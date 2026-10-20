@@ -241,13 +241,12 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 			return nil, fmt.Errorf("planner agent %q did not produce .swarm/active/TEST_PLAN.md", plannerAgent)
 		}
 
-		st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{
+		if _, err := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{
 			Type:     contract.ArtifactDesign,
 			Producer: plannerAgent + ":planner",
 			Summary:  fmt.Sprintf("Implementation plan for #%d", opts.IssueNumber),
 			Body:     string(planBytes),
-		})
-		if err != nil {
+		}); err != nil {
 			return nil, err
 		}
 

@@ -216,15 +216,13 @@ func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase
 		newState.Artifacts = reusableState.Artifacts
 	}
 
-	var postedComment *tracker.Comment
 	if reusableState != nil && reusableState.Lease.CommentID > 0 && (reusableState.Lease.Status == "active" || reusableState.Lease.Status == "handoff") {
 		newState.Lease.CommentID = reusableState.Lease.CommentID
 		body, err := FormatStateComment(newState)
 		if err != nil {
 			return nil, err
 		}
-		postedComment, err = m.tracker.UpdateComment(ctx, reusableState.Lease.CommentID, body)
-		if err != nil {
+		if _, err := m.tracker.UpdateComment(ctx, reusableState.Lease.CommentID, body); err != nil {
 			return nil, err
 		}
 	} else {
@@ -232,7 +230,7 @@ func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase
 		if err != nil {
 			return nil, err
 		}
-		postedComment, err = m.tracker.CreateComment(ctx, issueNum, body)
+		postedComment, err := m.tracker.CreateComment(ctx, issueNum, body)
 		if err != nil {
 			return nil, err
 		}

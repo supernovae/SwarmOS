@@ -1,6 +1,6 @@
 # Developer, Team & Worker Guide
 
-This guide covers day-to-day SwarmOS workflows for individual developers, collaborating teammates, and multi-repository worker pools. Pass `--backend github` when working against GitHub Issues, or `--backend local` when running an offline local fixture.
+This guide covers day-to-day SwarmOS workflows—whether you are an individual developer, an open-source contributor donating agent compute to a project's ready queue, or an engineering team running internal worker pools across private GitHub repositories. Pass `--backend github` when working against GitHub Issues, or `--backend local` when running an offline local fixture.
 
 ---
 

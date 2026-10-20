@@ -2,7 +2,7 @@
 description: Execute the SwarmOS Plan phase (analyze, design PLAN.md, and produce TEST_PLAN.md)
 ---
 
-Read `.swarm/active/WORKUNIT.md` and `.swarm/prompts/planner.md`.
+Read `.swarm/active/WORKUNIT.md` and the approved role instructions in `.swarm/active/SYSTEM_PROMPT.md`.
 Inspect the repository without modifying production source files.
 Produce:
 1. `.swarm/active/PLAN.md` with exact files, symbols, and step-by-step implementation details.

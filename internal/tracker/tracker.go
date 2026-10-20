@@ -77,6 +77,8 @@ func DefaultSwarmLabels() []LabelSpec {
 type Tracker interface {
 	BackendName() string
 	CurrentUser(ctx context.Context) (string, error)
+	// Authorize checks the current authenticated actor's repository permission.
+	Authorize(ctx context.Context, permission string) error
 	GetIssue(ctx context.Context, number int) (*Issue, error)
 	CreateIssue(ctx context.Context, title, body string, labels []string) (*Issue, error)
 	ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error)
@@ -86,6 +88,7 @@ type Tracker interface {
 	AddLabels(ctx context.Context, issueNumber int, labels []string) error
 	RemoveLabel(ctx context.Context, issueNumber int, label string) error
 	CreateDraftPR(ctx context.Context, req DraftPRRequest) (*PullRequest, error)
+	FindDraftPR(ctx context.Context, head, base string) (*PullRequest, error)
 	GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error)
 	EnsureLabels(ctx context.Context, labels []LabelSpec) error
 }

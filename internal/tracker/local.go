@@ -66,6 +66,20 @@ func (l *LocalTracker) CurrentUser(_ context.Context) (string, error) {
 	return l.user, nil
 }
 
+func (l *LocalTracker) Authorize(ctx context.Context, permission string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	switch permission {
+	case "approve-task", "review-human":
+		if l.assoc == "OWNER" || l.assoc == "MEMBER" || l.assoc == "COLLABORATOR" {
+			return nil
+		}
+		return fmt.Errorf("local actor %q is not authorized for %s", l.user, permission)
+	default:
+		return fmt.Errorf("unknown permission %q", permission)
+	}
+}
 func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) error {
 	dir := filepath.Dir(l.statePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -312,6 +326,24 @@ func (l *LocalTracker) CreateDraftPR(_ context.Context, req DraftPRRequest) (*Pu
 		return nil
 	})
 	return created, err
+}
+
+func (l *LocalTracker) FindDraftPR(ctx context.Context, head, base string) (*PullRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var found *PullRequest
+	err := l.withLock(false, func(st *localState) error {
+		for _, pr := range st.PullRequests {
+			if pr.Draft && pr.Head == head && pr.Base == base {
+				cp := *pr
+				found = &cp
+				return nil
+			}
+		}
+		return nil
+	})
+	return found, err
 }
 
 func (l *LocalTracker) GetCheckStatus(_ context.Context, _ string) ([]CheckRunResult, error) {

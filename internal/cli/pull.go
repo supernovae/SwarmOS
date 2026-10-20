@@ -4,19 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"slices"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
+
+var ErrNoReadyWork = errors.New("no approved ready work matches this node")
 
 type PulledWorkUnit struct {
 	Repo         string
@@ -33,26 +35,31 @@ type PulledWorkUnit struct {
 func newPullCmd(rootOpts *RootOptions) *cobra.Command {
 	var (
 		allRepos    bool
+		asJSON      bool
 		agentName   string
 		durationStr string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "pull",
-		Short: "Find, claim, and provision the next unclaimed or handed-off swarm:ready issue matching node capabilities",
+		Short: "Claim and prepare the next approved task matching this node",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var dur time.Duration
 			if durationStr != "" {
 				parsed, err := time.ParseDuration(durationStr)
-				if err != nil {
-					return fmt.Errorf("invalid --duration %q: %w", durationStr, err)
+				if err != nil || parsed <= 0 {
+					return fmt.Errorf("--duration must be a positive duration")
 				}
 				dur = parsed
 			}
 
-			pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, agentName, dur)
+			pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all"}, dur)
 			if err != nil {
 				return err
+			}
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "pull", "status": "claimed", "selection": pulled})
 			}
 
 			out := cmd.OutOrStdout()
@@ -67,158 +74,154 @@ func newPullCmd(rootOpts *RootOptions) *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&allRepos, "all", false, "Scan all registered repositories in ~/.config/swarm/repos.yaml")
-	cmd.Flags().StringVar(&agentName, "agent", "", "Agent harness (claude, codex, opencode, omp, mock)")
-	cmd.Flags().StringVar(&durationStr, "duration", "", "Lease TTL duration (default 4h)")
+	cmd.Flags().StringVar(&agentName, "agent", "", "Configured agent override")
+	cmd.Flags().StringVar(&durationStr, "duration", "", "Lease duration (approved policy default)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured selection and claim state")
 	return cmd
 }
 
-func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, agentName string, durOverride time.Duration) (*PulledWorkUnit, error) {
+func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration) (*PulledWorkUnit, error) {
+	if err := contract.ValidatePhase(opts.Phase); err != nil {
+		return nil, err
+	}
+	if err := contract.ValidateGate(opts.Gate); err != nil {
+		return nil, err
+	}
 	targets, err := rootOpts.resolveTargets(allRepos)
 	if err != nil {
 		return nil, err
 	}
-
-	nodeProf, _ := node.LoadOrDetectProfile("")
-	now := time.Now().UTC()
-
-	for _, tgt := range targets {
-		tr, mgr, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, tgt)
+	nodeProf, err := node.LoadOrDetectProfile("")
+	if err != nil {
+		return nil, err
+	}
+	for _, target := range targets {
+		tr, mgr, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, target)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("%s: %w", target.Repo, err)
 		}
-		if nodeProf != nil {
-			mgr.SetNodeProfile(nodeProf)
-		}
-
-		agent := agentName
-		if agent == "" {
-			agent = cfg.DefaultAgent
-			if agent == "" {
-				agent = "claude"
-			}
-		}
-
-		dur := durOverride
-		if dur <= 0 {
-			if parsed, err := time.ParseDuration(cfg.Lease.Duration); err == nil && parsed > 0 {
-				dur = parsed
-			} else {
-				dur = 4 * time.Hour
-			}
-		}
-
-		readyLabel := cfg.Security.ReadyLabel
-		if readyLabel == "" {
-			readyLabel = "swarm:ready"
-		}
-
-		var filterLabels []string
-		if cfg.Security.RequireReadyLabel {
-			filterLabels = []string{readyLabel}
-		}
-
-		issues, err := tr.ListIssues(ctx, tracker.IssueFilter{
-			State:  "open",
-			Labels: filterLabels,
-		})
+		mgr.SetNodeProfile(nodeProf)
+		issues, err := tr.ListIssues(ctx, tracker.IssueFilter{State: "open", Labels: []string{cfg.Security.ReadyLabel}})
 		if err != nil {
-			continue
+			return nil, err
 		}
-
-		owner, _ := tr.CurrentUser(ctx)
-		if owner == "" {
-			owner = "local-dev"
+		owner, err := tr.CurrentUser(ctx)
+		if err != nil || owner == "" {
+			return nil, fmt.Errorf("resolve worker identity: %w", err)
 		}
-
-		for _, iss := range issues {
-			if slices.Contains(iss.Labels, "swarm:pr-open") {
+		engine, err := workflow.NewEngine(target.Path, tr)
+		if err != nil {
+			return nil, err
+		}
+		for _, issue := range issues {
+			if slices.Contains(issue.Labels, "swarm:pr-open") {
 				continue
 			}
-			if err := mgr.VerifyTrustPolicy(iss); err != nil {
-				continue
-			}
-			wu, err := contract.ParseWorkUnitFromIssueWithRoot(iss.Number, iss.Title, iss.Body, tgt.Path)
+			wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
 			if err != nil {
 				continue
 			}
-
-			// Verify depends_on prerequisites are satisfied
-			if err := mgr.VerifyDependencies(ctx, wu); err != nil {
+			state, err := mgr.GetCurrentState(ctx, issue.Number)
+			if errors.Is(err, coordination.ErrNotFound) {
 				continue
 			}
-
-			// Verify volunteer node capability requirements match
+			if err != nil {
+				return nil, err
+			}
+			if state == nil || state.TaskDigest != contract.DigestWorkUnit(wu) || state.Lease.Status == "completed" ||
+				state.Lease.Status == "active" && state.Lease.ExpiresAt.After(time.Now()) {
+				continue
+			}
+			if err := mgr.VerifyDependencies(ctx, wu); err != nil {
+				if errors.Is(err, lease.ErrDependenciesUnmet) {
+					continue
+				}
+				return nil, err
+			}
 			if !node.MatchesCapabilities(nodeProf, wu.RequiredCapabilities) {
 				continue
 			}
-
-			targetPhase := "all"
-			role := "planner"
-
-			if st, err := mgr.GetCurrentState(ctx, iss.Number); err == nil && st != nil {
-				if st.Lease.Status == "completed" {
-					continue
+			phase := opts.Phase
+			if phase == "" {
+				phase = "all"
+			}
+			if phase == "all" && state.Lease.Status == "handoff" && state.Lease.NextPhase != "" {
+				phase = state.Lease.NextPhase
+			}
+			if state.EffectiveGate == contract.GateHuman && phase != "plan" {
+				hasPlan := false
+				for _, artifact := range state.Artifacts {
+					hasPlan = hasPlan || artifact.Type == contract.ArtifactDesign
 				}
-				if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
-					continue
-				}
-				if st.Lease.Status == "handoff" && st.Lease.NextPhase != "" {
-					if !node.SupportsPhaseCapability(nodeProf, st.Lease.NextPhase) {
-						continue
+				if hasPlan {
+					if err := lease.VerifyApproval(state, wu); err != nil {
+						continue // A human decision, not another worker, unblocks this task.
 					}
-					targetPhase = st.Lease.NextPhase
-					if targetPhase == "implement" {
-						role = "developer"
-					} else if targetPhase == "review" {
-						role = "reviewer"
+					if phase == "review" {
+						phase = "implement"
 					}
 				}
 			}
-
-			if hasGitRemote(tgt.Path) {
-				_ = exec.CommandContext(ctx, "git", "-C", tgt.Path, "fetch", "origin", "--prune").Run()
+			if !node.SupportsPhaseCapability(nodeProf, phase) {
+				continue
 			}
-
-			st, err := mgr.Acquire(ctx, iss.Number, owner, agent, targetPhase, dur, cfg.Lease.MaxRenewals)
+			selection := opts
+			selection.RepoRoot, selection.IssueNumber, selection.Phase = target.Path, issue.Number, phase
+			preflight, err := engine.Preflight(ctx, selection)
 			if err != nil {
+				return nil, err
+			}
+			duration := durOverride
+			if duration <= 0 {
+				duration, err = time.ParseDuration(preflight.Config.Lease.Duration)
+				if err != nil {
+					return nil, err
+				}
+			}
+			lock, err := lockClaim(target.Path, issue.Number)
+			if err != nil {
+				continue
+			}
+			role := "planner"
+			if phase == "review" {
+				role = "reviewer"
+			}
+			if phase == "implement" {
+				role = "developer"
+			}
+			claimed, err := mgr.Acquire(ctx, issue.Number, owner, preflight.Agents[role], phase, duration, preflight.Config.Lease.MaxRenewals)
+			if err != nil {
+				unlockClaim(lock)
 				if errors.Is(err, lease.ErrAlreadyClaimed) || errors.Is(err, lease.ErrClaimRaceLost) {
 					continue
 				}
 				return nil, err
 			}
-
-			wf, err := harness.LoadWorkflow(tgt.Path, wu.Workflow)
+			setup := func() (*PulledWorkUnit, error) {
+				if err := saveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID); err != nil {
+					return nil, err
+				}
+				worktree, branch, err := workspace.ProvisionAt(target.Path, issue.Number, issue.Title, claimed.BaseSHA, claimed.Branch, claimed.HeadSHA)
+				if err != nil {
+					return nil, err
+				}
+				if err := workspace.CompileHarnessBundleAt(worktree, wu, preflight.Workflow, claimed.Artifacts, role, claimed.BaseSHA); err != nil {
+					return nil, err
+				}
+				return &PulledWorkUnit{Repo: target.Repo, RepoRoot: target.Path, Backend: target.Backend, Issue: issue,
+					WorkUnit: wu, State: claimed, TargetPhase: phase, WorktreePath: worktree, BranchName: branch}, nil
+			}
+			pulled, err := setup()
 			if err != nil {
-				return nil, err
+				_, releaseErr := mgr.Release(ctx, issue.Number, owner, "pull setup failed")
+				unlockClaim(lock)
+				return nil, errors.Join(err, releaseErr)
 			}
-
-			wtPath, branchName, err := workspace.Provision(tgt.Path, iss.Number, iss.Title)
-			if err != nil {
-				return nil, err
-			}
-
-			if err := workspace.CompileHarnessBundle(wtPath, wu, wf, st.Artifacts, role); err != nil {
-				return nil, err
-			}
-
-			return &PulledWorkUnit{
-				Repo:         tgt.Repo,
-				RepoRoot:     tgt.Path,
-				Backend:      tgt.Backend,
-				Issue:        iss,
-				WorkUnit:     wu,
-				State:        st,
-				TargetPhase:  targetPhase,
-				WorktreePath: wtPath,
-				BranchName:   branchName,
-			}, nil
+			unlockClaim(lock)
+			return pulled, nil
 		}
 	}
-
-	if allRepos {
-		return nil, fmt.Errorf("no unclaimed or handed-off swarm:ready issues matching node capabilities found across %d registered repository(s)", len(targets))
-	}
-	return nil, fmt.Errorf("no unclaimed or handed-off swarm:ready issues matching node capabilities found in %s", targets[0].Repo)
+	return nil, ErrNoReadyWork
 }
 
 func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error) {

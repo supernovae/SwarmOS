@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -75,7 +77,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 		allRepos       bool
 		concurrency    int
 		maxJobs        int
-		once           bool
+		watch          bool
 		pollInterval   time.Duration
 		agentName      string
 		plannerAgent   string
@@ -84,140 +86,167 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 		testerAgent    string
 		gate           string
 		autoSubmit     bool
+		asJSON         bool
 	)
 
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run autonomous volunteer worker pool claiming and executing ready WorkUnits",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if concurrency <= 0 {
-				concurrency = 1
+			if concurrency <= 0 || maxJobs < 0 || pollInterval <= 0 {
+				return fmt.Errorf("--concurrency and --poll-interval must be positive; --max-jobs must be nonnegative")
 			}
-			prof, err := node.LoadOrDetectProfile("")
+			if err := contract.ValidateGate(contract.GateMode(gate)); err != nil {
+				return err
+			}
+			profile, err := node.LoadOrDetectProfile("")
 			if err != nil {
 				return err
 			}
-
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Starting SwarmOS Node %q [capabilities=%v, models=%v, concurrency=%d]\n",
-				prof.NodeID, prof.Capabilities, prof.Models, concurrency)
-
 			ctx := cmd.Context()
-			var completedJobs atomic.Int32
-			var outMu sync.Mutex
-
-			runBatch := func() int {
-				var wg sync.WaitGroup
-				var batchClaimed atomic.Int32
-
-				for w := range concurrency {
-					if maxJobs > 0 && int(completedJobs.Load()) >= maxJobs {
-						break
+			out := cmd.OutOrStdout()
+			if asJSON {
+				out = cmd.ErrOrStderr()
+			}
+			var admitted atomic.Int64
+			var completed atomic.Int64
+			var failures atomic.Int64
+			var outputMu sync.Mutex
+			reserve := func() bool {
+				for {
+					current := admitted.Load()
+					if maxJobs > 0 && current >= int64(maxJobs) {
+						return false
 					}
-					wg.Add(1)
-					go func(workerIdx int) {
-						defer wg.Done()
-						for {
-							if maxJobs > 0 && int(completedJobs.Load()) >= maxJobs {
+					if admitted.CompareAndSwap(current, current+1) {
+						return true
+					}
+				}
+			}
+			options := workflow.WorkOptions{
+				AgentName: agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
+				DeveloperAgent: developerAgent, TesterAgent: testerAgent,
+				Handoff: true,
+				Phase:   "all", Gate: contract.GateMode(gate), Headless: true,
+			}
+			execute := func(pulled *PulledWorkUnit) (*workflow.WorkResult, error) {
+				tr, manager, _, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
+					Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend,
+				})
+				if err != nil {
+					return nil, err
+				}
+				manager.BindClaim(pulled.Issue.Number, pulled.State.Lease.ClaimID)
+				engine, err := workflow.NewEngine(pulled.RepoRoot, tr)
+				if err != nil {
+					_, releaseErr := manager.Release(ctx, pulled.Issue.Number, pulled.State.Lease.Owner, "node setup failed")
+					return nil, errors.Join(err, releaseErr)
+				}
+				lock, err := lockClaim(pulled.RepoRoot, pulled.Issue.Number)
+				if err != nil {
+					return nil, err
+				}
+				selected := options
+				selected.RepoRoot, selected.IssueNumber = pulled.RepoRoot, pulled.Issue.Number
+				selected.Phase, selected.ClaimID = pulled.TargetPhase, pulled.State.Lease.ClaimID
+				selected.OnClaim = func(state *lease.IssueState) error {
+					return saveClaimToken(pulled.RepoRoot, pulled.Issue.Number, state.Lease.ClaimID)
+				}
+				result, err := engine.ExecuteWork(ctx, selected)
+				unlockClaim(lock)
+				if err != nil {
+					return result, err
+				}
+				if autoSubmit && result.ValidationPassed {
+					submit := newSubmitCmd(&RootOptions{Repo: pulled.Repo, RepoRoot: pulled.RepoRoot, Backend: pulled.Backend})
+					outputMu.Lock()
+					submit.SetOut(out)
+					submit.SetErr(cmd.ErrOrStderr())
+					submit.SetArgs([]string{fmt.Sprint(pulled.Issue.Number)})
+					err = submit.ExecuteContext(ctx)
+					outputMu.Unlock()
+					if err != nil {
+						return result, fmt.Errorf("automatic submission: %w", err)
+					}
+				}
+				return result, nil
+			}
+			runBatch := func() {
+				var workers sync.WaitGroup
+				for worker := 0; worker < concurrency; worker++ {
+					workers.Add(1)
+					go func(worker int) {
+						defer workers.Done()
+						for ctx.Err() == nil && reserve() {
+							pulled, err := PullNextReadyIssue(ctx, cmd, rootOpts, allRepos, options, 0)
+							if err != nil {
+								admitted.Add(-1)
+								if !errors.Is(err, ErrNoReadyWork) {
+									failures.Add(1)
+									outputMu.Lock()
+									fmt.Fprintf(out, "[worker-%d] selection failed: %v\n", worker+1, err)
+									outputMu.Unlock()
+								}
 								return
 							}
-
-							pulled, pErr := PullNextReadyIssue(ctx, cmd, rootOpts, allRepos, agentName, 0)
-							if pErr != nil {
-								return
-							}
-							batchClaimed.Add(1)
-
-							tr, _, _, tErr := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
-								Repo:    pulled.Repo,
-								Path:    pulled.RepoRoot,
-								Backend: pulled.Backend,
-							})
-							if tErr != nil {
-								return
-							}
-
-							eng, eErr := workflow.NewEngine(pulled.RepoRoot, tr)
-							if eErr != nil {
-								return
-							}
-
-							targetPhase := pulled.TargetPhase
-							if targetPhase == "" {
-								targetPhase = "all"
-							}
-
-							res, wErr := eng.ExecuteWork(ctx, workflow.WorkOptions{
-								RepoRoot:       pulled.RepoRoot,
-								IssueNumber:    pulled.Issue.Number,
-								AgentName:      agentName,
-								PlannerAgent:   plannerAgent,
-								ReviewerAgent:  reviewerAgent,
-								DeveloperAgent: developerAgent,
-								TesterAgent:    testerAgent,
-								Phase:          targetPhase,
-								Gate:           contract.GateMode(gate),
-								Headless:       true,
-							})
-
-							outMu.Lock()
-							if wErr != nil {
-								fmt.Fprintf(out, "[worker-%d] [%s #%d] FAILED: %v\n", workerIdx+1, pulled.Repo, pulled.Issue.Number, wErr)
+							result, err := execute(pulled)
+							completed.Add(1)
+							outputMu.Lock()
+							if err != nil {
+								failures.Add(1)
+								fmt.Fprintf(out, "[worker-%d] %s #%d failed: %v\n", worker+1, pulled.Repo, pulled.Issue.Number, err)
 							} else {
-								fmt.Fprintf(out, "[worker-%d] [%s #%d] COMPLETED phase=%s validation=%v\n",
-									workerIdx+1, pulled.Repo, pulled.Issue.Number, res.PhaseCompleted, res.ValidationPassed)
+								status := "completed"
+								if result.PausedForHuman {
+									status = "paused"
+								} else if result.HandedOffToPhase != "" {
+									status = "handed-off"
+								}
+								fmt.Fprintf(out, "[worker-%d] %s #%d %s: phase=%s validation=%t\n", worker+1, pulled.Repo, pulled.Issue.Number, status, result.PhaseCompleted, result.ValidationPassed)
 							}
-							outMu.Unlock()
-
-							if wErr == nil && autoSubmit && res.ValidationPassed {
-								subCmd := newSubmitCmd(&RootOptions{
-									Backend:  pulled.Backend,
-									Repo:     pulled.Repo,
-									RepoRoot: pulled.RepoRoot,
-								})
-								outMu.Lock()
-								subCmd.SetOut(out)
-								subCmd.SetErr(cmd.ErrOrStderr())
-								subCmd.SetArgs([]string{fmt.Sprintf("%d", pulled.Issue.Number)})
-								_ = subCmd.ExecuteContext(ctx)
-								outMu.Unlock()
-							}
-
-							completedJobs.Add(1)
-							if once {
-								continue
+							outputMu.Unlock()
+							if err != nil {
+								return
 							}
 						}
-					}(w)
+					}(worker)
 				}
-				wg.Wait()
-				return int(batchClaimed.Load())
+				workers.Wait()
 			}
-
 			for {
-				claimedCount := runBatch()
-				if once || (maxJobs > 0 && int(completedJobs.Load()) >= maxJobs) {
+				runBatch()
+				if failures.Load() > 0 {
+					if asJSON {
+						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load()})
+					}
+					return fmt.Errorf("node %q encountered %d failure(s)", profile.NodeID, failures.Load())
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if !watch || maxJobs > 0 && admitted.Load() >= int64(maxJobs) {
 					break
 				}
-				if claimedCount == 0 {
-					select {
-					case <-ctx.Done():
-						return nil
-					case <-time.After(pollInterval):
-					}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(pollInterval):
 				}
 			}
-
-			fmt.Fprintf(out, "Node %q finished (%d work unit(s) processed)\n", prof.NodeID, completedJobs.Load())
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load()})
+			}
+			fmt.Fprintf(out, "Node %q finished: %d task attempt(s)\n", profile.NodeID, completed.Load())
 			return nil
 		},
 	}
 
 	runCmd.Flags().BoolVar(&allRepos, "all", false, "Poll all registered repositories")
 	runCmd.Flags().IntVar(&concurrency, "concurrency", 1, "Number of concurrent worker goroutines")
-	runCmd.Flags().IntVar(&maxJobs, "max-jobs", 0, "Maximum number of work units to process before exiting (0 = unlimited)")
-	runCmd.Flags().BoolVar(&once, "once", true, "Drain currently available ready queue once and exit")
-	runCmd.Flags().DurationVar(&pollInterval, "poll-interval", 15*time.Second, "Polling interval when --once=false")
+	runCmd.Flags().IntVar(&maxJobs, "max-jobs", 0, "Maximum claimed task/phase attempts (0 = drain without a limit)")
+	runCmd.Flags().BoolVar(&watch, "watch", false, "Continuously poll after draining the ready queue")
+	runCmd.Flags().DurationVar(&pollInterval, "poll-interval", 15*time.Second, "Delay between scans with --watch")
 	runCmd.Flags().StringVar(&agentName, "agent", "", "Default agent harness")
 	runCmd.Flags().StringVar(&plannerAgent, "planner-agent", "", "Agent harness for planner role")
 	runCmd.Flags().StringVar(&reviewerAgent, "reviewer-agent", "", "Agent harness for reviewer role")
@@ -225,6 +254,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 	runCmd.Flags().StringVar(&testerAgent, "tester-agent", "", "Agent harness for tester role")
 	runCmd.Flags().StringVar(&gate, "gate", "", "Plan review gate override (none, agent, human)")
 	runCmd.Flags().BoolVar(&autoSubmit, "auto-submit", false, "Automatically submit Draft PRs when validation passes")
+	runCmd.Flags().BoolVar(&asJSON, "json", false, "Emit a final structured outcome; progress goes to stderr")
 
 	nodeCmd.AddCommand(initCmd, statusCmd, runCmd)
 	return nodeCmd

@@ -1,62 +1,76 @@
-# SwarmOS Workflows & Role Contracts
+# Workflows, prompts, and gates
 
-SwarmOS enforces a **Plan-First** engineering lifecycle across all supported coding agents (`claude`, `codex`, `opencode`, `omp`).
+## Prompt recipes, not a workflow graph
 
----
+`.swarm/workflows/feature.yaml`, `bugfix.yaml`, and `refactor.yaml` name steps and role context. They are fixed **prompt recipes**. The engine does not execute arbitrary YAML edges or automatically create a PR from a `create_pr` step.
 
-## 1. Built-In Workflows (`.swarm/workflows/`)
+The fixed lifecycle is:
 
-SwarmOS ships with three default workflows in `.swarm/workflows/`:
-- **`feature.yaml`**: End-to-end feature delivery (`analyze` $\rightarrow$ `design` $\rightarrow$ `test_plan` $\rightarrow$ `review_plan` $\rightarrow$ `implement` $\rightarrow$ `validate` $\rightarrow$ `create_pr`).
-- **`bugfix.yaml`**: Root-cause analysis, regression test planning, fix implementation, and verification.
-- **`refactor.yaml`**: Structural refactoring preserving behavioral invariants and passing all checks.
-
-Each workflow step binds to one of four role prompts in `.swarm/prompts/`:
-
-| Role | Prompt File | Responsibility | Output Artifact |
-| :--- | :--- | :--- | :--- |
-| `planner` | `.swarm/prompts/planner.md` | Inspect repository without modifying production files; design file-level implementation steps and map acceptance criteria to test commands. | `.swarm/active/PLAN.md` (`design`) & `.swarm/active/TEST_PLAN.md` (`test-plan`) |
-| `reviewer` | `.swarm/prompts/reviewer.md` | Audit `PLAN.md` and `TEST_PLAN.md` against `Objective`, `Constraints`, `Acceptance`, and protected paths. | `.swarm/active/REVIEW.md` (`review` with `VERDICT: APPROVED` or `CHANGES_REQUESTED`) |
-| `developer` | `.swarm/prompts/developer.md` | Implement `PLAN.md` step-by-step and write tests from `TEST_PLAN.md`. | Working tree code changes + `implementation` artifact |
-| `tester` | `.swarm/prompts/tester.md` | Run `swarm validate` and verify every acceptance criterion passes. | `.swarm/active/VALIDATION.md` (`validation`) |
-
----
-
-## 2. Plan Approval Gates (`none | agent | human`)
-
-You can configure the plan gate per issue, per workflow (`default_gate` in `.swarm/workflows/*.yaml`), in `.swarm/config.yaml`, or on the CLI via `--gate`:
-
-### `none` (Fast Autonomous Loop)
-```bash
-swarm work 12 --gate none --agent claude --headless
-```
-Runs the `planner` role to produce `PLAN.md` and `TEST_PLAN.md`, publishes both artifacts to the issue comment, and immediately transitions to the `developer` role and `swarm validate`.
-
-### `agent` (Automated Cross-Agent Review Gate)
-```bash
-swarm work 12 --gate agent --planner-agent claude --reviewer-agent omp --developer-agent codex --headless
-```
-After the planner produces `PLAN.md` and `TEST_PLAN.md`, SwarmOS invokes the reviewer agent (`--reviewer-agent`, which can be a different model/harness such as `omp` or `codex`).
-- If `.swarm/active/REVIEW.md` begins with `VERDICT: APPROVED`, the `swarm:plan-approved` label is applied and implementation starts automatically.
-- If it begins with `VERDICT: CHANGES_REQUESTED`, the `swarm:plan-review` label is applied, the findings are posted to the issue, and execution halts before touching code.
-
-### `human` (Human-in-the-Loop Approval Gate)
-```bash
-# Step 1: Generate and publish the plan, then pause for human review
-swarm work 12 --gate human --agent claude --headless
-
-# Option A: Approve from the CLI
-swarm review 12 --approve --notes "LGTM, proceed with implementation"
-
-# Option B: Comment `/swarm approve-plan` directly on the GitHub Issue
-
-# Step 2: Resume implementation after approval
-swarm work 12 --phase implement --agent claude --headless
+```text
+plan → publish design + test plan → required review gate → implement → validate → explicit submit
 ```
 
----
+This distinction matters when editing workflow YAML: it changes the context and expected artifacts, not the control-flow security model.
 
-## 3. Related Guides
+## Role outputs
 
-- **[Project & Maintainer Guide (`docs/project.md`)](project.md)** — Authoring `WorkUnit` issues, configuring `.swarm/config.yaml`, and partitioning epics with `swarm decompose`.
-- **[Developer, Team & Worker Node Guide (`docs/developer.md`)](developer.md)** — Pulling work (`swarm pull`), collaborative team handoffs (`--handoff`), multi-repo registries (`swarm repo`), and parallel worker pools (`swarm node run`).
+| Role | Reads | Required output |
+| --- | --- | --- |
+| planner | WorkUnit and repository context | `.swarm/active/PLAN.md`, `TEST_PLAN.md` |
+| reviewer | WorkUnit, plan, test plan | `REVIEW.md` beginning with an exact verdict |
+| developer | approved plan and test plan | source changes and implementation checkpoint |
+| tester | implementation and approved-base validation policy | validation evidence |
+
+The active bundle is generated per task. It contains `WORKUNIT.md`, `SYSTEM_PROMPT.md`, and prior artifacts. Do not reuse artifacts across issue revisions or replace a plan/test plan after it has been approved without obtaining new review.
+
+## Gate behavior
+
+```bash
+# Show task, gate, policy, workflow and resolved agents without side effects.
+swarm work 42 --dry-run
+
+# Agent gate: run plan then the configured reviewer in headless mode.
+swarm work 42 --gate agent --headless
+
+# Human gate: plan then pause; a permitted human decides using the CLI.
+swarm work 42 --gate human --phase plan --headless
+swarm review 42 --approve --notes "Proceed with the current plan"
+swarm work 42 --phase implement --headless
+```
+
+The exact effective gate is resolved from task, workflow, and repository policy. A CLI value can only preserve or raise policy; it cannot use `--gate none` to evade a human/agent requirement.
+
+For an agent gate, the reviewer must produce exactly one of:
+
+```text
+VERDICT: APPROVED
+```
+
+or
+
+```text
+VERDICT: CHANGES_REQUESTED
+```
+
+Malformed, absent, stale, or rejected verdicts stop before implementation. The recorded approval binds the WorkUnit digest and hashes of both plan files. A human decision is authenticated through tracker authorization and is distinct from an agent-produced review artifact. Human-gated standalone review is a pause, not an agent substitute.
+
+## Harness recipes
+
+The generated slash-command files are instructions for a compatible agent harness:
+
+- `/swarm-plan` produces plan and test-plan artifacts.
+- `/swarm-review` audits the current plan and writes a review artifact.
+- `/swarm-implement` applies the approved plan.
+- `/swarm-validate` runs repository validation.
+
+They do not grant permissions, create transitions, or bypass the CLI/engine state checks. Reviewer use requires the configured isolation boundary; planner, developer, and tester processes remain host processes with restricted credentials, not a general sandbox.
+
+## Failure and recovery
+
+A claim has a unique ID and expiry. The execution heartbeat renews it; if renewal or claim verification fails, the task stops before a later mutation. Resume only with the persisted claim token, never by assuming an active claim with the same username.
+
+Plans, artifacts, branch, base SHA, and checkpoint head are recorded in authoritative state. A fresh clone can provision the recorded branch/head only after verification. If a local worktree is missing, SwarmOS must not reset a surviving branch. If a review, agent run, validation, or checkpoint fails, inspect the task with `swarm status <issue>`, correct the cause, and resume/reclaim according to the live state rather than editing coordination comments.
+
+`swarm submit` is a separate transition. It verifies the current gate, checkpoints the branch, validates that exact clean head against the approved base, records validation/checkpoint/submission state through the fenced Git-CAS path, and reconciles an existing Draft PR on retry. An earlier validation run is not evidence for changed code, and a Draft PR does not mark acceptance criteria complete without criterion-specific evidence.
+
+Related: [maintainer setup](project.md), [developer operations](developer.md), [Git-CAS architecture](ARCHITECTURE.md).

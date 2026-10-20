@@ -1,91 +1,117 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/validation"
-	"github.com/supernovae/swarmos/internal/workspace"
 )
 
-func newValidateCmd(rootOpts *RootOptions) *cobra.Command {
-	var (
-		ciMode              bool
-		allowHarnessChanges bool
-	)
-	cmd := &cobra.Command{
-		Use:   "validate [<issue-number>]",
-		Short: "Run protected-path tamper checks, artifact verification, and required-checks.yaml",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			repoRoot := rootOpts.resolveRepoRoot()
-			var (
-				issueNum int
-				wtPath   string
-				wu       *contract.WorkUnit
-			)
-
-			if ciMode && len(args) == 0 {
-				wtPath = repoRoot
-				wu = &contract.WorkUnit{ID: "CI", IssueNumber: 1, AllowHarnessChanges: allowHarnessChanges}
-			} else {
-				var err error
-				issueNum, wtPath, err = resolveIssueAndWorktree(repoRoot, args)
-				if err != nil {
-					return err
-				}
-				wu, _ = workspace.LoadActiveWorkUnit(wtPath)
-				if wu == nil && issueNum > 0 {
-					if tr, tErr := rootOpts.resolveTracker(cmd); tErr == nil {
-						if iss, iErr := tr.GetIssue(cmd.Context(), issueNum); iErr == nil {
-							wu, _ = contract.ParseWorkUnitFromIssueWithRoot(iss.Number, iss.Title, iss.Body, repoRoot)
-						}
-					}
-				}
+func newValidateCmd(options *RootOptions) *cobra.Command {
+	var ciMode, asJSON bool
+	var baseSHA string
+	cmd := &cobra.Command{Use: "validate [<issue-number>]", Short: "Run checks and protected-path policy from the approved immutable base", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		root := options.resolveRepoRoot()
+		ctx := cmd.Context()
+		worktree := root
+		var unit *contract.WorkUnit
+		var manager *lease.Manager
+		var issue int
+		var owner string
+		if ciMode {
+			if len(args) != 0 {
+				return fmt.Errorf("--ci validates the current checkout; do not supply an issue number")
 			}
-			if wu != nil && allowHarnessChanges {
-				wu.AllowHarnessChanges = true
+			if baseSHA == "" {
+				return fmt.Errorf("--ci requires --base <trusted-full-commit-SHA>")
 			}
-			valSpec, err := harness.LoadValidationSpec(wtPath)
+		} else {
+			var err error
+			issue, worktree, err = resolveIssueAndWorktree(root, args)
 			if err != nil {
-				valSpec, err = harness.LoadValidationSpec(repoRoot)
-				if err != nil {
-					return err
+				return err
+			}
+			lock, err := lockClaim(root, issue)
+			if err != nil {
+				return err
+			}
+			defer unlockClaim(lock)
+			tr, mgr, _, err := options.resolveLeaseManager(cmd)
+			if err != nil {
+				return err
+			}
+			manager = mgr
+			owner, err = tr.CurrentUser(ctx)
+			if err != nil {
+				return err
+			}
+			claim, err := loadClaimToken(root, issue)
+			if err != nil {
+				return err
+			}
+			manager.BindClaim(issue, claim)
+			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
+				return err
+			}
+			state, err := manager.GetCurrentState(ctx, issue)
+			if err != nil {
+				return err
+			}
+			if baseSHA != "" && baseSHA != state.BaseSHA {
+				return fmt.Errorf("--base does not match the task's approved immutable base")
+			}
+			baseSHA = state.BaseSHA
+			iss, err := tr.GetIssue(ctx, issue)
+			if err != nil {
+				return err
+			}
+			unit, err = contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
+			if err != nil {
+				return err
+			}
+			cfg, err := harness.LoadConfigAt(root, baseSHA)
+			if err != nil {
+				return err
+			}
+			duration, err := time.ParseDuration(cfg.Lease.Duration)
+			if err != nil {
+				return err
+			}
+			renewed, stop := maintainClaim(ctx, manager, issue, owner, duration)
+			defer stop()
+			ctx = renewed
+		}
+		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{CIMode: ciMode, BaseSHA: baseSHA})
+		if report != nil && manager != nil {
+			_, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact)
+			validationErr = errors.Join(validationErr, err)
+		}
+		if asJSON {
+			status := "passed"
+			if validationErr != nil {
+				status = "failed"
+			}
+			if err := writeJSON(cmd, map[string]any{"kind": "validation", "status": status, "report": report}); err != nil {
+				return err
+			}
+		} else if report != nil {
+			for _, check := range report.CheckOutcomes {
+				status := "PASS"
+				if !check.Passed {
+					status = "FAIL"
 				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", status, check.Name)
 			}
-
-			report, valErr := validation.ValidateWithOptions(cmd.Context(), wtPath, wu, valSpec, validation.ValidateOptions{
-				CIMode: ciMode,
-			})
-
-			if report != nil && issueNum > 0 && !ciMode {
-				if tr, mgr, _, mErr := rootOpts.resolveLeaseManager(cmd); mErr == nil {
-					owner, _ := tr.CurrentUser(cmd.Context())
-					_, _ = mgr.UpdateArtifact(cmd.Context(), issueNum, owner, report.Artifact)
-				}
-			}
-
-			out := cmd.OutOrStdout()
-			if report != nil {
-				for _, chk := range report.CheckOutcomes {
-					status := "PASS"
-					if !chk.Passed {
-						status = "FAIL"
-					}
-					fmt.Fprintf(out, "[%s] %s (%s)\n", status, chk.Name, chk.Command)
-				}
-			}
-			if valErr != nil {
-				return valErr
-			}
-			fmt.Fprintln(out, "Validation PASSED")
-			return nil
-		},
-	}
-
-	cmd.Flags().BoolVar(&ciMode, "ci", false, "Run in CI mode (skip .swarm/active worktree artifact checks)")
-	cmd.Flags().BoolVar(&allowHarnessChanges, "allow-harness-changes", false, "Permit modifications to protected harness/CI paths")
+		}
+		return validationErr
+	}}
+	cmd.Flags().BoolVar(&ciMode, "ci", false, "Validate the checkout without task artifacts; requires --base")
+	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted immutable base SHA (task approval supplies it outside CI)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured validation outcome")
 	return cmd
 }

@@ -3,12 +3,16 @@ package agent
 import "context"
 
 type RunRequest struct {
-	Agent        string // "claude", "codex", "opencode", "omp", "custom", "mock"
+	Agent        string // configured allowlisted provider/harness name
 	Role         string // "planner", "reviewer", "developer", "tester"
 	Mode         string // "interactive", "headless"
 	WorktreePath string
 	SystemPrompt string // relative or absolute path to .swarm/active/SYSTEM_PROMPT.md
 	TaskPrompt   string
+	Model        string   // optional configured model selector
+	ReadOnly     bool     // requests an enforced read-only execution boundary
+	Local        bool     // permits deterministic local-only mock execution
+	DenyPaths    []string // internal isolation denylist supplied by RunReview
 }
 
 type RunResult struct {

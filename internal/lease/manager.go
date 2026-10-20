@@ -44,18 +44,20 @@ func (e *AlreadyClaimedError) Error() string {
 func (e *AlreadyClaimedError) Unwrap() error { return ErrAlreadyClaimed }
 
 type IssueState struct {
-	Lease         contract.Lease      `json:"lease"`
-	Artifacts     []contract.Artifact `json:"artifacts,omitempty"`
-	TaskDigest    string              `json:"task_digest"`
-	PolicyDigest  string              `json:"policy_digest"`
-	BaseSHA       string              `json:"base_sha"`
-	HeadSHA       string              `json:"head_sha,omitempty"`
-	Branch        string              `json:"branch,omitempty"`
-	ApprovedBy    string              `json:"approved_by,omitempty"`
-	ApprovedAt    time.Time           `json:"approved_at,omitempty"`
-	PRNumber      int                 `json:"pr_number,omitempty"`
-	EffectiveGate contract.GateMode   `json:"effective_gate,omitempty"`
-	PRURL         string              `json:"pr_url,omitempty"`
+	Lease               contract.Lease             `json:"lease"`
+	Artifacts           []contract.Artifact        `json:"artifacts,omitempty"`
+	Attestations        []contract.RoleAttestation `json:"attestations,omitempty"`
+	ProjectionCommentID int64                      `json:"projection_comment_id,omitempty"`
+	TaskDigest          string                     `json:"task_digest"`
+	PolicyDigest        string                     `json:"policy_digest"`
+	BaseSHA             string                     `json:"base_sha"`
+	HeadSHA             string                     `json:"head_sha,omitempty"`
+	Branch              string                     `json:"branch,omitempty"`
+	ApprovedBy          string                     `json:"approved_by,omitempty"`
+	ApprovedAt          time.Time                  `json:"approved_at,omitempty"`
+	PRNumber            int                        `json:"pr_number,omitempty"`
+	EffectiveGate       contract.GateMode          `json:"effective_gate,omitempty"`
+	PRURL               string                     `json:"pr_url,omitempty"`
 }
 type Manager struct {
 	tracker     tracker.Tracker
@@ -117,6 +119,19 @@ func verifyTrust(sec contract.SecurityConfig, issue *tracker.Issue) error {
 func (m *Manager) VerifyTrustPolicy(issue *tracker.Issue) error {
 	return verifyTrust(m.security, issue)
 }
+
+func matchesCollaboratorAllowlist(actor string, allowlist []string) bool {
+	if len(allowlist) == 0 {
+		return true
+	}
+	actor = strings.TrimSpace(actor)
+	for _, allowed := range allowlist {
+		if strings.EqualFold(strings.TrimSpace(allowed), actor) {
+			return true
+		}
+	}
+	return false
+}
 func (m *Manager) VerifyDependencies(ctx context.Context, wu *contract.WorkUnit) error {
 	for _, n := range wu.DependsOn {
 		if n == wu.IssueNumber {
@@ -147,6 +162,11 @@ func (m *Manager) load(ctx context.Context, n int) (*IssueState, string, error) 
 	return &st, rev, nil
 }
 func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (*IssueState, error) {
+	if st.ProjectionCommentID == 0 {
+		if existingID := m.findProjectionCommentID(ctx, n); existingID > 0 {
+			st.ProjectionCommentID = existingID
+		}
+	}
 	b, err := json.Marshal(st)
 	if err != nil {
 		return nil, err
@@ -157,15 +177,255 @@ func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (
 	m.project(ctx, n, st)
 	return st, nil
 }
-func (m *Manager) project(ctx context.Context, n int, st *IssueState) {
-	summary := fmt.Sprintf("<!-- swarm:audit:v1 -->\n### SwarmOS state projection\n\nTask `%s`, claim `%s`, phase `%s`, status `%s`.\n", short(st.TaskDigest), st.Lease.ClaimID, st.Lease.Phase, st.Lease.Status)
-	_, _ = m.tracker.CreateComment(ctx, n, summary)
+
+func (m *Manager) findProjectionCommentID(ctx context.Context, n int) int64 {
+	if m.tracker == nil {
+		return 0
+	}
+	comments, err := m.tracker.ListComments(ctx, n)
+	if err != nil {
+		return 0
+	}
+	for _, c := range comments {
+		if strings.HasPrefix(strings.TrimSpace(c.Body), "<!-- swarm:audit:v1 -->") {
+			return c.ID
+		}
+	}
+	return 0
 }
+
+func (m *Manager) project(ctx context.Context, n int, st *IssueState) {
+	if m.tracker == nil || st == nil {
+		return
+	}
+	var wu *contract.WorkUnit
+	if iss, err := m.tracker.GetIssue(ctx, n); err == nil && iss != nil {
+		wu, _ = contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
+	}
+	body := RenderStateProjection(wu, st)
+	commentID := st.ProjectionCommentID
+	if commentID == 0 {
+		commentID = m.findProjectionCommentID(ctx, n)
+	}
+	if commentID > 0 {
+		if _, err := m.tracker.UpdateComment(ctx, commentID, body); err == nil {
+			st.ProjectionCommentID = commentID
+			return
+		}
+	}
+	if created, err := m.tracker.CreateComment(ctx, n, body); err == nil && created != nil {
+		st.ProjectionCommentID = created.ID
+	}
+}
+
 func short(s string) string {
 	if len(s) > 12 {
 		return s[:12]
 	}
 	return s
+}
+
+const maxProjectedArtifactChars = 12000
+
+func TruncateArtifactBody(body string, issueNum int) string {
+	trimmed := strings.TrimSpace(body)
+	if len(trimmed) <= maxProjectedArtifactChars {
+		return trimmed
+	}
+	return fmt.Sprintf("%s\n\n...(truncated at %d chars; full artifact stored in `refs/heads/swarm-state/issue-%d`)", trimmed[:maxProjectedArtifactChars], maxProjectedArtifactChars, issueNum)
+}
+
+func roleOrder(role string) int {
+	switch role {
+	case "planner":
+		return 0
+	case "reviewer":
+		return 1
+	case "developer":
+		return 2
+	case "tester":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func RecordRoleAttestation(st *IssueState, att contract.RoleAttestation) {
+	if st == nil || strings.TrimSpace(att.Role) == "" {
+		return
+	}
+	if att.Model == "" {
+		att.Model = "default"
+	}
+	if att.HarnessVersion == "" {
+		att.HarnessVersion = "unknown"
+	}
+	if att.Sandbox == "" {
+		att.Sandbox = "host"
+	}
+	if att.Harness == "" {
+		att.Harness = att.Agent
+	}
+	if att.Agent == "" {
+		att.Agent = att.Harness
+	}
+	for i := range st.Attestations {
+		if st.Attestations[i].Role == att.Role {
+			if att.ArtifactType == "" {
+				att.ArtifactType = st.Attestations[i].ArtifactType
+			}
+			if att.ArtifactDigest == "" {
+				att.ArtifactDigest = st.Attestations[i].ArtifactDigest
+			}
+			st.Attestations[i] = att
+			return
+		}
+	}
+	st.Attestations = append(st.Attestations, att)
+	// Keep canonical role ordering: planner, reviewer, developer, tester.
+	for i := 0; i < len(st.Attestations); i++ {
+		for j := i + 1; j < len(st.Attestations); j++ {
+			if roleOrder(st.Attestations[j].Role) < roleOrder(st.Attestations[i].Role) {
+				st.Attestations[i], st.Attestations[j] = st.Attestations[j], st.Attestations[i]
+			}
+		}
+	}
+}
+
+func BuildProvenanceAttestation(wu *contract.WorkUnit, st *IssueState) *contract.ProvenanceAttestation {
+	att := &contract.ProvenanceAttestation{
+		SchemaVersion: 1,
+	}
+	if st == nil {
+		if wu != nil {
+			att.IssueNumber = wu.IssueNumber
+			att.Workflow = wu.Workflow
+		}
+		return att
+	}
+	att.IssueNumber = st.Lease.IssueNumber
+	if wu != nil {
+		if att.IssueNumber == 0 {
+			att.IssueNumber = wu.IssueNumber
+		}
+		att.Workflow = wu.Workflow
+	}
+	att.EffectiveGate = st.EffectiveGate
+	att.TaskDigest = st.TaskDigest
+	att.PolicyDigest = st.PolicyDigest
+	att.BaseSHA = st.BaseSHA
+	att.HeadSHA = st.HeadSHA
+
+	for _, a := range st.Artifacts {
+		digest := a.Metadata["content_sha256"]
+		if digest == "" {
+			digest = hash(a.Body)
+		}
+		switch a.Type {
+		case contract.ArtifactDesign:
+			att.PlanDigest = digest
+		case contract.ArtifactTestPlan:
+			att.TestPlanDigest = digest
+		case contract.ArtifactReview:
+			att.ReviewDigest = digest
+			att.ReviewVerdict = a.Verdict
+		case contract.ArtifactValidation:
+			att.ValidationPass = strings.EqualFold(a.Verdict, "PASS")
+		}
+	}
+	att.Roles = append([]contract.RoleAttestation(nil), st.Attestations...)
+	return att
+}
+
+func RenderStateProjection(wu *contract.WorkUnit, st *IssueState) string {
+	if st == nil {
+		return "<!-- swarm:audit:v1 -->\n### 🐝 SwarmOS Orchestration & Provenance State\n"
+	}
+	issueNum := st.Lease.IssueNumber
+	if issueNum == 0 && wu != nil {
+		issueNum = wu.IssueNumber
+	}
+	phase := st.Lease.Phase
+	if phase == "" {
+		phase = "approved"
+	}
+	status := st.Lease.Status
+	if status == "" {
+		status = "draft"
+	}
+	gate := string(st.EffectiveGate)
+	if gate == "" {
+		gate = "none"
+	}
+	head := short(st.HeadSHA)
+	if head == "" {
+		head = "-"
+	} else {
+		head = "`" + head + "`"
+	}
+	prDisplay := "-"
+	if st.PRNumber > 0 {
+		if st.PRURL != "" {
+			prDisplay = fmt.Sprintf("[#%d](%s)", st.PRNumber, st.PRURL)
+		} else {
+			prDisplay = fmt.Sprintf("#%d", st.PRNumber)
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("<!-- swarm:audit:v1 -->\n")
+	sb.WriteString("### 🐝 SwarmOS Orchestration & Provenance State\n\n")
+	sb.WriteString("| Field | Value |\n| :--- | :--- |\n")
+	sb.WriteString(fmt.Sprintf("| **Phase** | `%s` |\n", phase))
+	sb.WriteString(fmt.Sprintf("| **Status** | `%s` |\n", status))
+	sb.WriteString(fmt.Sprintf("| **Effective Gate** | `%s` |\n", gate))
+	sb.WriteString(fmt.Sprintf("| **Base SHA** | `%s` |\n", short(st.BaseSHA)))
+	sb.WriteString(fmt.Sprintf("| **Checkpoint SHA** | %s |\n", head))
+	sb.WriteString(fmt.Sprintf("| **Task Digest** | `%s` |\n", short(st.TaskDigest)))
+	sb.WriteString(fmt.Sprintf("| **Policy Digest** | `%s` |\n", short(st.PolicyDigest)))
+	sb.WriteString(fmt.Sprintf("| **Draft PR** | %s |\n", prDisplay))
+
+	prov := BuildProvenanceAttestation(wu, st)
+	if len(prov.Roles) > 0 {
+		sb.WriteString("\n#### 🔒 Harness & Model Provenance Attestation\n\n")
+		sb.WriteString("| Role | Configured Agent | Harness | Version | Model | Boundary | Artifact SHA-256 |\n")
+		sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+		for _, r := range prov.Roles {
+			digest := "-"
+			if r.ArtifactDigest != "" {
+				digest = "`" + short(r.ArtifactDigest) + "`"
+			}
+			sb.WriteString(fmt.Sprintf("| `%s` | `%s` | `%s` | `%s` | `%s` | `%s` | %s |\n",
+				r.Role, r.Agent, r.Harness, r.HarnessVersion, r.Model, r.Sandbox, digest))
+		}
+	}
+
+	if len(st.Artifacts) > 0 {
+		sb.WriteString("\n#### 📦 Workflow Artifacts\n\n")
+		for _, a := range st.Artifacts {
+			digest := a.Metadata["content_sha256"]
+			if digest == "" {
+				digest = hash(a.Body)
+			}
+			var title string
+			switch a.Type {
+			case contract.ArtifactDesign:
+				title = fmt.Sprintf("📋 Implementation Plan (PLAN.md — sha256:%s)", short(digest))
+			case contract.ArtifactTestPlan:
+				title = fmt.Sprintf("🧪 Test Plan (TEST_PLAN.md — sha256:%s)", short(digest))
+			case contract.ArtifactReview:
+				title = fmt.Sprintf("🔍 Plan Review (REVIEW.md — Verdict: %s — sha256:%s)", a.Verdict, short(digest))
+			case contract.ArtifactImplementation:
+				title = fmt.Sprintf("🛠️ Implementation Summary (sha256:%s)", short(digest))
+			case contract.ArtifactValidation:
+				title = fmt.Sprintf("✅ Validation Checks (%s — sha256:%s)", a.Verdict, short(digest))
+			default:
+				title = fmt.Sprintf("📄 Artifact (%s — sha256:%s)", a.Type, short(digest))
+			}
+			sb.WriteString(fmt.Sprintf("<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, TruncateArtifactBody(a.Body, issueNum)))
+		}
+	}
+	return sb.String()
 }
 func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueState, error) {
 	actor, err := m.tracker.CurrentUser(ctx)
@@ -217,6 +477,9 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		if _, err = m.save(ctx, n, rev, old); err != nil {
 			return nil, err
 		}
+		for _, staleLabel := range []string{"swarm:draft", "swarm:needs-scope", "swarm:blocked"} {
+			_ = m.tracker.RemoveLabel(ctx, n, staleLabel)
+		}
 		if err = m.tracker.AddLabels(ctx, n, []string{sec.ReadyLabel}); err != nil {
 			return nil, err
 		}
@@ -227,6 +490,9 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	st := &IssueState{Lease: contract.Lease{Version: 1, IssueNumber: n, Status: "draft"}, TaskDigest: contract.DigestWorkUnit(wu), PolicyDigest: digest, BaseSHA: base, EffectiveGate: gate, ApprovedBy: owner, ApprovedAt: m.nowFn()}
 	if _, err = m.save(ctx, n, "", st); err != nil {
 		return nil, err
+	}
+	for _, staleLabel := range []string{"swarm:draft", "swarm:needs-scope", "swarm:blocked"} {
+		_ = m.tracker.RemoveLabel(ctx, n, staleLabel)
 	}
 	if err = m.tracker.AddLabels(ctx, n, []string{sec.ReadyLabel}); err != nil {
 		return nil, err
@@ -271,6 +537,9 @@ func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string
 	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load approved policy: %w", err)
+	}
+	if !matchesCollaboratorAllowlist(owner, cfg.Security.ApprovedCollaborators) {
+		return nil, fmt.Errorf("actor %q is not in security.approved_collaborators", owner)
 	}
 	if err = verifyTrust(cfg.Security, issue); err != nil {
 		return nil, err
@@ -467,6 +736,11 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	if err := m.checkApprovedState(ctx, n, st); err != nil {
 		return nil, err
 	}
+	if cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA); cfgErr == nil {
+		if !matchesCollaboratorAllowlist(actor, cfg.Security.ReviewerCollaborators) {
+			return nil, fmt.Errorf("actor %q is not in security.reviewer_collaborators", actor)
+		}
+	}
 	var plan, test *contract.Artifact
 	for i := range st.Artifacts {
 		switch st.Artifacts[i].Type {
@@ -479,10 +753,22 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	if plan == nil || test == nil {
 		return nil, ErrApprovalRequired
 	}
-	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", n), IssueNumber: n, Type: contract.ArtifactReview, Producer: "human:" + actor, Verdict: verdict, Summary: "human plan review", Body: "VERDICT: " + verdict + "\n\n" + notes, CreatedAt: m.nowFn(), Metadata: map[string]string{"kind": "human", "actor": actor, "task_digest": st.TaskDigest, "policy_digest": st.PolicyDigest, "plan_digest": hash(plan.Body), "test_plan_digest": hash(test.Body)}}
+	body := "VERDICT: " + verdict + "\n\n" + notes
+	digest := hash(body)
+	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", n), IssueNumber: n, Type: contract.ArtifactReview, Producer: "human:" + actor, Verdict: verdict, Summary: "human plan review", Body: body, CreatedAt: m.nowFn(), Metadata: map[string]string{"kind": "human", "actor": actor, "task_digest": st.TaskDigest, "policy_digest": st.PolicyDigest, "plan_digest": hash(plan.Body), "test_plan_digest": hash(test.Body), "content_sha256": digest}}
 	if err := contract.ValidateArtifact(&art); err != nil {
 		return nil, err
 	}
+	RecordRoleAttestation(st, contract.RoleAttestation{
+		Role:           "reviewer",
+		Agent:          "human",
+		Harness:        "human",
+		HarnessVersion: "maintainer",
+		Model:          "human",
+		Sandbox:        "tracker",
+		ArtifactType:   string(contract.ArtifactReview),
+		ArtifactDigest: digest,
+	})
 	for i := range st.Artifacts {
 		if st.Artifacts[i].Type == contract.ArtifactReview {
 			art.Version = st.Artifacts[i].Version + 1
@@ -536,6 +822,11 @@ func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art c
 			if art.Metadata["actor"] == "" {
 				return fmt.Errorf("review actor metadata is required")
 			}
+			if cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA); cfgErr == nil {
+				if !matchesCollaboratorAllowlist(art.Metadata["actor"], cfg.Security.ReviewerCollaborators) {
+					return fmt.Errorf("actor %q is not in security.reviewer_collaborators", art.Metadata["actor"])
+				}
+			}
 			if kind == "human" {
 				if err := m.tracker.Authorize(ctx, "review-human"); err != nil {
 					return err
@@ -558,8 +849,42 @@ func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art c
 			art.Metadata["plan_digest"] = hash(plan.Body)
 			art.Metadata["test_plan_digest"] = hash(test.Body)
 		}
+		if art.Metadata == nil {
+			art.Metadata = make(map[string]string)
+		}
+		digest := hash(art.Body)
+		art.Metadata["content_sha256"] = digest
 		if err := contract.ValidateArtifact(&art); err != nil {
 			return err
+		}
+		if harnessName := strings.TrimSpace(art.Metadata["harness"]); harnessName != "" {
+			role := strings.TrimSpace(art.Metadata["role"])
+			if role == "" {
+				switch art.Type {
+				case contract.ArtifactDesign, contract.ArtifactTestPlan:
+					role = "planner"
+				case contract.ArtifactReview:
+					role = "reviewer"
+				case contract.ArtifactImplementation:
+					role = "developer"
+				case contract.ArtifactValidation:
+					role = "tester"
+				}
+			}
+			agentName := strings.TrimSpace(art.Metadata["agent"])
+			if agentName == "" {
+				agentName = harnessName
+			}
+			RecordRoleAttestation(st, contract.RoleAttestation{
+				Role:           role,
+				Agent:          agentName,
+				Harness:        harnessName,
+				HarnessVersion: art.Metadata["harness_version"],
+				Model:          art.Metadata["model"],
+				Sandbox:        art.Metadata["sandbox"],
+				ArtifactType:   string(art.Type),
+				ArtifactDigest: digest,
+			})
 		}
 		if art.Type == contract.ArtifactDesign || art.Type == contract.ArtifactTestPlan {
 			var kept []contract.Artifact
@@ -594,6 +919,11 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	}
 	if st.Branch != "" && st.Branch != branch {
 		return nil, fmt.Errorf("checkpoint branch differs from approved branch")
+	}
+	if st.ProjectionCommentID == 0 {
+		if existingID := m.findProjectionCommentID(ctx, n); existingID > 0 {
+			st.ProjectionCommentID = existingID
+		}
 	}
 	st.Branch = branch
 	st.HeadSHA = head

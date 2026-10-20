@@ -181,6 +181,22 @@ func (l *LocalTracker) CreateIssue(_ context.Context, title, body string, labels
 	return created, err
 }
 
+func (l *LocalTracker) UpdateIssueBody(_ context.Context, number int, body string) (*Issue, error) {
+	var updated *Issue
+	err := l.withLock(true, func(st *localState) error {
+		iss, ok := st.Issues[number]
+		if !ok {
+			return fmt.Errorf("issue #%d not found in local tracker", number)
+		}
+		iss.Body = body
+		cp := *iss
+		cp.Labels = append([]string(nil), iss.Labels...)
+		updated = &cp
+		return nil
+	})
+	return updated, err
+}
+
 func (l *LocalTracker) ListIssues(_ context.Context, filter IssueFilter) ([]*Issue, error) {
 	var list []*Issue
 	err := l.withLock(false, func(st *localState) error {
@@ -326,6 +342,24 @@ func (l *LocalTracker) CreateDraftPR(_ context.Context, req DraftPRRequest) (*Pu
 		return nil
 	})
 	return created, err
+}
+
+func (l *LocalTracker) UpdateDraftPR(_ context.Context, prNumber int, title, body string) (*PullRequest, error) {
+	var updated *PullRequest
+	err := l.withLock(true, func(st *localState) error {
+		pr, ok := st.PullRequests[prNumber]
+		if !ok {
+			return fmt.Errorf("pull request #%d not found in local tracker", prNumber)
+		}
+		if title != "" {
+			pr.Title = title
+		}
+		pr.Body = body
+		cp := *pr
+		updated = &cp
+		return nil
+	})
+	return updated, err
 }
 
 func (l *LocalTracker) FindDraftPR(ctx context.Context, head, base string) (*PullRequest, error) {

@@ -34,7 +34,11 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		iss, err := tr.CreateIssue(cmd.Context(), title, contract.FormatIssueMarkdown(wu), nil)
+		initialLabels := []string{"swarm:draft"}
+		if ready {
+			initialLabels = nil
+		}
+		iss, err := tr.CreateIssue(cmd.Context(), title, contract.FormatIssueMarkdown(wu), initialLabels)
 		if err != nil {
 			return err
 		}
@@ -50,6 +54,9 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			if _, err := mgr.ApproveTask(cmd.Context(), iss.Number, owner); err != nil {
 				return fmt.Errorf("approve newly created issue: %w", err)
+			}
+			if refreshed, refreshErr := tr.GetIssue(cmd.Context(), iss.Number); refreshErr == nil && refreshed != nil {
+				iss = refreshed
 			}
 			kind = "approved"
 		}

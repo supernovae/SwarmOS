@@ -17,15 +17,16 @@ swarm doctor --backend github
 
 | Path | Role |
 | :--- | :--- |
-| `.swarm/config.yaml` | Default agent, plan review gate, lease TTL/renewal limits, role routing, and allowed agent harnesses. |
+| `.swarm/config.yaml` | Default agent, `plan_mode` (`auto\|agent\|interactive`), plan review gate, lease TTL/renewal limits, role routing, collaborator allowlists, and allowed agent harnesses. |
+| `.swarm/goals.md`, `SKILLS.md`, `rules/`, `skills/` | Project mission, safety invariants, agent factory staging guide, and reusable rules/skills compiled into `SYSTEM_PROMPT.md`. |
 | `.swarm/project.md`, `architecture.md`, `conventions.md` | Project context, build/test commands, and conventions compiled into agent prompts. |
 | `.swarm/workflows/{feature,bugfix,refactor}.yaml` | Role prompt recipes for feature delivery, bug fixes, and refactors. |
 | `.swarm/prompts/{planner,reviewer,developer,tester}.md` | Role contracts defining what each phase reads and produces. |
 | `.swarm/contracts/{workunit,artifact}.schema.json` | JSON Schemas (Draft 2020-12) for validating issues and artifacts. |
 | `.swarm/validation/required-checks.yaml` | Required check commands and protected-path globs enforced before submission. |
-| `.github/ISSUE_TEMPLATE/swarm-workunit.yml` | GitHub Issue Form for creating structured WorkUnits from the GitHub UI. |
+| `.github/ISSUE_TEMPLATE/{swarm-workunit,swarm-feature,swarm-bugfix,swarm-refactor,config}.yml` | Preset GitHub Issue Forms for creating structured WorkUnits from the GitHub UI (customizable via `--template-dir`). |
 | `.github/workflows/swarm-validate.yml` | Consumer CI workflow running your repository checks against the trusted base commit. |
-| `.claude/commands/swarm-*.md` & `.opencode/command/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, and `/swarm-validate` slash commands. |
+| `.claude/commands/swarm-*.md` & `.opencode/command/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
 
 > [!TIP]
 > Passing `--swarm-version` ensures the generated `.github/workflows/swarm-validate.yml` installs that exact immutable SwarmOS version. Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
@@ -155,7 +156,9 @@ A CLI `--gate` flag can always make review stricter (for example, upgrading `non
 
 ## Related Guides
 
-- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI workflows, agent harness table, reviewer isolation, checkpoints, and recovery.
+- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — Daily maintainer playbook for `swarm plan`, triage labels, and Draft PR provenance review.
+- **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](GITHUB.md)** — Configure repository rulesets, `SWARM_GITHUB_TOKEN`, and role-separated collaborator accounts.
+- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI workflows, interactive `swarm stage`, agent harness table, reviewer isolation, checkpoints, and recovery.
 - **[Working with Grok Bot (`docs/grokbot.md`)](grokbot.md)** — Connect Grok Bot to GitHub and coordinate SwarmOS tasks.
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](openai-dot.md)** — Configure Codex Cloud environments and remote repositories for OpenAI Dots.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.

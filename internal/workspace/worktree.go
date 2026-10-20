@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
-
-	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/harness"
 )
 
 const (
@@ -287,10 +287,33 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 	if err != nil {
 		return err
 	}
-	return compileHarnessBundle(worktreePath, wu, wf, artifacts, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc)
+	var extraDocs []string
+	for _, optPath := range []string{".swarm/goals.md", ".swarm/SKILLS.md"} {
+		if content, optErr := showHarnessFile(worktreePath, baseSHA, optPath); optErr == nil && strings.TrimSpace(content) != "" {
+			extraDocs = append(extraDocs, strings.TrimSpace(content))
+		}
+	}
+	for _, dirPath := range []string{".swarm/rules", ".swarm/skills"} {
+		if treeOut, treeErr := gitOutput(worktreePath, "ls-tree", "-r", "--name-only", baseSHA, dirPath); treeErr == nil {
+			var files []string
+			for _, line := range strings.Split(strings.TrimSpace(treeOut), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasSuffix(strings.ToLower(line), ".md") {
+					files = append(files, line)
+				}
+			}
+			sort.Strings(files)
+			for _, f := range files {
+				if content, fErr := showHarnessFile(worktreePath, baseSHA, f); fErr == nil && strings.TrimSpace(content) != "" {
+					extraDocs = append(extraDocs, strings.TrimSpace(content))
+				}
+			}
+		}
+	}
+	return compileHarnessBundle(worktreePath, wu, wf, artifacts, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, extraDocs...)
 }
 
-func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc string) error {
+func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc string, extraDocs ...string) error {
 	activeDir := filepath.Join(worktreePath, ".swarm", "active")
 	if err := os.MkdirAll(activeDir, 0o755); err != nil {
 		return err
@@ -316,6 +339,11 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	if convDoc != "" {
 		sys.WriteString(strings.TrimSpace(convDoc) + "\n\n")
 	}
+	for _, doc := range extraDocs {
+		if strings.TrimSpace(doc) != "" {
+			sys.WriteString(strings.TrimSpace(doc) + "\n\n")
+		}
+	}
 	sys.WriteString("## Approved validation policy\n\n```yaml\n")
 	sys.WriteString(strings.TrimSpace(validationDoc))
 	sys.WriteString("\n```\n\nRun these check commands directly. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
@@ -335,10 +363,11 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 - **Plan Artifact Path**: `+"`.swarm/active/PLAN.md`"+`
 - **Test Plan Artifact Path**: `+"`.swarm/active/TEST_PLAN.md`"+`
 - **Review Artifact Path**: `+"`.swarm/active/REVIEW.md`"+`
-- **Slash Commands**: `+"`/swarm-plan`"+`, `+"`/swarm-review`"+`, `+"`/swarm-implement`"+`, `+"`/swarm-validate`"+`
+- **Slash Commands**: `+"`/swarm-plan`"+`, `+"`/swarm-review`"+`, `+"`/swarm-implement`"+`, `+"`/swarm-validate`"+`, `+"`/swarm-project-plan`"+`
+- **Interactive Staging CLI**: `+"`swarm stage %d --phase plan`"+` -> `+"`swarm review %d`"+` -> `+"`swarm stage %d --phase implement`"+` -> `+"`swarm submit %d`"+`
 
 Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMPT.md`"+` before making changes.
-%s`, ActiveMarkerStart, wu.ID, wu.IssueNumber, role, ActiveMarkerEnd)
+%s`, ActiveMarkerStart, wu.ID, wu.IssueNumber, role, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, ActiveMarkerEnd)
 
 	for _, docName := range []string{"AGENTS.md", "CLAUDE.md"} {
 		if err := injectManagedBlock(filepath.Join(worktreePath, docName), pointerBlock); err != nil {

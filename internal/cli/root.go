@@ -39,7 +39,7 @@ func NewRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", os.Getenv("SWARM_BACKEND"), "Tracker backend: github or local")
 	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", os.Getenv("SWARM_REPO"), "GitHub repository (owner/repo)")
 	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", "", "Repository root path")
-	rootCmd.AddCommand(newInitCmd(opts), newDoctorCmd(opts), newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newClaimCmd(opts), newPullCmd(opts), newWorkCmd(opts), newReviewCmd(opts), newValidateCmd(opts), newSubmitCmd(opts), newStatusCmd(opts), newRenewCmd(opts), newReleaseCmd(opts), newVersionCmd())
+	rootCmd.AddCommand(newInitCmd(opts), newDoctorCmd(opts), newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPlanCmd(opts), newClaimCmd(opts), newPullCmd(opts), newWorkCmd(opts), newStageCmd(opts), newReviewCmd(opts), newValidateCmd(opts), newSubmitCmd(opts), newStatusCmd(opts), newRenewCmd(opts), newReleaseCmd(opts), newVersionCmd())
 	for _, command := range rootCmd.Commands() {
 		switch command.Name() {
 		case "init", "doctor", "repo", "version":

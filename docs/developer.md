@@ -23,9 +23,10 @@ swarm submit 42 --backend github
 
 Helpful CLI conventions:
 - **Picking up the next task**: Use `swarm pull` to reserve the next eligible `swarm:ready` issue, or `swarm work --next` to claim and execute it immediately. Add `--all` with `--next` (or `swarm pull --all`) to scan across all repositories registered in `~/.config/swarm/repos.yaml`.
+- **Interactive & harness-driven staging (`swarm stage`)**: Working inside an interactive coding harness without spawning nested subprocesses? Run `swarm claim <issue>`, write `.swarm/active/PLAN.md` and `TEST_PLAN.md`, and stage each phase directly with `swarm stage <issue> --phase plan --harness <name> --model <name>` and `swarm stage <issue> --phase implement --harness <name> --model <name>`.
+- **Token auth without `gh` CLI**: Set `SWARM_GITHUB_TOKEN` (or `GH_TOKEN` / `GITHUB_TOKEN`) to authenticate directly with GitHub REST and Git HTTPS remotes on headless machines without installing `gh`.
 - **Headless vs. interactive**: `swarm work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` when you want to open an interactive terminal session inside the task worktree.
-- **Structured JSON output**: Add `--json` to any lifecycle command (`issue`, `claim`, `pull`, `work`, `review`, `validate`, `submit`, `status`, `renew`, `release`, or `node run`) for scripts and automation.
-
+- **Structured JSON output**: Add `--json` to any lifecycle command (`issue`, `plan`, `claim`, `pull`, `work`, `stage`, `review`, `validate`, `submit`, `status`, `renew`, `release`, or `node run`) for scripts and automation.
 ---
 
 ## Agent integration runbook
@@ -109,6 +110,8 @@ By default, `swarm node run` drains the currently available ready queue and exit
 
 ## Related Guides
 
+- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — Roadmap decomposition (`swarm plan`), backlog triage, and Draft PR auditing.
+- **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](GITHUB.md)** — Branch rulesets, `SWARM_GITHUB_TOKEN`, and collaborator allowlists.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents and checks, and approve tasks.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS state refs, fencing, and checkpoint mechanics.

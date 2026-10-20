@@ -170,14 +170,16 @@ swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 
 | Command | What It Does |
 | :--- | :--- |
-| `swarm init [--force] [--sync-labels] [--swarm-version <ref>]` | Scaffold `.swarm/`, GitHub Issue Form, consumer CI workflow, and `/swarm-*` slash commands. |
+| `swarm init [--force] [--sync-labels] [--template-dir <dir>] [--swarm-version <ref>]` | Scaffold `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI workflow, and `/swarm-*` slash commands. |
 | `swarm doctor` | Check `git`, `gh`, `.swarm/` schemas, and configured agent binaries. |
 | `swarm issue create\|approve\|lint\|decompose` | Create draft WorkUnits, approve revisions, lint schemas, or split epics into linked child tasks. |
+| `swarm plan [--from <file> \| --scan] [--normalize] [--apply] [--ready]` | Decompose a project roadmap into dependency-ordered WorkUnit issues or scan and import open issues against project goals. |
 | `swarm claim <issue>` / `swarm pull [--all]` | Claim a specific approved issue or pull the next ready task across registered repositories. |
 | `swarm work [<issue>] [--next] [--all]` | Run `plan`, `review`, `implement`, and `validate` (supports `--dry-run`, `--handoff`, and role overrides). |
+| `swarm stage [<issue>] [--phase plan\|implement] [--harness <name>] [--model <name>]` | Stage interactive or harness-produced plan and implementation artifacts onto an active lease with provenance metadata. |
 | `swarm review <issue> [--approve\|--reject]` | Run an isolated agent review or record a maintainer's human gate decision. |
 | `swarm validate [<issue>] [--ci --base <sha>]` | Verify artifacts, check protected paths, and run `.swarm/validation/required-checks.yaml`. |
-| `swarm submit [<issue>]` | Clean temporary markers, checkpoint and push the worktree branch, and open or update a Draft PR. |
+| `swarm submit [<issue>]` | Clean temporary markers, checkpoint and push the worktree branch, and open or update a Draft PR with collapsible artifacts and provenance attestation. |
 | `swarm status [<issue>] [--all]` | Inspect active claims, lease TTL, current phase, and published artifacts. |
 | `swarm repo add\|list\|remove` | Manage the local multi-repository registry (`~/.config/swarm/repos.yaml`). |
 | `swarm node init\|status\|run` | Configure a worker node profile and run concurrent worker pools (`--concurrency`, `--max-jobs`, `--watch`). |
@@ -190,11 +192,13 @@ Every lifecycle command supports `--json` for scripts and automation.
 
 ## Documentation & Guides
 
+- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](docs/ADMIN_GUIDE.md)** — Daily maintainer playbook for roadmap decomposition (`swarm plan --from`), backlog scanning (`swarm plan --scan`), and auditing provenance-attested Draft PRs.
+- **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](docs/GITHUB.md)** — Configure repository rulesets, `SWARM_GITHUB_TOKEN` auth without `gh` CLI, and role-separated collaborator allowlists.
 - **[Working with Grok Bot (`docs/grokbot.md`)](docs/grokbot.md)** — Connect Grok Bot to your repositories, talk to your codebase, run PR reviews, and coordinate SwarmOS workers.
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](docs/openai-dot.md)** — Configure Codex Cloud environments and remote repositories so your Dot can plan, review, and ship changes.
 - **[Project & Maintainer Setup (`docs/project.md`)](docs/project.md)** — Configure `.swarm/config.yaml`, validation rules, plan gates, and repository protections.
-- **[Developer & Worker Guide (`docs/developer.md`)](docs/developer.md)** — Everyday CLI workflows, agent harness table, reviewer sandboxing, handoffs, and recovery.
-- **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](docs/WORKFLOWS.md)** — Role prompts, `PLAN.md` / `TEST_PLAN.md` / `REVIEW.md` artifacts, and gate transitions.
+- **[Developer & Worker Guide (`docs/developer.md`)](docs/developer.md)** — Everyday CLI workflows, interactive `swarm stage`, agent harness table, reviewer sandboxing, handoffs, and recovery.
+- **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](docs/WORKFLOWS.md)** — Role prompts, `PLAN.md` / `TEST_PLAN.md` / `REVIEW.md` artifacts, provenance attestations, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)** — Git compare-and-swap state refs, claim fencing, worktree checkpoints, and process boundaries.
 - **[Security Policy (`SECURITY.md`)](SECURITY.md)** — Trust model, reviewer isolation, vulnerability reporting, and release attestation verification.
 - **[Agent & Contributor Guide (`AGENTS.md`)](AGENTS.md)** — Repository conventions, documentation voice guardrails, and review rules for coding agents and contributors.

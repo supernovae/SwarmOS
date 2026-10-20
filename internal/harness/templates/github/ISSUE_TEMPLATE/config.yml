@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: SwarmOS Agent & Harness Skills Guide
+    url: https://github.com/supernovae/swarmos
+    about: Learn how SwarmOS turns structured WorkUnit issues into validated Draft PRs

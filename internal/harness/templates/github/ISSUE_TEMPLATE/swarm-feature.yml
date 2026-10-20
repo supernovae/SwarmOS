@@ -1,0 +1,69 @@
+name: SwarmOS Feature Work Unit
+description: Propose a new feature or capability for SwarmOS agents and contributors
+title: "[Feature] "
+labels: ["swarm:draft"]
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: Clear, single-purpose statement of the feature to build.
+      placeholder: Add support for ...
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Architectural, dependency, or scope boundaries (one bullet per line).
+      value: |
+        - Follow project conventions in .swarm/conventions.md and .swarm/rules/
+        - Do not modify protected harness or CI files
+        - Add unit tests covering new behavior and edge cases
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Testable conditions required for completion (one bullet per line).
+      placeholder: |
+        - [ ] Feature is implemented and documented
+        - [ ] Unit tests cover happy path and error cases
+        - [ ] `swarm validate` passes
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow
+      description: Workflow recipe for this feature work unit.
+      options:
+        - feature
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
+    id: plan_gate
+    attributes:
+      label: Plan Gate
+      description: Requested plan review gate before implementation.
+      options:
+        - agent
+        - human
+        - none
+      default: 0
+    validations:
+      required: true
+  - type: input
+    id: depends_on
+    attributes:
+      label: Depends On
+      description: Optional comma-separated prerequisite issue numbers (e.g., #1, #2).
+      placeholder: "none"
+  - type: input
+    id: required_capabilities
+    attributes:
+      label: Required Capabilities
+      description: Optional capabilities required by worker nodes (one per line or comma-separated).
+      value: "coding, testing"

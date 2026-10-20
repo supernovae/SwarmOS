@@ -64,6 +64,14 @@ func ValidatePhase(phase string) error {
 	return fmt.Errorf("invalid workflow phase %q", phase)
 }
 
+func ValidatePlanMode(mode string) error {
+	switch mode {
+	case "", "auto", "agent", "interactive":
+		return nil
+	}
+	return fmt.Errorf("invalid plan_mode %q (must be auto, agent, or interactive)", mode)
+}
+
 func DigestSecurityPolicy(sec SecurityConfig) string {
 	b, err := json.Marshal(sec)
 	if err != nil {

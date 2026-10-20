@@ -1,55 +1,70 @@
-# Repository setup and task approval
+# Project & Maintainer Setup Guide
 
-This guide targets unreleased `main`. The v0.1.0 release may not include the Git-CAS lifecycle or interfaces below.
+This guide walks repository maintainers through initializing SwarmOS, configuring `.swarm/config.yaml` and validation rules, authoring and approving `WorkUnit` issues, and setting up GitHub repository protections.
 
-## Initialize and commit the harness
+---
+
+## 1. Initialize and Commit the Harness
+
+Run `swarm init` inside your repository checkout and pin the SwarmOS release tag or commit SHA you want your consumer CI workflow to install:
 
 ```bash
-SWARM_VERSION='your-compatible-release-tag-or-full-commit'
+export SWARM_VERSION=27797d318d969c77f62c74df1bb0d21652ff0f43 # or a release tag such as v0.2.0
 swarm init --sync-labels --backend github --swarm-version "$SWARM_VERSION"
-swarm doctor
+swarm doctor --backend github
 ```
 
-`--swarm-version` is an immutable release tag or full commit required to generate consumer CI. Without it, initialization deliberately omits the workflow and warns rather than emitting CI that installs a nonexistent or unpinned release. Pin a compatible released version or full SHA containing the consumer validator.
+`swarm init` detects your project stack (`Go`, `Rust`, `Python`, or `TypeScript/JavaScript`) and scaffolds:
 
-Commit generated `.swarm/`, issue form, and consumer CI configuration to the default branch. Consumer CI installs that pinned SwarmOS binary and runs the repository's approved checks; it must not assume the consumer contains `cmd/swarm` or Go source. It supplies the trusted PR or push base SHA to `swarm validate --ci --base`.
+| Path | Role |
+| :--- | :--- |
+| `.swarm/config.yaml` | Default agent, plan review gate, lease TTL/renewal limits, role routing, and allowed agent harnesses. |
+| `.swarm/project.md`, `architecture.md`, `conventions.md` | Project context, build/test commands, and conventions compiled into agent prompts. |
+| `.swarm/workflows/{feature,bugfix,refactor}.yaml` | Role prompt recipes for feature delivery, bug fixes, and refactors. |
+| `.swarm/prompts/{planner,reviewer,developer,tester}.md` | Role contracts defining what each phase reads and produces. |
+| `.swarm/contracts/{workunit,artifact}.schema.json` | JSON Schemas (Draft 2020-12) for validating issues and artifacts. |
+| `.swarm/validation/required-checks.yaml` | Required check commands and protected-path globs enforced before submission. |
+| `.github/ISSUE_TEMPLATE/swarm-workunit.yml` | GitHub Issue Form for creating structured WorkUnits from the GitHub UI. |
+| `.github/workflows/swarm-validate.yml` | Consumer CI workflow running your repository checks against the trusted base commit. |
+| `.claude/commands/swarm-*.md` & `.opencode/command/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, and `/swarm-validate` slash commands. |
+
+> [!TIP]
+> Passing `--swarm-version` ensures the generated `.github/workflows/swarm-validate.yml` installs that exact immutable SwarmOS version. Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
+
+---
 
 ## Consumer CI and release administration
 
-Generated consumer CI is emitted only with an explicit compatible immutable `--swarm-version`; it installs that pinned validator, detects the repository default branch rather than guessing `main`, and passes an explicit trusted base. It provisions the detected Go runtime, Node 24, Python 3.13 with `pytest`/`ruff`, or Rust `clippy` setup. A Python `pyproject.toml` repository may still require operator-managed dependency installation. If initialization cannot reliably identify a default branch, it omits CI with a warning.
+When `--swarm-version` is provided, `swarm init` generates `.github/workflows/swarm-validate.yml` configured for your repository's default branch and language toolchain (`Go`, `Node 24`, `Python 3.13` with `pytest`/`ruff`, or `Rust` with `clippy`), then runs `swarm validate --ci --base "$BASE_SHA"` against the pull request or push base SHA.
 
-SwarmOS's own release workflow runs the reusable lint, vulnerability, and Linux/macOS/Windows test matrix for the exact tag SHA, verifies that a semantic version tag is reachable from the repository default branch, then publishes through the `release` GitHub environment. Repository administrators must configure that environment's required reviewers and tag/branch protection: the workflow requests the environment but cannot itself enforce remote GitHub protection rules.
+For repositories that mirror SwarmOS's own release and security setup:
+- **Release workflow (`release.yml`)**: Runs the lint, vulnerability, and Linux/macOS/Windows test matrix for the tagged commit, verifies the semantic version tag is reachable from the default branch, and publishes through the `release` GitHub Environment. Configure required reviewers and tag protection rules on that environment in GitHub Settings.
+- **Dependency Review (`security.yml`)**: Requires GitHub's [dependency graph](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/enable-dependency-graph) to be enabled under **Settings → Advanced Security** (along with Dependabot alerts).
 
-SwarmOS's `Dependency Review` PR check also requires GitHub's repository-level [dependency graph](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/enable-dependency-graph). Administrators must enable it under **Settings → Advanced Security** and keep Dependabot alerts enabled for ongoing vulnerability notifications. These are GitHub settings, not workflow YAML. A disabled graph causes a setup failure, not a clean dependency report; keep the check blocking rather than switching it to warn-only.
+---
 
-The tracked harness provides:
-
-| Path | Role |
-| --- | --- |
-| `.swarm/config.yaml` | strict policy, configured agents, role routing, leases |
-| `.swarm/workflows/*.yaml` | prompt recipes, not an executable graph |
-| `.swarm/prompts/*.md` | planner, reviewer, developer, tester contracts |
-| `.swarm/validation/required-checks.yaml` | candidate-facing copy of validation policy |
-| `.swarm/project.md`, `architecture.md`, `conventions.md` | repository context compiled into prompts |
-
-## Configure only approved agents
+## 2. Configure Approved Agents (`.swarm/config.yaml`)
 
 ```yaml
 version: 1
 default_agent: claude
 default_gate: agent
+
 roles:
   planner: claude
   reviewer: omp
   developer: codex
   tester: opencode
+
 lease:
   duration: 4h
   renewable: true
   max_renewals: 3
+
 security:
   require_ready_label: true
   ready_label: swarm:ready
+
 agents:
   claude:
     binary: claude
@@ -57,6 +72,7 @@ agents:
   omp:
     binary: omp
     roles: [reviewer]
+    sandbox: sandbox-exec   # or bwrap on Linux, container with OCI runtime
   codex:
     binary: codex
     roles: [developer]
@@ -65,40 +81,56 @@ agents:
     roles: [tester]
 ```
 
-`agents` is an allowlist, not a discovery list. A configured entry may set `binary`, `harness`, `args`, `model`, `roles`, permitted `env`, and reviewer sandbox/network settings. The configured name is the policy/audit identity; `harness` selects the CLI argument contract and must be `claude`, `codex`, `omp`, or `opencode` (when omitted it defaults to the configured name). `model` is applied only through those supported harnesses. The exact resolved agent is checked before a claim. Resolution precedence is role CLI override, generic CLI agent, `roles`, then `default_agent`.
+How agent configuration works:
+- **Explicit allowlist**: Only entries under `agents:` can be selected. Each entry can configure `binary`, `harness` (`claude`, `codex`, `omp`, or `opencode`; defaults to the entry name), `args`, `model`, allowed `roles`, permitted `env` variables, and reviewer sandbox settings.
+- **Precedence**: Role-specific CLI flag (`--planner-agent`, `--reviewer-agent`, `--developer-agent`, `--tester-agent`) $\rightarrow$ generic `--agent` $\rightarrow$ `roles.<role>` $\rightarrow$ `default_agent`.
+- **Maintainer-controlled approvals**: When `security.require_ready_label` is `true`, an issue must be approved by a user with repository write/maintain/admin permissions via `swarm issue approve <issue>` (or `swarm issue create --ready`) before any worker can claim it.
 
-`require_ready_label` requires an authorized immutable task approval before execution. GitHub tracker authorization uses actual repository write, maintain, or admin permission checks for approval and human decisions, not issue author associations. Visible issue text remains untrusted; keep task approval explicit and use the configured human gate for decisions requiring a maintainer.
+---
 
-### Configuration migration
+## 3. Create, Lint, and Approve WorkUnit Issues
 
-Remove obsolete `security.trusted_associations` and `security.trusted_reviewers` keys; strict configuration rejects unknown fields. Approval and human review now use the tracker actor's actual repository permission. Remove `--allow-harness-changes` automation: a protected-path exception now requires `allow_harness_changes: true` in the exact approved WorkUnit, not a CLI bypass. Existing tasks must receive a fresh immutable approval before execution; do not migrate an old comment marker or readiness label into authority.
-
-## Draft, inspect, approve
+You can create structured WorkUnits from the GitHub Issue Form, fenced YAML blocks, external `.swarm/workunits/<id>.yaml` references, or the CLI:
 
 ```bash
-swarm issue create \
+# Create a draft WorkUnit issue on GitHub (add --ready to approve in one step)
+swarm issue create --backend github \
   --title "Add retry policy" \
   --objective "Retry transient HTTP failures" \
   --constraint "Preserve the public client API" \
   --acceptance "Retries 429 responses within the configured limit" \
   --workflow feature --gate human
 
-# Inspect/lint the actual issue, then approve its immutable revision.
-swarm issue lint 42
-swarm issue approve 42
+# Validate the issue schema and approve its revision for execution
+swarm issue lint 42 --backend github
+swarm issue approve 42 --backend github
 ```
 
-`issue create` creates a **draft** by default. `--ready` is an explicit convenience to approve the newly created revision. Approval records the canonical WorkUnit digest, policy digest, and immutable base SHA in authoritative state before adding readiness. Edited WorkUnits, policy changes, withdrawn readiness, and changed harness permissions require the relevant reapproval; do not use comments as an approval API.
+Approving an issue records the canonical WorkUnit digest, `.swarm/` policy digest, and trusted base SHA in Git state and applies the `swarm:ready` label. If an issue's scope or `.swarm/` policy changes later, run `swarm issue approve <issue>` again to approve the updated revision.
 
-A WorkUnit can be issue-form fields, fenced YAML, or an approved external file reference. It must identify objective, constraints, acceptance criteria, workflow, and optional gate. The issue number selected by the tracker is authoritative; an embedded different number is rejected.
+To split a larger epic into sequential child issues with `depends_on` links, run:
+
+```bash
+swarm issue decompose 42 --sequential --backend github
+```
+
+---
 
 ## Validation policy and protected paths
 
+`.swarm/validation/required-checks.yaml` defines the checks and protected paths that every task must satisfy:
+
 ```yaml
 required_checks:
+  - name: build
+    command: go build ./...
+    timeout: 5m
   - name: test
     command: go test ./...
     timeout: 10m
+  - name: lint
+    command: go vet ./...
+    timeout: 5m
 protected_paths:
   - .github/workflows/**
   - .swarm/config.yaml
@@ -108,22 +140,24 @@ protected_paths:
   - .swarm/workflows/**
 ```
 
-The candidate copy is not authoritative. Validation resolves this policy from the approved base and compares the base, worktree, index, and untracked files. Protected policy, configuration, prompts, and workflows are governed by the approved baseline; candidate flags cannot broadly bypass them. At least one required check and protected-path pattern are mandatory. Generic repositories deliberately fail validation until project-specific checks are configured.
+During `swarm validate` and `swarm submit`, SwarmOS reads `required-checks.yaml` from the **approved base commit** rather than the candidate worktree, so a task cannot pass validation by weakening its own check commands or protected-path rules. When a maintainer intentionally authors a task that updates `.swarm/` or `.github/workflows/`, set `allow_harness_changes: true` in that issue's WorkUnit before approving it.
 
-The approved WorkUnit's `allow_harness_changes: true` exception applies to task-scoped validation/submission, not `validate --ci`. Consumer CI deliberately continues to reject protected-path changes. Bootstrap the initial trusted baseline before enabling the required validation check; later policy promotion requires a separate maintainer-reviewed change and any narrowly authorized branch-rule exception. Do not weaken candidate checks to let a task rewrite its own authority.
+---
 
-## Plan gates
+## 4. Plan Review Gates (`none | agent | human`)
 
-- `none`: implementation may follow a recorded plan without a reviewer verdict.
-- `agent`: an isolated configured reviewer must emit exactly `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`; approval binds task, plan, and test-plan hashes.
-- `human`: planning pauses. A permitted human records exactly one CLI decision using `swarm review <issue> --approve` or `--reject`; an agent cannot satisfy this gate.
+- **`none`**: Runs the planner to generate `PLAN.md` and `TEST_PLAN.md`, then proceeds directly to implementation and validation.
+- **`agent`**: Runs your configured reviewer agent inside an isolated read-only snapshot. Implementation starts only when `.swarm/active/REVIEW.md` begins with `VERDICT: APPROVED` (bound to the current WorkUnit, plan, and test-plan digests).
+- **`human`**: Pauses after publishing the plan so a maintainer can inspect the design and run `swarm review <issue> --approve` or `--reject`.
 
-The effective gate follows task/workflow/repository policy and a CLI request cannot lower a mandatory gate. See [workflows](WORKFLOWS.md) for commands and transitions.
+A CLI `--gate` flag can always make review stricter (for example, upgrading `none` to `agent` or `human`), while preserving the minimum gate required by the issue and repository policy.
 
-## Dependencies and delivery baseline
+---
 
-Dependencies are normally ready only after their prerequisite is merged/closed. A Draft PR alone does not put prerequisite code in another worktree. Stacked dependencies require an explicitly supported checkpoint/base relationship; otherwise keep tasks independent or merge the prerequisite first.
+## Related Guides
 
-The approved base is the remote default branch when `origin` exists (after fetch), otherwise local `HEAD` for an explicit local fixture. Worktrees and checkpoints are verified against the recorded branch/head; SwarmOS does not reset a surviving branch to recreate work.
-
-Next: [developer operations and recovery](developer.md) · [architecture](ARCHITECTURE.md) · [security boundaries](../SECURITY.md)
+- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI workflows, agent harness table, reviewer isolation, checkpoints, and recovery.
+- **[Working with Grok Bot (`docs/grokbot.md`)](grokbot.md)** — Connect Grok Bot to GitHub and coordinate SwarmOS tasks.
+- **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](openai-dot.md)** — Configure Codex Cloud environments and remote repositories for OpenAI Dots.
+- **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
+- **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, fencing, and worktree lifecycle.

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The latest tagged release is supported according to its release notes. Documentation on `main` describes unreleased behavior and must not be treated as evidence that v0.1.0 implements it.
+The latest tagged release is supported according to its release notes. Always match your installed binary (`swarm version`) with the documentation for that release or commit.
 
 ## Reporting a vulnerability
 
@@ -12,7 +12,7 @@ Report vulnerabilities privately through [GitHub Security Advisories](https://gi
 
 SwarmOS is a trusted-repository orchestration tool. It does not make arbitrary issue text, agent processes, shell validation commands, or a Git worktree safe by itself.
 
-The intended controls on the unreleased Git-CAS lifecycle are:
+The enforced controls in the Git-CAS workflow are:
 
 - A task is a draft until an authorized actor runs `swarm issue approve <issue>`, which persists the WorkUnit digest, policy digest, and trusted base SHA before marking it ready.
 - State is read and written through authoritative Git CAS refs (or the explicitly selected locked local backend). Comments are audit projections and cannot create claims, approvals, or artifacts.
@@ -48,7 +48,7 @@ Release publication runs the exact tagged commit through the repository's reusab
 
 ## Supply chain and release evidence
 
-CI, CodeQL, dependency scanning, provenance, release-tag protection, and platform coverage are repository controls whose current configuration and release evidence must be checked in GitHub. Do not infer that a release is secure merely because an artifact exists. Verify the exact release's published provenance where available:
+Release archives are built and attested in GitHub Actions after passing the lint, vulnerability, and multi-platform test matrix. You can verify the provenance of any release archive with the GitHub CLI:
 
 ```bash
 gh attestation verify swarm_<version>_<os>_<arch>.tar.gz --repo supernovae/SwarmOS

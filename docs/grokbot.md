@@ -1,91 +1,152 @@
-# Working with Grok Bot and SwarmOS
+<div align="center">
 
-Grok Bot can be the teammate you talk to about a repository: ask it to explore the code, turn an idea into a task, follow a change through to a PR, or give you another review. SwarmOS gives that work a shared backlog and a repeatable delivery path, so Grok does not have to coordinate everything through chat history.
+<img src="assets/grokbot-hero.png" alt="Grok Bot" width="840" />
 
-There are two useful ways to put them together:
+# Working with Grok Bot & SwarmOS
 
-- **A repository teammate:** connect Grok Bot to GitHub and talk to it about issues, plans, and pull requests.
-- **A worker coordinator:** give its computer a checkout and `swarm`, then ask it to run approved work through the coding tools configured for that repository.
+**Use Grok Bot as an always-on repository teammate: talk to your codebase, turn ideas into structured tasks, review pull requests, and coordinate SwarmOS workers.**
 
-A GitHub connection is enough for repository conversation and supported review actions. Running `swarm` also needs a shell, the CLI, repository access, and the configured coding tools on the computer doing the work.
+[**Connect to GitHub**](#1-connect-grok-bot-to-your-repository) · [**Talk to Your Repo**](#2-talk-to-your-repository) · [**Review PRs & Plans**](#3-invite-grok-bot-as-a-reviewer) · [**Coordinate SwarmOS Workers**](#4-let-grok-bot-drive-swarmos)
 
-## Connect Grok Bot to your repository
+</div>
 
-1. Create a Bot in the [Grok Bot app](https://x.ai/bot). Give it a focused job, such as “help maintain this repository” or “review proposed changes.” The [getting-started guide](https://docs.x.ai/grok-bot/get-started) walks through account setup.
-2. Open **Connect apps**, add the [GitHub connector](https://x.ai/bot/plugin/48677658/github), and complete authentication. In a conversation, type `@` to attach the connector to the task. See [Grok's app connection guide](https://docs.x.ai/grok-bot/computer-and-apps#connect-an-app).
-3. Grant access to the repositories you want it to help with. If your setup uses a separate bot-owned GitHub account, invite that verified account as a collaborator with the permissions its job needs. If it uses an app installation or your connection, configure repository access there instead; a collaborator invite is not always necessary.
-4. Start with a read-only request: ask it to open the repository, explain the project, and link an issue and a PR it can read. Then try a review comment on a test PR before granting broader writing access.
+---
 
-Bots on your Grok account share a computer, files, and signed-in sessions. Choose credentials with that shared access in mind; creating another Bot does not create a separate credential boundary.
+Grok Bot gives you persistent AI teammates with their own cloud computer, browser, terminal, and GitHub connection. Pairing Grok Bot with **SwarmOS (`swarm`)** gives those teammates a structured way to work alongside humans and other coding agents: instead of burying plans in chat history or drifting out of sync on an external board, every task lives in a GitHub Issue `WorkUnit`, every claim and checkpoint is tracked in Git, and every pull request carries its plan and validation trail.
 
-## Talk to the repository
-
-You can give Grok a normal request rather than a long system prompt. For example:
-
-> Get familiar with OWNER/REPO. Read the README and the committed `.swarm/` project, architecture, and conventions files. Explain what the project does, identify the next useful piece of work, and draft an issue with an objective, constraints, and acceptance criteria. Leave it as a draft for me to approve.
-
-Or ask it to investigate an existing task:
-
-> Look at issue #42 in OWNER/REPO. Check the acceptance criteria against the code and tests. Tell me what is missing and propose a plan. Do not start implementation or approve the task on my behalf.
-
-The repository stays the durable record. Keep product discussion wherever it is useful, but put the agreed scope in a GitHub WorkUnit and approve it through `swarm issue approve` before a worker starts.
-
-## Use Grok as a GitHub reviewer
-
-Invite or connect the Bot using the access method above, then give it the exact PR and what to look for:
-
-> Review OWNER/REPO PR #123 against issue #42. Read the plan and test evidence linked from the PR. Look for correctness gaps, missing acceptance coverage, and security concerns. Post actionable findings with file and line references. Do not change code, approve the SwarmOS plan, or merge the PR.
-
-You can make that a recurring job once the first review works. Grok's marketplace also offers a third-party [Grok Bug Bot template](https://x.ai/bot/mXAP6VMDNxs4uLiv2B2HW) for selected repositories; its published behavior is comment-only PR review, not approval or merging. Review the template and requested permissions before adding it.
-
-**A GitHub review and a SwarmOS plan gate are different steps.** Bot comments are useful review input, but SwarmOS does not turn a mention or `/swarm approve-plan` comment into approval. For a human-gated task, a maintainer reads the findings and records their own decision:
-
-```bash
-swarm review 42 --approve --notes "Reviewed the plan and Grok's findings."
-swarm work 42
+```mermaid
+flowchart LR
+    You["You (Desktop, Mobile, or X)"] --> Grok["Grok Bot<br/>GitHub Connector + Cloud Computer"]
+    Grok -->|Explore & scope| Issue["GitHub Issue<br/>Approved WorkUnit"]
+    Grok -->|Run swarm work| Worktree["Isolated Worktree<br/>PLAN.md + TEST_PLAN.md"]
+    Worktree -->|Validate & submit| PR["Artifact-Backed<br/>Draft PR"]
+    Grok -->|Comment findings| PR
 ```
 
-Use `--reject --notes "..."` when changes are needed. An automated SwarmOS agent gate instead runs a configured reviewer inside the review sandbox and records its plan-bound `REVIEW.md` verdict; see the [integration runbook](developer.md#reviewer-isolation-and-credentials).
+---
 
-## Let Grok coordinate approved work
+## 1. Connect Grok Bot to Your Repository
 
-On the computer Grok will use, install the pinned SwarmOS version from the [README](../README.md#quickstart), Git, `gh`, and the coding tools allowed by the repository. Authenticate the coordinator for the intended GitHub repository. Initialize and commit `.swarm/` if the project has not been set up yet.
+<div align="center">
+<img src="assets/grokbot-github.png" alt="GitHub for Grok Bot" width="680" />
+</div>
 
-From each checkout:
+1. **Create a focused Bot** in the [Grok Bot app](https://x.ai/bot) (see the [Grok Bot Getting Started guide](https://docs.x.ai/grok-bot/get-started)). Give it a clear role such as *"Repo Maintainer & Reviewer"* or *"SwarmOS Release Coordinator"*.
+2. **Add the GitHub connector**: open **Connect apps** in the sidebar, add [**GitHub for Grok Bot**](https://x.ai/bot/plugin/48677658/github), and complete authentication in your browser. In any chat, type `@` to attach the GitHub connector to your request (see [Computer and apps](https://docs.x.ai/grok-bot/computer-and-apps#connect-an-app)).
+3. **Grant repository access**:
+   - If you connect through the GitHub plugin/app, select the repositories you want Grok Bot to access.
+   - If your team uses a dedicated GitHub account for your bot, invite that account as a repository collaborator with the permissions matching its role.
+4. **Do a quick read-only check**: ask your Bot to open the repository, summarize `README.md`, and link an open issue and pull request so you know it is looking at the right project.
+
+> [!NOTE]
+> All Bots on your Grok account share the same cloud computer, workspace files (`/workspace`), and signed-in browser sessions. Keep repository credentials scoped to what you want your Bots on that account to use.
+
+---
+
+## 2. Talk to Your Repository
+
+You don't need a rigid system prompt to get Grok Bot working with your repo—talk to it like a teammate and point it at your committed `.swarm/` context files.
+
+### Orient Grok Bot on a project and draft the next task
+> **Prompt:**  
+> *"Get familiar with `OWNER/REPO`. Read `README.md` along with `.swarm/project.md`, `.swarm/architecture.md`, and `.swarm/conventions.md`. Summarize how the codebase is put together, spot the highest-leverage improvement from the open issues, and draft a SwarmOS WorkUnit with an Objective, Constraints, and Acceptance Criteria for me to review."*
+
+### Investigate an issue before anyone writes code
+> **Prompt:**  
+> *"Look at issue #42 in `OWNER/REPO`. Check the acceptance criteria against the current implementation and tests. Tell me which files need to change, what edge cases we should watch out for, and propose a step-by-step plan before we kick off a worker."*
+
+Once you are happy with a new issue's scope, approve the revision with `swarm issue approve <issue>` so workers know it is ready to claim.
+
+---
+
+## 3. Invite Grok Bot as a Reviewer
+
+Grok Bot is a great second pair of eyes on both plans and pull requests.
+
+### Ask Grok Bot to review a pull request
+> **Prompt:**  
+> *"Review PR #123 on `OWNER/REPO` against issue #42. Check the diff against the linked `PLAN.md` and `TEST_PLAN.md`, verify every acceptance criterion is covered by a real test, and leave inline review comments with file and line references for any bugs or missing edge cases."*
+
+You can also turn that prompt into a saved Grok Bot skill or routine, or use the community [Grok Bug Bot template](https://x.ai/bot/mXAP6VMDNxs4uLiv2B2HW) for comment-only PR bug hunts across selected repos.
+
+### Combining Grok Bot reviews with SwarmOS Plan Gates
+
+SwarmOS supports two review gate styles so you can choose how plans are approved before code is written:
+
+- **Human Plan Gate (`--gate human`)**: Ask Grok Bot to review the proposed plan and post its findings on the issue or in chat. When you are ready to green-light the plan, record your maintainer decision via the CLI and resume execution:
+  ```bash
+  swarm review 42 --approve --notes "Reviewed plan with Grok Bot; ready to implement"
+  swarm work 42 --backend github
+  ```
+- **Automated Agent Gate (`--gate agent`)**: SwarmOS runs your configured reviewer harness inside an isolated read-only snapshot and verifies that `.swarm/active/REVIEW.md` begins with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED` before starting implementation.
+
+---
+
+## 4. Let Grok Bot Drive SwarmOS
+
+Because every Grok Bot has a persistent cloud computer with a terminal (`/workspace`), your Bot can also act as the coordinator that runs `swarm` and orchestrates your coding harnesses.
+
+### Prepare the Bot's workspace once
+
+On the computer where Grok Bot will run `swarm`, install `git`, `gh`, the pinned `swarm` binary from the [README Quickstart](../README.md#quickstart), and the coding harnesses configured for your repository (`claude`, `codex`, `opencode`, or `omp`). Then register each checkout:
 
 ```bash
+cd /workspace/your-repo
 swarm doctor --backend github
 swarm repo add --backend github
 ```
 
-Then give the Bot a short operating brief:
+### Give Grok Bot a task handoff
 
 ```text
-Work on OWNER/REPO using SwarmOS from its registered checkout.
-Read README.md and the committed .swarm/ project guidance first.
-Use `swarm work 42 --dry-run` to show me the configured agents and policy.
-When I authorize execution, use `swarm work 42`; let SwarmOS run the roles.
-If it pauses for human review, bring me the plan and wait for my decision.
-When work and validation pass, use `swarm submit 42` and send me the Draft PR.
-Do not approve tasks, change policy, or merge unless I separately authorize it.
-If credentials, tools, or the sandbox are missing, report the blocked step.
+Work on OWNER/REPO from its checkout in /workspace/your-repo.
+1. Run `swarm status --backend github` and `swarm work 42 --dry-run --backend github`
+   so we can see the resolved agents, plan gate, and base commit.
+2. Run `swarm work 42 --backend github`. If the task pauses on a human gate,
+   share the generated PLAN.md and TEST_PLAN.md with me and wait for my approval.
+3. Once implementation and `swarm validate 42` pass, run `swarm submit 42 --backend github`
+   and send me the Draft PR link.
 ```
 
-Inside a role, the coding harness reads `.swarm/active/WORKUNIT.md`, `SYSTEM_PROMPT.md`, and the current plan/test-plan artifacts. The conversational Bot runs the coordinator commands outside those role processes; it should not start another `swarm work` recursively inside a running agent role.
+### Run a multi-repository worker pool
 
-For a backlog rather than a named issue, use `swarm work --next --all`. For a bounded pool on that prepared host:
+When you have several approved issues queued up across one or more repositories, Grok Bot can drain a bounded batch and report back when the Draft PRs are open:
 
 ```bash
 swarm node init --id grok-coordinator
-swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit
+swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 ```
 
-This drains up to four task/phase attempts using the repository's configured agents. Add `--watch` for continued polling. The Bot's connection to GitHub does not install those tools or automatically register repositories on its computer.
+Add `--watch` when you want the worker pool to keep polling for newly approved issues.
 
-## Which part is Grok, and which part is SwarmOS?
+---
 
-Grok Bot is the conversational teammate with its own tools and computer. SwarmOS currently launches the `claude`, `codex`, `opencode`, and `omp` harnesses for its internal roles; it does not launch the Grok Bot app through a `grok -p` command. Grok can still drive those harnesses through `swarm` or review their output through GitHub.
+## 5. Using Grok Models Inside a Local SwarmOS Harness
 
-If you want a Grok **model** inside an automated role, use a supported harness with an xAI provider, such as [OpenCode's xAI integration](https://opencode.ai/docs/providers/#xai). Configure that installed harness's provider, exact model, and model-auth environment first, then select it in `.swarm/config.yaml`. That is a model-backed harness configuration, separate from connecting the hosted Grok Bot. The shared [agent runbook](developer.md#agent-integration-runbook) covers model routing and reviewer network access.
+SwarmOS launches local CLI harnesses through its built-in drivers (`claude`, `codex`, `opencode`, and `omp`). When you want an xAI **Grok model** (such as Grok 4) to power a local planner, reviewer, or developer role directly, pair `opencode` with [OpenCode's xAI provider](https://opencode.ai/docs/providers/#xai) in `.swarm/config.yaml`:
 
-Related: [project setup](project.md) · [worker operation and recovery](developer.md) · [review gates](WORKFLOWS.md) · [security](../SECURITY.md).
+```yaml
+agents:
+  grok:
+    binary: opencode
+    harness: opencode
+    model: xai/grok-4
+    roles: [planner, reviewer, developer]
+    env: [XAI_API_KEY]
+    sandbox: sandbox-exec   # or bwrap on Linux
+    review_network: true    # allows the sandboxed reviewer to reach the xAI API
+```
+
+Then route any role to `grok`:
+
+```bash
+swarm work 42 --planner-agent grok --reviewer-agent grok --developer-agent codex --backend github
+```
+
+---
+
+## Next Steps
+
+- **[OpenAI Dot & Codex Guide (`docs/openai-dot.md`)](openai-dot.md)** — Connect Codex Cloud environments and remote repositories for OpenAI Dots.
+- **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Configure `.swarm/config.yaml`, validation rules, and task approvals.
+- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Full CLI reference, reviewer sandboxing, checkpoints, and recovery.

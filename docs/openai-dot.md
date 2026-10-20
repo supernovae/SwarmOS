@@ -1,133 +1,166 @@
-# Working with OpenAI Dot, Codex, and SwarmOS
+<div align="center">
 
-Your dot can be the teammate who keeps a project moving: talk through an idea, ask it to inspect a repository, delegate coding to Codex, and come back with a PR or a decision for you. SwarmOS adds a shared work queue, explicit approvals, and checkpoints so that work can move between your dot, coding agents, and people.
+<img src="assets/openai-dot-hero.png" alt="OpenAI Dots" width="840" />
 
-OpenAI documents that [dots can create tasks in Codex cloud environments](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot). Create the environment first, connect the repositories you want it to use, and then tell your dot which environment and project to work in. You do not need a separate `dot` executable for this workflow.
+# Working with OpenAI Dot, Codex & SwarmOS
 
-## Set up your dot and repository access
+**Keep your repositories moving with an always-on OpenAI Dot that plans, coordinates Codex tasks, and ships validated Draft PRs through SwarmOS.**
 
-1. Create your dot at [chatgpt.com/dots](https://chatgpt.com/dots), using the intended account and workspace. Follow OpenAI's [getting-started guide](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot) for availability and onboarding.
-2. Connect GitHub through your supported ChatGPT/Codex connection. In GitHub's app or connection settings, select the repositories you want to work on and complete any organization or SSO approval.
-3. Review the dot's connected plugins and action rules. [Plugin permissions are shared across dots, ChatGPT, and Codex](https://help.openai.com/en/articles/20001529-dots-privacy-security-and-safety-faqs); a new conversation is not a separate access boundary.
-4. Ask your dot to read one selected repository and summarize its README and `.swarm/project.md`. Confirm it returns the right repository and branch before asking it to change anything.
+[**Connect Your Dot**](#1-set-up-your-dot-and-github-access) · [**Add Repos to Codex**](#2-add-the-repositories-you-want-to-swarm-on-to-codex) · [**Talk to Your Repo**](#3-talk-to-your-dot-about-the-repository) · [**Review PRs with Codex**](#4-review-prs-and-run-codex-roles)
 
-Repository access and a ready-to-run coding environment are separate. The next step makes the repositories available where Codex will actually run.
+</div>
 
-## Add the repositories to Codex Cloud
+---
 
-Follow the current [cloud environment guide](https://learn.chatgpt.com/docs/environments/cloud-environments):
+An [OpenAI Dot](https://openai.com/index/introducing-dots/) is an always-on teammate in ChatGPT with its own cloud computer, memory, and connected apps, and it can [create and manage tasks directly inside Codex environments](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot).
 
-1. On the web or desktop app, choose **Work in → Cloud → Select environment → Create environment**. You can also start from **Settings → Codex Cloud → Environments**.
-2. Select the GitHub repositories to check out. If one is missing, update the GitHub connection's selected repositories and organization approval, then return to the picker.
-3. Let Codex inspect the project and prepare its dependencies. Ask it to install the pinned SwarmOS version from this project's [README](../README.md#quickstart), plus Git, `gh`, and the coding harnesses your `.swarm/config.yaml` uses. Ensure these commands are on the task's `PATH`, not just available in the setup shell.
-4. Review network access for the coordinator: it needs the Git remote and GitHub API, along with the model endpoints and package registries your chosen tools use. Check coordinator GitHub authentication and model authentication separately; connecting a repository does not guarantee that `gh` or a spawned coding CLI has credentials.
-5. Test the setup, save it, and **Publish** the environment. When adding repositories or tools to an existing environment, edit and **Republish**, then start a new task; an existing task retains its own state.
-6. Give your dot the environment name and the exact repository to use. OpenAI's Dot guide specifically requires creating the Codex environment before delegating a cloud task to it.
+Pairing your Dot with **SwarmOS (`swarm`)** gives it a clean, repo-native engineering workflow: instead of juggling ad-hoc chat threads or external task boards, your Dot works from approved GitHub Issue `WorkUnit` contracts, isolates every task in a Git worktree, enforces your plan review gates and test checks, and brings back artifact-backed Draft PRs ready for your review.
 
-On the execution computer, also register each checkout with SwarmOS:
+<div align="center">
+<img src="assets/openai-dot-workflow.png" alt="OpenAI Dot turning feedback and tasks into reviewed pull requests" width="840" />
+</div>
 
-```bash
-# Run inside each repository checked out in the cloud environment.
-swarm doctor --backend github
-swarm repo add --backend github
-swarm repo list
+```mermaid
+flowchart LR
+    You["You (ChatGPT Desktop, Web, Mobile, or Slack)"] --> Dot["Your OpenAI Dot<br/>Always-On Teammate"]
+    Dot -->|Delegates coding task| Codex["Codex Cloud Environment<br/>or Connected Dev Host"]
+    Codex -->|swarm work / node run| Worktree["Isolated Git Worktree<br/>PLAN.md + TEST_PLAN.md + Checks"]
+    Worktree -->|swarm submit| PR["Artifact-Backed<br/>Draft PR"]
+    PR -->|Codex PR review| You
 ```
 
-If you are preparing an additional repository on a persistent host, SwarmOS can clone and register it there:
+---
 
-```bash
-# Replace OWNER/REPO with a repository this host is authorized to use.
-swarm repo add OWNER/REPO --clone --backend github
-```
+## 1. Set Up Your Dot and GitHub Access
 
-That command updates **SwarmOS's registry on that host**. It does not add a repository to your Codex Cloud environment or grant GitHub access. Do both steps when expanding the pool of repositories your dot can work on, and repeat registration in a new cloud workspace when needed. Do not bake live claim tokens or an authenticated operator's home directory into a shared environment snapshot.
+1. **Create your Dot** at [chatgpt.com/dots](https://chatgpt.com/dots) in the ChatGPT desktop app, web app, or mobile app (see [Getting started with your dot](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot)).
+2. **Connect GitHub**: in ChatGPT/Codex settings, connect the GitHub integration and authorize the repositories you want your Dot and Codex to work with.
+3. **Review shared plugin permissions**: [plugin connections are shared across your Dot, ChatGPT, and Codex](https://help.openai.com/en/articles/20001529-dots-privacy-security-and-safety-faqs), and you can set **Custom Rules** for which actions your Dot can take automatically versus when it should ask you first.
+4. **Verify repository visibility**: ask your Dot to read one of your repositories and summarize `README.md` and `.swarm/project.md` so you know it can see the right repo and branch.
 
-For GitHub-triggered reviews and tasks, OpenAI currently documents the separate [Codex Cloud (Legacy) environment setup](https://learn.chatgpt.com/docs/environments/cloud-environment). Use that setup for the GitHub integration below rather than assuming every cloud environment is a GitHub review environment.
+---
 
-## Using your configured remote computer instead
+## 2. Add the Repositories You Want to Swarm On to Codex
 
-If your repositories and tools already live on a development machine, use that host rather than rebuilding the setup in the cloud.
+Before asking your Dot to run coding tasks in Codex, add the target repositories to your configured Codex remote environment (or connected host) and register them with SwarmOS.
 
-- **Dot access to your computer:** in the ChatGPT desktop app on that computer, open your dot's profile, find **Computers**, and choose **Allow access**. Keep the computer online with the app open. This is a separate permission from pairing a Codex remote connection.
-- **Codex over SSH:** add the host to your SSH configuration, install and authenticate Codex there, then use **Settings → Connections** in the desktop app to add the SSH host and choose its remote project folders. OpenAI's [remote connections guide](https://learn.chatgpt.com/docs/remote-connections#connect-to-an-ssh-host) covers the setup.
-- **SwarmOS on that host:** install `swarm` and the repository's configured tools there, then run the registration commands above for each checkout. A registry on your laptop is not automatically copied to the remote computer.
+### Option A: Configure a Codex Cloud Environment
 
-For Codex's own cross-host chat handoff, save a project for the same repository on each destination host. For a SwarmOS task handoff, use SwarmOS's published checkpoint and live claim rather than copying `.swarm/active/` or a local claim-token file between machines.
+OpenAI Dots can launch tasks inside [Codex Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environments) once the environment has been created and published in Codex:
 
-## Tell your dot how to work with the repository
+1. Open ChatGPT on web or desktop and choose **Work in → Cloud → Select environment → Create environment** (or go to **Settings → Codex Cloud → Environments → Create environment**).
+2. **Add the GitHub repositories you want to swarm on**: select every repository this environment should check out. If a repository is missing from the picker, add it to your GitHub app installation permissions first.
+3. **Install `swarm` and your coding tools in the environment setup**:
+   - Have the environment setup install the pinned `swarm` binary from the [README Quickstart](../README.md#quickstart), along with `git`, `gh`, and the coding harnesses your `.swarm/config.yaml` uses (such as `codex`, `claude`, `opencode`, or `omp`).
+   - Make sure the binaries are on the task shell's `PATH` and configure any required model or GitHub credentials in the environment's variables/secrets settings.
+4. **Save and Publish**: click **Publish** (or **Republish** when adding new repositories to an existing environment) so new tasks start from the prepared workspace.
+5. **Register each checkout with SwarmOS**: inside each repository checked out in the environment, register it so `swarm work --next --all` and `swarm node run --all` know where it lives:
+   ```bash
+   swarm doctor --backend github
+   swarm repo add --backend github
+   swarm repo list
+   ```
 
-Start with a conversation, not an adapter configuration:
+### Option B: Connect Your Own Mac, Windows, or SSH Dev Machine
 
-> Use the Codex environment “MY-ENVIRONMENT” for OWNER/REPO. Read the README and `.swarm/` project guidance, look at issue #42, and tell me whether its objective and acceptance criteria are clear. Draft a plan or questions for me before starting implementation.
+If your repositories, credentials, and coding CLIs already live on a workstation or remote dev box, you can point your Dot and Codex at that machine instead:
 
-Once an authorized maintainer has approved the task, this is a useful handoff:
+- **Connect your computer to your Dot**: open the ChatGPT desktop app on that machine, open your Dot's profile, and under **Computers → Your computer** select **Allow access**.
+- **Or connect an SSH host to Codex**: add the host alias to `~/.ssh/config`, ensure `codex` and `swarm` are installed on the remote host's `PATH`, and add the host under **Settings → Connections** in the ChatGPT desktop app (see [Codex Remote Connections](https://learn.chatgpt.com/docs/remote-connections#connect-to-an-ssh-host)).
+- **Add and clone the repositories you want to swarm on**:
+  ```bash
+  # Register an existing local checkout
+  swarm repo add --backend github
+
+  # Or clone and register additional GitHub repositories into ~/.swarm/repos/<owner>/<repo>
+  swarm repo add OWNER/REPO --clone --backend github
+  swarm repo list
+  ```
+
+---
+
+## 3. Talk to Your Dot About the Repository
+
+Once your Codex environment or remote machine has your repositories registered, you can talk to your Dot naturally from desktop, mobile, or Slack.
+
+### Explore the repo and shape a new WorkUnit
+> **Prompt:**  
+> *"Using the Codex environment `MY-ENV` for `OWNER/REPO`, read `README.md` and `.swarm/project.md`, `.swarm/architecture.md`, and `.swarm/conventions.md`. Check open issue #42 and tell me if the objective, constraints, and acceptance criteria are concrete enough to implement, or suggest improvements before I approve it."*
+
+### Hand off an approved issue to your Dot
+After a maintainer approves the task (`swarm issue approve 42 --backend github`), give your Dot a clear handoff:
 
 ```text
-Use the prepared Codex environment for OWNER/REPO and run SwarmOS there.
-Check `swarm doctor --backend github`, then `swarm work 42 --dry-run`.
-Show me any missing tools, permissions, credentials, or reviewer sandbox.
-When execution is authorized, run `swarm work 42` with the repo's configured agents.
-Read the task's WORKUNIT.md, SYSTEM_PROMPT.md, PLAN.md, and TEST_PLAN.md
-from the worktree SwarmOS creates, not from another task or an old chat.
-If the human gate pauses work, return the plan and wait for my decision.
-After work and validation succeed, use `swarm submit 42` and send me the Draft PR.
-Do not approve tasks, change policy, or merge without separate authorization.
+In the Codex environment for OWNER/REPO, run SwarmOS on issue #42:
+1. Run `swarm doctor --backend github` and `swarm work 42 --dry-run --backend github`
+   to confirm the resolved agents, gate, and base commit.
+2. Run `swarm work 42 --backend github`. Read the generated WORKUNIT.md,
+   PLAN.md, and TEST_PLAN.md inside `.swarm/worktrees/issue-42`.
+3. If the task uses a human gate, send me the plan summary and wait for my approval.
+4. Once implementation and `swarm validate 42` pass, run `swarm submit 42 --backend github`
+   and share the Draft PR link with me.
 ```
 
-The dot delegates to a Codex task; that task runs the SwarmOS coordinator with the prepared tools and access. This does not require the hosted dot itself to implement a local CLI contract. Let `swarm work` own the role sequence rather than manually editing coordination state or recursively starting it inside one of its agent roles.
-
-For a prepared multi-repository host, you can ask it to run a bounded queue:
+### Drain a multi-repo backlog with a worker pool
+When you have several approved tasks across the repositories you added to your environment or remote host, ask your Dot to run a bounded worker pool:
 
 ```bash
 swarm node init --id dot-coordinator
-swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit
+swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 ```
 
-This runs the repository's configured coding agents, not an automatically discovered `dot` binary. A node drains and exits by default; add `--watch` only when you want continued polling. Keep the execution environment available for the duration of the run.
+---
 
-## Review PRs through Codex on GitHub
+## 4. Review PRs and Run Codex Roles
 
-You can ask your dot to read a PR and discuss findings with you. For a review posted directly by Codex:
+### Trigger `@codex review` on GitHub Pull Requests
 
-1. Connect the repository to Codex and configure its GitHub integration/environment.
-2. In [Codex code review settings](https://chatgpt.com/settings/code-review), enable code review for that repository. Turn on automatic review if you want it on matching PR events.
-3. Comment on a test PR:
+With your repository connected to Codex and [Codex Code Review](https://learn.chatgpt.com/docs/third-party/github) enabled in [chatgpt.com/settings/code-review](https://chatgpt.com/settings/code-review):
 
-```text
-@codex review
+- Comment `@codex review` on any pull request (or enable **Automatic review**) to have Codex inspect the diff against your repository's `AGENTS.md` guidance and flag high-priority bugs.
+- Comment `@codex security review` for a deeper security-focused review pass.
+- Comment `@codex fix the CI failures` when you want Codex to spin up a follow-up task on the PR branch.
+
+When a SwarmOS task uses a **human plan gate (`--gate human`)**, you can use your Dot's or Codex's review notes to inform your decision, then record your approval via the CLI:
+
+```bash
+swarm review 42 --approve --notes "Plan and acceptance coverage look solid"
+swarm work 42 --backend github
 ```
 
-For a narrower pass, use `@codex review for missing acceptance coverage`. Codex also supports follow-up task requests such as `@codex fix the CI failures`; these can change the branch when it has permission. See OpenAI's [GitHub review guide](https://learn.chatgpt.com/docs/third-party/github) for triggers and setup.
+### Use Codex CLI Directly in `.swarm/config.yaml`
 
-This is the Codex GitHub integration; you do not need to invite an account named `openai-dot`. If your organization provisions a separate specialist identity, use its actual verified account and normal repository permissions.
-
-GitHub reviews are review input, not automatic SwarmOS plan approval. On a human-gated task, a maintainer evaluates the plan and findings, then records their own `swarm review 42 --approve` or `--reject`. On an agent-gated task, SwarmOS runs its configured sandboxed reviewer and records the exact plan-bound verdict. Ordinary comments do not substitute for either path.
-
-## Running Codex directly in a SwarmOS role
-
-You can also use the local Codex CLI without involving a hosted dot:
+SwarmOS includes a native `codex` harness driver (`codex exec "<combined prompt>"` in headless mode and `codex "<task>"` interactively). You can route any role to `codex`—or define a `dot` policy alias that invokes the Codex driver—in `.swarm/config.yaml`:
 
 ```yaml
 agents:
   codex:
     binary: codex
     roles: [planner, developer, tester]
+  dot:
+    binary: codex
+    harness: codex
+    roles: [planner, reviewer, developer]
+    env: [OPENAI_API_KEY]
+    sandbox: sandbox-exec   # or bwrap on Linux
+    review_network: true
 ```
 
-Merge this entry into the existing `.swarm/config.yaml`, configure the required model authentication, and have a maintainer commit the policy before task approval. For example, route planning and implementation to Codex while keeping a separately configured reviewer:
+Then mix and match agents per role from the CLI:
 
 ```bash
-swarm work 42 --planner-agent codex --developer-agent codex
+swarm work 42 \
+  --planner-agent claude \
+  --reviewer-agent dot \
+  --developer-agent codex \
+  --tester-agent opencode \
+  --backend github
 ```
 
-If you prefer a local policy name such as `dot`, set `binary: codex` and `harness: codex` explicitly under that name. This launches **Codex CLI**; the hosted Dot workflow uses the environment or computer connection described above.
+---
 
-Reviewer snapshots use a fresh home and explicit model-auth environment entries, so a normal interactive Codex login is not automatically inherited by a reviewer. Configure its sandbox, model authentication, and network access using the [integration runbook](developer.md#reviewer-isolation-and-credentials).
+## Next Steps
 
-## Check the setup before leaving it running
-
-First ask the dot to read the right repository, then complete one small approved task and inspect the plan, check output, and Draft PR. Confirm that a human gate actually pauses, that work appears in the expected environment or remote host, and that the chosen identity has only the repository access you intended.
-
-These instructions describe the provider-supported setup and SwarmOS's current CLI. They do not configure your ChatGPT account, GitHub app installation, cloud environment, or remote computer automatically. Those connections stay under your control.
-
-Related: [project setup](project.md) · [worker operation and recovery](developer.md) · [review gates](WORKFLOWS.md) · [security](../SECURITY.md).
+- **[Working with Grok Bot (`docs/grokbot.md`)](grokbot.md)** — Connect Grok Bot to GitHub, chat with your repo, and coordinate SwarmOS tasks.
+- **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Configure `.swarm/config.yaml`, validation rules, and task approvals.
+- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI workflows, reviewer isolation, checkpoints, and recovery.

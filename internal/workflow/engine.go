@@ -142,7 +142,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		return nil, err
 	}
 
-	// Enforce Phase 3 dependency gating (depends_on)
+	// Enforce dependency gating (depends_on)
 	if err := e.LeaseManager.VerifyDependencies(ctx, wu); err != nil {
 		return nil, err
 	}
@@ -206,7 +206,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		State:          st,
 	}
 
-	// Phase 1: PLAN (analyze + design + test_plan)
+	// Step 1: PLAN (analyze + design + test_plan)
 	if runPlan {
 		plannerAgent := e.resolveRoleAgent("planner", opts)
 		res.RoleAgentsUsed["planner"] = plannerAgent
@@ -306,7 +306,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		}
 	}
 
-	// Phase 2: IMPLEMENT, TEST & VALIDATE
+	// Step 2: IMPLEMENT, TEST & VALIDATE
 	if opts.Phase == "all" || opts.Phase == "implement" {
 		if latest, err := e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber); err == nil {
 			st = latest

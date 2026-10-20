@@ -142,12 +142,12 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				continue
 			}
 
-			// Phase 3: Check depends_on prerequisites
+			// Verify depends_on prerequisites are satisfied
 			if err := mgr.VerifyDependencies(ctx, wu); err != nil {
 				continue
 			}
 
-			// Phase 4: Check volunteer node capability requirements
+			// Verify volunteer node capability requirements match
 			if !node.MatchesCapabilities(nodeProf, wu.RequiredCapabilities) {
 				continue
 			}

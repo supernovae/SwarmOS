@@ -159,7 +159,7 @@ func TestMultiRepoPullAndWorkNext(t *testing.T) {
 	}
 }
 
-func TestPhase3And4NodeAndDecomposeCLI(t *testing.T) {
+func TestNodePoolAndDecomposeCLI(t *testing.T) {
 	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
 	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
 

@@ -81,7 +81,7 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 	}
 }
 
-func TestPhase3CollaborativeHandoffAndDecomposition(t *testing.T) {
+func TestCollaborativeHandoffAndDecomposition(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {

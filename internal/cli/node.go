@@ -17,7 +17,7 @@ import (
 func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 	nodeCmd := &cobra.Command{
 		Use:   "node",
-		Short: "Configure and run Phase 4 distributed volunteer worker nodes",
+		Short: "Configure and run volunteer worker nodes and parallel agent pools",
 	}
 
 	var (

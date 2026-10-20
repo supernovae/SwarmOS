@@ -277,9 +277,11 @@ func cleanCheckEnv(home string) []string {
 
 func gitOutput(repoRoot string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return out, nil
 }

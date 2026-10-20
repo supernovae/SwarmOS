@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -58,6 +59,10 @@ func TestProtectedPathTamperDetection(t *testing.T) {
 	ctx := context.Background()
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
+	// Git's nonfatal line-ending warnings must never become filename data.
+	if out, err := exec.Command("git", "-C", repo, "config", "core.autocrlf", "true").CombinedOutput(); err != nil {
+		t.Fatalf("configure CRLF conversion: %v (%s)", err, out)
+	}
 
 	// Tamper with a protected file (.github/workflows/swarm-validate.yml)
 	if err := os.WriteFile(filepath.Join(repo, ".github/workflows/swarm-validate.yml"), []byte("tampered\n"), 0o644); err != nil {
@@ -108,13 +113,18 @@ func TestNULPathsAndInstructionFilesAreNotIgnored(t *testing.T) {
 	if err := os.WriteFile(path, []byte("changed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	weird := filepath.Join(repo, ".github", "workflows", "space \n name.yml")
+	name := "space \n name.yml"
+	if runtime.GOOS == "windows" {
+		// Windows rejects control characters in filenames; retain whitespace coverage.
+		name = "space name.yml"
+	}
+	weird := filepath.Join(repo, ".github", "workflows", name)
 	if err := os.WriteFile(weird, []byte("changed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := Validate(context.Background(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base})
 	if !errors.Is(err, ErrProtectedPathModified) {
-		t.Fatalf("newline protected filename must fail: %v", err)
+		t.Fatalf("protected filename containing whitespace must fail: %v", err)
 	}
 }
 

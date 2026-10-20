@@ -108,6 +108,8 @@ protected_paths:
 
 The candidate copy is not authoritative. Validation resolves this policy from the approved base and compares the base, worktree, index, and untracked files. Protected policy, configuration, prompts, and workflows are governed by the approved baseline; candidate flags cannot broadly bypass them. At least one required check and protected-path pattern are mandatory. Generic repositories deliberately fail validation until project-specific checks are configured.
 
+The approved WorkUnit's `allow_harness_changes: true` exception applies to task-scoped validation/submission, not `validate --ci`. Consumer CI deliberately continues to reject protected-path changes. Bootstrap the initial trusted baseline before enabling the required validation check; later policy promotion requires a separate maintainer-reviewed change and any narrowly authorized branch-rule exception. Do not weaken candidate checks to let a task rewrite its own authority.
+
 ## Plan gates
 
 - `none`: implementation may follow a recorded plan without a reviewer verdict.

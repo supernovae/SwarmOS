@@ -47,6 +47,15 @@ func TestHarnessCleanupPreservesUserInstructions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Provision failed: %v", err)
 	}
+	// Git may check out CRLF on Windows. Preserve the actual user bytes in this
+	// worktree, independently of Git's checkout conversion.
+	for path := range userFiles {
+		content, err := os.ReadFile(filepath.Join(wtPath, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		userFiles[path] = string(content)
+	}
 
 	wu := &contract.WorkUnit{
 		ID:          "ISSUE-12",

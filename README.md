@@ -106,7 +106,9 @@ swarm work 42 \
   --tester-agent opencode
 ```
 
-Only agents allowed by the repository configuration can run. You supply their installations and model access; SwarmOS supplies the task context and coordinates the work. Driver commands, checked versions, model selection, and credential setup live in the [integration runbook](docs/developer.md#agent-integration-runbook). Grok and Dot names are supported only as explicitly configured wrappers around a supported driver, not native integrations.
+Only agents allowed by the repository configuration can run. You supply their installations and model access; SwarmOS supplies the task context and coordinates the work. Driver commands, checked versions, model selection, and credential setup live in the [integration runbook](docs/developer.md#agent-integration-runbook).
+
+You can also work through a conversational teammate: [connect Grok Bot to the repository](docs/grokbot.md) for discussion and review, or [give OpenAI Dot a prepared Codex environment](docs/openai-dot.md) to coordinate approved work. Those guides cover repository access, setup, and requests you can give the bot directly.
 
 ## Share the backlog, not just the prompt
 

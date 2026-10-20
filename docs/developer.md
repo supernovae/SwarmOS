@@ -40,9 +40,11 @@ The listed versions passed `--version` inside the macOS arm64 reviewer sandbox. 
 
 SwarmOS checks availability before a claim. It does not assert provider account access, model entitlement, billing, or vendor behavior beyond the configured executable invocation. `mock` is deterministic local/test-only and must be explicitly selected in an explicit local backend context.
 
-### Grok and Dot wrappers
+### Grok Bot and OpenAI Dot
 
-`grok` and `dot` have no native supported harness. A repository may use either name as an explicit policy/audit identity only when it selects a supported `harness` and independently verifies that the chosen binary accepts that harness's CLI contract. SwarmOS does not guarantee an official vendor distribution, version, or CLI compatibility. See [Grok wrapper](grokbot.md) and [Dot/Codex wrapper](openai-dot.md).
+Grok Bot can discuss and review a repository through its GitHub connection, or coordinate work by running `swarm` on a prepared computer. OpenAI Dot can delegate to a prepared Codex cloud environment or use a connected computer. Start with the [Grok Bot guide](grokbot.md) or [Dot and Codex setup guide](openai-dot.md) for repository access and conversational handoffs.
+
+These hosted products sit alongside the local harness drivers above. An `agents.grok` or `agents.dot` entry is a local policy name, not a connection to the hosted service: set its `harness` to the supported driver actually being launched and configure that tool's binary, model, and authentication. Hosted GitHub review comments are review input; SwarmOS records plan approval through its agent or human gate.
 
 ## Reviewer isolation and credentials
 

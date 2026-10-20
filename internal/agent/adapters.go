@@ -24,10 +24,19 @@ func NewRunner(agentName string) (Runner, error) {
 		name = "claude"
 	}
 	switch name {
-	case "claude", "codex", "opencode", "omp", "custom":
+	case "claude", "codex", "opencode", "omp", "grok", "dot", "custom":
 		bin := name
-		if name == "custom" {
+		switch name {
+		case "custom":
 			if envBin := os.Getenv("SWARM_CUSTOM_AGENT_BIN"); envBin != "" {
+				bin = envBin
+			}
+		case "grok":
+			if envBin := os.Getenv("SWARM_GROK_BIN"); envBin != "" {
+				bin = envBin
+			}
+		case "dot":
+			if envBin := os.Getenv("SWARM_DOT_BIN"); envBin != "" {
 				bin = envBin
 			}
 		}
@@ -35,7 +44,7 @@ func NewRunner(agentName string) (Runner, error) {
 	case "mock":
 		return &MockRunner{}, nil
 	default:
-		return nil, fmt.Errorf("unsupported agent %q (expected claude, codex, opencode, omp, custom, or mock)", agentName)
+		return nil, fmt.Errorf("unsupported agent %q (expected claude, codex, opencode, omp, grok, dot, custom, or mock)", agentName)
 	}
 }
 
@@ -72,9 +81,15 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 		}
 		return a.binary, []string{"--append-system-prompt", sysFile, req.TaskPrompt}
 
-	case "codex":
+	case "codex", "dot":
 		if headless {
 			return a.binary, []string{"exec", combinedPrompt}
+		}
+		return a.binary, []string{req.TaskPrompt}
+
+	case "grok":
+		if headless {
+			return a.binary, []string{"-p", combinedPrompt}
 		}
 		return a.binary, []string{req.TaskPrompt}
 
@@ -83,7 +98,6 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 			return a.binary, []string{"run", combinedPrompt}
 		}
 		return a.binary, []string{"--prompt", req.TaskPrompt}
-
 	default:
 		return a.binary, []string{combinedPrompt}
 	}

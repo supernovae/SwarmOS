@@ -112,6 +112,7 @@ type SecurityConfig struct {
 	RequireReadyLabel   bool     `yaml:"require_ready_label" json:"require_ready_label"`
 	ReadyLabel          string   `yaml:"ready_label" json:"ready_label"`
 	TrustedAssociations []string `yaml:"trusted_associations" json:"trusted_associations"`
+	TrustedReviewers    []string `yaml:"trusted_reviewers,omitempty" json:"trusted_reviewers,omitempty"`
 }
 
 type AgentConfig struct {

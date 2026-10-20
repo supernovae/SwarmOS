@@ -18,13 +18,14 @@ type Issue struct {
 }
 
 type Comment struct {
-	ID        int64     `json:"id"`
-	IssueNum  int       `json:"issue_num"`
-	Author    string    `json:"author"`
-	Body      string    `json:"body"`
-	HTMLURL   string    `json:"html_url"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                int64     `json:"id"`
+	IssueNum          int       `json:"issue_num"`
+	Author            string    `json:"author"`
+	AuthorAssociation string    `json:"author_association,omitempty"`
+	Body              string    `json:"body"`
+	HTMLURL           string    `json:"html_url"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type IssueFilter struct {

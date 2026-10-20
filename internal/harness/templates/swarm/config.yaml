@@ -18,3 +18,7 @@ agents:
     binary: opencode
   omp:
     binary: omp
+  grok:
+    binary: grok
+  dot:
+    binary: dot

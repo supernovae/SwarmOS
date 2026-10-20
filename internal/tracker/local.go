@@ -224,13 +224,14 @@ func (l *LocalTracker) CreateComment(_ context.Context, issueNumber int, body st
 		st.NextCommentID++
 		now := time.Now().UTC()
 		c := &Comment{
-			ID:        cid,
-			IssueNum:  issueNumber,
-			Author:    l.user,
-			Body:      body,
-			HTMLURL:   fmt.Sprintf("local://issues/%d#comment-%d", issueNumber, cid),
-			CreatedAt: now,
-			UpdatedAt: now,
+			ID:                cid,
+			IssueNum:          issueNumber,
+			Author:            l.user,
+			AuthorAssociation: l.assoc,
+			Body:              body,
+			HTMLURL:           fmt.Sprintf("local://issues/%d#comment-%d", issueNumber, cid),
+			CreatedAt:         now,
+			UpdatedAt:         now,
 		}
 		st.Comments[issueNumber] = append(st.Comments[issueNumber], c)
 		cp := *c

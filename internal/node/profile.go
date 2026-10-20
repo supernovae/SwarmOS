@@ -34,7 +34,7 @@ func DetectHostProfile(nodeID string) *contract.NodeProfile {
 	}
 
 	var models []string
-	for _, m := range []string{"claude", "codex", "opencode", "omp"} {
+	for _, m := range []string{"claude", "codex", "opencode", "omp", "grok", "dot"} {
 		if _, err := exec.LookPath(m); err == nil {
 			models = append(models, m)
 		}

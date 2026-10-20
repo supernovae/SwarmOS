@@ -21,8 +21,9 @@ import (
 )
 
 var (
-	ErrPlanReviewRejected = errors.New("plan review requested changes")
-	ErrPlanApprovalNeeded = errors.New("plan approval required before implementation")
+	ErrPlanReviewRejected   = errors.New("plan review requested changes")
+	ErrPlanApprovalNeeded   = errors.New("plan approval required before implementation")
+	ErrReviewerModifiedCode = errors.New("reviewer agent modified repository files outside .swarm/active/")
 )
 
 type WorkOptions struct {
@@ -261,6 +262,20 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		}
 		res.State = st
 		res.PhaseCompleted = "plan"
+		if opts.Phase == "plan" {
+			if opts.Handoff {
+				nextP := "implement"
+				if gate != contract.GateNone && !hasApprovedReviewArtifact(st) {
+					nextP = "review"
+					_ = e.Tracker.AddLabels(ctx, opts.IssueNumber, []string{"swarm:plan-review"})
+				}
+				if hSt, hErr := e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "plan", nextP); hErr == nil {
+					res.State = hSt
+					res.HandedOffToPhase = nextP
+				}
+			}
+			return res, nil
+		}
 
 		// Evaluate Optional Plan Gate
 		switch gate {
@@ -290,20 +305,33 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 			res.PausedForHuman = true
 			return res, nil
 		}
+	}
 
-		if opts.Phase == "plan" {
-			if opts.Handoff {
-				nextP := "implement"
-				if gate != contract.GateNone && !hasApprovedReviewArtifact(st) {
-					nextP = "review"
-				}
-				if hSt, hErr := e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "plan", nextP); hErr == nil {
-					res.State = hSt
-					res.HandedOffToPhase = nextP
-				}
-			}
-			return res, nil
+	// Step 1b: Standalone REVIEW phase (when a contributor or bot claims a handed-off review step)
+	if opts.Phase == "review" {
+		if latest, err := e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber); err == nil {
+			st = latest
+			res.State = st
 		}
+		revAgent := e.resolveRoleAgent("reviewer", opts)
+		res.RoleAgentsUsed["reviewer"] = revAgent
+		verdict, revState, err := e.RunAgentReview(ctx, wtPath, wu, wf, st, opts.Owner, revAgent, mode)
+		res.ReviewVerdict = verdict
+		if revState != nil {
+			st = revState
+			res.State = st
+		}
+		if err != nil {
+			return res, err
+		}
+		res.PhaseCompleted = "review"
+		if opts.Handoff {
+			if hSt, hErr := e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "review", "implement"); hErr == nil {
+				res.State = hSt
+				res.HandedOffToPhase = "implement"
+			}
+		}
+		return res, nil
 	}
 
 	// Step 2: IMPLEMENT, TEST & VALIDATE
@@ -488,6 +516,8 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		return "", st, err
 	}
 
+	beforeSnap := snapshotNonActiveWorktreeStatus(wtPath)
+
 	revReq := agent.RunRequest{
 		Agent:        reviewerAgent,
 		Role:         "reviewer",
@@ -498,6 +528,12 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	}
 	if _, err := revRunner.Run(ctx, revReq); err != nil {
 		return "", st, err
+	}
+
+	afterSnap := snapshotNonActiveWorktreeStatus(wtPath)
+	if beforeSnap != afterSnap {
+		_ = exec.Command("git", "-C", wtPath, "checkout", "--", ".").Run()
+		return "", st, fmt.Errorf("%w: reviewer %q altered files outside .swarm/active/", ErrReviewerModifiedCode, reviewerAgent)
 	}
 
 	reviewBytes, err := os.ReadFile(filepath.Join(wtPath, ".swarm", "active", "REVIEW.md"))
@@ -644,4 +680,20 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func snapshotNonActiveWorktreeStatus(wtPath string) string {
+	out, err := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output()
+	if err != nil {
+		return ""
+	}
+	var relevant []string
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.Contains(trimmed, ".swarm/active") || strings.Contains(trimmed, "AGENTS.md") || strings.Contains(trimmed, "CLAUDE.md") {
+			continue
+		}
+		relevant = append(relevant, trimmed)
+	}
+	return strings.Join(relevant, "\n")
 }

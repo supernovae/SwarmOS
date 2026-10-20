@@ -41,6 +41,18 @@ func TestAdapterCommandBuilders(t *testing.T) {
 			wantArgs: []string{"--append-system-prompt", sysFile, task},
 		},
 		{
+			agent:    "grok",
+			mode:     "headless",
+			wantBin:  "grok",
+			wantArgs: []string{"-p", "Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md first.\n\nExecute /swarm-plan"},
+		},
+		{
+			agent:    "grok",
+			mode:     "interactive",
+			wantBin:  "grok",
+			wantArgs: []string{task},
+		},
+		{
 			agent:    "codex",
 			mode:     "headless",
 			wantBin:  "codex",
@@ -50,6 +62,18 @@ func TestAdapterCommandBuilders(t *testing.T) {
 			agent:    "codex",
 			mode:     "interactive",
 			wantBin:  "codex",
+			wantArgs: []string{task},
+		},
+		{
+			agent:    "dot",
+			mode:     "headless",
+			wantBin:  "dot",
+			wantArgs: []string{"exec", "Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md first.\n\nExecute /swarm-plan"},
+		},
+		{
+			agent:    "dot",
+			mode:     "interactive",
+			wantBin:  "dot",
 			wantArgs: []string{task},
 		},
 		{
@@ -84,7 +108,7 @@ func TestAdapterCommandBuilders(t *testing.T) {
 		if !reflect.DeepEqual(args, tc.wantArgs) {
 			t.Errorf("%s (%s): expected args %#v, got %#v", tc.agent, tc.mode, tc.wantArgs, args)
 		}
-		if tc.agent == "codex" || tc.agent == "opencode" {
+		if tc.agent == "codex" || tc.agent == "dot" || tc.agent == "grok" || tc.agent == "opencode" {
 			if tc.mode == "headless" && !strings.Contains(args[1], ".swarm/active/WORKUNIT.md") {
 				t.Errorf("%s headless prompt missing WORKUNIT.md reference", tc.agent)
 			}

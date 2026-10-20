@@ -92,6 +92,30 @@ func (m *Manager) VerifyTrustPolicy(issue *tracker.Issue) error {
 	return nil
 }
 
+// IsTrustedCommenter verifies whether a comment author is allowed to issue /swarm review or release commands.
+func (m *Manager) IsTrustedCommenter(c *tracker.Comment) bool {
+	if c == nil {
+		return false
+	}
+	for _, rev := range m.security.TrustedReviewers {
+		if strings.EqualFold(strings.TrimSpace(rev), strings.TrimSpace(c.Author)) {
+			return true
+		}
+	}
+	if len(m.security.TrustedAssociations) == 0 {
+		return true
+	}
+	if c.AuthorAssociation == "" {
+		return !m.security.RequireReadyLabel
+	}
+	for _, assoc := range m.security.TrustedAssociations {
+		if strings.EqualFold(assoc, c.AuthorAssociation) {
+			return true
+		}
+	}
+	return false
+}
+
 // VerifyDependencies checks whether all issue numbers in wu.DependsOn are either closed, have swarm:pr-open, or have Lease.Status == "completed".
 func (m *Manager) VerifyDependencies(ctx context.Context, wu *contract.WorkUnit) error {
 	if wu == nil || len(wu.DependsOn) == 0 {
@@ -457,6 +481,12 @@ func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueStat
 		}
 
 		trimmed := strings.TrimSpace(c.Body)
+		if !strings.HasPrefix(trimmed, "/swarm ") {
+			continue
+		}
+		if !m.IsTrustedCommenter(c) {
+			continue
+		}
 		switch {
 		case strings.HasPrefix(trimmed, "/swarm approve-plan"):
 			humanReview = &contract.Artifact{
@@ -464,9 +494,9 @@ func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueStat
 				ID:          fmt.Sprintf("art-%d-review", issueNum),
 				IssueNumber: issueNum,
 				Type:        contract.ArtifactReview,
-				Producer:    "human:" + c.Author,
+				Producer:    "reviewer:" + c.Author,
 				Verdict:     "APPROVED",
-				Summary:     "Approved via /swarm approve-plan comment",
+				Summary:     fmt.Sprintf("Approved by %s via /swarm approve-plan comment", c.Author),
 				Body:        trimmed,
 				CreatedAt:   c.CreatedAt,
 			}
@@ -476,9 +506,9 @@ func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueStat
 				ID:          fmt.Sprintf("art-%d-review", issueNum),
 				IssueNumber: issueNum,
 				Type:        contract.ArtifactReview,
-				Producer:    "human:" + c.Author,
+				Producer:    "reviewer:" + c.Author,
 				Verdict:     "CHANGES_REQUESTED",
-				Summary:     "Rejected via /swarm reject-plan comment",
+				Summary:     fmt.Sprintf("Changes requested by %s via /swarm reject-plan comment", c.Author),
 				Body:        trimmed,
 				CreatedAt:   c.CreatedAt,
 			}

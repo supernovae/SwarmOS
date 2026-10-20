@@ -188,3 +188,53 @@ func TestUpdateArtifactAndRelease(t *testing.T) {
 		t.Fatalf("expected status released, got %q", relState.Lease.Status)
 	}
 }
+
+func TestTrustedAndUntrustedReviewerComments(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	lt := tracker.NewLocalTracker(tmp)
+
+	iss, err := lt.CreateIssue(ctx, "Review comment trust", "### Objective\nReview plan\n", []string{"swarm:ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	security := defaultTestSecurity()
+	security.TrustedReviewers = []string{"grok-bot", "openai-dot"}
+	mgr := NewManager(lt, security)
+	if _, err := mgr.Acquire(ctx, iss.Number, "alice", "claude", "plan", 4*time.Hour, 3); err != nil {
+		t.Fatalf("Acquire failed: %v", err)
+	}
+
+	untrusted := lt.WithUser("random-stranger", "NONE")
+	if _, err := untrusted.CreateComment(ctx, iss.Number, "/swarm approve-plan"); err != nil {
+		t.Fatalf("creating untrusted review comment: %v", err)
+	}
+	st, err := mgr.GetCurrentState(ctx, iss.Number)
+	if err != nil {
+		t.Fatalf("GetCurrentState after untrusted comment: %v", err)
+	}
+	for _, artifact := range st.Artifacts {
+		if artifact.Type == contract.ArtifactReview {
+			t.Fatalf("untrusted commenter created review artifact: %+v", artifact)
+		}
+	}
+
+	trusted := lt.WithUser("grok-bot", "NONE")
+	if _, err := trusted.CreateComment(ctx, iss.Number, "/swarm approve-plan"); err != nil {
+		t.Fatalf("creating trusted review comment: %v", err)
+	}
+	st, err = mgr.GetCurrentState(ctx, iss.Number)
+	if err != nil {
+		t.Fatalf("GetCurrentState after trusted comment: %v", err)
+	}
+	for _, artifact := range st.Artifacts {
+		if artifact.Type == contract.ArtifactReview {
+			if artifact.Verdict != "APPROVED" || artifact.Producer != "reviewer:grok-bot" {
+				t.Fatalf("unexpected trusted review artifact: %+v", artifact)
+			}
+			return
+		}
+	}
+	t.Fatal("trusted reviewer comment did not create an APPROVED review artifact")
+}

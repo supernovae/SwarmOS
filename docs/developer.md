@@ -27,7 +27,7 @@ What happens when you claim or pull an issue:
 
 ## 2. Interactive vs. Headless Agent Execution
 
-SwarmOS supports **Claude Code (`claude`)**, **OpenAI Codex (`codex`)**, **OpenCode (`opencode`)**, and **OhMyPi (`omp`)**:
+SwarmOS supports **Claude Code (`claude`)**, **Grok Bot (`grok`)**, **OpenAI Codex (`codex`)**, **OpenAI Dot (`dot`)**, **OpenCode (`opencode`)**, and **OhMyPi (`omp`)**. See the [Grok Bot Guide (`docs/grokbot.md`)](grokbot.md) and [OpenAI Dot & Codex Guide (`docs/openai-dot.md`)](openai-dot.md) for their setup and invocation details:
 
 ```bash
 # Interactive mode (default): opens the agent TUI inside the isolated worktree with the compiled prompt

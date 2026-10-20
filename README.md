@@ -108,8 +108,10 @@ swarm submit 1
 | Agent (`--agent`) | Binary | Headless Invocation | Interactive Invocation |
 | :--- | :--- | :--- | :--- |
 | **Claude Code** (`claude`) | `claude` | `claude -p --append-system-prompt-file .swarm/active/SYSTEM_PROMPT.md "<Task>"` | `claude --append-system-prompt-file .swarm/active/SYSTEM_PROMPT.md "<Task>"` |
+| **Grok Bot** (`grok`) | `grok` | `grok -p "<System + WORKUNIT.md + Task>"` | `grok "<Task>"` |
 | **OhMyPi** (`omp`) | `omp` | `omp -p --no-pty --append-system-prompt .swarm/active/SYSTEM_PROMPT.md "<Task>"` | `omp --append-system-prompt .swarm/active/SYSTEM_PROMPT.md "<Task>"` |
 | **OpenAI Codex** (`codex`) | `codex` | `codex exec "<System + WORKUNIT.md + Task>"` | `codex "<Task>"` |
+| **OpenAI Dot** (`dot`) | `dot` | `dot exec "<System + WORKUNIT.md + Task>"` | `dot "<Task>"` |
 | **OpenCode** (`opencode`) | `opencode` | `opencode run "<System + WORKUNIT.md + Task>"` | `opencode --prompt "<Task>"` |
 | **Deterministic Mock** (`mock`) | Built-in | Offline CI & dry-run adapter (`--agent mock`) | Offline CI & dry-run adapter |
 
@@ -141,6 +143,8 @@ swarm submit 1
 
 - **[Project & Maintainer Guide (`docs/project.md`)](docs/project.md)** — Onboarding a repository, configuring `.swarm/config.yaml` and `required-checks.yaml`, setting up trust gates, authoring WorkUnit issues, and partitioning epics with `swarm decompose`.
 - **[Developer, Team & Worker Node Guide (`docs/developer.md`)](docs/developer.md)** — Pulling work (`swarm pull`, `swarm work --next`), interactive vs. headless execution, per-role agent routing, collaborative team handoffs (`--handoff`), multi-repo registration (`swarm repo`), and parallel worker nodes (`swarm node run`).
+- **[Grok Bot Guide (`docs/grokbot.md`)](docs/grokbot.md)** — Configuring and using Grok Bot as a SwarmOS agent or reviewer.
+- **[OpenAI Dot & Codex Guide (`docs/openai-dot.md`)](docs/openai-dot.md)** — Configuring Dot and Codex-backed review workflows.
 - **[Architecture & Security Model (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)** — Deep dive into optimistic comment-ID leases, lazy expiration, HTML comment sanitization, worktree isolation, and protected-path tamper checks.
 - **[Workflows & Role Contracts (`docs/WORKFLOWS.md`)](docs/WORKFLOWS.md)** — Customizing `.swarm/workflows/*.yaml`, role prompts (`planner`, `reviewer`, `developer`, `tester`), and plan approval gates (`none`, `agent`, `human`).
 - **[Security Policy (`SECURITY.md`)](SECURITY.md)** — Vulnerability reporting, CodeQL/`govulncheck` CI scanning, and verifying release binaries with `gh attestation verify`.

@@ -155,12 +155,13 @@ func (g *GitHubTracker) ListIssues(_ context.Context, filter IssueFilter) ([]*Is
 }
 
 type ghCommentResponse struct {
-	ID        int64     `json:"id"`
-	Body      string    `json:"body"`
-	HTMLURL   string    `json:"html_url"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	User      struct {
+	ID                int64     `json:"id"`
+	Body              string    `json:"body"`
+	HTMLURL           string    `json:"html_url"`
+	AuthorAssociation string    `json:"author_association"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	User              struct {
 		Login string `json:"login"`
 	} `json:"user"`
 }
@@ -174,13 +175,14 @@ func (g *GitHubTracker) ListComments(_ context.Context, issueNumber int) ([]*Com
 	var out []*Comment
 	for _, r := range rawList {
 		out = append(out, &Comment{
-			ID:        r.ID,
-			IssueNum:  issueNumber,
-			Author:    r.User.Login,
-			Body:      r.Body,
-			HTMLURL:   r.HTMLURL,
-			CreatedAt: r.CreatedAt,
-			UpdatedAt: r.UpdatedAt,
+			ID:                r.ID,
+			IssueNum:          issueNumber,
+			Author:            r.User.Login,
+			AuthorAssociation: r.AuthorAssociation,
+			Body:              r.Body,
+			HTMLURL:           r.HTMLURL,
+			CreatedAt:         r.CreatedAt,
+			UpdatedAt:         r.UpdatedAt,
 		})
 	}
 	return out, nil
@@ -194,13 +196,14 @@ func (g *GitHubTracker) CreateComment(_ context.Context, issueNumber int, body s
 		return nil, fmt.Errorf("github CreateComment #%d: %w", issueNumber, err)
 	}
 	return &Comment{
-		ID:        r.ID,
-		IssueNum:  issueNumber,
-		Author:    r.User.Login,
-		Body:      r.Body,
-		HTMLURL:   r.HTMLURL,
-		CreatedAt: r.CreatedAt,
-		UpdatedAt: r.UpdatedAt,
+		ID:                r.ID,
+		IssueNum:          issueNumber,
+		Author:            r.User.Login,
+		AuthorAssociation: r.AuthorAssociation,
+		Body:              r.Body,
+		HTMLURL:           r.HTMLURL,
+		CreatedAt:         r.CreatedAt,
+		UpdatedAt:         r.UpdatedAt,
 	}, nil
 }
 

@@ -31,7 +31,7 @@ HTML comments are stripped before parsing an issue contract. This reduces one hi
 - Agent children use a temporary credential-free scratch home rather than inherited host `HOME`, XDG, SSH, Git, or publishing-token state. Only exact configured `agents.<name>.env` entries are forwarded; configuration rejects `GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`, `HOME`, and `XDG_*` names. This does not isolate arbitrary non-reviewer code: planner, developer, and tester host processes share the user UID and can directly read host files or credential stores. Do not relabel secrets into permitted variables; keep publication credentials in the coordinator process.
 - GitHub branch protection, repository permissions, and human PR review remain the merge authority. A Draft PR and validation artifact do not prove each acceptance criterion or authorize merging.
 - The explicit local backend is for offline development and deterministic tests; it is not a GitHub authorization substitute.
-- `grok` and `dot` are unverified configured command wrappers, not confirmed vendor integrations.
+- Hosted Grok Bot and OpenAI Dot use their own account, connector, and computer permissions. SwarmOS does not provision those connections or convert their GitHub comments into plan approvals. Local agent entries named `grok` or `dot` must select the supported harness they actually launch; the name alone does not connect a hosted service.
 
 ## Operational guidance
 

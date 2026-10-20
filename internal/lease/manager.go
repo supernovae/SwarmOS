@@ -2,26 +2,33 @@ package lease
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
-	"slices"
-	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 var (
-	ErrUntrustedIssue    = errors.New("untrusted issue: missing required ready label or trusted author association")
+	ErrUntrustedIssue    = errors.New("untrusted issue: missing required ready label")
 	ErrAlreadyClaimed    = errors.New("issue is already claimed by another active lease")
-	ErrClaimRaceLost     = errors.New("claim race lost to a concurrent claimant with an earlier comment ID")
+	ErrClaimRaceLost     = errors.New("claim race lost to a concurrent claimant")
 	ErrNoActiveLease     = errors.New("no active lease found for issue")
 	ErrMaxRenewals       = errors.New("maximum lease renewals reached")
-	ErrDependenciesUnmet = errors.New("prerequisite depends_on issues are not yet completed")
+	ErrDependenciesUnmet = errors.New("prerequisite depends_on issues are not merged or closed")
+	ErrStoreUnconfigured = errors.New("coordination store is not configured")
+	ErrClaimFence        = errors.New("claim token is absent, stale, or expired")
+	ErrApprovalRequired  = errors.New("task approval is missing or stale")
 )
 
 type AlreadyClaimedError struct {
@@ -32,607 +39,628 @@ type AlreadyClaimedError struct {
 }
 
 func (e *AlreadyClaimedError) Error() string {
-	return fmt.Sprintf("%s: issue #%d is claimed by %q until %s (comment %d)",
-		ErrAlreadyClaimed.Error(), e.IssueNumber, e.Owner, e.ExpiresAt.Format(time.RFC3339), e.CommentID)
+	return fmt.Sprintf("%s: issue #%d is claimed by %q until %s", ErrAlreadyClaimed, e.IssueNumber, e.Owner, e.ExpiresAt.Format(time.RFC3339))
 }
-
-func (e *AlreadyClaimedError) Unwrap() error {
-	return ErrAlreadyClaimed
-}
+func (e *AlreadyClaimedError) Unwrap() error { return ErrAlreadyClaimed }
 
 type IssueState struct {
-	Lease     contract.Lease      `json:"lease"`
-	Artifacts []contract.Artifact `json:"artifacts,omitempty"`
+	Lease         contract.Lease      `json:"lease"`
+	Artifacts     []contract.Artifact `json:"artifacts,omitempty"`
+	TaskDigest    string              `json:"task_digest"`
+	PolicyDigest  string              `json:"policy_digest"`
+	BaseSHA       string              `json:"base_sha"`
+	HeadSHA       string              `json:"head_sha,omitempty"`
+	Branch        string              `json:"branch,omitempty"`
+	ApprovedBy    string              `json:"approved_by,omitempty"`
+	ApprovedAt    time.Time           `json:"approved_at,omitempty"`
+	PRNumber      int                 `json:"pr_number,omitempty"`
+	EffectiveGate contract.GateMode   `json:"effective_gate,omitempty"`
+	PRURL         string              `json:"pr_url,omitempty"`
 }
-
-var stateMarkerRegex = regexp.MustCompile(`(?s)<!--\s*swarm:state:v1\s*(\{.*?\})\s*-->`)
-
 type Manager struct {
 	tracker     tracker.Tracker
 	security    contract.SecurityConfig
+	store       coordination.Store
+	repoRoot    string
 	nodeProfile *contract.NodeProfile
 	nowFn       func() time.Time
+	mu          sync.Mutex
+	tokens      map[int]string
 }
 
-func NewManager(t tracker.Tracker, sec contract.SecurityConfig) *Manager {
-	if sec.ReadyLabel == "" {
-		sec.ReadyLabel = "swarm:ready"
-	}
-	return &Manager{
-		tracker:  t,
-		security: sec,
-		nowFn:    func() time.Time { return time.Now().UTC() },
-	}
+func NewManager(tr tracker.Tracker, security contract.SecurityConfig) *Manager {
+	return &Manager{tracker: tr, security: security, nowFn: time.Now, tokens: make(map[int]string)}
 }
 
-func (m *Manager) SetNodeProfile(prof *contract.NodeProfile) {
-	m.nodeProfile = prof
-}
-
-func (m *Manager) SetNowFunc(fn func() time.Time) {
-	m.nowFn = fn
-}
-
-func (m *Manager) VerifyTrustPolicy(issue *tracker.Issue) error {
-	if !m.security.RequireReadyLabel {
-		return nil
+func (m *Manager) SetNodeProfile(profile *contract.NodeProfile) { m.nodeProfile = profile }
+func (m *Manager) ConfigureStore(root string) error {
+	if strings.TrimSpace(root) == "" {
+		return fmt.Errorf("empty repository root")
 	}
-	hasReady := slices.Contains(issue.Labels, m.security.ReadyLabel)
-	isTrustedAssoc := false
-	for _, assoc := range m.security.TrustedAssociations {
-		if strings.EqualFold(assoc, issue.AuthorAssociation) {
-			isTrustedAssoc = true
-			break
-		}
-	}
-	if !hasReady && !isTrustedAssoc {
-		return fmt.Errorf("%w: issue #%d requires label %q or author association in %v (got %q)",
-			ErrUntrustedIssue, issue.Number, m.security.ReadyLabel, m.security.TrustedAssociations, issue.AuthorAssociation)
-	}
-	return nil
-}
-
-// IsTrustedCommenter verifies whether a comment author is allowed to issue /swarm review or release commands.
-func (m *Manager) IsTrustedCommenter(c *tracker.Comment) bool {
-	if c == nil {
-		return false
-	}
-	for _, rev := range m.security.TrustedReviewers {
-		if strings.EqualFold(strings.TrimSpace(rev), strings.TrimSpace(c.Author)) {
-			return true
-		}
-	}
-	if len(m.security.TrustedAssociations) == 0 {
-		return true
-	}
-	if c.AuthorAssociation == "" {
-		return !m.security.RequireReadyLabel
-	}
-	for _, assoc := range m.security.TrustedAssociations {
-		if strings.EqualFold(assoc, c.AuthorAssociation) {
-			return true
-		}
-	}
-	return false
-}
-
-// VerifyDependencies checks whether all issue numbers in wu.DependsOn are either closed, have swarm:pr-open, or have Lease.Status == "completed".
-func (m *Manager) VerifyDependencies(ctx context.Context, wu *contract.WorkUnit) error {
-	if wu == nil || len(wu.DependsOn) == 0 {
-		return nil
-	}
-	var blocking []string
-	for _, depNum := range wu.DependsOn {
-		if depNum == wu.IssueNumber {
-			continue
-		}
-		depIss, err := m.tracker.GetIssue(ctx, depNum)
-		if err != nil {
-			blocking = append(blocking, fmt.Sprintf("#%d (not found)", depNum))
-			continue
-		}
-		if strings.EqualFold(depIss.State, "closed") || slices.Contains(depIss.Labels, "swarm:pr-open") {
-			continue
-		}
-		if st, err := m.GetCurrentState(ctx, depNum); err == nil && st != nil && st.Lease.Status == "completed" {
-			continue
-		}
-		blocking = append(blocking, fmt.Sprintf("#%d (%s)", depNum, depIss.Title))
-	}
-	if len(blocking) > 0 {
-		return fmt.Errorf("%w: issue #%d is blocked by [%s]", ErrDependenciesUnmet, wu.IssueNumber, strings.Join(blocking, ", "))
-	}
-	return nil
-}
-
-// Acquire claims an issue using optimistic concurrency and comment-ID tie-breaking.
-// Also supports collaborative team handoffs: if the previous claimant placed the lease in status == "handoff",
-// the new contributor seamlessly claims the next phase while preserving prior artifacts and contributor history.
-func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase string, duration time.Duration, maxRenewals int) (*IssueState, error) {
-	if duration <= 0 {
-		duration = 4 * time.Hour
-	}
-	if maxRenewals <= 0 {
-		maxRenewals = 3
-	}
-	if phase == "" {
-		phase = "full"
-	}
-
-	issue, err := m.tracker.GetIssue(ctx, issueNum)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := m.VerifyTrustPolicy(issue); err != nil {
-		return nil, err
-	}
-
-	now := m.nowFn()
-	comments, err := m.tracker.ListComments(ctx, issueNum)
-	if err != nil {
-		return nil, err
-	}
-
-	var reusableState *IssueState
-	for _, c := range comments {
-		st, ok := ParseStateComment(c.Body)
-		if !ok {
-			continue
-		}
-		st.Lease.CommentID = c.ID
-		if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
-			if st.Lease.Owner != owner {
-				return nil, &AlreadyClaimedError{
-					IssueNumber: issueNum,
-					Owner:       st.Lease.Owner,
-					ExpiresAt:   st.Lease.ExpiresAt,
-					CommentID:   c.ID,
-				}
-			}
-			reusableState = st
-		} else if st.Lease.Status == "handoff" || st.Lease.Owner == owner || (st.Lease.Status == "active" && !st.Lease.ExpiresAt.After(now)) {
-			// Collaborative handoff or expired/own state comment: preserve artifacts and contributor chain!
-			reusableState = st
-		}
-	}
-
-	contributors := []string{owner}
-	if reusableState != nil {
-		for _, prev := range reusableState.Lease.Contributors {
-			if prev != "" && !slices.Contains(contributors, prev) {
-				contributors = append(contributors, prev)
-			}
-		}
-		if reusableState.Lease.Owner != "" && !slices.Contains(contributors, reusableState.Lease.Owner) {
-			contributors = append([]string{reusableState.Lease.Owner}, contributors...)
-		}
-		if (phase == "full" || phase == "all") && reusableState.Lease.Status == "handoff" && reusableState.Lease.NextPhase != "" {
-			phase = reusableState.Lease.NextPhase
-		}
-	}
-
-	var nodeID string
-	var nodeCaps []string
-	if m.nodeProfile != nil {
-		nodeID = m.nodeProfile.NodeID
-		nodeCaps = m.nodeProfile.Capabilities
-	}
-
-	newState := &IssueState{
-		Lease: contract.Lease{
-			Version:      1,
-			IssueNumber:  issueNum,
-			Owner:        owner,
-			Agent:        agent,
-			NodeID:       nodeID,
-			Capabilities: nodeCaps,
-			Contributors: contributors,
-			Phase:        phase,
-			Status:       "active",
-			ClaimedAt:    now,
-			ExpiresAt:    now.Add(duration),
-			Renewals:     0,
-			MaxRenewals:  maxRenewals,
-		},
-	}
-	if reusableState != nil {
-		newState.Artifacts = reusableState.Artifacts
-	}
-
-	if reusableState != nil && reusableState.Lease.CommentID > 0 && (reusableState.Lease.Status == "active" || reusableState.Lease.Status == "handoff") {
-		newState.Lease.CommentID = reusableState.Lease.CommentID
-		body, err := FormatStateComment(newState)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := m.tracker.UpdateComment(ctx, reusableState.Lease.CommentID, body); err != nil {
-			return nil, err
-		}
+	m.repoRoot = root
+	if strings.HasPrefix(m.tracker.BackendName(), "github") {
+		m.store = coordination.NewGitStore(root)
 	} else {
-		body, err := FormatStateComment(newState)
-		if err != nil {
-			return nil, err
-		}
-		postedComment, err := m.tracker.CreateComment(ctx, issueNum, body)
-		if err != nil {
-			return nil, err
-		}
-		newState.Lease.CommentID = postedComment.ID
-		updatedBody, err := FormatStateComment(newState)
-		if err == nil {
-			_, _ = m.tracker.UpdateComment(ctx, postedComment.ID, updatedBody)
+		m.store = coordination.NewFileStore(root)
+	}
+	return nil
+}
+func (m *Manager) Store() coordination.Store      { return m.store }
+func (m *Manager) SetNowFunc(fn func() time.Time) { m.nowFn = fn }
+func (m *Manager) BindClaim(issue int, claimID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if claimID == "" {
+		delete(m.tokens, issue)
+	} else {
+		m.tokens[issue] = claimID
+	}
+}
+func (m *Manager) token(issue int) string { m.mu.Lock(); defer m.mu.Unlock(); return m.tokens[issue] }
+func verifyTrust(sec contract.SecurityConfig, issue *tracker.Issue) error {
+	if issue == nil {
+		return ErrUntrustedIssue
+	}
+	if !sec.RequireReadyLabel {
+		return fmt.Errorf("security policy must require explicit readiness")
+	}
+	for _, l := range issue.Labels {
+		if l == sec.ReadyLabel {
+			return nil
 		}
 	}
+	return fmt.Errorf("%w: issue #%d requires label %q", ErrUntrustedIssue, issue.Number, sec.ReadyLabel)
+}
 
-	// Re-fetch comments to verify optimistic concurrency tie-breaking by lowest CommentID
-	verifyComments, err := m.tracker.ListComments(ctx, issueNum)
-	if err != nil {
-		return nil, err
-	}
-
-	type activeClaim struct {
-		commentID int64
-		state     *IssueState
-	}
-	var activeClaims []activeClaim
-	for _, c := range verifyComments {
-		st, ok := ParseStateComment(c.Body)
-		if !ok {
+// VerifyTrustPolicy is retained for queue prefiltering; acquisition reloads
+// the immutable approved policy before it can create a lease.
+func (m *Manager) VerifyTrustPolicy(issue *tracker.Issue) error {
+	return verifyTrust(m.security, issue)
+}
+func (m *Manager) VerifyDependencies(ctx context.Context, wu *contract.WorkUnit) error {
+	for _, n := range wu.DependsOn {
+		if n == wu.IssueNumber {
 			continue
 		}
-		st.Lease.CommentID = c.ID
-		if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
-			activeClaims = append(activeClaims, activeClaim{commentID: c.ID, state: st})
+		iss, err := m.tracker.GetIssue(ctx, n)
+		if err != nil || !strings.EqualFold(iss.State, "closed") {
+			return fmt.Errorf("%w: issue #%d", ErrDependenciesUnmet, n)
 		}
 	}
-
-	sort.Slice(activeClaims, func(i, j int) bool {
-		return activeClaims[i].commentID < activeClaims[j].commentID
-	})
-
-	if len(activeClaims) > 0 && activeClaims[0].commentID != newState.Lease.CommentID && activeClaims[0].state.Lease.Owner != owner {
-		newState.Lease.Status = "superseded"
-		if body, err := FormatStateComment(newState); err == nil {
-			_, _ = m.tracker.UpdateComment(ctx, newState.Lease.CommentID, body)
-		}
-		return nil, fmt.Errorf("%w: issue #%d won by %q (comment %d < %d)",
-			ErrClaimRaceLost, issueNum, activeClaims[0].state.Lease.Owner, activeClaims[0].commentID, newState.Lease.CommentID)
-	}
-
-	_ = m.tracker.AddLabels(ctx, issueNum, []string{"swarm:claimed", "swarm:in-progress"})
-	return newState, nil
+	return nil
 }
-
-// Handoff transitions an active lease into collaborative handoff mode ("status": "handoff") so another contributor or specialist node
-// can claim the next workflow phase (e.g., "review" or "implement") while retaining all artifacts.
-func (m *Manager) Handoff(ctx context.Context, issueNum int, owner, completedPhase, nextPhase string) (*IssueState, error) {
-	st, commentID, err := m.findLatestState(ctx, issueNum, owner)
+func (m *Manager) load(ctx context.Context, n int) (*IssueState, string, error) {
+	if m.store == nil {
+		return nil, "", ErrStoreUnconfigured
+	}
+	b, rev, err := m.store.Load(ctx, n)
+	if err != nil {
+		return nil, "", err
+	}
+	var st IssueState
+	if err = json.Unmarshal(b, &st); err != nil {
+		return nil, "", fmt.Errorf("invalid authoritative state: %w", err)
+	}
+	if st.Lease.IssueNumber != 0 && st.Lease.IssueNumber != n {
+		return nil, "", fmt.Errorf("state issue identity mismatch")
+	}
+	return &st, rev, nil
+}
+func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (*IssueState, error) {
+	b, err := json.Marshal(st)
 	if err != nil {
 		return nil, err
 	}
-	if completedPhase != "" {
-		st.Lease.Phase = completedPhase
-	}
-	st.Lease.NextPhase = nextPhase
-	st.Lease.Status = "handoff"
-	st.Lease.ExpiresAt = m.nowFn()
-	if owner != "" && !slices.Contains(st.Lease.Contributors, owner) {
-		st.Lease.Contributors = append(st.Lease.Contributors, owner)
-	}
-
-	body, err := FormatStateComment(st)
-	if err != nil {
+	if _, err = m.store.CompareAndSwap(ctx, n, rev, b); err != nil {
 		return nil, err
 	}
-	if _, err := m.tracker.UpdateComment(ctx, commentID, body); err != nil {
-		return nil, err
-	}
-	_ = m.tracker.RemoveLabel(ctx, issueNum, "swarm:in-progress")
+	m.project(ctx, n, st)
 	return st, nil
 }
-
-func (m *Manager) Renew(ctx context.Context, issueNum int, owner string, duration time.Duration) (*IssueState, error) {
-	if duration <= 0 {
-		duration = 4 * time.Hour
+func (m *Manager) project(ctx context.Context, n int, st *IssueState) {
+	summary := fmt.Sprintf("<!-- swarm:audit:v1 -->\n### SwarmOS state projection\n\nTask `%s`, claim `%s`, phase `%s`, status `%s`.\n", short(st.TaskDigest), st.Lease.ClaimID, st.Lease.Phase, st.Lease.Status)
+	_, _ = m.tracker.CreateComment(ctx, n, summary)
+}
+func short(s string) string {
+	if len(s) > 12 {
+		return s[:12]
 	}
-	st, commentID, err := m.findOwnerState(ctx, issueNum, owner)
+	return s
+}
+func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueState, error) {
+	actor, err := m.tracker.CurrentUser(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if st.Lease.Status != "active" {
-		return nil, fmt.Errorf("%w: lease status is %q", ErrNoActiveLease, st.Lease.Status)
+	if owner == "" || owner != actor {
+		return nil, fmt.Errorf("approval owner must be authenticated actor")
 	}
-	if st.Lease.MaxRenewals > 0 && st.Lease.Renewals >= st.Lease.MaxRenewals {
-		return nil, fmt.Errorf("%w (%d/%d)", ErrMaxRenewals, st.Lease.Renewals, st.Lease.MaxRenewals)
+	if err = m.tracker.Authorize(ctx, "approve-task"); err != nil {
+		return nil, err
+	}
+	issue, err := m.tracker.GetIssue(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+	if err != nil {
+		return nil, err
+	}
+	base, err := m.trustedBase()
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := harness.LoadConfigAt(m.repoRoot, base)
+	if err != nil {
+		return nil, fmt.Errorf("load approved policy: %w", err)
+	}
+	wf, err := harness.LoadWorkflowAt(m.repoRoot, wu.Workflow, base)
+	if err != nil {
+		return nil, err
+	}
+	gate, err := contract.ResolveGate(wu.Gate, wf.DefaultGate, cfg.DefaultGate)
+	if err != nil {
+		return nil, err
+	}
+	sec := cfg.Security
+	digest := contract.DigestApprovedPolicy(base, cfg)
+	if old, rev, err := m.load(ctx, n); err == nil {
+		if old.Lease.Status == "active" && old.Lease.ExpiresAt.After(m.nowFn()) {
+			return nil, ErrAlreadyClaimed
+		}
+		old.TaskDigest = contract.DigestWorkUnit(wu)
+		old.PolicyDigest = digest
+		old.BaseSHA = base
+		old.EffectiveGate = gate
+		old.ApprovedBy = owner
+		old.ApprovedAt = m.nowFn()
+		if _, err = m.save(ctx, n, rev, old); err != nil {
+			return nil, err
+		}
+		if err = m.tracker.AddLabels(ctx, n, []string{sec.ReadyLabel}); err != nil {
+			return nil, err
+		}
+		return old, nil
+	} else if !errors.Is(err, coordination.ErrNotFound) {
+		return nil, err
+	}
+	st := &IssueState{Lease: contract.Lease{Version: 1, IssueNumber: n, Status: "draft"}, TaskDigest: contract.DigestWorkUnit(wu), PolicyDigest: digest, BaseSHA: base, EffectiveGate: gate, ApprovedBy: owner, ApprovedAt: m.nowFn()}
+	if _, err = m.save(ctx, n, "", st); err != nil {
+		return nil, err
+	}
+	if err = m.tracker.AddLabels(ctx, n, []string{sec.ReadyLabel}); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+func (m *Manager) trustedBase() (string, error) {
+	if m.repoRoot == "" {
+		return "", ErrStoreUnconfigured
+	}
+	return workspace.ResolveBase(m.repoRoot)
+}
+func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
+	actor, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if owner == "" || owner != actor {
+		return nil, fmt.Errorf("claim owner must be authenticated actor")
+	}
+	if err := contract.ValidatePhase(phase); err != nil {
+		return nil, err
+	}
+	if duration <= 0 {
+		return nil, fmt.Errorf("lease duration must be positive")
+	}
+	issue, err := m.tracker.GetIssue(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err = m.VerifyDependencies(ctx, wu); err != nil {
+		return nil, err
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
+	}
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load approved policy: %w", err)
+	}
+	if err = verifyTrust(cfg.Security, issue); err != nil {
+		return nil, err
+	}
+	if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+		return nil, ErrApprovalRequired
 	}
 	now := m.nowFn()
-	st.Lease.Renewals++
-	st.Lease.ExpiresAt = now.Add(duration)
-	st.Lease.CommentID = commentID
-
-	body, err := FormatStateComment(st)
+	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
+		return nil, &AlreadyClaimedError{IssueNumber: n, Owner: st.Lease.Owner, ExpiresAt: st.Lease.ExpiresAt}
+	}
+	id := claimID()
+	contributors := append([]string(nil), st.Lease.Contributors...)
+	known := false
+	for _, contributor := range contributors {
+		known = known || contributor == owner
+	}
+	if !known {
+		contributors = append(contributors, owner)
+	}
+	st.Lease = contract.Lease{Version: 1, IssueNumber: n, ClaimID: id, Owner: owner, Agent: agent, Phase: phase, Status: "active", ClaimedAt: now, ExpiresAt: now.Add(duration), MaxRenewals: max}
+	st.Lease.Contributors = contributors
+	if m.nodeProfile != nil {
+		st.Lease.NodeID = m.nodeProfile.NodeID
+		st.Lease.Capabilities = append([]string(nil), m.nodeProfile.Capabilities...)
+	}
+	if _, err = m.save(ctx, n, rev, st); err != nil {
+		if errors.Is(err, coordination.ErrConflict) {
+			return nil, ErrClaimRaceLost
+		}
+		return nil, err
+	}
+	m.BindClaim(n, id)
+	_ = m.tracker.AddLabels(ctx, n, []string{"swarm:claimed", "swarm:in-progress"})
+	return st, nil
+}
+func claimID() string { b := make([]byte, 16); _, _ = rand.Read(b); return hex.EncodeToString(b) }
+func (m *Manager) Resume(ctx context.Context, n int, owner, id string) (*IssueState, error) {
+	m.BindClaim(n, id)
+	st, _, err := m.load(ctx, n)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := m.tracker.UpdateComment(ctx, commentID, body); err != nil {
+	if err = m.CheckClaim(ctx, n, owner); err != nil {
 		return nil, err
 	}
 	return st, nil
 }
-
-func (m *Manager) Release(ctx context.Context, issueNum int, owner, reason string) (*IssueState, error) {
-	st, commentID, err := m.findOwnerState(ctx, issueNum, owner)
+func (m *Manager) CheckClaim(ctx context.Context, n int, owner string) error {
+	st, _, err := m.load(ctx, n)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	st.Lease.Status = "released"
-	st.Lease.ExpiresAt = m.nowFn()
-	st.Lease.CommentID = commentID
-
-	body, err := FormatStateComment(st)
-	if err != nil {
-		return nil, err
-	}
-	if reason != "" {
-		body += fmt.Sprintf("\n\n_Lease released by `%s`: %s_\n", owner, reason)
-	}
-	if _, err := m.tracker.UpdateComment(ctx, commentID, body); err != nil {
-		return nil, err
-	}
-	_ = m.tracker.RemoveLabel(ctx, issueNum, "swarm:claimed")
-	_ = m.tracker.RemoveLabel(ctx, issueNum, "swarm:in-progress")
-	return st, nil
+	return m.checkStateClaim(ctx, n, owner, st)
 }
 
-func (m *Manager) UpdateArtifact(ctx context.Context, issueNum int, owner string, art contract.Artifact) (*IssueState, error) {
-	if art.Version == 0 {
-		art.Version = 1
+func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState) error {
+	issue, err := m.tracker.GetIssue(ctx, n)
+	if err != nil {
+		return err
 	}
-	if art.IssueNumber == 0 {
-		art.IssueNumber = issueNum
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	if err != nil {
+		return fmt.Errorf("load approved policy: %w", err)
 	}
-	if art.CreatedAt.IsZero() {
-		art.CreatedAt = m.nowFn()
+	if err = verifyTrust(cfg.Security, issue); err != nil {
+		return err
 	}
-	if art.ID == "" {
-		art.ID = fmt.Sprintf("art-%d-%s", issueNum, art.Type)
+	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+	if err != nil {
+		return err
 	}
+	if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+		return ErrApprovalRequired
+	}
+	return nil
+}
+
+func (m *Manager) checkStateClaim(ctx context.Context, n int, owner string, st *IssueState) error {
+	if st.Lease.Status != "active" || !st.Lease.ExpiresAt.After(m.nowFn()) || owner == "" || st.Lease.Owner != owner || st.Lease.ClaimID != m.token(n) {
+		return ErrClaimFence
+	}
+	return m.checkApprovedState(ctx, n, st)
+}
+func (m *Manager) mutate(ctx context.Context, n int, owner string, fn func(*IssueState) error) (*IssueState, error) {
+	// Heartbeats and human decisions can legitimately race this same attempt.
+	// Re-read on CAS conflict; a successor's token never passes the next check.
+	for attempt := 0; attempt < 4; attempt++ {
+		st, rev, err := m.load(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
+			return nil, err
+		}
+		if err = fn(st); err != nil {
+			return nil, err
+		}
+		out, err := m.save(ctx, n, rev, st)
+		if errors.Is(err, coordination.ErrConflict) {
+			continue
+		}
+		return out, err
+	}
+	return nil, coordination.ErrConflict
+}
+func (m *Manager) Renew(ctx context.Context, n int, owner string, d time.Duration) (*IssueState, error) {
+	if d <= 0 {
+		return nil, fmt.Errorf("renew duration must be positive")
+	}
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		if err != nil {
+			return err
+		}
+		if !cfg.Lease.Renewable {
+			return fmt.Errorf("approved policy disallows lease renewal")
+		}
+		if st.Lease.Renewals >= st.Lease.MaxRenewals {
+			return ErrMaxRenewals
+		}
+		st.Lease.Renewals++
+		st.Lease.ExpiresAt = m.nowFn().Add(d)
+		return nil
+	})
+}
+func (m *Manager) Release(ctx context.Context, n int, owner, reason string) (*IssueState, error) {
+	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error { st.Lease.Status = "released"; st.Lease.ExpiresAt = m.nowFn(); return nil })
+	if err == nil {
+		_ = m.tracker.RemoveLabel(ctx, n, "swarm:claimed")
+		_ = m.tracker.RemoveLabel(ctx, n, "swarm:in-progress")
+	}
+	return st, err
+}
+func (m *Manager) Handoff(ctx context.Context, n int, owner, done, next string) (*IssueState, error) {
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if err := contract.ValidatePhase(next); err != nil {
+			return err
+		}
+		st.Lease.Phase = done
+		st.Lease.NextPhase = next
+		st.Lease.Status = "handoff"
+		st.Lease.ExpiresAt = m.nowFn()
+		return nil
+	})
+}
+
+// RequireGate persists only stronger execution requirements for this approval.
+func (m *Manager) RequireGate(ctx context.Context, issue int, owner string, requested contract.GateMode) (*IssueState, error) {
+	return m.mutate(ctx, issue, owner, func(state *IssueState) error {
+		gate, err := contract.ResolveGate(requested, state.EffectiveGate, "")
+		if err != nil {
+			return err
+		}
+		state.EffectiveGate = gate
+		return nil
+	})
+}
+func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status string) (*IssueState, error) {
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if phase != "" {
+			if err := contract.ValidatePhase(phase); err != nil {
+				return err
+			}
+			st.Lease.Phase = phase
+		}
+		if status != "" {
+			st.Lease.Status = status
+		}
+		return nil
+	})
+}
+
+// RecordHumanReview records an authenticated maintainer decision without
+// borrowing or extending the worker's lease.
+func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes string) (*IssueState, error) {
+	if verdict != "APPROVED" && verdict != "CHANGES_REQUESTED" {
+		return nil, fmt.Errorf("invalid human review verdict %q", verdict)
+	}
+	if err := m.tracker.Authorize(ctx, "review-human"); err != nil {
+		return nil, err
+	}
+	actor, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if st.Lease.Status == "completed" {
+		return nil, ErrApprovalRequired
+	}
+	if err := m.checkApprovedState(ctx, n, st); err != nil {
+		return nil, err
+	}
+	var plan, test *contract.Artifact
+	for i := range st.Artifacts {
+		switch st.Artifacts[i].Type {
+		case contract.ArtifactDesign:
+			plan = &st.Artifacts[i]
+		case contract.ArtifactTestPlan:
+			test = &st.Artifacts[i]
+		}
+	}
+	if plan == nil || test == nil {
+		return nil, ErrApprovalRequired
+	}
+	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", n), IssueNumber: n, Type: contract.ArtifactReview, Producer: "human:" + actor, Verdict: verdict, Summary: "human plan review", Body: "VERDICT: " + verdict + "\n\n" + notes, CreatedAt: m.nowFn(), Metadata: map[string]string{"kind": "human", "actor": actor, "task_digest": st.TaskDigest, "policy_digest": st.PolicyDigest, "plan_digest": hash(plan.Body), "test_plan_digest": hash(test.Body)}}
 	if err := contract.ValidateArtifact(&art); err != nil {
 		return nil, err
 	}
-
-	st, commentID, err := m.findLatestState(ctx, issueNum, owner)
-	if err != nil {
-		return nil, err
-	}
-
-	replaced := false
-	for idx, existing := range st.Artifacts {
-		if existing.Type == art.Type {
-			art.Version = existing.Version + 1
-			st.Artifacts[idx] = art
-			replaced = true
-			break
+	for i := range st.Artifacts {
+		if st.Artifacts[i].Type == contract.ArtifactReview {
+			art.Version = st.Artifacts[i].Version + 1
+			st.Artifacts[i] = art
+			return m.save(ctx, n, rev, st)
 		}
 	}
-	if !replaced {
-		st.Artifacts = append(st.Artifacts, art)
-	}
-
-	body, err := FormatStateComment(st)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := m.tracker.UpdateComment(ctx, commentID, body); err != nil {
-		return nil, err
-	}
-	return st, nil
+	st.Artifacts = append(st.Artifacts, art)
+	return m.save(ctx, n, rev, st)
 }
 
-func (m *Manager) UpdatePhase(ctx context.Context, issueNum int, owner, phase, status string) (*IssueState, error) {
-	st, commentID, err := m.findLatestState(ctx, issueNum, owner)
-	if err != nil {
-		return nil, err
+// RecordSubmission is fenced by the owner token while an attempt is active
+// and makes PR identity durable for retry reconciliation.
+func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, number int, url string) (*IssueState, error) {
+	if number <= 0 || url == "" {
+		return nil, fmt.Errorf("submission requires PR number and URL")
 	}
-	if phase != "" {
-		st.Lease.Phase = phase
-	}
-	if status != "" {
-		st.Lease.Status = status
-	}
-	body, err := FormatStateComment(st)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := m.tracker.UpdateComment(ctx, commentID, body); err != nil {
-		return nil, err
-	}
-	return st, nil
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		st.PRNumber = number
+		st.PRURL = url
+		st.Lease.Status = "completed"
+		st.Lease.Phase = "submitted"
+		return nil
+	})
 }
-
-// GetCurrentState inspects issue comments and returns the latest active (or most recent) IssueState,
-// also recognizing `/swarm approve-plan`, `/swarm reject-plan`, and `/swarm release` comments from humans.
-func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueState, error) {
-	comments, err := m.tracker.ListComments(ctx, issueNum)
-	if err != nil {
-		return nil, err
-	}
-	now := m.nowFn()
-	var best *IssueState
-	var humanReview *contract.Artifact
-	var releasedViaComment bool
-
-	for _, c := range comments {
-		if st, ok := ParseStateComment(c.Body); ok {
-			st.Lease.CommentID = c.ID
-			if best == nil {
-				best = st
-				continue
+func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art contract.Artifact) (*IssueState, error) {
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if art.IssueNumber == 0 {
+			art.IssueNumber = n
+		}
+		if art.IssueNumber != n {
+			return fmt.Errorf("artifact issue identity mismatch")
+		}
+		if art.Version == 0 {
+			art.Version = 1
+		}
+		if art.ID == "" {
+			art.ID = fmt.Sprintf("art-%d-%s", n, art.Type)
+		}
+		if art.CreatedAt.IsZero() {
+			art.CreatedAt = m.nowFn()
+		}
+		if art.Type == contract.ArtifactReview {
+			if art.Metadata == nil {
+				return fmt.Errorf("review approval metadata is required")
 			}
-			bestActive := best.Lease.Status == "active" && best.Lease.ExpiresAt.After(now)
-			curActive := st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now)
-			if curActive && !bestActive {
-				best = st
-			} else if !curActive && !bestActive {
-				best = st
+			kind := art.Metadata["kind"]
+			if kind != "agent" && kind != "human" {
+				return fmt.Errorf("review kind must be agent or human")
 			}
-			continue
-		}
-
-		trimmed := strings.TrimSpace(c.Body)
-		if !strings.HasPrefix(trimmed, "/swarm ") {
-			continue
-		}
-		if !m.IsTrustedCommenter(c) {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(trimmed, "/swarm approve-plan"):
-			humanReview = &contract.Artifact{
-				Version:     1,
-				ID:          fmt.Sprintf("art-%d-review", issueNum),
-				IssueNumber: issueNum,
-				Type:        contract.ArtifactReview,
-				Producer:    "reviewer:" + c.Author,
-				Verdict:     "APPROVED",
-				Summary:     fmt.Sprintf("Approved by %s via /swarm approve-plan comment", c.Author),
-				Body:        trimmed,
-				CreatedAt:   c.CreatedAt,
+			if art.Metadata["actor"] == "" {
+				return fmt.Errorf("review actor metadata is required")
 			}
-		case strings.HasPrefix(trimmed, "/swarm reject-plan"):
-			humanReview = &contract.Artifact{
-				Version:     1,
-				ID:          fmt.Sprintf("art-%d-review", issueNum),
-				IssueNumber: issueNum,
-				Type:        contract.ArtifactReview,
-				Producer:    "reviewer:" + c.Author,
-				Verdict:     "CHANGES_REQUESTED",
-				Summary:     fmt.Sprintf("Changes requested by %s via /swarm reject-plan comment", c.Author),
-				Body:        trimmed,
-				CreatedAt:   c.CreatedAt,
-			}
-		case strings.HasPrefix(trimmed, "/swarm release"):
-			releasedViaComment = true
-		}
-	}
-
-	if best != nil {
-		if releasedViaComment && best.Lease.Status == "active" {
-			best.Lease.Status = "released"
-		}
-		if humanReview != nil {
-			replaced := false
-			for idx, a := range best.Artifacts {
-				if a.Type == contract.ArtifactReview {
-					best.Artifacts[idx] = *humanReview
-					replaced = true
-					break
+			if kind == "human" {
+				if err := m.tracker.Authorize(ctx, "review-human"); err != nil {
+					return err
 				}
 			}
-			if !replaced {
-				best.Artifacts = append(best.Artifacts, *humanReview)
+			var plan, test *contract.Artifact
+			for i := range st.Artifacts {
+				switch st.Artifacts[i].Type {
+				case contract.ArtifactDesign:
+					plan = &st.Artifacts[i]
+				case contract.ArtifactTestPlan:
+					test = &st.Artifacts[i]
+				}
+			}
+			if plan == nil || test == nil {
+				return fmt.Errorf("review requires current design and test-plan artifacts")
+			}
+			art.Metadata["task_digest"] = st.TaskDigest
+			art.Metadata["policy_digest"] = st.PolicyDigest
+			art.Metadata["plan_digest"] = hash(plan.Body)
+			art.Metadata["test_plan_digest"] = hash(test.Body)
+		}
+		if err := contract.ValidateArtifact(&art); err != nil {
+			return err
+		}
+		if art.Type == contract.ArtifactDesign || art.Type == contract.ArtifactTestPlan {
+			var kept []contract.Artifact
+			for _, a := range st.Artifacts {
+				if a.Type != contract.ArtifactReview {
+					kept = append(kept, a)
+				}
+			}
+			st.Artifacts = kept
+		}
+		for i, a := range st.Artifacts {
+			if a.Type == art.Type {
+				art.Version = a.Version + 1
+				st.Artifacts[i] = art
+				return nil
 			}
 		}
-	}
-
-	if best == nil {
-		return nil, ErrNoActiveLease
-	}
-	return best, nil
+		st.Artifacts = append(st.Artifacts, art)
+		return nil
+	})
 }
-
-func (m *Manager) findOwnerState(ctx context.Context, issueNum int, owner string) (*IssueState, int64, error) {
-	comments, err := m.tracker.ListComments(ctx, issueNum)
+func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, head string) (*IssueState, error) {
+	if branch == "" || head == "" || !strings.HasPrefix(branch, fmt.Sprintf("swarm/issue-%d-", n)) {
+		return nil, fmt.Errorf("invalid checkpoint branch")
+	}
+	st, rev, err := m.load(ctx, n)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	var found *IssueState
-	var foundID int64
-	for _, c := range comments {
-		st, ok := ParseStateComment(c.Body)
-		if !ok {
-			continue
+	if st.Lease.Status != "active" || st.Lease.Owner != owner || st.Lease.ClaimID != m.token(n) || !st.Lease.ExpiresAt.After(m.nowFn()) {
+		return nil, ErrClaimFence
+	}
+	if st.Branch != "" && st.Branch != branch {
+		return nil, fmt.Errorf("checkpoint branch differs from approved branch")
+	}
+	st.Branch = branch
+	st.HeadSHA = head
+	if ps, ok := m.store.(coordination.PublishingStore); ok {
+		raw, err := json.Marshal(st)
+		if err != nil {
+			return nil, err
 		}
-		if owner == "" || st.Lease.Owner == owner {
-			st.Lease.CommentID = c.ID
-			found = st
-			foundID = c.ID
-		}
-	}
-	if found == nil {
-		return nil, 0, fmt.Errorf("%w for issue #%d (owner=%s)", ErrNoActiveLease, issueNum, owner)
-	}
-	return found, foundID, nil
-}
-
-func (m *Manager) findLatestState(ctx context.Context, issueNum int, owner string) (*IssueState, int64, error) {
-	st, cid, err := m.findOwnerState(ctx, issueNum, owner)
-	if err == nil {
-		return st, cid, nil
-	}
-	return m.findOwnerState(ctx, issueNum, "")
-}
-
-func ParseStateComment(body string) (*IssueState, bool) {
-	matches := stateMarkerRegex.FindStringSubmatch(body)
-	if len(matches) < 2 {
-		return nil, false
-	}
-	var st IssueState
-	if err := json.Unmarshal([]byte(matches[1]), &st); err != nil {
-		return nil, false
-	}
-	return &st, true
-}
-
-func FormatStateComment(st *IssueState) (string, error) {
-	rawJSON, err := json.Marshal(st)
-	if err != nil {
-		return "", err
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<!-- swarm:state:v1 %s -->\n", string(rawJSON)))
-	sb.WriteString("### SwarmOS Orchestration State\n\n")
-	sb.WriteString("| Field | Value |\n| :--- | :--- |\n")
-	sb.WriteString(fmt.Sprintf("| **Issue** | `#%d` |\n", st.Lease.IssueNumber))
-	sb.WriteString(fmt.Sprintf("| **Owner** | `%s` |\n", st.Lease.Owner))
-	if len(st.Lease.Contributors) > 1 {
-		sb.WriteString(fmt.Sprintf("| **Contributors** | `%s` |\n", strings.Join(st.Lease.Contributors, ", ")))
-	}
-	if st.Lease.NodeID != "" {
-		sb.WriteString(fmt.Sprintf("| **Node ID** | `%s` |\n", st.Lease.NodeID))
-	}
-	if st.Lease.Agent != "" {
-		sb.WriteString(fmt.Sprintf("| **Agent** | `%s` |\n", st.Lease.Agent))
-	}
-	sb.WriteString(fmt.Sprintf("| **Phase** | `%s` |\n", st.Lease.Phase))
-	if st.Lease.NextPhase != "" && st.Lease.Status == "handoff" {
-		sb.WriteString(fmt.Sprintf("| **Next Phase (Handoff)** | `%s` |\n", st.Lease.NextPhase))
-	}
-	sb.WriteString(fmt.Sprintf("| **Status** | `%s` |\n", st.Lease.Status))
-	sb.WriteString(fmt.Sprintf("| **Expires At** | `%s` |\n", st.Lease.ExpiresAt.Format(time.RFC3339)))
-	sb.WriteString(fmt.Sprintf("| **Renewals** | `%d / %d` |\n\n", st.Lease.Renewals, st.Lease.MaxRenewals))
-
-	if len(st.Artifacts) > 0 {
-		sb.WriteString("#### Published Artifacts\n\n")
-		sb.WriteString("| Type | Producer | Verdict | Summary | Updated |\n| :--- | :--- | :--- | :--- | :--- |\n")
-		for _, a := range st.Artifacts {
-			verdict := a.Verdict
-			if verdict == "" {
-				verdict = "-"
+		if _, err = ps.CompareAndSwapAndPublish(ctx, n, rev, raw, branch, head); err != nil {
+			if errors.Is(err, coordination.ErrConflict) {
+				return nil, ErrClaimFence
 			}
-			sb.WriteString(fmt.Sprintf("| `%s` (v%d) | `%s` | `%s` | %s | `%s` |\n",
-				a.Type, a.Version, a.Producer, verdict, a.Summary, a.CreatedAt.Format(time.RFC3339)))
+			return nil, err
 		}
-		sb.WriteString("\n")
-
-		for _, a := range st.Artifacts {
-			sb.WriteString(fmt.Sprintf("<details>\n<summary>Artifact: <strong>%s</strong> (%s)</summary>\n\n%s\n\n</details>\n\n",
-				a.Type, a.Summary, strings.TrimSpace(a.Body)))
+		m.project(ctx, n, st)
+		return st, nil
+	}
+	return m.save(ctx, n, rev, st)
+}
+func (m *Manager) GetCurrentState(ctx context.Context, n int) (*IssueState, error) {
+	st, _, err := m.load(ctx, n)
+	return st, err
+}
+func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
+	if st == nil || wu == nil || st.TaskDigest != contract.DigestWorkUnit(wu) {
+		return ErrApprovalRequired
+	}
+	gate := st.EffectiveGate
+	if gate == "" {
+		var err error
+		gate, err = contract.ResolveGate(wu.Gate, "", "")
+		if err != nil {
+			return err
 		}
 	}
+	if gate == contract.GateNone {
+		return nil
+	}
+	var plan, test, review *contract.Artifact
+	for i := range st.Artifacts {
+		a := &st.Artifacts[i]
+		switch a.Type {
+		case contract.ArtifactDesign:
+			plan = a
+		case contract.ArtifactTestPlan:
+			test = a
+		case contract.ArtifactReview:
+			review = a
+		}
+	}
+	if plan == nil || test == nil || review == nil || review.Verdict != "APPROVED" {
+		return ErrApprovalRequired
+	}
+	if review.Metadata["task_digest"] != st.TaskDigest || review.Metadata["policy_digest"] != st.PolicyDigest || review.Metadata["plan_digest"] != hash(plan.Body) || review.Metadata["test_plan_digest"] != hash(test.Body) {
+		return ErrApprovalRequired
+	}
+	kind := review.Metadata["kind"]
+	if gate == contract.GateAgent && kind != "agent" && !(kind == "human" && review.Metadata["actor"] != "") {
+		return ErrApprovalRequired
+	}
+	if gate == contract.GateHuman && (kind != "human" || review.Metadata["actor"] == "") {
+		return ErrApprovalRequired
+	}
+	return nil
+}
 
-	return sb.String(), nil
+func hash(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
 }

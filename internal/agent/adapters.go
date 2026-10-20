@@ -1,51 +1,32 @@
 package agent
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 type CLIAdapter struct {
-	agentName string
-	binary    string
-}
-
-func NewRunner(agentName string) (Runner, error) {
-	name := strings.ToLower(strings.TrimSpace(agentName))
-	if name == "" {
-		name = "claude"
-	}
-	switch name {
-	case "claude", "codex", "opencode", "omp", "grok", "dot", "custom":
-		bin := name
-		switch name {
-		case "custom":
-			if envBin := os.Getenv("SWARM_CUSTOM_AGENT_BIN"); envBin != "" {
-				bin = envBin
-			}
-		case "grok":
-			if envBin := os.Getenv("SWARM_GROK_BIN"); envBin != "" {
-				bin = envBin
-			}
-		case "dot":
-			if envBin := os.Getenv("SWARM_DOT_BIN"); envBin != "" {
-				bin = envBin
-			}
-		}
-		return &CLIAdapter{agentName: name, binary: bin}, nil
-	case "mock":
-		return &MockRunner{}, nil
-	default:
-		return nil, fmt.Errorf("unsupported agent %q (expected claude, codex, opencode, omp, grok, dot, custom, or mock)", agentName)
-	}
+	agentName        string
+	driver           string
+	binary           string
+	prefixArgs       []string
+	model            string
+	envAllow         []string
+	sandboxRuntime   string
+	reviewNetwork    bool
+	containerRuntime string
+	container        string
 }
 
 func (a *CLIAdapter) Name() string {
@@ -68,82 +49,140 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 	headless := strings.EqualFold(req.Mode, "headless") || req.Mode == ""
 	combinedPrompt := fmt.Sprintf("Read %s and .swarm/active/WORKUNIT.md first.\n\n%s", sysFile, req.TaskPrompt)
 
-	switch a.agentName {
+	var args []string
+	switch a.driver {
 	case "claude":
 		if headless {
-			return a.binary, []string{"-p", "--append-system-prompt-file", sysFile, req.TaskPrompt}
+			args = []string{"-p", "--append-system-prompt-file", sysFile, req.TaskPrompt}
+		} else {
+			args = []string{"--append-system-prompt-file", sysFile, req.TaskPrompt}
 		}
-		return a.binary, []string{"--append-system-prompt-file", sysFile, req.TaskPrompt}
-
 	case "omp":
 		if headless {
-			return a.binary, []string{"-p", "--no-pty", "--append-system-prompt", sysFile, req.TaskPrompt}
+			args = []string{"-p", "--no-pty", "--append-system-prompt", sysFile, req.TaskPrompt}
+		} else {
+			args = []string{"--append-system-prompt", sysFile, req.TaskPrompt}
 		}
-		return a.binary, []string{"--append-system-prompt", sysFile, req.TaskPrompt}
-
 	case "codex", "dot":
 		if headless {
-			return a.binary, []string{"exec", combinedPrompt}
+			args = []string{"exec", combinedPrompt}
+		} else {
+			args = []string{req.TaskPrompt}
 		}
-		return a.binary, []string{req.TaskPrompt}
-
 	case "grok":
 		if headless {
-			return a.binary, []string{"-p", combinedPrompt}
+			args = []string{"-p", combinedPrompt}
+		} else {
+			args = []string{req.TaskPrompt}
 		}
-		return a.binary, []string{req.TaskPrompt}
-
 	case "opencode":
 		if headless {
-			return a.binary, []string{"run", combinedPrompt}
+			args = []string{"run", combinedPrompt}
+		} else {
+			args = []string{"--prompt", req.TaskPrompt}
 		}
-		return a.binary, []string{"--prompt", req.TaskPrompt}
 	default:
-		return a.binary, []string{combinedPrompt}
+		args = []string{combinedPrompt}
 	}
+	if req.Model != "" {
+		switch a.driver {
+		case "claude", "codex", "omp", "opencode":
+			args = append([]string{"--model", req.Model}, args...)
+		}
+	}
+	return a.binary, append(append([]string(nil), a.prefixArgs...), args...)
 }
 
 func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	bin, args := a.BuildCommand(req)
+	if a.sandboxRuntime != "container" {
+		resolvedBin, err := exec.LookPath(bin)
+		if err != nil {
+			return nil, fmt.Errorf("resolve agent %q binary %q: %w", a.agentName, bin, err)
+		}
+		bin = resolvedBin
+	}
 	fullCmd := append([]string{bin}, args...)
+	agentHome, err := os.MkdirTemp("", "swarm-agent-home-*")
+	if err != nil {
+		return nil, fmt.Errorf("create isolated agent home: %w", err)
+	}
+	defer os.RemoveAll(agentHome)
+	agentHome, err = filepath.EvalSymlinks(agentHome)
+	if err != nil {
+		return nil, fmt.Errorf("resolve isolated agent home: %w", err)
+	}
+	for _, path := range []string{agentHome, filepath.Join(agentHome, ".config"), filepath.Join(agentHome, ".cache"), filepath.Join(agentHome, ".local", "share"), filepath.Join(agentHome, "tmp")} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	var cmd *exec.Cmd
+	var containerIDFile string
+	if req.ReadOnly && a.sandboxRuntime == "container" {
+		controlDir, err := os.MkdirTemp("", "swarm-container-control-*")
+		if err != nil {
+			return nil, err
+		}
+		defer os.RemoveAll(controlDir)
+		containerIDFile = filepath.Join(controlDir, "container.id")
+	}
+	if req.ReadOnly {
+		cmd, err = sandbox.ReadOnlyCommand(req.WorktreePath, filepath.Join(req.WorktreePath, ".swarm", "active-output"), bin, args, sandbox.Options{
+			Runtime: a.sandboxRuntime, ContainerRuntime: a.containerRuntime, ContainerImage: a.container,
+			ContainerIDFile: containerIDFile, Home: agentHome, DenyPaths: req.DenyPaths,
+			AllowNetwork: a.reviewNetwork, Env: a.envAllow,
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cmd = exec.Command(bin, args...)
+		cmd.Dir = req.WorktreePath
+	}
+	cmd.Env = restrictedEnv(a.envAllow, agentHome)
+	process.Configure(cmd)
+	cmd.WaitDelay = time.Second
 
-	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Dir = req.WorktreePath
-
-	var outBuf bytes.Buffer
-	if strings.EqualFold(req.Mode, "interactive") {
+	var outBuf process.Output
+	if strings.EqualFold(req.Mode, "interactive") && !req.ReadOnly {
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
 		cmd.Stderr = io.MultiWriter(os.Stderr, &outBuf)
 	} else {
-		cmd.Stdout = &outBuf
-		cmd.Stderr = &outBuf
+		cmd.Stdout, cmd.Stderr = &outBuf, &outBuf
 	}
-
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start agent %q: %w", a.agentName, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		process.Stop(cmd)
+		err = <-done
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
+	process.Stop(cmd)
+	if err != nil && containerIDFile != "" {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = errors.Join(err, sandbox.RemoveContainer(cleanupCtx, cmd.Path, cmd.Env, containerIDFile))
+		cancel()
+	}
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
 			exitCode = 1
 		}
-		return &RunResult{
-			Agent:    a.agentName,
-			Role:     req.Role,
-			Command:  fullCmd,
-			ExitCode: exitCode,
-			Output:   outBuf.String(),
-		}, fmt.Errorf("agent %q (%s) failed (exit %d): %w\n%s", a.agentName, req.Role, exitCode, err, strings.TrimSpace(outBuf.String()))
+		return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: exitCode, Output: outBuf.String()}, fmt.Errorf("agent %q (%s) failed (exit %d): %w\n%s", a.agentName, req.Role, exitCode, err, strings.TrimSpace(outBuf.String()))
 	}
-
-	return &RunResult{
-		Agent:    a.agentName,
-		Role:     req.Role,
-		Command:  fullCmd,
-		ExitCode: 0,
-		Output:   outBuf.String(),
-	}, nil
+	return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: 0, Output: outBuf.String()}, nil
 }
 
 // MockRunner is a deterministic adapter for unit/CI tests and offline dry-runs (--agent mock).

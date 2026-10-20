@@ -2,4 +2,5 @@
 .swarm/worktrees/
 .swarm/active/
 .swarm/local-tracker/
+.swarm/coordination/
 bin/

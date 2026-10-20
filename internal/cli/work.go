@@ -1,131 +1,162 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
 )
 
 func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
-	var (
-		agentName      string
-		plannerAgent   string
-		reviewerAgent  string
-		developerAgent string
-		testerAgent    string
-		phase          string
-		gate           string
-		headless       bool
-		handoff        bool
-		nextReady      bool
-		allRepos       bool
-	)
-
+	var agentName, plannerAgent, reviewerAgent, developerAgent, testerAgent, phase, gate string
+	var headless, handoff, nextReady, allRepos, jsonOutput, dryRun bool
 	cmd := &cobra.Command{
 		Use:   "work [<issue-number>]",
-		Short: "Execute SwarmOS Plan-Review-Implement-Validate workflow for an issue (or --next available)",
+		Short: "Run an approved task through planning, review, and implementation",
 		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var (
-				issueNum int
-				repoRoot string
-				tr       tracker.Tracker
-				err      error
-			)
-
-			targetPhase := phase
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && nextReady {
+				return fmt.Errorf("<issue-number> and --next are mutually exclusive")
+			}
+			if len(args) == 0 && !nextReady {
+				return fmt.Errorf("issue number is required (or pass --next)")
+			}
+			if allRepos && !nextReady {
+				return fmt.Errorf("--all requires --next")
+			}
+			if err := contract.ValidatePhase(phase); err != nil {
+				return fmt.Errorf("invalid --phase: %w", err)
+			}
+			if err := contract.ValidateGate(contract.GateMode(gate)); err != nil {
+				return fmt.Errorf("invalid --gate: %w", err)
+			}
+			if dryRun && nextReady {
+				return fmt.Errorf("--dry-run requires an explicit issue number")
+			}
+			if handoff && phase != "plan" && phase != "review" {
+				return fmt.Errorf("--handoff requires --phase plan or --phase review")
+			}
+			if jsonOutput && !headless {
+				return fmt.Errorf("--json requires headless execution")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			if jsonOutput {
+				defer func() {
+					if runErr != nil {
+						_ = writeJSON(cmd, map[string]any{"kind": "work", "status": "failed", "error": runErr.Error()})
+					}
+				}()
+			}
+			opts := workflow.WorkOptions{AgentName: agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
+				DeveloperAgent: developerAgent, TesterAgent: testerAgent, Phase: phase, Gate: contract.GateMode(gate), Headless: headless, Handoff: handoff}
+			var tr tracker.Tracker
+			var err error
 			if nextReady {
-				pulled, pErr := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, agentName, 0)
-				if pErr != nil {
-					return pErr
-				}
-				issueNum = pulled.Issue.Number
-				repoRoot = pulled.RepoRoot
-				if targetPhase == "all" && pulled.TargetPhase != "" && pulled.TargetPhase != "all" {
-					targetPhase = pulled.TargetPhase
-				}
-				tr, _, _, err = rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
-					Repo:    pulled.Repo,
-					Path:    pulled.RepoRoot,
-					Backend: pulled.Backend,
-				})
+				pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, opts, 0)
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Auto-selected [%s] issue #%d: %s (phase=%s)\n",
-					pulled.Repo, issueNum, pulled.Issue.Title, targetPhase)
-			} else {
-				if len(args) == 0 {
-					return fmt.Errorf("issue number is required (or pass --next to pull the next ready issue)")
+				opts.IssueNumber, opts.RepoRoot, opts.Phase, opts.ClaimID = pulled.Issue.Number, pulled.RepoRoot, pulled.TargetPhase, pulled.State.Lease.ClaimID
+				tr, _, _, err = rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend})
+				if err != nil {
+					return err
 				}
-				issueNum, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-				if err != nil || issueNum <= 0 {
+			} else {
+				opts.IssueNumber, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
+				if err != nil || opts.IssueNumber <= 0 {
 					return fmt.Errorf("invalid issue number %q", args[0])
 				}
-				repoRoot = rootOpts.resolveRepoRoot()
+				opts.RepoRoot = rootOpts.resolveRepoRoot()
 				tr, err = rootOpts.resolveTracker(cmd)
 				if err != nil {
 					return err
 				}
 			}
-
-			eng, err := workflow.NewEngine(repoRoot, tr)
+			engine, err := workflow.NewEngine(opts.RepoRoot, tr)
 			if err != nil {
 				return err
 			}
-
-			res, err := eng.ExecuteWork(cmd.Context(), workflow.WorkOptions{
-				RepoRoot:       repoRoot,
-				IssueNumber:    issueNum,
-				AgentName:      agentName,
-				PlannerAgent:   plannerAgent,
-				ReviewerAgent:  reviewerAgent,
-				DeveloperAgent: developerAgent,
-				TesterAgent:    testerAgent,
-				Phase:          targetPhase,
-				Gate:           contract.GateMode(gate),
-				Headless:       headless,
-				Handoff:        handoff,
-			})
+			if !dryRun {
+				lock, err := lockClaim(opts.RepoRoot, opts.IssueNumber)
+				if err != nil {
+					return err
+				}
+				defer unlockClaim(lock)
+				if opts.ClaimID == "" {
+					claimID, tokenErr := loadClaimToken(opts.RepoRoot, opts.IssueNumber)
+					if tokenErr == nil {
+						state, err := engine.LeaseManager.GetCurrentState(cmd.Context(), opts.IssueNumber)
+						if err != nil {
+							return err
+						}
+						if state.Lease.Status == "active" && state.Lease.ExpiresAt.After(time.Now()) && state.Lease.ClaimID == claimID {
+							opts.ClaimID = claimID
+						}
+					} else if !os.IsNotExist(tokenErr) {
+						return fmt.Errorf("load persisted claim: %w", tokenErr)
+					}
+				}
+				opts.OnClaim = func(state *lease.IssueState) error {
+					return saveClaimToken(opts.RepoRoot, opts.IssueNumber, state.Lease.ClaimID)
+				}
+			}
+			if dryRun {
+				preflight, err := engine.Preflight(cmd.Context(), opts)
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd, map[string]any{"kind": "work-dry-run", "issue_number": opts.IssueNumber, "effective_plan": preflight})
+			}
+			result, err := engine.ExecuteWork(cmd.Context(), opts)
 			if err != nil {
 				return err
 			}
-
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Completed workflow phase %q for issue #%d in %s (branch %s)\n",
-				res.PhaseCompleted, res.IssueNumber, res.WorktreePath, res.BranchName)
-			if res.ReviewVerdict != "" {
-				fmt.Fprintf(out, "  Plan Review Verdict: %s\n", res.ReviewVerdict)
+			status := "completed"
+			if result.PausedForHuman {
+				status = "paused"
+			} else if result.HandedOffToPhase != "" {
+				status = "handed-off"
 			}
-			if res.HandedOffToPhase != "" {
-				fmt.Fprintf(out, "  Handoff: Ready for next contributor/node on phase %q\n", res.HandedOffToPhase)
+			if jsonOutput {
+				return writeJSON(cmd, map[string]any{"kind": "work", "status": status, "result": result})
 			}
-			if res.PausedForHuman {
-				fmt.Fprintf(out, "  Gate: Paused for human review (label swarm:plan-review applied). Run `swarm review %d --approve` to continue.\n", res.IssueNumber)
+			fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d %s: phase=%s branch=%s validation=%t\n", result.IssueNumber, status, result.PhaseCompleted, result.BranchName, result.ValidationPassed)
+			if result.PausedForHuman {
+				fmt.Fprintf(cmd.OutOrStdout(), "Human approval required: swarm review %d --approve\n", result.IssueNumber)
 			}
-			if res.ValidationPassed {
-				fmt.Fprintln(out, "  Validation: PASS")
+			if result.HandedOffToPhase != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s\n", result.HandedOffToPhase)
 			}
 			return nil
 		},
 	}
-
-	cmd.Flags().StringVar(&agentName, "agent", "", "Default agent harness for all roles (claude, codex, opencode, omp, mock)")
-	cmd.Flags().StringVar(&plannerAgent, "planner-agent", "", "Agent harness for the planner role")
-	cmd.Flags().StringVar(&reviewerAgent, "reviewer-agent", "", "Agent harness for the reviewer role")
-	cmd.Flags().StringVar(&developerAgent, "developer-agent", "", "Agent harness for the developer role")
-	cmd.Flags().StringVar(&testerAgent, "tester-agent", "", "Agent harness for the tester role")
-	cmd.Flags().StringVar(&phase, "phase", "all", "Workflow phase to run: all, plan, or implement")
-	cmd.Flags().StringVar(&gate, "gate", "", "Plan review gate override: none, agent, or human")
-	cmd.Flags().BoolVar(&headless, "headless", false, "Run agent non-interactively")
-	cmd.Flags().BoolVar(&handoff, "handoff", false, "Transition lease to collaborative handoff state after completing phase")
-	cmd.Flags().BoolVar(&nextReady, "next", false, "Automatically pull and work on the next unclaimed/handed-off swarm:ready issue")
-	cmd.Flags().BoolVar(&allRepos, "all", false, "With --next, search across all registered repositories")
+	cmd.Flags().StringVar(&agentName, "agent", "", "Configured agent for all roles")
+	cmd.Flags().StringVar(&plannerAgent, "planner-agent", "", "Configured planner override")
+	cmd.Flags().StringVar(&reviewerAgent, "reviewer-agent", "", "Configured reviewer override")
+	cmd.Flags().StringVar(&developerAgent, "developer-agent", "", "Configured developer override")
+	cmd.Flags().StringVar(&testerAgent, "tester-agent", "", "Configured tester override")
+	cmd.Flags().StringVar(&phase, "phase", "all", "Phase: all, plan, review, or implement")
+	cmd.Flags().StringVar(&gate, "gate", "", "Require gate none, agent, or human; cannot weaken policy")
+	cmd.Flags().BoolVar(&headless, "headless", true, "Run agents non-interactively (false requires a terminal)")
+	cmd.Flags().BoolVar(&handoff, "handoff", false, "Checkpoint and release to the next phase")
+	cmd.Flags().BoolVar(&nextReady, "next", false, "Claim the next approved ready task")
+	cmd.Flags().BoolVar(&allRepos, "all", false, "With --next, scan registered repositories")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit a structured outcome")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Inspect effective policy without claiming or running agents")
 	return cmd
+}
+
+func writeJSON(cmd *cobra.Command, value any) error {
+	return json.NewEncoder(cmd.OutOrStdout()).Encode(value)
 }

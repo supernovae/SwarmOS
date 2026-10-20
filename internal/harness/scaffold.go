@@ -1,12 +1,17 @@
 package harness
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"gopkg.in/yaml.v3"
@@ -48,7 +53,9 @@ func DetectStack(repoRoot string) StackProfile {
 				"Avoid unwrap() in production code paths.",
 			},
 		}
-	case fileExists(filepath.Join(repoRoot, "pyproject.toml")):
+	case fileExists(filepath.Join(repoRoot, "pyproject.toml")) ||
+		fileExists(filepath.Join(repoRoot, "requirements.txt")) ||
+		fileExists(filepath.Join(repoRoot, "requirements-dev.txt")):
 		return StackProfile{
 			Language: "Python",
 			BuildCmd: "python3 -m compileall .",
@@ -73,9 +80,9 @@ func DetectStack(repoRoot string) StackProfile {
 	default:
 		return StackProfile{
 			Language: "Generic",
-			BuildCmd: "true",
-			TestCmd:  "true",
-			LintCmd:  "true",
+			BuildCmd: "printf '%s\\n' 'Configure project-specific required checks before approving work' >&2; exit 1",
+			TestCmd:  "printf '%s\\n' 'Configure project-specific required checks before approving work' >&2; exit 1",
+			LintCmd:  "printf '%s\\n' 'Configure project-specific required checks before approving work' >&2; exit 1",
 			Conventions: []string{
 				"Keep changes minimal, atomic, and well-tested.",
 			},
@@ -83,18 +90,121 @@ func DetectStack(repoRoot string) StackProfile {
 	}
 }
 
+const (
+	setupNodeSHA        = "949feb2413d6458794dcd2491c4babbbce0c15c1" // actions/setup-node v7.1.0
+	setupPythonSHA      = "5fda3b95a4ea91299a34e894583c3862153e4b97" // actions/setup-python v7.0.0
+	setupRustSHA        = "ecabd13d1c56bd1345c230e542e9144811ad706f" // actions-rust-lang/setup-rust-toolchain v2.0.0
+	pythonPytestVersion = "9.1.1"
+	pythonRuffVersion   = "0.17.1"
+)
+
+func workflowDefaultBranch(repoRoot string) (string, string) {
+	runGit := func(args ...string) (string, error) {
+		out, err := exec.Command("git", append([]string{"-C", repoRoot}, args...)...).Output()
+		return strings.TrimSpace(string(out)), err
+	}
+
+	if ref, err := runGit("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
+		if branch, ok := strings.CutPrefix(ref, "origin/"); ok && branch != "" {
+			return branch, ""
+		}
+	}
+
+	if _, err := runGit("config", "--get", "remote.origin.url"); err == nil {
+		if refs, err := runGit("ls-remote", "--symref", "origin", "HEAD"); err == nil {
+			for _, line := range strings.Split(refs, "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 3 && fields[0] == "ref:" && fields[2] == "HEAD" {
+					if branch, ok := strings.CutPrefix(fields[1], "refs/heads/"); ok && branch != "" {
+						return branch, ""
+					}
+				}
+			}
+		}
+		return "", "CI workflow omitted: could not resolve origin's default branch; fetch origin and rerun init"
+	}
+
+	if branch, err := runGit("symbolic-ref", "--quiet", "--short", "HEAD"); err == nil && branch != "" {
+		return branch, ""
+	}
+	return "", "CI workflow omitted: no default branch is known; create or check out the intended default branch and rerun init"
+}
+
+func yamlQuotedString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func projectRuntimeSetup(stack StackProfile) string {
+	switch stack.Language {
+	case "Go":
+		return `      - name: Set up consumer Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+`
+	case "TypeScript/JavaScript":
+		return `      - name: Set up Node.js
+        uses: actions/setup-node@` + setupNodeSHA + ` # v7.1.0
+        with:
+          node-version: '24.22.0'
+          package-manager-cache: false
+      - name: Install Node dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+`
+	case "Python":
+		return `      - name: Set up Python
+        uses: actions/setup-python@` + setupPythonSHA + ` # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install Python validation dependencies
+        run: |
+          python -m pip install pytest==` + pythonPytestVersion + ` ruff==` + pythonRuffVersion + `
+          if [ -f requirements.txt ]; then python -m pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+          # Projects declaring dependencies only in pyproject.toml must configure them explicitly.
+`
+	case "Rust":
+		return `      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@` + setupRustSHA + ` # v2.0.0
+        with:
+          components: clippy
+          rustflags: ''
+`
+	default:
+		return `      - name: Configure project runtime
+        run: |
+          echo 'Configure project-specific runtime prerequisites and required checks in .swarm/validation/required-checks.yaml.' >&2
+          exit 1
+`
+	}
+}
+
 type InitOptions struct {
-	RepoRoot string
-	Force    bool
+	RepoRoot     string
+	Force        bool
+	SwarmVersion string
 }
 
 type InitResult struct {
 	CreatedFiles []string
 	SkippedFiles []string
 	Stack        StackProfile
+	Warnings     []string
 }
 
 func InitRepository(opts InitOptions) (*InitResult, error) {
+	if opts.SwarmVersion != "" {
+		immutable := regexp.MustCompile(`^(v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?|[0-9a-f]{40})$`)
+		if !immutable.MatchString(opts.SwarmVersion) || strings.HasPrefix(opts.SwarmVersion, "v0.1.") || strings.HasPrefix(opts.SwarmVersion, "v0.0.") {
+			return nil, fmt.Errorf("swarm version must be a compatible immutable release tag (v0.2.0 or newer) or full commit SHA")
+		}
+	}
 	root := opts.RepoRoot
 	if root == "" {
 		root = "."
@@ -186,6 +296,9 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 			".github/workflows/**",
 			".swarm/validation/**",
 			".swarm/contracts/**",
+			".swarm/config.yaml",
+			".swarm/prompts/**",
+			".swarm/workflows/**",
 		},
 	}
 	valBytes, err := yaml.Marshal(&valSpec)
@@ -200,8 +313,25 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	if err := copyEmbedded("templates/github/ISSUE_TEMPLATE/swarm-workunit.yml", ".github/ISSUE_TEMPLATE/swarm-workunit.yml"); err != nil {
 		return nil, err
 	}
-	if err := copyEmbedded("templates/github/workflows/swarm-validate.yml", ".github/workflows/swarm-validate.yml"); err != nil {
-		return nil, err
+	if opts.SwarmVersion == "" {
+		res.Warnings = append(res.Warnings, "CI workflow omitted: rerun swarm init --swarm-version <compatible-release-tag-or-full-commit-SHA> to pin the validator; v0.1.x lacks trusted-base validation")
+	} else {
+		data, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-validate.yml")
+		if err != nil {
+			return nil, err
+		}
+		branch, warning := workflowDefaultBranch(root)
+		if warning != "" {
+			res.Warnings = append(res.Warnings, warning)
+		}
+		if branch != "" {
+			data = bytes.ReplaceAll(data, []byte("SWARM_VERSION_PIN"), []byte(opts.SwarmVersion))
+			data = bytes.ReplaceAll(data, []byte("DEFAULT_BRANCH_YAML"), []byte(yamlQuotedString(branch)))
+			data = bytes.ReplaceAll(data, []byte("      # PROJECT_RUNTIME_SETUP"), []byte(projectRuntimeSetup(stack)))
+			if err := writeFile(".github/workflows/swarm-validate.yml", data); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// 8. Universal Slash Commands (.claude/commands/ and .opencode/command/)
@@ -210,7 +340,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	}
 
 	// 9. Update .gitignore
-	if err := ensureGitignoreEntries(root, []string{".swarm/worktrees/", ".swarm/active/", ".swarm/local-tracker/"}); err != nil {
+	if err := ensureGitignoreEntries(root, []string{".swarm/worktrees/", ".swarm/active/", ".swarm/local-tracker/", ".swarm/coordination/"}); err != nil {
 		return nil, err
 	}
 
@@ -248,38 +378,115 @@ func EnsureSlashCommands(root string, force bool, res *InitResult) error {
 }
 
 func LoadConfig(repoRoot string) (*contract.SwarmConfig, error) {
-	path := filepath.Join(repoRoot, ".swarm", "config.yaml")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".swarm", "config.yaml"))
 	if err != nil {
-		// Return sensible defaults if not initialized yet
-		var cfg contract.SwarmConfig
-		raw, _ := embeddedTemplates.ReadFile("templates/swarm/config.yaml")
-		_ = yaml.Unmarshal(raw, &cfg)
-		return &cfg, err
+		return nil, fmt.Errorf("read .swarm/config.yaml (run swarm init first): %w", err)
 	}
+	return decodeConfig(data)
+}
+
+// LoadConfigAt reads policy from the approved immutable commit, never candidate files.
+func LoadConfigAt(repoRoot, baseSHA string) (*contract.SwarmConfig, error) {
+	data, err := readAt(repoRoot, baseSHA, ".swarm/config.yaml")
+	if err != nil {
+		return nil, err
+	}
+	return decodeConfig(data)
+}
+
+func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	var cfg contract.SwarmConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := decodeStrictYAML(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse .swarm/config.yaml: %w", err)
+	}
+	if cfg.Version != 1 || cfg.DefaultAgent == "" || len(cfg.Agents) == 0 {
+		return nil, fmt.Errorf("config requires version: 1, default_agent, and an agents allowlist")
+	}
+	if _, ok := cfg.Agents[cfg.DefaultAgent]; !ok {
+		return nil, fmt.Errorf("default agent %q is not in the agents allowlist", cfg.DefaultAgent)
+	}
+	if cfg.DefaultGate != contract.GateNone && cfg.DefaultGate != contract.GateAgent && cfg.DefaultGate != contract.GateHuman {
+		return nil, fmt.Errorf("default_gate must be none, agent, or human")
+	}
+	if !cfg.Security.RequireReadyLabel || strings.TrimSpace(cfg.Security.ReadyLabel) == "" {
+		return nil, fmt.Errorf("security requires require_ready_label: true and a nonempty ready_label")
+	}
+	if d, err := time.ParseDuration(cfg.Lease.Duration); err != nil || d <= 0 || cfg.Lease.MaxRenewals < 0 {
+		return nil, fmt.Errorf("lease requires a positive duration and nonnegative max_renewals")
+	}
+	for role, name := range cfg.Roles {
+		switch role {
+		case "planner", "reviewer", "developer", "tester":
+		default:
+			return nil, fmt.Errorf("unknown role %q", role)
+		}
+		if _, ok := cfg.Agents[name]; !ok {
+			return nil, fmt.Errorf("role %s uses unapproved agent %q", role, name)
+		}
+	}
+	for name, agent := range cfg.Agents {
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(agent.Binary) == "" {
+			return nil, fmt.Errorf("agents require nonempty names and executable paths")
+		}
 	}
 	return &cfg, nil
 }
 
-func LoadWorkflow(repoRoot, name string) (*contract.WorkflowSpec, error) {
-	if name == "" {
-		name = "feature"
+func readAt(root, sha, path string) ([]byte, error) {
+	if len(sha) != 40 && len(sha) != 64 {
+		return nil, fmt.Errorf("approved base must be a full commit SHA")
 	}
-	path := filepath.Join(repoRoot, ".swarm", "workflows", name+".yaml")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		// Fallback to embedded workflow template
-		data, err = embeddedTemplates.ReadFile("templates/swarm/workflows/" + name + ".yaml")
-		if err != nil {
-			return nil, fmt.Errorf("workflow %q not found: %w", name, err)
+	for _, c := range sha {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return nil, fmt.Errorf("invalid approved base SHA")
 		}
 	}
+	out, err := exec.Command("git", "-C", root, "show", sha+":"+path).Output()
+	if err != nil {
+		return nil, fmt.Errorf("read approved %s at %s: %w", path, sha, err)
+	}
+	return out, nil
+}
+
+func LoadWorkflow(repoRoot, name string) (*contract.WorkflowSpec, error) {
+	if err := validateWorkflowName(name); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(repoRoot, ".swarm", "workflows", name+".yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("read workflow %q: %w", name, err)
+	}
+	return decodeWorkflow(data)
+}
+
+func LoadWorkflowAt(repoRoot, name, baseSHA string) (*contract.WorkflowSpec, error) {
+	if err := validateWorkflowName(name); err != nil {
+		return nil, err
+	}
+	data, err := readAt(repoRoot, baseSHA, ".swarm/workflows/"+name+".yaml")
+	if err != nil {
+		return nil, err
+	}
+	return decodeWorkflow(data)
+}
+
+func validateWorkflowName(name string) error {
+	if name == "" || filepath.Base(name) != name || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		return fmt.Errorf("workflow must be a nonempty name without path separators")
+	}
+	return nil
+}
+
+func decodeWorkflow(data []byte) (*contract.WorkflowSpec, error) {
 	var wf contract.WorkflowSpec
-	if err := yaml.Unmarshal(data, &wf); err != nil {
-		return nil, fmt.Errorf("parse workflow %q: %w", name, err)
+	if err := decodeStrictYAML(data, &wf); err != nil {
+		return nil, fmt.Errorf("parse workflow: %w", err)
+	}
+	if wf.Name == "" || len(wf.Steps) == 0 {
+		return nil, fmt.Errorf("workflow requires a name and prompt recipe steps")
+	}
+	if wf.DefaultGate != "" && wf.DefaultGate != contract.GateNone && wf.DefaultGate != contract.GateAgent && wf.DefaultGate != contract.GateHuman {
+		return nil, fmt.Errorf("invalid workflow default_gate %q", wf.DefaultGate)
 	}
 	return &wf, nil
 }
@@ -290,22 +497,73 @@ func LoadValidationSpec(repoRoot string) (*contract.ValidationSpec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read .swarm/validation/required-checks.yaml: %w", err)
 	}
+	return DecodeValidationSpec(data)
+}
+
+func LoadValidationSpecAt(repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
+	data, err := readAt(repoRoot, baseSHA, ".swarm/validation/required-checks.yaml")
+	if err != nil {
+		return nil, err
+	}
+	return DecodeValidationSpec(data)
+}
+
+func DecodeValidationSpec(data []byte) (*contract.ValidationSpec, error) {
 	var spec contract.ValidationSpec
-	if err := yaml.Unmarshal(data, &spec); err != nil {
+	if err := decodeStrictYAML(data, &spec); err != nil {
 		return nil, fmt.Errorf("parse required-checks.yaml: %w", err)
+	}
+	if len(spec.RequiredChecks) == 0 || len(spec.ProtectedPaths) == 0 {
+		return nil, fmt.Errorf("validation policy requires at least one required check and one protected path")
+	}
+	names := make(map[string]bool, len(spec.RequiredChecks))
+	for _, check := range spec.RequiredChecks {
+		if strings.TrimSpace(check.Name) == "" || strings.TrimSpace(check.Command) == "" || names[check.Name] {
+			return nil, fmt.Errorf("required checks need unique nonempty names and nonempty commands")
+		}
+		if timeout, err := time.ParseDuration(check.Timeout); err != nil || timeout <= 0 {
+			return nil, fmt.Errorf("check %q requires a positive timeout", check.Name)
+		}
+		names[check.Name] = true
+	}
+	for _, path := range spec.ProtectedPaths {
+		if strings.TrimSpace(path) == "" || filepath.IsAbs(path) || strings.HasPrefix(path, "../") {
+			return nil, fmt.Errorf("protected paths must be nonempty repository-relative patterns")
+		}
 	}
 	return &spec, nil
 }
 
-func LoadRolePrompt(repoRoot, role string) string {
-	path := filepath.Join(repoRoot, ".swarm", "prompts", role+".md")
-	if data, err := os.ReadFile(path); err == nil {
-		return string(data)
+func decodeStrictYAML(data []byte, value any) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(value); err != nil {
+		return err
 	}
-	if data, err := embeddedTemplates.ReadFile("templates/swarm/prompts/" + role + ".md"); err == nil {
-		return string(data)
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("expected a single YAML document")
 	}
-	return fmt.Sprintf("# Role: %s\n", role)
+	return nil
+}
+
+func LoadRolePromptAt(repoRoot, role, baseSHA string) (string, error) {
+	switch role {
+	case "planner", "reviewer", "developer", "tester":
+	default:
+		return "", fmt.Errorf("unknown role %q", role)
+	}
+	data, err := readAt(repoRoot, baseSHA, ".swarm/prompts/"+role+".md")
+	if err != nil {
+		return "", err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return "", fmt.Errorf("approved %s prompt is empty", role)
+	}
+	return string(data), nil
 }
 
 type DoctorCheck struct {
@@ -405,22 +663,20 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 		})
 	}
 
-	// 4. Probe all 4 target agent harnesses: claude, codex, opencode, omp
-	for _, agentName := range []string{"claude", "codex", "opencode", "omp"} {
-		if binPath, err := exec.LookPath(agentName); err == nil {
-			checks = append(checks, DoctorCheck{
-				Category: "agent",
-				Name:     agentName,
-				Status:   "OK",
-				Detail:   binPath,
-			})
-		} else {
-			checks = append(checks, DoctorCheck{
-				Category: "agent",
-				Name:     agentName,
-				Status:   "WARN",
-				Detail:   "not found in PATH",
-			})
+	// Probe configured executables rather than assuming particular installed CLIs.
+	if cfg, err := LoadConfig(repoRoot); err == nil {
+		names := make([]string, 0, len(cfg.Agents))
+		for name := range cfg.Agents {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			binary := cfg.Agents[name].Binary
+			check := DoctorCheck{Category: "agent", Name: name, Status: "WARN", Detail: "executable not found: " + binary}
+			if path, err := exec.LookPath(binary); err == nil {
+				check.Status, check.Detail = "OK", path
+			}
+			checks = append(checks, check)
 		}
 	}
 

@@ -17,60 +17,50 @@ import (
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
-type RootOptions struct {
-	Backend  string
-	Repo     string
-	RepoRoot string
-}
+type RootOptions struct{ Backend, Repo, RepoRoot string }
 
 func NewRootCmd() *cobra.Command {
 	opts := &RootOptions{}
-
-	rootCmd := &cobra.Command{
-		Use:           "swarm",
-		Short:         "SwarmOS — Contract-driven multi-agent orchestration on GitHub Issues",
-		SilenceUsage:  true,
-		SilenceErrors: true,
+	rootCmd := &cobra.Command{Use: "swarm", Short: "SwarmOS — contract-driven multi-agent orchestration", SilenceUsage: true, SilenceErrors: true}
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if opts.Backend != "" && opts.Backend != "github" && opts.Backend != "local" {
+			return fmt.Errorf("unknown tracker backend %q (must be github or local)", opts.Backend)
+		}
+		if opts.Repo != "" {
+			return registry.ValidateRepoSlug(opts.Repo)
+		}
+		return nil
 	}
-
+	rootCmd.AddGroup(
+		&cobra.Group{ID: "setup", Title: "Setup:"},
+		&cobra.Group{ID: "tasks", Title: "Task lifecycle:"},
+		&cobra.Group{ID: "operations", Title: "Operations:"},
+	)
 	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", os.Getenv("SWARM_BACKEND"), "Tracker backend: github or local")
 	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", os.Getenv("SWARM_REPO"), "GitHub repository (owner/repo)")
-	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", "", "Repository root path (defaults to current working directory or registered repo path)")
-
-	rootCmd.AddCommand(
-		newInitCmd(opts),
-		newDoctorCmd(opts),
-		newRepoCmd(opts),
-		newNodeCmd(opts),
-		newIssueCmd(opts),
-		newDecomposeCmd(opts),
-		newClaimCmd(opts),
-		newPullCmd(opts),
-		newWorkCmd(opts),
-		newReviewCmd(opts),
-		newValidateCmd(opts),
-		newSubmitCmd(opts),
-		newStatusCmd(opts),
-		newRenewCmd(opts),
-		newReleaseCmd(opts),
-		newVersionCmd(),
-	)
-
+	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", "", "Repository root path")
+	rootCmd.AddCommand(newInitCmd(opts), newDoctorCmd(opts), newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newClaimCmd(opts), newPullCmd(opts), newWorkCmd(opts), newReviewCmd(opts), newValidateCmd(opts), newSubmitCmd(opts), newStatusCmd(opts), newRenewCmd(opts), newReleaseCmd(opts), newVersionCmd())
+	for _, command := range rootCmd.Commands() {
+		switch command.Name() {
+		case "init", "doctor", "repo", "version":
+			command.GroupID = "setup"
+		case "status", "node", "renew", "release":
+			command.GroupID = "operations"
+		default:
+			command.GroupID = "tasks"
+		}
+	}
+	rootCmd.SetHelpCommandGroupID("setup")
+	rootCmd.SetCompletionCommandGroupID("setup")
 	return rootCmd
 }
-
-func Execute() error {
-	return NewRootCmd().Execute()
-}
-
-// resolveRepoRoot returns the explicit --root, or looks up --repo in the user registry, or defaults to ".".
+func Execute() error { return NewRootCmd().Execute() }
 func (o *RootOptions) resolveRepoRoot() string {
 	if o.RepoRoot != "" {
 		return o.RepoRoot
 	}
 	if o.Repo != "" {
-		reg := registry.New("")
-		if entry, ok, err := reg.Get(o.Repo); err == nil && ok {
+		if entry, ok, err := registry.New("").Get(o.Repo); err == nil && ok {
 			if info, statErr := os.Stat(entry.Path); statErr == nil && info.IsDir() {
 				return entry.Path
 			}
@@ -78,7 +68,6 @@ func (o *RootOptions) resolveRepoRoot() string {
 	}
 	return "."
 }
-
 func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error) {
 	root := o.resolveRepoRoot()
 	backend := strings.ToLower(strings.TrimSpace(o.Backend))
@@ -87,45 +76,50 @@ func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error
 			backend = strings.ToLower(entry.Backend)
 		}
 	}
-	if backend == "local" {
+	if backend == "" && (o.Repo != "" || hasGitRemote(root)) {
+		backend = "github"
+	}
+	switch backend {
+	case "local":
 		return tracker.NewLocalTracker(root), nil
-	}
-	if backend == "github" {
-		return tracker.NewGitHubTracker(o.Repo)
-	}
-	if o.Repo != "" || hasGitRemote(root) {
-		gt, err := tracker.NewGitHubTracker(o.Repo)
-		if err == nil {
-			return gt, nil
+	case "github":
+		detected := registry.DetectGitHubSlug(root)
+		if detected == "" {
+			return nil, fmt.Errorf("GitHub coordination requires an origin remote identifying this repository")
 		}
+		if o.Repo != "" && !strings.EqualFold(o.Repo, detected) {
+			return nil, fmt.Errorf("repository identity mismatch: --repo %s does not match origin %s", o.Repo, detected)
+		}
+		return tracker.NewGitHubTracker(detected)
+	case "":
+		// Offline operation is never selected as a fallback.
+		return nil, fmt.Errorf("tracker backend is required; pass --backend local for offline use or --backend github")
+	default:
+		return nil, fmt.Errorf("unknown tracker backend %q (must be github or local)", o.Backend)
 	}
-	fmt.Fprintln(cmd.ErrOrStderr(), "Note: No GitHub remote configured; using local tracker (.swarm/local-tracker/state.json)")
-	return tracker.NewLocalTracker(root), nil
 }
-
 func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error) {
 	root := o.resolveRepoRoot()
 	tr, err := o.resolveTracker(cmd)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	cfg, _ := harness.LoadConfig(root)
+	cfg, err := harness.LoadConfig(root)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load SwarmOS configuration: %w", err)
+	}
 	if cfg == nil {
-		cfg = &contract.SwarmConfig{Version: 1, DefaultAgent: "claude"}
+		return nil, nil, nil, fmt.Errorf("missing .swarm/config.yaml; run swarm init")
 	}
 	mgr := lease.NewManager(tr, cfg.Security)
+	if err := mgr.ConfigureStore(root); err != nil {
+		return nil, nil, nil, fmt.Errorf("configure authoritative state store: %w", err)
+	}
 	return tr, mgr, cfg, nil
 }
-
 func (o *RootOptions) resolveTargetLeaseManager(cmd *cobra.Command, tgt registry.RepoEntry) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error) {
-	sub := &RootOptions{
-		Backend:  firstNonEmptyStr(o.Backend, tgt.Backend),
-		Repo:     tgt.Repo,
-		RepoRoot: tgt.Path,
-	}
-	return sub.resolveLeaseManager(cmd)
+	return (&RootOptions{Backend: firstNonEmptyStr(o.Backend, tgt.Backend), Repo: tgt.Repo, RepoRoot: tgt.Path}).resolveLeaseManager(cmd)
 }
-
 func firstNonEmptyStr(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {
@@ -134,12 +128,10 @@ func firstNonEmptyStr(vals ...string) string {
 	}
 	return ""
 }
-
 func hasGitRemote(repoRoot string) bool {
 	out, err := exec.Command("git", "-C", repoRoot, "remote").Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
-
 func resolveIssueAndWorktree(repoRoot string, args []string) (int, string, error) {
 	if len(args) > 0 {
 		num, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
@@ -156,8 +148,7 @@ func resolveIssueAndWorktree(repoRoot string, args []string) (int, string, error
 		return wu.IssueNumber, repoRoot, nil
 	}
 	wtRoot := filepath.Join(repoRoot, ".swarm", "worktrees")
-	entries, err := os.ReadDir(wtRoot)
-	if err == nil {
+	if entries, err := os.ReadDir(wtRoot); err == nil {
 		for _, e := range entries {
 			if e.IsDir() && strings.HasPrefix(e.Name(), "issue-") {
 				if num, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "issue-")); err == nil && num > 0 {

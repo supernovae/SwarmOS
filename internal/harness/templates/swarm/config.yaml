@@ -1,6 +1,6 @@
 version: 1
 default_agent: claude
-default_gate: none
+default_gate: agent
 lease:
   duration: 4h
   renewable: true
@@ -8,7 +8,6 @@ lease:
 security:
   require_ready_label: true
   ready_label: "swarm:ready"
-  trusted_associations: ["OWNER", "MEMBER", "COLLABORATOR"]
 agents:
   claude:
     binary: claude
@@ -18,7 +17,3 @@ agents:
     binary: opencode
   omp:
     binary: omp
-  grok:
-    binary: grok
-  dot:
-    binary: dot

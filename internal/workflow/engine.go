@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,31 +22,35 @@ import (
 )
 
 var (
-	ErrPlanReviewRejected   = errors.New("plan review requested changes")
-	ErrPlanApprovalNeeded   = errors.New("plan approval required before implementation")
-	ErrReviewerModifiedCode = errors.New("reviewer agent modified repository files outside .swarm/active/")
+	ErrPlanReviewRejected = errors.New("plan review requested changes")
+	ErrPlanApprovalNeeded = errors.New("plan approval required before implementation")
+	ErrLeaseLost          = errors.New("lease ownership lost during execution")
 )
 
 type WorkOptions struct {
 	RepoRoot       string
 	IssueNumber    int
 	Owner          string
+	ClaimID        string // explicit fencing token persisted by the CLI
 	AgentName      string
 	PlannerAgent   string
 	ReviewerAgent  string
 	DeveloperAgent string
 	TesterAgent    string
-	Phase          string            // "all", "plan", "implement"
-	Gate           contract.GateMode // "", "none", "agent", "human"
+	Phase          string // "all", "plan", "review", "implement"
+	Gate           contract.GateMode
 	Headless       bool
-	Handoff        bool // Release into collaborative handoff state after completing phase
+	Handoff        bool
 	LeaseDuration  time.Duration
+	OnClaim        func(*lease.IssueState) error // persist fencing token before setup
 }
 
 type WorkResult struct {
 	IssueNumber      int
 	WorktreePath     string
 	BranchName       string
+	BaseSHA          string
+	HeadSHA          string
 	PhaseCompleted   string
 	HandedOffToPhase string
 	PausedForHuman   bool
@@ -55,33 +60,51 @@ type WorkResult struct {
 	State            *lease.IssueState
 }
 
+// PreflightResult is the immutable execution selection made before a claim.
+type PreflightResult struct {
+	Issue        *tracker.Issue
+	WorkUnit     *contract.WorkUnit
+	Workflow     *contract.WorkflowSpec
+	Config       *contract.SwarmConfig
+	BaseSHA      string
+	Gate         contract.GateMode
+	Agents       map[string]string
+	Binaries     map[string]string
+	Validation   *contract.ValidationSpec
+	TaskDigest   string
+	PolicyDigest string
+	Phase        string
+}
+
 type Engine struct {
 	Tracker      tracker.Tracker
 	LeaseManager *lease.Manager
 	Config       *contract.SwarmConfig
+	repoRoot     string
 }
 
 func NewEngine(repoRoot string, tr tracker.Tracker) (*Engine, error) {
-	cfg, _ := harness.LoadConfig(repoRoot)
-	if cfg == nil {
-		cfg = &contract.SwarmConfig{
-			Version:      1,
-			DefaultAgent: "claude",
-			DefaultGate:  contract.GateNone,
-		}
+	cfg, err := harness.LoadConfig(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("load SwarmOS config: %w", err)
 	}
 	mgr := lease.NewManager(tr, cfg.Security)
+	if err := mgr.ConfigureStore(repoRoot); err != nil {
+		return nil, fmt.Errorf("configure coordination store: %w", err)
+	}
 	if prof, err := node.LoadOrDetectProfile(""); err == nil {
 		mgr.SetNodeProfile(prof)
 	}
-	return &Engine{
-		Tracker:      tr,
-		LeaseManager: mgr,
-		Config:       cfg,
-	}, nil
+	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot}, nil
 }
 
-func (e *Engine) resolveRoleAgent(role string, opts WorkOptions) string {
+// ResolveRoleAgent applies role override, generic override, repository role,
+// then repository default precedence. It performs no availability check.
+func (e *Engine) ResolveRoleAgent(role string, opts WorkOptions) string {
+	return resolveRoleAgent(e.Config, role, opts)
+}
+
+func resolveRoleAgent(cfg *contract.SwarmConfig, role string, opts WorkOptions) string {
 	switch role {
 	case "planner":
 		if opts.PlannerAgent != "" {
@@ -100,330 +123,460 @@ func (e *Engine) resolveRoleAgent(role string, opts WorkOptions) string {
 			return opts.TesterAgent
 		}
 	}
-	if e.Config != nil && e.Config.Roles != nil {
-		if configured := strings.TrimSpace(e.Config.Roles[role]); configured != "" && opts.AgentName == "" {
-			return configured
-		}
-	}
 	if opts.AgentName != "" {
 		return opts.AgentName
 	}
-	if e.Config != nil && e.Config.DefaultAgent != "" {
-		return e.Config.DefaultAgent
+	if cfg != nil && cfg.Roles != nil {
+		if configured := strings.TrimSpace(cfg.Roles[role]); configured != "" {
+			return configured
+		}
 	}
-	return "claude"
+	if cfg == nil {
+		return ""
+	}
+	return cfg.DefaultAgent
 }
 
-func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult, error) {
+// Preflight rejects selector, policy, contract, workflow, and runner errors
+// before acquiring a lease or provisioning a worktree.
+func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightResult, error) {
 	if opts.RepoRoot == "" {
-		opts.RepoRoot = "."
+		opts.RepoRoot = e.repoRoot
 	}
 	if opts.Phase == "" {
 		opts.Phase = "all"
 	}
-	mode := "interactive"
-	if opts.Headless {
-		mode = "headless"
+	if err := contract.ValidatePhase(opts.Phase); err != nil {
+		return nil, err
 	}
-	if opts.Owner == "" {
-		u, err := e.Tracker.CurrentUser(ctx)
-		if err != nil || u == "" {
-			u = "local-dev"
-		}
-		opts.Owner = u
+	if err := contract.ValidateGate(opts.Gate); err != nil {
+		return nil, err
 	}
-
 	iss, err := e.Tracker.GetIssue(ctx, opts.IssueNumber)
 	if err != nil {
 		return nil, err
 	}
-
-	wu, err := contract.ParseWorkUnitFromIssueWithRoot(iss.Number, iss.Title, iss.Body, opts.RepoRoot)
+	wu, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
 	if err != nil {
 		return nil, err
 	}
-
-	// Enforce dependency gating (depends_on)
-	if err := e.LeaseManager.VerifyDependencies(ctx, wu); err != nil {
-		return nil, err
+	state, err := e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber)
+	if err != nil {
+		return nil, fmt.Errorf("read approved task state: %w", err)
 	}
-
-	wf, err := harness.LoadWorkflow(opts.RepoRoot, wu.Workflow)
+	if state == nil || state.BaseSHA == "" {
+		return nil, errors.New("task has no approved immutable base")
+	}
+	cfg, err := harness.LoadConfigAt(opts.RepoRoot, state.BaseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load approved base config: %w", err)
+	}
+	if state.TaskDigest != contract.DigestWorkUnit(wu) || state.PolicyDigest != contract.DigestApprovedPolicy(state.BaseSHA, cfg) ||
+		!slices.Contains(iss.Labels, cfg.Security.ReadyLabel) {
+		return nil, lease.ErrApprovalRequired
+	}
+	checks, err := harness.LoadValidationSpecAt(opts.RepoRoot, state.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
+	wf, err := harness.LoadWorkflowAt(opts.RepoRoot, wu.Workflow, state.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	gate, err := contract.ResolveGate(wu.Gate, wf.DefaultGate, cfg.DefaultGate)
+	if err != nil {
+		return nil, err
+	}
+	gate, err = contract.ResolveGate(opts.Gate, gate, state.EffectiveGate)
+	if err != nil {
+		return nil, err
+	}
+	agents := make(map[string]string, 4)
+	binaries := make(map[string]string, 4)
+	approvalState := *state
+	approvalState.EffectiveGate = gate
+	roles := rolesForPhase(opts.Phase, gate, hasDesignAndTestPlanArtifacts(state), lease.VerifyApproval(&approvalState, wu) == nil)
+	for _, role := range roles {
+		name := resolveRoleAgent(cfg, role, opts)
+		if name == "" {
+			return nil, fmt.Errorf("no configured %s agent", role)
+		}
+		resolved, err := agent.Preflight(name, cfg, e.Tracker.BackendName() == "local", role)
+		if err != nil {
+			return nil, fmt.Errorf("%s agent preflight: %w", role, err)
+		}
+		agents[role], binaries[role] = name, resolved
+	}
+	return &PreflightResult{Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
+		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase}, nil
+}
 
-	gate := opts.Gate
-	if gate == "" {
-		if wu.Gate != "" {
-			gate = wu.Gate
-		} else if wf.DefaultGate != "" {
-			gate = wf.DefaultGate
-		} else if e.Config.DefaultGate != "" {
-			gate = e.Config.DefaultGate
-		} else {
-			gate = contract.GateNone
+func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool) []string {
+	switch phase {
+	case "plan":
+		return []string{"planner"}
+	case "review":
+		if gate == contract.GateAgent || gate == contract.GateNone {
+			return []string{"reviewer"}
+		}
+		return nil
+	case "implement":
+		return []string{"developer", "tester"}
+	case "all":
+		var roles []string
+		if !hasPlan {
+			roles = append(roles, "planner")
+		}
+		if gate == contract.GateHuman && (!hasPlan || !approved) {
+			return roles
+		}
+		if gate == contract.GateAgent {
+			roles = append(roles, "reviewer")
+		}
+		return append(roles, "developer", "tester")
+	default:
+		return nil
+	}
+}
+
+func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult, error) {
+	if opts.RepoRoot == "" {
+		opts.RepoRoot = e.repoRoot
+	}
+	if opts.Phase == "" {
+		opts.Phase = "all"
+	}
+	if opts.Owner == "" {
+		var err error
+		if opts.Owner, err = e.Tracker.CurrentUser(ctx); err != nil {
+			return nil, err
 		}
 	}
-	wu.Gate = gate
-
-	dur := opts.LeaseDuration
-	if dur <= 0 {
-		if parsedDur, err := time.ParseDuration(e.Config.Lease.Duration); err == nil && parsedDur > 0 {
-			dur = parsedDur
-		} else {
-			dur = 4 * time.Hour
-		}
-	}
-
-	primaryAgent := e.resolveRoleAgent("planner", opts)
-	if opts.Phase == "implement" {
-		primaryAgent = e.resolveRoleAgent("developer", opts)
-	}
-
-	// 1. Acquire or refresh lease for current owner (also seamlessly claims collaborative handoffs)
-	st, err := e.LeaseManager.Acquire(ctx, opts.IssueNumber, opts.Owner, primaryAgent, opts.Phase, dur, e.Config.Lease.MaxRenewals)
+	pre, err := e.Preflight(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-
-	// If the lease was in handoff state with NextPhase == "implement" and opts.Phase == "all", skip re-planning!
+	if err := e.LeaseManager.VerifyDependencies(ctx, pre.WorkUnit); err != nil {
+		return nil, err
+	}
+	duration := opts.LeaseDuration
+	if duration <= 0 {
+		if duration, err = time.ParseDuration(pre.Config.Lease.Duration); err != nil {
+			return nil, fmt.Errorf("parse configured lease duration: %w", err)
+		}
+	}
+	primaryAgent := pre.Agents["planner"]
+	if primaryAgent == "" {
+		primaryAgent = pre.Agents["reviewer"]
+	}
+	if primaryAgent == "" {
+		primaryAgent = pre.Agents["developer"]
+	}
+	if primaryAgent == "" {
+		primaryAgent = pre.Agents["tester"]
+	}
+	var st *lease.IssueState
+	if opts.ClaimID != "" {
+		e.LeaseManager.BindClaim(opts.IssueNumber, opts.ClaimID)
+		st, err = e.LeaseManager.Resume(ctx, opts.IssueNumber, opts.Owner, opts.ClaimID)
+	} else {
+		st, err = e.LeaseManager.Acquire(ctx, opts.IssueNumber, opts.Owner, primaryAgent, opts.Phase, duration, pre.Config.Lease.MaxRenewals)
+	}
+	if err != nil {
+		return nil, err
+	}
+	setupComplete := false
+	defer func() {
+		if !setupComplete {
+			_, _ = e.LeaseManager.Release(context.Background(), opts.IssueNumber, opts.Owner, "workflow setup failed")
+		}
+	}()
+	if st.BaseSHA != pre.BaseSHA {
+		return nil, errors.New("approved task base changed during preflight; rerun work")
+	}
+	if opts.OnClaim != nil {
+		if err := opts.OnClaim(st); err != nil {
+			return nil, fmt.Errorf("persist claim token: %w", err)
+		}
+	}
+	cfg, err := harness.LoadConfigAt(opts.RepoRoot, st.BaseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load approved base config: %w", err)
+	}
+	wf, err := harness.LoadWorkflowAt(opts.RepoRoot, pre.WorkUnit.Workflow, st.BaseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load approved base workflow: %w", err)
+	}
+	gate, err := contract.ResolveGate(pre.WorkUnit.Gate, wf.DefaultGate, cfg.DefaultGate)
+	if err != nil {
+		return nil, err
+	}
+	if opts.Gate != "" {
+		if gate, err = contract.ResolveGate(opts.Gate, gate, gate); err != nil {
+			return nil, err
+		}
+	}
+	st, err = e.LeaseManager.RequireGate(ctx, opts.IssueNumber, opts.Owner, gate)
+	if err != nil {
+		return nil, err
+	}
+	gate = st.EffectiveGate
+	for _, role := range rolesForPhase(opts.Phase, gate, hasDesignAndTestPlanArtifacts(st), lease.VerifyApproval(st, pre.WorkUnit) == nil) {
+		if pre.Agents[role] == "" {
+			return nil, fmt.Errorf("task phase changed during preflight; rerun work to validate the %s agent", role)
+		}
+	}
+	e.Config = cfg
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	heartbeat := e.startHeartbeat(ctx, cancel, opts, duration)
+	check := func() error {
+		select {
+		case heartbeatErr := <-heartbeat:
+			if heartbeatErr != nil {
+				return fmt.Errorf("%w: %v", ErrLeaseLost, heartbeatErr)
+			}
+		default:
+		}
+		if err := e.LeaseManager.CheckClaim(ctx, opts.IssueNumber, opts.Owner); err != nil {
+			cancel()
+			return fmt.Errorf("%w: %v", ErrLeaseLost, err)
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return nil, err
+	}
+	wtPath, branch, err := workspace.ProvisionAt(opts.RepoRoot, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, st.Branch, st.HeadSHA)
+	if err != nil {
+		return nil, err
+	}
+	setupComplete = true
+	res := &WorkResult{IssueNumber: opts.IssueNumber, WorktreePath: wtPath, BranchName: branch, BaseSHA: st.BaseSHA, HeadSHA: st.HeadSHA, RoleAgentsUsed: map[string]string{}, State: st}
+	mode := "interactive"
+	if opts.Headless {
+		mode = "headless"
+	}
 	runPlan := opts.Phase == "all" || opts.Phase == "plan"
-	if opts.Phase == "all" && hasDesignAndTestPlanArtifacts(st) && (gate == contract.GateNone || hasApprovedReviewArtifact(st)) {
+	if opts.Phase == "all" && hasDesignAndTestPlanArtifacts(st) {
 		runPlan = false
 	}
-
-	// 2. Provision isolated git worktree
-	wtPath, branchName, err := workspace.Provision(opts.RepoRoot, opts.IssueNumber, iss.Title)
-	if err != nil {
-		return nil, err
-	}
-
-	res := &WorkResult{
-		IssueNumber:    opts.IssueNumber,
-		WorktreePath:   wtPath,
-		BranchName:     branchName,
-		RoleAgentsUsed: make(map[string]string),
-		State:          st,
-	}
-
-	// Step 1: PLAN (analyze + design + test_plan)
 	if runPlan {
-		plannerAgent := e.resolveRoleAgent("planner", opts)
-		res.RoleAgentsUsed["planner"] = plannerAgent
-		planRunner, err := agent.NewRunner(plannerAgent)
+		if err := check(); err != nil {
+			return res, err
+		}
+		planner := pre.Agents["planner"]
+		res.RoleAgentsUsed["planner"] = planner
+		runner, err := agent.NewConfiguredRunner(planner, cfg, e.Tracker.BackendName() == "local")
 		if err != nil {
-			return nil, err
+			return res, err
 		}
-
-		_, _ = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "plan", "active")
-		if err := workspace.CompileHarnessBundle(wtPath, wu, wf, st.Artifacts, "planner"); err != nil {
-			return nil, err
+		if _, err := e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "plan", "active"); err != nil {
+			return res, err
 		}
-
-		planReq := agent.RunRequest{
-			Agent:        plannerAgent,
-			Role:         "planner",
-			Mode:         mode,
-			WorktreePath: wtPath,
-			SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
-			TaskPrompt:   "Execute /swarm-plan: inspect the repository without modifying production source files and write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md.",
+		if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "planner", st.BaseSHA); err != nil {
+			return res, err
 		}
-		if _, err := planRunner.Run(ctx, planReq); err != nil {
-			return nil, err
+		if _, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-plan and write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md."}); err != nil {
+			return res, err
 		}
-
-		planBytes, err := os.ReadFile(filepath.Join(wtPath, ".swarm", "active", "PLAN.md"))
-		if err != nil || len(strings.TrimSpace(string(planBytes))) == 0 {
-			return nil, fmt.Errorf("planner agent %q did not produce .swarm/active/PLAN.md", plannerAgent)
-		}
-		testPlanBytes, err := os.ReadFile(filepath.Join(wtPath, ".swarm", "active", "TEST_PLAN.md"))
-		if err != nil || len(strings.TrimSpace(string(testPlanBytes))) == 0 {
-			return nil, fmt.Errorf("planner agent %q did not produce .swarm/active/TEST_PLAN.md", plannerAgent)
-		}
-
-		if _, err := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{
-			Type:     contract.ArtifactDesign,
-			Producer: plannerAgent + ":planner",
-			Summary:  fmt.Sprintf("Implementation plan for #%d", opts.IssueNumber),
-			Body:     string(planBytes),
-		}); err != nil {
-			return nil, err
-		}
-
-		st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{
-			Type:     contract.ArtifactTestPlan,
-			Producer: plannerAgent + ":planner",
-			Summary:  fmt.Sprintf("Test plan covering %d acceptance criteria", len(wu.Acceptance)),
-			Body:     string(testPlanBytes),
-		})
+		plan, err := readRequiredArtifact(wtPath, "PLAN.md")
 		if err != nil {
-			return nil, err
+			return res, fmt.Errorf("planner agent %q: %w", planner, err)
 		}
-		res.State = st
-		res.PhaseCompleted = "plan"
+		testPlan, err := readRequiredArtifact(wtPath, "TEST_PLAN.md")
+		if err != nil {
+			return res, fmt.Errorf("planner agent %q: %w", planner, err)
+		}
+		if err := check(); err != nil {
+			return res, err
+		}
+		if _, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: planner + ":planner", Summary: fmt.Sprintf("Implementation plan for #%d", opts.IssueNumber), Body: plan}); err != nil {
+			return res, err
+		}
+		if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: planner + ":planner", Summary: fmt.Sprintf("Test plan covering %d acceptance criteria", len(pre.WorkUnit.Acceptance)), Body: testPlan}); err != nil {
+			return res, err
+		}
+		res.State, res.PhaseCompleted = st, "plan"
 		if opts.Phase == "plan" {
 			if opts.Handoff {
-				nextP := "implement"
-				if gate != contract.GateNone && !hasApprovedReviewArtifact(st) {
-					nextP = "review"
-					_ = e.Tracker.AddLabels(ctx, opts.IssueNumber, []string{"swarm:plan-review"})
+				next := "implement"
+				if gate != contract.GateNone {
+					next = "review"
+					if err := check(); err != nil {
+						return res, err
+					}
+					if err := e.Tracker.AddLabels(ctx, opts.IssueNumber, []string{"swarm:plan-review"}); err != nil {
+						return res, err
+					}
 				}
-				if hSt, hErr := e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "plan", nextP); hErr == nil {
-					res.State = hSt
-					res.HandedOffToPhase = nextP
+				if err := check(); err != nil {
+					return res, err
 				}
-			}
-			return res, nil
-		}
-
-		// Evaluate Optional Plan Gate
-		switch gate {
-		case contract.GateAgent:
-			revAgent := e.resolveRoleAgent("reviewer", opts)
-			res.RoleAgentsUsed["reviewer"] = revAgent
-			verdict, revState, err := e.RunAgentReview(ctx, wtPath, wu, wf, st, opts.Owner, revAgent, mode)
-			res.ReviewVerdict = verdict
-			if revState != nil {
-				st = revState
-				res.State = st
-			}
-			if err != nil {
-				return res, err
-			}
-
-		case contract.GateHuman:
-			_ = e.Tracker.AddLabels(ctx, opts.IssueNumber, []string{"swarm:plan-review"})
-			if opts.Handoff {
-				if hSt, hErr := e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "plan", "review"); hErr == nil {
-					res.State = hSt
-					res.HandedOffToPhase = "review"
+				if st, err = e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "plan", next); err != nil {
+					return res, err
 				}
-			} else {
-				_, _ = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "review", "active")
+				res.State, res.HandedOffToPhase = st, next
 			}
-			res.PausedForHuman = true
 			return res, nil
 		}
 	}
-
-	// Step 1b: Standalone REVIEW phase (when a contributor or bot claims a handed-off review step)
-	if opts.Phase == "review" {
-		if latest, err := e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber); err == nil {
-			st = latest
-			res.State = st
+	if gate == contract.GateHuman && (opts.Phase == "review" || opts.Phase == "all" && (runPlan || lease.VerifyApproval(st, pre.WorkUnit) != nil)) {
+		if err := check(); err != nil {
+			return res, err
 		}
-		revAgent := e.resolveRoleAgent("reviewer", opts)
-		res.RoleAgentsUsed["reviewer"] = revAgent
-		verdict, revState, err := e.RunAgentReview(ctx, wtPath, wu, wf, st, opts.Owner, revAgent, mode)
+		if err := e.Tracker.AddLabels(ctx, opts.IssueNumber, []string{"swarm:plan-review"}); err != nil {
+			return res, err
+		}
+		if opts.Handoff {
+			if st, err = e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "plan", "review"); err != nil {
+				return res, err
+			}
+			res.State, res.HandedOffToPhase = st, "review"
+		}
+		res.PausedForHuman, res.PhaseCompleted = true, "plan"
+		return res, nil
+	}
+	if (gate == contract.GateAgent && (runPlan || opts.Phase == "all")) || (opts.Phase == "review" && gate != contract.GateHuman) {
+		if gate != contract.GateAgent && gate != contract.GateNone {
+			return res, fmt.Errorf("%w: gate %q requires an authenticated human decision", ErrPlanApprovalNeeded, gate)
+		}
+		if st, err = e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber); err != nil {
+			return res, err
+		}
+		res.State = st
+		reviewer := pre.Agents["reviewer"]
+		res.RoleAgentsUsed["reviewer"] = reviewer
+		verdict, reviewed, err := e.RunAgentReview(ctx, wtPath, pre.WorkUnit, wf, st, opts.Owner, reviewer, mode)
 		res.ReviewVerdict = verdict
-		if revState != nil {
-			st = revState
-			res.State = st
+		if reviewed != nil {
+			st, res.State = reviewed, reviewed
 		}
 		if err != nil {
 			return res, err
 		}
 		res.PhaseCompleted = "review"
-		if opts.Handoff {
-			if hSt, hErr := e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "review", "implement"); hErr == nil {
-				res.State = hSt
-				res.HandedOffToPhase = "implement"
+		if opts.Phase == "review" {
+			if opts.Handoff {
+				if err := check(); err != nil {
+					return res, err
+				}
+				if st, err = e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "review", "implement"); err != nil {
+					return res, err
+				}
+				res.State, res.HandedOffToPhase = st, "implement"
 			}
+			return res, nil
 		}
+	}
+	if opts.Phase != "all" && opts.Phase != "implement" {
 		return res, nil
 	}
-
-	// Step 2: IMPLEMENT, TEST & VALIDATE
-	if opts.Phase == "all" || opts.Phase == "implement" {
-		if latest, err := e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber); err == nil {
-			st = latest
-			res.State = st
-		}
-		if err := ensurePlanArtifactsInWorktree(wtPath, st); err != nil {
-			return nil, err
-		}
-		if gate == contract.GateAgent || gate == contract.GateHuman {
-			if !hasApprovedReviewArtifact(st) {
-				return nil, fmt.Errorf("%w: issue #%d has gate=%q; run `swarm review %d --approve` or `swarm review %d --agent <name>` first",
-					ErrPlanApprovalNeeded, opts.IssueNumber, gate, opts.IssueNumber, opts.IssueNumber)
-			}
-		}
-
-		devAgent := e.resolveRoleAgent("developer", opts)
-		res.RoleAgentsUsed["developer"] = devAgent
-		devRunner, err := agent.NewRunner(devAgent)
-		if err != nil {
-			return nil, err
-		}
-
-		_, _ = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "implement", "active")
-		if err := workspace.CompileHarnessBundle(wtPath, wu, wf, st.Artifacts, "developer"); err != nil {
-			return nil, err
-		}
-
-		implReq := agent.RunRequest{
-			Agent:        devAgent,
-			Role:         "developer",
-			Mode:         mode,
-			WorktreePath: wtPath,
-			SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
-			TaskPrompt:   "Execute /swarm-implement: implement .swarm/active/PLAN.md step-by-step and satisfy .swarm/active/TEST_PLAN.md.",
-		}
-		if _, err := devRunner.Run(ctx, implReq); err != nil {
-			return nil, err
-		}
-
-		// Publish `implementation` artifact capturing git diff summary
-		implSummary, implBody := summarizeImplementationChanges(wtPath, opts.IssueNumber)
-		if updatedSt, uErr := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{
-			Type:     contract.ArtifactImplementation,
-			Producer: devAgent + ":developer",
-			Verdict:  "PASS",
-			Summary:  implSummary,
-			Body:     implBody,
-		}); uErr == nil {
-			st = updatedSt
-			res.State = st
-		}
-
-		// Optional Tester Agent Role execution before deterministic Validator
-		if opts.TesterAgent != "" || (e.Config != nil && e.Config.Roles != nil && e.Config.Roles["tester"] != "") {
-			testerAgent := e.resolveRoleAgent("tester", opts)
-			res.RoleAgentsUsed["tester"] = testerAgent
-			if testerRunner, tErr := agent.NewRunner(testerAgent); tErr == nil {
-				_ = workspace.CompileHarnessBundle(wtPath, wu, wf, st.Artifacts, "tester")
-				_, _ = testerRunner.Run(ctx, agent.RunRequest{
-					Agent:        testerAgent,
-					Role:         "tester",
-					Mode:         mode,
-					WorktreePath: wtPath,
-					SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
-					TaskPrompt:   "Execute /swarm-validate: verify all acceptance criteria in .swarm/active/TEST_PLAN.md.",
-				})
-			}
-		}
-
-		valSpec, err := harness.LoadValidationSpec(wtPath)
-		if err != nil {
-			valSpec, _ = harness.LoadValidationSpec(opts.RepoRoot)
-		}
-		valReport, valErr := validation.Validate(ctx, wtPath, wu, valSpec)
-		if valReport != nil {
-			if updatedSt, uErr := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, valReport.Artifact); uErr == nil {
-				st = updatedSt
-				res.State = st
-			}
-			res.ValidationPassed = valReport.Passed
-		}
-		if valErr != nil {
-			return res, valErr
-		}
-
-		res.PhaseCompleted = "implement"
+	if st, err = e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber); err != nil {
+		return res, err
 	}
-
+	res.State = st
+	if err := ensurePlanArtifactsInWorktree(wtPath, st); err != nil {
+		return res, err
+	}
+	if err := lease.VerifyApproval(st, pre.WorkUnit); err != nil {
+		return res, fmt.Errorf("%w: %v", ErrPlanApprovalNeeded, err)
+	}
+	if err := check(); err != nil {
+		return res, err
+	}
+	developer := pre.Agents["developer"]
+	res.RoleAgentsUsed["developer"] = developer
+	devRunner, err := agent.NewConfiguredRunner(developer, cfg, e.Tracker.BackendName() == "local")
+	if err != nil {
+		return res, err
+	}
+	if _, err := e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "implement", "active"); err != nil {
+		return res, err
+	}
+	if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "developer", st.BaseSHA); err != nil {
+		return res, err
+	}
+	if _, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-implement step-by-step using the approved plan and test plan."}); err != nil {
+		return res, err
+	}
+	if err := check(); err != nil {
+		return res, err
+	}
+	summary, body := summarizeImplementationChanges(wtPath, opts.IssueNumber)
+	if st.HeadSHA, err = workspace.Checkpoint(ctx, wtPath, branch); err != nil {
+		return res, err
+	}
+	if st, err = e.LeaseManager.RecordCheckpoint(ctx, opts.IssueNumber, opts.Owner, branch, st.HeadSHA); err != nil {
+		return res, err
+	}
+	res.State, res.HeadSHA = st, st.HeadSHA
+	if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: "PASS", Summary: summary, Body: body}); err != nil {
+		return res, err
+	}
+	res.State = st
+	tester := pre.Agents["tester"]
+	res.RoleAgentsUsed["tester"] = tester
+	testerRunner, err := agent.NewConfiguredRunner(tester, cfg, e.Tracker.BackendName() == "local")
+	if err != nil {
+		return res, err
+	}
+	if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "tester", st.BaseSHA); err != nil {
+		return res, err
+	}
+	if _, err := testerRunner.Run(ctx, agent.RunRequest{Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-validate and record acceptance evidence."}); err != nil {
+		return res, fmt.Errorf("tester agent %q: %w", tester, err)
+	}
+	if err := check(); err != nil {
+		return res, err
+	}
+	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA})
+	if report != nil {
+		updated, updateErr := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, report.Artifact)
+		if updateErr != nil {
+			return res, updateErr
+		}
+		res.State, res.ValidationPassed = updated, report.Passed
+	}
+	if err != nil {
+		return res, err
+	}
+	res.PhaseCompleted = "implement"
 	return res, nil
+}
+
+func (e *Engine) startHeartbeat(ctx context.Context, cancel context.CancelFunc, opts WorkOptions, duration time.Duration) <-chan error {
+	result := make(chan error, 1)
+	interval := duration / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		defer close(result)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := e.LeaseManager.Renew(ctx, opts.IssueNumber, opts.Owner, duration); err != nil {
+					result <- err
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return result
+}
+
+func readRequiredArtifact(wtPath, name string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(wtPath, ".swarm", "active", name))
+	if err != nil || strings.TrimSpace(string(data)) == "" {
+		return "", fmt.Errorf("did not produce .swarm/active/%s", name)
+	}
+	return string(data), nil
 }
 
 // DecomposeIssue partitions a parent issue into sequential or parallel child WorkUnit issues linked via ParentIssue and DependsOn.
@@ -503,84 +656,98 @@ func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssu
 }
 
 func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode string) (string, *lease.IssueState, error) {
-	_, _ = e.LeaseManager.UpdatePhase(ctx, wu.IssueNumber, owner, "review", "active")
+	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
+		return "", st, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+	}
+	if _, err := e.LeaseManager.UpdatePhase(ctx, wu.IssueNumber, owner, "review", "active"); err != nil {
+		return "", st, err
+	}
 	if err := ensurePlanArtifactsInWorktree(wtPath, st); err != nil {
 		return "", st, err
 	}
-	if err := workspace.CompileHarnessBundle(wtPath, wu, wf, st.Artifacts, "reviewer"); err != nil {
+	if err := workspace.CompileHarnessBundleAt(wtPath, wu, wf, st.Artifacts, "reviewer", st.BaseSHA); err != nil {
 		return "", st, err
 	}
-
-	revRunner, err := agent.NewRunner(reviewerAgent)
+	runner, err := agent.NewConfiguredRunner(reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
 	if err != nil {
 		return "", st, err
 	}
-
-	beforeSnap := snapshotNonActiveWorktreeStatus(wtPath)
-
-	revReq := agent.RunRequest{
-		Agent:        reviewerAgent,
-		Role:         "reviewer",
-		Mode:         mode,
-		WorktreePath: wtPath,
+	req := agent.RunRequest{
+		Agent: reviewerAgent, Role: "reviewer", Mode: mode, WorktreePath: wtPath,
 		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
-		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md and write .swarm/active/REVIEW.md starting with VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
+		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md and write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
 	}
-	if _, err := revRunner.Run(ctx, revReq); err != nil {
+	if _, err := agent.RunReview(ctx, runner, req); err != nil {
 		return "", st, err
 	}
-
-	afterSnap := snapshotNonActiveWorktreeStatus(wtPath)
-	if beforeSnap != afterSnap {
-		_ = exec.Command("git", "-C", wtPath, "checkout", "--", ".").Run()
-		return "", st, fmt.Errorf("%w: reviewer %q altered files outside .swarm/active/", ErrReviewerModifiedCode, reviewerAgent)
-	}
-
-	reviewBytes, err := os.ReadFile(filepath.Join(wtPath, ".swarm", "active", "REVIEW.md"))
+	review, err := readRequiredArtifact(wtPath, "REVIEW.md")
 	if err != nil {
-		return "", st, fmt.Errorf("reviewer agent %q did not write .swarm/active/REVIEW.md: %w", reviewerAgent, err)
+		return "", st, fmt.Errorf("reviewer agent %q: %w", reviewerAgent, err)
 	}
-	verdict := ParseReviewVerdict(string(reviewBytes))
-
-	updatedSt, err := e.LeaseManager.UpdateArtifact(ctx, wu.IssueNumber, owner, contract.Artifact{
-		Type:     contract.ArtifactReview,
-		Producer: reviewerAgent + ":reviewer",
-		Verdict:  verdict,
-		Summary:  fmt.Sprintf("Automated plan review verdict: %s", verdict),
-		Body:     string(reviewBytes),
+	verdict, err := ParseReviewVerdict(review)
+	if err != nil {
+		return "", st, err
+	}
+	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
+		return verdict, st, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+	}
+	updated, err := e.LeaseManager.UpdateArtifact(ctx, wu.IssueNumber, owner, contract.Artifact{
+		Type: contract.ArtifactReview, Producer: reviewerAgent + ":reviewer", Verdict: verdict,
+		Summary: fmt.Sprintf("Automated plan review verdict: %s", verdict), Body: review,
+		Metadata: map[string]string{"kind": "agent", "actor": owner},
 	})
 	if err != nil {
 		return verdict, st, err
 	}
-
 	if verdict != "APPROVED" {
-		_ = e.Tracker.AddLabels(ctx, wu.IssueNumber, []string{"swarm:plan-review"})
-		return verdict, updatedSt, fmt.Errorf("%w: reviewer %q returned %s", ErrPlanReviewRejected, reviewerAgent, verdict)
+		if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
+			return verdict, updated, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+		}
+		if err := e.Tracker.AddLabels(ctx, wu.IssueNumber, []string{"swarm:plan-review"}); err != nil {
+			return verdict, updated, err
+		}
+		return verdict, updated, fmt.Errorf("%w: reviewer %q returned %s", ErrPlanReviewRejected, reviewerAgent, verdict)
 	}
-
-	_ = e.Tracker.RemoveLabel(ctx, wu.IssueNumber, "swarm:plan-review")
-	_ = e.Tracker.AddLabels(ctx, wu.IssueNumber, []string{"swarm:plan-approved"})
-	return verdict, updatedSt, nil
+	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
+		return verdict, updated, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+	}
+	if err := e.Tracker.RemoveLabel(ctx, wu.IssueNumber, "swarm:plan-review"); err != nil {
+		return verdict, updated, err
+	}
+	if err := e.Tracker.AddLabels(ctx, wu.IssueNumber, []string{"swarm:plan-approved"}); err != nil {
+		return verdict, updated, err
+	}
+	return verdict, updated, nil
 }
 
-func ParseReviewVerdict(content string) string {
+// ParseReviewVerdict accepts an exact first non-empty verdict line. Review
+// narrative may follow, but a second verdict is contradictory and rejected.
+func ParseReviewVerdict(content string) (string, error) {
+	var verdict string
 	for _, line := range strings.Split(content, "\n") {
-		trimmed := strings.TrimSpace(line)
-		upper := strings.ToUpper(trimmed)
-		if strings.HasPrefix(upper, "VERDICT:") {
-			v := strings.TrimSpace(strings.TrimPrefix(upper, "VERDICT:"))
-			if strings.Contains(v, "CHANGES_REQUESTED") {
-				return "CHANGES_REQUESTED"
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if verdict == "" {
+			switch line {
+			case "VERDICT: APPROVED":
+				verdict = "APPROVED"
+			case "VERDICT: CHANGES_REQUESTED":
+				verdict = "CHANGES_REQUESTED"
+			default:
+				return "", fmt.Errorf("invalid review verdict %q", line)
 			}
-			if strings.Contains(v, "APPROVED") {
-				return "APPROVED"
-			}
+			continue
+		}
+		if strings.HasPrefix(line, "VERDICT:") {
+			return "", errors.New("review contains more than one verdict")
 		}
 	}
-	if strings.Contains(strings.ToUpper(content), "CHANGES_REQUESTED") {
-		return "CHANGES_REQUESTED"
+	if verdict == "" {
+		return "", errors.New("review is missing an exact verdict")
 	}
-	return "APPROVED"
+	return verdict, nil
 }
 
 func hasDesignAndTestPlanArtifacts(st *lease.IssueState) bool {
@@ -611,35 +778,38 @@ func hasApprovedReviewArtifact(st *lease.IssueState) bool {
 	return false
 }
 
+// ensurePlanArtifactsInWorktree restores the authoritative state artifacts on
+// every phase transition. Existing local files are never accepted as a plan.
 func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
+	if st == nil {
+		return errors.New("missing authoritative issue state")
+	}
 	activeDir := filepath.Join(wtPath, ".swarm", "active")
 	if err := os.MkdirAll(activeDir, 0o755); err != nil {
 		return err
 	}
-	if st != nil {
-		for _, a := range st.Artifacts {
-			switch a.Type {
-			case contract.ArtifactDesign:
-				p := filepath.Join(activeDir, "PLAN.md")
-				if _, err := os.Stat(p); err != nil {
-					_ = os.WriteFile(p, []byte(a.Body), 0o644)
-				}
-			case contract.ArtifactTestPlan:
-				p := filepath.Join(activeDir, "TEST_PLAN.md")
-				if _, err := os.Stat(p); err != nil {
-					_ = os.WriteFile(p, []byte(a.Body), 0o644)
-				}
-			case contract.ArtifactReview:
-				p := filepath.Join(activeDir, "REVIEW.md")
-				if _, err := os.Stat(p); err != nil {
-					_ = os.WriteFile(p, []byte(a.Body), 0o644)
-				}
-			}
+	artifacts := map[contract.ArtifactType]string{}
+	for _, artifact := range st.Artifacts {
+		switch artifact.Type {
+		case contract.ArtifactDesign, contract.ArtifactTestPlan, contract.ArtifactReview:
+			artifacts[artifact.Type] = artifact.Body
 		}
 	}
-	for _, req := range []string{"PLAN.md", "TEST_PLAN.md"} {
-		if _, err := os.Stat(filepath.Join(activeDir, req)); err != nil {
-			return fmt.Errorf("missing %s in .swarm/active/ (run `swarm work <issue> --phase plan` first)", req)
+	required := map[contract.ArtifactType]string{
+		contract.ArtifactDesign: "PLAN.md", contract.ArtifactTestPlan: "TEST_PLAN.md",
+	}
+	for kind, name := range required {
+		body := artifacts[kind]
+		if strings.TrimSpace(body) == "" {
+			return fmt.Errorf("missing %s in authoritative state (run `swarm work <issue> --phase plan` first)", name)
+		}
+		if err := os.WriteFile(filepath.Join(activeDir, name), []byte(body), 0o644); err != nil {
+			return err
+		}
+	}
+	if review, ok := artifacts[contract.ArtifactReview]; ok {
+		if err := os.WriteFile(filepath.Join(activeDir, "REVIEW.md"), []byte(review), 0o644); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -680,20 +850,4 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-func snapshotNonActiveWorktreeStatus(wtPath string) string {
-	out, err := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output()
-	if err != nil {
-		return ""
-	}
-	var relevant []string
-	for _, line := range strings.Split(string(out), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.Contains(trimmed, ".swarm/active") || strings.Contains(trimmed, "AGENTS.md") || strings.Contains(trimmed, "CLAUDE.md") {
-			continue
-		}
-		relevant = append(relevant, trimmed)
-	}
-	return strings.Join(relevant, "\n")
 }

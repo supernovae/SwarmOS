@@ -3,9 +3,6 @@ package validation
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,12 +12,17 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/process"
 )
 
 var (
-	ErrProtectedPathModified = errors.New("protected path modified without allow_harness_changes")
+	ErrProtectedPathModified = errors.New("protected path modified without approved harness permission")
 	ErrMissingArtifact       = errors.New("required plan/test-plan artifact missing")
 	ErrRequiredCheckFailed   = errors.New("required validation check failed")
+	ErrMissingBaseSHA        = errors.New("trusted validation base SHA is required")
+	ErrInvalidPolicy         = errors.New("invalid trusted validation policy")
+	ErrUnsafePath            = errors.New("unsafe repository path")
 )
 
 type CheckRunOutcome struct {
@@ -34,6 +36,8 @@ type CheckRunOutcome struct {
 
 type ValidationReport struct {
 	Passed        bool              `json:"passed"`
+	BaseSHA       string            `json:"base_sha"`
+	HeadSHA       string            `json:"head_sha"`
 	ModifiedFiles []string          `json:"modified_files"`
 	CheckOutcomes []CheckRunOutcome `json:"check_outcomes"`
 	Artifact      contract.Artifact `json:"artifact"`
@@ -41,217 +45,259 @@ type ValidationReport struct {
 
 type ValidateOptions struct {
 	CIMode bool
+	// BaseSHA is the immutable approved commit from which policy is loaded and
+	// against which committed candidate changes are compared.
+	BaseSHA string
 }
 
-func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, spec *contract.ValidationSpec) (*ValidationReport, error) {
-	return ValidateWithOptions(ctx, worktreePath, wu, spec, ValidateOptions{})
-}
-
-func ValidateWithOptions(ctx context.Context, worktreePath string, wu *contract.WorkUnit, spec *contract.ValidationSpec, opts ValidateOptions) (*ValidationReport, error) {
-	if wu == nil {
-		wu = &contract.WorkUnit{ID: "CI", IssueNumber: 1}
+// Validate loads checks and protected paths exclusively from the immutable base.
+func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, opts ValidateOptions) (*ValidationReport, error) {
+	if opts.BaseSHA == "" {
+		return nil, ErrMissingBaseSHA
 	}
-	if spec == nil {
-		spec = &contract.ValidationSpec{
-			ProtectedPaths: []string{".github/workflows/**", ".swarm/validation/**", ".swarm/contracts/**"},
-		}
-	}
-
-	// 1. Artifact Completeness Check (when running inside an active worktree, not --ci)
-	if !opts.CIMode {
-		activeDir := filepath.Join(worktreePath, ".swarm", "active")
-		for _, reqFile := range []string{"PLAN.md", "TEST_PLAN.md"} {
-			full := filepath.Join(activeDir, reqFile)
-			info, err := os.Stat(full)
-			if err != nil || info.Size() == 0 {
-				return nil, fmt.Errorf("%w: %s not found or empty in .swarm/active/", ErrMissingArtifact, reqFile)
-			}
-		}
-	}
-
-	// 2. Protected Path Tamper Check
-	modified, err := collectModifiedFiles(worktreePath)
+	spec, err := loadTrustedValidationSpec(worktreePath, opts.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
+	baseSHA, err := resolveCommit(worktreePath, opts.BaseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("resolve trusted base: %w", err)
+	}
+	if wu == nil {
+		wu = &contract.WorkUnit{ID: "CI", IssueNumber: 1}
+	}
+	if !opts.CIMode {
+		for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
+			info, err := os.Stat(filepath.Join(worktreePath, ".swarm", "active", name))
+			if err != nil || info.Size() == 0 {
+				return nil, fmt.Errorf("%w: %s not found or empty in .swarm/active/", ErrMissingArtifact, name)
+			}
+		}
+	}
+	modified, err := collectModifiedFiles(worktreePath, baseSHA)
+	if err != nil {
+		return nil, err
+	}
+	// Authorization for explicit protected-path exceptions is checked by the
+	// approval state machine before this call. This boolean is only its input.
 	if !wu.AllowHarnessChanges {
-		for _, modFile := range modified {
+		for _, file := range modified {
 			for _, pattern := range spec.ProtectedPaths {
-				if matchGlobPattern(pattern, modFile) {
-					return nil, fmt.Errorf("%w: file %q matches protected pattern %q", ErrProtectedPathModified, modFile, pattern)
+				if matchGlobPattern(pattern, file) {
+					return nil, fmt.Errorf("%w: file %q matches protected pattern %q", ErrProtectedPathModified, file, pattern)
 				}
 			}
 		}
 	}
-
-	// 3. Required Checks Execution
-	report := &ValidationReport{
-		Passed:        true,
-		ModifiedFiles: modified,
+	headSHA, err := resolveCommit(worktreePath, "HEAD")
+	if err != nil {
+		return nil, err
 	}
-
-	var md strings.Builder
-	md.WriteString("# Validation Report\n\n")
-	md.WriteString("| Check | Command | Status | Duration |\n| :--- | :--- | :--- | :--- |\n")
-
+	report := &ValidationReport{Passed: true, BaseSHA: baseSHA, HeadSHA: headSHA, ModifiedFiles: modified}
+	var markdown strings.Builder
+	markdown.WriteString("# Validation Report\n\n")
+	markdown.WriteString(fmt.Sprintf("Trusted base: `%s`  \nCandidate head: `%s`\n\n", baseSHA, headSHA))
+	markdown.WriteString("| Check | Command | Status | Duration |\n| :--- | :--- | :--- | :--- |\n")
 	var details strings.Builder
-	var firstCheckErr error
-
-	for _, chk := range spec.RequiredChecks {
+	var firstErr error
+	checkHome, err := os.MkdirTemp("", "swarm-check-home-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(checkHome)
+	for _, check := range spec.RequiredChecks {
 		checkCtx := ctx
 		var cancel context.CancelFunc
-		if chk.Timeout != "" {
-			if dur, err := time.ParseDuration(chk.Timeout); err == nil && dur > 0 {
-				checkCtx, cancel = context.WithTimeout(ctx, dur)
-			}
+		if check.Timeout != "" {
+			duration, _ := time.ParseDuration(check.Timeout)
+			checkCtx, cancel = context.WithTimeout(ctx, duration)
 		}
-
 		start := time.Now()
-		cmd := exec.CommandContext(checkCtx, "sh", "-c", chk.Command)
+		cmd := exec.CommandContext(checkCtx, "sh", "-c", check.Command)
 		cmd.Dir = worktreePath
-		var outBuf bytes.Buffer
-		cmd.Stdout = &outBuf
-		cmd.Stderr = &outBuf
-
+		cmd.Env = cleanCheckEnv(checkHome)
+		process.Configure(cmd)
+		cmd.Cancel = func() error { process.Stop(cmd); return nil }
+		cmd.WaitDelay = time.Second
+		var output process.Output
+		cmd.Stdout, cmd.Stderr = &output, &output
 		runErr := cmd.Run()
 		if cancel != nil {
 			cancel()
 		}
-		dur := time.Since(start)
-		exitCode := 0
-		passed := true
+		outcome := CheckRunOutcome{Name: check.Name, Command: check.Command, Duration: time.Since(start), Output: output.String(), Passed: runErr == nil}
 		if runErr != nil {
-			passed = false
 			report.Passed = false
-			if exitErr, ok := runErr.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = 1
+			outcome.ExitCode = 1
+			if exit, ok := runErr.(*exec.ExitError); ok {
+				outcome.ExitCode = exit.ExitCode()
 			}
-			if firstCheckErr == nil {
-				firstCheckErr = fmt.Errorf("%w: check %q (%s) exited with %d: %s",
-					ErrRequiredCheckFailed, chk.Name, chk.Command, exitCode, strings.TrimSpace(outBuf.String()))
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%w: check %q (%s) exited with %d", ErrRequiredCheckFailed, check.Name, check.Command, outcome.ExitCode)
 			}
-		}
-
-		outcome := CheckRunOutcome{
-			Name:     chk.Name,
-			Command:  chk.Command,
-			ExitCode: exitCode,
-			Duration: dur,
-			Output:   outBuf.String(),
-			Passed:   passed,
 		}
 		report.CheckOutcomes = append(report.CheckOutcomes, outcome)
-
-		statusStr := "PASS"
-		if !passed {
-			statusStr = fmt.Sprintf("FAIL (exit %d)", exitCode)
+		status := "PASS"
+		if !outcome.Passed {
+			status = fmt.Sprintf("FAIL (exit %d)", outcome.ExitCode)
 		}
-		md.WriteString(fmt.Sprintf("| `%s` | `%s` | **%s** | `%s` |\n", chk.Name, chk.Command, statusStr, dur.Round(time.Millisecond)))
+		markdown.WriteString(fmt.Sprintf("| `%s` | `%s` | **%s** | `%s` |\n", check.Name, check.Command, status, outcome.Duration.Round(time.Millisecond)))
 		if strings.TrimSpace(outcome.Output) != "" {
-			details.WriteString(fmt.Sprintf("\n### Output: `%s`\n```text\n%s\n```\n", chk.Name, strings.TrimSpace(outcome.Output)))
+			details.WriteString(fmt.Sprintf("\n### Output: `%s`\n```text\n%s\n```\n", check.Name, strings.TrimSpace(outcome.Output)))
 		}
 	}
-
-	md.WriteString(details.String())
-
-	verdict := "PASS"
-	summary := fmt.Sprintf("All %d required checks passed", len(report.CheckOutcomes))
+	markdown.WriteString(details.String())
+	verdict, summary := "PASS", fmt.Sprintf("All %d required checks passed", len(report.CheckOutcomes))
 	if !report.Passed {
-		verdict = "FAIL"
-		summary = "One or more required checks failed"
+		verdict, summary = "FAIL", "One or more required checks failed"
 	}
-
-	issueNum := wu.IssueNumber
-	if issueNum <= 0 {
-		issueNum = 1
+	issue := wu.IssueNumber
+	if issue <= 0 {
+		issue = 1
 	}
-	report.Artifact = contract.Artifact{
-		Version:     1,
-		ID:          fmt.Sprintf("art-%d-validation", issueNum),
-		IssueNumber: issueNum,
-		Type:        contract.ArtifactValidation,
-		Producer:    "swarm:validator",
-		Verdict:     verdict,
-		Summary:     summary,
-		Body:        md.String(),
-		CreatedAt:   time.Now().UTC(),
-	}
-
+	report.Artifact = contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-validation", issue), IssueNumber: issue, Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: verdict, Summary: summary, Body: markdown.String(), CreatedAt: time.Now().UTC(), Metadata: map[string]string{"base_sha": baseSHA, "head_sha": headSHA}}
 	if !opts.CIMode {
-		activeDir := filepath.Join(worktreePath, ".swarm", "active")
-		_ = os.MkdirAll(activeDir, 0o755)
-		_ = os.WriteFile(filepath.Join(activeDir, "VALIDATION.md"), []byte(md.String()), 0o644)
+		active := filepath.Join(worktreePath, ".swarm", "active")
+		if err := os.MkdirAll(active, 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(active, "VALIDATION.md"), []byte(markdown.String()), 0o644); err != nil {
+			return nil, err
+		}
 	}
-
-	if firstCheckErr != nil {
-		return report, firstCheckErr
+	if firstErr != nil {
+		return report, firstErr
 	}
 	return report, nil
 }
 
-func collectModifiedFiles(worktreePath string) ([]string, error) {
-	syncedUntracked := make(map[string]string)
-	if raw, err := os.ReadFile(filepath.Join(worktreePath, ".swarm", "active", "synced-untracked.json")); err == nil {
-		_ = json.Unmarshal(raw, &syncedUntracked)
+func loadTrustedValidationSpec(repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
+	spec, err := harness.LoadValidationSpecAt(repoRoot, baseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("%w: load validation policy at %s: %v", ErrInvalidPolicy, baseSHA, err)
 	}
+	return spec, nil
+}
 
-	seen := make(map[string]bool)
+func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
+	commands := [][]string{{"diff", "--name-only", "-z", baseSHA + "...HEAD"}, {"diff", "--name-only", "-z"}, {"diff", "--cached", "--name-only", "-z"}, {"ls-files", "--others", "--exclude-standard", "-z"}}
+	seen := make(map[string]struct{})
 	var files []string
-	addLines := func(out []byte) {
-		for _, line := range strings.Split(string(out), "\n") {
-			f := filepath.ToSlash(strings.TrimSpace(line))
-			if f == "" || strings.HasPrefix(f, ".swarm/active") || strings.HasPrefix(f, ".swarm/worktrees") || strings.HasPrefix(f, ".swarm/local-tracker") {
+	for _, args := range commands {
+		out, err := gitOutput(worktreePath, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, raw := range bytes.Split(out, []byte{0}) {
+			if len(raw) == 0 {
 				continue
 			}
-			// Ignore untracked AGENTS.md / CLAUDE.md or slash command scaffolding injected by CompileHarnessBundle
-			if f == "AGENTS.md" || f == "CLAUDE.md" || strings.HasPrefix(f, ".claude/commands/swarm-") || strings.HasPrefix(f, ".opencode/command/swarm-") {
+			path := string(raw)
+			if isEphemeral(path) {
 				continue
 			}
-			if origHash, ok := syncedUntracked[f]; ok {
-				if curData, err := os.ReadFile(filepath.Join(worktreePath, f)); err == nil {
-					sum := sha256.Sum256(curData)
-					if hex.EncodeToString(sum[:]) == origHash {
-						continue
-					}
-				}
+			if err := safeRepoPath(worktreePath, path); err != nil {
+				return nil, err
 			}
-			if !seen[f] {
-				seen[f] = true
-				files = append(files, f)
+			if _, ok := seen[path]; !ok {
+				seen[path] = struct{}{}
+				files = append(files, path)
 			}
 		}
 	}
-
-	if out, err := exec.Command("git", "-C", worktreePath, "diff", "--name-only", "origin/HEAD...HEAD").Output(); err == nil {
-		addLines(out)
-	} else if out, err := exec.Command("git", "-C", worktreePath, "diff", "--name-only", "main...HEAD").Output(); err == nil {
-		addLines(out)
-	}
-	if out, err := exec.Command("git", "-C", worktreePath, "diff", "--name-only", "HEAD").Output(); err == nil {
-		addLines(out)
-	}
-	if out, err := exec.Command("git", "-C", worktreePath, "diff", "--cached", "--name-only").Output(); err == nil {
-		addLines(out)
-	}
-	if out, err := exec.Command("git", "-C", worktreePath, "ls-files", "--others", "--exclude-standard").Output(); err == nil {
-		addLines(out)
-	}
-
 	return files, nil
 }
 
-func matchGlobPattern(pattern, target string) bool {
-	pattern = filepath.ToSlash(strings.TrimSpace(pattern))
-	target = filepath.ToSlash(strings.TrimSpace(target))
+func isEphemeral(path string) bool {
+	return path == ".swarm/active" || strings.HasPrefix(path, ".swarm/active/")
+}
 
+func safeRepoPath(root, path string) error {
+	if path == "" || filepath.IsAbs(path) {
+		return fmt.Errorf("%w: %q", ErrUnsafePath, path)
+	}
+	clean := filepath.Clean(path)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: %q", ErrUnsafePath, path)
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	candidate := filepath.Join(rootAbs, clean)
+	if rel, err := filepath.Rel(rootAbs, candidate); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: %q", ErrUnsafePath, path)
+	}
+	for part := candidate; ; part = filepath.Dir(part) {
+		if info, err := os.Lstat(part); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, err := filepath.EvalSymlinks(part)
+			if err != nil {
+				return fmt.Errorf("%w: resolve symlink %q: %v", ErrUnsafePath, path, err)
+			}
+			rel, err := filepath.Rel(rootAbs, target)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("%w: symlink escape %q", ErrUnsafePath, path)
+			}
+		}
+		if part == rootAbs {
+			break
+		}
+	}
+	return nil
+}
+
+func cleanCheckEnv(home string) []string {
+	// Do not inherit a user home, credential helper, publishing token, or SSH
+	// agent. Checks get only deterministic process basics.
+	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "USERPROFILE=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(home, "config"), "XDG_CACHE_HOME=" + filepath.Join(home, "cache"),
+		"APPDATA=" + filepath.Join(home, "config"), "LOCALAPPDATA=" + filepath.Join(home, "cache"),
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_TERMINAL_PROMPT=0"}
+	// rustup keeps compiler installations outside HOME. Preserve that public
+	// toolchain directory, but not CARGO_HOME, which may contain registry tokens.
+	rustupHome := os.Getenv("RUSTUP_HOME")
+	if rustupHome == "" {
+		if userHome, err := os.UserHomeDir(); err == nil {
+			candidate := filepath.Join(userHome, ".rustup")
+			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+				rustupHome = candidate
+			}
+		}
+	}
+	if rustupHome != "" {
+		env = append(env, "RUSTUP_HOME="+rustupHome)
+	}
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ"} {
+		if value := os.Getenv(key); value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
+func gitOutput(repoRoot string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
+	}
+	return out, nil
+}
+
+func resolveCommit(repoRoot, revision string) (string, error) {
+	out, err := gitOutput(repoRoot, "rev-parse", "--verify", revision+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func matchGlobPattern(pattern, target string) bool {
+	pattern, target = filepath.ToSlash(strings.TrimSpace(pattern)), filepath.ToSlash(target)
 	if strings.HasSuffix(pattern, "/**") {
 		prefix := strings.TrimSuffix(pattern, "/**")
 		return target == prefix || strings.HasPrefix(target, prefix+"/")
 	}
-	if ok, err := filepath.Match(pattern, target); err == nil && ok {
-		return true
-	}
-	return pattern == target
+	ok, err := filepath.Match(pattern, target)
+	return (err == nil && ok) || pattern == target
 }

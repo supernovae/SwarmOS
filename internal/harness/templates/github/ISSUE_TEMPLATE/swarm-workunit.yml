@@ -1,7 +1,7 @@
 name: SwarmOS Work Unit
 description: Define a contract-driven work unit for SwarmOS agents and contributors
 title: "[Swarm] "
-labels: ["swarm:ready"]
+labels: ["swarm:draft"]
 body:
   - type: textarea
     id: objective
@@ -35,7 +35,7 @@ body:
     id: workflow
     attributes:
       label: Workflow
-      description: Select the SwarmOS workflow spec to execute.
+      description: Select a prompt recipe for the fixed SwarmOS phase engine.
       options:
         - feature
         - bugfix
@@ -47,11 +47,11 @@ body:
     id: plan_gate
     attributes:
       label: Plan Gate
-      description: Optional approval gate after the Plan phase before implementation starts.
+      description: Requested review gate; repository policy may require a stricter gate. A maintainer must approve this task before claiming.
       options:
-        - none
         - agent
         - human
+        - none
       default: 0
     validations:
       required: true

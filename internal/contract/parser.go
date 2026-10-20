@@ -76,11 +76,12 @@ func ParseWorkUnitFromIssueWithRoot(issueNum int, title, body, repoRoot string) 
 			wu = &candidate
 		}
 	}
-
 	if wu == nil {
 		return nil, fmt.Errorf("issue #%d does not contain a valid SwarmOS WorkUnit (expected fenced YAML, ### Objective markdown sections, or swarm-workunit-path)", issueNum)
 	}
-
+	if wu.IssueNumber != 0 && issueNum > 0 && wu.IssueNumber != issueNum {
+		return nil, fmt.Errorf("work unit issue_number %d does not match selected issue #%d", wu.IssueNumber, issueNum)
+	}
 	if wu.IssueNumber == 0 && issueNum > 0 {
 		wu.IssueNumber = issueNum
 	}
@@ -94,10 +95,9 @@ func ParseWorkUnitFromIssueWithRoot(issueNum int, title, body, repoRoot string) 
 	if wu.Title == "" && title != "" {
 		wu.Title = strings.TrimSpace(title)
 	}
-	if wu.Gate == "" {
-		wu.Gate = GateNone
+	if err := ValidateGate(wu.Gate); err != nil {
+		return nil, err
 	}
-
 	if err = ValidateWorkUnit(wu); err != nil {
 		return nil, err
 	}

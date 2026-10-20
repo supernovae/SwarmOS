@@ -2,136 +2,88 @@ package cli
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/harness"
-	"github.com/supernovae/swarmos/internal/workflow"
-	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newReviewCmd(rootOpts *RootOptions) *cobra.Command {
-	var (
-		agentName string
-		approve   bool
-		reject    bool
-		notes     string
-		headless  bool
-	)
-
+	var agentName, notes string
+	var approve, reject, headless, asJSON bool
 	cmd := &cobra.Command{
 		Use:   "review <issue-number>",
-		Short: "Run an automated reviewer agent or record human plan approval/rejection",
+		Short: "Run an isolated agent review or record an authorized human decision",
 		Args:  cobra.ExactArgs(1),
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if approve && reject {
+				return fmt.Errorf("--approve and --reject are mutually exclusive")
+			}
+			if (approve || reject) && agentName != "" {
+				return fmt.Errorf("--agent cannot be combined with a human decision")
+			}
+			if notes != "" && !approve && !reject {
+				return fmt.Errorf("--notes requires --approve or --reject")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			issueNum, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-			if err != nil || issueNum <= 0 {
+			issue, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
+			if err != nil || issue <= 0 {
 				return fmt.Errorf("invalid issue number %q", args[0])
 			}
-			repoRoot := rootOpts.resolveRepoRoot()
-			tr, mgr, cfg, err := rootOpts.resolveLeaseManager(cmd)
+			if !approve && !reject {
+				work := newWorkCmd(rootOpts)
+				work.SetOut(cmd.OutOrStdout())
+				work.SetErr(cmd.ErrOrStderr())
+				workArgs := []string{strconv.Itoa(issue), "--phase", "review", "--headless=" + strconv.FormatBool(headless)}
+				if agentName != "" {
+					workArgs = append(workArgs, "--reviewer-agent", agentName)
+				}
+				if asJSON {
+					workArgs = append(workArgs, "--json")
+				}
+				work.SetArgs(workArgs)
+				return work.ExecuteContext(cmd.Context())
+			}
+			tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
 				return err
 			}
-
-			ctx := cmd.Context()
-			owner, _ := tr.CurrentUser(ctx)
-			if owner == "" {
-				owner = "local-dev"
+			verdict := "APPROVED"
+			if reject {
+				verdict = "CHANGES_REQUESTED"
 			}
-
-			if approve || reject {
-				verdict := "APPROVED"
-				summary := "Human approved plan"
-				if reject {
-					verdict = "CHANGES_REQUESTED"
-					summary = "Human requested changes on plan"
-				}
-				body := fmt.Sprintf("VERDICT: %s\n\n%s\n", verdict, strings.TrimSpace(notes))
-				if strings.TrimSpace(notes) == "" {
-					body = fmt.Sprintf("VERDICT: %s\n\nReviewed by %s via `swarm review`.\n", verdict, owner)
-				}
-
-				wtPath := workspace.WorktreePath(repoRoot, issueNum)
-				if info, err := os.Stat(wtPath); err == nil && info.IsDir() {
-					_ = os.MkdirAll(filepath.Join(wtPath, ".swarm", "active"), 0o755)
-					_ = os.WriteFile(filepath.Join(wtPath, ".swarm", "active", "REVIEW.md"), []byte(body), 0o644)
-				}
-
-				if _, err := mgr.UpdateArtifact(ctx, issueNum, owner, contract.Artifact{
-					Type:     contract.ArtifactReview,
-					Producer: "human:" + owner,
-					Verdict:  verdict,
-					Summary:  summary,
-					Body:     body,
-				}); err != nil {
+			if _, err := manager.RecordHumanReview(cmd.Context(), issue, verdict, notes); err != nil {
+				return err
+			}
+			if approve {
+				if err := tr.RemoveLabel(cmd.Context(), issue, "swarm:plan-review"); err != nil {
 					return err
 				}
-				if approve {
-					_ = tr.RemoveLabel(ctx, issueNum, "swarm:plan-review")
-					_ = tr.AddLabels(ctx, issueNum, []string{"swarm:plan-approved"})
-				} else {
-					_ = tr.AddLabels(ctx, issueNum, []string{"swarm:plan-review"})
+				if err := tr.AddLabels(cmd.Context(), issue, []string{"swarm:plan-approved"}); err != nil {
+					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Recorded review verdict %s for issue #%d\n", verdict, issueNum)
-				return nil
-			}
-
-			if agentName == "" {
-				agentName = cfg.DefaultAgent
-				if agentName == "" {
-					agentName = "claude"
+			} else {
+				if err := tr.RemoveLabel(cmd.Context(), issue, "swarm:plan-approved"); err != nil {
+					return err
+				}
+				if err := tr.AddLabels(cmd.Context(), issue, []string{"swarm:plan-review"}); err != nil {
+					return err
 				}
 			}
-
-			iss, err := tr.GetIssue(ctx, issueNum)
-			if err != nil {
-				return err
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "review", "issue_number": issue, "reviewer_kind": "human", "verdict": verdict})
 			}
-			wu, err := contract.ParseWorkUnitFromIssueWithRoot(iss.Number, iss.Title, iss.Body, repoRoot)
-			if err != nil {
-				return err
-			}
-			wf, err := harness.LoadWorkflow(repoRoot, wu.Workflow)
-			if err != nil {
-				return err
-			}
-			st, err := mgr.GetCurrentState(ctx, issueNum)
-			if err != nil {
-				return err
-			}
-
-			wtPath, _, err := workspace.Provision(repoRoot, issueNum, iss.Title)
-			if err != nil {
-				return err
-			}
-
-			eng, err := workflow.NewEngine(repoRoot, tr)
-			if err != nil {
-				return err
-			}
-			mode := "interactive"
-			if headless {
-				mode = "headless"
-			}
-
-			verdict, _, err := eng.RunAgentReview(ctx, wtPath, wu, wf, st, owner, agentName, mode)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Reviewer agent %q completed review for issue #%d: %s\n", agentName, issueNum, verdict)
+			fmt.Fprintf(cmd.OutOrStdout(), "Human review recorded for issue #%d: %s\n", issue, verdict)
 			return nil
 		},
 	}
-
-	cmd.Flags().StringVar(&agentName, "agent", "", "Reviewer agent to run (claude, codex, opencode, omp, mock)")
-	cmd.Flags().BoolVar(&approve, "approve", false, "Record human approval of the plan")
-	cmd.Flags().BoolVar(&reject, "reject", false, "Record human rejection / changes requested")
-	cmd.Flags().StringVar(&notes, "notes", "", "Review notes when approving or rejecting")
-	cmd.Flags().BoolVar(&headless, "headless", true, "Run reviewer agent in headless mode")
+	cmd.Flags().StringVar(&agentName, "agent", "", "Configured reviewer override")
+	cmd.Flags().BoolVar(&approve, "approve", false, "Record an authenticated human approval")
+	cmd.Flags().BoolVar(&reject, "reject", false, "Record an authenticated human rejection")
+	cmd.Flags().StringVar(&notes, "notes", "", "Human decision notes")
+	cmd.Flags().BoolVar(&headless, "headless", true, "Run reviewer non-interactively")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured review outcome")
 	return cmd
 }

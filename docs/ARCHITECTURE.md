@@ -1,64 +1,50 @@
-# SwarmOS Architecture
+# SwarmOS architecture
 
-SwarmOS is designed around a single core principle: **Git and GitHub Issues already provide every primitive needed to coordinate distributed software agents—if used with strict schemas and optimistic concurrency.**
+## Authority and consistency model
 
----
+Git compare-and-swap refs are the authoritative task state store. For a GitHub task, state is stored on a dedicated `swarm-state/issue-<N>` ref; the local backend uses a durable locked CAS store for explicitly offline operation. GitHub issues and comments remain the human work surface and audit projection, but parsing a comment never authorizes a claim, approval, handoff, artifact, or release.
 
-## 1. Contract Layer (`internal/contract/`)
+This is a serialized state machine, not a claim that GitHub comments alone provide distributed locking. Worker-owned claim, artifact, checkpoint, and submission mutations verify repository/task/policy identity and claim fencing before CAS writes. Authorized task approval and human review are independent CAS operations. A conflict is a retry/failure condition, never permission to overwrite a newer state.
 
-Every SwarmOS task begins as a `WorkUnit` validated against [`workunit.schema.json`](../.swarm/contracts/workunit.schema.json).
+The Git remote authenticates ref writers, not the semantic claims inside arbitrary JSON. Protect `refs/heads/swarm-state/*` and issue checkpoint branches: a writer bypassing the CLI can forge state. CAS supplies ordering and stale-write rejection for trusted operators, not signed human-approval attestation against a compromised coordinator.
 
-`ParseWorkUnitFromIssue` supports three deterministic formats in priority order:
-1. **Fenced YAML Block** (` ```yaml swarm-workunit ` or ` ```yaml `).
-2. **GitHub Issue Form Sections** (`### Objective`, `### Constraints`, `### Acceptance Criteria`, `### Workflow`, `### Plan Gate`).
-3. **External File Reference** (`swarm-workunit-path: .swarm/workunits/<id>.yaml`).
+Authoritative state binds:
 
-### Prompt Injection Defense
-Before parsing any issue body:
-- `StripHTMLComments` removes all `<!-- ... -->` blocks so hidden instructions inside untrusted issue descriptions never reach agent system prompts.
-- `VerifyTrustPolicy` in `internal/lease/manager.go` verifies that the issue either carries the maintainer-controlled `swarm:ready` label or was authored by a user whose `AuthorAssociation` is in `security.trusted_associations` (`OWNER`, `MEMBER`, `COLLABORATOR`). Untrusted issues fail immediately with `ErrUntrustedIssue` before any worktree or agent process is spawned.
+- WorkUnit digest and policy digest;
+- approved immutable base SHA;
+- branch and checkpoint head SHA;
+- unique claim ID, owner/node, expiry, renewal state, and phase;
+- artifacts and hashes, including plan/test-plan/review approval binding;
+- submission identity when a Draft PR is created.
 
----
+## Task approval and claiming
 
-## 2. Serverless Lease & Artifact Protocol (`internal/lease/`)
+`swarm issue create` is draft-first. `swarm issue approve` authenticates the actor, parses the current WorkUnit, resolves the trusted base, persists task/policy/base identity with CAS, then applies readiness. Changed issue content, policy, permissions, or readiness cannot silently resume an old authorization.
 
-SwarmOS stores orchestration state inside a single living comment per claim on the issue using an embedded HTML state header followed by rendered Markdown tables and collapsible `<details>` sections:
+Acquire creates a unique attempt. The CLI persists its claim token outside the worktree and serializes same-machine execution. Every later state/artifact/checkpoint/submission operation verifies the live token, expiry, and current revisions. Heartbeat renewal failure cancels work. A stale process therefore cannot publish after a successor has claimed the task.
 
-```markdown
-<!-- swarm:state:v1 {"lease":{...},"artifacts":[...]} -->
-### SwarmOS Orchestration State
-...
-```
+## Workspace and checkpoints
 
-### Optimistic Concurrency & Comment-ID Tie-Breaking
-Because GitHub Issues do not offer server-side locks, `Manager.Acquire` implements a deterministic two-phase claim protocol:
-1. Fetch existing issue comments ordered by ascending `CommentID`.
-2. Parse all `<!-- swarm:state:v1 ... -->` blocks. If an unexpired active lease (`status == "active"` and `expires_at > now`) belongs to another owner, abort with `ErrAlreadyClaimed`.
-3. Post our claim comment (or update our existing comment).
-4. Re-fetch issue comments and inspect all unexpired active leases. The claimant whose comment has the **lowest `CommentID`** wins. Any concurrent claimant that posted milliseconds later detects that an earlier `CommentID` exists, marks its own comment `superseded`, and returns `ErrClaimRaceLost`.
+The base is `origin`'s advertised default-branch commit after fetch when a remote exists; otherwise it is local `HEAD` for an explicit offline fixture. Provisioning verifies an existing worktree is the expected linked worktree, branch, and checkpoint. It does not use branch-reset behavior to recreate one.
 
-### Lazy Lease Expiration
-If an agent crashes or a developer disconnects without running `swarm release`, the lease automatically becomes reclaimable once `expires_at <= now`. The next claimant seamlessly acquires the issue without manual cleanup.
+A checkpoint cleans ephemeral active markers, commits without rewriting history, and pushes the exact head for GitHub. The state records that head. A different machine fetches and verifies it before resuming, transferring code rather than merely transferring a textual implementation artifact.
 
----
+Dependencies default to merged/closed prerequisites. A PR-open label is not proof that prerequisite code is present. Stacked dependencies require an explicitly supported base/checkpoint relationship.
 
-## 3. Worktree Isolation & Universal Harness Compiler (`internal/workspace/`)
+## Plan and validation transitions
 
-When an issue is claimed, `workspace.Provision` creates an isolated Git worktree:
-- **Path**: `.swarm/worktrees/issue-<N>`
-- **Branch**: `swarm/issue-<N>-<slug>`
+Workflow YAML is a role prompt recipe, not an executable graph. The fixed engine produces plan and test-plan artifacts, applies the effective gate, implements, validates, then leaves submission explicit.
 
-`workspace.CompileHarnessBundle` then compiles role-specific context into the worktree:
-- `.swarm/active/WORKUNIT.md` — Structured contract and prior phase artifacts.
-- `.swarm/active/SYSTEM_PROMPT.md` — Concatenation of `.swarm/prompts/<role>.md`, `.swarm/project.md`, `.swarm/architecture.md`, `.swarm/conventions.md`, and `WORKUNIT.md`.
-- Managed pointer blocks (`<!-- swarm:active:start --> ... <!-- swarm:active:end -->`) in `AGENTS.md` and `CLAUDE.md` so any agent opened interactively inside the worktree immediately discovers the active contract.
-- `.swarm/active/` is automatically added to the worktree's `.git/info/exclude`, and `CleanEphemeralHarnessMarkers` strips temporary markers prior to `swarm submit`.
+Gate verification is shared at transition points. Agent approval requires an exact verdict and matching current WorkUnit/plan/test-plan hashes. Human approval requires tracker authorization for a human decision. Replacing a plan or test plan invalidates prior approval.
 
----
+Validation policy is resolved from the approved base before candidate code runs. It compares base-to-candidate changes as well as working/index/untracked state, so candidate changes cannot erase their own protected-path rules or required checks. Submission checkpoints first, validates the exact clean head, then records validation and submission state; changed code invalidates earlier evidence.
 
-## 4. Validation & Tamper Defense (`internal/validation/`)
+## Process boundary
 
-Before any work unit can be submitted as a Draft PR, `validation.Validate` enforces three checks:
-1. **Artifact Completeness**: Verifies `.swarm/active/PLAN.md` (`design`) and `.swarm/active/TEST_PLAN.md` (`test-plan`) exist and are non-empty.
-2. **Protected-Path Tamper Detection**: Diffs the worktree against `HEAD`/`origin/HEAD`. If any modified file matches `protected_paths` (`.github/workflows/**`, `.swarm/validation/**`, `.swarm/contracts/**`) and `allow_harness_changes` is `false`, validation fails with `ErrProtectedPathModified`.
-3. **Required Checks Execution**: Runs every command in `.swarm/validation/required-checks.yaml` (`build`, `test`, `lint`), capturing exit codes, durations, and output into a `validation` artifact.
+Worktrees isolate Git checkouts only. Agents and checks are host processes unless configured otherwise. Reviewer isolation is stronger: it runs a separate immutable snapshot with an output-only review artifact channel. The current implementation uses `sandbox-exec` on macOS, `bwrap` on Linux, or a configured OCI container runtime; Windows has no native host reviewer sandbox and requires the container path. An unavailable selected boundary fails closed. Linux `bwrap` uses user, IPC, PID, and UTS namespaces and isolates networking by default. Container review is reviewer-only with a read-only root, dropped capabilities/no-new-privileges, a read-only snapshot, and explicit writable output/scratch mounts; Linux Docker requires accessible bind mounts. Reviewer networking is denied by default; `review_network: true` permits unrestricted host/container egress for that reviewer and is not domain-filtered.
+
+Agent children start with a temporary credential-free scratch home and do not inherit host `HOME`, XDG, SSH, Git, or publishing-token state; only exact configured environment entries are forwarded, and configuration rejects `GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`, `HOME`, and `XDG_*`. This environment filtering does not isolate planner, developer, or tester host processes: they share the user UID and can directly read host files or credential stores. Review snapshot creation rejects absolute or escaping symlinks, denies the original worktree and host home, and atomically imports only a bounded regular `REVIEW.md`. This architecture does not claim prevention of visible prompt injection, malicious repository code, network exfiltration, or compromised host credentials.
+
+## Operational limits
+
+Git CAS establishes state ordering, but operators still need repository permissions, remote availability, branch protection, safe credential management, and release CI evidence for the exact SHA. Beyond the implemented `--max-jobs` limit, wall-time/cost budgets, repository fairness, richer structured event streams, and provider capability diagnostics remain planned work. The optional future centralized coordinator is specified, not implemented, in [todo.md](../todo.md).

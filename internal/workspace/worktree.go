@@ -1,11 +1,10 @@
 package workspace
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +22,7 @@ const (
 
 var (
 	nonSlugRegex     = regexp.MustCompile(`[^a-z0-9]+`)
-	activeBlockRegex = regexp.MustCompile(`(?s)\n*<!-- swarm:active:start -->.*?<!-- swarm:active:end -->\n*`)
+	activeBlockRegex = regexp.MustCompile(`(?s)<!-- swarm:active:start -->.*?<!-- swarm:active:end -->\n{0,2}`)
 )
 
 func Slugify(title string) string {
@@ -49,70 +48,262 @@ func BranchName(issueNum int, titleOrSlug string) string {
 	return fmt.Sprintf("swarm/issue-%d-%s", issueNum, Slugify(titleOrSlug))
 }
 
-// Provision creates or reuses an isolated git worktree at .swarm/worktrees/issue-<N> on branch swarm/issue-<N>-<slug>.
-func Provision(repoRoot string, issueNum int, slug string) (string, string, error) {
+// ResolveBase resolves the immutable commit used to create a worktree. When
+// origin exists, its advertised default branch is authoritative; a local
+// checkout branch must never become the base accidentally.
+func ResolveBase(repoRoot string) (string, error) {
+	if _, err := gitOutput(repoRoot, "rev-parse", "--show-toplevel"); err != nil {
+		return "", fmt.Errorf("resolve repository root: %w", err)
+	}
+	if _, err := gitOutput(repoRoot, "remote", "get-url", "origin"); err != nil {
+		if !errors.Is(err, errGitFailed) {
+			return "", err
+		}
+		return resolveCommit(repoRoot, "HEAD")
+	}
+	if _, err := gitOutput(repoRoot, "fetch", "--no-write-fetch-head", "--prune", "origin"); err != nil {
+		return "", fmt.Errorf("fetch origin before resolving base: %w", err)
+	}
+	if _, err := gitOutput(repoRoot, "remote", "set-head", "origin", "--auto"); err != nil {
+		return "", fmt.Errorf("discover advertised origin default branch: %w", err)
+	}
+	out, err := gitOutput(repoRoot, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+	if err != nil {
+		return "", fmt.Errorf("origin has no advertised default branch: %w", err)
+	}
+	return resolveCommit(repoRoot, strings.TrimSpace(out))
+}
+
+// ProvisionAt creates or reopens exactly the requested worktree branch.
+// It never resets an existing branch and refuses an unrelated directory.
+func ProvisionAt(repoRoot string, issueNum int, title, baseSHA, branch, headSHA string) (string, string, error) {
+	if issueNum <= 0 || baseSHA == "" {
+		return "", "", errors.New("issue number and approved base SHA are required")
+	}
+	if branch == "" {
+		branch = BranchName(issueNum, title)
+	}
 	absRoot, err := filepath.Abs(repoRoot)
 	if err != nil {
 		return "", "", err
 	}
-
-	if err := ensureInitialCommit(absRoot); err != nil {
+	baseSHA, err = resolveCommit(absRoot, baseSHA)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve approved base %q: %w", baseSHA, err)
+	}
+	if headSHA != "" {
+		if _, err := gitOutput(absRoot, "remote", "get-url", "origin"); err == nil {
+			remote, err := gitOutput(absRoot, "ls-remote", "--refs", "origin", "refs/heads/"+branch)
+			if err != nil {
+				return "", "", err
+			}
+			fields := strings.Fields(remote)
+			if len(fields) != 2 || fields[0] != headSHA {
+				return "", "", fmt.Errorf("remote branch %q does not match approved checkpoint %s", branch, headSHA)
+			}
+			if _, err := gitOutput(absRoot, "fetch", "--no-write-fetch-head", "origin", headSHA); err != nil {
+				return "", "", fmt.Errorf("fetch pinned checkpoint: %w", err)
+			}
+		}
+	}
+	checkpoint := headSHA
+	if checkpoint == "" {
+		checkpoint, err = resolveCommit(absRoot, "refs/heads/"+branch)
+		if err != nil {
+			checkpoint = baseSHA
+		}
+	}
+	if _, err := gitOutput(absRoot, "merge-base", "--is-ancestor", baseSHA, checkpoint); err != nil {
+		return "", "", fmt.Errorf("checkpoint %s does not descend from approved base %s; reconcile the branch without resetting it: %w", checkpoint, baseSHA, err)
+	}
+	wtPath := WorktreePath(absRoot, issueNum)
+	if _, err := os.Lstat(wtPath); err == nil {
+		if err := verifyWorktree(wtPath, branch, headSHA); err != nil {
+			return "", "", err
+		}
+		if err := configureWorktreeExclude(wtPath); err != nil {
+			return "", "", err
+		}
+		return wtPath, branch, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", "", err
 	}
-
-	branch := BranchName(issueNum, slug)
-	wtPath := WorktreePath(absRoot, issueNum)
-
-	if info, err := os.Stat(wtPath); err == nil && info.IsDir() {
-		_ = syncSwarmConfigToWorktree(absRoot, wtPath)
-		_ = configureWorktreeExclude(wtPath)
-		return wtPath, branch, nil
-	}
-
 	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
 		return "", "", err
 	}
-
 	_ = exec.Command("git", "-C", absRoot, "worktree", "prune").Run()
 
-	cmd := exec.Command("git", "-C", absRoot, "worktree", "add", "-B", branch, wtPath, "HEAD")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", "", fmt.Errorf("git worktree add failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	if headSHA != "" {
+		if existing, err := resolveCommit(absRoot, branch); err == nil && existing != headSHA {
+			return "", "", fmt.Errorf("existing branch %q is %s, expected checkpoint %s", branch, existing, headSHA)
+		}
+		if _, err := gitOutput(absRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err != nil {
+			if _, err := gitOutput(absRoot, "branch", branch, headSHA); err != nil {
+				return "", "", fmt.Errorf("create checkpoint branch: %w", err)
+			}
+		}
+	} else if _, err := gitOutput(absRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err != nil {
+		if _, err := gitOutput(absRoot, "branch", branch, baseSHA); err != nil {
+			return "", "", fmt.Errorf("create worktree branch: %w", err)
+		}
 	}
-
-	if err := syncSwarmConfigToWorktree(absRoot, wtPath); err != nil {
+	if _, err := gitOutput(absRoot, "worktree", "add", wtPath, branch); err != nil {
+		return "", "", fmt.Errorf("add worktree: %w", err)
+	}
+	if err := verifyWorktree(wtPath, branch, headSHA); err != nil {
 		return "", "", err
 	}
 	if err := configureWorktreeExclude(wtPath); err != nil {
 		return "", "", err
 	}
-
 	return wtPath, branch, nil
 }
 
-// CompileHarnessBundle populates .swarm/active/{WORKUNIT.md,SYSTEM_PROMPT.md,workunit.json} and injects universal context blocks into AGENTS.md and CLAUDE.md.
-func CompileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role string) error {
+// Checkpoint commits the worktree's current changes without rewriting history.
+// Publication belongs to the fenced coordination store, never this helper.
+func Checkpoint(ctx context.Context, wtPath, branch string) (string, error) {
+	if branch == "" {
+		return "", errors.New("checkpoint branch is required")
+	}
+	if err := verifyWorktree(wtPath, branch, ""); err != nil {
+		return "", err
+	}
+	if err := CleanEphemeralHarnessMarkers(wtPath); err != nil {
+		return "", err
+	}
+	status, err := gitOutputContext(ctx, wtPath, "status", "--porcelain=v1")
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(status) != "" {
+		if _, err := gitOutputContext(ctx, wtPath, "add", "-A"); err != nil {
+			return "", err
+		}
+		if _, err := gitOutputContext(ctx, wtPath, "commit", "-m", "swarm checkpoint"); err != nil {
+			return "", fmt.Errorf("commit checkpoint: %w", err)
+		}
+	}
+	head, err := resolveCommit(wtPath, "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return head, nil
+}
+
+var errGitFailed = errors.New("git command failed")
+
+func gitOutput(repoRoot string, args ...string) (string, error) {
+	return gitOutputContext(context.Background(), repoRoot, args...)
+}
+
+func gitOutputContext(ctx context.Context, repoRoot string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%w: git %s: %s", errGitFailed, strings.Join(args, " "), strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
+func resolveCommit(repoRoot, revision string) (string, error) {
+	out, err := gitOutput(repoRoot, "rev-parse", "--verify", revision+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func verifyWorktree(wtPath, branch, expectedHead string) error {
+	gitEntry, err := os.Lstat(filepath.Join(wtPath, ".git"))
+	if err != nil || gitEntry.IsDir() {
+		return fmt.Errorf("existing path %q is not a registered linked worktree", wtPath)
+	}
+	top, err := gitOutput(wtPath, "rev-parse", "--show-toplevel")
+	if err != nil || !samePath(strings.TrimSpace(top), wtPath) {
+		return fmt.Errorf("existing worktree %q is not the requested git worktree", wtPath)
+	}
+	currentBranch, err := gitOutput(wtPath, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil || strings.TrimSpace(currentBranch) != branch {
+		return fmt.Errorf("worktree %q is on branch %q, expected %q", wtPath, strings.TrimSpace(currentBranch), branch)
+	}
+	if expectedHead != "" {
+		head, err := resolveCommit(wtPath, "HEAD")
+		if err != nil {
+			return err
+		}
+		if head != expectedHead {
+			return fmt.Errorf("worktree %q is at %s, expected checkpoint %s", wtPath, head, expectedHead)
+		}
+	}
+	return nil
+}
+
+func samePath(a, b string) bool {
+	aAbs, errA := filepath.Abs(a)
+	bAbs, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(aAbs); err == nil {
+		aAbs = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(bAbs); err == nil {
+		bAbs = resolved
+	}
+	return filepath.Clean(aAbs) == filepath.Clean(bAbs)
+}
+
+func showHarnessFile(worktreePath, baseSHA, path string) (string, error) {
+	out, err := gitOutput(worktreePath, "show", baseSHA+":"+path)
+	if err != nil {
+		return "", fmt.Errorf("load approved harness file %q: %w", path, err)
+	}
+	return out, nil
+}
+
+// CompileHarnessBundleAt builds the active prompt only from base-pinned
+// harness instructions so a candidate cannot alter its own execution policy.
+func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, baseSHA string) error {
 	if role == "" {
 		role = "planner"
 	}
+	rolePrompt, err := harness.LoadRolePromptAt(worktreePath, role, baseSHA)
+	if err != nil {
+		return err
+	}
+	projectDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/project.md")
+	if err != nil {
+		return err
+	}
+	archDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/architecture.md")
+	if err != nil {
+		return err
+	}
+	convDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/conventions.md")
+	if err != nil {
+		return err
+	}
+	validationDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/validation/required-checks.yaml")
+	if err != nil {
+		return err
+	}
+	return compileHarnessBundle(worktreePath, wu, wf, artifacts, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc)
+}
+
+func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc string) error {
 	activeDir := filepath.Join(worktreePath, ".swarm", "active")
 	if err := os.MkdirAll(activeDir, 0o755); err != nil {
 		return err
 	}
-
 	if rawJSON, err := json.MarshalIndent(wu, "", "  "); err == nil {
-		_ = os.WriteFile(filepath.Join(activeDir, "workunit.json"), rawJSON, 0o644)
+		if err := os.WriteFile(filepath.Join(activeDir, "workunit.json"), rawJSON, 0o644); err != nil {
+			return err
+		}
 	}
-
 	workunitMD := renderWorkUnitMarkdown(wu, wf, artifacts)
 	if err := os.WriteFile(filepath.Join(activeDir, "WORKUNIT.md"), []byte(workunitMD), 0o644); err != nil {
 		return err
 	}
-
-	rolePrompt := harness.LoadRolePrompt(worktreePath, role)
-	projectDoc := readOptionalFile(filepath.Join(worktreePath, ".swarm", "project.md"))
-	archDoc := readOptionalFile(filepath.Join(worktreePath, ".swarm", "architecture.md"))
-	convDoc := readOptionalFile(filepath.Join(worktreePath, ".swarm", "conventions.md"))
 
 	var sys strings.Builder
 	sys.WriteString(strings.TrimSpace(rolePrompt) + "\n\n")
@@ -125,6 +316,9 @@ func CompileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	if convDoc != "" {
 		sys.WriteString(strings.TrimSpace(convDoc) + "\n\n")
 	}
+	sys.WriteString("## Approved validation policy\n\n```yaml\n")
+	sys.WriteString(strings.TrimSpace(validationDoc))
+	sys.WriteString("\n```\n\nRun these check commands directly. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
 	sys.WriteString("---\n\n")
 	sys.WriteString(workunitMD)
 
@@ -152,10 +346,6 @@ Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMP
 		}
 	}
 
-	if err := harness.EnsureSlashCommands(worktreePath, false, nil); err != nil {
-		return err
-	}
-
 	return configureWorktreeExclude(worktreePath)
 }
 
@@ -176,40 +366,37 @@ func LoadActiveWorkUnit(worktreePath string) (*contract.WorkUnit, error) {
 func CleanEphemeralHarnessMarkers(worktreePath string) error {
 	for _, docName := range []string{"AGENTS.md", "CLAUDE.md"} {
 		full := filepath.Join(worktreePath, docName)
-		data, err := os.ReadFile(full)
-		if err != nil {
+		info, err := os.Lstat(full)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		cleaned := strings.TrimSpace(activeBlockRegex.ReplaceAllString(string(data), "\n"))
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refuse to rewrite non-regular instruction file %s", docName)
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			return err
+		}
+		if !activeBlockRegex.Match(data) {
+			continue
+		}
+		cleaned := activeBlockRegex.ReplaceAllString(string(data), "")
 		if cleaned == "" {
 			if err := exec.Command("git", "-C", worktreePath, "ls-files", "--error-unmatch", docName).Run(); err != nil {
-				_ = os.Remove(full)
+				if err := os.Remove(full); err != nil {
+					return err
+				}
 				continue
 			}
 		}
-		_ = os.WriteFile(full, []byte(cleaned+"\n"), 0o644)
+		if err := os.WriteFile(full, []byte(cleaned), 0o644); err != nil {
+			return err
+		}
 	}
 
-	manifestPath := filepath.Join(worktreePath, ".swarm", "active", "synced-untracked.json")
-	if raw, err := os.ReadFile(manifestPath); err == nil {
-		var synced map[string]string
-		if json.Unmarshal(raw, &synced) == nil {
-			for rel, origHash := range synced {
-				full := filepath.Join(worktreePath, rel)
-				if curData, err := os.ReadFile(full); err == nil {
-					sum := sha256.Sum256(curData)
-					if hex.EncodeToString(sum[:]) == origHash {
-						_ = os.Remove(full)
-					}
-				}
-			}
-		}
-	}
-	for _, cmdDir := range []string{".claude/commands", ".opencode/command"} {
-		if err := exec.Command("git", "-C", worktreePath, "ls-files", "--error-unmatch", cmdDir).Run(); err != nil {
-			_ = os.RemoveAll(filepath.Join(worktreePath, filepath.Dir(cmdDir)))
-		}
-	}
 	return nil
 }
 
@@ -259,16 +446,26 @@ func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, ar
 }
 
 func injectManagedBlock(filePath, block string) error {
+	if info, err := os.Lstat(filePath); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing non-regular instruction file %s", filePath)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	existing, err := os.ReadFile(filePath)
 	if err != nil {
-		return os.WriteFile(filePath, []byte(block+"\n"), 0o644)
+		if !os.IsNotExist(err) {
+			return err
+		}
+		return os.WriteFile(filePath, []byte(block+"\n\n"), 0o644)
 	}
 	content := string(existing)
-	if strings.Contains(content, ActiveMarkerStart) && strings.Contains(content, ActiveMarkerEnd) {
-		updated := activeBlockRegex.ReplaceAllString(content, "\n\n"+block+"\n")
-		return os.WriteFile(filePath, []byte(strings.TrimSpace(updated)+"\n"), 0o644)
+	if activeBlockRegex.MatchString(content) {
+		updated := activeBlockRegex.ReplaceAllStringFunc(content, func(string) string { return block + "\n\n" })
+		return os.WriteFile(filePath, []byte(updated), 0o644)
 	}
-	updated := strings.TrimSpace(content) + "\n\n" + block + "\n"
+	updated := block + "\n\n" + content
 	return os.WriteFile(filePath, []byte(updated), 0o644)
 }
 
@@ -303,81 +500,4 @@ func configureWorktreeExclude(wtPath string) error {
 		return os.WriteFile(excludePath, []byte(sb.String()), 0o644)
 	}
 	return nil
-}
-
-func syncSwarmConfigToWorktree(repoRoot, wtPath string) error {
-	srcSwarm := filepath.Join(repoRoot, ".swarm")
-	if _, err := os.Stat(srcSwarm); err != nil {
-		return nil
-	}
-	manifestPath := filepath.Join(wtPath, ".swarm", "active", "synced-untracked.json")
-	synced := make(map[string]string)
-	if raw, err := os.ReadFile(manifestPath); err == nil {
-		_ = json.Unmarshal(raw, &synced)
-	}
-
-	err := filepath.WalkDir(srcSwarm, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		rel, err := filepath.Rel(srcSwarm, path)
-		if err != nil {
-			return nil
-		}
-		if strings.HasPrefix(rel, "worktrees") || strings.HasPrefix(rel, "active") || strings.HasPrefix(rel, "local-tracker") {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		dst := filepath.Join(wtPath, ".swarm", rel)
-		if d.IsDir() {
-			return os.MkdirAll(dst, 0o755)
-		}
-		if _, statErr := os.Stat(dst); statErr == nil {
-			return nil
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dst, data, 0o644); err != nil {
-			return err
-		}
-		repoRel := filepath.ToSlash(filepath.Join(".swarm", rel))
-		sum := sha256.Sum256(data)
-		synced[repoRel] = hex.EncodeToString(sum[:])
-		return nil
-	})
-	if len(synced) > 0 {
-		_ = os.MkdirAll(filepath.Dir(manifestPath), 0o755)
-		if out, mErr := json.MarshalIndent(synced, "", "  "); mErr == nil {
-			_ = os.WriteFile(manifestPath, out, 0o644)
-		}
-	}
-	return err
-}
-
-func ensureInitialCommit(repoRoot string) error {
-	if err := exec.Command("git", "-C", repoRoot, "rev-parse", "--verify", "HEAD").Run(); err == nil {
-		return nil
-	}
-	_ = exec.Command("git", "-C", repoRoot, "config", "user.name", "SwarmOS").Run()
-	_ = exec.Command("git", "-C", repoRoot, "config", "user.email", "swarm@localhost").Run()
-	cmd := exec.Command("git", "-C", repoRoot, "commit", "--allow-empty", "-m", "chore: initial repository commit")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to create initial commit for worktree: %w (%s)", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func readOptionalFile(p string) string {
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }

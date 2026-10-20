@@ -1,150 +1,77 @@
-# Developer, Team & Worker Node Guide
+# Developer operations and agent integration runbook
 
-This guide covers how individual developers, collaborating teammates, and autonomous worker nodes use `swarm` to discover, pull, execute, hand off, and submit work across one or more repositories.
+This guide documents the unreleased Git-CAS lifecycle. Use an explicit backend: `--backend github` for GitHub tracking or `--backend local` for a deliberate offline fixture. There is no implicit local fallback.
 
----
-
-## 1. Working in a Single Repository
-
-### Pulling the Next Available Task
-You don't need to browse GitHub Issues to find an unclaimed task. Run `swarm pull` or `swarm work --next` inside your repository:
+## Everyday task flow
 
 ```bash
-# Find, claim, and provision the oldest unclaimed `swarm:ready` issue into .swarm/worktrees/issue-<N>
-swarm pull --agent claude
+# Reserve only; preflights the configured planner and persists this machine's claim token.
+swarm claim 42
 
-# Or claim and immediately execute the full Plan -> Review Gate -> Implement -> Validate workflow
-swarm work --next --agent claude --headless
+# Or execute an explicit approved issue. This resumes the persisted token when present.
+swarm work 42 --headless
+
+# Inspect without a claim, worktree, or agent process.
+swarm work 42 --dry-run
+
+# Validate then submit the current checkpoint as a Draft PR.
+swarm validate 42
+swarm submit 42
 ```
 
-What happens when you claim or pull an issue:
-1. **Trust & Dependency Check**: Verifies the issue satisfies the repository's trust policy (`swarm:ready` label or trusted author) and that any `depends_on` prerequisite issues are complete.
-2. **Optimistic Lease Acquisition**: Posts a living orchestration state comment on the issue with a 4-hour renewable TTL (`swarm:claimed`, `swarm:in-progress`). If two developers claim the same issue simultaneously, lowest GitHub `CommentID` wins and the runner-up automatically moves to the next ready issue.
-3. **Isolated Git Worktree**: Creates branch `swarm/issue-<N>-<slug>` in `.swarm/worktrees/issue-<N>` without touching your main working directory.
-4. **Universal Harness Compilation**: Writes `.swarm/active/WORKUNIT.md` and `.swarm/active/SYSTEM_PROMPT.md`, injects context pointers into `AGENTS.md` and `CLAUDE.md`, and installs `/swarm-plan`, `/swarm-review`, `/swarm-implement`, and `/swarm-validate` slash commands.
+Use `swarm work --next` only to select a next eligible approved task. It is mutually exclusive with an explicit issue number. `--all` is meaningful only with `--next` for registered repositories. `claim`, `pull`, and `work` intentionally remain separate so reservation does not imply execution.
 
----
+Use `--json` where a command exposes it for scripts. JSON is the machine interface; do not parse status tables or progress prose. `work --dry-run` yields the effective selection, including resolved policy/gate/agents, before any mutation.
 
-## 2. Interactive vs. Headless Agent Execution
+`work` is headless by default; use `--headless=false` only for an interactive terminal session. The same structured JSON convention is available on task lifecycle, issue, status, lease, and node-run commands. `validate <issue>` uses the task's approved base SHA by default; `validate --ci` requires an explicit full immutable `--base` SHA and rejects `HEAD`.
 
-SwarmOS supports **Claude Code (`claude`)**, **Grok Bot (`grok`)**, **OpenAI Codex (`codex`)**, **OpenAI Dot (`dot`)**, **OpenCode (`opencode`)**, and **OhMyPi (`omp`)**. See the [Grok Bot Guide (`docs/grokbot.md`)](grokbot.md) and [OpenAI Dot & Codex Guide (`docs/openai-dot.md`)](openai-dot.md) for their setup and invocation details:
+## Agent integration runbook
 
-```bash
-# Interactive mode (default): opens the agent TUI inside the isolated worktree with the compiled prompt
-swarm work 12 --agent claude
+Configure every usable harness in `.swarm/config.yaml`; only configured entries are allowed. The supported harness drivers are `claude`, `codex`, `opencode`, and `omp`. The configuration key is the policy/audit identity; its `harness` field selects the driver and CLI flags, while `binary`, optional arguments/model, allowed roles, permitted environment, and sandbox settings remain repository policy. A missing `harness` defaults to the configuration key, so nonstandard names must set it explicitly.
 
-# Headless mode (--headless): runs non-interactively and captures artifacts automatically
-swarm work 12 --agent omp --headless
-```
+| Harness | Headless command shape | Interactive command shape |
+| --- | --- | --- |
+| [Claude Code](https://code.claude.com/docs/en/setup) 2.1.292 | `claude -p --append-system-prompt-file <prompt> <task>` | `claude --append-system-prompt-file <prompt> <task>` |
+| [OhMyPi](https://github.com/can1357/oh-my-pi#install) 18.12.3 | `omp -p --no-pty --append-system-prompt <prompt> <task>` | `omp --append-system-prompt <prompt> <task>` |
+| [Codex](https://learn.chatgpt.com/docs/codex/cli) 0.160.1 | `codex exec <combined prompt>` | `codex <task>` |
+| [OpenCode 1](https://opencode.ai/docs/) 1.17.1 | `opencode run <combined prompt>` | `opencode --prompt <task>` |
 
-### Routing Roles to Specialized Agents
-You can assign different agents to different workflow steps in a single run:
+The listed versions passed `--version` inside the macOS arm64 reviewer sandbox. This proves startup, not authenticated model execution; no paid model calls were made. OpenCode 2 and arbitrary newer versions require independent compatibility checks. An explicit configured `model` adds the driver's `--model` selection.
 
-```bash
-swarm work 12 \
-  --planner-agent claude \
-  --reviewer-agent omp \
-  --developer-agent codex \
-  --tester-agent opencode \
-  --gate agent \
-  --headless
-```
+SwarmOS checks availability before a claim. It does not assert provider account access, model entitlement, billing, or vendor behavior beyond the configured executable invocation. `mock` is deterministic local/test-only and must be explicitly selected in an explicit local backend context.
 
-1. **Planner (`--planner-agent`)**: Inspects the codebase without modifying production files and produces `.swarm/active/PLAN.md` (`design` artifact) and `.swarm/active/TEST_PLAN.md` (`test-plan` artifact).
-2. **Reviewer (`--reviewer-agent`)**: Audits the plan against all constraints and acceptance criteria, writing `.swarm/active/REVIEW.md` (`VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`).
-3. **Developer (`--developer-agent`)**: Implements `PLAN.md` step-by-step and records an `implementation` artifact summarizing modified files.
-4. **Tester (`--tester-agent`) & Validator**: Verifies acceptance criteria, checks protected paths for tampering, and runs `.swarm/validation/required-checks.yaml` (`validation` artifact).
+### Grok and Dot wrappers
 
----
+`grok` and `dot` have no native supported harness. A repository may use either name as an explicit policy/audit identity only when it selects a supported `harness` and independently verifies that the chosen binary accepts that harness's CLI contract. SwarmOS does not guarantee an official vendor distribution, version, or CLI compatibility. See [Grok wrapper](grokbot.md) and [Dot/Codex wrapper](openai-dot.md).
 
-## 3. Collaborative Team Handoffs (`--handoff`)
+## Reviewer isolation and credentials
 
-On a team, one contributor (or senior architect) may want to generate and vet the design plan, then hand the issue off for another contributor or coding node to implement:
+A reviewer is not made read-only by its prompt or by a worktree. The reviewer receives an immutable separate snapshot and an output-only `REVIEW.md` channel. The current implementation uses `sandbox-exec` on macOS, `bwrap` on Linux, or a configured OCI container runtime; there is no native Windows host sandbox, so Windows review requires the configured container path. An unavailable selected boundary fails closed. Linux `bwrap` uses user, IPC, PID, and UTS namespaces (and network isolation by default), so host user namespaces must be enabled. Container review is reviewer-only: it resolves the binary inside the image, runs with a read-only root, dropped capabilities/no-new-privileges, read-only snapshot, and explicit writable output/scratch mounts; on Unix it uses the host UID:GID, while Windows omits `--user` for bind-mount semantics. Docker on Linux requires accessible bind mounts. Reviewer network access is denied by default. `review_network: true` permits unrestricted egress for that configured reviewer so a cloud model CLI can operate; it is not a domain-filtered policy.
 
-```bash
-# Contributor A: Run the plan step and release into collaborative handoff mode
-swarm work 12 --phase plan --handoff --agent claude --headless
-```
+Agent children start with a temporary credential-free scratch home, not inherited host `HOME`, XDG, SSH, Git, or publishing-token state. Only exact configured model-authentication variables are forwarded through `AgentConfig.Env`; configuration rejects `GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`, `HOME`, and `XDG_*`. Do not relabel unrelated secrets into permitted names. The coordinator performs state and publication operations.
 
-- Publishes the `design` and `test-plan` artifacts to the issue's state comment.
-- Transitions the lease to `status: handoff` with `next_phase: implement` (or `review` if a review gate is pending) and records Contributor A in `contributors`.
-- Removes `swarm:in-progress` so the next teammate or worker node can pick it up.
+Host harness binaries are resolved to canonical paths. Because agent homes are masked, home-installed dependencies are unavailable to isolated review; use a system/global installation or a reviewed OCI image. Container/runtime preflight checks availability, but an OS/runtime restriction can still make review fail closed at launch.
 
-```bash
-# Contributor B: Pulls the next available task (automatically claims the handed-off implement step!)
-swarm work --next --agent codex --headless
-```
+This reviewer boundary does **not** sandbox planner, developer, or tester roles. Those configured host processes share the user UID and can directly read host files or credential stores despite the sanitized environment; they may also modify their assigned worktree and execute repository tools. Treat them as trusted host processes, not a general security boundary.
 
-Contributor B's worktree receives Contributor A's `PLAN.md` and `TEST_PLAN.md` automatically, and both contributors are credited in the lease's `contributors` list.
+## Checkpoints, handoffs, and recovery
 
----
+A claim records a unique attempt/claim ID, approved base SHA, branch, and checkpoint head. The claim token is persisted outside the worktree in the current user's configuration directory under `swarm/claims/<git-common-dir-hash>/<issue>.json`; same-machine execution is serialized, so a second command cannot resume the same token concurrently.
 
-## 4. Validating & Submitting a Draft PR
+A checkpoint commits current work without history rewriting. For GitHub, the state revision and exact branch tip are published together with an atomic push fenced against both previous refs. Another checkout verifies the recorded branch and SHA before opening it. Do not copy a plan into a new unrelated checkout, recreate a deleted worktree with a reset branch, or rely on a Draft PR as a dependency's code transfer.
 
-Once implementation is complete:
+If an agent exits, a lease is lost, or validation fails:
 
-```bash
-# Run protected-path tamper checks and all commands in .swarm/validation/required-checks.yaml
-swarm validate 12
+1. Run `swarm status <issue>` to inspect live state and artifacts.
+2. Fix configuration, sandbox, agent availability, or code in the verified worktree.
+3. Resume with the persisted token if still live; otherwise reclaim a fresh attempt.
+4. Re-plan/re-review if task, policy, plan, or test-plan digest changed.
+5. Validate the exact current head before submitting.
 
-# Clean temporary harness markers, commit & push the branch, and open an artifact-backed Draft PR
-swarm submit 12
-```
+## Workers
 
-If you need more time or want to step away from an issue:
-```bash
-# Extend lease TTL by 4h (up to max_renewals)
-swarm renew 12 --duration 4h
+A normal `swarm node run` drains available work then exits. `--watch` is the continuous polling interface when present in your installed unreleased build; do not assume it is available in v0.1.0. The worker atomically reserves `--max-jobs` capacity before selection, reports failed selection/execution/submission as failures, and reports human-gated tasks as paused rather than completed. It stops child process trees on cancellation and only auto-submits after validation.
 
-# Release the issue back to the backlog
-swarm release 12 --reason "Stepping away"
-```
+The `--max-jobs` admission limit is implemented. Wall-time/cost budgets and repository fairness remain planned optimization work. Agent output is bounded to 1 MiB; cost limits require provider usage data, and elapsed time is not a cost estimate.
 
----
-
-## 5. Multi-Repository Setup (`swarm repo`)
-
-If you contribute to multiple projects, register them in your local SwarmOS registry (`~/.config/swarm/repos.yaml`):
-
-```bash
-# Register an existing local checkout (verifies git origin remote matches owner/repo)
-swarm repo add supernovae/SwarmOS ~/src/SwarmOS
-
-# Or auto-clone a repository from GitHub into ~/.swarm/repos/<owner>/<repo> and register it
-swarm repo add supernovae/AnotherProject --clone
-
-# List all registered repositories and their harness status
-swarm repo list
-
-# View a unified dashboard of open issues, active claims, and TTLs across ALL registered repos
-swarm status --all
-
-# Pull or work on the next ready issue across all registered repos from any directory
-swarm pull --all
-swarm work --next --all --agent claude --reviewer-agent omp --gate agent --headless
-```
-
-### Logical Safety Guarantees Across Repos
-- **Remote-Slug Verification**: `swarm repo add` checks `git remote get-url origin` and refuses to associate an `owner/repo` slug with a mismatched local checkout.
-- **Location-Independent `--repo`**: Once registered, passing `--repo owner/repo` from anywhere on your machine automatically resolves the repository's local checkout path and provisions worktrees inside `<repoRoot>/.swarm/worktrees/issue-<N>`.
-- **Non-Destructive Fetch**: Before provisioning a worktree, `swarm pull` runs `git fetch origin --prune` without altering whatever branch or uncommitted changes you have in your primary checkout.
-
----
-
-## 6. Running Autonomous Worker Nodes (`swarm node`)
-
-To donate compute/agent capacity or run background worker pools across your repositories:
-
-```bash
-# 1. Detect host OS/Arch/CPUs/RAM and installed agent CLIs (~/.config/swarm/node.yaml)
-swarm node init --capabilities coding,testing,review,docs
-swarm node status
-
-# 2. Drain all currently ready work units across registered repos using 4 parallel workers
-swarm node run --all --concurrency 4 --once --gate agent --auto-submit
-
-# 3. Or run continuously as a polling daemon (checks every 30s)
-swarm node run --all --concurrency 2 --once=false --poll-interval 30s --gate agent --auto-submit
-```
-
-Nodes automatically match their declared `capabilities` against each issue's `required_capabilities` (and handoff phase requirements) before claiming work.
+Related: [setup](project.md) · [prompt and gate semantics](WORKFLOWS.md) · [security limits](../SECURITY.md).

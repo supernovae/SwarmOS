@@ -39,14 +39,15 @@ type WorkUnit struct {
 type Lease struct {
 	Version      int       `yaml:"version" json:"version"`
 	IssueNumber  int       `yaml:"issue_number" json:"issue_number"`
+	ClaimID      string    `yaml:"claim_id" json:"claim_id"`
 	Owner        string    `yaml:"owner" json:"owner"`
 	Agent        string    `yaml:"agent,omitempty" json:"agent,omitempty"`
 	NodeID       string    `yaml:"node_id,omitempty" json:"node_id,omitempty"`
 	Capabilities []string  `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
 	Contributors []string  `yaml:"contributors,omitempty" json:"contributors,omitempty"`
-	Phase        string    `yaml:"phase" json:"phase"`                               // "plan", "implement", "review", "validate", "full"
-	NextPhase    string    `yaml:"next_phase,omitempty" json:"next_phase,omitempty"` // target phase when Status == "handoff"
-	Status       string    `yaml:"status" json:"status"`                             // "active", "handoff", "released", "completed", "superseded"
+	Phase        string    `yaml:"phase" json:"phase"`
+	NextPhase    string    `yaml:"next_phase,omitempty" json:"next_phase,omitempty"`
+	Status       string    `yaml:"status" json:"status"`
 	ClaimedAt    time.Time `yaml:"claimed_at" json:"claimed_at"`
 	ExpiresAt    time.Time `yaml:"expires_at" json:"expires_at"`
 	Renewals     int       `yaml:"renewals" json:"renewals"`
@@ -109,15 +110,21 @@ type LeaseConfig struct {
 }
 
 type SecurityConfig struct {
-	RequireReadyLabel   bool     `yaml:"require_ready_label" json:"require_ready_label"`
-	ReadyLabel          string   `yaml:"ready_label" json:"ready_label"`
-	TrustedAssociations []string `yaml:"trusted_associations" json:"trusted_associations"`
-	TrustedReviewers    []string `yaml:"trusted_reviewers,omitempty" json:"trusted_reviewers,omitempty"`
+	RequireReadyLabel bool   `yaml:"require_ready_label" json:"require_ready_label"`
+	ReadyLabel        string `yaml:"ready_label" json:"ready_label"`
 }
 
 type AgentConfig struct {
-	Binary string   `yaml:"binary" json:"binary"`
-	Args   []string `yaml:"args,omitempty" json:"args,omitempty"`
+	Binary           string   `yaml:"binary" json:"binary"`
+	Harness          string   `yaml:"harness,omitempty" json:"harness,omitempty"`
+	Args             []string `yaml:"args,omitempty" json:"args,omitempty"`
+	Model            string   `yaml:"model,omitempty" json:"model,omitempty"`
+	Roles            []string `yaml:"roles,omitempty" json:"roles,omitempty"`
+	Env              []string `yaml:"env,omitempty" json:"env,omitempty"`
+	Sandbox          string   `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+	ReviewNetwork    bool     `yaml:"review_network,omitempty" json:"review_network,omitempty"`
+	ContainerRuntime string   `yaml:"container_runtime,omitempty" json:"container_runtime,omitempty"`
+	ContainerImage   string   `yaml:"container_image,omitempty" json:"container_image,omitempty"`
 }
 
 type NodeResources struct {

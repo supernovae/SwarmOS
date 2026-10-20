@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -16,140 +18,227 @@ import (
 
 func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 	var baseBranch string
-
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "submit [<issue-number>]",
-		Short: "Validate, strip ephemeral markers, commit worktree changes, and open an artifact-backed Draft PR",
+		Short: "Validate the exact checkpoint and idempotently open its draft PR",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			repoRoot := rootOpts.resolveRepoRoot()
-			issueNum, wtPath, err := resolveIssueAndWorktree(repoRoot, args)
+			root := rootOpts.resolveRepoRoot()
+			issue, worktree, err := resolveIssueAndWorktree(root, args)
 			if err != nil {
 				return err
 			}
-
-			tr, mgr, _, err := rootOpts.resolveLeaseManager(cmd)
+			lock, err := lockClaim(root, issue)
+			if err != nil {
+				return err
+			}
+			defer unlockClaim(lock)
+			tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
 				return err
 			}
 			ctx := cmd.Context()
-			owner, _ := tr.CurrentUser(ctx)
+			owner, err := tr.CurrentUser(ctx)
+			if err != nil {
+				return err
+			}
 			if owner == "" {
-				owner = "local-dev"
+				return fmt.Errorf("submission requires an authenticated owner")
 			}
-
-			iss, err := tr.GetIssue(ctx, issueNum)
+			claim, err := loadClaimToken(root, issue)
+			if err != nil {
+				return fmt.Errorf("load submission claim: %w", err)
+			}
+			manager.BindClaim(issue, claim)
+			state, err := manager.GetCurrentState(ctx, issue)
 			if err != nil {
 				return err
 			}
-			wu, err := contract.ParseWorkUnitFromIssueWithRoot(iss.Number, iss.Title, iss.Body, repoRoot)
+			iss, err := tr.GetIssue(ctx, issue)
 			if err != nil {
 				return err
 			}
-
-			valSpec, err := harness.LoadValidationSpec(wtPath)
+			unit, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
 			if err != nil {
-				valSpec, err = harness.LoadValidationSpec(repoRoot)
+				return err
+			}
+			if err := lease.VerifyApproval(state, unit); err != nil {
+				return fmt.Errorf("submission gate: %w", err)
+			}
+			if baseBranch == "" {
+				baseBranch, err = defaultBaseBranch(root)
 				if err != nil {
 					return err
 				}
 			}
-
-			// 1. Run validation before submitting
-			valReport, err := validation.Validate(ctx, wtPath, wu, valSpec)
-			if err != nil {
-				return fmt.Errorf("cannot submit before validation passes: %w", err)
+			if err := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", baseBranch).Run(); err != nil {
+				return fmt.Errorf("invalid PR base branch %q", baseBranch)
 			}
-			st, _ := mgr.UpdateArtifact(ctx, issueNum, owner, valReport.Artifact)
-
-			// 2. Strip ephemeral harness markers from AGENTS.md / CLAUDE.md and synced untracked files
-			if err := workspace.CleanEphemeralHarnessMarkers(wtPath); err != nil {
+			if state.Lease.Status == "completed" {
+				if state.Lease.Owner != owner || state.Lease.ClaimID != claim || state.PRNumber == 0 {
+					return fmt.Errorf("completed task has no submission for this claim")
+				}
+				if err := requireCleanHead(ctx, worktree, state.HeadSHA); err != nil {
+					return err
+				}
+				if err := projectSubmitted(ctx, tr, issue); err != nil {
+					return err
+				}
+				if asJSON {
+					return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": state.PRNumber, "pr_url": state.PRURL, "head_sha": state.HeadSHA})
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Draft PR #%d already submitted for issue #%d (%s)\n", state.PRNumber, issue, state.PRURL)
+				return nil
+			}
+			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 				return err
 			}
-
-			// 3. Commit worktree changes on swarm/issue-<N>-<slug>
-			branchName := workspace.BranchName(issueNum, iss.Title)
-			if out, err := exec.Command("git", "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
-				if b := strings.TrimSpace(string(out)); b != "" && b != "HEAD" {
-					branchName = b
-				}
-			}
-
-			_ = exec.Command("git", "-C", wtPath, "config", "user.name", owner).Run()
-			_ = exec.Command("git", "-C", wtPath, "config", "user.email", owner+"@users.noreply.github.com").Run()
-
-			if out, err := exec.Command("git", "-C", wtPath, "add", "-A").CombinedOutput(); err != nil {
-				return fmt.Errorf("git add failed: %w (%s)", err, string(out))
-			}
-
-			statusOut, _ := exec.Command("git", "-C", wtPath, "status", "--porcelain").Output()
-			commitMsg := fmt.Sprintf("feat(swarm): resolve #%d — %s", issueNum, iss.Title)
-			if strings.TrimSpace(string(statusOut)) != "" {
-				if out, err := exec.Command("git", "-C", wtPath, "commit", "-m", commitMsg).CombinedOutput(); err != nil {
-					return fmt.Errorf("git commit failed: %w (%s)", err, string(out))
-				}
-			}
-
-			// Push branch if using GitHub backend and origin remote exists
-			if strings.HasPrefix(tr.BackendName(), "github") && hasGitRemote(wtPath) {
-				if out, err := exec.Command("git", "-C", wtPath, "push", "-u", "origin", branchName).CombinedOutput(); err != nil {
-					return fmt.Errorf("git push failed: %w (%s)", err, string(out))
-				}
-			}
-
-			// 4. Create Draft PR with Objective, Acceptance Checklist, and Artifact Summary Table
-			if st == nil {
-				st, _ = mgr.GetCurrentState(ctx, issueNum)
-			}
-			prBody := formatDraftPRBody(wu, st)
-			pr, err := tr.CreateDraftPR(ctx, tracker.DraftPRRequest{
-				IssueNumber: issueNum,
-				Title:       fmt.Sprintf("%s (#%d)", iss.Title, issueNum),
-				Body:        prBody,
-				Head:        branchName,
-				Base:        baseBranch,
-			})
+			cfg, err := harness.LoadConfigAt(root, state.BaseSHA)
 			if err != nil {
 				return err
 			}
-
-			_, _ = mgr.UpdatePhase(ctx, issueNum, owner, "submitted", "completed")
-			_ = tr.RemoveLabel(ctx, issueNum, "swarm:in-progress")
-			_ = tr.AddLabels(ctx, issueNum, []string{"swarm:pr-open"})
-
-			fmt.Fprintf(cmd.OutOrStdout(), "Submitted Draft PR #%d for issue #%d on branch %s (%s)\n",
-				pr.Number, issueNum, branchName, pr.HTMLURL)
+			duration, err := time.ParseDuration(cfg.Lease.Duration)
+			if err != nil {
+				return err
+			}
+			ctx, stop := maintainClaim(ctx, manager, issue, owner, duration)
+			defer stop()
+			branch := state.Branch
+			if branch == "" {
+				branch = workspace.BranchName(issue, iss.Title)
+			}
+			head, err := workspace.Checkpoint(ctx, worktree, branch)
+			if err != nil {
+				return err
+			}
+			report, err := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA})
+			if err != nil {
+				return fmt.Errorf("trusted validation failed: %w", err)
+			}
+			if err := requireCleanHead(ctx, worktree, head); err != nil {
+				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
+			}
+			if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
+				return err
+			}
+			// GitHub publishes this head and the fenced state in one atomic Git push.
+			state, err = manager.RecordCheckpoint(ctx, issue, owner, branch, head)
+			if err != nil {
+				return err
+			}
+			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
+				return err
+			}
+			pr, err := tr.FindDraftPR(ctx, branch, baseBranch)
+			if err != nil {
+				return err
+			}
+			if pr == nil {
+				pr, err = tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue, Title: fmt.Sprintf("%s (#%d)", iss.Title, issue), Body: formatDraftPRBody(unit, state), Head: branch, Base: baseBranch})
+				if err != nil {
+					return err
+				}
+			}
+			if _, err := manager.RecordSubmission(ctx, issue, owner, pr.Number, pr.HTMLURL); err != nil {
+				return err
+			}
+			if err := projectSubmitted(ctx, tr, issue); err != nil {
+				return err
+			}
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Submitted draft PR #%d for issue #%d on %s (%s)\n", pr.Number, issue, branch, pr.HTMLURL)
 			return nil
 		},
 	}
-
-	cmd.Flags().StringVar(&baseBranch, "base", "main", "Base branch for Draft PR")
+	cmd.Flags().StringVar(&baseBranch, "base", "", "PR base branch (repository default unless explicitly selected)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the durable submission identity")
 	return cmd
 }
 
-func formatDraftPRBody(wu *contract.WorkUnit, st *lease.IssueState) string {
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Closes #%d\n\n", wu.IssueNumber))
-	sb.WriteString("## Objective\n\n")
-	sb.WriteString(strings.TrimSpace(wu.Objective) + "\n\n")
-
-	sb.WriteString("## Acceptance Criteria Checklist\n\n")
-	for _, a := range wu.Acceptance {
-		sb.WriteString("- [x] " + a + "\n")
-	}
-	sb.WriteString("\n")
-
-	if st != nil && len(st.Artifacts) > 0 {
-		sb.WriteString("## SwarmOS Artifact Summary\n\n")
-		sb.WriteString("| Artifact Type | Producer | Verdict | Summary |\n| :--- | :--- | :--- | :--- |\n")
-		for _, art := range st.Artifacts {
-			v := art.Verdict
-			if v == "" {
-				v = "-"
+func maintainClaim(parent context.Context, manager *lease.Manager, issue int, owner string, duration time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		ticker := time.NewTicker(max(duration/3, time.Millisecond))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := manager.Renew(ctx, issue, owner, duration); err != nil {
+					cancel()
+					return
+				}
 			}
-			sb.WriteString(fmt.Sprintf("| `%s` (v%d) | `%s` | `%s` | %s |\n", art.Type, art.Version, art.Producer, v, art.Summary))
 		}
-		sb.WriteString("\n")
+	}()
+	return ctx, cancel
+}
+
+func requireCleanHead(ctx context.Context, root, expected string) error {
+	head, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return err
 	}
-	return sb.String()
+	if strings.TrimSpace(string(head)) != expected {
+		return fmt.Errorf("candidate HEAD changed from checkpoint %s", expected)
+	}
+	status, err := exec.CommandContext(ctx, "git", "-C", root, "status", "--porcelain").Output()
+	if err != nil {
+		return err
+	}
+	if len(status) != 0 {
+		return fmt.Errorf("candidate has uncheckpointed changes")
+	}
+	return nil
+}
+
+func projectSubmitted(ctx context.Context, tr tracker.Tracker, issue int) error {
+	for _, label := range []string{"swarm:in-progress", "swarm:claimed"} {
+		if err := tr.RemoveLabel(ctx, issue, label); err != nil {
+			return err
+		}
+	}
+	return tr.AddLabels(ctx, issue, []string{"swarm:pr-open"})
+}
+
+func defaultBaseBranch(root string) (string, error) {
+	if hasGitRemote(root) {
+		if _, err := workspace.ResolveBase(root); err != nil {
+			return "", err
+		}
+		out, err := exec.Command("git", "-C", root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").Output()
+		if err != nil {
+			return "", fmt.Errorf("discover remote default branch: %w", err)
+		}
+		return strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"), nil
+	}
+	out, err := exec.Command("git", "-C", root, "branch", "--show-current").Output()
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("local repository needs an explicit --base on detached HEAD")
+	}
+	return branch, nil
+}
+
+func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState) string {
+	var body strings.Builder
+	fmt.Fprintf(&body, "Closes #%d\n\n## Objective\n\n%s\n\n## Acceptance criteria\n\n", unit.IssueNumber, strings.TrimSpace(unit.Objective))
+	for _, criterion := range unit.Acceptance {
+		fmt.Fprintf(&body, "- [ ] %s\n", criterion)
+	}
+	if state != nil && len(state.Artifacts) > 0 {
+		body.WriteString("\n## Artifact evidence\n\n| Type | Producer | Verdict | Summary |\n| --- | --- | --- | --- |\n")
+		escape := strings.NewReplacer("|", "\\|", "\n", " ", "\r", " ", "`", "'")
+		for _, artifact := range state.Artifacts {
+			fmt.Fprintf(&body, "| %s | %s | %s | %s |\n", escape.Replace(string(artifact.Type)), escape.Replace(artifact.Producer), escape.Replace(artifact.Verdict), escape.Replace(artifact.Summary))
+		}
+	}
+	return body.String()
 }

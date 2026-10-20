@@ -2,10 +2,6 @@ version: 2
 
 project_name: swarm
 
-before:
-  hooks:
-    - go mod tidy
-
 builds:
   - id: swarm
     main: ./cmd/swarm

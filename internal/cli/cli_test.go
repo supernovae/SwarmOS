@@ -2,210 +2,260 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
+	"slices"
+	"strconv"
 	"testing"
+
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workflow"
 )
 
-func TestCLIEndToEndLifecycle(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
-
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
-		t.Fatalf("git init failed: %v (%s)", err, string(out))
-	}
-
-	runCLI := func(args ...string) string {
-		t.Helper()
-		root := NewRootCmd()
-		var buf bytes.Buffer
-		root.SetOut(&buf)
-		root.SetErr(&buf)
-		fullArgs := append([]string{"--root", tmp, "--backend", "local"}, args...)
-		root.SetArgs(fullArgs)
-		if err := root.Execute(); err != nil {
-			t.Fatalf("swarm %v failed: %v\nOutput:\n%s", args, err, buf.String())
-		}
-		return buf.String()
-	}
-
-	// 1. swarm init --sync-labels
-	out := runCLI("init", "--sync-labels")
-	if !strings.Contains(out, "Initialized SwarmOS harness") {
-		t.Fatalf("unexpected init output: %s", out)
-	}
-
-	// 2. swarm doctor
-	out = runCLI("doctor")
-	if !strings.Contains(out, ".swarm/config.yaml") {
-		t.Fatalf("unexpected doctor output: %s", out)
-	}
-
-	// 3. swarm issue create
-	out = runCLI("issue", "create",
-		"--title", "Add version subcommand",
-		"--objective", "Add swarm version command printing JSON/text build info",
-		"--constraint", "Stdlib only",
-		"--acceptance", "swarm version --json outputs valid JSON",
-		"--workflow", "feature",
-	)
-	if !strings.Contains(out, "Created issue #1") {
-		t.Fatalf("unexpected issue create output: %s", out)
-	}
-
-	// 4. swarm issue lint 1
-	out = runCLI("issue", "lint", "1")
-	if !strings.Contains(out, "valid WorkUnit") {
-		t.Fatalf("unexpected issue lint output: %s", out)
-	}
-
-	// 5. swarm claim 1
-	out = runCLI("claim", "1", "--agent", "mock")
-	if !strings.Contains(out, "Claimed issue #1") {
-		t.Fatalf("unexpected claim output: %s", out)
-	}
-
-	// 6. swarm work 1 --gate agent --headless --agent mock
-	out = runCLI("work", "1", "--gate", "agent", "--headless", "--agent", "mock")
-	if !strings.Contains(out, "Plan Review Verdict: APPROVED") || !strings.Contains(out, "Validation: PASS") {
-		t.Fatalf("unexpected work output: %s", out)
-	}
-
-	// 7. swarm validate 1
-	out = runCLI("validate", "1")
-	if !strings.Contains(out, "Validation PASSED") {
-		t.Fatalf("unexpected validate output: %s", out)
-	}
-
-	// 8. swarm status 1
-	out = runCLI("status", "1")
-	if !strings.Contains(out, "Issue #1: Add version subcommand") {
-		t.Fatalf("unexpected status output: %s", out)
-	}
-
-	// 9. swarm submit 1
-	out = runCLI("submit", "1")
-	if !strings.Contains(out, "Submitted Draft PR #1 for issue #1") {
-		t.Fatalf("unexpected submit output: %s", out)
-	}
+type cliFixture struct {
+	root    string
+	tracker *tracker.LocalTracker
+	manager *lease.Manager
 }
 
-func TestMultiRepoPullAndWorkNext(t *testing.T) {
-	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
-
-	repoAlpha := t.TempDir()
-	repoBeta := t.TempDir()
-	for _, r := range []string{repoAlpha, repoBeta} {
-		if out, err := exec.Command("git", "init", "-b", "main", r).CombinedOutput(); err != nil {
-			t.Fatalf("git init failed: %v (%s)", err, string(out))
-		}
-	}
-
-	runGlobal := func(args ...string) string {
-		t.Helper()
-		root := NewRootCmd()
-		var buf bytes.Buffer
-		root.SetOut(&buf)
-		root.SetErr(&buf)
-		root.SetArgs(args)
-		if err := root.Execute(); err != nil {
-			t.Fatalf("swarm %v failed: %v\nOutput:\n%s", args, err, buf.String())
-		}
-		return buf.String()
-	}
-
-	// Register both repositories
-	runGlobal("--backend", "local", "repo", "add", "local/alpha", repoAlpha)
-	runGlobal("--backend", "local", "repo", "add", "local/beta", repoBeta)
-
-	listOut := runGlobal("repo", "list")
-	if !strings.Contains(listOut, "local/alpha") || !strings.Contains(listOut, "local/beta") {
-		t.Fatalf("expected both repos in repo list:\n%s", listOut)
-	}
-
-	// Create ready issues in both repos using only --repo (without --root!)
-	runGlobal("--repo", "local/alpha", "issue", "create",
-		"--title", "Alpha Task 1",
-		"--objective", "Implement Alpha feature",
-		"--constraint", "Keep minimal",
-		"--acceptance", "Tests pass",
-		"--workflow", "feature",
-	)
-	runGlobal("--repo", "local/beta", "issue", "create",
-		"--title", "Beta Task 1",
-		"--objective", "Implement Beta feature",
-		"--constraint", "Keep minimal",
-		"--acceptance", "Tests pass",
-		"--workflow", "feature",
-	)
-
-	// Check unified status across all registered repos
-	statusAll := runGlobal("status", "--all")
-	if !strings.Contains(statusAll, "Alpha Task 1") || !strings.Contains(statusAll, "Beta Task 1") {
-		t.Fatalf("expected both tasks in status --all:\n%s", statusAll)
-	}
-
-	// Pull first ready issue across all repos (should claim local/alpha #1)
-	pullOut := runGlobal("pull", "--all", "--agent", "mock")
-	if !strings.Contains(pullOut, "Pulled & claimed [local/alpha] issue #1") {
-		t.Fatalf("expected pull --all to claim local/alpha #1, got:\n%s", pullOut)
-	}
-
-	// Now run `swarm work --next --all` — since local/alpha #1 is already claimed, it should automatically pick local/beta #1!
-	workNextOut := runGlobal("work", "--next", "--all", "--agent", "mock", "--headless")
-	if !strings.Contains(workNextOut, "Auto-selected [local/beta] issue #1: Beta Task 1") || !strings.Contains(workNextOut, "Validation: PASS") {
-		t.Fatalf("expected work --next --all to select and complete local/beta #1, got:\n%s", workNextOut)
-	}
-}
-
-func TestNodePoolAndDecomposeCLI(t *testing.T) {
+func newCLIFixture(t *testing.T) *cliFixture {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("SWARM_USER", "alice")
 	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
 	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
-
-	repo := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", repo).CombinedOutput(); err != nil {
-		t.Fatalf("git init failed: %v (%s)", err, string(out))
-	}
-
-	runGlobal := func(args ...string) string {
+	git := func(args ...string) {
 		t.Helper()
-		root := NewRootCmd()
-		var buf bytes.Buffer
-		root.SetOut(&buf)
-		root.SetErr(&buf)
-		root.SetArgs(args)
-		if err := root.Execute(); err != nil {
-			t.Fatalf("swarm %v failed: %v\nOutput:\n%s", args, err, buf.String())
+		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
-		return buf.String()
 	}
-
-	// 1. Register repository and initialize Volunteer Node profile
-	runGlobal("--backend", "local", "repo", "add", "local/gamma", repo)
-	nodeInitOut := runGlobal("node", "init", "--id", "volunteer-node-01", "--capabilities", "coding,testing,review", "--ram", "64GB")
-	if !strings.Contains(nodeInitOut, "volunteer-node-01") || !strings.Contains(nodeInitOut, "64GB") {
-		t.Fatalf("unexpected node init output:\n%s", nodeInitOut)
+	git("init", "-b", "main")
+	git("config", "user.name", "CLI Test")
+	git("config", "user.email", "test@example.invalid")
+	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
 	}
-
-	// 2. Create a parent epic with 2 acceptance items and decompose it into parallel subtasks (--sequential=false)
-	runGlobal("--repo", "local/gamma", "issue", "create",
-		"--title", "Platform Telemetry Epic",
-		"--objective", "Add structured metrics and health endpoint",
-		"--constraint", "Stdlib only",
-		"--acceptance", "Metrics counter endpoint works",
-		"--acceptance", "Healthz endpoint returns 200 OK",
-		"--workflow", "feature",
-		"--ready=false",
-	)
-	decompOut := runGlobal("--repo", "local/gamma", "decompose", "1", "--sequential=false")
-	if !strings.Contains(decompOut, "Decomposed parent issue #1 into 2 child WorkUnit issue(s)") {
-		t.Fatalf("unexpected decompose output:\n%s", decompOut)
+	policy := "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
+	if err := os.WriteFile(filepath.Join(root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	git("add", ".")
+	git("commit", "-m", "approved harness")
+	tr := tracker.NewLocalTracker(root)
+	cfg, err := harness.LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := lease.NewManager(tr, cfg.Security)
+	if err := manager.ConfigureStore(root); err != nil {
+		t.Fatal(err)
+	}
+	return &cliFixture{root: root, tracker: tr, manager: manager}
+}
 
-	// 3. Run volunteer node pool with --concurrency 2 --all --once --auto-submit
-	nodeRunOut := runGlobal("node", "run", "--all", "--concurrency", "2", "--once", "--agent", "mock", "--auto-submit")
-	if !strings.Contains(nodeRunOut, "2 work unit(s) processed") {
-		t.Fatalf("expected node run to process both child work units, got:\n%s", nodeRunOut)
+func (f *cliFixture) run(args ...string) (string, error) {
+	cmd := NewRootCmd()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+	err := cmd.Execute()
+	return output.String(), err
+}
+func (f *cliFixture) must(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := f.run(args...)
+	if err != nil {
+		t.Fatalf("swarm %v: %v\n%s", args, err, out)
+	}
+	return out
+}
+func (f *cliFixture) create(t *testing.T, gate string) int {
+	t.Helper()
+	f.must(t, "issue", "create", "--title", "Approved task", "--objective", "Exercise the lifecycle", "--constraint", "Keep policy unchanged", "--acceptance", "Produce a checked checkpoint", "--gate", gate)
+	issues, err := f.tracker.ListIssues(context.Background(), tracker.IssueFilter{State: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	number := 0
+	for _, issue := range issues {
+		if issue.Number > number {
+			number = issue.Number
+		}
+	}
+	return number
+}
+func (f *cliFixture) state(t *testing.T, issue int) *lease.IssueState {
+	t.Helper()
+	state, err := f.manager.GetCurrentState(context.Background(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func TestCLIApprovalWorkAndIdempotentSubmission(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	issue, err := f.tracker.GetIssue(context.Background(), number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(issue.Labels, "swarm:ready") {
+		t.Fatal("new task was automatically ready")
+	}
+	if _, err := f.run("work", n, "--agent", "mock", "--headless"); err == nil {
+		t.Fatal("unapproved work executed")
+	}
+	f.must(t, "issue", "approve", n)
+	result := f.must(t, "work", n, "--agent", "mock", "--headless", "--json")
+	var outcome struct {
+		Status string              `json:"status"`
+		Result workflow.WorkResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(result), &outcome); err != nil {
+		t.Fatalf("invalid JSON outcome: %v: %s", err, result)
+	}
+	if outcome.Status != "completed" || !outcome.Result.ValidationPassed {
+		t.Fatalf("unexpected workflow outcome: %+v", outcome)
+	}
+	f.must(t, "submit", n)
+	first := f.state(t, number)
+	if first.PRNumber == 0 || first.Lease.Status != "completed" {
+		t.Fatalf("submission not durably recorded: %+v", first)
+	}
+	f.must(t, "submit", n)
+	second := f.state(t, number)
+	if second.PRNumber != first.PRNumber || second.HeadSHA != first.HeadSHA {
+		t.Fatal("retry changed the submission identity")
+	}
+	pr, err := f.tracker.FindDraftPR(context.Background(), first.Branch, "main")
+	if err != nil || pr == nil || pr.Number != first.PRNumber {
+		t.Fatalf("missing recorded draft PR: %v, %v", pr, err)
+	}
+}
+
+func TestCLIHumanGateCannotBeBypassedByReviewOrSubmit(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "human")
+	n := strconv.Itoa(number)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "work", n, "--agent", "mock", "--headless")
+	var paused struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(f.must(t, "work", n, "--agent", "mock", "--json")), &paused); err != nil {
+		t.Fatal(err)
+	}
+	if paused.Status != "paused" {
+		t.Fatalf("retry before human approval must remain paused, got %q", paused.Status)
+	}
+	if _, err := f.run("submit", n); err == nil {
+		t.Fatal("submission bypassed human approval")
+	}
+	f.must(t, "review", n, "--agent", "mock")
+	if _, err := f.run("work", n, "--phase", "implement", "--gate", "none", "--agent", "mock"); err == nil {
+		t.Fatal("agent review satisfied human gate")
+	}
+	t.Setenv("SWARM_USER", "independent-maintainer")
+	f.must(t, "review", n, "--approve", "--notes", "Checked exact plan and test plan")
+	t.Setenv("SWARM_USER", "alice")
+	f.must(t, "work", n, "--agent", "mock", "--headless")
+	f.must(t, "submit", n)
+}
+
+func TestCLISelectorsFailBeforeClaiming(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	for _, args := range [][]string{
+		{"work", "1", "--next"}, {"work", "1", "--phase", "typo"}, {"work", "1", "--phase", "full"},
+		{"work", "1", "--phase", "submitted"}, {"work", "1", "--gate", "typo"}, {"review", "1", "--approve", "--reject"},
+		{"node", "run", "--concurrency", "0"}, {"node", "run", "--max-jobs", "-1"}, {"node", "run", "--poll-interval", "0s"},
+	} {
+		if _, err := f.run(args...); err == nil {
+			t.Errorf("invalid selector accepted: %v", args)
+		}
+	}
+	if _, err := f.manager.GetCurrentState(context.Background(), number); !errors.Is(err, coordination.ErrNotFound) {
+		t.Fatalf("invalid selection changed state: %v", err)
+	}
+}
+
+func TestNodeAdmissionLimitAndFailedExecutionStatus(t *testing.T) {
+	f := newCLIFixture(t)
+	for i := 0; i < 6; i++ {
+		n := f.create(t, "agent")
+		f.must(t, "issue", "approve", strconv.Itoa(n))
+	}
+	f.must(t, "node", "run", "--concurrency", "4", "--max-jobs", "1", "--agent", "mock")
+	claimed := 0
+	for i := 1; i <= 6; i++ {
+		if f.state(t, i).Lease.ClaimID != "" {
+			claimed++
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("max-jobs=1 admitted %d tasks", claimed)
+	}
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 17")
+	if _, err := f.run("node", "run", "--max-jobs", "1", "--agent", "mock"); err == nil {
+		t.Fatal("failed developer produced successful node exit")
+	}
+}
+
+func TestEmptyNodeQueueIsSuccessfulDrain(t *testing.T) {
+	f := newCLIFixture(t)
+	f.must(t, "node", "run", "--agent", "mock")
+}
+
+func TestNodeHumanGateWaitsThenResumesImplementation(t *testing.T) {
+	f := newCLIFixture(t)
+	issue := f.create(t, "human")
+	n := strconv.Itoa(issue)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1")
+	waiting := f.state(t, issue)
+	if waiting.Lease.Status != "handoff" {
+		t.Fatalf("human wait did not release worker claim: %+v", waiting.Lease)
+	}
+	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1")
+	if after := f.state(t, issue); after.Lease.ClaimID != waiting.Lease.ClaimID {
+		t.Fatal("worker reclaimed a task blocked on human approval")
+	}
+	f.must(t, "review", n, "--approve")
+	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1", "--auto-submit")
+	if completed := f.state(t, issue); completed.PRNumber == 0 || completed.Lease.Status != "completed" {
+		t.Fatalf("approved human handoff did not reach submission: %+v", completed)
+	}
+}
+
+func TestCLIRenewalLimitReturnsErrorWithoutChangingLease(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "claim", n, "--agent", "mock")
+	for range f.state(t, number).Lease.MaxRenewals {
+		f.must(t, "renew", n, "--json")
+	}
+	before := f.state(t, number).Lease
+	if _, err := f.run("renew", n, "--json"); !errors.Is(err, lease.ErrMaxRenewals) {
+		t.Fatalf("renewal limit must reach the caller: %v", err)
+	}
+	after := f.state(t, number).Lease
+	if after.Renewals != before.Renewals || !after.ExpiresAt.Equal(before.ExpiresAt) {
+		t.Fatalf("failed renewal changed the lease: before=%+v after=%+v", before, after)
 	}
 }

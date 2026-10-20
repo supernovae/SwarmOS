@@ -1,90 +1,78 @@
-name: SwarmOS CI & Validation
+name: SwarmOS CI
 
 on:
   pull_request:
     branches: [main, master]
   push:
     branches: [main, master]
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   lint:
-    name: Lint (gofmt + go vet + staticcheck)
+    name: Lint and vulnerabilities
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '^1.26.9'
-          cache: true
-
-      - name: Check gofmt
+          go-version-file: go.mod
+      - name: Check formatting
         run: |
           unformatted=$(gofmt -s -l .)
           if [ -n "$unformatted" ]; then
-            echo "Unformatted Go files found:"
-            echo "$unformatted"
+            printf '%s\n' "$unformatted"
             exit 1
           fi
-
-      - name: Run go vet
-        run: go vet ./...
-
-      - name: Run staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+      - run: go vet ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   test-matrix:
-    name: Test & Validate (${{ matrix.os }})
+    name: Test and CLI smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '^1.26.9'
-          cache: true
-
-      - name: Configure Git identity for worktree tests
+          go-version-file: go.mod
+      - name: Configure test identity
         run: |
           git config --global user.name "SwarmOS CI"
           git config --global user.email "ci@swarmos.local"
-
-      - name: Run Go Tests (Unix with -race)
+      - name: Install reviewer sandbox (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - name: Unix regression tests
         if: runner.os != 'Windows'
-        run: go test -v -race ./...
-
-      - name: Run Go Tests (Windows)
+        run: go test -race ./...
+      - name: Windows regression tests
         if: runner.os == 'Windows'
-        run: go test -v ./...
-
-      - name: Build and Run Swarm Validate
-        if: runner.os != 'Windows'
+        run: go test ./...
+      - name: Build CLI
+        run: go build -o swarm-ci.exe ./cmd/swarm
+      - name: Exercise CLI surface
         run: |
-          go build -o /tmp/swarm ./cmd/swarm
-          /tmp/swarm version
-          /tmp/swarm validate --ci --allow-harness-changes
-
-      - name: Cross-Compile Smoke Check (Linux, macOS, Windows)
+          ./swarm-ci.exe version
+          ./swarm-ci.exe --help
+          ./swarm-ci.exe work --help
+      - name: Cross-compile all distributions
         if: runner.os == 'Linux'
         run: |
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
-          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
-          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
-          GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
+          done

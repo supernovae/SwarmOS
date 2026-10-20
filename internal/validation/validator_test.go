@@ -34,7 +34,13 @@ func setupGitRepoForValidation(t *testing.T) string {
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(full, []byte("initial\n"), 0o644); err != nil {
+		var contents string
+		if rel == ".swarm/validation/required-checks.yaml" {
+			contents = "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - .swarm/validation/**\n"
+		} else {
+			contents = "initial\n"
+		}
+		if err := os.WriteFile(full, []byte(contents), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -51,34 +57,101 @@ func setupGitRepoForValidation(t *testing.T) string {
 func TestProtectedPathTamperDetection(t *testing.T) {
 	ctx := context.Background()
 	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
 
 	// Tamper with a protected file (.github/workflows/swarm-validate.yml)
 	if err := os.WriteFile(filepath.Join(repo, ".github/workflows/swarm-validate.yml"), []byte("tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	wu := &contract.WorkUnit{
-		ID:                  "ISSUE-1",
-		IssueNumber:         1,
-		AllowHarnessChanges: false,
-	}
-	spec := &contract.ValidationSpec{
-		ProtectedPaths: []string{".github/workflows/**", ".swarm/validation/**", ".swarm/contracts/**"},
-		RequiredChecks: []contract.CheckSpec{{Name: "ok", Command: "true"}},
-	}
-
-	_, err := Validate(ctx, repo, wu, spec)
+	wu := &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}
+	_, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base})
 	if !errors.Is(err, ErrProtectedPathModified) {
 		t.Fatalf("expected ErrProtectedPathModified, got: %v", err)
 	}
 
-	// Now allow harness changes and verify it passes
-	wu.AllowHarnessChanges = true
-	report, err := Validate(ctx, repo, wu, spec)
-	if err != nil {
-		t.Fatalf("expected pass when AllowHarnessChanges=true, got: %v", err)
+	// A candidate cannot remove protected paths or checks by replacing its own
+	// policy; the baseline remains authoritative.
+	if err := os.WriteFile(filepath.Join(repo, ".swarm", "validation", "required-checks.yaml"), []byte("required_checks: []\nprotected_paths: []\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !report.Passed {
-		t.Fatal("expected report.Passed to be true")
+	_, err = Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base})
+	if !errors.Is(err, ErrProtectedPathModified) {
+		t.Fatalf("candidate policy tampering must not weaken baseline: %v", err)
+	}
+}
+
+func TestCommittedPolicyTamperingUsesTrustedBase(t *testing.T) {
+	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
+	policy := filepath.Join(repo, ".swarm", "validation", "required-checks.yaml")
+	if err := os.WriteFile(policy, []byte("required_checks: []\nprotected_paths: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	run("add", ".swarm/validation/required-checks.yaml")
+	run("commit", "-m", "tamper policy")
+	_, err := Validate(context.Background(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base})
+	if !errors.Is(err, ErrProtectedPathModified) {
+		t.Fatalf("committed tampering must fail: %v", err)
+	}
+}
+
+func TestNULPathsAndInstructionFilesAreNotIgnored(t *testing.T) {
+	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
+	path := filepath.Join(repo, "AGENTS.md")
+	if err := os.WriteFile(path, []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	weird := filepath.Join(repo, ".github", "workflows", "space \n name.yml")
+	if err := os.WriteFile(weird, []byte("changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Validate(context.Background(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base})
+	if !errors.Is(err, ErrProtectedPathModified) {
+		t.Fatalf("newline protected filename must fail: %v", err)
+	}
+}
+
+func TestSymlinkEscapeFailsClosed(t *testing.T) {
+	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
+	outside := filepath.Join(t.TempDir(), "outside.yml")
+	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(repo, ".github", "workflows", "escape.yml")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Validate(context.Background(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base})
+	if !errors.Is(err, ErrUnsafePath) {
+		t.Fatalf("symlink escape must fail closed: %v", err)
+	}
+}
+
+func gitRevision(t *testing.T, repo, revision string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repo, "rev-parse", revision).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out[:len(out)-1])
+}
+
+func TestValidationRejectsMutableBaseline(t *testing.T) {
+	repo := setupGitRepoForValidation(t)
+	for _, base := range []string{"HEAD", "HEAD~0", gitRevision(t, repo, "HEAD")[:12]} {
+		t.Run(base, func(t *testing.T) {
+			_, err := Validate(context.Background(), repo, nil, ValidateOptions{BaseSHA: base, CIMode: true})
+			if !errors.Is(err, ErrInvalidPolicy) {
+				t.Fatalf("mutable or abbreviated baseline %q must fail closed: %v", base, err)
+			}
+		})
 	}
 }

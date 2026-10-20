@@ -1,102 +1,86 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
-	var agentName string
-	var durationStr string
-
-	cmd := &cobra.Command{
-		Use:   "claim <issue-number>",
-		Short: "Verify trust gate, acquire lease on tracker, provision worktree, and compile .swarm/active/WORKUNIT.md",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			issueNum, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-			if err != nil || issueNum <= 0 {
-				return fmt.Errorf("invalid issue number %q", args[0])
+	var agentName, durationStr string
+	var asJSON bool
+	cmd := &cobra.Command{Use: "claim <issue-number>", Short: "Reserve an approved task and prepare its pinned worktree", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		issue, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
+		if err != nil || issue <= 0 {
+			return fmt.Errorf("invalid issue number %q", args[0])
+		}
+		var duration time.Duration
+		if durationStr != "" {
+			duration, err = time.ParseDuration(durationStr)
+			if err != nil || duration <= 0 {
+				return fmt.Errorf("--duration must be positive")
 			}
-			repoRoot := rootOpts.resolveRepoRoot()
-			tr, mgr, cfg, err := rootOpts.resolveLeaseManager(cmd)
+		}
+		root := rootOpts.resolveRepoRoot()
+		tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
+		if err != nil {
+			return err
+		}
+		engine, err := workflow.NewEngine(root, tr)
+		if err != nil {
+			return err
+		}
+		preflight, err := engine.Preflight(cmd.Context(), workflow.WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: agentName, Phase: "plan"})
+		if err != nil {
+			return err
+		}
+		if duration == 0 {
+			duration, err = time.ParseDuration(preflight.Config.Lease.Duration)
 			if err != nil {
 				return err
 			}
-
-			if agentName == "" {
-				agentName = cfg.DefaultAgent
-				if agentName == "" {
-					agentName = "claude"
-				}
-			}
-
-			dur := 4 * time.Hour
-			if durationStr != "" {
-				parsed, err := time.ParseDuration(durationStr)
-				if err != nil {
-					return fmt.Errorf("invalid --duration %q: %w", durationStr, err)
-				}
-				dur = parsed
-			} else if cfg.Lease.Duration != "" {
-				if parsed, err := time.ParseDuration(cfg.Lease.Duration); err == nil {
-					dur = parsed
-				}
-			}
-
-			ctx := cmd.Context()
-			iss, err := tr.GetIssue(ctx, issueNum)
-			if err != nil {
-				return err
-			}
-
-			wu, err := contract.ParseWorkUnitFromIssueWithRoot(iss.Number, iss.Title, iss.Body, repoRoot)
-			if err != nil {
-				return err
-			}
-
-			wf, err := harness.LoadWorkflow(repoRoot, wu.Workflow)
-			if err != nil {
-				return err
-			}
-
-			owner, err := tr.CurrentUser(ctx)
-			if err != nil || owner == "" {
-				owner = "local-dev"
-			}
-
-			st, err := mgr.Acquire(ctx, issueNum, owner, agentName, "plan", dur, cfg.Lease.MaxRenewals)
-			if err != nil {
-				return err
-			}
-
-			wtPath, branchName, err := workspace.Provision(repoRoot, issueNum, iss.Title)
-			if err != nil {
-				return err
-			}
-
-			if err := workspace.CompileHarnessBundle(wtPath, wu, wf, st.Artifacts, "planner"); err != nil {
-				return err
-			}
-
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Claimed issue #%d (%s) as %s [agent=%s, expires=%s]\n",
-				issueNum, iss.Title, owner, agentName, st.Lease.ExpiresAt.Format(time.RFC3339))
-			fmt.Fprintf(out, "  Branch:   %s\n", branchName)
-			fmt.Fprintf(out, "  Worktree: %s\n", wtPath)
-			fmt.Fprintf(out, "  Contract: %s/.swarm/active/WORKUNIT.md\n", wtPath)
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&agentName, "agent", "", "Agent harness (claude, codex, opencode, omp, mock)")
-	cmd.Flags().StringVar(&durationStr, "duration", "", "Lease TTL duration (default 4h)")
+		}
+		owner, err := tr.CurrentUser(cmd.Context())
+		if err != nil {
+			return err
+		}
+		lock, err := lockClaim(root, issue)
+		if err != nil {
+			return err
+		}
+		defer unlockClaim(lock)
+		state, err := manager.Acquire(cmd.Context(), issue, owner, preflight.Agents["planner"], "plan", duration, preflight.Config.Lease.MaxRenewals)
+		if err != nil {
+			return err
+		}
+		fail := func(cause error) error {
+			_, releaseErr := manager.Release(cmd.Context(), issue, owner, "claim setup failed")
+			return errors.Join(cause, releaseErr)
+		}
+		if err := saveClaimToken(root, issue, state.Lease.ClaimID); err != nil {
+			return fail(err)
+		}
+		path, branch, err := workspace.ProvisionAt(root, issue, preflight.Issue.Title, state.BaseSHA, state.Branch, state.HeadSHA)
+		if err != nil {
+			return fail(err)
+		}
+		if err := workspace.CompileHarnessBundleAt(path, preflight.WorkUnit, preflight.Workflow, state.Artifacts, "planner", state.BaseSHA); err != nil {
+			return fail(err)
+		}
+		if asJSON {
+			return writeJSON(cmd, map[string]any{"kind": "claim", "issue_number": issue, "state": state, "branch": branch, "worktree": path})
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Claimed issue #%d as %s [agent=%s expires=%s]\nBranch: %s\nWorktree: %s\n", issue, owner, state.Lease.Agent, state.Lease.ExpiresAt.Format(time.RFC3339), branch, path)
+		return nil
+	}}
+	cmd.Flags().StringVar(&agentName, "agent", "", "Configured planner override")
+	cmd.Flags().StringVar(&durationStr, "duration", "", "Lease duration (approved policy default)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured claim outcome")
 	return cmd
 }

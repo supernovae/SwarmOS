@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -54,17 +55,46 @@ func (g *GitHubTracker) BackendName() string {
 	return fmt.Sprintf("github (%s/%s)", g.owner, g.repo)
 }
 
-func (g *GitHubTracker) CurrentUser(_ context.Context) (string, error) {
-	if u := os.Getenv("SWARM_USER"); u != "" {
-		return u, nil
-	}
+func (g *GitHubTracker) CurrentUser(ctx context.Context) (string, error) {
 	var resp struct {
 		Login string `json:"login"`
 	}
-	if err := g.client.Get("user", &resp); err != nil {
+	if err := g.client.DoWithContext(ctx, "GET", "user", nil, &resp); err != nil {
 		return "", fmt.Errorf("failed to fetch current GitHub user: %w", err)
 	}
 	return resp.Login, nil
+}
+
+func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if permission != "approve-task" && permission != "review-human" {
+		return fmt.Errorf("unknown permission %q", permission)
+	}
+	var me struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	}
+	if err := g.client.DoWithContext(ctx, "GET", "user", nil, &me); err != nil {
+		return fmt.Errorf("github authorization identity: %w", err)
+	}
+	if permission == "review-human" && strings.EqualFold(me.Type, "bot") {
+		return fmt.Errorf("bot account %q cannot provide human review", me.Login)
+	}
+	var collaborator struct {
+		Permission string `json:"permission"`
+	}
+	path := fmt.Sprintf("repos/%s/%s/collaborators/%s/permission", g.owner, g.repo, url.PathEscape(me.Login))
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &collaborator); err != nil {
+		return fmt.Errorf("github authorization permission: %w", err)
+	}
+	switch strings.ToLower(collaborator.Permission) {
+	case "admin", "maintain", "write":
+		return nil
+	default:
+		return fmt.Errorf("github actor %q lacks write permission for %s", me.Login, permission)
+	}
 }
 
 type ghIssueResponse struct {
@@ -104,16 +134,16 @@ func convertGHIssue(r ghIssueResponse) *Issue {
 	}
 }
 
-func (g *GitHubTracker) GetIssue(_ context.Context, number int) (*Issue, error) {
+func (g *GitHubTracker) GetIssue(ctx context.Context, number int) (*Issue, error) {
 	var resp ghIssueResponse
 	path := fmt.Sprintf("repos/%s/%s/issues/%d", g.owner, g.repo, number)
-	if err := g.client.Get(path, &resp); err != nil {
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, fmt.Errorf("github GetIssue #%d: %w", number, err)
 	}
 	return convertGHIssue(resp), nil
 }
 
-func (g *GitHubTracker) CreateIssue(_ context.Context, title, body string, labels []string) (*Issue, error) {
+func (g *GitHubTracker) CreateIssue(ctx context.Context, title, body string, labels []string) (*Issue, error) {
 	payload := map[string]any{
 		"title":  title,
 		"body":   body,
@@ -122,34 +152,42 @@ func (g *GitHubTracker) CreateIssue(_ context.Context, title, body string, label
 	raw, _ := json.Marshal(payload)
 	var resp ghIssueResponse
 	path := fmt.Sprintf("repos/%s/%s/issues", g.owner, g.repo)
-	if err := g.client.Post(path, bytes.NewReader(raw), &resp); err != nil {
+	if err := g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp); err != nil {
 		return nil, fmt.Errorf("github CreateIssue: %w", err)
 	}
 	return convertGHIssue(resp), nil
 }
 
-func (g *GitHubTracker) ListIssues(_ context.Context, filter IssueFilter) ([]*Issue, error) {
-	q := url.Values{}
-	state := filter.State
-	if state == "" {
-		state = "open"
-	}
-	q.Set("state", state)
-	q.Set("per_page", "100")
-	if len(filter.Labels) > 0 {
-		q.Set("labels", strings.Join(filter.Labels, ","))
-	}
-	path := fmt.Sprintf("repos/%s/%s/issues?%s", g.owner, g.repo, q.Encode())
-	var rawList []ghIssueResponse
-	if err := g.client.Get(path, &rawList); err != nil {
-		return nil, fmt.Errorf("github ListIssues: %w", err)
-	}
+func (g *GitHubTracker) ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error) {
 	var out []*Issue
-	for _, r := range rawList {
-		if r.PullRequest != nil {
-			continue
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		out = append(out, convertGHIssue(r))
+		q := url.Values{}
+		state := filter.State
+		if state == "" {
+			state = "open"
+		}
+		q.Set("state", state)
+		q.Set("per_page", "100")
+		q.Set("page", fmt.Sprint(page))
+		if len(filter.Labels) > 0 {
+			q.Set("labels", strings.Join(filter.Labels, ","))
+		}
+		path := fmt.Sprintf("repos/%s/%s/issues?%s", g.owner, g.repo, q.Encode())
+		var rawList []ghIssueResponse
+		if err := g.client.DoWithContext(ctx, "GET", path, nil, &rawList); err != nil {
+			return nil, fmt.Errorf("github ListIssues page %d: %w", page, err)
+		}
+		for _, r := range rawList {
+			if r.PullRequest == nil {
+				out = append(out, convertGHIssue(r))
+			}
+		}
+		if len(rawList) < 100 {
+			break
+		}
 	}
 	return out, nil
 }
@@ -166,33 +204,32 @@ type ghCommentResponse struct {
 	} `json:"user"`
 }
 
-func (g *GitHubTracker) ListComments(_ context.Context, issueNumber int) ([]*Comment, error) {
-	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?per_page=100", g.owner, g.repo, issueNumber)
-	var rawList []ghCommentResponse
-	if err := g.client.Get(path, &rawList); err != nil {
-		return nil, fmt.Errorf("github ListComments #%d: %w", issueNumber, err)
-	}
+func (g *GitHubTracker) ListComments(ctx context.Context, issueNumber int) ([]*Comment, error) {
 	var out []*Comment
-	for _, r := range rawList {
-		out = append(out, &Comment{
-			ID:                r.ID,
-			IssueNum:          issueNumber,
-			Author:            r.User.Login,
-			AuthorAssociation: r.AuthorAssociation,
-			Body:              r.Body,
-			HTMLURL:           r.HTMLURL,
-			CreatedAt:         r.CreatedAt,
-			UpdatedAt:         r.UpdatedAt,
-		})
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?per_page=100&page=%d", g.owner, g.repo, issueNumber, page)
+		var rawList []ghCommentResponse
+		if err := g.client.DoWithContext(ctx, "GET", path, nil, &rawList); err != nil {
+			return nil, fmt.Errorf("github ListComments #%d page %d: %w", issueNumber, page, err)
+		}
+		for _, r := range rawList {
+			out = append(out, &Comment{ID: r.ID, IssueNum: issueNumber, Author: r.User.Login, AuthorAssociation: r.AuthorAssociation, Body: r.Body, HTMLURL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+		}
+		if len(rawList) < 100 {
+			break
+		}
 	}
 	return out, nil
 }
 
-func (g *GitHubTracker) CreateComment(_ context.Context, issueNumber int, body string) (*Comment, error) {
+func (g *GitHubTracker) CreateComment(ctx context.Context, issueNumber int, body string) (*Comment, error) {
 	raw, _ := json.Marshal(map[string]string{"body": body})
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/comments", g.owner, g.repo, issueNumber)
 	var r ghCommentResponse
-	if err := g.client.Post(path, bytes.NewReader(raw), &r); err != nil {
+	if err := g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &r); err != nil {
 		return nil, fmt.Errorf("github CreateComment #%d: %w", issueNumber, err)
 	}
 	return &Comment{
@@ -207,11 +244,11 @@ func (g *GitHubTracker) CreateComment(_ context.Context, issueNumber int, body s
 	}, nil
 }
 
-func (g *GitHubTracker) UpdateComment(_ context.Context, commentID int64, body string) (*Comment, error) {
+func (g *GitHubTracker) UpdateComment(ctx context.Context, commentID int64, body string) (*Comment, error) {
 	raw, _ := json.Marshal(map[string]string{"body": body})
 	path := fmt.Sprintf("repos/%s/%s/issues/comments/%d", g.owner, g.repo, commentID)
 	var r ghCommentResponse
-	if err := g.client.Patch(path, bytes.NewReader(raw), &r); err != nil {
+	if err := g.client.DoWithContext(ctx, "PATCH", path, bytes.NewReader(raw), &r); err != nil {
 		return nil, fmt.Errorf("github UpdateComment %d: %w", commentID, err)
 	}
 	return &Comment{
@@ -224,19 +261,24 @@ func (g *GitHubTracker) UpdateComment(_ context.Context, commentID int64, body s
 	}, nil
 }
 
-func (g *GitHubTracker) AddLabels(_ context.Context, issueNumber int, labels []string) error {
+func (g *GitHubTracker) AddLabels(ctx context.Context, issueNumber int, labels []string) error {
 	raw, _ := json.Marshal(map[string]any{"labels": labels})
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/labels", g.owner, g.repo, issueNumber)
 	var resp any
-	return g.client.Post(path, bytes.NewReader(raw), &resp)
+	return g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp)
 }
 
-func (g *GitHubTracker) RemoveLabel(_ context.Context, issueNumber int, label string) error {
+func (g *GitHubTracker) RemoveLabel(ctx context.Context, issueNumber int, label string) error {
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/labels/%s", g.owner, g.repo, issueNumber, url.PathEscape(label))
-	return g.client.Delete(path, nil)
+	err := g.client.DoWithContext(ctx, "DELETE", path, nil, nil)
+	var httpErr *api.HTTPError
+	if errors.As(err, &httpErr) && httpErr.StatusCode == 404 {
+		return nil // The requested projection is already absent.
+	}
+	return err
 }
 
-func (g *GitHubTracker) CreateDraftPR(_ context.Context, req DraftPRRequest) (*PullRequest, error) {
+func (g *GitHubTracker) CreateDraftPR(ctx context.Context, req DraftPRRequest) (*PullRequest, error) {
 	base := req.Base
 	if base == "" {
 		base = "main"
@@ -257,7 +299,7 @@ func (g *GitHubTracker) CreateDraftPR(_ context.Context, req DraftPRRequest) (*P
 		Draft   bool   `json:"draft"`
 		HTMLURL string `json:"html_url"`
 	}
-	if err := g.client.Post(path, bytes.NewReader(raw), &resp); err != nil {
+	if err := g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp); err != nil {
 		return nil, fmt.Errorf("github CreateDraftPR: %w", err)
 	}
 	return &PullRequest{
@@ -271,18 +313,42 @@ func (g *GitHubTracker) CreateDraftPR(_ context.Context, req DraftPRRequest) (*P
 	}, nil
 }
 
-func (g *GitHubTracker) GetCheckStatus(_ context.Context, ref string) ([]CheckRunResult, error) {
+func (g *GitHubTracker) FindDraftPR(ctx context.Context, head, base string) (*PullRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	q := url.Values{"state": []string{"open"}, "head": []string{g.owner + ":" + head}, "base": []string{base}, "per_page": []string{"100"}}
+	path := fmt.Sprintf("repos/%s/%s/pulls?%s", g.owner, g.repo, q.Encode())
+	var prs []struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		Draft   bool   `json:"draft"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &prs); err != nil {
+		return nil, fmt.Errorf("github FindDraftPR: %w", err)
+	}
+	for _, pr := range prs {
+		if pr.Draft {
+			return &PullRequest{Number: pr.Number, Title: pr.Title, Body: pr.Body, Head: head, Base: base, Draft: true, HTMLURL: pr.HTMLURL}, nil
+		}
+	}
+	return nil, nil
+}
+
+func (g *GitHubTracker) GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error) {
 	path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs", g.owner, g.repo, url.PathEscape(ref))
 	var resp struct {
 		CheckRuns []CheckRunResult `json:"check_runs"`
 	}
-	if err := g.client.Get(path, &resp); err != nil {
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, err
 	}
 	return resp.CheckRuns, nil
 }
 
-func (g *GitHubTracker) EnsureLabels(_ context.Context, labels []LabelSpec) error {
+func (g *GitHubTracker) EnsureLabels(ctx context.Context, labels []LabelSpec) error {
 	for _, lb := range labels {
 		raw, _ := json.Marshal(map[string]string{
 			"name":        lb.Name,
@@ -291,7 +357,7 @@ func (g *GitHubTracker) EnsureLabels(_ context.Context, labels []LabelSpec) erro
 		})
 		path := fmt.Sprintf("repos/%s/%s/labels", g.owner, g.repo)
 		var resp any
-		if err := g.client.Post(path, bytes.NewReader(raw), &resp); err != nil {
+		if err := g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp); err != nil {
 			// Ignore 422 already_exists
 			if !strings.Contains(err.Error(), "422") && !strings.Contains(err.Error(), "already_exists") {
 				return fmt.Errorf("ensure label %q: %w", lb.Name, err)

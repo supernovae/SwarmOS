@@ -16,11 +16,12 @@ import (
 )
 
 var (
-	ErrUntrustedIssue = errors.New("untrusted issue: missing required ready label or trusted author association")
-	ErrAlreadyClaimed = errors.New("issue is already claimed by another active lease")
-	ErrClaimRaceLost  = errors.New("claim race lost to a concurrent claimant with an earlier comment ID")
-	ErrNoActiveLease  = errors.New("no active lease found for issue")
-	ErrMaxRenewals    = errors.New("maximum lease renewals reached")
+	ErrUntrustedIssue    = errors.New("untrusted issue: missing required ready label or trusted author association")
+	ErrAlreadyClaimed    = errors.New("issue is already claimed by another active lease")
+	ErrClaimRaceLost     = errors.New("claim race lost to a concurrent claimant with an earlier comment ID")
+	ErrNoActiveLease     = errors.New("no active lease found for issue")
+	ErrMaxRenewals       = errors.New("maximum lease renewals reached")
+	ErrDependenciesUnmet = errors.New("prerequisite depends_on issues are not yet completed")
 )
 
 type AlreadyClaimedError struct {
@@ -47,9 +48,10 @@ type IssueState struct {
 var stateMarkerRegex = regexp.MustCompile(`(?s)<!--\s*swarm:state:v1\s*(\{.*?\})\s*-->`)
 
 type Manager struct {
-	tracker  tracker.Tracker
-	security contract.SecurityConfig
-	nowFn    func() time.Time
+	tracker     tracker.Tracker
+	security    contract.SecurityConfig
+	nodeProfile *contract.NodeProfile
+	nowFn       func() time.Time
 }
 
 func NewManager(t tracker.Tracker, sec contract.SecurityConfig) *Manager {
@@ -61,6 +63,10 @@ func NewManager(t tracker.Tracker, sec contract.SecurityConfig) *Manager {
 		security: sec,
 		nowFn:    func() time.Time { return time.Now().UTC() },
 	}
+}
+
+func (m *Manager) SetNodeProfile(prof *contract.NodeProfile) {
+	m.nodeProfile = prof
 }
 
 func (m *Manager) SetNowFunc(fn func() time.Time) {
@@ -86,7 +92,38 @@ func (m *Manager) VerifyTrustPolicy(issue *tracker.Issue) error {
 	return nil
 }
 
+// VerifyDependencies checks whether all issue numbers in wu.DependsOn are either closed, have swarm:pr-open, or have Lease.Status == "completed".
+func (m *Manager) VerifyDependencies(ctx context.Context, wu *contract.WorkUnit) error {
+	if wu == nil || len(wu.DependsOn) == 0 {
+		return nil
+	}
+	var blocking []string
+	for _, depNum := range wu.DependsOn {
+		if depNum == wu.IssueNumber {
+			continue
+		}
+		depIss, err := m.tracker.GetIssue(ctx, depNum)
+		if err != nil {
+			blocking = append(blocking, fmt.Sprintf("#%d (not found)", depNum))
+			continue
+		}
+		if strings.EqualFold(depIss.State, "closed") || slices.Contains(depIss.Labels, "swarm:pr-open") {
+			continue
+		}
+		if st, err := m.GetCurrentState(ctx, depNum); err == nil && st != nil && st.Lease.Status == "completed" {
+			continue
+		}
+		blocking = append(blocking, fmt.Sprintf("#%d (%s)", depNum, depIss.Title))
+	}
+	if len(blocking) > 0 {
+		return fmt.Errorf("%w: issue #%d is blocked by [%s]", ErrDependenciesUnmet, wu.IssueNumber, strings.Join(blocking, ", "))
+	}
+	return nil
+}
+
 // Acquire claims an issue using optimistic concurrency and comment-ID tie-breaking.
+// Also supports collaborative team handoffs: if the previous claimant placed the lease in status == "handoff",
+// the new contributor seamlessly claims the next phase while preserving prior artifacts and contributor history.
 func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase string, duration time.Duration, maxRenewals int) (*IssueState, error) {
 	if duration <= 0 {
 		duration = 4 * time.Hour
@@ -113,7 +150,7 @@ func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase
 		return nil, err
 	}
 
-	var existingOwnState *IssueState
+	var reusableState *IssueState
 	for _, c := range comments {
 		st, ok := ParseStateComment(c.Body)
 		if !ok {
@@ -129,39 +166,64 @@ func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase
 					CommentID:   c.ID,
 				}
 			}
-			existingOwnState = st
-		} else if st.Lease.Owner == owner && existingOwnState == nil {
-			// Reuse our own expired/released state comment so artifacts are preserved
-			existingOwnState = st
+			reusableState = st
+		} else if st.Lease.Status == "handoff" || st.Lease.Owner == owner || (st.Lease.Status == "active" && !st.Lease.ExpiresAt.After(now)) {
+			// Collaborative handoff or expired/own state comment: preserve artifacts and contributor chain!
+			reusableState = st
 		}
+	}
+
+	contributors := []string{owner}
+	if reusableState != nil {
+		for _, prev := range reusableState.Lease.Contributors {
+			if prev != "" && !slices.Contains(contributors, prev) {
+				contributors = append(contributors, prev)
+			}
+		}
+		if reusableState.Lease.Owner != "" && !slices.Contains(contributors, reusableState.Lease.Owner) {
+			contributors = append([]string{reusableState.Lease.Owner}, contributors...)
+		}
+		if (phase == "full" || phase == "all") && reusableState.Lease.Status == "handoff" && reusableState.Lease.NextPhase != "" {
+			phase = reusableState.Lease.NextPhase
+		}
+	}
+
+	var nodeID string
+	var nodeCaps []string
+	if m.nodeProfile != nil {
+		nodeID = m.nodeProfile.NodeID
+		nodeCaps = m.nodeProfile.Capabilities
 	}
 
 	newState := &IssueState{
 		Lease: contract.Lease{
-			Version:     1,
-			IssueNumber: issueNum,
-			Owner:       owner,
-			Agent:       agent,
-			Phase:       phase,
-			Status:      "active",
-			ClaimedAt:   now,
-			ExpiresAt:   now.Add(duration),
-			Renewals:    0,
-			MaxRenewals: maxRenewals,
+			Version:      1,
+			IssueNumber:  issueNum,
+			Owner:        owner,
+			Agent:        agent,
+			NodeID:       nodeID,
+			Capabilities: nodeCaps,
+			Contributors: contributors,
+			Phase:        phase,
+			Status:       "active",
+			ClaimedAt:    now,
+			ExpiresAt:    now.Add(duration),
+			Renewals:     0,
+			MaxRenewals:  maxRenewals,
 		},
 	}
-	if existingOwnState != nil {
-		newState.Artifacts = existingOwnState.Artifacts
+	if reusableState != nil {
+		newState.Artifacts = reusableState.Artifacts
 	}
 
 	var postedComment *tracker.Comment
-	if existingOwnState != nil && existingOwnState.Lease.CommentID > 0 && existingOwnState.Lease.Status == "active" {
-		newState.Lease.CommentID = existingOwnState.Lease.CommentID
+	if reusableState != nil && reusableState.Lease.CommentID > 0 && (reusableState.Lease.Status == "active" || reusableState.Lease.Status == "handoff") {
+		newState.Lease.CommentID = reusableState.Lease.CommentID
 		body, err := FormatStateComment(newState)
 		if err != nil {
 			return nil, err
 		}
-		postedComment, err = m.tracker.UpdateComment(ctx, existingOwnState.Lease.CommentID, body)
+		postedComment, err = m.tracker.UpdateComment(ctx, reusableState.Lease.CommentID, body)
 		if err != nil {
 			return nil, err
 		}
@@ -175,7 +237,6 @@ func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase
 			return nil, err
 		}
 		newState.Lease.CommentID = postedComment.ID
-		// Update comment so CommentID is recorded inside the JSON payload as well
 		updatedBody, err := FormatStateComment(newState)
 		if err == nil {
 			_, _ = m.tracker.UpdateComment(ctx, postedComment.ID, updatedBody)
@@ -209,7 +270,6 @@ func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase
 	})
 
 	if len(activeClaims) > 0 && activeClaims[0].commentID != newState.Lease.CommentID && activeClaims[0].state.Lease.Owner != owner {
-		// We lost the race! Mark our comment as superseded.
 		newState.Lease.Status = "superseded"
 		if body, err := FormatStateComment(newState); err == nil {
 			_, _ = m.tracker.UpdateComment(ctx, newState.Lease.CommentID, body)
@@ -220,6 +280,34 @@ func (m *Manager) Acquire(ctx context.Context, issueNum int, owner, agent, phase
 
 	_ = m.tracker.AddLabels(ctx, issueNum, []string{"swarm:claimed", "swarm:in-progress"})
 	return newState, nil
+}
+
+// Handoff transitions an active lease into collaborative handoff mode ("status": "handoff") so another contributor or specialist node
+// can claim the next workflow phase (e.g., "review" or "implement") while retaining all artifacts.
+func (m *Manager) Handoff(ctx context.Context, issueNum int, owner, completedPhase, nextPhase string) (*IssueState, error) {
+	st, commentID, err := m.findLatestState(ctx, issueNum, owner)
+	if err != nil {
+		return nil, err
+	}
+	if completedPhase != "" {
+		st.Lease.Phase = completedPhase
+	}
+	st.Lease.NextPhase = nextPhase
+	st.Lease.Status = "handoff"
+	st.Lease.ExpiresAt = m.nowFn()
+	if owner != "" && !slices.Contains(st.Lease.Contributors, owner) {
+		st.Lease.Contributors = append(st.Lease.Contributors, owner)
+	}
+
+	body, err := FormatStateComment(st)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := m.tracker.UpdateComment(ctx, commentID, body); err != nil {
+		return nil, err
+	}
+	_ = m.tracker.RemoveLabel(ctx, issueNum, "swarm:in-progress")
+	return st, nil
 }
 
 func (m *Manager) Renew(ctx context.Context, issueNum int, owner string, duration time.Duration) (*IssueState, error) {
@@ -342,7 +430,7 @@ func (m *Manager) UpdatePhase(ctx context.Context, issueNum int, owner, phase, s
 }
 
 // GetCurrentState inspects issue comments and returns the latest active (or most recent) IssueState,
-// also recognizing `/swarm approve-plan` comments from humans.
+// also recognizing `/swarm approve-plan`, `/swarm reject-plan`, and `/swarm release` comments from humans.
 func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueState, error) {
 	comments, err := m.tracker.ListComments(ctx, issueNum)
 	if err != nil {
@@ -350,7 +438,8 @@ func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueStat
 	}
 	now := m.nowFn()
 	var best *IssueState
-	var humanApproval *contract.Artifact
+	var humanReview *contract.Artifact
+	var releasedViaComment bool
 
 	for _, c := range comments {
 		if st, ok := ParseStateComment(c.Body); ok {
@@ -359,7 +448,6 @@ func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueStat
 				best = st
 				continue
 			}
-			// Prefer active unexpired lease with lowest comment ID, or most recent comment
 			bestActive := best.Lease.Status == "active" && best.Lease.ExpiresAt.After(now)
 			curActive := st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now)
 			if curActive && !bestActive {
@@ -371,8 +459,9 @@ func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueStat
 		}
 
 		trimmed := strings.TrimSpace(c.Body)
-		if strings.HasPrefix(trimmed, "/swarm approve-plan") {
-			humanApproval = &contract.Artifact{
+		switch {
+		case strings.HasPrefix(trimmed, "/swarm approve-plan"):
+			humanReview = &contract.Artifact{
 				Version:     1,
 				ID:          fmt.Sprintf("art-%d-review", issueNum),
 				IssueNumber: issueNum,
@@ -383,19 +472,39 @@ func (m *Manager) GetCurrentState(ctx context.Context, issueNum int) (*IssueStat
 				Body:        trimmed,
 				CreatedAt:   c.CreatedAt,
 			}
+		case strings.HasPrefix(trimmed, "/swarm reject-plan"):
+			humanReview = &contract.Artifact{
+				Version:     1,
+				ID:          fmt.Sprintf("art-%d-review", issueNum),
+				IssueNumber: issueNum,
+				Type:        contract.ArtifactReview,
+				Producer:    "human:" + c.Author,
+				Verdict:     "CHANGES_REQUESTED",
+				Summary:     "Rejected via /swarm reject-plan comment",
+				Body:        trimmed,
+				CreatedAt:   c.CreatedAt,
+			}
+		case strings.HasPrefix(trimmed, "/swarm release"):
+			releasedViaComment = true
 		}
 	}
 
-	if best != nil && humanApproval != nil {
-		hasApprovedReview := false
-		for _, a := range best.Artifacts {
-			if a.Type == contract.ArtifactReview && a.Verdict == "APPROVED" {
-				hasApprovedReview = true
-				break
-			}
+	if best != nil {
+		if releasedViaComment && best.Lease.Status == "active" {
+			best.Lease.Status = "released"
 		}
-		if !hasApprovedReview {
-			best.Artifacts = append(best.Artifacts, *humanApproval)
+		if humanReview != nil {
+			replaced := false
+			for idx, a := range best.Artifacts {
+				if a.Type == contract.ArtifactReview {
+					best.Artifacts[idx] = *humanReview
+					replaced = true
+					break
+				}
+			}
+			if !replaced {
+				best.Artifacts = append(best.Artifacts, *humanReview)
+			}
 		}
 	}
 
@@ -461,10 +570,19 @@ func FormatStateComment(st *IssueState) (string, error) {
 	sb.WriteString("| Field | Value |\n| :--- | :--- |\n")
 	sb.WriteString(fmt.Sprintf("| **Issue** | `#%d` |\n", st.Lease.IssueNumber))
 	sb.WriteString(fmt.Sprintf("| **Owner** | `%s` |\n", st.Lease.Owner))
+	if len(st.Lease.Contributors) > 1 {
+		sb.WriteString(fmt.Sprintf("| **Contributors** | `%s` |\n", strings.Join(st.Lease.Contributors, ", ")))
+	}
+	if st.Lease.NodeID != "" {
+		sb.WriteString(fmt.Sprintf("| **Node ID** | `%s` |\n", st.Lease.NodeID))
+	}
 	if st.Lease.Agent != "" {
 		sb.WriteString(fmt.Sprintf("| **Agent** | `%s` |\n", st.Lease.Agent))
 	}
 	sb.WriteString(fmt.Sprintf("| **Phase** | `%s` |\n", st.Lease.Phase))
+	if st.Lease.NextPhase != "" && st.Lease.Status == "handoff" {
+		sb.WriteString(fmt.Sprintf("| **Next Phase (Handoff)** | `%s` |\n", st.Lease.NextPhase))
+	}
 	sb.WriteString(fmt.Sprintf("| **Status** | `%s` |\n", st.Lease.Status))
 	sb.WriteString(fmt.Sprintf("| **Expires At** | `%s` |\n", st.Lease.ExpiresAt.Format(time.RFC3339)))
 	sb.WriteString(fmt.Sprintf("| **Renewals** | `%d / %d` |\n\n", st.Lease.Renewals, st.Lease.MaxRenewals))

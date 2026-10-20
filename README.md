@@ -163,6 +163,31 @@ swarm work --next --all --agent claude --reviewer-agent omp --gate agent --headl
 - **Location-Independent `--repo`**: Once a repository is registered, passing `--repo owner/repo` from *any* directory automatically resolves its local checkout path and isolated `.swarm/worktrees/issue-<N>` directory.
 - **Race-Resilient Queue Dispatch**: `swarm pull` and `swarm work --next` skip untrusted or actively leased issues, run a non-destructive `git fetch origin --prune`, and automatically fall through to the next ready issue if a concurrent agent wins a claim race.
 
+
+### 5. Multi-Role Swarm Coordinator, Team Handoffs & Volunteer Nodes (Phases 2–4)
+
+```bash
+# Phase 2: Route each workflow role to a specialized coding agent
+swarm work 12 \
+  --planner-agent claude \
+  --reviewer-agent omp \
+  --developer-agent codex \
+  --tester-agent opencode \
+  --gate agent --headless
+
+# Phase 3: Partition a parent epic into linked child WorkUnits (with sequential depends_on gating)
+swarm decompose 10 --sequential
+
+# Phase 3: Collaborative team handoff — Contributor A completes the plan and hands off to Contributor B
+swarm work 12 --phase plan --handoff --agent claude --headless
+swarm work --next --agent codex --headless   # Contributor B picks up the handed-off implement phase!
+
+# Phase 4: Initialize a Volunteer Node profile (~/.config/swarm/node.yaml) & run parallel worker pool
+swarm node init --capabilities coding,testing,review,docs
+swarm node status
+swarm node run --all --concurrency 4 --once --gate agent --auto-submit
+```
+
 ---
 
 ## Multi-Agent Harness Matrix
@@ -186,11 +211,13 @@ SwarmOS treats coding agents as pluggable execution engines over a shared reposi
 | `swarm init [--force] [--sync-labels]` | Scaffold `.swarm/`, GitHub Issue Form, GitHub Action, and `.claude`/`.opencode` slash commands. |
 | `swarm doctor` | Probe `git`, `gh auth`, `.swarm/` schemas, and installed agent binaries (`claude`, `codex`, `opencode`, `omp`). |
 | `swarm repo add\|list\|remove` | Register repositories (`--clone` supported), list registered checkouts, or unregister a repo. |
-| `swarm issue create [flags]` | Create a schema-validated SwarmOS WorkUnit issue (`--title`, `--objective`, `--constraint`, `--acceptance`, `--workflow`, `--gate`). |
+| `swarm node init\|status\|run` | Register volunteer node capabilities/resources (`~/.config/swarm/node.yaml`) and run parallel worker pools (`--concurrency N --auto-submit`). |
+| `swarm issue create [flags]` | Create a schema-validated SwarmOS WorkUnit issue (`--title`, `--objective`, `--constraint`, `--acceptance`, `--depends-on`, `--capability`). |
 | `swarm issue lint <issue>` | Validate an existing issue's body against `.swarm/contracts/workunit.schema.json`. |
+| `swarm decompose <issue> [--sequential]` | Partition a parent WorkUnit into linked child WorkUnit issues with `parent_issue` and `depends_on` ordering. |
 | `swarm claim <issue> [--agent <name>] [--duration 4h]` | Verify trust policy, acquire optimistic lease comment, provision worktree, and compile `.swarm/active/WORKUNIT.md`. |
-| `swarm pull [--all] [--agent <name>]` | Find, claim, and provision the next unclaimed `swarm:ready` issue in the current or registered repos. |
-| `swarm work [<issue>] [--next] [--all] [flags]` | Orchestrate `plan`, `review`, `implement`, and `validate` phases (`--next` auto-pulls the next ready issue). |
+| `swarm pull [--all] [--agent <name>]` | Find, claim, and provision the next unclaimed or handed-off `swarm:ready` issue matching node capabilities. |
+| `swarm work [<issue>] [--next] [--all] [flags]` | Orchestrate `plan`, `review`, `implement`, and `validate` with per-role agents (`--planner-agent`, `--reviewer-agent`, `--developer-agent`, `--tester-agent`) and `--handoff`. |
 | `swarm review <issue> [flags]` | Run an automated reviewer agent (`--agent <name>`) or record human approval/rejection (`--approve`, `--reject --notes "..."`). |
 | `swarm validate [<issue>] [--ci]` | Verify artifact completeness, check protected paths for unauthorized edits, and run `.swarm/validation/required-checks.yaml`. |
 | `swarm submit [<issue>] [--base main]` | Strip ephemeral harness markers, commit and push worktree changes, and open a Draft PR with the artifact summary table. |

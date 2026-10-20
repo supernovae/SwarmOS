@@ -158,3 +158,54 @@ func TestMultiRepoPullAndWorkNext(t *testing.T) {
 		t.Fatalf("expected work --next --all to select and complete local/beta #1, got:\n%s", workNextOut)
 	}
 }
+
+func TestPhase3And4NodeAndDecomposeCLI(t *testing.T) {
+	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
+	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
+
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "init", "-b", "main", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v (%s)", err, string(out))
+	}
+
+	runGlobal := func(args ...string) string {
+		t.Helper()
+		root := NewRootCmd()
+		var buf bytes.Buffer
+		root.SetOut(&buf)
+		root.SetErr(&buf)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("swarm %v failed: %v\nOutput:\n%s", args, err, buf.String())
+		}
+		return buf.String()
+	}
+
+	// 1. Register repository and initialize Volunteer Node profile
+	runGlobal("--backend", "local", "repo", "add", "local/gamma", repo)
+	nodeInitOut := runGlobal("node", "init", "--id", "volunteer-node-01", "--capabilities", "coding,testing,review", "--ram", "64GB")
+	if !strings.Contains(nodeInitOut, "volunteer-node-01") || !strings.Contains(nodeInitOut, "64GB") {
+		t.Fatalf("unexpected node init output:\n%s", nodeInitOut)
+	}
+
+	// 2. Create a parent epic with 2 acceptance items and decompose it into parallel subtasks (--sequential=false)
+	runGlobal("--repo", "local/gamma", "issue", "create",
+		"--title", "Platform Telemetry Epic",
+		"--objective", "Add structured metrics and health endpoint",
+		"--constraint", "Stdlib only",
+		"--acceptance", "Metrics counter endpoint works",
+		"--acceptance", "Healthz endpoint returns 200 OK",
+		"--workflow", "feature",
+		"--ready=false",
+	)
+	decompOut := runGlobal("--repo", "local/gamma", "decompose", "1", "--sequential=false")
+	if !strings.Contains(decompOut, "Decomposed parent issue #1 into 2 child WorkUnit issue(s)") {
+		t.Fatalf("unexpected decompose output:\n%s", decompOut)
+	}
+
+	// 3. Run volunteer node pool with --concurrency 2 --all --once --auto-submit
+	nodeRunOut := runGlobal("node", "run", "--all", "--concurrency", "2", "--once", "--agent", "mock", "--auto-submit")
+	if !strings.Contains(nodeRunOut, "2 work unit(s) processed") {
+		t.Fatalf("expected node run to process both child work units, got:\n%s", nodeRunOut)
+	}
+}

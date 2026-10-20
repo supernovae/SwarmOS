@@ -12,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -24,6 +25,7 @@ type PulledWorkUnit struct {
 	Issue        *tracker.Issue
 	WorkUnit     *contract.WorkUnit
 	State        *lease.IssueState
+	TargetPhase  string
 	WorktreePath string
 	BranchName   string
 }
@@ -37,7 +39,7 @@ func newPullCmd(rootOpts *RootOptions) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "pull",
-		Short: "Find, claim, and provision the next unclaimed swarm:ready issue from the current or registered repos",
+		Short: "Find, claim, and provision the next unclaimed or handed-off swarm:ready issue matching node capabilities",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var dur time.Duration
 			if durationStr != "" {
@@ -54,8 +56,8 @@ func newPullCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Pulled & claimed [%s] issue #%d: %s (expires %s)\n",
-				pulled.Repo, pulled.Issue.Number, pulled.Issue.Title, pulled.State.Lease.ExpiresAt.Format(time.RFC3339))
+			fmt.Fprintf(out, "Pulled & claimed [%s] issue #%d: %s [phase=%s, expires=%s]\n",
+				pulled.Repo, pulled.Issue.Number, pulled.Issue.Title, pulled.TargetPhase, pulled.State.Lease.ExpiresAt.Format(time.RFC3339))
 			fmt.Fprintf(out, "  Repo Root: %s\n", pulled.RepoRoot)
 			fmt.Fprintf(out, "  Branch:    %s\n", pulled.BranchName)
 			fmt.Fprintf(out, "  Worktree:  %s\n", pulled.WorktreePath)
@@ -76,11 +78,16 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 		return nil, err
 	}
 
+	nodeProf, _ := node.LoadOrDetectProfile("")
 	now := time.Now().UTC()
+
 	for _, tgt := range targets {
 		tr, mgr, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, tgt)
 		if err != nil {
 			continue
+		}
+		if nodeProf != nil {
+			mgr.SetNodeProfile(nodeProf)
 		}
 
 		agent := agentName
@@ -135,7 +142,19 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				continue
 			}
 
-			// Skip issues that already have an active lease or completed status
+			// Phase 3: Check depends_on prerequisites
+			if err := mgr.VerifyDependencies(ctx, wu); err != nil {
+				continue
+			}
+
+			// Phase 4: Check volunteer node capability requirements
+			if !node.MatchesCapabilities(nodeProf, wu.RequiredCapabilities) {
+				continue
+			}
+
+			targetPhase := "all"
+			role := "planner"
+
 			if st, err := mgr.GetCurrentState(ctx, iss.Number); err == nil && st != nil {
 				if st.Lease.Status == "completed" {
 					continue
@@ -143,14 +162,24 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
 					continue
 				}
+				if st.Lease.Status == "handoff" && st.Lease.NextPhase != "" {
+					if !node.SupportsPhaseCapability(nodeProf, st.Lease.NextPhase) {
+						continue
+					}
+					targetPhase = st.Lease.NextPhase
+					if targetPhase == "implement" {
+						role = "developer"
+					} else if targetPhase == "review" {
+						role = "reviewer"
+					}
+				}
 			}
 
-			// Refresh remote refs non-destructively if origin exists
 			if hasGitRemote(tgt.Path) {
 				_ = exec.CommandContext(ctx, "git", "-C", tgt.Path, "fetch", "origin", "--prune").Run()
 			}
 
-			st, err := mgr.Acquire(ctx, iss.Number, owner, agent, "plan", dur, cfg.Lease.MaxRenewals)
+			st, err := mgr.Acquire(ctx, iss.Number, owner, agent, targetPhase, dur, cfg.Lease.MaxRenewals)
 			if err != nil {
 				if errors.Is(err, lease.ErrAlreadyClaimed) || errors.Is(err, lease.ErrClaimRaceLost) {
 					continue
@@ -168,7 +197,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				return nil, err
 			}
 
-			if err := workspace.CompileHarnessBundle(wtPath, wu, wf, st.Artifacts, "planner"); err != nil {
+			if err := workspace.CompileHarnessBundle(wtPath, wu, wf, st.Artifacts, role); err != nil {
 				return nil, err
 			}
 
@@ -179,6 +208,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				Issue:        iss,
 				WorkUnit:     wu,
 				State:        st,
+				TargetPhase:  targetPhase,
 				WorktreePath: wtPath,
 				BranchName:   branchName,
 			}, nil
@@ -186,9 +216,9 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 	}
 
 	if allRepos {
-		return nil, fmt.Errorf("no unclaimed swarm:ready issues found across %d registered repository(s)", len(targets))
+		return nil, fmt.Errorf("no unclaimed or handed-off swarm:ready issues matching node capabilities found across %d registered repository(s)", len(targets))
 	}
-	return nil, fmt.Errorf("no unclaimed swarm:ready issues found in %s", targets[0].Repo)
+	return nil, fmt.Errorf("no unclaimed or handed-off swarm:ready issues matching node capabilities found in %s", targets[0].Repo)
 }
 
 func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error) {

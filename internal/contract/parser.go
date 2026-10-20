@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -14,6 +15,7 @@ var (
 	htmlCommentRegex     = regexp.MustCompile(`(?s)<!--.*?-->`)
 	fencedYAMLBlockRegex = regexp.MustCompile("(?s)```yaml(?:\\s+swarm-workunit)?\\s*\\n(.*?)\\n```")
 	externalPathRegex    = regexp.MustCompile(`(?m)^swarm-workunit-path:\s*(\S+)\s*$`)
+	issueRefRegex        = regexp.MustCompile(`#?(\d+)`)
 )
 
 // StripHTMLComments removes all <!-- ... --> blocks from untrusted markdown input.
@@ -134,10 +136,18 @@ func parseMarkdownSections(cleanBody string) (*WorkUnit, bool) {
 	}
 
 	wu := &WorkUnit{
-		Objective:   sections["objective"],
-		Constraints: parseListItems(sections["constraints"]),
-		Acceptance:  parseListItems(firstNonEmpty(sections["acceptance criteria"], sections["acceptance"])),
-		Workflow:    strings.ToLower(strings.TrimSpace(sections["workflow"])),
+		Objective:            sections["objective"],
+		Constraints:          parseListItems(sections["constraints"]),
+		Acceptance:           parseListItems(firstNonEmpty(sections["acceptance criteria"], sections["acceptance"])),
+		Workflow:             strings.ToLower(strings.TrimSpace(sections["workflow"])),
+		RequiredCapabilities: parseListItems(firstNonEmpty(sections["required capabilities"], sections["capabilities"])),
+		DependsOn:            parseIssueNumbers(firstNonEmpty(sections["depends on"], sections["dependencies"])),
+	}
+
+	if parentRaw := strings.TrimSpace(sections["parent issue"]); parentRaw != "" {
+		if nums := parseIssueNumbers(parentRaw); len(nums) > 0 {
+			wu.ParentIssue = nums[0]
+		}
 	}
 
 	gateRaw := strings.ToLower(strings.TrimSpace(firstNonEmpty(sections["plan gate"], sections["plan review gate"], sections["gate"])))
@@ -153,6 +163,24 @@ func parseMarkdownSections(cleanBody string) (*WorkUnit, bool) {
 	}
 
 	return wu, true
+}
+
+func parseIssueNumbers(raw string) []int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.EqualFold(raw, "_no response_") || strings.EqualFold(raw, "none") {
+		return nil
+	}
+	var out []int
+	seen := make(map[int]bool)
+	for _, m := range issueRefRegex.FindAllStringSubmatch(raw, -1) {
+		if len(m) > 1 {
+			if n, err := strconv.Atoi(m[1]); err == nil && n > 0 && !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
 }
 
 func firstNonEmpty(vals ...string) string {
@@ -214,5 +242,21 @@ func FormatIssueMarkdown(wu *WorkUnit) string {
 	}
 	sb.WriteString("### Plan Gate\n\n")
 	sb.WriteString(string(gate) + "\n")
+
+	if wu.ParentIssue > 0 {
+		sb.WriteString(fmt.Sprintf("\n### Parent Issue\n\n#%d\n", wu.ParentIssue))
+	}
+	if len(wu.DependsOn) > 0 {
+		sb.WriteString("\n### Depends On\n\n")
+		for _, dep := range wu.DependsOn {
+			sb.WriteString(fmt.Sprintf("- #%d\n", dep))
+		}
+	}
+	if len(wu.RequiredCapabilities) > 0 {
+		sb.WriteString("\n### Required Capabilities\n\n")
+		for _, capName := range wu.RequiredCapabilities {
+			sb.WriteString("- " + capName + "\n")
+		}
+	}
 	return sb.String()
 }

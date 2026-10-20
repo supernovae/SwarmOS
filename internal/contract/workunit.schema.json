@@ -13,6 +13,24 @@
       "type": "integer",
       "minimum": 0
     },
+    "parent_issue": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "required_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "title": {
       "type": "string"
     },
@@ -46,6 +64,12 @@
     },
     "allow_harness_changes": {
       "type": "boolean"
+    },
+    "subtasks": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
     }
   },
   "additionalProperties": false

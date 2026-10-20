@@ -116,3 +116,44 @@ swarm work 5 --repo supernovae/SwarmOS --agent omp
 # 5. Pull and execute the next ready work unit across ALL registered repositories
 swarm work --next --all --agent claude --reviewer-agent omp --gate agent --headless
 ```
+
+---
+
+## 5. Multi-Role Agent Routing, Team Handoffs & Volunteer Nodes (Phases 2–4)
+
+### Per-Role Agent Routing (Phase 2)
+You can assign a dedicated agent harness to each role via CLI flags or `.swarm/config.yaml`:
+
+```yaml
+# .swarm/config.yaml
+roles:
+  planner: claude
+  reviewer: omp
+  developer: codex
+  tester: opencode
+```
+
+Or per-invocation:
+```bash
+swarm work 12 \
+  --planner-agent claude \
+  --reviewer-agent omp \
+  --developer-agent codex \
+  --tester-agent opencode \
+  --gate agent --headless
+```
+
+### Work Partitioning, Dependency Gating & Collaborative Handoffs (Phase 3)
+- **Work Partitioning (`swarm decompose <issue>`)**: Splits an epic or multi-criterion issue into child `WorkUnit` issues linked via `parent_issue` and optional sequential `depends_on` constraints. `swarm pull` and `swarm work` automatically block work units whose `depends_on` prerequisites are not yet completed.
+- **Collaborative Phase Handoffs (`--handoff`)**: A planner or architect can run `swarm work 12 --phase plan --handoff`, publishing the `design` and `test-plan` artifacts and placing the lease in `status: handoff` (`next_phase: review` or `implement`). Any teammate or volunteer node running `swarm pull` or `swarm work --next` can then claim the next phase while preserving the full artifact and contributor history.
+
+### Distributed Volunteer Nodes (Phase 4)
+Register a machine's capabilities (`coding`, `testing`, `review`, `docs`), installed models, and hardware resources (`OS`, `Arch`, `CPUs`, `RAM`) in `~/.config/swarm/node.yaml`:
+
+```bash
+swarm node init --capabilities coding,testing,review,docs
+swarm node status
+
+# Run a 4-worker parallel pool across all registered repositories and auto-submit passing Draft PRs
+swarm node run --all --concurrency 4 --once --gate agent --auto-submit
+```

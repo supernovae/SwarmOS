@@ -11,8 +11,10 @@ import (
 )
 
 func newValidateCmd(rootOpts *RootOptions) *cobra.Command {
-	var ciMode bool
-
+	var (
+		ciMode              bool
+		allowHarnessChanges bool
+	)
 	cmd := &cobra.Command{
 		Use:   "validate [<issue-number>]",
 		Short: "Run protected-path tamper checks, artifact verification, and required-checks.yaml",
@@ -27,7 +29,7 @@ func newValidateCmd(rootOpts *RootOptions) *cobra.Command {
 
 			if ciMode && len(args) == 0 {
 				wtPath = repoRoot
-				wu = &contract.WorkUnit{ID: "CI", IssueNumber: 1}
+				wu = &contract.WorkUnit{ID: "CI", IssueNumber: 1, AllowHarnessChanges: allowHarnessChanges}
 			} else {
 				var err error
 				issueNum, wtPath, err = resolveIssueAndWorktree(repoRoot, args)
@@ -43,7 +45,9 @@ func newValidateCmd(rootOpts *RootOptions) *cobra.Command {
 					}
 				}
 			}
-
+			if wu != nil && allowHarnessChanges {
+				wu.AllowHarnessChanges = true
+			}
 			valSpec, err := harness.LoadValidationSpec(wtPath)
 			if err != nil {
 				valSpec, err = harness.LoadValidationSpec(repoRoot)
@@ -82,5 +86,6 @@ func newValidateCmd(rootOpts *RootOptions) *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&ciMode, "ci", false, "Run in CI mode (skip .swarm/active worktree artifact checks)")
+	cmd.Flags().BoolVar(&allowHarnessChanges, "allow-harness-changes", false, "Permit modifications to protected harness/CI paths")
 	return cmd
 }

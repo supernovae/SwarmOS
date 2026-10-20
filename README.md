@@ -4,10 +4,11 @@
 
 **Serverless, Contract-Driven Multi-Agent Orchestration Native to GitHub & Git**
 
+[![CI & Validation](https://github.com/supernovae/SwarmOS/actions/workflows/swarm-validate.yml/badge.svg)](https://github.com/supernovae/SwarmOS/actions/workflows/swarm-validate.yml)
+[![Security Scanning](https://github.com/supernovae/SwarmOS/actions/workflows/security.yml/badge.svg)](https://github.com/supernovae/SwarmOS/actions/workflows/security.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Agents](https://img.shields.io/badge/Agents-Claude%20%7C%20Codex%20%7C%20OpenCode%20%7C%20OhMyPi-7B61FF?style=flat-square)](#multi-agent-harness-matrix)
-[![Architecture](https://img.shields.io/badge/Backend-GitHub%20Issues%20%2B%20Git%20Worktrees-181717?style=flat-square&logo=github)](docs/ARCHITECTURE.md)
 
 *Turn GitHub Issues into machine-validated contracts, coordinate distributed coding agents without external servers, isolate execution in Git worktrees, and ship artifact-backed Draft PRs.*
 
@@ -285,3 +286,18 @@ go test -v -race ./...
 go build -o bin/swarm ./cmd/swarm
 ./bin/swarm validate --ci
 ```
+
+### Tagged Releases (Linux, macOS, Windows) & SLSA Provenance
+
+Pushing any semver tag (`v*`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml) via GoReleaser (`.goreleaser.yaml`), publishing static binaries (`amd64` & `arm64`) for **Linux**, **macOS**, and **Windows**, SHA-256 checksums, and cryptographic **GitHub Artifact Build Provenance Attestations**:
+
+```bash
+# Cut and push a tagged release
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+
+# Verify downloaded release binary provenance via GitHub CLI
+gh attestation verify swarm_0.1.0_darwin_arm64.tar.gz --repo supernovae/SwarmOS
+```
+
+See **[`SECURITY.md`](SECURITY.md)** for our vulnerability disclosure policy and supply-chain security controls (CodeQL, `govulncheck`, Dependency Review, and Dependabot).

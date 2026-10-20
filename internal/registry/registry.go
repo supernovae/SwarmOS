@@ -8,17 +8,17 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/filelock"
 	"gopkg.in/yaml.v3"
 )
 
 var validRepoSlugRegex = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 type RepoEntry struct {
-	Repo    string    `yaml:"repo" json:"repo"`                         // "owner/repo"
-	Path    string    `yaml:"path" json:"path"`                         // Absolute path to git repository root
+	Repo    string    `yaml:"repo" json:"repo"`                           // "owner/repo"
+	Path    string    `yaml:"path" json:"path"`                           // Absolute path to git repository root
 	Backend string    `yaml:"backend,omitempty" json:"backend,omitempty"` // "github" or "local"
 	AddedAt time.Time `yaml:"added_at" json:"added_at"`
 }
@@ -80,11 +80,11 @@ func (r *Registry) withLock(mutate bool, fn func(rf *registryFile) error) error 
 	}
 	defer lf.Close()
 
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("flock registry failed: %w", err)
+	if err := filelock.LockExclusive(lf); err != nil {
+		return fmt.Errorf("filelock registry failed: %w", err)
 	}
 	defer func() {
-		_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+		_ = filelock.Unlock(lf)
 	}()
 
 	rf := &registryFile{

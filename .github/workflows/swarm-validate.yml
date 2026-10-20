@@ -1,23 +1,92 @@
-name: SwarmOS Validation
+name: SwarmOS CI & Validation
+
 on:
   pull_request:
     branches: [main, master]
   push:
     branches: [main, master]
 
+permissions:
+  contents: read
+
 jobs:
-  validate:
+  lint:
+    name: Lint (gofmt + go vet + golangci-lint)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.24.x'
-      - name: Run Go Tests
-        run: go test -race ./...
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check gofmt
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted Go files found:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  test-matrix:
+    name: Test & Validate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure Git identity for worktree tests
+        run: |
+          git config --global user.name "SwarmOS CI"
+          git config --global user.email "ci@swarmos.local"
+
+      - name: Run Go Tests (Unix with -race)
+        if: runner.os != 'Windows'
+        run: go test -v -race ./...
+
+      - name: Run Go Tests (Windows)
+        if: runner.os == 'Windows'
+        run: go test -v ./...
+
       - name: Build and Run Swarm Validate
+        if: runner.os != 'Windows'
         run: |
           go build -o /tmp/swarm ./cmd/swarm
-          /tmp/swarm validate --ci
+          /tmp/swarm version
+          /tmp/swarm validate --ci --allow-harness-changes
+
+      - name: Cross-Compile Smoke Check (Linux, macOS, Windows)
+        if: runner.os == 'Linux'
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
+          GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm

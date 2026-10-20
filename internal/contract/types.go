@@ -44,9 +44,9 @@ type Lease struct {
 	NodeID       string    `yaml:"node_id,omitempty" json:"node_id,omitempty"`
 	Capabilities []string  `yaml:"capabilities,omitempty" json:"capabilities,omitempty"`
 	Contributors []string  `yaml:"contributors,omitempty" json:"contributors,omitempty"`
-	Phase        string    `yaml:"phase" json:"phase"`                         // "plan", "implement", "review", "validate", "full"
+	Phase        string    `yaml:"phase" json:"phase"`                               // "plan", "implement", "review", "validate", "full"
 	NextPhase    string    `yaml:"next_phase,omitempty" json:"next_phase,omitempty"` // target phase when Status == "handoff"
-	Status       string    `yaml:"status" json:"status"`                       // "active", "handoff", "released", "completed", "superseded"
+	Status       string    `yaml:"status" json:"status"`                             // "active", "handoff", "released", "completed", "superseded"
 	ClaimedAt    time.Time `yaml:"claimed_at" json:"claimed_at"`
 	ExpiresAt    time.Time `yaml:"expires_at" json:"expires_at"`
 	Renewals     int       `yaml:"renewals" json:"renewals"`
@@ -58,8 +58,8 @@ type Artifact struct {
 	Version     int               `yaml:"version" json:"version"`
 	ID          string            `yaml:"id" json:"id"`
 	IssueNumber int               `yaml:"issue_number" json:"issue_number"`
-	Type        ArtifactType      `yaml:"type" json:"type"`                         // "design", "test-plan", "review", "implementation", "validation"
-	Producer    string            `yaml:"producer" json:"producer"`                 // e.g., "claude:planner", "omp:reviewer", "human:supernovae"
+	Type        ArtifactType      `yaml:"type" json:"type"`                           // "design", "test-plan", "review", "implementation", "validation"
+	Producer    string            `yaml:"producer" json:"producer"`                   // e.g., "claude:planner", "omp:reviewer", "human:supernovae"
 	Verdict     string            `yaml:"verdict,omitempty" json:"verdict,omitempty"` // "APPROVED", "CHANGES_REQUESTED", "PASS", "FAIL"
 	Summary     string            `yaml:"summary" json:"summary"`
 	Body        string            `yaml:"body" json:"body"`

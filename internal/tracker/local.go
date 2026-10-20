@@ -8,24 +8,25 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"syscall"
 	"time"
+
+	"github.com/supernovae/swarmos/internal/filelock"
 )
 
 type localState struct {
-	NextIssueNum   int                  `json:"next_issue_num"`
-	NextCommentID  int64                `json:"next_comment_id"`
-	NextPRNum      int                  `json:"next_pr_num"`
-	Issues         map[int]*Issue       `json:"issues"`
-	Comments       map[int][]*Comment   `json:"comments"`
-	PullRequests   map[int]*PullRequest `json:"pull_requests"`
-	DefinedLabels  map[string]LabelSpec `json:"defined_labels"`
+	NextIssueNum  int                  `json:"next_issue_num"`
+	NextCommentID int64                `json:"next_comment_id"`
+	NextPRNum     int                  `json:"next_pr_num"`
+	Issues        map[int]*Issue       `json:"issues"`
+	Comments      map[int][]*Comment   `json:"comments"`
+	PullRequests  map[int]*PullRequest `json:"pull_requests"`
+	DefinedLabels map[string]LabelSpec `json:"defined_labels"`
 }
 
 type LocalTracker struct {
-	statePath string
-	user      string
-	assoc     string
+	statePath        string
+	user             string
+	assoc            string
 	hookAfterComment func(issueNumber int, c *Comment)
 }
 
@@ -77,11 +78,11 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 	}
 	defer lockFile.Close()
 
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("flock failed: %w", err)
+	if err := filelock.LockExclusive(lockFile); err != nil {
+		return fmt.Errorf("filelock failed: %w", err)
 	}
 	defer func() {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = filelock.Unlock(lockFile)
 	}()
 
 	st := &localState{

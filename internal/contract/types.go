@@ -97,6 +97,7 @@ type SwarmConfig struct {
 	Version      int                    `yaml:"version" json:"version"`
 	DefaultAgent string                 `yaml:"default_agent" json:"default_agent"`
 	DefaultGate  GateMode               `yaml:"default_gate" json:"default_gate"`
+	PlanMode     string                 `yaml:"plan_mode,omitempty" json:"plan_mode,omitempty"`
 	Roles        map[string]string      `yaml:"roles,omitempty" json:"roles,omitempty"`
 	Lease        LeaseConfig            `yaml:"lease" json:"lease"`
 	Security     SecurityConfig         `yaml:"security" json:"security"`
@@ -110,8 +111,10 @@ type LeaseConfig struct {
 }
 
 type SecurityConfig struct {
-	RequireReadyLabel bool   `yaml:"require_ready_label" json:"require_ready_label"`
-	ReadyLabel        string `yaml:"ready_label" json:"ready_label"`
+	RequireReadyLabel     bool     `yaml:"require_ready_label" json:"require_ready_label"`
+	ReadyLabel            string   `yaml:"ready_label" json:"ready_label"`
+	ApprovedCollaborators []string `yaml:"approved_collaborators,omitempty" json:"approved_collaborators,omitempty"`
+	ReviewerCollaborators []string `yaml:"reviewer_collaborators,omitempty" json:"reviewer_collaborators,omitempty"`
 }
 
 type AgentConfig struct {
@@ -139,4 +142,32 @@ type NodeProfile struct {
 	Capabilities []string      `yaml:"capabilities" json:"capabilities"` // "coding", "testing", "review", "docs"
 	Models       []string      `yaml:"models" json:"models"`             // "claude", "codex", "opencode", "omp"
 	Resources    NodeResources `yaml:"resources" json:"resources"`
+}
+
+type RoleAttestation struct {
+	Role           string `yaml:"role" json:"role"`                       // "planner", "reviewer", "developer", "tester"
+	Agent          string `yaml:"agent" json:"agent"`                     // configured policy key in .swarm/config.yaml
+	Harness        string `yaml:"harness" json:"harness"`                 // "claude", "codex", "opencode", "omp", "mock"
+	HarnessVersion string `yaml:"harness_version" json:"harness_version"` // sanitized first-line CLI version or "builtin"
+	Model          string `yaml:"model" json:"model"`                     // configured model selector or "default"
+	Sandbox        string `yaml:"sandbox" json:"sandbox"`                 // "sandbox-exec", "bwrap", "container", "host", "mock"
+	ArtifactType   string `yaml:"artifact_type,omitempty" json:"artifact_type,omitempty"`
+	ArtifactDigest string `yaml:"artifact_digest,omitempty" json:"artifact_digest,omitempty"`
+}
+
+type ProvenanceAttestation struct {
+	SchemaVersion  int               `yaml:"schema_version" json:"schema_version"` // 1
+	IssueNumber    int               `yaml:"issue_number" json:"issue_number"`
+	Workflow       string            `yaml:"workflow" json:"workflow"`
+	EffectiveGate  GateMode          `yaml:"effective_gate" json:"effective_gate"`
+	TaskDigest     string            `yaml:"task_digest" json:"task_digest"`
+	PolicyDigest   string            `yaml:"policy_digest" json:"policy_digest"`
+	BaseSHA        string            `yaml:"base_sha" json:"base_sha"`
+	HeadSHA        string            `yaml:"head_sha,omitempty" json:"head_sha,omitempty"`
+	PlanDigest     string            `yaml:"plan_digest,omitempty" json:"plan_digest,omitempty"`
+	TestPlanDigest string            `yaml:"test_plan_digest,omitempty" json:"test_plan_digest,omitempty"`
+	ReviewDigest   string            `yaml:"review_digest,omitempty" json:"review_digest,omitempty"`
+	ReviewVerdict  string            `yaml:"review_verdict,omitempty" json:"review_verdict,omitempty"`
+	ValidationPass bool              `yaml:"validation_passed" json:"validation_passed"`
+	Roles          []RoleAttestation `yaml:"roles" json:"roles"`
 }

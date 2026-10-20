@@ -196,16 +196,26 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	approvalState := *state
 	approvalState.EffectiveGate = gate
 	roles := rolesForPhase(opts.Phase, gate, hasDesignAndTestPlanArtifacts(state), lease.VerifyApproval(&approvalState, wu) == nil)
-	for _, role := range roles {
-		name := resolveRoleAgent(cfg, role, opts)
-		if name == "" {
-			return nil, fmt.Errorf("no configured %s agent", role)
+	if strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !hasDesignAndTestPlanArtifacts(state))) {
+		agents["planner"] = "interactive"
+		binaries["planner"] = "interactive"
+	} else {
+		for _, role := range roles {
+			if role == "planner" && strings.EqualFold(cfg.PlanMode, "interactive") {
+				agents[role] = "interactive"
+				binaries[role] = "interactive"
+				continue
+			}
+			name := resolveRoleAgent(cfg, role, opts)
+			if name == "" {
+				return nil, fmt.Errorf("no configured %s agent", role)
+			}
+			resolved, err := agent.Preflight(name, cfg, e.Tracker.BackendName() == "local", role)
+			if err != nil {
+				return nil, fmt.Errorf("%s agent preflight: %w", role, err)
+			}
+			agents[role], binaries[role] = name, resolved
 		}
-		resolved, err := agent.Preflight(name, cfg, e.Tracker.BackendName() == "local", role)
-		if err != nil {
-			return nil, fmt.Errorf("%s agent preflight: %w", role, err)
-		}
-		agents[role], binaries[role] = name, resolved
 	}
 	return &PreflightResult{Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
 		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase}, nil
@@ -321,9 +331,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		return nil, err
 	}
 	gate = st.EffectiveGate
-	for _, role := range rolesForPhase(opts.Phase, gate, hasDesignAndTestPlanArtifacts(st), lease.VerifyApproval(st, pre.WorkUnit) == nil) {
-		if pre.Agents[role] == "" {
-			return nil, fmt.Errorf("task phase changed during preflight; rerun work to validate the %s agent", role)
+	if !(strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !hasDesignAndTestPlanArtifacts(st)))) {
+		for _, role := range rolesForPhase(opts.Phase, gate, hasDesignAndTestPlanArtifacts(st), lease.VerifyApproval(st, pre.WorkUnit) == nil) {
+			if pre.Agents[role] == "" {
+				return nil, fmt.Errorf("task phase changed during preflight; rerun work to validate the %s agent", role)
+			}
 		}
 	}
 	e.Config = cfg
@@ -365,6 +377,19 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		if err := check(); err != nil {
 			return res, err
 		}
+		if strings.EqualFold(cfg.PlanMode, "interactive") {
+			res.RoleAgentsUsed["planner"] = "interactive"
+			if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "planner", st.BaseSHA); err != nil {
+				return res, err
+			}
+			if st, err = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "plan", "awaiting-plan"); err != nil {
+				return res, err
+			}
+			res.State = st
+			res.PausedForHuman = true
+			res.PhaseCompleted = "awaiting-plan"
+			return res, nil
+		}
 		planner := pre.Agents["planner"]
 		res.RoleAgentsUsed["planner"] = planner
 		runner, err := agent.NewConfiguredRunner(planner, cfg, e.Tracker.BackendName() == "local")
@@ -377,7 +402,8 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "planner", st.BaseSHA); err != nil {
 			return res, err
 		}
-		if _, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-plan and write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md."}); err != nil {
+		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-plan and write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md."})
+		if err != nil {
 			return res, err
 		}
 		plan, err := readRequiredArtifact(wtPath, "PLAN.md")
@@ -391,10 +417,12 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		if err := check(); err != nil {
 			return res, err
 		}
-		if _, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: planner + ":planner", Summary: fmt.Sprintf("Implementation plan for #%d", opts.IssueNumber), Body: plan}); err != nil {
+		planMeta := attestationMetadata(planRun.Attestation, nil)
+		if _, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: planner + ":planner", Summary: fmt.Sprintf("Implementation plan for #%d", opts.IssueNumber), Body: plan, Metadata: planMeta}); err != nil {
 			return res, err
 		}
-		if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: planner + ":planner", Summary: fmt.Sprintf("Test plan covering %d acceptance criteria", len(pre.WorkUnit.Acceptance)), Body: testPlan}); err != nil {
+		testMeta := attestationMetadata(planRun.Attestation, nil)
+		if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: planner + ":planner", Summary: fmt.Sprintf("Test plan covering %d acceptance criteria", len(pre.WorkUnit.Acceptance)), Body: testPlan, Metadata: testMeta}); err != nil {
 			return res, err
 		}
 		res.State, res.PhaseCompleted = st, "plan"
@@ -497,7 +525,8 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "developer", st.BaseSHA); err != nil {
 		return res, err
 	}
-	if _, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-implement step-by-step using the approved plan and test plan."}); err != nil {
+	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-implement step-by-step using the approved plan and test plan."})
+	if err != nil {
 		return res, err
 	}
 	if err := check(); err != nil {
@@ -511,7 +540,8 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		return res, err
 	}
 	res.State, res.HeadSHA = st, st.HeadSHA
-	if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: "PASS", Summary: summary, Body: body}); err != nil {
+	devMeta := attestationMetadata(devRun.Attestation, nil)
+	if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: "PASS", Summary: summary, Body: body, Metadata: devMeta}); err != nil {
 		return res, err
 	}
 	res.State = st
@@ -524,7 +554,8 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "tester", st.BaseSHA); err != nil {
 		return res, err
 	}
-	if _, err := testerRunner.Run(ctx, agent.RunRequest{Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-validate and record acceptance evidence."}); err != nil {
+	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-validate and record acceptance evidence."})
+	if err != nil {
 		return res, fmt.Errorf("tester agent %q: %w", tester, err)
 	}
 	if err := check(); err != nil {
@@ -532,6 +563,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	}
 	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA})
 	if report != nil {
+		report.Artifact.Metadata = attestationMetadata(testerRun.Attestation, report.Artifact.Metadata)
 		updated, updateErr := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, report.Artifact)
 		if updateErr != nil {
 			return res, updateErr
@@ -677,7 +709,8 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
 		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md and write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
 	}
-	if _, err := agent.RunReview(ctx, runner, req); err != nil {
+	revRun, err := agent.RunReview(ctx, runner, req)
+	if err != nil {
 		return "", st, err
 	}
 	review, err := readRequiredArtifact(wtPath, "REVIEW.md")
@@ -691,10 +724,17 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
 		return verdict, st, fmt.Errorf("%w: %v", ErrLeaseLost, err)
 	}
+	var revAtt contract.RoleAttestation
+	if revRun != nil {
+		revAtt = revRun.Attestation
+	} else {
+		revAtt = runner.Provenance("reviewer", true)
+	}
+	revMeta := attestationMetadata(revAtt, map[string]string{"kind": "agent", "actor": owner})
 	updated, err := e.LeaseManager.UpdateArtifact(ctx, wu.IssueNumber, owner, contract.Artifact{
 		Type: contract.ArtifactReview, Producer: reviewerAgent + ":reviewer", Verdict: verdict,
 		Summary: fmt.Sprintf("Automated plan review verdict: %s", verdict), Body: review,
-		Metadata: map[string]string{"kind": "agent", "actor": owner},
+		Metadata: revMeta,
 	})
 	if err != nil {
 		return verdict, st, err
@@ -850,4 +890,30 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func attestationMetadata(att contract.RoleAttestation, base map[string]string) map[string]string {
+	m := make(map[string]string, len(base)+6)
+	for k, v := range base {
+		m[k] = v
+	}
+	if att.Role != "" {
+		m["role"] = att.Role
+	}
+	if att.Agent != "" {
+		m["agent"] = att.Agent
+	}
+	if att.Harness != "" {
+		m["harness"] = att.Harness
+	}
+	if att.HarnessVersion != "" {
+		m["harness_version"] = att.HarnessVersion
+	}
+	if att.Model != "" {
+		m["model"] = att.Model
+	}
+	if att.Sandbox != "" {
+		m["sandbox"] = att.Sandbox
+	}
+	return m
 }

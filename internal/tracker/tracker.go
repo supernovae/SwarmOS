@@ -66,6 +66,9 @@ type LabelSpec struct {
 func DefaultSwarmLabels() []LabelSpec {
 	return []LabelSpec{
 		{Name: "swarm:ready", Color: "0e8a16", Description: "Work unit vetted and ready for SwarmOS agents"},
+		{Name: "swarm:draft", Color: "cfd3d7", Description: "Structured WorkUnit draft awaiting maintainer approval"},
+		{Name: "swarm:needs-scope", Color: "e99695", Description: "Imported or raw issue needing a structured WorkUnit contract"},
+		{Name: "swarm:blocked", Color: "b60205", Description: "Waiting on prerequisite depends_on issues, overlapping touchpoints, or policy review"},
 		{Name: "swarm:claimed", Color: "1d76db", Description: "Claimed by an active SwarmOS lease"},
 		{Name: "swarm:in-progress", Color: "fbca04", Description: "SwarmOS workflow execution in progress"},
 		{Name: "swarm:plan-review", Color: "d93f0b", Description: "Plan artifact awaiting review approval"},
@@ -81,6 +84,7 @@ type Tracker interface {
 	Authorize(ctx context.Context, permission string) error
 	GetIssue(ctx context.Context, number int) (*Issue, error)
 	CreateIssue(ctx context.Context, title, body string, labels []string) (*Issue, error)
+	UpdateIssueBody(ctx context.Context, number int, body string) (*Issue, error)
 	ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error)
 	ListComments(ctx context.Context, issueNumber int) ([]*Comment, error)
 	CreateComment(ctx context.Context, issueNumber int, body string) (*Comment, error)
@@ -88,6 +92,7 @@ type Tracker interface {
 	AddLabels(ctx context.Context, issueNumber int, labels []string) error
 	RemoveLabel(ctx context.Context, issueNumber int, label string) error
 	CreateDraftPR(ctx context.Context, req DraftPRRequest) (*PullRequest, error)
+	UpdateDraftPR(ctx context.Context, prNumber int, title, body string) (*PullRequest, error)
 	FindDraftPR(ctx context.Context, head, base string) (*PullRequest, error)
 	GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error)
 	EnsureLabels(ctx context.Context, labels []LabelSpec) error

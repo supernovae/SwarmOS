@@ -189,6 +189,7 @@ type InitOptions struct {
 	RepoRoot     string
 	Force        bool
 	SwarmVersion string
+	TemplateDir  string
 }
 
 type InitResult struct {
@@ -262,6 +263,22 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	if err := writeFile(".swarm/conventions.md", []byte(convBuilder.String())); err != nil {
 		return nil, err
 	}
+	// 2b. .swarm/goals.md, .swarm/SKILLS.md, AGENTS.md, .swarm/rules/, .swarm/skills/
+	if err := copyEmbedded("templates/swarm/goals.md", ".swarm/goals.md"); err != nil {
+		return nil, err
+	}
+	if err := copyEmbedded("templates/swarm/SKILLS.md", ".swarm/SKILLS.md"); err != nil {
+		return nil, err
+	}
+	if err := copyEmbedded("templates/swarm/AGENTS.md", "AGENTS.md"); err != nil {
+		return nil, err
+	}
+	if err := copyEmbedded("templates/swarm/rules/default.md", ".swarm/rules/default.md"); err != nil {
+		return nil, err
+	}
+	if err := copyEmbedded("templates/swarm/skills/triage-and-plan.md", ".swarm/skills/triage-and-plan.md"); err != nil {
+		return nil, err
+	}
 
 	// 3. Workflows
 	for _, wf := range []string{"feature.yaml", "bugfix.yaml", "refactor.yaml"} {
@@ -299,6 +316,10 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 			".swarm/config.yaml",
 			".swarm/prompts/**",
 			".swarm/workflows/**",
+			".swarm/goals.md",
+			".swarm/SKILLS.md",
+			".swarm/rules/**",
+			".swarm/skills/**",
 		},
 	}
 	valBytes, err := yaml.Marshal(&valSpec)
@@ -309,9 +330,16 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		return nil, err
 	}
 
-	// 7. GitHub Issue Template & Action
-	if err := copyEmbedded("templates/github/ISSUE_TEMPLATE/swarm-workunit.yml", ".github/ISSUE_TEMPLATE/swarm-workunit.yml"); err != nil {
-		return nil, err
+	// 7. GitHub Issue Templates & Action
+	for _, tmpl := range []string{"swarm-workunit.yml", "swarm-feature.yml", "swarm-bugfix.yml", "swarm-refactor.yml", "config.yml"} {
+		if err := copyEmbedded("templates/github/ISSUE_TEMPLATE/"+tmpl, ".github/ISSUE_TEMPLATE/"+tmpl); err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(opts.TemplateDir) != "" {
+		if err := copyCustomTemplateDir(opts.TemplateDir, writeFile); err != nil {
+			return nil, err
+		}
 	}
 	if opts.SwarmVersion == "" {
 		res.Warnings = append(res.Warnings, "CI workflow omitted: rerun swarm init --swarm-version <compatible-release-tag-or-full-commit-SHA> to pin the validator; v0.1.x lacks trusted-base validation")
@@ -348,7 +376,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 }
 
 func EnsureSlashCommands(root string, force bool, res *InitResult) error {
-	cmds := []string{"swarm-plan.md", "swarm-review.md", "swarm-implement.md", "swarm-validate.md"}
+	cmds := []string{"swarm-plan.md", "swarm-review.md", "swarm-implement.md", "swarm-validate.md", "swarm-project-plan.md"}
 	for _, cmd := range cmds {
 		data, err := embeddedTemplates.ReadFile("templates/commands/" + cmd)
 		if err != nil {
@@ -371,6 +399,71 @@ func EnsureSlashCommands(root string, force bool, res *InitResult) error {
 			}
 			if res != nil {
 				res.CreatedFiles = append(res.CreatedFiles, rel)
+			}
+		}
+	}
+	return nil
+}
+
+func copyCustomTemplateDir(templateDir string, writeFile func(relPath string, data []byte) error) error {
+	info, err := os.Stat(templateDir)
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("invalid --template-dir %q: directory does not exist", templateDir)
+	}
+	copyDirFiles := func(srcDir, targetDir string, exts []string) error {
+		entries, err := os.ReadDir(srcDir)
+		if err != nil {
+			return nil
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(e.Name()))
+			matched := false
+			for _, allowed := range exts {
+				if ext == allowed {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(srcDir, e.Name()))
+			if err != nil {
+				return err
+			}
+			if err := writeFile(filepath.Join(targetDir, e.Name()), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, issueDir := range []string{templateDir, filepath.Join(templateDir, "ISSUE_TEMPLATE"), filepath.Join(templateDir, ".github", "ISSUE_TEMPLATE")} {
+		if err := copyDirFiles(issueDir, ".github/ISSUE_TEMPLATE", []string{".yml", ".yaml"}); err != nil {
+			return err
+		}
+	}
+	for _, rulesDir := range []string{filepath.Join(templateDir, "rules"), filepath.Join(templateDir, ".swarm", "rules")} {
+		if err := copyDirFiles(rulesDir, ".swarm/rules", []string{".md"}); err != nil {
+			return err
+		}
+	}
+	for _, skillsDir := range []string{filepath.Join(templateDir, "skills"), filepath.Join(templateDir, ".swarm", "skills")} {
+		if err := copyDirFiles(skillsDir, ".swarm/skills", []string{".md"}); err != nil {
+			return err
+		}
+	}
+	for _, pair := range [][2]string{
+		{filepath.Join(templateDir, "goals.md"), ".swarm/goals.md"},
+		{filepath.Join(templateDir, ".swarm", "goals.md"), ".swarm/goals.md"},
+		{filepath.Join(templateDir, "SKILLS.md"), ".swarm/SKILLS.md"},
+		{filepath.Join(templateDir, ".swarm", "SKILLS.md"), ".swarm/SKILLS.md"},
+	} {
+		if data, err := os.ReadFile(pair[0]); err == nil {
+			if err := writeFile(pair[1], data); err != nil {
+				return err
 			}
 		}
 	}
@@ -407,6 +500,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	}
 	if cfg.DefaultGate != contract.GateNone && cfg.DefaultGate != contract.GateAgent && cfg.DefaultGate != contract.GateHuman {
 		return nil, fmt.Errorf("default_gate must be none, agent, or human")
+	}
+	if err := contract.ValidatePlanMode(cfg.PlanMode); err != nil {
+		return nil, err
 	}
 	if !cfg.Security.RequireReadyLabel || strings.TrimSpace(cfg.Security.ReadyLabel) == "" {
 		return nil, fmt.Errorf("security requires require_ready_label: true and a nonempty ready_label")
@@ -594,8 +690,15 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 		})
 	}
 
-	// 2. GitHub CLI / Auth
-	if ghPath, err := exec.LookPath("gh"); err == nil {
+	// 2. GitHub Token / CLI Auth
+	if _, source := trackerTokenSource(); source != "" {
+		checks = append(checks, DoctorCheck{
+			Category: "tracker",
+			Name:     "github-token",
+			Status:   "OK",
+			Detail:   fmt.Sprintf("authenticated via %s (gh CLI not required)", source),
+		})
+	} else if ghPath, err := exec.LookPath("gh"); err == nil {
 		if checkGitHubAuth {
 			if out, err := exec.Command(ghPath, "auth", "status").CombinedOutput(); err == nil {
 				firstLine := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
@@ -610,7 +713,7 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 					Category: "tracker",
 					Name:     "gh-auth",
 					Status:   "WARN",
-					Detail:   "gh installed but not authenticated (use --backend local or gh auth login)",
+					Detail:   "gh installed but not authenticated (set SWARM_GITHUB_TOKEN/GH_TOKEN or run gh auth login)",
 				})
 			}
 		} else {
@@ -624,9 +727,9 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 	} else {
 		checks = append(checks, DoctorCheck{
 			Category: "tracker",
-			Name:     "gh-cli",
+			Name:     "github-auth",
 			Status:   "WARN",
-			Detail:   "gh CLI not found (local tracker still available)",
+			Detail:   "no SWARM_GITHUB_TOKEN/GH_TOKEN set and gh CLI not found (local tracker still available)",
 		})
 	}
 
@@ -719,4 +822,13 @@ func mustAbs(p string) string {
 		return p
 	}
 	return abs
+}
+
+func trackerTokenSource() (string, string) {
+	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+		if val := strings.TrimSpace(os.Getenv(key)); val != "" {
+			return val, key
+		}
+	}
+	return "", ""
 }

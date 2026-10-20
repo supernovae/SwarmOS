@@ -2,11 +2,8 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"os/exec"
-	"strings"
-	"time"
-
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
@@ -14,6 +11,9 @@ import (
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
+	"os/exec"
+	"strings"
+	"time"
 )
 
 func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
@@ -119,6 +119,22 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 			if err := requireCleanHead(ctx, worktree, head); err != nil {
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
 			}
+			if len(state.Attestations) > 0 {
+				for _, att := range state.Attestations {
+					if att.Role == "tester" {
+						if report.Artifact.Metadata == nil {
+							report.Artifact.Metadata = make(map[string]string)
+						}
+						report.Artifact.Metadata["role"] = "tester"
+						report.Artifact.Metadata["agent"] = att.Agent
+						report.Artifact.Metadata["harness"] = att.Harness
+						report.Artifact.Metadata["harness_version"] = att.HarnessVersion
+						report.Artifact.Metadata["model"] = att.Model
+						report.Artifact.Metadata["sandbox"] = att.Sandbox
+						break
+					}
+				}
+			}
 			if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
 				return err
 			}
@@ -130,14 +146,20 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 				return err
 			}
+			prTitle := fmt.Sprintf("%s (#%d)", iss.Title, issue)
+			prBody := formatDraftPRBody(unit, state)
 			pr, err := tr.FindDraftPR(ctx, branch, baseBranch)
 			if err != nil {
 				return err
 			}
 			if pr == nil {
-				pr, err = tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue, Title: fmt.Sprintf("%s (#%d)", iss.Title, issue), Body: formatDraftPRBody(unit, state), Head: branch, Base: baseBranch})
+				pr, err = tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue, Title: prTitle, Body: prBody, Head: branch, Base: baseBranch})
 				if err != nil {
 					return err
+				}
+			} else {
+				if updatedPR, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody); updateErr == nil && updatedPR != nil {
+					pr = updatedPR
 				}
 			}
 			if _, err := manager.RecordSubmission(ctx, issue, owner, pr.Number, pr.HTMLURL); err != nil {
@@ -229,15 +251,70 @@ func defaultBaseBranch(root string) (string, error) {
 
 func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState) string {
 	var body strings.Builder
-	fmt.Fprintf(&body, "Closes #%d\n\n## Objective\n\n%s\n\n## Acceptance criteria\n\n", unit.IssueNumber, strings.TrimSpace(unit.Objective))
+	fmt.Fprintf(&body, "Closes #%d\n\n## Objective\n\n%s\n", unit.IssueNumber, strings.TrimSpace(unit.Objective))
+	if len(unit.Constraints) > 0 {
+		body.WriteString("\n## Constraints\n\n")
+		for _, c := range unit.Constraints {
+			fmt.Fprintf(&body, "- %s\n", c)
+		}
+	}
+	body.WriteString("\n## Acceptance criteria\n\n")
 	for _, criterion := range unit.Acceptance {
 		fmt.Fprintf(&body, "- [ ] %s\n", criterion)
 	}
-	if state != nil && len(state.Artifacts) > 0 {
-		body.WriteString("\n## Artifact evidence\n\n| Type | Producer | Verdict | Summary |\n| --- | --- | --- | --- |\n")
-		escape := strings.NewReplacer("|", "\\|", "\n", " ", "\r", " ", "`", "'")
-		for _, artifact := range state.Artifacts {
-			fmt.Fprintf(&body, "| %s | %s | %s | %s |\n", escape.Replace(string(artifact.Type)), escape.Replace(artifact.Producer), escape.Replace(artifact.Verdict), escape.Replace(artifact.Summary))
+	if state != nil {
+		prov := lease.BuildProvenanceAttestation(unit, state)
+		body.WriteString("\n## 🔒 Harness & Model Provenance Attestation\n\n")
+		if len(prov.Roles) > 0 {
+			body.WriteString("| Role | Configured Agent | Harness | Version | Model | Boundary | Artifact SHA-256 |\n")
+			body.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+			for _, r := range prov.Roles {
+				digest := "-"
+				if len(r.ArtifactDigest) > 12 {
+					digest = "`" + r.ArtifactDigest[:12] + "`"
+				} else if r.ArtifactDigest != "" {
+					digest = "`" + r.ArtifactDigest + "`"
+				}
+				fmt.Fprintf(&body, "| `%s` | `%s` | `%s` | `%s` | `%s` | `%s` | %s |\n",
+					r.Role, r.Agent, r.Harness, r.HarnessVersion, r.Model, r.Sandbox, digest)
+			}
+			body.WriteString("\n")
+		}
+		if rawJSON, err := json.MarshalIndent(prov, "", "  "); err == nil {
+			body.WriteString("<details>\n<summary>Machine-Readable Provenance Attestation (JSON)</summary>\n\n```json\n")
+			body.Write(rawJSON)
+			body.WriteString("\n```\n\n</details>\n")
+		}
+		if len(state.Artifacts) > 0 {
+			body.WriteString("\n## 📦 Attached SwarmOS Artifacts\n\n")
+			body.WriteString("| Type | Producer | Verdict | Summary |\n| --- | --- | --- | --- |\n")
+			escape := strings.NewReplacer("|", "\\|", "\n", " ", "\r", " ", "`", "'")
+			for _, artifact := range state.Artifacts {
+				fmt.Fprintf(&body, "| %s | %s | %s | %s |\n", escape.Replace(string(artifact.Type)), escape.Replace(artifact.Producer), escape.Replace(artifact.Verdict), escape.Replace(artifact.Summary))
+			}
+			body.WriteString("\n")
+			for _, a := range state.Artifacts {
+				digest := a.Metadata["content_sha256"]
+				if len(digest) > 12 {
+					digest = digest[:12]
+				}
+				var title string
+				switch a.Type {
+				case contract.ArtifactDesign:
+					title = fmt.Sprintf("📋 Implementation Plan (PLAN.md — sha256:%s)", digest)
+				case contract.ArtifactTestPlan:
+					title = fmt.Sprintf("🧪 Test Plan (TEST_PLAN.md — sha256:%s)", digest)
+				case contract.ArtifactReview:
+					title = fmt.Sprintf("🔍 Plan Review (REVIEW.md — Verdict: %s — sha256:%s)", a.Verdict, digest)
+				case contract.ArtifactImplementation:
+					title = fmt.Sprintf("🛠️ Implementation Summary (sha256:%s)", digest)
+				case contract.ArtifactValidation:
+					title = fmt.Sprintf("✅ Validation Checks (%s — sha256:%s)", a.Verdict, digest)
+				default:
+					title = fmt.Sprintf("📄 Artifact (%s — sha256:%s)", a.Type, digest)
+				}
+				fmt.Fprintf(&body, "<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, lease.TruncateArtifactBody(a.Body, unit.IssueNumber))
+			}
 		}
 	}
 	return body.String()

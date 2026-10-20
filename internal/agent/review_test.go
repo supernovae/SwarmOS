@@ -33,6 +33,16 @@ type helperReviewer struct{ fail bool }
 func (h helperReviewer) Name() string                               { return "test-helper" }
 func (h helperReviewer) Available() (string, bool)                  { return os.Args[0], true }
 func (h helperReviewer) BuildCommand(RunRequest) (string, []string) { return os.Args[0], nil }
+func (h helperReviewer) Provenance(role string, readOnly bool) contract.RoleAttestation {
+	return contract.RoleAttestation{
+		Role:           role,
+		Agent:          h.Name(),
+		Harness:        "mock",
+		HarnessVersion: "builtin",
+		Model:          "default",
+		Sandbox:        "mock",
+	}
+}
 func (h helperReviewer) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestReviewHelperProcess", "--")
 	cmd.Dir = req.WorktreePath
@@ -41,7 +51,7 @@ func (h helperReviewer) Run(ctx context.Context, req RunRequest) (*RunResult, er
 		cmd.Env = append(cmd.Env, "SWARM_REVIEW_FAIL=1")
 	}
 	out, err := cmd.CombinedOutput()
-	result := &RunResult{Agent: h.Name(), Role: req.Role, Output: string(out)}
+	result := &RunResult{Agent: h.Name(), Role: req.Role, Output: string(out), Attestation: h.Provenance(req.Role, req.ReadOnly)}
 	if err != nil {
 		return result, err
 	}

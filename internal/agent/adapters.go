@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -39,6 +41,97 @@ func (a *CLIAdapter) Available() (string, bool) {
 		return "", false
 	}
 	return path, true
+}
+
+func (a *CLIAdapter) Provenance(role string, readOnly bool) contract.RoleAttestation {
+	agentName := a.agentName
+	if agentName == "" {
+		agentName = a.driver
+	}
+	harnessName := a.driver
+	if harnessName == "" {
+		harnessName = a.agentName
+	}
+	var version string
+	if a.sandboxRuntime == "container" {
+		base := filepath.Base(strings.TrimSpace(a.container))
+		if base == "" || base == "." || base == "/" {
+			version = "container:unknown"
+		} else {
+			version = "container:" + base
+		}
+	} else {
+		version = probeHarnessVersion(a.binary)
+	}
+	model := strings.TrimSpace(a.model)
+	if model == "" {
+		model = "default"
+	}
+	boundary := "host"
+	if readOnly {
+		if a.sandboxRuntime != "" {
+			boundary = a.sandboxRuntime
+		} else if runtime.GOOS == "darwin" {
+			boundary = "sandbox-exec"
+		} else {
+			boundary = "bwrap"
+		}
+	}
+	return contract.RoleAttestation{
+		Role:           role,
+		Agent:          agentName,
+		Harness:        harnessName,
+		HarnessVersion: version,
+		Model:          model,
+		Sandbox:        boundary,
+	}
+}
+
+func probeHarnessVersion(binary string) string {
+	bin := strings.TrimSpace(binary)
+	if bin == "" {
+		return "unknown"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "--version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "unknown"
+	}
+	var firstLine string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			firstLine = line
+			break
+		}
+	}
+	if firstLine == "" {
+		return "unknown"
+	}
+	var kept []string
+	for _, tok := range strings.Fields(firstLine) {
+		cleaned := strings.Trim(tok, "(),;[]\"'")
+		if cleaned == "" {
+			continue
+		}
+		if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "~") || strings.Contains(cleaned, `\`) {
+			continue
+		}
+		if strings.Contains(cleaned, "@") && !strings.HasPrefix(cleaned, "@") {
+			continue
+		}
+		kept = append(kept, tok)
+	}
+	sanitized := strings.TrimSpace(strings.Join(kept, " "))
+	if sanitized == "" {
+		return "unknown"
+	}
+	if len(sanitized) > 64 {
+		sanitized = strings.TrimSpace(sanitized[:64])
+	}
+	return sanitized
 }
 
 func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
@@ -172,6 +265,10 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (*RunResult, error
 		err = errors.Join(err, sandbox.RemoveContainer(cleanupCtx, cmd.Path, cmd.Env, containerIDFile))
 		cancel()
 	}
+	att := a.Provenance(req.Role, req.ReadOnly)
+	if strings.TrimSpace(req.Model) != "" {
+		att.Model = strings.TrimSpace(req.Model)
+	}
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -180,9 +277,9 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (*RunResult, error
 		} else {
 			exitCode = 1
 		}
-		return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: exitCode, Output: outBuf.String()}, fmt.Errorf("agent %q (%s) failed (exit %d): %w\n%s", a.agentName, req.Role, exitCode, err, strings.TrimSpace(outBuf.String()))
+		return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: exitCode, Output: outBuf.String(), Attestation: att}, fmt.Errorf("agent %q (%s) failed (exit %d): %w\n%s", a.agentName, req.Role, exitCode, err, strings.TrimSpace(outBuf.String()))
 	}
-	return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: 0, Output: outBuf.String()}, nil
+	return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: 0, Output: outBuf.String(), Attestation: att}, nil
 }
 
 // MockRunner is a deterministic adapter for unit/CI tests and offline dry-runs (--agent mock).
@@ -200,6 +297,17 @@ func (m *MockRunner) Available() (string, bool) {
 
 func (m *MockRunner) BuildCommand(req RunRequest) (string, []string) {
 	return "mock", []string{"--role", req.Role, "--mode", req.Mode, req.TaskPrompt}
+}
+
+func (m *MockRunner) Provenance(role string, readOnly bool) contract.RoleAttestation {
+	return contract.RoleAttestation{
+		Role:           role,
+		Agent:          "mock",
+		Harness:        "mock",
+		HarnessVersion: "builtin",
+		Model:          "default",
+		Sandbox:        "mock",
+	}
 }
 
 func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
@@ -329,11 +437,16 @@ func newVersionCmd() *cobra.Command {
 	}
 
 	_, args := m.BuildCommand(req)
+	att := m.Provenance(req.Role, req.ReadOnly)
+	if strings.TrimSpace(req.Model) != "" {
+		att.Model = strings.TrimSpace(req.Model)
+	}
 	return &RunResult{
-		Agent:    "mock",
-		Role:     req.Role,
-		Command:  append([]string{"mock"}, args...),
-		ExitCode: 0,
-		Output:   output,
+		Agent:       "mock",
+		Role:        req.Role,
+		Command:     append([]string{"mock"}, args...),
+		ExitCode:    0,
+		Output:      output,
+		Attestation: att,
 	}, nil
 }

@@ -3,6 +3,7 @@ package coordination
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -86,7 +87,15 @@ type GitStore struct{ root string }
 func NewGitStore(root string) *GitStore { return &GitStore{root: root} }
 func (s *GitStore) ref(n int) string    { return fmt.Sprintf("refs/heads/swarm-state/issue-%d", n) }
 func (s *GitStore) run(ctx context.Context, input string, args ...string) (string, error) {
-	c := exec.CommandContext(ctx, "git", args...)
+	fullArgs := args
+	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+		if tok := strings.TrimSpace(os.Getenv(key)); tok != "" {
+			basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + tok))
+			fullArgs = append([]string{"-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic " + basic}, args...)
+			break
+		}
+	}
+	c := exec.CommandContext(ctx, "git", fullArgs...)
 	c.Dir = s.root
 	c.Stdin = strings.NewReader(input)
 	b, e := c.CombinedOutput()

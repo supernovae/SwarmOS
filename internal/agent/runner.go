@@ -1,6 +1,10 @@
 package agent
 
-import "context"
+import (
+	"context"
+
+	"github.com/supernovae/swarmos/internal/contract"
+)
 
 type RunRequest struct {
 	Agent        string // configured allowlisted provider/harness name
@@ -16,16 +20,18 @@ type RunRequest struct {
 }
 
 type RunResult struct {
-	Agent    string   `json:"agent"`
-	Role     string   `json:"role"`
-	Command  []string `json:"command"`
-	ExitCode int      `json:"exit_code"`
-	Output   string   `json:"output"`
+	Agent       string                   `json:"agent"`
+	Role        string                   `json:"role"`
+	Command     []string                 `json:"command"`
+	ExitCode    int                      `json:"exit_code"`
+	Output      string                   `json:"output"`
+	Attestation contract.RoleAttestation `json:"attestation"`
 }
 
 type Runner interface {
 	Name() string
 	Available() (string, bool)
 	BuildCommand(req RunRequest) (string, []string)
+	Provenance(role string, readOnly bool) contract.RoleAttestation
 	Run(ctx context.Context, req RunRequest) (*RunResult, error)
 }

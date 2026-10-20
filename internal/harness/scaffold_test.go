@@ -172,3 +172,43 @@ func TestWorkflowDefaultBranchPrefersOriginSymbolicRef(t *testing.T) {
 		t.Fatalf("default branch = %q, want trunk", branch)
 	}
 }
+
+func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
+	root := t.TempDir()
+	customDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(customDir, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(customDir, "org-custom.yml"), []byte("name: Custom Org Form\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(customDir, "rules", "security.md"), []byte("# Security Rule\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := InitRepository(InitOptions{RepoRoot: root, TemplateDir: customDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	expectedFiles := []string{
+		"AGENTS.md",
+		".swarm/goals.md",
+		".swarm/SKILLS.md",
+		".swarm/rules/default.md",
+		".swarm/rules/security.md",
+		".swarm/skills/triage-and-plan.md",
+		".github/ISSUE_TEMPLATE/swarm-workunit.yml",
+		".github/ISSUE_TEMPLATE/swarm-feature.yml",
+		".github/ISSUE_TEMPLATE/swarm-bugfix.yml",
+		".github/ISSUE_TEMPLATE/swarm-refactor.yml",
+		".github/ISSUE_TEMPLATE/config.yml",
+		".github/ISSUE_TEMPLATE/org-custom.yml",
+		".claude/commands/swarm-project-plan.md",
+		".opencode/command/swarm-project-plan.md",
+	}
+	for _, rel := range expectedFiles {
+		if !fileExists(filepath.Join(root, rel)) {
+			t.Fatalf("expected %s to be created by InitRepository", rel)
+		}
+	}
+}

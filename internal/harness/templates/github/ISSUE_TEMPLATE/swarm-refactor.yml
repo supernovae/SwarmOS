@@ -1,0 +1,69 @@
+name: SwarmOS Refactor Work Unit
+description: Propose a behavior-preserving structural refactor for SwarmOS agents
+title: "[Refactor] "
+labels: ["swarm:draft"]
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: Describe the target modules/symbols to refactor and the maintainability goal.
+      placeholder: Extract and simplify ...
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Invariants that must hold throughout the refactor (one bullet per line).
+      value: |
+        - Preserve all observable behavior and existing test expectations
+        - Do not introduce new external dependencies
+        - Keep commits and file touchpoints scoped to the target package
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Verification criteria for the refactor (one bullet per line).
+      placeholder: |
+        - [ ] Target code is simplified with zero behavioral regressions
+        - [ ] Existing and new unit tests pass
+        - [ ] `swarm validate` passes
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow
+      description: Workflow recipe for this refactor work unit.
+      options:
+        - refactor
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
+    id: plan_gate
+    attributes:
+      label: Plan Gate
+      description: Requested plan review gate before implementation.
+      options:
+        - agent
+        - human
+        - none
+      default: 0
+    validations:
+      required: true
+  - type: input
+    id: depends_on
+    attributes:
+      label: Depends On
+      description: Optional comma-separated prerequisite issue numbers (e.g., #1, #2).
+      placeholder: "none"
+  - type: input
+    id: required_capabilities
+    attributes:
+      label: Required Capabilities
+      description: Optional capabilities required by worker nodes.
+      value: "coding, testing"

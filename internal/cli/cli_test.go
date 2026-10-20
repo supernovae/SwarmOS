@@ -5,18 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"slices"
-	"strconv"
-	"testing"
-
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
 )
 
 type cliFixture struct {
@@ -257,5 +257,85 @@ func TestCLIRenewalLimitReturnsErrorWithoutChangingLease(t *testing.T) {
 	after := f.state(t, number).Lease
 	if after.Renewals != before.Renewals || !after.ExpiresAt.Equal(before.ExpiresAt) {
 		t.Fatalf("failed renewal changed the lease: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+
+	createdIss, err := f.tracker.GetIssue(context.Background(), number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(createdIss.Labels, "swarm:draft") {
+		t.Fatalf("expected newly created draft issue to have swarm:draft label, got %v", createdIss.Labels)
+	}
+
+	f.must(t, "issue", "approve", n)
+	f.must(t, "claim", n, "--agent", "mock")
+
+	wtPath := filepath.Join(f.root, ".swarm", "worktrees", "issue-"+n)
+	activeDir := filepath.Join(wtPath, ".swarm", "active")
+	if err := os.WriteFile(filepath.Join(activeDir, "PLAN.md"), []byte("# Interactive Plan\n\n1. Add feature.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, "TEST_PLAN.md"), []byte("# Interactive Test Plan\n\n- Run git --version\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f.must(t, "stage", n, "--phase", "plan", "--harness", "claude", "--model", "claude-sonnet-4-5")
+	f.must(t, "review", n, "--agent", "mock")
+
+	if err := os.WriteFile(filepath.Join(wtPath, "feature.txt"), []byte("shipped\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.must(t, "stage", n, "--phase", "implement", "--harness", "codex", "--model", "gpt-5-codex")
+	f.must(t, "submit", n)
+
+	state := f.state(t, number)
+	pr, err := f.tracker.FindDraftPR(context.Background(), state.Branch, "main")
+	if err != nil || pr == nil {
+		t.Fatalf("FindDraftPR: %v, %v", pr, err)
+	}
+	for _, want := range []string{
+		"## 🔒 Harness & Model Provenance Attestation",
+		"Machine-Readable Provenance Attestation (JSON)",
+		"claude-sonnet-4-5",
+		"gpt-5-codex",
+		"## 📦 Attached SwarmOS Artifacts",
+		"# Interactive Plan",
+		"# Interactive Test Plan",
+		"VERDICT: APPROVED",
+	} {
+		if !strings.Contains(pr.Body, want) {
+			t.Fatalf("Draft PR body missing %q:\n%s", want, pr.Body)
+		}
+	}
+	if strings.Contains(pr.Body, "alice") {
+		t.Fatalf("Draft PR body leaked local username 'alice':\n%s", pr.Body)
+	}
+
+	comments, err := f.tracker.ListComments(context.Background(), number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 living projection comment on issue #%d, got %d", number, len(comments))
+	}
+
+	// Verify swarm plan --from and --scan CLI commands
+	roadmapFile := filepath.Join(f.root, "ROADMAP.md")
+	if err := os.WriteFile(roadmapFile, []byte("## First Roadmap Item\nBuild part one\n- [ ] Check one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	planOut := f.must(t, "plan", "--from", roadmapFile, "--apply")
+	if !strings.Contains(planOut, "First Roadmap Item") {
+		t.Fatalf("unexpected plan --from output:\n%s", planOut)
+	}
+	scanOut := f.must(t, "plan", "--scan", "--apply")
+	if !strings.Contains(scanOut, "SwarmOS Backlog Sense-Making") {
+		t.Fatalf("unexpected plan --scan output:\n%s", scanOut)
 	}
 }

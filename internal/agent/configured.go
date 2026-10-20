@@ -121,6 +121,20 @@ func (r *configuredRunner) validate(req RunRequest) error {
 	}
 	return nil
 }
+func (r *configuredRunner) Provenance(role string, readOnly bool) contract.RoleAttestation {
+	att := r.Runner.Provenance(role, readOnly)
+	if r.name != "" {
+		att.Agent = r.name
+	}
+	if (att.Model == "" || att.Model == "default") && strings.TrimSpace(r.model) != "" {
+		att.Model = strings.TrimSpace(r.model)
+	}
+	if att.Model == "" {
+		att.Model = "default"
+	}
+	return att
+}
+
 func (r *configuredRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	if err := r.validate(req); err != nil {
 		return nil, err
@@ -128,7 +142,19 @@ func (r *configuredRunner) Run(ctx context.Context, req RunRequest) (*RunResult,
 	if req.Model == "" {
 		req.Model = r.model
 	}
-	return r.Runner.Run(ctx, req)
+	res, err := r.Runner.Run(ctx, req)
+	if res != nil {
+		if r.name != "" {
+			res.Attestation.Agent = r.name
+		}
+		if strings.TrimSpace(req.Model) != "" {
+			res.Attestation.Model = strings.TrimSpace(req.Model)
+		}
+		if res.Attestation.Model == "" {
+			res.Attestation.Model = "default"
+		}
+	}
+	return res, err
 }
 
 func validateAgentEnv(names []string) error {
@@ -138,7 +164,7 @@ func validateAgentEnv(names []string) error {
 			return fmt.Errorf("empty variable name")
 		}
 		upper := strings.ToUpper(name)
-		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "GH_") || strings.HasPrefix(upper, "GIT_") || strings.HasPrefix(upper, "SSH_") || upper == "HOME" || strings.HasPrefix(upper, "XDG_") {
+		if strings.HasPrefix(upper, "GITHUB_") || strings.HasPrefix(upper, "GH_") || strings.HasPrefix(upper, "SWARM_GITHUB_") || strings.HasPrefix(upper, "GIT_") || strings.HasPrefix(upper, "SSH_") || upper == "HOME" || strings.HasPrefix(upper, "XDG_") {
 			return fmt.Errorf("%q is a coordinator or host credential variable, not model authentication", name)
 		}
 	}

@@ -21,6 +21,17 @@ type GitHubTracker struct {
 	client *api.RESTClient
 }
 
+// ResolveGitHubToken returns the configured GitHub API token in precedence order:
+// SWARM_GITHUB_TOKEN -> GH_TOKEN -> GITHUB_TOKEN.
+func ResolveGitHubToken() (string, string) {
+	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+		if val := strings.TrimSpace(os.Getenv(key)); val != "" {
+			return val, key
+		}
+	}
+	return "", ""
+}
+
 func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 	var owner, name string
 	if repoOverride == "" {
@@ -40,9 +51,22 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 		owner, name = r.Owner, r.Name
 	}
 
-	client, err := api.DefaultRESTClient()
+	var client *api.RESTClient
+	var err error
+	if token, source := ResolveGitHubToken(); token != "" && source == "SWARM_GITHUB_TOKEN" {
+		host := strings.TrimSpace(os.Getenv("GH_HOST"))
+		if host == "" {
+			host = "github.com"
+		}
+		client, err = api.NewRESTClient(api.ClientOptions{
+			Host:      host,
+			AuthToken: token,
+		})
+	} else {
+		client, err = api.DefaultRESTClient()
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize GitHub REST client: %w", err)
+		return nil, fmt.Errorf("failed to initialize GitHub REST client (set SWARM_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN, or run gh auth login): %w", err)
 	}
 	return &GitHubTracker{
 		owner:  owner,
@@ -154,6 +178,16 @@ func (g *GitHubTracker) CreateIssue(ctx context.Context, title, body string, lab
 	path := fmt.Sprintf("repos/%s/%s/issues", g.owner, g.repo)
 	if err := g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp); err != nil {
 		return nil, fmt.Errorf("github CreateIssue: %w", err)
+	}
+	return convertGHIssue(resp), nil
+}
+
+func (g *GitHubTracker) UpdateIssueBody(ctx context.Context, number int, body string) (*Issue, error) {
+	raw, _ := json.Marshal(map[string]any{"body": body})
+	var resp ghIssueResponse
+	path := fmt.Sprintf("repos/%s/%s/issues/%d", g.owner, g.repo, number)
+	if err := g.client.DoWithContext(ctx, "PATCH", path, bytes.NewReader(raw), &resp); err != nil {
+		return nil, fmt.Errorf("github UpdateIssueBody #%d: %w", number, err)
 	}
 	return convertGHIssue(resp), nil
 }
@@ -308,6 +342,42 @@ func (g *GitHubTracker) CreateDraftPR(ctx context.Context, req DraftPRRequest) (
 		Body:    resp.Body,
 		Head:    req.Head,
 		Base:    base,
+		Draft:   resp.Draft,
+		HTMLURL: resp.HTMLURL,
+	}, nil
+}
+
+func (g *GitHubTracker) UpdateDraftPR(ctx context.Context, prNumber int, title, body string) (*PullRequest, error) {
+	payload := map[string]any{
+		"body": body,
+	}
+	if strings.TrimSpace(title) != "" {
+		payload["title"] = title
+	}
+	raw, _ := json.Marshal(payload)
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d", g.owner, g.repo, prNumber)
+	var resp struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		Draft   bool   `json:"draft"`
+		HTMLURL string `json:"html_url"`
+		Head    struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	if err := g.client.DoWithContext(ctx, "PATCH", path, bytes.NewReader(raw), &resp); err != nil {
+		return nil, fmt.Errorf("github UpdateDraftPR #%d: %w", prNumber, err)
+	}
+	return &PullRequest{
+		Number:  resp.Number,
+		Title:   resp.Title,
+		Body:    resp.Body,
+		Head:    resp.Head.Ref,
+		Base:    resp.Base.Ref,
 		Draft:   resp.Draft,
 		HTMLURL: resp.HTMLURL,
 	}, nil

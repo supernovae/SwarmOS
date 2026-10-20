@@ -1,0 +1,935 @@
+package workflow
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+
+	"github.com/supernovae/swarmos/internal/agent"
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
+	"gopkg.in/yaml.v3"
+)
+
+type ProjectPlanOptions struct {
+	RepoRoot     string
+	FromFile     string // path to markdown/YAML project roadmap or plan
+	ScanOpen     bool   // scan and sense-make open tracker issues
+	Normalize    bool   // when ScanOpen && Apply, rewrite raw open issues into structured WorkUnit markdown and label swarm:draft
+	AgentName    string // optional agent to draft/enrich plan; deterministic analyzer when empty or mock
+	Apply        bool   // create/update draft WorkUnit issues, apply triage labels, or post sense-making report on tracker
+	Ready        bool   // when Apply is true, also approve created/normalized WorkUnits (requires maintainer auth)
+	PublishIssue int    // optional tracking issue number to post the sense-making & goal attestation report to
+}
+
+type IssueSenseItem struct {
+	IssueNumber      int                `yaml:"issue_number" json:"issue_number"`
+	Title            string             `yaml:"title" json:"title"`
+	ValidWorkUnit    bool               `yaml:"valid_work_unit" json:"valid_work_unit"`
+	Approved         bool               `yaml:"approved" json:"approved"`
+	RecommendedLabel string             `yaml:"recommended_label" json:"recommended_label"` // "swarm:ready", "swarm:draft", "swarm:needs-scope", "swarm:blocked"
+	Workflow         string             `yaml:"workflow" json:"workflow"`
+	Gate             contract.GateMode  `yaml:"gate" json:"gate"`
+	DependsOn        []int              `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
+	Touchpoints      []string           `yaml:"touchpoints,omitempty" json:"touchpoints,omitempty"`
+	OverlapsWith     []int              `yaml:"overlaps_with,omitempty" json:"overlaps_with,omitempty"`
+	GoalAlignment    string             `yaml:"goal_alignment" json:"goal_alignment"` // "PASS", "NEEDS_SCOPE", "RISK_FLAGGED"
+	SafetyNotes      []string           `yaml:"safety_notes,omitempty" json:"safety_notes,omitempty"`
+	SuggestedUpdate  *contract.WorkUnit `yaml:"suggested_work_unit,omitempty" json:"suggested_work_unit,omitempty"`
+}
+
+type ProjectPlanReport struct {
+	Mode            string              `yaml:"mode" json:"mode"` // "from-plan" or "backlog-scan"
+	BaseSHA         string              `yaml:"base_sha" json:"base_sha"`
+	PolicyDigest    string              `yaml:"policy_digest" json:"policy_digest"`
+	GoalsDigest     string              `yaml:"goals_digest" json:"goals_digest"`
+	ProposedUnits   []contract.WorkUnit `yaml:"proposed_units,omitempty" json:"proposed_units,omitempty"`
+	CreatedIssues   []*tracker.Issue    `yaml:"created_issues,omitempty" json:"created_issues,omitempty"`
+	BacklogItems    []IssueSenseItem    `yaml:"backlog_items,omitempty" json:"backlog_items,omitempty"`
+	ExecutionWaves  [][]int             `yaml:"execution_waves,omitempty" json:"execution_waves,omitempty"`
+	SummaryMarkdown string              `yaml:"summary_markdown" json:"summary_markdown"`
+}
+
+func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*ProjectPlanReport, error) {
+	root := opts.RepoRoot
+	if root == "" {
+		root = e.repoRoot
+	}
+	if root == "" {
+		root = "."
+	}
+	if opts.FromFile == "" && !opts.ScanOpen {
+		return nil, fmt.Errorf("specify --from <file> to decompose a project plan or --scan to sense-make open issues")
+	}
+
+	baseSHA, _ := workspace.ResolveBase(root)
+	cfg := e.Config
+	if baseSHA != "" {
+		if pinnedCfg, err := harness.LoadConfigAt(root, baseSHA); err == nil {
+			cfg = pinnedCfg
+		}
+	}
+	policyDigest := contract.DigestApprovedPolicy(baseSHA, cfg)
+	goalsDigest, defaultConstraints := loadGoalsAndRules(root)
+	valSpec, _ := harness.LoadValidationSpec(root)
+
+	report := &ProjectPlanReport{
+		BaseSHA:      baseSHA,
+		PolicyDigest: policyDigest,
+		GoalsDigest:  goalsDigest,
+	}
+
+	if opts.FromFile != "" {
+		report.Mode = "from-plan"
+		units, err := e.parseOrSynthesizeRoadmap(ctx, root, opts.FromFile, opts.AgentName, defaultConstraints, cfg)
+		if err != nil {
+			return nil, err
+		}
+		if len(units) == 0 {
+			return nil, fmt.Errorf("no WorkUnit tasks found in %s", opts.FromFile)
+		}
+
+		if opts.Apply {
+			var created []*tracker.Issue
+			var prevNum int
+			var owner string
+			if opts.Ready {
+				owner, err = e.Tracker.CurrentUser(ctx)
+				if err != nil || strings.TrimSpace(owner) == "" {
+					return nil, fmt.Errorf("determine approving actor: %w", err)
+				}
+			}
+			indexToIssueNum := make(map[int]int, len(units))
+			for i := range units {
+				u := &units[i]
+				var mappedDeps []int
+				for _, dep := range u.DependsOn {
+					if mapped, ok := indexToIssueNum[dep]; ok {
+						mappedDeps = append(mappedDeps, mapped)
+					} else if dep > 0 {
+						mappedDeps = append(mappedDeps, dep)
+					}
+				}
+				if len(mappedDeps) == 0 && prevNum > 0 {
+					mappedDeps = []int{prevNum}
+				}
+				u.DependsOn = mappedDeps
+				if u.ID == "" {
+					u.ID = fmt.Sprintf("PLAN-%d", i+1)
+				}
+				if err := contract.ValidateWorkUnit(u); err != nil {
+					return nil, fmt.Errorf("task %d (%s): %w", i+1, u.Title, err)
+				}
+				iss, err := e.Tracker.CreateIssue(ctx, u.Title, contract.FormatIssueMarkdown(u), []string{"swarm:draft"})
+				if err != nil {
+					return nil, err
+				}
+				u.IssueNumber = iss.Number
+				indexToIssueNum[i+1] = iss.Number
+				prevNum = iss.Number
+				if opts.Ready {
+					if _, err := e.LeaseManager.ApproveTask(ctx, iss.Number, owner); err != nil {
+						return nil, fmt.Errorf("approve created issue #%d: %w", iss.Number, err)
+					}
+					if refreshed, refErr := e.Tracker.GetIssue(ctx, iss.Number); refErr == nil && refreshed != nil {
+						iss = refreshed
+					}
+				}
+				created = append(created, iss)
+			}
+			report.CreatedIssues = created
+		} else {
+			for i := range units {
+				if units[i].IssueNumber == 0 {
+					units[i].IssueNumber = i + 1
+				}
+				if len(units[i].DependsOn) == 0 && i > 0 {
+					units[i].DependsOn = []int{units[i-1].IssueNumber}
+				}
+			}
+		}
+
+		report.ProposedUnits = units
+		var waveItems []IssueSenseItem
+		for _, u := range units {
+			waveItems = append(waveItems, IssueSenseItem{
+				IssueNumber: u.IssueNumber,
+				Title:       u.Title,
+				DependsOn:   u.DependsOn,
+				Touchpoints: extractTouchpoints(root, u.Title+"\n"+u.Objective+"\n"+strings.Join(u.Acceptance, "\n")),
+			})
+		}
+		populateOverlaps(waveItems)
+		report.ExecutionWaves = computeExecutionWaves(waveItems)
+		report.SummaryMarkdown = renderFromPlanMarkdown(report, opts.Apply, opts.Ready)
+		if opts.PublishIssue > 0 && opts.Apply {
+			_, _ = e.Tracker.CreateComment(ctx, opts.PublishIssue, report.SummaryMarkdown)
+		}
+		return report, nil
+	}
+
+	// Backlog Sense-Making & Issue Import Mode (--scan)
+	report.Mode = "backlog-scan"
+	issues, err := e.Tracker.ListIssues(ctx, tracker.IssueFilter{State: "open"})
+	if err != nil {
+		return nil, err
+	}
+
+	readyLabel := "swarm:ready"
+	if cfg != nil && cfg.Security.ReadyLabel != "" {
+		readyLabel = cfg.Security.ReadyLabel
+	}
+
+	items := make([]IssueSenseItem, 0, len(issues))
+	for _, iss := range issues {
+		tps := extractTouchpoints(root, iss.Title+"\n"+iss.Body)
+		wu, parseErr := contract.ParseWorkUnitFromIssueWithRoot(iss.Number, iss.Title, iss.Body, root)
+		item := IssueSenseItem{
+			IssueNumber: iss.Number,
+			Title:       iss.Title,
+			Touchpoints: tps,
+		}
+		if parseErr != nil {
+			suggested := synthesizeWorkUnitFromRawIssue(iss, defaultConstraints, cfg)
+			item.ValidWorkUnit = false
+			item.Workflow = suggested.Workflow
+			item.Gate = suggested.Gate
+			item.GoalAlignment = "NEEDS_SCOPE"
+			item.RecommendedLabel = "swarm:needs-scope"
+			item.SuggestedUpdate = suggested
+			item.SafetyNotes = append(item.SafetyNotes, "Raw issue missing structured WorkUnit sections (Objective/Constraints/Acceptance Criteria)")
+			if touchesProtectedPath(tps, valSpec) {
+				item.GoalAlignment = "RISK_FLAGGED"
+				item.RecommendedLabel = "swarm:blocked"
+				item.SafetyNotes = append(item.SafetyNotes, "Touches protected harness or CI paths without allow_harness_changes")
+			}
+		} else {
+			item.ValidWorkUnit = true
+			item.Workflow = wu.Workflow
+			item.Gate = wu.Gate
+			item.DependsOn = wu.DependsOn
+			st, stErr := e.LeaseManager.GetCurrentState(ctx, iss.Number)
+			if stErr == nil && st != nil && st.TaskDigest == contract.DigestWorkUnit(wu) && st.PolicyDigest == policyDigest && slices.Contains(iss.Labels, readyLabel) {
+				item.Approved = true
+			}
+			item.GoalAlignment = "PASS"
+			if touchesProtectedPath(tps, valSpec) && !wu.AllowHarnessChanges {
+				item.GoalAlignment = "RISK_FLAGGED"
+				item.SafetyNotes = append(item.SafetyNotes, "Touches protected harness or CI paths without allow_harness_changes: true")
+			}
+			depsUnmet := e.LeaseManager.VerifyDependencies(ctx, wu) != nil
+			if depsUnmet {
+				item.SafetyNotes = append(item.SafetyNotes, "Waiting on open prerequisite depends_on issue(s)")
+			}
+			switch {
+			case item.GoalAlignment == "RISK_FLAGGED" || depsUnmet:
+				item.RecommendedLabel = "swarm:blocked"
+			case item.Approved:
+				item.RecommendedLabel = readyLabel
+			default:
+				item.RecommendedLabel = "swarm:draft"
+			}
+		}
+		items = append(items, item)
+	}
+
+	populateOverlaps(items)
+	for i := range items {
+		if len(items[i].OverlapsWith) > 0 {
+			var refs []string
+			for _, ov := range items[i].OverlapsWith {
+				refs = append(refs, fmt.Sprintf("#%d", ov))
+			}
+			items[i].SafetyNotes = append(items[i].SafetyNotes, fmt.Sprintf("Overlapping touchpoints with %s (schedule in sequential execution waves)", strings.Join(refs, ", ")))
+		}
+	}
+
+	if opts.Apply {
+		var owner string
+		if opts.Ready {
+			owner, err = e.Tracker.CurrentUser(ctx)
+			if err != nil || strings.TrimSpace(owner) == "" {
+				return nil, fmt.Errorf("determine approving actor: %w", err)
+			}
+		}
+		for i := range items {
+			item := &items[i]
+			if opts.Normalize && !item.ValidWorkUnit && item.SuggestedUpdate != nil {
+				body := contract.FormatIssueMarkdown(item.SuggestedUpdate)
+				if _, err := e.Tracker.UpdateIssueBody(ctx, item.IssueNumber, body); err != nil {
+					return nil, err
+				}
+				_ = e.Tracker.RemoveLabel(ctx, item.IssueNumber, "swarm:needs-scope")
+				item.ValidWorkUnit = true
+				if item.GoalAlignment != "RISK_FLAGGED" {
+					item.GoalAlignment = "PASS"
+					item.RecommendedLabel = "swarm:draft"
+				}
+			}
+			if item.RecommendedLabel != "" {
+				_ = e.Tracker.AddLabels(ctx, item.IssueNumber, []string{item.RecommendedLabel})
+			}
+			if opts.Ready && item.ValidWorkUnit && item.RecommendedLabel != "swarm:blocked" && !item.Approved {
+				if _, err := e.LeaseManager.ApproveTask(ctx, item.IssueNumber, owner); err != nil {
+					return nil, fmt.Errorf("approve issue #%d: %w", item.IssueNumber, err)
+				}
+				item.Approved = true
+				item.RecommendedLabel = readyLabel
+			}
+		}
+	}
+
+	report.BacklogItems = items
+	report.ExecutionWaves = computeExecutionWaves(items)
+	report.SummaryMarkdown = renderBacklogScanMarkdown(report, opts.Apply, opts.Normalize)
+	if opts.PublishIssue > 0 && opts.Apply {
+		_, _ = e.Tracker.CreateComment(ctx, opts.PublishIssue, report.SummaryMarkdown)
+	}
+	return report, nil
+}
+
+func loadGoalsAndRules(root string) (string, []string) {
+	h := sha256.New()
+	var constraints []string
+	hasContent := false
+
+	goalsPath := filepath.Join(root, ".swarm", "goals.md")
+	if data, err := os.ReadFile(goalsPath); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		hasContent = true
+		_, _ = h.Write(data)
+		constraints = append(constraints, "Honor project mission and safety invariants in .swarm/goals.md")
+	}
+
+	rulesDir := filepath.Join(root, ".swarm", "rules")
+	if entries, err := os.ReadDir(rulesDir); err == nil {
+		var names []string
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if data, err := os.ReadFile(filepath.Join(rulesDir, name)); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+				hasContent = true
+				_, _ = h.Write(data)
+			}
+		}
+		if len(names) > 0 {
+			constraints = append(constraints, "Comply with repository rules in .swarm/rules/")
+		}
+	}
+
+	if len(constraints) == 0 {
+		constraints = []string{
+			"Follow repository conventions in .swarm/conventions.md",
+			"Do not modify protected harness or CI files",
+		}
+	}
+	if !hasContent {
+		return "none", constraints
+	}
+	return hex.EncodeToString(h.Sum(nil)), constraints
+}
+
+func (e *Engine) parseOrSynthesizeRoadmap(ctx context.Context, root, fromFile, agentName string, defaultConstraints []string, cfg *contract.SwarmConfig) ([]contract.WorkUnit, error) {
+	data, err := os.ReadFile(fromFile)
+	if err != nil {
+		return nil, fmt.Errorf("read plan file %q: %w", fromFile, err)
+	}
+	raw := string(data)
+
+	// If an explicit non-mock agent is requested to synthesize/enrich a plan, run it when available.
+	if strings.TrimSpace(agentName) != "" && !strings.EqualFold(agentName, "mock") && cfg != nil {
+		if runner, err := agent.NewConfiguredRunner(agentName, cfg, e.Tracker.BackendName() == "local"); err == nil {
+			activeDir := filepath.Join(root, ".swarm", "active")
+			_ = os.MkdirAll(activeDir, 0o755)
+			outPath := filepath.Join(activeDir, "PROJECT_PLAN.yaml")
+			_ = os.Remove(outPath)
+			prompt := fmt.Sprintf("Read %s, .swarm/goals.md, and .swarm/rules/. Decompose the roadmap into a YAML list of SwarmOS WorkUnit objects at .swarm/active/PROJECT_PLAN.yaml.", fromFile)
+			if _, runErr := runner.Run(ctx, agent.RunRequest{
+				Agent:        agentName,
+				Role:         "planner",
+				Mode:         "headless",
+				WorktreePath: root,
+				TaskPrompt:   prompt,
+			}); runErr == nil {
+				if synthBytes, readErr := os.ReadFile(outPath); readErr == nil && len(synthBytes) > 0 {
+					raw = string(synthBytes)
+				}
+			}
+		}
+	}
+
+	defaultGate := contract.GateAgent
+	if cfg != nil && cfg.DefaultGate != "" {
+		defaultGate = cfg.DefaultGate
+	}
+
+	// 1. Try YAML list or wrapper struct
+	ext := strings.ToLower(filepath.Ext(fromFile))
+	if ext == ".yaml" || ext == ".yml" || strings.HasPrefix(strings.TrimSpace(raw), "- ") || strings.HasPrefix(strings.TrimSpace(raw), "work_units:") || strings.HasPrefix(strings.TrimSpace(raw), "tasks:") {
+		var list []contract.WorkUnit
+		if err := yaml.Unmarshal([]byte(raw), &list); err == nil && len(list) > 0 && (list[0].Title != "" || list[0].Objective != "") {
+			return normalizeProposedUnits(list, defaultConstraints, defaultGate), nil
+		}
+		var wrapper struct {
+			WorkUnits []contract.WorkUnit `yaml:"work_units"`
+			Tasks     []contract.WorkUnit `yaml:"tasks"`
+			Subtasks  []contract.WorkUnit `yaml:"subtasks"`
+		}
+		if err := yaml.Unmarshal([]byte(raw), &wrapper); err == nil {
+			combined := append(append(wrapper.WorkUnits, wrapper.Tasks...), wrapper.Subtasks...)
+			if len(combined) > 0 {
+				return normalizeProposedUnits(combined, defaultConstraints, defaultGate), nil
+			}
+		}
+	}
+
+	// 2. Parse Markdown roadmap sections (## <Task Title>)
+	units := parseMarkdownRoadmap(raw, defaultConstraints, defaultGate)
+	return units, nil
+}
+
+func normalizeProposedUnits(units []contract.WorkUnit, defaultConstraints []string, defaultGate contract.GateMode) []contract.WorkUnit {
+	out := make([]contract.WorkUnit, 0, len(units))
+	for i, u := range units {
+		if u.ID == "" {
+			u.ID = fmt.Sprintf("PLAN-%d", i+1)
+		}
+		if u.Title == "" {
+			u.Title = truncateStr(u.Objective, 60)
+		}
+		if u.Objective == "" {
+			u.Objective = u.Title
+		}
+		if len(u.Constraints) == 0 {
+			u.Constraints = append([]string(nil), defaultConstraints...)
+		}
+		if len(u.Acceptance) == 0 {
+			u.Acceptance = []string{
+				"Implementation satisfies the declared objective and constraints",
+				"`swarm validate` passes",
+			}
+		}
+		if u.Workflow == "" {
+			u.Workflow = inferWorkflowFromText(u.Title + " " + u.Objective)
+		}
+		if u.Gate == "" {
+			u.Gate = defaultGate
+		}
+		out = append(out, u)
+	}
+	return out
+}
+
+func parseMarkdownRoadmap(raw string, defaultConstraints []string, defaultGate contract.GateMode) []contract.WorkUnit {
+	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	type section struct {
+		title string
+		lines []string
+	}
+	var sections []section
+	var current *section
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") && !strings.HasPrefix(trimmed, "### ") {
+			title := strings.TrimSpace(strings.TrimPrefix(trimmed, "## "))
+			if title != "" {
+				sections = append(sections, section{title: title})
+				current = &sections[len(sections)-1]
+			}
+			continue
+		}
+		if current != nil {
+			current.lines = append(current.lines, line)
+		}
+	}
+
+	if len(sections) == 0 && strings.TrimSpace(raw) != "" {
+		sections = append(sections, section{
+			title: "Roadmap Task 1",
+			lines: lines,
+		})
+	}
+
+	var units []contract.WorkUnit
+	for idx, sec := range sections {
+		body := strings.TrimSpace(strings.Join(sec.lines, "\n"))
+		if wu, err := contract.ParseWorkUnitFromIssue(idx+1, sec.title, body); err == nil && wu != nil {
+			wu.IssueNumber = 0
+			wu.ID = fmt.Sprintf("PLAN-%d", idx+1)
+			units = append(units, *wu)
+			continue
+		}
+
+		var objectiveParts []string
+		var constraints []string
+		var acceptance []string
+		var dependsOn []int
+		workflowName := ""
+		gate := defaultGate
+		mode := ""
+
+		for _, l := range sec.lines {
+			t := strings.TrimSpace(l)
+			if t == "" {
+				continue
+			}
+			lower := strings.ToLower(t)
+			switch {
+			case strings.HasPrefix(lower, "### objective") || strings.HasPrefix(lower, "**objective**"):
+				mode = "objective"
+				continue
+			case strings.HasPrefix(lower, "### constraint") || strings.HasPrefix(lower, "**constraint"):
+				mode = "constraints"
+				continue
+			case strings.HasPrefix(lower, "### acceptance") || strings.HasPrefix(lower, "**acceptance"):
+				mode = "acceptance"
+				continue
+			case strings.HasPrefix(lower, "depends on:") || strings.HasPrefix(lower, "depends_on:"):
+				for _, m := range regexp.MustCompile(`#?(\d+)`).FindAllStringSubmatch(t, -1) {
+					var n int
+					_, _ = fmt.Sscanf(m[1], "%d", &n)
+					if n > 0 {
+						dependsOn = append(dependsOn, n)
+					}
+				}
+				continue
+			case strings.HasPrefix(lower, "workflow:"):
+				workflowName = strings.TrimSpace(strings.TrimPrefix(lower, "workflow:"))
+				continue
+			case strings.HasPrefix(lower, "gate:"):
+				g := contract.GateMode(strings.TrimSpace(strings.TrimPrefix(lower, "gate:")))
+				if contract.ValidateGate(g) == nil && g != "" {
+					gate = g
+				}
+				continue
+			}
+
+			isBullet := strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ")
+			isCheck := strings.HasPrefix(t, "- [ ] ") || strings.HasPrefix(t, "- [x] ") || strings.HasPrefix(t, "* [ ] ")
+			cleanItem := t
+			for _, p := range []string{"- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "- ", "* "} {
+				if strings.HasPrefix(cleanItem, p) {
+					cleanItem = strings.TrimSpace(strings.TrimPrefix(cleanItem, p))
+					break
+				}
+			}
+
+			switch mode {
+			case "constraints":
+				if cleanItem != "" {
+					constraints = append(constraints, cleanItem)
+				}
+			case "acceptance":
+				if cleanItem != "" {
+					acceptance = append(acceptance, cleanItem)
+				}
+			case "objective":
+				objectiveParts = append(objectiveParts, cleanItem)
+			default:
+				if isCheck {
+					acceptance = append(acceptance, cleanItem)
+				} else if isBullet {
+					acceptance = append(acceptance, cleanItem)
+				} else {
+					objectiveParts = append(objectiveParts, t)
+				}
+			}
+		}
+
+		obj := strings.TrimSpace(strings.Join(objectiveParts, " "))
+		if obj == "" && len(acceptance) > 0 {
+			obj = fmt.Sprintf("%s: %s", sec.title, strings.Join(acceptance, "; "))
+		}
+		if obj == "" {
+			obj = sec.title
+		}
+		units = append(units, contract.WorkUnit{
+			ID:          fmt.Sprintf("PLAN-%d", idx+1),
+			Title:       sec.title,
+			Objective:   obj,
+			Constraints: constraints,
+			Acceptance:  acceptance,
+			Workflow:    workflowName,
+			Gate:        gate,
+			DependsOn:   dependsOn,
+		})
+	}
+
+	return normalizeProposedUnits(units, defaultConstraints, defaultGate)
+}
+
+func synthesizeWorkUnitFromRawIssue(iss *tracker.Issue, defaultConstraints []string, cfg *contract.SwarmConfig) *contract.WorkUnit {
+	cleanBody := strings.TrimSpace(contract.StripHTMLComments(iss.Body))
+	var bullets []string
+	var paragraphs []string
+	for _, line := range strings.Split(strings.ReplaceAll(cleanBody, "\r\n", "\n"), "\n") {
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if strings.HasPrefix(t, "- ") || strings.HasPrefix(t, "* ") {
+			item := t
+			for _, p := range []string{"- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "- ", "* "} {
+				if strings.HasPrefix(item, p) {
+					item = strings.TrimSpace(strings.TrimPrefix(item, p))
+					break
+				}
+			}
+			if item != "" {
+				bullets = append(bullets, item)
+			}
+		} else {
+			paragraphs = append(paragraphs, t)
+		}
+	}
+	objective := strings.TrimSpace(strings.Join(paragraphs, " "))
+	if objective == "" {
+		objective = iss.Title
+	}
+	acceptance := bullets
+	if len(acceptance) == 0 {
+		acceptance = []string{
+			fmt.Sprintf("Resolve #%d (%s) with automated test coverage", iss.Number, iss.Title),
+			"`swarm validate` passes",
+		}
+	}
+	gate := contract.GateAgent
+	if cfg != nil && cfg.DefaultGate != "" {
+		gate = cfg.DefaultGate
+	}
+	return &contract.WorkUnit{
+		ID:          fmt.Sprintf("ISSUE-%d", iss.Number),
+		IssueNumber: iss.Number,
+		Title:       iss.Title,
+		Objective:   objective,
+		Constraints: append([]string(nil), defaultConstraints...),
+		Acceptance:  acceptance,
+		Workflow:    inferWorkflowFromText(iss.Title + " " + objective),
+		Gate:        gate,
+	}
+}
+
+func inferWorkflowFromText(text string) string {
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "bug") || strings.Contains(lower, "fix") || strings.Contains(lower, "crash") || strings.Contains(lower, "regression"):
+		return "bugfix"
+	case strings.Contains(lower, "refactor") || strings.Contains(lower, "cleanup") || strings.Contains(lower, "extract"):
+		return "refactor"
+	default:
+		return "feature"
+	}
+}
+
+var pathTokenRegex = regexp.MustCompile(`\.?[A-Za-z0-9_./-]+\.[A-Za-z0-9]+|\.?[A-Za-z0-9_-]+/[A-Za-z0-9_./-]+`)
+
+func extractTouchpoints(repoRoot, text string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	matches := pathTokenRegex.FindAllString(text, -1)
+	for _, tok := range matches {
+		tok = strings.TrimLeft(tok, ",:;()[]\"'`")
+		tok = strings.TrimRight(tok, ".,:;()[]\"'`")
+		if tok == "" || strings.Contains(tok, "://") || strings.HasPrefix(tok, "http") {
+			continue
+		}
+		clean := filepath.ToSlash(filepath.Clean(tok))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+			continue
+		}
+		if strings.HasPrefix(clean, ".swarm/active") || strings.HasPrefix(clean, ".swarm/worktrees") {
+			continue
+		}
+		if isLikelyRepoTouchpoint(repoRoot, clean) && !seen[clean] {
+			seen[clean] = true
+			out = append(out, clean)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func isLikelyRepoTouchpoint(repoRoot, rel string) bool {
+	if _, err := os.Stat(filepath.Join(repoRoot, rel)); err == nil {
+		return true
+	}
+	for _, prefix := range []string{"cmd/", "internal/", "pkg/", "src/", "docs/", ".github/", ".swarm/"} {
+		if strings.HasPrefix(rel, prefix) {
+			return true
+		}
+	}
+	ext := strings.ToLower(filepath.Ext(rel))
+	switch ext {
+	case ".go", ".rs", ".py", ".ts", ".js", ".tsx", ".jsx", ".yaml", ".yml", ".json", ".md", ".sh", ".toml":
+		if strings.Contains(rel, "/") || fileExistsInRepo(repoRoot, rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func fileExistsInRepo(repoRoot, rel string) bool {
+	_, err := os.Stat(filepath.Join(repoRoot, rel))
+	return err == nil
+}
+
+func touchesProtectedPath(touchpoints []string, spec *contract.ValidationSpec) bool {
+	var patterns []string
+	if spec != nil && len(spec.ProtectedPaths) > 0 {
+		patterns = spec.ProtectedPaths
+	} else {
+		patterns = []string{
+			".github/workflows/**",
+			".swarm/validation/**",
+			".swarm/contracts/**",
+			".swarm/config.yaml",
+			".swarm/prompts/**",
+			".swarm/workflows/**",
+			".swarm/goals.md",
+			".swarm/SKILLS.md",
+			".swarm/rules/**",
+			".swarm/skills/**",
+		}
+	}
+	for _, tp := range touchpoints {
+		for _, p := range patterns {
+			prefix := strings.TrimSuffix(p, "/**")
+			prefix = strings.TrimSuffix(prefix, "/*")
+			if tp == prefix || strings.HasPrefix(tp, prefix+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func populateOverlaps(items []IssueSenseItem) {
+	for i := range items {
+		var overlaps []int
+		for j := range items {
+			if i == j {
+				continue
+			}
+			if sharesTouchpoint(items[i].Touchpoints, items[j].Touchpoints) {
+				overlaps = append(overlaps, items[j].IssueNumber)
+			}
+		}
+		sort.Ints(overlaps)
+		items[i].OverlapsWith = overlaps
+	}
+}
+
+func sharesTouchpoint(a, b []string) bool {
+	for _, x := range a {
+		for _, y := range b {
+			if x == y || strings.HasPrefix(x, y+"/") || strings.HasPrefix(y, x+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func computeExecutionWaves(items []IssueSenseItem) [][]int {
+	if len(items) == 0 {
+		return nil
+	}
+	sorted := append([]IssueSenseItem(nil), items...)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].IssueNumber < sorted[j].IssueNumber
+	})
+
+	byNum := make(map[int]IssueSenseItem, len(sorted))
+	for _, it := range sorted {
+		byNum[it.IssueNumber] = it
+	}
+
+	waveOf := make(map[int]int, len(sorted))
+	for pass := 0; pass < len(sorted); pass++ {
+		changed := false
+		for _, it := range sorted {
+			minWave := 0
+			for _, dep := range it.DependsOn {
+				if w, ok := waveOf[dep]; ok && w+1 > minWave {
+					minWave = w + 1
+				}
+			}
+			for _, ov := range it.OverlapsWith {
+				if ov < it.IssueNumber {
+					if w, ok := waveOf[ov]; ok && w+1 > minWave {
+						minWave = w + 1
+					}
+				}
+			}
+			if cur, ok := waveOf[it.IssueNumber]; !ok || minWave > cur {
+				waveOf[it.IssueNumber] = minWave
+				changed = true
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+
+	maxWave := 0
+	for _, w := range waveOf {
+		if w > maxWave {
+			maxWave = w
+		}
+	}
+	waves := make([][]int, maxWave+1)
+	for _, it := range sorted {
+		w := waveOf[it.IssueNumber]
+		waves[w] = append(waves[w], it.IssueNumber)
+	}
+	var compact [][]int
+	for _, w := range waves {
+		if len(w) > 0 {
+			compact = append(compact, w)
+		}
+	}
+	return compact
+}
+
+func renderFromPlanMarkdown(report *ProjectPlanReport, applied, ready bool) string {
+	var sb strings.Builder
+	sb.WriteString("### 🗺️ SwarmOS Project Plan & Decomposition Report\n\n")
+	sb.WriteString(fmt.Sprintf("- **Base SHA**: `%s`\n", shortHash(report.BaseSHA)))
+	sb.WriteString(fmt.Sprintf("- **Policy Digest**: `%s`\n", shortHash(report.PolicyDigest)))
+	sb.WriteString(fmt.Sprintf("- **Goals Digest**: `%s`\n", shortHash(report.GoalsDigest)))
+	sb.WriteString(fmt.Sprintf("- **Proposed WorkUnits**: `%d`\n\n", len(report.ProposedUnits)))
+
+	sb.WriteString("| Issue / Step | Title | Workflow | Gate | Depends On | Status |\n")
+	sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- |\n")
+	for _, u := range report.ProposedUnits {
+		deps := "-"
+		if len(u.DependsOn) > 0 {
+			var parts []string
+			for _, d := range u.DependsOn {
+				parts = append(parts, fmt.Sprintf("#%d", d))
+			}
+			deps = strings.Join(parts, ", ")
+		}
+		status := "preview"
+		if applied {
+			if ready {
+				status = "`swarm:ready`"
+			} else {
+				status = "`swarm:draft`"
+			}
+		}
+		sb.WriteString(fmt.Sprintf("| `#%d` | %s | `%s` | `%s` | %s | %s |\n",
+			u.IssueNumber, u.Title, u.Workflow, u.Gate, deps, status))
+	}
+
+	renderWavesSection(&sb, report.ExecutionWaves)
+	return sb.String()
+}
+
+func renderBacklogScanMarkdown(report *ProjectPlanReport, applied, normalized bool) string {
+	var readyCount, draftCount, needsScopeCount, blockedCount int
+	for _, it := range report.BacklogItems {
+		switch it.RecommendedLabel {
+		case "swarm:ready":
+			readyCount++
+		case "swarm:draft":
+			draftCount++
+		case "swarm:needs-scope":
+			needsScopeCount++
+		case "swarm:blocked":
+			blockedCount++
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("### 🧭 SwarmOS Backlog Sense-Making & Goal Attestation\n\n")
+	sb.WriteString(fmt.Sprintf("- **Base SHA**: `%s` | **Policy Digest**: `%s` | **Goals Digest**: `%s`\n",
+		shortHash(report.BaseSHA), shortHash(report.PolicyDigest), shortHash(report.GoalsDigest)))
+	sb.WriteString(fmt.Sprintf("- **Open Issues**: `%d` (`%d` ready, `%d` draft, `%d` needs-scope, `%d` blocked)\n",
+		len(report.BacklogItems), readyCount, draftCount, needsScopeCount, blockedCount))
+	if applied {
+		sb.WriteString(fmt.Sprintf("- **Tracker Actions Applied**: labels synced (`normalize=%t`)\n", normalized))
+	}
+	sb.WriteString("\n| Issue | Recommended Label | Goal Alignment | Touchpoints | Overlaps | Depends On | Next Action |\n")
+	sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+
+	for _, it := range report.BacklogItems {
+		tps := "-"
+		if len(it.Touchpoints) > 0 {
+			tps = "`" + strings.Join(it.Touchpoints, "`, `") + "`"
+		}
+		ovs := "-"
+		if len(it.OverlapsWith) > 0 {
+			var parts []string
+			for _, o := range it.OverlapsWith {
+				parts = append(parts, fmt.Sprintf("#%d", o))
+			}
+			ovs = strings.Join(parts, ", ")
+		}
+		deps := "-"
+		if len(it.DependsOn) > 0 {
+			var parts []string
+			for _, d := range it.DependsOn {
+				parts = append(parts, fmt.Sprintf("#%d", d))
+			}
+			deps = strings.Join(parts, ", ")
+		}
+		var nextAction string
+		switch it.RecommendedLabel {
+		case "swarm:ready":
+			nextAction = fmt.Sprintf("`swarm work %d`", it.IssueNumber)
+		case "swarm:draft":
+			nextAction = fmt.Sprintf("`swarm issue approve %d`", it.IssueNumber)
+		case "swarm:needs-scope":
+			nextAction = "`swarm plan --scan --apply --normalize`"
+		case "swarm:blocked":
+			nextAction = "Resolve dependencies / review protected paths"
+		}
+		sb.WriteString(fmt.Sprintf("| `#%d` %s | `%s` | `%s` | %s | %s | %s | %s |\n",
+			it.IssueNumber, it.Title, it.RecommendedLabel, it.GoalAlignment, tps, ovs, deps, nextAction))
+	}
+
+	renderWavesSection(&sb, report.ExecutionWaves)
+	return sb.String()
+}
+
+func renderWavesSection(sb *strings.Builder, waves [][]int) {
+	if len(waves) == 0 {
+		return
+	}
+	sb.WriteString("\n#### 🌊 Recommended Execution Waves\n\n")
+	for idx, wave := range waves {
+		var parts []string
+		for _, num := range wave {
+			parts = append(parts, fmt.Sprintf("`#%d`", num))
+		}
+		mode := "Parallel"
+		if len(wave) == 1 {
+			mode = "Single"
+		}
+		sb.WriteString(fmt.Sprintf("- **Wave %d (%s)**: %s\n", idx+1, mode, strings.Join(parts, ", ")))
+	}
+}
+
+func shortHash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}

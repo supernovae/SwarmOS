@@ -13,6 +13,7 @@ func newInitCmd(rootOpts *RootOptions) *cobra.Command {
 	var force bool
 	var syncLabels bool
 	var swarmVersion string
+	var templateDir string
 	var verbose bool
 
 	cmd := &cobra.Command{
@@ -27,7 +28,7 @@ func newInitCmd(rootOpts *RootOptions) *cobra.Command {
 					swarmVersion = released
 				}
 			}
-			res, err := harness.InitRepository(harness.InitOptions{RepoRoot: repoRoot, Force: force, SwarmVersion: swarmVersion})
+			res, err := harness.InitRepository(harness.InitOptions{RepoRoot: repoRoot, Force: force, SwarmVersion: swarmVersion, TemplateDir: templateDir})
 			if err != nil {
 				return err
 			}
@@ -65,6 +66,7 @@ func newInitCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite existing .swarm/ and template files")
 	cmd.Flags().BoolVar(&syncLabels, "sync-labels", false, "Idempotently create swarm:* labels on the issue tracker")
 	cmd.Flags().StringVar(&swarmVersion, "swarm-version", "", "Immutable SwarmOS release tag or full commit for generated CI")
+	cmd.Flags().StringVar(&templateDir, "template-dir", "", "Directory of custom GitHub Issue Forms (.yml/.yaml) and .swarm/{rules,skills}/*.md templates")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "List individual created and preserved files")
 	return cmd
 }

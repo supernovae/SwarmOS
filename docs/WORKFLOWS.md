@@ -68,7 +68,7 @@ When working interactively inside a provisioned worktree (`.swarm/worktrees/issu
 - `/swarm-review` — Audit the current plan against all constraints and acceptance criteria.
 - `/swarm-implement` — Implement the approved plan step by step.
 - `/swarm-validate` — Run `swarm validate` and verify every acceptance criterion.
-
+- `/swarm-project-plan` — Decompose a roadmap (`swarm plan --from`) or scan/import open issues (`swarm plan --scan`).
 ---
 
 ## Related Guides

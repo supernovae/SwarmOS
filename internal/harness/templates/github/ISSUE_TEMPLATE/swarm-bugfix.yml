@@ -1,0 +1,69 @@
+name: SwarmOS Bugfix Work Unit
+description: Report a reproducible bug as a structured SwarmOS work unit with regression test criteria
+title: "[Bugfix] "
+labels: ["swarm:draft"]
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: Describe the observed bug, reproduction steps, and expected behavior.
+      placeholder: Fix race condition / crash / incorrect output when ...
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Scope and safety boundaries for the fix (one bullet per line).
+      value: |
+        - Keep the fix minimal and targeted to the root cause
+        - Preserve existing public API and CLI contracts
+        - Include a regression test that fails before the fix and passes after
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Testable conditions proving the bug is fixed (one bullet per line).
+      placeholder: |
+        - [ ] Root cause is resolved without regressions
+        - [ ] Regression test added and passing
+        - [ ] `swarm validate` passes
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow
+      description: Workflow recipe for this bugfix work unit.
+      options:
+        - bugfix
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
+    id: plan_gate
+    attributes:
+      label: Plan Gate
+      description: Requested plan review gate before implementation.
+      options:
+        - agent
+        - human
+        - none
+      default: 0
+    validations:
+      required: true
+  - type: input
+    id: depends_on
+    attributes:
+      label: Depends On
+      description: Optional comma-separated prerequisite issue numbers (e.g., #1, #2).
+      placeholder: "none"
+  - type: input
+    id: required_capabilities
+    attributes:
+      label: Required Capabilities
+      description: Optional capabilities required by worker nodes.
+      value: "coding, testing"

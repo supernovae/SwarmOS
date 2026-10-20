@@ -1,81 +1,115 @@
-# Developer operations and agent integration runbook
+# Developer, Team & Worker Guide
 
-This guide documents the unreleased Git-CAS lifecycle. Use an explicit backend: `--backend github` for GitHub tracking or `--backend local` for a deliberate offline fixture. There is no implicit local fallback.
+This guide covers day-to-day SwarmOS workflows for individual developers, collaborating teammates, and multi-repository worker pools. Pass `--backend github` when working against GitHub Issues, or `--backend local` when running an offline local fixture.
 
-## Everyday task flow
+---
+
+## 1. Everyday Task Flow
 
 ```bash
-# Reserve only; preflights the configured planner and persists this machine's claim token.
-swarm claim 42
+# Inspect the resolved agents, gate, and base commit without claiming or running processes
+swarm work 42 --dry-run --backend github
 
-# Or execute an explicit approved issue. This resumes the persisted token when present.
-swarm work 42 --headless
+# Reserve an approved task and provision .swarm/worktrees/issue-42
+swarm claim 42 --backend github
 
-# Inspect without a claim, worktree, or agent process.
-swarm work 42 --dry-run
+# Run (or resume) planning, review gate, implementation, and validation
+swarm work 42 --backend github
 
-# Validate then submit the current checkpoint as a Draft PR.
-swarm validate 42
-swarm submit 42
+# Run validation checks directly or submit the validated branch as a Draft PR
+swarm validate 42 --backend github
+swarm submit 42 --backend github
 ```
 
-Use `swarm work --next` only to select a next eligible approved task. It is mutually exclusive with an explicit issue number. `--all` is meaningful only with `--next` for registered repositories. `claim`, `pull`, and `work` intentionally remain separate so reservation does not imply execution.
+Helpful CLI conventions:
+- **Picking up the next task**: Use `swarm pull` to reserve the next eligible `swarm:ready` issue, or `swarm work --next` to claim and execute it immediately. Add `--all` with `--next` (or `swarm pull --all`) to scan across all repositories registered in `~/.config/swarm/repos.yaml`.
+- **Headless vs. interactive**: `swarm work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` when you want to open an interactive terminal session inside the task worktree.
+- **Structured JSON output**: Add `--json` to any lifecycle command (`issue`, `claim`, `pull`, `work`, `review`, `validate`, `submit`, `status`, `renew`, `release`, or `node run`) for scripts and automation.
 
-Use `--json` where a command exposes it for scripts. JSON is the machine interface; do not parse status tables or progress prose. `work --dry-run` yields the effective selection, including resolved policy/gate/agents, before any mutation.
-
-`work` is headless by default; use `--headless=false` only for an interactive terminal session. The same structured JSON convention is available on task lifecycle, issue, status, lease, and node-run commands. `validate <issue>` uses the task's approved base SHA by default; `validate --ci` requires an explicit full immutable `--base` SHA and rejects `HEAD`.
+---
 
 ## Agent integration runbook
 
-Configure every usable harness in `.swarm/config.yaml`; only configured entries are allowed. The supported harness drivers are `claude`, `codex`, `opencode`, and `omp`. The configuration key is the policy/audit identity; its `harness` field selects the driver and CLI flags, while `binary`, optional arguments/model, allowed roles, permitted environment, and sandbox settings remain repository policy. A missing `harness` defaults to the configuration key, so nonstandard names must set it explicitly.
+Every usable coding tool is configured under `agents:` in `.swarm/config.yaml`. The configuration key is the policy and audit name, while `harness` selects one of SwarmOS's four built-in CLI drivers (`claude`, `codex`, `opencode`, or `omp`; defaults to the key name when omitted).
 
-| Harness | Headless command shape | Interactive command shape |
-| --- | --- | --- |
-| [Claude Code](https://code.claude.com/docs/en/setup) 2.1.292 | `claude -p --append-system-prompt-file <prompt> <task>` | `claude --append-system-prompt-file <prompt> <task>` |
-| [OhMyPi](https://github.com/can1357/oh-my-pi#install) 18.12.3 | `omp -p --no-pty --append-system-prompt <prompt> <task>` | `omp --append-system-prompt <prompt> <task>` |
-| [Codex](https://learn.chatgpt.com/docs/codex/cli) 0.160.1 | `codex exec <combined prompt>` | `codex <task>` |
-| [OpenCode 1](https://opencode.ai/docs/) 1.17.1 | `opencode run <combined prompt>` | `opencode --prompt <task>` |
+| Harness Driver | Headless Invocation | Interactive Invocation |
+| :--- | :--- | :--- |
+| **[Claude Code](https://code.claude.com/docs/en/setup)** (`claude`, checked with `2.1.292`) | `claude -p --append-system-prompt-file <prompt> <task>` | `claude --append-system-prompt-file <prompt> <task>` |
+| **[OhMyPi](https://github.com/can1357/oh-my-pi#install)** (`omp`, checked with `18.12.3`) | `omp -p --no-pty --append-system-prompt <prompt> <task>` | `omp --append-system-prompt <prompt> <task>` |
+| **[OpenAI Codex](https://learn.chatgpt.com/docs/codex/cli)** (`codex`, checked with `0.160.1`) | `codex exec <combined prompt>` | `codex <task>` |
+| **[OpenCode](https://opencode.ai/docs/)** (`opencode`, checked with `1.17.1`) | `opencode run <combined prompt>` | `opencode --prompt <task>` |
 
-The listed versions passed `--version` inside the macOS arm64 reviewer sandbox. This proves startup, not authenticated model execution; no paid model calls were made. OpenCode 2 and arbitrary newer versions require independent compatibility checks. An explicit configured `model` adds the driver's `--model` selection.
-
-SwarmOS checks availability before a claim. It does not assert provider account access, model entitlement, billing, or vendor behavior beyond the configured executable invocation. `mock` is deterministic local/test-only and must be explicitly selected in an explicit local backend context.
+When an entry sets `model: <name>`, SwarmOS passes `--model <name>` to that harness driver. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner.
 
 ### Grok Bot and OpenAI Dot
 
-Grok Bot can discuss and review a repository through its GitHub connection, or coordinate work by running `swarm` on a prepared computer. OpenAI Dot can delegate to a prepared Codex cloud environment or use a connected computer. Start with the [Grok Bot guide](grokbot.md) or [Dot and Codex setup guide](openai-dot.md) for repository access and conversational handoffs.
+Want to work through an always-on conversational teammate in addition to local CLI drivers?
+- **[Working with Grok Bot & SwarmOS](grokbot.md)** — Connect Grok Bot to GitHub for repository conversations and PR reviews, run `swarm` on Grok Bot's cloud computer, or configure an xAI Grok model via `opencode`.
+- **[Working with OpenAI Dot, Codex & SwarmOS](openai-dot.md)** — Add the repositories you want to swarm on to a Codex Cloud environment or connected dev machine and let your Dot coordinate approved tasks.
 
-These hosted products sit alongside the local harness drivers above. An `agents.grok` or `agents.dot` entry is a local policy name, not a connection to the hosted service: set its `harness` to the supported driver actually being launched and configure that tool's binary, model, and authentication. Hosted GitHub review comments are review input; SwarmOS records plan approval through its agent or human gate.
+---
 
 ## Reviewer isolation and credentials
 
-A reviewer is not made read-only by its prompt or by a worktree. The reviewer receives an immutable separate snapshot and an output-only `REVIEW.md` channel. The current implementation uses `sandbox-exec` on macOS, `bwrap` on Linux, or a configured OCI container runtime; there is no native Windows host sandbox, so Windows review requires the configured container path. An unavailable selected boundary fails closed. Linux `bwrap` uses user, IPC, PID, and UTS namespaces (and network isolation by default), so host user namespaces must be enabled. Container review is reviewer-only: it resolves the binary inside the image, runs with a read-only root, dropped capabilities/no-new-privileges, read-only snapshot, and explicit writable output/scratch mounts; on Unix it uses the host UID:GID, while Windows omits `--user` for bind-mount semantics. Docker on Linux requires accessible bind mounts. Reviewer network access is denied by default. `review_network: true` permits unrestricted egress for that configured reviewer so a cloud model CLI can operate; it is not a domain-filtered policy.
+During an automated agent review (`--gate agent`), SwarmOS runs the reviewer against a separate read-only snapshot of the worktree where the only imported output is `.swarm/active/REVIEW.md`:
 
-On AppArmor-enabled Linux, enabling user namespaces alone is insufficient: the installed system `bwrap` also needs the distribution's compatible AppArmor profile. Ubuntu 24.04 can reject network namespace setup with `Failed RTM_NEWADDR: Operation not permitted` ([upstream issue](https://bugs.launchpad.net/ubuntu/+source/apparmor/+bug/2069526)). SwarmOS CI uses Ubuntu 26.04 for native reviewer isolation. On older hosts, have an administrator install the compatible distribution policy or use the configured OCI boundary; do not disable AppArmor globally or enable reviewer networking to bypass a sandbox startup failure.
+- **macOS**: Uses `sandbox-exec` to block writes outside the temporary scratch space and review output channel.
+- **Linux**: Uses `bwrap` (`bubblewrap`) with user, IPC, PID, UTS, and default network namespace isolation. On AppArmor-enabled Linux distributions, ensure the distribution's `bwrap` AppArmor profile is installed (Ubuntu 26.04 includes this out of the box; on Ubuntu 24.04 see [LP #2069526](https://bugs.launchpad.net/ubuntu/+source/apparmor/+bug/2069526) or use an OCI container runtime).
+- **OCI Container (`sandbox: container`)**: Supported on Linux, macOS, and Windows (where no native host sandbox exists) using `docker` or `podman` with a read-only root filesystem, dropped capabilities, and explicit scratch/output mounts.
+- **Reviewer network policy**: Reviewer network access is disabled by default; set `review_network: true` on a reviewer agent entry when it needs outbound API access to reach its model provider.
 
-Agent children start with a temporary credential-free scratch home, not inherited host `HOME`, XDG, SSH, Git, or publishing-token state. Only exact configured model-authentication variables are forwarded through `AgentConfig.Env`; configuration rejects `GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`, `HOME`, and `XDG_*`. Do not relabel unrelated secrets into permitted names. The coordinator performs state and publication operations.
+Agent subprocesses start with a clean temporary `HOME` and receive only the model-authentication environment variables explicitly listed in `agents.<name>.env` (publishing/SSH variables such as `GH_*`, `GITHUB_*`, `GIT_*`, and `SSH_*` remain with the `swarm` coordinator process). Planner, developer, and tester roles execute your project's build and test tools inside their assigned worktree as trusted host processes under your user account.
 
-Host harness binaries are resolved to canonical paths. Because agent homes are masked, home-installed dependencies are unavailable to isolated review; use a system/global installation or a reviewed OCI image. Container/runtime preflight checks availability, but an OS/runtime restriction can still make review fail closed at launch.
+---
 
-This reviewer boundary does **not** sandbox planner, developer, or tester roles. Those configured host processes share the user UID and can directly read host files or credential stores despite the sanitized environment; they may also modify their assigned worktree and execute repository tools. Treat them as trusted host processes, not a general security boundary.
+## 2. Checkpoints, Handoffs & Recovery
 
-## Checkpoints, handoffs, and recovery
+Every claim records a unique fencing token (`claim_id`), approved base SHA, branch name, and checkpoint commit SHA. The local claim token is stored in your user config directory (`swarm/claims/<git-common-dir-hash>/<issue>.json`) so same-machine commands resume cleanly without colliding.
 
-A claim records a unique attempt/claim ID, approved base SHA, branch, and checkpoint head. The claim token is persisted outside the worktree in the current user's configuration directory under `swarm/claims/<git-common-dir-hash>/<issue>.json`; same-machine execution is serialized, so a second command cannot resume the same token concurrently.
+### Handing Off a Plan or Review to Another Teammate
+One teammate or node can complete the planning phase, checkpoint the branch and artifacts to Git, and hand the task off for another worker to review or implement:
 
-A checkpoint commits current work without history rewriting. For GitHub, the state revision and exact branch tip are published together with an atomic push fenced against both previous refs. Another checkout verifies the recorded branch and SHA before opening it. Do not copy a plan into a new unrelated checkout, recreate a deleted worktree with a reset branch, or rely on a Draft PR as a dependency's code transfer.
+```bash
+# Teammate A generates and checkpoints PLAN.md + TEST_PLAN.md, then releases into handoff mode
+swarm work 42 --phase plan --handoff --backend github
 
-If an agent exits, a lease is lost, or validation fails:
+# Teammate B (or a worker node) picks up the handed-off task and continues from the verified checkpoint
+swarm work --next --all --backend github
+```
 
-1. Run `swarm status <issue>` to inspect live state and artifacts.
-2. Fix configuration, sandbox, agent availability, or code in the verified worktree.
-3. Resume with the persisted token if still live; otherwise reclaim a fresh attempt.
-4. Re-plan/re-review if task, policy, plan, or test-plan digest changed.
-5. Validate the exact current head before submitting.
+### Recovering from an Interrupted Run
+If an agent exits early, a lease expires, or a validation check fails:
+1. Run `swarm status <issue> --backend github` to inspect the current lease, phase, and published artifacts.
+2. Fix the code, test, or agent configuration inside `.swarm/worktrees/issue-<N>`.
+3. Re-run `swarm work <issue> --backend github`—if your claim token is still active, SwarmOS resumes in place; if the lease expired, it acquires a fresh attempt on the verified checkpoint branch.
+4. Run `swarm validate <issue>` and `swarm submit <issue>` when all checks pass.
 
-## Workers
+---
 
-A normal `swarm node run` drains available work then exits. `--watch` is the continuous polling interface when present in your installed unreleased build; do not assume it is available in v0.1.0. The worker atomically reserves `--max-jobs` capacity before selection, reports failed selection/execution/submission as failures, and reports human-gated tasks as paused rather than completed. It stops child process trees on cancellation and only auto-submits after validation.
+## 3. Multi-Repository Registry & Worker Pools
 
-The `--max-jobs` admission limit is implemented. Wall-time/cost budgets and repository fairness remain planned optimization work. Agent output is bounded to 1 MiB; cost limits require provider usage data, and elapsed time is not a cost estimate.
+Register the repositories you want to work on so `swarm pull --all`, `swarm work --next --all`, and `swarm node run --all` can coordinate across them:
 
-Related: [setup](project.md) · [prompt and gate semantics](WORKFLOWS.md) · [security limits](../SECURITY.md).
+```bash
+# Register the current checkout or clone a remote GitHub repository
+swarm repo add --backend github
+swarm repo add OWNER/REPO --clone --backend github
+swarm repo list
+
+# Initialize a worker node profile (~/.config/swarm/node.yaml)
+swarm node init
+
+# Drain up to 4 ready tasks across registered repositories with 2 concurrent workers
+swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
+```
+
+By default, `swarm node run` drains the currently available ready queue and exits cleanly. Add `--watch` (and optional `--poll-interval 30s`) when you want the worker pool to keep polling for newly approved tasks.
+
+---
+
+## Related Guides
+
+- **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents and checks, and approve tasks.
+- **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
+- **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS state refs, fencing, and checkpoint mechanics.
+- **[Security Policy (`SECURITY.md`)](../SECURITY.md)** — Trust boundaries, reviewer isolation, and release verification.

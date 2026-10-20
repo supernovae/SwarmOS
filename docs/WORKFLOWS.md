@@ -1,76 +1,78 @@
-# Workflows, prompts, and gates
+# Workflows, Role Contracts & Review Gates
 
-## Prompt recipes, not a workflow graph
+SwarmOS uses a **Plan-First** lifecycle across all supported coding harnesses (`claude`, `codex`, `opencode`, `omp`). Every task produces a concrete design and test plan before implementation code is written.
 
-`.swarm/workflows/feature.yaml`, `bugfix.yaml`, and `refactor.yaml` name steps and role context. They are fixed **prompt recipes**. The engine does not execute arbitrary YAML edges or automatically create a PR from a `create_pr` step.
+---
 
-The fixed lifecycle is:
+## 1. Built-In Workflow Recipes (`.swarm/workflows/`)
 
-```text
-plan → publish design + test plan → required review gate → implement → validate → explicit submit
+SwarmOS scaffolds three workflow recipes in `.swarm/workflows/`:
+- **`feature.yaml`**: End-to-end feature delivery from requirements analysis and design through implementation and validation.
+- **`bugfix.yaml`**: Root-cause analysis, regression test planning, fix implementation, and verification.
+- **`refactor.yaml`**: Structural improvements that preserve behavior and pass all repository checks.
+
+Workflow YAML files customize the step descriptions and role context compiled into `.swarm/active/WORKUNIT.md` and `SYSTEM_PROMPT.md`, while the SwarmOS engine enforces the execution sequence:
+
+```mermaid
+flowchart LR
+    Plan["1. Planner<br/>PLAN.md + TEST_PLAN.md"] --> Gate{"2. Plan Review Gate<br/>none | agent | human"}
+    Gate -->|Approved| Impl["3. Developer<br/>Code + Tests"]
+    Impl --> Val["4. Tester & Validator<br/>Baseline Checks"]
+    Val --> Submit["5. Explicit Submit<br/>Draft PR"]
 ```
 
-This distinction matters when editing workflow YAML: it changes the context and expected artifacts, not the control-flow security model.
+---
 
-## Role outputs
+## 2. Role Contracts & Artifacts
 
-| Role | Reads | Required output |
-| --- | --- | --- |
-| planner | WorkUnit and repository context | `.swarm/active/PLAN.md`, `TEST_PLAN.md` |
-| reviewer | WorkUnit, plan, test plan | `REVIEW.md` beginning with an exact verdict |
-| developer | approved plan and test plan | source changes and implementation checkpoint |
-| tester | implementation and approved-base validation policy | validation evidence |
+Each workflow phase binds to a role prompt in `.swarm/prompts/` and reads/writes well-defined artifacts in `.swarm/active/`:
 
-The active bundle is generated per task. It contains `WORKUNIT.md`, `SYSTEM_PROMPT.md`, and prior artifacts. Do not reuse artifacts across issue revisions or replace a plan/test plan after it has been approved without obtaining new review.
+| Role | Prompt File | Reads | Produces |
+| :--- | :--- | :--- | :--- |
+| **Planner** (`planner`) | `.swarm/prompts/planner.md` | `WORKUNIT.md` and repository context | `.swarm/active/PLAN.md` (`design`) & `.swarm/active/TEST_PLAN.md` (`test-plan`) |
+| **Reviewer** (`reviewer`) | `.swarm/prompts/reviewer.md` | `WORKUNIT.md`, `PLAN.md`, `TEST_PLAN.md` | `.swarm/active/REVIEW.md` (`review` starting with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`) |
+| **Developer** (`developer`) | `.swarm/prompts/developer.md` | Approved `PLAN.md` and `TEST_PLAN.md` | Working-tree implementation changes + checkpoint commit |
+| **Tester / Validator** (`tester`) | `.swarm/prompts/tester.md` | Implementation and approved-base validation policy | Validation check output (`validation` artifact) |
 
-## Gate behavior
+SwarmOS compiles `.swarm/active/WORKUNIT.md` and `.swarm/active/SYSTEM_PROMPT.md` freshly for each claimed task and injects managed pointer blocks into `AGENTS.md` and `CLAUDE.md` inside the worktree so interactive and headless tools find the active contract immediately.
+
+---
+
+## 3. Plan Review Gates (`none | agent | human`)
 
 ```bash
-# Show task, gate, policy, workflow and resolved agents without side effects.
-swarm work 42 --dry-run
+# Preview the effective workflow, resolved gate, and role agents without side effects
+swarm work 42 --dry-run --backend github
 
-# Agent gate: run plan then the configured reviewer in headless mode.
-swarm work 42 --gate agent --headless
+# Agent gate: planner writes PLAN.md + TEST_PLAN.md, then the sandboxed reviewer audits it
+swarm work 42 --gate agent --planner-agent claude --reviewer-agent omp --developer-agent codex --backend github
 
-# Human gate: plan then pause; a permitted human decides using the CLI.
-swarm work 42 --gate human --phase plan --headless
-swarm review 42 --approve --notes "Proceed with the current plan"
-swarm work 42 --phase implement --headless
+# Human gate: generate and publish the plan, pause for maintainer review, then resume
+swarm work 42 --gate human --phase plan --backend github
+swarm review 42 --approve --notes "Plan looks great; proceed with implementation" --backend github
+swarm work 42 --phase implement --backend github
 ```
 
-The exact effective gate is resolved from task, workflow, and repository policy. A CLI value can only preserve or raise policy; it cannot use `--gate none` to evade a human/agent requirement.
+How gate verification keeps reviews trustworthy:
+- **Cryptographic plan binding**: Both `agent` and `human` approvals bind to the exact `WorkUnit` digest and the SHA-256 digests of `PLAN.md` and `TEST_PLAN.md`. If the issue or plan files are edited after approval, SwarmOS requires a fresh review before implementation or submission.
+- **Exact reviewer verdicts**: Under `--gate agent`, the isolated reviewer must begin `.swarm/active/REVIEW.md` with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`. Any `CHANGES_REQUESTED` verdict stops the workflow before code is modified and publishes the findings for inspection.
+- **Authenticated human decisions**: Under `--gate human`, planning pauses with label `swarm:plan-review` until a repository maintainer runs `swarm review <issue> --approve` (or `--reject`).
 
-For an agent gate, the reviewer must produce exactly one of:
+---
 
-```text
-VERDICT: APPROVED
-```
+## 4. Interactive Slash Commands
 
-or
+When working interactively inside a provisioned worktree (`.swarm/worktrees/issue-<N>`) with Claude Code or OpenCode, you can also use the generated slash commands:
 
-```text
-VERDICT: CHANGES_REQUESTED
-```
+- `/swarm-plan` — Draft `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` for the active WorkUnit.
+- `/swarm-review` — Audit the current plan against all constraints and acceptance criteria.
+- `/swarm-implement` — Implement the approved plan step by step.
+- `/swarm-validate` — Run `swarm validate` and verify every acceptance criterion.
 
-Malformed, absent, stale, or rejected verdicts stop before implementation. The recorded approval binds the WorkUnit digest and hashes of both plan files. A human decision is authenticated through tracker authorization and is distinct from an agent-produced review artifact. Human-gated standalone review is a pause, not an agent substitute.
+---
 
-## Harness recipes
+## Related Guides
 
-The generated slash-command files are instructions for a compatible agent harness:
-
-- `/swarm-plan` produces plan and test-plan artifacts.
-- `/swarm-review` audits the current plan and writes a review artifact.
-- `/swarm-implement` applies the approved plan.
-- `/swarm-validate` runs repository validation.
-
-They do not grant permissions, create transitions, or bypass the CLI/engine state checks. Reviewer use requires the configured isolation boundary; planner, developer, and tester processes remain host processes with restricted credentials, not a general sandbox.
-
-## Failure and recovery
-
-A claim has a unique ID and expiry. The execution heartbeat renews it; if renewal or claim verification fails, the task stops before a later mutation. Resume only with the persisted claim token, never by assuming an active claim with the same username.
-
-Plans, artifacts, branch, base SHA, and checkpoint head are recorded in authoritative state. A fresh clone can provision the recorded branch/head only after verification. If a local worktree is missing, SwarmOS must not reset a surviving branch. If a review, agent run, validation, or checkpoint fails, inspect the task with `swarm status <issue>`, correct the cause, and resume/reclaim according to the live state rather than editing coordination comments.
-
-`swarm submit` is a separate transition. It verifies the current gate, checkpoints the branch, validates that exact clean head against the approved base, records validation/checkpoint/submission state through the fenced Git-CAS path, and reconciles an existing Draft PR on retry. An earlier validation run is not evidence for changed code, and a Draft PR does not mark acceptance criteria complete without criterion-specific evidence.
-
-Related: [maintainer setup](project.md), [developer operations](developer.md), [Git-CAS architecture](ARCHITECTURE.md).
+- **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents, and approve issues.
+- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI commands, handoffs, recovery, and worker pools.
+- **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, claim fencing, and checkpoint design.

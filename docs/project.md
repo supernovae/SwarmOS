@@ -20,6 +20,8 @@ Generated consumer CI is emitted only with an explicit compatible immutable `--s
 
 SwarmOS's own release workflow runs the reusable lint, vulnerability, and Linux/macOS/Windows test matrix for the exact tag SHA, verifies that a semantic version tag is reachable from the repository default branch, then publishes through the `release` GitHub environment. Repository administrators must configure that environment's required reviewers and tag/branch protection: the workflow requests the environment but cannot itself enforce remote GitHub protection rules.
 
+SwarmOS's `Dependency Review` PR check also requires GitHub's repository-level [dependency graph](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/enable-dependency-graph). Administrators must enable it under **Settings → Advanced Security** and keep Dependabot alerts enabled for ongoing vulnerability notifications. These are GitHub settings, not workflow YAML. A disabled graph causes a setup failure, not a clean dependency report; keep the check blocking rather than switching it to warn-only.
+
 The tracked harness provides:
 
 | Path | Role |

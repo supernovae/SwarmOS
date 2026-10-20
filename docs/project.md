@@ -6,11 +6,10 @@ This guide walks repository maintainers through initializing SwarmOS, configurin
 
 ## 1. Initialize and Commit the Harness
 
-Run `swarm init` inside your repository checkout and pin the SwarmOS release tag or commit SHA you want your consumer CI workflow to install:
+Download the latest `swarm` release from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest), then run `swarm init` inside your repository checkout and pin the release tag you want your consumer CI workflow to install:
 
 ```bash
-export SWARM_VERSION=27797d318d969c77f62c74df1bb0d21652ff0f43 # or a release tag such as v0.2.0
-swarm init --sync-labels --backend github --swarm-version "$SWARM_VERSION"
+swarm init --sync-labels --backend github --swarm-version v0.2.0
 swarm doctor --backend github
 ```
 

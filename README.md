@@ -70,11 +70,10 @@ flowchart LR
 
 ### 1. Install `swarm`
 
-Download a prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases), or install with Go 1.26.9+:
+Download the latest prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install `v0.2.0` with Go 1.26.9+:
 
 ```bash
-export SWARM_VERSION=27797d318d969c77f62c74df1bb0d21652ff0f43 # or a release tag such as v0.2.0
-go install github.com/supernovae/swarmos/cmd/swarm@"$SWARM_VERSION"
+go install github.com/supernovae/swarmos/cmd/swarm@v0.2.0
 ```
 
 ### 2. Initialize Your Repository
@@ -82,7 +81,7 @@ go install github.com/supernovae/swarmos/cmd/swarm@"$SWARM_VERSION"
 From a Git checkout connected to GitHub (`gh auth login`), scaffold your `.swarm/` harness and run diagnostics:
 
 ```bash
-swarm init --sync-labels --backend github --swarm-version "$SWARM_VERSION"
+swarm init --sync-labels --backend github --swarm-version v0.2.0
 swarm doctor --backend github
 ```
 

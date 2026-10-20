@@ -1,0 +1,14 @@
+required_checks:
+    - name: build
+      command: go build ./...
+      timeout: 5m
+    - name: test
+      command: go test ./...
+      timeout: 10m
+    - name: lint
+      command: go vet ./...
+      timeout: 5m
+protected_paths:
+    - .github/workflows/**
+    - .swarm/validation/**
+    - .swarm/contracts/**

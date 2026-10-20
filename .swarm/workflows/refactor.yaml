@@ -1,0 +1,24 @@
+name: refactor
+description: Structural refactoring workflow preserving behavioral invariants and passing all checks.
+default_gate: none
+steps:
+  - name: analyze
+    role: planner
+  - name: design
+    role: planner
+    artifact: design
+  - name: test_plan
+    role: planner
+    artifact: test-plan
+  - name: review_plan
+    role: reviewer
+    artifact: review
+    gate: agent
+  - name: implement
+    role: developer
+    artifact: implementation
+  - name: validate
+    role: tester
+    artifact: validation
+  - name: create_pr
+    role: developer

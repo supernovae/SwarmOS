@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/supernovae/swarmos/schemas/artifact.schema.json",
+  "title": "SwarmOS Artifact Contract",
+  "type": "object",
+  "required": ["version", "id", "issue_number", "type", "producer", "summary", "body", "created_at"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "issue_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": ["design", "test-plan", "review", "implementation", "validation"]
+    },
+    "producer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["", "APPROVED", "CHANGES_REQUESTED", "PASS", "FAIL"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

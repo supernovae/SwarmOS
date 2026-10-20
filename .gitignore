@@ -1,0 +1,5 @@
+# SwarmOS ephemeral state
+.swarm/worktrees/
+.swarm/active/
+.swarm/local-tracker/
+bin/

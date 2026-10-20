@@ -1,0 +1,20 @@
+version: 1
+default_agent: claude
+default_gate: none
+lease:
+  duration: 4h
+  renewable: true
+  max_renewals: 3
+security:
+  require_ready_label: true
+  ready_label: "swarm:ready"
+  trusted_associations: ["OWNER", "MEMBER", "COLLABORATOR"]
+agents:
+  claude:
+    binary: claude
+  codex:
+    binary: codex
+  opencode:
+    binary: opencode
+  omp:
+    binary: omp

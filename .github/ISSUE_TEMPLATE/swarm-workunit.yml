@@ -1,0 +1,57 @@
+name: SwarmOS Work Unit
+description: Define a contract-driven work unit for SwarmOS agents and contributors
+title: "[Swarm] "
+labels: ["swarm:ready"]
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: Clear, single-purpose statement of what needs to be achieved.
+      placeholder: Implement ...
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Architectural, dependency, or scope boundaries (one bullet per line).
+      placeholder: |
+        - No new external dependencies
+        - Maintain backward compatibility
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Testable conditions required for completion (one bullet per line).
+      placeholder: |
+        - [ ] Unit tests cover edge cases
+        - [ ] `swarm validate` passes
+    validations:
+      required: true
+  - type: dropdown
+    id: workflow
+    attributes:
+      label: Workflow
+      description: Select the SwarmOS workflow spec to execute.
+      options:
+        - feature
+        - bugfix
+        - refactor
+      default: 0
+    validations:
+      required: true
+  - type: dropdown
+    id: plan_gate
+    attributes:
+      label: Plan Gate
+      description: Optional approval gate after the Plan phase before implementation starts.
+      options:
+        - none
+        - agent
+        - human
+      default: 0
+    validations:
+      required: true

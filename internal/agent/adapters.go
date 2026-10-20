@@ -1,0 +1,286 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/supernovae/swarmos/internal/workspace"
+)
+
+type CLIAdapter struct {
+	agentName string
+	binary    string
+}
+
+func NewRunner(agentName string) (Runner, error) {
+	name := strings.ToLower(strings.TrimSpace(agentName))
+	if name == "" {
+		name = "claude"
+	}
+	switch name {
+	case "claude", "codex", "opencode", "omp", "custom":
+		bin := name
+		if name == "custom" {
+			if envBin := os.Getenv("SWARM_CUSTOM_AGENT_BIN"); envBin != "" {
+				bin = envBin
+			}
+		}
+		return &CLIAdapter{agentName: name, binary: bin}, nil
+	case "mock":
+		return &MockRunner{}, nil
+	default:
+		return nil, fmt.Errorf("unsupported agent %q (expected claude, codex, opencode, omp, custom, or mock)", agentName)
+	}
+}
+
+func (a *CLIAdapter) Name() string {
+	return a.agentName
+}
+
+func (a *CLIAdapter) Available() (string, bool) {
+	path, err := exec.LookPath(a.binary)
+	if err != nil {
+		return "", false
+	}
+	return path, true
+}
+
+func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
+	sysFile := req.SystemPrompt
+	if sysFile == "" {
+		sysFile = ".swarm/active/SYSTEM_PROMPT.md"
+	}
+	headless := strings.EqualFold(req.Mode, "headless") || req.Mode == ""
+	combinedPrompt := fmt.Sprintf("Read %s and .swarm/active/WORKUNIT.md first.\n\n%s", sysFile, req.TaskPrompt)
+
+	switch a.agentName {
+	case "claude":
+		if headless {
+			return a.binary, []string{"-p", "--append-system-prompt-file", sysFile, req.TaskPrompt}
+		}
+		return a.binary, []string{"--append-system-prompt-file", sysFile, req.TaskPrompt}
+
+	case "omp":
+		if headless {
+			return a.binary, []string{"-p", "--no-pty", "--append-system-prompt", sysFile, req.TaskPrompt}
+		}
+		return a.binary, []string{"--append-system-prompt", sysFile, req.TaskPrompt}
+
+	case "codex":
+		if headless {
+			return a.binary, []string{"exec", combinedPrompt}
+		}
+		return a.binary, []string{req.TaskPrompt}
+
+	case "opencode":
+		if headless {
+			return a.binary, []string{"run", combinedPrompt}
+		}
+		return a.binary, []string{"--prompt", req.TaskPrompt}
+
+	default:
+		return a.binary, []string{combinedPrompt}
+	}
+}
+
+func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
+	bin, args := a.BuildCommand(req)
+	fullCmd := append([]string{bin}, args...)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = req.WorktreePath
+
+	var outBuf bytes.Buffer
+	if strings.EqualFold(req.Mode, "interactive") {
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
+		cmd.Stderr = io.MultiWriter(os.Stderr, &outBuf)
+	} else {
+		cmd.Stdout = &outBuf
+		cmd.Stderr = &outBuf
+	}
+
+	err := cmd.Run()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+		return &RunResult{
+			Agent:    a.agentName,
+			Role:     req.Role,
+			Command:  fullCmd,
+			ExitCode: exitCode,
+			Output:   outBuf.String(),
+		}, fmt.Errorf("agent %q (%s) failed (exit %d): %w\n%s", a.agentName, req.Role, exitCode, err, strings.TrimSpace(outBuf.String()))
+	}
+
+	return &RunResult{
+		Agent:    a.agentName,
+		Role:     req.Role,
+		Command:  fullCmd,
+		ExitCode: 0,
+		Output:   outBuf.String(),
+	}, nil
+}
+
+// MockRunner is a deterministic adapter for unit/CI tests and offline dry-runs (--agent mock).
+type MockRunner struct {
+	ReviewVerdict string // defaults to "APPROVED" unless SWARM_MOCK_VERDICT is set
+}
+
+func (m *MockRunner) Name() string {
+	return "mock"
+}
+
+func (m *MockRunner) Available() (string, bool) {
+	return "builtin:mock", true
+}
+
+func (m *MockRunner) BuildCommand(req RunRequest) (string, []string) {
+	return "mock", []string{"--role", req.Role, "--mode", req.Mode, req.TaskPrompt}
+}
+
+func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
+	activeDir := filepath.Join(req.WorktreePath, ".swarm", "active")
+	if err := os.MkdirAll(activeDir, 0o755); err != nil {
+		return nil, err
+	}
+
+	wu, _ := workspace.LoadActiveWorkUnit(req.WorktreePath)
+	title := "WorkUnit"
+	objective := "Complete objective"
+	var constraints, acceptance []string
+	if wu != nil {
+		title = wu.Title
+		objective = wu.Objective
+		constraints = wu.Constraints
+		acceptance = wu.Acceptance
+	}
+
+	var output string
+	switch req.Role {
+	case "planner":
+		var planSB strings.Builder
+		planSB.WriteString(fmt.Sprintf("# Implementation Plan: %s\n\n", title))
+		planSB.WriteString("## Context & Objective\n\n")
+		planSB.WriteString(objective + "\n\n")
+		planSB.WriteString("## Constraints Honored\n\n")
+		for _, c := range constraints {
+			planSB.WriteString("- " + c + "\n")
+		}
+		planSB.WriteString("\n## Planned File Changes\n\n")
+		planSB.WriteString("1. Inspect existing CLI and domain packages.\n")
+		planSB.WriteString("2. Implement the requested behavior in clean, self-contained Go files.\n")
+		planSB.WriteString("3. Add unit tests verifying all acceptance criteria.\n")
+
+		if err := os.WriteFile(filepath.Join(activeDir, "PLAN.md"), []byte(planSB.String()), 0o644); err != nil {
+			return nil, err
+		}
+
+		var testSB strings.Builder
+		testSB.WriteString(fmt.Sprintf("# Test Plan: %s\n\n", title))
+		testSB.WriteString("| Acceptance Criterion | Verification Command |\n| :--- | :--- |\n")
+		for _, a := range acceptance {
+			testSB.WriteString(fmt.Sprintf("| %s | `go test ./...` |\n", a))
+		}
+		if err := os.WriteFile(filepath.Join(activeDir, "TEST_PLAN.md"), []byte(testSB.String()), 0o644); err != nil {
+			return nil, err
+		}
+		output = "Mock planner generated .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md"
+
+	case "reviewer":
+		verdict := m.ReviewVerdict
+		if envV := os.Getenv("SWARM_MOCK_VERDICT"); envV != "" {
+			verdict = envV
+		}
+		if verdict == "" {
+			verdict = "APPROVED"
+		}
+		reviewContent := fmt.Sprintf("VERDICT: %s\n\n## Plan Audit Summary\n\n- **Objective Alignment**: PASS\n- **Constraints Check**: PASS\n- **Test Plan Coverage**: PASS\n- **Protected Paths**: Unmodified\n", verdict)
+		if err := os.WriteFile(filepath.Join(activeDir, "REVIEW.md"), []byte(reviewContent), 0o644); err != nil {
+			return nil, err
+		}
+		output = fmt.Sprintf("Mock reviewer generated .swarm/active/REVIEW.md with VERDICT: %s", verdict)
+
+	case "developer":
+		if customCmd := os.Getenv("SWARM_MOCK_DEVELOPER_CMD"); customCmd != "" {
+			c := exec.CommandContext(ctx, "sh", "-c", customCmd)
+			c.Dir = req.WorktreePath
+			out, err := c.CombinedOutput()
+			if err != nil {
+				return nil, fmt.Errorf("mock developer command failed: %w (%s)", err, string(out))
+			}
+			output = string(out)
+		} else {
+			// Produce a clean implementation note or requested change in the worktree so git commit has a real change
+			implPath := filepath.Join(req.WorktreePath, "internal", "cli", "version.go")
+			if _, err := os.Stat(filepath.Join(req.WorktreePath, "internal", "cli")); err == nil {
+				if _, statErr := os.Stat(implPath); statErr != nil {
+					versionCode := `package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"runtime"
+
+	"github.com/spf13/cobra"
+)
+
+var Version = "0.1.0-dev"
+
+func newVersionCmd() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print SwarmOS version and build information",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			info := map[string]string{
+				"version": Version,
+				"go":      runtime.Version(),
+				"os":      runtime.GOOS,
+				"arch":    runtime.GOARCH,
+			}
+			if asJSON {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(info)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "swarm version %s (%s %s/%s)\n", Version, info["go"], info["os"], info["arch"])
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Output version info as JSON")
+	return cmd
+}
+`
+					_ = os.WriteFile(implPath, []byte(versionCode), 0o644)
+				}
+			} else {
+				// Fallback file in generic test repositories
+				_ = os.WriteFile(filepath.Join(req.WorktreePath, "SWARM_IMPLEMENTED.md"), []byte(fmt.Sprintf("# Implemented %s\n\n%s\n", title, objective)), 0o644)
+			}
+			output = "Mock developer implemented planned changes"
+		}
+
+	case "tester":
+		output = "Mock tester completed verification"
+	}
+
+	_, args := m.BuildCommand(req)
+	return &RunResult{
+		Agent:    "mock",
+		Role:     req.Role,
+		Command:  append([]string{"mock"}, args...),
+		ExitCode: 0,
+		Output:   output,
+	}, nil
+}

@@ -193,6 +193,9 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 	for _, iss := range issues {
 		tps := extractTouchpoints(root, iss.Title+"\n"+iss.Body)
 		wu, parseErr := contract.ParseWorkUnitFromIssueWithRoot(iss.Number, iss.Title, iss.Body, root)
+		if parseErr == nil && wu != nil {
+			tps = extractTouchpoints(root, wu.Title+"\n"+wu.Objective+"\n"+strings.Join(wu.Acceptance, "\n"))
+		}
 		item := IssueSenseItem{
 			IssueNumber: iss.Number,
 			Title:       iss.Title,

@@ -9,7 +9,7 @@ This guide walks repository maintainers through initializing SwarmOS, configurin
 Download the latest `swarm` release from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest), then run `swarm init` inside your repository checkout and pin the release tag you want your consumer CI workflow to install:
 
 ```bash
-swarm init --sync-labels --backend github --swarm-version v0.2.0
+swarm init --sync-labels --backend github --swarm-version v0.3.0
 swarm doctor --backend github
 ```
 

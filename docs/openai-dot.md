@@ -26,7 +26,7 @@ flowchart LR
     Dot -->|Delegates coding task| Codex["Codex Cloud Environment<br/>or Connected Dev Host"]
     Codex -->|swarm work / node run| Worktree["Isolated Git Worktree<br/>PLAN.md + TEST_PLAN.md + Checks"]
     Worktree -->|swarm submit| PR["Artifact-Backed<br/>Draft PR"]
-    PR -->|@codex review| You
+    PR -->|Codex PR review| You
 ```
 
 ---

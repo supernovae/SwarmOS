@@ -15,3 +15,7 @@ protected_paths:
     - .swarm/config.yaml
     - .swarm/prompts/**
     - .swarm/workflows/**
+    - .swarm/goals.md
+    - .swarm/SKILLS.md
+    - .swarm/rules/**
+    - .swarm/skills/**

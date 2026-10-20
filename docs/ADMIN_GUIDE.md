@@ -15,7 +15,7 @@ flowchart LR
 When you initialize a repository (or upgrade an existing `.swarm/` setup), SwarmOS scaffolds an agent factory and preset GitHub Issue Forms:
 
 ```bash
-swarm init --sync-labels --backend github --swarm-version v0.2.0
+swarm init --sync-labels --backend github --swarm-version v0.3.0
 ```
 
 As a repo admin, tailor three foundational files before your team or community starts swarming:

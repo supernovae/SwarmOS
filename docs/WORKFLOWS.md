@@ -80,3 +80,39 @@ Reference a versioned YAML file in the issue body:
 ```text
 swarm-workunit-path: .swarm/workunits/oauth-device-flow.yaml
 ```
+
+---
+
+## 4. Pulling Work Down & Multi-Repository Dispatch
+
+### Single-Project Work Pulling
+Inside any SwarmOS-initialized repository, contributors can pull the next unclaimed `swarm:ready` issue without looking up issue numbers:
+
+```bash
+# Claim and provision the next unclaimed swarm:ready issue into .swarm/worktrees/issue-<N>
+swarm pull --agent claude
+
+# Or claim and execute the full Plan -> Gate -> Implement -> Validate workflow in one step
+swarm work --next --agent claude --headless
+```
+
+### Multi-Repository Registry (`~/.config/swarm/repos.yaml`)
+To work across multiple repositories from any directory on your machine:
+
+```bash
+# 1. Register local checkouts (or pass --clone to clone from GitHub into ~/.swarm/repos/<owner>/<repo>)
+swarm repo add supernovae/SwarmOS ~/src/SwarmOS
+swarm repo add supernovae/AnotherService --clone
+
+# 2. Inspect registered repositories
+swarm repo list
+
+# 3. View unified status across all registered repositories
+swarm status --all
+
+# 4. Target a registered repository from anywhere without cd or --root
+swarm work 5 --repo supernovae/SwarmOS --agent omp
+
+# 5. Pull and execute the next ready work unit across ALL registered repositories
+swarm work --next --all --agent claude --reviewer-agent omp --gate agent --headless
+```

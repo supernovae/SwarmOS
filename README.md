@@ -135,6 +135,34 @@ swarm status 1
 swarm submit 1
 ```
 
+### 4. Pulling Work Down & Multi-Repo Orchestration
+
+Contributors and autonomous worker nodes don't need to look up issue numbers manually or stay inside a single repository. SwarmOS includes a file-locked **Multi-Repo Registry** (`~/.config/swarm/repos.yaml`) with remote-slug safety verification:
+
+```bash
+# Register the current repository (auto-detects owner/repo from git remote)
+swarm repo add
+
+# Register or auto-clone additional repositories into ~/.swarm/repos/<owner>/<repo>
+swarm repo add supernovae/SwarmOS --clone
+swarm repo list
+
+# View open work units, active leases, and TTL across ALL registered repositories
+swarm status --all
+
+# Pull & claim the next unclaimed `swarm:ready` issue (current repo or --all repos)
+swarm pull
+swarm pull --all
+
+# Or pull the next available `swarm:ready` issue AND run the full workflow automatically
+swarm work --next --all --agent claude --reviewer-agent omp --gate agent --headless
+```
+
+**Logical Safety Across Multiple Repositories**:
+- **Remote-Slug Verification**: `swarm repo add` verifies the local Git checkout's `origin` remote matches `<owner/repo>`, preventing accidental cross-repository worktree or PR mixups.
+- **Location-Independent `--repo`**: Once a repository is registered, passing `--repo owner/repo` from *any* directory automatically resolves its local checkout path and isolated `.swarm/worktrees/issue-<N>` directory.
+- **Race-Resilient Queue Dispatch**: `swarm pull` and `swarm work --next` skip untrusted or actively leased issues, run a non-destructive `git fetch origin --prune`, and automatically fall through to the next ready issue if a concurrent agent wins a claim race.
+
 ---
 
 ## Multi-Agent Harness Matrix
@@ -157,17 +185,18 @@ SwarmOS treats coding agents as pluggable execution engines over a shared reposi
 | :--- | :--- |
 | `swarm init [--force] [--sync-labels]` | Scaffold `.swarm/`, GitHub Issue Form, GitHub Action, and `.claude`/`.opencode` slash commands. |
 | `swarm doctor` | Probe `git`, `gh auth`, `.swarm/` schemas, and installed agent binaries (`claude`, `codex`, `opencode`, `omp`). |
+| `swarm repo add\|list\|remove` | Register repositories (`--clone` supported), list registered checkouts, or unregister a repo. |
 | `swarm issue create [flags]` | Create a schema-validated SwarmOS WorkUnit issue (`--title`, `--objective`, `--constraint`, `--acceptance`, `--workflow`, `--gate`). |
 | `swarm issue lint <issue>` | Validate an existing issue's body against `.swarm/contracts/workunit.schema.json`. |
 | `swarm claim <issue> [--agent <name>] [--duration 4h]` | Verify trust policy, acquire optimistic lease comment, provision worktree, and compile `.swarm/active/WORKUNIT.md`. |
-| `swarm work <issue> [flags]` | Orchestrate `plan`, `review`, `implement`, and `validate` phases (`--phase all\|plan\|implement`, `--gate none\|agent\|human`, `--agent`, `--reviewer-agent`, `--headless`). |
+| `swarm pull [--all] [--agent <name>]` | Find, claim, and provision the next unclaimed `swarm:ready` issue in the current or registered repos. |
+| `swarm work [<issue>] [--next] [--all] [flags]` | Orchestrate `plan`, `review`, `implement`, and `validate` phases (`--next` auto-pulls the next ready issue). |
 | `swarm review <issue> [flags]` | Run an automated reviewer agent (`--agent <name>`) or record human approval/rejection (`--approve`, `--reject --notes "..."`). |
 | `swarm validate [<issue>] [--ci]` | Verify artifact completeness, check protected paths for unauthorized edits, and run `.swarm/validation/required-checks.yaml`. |
 | `swarm submit [<issue>] [--base main]` | Strip ephemeral harness markers, commit and push worktree changes, and open a Draft PR with the artifact summary table. |
-| `swarm status [<issue>]` | Show open work units, active lease owners, remaining TTL, current workflow phase, and published artifacts. |
+| `swarm status [<issue>] [--all]` | Show open work units, active lease owners, remaining TTL, current workflow phase, and published artifacts (`--all` spans registered repos). |
 | `swarm renew <issue> [--duration 4h]` | Extend an active lease's TTL (up to `lease.max_renewals`). |
 | `swarm release <issue> [--reason "..."]` | Release an active claim and remove `swarm:claimed` / `swarm:in-progress` labels. |
-
 Global flags available on all commands:
 - `--backend github|local` (or `SWARM_BACKEND`): Select GitHub REST API tracker or offline file-locked local tracker.
 - `--repo owner/repo` (or `SWARM_REPO`): Target a specific GitHub repository.

@@ -13,15 +13,13 @@ import (
 )
 
 func newStatusCmd(rootOpts *RootOptions) *cobra.Command {
+	var allRepos bool
+
 	cmd := &cobra.Command{
 		Use:   "status [<issue-number>]",
 		Short: "Display active claims, remaining lease TTL, workflow phase, plan gate status, and artifacts",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			tr, mgr, _, err := rootOpts.resolveLeaseManager(cmd)
-			if err != nil {
-				return err
-			}
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
 
@@ -30,9 +28,59 @@ func newStatusCmd(rootOpts *RootOptions) *cobra.Command {
 				if err != nil || num <= 0 {
 					return fmt.Errorf("invalid issue number %q", args[0])
 				}
+				tr, mgr, _, err := rootOpts.resolveLeaseManager(cmd)
+				if err != nil {
+					return err
+				}
 				return printSingleIssueStatus(cmd, rootOpts.resolveRepoRoot(), tr, mgr, num)
 			}
 
+			if allRepos {
+				targets, err := rootOpts.resolveTargets(true)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(out, "REPOSITORY                   ISSUE   OWNER          AGENT      PHASE       STATUS      TTL         TITLE")
+				fmt.Fprintln(out, "----------                   -----   -----          -----      -----       ------      ---         -----")
+				now := time.Now().UTC()
+				total := 0
+				for _, tgt := range targets {
+					tr, mgr, _, err := rootOpts.resolveTargetLeaseManager(cmd, tgt)
+					if err != nil {
+						continue
+					}
+					issues, err := tr.ListIssues(ctx, tracker.IssueFilter{State: "open"})
+					if err != nil {
+						continue
+					}
+					for _, iss := range issues {
+						total++
+						st, err := mgr.GetCurrentState(ctx, iss.Number)
+						if err != nil || st == nil {
+							fmt.Fprintf(out, "%-28s #%-6d %-14s %-10s %-11s %-11s %-11s %s\n",
+								tgt.Repo, iss.Number, "-", "-", "-", "unclaimed", "-", iss.Title)
+							continue
+						}
+						ttl := "expired"
+						if st.Lease.ExpiresAt.After(now) && st.Lease.Status == "active" {
+							ttl = st.Lease.ExpiresAt.Sub(now).Round(time.Second).String()
+						} else if st.Lease.Status != "active" {
+							ttl = "-"
+						}
+						fmt.Fprintf(out, "%-28s #%-6d %-14s %-10s %-11s %-11s %-11s %s\n",
+							tgt.Repo, iss.Number, st.Lease.Owner, st.Lease.Agent, st.Lease.Phase, st.Lease.Status, ttl, iss.Title)
+					}
+				}
+				if total == 0 {
+					fmt.Fprintln(out, "No open issues found across registered repositories.")
+				}
+				return nil
+			}
+
+			tr, mgr, _, err := rootOpts.resolveLeaseManager(cmd)
+			if err != nil {
+				return err
+			}
 			issues, err := tr.ListIssues(ctx, tracker.IssueFilter{State: "open"})
 			if err != nil {
 				return err
@@ -64,6 +112,8 @@ func newStatusCmd(rootOpts *RootOptions) *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&allRepos, "all", false, "Show status across all registered repositories")
 	return cmd
 }
 

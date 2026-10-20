@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestCLIEndToEndLifecycle(t *testing.T) {
 	tmp := t.TempDir()
+	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
+
 	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, string(out))
 	}
@@ -85,5 +88,73 @@ func TestCLIEndToEndLifecycle(t *testing.T) {
 	out = runCLI("submit", "1")
 	if !strings.Contains(out, "Submitted Draft PR #1 for issue #1") {
 		t.Fatalf("unexpected submit output: %s", out)
+	}
+}
+
+func TestMultiRepoPullAndWorkNext(t *testing.T) {
+	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
+
+	repoAlpha := t.TempDir()
+	repoBeta := t.TempDir()
+	for _, r := range []string{repoAlpha, repoBeta} {
+		if out, err := exec.Command("git", "init", "-b", "main", r).CombinedOutput(); err != nil {
+			t.Fatalf("git init failed: %v (%s)", err, string(out))
+		}
+	}
+
+	runGlobal := func(args ...string) string {
+		t.Helper()
+		root := NewRootCmd()
+		var buf bytes.Buffer
+		root.SetOut(&buf)
+		root.SetErr(&buf)
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("swarm %v failed: %v\nOutput:\n%s", args, err, buf.String())
+		}
+		return buf.String()
+	}
+
+	// Register both repositories
+	runGlobal("--backend", "local", "repo", "add", "local/alpha", repoAlpha)
+	runGlobal("--backend", "local", "repo", "add", "local/beta", repoBeta)
+
+	listOut := runGlobal("repo", "list")
+	if !strings.Contains(listOut, "local/alpha") || !strings.Contains(listOut, "local/beta") {
+		t.Fatalf("expected both repos in repo list:\n%s", listOut)
+	}
+
+	// Create ready issues in both repos using only --repo (without --root!)
+	runGlobal("--repo", "local/alpha", "issue", "create",
+		"--title", "Alpha Task 1",
+		"--objective", "Implement Alpha feature",
+		"--constraint", "Keep minimal",
+		"--acceptance", "Tests pass",
+		"--workflow", "feature",
+	)
+	runGlobal("--repo", "local/beta", "issue", "create",
+		"--title", "Beta Task 1",
+		"--objective", "Implement Beta feature",
+		"--constraint", "Keep minimal",
+		"--acceptance", "Tests pass",
+		"--workflow", "feature",
+	)
+
+	// Check unified status across all registered repos
+	statusAll := runGlobal("status", "--all")
+	if !strings.Contains(statusAll, "Alpha Task 1") || !strings.Contains(statusAll, "Beta Task 1") {
+		t.Fatalf("expected both tasks in status --all:\n%s", statusAll)
+	}
+
+	// Pull first ready issue across all repos (should claim local/alpha #1)
+	pullOut := runGlobal("pull", "--all", "--agent", "mock")
+	if !strings.Contains(pullOut, "Pulled & claimed [local/alpha] issue #1") {
+		t.Fatalf("expected pull --all to claim local/alpha #1, got:\n%s", pullOut)
+	}
+
+	// Now run `swarm work --next --all` — since local/alpha #1 is already claimed, it should automatically pick local/beta #1!
+	workNextOut := runGlobal("work", "--next", "--all", "--agent", "mock", "--headless")
+	if !strings.Contains(workNextOut, "Auto-selected [local/beta] issue #1: Beta Task 1") || !strings.Contains(workNextOut, "Validation: PASS") {
+		t.Fatalf("expected work --next --all to select and complete local/beta #1, got:\n%s", workNextOut)
 	}
 }

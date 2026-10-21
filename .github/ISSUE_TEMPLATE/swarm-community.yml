@@ -1,0 +1,24 @@
+name: Community report
+description: Share a bug report, feature idea, or feedback for maintainer triage (intake only — not an executable WorkUnit)
+title: "[Community] "
+labels: ["swarm:community"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem, Idea, or Feedback
+      description: Describe the bug, question, or improvement idea you want maintainers to review.
+      placeholder: |
+        What happened or what would you like to see improved?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context & Reproduction Steps
+      description: Optional environment details, commands run, logs, or examples.
+      placeholder: |
+        - OS / Go version:
+        - Commands or steps:
+    validations:
+      required: false

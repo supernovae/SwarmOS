@@ -6,7 +6,7 @@
 
 [![CI & Validation](https://github.com/supernovae/SwarmOS/actions/workflows/swarm-validate.yml/badge.svg)](https://github.com/supernovae/SwarmOS/actions/workflows/swarm-validate.yml)
 [![Security Scanning](https://github.com/supernovae/SwarmOS/actions/workflows/security.yml/badge.svg)](https://github.com/supernovae/SwarmOS/actions/workflows/security.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.26.9+-00ADD8?style=flat-square&logo=go)](go.mod)
+[![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?style=flat-square&logo=go)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Agents](https://img.shields.io/badge/Agents-Claude%20%7C%20Codex%20%7C%20OpenCode%20%7C%20OhMyPi-7B61FF?style=flat-square)](#bring-your-own-agents)
 
@@ -70,7 +70,7 @@ flowchart LR
 
 ### 1. Install `swarm`
 
-Download the latest prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install `v0.3.0` with Go 1.26.9+:
+Download the latest prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install `v0.3.0` with Go 1.26.10+:
 
 ```bash
 go install github.com/supernovae/swarmos/cmd/swarm@v0.3.0
@@ -171,9 +171,9 @@ swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 | Command | What It Does |
 | :--- | :--- |
 | `swarm init [--force] [--sync-labels] [--template-dir <dir>] [--swarm-version <ref>]` | Scaffold `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI workflow, and `/swarm-*` slash commands. |
-| `swarm doctor` | Check `git`, `gh`, `.swarm/` schemas, and configured agent binaries. |
-| `swarm issue create\|approve\|lint\|decompose` | Create draft WorkUnits, approve revisions, lint schemas, or split epics into linked child tasks. |
-| `swarm plan [--from <file> \| --scan] [--normalize] [--apply] [--ready]` | Decompose a project roadmap into dependency-ordered WorkUnit issues or scan and import open issues against project goals. |
+| `swarm doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. |
+| `swarm issue create\|epic create\|approve\|lint\|decompose` | Create draft WorkUnits (`--parent`), standalone Epics (`--body-file`), approve revisions, lint schemas, or split WorkUnits into linked draft sub-issues. |
+| `swarm plan [--from <file> \| --scan] [--normalize] [--apply] [--ready]` | Preview `Step N` tasks from a roadmap, publish a native `Epic` with linked draft child WorkUnits (`--apply`), or scan and triage open issues (`--scan`). |
 | `swarm claim <issue>` / `swarm pull [--all]` | Claim a specific approved issue or pull the next ready task across registered repositories. |
 | `swarm work [<issue>] [--next] [--all]` | Run `plan`, `review`, `implement`, and `validate` (supports `--dry-run`, `--handoff`, and role overrides). |
 | `swarm stage [<issue>] [--phase plan\|implement] [--harness <name>] [--model <name>]` | Stage interactive or harness-produced plan and implementation artifacts onto an active lease with provenance metadata. |

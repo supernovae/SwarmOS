@@ -331,7 +331,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	}
 
 	// 7. GitHub Issue Templates & Action
-	for _, tmpl := range []string{"swarm-workunit.yml", "swarm-feature.yml", "swarm-bugfix.yml", "swarm-refactor.yml", "config.yml"} {
+	for _, tmpl := range []string{"swarm-workunit.yml", "swarm-community.yml", "swarm-feature.yml", "swarm-bugfix.yml", "swarm-refactor.yml", "config.yml"} {
 		if err := copyEmbedded("templates/github/ISSUE_TEMPLATE/"+tmpl, ".github/ISSUE_TEMPLATE/"+tmpl); err != nil {
 			return nil, err
 		}

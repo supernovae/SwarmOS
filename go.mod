@@ -1,6 +1,6 @@
 module github.com/supernovae/swarmos
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/cli/go-gh/v2 v2.17.0

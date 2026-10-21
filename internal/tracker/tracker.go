@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -10,11 +11,20 @@ type Issue struct {
 	Title             string    `json:"title"`
 	Body              string    `json:"body"`
 	State             string    `json:"state"` // "open", "closed"
+	Type              string    `json:"type,omitempty"`
 	Labels            []string  `json:"labels"`
 	Author            string    `json:"author"`
 	AuthorAssociation string    `json:"author_association"` // "OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"
 	HTMLURL           string    `json:"html_url"`
 	CreatedAt         time.Time `json:"created_at"`
+}
+
+func IsEpicIssueType(issueType string) bool {
+	return strings.EqualFold(strings.TrimSpace(issueType), "Epic")
+}
+
+func (i *Issue) IsEpic() bool {
+	return i != nil && IsEpicIssueType(i.Type)
 }
 
 type Comment struct {
@@ -67,6 +77,7 @@ func DefaultSwarmLabels() []LabelSpec {
 	return []LabelSpec{
 		{Name: "swarm:ready", Color: "0e8a16", Description: "Work unit vetted and ready for SwarmOS agents"},
 		{Name: "swarm:draft", Color: "cfd3d7", Description: "Structured WorkUnit draft awaiting maintainer approval"},
+		{Name: "swarm:community", Color: "c5def5", Description: "Community bug report, idea, or feedback awaiting maintainer triage"},
 		{Name: "swarm:needs-scope", Color: "e99695", Description: "Imported or raw issue needing a structured WorkUnit contract"},
 		{Name: "swarm:blocked", Color: "b60205", Description: "Waiting on prerequisite depends_on issues, overlapping touchpoints, or policy review"},
 		{Name: "swarm:claimed", Color: "1d76db", Description: "Claimed by an active SwarmOS lease"},
@@ -82,9 +93,13 @@ type Tracker interface {
 	CurrentUser(ctx context.Context) (string, error)
 	// Authorize checks the current authenticated actor's repository permission.
 	Authorize(ctx context.Context, permission string) error
+	CheckIssueType(ctx context.Context, issueType string) error
 	GetIssue(ctx context.Context, number int) (*Issue, error)
 	CreateIssue(ctx context.Context, title, body string, labels []string) (*Issue, error)
+	CreateTypedIssue(ctx context.Context, title, body string, labels []string, issueType string) (*Issue, error)
 	UpdateIssueBody(ctx context.Context, number int, body string) (*Issue, error)
+	ParentIssueNumber(ctx context.Context, childNumber int) (int, error)
+	LinkSubIssue(ctx context.Context, parentNumber, childNumber int) error
 	ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error)
 	ListComments(ctx context.Context, issueNumber int) ([]*Comment, error)
 	CreateComment(ctx context.Context, issueNumber int, body string) (*Comment, error)

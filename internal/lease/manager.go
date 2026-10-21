@@ -442,6 +442,9 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	if err != nil {
 		return nil, err
 	}
+	if issue.IsEpic() {
+		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be approved as an executable WorkUnit", n)
+	}
 	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 	if err != nil {
 		return nil, err
@@ -523,6 +526,9 @@ func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string
 	if err != nil {
 		return nil, err
 	}
+	if issue.IsEpic() {
+		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be claimed for execution", n)
+	}
 	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 	if err != nil {
 		return nil, err
@@ -600,6 +606,9 @@ func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState)
 	issue, err := m.tracker.GetIssue(ctx, n)
 	if err != nil {
 		return err
+	}
+	if issue.IsEpic() {
+		return fmt.Errorf("issue #%d has type \"Epic\" and cannot be executed as a WorkUnit", n)
 	}
 	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
 	if err != nil {
@@ -914,8 +923,8 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	if err != nil {
 		return nil, err
 	}
-	if st.Lease.Status != "active" || st.Lease.Owner != owner || st.Lease.ClaimID != m.token(n) || !st.Lease.ExpiresAt.After(m.nowFn()) {
-		return nil, ErrClaimFence
+	if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
+		return nil, err
 	}
 	if st.Branch != "" && st.Branch != branch {
 		return nil, fmt.Errorf("checkpoint branch differs from approved branch")

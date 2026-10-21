@@ -325,17 +325,153 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 		t.Fatalf("expected 1 living projection comment on issue #%d, got %d", number, len(comments))
 	}
 
-	// Verify swarm plan --from and --scan CLI commands
+	// Verify swarm plan --from preview vs --apply --json and --scan CLI commands
 	roadmapFile := filepath.Join(f.root, "ROADMAP.md")
-	if err := os.WriteFile(roadmapFile, []byte("## First Roadmap Item\nBuild part one\n- [ ] Check one\n"), 0o644); err != nil {
+	roadmapContent := "# CLI Roadmap\n\n## First Roadmap Item\n### Objective\nBuild part one.\n### Acceptance Criteria\n- [ ] Check one\n"
+	if err := os.WriteFile(roadmapFile, []byte(roadmapContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	planOut := f.must(t, "plan", "--from", roadmapFile, "--apply")
-	if !strings.Contains(planOut, "First Roadmap Item") {
-		t.Fatalf("unexpected plan --from output:\n%s", planOut)
+	previewOut := f.must(t, "plan", "--from", roadmapFile)
+	if !strings.Contains(previewOut, "`Step 1`") || strings.Contains(previewOut, "`#1`") {
+		t.Fatalf("expected preview output to use Step 1 and not fake #1:\n%s", previewOut)
+	}
+	planJSON := f.must(t, "plan", "--from", roadmapFile, "--apply", "--json")
+	var parsedPlan struct {
+		Kind   string                     `json:"kind"`
+		Report workflow.ProjectPlanReport `json:"report"`
+	}
+	if err := json.Unmarshal([]byte(planJSON), &parsedPlan); err != nil {
+		t.Fatalf("unmarshal plan JSON: %v\n%s", err, planJSON)
+	}
+	if parsedPlan.Report.EpicIssue == nil || !parsedPlan.Report.EpicCreated || !parsedPlan.Report.EpicIssue.IsEpic() {
+		t.Fatalf("expected epic_issue (EpicCreated=true), got %+v", parsedPlan.Report)
+	}
+	if len(parsedPlan.Report.CreatedIssues) != 1 || len(parsedPlan.Report.ExistingIssues) != 0 {
+		t.Fatalf("expected 1 created child and 0 existing, got %+v", parsedPlan.Report)
+	}
+	// Repeat apply --json: EpicCreated=false, CreatedIssues=0, ExistingIssues=1
+	repeatJSON := f.must(t, "plan", "--from", roadmapFile, "--apply", "--json")
+	var repeatPlan struct {
+		Kind   string                     `json:"kind"`
+		Report workflow.ProjectPlanReport `json:"report"`
+	}
+	if err := json.Unmarshal([]byte(repeatJSON), &repeatPlan); err != nil {
+		t.Fatal(err)
+	}
+	if repeatPlan.Report.EpicCreated || len(repeatPlan.Report.CreatedIssues) != 0 || len(repeatPlan.Report.ExistingIssues) != 1 {
+		t.Fatalf("expected repeat apply JSON to show reused epic and child, got %+v", repeatPlan.Report)
 	}
 	scanOut := f.must(t, "plan", "--scan", "--apply")
 	if !strings.Contains(scanOut, "SwarmOS Backlog Sense-Making") {
 		t.Fatalf("unexpected plan --scan output:\n%s", scanOut)
+	}
+}
+
+type mockDoctorTracker struct {
+	tracker.Tracker
+	epicTypeErr error
+	authErr     error
+	created     int
+}
+
+func (m *mockDoctorTracker) CheckIssueType(_ context.Context, issueType string) error {
+	return m.epicTypeErr
+}
+
+func (m *mockDoctorTracker) Authorize(_ context.Context, permission string) error {
+	if permission == "create-epic" {
+		return m.authErr
+	}
+	return nil
+}
+
+func (m *mockDoctorTracker) CreateIssue(ctx context.Context, title, body string, labels []string) (*tracker.Issue, error) {
+	m.created++
+	return m.Tracker.CreateIssue(ctx, title, body, labels)
+}
+
+func (m *mockDoctorTracker) CreateTypedIssue(ctx context.Context, title, body string, labels []string, issueType string) (*tracker.Issue, error) {
+	m.created++
+	return m.Tracker.CreateTypedIssue(ctx, title, body, labels, issueType)
+}
+
+func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
+	f := newCLIFixture(t)
+	ctx := context.Background()
+
+	bodyFile := filepath.Join(f.root, "EPIC.md")
+	if err := os.WriteFile(bodyFile, []byte("# Standalone Epic\n\nHigh-level design.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	epicOut := f.must(t, "issue", "epic", "create", "--title", "Standalone Epic", "--body-file", bodyFile, "--json")
+	var epicRes struct {
+		Kind  string         `json:"kind"`
+		Issue *tracker.Issue `json:"issue"`
+	}
+	if err := json.Unmarshal([]byte(epicOut), &epicRes); err != nil {
+		t.Fatalf("unmarshal epic JSON: %v\n%s", err, epicOut)
+	}
+	if epicRes.Issue == nil || !epicRes.Issue.IsEpic() {
+		t.Fatalf("expected created Epic issue, got %+v", epicRes)
+	}
+	epicNumStr := strconv.Itoa(epicRes.Issue.Number)
+
+	// Epic cannot be approved or claimed
+	if _, err := f.run("issue", "approve", epicNumStr); err == nil {
+		t.Fatal("expected issue approve on Epic to fail")
+	}
+	if _, err := f.run("claim", epicNumStr); err == nil {
+		t.Fatal("expected claim on Epic to fail")
+	}
+
+	// Create a child issue with --parent <epic>
+	childOut := f.must(t, "issue", "create", "--parent", epicNumStr,
+		"--title", "Child under Epic",
+		"--objective", "Implement child work",
+		"--constraint", "Stay within scope",
+		"--acceptance", "Child tests pass",
+		"--json")
+	var childRes struct {
+		Issue *tracker.Issue `json:"issue"`
+	}
+	if err := json.Unmarshal([]byte(childOut), &childRes); err != nil {
+		t.Fatal(err)
+	}
+	if parentNum, err := f.tracker.ParentIssueNumber(ctx, childRes.Issue.Number); err != nil || parentNum != epicRes.Issue.Number {
+		t.Fatalf("expected child #%d native parent #%d, got (%d, %v)", childRes.Issue.Number, epicRes.Issue.Number, parentNum, err)
+	}
+
+	// Even if an Epic is mislabeled swarm:ready, PullNextReadyIssue skips it and claims the approved child
+	_ = f.tracker.AddLabels(ctx, epicRes.Issue.Number, []string{"swarm:ready"})
+	f.must(t, "issue", "approve", strconv.Itoa(childRes.Issue.Number))
+	f.must(t, "work", "--next", "--agent", "mock", "--headless")
+	if st := f.state(t, childRes.Issue.Number); st.Lease.ClaimID == "" {
+		t.Fatalf("expected child #%d to be pulled and worked past mislabeled Epic #%d", childRes.Issue.Number, epicRes.Issue.Number)
+	}
+
+	// Read-only doctor with github backend reports WARN for missing Epic type and non-maintainer without creating issues
+	mockTr := &mockDoctorTracker{
+		Tracker:     f.tracker,
+		epicTypeErr: errors.New("issue type \"Epic\" is not enabled"),
+		authErr:     errors.New("actor lacks maintainer permission"),
+	}
+	docCmd := newRootCmdWithOptions(&RootOptions{
+		RepoRoot:        f.root,
+		Backend:         "github",
+		trackerOverride: mockTr,
+	})
+	var docBuf bytes.Buffer
+	docCmd.SetOut(&docBuf)
+	docCmd.SetErr(&docBuf)
+	docCmd.SetArgs([]string{"--root", f.root, "doctor", "--backend", "github"})
+	if err := docCmd.Execute(); err != nil {
+		t.Fatalf("doctor should report WARN without failing: %v\n%s", err, docBuf.String())
+	}
+	docText := docBuf.String()
+	if !strings.Contains(docText, "github-epic-type") || !strings.Contains(docText, "github-epic-auth") || !strings.Contains(docText, "WARN") {
+		t.Fatalf("expected doctor output to include WARN for github-epic-type and github-epic-auth:\n%s", docText)
+	}
+	if mockTr.created != 0 {
+		t.Fatalf("doctor must be read-only, created %d issues", mockTr.created)
 	}
 }

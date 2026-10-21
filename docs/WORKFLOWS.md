@@ -60,16 +60,17 @@ How gate verification keeps reviews trustworthy:
 
 ---
 
-## 4. Interactive Slash Commands
+## 4. Interactive Slash Commands & Shared Skills
 
-When working interactively inside a provisioned worktree (`.swarm/worktrees/issue-<N>`) with Claude Code or OpenCode, you can also use the generated slash commands:
+SwarmOS separates per-issue execution planning from repository-wide roadmap planning (and never overrides a harness's built-in `/plan` command):
 
-- `/swarm-plan` — Draft `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` for the active WorkUnit.
-- `/swarm-review` — Audit the current plan against all constraints and acceptance criteria.
-- `/swarm-implement` — Implement the approved plan step by step.
-- `/swarm-validate` — Run `swarm validate` and verify every acceptance criterion.
-- `/swarm-project-plan` — Decompose a roadmap (`swarm plan --from`) or scan/import open issues (`swarm plan --scan`).
----
+- **Inside a claimed task worktree (`.swarm/worktrees/issue-<N>`)**:
+  - `/swarm-plan` — Draft `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` for the active WorkUnit.
+  - `/swarm-review` — Audit the current plan against all constraints and acceptance criteria.
+  - `/swarm-implement` — Implement the approved plan step by step.
+  - `/swarm-validate` — Run `swarm validate` and verify every acceptance criterion.
+- **At the repository root for roadmap ideation & backlog triage**:
+  - `/swarm-project-plan` (in Claude Code and OpenCode) or the shared `.swarm/skills/triage-and-plan.md` skill (used as a regular prompt in Codex and `omp`) — Collaboratively refine an idea into a repo-local plan file, preview `Step N` child tasks with `swarm plan --from <file>`, publish a native `Epic` and draft child sub-issues on explicit maintainer instruction (`--apply`), and selectively approve child WorkUnits with `swarm issue approve <N>`, or triage open issues with `swarm plan --scan`.
 
 ## Related Guides
 

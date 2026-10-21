@@ -1069,7 +1069,7 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(iss.Title), strings.TrimSpace(epicTitle)) {
-			return fmt.Errorf("Epic title %q collides with existing issue #%d (%s)", epicTitle, iss.Number, iss.Title)
+			return fmt.Errorf("epic title %q collides with existing issue #%d (%s)", epicTitle, iss.Number, iss.Title)
 		}
 	}
 

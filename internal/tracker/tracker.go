@@ -32,6 +32,7 @@ type Comment struct {
 	IssueNum          int       `json:"issue_num"`
 	Author            string    `json:"author"`
 	AuthorAssociation string    `json:"author_association,omitempty"`
+	AuthorType        string    `json:"author_type,omitempty"`
 	Body              string    `json:"body"`
 	HTMLURL           string    `json:"html_url"`
 	CreatedAt         time.Time `json:"created_at"`
@@ -52,13 +53,16 @@ type DraftPRRequest struct {
 }
 
 type PullRequest struct {
-	Number  int    `json:"number"`
-	Title   string `json:"title"`
-	Body    string `json:"body"`
-	Head    string `json:"head"`
-	Base    string `json:"base"`
-	Draft   bool   `json:"draft"`
-	HTMLURL string `json:"html_url"`
+	Number   int    `json:"number"`
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	Head     string `json:"head"`
+	HeadRepo string `json:"head_repo,omitempty"`
+	HeadSHA  string `json:"head_sha,omitempty"`
+	Base     string `json:"base"`
+	BaseRepo string `json:"base_repo,omitempty"`
+	Draft    bool   `json:"draft"`
+	HTMLURL  string `json:"html_url"`
 }
 
 type CheckRunResult struct {
@@ -109,6 +113,7 @@ type Tracker interface {
 	CreateDraftPR(ctx context.Context, req DraftPRRequest) (*PullRequest, error)
 	UpdateDraftPR(ctx context.Context, prNumber int, title, body string) (*PullRequest, error)
 	FindDraftPR(ctx context.Context, head, base string) (*PullRequest, error)
+	GetPullRequest(ctx context.Context, number int) (*PullRequest, error)
 	GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error)
 	EnsureLabels(ctx context.Context, labels []LabelSpec) error
 }

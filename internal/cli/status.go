@@ -12,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 type issueStatus struct {
@@ -78,7 +79,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			if status == "" {
 				status = "approved"
 			}
-			if status == "active" && !state.Lease.ExpiresAt.After(time.Now()) {
+			if status == "active" && !state.Lease.ExpiresAt.After(options.now()) {
 				status = "expired"
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s #%d %s: owner=%s phase=%s gate=%s\n", entry.Repository, entry.Issue.Number, status, state.Lease.Owner, state.Lease.Phase, state.EffectiveGate)
@@ -142,6 +143,7 @@ func newLeaseMutationCmd(options *RootOptions, renew bool) *cobra.Command {
 			return err
 		}
 		if renew {
+			_ = workspace.FetchCommit(options.resolveRepoRoot(), "origin", state.BaseSHA)
 			cfg, loadErr := harness.LoadConfigAt(options.resolveRepoRoot(), state.BaseSHA)
 			if loadErr != nil {
 				return loadErr

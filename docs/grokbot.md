@@ -119,6 +119,39 @@ swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 
 Add `--watch` when you want the worker pool to keep polling for newly approved issues.
 
+
+### Contributing from a personal fork without upstream write access (`--fork`)
+
+When Grok Bot (or an external contributor) does not have push access to the upstream repository, it can still claim approved issues and ship changes through a personal GitHub fork:
+
+- **Local working strategy:** SwarmOS provisions an isolated local worktree (`.swarm/worktrees/issue-42`) on branch `swarm/issue-42-<claim_id>` anchored to the upstream approved `BaseSHA`, loading all `.swarm/` policies and checks from that upstream commit.
+- **Remote contribution strategy:** Checkpoints are pushed to the contributor's writable `fork` remote (`refs/heads/swarm/issue-42-<claim_id>`), and `swarm --fork submit 42` opens a fork-qualified Draft PR (`<fork-owner>:swarm/issue-42-<claim_id>` targeting the upstream base branch). Issue approval, human plan gates (`swarm review 42 --approve`), PR review, and merge stay with upstream maintainers.
+
+**1. Upstream maintainer setup:**
+
+```bash
+# Set SWARM_VERSION_PIN to an immutable published fork-capable release tag or full 40-char commit SHA
+export SWARM_VERSION_PIN="<published-fork-capable-tag-or-full-commit-sha>"
+swarm init --fork-coordinator --swarm-version "$SWARM_VERSION_PIN"
+swarm issue approve 42 --backend github
+```
+
+**2. Contributor / Grok Bot fork walkthrough:**
+
+```bash
+# Clone upstream as origin and add your personal GitHub fork as the writable "fork" remote
+git clone https://github.com/OWNER/REPO.git /workspace/your-repo
+cd /workspace/your-repo
+gh repo fork --remote=true --remote-name=fork
+
+# Claim, execute, renew if needed, and submit a fork-qualified Draft PR
+swarm --fork claim 42
+swarm --fork work 42
+swarm --fork renew 42
+swarm --fork submit 42
+```
+
+See **[Fork Mode (`docs/fork-mode.md`)](fork-mode.md)** for full setup details.
 ---
 
 ## 5. Using Grok Models Inside a Local SwarmOS Harness
@@ -148,5 +181,6 @@ swarm work 42 --planner-agent grok --reviewer-agent grok --developer-agent codex
 ## Next Steps
 
 - **[OpenAI Dot & Codex Guide (`docs/openai-dot.md`)](openai-dot.md)** — Connect Codex Cloud environments and remote repositories for OpenAI Dots.
+- **[Fork Mode Guide (`docs/fork-mode.md`)](fork-mode.md)** — Contribute from a personal GitHub fork without upstream push access.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Configure `.swarm/config.yaml`, validation rules, and task approvals.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Full CLI reference, reviewer sandboxing, checkpoints, and recovery.

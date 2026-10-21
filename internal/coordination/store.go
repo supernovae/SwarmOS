@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/filelock"
 )
@@ -23,6 +25,8 @@ type PublishingStore interface {
 
 var ErrConflict = errors.New("coordination compare-and-swap conflict")
 var ErrNotFound = errors.New("coordination state not found")
+var ErrReplay = errors.New("fork request comment ID already processed")
+var ErrForkClaimLimit = errors.New("fork active claim limit reached for contributor")
 
 type Store interface {
 	Load(context.Context, int) ([]byte, string, error)
@@ -209,3 +213,274 @@ func (s *GitStore) CompareAndSwapAndPublish(ctx context.Context, n int, old stri
 	return commit, nil
 }
 func digest(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+
+type contributorIndex struct {
+	Version int                       `json:"version"`
+	Actor   string                    `json:"actor"`
+	Claims  []contributorIndexedClaim `json:"claims,omitempty"`
+}
+
+type contributorIndexedClaim struct {
+	IssueNumber int    `json:"issue_number"`
+	ClaimID     string `json:"claim_id"`
+}
+
+type forkStateEnvelope struct {
+	Lease struct {
+		IssueNumber int       `json:"issue_number"`
+		ClaimID     string    `json:"claim_id"`
+		Owner       string    `json:"owner"`
+		Status      string    `json:"status"`
+		ExpiresAt   time.Time `json:"expires_at"`
+	} `json:"lease"`
+	LastForkRequestID int64 `json:"last_fork_request_id"`
+}
+
+// ForkIndexedStore wraps an upstream GitStore for verified fork coordinator
+// events. It intentionally does not implement PublishingStore.
+type ForkIndexedStore struct {
+	git       *GitStore
+	actor     string
+	maxActive int
+	requestID int64
+	nowFn     func() time.Time
+}
+
+func NewForkIndexedStore(root, actor string, maxActive int, requestID int64) *ForkIndexedStore {
+	if maxActive <= 0 {
+		maxActive = 1
+	}
+	return &ForkIndexedStore{
+		git:       NewGitStore(root),
+		actor:     strings.TrimSpace(actor),
+		maxActive: maxActive,
+		requestID: requestID,
+		nowFn:     time.Now,
+	}
+}
+
+func (s *ForkIndexedStore) SetNowFunc(fn func() time.Time) {
+	if fn != nil {
+		s.nowFn = fn
+	}
+}
+
+func (s *ForkIndexedStore) contributorRef() (string, error) {
+	actor := strings.ToLower(strings.TrimSpace(s.actor))
+	if actor == "" || strings.ContainsAny(actor, " /\\:~^?*[]@") || strings.Contains(actor, "..") {
+		return "", fmt.Errorf("invalid contributor actor %q", s.actor)
+	}
+	return "refs/heads/swarm-contributors/" + actor, nil
+}
+
+func (s *ForkIndexedStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	return s.git.Load(ctx, n)
+}
+
+func (s *ForkIndexedStore) loadStateAtCommit(ctx context.Context, sha string) (*forkStateEnvelope, error) {
+	if sha == "" {
+		return &forkStateEnvelope{}, nil
+	}
+	if _, err := s.git.run(ctx, "", "fetch", "--no-write-fetch-head", "origin", sha); err != nil {
+		return nil, fmt.Errorf("fetch state commit %s: %w", sha, err)
+	}
+	body, err := s.git.run(ctx, "", "show", sha+":state.json")
+	if err != nil {
+		return nil, err
+	}
+	var env forkStateEnvelope
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		return nil, fmt.Errorf("decode state envelope: %w", err)
+	}
+	return &env, nil
+}
+
+func (s *ForkIndexedStore) stampRequestID(next []byte) ([]byte, *forkStateEnvelope, error) {
+	var env forkStateEnvelope
+	if err := json.Unmarshal(next, &env); err != nil {
+		return nil, nil, fmt.Errorf("decode next state envelope: %w", err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(next, &raw); err != nil {
+		return nil, nil, fmt.Errorf("decode next state map: %w", err)
+	}
+	reqBytes, err := json.Marshal(s.requestID)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw["last_fork_request_id"] = reqBytes
+	env.LastForkRequestID = s.requestID
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, &env, nil
+}
+
+func (s *ForkIndexedStore) commitBlob(ctx context.Context, fileName string, content []byte, parent string, msg string) (string, error) {
+	blob, err := s.git.run(ctx, string(content), "hash-object", "-w", "--stdin")
+	if err != nil {
+		return "", err
+	}
+	tree, err := s.git.run(ctx, fmt.Sprintf("100644 blob %s\t%s\n", blob, fileName), "mktree")
+	if err != nil {
+		return "", err
+	}
+	args := []string{"-c", "user.name=SwarmOS", "-c", "user.email=swarmos@localhost", "commit-tree", tree}
+	if parent != "" {
+		args = append(args, "-p", parent)
+	}
+	return s.git.run(ctx, msg+"\n", args...)
+}
+
+func (s *ForkIndexedStore) loadAndRevalidateIndex(ctx context.Context, contribRef string, currentIssue int) ([]contributorIndexedClaim, string, error) {
+	oldSHA, err := s.git.remoteSHA(ctx, contribRef)
+	if errors.Is(err, ErrNotFound) {
+		return nil, "", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := s.git.run(ctx, "", "fetch", "--no-write-fetch-head", "origin", oldSHA); err != nil {
+		return nil, "", fmt.Errorf("fetch contributor index %s: %w", contribRef, err)
+	}
+	body, err := s.git.run(ctx, "", "show", oldSHA+":index.json")
+	if err != nil {
+		return nil, "", fmt.Errorf("read contributor index %s: %w", contribRef, err)
+	}
+	var idx contributorIndex
+	if err := json.Unmarshal([]byte(body), &idx); err != nil {
+		return nil, "", fmt.Errorf("parse contributor index %s: %w", contribRef, err)
+	}
+	now := s.nowFn()
+	seen := make(map[int]bool)
+	var kept []contributorIndexedClaim
+	for _, entry := range idx.Claims {
+		if entry.IssueNumber <= 0 || entry.ClaimID == "" || entry.IssueNumber == currentIssue || seen[entry.IssueNumber] {
+			continue
+		}
+		rawState, _, loadErr := s.git.Load(ctx, entry.IssueNumber)
+		if errors.Is(loadErr, ErrNotFound) {
+			continue
+		}
+		if loadErr != nil {
+			return nil, "", loadErr
+		}
+		var env forkStateEnvelope
+		if err := json.Unmarshal(rawState, &env); err != nil {
+			continue
+		}
+		if env.Lease.Status == "active" &&
+			strings.EqualFold(env.Lease.Owner, s.actor) &&
+			env.Lease.ClaimID == entry.ClaimID &&
+			env.Lease.ExpiresAt.After(now) {
+			seen[entry.IssueNumber] = true
+			kept = append(kept, contributorIndexedClaim{
+				IssueNumber: entry.IssueNumber,
+				ClaimID:     entry.ClaimID,
+			})
+		}
+	}
+	return kept, oldSHA, nil
+}
+
+func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string, next []byte) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if s.requestID <= 0 {
+		return "", fmt.Errorf("fork indexed store requires a positive request ID")
+	}
+	priorEnv, err := s.loadStateAtCommit(ctx, old)
+	if err != nil {
+		return "", err
+	}
+	if priorEnv.LastForkRequestID >= s.requestID {
+		return "", fmt.Errorf("%w: request %d <= last processed %d", ErrReplay, s.requestID, priorEnv.LastForkRequestID)
+	}
+	stampedNext, nextEnv, err := s.stampRequestID(next)
+	if err != nil {
+		return "", err
+	}
+	stateCommit, err := s.commitBlob(ctx, "state.json", stampedNext, old, "swarm coordination state")
+	if err != nil {
+		return "", err
+	}
+	stateRef := s.git.ref(n)
+	stateLease := stateRef + ":" + old
+
+	now := s.nowFn()
+	wasActiveForActor := priorEnv.Lease.Status == "active" &&
+		strings.EqualFold(priorEnv.Lease.Owner, s.actor) &&
+		priorEnv.Lease.ClaimID != "" &&
+		priorEnv.Lease.ExpiresAt.After(now)
+	isActiveForActor := nextEnv.Lease.Status == "active" &&
+		strings.EqualFold(nextEnv.Lease.Owner, s.actor) &&
+		nextEnv.Lease.ClaimID != "" &&
+		nextEnv.Lease.ExpiresAt.After(now)
+	isAcquire := isActiveForActor && (!wasActiveForActor || priorEnv.Lease.ClaimID != nextEnv.Lease.ClaimID)
+	isLeave := priorEnv.Lease.Status == "active" && nextEnv.Lease.Status != "active"
+
+	if !isAcquire && !isLeave {
+		if _, err := s.git.run(ctx, "", "push", "origin", "--force-with-lease="+stateLease, stateCommit+":"+stateRef); err != nil {
+			actual, readErr := s.git.remoteSHA(ctx, stateRef)
+			if readErr == nil && actual != old {
+				return "", ErrConflict
+			}
+			if errors.Is(readErr, ErrNotFound) && old != "" {
+				return "", ErrConflict
+			}
+			return "", fmt.Errorf("push coordination state: %w", err)
+		}
+		return stateCommit, nil
+	}
+	contribRef, err := s.contributorRef()
+	if err != nil {
+		return "", err
+	}
+	for range 4 {
+		kept, oldIndexSHA, err := s.loadAndRevalidateIndex(ctx, contribRef, n)
+		if err != nil {
+			return "", err
+		}
+		if isAcquire {
+			if len(kept) >= s.maxActive {
+				return "", fmt.Errorf("%w: contributor %q already has %d active fork claim(s) (max %d)", ErrForkClaimLimit, s.actor, len(kept), s.maxActive)
+			}
+			kept = append(kept, contributorIndexedClaim{
+				IssueNumber: n,
+				ClaimID:     nextEnv.Lease.ClaimID,
+			})
+		}
+		idxBytes, err := json.Marshal(contributorIndex{
+			Version: 1,
+			Actor:   strings.ToLower(strings.TrimSpace(s.actor)),
+			Claims:  kept,
+		})
+		if err != nil {
+			return "", err
+		}
+		indexCommit, err := s.commitBlob(ctx, "index.json", idxBytes, oldIndexSHA, "swarm contributor claim index")
+		if err != nil {
+			return "", err
+		}
+		contribLease := contribRef + ":" + oldIndexSHA
+		if _, err := s.git.run(ctx, "", "push", "--atomic", "origin", "--force-with-lease="+stateLease, "--force-with-lease="+contribLease, stateCommit+":"+stateRef, indexCommit+":"+contribRef); err != nil {
+			actualState, stateReadErr := s.git.remoteSHA(ctx, stateRef)
+			if (stateReadErr == nil && actualState != old) || (errors.Is(stateReadErr, ErrNotFound) && old != "") {
+				return "", ErrConflict
+			}
+			actualIndex, idxReadErr := s.git.remoteSHA(ctx, contribRef)
+			if (idxReadErr == nil && actualIndex != oldIndexSHA) || (errors.Is(idxReadErr, ErrNotFound) && oldIndexSHA != "") {
+				continue
+			}
+			return "", fmt.Errorf("atomic fork coordination push: %w", err)
+		}
+		return stateCommit, nil
+	}
+	return "", ErrConflict
+}
+
+func (s *ForkIndexedStore) RequestID() int64 {
+	return s.requestID
+}

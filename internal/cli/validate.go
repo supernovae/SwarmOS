@@ -10,6 +10,7 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/validation"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newValidateCmd(options *RootOptions) *cobra.Command {
@@ -66,6 +67,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 				return fmt.Errorf("--base does not match the task's approved immutable base")
 			}
 			baseSHA = state.BaseSHA
+			_ = workspace.FetchCommit(root, "origin", baseSHA)
 			iss, err := tr.GetIssue(ctx, issue)
 			if err != nil {
 				return err
@@ -86,7 +88,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 			defer stop()
 			ctx = renewed
 		}
-		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{CIMode: ciMode, BaseSHA: baseSHA})
+		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{CIMode: ciMode, BaseSHA: baseSHA, ForkMode: options.Fork})
 		if report != nil && manager != nil {
 			_, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact)
 			validationErr = errors.Join(validationErr, err)

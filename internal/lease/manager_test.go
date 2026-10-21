@@ -352,3 +352,53 @@ func TestEpicIssuesRejectedAtApproveAcquireAndCheckApprovedState(t *testing.T) {
 		t.Fatal("RecordCheckpoint must reject issue retyped to Epic")
 	}
 }
+
+func TestForkAcquireAndTakeoverClearsCheckpointAndHeadArtifacts(t *testing.T) {
+	m, lt, iss := testManager(t)
+	ctx := context.Background()
+	now := time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC)
+	m.SetNowFunc(func() time.Time { return now })
+
+	st1, err := m.AcquireFork(ctx, iss.Number, "local-dev", "claude", "all", "local-dev/swarm", 24*time.Hour, 99)
+	if err != nil {
+		t.Fatalf("AcquireFork failed: %v", err)
+	}
+	if st1.ForkRepo != "local-dev/swarm" || st1.Lease.ExpiresAt.Sub(now) != 4*time.Hour || st1.Lease.MaxRenewals != 3 {
+		t.Fatalf("AcquireFork did not enforce approved policy duration/max_renewals: %+v", st1.Lease)
+	}
+	branch1 := "swarm/issue-1-" + st1.Lease.ClaimID
+	for _, art := range []contract.Artifact{
+		{Type: contract.ArtifactDesign, Producer: "claude:planner", Summary: "Plan", Body: "# Plan\n"},
+		{Type: contract.ArtifactTestPlan, Producer: "claude:planner", Summary: "Tests", Body: "# Tests\n"},
+		{Type: contract.ArtifactImplementation, Producer: "claude:developer", Verdict: "PASS", Summary: "Impl", Body: "# Impl\n"},
+	} {
+		if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", art); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.RecordCheckpoint(ctx, iss.Number, "local-dev", branch1, st1.BaseSHA); err != nil {
+		t.Fatalf("RecordCheckpoint failed: %v", err)
+	}
+
+	// Advance past expiry and acquire replacement fork claim
+	now = now.Add(5 * time.Hour)
+	m2 := NewManager(lt.WithUser("bob", "NONE"), m.security)
+	m2.SetStore(m.repoRoot, m.Store())
+	m2.SetNowFunc(func() time.Time { return now })
+	st2, err := m2.AcquireFork(ctx, iss.Number, "bob", "claude", "implement", "bob/swarm", time.Hour, 3)
+	if err != nil {
+		t.Fatalf("bob AcquireFork takeover failed: %v", err)
+	}
+	if st2.ForkRepo != "bob/swarm" || st2.Branch != "" || st2.HeadSHA != "" || st2.Lease.ClaimID == st1.Lease.ClaimID {
+		t.Fatalf("takeover did not reset fork checkpoint identity: %+v", st2)
+	}
+	if len(st2.Artifacts) != 2 {
+		t.Fatalf("expected only design and test-plan artifacts retained after takeover, got %+v", st2.Artifacts)
+	}
+
+	// Displaced claim token fails with ErrClaimFence
+	m.BindClaim(iss.Number, st1.Lease.ClaimID)
+	if _, err := m.Renew(ctx, iss.Number, "local-dev", time.Hour); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("expected ErrClaimFence for displaced claim, got %v", err)
+	}
+}

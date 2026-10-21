@@ -21,7 +21,8 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 		return nil, fmt.Errorf("agent name is required")
 	}
 	if name == "mock" {
-		if !local {
+		_, allowlisted := cfg.Agents["mock"]
+		if !local && !allowlisted {
 			return nil, fmt.Errorf("mock runner is available only with the local backend")
 		}
 		return &configuredRunner{Runner: &MockRunner{}, name: name}, nil

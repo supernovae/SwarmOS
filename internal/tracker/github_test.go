@@ -429,3 +429,156 @@ func TestLocalTrackerEpicAndHierarchyPersistence(t *testing.T) {
 		t.Fatalf("reloaded ParentIssueNumber = (%d, %v), want (%d, nil)", gotParent, err, epic.Number)
 	}
 }
+
+func TestForkGitHubTrackerVerifyForkAndGetPullRequest(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name          string
+		forkSlug      string
+		expectedOwner string
+		requirePush   bool
+		repoResp      map[string]any
+		wantErr       bool
+	}{
+		{
+			name:          "valid writable personal fork",
+			forkSlug:      "alice/swarm",
+			expectedOwner: "alice",
+			requirePush:   true,
+			repoResp: map[string]any{
+				"full_name":   "alice/swarm",
+				"fork":        true,
+				"owner":       map[string]any{"login": "alice"},
+				"source":      map[string]any{"full_name": "octo/swarm"},
+				"permissions": map[string]any{"push": true},
+			},
+		},
+		{
+			name:          "valid fork verified by coordinator without push permission",
+			forkSlug:      "alice/swarm",
+			expectedOwner: "alice",
+			requirePush:   false,
+			repoResp: map[string]any{
+				"full_name":   "alice/swarm",
+				"fork":        true,
+				"owner":       map[string]any{"login": "alice"},
+				"source":      map[string]any{"full_name": "octo/swarm"},
+				"permissions": map[string]any{"push": false},
+			},
+		},
+		{
+			name:          "rejects non-fork repository",
+			forkSlug:      "alice/swarm",
+			expectedOwner: "alice",
+			requirePush:   true,
+			repoResp: map[string]any{
+				"full_name":   "alice/swarm",
+				"fork":        false,
+				"owner":       map[string]any{"login": "alice"},
+				"permissions": map[string]any{"push": true},
+			},
+			wantErr: true,
+		},
+		{
+			name:          "rejects fork of unrelated upstream",
+			forkSlug:      "alice/swarm",
+			expectedOwner: "alice",
+			requirePush:   true,
+			repoResp: map[string]any{
+				"full_name":   "alice/swarm",
+				"fork":        true,
+				"owner":       map[string]any{"login": "alice"},
+				"source":      map[string]any{"full_name": "other/repo"},
+				"permissions": map[string]any{"push": true},
+			},
+			wantErr: true,
+		},
+		{
+			name:          "rejects fork owned by different user",
+			forkSlug:      "bob/swarm",
+			expectedOwner: "alice",
+			requirePush:   true,
+			repoResp: map[string]any{
+				"full_name":   "bob/swarm",
+				"fork":        true,
+				"owner":       map[string]any{"login": "bob"},
+				"source":      map[string]any{"full_name": "octo/swarm"},
+				"permissions": map[string]any{"push": true},
+			},
+			wantErr: true,
+		},
+		{
+			name:          "rejects non-writable fork on client",
+			forkSlug:      "alice/swarm",
+			expectedOwner: "alice",
+			requirePush:   true,
+			repoResp: map[string]any{
+				"full_name":   "alice/swarm",
+				"fork":        true,
+				"owner":       map[string]any{"login": "alice"},
+				"source":      map[string]any{"full_name": "octo/swarm"},
+				"permissions": map[string]any{"push": false},
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/") {
+					writeJSON(t, w, tc.repoResp)
+					return
+				}
+				http.Error(w, "unexpected", http.StatusNotFound)
+			}))
+			got, err := tr.VerifyForkRepository(ctx, tc.forkSlug, tc.expectedOwner, tc.requirePush)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("VerifyForkRepository() = (%q, %v), wantErr %t", got, err, tc.wantErr)
+			}
+		})
+	}
+
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/pulls":
+			if r.URL.Query().Get("head") != "alice:swarm/issue-42-claim1" {
+				http.Error(w, "expected qualified head without double prefix, got "+r.URL.Query().Get("head"), http.StatusBadRequest)
+				return
+			}
+			writeJSON(t, w, []map[string]any{
+				{"number": 77, "title": "Fix #42", "draft": true, "html_url": "https://github.com/octo/swarm/pull/77"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/pulls/77":
+			writeJSON(t, w, map[string]any{
+				"number":   77,
+				"title":    "Fix #42",
+				"state":    "open",
+				"draft":    true,
+				"html_url": "https://github.com/octo/swarm/pull/77",
+				"head": map[string]any{
+					"ref":  "swarm/issue-42-claim1",
+					"sha":  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					"repo": map[string]any{"full_name": "alice/swarm"},
+				},
+				"base": map[string]any{
+					"ref":  "main",
+					"repo": map[string]any{"full_name": "octo/swarm"},
+				},
+			})
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+
+	found, err := tr.FindDraftPR(ctx, "alice:swarm/issue-42-claim1", "main")
+	if err != nil || found == nil || found.Number != 77 {
+		t.Fatalf("FindDraftPR(qualified) = (%+v, %v)", found, err)
+	}
+	pr, err := tr.GetPullRequest(ctx, 77)
+	if err != nil || pr == nil {
+		t.Fatalf("GetPullRequest(77) = (%+v, %v)", pr, err)
+	}
+	if pr.HeadRepo != "alice/swarm" || pr.BaseRepo != "octo/swarm" || pr.Head != "swarm/issue-42-claim1" || pr.HeadSHA != "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" || !pr.Draft {
+		t.Fatalf("unexpected GetPullRequest fields: %+v", pr)
+	}
+}

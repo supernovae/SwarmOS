@@ -109,10 +109,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 		if err != nil || owner == "" {
 			return nil, fmt.Errorf("resolve worker identity: %w", err)
 		}
-		engine, err := workflow.NewEngine(target.Path, tr)
-		if err != nil {
-			return nil, err
-		}
+		engine := workflow.NewEngineWithManager(target.Path, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
 		for _, issue := range issues {
 			if issue.IsEpic() || slices.Contains(issue.Labels, "swarm:pr-open") {
 				continue
@@ -129,7 +126,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				return nil, err
 			}
 			if state == nil || state.TaskDigest != contract.DigestWorkUnit(wu) || state.Lease.Status == "completed" ||
-				state.Lease.Status == "active" && state.Lease.ExpiresAt.After(time.Now()) {
+				state.Lease.Status == "active" && state.Lease.ExpiresAt.After(rootOpts.now()) {
 				continue
 			}
 			if err := mgr.VerifyDependencies(ctx, wu); err != nil {
@@ -201,7 +198,15 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				if err := saveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID); err != nil {
 					return nil, err
 				}
-				worktree, branch, err := workspace.ProvisionAt(target.Path, issue.Number, issue.Title, claimed.BaseSHA, claimed.Branch, claimed.HeadSHA)
+				checkpointRemote := "origin"
+				targetBranch := claimed.Branch
+				if rootOpts.Fork {
+					checkpointRemote = rootOpts.effectiveForkRemote()
+					if targetBranch == "" {
+						targetBranch = workspace.ForkBranchName(issue.Number, claimed.Lease.ClaimID)
+					}
+				}
+				worktree, branch, err := workspace.ProvisionFromRemoteAt(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA)
 				if err != nil {
 					return nil, err
 				}

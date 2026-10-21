@@ -31,15 +31,15 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 			if ready && !apply {
 				return fmt.Errorf("--ready requires --apply")
 			}
+			if rootOpts.Fork && (apply || ready) {
+				return fmt.Errorf("swarm plan --apply and --ready are maintainer-only and cannot be used with --fork")
+			}
 			repoRoot := rootOpts.resolveRepoRoot()
-			tr, err := rootOpts.resolveTracker(cmd)
+			tr, mgr, cfg, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
 				return err
 			}
-			eng, err := workflow.NewEngine(repoRoot, tr)
-			if err != nil {
-				return err
-			}
+			eng := workflow.NewEngineWithManager(repoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
 			report, err := eng.RunProjectPlan(cmd.Context(), workflow.ProjectPlanOptions{
 				RepoRoot:     repoRoot,
 				FromFile:     fromFile,

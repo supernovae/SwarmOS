@@ -28,14 +28,11 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 		}
 		root := rootOpts.resolveRepoRoot()
-		tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
+		tr, manager, cfg, err := rootOpts.resolveLeaseManager(cmd)
 		if err != nil {
 			return err
 		}
-		engine, err := workflow.NewEngine(root, tr)
-		if err != nil {
-			return err
-		}
+		engine := workflow.NewEngineWithManager(root, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
 		preflight, err := engine.Preflight(cmd.Context(), workflow.WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: agentName, Phase: "plan"})
 		if err != nil {
 			return err
@@ -66,7 +63,15 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		if err := saveClaimToken(root, issue, state.Lease.ClaimID); err != nil {
 			return fail(err)
 		}
-		path, branch, err := workspace.ProvisionAt(root, issue, preflight.Issue.Title, state.BaseSHA, state.Branch, state.HeadSHA)
+		checkpointRemote := "origin"
+		targetBranch := state.Branch
+		if rootOpts.Fork {
+			checkpointRemote = rootOpts.effectiveForkRemote()
+			if targetBranch == "" {
+				targetBranch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
+			}
+		}
+		path, branch, err := workspace.ProvisionFromRemoteAt(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA)
 		if err != nil {
 			return fail(err)
 		}

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"gopkg.in/yaml.v3"
 )
 
@@ -255,5 +256,102 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 	}
 	if !strings.Contains(string(cmdContent), "--from") || !strings.Contains(string(cmdContent), "--apply") || !strings.Contains(string(cmdContent), "swarm issue approve") {
 		t.Fatalf("expected swarm-project-plan.md to document preview, explicit --apply, and selective child approval:\n%s", string(cmdContent))
+	}
+}
+
+func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
+	valid, err := embeddedTemplates.ReadFile("templates/swarm/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCfg, err := decodeConfig(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseCfg.MaxActiveForkClaims() != 1 {
+		t.Fatalf("MaxActiveForkClaims() default = %d, want 1", baseCfg.MaxActiveForkClaims())
+	}
+	// Omitting fork config keeps DigestApprovedPolicy unchanged.
+	digestBefore := contract.DigestApprovedPolicy("0123456789abcdef0123456789abcdef01234567", baseCfg)
+	if _, err := decodeConfig([]byte(string(valid) + "fork:\n  max_active_claims: 0\n")); err == nil {
+		t.Fatal("expected non-positive fork.max_active_claims to fail decodeConfig")
+	}
+	withFork, err := decodeConfig([]byte(string(valid) + "fork:\n  max_active_claims: 2\n"))
+	if err != nil || withFork.MaxActiveForkClaims() != 2 {
+		t.Fatalf("decodeConfig with fork.max_active_claims=2 failed: %v (%+v)", err, withFork)
+	}
+	withNilFork := *withFork
+	withNilFork.Fork = nil
+	if got := contract.DigestApprovedPolicy("0123456789abcdef0123456789abcdef01234567", &withNilFork); got != digestBefore {
+		t.Fatalf("DigestApprovedPolicy changed when Fork is nil: got %s, want %s", got, digestBefore)
+	}
+
+	// Default init does not create swarm-fork-coordinator.yml
+	defaultRoot := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: defaultRoot}); err != nil {
+		t.Fatal(err)
+	}
+	if fileExists(filepath.Join(defaultRoot, ".github", "workflows", "swarm-fork-coordinator.yml")) {
+		t.Fatal("default InitRepository must not scaffold swarm-fork-coordinator.yml without --fork-coordinator")
+	}
+
+	// --fork-coordinator requires a fork-capable --swarm-version pin
+	for _, badPin := range []string{"", "v0.2.0", "v0.3.0", "main"} {
+		if _, err := InitRepository(InitOptions{RepoRoot: t.TempDir(), ForkCoordinator: true, SwarmVersion: badPin}); err == nil {
+			t.Fatalf("expected ForkCoordinator with pin %q to fail", badPin)
+		}
+	}
+
+	pin := "a1b2c3d4e5f60123456789abcdef0123456789ab"
+	optInRoot := t.TempDir()
+	if out, err := exec.Command("git", "-C", optInRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	if _, err := InitRepository(InitOptions{RepoRoot: optInRoot, ForkCoordinator: true, SwarmVersion: pin}); err != nil {
+		t.Fatalf("InitRepository(ForkCoordinator) error = %v", err)
+	}
+	coordPath := filepath.Join(optInRoot, ".github", "workflows", "swarm-fork-coordinator.yml")
+	raw, err := os.ReadFile(coordPath)
+	if err != nil {
+		t.Fatalf("read generated swarm-fork-coordinator.yml: %v", err)
+	}
+	var parsed struct {
+		On struct {
+			IssueComment struct {
+				Types []string `yaml:"types"`
+			} `yaml:"issue_comment"`
+		} `yaml:"on"`
+		Permissions map[string]string `yaml:"permissions"`
+		Jobs        map[string]struct {
+			If    string `yaml:"if"`
+			Steps []struct {
+				Uses string            `yaml:"uses"`
+				With map[string]any    `yaml:"with"`
+				Env  map[string]string `yaml:"env"`
+				Run  string            `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal swarm-fork-coordinator.yml: %v", err)
+	}
+	if len(parsed.On.IssueComment.Types) != 1 || parsed.On.IssueComment.Types[0] != "created" {
+		t.Fatalf("unexpected trigger types: %+v", parsed.On.IssueComment.Types)
+	}
+	if parsed.Permissions["contents"] != "write" || parsed.Permissions["issues"] != "write" {
+		t.Fatalf("unexpected workflow permissions: %+v", parsed.Permissions)
+	}
+	job, ok := parsed.Jobs["coordinate"]
+	if !ok || len(job.Steps) < 4 {
+		t.Fatalf("missing coordinate job steps: %+v", parsed.Jobs)
+	}
+	if job.Steps[0].With["persist-credentials"] != false {
+		t.Fatalf("checkout step must set persist-credentials: false, got %+v", job.Steps[0].With)
+	}
+	if job.Steps[2].Env["SWARM_VERSION"] != pin {
+		t.Fatalf("install step SWARM_VERSION = %q, want %q", job.Steps[2].Env["SWARM_VERSION"], pin)
+	}
+	if !strings.Contains(job.Steps[3].Run, `fork-coordinator --event "$GITHUB_EVENT_PATH"`) {
+		t.Fatalf("unexpected coordinator run command: %q", job.Steps[3].Run)
 	}
 }

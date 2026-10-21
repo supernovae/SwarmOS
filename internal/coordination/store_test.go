@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestGitCASAcrossClonesAndAtomicCheckpointFence(t *testing.T) {
@@ -128,5 +129,78 @@ func TestConcurrentIssueReadsStayPinnedAndTransportErrorsSurface(t *testing.T) {
 	}
 	if _, _, err := store.Load(ctx, 1); err == nil || errors.Is(err, ErrNotFound) {
 		t.Fatalf("transport error hidden as absent state: %v", err)
+	}
+}
+
+func TestForkIndexedStoreAtomicCapAndReplay(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	remote := filepath.Join(root, "origin.git")
+	git(root, "init", "--bare", "--initial-branch=main", remote)
+	clone := filepath.Join(root, "clone")
+	git(root, "clone", remote, clone)
+	git(clone, "config", "user.name", "Fork Index Test")
+	git(clone, "config", "user.email", "test@example.invalid")
+	git(clone, "commit", "--allow-empty", "-m", "initial")
+	git(clone, "push", "origin", "main")
+
+	baseStore := NewGitStore(clone)
+	var anyStore Store = NewForkIndexedStore(clone, "alice", 1, 100)
+	if _, ok := anyStore.(PublishingStore); ok {
+		t.Fatal("ForkIndexedStore must never implement PublishingStore")
+	}
+
+	rev1, err := baseStore.CompareAndSwap(ctx, 1, "", []byte(`{"lease":{"issue_number":1,"status":"draft"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev2, err := baseStore.CompareAndSwap(ctx, 2, "", []byte(`{"lease":{"issue_number":2,"status":"draft"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC)
+	exp := now.Add(time.Hour).Format(time.RFC3339)
+
+	// Acquire issue #1 as alice with request ID 101
+	s1 := NewForkIndexedStore(clone, "alice", 1, 101)
+	s1.SetNowFunc(func() time.Time { return now })
+	active1 := fmt.Sprintf(`{"lease":{"issue_number":1,"claim_id":"c1","owner":"alice","status":"active","expires_at":%q}}`, exp)
+	rev1After, err := s1.CompareAndSwap(ctx, 1, rev1, []byte(active1))
+	if err != nil {
+		t.Fatalf("acquire issue 1 failed: %v", err)
+	}
+
+	// Replaying request ID 101 (or older ID 100) must fail with ErrReplay
+	sReplay := NewForkIndexedStore(clone, "alice", 1, 101)
+	sReplay.SetNowFunc(func() time.Time { return now })
+	if _, err := sReplay.CompareAndSwap(ctx, 1, rev1After, []byte(active1)); !errors.Is(err, ErrReplay) {
+		t.Fatalf("expected ErrReplay for duplicate request ID, got %v", err)
+	}
+
+	// Acquiring issue #2 while issue #1 is active exceeds maxActive=1
+	s2 := NewForkIndexedStore(clone, "alice", 1, 102)
+	s2.SetNowFunc(func() time.Time { return now })
+	active2 := fmt.Sprintf(`{"lease":{"issue_number":2,"claim_id":"c2","owner":"alice","status":"active","expires_at":%q}}`, exp)
+	if _, err := s2.CompareAndSwap(ctx, 2, rev2, []byte(active2)); !errors.Is(err, ErrForkClaimLimit) {
+		t.Fatalf("expected ErrForkClaimLimit on second active claim, got %v", err)
+	}
+
+	// Advance clock past issue #1 expiry: revalidation prunes issue #1 and admits issue #2
+	later := now.Add(2 * time.Hour)
+	exp2 := later.Add(time.Hour).Format(time.RFC3339)
+	s2Later := NewForkIndexedStore(clone, "alice", 1, 103)
+	s2Later.SetNowFunc(func() time.Time { return later })
+	active2Later := fmt.Sprintf(`{"lease":{"issue_number":2,"claim_id":"c2","owner":"alice","status":"active","expires_at":%q}}`, exp2)
+	if _, err := s2Later.CompareAndSwap(ctx, 2, rev2, []byte(active2Later)); err != nil {
+		t.Fatalf("acquire issue 2 after issue 1 expiry failed: %v", err)
 	}
 }

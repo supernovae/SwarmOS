@@ -58,6 +58,8 @@ type IssueState struct {
 	PRNumber            int                        `json:"pr_number,omitempty"`
 	EffectiveGate       contract.GateMode          `json:"effective_gate,omitempty"`
 	PRURL               string                     `json:"pr_url,omitempty"`
+	ForkRepo            string                     `json:"fork_repo,omitempty"`
+	LastForkRequestID   int64                      `json:"last_fork_request_id,omitempty"`
 }
 type Manager struct {
 	tracker     tracker.Tracker
@@ -66,6 +68,7 @@ type Manager struct {
 	repoRoot    string
 	nodeProfile *contract.NodeProfile
 	nowFn       func() time.Time
+	gateway     WorkerGateway
 	mu          sync.Mutex
 	tokens      map[int]string
 }
@@ -89,6 +92,14 @@ func (m *Manager) ConfigureStore(root string) error {
 }
 func (m *Manager) Store() coordination.Store      { return m.store }
 func (m *Manager) SetNowFunc(fn func() time.Time) { m.nowFn = fn }
+func (m *Manager) SetStore(root string, s coordination.Store) {
+	if strings.TrimSpace(root) != "" {
+		m.repoRoot = root
+	}
+	m.store = s
+}
+func (m *Manager) SetWorkerGateway(g WorkerGateway) { m.gateway = g }
+func (m *Manager) HasWorkerGateway() bool           { return m.gateway != nil }
 func (m *Manager) BindClaim(issue int, claimID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -165,6 +176,11 @@ func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (
 	if st.ProjectionCommentID == 0 {
 		if existingID := m.findProjectionCommentID(ctx, n); existingID > 0 {
 			st.ProjectionCommentID = existingID
+		}
+	}
+	if stamper, ok := m.store.(interface{ RequestID() int64 }); ok {
+		if reqID := stamper.RequestID(); reqID > 0 {
+			st.LastForkRequestID = reqID
 		}
 	}
 	b, err := json.Marshal(st)
@@ -428,6 +444,9 @@ func RenderStateProjection(wu *contract.WorkUnit, st *IssueState) string {
 	return sb.String()
 }
 func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("task approval is not permitted in fork mode")
+	}
 	actor, err := m.tracker.CurrentUser(ctx)
 	if err != nil {
 		return nil, err
@@ -509,6 +528,23 @@ func (m *Manager) trustedBase() (string, error) {
 	return workspace.ResolveBase(m.repoRoot)
 }
 func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
+	if m.gateway != nil {
+		st, err := m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "acquire",
+			IssueNumber: n,
+			Agent:       agent,
+			Phase:       phase,
+			Duration:    duration.String(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if st != nil && st.Lease.ClaimID != "" {
+			m.BindClaim(n, st.Lease.ClaimID)
+		}
+		return st, nil
+	}
 	actor, err := m.tracker.CurrentUser(ctx)
 	if err != nil {
 		return nil, err
@@ -566,6 +602,10 @@ func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string
 	if !known {
 		contributors = append(contributors, owner)
 	}
+	if st.ForkRepo != "" {
+		clearCheckpointAndHeadArtifacts(st)
+		st.ForkRepo = ""
+	}
 	st.Lease = contract.Lease{Version: 1, IssueNumber: n, ClaimID: id, Owner: owner, Agent: agent, Phase: phase, Status: "active", ClaimedAt: now, ExpiresAt: now.Add(duration), MaxRenewals: max}
 	st.Lease.Contributors = contributors
 	if m.nodeProfile != nil {
@@ -581,6 +621,141 @@ func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string
 	m.BindClaim(n, id)
 	_ = m.tracker.AddLabels(ctx, n, []string{"swarm:claimed", "swarm:in-progress"})
 	return st, nil
+}
+
+func clearCheckpointAndHeadArtifacts(st *IssueState) {
+	if st == nil {
+		return
+	}
+	st.Branch = ""
+	st.HeadSHA = ""
+	st.PRNumber = 0
+	st.PRURL = ""
+	var keptArtifacts []contract.Artifact
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactDesign || a.Type == contract.ArtifactTestPlan || a.Type == contract.ArtifactReview {
+			keptArtifacts = append(keptArtifacts, a)
+		}
+	}
+	st.Artifacts = keptArtifacts
+	var keptAttestations []contract.RoleAttestation
+	for _, att := range st.Attestations {
+		if att.ArtifactType == string(contract.ArtifactDesign) ||
+			att.ArtifactType == string(contract.ArtifactTestPlan) ||
+			att.ArtifactType == string(contract.ArtifactReview) {
+			keptAttestations = append(keptAttestations, att)
+		}
+	}
+	st.Attestations = keptAttestations
+}
+
+func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phase, forkRepo string, duration time.Duration, maxRenewals int) (*IssueState, error) {
+	actor, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if owner == "" || owner != actor {
+		return nil, fmt.Errorf("claim owner must be authenticated actor")
+	}
+	if err := contract.ValidatePhase(phase); err != nil {
+		return nil, err
+	}
+	forkRepo = strings.TrimSpace(forkRepo)
+	if forkRepo == "" || !strings.Contains(forkRepo, "/") {
+		return nil, fmt.Errorf("fork repository owner/repo is required")
+	}
+	iss, err := m.tracker.GetIssue(ctx, issue)
+	if err != nil {
+		return nil, err
+	}
+	if iss.IsEpic() {
+		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be claimed for execution", issue)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(issue, iss.Title, iss.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err = m.VerifyDependencies(ctx, wu); err != nil {
+		return nil, err
+	}
+	for attempt := range 4 {
+		st, rev, err := m.load(ctx, issue)
+		if err != nil {
+			return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
+		}
+		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		if err != nil {
+			return nil, fmt.Errorf("load approved policy: %w", err)
+		}
+		if !matchesCollaboratorAllowlist(owner, cfg.Security.ApprovedCollaborators) {
+			return nil, fmt.Errorf("actor %q is not in security.approved_collaborators", owner)
+		}
+		if err = verifyTrust(cfg.Security, iss); err != nil {
+			return nil, err
+		}
+		if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+			return nil, ErrApprovalRequired
+		}
+		policyDur, err := time.ParseDuration(cfg.Lease.Duration)
+		if err != nil || policyDur <= 0 {
+			return nil, fmt.Errorf("invalid approved lease duration")
+		}
+		effectiveDur := duration
+		if effectiveDur <= 0 || effectiveDur > policyDur {
+			effectiveDur = policyDur
+		}
+		effectiveMax := cfg.Lease.MaxRenewals
+		if !cfg.Lease.Renewable {
+			effectiveMax = 0
+		} else if maxRenewals >= 0 && maxRenewals < effectiveMax {
+			effectiveMax = maxRenewals
+		}
+		now := m.nowFn()
+		if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
+			if attempt > 0 {
+				return nil, ErrClaimRaceLost
+			}
+			return nil, &AlreadyClaimedError{IssueNumber: issue, Owner: st.Lease.Owner, ExpiresAt: st.Lease.ExpiresAt}
+		}
+		id := claimID()
+		contributors := append([]string(nil), st.Lease.Contributors...)
+		known := false
+		for _, contributor := range contributors {
+			known = known || contributor == owner
+		}
+		if !known {
+			contributors = append(contributors, owner)
+		}
+		clearCheckpointAndHeadArtifacts(st)
+		st.ForkRepo = forkRepo
+		st.Lease = contract.Lease{
+			Version:      1,
+			IssueNumber:  issue,
+			ClaimID:      id,
+			Owner:        owner,
+			Agent:        agent,
+			Phase:        phase,
+			Status:       "active",
+			ClaimedAt:    now,
+			ExpiresAt:    now.Add(effectiveDur),
+			MaxRenewals:  effectiveMax,
+			Contributors: contributors,
+		}
+		if m.nodeProfile != nil {
+			st.Lease.NodeID = m.nodeProfile.NodeID
+			st.Lease.Capabilities = append([]string(nil), m.nodeProfile.Capabilities...)
+		}
+		if _, err = m.save(ctx, issue, rev, st); err != nil {
+			if errors.Is(err, coordination.ErrConflict) {
+				continue
+			}
+			return nil, err
+		}
+		m.BindClaim(issue, id)
+		_ = m.tracker.AddLabels(ctx, issue, []string{"swarm:claimed", "swarm:in-progress"})
+		return st, nil
+	}
+	return nil, ErrClaimRaceLost
 }
 func claimID() string { b := make([]byte, 16); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func (m *Manager) Resume(ctx context.Context, n int, owner, id string) (*IssueState, error) {
@@ -636,7 +811,7 @@ func (m *Manager) checkStateClaim(ctx context.Context, n int, owner string, st *
 func (m *Manager) mutate(ctx context.Context, n int, owner string, fn func(*IssueState) error) (*IssueState, error) {
 	// Heartbeats and human decisions can legitimately race this same attempt.
 	// Re-read on CAS conflict; a successor's token never passes the next check.
-	for attempt := 0; attempt < 4; attempt++ {
+	for range 4 {
 		st, rev, err := m.load(ctx, n)
 		if err != nil {
 			return nil, err
@@ -656,6 +831,15 @@ func (m *Manager) mutate(ctx context.Context, n int, owner string, fn func(*Issu
 	return nil, coordination.ErrConflict
 }
 func (m *Manager) Renew(ctx context.Context, n int, owner string, d time.Duration) (*IssueState, error) {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "renew",
+			IssueNumber: n,
+			ClaimID:     m.token(n),
+			Duration:    d.String(),
+		})
+	}
 	if d <= 0 {
 		return nil, fmt.Errorf("renew duration must be positive")
 	}
@@ -670,12 +854,25 @@ func (m *Manager) Renew(ctx context.Context, n int, owner string, d time.Duratio
 		if st.Lease.Renewals >= st.Lease.MaxRenewals {
 			return ErrMaxRenewals
 		}
+		effectiveDur := d
+		if policyDur, err := time.ParseDuration(cfg.Lease.Duration); err == nil && policyDur > 0 && st.ForkRepo != "" && effectiveDur > policyDur {
+			effectiveDur = policyDur
+		}
 		st.Lease.Renewals++
-		st.Lease.ExpiresAt = m.nowFn().Add(d)
+		st.Lease.ExpiresAt = m.nowFn().Add(effectiveDur)
 		return nil
 	})
 }
 func (m *Manager) Release(ctx context.Context, n int, owner, reason string) (*IssueState, error) {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "release",
+			IssueNumber: n,
+			ClaimID:     m.token(n),
+			Reason:      reason,
+		})
+	}
 	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error { st.Lease.Status = "released"; st.Lease.ExpiresAt = m.nowFn(); return nil })
 	if err == nil {
 		_ = m.tracker.RemoveLabel(ctx, n, "swarm:claimed")
@@ -684,7 +881,17 @@ func (m *Manager) Release(ctx context.Context, n int, owner, reason string) (*Is
 	return st, err
 }
 func (m *Manager) Handoff(ctx context.Context, n int, owner, done, next string) (*IssueState, error) {
-	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "handoff",
+			IssueNumber: n,
+			ClaimID:     m.token(n),
+			Phase:       done,
+			NextPhase:   next,
+		})
+	}
+	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if err := contract.ValidatePhase(next); err != nil {
 			return err
 		}
@@ -694,10 +901,23 @@ func (m *Manager) Handoff(ctx context.Context, n int, owner, done, next string) 
 		st.Lease.ExpiresAt = m.nowFn()
 		return nil
 	})
+	if err == nil && m.tracker != nil && st.EffectiveGate != contract.GateNone && (done == "plan" || next == "review") {
+		_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+	}
+	return st, err
 }
 
 // RequireGate persists only stronger execution requirements for this approval.
 func (m *Manager) RequireGate(ctx context.Context, issue int, owner string, requested contract.GateMode) (*IssueState, error) {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "require-gate",
+			IssueNumber: issue,
+			ClaimID:     m.token(issue),
+			Gate:        requested,
+		})
+	}
 	return m.mutate(ctx, issue, owner, func(state *IssueState) error {
 		gate, err := contract.ResolveGate(requested, state.EffectiveGate, "")
 		if err != nil {
@@ -708,7 +928,17 @@ func (m *Manager) RequireGate(ctx context.Context, issue int, owner string, requ
 	})
 }
 func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status string) (*IssueState, error) {
-	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "update-phase",
+			IssueNumber: n,
+			ClaimID:     m.token(n),
+			Phase:       phase,
+			Status:      status,
+		})
+	}
+	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if phase != "" {
 			if err := contract.ValidatePhase(phase); err != nil {
 				return err
@@ -720,11 +950,18 @@ func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status s
 		}
 		return nil
 	})
+	if err == nil && m.tracker != nil && st.EffectiveGate != contract.GateNone && phase == "review" {
+		_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+	}
+	return st, err
 }
 
 // RecordHumanReview records an authenticated maintainer decision without
 // borrowing or extending the worker's lease.
 func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes string) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("human review is not permitted in fork mode")
+	}
 	if verdict != "APPROVED" && verdict != "CHANGES_REQUESTED" {
 		return nil, fmt.Errorf("invalid human review verdict %q", verdict)
 	}
@@ -792,19 +1029,55 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 // RecordSubmission is fenced by the owner token while an attempt is active
 // and makes PR identity durable for retry reconciliation.
 func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, number int, url string) (*IssueState, error) {
-	if number <= 0 || url == "" {
+	if number <= 0 {
 		return nil, fmt.Errorf("submission requires PR number and URL")
 	}
-	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "record-submission",
+			IssueNumber: n,
+			ClaimID:     m.token(n),
+			PRNumber:    number,
+		})
+	}
+	if url == "" {
+		return nil, fmt.Errorf("submission requires PR number and URL")
+	}
+	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
 		st.PRNumber = number
 		st.PRURL = url
 		st.Lease.Status = "completed"
 		st.Lease.Phase = "submitted"
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	if m.tracker != nil {
+		for _, label := range []string{"swarm:in-progress", "swarm:claimed"} {
+			if err := m.tracker.RemoveLabel(ctx, n, label); err != nil {
+				return st, err
+			}
+		}
+		if err := m.tracker.AddLabels(ctx, n, []string{"swarm:pr-open"}); err != nil {
+			return st, err
+		}
+	}
+	return st, nil
 }
 func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art contract.Artifact) (*IssueState, error) {
-	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+	if m.gateway != nil {
+		artCopy := art
+		return m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "update-artifact",
+			IssueNumber: n,
+			ClaimID:     m.token(n),
+			Artifact:    &artCopy,
+		})
+	}
+	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if art.IssueNumber == 0 {
 			art.IssueNumber = n
 		}
@@ -914,8 +1187,44 @@ func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art c
 		st.Artifacts = append(st.Artifacts, art)
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	if m.tracker != nil {
+		switch art.Type {
+		case contract.ArtifactTestPlan:
+			if st.EffectiveGate != contract.GateNone {
+				_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+			}
+		case contract.ArtifactReview:
+			if art.Verdict == "APPROVED" {
+				if err := m.tracker.RemoveLabel(ctx, n, "swarm:plan-review"); err != nil {
+					return st, err
+				}
+				if err := m.tracker.AddLabels(ctx, n, []string{"swarm:plan-approved"}); err != nil {
+					return st, err
+				}
+			} else {
+				_ = m.tracker.RemoveLabel(ctx, n, "swarm:plan-approved")
+				if err := m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"}); err != nil {
+					return st, err
+				}
+			}
+		}
+	}
+	return st, nil
 }
 func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, head string) (*IssueState, error) {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{
+			Version:     1,
+			Operation:   "record-checkpoint",
+			IssueNumber: n,
+			ClaimID:     m.token(n),
+			Branch:      branch,
+			HeadSHA:     head,
+		})
+	}
 	if branch == "" || head == "" || !strings.HasPrefix(branch, fmt.Sprintf("swarm/issue-%d-", n)) {
 		return nil, fmt.Errorf("invalid checkpoint branch")
 	}
@@ -925,6 +1234,9 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	}
 	if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
 		return nil, err
+	}
+	if st.ForkRepo != "" && branch != fmt.Sprintf("swarm/issue-%d-%s", n, st.Lease.ClaimID) {
+		return nil, fmt.Errorf("fork checkpoint branch %q does not match active claim %q", branch, st.Lease.ClaimID)
 	}
 	if st.Branch != "" && st.Branch != branch {
 		return nil, fmt.Errorf("checkpoint branch differs from approved branch")

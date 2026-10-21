@@ -76,6 +76,78 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 	}, nil
 }
 
+func NewGitHubTrackerWithClient(owner, repo string, client *api.RESTClient) *GitHubTracker {
+	return &GitHubTracker{
+		owner:  owner,
+		repo:   repo,
+		client: client,
+	}
+}
+
+func (g *GitHubTracker) UpstreamRepo() string {
+	return g.owner + "/" + g.repo
+}
+
+func (g *GitHubTracker) RESTClient() *api.RESTClient {
+	return g.client
+}
+
+func (g *GitHubTracker) VerifyForkRepository(ctx context.Context, forkSlug, expectedOwner string, requirePush bool) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	forkSlug = strings.TrimSpace(forkSlug)
+	parts := strings.Split(forkSlug, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return "", fmt.Errorf("invalid fork repository %q: expected owner/repo", forkSlug)
+	}
+	if expectedOwner != "" && !strings.EqualFold(parts[0], expectedOwner) {
+		return "", fmt.Errorf("fork repository %q owner %q does not match authenticated user %q", forkSlug, parts[0], expectedOwner)
+	}
+	path := fmt.Sprintf("repos/%s/%s", url.PathEscape(parts[0]), url.PathEscape(parts[1]))
+	var resp struct {
+		FullName string `json:"full_name"`
+		Name     string `json:"name"`
+		Fork     bool   `json:"fork"`
+		Owner    struct {
+			Login string `json:"login"`
+		} `json:"owner"`
+		Source struct {
+			FullName string `json:"full_name"`
+		} `json:"source"`
+		Permissions *struct {
+			Push  bool `json:"push"`
+			Admin bool `json:"admin"`
+		} `json:"permissions,omitempty"`
+	}
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
+		return "", fmt.Errorf("verify fork repository %q: %w", forkSlug, err)
+	}
+	if !resp.Fork {
+		return "", fmt.Errorf("repository %q is not a GitHub fork", forkSlug)
+	}
+	upstream := g.UpstreamRepo()
+	if !strings.EqualFold(resp.Source.FullName, upstream) {
+		return "", fmt.Errorf("fork repository %q source %q does not match upstream %q", forkSlug, resp.Source.FullName, upstream)
+	}
+	if expectedOwner != "" && !strings.EqualFold(resp.Owner.Login, expectedOwner) {
+		return "", fmt.Errorf("fork repository %q owner %q does not match %q", forkSlug, resp.Owner.Login, expectedOwner)
+	}
+	if requirePush {
+		if resp.Permissions == nil || (!resp.Permissions.Push && !resp.Permissions.Admin) {
+			return "", fmt.Errorf("authenticated user lacks push permission on fork repository %q", forkSlug)
+		}
+	}
+	canonical := strings.TrimSpace(resp.FullName)
+	if canonical == "" && resp.Owner.Login != "" && resp.Name != "" {
+		canonical = resp.Owner.Login + "/" + resp.Name
+	}
+	if canonical == "" {
+		canonical = forkSlug
+	}
+	return canonical, nil
+}
+
 func (g *GitHubTracker) BackendName() string {
 	return fmt.Sprintf("github (%s/%s)", g.owner, g.repo)
 }
@@ -374,6 +446,7 @@ type ghCommentResponse struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 	User              struct {
 		Login string `json:"login"`
+		Type  string `json:"type"`
 	} `json:"user"`
 }
 
@@ -389,13 +462,37 @@ func (g *GitHubTracker) ListComments(ctx context.Context, issueNumber int) ([]*C
 			return nil, fmt.Errorf("github ListComments #%d page %d: %w", issueNumber, page, err)
 		}
 		for _, r := range rawList {
-			out = append(out, &Comment{ID: r.ID, IssueNum: issueNumber, Author: r.User.Login, AuthorAssociation: r.AuthorAssociation, Body: r.Body, HTMLURL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+			out = append(out, &Comment{ID: r.ID, IssueNum: issueNumber, Author: r.User.Login, AuthorAssociation: r.AuthorAssociation, AuthorType: r.User.Type, Body: r.Body, HTMLURL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
 		}
 		if len(rawList) < 100 {
 			break
 		}
 	}
 	return out, nil
+}
+
+func (g *GitHubTracker) GetComment(ctx context.Context, commentID int64) (*Comment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if commentID <= 0 {
+		return nil, fmt.Errorf("invalid comment id %d", commentID)
+	}
+	path := fmt.Sprintf("repos/%s/%s/issues/comments/%d", g.owner, g.repo, commentID)
+	var r ghCommentResponse
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &r); err != nil {
+		return nil, fmt.Errorf("github GetComment %d: %w", commentID, err)
+	}
+	return &Comment{
+		ID:                r.ID,
+		Author:            r.User.Login,
+		AuthorAssociation: r.AuthorAssociation,
+		AuthorType:        r.User.Type,
+		Body:              r.Body,
+		HTMLURL:           r.HTMLURL,
+		CreatedAt:         r.CreatedAt,
+		UpdatedAt:         r.UpdatedAt,
+	}, nil
 }
 
 func (g *GitHubTracker) CreateComment(ctx context.Context, issueNumber int, body string) (*Comment, error) {
@@ -410,6 +507,7 @@ func (g *GitHubTracker) CreateComment(ctx context.Context, issueNumber int, body
 		IssueNum:          issueNumber,
 		Author:            r.User.Login,
 		AuthorAssociation: r.AuthorAssociation,
+		AuthorType:        r.User.Type,
 		Body:              r.Body,
 		HTMLURL:           r.HTMLURL,
 		CreatedAt:         r.CreatedAt,
@@ -425,12 +523,13 @@ func (g *GitHubTracker) UpdateComment(ctx context.Context, commentID int64, body
 		return nil, fmt.Errorf("github UpdateComment %d: %w", commentID, err)
 	}
 	return &Comment{
-		ID:        r.ID,
-		Author:    r.User.Login,
-		Body:      r.Body,
-		HTMLURL:   r.HTMLURL,
-		CreatedAt: r.CreatedAt,
-		UpdatedAt: r.UpdatedAt,
+		ID:         r.ID,
+		Author:     r.User.Login,
+		AuthorType: r.User.Type,
+		Body:       r.Body,
+		HTMLURL:    r.HTMLURL,
+		CreatedAt:  r.CreatedAt,
+		UpdatedAt:  r.UpdatedAt,
 	}, nil
 }
 
@@ -526,7 +625,11 @@ func (g *GitHubTracker) FindDraftPR(ctx context.Context, head, base string) (*Pu
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	q := url.Values{"state": []string{"open"}, "head": []string{g.owner + ":" + head}, "base": []string{base}, "per_page": []string{"100"}}
+	qualifiedHead := head
+	if !strings.Contains(head, ":") {
+		qualifiedHead = g.owner + ":" + head
+	}
+	q := url.Values{"state": []string{"open"}, "head": []string{qualifiedHead}, "base": []string{base}, "per_page": []string{"100"}}
 	path := fmt.Sprintf("repos/%s/%s/pulls?%s", g.owner, g.repo, q.Encode())
 	var prs []struct {
 		Number  int    `json:"number"`
@@ -544,6 +647,56 @@ func (g *GitHubTracker) FindDraftPR(ctx context.Context, head, base string) (*Pu
 		}
 	}
 	return nil, nil
+}
+
+func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if number <= 0 {
+		return nil, fmt.Errorf("invalid pull request number %d", number)
+	}
+	path := fmt.Sprintf("repos/%s/%s/pulls/%d", g.owner, g.repo, number)
+	var resp struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		Body    string `json:"body"`
+		State   string `json:"state"`
+		Draft   bool   `json:"draft"`
+		HTMLURL string `json:"html_url"`
+		Head    struct {
+			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
+			Repo struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
+		} `json:"head"`
+		Base struct {
+			Ref  string `json:"ref"`
+			Repo struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
+		} `json:"base"`
+	}
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
+		return nil, fmt.Errorf("github GetPullRequest #%d: %w", number, err)
+	}
+	draft := resp.Draft
+	if resp.State != "" && !strings.EqualFold(resp.State, "open") {
+		draft = false
+	}
+	return &PullRequest{
+		Number:   resp.Number,
+		Title:    resp.Title,
+		Body:     resp.Body,
+		Head:     resp.Head.Ref,
+		HeadRepo: resp.Head.Repo.FullName,
+		HeadSHA:  resp.Head.SHA,
+		Base:     resp.Base.Ref,
+		BaseRepo: resp.Base.Repo.FullName,
+		Draft:    draft,
+		HTMLURL:  resp.HTMLURL,
+	}, nil
 }
 
 func (g *GitHubTracker) GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error) {

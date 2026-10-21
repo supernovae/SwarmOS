@@ -74,6 +74,7 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			_ = workspace.FetchCommit(root, "origin", state.BaseSHA)
 			cfg, err := harness.LoadConfigAt(root, state.BaseSHA)
 			if err != nil {
 				return err
@@ -132,9 +133,7 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if state.EffectiveGate != contract.GateNone {
-					_ = tr.AddLabels(ctx, issue, []string{"swarm:plan-review"})
-				}
+				// Plan-review label projection is handled by LeaseManager.UpdateArtifact.
 				nextPhase := ""
 				if handoff {
 					nextPhase = "implement"
@@ -170,7 +169,11 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			branch := state.Branch
 			if branch == "" {
-				branch = workspace.BranchName(issue, iss.Title)
+				if rootOpts.Fork {
+					branch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
+				} else {
+					branch = workspace.BranchName(issue, iss.Title)
+				}
 			}
 			summary, implBody := stageImplementationSummary(worktree, issue)
 			head, err := workspace.Checkpoint(ctx, worktree, branch)
@@ -187,7 +190,7 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA})
+			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
 			if report != nil {
 				if report.Artifact.Metadata == nil {
 					report.Artifact.Metadata = make(map[string]string)
@@ -196,6 +199,11 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 					report.Artifact.Metadata[k] = v
 				}
 				if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
+					return err
+				}
+			}
+			if rootOpts.Fork {
+				if err := workspace.PushForkCheckpoint(ctx, root, rootOpts.effectiveForkRemote(), branch, head); err != nil {
 					return err
 				}
 			}

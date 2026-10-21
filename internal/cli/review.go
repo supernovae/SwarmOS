@@ -25,6 +25,9 @@ func newReviewCmd(rootOpts *RootOptions) *cobra.Command {
 			if notes != "" && !approve && !reject {
 				return fmt.Errorf("--notes requires --approve or --reject")
 			}
+			if rootOpts.Fork && (approve || reject) {
+				return fmt.Errorf("human review (--approve and --reject) is maintainer-only and cannot be used with --fork")
+			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -102,12 +102,24 @@ type SwarmConfig struct {
 	Lease        LeaseConfig            `yaml:"lease" json:"lease"`
 	Security     SecurityConfig         `yaml:"security" json:"security"`
 	Agents       map[string]AgentConfig `yaml:"agents" json:"agents"`
+	Fork         *ForkConfig            `yaml:"fork,omitempty" json:"fork,omitempty"`
 }
 
 type LeaseConfig struct {
 	Duration    string `yaml:"duration" json:"duration"`
 	Renewable   bool   `yaml:"renewable" json:"renewable"`
 	MaxRenewals int    `yaml:"max_renewals" json:"max_renewals"`
+}
+
+type ForkConfig struct {
+	MaxActiveClaims int `yaml:"max_active_claims" json:"max_active_claims"`
+}
+
+func (c *SwarmConfig) MaxActiveForkClaims() int {
+	if c == nil || c.Fork == nil || c.Fork.MaxActiveClaims <= 0 {
+		return 1
+	}
+	return c.Fork.MaxActiveClaims
 }
 
 type SecurityConfig struct {

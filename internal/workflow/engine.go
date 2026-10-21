@@ -42,6 +42,8 @@ type WorkOptions struct {
 	Headless       bool
 	Handoff        bool
 	LeaseDuration  time.Duration
+	ForkMode       bool
+	ForkRemote     string
 	OnClaim        func(*lease.IssueState) error // persist fencing token before setup
 }
 
@@ -81,6 +83,8 @@ type Engine struct {
 	LeaseManager *lease.Manager
 	Config       *contract.SwarmConfig
 	repoRoot     string
+	ForkMode     bool
+	ForkRemote   string
 }
 
 func NewEngine(repoRoot string, tr tracker.Tracker) (*Engine, error) {
@@ -96,6 +100,20 @@ func NewEngine(repoRoot string, tr tracker.Tracker) (*Engine, error) {
 		mgr.SetNodeProfile(prof)
 	}
 	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot}, nil
+}
+
+func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string) *Engine {
+	if prof, err := node.LoadOrDetectProfile(""); err == nil && mgr != nil {
+		mgr.SetNodeProfile(prof)
+	}
+	return &Engine{
+		Tracker:      tr,
+		LeaseManager: mgr,
+		Config:       cfg,
+		repoRoot:     repoRoot,
+		ForkMode:     forkMode,
+		ForkRemote:   forkRemote,
+	}
 }
 
 // ResolveRoleAgent applies role override, generic override, repository role,
@@ -170,6 +188,7 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	if state == nil || state.BaseSHA == "" {
 		return nil, errors.New("task has no approved immutable base")
 	}
+	_ = workspace.FetchCommit(opts.RepoRoot, "origin", state.BaseSHA)
 	cfg, err := harness.LoadConfigAt(opts.RepoRoot, state.BaseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load approved base config: %w", err)
@@ -362,7 +381,23 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	if err := check(); err != nil {
 		return nil, err
 	}
-	wtPath, branch, err := workspace.ProvisionAt(opts.RepoRoot, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, st.Branch, st.HeadSHA)
+	forkMode := e.ForkMode || opts.ForkMode
+	forkRemote := strings.TrimSpace(opts.ForkRemote)
+	if forkRemote == "" {
+		forkRemote = strings.TrimSpace(e.ForkRemote)
+	}
+	if forkRemote == "" {
+		forkRemote = "fork"
+	}
+	targetBranch := st.Branch
+	checkpointRemote := "origin"
+	if forkMode {
+		checkpointRemote = forkRemote
+		if targetBranch == "" {
+			targetBranch = workspace.ForkBranchName(opts.IssueNumber, st.Lease.ClaimID)
+		}
+	}
+	wtPath, branch, err := workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -434,12 +469,6 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 				next := "implement"
 				if gate != contract.GateNone {
 					next = "review"
-					if err := check(); err != nil {
-						return res, err
-					}
-					if err := e.Tracker.AddLabels(ctx, opts.IssueNumber, []string{"swarm:plan-review"}); err != nil {
-						return res, err
-					}
 				}
 				if err := check(); err != nil {
 					return res, err
@@ -456,14 +485,16 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		if err := check(); err != nil {
 			return res, err
 		}
-		if err := e.Tracker.AddLabels(ctx, opts.IssueNumber, []string{"swarm:plan-review"}); err != nil {
-			return res, err
-		}
 		if opts.Handoff {
 			if st, err = e.LeaseManager.Handoff(ctx, opts.IssueNumber, opts.Owner, "plan", "review"); err != nil {
 				return res, err
 			}
 			res.State, res.HandedOffToPhase = st, "review"
+		} else {
+			if st, err = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "review", "active"); err != nil {
+				return res, err
+			}
+			res.State = st
 		}
 		res.PausedForHuman, res.PhaseCompleted = true, "plan"
 		return res, nil
@@ -539,6 +570,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	if st.HeadSHA, err = workspace.Checkpoint(ctx, wtPath, branch); err != nil {
 		return res, err
 	}
+	if forkMode {
+		if err := workspace.PushForkCheckpoint(ctx, opts.RepoRoot, forkRemote, branch, st.HeadSHA); err != nil {
+			return res, err
+		}
+	}
 	if st, err = e.LeaseManager.RecordCheckpoint(ctx, opts.IssueNumber, opts.Owner, branch, st.HeadSHA); err != nil {
 		return res, err
 	}
@@ -564,7 +600,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	if err := check(); err != nil {
 		return res, err
 	}
-	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA})
+	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA, ForkMode: forkMode})
 	if report != nil {
 		report.Artifact.Metadata = attestationMetadata(testerRun.Attestation, report.Artifact.Metadata)
 		updated, updateErr := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, report.Artifact)
@@ -750,19 +786,10 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
 			return verdict, updated, fmt.Errorf("%w: %v", ErrLeaseLost, err)
 		}
-		if err := e.Tracker.AddLabels(ctx, wu.IssueNumber, []string{"swarm:plan-review"}); err != nil {
-			return verdict, updated, err
-		}
 		return verdict, updated, fmt.Errorf("%w: reviewer %q returned %s", ErrPlanReviewRejected, reviewerAgent, verdict)
 	}
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
 		return verdict, updated, fmt.Errorf("%w: %v", ErrLeaseLost, err)
-	}
-	if err := e.Tracker.RemoveLabel(ctx, wu.IssueNumber, "swarm:plan-review"); err != nil {
-		return verdict, updated, err
-	}
-	if err := e.Tracker.AddLabels(ctx, wu.IssueNumber, []string{"swarm:plan-approved"}); err != nil {
-		return verdict, updated, err
 	}
 	return verdict, updated, nil
 }

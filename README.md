@@ -164,13 +164,41 @@ swarm node init
 swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 ```
 
+
+---
+
+## Fork-Based Open-Source Contributions (`--fork`)
+
+External contributors do not need push access to the upstream repository. When maintainers opt in to the upstream fork coordinator Action, contributors can work in isolated local worktrees, push checkpoints to their own personal GitHub fork, and open cross-repository Draft PRs—while issue approval, validation policy, human plan review, and PR merge remain upstream maintainer actions.
+
+```bash
+# Maintainer (once, on the upstream default branch):
+# Set SWARM_VERSION_PIN to an immutable published fork-capable release tag or full 40-char commit SHA
+export SWARM_VERSION_PIN="<published-fork-capable-tag-or-full-commit-sha>"
+swarm init --fork-coordinator --swarm-version "$SWARM_VERSION_PIN"
+swarm issue approve 42 --backend github
+
+# Contributor (clones upstream as origin, adds writable personal fork as "fork"):
+git clone https://github.com/OWNER/REPO.git
+cd REPO
+gh repo fork --remote=true --remote-name=fork
+
+# Claim, work on local branch swarm/issue-42-<claim_id>, push checkpoints to "fork",
+# and open a fork-qualified Draft PR (<fork-owner>:swarm/issue-42-<claim_id> -> upstream):
+swarm --fork claim 42
+swarm --fork work 42
+swarm --fork renew 42   # optional when you need additional lease time
+swarm --fork submit 42
+```
+
+See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for architecture details, per-contributor claim caps (`fork.max_active_claims`), and security boundaries.
 ---
 
 ## CLI Overview
 
 | Command | What It Does |
 | :--- | :--- |
-| `swarm init [--force] [--sync-labels] [--template-dir <dir>] [--swarm-version <ref>]` | Scaffold `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI workflow, and `/swarm-*` slash commands. |
+| `swarm init [--force] [--sync-labels] [--template-dir <dir>] [--swarm-version <ref>] [--fork-coordinator]` | Scaffold `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. |
 | `swarm doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. |
 | `swarm issue create\|epic create\|approve\|lint\|decompose` | Create draft WorkUnits (`--parent`), standalone Epics (`--body-file`), approve revisions, lint schemas, or split WorkUnits into linked draft sub-issues. |
 | `swarm plan [--from <file> \| --scan] [--normalize] [--apply] [--ready]` | Preview `Step N` tasks from a roadmap, publish a native `Epic` with linked draft child WorkUnits (`--apply`), or scan and triage open issues (`--scan`). |
@@ -184,9 +212,10 @@ swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 | `swarm repo add\|list\|remove` | Manage the local multi-repository registry (`~/.config/swarm/repos.yaml`). |
 | `swarm node init\|status\|run` | Configure a worker node profile and run concurrent worker pools (`--concurrency`, `--max-jobs`, `--watch`). |
 | `swarm renew <issue>` / `swarm release <issue>` | Extend an active lease's TTL or release a claim back to the queue. |
+| `swarm fork-coordinator --event <path> [--json]` | Process a verified `issue_comment.created` fork worker request inside the upstream GitHub Action. |
 | `swarm version [--json]` | Print version, commit, and platform metadata. |
 
-Every lifecycle command supports `--json` for scripts and automation.
+Every lifecycle command supports `--json` for scripts and automation, and worker commands accept `--fork [--fork-remote <name>]` for personal-fork contributions.
 
 ---
 
@@ -194,6 +223,7 @@ Every lifecycle command supports `--json` for scripts and automation.
 
 - **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](docs/ADMIN_GUIDE.md)** — Daily maintainer playbook for roadmap decomposition (`swarm plan --from`), backlog scanning (`swarm plan --scan`), and auditing provenance-attested Draft PRs.
 - **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](docs/GITHUB.md)** — Configure repository rulesets, `SWARM_GITHUB_TOKEN` auth without `gh` CLI, and role-separated collaborator allowlists.
+- **[Fork Mode Guide (`docs/fork-mode.md`)](docs/fork-mode.md)** — Contribute from a personal GitHub fork without upstream push access using the upstream fork coordinator Action.
 - **[Working with Grok Bot (`docs/grokbot.md`)](docs/grokbot.md)** — Connect Grok Bot to your repositories, talk to your codebase, run PR reviews, and coordinate SwarmOS workers.
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](docs/openai-dot.md)** — Configure Codex Cloud environments and remote repositories so your Dot can plan, review, and ship changes.
 - **[Project & Maintainer Setup (`docs/project.md`)](docs/project.md)** — Configure `.swarm/config.yaml`, validation rules, plan gates, and repository protections.

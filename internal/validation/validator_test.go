@@ -165,3 +165,29 @@ func TestValidationRejectsMutableBaseline(t *testing.T) {
 		})
 	}
 }
+
+func TestForkModeProtectedPathsRejectHarnessAndWorkflowsDespiteAllowHarnessChanges(t *testing.T) {
+	ctx := context.Background()
+	for _, tamperedFile := range []string{
+		".swarm/validation/required-checks.yaml",
+		".swarm/config.yaml",
+		".github/workflows/swarm-fork-coordinator.yml",
+	} {
+		t.Run(tamperedFile, func(t *testing.T) {
+			repo := setupGitRepoForValidation(t)
+			base := gitRevision(t, repo, "HEAD")
+			full := filepath.Join(repo, tamperedFile)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte("tampered: true\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			wu := &contract.WorkUnit{ID: "ISSUE-42", IssueNumber: 42, AllowHarnessChanges: true}
+			_, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base, ForkMode: true})
+			if !errors.Is(err, ErrProtectedPathModified) {
+				t.Fatalf("ForkMode Validate(%s) with AllowHarnessChanges=true = %v, want ErrProtectedPathModified", tamperedFile, err)
+			}
+		})
+	}
+}

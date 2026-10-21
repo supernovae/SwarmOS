@@ -5,18 +5,27 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/fork"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
+	"github.com/supernovae/swarmos/internal/workspace"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 type cliFixture struct {
@@ -475,3 +484,641 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 		t.Fatalf("doctor must be read-only, created %d issues", mockTr.created)
 	}
 }
+
+func TestForkCLISmoke(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
+	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
+
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v in %s: %v (%s)", args, dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	originBare := filepath.Join(tmp, "octo", "swarm.git")
+	aliceForkBare := filepath.Join(tmp, "alice", "swarm.git")
+	bobForkBare := filepath.Join(tmp, "bob", "swarm.git")
+	for _, dir := range []string{originBare, aliceForkBare, bobForkBare} {
+		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(tmp, "init", "--bare", "--initial-branch=main", originBare)
+
+	upstreamRoot := filepath.Join(tmp, "upstream")
+	git(tmp, "clone", originBare, upstreamRoot)
+	git(upstreamRoot, "config", "user.name", "Maintainer")
+	git(upstreamRoot, "config", "user.email", "maintainer@example.invalid")
+	pin := "a1b2c3d4e5f60123456789abcdef0123456789ab"
+	if _, err := harness.InitRepository(harness.InitOptions{
+		RepoRoot:        upstreamRoot,
+		SwarmVersion:    pin,
+		ForkCoordinator: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(upstreamRoot, ".swarm", "config.yaml")
+	cfgBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgWithMock := string(cfgBytes) + "\n  mock:\n    binary: git\n    harness: mock\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgWithMock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checksPolicy := "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
+	if err := os.WriteFile(filepath.Join(upstreamRoot, ".swarm", "validation", "required-checks.yaml"), []byte(checksPolicy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(upstreamRoot, "add", ".")
+	git(upstreamRoot, "commit", "-m", "approved upstream baseline")
+	git(upstreamRoot, "push", "origin", "main")
+	git(originBare, "symbolic-ref", "HEAD", "refs/heads/main")
+	shaA := git(upstreamRoot, "rev-parse", "HEAD")
+
+	git(tmp, "clone", "--bare", originBare, aliceForkBare)
+	git(tmp, "clone", "--bare", originBare, bobForkBare)
+
+	var mu sync.Mutex
+	now := time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC)
+	nextCommentID := int64(1000)
+	nextPRNum := 0
+	wuBody := "```yaml swarm-workunit\nid: ISSUE-42\nobjective: Exercise fork contributor flow\nconstraints: [No upstream push access]\nacceptance: [Cross-repo Draft PR opened]\nworkflow: feature\ngate: agent\nallow_harness_changes: true\n```"
+	issues := map[int]*tracker.Issue{
+		42: {
+			Number:  42,
+			Title:   "Fork mode smoke task",
+			Body:    wuBody,
+			State:   "open",
+			Author:  "maintainer",
+			HTMLURL: "https://github.com/octo/swarm/issues/42",
+		},
+	}
+	comments := make(map[int64]*tracker.Comment)
+	issueComments := make(map[int][]int64)
+	prs := make(map[int]*tracker.PullRequest)
+
+	resolveHeadSHA := func(head string) string {
+		parts := strings.SplitN(head, ":", 2)
+		branch := head
+		bare := originBare
+		if len(parts) == 2 {
+			branch = parts[1]
+			switch parts[0] {
+			case "alice":
+				bare = aliceForkBare
+			case "bob":
+				bare = bobForkBare
+			}
+		}
+		out, err := exec.Command("git", "-C", bare, "rev-parse", "refs/heads/"+branch).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	newGHTracker := func(login, userType string) *tracker.GitHubTracker {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			writeResp := func(v any) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(v)
+			}
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/user":
+				writeResp(map[string]any{"login": login, "type": userType})
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/collaborators/"):
+				perm := "read"
+				if login == "maintainer" {
+					perm = "admin"
+				}
+				writeResp(map[string]any{"permission": perm})
+			case r.Method == http.MethodGet && (r.URL.Path == "/repos/alice/swarm" || r.URL.Path == "/repos/bob/swarm"):
+				owner := strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/"), "/")[0]
+				writeResp(map[string]any{
+					"full_name":   owner + "/swarm",
+					"name":        "swarm",
+					"fork":        true,
+					"owner":       map[string]any{"login": owner},
+					"source":      map[string]any{"full_name": "octo/swarm"},
+					"permissions": map[string]any{"push": login == owner},
+				})
+			case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/issues/comments/"):
+				id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/repos/octo/swarm/issues/comments/"), 10, 64)
+				c, ok := comments[id]
+				if !ok {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				writeResp(map[string]any{
+					"id":         c.ID,
+					"body":       c.Body,
+					"created_at": c.CreatedAt,
+					"updated_at": c.UpdatedAt,
+					"user":       map[string]any{"login": c.Author, "type": c.AuthorType},
+				})
+			case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/issues/comments/"):
+				id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/repos/octo/swarm/issues/comments/"), 10, 64)
+				c, ok := comments[id]
+				if !ok {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				var payload struct {
+					Body string `json:"body"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				c.Body = payload.Body
+				writeResp(map[string]any{
+					"id":         c.ID,
+					"body":       c.Body,
+					"created_at": c.CreatedAt,
+					"updated_at": c.UpdatedAt,
+					"user":       map[string]any{"login": c.Author, "type": c.AuthorType},
+				})
+			case strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/issues/"):
+				rest := strings.TrimPrefix(r.URL.Path, "/repos/octo/swarm/issues/")
+				parts := strings.Split(rest, "/")
+				issueNum, _ := strconv.Atoi(parts[0])
+				iss, ok := issues[issueNum]
+				if !ok {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				if len(parts) == 1 && r.Method == http.MethodGet {
+					var lbs []map[string]string
+					for _, l := range iss.Labels {
+						lbs = append(lbs, map[string]string{"name": l})
+					}
+					writeResp(map[string]any{
+						"id":     issueNum,
+						"number": iss.Number,
+						"title":  iss.Title,
+						"body":   iss.Body,
+						"state":  iss.State,
+						"user":   map[string]any{"login": iss.Author},
+						"labels": lbs,
+					})
+					return
+				}
+				if len(parts) == 2 && parts[1] == "comments" {
+					if r.Method == http.MethodGet {
+						var list []map[string]any
+						for _, cid := range issueComments[issueNum] {
+							c := comments[cid]
+							list = append(list, map[string]any{
+								"id":         c.ID,
+								"body":       c.Body,
+								"created_at": c.CreatedAt,
+								"updated_at": c.UpdatedAt,
+								"user":       map[string]any{"login": c.Author, "type": c.AuthorType},
+							})
+						}
+						writeResp(list)
+						return
+					}
+					if r.Method == http.MethodPost {
+						var payload struct {
+							Body string `json:"body"`
+						}
+						_ = json.NewDecoder(r.Body).Decode(&payload)
+						nextCommentID++
+						c := &tracker.Comment{
+							ID:         nextCommentID,
+							IssueNum:   issueNum,
+							Author:     login,
+							AuthorType: userType,
+							Body:       payload.Body,
+							CreatedAt:  now,
+							UpdatedAt:  now,
+						}
+						comments[c.ID] = c
+						issueComments[issueNum] = append(issueComments[issueNum], c.ID)
+						writeResp(map[string]any{
+							"id":         c.ID,
+							"body":       c.Body,
+							"created_at": c.CreatedAt,
+							"updated_at": c.UpdatedAt,
+							"user":       map[string]any{"login": c.Author, "type": c.AuthorType},
+						})
+						return
+					}
+				}
+				if len(parts) == 2 && parts[1] == "labels" && r.Method == http.MethodPost {
+					if login != "maintainer" && login != fork.ActionsBotLogin {
+						http.Error(w, "contributor cannot mutate upstream labels", http.StatusForbidden)
+						return
+					}
+					var payload struct {
+						Labels []string `json:"labels"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&payload)
+					for _, lb := range payload.Labels {
+						if !slices.Contains(iss.Labels, lb) {
+							iss.Labels = append(iss.Labels, lb)
+						}
+					}
+					writeResp(map[string]any{})
+					return
+				}
+				if len(parts) == 3 && parts[1] == "labels" && r.Method == http.MethodDelete {
+					if login != "maintainer" && login != fork.ActionsBotLogin {
+						http.Error(w, "contributor cannot mutate upstream labels", http.StatusForbidden)
+						return
+					}
+					target := parts[2]
+					var kept []string
+					for _, lb := range iss.Labels {
+						if lb != target {
+							kept = append(kept, lb)
+						}
+					}
+					iss.Labels = kept
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			case r.URL.Path == "/repos/octo/swarm/pulls" && r.Method == http.MethodGet:
+				wantHead := r.URL.Query().Get("head")
+				wantBase := r.URL.Query().Get("base")
+				var list []map[string]any
+				for _, pr := range prs {
+					qualified := pr.Head
+					if pr.HeadRepo != "" {
+						owner := strings.Split(pr.HeadRepo, "/")[0]
+						qualified = owner + ":" + pr.Head
+					}
+					if pr.Draft && qualified == wantHead && pr.Base == wantBase {
+						list = append(list, map[string]any{
+							"number":   pr.Number,
+							"title":    pr.Title,
+							"body":     pr.Body,
+							"draft":    pr.Draft,
+							"html_url": pr.HTMLURL,
+						})
+					}
+				}
+				writeResp(list)
+				return
+			case r.URL.Path == "/repos/octo/swarm/pulls" && r.Method == http.MethodPost:
+				var payload struct {
+					Title string `json:"title"`
+					Body  string `json:"body"`
+					Head  string `json:"head"`
+					Base  string `json:"base"`
+					Draft bool   `json:"draft"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&payload)
+				nextPRNum++
+				headBranch := payload.Head
+				headRepo := "octo/swarm"
+				if parts := strings.SplitN(payload.Head, ":", 2); len(parts) == 2 {
+					headRepo = parts[0] + "/swarm"
+					headBranch = parts[1]
+				}
+				pr := &tracker.PullRequest{
+					Number:   nextPRNum,
+					Title:    payload.Title,
+					Body:     payload.Body,
+					Head:     headBranch,
+					HeadRepo: headRepo,
+					HeadSHA:  resolveHeadSHA(payload.Head),
+					Base:     payload.Base,
+					BaseRepo: "octo/swarm",
+					Draft:    payload.Draft,
+					HTMLURL:  fmt.Sprintf("https://github.com/octo/swarm/pull/%d", nextPRNum),
+				}
+				prs[pr.Number] = pr
+				writeResp(map[string]any{
+					"number":   pr.Number,
+					"title":    pr.Title,
+					"body":     pr.Body,
+					"draft":    pr.Draft,
+					"html_url": pr.HTMLURL,
+				})
+				return
+			case strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/pulls/") && r.Method == http.MethodPatch:
+				prNum, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/repos/octo/swarm/pulls/"))
+				pr, ok := prs[prNum]
+				if !ok {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				writeResp(map[string]any{
+					"number":   pr.Number,
+					"title":    pr.Title,
+					"body":     pr.Body,
+					"draft":    pr.Draft,
+					"html_url": pr.HTMLURL,
+					"head":     map[string]any{"ref": pr.Head},
+					"base":     map[string]any{"ref": pr.Base},
+				})
+				return
+			case strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/pulls/") && r.Method == http.MethodGet:
+				prNum, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/repos/octo/swarm/pulls/"))
+				pr, ok := prs[prNum]
+				if !ok {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				writeResp(map[string]any{
+					"number":   pr.Number,
+					"title":    pr.Title,
+					"body":     pr.Body,
+					"state":    "open",
+					"draft":    pr.Draft,
+					"html_url": pr.HTMLURL,
+					"head": map[string]any{
+						"ref":  pr.Head,
+						"sha":  pr.HeadSHA,
+						"repo": map[string]any{"full_name": pr.HeadRepo},
+					},
+					"base": map[string]any{
+						"ref":  pr.Base,
+						"repo": map[string]any{"full_name": pr.BaseRepo},
+					},
+				})
+				return
+			default:
+				http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		srvURL, _ := url.Parse(srv.URL)
+		client, err := api.NewRESTClient(api.ClientOptions{
+			Host:      "github.com",
+			AuthToken: "test-token",
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				cloned := req.Clone(req.Context())
+				cloned.URL.Scheme = srvURL.Scheme
+				cloned.URL.Host = srvURL.Host
+				cloned.Host = srvURL.Host
+				return http.DefaultTransport.RoundTrip(cloned)
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tracker.NewGitHubTrackerWithClient("octo", "swarm", client)
+	}
+
+	maintTracker := newGHTracker("maintainer", "User")
+	botTracker := newGHTracker(fork.ActionsBotLogin, "Bot")
+	aliceTracker := newGHTracker("alice", "User")
+	bobTracker := newGHTracker("bob", "User")
+
+	coord := &fork.Coordinator{
+		RepoRoot:     upstreamRoot,
+		UpstreamRepo: "octo/swarm",
+		Tracker:      botTracker,
+		NowFn:        func() time.Time { mu.Lock(); defer mu.Unlock(); return now },
+		ForkGitURLFunc: func(forkRepo string) string {
+			switch forkRepo {
+			case "alice/swarm":
+				return aliceForkBare
+			case "bob/swarm":
+				return bobForkBare
+			default:
+				return filepath.Join(tmp, "missing.git")
+			}
+		},
+	}
+	dispatch := func(ctx context.Context, issueNumber int, c *tracker.Comment) error {
+		var ev fork.IssueCommentEvent
+		ev.Action = "created"
+		ev.Repository.FullName = "octo/swarm"
+		ev.Issue.Number = issueNumber
+		ev.Issue.State = "open"
+		ev.Comment.ID = c.ID
+		ev.Comment.Body = c.Body
+		ev.Comment.CreatedAt = c.CreatedAt
+		ev.Comment.UpdatedAt = c.UpdatedAt
+		ev.Comment.User.Login = c.Author
+		ev.Comment.User.Type = c.AuthorType
+		_, err := coord.HandleEvent(ctx, ev)
+		return err
+	}
+
+	runCmd := func(opts RootOptions, args ...string) (string, error) {
+		opts.forkPollInterval = 5 * time.Millisecond
+		opts.forkPollTimeout = 2 * time.Second
+		opts.forkDispatcher = dispatch
+		opts.nowFn = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+		cmd := newRootCmdWithOptions(&opts)
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(args)
+		err := cmd.ExecuteContext(ctx)
+		return out.String(), err
+	}
+
+	// 0. Flag & backend validation checks
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--backend", "local", "--fork", "status"); err == nil {
+		t.Fatal("expected --backend local --fork to fail explicitly")
+	}
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--fork-remote", "fork", "status"); err == nil {
+		t.Fatal("expected --fork-remote without --fork to fail explicitly")
+	}
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: aliceTracker}, "--fork", "issue", "approve", "42"); err == nil {
+		t.Fatal("expected maintainer issue command to fail with --fork")
+	}
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: aliceTracker}, "--fork", "review", "42", "--approve"); err == nil {
+		t.Fatal("expected human review --approve to fail with --fork")
+	}
+
+	// 1. Maintainer approves issue #42 at SHA A on upstream
+	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "issue", "approve", "42"); err != nil {
+		t.Fatalf("maintainer issue approve 42 failed: %v\n%s", err, out)
+	}
+
+	// 2. Prepare alice's clone where origin push is denied and fork remote points to aliceForkBare
+	aliceRoot := filepath.Join(tmp, "alice-clone")
+	git(tmp, "clone", originBare, aliceRoot)
+	git(aliceRoot, "config", "user.name", "Alice")
+	git(aliceRoot, "config", "user.email", "alice@example.invalid")
+	git(aliceRoot, "remote", "add", "fork", aliceForkBare)
+	git(aliceRoot, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "no-upstream-push.git"))
+
+	// 3. Alice runs `swarm --fork claim 42 --agent mock`
+	claimOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "claim", "42", "--agent", "mock")
+	if err != nil {
+		t.Fatalf("alice --fork claim 42 failed: %v\n%s", err, claimOut)
+	}
+	t.Logf("claim output:\n%s", claimOut)
+
+	upstreamStore := coordination.NewGitStore(upstreamRoot)
+	readUpstreamState := func() *lease.IssueState {
+		t.Helper()
+		raw, _, err := upstreamStore.Load(ctx, 42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var st lease.IssueState
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatal(err)
+		}
+		return &st
+	}
+	stClaimed := readUpstreamState()
+	aliceClaimID := stClaimed.Lease.ClaimID
+	expectedAliceBranch := fmt.Sprintf("swarm/issue-42-%s", aliceClaimID)
+	if stClaimed.BaseSHA != shaA || stClaimed.Lease.Owner != "alice" || stClaimed.ForkRepo != "alice/swarm" || aliceClaimID == "" {
+		t.Fatalf("unexpected upstream state after alice claim: %+v", stClaimed)
+	}
+	if !strings.Contains(claimOut, expectedAliceBranch) {
+		t.Fatalf("claim output did not report fork branch %s:\n%s", expectedAliceBranch, claimOut)
+	}
+
+	// 4. Alice runs `swarm --fork work 42 --agent mock --headless`
+	workOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "work", "42", "--agent", "mock", "--headless")
+	if err != nil {
+		t.Fatalf("alice --fork work 42 failed: %v\n%s", err, workOut)
+	}
+	t.Logf("work output:\n%s", workOut)
+
+	wt42 := workspace.WorktreePath(aliceRoot, 42)
+	if err := os.WriteFile(filepath.Join(wt42, "feature.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Tampering with .swarm/validation/required-checks.yaml or .github/workflows/swarm-fork-coordinator.yml in fork worktree must fail submission BEFORE PR creation despite allow_harness_changes: true
+	origChecks, err := os.ReadFile(filepath.Join(wt42, ".swarm", "validation", "required-checks.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt42, ".swarm", "validation", "required-checks.yaml"), []byte("required_checks: []\nprotected_paths: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "42"); err == nil {
+		t.Fatalf("expected --fork submit with tampered required-checks.yaml to fail, got:\n%s", out)
+	}
+	// Reset tampered commit back to shaA and restore clean feature change
+	git(wt42, "reset", "--hard", shaA)
+	if err := os.WriteFile(filepath.Join(wt42, ".swarm", "validation", "required-checks.yaml"), origChecks, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origWorkflow, err := os.ReadFile(filepath.Join(wt42, ".github", "workflows", "swarm-fork-coordinator.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt42, ".github", "workflows", "swarm-fork-coordinator.yml"), []byte("name: Tampered\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "42"); err == nil {
+		t.Fatalf("expected --fork submit with tampered workflow to fail, got:\n%s", out)
+	}
+	mu.Lock()
+	prCountAfterTamper := len(prs)
+	mu.Unlock()
+	if prCountAfterTamper != 0 {
+		t.Fatalf("expected 0 PRs created after rejected fork submissions, got %d", prCountAfterTamper)
+	}
+
+	// Restore clean worktree at shaA with legitimate feature.go change
+	git(wt42, "reset", "--hard", shaA)
+	if err := os.WriteFile(filepath.Join(wt42, ".github", "workflows", "swarm-fork-coordinator.yml"), origWorkflow, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt42, "feature.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 6. Alice runs `swarm --fork submit 42`: records checkpoint SHA B on fork & upstream, creates Draft PR with head=alice:swarm/issue-42-<claim_id> and base=main
+	submitOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "42")
+	if err != nil {
+		t.Fatalf("alice --fork submit 42 failed: %v\n%s", err, submitOut)
+	}
+	t.Logf("submit output:\n%s", submitOut)
+
+	shaB := git(wt42, "rev-parse", "HEAD")
+	stSubmitted := readUpstreamState()
+	if stSubmitted.HeadSHA != shaB || stSubmitted.Branch != expectedAliceBranch || stSubmitted.PRNumber != 1 || stSubmitted.Lease.Status != "completed" {
+		t.Fatalf("unexpected upstream state after submit: %+v (want shaB=%s)", stSubmitted, shaB)
+	}
+	// Repeat submit is idempotent and returns the same PR
+	repeatOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "42")
+	if err != nil {
+		t.Fatalf("repeat --fork submit 42 failed: %v\n%s", err, repeatOut)
+	}
+	mu.Lock()
+	totalPRs := len(prs)
+	createdPR := prs[1]
+	mu.Unlock()
+	if totalPRs != 1 || createdPR == nil || createdPR.Head != expectedAliceBranch || createdPR.HeadRepo != "alice/swarm" || createdPR.Base != "main" {
+		t.Fatalf("unexpected PR state after repeat submit: count=%d pr=%+v", totalPRs, createdPR)
+	}
+
+	// 7. Expiry and bob takeover on a second issue #43: alice's old claim cannot mutate upstream state
+	mu.Lock()
+	issues[43] = &tracker.Issue{
+		Number:  43,
+		Title:   "Takeover task",
+		Body:    strings.ReplaceAll(wuBody, "ISSUE-42", "ISSUE-43"),
+		State:   "open",
+		Author:  "maintainer",
+		HTMLURL: "https://github.com/octo/swarm/issues/43",
+	}
+	mu.Unlock()
+	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "issue", "approve", "43"); err != nil {
+		t.Fatalf("approve 43: %v\n%s", err, out)
+	}
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "claim", "43", "--agent", "mock"); err != nil {
+		t.Fatalf("alice claim 43: %v\n%s", err, out)
+	}
+
+	// Advance clock past lease expiry and have bob claim #43
+	mu.Lock()
+	now = now.Add(5 * time.Hour)
+	mu.Unlock()
+
+	bobRoot := filepath.Join(tmp, "bob-clone")
+	git(tmp, "clone", originBare, bobRoot)
+	git(bobRoot, "config", "user.name", "Bob")
+	git(bobRoot, "config", "user.email", "bob@example.invalid")
+	git(bobRoot, "remote", "add", "fork", bobForkBare)
+	git(bobRoot, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "no-upstream-push.git"))
+
+	if out, err := runCmd(RootOptions{RepoRoot: bobRoot, Backend: "github", trackerOverride: bobTracker}, "--fork", "claim", "43", "--agent", "mock"); err != nil {
+		t.Fatalf("bob takeover claim 43 failed: %v\n%s", err, out)
+	}
+	raw43Before, _, err := upstreamStore.Load(ctx, 43)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st43Before lease.IssueState
+	_ = json.Unmarshal(raw43Before, &st43Before)
+	if st43Before.Lease.Owner != "bob" || st43Before.ForkRepo != "bob/swarm" {
+		t.Fatalf("expected bob to hold #43 after takeover, got %+v", st43Before)
+	}
+
+	// Alice's stale renew and submit on #43 must fail and leave upstream #43 state untouched
+	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "renew", "43"); err == nil {
+		t.Fatal("expected alice stale renew on #43 to fail after bob takeover")
+	}
+	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "43"); err == nil {
+		t.Fatal("expected alice stale submit on #43 to fail after bob takeover")
+	}
+	raw43After, _, err := upstreamStore.Load(ctx, 43)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st43After lease.IssueState
+	_ = json.Unmarshal(raw43After, &st43After)
+	if st43After.Lease.Owner != "bob" || st43After.Lease.ClaimID != st43Before.Lease.ClaimID || st43After.ForkRepo != "bob/swarm" {
+		t.Fatalf("alice stale operations modified #43 state after takeover: %+v", st43After)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

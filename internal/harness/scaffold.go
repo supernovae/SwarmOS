@@ -186,10 +186,11 @@ func projectRuntimeSetup(stack StackProfile) string {
 }
 
 type InitOptions struct {
-	RepoRoot     string
-	Force        bool
-	SwarmVersion string
-	TemplateDir  string
+	RepoRoot        string
+	Force           bool
+	SwarmVersion    string
+	TemplateDir     string
+	ForkCoordinator bool
 }
 
 type InitResult struct {
@@ -204,6 +205,14 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		immutable := regexp.MustCompile(`^(v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?|[0-9a-f]{40})$`)
 		if !immutable.MatchString(opts.SwarmVersion) || strings.HasPrefix(opts.SwarmVersion, "v0.1.") || strings.HasPrefix(opts.SwarmVersion, "v0.0.") {
 			return nil, fmt.Errorf("swarm version must be a compatible immutable release tag (v0.2.0 or newer) or full commit SHA")
+		}
+	}
+	if opts.ForkCoordinator {
+		if strings.TrimSpace(opts.SwarmVersion) == "" {
+			return nil, fmt.Errorf("--fork-coordinator requires --swarm-version <immutable-compatible-tag-or-SHA>")
+		}
+		if strings.HasPrefix(opts.SwarmVersion, "v0.2.") || opts.SwarmVersion == "v0.3.0" {
+			return nil, fmt.Errorf("--fork-coordinator requires a fork-capable release tag (newer than v0.3.0) or full commit SHA")
 		}
 	}
 	root := opts.RepoRoot
@@ -361,6 +370,16 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 			}
 		}
 	}
+	if opts.ForkCoordinator {
+		coordData, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-fork-coordinator.yml")
+		if err != nil {
+			return nil, err
+		}
+		coordData = bytes.ReplaceAll(coordData, []byte("SWARM_VERSION_PIN"), []byte(opts.SwarmVersion))
+		if err := writeFile(".github/workflows/swarm-fork-coordinator.yml", coordData); err != nil {
+			return nil, err
+		}
+	}
 
 	// 8. Universal Slash Commands (.claude/commands/ and .opencode/command/)
 	if err := EnsureSlashCommands(root, opts.Force, res); err != nil {
@@ -509,6 +528,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	}
 	if d, err := time.ParseDuration(cfg.Lease.Duration); err != nil || d <= 0 || cfg.Lease.MaxRenewals < 0 {
 		return nil, fmt.Errorf("lease requires a positive duration and nonnegative max_renewals")
+	}
+	if cfg.Fork != nil && cfg.Fork.MaxActiveClaims <= 0 {
+		return nil, fmt.Errorf("fork.max_active_claims must be positive")
 	}
 	for role, name := range cfg.Roles {
 		switch role {

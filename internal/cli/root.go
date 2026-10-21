@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,18 +11,28 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/fork"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
+	"time"
 )
 
 type RootOptions struct {
-	Backend         string
-	Repo            string
-	RepoRoot        string
-	trackerOverride tracker.Tracker
+	Backend          string
+	Repo             string
+	RepoRoot         string
+	trackerOverride  tracker.Tracker
+	Fork             bool
+	ForkRemote       string
+	forkPollInterval time.Duration
+	forkPollTimeout  time.Duration
+	forkDispatcher   func(context.Context, int, *tracker.Comment) error
+	forkVerifyFunc   func(ctx context.Context, forkSlug, expectedOwner string, requirePush bool) (string, error)
+	nowFn            func() time.Time
 }
 
 func NewRootCmd() *cobra.Command {
@@ -37,6 +48,25 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		if opts.Repo != "" {
 			return registry.ValidateRepoSlug(opts.Repo)
 		}
+		if !opts.Fork && cmd.Flags().Changed("fork-remote") {
+			return fmt.Errorf("--fork-remote is only valid when --fork is set")
+		}
+		if opts.Fork {
+			if strings.EqualFold(strings.TrimSpace(opts.Backend), "local") {
+				return fmt.Errorf("--fork requires the github backend and cannot be used with --backend local")
+			}
+			if strings.TrimSpace(opts.ForkRemote) == "" {
+				opts.ForkRemote = "fork"
+			}
+			if strings.EqualFold(strings.TrimSpace(opts.ForkRemote), "origin") {
+				return fmt.Errorf("--fork-remote cannot be origin; configure a separate personal fork remote")
+			}
+			for p := cmd; p != nil; p = p.Parent() {
+				if p.Name() == "issue" {
+					return fmt.Errorf("swarm issue commands are maintainer-only and cannot be used with --fork")
+				}
+			}
+		}
 		return nil
 	}
 	rootCmd.AddGroup(
@@ -44,15 +74,17 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		&cobra.Group{ID: "tasks", Title: "Task lifecycle:"},
 		&cobra.Group{ID: "operations", Title: "Operations:"},
 	)
-	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", os.Getenv("SWARM_BACKEND"), "Tracker backend: github or local")
-	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", os.Getenv("SWARM_REPO"), "GitHub repository (owner/repo)")
-	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", "", "Repository root path")
-	rootCmd.AddCommand(newInitCmd(opts), newDoctorCmd(opts), newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPlanCmd(opts), newClaimCmd(opts), newPullCmd(opts), newWorkCmd(opts), newStageCmd(opts), newReviewCmd(opts), newValidateCmd(opts), newSubmitCmd(opts), newStatusCmd(opts), newRenewCmd(opts), newReleaseCmd(opts), newVersionCmd())
+	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", firstNonEmptyStr(opts.Backend, os.Getenv("SWARM_BACKEND")), "Tracker backend: github or local")
+	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", firstNonEmptyStr(opts.Repo, os.Getenv("SWARM_REPO")), "GitHub repository (owner/repo)")
+	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", opts.RepoRoot, "Repository root path")
+	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
+	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", firstNonEmptyStr(opts.ForkRemote, "fork"), "Writable personal fork git remote name (only valid with --fork)")
+	rootCmd.AddCommand(newInitCmd(opts), newDoctorCmd(opts), newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPlanCmd(opts), newClaimCmd(opts), newPullCmd(opts), newWorkCmd(opts), newStageCmd(opts), newReviewCmd(opts), newValidateCmd(opts), newSubmitCmd(opts), newStatusCmd(opts), newRenewCmd(opts), newReleaseCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
 	for _, command := range rootCmd.Commands() {
 		switch command.Name() {
 		case "init", "doctor", "repo", "version":
 			command.GroupID = "setup"
-		case "status", "node", "renew", "release":
+		case "status", "node", "renew", "release", "fork-coordinator":
 			command.GroupID = "operations"
 		default:
 			command.GroupID = "tasks"
@@ -63,6 +95,62 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	return rootCmd
 }
 func Execute() error { return NewRootCmd().Execute() }
+func (o *RootOptions) now() time.Time {
+	if o != nil && o.nowFn != nil {
+		return o.nowFn()
+	}
+	return time.Now()
+}
+func (o *RootOptions) effectiveForkRemote() string {
+	if r := strings.TrimSpace(o.ForkRemote); r != "" {
+		return r
+	}
+	return "fork"
+}
+func (o *RootOptions) verifyForkRemote(ctx context.Context, root string, tr tracker.Tracker) (string, string, error) {
+	forkRemote := o.effectiveForkRemote()
+	if strings.EqualFold(forkRemote, "origin") {
+		return "", "", fmt.Errorf("--fork-remote cannot be origin; configure a separate personal fork remote")
+	}
+	forkSlug, err := workspace.ResolveRemoteGitHubSlug(root, forkRemote)
+	if err != nil {
+		return "", "", err
+	}
+	owner, err := tr.CurrentUser(ctx)
+	if err != nil || strings.TrimSpace(owner) == "" {
+		return "", "", fmt.Errorf("resolve authenticated GitHub user for fork verification: %w", err)
+	}
+	if o.forkVerifyFunc != nil {
+		canonical, err := o.forkVerifyFunc(ctx, forkSlug, owner, true)
+		if err != nil {
+			return "", "", err
+		}
+		return forkRemote, canonical, nil
+	}
+	if gh, ok := tr.(*tracker.GitHubTracker); ok {
+		canonical, err := gh.VerifyForkRepository(ctx, forkSlug, owner, true)
+		if err != nil {
+			return "", "", err
+		}
+		return forkRemote, canonical, nil
+	}
+	return "", "", fmt.Errorf("tracker %s does not support GitHub fork verification", tr.BackendName())
+}
+func loadTrustedUpstreamConfig(root string) (*contract.SwarmConfig, error) {
+	if baseSHA, err := workspace.ResolveBase(root); err == nil && baseSHA != "" {
+		if cfg, loadErr := harness.LoadConfigAt(root, baseSHA); loadErr == nil && cfg != nil {
+			return cfg, nil
+		}
+	}
+	cfg, err := harness.LoadConfig(root)
+	if err != nil {
+		return nil, fmt.Errorf("load SwarmOS configuration: %w", err)
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("missing .swarm/config.yaml; run swarm init")
+	}
+	return cfg, nil
+}
 func (o *RootOptions) resolveRepoRoot() string {
 	if o.RepoRoot != "" {
 		return o.RepoRoot
@@ -92,6 +180,9 @@ func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error
 	}
 	switch backend {
 	case "local":
+		if o.Fork {
+			return nil, fmt.Errorf("--fork requires the github backend and cannot be used with --backend local")
+		}
 		return tracker.NewLocalTracker(root), nil
 	case "github":
 		detected := registry.DetectGitHubSlug(root)
@@ -115,6 +206,34 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	if o.Fork {
+		if strings.EqualFold(tr.BackendName(), "local") {
+			return nil, nil, nil, fmt.Errorf("--fork requires the github backend and cannot be used with --backend local")
+		}
+		_, verifiedForkSlug, err := o.verifyForkRemote(cmd.Context(), root, tr)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		cfg, err := loadTrustedUpstreamConfig(root)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		store := coordination.NewGitStore(root)
+		mgr := lease.NewManager(tr, cfg.Security)
+		if o.nowFn != nil {
+			mgr.SetNowFunc(o.nowFn)
+		}
+		mgr.SetStore(root, store)
+		mgr.SetWorkerGateway(&fork.Gateway{
+			Tracker:      tr,
+			Store:        store,
+			ForkRepo:     verifiedForkSlug,
+			PollInterval: o.forkPollInterval,
+			PollTimeout:  o.forkPollTimeout,
+			Dispatcher:   o.forkDispatcher,
+		})
+		return tr, mgr, cfg, nil
+	}
 	cfg, err := harness.LoadConfig(root)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("load SwarmOS configuration: %w", err)
@@ -123,13 +242,20 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 		return nil, nil, nil, fmt.Errorf("missing .swarm/config.yaml; run swarm init")
 	}
 	mgr := lease.NewManager(tr, cfg.Security)
+	if o.nowFn != nil {
+		mgr.SetNowFunc(o.nowFn)
+	}
 	if err := mgr.ConfigureStore(root); err != nil {
 		return nil, nil, nil, fmt.Errorf("configure authoritative state store: %w", err)
 	}
 	return tr, mgr, cfg, nil
 }
 func (o *RootOptions) resolveTargetLeaseManager(cmd *cobra.Command, tgt registry.RepoEntry) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error) {
-	return (&RootOptions{Backend: firstNonEmptyStr(o.Backend, tgt.Backend), Repo: tgt.Repo, RepoRoot: tgt.Path}).resolveLeaseManager(cmd)
+	cp := *o
+	cp.Backend = firstNonEmptyStr(o.Backend, tgt.Backend)
+	cp.Repo = tgt.Repo
+	cp.RepoRoot = tgt.Path
+	return (&cp).resolveLeaseManager(cmd)
 }
 func firstNonEmptyStr(vals ...string) string {
 	for _, v := range vals {

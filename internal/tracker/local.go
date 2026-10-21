@@ -486,6 +486,23 @@ func (l *LocalTracker) FindDraftPR(ctx context.Context, head, base string) (*Pul
 	return found, err
 }
 
+func (l *LocalTracker) GetPullRequest(ctx context.Context, number int) (*PullRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var found *PullRequest
+	err := l.withLock(false, func(st *localState) error {
+		pr, ok := st.PullRequests[number]
+		if !ok {
+			return fmt.Errorf("pull request #%d not found in local tracker", number)
+		}
+		cp := *pr
+		found = &cp
+		return nil
+	})
+	return found, err
+}
+
 func (l *LocalTracker) GetCheckStatus(_ context.Context, _ string) ([]CheckRunResult, error) {
 	return []CheckRunResult{
 		{Name: "local-validate", Status: "completed", Conclusion: "success"},

@@ -2,11 +2,13 @@ package workspace
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +50,136 @@ func BranchName(issueNum int, titleOrSlug string) string {
 	return fmt.Sprintf("swarm/issue-%d-%s", issueNum, Slugify(titleOrSlug))
 }
 
+func ForkBranchName(issueNum int, claimID string) string {
+	return fmt.Sprintf("swarm/issue-%d-%s", issueNum, strings.TrimSpace(claimID))
+}
+
+func FetchCommit(repoRoot, remoteName, sha string) error {
+	if strings.TrimSpace(remoteName) == "" {
+		remoteName = "origin"
+	}
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return fmt.Errorf("empty commit SHA")
+	}
+	if _, err := resolveCommit(repoRoot, sha); err == nil {
+		return nil
+	}
+	if _, err := gitOutput(repoRoot, "remote", "get-url", remoteName); err != nil {
+		return fmt.Errorf("remote %q is not configured: %w", remoteName, err)
+	}
+	if _, err := gitOutput(repoRoot, "fetch", "--no-write-fetch-head", remoteName, sha); err != nil {
+		return fmt.Errorf("fetch commit %s from %s: %w", sha, remoteName, err)
+	}
+	return nil
+}
+
+// ResolveRemoteGitHubSlug resolves a git remote's owner/repo slug and rejects
+// missing remotes or a fork remote that points to the same URL as origin.
+func ResolveRemoteGitHubSlug(repoRoot, remoteName string) (string, error) {
+	remoteName = strings.TrimSpace(remoteName)
+	if remoteName == "" {
+		return "", fmt.Errorf("remote name is required")
+	}
+	rawURL, err := gitOutput(repoRoot, "remote", "get-url", remoteName)
+	if err != nil {
+		return "", fmt.Errorf("git remote %q is not configured: %w", remoteName, err)
+	}
+	rawURL = strings.TrimSpace(rawURL)
+	if remoteName != "origin" {
+		if originURL, origErr := gitOutput(repoRoot, "remote", "get-url", "origin"); origErr == nil {
+			if strings.TrimSpace(originURL) == rawURL {
+				return "", fmt.Errorf("fork remote %q must not point to the same URL as upstream origin", remoteName)
+			}
+		}
+	}
+	if explicit, cfgErr := gitOutput(repoRoot, "config", "--get", "remote."+remoteName+".swarmSlug"); cfgErr == nil {
+		if slug := strings.TrimSpace(explicit); strings.Count(slug, "/") == 1 {
+			return slug, nil
+		}
+	}
+	return parseGitRemoteSlug(rawURL)
+}
+
+func parseGitRemoteSlug(rawURL string) (string, error) {
+	u := strings.TrimSpace(rawURL)
+	if u == "" {
+		return "", fmt.Errorf("empty git remote URL")
+	}
+	if strings.Contains(u, "://") {
+		parsed, err := url.Parse(u)
+		if err != nil {
+			return "", fmt.Errorf("parse remote URL %q: %w", rawURL, err)
+		}
+		path := strings.Trim(strings.TrimSuffix(parsed.Path, ".git"), "/")
+		parts := strings.Split(path, "/")
+		if len(parts) >= 2 && parts[len(parts)-2] != "" && parts[len(parts)-1] != "" {
+			return parts[len(parts)-2] + "/" + parts[len(parts)-1], nil
+		}
+		return "", fmt.Errorf("could not extract owner/repo from remote URL %q", rawURL)
+	}
+	if idx := strings.Index(u, ":"); idx > 0 && !strings.Contains(u[:idx], "/") && !strings.Contains(u[:idx], `\`) {
+		path := strings.Trim(strings.TrimSuffix(u[idx+1:], ".git"), "/")
+		parts := strings.Split(path, "/")
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return parts[0] + "/" + parts[1], nil
+		}
+	}
+	cleaned := filepath.ToSlash(filepath.Clean(strings.TrimSuffix(u, ".git")))
+	parts := strings.Split(strings.Trim(cleaned, "/"), "/")
+	if len(parts) >= 2 && parts[len(parts)-2] != "" && parts[len(parts)-1] != "" {
+		return parts[len(parts)-2] + "/" + parts[len(parts)-1], nil
+	}
+	return "", fmt.Errorf("could not extract GitHub owner/repo from remote URL %q", rawURL)
+}
+
+// PushForkCheckpoint pushes a local checkpoint commit to the verified fork
+// remote using explicit --force-with-lease expectations (never to origin).
+func PushForkCheckpoint(ctx context.Context, repoRoot, forkRemote, branch, headSHA string) error {
+	forkRemote = strings.TrimSpace(forkRemote)
+	if forkRemote == "" || forkRemote == "origin" {
+		return fmt.Errorf("fork checkpoint push requires a non-origin fork remote (got %q)", forkRemote)
+	}
+	if !strings.HasPrefix(branch, "swarm/issue-") || strings.Contains(branch, "..") || strings.TrimSpace(headSHA) == "" {
+		return fmt.Errorf("invalid fork checkpoint branch %q or head SHA %q", branch, headSHA)
+	}
+	branchRef := "refs/heads/" + branch
+	lsOut, err := gitOutputWithTokenContext(ctx, repoRoot, "ls-remote", "--refs", forkRemote, branchRef)
+	if err != nil {
+		return fmt.Errorf("query fork remote %q for %s: %w", forkRemote, branch, err)
+	}
+	observedSHA := ""
+	if trimmed := strings.TrimSpace(lsOut); trimmed != "" {
+		fields := strings.Fields(trimmed)
+		if len(fields) != 2 || fields[1] != branchRef {
+			return fmt.Errorf("invalid ls-remote output from fork remote %q for %s", forkRemote, branchRef)
+		}
+		observedSHA = fields[0]
+	}
+	leaseArg := branchRef + ":" + observedSHA
+	if _, err := gitOutputWithTokenContext(ctx, repoRoot, "push", forkRemote, "--force-with-lease="+leaseArg, headSHA+":"+branchRef); err != nil {
+		return fmt.Errorf("push checkpoint to fork remote %q: %w", forkRemote, err)
+	}
+	return nil
+}
+
+func gitOutputWithTokenContext(ctx context.Context, repoRoot string, args ...string) (string, error) {
+	fullArgs := append([]string{"-C", repoRoot}, args...)
+	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+		if tok := strings.TrimSpace(os.Getenv(key)); tok != "" {
+			basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + tok))
+			fullArgs = append([]string{"-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic " + basic}, fullArgs...)
+			break
+		}
+	}
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%w: git %s: %s", errGitFailed, strings.Join(args, " "), strings.TrimSpace(string(out)))
+	}
+	return string(out), nil
+}
+
 // ResolveBase resolves the immutable commit used to create a worktree. When
 // origin exists, its advertised default branch is authoritative; a local
 // checkout branch must never become the base accidentally.
@@ -77,8 +209,19 @@ func ResolveBase(repoRoot string) (string, error) {
 // ProvisionAt creates or reopens exactly the requested worktree branch.
 // It never resets an existing branch and refuses an unrelated directory.
 func ProvisionAt(repoRoot string, issueNum int, title, baseSHA, branch, headSHA string) (string, string, error) {
+	return ProvisionFromRemoteAt(repoRoot, "origin", issueNum, title, baseSHA, branch, headSHA)
+}
+
+// ProvisionFromRemoteAt creates or reopens the requested worktree branch,
+// fetching baseSHA from origin if needed and restoring any pinned checkpoint
+// headSHA from checkpointRemote ("origin" in same-repo mode, or the verified
+// fork remote in --fork mode).
+func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, title, baseSHA, branch, headSHA string) (string, string, error) {
 	if issueNum <= 0 || baseSHA == "" {
 		return "", "", errors.New("issue number and approved base SHA are required")
+	}
+	if strings.TrimSpace(checkpointRemote) == "" {
+		checkpointRemote = "origin"
 	}
 	if branch == "" {
 		branch = BranchName(issueNum, title)
@@ -87,22 +230,28 @@ func ProvisionAt(repoRoot string, issueNum int, title, baseSHA, branch, headSHA 
 	if err != nil {
 		return "", "", err
 	}
-	baseSHA, err = resolveCommit(absRoot, baseSHA)
+	resolvedBase, err := resolveCommit(absRoot, baseSHA)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve approved base %q: %w", baseSHA, err)
+		if fetchErr := FetchCommit(absRoot, "origin", baseSHA); fetchErr == nil {
+			resolvedBase, err = resolveCommit(absRoot, baseSHA)
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("resolve approved base %q: %w", baseSHA, err)
+		}
 	}
+	baseSHA = resolvedBase
 	if headSHA != "" {
-		if _, err := gitOutput(absRoot, "remote", "get-url", "origin"); err == nil {
-			remote, err := gitOutput(absRoot, "ls-remote", "--refs", "origin", "refs/heads/"+branch)
+		if _, err := gitOutput(absRoot, "remote", "get-url", checkpointRemote); err == nil {
+			remote, err := gitOutput(absRoot, "ls-remote", "--refs", checkpointRemote, "refs/heads/"+branch)
 			if err != nil {
 				return "", "", err
 			}
 			fields := strings.Fields(remote)
 			if len(fields) != 2 || fields[0] != headSHA {
-				return "", "", fmt.Errorf("remote branch %q does not match approved checkpoint %s", branch, headSHA)
+				return "", "", fmt.Errorf("remote branch %q on %s does not match approved checkpoint %s", branch, checkpointRemote, headSHA)
 			}
-			if _, err := gitOutput(absRoot, "fetch", "--no-write-fetch-head", "origin", headSHA); err != nil {
-				return "", "", fmt.Errorf("fetch pinned checkpoint: %w", err)
+			if _, err := gitOutput(absRoot, "fetch", "--no-write-fetch-head", checkpointRemote, headSHA); err != nil {
+				return "", "", fmt.Errorf("fetch pinned checkpoint from %s: %w", checkpointRemote, err)
 			}
 		}
 	}

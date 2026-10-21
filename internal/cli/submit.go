@@ -55,6 +55,7 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			_ = workspace.FetchCommit(root, "origin", state.BaseSHA)
 			iss, err := tr.GetIssue(ctx, issue)
 			if err != nil {
 				return err
@@ -82,8 +83,10 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 				if err := requireCleanHead(ctx, worktree, state.HeadSHA); err != nil {
 					return err
 				}
-				if err := projectSubmitted(ctx, tr, issue); err != nil {
-					return err
+				if !rootOpts.Fork {
+					if err := projectSubmitted(ctx, tr, issue); err != nil {
+						return err
+					}
 				}
 				if asJSON {
 					return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": state.PRNumber, "pr_url": state.PRURL, "head_sha": state.HeadSHA})
@@ -106,13 +109,17 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 			defer stop()
 			branch := state.Branch
 			if branch == "" {
-				branch = workspace.BranchName(issue, iss.Title)
+				if rootOpts.Fork {
+					branch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
+				} else {
+					branch = workspace.BranchName(issue, iss.Title)
+				}
 			}
 			head, err := workspace.Checkpoint(ctx, worktree, branch)
 			if err != nil {
 				return err
 			}
-			report, err := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA})
+			report, err := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
 			if err != nil {
 				return fmt.Errorf("trusted validation failed: %w", err)
 			}
@@ -139,6 +146,11 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 				return err
 			}
 			// GitHub publishes this head and the fenced state in one atomic Git push.
+			if rootOpts.Fork {
+				if err := workspace.PushForkCheckpoint(ctx, root, rootOpts.effectiveForkRemote(), branch, head); err != nil {
+					return err
+				}
+			}
 			state, err = manager.RecordCheckpoint(ctx, issue, owner, branch, head)
 			if err != nil {
 				return err
@@ -148,12 +160,20 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			prTitle := fmt.Sprintf("%s (#%d)", iss.Title, issue)
 			prBody := formatDraftPRBody(unit, state)
-			pr, err := tr.FindDraftPR(ctx, branch, baseBranch)
+			prHead := branch
+			if rootOpts.Fork {
+				forkOwner := owner
+				if parts := strings.Split(strings.TrimSpace(state.ForkRepo), "/"); len(parts) == 2 && parts[0] != "" {
+					forkOwner = parts[0]
+				}
+				prHead = forkOwner + ":" + branch
+			}
+			pr, err := tr.FindDraftPR(ctx, prHead, baseBranch)
 			if err != nil {
 				return err
 			}
 			if pr == nil {
-				pr, err = tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue, Title: prTitle, Body: prBody, Head: branch, Base: baseBranch})
+				pr, err = tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue, Title: prTitle, Body: prBody, Head: prHead, Base: baseBranch})
 				if err != nil {
 					return err
 				}
@@ -162,11 +182,12 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 					pr = updatedPR
 				}
 			}
-			if _, err := manager.RecordSubmission(ctx, issue, owner, pr.Number, pr.HTMLURL); err != nil {
+			submittedState, err := manager.RecordSubmission(ctx, issue, owner, pr.Number, pr.HTMLURL)
+			if err != nil {
 				return err
 			}
-			if err := projectSubmitted(ctx, tr, issue); err != nil {
-				return err
+			if submittedState != nil && strings.TrimSpace(submittedState.PRURL) != "" {
+				pr.HTMLURL = submittedState.PRURL
 			}
 			if asJSON {
 				return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head})

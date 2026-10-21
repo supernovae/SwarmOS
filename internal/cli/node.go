@@ -129,20 +129,17 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				DeveloperAgent: developerAgent, TesterAgent: testerAgent,
 				Handoff: true,
 				Phase:   "all", Gate: contract.GateMode(gate), Headless: true,
+				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),
 			}
 			execute := func(pulled *PulledWorkUnit) (*workflow.WorkResult, error) {
-				tr, manager, _, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
+				tr, manager, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
 					Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend,
 				})
 				if err != nil {
 					return nil, err
 				}
 				manager.BindClaim(pulled.Issue.Number, pulled.State.Lease.ClaimID)
-				engine, err := workflow.NewEngine(pulled.RepoRoot, tr)
-				if err != nil {
-					_, releaseErr := manager.Release(ctx, pulled.Issue.Number, pulled.State.Lease.Owner, "node setup failed")
-					return nil, errors.Join(err, releaseErr)
-				}
+				engine := workflow.NewEngineWithManager(pulled.RepoRoot, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
 				lock, err := lockClaim(pulled.RepoRoot, pulled.Issue.Number)
 				if err != nil {
 					return nil, err
@@ -159,7 +156,11 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					return result, err
 				}
 				if autoSubmit && result.ValidationPassed {
-					submit := newSubmitCmd(&RootOptions{Repo: pulled.Repo, RepoRoot: pulled.RepoRoot, Backend: pulled.Backend})
+					submitOpts := *rootOpts
+					submitOpts.Repo = pulled.Repo
+					submitOpts.RepoRoot = pulled.RepoRoot
+					submitOpts.Backend = pulled.Backend
+					submit := newSubmitCmd(&submitOpts)
 					outputMu.Lock()
 					submit.SetOut(out)
 					submit.SetErr(cmd.ErrOrStderr())

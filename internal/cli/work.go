@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -58,9 +57,15 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					}
 				}()
 			}
-			opts := workflow.WorkOptions{AgentName: agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
-				DeveloperAgent: developerAgent, TesterAgent: testerAgent, Phase: phase, Gate: contract.GateMode(gate), Headless: headless, Handoff: handoff}
+			opts := workflow.WorkOptions{
+				AgentName: agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
+				DeveloperAgent: developerAgent, TesterAgent: testerAgent, Phase: phase,
+				Gate: contract.GateMode(gate), Headless: headless, Handoff: handoff,
+				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),
+			}
 			var tr tracker.Tracker
+			var mgr *lease.Manager
+			var cfg *contract.SwarmConfig
 			var err error
 			if nextReady {
 				pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, opts, 0)
@@ -68,7 +73,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					return err
 				}
 				opts.IssueNumber, opts.RepoRoot, opts.Phase, opts.ClaimID = pulled.Issue.Number, pulled.RepoRoot, pulled.TargetPhase, pulled.State.Lease.ClaimID
-				tr, _, _, err = rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend})
+				tr, mgr, cfg, err = rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend})
 				if err != nil {
 					return err
 				}
@@ -78,15 +83,12 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					return fmt.Errorf("invalid issue number %q", args[0])
 				}
 				opts.RepoRoot = rootOpts.resolveRepoRoot()
-				tr, err = rootOpts.resolveTracker(cmd)
+				tr, mgr, cfg, err = rootOpts.resolveLeaseManager(cmd)
 				if err != nil {
 					return err
 				}
 			}
-			engine, err := workflow.NewEngine(opts.RepoRoot, tr)
-			if err != nil {
-				return err
-			}
+			engine := workflow.NewEngineWithManager(opts.RepoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
 			if !dryRun {
 				lock, err := lockClaim(opts.RepoRoot, opts.IssueNumber)
 				if err != nil {
@@ -100,7 +102,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 						if err != nil {
 							return err
 						}
-						if state.Lease.Status == "active" && state.Lease.ExpiresAt.After(time.Now()) && state.Lease.ClaimID == claimID {
+						if state.Lease.Status == "active" && state.Lease.ExpiresAt.After(rootOpts.now()) && state.Lease.ClaimID == claimID {
 							opts.ClaimID = claimID
 						}
 					} else if !os.IsNotExist(tokenErr) {

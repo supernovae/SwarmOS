@@ -47,7 +47,8 @@ type ValidateOptions struct {
 	CIMode bool
 	// BaseSHA is the immutable approved commit from which policy is loaded and
 	// against which committed candidate changes are compared.
-	BaseSHA string
+	BaseSHA  string
+	ForkMode bool
 }
 
 // Validate loads checks and protected paths exclusively from the immutable base.
@@ -77,6 +78,13 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	modified, err := collectModifiedFiles(worktreePath, baseSHA)
 	if err != nil {
 		return nil, err
+	}
+	if opts.ForkMode {
+		for _, file := range modified {
+			if file == ".swarm" || strings.HasPrefix(file, ".swarm/") || file == ".github/workflows" || strings.HasPrefix(file, ".github/workflows/") {
+				return nil, fmt.Errorf("%w: file %q cannot be modified in fork mode", ErrProtectedPathModified, file)
+			}
+		}
 	}
 	// Authorization for explicit protected-path exceptions is checked by the
 	// approval state machine before this call. This boolean is only its input.

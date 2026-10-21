@@ -18,6 +18,7 @@ type localState struct {
 	NextCommentID int64                `json:"next_comment_id"`
 	NextPRNum     int                  `json:"next_pr_num"`
 	Issues        map[int]*Issue       `json:"issues"`
+	Parents       map[int]int          `json:"parents"`
 	Comments      map[int][]*Comment   `json:"comments"`
 	PullRequests  map[int]*PullRequest `json:"pull_requests"`
 	DefinedLabels map[string]LabelSpec `json:"defined_labels"`
@@ -76,10 +77,26 @@ func (l *LocalTracker) Authorize(ctx context.Context, permission string) error {
 			return nil
 		}
 		return fmt.Errorf("local actor %q is not authorized for %s", l.user, permission)
+	case "create-epic":
+		if l.assoc == "OWNER" {
+			return nil
+		}
+		return fmt.Errorf("local actor %q (association %q) is not authorized for %s; maintainer OWNER required", l.user, l.assoc, permission)
 	default:
 		return fmt.Errorf("unknown permission %q", permission)
 	}
 }
+
+func (l *LocalTracker) CheckIssueType(ctx context.Context, issueType string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !IsEpicIssueType(issueType) {
+		return fmt.Errorf("unsupported issue type %q in local tracker (only \"Epic\" is supported)", issueType)
+	}
+	return nil
+}
+
 func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) error {
 	dir := filepath.Dir(l.statePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -104,6 +121,7 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 		NextCommentID: 1000,
 		NextPRNum:     1,
 		Issues:        make(map[int]*Issue),
+		Parents:       make(map[int]int),
 		Comments:      make(map[int][]*Comment),
 		PullRequests:  make(map[int]*PullRequest),
 		DefinedLabels: make(map[string]LabelSpec),
@@ -116,6 +134,9 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 		if st.Issues == nil {
 			st.Issues = make(map[int]*Issue)
 		}
+		if st.Parents == nil {
+			st.Parents = make(map[int]int)
+		}
 		if st.Comments == nil {
 			st.Comments = make(map[int][]*Comment)
 		}
@@ -126,7 +147,6 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 			st.DefinedLabels = make(map[string]LabelSpec)
 		}
 	}
-
 	if err := fn(st); err != nil {
 		return err
 	}
@@ -179,6 +199,92 @@ func (l *LocalTracker) CreateIssue(_ context.Context, title, body string, labels
 		return nil
 	})
 	return created, err
+}
+
+func (l *LocalTracker) CreateTypedIssue(ctx context.Context, title, body string, labels []string, issueType string) (*Issue, error) {
+	if IsEpicIssueType(issueType) {
+		if err := l.Authorize(ctx, "create-epic"); err != nil {
+			return nil, err
+		}
+	}
+	if err := l.CheckIssueType(ctx, issueType); err != nil {
+		return nil, err
+	}
+	canonicalType := "Epic"
+	var created *Issue
+	err := l.withLock(true, func(st *localState) error {
+		num := st.NextIssueNum
+		st.NextIssueNum++
+		now := time.Now().UTC()
+		iss := &Issue{
+			Number:            num,
+			Title:             title,
+			Body:              body,
+			State:             "open",
+			Type:              canonicalType,
+			Labels:            uniqueStrings(labels),
+			Author:            l.user,
+			AuthorAssociation: l.assoc,
+			HTMLURL:           fmt.Sprintf("local://issues/%d", num),
+			CreatedAt:         now,
+		}
+		st.Issues[num] = iss
+		cp := *iss
+		created = &cp
+		return nil
+	})
+	return created, err
+}
+
+func (l *LocalTracker) ParentIssueNumber(ctx context.Context, childNumber int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if childNumber <= 0 {
+		return 0, fmt.Errorf("invalid child issue number %d", childNumber)
+	}
+	var parent int
+	err := l.withLock(false, func(st *localState) error {
+		if _, ok := st.Issues[childNumber]; !ok {
+			return fmt.Errorf("issue #%d not found in local tracker", childNumber)
+		}
+		parent = st.Parents[childNumber]
+		return nil
+	})
+	return parent, err
+}
+
+func (l *LocalTracker) LinkSubIssue(ctx context.Context, parentNumber, childNumber int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if parentNumber <= 0 || childNumber <= 0 {
+		return fmt.Errorf("invalid parent #%d or child #%d issue number", parentNumber, childNumber)
+	}
+	if parentNumber == childNumber {
+		return fmt.Errorf("issue #%d cannot be linked as a sub-issue of itself", childNumber)
+	}
+	return l.withLock(true, func(st *localState) error {
+		if _, ok := st.Issues[parentNumber]; !ok {
+			return fmt.Errorf("parent issue #%d not found in local tracker", parentNumber)
+		}
+		if _, ok := st.Issues[childNumber]; !ok {
+			return fmt.Errorf("child issue #%d not found in local tracker", childNumber)
+		}
+		if existing := st.Parents[childNumber]; existing != 0 {
+			if existing == parentNumber {
+				return nil
+			}
+			return fmt.Errorf("issue #%d is already linked to parent issue #%d (cannot link to #%d)", childNumber, existing, parentNumber)
+		}
+		for cur := st.Parents[parentNumber]; cur != 0; cur = st.Parents[cur] {
+			if cur == childNumber {
+				return fmt.Errorf("linking issue #%d under #%d would create a parent cycle", childNumber, parentNumber)
+			}
+		}
+		st.Parents[childNumber] = parentNumber
+		return nil
+	})
 }
 
 func (l *LocalTracker) UpdateIssueBody(_ context.Context, number int, body string) (*Issue, error) {

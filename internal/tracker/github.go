@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -93,7 +94,7 @@ func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if permission != "approve-task" && permission != "review-human" {
+	if permission != "approve-task" && permission != "review-human" && permission != "create-epic" {
 		return fmt.Errorf("unknown permission %q", permission)
 	}
 	var me struct {
@@ -113,7 +114,16 @@ func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error 
 	if err := g.client.DoWithContext(ctx, "GET", path, nil, &collaborator); err != nil {
 		return fmt.Errorf("github authorization permission: %w", err)
 	}
-	switch strings.ToLower(collaborator.Permission) {
+	perm := strings.ToLower(collaborator.Permission)
+	if permission == "create-epic" {
+		switch perm {
+		case "admin", "maintain":
+			return nil
+		default:
+			return fmt.Errorf("github actor %q lacks maintainer/admin permission for %s", me.Login, permission)
+		}
+	}
+	switch perm {
 	case "admin", "maintain", "write":
 		return nil
 	default:
@@ -121,7 +131,34 @@ func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error 
 	}
 }
 
+type ghIssueTypeResponse struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	IsEnabled *bool  `json:"is_enabled,omitempty"`
+}
+
+func (g *GitHubTracker) CheckIssueType(ctx context.Context, issueType string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !IsEpicIssueType(issueType) {
+		return fmt.Errorf("unsupported issue type %q (only \"Epic\" is supported)", issueType)
+	}
+	path := fmt.Sprintf("repos/%s/%s/issue-types", g.owner, g.repo)
+	var types []ghIssueTypeResponse
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &types); err != nil {
+		return fmt.Errorf("github issue types unavailable on %s/%s (enable organization issue types including \"Epic\" and verify token permissions): %w", g.owner, g.repo, err)
+	}
+	for _, t := range types {
+		if IsEpicIssueType(t.Name) && (t.IsEnabled == nil || *t.IsEnabled) {
+			return nil
+		}
+	}
+	return fmt.Errorf("github issue type \"Epic\" is not enabled on %s/%s; enable the organization \"Epic\" issue type in GitHub settings", g.owner, g.repo)
+}
+
 type ghIssueResponse struct {
+	ID                int64     `json:"id"`
 	Number            int       `json:"number"`
 	Title             string    `json:"title"`
 	Body              string    `json:"body"`
@@ -129,7 +166,10 @@ type ghIssueResponse struct {
 	HTMLURL           string    `json:"html_url"`
 	AuthorAssociation string    `json:"author_association"`
 	CreatedAt         time.Time `json:"created_at"`
-	User              struct {
+	Type              *struct {
+		Name string `json:"name"`
+	} `json:"type,omitempty"`
+	User struct {
 		Login string `json:"login"`
 	} `json:"user"`
 	Labels []struct {
@@ -145,11 +185,16 @@ func convertGHIssue(r ghIssueResponse) *Issue {
 	for _, l := range r.Labels {
 		labels = append(labels, l.Name)
 	}
+	var issueType string
+	if r.Type != nil {
+		issueType = r.Type.Name
+	}
 	return &Issue{
 		Number:            r.Number,
 		Title:             r.Title,
 		Body:              r.Body,
 		State:             r.State,
+		Type:              issueType,
 		Labels:            labels,
 		Author:            r.User.Login,
 		AuthorAssociation: r.AuthorAssociation,
@@ -182,6 +227,100 @@ func (g *GitHubTracker) CreateIssue(ctx context.Context, title, body string, lab
 	return convertGHIssue(resp), nil
 }
 
+func (g *GitHubTracker) CreateTypedIssue(ctx context.Context, title, body string, labels []string, issueType string) (*Issue, error) {
+	if IsEpicIssueType(issueType) {
+		if err := g.Authorize(ctx, "create-epic"); err != nil {
+			return nil, err
+		}
+	}
+	if err := g.CheckIssueType(ctx, issueType); err != nil {
+		return nil, err
+	}
+	canonicalType := "Epic"
+	payload := map[string]any{
+		"title":  title,
+		"body":   body,
+		"labels": labels,
+		"type":   canonicalType,
+	}
+	raw, _ := json.Marshal(payload)
+	var resp ghIssueResponse
+	path := fmt.Sprintf("repos/%s/%s/issues", g.owner, g.repo)
+	if err := g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp); err != nil {
+		return nil, fmt.Errorf("github CreateTypedIssue (%s): %w", canonicalType, err)
+	}
+	iss := convertGHIssue(resp)
+	if !IsEpicIssueType(iss.Type) {
+		return nil, fmt.Errorf("github CreateTypedIssue (%s): response did not confirm issue type %q (got %q)", canonicalType, canonicalType, iss.Type)
+	}
+	return iss, nil
+}
+
+func httpErrorStatusCode(err error) int {
+	var httpErr *api.HTTPError
+	if errors.As(err, &httpErr) && httpErr != nil {
+		return httpErr.StatusCode
+	}
+	return 0
+}
+
+func (g *GitHubTracker) ParentIssueNumber(ctx context.Context, childNumber int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if childNumber <= 0 {
+		return 0, fmt.Errorf("invalid child issue number %d", childNumber)
+	}
+	var resp ghIssueResponse
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/parent", g.owner, g.repo, childNumber)
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
+		if httpErrorStatusCode(err) == http.StatusNotFound {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("github ParentIssueNumber #%d: %w", childNumber, err)
+	}
+	return resp.Number, nil
+}
+
+func (g *GitHubTracker) LinkSubIssue(ctx context.Context, parentNumber, childNumber int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if parentNumber <= 0 || childNumber <= 0 {
+		return fmt.Errorf("invalid parent #%d or child #%d issue number", parentNumber, childNumber)
+	}
+	if parentNumber == childNumber {
+		return fmt.Errorf("issue #%d cannot be linked as a sub-issue of itself", childNumber)
+	}
+	if _, err := g.GetIssue(ctx, parentNumber); err != nil {
+		return fmt.Errorf("github LinkSubIssue parent #%d: %w", parentNumber, err)
+	}
+	var childResp ghIssueResponse
+	childPath := fmt.Sprintf("repos/%s/%s/issues/%d", g.owner, g.repo, childNumber)
+	if err := g.client.DoWithContext(ctx, "GET", childPath, nil, &childResp); err != nil {
+		return fmt.Errorf("github LinkSubIssue child #%d: %w", childNumber, err)
+	}
+	if childResp.ID <= 0 {
+		return fmt.Errorf("github LinkSubIssue child #%d missing database id", childNumber)
+	}
+	existingParent, err := g.ParentIssueNumber(ctx, childNumber)
+	if err != nil {
+		return err
+	}
+	if existingParent == parentNumber {
+		return nil
+	}
+	if existingParent != 0 {
+		return fmt.Errorf("issue #%d is already linked to parent issue #%d (cannot link to #%d)", childNumber, existingParent, parentNumber)
+	}
+	raw, _ := json.Marshal(map[string]any{"sub_issue_id": childResp.ID})
+	subPath := fmt.Sprintf("repos/%s/%s/issues/%d/sub_issues", g.owner, g.repo, parentNumber)
+	var subResp any
+	if err := g.client.DoWithContext(ctx, "POST", subPath, bytes.NewReader(raw), &subResp); err != nil {
+		return fmt.Errorf("github LinkSubIssue #%d -> #%d: %w", parentNumber, childNumber, err)
+	}
+	return nil
+}
 func (g *GitHubTracker) UpdateIssueBody(ctx context.Context, number int, body string) (*Issue, error) {
 	raw, _ := json.Marshal(map[string]any{"body": body})
 	var resp ghIssueResponse

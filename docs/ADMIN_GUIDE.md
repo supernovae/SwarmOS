@@ -12,12 +12,18 @@ flowchart LR
 
 ## 1. One-Time Setup: Define Your Repository's Goals, Skills & Issue Forms
 
-When you initialize a repository (or upgrade an existing `.swarm/` setup), SwarmOS scaffolds an agent factory and preset GitHub Issue Forms:
+When you initialize a repository (or upgrade an existing `.swarm/` setup), SwarmOS scaffolds local agent factory contracts, preset GitHub Issue Forms (including `.github/ISSUE_TEMPLATE/swarm-community.yml` for community intake and `swarm-workunit.yml` for draft WorkUnits), and syncs `swarm:*` repository labels:
 
 ```bash
 swarm init --sync-labels --backend github --swarm-version v0.3.0
+swarm doctor --backend github
 ```
 
+> [!NOTE]
+> **GitHub Organization & Repository Checklist:**
+> 1. **Enable the `Epic` Issue Type**: In your GitHub Organization Settings (**Settings → Issues → Issue types**), ensure the `Epic` issue type is enabled so `swarm plan --from <file> --apply` and `swarm issue epic create` can publish native Epic hierarchy and sub-issues.
+> 2. **Verify Current Actor & Issue Type**: Run `swarm doctor --backend github` to check whether the `Epic` issue type is enabled on the repository and whether your current GitHub identity has `maintain` or `admin` permission to publish Epics through SwarmOS.
+> 3. **Review Issue Forms & Intake Settings**: `swarm init` creates local `.github/ISSUE_TEMPLATE/` forms and syncs `swarm:*` labels, while GitHub's own web UI and API issue creation remain governed by your GitHub repository and organization settings. Review your repository's issue forms (`swarm-community.yml` vs `swarm-workunit.yml`) and organization issue-type permissions in GitHub Settings.
 As a repo admin, tailor three foundational files before your team or community starts swarming:
 
 1. **`.swarm/goals.md`** — Your project's mission, quality bar, architectural priorities, and non-negotiable safety invariants. SwarmOS compiles this file into every agent's `.swarm/active/SYSTEM_PROMPT.md` and uses it during `swarm plan --scan` to check backlog alignment.
@@ -33,23 +39,34 @@ Commit your `.swarm/` and `.github/` changes to `main` so they become the immuta
 
 ## 2. Morning: Turn Roadmaps & Raw Issues into Execution Waves (`swarm plan`)
 
-Instead of waiting for uncoordinated PRs to land in your review queue, start the day by shaping the backlog with `swarm plan` (or `/swarm-project-plan` inside Claude Code / OpenCode).
+Instead of waiting for uncoordinated PRs to land in your review queue, start the day by shaping the backlog with `swarm plan` (using `/swarm-project-plan` in Claude Code / OpenCode, or the shared `.swarm/skills/triage-and-plan.md` skill as a regular prompt in Codex / `omp`).
 
-### Option A: Decompose a Roadmap or Feature Spec into Issues (`--from`)
+### Option A: Turn an Idea into a Roadmap File, Native Epic & Child WorkUnits (`--from`)
 
-Write a Markdown roadmap (`ROADMAP.md`) with `## <Task Title>` sections (or a YAML list of `WorkUnit` definitions), then preview how SwarmOS decomposes and orders the work:
+Write a repo-local Markdown roadmap (`ROADMAP.md`) with a top-level `# <Epic Title>` and one `## <Task Title>` section per child task (each with `### Objective`, `### Constraints`, observable `### Acceptance Criteria` checkboxes, and optional `depends on: <earlier-step-number>`), then preview and publish the hierarchy:
 
 ```bash
-# 1. Preview proposed WorkUnits, inferred workflows, and execution waves (no tracker changes)
+# 1. Preview the Epic and Step 1..N child tasks and execution waves (no tracker changes)
 swarm plan --from ROADMAP.md --backend github
 
-# 2. Create the issues on GitHub labeled swarm:draft
+# 2. Maintainer-only: publish one unlabeled Epic issue (type: Epic) containing the full plan
+#    and attach draft child WorkUnit sub-issues (swarm:draft)
 swarm plan --from ROADMAP.md --apply --backend github
 
-# 3. Or create and immediately approve all tasks as swarm:ready in one step
-swarm plan --from ROADMAP.md --apply --ready --backend github
+# 3. Selectively approve the child WorkUnit issues you want workers to claim first
+swarm issue approve 2 --backend github
 ```
 
+Re-running `swarm plan --from ROADMAP.md --apply` is idempotent: it reuses the existing Epic and unchanged child issues, refreshes the Epic body if you added new tasks, creates and links only the new child tasks as `swarm:draft`, and reports any removed tasks as leftovers without closing them. You can also create a standalone Epic and attach child WorkUnits directly:
+
+```bash
+swarm issue epic create --title "Q4 Reliability Epic" --body-file EPIC.md --backend github
+swarm issue create --parent 10 --title "Add circuit breaker" \
+  --objective "Prevent cascading retries" \
+  --constraint "No new external dependencies" \
+  --acceptance "Unit tests cover open/half-open transitions" \
+  --backend github
+```
 ### Option B: Scan, Import & Triage Open GitHub Issues (`--scan`)
 
 When users or teammates open raw, unstructured issues on GitHub, run `swarm plan --scan` to sense-make the open backlog against `.swarm/goals.md`, `.swarm/rules/`, and your codebase:
@@ -63,13 +80,12 @@ swarm plan --scan --backend github
 swarm plan --scan --apply --normalize --publish-issue 1 --backend github
 ```
 
-What `swarm plan --scan` does for you:
-- **Classifies every open issue with a triage label**:
+What `swarm plan --scan` does for you (while automatically skipping non-executable `Epic` issues):
+- **Classifies open issues (including `swarm:community` intake reports) with a triage label**:
   - `swarm:ready` — Valid, maintainer-approved `WorkUnit` ready for agents to claim.
   - `swarm:draft` — Valid structured `WorkUnit` awaiting your `swarm issue approve <N>`.
-  - `swarm:needs-scope` — Raw or imported issue missing structured `Objective`, `Constraints`, or `Acceptance Criteria`. Passing `--normalize` with `--apply` automatically converts the issue body into a structured `WorkUnit` (inheriting default constraints from `.swarm/goals.md` and `.swarm/rules/`) and promotes its label to `swarm:draft`.
+  - `swarm:needs-scope` — Raw or `swarm:community` intake issue missing structured `Objective`, `Constraints`, or `Acceptance Criteria`. Passing `--normalize` with `--apply` converts the issue body into a structured `WorkUnit` draft (`swarm:draft`) for maintainer review.
   - `swarm:blocked` — Issue waiting on open `depends_on` prerequisites or touching `protected_paths` (`.github/workflows/**`, `.swarm/**`) without `allow_harness_changes: true`.
-- **Detects file & package touchpoint collisions (`Overlaps`)**:
   - If Issue `#12` and Issue `#15` both reference `internal/api/handler.go`, `swarm plan --scan` flags the overlap and places them into **sequential Execution Waves** (`Wave 1`, `Wave 2`) so two parallel agents never cause merge conflicts on the same file.
 
 ---
@@ -125,10 +141,13 @@ Once you merge the PR for a Wave 1 issue, any Wave 2 issues that listed it under
 
 | Daily Admin Task | Command |
 | :--- | :--- |
-| Sync all 9 `swarm:*` labels (`ready`, `draft`, `needs-scope`, `blocked`, etc.) | `swarm init --sync-labels --backend github` |
-| Decompose `ROADMAP.md` into draft issues | `swarm plan --from ROADMAP.md --apply --backend github` |
-| Scan open issues, apply triage labels & normalize raw issues | `swarm plan --scan --apply --normalize --backend github` |
-| Lint and approve an issue for agent execution | `swarm issue lint <N> && swarm issue approve <N> --backend github` |
+| Sync all 10 `swarm:*` labels (`ready`, `draft`, `community`, `needs-scope`, `blocked`, etc.) | `swarm init --sync-labels --backend github` |
+| Check GitHub `Epic` issue type availability and maintainer `create-epic` permission | `swarm doctor --backend github` |
+| Preview `ROADMAP.md` decomposition (`Step 1..N`) without tracker writes | `swarm plan --from ROADMAP.md --backend github` |
+| Publish native `Epic` and linked `swarm:draft` child WorkUnits | `swarm plan --from ROADMAP.md --apply --backend github` |
+| Create a standalone `Epic` issue from a Markdown file | `swarm issue epic create --title "..." --body-file EPIC.md --backend github` |
+| Scan open issues, apply triage labels & normalize raw/`swarm:community` issues | `swarm plan --scan --apply --normalize --backend github` |
+| Lint and approve a child WorkUnit issue for agent execution | `swarm issue lint <N> && swarm issue approve <N> --backend github` |
 | Approve or reject a human-gated plan | `swarm review <N> --approve --notes "..." --backend github` |
 | Inspect active leases and artifacts across the repo | `swarm status --backend github` |
 

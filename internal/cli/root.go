@@ -17,10 +17,18 @@ import (
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
-type RootOptions struct{ Backend, Repo, RepoRoot string }
+type RootOptions struct {
+	Backend         string
+	Repo            string
+	RepoRoot        string
+	trackerOverride tracker.Tracker
+}
 
 func NewRootCmd() *cobra.Command {
-	opts := &RootOptions{}
+	return newRootCmdWithOptions(&RootOptions{})
+}
+
+func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	rootCmd := &cobra.Command{Use: "swarm", Short: "SwarmOS — contract-driven multi-agent orchestration", SilenceUsage: true, SilenceErrors: true}
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		if opts.Backend != "" && opts.Backend != "github" && opts.Backend != "local" {
@@ -69,6 +77,9 @@ func (o *RootOptions) resolveRepoRoot() string {
 	return "."
 }
 func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error) {
+	if o.trackerOverride != nil {
+		return o.trackerOverride, nil
+	}
 	root := o.resolveRepoRoot()
 	backend := strings.ToLower(strings.TrimSpace(o.Backend))
 	if backend == "" && o.Repo != "" {

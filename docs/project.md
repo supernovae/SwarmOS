@@ -24,13 +24,13 @@ swarm doctor --backend github
 | `.swarm/prompts/{planner,reviewer,developer,tester}.md` | Role contracts defining what each phase reads and produces. |
 | `.swarm/contracts/{workunit,artifact}.schema.json` | JSON Schemas (Draft 2020-12) for validating issues and artifacts. |
 | `.swarm/validation/required-checks.yaml` | Required check commands and protected-path globs enforced before submission. |
-| `.github/ISSUE_TEMPLATE/{swarm-workunit,swarm-feature,swarm-bugfix,swarm-refactor,config}.yml` | Preset GitHub Issue Forms for creating structured WorkUnits from the GitHub UI (customizable via `--template-dir`). |
+| `.github/ISSUE_TEMPLATE/{swarm-workunit,swarm-community,swarm-feature,swarm-bugfix,swarm-refactor,config}.yml` | Preset GitHub Issue Forms for structured draft WorkUnits (`swarm:draft`) and community bug/idea intake (`swarm:community`). |
 | `.github/workflows/swarm-validate.yml` | Consumer CI workflow running your repository checks against the trusted base commit. |
 | `.claude/commands/swarm-*.md` & `.opencode/command/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
 
 > [!TIP]
-> Passing `--swarm-version` ensures the generated `.github/workflows/swarm-validate.yml` installs that exact immutable SwarmOS version. Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
-
+> - Passing `--swarm-version` ensures the generated `.github/workflows/swarm-validate.yml` installs that exact immutable SwarmOS version. Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
+> - `swarm init --sync-labels --backend github` provisions local issue forms and `swarm:*` labels on the repository; it does not configure organization-wide GitHub issue types or restrict direct GitHub web/API issue creation. Enable the organization `Epic` issue type in GitHub Settings, review your repository's issue forms and maintainer permissions manually, and run `swarm doctor --backend github` to verify that `Epic` is enabled and your current actor is authorized for `create-epic`.
 ---
 
 ## Consumer CI and release administration
@@ -90,30 +90,35 @@ How agent configuration works:
 
 ## 3. Create, Lint, and Approve WorkUnit Issues
 
-You can create structured WorkUnits from the GitHub Issue Form, fenced YAML blocks, external `.swarm/workunits/<id>.yaml` references, or the CLI:
+You can create structured WorkUnits from the GitHub Issue Form (`swarm:draft`), fenced YAML blocks, external `.swarm/workunits/<id>.yaml` references, roadmap files (`swarm plan --from <file> --apply`), or the CLI. Community members can submit bugs, ideas, and feedback through the **Community report** form (`swarm:community`), which remains intake until a maintainer scopes and approves a WorkUnit.
 
 ```bash
-# Create a draft WorkUnit issue on GitHub (add --ready to approve in one step)
+# Create a standalone non-executable Epic issue (requires maintainer/admin permission)
+swarm issue epic create --backend github \
+  --title "HTTP Client Resilience Epic" \
+  --body-file plans/http-resilience.md
+
+# Create a draft child WorkUnit linked as a native sub-issue of parent #10
 swarm issue create --backend github \
+  --parent 10 \
   --title "Add retry policy" \
   --objective "Retry transient HTTP failures" \
   --constraint "Preserve the public client API" \
   --acceptance "Retries 429 responses within the configured limit" \
   --workflow feature --gate human
 
-# Validate the issue schema and approve its revision for execution
+# Validate the child issue schema and approve its revision for execution
 swarm issue lint 42 --backend github
 swarm issue approve 42 --backend github
 ```
 
-Approving an issue records the canonical WorkUnit digest, `.swarm/` policy digest, and trusted base SHA in Git state and applies the `swarm:ready` label. If an issue's scope or `.swarm/` policy changes later, run `swarm issue approve <issue>` again to approve the updated revision.
+Approving a child WorkUnit records its canonical WorkUnit digest, `.swarm/` policy digest, and trusted base SHA in Git state and applies the `swarm:ready` label. Epics (`type: Epic`) are non-executable planning containers: they carry no readiness label and cannot be approved or claimed directly.
 
-To split a larger epic into sequential child issues with `depends_on` links, run:
+To split an existing multi-item WorkUnit issue into linked `swarm:draft` child sub-issues, run:
 
 ```bash
 swarm issue decompose 42 --sequential --backend github
 ```
-
 ---
 
 ## Validation policy and protected paths

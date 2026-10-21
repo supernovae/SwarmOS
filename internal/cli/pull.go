@@ -114,7 +114,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			return nil, err
 		}
 		for _, issue := range issues {
-			if slices.Contains(issue.Labels, "swarm:pr-open") {
+			if issue.IsEpic() || slices.Contains(issue.Labels, "swarm:pr-open") {
 				continue
 			}
 			wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)

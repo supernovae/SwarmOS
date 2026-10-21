@@ -157,14 +157,19 @@ SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm submit 42 --backend github
 
 ### How Each Boundary Is Enforced
 
-| Action | Required GitHub Permission | `.swarm/config.yaml` Policy Check |
+| Action | Required GitHub Permission | `.swarm/config.yaml` / Tracker Policy Check |
 | :--- | :--- | :--- |
-| `swarm issue approve <N>` | Repository `write`, `maintain`, or `admin` | Must be an authenticated collaborator; pins `task_digest`, `policy_digest`, and `base_sha`. |
-| `swarm claim <N>` / `swarm work <N>` | Repository `write` | Actor must match `security.approved_collaborators` (when configured) and issue must carry `swarm:ready`. |
+| `swarm plan --from <file> --apply` / `swarm issue epic create` | Repository `maintain` or `admin` | Verifies maintainer role (`create-epic`) and enabled organization `Epic` issue type before creating the unlabeled Epic or linking native sub-issues. |
+| `swarm issue approve <N>` | Repository `write`, `maintain`, or `admin` | Rejects `Epic` issues; must be an authenticated collaborator; pins `task_digest`, `policy_digest`, and `base_sha` and applies `swarm:ready`. |
+| `swarm claim <N>` / `swarm work <N>` | Repository `write` | Rejects `Epic` issues; actor must match `security.approved_collaborators` (when configured) and issue must carry `swarm:ready`. |
 | `swarm review <N>` (Agent Gate) | Repository `write` | Actor must match `security.reviewer_collaborators` (when configured); reviewer subprocess runs in a read-only sandbox. |
 | `swarm review <N> --approve` (Human Gate) | Repository `write`, `maintain`, or `admin` (non-Bot account) | Actor must be a human GitHub user and match `security.reviewer_collaborators` (when configured). |
 | `swarm submit <N>` | Repository `write` | Requires a verified review verdict matching the current `WorkUnit`, `PLAN.md`, and `TEST_PLAN.md` digests plus passing baseline-pinned checks. |
 
+> [!NOTE]
+> **Organization Issue Types & Web Intake:**
+> - Native `Epic` issues and sub-issue hierarchy require GitHub's organization `Epic` issue type to be enabled on the repository. Run `swarm doctor --backend github` to check `Epic` availability and your current actor's `create-epic` permission.
+> - `swarm init --sync-labels --backend github` scaffolds `.github/ISSUE_TEMPLATE/swarm-community.yml` (`swarm:community` intake) and `swarm-workunit.yml` (`swarm:draft`) and syncs labels. Because GitHub's web UI and REST API allow users with repository access to open issues directly, maintainers should review repository issue forms and organization issue-type settings in GitHub Settings; SwarmOS enforces execution gating by requiring explicit `swarm issue approve <N>` on non-Epic WorkUnits.
 ---
 
 ## Related Guides

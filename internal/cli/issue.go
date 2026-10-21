@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -26,6 +27,9 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err := contract.ValidateGate(contract.GateMode(gate)); err != nil {
 			return fmt.Errorf("invalid --gate: %w", err)
 		}
+		if parentIssue < 0 {
+			return fmt.Errorf("invalid --parent %d", parentIssue)
+		}
 		wu := &contract.WorkUnit{ID: "ISSUE-NEW", ParentIssue: parentIssue, DependsOn: dependsOn, RequiredCapabilities: capabilities, Title: title, Objective: objective, Constraints: constraints, Acceptance: acceptance, Workflow: workflowName, Gate: contract.GateMode(gate)}
 		if err := contract.ValidateWorkUnit(wu); err != nil {
 			return err
@@ -34,6 +38,11 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if parentIssue > 0 {
+			if _, err := tr.GetIssue(cmd.Context(), parentIssue); err != nil {
+				return fmt.Errorf("verify parent issue #%d: %w", parentIssue, err)
+			}
+		}
 		initialLabels := []string{"swarm:draft"}
 		if ready {
 			initialLabels = nil
@@ -41,6 +50,11 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		iss, err := tr.CreateIssue(cmd.Context(), title, contract.FormatIssueMarkdown(wu), initialLabels)
 		if err != nil {
 			return err
+		}
+		if parentIssue > 0 {
+			if err := tr.LinkSubIssue(cmd.Context(), parentIssue, iss.Number); err != nil {
+				return fmt.Errorf("created child issue #%d (%s), but failed to link as sub-issue of parent #%d (maintainer can retry linking #%d -> #%d): %w", iss.Number, iss.HTMLURL, parentIssue, parentIssue, iss.Number, err)
+			}
 		}
 		kind := "draft"
 		if ready {
@@ -122,8 +136,59 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities)
 		return nil
 	}}
-	issueCmd.AddCommand(createCmd, approveCmd, lintCmd, newDecomposeCmd(rootOpts))
+	issueCmd.AddCommand(createCmd, approveCmd, lintCmd, newDecomposeCmd(rootOpts), newIssueEpicCmd(rootOpts))
 	return issueCmd
+}
+
+func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
+	epicCmd := &cobra.Command{
+		Use:   "epic",
+		Short: "Create or manage non-executable Epic planning issues",
+	}
+	var title string
+	var bodyFile string
+	var asJSON bool
+	createCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a standalone typed Epic issue from a body file (maintainer only)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(title) == "" {
+				return fmt.Errorf("--title is required")
+			}
+			if strings.TrimSpace(bodyFile) == "" {
+				return fmt.Errorf("--body-file is required")
+			}
+			rawBody, err := os.ReadFile(bodyFile)
+			if err != nil {
+				return fmt.Errorf("read epic body file %q: %w", bodyFile, err)
+			}
+			if strings.TrimSpace(string(rawBody)) == "" {
+				return fmt.Errorf("epic body file %q is empty", bodyFile)
+			}
+			tr, err := rootOpts.resolveTracker(cmd)
+			if err != nil {
+				return err
+			}
+			iss, err := tr.CreateTypedIssue(cmd.Context(), strings.TrimSpace(title), string(rawBody), nil, "Epic")
+			if err != nil {
+				return err
+			}
+			if asJSON || cmd.Flags().Changed("json") {
+				return writeJSON(cmd, map[string]any{"kind": "epic", "status": "created", "issue": iss})
+			}
+			if parentJSON, err := cmd.InheritedFlags().GetBool("json"); err == nil && parentJSON {
+				return writeJSON(cmd, map[string]any{"kind": "epic", "status": "created", "issue": iss})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Created Epic issue #%d: %s (%s)\n", iss.Number, iss.Title, iss.HTMLURL)
+			return nil
+		},
+	}
+	createCmd.Flags().StringVar(&title, "title", "", "Epic issue title")
+	createCmd.Flags().StringVar(&bodyFile, "body-file", "", "Path to Markdown file containing the Epic body")
+	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured Epic creation output")
+	epicCmd.AddCommand(createCmd)
+	return epicCmd
 }
 
 func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {

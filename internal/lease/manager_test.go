@@ -302,3 +302,53 @@ func TestCollaboratorAllowlistsEnforceWorkerAndReviewerSeparation(t *testing.T) 
 		t.Fatalf("reviewer-bot review failed: %v", err)
 	}
 }
+
+func TestEpicIssuesRejectedAtApproveAcquireAndCheckApprovedState(t *testing.T) {
+	m, lt, iss := testManager(t)
+	ctx := context.Background()
+
+	// Create a typed Epic whose body is formatted like a valid WorkUnit and mislabeled swarm:ready
+	epic, err := lt.CreateTypedIssue(ctx, "WorkUnit-shaped Epic", testWorkUnit(), []string{"swarm:ready"}, "Epic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ApproveTask(ctx, epic.Number, "local-dev"); err == nil {
+		t.Fatal("ApproveTask must reject Epic issue")
+	}
+	if _, err := m.Acquire(ctx, epic.Number, "local-dev", "claude", "plan", time.Hour, 1); err == nil {
+		t.Fatal("Acquire must reject Epic issue")
+	}
+
+	// Acquire a normal approved issue, then retype it to Epic in the local state and verify checkApprovedState fences it
+	claimed, err := m.Acquire(ctx, iss.Number, "local-dev", "claude", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(m.repoRoot, ".swarm", "local-tracker", "state.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st map[string]any
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	issuesMap := st["issues"].(map[string]any)
+	issObj := issuesMap["1"].(map[string]any)
+	issObj["type"] = "Epic"
+	updatedRaw, _ := json.MarshalIndent(st, "", "  ")
+	if err := os.WriteFile(statePath, updatedRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m.BindClaim(iss.Number, claimed.Lease.ClaimID)
+	if err := m.CheckClaim(ctx, iss.Number, "local-dev"); err == nil {
+		t.Fatal("CheckClaim must reject issue retyped to Epic")
+	}
+	if _, err := m.UpdatePhase(ctx, iss.Number, "local-dev", "implement", "active"); err == nil {
+		t.Fatal("UpdatePhase must reject issue retyped to Epic")
+	}
+	if _, err := m.RecordCheckpoint(ctx, iss.Number, "local-dev", "swarm/issue-1-test", claimed.BaseSHA); err == nil {
+		t.Fatal("RecordCheckpoint must reject issue retyped to Epic")
+	}
+}

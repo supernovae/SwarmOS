@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -140,11 +141,27 @@ func TestCollaborativeHandoffAndDecomposition(t *testing.T) {
 		t.Fatalf("expected 2 decomposed child issues, got %d (%v)", len(children), err)
 	}
 	for _, child := range children {
+		if !slices.Contains(child.Labels, "swarm:draft") || slices.Contains(child.Labels, "swarm:ready") {
+			t.Fatalf("expected decomposed child #%d to start as swarm:draft, got %v", child.Number, child.Labels)
+		}
+		if parentNum, err := lt.ParentIssueNumber(ctx, child.Number); err != nil || parentNum != parentIss.Number {
+			t.Fatalf("expected decomposed child #%d native parent #%d, got (%d, %v)", child.Number, parentIss.Number, parentNum, err)
+		}
 		if _, err := eng.LeaseManager.ApproveTask(ctx, child.Number, "local-dev"); err != nil {
 			t.Fatal(err)
 		}
 	}
 
+	epicIss, err := lt.CreateTypedIssue(ctx, "Standalone Epic", "# Epic Body", []string{"swarm:ready"}, "Epic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.DecomposeIssue(ctx, tmp, epicIss.Number, nil, true); err == nil {
+		t.Fatal("expected DecomposeIssue to reject Epic issue")
+	}
+	if _, err := eng.Preflight(ctx, WorkOptions{RepoRoot: tmp, IssueNumber: epicIss.Number, Phase: "plan"}); err == nil {
+		t.Fatal("expected Preflight to reject Epic issue")
+	}
 	// Child #2 depends on Child #1 -> attempting to execute Child #2 before Child #1 is completed must fail with ErrDependenciesUnmet!
 	_, err = eng.ExecuteWork(ctx, WorkOptions{
 		RepoRoot:    tmp,
@@ -335,6 +352,14 @@ func TestParseReviewVerdictFailsClosed(t *testing.T) {
 
 func configureValidation(t *testing.T, root string) {
 	t.Helper()
+	for _, args := range [][]string{
+		{"-C", root, "config", "user.name", "SwarmOS"},
+		{"-C", root, "config", "user.email", "swarm@example.test"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, string(out))
+		}
+	}
 	path := filepath.Join(root, ".swarm", "validation", "required-checks.yaml")
 	content := "required_checks:\n  - name: repository status\n    command: git status --porcelain\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - .swarm/validation/**\n  - .swarm/contracts/**\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

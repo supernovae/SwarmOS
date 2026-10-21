@@ -186,7 +186,27 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Pre-populate a custom issue form to verify non-force InitRepository preserves it
+	issueTmplDir := filepath.Join(root, ".github", "ISSUE_TEMPLATE")
+	if err := os.MkdirAll(issueTmplDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	customFormPath := filepath.Join(issueTmplDir, "swarm-community.yml")
+	if err := os.WriteFile(customFormPath, []byte("name: Custom Community Form\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := InitRepository(InitOptions{RepoRoot: root, TemplateDir: customDir}); err != nil {
+		t.Fatal(err)
+	}
+
+	preserved, err := os.ReadFile(customFormPath)
+	if err != nil || string(preserved) != "name: Custom Community Form\n" {
+		t.Fatalf("expected existing custom form to be preserved without --force, got %q (%v)", string(preserved), err)
+	}
+
+	// Re-run with Force: true to write the built-in swarm-community.yml
+	if _, err := InitRepository(InitOptions{RepoRoot: root, TemplateDir: customDir, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -198,6 +218,7 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		".swarm/rules/security.md",
 		".swarm/skills/triage-and-plan.md",
 		".github/ISSUE_TEMPLATE/swarm-workunit.yml",
+		".github/ISSUE_TEMPLATE/swarm-community.yml",
 		".github/ISSUE_TEMPLATE/swarm-feature.yml",
 		".github/ISSUE_TEMPLATE/swarm-bugfix.yml",
 		".github/ISSUE_TEMPLATE/swarm-refactor.yml",
@@ -210,5 +231,29 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		if !fileExists(filepath.Join(root, rel)) {
 			t.Fatalf("expected %s to be created by InitRepository", rel)
 		}
+	}
+
+	commForm, err := os.ReadFile(filepath.Join(root, ".github/ISSUE_TEMPLATE/swarm-community.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(commForm), "name: Community report") || !strings.Contains(string(commForm), "swarm:community") || strings.Contains(string(commForm), "Acceptance Criteria") {
+		t.Fatalf("unexpected swarm-community.yml content:\n%s", string(commForm))
+	}
+
+	wuForm, err := os.ReadFile(filepath.Join(root, ".github/ISSUE_TEMPLATE/swarm-workunit.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wuForm), "swarm:draft") || strings.Contains(string(wuForm), "swarm:ready") {
+		t.Fatalf("expected swarm-workunit.yml to default to swarm:draft, got:\n%s", string(wuForm))
+	}
+
+	cmdContent, err := os.ReadFile(filepath.Join(root, ".claude/commands/swarm-project-plan.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cmdContent), "--from") || !strings.Contains(string(cmdContent), "--apply") || !strings.Contains(string(cmdContent), "swarm issue approve") {
+		t.Fatalf("expected swarm-project-plan.md to document preview, explicit --apply, and selective child approval:\n%s", string(cmdContent))
 	}
 }

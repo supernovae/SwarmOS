@@ -156,6 +156,9 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	if err != nil {
 		return nil, err
 	}
+	if iss.IsEpic() {
+		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be claimed or executed as a WorkUnit", opts.IssueNumber)
+	}
 	wu, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
 	if err != nil {
 		return nil, err
@@ -617,11 +620,13 @@ func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssu
 	if err != nil {
 		return nil, err
 	}
+	if parentIss.IsEpic() {
+		return nil, fmt.Errorf("issue #%d has type \"Epic\" and does not carry a WorkUnit contract for auto-decomposition", parentIssueNum)
+	}
 	parentWU, err := contract.ParseWorkUnitFromIssueWithRoot(parentIss.Number, parentIss.Title, parentIss.Body, repoRoot)
 	if err != nil {
 		return nil, err
 	}
-
 	if len(subtasks) == 0 {
 		subtasks = parentWU.Subtasks
 	}
@@ -665,13 +670,15 @@ func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssu
 			title = fmt.Sprintf("[Subtask %d/%d] %s", idx+1, len(subtasks), parentIss.Title)
 		}
 		body := contract.FormatIssueMarkdown(&sub)
-		childIss, err := e.Tracker.CreateIssue(ctx, title, body, []string{"swarm:ready"})
+		childIss, err := e.Tracker.CreateIssue(ctx, title, body, []string{"swarm:draft"})
 		if err != nil {
 			return created, err
 		}
+		if err := e.Tracker.LinkSubIssue(ctx, parentIssueNum, childIss.Number); err != nil {
+			return created, fmt.Errorf("link decomposed child issue #%d to parent #%d: %w", childIss.Number, parentIssueNum, err)
+		}
 		created = append(created, childIss)
 		prevIssueNum = childIss.Number
-
 		depStr := "-"
 		if len(sub.DependsOn) > 0 {
 			var parts []string

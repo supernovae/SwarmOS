@@ -133,16 +133,20 @@ func TestGitHubTrackerCurrentUserUsesGitHubIdentity(t *testing.T) {
 
 func TestGitHubTrackerAuthorizePermissionsAndHumanReview(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		accountType string
-		permission  string
-		wantErr     bool
+		name          string
+		accountType   string
+		permission    string
+		reqPermission string
+		wantErr       bool
 	}{
-		{name: "write approves task", permission: "write"},
-		{name: "maintain approves task", permission: "maintain"},
-		{name: "admin approves task", permission: "admin"},
-		{name: "read cannot approve task", permission: "read", wantErr: true},
-		{name: "bot cannot review as human", accountType: "Bot", permission: "admin", wantErr: true},
+		{name: "write approves task", permission: "write", reqPermission: "approve-task"},
+		{name: "maintain approves task", permission: "maintain", reqPermission: "approve-task"},
+		{name: "admin approves task", permission: "admin", reqPermission: "approve-task"},
+		{name: "read cannot approve task", permission: "read", reqPermission: "approve-task", wantErr: true},
+		{name: "bot cannot review as human", accountType: "Bot", permission: "admin", reqPermission: "review-human", wantErr: true},
+		{name: "write cannot create epic", permission: "write", reqPermission: "create-epic", wantErr: true},
+		{name: "maintain can create epic", permission: "maintain", reqPermission: "create-epic"},
+		{name: "admin can create epic", permission: "admin", reqPermission: "create-epic"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tracker := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -155,13 +159,9 @@ func TestGitHubTrackerAuthorizePermissionsAndHumanReview(t *testing.T) {
 					http.Error(w, "unexpected request", http.StatusNotFound)
 				}
 			}))
-			permission := "approve-task"
-			if tc.accountType != "" {
-				permission = "review-human"
-			}
-			err := tracker.Authorize(context.Background(), permission)
+			err := tracker.Authorize(context.Background(), tc.reqPermission)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("Authorize() error = %v, wantErr %t", err, tc.wantErr)
+				t.Fatalf("Authorize(%q) error = %v, wantErr %t", tc.reqPermission, err, tc.wantErr)
 			}
 		})
 	}
@@ -209,5 +209,223 @@ func TestGitHubTrackerFindDraftPRUsesRequestedHeadAndBase(t *testing.T) {
 	}
 	if pr == nil || pr.Number != 12 || pr.Head != "feature/ref" || pr.Base != "release" || !pr.Draft {
 		t.Fatalf("FindDraftPR() = %#v", pr)
+	}
+}
+
+func TestGitHubTrackerEpicIssueTypeAndNativeSubIssues(t *testing.T) {
+	ctx := context.Background()
+	enabled := true
+	disabled := false
+
+	t.Run("create typed epic and link sub-issue using child database id", func(t *testing.T) {
+		var createdPayload map[string]any
+		var linkedPayload map[string]any
+		parentLinked := 0
+
+		tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/user":
+				writeJSON(t, w, map[string]string{"login": "maintainer", "type": "User"})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/collaborators/maintainer/permission":
+				writeJSON(t, w, map[string]string{"permission": "maintain"})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/issue-types":
+				writeJSON(t, w, []map[string]any{
+					{"id": 10, "name": "Bug", "is_enabled": enabled},
+					{"id": 20, "name": "Epic", "is_enabled": enabled},
+				})
+			case r.Method == http.MethodPost && r.URL.Path == "/repos/octo/swarm/issues":
+				if err := json.NewDecoder(r.Body).Decode(&createdPayload); err != nil {
+					t.Fatal(err)
+				}
+				writeJSON(t, w, map[string]any{
+					"id":       5001,
+					"number":   1,
+					"title":    createdPayload["title"],
+					"body":     createdPayload["body"],
+					"state":    "open",
+					"html_url": "https://example.test/issues/1",
+					"type":     map[string]any{"name": "Epic"},
+				})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/issues/1":
+				writeJSON(t, w, map[string]any{
+					"id":     5001,
+					"number": 1,
+					"title":  "Roadmap Epic",
+					"state":  "open",
+					"type":   map[string]any{"name": "Epic"},
+				})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/issues/2":
+				writeJSON(t, w, map[string]any{
+					"id":     987654321,
+					"number": 2,
+					"title":  "Child task",
+					"state":  "open",
+				})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/issues/2/parent":
+				if parentLinked == 0 {
+					http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+					return
+				}
+				writeJSON(t, w, map[string]any{"id": 5001, "number": parentLinked, "title": "Parent"})
+			case r.Method == http.MethodPost && r.URL.Path == "/repos/octo/swarm/issues/1/sub_issues":
+				if err := json.NewDecoder(r.Body).Decode(&linkedPayload); err != nil {
+					t.Fatal(err)
+				}
+				parentLinked = 1
+				writeJSON(t, w, map[string]any{"id": 987654321, "number": 2})
+			default:
+				http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+			}
+		}))
+
+		epic, err := tr.CreateTypedIssue(ctx, "Roadmap Epic", "# Plan", nil, "Epic")
+		if err != nil {
+			t.Fatalf("CreateTypedIssue() error = %v", err)
+		}
+		if !epic.IsEpic() || epic.Type != "Epic" {
+			t.Fatalf("epic.Type = %q, want Epic", epic.Type)
+		}
+		if got := createdPayload["type"]; got != "Epic" {
+			t.Fatalf("POST /issues payload type = %v, want Epic", got)
+		}
+
+		parent, err := tr.ParentIssueNumber(ctx, 2)
+		if err != nil || parent != 0 {
+			t.Fatalf("ParentIssueNumber(unlinked) = (%d, %v), want (0, nil)", parent, err)
+		}
+
+		if err := tr.LinkSubIssue(ctx, 1, 2); err != nil {
+			t.Fatalf("LinkSubIssue() error = %v", err)
+		}
+		if got := linkedPayload["sub_issue_id"]; got != float64(987654321) {
+			t.Fatalf("POST /sub_issues sub_issue_id = %v, want child database id 987654321", got)
+		}
+		// Idempotent repeat link to same parent
+		if err := tr.LinkSubIssue(ctx, 1, 2); err != nil {
+			t.Fatalf("idempotent LinkSubIssue() error = %v", err)
+		}
+		parent, err = tr.ParentIssueNumber(ctx, 2)
+		if err != nil || parent != 1 {
+			t.Fatalf("ParentIssueNumber(linked) = (%d, %v), want (1, nil)", parent, err)
+		}
+	})
+
+	t.Run("rejects disabled epic type, non-maintainer create, self link, and foreign parent", func(t *testing.T) {
+		posts := 0
+		tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/user":
+				writeJSON(t, w, map[string]string{"login": "contributor", "type": "User"})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/collaborators/contributor/permission":
+				writeJSON(t, w, map[string]string{"permission": "write"})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/issue-types":
+				writeJSON(t, w, []map[string]any{
+					{"id": 20, "name": "Epic", "is_enabled": disabled},
+				})
+			case r.Method == http.MethodPost:
+				posts++
+				http.Error(w, "should not write", http.StatusInternalServerError)
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/issues/10":
+				writeJSON(t, w, map[string]any{"id": 1000, "number": 10, "state": "open"})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/issues/20":
+				writeJSON(t, w, map[string]any{"id": 2000, "number": 20, "state": "open"})
+			case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/issues/20/parent":
+				writeJSON(t, w, map[string]any{"id": 999, "number": 99})
+			default:
+				http.Error(w, "unexpected", http.StatusNotFound)
+			}
+		}))
+
+		if _, err := tr.CreateTypedIssue(ctx, "Unauthorized Epic", "body", nil, "Epic"); err == nil {
+			t.Fatal("expected write collaborator to be denied create-epic")
+		}
+		if err := tr.CheckIssueType(ctx, "Epic"); err == nil {
+			t.Fatal("expected disabled Epic type to fail CheckIssueType")
+		}
+		if err := tr.CheckIssueType(ctx, "Task"); err == nil {
+			t.Fatal("expected unsupported type to fail CheckIssueType")
+		}
+		if err := tr.LinkSubIssue(ctx, 10, 10); err == nil {
+			t.Fatal("expected self-link to fail")
+		}
+		if err := tr.LinkSubIssue(ctx, 10, 20); err == nil || !strings.Contains(err.Error(), "#99") {
+			t.Fatalf("expected foreign parent #99 conflict, got %v", err)
+		}
+		if posts != 0 {
+			t.Fatalf("expected 0 writes on preflight failures, got %d", posts)
+		}
+	})
+}
+
+func TestLocalTrackerEpicAndHierarchyPersistence(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	tr := NewLocalTracker(root)
+
+	collab := tr.WithUser("contrib", "COLLABORATOR")
+	if err := collab.Authorize(ctx, "approve-task"); err != nil {
+		t.Fatalf("COLLABORATOR should authorize approve-task: %v", err)
+	}
+	if err := collab.Authorize(ctx, "create-epic"); err == nil {
+		t.Fatal("COLLABORATOR must not authorize create-epic")
+	}
+	if _, err := collab.CreateTypedIssue(ctx, "Blocked Epic", "body", nil, "Epic"); err == nil {
+		t.Fatal("COLLABORATOR CreateTypedIssue(Epic) must fail before writing")
+	}
+	if issues, err := tr.ListIssues(ctx, IssueFilter{State: "all"}); err != nil || len(issues) != 0 {
+		t.Fatalf("expected 0 issues after unauthorized CreateTypedIssue, got %d (%v)", len(issues), err)
+	}
+
+	if err := tr.CheckIssueType(ctx, "Unknown"); err == nil {
+		t.Fatal("expected unknown issue type to fail")
+	}
+
+	epic, err := tr.CreateTypedIssue(ctx, "Roadmap Epic", "# Plan", nil, "epic")
+	if err != nil {
+		t.Fatalf("OWNER CreateTypedIssue(Epic) failed: %v", err)
+	}
+	if epic.Type != "Epic" || !epic.IsEpic() {
+		t.Fatalf("epic.Type = %q, want Epic", epic.Type)
+	}
+
+	child, err := tr.CreateIssue(ctx, "Child 1", "body", []string{"swarm:draft"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherEpic, err := tr.CreateTypedIssue(ctx, "Other Epic", "# Other", nil, "Epic")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if p, err := tr.ParentIssueNumber(ctx, child.Number); err != nil || p != 0 {
+		t.Fatalf("unlinked child parent = (%d, %v), want (0, nil)", p, err)
+	}
+	if err := tr.LinkSubIssue(ctx, epic.Number, child.Number); err != nil {
+		t.Fatalf("LinkSubIssue failed: %v", err)
+	}
+	// Idempotent link
+	if err := tr.LinkSubIssue(ctx, epic.Number, child.Number); err != nil {
+		t.Fatalf("idempotent LinkSubIssue failed: %v", err)
+	}
+	// Reject foreign parent
+	if err := tr.LinkSubIssue(ctx, otherEpic.Number, child.Number); err == nil {
+		t.Fatal("expected linking child to second parent to fail")
+	}
+	// Reject self link and missing issue
+	if err := tr.LinkSubIssue(ctx, child.Number, child.Number); err == nil {
+		t.Fatal("expected self link to fail")
+	}
+	if err := tr.LinkSubIssue(ctx, epic.Number, 999); err == nil {
+		t.Fatal("expected missing child link to fail")
+	}
+
+	reloaded := NewLocalTracker(root)
+	gotEpic, err := reloaded.GetIssue(ctx, epic.Number)
+	if err != nil || !gotEpic.IsEpic() {
+		t.Fatalf("reloaded epic = %#v, err = %v", gotEpic, err)
+	}
+	gotParent, err := reloaded.ParentIssueNumber(ctx, child.Number)
+	if err != nil || gotParent != epic.Number {
+		t.Fatalf("reloaded ParentIssueNumber = (%d, %v), want (%d, nil)", gotParent, err, epic.Number)
 	}
 }

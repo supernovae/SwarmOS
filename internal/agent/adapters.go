@@ -68,9 +68,6 @@ func (a *CLIAdapter) Provenance(role string, readOnly bool) contract.RoleAttesta
 		// outside its boundary, including a supposedly harmless --version probe.
 		version = "unknown"
 	}
-	if a.sandboxRuntime == "codex-native" {
-		version = sandbox.NativeCodexVersion
-	}
 	model := strings.TrimSpace(a.model)
 	if model == "" {
 		model = "default"

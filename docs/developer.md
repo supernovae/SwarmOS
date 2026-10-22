@@ -46,6 +46,8 @@ You can still pause automated work for a maintainer's plan review with `--gate h
 
 SwarmOS uses your agent's normal login and security controls. The first native integration supports **Codex 0.163.0 on Linux**, using its supported permission profiles and sandbox. Install Codex, run `codex login`, then run `swarm doctor`. No extra provider credentials are needed for each role.
 
+`doctor` marks the selected agents and their roles. An unavailable selected agent fails the check; `OPTIONAL` identifies unused harnesses that still need setup or qualification. Binary installation is listed separately from execution support. To keep using a qualified Codex release alongside a newer CLI, point `agents.codex.binary` at that installation in the repository configuration. See the [qualification guide](native-qualification.md) for adding releases and running the dogfood workflow.
+
 | Execution mode | Use it for |
 | :--- | :--- |
 | **`isolated` (default)** | Codex's native sandbox, with task files separated from live Git state and host credentials. Set `execution.backend: oci` for the optional container backend. |

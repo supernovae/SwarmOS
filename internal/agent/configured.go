@@ -115,14 +115,15 @@ func Preflight(name string, cfg *contract.SwarmConfig, local bool, role string) 
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "codex-native" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := sandbox.CheckNativeCodex(ctx, adapter.binary); err != nil {
+		version, err := sandbox.InspectNativeCodex(ctx, adapter.binary)
+		if err != nil {
 			return "", err
 		}
 		auth, err := sandbox.CodexAuthentication(ctx, adapter.binary)
 		if err != nil {
 			return "", err
 		}
-		return "native:codex " + sandbox.NativeCodexVersion + "; " + auth + "; filesystem/network canaries passed; MCP, plugins and hooks disabled; interactive and unattended", nil
+		return "native:codex " + version + "; " + auth + " present; filesystem/network canaries passed; MCP, plugins and hooks disabled; interactive and unattended", nil
 	}
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "container" {
 		if adapter.executionMode == contract.ExecutionIsolated {

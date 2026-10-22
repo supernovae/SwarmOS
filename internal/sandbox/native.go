@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -19,9 +18,19 @@ import (
 	"github.com/supernovae/swarmos/internal/safefs"
 )
 
-// NativeCodexVersion pins the tool/configuration surface qualified by the adapter.
-// Expanding this range requires running the native boundary tests on that version.
-const NativeCodexVersion = "0.163.0"
+// Keep earlier qualified releases when adding a tested version. These are exact
+// versions, not a minimum: permission-profile semantics can change between releases.
+var nativeCodexVersions = []string{"0.163.0"}
+
+func qualifiedNativeCodexVersion(output string) (string, error) {
+	version := strings.TrimPrefix(strings.TrimSpace(output), "codex-cli ")
+	for _, qualified := range nativeCodexVersions {
+		if strings.TrimSpace(output) == "codex-cli "+qualified {
+			return version, nil
+		}
+	}
+	return "", fmt.Errorf("Codex version %q is not qualified for native isolation; supported: %s; select a qualified installation with agents.<name>.binary", version, strings.Join(nativeCodexVersions, ", "))
+}
 
 // NativeValidationBinary uses an approved Codex entry; validation needs only its
 // sandbox command, not model authentication or a separate provider identity.
@@ -98,51 +107,68 @@ func runNativeCommand(ctx context.Context, binary, dir string, env, args []strin
 	cmd.WaitDelay = time.Second
 	err := cmd.Run()
 	process.Stop(cmd)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	return err
 }
 
 // CheckNativeCodex verifies actual filesystem and loopback restrictions using
 // dummy data. No login or provider request is needed for these checks.
 func CheckNativeCodex(ctx context.Context, binary string) error {
+	_, err := InspectNativeCodex(ctx, binary)
+	return err
+}
+
+// InspectNativeCodex returns the version whose boundary checks passed.
+func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 	if runtime.GOOS != "linux" {
-		return fmt.Errorf("native Codex isolation is currently qualified on Linux; select execution.backend: oci for a qualified container setup")
+		return "", fmt.Errorf("native Codex isolation is currently qualified on Linux; use a qualified Linux worker (OCI is a separate offline backend)")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	root, err := os.MkdirTemp("", "swarm-native-check-*")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(root)
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return err
+		return "", err
 	}
 	work, home := filepath.Join(root, "work"), filepath.Join(root, "home")
 	for _, dir := range []string{work, home} {
 		if err := os.Mkdir(dir, 0700); err != nil {
-			return err
+			return "", err
 		}
 	}
 	var version, versionDiagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false), []string{"--version"}, nil, &version, &versionDiagnostics); err != nil {
-		return fmt.Errorf("check Codex version: %w", err)
+		return "", fmt.Errorf("check Codex version: %w", err)
 	}
-	if strings.TrimSpace(version.String()) != "codex-cli "+NativeCodexVersion {
-		return fmt.Errorf("native isolation requires qualified Codex %s; update Codex or select a supported execution backend", NativeCodexVersion)
+	qualified, err := qualifiedNativeCodexVersion(version.String())
+	if err != nil {
+		return "", err
 	}
 	canary := filepath.Join(root, "coordinator-token")
 	if err := os.WriteFile(canary, []byte("SWARM_DUMMY_CREDENTIAL"), 0600); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.Symlink(canary, filepath.Join(work, "outside-link")); err != nil {
-		return err
+		return "", err
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return fmt.Errorf("native network canary: %w", err)
+		return "", fmt.Errorf("native network canary: %w", err)
 	}
 	defer listener.Close()
+	// Establish reachability outside the tool boundary so ambient runner policy
+	// cannot masquerade as enforcement by Codex.
+	connection, err := net.DialTimeout("tcp4", listener.Addr().String(), time.Second)
+	if err != nil {
+		return "", fmt.Errorf("native network canary is unreachable before sandboxing: %w", err)
+	}
+	connection.Close()
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 	// All paths are passed as positional parameters, never interpolated as shell.
 	script := `set -eu
@@ -161,13 +187,13 @@ printf SWARM_NATIVE_BOUNDARY_OK`
 	args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-canary", canary, port)
 	var out, diagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false), args, nil, &out, &diagnostics); err != nil {
-		return fmt.Errorf("Codex native boundary check failed: %w: %s", err, diagnostics.String())
+		return "", fmt.Errorf("Codex native boundary check failed: %w: %s", err, diagnostics.String())
 	}
 	data, err := os.ReadFile(canary)
 	if err != nil || string(data) != "SWARM_DUMMY_CREDENTIAL" || strings.TrimSpace(out.String()) != "SWARM_NATIVE_BOUNDARY_OK" {
-		return fmt.Errorf("Codex native boundary check did not preserve the outside canary")
+		return "", fmt.Errorf("Codex native boundary check did not preserve the outside canary")
 	}
-	return nil
+	return qualified, nil
 }
 
 func CodexAuthentication(ctx context.Context, binary string) (string, error) {
@@ -193,16 +219,17 @@ func CodexAuthentication(ctx context.Context, binary string) (string, error) {
 
 // RunNativeCodex leaves provider authentication in the trusted Codex process.
 // Model-controlled commands use Codex's native profile, with no host credentials.
-func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts WorkerOptions, interactive bool, stdin io.Reader, stdout, stderr io.Writer) ([]string, error) {
-	if err := CheckNativeCodex(ctx, binary); err != nil {
-		return nil, err
+func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts WorkerOptions, interactive bool, stdin io.Reader, stdout, stderr io.Writer) ([]string, string, error) {
+	version, err := InspectNativeCodex(ctx, binary)
+	if err != nil {
+		return nil, "", err
 	}
 	if _, err := CodexAuthentication(ctx, binary); err != nil {
-		return nil, err
+		return nil, version, err
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, err
+		return nil, version, err
 	}
 	var command []string
 	err = withNativeWorkspace(ctx, dir, opts, func(ctx context.Context, work, scratch string) error {
@@ -210,10 +237,6 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		args = append(args, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-C", work)
 		if model != "" {
 			args = append(args, "--model", model)
-		}
-		reader := bufio.NewReader(strings.NewReader(""))
-		if stdin != nil {
-			reader = bufio.NewReader(stdin)
 		}
 		for {
 			command = append(append([]string{binary}, args...), prompt)
@@ -224,7 +247,7 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 				return nil
 			}
 			fmt.Fprint(stdout, "\nFollow-up instruction (Enter to finish this phase): ")
-			line, err := nativeInstruction(ctx, reader)
+			line, err := nativeInstruction(ctx, stdin)
 			if err != nil && err != io.EOF {
 				return err
 			}
@@ -235,22 +258,7 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 			prompt = "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n" + line
 		}
 	})
-	return command, err
-}
-
-func nativeInstruction(ctx context.Context, reader *bufio.Reader) (string, error) {
-	type result struct {
-		line string
-		err  error
-	}
-	ready := make(chan result, 1)
-	go func() { line, err := reader.ReadString('\n'); ready <- result{line, err} }()
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case r := <-ready:
-		return r.line, r.err
-	}
+	return command, version, err
 }
 
 func RunNativeValidation(ctx context.Context, dir, binary, command string, stdout, stderr io.Writer) error {
@@ -267,7 +275,11 @@ func RunNativeValidation(ctx context.Context, dir, binary, command string, stdou
 // Reuse the OCI filesystem acceptance rules. Native workers also operate on a
 // detached snapshot, so tools cannot access live Git or coordinator state.
 func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, run func(context.Context, string, string) error) error {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	timeout := 15 * time.Minute
+	if opts.Timeout > 0 && opts.Timeout < timeout {
+		timeout = opts.Timeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	root, err := os.MkdirTemp("", "swarm-native-*")
 	if err != nil {
@@ -311,6 +323,17 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 		return nil
 	}
 	if opts.ReadOnly {
+		// Validate every role output before replacing any existing artifact.
+		artifacts := make([][]byte, len(outputs))
+		for i, name := range outputs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			artifacts[i], err = safefs.ReadFile(work, filepath.Join(".swarm", "active", name), 1<<20)
+			if err != nil {
+				return fmt.Errorf("read native role output %s: %w", name, err)
+			}
+		}
 		destination := original
 		if opts.OutputDir != "" {
 			destination, err = safefs.Open(opts.OutputDir)
@@ -319,16 +342,15 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 			}
 			defer destination.Close()
 		}
-		for _, name := range outputs {
-			data, err := safefs.ReadFile(work, filepath.Join(".swarm", "active", name), 1<<20)
-			if err != nil {
-				return fmt.Errorf("read native role output %s: %w", name, err)
-			}
+		for i, name := range outputs {
 			dest := filepath.Join(".swarm", "active", name)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if opts.OutputDir != "" {
 				dest = name
 			}
-			if err := destination.WriteFile(dest, data, 0644); err != nil {
+			if err := destination.WriteFile(dest, artifacts[i], 0644); err != nil {
 				return err
 			}
 		}

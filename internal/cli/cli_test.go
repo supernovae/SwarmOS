@@ -461,6 +461,16 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	}
 
 	// Read-only doctor with github backend reports WARN for missing Epic type and non-maintainer without creating issues
+	cfgPath := filepath.Join(f.root, ".swarm", "config.yaml")
+	cfgBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgText := strings.Replace(string(cfgBytes), "default_agent: codex", "default_agent: mock", 1)
+	cfgText += "\n  mock:\n    binary: git\n    harness: mock\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgText), 0600); err != nil {
+		t.Fatal(err)
+	}
 	mockTr := &mockDoctorTracker{
 		Tracker:     f.tracker,
 		epicTypeErr: errors.New("issue type \"Epic\" is not enabled"),

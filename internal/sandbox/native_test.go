@@ -1,14 +1,13 @@
 package sandbox
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -95,15 +94,103 @@ func TestNativeRoleOnlyImportsExpectedArtifacts(t *testing.T) {
 	}
 }
 
+func TestNativeDeadlineAndFailedRunDiscardChanges(t *testing.T) {
+	for _, deadline := range []bool{true, false} {
+		t.Run(fmt.Sprint(deadline), func(t *testing.T) {
+			dir := t.TempDir()
+			writeWorkerFixture(t, dir, "source", "original")
+			var snapshot string
+			failed := errors.New("harness session failed")
+			err := withNativeWorkspace(context.Background(), dir, WorkerOptions{Timeout: 100 * time.Millisecond}, func(ctx context.Context, work, _ string) error {
+				snapshot = work
+				if err := os.WriteFile(filepath.Join(work, "source"), []byte("partial"), 0600); err != nil {
+					return err
+				}
+				if !deadline {
+					return failed
+				}
+				due, ok := ctx.Deadline()
+				if !ok || time.Until(due) > time.Second {
+					t.Fatal("worker ignored requested timeout")
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			})
+			want := failed
+			if deadline {
+				want = context.DeadlineExceeded
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("got %v, want %v", err, want)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "source"))
+			if err != nil || string(data) != "original" {
+				t.Fatalf("imported failed run: %q, %v", data, err)
+			}
+			if _, err := os.Stat(snapshot); !os.IsNotExist(err) {
+				t.Fatalf("snapshot retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeInvalidRoleOutputPreservesExistingArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerFixture(t, dir, ".swarm/active/PLAN.md", "previous plan")
+	err := withNativeWorkspace(context.Background(), dir, WorkerOptions{ReadOnly: true, Role: "planner"}, func(_ context.Context, work, _ string) error {
+		// A valid first output and missing second output must not replace the plan.
+		return os.WriteFile(filepath.Join(work, ".swarm/active/PLAN.md"), []byte("incomplete new plan"), 0600)
+	})
+	if err == nil {
+		t.Fatal("accepted incomplete role outputs")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".swarm/active/PLAN.md"))
+	if err != nil || string(data) != "previous plan" {
+		t.Fatalf("partial artifact import: %q, %v", data, err)
+	}
+}
+
+func TestNativeVersionQualification(t *testing.T) {
+	for _, version := range nativeCodexVersions {
+		got, err := qualifiedNativeCodexVersion("codex-cli " + version + "\n")
+		if err != nil || got != version {
+			t.Fatalf("qualified version %q: %q, %v", version, got, err)
+		}
+	}
+	for _, output := range []string{"codex-cli 0.163.1", "codex-cli 0.164.0", "codex-cli 0.163.0-preview", "0.163.0", "codex-cli 0.163.0\nextra"} {
+		if _, err := qualifiedNativeCodexVersion(output); err == nil {
+			t.Fatalf("accepted unqualified output %q", output)
+		}
+	}
+}
+
 func TestInteractiveCancellation(t *testing.T) {
-	in, out := io.Pipe()
+	if runtime.GOOS != "linux" {
+		t.Skip("native input is qualified on Linux")
+	}
+	in, out, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer in.Close()
 	defer out.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := nativeInstruction(ctx, bufio.NewReader(in))
-	if !errors.Is(err, context.Canceled) {
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	_, err = nativeInstruction(ctx, in)
+	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
+	}
+	// A canceled reader must not consume the next session's instruction.
+	if _, err := out.WriteString("next turn\nsecond turn\n"); err != nil {
+		t.Fatal(err)
+	}
+	resumed, stop := context.WithTimeout(context.Background(), time.Second)
+	defer stop()
+	for _, want := range []string{"next turn", "second turn"} {
+		got, err := nativeInstruction(resumed, in)
+		if err != nil || got != want {
+			t.Fatalf("got %q, %v; want %q", got, err, want)
+		}
 	}
 }
 
@@ -215,7 +302,7 @@ func TestNativeCodexAuthenticatedFileTools(t *testing.T) {
 	var output process.Output
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if _, err := RunNativeCodex(ctx, work, binary, "", prompt, WorkerOptions{Role: "developer"}, false, nil, &output, &output); err != nil {
+	if _, _, err := RunNativeCodex(ctx, work, binary, "", prompt, WorkerOptions{Role: "developer"}, false, nil, &output, &output); err != nil {
 		t.Fatal(err, output.String())
 	}
 	data, err := os.ReadFile(canary)

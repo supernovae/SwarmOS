@@ -44,15 +44,19 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 		options.OutputDir = filepath.Join(req.WorktreePath, ".swarm", "active-output")
 	}
 	var err error
+	var nativeVersion string
 	command := append([]string{bin}, args...)
 	if a.sandboxRuntime == "codex-native" {
 		prompt := fmt.Sprintf("Read %s and .swarm/active/WORKUNIT.md first.\n\n%s", req.SystemPrompt, req.TaskPrompt)
-		command, err = sandbox.RunNativeCodex(ctx, req.WorktreePath, a.binary, req.Model, prompt, options, strings.EqualFold(req.Mode, "interactive"), in, stdout, stderr)
+		command, nativeVersion, err = sandbox.RunNativeCodex(ctx, req.WorktreePath, a.binary, req.Model, prompt, options, strings.EqualFold(req.Mode, "interactive"), in, stdout, stderr)
 	} else {
 		err = sandbox.RunWorker(ctx, req.WorktreePath, bin, args, options, in, stdout, stderr)
 	}
 	att := a.Provenance(req.Role, options.ReadOnly)
 	att.ExecutionMode = contract.ExecutionIsolated
+	if nativeVersion != "" {
+		att.HarnessVersion = nativeVersion
+	}
 	result := &RunResult{Agent: a.agentName, Role: req.Role, Command: command, Output: out.String(), Attestation: att}
 	if err != nil {
 		result.ExitCode = 1

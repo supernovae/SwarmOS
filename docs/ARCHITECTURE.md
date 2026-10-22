@@ -91,6 +91,8 @@ Codex's documented CLI permission profiles provide the first complete path witho
 
 Native capability tests cover host-file canaries, environment filtering, read-only roles, network denial, artifact import, and cancellation of a detached subprocess. The reproducible authenticated WorkUnit test exercises all four roles, interactive planning, unattended implementation, human approval, native validation, and a local Draft PR. Version expansion, macOS/Windows, provider session-expiration scenarios, and additional tool integrations remain qualification work.
 
+Exact qualified releases live in a small adapter allowlist. Runtime checks return the tested version for diagnostics and artifact provenance. Each added release follows the [qualification procedure](native-qualification.md#adding-a-codex-release); repository policy can continue selecting an older installed binary.
+
 ---
 
 ## Related Guides

@@ -1,4 +1,5 @@
 version: 1
+# Native isolation: qualified Codex releases on Linux. Run swarm doctor before work.
 default_agent: codex
 plan_mode: auto
 execution:
@@ -13,6 +14,7 @@ security:
   require_ready_label: true
   ready_label: "swarm:ready"
 agents:
+  # Optional harnesses: native isolation qualification is still in progress.
   claude:
     binary: claude
   codex:

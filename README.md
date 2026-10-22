@@ -125,6 +125,8 @@ swarm submit 42 --backend github
 > [!TIP]
 > `swarm work` runs headlessly by default. Pass `--headless=false` to pair with your agent, or use `swarm node run --watch` to keep picking up approved tasks. The default isolated path uses Codex's native sandbox and your existing `codex login` on supported Linux setups. Start with `swarm doctor`; the [worker guide](docs/developer.md#choose-how-you-work) covers setup and other harnesses. Use `--backend local` to experiment with local coordination storage.
 
+`swarm doctor` highlights your selected agents and reports unused, unqualified harnesses as `OPTIONAL`. The [native qualification guide](docs/native-qualification.md) tracks tested releases and the dogfood workflow.
+
 ---
 
 ## Bring Your Own Agents

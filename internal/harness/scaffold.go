@@ -707,7 +707,7 @@ func LoadRolePromptAt(repoRoot, role, baseSHA string) (string, error) {
 type DoctorCheck struct {
 	Category string `json:"category"`
 	Name     string `json:"name"`
-	Status   string `json:"status"` // "OK", "WARN", "FAIL"
+	Status   string `json:"status"` // "OK", "WARN", "FAIL", "OPTIONAL"
 	Detail   string `json:"detail"`
 }
 
@@ -817,9 +817,9 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 		sort.Strings(names)
 		for _, name := range names {
 			binary := cfg.Agents[name].Binary
-			check := DoctorCheck{Category: "agent", Name: name, Status: "WARN", Detail: "executable not found: " + binary}
+			check := DoctorCheck{Category: "binary", Name: name, Status: "OPTIONAL", Detail: "executable not found: " + binary}
 			if path, err := exec.LookPath(binary); err == nil {
-				check.Status, check.Detail = "OK", path
+				check.Status, check.Detail = "OK", path+"; installation only; see execution checks"
 			}
 			checks = append(checks, check)
 		}

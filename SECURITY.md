@@ -62,6 +62,8 @@ OCI workers have a read-only image, no host mounts, no network, dropped capabili
 
 A failed isolated run never falls back to host execution. Other native harnesses and macOS/Windows require qualification before they can use the native backend.
 
+The [qualification record](docs/native-qualification.md) separates fresh boundary tests, earlier authenticated workflow evidence, and remaining hosted/platform checks. Codex releases are enabled individually; newer versions can be added without removing previously qualified releases.
+
 `swarm doctor` and `swarm work <issue> --dry-run` report execution setup and blockers. These checks help prepare the worker environment before acquiring work.
 
 ## Boundaries that need operator care

@@ -41,6 +41,8 @@ Onboarding for the qualified native path is install Codex, sign in with `codex l
 
 ## Validation record
 
+The [final native qualification record](native-qualification.md) covers the follow-up to `d451180`, including fresh boundary tests and the private GitHub dogfood fixture. This review fixes ignored worker timeouts, canceled interactive reads consuming later input, incomplete plan output imports, and selected-role failures hidden by `doctor`. It also checks loopback reachability before testing sandbox denial and records the actual qualified harness version in provenance.
+
 The Linux suite runs inside Bubblewrap with no external network, an allowlisted environment, read-only source/toolchain/module cache, bounded scratch storage, and explicit process, CPU, memory, file-size, and wall-time limits. Race tests use a cgroup memory limit because Go's race detector reserves a large virtual address space. The real OCI integration tests are opt-in and are skipped in this sandbox, which exposes no container-engine socket.
 
 These are test-runner controls. Product integrations use the supported harness/runtime controls required by repository policy, following the architecture above.

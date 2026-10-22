@@ -29,6 +29,7 @@ func setupGitRepoForValidation(t *testing.T) string {
 	for _, rel := range []string{
 		".github/workflows/swarm-validate.yml",
 		".swarm/validation/required-checks.yaml",
+		".swarm/config.yaml",
 		"main.go",
 	} {
 		full := filepath.Join(tmp, rel)
@@ -38,6 +39,9 @@ func setupGitRepoForValidation(t *testing.T) string {
 		var contents string
 		if rel == ".swarm/validation/required-checks.yaml" {
 			contents = "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - .swarm/validation/**\n"
+		} else if rel == ".swarm/config.yaml" {
+			// These fixtures exercise validation policy in explicit host compatibility mode.
+			contents = "version: 1\ndefault_agent: mock\ndefault_gate: none\nexecution:\n  mode: trusted-local\nlease:\n  duration: 1h\n  max_renewals: 1\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  mock:\n    binary: git\n    harness: mock\n"
 		} else {
 			contents = "initial\n"
 		}

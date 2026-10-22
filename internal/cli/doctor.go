@@ -2,9 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/agent"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 )
 
@@ -16,6 +20,46 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 			repoRoot := rootOpts.resolveRepoRoot()
 			checkGHAuth := !strings.EqualFold(rootOpts.Backend, "local")
 			checks := harness.RunDoctor(repoRoot, checkGHAuth)
+			if cfg, err := harness.LoadConfig(repoRoot); err == nil {
+				execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+				status, detail := "OK", ""
+				if err != nil {
+					status, detail = "FAIL", err.Error()
+				} else {
+					detail = "mode=" + execution.Mode + "; policy is read from each task's approved base before execution"
+					if execution.Mode == contract.ExecutionTrustedLocal {
+						status = "WARN"
+						detail += "; workers share operator OS permissions"
+					}
+				}
+				checks = append(checks, harness.DoctorCheck{Category: "execution", Name: "mode", Status: status, Detail: detail})
+				names := make([]string, 0, len(cfg.Agents))
+				for name := range cfg.Agents {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				for _, name := range names {
+					roles := cfg.Agents[name].Roles
+					if len(roles) == 0 {
+						roles = []string{"planner", "developer", "tester", "reviewer"}
+					}
+					for _, role := range roles {
+						resolved, err := agent.Preflight(name, cfg, !checkGHAuth, role)
+						status, detail := "OK", resolved
+						if err != nil {
+							status, detail = "FAIL", err.Error()
+							selected := cfg.Roles[role]
+							if selected == "" {
+								selected = cfg.DefaultAgent
+							}
+							if execution.Mode == contract.ExecutionTrustedLocal || selected != name {
+								status = "WARN"
+							}
+						}
+						checks = append(checks, harness.DoctorCheck{Category: "execution", Name: name + "/" + role, Status: status, Detail: detail})
+					}
+				}
+			}
 			if checkGHAuth && (strings.EqualFold(rootOpts.Backend, "github") || rootOpts.trackerOverride != nil || rootOpts.Repo != "" || hasGitRemote(repoRoot)) {
 				tr, err := rootOpts.resolveTracker(cmd)
 				if err != nil {

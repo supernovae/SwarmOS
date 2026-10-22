@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -61,6 +62,9 @@ func IsRequestComment(body string) bool {
 }
 
 func ParseRequestComment(body string) (*lease.ForkRequest, error) {
+	if len(body) > MaxForkCommentBytes {
+		return nil, fmt.Errorf("fork request exceeds maximum size")
+	}
 	trimmed := strings.TrimSpace(body)
 	if !strings.HasPrefix(trimmed, RequestMarker) {
 		return nil, fmt.Errorf("comment does not start with %s", RequestMarker)
@@ -76,7 +80,7 @@ func ParseRequestComment(body string) (*lease.ForkRequest, error) {
 		return nil, fmt.Errorf("invalid fork request JSON: %w", err)
 	}
 	var extra any
-	if dec.Decode(&extra) == nil {
+	if dec.Decode(&extra) != io.EOF {
 		return nil, fmt.Errorf("unexpected trailing data in fork request JSON")
 	}
 	if req.Version != 1 {
@@ -100,6 +104,9 @@ func FormatResultComment(res ForkResult) (string, error) {
 }
 
 func ParseResultComment(body string) (*ForkResult, error) {
+	if len(body) > MaxForkCommentBytes {
+		return nil, fmt.Errorf("fork result exceeds maximum size")
+	}
 	trimmed := strings.TrimSpace(body)
 	if !strings.HasPrefix(trimmed, ResultMarker) {
 		return nil, fmt.Errorf("comment does not start with %s", ResultMarker)
@@ -113,6 +120,10 @@ func ParseResultComment(body string) (*ForkResult, error) {
 	var res ForkResult
 	if err := dec.Decode(&res); err != nil {
 		return nil, fmt.Errorf("invalid fork result JSON: %w", err)
+	}
+	var extra any
+	if dec.Decode(&extra) != io.EOF {
+		return nil, fmt.Errorf("unexpected trailing data in fork result JSON")
 	}
 	if res.Version != 1 || res.RequestID <= 0 {
 		return nil, fmt.Errorf("invalid fork result metadata")
@@ -146,6 +157,13 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 	if g == nil || g.Tracker == nil || g.Store == nil {
 		return nil, fmt.Errorf("fork worker gateway is not configured")
 	}
+	timeout := g.PollTimeout
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	req.Version = 1
 	if req.Operation == "acquire" {
 		if strings.TrimSpace(req.ForkRepo) == "" {
@@ -179,68 +197,76 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 	if interval <= 0 {
 		interval = 1 * time.Second
 	}
-	timeout := g.PollTimeout
-	if timeout <= 0 {
-		timeout = 90 * time.Second
+	since := comment.CreatedAt
+	if since.IsZero() {
+		since = time.Now()
 	}
-
-	deadline := time.Now().Add(timeout)
+	// Anchor at the request (with a one-second overlap) so delayed result
+	// visibility cannot be skipped when newer comments appear first.
+	since = since.Add(-time.Second)
 	for {
-		st, done, checkErr := g.checkRequestOutcome(ctx, req, reqID)
+		st, done, checkErr := g.checkRequestOutcome(ctx, req, reqID, &since)
 		if checkErr != nil {
 			return nil, checkErr
 		}
 		if done {
 			return st, nil
 		}
-		if time.Now().After(deadline) {
-			break
-		}
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(interval):
+			timer.Stop()
+			return nil, fmt.Errorf("waiting for fork coordinator response to request %d (%s): %w", reqID, req.Operation, ctx.Err())
+		case <-timer.C:
+		}
+		if interval < 5*time.Second {
+			interval *= 2
+			if interval > 5*time.Second {
+				interval = 5 * time.Second
+			}
 		}
 	}
-
-	// Final re-query of the same request comment/result and upstream state before failing closed.
-	if getter, ok := g.Tracker.(interface {
-		GetComment(context.Context, int64) (*tracker.Comment, error)
-	}); ok {
-		if orig, getErr := getter.GetComment(ctx, reqID); getErr != nil || orig == nil {
-			return nil, fmt.Errorf("fork request comment %d could not be re-verified after timeout: %w", reqID, getErr)
-		}
-	}
-	if st, done, checkErr := g.checkRequestOutcome(ctx, req, reqID); checkErr != nil {
-		return nil, checkErr
-	} else if done {
-		return st, nil
-	}
-	if st, loadErr := g.loadUpstreamState(ctx, req.IssueNumber); loadErr == nil && st != nil {
-		if st.LastForkRequestID == reqID && expectedResultPresent(st, req) {
-			return st, nil
-		}
-		if st.LastForkRequestID > reqID {
-			return nil, fmt.Errorf("fork request %d was superseded by upstream request %d", reqID, st.LastForkRequestID)
-		}
-	}
-	return nil, fmt.Errorf("timed out waiting for upstream fork coordinator response to request %d (%s): ensure .github/workflows/swarm-fork-coordinator.yml is enabled on the upstream default branch and allowed to push refs/heads/swarm-state/* and refs/heads/swarm-contributors/*", reqID, req.Operation)
 }
 
-func (g *Gateway) checkRequestOutcome(ctx context.Context, req lease.ForkRequest, reqID int64) (*lease.IssueState, bool, error) {
-	comments, err := g.Tracker.ListComments(ctx, req.IssueNumber)
+func (g *Gateway) checkRequestOutcome(ctx context.Context, req lease.ForkRequest, reqID int64, since *time.Time) (*lease.IssueState, bool, error) {
+	var comments []*tracker.Comment
+	var err error
+	if incremental, ok := g.Tracker.(interface {
+		ListCommentsSince(context.Context, int, time.Time) ([]*tracker.Comment, error)
+	}); ok {
+		comments, err = incremental.ListCommentsSince(ctx, req.IssueNumber, *since)
+	} else {
+		comments, err = g.Tracker.ListComments(ctx, req.IssueNumber)
+	}
 	if err != nil {
 		return nil, false, fmt.Errorf("poll fork coordinator comments: %w", err)
 	}
+	if len(comments) > 1000 {
+		return nil, false, fmt.Errorf("fork comment scan exceeds 1000 records")
+	}
+	bytes := 0
 	for _, c := range comments {
-		if c == nil || !strings.HasPrefix(strings.TrimSpace(c.Body), ResultMarker) {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		if c == nil {
+			continue
+		}
+		bytes += len(c.Body)
+		if bytes > 8<<20 {
+			return nil, false, fmt.Errorf("fork comment scan exceeds byte budget")
+		}
+		if c.ID <= reqID {
+			continue
+		}
+		if !strings.HasPrefix(strings.TrimSpace(c.Body), ResultMarker) {
 			continue
 		}
 		res, parseErr := ParseResultComment(c.Body)
-		if parseErr != nil || res.RequestID != reqID {
+		if parseErr != nil || res.RequestID != reqID || res.IssueNumber != req.IssueNumber || res.Operation != req.Operation {
 			continue
 		}
-		if !IsTrustedBotComment(c) {
+		if !IsTrustedBotComment(c) || (!c.UpdatedAt.IsZero() && !c.CreatedAt.Equal(c.UpdatedAt)) {
 			continue
 		}
 		if !res.Success {
@@ -257,6 +283,16 @@ func (g *Gateway) checkRequestOutcome(ctx context.Context, req lease.ForkRequest
 			return nil, false, fmt.Errorf("upstream state did not confirm fork request %d (%s)", reqID, req.Operation)
 		}
 		return st, true, nil
+	}
+	// A successfully committed operation can outlive a failed result-comment post.
+	st, loadErr := g.loadUpstreamState(ctx, req.IssueNumber)
+	if loadErr == nil && st != nil {
+		if st.LastForkRequestID == reqID && expectedResultPresent(st, req) {
+			return st, true, nil
+		}
+		if st.LastForkRequestID > reqID {
+			return nil, false, fmt.Errorf("fork request %d was superseded", reqID)
+		}
 	}
 	return nil, false, nil
 }

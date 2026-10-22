@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -450,25 +451,54 @@ type ghCommentResponse struct {
 	} `json:"user"`
 }
 
+const maxCommentPages = 10
+const maxCommentResponseBytes = 8 << 20
+
 func (g *GitHubTracker) ListComments(ctx context.Context, issueNumber int) ([]*Comment, error) {
+	return g.ListCommentsSince(ctx, issueNumber, time.Time{})
+}
+
+// ListCommentsSince bounds both the work and memory of a comment scan. Callers
+// polling an outstanding request use the server timestamp of that request.
+func (g *GitHubTracker) ListCommentsSince(ctx context.Context, issueNumber int, since time.Time) ([]*Comment, error) {
 	var out []*Comment
-	for page := 1; ; page++ {
+	remaining := int64(maxCommentResponseBytes)
+	for page := 1; page <= maxCommentPages; page++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		path := fmt.Sprintf("repos/%s/%s/issues/%d/comments?per_page=100&page=%d", g.owner, g.repo, issueNumber, page)
-		var rawList []ghCommentResponse
-		if err := g.client.DoWithContext(ctx, "GET", path, nil, &rawList); err != nil {
+		if !since.IsZero() {
+			path += "&since=" + url.QueryEscape(since.UTC().Format(time.RFC3339))
+		}
+		resp, err := g.client.RequestWithContext(ctx, "GET", path, nil)
+		if err != nil {
 			return nil, fmt.Errorf("github ListComments #%d page %d: %w", issueNumber, page, err)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, remaining+1))
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if int64(len(data)) > remaining {
+			return nil, fmt.Errorf("github comment scan exceeds %d bytes", maxCommentResponseBytes)
+		}
+		remaining -= int64(len(data))
+		var rawList []ghCommentResponse
+		if err := json.Unmarshal(data, &rawList); err != nil {
+			return nil, fmt.Errorf("decode github comments: %w", err)
+		}
+		if len(rawList) > 100 {
+			return nil, fmt.Errorf("github comment page exceeds 100 records")
 		}
 		for _, r := range rawList {
 			out = append(out, &Comment{ID: r.ID, IssueNum: issueNumber, Author: r.User.Login, AuthorAssociation: r.AuthorAssociation, AuthorType: r.User.Type, Body: r.Body, HTMLURL: r.HTMLURL, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
 		}
 		if len(rawList) < 100 {
-			break
+			return out, nil
 		}
 	}
-	return out, nil
+	return nil, fmt.Errorf("github comment scan exceeds %d pages", maxCommentPages)
 }
 
 func (g *GitHubTracker) GetComment(ctx context.Context, commentID int64) (*Comment, error) {

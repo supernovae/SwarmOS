@@ -14,10 +14,58 @@ concurrency:
 
 jobs:
   coordinate:
-    if: github.event.issue.pull_request == null && startsWith(github.event.comment.body, '<!-- swarm:fork-request:v1 -->')
+    if: github.event.issue.pull_request == null && github.event.issue.state == 'open' && github.event.comment.user.type == 'User' && startsWith(github.event.comment.body, '<!-- swarm:fork-request:v1 -->')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Authenticate request before checkout and toolchain setup
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, urllib.request
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
+              event = json.load(stream)
+          repository = os.environ["GITHUB_REPOSITORY"]
+          issue = event["issue"]
+          comment = event["comment"]
+          marker = "<!-- swarm:fork-request:v1 -->"
+          body = comment.get("body", "")
+          if len(body.encode("utf-8")) > 60000 or not body.startswith(marker):
+              raise SystemExit("Invalid fork request size or marker")
+          payload = json.loads(body[len(marker):].strip())
+          operations = {"acquire", "renew", "release", "handoff", "require-gate", "update-phase", "update-artifact", "record-checkpoint", "record-submission"}
+          if (payload.get("version") != 1 or payload.get("issue_number") != issue["number"]
+                  or payload.get("operation") not in operations):
+              raise SystemExit("Invalid fork request metadata")
+          if comment["user"].get("type") != "User" or comment["created_at"] != comment["updated_at"]:
+              raise SystemExit("Only original human-authored requests are accepted")
+
+          def fetch(path):
+              request = urllib.request.Request(os.environ["GITHUB_API_URL"] + path, headers={
+                  "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                  "Accept": "application/vnd.github+json",
+              })
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  raw = response.read(1048577)
+              if len(raw) > 1048576:
+                  raise SystemExit("Admission API response exceeds size limit")
+              return json.loads(raw)
+
+          current_issue = fetch(f"/repos/{repository}/issues/{int(issue['number'])}")
+          current_comment = fetch(f"/repos/{repository}/issues/comments/{int(comment['id'])}")
+          if current_issue.get("state") != "open" or "pull_request" in current_issue:
+              raise SystemExit("Fork requests require an open issue")
+          expected_issue_url = os.environ["GITHUB_API_URL"] + f"/repos/{repository}/issues/{int(issue['number'])}"
+          if (current_comment.get("issue_url") != expected_issue_url
+                  or current_comment.get("body") != body
+                  or current_comment.get("user", {}).get("id") != comment["user"]["id"]
+                  or current_comment.get("user", {}).get("type") != "User"
+                  or current_comment.get("created_at") != current_comment.get("updated_at")):
+              raise SystemExit("Request no longer matches the authenticated event")
+          PYTHON
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0

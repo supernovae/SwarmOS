@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/sandbox"
@@ -161,7 +162,7 @@ func TestReviewerSandboxAllowsScratchButDeniesSourceAndCredentials(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{
 		"isolated-review": {
 			Binary: binary, Harness: "claude", Roles: []string{"reviewer"},
 			Args: []string{"-test.run=^TestSandboxReviewerHelper$", "--"},
@@ -187,5 +188,128 @@ func TestReviewerSandboxAllowsScratchButDeniesSourceAndCredentials(t *testing.T)
 	}
 	if got, err := os.ReadFile(filepath.Join(root, "tracked.txt")); err != nil || string(got) != "original" {
 		t.Fatalf("original source changed: %q, %v", got, err)
+	}
+}
+
+type reviewOutputRunner struct {
+	*MockRunner
+	produce func(RunRequest) error
+}
+
+func (r reviewOutputRunner) Run(_ context.Context, req RunRequest) (*RunResult, error) {
+	return &RunResult{}, r.produce(req)
+}
+
+func TestReviewRejectsUnsafeOutput(t *testing.T) {
+	for _, kind := range []string{"symlink", "hardlink", "oversize", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			root, outside := t.TempDir(), t.TempDir()
+			mustWriteReviewFixture(t, outside, "canary", "coordinator-canary")
+			runner := reviewOutputRunner{MockRunner: &MockRunner{}, produce: func(req RunRequest) error {
+				path := filepath.Join(req.WorktreePath, ".swarm", "active-output", "REVIEW.md")
+				switch kind {
+				case "symlink":
+					return os.Symlink(filepath.Join(outside, "canary"), path)
+				case "hardlink":
+					return os.Link(filepath.Join(outside, "canary"), path)
+				case "directory":
+					return os.Mkdir(path, 0o700)
+				default:
+					return os.WriteFile(path, []byte(strings.Repeat("x", maxReviewBytes+1)), 0o600)
+				}
+			}}
+			if _, err := RunReview(context.Background(), runner, RunRequest{Role: "reviewer", WorktreePath: root}); err == nil {
+				t.Fatal("unsafe output was imported")
+			}
+			if _, err := os.Stat(filepath.Join(root, ".swarm", "active", "REVIEW.md")); !os.IsNotExist(err) {
+				t.Fatalf("unsafe output created destination: %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(outside, "canary")); err != nil || string(got) != "coordinator-canary" {
+				t.Fatalf("canary changed: %q %v", got, err)
+			}
+		})
+	}
+}
+
+func TestReviewRejectsDestinationSwap(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	mustWriteReviewFixture(t, root, ".swarm/active/PLAN.md", "plan")
+	runner := reviewOutputRunner{MockRunner: &MockRunner{}, produce: func(req RunRequest) error {
+		if err := os.Rename(filepath.Join(root, ".swarm", "active"), filepath.Join(root, ".swarm", "old-active")); err != nil {
+			return err
+		}
+		if err := os.Symlink(outside, filepath.Join(root, ".swarm", "active")); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(req.WorktreePath, ".swarm", "active-output", "REVIEW.md"), []byte("approved"), 0o600)
+	}}
+	if _, err := RunReview(context.Background(), runner, RunRequest{Role: "reviewer", WorktreePath: root}); err == nil {
+		t.Fatal("accepted swapped destination directory")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "REVIEW.md")); !os.IsNotExist(err) {
+		t.Fatalf("wrote outside destination: %v", err)
+	}
+}
+
+func TestSnapshotLimitsAndCancellation(t *testing.T) {
+	for _, kind := range []string{"entries", "file", "aggregate", "cancelled", "depth"} {
+		t.Run(kind, func(t *testing.T) {
+			source := t.TempDir()
+			mustWriteReviewFixture(t, source, "one", "1234")
+			mustWriteReviewFixture(t, source, "two", "5678")
+			limits := snapshotLimits{entries: 1000, fileBytes: 16, totalBytes: 32, duration: time.Minute}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			switch kind {
+			case "entries":
+				limits.entries = 1
+			case "file":
+				limits.fileBytes = 3
+			case "aggregate":
+				limits.totalBytes = 7
+			case "cancelled":
+				cancel()
+			case "depth":
+				mustWriteReviewFixture(t, source, strings.Repeat("d/", 66)+"file", "deep")
+			}
+			if err := copySnapshotContext(ctx, source, filepath.Join(t.TempDir(), "snapshot"), limits); err == nil {
+				t.Fatal("snapshot ignored resource boundary")
+			}
+		})
+	}
+}
+
+func TestSnapshotSymlinkPolicy(t *testing.T) {
+	for _, kind := range []string{"relative", "escape", "absolute", "active"} {
+		t.Run(kind, func(t *testing.T) {
+			source, target, outside := t.TempDir(), filepath.Join(t.TempDir(), "snapshot"), t.TempDir()
+			mustWriteReviewFixture(t, source, "real.txt", "safe")
+			mustWriteReviewFixture(t, outside, "secret", "canary")
+			link, dest := "real.txt", filepath.Join(source, "link")
+			switch kind {
+			case "escape":
+				link, _ = filepath.Rel(source, filepath.Join(outside, "secret"))
+			case "absolute":
+				link = filepath.Join(outside, "secret")
+			case "active":
+				if err := os.Mkdir(filepath.Join(source, ".swarm"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(source, "other"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				link, dest = "../other", filepath.Join(source, ".swarm", "active")
+			}
+			if err := os.Symlink(link, dest); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			err := copySnapshot(source, target)
+			if kind == "relative" && err != nil {
+				t.Fatal(err)
+			}
+			if kind != "relative" && err == nil {
+				t.Fatal("unsafe link accepted")
+			}
+		})
 	}
 }

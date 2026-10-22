@@ -2,6 +2,8 @@ version: 1
 default_agent: claude
 default_gate: agent
 plan_mode: auto
+execution:
+  mode: isolated
 lease:
   duration: 4h
   renewable: true

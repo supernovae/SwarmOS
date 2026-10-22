@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/sandbox"
@@ -16,11 +18,18 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 	if cfg == nil {
 		return nil, fmt.Errorf("agent policy is required")
 	}
+	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+	if err != nil {
+		return nil, err
+	}
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
 		return nil, fmt.Errorf("agent name is required")
 	}
 	if name == "mock" {
+		if execution.Mode == contract.ExecutionIsolated {
+			return nil, fmt.Errorf("mock runs host test helpers and requires explicit trusted-local execution")
+		}
 		_, allowlisted := cfg.Agents["mock"]
 		if !local && !allowlisted {
 			return nil, fmt.Errorf("mock runner is available only with the local backend")
@@ -42,7 +51,31 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 		return nil, err
 	}
 	a := &CLIAdapter{agentName: name, driver: driver, binary: ac.Binary, prefixArgs: append([]string(nil), ac.Args...), model: ac.Model, envAllow: append([]string(nil), ac.Env...), sandboxRuntime: ac.Sandbox, reviewNetwork: ac.ReviewNetwork, containerRuntime: ac.ContainerRuntime, container: ac.ContainerImage}
-	if ac.Sandbox != "container" {
+	a.executionMode = execution.Mode
+	a.authentication = ac.Authentication
+	if execution.Mode == contract.ExecutionIsolated {
+		a.sandboxRuntime = "container"
+		a.containerRuntime, a.container = execution.ContainerRuntime, execution.ContainerImage
+		if ac.ContainerRuntime != "" {
+			if ac.ContainerRuntime != "docker" && ac.ContainerRuntime != "podman" {
+				return nil, fmt.Errorf("agent %q container_runtime must be docker or podman, not a worker-controlled executable path", name)
+			}
+			a.containerRuntime = ac.ContainerRuntime
+		}
+		if ac.ContainerImage != "" {
+			a.container = ac.ContainerImage
+		}
+		if ac.ReviewNetwork {
+			return nil, fmt.Errorf("agent %q: isolated execution does not permit unrestricted review_network", name)
+		}
+		if len(ac.Env) != 0 {
+			return nil, fmt.Errorf("agent %q: isolated execution does not forward host environment credentials; configure a verified authentication adapter", name)
+		}
+		if ac.Authentication != "none" {
+			return nil, fmt.Errorf("agent %q (%s): no verified isolated adapter for existing login authentication; host credential stores are never mounted. Use an offline image with authentication: none, or explicitly select trusted-local where repository policy permits", name, driver)
+		}
+	}
+	if a.sandboxRuntime != "container" {
 		if path, ok := a.Available(); !ok {
 			return nil, fmt.Errorf("agent %q binary %q is unavailable", name, ac.Binary)
 		} else {
@@ -70,6 +103,14 @@ func Preflight(name string, cfg *contract.SwarmConfig, local bool, role string) 
 		return "", err
 	}
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "container" {
+		if adapter.executionMode == contract.ExecutionIsolated {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := sandbox.CheckWorkerRuntime(ctx, adapter.containerRuntime, adapter.container); err != nil {
+				return "", err
+			}
+			return "container:" + adapter.container, nil
+		}
 		if !strings.EqualFold(role, "reviewer") {
 			return "", fmt.Errorf("container-isolated agent %q is supported only for reviewer role", name)
 		}

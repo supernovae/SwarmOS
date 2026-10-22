@@ -3,18 +3,19 @@ package coordination
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/safefs"
+
+	"github.com/supernovae/swarmos/internal/gitcredential"
 )
 
 // PublishingStore atomically advances both the authoritative state ref and a
@@ -32,17 +33,43 @@ type Store interface {
 	Load(context.Context, int) ([]byte, string, error)
 	CompareAndSwap(context.Context, int, string, []byte) (string, error)
 }
-type FileStore struct{ root string }
+type FileStore struct {
+	root     string
+	repoRoot string
+}
 
 func NewFileStore(root string) *FileStore {
-	return &FileStore{root: filepath.Join(root, ".swarm", "coordination")}
+	return &FileStore{root: filepath.Join(root, ".swarm", "coordination"), repoRoot: root}
 }
 func (s *FileStore) path(n int) string { return filepath.Join(s.root, fmt.Sprintf("issue-%d.json", n)) }
 func (s *FileStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	b, err := os.ReadFile(s.path(n))
+	base, err := safefs.Open(s.repoRoot)
+	if err != nil {
+		return nil, "", err
+	}
+	defer base.Close()
+	state, err := base.Sub(filepath.Join(".swarm", "coordination"), false, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", ErrNotFound
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	defer state.Close()
+	name := fmt.Sprintf("issue-%d.json", n)
+	lock, err := state.OpenLock(name + ".lock")
+	if err != nil {
+		return nil, "", err
+	}
+	defer lock.Close()
+	if err := filelock.LockExclusive(lock); err != nil {
+		return nil, "", err
+	}
+	defer filelock.Unlock(lock)
+	b, err := state.ReadFile(name, 64<<20)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, "", ErrNotFound
 	}
@@ -55,10 +82,18 @@ func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(s.root, 0755); err != nil {
+	base, err := safefs.Open(s.repoRoot)
+	if err != nil {
 		return "", err
 	}
-	f, err := os.OpenFile(s.path(n)+".lock", os.O_CREATE|os.O_RDWR, 0644)
+	defer base.Close()
+	state, err := base.Sub(filepath.Join(".swarm", "coordination"), true, 0700)
+	if err != nil {
+		return "", err
+	}
+	defer state.Close()
+	name := fmt.Sprintf("issue-%d.json", n)
+	f, err := state.OpenLock(name + ".lock")
 	if err != nil {
 		return "", err
 	}
@@ -68,7 +103,7 @@ func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next 
 	}
 	defer filelock.Unlock(f)
 	current := ""
-	if b, err := os.ReadFile(s.path(n)); err == nil {
+	if b, err := state.ReadFile(name, 64<<20); err == nil {
 		current = digest(b)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -76,11 +111,7 @@ func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next 
 	if current != old {
 		return "", ErrConflict
 	}
-	tmp := s.path(n) + ".tmp"
-	if err = os.WriteFile(tmp, next, 0644); err != nil {
-		return "", err
-	}
-	if err = os.Rename(tmp, s.path(n)); err != nil {
+	if err = state.WriteFile(name, next, 0600); err != nil {
 		return "", err
 	}
 	return digest(next), nil
@@ -91,22 +122,16 @@ type GitStore struct{ root string }
 func NewGitStore(root string) *GitStore { return &GitStore{root: root} }
 func (s *GitStore) ref(n int) string    { return fmt.Sprintf("refs/heads/swarm-state/issue-%d", n) }
 func (s *GitStore) run(ctx context.Context, input string, args ...string) (string, error) {
-	fullArgs := args
-	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
-		if tok := strings.TrimSpace(os.Getenv(key)); tok != "" {
-			basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + tok))
-			fullArgs = append([]string{"-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic " + basic}, args...)
-			break
-		}
+	c, redact, err := gitcredential.Command(ctx, s.root, args...)
+	if err != nil {
+		return "", err
 	}
-	c := exec.CommandContext(ctx, "git", fullArgs...)
-	c.Dir = s.root
 	c.Stdin = strings.NewReader(input)
 	b, e := c.CombinedOutput()
 	if e != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), e, strings.TrimSpace(string(b)))
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), e, redact(strings.TrimSpace(string(b))))
 	}
-	return strings.TrimSpace(string(b)), nil
+	return redact(strings.TrimSpace(string(b))), nil
 }
 func (s *GitStore) remoteSHA(ctx context.Context, ref string) (string, error) {
 	out, err := s.run(ctx, "", "ls-remote", "--refs", "origin", ref)

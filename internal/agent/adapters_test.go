@@ -33,7 +33,7 @@ func TestAgentModelHelper(t *testing.T) {
 }
 
 func TestConfiguredRunnerRejectsUnapprovedOrUnavailableSelections(t *testing.T) {
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{
 		"claude": {Binary: os.Args[0], Roles: []string{"planner"}, Model: "approved-model"},
 	}}
 	if _, err := NewConfiguredRunner("codex", cfg, false); err == nil {
@@ -54,14 +54,14 @@ func TestConfiguredRunnerRejectsUnapprovedOrUnavailableSelections(t *testing.T) 
 }
 
 func TestConfiguredRunnerRejectsMissingBinaryBeforeExecution(t *testing.T) {
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{"claude": {Binary: "definitely-not-a-swarm-agent"}}}
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{"claude": {Binary: "definitely-not-a-swarm-agent"}}}
 	if _, err := NewConfiguredRunner("claude", cfg, false); err == nil {
 		t.Fatal("unavailable configured executable was accepted")
 	}
 }
 
 func TestConfiguredRunnerRejectsPublishingCredentialForwarding(t *testing.T) {
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{"claude": {Binary: os.Args[0], Env: []string{"GITHUB_TOKEN"}}}}
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{"claude": {Binary: os.Args[0], Env: []string{"GITHUB_TOKEN"}}}}
 	if _, err := NewConfiguredRunner("claude", cfg, false); err == nil {
 		t.Fatal("publishing token was accepted as agent authentication")
 	}
@@ -99,7 +99,7 @@ func TestAdapterProcessHidesPublishingCredentials(t *testing.T) {
 
 func TestConfiguredModelReachesSupportedHarness(t *testing.T) {
 	t.Setenv("SWARM_AGENT_MODEL_HELPER", "1")
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{
 		"reviewer": {Binary: os.Args[0], Harness: "claude", Args: []string{"-test.run=TestAgentModelHelper", "--"}, Model: "approved-model"},
 	}}
 	runner, err := NewConfiguredRunner("reviewer", cfg, false)

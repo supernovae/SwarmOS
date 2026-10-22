@@ -342,16 +342,19 @@ func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
 		t.Fatalf("unexpected workflow permissions: %+v", parsed.Permissions)
 	}
 	job, ok := parsed.Jobs["coordinate"]
-	if !ok || len(job.Steps) < 4 {
+	if !ok || len(job.Steps) < 5 {
 		t.Fatalf("missing coordinate job steps: %+v", parsed.Jobs)
 	}
-	if job.Steps[0].With["persist-credentials"] != false {
-		t.Fatalf("checkout step must set persist-credentials: false, got %+v", job.Steps[0].With)
+	if !strings.Contains(job.Steps[0].Run, "current_comment = fetch(") || !strings.Contains(job.Steps[0].Run, "current_issue = fetch(") {
+		t.Fatal("API admission must run before checkout")
 	}
-	if job.Steps[2].Env["SWARM_VERSION"] != pin {
-		t.Fatalf("install step SWARM_VERSION = %q, want %q", job.Steps[2].Env["SWARM_VERSION"], pin)
+	if job.Steps[1].With["persist-credentials"] != false {
+		t.Fatalf("checkout step must set persist-credentials: false, got %+v", job.Steps[1].With)
 	}
-	if !strings.Contains(job.Steps[3].Run, `fork-coordinator --event "$GITHUB_EVENT_PATH"`) {
-		t.Fatalf("unexpected coordinator run command: %q", job.Steps[3].Run)
+	if job.Steps[3].Env["SWARM_VERSION"] != pin {
+		t.Fatalf("install step SWARM_VERSION = %q, want %q", job.Steps[3].Env["SWARM_VERSION"], pin)
+	}
+	if !strings.Contains(job.Steps[4].Run, `fork-coordinator --event "$GITHUB_EVENT_PATH"`) {
+		t.Fatalf("unexpected coordinator run command: %q", job.Steps[4].Run)
 	}
 }

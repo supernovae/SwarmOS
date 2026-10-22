@@ -1,15 +1,16 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/validation"
@@ -241,8 +242,8 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 }
 
 func stageImplementationSummary(wtPath string, issueNum int) (string, string) {
-	statusOut, _ := exec.Command("git", "-C", wtPath, "status", "--short").Output()
-	diffStat, _ := exec.Command("git", "-C", wtPath, "diff", "--stat", "HEAD").Output()
+	statusOut, _ := gitcredential.Output(context.Background(), wtPath, "status", "--short")
+	diffStat, _ := gitcredential.Output(context.Background(), wtPath, "diff", "--stat", "HEAD")
 	lines := strings.Split(strings.TrimSpace(string(statusOut)), "\n")
 	count := 0
 	var body strings.Builder

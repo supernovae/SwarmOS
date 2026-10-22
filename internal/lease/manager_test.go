@@ -113,7 +113,7 @@ func TestCurrentPlanHumanApprovalRequired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = m.UpdateArtifact(context.Background(), iss.Number, "local-dev", contract.Artifact{Type: contract.ArtifactReview, Producer: "human:local-dev", Verdict: "APPROVED", Summary: "ok", Body: "ok", Metadata: map[string]string{"kind": "human", "actor": "local-dev"}})
+	_, err = m.UpdateArtifact(context.Background(), iss.Number, "local-dev", contract.Artifact{Type: contract.ArtifactReview, Producer: "human:local-dev", Verdict: "APPROVED", Summary: "ok", Body: "VERDICT: APPROVED\n", Metadata: map[string]string{"kind": "human", "actor": "local-dev"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,5 +400,134 @@ func TestForkAcquireAndTakeoverClearsCheckpointAndHeadArtifacts(t *testing.T) {
 	m.BindClaim(iss.Number, st1.Lease.ClaimID)
 	if _, err := m.Renew(ctx, iss.Number, "local-dev", time.Hour); !errors.Is(err, ErrClaimFence) {
 		t.Fatalf("expected ErrClaimFence for displaced claim, got %v", err)
+	}
+}
+
+func TestReviewApprovalRequiresAuthenticatedConsistentEvidence(t *testing.T) {
+	m, lt, iss := testManager(t)
+	ctx := context.Background()
+	if _, err := m.Acquire(ctx, iss.Number, "local-dev", "claude", "plan", time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, art := range []contract.Artifact{
+		{Type: contract.ArtifactDesign, Producer: "mock", Summary: "plan", Body: "plan"},
+		{Type: contract.ArtifactTestPlan, Producer: "mock", Summary: "tests", Body: "tests"},
+	} {
+		if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", art); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeReview := func() contract.Artifact {
+		return contract.Artifact{Type: contract.ArtifactReview, Producer: "mock:reviewer", Verdict: "APPROVED", Summary: "review", Body: "VERDICT: APPROVED\n", Metadata: map[string]string{"kind": "agent", "actor": "spoofed-maintainer", "review_source": "authenticated-agent"}}
+	}
+	st, err := m.UpdateAdvisoryReview(ctx, iss.Number, "local-dev", makeReview())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.EffectiveGate = contract.GateAgent
+	if !errors.Is(VerifyApproval(st, wu), ErrApprovalRequired) {
+		t.Fatal("advisory review satisfied agent gate")
+	}
+	for _, art := range st.Artifacts {
+		if art.Type == contract.ArtifactReview && (art.Metadata["actor"] != "local-dev" || art.Metadata["review_source"] != "contributor") {
+			t.Fatalf("trusted client metadata: %+v", art.Metadata)
+		}
+	}
+	m.tracker = lt.WithUser("local-dev", "NONE")
+	if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", makeReview()); err == nil {
+		t.Fatal("unauthorized actor recorded trusted agent review")
+	}
+	m.tracker = lt
+	for _, body := range []string{"VERDICT: CHANGES_REQUESTED\n", "VERDICT: APPROVED\nVERDICT: APPROVED", "unstructured approval"} {
+		art := makeReview()
+		art.Body = body
+		if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", art); err == nil {
+			t.Fatalf("accepted inconsistent review body %q", body)
+		}
+	}
+	st, err = m.RecordHumanReview(ctx, iss.Number, "APPROVED", "Reviewed the current plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyApproval(st, wu); err != nil {
+		t.Fatalf("authenticated human approval failed: %v", err)
+	}
+	for name, tamper := range map[string]func(*IssueState){
+		"missing source":    func(s *IssueState) { delete(s.Artifacts[2].Metadata, "review_source") },
+		"advisory source":   func(s *IssueState) { s.Artifacts[2].Metadata["review_source"] = "contributor" },
+		"body changed":      func(s *IssueState) { s.Artifacts[2].Body += "tampered" },
+		"base changed":      func(s *IssueState) { s.BaseSHA = "different" },
+		"policy changed":    func(s *IssueState) { s.PolicyDigest = "different" },
+		"plan changed":      func(s *IssueState) { s.Artifacts[0].Body = "different" },
+		"test plan changed": func(s *IssueState) { s.Artifacts[1].Body = "different" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, _ := json.Marshal(st)
+			var copy IssueState
+			if err := json.Unmarshal(raw, &copy); err != nil {
+				t.Fatal(err)
+			}
+			tamper(&copy)
+			if !errors.Is(VerifyApproval(&copy, wu), ErrApprovalRequired) {
+				t.Fatal("tampered review satisfied gate")
+			}
+		})
+	}
+}
+
+func TestAgentReviewCannotBeReboundAfterInputsChange(t *testing.T) {
+	m, _, iss := testManager(t)
+	ctx := context.Background()
+	if _, err := m.Acquire(ctx, iss.Number, "local-dev", "claude", "plan", time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, art := range []contract.Artifact{
+		{Type: contract.ArtifactDesign, Producer: "mock", Summary: "plan", Body: "original plan"},
+		{Type: contract.ArtifactTestPlan, Producer: "mock", Summary: "tests", Body: "tests"},
+	} {
+		if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", art); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := m.GetCurrentState(ctx, iss.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := ReviewBindings(before)
+	metadata["kind"], metadata["actor"] = "agent", "untrusted-metadata-actor"
+	review := contract.Artifact{Type: contract.ArtifactReview, Producer: "mock:reviewer", Verdict: "APPROVED", Summary: "reviewed original plan", Body: "VERDICT: APPROVED\n", Metadata: metadata}
+	if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock", Summary: "new plan", Body: "different plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", review); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("stale reviewer result rebound to new plan: %v", err)
+	}
+	after, err := m.GetCurrentState(ctx, iss.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range ReviewBindings(after) {
+		review.Metadata[key] = value
+	}
+	review.Metadata["review_claim_id"] = "previous-claim"
+	if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", review); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("stale claim review accepted: %v", err)
+	}
+	review.Metadata["review_claim_id"] = after.Lease.ClaimID
+	accepted, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted.EffectiveGate = contract.GateAgent
+	if err := VerifyApproval(accepted, wu); err != nil {
+		t.Fatalf("fresh bound agent review rejected: %v", err)
 	}
 }

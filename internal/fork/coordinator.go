@@ -2,11 +2,9 @@ package fork
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -16,6 +14,8 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
+
+	"github.com/supernovae/swarmos/internal/gitcredential"
 )
 
 type IssueCommentEvent struct {
@@ -378,7 +378,11 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 				art.Metadata["kind"] = "agent"
 				art.Metadata["actor"] = actor
 			}
-			updated, err = mgr.UpdateArtifact(ctx, req.IssueNumber, actor, art)
+			if art.Type == contract.ArtifactReview {
+				updated, err = mgr.UpdateAdvisoryReview(ctx, req.IssueNumber, actor, art)
+			} else {
+				updated, err = mgr.UpdateArtifact(ctx, req.IssueNumber, actor, art)
+			}
 			if err != nil {
 				return nil, "", err
 			}
@@ -454,7 +458,7 @@ func (c *Coordinator) resolveDefaultBase() (string, error) {
 	if c.DefaultBaseFunc != nil {
 		return c.DefaultBaseFunc(c.RepoRoot)
 	}
-	out, err := exec.Command("git", "-C", c.RepoRoot, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").Output()
+	out, err := runGitWithToken(context.Background(), c.RepoRoot, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
 	if err == nil {
 		if b := strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"); b != "" {
 			return b, nil
@@ -488,21 +492,15 @@ func (c *Coordinator) verifyForkCheckpointCommit(ctx context.Context, forkRepo, 
 }
 
 func runGitWithToken(ctx context.Context, dir string, args ...string) (string, error) {
-	fullArgs := args
-	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
-		if tok := strings.TrimSpace(os.Getenv(key)); tok != "" {
-			basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + tok))
-			fullArgs = append([]string{"-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic " + basic}, args...)
-			break
-		}
+	cmd, redact, err := gitcredential.Command(ctx, dir, args...)
+	if err != nil {
+		return "", err
 	}
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, redact(strings.TrimSpace(string(out))))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return redact(strings.TrimSpace(string(out))), nil
 }
 
 func isFullCommitSHA(sha string) bool {

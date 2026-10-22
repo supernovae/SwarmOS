@@ -14,12 +14,18 @@ import (
 func TestCredentialsNeverEnterArgumentsOrDiagnostics(t *testing.T) {
 	const token = "synthetic-secret-for-test"
 	t.Setenv("SWARM_GITHUB_TOKEN", token)
+	t.Setenv(TokenCommandEnv, "")
+	resetTokenCache()
+	t.Cleanup(resetTokenCache)
 	t.Setenv("GIT_TRACE_CURL", "1")
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
 	t.Setenv("GIT_CONFIG_VALUE_0", "untrusted-helper")
 	cmd := exec.Command("git", "ls-remote", "origin")
-	redact := Configure(cmd)
+	redact, err := Configure(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
 	basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
 	args := strings.Join(cmd.Args, " ")
 	if strings.Contains(args, token) || strings.Contains(args, basic) {

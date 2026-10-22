@@ -71,6 +71,7 @@ func TestRestrictedEnvRemovesPublishingCredentials(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "publish-secret")
 	t.Setenv("SSH_AUTH_SOCK", "/host/agent.sock")
 	t.Setenv("MODEL_API_KEY", "model-secret")
+	t.Setenv("SWARM_GITHUB_TOKEN_COMMAND", "op read op://vault/github/token")
 	env := restrictedEnv([]string{"MODEL_API_KEY"}, t.TempDir())
 	seen := map[string]bool{}
 	for _, entry := range env {
@@ -84,6 +85,9 @@ func TestRestrictedEnvRemovesPublishingCredentials(t *testing.T) {
 	}
 	if seen["SSH_AUTH_SOCK=/host/agent.sock"] {
 		t.Fatal("host SSH credential socket reached agent environment")
+	}
+	if seen["SWARM_GITHUB_TOKEN_COMMAND=op read op://vault/github/token"] {
+		t.Fatal("coordinator credential command reached agent environment")
 	}
 }
 

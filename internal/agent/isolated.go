@@ -15,7 +15,7 @@ import (
 )
 
 func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResult, error) {
-	if a.sandboxRuntime != "codex-native" && (a.authentication != "none" || len(a.envAllow) != 0 || a.reviewNetwork) {
+	if a.sandboxRuntime != "codex-native" && a.sandboxRuntime != "harness-tools-bwrap" && (a.authentication != "none" || len(a.envAllow) != 0 || a.reviewNetwork) {
 		return nil, fmt.Errorf("isolated agent requires a verified authentication adapter and restricted networking")
 	}
 	// Agent prompt paths refer to the detached worker workspace, never a host path.
@@ -49,6 +49,9 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	if a.sandboxRuntime == "codex-native" {
 		prompt := fmt.Sprintf("Read %s and .swarm/active/WORKUNIT.md first.\n\n%s", req.SystemPrompt, req.TaskPrompt)
 		command, nativeVersion, err = sandbox.RunNativeCodex(ctx, req.WorktreePath, a.binary, req.Model, prompt, options, strings.EqualFold(req.Mode, "interactive"), in, stdout, stderr)
+	} else if a.sandboxRuntime == "harness-tools-bwrap" {
+		prompt := fmt.Sprintf("Read %s and .swarm/active/WORKUNIT.md first.\n\n%s", req.SystemPrompt, req.TaskPrompt)
+		command, nativeVersion, err = sandbox.RunDelegatedHarness(ctx, req.WorktreePath, a.driver, a.binary, req.Model, prompt, options, strings.EqualFold(req.Mode, "interactive"), in, stdout, stderr)
 	} else {
 		err = sandbox.RunWorker(ctx, req.WorktreePath, bin, args, options, in, stdout, stderr)
 	}

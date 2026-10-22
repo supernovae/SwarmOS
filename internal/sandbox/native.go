@@ -18,18 +18,8 @@ import (
 	"github.com/supernovae/swarmos/internal/safefs"
 )
 
-// Keep earlier qualified releases when adding a tested version. These are exact
-// versions, not a minimum: permission-profile semantics can change between releases.
-var nativeCodexVersions = []string{"0.163.0"}
-
 func qualifiedNativeCodexVersion(output string) (string, error) {
-	version := strings.TrimPrefix(strings.TrimSpace(output), "codex-cli ")
-	for _, qualified := range nativeCodexVersions {
-		if strings.TrimSpace(output) == "codex-cli "+qualified {
-			return version, nil
-		}
-	}
-	return "", fmt.Errorf("Codex version %q is not qualified for native isolation; supported: %s; select a qualified installation with agents.<name>.binary", version, strings.Join(nativeCodexVersions, ", "))
+	return harnessVersion(output, "codex-cli ", "", [3]int{0, 163, 0})
 }
 
 // NativeValidationBinary uses an approved Codex entry; validation needs only its
@@ -56,7 +46,7 @@ func NativeValidationBinary(cfg *contract.SwarmConfig) (string, error) {
 func nativeEnv(home string, authentication bool) []string {
 	env := []string{"PATH=/usr/bin:/bin", "HOME=" + home}
 	if authentication {
-		// Codex alone opens its normal credential store. Never read or copy it here.
+		// The harness alone opens its normal credential store. Never read or copy it here.
 		for _, key := range []string{"CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} {
 			if value, ok := os.LookupEnv(key); ok {
 				env = append(env, key+"="+value)
@@ -149,6 +139,15 @@ func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 	qualified, err := qualifiedNativeCodexVersion(version.String())
 	if err != nil {
 		return "", err
+	}
+	var help process.Output
+	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false), []string{"exec", "--help"}, nil, &help, &versionDiagnostics); err != nil {
+		return "", fmt.Errorf("inspect Codex execution interface: %w", err)
+	}
+	for _, flag := range []string{"--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check"} {
+		if !strings.Contains(help.String(), flag) {
+			return "", fmt.Errorf("Codex %s lacks required execution interface %s", qualified, flag)
+		}
 	}
 	canary := filepath.Join(root, "coordinator-token")
 	if err := os.WriteFile(canary, []byte("SWARM_DUMMY_CREDENTIAL"), 0600); err != nil {

@@ -26,7 +26,7 @@ swarm doctor --backend github
 | `.swarm/validation/required-checks.yaml` | Required check commands and protected-path globs enforced before submission. |
 | `.github/ISSUE_TEMPLATE/{swarm-workunit,swarm-community,swarm-feature,swarm-bugfix,swarm-refactor,config}.yml` | Preset GitHub Issue Forms for structured draft WorkUnits (`swarm:draft`) and community bug/idea intake (`swarm:community`). |
 | `.github/workflows/swarm-validate.yml` | Consumer CI workflow running your repository checks against the trusted base commit. |
-| `.claude/commands/swarm-*.md` & `.opencode/command/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
+| `.claude/commands/swarm-*.md` & `.opencode/commands/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
 
 > [!TIP]
 > - Passing `--swarm-version` ensures the generated `.github/workflows/swarm-validate.yml` installs that exact immutable SwarmOS version. Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
@@ -68,7 +68,7 @@ agents:
     roles: [planner, reviewer, developer, tester]
 ```
 
-Run `codex login` once on the worker, then `swarm doctor`. Native Codex uses coordinator-selected permissions; agent entries can choose a model and roles, while arbitrary `args`, environment forwarding, and sandbox overrides are rejected. For optional offline containers, select `execution.backend: oci` and follow the [OCI setup](../SECURITY.md#optional-oci-backend).
+Sign in through the selected harness on the worker, then run `swarm doctor`. Isolated adapters use coordinator-selected permissions; agent entries can choose a model and roles, while arbitrary `args`, environment forwarding, and sandbox overrides are rejected. For optional offline containers, select `execution.backend: oci` and follow the [OCI setup](../SECURITY.md#optional-oci-backend).
 
 How agent configuration works:
 - **Explicit allowlist**: Only entries under `agents:` can be selected. Each entry can configure `binary`, `harness` (`claude`, `codex`, `omp`, or `opencode`; defaults to the entry name), `args`, `model`, allowed `roles`, permitted `env` variables, and reviewer sandbox settings.
@@ -101,7 +101,7 @@ agents:
 
 Choose `--developer-agent codex-pair --headless=false` to pair, or `--developer-agent codex-worker` for unattended work. The worker preset keeps Codex's workspace sandbox enabled and turns off approval prompts. SwarmOS places `args` before the driver's subcommand, so use options accepted in that position. See the [Codex CLI reference](https://developers.openai.com/codex/cli/reference) for permission options.
 
-Provider authentication belongs to the harness. The current `trusted-local` launcher accepts model credential variables listed in `agents.<name>.env`; keep their values in your shell or CI secret store. The native isolated path uses the existing Codex login directly, without those environment presets. The [worker guide](developer.md#choose-where-agents-run) explains the available setup paths.
+Provider authentication belongs to the harness. The current `trusted-local` launcher accepts model credential variables listed in `agents.<name>.env`; keep their values in your shell or CI secret store. Isolated adapters use harness-owned login directly, without those environment presets. Leave `model` unset for harness selection, or declare the project's model choice in its agent entry. The [worker guide](developer.md#choose-where-agents-run) explains the available setup paths.
 
 ---
 

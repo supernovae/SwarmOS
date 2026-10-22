@@ -255,11 +255,7 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	if execution.Mode == contract.ExecutionIsolated && slices.Contains(roles, "developer") && len(checks.RequiredChecks) > 0 {
 		var runtimeErr error
 		if execution.Backend == contract.BackendNative {
-			binary, err := sandbox.NativeValidationBinary(cfg)
-			runtimeErr = err
-			if err == nil {
-				runtimeErr = sandbox.CheckNativeCodex(ctx, binary)
-			}
+			runtimeErr = sandbox.CheckNativeValidation(ctx, cfg)
 		} else {
 			runtimeErr = sandbox.CheckWorkerRuntime(ctx, execution.ContainerRuntime, execution.ContainerImage)
 		}

@@ -390,7 +390,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		}
 	}
 
-	// 8. Universal Slash Commands (.claude/commands/ and .opencode/command/)
+	// 8. Universal Slash Commands (.claude/commands/ and .opencode/commands/)
 	if err := EnsureSlashCommands(root, opts.Force, res); err != nil {
 		return nil, err
 	}
@@ -415,7 +415,7 @@ func EnsureSlashCommands(root string, force bool, res *InitResult) error {
 		if err != nil {
 			return err
 		}
-		for _, dir := range []string{".claude/commands", ".opencode/command"} {
+		for _, dir := range []string{".claude/commands", ".opencode/commands"} {
 			rel := filepath.Join(dir, cmd)
 			_, readErr := safe.ReadFile(rel, 16<<20)
 			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {

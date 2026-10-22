@@ -12,7 +12,7 @@ Report vulnerabilities privately through [GitHub Security Advisories](https://gi
 
 SwarmOS keeps task approval, coordination state, and publication under maintainer-controlled policy. Task workers receive the execution boundary selected by that policy; the coordinator remains a trusted process.
 
-Our [execution architecture](docs/ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) builds on each supported harness's authentication, permissions, and sandbox. SwarmOS verifies the integration against repository policy and adds external isolation only for capabilities the harness cannot supply. For the native Codex integration, sign in normally and let SwarmOS coordinate the work.
+Our [execution architecture](docs/ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) builds on each supported harness's authentication, permissions, and sandbox. SwarmOS verifies the integration against repository policy and adds external isolation only for capabilities the harness cannot supply. Sign in through the harness and let SwarmOS coordinate the work.
 
 | Owner | Responsibility | How it is checked |
 | --- | --- | --- |
@@ -41,7 +41,7 @@ SwarmOS has two execution modes. `isolated` is the default when no mode is confi
 
 | Mode | Worker boundary | Setup |
 | --- | --- | --- |
-| `isolated` | Native Codex permissions and sandbox by default; OCI when selected by repository policy. Missing required capabilities block execution. | Codex 0.163.0 on Linux, a normal `codex login`, and passing `swarm doctor` checks. |
+| `isolated` | Codex native sandbox or restricted delegated tools for the selected harness; OCI when required by repository policy. Missing required capabilities block execution. | A supported Linux harness/runtime, its normal provider login, and passing `swarm doctor` checks. |
 | `trusted-local` | Planner, developer, tester, and validation commands run with the operator's OS permissions. Reviewers retain their separate snapshot sandbox. | Select this mode explicitly for repositories and tools you trust, where approved policy permits it. |
 
 ### Native Codex
@@ -52,6 +52,16 @@ SwarmOS uses `codex exec` with user execution settings and rules ignored, disabl
 
 Codex and its internal tool dispatcher remain trusted host-side software. The boundary protects against agent-directed tools, not a compromised harness binary or OS. Task context is sent to the chosen model through the authenticated harness; keep secrets out of task source. Native execution has a fifteen-minute phase deadline and bounded imports, but does not add OCI's CPU, memory, or disk quotas. Provider spend controls remain with the account owner.
 
+### Claude Code, OpenCode 2, and OhMyPi
+
+These adapters keep the authenticated harness in a coordinator-owned control directory and route workspace reads, writes, edits, and shell commands through Bubblewrap. Each tool receives a detached task snapshot, read-only system tools under `/usr`, private temporary storage, a clean environment, and a separate PID/network namespace. Planner and reviewer source stays read-only. Validation uses the same executor without a provider session.
+
+Claude uses its supported restricted mode and an explicit MCP tool server. OhMyPi registers host tools through its RPC interface and verifies the effective tool list before each turn. OpenCode 2 uses a private loopback server, waits for the MCP catalog, and checks the effective agent permissions before work starts. A temporary server password remains between SwarmOS and OpenCode; it is unrelated to provider authentication and never enters the tool environment. The operator's shared OpenCode server is not used.
+
+Native built-ins that would bypass this executor, custom hooks, external MCP servers, plugins, and agent delegation remain restricted. These adapters trust the installed harness to enforce that tool selection; Bubblewrap independently confines the tools it receives. The [capability table](docs/ARCHITECTURE.md#tool-capabilities) and [qualification record](docs/native-qualification.md) describe the tested coverage.
+
+Tools have two-minute deadlines and per-process CPU, address-space, file-size, and descriptor limits. Private temporary storage is limited to 256 MiB per call. These limits do not provide aggregate memory or task-workspace disk quotas. Shared worker operators can apply service-level limits; the OCI backend supplies a separate resource boundary.
+
 ### Optional OCI backend
 
 Set `execution.backend: oci`, `execution.container_runtime` to `docker` or `podman`, and `execution.container_image` to a locally available image pinned by SHA-256 digest. Existing policies that explicitly configure container settings retain OCI selection. Conflicting native/container requirements are rejected.
@@ -60,9 +70,9 @@ OCI currently supports **offline workers** with `agents.<name>.authentication: n
 
 OCI workers have a read-only image, no host mounts, no network, dropped capabilities, temporary storage, and fixed CPU, memory, process, and wall-time limits. Runtime preflight checks effective cgroup v2 limits and the ability to pause workers. Changes return through bounded import after the container is frozen and destroyed. Agent executables resolve inside the image. The [qualification plan](docs/security-remediation.md#real-container-qualification) covers actual Docker/Podman and cross-platform lifecycle tests.
 
-A failed isolated run never falls back to host execution. Other native harnesses and macOS/Windows require qualification before they can use the native backend.
+A failed isolated run never falls back to host execution. Native macOS and Windows execution require runtime qualification; WSL2 can use the Linux path.
 
-The [qualification record](docs/native-qualification.md) separates fresh boundary tests, earlier authenticated workflow evidence, and remaining hosted/platform checks. Codex releases are enabled individually; newer versions can be added without removing previously qualified releases.
+The [qualification record](docs/native-qualification.md) separates fresh boundary tests, earlier authenticated workflow evidence, and remaining hosted/platform checks. Stable releases at or above each adapter's minimum must pass interface and runtime capability checks. The actual version is recorded in artifact provenance.
 
 `swarm doctor` and `swarm work <issue> --dry-run` report execution setup and blockers. These checks help prepare the worker environment before acquiring work.
 

@@ -2,7 +2,6 @@ package agent
 
 import (
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -10,10 +9,15 @@ import (
 
 func TestDefaultModeNeverRunsHostAgent(t *testing.T) {
 	t.Setenv("SWARM_EXECUTION_MODE", "")
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{"claude": {Binary: os.Args[0]}}}
-	_, err := NewConfiguredRunner("claude", cfg, false)
-	if err == nil || !strings.Contains(err.Error(), "no verified isolated adapter") {
-		t.Fatalf("default isolation did not fail closed: %v", err)
+	for _, name := range []string{"claude", "opencode", "omp"} {
+		cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{name: {Binary: os.Args[0]}}}
+		r, err := NewConfiguredRunner(name, cfg, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := r.Provenance("developer", false).Sandbox; got != "harness-tools-bwrap" {
+			t.Fatalf("%s selected %q", name, got)
+		}
 	}
 }
 

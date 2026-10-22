@@ -21,10 +21,10 @@ func TestHarnessCleanupPreservesUserInstructions(t *testing.T) {
 		t.Fatalf("InitRepository failed: %v", err)
 	}
 	userFiles := map[string]string{
-		"AGENTS.md":                     "    indented instructions\n\n",
-		"CLAUDE.md":                     "\n# Local instructions\n\nKeep this whitespace.\n\n",
-		".claude/commands/personal.md":  "user-owned Claude command",
-		".opencode/command/personal.md": "user-owned OpenCode command",
+		"AGENTS.md":                      "    indented instructions\n\n",
+		"CLAUDE.md":                      "\n# Local instructions\n\nKeep this whitespace.\n\n",
+		".claude/commands/personal.md":   "user-owned Claude command",
+		".opencode/commands/personal.md": "user-owned OpenCode command",
 	}
 	for path, content := range userFiles {
 		if err := os.WriteFile(filepath.Join(tmp, path), []byte(content), 0o644); err != nil {

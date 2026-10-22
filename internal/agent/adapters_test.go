@@ -110,3 +110,31 @@ func TestConfiguredModelReachesSupportedHarness(t *testing.T) {
 		t.Fatalf("configured model did not reach supported harness: %v", err)
 	}
 }
+
+func TestOpenCodeV2CommandsPreserveOptionalModel(t *testing.T) {
+	for _, mode := range []string{"headless", "interactive"} {
+		for _, model := range []string{"", "project-provider/project-model"} {
+			adapter := &CLIAdapter{driver: "opencode", binary: "opencode"}
+			_, args := adapter.BuildCommand(RunRequest{Mode: mode, Model: model, TaskPrompt: "task"})
+			want := "run"
+			if mode == "interactive" {
+				want = "mini"
+			}
+			if len(args) < 3 || args[0] != want || args[1] != "--standalone" {
+				t.Fatal(args)
+			}
+			found := false
+			for i, arg := range args {
+				if arg == "--model" {
+					found = true
+					if i == 0 || i+1 >= len(args) || args[i+1] != model {
+						t.Fatal(args)
+					}
+				}
+			}
+			if found != (model != "") {
+				t.Fatal("model selection changed", args)
+			}
+		}
+	}
+}

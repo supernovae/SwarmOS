@@ -137,12 +137,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		var output process.Output
 		var runErr error
 		if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
-			binary, err := sandbox.NativeValidationBinary(cfg)
-			if err != nil {
-				runErr = err
-			} else {
-				runErr = sandbox.RunNativeValidation(checkCtx, worktreePath, binary, check.Command, &output, &output)
-			}
+			runErr = sandbox.RunConfiguredNativeValidation(checkCtx, worktreePath, cfg, check.Command, &output, &output)
 		} else if execution.Mode == contract.ExecutionIsolated {
 			runErr = sandbox.RunWorker(checkCtx, worktreePath, "/bin/sh", []string{"-c", check.Command}, sandbox.WorkerOptions{
 				Runtime: execution.ContainerRuntime, Image: execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,

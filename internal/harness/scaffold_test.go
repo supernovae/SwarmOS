@@ -226,7 +226,7 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		".github/ISSUE_TEMPLATE/config.yml",
 		".github/ISSUE_TEMPLATE/org-custom.yml",
 		".claude/commands/swarm-project-plan.md",
-		".opencode/command/swarm-project-plan.md",
+		".opencode/commands/swarm-project-plan.md",
 	}
 	for _, rel := range expectedFiles {
 		if !fileExists(filepath.Join(root, rel)) {

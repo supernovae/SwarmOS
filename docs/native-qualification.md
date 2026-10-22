@@ -1,6 +1,6 @@
-# Native Codex qualification
+# Harness qualification
 
-The native Codex workflow is ready for focused Linux dogfooding. The remaining release checks are an authenticated rerun of these fixes, hosted coordination and publication, and provider session recovery. Native authentication and isolation remain the default; OCI authentication and enterprise identity are separate roadmap work.
+Linux adapters are implemented for Codex, Claude Code, OpenCode 2, and OhMyPi. Codex retains its native sandbox; the other adapters use supported tool controls with Bubblewrap. All keep provider authentication with the harness. Full multi-harness qualification still needs the authenticated OpenCode and mixed-workflow runs below. OCI authentication and enterprise identity remain separate roadmap work.
 
 ## Evidence at this review
 
@@ -8,25 +8,28 @@ Reviewed PR #19 at `d451180` and the follow-up changes on `security/audit-remedi
 
 | Area | Evidence and remaining work |
 | --- | --- |
-| Fresh independent checks | Linux/amd64 `go vet` and the full race suite passed. Real Codex 0.163.0 sandbox tests passed inside a credential-free Bubblewrap environment: outside-file and symlink denial, allowed writes, read-only roles, loopback denial, filtered credential variables, detached-child cancellation, missing-login diagnostics, and disposable validation. |
-| Existing authenticated evidence | At `d451180`, the ChatGPT-authenticated WorkUnit passed interactive planning, reviewer execution, the human gate, unattended development/testing, native validation, and local Draft PR creation. The authenticated file-tool test exercised `apply_patch` and shell attempts against dummy outside credentials. These authenticated tests have not been rerun for this follow-up. |
-| Fixed implementation defects | Native workers now honor shorter requested timeouts. Canceling interactive input leaves no blocked reader to consume a resumed session's input. Invalid or missing plan outputs are rejected before replacing existing artifacts. `doctor` checks selected roles even when their agent's allowed-role list excludes them, and selected failures remain failures in both modes. Regression tests cover these cases. |
-| Verification improvements | The loopback probe first confirms coordinator-side reachability. Diagnostics distinguish installed binaries, selected role failures, and optional harnesses. The version allowlist retains exact qualification and records the actual verified version in provenance. |
-| Environment qualification | Fresh native tests ran on Linux/amd64 under WSL2. This session's authenticated runner blocks loopback sockets and access to Codex's required app-server socket directory. No macOS runner was available. The updated sandbox package compiled for macOS/arm64 and Windows/amd64; runtime qualification remains open. Other Linux architectures need their own recorded runs. |
-| Hosted staging | The private `supernovae/swarm-test` repository contains the approved 11-file fixture at `30b07d1`. Claims, state refs, gates, artifact submission, and hosted Draft PR creation await the operator's local run below, using repository-scoped credentials. |
-| Optional roadmap | Authenticated OCI, enterprise workload identity/OIDC, scoped GitHub Apps, and Claude/OpenCode/OhMyPi isolation adapters remain in the [roadmap](../todo.md#oci-authentication-and-enterprise-integrations). |
+| Fresh independent checks | `go vet ./...` and the full Linux race suite passed. Real Codex sandbox tests cover outside files, symlinks, read-only roles, network denial, filtered environment, and detached-child cancellation. Bubblewrap tests cover the same tool boundary, actual file editing, and MCP request cancellation. |
+| Codex authentication | The earlier `d451180` WorkUnit passed interactive planning, reviewer execution, a human gate, unattended development/testing, validation, and local Draft PR creation. Normal ChatGPT login remains available in the current `doctor` run. |
+| Claude Code 2.1.308 | A real authenticated interactive tool task passed with the operator's normal Claude login: denied synthetic host-file read, workspace write/read, and shell verification. Full WorkUnit qualification remains to run. |
+| OhMyPi 18.12.5 | The real RPC interface exposes exactly the approved task tools. An authenticated interactive tool task passed through its existing provider login, including synthetic host-file denial and workspace editing/testing. Full WorkUnit qualification remains to run. |
+| OpenCode 2.1.2 | The installed CLI passes an offline model/tool cycle, rejects a forged host-shell call, and stops detached tool children on cancellation through its private server and isolated MCP tools. Live provider execution remains unqualified: the requested test model was unavailable and the harness default free-tier request was rejected. Further model calls were stopped at the operator's request. |
+| Mixed routing | The opt-in test routes Claude planning → Codex review → OpenCode development → OhMyPi testing, with a human gate, validation, and local Draft PR. It is implemented but has not completed against four authenticated sessions. |
+| Fixed implementation defects | OpenCode now waits for connected tools before its first model request and checks merged permissions. Trusted-local OpenCode uses V2 commands. MCP cancellation reaches tool subprocesses. Existing timeout, interactive cancellation, safe-import, role-policy, provenance and approval regressions remain covered. |
+| Versions and platforms | Minimum stable versions: Codex 0.163.0, Claude 2.1.308, OpenCode 2.1.2, OhMyPi 18.12.5. Interface and runtime checks also apply to newer releases. Tests ran on Linux/amd64 under WSL2. The sandbox package compiles for macOS/arm64 and Windows/amd64; native runtime qualification remains open. |
+| Hosted staging | The operator is continuing `supernovae/swarm-test` separately. No staging publication or remote mutation was performed during this adapter work. |
+| Optional roadmap | Authenticated OCI, enterprise workload identity/OIDC, scoped GitHub Apps, and additional harness capabilities remain in the [roadmap](../todo.md#oci-authentication-and-enterprise-integrations). |
 
 The fresh test runner had no external network or host credentials, read-only source/toolchain/binary mounts, and private scratch. Limits were two CPUs, 3 GiB memory, zero swap, 128 processes, 1.5 GiB scratch, 256 MiB per file, and four minutes wall time. The real native suite used only a private loopback namespace and dummy credential canaries.
 
-CLI help, documentation links/anchors, and 17 shell blocks passed their checks. A remote-free scratch copy of the dogfood fixture successfully created, approved, and linted a local WorkUnit with the human gate.
+The earlier remote-free dogfood fixture passed local WorkUnit creation, approval, and linting. CLI examples and documentation are checked separately from authenticated workflow qualification.
 
 ## Adding a Codex release
 
-Keep exact version qualification: Codex's [permission profiles are still beta](https://learn.chatgpt.com/docs/permissions), and their configuration precedence and tool surfaces can change.
+Codex's [permission profiles are still beta](https://learn.chatgpt.com/docs/permissions). The adapter accepts stable releases from 0.163.0 onward when the required execution flags and runtime boundary checks pass.
 
-1. In a qualification branch, add the candidate's exact version to `nativeCodexVersions` in `internal/sandbox/native.go`, preserving earlier qualified versions. Review its permission and tool changes against `codexPolicy`.
-2. Run the boundary, authenticated file-tool, and full WorkUnit tests below on each intended platform. Exercise interactive input and detached-process cancellation. Record the harness version, OS/architecture, and results.
-3. Merge the allowlist addition with its evidence. Until then, repositories can set `agents.codex.binary` to an installed qualified release alongside the operator's newer CLI. There is no wildcard version or production verification bypass.
+1. Review permission, configuration-precedence, and tool changes in the new release.
+2. Run the boundary, authenticated file-tool, and WorkUnit tests below on each intended platform. Include interactive input and detached-process cancellation.
+3. Record the version, OS/architecture, and results here. Missing interfaces or failed canaries stop execution; there is no verification-bypass flag. Projects may select a specific installed binary with `agents.<name>.binary`.
 
 From the reviewed SwarmOS checkout on a Linux worker with Codex 0.163.0 and its normal login:
 
@@ -39,7 +42,32 @@ SWARM_TEST_CODEX_AUTHENTICATED=1 go test ./internal/cli -run '^TestNativeCodexAu
 go build -o /tmp/swarm-native-review ./cmd/swarm
 ```
 
-The authenticated tests use model quota and temporary local fixtures. They leave provider credentials with Codex. When this runner's boundary checks fail, use a Linux worker where Codex's native sandbox and local socket setup are available; keep the same SwarmOS execution policy.
+The authenticated tests use model quota and temporary local fixtures. They leave provider credentials with Codex. When boundary checks fail, use a Linux worker where the sandbox and local socket setup are available; keep the same SwarmOS execution policy.
+
+## Other harnesses and mixed routing
+
+The offline interface tests use installed harnesses and a synthetic local provider. They do not need provider accounts:
+
+```bash
+SWARM_TEST_EXECUTOR=1 SWARM_TEST_OMP_BINARY="$(command -v omp)" \
+  SWARM_TEST_OPENCODE_BINARY="$(command -v opencode)" \
+  go test ./internal/sandbox -run 'Test(ToolExecutorBoundary|MCPToolCancellation|OMPRealToolRegistration|OpenCodeRealTools)$' -count=1 -v
+```
+
+For an authenticated task, use an existing login and choose the harness to test. Model selection stays with the harness unless `SWARM_TEST_HARNESS_MODEL` is set explicitly for this test:
+
+```bash
+SWARM_TEST_AUTHENTICATED_HARNESS=claude \
+  go test ./internal/sandbox -run '^TestAuthenticatedDelegatedTools$' -count=1 -v
+SWARM_TEST_WORKFLOW_HARNESS=claude \
+  go test ./internal/cli -run '^TestDelegatedAuthenticatedWorkUnit$' -count=1 -v -timeout 10m
+SWARM_TEST_MIXED_AUTHENTICATED=1 \
+  go test ./internal/cli -run '^TestMixedHarnessAuthenticatedWorkUnit$' -count=1 -v -timeout 15m
+```
+
+The first two commands also accept `omp` or `opencode`. For full workflow tests, optional `SWARM_TEST_CLAUDE_MODEL`, `SWARM_TEST_CODEX_MODEL`, `SWARM_TEST_OPENCODE_MODEL`, and `SWARM_TEST_OMP_MODEL` select models through the fixture's project configuration. Matching `_BINARY` variables select installed executables outside `PATH`. These commands use model quota and local disposable repositories, with no GitHub publication.
+
+Safe file and shell tools are available across the adapters. Native subagents, hooks, plugins, external MCP services, browser control, and additional network tools need integration-specific boundary tests before enablement. See the [capability table](ARCHITECTURE.md#tool-capabilities).
 
 ## Hosted dogfood run
 
@@ -101,4 +129,4 @@ Codex handles [login storage and automatic token renewal](https://learn.chatgpt.
 
 Missing-login behavior, failed-run discard, deadlines, and cancellation are tested. Live session expiration, renewal failure, and reauthentication during a WorkUnit still need a provider-supported test account/session. Do not edit credential files or sign out a shared operator account to simulate expiration. Record that scenario separately when a suitable session is available.
 
-Artifacts are replaced atomically per file. All read-only role outputs are checked before any replacement, and developer imports check for concurrent workspace changes. A disk or filesystem error during a multi-file import can still leave part of the local change set applied; acceptance and publication must succeed separately. Whole-change-set rollback is follow-up hardening. Native workers have bounded import sizes and phase deadlines, but no product-enforced CPU, memory, PID, or scratch-disk quotas. Shared unattended deployments can add OS service limits; authenticated OCI resource isolation remains optional roadmap work.
+Artifacts are replaced atomically per file. All read-only role outputs are checked before any replacement, and developer imports check for concurrent workspace changes. A disk or filesystem error during a multi-file import can still leave part of the local change set applied; acceptance and publication must succeed separately. Whole-change-set rollback is follow-up hardening. Codex has bounded imports and phase deadlines. Delegated tools also have per-process resource limits and private temporary-storage limits; neither path currently supplies aggregate task memory or workspace-disk quotas. Shared unattended deployments can add OS service limits; authenticated OCI resource isolation remains optional roadmap work.

@@ -6,12 +6,24 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"gopkg.in/yaml.v3"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "internal-tools" {
+		if err := NewRootCmd().Execute(); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 // This opt-in test uses the operator's existing Codex login and model quota.
 // Coordination and Draft PR creation stay in a disposable local fixture.
@@ -19,6 +31,28 @@ func TestNativeCodexAuthenticatedWorkUnit(t *testing.T) {
 	if os.Getenv("SWARM_TEST_CODEX_AUTHENTICATED") != "1" {
 		t.Skip("set SWARM_TEST_CODEX_AUTHENTICATED=1 to use your Codex login")
 	}
+	authenticatedWorkUnit(t, "codex")
+}
+
+func TestMixedHarnessAuthenticatedWorkUnit(t *testing.T) {
+	if os.Getenv("SWARM_TEST_MIXED_AUTHENTICATED") != "1" {
+		t.Skip("set SWARM_TEST_MIXED_AUTHENTICATED=1 to use all four existing harness logins")
+	}
+	authenticatedWorkUnit(t, "mixed")
+}
+
+func TestDelegatedAuthenticatedWorkUnit(t *testing.T) {
+	driver := os.Getenv("SWARM_TEST_WORKFLOW_HARNESS")
+	if driver == "" {
+		t.Skip("set SWARM_TEST_WORKFLOW_HARNESS=claude, opencode or omp for all-role authenticated qualification")
+	}
+	if driver != "claude" && driver != "opencode" && driver != "omp" {
+		t.Fatal("unsupported harness")
+	}
+	authenticatedWorkUnit(t, driver)
+}
+
+func authenticatedWorkUnit(t *testing.T, routing string) {
 	t.Setenv("SWARM_EXECUTION_MODE", "isolated")
 	t.Setenv("SWARM_USER", "native-worker")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -34,6 +68,35 @@ func TestNativeCodexAuthenticatedWorkUnit(t *testing.T) {
 	git("config", "user.email", "native@example.invalid")
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: root}); err != nil {
 		t.Fatal(err)
+	}
+	if routing != "codex" {
+		cfg, err := harness.LoadConfig(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Roles = map[string]string{"planner": "claude", "reviewer": "codex", "developer": "opencode", "tester": "omp"}
+		if routing != "mixed" {
+			cfg.DefaultAgent = routing
+			for role := range cfg.Roles {
+				cfg.Roles[role] = routing
+			}
+		}
+		for name, ac := range cfg.Agents {
+			if value := os.Getenv("SWARM_TEST_" + strings.ToUpper(name) + "_BINARY"); value != "" {
+				ac.Binary = value
+			}
+			if value := os.Getenv("SWARM_TEST_" + strings.ToUpper(name) + "_MODEL"); value != "" {
+				ac.Model = value
+			}
+			cfg.Agents[name] = ac
+		}
+		data, err := yaml.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".swarm/config.yaml"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	policy := "required_checks:\n  - name: greeting\n    command: test \"$(cat hello.txt)\" = 'hello from SwarmOS'\n    timeout: 30s\nprotected_paths: ['.swarm/**', '.github/**']\n"
 	if err := os.WriteFile(filepath.Join(root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
@@ -99,10 +162,14 @@ func TestNativeCodexAuthenticatedWorkUnit(t *testing.T) {
 	}
 	for _, artifact := range state.Artifacts {
 		if artifact.Type == "design" || artifact.Type == "test-plan" || artifact.Type == "implementation" || artifact.Type == "validation" {
-			if artifact.Metadata["sandbox"] != "codex-native" {
+			want := "codex-native"
+			if artifact.Metadata["harness"] != "codex" {
+				want = "harness-tools-bwrap"
+			}
+			if artifact.Metadata["sandbox"] != want {
 				t.Fatalf("missing native provenance: %+v", artifact)
 			}
 		}
 	}
-	t.Log("Codex login: planner (interactive), reviewer, human gate, developer, tester, native validation and local Draft PR completed")
+	t.Log("Authenticated planner (interactive), reviewer, human gate, developer, tester, isolated validation and local Draft PR completed; routing:", routing)
 }

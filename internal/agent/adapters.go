@@ -130,17 +130,19 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 		}
 	case "opencode":
 		if headless {
-			args = []string{"run", combinedPrompt}
+			args = []string{"run", "--standalone", combinedPrompt}
 		} else {
-			args = []string{"--prompt", req.TaskPrompt}
+			args = []string{"mini", "--standalone", "--prompt", req.TaskPrompt}
 		}
 	default:
 		args = []string{combinedPrompt}
 	}
 	if req.Model != "" {
 		switch a.driver {
-		case "claude", "codex", "omp", "opencode":
+		case "claude", "codex", "omp":
 			args = append([]string{"--model", req.Model}, args...)
+		case "opencode":
+			args = append(args, "--model", req.Model)
 		}
 	}
 	return a.binary, append(append([]string(nil), a.prefixArgs...), args...)
@@ -149,6 +151,11 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
 	if a.executionMode == contract.ExecutionIsolated {
 		return a.runIsolated(ctx, req)
+	}
+	if a.driver == "opencode" && a.sandboxRuntime != "container" {
+		if _, err := sandbox.InspectDelegatedHarness(ctx, a.driver, a.binary); err != nil {
+			return nil, err
+		}
 	}
 	bin, args := a.BuildCommand(req)
 	if a.sandboxRuntime != "container" {

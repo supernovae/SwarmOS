@@ -151,13 +151,13 @@ func TestNativeInvalidRoleOutputPreservesExistingArtifacts(t *testing.T) {
 }
 
 func TestNativeVersionQualification(t *testing.T) {
-	for _, version := range nativeCodexVersions {
+	for _, version := range []string{"0.163.0", "0.163.1", "0.164.0", "1.0.0"} {
 		got, err := qualifiedNativeCodexVersion("codex-cli " + version + "\n")
 		if err != nil || got != version {
 			t.Fatalf("qualified version %q: %q, %v", version, got, err)
 		}
 	}
-	for _, output := range []string{"codex-cli 0.163.1", "codex-cli 0.164.0", "codex-cli 0.163.0-preview", "0.163.0", "codex-cli 0.163.0\nextra"} {
+	for _, output := range []string{"codex-cli 0.162.9", "codex-cli 0.0163.0", "codex-cli 0.163.0-preview", "0.163.0", "codex-cli 0.163.0\nextra"} {
 		if _, err := qualifiedNativeCodexVersion(output); err == nil {
 			t.Fatalf("accepted unqualified output %q", output)
 		}

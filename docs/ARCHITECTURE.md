@@ -74,24 +74,40 @@ The two user-facing modes remain `isolated` and explicit `trusted-local`. `isola
 
 ### Implemented backend selection
 
-`execution.backend` defaults to `native`. The first qualified adapter is Codex 0.163.0 on Linux. SwarmOS runs the authenticated harness in the user's environment and delegates execution to Codex's native sandbox. `swarm doctor` verifies the version, login availability, and actual filesystem/network restrictions. An unsupported adapter or failed probe stops the run before claiming work.
+`execution.backend` defaults to `native`. On Linux, Codex uses its native sandbox. Claude Code, OpenCode 2, and OhMyPi use their supported tool-control interfaces with a restricted Bubblewrap executor. Provider sessions stay with the authenticated harness. `swarm doctor` checks versions and actual filesystem/network restrictions. It reports login availability through supported status interfaces, and marks unprobed provider sessions explicitly. An unsupported adapter or failed probe stops the run before claiming work.
 
 | Approach | Fit and tradeoff |
 | --- | --- |
 | **Trusted harness with native tool isolation — selected** | Reuses normal Codex login and session renewal. Codex enforces tool permissions; SwarmOS supplies task snapshots, runs boundary checks, and accepts bounded artifacts. The host-side harness and its internal tool dispatcher remain trusted. |
-| **Trusted harness with an external executor** | Useful when a supported delegation interface covers a missing native capability. Each adapter must cover built-in tools as well as extensions. No separate external-executor adapter is implemented yet. |
+| **Trusted harness with an external executor** | Implemented for Claude through restricted-mode MCP, OpenCode 2 through a private server and V2 permissions, and OhMyPi through RPC host tools. Built-ins that bypass the executor are unavailable. |
 | **Containerized harness with restricted authentication** | Useful for independently enforced isolation and resource quotas. The OCI executor is available for offline agents; provider-supported login, refresh, and revocation need qualification before authenticated use. |
 
-Codex's documented CLI permission profiles provide the first complete path without a new transport or credential service. App-server is another supported integration interface, but is unnecessary for this slice. MCP alone would leave built-in tools uncovered. See the provider's [permissions](https://learn.chatgpt.com/docs/permissions) and [app-server](https://learn.chatgpt.com/docs/app-server) documentation.
+Codex's documented CLI permission profiles supply its native boundary. App-server is another supported integration interface. The delegated adapters combine their tool transport with harness controls that restrict built-in execution paths. See the provider's [permissions](https://learn.chatgpt.com/docs/permissions) and [app-server](https://learn.chatgpt.com/docs/app-server) documentation.
 
 - **Execution:** Codex shell and file tools use a restricted native profile. MCP, plugins, hooks, browser tools, and subagents are disabled. Validation uses the same harness's `sandbox` command without provider credentials. Interactive execution streams `codex exec` and accepts follow-up turns under the same permissions.
 - **Files and authority:** Workers receive a detached snapshot without live Git metadata, coordinator state, or autoloaded `.codex`/`.agents` directories. Planner and reviewer input is read-only. SwarmOS imports only expected role artifacts or bounded developer/tester changes, then performs the existing provenance, policy, lease, and approval checks.
 - **Credentials:** Codex opens its normal login store; SwarmOS neither reads nor copies provider tokens. Tool processes receive a clean environment and private home. Publishing credentials stay with the coordinator. Explicit `trusted-local` launches retain their existing allowlisted model-environment setup.
 - **Optional OCI:** Approved repository policy can select `execution.backend: oci`. Existing explicit container settings also retain that selection. Native execution cannot silently replace a required container boundary. See [execution modes](../SECURITY.md#execution-modes) for setup and [future work](../todo.md#oci-authentication-and-enterprise-integrations) for authenticated OCI qualification.
 
-Native capability tests cover host-file canaries, environment filtering, read-only roles, network denial, artifact import, and cancellation of a detached subprocess. The reproducible authenticated WorkUnit test exercises all four roles, interactive planning, unattended implementation, human approval, native validation, and a local Draft PR. Version expansion, macOS/Windows, provider session-expiration scenarios, and additional tool integrations remain qualification work.
+Native capability tests cover host-file canaries, environment filtering, read-only roles, network denial, artifact import, and cancellation of a detached subprocess. The reproducible authenticated WorkUnit test exercises all four roles, interactive planning, unattended implementation, human approval, native validation, and a local Draft PR. The four-harness mixed workflow, native macOS/Windows, provider session-expiration scenarios, and additional tool integrations remain qualification work. See the current [evidence](native-qualification.md).
 
-Exact qualified releases live in a small adapter allowlist. Runtime checks return the tested version for diagnostics and artifact provenance. Each added release follows the [qualification procedure](native-qualification.md#adding-a-codex-release); repository policy can continue selecting an older installed binary.
+Adapters use minimum stable versions, supported-interface checks, and runtime canaries. OpenCode also checks merged permissions; OhMyPi checks its effective tool catalog. Diagnostics and artifact provenance record the version used. Follow the [qualification procedure](native-qualification.md#adding-a-codex-release) when updating the tested matrix; repository policy can select a particular installed binary.
+
+### Tool capabilities
+
+The default supports reading, editing, building, testing, and analysis with locally installed tools. Repository role routing and read-only stages apply across harnesses.
+
+| Capability | Codex | Claude Code / OpenCode 2 / OhMyPi |
+| --- | --- | --- |
+| Workspace reads and edits | Native file tools under the permission profile | Isolated read/write/edit tools |
+| Shell, subprocesses, local analysis | Native command sandbox | Bubblewrap executor; background children end with each call |
+| Provider connectivity | Harness-owned login and model transport | Harness-owned login and model transport |
+| MCP | Restricted pending integration-specific qualification | Only the generated task-tool server; OhMyPi uses RPC host tools |
+| Subagents and delegated tasks | Restricted pending inherited-boundary tests | Restricted until delegated calls can retain the same executor boundary |
+| Hooks, plugins, language servers | Autoloading restricted; command-line analysis remains available | Autoloading restricted; command-line analysis remains available |
+| Tool network, browser, computer interaction | Restricted | Restricted |
+
+The executor addresses a specific gap: host file and command tools in these adapters are not covered by a complete native OS sandbox. SwarmOS uses standard Bubblewrap namespaces rather than a new sandbox technology. Future capability additions should preserve the harness's own interfaces and qualify each execution path individually.
 
 ---
 

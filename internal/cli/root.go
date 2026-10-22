@@ -80,6 +80,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
 	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", firstNonEmptyStr(opts.ForkRemote, "fork"), "Writable personal fork git remote name (only valid with --fork)")
 	rootCmd.AddCommand(newInitCmd(opts), newDoctorCmd(opts), newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPlanCmd(opts), newClaimCmd(opts), newPullCmd(opts), newWorkCmd(opts), newStageCmd(opts), newReviewCmd(opts), newValidateCmd(opts), newSubmitCmd(opts), newStatusCmd(opts), newRenewCmd(opts), newReleaseCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
+	rootCmd.AddCommand(newInternalToolsCmd())
 	for _, command := range rootCmd.Commands() {
 		switch command.Name() {
 		case "init", "doctor", "repo", "version":

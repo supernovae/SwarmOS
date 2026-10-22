@@ -23,7 +23,7 @@ Beyond the implemented `--max-jobs` limit, these remain planned rather than guar
 
 ## OCI authentication and enterprise integrations
 
-Native Codex is the everyday path. OCI remains an optional boundary for teams that need independently enforced worker isolation and resource quotas. Complete these steps before advertising provider-authenticated OCI execution:
+Harness-owned authentication is the everyday path. OCI remains an optional boundary for teams that need independently enforced worker isolation and resource quotas. Complete these steps before advertising provider-authenticated OCI execution:
 
 - Qualify a provider-supported login/session integration for each containerized harness, including renewal, expiry, cancellation, and revocation. Keep host credential stores and coordinator publishing tokens outside workers; avoid undocumented session-file copying or a general model proxy.
 - Define credential scope and lifetime, permitted destinations/operations, and usage limits. Document which forms of model-account misuse remain possible even when tokens are hidden.
@@ -35,6 +35,6 @@ Native Codex is the everyday path. OCI remains an optional boundary for teams th
 ## Native adapter qualification
 
 - Expand the tested Codex version/platform matrix, including macOS and Windows. Exercise session expiration, renewal failure, cancellation during model/tool work, and checkpoint resumption without weakening repository policy.
-- Qualify Claude's supported sandbox and permission controls with its normal login. Cover shell, file tools, hooks, MCP, and subprocesses before enabling its native adapter.
-- Qualify OpenCode and OhMyPi individually: identify supported enforcement and delegation interfaces, then test each enabled tool path. Use an external executor only for a concrete uncovered capability.
+- Expand Claude's restricted-mode integration with native file/shell capabilities where their controls cover the same boundary. Test hooks, MCP, and subprocesses before enabling additional execution paths.
+- Complete authenticated OpenCode 2 and mixed-harness workflow qualification using operator-selected models. The implemented OpenCode MCP and OhMyPi RPC paths use isolated task tools; qualify safe native delegation, extensions, and session recovery incrementally.
 - Add opt-in network/tool integrations and locally installed toolchain access through bounded repository policy as they are qualified. Preserve the simple default and fail closed on unsupported requirements.

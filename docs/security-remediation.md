@@ -2,11 +2,11 @@
 
 This work follows the 15 leads in the source audit of commit `2afdb8017f62ed07953c7ba932587042f9d66a9a`. That audit could not run its required sandbox and did not confirm vulnerabilities or assign severity. The implementation branch is `security/audit-remediation`.
 
-The changes below add protections and adversarial regression fixtures. Native Codex now completes an authenticated WorkUnit using the existing login. Hosted authorization settings, other harnesses/platforms, and authenticated OCI remain separate qualification work.
+The changes below add protections and adversarial regression fixtures. Native Codex now completes an authenticated WorkUnit using the existing login. Claude, OpenCode 2, and OhMyPi now have isolated tool adapters. Their full authenticated workflows, hosted authorization settings, additional platforms, and authenticated OCI have separate qualification records.
 
 ## Architectural direction
 
-The [harness-first execution design](ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) governs remediation choices. The default isolated backend uses native Codex on Linux. Its harness owns login and tool enforcement; SwarmOS checks actual restrictions and retains task scope, leases, approval gates, artifact acceptance, and publishing authority. OCI remains an explicit alternative with offline workers.
+The [harness-first execution design](ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) governs remediation choices. The default isolated backend uses native Codex or supported harness tool delegation on Linux. Harnesses own login and tool selection; the selected native sandbox or Bubblewrap executor enforces tool isolation; SwarmOS checks actual restrictions and retains task scope, leases, approval gates, artifact acceptance, and publishing authority. OCI remains an explicit alternative with offline workers.
 
 Adapter qualification records a supported version/configuration and exercises its tool paths. Trust in the harness and operating system is part of the architecture. The tracker separates defects, integration gaps, and optional hardening.
 
@@ -14,7 +14,7 @@ Adapter qualification records a supported version/configuration and exercises it
 
 | Audit fingerprint | Change and regression coverage | Remaining validation |
 | --- | --- | --- |
-| `agent-task-cli-host-authority` | Native Codex uses restricted permission profiles and detached task files. Real tests cover file/network boundaries, read-only roles, filtered credentials, and cancellation. OCI remains available; policy tests cover backend selection and forbidden fallback. | Qualify additional versions, platforms, and harnesses. MCP/plugins/hooks are disabled in the native Codex adapter; enabling them needs separate coverage. |
+| `agent-task-cli-host-authority` | Codex uses restricted permission profiles; Claude, OpenCode 2, and OhMyPi use restricted delegated tools. All receive detached task files. Real tests cover file/network boundaries, read-only roles, filtered credentials, and cancellation. OCI remains available; policy tests cover backend selection and forbidden fallback. | Qualify additional versions, platforms, and harnesses. MCP/plugins/hooks are disabled in the native Codex adapter; enabling them needs separate coverage. |
 | `contract.workunit-file.symlink-escape` | External WorkUnit reads are bounded and root-bound. Tests reject file and parent-directory symlinks to dummy outside YAML. | Confirm supported-platform behavior and any deployment route from issue authors to operator filesystem content. |
 | `coordination.filestore.path-symlinks` | State and lock files use pinned directories; randomized exclusive temporary files replace predictable writes. Tests cover state/lock symlinks, the old temporary filename, and concurrent reads/CAS. | Native Windows/macOS filesystem matrix. |
 | `coordinator-token.git-argv-visible-to-agent` | Git authentication is removed from command arguments and diagnostics are redacted. Git subprocess hardening disables candidate hooks and external helpers. | Native tests protect dummy host credentials and omit publishing variables. Extend this coverage to other runtimes. Provider login stays with the harness; repository publishing stays with SwarmOS. |
@@ -25,7 +25,7 @@ Adapter qualification records a supported version/configuration and exercises it
 | `reviewer-execution-resource-bounds` | Managed OCI workers specify resource caps and verify effective cgroup limits; snapshot, output, and wall-time budgets bound coordinator work. | Check cancellation and resource controls for each supported harness/runtime. Add deployment limits where needed for unattended or shared workers; native reviewer resource enforcement remains unverified. |
 | `reviewer-snapshot-unbounded-copy` | Snapshot copy has file, count, aggregate-byte, depth, and duration limits, cancellation, and special-file checks. Tests cover budgets and link policy. | Platform-specific cleanup and concurrent input mutation scenarios. |
 | `tracker.local-tracker.state-and-lock-symlink-escape` | Local tracker state and locks use pinned root operations and atomic replacement; invalid state errors are surfaced. Tests protect outside canaries and reject invalid state types. | Native Windows/macOS filesystem matrix. |
-| `validation-runs-candidate-tests-on-host` | Isolated validation uses approved-base commands through the selected native Codex or OCI executor. Reacquiring an uncheckpointed worktree requires the approved base and rejects ordinary dirty changes, while preserving generated instruction pointers. | Native validation runs in a disposable snapshot and discards changes; cancellation is tested on Linux. Extend platform coverage. `trusted-local` validation still uses host permissions. |
+| `validation-runs-candidate-tests-on-host` | Isolated validation uses approved-base commands through the selected native Codex, Bubblewrap, or OCI executor. Reacquiring an uncheckpointed worktree requires the approved base and rejects ordinary dirty changes, while preserving generated instruction pointers. | Native validation runs in a disposable snapshot and discards changes; cancellation is tested on Linux. Extend platform coverage. `trusted-local` validation still uses host permissions. |
 | `workflows.fork-comment-triggered-actions-cost` | Repository and generated workflows perform admission checks before expensive checkout/toolchain work and bound processing. | Inspect owner-visible usage and admission behavior. GitHub still allocates a runner for eligible comment events; YAML cannot eliminate that cost. |
 | `workflows.release.tag-release-authorization` | Existing tag/ancestry checks and release-environment requirement remain. | Owner must inspect tag rules, required reviewers, bypass identities, and effective permissions. No release or test tag is created for validation. |
 | `workspace.active-directory.symlink-write-escape` | Bundle and artifact paths use safe pinned operations. Validation checks active-directory structure before ephemeral exclusions; regressions protect outside directories and instruction content. | Cross-platform checkpoint-to-provision tests and recorded collaborator policy. |
@@ -33,11 +33,11 @@ Adapter qualification records a supported version/configuration and exercises it
 ## Remaining qualification work
 
 1. **Codex lifecycle and platforms:** the authenticated Linux slice covers all roles, interactive planning, unattended work, enforced human review, validation, and a local Draft PR. Add hosted GitHub publication in a staging repository, session-expiration/renewal scenarios, and macOS/Windows runtime checks. Existing lease-loss and stale-publication regression tests remain in place.
-2. **Other harnesses:** qualify Claude, OpenCode, and OhMyPi against the same capability contract. Keep their normal login flows and use a supported external executor only for a specific missing boundary.
+2. **Multi-harness workflows:** complete the authenticated all-role and mixed-routing tests. Claude and OhMyPi have passing authenticated tool tasks; OpenCode 2 has passing real offline dispatch tests and an unresolved provider test. Retain harness login ownership and qualify additional tool surfaces individually.
 3. **Optional OCI and enterprise integration:** follow the [concrete roadmap](../todo.md#oci-authentication-and-enterprise-integrations) for provider-supported OCI authentication, credential separation/revocation, optional workload identity/OIDC, scoped GitHub Apps, and real-container cross-platform tests.
 4. **Repository administration:** verify state-ref permissions, branch/tag rules, release reviewers, and bypass identities in the deployed GitHub repository. Repeat dependency/advisory checks as releases change.
 
-Onboarding for the qualified native path is install Codex, sign in with `codex login`, run `swarm doctor`, and start an approved WorkUnit. OCI authentication is independent follow-up work.
+Onboarding is install a supported harness and its runtime prerequisites, sign in through that harness, run `swarm doctor`, and start an approved WorkUnit. The [qualification record](native-qualification.md) lists the evidence for each adapter. OCI authentication is independent follow-up work.
 
 ## Validation record
 
@@ -51,7 +51,7 @@ These are test-runner controls. Product integrations use the supported harness/r
 | --- | --- |
 | `gofmt -s`, `git diff --check` | Passed. |
 | `go vet ./...` | Passed in the offline sandbox. |
-| `go test -race -p 2 ./...` | Passed on Linux/amd64, including adversarial fixtures; real OCI tests skipped without explicit opt-in. Limits: 3 GiB memory, zero swap, two CPUs, 128 processes, 1.5 GiB scratch, 256 MiB per file, and a four-minute wall deadline. |
+| `go test -race ./...` | Passed on Linux/amd64, including adversarial fixtures; real OCI tests skipped without explicit opt-in. Limits: 3 GiB memory, zero swap, two CPUs, 128 processes, 1.5 GiB scratch, 256 MiB per file, and a four-minute wall deadline. |
 | Native Codex 0.163.0, Linux/amd64 | Real sandbox boundary/lifecycle tests and the authenticated WorkUnit passed using the existing ChatGPT login. |
 | macOS/arm64 test-package compilation | Passed; no native execution. |
 | Windows/amd64 security-package compilation | Passed for `safefs`, `sandbox`, `agent`, and `validation`. Full CLI compilation was blocked by uncached `github.com/inconshreveable/mousetrap` v1.1.0; dependencies were not fetched by builds. |
@@ -63,7 +63,7 @@ The offline dependency scan used `govulncheck` v1.9.0 and Go 1.26.10 against `./
 
 ## Native Codex qualification
 
-The native adapter is pinned to Codex 0.163.0 on Linux. The real sandbox tests exercise outside credential canaries, symlinks, write protection, loopback denial, environment filtering, read-only roles, detached-child cancellation, missing login diagnostics, and validation that leaves source unchanged:
+The Codex adapter requires at least 0.163.0 on Linux, supported execution flags, and passing runtime canaries. The real sandbox tests exercise outside credential canaries, symlinks, write protection, loopback denial, environment filtering, read-only roles, detached-child cancellation, missing login diagnostics, and validation that leaves source unchanged:
 
 ```bash
 SWARM_TEST_CODEX_BINARY="$(command -v codex)" go test ./internal/sandbox -run '^TestNativeCodex(Boundary|ReadOnlyAndCancellation)$' -count=1 -v

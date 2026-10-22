@@ -54,13 +54,16 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 	a.executionMode = execution.Mode
 	a.authentication = ac.Authentication
 	if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
-		if driver != "codex" {
+		if driver != "codex" && driver != "claude" && driver != "opencode" && driver != "omp" {
 			return nil, fmt.Errorf("agent %q: no verified isolated adapter for native %s; choose a qualified Codex agent or explicitly configure execution.backend: oci", name, driver)
 		}
 		if len(ac.Args) != 0 || len(ac.Env) != 0 || ac.ReviewNetwork || ac.Sandbox != "" || ac.ContainerRuntime != "" || ac.ContainerImage != "" || (ac.Authentication != "" && ac.Authentication != "auto") {
-			return nil, fmt.Errorf("native Codex uses harness-owned login and coordinator-selected permissions; remove args, env, sandbox, container and authentication overrides from agent %q", name)
+			return nil, fmt.Errorf("isolated harnesses use harness-owned login and coordinator-selected permissions; remove args, env, sandbox, container and authentication overrides from agent %q", name)
 		}
 		a.sandboxRuntime = "codex-native"
+		if driver != "codex" {
+			a.sandboxRuntime = "harness-tools-bwrap"
+		}
 		a.authentication = "harness"
 	}
 	if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendOCI {
@@ -125,6 +128,29 @@ func Preflight(name string, cfg *contract.SwarmConfig, local bool, role string) 
 		}
 		return "native:codex " + version + "; " + auth + " present; filesystem/network canaries passed; MCP, plugins and hooks disabled; interactive and unattended", nil
 	}
+	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "harness-tools-bwrap" {
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		defer cancel()
+		version, err := sandbox.InspectDelegatedHarness(ctx, adapter.driver, adapter.binary)
+		if err != nil {
+			return "", err
+		}
+		if err := sandbox.CheckToolExecutor(ctx); err != nil {
+			return "", err
+		}
+		auth := "provider login: harness-managed, not probed (no model request)"
+		if adapter.driver == "claude" {
+			auth, err = sandbox.ClaudeAuthentication(ctx, adapter.binary)
+			if err != nil {
+				return "", err
+			}
+		}
+		model := "harness default model"
+		if cr.model != "" {
+			model = "project model=" + cr.model
+		}
+		return fmt.Sprintf("%s %s; Linux isolated tools (Bubblewrap); %s; %s; workspace read/edit/write and shell; filesystem/network/read-only canaries passed; tool policy checked at launch; external MCP, hooks, plugins and subagents restricted; interactive and unattended", adapter.driver, version, auth, model), nil
+	}
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "container" {
 		if adapter.executionMode == contract.ExecutionIsolated {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -152,6 +178,13 @@ func Preflight(name string, cfg *contract.SwarmConfig, local bool, role string) 
 	path, ok := r.Available()
 	if !ok {
 		return "", fmt.Errorf("agent %q became unavailable", name)
+	}
+	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.driver == "opencode" {
+		version, err := sandbox.InspectDelegatedHarness(context.Background(), adapter.driver, path)
+		if err != nil {
+			return "", err
+		}
+		return path + " (OpenCode " + version + "; trusted-local)", nil
 	}
 	return path, nil
 }

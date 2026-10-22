@@ -44,17 +44,17 @@ You can still pause automated work for a maintainer's plan review with `--gate h
 
 ### Choose where agents run
 
-SwarmOS uses your agent's normal login and security controls. The first native integration supports **Codex 0.163.0 on Linux**, using its supported permission profiles and sandbox. Install Codex, run `codex login`, then run `swarm doctor`. No extra provider credentials are needed for each role.
+SwarmOS uses your agent's normal login and security controls. On **Linux**, Codex uses its native permission profiles and sandbox. Claude Code, OpenCode 2, and OhMyPi keep their normal provider sessions and use a restricted tool executor for workspace editing and commands. Install your harness, sign in normally, then run `swarm doctor`. The tool executor also needs Bubblewrap, Python 3, Bash, and `prlimit` installed under `/usr`.
 
-`doctor` marks the selected agents and their roles. An unavailable selected agent fails the check; `OPTIONAL` identifies unused harnesses that still need setup or qualification. Binary installation is listed separately from execution support. To keep using a qualified Codex release alongside a newer CLI, point `agents.codex.binary` at that installation in the repository configuration. See the [qualification guide](native-qualification.md) for adding releases and running the dogfood workflow.
+`doctor` marks the selected agents and their roles. An unavailable selected agent fails the check; `OPTIONAL` identifies unused harnesses that still need setup or qualification. Binary installation is listed separately from execution support. Adapters check minimum versions, supported interfaces, and actual filesystem/network restrictions. Newer stable versions can pass these checks without an exact-version allowlist. See the [qualification guide](native-qualification.md) for tested versions and the dogfood workflow.
 
 | Execution mode | Use it for |
 | :--- | :--- |
-| **`isolated` (default)** | Codex's native sandbox, with task files separated from live Git state and host credentials. Set `execution.backend: oci` for the optional container backend. |
+| **`isolated` (default)** | The selected harness's verified tool boundary, with task files separated from live Git state and host credentials. Set `execution.backend: oci` for the optional container backend. |
 | **`trusted-local`** | Repositories and tools you trust to run under your OS account. Select it explicitly with `SWARM_EXECUTION_MODE=trusted-local` where project policy permits. |
 
 > [!NOTE]
-> Native Codex keeps model connectivity in the authenticated harness. Its tools have access to the task snapshot, private scratch space, and system runtime files; tool network access is disabled. Make build tools and dependencies available locally. MCP servers, plugins, hooks, and personal execution settings are disabled for this integration. Claude, OpenCode, OhMyPi, and native macOS/Windows support are next qualification steps; use an explicitly trusted setup for those harnesses today. Authenticated OCI workers are a separate roadmap item.
+> Model connectivity stays in the authenticated harness. Isolated tools can use the task snapshot, private scratch space, and system runtime files; tool network access is disabled. Install build tools and dependencies locally. The [capability table](ARCHITECTURE.md#tool-capabilities) describes editing, shell access, and extension restrictions. Native macOS and Windows execution still need qualification; Windows users can use a qualified Linux setup in WSL2. Authenticated OCI workers are a separate roadmap item.
 
 Run `swarm doctor` and `swarm work 42 --dry-run` to check the setup before claiming work. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
 
@@ -64,16 +64,16 @@ Run `swarm doctor` and `swarm work 42 --dry-run` to check the setup before claim
 
 Every usable coding tool is configured under `agents:` in `.swarm/config.yaml`. The configuration key is the policy and audit name, while `harness` selects one of SwarmOS's four built-in CLI drivers (`claude`, `codex`, `opencode`, or `omp`; defaults to the key name when omitted).
 
-The following are the `trusted-local` CLI drivers. Native Codex uses `codex exec` with SwarmOS-selected permissions for both working styles.
+The following are the `trusted-local` CLI drivers. Isolated adapters use the same bounded tools for both working styles; pairing streams the response and accepts follow-up instructions.
 
 | Harness Driver | Headless Invocation | Interactive Invocation |
 | :--- | :--- | :--- |
-| **[Claude Code](https://code.claude.com/docs/en/setup)** (`claude`, checked with `2.1.292`) | `claude -p --append-system-prompt-file <prompt> <task>` | `claude --append-system-prompt-file <prompt> <task>` |
-| **[OhMyPi](https://github.com/can1357/oh-my-pi#install)** (`omp`, checked with `18.12.3`) | `omp -p --no-pty --append-system-prompt <prompt> <task>` | `omp --append-system-prompt <prompt> <task>` |
+| **[Claude Code](https://code.claude.com/docs/en/setup)** (`claude`, checked with `2.1.308`) | `claude -p --append-system-prompt-file <prompt> <task>` | `claude --append-system-prompt-file <prompt> <task>` |
+| **[OhMyPi](https://github.com/can1357/oh-my-pi#install)** (`omp`, checked with `18.12.5`) | `omp -p --no-pty --append-system-prompt <prompt> <task>` | `omp --append-system-prompt <prompt> <task>` |
 | **[OpenAI Codex](https://learn.chatgpt.com/docs/codex/cli)** (`codex`, native integration checked with `0.163.0`) | `codex exec <combined prompt>` | `codex <task>` |
-| **[OpenCode](https://opencode.ai/docs/)** (`opencode`, checked with `1.17.1`) | `opencode run <combined prompt>` | `opencode --prompt <task>` |
+| **[OpenCode 2](https://dev.opencode.ai/v2/docs/)** (`opencode`, V2; checked with `2.1.2`) | `opencode run --standalone <combined prompt>` | `opencode mini --standalone --prompt <task>` |
 
-When an entry sets `model: <name>`, SwarmOS passes `--model <name>` to that harness driver. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner with explicit `trusted-local` execution.
+When an entry sets `model: <name>`, SwarmOS passes that exact choice to the harness. With no model set, the harness selects its default; SwarmOS has no built-in model-name mapping. Isolated runs use controlled execution settings, so choose a project model here when you need a consistent selection across workers. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner with explicit `trusted-local` execution.
 
 ### Grok Bot and OpenAI Dot
 

@@ -44,13 +44,15 @@ You can still pause automated work for a maintainer's plan review with `--gate h
 
 ### Choose where agents run
 
+SwarmOS is designed to work with your agent's normal login and security controls. The [harness-first integration](ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) is still being completed; the modes below describe the current branch.
+
 | Execution mode | Use it for |
 | :--- | :--- |
 | **`isolated` (default)** | Workers in a configured Docker/Podman container, with separate files, credentials, and resource limits. |
 | **`trusted-local`** | Repositories and tools you trust to run under your OS account. Select it explicitly with `SWARM_EXECUTION_MODE=trusted-local` where project policy permits. |
 
 > [!NOTE]
-> Isolated execution currently supports offline workers. Provider authentication for Claude, Codex, OpenCode, and OhMyPi is still being added. For provider-backed work today, use an existing agent session with `swarm stage`, or configure `trusted-local` execution and model credentials. Existing sessions retain their own execution environment; staging records their work. SwarmOS-run validation uses the project's selected execution mode.
+> Isolated execution currently supports offline workers. Normal harness login with isolated execution is the next integration milestone. For provider-backed work today, use an existing agent session with `swarm stage`, or configure `trusted-local` execution and model credentials. Existing sessions retain their own execution environment; staging records their work. SwarmOS-run validation uses the project's selected execution mode.
 
 Run `swarm doctor` and `swarm work 42 --dry-run` to check the setup before claiming work. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
 

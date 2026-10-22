@@ -12,6 +12,18 @@ Report vulnerabilities privately through [GitHub Security Advisories](https://gi
 
 SwarmOS keeps task approval, coordination state, and publication under maintainer-controlled policy. Task workers receive the execution boundary selected by that policy; the coordinator remains a trusted process.
 
+Our [execution architecture](docs/ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) builds on each supported harness's authentication, permissions, and sandbox. SwarmOS verifies the integration against repository policy and adds external isolation only for capabilities the harness cannot supply. The intended everyday workflow is to sign in to your agent normally and let SwarmOS coordinate its work.
+
+| Owner | Responsibility | How it is checked |
+| --- | --- | --- |
+| Agent harness | Provider login, session renewal, model connectivity, and native tool permissions. | Adapter support for documented harness versions and settings; focused tool-boundary tests. |
+| OS or container runtime | Enforce the filesystem, process, and network boundary used by the harness or executor. | Runtime capability checks and tests on supported platforms. |
+| SwarmOS | Approved task scope, leases, artifact acceptance, review provenance, gates, and authorized publication. | Approved-base policy, fenced state transitions, and regression tests. |
+| GitHub | Repository access, protected refs, merge rules, and release authorization. | Repository settings and checks for the submitted commit. |
+| Operator | Choose trusted harnesses and extensions, authenticate with providers, and configure project policy. | `swarm doctor`, task previews, and review of enabled integrations. |
+
+Provider login, worker identity, and GitHub authorization remain separate. Organizations may later integrate their own identity system or a repository-installed GitHub App for scoped automation credentials. These are optional integrations; a GitHub App supplies GitHub authorization, not an OIDC identity provider.
+
 The enforced controls in the Git-CAS workflow are:
 
 - A task is a draft until an authorized actor runs `swarm issue approve <issue>`, which persists the WorkUnit digest, policy digest, and trusted base SHA before marking it ready.
@@ -25,6 +37,8 @@ HTML comments are stripped before parsing an issue contract. This reduces one hi
 
 ## Execution modes
 
+This section describes the current PR implementation. Harness-native isolated execution is the architectural priority; the offline OCI path is an interim implementation, not the required setup for every future agent integration.
+
 SwarmOS has two execution modes. `isolated` is the default when no mode is configured. Choose a repository default with `execution.mode` in `.swarm/config.yaml`, or select a local mode with `SWARM_EXECUTION_MODE`. The approved base commit supplies the task's policy. Setting `security.require_isolation: true` prevents an operator from selecting `trusted-local` for that task.
 
 | Mode | Worker boundary | Setup |
@@ -32,7 +46,7 @@ SwarmOS has two execution modes. `isolated` is the default when no mode is confi
 | `isolated` | Disposable OCI workers, separate from coordinator files, process environment, and credentials. Missing required capabilities block execution. | Set `execution.container_runtime` to `docker` or `podman` and `execution.container_image` to a locally available image pinned by SHA-256 digest. |
 | `trusted-local` | Planner, developer, tester, and validation commands run with the operator's OS permissions. Reviewers retain their separate snapshot sandbox. | Select this mode explicitly for repositories and tools you trust, where approved policy permits it. |
 
-The initial isolated worker implementation supports **offline execution**. Set the selected agent's `authentication: none` only for an image that actually operates without provider credentials. Existing Claude, Codex, OpenCode, and OhMyPi login reuse has no verified broker adapter yet, so those authentication paths are blocked in isolated mode. Host credential stores and configured credential environment variables are not mounted or forwarded. Model access through a safe provider adapter remains follow-up work; see the [remediation tracker](docs/security-remediation.md).
+The initial isolated worker implementation supports **offline execution**. Set the selected agent's `authentication: none` only for an image that actually operates without provider credentials. Normal Claude, Codex, OpenCode, and OhMyPi login integration is not yet available in this path. The next step is to use supported harness authentication and isolation together, keeping login and session renewal with the harness. Host credential stores are not mounted or copied into the current workers. See the [remediation tracker](docs/security-remediation.md) for this usability gap and the integration plan.
 
 Isolated workers have a read-only image, no host mounts, no network, dropped capabilities, temporary storage, and fixed CPU, memory, process, and wall-time limits. Runtime preflight checks effective cgroup v2 limits and the ability to pause workers. Planner and reviewer inputs are read-only, with designated artifact outputs. Developer and tester changes return through bounded file import after the container is frozen and destroyed. Validation uses approved-base commands inside the same isolation boundary. Agent executables are resolved inside the image, rather than probed on the host.
 

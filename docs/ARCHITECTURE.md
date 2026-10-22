@@ -58,7 +58,23 @@ Each claimed issue runs inside its own linked Git worktree at `.swarm/worktrees/
 
 ## 4. Process & Reviewer Isolation (`internal/sandbox/` & `internal/agent/`)
 
-SwarmOS defaults to isolated worker containers and gives plan reviewers a read-only snapshot:
+### Design decision: use the harness's security model first
+
+Users bring their agents and sign in through those agents' normal login flows. The harness owns provider authentication, sessions, refresh, and model connectivity. SwarmOS owns task coordination, repository policy, artifact acceptance, and publication.
+
+Choose the simplest supported execution path that meets the project's policy:
+
+1. Use the harness's native authentication, permissions, and sandbox.
+2. Keep the authenticated harness in the user's environment and delegate tools to a restricted executor through a supported interface.
+3. Use a disposable container with a documented, restricted authentication integration when the harness needs an external boundary.
+
+Harnesses and their underlying OS controls are trusted dependencies. Each adapter documents its supported versions and platforms, effective permissions, tool coverage, and cancellation behavior. Focused checks cover the boundaries the project requires, including shell commands, file tools, subprocesses, and enabled MCP tools or plugins. Add an external executor only to cover a specific gap. A permission prompt alone does not establish isolation.
+
+The two user-facing modes remain `isolated` and explicit `trusted-local`. In the intended design, `isolated` describes the enforced boundary, regardless of which supported harness or runtime provides it. Normal provider login should be enough to start work. SwarmOS will not add a universal credential store, OAuth lifecycle, or model proxy.
+
+### Current implementation in PR #19
+
+The branch currently implements `isolated` through offline OCI workers. Harness-native integration is unfinished, so the normal-login isolated workflow is still a release blocker. Keep the filesystem, lease, and approval fixes independently reviewable while replacing the container-first assumption with the design above. The current code provides:
 
 - **Sandboxed Plan Reviewer**: When running the `reviewer` role, SwarmOS copies the repository into a separate immutable snapshot (rejecting symlinks that escape the root), masks the user's home directory, and denies access to the live worktree. Isolated mode uses the configured worker container; `trusted-local` uses `sandbox-exec` (macOS), `bwrap` (Linux), or a read-only OCI container (`docker` / `podman`). Only a bounded regular `REVIEW.md` file is imported back from the run.
 - **Credential Hygiene**: Spawned agents use a fresh temporary `HOME`. Isolated workers receive no host credential variables; `trusted-local` agents receive only the model credential variables explicitly allowlisted in `agents.<name>.env`. Coordinator publishing tokens (`GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`) are never forwarded to agent subprocesses.

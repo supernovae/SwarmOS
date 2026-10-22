@@ -115,7 +115,7 @@ agents:
 
 Choose `--developer-agent codex-pair --headless=false` to pair, or `--developer-agent codex-worker` for unattended work. The worker preset keeps Codex's workspace sandbox enabled and turns off approval prompts. SwarmOS places `args` before the driver's subcommand, so use options accepted in that position. See the [Codex CLI reference](https://developers.openai.com/codex/cli/reference) for permission options.
 
-Keep credential values in your shell or CI secret store. For `trusted-local` agents, list only the required model credential variable names in `agents.<name>.env`. Isolated workers currently support offline execution; provider authentication is still being added. The [worker guide](developer.md#choose-where-agents-run) explains the available setup paths.
+Provider authentication belongs to the harness. The current `trusted-local` launcher accepts model credential variables listed in `agents.<name>.env`; keep their values in your shell or CI secret store. Normal harness login with isolated execution is still being integrated. The [worker guide](developer.md#choose-where-agents-run) explains the available setup paths.
 
 ---
 

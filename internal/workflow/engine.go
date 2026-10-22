@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,9 +12,12 @@ import (
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
+	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -28,6 +30,7 @@ var (
 )
 
 type WorkOptions struct {
+	InspectOnly    bool // report execution blockers without claiming or running work
 	RepoRoot       string
 	IssueNumber    int
 	Owner          string
@@ -64,6 +67,8 @@ type WorkResult struct {
 
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
+	Execution    contract.ExecutionConfig
+	Blockers     []string
 	Issue        *tracker.Issue
 	WorkUnit     *contract.WorkUnit
 	Workflow     *contract.WorkflowSpec
@@ -197,6 +202,11 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 		!slices.Contains(iss.Labels, cfg.Security.ReadyLabel) {
 		return nil, lease.ErrApprovalRequired
 	}
+	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+	if err != nil {
+		return nil, err
+	}
+	var blockers []string
 	checks, err := harness.LoadValidationSpecAt(opts.RepoRoot, state.BaseSHA)
 	if err != nil {
 		return nil, err
@@ -234,12 +244,29 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 			}
 			resolved, err := agent.Preflight(name, cfg, e.Tracker.BackendName() == "local", role)
 			if err != nil {
-				return nil, fmt.Errorf("%s agent preflight: %w", role, err)
+				if !opts.InspectOnly {
+					return nil, fmt.Errorf("%s agent preflight: %w", role, err)
+				}
+				blockers = append(blockers, fmt.Sprintf("%s agent preflight: %v", role, err))
 			}
 			agents[role], binaries[role] = name, resolved
 		}
 	}
-	return &PreflightResult{Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
+	if execution.Mode == contract.ExecutionIsolated && slices.Contains(roles, "developer") && len(checks.RequiredChecks) > 0 {
+		var runtimeErr error
+		if execution.Backend == contract.BackendNative {
+			runtimeErr = sandbox.CheckNativeValidation(ctx, cfg)
+		} else {
+			runtimeErr = sandbox.CheckWorkerRuntime(ctx, execution.ContainerRuntime, execution.ContainerImage)
+		}
+		if err := runtimeErr; err != nil {
+			if !opts.InspectOnly {
+				return nil, fmt.Errorf("validation runtime preflight: %w", err)
+			}
+			blockers = append(blockers, fmt.Sprintf("validation runtime preflight: %v", err))
+		}
+	}
+	return &PreflightResult{Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
 		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase}, nil
 }
 
@@ -272,6 +299,8 @@ func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool)
 }
 
 func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult, error) {
+	// Inspection never weakens execution preflight, even for direct API callers.
+	opts.InspectOnly = false
 	if opts.RepoRoot == "" {
 		opts.RepoRoot = e.repoRoot
 	}
@@ -643,8 +672,11 @@ func (e *Engine) startHeartbeat(ctx context.Context, cancel context.CancelFunc, 
 }
 
 func readRequiredArtifact(wtPath, name string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(wtPath, ".swarm", "active", name))
-	if err != nil || strings.TrimSpace(string(data)) == "" {
+	data, err := safefs.ReadFile(wtPath, filepath.Join(".swarm", "active", name), 1<<20)
+	if err != nil {
+		return "", fmt.Errorf("read .swarm/active/%s: %w", name, err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
 		return "", fmt.Errorf("did not produce .swarm/active/%s", name)
 	}
 	return string(data), nil
@@ -774,6 +806,9 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		revAtt = runner.Provenance("reviewer", true)
 	}
 	revMeta := attestationMetadata(revAtt, map[string]string{"kind": "agent", "actor": owner})
+	for key, value := range lease.ReviewBindings(st) {
+		revMeta[key] = value
+	}
 	updated, err := e.LeaseManager.UpdateArtifact(ctx, wu.IssueNumber, owner, contract.Artifact{
 		Type: contract.ArtifactReview, Producer: reviewerAgent + ":reviewer", Verdict: verdict,
 		Summary: fmt.Sprintf("Automated plan review verdict: %s", verdict), Body: review,
@@ -858,10 +893,16 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 	if st == nil {
 		return errors.New("missing authoritative issue state")
 	}
-	activeDir := filepath.Join(wtPath, ".swarm", "active")
-	if err := os.MkdirAll(activeDir, 0o755); err != nil {
+	safe, err := safefs.Open(wtPath)
+	if err != nil {
 		return err
 	}
+	defer safe.Close()
+	active, err := safe.Sub(filepath.Join(".swarm", "active"), true, 0755)
+	if err != nil {
+		return err
+	}
+	defer active.Close()
 	artifacts := map[contract.ArtifactType]string{}
 	for _, artifact := range st.Artifacts {
 		switch artifact.Type {
@@ -877,12 +918,12 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 		if strings.TrimSpace(body) == "" {
 			return fmt.Errorf("missing %s in authoritative state (run `swarm work <issue> --phase plan` first)", name)
 		}
-		if err := os.WriteFile(filepath.Join(activeDir, name), []byte(body), 0o644); err != nil {
+		if err := active.WriteFile(name, []byte(body), 0o644); err != nil {
 			return err
 		}
 	}
 	if review, ok := artifacts[contract.ArtifactReview]; ok {
-		if err := os.WriteFile(filepath.Join(activeDir, "REVIEW.md"), []byte(review), 0o644); err != nil {
+		if err := active.WriteFile("REVIEW.md", []byte(review), 0o644); err != nil {
 			return err
 		}
 	}
@@ -890,8 +931,8 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 }
 
 func summarizeImplementationChanges(wtPath string, issueNum int) (string, string) {
-	statusOut, _ := exec.Command("git", "-C", wtPath, "status", "--short").Output()
-	diffStat, _ := exec.Command("git", "-C", wtPath, "diff", "--stat", "HEAD").Output()
+	statusOut, _ := gitcredential.Output(context.Background(), wtPath, "status", "--short")
+	diffStat, _ := gitcredential.Output(context.Background(), wtPath, "diff", "--stat", "HEAD")
 
 	lines := strings.Split(strings.TrimSpace(string(statusOut)), "\n")
 	count := 0
@@ -948,6 +989,12 @@ func attestationMetadata(att contract.RoleAttestation, base map[string]string) m
 	}
 	if att.Sandbox != "" {
 		m["sandbox"] = att.Sandbox
+	}
+	if att.ExecutionMode != "" {
+		m["execution_mode"] = att.ExecutionMode
+	}
+	if att.Authentication != "" {
+		m["authentication"] = att.Authentication
 	}
 	return m
 }

@@ -114,6 +114,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			if dryRun {
+				opts.InspectOnly = true
 				preflight, err := engine.Preflight(cmd.Context(), opts)
 				if err != nil {
 					return err

@@ -23,7 +23,7 @@ func TestConfigRejectsInvalidSecurityPolicy(t *testing.T) {
 		"readiness disabled": strings.Replace(string(valid), "require_ready_label: true", "require_ready_label: false", 1),
 		"unknown gate":       strings.Replace(string(valid), "default_gate: agent", "default_gate: typo", 1),
 		"nonpositive lease":  strings.Replace(string(valid), "duration: 4h", "duration: 0s", 1),
-		"unapproved default": strings.Replace(string(valid), "default_agent: claude", "default_agent: unapproved", 1),
+		"unapproved default": strings.Replace(string(valid), "default_agent: codex", "default_agent: unapproved", 1),
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -226,7 +226,7 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		".github/ISSUE_TEMPLATE/config.yml",
 		".github/ISSUE_TEMPLATE/org-custom.yml",
 		".claude/commands/swarm-project-plan.md",
-		".opencode/command/swarm-project-plan.md",
+		".opencode/commands/swarm-project-plan.md",
 	}
 	for _, rel := range expectedFiles {
 		if !fileExists(filepath.Join(root, rel)) {
@@ -342,16 +342,19 @@ func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
 		t.Fatalf("unexpected workflow permissions: %+v", parsed.Permissions)
 	}
 	job, ok := parsed.Jobs["coordinate"]
-	if !ok || len(job.Steps) < 4 {
+	if !ok || len(job.Steps) < 5 {
 		t.Fatalf("missing coordinate job steps: %+v", parsed.Jobs)
 	}
-	if job.Steps[0].With["persist-credentials"] != false {
-		t.Fatalf("checkout step must set persist-credentials: false, got %+v", job.Steps[0].With)
+	if !strings.Contains(job.Steps[0].Run, "current_comment = fetch(") || !strings.Contains(job.Steps[0].Run, "current_issue = fetch(") {
+		t.Fatal("API admission must run before checkout")
 	}
-	if job.Steps[2].Env["SWARM_VERSION"] != pin {
-		t.Fatalf("install step SWARM_VERSION = %q, want %q", job.Steps[2].Env["SWARM_VERSION"], pin)
+	if job.Steps[1].With["persist-credentials"] != false {
+		t.Fatalf("checkout step must set persist-credentials: false, got %+v", job.Steps[1].With)
 	}
-	if !strings.Contains(job.Steps[3].Run, `fork-coordinator --event "$GITHUB_EVENT_PATH"`) {
-		t.Fatalf("unexpected coordinator run command: %q", job.Steps[3].Run)
+	if job.Steps[3].Env["SWARM_VERSION"] != pin {
+		t.Fatalf("install step SWARM_VERSION = %q, want %q", job.Steps[3].Env["SWARM_VERSION"], pin)
+	}
+	if !strings.Contains(job.Steps[4].Run, `fork-coordinator --event "$GITHUB_EVENT_PATH"`) {
+		t.Fatalf("unexpected coordinator run command: %q", job.Steps[4].Run)
 	}
 }

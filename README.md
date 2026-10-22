@@ -91,13 +91,15 @@ Example `swarm doctor` output:
 CATEGORY   CHECK                                    STATUS   DETAIL
 --------   -----                                    ------   ------
 system     git                                      OK       git version 2.54.0
-tracker    gh-cli                                   OK       /opt/homebrew/bin/gh
-harness    .swarm/config.yaml                       OK       v1 (default_agent=claude, default_gate=agent)
+tracker    gh-cli                                   OK       /usr/local/bin/gh
+harness    .swarm/config.yaml                       OK       v1 (default_agent=codex, default_gate=agent)
 harness    .swarm/validation/required-checks.yaml   OK       3 checks, 6 protected paths
-agent      claude                                   OK       /opt/homebrew/bin/claude
-agent      codex                                    OK       /opt/homebrew/bin/codex
-agent      omp                                      OK       /opt/homebrew/bin/omp
-agent      opencode                                 OK       /opt/homebrew/bin/opencode
+binary     claude                                   OK       /usr/local/bin/claude
+binary     codex                                    OK       /usr/local/bin/codex
+binary     omp                                      OK       /usr/local/bin/omp
+binary     opencode                                 OK       /usr/local/bin/opencode
+execution  mode                                     OK       mode=isolated; backend=native
+execution  codex/planner                            OK       selected; native Codex; login available; boundary checks passed
 ```
 
 Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch so every teammate and agent works from the same project rules.
@@ -123,13 +125,15 @@ swarm submit 42 --backend github
 ```
 
 > [!TIP]
-> `swarm work` runs headlessly by default. Pass `--headless=false` to open an interactive terminal session inside the worktree, or pass `--backend local` to experiment in an offline local sandbox.
+> `swarm work` runs headlessly by default. Pass `--headless=false` to pair with your agent, or use `swarm node run --watch` to keep picking up approved tasks. On Linux, isolated execution uses Codex's native sandbox or bounded tools for Claude Code, OpenCode 2, and OhMyPi, with provider login managed by the harness. Start with `swarm doctor`; the [worker guide](docs/developer.md#choose-how-you-work) covers setup and other harnesses. Use `--backend local` to experiment with local coordination storage.
+
+`swarm doctor` highlights your selected agents and reports unused, unqualified harnesses as `OPTIONAL`. The [native qualification guide](docs/native-qualification.md) tracks tested releases and the dogfood workflow.
 
 ---
 
 ## Bring Your Own Agents
 
-SwarmOS supports **Claude Code (`claude`), OpenAI Codex (`codex`), OpenCode (`opencode`), and OhMyPi (`omp`)**. Use a single tool across the workflow or route each role to your favorite harness:
+SwarmOS integrates **Claude Code (`claude`), OpenAI Codex (`codex`), OpenCode 2 (`opencode`), and OhMyPi (`omp`)**. Use a single tool across the workflow or route each role to your favorite harness:
 
 ```bash
 swarm work 42 \
@@ -138,6 +142,8 @@ swarm work 42 \
   --developer-agent codex \
   --tester-agent opencode
 ```
+
+Models are optional in `.swarm/config.yaml`: set `agents.<name>.model` when the project needs a specific model, or leave selection to the harness. The [qualification guide](docs/native-qualification.md) lists tested workflows and remaining provider checks.
 
 Want to coordinate work from an always-on conversational teammate?
 - **[Working with Grok Bot & SwarmOS](docs/grokbot.md)** — Connect Grok Bot to GitHub, chat with your repository, request PR reviews, or let Grok drive `swarm` on its cloud computer.

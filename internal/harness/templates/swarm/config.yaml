@@ -1,7 +1,12 @@
 version: 1
-default_agent: claude
+# Linux isolation: Codex native sandbox; other harnesses use isolated tools.
+# Run swarm doctor before work. Models are optional; each harness chooses its default.
+default_agent: codex
 default_gate: agent
 plan_mode: auto
+execution:
+  mode: isolated
+  backend: native
 lease:
   duration: 4h
   renewable: true
@@ -10,6 +15,8 @@ security:
   require_ready_label: true
   ready_label: "swarm:ready"
 agents:
+  # Route roles to installed harnesses. OpenCode requires V2 (2.1.2 or newer).
+  # Claude/OpenCode/OhMyPi isolated tools require Bubblewrap and Python 3.
   claude:
     binary: claude
   codex:

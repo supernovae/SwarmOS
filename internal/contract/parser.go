@@ -2,12 +2,12 @@ package contract
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/supernovae/swarmos/internal/safefs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -64,8 +64,7 @@ func ParseWorkUnitFromIssueWithRoot(issueNum int, title, body, repoRoot string) 
 			if strings.HasPrefix(cleanPath, "..") || filepath.IsAbs(cleanPath) {
 				return nil, fmt.Errorf("invalid external workunit path %q: must be relative to repo root", relPath)
 			}
-			fullPath := filepath.Join(repoRoot, cleanPath)
-			data, readErr := os.ReadFile(fullPath)
+			data, readErr := safefs.ReadFile(repoRoot, cleanPath, 1<<20)
 			if readErr != nil {
 				return nil, fmt.Errorf("failed to read external workunit file %q: %w", relPath, readErr)
 			}

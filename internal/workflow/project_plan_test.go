@@ -15,6 +15,7 @@ import (
 
 func setupProjectPlanTestRepo(t *testing.T) (string, *Engine, *tracker.LocalTracker) {
 	t.Helper()
+	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	root := t.TempDir()
 	t.Setenv("SWARM_USER", "maintainer")
 	git := func(args ...string) {
@@ -44,6 +45,22 @@ func setupProjectPlanTestRepo(t *testing.T) (string, *Engine, *tracker.LocalTrac
 		t.Fatal(err)
 	}
 	return root, eng, tr
+}
+
+func TestProjectPlannerReportsIsolationFailure(t *testing.T) {
+	root, engine, _ := setupProjectPlanTestRepo(t)
+	t.Setenv("SWARM_EXECUTION_MODE", "")
+	entry := engine.Config.Agents["claude"]
+	entry.Binary = "swarm-test-missing-claude"
+	engine.Config.Agents["claude"] = entry
+	source := filepath.Join(root, "roadmap.md")
+	if err := os.WriteFile(source, []byte("# Roadmap\n- Deliver a tested feature\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := engine.parseOrSynthesizeRoadmap(t.Context(), root, source, "roadmap.md", "claude", nil, engine.Config)
+	if err == nil || !strings.Contains(err.Error(), "is unavailable") {
+		t.Fatalf("explicit agent request silently fell back after isolation failure: %v", err)
+	}
 }
 
 type flakyLinkTracker struct {

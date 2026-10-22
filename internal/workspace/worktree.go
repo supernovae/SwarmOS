@@ -2,19 +2,21 @@ package workspace
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/supernovae/swarmos/internal/gitcredential"
 )
 
 const (
@@ -24,7 +26,7 @@ const (
 
 var (
 	nonSlugRegex     = regexp.MustCompile(`[^a-z0-9]+`)
-	activeBlockRegex = regexp.MustCompile(`(?s)<!-- swarm:active:start -->.*?<!-- swarm:active:end -->\n{0,2}`)
+	activeBlockRegex = regexp.MustCompile(`(?s)<!-- swarm:active:start -->.*?<!-- swarm:active:end -->(?:\r?\n){0,2}`)
 )
 
 func Slugify(title string) string {
@@ -164,20 +166,7 @@ func PushForkCheckpoint(ctx context.Context, repoRoot, forkRemote, branch, headS
 }
 
 func gitOutputWithTokenContext(ctx context.Context, repoRoot string, args ...string) (string, error) {
-	fullArgs := append([]string{"-C", repoRoot}, args...)
-	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
-		if tok := strings.TrimSpace(os.Getenv(key)); tok != "" {
-			basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + tok))
-			fullArgs = append([]string{"-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic " + basic}, fullArgs...)
-			break
-		}
-	}
-	cmd := exec.CommandContext(ctx, "git", fullArgs...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("%w: git %s: %s", errGitFailed, strings.Join(args, " "), strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
+	return gitOutputContext(ctx, repoRoot, args...)
 }
 
 // ResolveBase resolves the immutable commit used to create a worktree. When
@@ -257,18 +246,33 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 	}
 	checkpoint := headSHA
 	if checkpoint == "" {
-		checkpoint, err = resolveCommit(absRoot, "refs/heads/"+branch)
-		if err != nil {
-			checkpoint = baseSHA
-		}
+		checkpoint = baseSHA
 	}
 	if _, err := gitOutput(absRoot, "merge-base", "--is-ancestor", baseSHA, checkpoint); err != nil {
 		return "", "", fmt.Errorf("checkpoint %s does not descend from approved base %s; reconcile the branch without resetting it: %w", checkpoint, baseSHA, err)
 	}
 	wtPath := WorktreePath(absRoot, issueNum)
-	if _, err := os.Lstat(wtPath); err == nil {
-		if err := verifyWorktree(wtPath, branch, headSHA); err != nil {
+	safe, err := safefs.Open(absRoot)
+	if err != nil {
+		return "", "", err
+	}
+	defer safe.Close()
+	parents, err := safe.Sub(filepath.Join(".swarm", "worktrees"), true, 0755)
+	if err != nil {
+		return "", "", err
+	}
+	defer parents.Close()
+	if info, err := os.Lstat(wtPath); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return "", "", fmt.Errorf("worktree path %q must be a real directory", wtPath)
+		}
+		if err := verifyWorktree(wtPath, branch, checkpoint); err != nil {
 			return "", "", err
+		}
+		if headSHA == "" {
+			if err := verifyUncheckpointedWorktree(wtPath, checkpoint); err != nil {
+				return "", "", err
+			}
 		}
 		if err := configureWorktreeExclude(wtPath); err != nil {
 			return "", "", err
@@ -277,10 +281,7 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
-		return "", "", err
-	}
-	_ = exec.Command("git", "-C", absRoot, "worktree", "prune").Run()
+	_, _ = gitOutput(absRoot, "worktree", "prune")
 
 	if headSHA != "" {
 		if existing, err := resolveCommit(absRoot, branch); err == nil && existing != headSHA {
@@ -295,6 +296,9 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 		if _, err := gitOutput(absRoot, "branch", branch, baseSHA); err != nil {
 			return "", "", fmt.Errorf("create worktree branch: %w", err)
 		}
+	}
+	if existing, err := resolveCommit(absRoot, branch); err == nil && existing != checkpoint {
+		return "", "", fmt.Errorf("existing branch %q is at %s, expected approved checkpoint %s; preserve it under another branch before retrying", branch, existing, checkpoint)
 	}
 	if _, err := gitOutput(absRoot, "worktree", "add", wtPath, branch); err != nil {
 		return "", "", fmt.Errorf("add worktree: %w", err)
@@ -346,12 +350,15 @@ func gitOutput(repoRoot string, args ...string) (string, error) {
 }
 
 func gitOutputContext(ctx context.Context, repoRoot string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repoRoot}, args...)...)
+	cmd, redact, err := gitcredential.Command(ctx, repoRoot, args...)
+	if err != nil {
+		return "", err
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%w: git %s: %s", errGitFailed, strings.Join(args, " "), strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("%w: git %s: %s", errGitFailed, strings.Join(args, " "), redact(strings.TrimSpace(string(out))))
 	}
-	return string(out), nil
+	return redact(string(out)), nil
 }
 
 func resolveCommit(repoRoot, revision string) (string, error) {
@@ -364,7 +371,7 @@ func resolveCommit(repoRoot, revision string) (string, error) {
 
 func verifyWorktree(wtPath, branch, expectedHead string) error {
 	gitEntry, err := os.Lstat(filepath.Join(wtPath, ".git"))
-	if err != nil || gitEntry.IsDir() {
+	if err != nil || !gitEntry.Mode().IsRegular() {
 		return fmt.Errorf("existing path %q is not a registered linked worktree", wtPath)
 	}
 	top, err := gitOutput(wtPath, "rev-parse", "--show-toplevel")
@@ -382,6 +389,70 @@ func verifyWorktree(wtPath, branch, expectedHead string) error {
 		}
 		if head != expectedHead {
 			return fmt.Errorf("worktree %q is at %s, expected checkpoint %s", wtPath, head, expectedHead)
+		}
+	}
+	return nil
+}
+
+// verifyUncheckpointedWorktree permits only coordinator-generated instruction
+// pointers before the first checkpoint. All ordinary candidate changes require
+// an explicit checkpoint; a fresh claim cannot adopt a prior worker's files.
+func verifyUncheckpointedWorktree(wtPath, base string) error {
+	status, err := gitOutput(wtPath, "status", "--porcelain", "-z", "--untracked-files=all")
+	if err != nil {
+		return err
+	}
+	reject := func() error {
+		return fmt.Errorf("worktree %q contains uncommitted changes without an approved checkpoint; preserve them before retrying", wtPath)
+	}
+	for _, entry := range strings.Split(status, "\x00") {
+		if entry == "" {
+			continue
+		}
+		if len(entry) < 4 || entry[2] != ' ' {
+			return reject()
+		}
+		name := entry[3:]
+		if name != "AGENTS.md" && name != "CLAUDE.md" {
+			return reject()
+		}
+		if strings.ContainsAny(entry[:2], "RCDU") {
+			return reject()
+		}
+		current, err := safefs.ReadFile(wtPath, name, 16<<20)
+		if err != nil {
+			return reject()
+		}
+		listing, err := gitOutput(wtPath, "ls-tree", "-z", base, "--", name)
+		if err != nil {
+			return err
+		}
+		expected := ""
+		expectedExecutable := false
+		if listing != "" {
+			fields := strings.Fields(strings.SplitN(listing, "\t", 2)[0])
+			if len(fields) != 3 || (fields[0] != "100644" && fields[0] != "100755") {
+				return reject()
+			}
+			expectedExecutable = fields[0] == "100755"
+			expected, err = gitOutput(wtPath, "show", base+":"+name)
+			if err != nil {
+				return err
+			}
+		}
+		// Git may check out Markdown with CRLF on Windows while storing LF blobs.
+		// Compare instruction content with consistent line endings; retain the
+		// original bytes when removing or refreshing the generated pointer.
+		cleaned := activeBlockRegex.ReplaceAllString(string(current), "")
+		if strings.ReplaceAll(cleaned, "\r\n", "\n") != strings.ReplaceAll(expected, "\r\n", "\n") {
+			return reject()
+		}
+		// Git ignores executable bits on Windows; on other platforms preserve them.
+		if runtime.GOOS != "windows" {
+			info, err := os.Lstat(filepath.Join(wtPath, name))
+			if err != nil || !info.Mode().IsRegular() || (info.Mode().Perm()&0111 != 0) != expectedExecutable {
+				return reject()
+			}
 		}
 	}
 	return nil
@@ -463,17 +534,23 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 }
 
 func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc string, extraDocs ...string) error {
-	activeDir := filepath.Join(worktreePath, ".swarm", "active")
-	if err := os.MkdirAll(activeDir, 0o755); err != nil {
+	safe, err := safefs.Open(worktreePath)
+	if err != nil {
 		return err
 	}
+	defer safe.Close()
+	active, err := safe.Sub(filepath.Join(".swarm", "active"), true, 0755)
+	if err != nil {
+		return err
+	}
+	defer active.Close()
 	if rawJSON, err := json.MarshalIndent(wu, "", "  "); err == nil {
-		if err := os.WriteFile(filepath.Join(activeDir, "workunit.json"), rawJSON, 0o644); err != nil {
+		if err := active.WriteFile("workunit.json", rawJSON, 0o644); err != nil {
 			return err
 		}
 	}
 	workunitMD := renderWorkUnitMarkdown(wu, wf, artifacts)
-	if err := os.WriteFile(filepath.Join(activeDir, "WORKUNIT.md"), []byte(workunitMD), 0o644); err != nil {
+	if err := active.WriteFile("WORKUNIT.md", []byte(workunitMD), 0o644); err != nil {
 		return err
 	}
 
@@ -499,7 +576,7 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	sys.WriteString("---\n\n")
 	sys.WriteString(workunitMD)
 
-	if err := os.WriteFile(filepath.Join(activeDir, "SYSTEM_PROMPT.md"), []byte(sys.String()), 0o644); err != nil {
+	if err := active.WriteFile("SYSTEM_PROMPT.md", []byte(sys.String()), 0o644); err != nil {
 		return err
 	}
 
@@ -528,7 +605,7 @@ Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMP
 }
 
 func LoadActiveWorkUnit(worktreePath string) (*contract.WorkUnit, error) {
-	data, err := os.ReadFile(filepath.Join(worktreePath, ".swarm", "active", "workunit.json"))
+	data, err := safefs.ReadFile(worktreePath, filepath.Join(".swarm", "active", "workunit.json"), 1<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -542,6 +619,11 @@ func LoadActiveWorkUnit(worktreePath string) (*contract.WorkUnit, error) {
 // CleanEphemeralHarnessMarkers removes the managed <!-- swarm:active:start --> block from AGENTS.md and CLAUDE.md
 // so worktree commits remain clean on `swarm submit`.
 func CleanEphemeralHarnessMarkers(worktreePath string) error {
+	safe, err := safefs.Open(worktreePath)
+	if err != nil {
+		return err
+	}
+	defer safe.Close()
 	for _, docName := range []string{"AGENTS.md", "CLAUDE.md"} {
 		full := filepath.Join(worktreePath, docName)
 		info, err := os.Lstat(full)
@@ -554,7 +636,7 @@ func CleanEphemeralHarnessMarkers(worktreePath string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("refuse to rewrite non-regular instruction file %s", docName)
 		}
-		data, err := os.ReadFile(full)
+		data, err := safe.ReadFile(docName, 16<<20)
 		if err != nil {
 			return err
 		}
@@ -563,14 +645,14 @@ func CleanEphemeralHarnessMarkers(worktreePath string) error {
 		}
 		cleaned := activeBlockRegex.ReplaceAllString(string(data), "")
 		if cleaned == "" {
-			if err := exec.Command("git", "-C", worktreePath, "ls-files", "--error-unmatch", docName).Run(); err != nil {
-				if err := os.Remove(full); err != nil {
+			if _, err := gitOutput(worktreePath, "ls-files", "--error-unmatch", docName); err != nil {
+				if err := safe.Remove(docName); err != nil {
 					return err
 				}
 				continue
 			}
 		}
-		if err := os.WriteFile(full, []byte(cleaned), 0o644); err != nil {
+		if err := safe.WriteFile(docName, []byte(cleaned), 0o644); err != nil {
 			return err
 		}
 	}
@@ -624,6 +706,12 @@ func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, ar
 }
 
 func injectManagedBlock(filePath, block string) error {
+	safe, err := safefs.Open(filepath.Dir(filePath))
+	if err != nil {
+		return err
+	}
+	defer safe.Close()
+	name := filepath.Base(filePath)
 	if info, err := os.Lstat(filePath); err == nil {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("refusing non-regular instruction file %s", filePath)
@@ -631,24 +719,24 @@ func injectManagedBlock(filePath, block string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	existing, err := os.ReadFile(filePath)
+	existing, err := safe.ReadFile(name, 16<<20)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
 		}
-		return os.WriteFile(filePath, []byte(block+"\n\n"), 0o644)
+		return safe.WriteFile(name, []byte(block+"\n\n"), 0o644)
 	}
 	content := string(existing)
 	if activeBlockRegex.MatchString(content) {
 		updated := activeBlockRegex.ReplaceAllStringFunc(content, func(string) string { return block + "\n\n" })
-		return os.WriteFile(filePath, []byte(updated), 0o644)
+		return safe.WriteFile(name, []byte(updated), 0o644)
 	}
 	updated := block + "\n\n" + content
-	return os.WriteFile(filePath, []byte(updated), 0o644)
+	return safe.WriteFile(name, []byte(updated), 0o644)
 }
 
 func configureWorktreeExclude(wtPath string) error {
-	out, err := exec.Command("git", "-C", wtPath, "rev-parse", "--git-path", "info/exclude").CombinedOutput()
+	out, err := gitOutput(wtPath, "rev-parse", "--git-path", "info/exclude")
 	if err != nil {
 		return nil
 	}
@@ -656,10 +744,20 @@ func configureWorktreeExclude(wtPath string) error {
 	if !filepath.IsAbs(excludePath) {
 		excludePath = filepath.Join(wtPath, excludePath)
 	}
-	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
-		return nil
+	// Git owns the metadata directory; reject links below it before updating
+	// its exclude file. Task workers in isolated mode never receive this root.
+	if filepath.Base(excludePath) != "exclude" || filepath.Base(filepath.Dir(excludePath)) != "info" {
+		return fmt.Errorf("unexpected Git exclude path %q", excludePath)
 	}
-	existing, _ := os.ReadFile(excludePath)
+	metadata, err := safefs.Open(filepath.Dir(filepath.Dir(excludePath)))
+	if err != nil {
+		return err
+	}
+	defer metadata.Close()
+	existing, err := metadata.ReadFile(filepath.Join("info", "exclude"), 16<<20)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	content := string(existing)
 	entries := []string{".swarm/active/", ".swarm/worktrees/", ".swarm/local-tracker/"}
 	var sb strings.Builder
@@ -675,7 +773,7 @@ func configureWorktreeExclude(wtPath string) error {
 		}
 	}
 	if changed {
-		return os.WriteFile(excludePath, []byte(sb.String()), 0o644)
+		return metadata.WriteFile(filepath.Join("info", "exclude"), []byte(sb.String()), 0o644)
 	}
 	return nil
 }

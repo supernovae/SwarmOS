@@ -26,7 +26,7 @@ swarm doctor --backend github
 | `.swarm/validation/required-checks.yaml` | Required check commands and protected-path globs enforced before submission. |
 | `.github/ISSUE_TEMPLATE/{swarm-workunit,swarm-community,swarm-feature,swarm-bugfix,swarm-refactor,config}.yml` | Preset GitHub Issue Forms for structured draft WorkUnits (`swarm:draft`) and community bug/idea intake (`swarm:community`). |
 | `.github/workflows/swarm-validate.yml` | Consumer CI workflow running your repository checks against the trusted base commit. |
-| `.claude/commands/swarm-*.md` & `.opencode/command/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
+| `.claude/commands/swarm-*.md` & `.opencode/commands/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
 
 > [!TIP]
 > - Passing `--swarm-version` ensures the generated `.github/workflows/swarm-validate.yml` installs that exact immutable SwarmOS version. Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
@@ -45,46 +45,63 @@ For repositories that mirror SwarmOS's own release and security setup:
 
 ## 2. Configure Approved Agents (`.swarm/config.yaml`)
 
+Start with one Codex login for all four roles on a supported Linux worker:
+
 ```yaml
 version: 1
-default_agent: claude
+default_agent: codex
 default_gate: agent
-
-roles:
-  planner: claude
-  reviewer: omp
-  developer: codex
-  tester: opencode
-
+execution:
+  mode: isolated
+  backend: native
 lease:
   duration: 4h
   renewable: true
   max_renewals: 3
-
 security:
   require_ready_label: true
   ready_label: swarm:ready
-
+  require_isolation: true
 agents:
-  claude:
-    binary: claude
-    roles: [planner, developer]
-  omp:
-    binary: omp
-    roles: [reviewer]
-    sandbox: sandbox-exec   # or bwrap on Linux, container with OCI runtime
   codex:
     binary: codex
-    roles: [developer]
-  opencode:
-    binary: opencode
-    roles: [tester]
+    roles: [planner, reviewer, developer, tester]
 ```
+
+Sign in through the selected harness on the worker, then run `swarm doctor`. Isolated adapters use coordinator-selected permissions; agent entries can choose a model and roles, while arbitrary `args`, environment forwarding, and sandbox overrides are rejected. For optional offline containers, select `execution.backend: oci` and follow the [OCI setup](../SECURITY.md#optional-oci-backend).
 
 How agent configuration works:
 - **Explicit allowlist**: Only entries under `agents:` can be selected. Each entry can configure `binary`, `harness` (`claude`, `codex`, `omp`, or `opencode`; defaults to the entry name), `args`, `model`, allowed `roles`, permitted `env` variables, and reviewer sandbox settings.
 - **Precedence**: Role-specific CLI flag (`--planner-agent`, `--reviewer-agent`, `--developer-agent`, `--tester-agent`) $\rightarrow$ generic `--agent` $\rightarrow$ `roles.<role>` $\rightarrow$ `default_agent`.
 - **Maintainer-controlled approvals**: When `security.require_ready_label` is `true`, an issue must be approved by a user with repository write/maintain/admin permissions via `swarm issue approve <issue>` (or `swarm issue create --ready`) before any worker can claim it.
+
+### Shared defaults and personal choices
+
+Keep team defaults in the project root's `.swarm/config.yaml`: agent presets under `agents`, role assignments under `roles`, and the worker environment under `execution`. Commit changes before approving tasks; existing tasks need fresh approval to adopt updated policy. Set `security.require_isolation: true` to require isolated workers.
+
+For teams planning in an existing agent session, set `plan_mode: interactive` so tasks can be claimed without launching a planner. Write the plan in the assigned worktree and record it with `swarm stage <issue> --phase plan`.
+
+Developers choose from those presets with `--agent` or a role flag such as `--developer-agent`. Use `--headless=false` for pairing, or the default headless mode for automation. `SWARM_EXECUTION_MODE` selects a mode for your shell or CI job within project policy. The user-level `~/.config/swarm/node.yaml` describes worker capabilities for task matching; agent permissions belong in the project presets.
+
+For a `trusted-local` Codex setup, for example, add named presets to your existing `agents` map:
+
+```yaml
+agents:
+  codex-pair:
+    harness: codex
+    binary: codex
+    roles: [developer, tester]
+    args: ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"]
+  codex-worker:
+    harness: codex
+    binary: codex
+    roles: [developer, tester]
+    args: ["--sandbox", "workspace-write", "-c", 'approval_policy="never"']
+```
+
+Choose `--developer-agent codex-pair --headless=false` to pair, or `--developer-agent codex-worker` for unattended work. The worker preset keeps Codex's workspace sandbox enabled and turns off approval prompts. SwarmOS places `args` before the driver's subcommand, so use options accepted in that position. See the [Codex CLI reference](https://developers.openai.com/codex/cli/reference) for permission options.
+
+Provider authentication belongs to the harness. The current `trusted-local` launcher accepts model credential variables listed in `agents.<name>.env`; keep their values in your shell or CI secret store. Isolated adapters use harness-owned login directly, without those environment presets. Leave `model` unset for harness selection, or declare the project's model choice in its agent entry. The [worker guide](developer.md#choose-where-agents-run) explains the available setup paths.
 
 ---
 

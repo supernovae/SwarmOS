@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 var (
@@ -69,8 +72,8 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	}
 	if !opts.CIMode {
 		for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
-			info, err := os.Stat(filepath.Join(worktreePath, ".swarm", "active", name))
-			if err != nil || info.Size() == 0 {
+			data, err := safefs.ReadFile(worktreePath, filepath.Join(".swarm", "active", name), 1<<20)
+			if err != nil || len(data) == 0 {
 				return nil, fmt.Errorf("%w: %s not found or empty in .swarm/active/", ErrMissingArtifact, name)
 			}
 		}
@@ -101,6 +104,14 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := harness.LoadConfigAt(worktreePath, baseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load approved execution policy: %w", err)
+	}
+	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+	if err != nil {
+		return nil, err
+	}
 	report := &ValidationReport{Passed: true, BaseSHA: baseSHA, HeadSHA: headSHA, ModifiedFiles: modified}
 	var markdown strings.Builder
 	markdown.WriteString("# Validation Report\n\n")
@@ -114,25 +125,35 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	}
 	defer os.RemoveAll(checkHome)
 	for _, check := range spec.RequiredChecks {
-		checkCtx := ctx
-		var cancel context.CancelFunc
+		duration := 15 * time.Minute
 		if check.Timeout != "" {
-			duration, _ := time.ParseDuration(check.Timeout)
-			checkCtx, cancel = context.WithTimeout(ctx, duration)
+			configured, _ := time.ParseDuration(check.Timeout)
+			if configured < duration {
+				duration = configured
+			}
 		}
+		checkCtx, cancel := context.WithTimeout(ctx, duration)
 		start := time.Now()
-		cmd := exec.CommandContext(checkCtx, "sh", "-c", check.Command)
-		cmd.Dir = worktreePath
-		cmd.Env = cleanCheckEnv(checkHome)
-		process.Configure(cmd)
-		cmd.Cancel = func() error { process.Stop(cmd); return nil }
-		cmd.WaitDelay = time.Second
 		var output process.Output
-		cmd.Stdout, cmd.Stderr = &output, &output
-		runErr := cmd.Run()
-		if cancel != nil {
-			cancel()
+		var runErr error
+		if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
+			runErr = sandbox.RunConfiguredNativeValidation(checkCtx, worktreePath, cfg, check.Command, &output, &output)
+		} else if execution.Mode == contract.ExecutionIsolated {
+			runErr = sandbox.RunWorker(checkCtx, worktreePath, "/bin/sh", []string{"-c", check.Command}, sandbox.WorkerOptions{
+				Runtime: execution.ContainerRuntime, Image: execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,
+			}, nil, &output, &output)
+		} else {
+			cmd := exec.CommandContext(checkCtx, "sh", "-c", check.Command)
+			cmd.Dir = worktreePath
+			cmd.Env = cleanCheckEnv(checkHome)
+			process.Configure(cmd)
+			cmd.Cancel = func() error { process.Stop(cmd); return nil }
+			cmd.WaitDelay = time.Second
+			cmd.Stdout, cmd.Stderr = &output, &output
+			runErr = cmd.Run()
+			process.Stop(cmd)
 		}
+		cancel()
 		outcome := CheckRunOutcome{Name: check.Name, Command: check.Command, Duration: time.Since(start), Output: output.String(), Passed: runErr == nil}
 		if runErr != nil {
 			report.Passed = false
@@ -141,7 +162,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 				outcome.ExitCode = exit.ExitCode()
 			}
 			if firstErr == nil {
-				firstErr = fmt.Errorf("%w: check %q (%s) exited with %d", ErrRequiredCheckFailed, check.Name, check.Command, outcome.ExitCode)
+				firstErr = fmt.Errorf("%w: check %q (%s) exited with %d: %v", ErrRequiredCheckFailed, check.Name, check.Command, outcome.ExitCode, runErr)
 			}
 		}
 		report.CheckOutcomes = append(report.CheckOutcomes, outcome)
@@ -165,11 +186,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	}
 	report.Artifact = contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-validation", issue), IssueNumber: issue, Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: verdict, Summary: summary, Body: markdown.String(), CreatedAt: time.Now().UTC(), Metadata: map[string]string{"base_sha": baseSHA, "head_sha": headSHA}}
 	if !opts.CIMode {
-		active := filepath.Join(worktreePath, ".swarm", "active")
-		if err := os.MkdirAll(active, 0o755); err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(filepath.Join(active, "VALIDATION.md"), []byte(markdown.String()), 0o644); err != nil {
+		if err := safefs.WriteFile(worktreePath, filepath.Join(".swarm", "active", "VALIDATION.md"), []byte(markdown.String()), 0o644); err != nil {
 			return nil, err
 		}
 	}
@@ -188,6 +205,22 @@ func loadTrustedValidationSpec(repoRoot, baseSHA string) (*contract.ValidationSp
 }
 
 func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
+	// Inspect tracked control paths before excluding generated artifacts. A
+	// committed link or file at the active directory is never ephemeral output.
+	entries, err := gitOutput(worktreePath, "ls-files", "--stage", "-z", "--", ".swarm", ".swarm/active")
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range bytes.Split(entries, []byte{0}) {
+		parts := bytes.SplitN(entry, []byte{'\t'}, 2)
+		if len(parts) != 2 {
+			continue
+		}
+		name := string(parts[1])
+		if name == ".swarm" || name == ".swarm/active" || (isEphemeral(name) && bytes.HasPrefix(parts[0], []byte("120000"))) {
+			return nil, fmt.Errorf("%w: tracked control path %q", ErrUnsafePath, name)
+		}
+	}
 	commands := [][]string{{"diff", "--name-only", "-z", baseSHA + "...HEAD"}, {"diff", "--name-only", "-z"}, {"diff", "--cached", "--name-only", "-z"}, {"ls-files", "--others", "--exclude-standard", "-z"}}
 	seen := make(map[string]struct{})
 	var files []string
@@ -201,11 +234,11 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 				continue
 			}
 			path := string(raw)
-			if isEphemeral(path) {
-				continue
-			}
 			if err := safeRepoPath(worktreePath, path); err != nil {
 				return nil, err
+			}
+			if isEphemeral(path) {
+				continue
 			}
 			if _, ok := seen[path]; !ok {
 				seen[path] = struct{}{}
@@ -284,12 +317,15 @@ func cleanCheckEnv(home string) []string {
 }
 
 func gitOutput(repoRoot string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+	cmd, redact, err := gitcredential.Command(context.Background(), repoRoot, args...)
+	if err != nil {
+		return nil, err
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, redact(strings.TrimSpace(stderr.String())))
 	}
 	return out, nil
 }

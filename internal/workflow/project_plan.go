@@ -17,6 +17,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"gopkg.in/yaml.v3"
@@ -370,26 +371,44 @@ func (e *Engine) parseOrSynthesizeRoadmap(ctx context.Context, root, absSource, 
 	rawSource := string(data)
 	raw := rawSource
 
-	// If an explicit non-mock agent is requested to synthesize/enrich a plan, run it when available.
+	// An explicitly requested agent must satisfy execution policy. Never hide a
+	// failed boundary or authentication setup behind deterministic synthesis.
 	if strings.TrimSpace(agentName) != "" && !strings.EqualFold(agentName, "mock") && cfg != nil {
-		if runner, err := agent.NewConfiguredRunner(agentName, cfg, e.Tracker.BackendName() == "local"); err == nil {
-			activeDir := filepath.Join(root, ".swarm", "active")
-			_ = os.MkdirAll(activeDir, 0o755)
-			outPath := filepath.Join(activeDir, "PROJECT_PLAN.yaml")
-			_ = os.Remove(outPath)
-			prompt := fmt.Sprintf("Read %s, .swarm/goals.md, and .swarm/rules/. Decompose the roadmap into a YAML list of SwarmOS WorkUnit objects at .swarm/active/PROJECT_PLAN.yaml.", displayPath)
-			if _, runErr := runner.Run(ctx, agent.RunRequest{
-				Agent:        agentName,
-				Role:         "planner",
-				Mode:         "headless",
-				WorktreePath: root,
-				TaskPrompt:   prompt,
-			}); runErr == nil {
-				if synthBytes, readErr := os.ReadFile(outPath); readErr == nil && len(synthBytes) > 0 {
-					raw = string(synthBytes)
-				}
-			}
+		runner, err := agent.NewConfiguredRunner(agentName, cfg, e.Tracker.BackendName() == "local")
+		if err != nil {
+			return nil, err
 		}
+		safe, err := safefs.Open(root)
+		if err != nil {
+			return nil, err
+		}
+		defer safe.Close()
+		outPath := filepath.Join(".swarm", "active", "PROJECT_PLAN.yaml")
+		if err := safe.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+			return nil, err
+		}
+		if err := safe.Remove(outPath); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		prompt := fmt.Sprintf("Read %s, .swarm/goals.md, and .swarm/rules/. Decompose the roadmap into a YAML list of SwarmOS WorkUnit objects at .swarm/active/PROJECT_PLAN.yaml.", displayPath)
+		if _, runErr := runner.Run(ctx, agent.RunRequest{
+			Agent:        agentName,
+			Role:         "planner",
+			Mode:         "headless",
+			WorktreePath: root,
+			TaskPrompt:   prompt,
+			ProjectPlan:  true,
+		}); runErr != nil {
+			return nil, runErr
+		}
+		synthBytes, readErr := safe.ReadFile(outPath, 1<<20)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if len(strings.TrimSpace(string(synthBytes))) == 0 {
+			return nil, fmt.Errorf("planner produced an empty project plan")
+		}
+		raw = string(synthBytes)
 	}
 
 	defaultGate := contract.GateAgent

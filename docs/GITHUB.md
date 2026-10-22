@@ -79,13 +79,15 @@ Rather than running coding agents under a human maintainer's personal admin toke
 
 ### Step 2: Enforce Collaborator Allowlists in `.swarm/config.yaml`
 
-Pin the allowed worker and reviewer GitHub usernames under `security:` in `.swarm/config.yaml` on your default branch:
+Pin the allowed worker and reviewer GitHub usernames under `security:` in `.swarm/config.yaml` on your default branch. This multi-harness example uses explicit `trusted-local` execution; for the native isolated default, use the [Codex setup](project.md#2-configure-approved-agents-swarmconfigyaml) with the same collaborator rules.
 
 ```yaml
 version: 1
 default_agent: claude
 default_gate: agent
 plan_mode: auto
+execution:
+  mode: trusted-local
 
 roles:
   planner: claude

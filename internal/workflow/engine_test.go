@@ -352,6 +352,8 @@ func TestParseReviewVerdictFailsClosed(t *testing.T) {
 
 func configureValidation(t *testing.T, root string) {
 	t.Helper()
+	// Mock lifecycle tests explicitly exercise host compatibility mode.
+	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	for _, args := range [][]string{
 		{"-C", root, "config", "user.name", "SwarmOS"},
 		{"-C", root, "config", "user.email", "swarm@example.test"},

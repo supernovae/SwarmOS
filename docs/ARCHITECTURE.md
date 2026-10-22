@@ -58,11 +58,56 @@ Each claimed issue runs inside its own linked Git worktree at `.swarm/worktrees/
 
 ## 4. Process & Reviewer Isolation (`internal/sandbox/` & `internal/agent/`)
 
-SwarmOS separates ordinary code-editing roles from plan-review isolation:
+### Design decision: use the harness's security model first
 
-- **Sandboxed Plan Reviewer**: When running the `reviewer` role, SwarmOS copies the repository into a separate immutable snapshot (rejecting symlinks that escape the root), masks the user's home directory, denies access to the live worktree, and runs the reviewer inside `sandbox-exec` (macOS), `bwrap` (Linux), or a rootless/read-only OCI container (`docker` / `podman`). Only a bounded regular `REVIEW.md` file is imported back from the run.
-- **Credential Hygiene**: All spawned agent subprocesses run with a fresh temporary `HOME` and receive only the environment variable names explicitly allowlisted in `agents.<name>.env`. Coordinator publishing tokens (`GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`) are never forwarded to agent subprocesses.
-- **Trusted Host Roles**: Planner, developer, and tester roles run your compiler, test suite, and local tools inside their worktree as host processes under your user account. See [`SECURITY.md`](../SECURITY.md) for operational guidance when running unattended worker nodes.
+Users bring their agents and sign in through those agents' normal login flows. The harness owns provider authentication, sessions, refresh, and model connectivity. SwarmOS owns task coordination, repository policy, artifact acceptance, and publication.
+
+Choose the simplest supported execution path that meets the project's policy:
+
+1. Use the harness's native authentication, permissions, and sandbox.
+2. Keep the authenticated harness in the user's environment and delegate tools to a restricted executor through a supported interface.
+3. Use a disposable container with a documented, restricted authentication integration when the harness needs an external boundary.
+
+Harnesses and their underlying OS controls are trusted dependencies. Each adapter documents its supported versions and platforms, effective permissions, tool coverage, and cancellation behavior. Focused checks cover the boundaries the project requires, including shell commands, file tools, subprocesses, and enabled MCP tools or plugins. Add an external executor only to cover a specific gap. A permission prompt alone does not establish isolation.
+
+The two user-facing modes remain `isolated` and explicit `trusted-local`. `isolated` describes the enforced boundary, regardless of which supported harness or runtime provides it. The Codex native path uses the existing provider login. SwarmOS will not add a universal credential store, OAuth lifecycle, or model proxy.
+
+### Implemented backend selection
+
+`execution.backend` defaults to `native`. On Linux, Codex uses its native sandbox. Claude Code, OpenCode 2, and OhMyPi use their supported tool-control interfaces with a restricted Bubblewrap executor. Provider sessions stay with the authenticated harness. `swarm doctor` checks versions and actual filesystem/network restrictions. It reports login availability through supported status interfaces, and marks unprobed provider sessions explicitly. An unsupported adapter or failed probe stops the run before claiming work.
+
+| Approach | Fit and tradeoff |
+| --- | --- |
+| **Trusted harness with native tool isolation — selected** | Reuses normal Codex login and session renewal. Codex enforces tool permissions; SwarmOS supplies task snapshots, runs boundary checks, and accepts bounded artifacts. The host-side harness and its internal tool dispatcher remain trusted. |
+| **Trusted harness with an external executor** | Implemented for Claude through restricted-mode MCP, OpenCode 2 through a private server and V2 permissions, and OhMyPi through RPC host tools. Built-ins that bypass the executor are unavailable. |
+| **Containerized harness with restricted authentication** | Useful for independently enforced isolation and resource quotas. The OCI executor is available for offline agents; provider-supported login, refresh, and revocation need qualification before authenticated use. |
+
+Codex's documented CLI permission profiles supply its native boundary. App-server is another supported integration interface. The delegated adapters combine their tool transport with harness controls that restrict built-in execution paths. See the provider's [permissions](https://learn.chatgpt.com/docs/permissions) and [app-server](https://learn.chatgpt.com/docs/app-server) documentation.
+
+- **Execution:** Codex shell and file tools use a restricted native profile. MCP, plugins, hooks, browser tools, and subagents are disabled. Validation uses the same harness's `sandbox` command without provider credentials. Interactive execution streams `codex exec` and accepts follow-up turns under the same permissions.
+- **Files and authority:** Workers receive a detached snapshot without live Git metadata, coordinator state, or autoloaded `.codex`/`.agents` directories. Planner and reviewer input is read-only. SwarmOS imports only expected role artifacts or bounded developer/tester changes, then performs the existing provenance, policy, lease, and approval checks.
+- **Credentials:** Codex opens its normal login store; SwarmOS neither reads nor copies provider tokens. Tool processes receive a clean environment and private home. Publishing credentials stay with the coordinator. Explicit `trusted-local` launches retain their existing allowlisted model-environment setup.
+- **Optional OCI:** Approved repository policy can select `execution.backend: oci`. Existing explicit container settings also retain that selection. Native execution cannot silently replace a required container boundary. See [execution modes](../SECURITY.md#execution-modes) for setup and [future work](../todo.md#oci-authentication-and-enterprise-integrations) for authenticated OCI qualification.
+
+Native capability tests cover host-file canaries, environment filtering, read-only roles, network denial, artifact import, and cancellation of a detached subprocess. The reproducible authenticated WorkUnit test exercises all four roles, interactive planning, unattended implementation, human approval, native validation, and a local Draft PR. The four-harness mixed workflow, native macOS/Windows, provider session-expiration scenarios, and additional tool integrations remain qualification work. See the current [evidence](native-qualification.md).
+
+Adapters use minimum stable versions, supported-interface checks, and runtime canaries. OpenCode also checks merged permissions; OhMyPi checks its effective tool catalog. Diagnostics and artifact provenance record the version used. Follow the [qualification procedure](native-qualification.md#adding-a-codex-release) when updating the tested matrix; repository policy can select a particular installed binary.
+
+### Tool capabilities
+
+The default supports reading, editing, building, testing, and analysis with locally installed tools. Repository role routing and read-only stages apply across harnesses.
+
+| Capability | Codex | Claude Code / OpenCode 2 / OhMyPi |
+| --- | --- | --- |
+| Workspace reads and edits | Native file tools under the permission profile | Isolated read/write/edit tools |
+| Shell, subprocesses, local analysis | Native command sandbox | Bubblewrap executor; background children end with each call |
+| Provider connectivity | Harness-owned login and model transport | Harness-owned login and model transport |
+| MCP | Restricted pending integration-specific qualification | Only the generated task-tool server; OhMyPi uses RPC host tools |
+| Subagents and delegated tasks | Restricted pending inherited-boundary tests | Restricted until delegated calls can retain the same executor boundary |
+| Hooks, plugins, language servers | Autoloading restricted; command-line analysis remains available | Autoloading restricted; command-line analysis remains available |
+| Tool network, browser, computer interaction | Restricted | Restricted |
+
+The executor addresses a specific gap: host file and command tools in these adapters are not covered by a complete native OS sandbox. SwarmOS uses standard Bubblewrap namespaces rather than a new sandbox technology. Future capability additions should preserve the harness's own interfaces and qualify each execution path individually.
 
 ---
 

@@ -33,7 +33,7 @@ func TestAgentModelHelper(t *testing.T) {
 }
 
 func TestConfiguredRunnerRejectsUnapprovedOrUnavailableSelections(t *testing.T) {
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{
 		"claude": {Binary: os.Args[0], Roles: []string{"planner"}, Model: "approved-model"},
 	}}
 	if _, err := NewConfiguredRunner("codex", cfg, false); err == nil {
@@ -54,14 +54,14 @@ func TestConfiguredRunnerRejectsUnapprovedOrUnavailableSelections(t *testing.T) 
 }
 
 func TestConfiguredRunnerRejectsMissingBinaryBeforeExecution(t *testing.T) {
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{"claude": {Binary: "definitely-not-a-swarm-agent"}}}
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{"claude": {Binary: "definitely-not-a-swarm-agent"}}}
 	if _, err := NewConfiguredRunner("claude", cfg, false); err == nil {
 		t.Fatal("unavailable configured executable was accepted")
 	}
 }
 
 func TestConfiguredRunnerRejectsPublishingCredentialForwarding(t *testing.T) {
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{"claude": {Binary: os.Args[0], Env: []string{"GITHUB_TOKEN"}}}}
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{"claude": {Binary: os.Args[0], Env: []string{"GITHUB_TOKEN"}}}}
 	if _, err := NewConfiguredRunner("claude", cfg, false); err == nil {
 		t.Fatal("publishing token was accepted as agent authentication")
 	}
@@ -99,7 +99,7 @@ func TestAdapterProcessHidesPublishingCredentials(t *testing.T) {
 
 func TestConfiguredModelReachesSupportedHarness(t *testing.T) {
 	t.Setenv("SWARM_AGENT_MODEL_HELPER", "1")
-	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{
 		"reviewer": {Binary: os.Args[0], Harness: "claude", Args: []string{"-test.run=TestAgentModelHelper", "--"}, Model: "approved-model"},
 	}}
 	runner, err := NewConfiguredRunner("reviewer", cfg, false)
@@ -108,5 +108,33 @@ func TestConfiguredModelReachesSupportedHarness(t *testing.T) {
 	}
 	if _, err := runner.Run(t.Context(), RunRequest{Role: "reviewer", WorktreePath: t.TempDir(), Mode: "headless"}); err != nil {
 		t.Fatalf("configured model did not reach supported harness: %v", err)
+	}
+}
+
+func TestOpenCodeV2CommandsPreserveOptionalModel(t *testing.T) {
+	for _, mode := range []string{"headless", "interactive"} {
+		for _, model := range []string{"", "project-provider/project-model"} {
+			adapter := &CLIAdapter{driver: "opencode", binary: "opencode"}
+			_, args := adapter.BuildCommand(RunRequest{Mode: mode, Model: model, TaskPrompt: "task"})
+			want := "run"
+			if mode == "interactive" {
+				want = "mini"
+			}
+			if len(args) < 3 || args[0] != want || args[1] != "--standalone" {
+				t.Fatal(args)
+			}
+			found := false
+			for i, arg := range args {
+				if arg == "--model" {
+					found = true
+					if i == 0 || i+1 >= len(args) || args[i+1] != model {
+						t.Fatal(args)
+					}
+				}
+			}
+			if found != (model != "") {
+				t.Fatal("model selection changed", args)
+			}
+		}
 	}
 }

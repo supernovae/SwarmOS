@@ -2,7 +2,9 @@ package harness
 
 import (
 	"bytes"
+	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"gopkg.in/yaml.v3"
 )
 
@@ -100,7 +104,7 @@ const (
 
 func workflowDefaultBranch(repoRoot string) (string, string) {
 	runGit := func(args ...string) (string, error) {
-		out, err := exec.Command("git", append([]string{"-C", repoRoot}, args...)...).Output()
+		out, err := gitcredential.Output(context.Background(), repoRoot, args...)
 		return strings.TrimSpace(string(out)), err
 	}
 
@@ -221,17 +225,22 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	}
 	stack := DetectStack(root)
 	res := &InitResult{Stack: stack}
+	safe, err := safefs.Open(root)
+	if err != nil {
+		return nil, err
+	}
+	defer safe.Close()
 
 	writeFile := func(relPath string, data []byte) error {
-		full := filepath.Join(root, relPath)
-		if !opts.Force && fileExists(full) {
+		_, readErr := safe.ReadFile(relPath, 16<<20)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return readErr
+		}
+		if !opts.Force && readErr == nil {
 			res.SkippedFiles = append(res.SkippedFiles, relPath)
 			return nil
 		}
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(full, data, 0o644); err != nil {
+		if err := safe.WriteFile(relPath, data, 0644); err != nil {
 			return err
 		}
 		res.CreatedFiles = append(res.CreatedFiles, relPath)
@@ -381,7 +390,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		}
 	}
 
-	// 8. Universal Slash Commands (.claude/commands/ and .opencode/command/)
+	// 8. Universal Slash Commands (.claude/commands/ and .opencode/commands/)
 	if err := EnsureSlashCommands(root, opts.Force, res); err != nil {
 		return nil, err
 	}
@@ -395,25 +404,30 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 }
 
 func EnsureSlashCommands(root string, force bool, res *InitResult) error {
+	safe, err := safefs.Open(root)
+	if err != nil {
+		return err
+	}
+	defer safe.Close()
 	cmds := []string{"swarm-plan.md", "swarm-review.md", "swarm-implement.md", "swarm-validate.md", "swarm-project-plan.md"}
 	for _, cmd := range cmds {
 		data, err := embeddedTemplates.ReadFile("templates/commands/" + cmd)
 		if err != nil {
 			return err
 		}
-		for _, dir := range []string{".claude/commands", ".opencode/command"} {
+		for _, dir := range []string{".claude/commands", ".opencode/commands"} {
 			rel := filepath.Join(dir, cmd)
-			full := filepath.Join(root, rel)
-			if !force && fileExists(full) {
+			_, readErr := safe.ReadFile(rel, 16<<20)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				return readErr
+			}
+			if !force && readErr == nil {
 				if res != nil {
 					res.SkippedFiles = append(res.SkippedFiles, rel)
 				}
 				continue
 			}
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				return err
-			}
-			if err := os.WriteFile(full, data, 0o644); err != nil {
+			if err := safe.WriteFile(rel, data, 0o644); err != nil {
 				return err
 			}
 			if res != nil {
@@ -523,6 +537,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	if err := contract.ValidatePlanMode(cfg.PlanMode); err != nil {
 		return nil, err
 	}
+	if _, err := contract.ResolveExecution(&cfg, ""); err != nil {
+		return nil, err
+	}
 	if !cfg.Security.RequireReadyLabel || strings.TrimSpace(cfg.Security.ReadyLabel) == "" {
 		return nil, fmt.Errorf("security requires require_ready_label: true and a nonempty ready_label")
 	}
@@ -543,6 +560,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 		}
 	}
 	for name, agent := range cfg.Agents {
+		if agent.Authentication != "" && agent.Authentication != "auto" && agent.Authentication != "none" {
+			return nil, fmt.Errorf("agent %q authentication must be auto or none", name)
+		}
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(agent.Binary) == "" {
 			return nil, fmt.Errorf("agents require nonempty names and executable paths")
 		}
@@ -559,7 +579,7 @@ func readAt(root, sha, path string) ([]byte, error) {
 			return nil, fmt.Errorf("invalid approved base SHA")
 		}
 	}
-	out, err := exec.Command("git", "-C", root, "show", sha+":"+path).Output()
+	out, err := gitcredential.Output(context.Background(), root, "show", sha+":"+path)
 	if err != nil {
 		return nil, fmt.Errorf("read approved %s at %s: %w", path, sha, err)
 	}
@@ -687,7 +707,7 @@ func LoadRolePromptAt(repoRoot, role, baseSHA string) (string, error) {
 type DoctorCheck struct {
 	Category string `json:"category"`
 	Name     string `json:"name"`
-	Status   string `json:"status"` // "OK", "WARN", "FAIL"
+	Status   string `json:"status"` // "OK", "WARN", "FAIL", "OPTIONAL"
 	Detail   string `json:"detail"`
 }
 
@@ -797,9 +817,9 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 		sort.Strings(names)
 		for _, name := range names {
 			binary := cfg.Agents[name].Binary
-			check := DoctorCheck{Category: "agent", Name: name, Status: "WARN", Detail: "executable not found: " + binary}
+			check := DoctorCheck{Category: "binary", Name: name, Status: "OPTIONAL", Detail: "executable not found: " + binary}
 			if path, err := exec.LookPath(binary); err == nil {
-				check.Status, check.Detail = "OK", path
+				check.Status, check.Detail = "OK", path+"; installation only; see execution checks"
 			}
 			checks = append(checks, check)
 		}
@@ -809,8 +829,15 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 }
 
 func ensureGitignoreEntries(repoRoot string, entries []string) error {
-	gitignorePath := filepath.Join(repoRoot, ".gitignore")
-	existing, _ := os.ReadFile(gitignorePath)
+	safe, err := safefs.Open(repoRoot)
+	if err != nil {
+		return err
+	}
+	defer safe.Close()
+	existing, err := safe.ReadFile(".gitignore", 16<<20)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	content := string(existing)
 	var added []string
 	for _, e := range entries {
@@ -830,7 +857,7 @@ func ensureGitignoreEntries(repoRoot string, entries []string) error {
 	for _, a := range added {
 		sb.WriteString(a + "\n")
 	}
-	return os.WriteFile(gitignorePath, []byte(sb.String()), 0o644)
+	return safe.WriteFile(".gitignore", []byte(sb.String()), 0o644)
 }
 
 func fileExists(p string) bool {

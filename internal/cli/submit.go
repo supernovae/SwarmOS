@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
@@ -136,6 +137,8 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 						report.Artifact.Metadata["agent"] = att.Agent
 						report.Artifact.Metadata["harness"] = att.Harness
 						report.Artifact.Metadata["harness_version"] = att.HarnessVersion
+						report.Artifact.Metadata["execution_mode"] = att.ExecutionMode
+						report.Artifact.Metadata["authentication"] = att.Authentication
 						report.Artifact.Metadata["model"] = att.Model
 						report.Artifact.Metadata["sandbox"] = att.Sandbox
 						break
@@ -222,14 +225,14 @@ func maintainClaim(parent context.Context, manager *lease.Manager, issue int, ow
 }
 
 func requireCleanHead(ctx context.Context, root, expected string) error {
-	head, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "HEAD").Output()
+	head, err := gitcredential.Output(ctx, root, "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(string(head)) != expected {
 		return fmt.Errorf("candidate HEAD changed from checkpoint %s", expected)
 	}
-	status, err := exec.CommandContext(ctx, "git", "-C", root, "status", "--porcelain").Output()
+	status, err := gitcredential.Output(ctx, root, "status", "--porcelain")
 	if err != nil {
 		return err
 	}
@@ -253,13 +256,13 @@ func defaultBaseBranch(root string) (string, error) {
 		if _, err := workspace.ResolveBase(root); err != nil {
 			return "", err
 		}
-		out, err := exec.Command("git", "-C", root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").Output()
+		out, err := gitcredential.Output(context.Background(), root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
 		if err != nil {
 			return "", fmt.Errorf("discover remote default branch: %w", err)
 		}
 		return strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"), nil
 	}
-	out, err := exec.Command("git", "-C", root, "branch", "--show-current").Output()
+	out, err := gitcredential.Output(context.Background(), root, "branch", "--show-current")
 	if err != nil {
 		return "", err
 	}

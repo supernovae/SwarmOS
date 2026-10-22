@@ -94,6 +94,7 @@ type CheckSpec struct {
 }
 
 type SwarmConfig struct {
+	Execution    ExecutionConfig        `yaml:"execution,omitempty" json:"execution,omitempty"`
 	Version      int                    `yaml:"version" json:"version"`
 	DefaultAgent string                 `yaml:"default_agent" json:"default_agent"`
 	DefaultGate  GateMode               `yaml:"default_gate" json:"default_gate"`
@@ -123,6 +124,7 @@ func (c *SwarmConfig) MaxActiveForkClaims() int {
 }
 
 type SecurityConfig struct {
+	RequireIsolation      bool     `yaml:"require_isolation,omitempty" json:"require_isolation,omitempty"`
 	RequireReadyLabel     bool     `yaml:"require_ready_label" json:"require_ready_label"`
 	ReadyLabel            string   `yaml:"ready_label" json:"ready_label"`
 	ApprovedCollaborators []string `yaml:"approved_collaborators,omitempty" json:"approved_collaborators,omitempty"`
@@ -130,6 +132,7 @@ type SecurityConfig struct {
 }
 
 type AgentConfig struct {
+	Authentication   string   `yaml:"authentication,omitempty" json:"authentication,omitempty"`
 	Binary           string   `yaml:"binary" json:"binary"`
 	Harness          string   `yaml:"harness,omitempty" json:"harness,omitempty"`
 	Args             []string `yaml:"args,omitempty" json:"args,omitempty"`
@@ -157,6 +160,8 @@ type NodeProfile struct {
 }
 
 type RoleAttestation struct {
+	ExecutionMode  string `yaml:"execution_mode,omitempty" json:"execution_mode,omitempty"`
+	Authentication string `yaml:"authentication,omitempty" json:"authentication,omitempty"`
 	Role           string `yaml:"role" json:"role"`                       // "planner", "reviewer", "developer", "tester"
 	Agent          string `yaml:"agent" json:"agent"`                     // configured policy key in .swarm/config.yaml
 	Harness        string `yaml:"harness" json:"harness"`                 // "claude", "codex", "opencode", "omp", "mock"

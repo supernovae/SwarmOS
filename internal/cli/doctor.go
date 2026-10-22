@@ -2,9 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/agent"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 )
 
@@ -16,6 +20,24 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 			repoRoot := rootOpts.resolveRepoRoot()
 			checkGHAuth := !strings.EqualFold(rootOpts.Backend, "local")
 			checks := harness.RunDoctor(repoRoot, checkGHAuth)
+			if cfg, err := harness.LoadConfig(repoRoot); err == nil {
+				execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+				status, detail := "OK", ""
+				if err != nil {
+					status, detail = "FAIL", err.Error()
+				} else {
+					detail = "mode=" + execution.Mode + "; policy is read from each task's approved base before execution"
+					if execution.Mode == contract.ExecutionIsolated {
+						detail += "; backend=" + execution.Backend
+					}
+					if execution.Mode == contract.ExecutionTrustedLocal {
+						status = "WARN"
+						detail += "; workers share operator OS permissions"
+					}
+				}
+				checks = append(checks, harness.DoctorCheck{Category: "execution", Name: "mode", Status: status, Detail: detail})
+				checks = append(checks, doctorAgentChecks(cfg, !checkGHAuth, agent.Preflight)...)
+			}
 			if checkGHAuth && (strings.EqualFold(rootOpts.Backend, "github") || rootOpts.trackerOverride != nil || rootOpts.Repo != "" || hasGitRemote(repoRoot)) {
 				tr, err := rootOpts.resolveTracker(cmd)
 				if err != nil {
@@ -84,4 +106,42 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+// Check selected roles even when an agent's allowlist excludes that assignment.
+func doctorAgentChecks(cfg *contract.SwarmConfig, local bool, preflight func(string, *contract.SwarmConfig, bool, string) (string, error)) []harness.DoctorCheck {
+	var checks []harness.DoctorCheck
+	names := make([]string, 0, len(cfg.Agents))
+	for name := range cfg.Agents {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
+			selected := cfg.Roles[role]
+			if selected == "" {
+				selected = cfg.DefaultAgent
+			}
+			allowed := len(cfg.Agents[name].Roles) == 0
+			for _, permitted := range cfg.Agents[name].Roles {
+				allowed = allowed || permitted == role
+			}
+			if selected != name && !allowed {
+				continue
+			}
+			detail, err := preflight(name, cfg, local, role)
+			status := "OK"
+			if err != nil {
+				status, detail = "FAIL", err.Error()
+				if selected != name {
+					status = "OPTIONAL"
+				}
+			}
+			if selected == name {
+				detail = "selected; " + detail
+			}
+			checks = append(checks, harness.DoctorCheck{Category: "execution", Name: name + "/" + role, Status: status, Detail: detail})
+		}
+	}
+	return checks
 }

@@ -14,11 +14,14 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 type CLIAdapter struct {
+	executionMode    string
+	authentication   string
 	agentName        string
 	driver           string
 	binary           string
@@ -61,14 +64,16 @@ func (a *CLIAdapter) Provenance(role string, readOnly bool) contract.RoleAttesta
 			version = "container:" + base
 		}
 	} else {
-		version = probeHarnessVersion(a.binary)
+		// Provenance collection must never execute a configured worker binary
+		// outside its boundary, including a supposedly harmless --version probe.
+		version = "unknown"
 	}
 	model := strings.TrimSpace(a.model)
 	if model == "" {
 		model = "default"
 	}
 	boundary := "host"
-	if readOnly {
+	if readOnly || a.executionMode == contract.ExecutionIsolated {
 		if a.sandboxRuntime != "" {
 			boundary = a.sandboxRuntime
 		} else if runtime.GOOS == "darwin" {
@@ -78,6 +83,8 @@ func (a *CLIAdapter) Provenance(role string, readOnly bool) contract.RoleAttesta
 		}
 	}
 	return contract.RoleAttestation{
+		ExecutionMode:  a.executionMode,
+		Authentication: a.authentication,
 		Role:           role,
 		Agent:          agentName,
 		Harness:        harnessName,
@@ -85,53 +92,6 @@ func (a *CLIAdapter) Provenance(role string, readOnly bool) contract.RoleAttesta
 		Model:          model,
 		Sandbox:        boundary,
 	}
-}
-
-func probeHarnessVersion(binary string) string {
-	bin := strings.TrimSpace(binary)
-	if bin == "" {
-		return "unknown"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "--version")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "unknown"
-	}
-	var firstLine string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			firstLine = line
-			break
-		}
-	}
-	if firstLine == "" {
-		return "unknown"
-	}
-	var kept []string
-	for _, tok := range strings.Fields(firstLine) {
-		cleaned := strings.Trim(tok, "(),;[]\"'")
-		if cleaned == "" {
-			continue
-		}
-		if filepath.IsAbs(cleaned) || strings.HasPrefix(cleaned, "~") || strings.Contains(cleaned, `\`) {
-			continue
-		}
-		if strings.Contains(cleaned, "@") && !strings.HasPrefix(cleaned, "@") {
-			continue
-		}
-		kept = append(kept, tok)
-	}
-	sanitized := strings.TrimSpace(strings.Join(kept, " "))
-	if sanitized == "" {
-		return "unknown"
-	}
-	if len(sanitized) > 64 {
-		sanitized = strings.TrimSpace(sanitized[:64])
-	}
-	return sanitized
 }
 
 func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
@@ -170,23 +130,33 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 		}
 	case "opencode":
 		if headless {
-			args = []string{"run", combinedPrompt}
+			args = []string{"run", "--standalone", combinedPrompt}
 		} else {
-			args = []string{"--prompt", req.TaskPrompt}
+			args = []string{"mini", "--standalone", "--prompt", req.TaskPrompt}
 		}
 	default:
 		args = []string{combinedPrompt}
 	}
 	if req.Model != "" {
 		switch a.driver {
-		case "claude", "codex", "omp", "opencode":
+		case "claude", "codex", "omp":
 			args = append([]string{"--model", req.Model}, args...)
+		case "opencode":
+			args = append(args, "--model", req.Model)
 		}
 	}
 	return a.binary, append(append([]string(nil), a.prefixArgs...), args...)
 }
 
 func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
+	if a.executionMode == contract.ExecutionIsolated {
+		return a.runIsolated(ctx, req)
+	}
+	if a.driver == "opencode" && a.sandboxRuntime != "container" {
+		if _, err := sandbox.InspectDelegatedHarness(ctx, a.driver, a.binary); err != nil {
+			return nil, err
+		}
+	}
 	bin, args := a.BuildCommand(req)
 	if a.sandboxRuntime != "container" {
 		resolvedBin, err := exec.LookPath(bin)
@@ -311,10 +281,16 @@ func (m *MockRunner) Provenance(role string, readOnly bool) contract.RoleAttesta
 }
 
 func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
-	activeDir := filepath.Join(req.WorktreePath, ".swarm", "active")
-	if err := os.MkdirAll(activeDir, 0o755); err != nil {
+	safe, err := safefs.Open(req.WorktreePath)
+	if err != nil {
 		return nil, err
 	}
+	defer safe.Close()
+	active, err := safe.Sub(filepath.Join(".swarm", "active"), true, 0755)
+	if err != nil {
+		return nil, err
+	}
+	defer active.Close()
 
 	wu, _ := workspace.LoadActiveWorkUnit(req.WorktreePath)
 	title := "WorkUnit"
@@ -343,7 +319,7 @@ func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error
 		planSB.WriteString("2. Implement the requested behavior in clean, self-contained Go files.\n")
 		planSB.WriteString("3. Add unit tests verifying all acceptance criteria.\n")
 
-		if err := os.WriteFile(filepath.Join(activeDir, "PLAN.md"), []byte(planSB.String()), 0o644); err != nil {
+		if err := active.WriteFile("PLAN.md", []byte(planSB.String()), 0o644); err != nil {
 			return nil, err
 		}
 
@@ -353,7 +329,7 @@ func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error
 		for _, a := range acceptance {
 			testSB.WriteString(fmt.Sprintf("| %s | `go test ./...` |\n", a))
 		}
-		if err := os.WriteFile(filepath.Join(activeDir, "TEST_PLAN.md"), []byte(testSB.String()), 0o644); err != nil {
+		if err := active.WriteFile("TEST_PLAN.md", []byte(testSB.String()), 0o644); err != nil {
 			return nil, err
 		}
 		output = "Mock planner generated .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md"
@@ -367,7 +343,11 @@ func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error
 			verdict = "APPROVED"
 		}
 		reviewContent := fmt.Sprintf("VERDICT: %s\n\n## Plan Audit Summary\n\n- **Objective Alignment**: PASS\n- **Constraints Check**: PASS\n- **Test Plan Coverage**: PASS\n- **Protected Paths**: Unmodified\n", verdict)
-		if err := os.WriteFile(filepath.Join(activeDir, "REVIEW.md"), []byte(reviewContent), 0o644); err != nil {
+		reviewName := filepath.Join(".swarm", "active", "REVIEW.md")
+		if req.ReadOnly {
+			reviewName = filepath.Join(".swarm", "active-output", "REVIEW.md")
+		}
+		if err := safe.WriteFile(reviewName, []byte(reviewContent), 0644); err != nil {
 			return nil, err
 		}
 		output = fmt.Sprintf("Mock reviewer generated .swarm/active/REVIEW.md with VERDICT: %s", verdict)
@@ -423,11 +403,15 @@ func newVersionCmd() *cobra.Command {
 	return cmd
 }
 `
-					_ = os.WriteFile(implPath, []byte(versionCode), 0o644)
+					if err := safe.WriteFile(filepath.Join("internal", "cli", "version.go"), []byte(versionCode), 0644); err != nil {
+						return nil, err
+					}
 				}
 			} else {
 				// Fallback file in generic test repositories
-				_ = os.WriteFile(filepath.Join(req.WorktreePath, "SWARM_IMPLEMENTED.md"), []byte(fmt.Sprintf("# Implemented %s\n\n%s\n", title, objective)), 0o644)
+				if err := safe.WriteFile("SWARM_IMPLEMENTED.md", []byte(fmt.Sprintf("# Implemented %s\n\n%s\n", title, objective)), 0644); err != nil {
+					return nil, err
+				}
 			}
 			output = "Mock developer implemented planned changes"
 		}

@@ -982,10 +982,12 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	if err := m.checkApprovedState(ctx, n, st); err != nil {
 		return nil, err
 	}
-	if cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA); cfgErr == nil {
-		if !matchesCollaboratorAllowlist(actor, cfg.Security.ReviewerCollaborators) {
-			return nil, fmt.Errorf("actor %q is not in security.reviewer_collaborators", actor)
-		}
+	cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	if cfgErr != nil {
+		return nil, fmt.Errorf("load approved reviewer policy: %w", cfgErr)
+	}
+	if !matchesCollaboratorAllowlist(actor, cfg.Security.ReviewerCollaborators) {
+		return nil, fmt.Errorf("actor %q is not in security.reviewer_collaborators", actor)
 	}
 	var plan, test *contract.Artifact
 	for i := range st.Artifacts {
@@ -1000,8 +1002,11 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 		return nil, ErrApprovalRequired
 	}
 	body := "VERDICT: " + verdict + "\n\n" + notes
+	if !reviewBodyMatchesVerdict(body, verdict) {
+		return nil, fmt.Errorf("review notes contain a conflicting verdict")
+	}
 	digest := hash(body)
-	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", n), IssueNumber: n, Type: contract.ArtifactReview, Producer: "human:" + actor, Verdict: verdict, Summary: "human plan review", Body: body, CreatedAt: m.nowFn(), Metadata: map[string]string{"kind": "human", "actor": actor, "task_digest": st.TaskDigest, "policy_digest": st.PolicyDigest, "plan_digest": hash(plan.Body), "test_plan_digest": hash(test.Body), "content_sha256": digest}}
+	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", n), IssueNumber: n, Type: contract.ArtifactReview, Producer: "human:" + actor, Verdict: verdict, Summary: "human plan review", Body: body, CreatedAt: m.nowFn(), Metadata: map[string]string{"kind": "human", "actor": actor, "task_digest": st.TaskDigest, "policy_digest": st.PolicyDigest, "plan_digest": hash(plan.Body), "test_plan_digest": hash(test.Body), "content_sha256": digest, "review_source": "authenticated-human", "base_sha": st.BaseSHA}}
 	if err := contract.ValidateArtifact(&art); err != nil {
 		return nil, err
 	}
@@ -1045,6 +1050,18 @@ func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, num
 		return nil, fmt.Errorf("submission requires PR number and URL")
 	}
 	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+		issue, err := m.tracker.GetIssue(ctx, n)
+		if err != nil {
+			return err
+		}
+		wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+		if err != nil {
+			return err
+		}
+		if err := VerifyApproval(st, wu); err != nil {
+			return err
+		}
+
 		st.PRNumber = number
 		st.PRURL = url
 		st.Lease.Status = "completed"
@@ -1066,7 +1083,21 @@ func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, num
 	}
 	return st, nil
 }
+
+// UpdateAdvisoryReview records contributor feedback without granting approval authority.
+// The authenticated tracker identity, never artifact metadata, identifies its author.
+func (m *Manager) UpdateAdvisoryReview(ctx context.Context, n int, owner string, art contract.Artifact) (*IssueState, error) {
+	if art.Type != contract.ArtifactReview || art.Metadata["kind"] == "human" {
+		return nil, fmt.Errorf("advisory review requires an agent review artifact")
+	}
+	return m.updateArtifact(ctx, n, owner, art, true)
+}
+
 func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art contract.Artifact) (*IssueState, error) {
+	return m.updateArtifact(ctx, n, owner, art, false)
+}
+
+func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art contract.Artifact, advisory bool) (*IssueState, error) {
 	if m.gateway != nil {
 		artCopy := art
 		return m.gateway.Apply(ctx, ForkRequest{
@@ -1101,18 +1132,31 @@ func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art c
 			if kind != "agent" && kind != "human" {
 				return fmt.Errorf("review kind must be agent or human")
 			}
-			if art.Metadata["actor"] == "" {
-				return fmt.Errorf("review actor metadata is required")
+			actor, err := m.tracker.CurrentUser(ctx)
+			if err != nil || strings.TrimSpace(actor) == "" {
+				return fmt.Errorf("cannot authenticate review actor: %v", err)
 			}
-			if cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA); cfgErr == nil {
-				if !matchesCollaboratorAllowlist(art.Metadata["actor"], cfg.Security.ReviewerCollaborators) {
-					return fmt.Errorf("actor %q is not in security.reviewer_collaborators", art.Metadata["actor"])
+			art.Metadata["actor"] = actor
+			art.Metadata["review_source"] = "contributor"
+			if !advisory {
+				permission := "approve-task"
+				if kind == "human" {
+					permission = "review-human"
 				}
-			}
-			if kind == "human" {
-				if err := m.tracker.Authorize(ctx, "review-human"); err != nil {
+				if err := m.tracker.Authorize(ctx, permission); err != nil {
 					return err
 				}
+				cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+				if cfgErr != nil {
+					return fmt.Errorf("load approved reviewer policy: %w", cfgErr)
+				}
+				if !matchesCollaboratorAllowlist(actor, cfg.Security.ReviewerCollaborators) {
+					return fmt.Errorf("actor %q is not in security.reviewer_collaborators", actor)
+				}
+				art.Metadata["review_source"] = "authenticated-" + kind
+			}
+			if !reviewBodyMatchesVerdict(art.Body, art.Verdict) {
+				return fmt.Errorf("review body must contain one exact first-line verdict matching its verdict field")
 			}
 			var plan, test *contract.Artifact
 			for i := range st.Artifacts {
@@ -1126,10 +1170,17 @@ func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art c
 			if plan == nil || test == nil {
 				return fmt.Errorf("review requires current design and test-plan artifacts")
 			}
-			art.Metadata["task_digest"] = st.TaskDigest
-			art.Metadata["policy_digest"] = st.PolicyDigest
-			art.Metadata["plan_digest"] = hash(plan.Body)
-			art.Metadata["test_plan_digest"] = hash(test.Body)
+			bindings := ReviewBindings(st)
+			if kind == "agent" && !advisory {
+				for key, expected := range bindings {
+					if expected == "" || art.Metadata[key] != expected {
+						return fmt.Errorf("%w: reviewed inputs changed (%s)", ErrApprovalRequired, key)
+					}
+				}
+			}
+			for key, value := range bindings {
+				art.Metadata[key] = value
+			}
 		}
 		if art.Metadata == nil {
 			art.Metadata = make(map[string]string)
@@ -1158,6 +1209,8 @@ func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art c
 				agentName = harnessName
 			}
 			RecordRoleAttestation(st, contract.RoleAttestation{
+				ExecutionMode:  art.Metadata["execution_mode"],
+				Authentication: art.Metadata["authentication"],
 				Role:           role,
 				Agent:          agentName,
 				Harness:        harnessName,
@@ -1197,7 +1250,7 @@ func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art c
 				_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
 			}
 		case contract.ArtifactReview:
-			if art.Verdict == "APPROVED" {
+			if art.Verdict == "APPROVED" && !advisory {
 				if err := m.tracker.RemoveLabel(ctx, n, "swarm:plan-review"); err != nil {
 					return st, err
 				}
@@ -1268,6 +1321,30 @@ func (m *Manager) GetCurrentState(ctx context.Context, n int) (*IssueState, erro
 	st, _, err := m.load(ctx, n)
 	return st, err
 }
+
+// ReviewBindings identifies the exact coordinator snapshot a reviewer receives.
+// The publisher must return these bindings unchanged; a newer plan or lease
+// cannot inherit the verdict of a review that is still running.
+func ReviewBindings(st *IssueState) map[string]string {
+	bindings := map[string]string{}
+	if st == nil {
+		return bindings
+	}
+	bindings["task_digest"] = st.TaskDigest
+	bindings["policy_digest"] = st.PolicyDigest
+	bindings["base_sha"] = st.BaseSHA
+	bindings["review_claim_id"] = st.Lease.ClaimID
+	for _, art := range st.Artifacts {
+		switch art.Type {
+		case contract.ArtifactDesign:
+			bindings["plan_digest"] = hash(art.Body)
+		case contract.ArtifactTestPlan:
+			bindings["test_plan_digest"] = hash(art.Body)
+		}
+	}
+	return bindings
+}
+
 func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 	if st == nil || wu == nil || st.TaskDigest != contract.DigestWorkUnit(wu) {
 		return ErrApprovalRequired
@@ -1298,6 +1375,11 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 	if plan == nil || test == nil || review == nil || review.Verdict != "APPROVED" {
 		return ErrApprovalRequired
 	}
+	if review.Metadata["actor"] == "" || review.Metadata["review_source"] != "authenticated-"+review.Metadata["kind"] ||
+		review.Metadata["base_sha"] != st.BaseSHA || review.Metadata["content_sha256"] != hash(review.Body) ||
+		!reviewBodyMatchesVerdict(review.Body, review.Verdict) {
+		return ErrApprovalRequired
+	}
 	if review.Metadata["task_digest"] != st.TaskDigest || review.Metadata["policy_digest"] != st.PolicyDigest || review.Metadata["plan_digest"] != hash(plan.Body) || review.Metadata["test_plan_digest"] != hash(test.Body) {
 		return ErrApprovalRequired
 	}
@@ -1314,4 +1396,27 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 func hash(body string) string {
 	sum := sha256.Sum256([]byte(body))
 	return hex.EncodeToString(sum[:])
+}
+
+// Review bodies are machine-readable decisions followed by optional narrative.
+func reviewBodyMatchesVerdict(body, verdict string) bool {
+	if verdict != "APPROVED" && verdict != "CHANGES_REQUESTED" {
+		return false
+	}
+	seen := false
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !seen {
+			if line != "VERDICT: "+verdict {
+				return false
+			}
+			seen = true
+		} else if strings.HasPrefix(line, "VERDICT:") {
+			return false
+		}
+	}
+	return seen
 }

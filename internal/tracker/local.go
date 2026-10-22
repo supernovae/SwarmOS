@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/safefs"
 )
 
 type localState struct {
@@ -25,6 +27,7 @@ type localState struct {
 }
 
 type LocalTracker struct {
+	repoRoot         string
 	statePath        string
 	user             string
 	assoc            string
@@ -40,6 +43,7 @@ func NewLocalTracker(repoRoot string) *LocalTracker {
 		user = "local-dev"
 	}
 	return &LocalTracker{
+		repoRoot:  repoRoot,
 		statePath: filepath.Join(repoRoot, ".swarm", "local-tracker", "state.json"),
 		user:      user,
 		assoc:     "OWNER",
@@ -98,12 +102,17 @@ func (l *LocalTracker) CheckIssueType(ctx context.Context, issueType string) err
 }
 
 func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) error {
-	dir := filepath.Dir(l.statePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	base, err := safefs.Open(l.repoRoot)
+	if err != nil {
 		return err
 	}
-	lockPath := l.statePath + ".lock"
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	defer base.Close()
+	state, err := base.Sub(filepath.Join(".swarm", "local-tracker"), true, 0700)
+	if err != nil {
+		return err
+	}
+	defer state.Close()
+	lockFile, err := state.OpenLock("state.json.lock")
 	if err != nil {
 		return err
 	}
@@ -127,7 +136,11 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 		DefinedLabels: make(map[string]LabelSpec),
 	}
 
-	if data, err := os.ReadFile(l.statePath); err == nil && len(data) > 0 {
+	data, readErr := state.ReadFile("state.json", 64<<20)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return readErr
+	}
+	if len(data) > 0 {
 		if err := json.Unmarshal(data, st); err != nil {
 			return fmt.Errorf("corrupt local tracker state: %w", err)
 		}
@@ -156,7 +169,7 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 		if err != nil {
 			return err
 		}
-		return os.WriteFile(l.statePath, out, 0o644)
+		return state.WriteFile("state.json", out, 0o600)
 	}
 	return nil
 }

@@ -36,6 +36,8 @@ type cliFixture struct {
 
 func newCLIFixture(t *testing.T) *cliFixture {
 	t.Helper()
+	// This fixture intentionally runs local mock agents and validation.
+	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -459,6 +461,16 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	}
 
 	// Read-only doctor with github backend reports WARN for missing Epic type and non-maintainer without creating issues
+	cfgPath := filepath.Join(f.root, ".swarm", "config.yaml")
+	cfgBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgText := strings.Replace(string(cfgBytes), "default_agent: codex", "default_agent: mock", 1)
+	cfgText += "\n  mock:\n    binary: git\n    harness: mock\n"
+	if err := os.WriteFile(cfgPath, []byte(cfgText), 0600); err != nil {
+		t.Fatal(err)
+	}
 	mockTr := &mockDoctorTracker{
 		Tracker:     f.tracker,
 		epicTypeErr: errors.New("issue type \"Epic\" is not enabled"),
@@ -486,6 +498,7 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 }
 
 func TestForkCLISmoke(t *testing.T) {
+	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	ctx := context.Background()
 	tmp := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
@@ -910,7 +923,7 @@ func TestForkCLISmoke(t *testing.T) {
 
 	runCmd := func(opts RootOptions, args ...string) (string, error) {
 		opts.forkPollInterval = 5 * time.Millisecond
-		opts.forkPollTimeout = 2 * time.Second
+		opts.forkPollTimeout = 30 * time.Second
 		opts.forkDispatcher = dispatch
 		opts.nowFn = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 		cmd := newRootCmdWithOptions(&opts)
@@ -979,10 +992,18 @@ func TestForkCLISmoke(t *testing.T) {
 		t.Fatalf("claim output did not report fork branch %s:\n%s", expectedAliceBranch, claimOut)
 	}
 
-	// 4. Alice runs `swarm --fork work 42 --agent mock --headless`
+	// 4. Contributor review is advisory: the authenticated maintainer must
+	// approve the current plan before the contributor can resume implementation.
 	workOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "work", "42", "--agent", "mock", "--headless")
+	if !errors.Is(err, workflow.ErrPlanApprovalNeeded) {
+		t.Fatalf("expected contributor review to stop at the trusted approval gate, got %v\n%s", err, workOut)
+	}
+	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "review", "42", "--approve", "--notes", "Reviewed the contributor plan and test plan"); err != nil {
+		t.Fatalf("maintainer review failed: %v\n%s", err, out)
+	}
+	workOut, err = runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "work", "42", "--agent", "mock", "--headless", "--phase", "implement")
 	if err != nil {
-		t.Fatalf("alice --fork work 42 failed: %v\n%s", err, workOut)
+		t.Fatalf("alice --fork work 42 --phase implement after trusted approval failed: %v\n%s", err, workOut)
 	}
 	t.Logf("work output:\n%s", workOut)
 

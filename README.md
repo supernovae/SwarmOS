@@ -123,7 +123,7 @@ swarm submit 42 --backend github
 ```
 
 > [!TIP]
-> `swarm work` runs headlessly by default. Pass `--headless=false` to open an interactive terminal session inside the worktree, or pass `--backend local` to experiment in an offline local sandbox.
+> `swarm work` runs headlessly by default. Pass `--headless=false` to pair with your agent, or use `swarm node run --watch` to keep picking up approved tasks. The [worker guide](docs/developer.md#choose-how-you-work) covers permissions and execution setup, including the current offline-only isolated mode. Use `--backend local` to experiment with local coordination storage.
 
 ---
 

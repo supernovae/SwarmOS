@@ -27,6 +27,33 @@ Helpful CLI conventions:
 - **Token auth without `gh` CLI**: Set `SWARM_GITHUB_TOKEN` (or `GH_TOKEN` / `GITHUB_TOKEN`) to authenticate directly with GitHub REST and Git HTTPS remotes on headless machines without installing `gh`.
 - **Headless vs. interactive**: `swarm work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` when you want to open an interactive terminal session inside the task worktree.
 - **Structured JSON output**: Add `--json` to any lifecycle command (`issue`, `plan`, `claim`, `pull`, `work`, `stage`, `review`, `validate`, `submit`, `status`, `renew`, `release`, or `node run`) for scripts and automation.
+
+### Choose how you work
+
+Start interactively when you want to stay close to the changes. Move repeatable tasks to unattended workers once the tools and permissions are set up.
+
+| Working style | How to use it |
+| :--- | :--- |
+| **Pair with an agent** | Run `swarm work 42 --headless=false` and keep the harness's permission prompts enabled so you can approve commands as you go. |
+| **Stay in your current agent session** | Use `swarm claim` or `swarm pull`, work in the assigned worktree, and record each phase with `swarm stage`. Your existing session keeps its own permissions. |
+| **Let a worker pick up tasks** | Run `swarm work --next` for one task or `swarm node run --watch` for a continuing queue. Both run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
+
+For unattended runs, prefer narrowly allowed tools and workspace access, with approval requests disabled or denied. SwarmOS selects the harness's headless command without adding permission-bypass flags. Reserve full-access or “YOLO” settings for disposable workers with independently enforced isolation; CI alone does not provide that boundary. Ephemeral sessions help keep agent history temporary, while workspace permissions control where the agent can work.
+
+You can still pause automated work for a maintainer's plan review with `--gate human`. That checkpoint is separate from the harness's per-command permission prompts.
+
+### Choose where agents run
+
+| Execution mode | Use it for |
+| :--- | :--- |
+| **`isolated` (default)** | Workers in a configured Docker/Podman container, with separate files, credentials, and resource limits. |
+| **`trusted-local`** | Repositories and tools you trust to run under your OS account. Select it explicitly with `SWARM_EXECUTION_MODE=trusted-local` where project policy permits. |
+
+> [!NOTE]
+> Isolated execution currently supports offline workers. Provider authentication for Claude, Codex, OpenCode, and OhMyPi is still being added. For provider-backed work today, use an existing agent session with `swarm stage`, or configure `trusted-local` execution and model credentials. Existing sessions retain their own execution environment; staging records their work. SwarmOS-run validation uses the project's selected execution mode.
+
+Run `swarm doctor` and `swarm work 42 --dry-run` to check the setup before claiming work. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
+
 ---
 
 ## Agent integration runbook
@@ -40,7 +67,7 @@ Every usable coding tool is configured under `agents:` in `.swarm/config.yaml`. 
 | **[OpenAI Codex](https://learn.chatgpt.com/docs/codex/cli)** (`codex`, checked with `0.160.1`) | `codex exec <combined prompt>` | `codex <task>` |
 | **[OpenCode](https://opencode.ai/docs/)** (`opencode`, checked with `1.17.1`) | `opencode run <combined prompt>` | `opencode --prompt <task>` |
 
-When an entry sets `model: <name>`, SwarmOS passes `--model <name>` to that harness driver. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner.
+When an entry sets `model: <name>`, SwarmOS passes `--model <name>` to that harness driver. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner with explicit `trusted-local` execution.
 
 ### Grok Bot and OpenAI Dot
 
@@ -52,14 +79,14 @@ Want to work through an always-on conversational teammate in addition to local C
 
 ## Reviewer isolation and credentials
 
-During an automated agent review (`--gate agent`), SwarmOS runs the reviewer against a separate read-only snapshot of the worktree where the only imported output is `.swarm/active/REVIEW.md`:
+During an automated agent review (`--gate agent`), SwarmOS runs the reviewer against a separate read-only snapshot of the worktree where the only imported output is `.swarm/active/REVIEW.md`. In `isolated` mode, this uses the configured worker container. In `trusted-local` mode, choose a reviewer sandbox:
 
 - **macOS**: Uses `sandbox-exec` to block writes outside the temporary scratch space and review output channel.
 - **Linux**: Uses `bwrap` (`bubblewrap`) with user, IPC, PID, UTS, and default network namespace isolation. On AppArmor-enabled Linux distributions, ensure the distribution's `bwrap` AppArmor profile is installed (Ubuntu 26.04 includes this out of the box; on Ubuntu 24.04 see [LP #2069526](https://bugs.launchpad.net/ubuntu/+source/apparmor/+bug/2069526) or use an OCI container runtime).
 - **OCI Container (`sandbox: container`)**: Supported on Linux, macOS, and Windows (where no native host sandbox exists) using `docker` or `podman` with a read-only root filesystem, dropped capabilities, and explicit scratch/output mounts.
 - **Reviewer network policy**: Reviewer network access is disabled by default; set `review_network: true` on a reviewer agent entry when it needs outbound API access to reach its model provider.
 
-Agent subprocesses start with a clean temporary `HOME` and receive only the model-authentication environment variables explicitly listed in `agents.<name>.env` (publishing/SSH variables such as `GH_*`, `GITHUB_*`, `GIT_*`, and `SSH_*` remain with the `swarm` coordinator process). Planner, developer, and tester roles execute your project's build and test tools inside their assigned worktree as trusted host processes under your user account.
+In `trusted-local` mode, agent subprocesses start with a clean temporary `HOME` and receive only the model-authentication environment variables explicitly listed in `agents.<name>.env` (publishing/SSH variables such as `GH_*`, `GITHUB_*`, `GIT_*`, and `SSH_*` remain with the `swarm` coordinator process). Configure credentials through those allowed variables; your usual home-directory login and settings are not automatically loaded. Planner, developer, and tester roles execute your project's build and test tools inside their assigned worktree as host processes under your user account. Isolated workers receive no host credential variables.
 
 ---
 

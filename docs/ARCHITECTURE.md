@@ -58,11 +58,11 @@ Each claimed issue runs inside its own linked Git worktree at `.swarm/worktrees/
 
 ## 4. Process & Reviewer Isolation (`internal/sandbox/` & `internal/agent/`)
 
-SwarmOS separates ordinary code-editing roles from plan-review isolation:
+SwarmOS defaults to isolated worker containers and gives plan reviewers a read-only snapshot:
 
-- **Sandboxed Plan Reviewer**: When running the `reviewer` role, SwarmOS copies the repository into a separate immutable snapshot (rejecting symlinks that escape the root), masks the user's home directory, denies access to the live worktree, and runs the reviewer inside `sandbox-exec` (macOS), `bwrap` (Linux), or a rootless/read-only OCI container (`docker` / `podman`). Only a bounded regular `REVIEW.md` file is imported back from the run.
-- **Credential Hygiene**: All spawned agent subprocesses run with a fresh temporary `HOME` and receive only the environment variable names explicitly allowlisted in `agents.<name>.env`. Coordinator publishing tokens (`GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`) are never forwarded to agent subprocesses.
-- **Trusted Host Roles**: Planner, developer, and tester roles run your compiler, test suite, and local tools inside their worktree as host processes under your user account. See [`SECURITY.md`](../SECURITY.md) for operational guidance when running unattended worker nodes.
+- **Sandboxed Plan Reviewer**: When running the `reviewer` role, SwarmOS copies the repository into a separate immutable snapshot (rejecting symlinks that escape the root), masks the user's home directory, and denies access to the live worktree. Isolated mode uses the configured worker container; `trusted-local` uses `sandbox-exec` (macOS), `bwrap` (Linux), or a read-only OCI container (`docker` / `podman`). Only a bounded regular `REVIEW.md` file is imported back from the run.
+- **Credential Hygiene**: Spawned agents use a fresh temporary `HOME`. Isolated workers receive no host credential variables; `trusted-local` agents receive only the model credential variables explicitly allowlisted in `agents.<name>.env`. Coordinator publishing tokens (`GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`) are never forwarded to agent subprocesses.
+- **Worker Execution**: Isolated mode runs agent roles and validation in managed containers. Explicit `trusted-local` mode runs planner, developer, tester, and validation commands under your OS account. See the [worker guide](developer.md#choose-where-agents-run) for choosing a mode and [`SECURITY.md`](../SECURITY.md) for runtime requirements.
 
 ---
 

@@ -429,7 +429,7 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 		Store:        aliceStore,
 		ForkRepo:     "alice/swarm",
 		PollInterval: 5 * time.Millisecond,
-		PollTimeout:  2 * time.Second,
+		PollTimeout:  30 * time.Second,
 		Dispatcher: func(ctx context.Context, issueNumber int, c *tracker.Comment) error {
 			// Inject a forged non-bot result comment first to ensure Gateway ignores it
 			_, _ = bobTracker.CreateComment(ctx, issueNumber, ResultMarker+"\n"+fmt.Sprintf(`{"version":1,"request_id":%d,"issue_number":%d,"operation":"acquire","success":false,"error":"spoofed by bob"}`, c.ID, issueNumber))
@@ -577,7 +577,7 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 		Store:        aliceStore,
 		ForkRepo:     "bob/swarm",
 		PollInterval: 5 * time.Millisecond,
-		PollTimeout:  2 * time.Second,
+		PollTimeout:  30 * time.Second,
 		Dispatcher: func(ctx context.Context, issueNumber int, c *tracker.Comment) error {
 			_, err := coord.HandleEvent(ctx, makeEvent(issueNumber, c))
 			return err

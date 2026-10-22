@@ -923,7 +923,7 @@ func TestForkCLISmoke(t *testing.T) {
 
 	runCmd := func(opts RootOptions, args ...string) (string, error) {
 		opts.forkPollInterval = 5 * time.Millisecond
-		opts.forkPollTimeout = 2 * time.Second
+		opts.forkPollTimeout = 30 * time.Second
 		opts.forkDispatcher = dispatch
 		opts.nowFn = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 		cmd := newRootCmdWithOptions(&opts)

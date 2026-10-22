@@ -34,14 +34,12 @@ type Store interface {
 	CompareAndSwap(context.Context, int, string, []byte) (string, error)
 }
 type FileStore struct {
-	root     string
 	repoRoot string
 }
 
 func NewFileStore(root string) *FileStore {
-	return &FileStore{root: filepath.Join(root, ".swarm", "coordination"), repoRoot: root}
+	return &FileStore{repoRoot: root}
 }
-func (s *FileStore) path(n int) string { return filepath.Join(s.root, fmt.Sprintf("issue-%d.json", n)) }
 func (s *FileStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err

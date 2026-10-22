@@ -26,7 +26,7 @@ const (
 
 var (
 	nonSlugRegex     = regexp.MustCompile(`[^a-z0-9]+`)
-	activeBlockRegex = regexp.MustCompile(`(?s)<!-- swarm:active:start -->.*?<!-- swarm:active:end -->\n{0,2}`)
+	activeBlockRegex = regexp.MustCompile(`(?s)<!-- swarm:active:start -->.*?<!-- swarm:active:end -->(?:\r?\n){0,2}`)
 )
 
 func Slugify(title string) string {
@@ -440,7 +440,11 @@ func verifyUncheckpointedWorktree(wtPath, base string) error {
 				return err
 			}
 		}
-		if activeBlockRegex.ReplaceAllString(string(current), "") != expected {
+		// Git may check out Markdown with CRLF on Windows while storing LF blobs.
+		// Compare instruction content with consistent line endings; retain the
+		// original bytes when removing or refreshing the generated pointer.
+		cleaned := activeBlockRegex.ReplaceAllString(string(current), "")
+		if strings.ReplaceAll(cleaned, "\r\n", "\n") != strings.ReplaceAll(expected, "\r\n", "\n") {
 			return reject()
 		}
 		// Git ignores executable bits on Windows; on other platforms preserve them.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -106,8 +107,18 @@ func TestWorktreeExcludeRejectsSymlink(t *testing.T) {
 }
 
 func TestUncheckpointedResumeAllowsOnlyGeneratedInstructionPointers(t *testing.T) {
+	for _, autocrlf := range []string{"false", "true"} {
+		t.Run("autocrlf="+autocrlf, func(t *testing.T) {
+			testUncheckpointedInstructionPointers(t, autocrlf)
+		})
+	}
+}
+
+func testUncheckpointedInstructionPointers(t *testing.T, autocrlf string) {
+	t.Helper()
 	root := t.TempDir()
 	runWorkspaceGit(t, root, "init", "-b", "main")
+	runWorkspaceGit(t, root, "config", "core.autocrlf", autocrlf)
 	runWorkspaceGit(t, root, "config", "user.name", "Test")
 	runWorkspaceGit(t, root, "config", "user.email", "test@example.test")
 	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Original instructions.\n"), 0644); err != nil {
@@ -120,7 +131,14 @@ func TestUncheckpointedResumeAllowsOnlyGeneratedInstructionPointers(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	original, err := os.ReadFile(filepath.Join(wt, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	block := ActiveMarkerStart + "\nGenerated pointer.\n" + ActiveMarkerEnd
+	if autocrlf == "true" {
+		block = strings.ReplaceAll(block, "\n", "\r\n")
+	}
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
 		if err := injectManagedBlock(filepath.Join(wt, name), block); err != nil {
 			t.Fatal(err)
@@ -128,6 +146,13 @@ func TestUncheckpointedResumeAllowsOnlyGeneratedInstructionPointers(t *testing.T
 	}
 	if _, _, err := ProvisionAt(root, 93, "Resume pointers", base, branch, ""); err != nil {
 		t.Fatal(err)
+	}
+	if err := CleanEphemeralHarnessMarkers(wt); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err := os.ReadFile(filepath.Join(wt, "AGENTS.md"))
+	if err != nil || string(cleaned) != string(original) {
+		t.Fatalf("instruction bytes changed after pointer cleanup: %q, %v", cleaned, err)
 	}
 	if err := os.WriteFile(filepath.Join(wt, "AGENTS.md"), []byte(block+"\n\nAltered user instructions.\n"), 0644); err != nil {
 		t.Fatal(err)

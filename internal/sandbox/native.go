@@ -146,7 +146,7 @@ func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 	}
 	for _, flag := range []string{"--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check"} {
 		if !strings.Contains(help.String(), flag) {
-			return "", fmt.Errorf("Codex %s lacks required execution interface %s", qualified, flag)
+			return "", fmt.Errorf("codex %s lacks required execution interface %s", qualified, flag)
 		}
 	}
 	canary := filepath.Join(root, "coordinator-token")
@@ -186,11 +186,11 @@ printf SWARM_NATIVE_BOUNDARY_OK`
 	args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-canary", canary, port)
 	var out, diagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false), args, nil, &out, &diagnostics); err != nil {
-		return "", fmt.Errorf("Codex native boundary check failed: %w: %s", err, diagnostics.String())
+		return "", fmt.Errorf("codex native boundary check failed: %w: %s", err, diagnostics.String())
 	}
 	data, err := os.ReadFile(canary)
 	if err != nil || string(data) != "SWARM_DUMMY_CREDENTIAL" || strings.TrimSpace(out.String()) != "SWARM_NATIVE_BOUNDARY_OK" {
-		return "", fmt.Errorf("Codex native boundary check did not preserve the outside canary")
+		return "", fmt.Errorf("codex native boundary check did not preserve the outside canary")
 	}
 	return qualified, nil
 }
@@ -205,7 +205,7 @@ func CodexAuthentication(ctx context.Context, binary string) (string, error) {
 	var out process.Output
 	err = runNativeCommand(ctx, binary, os.TempDir(), nativeEnv(home, true), []string{"login", "status"}, nil, &out, &out)
 	if err != nil {
-		return "", fmt.Errorf("Codex login is unavailable; run codex login, then swarm doctor")
+		return "", fmt.Errorf("codex login is unavailable; run codex login, then swarm doctor")
 	}
 	if strings.Contains(out.String(), "Logged in using ChatGPT") {
 		return "Codex-managed ChatGPT login", nil
@@ -213,7 +213,7 @@ func CodexAuthentication(ctx context.Context, binary string) (string, error) {
 	if strings.Contains(out.String(), "Logged in using an API key") {
 		return "Codex-managed API key", nil
 	}
-	return "", fmt.Errorf("Codex login status was not recognized; run codex login")
+	return "", fmt.Errorf("codex login status was not recognized; run codex login")
 }
 
 // RunNativeCodex leaves provider authentication in the trusted Codex process.

@@ -126,7 +126,7 @@ type limitedWriter struct {
 
 func (w *limitedWriter) Write(p []byte) (int, error) {
 	if len(p) > w.remaining {
-		return 0, fmt.Errorf("Git filter configuration exceeds byte budget")
+		return 0, fmt.Errorf("git filter configuration exceeds byte budget")
 	}
 	w.remaining -= len(p)
 	return w.dst.Write(p)

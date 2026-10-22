@@ -763,7 +763,7 @@ func unpackWorker(ctx context.Context, archive, target string) (workerManifest, 
 			if err := root.MkdirAll(filepath.FromSlash(name), 0700); err != nil {
 				return nil, err
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if header.Size < 0 || header.Size > workerFileBytes || total+header.Size > workerMaxBytes {
 				return nil, fmt.Errorf("worker output byte limit exceeded")
 			}

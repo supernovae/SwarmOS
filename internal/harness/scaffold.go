@@ -733,7 +733,14 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 	}
 
 	// 2. GitHub Token / CLI Auth
-	if _, source := trackerTokenSource(); source != "" {
+	if _, source, err := gitcredential.GitHubToken(); err != nil {
+		checks = append(checks, DoctorCheck{
+			Category: "tracker",
+			Name:     "github-token",
+			Status:   "FAIL",
+			Detail:   err.Error(),
+		})
+	} else if source != "" {
 		checks = append(checks, DoctorCheck{
 			Category: "tracker",
 			Name:     "github-token",
@@ -755,7 +762,7 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 					Category: "tracker",
 					Name:     "gh-auth",
 					Status:   "WARN",
-					Detail:   "gh installed but not authenticated (set SWARM_GITHUB_TOKEN/GH_TOKEN or run gh auth login)",
+					Detail:   "gh installed but not authenticated (run gh auth login or set SWARM_GITHUB_TOKEN_COMMAND)",
 				})
 			}
 		} else {
@@ -771,7 +778,7 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 			Category: "tracker",
 			Name:     "github-auth",
 			Status:   "WARN",
-			Detail:   "no SWARM_GITHUB_TOKEN/GH_TOKEN set and gh CLI not found (local tracker still available)",
+			Detail:   "no SWARM_GITHUB_TOKEN_COMMAND/SWARM_GITHUB_TOKEN/GH_TOKEN set and gh CLI not found (local tracker still available)",
 		})
 	}
 
@@ -871,13 +878,4 @@ func mustAbs(p string) string {
 		return p
 	}
 	return abs
-}
-
-func trackerTokenSource() (string, string) {
-	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
-		if val := strings.TrimSpace(os.Getenv(key)); val != "" {
-			return val, key
-		}
-	}
-	return "", ""
 }

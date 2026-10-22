@@ -15,19 +15,17 @@ import (
 
 // Configure avoids exposing credentials in process arguments or Git config files.
 // The returned function redacts the credential from subprocess diagnostics.
-func Configure(cmd *exec.Cmd) func(string) string {
-	var token string
-	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
-		if token = strings.TrimSpace(os.Getenv(key)); token != "" {
-			break
-		}
+func Configure(cmd *exec.Cmd) (func(string) string, error) {
+	token, _, err := GitHubToken()
+	if err != nil {
+		return nil, err
 	}
 	var env []string
 	for _, item := range os.Environ() {
 		key, _, _ := strings.Cut(item, "=")
 		upper := strings.ToUpper(key)
 		if strings.HasPrefix(upper, "GIT_CONFIG_") || strings.HasPrefix(upper, "GIT_TRACE") || upper == "GIT_CURL_VERBOSE" || upper == "GIT_EXTERNAL_DIFF" || upper == "GIT_DIFF_OPTS" || upper == "GIT_REPLACE_REF_BASE" || upper == "GIT_NO_REPLACE_OBJECTS" ||
-			(token != "" && (upper == "SWARM_GITHUB_TOKEN" || upper == "GH_TOKEN" || upper == "GITHUB_TOKEN")) {
+			(token != "" && (upper == "SWARM_GITHUB_TOKEN" || upper == "GH_TOKEN" || upper == "GITHUB_TOKEN")) || upper == TokenCommandEnv {
 			continue
 		}
 		env = append(env, item)
@@ -53,7 +51,7 @@ func Configure(cmd *exec.Cmd) func(string) string {
 			output = strings.ReplaceAll(output, basic, "[REDACTED]")
 		}
 		return output
-	}
+	}, nil
 }
 
 // Command constructs a coordinator Git command. Working-tree operations disable
@@ -65,7 +63,10 @@ func Command(ctx context.Context, root string, args ...string) (*exec.Cmd, func(
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root
-	redact := Configure(cmd)
+	redact, err := Configure(cmd)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(args) == 0 {
 		return cmd, redact, nil
 	}

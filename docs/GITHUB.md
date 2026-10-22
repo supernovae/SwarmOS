@@ -10,9 +10,12 @@ SwarmOS communicates with the GitHub REST API in-process and passes token creden
 
 SwarmOS resolves credentials in the following order:
 
-1. **`SWARM_GITHUB_TOKEN`** — Dedicated token for the `swarm` coordinator process (recommended for agent nodes and role-separated collaborators).
-2. **`GH_TOKEN` / `GITHUB_TOKEN`** — Standard GitHub environment token.
-3. **`gh auth login` keyring** — Used automatically on developer laptops when no token environment variable is set.
+1. **`SWARM_GITHUB_TOKEN`**: a dedicated token for the `swarm` coordinator process (recommended for agent nodes and role-separated collaborators).
+2. **`SWARM_GITHUB_TOKEN_COMMAND`**: a command that prints the token, such as `op read …`. `swarm` runs it once and keeps the result in memory. See [Keep tokens out of your shell with a secret manager](#keep-tokens-out-of-your-shell-with-a-secret-manager).
+3. **`GH_TOKEN` / `GITHUB_TOKEN`**: the standard GitHub environment token.
+4. **`gh auth login` keyring**: used automatically on developer laptops when no token is set.
+
+Set only one of `SWARM_GITHUB_TOKEN` or `SWARM_GITHUB_TOKEN_COMMAND`. If both are present, `swarm` stops and asks you to pick one.
 
 ```bash
 # Run any SwarmOS command on a headless machine without installing gh
@@ -23,6 +26,42 @@ swarm work --next --backend github
 
 > [!NOTE]
 > SwarmOS keeps coordinator tokens (`SWARM_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `GIT_*`, `SSH_*`) inside the `swarm` parent process. Spawned agent subprocesses (`claude`, `codex`, `opencode`, `omp`) run with an isolated temporary `HOME` and receive only the model API keys listed under `agents.<name>.env` in `.swarm/config.yaml`.
+
+### Keep Tokens Out of Your Shell with a Secret Manager
+
+An exported token is copied into every program you start from that shell. It also ends up in dotfiles, `.env` files, and shell history. On Linux, any process running as your user can read another process's environment from `/proc/<pid>/environ`. That includes a coding agent running on the host. Keeping the token in a secret manager, and letting `swarm` fetch it only when it needs it, closes most of these paths.
+
+> [!TIP]
+> On a laptop, the easiest setup is `gh auth login`. The `gh` CLI keeps the token in your OS keyring (macOS Keychain, Windows Credential Manager, or libsecret on Linux), and `swarm` uses it automatically. For `git push` and `git fetch`, `swarm` also respects the credential helper you already use, such as `osxkeychain`, Git Credential Manager, `libsecret`, or `gh auth setup-git`.
+
+If you already keep secrets in a password manager, point `SWARM_GITHUB_TOKEN_COMMAND` at it. The command can be anything that prints the token on a single line. Here are some common choices:
+
+| Tool | `SWARM_GITHUB_TOKEN_COMMAND` | One-time setup |
+| :--- | :--- | :--- |
+| 1Password CLI | `op read op://Private/GitHub/swarm-token` | Store the token in a 1Password item. |
+| Bitwarden CLI | `bw get password swarm-github` | Run `bw unlock` and export `BW_SESSION` in the shell that runs `swarm`. |
+| macOS Keychain | `security find-generic-password -s swarm-github -w` | `security add-generic-password -a "$USER" -s swarm-github -w` (prompts for the token). |
+| Linux libsecret | `secret-tool lookup service swarm-github` | `secret-tool store --label="swarm GitHub token" service swarm-github` |
+| `pass` | `pass show github/swarm \| head -n 1` | `pass insert github/swarm` |
+| GitHub CLI | `gh auth token` | `gh auth login` |
+
+```bash
+export SWARM_GITHUB_TOKEN_COMMAND="op read op://Private/GitHub/swarm-token"
+swarm doctor --backend github
+swarm work --next --backend github
+```
+
+What happens:
+
+1. The first time `swarm` needs GitHub access, it runs the command through your shell (`sh -c`, or `cmd /C` on Windows). Your terminal stays attached, so 1Password, Bitwarden, or Keychain can ask you to unlock or confirm with a fingerprint.
+2. The token is held in memory for the rest of that `swarm` invocation. It is never written to disk, never passed as a command-line argument, and never shown in `swarm` diagnostics.
+3. When `git` needs to authenticate, `swarm` gives it a header scoped to `https://github.com/` through a short-lived child environment. That environment drops any `GIT_CONFIG_*`, `GIT_TRACE*`, and token variables you had set.
+4. Agent processes (`claude`, `codex`, `opencode`, `omp`) never receive the token, the command, or your shell's token variables.
+
+> [!NOTE]
+> `SWARM_GITHUB_TOKEN_COMMAND` is read only from your own environment. Nothing in `.swarm/config.yaml` can set it, so a repository you contribute to can never choose a program to run on your machine. Agents running in `trusted-local` mode still run as your user account. For work from people you don't know, use the default `isolated` [execution mode](../SECURITY.md#execution-modes), which runs agent tools against a detached task snapshot with a clean environment and their own process namespace.
+
+**Model provider keys.** Each agent CLI's own login is the best option where it's available, because it keeps the key in that tool's credential store. If an agent needs an API key from the environment, list only that key under `agents.<name>.env`. Model keys have to reach the agent that uses them, but you can still keep them out of your shell profile by injecting them for a single run, for example `op run --env-file=.env.swarm -- swarm work --next`.
 
 ---
 

@@ -32,6 +32,7 @@ The enforced controls in the Git-CAS workflow are:
 - Plan approval is bound to the current task, policy, plan, and test-plan digests. Agent approval and human approval are distinct; a human gate cannot be satisfied by an agent verdict. Contributor-supplied review artifacts cannot establish trusted agent approval.
 - Validation obtains checks and protected paths from the approved base, not the candidate worktree. A candidate cannot remove validation policy to pass.
 - Configured agents are allowlisted by name, role, executable, and optional model/arguments. `mock` is allowed only for explicit local/test use.
+- GitHub credentials stay with the coordinator. Agents receive neither the token nor `SWARM_GITHUB_TOKEN_COMMAND`. A token from that command lives only in `swarm`'s memory and the scoped Git child environment, never in argv or on disk. Only the operator's environment can set the command, never repository configuration. See [Keep tokens out of your shell](docs/GITHUB.md#keep-tokens-out-of-your-shell-with-a-secret-manager).
 
 HTML comments are stripped before parsing an issue contract. This reduces one hidden-text input path; it does **not** prevent prompt injection in visible issue text, source files, tool output, dependencies, or an agent's external context. Treat all untrusted content as data and review generated plans and changes.
 

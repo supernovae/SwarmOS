@@ -15,6 +15,7 @@ import (
 
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/cli/go-gh/v2/pkg/repository"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 )
 
 type GitHubTracker struct {
@@ -24,14 +25,9 @@ type GitHubTracker struct {
 }
 
 // ResolveGitHubToken returns the configured GitHub API token in precedence order:
-// SWARM_GITHUB_TOKEN -> GH_TOKEN -> GITHUB_TOKEN.
-func ResolveGitHubToken() (string, string) {
-	for _, key := range []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
-		if val := strings.TrimSpace(os.Getenv(key)); val != "" {
-			return val, key
-		}
-	}
-	return "", ""
+// SWARM_GITHUB_TOKEN -> SWARM_GITHUB_TOKEN_COMMAND -> GH_TOKEN -> GITHUB_TOKEN.
+func ResolveGitHubToken() (string, string, error) {
+	return gitcredential.GitHubToken()
 }
 
 func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
@@ -53,9 +49,12 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 		owner, name = r.Owner, r.Name
 	}
 
+	token, source, err := ResolveGitHubToken()
+	if err != nil {
+		return nil, err
+	}
 	var client *api.RESTClient
-	var err error
-	if token, source := ResolveGitHubToken(); token != "" && source == "SWARM_GITHUB_TOKEN" {
+	if token != "" && (source == "SWARM_GITHUB_TOKEN" || source == gitcredential.TokenCommandEnv) {
 		host := strings.TrimSpace(os.Getenv("GH_HOST"))
 		if host == "" {
 			host = "github.com"
@@ -68,7 +67,7 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 		client, err = api.DefaultRESTClient()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize GitHub REST client (set SWARM_GITHUB_TOKEN, GH_TOKEN, or GITHUB_TOKEN, or run gh auth login): %w", err)
+		return nil, fmt.Errorf("failed to initialize GitHub REST client (set SWARM_GITHUB_TOKEN_COMMAND, SWARM_GITHUB_TOKEN, or GH_TOKEN, or run gh auth login): %w", err)
 	}
 	return &GitHubTracker{
 		owner:  owner,

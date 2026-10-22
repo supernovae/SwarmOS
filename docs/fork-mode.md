@@ -120,8 +120,8 @@ git clone https://github.com/OWNER/REPO.git
 cd REPO
 gh repo fork --remote=true --remote-name=fork
 
-# 2. Export a GitHub token with public_repo (or repo + pull_requests + issues) access for your fork
-export SWARM_GITHUB_TOKEN="$(gh auth token)"
+# 2. Let swarm fetch a token with public_repo (or repo + pull_requests + issues) access when it needs one
+export SWARM_GITHUB_TOKEN_COMMAND="gh auth token"
 
 # 3. Claim an approved upstream issue via the upstream coordinator Action
 swarm --fork claim 42

@@ -12,7 +12,7 @@ Report vulnerabilities privately through [GitHub Security Advisories](https://gi
 
 SwarmOS keeps task approval, coordination state, and publication under maintainer-controlled policy. Task workers receive the execution boundary selected by that policy; the coordinator remains a trusted process.
 
-Our [execution architecture](docs/ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) builds on each supported harness's authentication, permissions, and sandbox. SwarmOS verifies the integration against repository policy and adds external isolation only for capabilities the harness cannot supply. The intended everyday workflow is to sign in to your agent normally and let SwarmOS coordinate its work.
+Our [execution architecture](docs/ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) builds on each supported harness's authentication, permissions, and sandbox. SwarmOS verifies the integration against repository policy and adds external isolation only for capabilities the harness cannot supply. For the native Codex integration, sign in normally and let SwarmOS coordinate the work.
 
 | Owner | Responsibility | How it is checked |
 | --- | --- | --- |
@@ -37,20 +37,30 @@ HTML comments are stripped before parsing an issue contract. This reduces one hi
 
 ## Execution modes
 
-This section describes the current PR implementation. Harness-native isolated execution is the architectural priority; the offline OCI path is an interim implementation, not the required setup for every future agent integration.
-
 SwarmOS has two execution modes. `isolated` is the default when no mode is configured. Choose a repository default with `execution.mode` in `.swarm/config.yaml`, or select a local mode with `SWARM_EXECUTION_MODE`. The approved base commit supplies the task's policy. Setting `security.require_isolation: true` prevents an operator from selecting `trusted-local` for that task.
 
 | Mode | Worker boundary | Setup |
 | --- | --- | --- |
-| `isolated` | Disposable OCI workers, separate from coordinator files, process environment, and credentials. Missing required capabilities block execution. | Set `execution.container_runtime` to `docker` or `podman` and `execution.container_image` to a locally available image pinned by SHA-256 digest. |
+| `isolated` | Native Codex permissions and sandbox by default; OCI when selected by repository policy. Missing required capabilities block execution. | Codex 0.163.0 on Linux, a normal `codex login`, and passing `swarm doctor` checks. |
 | `trusted-local` | Planner, developer, tester, and validation commands run with the operator's OS permissions. Reviewers retain their separate snapshot sandbox. | Select this mode explicitly for repositories and tools you trust, where approved policy permits it. |
 
-The initial isolated worker implementation supports **offline execution**. Set the selected agent's `authentication: none` only for an image that actually operates without provider credentials. Normal Claude, Codex, OpenCode, and OhMyPi login integration is not yet available in this path. The next step is to use supported harness authentication and isolation together, keeping login and session renewal with the harness. Host credential stores are not mounted or copied into the current workers. See the [remediation tracker](docs/security-remediation.md) for this usability gap and the integration plan.
+### Native Codex
 
-Isolated workers have a read-only image, no host mounts, no network, dropped capabilities, temporary storage, and fixed CPU, memory, process, and wall-time limits. Runtime preflight checks effective cgroup v2 limits and the ability to pause workers. Planner and reviewer inputs are read-only, with designated artifact outputs. Developer and tester changes return through bounded file import after the container is frozen and destroyed. Validation uses approved-base commands inside the same isolation boundary. Agent executables are resolved inside the image, rather than probed on the host.
+The trusted Codex process uses its own provider login and session renewal. Agent tools run with a named permission profile: a detached task snapshot, private scratch space, and Codex's minimal system runtime files. Live Git metadata, coordinator state, and host credential stores are outside that profile. Shell environments exclude provider and publishing tokens; tool networking is disabled. Code execution and subprocess restrictions come from Codex's Linux sandbox. SwarmOS checks outside-file, symlink, write, and loopback canaries before running work.
 
-Docker or Podman may provide this boundary on Linux, macOS, or Windows through a Linux container runtime. Each deployment must pass the capability checks. Native runtime and interactive compatibility testing across all three platforms remains part of the completion criteria; the presence of a runtime executable alone is insufficient. A failed isolated run never falls back to host execution.
+SwarmOS uses `codex exec` with user execution settings and rules ignored, disables MCP, plugins, hooks, browser tools, and subagents, and excludes `.codex` and `.agents` directories from the task snapshot. Interactive turns use the same permissions as unattended turns; requests to escalate access are denied. Planner and reviewer source is read-only, with designated artifact output. Developer/tester changes pass through bounded file import, and validation runs approved-base commands through `codex sandbox` in a disposable snapshot.
+
+Codex and its internal tool dispatcher remain trusted host-side software. The boundary protects against agent-directed tools, not a compromised harness binary or OS. Task context is sent to the chosen model through the authenticated harness; keep secrets out of task source. Native execution has a fifteen-minute phase deadline and bounded imports, but does not add OCI's CPU, memory, or disk quotas. Provider spend controls remain with the account owner.
+
+### Optional OCI backend
+
+Set `execution.backend: oci`, `execution.container_runtime` to `docker` or `podman`, and `execution.container_image` to a locally available image pinned by SHA-256 digest. Existing policies that explicitly configure container settings retain OCI selection. Conflicting native/container requirements are rejected.
+
+OCI currently supports **offline workers** with `agents.<name>.authentication: none`. Authenticated provider execution inside OCI is future work, separate from the working native Codex path. Host credential stores are never mounted or copied into these workers.
+
+OCI workers have a read-only image, no host mounts, no network, dropped capabilities, temporary storage, and fixed CPU, memory, process, and wall-time limits. Runtime preflight checks effective cgroup v2 limits and the ability to pause workers. Changes return through bounded import after the container is frozen and destroyed. Agent executables resolve inside the image. The [qualification plan](docs/security-remediation.md#real-container-qualification) covers actual Docker/Podman and cross-platform lifecycle tests.
+
+A failed isolated run never falls back to host execution. Other native harnesses and macOS/Windows require qualification before they can use the native backend.
 
 `swarm doctor` and `swarm work <issue> --dry-run` report execution setup and blockers. These checks help prepare the worker environment before acquiring work.
 

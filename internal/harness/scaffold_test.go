@@ -23,7 +23,7 @@ func TestConfigRejectsInvalidSecurityPolicy(t *testing.T) {
 		"readiness disabled": strings.Replace(string(valid), "require_ready_label: true", "require_ready_label: false", 1),
 		"unknown gate":       strings.Replace(string(valid), "default_gate: agent", "default_gate: typo", 1),
 		"nonpositive lease":  strings.Replace(string(valid), "duration: 4h", "duration: 0s", 1),
-		"unapproved default": strings.Replace(string(valid), "default_agent: claude", "default_agent: unapproved", 1),
+		"unapproved default": strings.Replace(string(valid), "default_agent: codex", "default_agent: unapproved", 1),
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -70,15 +70,26 @@ Choose the simplest supported execution path that meets the project's policy:
 
 Harnesses and their underlying OS controls are trusted dependencies. Each adapter documents its supported versions and platforms, effective permissions, tool coverage, and cancellation behavior. Focused checks cover the boundaries the project requires, including shell commands, file tools, subprocesses, and enabled MCP tools or plugins. Add an external executor only to cover a specific gap. A permission prompt alone does not establish isolation.
 
-The two user-facing modes remain `isolated` and explicit `trusted-local`. In the intended design, `isolated` describes the enforced boundary, regardless of which supported harness or runtime provides it. Normal provider login should be enough to start work. SwarmOS will not add a universal credential store, OAuth lifecycle, or model proxy.
+The two user-facing modes remain `isolated` and explicit `trusted-local`. `isolated` describes the enforced boundary, regardless of which supported harness or runtime provides it. The Codex native path uses the existing provider login. SwarmOS will not add a universal credential store, OAuth lifecycle, or model proxy.
 
-### Current implementation in PR #19
+### Implemented backend selection
 
-The branch currently implements `isolated` through offline OCI workers. Harness-native integration is unfinished, so the normal-login isolated workflow is still a release blocker. Keep the filesystem, lease, and approval fixes independently reviewable while replacing the container-first assumption with the design above. The current code provides:
+`execution.backend` defaults to `native`. The first qualified adapter is Codex 0.163.0 on Linux. SwarmOS runs the authenticated harness in the user's environment and delegates execution to Codex's native sandbox. `swarm doctor` verifies the version, login availability, and actual filesystem/network restrictions. An unsupported adapter or failed probe stops the run before claiming work.
 
-- **Sandboxed Plan Reviewer**: When running the `reviewer` role, SwarmOS copies the repository into a separate immutable snapshot (rejecting symlinks that escape the root), masks the user's home directory, and denies access to the live worktree. Isolated mode uses the configured worker container; `trusted-local` uses `sandbox-exec` (macOS), `bwrap` (Linux), or a read-only OCI container (`docker` / `podman`). Only a bounded regular `REVIEW.md` file is imported back from the run.
-- **Credential Hygiene**: Spawned agents use a fresh temporary `HOME`. Isolated workers receive no host credential variables; `trusted-local` agents receive only the model credential variables explicitly allowlisted in `agents.<name>.env`. Coordinator publishing tokens (`GH_*`, `GITHUB_*`, `GIT_*`, `SSH_*`) are never forwarded to agent subprocesses.
-- **Worker Execution**: Isolated mode runs agent roles and validation in managed containers. Explicit `trusted-local` mode runs planner, developer, tester, and validation commands under your OS account. See the [worker guide](developer.md#choose-where-agents-run) for choosing a mode and [`SECURITY.md`](../SECURITY.md) for runtime requirements.
+| Approach | Fit and tradeoff |
+| --- | --- |
+| **Trusted harness with native tool isolation — selected** | Reuses normal Codex login and session renewal. Codex enforces tool permissions; SwarmOS supplies task snapshots, runs boundary checks, and accepts bounded artifacts. The host-side harness and its internal tool dispatcher remain trusted. |
+| **Trusted harness with an external executor** | Useful when a supported delegation interface covers a missing native capability. Each adapter must cover built-in tools as well as extensions. No separate external-executor adapter is implemented yet. |
+| **Containerized harness with restricted authentication** | Useful for independently enforced isolation and resource quotas. The OCI executor is available for offline agents; provider-supported login, refresh, and revocation need qualification before authenticated use. |
+
+Codex's documented CLI permission profiles provide the first complete path without a new transport or credential service. App-server is another supported integration interface, but is unnecessary for this slice. MCP alone would leave built-in tools uncovered. See the provider's [permissions](https://learn.chatgpt.com/docs/permissions) and [app-server](https://learn.chatgpt.com/docs/app-server) documentation.
+
+- **Execution:** Codex shell and file tools use a restricted native profile. MCP, plugins, hooks, browser tools, and subagents are disabled. Validation uses the same harness's `sandbox` command without provider credentials. Interactive execution streams `codex exec` and accepts follow-up turns under the same permissions.
+- **Files and authority:** Workers receive a detached snapshot without live Git metadata, coordinator state, or autoloaded `.codex`/`.agents` directories. Planner and reviewer input is read-only. SwarmOS imports only expected role artifacts or bounded developer/tester changes, then performs the existing provenance, policy, lease, and approval checks.
+- **Credentials:** Codex opens its normal login store; SwarmOS neither reads nor copies provider tokens. Tool processes receive a clean environment and private home. Publishing credentials stay with the coordinator. Explicit `trusted-local` launches retain their existing allowlisted model-environment setup.
+- **Optional OCI:** Approved repository policy can select `execution.backend: oci`. Existing explicit container settings also retain that selection. Native execution cannot silently replace a required container boundary. See [execution modes](../SECURITY.md#execution-modes) for setup and [future work](../todo.md#oci-authentication-and-enterprise-integrations) for authenticated OCI qualification.
+
+Native capability tests cover host-file canaries, environment filtering, read-only roles, network denial, artifact import, and cancellation of a detached subprocess. The reproducible authenticated WorkUnit test exercises all four roles, interactive planning, unattended implementation, human approval, native validation, and a local Draft PR. Version expansion, macOS/Windows, provider session-expiration scenarios, and additional tool integrations remain qualification work.
 
 ---
 

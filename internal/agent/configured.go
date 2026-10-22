@@ -53,7 +53,17 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 	a := &CLIAdapter{agentName: name, driver: driver, binary: ac.Binary, prefixArgs: append([]string(nil), ac.Args...), model: ac.Model, envAllow: append([]string(nil), ac.Env...), sandboxRuntime: ac.Sandbox, reviewNetwork: ac.ReviewNetwork, containerRuntime: ac.ContainerRuntime, container: ac.ContainerImage}
 	a.executionMode = execution.Mode
 	a.authentication = ac.Authentication
-	if execution.Mode == contract.ExecutionIsolated {
+	if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
+		if driver != "codex" {
+			return nil, fmt.Errorf("agent %q: no verified isolated adapter for native %s; choose a qualified Codex agent or explicitly configure execution.backend: oci", name, driver)
+		}
+		if len(ac.Args) != 0 || len(ac.Env) != 0 || ac.ReviewNetwork || ac.Sandbox != "" || ac.ContainerRuntime != "" || ac.ContainerImage != "" || (ac.Authentication != "" && ac.Authentication != "auto") {
+			return nil, fmt.Errorf("native Codex uses harness-owned login and coordinator-selected permissions; remove args, env, sandbox, container and authentication overrides from agent %q", name)
+		}
+		a.sandboxRuntime = "codex-native"
+		a.authentication = "harness"
+	}
+	if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendOCI {
 		a.sandboxRuntime = "container"
 		a.containerRuntime, a.container = execution.ContainerRuntime, execution.ContainerImage
 		if ac.ContainerRuntime != "" {
@@ -69,10 +79,10 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 			return nil, fmt.Errorf("agent %q: isolated execution does not permit unrestricted review_network", name)
 		}
 		if len(ac.Env) != 0 {
-			return nil, fmt.Errorf("agent %q: isolated execution does not forward host environment credentials; configure a verified authentication adapter", name)
+			return nil, fmt.Errorf("agent %q: OCI execution does not forward host environment credentials; authenticated OCI support is not yet available", name)
 		}
 		if ac.Authentication != "none" {
-			return nil, fmt.Errorf("agent %q (%s): no verified isolated adapter for existing login authentication; host credential stores are never mounted. Use an offline image with authentication: none, or explicitly select trusted-local where repository policy permits", name, driver)
+			return nil, fmt.Errorf("agent %q (%s): authenticated OCI execution is not yet supported; use native Codex for existing login, or an offline OCI image with authentication: none", name, driver)
 		}
 	}
 	if a.sandboxRuntime != "container" {
@@ -101,6 +111,18 @@ func Preflight(name string, cfg *contract.SwarmConfig, local bool, role string) 
 	cr := r.(*configuredRunner)
 	if err := cr.validate(RunRequest{Role: role, Model: cr.model, Local: local}); err != nil {
 		return "", err
+	}
+	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "codex-native" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := sandbox.CheckNativeCodex(ctx, adapter.binary); err != nil {
+			return "", err
+		}
+		auth, err := sandbox.CodexAuthentication(ctx, adapter.binary)
+		if err != nil {
+			return "", err
+		}
+		return "native:codex " + sandbox.NativeCodexVersion + "; " + auth + "; filesystem/network canaries passed; MCP, plugins and hooks disabled; interactive and unattended", nil
 	}
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "container" {
 		if adapter.executionMode == contract.ExecutionIsolated {

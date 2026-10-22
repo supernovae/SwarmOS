@@ -27,6 +27,9 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 					status, detail = "FAIL", err.Error()
 				} else {
 					detail = "mode=" + execution.Mode + "; policy is read from each task's approved base before execution"
+					if execution.Mode == contract.ExecutionIsolated {
+						detail += "; backend=" + execution.Backend
+					}
 					if execution.Mode == contract.ExecutionTrustedLocal {
 						status = "WARN"
 						detail += "; workers share operator OS permissions"

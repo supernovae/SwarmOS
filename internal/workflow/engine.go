@@ -253,7 +253,17 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 		}
 	}
 	if execution.Mode == contract.ExecutionIsolated && slices.Contains(roles, "developer") && len(checks.RequiredChecks) > 0 {
-		if err := sandbox.CheckWorkerRuntime(ctx, execution.ContainerRuntime, execution.ContainerImage); err != nil {
+		var runtimeErr error
+		if execution.Backend == contract.BackendNative {
+			binary, err := sandbox.NativeValidationBinary(cfg)
+			runtimeErr = err
+			if err == nil {
+				runtimeErr = sandbox.CheckNativeCodex(ctx, binary)
+			}
+		} else {
+			runtimeErr = sandbox.CheckWorkerRuntime(ctx, execution.ContainerRuntime, execution.ContainerImage)
+		}
+		if err := runtimeErr; err != nil {
 			if !opts.InspectOnly {
 				return nil, fmt.Errorf("validation runtime preflight: %w", err)
 			}

@@ -45,44 +45,30 @@ For repositories that mirror SwarmOS's own release and security setup:
 
 ## 2. Configure Approved Agents (`.swarm/config.yaml`)
 
+Start with one Codex login for all four roles on a supported Linux worker:
+
 ```yaml
 version: 1
-default_agent: claude
+default_agent: codex
 default_gate: agent
-
 execution:
   mode: isolated
-
-roles:
-  planner: claude
-  reviewer: omp
-  developer: codex
-  tester: opencode
-
+  backend: native
 lease:
   duration: 4h
   renewable: true
   max_renewals: 3
-
 security:
   require_ready_label: true
   ready_label: swarm:ready
-
+  require_isolation: true
 agents:
-  claude:
-    binary: claude
-    roles: [planner, developer]
-  omp:
-    binary: omp
-    roles: [reviewer]
-    sandbox: sandbox-exec   # or bwrap on Linux, container with OCI runtime
   codex:
     binary: codex
-    roles: [developer]
-  opencode:
-    binary: opencode
-    roles: [tester]
+    roles: [planner, reviewer, developer, tester]
 ```
+
+Run `codex login` once on the worker, then `swarm doctor`. Native Codex uses coordinator-selected permissions; agent entries can choose a model and roles, while arbitrary `args`, environment forwarding, and sandbox overrides are rejected. For optional offline containers, select `execution.backend: oci` and follow the [OCI setup](../SECURITY.md#optional-oci-backend).
 
 How agent configuration works:
 - **Explicit allowlist**: Only entries under `agents:` can be selected. Each entry can configure `binary`, `harness` (`claude`, `codex`, `omp`, or `opencode`; defaults to the entry name), `args`, `model`, allowed `roles`, permitted `env` variables, and reviewer sandbox settings.
@@ -115,7 +101,7 @@ agents:
 
 Choose `--developer-agent codex-pair --headless=false` to pair, or `--developer-agent codex-worker` for unattended work. The worker preset keeps Codex's workspace sandbox enabled and turns off approval prompts. SwarmOS places `args` before the driver's subcommand, so use options accepted in that position. See the [Codex CLI reference](https://developers.openai.com/codex/cli/reference) for permission options.
 
-Provider authentication belongs to the harness. The current `trusted-local` launcher accepts model credential variables listed in `agents.<name>.env`; keep their values in your shell or CI secret store. Normal harness login with isolated execution is still being integrated. The [worker guide](developer.md#choose-where-agents-run) explains the available setup paths.
+Provider authentication belongs to the harness. The current `trusted-local` launcher accepts model credential variables listed in `agents.<name>.env`; keep their values in your shell or CI secret store. The native isolated path uses the existing Codex login directly, without those environment presets. The [worker guide](developer.md#choose-where-agents-run) explains the available setup paths.
 
 ---
 

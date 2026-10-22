@@ -1,9 +1,10 @@
 version: 1
-default_agent: claude
+default_agent: codex
 default_gate: agent
 plan_mode: auto
 execution:
   mode: isolated
+  backend: native
 lease:
   duration: 4h
   renewable: true

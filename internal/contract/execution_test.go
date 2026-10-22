@@ -29,3 +29,38 @@ func TestExecutionModesAndRepositoryMinimum(t *testing.T) {
 		}
 	}
 }
+
+func TestExecutionBackendSelection(t *testing.T) {
+	for _, backend := range []string{"", BackendNative, BackendOCI, "external", "host"} {
+		cfg := &SwarmConfig{Execution: ExecutionConfig{Backend: backend}}
+		e, err := ResolveExecution(cfg, "")
+		if backend == "external" || backend == "host" {
+			if err == nil {
+				t.Fatalf("accepted unimplemented backend %q", backend)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := backend
+		if want == "" {
+			want = BackendNative
+		}
+		if e.Backend != want {
+			t.Fatalf("got %q, want %q", e.Backend, want)
+		}
+	}
+}
+
+func TestContainerPolicyCannotBecomeNativeImplicitly(t *testing.T) {
+	cfg := &SwarmConfig{Execution: ExecutionConfig{ContainerRuntime: "podman", ContainerImage: "approved-image"}}
+	e, err := ResolveExecution(cfg, "")
+	if err != nil || e.Backend != BackendOCI {
+		t.Fatalf("container requirement lost: %+v, %v", e, err)
+	}
+	cfg.Execution.Backend = BackendNative
+	if _, err := ResolveExecution(cfg, ""); err == nil {
+		t.Fatal("accepted conflicting native/container requirements")
+	}
+}

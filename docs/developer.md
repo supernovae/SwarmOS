@@ -25,7 +25,7 @@ Helpful CLI conventions:
 - **Picking up the next task**: Use `swarm pull` to reserve the next eligible `swarm:ready` issue, or `swarm work --next` to claim and execute it immediately. Add `--all` with `--next` (or `swarm pull --all`) to scan across all repositories registered in `~/.config/swarm/repos.yaml`.
 - **Interactive & harness-driven staging (`swarm stage`)**: Working inside an interactive coding harness without spawning nested subprocesses? Run `swarm claim <issue>`, write `.swarm/active/PLAN.md` and `TEST_PLAN.md`, and stage each phase directly with `swarm stage <issue> --phase plan --harness <name> --model <name>` and `swarm stage <issue> --phase implement --harness <name> --model <name>`.
 - **Token auth without `gh` CLI**: Set `SWARM_GITHUB_TOKEN` (or `GH_TOKEN` / `GITHUB_TOKEN`) to authenticate directly with GitHub REST and Git HTTPS remotes on headless machines without installing `gh`.
-- **Headless vs. interactive**: `swarm work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` when you want to open an interactive terminal session inside the task worktree.
+- **Headless vs. interactive**: `swarm work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` to follow the agent's work and add instructions between turns.
 - **Structured JSON output**: Add `--json` to any lifecycle command (`issue`, `plan`, `claim`, `pull`, `work`, `stage`, `review`, `validate`, `submit`, `status`, `renew`, `release`, or `node run`) for scripts and automation.
 
 ### Choose how you work
@@ -34,25 +34,25 @@ Start interactively when you want to stay close to the changes. Move repeatable 
 
 | Working style | How to use it |
 | :--- | :--- |
-| **Pair with an agent** | Run `swarm work 42 --headless=false` and keep the harness's permission prompts enabled so you can approve commands as you go. |
+| **Pair with an agent** | Run `swarm work 42 --headless=false`. Native Codex streams its work, then accepts a follow-up instruction; press Enter to finish the phase. |
 | **Stay in your current agent session** | Use `swarm claim` or `swarm pull`, work in the assigned worktree, and record each phase with `swarm stage`. Your existing session keeps its own permissions. |
 | **Let a worker pick up tasks** | Run `swarm work --next` for one task or `swarm node run --watch` for a continuing queue. Both run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
 
-For unattended runs, prefer narrowly allowed tools and workspace access, with approval requests disabled or denied. SwarmOS selects the harness's headless command without adding permission-bypass flags. Reserve full-access or “YOLO” settings for disposable workers with independently enforced isolation; CI alone does not provide that boundary. Ephemeral sessions help keep agent history temporary, while workspace permissions control where the agent can work.
+Native Codex uses the same bounded permissions for pairing and unattended work. Allowed commands run without approval prompts; requests for broader access are denied. Each turn uses an ephemeral session, with task files carrying progress forward. For an existing agent session or `trusted-local` setup, keep the harness's approval prompts enabled when pairing. Reserve full-access or “YOLO” settings for disposable workers with independently enforced isolation; CI alone does not provide that boundary.
 
 You can still pause automated work for a maintainer's plan review with `--gate human`. That checkpoint is separate from the harness's per-command permission prompts.
 
 ### Choose where agents run
 
-SwarmOS is designed to work with your agent's normal login and security controls. The [harness-first integration](ARCHITECTURE.md#design-decision-use-the-harnesss-security-model-first) is still being completed; the modes below describe the current branch.
+SwarmOS uses your agent's normal login and security controls. The first native integration supports **Codex 0.163.0 on Linux**, using its supported permission profiles and sandbox. Install Codex, run `codex login`, then run `swarm doctor`. No extra provider credentials are needed for each role.
 
 | Execution mode | Use it for |
 | :--- | :--- |
-| **`isolated` (default)** | Workers in a configured Docker/Podman container, with separate files, credentials, and resource limits. |
+| **`isolated` (default)** | Codex's native sandbox, with task files separated from live Git state and host credentials. Set `execution.backend: oci` for the optional container backend. |
 | **`trusted-local`** | Repositories and tools you trust to run under your OS account. Select it explicitly with `SWARM_EXECUTION_MODE=trusted-local` where project policy permits. |
 
 > [!NOTE]
-> Isolated execution currently supports offline workers. Normal harness login with isolated execution is the next integration milestone. For provider-backed work today, use an existing agent session with `swarm stage`, or configure `trusted-local` execution and model credentials. Existing sessions retain their own execution environment; staging records their work. SwarmOS-run validation uses the project's selected execution mode.
+> Native Codex keeps model connectivity in the authenticated harness. Its tools have access to the task snapshot, private scratch space, and system runtime files; tool network access is disabled. Make build tools and dependencies available locally. MCP servers, plugins, hooks, and personal execution settings are disabled for this integration. Claude, OpenCode, OhMyPi, and native macOS/Windows support are next qualification steps; use an explicitly trusted setup for those harnesses today. Authenticated OCI workers are a separate roadmap item.
 
 Run `swarm doctor` and `swarm work 42 --dry-run` to check the setup before claiming work. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
 
@@ -62,11 +62,13 @@ Run `swarm doctor` and `swarm work 42 --dry-run` to check the setup before claim
 
 Every usable coding tool is configured under `agents:` in `.swarm/config.yaml`. The configuration key is the policy and audit name, while `harness` selects one of SwarmOS's four built-in CLI drivers (`claude`, `codex`, `opencode`, or `omp`; defaults to the key name when omitted).
 
+The following are the `trusted-local` CLI drivers. Native Codex uses `codex exec` with SwarmOS-selected permissions for both working styles.
+
 | Harness Driver | Headless Invocation | Interactive Invocation |
 | :--- | :--- | :--- |
 | **[Claude Code](https://code.claude.com/docs/en/setup)** (`claude`, checked with `2.1.292`) | `claude -p --append-system-prompt-file <prompt> <task>` | `claude --append-system-prompt-file <prompt> <task>` |
 | **[OhMyPi](https://github.com/can1357/oh-my-pi#install)** (`omp`, checked with `18.12.3`) | `omp -p --no-pty --append-system-prompt <prompt> <task>` | `omp --append-system-prompt <prompt> <task>` |
-| **[OpenAI Codex](https://learn.chatgpt.com/docs/codex/cli)** (`codex`, checked with `0.160.1`) | `codex exec <combined prompt>` | `codex <task>` |
+| **[OpenAI Codex](https://learn.chatgpt.com/docs/codex/cli)** (`codex`, native integration checked with `0.163.0`) | `codex exec <combined prompt>` | `codex <task>` |
 | **[OpenCode](https://opencode.ai/docs/)** (`opencode`, checked with `1.17.1`) | `opencode run <combined prompt>` | `opencode --prompt <task>` |
 
 When an entry sets `model: <name>`, SwarmOS passes `--model <name>` to that harness driver. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner with explicit `trusted-local` execution.
@@ -81,7 +83,7 @@ Want to work through an always-on conversational teammate in addition to local C
 
 ## Reviewer isolation and credentials
 
-During an automated agent review (`--gate agent`), SwarmOS runs the reviewer against a separate read-only snapshot of the worktree where the only imported output is `.swarm/active/REVIEW.md`. In `isolated` mode, this uses the configured worker container. In `trusted-local` mode, choose a reviewer sandbox:
+During an automated agent review (`--gate agent`), SwarmOS runs the reviewer against a separate read-only snapshot of the worktree where the only imported output is `.swarm/active/REVIEW.md`. In `isolated` mode, the selected native or OCI backend enforces this boundary. In `trusted-local` mode, choose a reviewer sandbox:
 
 - **macOS**: Uses `sandbox-exec` to block writes outside the temporary scratch space and review output channel.
 - **Linux**: Uses `bwrap` (`bubblewrap`) with user, IPC, PID, UTS, and default network namespace isolation. On AppArmor-enabled Linux distributions, ensure the distribution's `bwrap` AppArmor profile is installed (Ubuntu 26.04 includes this out of the box; on Ubuntu 24.04 see [LP #2069526](https://bugs.launchpad.net/ubuntu/+source/apparmor/+bug/2069526) or use an OCI container runtime).

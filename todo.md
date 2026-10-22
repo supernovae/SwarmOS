@@ -20,3 +20,21 @@ Acceptance evidence: concurrent same-owner and different-owner claims permit one
 ## Planned optimization work
 
 Beyond the implemented `--max-jobs` limit, these remain planned rather than guaranteed: wall-time/cost budgets, repository fairness, richer structured event streams, and provider capability diagnostics. Cost limits require provider usage data; elapsed time must not be represented as a cost estimate.
+
+## OCI authentication and enterprise integrations
+
+Native Codex is the everyday path. OCI remains an optional boundary for teams that need independently enforced worker isolation and resource quotas. Complete these steps before advertising provider-authenticated OCI execution:
+
+- Qualify a provider-supported login/session integration for each containerized harness, including renewal, expiry, cancellation, and revocation. Keep host credential stores and coordinator publishing tokens outside workers; avoid undocumented session-file copying or a general model proxy.
+- Define credential scope and lifetime, permitted destinations/operations, and usage limits. Document which forms of model-account misuse remain possible even when tokens are hidden.
+- Offer optional enterprise workload identity or an organization's OIDC integration where it serves a concrete deployment need. Keep provider authentication and worker identity separate.
+- Evaluate repository-installed GitHub Apps for short-lived, scoped coordination/publishing authorization. Keep GitHub App installation optional and separate from OIDC federation.
+- Run real Docker/Podman adversarial tests on Linux, macOS, and Windows: filesystem and credential access, egress, cancellation, detached processes, cgroup/resource limits, and safe artifact import. Record exact runtime and image versions.
+- Document the stronger OS/resource guarantees and residual trust in the runtime, host, harness, and provider integration. `swarm doctor` must report authenticated OCI as unavailable until qualification passes.
+
+## Native adapter qualification
+
+- Expand the tested Codex version/platform matrix, including macOS and Windows. Exercise session expiration, renewal failure, cancellation during model/tool work, and checkpoint resumption without weakening repository policy.
+- Qualify Claude's supported sandbox and permission controls with its normal login. Cover shell, file tools, hooks, MCP, and subprocesses before enabling its native adapter.
+- Qualify OpenCode and OhMyPi individually: identify supported enforcement and delegation interfaces, then test each enabled tool path. Use an external executor only for a concrete uncovered capability.
+- Add opt-in network/tool integrations and locally installed toolchain access through bounded repository policy as they are qualified. Preserve the simple default and fail closed on unsupported requirements.

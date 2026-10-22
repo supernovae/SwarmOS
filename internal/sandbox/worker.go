@@ -576,7 +576,7 @@ func workerPath(name string) (string, error) {
 	return name, nil
 }
 
-func packWorker(ctx context.Context, source, archive string, outputs []string, readOnly bool) (workerManifest, error) {
+func packWorker(ctx context.Context, source, archive string, outputs []string, readOnly bool, excludedDirectories ...string) (workerManifest, error) {
 	root, err := safefs.Open(source)
 	if err != nil {
 		return nil, err
@@ -609,6 +609,15 @@ func packWorker(ctx context.Context, source, archive string, outputs []string, r
 				return readErr
 			}
 			for _, entry := range children {
+				excluded := false
+				for _, name := range excludedDirectories {
+					if entry.Name() == name {
+						excluded = true
+					}
+				}
+				if excluded {
+					continue
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}

@@ -15,10 +15,13 @@ import (
 )
 
 func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResult, error) {
-	if a.authentication != "none" || len(a.envAllow) != 0 || a.reviewNetwork {
+	if a.sandboxRuntime != "codex-native" && (a.authentication != "none" || len(a.envAllow) != 0 || a.reviewNetwork) {
 		return nil, fmt.Errorf("isolated agent requires a verified authentication adapter and restricted networking")
 	}
 	// Agent prompt paths refer to the detached worker workspace, never a host path.
+	if req.SystemPrompt == "" {
+		req.SystemPrompt = ".swarm/active/SYSTEM_PROMPT.md"
+	}
 	if filepath.IsAbs(req.SystemPrompt) {
 		rel, err := filepath.Rel(req.WorktreePath, req.SystemPrompt)
 		if err != nil || !filepath.IsLocal(rel) {
@@ -40,13 +43,20 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	if req.ReadOnly && req.Role == "reviewer" {
 		options.OutputDir = filepath.Join(req.WorktreePath, ".swarm", "active-output")
 	}
-	err := sandbox.RunWorker(ctx, req.WorktreePath, bin, args, options, in, stdout, stderr)
+	var err error
+	command := append([]string{bin}, args...)
+	if a.sandboxRuntime == "codex-native" {
+		prompt := fmt.Sprintf("Read %s and .swarm/active/WORKUNIT.md first.\n\n%s", req.SystemPrompt, req.TaskPrompt)
+		command, err = sandbox.RunNativeCodex(ctx, req.WorktreePath, a.binary, req.Model, prompt, options, strings.EqualFold(req.Mode, "interactive"), in, stdout, stderr)
+	} else {
+		err = sandbox.RunWorker(ctx, req.WorktreePath, bin, args, options, in, stdout, stderr)
+	}
 	att := a.Provenance(req.Role, options.ReadOnly)
 	att.ExecutionMode = contract.ExecutionIsolated
-	result := &RunResult{Agent: a.agentName, Role: req.Role, Command: append([]string{bin}, args...), Output: out.String(), Attestation: att}
+	result := &RunResult{Agent: a.agentName, Role: req.Role, Command: command, Output: out.String(), Attestation: att}
 	if err != nil {
 		result.ExitCode = 1
-		return result, fmt.Errorf("isolated %s agent: %w", req.Role, err)
+		return result, fmt.Errorf("isolated %s agent: %w\n%s", req.Role, err, strings.TrimSpace(out.String()))
 	}
 	return result, nil
 }

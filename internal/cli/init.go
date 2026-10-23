@@ -23,7 +23,7 @@ func newInitCmd(rootOpts *RootOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoRoot := rootOpts.resolveRepoRoot()
-			if swarmVersion == "" && Version != "" && !strings.Contains(Version, "dev") && !strings.Contains(Version, "snapshot") {
+			if swarmVersion == "" && Version != "" && !strings.Contains(Version, "dev") && !strings.Contains(Version, "snapshot") && !strings.HasSuffix(Version, "+dirty") {
 				released := "v" + strings.TrimPrefix(Version, "v")
 				if !strings.HasPrefix(released, "v0.1.") && !strings.HasPrefix(released, "v0.0.") {
 					if !forkCoordinator || (!strings.HasPrefix(released, "v0.2.") && released != "v0.3.0") {

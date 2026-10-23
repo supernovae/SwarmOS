@@ -1180,13 +1180,17 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 		}
 	}
 
-	Version = "0.4.0-dev"
-	devRoot := t.TempDir()
-	if out, err := exec.Command("git", "-C", devRoot, "init", "-b", "main").CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v (%s)", err, out)
-	}
-	if err := runCmd(devRoot, "init", "--fork-coordinator"); err == nil {
-		t.Fatal("expected swarm init --fork-coordinator on dev build without --swarm-version to fail")
+	for _, version := range []string{"0.4.0-dev", "0.5.0+dirty"} {
+		t.Run(version, func(t *testing.T) {
+			Version = version
+			devRoot := t.TempDir()
+			if out, err := exec.Command("git", "-C", devRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v (%s)", err, out)
+			}
+			if err := runCmd(devRoot, "init", "--fork-coordinator"); err == nil {
+				t.Fatal("expected non-release build without --swarm-version to fail")
+			}
+		})
 	}
 }
 

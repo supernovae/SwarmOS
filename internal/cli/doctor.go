@@ -13,6 +13,7 @@ import (
 )
 
 func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Verify git, GitHub auth, .swarm/ contracts, and agent binaries (claude, codex, opencode, omp)",
@@ -90,14 +91,26 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 
-			out := cmd.OutOrStdout()
-			fmt.Fprintln(out, "CATEGORY   CHECK                                    STATUS   DETAIL")
-			fmt.Fprintln(out, "--------   -----                                    ------   ------")
 			failures := 0
 			for _, c := range checks {
-				fmt.Fprintf(out, "%-10s %-40s %-8s %s\n", c.Category, c.Name, c.Status, c.Detail)
 				if c.Status == "FAIL" {
 					failures++
+				}
+			}
+			if asJSON {
+				status := "passed"
+				if failures > 0 {
+					status = "failed"
+				}
+				if err := writeJSON(cmd, map[string]any{"kind": "doctor", "status": status, "checks": checks}); err != nil {
+					return err
+				}
+			} else {
+				out := cmd.OutOrStdout()
+				fmt.Fprintln(out, "CATEGORY   CHECK                                    STATUS   DETAIL")
+				fmt.Fprintln(out, "--------   -----                                    ------   ------")
+				for _, c := range checks {
+					fmt.Fprintf(out, "%-10s %-40s %-8s %s\n", c.Category, c.Name, c.Status, c.Detail)
 				}
 			}
 			if failures > 0 {
@@ -106,6 +119,7 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit doctor checks as JSON")
 	return cmd
 }
 

@@ -74,3 +74,32 @@ func TestJSONCommandsReportFailuresAsJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestUtilityCommandsEmitJSON(t *testing.T) {
+	f := newCLIFixture(t)
+	for kind, args := range map[string][]string{
+		"version":     {"version", "--json"},
+		"repo-list":   {"repo", "list", "--json"},
+		"node-init":   {"node", "init", "--id", "test-node", "--json"},
+		"node-status": {"node", "status", "--json"},
+		"repo-init":   {"repo", "init", "--json"},
+		"repo-add":    {"repo", "add", "octo/swarm", f.root, "--json"},
+	} {
+		out := f.must(t, args...)
+		var outcome map[string]any
+		if err := json.Unmarshal([]byte(out), &outcome); err != nil {
+			t.Fatalf("%v did not emit one JSON document: %v\n%s", args, err, out)
+		}
+		if outcome["kind"] != kind {
+			t.Fatalf("%v kind = %v", args, outcome["kind"])
+		}
+	}
+	out, err := f.run("repo", "doctor", "--json")
+	var doctor map[string]any
+	if decodeErr := json.Unmarshal([]byte(strings.SplitN(out, "\n", 2)[0]), &doctor); decodeErr != nil || doctor["kind"] != "doctor" {
+		t.Fatalf("doctor JSON = %v (%v)\n%s", doctor, decodeErr, out)
+	}
+	if (err != nil) != (doctor["status"] == "failed") {
+		t.Fatalf("doctor status %v disagrees with exit error %v", doctor["status"], err)
+	}
+}

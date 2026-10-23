@@ -30,13 +30,15 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 		capabilities []string
 		models       []string
 		ramOverride  string
+		profileJSON  bool
 	)
 
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "Detect host capabilities/models and register volunteer node profile (~/.config/swarm/node.yaml)",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, profileJSON, "node-init", runErr) }()
 			prof := node.DetectHostProfile(nodeID)
 			if len(capabilities) > 0 {
 				prof.Capabilities = capabilities
@@ -53,6 +55,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				return err
 			}
 
+			if profileJSON {
+				return writeJSON(cmd, map[string]any{"kind": "node-init", "status": "initialized", "path": cfgPath, "profile": prof})
+			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Initialized SwarmOS Volunteer Node profile at %s\n", cfgPath)
 			printNodeProfile(cmd, prof)
@@ -63,20 +68,27 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 	initCmd.Flags().StringSliceVar(&capabilities, "capabilities", []string{"coding", "testing", "review", "docs"}, "Node capabilities")
 	initCmd.Flags().StringSliceVar(&models, "models", nil, "Override available agent models (defaults to auto-detected claude/codex/opencode/omp)")
 	initCmd.Flags().StringVar(&ramOverride, "ram", "", "Override detected RAM (e.g., 64GB)")
+	initCmd.Flags().BoolVar(&profileJSON, "json", false, "Emit the saved node profile as JSON")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Display current volunteer node capabilities, models, and hardware resources",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, profileJSON, "node-status", runErr) }()
 			prof, err := node.LoadOrDetectProfile("")
 			if err != nil {
 				return err
+			}
+			if profileJSON {
+				return writeJSON(cmd, map[string]any{"kind": "node-status", "profile": prof})
 			}
 			printNodeProfile(cmd, prof)
 			return nil
 		},
 	}
+
+	statusCmd.Flags().BoolVar(&profileJSON, "json", false, "Emit the node profile as JSON")
 
 	var (
 		allRepos       bool

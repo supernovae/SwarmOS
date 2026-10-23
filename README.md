@@ -246,7 +246,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm fork-coordinator --event <path> [--json]` | Process a verified `issue_comment.created` fork worker request inside the upstream GitHub Action. |
 | `swarm version [--json]` | Print version, commit, and platform metadata. |
 
-Use `--json` on leaves that offer it (for example, `swarm issue create --json`, `swarm issue claim --json`, `swarm issue status --json`, and `swarm repo validate --base <sha> --json`); bare `issue` and `repo` groups do not expose JSON output. Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions.
+Every leaf command accepts `--json` for scripting (for example, `swarm issue claim --json`, `swarm issue status --json`, `swarm repo doctor --json`, and `swarm repo validate --base <sha> --json`). Each prints one JSON document with a `kind` field, and failures print `{"kind": ..., "status": "failed", "error": ...}`; the `issue`, `repo`, `pr`, and `node` groups themselves only print help. Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions.
 
 When upgrading an existing repository, install a binary with the resource-owned CLI first, then review and update the checked-in workflow, slash-command instructions, and their immutable pin together. Generated files are preserved by default; review individual changes instead of blanket `--force` scaffolding.
 

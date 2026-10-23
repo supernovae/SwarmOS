@@ -144,8 +144,7 @@ func TestCurrentPlanHumanApprovalRequired(t *testing.T) {
 func TestPRRevisionFencesIssueCheckpointAndInvalidatesApproval(t *testing.T) {
 	m, _, issue := testManager(t)
 	ctx := context.Background()
-	st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
-	if err != nil {
+	if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
 		t.Fatal(err)
 	}
 	for _, art := range []contract.Artifact{

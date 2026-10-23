@@ -547,9 +547,18 @@ func (m *Manager) trustedBase() (string, error) {
 }
 
 // AcquirePR reuses the approved WorkUnit lease for a linked PR revision.
+// Through a contributor gateway, the upstream coordinator verifies that the
+// actor owns the fork the PR's head lives in before granting the claim.
 func (m *Manager) AcquirePR(ctx context.Context, n, number int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
 	if m.gateway != nil {
-		return nil, fmt.Errorf("PR claims cannot be acquired through contributor gateway")
+		st, err := m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: n, PRNumber: number, Agent: agent, Phase: phase, Duration: duration.String()})
+		if err != nil {
+			return nil, err
+		}
+		if st != nil && st.Lease.ClaimID != "" {
+			m.BindClaim(n, st.Lease.ClaimID)
+		}
+		return st, nil
 	}
 	return m.acquire(ctx, n, number, owner, agent, phase, duration, max)
 }
@@ -1373,11 +1382,11 @@ func (m *Manager) GetCurrentState(ctx context.Context, n int) (*IssueState, erro
 // BeginPRRevision fences a new local revision without changing the submitted
 // issue checkpoint. It invalidates approval and head-dependent evidence.
 func (m *Manager) BeginPRRevision(ctx context.Context, n int, owner string, number int, remoteHead, localHead, branch string) (*IssueState, error) {
-	if m.gateway != nil {
-		return nil, fmt.Errorf("PR revisions require upstream coordination write access; --fork contributor gateway cannot publish them")
-	}
 	if number <= 0 || remoteHead == "" || localHead == "" || branch == "" {
 		return nil, fmt.Errorf("incomplete PR revision identity")
+	}
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "begin-pr-revision", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, ExpectedHeadSHA: remoteHead, HeadSHA: localHead, Branch: branch})
 	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if st.PRNumber != number {
@@ -1406,11 +1415,11 @@ func invalidatePRRevisionEvidence(st *IssueState) {
 // RecordPRHead publishes a local checkpoint to the issue coordination store,
 // not to the PR's remote head ref.
 func (m *Manager) RecordPRHead(ctx context.Context, n int, owner string, number int, branch, head string) (*IssueState, error) {
-	if m.gateway != nil {
-		return nil, fmt.Errorf("PR revisions require upstream coordination write access")
-	}
 	if branch == "" || head == "" {
 		return nil, fmt.Errorf("incomplete PR checkpoint")
+	}
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "record-pr-head", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, Branch: branch, HeadSHA: head})
 	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if st.PRRevision == nil || st.PRRevision.Number != number || st.PRRevision.Branch != branch {
@@ -1452,7 +1461,11 @@ func (m *Manager) CompletePRRevisionLocal(ctx context.Context, n int, owner stri
 
 func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, number int, expected, published string, atomicOrigin bool) (*IssueState, error) {
 	if m.gateway != nil {
-		return nil, fmt.Errorf("PR publication is not supported through contributor gateway")
+		if atomicOrigin {
+			return nil, fmt.Errorf("contributors publish PR revisions to their fork, not origin")
+		}
+		// The coordinator re-verifies the published head on GitHub before completing.
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "complete-pr-revision", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, ExpectedHeadSHA: expected, HeadSHA: published})
 	}
 	st, rev, err := m.load(ctx, n)
 	if err != nil {
@@ -1490,6 +1503,9 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 
 // InvalidatePRRevisionEvidence requires the same claim fence as execution.
 func (m *Manager) InvalidatePRRevisionEvidence(ctx context.Context, n int, owner string, number int) (*IssueState, error) {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "invalidate-pr-evidence", IssueNumber: n, ClaimID: m.token(n), PRNumber: number})
+	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if st.PRRevision == nil || st.PRRevision.Number != number {
 			return fmt.Errorf("no pending revision for PR #%d", number)

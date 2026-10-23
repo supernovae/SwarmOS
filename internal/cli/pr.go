@@ -25,8 +25,11 @@ description, and draft/ready state. GitHub applies its review rules to new commi
 
 The linked issue remains the approved contract. Updated policy requires issue
 approval, and human plan gates still require issue review-plan --approve.
-PR mutations require upstream write access; contributor-only --fork coordination
-is not supported for PR revisions. Final code review and merge remain in GitHub.`,
+Maintainers revise PRs with upstream write access. Contributors revise their own
+fork PRs with --fork: changes publish to their fork branch, and the upstream fork
+coordinator verifies fork ownership, the published head, plan approval, and
+validation before recording the revision. Final code review and merge remain in
+GitHub.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
@@ -59,9 +62,6 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				return err
 			}
 			opts.Number = number
-			if operation != "status" && rootOpts.Fork {
-				return fmt.Errorf("%s requires upstream write access; contributor-only --fork coordination does not support PR revisions", cmd.CommandPath())
-			}
 			if opts.Continue && opts.Abort {
 				return fmt.Errorf("--continue and --abort are mutually exclusive")
 			}
@@ -117,6 +117,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "PR #%d %s: issue=#%d head=%s base=%s\n", opts.Number, result.Status, result.IssueNumber, result.HeadSHA, result.BaseSHA)
 				if result.Worktree != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "Worktree: %s\nBranch: %s\n", result.Worktree, result.Branch)
+				}
+				if result.Status == pr.StatusUnverifiedHead && result.State != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "The PR head has commits pushed outside SwarmOS since verified head %s; its recorded plan, validation, and provenance describe that earlier head. Run swarm pr work %d to re-plan and re-validate.\n", result.State.HeadSHA, opts.Number)
 				}
 				if result.PR != nil {
 					fmt.Fprintln(cmd.OutOrStdout(), result.PR.HTMLURL)

@@ -136,6 +136,8 @@ func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
 		} else if pr.HeadSHA != rev.RemoteHeadSHA {
 			result.Status = StatusDiverged
 		}
+	} else if result.State.HeadSHA != "" && pr.HeadSHA != result.State.HeadSHA {
+		result.Status = StatusUnverifiedHead
 	}
 	return result, nil
 }
@@ -239,7 +241,7 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 		}
 		r.HeadSHA = head
 		r.Dirty, r.Rebasing = dirty, rebasing
-		if r.Status != StatusDiverged {
+		if r.Status != StatusDiverged && r.Status != StatusUnverifiedHead {
 			if rebasing {
 				r.Status = "rebasing"
 			} else if dirty {
@@ -263,6 +265,30 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 		}
 	}
 	return r, nil
+}
+
+// contributorRemote selects the contributor's own fork as the publish target in
+// --fork mode. The fork must be the one the issue recorded for this PR; the
+// upstream coordinator re-verifies ownership before any state changes.
+func (s *Service) contributorRemote(r *Result) (string, error) {
+	provider, ok := s.Tracker.(interface{ UpstreamRepo() string })
+	if !ok {
+		return "", fmt.Errorf("--fork PR revisions require the github backend")
+	}
+	if strings.EqualFold(r.PR.HeadRepo, provider.UpstreamRepo()) || r.State == nil || !strings.EqualFold(r.PR.HeadRepo, r.State.ForkRepo) {
+		return "", fmt.Errorf("--fork can only revise a PR whose head is in the contributor fork recorded for issue #%d", r.IssueNumber)
+	}
+	if s.ForkRemote == "" || s.ForkRemote == "origin" {
+		return "", fmt.Errorf("--fork PR revisions require --fork-remote naming your fork %s", r.PR.HeadRepo)
+	}
+	slug, err := workspace.ResolveRemoteGitHubSlug(s.Root, s.ForkRemote)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(slug, r.PR.HeadRepo) {
+		return "", fmt.Errorf("fork remote %s is %s, but PR #%d's head is in %s", s.ForkRemote, slug, r.PR.Number, r.PR.HeadRepo)
+	}
+	return s.ForkRemote, nil
 }
 
 // RecordedValidationCheck names the check synthesized from SwarmOS's own
@@ -290,7 +316,7 @@ func recordedValidationChecks(st *lease.IssueState, head string) []tracker.Check
 
 func (s *Service) remote(ctx context.Context, r *Result) (string, error) {
 	if s.Fork {
-		return "", fmt.Errorf("PR mutations need upstream write authorization; --fork contributor gateway is not supported")
+		return s.contributorRemote(r)
 	}
 	remote := ""
 	if provider, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
@@ -404,11 +430,14 @@ func withCleanPRMarkers(path string, run func() (*Result, error)) (result *Resul
 	return run()
 }
 
-// Result statuses for a pending revision whose remote head no longer matches
-// what was recorded.
+// Result statuses for a PR whose remote head no longer matches what SwarmOS
+// recorded. Unverified heads carry commits pushed outside SwarmOS since the
+// last verified submission; the next pr work revision re-plans and re-validates
+// from that head.
 const (
 	StatusDiverged         = "diverged"
 	StatusPublishedPending = "published-pending-reconciliation"
+	StatusUnverifiedHead   = "unverified-head"
 )
 
 // openForMutation resolves the linked PR and its write remote. A PR whose

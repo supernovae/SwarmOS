@@ -56,9 +56,6 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if rootOpts.Fork {
-					return fmt.Errorf("%s requires upstream write access; contributor-only --fork coordination does not support PR revisions", cmd.CommandPath())
-				}
 			} else {
 				issue, worktree, err = resolveIssueAndWorktree(root, args)
 				if err != nil {
@@ -71,7 +68,9 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			}
 			ctx := cmd.Context()
 			if prStage {
-				if tr.BackendName() != "local" {
+				// Contributors revise their own fork PRs through the coordinator,
+				// which verifies fork ownership; maintainers need upstream write.
+				if tr.BackendName() != "local" && !rootOpts.Fork {
 					if err := tr.Authorize(ctx, "approve-task"); err != nil {
 						return fmt.Errorf("upstream write authorization required: %w", err)
 					}

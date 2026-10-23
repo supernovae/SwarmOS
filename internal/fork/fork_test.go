@@ -669,4 +669,91 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	if stSubmitted.Lease.Status != "completed" || stSubmitted.PRNumber != 55 || stSubmitted.PRURL != "https://github.com/octo/swarm/pull/55" {
 		t.Fatalf("unexpected submitted state: %+v", stSubmitted)
 	}
+
+	// 9. Fork PR revisions: only the contributor whose fork holds the PR head may
+	// revise it, and completion requires the published, approved, validated head.
+	applyBob := func(req lease.ForkRequest) (*lease.IssueState, error) {
+		req.Version, req.IssueNumber = 1, 42
+		return bobGateway.Apply(ctx, req)
+	}
+	if _, err := aliceGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: 42, PRNumber: 55}); err == nil || !strings.Contains(err.Error(), "does not match authenticated user") {
+		t.Fatalf("a contributor claimed a PR whose head is in another contributor's fork: %v", err)
+	}
+	if _, err := applyBob(lease.ForkRequest{Operation: "acquire-pr", PRNumber: 56}); err == nil || !strings.Contains(err.Error(), "not a fork contribution linked") {
+		t.Fatalf("acquire-pr accepted a PR the issue does not link: %v", err)
+	}
+	stRev, err := applyBob(lease.ForkRequest{Operation: "acquire-pr", PRNumber: 55, Agent: "claude", Duration: "24h"})
+	if err != nil {
+		t.Fatalf("bob acquire-pr: %v", err)
+	}
+	if stRev.Lease.Owner != "bob" || stRev.Lease.Status != "active" || stRev.PRNumber != 55 || stRev.ForkRepo != "bob/swarm" || stRev.Lease.ExpiresAt.Sub(now) != 4*time.Hour {
+		t.Fatalf("unexpected PR revision claim: %+v (fork=%q pr=%d)", stRev.Lease, stRev.ForkRepo, stRev.PRNumber)
+	}
+	revClaim := stRev.Lease.ClaimID
+	if _, err := applyBob(lease.ForkRequest{Operation: "begin-pr-revision", ClaimID: revClaim, PRNumber: 55, ExpectedHeadSHA: baseSHA, HeadSHA: baseSHA, Branch: "swarm/pr-55"}); err == nil || !strings.Contains(err.Error(), "pull request #55 head is") {
+		t.Fatalf("begin-pr-revision accepted a head that is not the published PR head: %v", err)
+	}
+	if stRev, err = applyBob(lease.ForkRequest{Operation: "begin-pr-revision", ClaimID: revClaim, PRNumber: 55, ExpectedHeadSHA: aliceHead, HeadSHA: aliceHead, Branch: "swarm/pr-55"}); err != nil {
+		t.Fatalf("begin-pr-revision: %v", err)
+	}
+	if stRev.PRRevision == nil || len(stRev.Artifacts) != 0 {
+		t.Fatalf("revision did not start clean from the published head: %+v", stRev)
+	}
+
+	git(aliceClone, "checkout", "-q", "-b", "bob-revision", aliceHead)
+	if err := os.WriteFile(filepath.Join(aliceClone, "feature.txt"), []byte("revised after review\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(aliceClone, "commit", "-qam", "address review feedback")
+	revHead := git(aliceClone, "rev-parse", "HEAD")
+	if _, err := applyBob(lease.ForkRequest{Operation: "record-pr-head", ClaimID: revClaim, PRNumber: 55, Branch: "swarm/pr-55", HeadSHA: revHead}); err != nil {
+		t.Fatalf("record-pr-head: %v", err)
+	}
+	complete := lease.ForkRequest{Operation: "complete-pr-revision", ClaimID: revClaim, PRNumber: 55, ExpectedHeadSHA: aliceHead, HeadSHA: revHead}
+	if _, err := applyBob(complete); err == nil || !strings.Contains(err.Error(), "not the validated revision") {
+		t.Fatalf("completed a revision that was never published to the PR: %v", err)
+	}
+	git(aliceClone, "push", "-q", "bob-fork", revHead+":refs/heads/"+bobBranch)
+	ghState.mu.Lock()
+	ghState.prs[55].HeadSHA = revHead
+	ghState.mu.Unlock()
+	if _, err := applyBob(complete); !errors.Is(err, lease.ErrApprovalRequired) {
+		t.Fatalf("completed a revision without plan approval: %v", err)
+	}
+	for _, art := range []contract.Artifact{
+		{Type: contract.ArtifactDesign, Producer: "claude:planner", Summary: "Revised plan", Body: "# Revised plan\n"},
+		{Type: contract.ArtifactTestPlan, Producer: "claude:planner", Summary: "Revised tests", Body: "# Revised tests\n"},
+	} {
+		artCopy := art
+		if _, err := applyBob(lease.ForkRequest{Operation: "update-artifact", ClaimID: revClaim, Artifact: &artCopy}); err != nil {
+			t.Fatalf("record revised %s: %v", art.Type, err)
+		}
+	}
+	if _, err := maintMgr.RecordHumanReview(ctx, 42, "APPROVED", "Reviewed the revised contributor plan"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyBob(complete); err == nil || !strings.Contains(err.Error(), "no passing validation") {
+		t.Fatalf("completed an approved revision without validation: %v", err)
+	}
+	staleValidation := contract.Artifact{Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: "PASS", Summary: "ok", Body: "ok", Metadata: map[string]string{"head_sha": aliceHead}}
+	if _, err := applyBob(lease.ForkRequest{Operation: "update-artifact", ClaimID: revClaim, Artifact: &staleValidation}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyBob(complete); err == nil || !strings.Contains(err.Error(), "no passing validation") {
+		t.Fatalf("validation of an earlier head completed the revision: %v", err)
+	}
+	validation := contract.Artifact{Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: "PASS", Summary: "ok", Body: "ok", Metadata: map[string]string{"head_sha": revHead}}
+	if _, err := applyBob(lease.ForkRequest{Operation: "update-artifact", ClaimID: revClaim, Artifact: &validation}); err != nil {
+		t.Fatal(err)
+	}
+	stDone, err := applyBob(complete)
+	if err != nil {
+		t.Fatalf("complete-pr-revision: %v", err)
+	}
+	if stDone.PRRevision != nil || stDone.HeadSHA != revHead || stDone.Lease.Status != "completed" || stDone.PRNumber != 55 {
+		t.Fatalf("unexpected completed revision state: %+v", stDone)
+	}
+	if _, err := applyBob(complete); !errors.Is(err, lease.ErrClaimFence) {
+		t.Fatalf("completed revision accepted a second completion: %v", err)
+	}
 }

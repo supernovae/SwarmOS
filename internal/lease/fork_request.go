@@ -23,9 +23,11 @@ type ForkRequest struct {
 	Artifact    *contract.Artifact `json:"artifact,omitempty"`
 	Branch      string             `json:"branch,omitempty"`
 	HeadSHA     string             `json:"head_sha,omitempty"`
-	PRNumber    int                `json:"pr_number,omitempty"`
-	Reason      string             `json:"reason,omitempty"`
-	NextPhase   string             `json:"next_phase,omitempty"`
+	// ExpectedHeadSHA is the published PR head a revision starts from or replaces.
+	ExpectedHeadSHA string `json:"expected_head_sha,omitempty"`
+	PRNumber        int    `json:"pr_number,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	NextPhase       string `json:"next_phase,omitempty"`
 }
 
 // WorkerGateway forwards worker-side lease mutations in --fork mode to the

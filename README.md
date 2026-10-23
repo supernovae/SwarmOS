@@ -33,9 +33,15 @@ Single-agent coding tools are great at editing files, but coordinating several a
 | **Vendor lock-in to a single CLI** | **Multi-Agent Routing** lets you mix **Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`), and OhMyPi (`omp`)**—and coordinate from [**Grok Bot**](docs/grokbot.md) or [**OpenAI Dot**](docs/openai-dot.md). |
 | **Untested or unsafe diffs** | **Baseline Validation** runs the required checks and protected-path rules from the approved base commit before opening an artifact-backed Draft PR. |
 
-### Capabilities Introduced in v0.5.0
+### What's New in v0.6.0
 
-These capabilities remain available through the resource-owned CLI commands below:
+- **Resource-oriented CLI:** Commands are grouped by what they act on—`swarm repo`, `swarm issue`, `swarm pr`, and `swarm node`—so the same verbs (`work`, `stage`, `validate`, `submit`, `status`) mean the same thing everywhere. Every leaf command accepts `--json`.
+- **Continue existing PRs:** `swarm pr status|work|stage|rebase|validate|submit <PR>` keeps developing a submitted WorkUnit PR—failing tests, review feedback, rebases—in a separate PR worktree, and publishes only with `pr submit` against the head it started from.
+- **Fork contributors revise their own PRs:** With `--fork`, contributors address review feedback on their fork PRs through the upstream fork coordinator, which verifies fork ownership, the published head, validation, and maintainer plan approval before recording each revision. Pushes made outside SwarmOS show as `unverified-head` in `pr status`.
+- **`swarm repo init` upgrades cleanly:** Generated workflows pin themselves to the swarm you run, and rerunning init after an upgrade updates untouched generated files while keeping your edits. Init adds its own `swarm-*` workflows and a marked section in an existing `AGENTS.md`, and never edits your other files.
+- **Hardened coordination:** Long validations renew their lease, issue commands never guess between worktrees, and PR publication to origin always moves the branch and coordination state together.
+
+### Capabilities Introduced in v0.5.0
 
 - **Live work progress:** Headless `swarm issue work` reports stage transitions and a 15-second heartbeat on stderr while keeping stdout and JSON results separate. Use `--progress=false` for quiet runs.
 - **Provenance at the terminal:** `swarm issue status <issue>` shows recorded per-role harness, model, sandbox boundary, and artifact digests; `--json` includes structured provenance.
@@ -80,11 +86,13 @@ flowchart LR
 
 ### 1. Install `swarm`
 
-Once a resource-CLI-compatible release (`v0.6.0` or newer) is available, download its prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install that release with Go 1.26.10+. Until then, install from this source checkout (with Go's binary directory on your `PATH`):
+Download the prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install with Go 1.26.10+:
 
 ```bash
-go install ./cmd/swarm
+go install github.com/supernovae/swarmos/cmd/swarm@latest
 ```
+
+To build from a source checkout instead, run `go install ./cmd/swarm` with Go's binary directory on your `PATH`.
 
 `swarm repo init` pins generated CI and fork automation to the swarm you ran it with: a release installs that release, and a clean source build installs its exact commit (push that commit before CI runs). From a build with uncommitted changes, init keeps the pin your workflows already use.
 
@@ -95,7 +103,7 @@ swarm version
 swarm version --json
 ```
 
-Release binaries include the version, commit, build date, Go toolchain, and platform. Go-installed binaries report their module version. Local `go build` binaries use Go's embedded module and Git metadata, including a `+dirty` suffix for modified checkouts; their date is the source commit time. Metadata that was not embedded remains `dev`, `none`, or `unknown`. Generated automation using this CLI requires a compatible immutable release pin (`v0.6.0` or newer, including prereleases) or an explicitly selected compatible full 40-character commit SHA. Development, dirty, and older release builds are not automatically pinned.
+Release binaries include the version, commit, build date, Go toolchain, and platform. Go-installed binaries report their module version. Local `go build` binaries use Go's embedded module and Git metadata, including a `+dirty` suffix for modified checkouts; their date is the source commit time. Metadata that was not embedded remains `dev`, `none`, or `unknown`.
 
 ### 2. Initialize Your Repository
 

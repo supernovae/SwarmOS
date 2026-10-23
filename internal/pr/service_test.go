@@ -246,14 +246,10 @@ func TestPRWorkPreservesGenuineDirtyEdits(t *testing.T) {
 func TestPRWorkRelativeRootAndValidation(t *testing.T) {
 	s, _, number, _ := fixture(t)
 	absolute := s.Root
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	relative, err := filepath.Rel(cwd, absolute)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Work from the fixture's parent: on Windows the checkout and temp
+	// directories can be on different volumes, which have no relative path.
+	t.Chdir(filepath.Dir(absolute))
+	relative := filepath.Base(absolute)
 	s.Root = relative
 	result, err := s.Work(context.Background(), Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock"}})
 	if err != nil {

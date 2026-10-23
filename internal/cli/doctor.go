@@ -16,6 +16,7 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Verify git, GitHub auth, .swarm/ contracts, and agent binaries (claude, codex, opencode, omp)",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoRoot := rootOpts.resolveRepoRoot()
 			checkGHAuth := !strings.EqualFold(rootOpts.Backend, "local")

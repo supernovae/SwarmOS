@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,6 +21,8 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 	nodeCmd := &cobra.Command{
 		Use:   "node",
 		Short: "Configure and run volunteer worker nodes and parallel agent pools",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 
 	var (
@@ -32,6 +35,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "Detect host capabilities/models and register volunteer node profile (~/.config/swarm/node.yaml)",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prof := node.DetectHostProfile(nodeID)
 			if len(capabilities) > 0 {
@@ -63,6 +67,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Display current volunteer node capabilities, models, and hardware resources",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prof, err := node.LoadOrDetectProfile("")
 			if err != nil {
@@ -160,12 +165,17 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					submitOpts.Repo = pulled.Repo
 					submitOpts.RepoRoot = pulled.RepoRoot
 					submitOpts.Backend = pulled.Backend
+					// Buffer submission output so validation does not hold the
+					// shared output lock and stall other workers' reporting.
+					var submitOut, submitErr bytes.Buffer
 					submit := newSubmitCmd(&submitOpts)
-					outputMu.Lock()
-					submit.SetOut(out)
-					submit.SetErr(cmd.ErrOrStderr())
+					submit.SetOut(&submitOut)
+					submit.SetErr(&submitErr)
 					submit.SetArgs([]string{fmt.Sprint(pulled.Issue.Number)})
 					err = submit.ExecuteContext(ctx)
+					outputMu.Lock()
+					_, _ = submitOut.WriteTo(out)
+					_, _ = submitErr.WriteTo(cmd.ErrOrStderr())
 					outputMu.Unlock()
 					if err != nil {
 						return result, fmt.Errorf("automatic submission: %w", err)

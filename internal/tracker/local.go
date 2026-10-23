@@ -567,8 +567,11 @@ func (l *LocalTracker) PublishPRHead(ctx context.Context, number int, expectedHe
 			return err
 		}
 		out, err := cmd.Output()
-		if err != nil || strings.TrimSpace(string(out)) != head {
+		if err != nil {
 			return fmt.Errorf("PR head commit %s unavailable: %w", head, err)
+		}
+		if strings.TrimSpace(string(out)) != head {
+			return fmt.Errorf("PR head commit %s resolved to %s", head, strings.TrimSpace(string(out)))
 		}
 		if err := l.updatePRRef(ctx, number, head, expectedHead); err != nil {
 			return fmt.Errorf("publish local PR head: %w", err)

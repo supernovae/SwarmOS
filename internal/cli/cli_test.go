@@ -302,6 +302,9 @@ func TestCLIValidationNamespacesAndRemovedRoutes(t *testing.T) {
 		{"init"}, {"doctor"}, {"plan", "--scan"}, {"claim", n}, {"pull"}, {"work", n},
 		{"stage", n}, {"review", n}, {"validate", n}, {"submit", n}, {"status", n},
 		{"renew", n}, {"release", n}, {"issue", "pull"}, {"issue", "review", n},
+		{"repo", "bogus"}, {"node", "bogus"}, {"issue", "epic", "bogus"}, {"repo", "list", "extra"},
+		{"repo", "doctor", "extra"}, {"node", "status", "extra"}, {"version", "extra"},
+		{"issue", "stage", n, "--phase", "implement", "--handoff"}, {"pr", "stage", "1", "--phase", "implement", "--handoff"},
 	} {
 		if _, err := f.run(args...); err == nil {
 			t.Fatalf("removed route accepted: %v", args)

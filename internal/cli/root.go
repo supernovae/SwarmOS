@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -274,7 +275,15 @@ func hasGitRemote(repoRoot string) bool {
 	out, err := exec.Command("git", "-C", repoRoot, "remote").Output()
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
+
+// resolveIssueAndWorktree finds the checkout an issue command must operate on:
+// the managed worktree for the issue, or the current checkout when it holds that
+// issue's active bundle. It never guesses between several candidate worktrees.
 func resolveIssueAndWorktree(repoRoot string, args []string) (int, string, error) {
+	active := 0
+	if wu, err := workspace.LoadActiveWorkUnit(repoRoot); err == nil && wu.IssueNumber > 0 {
+		active = wu.IssueNumber
+	}
 	if len(args) > 0 {
 		num, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
 		if err != nil || num <= 0 {
@@ -284,20 +293,36 @@ func resolveIssueAndWorktree(repoRoot string, args []string) (int, string, error
 		if info, err := os.Stat(wt); err == nil && info.IsDir() {
 			return num, wt, nil
 		}
-		return num, repoRoot, nil
+		if active == num {
+			return num, repoRoot, nil
+		}
+		return 0, "", fmt.Errorf("no worktree for issue #%d at %s; claim it first with swarm issue claim %d", num, wt, num)
 	}
-	if wu, err := workspace.LoadActiveWorkUnit(repoRoot); err == nil && wu.IssueNumber > 0 {
-		return wu.IssueNumber, repoRoot, nil
+	if active > 0 {
+		return active, repoRoot, nil
 	}
 	wtRoot := filepath.Join(repoRoot, ".swarm", "worktrees")
+	var candidates []int
 	if entries, err := os.ReadDir(wtRoot); err == nil {
 		for _, e := range entries {
 			if e.IsDir() && strings.HasPrefix(e.Name(), "issue-") {
 				if num, err := strconv.Atoi(strings.TrimPrefix(e.Name(), "issue-")); err == nil && num > 0 {
-					return num, filepath.Join(wtRoot, e.Name()), nil
+					candidates = append(candidates, num)
 				}
 			}
 		}
 	}
-	return 0, repoRoot, fmt.Errorf("issue number required (or run inside an active worktree)")
+	switch len(candidates) {
+	case 0:
+		return 0, repoRoot, fmt.Errorf("issue number required (or run inside an active worktree)")
+	case 1:
+		return candidates[0], workspace.WorktreePath(repoRoot, candidates[0]), nil
+	default:
+		sort.Ints(candidates)
+		labels := make([]string, len(candidates))
+		for i, num := range candidates {
+			labels[i] = "#" + strconv.Itoa(num)
+		}
+		return 0, repoRoot, fmt.Errorf("several issue worktrees exist (%s); pass the issue number", strings.Join(labels, ", "))
+	}
 }

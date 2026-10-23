@@ -26,6 +26,8 @@ type Service struct {
 	Manager    *lease.Manager
 	Fork       bool
 	ForkRemote string
+	// Now overrides the clock used for lease expiry checks (tests).
+	Now func() time.Time
 }
 type Options struct {
 	Number       int
@@ -229,7 +231,17 @@ func (s *Service) remote(ctx context.Context, r *Result) (string, error) {
 // withClaim serializes the issue across CLI and PR commands and binds the exact
 // persisted token before any fenced operation. A completed issue is re-claimed
 // for PR work; an active issue can only be resumed by its original owner.
-func (s *Service) withClaim(ctx context.Context, r *Result, fn func(string, *lease.IssueState) (*Result, error)) (*Result, error) {
+func (s *Service) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+// withClaim runs fn under the issue's fenced claim. Long-running validation and
+// publication pass renew=true so the lease is kept alive until fn returns; the
+// workflow engine renews its own claim during pr work.
+func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, fn func(context.Context, string, *lease.IssueState) (*Result, error)) (*Result, error) {
 	lock, err := lease.LockClaim(s.Root, r.IssueNumber)
 	if err != nil {
 		return nil, err
@@ -249,14 +261,19 @@ func (s *Service) withClaim(ctx context.Context, r *Result, fn func(string, *lea
 	if st.PRNumber != r.PR.Number || (st.PRRevision != nil && st.PRRevision.RemoteHeadSHA != r.PR.HeadSHA && st.PRRevision.LocalHeadSHA != r.PR.HeadSHA) {
 		return nil, fmt.Errorf("PR coordination state changed")
 	}
-	token := ""
-	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(time.Now()) {
-		token, err = lease.LoadClaimToken(s.Root, r.IssueNumber)
+	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	duration, err := time.ParseDuration(cfg.Lease.Duration)
+	if err != nil {
+		return nil, err
+	}
+	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(s.now()) {
+		token, err := lease.LoadClaimToken(s.Root, r.IssueNumber)
 		if err != nil {
 			return nil, fmt.Errorf("load active claim: %w", err)
 		}
-	}
-	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(time.Now()) {
 		if token == "" || st.Lease.ClaimID != token {
 			return nil, lease.ErrClaimFence
 		}
@@ -265,24 +282,24 @@ func (s *Service) withClaim(ctx context.Context, r *Result, fn func(string, *lea
 			return nil, err
 		}
 	} else {
-		cfg, e := harness.LoadConfigAt(s.Root, st.BaseSHA)
-		if e != nil {
-			return nil, e
-		}
-		duration, e := time.ParseDuration(cfg.Lease.Duration)
-		if e != nil {
-			return nil, e
-		}
 		st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, "pr", "all", duration, cfg.Lease.MaxRenewals)
 		if err != nil {
 			return nil, err
 		}
-		token = st.Lease.ClaimID
-		if err = lease.SaveClaimToken(s.Root, r.IssueNumber, token); err != nil {
+		if err = lease.SaveClaimToken(s.Root, r.IssueNumber, st.Lease.ClaimID); err != nil {
 			return nil, err
 		}
 	}
-	return fn(owner, st)
+	if !renew {
+		return fn(ctx, owner, st)
+	}
+	heartbeat := s.Manager.StartHeartbeat(ctx, r.IssueNumber, owner, duration)
+	defer heartbeat.Stop()
+	result, err := fn(heartbeat.Context(), owner, st)
+	if renewErr := heartbeat.Err(); renewErr != nil {
+		return nil, errors.Join(err, fmt.Errorf("claim renewal failed: %w", renewErr))
+	}
+	return result, err
 }
 
 // withCleanPRMarkers runs only after PreparePR has verified the managed worktree.
@@ -349,7 +366,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		}
 		return r, nil
 	}
-	return s.withClaim(ctx, r, func(owner string, st *lease.IssueState) (*Result, error) {
+	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: opts.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: revisionHead(r.State), AllowHarnessMarkers: true})
 		if e != nil {
 			return nil, e
@@ -404,7 +421,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 	if !opts.Abort && r.PR.BaseSHA != r.BaseSHA {
 		return nil, fmt.Errorf("PR base tip differs from approved issue baseline: swarm issue approve %d then retry (release active claim first if needed)", r.IssueNumber)
 	}
-	return s.withClaim(ctx, r, func(owner string, st *lease.IssueState) (*Result, error) {
+	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: opts.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: revisionHead(r.State), AllowHarnessMarkers: true})
 		if e != nil {
 			return nil, e
@@ -466,7 +483,7 @@ func (s *Service) Validate(ctx context.Context, number int) (*Result, error) {
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
 	}
-	return s.withClaim(ctx, r, func(owner string, st *lease.IssueState) (*Result, error) {
+	return s.withClaim(ctx, r, true, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		if st.PRRevision == nil || st.PRRevision.Number != number {
 			return nil, fmt.Errorf("pending PR revision changed during validation")
 		}
@@ -505,6 +522,7 @@ func (s *Service) Validate(ctx context.Context, number int) (*Result, error) {
 				return nil, fmt.Errorf("PR candidate changed during validation")
 			}
 			if report != nil {
+				report.Artifact.Metadata = lease.TesterMetadata(st, report.Artifact.Metadata)
 				r.Validation = report
 				st, e = s.Manager.UpdateArtifact(ctx, r.IssueNumber, owner, report.Artifact)
 				if e != nil {
@@ -544,7 +562,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 	}
 	// Validation acquired the issue lock and released it; acquire again for the
 	// final head comparison, exact-old-head push, and coordination CAS.
-	return s.withClaim(ctx, r, func(owner string, st *lease.IssueState) (*Result, error) {
+	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		rev := st.PRRevision
 		if rev == nil || (rev.RemoteHeadSHA != r.PR.HeadSHA && rev.LocalHeadSHA != r.PR.HeadSHA) {
 			return nil, fmt.Errorf("PR revision changed during validation")
@@ -571,7 +589,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		if e != nil {
 			return nil, e
 		}
-		if fresh == nil || fresh.State != "open" || fresh.Merged || fresh.Head != r.PR.Head || fresh.HeadRepo != r.PR.HeadRepo || fresh.BaseSHA != r.BaseSHA {
+		if fresh == nil || !strings.EqualFold(fresh.State, "open") || fresh.Merged || fresh.Head != r.PR.Head || fresh.HeadRepo != r.PR.HeadRepo || fresh.BaseSHA != r.BaseSHA {
 			return nil, fmt.Errorf("PR changed remotely before publish; refusing stale head")
 		}
 		if fresh.HeadSHA != head {
@@ -603,7 +621,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 				if observeErr != nil {
 					return nil, observeErr
 				}
-				if observed == nil || observed.HeadSHA != head || observed.State != "open" || observed.Merged {
+				if observed == nil || observed.HeadSHA != head || !strings.EqualFold(observed.State, "open") || observed.Merged {
 					return nil, fmt.Errorf("PR head or state changed after publication; coordination remains pending")
 				}
 				st, e = s.Manager.CompletePRRevisionLocal(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)

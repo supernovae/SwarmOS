@@ -25,7 +25,8 @@ type issueStatus struct {
 
 func newStatusCmd(options *RootOptions) *cobra.Command {
 	var all, asJSON bool
-	cmd := &cobra.Command{Use: "status [<issue-number>]", Short: "Inspect authoritative task approvals, claims, artifacts, and submissions", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "status [<issue-number>]", Short: "Inspect authoritative task approvals, claims, artifacts, and submissions", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() { reportJSONFailure(cmd, asJSON, "status", runErr) }()
 		if all && len(args) != 0 {
 			return fmt.Errorf("--all and an issue number are mutually exclusive")
 		}
@@ -134,7 +135,8 @@ func newLeaseMutationCmd(options *RootOptions, renew bool) *cobra.Command {
 	}
 	var durationString, reason string
 	var asJSON bool
-	cmd := &cobra.Command{Use: name + " <issue-number>", Short: summary, Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: name + " <issue-number>", Short: summary, Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() { reportJSONFailure(cmd, asJSON, name, runErr) }()
 		issue, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
 		if err != nil || issue <= 0 {
 			return fmt.Errorf("invalid issue number %q", args[0])

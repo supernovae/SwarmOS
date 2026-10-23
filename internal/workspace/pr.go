@@ -78,8 +78,11 @@ func prCommit(ctx context.Context, path, sha string) error {
 		return fmt.Errorf("expected full commit SHA, got %q", sha)
 	}
 	actual, err := prGit(ctx, path, "rev-parse", "--verify", sha+"^{commit}")
-	if err != nil || !strings.EqualFold(strings.TrimSpace(actual), sha) {
+	if err != nil {
 		return fmt.Errorf("commit %s is unavailable: %w", sha, err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(actual), sha) {
+		return fmt.Errorf("commit %s resolved to %s", sha, strings.TrimSpace(actual))
 	}
 	return nil
 }

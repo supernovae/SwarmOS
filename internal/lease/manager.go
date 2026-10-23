@@ -183,6 +183,20 @@ func (m *Manager) load(ctx context.Context, n int) (*IssueState, string, error) 
 	return &st, rev, nil
 }
 func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (*IssueState, error) {
+	m.stampForSave(ctx, n, st)
+	b, err := json.Marshal(st)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = m.store.CompareAndSwap(ctx, n, rev, b); err != nil {
+		return nil, err
+	}
+	m.project(ctx, n, st)
+	return st, nil
+}
+
+// stampForSave fills bookkeeping fields every persisted state carries.
+func (m *Manager) stampForSave(ctx context.Context, n int, st *IssueState) {
 	if st.ProjectionCommentID == 0 {
 		if existingID := m.findProjectionCommentID(ctx, n); existingID > 0 {
 			st.ProjectionCommentID = existingID
@@ -193,15 +207,6 @@ func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (
 			st.LastForkRequestID = reqID
 		}
 	}
-	b, err := json.Marshal(st)
-	if err != nil {
-		return nil, err
-	}
-	if _, err = m.store.CompareAndSwap(ctx, n, rev, b); err != nil {
-		return nil, err
-	}
-	m.project(ctx, n, st)
-	return st, nil
 }
 
 func (m *Manager) findProjectionCommentID(ctx context.Context, n int) int64 {
@@ -633,7 +638,9 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if !known {
 		contributors = append(contributors, owner)
 	}
-	if st.ForkRepo != "" {
+	// A fresh issue claim replaces a fork contributor's checkpoint. PR work keeps
+	// the PR link and its head repository so the revision can be published there.
+	if st.ForkRepo != "" && prNumber == 0 {
 		clearCheckpointAndHeadArtifacts(st)
 		st.ForkRepo = ""
 	}
@@ -662,6 +669,7 @@ func clearCheckpointAndHeadArtifacts(st *IssueState) {
 	st.HeadSHA = ""
 	st.PRNumber = 0
 	st.PRURL = ""
+	st.PRRevision = nil
 	var keptArtifacts []contract.Artifact
 	for _, a := range st.Artifacts {
 		if a.Type == contract.ArtifactDesign || a.Type == contract.ArtifactTestPlan || a.Type == contract.ArtifactReview {
@@ -713,6 +721,9 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		st, rev, err := m.load(ctx, issue)
 		if err != nil {
 			return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
+		}
+		if st.PRRevision != nil {
+			return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", issue, st.PRRevision.Number)
 		}
 		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
 		if err != nil {
@@ -1168,7 +1179,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			}
 			actor, err := m.tracker.CurrentUser(ctx)
 			if err != nil || strings.TrimSpace(actor) == "" {
-				return fmt.Errorf("cannot authenticate review actor: %v", err)
+				return fmt.Errorf("cannot authenticate review actor: %w", err)
 			}
 			art.Metadata["actor"] = actor
 			art.Metadata["review_source"] = "contributor"
@@ -1458,7 +1469,12 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 	st.HeadSHA = published
 	st.Lease.Status = "completed"
 	st.Lease.Phase = "submitted"
-	if ps, ok := m.store.(coordination.ExpectedPRPublishingStore); ok && atomicOrigin {
+	if atomicOrigin {
+		ps, ok := m.store.(coordination.ExpectedPRPublishingStore)
+		if !ok {
+			return nil, fmt.Errorf("origin PR publication requires a coordination store that publishes the PR head atomically")
+		}
+		m.stampForSave(ctx, n, st)
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return nil, err
@@ -1481,6 +1497,19 @@ func (m *Manager) InvalidatePRRevisionEvidence(ctx context.Context, n int, owner
 		invalidatePRRevisionEvidence(st)
 		return nil
 	})
+}
+
+// TesterMetadata adds the recorded tester attestation, if any, to a validation
+// artifact's metadata so every validation path reports the same provenance.
+func TesterMetadata(st *IssueState, base map[string]string) map[string]string {
+	if st != nil {
+		for _, att := range st.Attestations {
+			if att.Role == "tester" {
+				return att.Metadata(base)
+			}
+		}
+	}
+	return base
 }
 
 // ReviewBindings identifies the exact coordinator snapshot a reviewer receives.

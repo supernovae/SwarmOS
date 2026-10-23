@@ -20,7 +20,8 @@ and plan digests. This command does not review a finished PR or check off its
 acceptance criteria; final code and acceptance review happens in GitHub after
 issue submit opens the linked draft PR.`,
 		Args: cobra.ExactArgs(1),
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON && (approve || reject), "review", runErr) }()
 			if approve && reject {
 				return fmt.Errorf("--approve and --reject are mutually exclusive")
 			}
@@ -87,7 +88,7 @@ issue submit opens the linked draft PR.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&agentName, "agent", "", "Configured reviewer override")
+	cmd.Flags().StringVar(&agentName, "agent", "", "Configured agent for the reviewer role (overrides roles.reviewer)")
 	cmd.Flags().BoolVar(&approve, "approve", false, "Record an authenticated human approval")
 	cmd.Flags().BoolVar(&reject, "reject", false, "Record an authenticated human rejection")
 	cmd.Flags().StringVar(&notes, "notes", "", "Human decision notes")

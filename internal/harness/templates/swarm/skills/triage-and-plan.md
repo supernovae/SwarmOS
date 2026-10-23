@@ -25,7 +25,7 @@ Use this skill when running `/swarm-project-plan` (in Claude Code or OpenCode) o
 - `swarm:draft`: Valid structured `WorkUnit` awaiting maintainer review and `swarm issue approve <N>`.
 - `swarm:needs-scope`: Raw or imported issue missing structured `Objective`, `Constraints`, or `Acceptance Criteria` sections.
 - `swarm:blocked`: Issue waiting on open `depends_on` prerequisites or protected-path policy review.
-- `swarm:ready`: Maintainer-approved immutable `WorkUnit` ready for agents to claim (`swarm issue claim` or `swarm issue claim --next`).
+- `swarm:ready`: Maintainer-approved immutable `WorkUnit` ready for agents to claim (`swarm issue claim --next` or `swarm issue work --next`).
 
 ## 3. Decomposition & Sense-Making Checklist
 

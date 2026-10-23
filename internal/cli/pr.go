@@ -85,7 +85,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := pr.Service{Root: rootOpts.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote()}
+			service := pr.Service{Root: rootOpts.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(), Now: rootOpts.now}
 			if operation == "work" && opts.Work.Headless && progress && !opts.Work.InspectOnly {
 				opts.Work.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
 			}
@@ -168,7 +168,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 		cmd.Flags().StringVar(&gate, "gate", "", "Require gate none, agent, or human; cannot weaken policy")
 		cmd.Flags().StringVar(&opts.Instructions, "instructions", "", "Development instructions within the approved WorkUnit scope")
 		cmd.Flags().BoolVar(&opts.Work.Headless, "headless", true, "Run agents non-interactively (false requires a terminal)")
-		cmd.Flags().BoolVar(&opts.Work.InspectOnly, "dry-run", false, "Inspect the linked task and execution policy without changing state")
+		cmd.Flags().BoolVar(&opts.Work.InspectOnly, "dry-run", false, "Print the linked task and execution policy as JSON without changing state")
 		cmd.Flags().BoolVar(&progress, "progress", true, "Report headless progress on stderr")
 	}
 	if operation == "rebase" {

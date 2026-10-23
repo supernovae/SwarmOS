@@ -130,7 +130,7 @@ func TestLinkedPRIdentityAndPendingState(t *testing.T) {
 func TestPRRevisionCannotPublishViaIssueCheckpoint(t *testing.T) {
 	s, issue, number, base := fixture(t)
 	ctx := context.Background()
-	r, e := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, func(owner string, st *lease.IssueState) (*Result, error) {
+	r, e := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		if st.PRNumber != number {
 			t.Fatalf("incorrect claim identity: %+v", st)
 		}

@@ -16,8 +16,13 @@ func TestGitHubPRStateAndBaseMetadata(t *testing.T) {
 	draft := false
 	merged := false
 	targetMissing := false
+	baseRef := "main"
 	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/repos/octo/swarm/git/ref/heads/main" {
+		if strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/git/ref/heads/") {
+			if r.URL.EscapedPath() != "/repos/octo/swarm/git/ref/heads/"+baseRef {
+				http.Error(w, "unexpected ref path "+r.URL.EscapedPath(), http.StatusNotFound)
+				return
+			}
 			if targetMissing {
 				http.Error(w, "target deleted", http.StatusNotFound)
 			} else {
@@ -27,12 +32,17 @@ func TestGitHubPRStateAndBaseMetadata(t *testing.T) {
 		}
 		writeJSON(t, w, map[string]any{"number": 55, "state": state, "draft": draft, "merged": merged,
 			"head": map[string]any{"ref": "feature", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": map[string]any{"full_name": "octo/swarm"}},
-			"base": map[string]any{"ref": "main", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "repo": map[string]any{"full_name": "octo/swarm"}}})
+			"base": map[string]any{"ref": baseRef, "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "repo": map[string]any{"full_name": "octo/swarm"}}})
 	}))
 	pr, err := tr.GetPullRequest(context.Background(), 55)
 	if err != nil || pr.State != "open" || pr.Draft || pr.Merged || pr.BaseSHA != "cccccccccccccccccccccccccccccccccccccccc" {
 		t.Fatalf("open ready PR: %+v %v", pr, err)
 	}
+	baseRef = "release/1.0"
+	if pr, err = tr.GetPullRequest(context.Background(), 55); err != nil || pr.BaseSHA != "cccccccccccccccccccccccccccccccccccccccc" {
+		t.Fatalf("PR targeting a nested branch: %+v %v", pr, err)
+	}
+	baseRef = "main"
 	targetMissing = true
 	if _, err := tr.GetPullRequest(context.Background(), 55); err == nil {
 		t.Fatal("missing target branch fell back to the stale PR base snapshot")

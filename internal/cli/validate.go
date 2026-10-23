@@ -36,6 +36,9 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if owner == "" {
+			return fmt.Errorf("authenticated claim owner required")
+		}
 		claim, err := lease.LoadClaimToken(root, issue)
 		if err != nil {
 			return err
@@ -72,35 +75,18 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		renewed, stop := maintainClaim(ctx, manager, issue, owner, duration)
-		defer stop()
-		ctx = renewed
+		heartbeat := manager.StartHeartbeat(ctx, issue, owner, duration)
+		defer heartbeat.Stop()
+		ctx = heartbeat.Context()
 		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork})
 		if report != nil {
-			if state != nil {
-				for _, att := range state.Attestations {
-					if att.Role == "tester" {
-						if report.Artifact.Metadata == nil {
-							report.Artifact.Metadata = make(map[string]string)
-						}
-						report.Artifact.Metadata["role"] = "tester"
-						report.Artifact.Metadata["agent"] = att.Agent
-						report.Artifact.Metadata["harness"] = att.Harness
-						report.Artifact.Metadata["harness_version"] = att.HarnessVersion
-						report.Artifact.Metadata["execution_mode"] = att.ExecutionMode
-						report.Artifact.Metadata["authentication"] = att.Authentication
-						report.Artifact.Metadata["model"] = att.Model
-						report.Artifact.Metadata["sandbox"] = att.Sandbox
-						break
-					}
-				}
-			}
+			report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 			_, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact)
 			validationErr = errors.Join(validationErr, err)
 		}
 		return writeValidationOutcome(cmd, report, validationErr, asJSON)
 	}}
-	cmd.Flags().StringVar(&baseSHA, "base", "", "Approved immutable task base SHA")
+	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted base commit SHA; must equal the issue's approved base (defaults to it)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured validation outcome")
 	return cmd
 }
@@ -115,7 +101,7 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, BaseSHA: baseSHA, ForkMode: options.Fork})
 		return writeValidationOutcome(cmd, report, err, asJSON)
 	}}
-	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted full immutable base commit SHA")
+	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted full base commit SHA to validate against (required)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured validation outcome")
 	return cmd
 }

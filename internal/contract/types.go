@@ -186,6 +186,30 @@ type RoleAttestation struct {
 	ArtifactDigest string `yaml:"artifact_digest,omitempty" json:"artifact_digest,omitempty"`
 }
 
+// Metadata returns base extended with the attestation's nonempty provenance
+// fields, in the key format artifacts record.
+func (a RoleAttestation) Metadata(base map[string]string) map[string]string {
+	m := make(map[string]string, len(base)+8)
+	for k, v := range base {
+		m[k] = v
+	}
+	for key, value := range map[string]string{
+		"role":            a.Role,
+		"agent":           a.Agent,
+		"harness":         a.Harness,
+		"harness_version": a.HarnessVersion,
+		"model":           a.Model,
+		"sandbox":         a.Sandbox,
+		"execution_mode":  a.ExecutionMode,
+		"authentication":  a.Authentication,
+	} {
+		if value != "" {
+			m[key] = value
+		}
+	}
+	return m
+}
+
 type ProvenanceAttestation struct {
 	SchemaVersion  int               `yaml:"schema_version" json:"schema_version"` // 1
 	IssueNumber    int               `yaml:"issue_number" json:"issue_number"`

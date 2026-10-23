@@ -153,13 +153,13 @@ func workflowDefaultBranch(repoRoot string) (string, string) {
 				}
 			}
 		}
-		return "", "CI workflow omitted: could not resolve origin's default branch; fetch origin and rerun init"
+		return "", "CI workflow omitted: could not resolve origin's default branch; fetch origin and rerun swarm repo init"
 	}
 
 	if branch, err := runGit("symbolic-ref", "--quiet", "--short", "HEAD"); err == nil && branch != "" {
 		return branch, ""
 	}
-	return "", "CI workflow omitted: no default branch is known; create or check out the intended default branch and rerun init"
+	return "", "CI workflow omitted: no default branch is known; create or check out the intended default branch and rerun swarm repo init"
 }
 
 func yamlQuotedString(value string) string {

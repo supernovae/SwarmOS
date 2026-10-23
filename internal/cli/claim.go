@@ -16,7 +16,8 @@ import (
 func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, durationStr string
 	var asJSON, next, allRepos bool
-	cmd := &cobra.Command{Use: "claim [<issue-number>]", Short: "Reserve an approved task or select the next eligible phase", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "claim [<issue-number>]", Short: "Reserve an approved task or select the next eligible phase", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() { reportJSONFailure(cmd, asJSON, "claim", runErr) }()
 		if len(args) > 0 && next {
 			return fmt.Errorf("<issue-number> and --next are mutually exclusive")
 		}
@@ -113,7 +114,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 	}}
 	cmd.Flags().BoolVar(&next, "next", false, "Select the next eligible approved WorkUnit")
 	cmd.Flags().BoolVar(&allRepos, "all", false, "Scan all registered repositories (requires --next)")
-	cmd.Flags().StringVar(&agentName, "agent", "", "Configured planner override")
+	cmd.Flags().StringVar(&agentName, "agent", "", "Configured agent for the planner role (overrides roles.planner)")
 	cmd.Flags().StringVar(&durationStr, "duration", "", "Lease duration (approved policy default)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured claim outcome")
 	return cmd

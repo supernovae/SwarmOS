@@ -16,6 +16,8 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 	repoCmd := &cobra.Command{
 		Use:   "repo",
 		Short: "Initialize, plan, validate, and register SwarmOS repositories",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 
 	var cloneIfMissing bool
@@ -76,7 +78,9 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 
 			// Ensure .swarm/ harness is initialized in the registered repository
 			if _, err := os.Stat(filepath.Join(entry.Path, ".swarm", "config.yaml")); err != nil {
-				_, _ = harness.InitRepository(harness.InitOptions{RepoRoot: entry.Path})
+				if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: entry.Path}); err != nil {
+					return fmt.Errorf("registered %s but could not initialize its .swarm/ harness (run swarm repo init --root %s): %w", entry.Repo, entry.Path, err)
+				}
 			}
 
 			fmt.Fprintf(cmd.OutOrStdout(), "Registered repository %s -> %s (backend=%s)\n",
@@ -89,6 +93,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all registered SwarmOS repositories",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reg := registry.New("")
 			entries, err := reg.List()

@@ -40,12 +40,16 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 		Use:   use,
 		Short: short,
 		Args:  argsValidator,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON, "stage", runErr) }()
 			if phase == "" {
 				phase = "plan"
 			}
 			if phase != "plan" && phase != "implement" {
 				return fmt.Errorf("invalid --phase %q (must be plan or implement)", phase)
+			}
+			if handoff && phase != "plan" {
+				return fmt.Errorf("--handoff applies only to --phase plan")
 			}
 			root := rootOpts.resolveRepoRoot()
 			issue, worktree, prNumber := 0, "", 0
@@ -154,8 +158,9 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, stop := maintainClaim(ctx, manager, issue, owner, duration)
-			defer stop()
+			heartbeat := manager.StartHeartbeat(ctx, issue, owner, duration)
+			defer heartbeat.Stop()
+			ctx = heartbeat.Context()
 
 			harnessName := strings.TrimSpace(firstNonEmptyStr(harnessFlag, "interactive"))
 			modelName := strings.TrimSpace(firstNonEmptyStr(modelFlag, "interactive"))
@@ -311,6 +316,13 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			if valErr != nil {
 				return valErr
 			}
+			validationLabel := "NONE"
+			if report != nil {
+				validationLabel = "FAIL"
+				if report.Passed {
+					validationLabel = "PASS"
+				}
+			}
 			if asJSON {
 				outcome := map[string]any{
 					"kind":              "stage",
@@ -329,9 +341,9 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				return writeJSON(cmd, outcome)
 			}
 			if prStage {
-				fmt.Fprintf(cmd.OutOrStdout(), "Staged unpublished implementation checkpoint %s for PR #%d (issue #%d) on %s [validation=PASS]\n", head, prNumber, issue, branch)
+				fmt.Fprintf(cmd.OutOrStdout(), "Staged unpublished implementation checkpoint %s for PR #%d (issue #%d) on %s [validation=%s]\n", head, prNumber, issue, branch, validationLabel)
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "Staged implementation checkpoint %s for issue #%d on %s [validation=PASS]\n", head, issue, branch)
+				fmt.Fprintf(cmd.OutOrStdout(), "Staged implementation checkpoint %s for issue #%d on %s [validation=%s]\n", head, issue, branch, validationLabel)
 			}
 			return nil
 		},
@@ -340,7 +352,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 	cmd.Flags().StringVar(&phase, "phase", "plan", "Workflow phase to stage: plan or implement")
 	cmd.Flags().StringVar(&harnessFlag, "harness", "", "Harness identifier for provenance attestation (e.g., claude, codex, opencode, omp)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "Model identifier for provenance attestation")
-	cmd.Flags().BoolVar(&handoff, "handoff", false, "Hand off the lease to the next workflow phase after staging plan artifacts")
+	cmd.Flags().BoolVar(&handoff, "handoff", false, "With --phase plan, hand off the lease to the next workflow phase after staging")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured staging output as JSON")
 	return cmd
 }

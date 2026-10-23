@@ -25,7 +25,8 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	var dependsOn []int
 	var parentIssue int
 	var asJSON bool
-	createCmd := &cobra.Command{Use: "create", Short: "Create a draft structured SwarmOS WorkUnit issue", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	createCmd := &cobra.Command{Use: "create", Short: "Create a draft structured SwarmOS WorkUnit issue", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() { reportJSONFailure(cmd, asJSON, "issue", runErr) }()
 		if strings.TrimSpace(title) == "" {
 			return fmt.Errorf("--title is required")
 		}
@@ -96,7 +97,8 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	createCmd.Flags().StringSliceVar(&capabilities, "capability", nil, "Required volunteer node capabilities (e.g., coding,testing,docs)")
 	createCmd.Flags().IntVar(&parentIssue, "parent", 0, "Parent epic/workunit issue number")
 	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured issue results")
-	approveCmd := &cobra.Command{Use: "approve <issue-number>", Short: "Approve the current immutable WorkUnit revision for execution", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	approveCmd := &cobra.Command{Use: "approve <issue-number>", Short: "Approve the current immutable WorkUnit revision for execution", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() { reportJSONFailure(cmd, asJSON, "task-approval", runErr) }()
 		number, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
 		if err != nil || number <= 0 {
 			return fmt.Errorf("invalid issue number %q", args[0])
@@ -120,7 +122,8 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		return nil
 	}}
 	approveCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured approval results")
-	lintCmd := &cobra.Command{Use: "lint <issue-number>", Short: "Validate an existing issue against the SwarmOS WorkUnit JSON schema", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	lintCmd := &cobra.Command{Use: "lint <issue-number>", Short: "Validate an existing issue against the SwarmOS WorkUnit JSON schema", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() { reportJSONFailure(cmd, asJSON, "issue-lint", runErr) }()
 		num, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
 		if err != nil || num <= 0 {
 			return fmt.Errorf("invalid issue number %q", args[0])
@@ -152,6 +155,8 @@ func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
 	epicCmd := &cobra.Command{
 		Use:   "epic",
 		Short: "Create or manage non-executable Epic planning issues",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 	var title string
 	var bodyFile string
@@ -160,7 +165,8 @@ func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
 		Use:   "create",
 		Short: "Create a standalone typed Epic issue from a body file (maintainer only)",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON, "epic", runErr) }()
 			if strings.TrimSpace(title) == "" {
 				return fmt.Errorf("--title is required")
 			}
@@ -199,7 +205,8 @@ func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
 func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
 	var sequential bool
 	var asJSON bool
-	cmd := &cobra.Command{Use: "decompose <issue-number>", Short: "Partition a parent WorkUnit issue into linked child WorkUnit issues", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "decompose <issue-number>", Short: "Partition a parent WorkUnit issue into linked child WorkUnit issues", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() { reportJSONFailure(cmd, asJSON, "decomposition", runErr) }()
 		parentNum, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
 		if err != nil || parentNum <= 0 {
 			return fmt.Errorf("invalid issue number %q", args[0])

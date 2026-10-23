@@ -240,9 +240,21 @@ func TestCLIClaimNextSelectorsAndPreparedWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	if outcome.Kind != "claim" || outcome.Status != "claimed" || outcome.Selection.Repo != "octo/repo" ||
-		outcome.Selection.Issue == nil || outcome.Selection.Issue.Number != number || outcome.Selection.RepoRoot != f.root ||
+		outcome.Selection.Issue == nil || outcome.Selection.Issue.Number != number ||
 		outcome.Selection.TargetPhase != "all" || outcome.Selection.WorktreePath == "" {
 		t.Fatalf("incorrect selected repository or task: %+v", outcome)
+	}
+	// Git can report a canonical path while TempDir retains a symlinked prefix.
+	selectedRoot, err := os.Stat(outcome.Selection.RepoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtureRoot, err := os.Stat(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(selectedRoot, fixtureRoot) {
+		t.Fatalf("selected repository %q is not fixture %q", outcome.Selection.RepoRoot, f.root)
 	}
 	before := f.state(t, number)
 	if before.Lease.Status != "active" || len(before.Artifacts) != 0 {

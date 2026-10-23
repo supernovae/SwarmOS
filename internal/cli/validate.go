@@ -3,20 +3,22 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/validation"
-	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newValidateCmd(options *RootOptions) *cobra.Command {
 	var asJSON bool
 	var baseSHA string
-	cmd := &cobra.Command{Use: "validate [<issue-number>]", Short: "Run issue checks and protected-path policy from the approved immutable base", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "validate [<issue-number>]", Short: "Run issue checks and protected-path policy from the approved immutable base", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		reported := false
+		defer func() {
+			if !reported {
+				reportJSONFailure(cmd, asJSON, "validation", runErr)
+			}
+		}()
 		root := options.resolveRepoRoot()
 		ctx := cmd.Context()
 		issue, worktree, err := resolveIssueAndWorktree(root, args)
@@ -32,18 +34,10 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		owner, err := tr.CurrentUser(ctx)
+		owner, _, err := bindPersistedClaim(ctx, root, tr, manager, issue)
 		if err != nil {
 			return err
 		}
-		if owner == "" {
-			return fmt.Errorf("authenticated claim owner required")
-		}
-		claim, err := lease.LoadClaimToken(root, issue)
-		if err != nil {
-			return err
-		}
-		manager.BindClaim(issue, claim)
 		if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 			return err
 		}
@@ -58,20 +52,11 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 			return fmt.Errorf("--base does not match the task's approved immutable base")
 		}
 		baseSHA = state.BaseSHA
-		_ = workspace.FetchCommit(root, "origin", baseSHA)
-		iss, err := tr.GetIssue(ctx, issue)
+		_, unit, err := loadWorkUnit(ctx, tr, issue)
 		if err != nil {
 			return err
 		}
-		unit, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
-		if err != nil {
-			return err
-		}
-		cfg, err := harness.LoadConfigAt(root, baseSHA)
-		if err != nil {
-			return err
-		}
-		duration, err := time.ParseDuration(cfg.Lease.Duration)
+		_, duration, err := approvedLeasePolicy(root, baseSHA)
 		if err != nil {
 			return err
 		}
@@ -84,6 +69,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 			_, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact)
 			validationErr = errors.Join(validationErr, err)
 		}
+		reported = true
 		return writeValidationOutcome(cmd, report, validationErr, asJSON)
 	}}
 	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted base commit SHA; must equal the issue's approved base (defaults to it)")
@@ -96,7 +82,9 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{Use: "validate", Short: "Validate a repository checkout against a trusted immutable base", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		if baseSHA == "" {
-			return fmt.Errorf("--base <trusted-full-commit-SHA> is required")
+			err := fmt.Errorf("--base <trusted-full-commit-SHA> is required")
+			reportJSONFailure(cmd, asJSON, "validation", err)
+			return err
 		}
 		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, BaseSHA: baseSHA, ForkMode: options.Fork})
 		return writeValidationOutcome(cmd, report, err, asJSON)

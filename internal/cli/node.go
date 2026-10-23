@@ -148,7 +148,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				Phase:   "all", Gate: contract.GateMode(gate), Headless: true,
 				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),
 			}
-			execute := func(pulled *PulledWorkUnit) (*workflow.WorkResult, error) {
+			execute := func(pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
 				tr, manager, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
 					Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend,
 				})
@@ -202,10 +202,10 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					go func(worker int) {
 						defer workers.Done()
 						for ctx.Err() == nil && reserve() {
-							pulled, err := PullNextReadyIssue(ctx, cmd, rootOpts, allRepos, options, 0)
+							pulled, err := pullNextReadyIssue(ctx, cmd, rootOpts, allRepos, options, 0)
 							if err != nil {
 								admitted.Add(-1)
-								if !errors.Is(err, ErrNoReadyWork) {
+								if !errors.Is(err, errNoReadyWork) {
 									failures.Add(1)
 									outputMu.Lock()
 									fmt.Fprintf(out, "[worker-%d] selection failed: %v\n", worker+1, err)

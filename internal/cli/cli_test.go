@@ -225,7 +225,7 @@ func TestCLIClaimNextSelectorsAndPreparedWork(t *testing.T) {
 	if _, err := f.manager.GetCurrentState(context.Background(), number); !errors.Is(err, coordination.ErrNotFound) {
 		t.Fatalf("invalid claim changed state: %v", err)
 	}
-	if _, err := f.run("issue", "claim", "--next"); !errors.Is(err, ErrNoReadyWork) {
+	if _, err := f.run("issue", "claim", "--next"); !errors.Is(err, errNoReadyWork) {
 		t.Fatalf("empty queue: %v", err)
 	}
 	f.must(t, "issue", "approve", n)
@@ -234,7 +234,7 @@ func TestCLIClaimNextSelectorsAndPreparedWork(t *testing.T) {
 	var outcome struct {
 		Kind      string         `json:"kind"`
 		Status    string         `json:"status"`
-		Selection PulledWorkUnit `json:"selection"`
+		Selection pulledWorkUnit `json:"selection"`
 	}
 	if err := json.Unmarshal([]byte(raw), &outcome); err != nil {
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func TestCLIClaimNextResumesHandoffPhase(t *testing.T) {
 	}
 	raw := f.must(t, "issue", "claim", "--next", "--agent", "mock", "--json")
 	var outcome struct {
-		Selection PulledWorkUnit `json:"selection"`
+		Selection pulledWorkUnit `json:"selection"`
 	}
 	if err := json.Unmarshal([]byte(raw), &outcome); err != nil {
 		t.Fatal(err)
@@ -660,7 +660,7 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 		t.Fatalf("expected child #%d native parent #%d, got (%d, %v)", childRes.Issue.Number, epicRes.Issue.Number, parentNum, err)
 	}
 
-	// Even if an Epic is mislabeled swarm:ready, PullNextReadyIssue skips it and claims the approved child
+	// Even if an Epic is mislabeled swarm:ready, pullNextReadyIssue skips it and claims the approved child
 	_ = f.tracker.AddLabels(ctx, epicRes.Issue.Number, []string{"swarm:ready"})
 	f.must(t, "issue", "approve", strconv.Itoa(childRes.Issue.Number))
 	f.must(t, "issue", "work", "--next", "--agent", "mock", "--headless")

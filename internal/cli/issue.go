@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -99,9 +98,9 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured issue results")
 	approveCmd := &cobra.Command{Use: "approve <issue-number>", Short: "Approve the current immutable WorkUnit revision for execution", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 		defer func() { reportJSONFailure(cmd, asJSON, "task-approval", runErr) }()
-		number, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-		if err != nil || number <= 0 {
-			return fmt.Errorf("invalid issue number %q", args[0])
+		number, err := parseNumberArg(args[0], "issue")
+		if err != nil {
+			return err
 		}
 		tr, mgr, _, err := rootOpts.resolveLeaseManager(cmd)
 		if err != nil {
@@ -124,9 +123,9 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	approveCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured approval results")
 	lintCmd := &cobra.Command{Use: "lint <issue-number>", Short: "Validate an existing issue against the SwarmOS WorkUnit JSON schema", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 		defer func() { reportJSONFailure(cmd, asJSON, "issue-lint", runErr) }()
-		num, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-		if err != nil || num <= 0 {
-			return fmt.Errorf("invalid issue number %q", args[0])
+		num, err := parseNumberArg(args[0], "issue")
+		if err != nil {
+			return err
 		}
 		tr, err := rootOpts.resolveTracker(cmd)
 		if err != nil {
@@ -207,9 +206,9 @@ func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{Use: "decompose <issue-number>", Short: "Partition a parent WorkUnit issue into linked child WorkUnit issues", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 		defer func() { reportJSONFailure(cmd, asJSON, "decomposition", runErr) }()
-		parentNum, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-		if err != nil || parentNum <= 0 {
-			return fmt.Errorf("invalid issue number %q", args[0])
+		parentNum, err := parseNumberArg(args[0], "issue")
+		if err != nil {
+			return err
 		}
 		repoRoot := rootOpts.resolveRepoRoot()
 		tr, err := rootOpts.resolveTracker(cmd)

@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -37,9 +36,9 @@ issue submit opens the linked draft PR.`,
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			issue, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-			if err != nil || issue <= 0 {
-				return fmt.Errorf("invalid issue number %q", args[0])
+			issue, err := parseNumberArg(args[0], "issue")
+			if err != nil {
+				return err
 			}
 			if !approve && !reject {
 				work := newWorkCmd(rootOpts)

@@ -7,14 +7,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/gitcredential"
-	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
@@ -49,18 +47,10 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return err
 			}
 			ctx := cmd.Context()
-			owner, err := tr.CurrentUser(ctx)
+			owner, claim, err := bindPersistedClaim(ctx, root, tr, manager, issue)
 			if err != nil {
 				return err
 			}
-			if owner == "" {
-				return fmt.Errorf("submission requires an authenticated owner")
-			}
-			claim, err := lease.LoadClaimToken(root, issue)
-			if err != nil {
-				return fmt.Errorf("load submission claim: %w", err)
-			}
-			manager.BindClaim(issue, claim)
 			state, err := manager.GetCurrentState(ctx, issue)
 			if err != nil {
 				return err
@@ -68,12 +58,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := requireIssueWorkspace(state); err != nil {
 				return err
 			}
-			_ = workspace.FetchCommit(root, "origin", state.BaseSHA)
-			iss, err := tr.GetIssue(ctx, issue)
-			if err != nil {
-				return err
-			}
-			unit, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
+			iss, unit, err := loadWorkUnit(ctx, tr, issue)
 			if err != nil {
 				return err
 			}
@@ -110,11 +95,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 				return err
 			}
-			cfg, err := harness.LoadConfigAt(root, state.BaseSHA)
-			if err != nil {
-				return err
-			}
-			duration, err := time.ParseDuration(cfg.Lease.Duration)
+			cfg, duration, err := approvedLeasePolicy(root, state.BaseSHA)
 			if err != nil {
 				return err
 			}

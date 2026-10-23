@@ -2,8 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -55,9 +53,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 		Short: summaries[operation],
 		Args:  cobra.ExactArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			number, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-			if err != nil || number <= 0 {
-				return fmt.Errorf("invalid PR number %q", args[0])
+			number, err := parseNumberArg(args[0], "PR")
+			if err != nil {
+				return err
 			}
 			opts.Number = number
 			if operation != "status" && rootOpts.Fork {

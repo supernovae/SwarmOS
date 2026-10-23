@@ -128,12 +128,8 @@ func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manage
 	}
 }
 
-// ResolveRoleAgent applies role override, generic override, repository role,
+// resolveRoleAgent applies role override, generic override, repository role,
 // then repository default precedence. It performs no availability check.
-func (e *Engine) ResolveRoleAgent(role string, opts WorkOptions) string {
-	return resolveRoleAgent(e.Config, role, opts)
-}
-
 func resolveRoleAgent(cfg *contract.SwarmConfig, role string, opts WorkOptions) string {
 	switch role {
 	case "planner":
@@ -660,7 +656,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := check(); err != nil {
 		return res, err
 	}
-	summary, body := summarizeImplementationChanges(wtPath, opts.IssueNumber)
+	summary, body := SummarizeImplementationChanges(ctx, wtPath, opts.IssueNumber)
 	progress.next("checkpoint")
 	checkpointHead, err := workspace.Checkpoint(ctx, wtPath, branch, workspace.CheckpointOptions{
 		WorkUnit: pre.WorkUnit, Purpose: checkpointPurpose, Detail: cfg.CommitMessageDetail(),
@@ -1011,15 +1007,16 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 	return nil
 }
 
-func summarizeImplementationChanges(wtPath string, issueNum int) (string, string) {
-	statusOut, _ := gitcredential.Output(context.Background(), wtPath, "status", "--short")
-	diffStat, _ := gitcredential.Output(context.Background(), wtPath, "diff", "--stat", "HEAD")
+// SummarizeImplementationChanges describes a worktree's uncommitted changes for
+// an implementation artifact: a one-line summary and a Markdown body.
+func SummarizeImplementationChanges(ctx context.Context, wtPath string, issueNum int) (string, string) {
+	statusOut, _ := gitcredential.Output(ctx, wtPath, "status", "--short")
+	diffStat, _ := gitcredential.Output(ctx, wtPath, "diff", "--stat", "HEAD")
 
 	lines := strings.Split(strings.TrimSpace(string(statusOut)), "\n")
 	count := 0
 	var body strings.Builder
-	body.WriteString(fmt.Sprintf("# Implementation Summary (Issue #%d)\n\n", issueNum))
-	body.WriteString("## Working Tree Changes\n```text\n")
+	fmt.Fprintf(&body, "# Implementation Summary (Issue #%d)\n\n## Working Tree Changes\n```text\n", issueNum)
 	for _, l := range lines {
 		if strings.TrimSpace(l) == "" {
 			continue

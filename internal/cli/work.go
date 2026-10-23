@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -63,7 +60,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			var cfg *contract.SwarmConfig
 			var err error
 			if nextReady {
-				pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, opts, 0)
+				pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, opts, 0)
 				if err != nil {
 					return err
 				}
@@ -73,9 +70,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					return err
 				}
 			} else {
-				opts.IssueNumber, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-				if err != nil || opts.IssueNumber <= 0 {
-					return fmt.Errorf("invalid issue number %q", args[0])
+				opts.IssueNumber, err = parseNumberArg(args[0], "issue")
+				if err != nil {
+					return err
 				}
 				opts.RepoRoot = rootOpts.resolveRepoRoot()
 				tr, mgr, cfg, err = rootOpts.resolveLeaseManager(cmd)
@@ -161,16 +158,4 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the effective policy as JSON without claiming or running agents")
 	cmd.Flags().BoolVar(&progressOutput, "progress", true, "Report headless stages and a 15-second heartbeat to stderr (false disables)")
 	return cmd
-}
-
-func writeJSON(cmd *cobra.Command, value any) error {
-	return json.NewEncoder(cmd.OutOrStdout()).Encode(value)
-}
-
-// reportJSONFailure emits one structured failure document when a --json
-// command returns an error, so scripted callers always receive JSON.
-func reportJSONFailure(cmd *cobra.Command, asJSON bool, kind string, err error) {
-	if asJSON && err != nil {
-		_ = writeJSON(cmd, map[string]any{"kind": kind, "status": "failed", "error": err.Error()})
-	}
 }

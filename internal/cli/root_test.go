@@ -60,6 +60,7 @@ func TestJSONCommandsReportFailuresAsJSON(t *testing.T) {
 		"release":       {"issue", "release", issue, "--json"},
 		"task-approval": {"issue", "approve", "999", "--json"},
 		"submission":    {"issue", "submit", issue, "--json"},
+		"validation":    {"issue", "validate", issue, "--json"},
 	} {
 		out, err := f.run(args...)
 		if err == nil {

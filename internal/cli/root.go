@@ -276,6 +276,15 @@ func hasGitRemote(repoRoot string) bool {
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
+// parseNumberArg parses a positive issue or PR number, accepting a leading #.
+func parseNumberArg(arg, kind string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimPrefix(arg, "#"))
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid %s number %q", kind, arg)
+	}
+	return n, nil
+}
+
 // resolveIssueAndWorktree finds the checkout an issue command must operate on:
 // the managed worktree for the issue, or the current checkout when it holds that
 // issue's active bundle. It never guesses between several candidate worktrees.
@@ -285,9 +294,9 @@ func resolveIssueAndWorktree(repoRoot string, args []string) (int, string, error
 		active = wu.IssueNumber
 	}
 	if len(args) > 0 {
-		num, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-		if err != nil || num <= 0 {
-			return 0, "", fmt.Errorf("invalid issue number %q", args[0])
+		num, err := parseNumberArg(args[0], "issue")
+		if err != nil {
+			return 0, "", err
 		}
 		wt := workspace.WorktreePath(repoRoot, num)
 		if info, err := os.Stat(wt); err == nil && info.IsDir() {

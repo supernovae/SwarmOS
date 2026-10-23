@@ -1,21 +1,17 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/gitcredential"
-	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/validation"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -56,9 +52,9 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			var prStatus *pr.Result
 			var err error
 			if prStage {
-				prNumber, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-				if err != nil || prNumber <= 0 {
-					return fmt.Errorf("invalid PR number %q", args[0])
+				prNumber, err = parseNumberArg(args[0], "PR")
+				if err != nil {
+					return err
 				}
 				if rootOpts.Fork {
 					return fmt.Errorf("%s requires upstream write access; contributor-only --fork coordination does not support PR revisions", cmd.CommandPath())
@@ -108,15 +104,10 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				}
 				prStatus = fresh
 			}
-			owner, err := tr.CurrentUser(ctx)
-			if err != nil || strings.TrimSpace(owner) == "" {
-				return fmt.Errorf("staging requires an authenticated owner")
-			}
-			claim, err := lease.LoadClaimToken(root, issue)
+			owner, _, err := bindPersistedClaim(ctx, root, tr, manager, issue)
 			if err != nil {
-				return fmt.Errorf("load active claim token: %w", err)
+				return err
 			}
-			manager.BindClaim(issue, claim)
 			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 				return err
 			}
@@ -141,20 +132,11 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			} else if err := requireIssueWorkspace(state); err != nil {
 				return err
 			}
-			iss, err := tr.GetIssue(ctx, issue)
+			iss, unit, err := loadWorkUnit(ctx, tr, issue)
 			if err != nil {
 				return err
 			}
-			unit, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
-			if err != nil {
-				return err
-			}
-			_ = workspace.FetchCommit(root, "origin", state.BaseSHA)
-			cfg, err := harness.LoadConfigAt(root, state.BaseSHA)
-			if err != nil {
-				return err
-			}
-			duration, err := time.ParseDuration(cfg.Lease.Duration)
+			cfg, duration, err := approvedLeasePolicy(root, state.BaseSHA)
 			if err != nil {
 				return err
 			}
@@ -262,7 +244,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 					branch = workspace.BranchName(issue, iss.Title)
 				}
 			}
-			summary, implBody := stageImplementationSummary(worktree, issue)
+			summary, implBody := workflow.SummarizeImplementationChanges(ctx, worktree, issue)
 			head, err := workspace.Checkpoint(ctx, worktree, branch, workspace.CheckpointOptions{
 				WorkUnit: unit, Purpose: "implement", Detail: cfg.CommitMessageDetail(),
 			})
@@ -355,31 +337,4 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 	cmd.Flags().BoolVar(&handoff, "handoff", false, "With --phase plan, hand off the lease to the next workflow phase after staging")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured staging output as JSON")
 	return cmd
-}
-
-func stageImplementationSummary(wtPath string, issueNum int) (string, string) {
-	statusOut, _ := gitcredential.Output(context.Background(), wtPath, "status", "--short")
-	diffStat, _ := gitcredential.Output(context.Background(), wtPath, "diff", "--stat", "HEAD")
-	lines := strings.Split(strings.TrimSpace(string(statusOut)), "\n")
-	count := 0
-	var body strings.Builder
-	fmt.Fprintf(&body, "# Implementation Summary (Issue #%d)\n\n## Working Tree Changes\n```text\n", issueNum)
-	for _, l := range lines {
-		if strings.TrimSpace(l) == "" {
-			continue
-		}
-		if strings.Contains(l, ".swarm/active") || strings.Contains(l, "AGENTS.md") || strings.Contains(l, "CLAUDE.md") {
-			continue
-		}
-		count++
-		body.WriteString(l + "\n")
-	}
-	if count == 0 {
-		body.WriteString("(clean working tree)\n")
-	}
-	body.WriteString("```\n")
-	if len(strings.TrimSpace(string(diffStat))) > 0 {
-		body.WriteString("\n## Diff Stat\n```text\n" + strings.TrimSpace(string(diffStat)) + "\n```\n")
-	}
-	return fmt.Sprintf("Implemented changes across %d file(s)", count), body.String()
 }

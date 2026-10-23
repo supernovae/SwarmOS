@@ -18,9 +18,9 @@ import (
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
-var ErrNoReadyWork = errors.New("no approved ready work matches this node")
+var errNoReadyWork = errors.New("no approved ready work matches this node")
 
-type PulledWorkUnit struct {
+type pulledWorkUnit struct {
 	Repo         string
 	RepoRoot     string
 	Backend      string
@@ -32,7 +32,7 @@ type PulledWorkUnit struct {
 	BranchName   string
 }
 
-func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration) (*PulledWorkUnit, error) {
+func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration) (*pulledWorkUnit, error) {
 	if err := contract.ValidatePhase(opts.Phase); err != nil {
 		return nil, err
 	}
@@ -146,7 +146,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				}
 				return nil, err
 			}
-			setup := func() (*PulledWorkUnit, error) {
+			setup := func() (*pulledWorkUnit, error) {
 				if err := lease.SaveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID); err != nil {
 					return nil, err
 				}
@@ -165,7 +165,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				if err := workspace.CompileHarnessBundleAt(worktree, wu, preflight.Workflow, claimed.Artifacts, role, claimed.BaseSHA); err != nil {
 					return nil, err
 				}
-				return &PulledWorkUnit{Repo: target.Repo, RepoRoot: target.Path, Backend: target.Backend, Issue: issue,
+				return &pulledWorkUnit{Repo: target.Repo, RepoRoot: target.Path, Backend: target.Backend, Issue: issue,
 					WorkUnit: wu, State: claimed, TargetPhase: phase, WorktreePath: worktree, BranchName: branch}, nil
 			}
 			pulled, err := setup()
@@ -178,7 +178,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			return pulled, nil
 		}
 	}
-	return nil, ErrNoReadyWork
+	return nil, errNoReadyWork
 }
 
 func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error) {

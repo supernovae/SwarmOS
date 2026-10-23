@@ -3,8 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -30,9 +28,9 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		var issue int
 		var err error
 		if len(args) > 0 {
-			issue, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-			if err != nil || issue <= 0 {
-				return fmt.Errorf("invalid issue number %q", args[0])
+			issue, err = parseNumberArg(args[0], "issue")
+			if err != nil {
+				return err
 			}
 		}
 		var duration time.Duration
@@ -43,7 +41,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 		}
 		if next {
-			pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all"}, duration)
+			pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all"}, duration)
 			if err != nil {
 				return err
 			}

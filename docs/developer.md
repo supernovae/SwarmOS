@@ -101,6 +101,12 @@ In `trusted-local` mode, agent subprocesses start with a clean temporary `HOME` 
 
 Every claim records a unique fencing token (`claim_id`), approved base SHA, branch name, and checkpoint commit SHA. The local claim token is stored in your user config directory (`swarm/claims/<git-common-dir-hash>/<issue>.json`) so same-machine commands resume cleanly without colliding.
 
+### Readable task history
+
+Task commits use the approved issue title and number instead of a generic checkpoint message. Automated retries after failed validation identify repair commits; submission identifies any final changes it needs to commit. A clean worktree does not produce another commit. Maintainers can choose subject-only messages or include the objective and staged-file summary with [`commit_message.detail`](project.md#checkpoint-commit-messages).
+
+SwarmOS opens Draft PRs without squashing or rewriting task history. GitHub's **Squash and merge** combines the PR commits into one commit on the base branch; **Create a merge commit** and **Rebase and merge** retain individual task commits. Under **Settings → General → Pull Requests → Allow squash merging**, choose the default squash message format. For a compact final history, use the PR title and review the message before merging; including the PR description also includes its longer artifact and review context.
+
 ### Handing Off a Plan or Review to Another Teammate
 One teammate or node can complete the planning phase, checkpoint the branch and artifacts to Git, and hand the task off for another worker to review or implement:
 

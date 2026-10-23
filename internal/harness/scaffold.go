@@ -537,6 +537,11 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	if err := contract.ValidatePlanMode(cfg.PlanMode); err != nil {
 		return nil, err
 	}
+	if cfg.CommitMessage != nil {
+		if err := contract.ValidateCommitMessageDetail(cfg.CommitMessage.Detail); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := contract.ResolveExecution(&cfg, ""); err != nil {
 		return nil, err
 	}

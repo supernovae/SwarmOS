@@ -605,8 +605,10 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return res, err
 	}
 	devPrompt := "Execute /swarm-implement step-by-step using the approved plan and test plan."
+	checkpointPurpose := "implement"
 	if hasFailedValidationArtifact(st) {
 		devPrompt = "Execute /swarm-implement step-by-step using the approved plan and test plan. A prior validation check failed; inspect .swarm/active/VALIDATION.md and .swarm/active/WORKUNIT.md and fix all failing checks."
+		checkpointPurpose = "repair"
 	}
 	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: devPrompt})
 	if err != nil {
@@ -617,7 +619,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	summary, body := summarizeImplementationChanges(wtPath, opts.IssueNumber)
 	progress.next("checkpoint")
-	if st.HeadSHA, err = workspace.Checkpoint(ctx, wtPath, branch); err != nil {
+	if st.HeadSHA, err = workspace.Checkpoint(ctx, wtPath, branch, workspace.CheckpointOptions{
+		WorkUnit: pre.WorkUnit, Purpose: checkpointPurpose, Detail: cfg.CommitMessageDetail(),
+	}); err != nil {
 		return res, err
 	}
 	if forkMode {

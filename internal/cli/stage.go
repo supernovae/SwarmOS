@@ -177,7 +177,9 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			summary, implBody := stageImplementationSummary(worktree, issue)
-			head, err := workspace.Checkpoint(ctx, worktree, branch)
+			head, err := workspace.Checkpoint(ctx, worktree, branch, workspace.CheckpointOptions{
+				WorkUnit: unit, Purpose: "implement", Detail: cfg.CommitMessageDetail(),
+			})
 			if err != nil {
 				return err
 			}

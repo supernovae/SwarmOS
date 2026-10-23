@@ -103,6 +103,22 @@ Choose `--developer-agent codex-pair --headless=false` to pair, or `--developer-
 
 Provider authentication belongs to the harness. The current `trusted-local` launcher accepts model credential variables listed in `agents.<name>.env`; keep their values in your shell or CI secret store. Isolated adapters use harness-owned login directly, without those environment presets. Leave `model` unset for harness selection, or declare the project's model choice in its agent entry. The [worker guide](developer.md#choose-where-agents-run) explains the available setup paths.
 
+### Checkpoint commit messages
+
+Readable task commits make PR review and Git history easier to follow. SwarmOS uses the approved issue title and issue number as the commit subject, with a `Repair validation:` prefix for automated repairs and `Finalize:` for remaining changes checkpointed during submission. Subjects are kept to 72 bytes, preserving Unicode characters and the issue reference.
+
+Choose the amount of context in `.swarm/config.yaml`:
+
+```yaml
+commit_message:
+  detail: concise
+```
+
+- **`concise`** (default when omitted): a subject only, such as `Add backlog export (#15)`.
+- **`detailed`**: the same subject plus the approved objective and a summary of files actually staged in that commit. The body includes up to 20 files, with an overflow count; long objectives and paths are shortened.
+
+This setting applies to commits created by `swarm work`, `swarm stage --phase implement`, and `swarm submit`. Messages are derived from task context and Git changes without an additional model call. Commit the configuration before approving tasks: running tasks use the setting from their approved base, not edits in the candidate worktree. Existing commits are never renamed or amended.
+
 ---
 
 ## 3. Create, Lint, and Approve WorkUnit Issues

@@ -123,7 +123,9 @@ swarm review approves the implementation plan, not the finished PR.`,
 					branch = workspace.BranchName(issue, iss.Title)
 				}
 			}
-			head, err := workspace.Checkpoint(ctx, worktree, branch)
+			head, err := workspace.Checkpoint(ctx, worktree, branch, workspace.CheckpointOptions{
+				WorkUnit: unit, Purpose: "submit", Detail: cfg.CommitMessageDetail(),
+			})
 			if err != nil {
 				return err
 			}

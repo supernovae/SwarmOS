@@ -145,7 +145,7 @@ func TestCheckpointPreservesPrimaryDirtyCheckout(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, "checkpoint.txt"), []byte("checkpoint"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Checkpoint(context.Background(), wt, branch); err != nil {
+	if _, err := Checkpoint(context.Background(), wt, branch, CheckpointOptions{WorkUnit: &contract.WorkUnit{IssueNumber: 14, Title: "Checkpoint"}, Purpose: "implement"}); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := os.ReadFile(filepath.Join(repo, "tracked.txt")); err != nil || string(got) != "primary dirty" {
@@ -188,7 +188,7 @@ func TestProvisionAtRestoresExactCheckpointInFreshClone(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt, "checkpoint.txt"), []byte("transferred"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	head, err := Checkpoint(context.Background(), wt, branch)
+	head, err := Checkpoint(context.Background(), wt, branch, CheckpointOptions{WorkUnit: &contract.WorkUnit{IssueNumber: 15, Title: "transfer"}, Purpose: "implement"})
 	if err != nil {
 		t.Fatal(err)
 	}

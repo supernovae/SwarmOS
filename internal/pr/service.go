@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,7 +71,9 @@ func revisionHead(st *lease.IssueState) string {
 }
 
 // linked accepts only the authoritative issue coordination state, never PR
-// descriptions, titles, naming conventions or unverified tracker hints.
+// descriptions, titles, naming conventions or unverified tracker hints. Hints
+// only choose which issue's state to read first; a hinted issue that does not
+// record this PR falls back to scanning every issue.
 func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
 	if number <= 0 {
 		return nil, fmt.Errorf("positive PR number required")
@@ -81,63 +85,42 @@ func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
 	if pr == nil || pr.Number != number || !strings.EqualFold(pr.State, "open") || pr.Merged {
 		return nil, fmt.Errorf("PR #%d must be open and unmerged", number)
 	}
-	issues, err := s.Tracker.ListIssues(ctx, tracker.IssueFilter{State: "all"})
-	if err != nil {
-		return nil, err
-	}
 	var result *Result
-	for _, issue := range issues {
-		st, stateErr := s.Manager.GetCurrentState(ctx, issue.Number)
-		if errors.Is(stateErr, coordination.ErrNotFound) {
-			continue
-		}
-		if stateErr != nil {
-			return nil, fmt.Errorf("read issue #%d authoritative state: %w", issue.Number, stateErr)
-		}
-		if st == nil || st.PRNumber != number {
-			continue
-		}
-		if result != nil {
-			return nil, fmt.Errorf("PR #%d has multiple authoritative issue links", number)
-		}
-		cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+	for _, hint := range linkHints(pr) {
+		issue, st, err := s.linkedState(ctx, hint, number)
 		if err != nil {
 			return nil, err
 		}
-		wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+		if st != nil {
+			if result, err = s.verifyLink(pr, issue, st); err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
+	if result == nil {
+		issues, err := s.Tracker.ListIssues(ctx, tracker.IssueFilter{State: "all"})
 		if err != nil {
 			return nil, err
 		}
-		if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
-			return nil, lease.ErrApprovalRequired
-		}
-		if st.Branch == "" || pr.HeadSHA == "" || pr.BaseSHA == "" {
-			return nil, fmt.Errorf("PR #%d lacks exact branch/head/base identity", number)
-		}
-		if headBranch(pr) != st.Branch {
-			return nil, fmt.Errorf("PR #%d head branch differs from its linked issue", number)
-		}
-		if pr.IssueNumber != 0 && pr.IssueNumber != issue.Number {
-			return nil, fmt.Errorf("PR #%d issue identity mismatch", number)
-		}
-		if provider, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
-			upstream := provider.UpstreamRepo()
-			if pr.BaseRepo == "" || !strings.EqualFold(pr.BaseRepo, upstream) || pr.HeadRepo == "" {
-				return nil, fmt.Errorf("PR repository identity differs from upstream %s", upstream)
+		for i := range issues {
+			st, stateErr := s.Manager.GetCurrentState(ctx, issues[i].Number)
+			if errors.Is(stateErr, coordination.ErrNotFound) {
+				continue
 			}
-			if !strings.EqualFold(pr.HeadRepo, upstream) {
-				if st.ForkRepo == "" || !strings.EqualFold(pr.HeadRepo, st.ForkRepo) {
-					return nil, fmt.Errorf("fork PR head repository differs from authoritative issue fork repository")
-				}
-			} else if pr.Head != st.Branch {
-				return nil, fmt.Errorf("same-repository PR head must match linked branch")
+			if stateErr != nil {
+				return nil, fmt.Errorf("read issue #%d authoritative state: %w", issues[i].Number, stateErr)
+			}
+			if st == nil || st.PRNumber != number {
+				continue
+			}
+			if result != nil {
+				return nil, fmt.Errorf("PR #%d has multiple authoritative issue links", number)
+			}
+			if result, err = s.verifyLink(pr, issues[i], st); err != nil {
+				return nil, err
 			}
 		}
-		root, err := filepath.Abs(s.Root)
-		if err != nil {
-			return nil, fmt.Errorf("resolve PR workspace root: %w", err)
-		}
-		result = &Result{PR: pr, IssueNumber: issue.Number, State: st, Worktree: workspace.PRWorktreePath(root, number), Branch: workspace.PRBranchName(number), HeadSHA: pr.HeadSHA, BaseSHA: st.BaseSHA, Status: "open"}
 	}
 	if result == nil {
 		return nil, fmt.Errorf("PR #%d is not linked to an approved WorkUnit", number)
@@ -155,6 +138,86 @@ func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
 		}
 	}
 	return result, nil
+}
+
+var closingReference = regexp.MustCompile(`(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b`)
+
+// linkHints lists candidate issue numbers for a PR: the tracker's recorded
+// link, then the closing reference SwarmOS writes into draft PR bodies.
+func linkHints(pr *tracker.PullRequest) []int {
+	var hints []int
+	if pr.IssueNumber > 0 {
+		hints = append(hints, pr.IssueNumber)
+	}
+	if m := closingReference.FindStringSubmatch(pr.Body); m != nil {
+		if n, err := strconv.Atoi(m[1]); err == nil && n > 0 && n != pr.IssueNumber {
+			hints = append(hints, n)
+		}
+	}
+	return hints
+}
+
+// linkedState returns the hinted issue and its state only when that state
+// authoritatively records the PR.
+func (s *Service) linkedState(ctx context.Context, issueNumber, prNumber int) (*tracker.Issue, *lease.IssueState, error) {
+	st, err := s.Manager.GetCurrentState(ctx, issueNumber)
+	if errors.Is(err, coordination.ErrNotFound) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("read issue #%d authoritative state: %w", issueNumber, err)
+	}
+	if st == nil || st.PRNumber != prNumber {
+		return nil, nil, nil
+	}
+	issue, err := s.Tracker.GetIssue(ctx, issueNumber)
+	if err != nil {
+		return nil, nil, err
+	}
+	return issue, st, nil
+}
+
+// verifyLink checks a PR against the approved state of the issue that records it.
+func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *lease.IssueState) (*Result, error) {
+	number := pr.Number
+	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		return nil, err
+	}
+	if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+		return nil, lease.ErrApprovalRequired
+	}
+	if st.Branch == "" || pr.HeadSHA == "" || pr.BaseSHA == "" {
+		return nil, fmt.Errorf("PR #%d lacks exact branch/head/base identity", number)
+	}
+	if headBranch(pr) != st.Branch {
+		return nil, fmt.Errorf("PR #%d head branch differs from its linked issue", number)
+	}
+	if pr.IssueNumber != 0 && pr.IssueNumber != issue.Number {
+		return nil, fmt.Errorf("PR #%d issue identity mismatch", number)
+	}
+	if provider, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
+		upstream := provider.UpstreamRepo()
+		if pr.BaseRepo == "" || !strings.EqualFold(pr.BaseRepo, upstream) || pr.HeadRepo == "" {
+			return nil, fmt.Errorf("PR repository identity differs from upstream %s", upstream)
+		}
+		if !strings.EqualFold(pr.HeadRepo, upstream) {
+			if st.ForkRepo == "" || !strings.EqualFold(pr.HeadRepo, st.ForkRepo) {
+				return nil, fmt.Errorf("fork PR head repository differs from authoritative issue fork repository")
+			}
+		} else if pr.Head != st.Branch {
+			return nil, fmt.Errorf("same-repository PR head must match linked branch")
+		}
+	}
+	root, err := filepath.Abs(s.Root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve PR workspace root: %w", err)
+	}
+	return &Result{PR: pr, IssueNumber: issue.Number, State: st, Worktree: workspace.PRWorktreePath(root, number), Branch: workspace.PRBranchName(number), HeadSHA: pr.HeadSHA, BaseSHA: st.BaseSHA, Status: "open"}, nil
 }
 
 func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
@@ -188,6 +251,9 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 	if err != nil {
 		return r, err
 	}
+	if len(r.Checks) == 0 {
+		r.Checks = recordedValidationChecks(r.State, r.PR.HeadSHA)
+	}
 	if reviewer, ok := s.Tracker.(interface {
 		GetPullRequestReviews(context.Context, int) ([]tracker.PullRequestReview, error)
 	}); ok {
@@ -197,6 +263,29 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 		}
 	}
 	return r, nil
+}
+
+// RecordedValidationCheck names the check synthesized from SwarmOS's own
+// validation evidence when the tracker reports no CI checks (local backend, or
+// a repository without CI).
+const RecordedValidationCheck = "swarm-validation"
+
+func recordedValidationChecks(st *lease.IssueState, head string) []tracker.CheckRunResult {
+	if st == nil || head == "" {
+		return nil
+	}
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		art := st.Artifacts[i]
+		if art.Type != contract.ArtifactValidation || art.Metadata["head_sha"] != head {
+			continue
+		}
+		conclusion := "failure"
+		if strings.EqualFold(art.Verdict, "PASS") {
+			conclusion = "success"
+		}
+		return []tracker.CheckRunResult{{Name: RecordedValidationCheck, Status: "completed", Conclusion: conclusion}}
+	}
+	return nil
 }
 
 func (s *Service) remote(ctx context.Context, r *Result) (string, error) {

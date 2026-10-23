@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -306,5 +307,68 @@ func TestPRSubmitRejectsUnrecordedRemoteUpdate(t *testing.T) {
 	}
 	if state.HeadSHA != base || state.PRRevision != nil || state.Lease.Status != "completed" {
 		t.Fatalf("rejected submit changed authoritative checkpoint: %+v", state)
+	}
+}
+
+// hintTracker presents PRs the way GitHub does: no tracker-recorded issue
+// link, only the editable PR body.
+type hintTracker struct {
+	tracker.Tracker
+	body  string
+	lists int
+}
+
+func (h *hintTracker) GetPullRequest(ctx context.Context, number int) (*tracker.PullRequest, error) {
+	pr, err := h.Tracker.GetPullRequest(ctx, number)
+	if pr != nil {
+		copy := *pr
+		copy.IssueNumber, copy.Body = 0, h.body
+		pr = &copy
+	}
+	return pr, err
+}
+
+func (h *hintTracker) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
+	h.lists++
+	return h.Tracker.ListIssues(ctx, filter)
+}
+
+func TestLinkedUsesVerifiedHintsBeforeScanning(t *testing.T) {
+	s, issue, number, _ := fixture(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		body      string
+		wantLists int
+	}{
+		{body: "Closes #" + strconv.Itoa(issue) + "\n\n## Objective", wantLists: 0},
+		{body: "Closes #1\n", wantLists: 1}, // hint names an issue that does not record this PR
+		{body: "no closing reference", wantLists: 1},
+	} {
+		hinted := &hintTracker{Tracker: s.Tracker, body: tc.body}
+		svc := *s
+		svc.Tracker = hinted
+		r, err := svc.linked(ctx, number)
+		if err != nil || r.IssueNumber != issue {
+			t.Fatalf("body %q: linked = %+v, %v", tc.body, r, err)
+		}
+		if hinted.lists != tc.wantLists {
+			t.Fatalf("body %q: scanned issues %d times, want %d", tc.body, hinted.lists, tc.wantLists)
+		}
+	}
+}
+
+func TestRecordedValidationChecksMatchPublishedHead(t *testing.T) {
+	head, other := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	st := &lease.IssueState{Artifacts: []contract.Artifact{
+		{Type: contract.ArtifactValidation, Verdict: "FAIL", Metadata: map[string]string{"head_sha": head}},
+		{Type: contract.ArtifactValidation, Verdict: "PASS", Metadata: map[string]string{"head_sha": head}},
+		{Type: contract.ArtifactValidation, Verdict: "FAIL", Metadata: map[string]string{"head_sha": other}},
+	}}
+	got := recordedValidationChecks(st, head)
+	if len(got) != 1 || got[0].Name != RecordedValidationCheck || got[0].Conclusion != "success" {
+		t.Fatalf("checks for published head = %+v", got)
+	}
+	if got := recordedValidationChecks(st, strings.Repeat("c", 40)); got != nil {
+		t.Fatalf("unvalidated head reported checks: %+v", got)
 	}
 }

@@ -45,7 +45,7 @@ func NativeValidationBinary(cfg *contract.SwarmConfig) (string, error) {
 
 func nativeEnv(home string, authentication bool) []string {
 	toolchains := HostToolchains()
-	env := []string{"PATH=" + SandboxPath(toolchains), "HOME=" + home}
+	env := []string{"PATH=" + SandboxPath(toolchains), "HOME=" + home, "GOFLAGS=-buildvcs=false"}
 	for _, b := range toolchains {
 		if b.EnvKey != "" && b.EnvVal != "" {
 			env = append(env, b.EnvKey+"="+b.EnvVal)
@@ -98,6 +98,7 @@ func codexPolicy(binary, work, scratch string, readOnly bool) []string {
 		`XDG_CACHE_HOME=` + strconv.Quote(filepath.Join(scratch, ".cache")),
 		`XDG_CONFIG_HOME=` + strconv.Quote(filepath.Join(scratch, ".config")),
 		`XDG_DATA_HOME=` + strconv.Quote(filepath.Join(scratch, ".local", "share")),
+		`GOFLAGS="-buildvcs=false"`,
 	}
 	for _, b := range toolchains {
 		if b.EnvKey != "" && b.EnvVal != "" {

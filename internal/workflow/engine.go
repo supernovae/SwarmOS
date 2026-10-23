@@ -289,7 +289,7 @@ func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool)
 		if gate == contract.GateHuman && (!hasPlan || !approved) {
 			return roles
 		}
-		if gate == contract.GateAgent {
+		if gate == contract.GateAgent && (!hasPlan || !approved) {
 			roles = append(roles, "reviewer")
 		}
 		return append(roles, "developer", "tester")
@@ -528,7 +528,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		res.PausedForHuman, res.PhaseCompleted = true, "plan"
 		return res, nil
 	}
-	if (gate == contract.GateAgent && (runPlan || opts.Phase == "all")) || (opts.Phase == "review" && gate != contract.GateHuman) {
+	if (gate == contract.GateAgent && (runPlan || (opts.Phase == "all" && lease.VerifyApproval(st, pre.WorkUnit) != nil))) || (opts.Phase == "review" && gate != contract.GateHuman) {
 		if gate != contract.GateAgent && gate != contract.GateNone {
 			return res, fmt.Errorf("%w: gate %q requires an authenticated human decision", ErrPlanApprovalNeeded, gate)
 		}
@@ -567,6 +567,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		return res, err
 	}
 	res.State = st
+	if res.ReviewVerdict == "" && hasApprovedReviewArtifact(st) {
+		res.ReviewVerdict = "APPROVED"
+	}
 	if err := ensurePlanArtifactsInWorktree(wtPath, st); err != nil {
 		return res, err
 	}
@@ -588,7 +591,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "developer", st.BaseSHA); err != nil {
 		return res, err
 	}
-	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-implement step-by-step using the approved plan and test plan."})
+	devPrompt := "Execute /swarm-implement step-by-step using the approved plan and test plan."
+	if hasFailedValidationArtifact(st) {
+		devPrompt = "Execute /swarm-implement step-by-step using the approved plan and test plan. A prior validation check failed; inspect .swarm/active/VALIDATION.md and .swarm/active/WORKUNIT.md and fix all failing checks."
+	}
+	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: devPrompt})
 	if err != nil {
 		return res, err
 	}
@@ -887,6 +894,18 @@ func hasApprovedReviewArtifact(st *lease.IssueState) bool {
 	return false
 }
 
+func hasFailedValidationArtifact(st *lease.IssueState) bool {
+	if st == nil {
+		return false
+	}
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactValidation && strings.EqualFold(a.Verdict, "FAIL") {
+			return true
+		}
+	}
+	return false
+}
+
 // ensurePlanArtifactsInWorktree restores the authoritative state artifacts on
 // every phase transition. Existing local files are never accepted as a plan.
 func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
@@ -906,7 +925,7 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 	artifacts := map[contract.ArtifactType]string{}
 	for _, artifact := range st.Artifacts {
 		switch artifact.Type {
-		case contract.ArtifactDesign, contract.ArtifactTestPlan, contract.ArtifactReview:
+		case contract.ArtifactDesign, contract.ArtifactTestPlan, contract.ArtifactReview, contract.ArtifactValidation:
 			artifacts[artifact.Type] = artifact.Body
 		}
 	}
@@ -924,6 +943,11 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 	}
 	if review, ok := artifacts[contract.ArtifactReview]; ok {
 		if err := active.WriteFile("REVIEW.md", []byte(review), 0o644); err != nil {
+			return err
+		}
+	}
+	if val, ok := artifacts[contract.ArtifactValidation]; ok {
+		if err := active.WriteFile("VALIDATION.md", []byte(val), 0o644); err != nil {
 			return err
 		}
 	}

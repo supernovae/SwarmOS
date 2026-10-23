@@ -22,6 +22,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		worktree := root
 		var unit *contract.WorkUnit
 		var manager *lease.Manager
+		var state *lease.IssueState
 		var issue int
 		var owner string
 		if ciMode {
@@ -59,7 +60,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 				return err
 			}
-			state, err := manager.GetCurrentState(ctx, issue)
+			state, err = manager.GetCurrentState(ctx, issue)
 			if err != nil {
 				return err
 			}
@@ -90,6 +91,24 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		}
 		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{CIMode: ciMode, BaseSHA: baseSHA, ForkMode: options.Fork})
 		if report != nil && manager != nil {
+			if state != nil {
+				for _, att := range state.Attestations {
+					if att.Role == "tester" {
+						if report.Artifact.Metadata == nil {
+							report.Artifact.Metadata = make(map[string]string)
+						}
+						report.Artifact.Metadata["role"] = "tester"
+						report.Artifact.Metadata["agent"] = att.Agent
+						report.Artifact.Metadata["harness"] = att.Harness
+						report.Artifact.Metadata["harness_version"] = att.HarnessVersion
+						report.Artifact.Metadata["execution_mode"] = att.ExecutionMode
+						report.Artifact.Metadata["authentication"] = att.Authentication
+						report.Artifact.Metadata["model"] = att.Model
+						report.Artifact.Metadata["sandbox"] = att.Sandbox
+						break
+					}
+				}
+			}
 			_, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact)
 			validationErr = errors.Join(validationErr, err)
 		}

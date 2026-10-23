@@ -16,7 +16,6 @@ import (
 	"github.com/supernovae/swarmos/internal/workspace"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -600,7 +599,7 @@ func TestForkCLISmoke(t *testing.T) {
 	}
 
 	newGHTracker := func(login, userType string) *tracker.GitHubTracker {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			defer mu.Unlock()
 			writeResp := func(v any) {
@@ -864,18 +863,17 @@ func TestForkCLISmoke(t *testing.T) {
 			default:
 				http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 			}
-		}))
-		t.Cleanup(srv.Close)
-		srvURL, _ := url.Parse(srv.URL)
+		})
 		client, err := api.NewRESTClient(api.ClientOptions{
 			Host:      "github.com",
 			AuthToken: "test-token",
 			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 				cloned := req.Clone(req.Context())
-				cloned.URL.Scheme = srvURL.Scheme
-				cloned.URL.Host = srvURL.Host
-				cloned.Host = srvURL.Host
-				return http.DefaultTransport.RoundTrip(cloned)
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, cloned)
+				resp := rec.Result()
+				resp.Request = cloned
+				return resp, nil
 			}),
 		})
 		if err != nil {

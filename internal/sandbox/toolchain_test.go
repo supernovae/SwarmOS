@@ -184,17 +184,13 @@ func TestNativeAndBubblewrapOfflineLanguageBuildAndTest(t *testing.T) {
 	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
 		t.Skip("set SWARM_TEST_EXECUTOR=1 for real sandbox language build tests")
 	}
-	wt := filepath.Join("..", "..", ".swarm", "worktrees", "issue-14")
-	if _, err := os.Stat(wt); err != nil {
-		wt = filepath.Join("..", "..")
-	}
-	absWT, err := filepath.Abs(wt)
+	absWT, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var out strings.Builder
-	if err := (ToolExecutor{Work: absWT}).Run(context.Background(), "go version && go vet ./internal/cli", &out, &out); err != nil {
-		t.Fatalf("Bubblewrap offline Go vet failed: %v\n%s", err, out.String())
+	if err := (ToolExecutor{Work: absWT}).Run(context.Background(), "go version && go build ./... && go vet ./internal/cli", &out, &out); err != nil {
+		t.Fatalf("Bubblewrap offline Go build/vet failed: %v\n%s", err, out.String())
 	}
 	if binary := os.Getenv("SWARM_TEST_CODEX_BINARY"); binary != "" {
 		resolved, err := filepath.EvalSymlinks(binary)
@@ -202,8 +198,8 @@ func TestNativeAndBubblewrapOfflineLanguageBuildAndTest(t *testing.T) {
 			t.Fatal(err)
 		}
 		out.Reset()
-		if err := RunNativeValidation(context.Background(), absWT, resolved, "go build ./internal/cli && go vet ./internal/cli", &out, &out); err != nil {
-			t.Fatalf("Codex native offline Go build/vet failed: %v\n%s", err, out.String())
+		if err := RunNativeValidation(context.Background(), absWT, resolved, "go build ./... && go test ./... && go vet ./...", &out, &out); err != nil {
+			t.Fatalf("Codex native offline Go build/test/vet failed: %v\n%s", err, out.String())
 		}
 		if strings.Contains(out.String(), "Refusing to create helper binaries under temporary dir") {
 			t.Fatalf("unexpected Codex temporary-dir warning: %s", out.String())

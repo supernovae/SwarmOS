@@ -169,7 +169,7 @@ func PushForkCheckpoint(ctx context.Context, repoRoot, forkRemote, branch, headS
 		return fmt.Errorf("invalid fork checkpoint branch %q or head SHA %q", branch, headSHA)
 	}
 	branchRef := "refs/heads/" + branch
-	lsOut, err := gitOutputWithTokenContext(ctx, repoRoot, "ls-remote", "--refs", forkRemote, branchRef)
+	lsOut, err := gitOutputContext(ctx, repoRoot, "ls-remote", "--refs", forkRemote, branchRef)
 	if err != nil {
 		return fmt.Errorf("query fork remote %q for %s: %w", forkRemote, branch, err)
 	}
@@ -182,14 +182,10 @@ func PushForkCheckpoint(ctx context.Context, repoRoot, forkRemote, branch, headS
 		observedSHA = fields[0]
 	}
 	leaseArg := branchRef + ":" + observedSHA
-	if _, err := gitOutputWithTokenContext(ctx, repoRoot, "push", forkRemote, "--force-with-lease="+leaseArg, headSHA+":"+branchRef); err != nil {
+	if _, err := gitOutputContext(ctx, repoRoot, "push", forkRemote, "--force-with-lease="+leaseArg, headSHA+":"+branchRef); err != nil {
 		return fmt.Errorf("push checkpoint to fork remote %q: %w", forkRemote, err)
 	}
 	return nil
-}
-
-func gitOutputWithTokenContext(ctx context.Context, repoRoot string, args ...string) (string, error) {
-	return gitOutputContext(ctx, repoRoot, args...)
 }
 
 // ResolveBase resolves the immutable commit used to create a worktree. When
@@ -323,7 +319,7 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 	if existing, err := resolveCommit(absRoot, branch); err == nil && existing != checkpoint {
 		return "", "", fmt.Errorf("existing branch %q is at %s, expected approved checkpoint %s; preserve it under another branch before retrying", branch, existing, checkpoint)
 	}
-	if _, err := gitOutput(absRoot, "worktree", "add", wtPath, branch); err != nil {
+	if _, err := gitOutput(absRoot, "worktree", "add", "--", wtPath, branch); err != nil {
 		return "", "", fmt.Errorf("add worktree: %w", err)
 	}
 	if err := verifyWorktree(wtPath, branch, headSHA); err != nil {
@@ -746,13 +742,21 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMPT.md`"+` before making changes.
 %s`, ActiveMarkerStart, wu.ID, wu.IssueNumber, role, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, ActiveMarkerEnd)
 
+	if err := injectActivePointer(worktreePath, pointerBlock); err != nil {
+		return err
+	}
+	return configureWorktreeExclude(worktreePath)
+}
+
+// injectActivePointer writes the ephemeral active-task block into the agent
+// instruction files; CleanEphemeralHarnessMarkers removes it again.
+func injectActivePointer(worktreePath, block string) error {
 	for _, docName := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if err := injectManagedBlock(filepath.Join(worktreePath, docName), pointerBlock); err != nil {
+		if err := injectManagedBlock(filepath.Join(worktreePath, docName), block); err != nil {
 			return err
 		}
 	}
-
-	return configureWorktreeExclude(worktreePath)
+	return nil
 }
 
 func LoadActiveWorkUnit(worktreePath string) (*contract.WorkUnit, error) {

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"gopkg.in/yaml.v3"
 )
 
@@ -835,7 +837,8 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 	}
 
 	// 3. .swarm/ Harness configuration
-	if cfg, err := LoadConfig(repoRoot); err == nil && cfg.Version >= 1 {
+	cfg, configErr := LoadConfig(repoRoot)
+	if configErr == nil && cfg.Version >= 1 {
 		checks = append(checks, DoctorCheck{
 			Category: "harness",
 			Name:     ".swarm/config.yaml",
@@ -884,7 +887,63 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 		}
 	}
 
+	if configErr != nil || cfg.Version < 1 {
+		cfg = nil
+	}
+	checks = append(checks, doctorSandboxCheck(cfg))
 	return checks
+}
+
+// doctorSandboxCheck reports discovery only; agent preflights validate execution.
+func doctorSandboxCheck(cfg *contract.SwarmConfig) DoctorCheck {
+	check := DoctorCheck{Category: "sandbox", Name: "reviewer-runtime", Status: "WARN"}
+	var runtimeName, containerRuntime, image string
+	var err error
+	if cfg != nil {
+		name := cfg.Roles["reviewer"]
+		if name == "" {
+			name = cfg.DefaultAgent
+		}
+		ac := cfg.Agents[name]
+		runtimeName, containerRuntime, image = ac.Sandbox, ac.ContainerRuntime, ac.ContainerImage
+		var execution contract.ExecutionConfig
+		execution, err = contract.ResolveExecution(cfg, "")
+		if err == nil && execution.Mode == contract.ExecutionIsolated {
+			runtimeName = ""
+			if execution.Backend == contract.BackendOCI {
+				runtimeName = "container"
+				containerRuntime, image = execution.ContainerRuntime, execution.ContainerImage
+				if ac.ContainerRuntime != "" {
+					containerRuntime = ac.ContainerRuntime
+				}
+				if ac.ContainerImage != "" {
+					image = ac.ContainerImage
+				}
+			}
+		}
+	}
+	guidance := "configure execution.backend: oci with execution.container_runtime and execution.container_image"
+	if runtimeName == "container" {
+		if containerRuntime == "" {
+			containerRuntime = "docker"
+		}
+		guidance = "install the selected " + containerRuntime + " CLI on PATH and configure its container image"
+	} else if runtime.GOOS == "linux" {
+		guidance = "install Bubblewrap and put bwrap on PATH, or " + guidance
+	} else if runtime.GOOS == "darwin" {
+		guidance = "ensure sandbox-exec is available on PATH, or " + guidance
+	}
+	var path string
+	if err == nil {
+		path, err = sandbox.ResolveReadOnlyRuntime(runtimeName, containerRuntime, image)
+	}
+	if err != nil {
+		check.Detail = err.Error() + "; " + guidance
+	} else {
+		check.Status = "OK"
+		check.Detail = "reviewer runtime binary available: " + path
+	}
+	return check
 }
 
 func ensureGitignoreEntries(repoRoot string, entries []string) error {

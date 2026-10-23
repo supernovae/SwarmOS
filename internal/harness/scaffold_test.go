@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -811,6 +812,146 @@ func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
 		}
 		if got := strings.TrimSpace(string(args)); got != "repo validate --base "+want {
 			t.Fatalf("%s validated against %q, want base %s", event, got, want)
+		}
+	}
+}
+
+func TestDoctorSandboxSelection(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	marker := filepath.Join(dir, "executed")
+	for _, bin := range []string{"bwrap", "sandbox-exec", "docker", "podman"} {
+		if err := os.WriteFile(filepath.Join(dir, bin), []byte(fmt.Sprintf("#!/bin/sh\nprintf executed > %q\n", marker)), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, mode, backend, cli, image, agentCLI, agentImage string
+		reviewer                                              bool
+		want                                                  string
+	}{
+		{"default OCI", "", "oci", "", "image", "", "", false, "docker"},
+		{"podman OCI", "", "oci", "podman", "image", "", "", false, "podman"},
+		{"reviewer override", "", "oci", "docker", "", "podman", "agent-image", true, "podman"},
+		{"default agent override", "", "oci", "docker", "image", "podman", "", false, "podman"},
+		{"trusted container", "trusted-local", "", "", "", "podman", "image", false, "podman"},
+		{"missing image", "", "oci", "podman", "", "", "", false, "WARN"},
+		{"missing selected CLI", "trusted-local", "", "", "", "absent", "image", false, "WARN"},
+		{"native", "", "native", "", "", "codex-native", "", false, "native"},
+		{"invalid execution", "", "invalid", "", "", "", "", false, "WARN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &contract.SwarmConfig{DefaultAgent: "default"}
+			cfg.Execution = contract.ExecutionConfig{Mode: tc.mode, Backend: tc.backend, ContainerRuntime: tc.cli, ContainerImage: tc.image}
+			// Derive the agent map type from the existing config fixture.
+			template, err := embeddedTemplates.ReadFile("templates/swarm/config.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			base, err := decodeConfig(template)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Agents = base.Agents
+			ac := cfg.Agents["codex"]
+			ac.Sandbox = "container"
+			ac.ContainerRuntime = tc.agentCLI
+			ac.ContainerImage = tc.agentImage
+			cfg.Agents["default"] = ac
+			if tc.reviewer {
+				cfg.Roles = map[string]string{"reviewer": "review"}
+				cfg.Agents["review"] = ac
+				other := ac
+				other.ContainerRuntime = "absent"
+				cfg.Agents["default"] = other
+			}
+			check := doctorSandboxCheck(cfg)
+			want := tc.want
+			if want == "native" {
+				switch runtime.GOOS {
+				case "linux":
+					want = "bwrap"
+				case "darwin":
+					want = "sandbox-exec"
+				default:
+					want = "WARN"
+				}
+			}
+			if want == "WARN" {
+				if check.Status != "WARN" || !strings.Contains(check.Detail, "configure") {
+					t.Fatalf("%+v", check)
+				}
+			} else if check.Status != "OK" || !strings.Contains(check.Detail, filepath.Join(dir, want)) {
+				t.Fatalf("%+v", check)
+			}
+		})
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("runtime fixture executed")
+	}
+}
+
+func TestRunDoctorSandboxReadiness(t *testing.T) {
+	t.Setenv("SWARM_GITHUB_TOKEN_COMMAND", "")
+	t.Setenv("SWARM_GITHUB_TOKEN", "fixture")
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	native := "bwrap"
+	guidance := "Bubblewrap"
+	if runtime.GOOS == "darwin" {
+		native = "sandbox-exec"
+		guidance = "sandbox-exec"
+	}
+	for _, available := range []bool{false, true} {
+		if available {
+			if err := os.WriteFile(filepath.Join(dir, native), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, config := range []string{"absent", "invalid", "valid"} {
+			t.Run(fmt.Sprintf("%s/%v", config, available), func(t *testing.T) {
+				root := t.TempDir()
+				if config != "absent" {
+					if err := os.MkdirAll(filepath.Join(root, ".swarm"), 0700); err != nil {
+						t.Fatal(err)
+					}
+					data := []byte("invalid: [")
+					if config == "valid" {
+						var err error
+						data, err = embeddedTemplates.ReadFile("templates/swarm/config.yaml")
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := os.WriteFile(filepath.Join(root, ".swarm/config.yaml"), data, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				count := 0
+				configFail := false
+				for _, check := range RunDoctor(root, false) {
+					if check.Name == ".swarm/config.yaml" {
+						configFail = check.Status == "FAIL"
+					}
+					if check.Category != "sandbox" {
+						continue
+					}
+					count++
+					if check.Name != "reviewer-runtime" {
+						t.Fatalf("%+v", check)
+					}
+					if available && (runtime.GOOS == "linux" || runtime.GOOS == "darwin") {
+						if check.Status != "OK" || !strings.Contains(check.Detail, filepath.Join(dir, native)) {
+							t.Fatalf("%+v", check)
+						}
+					} else if check.Status != "WARN" || (runtime.GOOS == "linux" || runtime.GOOS == "darwin") && !strings.Contains(check.Detail, guidance) {
+						t.Fatalf("%+v", check)
+					}
+				}
+				if count != 1 || configFail != (config != "valid") {
+					t.Fatalf("count=%d configFail=%v", count, configFail)
+				}
+			})
 		}
 	}
 }

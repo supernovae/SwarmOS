@@ -28,37 +28,51 @@ type Options struct {
 // CheckReadOnlyRuntime verifies that the selected isolation boundary is
 // available before a caller reserves work.
 func CheckReadOnlyRuntime(runtimeName, containerRuntime, container string) error {
+	_, err := ResolveReadOnlyRuntime(runtimeName, containerRuntime, container)
+	return err
+}
+
+// ResolveReadOnlyRuntime returns the selected runtime executable path without
+// running it or checking daemon, image, or kernel readiness.
+func ResolveReadOnlyRuntime(runtimeName, containerRuntime, container string) (string, error) {
+	return resolveReadOnlyRuntime(runtimeName, containerRuntime, container, runtime.GOOS, exec.LookPath)
+}
+
+func resolveReadOnlyRuntime(runtimeName, containerRuntime, container, goos string, lookup func(string) (string, error)) (string, error) {
 	if runtimeName == "container" {
 		if container == "" {
-			return fmt.Errorf("review isolation container image is required")
+			return "", fmt.Errorf("review isolation container image is required")
 		}
 		if containerRuntime == "" {
 			containerRuntime = "docker"
 		}
-		if _, err := exec.LookPath(containerRuntime); err != nil {
-			return fmt.Errorf("review isolation unavailable: configured container runtime %q is required: %w", containerRuntime, err)
+		if path, err := lookup(containerRuntime); err != nil {
+			return "", fmt.Errorf("review isolation unavailable: configured container runtime %q is required: %w", containerRuntime, err)
+		} else {
+			return path, nil
 		}
-		return nil
 	}
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		if runtimeName != "" && runtimeName != "sandbox-exec" {
-			return fmt.Errorf("configured review isolation runtime %q is unavailable on macOS", runtimeName)
+			return "", fmt.Errorf("configured review isolation runtime %q is unavailable on macOS", runtimeName)
 		}
-		if _, err := exec.LookPath("sandbox-exec"); err != nil {
-			return fmt.Errorf("review isolation unavailable: sandbox-exec is required on macOS: %w", err)
+		if path, err := lookup("sandbox-exec"); err != nil {
+			return "", fmt.Errorf("review isolation unavailable: sandbox-exec is required on macOS: %w", err)
+		} else {
+			return path, nil
 		}
-		return nil
 	case "linux":
 		if runtimeName != "" && runtimeName != "bwrap" {
-			return fmt.Errorf("configured review isolation runtime %q is unavailable on Linux", runtimeName)
+			return "", fmt.Errorf("configured review isolation runtime %q is unavailable on Linux", runtimeName)
 		}
-		if _, err := exec.LookPath("bwrap"); err != nil {
-			return fmt.Errorf("review isolation unavailable: bwrap is required on Linux or configure a container: %w", err)
+		if path, err := lookup("bwrap"); err != nil {
+			return "", fmt.Errorf("review isolation unavailable: bwrap is required on Linux or configure a container: %w", err)
+		} else {
+			return path, nil
 		}
-		return nil
 	default:
-		return fmt.Errorf("review isolation unsupported on %s; configure a container runtime", runtime.GOOS)
+		return "", fmt.Errorf("review isolation unsupported on %s; configure a container runtime", goos)
 	}
 }
 

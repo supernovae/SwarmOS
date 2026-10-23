@@ -38,11 +38,11 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
-			lock, err := lockClaim(root, issue)
+			lock, err := lease.LockClaim(root, issue)
 			if err != nil {
 				return err
 			}
-			defer unlockClaim(lock)
+			defer lease.UnlockClaim(lock)
 			tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
 				return err
@@ -55,13 +55,16 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if owner == "" {
 				return fmt.Errorf("submission requires an authenticated owner")
 			}
-			claim, err := loadClaimToken(root, issue)
+			claim, err := lease.LoadClaimToken(root, issue)
 			if err != nil {
 				return fmt.Errorf("load submission claim: %w", err)
 			}
 			manager.BindClaim(issue, claim)
 			state, err := manager.GetCurrentState(ctx, issue)
 			if err != nil {
+				return err
+			}
+			if err := requireIssueWorkspace(state); err != nil {
 				return err
 			}
 			_ = workspace.FetchCommit(root, "origin", state.BaseSHA)

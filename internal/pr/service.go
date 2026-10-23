@@ -1,0 +1,627 @@
+package pr
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/supernovae/swarmos/internal/agent"
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
+	"github.com/supernovae/swarmos/internal/workflow"
+	"github.com/supernovae/swarmos/internal/workspace"
+)
+
+type Service struct {
+	Root       string
+	Tracker    tracker.Tracker
+	Manager    *lease.Manager
+	Fork       bool
+	ForkRemote string
+}
+type Options struct {
+	Number       int
+	Work         workflow.WorkOptions
+	Instructions string
+	Continue     bool
+	Abort        bool
+}
+type Result struct {
+	PR          *tracker.PullRequest         `json:"pr"`
+	IssueNumber int                          `json:"issue_number"`
+	State       *lease.IssueState            `json:"state,omitempty"`
+	Worktree    string                       `json:"worktree,omitempty"`
+	Branch      string                       `json:"branch,omitempty"`
+	HeadSHA     string                       `json:"head_sha,omitempty"`
+	BaseSHA     string                       `json:"base_sha,omitempty"`
+	Checks      []tracker.CheckRunResult     `json:"checks,omitempty"`
+	Reviews     []tracker.PullRequestReview  `json:"reviews,omitempty"`
+	Status      string                       `json:"status"`
+	Dirty       bool                         `json:"dirty"`
+	Rebasing    bool                         `json:"rebasing"`
+	Validation  *validation.ValidationReport `json:"validation,omitempty"`
+	Preflight   *workflow.PreflightResult    `json:"preflight,omitempty"`
+	Work        *workflow.WorkResult         `json:"work,omitempty"`
+}
+
+func headBranch(pr *tracker.PullRequest) string {
+	if i := strings.IndexByte(pr.Head, ':'); i >= 0 {
+		return pr.Head[i+1:]
+	}
+	return pr.Head
+}
+
+func revisionHead(st *lease.IssueState) string {
+	if st != nil && st.PRRevision != nil {
+		return st.PRRevision.LocalHeadSHA
+	}
+	return ""
+}
+
+// linked accepts only the authoritative issue coordination state, never PR
+// descriptions, titles, naming conventions or unverified tracker hints.
+func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
+	if number <= 0 {
+		return nil, fmt.Errorf("positive PR number required")
+	}
+	pr, err := s.Tracker.GetPullRequest(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if pr == nil || pr.Number != number || !strings.EqualFold(pr.State, "open") || pr.Merged {
+		return nil, fmt.Errorf("PR #%d must be open and unmerged", number)
+	}
+	issues, err := s.Tracker.ListIssues(ctx, tracker.IssueFilter{State: "all"})
+	if err != nil {
+		return nil, err
+	}
+	var result *Result
+	for _, issue := range issues {
+		st, stateErr := s.Manager.GetCurrentState(ctx, issue.Number)
+		if errors.Is(stateErr, coordination.ErrNotFound) {
+			continue
+		}
+		if stateErr != nil {
+			return nil, fmt.Errorf("read issue #%d authoritative state: %w", issue.Number, stateErr)
+		}
+		if st == nil || st.PRNumber != number {
+			continue
+		}
+		if result != nil {
+			return nil, fmt.Errorf("PR #%d has multiple authoritative issue links", number)
+		}
+		cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+		if err != nil {
+			return nil, err
+		}
+		wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+		if err != nil {
+			return nil, err
+		}
+		if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+			return nil, lease.ErrApprovalRequired
+		}
+		if st.Branch == "" || pr.HeadSHA == "" || pr.BaseSHA == "" {
+			return nil, fmt.Errorf("PR #%d lacks exact branch/head/base identity", number)
+		}
+		if headBranch(pr) != st.Branch {
+			return nil, fmt.Errorf("PR #%d head branch differs from its linked issue", number)
+		}
+		if pr.IssueNumber != 0 && pr.IssueNumber != issue.Number {
+			return nil, fmt.Errorf("PR #%d issue identity mismatch", number)
+		}
+		if provider, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
+			upstream := provider.UpstreamRepo()
+			if pr.BaseRepo == "" || !strings.EqualFold(pr.BaseRepo, upstream) || pr.HeadRepo == "" {
+				return nil, fmt.Errorf("PR repository identity differs from upstream %s", upstream)
+			}
+			if !strings.EqualFold(pr.HeadRepo, upstream) {
+				if st.ForkRepo == "" || !strings.EqualFold(pr.HeadRepo, st.ForkRepo) {
+					return nil, fmt.Errorf("fork PR head repository differs from authoritative issue fork repository")
+				}
+			} else if pr.Head != st.Branch {
+				return nil, fmt.Errorf("same-repository PR head must match linked branch")
+			}
+		}
+		root, err := filepath.Abs(s.Root)
+		if err != nil {
+			return nil, fmt.Errorf("resolve PR workspace root: %w", err)
+		}
+		result = &Result{PR: pr, IssueNumber: issue.Number, State: st, Worktree: workspace.PRWorktreePath(root, number), Branch: workspace.PRBranchName(number), HeadSHA: pr.HeadSHA, BaseSHA: st.BaseSHA, Status: "open"}
+	}
+	if result == nil {
+		return nil, fmt.Errorf("PR #%d is not linked to an approved WorkUnit", number)
+	}
+	if result.State.PRRevision != nil {
+		rev := result.State.PRRevision
+		if rev.Number != number {
+			return nil, fmt.Errorf("PR revision identity mismatch")
+		}
+		result.HeadSHA, result.Branch, result.Status = rev.LocalHeadSHA, rev.Branch, "pending"
+		if rev.RemoteHeadSHA != rev.LocalHeadSHA && pr.HeadSHA == rev.LocalHeadSHA {
+			result.Status = "published-pending-reconciliation"
+		} else if pr.HeadSHA != rev.RemoteHeadSHA {
+			result.Status = "diverged"
+		}
+	}
+	return result, nil
+}
+
+func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
+	r, err := s.linked(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if _, statErr := os.Lstat(r.Worktree); os.IsNotExist(statErr) {
+		r.Worktree = ""
+	} else if statErr != nil {
+		return nil, statErr
+	} else {
+		head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
+		if e != nil {
+			return nil, fmt.Errorf("inspect managed PR worktree: %w", e)
+		}
+		if r.State.PRRevision != nil && head != r.State.PRRevision.LocalHeadSHA && !rebasing {
+			return nil, fmt.Errorf("local PR head differs from recorded checkpoint")
+		}
+		r.HeadSHA = head
+		r.Dirty, r.Rebasing = dirty, rebasing
+		if r.Status != "diverged" {
+			if rebasing {
+				r.Status = "rebasing"
+			} else if dirty {
+				r.Status = "dirty"
+			}
+		}
+	}
+	r.Checks, err = s.Tracker.GetCheckStatus(ctx, r.PR.HeadSHA)
+	if err != nil {
+		return r, err
+	}
+	if reviewer, ok := s.Tracker.(interface {
+		GetPullRequestReviews(context.Context, int) ([]tracker.PullRequestReview, error)
+	}); ok {
+		r.Reviews, err = reviewer.GetPullRequestReviews(ctx, number)
+		if err != nil {
+			return r, err
+		}
+	}
+	return r, nil
+}
+
+func (s *Service) remote(ctx context.Context, r *Result) (string, error) {
+	if s.Fork {
+		return "", fmt.Errorf("PR mutations need upstream write authorization; --fork contributor gateway is not supported")
+	}
+	remote := ""
+	if _, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
+		remote = "origin"
+	}
+	if provider, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
+		if !strings.EqualFold(r.PR.HeadRepo, provider.UpstreamRepo()) {
+			if s.ForkRemote == "" || s.ForkRemote == "origin" {
+				return "", fmt.Errorf("fork PR head requires an explicit writable remote matching %s", r.PR.HeadRepo)
+			}
+			slug, err := workspace.ResolveRemoteGitHubSlug(s.Root, s.ForkRemote)
+			if err != nil {
+				return "", err
+			}
+			if !strings.EqualFold(slug, r.PR.HeadRepo) {
+				return "", fmt.Errorf("configured head remote %s does not match PR head repository %s", slug, r.PR.HeadRepo)
+			}
+			remote = s.ForkRemote
+		}
+		if err := s.Tracker.Authorize(ctx, "approve-task"); err != nil {
+			return "", fmt.Errorf("upstream write authorization required: %w", err)
+		}
+	}
+	return remote, nil
+}
+
+// withClaim serializes the issue across CLI and PR commands and binds the exact
+// persisted token before any fenced operation. A completed issue is re-claimed
+// for PR work; an active issue can only be resumed by its original owner.
+func (s *Service) withClaim(ctx context.Context, r *Result, fn func(string, *lease.IssueState) (*Result, error)) (*Result, error) {
+	lock, err := lease.LockClaim(s.Root, r.IssueNumber)
+	if err != nil {
+		return nil, err
+	}
+	defer lease.UnlockClaim(lock)
+	owner, err := s.Tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if owner == "" {
+		return nil, fmt.Errorf("authenticated claim owner required")
+	}
+	st, err := s.Manager.GetCurrentState(ctx, r.IssueNumber)
+	if err != nil {
+		return nil, err
+	}
+	if st.PRNumber != r.PR.Number || (st.PRRevision != nil && st.PRRevision.RemoteHeadSHA != r.PR.HeadSHA && st.PRRevision.LocalHeadSHA != r.PR.HeadSHA) {
+		return nil, fmt.Errorf("PR coordination state changed")
+	}
+	token := ""
+	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(time.Now()) {
+		token, err = lease.LoadClaimToken(s.Root, r.IssueNumber)
+		if err != nil {
+			return nil, fmt.Errorf("load active claim: %w", err)
+		}
+	}
+	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(time.Now()) {
+		if token == "" || st.Lease.ClaimID != token {
+			return nil, lease.ErrClaimFence
+		}
+		st, err = s.Manager.Resume(ctx, r.IssueNumber, owner, token)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		cfg, e := harness.LoadConfigAt(s.Root, st.BaseSHA)
+		if e != nil {
+			return nil, e
+		}
+		duration, e := time.ParseDuration(cfg.Lease.Duration)
+		if e != nil {
+			return nil, e
+		}
+		st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, "pr", "all", duration, cfg.Lease.MaxRenewals)
+		if err != nil {
+			return nil, err
+		}
+		token = st.Lease.ClaimID
+		if err = lease.SaveClaimToken(s.Root, r.IssueNumber, token); err != nil {
+			return nil, err
+		}
+	}
+	return fn(owner, st)
+}
+
+// withCleanPRMarkers runs only after PreparePR has verified the managed worktree.
+// Remove temporary instruction pointers before inspecting cleanliness and again
+// after execution; unrelated edits remain visible to PRHead and Git.
+func withCleanPRMarkers(path string, run func() (*Result, error)) (result *Result, err error) {
+	if cleanErr := workspace.CleanEphemeralHarnessMarkers(path); cleanErr != nil {
+		return nil, fmt.Errorf("clean PR harness markers: %w", cleanErr)
+	}
+	defer func() {
+		if cleanErr := workspace.CleanEphemeralHarnessMarkers(path); cleanErr != nil {
+			err = errors.Join(err, fmt.Errorf("clean PR harness markers: %w", cleanErr))
+		}
+	}()
+	return run()
+}
+
+func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
+	r, err := s.linked(ctx, opts.Number)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status == "published-pending-reconciliation" {
+		return nil, fmt.Errorf("PR head has been published; run swarm pr submit %d to reconcile state", opts.Number)
+	}
+	if r.Status == "diverged" {
+		return nil, fmt.Errorf("PR remote head changed outside the recorded revision; preserve local work and reconcile the PR before mutation")
+	}
+	remote, err := s.remote(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	opts.Work.RepoRoot = s.Root
+	opts.Work.IssueNumber = r.IssueNumber
+	opts.Work.PRNumber = opts.Number
+	opts.Work.PRWorktree = r.Worktree
+	opts.Work.Instructions = opts.Instructions
+	if opts.Work.Phase == "" {
+		opts.Work.Phase = "all"
+	}
+	opts.Work.FreshPRRevision = r.State.PRRevision == nil
+	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	for _, override := range []struct{ role, name string }{{"planner", opts.Work.PlannerAgent}, {"reviewer", opts.Work.ReviewerAgent}, {"developer", opts.Work.DeveloperAgent}, {"tester", opts.Work.TesterAgent}} {
+		if override.name != "" {
+			if _, e := agent.Preflight(override.name, cfg, s.Tracker.BackendName() == "local", override.role); e != nil {
+				return nil, fmt.Errorf("%s agent preflight: %w", override.role, e)
+			}
+		}
+	}
+	engine := workflow.NewEngineWithManager(s.Root, s.Tracker, s.Manager, cfg, false, "")
+	pre, preflightErr := engine.Preflight(ctx, opts.Work)
+	if preflightErr != nil {
+		return nil, preflightErr
+	}
+	if opts.Work.InspectOnly {
+		r.Preflight = pre
+		if len(pre.Blockers) > 0 {
+			r.Status = "blocked"
+		} else {
+			r.Status = "ready"
+		}
+		return r, nil
+	}
+	return s.withClaim(ctx, r, func(owner string, st *lease.IssueState) (*Result, error) {
+		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: opts.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: revisionHead(r.State), AllowHarnessMarkers: true})
+		if e != nil {
+			return nil, e
+		}
+		return withCleanPRMarkers(path, func() (*Result, error) {
+			head, dirty, rebasing, e := workspace.PRHead(ctx, path)
+			if e != nil {
+				return nil, e
+			}
+			if dirty || rebasing {
+				return nil, fmt.Errorf("PR worktree must be clean and not rebasing before work")
+			}
+			st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch)
+			if e != nil {
+				return nil, e
+			}
+			opts.Work.FreshPRRevision = false
+			opts.Work.Owner = owner
+			opts.Work.ClaimID = st.Lease.ClaimID
+			opts.Work.PRWorktree = path
+			opts.Work.OnClaim = func(st *lease.IssueState) error { return lease.SaveClaimToken(s.Root, r.IssueNumber, st.Lease.ClaimID) }
+			worked, e := engine.ExecuteWork(ctx, opts.Work)
+			if worked != nil {
+				r.Work = worked
+				r.State = worked.State
+				r.HeadSHA = worked.HeadSHA
+				r.Status = "pending"
+			}
+			return r, e
+		})
+	})
+}
+
+func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
+	if opts.Continue && opts.Abort {
+		return nil, fmt.Errorf("--continue and --abort are mutually exclusive")
+	}
+	r, err := s.linked(ctx, opts.Number)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status == "published-pending-reconciliation" {
+		return nil, fmt.Errorf("PR head has been published; run swarm pr submit %d to reconcile state", opts.Number)
+	}
+	if r.Status == "diverged" {
+		return nil, fmt.Errorf("PR remote head changed outside the recorded revision; preserve local work and reconcile the PR before mutation")
+	}
+	remote, err := s.remote(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if !opts.Abort && r.PR.BaseSHA != r.BaseSHA {
+		return nil, fmt.Errorf("PR base tip differs from approved issue baseline: swarm issue approve %d then retry (release active claim first if needed)", r.IssueNumber)
+	}
+	return s.withClaim(ctx, r, func(owner string, st *lease.IssueState) (*Result, error) {
+		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: opts.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: revisionHead(r.State), AllowHarnessMarkers: true})
+		if e != nil {
+			return nil, e
+		}
+		return withCleanPRMarkers(path, func() (*Result, error) {
+			head, dirty, rebasing, e := workspace.PRHead(ctx, path)
+			if e != nil {
+				return nil, e
+			}
+			if opts.Continue || opts.Abort {
+				if !rebasing {
+					return nil, fmt.Errorf("no managed PR rebase in progress")
+				}
+			} else if dirty || rebasing {
+				return nil, fmt.Errorf("PR worktree must be clean before starting rebase")
+			}
+			if !rebasing {
+				st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch)
+				if e != nil {
+					return nil, e
+				}
+			}
+			if !opts.Abort {
+				if _, e = s.Manager.InvalidatePRRevisionEvidence(ctx, r.IssueNumber, owner, opts.Number); e != nil {
+					return nil, e
+				}
+			}
+			newHead, e := workspace.RebasePR(ctx, path, r.PR.BaseSHA, opts.Continue, opts.Abort)
+			if e != nil {
+				r.Status = "rebasing"
+				return r, e
+			}
+			if newHead != "" {
+				st, e = s.Manager.RecordPRHead(ctx, r.IssueNumber, owner, opts.Number, branch, newHead)
+				if e != nil {
+					return nil, e
+				}
+				r.State = st
+				r.HeadSHA = newHead
+			}
+			r.Status = "pending"
+			return r, nil
+		})
+	})
+}
+
+func (s *Service) Validate(ctx context.Context, number int) (*Result, error) {
+	r, err := s.linked(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status == "diverged" {
+		return nil, fmt.Errorf("PR remote head changed outside the recorded revision; preserve local work and reconcile the PR before mutation")
+	}
+	remote, err := s.remote(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if r.State.PRRevision == nil {
+		return nil, fmt.Errorf("no pending PR revision to validate")
+	}
+	return s.withClaim(ctx, r, func(owner string, st *lease.IssueState) (*Result, error) {
+		if st.PRRevision == nil || st.PRRevision.Number != number {
+			return nil, fmt.Errorf("pending PR revision changed during validation")
+		}
+		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: st.PRRevision.LocalHeadSHA, AllowHarnessMarkers: true, RequireBaseAncestor: true})
+		if e != nil {
+			return nil, e
+		}
+		if path != r.Worktree || branch != st.PRRevision.Branch {
+			return nil, fmt.Errorf("PR worktree identity differs from recorded revision")
+		}
+		return withCleanPRMarkers(path, func() (*Result, error) {
+			head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
+			if e != nil {
+				return nil, e
+			}
+			if dirty || rebasing || head != st.PRRevision.LocalHeadSHA {
+				return nil, fmt.Errorf("PR worktree is dirty, rebasing, or differs from recorded checkpoint")
+			}
+			issue, e := s.Tracker.GetIssue(ctx, r.IssueNumber)
+			if e != nil {
+				return nil, e
+			}
+			wu, e := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+			if e != nil {
+				return nil, e
+			}
+			if e = lease.VerifyApproval(st, wu); e != nil {
+				return nil, fmt.Errorf("PR plan approval required: %w", e)
+			}
+			report, valErr := validation.Validate(ctx, r.Worktree, wu, validation.ValidateOptions{BaseSHA: st.BaseSHA})
+			checkedHead, changed, activeRebase, checkErr := workspace.PRHead(ctx, r.Worktree)
+			if checkErr != nil {
+				return nil, checkErr
+			}
+			if changed || activeRebase || checkedHead != head {
+				return nil, fmt.Errorf("PR candidate changed during validation")
+			}
+			if report != nil {
+				r.Validation = report
+				st, e = s.Manager.UpdateArtifact(ctx, r.IssueNumber, owner, report.Artifact)
+				if e != nil {
+					return r, e
+				}
+				r.State = st
+			}
+			r.HeadSHA = head
+			r.Status = "pending"
+			return r, valErr
+		})
+	})
+}
+
+func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
+	r, err := s.linked(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if r.Status == "diverged" {
+		return nil, fmt.Errorf("PR remote head changed outside the recorded revision; refusing submit")
+	}
+	remote, err := s.remote(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if r.State.PRRevision == nil {
+		if r.PR.HeadSHA != r.State.HeadSHA {
+			return nil, fmt.Errorf("PR head changed since the last verified submission; run swarm pr work %d before submitting", number)
+		}
+		r.Status = "submitted"
+		return r, nil
+	}
+	r, err = s.Validate(ctx, number)
+	if err != nil {
+		return r, err
+	}
+	// Validation acquired the issue lock and released it; acquire again for the
+	// final head comparison, exact-old-head push, and coordination CAS.
+	return s.withClaim(ctx, r, func(owner string, st *lease.IssueState) (*Result, error) {
+		rev := st.PRRevision
+		if rev == nil || (rev.RemoteHeadSHA != r.PR.HeadSHA && rev.LocalHeadSHA != r.PR.HeadSHA) {
+			return nil, fmt.Errorf("PR revision changed during validation")
+		}
+		head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
+		if e != nil {
+			return nil, e
+		}
+		if dirty || rebasing || head != rev.LocalHeadSHA || r.Validation == nil || !r.Validation.Passed || r.Validation.HeadSHA != head {
+			return nil, fmt.Errorf("PR candidate changed after validation")
+		}
+		issue, e := s.Tracker.GetIssue(ctx, r.IssueNumber)
+		if e != nil {
+			return nil, e
+		}
+		wu, e := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+		if e != nil {
+			return nil, e
+		}
+		if e = lease.VerifyApproval(st, wu); e != nil {
+			return nil, e
+		}
+		fresh, e := s.Tracker.GetPullRequest(ctx, number)
+		if e != nil {
+			return nil, e
+		}
+		if fresh == nil || fresh.State != "open" || fresh.Merged || fresh.Head != r.PR.Head || fresh.HeadRepo != r.PR.HeadRepo || fresh.BaseSHA != r.BaseSHA {
+			return nil, fmt.Errorf("PR changed remotely before publish; refusing stale head")
+		}
+		if fresh.HeadSHA != head {
+			if fresh.HeadSHA != rev.RemoteHeadSHA {
+				return nil, fmt.Errorf("PR head moved concurrently; refusing stale publish")
+			}
+			if remote == "origin" {
+				st, e = s.Manager.CompletePRRevision(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
+				if e != nil {
+					return nil, e
+				}
+			} else {
+				if e = s.Manager.CheckClaim(ctx, r.IssueNumber, owner); e != nil {
+					return nil, e
+				}
+				if remote == "" {
+					local, ok := s.Tracker.(*tracker.LocalTracker)
+					if !ok {
+						return nil, fmt.Errorf("local PR publication requires local tracker")
+					}
+					e = local.PublishPRHead(ctx, number, rev.RemoteHeadSHA, head)
+				} else {
+					e = workspace.PublishPR(ctx, s.Root, remote, headBranch(fresh), rev.RemoteHeadSHA, head)
+				}
+				if e != nil {
+					return nil, e
+				}
+				observed, observeErr := s.Tracker.GetPullRequest(ctx, number)
+				if observeErr != nil {
+					return nil, observeErr
+				}
+				if observed == nil || observed.HeadSHA != head || observed.State != "open" || observed.Merged {
+					return nil, fmt.Errorf("PR head or state changed after publication; coordination remains pending")
+				}
+				st, e = s.Manager.CompletePRRevisionLocal(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
+				if e != nil {
+					return nil, fmt.Errorf("PR head published but state reconciliation is required: %w", e)
+				}
+			}
+		} else {
+			// Retry after a local or fork head update succeeded but its state CAS failed.
+			st, e = s.Manager.CompletePRRevisionLocal(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
+			if e != nil {
+				return nil, e
+			}
+		}
+		r.PR.HeadSHA = head
+		r.State = st
+		r.HeadSHA = head
+		r.Status = "submitted"
+		return r, nil
+	})
+}

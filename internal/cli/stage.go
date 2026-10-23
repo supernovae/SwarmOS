@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,21 +14,32 @@ import (
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
-func newStageCmd(rootOpts *RootOptions) *cobra.Command {
+func newStageCmd(rootOpts *RootOptions) *cobra.Command { return newStageCommand(rootOpts, false) }
+
+func newPRStageCmd(rootOpts *RootOptions) *cobra.Command { return newStageCommand(rootOpts, true) }
+
+func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 	var phase string
 	var harnessFlag string
 	var modelFlag string
 	var handoff bool
 	var asJSON bool
 
+	use, short := "stage [<issue-number>]", "Stage interactive or harness-produced plan/implementation artifacts onto the active lease"
+	argsValidator := cobra.MaximumNArgs(1)
+	if prStage {
+		use, short = "stage <pr-number>", "Stage an interactive plan or unpublished implementation in the managed PR worktree"
+		argsValidator = cobra.ExactArgs(1)
+	}
 	cmd := &cobra.Command{
-		Use:   "stage [<issue-number>]",
-		Short: "Stage interactive or harness-produced plan/implementation artifacts onto the active lease",
-		Args:  cobra.MaximumNArgs(1),
+		Use:   use,
+		Short: short,
+		Args:  argsValidator,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if phase == "" {
 				phase = "plan"
@@ -36,26 +48,67 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 				return fmt.Errorf("invalid --phase %q (must be plan or implement)", phase)
 			}
 			root := rootOpts.resolveRepoRoot()
-			issue, worktree, err := resolveIssueAndWorktree(root, args)
-			if err != nil {
-				return err
+			issue, worktree, prNumber := 0, "", 0
+			var prStatus *pr.Result
+			var err error
+			if prStage {
+				prNumber, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
+				if err != nil || prNumber <= 0 {
+					return fmt.Errorf("invalid PR number %q", args[0])
+				}
+				if rootOpts.Fork {
+					return fmt.Errorf("%s requires upstream write access; contributor-only --fork coordination does not support PR revisions", cmd.CommandPath())
+				}
+			} else {
+				issue, worktree, err = resolveIssueAndWorktree(root, args)
+				if err != nil {
+					return err
+				}
 			}
-			lock, err := lockClaim(root, issue)
-			if err != nil {
-				return err
-			}
-			defer unlockClaim(lock)
-
 			tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
 				return err
 			}
 			ctx := cmd.Context()
+			if prStage {
+				if tr.BackendName() != "local" {
+					if err := tr.Authorize(ctx, "approve-task"); err != nil {
+						return fmt.Errorf("upstream write authorization required: %w", err)
+					}
+				}
+				prStatus, err = (&pr.Service{Root: root, Tracker: tr, Manager: manager}).Status(ctx, prNumber)
+				if err != nil {
+					return err
+				}
+				issue, worktree = prStatus.IssueNumber, prStatus.Worktree
+				if prStatus.State.PRRevision == nil || prStatus.Status == "diverged" || prStatus.Status == "published-pending-reconciliation" {
+					return fmt.Errorf("PR #%d requires an existing pending unpublished revision; run swarm pr work %d or reconcile with swarm pr submit %d", prNumber, prNumber, prNumber)
+				}
+				if worktree == "" || prStatus.Rebasing {
+					return fmt.Errorf("PR #%d requires an existing managed worktree that is not rebasing", prNumber)
+				}
+			}
+			lock, err := lease.LockClaim(root, issue)
+			if err != nil {
+				return err
+			}
+			defer lease.UnlockClaim(lock)
+
+			if prStage {
+				fresh, e := (&pr.Service{Root: root, Tracker: tr, Manager: manager}).Status(ctx, prNumber)
+				if e != nil {
+					return e
+				}
+				if fresh.Status == "diverged" || fresh.Status == "published-pending-reconciliation" || fresh.Rebasing || fresh.Worktree != worktree || fresh.State.PRRevision == nil || fresh.State.PRRevision.LocalHeadSHA != prStatus.State.PRRevision.LocalHeadSHA {
+					return fmt.Errorf("PR #%d revision changed or is rebasing; refusing to stage", prNumber)
+				}
+				prStatus = fresh
+			}
 			owner, err := tr.CurrentUser(ctx)
 			if err != nil || strings.TrimSpace(owner) == "" {
 				return fmt.Errorf("staging requires an authenticated owner")
 			}
-			claim, err := loadClaimToken(root, issue)
+			claim, err := lease.LoadClaimToken(root, issue)
 			if err != nil {
 				return fmt.Errorf("load active claim token: %w", err)
 			}
@@ -65,6 +118,23 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			state, err := manager.GetCurrentState(ctx, issue)
 			if err != nil {
+				return err
+			}
+			if prStage {
+				rev := state.PRRevision
+				if state.PRNumber != prNumber || rev == nil || rev.Number != prNumber || rev.RemoteHeadSHA != prStatus.PR.HeadSHA || rev.Branch != workspace.PRBranchName(prNumber) || rev.LocalHeadSHA != prStatus.State.PRRevision.LocalHeadSHA {
+					return fmt.Errorf("PR #%d pending revision changed; refusing to stage", prNumber)
+				}
+				verified, err := workspace.VerifyPRWorktree(ctx, root, prNumber, rev.LocalHeadSHA)
+				if err != nil {
+					return err
+				}
+				resolved, err := filepath.Abs(worktree)
+				if err != nil || filepath.Clean(resolved) != verified {
+					return fmt.Errorf("PR #%d worktree differs from its managed checkout", prNumber)
+				}
+				worktree = verified
+			} else if err := requireIssueWorkspace(state); err != nil {
 				return err
 			}
 			iss, err := tr.GetIssue(ctx, issue)
@@ -147,7 +217,7 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 					}
 				}
 				if asJSON {
-					return writeJSON(cmd, map[string]any{
+					outcome := map[string]any{
 						"kind":         "stage",
 						"phase":        "plan",
 						"issue_number": issue,
@@ -155,9 +225,17 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 						"model":        modelName,
 						"handed_off":   nextPhase,
 						"state":        state,
-					})
+					}
+					if prStage {
+						outcome["pr_number"] = prNumber
+					}
+					return writeJSON(cmd, outcome)
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "Staged plan and test-plan artifacts for issue #%d [harness=%s model=%s gate=%s]\n", issue, harnessName, modelName, state.EffectiveGate)
+				if prStage {
+					fmt.Fprintf(cmd.OutOrStdout(), "Staged plan and test-plan artifacts for PR #%d (issue #%d) [harness=%s model=%s gate=%s]\n", prNumber, issue, harnessName, modelName, state.EffectiveGate)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "Staged plan and test-plan artifacts for issue #%d [harness=%s model=%s gate=%s]\n", issue, harnessName, modelName, state.EffectiveGate)
+				}
 				return nil
 			}
 
@@ -169,6 +247,9 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 				return err
 			}
 			branch := state.Branch
+			if prStage {
+				branch = state.PRRevision.Branch
+			}
 			if branch == "" {
 				if rootOpts.Fork {
 					branch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
@@ -182,6 +263,12 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 			})
 			if err != nil {
 				return err
+			}
+			if prStage {
+				state, err = manager.RecordPRHead(ctx, issue, owner, prNumber, branch, head)
+				if err != nil {
+					return err
+				}
 			}
 			if _, err := manager.UpdateArtifact(ctx, issue, owner, contract.Artifact{
 				Type:     contract.ArtifactImplementation,
@@ -205,20 +292,27 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 					return err
 				}
 			}
-			if rootOpts.Fork {
-				if err := workspace.PushForkCheckpoint(ctx, root, rootOpts.effectiveForkRemote(), branch, head); err != nil {
+			if !prStage {
+				if rootOpts.Fork {
+					if err := workspace.PushForkCheckpoint(ctx, root, rootOpts.effectiveForkRemote(), branch, head); err != nil {
+						return err
+					}
+				}
+				state, err = manager.RecordCheckpoint(ctx, issue, owner, branch, head)
+				if err != nil {
 					return err
 				}
-			}
-			state, err = manager.RecordCheckpoint(ctx, issue, owner, branch, head)
-			if err != nil {
-				return err
+			} else {
+				state, err = manager.GetCurrentState(ctx, issue)
+				if err != nil {
+					return err
+				}
 			}
 			if valErr != nil {
 				return valErr
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{
+				outcome := map[string]any{
 					"kind":              "stage",
 					"phase":             "implement",
 					"issue_number":      issue,
@@ -228,9 +322,17 @@ func newStageCmd(rootOpts *RootOptions) *cobra.Command {
 					"head_sha":          head,
 					"validation_passed": report != nil && report.Passed,
 					"state":             state,
-				})
+				}
+				if prStage {
+					outcome["pr_number"] = prNumber
+				}
+				return writeJSON(cmd, outcome)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Staged implementation checkpoint %s for issue #%d on %s [validation=PASS]\n", head, issue, branch)
+			if prStage {
+				fmt.Fprintf(cmd.OutOrStdout(), "Staged unpublished implementation checkpoint %s for PR #%d (issue #%d) on %s [validation=PASS]\n", head, prNumber, issue, branch)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Staged implementation checkpoint %s for issue #%d on %s [validation=PASS]\n", head, issue, branch)
+			}
 			return nil
 		},
 	}

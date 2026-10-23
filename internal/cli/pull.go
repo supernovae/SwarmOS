@@ -127,7 +127,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					return nil, err
 				}
 			}
-			lock, err := lockClaim(target.Path, issue.Number)
+			lock, err := lease.LockClaim(target.Path, issue.Number)
 			if err != nil {
 				continue
 			}
@@ -140,14 +140,14 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			}
 			claimed, err := mgr.Acquire(ctx, issue.Number, owner, preflight.Agents[role], phase, duration, preflight.Config.Lease.MaxRenewals)
 			if err != nil {
-				unlockClaim(lock)
+				lease.UnlockClaim(lock)
 				if errors.Is(err, lease.ErrAlreadyClaimed) || errors.Is(err, lease.ErrClaimRaceLost) {
 					continue
 				}
 				return nil, err
 			}
 			setup := func() (*PulledWorkUnit, error) {
-				if err := saveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID); err != nil {
+				if err := lease.SaveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID); err != nil {
 					return nil, err
 				}
 				checkpointRemote := "origin"
@@ -171,10 +171,10 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			pulled, err := setup()
 			if err != nil {
 				_, releaseErr := mgr.Release(ctx, issue.Number, owner, "claim setup failed")
-				unlockClaim(lock)
+				lease.UnlockClaim(lock)
 				return nil, errors.Join(err, releaseErr)
 			}
-			unlockClaim(lock)
+			lease.UnlockClaim(lock)
 			return pulled, nil
 		}
 	}

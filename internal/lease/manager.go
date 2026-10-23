@@ -43,6 +43,15 @@ func (e *AlreadyClaimedError) Error() string {
 }
 func (e *AlreadyClaimedError) Unwrap() error { return ErrAlreadyClaimed }
 
+// PRRevision tracks unpublished work on the linked pull request. The remote
+// head is an immutable publication expectation until a successful submit.
+type PRRevision struct {
+	Number        int    `json:"number"`
+	RemoteHeadSHA string `json:"remote_head_sha"`
+	LocalHeadSHA  string `json:"local_head_sha"`
+	Branch        string `json:"branch"`
+}
+
 type IssueState struct {
 	Lease               contract.Lease             `json:"lease"`
 	Artifacts           []contract.Artifact        `json:"artifacts,omitempty"`
@@ -56,6 +65,7 @@ type IssueState struct {
 	ApprovedBy          string                     `json:"approved_by,omitempty"`
 	ApprovedAt          time.Time                  `json:"approved_at,omitempty"`
 	PRNumber            int                        `json:"pr_number,omitempty"`
+	PRRevision          *PRRevision                `json:"pr_revision,omitempty"`
 	EffectiveGate       contract.GateMode          `json:"effective_gate,omitempty"`
 	PRURL               string                     `json:"pr_url,omitempty"`
 	ForkRepo            string                     `json:"fork_repo,omitempty"`
@@ -490,6 +500,9 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		if old.Lease.Status == "active" && old.Lease.ExpiresAt.After(m.nowFn()) {
 			return nil, ErrAlreadyClaimed
 		}
+		if old.BaseSHA != base || old.TaskDigest != contract.DigestWorkUnit(wu) || old.PolicyDigest != digest {
+			invalidatePRRevisionEvidence(old)
+		}
 		old.TaskDigest = contract.DigestWorkUnit(wu)
 		old.PolicyDigest = digest
 		old.BaseSHA = base
@@ -527,7 +540,19 @@ func (m *Manager) trustedBase() (string, error) {
 	}
 	return workspace.ResolveBase(m.repoRoot)
 }
+
+// AcquirePR reuses the approved WorkUnit lease for a linked PR revision.
+func (m *Manager) AcquirePR(ctx context.Context, n, number int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("PR claims cannot be acquired through contributor gateway")
+	}
+	return m.acquire(ctx, n, number, owner, agent, phase, duration, max)
+}
 func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
+	return m.acquire(ctx, n, 0, owner, agent, phase, duration, max)
+}
+
+func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
 	if m.gateway != nil {
 		st, err := m.gateway.Apply(ctx, ForkRequest{
 			Version:     1,
@@ -575,6 +600,12 @@ func (m *Manager) Acquire(ctx context.Context, n int, owner, agent, phase string
 	st, rev, err := m.load(ctx, n)
 	if err != nil {
 		return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
+	}
+	if st.PRRevision != nil && prNumber != st.PRRevision.Number {
+		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", n, st.PRRevision.Number)
+	}
+	if prNumber != 0 && st.PRNumber != prNumber {
+		return nil, fmt.Errorf("PR #%d is not linked to issue #%d", prNumber, n)
 	}
 	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
 	if err != nil {
@@ -1050,6 +1081,9 @@ func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, num
 		return nil, fmt.Errorf("submission requires PR number and URL")
 	}
 	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if st.PRRevision != nil {
+			return fmt.Errorf("issue #%d has a pending PR revision; use swarm pr submit %d", n, st.PRRevision.Number)
+		}
 		issue, err := m.tracker.GetIssue(ctx, n)
 		if err != nil {
 			return err
@@ -1288,6 +1322,9 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
 		return nil, err
 	}
+	if st.PRRevision != nil {
+		return nil, fmt.Errorf("issue #%d has a pending PR revision; issue checkpoint publication is blocked", n)
+	}
 	if st.ForkRepo != "" && branch != fmt.Sprintf("swarm/issue-%d-%s", n, st.Lease.ClaimID) {
 		return nil, fmt.Errorf("fork checkpoint branch %q does not match active claim %q", branch, st.Lease.ClaimID)
 	}
@@ -1320,6 +1357,130 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 func (m *Manager) GetCurrentState(ctx context.Context, n int) (*IssueState, error) {
 	st, _, err := m.load(ctx, n)
 	return st, err
+}
+
+// BeginPRRevision fences a new local revision without changing the submitted
+// issue checkpoint. It invalidates approval and head-dependent evidence.
+func (m *Manager) BeginPRRevision(ctx context.Context, n int, owner string, number int, remoteHead, localHead, branch string) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("PR revisions require upstream coordination write access; --fork contributor gateway cannot publish them")
+	}
+	if number <= 0 || remoteHead == "" || localHead == "" || branch == "" {
+		return nil, fmt.Errorf("incomplete PR revision identity")
+	}
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if st.PRNumber != number {
+			return fmt.Errorf("PR #%d is not linked to issue #%d", number, n)
+		}
+		if st.PRRevision != nil {
+			if st.PRRevision.Number != number || st.PRRevision.RemoteHeadSHA != remoteHead || st.PRRevision.Branch != branch {
+				return fmt.Errorf("pending PR revision identity changed; submit or resolve the existing revision first")
+			}
+			if st.PRRevision.LocalHeadSHA != localHead {
+				return fmt.Errorf("local PR head changed outside the recorded revision")
+			}
+			return nil
+		}
+		st.PRRevision = &PRRevision{Number: number, RemoteHeadSHA: remoteHead, LocalHeadSHA: localHead, Branch: branch}
+		invalidatePRRevisionEvidence(st)
+		return nil
+	})
+}
+
+func invalidatePRRevisionEvidence(st *IssueState) {
+	st.Artifacts = nil
+	st.Attestations = nil
+}
+
+// RecordPRHead publishes a local checkpoint to the issue coordination store,
+// not to the PR's remote head ref.
+func (m *Manager) RecordPRHead(ctx context.Context, n int, owner string, number int, branch, head string) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("PR revisions require upstream coordination write access")
+	}
+	if branch == "" || head == "" {
+		return nil, fmt.Errorf("incomplete PR checkpoint")
+	}
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if st.PRRevision == nil || st.PRRevision.Number != number || st.PRRevision.Branch != branch {
+			return fmt.Errorf("PR checkpoint does not match pending revision")
+		}
+		if st.PRRevision.LocalHeadSHA != head {
+			kept := st.Artifacts[:0]
+			for _, art := range st.Artifacts {
+				if art.Type != contract.ArtifactImplementation && art.Type != contract.ArtifactValidation {
+					kept = append(kept, art)
+				}
+			}
+			st.Artifacts = kept
+			attestations := st.Attestations[:0]
+			for _, att := range st.Attestations {
+				if att.ArtifactType != string(contract.ArtifactImplementation) && att.ArtifactType != string(contract.ArtifactValidation) {
+					attestations = append(attestations, att)
+				}
+			}
+			st.Attestations = attestations
+		}
+		st.PRRevision.LocalHeadSHA = head
+		return nil
+	})
+}
+
+// CompletePRRevision clears the pending revision only if both remote and
+// locally validated heads are exactly the publication snapshot.
+func (m *Manager) CompletePRRevision(ctx context.Context, n int, owner string, number int, expected, published string) (*IssueState, error) {
+	return m.completePRRevision(ctx, n, owner, number, expected, published, true)
+}
+
+// CompletePRRevisionLocal records a publication already fenced by the local
+// tracker or a separately authorized fork head remote. Origin publications
+// must use CompletePRRevision's atomic coordination-and-head CAS instead.
+func (m *Manager) CompletePRRevisionLocal(ctx context.Context, n int, owner string, number int, expected, published string) (*IssueState, error) {
+	return m.completePRRevision(ctx, n, owner, number, expected, published, false)
+}
+
+func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, number int, expected, published string, atomicOrigin bool) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("PR publication is not supported through contributor gateway")
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
+		return nil, err
+	}
+	r := st.PRRevision
+	if r == nil || st.PRNumber != number || r.Number != number || r.RemoteHeadSHA != expected || r.LocalHeadSHA != published {
+		return nil, fmt.Errorf("PR publication snapshot changed")
+	}
+	st.PRRevision = nil
+	st.HeadSHA = published
+	st.Lease.Status = "completed"
+	st.Lease.Phase = "submitted"
+	if ps, ok := m.store.(coordination.ExpectedPRPublishingStore); ok && atomicOrigin {
+		raw, err := json.Marshal(st)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = ps.CompareAndSwapAndPublishPR(ctx, n, rev, raw, st.Branch, expected, published); err != nil {
+			return nil, fmt.Errorf("atomic PR publication failed without changing either remote ref: %w", err)
+		}
+		m.project(ctx, n, st)
+		return st, nil
+	}
+	return m.save(ctx, n, rev, st)
+}
+
+// InvalidatePRRevisionEvidence requires the same claim fence as execution.
+func (m *Manager) InvalidatePRRevisionEvidence(ctx context.Context, n int, owner string, number int) (*IssueState, error) {
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if st.PRRevision == nil || st.PRRevision.Number != number {
+			return fmt.Errorf("no pending revision for PR #%d", number)
+		}
+		invalidatePRRevisionEvidence(st)
+		return nil
+	})
 }
 
 // ReviewBindings identifies the exact coordinator snapshot a reviewer receives.

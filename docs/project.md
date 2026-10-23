@@ -192,7 +192,7 @@ During `swarm issue validate` and `swarm issue submit`, SwarmOS reads `required-
 
 A CLI `--gate` flag can always make review stricter (for example, upgrading `none` to `agent` or `human`), while preserving the minimum gate required by the issue and repository policy.
 
-`swarm issue approve <issue>` authorizes the issue's WorkUnit contract for execution; `swarm issue review-plan <issue> --approve` separately approves the implementation plan before code changes. `swarm issue submit <issue>` links a Draft PR proposing the implementation. Review code and acceptance criteria in GitHub before merging; neither PR rebase nor PR repair is a SwarmOS command.
+`swarm issue approve <issue>` authorizes the issue's WorkUnit contract for execution; `swarm issue review-plan <issue> --approve` separately approves the implementation plan before code changes. `swarm issue submit <issue>` links a Draft PR proposing the implementation. Continue development with `swarm pr work <PR>` or update ancestry with `swarm pr rebase <PR>`, then validate and publish with `swarm pr submit <PR>`. A changed target baseline requires approval of its policy; PR revisions do not bypass human plan gates. Review code and acceptance criteria in GitHub before merging.
 
 ---
 

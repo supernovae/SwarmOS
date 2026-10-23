@@ -140,7 +140,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 				manager.BindClaim(pulled.Issue.Number, pulled.State.Lease.ClaimID)
 				engine := workflow.NewEngineWithManager(pulled.RepoRoot, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
-				lock, err := lockClaim(pulled.RepoRoot, pulled.Issue.Number)
+				lock, err := lease.LockClaim(pulled.RepoRoot, pulled.Issue.Number)
 				if err != nil {
 					return nil, err
 				}
@@ -148,10 +148,10 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				selected.RepoRoot, selected.IssueNumber = pulled.RepoRoot, pulled.Issue.Number
 				selected.Phase, selected.ClaimID = pulled.TargetPhase, pulled.State.Lease.ClaimID
 				selected.OnClaim = func(state *lease.IssueState) error {
-					return saveClaimToken(pulled.RepoRoot, pulled.Issue.Number, state.Lease.ClaimID)
+					return lease.SaveClaimToken(pulled.RepoRoot, pulled.Issue.Number, state.Lease.ClaimID)
 				}
 				result, err := engine.ExecuteWork(ctx, selected)
-				unlockClaim(lock)
+				lease.UnlockClaim(lock)
 				if err != nil {
 					return result, err
 				}

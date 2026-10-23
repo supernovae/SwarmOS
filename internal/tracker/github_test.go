@@ -534,6 +534,8 @@ func TestForkGitHubTrackerVerifyForkAndGetPullRequest(t *testing.T) {
 
 	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/git/ref/heads/main":
+			writeJSON(t, w, map[string]any{"object": map[string]string{"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/octo/swarm/pulls":
 			if r.URL.Query().Get("head") != "alice:swarm/issue-42-claim1" {
 				http.Error(w, "expected qualified head without double prefix, got "+r.URL.Query().Get("head"), http.StatusBadRequest)

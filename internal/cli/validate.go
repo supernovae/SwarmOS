@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -22,11 +23,11 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		lock, err := lockClaim(root, issue)
+		lock, err := lease.LockClaim(root, issue)
 		if err != nil {
 			return err
 		}
-		defer unlockClaim(lock)
+		defer lease.UnlockClaim(lock)
 		tr, manager, _, err := options.resolveLeaseManager(cmd)
 		if err != nil {
 			return err
@@ -35,7 +36,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		claim, err := loadClaimToken(root, issue)
+		claim, err := lease.LoadClaimToken(root, issue)
 		if err != nil {
 			return err
 		}
@@ -45,6 +46,9 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		}
 		state, err := manager.GetCurrentState(ctx, issue)
 		if err != nil {
+			return err
+		}
+		if err := requireIssueWorkspace(state); err != nil {
 			return err
 		}
 		if baseSHA != "" && baseSHA != state.BaseSHA {

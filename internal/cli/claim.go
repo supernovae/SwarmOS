@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -73,11 +74,11 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		lock, err := lockClaim(root, issue)
+		lock, err := lease.LockClaim(root, issue)
 		if err != nil {
 			return err
 		}
-		defer unlockClaim(lock)
+		defer lease.UnlockClaim(lock)
 		state, err := manager.Acquire(cmd.Context(), issue, owner, preflight.Agents["planner"], "plan", duration, preflight.Config.Lease.MaxRenewals)
 		if err != nil {
 			return err
@@ -86,7 +87,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			_, releaseErr := manager.Release(cmd.Context(), issue, owner, "claim setup failed")
 			return errors.Join(cause, releaseErr)
 		}
-		if err := saveClaimToken(root, issue, state.Lease.ClaimID); err != nil {
+		if err := lease.SaveClaimToken(root, issue, state.Lease.ClaimID); err != nil {
 			return fail(err)
 		}
 		checkpointRemote := "origin"

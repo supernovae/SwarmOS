@@ -36,12 +36,13 @@ Our documentation (`README.md`, `docs/*.md`, `SECURITY.md`) is the front door to
 
 ## 3. Codebase Map & Architectural Invariants
 
-- **`cmd/swarm/` & `internal/cli/`**: Cobra CLI entrypoint and resource groups (`repo init`, `repo doctor`, `repo plan`, `repo validate`, `issue create/approve/claim/work/stage/review-plan/validate/submit/status/renew/release`, `node init/status/run`), plus root `version` and `fork-coordinator`.
+- **`cmd/swarm/` & `internal/cli/`**: Cobra CLI entrypoint and resource groups (`repo init`, `repo doctor`, `repo plan`, `repo validate`, `issue create/approve/claim/work/stage/review-plan/validate/submit/status/renew/release`, `pr status/work/rebase/validate/submit`, `node init/status/run`), plus root `version` and `fork-coordinator`.
 - **`internal/contract/`**: Canonical `WorkUnit`, `Lease`, `Artifact`, `WorkflowSpec`, `ValidationSpec`, and `.swarm/config.yaml` types, JSON Schema validation, and HTML comment stripping.
 - **`internal/coordination/` & `internal/lease/`**: Git compare-and-swap state refs (`refs/heads/swarm-state/issue-<N>`), file-locked local CAS store (`--backend local`), fenced claims (`claim_id`), heartbeats, and issue audit comments.
 - **`internal/workspace/`**: Isolated Git worktree provisioning (`.swarm/worktrees/issue-<N>`), checkpoint commits, and active bundle compilation (`.swarm/active/WORKUNIT.md`, `SYSTEM_PROMPT.md`). Note that SwarmOS injects an ephemeral `` pointer block into `AGENTS.md` and `CLAUDE.md` inside task worktrees and strips it automatically before checkpoints and submissions—never delete content outside those markers.
 - **`internal/agent/` & `internal/sandbox/`**: Adapters for `claude`, `codex`, `opencode`, `omp`, and local/test `mock`, plus isolated read-only snapshot sandboxing (`sandbox-exec`, `bwrap`, or OCI `docker`/`podman`) for the `reviewer` role.
 - **`internal/workflow/` & `internal/validation/`**: Plan-first execution engine (`plan` $\rightarrow$ `gate` $\rightarrow$ `implement` $\rightarrow$ `validate`), cryptographic binding of review verdicts to `WorkUnit`/`PLAN.md`/`TEST_PLAN.md` digests, and baseline-pinned validation of `required-checks.yaml` and `protected_paths`.
+- **`internal/pr/`**: Continued development of PRs authoritatively linked to approved WorkUnits. PR commands use PR numbers, retain the linked issue's fenced claim and approval gates, prepare changes in separate PR worktrees, and publish only through explicit `pr submit` with an expected remote head.
 
 ---
 

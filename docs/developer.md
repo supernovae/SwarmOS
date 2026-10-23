@@ -129,9 +129,48 @@ The PR's acceptance checkboxes are a **maintainer review checklist**. SwarmOS co
 3. Mark the Draft PR **Ready for review** in GitHub, or use `gh pr ready <PR-number>`. If it is already ready, request a code review directly.
 4. Complete the repository's normal code review and CI requirements, then merge. `Closes #<issue>` closes the linked issue when the PR merges into the default branch; it does not synchronize the issue's and PR's checkboxes.
 
-Use GitHub for this final handoff; there is no additional SwarmOS command to approve acceptance criteria, repair a PR, or rebase it. Retrying an already completed `swarm issue submit <issue>` returns the existing PR rather than refreshing its description.
+Use GitHub for final code and acceptance review. Retrying an already completed `swarm issue submit <issue>` returns the existing PR rather than refreshing its description. To change that PR, use its PR number with the commands below; issue commands continue to take issue numbers.
 
-Repair changes the implementation to address failures or review feedback; rebase changes the branch's ancestry or base. Neither is implemented by this CLI cutover. Any future PR-oriented commands will take explicit PR identifiers; issue lifecycle commands continue to take issue numbers after submission.
+### Continuing an Existing PR
+
+Use the same verbs for the same kind of work: `issue work` implements an approved issue, while `pr work` continues its proposed implementation. `issue stage` and `pr stage` both record interactive plans or implementation checkpoints, but PR staging reads only the separate PR worktree and leaves the original issue branch unchanged. Fixing a failing test or addressing feedback is development, not a separate `repair` operation. `pr rebase` changes branch ancestry and does not ask an agent to rewrite the implementation.
+
+PR commands require an open PR recorded in an approved WorkUnit's authoritative state. A closing reference in a PR description is not a substitute for that link. Mutation requires upstream write permission; contributor-only `--fork` coordination remains an issue workflow.
+
+For a fork-head PR, a maintainer also needs a writable Git remote matching the recorded fork repository. Use `--fork-remote <name>` to select it (default `fork`), without `--fork`; the linked issue still uses upstream coordination.
+
+`pr status` shows the published head and target, local revision, check runs, and GitHub review records with their commit SHAs. Checks on the published head are separate from local `pr validate` results; reviews against an older commit remain visible as history.
+
+```bash
+# 33 is the PR number; its linked WorkUnit may have a different issue number.
+swarm pr status 33 --backend github
+swarm pr work 33 --dry-run --backend github
+swarm pr work 33 --instructions "Fix the failing checks within the approved scope" --backend github
+swarm pr validate 33 --backend github
+swarm pr submit 33 --backend github
+```
+
+Changes are prepared in `.swarm/worktrees/pr-33`, separate from the original issue worktree. A new revision goes through planning and the configured review gate again. For a human gate, an independent maintainer approves the linked **issue's** plan with `swarm issue review-plan <issue> --approve`, then the worker resumes `swarm pr work <PR>`. Use the existing `--agent`, role-agent overrides, `--phase`, `--headless`, `--progress`, and `--json` flags as appropriate.
+
+For `plan_mode: interactive`, `swarm pr work <PR>` pauses at `awaiting-plan` after preparing `.swarm/worktrees/pr-<PR>`. Write `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` **in that PR worktree**, then run `swarm pr stage <PR> --phase plan --harness <name> --model <name>` (optionally `--handoff` or `--json`). Under an agent gate, resume with `swarm pr work <PR>` to review and implement; under a human gate, an independent maintainer uses `swarm issue review-plan <issue> --approve` before `swarm pr work <PR>` resumes implementation. Do not stage through `swarm issue stage` against the old issue worktree while the PR revision is pending.
+
+Alternatively, after the plan gate, make implementation changes in the managed PR worktree and run `swarm pr stage <PR> --phase implement --harness <name> --model <name>`. This records a local checkpoint and validates against the approved baseline; it does **not** publish the branch or change the submitted issue checkpoint. Inspect with `swarm pr status <PR>` and publish only with `swarm pr submit <PR>`. Staging requires the existing pending revision, a valid active issue claim, and upstream mutation authorization; it rejects rebases, diverged heads, and unrelated worktrees.
+
+`pr submit` reruns trusted validation and publishes to the existing PR branch. It preserves the PR's title, description, draft/ready state, and identity; GitHub applies the repository's review rules to the new commits. Publication uses the remote head observed when the revision began; a concurrent remote update is rejected rather than overwritten. Same-repository publication updates the PR branch and issue coordination state atomically.
+
+#### Rebasing onto an Updated Base
+
+The target is the existing PR's base branch, pinned to a full commit. If it has advanced beyond the WorkUnit's approved baseline, a maintainer first runs `swarm issue approve <issue>` to approve the current policy. Release an active issue claim before changing that approval. Then:
+
+```bash
+swarm pr rebase 33 --backend github
+# If Git reports conflicts, resolve and stage them in the reported PR worktree.
+swarm pr rebase 33 --continue --backend github
+# Or abandon that in-progress rebase without discarding unrelated work:
+swarm pr rebase 33 --abort --backend github
+```
+
+Use `--continue` or `--abort` only when a rebase is in progress. A successful rebase invalidates earlier review and validation evidence. Run `pr work` through its plan gate, validate, and submit the revised branch explicitly. While a PR revision is pending, use the PR commands rather than issue work/stage/validate/submit against the original worktree.
 
 ### Recovering from an Interrupted Run
 If an agent exits early, a lease expires, or a validation check fails:

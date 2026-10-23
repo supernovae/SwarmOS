@@ -96,6 +96,57 @@ func TestGitCASAcrossClonesAndAtomicCheckpointFence(t *testing.T) {
 	}
 }
 
+func TestPRPublishRequiresCapturedStateAndRemoteHead(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	remote := filepath.Join(root, "remote.git")
+	git(root, "init", "--bare", "--initial-branch=main", remote)
+	first := filepath.Join(root, "first")
+	git(root, "clone", remote, first)
+	git(first, "config", "user.name", "PR CAS Test")
+	git(first, "config", "user.email", "test@example.invalid")
+	git(first, "commit", "--allow-empty", "-m", "baseline")
+	base := git(first, "rev-parse", "HEAD")
+	git(first, "push", "origin", "main")
+	branch := "swarm/issue-2-pr"
+	git(first, "branch", branch, base)
+	git(first, "push", "origin", branch)
+	store := NewGitStore(first)
+	oldState, err := store.CompareAndSwap(ctx, 2, "", []byte(`{"revision":"pending"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	git(first, "checkout", "-b", "swarm/pr-9", base)
+	git(first, "commit", "--allow-empty", "-m", "local PR candidate")
+	candidate := git(first, "rev-parse", "HEAD")
+	if _, err := store.CompareAndSwapAndPublishPR(ctx, 2, strings.Repeat("f", 40), []byte(`{"revision":"published"}`), branch, base, candidate); err == nil {
+		t.Fatal("stale state lease published PR")
+	}
+	if got := git(remote, "rev-parse", "refs/heads/"+branch); got != base {
+		t.Fatalf("stale state push moved PR to %s", got)
+	}
+	if _, err := store.CompareAndSwapAndPublishPR(ctx, 2, oldState, []byte(`{"revision":"published"}`), branch, strings.Repeat("e", 40), candidate); err == nil {
+		t.Fatal("stale PR head lease published")
+	}
+	if _, err := store.CompareAndSwapAndPublishPR(ctx, 2, oldState, []byte(`{"revision":"published"}`), branch, base, candidate); err != nil {
+		t.Fatal(err)
+	}
+	if got := git(remote, "rev-parse", "refs/heads/"+branch); got != candidate {
+		t.Fatalf("atomic publish head = %s, want %s", got, candidate)
+	}
+	if body, _, err := store.Load(ctx, 2); err != nil || string(body) != `{"revision":"published"}` {
+		t.Fatalf("atomic publish state = %s: %v", body, err)
+	}
+}
+
 func TestConcurrentIssueReadsStayPinnedAndTransportErrorsSurface(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")

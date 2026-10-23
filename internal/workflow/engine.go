@@ -30,24 +30,28 @@ var (
 )
 
 type WorkOptions struct {
-	InspectOnly    bool // report execution blockers without claiming or running work
-	RepoRoot       string
-	IssueNumber    int
-	Owner          string
-	ClaimID        string // explicit fencing token persisted by the CLI
-	AgentName      string
-	PlannerAgent   string
-	ReviewerAgent  string
-	DeveloperAgent string
-	TesterAgent    string
-	Phase          string // "all", "plan", "review", "implement"
-	Gate           contract.GateMode
-	Headless       bool
-	Handoff        bool
-	LeaseDuration  time.Duration
-	ForkMode       bool
-	ForkRemote     string
-	OnClaim        func(*lease.IssueState) error // persist fencing token before setup
+	InspectOnly     bool // report execution blockers without claiming or running work
+	RepoRoot        string
+	IssueNumber     int
+	Owner           string
+	ClaimID         string // explicit fencing token persisted by the CLI
+	AgentName       string
+	PlannerAgent    string
+	ReviewerAgent   string
+	DeveloperAgent  string
+	TesterAgent     string
+	Phase           string // "all", "plan", "review", "implement"
+	Gate            contract.GateMode
+	Headless        bool
+	Handoff         bool
+	LeaseDuration   time.Duration
+	ForkMode        bool
+	ForkRemote      string
+	PRNumber        int // nonzero selects an already prepared, separate PR worktree
+	PRWorktree      string
+	Instructions    string                        // additional operator guidance, never a replacement for trusted policy
+	FreshPRRevision bool                          // inspect the new revision's empty evidence before mutation
+	OnClaim         func(*lease.IssueState) error // persist fencing token before setup
 	// OnProgress receives serialized local status events. It must return promptly
 	// and must not call back into execution. No callback runs after ExecuteWork returns.
 	OnProgress func(ProgressEvent)
@@ -195,6 +199,24 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	}
 	if state == nil || state.BaseSHA == "" {
 		return nil, errors.New("task has no approved immutable base")
+	}
+	if state.PRRevision != nil && opts.PRNumber == 0 {
+		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work/validate/submit", opts.IssueNumber)
+	}
+	if opts.PRNumber != 0 && (state.PRRevision == nil || state.PRRevision.Number != opts.PRNumber) && !opts.InspectOnly && !opts.FreshPRRevision {
+		return nil, fmt.Errorf("PR revision is not linked to this issue")
+	}
+	if opts.FreshPRRevision {
+		if opts.PRNumber == 0 || state.PRRevision != nil {
+			return nil, fmt.Errorf("fresh PR revision preflight does not match authoritative state")
+		}
+		if opts.Phase == "implement" || opts.Phase == "review" {
+			return nil, fmt.Errorf("%w: first prepare the new PR plan", ErrPlanApprovalNeeded)
+		}
+		copyState := *state
+		copyState.Artifacts = nil
+		copyState.Attestations = nil
+		state = &copyState
 	}
 	_ = workspace.FetchCommit(opts.RepoRoot, "origin", state.BaseSHA)
 	cfg, err := harness.LoadConfigAt(opts.RepoRoot, state.BaseSHA)
@@ -433,12 +455,30 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 	}
 	progress.next("workspace")
-	wtPath, branch, err := workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA)
-	if err != nil {
-		return nil, err
+	var wtPath, branch string
+	if opts.PRNumber != 0 {
+		if opts.PRWorktree == "" || st.PRRevision == nil || st.PRRevision.Number != opts.PRNumber {
+			return nil, fmt.Errorf("PR worktree and fenced revision are required")
+		}
+		wtPath, branch = opts.PRWorktree, st.PRRevision.Branch
+		head, dirty, rebasing, headErr := workspace.PRHead(ctx, wtPath)
+		if headErr != nil {
+			return nil, headErr
+		}
+		if rebasing || dirty || head != st.PRRevision.LocalHeadSHA {
+			return nil, fmt.Errorf("PR worktree is dirty, rebasing, or differs from its recorded checkpoint")
+		}
+	} else {
+		wtPath, branch, err = workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA)
+		if err != nil {
+			return nil, err
+		}
 	}
 	setupComplete = true
 	res := &WorkResult{IssueNumber: opts.IssueNumber, WorktreePath: wtPath, BranchName: branch, BaseSHA: st.BaseSHA, HeadSHA: st.HeadSHA, RoleAgentsUsed: map[string]string{}, State: st}
+	if opts.PRNumber != 0 {
+		res.HeadSHA = st.PRRevision.LocalHeadSHA
+	}
 	mode := "interactive"
 	if opts.Headless {
 		mode = "headless"
@@ -454,10 +494,10 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 		if strings.EqualFold(cfg.PlanMode, "interactive") {
 			res.RoleAgentsUsed["planner"] = "interactive"
-			if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "planner", st.BaseSHA); err != nil {
+			if err := compileExecutionBundle(wtPath, pre.WorkUnit, wf, st, "planner", opts.PRNumber); err != nil {
 				return res, err
 			}
-			if st, err = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "plan", "awaiting-plan"); err != nil {
+			if st, err = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "plan", "active"); err != nil {
 				return res, err
 			}
 			res.State = st
@@ -474,10 +514,14 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if _, err := e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "plan", "active"); err != nil {
 			return res, err
 		}
-		if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "planner", st.BaseSHA); err != nil {
+		if err := compileExecutionBundle(wtPath, pre.WorkUnit, wf, st, "planner", opts.PRNumber); err != nil {
 			return res, err
 		}
-		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-plan and write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md."})
+		planPrompt := "Execute /swarm-plan and write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md."
+		if opts.Instructions != "" {
+			planPrompt += "\nOperator instructions: " + opts.Instructions
+		}
+		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: planPrompt})
 		if err != nil {
 			return res, err
 		}
@@ -549,7 +593,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		res.State = st
 		reviewer := pre.Agents["reviewer"]
 		res.RoleAgentsUsed["reviewer"] = reviewer
-		verdict, reviewed, err := e.RunAgentReview(ctx, wtPath, pre.WorkUnit, wf, st, opts.Owner, reviewer, mode)
+		verdict, reviewed, err := e.RunAgentReview(ctx, wtPath, pre.WorkUnit, wf, st, opts.Owner, reviewer, mode, opts.Instructions, opts.PRNumber)
 		res.ReviewVerdict = verdict
 		if reviewed != nil {
 			st, res.State = reviewed, reviewed
@@ -601,7 +645,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if _, err := e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "implement", "active"); err != nil {
 		return res, err
 	}
-	if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "developer", st.BaseSHA); err != nil {
+	if err := compileExecutionBundle(wtPath, pre.WorkUnit, wf, st, "developer", opts.PRNumber); err != nil {
 		return res, err
 	}
 	devPrompt := "Execute /swarm-implement step-by-step using the approved plan and test plan."
@@ -609,6 +653,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if hasFailedValidationArtifact(st) {
 		devPrompt = "Execute /swarm-implement step-by-step using the approved plan and test plan. A prior validation check failed; inspect .swarm/active/VALIDATION.md and .swarm/active/WORKUNIT.md and fix all failing checks."
 		checkpointPurpose = "repair"
+	}
+	if opts.Instructions != "" {
+		devPrompt += "\nOperator instructions: " + opts.Instructions
 	}
 	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: devPrompt})
 	if err != nil {
@@ -619,20 +666,26 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	summary, body := summarizeImplementationChanges(wtPath, opts.IssueNumber)
 	progress.next("checkpoint")
-	if st.HeadSHA, err = workspace.Checkpoint(ctx, wtPath, branch, workspace.CheckpointOptions{
+	checkpointHead, err := workspace.Checkpoint(ctx, wtPath, branch, workspace.CheckpointOptions{
 		WorkUnit: pre.WorkUnit, Purpose: checkpointPurpose, Detail: cfg.CommitMessageDetail(),
-	}); err != nil {
+	})
+	if err != nil {
 		return res, err
 	}
-	if forkMode {
-		if err := workspace.PushForkCheckpoint(ctx, opts.RepoRoot, forkRemote, branch, st.HeadSHA); err != nil {
-			return res, err
+	if opts.PRNumber != 0 {
+		st, err = e.LeaseManager.RecordPRHead(ctx, opts.IssueNumber, opts.Owner, opts.PRNumber, branch, checkpointHead)
+	} else {
+		if forkMode {
+			if err := workspace.PushForkCheckpoint(ctx, opts.RepoRoot, forkRemote, branch, checkpointHead); err != nil {
+				return res, err
+			}
 		}
+		st, err = e.LeaseManager.RecordCheckpoint(ctx, opts.IssueNumber, opts.Owner, branch, checkpointHead)
 	}
-	if st, err = e.LeaseManager.RecordCheckpoint(ctx, opts.IssueNumber, opts.Owner, branch, st.HeadSHA); err != nil {
+	if err != nil {
 		return res, err
 	}
-	res.State, res.HeadSHA = st, st.HeadSHA
+	res.State, res.HeadSHA = st, checkpointHead
 	devMeta := attestationMetadata(devRun.Attestation, nil)
 	if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: "PASS", Summary: summary, Body: body, Metadata: devMeta}); err != nil {
 		return res, err
@@ -645,10 +698,14 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err != nil {
 		return res, err
 	}
-	if err := workspace.CompileHarnessBundleAt(wtPath, pre.WorkUnit, wf, st.Artifacts, "tester", st.BaseSHA); err != nil {
+	if err := compileExecutionBundle(wtPath, pre.WorkUnit, wf, st, "tester", opts.PRNumber); err != nil {
 		return res, err
 	}
-	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: "Execute /swarm-validate and record acceptance evidence."})
+	testPrompt := "Execute /swarm-validate and record acceptance evidence."
+	if opts.Instructions != "" {
+		testPrompt += "\nOperator instructions: " + opts.Instructions
+	}
+	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt})
 	if err != nil {
 		return res, fmt.Errorf("tester agent %q: %w", tester, err)
 	}
@@ -789,7 +846,14 @@ func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssu
 	return created, nil
 }
 
-func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode string) (string, *lease.IssueState, error) {
+func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int) error {
+	if prNumber != 0 {
+		return workspace.CompilePRHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA, prNumber)
+	}
+	return workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA)
+}
+
+func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int) (string, *lease.IssueState, error) {
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
 		return "", st, fmt.Errorf("%w: %v", ErrLeaseLost, err)
 	}
@@ -799,7 +863,7 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	if err := ensurePlanArtifactsInWorktree(wtPath, st); err != nil {
 		return "", st, err
 	}
-	if err := workspace.CompileHarnessBundleAt(wtPath, wu, wf, st.Artifacts, "reviewer", st.BaseSHA); err != nil {
+	if err := compileExecutionBundle(wtPath, wu, wf, st, "reviewer", prNumber); err != nil {
 		return "", st, err
 	}
 	runner, err := agent.NewConfiguredRunner(reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
@@ -810,6 +874,9 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		Agent: reviewerAgent, Role: "reviewer", Mode: mode, WorktreePath: wtPath,
 		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
 		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md and write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
+	}
+	if instructions != "" {
+		req.TaskPrompt += "\nOperator instructions: " + instructions
 	}
 	revRun, err := agent.RunReview(ctx, runner, req)
 	if err != nil {

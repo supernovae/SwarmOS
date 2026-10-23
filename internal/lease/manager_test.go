@@ -141,6 +141,62 @@ func TestCurrentPlanHumanApprovalRequired(t *testing.T) {
 	}
 }
 
+func TestPRRevisionFencesIssueCheckpointAndInvalidatesApproval(t *testing.T) {
+	m, _, issue := testManager(t)
+	ctx := context.Background()
+	st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, art := range []contract.Artifact{
+		{Type: contract.ArtifactDesign, Producer: "mock", Summary: "plan", Body: "plan"},
+		{Type: contract.ArtifactTestPlan, Producer: "mock", Summary: "tests", Body: "tests"},
+	} {
+		if _, err := m.UpdateArtifact(ctx, issue.Number, "local-dev", art); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.RecordHumanReview(ctx, issue.Number, "APPROVED", "verified"); err != nil {
+		t.Fatal(err)
+	}
+	st, revision, err := m.load(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.PRNumber = 37
+	if _, err := m.save(ctx, issue.Number, revision, st); err != nil {
+		t.Fatal(err)
+	}
+	remoteHead, localHead := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	st, err = m.BeginPRRevision(ctx, issue.Number, "local-dev", 37, remoteHead, remoteHead, "swarm/pr-37")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PRRevision == nil || len(st.Artifacts) != 0 || len(st.Attestations) != 0 {
+		t.Fatalf("revision retained stale evidence: %+v", st)
+	}
+	if _, err := m.RecordCheckpoint(ctx, issue.Number, "local-dev", "swarm/issue-1-test", remoteHead); err == nil {
+		t.Fatal("issue checkpoint bypassed pending PR revision")
+	}
+	if _, err := m.RecordPRHead(ctx, issue.Number, "local-dev", 38, "swarm/pr-37", localHead); err == nil {
+		t.Fatal("unlinked PR checkpoint accepted")
+	}
+	if _, err := m.RecordPRHead(ctx, issue.Number, "local-dev", 37, "swarm/pr-37", localHead); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CompletePRRevision(ctx, issue.Number, "local-dev", 37, remoteHead, remoteHead); err == nil {
+		t.Fatal("stale local head completed revision")
+	}
+	m.BindClaim(issue.Number, "stale-token")
+	if _, err := m.CompletePRRevision(ctx, issue.Number, "local-dev", 37, remoteHead, localHead); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("stale claim completion = %v", err)
+	}
+	m.BindClaim(issue.Number, st.Lease.ClaimID)
+	if st, err = m.CompletePRRevision(ctx, issue.Number, "local-dev", 37, remoteHead, localHead); err != nil || st.PRRevision != nil {
+		t.Fatalf("complete revision: %+v, %v", st, err)
+	}
+}
+
 func TestLivingCommentProjectionAndPIIFreeProvenance(t *testing.T) {
 	m, lt, iss := testManager(t)
 	ctx := context.Background()

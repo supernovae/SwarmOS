@@ -598,6 +598,7 @@ func (g *GitHubTracker) CreateDraftPR(ctx context.Context, req DraftPRRequest) (
 		Title   string `json:"title"`
 		Body    string `json:"body"`
 		Draft   bool   `json:"draft"`
+		State   string `json:"state"`
 		HTMLURL string `json:"html_url"`
 	}
 	if err := g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp); err != nil {
@@ -609,6 +610,7 @@ func (g *GitHubTracker) CreateDraftPR(ctx context.Context, req DraftPRRequest) (
 		Body:    resp.Body,
 		Head:    req.Head,
 		Base:    base,
+		State:   "open",
 		Draft:   resp.Draft,
 		HTMLURL: resp.HTMLURL,
 	}, nil
@@ -628,6 +630,7 @@ func (g *GitHubTracker) UpdateDraftPR(ctx context.Context, prNumber int, title, 
 		Title   string `json:"title"`
 		Body    string `json:"body"`
 		Draft   bool   `json:"draft"`
+		State   string `json:"state"`
 		HTMLURL string `json:"html_url"`
 		Head    struct {
 			Ref string `json:"ref"`
@@ -645,6 +648,7 @@ func (g *GitHubTracker) UpdateDraftPR(ctx context.Context, prNumber int, title, 
 		Body:    resp.Body,
 		Head:    resp.Head.Ref,
 		Base:    resp.Base.Ref,
+		State:   "open",
 		Draft:   resp.Draft,
 		HTMLURL: resp.HTMLURL,
 	}, nil
@@ -672,7 +676,7 @@ func (g *GitHubTracker) FindDraftPR(ctx context.Context, head, base string) (*Pu
 	}
 	for _, pr := range prs {
 		if pr.Draft {
-			return &PullRequest{Number: pr.Number, Title: pr.Title, Body: pr.Body, Head: head, Base: base, Draft: true, HTMLURL: pr.HTMLURL}, nil
+			return &PullRequest{Number: pr.Number, Title: pr.Title, Body: pr.Body, Head: head, Base: base, State: "open", Draft: true, HTMLURL: pr.HTMLURL}, nil
 		}
 	}
 	return nil, nil
@@ -691,6 +695,7 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 		Title   string `json:"title"`
 		Body    string `json:"body"`
 		State   string `json:"state"`
+		Merged  bool   `json:"merged"`
 		Draft   bool   `json:"draft"`
 		HTMLURL string `json:"html_url"`
 		Head    struct {
@@ -702,6 +707,7 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 		} `json:"head"`
 		Base struct {
 			Ref  string `json:"ref"`
+			SHA  string `json:"sha"`
 			Repo struct {
 				FullName string `json:"full_name"`
 			} `json:"repo"`
@@ -709,6 +715,26 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 	}
 	if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, fmt.Errorf("github GetPullRequest #%d: %w", number, err)
+	}
+	if strings.EqualFold(resp.State, "open") {
+		if resp.Base.Ref == "" {
+			return nil, fmt.Errorf("github PR #%d has no target branch", number)
+		}
+		// pulls/N can retain the base SHA from an earlier synchronization.
+		// Resolve the branch ref itself before deciding what to rebase onto.
+		var target struct {
+			Object struct {
+				SHA string `json:"sha"`
+			} `json:"object"`
+		}
+		refPath := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", g.owner, g.repo, url.PathEscape(resp.Base.Ref))
+		if err := g.client.DoWithContext(ctx, "GET", refPath, nil, &target); err != nil {
+			return nil, fmt.Errorf("github PR #%d target branch %s: %w", number, resp.Base.Ref, err)
+		}
+		if target.Object.SHA == "" {
+			return nil, fmt.Errorf("github PR #%d target branch has no commit", number)
+		}
+		resp.Base.SHA = target.Object.SHA
 	}
 	draft := resp.Draft
 	if resp.State != "" && !strings.EqualFold(resp.State, "open") {
@@ -719,13 +745,56 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 		Title:    resp.Title,
 		Body:     resp.Body,
 		Head:     resp.Head.Ref,
+		State:    resp.State,
+		Merged:   resp.Merged,
 		HeadRepo: resp.Head.Repo.FullName,
 		HeadSHA:  resp.Head.SHA,
 		Base:     resp.Base.Ref,
+		BaseSHA:  resp.Base.SHA,
 		BaseRepo: resp.Base.Repo.FullName,
 		Draft:    draft,
 		HTMLURL:  resp.HTMLURL,
 	}, nil
+}
+
+// GetPullRequestReviews returns review metadata, not review bodies or comments:
+// untrusted PR text must never become coordinator instructions.
+func (g *GitHubTracker) GetPullRequestReviews(ctx context.Context, number int) ([]PullRequestReview, error) {
+	if number <= 0 {
+		return nil, fmt.Errorf("invalid pull request number %d", number)
+	}
+	var reviews []PullRequestReview
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		path := fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=100&page=%d", g.owner, g.repo, number, page)
+		var resp []struct {
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			State       string    `json:"state"`
+			CommitSHA   string    `json:"commit_id"`
+			SubmittedAt time.Time `json:"submitted_at"`
+		}
+		if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
+			return nil, fmt.Errorf("github GetPullRequestReviews #%d page %d: %w", number, page, err)
+		}
+		if len(resp) > 100 {
+			return nil, fmt.Errorf("github PR review page exceeds 100 records")
+		}
+		for _, review := range resp {
+			reviews = append(reviews, PullRequestReview{
+				Author:      review.User.Login,
+				State:       review.State,
+				CommitSHA:   review.CommitSHA,
+				SubmittedAt: review.SubmittedAt,
+			})
+		}
+		if len(resp) < 100 {
+			return reviews, nil
+		}
+	}
 }
 
 func (g *GitHubTracker) GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error) {

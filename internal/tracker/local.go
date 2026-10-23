@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +13,9 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"strings"
 )
 
 type localState struct {
@@ -447,13 +450,21 @@ func (l *LocalTracker) CreateDraftPR(_ context.Context, req DraftPRRequest) (*Pu
 		num := st.NextPRNum
 		st.NextPRNum++
 		pr := &PullRequest{
-			Number:  num,
-			Title:   req.Title,
-			Body:    req.Body,
-			Head:    req.Head,
-			Base:    req.Base,
-			Draft:   true,
-			HTMLURL: fmt.Sprintf("local://pulls/%d", num),
+			Number:      num,
+			IssueNumber: req.IssueNumber,
+			Title:       req.Title,
+			Body:        req.Body,
+			Head:        req.Head,
+			Base:        req.Base,
+			State:       "open",
+			Draft:       true,
+			HTMLURL:     fmt.Sprintf("local://pulls/%d", num),
+		}
+		l.refreshPRRefs(pr)
+		if pr.HeadSHA != "" {
+			if err := l.updatePRRef(context.Background(), num, pr.HeadSHA, ""); err != nil {
+				return fmt.Errorf("initialize local PR head: %w", err)
+			}
 		}
 		st.PullRequests[num] = pr
 		cp := *pr
@@ -490,6 +501,7 @@ func (l *LocalTracker) FindDraftPR(ctx context.Context, head, base string) (*Pul
 		for _, pr := range st.PullRequests {
 			if pr.Draft && pr.Head == head && pr.Base == base {
 				cp := *pr
+				l.refreshPRRefs(&cp)
 				found = &cp
 				return nil
 			}
@@ -510,16 +522,124 @@ func (l *LocalTracker) GetPullRequest(ctx context.Context, number int) (*PullReq
 			return fmt.Errorf("pull request #%d not found in local tracker", number)
 		}
 		cp := *pr
+		l.refreshPRRefs(&cp)
 		found = &cp
 		return nil
 	})
 	return found, err
 }
 
+// refreshPRRefs reads only explicit branch refs. Missing refs retain persisted
+// metadata for fixtures without a Git repository, never substituting HEAD.
+func (l *LocalTracker) refreshPRRefs(pr *PullRequest) {
+	if sha := l.prRefSHA(pr.Number); sha != "" {
+		pr.HeadSHA = sha
+	} else if sha := l.branchSHA(pr.Head); sha != "" {
+		pr.HeadSHA = sha
+	}
+	if sha := l.branchSHA(pr.Base); sha != "" {
+		pr.BaseSHA = sha
+	}
+}
+
+// PublishPRHead advances only the local PR's dedicated Git ref with a
+// compare-and-swap. The checked-out issue branch/worktree remains untouched.
+func (l *LocalTracker) PublishPRHead(ctx context.Context, number int, expectedHead, head string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if number <= 0 || !validLocalSHA(expectedHead) || !validLocalSHA(head) {
+		return fmt.Errorf("PR number and full expected/new commit SHAs are required")
+	}
+	return l.withLock(true, func(st *localState) error {
+		pr, ok := st.PullRequests[number]
+		if !ok {
+			return fmt.Errorf("pull request #%d not found in local tracker", number)
+		}
+		if pr.State != "open" {
+			return fmt.Errorf("pull request #%d is not open", number)
+		}
+		if l.prRefSHA(number) != expectedHead {
+			return fmt.Errorf("local PR #%d head changed from expected %s", number, expectedHead)
+		}
+		cmd, _, err := gitcredential.Command(ctx, l.repoRoot, "rev-parse", "--verify", head+"^{commit}")
+		if err != nil {
+			return err
+		}
+		out, err := cmd.Output()
+		if err != nil || strings.TrimSpace(string(out)) != head {
+			return fmt.Errorf("PR head commit %s unavailable: %w", head, err)
+		}
+		if err := l.updatePRRef(ctx, number, head, expectedHead); err != nil {
+			return fmt.Errorf("publish local PR head: %w", err)
+		}
+		pr.HeadSHA = head
+		return nil
+	})
+}
+
+func validLocalSHA(sha string) bool {
+	if len(sha) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(sha)
+	return err == nil
+}
+
+func (l *LocalTracker) updatePRRef(ctx context.Context, number int, head, old string) error {
+	cmd, redact, err := gitcredential.Command(ctx, l.repoRoot, "update-ref", fmt.Sprintf("refs/swarm/pr-head/%d", number), head, old)
+	if err != nil {
+		return err
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, redact(strings.TrimSpace(string(out))))
+	}
+	return nil
+}
+
+func (l *LocalTracker) prRefSHA(number int) string {
+	if number <= 0 {
+		return ""
+	}
+	return l.refSHA(fmt.Sprintf("refs/swarm/pr-head/%d", number))
+}
+
+func (l *LocalTracker) branchSHA(branch string) string {
+	if branch == "" || strings.HasPrefix(branch, "-") || strings.Contains(branch, ":") {
+		return ""
+	}
+	ref := "refs/heads/" + branch
+	check, _, err := gitcredential.Command(context.Background(), l.repoRoot, "check-ref-format", ref)
+	if err != nil || check.Run() != nil {
+		return ""
+	}
+	return l.refSHA(ref)
+}
+
+func (l *LocalTracker) refSHA(ref string) string {
+	cmd, _, err := gitcredential.Command(context.Background(), l.repoRoot, "rev-parse", "--verify", ref+"^{commit}")
+	if err != nil {
+		return ""
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func (l *LocalTracker) GetPullRequestReviews(ctx context.Context, number int) ([]PullRequestReview, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if number <= 0 {
+		return nil, fmt.Errorf("invalid pull request number %d", number)
+	}
+	return nil, nil
+}
+
 func (l *LocalTracker) GetCheckStatus(_ context.Context, _ string) ([]CheckRunResult, error) {
-	return []CheckRunResult{
-		{Name: "local-validate", Status: "completed", Conclusion: "success"},
-	}, nil
+	return nil, nil
 }
 
 func (l *LocalTracker) EnsureLabels(_ context.Context, labels []LabelSpec) error {

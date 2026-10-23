@@ -24,6 +24,12 @@ type PublishingStore interface {
 	CompareAndSwapAndPublish(context.Context, int, string, []byte, string, string) (string, error)
 }
 
+// ExpectedPRPublishingStore atomically advances a linked PR branch and issue
+// state using the caller's captured remote head, never a freshly read value.
+type ExpectedPRPublishingStore interface {
+	CompareAndSwapAndPublishPR(context.Context, int, string, []byte, string, string, string) (string, error)
+}
+
 var ErrConflict = errors.New("coordination compare-and-swap conflict")
 var ErrNotFound = errors.New("coordination state not found")
 var ErrReplay = errors.New("fork request comment ID already processed")
@@ -232,6 +238,45 @@ func (s *GitStore) CompareAndSwapAndPublish(ctx context.Context, n int, old stri
 	}
 	if _, err = s.run(ctx, "", "push", "--atomic", "origin", "--force-with-lease="+stateLease, "--force-with-lease="+branchLease, commit+":"+stateRef, head+":"+branchRef); err != nil {
 		return "", fmt.Errorf("atomic checkpoint push: %w", err)
+	}
+	return commit, nil
+}
+
+func (s *GitStore) CompareAndSwapAndPublishPR(ctx context.Context, n int, oldState string, next []byte, branch, expectedHead, head string) (string, error) {
+	if oldState == "" || len(expectedHead) != 40 || len(head) != 40 || expectedHead == head || branch == "" || strings.HasPrefix(branch, "-") {
+		return "", fmt.Errorf("invalid PR publication identity")
+	}
+	if _, err := hex.DecodeString(expectedHead); err != nil {
+		return "", fmt.Errorf("invalid expected PR head: %w", err)
+	}
+	if _, err := hex.DecodeString(head); err != nil {
+		return "", fmt.Errorf("invalid candidate PR head: %w", err)
+	}
+	branchRef := "refs/heads/" + branch
+	if _, err := s.run(ctx, "", "check-ref-format", branchRef); err != nil {
+		return "", fmt.Errorf("invalid PR head branch: %w", err)
+	}
+	if _, err := s.run(ctx, "", "cat-file", "-e", head+"^{commit}"); err != nil {
+		return "", fmt.Errorf("candidate PR commit unavailable: %w", err)
+	}
+	blob, err := s.run(ctx, string(next), "hash-object", "-w", "--stdin")
+	if err != nil {
+		return "", err
+	}
+	tree, err := s.run(ctx, fmt.Sprintf("100644 blob %s\tstate.json\n", blob), "mktree")
+	if err != nil {
+		return "", err
+	}
+	commit, err := s.run(ctx, "swarm PR revision published\n", "-c", "user.name=SwarmOS", "-c", "user.email=swarmos@localhost", "commit-tree", tree, "-p", oldState)
+	if err != nil {
+		return "", err
+	}
+	stateRef := s.ref(n)
+	if _, err = s.run(ctx, "", "push", "--atomic", "origin",
+		"--force-with-lease="+stateRef+":"+oldState,
+		"--force-with-lease="+branchRef+":"+expectedHead,
+		commit+":"+stateRef, head+":"+branchRef); err != nil {
+		return "", fmt.Errorf("atomic PR publication rejected (issue state or remote head changed): %w", err)
 	}
 	return commit, nil
 }

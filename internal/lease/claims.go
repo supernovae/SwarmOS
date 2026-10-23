@@ -1,4 +1,4 @@
-package cli
+package lease
 
 import (
 	"crypto/sha256"
@@ -37,7 +37,7 @@ func claimControlPath(repoRoot string, issueNumber int) (string, error) {
 	return filepath.Join(configDir, "swarm", "claims", hex.EncodeToString(digest[:]), fmt.Sprintf("%d.json", issueNumber)), nil
 }
 
-func saveClaimToken(repoRoot string, issueNumber int, claimID string) error {
+func SaveClaimToken(repoRoot string, issueNumber int, claimID string) error {
 	if claimID == "" {
 		return fmt.Errorf("claim token is empty")
 	}
@@ -71,7 +71,7 @@ func saveClaimToken(repoRoot string, issueNumber int, claimID string) error {
 	return os.Rename(file.Name(), path)
 }
 
-func loadClaimToken(repoRoot string, issueNumber int) (string, error) {
+func LoadClaimToken(repoRoot string, issueNumber int) (string, error) {
 	path, err := claimControlPath(repoRoot, issueNumber)
 	if err != nil {
 		return "", err
@@ -90,7 +90,7 @@ func loadClaimToken(repoRoot string, issueNumber int) (string, error) {
 	return token.ClaimID, nil
 }
 
-func lockClaim(repoRoot string, issueNumber int) (*os.File, error) {
+func LockClaim(repoRoot string, issueNumber int) (*os.File, error) {
 	path, err := claimControlPath(repoRoot, issueNumber)
 	if err != nil {
 		return nil, err
@@ -109,7 +109,7 @@ func lockClaim(repoRoot string, issueNumber int) (*os.File, error) {
 	return file, nil
 }
 
-func unlockClaim(file *os.File) {
+func UnlockClaim(file *os.File) {
 	if file != nil {
 		_ = filelock.Unlock(file)
 		_ = file.Close()

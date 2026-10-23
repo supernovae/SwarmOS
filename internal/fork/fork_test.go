@@ -30,6 +30,7 @@ type fakeGitHubState struct {
 	currentUser string
 	nextID      int64
 	nextPR      int
+	baseSHA     string
 	issues      map[int]*tracker.Issue
 	comments    map[int64]*tracker.Comment
 	issueComm   map[int][]int64
@@ -232,6 +233,9 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 			}
 			http.Error(w, "unhandled issue route", http.StatusNotFound)
 
+		case r.URL.Path == "/repos/octo/swarm/git/ref/heads/main" && r.Method == http.MethodGet:
+			writeJSON(map[string]any{"object": map[string]string{"sha": s.baseSHA}})
+
 		case strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/pulls/"):
 			prNum, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/repos/octo/swarm/pulls/"))
 			pr, ok := s.prs[prNum]
@@ -324,6 +328,7 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	git(tmp, "clone", "--bare", originBare, bobForkBare)
 
 	ghState := newFakeGitHubState()
+	ghState.baseSHA = baseSHA
 	wuBody := "```yaml swarm-workunit\nid: ISSUE-42\nobjective: Implement fork feature\nconstraints: [Follow policy]\nacceptance: [Tests pass]\nworkflow: feature\ngate: agent\n```"
 	ghState.issues[42] = &tracker.Issue{Number: 42, Title: "Fork feature 42", Body: wuBody, State: "open", Author: "maintainer"}
 	ghState.issues[43] = &tracker.Issue{Number: 43, Title: "Fork feature 43", Body: strings.ReplaceAll(wuBody, "ISSUE-42", "ISSUE-43"), State: "open", Author: "maintainer"}

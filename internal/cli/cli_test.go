@@ -965,6 +965,9 @@ func TestForkCLISmoke(t *testing.T) {
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
+			case r.URL.Path == "/repos/octo/swarm/git/ref/heads/main" && r.Method == http.MethodGet:
+				writeResp(map[string]any{"object": map[string]string{"sha": resolveHeadSHA("main")}})
+				return
 			case r.URL.Path == "/repos/octo/swarm/pulls" && r.Method == http.MethodGet:
 				wantHead := r.URL.Query().Get("head")
 				wantBase := r.URL.Query().Get("base")

@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 
 	"github.com/supernovae/swarmos/internal/safefs"
 )
@@ -83,7 +84,11 @@ func (w *managedWriter) write(rel string, data []byte, legacy func(existing []by
 		w.res.CurrentFiles = append(w.res.CurrentFiles, rel)
 		return nil
 	case exists && !w.force && !w.generatedBefore(rel, existing, legacy):
-		w.res.SkippedFiles = append(w.res.SkippedFiles, rel)
+		if _, recorded := w.manifest.Files[rel]; recorded {
+			w.res.CustomizedFiles = append(w.res.CustomizedFiles, rel)
+		} else {
+			w.res.PreservedFiles = append(w.res.PreservedFiles, rel)
+		}
 		return nil
 	}
 	if err := w.safe.WriteFile(rel, data, 0o644); err != nil {
@@ -135,4 +140,92 @@ func samePinnedTemplate(render func(pin string) []byte) func([]byte) bool {
 		m := workflowPin.FindSubmatch(existing)
 		return m != nil && string(render(string(m[1]))) == string(existing)
 	}
+}
+
+// Files SwarmOS used to generate but no longer owns. Each is removed only while
+// it is still exactly as SwarmOS wrote it; otherwise it is left to the repository.
+var retiredFiles = map[string][]string{
+	// Repository-wide issue chooser settings belong to the repository owner.
+	".github/ISSUE_TEMPLATE/config.yml": {"blank_issues_enabled: true\ncontact_links:\n  - name: SwarmOS Agent & Harness Skills Guide\n    url: https://github.com/supernovae/swarmos\n    about: Learn how SwarmOS turns structured WorkUnit issues into validated Draft PRs\n"},
+}
+
+func (w *managedWriter) retire() error {
+	paths := make([]string, 0, len(retiredFiles))
+	for rel := range retiredFiles {
+		paths = append(paths, rel)
+	}
+	sort.Strings(paths)
+	for _, rel := range paths {
+		recorded, wasManaged := w.manifest.Files[rel]
+		delete(w.manifest.Files, rel)
+		existing, err := w.safe.ReadFile(rel, 1<<20)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		untouched := wasManaged && recorded == digest(existing)
+		for _, legacy := range retiredFiles[rel] {
+			untouched = untouched || (!wasManaged && string(existing) == legacy)
+		}
+		if !untouched {
+			continue
+		}
+		if err := w.safe.Remove(rel); err != nil {
+			return err
+		}
+		w.res.RemovedFiles = append(w.res.RemovedFiles, rel)
+	}
+	return nil
+}
+
+const (
+	harnessSectionStart = "<!-- swarm:harness:start -->"
+	harnessSectionEnd   = "<!-- swarm:harness:end -->"
+	// harnessSection points agents at SwarmOS from a repository's own AGENTS.md.
+	harnessSection = harnessSectionStart + `
+## SwarmOS
+
+This repository uses SwarmOS for contract-driven work. Coding agents: read ` + "`.swarm/SKILLS.md`" + ` for the issue and PR workflow, ` + "`.swarm/goals.md`" + ` and ` + "`.swarm/rules/`" + ` for project rules, and ` + "`.swarm/validation/required-checks.yaml`" + ` for the checks to run. Inside a task worktree, read ` + "`.swarm/active/WORKUNIT.md`" + ` and ` + "`.swarm/active/SYSTEM_PROMPT.md`" + ` first.
+` + harnessSectionEnd
+)
+
+var harnessSectionPattern = regexp.MustCompile(`(?s)` + regexp.QuoteMeta(harnessSectionStart) + `.*?` + regexp.QuoteMeta(harnessSectionEnd))
+
+// writeAgentsFile creates AGENTS.md from the template, or adds a marked SwarmOS
+// section to a repository's own AGENTS.md. Only text between the markers is
+// ever rewritten; the rest of the file stays the repository's.
+func (w *managedWriter) writeAgentsFile(rel string, template []byte) error {
+	existing, err := w.safe.ReadFile(rel, 16<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return w.write(rel, template, nil)
+	}
+	if err != nil {
+		return err
+	}
+	if _, recorded := w.manifest.Files[rel]; recorded || string(existing) == string(template) {
+		return w.write(rel, template, nil)
+	}
+	content := string(existing)
+	var updated string
+	switch {
+	case harnessSectionPattern.MatchString(content):
+		updated = harnessSectionPattern.ReplaceAllLiteralString(content, harnessSection)
+	case strings.Contains(content, ".swarm/SKILLS.md"):
+		// Already points agents at SwarmOS (for example, an older generated copy).
+		w.res.PreservedFiles = append(w.res.PreservedFiles, rel)
+		return nil
+	default:
+		updated = strings.TrimRight(content, "\n") + "\n\n" + harnessSection + "\n"
+	}
+	if updated == content {
+		w.res.CurrentFiles = append(w.res.CurrentFiles, rel)
+		return nil
+	}
+	if err := w.safe.WriteFile(rel, []byte(updated), 0o644); err != nil {
+		return err
+	}
+	w.res.SectionFiles = append(w.res.SectionFiles, rel)
+	return nil
 }

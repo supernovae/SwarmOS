@@ -1639,7 +1639,7 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 	if !strings.Contains(read(root, coordinator), "SWARM_VERSION: v0.6.1") || !strings.Contains(read(root, ".github/workflows/swarm-validate.yml"), "SWARM_VERSION: v0.6.1") {
 		t.Fatal("upgrade did not move untouched workflows to the new release")
 	}
-	if read(root, ".swarm/goals.md") != "# Our goals\n" || !strings.Contains(out, "kept customized .swarm/goals.md") {
+	if read(root, ".swarm/goals.md") != "# Our goals\n" || !strings.Contains(out, "kept your edits to .swarm/goals.md") {
 		t.Fatalf("upgrade overwrote or failed to report a customized file:\n%s", out)
 	}
 

@@ -9,7 +9,7 @@ import (
 
 func newReviewCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, notes string
-	var approve, reject, headless, asJSON bool
+	var approve, reject, headless, progress, asJSON bool
 	cmd := &cobra.Command{
 		Use:   "review-plan <issue-number>",
 		Short: "Review the implementation plan with an isolated agent or authorized human",
@@ -30,6 +30,9 @@ issue submit opens the linked draft PR.`,
 			if notes != "" && !approve && !reject {
 				return fmt.Errorf("--notes requires --approve or --reject")
 			}
+			if !approve && !reject && asJSON && !headless {
+				return fmt.Errorf("--json requires headless agent review")
+			}
 			if rootOpts.Fork && (approve || reject) {
 				return fmt.Errorf("human review (--approve and --reject) is maintainer-only and cannot be used with --fork")
 			}
@@ -44,7 +47,8 @@ issue submit opens the linked draft PR.`,
 				work := newWorkCmd(rootOpts)
 				work.SetOut(cmd.OutOrStdout())
 				work.SetErr(cmd.ErrOrStderr())
-				workArgs := []string{strconv.Itoa(issue), "--phase", "review", "--headless=" + strconv.FormatBool(headless)}
+				// Delegate to issue work so agent review gets identical validation and output.
+				workArgs := []string{strconv.Itoa(issue), "--phase", "review", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(progress)}
 				if agentName != "" {
 					workArgs = append(workArgs, "--reviewer-agent", agentName)
 				}
@@ -92,6 +96,7 @@ issue submit opens the linked draft PR.`,
 	cmd.Flags().BoolVar(&reject, "reject", false, "Record an authenticated human rejection")
 	cmd.Flags().StringVar(&notes, "notes", "", "Human decision notes")
 	cmd.Flags().BoolVar(&headless, "headless", true, "Run reviewer non-interactively")
+	cmd.Flags().BoolVar(&progress, "progress", true, "Report headless agent review progress on stderr (false disables)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured review outcome")
 	return cmd
 }

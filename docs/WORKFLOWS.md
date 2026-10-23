@@ -19,6 +19,8 @@ flowchart LR
     Gate -->|Approved| Impl["3. Developer<br/>Code + Tests"]
     Impl --> Val["4. Tester & Validator<br/>Baseline Checks"]
     Val --> Submit["5. Explicit Submit<br/>Draft PR"]
+    Submit --> Review["6. GitHub Code & Acceptance Review"]
+    Review --> Merge["7. Merge"]
 ```
 
 ---
@@ -58,6 +60,8 @@ How gate verification keeps reviews trustworthy:
 - **Exact reviewer verdicts**: Under `--gate agent`, the isolated reviewer must begin `.swarm/active/REVIEW.md` with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`. Any `CHANGES_REQUESTED` verdict stops the workflow before code is modified and publishes the findings for inspection.
 - **Authenticated human decisions**: Under `--gate human`, planning pauses with label `swarm:plan-review` until a repository maintainer runs `swarm review <issue> --approve` (or `--reject`).
 
+Plan approval and final acceptance review are separate checkpoints. `swarm validate` runs the approved-base checks and protected-path policy; it does not record a pass/fail decision for each acceptance criterion. After submission, maintainers use the attached test plan and observed results to check off verified criteria in the PR and complete GitHub code review. See [Taking a Submitted PR Through Acceptance Review](developer.md#taking-a-submitted-pr-through-acceptance-review) for the handoff.
+
 ---
 
 ## 4. Interactive Slash Commands & Shared Skills
@@ -68,7 +72,7 @@ SwarmOS separates per-issue execution planning from repository-wide roadmap plan
   - `/swarm-plan` — Draft `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` for the active WorkUnit.
   - `/swarm-review` — Audit the current plan against all constraints and acceptance criteria.
   - `/swarm-implement` — Implement the approved plan step by step.
-  - `/swarm-validate` — Run `swarm validate` and verify every acceptance criterion.
+  - `/swarm-validate` — Run the approved checks and test-plan scenarios, reporting observed results and unverified criteria. The coordinator runs claim-bound `swarm validate` and publishes its validation report.
 - **At the repository root for roadmap ideation & backlog triage**:
   - `/swarm-project-plan` (in Claude Code and OpenCode) or the shared `.swarm/skills/triage-and-plan.md` skill (used as a regular prompt in Codex and `omp`) — Collaboratively refine an idea into a repo-local plan file, preview `Step N` child tasks with `swarm plan --from <file>`, publish a native `Epic` and draft child sub-issues on explicit maintainer instruction (`--apply`), and selectively approve child WorkUnits with `swarm issue approve <N>`, or triage open issues with `swarm plan --scan`.
 

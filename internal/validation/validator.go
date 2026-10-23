@@ -294,19 +294,13 @@ func cleanCheckEnv(home string) []string {
 		"XDG_CONFIG_HOME=" + filepath.Join(home, "config"), "XDG_CACHE_HOME=" + filepath.Join(home, "cache"),
 		"APPDATA=" + filepath.Join(home, "config"), "LOCALAPPDATA=" + filepath.Join(home, "cache"),
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_TERMINAL_PROMPT=0"}
-	// rustup keeps compiler installations outside HOME. Preserve that public
-	// toolchain directory, but not CARGO_HOME, which may contain registry tokens.
-	rustupHome := os.Getenv("RUSTUP_HOME")
-	if rustupHome == "" {
-		if userHome, err := os.UserHomeDir(); err == nil {
-			candidate := filepath.Join(userHome, ".rustup")
-			if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-				rustupHome = candidate
-			}
+	// Preserve public language toolchain and package cache directories outside
+	// the scratch HOME, without exposing credential files such as ~/.cargo/credentials.toml,
+	// ~/.npmrc, or ~/.pypirc.
+	for _, b := range sandbox.HostToolchains() {
+		if b.EnvKey != "" && b.EnvVal != "" {
+			env = append(env, b.EnvKey+"="+b.EnvVal)
 		}
-	}
-	if rustupHome != "" {
-		env = append(env, "RUSTUP_HOME="+rustupHome)
 	}
 	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ"} {
 		if value := os.Getenv(key); value != "" {

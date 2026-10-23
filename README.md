@@ -33,6 +33,16 @@ Single-agent coding tools are great at editing files, but coordinating several a
 | **Vendor lock-in to a single CLI** | **Multi-Agent Routing** lets you mix **Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`), and OhMyPi (`omp`)**—and coordinate from [**Grok Bot**](docs/grokbot.md) or [**OpenAI Dot**](docs/openai-dot.md). |
 | **Untested or unsafe diffs** | **Baseline Validation** runs the required checks and protected-path rules from the approved base commit before opening an artifact-backed Draft PR. |
 
+### What's New in v0.5.0
+
+This release makes agent work easier to follow and its results easier to review:
+
+- **Live work progress:** Headless `swarm work` reports stage transitions and a 15-second heartbeat on stderr while keeping stdout and JSON results separate. Use `--progress=false` for quiet runs.
+- **Provenance at the terminal:** `swarm status <issue>` shows recorded per-role harness, model, sandbox boundary, and artifact digests; `--json` includes structured provenance.
+- **Clearer review handoffs:** Generated PRs distinguish automated validation from the maintainer's acceptance checklist, with guidance for reviewing the finished implementation.
+- **Automatic version metadata:** `swarm version` reads Go's embedded build information when release metadata is not supplied, replacing the old fixed version in source builds.
+- **Nested sandbox compatibility:** Detached sandbox builds work without Git metadata, and regression checks handle restricted nested sandboxes.
+
 ---
 
 ## How It Works
@@ -75,6 +85,15 @@ Download the latest prebuilt binary for **Linux**, **macOS**, or **Windows** fro
 ```bash
 go install github.com/supernovae/swarmos/cmd/swarm@latest
 ```
+
+Check the installed binary before starting a worker or reporting an issue:
+
+```bash
+swarm version
+swarm version --json
+```
+
+Release binaries include the version, commit, build date, Go toolchain, and platform. Go-installed binaries report their module version. Local `go build` binaries use Go's embedded module and Git metadata, including a `+dirty` suffix for modified checkouts; their date is the source commit time. Metadata that was not embedded remains `dev`, `none`, or `unknown`. Development and dirty builds require an explicit `--swarm-version` when generating the fork coordinator.
 
 ### 2. Initialize Your Repository
 

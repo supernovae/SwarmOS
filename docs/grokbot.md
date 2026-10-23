@@ -130,8 +130,7 @@ When Grok Bot (or an external contributor) does not have push access to the upst
 **1. Upstream maintainer setup:**
 
 ```bash
-# Generate .github/workflows/swarm-fork-coordinator.yml pinned to a compatible installed release (v0.6.0 or newer)
-# (or pass --swarm-version <compatible-tag-or-full-commit-sha> explicitly)
+# Generate .github/workflows/swarm-fork-coordinator.yml, pinned to the swarm you run it with
 swarm repo init --fork-coordinator
 swarm issue approve 42 --backend github
 ```

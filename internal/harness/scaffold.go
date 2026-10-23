@@ -227,10 +227,19 @@ type InitOptions struct {
 
 type InitResult struct {
 	CreatedFiles []string
+	// UpdatedFiles were still as SwarmOS generated them and now match this version.
+	UpdatedFiles []string
+	// CurrentFiles already matched this version.
+	CurrentFiles []string
+	// SkippedFiles were customized after generation and kept (use Force to replace).
 	SkippedFiles []string
 	Stack        StackProfile
 	Warnings     []string
 }
+
+// CoordinatorWorkflowPath is the opt-in fork coordinator workflow. Once a
+// repository has it, init keeps it current without --fork-coordinator.
+const CoordinatorWorkflowPath = ".github/workflows/swarm-fork-coordinator.yml"
 
 func InitRepository(opts InitOptions) (*InitResult, error) {
 	if opts.SwarmVersion != "" {
@@ -238,14 +247,13 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 			return nil, err
 		}
 	}
-	if opts.ForkCoordinator {
-		if strings.TrimSpace(opts.SwarmVersion) == "" {
-			return nil, fmt.Errorf("--fork-coordinator requires --swarm-version <v0.6.0-or-newer-immutable-release-tag-or-full-commit-SHA>")
-		}
-	}
 	root := opts.RepoRoot
 	if root == "" {
 		root = "."
+	}
+	forkCoordinator := opts.ForkCoordinator || fileExists(filepath.Join(root, CoordinatorWorkflowPath))
+	if forkCoordinator && strings.TrimSpace(opts.SwarmVersion) == "" {
+		return nil, fmt.Errorf("the fork coordinator workflow must install a specific swarm, but this build is neither a release nor a clean commit (for example, it has uncommitted changes); run repo init from a released or committed swarm, or pass --swarm-version <v0.6.0-or-newer-tag-or-full-commit-SHA>")
 	}
 	stack := DetectStack(root)
 	res := &InitResult{Stack: stack}
@@ -255,21 +263,12 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	}
 	defer safe.Close()
 
-	writeFile := func(relPath string, data []byte) error {
-		_, readErr := safe.ReadFile(relPath, 16<<20)
-		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-			return readErr
-		}
-		if !opts.Force && readErr == nil {
-			res.SkippedFiles = append(res.SkippedFiles, relPath)
-			return nil
-		}
-		if err := safe.WriteFile(relPath, data, 0644); err != nil {
-			return err
-		}
-		res.CreatedFiles = append(res.CreatedFiles, relPath)
-		return nil
+	recorded, err := loadManifest(safe)
+	if err != nil {
+		return nil, err
 	}
+	writer := &managedWriter{safe: safe, manifest: recorded, force: opts.Force, res: res}
+	writeFile := func(relPath string, data []byte) error { return writer.write(relPath, data, nil) }
 
 	copyEmbedded := func(embedPath, targetRel string) error {
 		data, err := embeddedTemplates.ReadFile(embedPath)
@@ -384,9 +383,9 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		}
 	}
 	if opts.SwarmVersion == "" {
-		res.Warnings = append(res.Warnings, "CI workflow omitted: rerun swarm repo init --swarm-version <v0.6.0-or-newer-immutable-release-tag-or-full-commit-SHA> to pin the validator")
+		res.Warnings = append(res.Warnings, "CI workflow omitted: this swarm build is neither a release nor a clean commit (for example, it has uncommitted changes); rerun repo init from a released or committed swarm to add it")
 	} else {
-		data, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-validate.yml")
+		template, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-validate.yml")
 		if err != nil {
 			return nil, err
 		}
@@ -395,27 +394,35 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 			res.Warnings = append(res.Warnings, warning)
 		}
 		if branch != "" {
-			data = bytes.ReplaceAll(data, []byte("SWARM_VERSION_PIN"), []byte(opts.SwarmVersion))
-			data = bytes.ReplaceAll(data, []byte("DEFAULT_BRANCH_YAML"), []byte(yamlQuotedString(branch)))
-			data = bytes.ReplaceAll(data, []byte("      # PROJECT_RUNTIME_SETUP"), []byte(projectRuntimeSetup(stack)))
-			if err := writeFile(".github/workflows/swarm-validate.yml", data); err != nil {
+			render := func(pin string) []byte {
+				data := bytes.ReplaceAll(template, []byte("SWARM_VERSION_PIN"), []byte(pin))
+				data = bytes.ReplaceAll(data, []byte("DEFAULT_BRANCH_YAML"), []byte(yamlQuotedString(branch)))
+				return bytes.ReplaceAll(data, []byte("      # PROJECT_RUNTIME_SETUP"), []byte(projectRuntimeSetup(stack)))
+			}
+			if err := writer.write(".github/workflows/swarm-validate.yml", render(opts.SwarmVersion), samePinnedTemplate(render)); err != nil {
 				return nil, err
 			}
 		}
 	}
-	if opts.ForkCoordinator {
-		coordData, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-fork-coordinator.yml")
+	if forkCoordinator {
+		template, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-fork-coordinator.yml")
 		if err != nil {
 			return nil, err
 		}
-		coordData = bytes.ReplaceAll(coordData, []byte("SWARM_VERSION_PIN"), []byte(opts.SwarmVersion))
-		if err := writeFile(".github/workflows/swarm-fork-coordinator.yml", coordData); err != nil {
+		render := func(pin string) []byte { return bytes.ReplaceAll(template, []byte("SWARM_VERSION_PIN"), []byte(pin)) }
+		if err := writer.write(CoordinatorWorkflowPath, render(opts.SwarmVersion), samePinnedTemplate(render)); err != nil {
 			return nil, err
 		}
 	}
 
 	// 8. Universal Slash Commands (.claude/commands/ and .opencode/commands/)
-	if err := EnsureSlashCommands(root, opts.Force, res); err != nil {
+	if err := ensureSlashCommands(writer); err != nil {
+		return nil, err
+	}
+	if opts.SwarmVersion != "" {
+		recorded.SwarmVersion = opts.SwarmVersion
+	}
+	if err := recorded.save(safe); err != nil {
 		return nil, err
 	}
 
@@ -427,35 +434,15 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	return res, nil
 }
 
-func EnsureSlashCommands(root string, force bool, res *InitResult) error {
-	safe, err := safefs.Open(root)
-	if err != nil {
-		return err
-	}
-	defer safe.Close()
-	cmds := []string{"swarm-plan.md", "swarm-review.md", "swarm-implement.md", "swarm-validate.md", "swarm-project-plan.md"}
-	for _, cmd := range cmds {
+func ensureSlashCommands(w *managedWriter) error {
+	for _, cmd := range []string{"swarm-plan.md", "swarm-review.md", "swarm-implement.md", "swarm-validate.md", "swarm-project-plan.md"} {
 		data, err := embeddedTemplates.ReadFile("templates/commands/" + cmd)
 		if err != nil {
 			return err
 		}
 		for _, dir := range []string{".claude/commands", ".opencode/commands"} {
-			rel := filepath.Join(dir, cmd)
-			_, readErr := safe.ReadFile(rel, 16<<20)
-			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-				return readErr
-			}
-			if !force && readErr == nil {
-				if res != nil {
-					res.SkippedFiles = append(res.SkippedFiles, rel)
-				}
-				continue
-			}
-			if err := safe.WriteFile(rel, data, 0o644); err != nil {
+			if err := w.write(dir+"/"+cmd, data, nil); err != nil {
 				return err
-			}
-			if res != nil {
-				res.CreatedFiles = append(res.CreatedFiles, rel)
 			}
 		}
 	}

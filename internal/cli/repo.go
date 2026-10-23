@@ -80,7 +80,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 
 			// Ensure .swarm/ harness is initialized in the registered repository
 			if _, err := os.Stat(filepath.Join(entry.Path, ".swarm", "config.yaml")); err != nil {
-				if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: entry.Path}); err != nil {
+				if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: entry.Path, SwarmVersion: pinFor(entry.Path)}); err != nil {
 					return fmt.Errorf("registered %s but could not initialize its .swarm/ harness (run swarm repo init --root %s): %w", entry.Repo, entry.Path, err)
 				}
 			}

@@ -1374,8 +1374,9 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
-	origVersion := Version
-	defer func() { Version = origVersion }()
+	origVersion, origCommit := Version, Commit
+	defer func() { Version, Commit = origVersion, origCommit }()
+	Commit = "none"
 
 	runCmd := func(root string, args ...string) error {
 		var buf bytes.Buffer
@@ -1575,5 +1576,88 @@ func TestCLIStatusProvenanceMissing(t *testing.T) {
 				t.Fatalf("status created state: %v", err)
 			}
 		})
+	}
+}
+
+func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
+	origVersion, origCommit := Version, Commit
+	defer func() { Version, Commit = origVersion, origCommit }()
+	run := func(root string, args ...string) (string, error) {
+		var buf bytes.Buffer
+		cmd := NewRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs(append([]string{"--root", root, "--backend", "local"}, args...))
+		err := cmd.Execute()
+		return buf.String(), err
+	}
+	read := func(root, rel string) string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	root := t.TempDir()
+	if out, err := exec.Command("git", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+
+	// A clean development build pins its exact commit, with no flag required.
+	buildCommit := strings.Repeat("b", 40)
+	Version, Commit = "dev", buildCommit
+	if out, err := run(root, "repo", "init", "--fork-coordinator"); err != nil || !strings.Contains(out, "push that commit") {
+		t.Fatalf("dev build init: %v\n%s", err, out)
+	}
+	coordinator := ".github/workflows/swarm-fork-coordinator.yml"
+	if !strings.Contains(read(root, coordinator), "SWARM_VERSION: "+buildCommit) {
+		t.Fatal("coordinator did not pin the build commit")
+	}
+
+	// A dirty build keeps the repository's existing pin instead of dropping CI.
+	Version, Commit = "0.6.0+dirty", "none"
+	if _, err := run(root, "repo", "init"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read(root, ".github/workflows/swarm-validate.yml"), "SWARM_VERSION: "+buildCommit) {
+		t.Fatal("dirty build dropped the existing workflow pin")
+	}
+
+	// Customize one generated file, then upgrade to a release: untouched files
+	// (including the coordinator, without --fork-coordinator) move to the new pin,
+	// and the customized file is kept.
+	customized := filepath.Join(root, ".swarm", "goals.md")
+	if err := os.WriteFile(customized, []byte("# Our goals\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	Version = "0.6.1"
+	out, err := run(root, "repo", "init")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read(root, coordinator), "SWARM_VERSION: v0.6.1") || !strings.Contains(read(root, ".github/workflows/swarm-validate.yml"), "SWARM_VERSION: v0.6.1") {
+		t.Fatal("upgrade did not move untouched workflows to the new release")
+	}
+	if read(root, ".swarm/goals.md") != "# Our goals\n" || !strings.Contains(out, "kept customized .swarm/goals.md") {
+		t.Fatalf("upgrade overwrote or failed to report a customized file:\n%s", out)
+	}
+
+	// Installs that predate the manifest are recognized by their pinned template.
+	if err := os.Remove(filepath.Join(root, ".swarm", "managed.json")); err != nil {
+		t.Fatal(err)
+	}
+	Version = "0.6.2"
+	if _, err := run(root, "repo", "init"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read(root, coordinator), "SWARM_VERSION: v0.6.2") {
+		t.Fatal("legacy coordinator workflow was not upgraded")
+	}
+	if read(root, ".swarm/goals.md") != "# Our goals\n" {
+		t.Fatal("legacy upgrade overwrote a customized file")
+	}
+	if _, err := run(root, "repo", "init", "--force"); err != nil || read(root, ".swarm/goals.md") == "# Our goals\n" {
+		t.Fatalf("--force did not replace the customized file: %v", err)
 	}
 }

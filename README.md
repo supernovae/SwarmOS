@@ -86,7 +86,7 @@ Once a resource-CLI-compatible release (`v0.6.0` or newer) is available, downloa
 go install ./cmd/swarm
 ```
 
-For generated CI and fork automation from a source build, pass `--swarm-version <full-40-character-commit-sha>` for an explicitly selected compatible commit; there is no automatic pin for a dev/dirty build.
+`swarm repo init` pins generated CI and fork automation to the swarm you ran it with: a release installs that release, and a clean source build installs its exact commit (push that commit before CI runs). From a build with uncommitted changes, init keeps the pin your workflows already use.
 
 Check the installed binary before starting a worker or reporting an issue:
 
@@ -200,8 +200,7 @@ External contributors do not need push access to the upstream repository. When m
 
 ```bash
 # Maintainer (once, on the upstream default branch):
-# Generates .github/workflows/swarm-fork-coordinator.yml pinned to a compatible installed release
-# (or pass --swarm-version <compatible-tag-or-full-commit-sha> explicitly)
+# Generates .github/workflows/swarm-fork-coordinator.yml; later `swarm repo init` runs keep it current
 swarm repo init --fork-coordinator
 swarm issue approve 42 --backend github
 
@@ -229,7 +228,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 
 | Command | What It Does |
 | :--- | :--- |
-| `swarm repo init [--force] [--sync-labels] [--template-dir <dir>] [--swarm-version <ref>] [--fork-coordinator]` | Scaffold `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. Compatible pins are `v0.6.0` or newer (including prereleases) or an explicitly selected compatible full commit SHA. |
+| `swarm repo init [--force] [--sync-labels] [--template-dir <dir>] [--fork-coordinator]` | Scaffold or upgrade `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. Rerun it after upgrading swarm: untouched generated files are updated, customized files are kept and listed (`--force` replaces them). `--swarm-version <ref>` overrides the pinned release. |
 | `swarm repo doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. |
 | `swarm issue create`, `swarm issue epic create`, `swarm issue approve`, `swarm issue lint`, `swarm issue decompose` | Create draft WorkUnits (`--parent`), standalone Epics (`--body-file`), approve revisions, lint schemas, or split WorkUnits into linked draft sub-issues. |
 | `swarm repo plan [--from <file> \| --scan] [--normalize] [--apply] [--ready] [--export <path>]` | Preview `Step N` tasks from a roadmap, publish a native `Epic` with linked draft child WorkUnits (`--apply`), scan and triage open issues (`--scan`), or export a plan snapshot. |
@@ -252,7 +251,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 
 Every leaf command accepts `--json` for scripting (for example, `swarm issue claim --json`, `swarm issue status --json`, `swarm repo doctor --json`, and `swarm repo validate --base <sha> --json`). Each prints one JSON document with a `kind` field, and failures print `{"kind": ..., "status": "failed", "error": ...}`; the `issue`, `repo`, `pr`, and `node` groups themselves only print help. Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions.
 
-When upgrading an existing repository, install a binary with the resource-owned CLI first, then review and update the checked-in workflow, slash-command instructions, and their immutable pin together. Generated files are preserved by default; review individual changes instead of blanket `--force` scaffolding.
+To upgrade an existing repository, install the new swarm and rerun `swarm repo init`. It updates every generated file you haven't changed (workflows, their pins, slash commands, prompts, and templates) and lists the customized files it kept so you can merge those by hand. Review the diff and commit it like any other change.
 
 For an existing approved WorkUnit PR, use `pr work` to develop or fix its implementation, `pr stage` to record an interactive plan or implementation in the PR worktree, and `pr rebase` to update ancestry. None publishes the candidate branch; only `pr submit` does. Maintainers revise PRs with upstream write access; contributors revise their own fork PRs with `--fork`. See [Continuing an Existing PR](docs/developer.md#continuing-an-existing-pr) for approvals, conflicts, and publication.
 

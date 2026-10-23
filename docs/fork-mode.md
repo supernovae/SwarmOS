@@ -82,19 +82,18 @@ Every cross-trust-boundary step in fork mode is designed to fail closed:
 
 ## 3. Maintainer Setup (Enabling Fork Mode on an Upstream Repository)
 
-Maintainers opt in to fork contributions by scaffolding the coordinator workflow pinned to an installed resource-CLI-compatible SwarmOS release (or an explicit compatible full commit SHA):
+Maintainers opt in to fork contributions once by scaffolding the coordinator workflow, then commit it to the default branch:
 
 ```bash
-# Generate .github/workflows/swarm-fork-coordinator.yml pinned to a compatible installed release
-# (or pass --swarm-version <compatible-tag-or-full-commit-sha> explicitly)
+# Generate .github/workflows/swarm-fork-coordinator.yml, pinned to the swarm you run it with
 swarm repo init --fork-coordinator
 ```
 
 > [!NOTE]
-> Fork mode requires a resource-CLI-compatible immutable release (`v0.6.0` or newer, including prereleases) or an explicitly selected compatible full lowercase 40-character commit SHA. If the installed version is older, dev, or dirty, pass `--swarm-version <compatible-tag-or-full-commit-sha>` explicitly. Review and update existing generated workflows and their pins alongside the binary and slash-command instructions; init preserves existing files unless deliberately forced.
+> The coordinator installs the same swarm you ran `repo init` with (`v0.6.0` or newer, or the exact commit of a clean source build). After upgrading swarm, rerun `swarm repo init`: it moves the coordinator and CI workflows to the new pin and updates other untouched generated files, while keeping and listing any files you customized. Review and commit the result.
 
 > [!TIP]
-> The coordinator reads pull requests to verify contributor submissions and PR revisions, so its workflow needs `pull-requests: read` alongside `contents: write` and `issues: write`. Workflows generated before v0.6 should add that permission (or be regenerated with `swarm repo init --fork-coordinator --force` after reviewing local changes).
+> The coordinator reads pull requests to verify contributor submissions and PR revisions, so its workflow needs `pull-requests: read` alongside `contents: write` and `issues: write`. Rerunning `swarm repo init` adds it to an untouched coordinator workflow; if you customized the workflow, add the permission by hand.
 
 ### Optional `.swarm/config.yaml` Settings
 

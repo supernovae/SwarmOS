@@ -1615,6 +1615,17 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 		t.Fatal("coordinator did not pin the build commit")
 	}
 
+	// A source build Go stamps with a pseudo-version pins it, with the same reminder.
+	pseudoRoot := t.TempDir()
+	if out, err := exec.Command("git", "-C", pseudoRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	Version = "0.6.1-0.20261023222858-9ad1652a4325"
+	if out, err := run(pseudoRoot, "repo", "init"); err != nil || !strings.Contains(out, "push that commit") || !strings.Contains(read(pseudoRoot, ".github/workflows/swarm-validate.yml"), "SWARM_VERSION: v0.6.1-0.20261023222858-9ad1652a4325") {
+		t.Fatalf("pseudo-version init: %v\n%s", err, out)
+	}
+	Version = "dev"
+
 	// A dirty build keeps the repository's existing pin instead of dropping CI.
 	Version, Commit = "0.6.0+dirty", "none"
 	if _, err := run(root, "repo", "init"); err != nil {

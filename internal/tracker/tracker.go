@@ -53,16 +53,27 @@ type DraftPRRequest struct {
 }
 
 type PullRequest struct {
-	Number   int    `json:"number"`
-	Title    string `json:"title"`
-	Body     string `json:"body"`
-	Head     string `json:"head"`
-	HeadRepo string `json:"head_repo,omitempty"`
-	HeadSHA  string `json:"head_sha,omitempty"`
-	Base     string `json:"base"`
-	BaseRepo string `json:"base_repo,omitempty"`
-	Draft    bool   `json:"draft"`
-	HTMLURL  string `json:"html_url"`
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`
+	Head        string `json:"head"`
+	HeadRepo    string `json:"head_repo,omitempty"`
+	HeadSHA     string `json:"head_sha,omitempty"`
+	BaseSHA     string `json:"base_sha,omitempty"`
+	State       string `json:"state"`
+	Merged      bool   `json:"merged"`
+	IssueNumber int    `json:"issue_number,omitempty"`
+	Base        string `json:"base"`
+	BaseRepo    string `json:"base_repo,omitempty"`
+	Draft       bool   `json:"draft"`
+	HTMLURL     string `json:"html_url"`
+}
+
+type PullRequestReview struct {
+	Author      string    `json:"author"`
+	State       string    `json:"state"`
+	CommitSHA   string    `json:"commit_sha"`
+	SubmittedAt time.Time `json:"submitted_at"`
 }
 
 type CheckRunResult struct {

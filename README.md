@@ -236,6 +236,10 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm issue validate [<issue>] [--base <sha>]` / `swarm repo validate --base <trusted-full-commit-sha>` | Validate a claimed issue against its approved base and artifacts, or run checkout-only CI validation against a trusted full base without a claim. |
 | `swarm issue submit [<issue>]` | Clean temporary markers, checkpoint and push the worktree branch, and open or reuse its linked Draft PR with collapsible artifacts and provenance attestation. |
 | `swarm issue status [<issue>] [--all]` | Inspect active claims, lease TTL, current phase, and published artifacts. |
+| `swarm pr status <PR>` / `swarm pr work <PR> [--instructions <text>]` | Inspect or continue developing a PR linked to an approved WorkUnit, including failing tests and review feedback, in a separate PR worktree. |
+| `swarm pr stage <PR> [--phase plan\|implement] [--harness <name>] [--model <name>] [--handoff] [--json]` | Stage an interactive plan or local implementation checkpoint in the separate managed PR worktree; links artifacts to the original issue without publishing the PR. |
+| `swarm pr rebase <PR> [--continue\|--abort]` | Rebase onto the PR's approved target base; retain conflicts for deliberate resolution. |
+| `swarm pr validate <PR>` / `swarm pr submit <PR>` | Validate the local revision and explicitly publish it to the same PR, refusing to overwrite a concurrent remote update. |
 | `swarm repo add`, `swarm repo list`, `swarm repo remove` | Manage the local multi-repository registry (`~/.config/swarm/repos.yaml`). |
 | `swarm node init`, `swarm node status`, `swarm node run` | Configure a worker node profile and run concurrent worker pools (`--concurrency`, `--max-jobs`, `--watch`). |
 | `swarm issue renew <issue>` / `swarm issue release <issue>` | Extend an active lease's TTL or release a claim back to the queue. |
@@ -244,7 +248,9 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 
 Use `--json` on leaves that offer it (for example, `swarm issue create --json`, `swarm issue claim --json`, `swarm issue status --json`, and `swarm repo validate --base <sha> --json`); bare `issue` and `repo` groups do not expose JSON output. Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions.
 
-When upgrading an existing repository, install a binary with the resource-owned CLI first, then review and update the checked-in workflow, slash-command instructions, and their immutable pin together. Generated files are preserved by default; review individual changes instead of blanket `--force` scaffolding. The namespace change does not provide PR repair or rebase commands: make code changes in your worktree and use GitHub's normal PR review and merge flow.
+When upgrading an existing repository, install a binary with the resource-owned CLI first, then review and update the checked-in workflow, slash-command instructions, and their immutable pin together. Generated files are preserved by default; review individual changes instead of blanket `--force` scaffolding.
+
+For an existing approved WorkUnit PR, use `pr work` to develop or fix its implementation, `pr stage` to record an interactive plan or implementation in the PR worktree, and `pr rebase` to update ancestry. None publishes the candidate branch; only `pr submit` does. PR mutation requires upstream write access rather than contributor-only `--fork` coordination. See [Continuing an Existing PR](docs/developer.md#continuing-an-existing-pr) for approvals, conflicts, and publication.
 
 ---
 

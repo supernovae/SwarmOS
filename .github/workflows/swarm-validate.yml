@@ -78,9 +78,17 @@ jobs:
           ./swarm-ci.exe issue --help
           ./swarm-ci.exe issue claim --help
           ./swarm-ci.exe issue work --help
+          ./swarm-ci.exe issue stage --help
           ./swarm-ci.exe issue review-plan --help
           ./swarm-ci.exe issue validate --help
           ./swarm-ci.exe issue submit --help
+          ./swarm-ci.exe pr --help
+          ./swarm-ci.exe pr status --help
+          ./swarm-ci.exe pr work --help
+          ./swarm-ci.exe pr stage --help
+          ./swarm-ci.exe pr rebase --help
+          ./swarm-ci.exe pr validate --help
+          ./swarm-ci.exe pr submit --help
       - name: Cross-compile all distributions
         if: runner.os == 'Linux'
         run: |

@@ -35,6 +35,10 @@ When working interactively on a single approved `WorkUnit` issue (using `/swarm-
    swarm issue submit '<issue-number>'
    ```
    The issue remains the approved work contract; `swarm issue status <issue-number>` shows its linked PR. Code and acceptance review happen on GitHub's PR, not in `review-plan`.
+7. **Continue an existing PR**:
+   - Use the recorded PR number with `swarm pr status <PR>` and `swarm pr work <PR> --instructions "Address the failing checks within the approved scope"`.
+   - Use `swarm pr rebase <PR>` for ancestry changes; a newer base requires maintainer approval of the linked issue first.
+   - Work in the separate reported PR worktree, satisfy the plan gate, then run `swarm pr validate <PR>` and `swarm pr submit <PR>` to update the same PR. Mutation requires upstream write access; contributor-only `--fork` coordination is unchanged.
 
 ## 2. Repository-Wide Roadmap Ideation, Epics & Backlog Triage (`swarm repo plan`)
 

@@ -91,13 +91,13 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			engine := workflow.NewEngineWithManager(opts.RepoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
 			if !dryRun {
-				lock, err := lockClaim(opts.RepoRoot, opts.IssueNumber)
+				lock, err := lease.LockClaim(opts.RepoRoot, opts.IssueNumber)
 				if err != nil {
 					return err
 				}
-				defer unlockClaim(lock)
+				defer lease.UnlockClaim(lock)
 				if opts.ClaimID == "" {
-					claimID, tokenErr := loadClaimToken(opts.RepoRoot, opts.IssueNumber)
+					claimID, tokenErr := lease.LoadClaimToken(opts.RepoRoot, opts.IssueNumber)
 					if tokenErr == nil {
 						state, err := engine.LeaseManager.GetCurrentState(cmd.Context(), opts.IssueNumber)
 						if err != nil {
@@ -111,7 +111,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					}
 				}
 				opts.OnClaim = func(state *lease.IssueState) error {
-					return saveClaimToken(opts.RepoRoot, opts.IssueNumber, state.Lease.ClaimID)
+					return lease.SaveClaimToken(opts.RepoRoot, opts.IssueNumber, state.Lease.ClaimID)
 				}
 			}
 			if dryRun {

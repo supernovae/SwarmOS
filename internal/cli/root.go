@@ -50,8 +50,9 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 				return err
 			}
 		}
-		if !opts.Fork && cmd.Flags().Changed("fork-remote") {
-			return fmt.Errorf("--fork-remote is only valid when --fork is set")
+		prCommand := cmd.Parent() != nil && cmd.Parent().Name() == "pr"
+		if !opts.Fork && !prCommand && cmd.Flags().Changed("fork-remote") {
+			return fmt.Errorf("--fork-remote requires --fork or a pr command")
 		}
 		if opts.Fork {
 			if strings.EqualFold(strings.TrimSpace(opts.Backend), "local") {
@@ -83,12 +84,12 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", firstNonEmptyStr(opts.Repo, os.Getenv("SWARM_REPO")), "GitHub repository (owner/repo)")
 	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", opts.RepoRoot, "Repository root path")
 	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
-	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", firstNonEmptyStr(opts.ForkRemote, "fork"), "Writable personal fork git remote name (only valid with --fork)")
-	rootCmd.AddCommand(newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
+	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", firstNonEmptyStr(opts.ForkRemote, "fork"), "Writable fork remote for --fork coordination or upstream-authorized PR updates")
+	rootCmd.AddCommand(newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPRCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
 	rootCmd.AddCommand(newInternalToolsCmd())
 	for _, command := range rootCmd.Commands() {
 		switch command.Name() {
-		case "repo", "node", "issue":
+		case "repo", "node", "issue", "pr":
 			command.GroupID = "resources"
 		default:
 			command.GroupID = "tools"

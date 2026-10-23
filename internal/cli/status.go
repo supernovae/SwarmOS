@@ -154,7 +154,7 @@ func newLeaseMutationCmd(options *RootOptions, renew bool) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		claim, err := loadClaimToken(options.resolveRepoRoot(), issue)
+		claim, err := lease.LoadClaimToken(options.resolveRepoRoot(), issue)
 		if err != nil {
 			return err
 		}
@@ -180,11 +180,11 @@ func newLeaseMutationCmd(options *RootOptions, renew bool) *cobra.Command {
 			}
 			state, err = manager.Renew(cmd.Context(), issue, owner, duration)
 		} else {
-			lock, lockErr := lockClaim(options.resolveRepoRoot(), issue)
+			lock, lockErr := lease.LockClaim(options.resolveRepoRoot(), issue)
 			if lockErr != nil {
 				return lockErr
 			}
-			defer unlockClaim(lock)
+			defer lease.UnlockClaim(lock)
 			state, err = manager.Release(cmd.Context(), issue, owner, reason)
 		}
 		if err != nil {

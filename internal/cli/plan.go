@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -9,6 +10,7 @@ import (
 
 func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 	var fromFile string
+	var exportPath string
 	var scanOpen bool
 	var normalize bool
 	var agentName string
@@ -34,6 +36,17 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 			if rootOpts.Fork && (apply || ready) {
 				return fmt.Errorf("swarm plan --apply and --ready are maintainer-only and cannot be used with --fork")
 			}
+			var exportFormat string
+			if cmd.Flags().Changed("export") {
+				if exportPath == "" {
+					return fmt.Errorf("--export requires a nonempty path")
+				}
+				var err error
+				exportFormat, err = workflow.ProjectPlanExportFormat(exportPath)
+				if err != nil {
+					return err
+				}
+			}
 			repoRoot := rootOpts.resolveRepoRoot()
 			tr, mgr, cfg, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
@@ -53,6 +66,15 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if exportFormat != "" {
+				data, err := workflow.MarshalProjectPlanReport(report, exportFormat)
+				if err != nil {
+					return fmt.Errorf("export project plan: %w", err)
+				}
+				if err := os.WriteFile(exportPath, data, 0o644); err != nil {
+					return fmt.Errorf("export project plan to %q: %w", exportPath, err)
+				}
+			}
 			if asJSON {
 				return writeJSON(cmd, map[string]any{
 					"kind":   "project-plan",
@@ -64,6 +86,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 		},
 	}
 
+	cmd.Flags().StringVar(&exportPath, "export", "", "Export project plan snapshot to a .yaml, .yml, or .json file")
 	cmd.Flags().StringVar(&fromFile, "from", "", "Path to Markdown or YAML project roadmap/plan file")
 	cmd.Flags().BoolVar(&scanOpen, "scan", false, "Scan, sense-make, and audit open tracker issues against project goals and rules")
 	cmd.Flags().BoolVar(&normalize, "normalize", false, "When used with --scan --apply, convert unstructured raw issues into structured WorkUnit markdown")

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -23,12 +22,6 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func newHTTPGitHubTracker(t *testing.T, handler http.Handler) *GitHubTracker {
 	t.Helper()
-	server := httptest.NewServer(handler)
-	t.Cleanup(server.Close)
-	serverURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
 	client, err := api.NewRESTClient(api.ClientOptions{
 		Host:      "github.com",
 		AuthToken: "test-token",
@@ -37,10 +30,11 @@ func newHTTPGitHubTracker(t *testing.T, handler http.Handler) *GitHubTracker {
 				return nil, fmt.Errorf("unexpected outbound host %q", req.URL.Host)
 			}
 			cloned := req.Clone(req.Context())
-			cloned.URL.Scheme = serverURL.Scheme
-			cloned.URL.Host = serverURL.Host
-			cloned.Host = serverURL.Host
-			return http.DefaultTransport.RoundTrip(cloned)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, cloned)
+			resp := rec.Result()
+			resp.Request = cloned
+			return resp, nil
 		}),
 	})
 	if err != nil {

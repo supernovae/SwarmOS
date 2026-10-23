@@ -74,7 +74,7 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 	}
 	flags = append(flags, "--dir", "/home/worker", "--setenv", "HOME", "/home/worker", "--setenv", "TMPDIR", "/tmp",
 		"--setenv", "XDG_CACHE_HOME", "/home/worker/.cache", "--setenv", "XDG_CONFIG_HOME", "/home/worker/.config", "--setenv", "XDG_DATA_HOME", "/home/worker/.local/share",
-		"--setenv", "PATH", SandboxPath(toolchains))
+		"--setenv", "GOFLAGS", "-buildvcs=false", "--setenv", "PATH", SandboxPath(toolchains))
 	for _, b := range toolchains {
 		if b.EnvKey != "" && b.EnvVal != "" {
 			flags = append(flags, "--setenv", b.EnvKey, b.EnvVal)

@@ -120,33 +120,35 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			report, err := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
-			if err != nil {
-				return fmt.Errorf("trusted validation failed: %w", err)
+			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
+			if report != nil {
+				if len(state.Attestations) > 0 {
+					for _, att := range state.Attestations {
+						if att.Role == "tester" {
+							if report.Artifact.Metadata == nil {
+								report.Artifact.Metadata = make(map[string]string)
+							}
+							report.Artifact.Metadata["role"] = "tester"
+							report.Artifact.Metadata["agent"] = att.Agent
+							report.Artifact.Metadata["harness"] = att.Harness
+							report.Artifact.Metadata["harness_version"] = att.HarnessVersion
+							report.Artifact.Metadata["execution_mode"] = att.ExecutionMode
+							report.Artifact.Metadata["authentication"] = att.Authentication
+							report.Artifact.Metadata["model"] = att.Model
+							report.Artifact.Metadata["sandbox"] = att.Sandbox
+							break
+						}
+					}
+				}
+				if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
+					return err
+				}
+			}
+			if valErr != nil {
+				return fmt.Errorf("trusted validation failed: %w", valErr)
 			}
 			if err := requireCleanHead(ctx, worktree, head); err != nil {
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
-			}
-			if len(state.Attestations) > 0 {
-				for _, att := range state.Attestations {
-					if att.Role == "tester" {
-						if report.Artifact.Metadata == nil {
-							report.Artifact.Metadata = make(map[string]string)
-						}
-						report.Artifact.Metadata["role"] = "tester"
-						report.Artifact.Metadata["agent"] = att.Agent
-						report.Artifact.Metadata["harness"] = att.Harness
-						report.Artifact.Metadata["harness_version"] = att.HarnessVersion
-						report.Artifact.Metadata["execution_mode"] = att.ExecutionMode
-						report.Artifact.Metadata["authentication"] = att.Authentication
-						report.Artifact.Metadata["model"] = att.Model
-						report.Artifact.Metadata["sandbox"] = att.Sandbox
-						break
-					}
-				}
-			}
-			if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
-				return err
 			}
 			// GitHub publishes this head and the fenced state in one atomic Git push.
 			if rootOpts.Fork {

@@ -38,7 +38,7 @@ When working interactively on a single approved `WorkUnit` issue (using `/swarm-
 7. **Continue an existing PR**:
    - Use the recorded PR number with `swarm pr status <PR>` and `swarm pr work <PR> --instructions "Address the failing checks within the approved scope"`.
    - Use `swarm pr rebase <PR>` for ancestry changes; a newer base requires maintainer approval of the linked issue first.
-   - Work in the separate reported PR worktree, satisfy the plan gate, then run `swarm pr validate <PR>` and `swarm pr submit <PR>` to update the same PR. Mutation requires upstream write access; contributor-only `--fork` coordination is unchanged.
+   - Work in the separate reported PR worktree, satisfy the plan gate, then run `swarm pr validate <PR>` and `swarm pr submit <PR>` to update the same PR. Maintainers need upstream write access; contributors revise their own fork PRs by adding `--fork` (for example, `swarm --fork pr work <PR>`), and a maintainer approves the revised plan with `swarm issue review-plan <issue> --approve`.
 
 ## 2. Repository-Wide Roadmap Ideation, Epics & Backlog Triage (`swarm repo plan`)
 

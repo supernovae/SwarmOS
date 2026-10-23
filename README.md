@@ -196,7 +196,7 @@ swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 
 ## Fork-Based Open-Source Contributions (`--fork`)
 
-External contributors do not need push access to the upstream repository. When maintainers opt in to the upstream fork coordinator Action, contributors can work in isolated local worktrees, push checkpoints to their own personal GitHub fork, and open cross-repository Draft PRs—while issue approval, validation policy, human plan review, and PR merge remain upstream maintainer actions.
+External contributors do not need push access to the upstream repository. When maintainers opt in to the upstream fork coordinator Action, contributors can work in isolated local worktrees, push checkpoints to their own personal GitHub fork, open cross-repository Draft PRs, and revise them after review—while issue approval, validation policy, human plan review, and PR merge remain upstream maintainer actions.
 
 ```bash
 # Maintainer (once, on the upstream default branch):
@@ -216,6 +216,10 @@ swarm --fork issue claim 42
 swarm --fork issue work 42
 swarm --fork issue renew 42   # optional when you need additional lease time
 swarm --fork issue submit 42
+
+# After review, revise the same PR (55 here) from your fork:
+swarm --fork pr work 55
+swarm --fork pr submit 55
 ```
 
 See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for architecture details, per-contributor claim caps (`fork.max_active_claims`), and security boundaries.
@@ -236,7 +240,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm issue validate [<issue>] [--base <approved-base-sha>]` / `swarm repo validate --base <trusted-full-commit-sha>` | Validate a claimed issue against its approved base and artifacts (`--base`, if given, must match it), or run checkout-only CI validation against a trusted full base without a claim. |
 | `swarm issue submit [<issue>] [--base <target-branch>]` | Clean temporary markers, checkpoint and push the worktree branch, and open or reuse its linked Draft PR (targeting the default branch unless `--base` names another) with collapsible artifacts and provenance attestation. |
 | `swarm issue status [<issue>] [--all]` | Inspect active claims, lease TTL, current phase, and published artifacts. |
-| `swarm pr status <PR>` / `swarm pr work <PR> [--instructions <text>]` | Inspect or continue developing a PR linked to an approved WorkUnit, including failing tests and review feedback, in a separate PR worktree. |
+| `swarm pr status <PR>` / `swarm pr work <PR> [--instructions <text>]` | Inspect or continue developing a PR linked to an approved WorkUnit, including failing tests and review feedback, in a separate PR worktree. Contributors add `--fork` to revise their own fork PRs. |
 | `swarm pr stage <PR> [--phase plan\|implement] [--harness <name>] [--model <name>] [--handoff] [--json]` | Stage an interactive plan or local implementation checkpoint in the separate managed PR worktree; links artifacts to the original issue without publishing the PR. |
 | `swarm pr rebase <PR> [--continue\|--abort]` | Rebase onto the PR's approved target base; retain conflicts for deliberate resolution. |
 | `swarm pr validate <PR>` / `swarm pr submit <PR>` | Validate the local revision and explicitly publish it to the same PR, refusing to overwrite a concurrent remote update. |
@@ -250,7 +254,7 @@ Every leaf command accepts `--json` for scripting (for example, `swarm issue cla
 
 When upgrading an existing repository, install a binary with the resource-owned CLI first, then review and update the checked-in workflow, slash-command instructions, and their immutable pin together. Generated files are preserved by default; review individual changes instead of blanket `--force` scaffolding.
 
-For an existing approved WorkUnit PR, use `pr work` to develop or fix its implementation, `pr stage` to record an interactive plan or implementation in the PR worktree, and `pr rebase` to update ancestry. None publishes the candidate branch; only `pr submit` does. PR mutation requires upstream write access rather than contributor-only `--fork` coordination. See [Continuing an Existing PR](docs/developer.md#continuing-an-existing-pr) for approvals, conflicts, and publication.
+For an existing approved WorkUnit PR, use `pr work` to develop or fix its implementation, `pr stage` to record an interactive plan or implementation in the PR worktree, and `pr rebase` to update ancestry. None publishes the candidate branch; only `pr submit` does. Maintainers revise PRs with upstream write access; contributors revise their own fork PRs with `--fork`. See [Continuing an Existing PR](docs/developer.md#continuing-an-existing-pr) for approvals, conflicts, and publication.
 
 ---
 

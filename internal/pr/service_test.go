@@ -372,3 +372,102 @@ func TestRecordedValidationChecksMatchPublishedHead(t *testing.T) {
 		t.Fatalf("unvalidated head reported checks: %+v", got)
 	}
 }
+
+// upstreamTracker presents the local fixture as a GitHub upstream so the
+// repository-identity and remote-selection paths run.
+type upstreamTracker struct {
+	tracker.Tracker
+	upstream, headRepo, headSHA string
+}
+
+func (u *upstreamTracker) UpstreamRepo() string { return u.upstream }
+
+func (u *upstreamTracker) GetPullRequest(ctx context.Context, number int) (*tracker.PullRequest, error) {
+	pr, err := u.Tracker.GetPullRequest(ctx, number)
+	if pr != nil {
+		copy := *pr
+		copy.BaseRepo, copy.HeadRepo = u.upstream, u.upstream
+		if u.headRepo != "" {
+			copy.HeadRepo = u.headRepo
+		}
+		if u.headSHA != "" {
+			copy.HeadSHA = u.headSHA
+		}
+		pr = &copy
+	}
+	return pr, err
+}
+
+func TestRemoteSelectsUpstreamOrVerifiedForkHead(t *testing.T) {
+	s, _, number, _ := fixture(t)
+	ctx := context.Background()
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", s.Root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("remote", "add", "origin", "https://github.com/octo/swarm.git")
+	git("remote", "add", "fork", "https://github.com/bob/swarm.git")
+	pr, err := s.Tracker.GetPullRequest(ctx, number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := &upstreamTracker{Tracker: s.Tracker, upstream: "octo/swarm"}
+	svc := *s
+	svc.Tracker = upstream
+	same := *pr
+	same.HeadRepo = "octo/swarm"
+	if remote, err := svc.remote(ctx, &Result{PR: &same}); err != nil || remote != "origin" {
+		t.Fatalf("same-repository PR remote = %q, %v", remote, err)
+	}
+	forked := *pr
+	forked.HeadRepo = "alice/swarm"
+	if _, err := svc.remote(ctx, &Result{PR: &forked}); err == nil || !strings.Contains(err.Error(), "explicit writable remote") {
+		t.Fatalf("fork head without a remote = %v", err)
+	}
+	svc.ForkRemote = "fork"
+	if _, err := svc.remote(ctx, &Result{PR: &forked}); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("fork head with another fork's remote = %v", err)
+	}
+	git("remote", "set-url", "fork", "https://github.com/alice/swarm.git")
+	if remote, err := svc.remote(ctx, &Result{PR: &forked}); err != nil || remote != "fork" {
+		t.Fatalf("verified fork head remote = %q, %v", remote, err)
+	}
+	svc.Fork = true
+	if _, err := svc.remote(ctx, &Result{PR: &same}); err == nil {
+		t.Fatal("contributor --fork mode selected a PR mutation remote")
+	}
+}
+
+func TestLinkedReportsRevisionPublicationStatus(t *testing.T) {
+	s, issue, number, base := fixture(t)
+	ctx := context.Background()
+	local := strings.Repeat("b", 40)
+	if _, err := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+		_, err := s.Manager.BeginPRRevision(ctx, issue, owner, number, base, local, "swarm/pr-1")
+		return nil, err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for head, want := range map[string]string{
+		base:                    "pending",
+		local:                   "published-pending-reconciliation",
+		strings.Repeat("c", 40): "diverged",
+	} {
+		svc := *s
+		svc.Tracker = &upstreamTracker{Tracker: s.Tracker, upstream: "octo/swarm", headSHA: head}
+		r, err := svc.linked(ctx, number)
+		if err != nil || r.Status != want {
+			t.Fatalf("PR head %s: status = %+v, %v; want %s", head[:7], r, err, want)
+		}
+	}
+	svc := *s
+	svc.Tracker = &upstreamTracker{Tracker: s.Tracker, upstream: "octo/swarm", headSHA: strings.Repeat("c", 40)}
+	if _, err := svc.Validate(ctx, number); err == nil || !strings.Contains(err.Error(), "changed outside the recorded revision") {
+		t.Fatalf("validate on diverged PR = %v", err)
+	}
+	if _, err := svc.Submit(ctx, number); err == nil || !strings.Contains(err.Error(), "refusing submit") {
+		t.Fatalf("submit on diverged PR = %v", err)
+	}
+}

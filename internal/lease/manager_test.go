@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
 
@@ -667,5 +668,79 @@ func TestHeartbeatRenewsAndStopsOnFenceLoss(t *testing.T) {
 	lost.Stop()
 	if !errors.Is(lost.Err(), ErrClaimFence) {
 		t.Fatalf("lost heartbeat error = %v", lost.Err())
+	}
+}
+
+func TestCompletePRRevisionPublishesHeadAndStateAtomically(t *testing.T) {
+	m, lt, iss := testManager(t)
+	ctx := context.Background()
+	root := m.repoRoot
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	if out, err := exec.Command("git", "init", "--bare", "--initial-branch=main", origin).CombinedOutput(); err != nil {
+		t.Fatalf("init origin: %v: %s", err, out)
+	}
+	git("remote", "add", "origin", origin)
+	base := git("rev-parse", "HEAD")
+	branch := "swarm/issue-1-test"
+	git("push", "origin", base+":refs/heads/main", base+":refs/heads/"+branch)
+
+	gm := NewManager(lt, m.security)
+	gm.SetStore(root, coordination.NewGitStore(root))
+	if _, err := gm.ApproveTask(ctx, iss.Number, "local-dev"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gm.Acquire(ctx, iss.Number, "local-dev", "pr", "all", time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	st, revision, err := gm.load(ctx, iss.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Branch, st.PRNumber = branch, 37
+	if _, err := gm.save(ctx, iss.Number, revision, st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gm.BeginPRRevision(ctx, iss.Number, "local-dev", 37, base, base, "swarm/pr-37"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gm.UpdateArtifact(ctx, iss.Number, "local-dev", contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock", Summary: "plan", Body: "plan"}); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = gm.InvalidatePRRevisionEvidence(ctx, iss.Number, "local-dev", 37); err != nil || len(st.Artifacts) != 0 {
+		t.Fatalf("invalidate revision evidence: %+v, %v", st, err)
+	}
+	if _, err := gm.InvalidatePRRevisionEvidence(ctx, iss.Number, "local-dev", 38); err == nil {
+		t.Fatal("invalidated evidence for a PR without a pending revision")
+	}
+	git("checkout", "-q", "-b", "swarm/pr-37", base)
+	git("commit", "-q", "--allow-empty", "-m", "PR revision")
+	candidate := git("rev-parse", "HEAD")
+	if _, err := gm.RecordPRHead(ctx, iss.Number, "local-dev", 37, "swarm/pr-37", candidate); err != nil {
+		t.Fatal(err)
+	}
+	st, err = gm.CompletePRRevision(ctx, iss.Number, "local-dev", 37, base, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PRRevision != nil || st.HeadSHA != candidate || st.Lease.Status != "completed" {
+		t.Fatalf("completed state = %+v", st)
+	}
+	if got := strings.TrimSpace(func() string {
+		out, _ := exec.Command("git", "-C", origin, "rev-parse", "refs/heads/"+branch).Output()
+		return string(out)
+	}()); got != candidate {
+		t.Fatalf("origin PR branch = %s, want %s", got, candidate)
+	}
+	persisted, err := gm.GetCurrentState(ctx, iss.Number)
+	if err != nil || persisted.PRRevision != nil || persisted.HeadSHA != candidate {
+		t.Fatalf("persisted state = %+v, %v", persisted, err)
 	}
 }

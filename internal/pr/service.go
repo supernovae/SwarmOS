@@ -510,6 +510,15 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 	if !opts.Abort && r.PR.BaseSHA != r.BaseSHA {
 		return nil, fmt.Errorf("PR base tip differs from approved issue baseline: swarm issue approve %d then retry (release active claim first if needed)", r.IssueNumber)
 	}
+	if opts.Continue || opts.Abort {
+		// Check before claiming so a mistaken --continue/--abort leaves no lease behind.
+		if _, statErr := os.Lstat(r.Worktree); statErr != nil {
+			return nil, fmt.Errorf("no managed PR rebase in progress")
+		}
+		if _, _, rebasing, e := workspace.PRHead(ctx, r.Worktree); e != nil || !rebasing {
+			return nil, fmt.Errorf("no managed PR rebase in progress")
+		}
+	}
 	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: opts.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: revisionHead(r.State), AllowHarnessMarkers: true})
 		if e != nil {

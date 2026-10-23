@@ -6,10 +6,10 @@ This guide walks repository maintainers through initializing SwarmOS, configurin
 
 ## 1. Initialize and Commit the Harness
 
-Download the latest `swarm` release from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest), then run `swarm init` inside your repository checkout and pin the release tag you want your consumer CI workflow to install:
+Download the latest `swarm` release from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or run `go install github.com/supernovae/swarmos/cmd/swarm@latest`), then run `swarm init` inside your repository checkout:
 
 ```bash
-swarm init --sync-labels --backend github --swarm-version v0.3.0
+swarm init --sync-labels --backend github
 swarm doctor --backend github
 ```
 
@@ -29,13 +29,13 @@ swarm doctor --backend github
 | `.claude/commands/swarm-*.md` & `.opencode/commands/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
 
 > [!TIP]
-> - Passing `--swarm-version` ensures the generated `.github/workflows/swarm-validate.yml` installs that exact immutable SwarmOS version. Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
+> - `swarm init` automatically pins the generated `.github/workflows/swarm-validate.yml` to your installed SwarmOS release tag (pass `--swarm-version <tag-or-sha>` to pin a different immutable release tag or commit SHA). Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
 > - `swarm init --sync-labels --backend github` provisions local issue forms and `swarm:*` labels on the repository; it does not configure organization-wide GitHub issue types or restrict direct GitHub web/API issue creation. Enable the organization `Epic` issue type in GitHub Settings, review your repository's issue forms and maintainer permissions manually, and run `swarm doctor --backend github` to verify that `Epic` is enabled and your current actor is authorized for `create-epic`.
 ---
 
 ## Consumer CI and release administration
 
-When `--swarm-version` is provided, `swarm init` generates `.github/workflows/swarm-validate.yml` configured for your repository's default branch and language toolchain (`Go`, `Node 24`, `Python 3.13` with `pytest`/`ruff`, or `Rust` with `clippy`), then runs `swarm validate --ci --base "$BASE_SHA"` against the pull request or push base SHA.
+When run from a tagged release (or when `--swarm-version` is provided), `swarm init` generates `.github/workflows/swarm-validate.yml` configured for your repository's default branch and language toolchain (`Go`, `Node 24`, `Python 3.13` with `pytest`/`ruff`, or `Rust` with `clippy`), then runs `swarm validate --ci --base "$BASE_SHA"` against the pull request or push base SHA.
 
 For repositories that mirror SwarmOS's own release and security setup:
 - **Release workflow (`release.yml`)**: Runs the lint, vulnerability, and Linux/macOS/Windows test matrix for the tagged commit, verifies the semantic version tag is reachable from the default branch, and publishes through the `release` GitHub Environment. Configure required reviewers and tag protection rules on that environment in GitHub Settings.

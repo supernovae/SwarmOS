@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -16,9 +17,10 @@ import (
 )
 
 type issueStatus struct {
-	Repository string            `json:"repository"`
-	Issue      *tracker.Issue    `json:"issue"`
-	State      *lease.IssueState `json:"state"`
+	Repository string                     `json:"repository"`
+	Issue      *tracker.Issue             `json:"issue"`
+	State      *lease.IssueState          `json:"state"`
+	Provenance []contract.RoleAttestation `json:"provenance"`
 }
 
 func newStatusCmd(options *RootOptions) *cobra.Command {
@@ -63,7 +65,11 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				if err != nil && !errors.Is(err, coordination.ErrNotFound) {
 					return fmt.Errorf("read %s #%d state: %w", target.Repo, issue.Number, err)
 				}
-				entries = append(entries, issueStatus{Repository: target.Repo, Issue: issue, State: state})
+				provenance := make([]contract.RoleAttestation, 0)
+				if state != nil {
+					provenance = append(provenance, state.Attestations...)
+				}
+				entries = append(entries, issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance})
 			}
 		}
 		if asJSON {
@@ -87,6 +93,21 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "Base: %s\nTask: %s\nApproved by: %s\n", state.BaseSHA, state.TaskDigest, state.ApprovedBy)
 				for _, artifact := range state.Artifacts {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s (%s)\n", artifact.Type, artifact.Verdict, artifact.Producer)
+				}
+				if len(entry.Provenance) == 0 {
+					fmt.Fprintln(cmd.OutOrStdout(), "Provenance: none recorded")
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "Provenance:")
+					for _, record := range entry.Provenance {
+						value := func(s string) string {
+							if s == "" {
+								return "-"
+							}
+							return s
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "  %s: Agent: %s; Harness: %s; Version: %s; Model: %s; Sandbox boundary: %s; Artifact type: %s; Artifact SHA-256: %s\n",
+							record.Role, value(record.Agent), value(record.Harness), value(record.HarnessVersion), value(record.Model), value(record.Sandbox), value(record.ArtifactType), value(record.ArtifactDigest))
+					}
 				}
 				if state.PRNumber != 0 {
 					fmt.Fprintf(cmd.OutOrStdout(), "PR #%d: %s\n", state.PRNumber, state.PRURL)

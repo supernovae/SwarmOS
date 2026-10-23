@@ -3,10 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/fork"
 	"github.com/supernovae/swarmos/internal/harness"
@@ -19,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1181,5 +1184,138 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 	}
 	if err := runCmd(devRoot, "init", "--fork-coordinator"); err == nil {
 		t.Fatal("expected swarm init --fork-coordinator on dev build without --swarm-version to fail")
+	}
+}
+
+func TestCLIStatusProvenance(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "work", n, "--agent", "mock", "--headless")
+	before := f.state(t, number)
+	roles := []string{"planner", "reviewer", "developer", "tester"}
+	if len(before.Attestations) != len(roles) {
+		t.Fatalf("expected four records: %+v", before.Attestations)
+	}
+	out := f.must(t, "status", n)
+	previous := -1
+	for i, record := range before.Attestations {
+		if record.Role != roles[i] {
+			t.Fatalf("unexpected role order: %+v", before.Attestations)
+		}
+		digest, err := hex.DecodeString(record.ArtifactDigest)
+		if err != nil || len(digest) != 32 {
+			t.Fatalf("invalid digest: %q", record.ArtifactDigest)
+		}
+		marker := "  " + record.Role + ":"
+		pos := strings.Index(out, marker)
+		if pos <= previous {
+			t.Fatalf("missing or unordered %s record: %s", record.Role, out)
+		}
+		previous = pos
+		row := strings.SplitN(out[pos:], "\n", 2)[0]
+		fields := []struct{ label, value string }{
+			{"Agent", record.Agent}, {"Harness", record.Harness}, {"Version", record.HarnessVersion},
+			{"Model", record.Model}, {"Sandbox boundary", record.Sandbox},
+			{"Artifact type", record.ArtifactType}, {"Artifact SHA-256", record.ArtifactDigest},
+		}
+		for _, field := range fields {
+			if field.value == "" || !strings.Contains(row, field.label+": "+field.value) {
+				t.Errorf("missing %s for %s: %s", field.label, record.Role, row)
+			}
+		}
+	}
+	for _, detail := range []string{"#" + n, "Base: " + before.BaseSHA, "Task: " + before.TaskDigest, "Approved by: " + before.ApprovedBy} {
+		if !strings.Contains(out, detail) {
+			t.Errorf("missing detail %q: %s", detail, out)
+		}
+	}
+	for _, artifact := range before.Artifacts {
+		if !strings.Contains(out, fmt.Sprintf("  %s: %s (%s)", artifact.Type, artifact.Verdict, artifact.Producer)) {
+			t.Errorf("missing artifact: %+v", artifact)
+		}
+	}
+	if before.PRNumber != 0 && !strings.Contains(out, fmt.Sprintf("PR #%d: %s", before.PRNumber, before.PRURL)) {
+		t.Errorf("missing PR: %s", out)
+	}
+	for _, args := range [][]string{{"status", n, "--json"}, {"status", "--json"}} {
+		var result struct {
+			Kind   string `json:"kind"`
+			Issues []struct {
+				Repository string                     `json:"repository"`
+				Issue      *tracker.Issue             `json:"issue"`
+				State      *lease.IssueState          `json:"state"`
+				Provenance []contract.RoleAttestation `json:"provenance"`
+			} `json:"issues"`
+		}
+		raw := f.must(t, args...)
+		if err := json.Unmarshal([]byte(raw), &result); err != nil {
+			t.Fatalf("invalid JSON: %v: %s", err, raw)
+		}
+		if result.Kind != "status" || len(result.Issues) != 1 {
+			t.Fatalf("unexpected envelope: %+v", result)
+		}
+		entry := result.Issues[0]
+		if entry.Repository == "" || entry.Issue == nil || entry.Issue.Number != number || !reflect.DeepEqual(entry.State, before) || !reflect.DeepEqual(entry.Provenance, before.Attestations) {
+			t.Fatalf("unexpected status: %+v", entry)
+		}
+	}
+	if listing := f.must(t, "status"); strings.Contains(listing, "Provenance:") || strings.Contains(listing, "Artifact SHA-256:") {
+		t.Fatalf("listing contains details: %s", listing)
+	}
+	if !reflect.DeepEqual(before, f.state(t, number)) {
+		t.Fatal("status mutated authoritative state")
+	}
+}
+
+func TestCLIStatusProvenanceMissing(t *testing.T) {
+	for _, approved := range []bool{false, true} {
+		t.Run(fmt.Sprintf("approved=%t", approved), func(t *testing.T) {
+			f := newCLIFixture(t)
+			number := f.create(t, "agent")
+			n := strconv.Itoa(number)
+			var before *lease.IssueState
+			if approved {
+				f.must(t, "issue", "approve", n)
+				before = f.state(t, number)
+			}
+			out := f.must(t, "status", n)
+			want := "draft/unapproved:"
+			if approved {
+				want = "Provenance: none recorded"
+			}
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q: %s", want, out)
+			}
+			for _, args := range [][]string{{"status", n, "--json"}, {"status", "--json"}} {
+				var result struct {
+					Issues []struct {
+						Repository string                     `json:"repository"`
+						Issue      *tracker.Issue             `json:"issue"`
+						State      *lease.IssueState          `json:"state"`
+						Provenance []contract.RoleAttestation `json:"provenance"`
+					} `json:"issues"`
+				}
+				raw := f.must(t, args...)
+				if err := json.Unmarshal([]byte(raw), &result); err != nil {
+					t.Fatalf("invalid JSON: %v: %s", err, raw)
+				}
+				if len(result.Issues) != 1 {
+					t.Fatalf("unexpected entries: %s", raw)
+				}
+				entry := result.Issues[0]
+				if entry.Provenance == nil || len(entry.Provenance) != 0 || !reflect.DeepEqual(entry.State, before) {
+					t.Fatalf("expected empty array and original state: %s", raw)
+				}
+			}
+			if approved {
+				if !reflect.DeepEqual(before, f.state(t, number)) {
+					t.Fatal("status mutated state")
+				}
+			} else if _, err := f.manager.GetCurrentState(context.Background(), number); !errors.Is(err, coordination.ErrNotFound) {
+				t.Fatalf("status created state: %v", err)
+			}
+		})
 	}
 }

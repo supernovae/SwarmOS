@@ -345,3 +345,81 @@ func TestCLIPRManualImplementationStageRemainsUnpublished(t *testing.T) {
 		t.Fatalf("PR submit did not publish manual checkpoint: %+v", state)
 	}
 }
+
+func TestCLIIssueInteractivePlanPauseKeepsClaimActive(t *testing.T) {
+	f := newCLIFixture(t)
+	cfgPath := filepath.Join(f.root, ".swarm", "config.yaml")
+	cfg, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(strings.Replace(string(cfg), "plan_mode: auto", "plan_mode: interactive", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, f.root, "add", ".swarm/config.yaml")
+	prGit(t, f.root, "commit", "-m", "Approve interactive plan policy")
+	issue := f.create(t, "human")
+	n := strconv.Itoa(issue)
+	f.must(t, "issue", "approve", n)
+	out := f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+	if !strings.Contains(out, "Interactive plan required") {
+		t.Fatalf("issue work did not pause for an interactive plan:\n%s", out)
+	}
+	state := f.state(t, issue)
+	if state.Lease.Status != "active" || state.Lease.Phase != "plan" || state.Lease.Owner != "alice" {
+		t.Fatalf("interactive pause must keep the planner's claim active: %+v", state.Lease)
+	}
+	planDir := filepath.Join(workspace.WorktreePath(f.root, issue), ".swarm", "active")
+	for name, body := range map[string]string{"PLAN.md": "# Plan\n", "TEST_PLAN.md": "# Tests\n"} {
+		if err := os.WriteFile(filepath.Join(planDir, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.must(t, "issue", "stage", n, "--phase", "plan")
+}
+
+func TestCLIPRRebaseConflictAbortAndContinue(t *testing.T) {
+	f, issue, number := submittedPRFixture(t, "agent")
+	p := strconv.Itoa(number)
+	before := f.state(t, issue)
+	changed := strings.Fields(prGit(t, f.root, "diff", "--name-only", before.BaseSHA, before.HeadSHA))
+	if len(changed) == 0 {
+		t.Fatal("fixture PR changed no files")
+	}
+	if _, err := f.run("pr", "rebase", p, "--continue"); err == nil || !strings.Contains(err.Error(), "no managed PR rebase in progress") {
+		t.Fatalf("continue without a rebase = %v", err)
+	}
+	conflicting := changed[0]
+	if err := os.WriteFile(filepath.Join(f.root, conflicting), []byte("conflicting upstream content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, f.root, "add", conflicting)
+	prGit(t, f.root, "commit", "-m", "Conflicting upstream change")
+	base := prGit(t, f.root, "rev-parse", "HEAD")
+	f.must(t, "issue", "approve", strconv.Itoa(issue))
+
+	if _, err := f.run("pr", "rebase", p); err == nil {
+		t.Fatal("conflicting rebase reported success")
+	}
+	worktree := workspace.PRWorktreePath(f.root, number)
+	f.must(t, "pr", "rebase", p, "--abort")
+	if head := prGit(t, worktree, "rev-parse", "HEAD"); head != before.HeadSHA {
+		t.Fatalf("abort left PR head at %s, want %s", head, before.HeadSHA)
+	}
+
+	if _, err := f.run("pr", "rebase", p); err == nil {
+		t.Fatal("conflicting rebase reported success")
+	}
+	if err := os.WriteFile(filepath.Join(worktree, conflicting), []byte("resolved content\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, worktree, "add", conflicting)
+	rebased := readPROutcome(t, f.must(t, "pr", "rebase", p, "--continue", "--json"))
+	if rebased.Status != "pending" || rebased.HeadSHA == before.HeadSHA {
+		t.Fatalf("continued rebase = %+v", rebased)
+	}
+	prGit(t, worktree, "merge-base", "--is-ancestor", base, "HEAD")
+	if state := f.state(t, issue); state.PRRevision == nil || state.PRRevision.LocalHeadSHA != rebased.HeadSHA {
+		t.Fatalf("rebased head not recorded: %+v", state.PRRevision)
+	}
+}

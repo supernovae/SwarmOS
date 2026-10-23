@@ -191,3 +191,18 @@ func TestCLIPlanExportApply(t *testing.T) {
 		})
 	}
 }
+
+func TestCLIPlanRejectsFlagsThatWouldBeIgnored(t *testing.T) {
+	f := newCLIFixture(t)
+	for args, want := range map[string]string{
+		"--scan --publish-issue 1":              "--publish-issue requires --apply",
+		"--scan --apply --publish-issue -1":     "positive issue number",
+		"--from ROADMAP.md --normalize":         "--normalize requires --scan",
+		"--from ROADMAP.md --normalize --apply": "--normalize requires --scan",
+	} {
+		_, err := f.run(append([]string{"repo", "plan"}, strings.Fields(args)...)...)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("repo plan %s = %v, want %q", args, err, want)
+		}
+	}
+}

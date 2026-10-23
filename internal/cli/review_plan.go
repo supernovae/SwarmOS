@@ -3,14 +3,13 @@ package cli
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 func newReviewCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, notes string
-	var approve, reject, headless, asJSON bool
+	var approve, reject, headless, progress, asJSON bool
 	cmd := &cobra.Command{
 		Use:   "review-plan <issue-number>",
 		Short: "Review the implementation plan with an isolated agent or authorized human",
@@ -20,7 +19,8 @@ and plan digests. This command does not review a finished PR or check off its
 acceptance criteria; final code and acceptance review happens in GitHub after
 issue submit opens the linked draft PR.`,
 		Args: cobra.ExactArgs(1),
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PreRunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON && (approve || reject), "review", runErr) }()
 			if approve && reject {
 				return fmt.Errorf("--approve and --reject are mutually exclusive")
 			}
@@ -30,21 +30,25 @@ issue submit opens the linked draft PR.`,
 			if notes != "" && !approve && !reject {
 				return fmt.Errorf("--notes requires --approve or --reject")
 			}
+			if !approve && !reject && asJSON && !headless {
+				return fmt.Errorf("--json requires headless agent review")
+			}
 			if rootOpts.Fork && (approve || reject) {
 				return fmt.Errorf("human review (--approve and --reject) is maintainer-only and cannot be used with --fork")
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			issue, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-			if err != nil || issue <= 0 {
-				return fmt.Errorf("invalid issue number %q", args[0])
+			issue, err := parseNumberArg(args[0], "issue")
+			if err != nil {
+				return err
 			}
 			if !approve && !reject {
 				work := newWorkCmd(rootOpts)
 				work.SetOut(cmd.OutOrStdout())
 				work.SetErr(cmd.ErrOrStderr())
-				workArgs := []string{strconv.Itoa(issue), "--phase", "review", "--headless=" + strconv.FormatBool(headless)}
+				// Delegate to issue work so agent review gets identical validation and output.
+				workArgs := []string{strconv.Itoa(issue), "--phase", "review", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(progress)}
 				if agentName != "" {
 					workArgs = append(workArgs, "--reviewer-agent", agentName)
 				}
@@ -87,11 +91,12 @@ issue submit opens the linked draft PR.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&agentName, "agent", "", "Configured reviewer override")
+	cmd.Flags().StringVar(&agentName, "agent", "", "Configured agent for the reviewer role (overrides roles.reviewer)")
 	cmd.Flags().BoolVar(&approve, "approve", false, "Record an authenticated human approval")
 	cmd.Flags().BoolVar(&reject, "reject", false, "Record an authenticated human rejection")
 	cmd.Flags().StringVar(&notes, "notes", "", "Human decision notes")
 	cmd.Flags().BoolVar(&headless, "headless", true, "Run reviewer non-interactively")
+	cmd.Flags().BoolVar(&progress, "progress", true, "Report headless agent review progress on stderr (false disables)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured review outcome")
 	return cmd
 }

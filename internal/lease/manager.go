@@ -183,6 +183,20 @@ func (m *Manager) load(ctx context.Context, n int) (*IssueState, string, error) 
 	return &st, rev, nil
 }
 func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (*IssueState, error) {
+	m.stampForSave(ctx, n, st)
+	b, err := json.Marshal(st)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = m.store.CompareAndSwap(ctx, n, rev, b); err != nil {
+		return nil, err
+	}
+	m.project(ctx, n, st)
+	return st, nil
+}
+
+// stampForSave fills bookkeeping fields every persisted state carries.
+func (m *Manager) stampForSave(ctx context.Context, n int, st *IssueState) {
 	if st.ProjectionCommentID == 0 {
 		if existingID := m.findProjectionCommentID(ctx, n); existingID > 0 {
 			st.ProjectionCommentID = existingID
@@ -193,15 +207,6 @@ func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (
 			st.LastForkRequestID = reqID
 		}
 	}
-	b, err := json.Marshal(st)
-	if err != nil {
-		return nil, err
-	}
-	if _, err = m.store.CompareAndSwap(ctx, n, rev, b); err != nil {
-		return nil, err
-	}
-	m.project(ctx, n, st)
-	return st, nil
 }
 
 func (m *Manager) findProjectionCommentID(ctx context.Context, n int) int64 {
@@ -542,9 +547,18 @@ func (m *Manager) trustedBase() (string, error) {
 }
 
 // AcquirePR reuses the approved WorkUnit lease for a linked PR revision.
+// Through a contributor gateway, the upstream coordinator verifies that the
+// actor owns the fork the PR's head lives in before granting the claim.
 func (m *Manager) AcquirePR(ctx context.Context, n, number int, owner, agent, phase string, duration time.Duration, max int) (*IssueState, error) {
 	if m.gateway != nil {
-		return nil, fmt.Errorf("PR claims cannot be acquired through contributor gateway")
+		st, err := m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: n, PRNumber: number, Agent: agent, Phase: phase, Duration: duration.String()})
+		if err != nil {
+			return nil, err
+		}
+		if st != nil && st.Lease.ClaimID != "" {
+			m.BindClaim(n, st.Lease.ClaimID)
+		}
+		return st, nil
 	}
 	return m.acquire(ctx, n, number, owner, agent, phase, duration, max)
 }
@@ -617,7 +631,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if err = verifyTrust(cfg.Security, issue); err != nil {
 		return nil, err
 	}
-	if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+	if !TaskApprovalCurrent(st, wu, cfg) {
 		return nil, ErrApprovalRequired
 	}
 	now := m.nowFn()
@@ -633,7 +647,9 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if !known {
 		contributors = append(contributors, owner)
 	}
-	if st.ForkRepo != "" {
+	// A fresh issue claim replaces a fork contributor's checkpoint. PR work keeps
+	// the PR link and its head repository so the revision can be published there.
+	if st.ForkRepo != "" && prNumber == 0 {
 		clearCheckpointAndHeadArtifacts(st)
 		st.ForkRepo = ""
 	}
@@ -662,6 +678,7 @@ func clearCheckpointAndHeadArtifacts(st *IssueState) {
 	st.HeadSHA = ""
 	st.PRNumber = 0
 	st.PRURL = ""
+	st.PRRevision = nil
 	var keptArtifacts []contract.Artifact
 	for _, a := range st.Artifacts {
 		if a.Type == contract.ArtifactDesign || a.Type == contract.ArtifactTestPlan || a.Type == contract.ArtifactReview {
@@ -714,6 +731,9 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		if err != nil {
 			return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
 		}
+		if st.PRRevision != nil {
+			return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", issue, st.PRRevision.Number)
+		}
 		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
 		if err != nil {
 			return nil, fmt.Errorf("load approved policy: %w", err)
@@ -724,7 +744,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		if err = verifyTrust(cfg.Security, iss); err != nil {
 			return nil, err
 		}
-		if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+		if !TaskApprovalCurrent(st, wu, cfg) {
 			return nil, ErrApprovalRequired
 		}
 		policyDur, err := time.ParseDuration(cfg.Lease.Duration)
@@ -827,7 +847,7 @@ func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState)
 	if err != nil {
 		return err
 	}
-	if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+	if !TaskApprovalCurrent(st, wu, cfg) {
 		return ErrApprovalRequired
 	}
 	return nil
@@ -1168,7 +1188,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			}
 			actor, err := m.tracker.CurrentUser(ctx)
 			if err != nil || strings.TrimSpace(actor) == "" {
-				return fmt.Errorf("cannot authenticate review actor: %v", err)
+				return fmt.Errorf("cannot authenticate review actor: %w", err)
 			}
 			art.Metadata["actor"] = actor
 			art.Metadata["review_source"] = "contributor"
@@ -1362,11 +1382,11 @@ func (m *Manager) GetCurrentState(ctx context.Context, n int) (*IssueState, erro
 // BeginPRRevision fences a new local revision without changing the submitted
 // issue checkpoint. It invalidates approval and head-dependent evidence.
 func (m *Manager) BeginPRRevision(ctx context.Context, n int, owner string, number int, remoteHead, localHead, branch string) (*IssueState, error) {
-	if m.gateway != nil {
-		return nil, fmt.Errorf("PR revisions require upstream coordination write access; --fork contributor gateway cannot publish them")
-	}
 	if number <= 0 || remoteHead == "" || localHead == "" || branch == "" {
 		return nil, fmt.Errorf("incomplete PR revision identity")
+	}
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "begin-pr-revision", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, ExpectedHeadSHA: remoteHead, HeadSHA: localHead, Branch: branch})
 	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if st.PRNumber != number {
@@ -1395,11 +1415,11 @@ func invalidatePRRevisionEvidence(st *IssueState) {
 // RecordPRHead publishes a local checkpoint to the issue coordination store,
 // not to the PR's remote head ref.
 func (m *Manager) RecordPRHead(ctx context.Context, n int, owner string, number int, branch, head string) (*IssueState, error) {
-	if m.gateway != nil {
-		return nil, fmt.Errorf("PR revisions require upstream coordination write access")
-	}
 	if branch == "" || head == "" {
 		return nil, fmt.Errorf("incomplete PR checkpoint")
+	}
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "record-pr-head", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, Branch: branch, HeadSHA: head})
 	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if st.PRRevision == nil || st.PRRevision.Number != number || st.PRRevision.Branch != branch {
@@ -1441,7 +1461,11 @@ func (m *Manager) CompletePRRevisionLocal(ctx context.Context, n int, owner stri
 
 func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, number int, expected, published string, atomicOrigin bool) (*IssueState, error) {
 	if m.gateway != nil {
-		return nil, fmt.Errorf("PR publication is not supported through contributor gateway")
+		if atomicOrigin {
+			return nil, fmt.Errorf("contributors publish PR revisions to their fork, not origin")
+		}
+		// The coordinator re-verifies the published head on GitHub before completing.
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "complete-pr-revision", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, ExpectedHeadSHA: expected, HeadSHA: published})
 	}
 	st, rev, err := m.load(ctx, n)
 	if err != nil {
@@ -1458,7 +1482,12 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 	st.HeadSHA = published
 	st.Lease.Status = "completed"
 	st.Lease.Phase = "submitted"
-	if ps, ok := m.store.(coordination.ExpectedPRPublishingStore); ok && atomicOrigin {
+	if atomicOrigin {
+		ps, ok := m.store.(coordination.ExpectedPRPublishingStore)
+		if !ok {
+			return nil, fmt.Errorf("origin PR publication requires a coordination store that publishes the PR head atomically")
+		}
+		m.stampForSave(ctx, n, st)
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return nil, err
@@ -1474,6 +1503,9 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 
 // InvalidatePRRevisionEvidence requires the same claim fence as execution.
 func (m *Manager) InvalidatePRRevisionEvidence(ctx context.Context, n int, owner string, number int) (*IssueState, error) {
+	if m.gateway != nil {
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "invalidate-pr-evidence", IssueNumber: n, ClaimID: m.token(n), PRNumber: number})
+	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if st.PRRevision == nil || st.PRRevision.Number != number {
 			return fmt.Errorf("no pending revision for PR #%d", number)
@@ -1481,6 +1513,19 @@ func (m *Manager) InvalidatePRRevisionEvidence(ctx context.Context, n int, owner
 		invalidatePRRevisionEvidence(st)
 		return nil
 	})
+}
+
+// TesterMetadata adds the recorded tester attestation, if any, to a validation
+// artifact's metadata so every validation path reports the same provenance.
+func TesterMetadata(st *IssueState, base map[string]string) map[string]string {
+	if st != nil {
+		for _, att := range st.Attestations {
+			if att.Role == "tester" {
+				return att.Metadata(base)
+			}
+		}
+	}
+	return base
 }
 
 // ReviewBindings identifies the exact coordinator snapshot a reviewer receives.
@@ -1504,6 +1549,12 @@ func ReviewBindings(st *IssueState) map[string]string {
 		}
 	}
 	return bindings
+}
+
+// TaskApprovalCurrent reports whether state still approves exactly this
+// WorkUnit revision under the policy approved at its base commit.
+func TaskApprovalCurrent(st *IssueState, wu *contract.WorkUnit, cfg *contract.SwarmConfig) bool {
+	return st != nil && st.TaskDigest == contract.DigestWorkUnit(wu) && st.PolicyDigest == contract.DigestApprovedPolicy(st.BaseSHA, cfg)
 }
 
 func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {

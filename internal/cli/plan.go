@@ -33,6 +33,15 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 			if ready && !apply {
 				return fmt.Errorf("--ready requires --apply")
 			}
+			if publishIssue != 0 && !apply {
+				return fmt.Errorf("--publish-issue requires --apply")
+			}
+			if publishIssue < 0 {
+				return fmt.Errorf("--publish-issue must be a positive issue number")
+			}
+			if normalize && !scanOpen {
+				return fmt.Errorf("--normalize requires --scan")
+			}
 			if rootOpts.Fork && (apply || ready) {
 				return fmt.Errorf("swarm repo plan --apply and --ready are maintainer-only and cannot be used with --fork")
 			}
@@ -63,9 +72,12 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 				Ready:        ready,
 				PublishIssue: publishIssue,
 			})
-			if err != nil {
+			if report == nil {
 				return err
 			}
+			// A report with an error means the plan was applied but its summary
+			// could not be published; still show and export what was applied.
+			publishErr := err
 			if exportFormat != "" {
 				data, err := workflow.MarshalProjectPlanReport(report, exportFormat)
 				if err != nil {
@@ -76,13 +88,16 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{
+				if err := writeJSON(cmd, map[string]any{
 					"kind":   "project-plan",
 					"report": report,
-				})
+				}); err != nil {
+					return err
+				}
+				return publishErr
 			}
 			fmt.Fprint(cmd.OutOrStdout(), report.SummaryMarkdown)
-			return nil
+			return publishErr
 		},
 	}
 

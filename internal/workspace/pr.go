@@ -44,12 +44,7 @@ func CompilePRHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *co
 
 Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMPT.md`"+` before making changes.
 %s`, ActiveMarkerStart, prNumber, wu.ID, wu.IssueNumber, role, prNumber, prNumber, prNumber, prNumber, prNumber, prNumber, wu.IssueNumber, ActiveMarkerEnd)
-	for _, doc := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if err := injectManagedBlock(filepath.Join(worktreePath, doc), pointer); err != nil {
-			return err
-		}
-	}
-	return nil
+	return injectActivePointer(worktreePath, pointer)
 }
 
 type PRWorkspaceOptions struct {
@@ -69,17 +64,16 @@ func PRWorktreePath(root string, number int) string {
 
 func PRBranchName(number int) string { return fmt.Sprintf("swarm/pr-%d", number) }
 
-func prGit(ctx context.Context, path string, args ...string) (string, error) {
-	return gitOutputContext(ctx, path, args...)
-}
-
 func prCommit(ctx context.Context, path, sha string) error {
 	if !prCommitSHA.MatchString(sha) {
 		return fmt.Errorf("expected full commit SHA, got %q", sha)
 	}
-	actual, err := prGit(ctx, path, "rev-parse", "--verify", sha+"^{commit}")
-	if err != nil || !strings.EqualFold(strings.TrimSpace(actual), sha) {
+	actual, err := gitOutputContext(ctx, path, "rev-parse", "--verify", sha+"^{commit}")
+	if err != nil {
 		return fmt.Errorf("commit %s is unavailable: %w", sha, err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(actual), sha) {
+		return fmt.Errorf("commit %s resolved to %s", sha, strings.TrimSpace(actual))
 	}
 	return nil
 }
@@ -88,7 +82,7 @@ func prRef(ctx context.Context, root, ref string) error {
 	if strings.HasPrefix(ref, "-") || strings.Contains(ref, ":") || ref == "" {
 		return fmt.Errorf("invalid branch %q", ref)
 	}
-	if _, err := prGit(ctx, root, "check-ref-format", "refs/heads/"+ref); err != nil {
+	if _, err := gitOutputContext(ctx, root, "check-ref-format", "refs/heads/"+ref); err != nil {
 		return fmt.Errorf("invalid branch %q: %w", ref, err)
 	}
 	return nil
@@ -119,11 +113,11 @@ func PreparePR(ctx context.Context, root string, opts PRWorkspaceOptions) (strin
 		if strings.HasPrefix(opts.Remote, "-") || strings.ContainsAny(opts.Remote, "\x00\n") {
 			return "", "", fmt.Errorf("invalid remote %q", opts.Remote)
 		}
-		if _, err := prGit(ctx, abs, "remote", "get-url", opts.Remote); err != nil {
+		if _, err := gitOutputContext(ctx, abs, "remote", "get-url", opts.Remote); err != nil {
 			return "", "", fmt.Errorf("remote %q unavailable: %w", opts.Remote, err)
 		}
 		ref := "refs/heads/" + opts.HeadBranch
-		observed, err := prGit(ctx, abs, "ls-remote", "--refs", opts.Remote, ref)
+		observed, err := gitOutputContext(ctx, abs, "ls-remote", "--refs", opts.Remote, ref)
 		if err != nil {
 			return "", "", err
 		}
@@ -131,12 +125,12 @@ func PreparePR(ctx context.Context, root string, opts PRWorkspaceOptions) (strin
 			return "", "", fmt.Errorf("remote %s branch %s does not match expected PR head %s", opts.Remote, ref, opts.HeadSHA)
 		}
 		if err := prCommit(ctx, abs, opts.HeadSHA); err != nil {
-			if _, err := prGit(ctx, abs, "fetch", "--no-write-fetch-head", opts.Remote, opts.HeadSHA); err != nil {
+			if _, err := gitOutputContext(ctx, abs, "fetch", "--no-write-fetch-head", opts.Remote, opts.HeadSHA); err != nil {
 				return "", "", fmt.Errorf("fetch expected PR head: %w", err)
 			}
 		}
 		if err := prCommit(ctx, abs, opts.BaseSHA); err != nil {
-			if _, err := prGit(ctx, abs, "fetch", "--no-write-fetch-head", opts.Remote, opts.BaseSHA); err != nil {
+			if _, err := gitOutputContext(ctx, abs, "fetch", "--no-write-fetch-head", opts.Remote, opts.BaseSHA); err != nil {
 				return "", "", fmt.Errorf("fetch approved PR base: %w", err)
 			}
 		}
@@ -151,7 +145,7 @@ func PreparePR(ctx context.Context, root string, opts PRWorkspaceOptions) (strin
 		if candidate == "" {
 			candidate = opts.HeadSHA
 		}
-		if _, err := prGit(ctx, abs, "merge-base", "--is-ancestor", opts.BaseSHA, candidate); err != nil {
+		if _, err := gitOutputContext(ctx, abs, "merge-base", "--is-ancestor", opts.BaseSHA, candidate); err != nil {
 			return "", "", fmt.Errorf("PR candidate does not include the approved base; run swarm pr rebase %d: %w", opts.Number, err)
 		}
 	}
@@ -179,7 +173,7 @@ func PreparePR(ctx context.Context, root string, opts PRWorkspaceOptions) (strin
 			if err := verifyPRRebase(ctx, path, opts.Number); err != nil {
 				return "", "", err
 			}
-			ref, err := prGit(ctx, abs, "rev-parse", "--verify", "refs/heads/"+branch+"^{commit}")
+			ref, err := gitOutputContext(ctx, abs, "rev-parse", "--verify", "refs/heads/"+branch+"^{commit}")
 			expected := opts.HeadSHA
 			if opts.LocalHeadSHA != "" {
 				expected = opts.LocalHeadSHA
@@ -204,31 +198,33 @@ func PreparePR(ctx context.Context, root string, opts PRWorkspaceOptions) (strin
 			if local != opts.LocalHeadSHA {
 				return "", "", fmt.Errorf("managed PR head %s differs from recorded local head %s", local, opts.LocalHeadSHA)
 			}
-		} else if _, err := prGit(ctx, path, "merge-base", "--is-ancestor", opts.HeadSHA, local); err != nil {
+		} else if _, err := gitOutputContext(ctx, path, "merge-base", "--is-ancestor", opts.HeadSHA, local); err != nil {
 			return "", "", fmt.Errorf("PR worktree head %s diverged from expected PR head %s", local, opts.HeadSHA)
 		}
 		return path, branch, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", "", err
 	}
-	if out, err := prGit(ctx, abs, "show-ref", "--verify", "--hash", "refs/heads/"+branch); err == nil {
+	// Drop registrations for PR worktrees removed by hand so worktree add succeeds.
+	_, _ = gitOutputContext(ctx, abs, "worktree", "prune")
+	if out, err := gitOutputContext(ctx, abs, "show-ref", "--verify", "--hash", "refs/heads/"+branch); err == nil {
 		local := strings.TrimSpace(out)
 		if opts.LocalHeadSHA != "" {
 			if local != opts.LocalHeadSHA {
 				return "", "", fmt.Errorf("existing PR branch %s differs from recorded local head %s", branch, opts.LocalHeadSHA)
 			}
-		} else if _, err := prGit(ctx, abs, "merge-base", "--is-ancestor", opts.HeadSHA, local); err != nil {
+		} else if _, err := gitOutputContext(ctx, abs, "merge-base", "--is-ancestor", opts.HeadSHA, local); err != nil {
 			return "", "", fmt.Errorf("existing PR branch %s diverged from expected PR head %s", branch, opts.HeadSHA)
 		}
 	} else {
 		if opts.LocalHeadSHA != "" && opts.LocalHeadSHA != opts.HeadSHA {
 			return "", "", fmt.Errorf("recorded local PR head %s is missing; refusing to recreate it", opts.LocalHeadSHA)
 		}
-		if _, err := prGit(ctx, abs, "branch", branch, opts.HeadSHA); err != nil {
+		if _, err := gitOutputContext(ctx, abs, "branch", branch, opts.HeadSHA); err != nil {
 			return "", "", fmt.Errorf("create PR branch: %w", err)
 		}
 	}
-	if _, err := prGit(ctx, abs, "worktree", "add", "--", path, branch); err != nil {
+	if _, err := gitOutputContext(ctx, abs, "worktree", "add", "--", path, branch); err != nil {
 		return "", "", fmt.Errorf("add PR worktree: %w", err)
 	}
 	if err := verifyWorktree(path, branch, ""); err != nil {
@@ -268,11 +264,11 @@ func VerifyPRWorktree(ctx context.Context, root string, number int, expectedHead
 	if err := verifyWorktree(path, PRBranchName(number), expectedHead); err != nil {
 		return "", err
 	}
-	common, err := prGit(ctx, abs, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	common, err := gitOutputContext(ctx, abs, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", err
 	}
-	actual, err := prGit(ctx, path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	actual, err := gitOutputContext(ctx, path, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", err
 	}
@@ -291,7 +287,7 @@ func VerifyPRWorktree(ctx context.Context, root string, number int, expectedHead
 
 func prRebasing(ctx context.Context, path string) (bool, error) {
 	for _, name := range []string{"rebase-merge", "rebase-apply"} {
-		gitPath, err := prGit(ctx, path, "rev-parse", "--git-path", name)
+		gitPath, err := gitOutputContext(ctx, path, "rev-parse", "--git-path", name)
 		if err != nil {
 			return false, err
 		}
@@ -305,11 +301,11 @@ func prRebasing(ctx context.Context, path string) (bool, error) {
 }
 
 func PRHead(ctx context.Context, path string) (string, bool, bool, error) {
-	head, err := prGit(ctx, path, "rev-parse", "--verify", "HEAD^{commit}")
+	head, err := gitOutputContext(ctx, path, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return "", false, false, err
 	}
-	status, err := prGit(ctx, path, "status", "--porcelain", "-z", "--untracked-files=all")
+	status, err := gitOutputContext(ctx, path, "status", "--porcelain", "-z", "--untracked-files=all")
 	if err != nil {
 		return "", false, false, err
 	}
@@ -319,7 +315,7 @@ func PRHead(ctx context.Context, path string) (string, bool, bool, error) {
 
 func prRebaseValue(ctx context.Context, path, key string) (string, error) {
 	for _, dir := range []string{"rebase-merge", "rebase-apply"} {
-		name, err := prGit(ctx, path, "rev-parse", "--git-path", dir+"/"+key)
+		name, err := gitOutputContext(ctx, path, "rev-parse", "--git-path", dir+"/"+key)
 		if err != nil {
 			return "", err
 		}
@@ -365,11 +361,11 @@ func RebasePR(ctx context.Context, path, baseSHA string, resume, abort bool) (st
 	if statErr != nil || !gitFile.Mode().IsRegular() {
 		return "", fmt.Errorf("not a registered PR worktree: %s", path)
 	}
-	top, err := prGit(ctx, path, "rev-parse", "--show-toplevel")
+	top, err := gitOutputContext(ctx, path, "rev-parse", "--show-toplevel")
 	if err != nil || !samePath(strings.TrimSpace(top), path) {
 		return "", fmt.Errorf("not a registered PR worktree: %s", path)
 	}
-	branch, err := prGit(ctx, path, "symbolic-ref", "--quiet", "--short", "HEAD")
+	branch, err := gitOutputContext(ctx, path, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil || strings.TrimSpace(branch) != PRBranchName(number) {
 		if !resume && !abort {
 			return "", fmt.Errorf("not on managed branch %s", PRBranchName(number))
@@ -417,7 +413,7 @@ func RebasePR(ctx context.Context, path, baseSHA string, resume, abort bool) (st
 	if err := prCommit(ctx, path, baseSHA); err != nil {
 		return "", err
 	}
-	if _, err := prGit(ctx, path, "rebase", "--no-autostash", baseSHA); err != nil {
+	if _, err := gitOutputContext(ctx, path, "rebase", "--no-autostash", baseSHA); err != nil {
 		return "", fmt.Errorf("rebase PR head %s onto %s (conflicts preserved): %w", head, baseSHA, err)
 	}
 	newHead, _, _, err := PRHead(ctx, path)
@@ -439,18 +435,18 @@ func PublishPR(ctx context.Context, root, remote, branch, expectedHead, head str
 	if err := prCommit(ctx, root, head); err != nil {
 		return err
 	}
-	if _, err := prGit(ctx, root, "remote", "get-url", remote); err != nil {
+	if _, err := gitOutputContext(ctx, root, "remote", "get-url", remote); err != nil {
 		return fmt.Errorf("remote %q unavailable: %w", remote, err)
 	}
 	ref := "refs/heads/" + branch
-	observed, err := prGit(ctx, root, "ls-remote", "--refs", remote, ref)
+	observed, err := gitOutputContext(ctx, root, "ls-remote", "--refs", remote, ref)
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(observed) != expectedHead+"\t"+ref {
 		return fmt.Errorf("remote %s branch %s no longer points to expected head %s", remote, branch, expectedHead)
 	}
-	_, err = prGit(ctx, root, "push", remote, "--force-with-lease="+ref+":"+expectedHead, head+":"+ref)
+	_, err = gitOutputContext(ctx, root, "push", remote, "--force-with-lease="+ref+":"+expectedHead, head+":"+ref)
 	if err != nil {
 		return fmt.Errorf("publish PR head with exact remote lease: %w", err)
 	}

@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -130,7 +132,7 @@ func TestLinkedPRIdentityAndPendingState(t *testing.T) {
 func TestPRRevisionCannotPublishViaIssueCheckpoint(t *testing.T) {
 	s, issue, number, base := fixture(t)
 	ctx := context.Background()
-	r, e := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, func(owner string, st *lease.IssueState) (*Result, error) {
+	r, e := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		if st.PRNumber != number {
 			t.Fatalf("incorrect claim identity: %+v", st)
 		}
@@ -307,4 +309,309 @@ func TestPRSubmitRejectsUnrecordedRemoteUpdate(t *testing.T) {
 	if state.HeadSHA != base || state.PRRevision != nil || state.Lease.Status != "completed" {
 		t.Fatalf("rejected submit changed authoritative checkpoint: %+v", state)
 	}
+}
+
+// hintTracker presents PRs the way GitHub does: no tracker-recorded issue
+// link, only the editable PR body.
+type hintTracker struct {
+	tracker.Tracker
+	body  string
+	lists int
+}
+
+func (h *hintTracker) GetPullRequest(ctx context.Context, number int) (*tracker.PullRequest, error) {
+	pr, err := h.Tracker.GetPullRequest(ctx, number)
+	if pr != nil {
+		copy := *pr
+		copy.IssueNumber, copy.Body = 0, h.body
+		pr = &copy
+	}
+	return pr, err
+}
+
+func (h *hintTracker) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
+	h.lists++
+	return h.Tracker.ListIssues(ctx, filter)
+}
+
+func TestLinkedUsesVerifiedHintsBeforeScanning(t *testing.T) {
+	s, issue, number, _ := fixture(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		body      string
+		wantLists int
+	}{
+		{body: "Closes #" + strconv.Itoa(issue) + "\n\n## Objective", wantLists: 0},
+		{body: "Closes #1\n", wantLists: 1}, // hint names an issue that does not record this PR
+		{body: "no closing reference", wantLists: 1},
+	} {
+		hinted := &hintTracker{Tracker: s.Tracker, body: tc.body}
+		svc := *s
+		svc.Tracker = hinted
+		r, err := svc.linked(ctx, number)
+		if err != nil || r.IssueNumber != issue {
+			t.Fatalf("body %q: linked = %+v, %v", tc.body, r, err)
+		}
+		if hinted.lists != tc.wantLists {
+			t.Fatalf("body %q: scanned issues %d times, want %d", tc.body, hinted.lists, tc.wantLists)
+		}
+	}
+}
+
+func TestRecordedValidationChecksMatchPublishedHead(t *testing.T) {
+	head, other := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	st := &lease.IssueState{Artifacts: []contract.Artifact{
+		{Type: contract.ArtifactValidation, Verdict: "FAIL", Metadata: map[string]string{"head_sha": head}},
+		{Type: contract.ArtifactValidation, Verdict: "PASS", Metadata: map[string]string{"head_sha": head}},
+		{Type: contract.ArtifactValidation, Verdict: "FAIL", Metadata: map[string]string{"head_sha": other}},
+	}}
+	got := recordedValidationChecks(st, head)
+	if len(got) != 1 || got[0].Name != RecordedValidationCheck || got[0].Conclusion != "success" {
+		t.Fatalf("checks for published head = %+v", got)
+	}
+	if got := recordedValidationChecks(st, strings.Repeat("c", 40)); got != nil {
+		t.Fatalf("unvalidated head reported checks: %+v", got)
+	}
+}
+
+// upstreamTracker presents the local fixture as a GitHub upstream so the
+// repository-identity and remote-selection paths run.
+type upstreamTracker struct {
+	tracker.Tracker
+	upstream, headRepo, headSHA string
+}
+
+func (u *upstreamTracker) UpstreamRepo() string { return u.upstream }
+
+func (u *upstreamTracker) GetPullRequest(ctx context.Context, number int) (*tracker.PullRequest, error) {
+	pr, err := u.Tracker.GetPullRequest(ctx, number)
+	if pr != nil {
+		copy := *pr
+		copy.BaseRepo, copy.HeadRepo = u.upstream, u.upstream
+		if u.headRepo != "" {
+			copy.HeadRepo = u.headRepo
+		}
+		if u.headSHA != "" {
+			copy.HeadSHA = u.headSHA
+		}
+		pr = &copy
+	}
+	return pr, err
+}
+
+func TestRemoteSelectsUpstreamOrVerifiedForkHead(t *testing.T) {
+	s, _, number, _ := fixture(t)
+	ctx := context.Background()
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", s.Root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("remote", "add", "origin", "https://github.com/octo/swarm.git")
+	git("remote", "add", "fork", "https://github.com/bob/swarm.git")
+	pr, err := s.Tracker.GetPullRequest(ctx, number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := &upstreamTracker{Tracker: s.Tracker, upstream: "octo/swarm"}
+	svc := *s
+	svc.Tracker = upstream
+	same := *pr
+	same.HeadRepo = "octo/swarm"
+	if remote, err := svc.remote(ctx, &Result{PR: &same}); err != nil || remote != "origin" {
+		t.Fatalf("same-repository PR remote = %q, %v", remote, err)
+	}
+	forked := *pr
+	forked.HeadRepo = "alice/swarm"
+	if _, err := svc.remote(ctx, &Result{PR: &forked}); err == nil || !strings.Contains(err.Error(), "explicit writable remote") {
+		t.Fatalf("fork head without a remote = %v", err)
+	}
+	svc.ForkRemote = "fork"
+	if _, err := svc.remote(ctx, &Result{PR: &forked}); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("fork head with another fork's remote = %v", err)
+	}
+	git("remote", "set-url", "fork", "https://github.com/alice/swarm.git")
+	if remote, err := svc.remote(ctx, &Result{PR: &forked}); err != nil || remote != "fork" {
+		t.Fatalf("verified fork head remote = %q, %v", remote, err)
+	}
+	svc.Fork = true
+	if _, err := svc.remote(ctx, &Result{PR: &same}); err == nil {
+		t.Fatal("contributor --fork mode selected a PR mutation remote")
+	}
+}
+
+func TestLinkedReportsRevisionPublicationStatus(t *testing.T) {
+	s, issue, number, base := fixture(t)
+	ctx := context.Background()
+	local := strings.Repeat("b", 40)
+	if _, err := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+		_, err := s.Manager.BeginPRRevision(ctx, issue, owner, number, base, local, "swarm/pr-1")
+		return nil, err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for head, want := range map[string]string{
+		base:                    "pending",
+		local:                   "published-pending-reconciliation",
+		strings.Repeat("c", 40): "diverged",
+	} {
+		svc := *s
+		svc.Tracker = &upstreamTracker{Tracker: s.Tracker, upstream: "octo/swarm", headSHA: head}
+		r, err := svc.linked(ctx, number)
+		if err != nil || r.Status != want {
+			t.Fatalf("PR head %s: status = %+v, %v; want %s", head[:7], r, err, want)
+		}
+	}
+	svc := *s
+	svc.Tracker = &upstreamTracker{Tracker: s.Tracker, upstream: "octo/swarm", headSHA: strings.Repeat("c", 40)}
+	if _, err := svc.Validate(ctx, number); err == nil || !strings.Contains(err.Error(), "changed outside the recorded revision") {
+		t.Fatalf("validate on diverged PR = %v", err)
+	}
+	if _, err := svc.Submit(ctx, number); err == nil || !strings.Contains(err.Error(), "changed outside the recorded revision") {
+		t.Fatalf("submit on diverged PR = %v", err)
+	}
+}
+
+// loopbackGateway applies contributor requests directly to an upstream manager.
+// It stands in for the fork coordinator (whose GitHub-side verification is
+// covered in internal/fork) so the contributor's client wiring runs end to end.
+type loopbackGateway struct {
+	t          *testing.T
+	upstream   *lease.Manager
+	actor      string
+	operations []string
+}
+
+func (g *loopbackGateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.IssueState, error) {
+	g.operations = append(g.operations, req.Operation)
+	up, n, actor := g.upstream, req.IssueNumber, g.actor
+	if req.ClaimID != "" {
+		up.BindClaim(n, req.ClaimID)
+	}
+	switch req.Operation {
+	case "acquire-pr":
+		return up.AcquirePR(ctx, n, req.PRNumber, actor, req.Agent, req.Phase, time.Hour, 3)
+	case "begin-pr-revision":
+		return up.BeginPRRevision(ctx, n, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA, req.Branch)
+	case "record-pr-head":
+		return up.RecordPRHead(ctx, n, actor, req.PRNumber, req.Branch, req.HeadSHA)
+	case "invalidate-pr-evidence":
+		return up.InvalidatePRRevisionEvidence(ctx, n, actor, req.PRNumber)
+	case "complete-pr-revision":
+		return up.CompletePRRevisionLocal(ctx, n, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA)
+	case "update-artifact":
+		return up.UpdateArtifact(ctx, n, actor, *req.Artifact)
+	case "update-phase":
+		return up.UpdatePhase(ctx, n, actor, req.Phase, req.Status)
+	case "renew":
+		return up.Renew(ctx, n, actor, time.Hour)
+	case "require-gate":
+		return up.RequireGate(ctx, n, actor, req.Gate)
+	case "handoff":
+		return up.Handoff(ctx, n, actor, req.Phase, req.NextPhase)
+	case "release":
+		return up.Release(ctx, n, actor, req.Reason)
+	default:
+		g.t.Fatalf("unexpected contributor operation %q", req.Operation)
+		return nil, nil
+	}
+}
+
+func TestForkContributorRevisesOwnPR(t *testing.T) {
+	s, issue, number, base := fixture(t)
+	ctx := context.Background()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	// Re-record the submission as a fork contribution whose head lives in alice/swarm.
+	if _, err := s.Manager.ApproveTask(ctx, issue, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.Manager.GetCurrentState(ctx, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forked, err := s.Manager.AcquireFork(ctx, issue, "alice", "mock", "all", "alice/swarm", time.Hour, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := workspace.ForkBranchName(issue, forked.Lease.ClaimID)
+	forkBare := filepath.Join(t.TempDir(), "alice-swarm.git")
+	git(s.Root, "init", "-q", "--bare", forkBare)
+	git(s.Root, "remote", "add", "fork", forkBare)
+	git(s.Root, "config", "remote.fork.swarmSlug", "alice/swarm")
+	git(s.Root, "push", "-q", "fork", base+":refs/heads/"+branch)
+	if _, err = s.Manager.RecordCheckpoint(ctx, issue, "alice", branch, base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Manager.RecordSubmission(ctx, issue, "alice", number, st.PRURL); err != nil {
+		t.Fatal(err)
+	}
+	forkHead := func() string { return strings.Fields(git(s.Root, "ls-remote", forkBare, "refs/heads/"+branch))[0] }
+	contributorView := &forkPRTracker{Tracker: s.Tracker, branch: branch, head: forkHead}
+
+	gateway := &loopbackGateway{t: t, upstream: s.Manager, actor: "alice"}
+	contributor := lease.NewManager(contributorView, contract.SecurityConfig{RequireReadyLabel: true, ReadyLabel: "swarm:ready"})
+	contributor.SetStore(s.Root, s.Manager.Store())
+	contributor.SetWorkerGateway(gateway)
+	svc := &Service{Root: s.Root, Tracker: contributorView, Manager: contributor, Fork: true, ForkRemote: "fork"}
+
+	if r, err := svc.Status(ctx, number); err != nil || r.Status != "open" {
+		t.Fatalf("contributor status = %+v, %v", r, err)
+	}
+	worked, err := svc.Work(ctx, Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock"}})
+	if err != nil {
+		t.Fatalf("contributor pr work: %v", err)
+	}
+	if worked.HeadSHA == base {
+		t.Fatal("contributor revision produced no new commit")
+	}
+	submitted, err := svc.Submit(ctx, number)
+	if err != nil {
+		t.Fatalf("contributor pr submit: %v", err)
+	}
+	if forkHead() != worked.HeadSHA || submitted.HeadSHA != worked.HeadSHA {
+		t.Fatalf("fork branch %s, submitted %s, want %s", forkHead(), submitted.HeadSHA, worked.HeadSHA)
+	}
+	final, err := s.Manager.GetCurrentState(ctx, issue)
+	if err != nil || final.PRRevision != nil || final.HeadSHA != worked.HeadSHA || final.ForkRepo != "alice/swarm" {
+		t.Fatalf("upstream state after contributor revision = %+v, %v", final, err)
+	}
+	for _, op := range []string{"acquire-pr", "begin-pr-revision", "record-pr-head", "complete-pr-revision"} {
+		if !slices.Contains(gateway.operations, op) {
+			t.Fatalf("contributor flow never sent %s through the coordinator: %v", op, gateway.operations)
+		}
+	}
+
+	// A push outside SwarmOS leaves the PR head unverified.
+	git(s.Root, "push", "-q", "fork", base+":refs/heads/"+branch, "--force")
+	if r, err := svc.Status(ctx, number); err != nil || r.Status != StatusUnverifiedHead {
+		t.Fatalf("status after an out-of-band push = %+v, %v", r, err)
+	}
+}
+
+// forkPRTracker presents the fixture's PR as GitHub would for a fork
+// contribution: head in alice/swarm, base in the upstream repository.
+type forkPRTracker struct {
+	tracker.Tracker
+	branch string
+	head   func() string
+}
+
+func (f *forkPRTracker) UpstreamRepo() string { return "octo/swarm" }
+
+func (f *forkPRTracker) GetPullRequest(ctx context.Context, number int) (*tracker.PullRequest, error) {
+	pr, err := f.Tracker.GetPullRequest(ctx, number)
+	if pr != nil {
+		copy := *pr
+		copy.BaseRepo, copy.HeadRepo, copy.Head, copy.HeadSHA = "octo/swarm", "alice/swarm", f.branch, f.head()
+		pr = &copy
+	}
+	return pr, err
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -330,7 +331,6 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		".github/ISSUE_TEMPLATE/swarm-feature.yml",
 		".github/ISSUE_TEMPLATE/swarm-bugfix.yml",
 		".github/ISSUE_TEMPLATE/swarm-refactor.yml",
-		".github/ISSUE_TEMPLATE/config.yml",
 		".github/ISSUE_TEMPLATE/org-custom.yml",
 		".claude/commands/swarm-project-plan.md",
 		".opencode/commands/swarm-project-plan.md",
@@ -339,6 +339,9 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		if !fileExists(filepath.Join(root, rel)) {
 			t.Fatalf("expected %s to be created by InitRepository", rel)
 		}
+	}
+	if fileExists(filepath.Join(root, ".github/ISSUE_TEMPLATE/config.yml")) {
+		t.Fatal("init created the repository-wide issue chooser config")
 	}
 
 	commForm, err := os.ReadFile(filepath.Join(root, ".github/ISSUE_TEMPLATE/swarm-community.yml"))
@@ -456,5 +459,97 @@ func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
 	}
 	if !strings.Contains(job.Steps[4].Run, `fork-coordinator --event "$GITHUB_EVENT_PATH"`) {
 		t.Fatalf("unexpected coordinator run command: %q", job.Steps[4].Run)
+	}
+}
+
+func TestInitSharesRepositoryFilesWithoutTakingThemOver(t *testing.T) {
+	root := t.TempDir()
+	if out, err := exec.Command("git", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	write := func(rel, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(rel string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	ownAgents := "# Team agent guide\n\nRun make check before committing.\n"
+	ownChooser := "blank_issues_enabled: false\n"
+	ownWorkflow := "name: Team CI\non: [push]\njobs: {}\n"
+	ownSwarmNamed := "name: Our own swarm-validate\non: [push]\njobs: {}\n"
+	write("AGENTS.md", ownAgents)
+	write(".github/ISSUE_TEMPLATE/config.yml", ownChooser)
+	write(".github/workflows/ci.yml", ownWorkflow)
+	write(".github/workflows/swarm-validate.yml", ownSwarmNamed)
+
+	res, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: "v0.6.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := read("AGENTS.md")
+	if !strings.HasPrefix(agents, ownAgents) || !strings.Contains(agents, harnessSectionStart) || !strings.Contains(agents, ".swarm/SKILLS.md") {
+		t.Fatalf("AGENTS.md section not appended after the team's content:\n%s", agents)
+	}
+	if !slices.Contains(res.SectionFiles, "AGENTS.md") {
+		t.Fatalf("section not reported: %+v", res)
+	}
+	if read(".github/ISSUE_TEMPLATE/config.yml") != ownChooser || read(".github/workflows/ci.yml") != ownWorkflow || read(".github/workflows/swarm-validate.yml") != ownSwarmNamed {
+		t.Fatal("init changed repository-owned GitHub files")
+	}
+	if !slices.Contains(res.PreservedFiles, ".github/workflows/swarm-validate.yml") || slices.Contains(res.RemovedFiles, ".github/ISSUE_TEMPLATE/config.yml") {
+		t.Fatalf("repository-owned files misreported: %+v", res)
+	}
+
+	// Rerunning is idempotent, and only the marked section is ever rewritten.
+	if _, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: "v0.6.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if read("AGENTS.md") != agents {
+		t.Fatal("rerun changed AGENTS.md")
+	}
+	stale := strings.Replace(agents, "for the issue and PR workflow", "for an outdated workflow", 1)
+	write("AGENTS.md", stale+"\n## Added later by the team\n")
+	if _, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: "v0.6.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := read("AGENTS.md"); got != agents+"\n## Added later by the team\n" {
+		t.Fatalf("section refresh touched content outside the markers:\n%s", got)
+	}
+}
+
+func TestInitRemovesRetiredFilesOnlyWhenUntouched(t *testing.T) {
+	for name, edited := range map[string]bool{"untouched": false, "edited": true} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			chooser := filepath.Join(root, ".github", "ISSUE_TEMPLATE", "config.yml")
+			if err := os.MkdirAll(filepath.Dir(chooser), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := retiredFiles[".github/ISSUE_TEMPLATE/config.yml"][0]
+			if edited {
+				body += "  - name: Team support\n    url: https://example.invalid\n    about: Ask us\n"
+			}
+			if err := os.WriteFile(chooser, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			res, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: "v0.6.0"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fileExists(chooser) == !edited || slices.Contains(res.RemovedFiles, ".github/ISSUE_TEMPLATE/config.yml") == edited {
+				t.Fatalf("retired config.yml handling (edited=%t): exists=%t removed=%v", edited, fileExists(chooser), res.RemovedFiles)
+			}
+		})
 	}
 }

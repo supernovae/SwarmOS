@@ -244,3 +244,23 @@ func TestPRManualWorktreeVerificationPreservesDirtyFiles(t *testing.T) {
 		t.Fatal("symlinked PR worktree accepted")
 	}
 }
+
+func TestPreparePRRecreatesHandRemovedWorktree(t *testing.T) {
+	ctx := context.Background()
+	repo, _, base, head := prFixture(t)
+	opts := PRWorkspaceOptions{Number: 7, Remote: "origin", HeadBranch: "feature", HeadSHA: head, BaseSHA: base}
+	path, _, err := PreparePR(ctx, repo, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	again, branch, err := PreparePR(ctx, repo, opts)
+	if err != nil {
+		t.Fatalf("re-prepare after removing the PR worktree directory: %v", err)
+	}
+	if again != path || workspaceGitOutput(t, again, "rev-parse", "HEAD") != head || branch != PRBranchName(7) {
+		t.Fatalf("recreated PR worktree %s on %s", again, branch)
+	}
+}

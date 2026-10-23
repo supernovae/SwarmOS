@@ -21,23 +21,24 @@ When working interactively on a single approved `WorkUnit` issue (using `/swarm-
      ```bash
      swarm issue stage '<issue-number>' --phase plan --harness '<harness-name>' --model '<model-name>'
      ```
-4. **Run or record plan review (`review` phase)**:
+4. **Review the implementation plan (`review` phase)**:
    - For agent-gated tasks: `swarm issue review-plan <issue-number>`
-   - For human-gated tasks: maintainer runs `swarm issue review-plan <issue-number> --approve --notes "LGTM"`
+   - For human-gated tasks: an independent maintainer runs `swarm issue review-plan <issue-number> --approve --notes "LGTM"`; `swarm issue approve` authorizes the WorkUnit but does not approve its implementation plan.
 5. **Implement, validate, and stage the checkpoint (`implement` phase)**:
    - Implement the approved plan and run the checks in `.swarm/validation/required-checks.yaml`.
    - Stage the implementation checkpoint and validation attestation:
      ```bash
      swarm issue stage '<issue-number>' --phase implement --harness '<harness-name>' --model '<model-name>'
      ```
-6. **Submit the Draft PR**: The approved issue remains the work contract; submission links its proposed implementation to a draft PR for GitHub code and acceptance review.
+6. **Submit the issue's proposed implementation as a Draft PR**:
    ```bash
    swarm issue submit '<issue-number>'
    ```
+   The issue remains the approved work contract; `swarm issue status <issue-number>` shows its linked PR. Code and acceptance review happen on GitHub's PR, not in `review-plan`.
 7. **Continue an existing PR**:
    - Use the recorded PR number with `swarm pr status <PR>` and `swarm pr work <PR> --instructions "Address the failing checks within the approved scope"`.
    - Use `swarm pr rebase <PR>` for ancestry changes; a newer base requires maintainer approval of the linked issue first.
-   - Work in the separate reported PR worktree, satisfy the plan gate, then run `swarm pr validate <PR>` and `swarm pr submit <PR>` to update the same PR. Mutation requires upstream write access; contributor-only `--fork` coordination is unchanged.
+   - Work in the separate reported PR worktree, satisfy the plan gate, then run `swarm pr validate <PR>` and `swarm pr submit <PR>` to update the same PR. Maintainers need upstream write access; contributors revise their own fork PRs by adding `--fork` (for example, `swarm --fork pr work <PR>`), and a maintainer approves the revised plan with `swarm issue review-plan <issue> --approve`.
 
 ## 2. Repository-Wide Roadmap Ideation, Epics & Backlog Triage (`swarm repo plan`)
 

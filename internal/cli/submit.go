@@ -7,14 +7,12 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/gitcredential"
-	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
@@ -32,7 +30,8 @@ each acceptance criterion against the implementation and observed results,
 records the decision in the PR, and uses GitHub to mark it ready for review.
 swarm issue review-plan approves the implementation plan, not the finished PR.`,
 		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON, "submission", runErr) }()
 			root := rootOpts.resolveRepoRoot()
 			issue, worktree, err := resolveIssueAndWorktree(root, args)
 			if err != nil {
@@ -48,18 +47,10 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return err
 			}
 			ctx := cmd.Context()
-			owner, err := tr.CurrentUser(ctx)
+			owner, claim, err := bindPersistedClaim(ctx, root, tr, manager, issue)
 			if err != nil {
 				return err
 			}
-			if owner == "" {
-				return fmt.Errorf("submission requires an authenticated owner")
-			}
-			claim, err := lease.LoadClaimToken(root, issue)
-			if err != nil {
-				return fmt.Errorf("load submission claim: %w", err)
-			}
-			manager.BindClaim(issue, claim)
 			state, err := manager.GetCurrentState(ctx, issue)
 			if err != nil {
 				return err
@@ -67,12 +58,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := requireIssueWorkspace(state); err != nil {
 				return err
 			}
-			_ = workspace.FetchCommit(root, "origin", state.BaseSHA)
-			iss, err := tr.GetIssue(ctx, issue)
-			if err != nil {
-				return err
-			}
-			unit, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
+			iss, unit, err := loadWorkUnit(ctx, tr, issue)
 			if err != nil {
 				return err
 			}
@@ -109,24 +95,14 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 				return err
 			}
-			cfg, err := harness.LoadConfigAt(root, state.BaseSHA)
+			cfg, duration, err := approvedLeasePolicy(root, state.BaseSHA)
 			if err != nil {
 				return err
 			}
-			duration, err := time.ParseDuration(cfg.Lease.Duration)
-			if err != nil {
-				return err
-			}
-			ctx, stop := maintainClaim(ctx, manager, issue, owner, duration)
-			defer stop()
-			branch := state.Branch
-			if branch == "" {
-				if rootOpts.Fork {
-					branch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
-				} else {
-					branch = workspace.BranchName(issue, iss.Title)
-				}
-			}
+			heartbeat := manager.StartHeartbeat(ctx, issue, owner, duration)
+			defer heartbeat.Stop()
+			ctx = heartbeat.Context()
+			_, branch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, iss.Title, state.Lease.ClaimID, state.Branch)
 			head, err := workspace.Checkpoint(ctx, worktree, branch, workspace.CheckpointOptions{
 				WorkUnit: unit, Purpose: "submit", Detail: cfg.CommitMessageDetail(),
 			})
@@ -135,24 +111,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			}
 			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
 			if report != nil {
-				if len(state.Attestations) > 0 {
-					for _, att := range state.Attestations {
-						if att.Role == "tester" {
-							if report.Artifact.Metadata == nil {
-								report.Artifact.Metadata = make(map[string]string)
-							}
-							report.Artifact.Metadata["role"] = "tester"
-							report.Artifact.Metadata["agent"] = att.Agent
-							report.Artifact.Metadata["harness"] = att.Harness
-							report.Artifact.Metadata["harness_version"] = att.HarnessVersion
-							report.Artifact.Metadata["execution_mode"] = att.ExecutionMode
-							report.Artifact.Metadata["authentication"] = att.Authentication
-							report.Artifact.Metadata["model"] = att.Model
-							report.Artifact.Metadata["sandbox"] = att.Sandbox
-							break
-						}
-					}
-				}
+				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 				if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
 					return err
 				}
@@ -214,29 +173,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&baseBranch, "base", "", "PR base branch (repository default unless explicitly selected)")
+	cmd.Flags().StringVar(&baseBranch, "base", "", "Target branch name for the draft PR (defaults to the repository default branch)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the durable submission identity")
 	return cmd
-}
-
-func maintainClaim(parent context.Context, manager *lease.Manager, issue int, owner string, duration time.Duration) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(parent)
-	go func() {
-		ticker := time.NewTicker(max(duration/3, time.Millisecond))
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if _, err := manager.Renew(ctx, issue, owner, duration); err != nil {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	return ctx, cancel
 }
 
 func requireCleanHead(ctx context.Context, root, expected string) error {

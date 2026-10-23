@@ -53,15 +53,18 @@ type DraftPRRequest struct {
 }
 
 type PullRequest struct {
-	Number      int    `json:"number"`
-	Title       string `json:"title"`
-	Body        string `json:"body"`
-	Head        string `json:"head"`
-	HeadRepo    string `json:"head_repo,omitempty"`
-	HeadSHA     string `json:"head_sha,omitempty"`
-	BaseSHA     string `json:"base_sha,omitempty"`
-	State       string `json:"state"`
-	Merged      bool   `json:"merged"`
+	Number   int    `json:"number"`
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	Head     string `json:"head"`
+	HeadRepo string `json:"head_repo,omitempty"`
+	HeadSHA  string `json:"head_sha,omitempty"`
+	BaseSHA  string `json:"base_sha,omitempty"`
+	State    string `json:"state"`
+	Merged   bool   `json:"merged"`
+	// IssueNumber is the tracker's own record of the linked issue (local backend).
+	// GitHub has no such field; PR commands treat the body's closing reference
+	// as a lookup hint and always verify the link against coordination state.
 	IssueNumber int    `json:"issue_number,omitempty"`
 	Base        string `json:"base"`
 	BaseRepo    string `json:"base_repo,omitempty"`

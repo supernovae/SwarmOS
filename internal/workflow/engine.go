@@ -72,6 +72,31 @@ type WorkResult struct {
 	State            *lease.IssueState
 }
 
+// Outcome summarizes how a run ended: completed, paused for a human, or
+// handed off to the next phase.
+func (r *WorkResult) Outcome() string {
+	switch {
+	case r.PausedForHuman:
+		return "paused"
+	case r.HandedOffToPhase != "":
+		return "handed-off"
+	default:
+		return "completed"
+	}
+}
+
+// LeadRole is the role whose agent a claim for phase is recorded under.
+func LeadRole(phase string) string {
+	switch phase {
+	case "review":
+		return "reviewer"
+	case "implement":
+		return "developer"
+	default:
+		return "planner"
+	}
+}
+
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
 	Execution    contract.ExecutionConfig
@@ -128,12 +153,8 @@ func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manage
 	}
 }
 
-// ResolveRoleAgent applies role override, generic override, repository role,
+// resolveRoleAgent applies role override, generic override, repository role,
 // then repository default precedence. It performs no availability check.
-func (e *Engine) ResolveRoleAgent(role string, opts WorkOptions) string {
-	return resolveRoleAgent(e.Config, role, opts)
-}
-
 func resolveRoleAgent(cfg *contract.SwarmConfig, role string, opts WorkOptions) string {
 	switch role {
 	case "planner":
@@ -223,7 +244,7 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	if err != nil {
 		return nil, fmt.Errorf("load approved base config: %w", err)
 	}
-	if state.TaskDigest != contract.DigestWorkUnit(wu) || state.PolicyDigest != contract.DigestApprovedPolicy(state.BaseSHA, cfg) ||
+	if !lease.TaskApprovalCurrent(state, wu, cfg) ||
 		!slices.Contains(iss.Labels, cfg.Security.ReadyLabel) {
 		return nil, lease.ErrApprovalRequired
 	}
@@ -381,7 +402,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 	}()
 	if st.BaseSHA != pre.BaseSHA {
-		return nil, errors.New("approved task base changed during preflight; rerun work")
+		return nil, errors.New("approved task base changed during preflight; rerun swarm issue work (or swarm pr work)")
 	}
 	if opts.OnClaim != nil {
 		if err := opts.OnClaim(st); err != nil {
@@ -413,25 +434,21 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if !(strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !hasDesignAndTestPlanArtifacts(st)))) {
 		for _, role := range rolesForPhase(opts.Phase, gate, hasDesignAndTestPlanArtifacts(st), lease.VerifyApproval(st, pre.WorkUnit) == nil) {
 			if pre.Agents[role] == "" {
-				return nil, fmt.Errorf("task phase changed during preflight; rerun work to validate the %s agent", role)
+				return nil, fmt.Errorf("task phase changed during preflight; rerun swarm issue work (or swarm pr work) to validate the %s agent", role)
 			}
 		}
 	}
 	e.Config = cfg
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	heartbeat := e.startHeartbeat(ctx, cancel, opts, duration)
+	heartbeat := e.LeaseManager.StartHeartbeat(ctx, opts.IssueNumber, opts.Owner, duration)
+	defer heartbeat.Stop()
+	ctx = heartbeat.Context()
 	check := func() error {
-		select {
-		case heartbeatErr := <-heartbeat:
-			if heartbeatErr != nil {
-				return fmt.Errorf("%w: %v", ErrLeaseLost, heartbeatErr)
-			}
-		default:
+		if heartbeatErr := heartbeat.Err(); heartbeatErr != nil {
+			return fmt.Errorf("%w: %w", ErrLeaseLost, heartbeatErr)
 		}
 		if err := e.LeaseManager.CheckClaim(ctx, opts.IssueNumber, opts.Owner); err != nil {
-			cancel()
-			return fmt.Errorf("%w: %v", ErrLeaseLost, err)
+			heartbeat.Stop()
+			return fmt.Errorf("%w: %w", ErrLeaseLost, err)
 		}
 		return nil
 	}
@@ -444,16 +461,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		forkRemote = strings.TrimSpace(e.ForkRemote)
 	}
 	if forkRemote == "" {
-		forkRemote = "fork"
+		forkRemote = workspace.DefaultForkRemote
 	}
-	targetBranch := st.Branch
-	checkpointRemote := "origin"
-	if forkMode {
-		checkpointRemote = forkRemote
-		if targetBranch == "" {
-			targetBranch = workspace.ForkBranchName(opts.IssueNumber, st.Lease.ClaimID)
-		}
-	}
+	checkpointRemote, targetBranch := workspace.ClaimCheckpoint(forkMode, forkRemote, opts.IssueNumber, pre.Issue.Title, st.Lease.ClaimID, st.Branch)
 	progress.next("workspace")
 	var wtPath, branch string
 	if opts.PRNumber != 0 {
@@ -536,11 +546,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if err := check(); err != nil {
 			return res, err
 		}
-		planMeta := attestationMetadata(planRun.Attestation, nil)
+		planMeta := planRun.Attestation.Metadata(nil)
 		if _, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: planner + ":planner", Summary: fmt.Sprintf("Implementation plan for #%d", opts.IssueNumber), Body: plan, Metadata: planMeta}); err != nil {
 			return res, err
 		}
-		testMeta := attestationMetadata(planRun.Attestation, nil)
+		testMeta := planRun.Attestation.Metadata(nil)
 		if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: planner + ":planner", Summary: fmt.Sprintf("Test plan covering %d acceptance criteria", len(pre.WorkUnit.Acceptance)), Body: testPlan, Metadata: testMeta}); err != nil {
 			return res, err
 		}
@@ -630,7 +640,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return res, err
 	}
 	if err := lease.VerifyApproval(st, pre.WorkUnit); err != nil {
-		return res, fmt.Errorf("%w: %v", ErrPlanApprovalNeeded, err)
+		return res, fmt.Errorf("%w: %w", ErrPlanApprovalNeeded, err)
 	}
 	if err := check(); err != nil {
 		return res, err
@@ -664,7 +674,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := check(); err != nil {
 		return res, err
 	}
-	summary, body := summarizeImplementationChanges(wtPath, opts.IssueNumber)
+	summary, body := SummarizeImplementationChanges(ctx, wtPath, opts.IssueNumber)
 	progress.next("checkpoint")
 	checkpointHead, err := workspace.Checkpoint(ctx, wtPath, branch, workspace.CheckpointOptions{
 		WorkUnit: pre.WorkUnit, Purpose: checkpointPurpose, Detail: cfg.CommitMessageDetail(),
@@ -686,7 +696,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return res, err
 	}
 	res.State, res.HeadSHA = st, checkpointHead
-	devMeta := attestationMetadata(devRun.Attestation, nil)
+	devMeta := devRun.Attestation.Metadata(nil)
 	if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: "PASS", Summary: summary, Body: body, Metadata: devMeta}); err != nil {
 		return res, err
 	}
@@ -715,7 +725,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	progress.next("required-checks")
 	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA, ForkMode: forkMode})
 	if report != nil {
-		report.Artifact.Metadata = attestationMetadata(testerRun.Attestation, report.Artifact.Metadata)
+		report.Artifact.Metadata = testerRun.Attestation.Metadata(report.Artifact.Metadata)
 		updated, updateErr := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, report.Artifact)
 		if updateErr != nil {
 			return res, updateErr
@@ -727,32 +737,6 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	res.PhaseCompleted = "implement"
 	return res, nil
-}
-
-func (e *Engine) startHeartbeat(ctx context.Context, cancel context.CancelFunc, opts WorkOptions, duration time.Duration) <-chan error {
-	result := make(chan error, 1)
-	interval := duration / 3
-	if interval < time.Second {
-		interval = time.Second
-	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		defer close(result)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if _, err := e.LeaseManager.Renew(ctx, opts.IssueNumber, opts.Owner, duration); err != nil {
-					result <- err
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	return result
 }
 
 func readRequiredArtifact(wtPath, name string) (string, error) {
@@ -855,7 +839,7 @@ func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.Wor
 
 func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int) (string, *lease.IssueState, error) {
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
-		return "", st, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+		return "", st, fmt.Errorf("%w: %w", ErrLeaseLost, err)
 	}
 	if _, err := e.LeaseManager.UpdatePhase(ctx, wu.IssueNumber, owner, "review", "active"); err != nil {
 		return "", st, err
@@ -891,7 +875,7 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		return "", st, err
 	}
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
-		return verdict, st, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+		return verdict, st, fmt.Errorf("%w: %w", ErrLeaseLost, err)
 	}
 	var revAtt contract.RoleAttestation
 	if revRun != nil {
@@ -899,7 +883,7 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	} else {
 		revAtt = runner.Provenance("reviewer", true)
 	}
-	revMeta := attestationMetadata(revAtt, map[string]string{"kind": "agent", "actor": owner})
+	revMeta := revAtt.Metadata(map[string]string{"kind": "agent", "actor": owner})
 	for key, value := range lease.ReviewBindings(st) {
 		revMeta[key] = value
 	}
@@ -913,12 +897,12 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	}
 	if verdict != "APPROVED" {
 		if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
-			return verdict, updated, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+			return verdict, updated, fmt.Errorf("%w: %w", ErrLeaseLost, err)
 		}
 		return verdict, updated, fmt.Errorf("%w: reviewer %q returned %s", ErrPlanReviewRejected, reviewerAgent, verdict)
 	}
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
-		return verdict, updated, fmt.Errorf("%w: %v", ErrLeaseLost, err)
+		return verdict, updated, fmt.Errorf("%w: %w", ErrLeaseLost, err)
 	}
 	return verdict, updated, nil
 }
@@ -1041,15 +1025,16 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 	return nil
 }
 
-func summarizeImplementationChanges(wtPath string, issueNum int) (string, string) {
-	statusOut, _ := gitcredential.Output(context.Background(), wtPath, "status", "--short")
-	diffStat, _ := gitcredential.Output(context.Background(), wtPath, "diff", "--stat", "HEAD")
+// SummarizeImplementationChanges describes a worktree's uncommitted changes for
+// an implementation artifact: a one-line summary and a Markdown body.
+func SummarizeImplementationChanges(ctx context.Context, wtPath string, issueNum int) (string, string) {
+	statusOut, _ := gitcredential.Output(ctx, wtPath, "status", "--short")
+	diffStat, _ := gitcredential.Output(ctx, wtPath, "diff", "--stat", "HEAD")
 
 	lines := strings.Split(strings.TrimSpace(string(statusOut)), "\n")
 	count := 0
 	var body strings.Builder
-	body.WriteString(fmt.Sprintf("# Implementation Summary (Issue #%d)\n\n", issueNum))
-	body.WriteString("## Working Tree Changes\n```text\n")
+	fmt.Fprintf(&body, "# Implementation Summary (Issue #%d)\n\n## Working Tree Changes\n```text\n", issueNum)
 	for _, l := range lines {
 		if strings.TrimSpace(l) == "" {
 			continue
@@ -1076,36 +1061,4 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-func attestationMetadata(att contract.RoleAttestation, base map[string]string) map[string]string {
-	m := make(map[string]string, len(base)+6)
-	for k, v := range base {
-		m[k] = v
-	}
-	if att.Role != "" {
-		m["role"] = att.Role
-	}
-	if att.Agent != "" {
-		m["agent"] = att.Agent
-	}
-	if att.Harness != "" {
-		m["harness"] = att.Harness
-	}
-	if att.HarnessVersion != "" {
-		m["harness_version"] = att.HarnessVersion
-	}
-	if att.Model != "" {
-		m["model"] = att.Model
-	}
-	if att.Sandbox != "" {
-		m["sandbox"] = att.Sandbox
-	}
-	if att.ExecutionMode != "" {
-		m["execution_mode"] = att.ExecutionMode
-	}
-	if att.Authentication != "" {
-		m["authentication"] = att.Authentication
-	}
-	return m
 }

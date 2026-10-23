@@ -282,25 +282,36 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 		if err != nil {
 			return nil, "", err
 		}
-		var reqDur time.Duration
-		if strings.TrimSpace(req.Duration) != "" {
-			reqDur, err = time.ParseDuration(req.Duration)
-			if err != nil || reqDur <= 0 {
-				return nil, "", fmt.Errorf("invalid acquire duration %q", req.Duration)
-			}
-		}
-		agentName := strings.TrimSpace(req.Agent)
-		if agentName == "" {
-			agentName = cfg.DefaultAgent
-		}
-		if _, ok := cfg.Agents[agentName]; !ok {
-			return nil, "", fmt.Errorf("agent %q is not in the approved agents allowlist", agentName)
-		}
-		phase := strings.TrimSpace(req.Phase)
-		if phase == "" {
-			phase = "all"
+		agentName, phase, reqDur, err := forkClaimRequest(cfg, req)
+		if err != nil {
+			return nil, "", err
 		}
 		updated, err = mgr.AcquireFork(ctx, req.IssueNumber, actor, agentName, phase, canonicalFork, reqDur, cfg.Lease.MaxRenewals)
+		if err != nil {
+			return nil, "", err
+		}
+
+	case "acquire-pr":
+		// Only the contributor whose fork holds the PR head may revise it, and
+		// only for the PR the issue's authoritative state already links.
+		if req.PRNumber <= 0 || currentState.PRNumber != req.PRNumber || strings.TrimSpace(currentState.ForkRepo) == "" {
+			return nil, "", fmt.Errorf("PR #%d is not a fork contribution linked to issue #%d", req.PRNumber, req.IssueNumber)
+		}
+		if _, err := c.verifyForkRepo(ctx, currentState.ForkRepo, actor); err != nil {
+			return nil, "", err
+		}
+		if _, err := c.verifyForkPR(ctx, &currentState, req.PRNumber); err != nil {
+			return nil, "", err
+		}
+		agentName, phase, reqDur, err := forkClaimRequest(cfg, req)
+		if err != nil {
+			return nil, "", err
+		}
+		dur, maxRenewals, err := forkLeaseTerms(cfg, reqDur)
+		if err != nil {
+			return nil, "", err
+		}
+		updated, err = mgr.AcquirePR(ctx, req.IssueNumber, req.PRNumber, actor, agentName, phase, dur, maxRenewals)
 		if err != nil {
 			return nil, "", err
 		}
@@ -442,16 +453,161 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 				return nil, "", err
 			}
 
+		case "begin-pr-revision":
+			if currentState.PRNumber != req.PRNumber || req.Branch != workspace.PRBranchName(req.PRNumber) || !isFullCommitSHA(req.ExpectedHeadSHA) || !isFullCommitSHA(req.HeadSHA) {
+				return nil, "", fmt.Errorf("begin-pr-revision requires the linked PR, its managed branch, and full head SHAs")
+			}
+			pr, err := c.verifyForkPR(ctx, &currentState, req.PRNumber)
+			if err != nil {
+				return nil, "", err
+			}
+			if pr.HeadSHA != req.ExpectedHeadSHA {
+				return nil, "", fmt.Errorf("pull request #%d head is %s, not %s", req.PRNumber, pr.HeadSHA, req.ExpectedHeadSHA)
+			}
+			// A new revision starts from the published head; local work is recorded later.
+			if currentState.PRRevision == nil && req.HeadSHA != req.ExpectedHeadSHA {
+				return nil, "", fmt.Errorf("a new PR revision must start at the published head %s", req.ExpectedHeadSHA)
+			}
+			updated, err = mgr.BeginPRRevision(ctx, req.IssueNumber, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA, req.Branch)
+			if err != nil {
+				return nil, "", err
+			}
+
+		case "record-pr-head":
+			// The local head cannot be inspected here; complete-pr-revision
+			// verifies the commit that is actually published.
+			if req.Branch != workspace.PRBranchName(req.PRNumber) || !isFullCommitSHA(req.HeadSHA) {
+				return nil, "", fmt.Errorf("record-pr-head requires the managed PR branch and a full head SHA")
+			}
+			updated, err = mgr.RecordPRHead(ctx, req.IssueNumber, actor, req.PRNumber, req.Branch, req.HeadSHA)
+			if err != nil {
+				return nil, "", err
+			}
+
+		case "invalidate-pr-evidence":
+			updated, err = mgr.InvalidatePRRevisionEvidence(ctx, req.IssueNumber, actor, req.PRNumber)
+			if err != nil {
+				return nil, "", err
+			}
+
+		case "complete-pr-revision":
+			rev := currentState.PRRevision
+			if rev == nil || rev.Number != req.PRNumber || rev.RemoteHeadSHA != req.ExpectedHeadSHA || rev.LocalHeadSHA != req.HeadSHA || !isFullCommitSHA(req.HeadSHA) {
+				return nil, "", fmt.Errorf("complete-pr-revision does not match the pending revision")
+			}
+			pr, err := c.verifyForkPR(ctx, &currentState, req.PRNumber)
+			if err != nil {
+				return nil, "", err
+			}
+			if pr.HeadSHA != req.HeadSHA {
+				return nil, "", fmt.Errorf("pull request #%d head is %s, not the validated revision %s", req.PRNumber, pr.HeadSHA, req.HeadSHA)
+			}
+			if err := c.verifyForkCheckpointCommit(ctx, currentState.ForkRepo, currentState.Branch, req.HeadSHA, currentState.BaseSHA); err != nil {
+				return nil, "", err
+			}
+			if err := c.verifyRevisionEvidence(ctx, req.IssueNumber, &currentState, req.HeadSHA); err != nil {
+				return nil, "", err
+			}
+			updated, err = mgr.CompletePRRevisionLocal(ctx, req.IssueNumber, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA)
+			if err != nil {
+				return nil, "", err
+			}
+
 		default:
 			return nil, "", fmt.Errorf("unsupported fork operation %q", req.Operation)
 		}
 	}
 
+	// The mutation is already durable; the new revision is advisory for the
+	// worker, so a failed re-read reports none rather than failing the request.
 	_, newRev, revErr := readStore.Load(ctx, req.IssueNumber)
 	if revErr != nil {
 		return updated, "", nil
 	}
 	return updated, newRev, nil
+}
+
+// forkClaimRequest validates the agent and phase a contributor asks to claim with.
+func forkClaimRequest(cfg *contract.SwarmConfig, req lease.ForkRequest) (agentName, phase string, duration time.Duration, err error) {
+	if strings.TrimSpace(req.Duration) != "" {
+		duration, err = time.ParseDuration(req.Duration)
+		if err != nil || duration <= 0 {
+			return "", "", 0, fmt.Errorf("invalid %s duration %q", req.Operation, req.Duration)
+		}
+	}
+	agentName = strings.TrimSpace(req.Agent)
+	if agentName == "" {
+		agentName = cfg.DefaultAgent
+	}
+	if _, ok := cfg.Agents[agentName]; !ok {
+		return "", "", 0, fmt.Errorf("agent %q is not in the approved agents allowlist", agentName)
+	}
+	phase = strings.TrimSpace(req.Phase)
+	if phase == "" {
+		phase = "all"
+	}
+	return agentName, phase, duration, nil
+}
+
+// forkLeaseTerms caps a requested lease at the approved policy, as AcquireFork does.
+func forkLeaseTerms(cfg *contract.SwarmConfig, requested time.Duration) (time.Duration, int, error) {
+	policy, err := time.ParseDuration(cfg.Lease.Duration)
+	if err != nil || policy <= 0 {
+		return 0, 0, fmt.Errorf("invalid approved lease duration")
+	}
+	if requested <= 0 || requested > policy {
+		requested = policy
+	}
+	maxRenewals := cfg.Lease.MaxRenewals
+	if !cfg.Lease.Renewable {
+		maxRenewals = 0
+	}
+	return requested, maxRenewals, nil
+}
+
+// verifyForkPR confirms on GitHub that the PR is open, targets upstream, and
+// still has its head on the issue's recorded fork branch.
+func (c *Coordinator) verifyForkPR(ctx context.Context, st *lease.IssueState, number int) (*tracker.PullRequest, error) {
+	pr, err := c.Tracker.GetPullRequest(ctx, number)
+	if err != nil || pr == nil {
+		return nil, fmt.Errorf("verify pull request #%d: %w", number, err)
+	}
+	if pr.Number != number || !strings.EqualFold(pr.State, "open") || pr.Merged {
+		return nil, fmt.Errorf("pull request #%d must be open and unmerged", number)
+	}
+	if !strings.EqualFold(strings.TrimSpace(pr.HeadRepo), strings.TrimSpace(st.ForkRepo)) {
+		return nil, fmt.Errorf("pull request #%d head repo %q does not match claim fork %q", number, pr.HeadRepo, st.ForkRepo)
+	}
+	if c.UpstreamRepo != "" && !strings.EqualFold(strings.TrimSpace(pr.BaseRepo), strings.TrimSpace(c.UpstreamRepo)) {
+		return nil, fmt.Errorf("pull request #%d base repo %q does not match upstream %q", number, pr.BaseRepo, c.UpstreamRepo)
+	}
+	forkOwner := strings.Split(st.ForkRepo, "/")[0]
+	if strings.TrimPrefix(pr.Head, forkOwner+":") != st.Branch {
+		return nil, fmt.Errorf("pull request #%d head branch %q does not match recorded branch %q", number, pr.Head, st.Branch)
+	}
+	return pr, nil
+}
+
+// verifyRevisionEvidence requires the revision's plan approval to be current and
+// a passing validation report for exactly the head being published.
+func (c *Coordinator) verifyRevisionEvidence(ctx context.Context, issueNumber int, st *lease.IssueState, head string) error {
+	issue, err := c.Tracker.GetIssue(ctx, issueNumber)
+	if err != nil {
+		return err
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		return err
+	}
+	if err := lease.VerifyApproval(st, wu); err != nil {
+		return err
+	}
+	for _, art := range st.Artifacts {
+		if art.Type == contract.ArtifactValidation && art.Metadata["head_sha"] == head && strings.EqualFold(art.Verdict, "PASS") {
+			return nil
+		}
+	}
+	return fmt.Errorf("no passing validation recorded for PR revision %s", head)
 }
 
 func (c *Coordinator) resolveDefaultBase() (string, error) {

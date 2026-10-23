@@ -2,13 +2,12 @@ package cli
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
+	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 func newPRCmd(rootOpts *RootOptions) *cobra.Command {
@@ -26,8 +25,11 @@ description, and draft/ready state. GitHub applies its review rules to new commi
 
 The linked issue remains the approved contract. Updated policy requires issue
 approval, and human plan gates still require issue review-plan --approve.
-PR mutations require upstream write access; contributor-only --fork coordination
-is not supported for PR revisions. Final code review and merge remain in GitHub.`,
+Maintainers revise PRs with upstream write access. Contributors revise their own
+fork PRs with --fork: changes publish to their fork branch, and the upstream fork
+coordinator verifies fork ownership, the published head, plan approval, and
+validation before recording the revision. Final code review and merge remain in
+GitHub.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
@@ -55,14 +57,11 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 		Short: summaries[operation],
 		Args:  cobra.ExactArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			number, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-			if err != nil || number <= 0 {
-				return fmt.Errorf("invalid PR number %q", args[0])
+			number, err := parseNumberArg(args[0], "PR")
+			if err != nil {
+				return err
 			}
 			opts.Number = number
-			if operation != "status" && rootOpts.Fork {
-				return fmt.Errorf("%s requires upstream write access; contributor-only --fork coordination does not support PR revisions", cmd.CommandPath())
-			}
 			if opts.Continue && opts.Abort {
 				return fmt.Errorf("--continue and --abort are mutually exclusive")
 			}
@@ -85,7 +84,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := pr.Service{Root: rootOpts.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote()}
+			service := rootOpts.prService(tr, manager)
 			if operation == "work" && opts.Work.Headless && progress && !opts.Work.InspectOnly {
 				opts.Work.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
 			}
@@ -118,6 +117,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "PR #%d %s: issue=#%d head=%s base=%s\n", opts.Number, result.Status, result.IssueNumber, result.HeadSHA, result.BaseSHA)
 				if result.Worktree != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "Worktree: %s\nBranch: %s\n", result.Worktree, result.Branch)
+				}
+				if result.Status == pr.StatusUnverifiedHead && result.State != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "The PR head has commits pushed outside SwarmOS since verified head %s; its recorded plan, validation, and provenance describe that earlier head. Run swarm pr work %d to re-plan and re-validate.\n", result.State.HeadSHA, opts.Number)
 				}
 				if result.PR != nil {
 					fmt.Fprintln(cmd.OutOrStdout(), result.PR.HTMLURL)
@@ -168,7 +170,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 		cmd.Flags().StringVar(&gate, "gate", "", "Require gate none, agent, or human; cannot weaken policy")
 		cmd.Flags().StringVar(&opts.Instructions, "instructions", "", "Development instructions within the approved WorkUnit scope")
 		cmd.Flags().BoolVar(&opts.Work.Headless, "headless", true, "Run agents non-interactively (false requires a terminal)")
-		cmd.Flags().BoolVar(&opts.Work.InspectOnly, "dry-run", false, "Inspect the linked task and execution policy without changing state")
+		cmd.Flags().BoolVar(&opts.Work.InspectOnly, "dry-run", false, "Print the linked task and execution policy as JSON without changing state")
 		cmd.Flags().BoolVar(&progress, "progress", true, "Report headless progress on stderr")
 	}
 	if operation == "rebase" {
@@ -183,4 +185,9 @@ func requireIssueWorkspace(state *lease.IssueState) error {
 		return fmt.Errorf("issue has a pending PR revision; use swarm pr work %d, swarm pr stage %d, swarm pr validate %d, or swarm pr submit %d", state.PRRevision.Number, state.PRRevision.Number, state.PRRevision.Number, state.PRRevision.Number)
 	}
 	return nil
+}
+
+// prService builds the PR lifecycle service for this invocation's repository.
+func (o *RootOptions) prService(tr tracker.Tracker, manager *lease.Manager) *pr.Service {
+	return &pr.Service{Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now}
 }

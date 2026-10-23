@@ -165,14 +165,20 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 	defer cancel()
 
 	req.Version = 1
-	if req.Operation == "acquire" {
+	switch {
+	case req.Operation == "acquire":
 		if strings.TrimSpace(req.ForkRepo) == "" {
 			req.ForkRepo = strings.TrimSpace(g.ForkRepo)
 		}
 		if req.ForkRepo == "" {
 			return nil, fmt.Errorf("fork repository is required for acquire")
 		}
-	} else if strings.TrimSpace(req.ClaimID) == "" {
+	case req.Operation == "acquire-pr":
+		// The PR's head repository, recorded at submission, identifies the fork.
+		if req.PRNumber <= 0 {
+			return nil, fmt.Errorf("PR number is required for acquire-pr")
+		}
+	case strings.TrimSpace(req.ClaimID) == "":
 		return nil, lease.ErrClaimFence
 	}
 
@@ -348,6 +354,17 @@ func expectedResultPresent(st *lease.IssueState, req lease.ForkRequest) bool {
 	case "record-submission":
 		return st.Lease.Status == "completed" && st.Lease.Phase == "submitted" &&
 			st.PRNumber == req.PRNumber && strings.TrimSpace(st.PRURL) != ""
+	case "acquire-pr":
+		return st.Lease.Status == "active" && st.Lease.ClaimID != "" && st.PRNumber == req.PRNumber
+	case "begin-pr-revision":
+		return st.PRRevision != nil && st.PRRevision.Number == req.PRNumber &&
+			st.PRRevision.RemoteHeadSHA == req.ExpectedHeadSHA && st.PRRevision.LocalHeadSHA == req.HeadSHA
+	case "record-pr-head":
+		return st.PRRevision != nil && st.PRRevision.Number == req.PRNumber && st.PRRevision.LocalHeadSHA == req.HeadSHA
+	case "invalidate-pr-evidence":
+		return st.PRRevision != nil && st.PRRevision.Number == req.PRNumber
+	case "complete-pr-revision":
+		return st.PRRevision == nil && st.PRNumber == req.PRNumber && st.HeadSHA == req.HeadSHA && st.Lease.Status == "completed"
 	default:
 		return false
 	}

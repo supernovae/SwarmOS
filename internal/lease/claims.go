@@ -1,16 +1,17 @@
 package lease
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 )
 
 type persistedClaim struct {
@@ -21,7 +22,8 @@ type persistedClaim struct {
 // Control files live outside agent worktrees and are shared by this clone's
 // linked worktrees. Independent clones still arbitrate through the remote CAS.
 func claimControlPath(repoRoot string, issueNumber int) (string, error) {
-	out, err := exec.Command("git", "-C", repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	// Hardened git environment: an inherited GIT_DIR must not redirect claim identity.
+	out, err := gitcredential.Output(context.Background(), repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
 		return "", fmt.Errorf("resolve claim repository identity: %w", err)
 	}

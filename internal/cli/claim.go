@@ -3,8 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,7 +14,8 @@ import (
 func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, durationStr string
 	var asJSON, next, allRepos bool
-	cmd := &cobra.Command{Use: "claim [<issue-number>]", Short: "Reserve an approved task or select the next eligible phase", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "claim [<issue-number>]", Short: "Reserve an approved task or select the next eligible phase", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		defer func() { reportJSONFailure(cmd, asJSON, "claim", runErr) }()
 		if len(args) > 0 && next {
 			return fmt.Errorf("<issue-number> and --next are mutually exclusive")
 		}
@@ -29,9 +28,9 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		var issue int
 		var err error
 		if len(args) > 0 {
-			issue, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-			if err != nil || issue <= 0 {
-				return fmt.Errorf("invalid issue number %q", args[0])
+			issue, err = parseNumberArg(args[0], "issue")
+			if err != nil {
+				return err
 			}
 		}
 		var duration time.Duration
@@ -42,7 +41,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 		}
 		if next {
-			pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all"}, duration)
+			pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all"}, duration)
 			if err != nil {
 				return err
 			}
@@ -90,14 +89,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		if err := lease.SaveClaimToken(root, issue, state.Lease.ClaimID); err != nil {
 			return fail(err)
 		}
-		checkpointRemote := "origin"
-		targetBranch := state.Branch
-		if rootOpts.Fork {
-			checkpointRemote = rootOpts.effectiveForkRemote()
-			if targetBranch == "" {
-				targetBranch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
-			}
-		}
+		checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, preflight.Issue.Title, state.Lease.ClaimID, state.Branch)
 		path, branch, err := workspace.ProvisionFromRemoteAt(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA)
 		if err != nil {
 			return fail(err)
@@ -113,7 +105,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 	}}
 	cmd.Flags().BoolVar(&next, "next", false, "Select the next eligible approved WorkUnit")
 	cmd.Flags().BoolVar(&allRepos, "all", false, "Scan all registered repositories (requires --next)")
-	cmd.Flags().StringVar(&agentName, "agent", "", "Configured planner override")
+	cmd.Flags().StringVar(&agentName, "agent", "", "Configured agent for the planner role (overrides roles.planner)")
 	cmd.Flags().StringVar(&durationStr, "duration", "", "Lease duration (approved policy default)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured claim outcome")
 	return cmd

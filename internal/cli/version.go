@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"runtime"
 	"runtime/debug"
@@ -53,6 +52,7 @@ func newVersionCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print SwarmOS version and build information",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			info := map[string]string{
 				"version": Version,
@@ -63,9 +63,11 @@ func newVersionCmd() *cobra.Command {
 				"arch":    runtime.GOARCH,
 			}
 			if asJSON {
-				enc := json.NewEncoder(cmd.OutOrStdout())
-				enc.SetIndent("", "  ")
-				return enc.Encode(info)
+				out := map[string]string{"kind": "version"}
+				for k, v := range info {
+					out[k] = v
+				}
+				return writeJSON(cmd, out)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "swarm version %s (commit: %s, built: %s, %s %s/%s)\n",
 				Version, Commit, Date, info["go"], info["os"], info["arch"])

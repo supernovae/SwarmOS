@@ -727,7 +727,7 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 				SHA string `json:"sha"`
 			} `json:"object"`
 		}
-		refPath := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", g.owner, g.repo, url.PathEscape(resp.Base.Ref))
+		refPath := fmt.Sprintf("repos/%s/%s/git/ref/heads/%s", g.owner, g.repo, escapeRefPath(resp.Base.Ref))
 		if err := g.client.DoWithContext(ctx, "GET", refPath, nil, &target); err != nil {
 			return nil, fmt.Errorf("github PR #%d target branch %s: %w", number, resp.Base.Ref, err)
 		}
@@ -825,4 +825,14 @@ func (g *GitHubTracker) EnsureLabels(ctx context.Context, labels []LabelSpec) er
 		}
 	}
 	return nil
+}
+
+// escapeRefPath escapes each segment of a branch name so refs such as
+// release/1.0 keep their slashes in REST paths.
+func escapeRefPath(ref string) string {
+	segments := strings.Split(ref, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }

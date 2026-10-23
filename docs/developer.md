@@ -135,11 +135,16 @@ Use GitHub for final code and acceptance review. Retrying an already completed `
 
 Use the same verbs for the same kind of work: `issue work` implements an approved issue, while `pr work` continues its proposed implementation. `issue stage` and `pr stage` both record interactive plans or implementation checkpoints, but PR staging reads only the separate PR worktree and leaves the original issue branch unchanged. Fixing a failing test or addressing feedback is development, not a separate `repair` operation. `pr rebase` changes branch ancestry and does not ask an agent to rewrite the implementation.
 
-PR commands require an open PR recorded in an approved WorkUnit's authoritative state. A closing reference in a PR description is not a substitute for that link. Mutation requires upstream write permission; contributor-only `--fork` coordination remains an issue workflow.
+PR commands require an open PR recorded in an approved WorkUnit's authoritative state. A closing reference in a PR description helps SwarmOS find that link quickly, but the link itself always comes from coordination state.
 
-For a fork-head PR, a maintainer also needs a writable Git remote matching the recorded fork repository. Use `--fork-remote <name>` to select it (default `fork`), without `--fork`; the linked issue still uses upstream coordination.
+Who can revise a PR:
 
-`pr status` shows the published head and target, local revision, check runs, and GitHub review records with their commit SHAs. Checks on the published head are separate from local `pr validate` results; reviews against an older commit remain visible as history.
+- **Maintainers** with upstream write permission can revise any linked PR. For a PR whose head lives in a contributor's fork, add a writable Git remote for that fork and select it with `--fork-remote <name>` (default `fork`), without `--fork`.
+- **Contributors** revise their own fork PRs with `swarm --fork pr ...`. Changes publish to the branch in their fork, and the upstream fork coordinator records each step after checking that they own that fork, that the published head is the one they validated, and that the revised plan is approved. See [Revising your PR](fork-mode.md#revising-your-pr-after-review).
+
+`pr status` shows the published head and target, local revision, check runs, and GitHub review records with their commit SHAs. Checks on the published head are separate from local `pr validate` results; reviews against an older commit remain visible as history. When the tracker reports no CI checks (for example, on the local backend), `pr status` shows the SwarmOS validation recorded for the published head as a `swarm-validation` check.
+
+If commits are pushed to the PR branch outside SwarmOS, `pr status` reports `unverified-head`: the recorded plan, validation, and provenance attestation describe the last verified head, not the current one. Run `swarm pr work <PR>` to start a revision from the current head; it re-plans, re-validates, and records new evidence before `pr submit`.
 
 ```bash
 # 33 is the PR number; its linked WorkUnit may have a different issue number.
@@ -154,7 +159,7 @@ Changes are prepared in `.swarm/worktrees/pr-33`, separate from the original iss
 
 For `plan_mode: interactive`, `swarm pr work <PR>` pauses at `awaiting-plan` after preparing `.swarm/worktrees/pr-<PR>`. Write `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` **in that PR worktree**, then run `swarm pr stage <PR> --phase plan --harness <name> --model <name>` (optionally `--handoff` or `--json`). Under an agent gate, resume with `swarm pr work <PR>` to review and implement; under a human gate, an independent maintainer uses `swarm issue review-plan <issue> --approve` before `swarm pr work <PR>` resumes implementation. Do not stage through `swarm issue stage` against the old issue worktree while the PR revision is pending.
 
-Alternatively, after the plan gate, make implementation changes in the managed PR worktree and run `swarm pr stage <PR> --phase implement --harness <name> --model <name>`. This records a local checkpoint and validates against the approved baseline; it does **not** publish the branch or change the submitted issue checkpoint. Inspect with `swarm pr status <PR>` and publish only with `swarm pr submit <PR>`. Staging requires the existing pending revision, a valid active issue claim, and upstream mutation authorization; it rejects rebases, diverged heads, and unrelated worktrees.
+Alternatively, after the plan gate, make implementation changes in the managed PR worktree and run `swarm pr stage <PR> --phase implement --harness <name> --model <name>`. This records a local checkpoint and validates against the approved baseline; it does **not** publish the branch or change the submitted issue checkpoint. Inspect with `swarm pr status <PR>` and publish only with `swarm pr submit <PR>`. Staging requires the existing pending revision, a valid active issue claim, and upstream mutation authorization (or, with `--fork`, a claim on your own fork PR); it rejects rebases, diverged heads, and unrelated worktrees.
 
 `pr submit` reruns trusted validation and publishes to the existing PR branch. It preserves the PR's title, description, draft/ready state, and identity; GitHub applies the repository's review rules to the new commits. Publication uses the remote head observed when the revision began; a concurrent remote update is rejected rather than overwritten. Same-repository publication updates the PR branch and issue coordination state atomically.
 

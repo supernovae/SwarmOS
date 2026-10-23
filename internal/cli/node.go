@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,6 +21,8 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 	nodeCmd := &cobra.Command{
 		Use:   "node",
 		Short: "Configure and run volunteer worker nodes and parallel agent pools",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 
 	var (
@@ -27,12 +30,15 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 		capabilities []string
 		models       []string
 		ramOverride  string
+		profileJSON  bool
 	)
 
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "Detect host capabilities/models and register volunteer node profile (~/.config/swarm/node.yaml)",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, profileJSON, "node-init", runErr) }()
 			prof := node.DetectHostProfile(nodeID)
 			if len(capabilities) > 0 {
 				prof.Capabilities = capabilities
@@ -49,6 +55,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				return err
 			}
 
+			if profileJSON {
+				return writeJSON(cmd, map[string]any{"kind": "node-init", "status": "initialized", "path": cfgPath, "profile": prof})
+			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Initialized SwarmOS Volunteer Node profile at %s\n", cfgPath)
 			printNodeProfile(cmd, prof)
@@ -59,19 +68,27 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 	initCmd.Flags().StringSliceVar(&capabilities, "capabilities", []string{"coding", "testing", "review", "docs"}, "Node capabilities")
 	initCmd.Flags().StringSliceVar(&models, "models", nil, "Override available agent models (defaults to auto-detected claude/codex/opencode/omp)")
 	initCmd.Flags().StringVar(&ramOverride, "ram", "", "Override detected RAM (e.g., 64GB)")
+	initCmd.Flags().BoolVar(&profileJSON, "json", false, "Emit the saved node profile as JSON")
 
 	statusCmd := &cobra.Command{
 		Use:   "status",
 		Short: "Display current volunteer node capabilities, models, and hardware resources",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, profileJSON, "node-status", runErr) }()
 			prof, err := node.LoadOrDetectProfile("")
 			if err != nil {
 				return err
+			}
+			if profileJSON {
+				return writeJSON(cmd, map[string]any{"kind": "node-status", "profile": prof})
 			}
 			printNodeProfile(cmd, prof)
 			return nil
 		},
 	}
+
+	statusCmd.Flags().BoolVar(&profileJSON, "json", false, "Emit the node profile as JSON")
 
 	var (
 		allRepos       bool
@@ -131,7 +148,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				Phase:   "all", Gate: contract.GateMode(gate), Headless: true,
 				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),
 			}
-			execute := func(pulled *PulledWorkUnit) (*workflow.WorkResult, error) {
+			execute := func(pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
 				tr, manager, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
 					Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend,
 				})
@@ -160,12 +177,17 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					submitOpts.Repo = pulled.Repo
 					submitOpts.RepoRoot = pulled.RepoRoot
 					submitOpts.Backend = pulled.Backend
+					// Buffer submission output so validation does not hold the
+					// shared output lock and stall other workers' reporting.
+					var submitOut, submitErr bytes.Buffer
 					submit := newSubmitCmd(&submitOpts)
-					outputMu.Lock()
-					submit.SetOut(out)
-					submit.SetErr(cmd.ErrOrStderr())
+					submit.SetOut(&submitOut)
+					submit.SetErr(&submitErr)
 					submit.SetArgs([]string{fmt.Sprint(pulled.Issue.Number)})
 					err = submit.ExecuteContext(ctx)
+					outputMu.Lock()
+					_, _ = submitOut.WriteTo(out)
+					_, _ = submitErr.WriteTo(cmd.ErrOrStderr())
 					outputMu.Unlock()
 					if err != nil {
 						return result, fmt.Errorf("automatic submission: %w", err)
@@ -180,10 +202,10 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					go func(worker int) {
 						defer workers.Done()
 						for ctx.Err() == nil && reserve() {
-							pulled, err := PullNextReadyIssue(ctx, cmd, rootOpts, allRepos, options, 0)
+							pulled, err := pullNextReadyIssue(ctx, cmd, rootOpts, allRepos, options, 0)
 							if err != nil {
 								admitted.Add(-1)
-								if !errors.Is(err, ErrNoReadyWork) {
+								if !errors.Is(err, errNoReadyWork) {
 									failures.Add(1)
 									outputMu.Lock()
 									fmt.Fprintf(out, "[worker-%d] selection failed: %v\n", worker+1, err)
@@ -198,13 +220,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								failures.Add(1)
 								fmt.Fprintf(out, "[worker-%d] %s #%d failed: %v\n", worker+1, pulled.Repo, pulled.Issue.Number, err)
 							} else {
-								status := "completed"
-								if result.PausedForHuman {
-									status = "paused"
-								} else if result.HandedOffToPhase != "" {
-									status = "handed-off"
-								}
-								fmt.Fprintf(out, "[worker-%d] %s #%d %s: phase=%s validation=%t\n", worker+1, pulled.Repo, pulled.Issue.Number, status, result.PhaseCompleted, result.ValidationPassed)
+								fmt.Fprintf(out, "[worker-%d] %s #%d %s: phase=%s validation=%t\n", worker+1, pulled.Repo, pulled.Issue.Number, result.Outcome(), result.PhaseCompleted, result.ValidationPassed)
 							}
 							outputMu.Unlock()
 							if err != nil {

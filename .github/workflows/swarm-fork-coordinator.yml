@@ -7,6 +7,8 @@ on:
 permissions:
   contents: write
   issues: write
+  # Verifies fork PR heads, branches, and targets before recording submissions and revisions.
+  pull-requests: read
 
 concurrency:
   group: swarm-fork-coordinator-${{ github.repository }}-issue-${{ github.event.issue.number }}

@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -51,13 +48,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
-			if jsonOutput {
-				defer func() {
-					if runErr != nil {
-						_ = writeJSON(cmd, map[string]any{"kind": "work", "status": "failed", "error": runErr.Error()})
-					}
-				}()
-			}
+			defer func() { reportJSONFailure(cmd, jsonOutput, "work", runErr) }()
 			opts := workflow.WorkOptions{
 				AgentName: agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
 				DeveloperAgent: developerAgent, TesterAgent: testerAgent, Phase: phase,
@@ -69,7 +60,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			var cfg *contract.SwarmConfig
 			var err error
 			if nextReady {
-				pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, opts, 0)
+				pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, opts, 0)
 				if err != nil {
 					return err
 				}
@@ -79,9 +70,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					return err
 				}
 			} else {
-				opts.IssueNumber, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-				if err != nil || opts.IssueNumber <= 0 {
-					return fmt.Errorf("invalid issue number %q", args[0])
+				opts.IssueNumber, err = parseNumberArg(args[0], "issue")
+				if err != nil {
+					return err
 				}
 				opts.RepoRoot = rootOpts.resolveRepoRoot()
 				tr, mgr, cfg, err = rootOpts.resolveLeaseManager(cmd)
@@ -129,12 +120,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			status := "completed"
-			if result.PausedForHuman {
-				status = "paused"
-			} else if result.HandedOffToPhase != "" {
-				status = "handed-off"
-			}
+			status := result.Outcome()
 			if jsonOutput {
 				return writeJSON(cmd, map[string]any{"kind": "work", "status": status, "result": result})
 			}
@@ -143,7 +129,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				if result.PhaseCompleted == "awaiting-plan" {
 					fmt.Fprintf(cmd.OutOrStdout(), "Interactive plan required: write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md in %s, then run: swarm issue stage %d --phase plan\n", result.WorktreePath, result.IssueNumber)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "Human approval required: swarm issue review-plan %d --approve\n", result.IssueNumber)
+					fmt.Fprintf(cmd.OutOrStdout(), "Plan approval required: swarm issue review-plan %d --approve\n", result.IssueNumber)
 				}
 			}
 			if result.HandedOffToPhase != "" {
@@ -164,11 +150,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&nextReady, "next", false, "Claim the next approved ready task")
 	cmd.Flags().BoolVar(&allRepos, "all", false, "With --next, scan registered repositories")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit a structured outcome")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Inspect effective policy without claiming or running agents")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the effective policy as JSON without claiming or running agents")
 	cmd.Flags().BoolVar(&progressOutput, "progress", true, "Report headless stages and a 15-second heartbeat to stderr (false disables)")
 	return cmd
-}
-
-func writeJSON(cmd *cobra.Command, value any) error {
-	return json.NewEncoder(cmd.OutOrStdout()).Encode(value)
 }

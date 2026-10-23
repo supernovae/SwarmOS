@@ -16,15 +16,19 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 	repoCmd := &cobra.Command{
 		Use:   "repo",
 		Short: "Initialize, plan, validate, and register SwarmOS repositories",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 
 	var cloneIfMissing bool
+	var asJSON bool
 
 	addCmd := &cobra.Command{
 		Use:   "add [<owner/repo>] [<local-path>]",
 		Short: "Register a repository with SwarmOS (optionally cloning it)",
 		Args:  cobra.MaximumNArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON, "repo-add", runErr) }()
 			var slug, localPath string
 			if len(args) == 1 {
 				// Could be a local path or an owner/repo slug
@@ -76,24 +80,43 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 
 			// Ensure .swarm/ harness is initialized in the registered repository
 			if _, err := os.Stat(filepath.Join(entry.Path, ".swarm", "config.yaml")); err != nil {
-				_, _ = harness.InitRepository(harness.InitOptions{RepoRoot: entry.Path})
+				if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: entry.Path, SwarmVersion: pinFor(entry.Path)}); err != nil {
+					return fmt.Errorf("registered %s but could not initialize its .swarm/ harness (run swarm repo init --root %s): %w", entry.Repo, entry.Path, err)
+				}
 			}
 
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "repo-add", "status": "registered", "repository": entry})
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Registered repository %s -> %s (backend=%s)\n",
 				entry.Repo, entry.Path, entry.Backend)
 			return nil
 		},
 	}
 	addCmd.Flags().BoolVar(&cloneIfMissing, "clone", false, "Clone repository from GitHub if not present locally")
+	addCmd.Flags().BoolVar(&asJSON, "json", false, "Emit the registered repository as JSON")
 
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List all registered SwarmOS repositories",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON, "repo-list", runErr) }()
 			reg := registry.New("")
 			entries, err := reg.List()
 			if err != nil {
 				return err
+			}
+			if asJSON {
+				type listed struct {
+					registry.RepoEntry
+					Harness string `json:"harness"`
+				}
+				repos := make([]listed, 0, len(entries))
+				for _, e := range entries {
+					repos = append(repos, listed{RepoEntry: e, Harness: harnessState(e.Path)})
+				}
+				return writeJSON(cmd, map[string]any{"kind": "repo-list", "repositories": repos})
 			}
 			out := cmd.OutOrStdout()
 			if len(entries) == 0 {
@@ -103,11 +126,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 			fmt.Fprintln(out, "REPOSITORY                   BACKEND   HARNESS   LOCAL PATH")
 			fmt.Fprintln(out, "----------                   -------   -------   ----------")
 			for _, e := range entries {
-				harnessState := "ready"
-				if _, err := os.Stat(filepath.Join(e.Path, ".swarm", "config.yaml")); err != nil {
-					harnessState = "uninitialized"
-				}
-				fmt.Fprintf(out, "%-28s %-9s %-9s %s\n", e.Repo, e.Backend, harnessState, e.Path)
+				fmt.Fprintf(out, "%-28s %-9s %-9s %s\n", e.Repo, e.Backend, harnessState(e.Path), e.Path)
 			}
 			return nil
 		},
@@ -117,16 +136,30 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 		Use:   "remove <owner/repo>",
 		Short: "Unregister a repository from SwarmOS (does not delete local files)",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON, "repo-remove", runErr) }()
 			reg := registry.New("")
 			if err := reg.Remove(args[0]); err != nil {
 				return err
+			}
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "repo-remove", "status": "unregistered", "repo": args[0]})
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Unregistered repository %s\n", args[0])
 			return nil
 		},
 	}
 
+	listCmd.Flags().BoolVar(&asJSON, "json", false, "Emit registered repositories as JSON")
+	removeCmd.Flags().BoolVar(&asJSON, "json", false, "Emit the unregistered repository as JSON")
 	repoCmd.AddCommand(addCmd, listCmd, removeCmd, newInitCmd(rootOpts), newDoctorCmd(rootOpts), newPlanCmd(rootOpts), newRepoValidateCmd(rootOpts))
 	return repoCmd
+}
+
+// harnessState reports whether a registered repository has a .swarm/ harness.
+func harnessState(path string) string {
+	if _, err := os.Stat(filepath.Join(path, ".swarm", "config.yaml")); err != nil {
+		return "uninitialized"
+	}
+	return "ready"
 }

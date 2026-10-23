@@ -190,10 +190,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 		populateOverlaps(waveItems)
 		report.ExecutionWaves = computeExecutionWaves(waveItems)
 		report.SummaryMarkdown = renderFromPlanMarkdown(report, epicTitle, opts.Apply, opts.Ready)
-		if opts.PublishIssue > 0 && opts.Apply {
-			_, _ = e.Tracker.CreateComment(ctx, opts.PublishIssue, report.SummaryMarkdown)
-		}
-		return report, nil
+		return report, e.publishProjectPlan(ctx, opts, report)
 	}
 
 	// Backlog Sense-Making & Issue Import Mode (--scan)
@@ -316,10 +313,19 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 	report.BacklogItems = items
 	report.ExecutionWaves = computeExecutionWaves(items)
 	report.SummaryMarkdown = renderBacklogScanMarkdown(report, opts.Apply, opts.Normalize)
-	if opts.PublishIssue > 0 && opts.Apply {
-		_, _ = e.Tracker.CreateComment(ctx, opts.PublishIssue, report.SummaryMarkdown)
+	return report, e.publishProjectPlan(ctx, opts, report)
+}
+
+// publishProjectPlan posts the summary to the tracking issue. The report is
+// still returned on failure because issues may already have been applied.
+func (e *Engine) publishProjectPlan(ctx context.Context, opts ProjectPlanOptions, report *ProjectPlanReport) error {
+	if opts.PublishIssue <= 0 || !opts.Apply {
+		return nil
 	}
-	return report, nil
+	if _, err := e.Tracker.CreateComment(ctx, opts.PublishIssue, report.SummaryMarkdown); err != nil {
+		return fmt.Errorf("publish project plan report to issue #%d: %w", opts.PublishIssue, err)
+	}
+	return nil
 }
 
 func loadGoalsAndRules(root string) (string, []string) {

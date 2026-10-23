@@ -104,3 +104,23 @@ func TestUtilityCommandsEmitJSON(t *testing.T) {
 		t.Fatalf("doctor status %v disagrees with exit error %v", doctor["status"], err)
 	}
 }
+
+func TestFailedResumeKeepsClaimForStagingRecovery(t *testing.T) {
+	f := newCLIFixture(t)
+	n := f.create(t, "agent")
+	issue := strconv.Itoa(n)
+	f.must(t, "issue", "approve", issue)
+	f.must(t, "issue", "claim", issue, "--agent", "mock")
+	claim := f.state(t, n).Lease.ClaimID
+	worktree := workspace.WorktreePath(f.root, n)
+	if err := os.WriteFile(filepath.Join(worktree, "agent-output.txt"), []byte("work from a failed checkpoint\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.run("issue", "work", issue, "--agent", "mock", "--progress=false")
+	if err == nil || !strings.Contains(out+err.Error(), "swarm issue stage <issue> --phase implement") {
+		t.Fatalf("dirty resume = %v\n%s", err, out)
+	}
+	if state := f.state(t, n); state.Lease.Status != "active" || state.Lease.ClaimID != claim {
+		t.Fatalf("failed resume released the existing claim: %+v", state.Lease)
+	}
+}

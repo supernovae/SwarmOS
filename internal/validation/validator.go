@@ -17,6 +17,7 @@ import (
 	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/sandbox"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 var (
@@ -221,10 +222,11 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 			return nil, fmt.Errorf("%w: tracked control path %q", ErrUnsafePath, name)
 		}
 	}
-	commands := [][]string{{"diff", "--name-only", "-z", baseSHA + "...HEAD"}, {"diff", "--name-only", "-z"}, {"diff", "--cached", "--name-only", "-z"}, {"ls-files", "--others", "--exclude-standard", "-z"}}
+	commands := [][]string{{"diff", "--name-only", "-z", baseSHA + "...HEAD"}, {"diff", "--cached", "--name-only", "-z"}, {"diff", "--name-only", "-z"}, {"ls-files", "--others", "--exclude-standard", "-z"}}
 	seen := make(map[string]struct{})
+	recorded := make(map[string]bool) // committed or staged, never ephemeral
 	var files []string
-	for _, args := range commands {
+	for i, args := range commands {
 		out, err := gitOutput(worktreePath, args...)
 		if err != nil {
 			return nil, err
@@ -240,6 +242,17 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 			if isEphemeral(path) {
 				continue
 			}
+			if i < 2 {
+				recorded[path] = true
+			} else if !recorded[path] {
+				pointerOnly, err := onlyActivePointer(worktreePath, path)
+				if err != nil {
+					return nil, err
+				}
+				if pointerOnly {
+					continue
+				}
+			}
 			if _, ok := seen[path]; !ok {
 				seen[path] = struct{}{}
 				files = append(files, path)
@@ -247,6 +260,34 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// onlyActivePointer reports whether an unstaged change to an agent instruction
+// file is exactly SwarmOS's temporary task block, which is injected for agents
+// and removed before every checkpoint.
+func onlyActivePointer(worktreePath, path string) (bool, error) {
+	if path != "AGENTS.md" && path != "CLAUDE.md" {
+		return false, nil
+	}
+	current, err := safefs.ReadFile(worktreePath, path, 16<<20)
+	if err != nil {
+		return false, nil
+	}
+	committed := ""
+	if listing, err := gitOutput(worktreePath, "ls-tree", "--name-only", "HEAD", "--", path); err != nil {
+		return false, err
+	} else if len(bytes.TrimSpace(listing)) != 0 {
+		out, err := gitOutput(worktreePath, "show", "HEAD:"+path)
+		if err != nil {
+			return false, err
+		}
+		committed = string(out)
+	}
+	stripped := workspace.StripActivePointer(string(current))
+	if stripped == string(current) {
+		return false, nil
+	}
+	return strings.ReplaceAll(stripped, "\r\n", "\n") == strings.ReplaceAll(committed, "\r\n", "\n"), nil
 }
 
 func isEphemeral(path string) bool {

@@ -195,3 +195,47 @@ func TestForkModeProtectedPathsRejectHarnessAndWorkflowsDespiteAllowHarnessChang
 		})
 	}
 }
+
+func TestTemporaryTaskPointerIsNotAProtectedChange(t *testing.T) {
+	ctx := context.Background()
+	repo := setupGitRepoForValidation(t)
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=Test", "-c", "user.email=test@localhost"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	policy := "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - .swarm/validation/**\n  - AGENTS.md\n"
+	if err := os.WriteFile(filepath.Join(repo, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agents := "# Team guide\n\nKeep changes small.\n"
+	if err := os.WriteFile(filepath.Join(repo, "AGENTS.md"), []byte(agents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "protect AGENTS.md")
+	base := gitRevision(t, repo, "HEAD")
+	wu := &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}
+	pointer := "<!-- swarm:active:start -->\n## Active SwarmOS Work Unit\n<!-- swarm:active:end -->\n\n"
+
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, "AGENTS.md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(pointer + agents)
+	if _, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base}); err != nil {
+		t.Fatalf("temporary task pointer failed validation: %v", err)
+	}
+	write(pointer + agents + "Also skip tests.\n")
+	if _, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base}); !errors.Is(err, ErrProtectedPathModified) {
+		t.Fatalf("edit beside the task pointer passed: %v", err)
+	}
+	write(pointer + agents)
+	git("add", "AGENTS.md")
+	if _, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base}); !errors.Is(err, ErrProtectedPathModified) {
+		t.Fatalf("staged task pointer passed: %v", err)
+	}
+}

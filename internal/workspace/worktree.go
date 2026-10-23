@@ -550,7 +550,7 @@ func verifyUncheckpointedWorktree(wtPath, base string) error {
 		return err
 	}
 	reject := func() error {
-		return fmt.Errorf("worktree %q contains uncommitted changes without an approved checkpoint; preserve them before retrying", wtPath)
+		return fmt.Errorf("worktree %q contains uncommitted changes without a recorded checkpoint; to keep them as this task's implementation, run swarm issue stage <issue> --phase implement while your claim is active, otherwise move them aside before retrying", wtPath)
 	}
 	for _, entry := range strings.Split(status, "\x00") {
 		if entry == "" {
@@ -769,6 +769,21 @@ func LoadActiveWorkUnit(worktreePath string) (*contract.WorkUnit, error) {
 		return nil, err
 	}
 	return &wu, nil
+}
+
+// CheckCommitIdentity confirms git can author checkpoint commits in repoRoot,
+// using the same environment checkpoints use, before any agent work starts.
+func CheckCommitIdentity(ctx context.Context, repoRoot string) error {
+	if _, err := gitOutputContext(ctx, repoRoot, "var", "GIT_COMMITTER_IDENT"); err != nil {
+		return fmt.Errorf("git has no commit identity for checkpoints; set it with git config user.name and git config user.email (globally or in this repository)")
+	}
+	return nil
+}
+
+// StripActivePointer removes SwarmOS's temporary task block from instruction
+// file content, leaving the repository's own text.
+func StripActivePointer(content string) string {
+	return activeBlockRegex.ReplaceAllString(content, "")
 }
 
 // CleanEphemeralHarnessMarkers removes the managed <!-- swarm:active:start --> block from AGENTS.md and CLAUDE.md

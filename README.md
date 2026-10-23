@@ -92,7 +92,7 @@ Download the prebuilt binary for **Linux**, **macOS**, or **Windows** from [**Gi
 go install github.com/supernovae/swarmos/cmd/swarm@latest
 ```
 
-To build from a source checkout instead, run `go install ./cmd/swarm` with Go's binary directory on your `PATH`.
+To build from a source checkout instead, run `make install` (or `go install ./cmd/swarm`); it installs into `$HOME/go/bin` by default, so keep that directory on your `PATH`. `make check` runs the same formatting, vet, staticcheck, and race-enabled tests as CI.
 
 `swarm repo init` pins generated CI and fork automation to the swarm you ran it with: a release installs that release, and a clean source build installs its exact commit (push that commit before CI runs). From a build with uncommitted changes, init keeps the pin your workflows already use.
 

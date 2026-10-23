@@ -38,7 +38,7 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 		return nil, fmt.Errorf("executor requires an absolute task workspace")
 	}
 	flags := []string{"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv",
-		"--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev", "--size", "268435456", "--tmpfs", "/tmp"}
+		"--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev", "--size", "1073741824", "--tmpfs", "/tmp"}
 	// Account for both merged-/usr and older Linux distributions.
 	for _, path := range []string{"/bin", "/lib", "/lib64"} {
 		info, statErr := os.Lstat(path)
@@ -58,6 +58,12 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 			flags = append(flags, "--ro-bind", path, path)
 		}
 	}
+	toolchains := HostToolchains()
+	for _, mount := range ToolchainMounts(toolchains, true) {
+		if mount != work && !isSubpath(mount, work) {
+			flags = append(flags, "--ro-bind", mount, mount)
+		}
+	}
 	bind := "--bind"
 	if e.ReadOnly {
 		bind = "--ro-bind"
@@ -67,8 +73,15 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 		flags = append(flags, "--bind", filepath.Join(work, ".swarm", "active"), "/workspace/.swarm/active")
 	}
 	flags = append(flags, "--dir", "/home/worker", "--setenv", "HOME", "/home/worker", "--setenv", "TMPDIR", "/tmp",
-		"--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin", "--chdir", "/workspace", "--",
-		"/usr/bin/prlimit", "--as=2147483648", "--cpu=120", "--nproc=128", "--nofile=256", "--fsize=67108864", "--core=0", "--",
+		"--setenv", "XDG_CACHE_HOME", "/home/worker/.cache", "--setenv", "XDG_CONFIG_HOME", "/home/worker/.config", "--setenv", "XDG_DATA_HOME", "/home/worker/.local/share",
+		"--setenv", "PATH", SandboxPath(toolchains))
+	for _, b := range toolchains {
+		if b.EnvKey != "" && b.EnvVal != "" {
+			flags = append(flags, "--setenv", b.EnvKey, b.EnvVal)
+		}
+	}
+	flags = append(flags, "--chdir", "/workspace", "--",
+		"/usr/bin/prlimit", "--as=8589934592", "--cpu=300", "--nproc=1024", "--nofile=4096", "--fsize=268435456", "--core=0", "--",
 		"/bin/sh", "-c", script, "swarm-tool")
 	flags = append(flags, args...)
 	cmd := exec.CommandContext(ctx, binary, flags...)

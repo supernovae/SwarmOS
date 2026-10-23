@@ -211,8 +211,11 @@ func TestNativeCodexBoundary(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "test.txt"), []byte("source"), 0600)
 	var output strings.Builder
-	if err := RunNativeValidation(ctx, dir, binary, "cat test.txt; printf changed > test.txt", &output, &output); err != nil {
+	if err := RunNativeValidation(ctx, dir, binary, "cat test.txt; printf changed > test.txt; go version", &output, &output); err != nil {
 		t.Fatal(err, output.String())
+	}
+	if strings.Contains(output.String(), "Refusing to create helper binaries under temporary dir") {
+		t.Fatalf("unexpected Codex temporary-dir PATH alias warning: %s", output.String())
 	}
 	data, _ := os.ReadFile(filepath.Join(dir, "test.txt"))
 	if string(data) != "source" {

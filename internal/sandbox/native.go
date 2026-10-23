@@ -44,7 +44,13 @@ func NativeValidationBinary(cfg *contract.SwarmConfig) (string, error) {
 }
 
 func nativeEnv(home string, authentication bool) []string {
-	env := []string{"PATH=/usr/bin:/bin", "HOME=" + home}
+	toolchains := HostToolchains()
+	env := []string{"PATH=" + SandboxPath(toolchains), "HOME=" + home}
+	for _, b := range toolchains {
+		if b.EnvKey != "" && b.EnvVal != "" {
+			env = append(env, b.EnvKey+"="+b.EnvVal)
+		}
+	}
 	if authentication {
 		// The harness alone opens its normal credential store. Never read or copy it here.
 		for _, key := range []string{"CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} {
@@ -56,6 +62,17 @@ func nativeEnv(home string, authentication bool) []string {
 	return env
 }
 
+// codexHostHome resolves a non-/tmp parent HOME for the trusted outer Codex CLI
+// process so Codex does not emit a warning refusing to create PATH helper
+// aliases when scratch is under /tmp. Inside the sandbox, shell_environment_policy
+// still forces HOME and TMPDIR to the isolated scratch directory.
+func codexHostHome(fallback string) string {
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return home
+	}
+	return fallback
+}
+
 // codexPolicy uses a named native profile rather than workspace-write's broad
 // default read access. :minimal supplies Codex's platform runtime files.
 func codexPolicy(binary, work, scratch string, readOnly bool) []string {
@@ -63,9 +80,29 @@ func codexPolicy(binary, work, scratch string, readOnly bool) []string {
 	if readOnly {
 		access = "read"
 	}
-	fs := []string{`":root"="deny"`, `":minimal"="read"`, strconv.Quote(binary) + `="read"`, strconv.Quote(work) + "=" + strconv.Quote(access), strconv.Quote(scratch) + `="write"`}
+	toolchains := HostToolchains()
+	fs := []string{`":root"="deny"`, `":minimal"="read"`, strconv.Quote(binary) + `="read"`}
+	for _, mount := range ToolchainMounts(toolchains, false) {
+		if mount != work && mount != scratch && !isSubpath(mount, work) && !isSubpath(mount, scratch) {
+			fs = append(fs, strconv.Quote(mount)+`="read"`)
+		}
+	}
+	fs = append(fs, strconv.Quote(work)+"="+strconv.Quote(access), strconv.Quote(scratch)+`="write"`)
 	if readOnly {
 		fs = append(fs, strconv.Quote(filepath.Join(work, ".swarm", "active"))+`="write"`)
+	}
+	envPairs := []string{
+		`PATH=` + strconv.Quote(SandboxPath(toolchains)),
+		`HOME=` + strconv.Quote(scratch),
+		`TMPDIR=` + strconv.Quote(scratch),
+		`XDG_CACHE_HOME=` + strconv.Quote(filepath.Join(scratch, ".cache")),
+		`XDG_CONFIG_HOME=` + strconv.Quote(filepath.Join(scratch, ".config")),
+		`XDG_DATA_HOME=` + strconv.Quote(filepath.Join(scratch, ".local", "share")),
+	}
+	for _, b := range toolchains {
+		if b.EnvKey != "" && b.EnvVal != "" {
+			envPairs = append(envPairs, b.EnvKey+"="+strconv.Quote(b.EnvVal))
+		}
 	}
 	config := []string{
 		`default_permissions="swarm"`,
@@ -74,7 +111,7 @@ func codexPolicy(binary, work, scratch string, readOnly bool) []string {
 		`mcp_servers={}`, `notify=[]`, `web_search="disabled"`,
 		`model_provider="openai"`, `model_providers={}`,
 		`projects={}`, `profiles={}`,
-		`shell_environment_policy={inherit="none",experimental_use_profile=false,set={PATH="/usr/bin:/bin",HOME=` + strconv.Quote(scratch) + `,TMPDIR=` + strconv.Quote(scratch) + `}}`,
+		`shell_environment_policy={inherit="none",experimental_use_profile=false,set={` + strings.Join(envPairs, ",") + `}}`,
 	}
 	args := []string{"--no-daemon"}
 	for _, setting := range config {
@@ -185,7 +222,7 @@ printf SWARM_NATIVE_BOUNDARY_OK`
 	args := codexPolicy(binary, work, home, false)
 	args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-canary", canary, port)
 	var out, diagnostics process.Output
-	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false), args, nil, &out, &diagnostics); err != nil {
+	if err := runNativeCommand(ctx, binary, home, nativeEnv(codexHostHome(home), false), args, nil, &out, &diagnostics); err != nil {
 		return "", fmt.Errorf("codex native boundary check failed: %w: %s", err, diagnostics.String())
 	}
 	data, err := os.ReadFile(canary)
@@ -267,7 +304,7 @@ func RunNativeValidation(ctx context.Context, dir, binary, command string, stdou
 	return withNativeWorkspace(ctx, dir, WorkerOptions{DiscardChanges: true}, func(ctx context.Context, work, scratch string) error {
 		args := codexPolicy(binary, work, scratch, false)
 		args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", command)
-		return runNativeCommand(ctx, binary, scratch, nativeEnv(scratch, false), args, nil, stdout, stderr)
+		return runNativeCommand(ctx, binary, scratch, nativeEnv(codexHostHome(scratch), false), args, nil, stdout, stderr)
 	})
 }
 

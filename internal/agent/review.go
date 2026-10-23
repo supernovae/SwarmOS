@@ -105,6 +105,15 @@ func RunReview(ctx context.Context, runner Runner, req RunRequest) (result *RunR
 	return result, nil
 }
 
+func isEphemeralReviewDir(name string) bool {
+	switch name {
+	case "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".gradle", ".next", ".nuxt", ".turbo", ".parcel-cache":
+		return true
+	default:
+		return false
+	}
+}
+
 func copySnapshot(source, target string) error {
 	return copySnapshotContext(context.Background(), source, target, defaultSnapshotLimits)
 }
@@ -151,7 +160,7 @@ func copySnapshotContext(ctx context.Context, source, target string, limits snap
 					return err
 				}
 				rel := filepath.Join(dir, entry.Name())
-				if rel == ".git" {
+				if rel == ".git" || (entry.IsDir() && isEphemeralReviewDir(entry.Name())) {
 					continue
 				}
 				count++

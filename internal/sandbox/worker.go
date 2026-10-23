@@ -576,6 +576,18 @@ func workerPath(name string) (string, error) {
 	return name, nil
 }
 
+// IsEphemeralBuildDir reports whether a directory name is a language build,
+// test, or local virtual-environment cache directory that should not be
+// archived into or imported out of detached worker snapshots.
+func IsEphemeralBuildDir(name string) bool {
+	switch name {
+	case "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".gradle", ".next", ".nuxt", ".turbo", ".parcel-cache":
+		return true
+	default:
+		return false
+	}
+}
+
 func packWorker(ctx context.Context, source, archive string, outputs []string, readOnly bool, excludedDirectories ...string) (workerManifest, error) {
 	root, err := safefs.Open(source)
 	if err != nil {
@@ -622,7 +634,7 @@ func packWorker(ctx context.Context, source, archive string, outputs []string, r
 					return err
 				}
 				name := path.Join(dir, entry.Name())
-				if entry.Name() == ".git" || name == ".swarm/coordination" || name == ".swarm/local-tracker" || name == ".swarm/worktrees" {
+				if entry.Name() == ".git" || name == ".swarm/coordination" || name == ".swarm/local-tracker" || name == ".swarm/worktrees" || (entry.IsDir() && IsEphemeralBuildDir(entry.Name())) {
 					continue
 				}
 				if _, err := workerPath(name); err != nil {

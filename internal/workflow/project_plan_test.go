@@ -1,10 +1,15 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"github.com/supernovae/swarmos/internal/contract"
+	"gopkg.in/yaml.v3"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -483,5 +488,73 @@ Complete the first closed task.
 	_, _ = tr.UpdateIssueBody(ctx, epicNum, "tampered epic\n"+origEpic.Body)
 	if _, err := eng.RunProjectPlan(ctx, ProjectPlanOptions{RepoRoot: root, FromFile: planPath, Apply: true}); err == nil || !strings.Contains(err.Error(), "#1") {
 		t.Fatalf("expected manual Epic edit conflict mentioning #%d, got %v", epicNum, err)
+	}
+}
+
+func TestProjectPlanExportFormat(t *testing.T) {
+	for _, tc := range []struct{ path, want string }{
+		{"snapshot.yaml", "yaml"}, {"snapshot.yml", "yaml"}, {"snapshot.JSON", "json"},
+		{"snapshot.YaMl", "yaml"}, {"snapshot.YML", "yaml"}, {"snapshot", ""}, {"snapshot.txt", ""}, {"", ""},
+	} {
+		got, err := ProjectPlanExportFormat(tc.path)
+		if got != tc.want || (err != nil) != (tc.want == "") {
+			t.Fatalf("%q: %q, %v", tc.path, got, err)
+		}
+	}
+}
+
+func TestMarshalProjectPlanReport(t *testing.T) {
+	report := &ProjectPlanReport{
+		Mode: "from-plan", BaseSHA: "abc", PolicyDigest: "policy", GoalsDigest: "goals",
+		EpicIssue:      &tracker.Issue{Number: 42, Title: "Release", Labels: []string{}},
+		ProposedUnits:  []contract.WorkUnit{{ID: "task", Title: "Unicode café", Objective: "First\nSecond", Constraints: []string{"Keep order"}, Acceptance: []string{"Works"}, DependsOn: []int{3, 1}, Subtasks: []contract.WorkUnit{{ID: "nested", Constraints: []string{}, Acceptance: []string{}}}}},
+		BacklogItems:   []IssueSenseItem{{IssueNumber: 7, RecommendedLabel: "swarm:draft", Touchpoints: []string{"b.go", "a.go"}}},
+		ExecutionWaves: [][]int{{3, 1}, {7}}, SummaryMarkdown: "# Release\n\nReady.\n",
+	}
+	before, _ := json.Marshal(report)
+	for _, format := range []string{"yaml", "json"} {
+		for _, input := range []*ProjectPlanReport{report, {}} {
+			data, err := MarshalProjectPlanReport(input, format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := MarshalProjectPlanReport(input, format)
+			if err != nil || !bytes.Equal(data, again) {
+				t.Fatal("unstable serialization", err)
+			}
+			if !bytes.HasSuffix(data, []byte("\n")) || bytes.HasSuffix(data, []byte("\n\n")) {
+				t.Fatalf("newline: %q", data)
+			}
+			var decoded ProjectPlanReport
+			if format == "json" {
+				err = json.Unmarshal(data, &decoded)
+			} else {
+				err = yaml.Unmarshal(data, &decoded)
+			}
+			if err != nil || !reflect.DeepEqual(input, &decoded) {
+				t.Fatalf("%s roundtrip: %v\n%#v\n%#v", format, err, input, &decoded)
+			}
+			indent := "  base_sha:"
+			if format == "json" {
+				indent = "  \"base_sha\":"
+			} else {
+				indent = "  - id:"
+			}
+			if input == report && !bytes.Contains(data, []byte(indent)) {
+				t.Fatalf("missing indentation %q: %s", indent, data)
+			}
+		}
+	}
+	after, _ := json.Marshal(report)
+	if !bytes.Equal(before, after) {
+		t.Fatal("input changed")
+	}
+	for _, tc := range []struct {
+		r *ProjectPlanReport
+		f string
+	}{{nil, "yaml"}, {report, "xml"}} {
+		if _, err := MarshalProjectPlanReport(tc.r, tc.f); err == nil {
+			t.Fatal("expected error")
+		}
 	}
 }

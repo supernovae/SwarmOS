@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -183,8 +184,18 @@ func TestReviewerSandboxAllowsScratchButDeniesSourceAndCredentials(t *testing.T)
 		}
 	} else {
 		if reviewErr != nil {
-			if strings.Contains(reviewErr.Error(), "bwrap:") && strings.Contains(reviewErr.Error(), "Operation not permitted") {
-				t.Skipf("skipping nested bwrap reviewer sandbox execution inside outer sandbox: %v", reviewErr)
+			// Runner errors deliberately redact harness diagnostics. Probe namespace
+			// availability independently so a helper assertion can never trigger a skip.
+			if runtime.GOOS == "linux" {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				probe := exec.CommandContext(ctx, "bwrap", "--ro-bind", "/", "/",
+					"--unshare-user", "--unshare-ipc", "--unshare-pid", "--unshare-uts",
+					"--unshare-net", "--", "/bin/true")
+				output, probeErr := probe.CombinedOutput()
+				if probeErr != nil && strings.Contains(string(output), "bwrap:") && strings.Contains(string(output), "Operation not permitted") {
+					t.Skipf("host denies nested Bubblewrap namespaces: %s", strings.TrimSpace(string(output)))
+				}
 			}
 			t.Fatal(reviewErr)
 		}

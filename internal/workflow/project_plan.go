@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -64,6 +65,46 @@ type ProjectPlanReport struct {
 	BacklogItems    []IssueSenseItem    `yaml:"backlog_items,omitempty" json:"backlog_items,omitempty"`
 	ExecutionWaves  [][]int             `yaml:"execution_waves,omitempty" json:"execution_waves,omitempty"`
 	SummaryMarkdown string              `yaml:"summary_markdown" json:"summary_markdown"`
+}
+
+// ProjectPlanExportFormat returns the snapshot encoding selected by the file extension.
+func ProjectPlanExportFormat(path string) (string, error) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".yaml", ".yml":
+		return "yaml", nil
+	case ".json":
+		return "json", nil
+	default:
+		return "", fmt.Errorf("project plan export requires a .yaml, .yml, or .json extension")
+	}
+}
+
+// MarshalProjectPlanReport serializes a standalone snapshot without changing report order.
+func MarshalProjectPlanReport(report *ProjectPlanReport, format string) ([]byte, error) {
+	if report == nil {
+		return nil, fmt.Errorf("cannot export a nil project plan report")
+	}
+	switch format {
+	case "json":
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return append(data, '\n'), nil
+	case "yaml":
+		var buf bytes.Buffer
+		enc := yaml.NewEncoder(&buf)
+		enc.SetIndent(2)
+		if err := enc.Encode(report); err != nil {
+			return nil, err
+		}
+		if err := enc.Close(); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	default:
+		return nil, fmt.Errorf("unsupported project plan export format %q", format)
+	}
 }
 
 func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*ProjectPlanReport, error) {

@@ -18,6 +18,7 @@ import (
 func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, plannerAgent, reviewerAgent, developerAgent, testerAgent, phase, gate string
 	var headless, handoff, nextReady, allRepos, jsonOutput, dryRun bool
+	var progressOutput bool
 	cmd := &cobra.Command{
 		Use:   "work [<issue-number>]",
 		Short: "Run an approved task through planning, review, and implementation",
@@ -121,6 +122,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 				return writeJSON(cmd, map[string]any{"kind": "work-dry-run", "issue_number": opts.IssueNumber, "effective_plan": preflight})
 			}
+			if headless && progressOutput {
+				opts.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
+			}
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
 			if err != nil {
 				return err
@@ -161,6 +165,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&allRepos, "all", false, "With --next, scan registered repositories")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit a structured outcome")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Inspect effective policy without claiming or running agents")
+	cmd.Flags().BoolVar(&progressOutput, "progress", true, "Report headless stages and a 15-second heartbeat to stderr (false disables)")
 	return cmd
 }
 

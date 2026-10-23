@@ -48,6 +48,9 @@ type WorkOptions struct {
 	ForkMode       bool
 	ForkRemote     string
 	OnClaim        func(*lease.IssueState) error // persist fencing token before setup
+	// OnProgress receives serialized local status events. It must return promptly
+	// and must not call back into execution. No callback runs after ExecuteWork returns.
+	OnProgress func(ProgressEvent)
 }
 
 type WorkResult struct {
@@ -298,7 +301,9 @@ func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool)
 	}
 }
 
-func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult, error) {
+func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *WorkResult, workErr error) {
+	progress := startWorkProgress(ctx, opts.IssueNumber, opts.OnProgress)
+	defer func() { progress.finish(result, workErr) }()
 	// Inspection never weakens execution preflight, even for direct API callers.
 	opts.InspectOnly = false
 	if opts.RepoRoot == "" {
@@ -337,6 +342,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		primaryAgent = pre.Agents["tester"]
 	}
 	var st *lease.IssueState
+	progress.next("claim")
 	if opts.ClaimID != "" {
 		e.LeaseManager.BindClaim(opts.IssueNumber, opts.ClaimID)
 		st, err = e.LeaseManager.Resume(ctx, opts.IssueNumber, opts.Owner, opts.ClaimID)
@@ -426,6 +432,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 			targetBranch = workspace.ForkBranchName(opts.IssueNumber, st.Lease.ClaimID)
 		}
 	}
+	progress.next("workspace")
 	wtPath, branch, err := workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA)
 	if err != nil {
 		return nil, err
@@ -441,6 +448,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		runPlan = false
 	}
 	if runPlan {
+		progress.next("plan")
 		if err := check(); err != nil {
 			return res, err
 		}
@@ -495,6 +503,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		res.State, res.PhaseCompleted = st, "plan"
 		if opts.Phase == "plan" {
 			if opts.Handoff {
+				progress.next("handoff")
 				next := "implement"
 				if gate != contract.GateNone {
 					next = "review"
@@ -511,6 +520,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		}
 	}
 	if gate == contract.GateHuman && (opts.Phase == "review" || opts.Phase == "all" && (runPlan || lease.VerifyApproval(st, pre.WorkUnit) != nil)) {
+		progress.next("awaiting-approval")
 		if err := check(); err != nil {
 			return res, err
 		}
@@ -529,6 +539,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		return res, nil
 	}
 	if (gate == contract.GateAgent && (runPlan || (opts.Phase == "all" && lease.VerifyApproval(st, pre.WorkUnit) != nil))) || (opts.Phase == "review" && gate != contract.GateHuman) {
+		progress.next("review")
 		if gate != contract.GateAgent && gate != contract.GateNone {
 			return res, fmt.Errorf("%w: gate %q requires an authenticated human decision", ErrPlanApprovalNeeded, gate)
 		}
@@ -549,6 +560,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		res.PhaseCompleted = "review"
 		if opts.Phase == "review" {
 			if opts.Handoff {
+				progress.next("handoff")
 				if err := check(); err != nil {
 					return res, err
 				}
@@ -579,6 +591,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	if err := check(); err != nil {
 		return res, err
 	}
+	progress.next("implement")
 	developer := pre.Agents["developer"]
 	res.RoleAgentsUsed["developer"] = developer
 	devRunner, err := agent.NewConfiguredRunner(developer, cfg, e.Tracker.BackendName() == "local")
@@ -603,6 +616,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		return res, err
 	}
 	summary, body := summarizeImplementationChanges(wtPath, opts.IssueNumber)
+	progress.next("checkpoint")
 	if st.HeadSHA, err = workspace.Checkpoint(ctx, wtPath, branch); err != nil {
 		return res, err
 	}
@@ -620,6 +634,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 		return res, err
 	}
 	res.State = st
+	progress.next("test")
 	tester := pre.Agents["tester"]
 	res.RoleAgentsUsed["tester"] = tester
 	testerRunner, err := agent.NewConfiguredRunner(tester, cfg, e.Tracker.BackendName() == "local")
@@ -636,6 +651,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (*WorkResult
 	if err := check(); err != nil {
 		return res, err
 	}
+	progress.next("required-checks")
 	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA, ForkMode: forkMode})
 	if report != nil {
 		report.Artifact.Metadata = attestationMetadata(testerRun.Attestation, report.Artifact.Metadata)
@@ -852,7 +868,7 @@ func ParseReviewVerdict(content string) (string, error) {
 			case "VERDICT: CHANGES_REQUESTED":
 				verdict = "CHANGES_REQUESTED"
 			default:
-				return "", fmt.Errorf("invalid review verdict %q", line)
+				return "", errors.New("review must begin with VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED")
 			}
 			continue
 		}

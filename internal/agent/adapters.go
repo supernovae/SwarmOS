@@ -148,7 +148,8 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 	return a.binary, append(append([]string(nil), a.prefixArgs...), args...)
 }
 
-func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
+func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult, runErr error) {
+	defer func() { runErr = safeRunFailure(ctx, req.Role, result, runErr) }()
 	if a.executionMode == contract.ExecutionIsolated {
 		return a.runIsolated(ctx, req)
 	}
@@ -247,7 +248,7 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (*RunResult, error
 		} else {
 			exitCode = 1
 		}
-		return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: exitCode, Output: outBuf.String(), Attestation: att}, fmt.Errorf("agent %q (%s) failed (exit %d): %w\n%s", a.agentName, req.Role, exitCode, err, strings.TrimSpace(outBuf.String()))
+		return &RunResult{Agent: a.agentName, Role: req.Role, ExitCode: exitCode, Attestation: att}, err
 	}
 	return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: 0, Output: outBuf.String(), Attestation: att}, nil
 }

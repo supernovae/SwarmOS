@@ -79,11 +79,14 @@ func newCLIFixture(t *testing.T) *cliFixture {
 
 func (f *cliFixture) run(args ...string) (string, error) {
 	cmd := NewRootCmd()
-	var output bytes.Buffer
+	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
-	cmd.SetErr(&output)
+	cmd.SetErr(&diagnostics)
 	cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
 	err := cmd.Execute()
+	if err != nil {
+		output.Write(diagnostics.Bytes())
+	}
 	return output.String(), err
 }
 func (f *cliFixture) must(t *testing.T, args ...string) string {

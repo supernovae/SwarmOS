@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +40,71 @@ func TestConfigRejectsInvalidSecurityPolicy(t *testing.T) {
 	}
 }
 
+func TestCommitMessageConfigModesAndLegacyPolicy(t *testing.T) {
+	const legacy = `version: 1
+default_agent: codex
+default_gate: agent
+execution:
+  mode: isolated
+  backend: native
+lease:
+  duration: 4h
+  renewable: true
+  max_renewals: 3
+security:
+  require_ready_label: true
+  ready_label: swarm:ready
+agents:
+  codex:
+    binary: codex
+`
+	legacyCfg, err := decodeConfig([]byte(legacy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyCfg.CommitMessage != nil || legacyCfg.CommitMessageDetail() != "concise" {
+		t.Fatalf("legacy config must not materialize defaults: %+v", legacyCfg.CommitMessage)
+	}
+	b, err := json.Marshal(legacyCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"commit_message"`) {
+		t.Fatalf("legacy JSON acquired commit_message field: %s", b)
+	}
+	legacyDigest := contract.DigestApprovedPolicy("0123456789abcdef0123456789abcdef01234567", legacyCfg)
+
+	for _, detail := range []string{"", "concise", "detailed"} {
+		t.Run("accepted "+detail, func(t *testing.T) {
+			cfg, err := decodeConfig([]byte(legacy + "commit_message:\n  detail: " + detail + "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.CommitMessage == nil || cfg.CommitMessage.Detail != detail {
+				t.Fatalf("explicit detail not preserved: %+v", cfg.CommitMessage)
+			}
+			want := detail
+			if want == "" {
+				want = "concise"
+			}
+			if got := cfg.CommitMessageDetail(); got != want {
+				t.Fatalf("effective detail = %q, want %q", got, want)
+			}
+			if contract.DigestApprovedPolicy("0123456789abcdef0123456789abcdef01234567", cfg) == legacyDigest {
+				t.Fatal("explicit commit_message did not affect policy digest")
+			}
+		})
+	}
+	for _, detail := range []string{"verbose", "Concise", "super-detailed"} {
+		t.Run("invalid "+detail, func(t *testing.T) {
+			cfg, err := decodeConfig([]byte(legacy + "commit_message:\n  detail: " + detail + "\n"))
+			if err == nil || cfg != nil || !strings.Contains(err.Error(), "commit_message.detail") {
+				t.Fatalf("invalid detail accepted or unclear error: cfg=%+v err=%v", cfg, err)
+			}
+		})
+	}
+}
+
 func TestValidationPolicyCannotSilentlyDisableChecks(t *testing.T) {
 	for name, data := range map[string]string{
 		"empty":         "required_checks: []\nprotected_paths: []\n",
@@ -71,6 +137,18 @@ func TestApprovedPolicyIgnoresCandidateChanges(t *testing.T) {
 	git("init", "-b", "main")
 	git("config", "user.name", "Harness Test")
 	git("config", "user.email", "test@example.invalid")
+	configPath := filepath.Join(root, ".swarm", "config.yaml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailed := strings.Replace(string(configData), "detail: concise", "detail: detailed", 1)
+	if detailed == string(configData) {
+		t.Fatal("generated config missing concise detail")
+	}
+	if err := os.WriteFile(configPath, []byte(detailed), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	git("add", ".")
 	git("commit", "-m", "approved policy")
 	base := git("rev-parse", "HEAD")
@@ -86,6 +164,9 @@ func TestApprovedPolicyIgnoresCandidateChanges(t *testing.T) {
 	}
 	if !cfg.Security.RequireReadyLabel {
 		t.Fatal("approved readiness policy weakened by candidate")
+	}
+	if cfg.CommitMessage == nil || cfg.CommitMessage.Detail != "detailed" || cfg.CommitMessageDetail() != "detailed" {
+		t.Fatalf("approved detailed commit message policy lost: %+v", cfg.CommitMessage)
 	}
 	if _, err := LoadConfigAt(root, "HEAD"); err == nil {
 		t.Fatal("mutable base accepted")

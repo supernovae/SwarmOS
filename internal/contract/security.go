@@ -72,6 +72,14 @@ func ValidatePlanMode(mode string) error {
 	return fmt.Errorf("invalid plan_mode %q (must be auto, agent, or interactive)", mode)
 }
 
+func ValidateCommitMessageDetail(detail string) error {
+	switch detail {
+	case "", "concise", "detailed":
+		return nil
+	}
+	return fmt.Errorf("invalid commit_message.detail %q (must be concise or detailed)", detail)
+}
+
 func DigestSecurityPolicy(sec SecurityConfig) string {
 	b, err := json.Marshal(sec)
 	if err != nil {

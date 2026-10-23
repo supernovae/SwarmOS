@@ -14,7 +14,10 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
 )
@@ -312,11 +315,35 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 	return wtPath, branch, nil
 }
 
+// CheckpointOptions describes the task and reason for a worktree checkpoint.
+type CheckpointOptions struct {
+	WorkUnit *contract.WorkUnit
+	Purpose  string // implement, repair, or submit
+	Detail   string // empty (concise), concise, or detailed
+}
+
 // Checkpoint commits the worktree's current changes without rewriting history.
 // Publication belongs to the fenced coordination store, never this helper.
-func Checkpoint(ctx context.Context, wtPath, branch string) (string, error) {
+func Checkpoint(ctx context.Context, wtPath, branch string, opts CheckpointOptions) (string, error) {
 	if branch == "" {
 		return "", errors.New("checkpoint branch is required")
+	}
+	if opts.WorkUnit == nil || opts.WorkUnit.IssueNumber <= 0 || strings.TrimSpace(opts.WorkUnit.Title) == "" {
+		return "", errors.New("checkpoint requires a work unit with issue number and title")
+	}
+	if err := contract.ValidateCommitMessageDetail(opts.Detail); err != nil {
+		return "", err
+	}
+	var action string
+	switch opts.Purpose {
+	case "implement":
+		action = ""
+	case "repair":
+		action = "Repair validation"
+	case "submit":
+		action = "Finalize"
+	default:
+		return "", fmt.Errorf("invalid checkpoint purpose %q", opts.Purpose)
 	}
 	if err := verifyWorktree(wtPath, branch, ""); err != nil {
 		return "", err
@@ -332,8 +359,27 @@ func Checkpoint(ctx context.Context, wtPath, branch string) (string, error) {
 		if _, err := gitOutputContext(ctx, wtPath, "add", "-A"); err != nil {
 			return "", err
 		}
-		if _, err := gitOutputContext(ctx, wtPath, "commit", "-m", "swarm checkpoint"); err != nil {
-			return "", fmt.Errorf("commit checkpoint: %w", err)
+		// Staged changes can cancel unstaged changes, leaving no commit to make.
+		diff, err := gitOutputContext(ctx, wtPath, "diff", "--cached", "--name-status", "-z", "--no-renames", "HEAD")
+		if err != nil {
+			return "", err
+		}
+		if diff != "" {
+			suffix := fmt.Sprintf(" (#%d)", opts.WorkUnit.IssueNumber)
+			prefix := ""
+			if action != "" {
+				prefix = action + ": "
+			}
+			title := checkpointText(opts.WorkUnit.Title)
+			title = truncateCheckpointText(title, 72-len(prefix)-len(suffix))
+			subject := prefix + title + suffix
+			args := []string{"commit", "-m", subject}
+			if opts.Detail == "detailed" {
+				args = append(args, "-m", checkpointBody(opts.WorkUnit.Objective, diff))
+			}
+			if _, err := gitOutputContext(ctx, wtPath, args...); err != nil {
+				return "", fmt.Errorf("commit checkpoint: %w", err)
+			}
 		}
 	}
 	head, err := resolveCommit(wtPath, "HEAD")
@@ -341,6 +387,91 @@ func Checkpoint(ctx context.Context, wtPath, branch string) (string, error) {
 		return "", err
 	}
 	return head, nil
+}
+
+// checkpointText keeps arbitrary task text on a single safe line.
+func checkpointText(s string) string {
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r) || r == utf8.RuneError
+	}), " ")
+}
+
+func truncateCheckpointText(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	// Keep rune boundaries and reserve space for the ellipsis.
+	var end int
+	for i, r := range s {
+		if i+utf8.RuneLen(r) > maxBytes-3 {
+			break
+		}
+		end = i + utf8.RuneLen(r)
+	}
+	if maxBytes < 3 {
+		return s[:0]
+	}
+	return strings.TrimSpace(s[:end]) + "..."
+}
+
+func truncateCheckpointPath(path string) string {
+	const maxBytes = 160
+	if len(path) <= maxBytes {
+		return path
+	}
+	end := 0
+	for i := range path {
+		if i > maxBytes-3 {
+			break
+		}
+		end = i
+	}
+	return path[:end] + "..."
+}
+
+func checkpointBody(objective, diff string) string {
+	var body strings.Builder
+	if objective = truncateCheckpointText(checkpointText(objective), 500); objective != "" {
+		body.WriteString("Objective: ")
+		body.WriteString(objective)
+		body.WriteString("\n\n")
+	}
+	// --name-status -z --no-renames emits status\0path\0 pairs, in Git's
+	// stable pathname ordering. Only these staged paths inform the message.
+	parts := strings.Split(diff, "\x00")
+	count := (len(parts) - 1) / 2
+	body.WriteString("Staged changes (")
+	body.WriteString(strconv.Itoa(count))
+	body.WriteString(" file")
+	if count != 1 {
+		body.WriteByte('s')
+	}
+	body.WriteString("):")
+	const maxFiles = 20
+	for i := 0; i < count && i < maxFiles; i++ {
+		var kind string
+		switch parts[2*i] {
+		case "A":
+			kind = "added"
+		case "D":
+			kind = "deleted"
+		default:
+			kind = "modified"
+		}
+		body.WriteString("\n- ")
+		body.WriteString(kind)
+		body.WriteByte(' ')
+		body.WriteString(strconv.Quote(truncateCheckpointPath(parts[2*i+1])))
+	}
+	if count > maxFiles {
+		body.WriteString("\n- ... and ")
+		body.WriteString(strconv.Itoa(count - maxFiles))
+		body.WriteString(" more files")
+	}
+	return body.String()
 }
 
 var errGitFailed = errors.New("git command failed")

@@ -4,6 +4,9 @@ version: 1
 default_agent: codex
 default_gate: agent
 plan_mode: auto
+# Checkpoint commit messages: concise (default) or detailed.
+commit_message:
+  detail: concise
 execution:
   mode: isolated
   backend: native

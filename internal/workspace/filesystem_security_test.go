@@ -49,7 +49,7 @@ func TestReacquireRejectsUnpinnedWorktreeWithoutDiscardingChanges(t *testing.T) 
 				t.Fatal(err)
 			}
 			if committed {
-				if _, err := Checkpoint(context.Background(), wt, branch); err != nil {
+				if _, err := Checkpoint(context.Background(), wt, branch, CheckpointOptions{WorkUnit: &contract.WorkUnit{IssueNumber: 91, Title: "Reacquire"}, Purpose: "implement"}); err != nil {
 					t.Fatal(err)
 				}
 			}

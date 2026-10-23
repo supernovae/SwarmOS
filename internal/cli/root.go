@@ -60,7 +60,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 				return fmt.Errorf("--fork requires the github backend and cannot be used with --backend local")
 			}
 			if strings.TrimSpace(opts.ForkRemote) == "" {
-				opts.ForkRemote = "fork"
+				opts.ForkRemote = workspace.DefaultForkRemote
 			}
 			if strings.EqualFold(strings.TrimSpace(opts.ForkRemote), "origin") {
 				return fmt.Errorf("--fork-remote cannot be origin; configure a separate personal fork remote")
@@ -85,7 +85,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", firstNonEmptyStr(opts.Repo, os.Getenv("SWARM_REPO")), "GitHub repository (owner/repo)")
 	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", opts.RepoRoot, "Repository root path")
 	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
-	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", firstNonEmptyStr(opts.ForkRemote, "fork"), "Writable fork remote for --fork coordination or upstream-authorized PR updates")
+	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", firstNonEmptyStr(opts.ForkRemote, workspace.DefaultForkRemote), "Writable fork remote for --fork coordination or upstream-authorized PR updates")
 	rootCmd.AddCommand(newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPRCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
 	rootCmd.AddCommand(newInternalToolsCmd())
 	for _, command := range rootCmd.Commands() {
@@ -111,7 +111,7 @@ func (o *RootOptions) effectiveForkRemote() string {
 	if r := strings.TrimSpace(o.ForkRemote); r != "" {
 		return r
 	}
-	return "fork"
+	return workspace.DefaultForkRemote
 }
 func (o *RootOptions) verifyForkRemote(ctx context.Context, root string, tr tracker.Tracker) (string, string, error) {
 	forkRemote := o.effectiveForkRemote()

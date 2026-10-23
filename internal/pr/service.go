@@ -132,9 +132,9 @@ func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
 		}
 		result.HeadSHA, result.Branch, result.Status = rev.LocalHeadSHA, rev.Branch, "pending"
 		if rev.RemoteHeadSHA != rev.LocalHeadSHA && pr.HeadSHA == rev.LocalHeadSHA {
-			result.Status = "published-pending-reconciliation"
+			result.Status = StatusPublishedPending
 		} else if pr.HeadSHA != rev.RemoteHeadSHA {
-			result.Status = "diverged"
+			result.Status = StatusDiverged
 		}
 	}
 	return result, nil
@@ -239,7 +239,7 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 		}
 		r.HeadSHA = head
 		r.Dirty, r.Rebasing = dirty, rebasing
-		if r.Status != "diverged" {
+		if r.Status != StatusDiverged {
 			if rebasing {
 				r.Status = "rebasing"
 			} else if dirty {
@@ -293,10 +293,8 @@ func (s *Service) remote(ctx context.Context, r *Result) (string, error) {
 		return "", fmt.Errorf("PR mutations need upstream write authorization; --fork contributor gateway is not supported")
 	}
 	remote := ""
-	if _, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
-		remote = "origin"
-	}
 	if provider, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
+		remote = "origin"
 		if !strings.EqualFold(r.PR.HeadRepo, provider.UpstreamRepo()) {
 			if s.ForkRemote == "" || s.ForkRemote == "origin" {
 				return "", fmt.Errorf("fork PR head requires an explicit writable remote matching %s", r.PR.HeadRepo)
@@ -406,18 +404,59 @@ func withCleanPRMarkers(path string, run func() (*Result, error)) (result *Resul
 	return run()
 }
 
-func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
-	r, err := s.linked(ctx, opts.Number)
+// Result statuses for a pending revision whose remote head no longer matches
+// what was recorded.
+const (
+	StatusDiverged         = "diverged"
+	StatusPublishedPending = "published-pending-reconciliation"
+)
+
+// openForMutation resolves the linked PR and its write remote. A PR whose
+// remote head moved outside the recorded revision is always refused; one whose
+// publication awaits reconciliation is refused unless the caller reconciles it.
+func (s *Service) openForMutation(ctx context.Context, number int, reconciles bool) (*Result, string, error) {
+	r, err := s.linked(ctx, number)
+	if err != nil {
+		return nil, "", err
+	}
+	if r.Status == StatusPublishedPending && !reconciles {
+		return nil, "", fmt.Errorf("PR head has been published; run swarm pr submit %d to reconcile state", number)
+	}
+	if r.Status == StatusDiverged {
+		return nil, "", fmt.Errorf("PR remote head changed outside the recorded revision; preserve local work and reconcile the PR before mutation")
+	}
+	remote, err := s.remote(ctx, r)
+	if err != nil {
+		return nil, "", err
+	}
+	return r, remote, nil
+}
+
+// preparePR checks out the managed PR worktree at localHead and verifies it is
+// the worktree recorded for this PR.
+func (s *Service) preparePR(ctx context.Context, r *Result, remote, localHead string, requireBaseAncestor bool) (string, string, error) {
+	return workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: r.PR.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: localHead, AllowHarnessMarkers: true, RequireBaseAncestor: requireBaseAncestor})
+}
+
+// requireApproval re-reads the issue and requires the claimed state to still
+// approve its current WorkUnit and plan.
+func (s *Service) requireApproval(ctx context.Context, r *Result, st *lease.IssueState) (*contract.WorkUnit, error) {
+	issue, err := s.Tracker.GetIssue(ctx, r.IssueNumber)
 	if err != nil {
 		return nil, err
 	}
-	if r.Status == "published-pending-reconciliation" {
-		return nil, fmt.Errorf("PR head has been published; run swarm pr submit %d to reconcile state", opts.Number)
+	wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		return nil, err
 	}
-	if r.Status == "diverged" {
-		return nil, fmt.Errorf("PR remote head changed outside the recorded revision; preserve local work and reconcile the PR before mutation")
+	if err = lease.VerifyApproval(st, wu); err != nil {
+		return nil, fmt.Errorf("PR plan approval required: %w", err)
 	}
-	remote, err := s.remote(ctx, r)
+	return wu, nil
+}
+
+func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
+	r, remote, err := s.openForMutation(ctx, opts.Number, false)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +495,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		return r, nil
 	}
 	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
-		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: opts.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: revisionHead(r.State), AllowHarnessMarkers: true})
+		path, branch, e := s.preparePR(ctx, r, remote, revisionHead(r.State), false)
 		if e != nil {
 			return nil, e
 		}
@@ -493,17 +532,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Continue && opts.Abort {
 		return nil, fmt.Errorf("--continue and --abort are mutually exclusive")
 	}
-	r, err := s.linked(ctx, opts.Number)
-	if err != nil {
-		return nil, err
-	}
-	if r.Status == "published-pending-reconciliation" {
-		return nil, fmt.Errorf("PR head has been published; run swarm pr submit %d to reconcile state", opts.Number)
-	}
-	if r.Status == "diverged" {
-		return nil, fmt.Errorf("PR remote head changed outside the recorded revision; preserve local work and reconcile the PR before mutation")
-	}
-	remote, err := s.remote(ctx, r)
+	r, remote, err := s.openForMutation(ctx, opts.Number, false)
 	if err != nil {
 		return nil, err
 	}
@@ -520,7 +549,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
-		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: opts.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: revisionHead(r.State), AllowHarnessMarkers: true})
+		path, branch, e := s.preparePR(ctx, r, remote, revisionHead(r.State), false)
 		if e != nil {
 			return nil, e
 		}
@@ -567,17 +596,17 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 }
 
 func (s *Service) Validate(ctx context.Context, number int) (*Result, error) {
-	r, err := s.linked(ctx, number)
+	r, remote, err := s.openForMutation(ctx, number, true)
 	if err != nil {
 		return nil, err
 	}
-	if r.Status == "diverged" {
-		return nil, fmt.Errorf("PR remote head changed outside the recorded revision; preserve local work and reconcile the PR before mutation")
-	}
-	remote, err := s.remote(ctx, r)
-	if err != nil {
-		return nil, err
-	}
+	return s.validate(ctx, r, remote)
+}
+
+// validate runs required checks on the pending revision under the renewed claim
+// and records the report as that revision's validation evidence.
+func (s *Service) validate(ctx context.Context, r *Result, remote string) (*Result, error) {
+	number := r.PR.Number
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
 	}
@@ -585,7 +614,7 @@ func (s *Service) Validate(ctx context.Context, number int) (*Result, error) {
 		if st.PRRevision == nil || st.PRRevision.Number != number {
 			return nil, fmt.Errorf("pending PR revision changed during validation")
 		}
-		path, branch, e := workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: st.PRRevision.LocalHeadSHA, AllowHarnessMarkers: true, RequireBaseAncestor: true})
+		path, branch, e := s.preparePR(ctx, r, remote, st.PRRevision.LocalHeadSHA, true)
 		if e != nil {
 			return nil, e
 		}
@@ -600,16 +629,9 @@ func (s *Service) Validate(ctx context.Context, number int) (*Result, error) {
 			if dirty || rebasing || head != st.PRRevision.LocalHeadSHA {
 				return nil, fmt.Errorf("PR worktree is dirty, rebasing, or differs from recorded checkpoint")
 			}
-			issue, e := s.Tracker.GetIssue(ctx, r.IssueNumber)
+			wu, e := s.requireApproval(ctx, r, st)
 			if e != nil {
 				return nil, e
-			}
-			wu, e := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
-			if e != nil {
-				return nil, e
-			}
-			if e = lease.VerifyApproval(st, wu); e != nil {
-				return nil, fmt.Errorf("PR plan approval required: %w", e)
 			}
 			report, valErr := validation.Validate(ctx, r.Worktree, wu, validation.ValidateOptions{BaseSHA: st.BaseSHA})
 			checkedHead, changed, activeRebase, checkErr := workspace.PRHead(ctx, r.Worktree)
@@ -636,14 +658,7 @@ func (s *Service) Validate(ctx context.Context, number int) (*Result, error) {
 }
 
 func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
-	r, err := s.linked(ctx, number)
-	if err != nil {
-		return nil, err
-	}
-	if r.Status == "diverged" {
-		return nil, fmt.Errorf("PR remote head changed outside the recorded revision; refusing submit")
-	}
-	remote, err := s.remote(ctx, r)
+	r, remote, err := s.openForMutation(ctx, number, true)
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +669,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		r.Status = "submitted"
 		return r, nil
 	}
-	r, err = s.Validate(ctx, number)
+	r, err = s.validate(ctx, r, remote)
 	if err != nil {
 		return r, err
 	}
@@ -672,15 +687,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		if dirty || rebasing || head != rev.LocalHeadSHA || r.Validation == nil || !r.Validation.Passed || r.Validation.HeadSHA != head {
 			return nil, fmt.Errorf("PR candidate changed after validation")
 		}
-		issue, e := s.Tracker.GetIssue(ctx, r.IssueNumber)
-		if e != nil {
-			return nil, e
-		}
-		wu, e := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
-		if e != nil {
-			return nil, e
-		}
-		if e = lease.VerifyApproval(st, wu); e != nil {
+		if _, e = s.requireApproval(ctx, r, st); e != nil {
 			return nil, e
 		}
 		fresh, e := s.Tracker.GetPullRequest(ctx, number)

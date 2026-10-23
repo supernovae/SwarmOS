@@ -7,6 +7,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
+	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 func newPRCmd(rootOpts *RootOptions) *cobra.Command {
@@ -83,7 +84,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := pr.Service{Root: rootOpts.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(), Now: rootOpts.now}
+			service := rootOpts.prService(tr, manager)
 			if operation == "work" && opts.Work.Headless && progress && !opts.Work.InspectOnly {
 				opts.Work.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
 			}
@@ -181,4 +182,9 @@ func requireIssueWorkspace(state *lease.IssueState) error {
 		return fmt.Errorf("issue has a pending PR revision; use swarm pr work %d, swarm pr stage %d, swarm pr validate %d, or swarm pr submit %d", state.PRRevision.Number, state.PRRevision.Number, state.PRRevision.Number, state.PRRevision.Number)
 	}
 	return nil
+}
+
+// prService builds the PR lifecycle service for this invocation's repository.
+func (o *RootOptions) prService(tr tracker.Tracker, manager *lease.Manager) *pr.Service {
+	return &pr.Service{Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now}
 }

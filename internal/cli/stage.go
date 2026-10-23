@@ -76,12 +76,12 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 						return fmt.Errorf("upstream write authorization required: %w", err)
 					}
 				}
-				prStatus, err = (&pr.Service{Root: root, Tracker: tr, Manager: manager}).Status(ctx, prNumber)
+				prStatus, err = rootOpts.prService(tr, manager).Status(ctx, prNumber)
 				if err != nil {
 					return err
 				}
 				issue, worktree = prStatus.IssueNumber, prStatus.Worktree
-				if prStatus.State.PRRevision == nil || prStatus.Status == "diverged" || prStatus.Status == "published-pending-reconciliation" {
+				if prStatus.State.PRRevision == nil || prStatus.Status == pr.StatusDiverged || prStatus.Status == pr.StatusPublishedPending {
 					return fmt.Errorf("PR #%d requires an existing pending unpublished revision; run swarm pr work %d or reconcile with swarm pr submit %d", prNumber, prNumber, prNumber)
 				}
 				if worktree == "" || prStatus.Rebasing {
@@ -95,11 +95,11 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			defer lease.UnlockClaim(lock)
 
 			if prStage {
-				fresh, e := (&pr.Service{Root: root, Tracker: tr, Manager: manager}).Status(ctx, prNumber)
+				fresh, e := rootOpts.prService(tr, manager).Status(ctx, prNumber)
 				if e != nil {
 					return e
 				}
-				if fresh.Status == "diverged" || fresh.Status == "published-pending-reconciliation" || fresh.Rebasing || fresh.Worktree != worktree || fresh.State.PRRevision == nil || fresh.State.PRRevision.LocalHeadSHA != prStatus.State.PRRevision.LocalHeadSHA {
+				if fresh.Status == pr.StatusDiverged || fresh.Status == pr.StatusPublishedPending || fresh.Rebasing || fresh.Worktree != worktree || fresh.State.PRRevision == nil || fresh.State.PRRevision.LocalHeadSHA != prStatus.State.PRRevision.LocalHeadSHA {
 					return fmt.Errorf("PR #%d revision changed or is rebasing; refusing to stage", prNumber)
 				}
 				prStatus = fresh
@@ -233,16 +233,9 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			if _, err := manager.UpdatePhase(ctx, issue, owner, "implement", "active"); err != nil {
 				return err
 			}
-			branch := state.Branch
+			_, branch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, iss.Title, state.Lease.ClaimID, state.Branch)
 			if prStage {
 				branch = state.PRRevision.Branch
-			}
-			if branch == "" {
-				if rootOpts.Fork {
-					branch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
-				} else {
-					branch = workspace.BranchName(issue, iss.Title)
-				}
 			}
 			summary, implBody := workflow.SummarizeImplementationChanges(ctx, worktree, issue)
 			head, err := workspace.Checkpoint(ctx, worktree, branch, workspace.CheckpointOptions{

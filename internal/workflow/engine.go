@@ -72,6 +72,31 @@ type WorkResult struct {
 	State            *lease.IssueState
 }
 
+// Outcome summarizes how a run ended: completed, paused for a human, or
+// handed off to the next phase.
+func (r *WorkResult) Outcome() string {
+	switch {
+	case r.PausedForHuman:
+		return "paused"
+	case r.HandedOffToPhase != "":
+		return "handed-off"
+	default:
+		return "completed"
+	}
+}
+
+// LeadRole is the role whose agent a claim for phase is recorded under.
+func LeadRole(phase string) string {
+	switch phase {
+	case "review":
+		return "reviewer"
+	case "implement":
+		return "developer"
+	default:
+		return "planner"
+	}
+}
+
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
 	Execution    contract.ExecutionConfig
@@ -436,16 +461,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		forkRemote = strings.TrimSpace(e.ForkRemote)
 	}
 	if forkRemote == "" {
-		forkRemote = "fork"
+		forkRemote = workspace.DefaultForkRemote
 	}
-	targetBranch := st.Branch
-	checkpointRemote := "origin"
-	if forkMode {
-		checkpointRemote = forkRemote
-		if targetBranch == "" {
-			targetBranch = workspace.ForkBranchName(opts.IssueNumber, st.Lease.ClaimID)
-		}
-	}
+	checkpointRemote, targetBranch := workspace.ClaimCheckpoint(forkMode, forkRemote, opts.IssueNumber, pre.Issue.Title, st.Lease.ClaimID, st.Branch)
 	progress.next("workspace")
 	var wtPath, branch string
 	if opts.PRNumber != 0 {

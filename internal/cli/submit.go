@@ -102,14 +102,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			heartbeat := manager.StartHeartbeat(ctx, issue, owner, duration)
 			defer heartbeat.Stop()
 			ctx = heartbeat.Context()
-			branch := state.Branch
-			if branch == "" {
-				if rootOpts.Fork {
-					branch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
-				} else {
-					branch = workspace.BranchName(issue, iss.Title)
-				}
-			}
+			_, branch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, iss.Title, state.Lease.ClaimID, state.Branch)
 			head, err := workspace.Checkpoint(ctx, worktree, branch, workspace.CheckpointOptions{
 				WorkUnit: unit, Purpose: "submit", Detail: cfg.CommitMessageDetail(),
 			})

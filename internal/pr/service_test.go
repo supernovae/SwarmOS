@@ -467,7 +467,7 @@ func TestLinkedReportsRevisionPublicationStatus(t *testing.T) {
 	if _, err := svc.Validate(ctx, number); err == nil || !strings.Contains(err.Error(), "changed outside the recorded revision") {
 		t.Fatalf("validate on diverged PR = %v", err)
 	}
-	if _, err := svc.Submit(ctx, number); err == nil || !strings.Contains(err.Error(), "refusing submit") {
+	if _, err := svc.Submit(ctx, number); err == nil || !strings.Contains(err.Error(), "changed outside the recorded revision") {
 		t.Fatalf("submit on diverged PR = %v", err)
 	}
 }

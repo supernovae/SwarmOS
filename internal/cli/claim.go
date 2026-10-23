@@ -89,14 +89,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		if err := lease.SaveClaimToken(root, issue, state.Lease.ClaimID); err != nil {
 			return fail(err)
 		}
-		checkpointRemote := "origin"
-		targetBranch := state.Branch
-		if rootOpts.Fork {
-			checkpointRemote = rootOpts.effectiveForkRemote()
-			if targetBranch == "" {
-				targetBranch = workspace.ForkBranchName(issue, state.Lease.ClaimID)
-			}
-		}
+		checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, preflight.Issue.Title, state.Lease.ClaimID, state.Branch)
 		path, branch, err := workspace.ProvisionFromRemoteAt(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA)
 		if err != nil {
 			return fail(err)

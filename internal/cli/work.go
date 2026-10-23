@@ -120,12 +120,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			status := "completed"
-			if result.PausedForHuman {
-				status = "paused"
-			} else if result.HandedOffToPhase != "" {
-				status = "handed-off"
-			}
+			status := result.Outcome()
 			if jsonOutput {
 				return writeJSON(cmd, map[string]any{"kind": "work", "status": status, "result": result})
 			}

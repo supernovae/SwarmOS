@@ -220,13 +220,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								failures.Add(1)
 								fmt.Fprintf(out, "[worker-%d] %s #%d failed: %v\n", worker+1, pulled.Repo, pulled.Issue.Number, err)
 							} else {
-								status := "completed"
-								if result.PausedForHuman {
-									status = "paused"
-								} else if result.HandedOffToPhase != "" {
-									status = "handed-off"
-								}
-								fmt.Fprintf(out, "[worker-%d] %s #%d %s: phase=%s validation=%t\n", worker+1, pulled.Repo, pulled.Issue.Number, status, result.PhaseCompleted, result.ValidationPassed)
+								fmt.Fprintf(out, "[worker-%d] %s #%d %s: phase=%s validation=%t\n", worker+1, pulled.Repo, pulled.Issue.Number, result.Outcome(), result.PhaseCompleted, result.ValidationPassed)
 							}
 							outputMu.Unlock()
 							if err != nil {

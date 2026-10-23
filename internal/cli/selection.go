@@ -131,13 +131,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			if err != nil {
 				continue
 			}
-			role := "planner"
-			if phase == "review" {
-				role = "reviewer"
-			}
-			if phase == "implement" {
-				role = "developer"
-			}
+			role := workflow.LeadRole(phase)
 			claimed, err := mgr.Acquire(ctx, issue.Number, owner, preflight.Agents[role], phase, duration, preflight.Config.Lease.MaxRenewals)
 			if err != nil {
 				lease.UnlockClaim(lock)
@@ -150,14 +144,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				if err := lease.SaveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID); err != nil {
 					return nil, err
 				}
-				checkpointRemote := "origin"
-				targetBranch := claimed.Branch
-				if rootOpts.Fork {
-					checkpointRemote = rootOpts.effectiveForkRemote()
-					if targetBranch == "" {
-						targetBranch = workspace.ForkBranchName(issue.Number, claimed.Lease.ClaimID)
-					}
-				}
+				checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue.Number, issue.Title, claimed.Lease.ClaimID, claimed.Branch)
 				worktree, branch, err := workspace.ProvisionFromRemoteAt(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA)
 				if err != nil {
 					return nil, err

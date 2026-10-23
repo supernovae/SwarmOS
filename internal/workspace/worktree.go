@@ -59,6 +59,26 @@ func ForkBranchName(issueNum int, claimID string) string {
 	return fmt.Sprintf("swarm/issue-%d-%s", issueNum, strings.TrimSpace(claimID))
 }
 
+// DefaultForkRemote names a contributor's personal fork remote.
+const DefaultForkRemote = "fork"
+
+// ClaimCheckpoint returns where a claim's work is checkpointed: the recorded
+// branch on origin (or the issue branch), or in fork mode a claim-scoped branch
+// on the contributor's fork remote.
+func ClaimCheckpoint(forkMode bool, forkRemote string, issueNum int, title, claimID, recorded string) (remote, branch string) {
+	remote, branch = "origin", recorded
+	if forkMode {
+		remote = forkRemote
+		if branch == "" {
+			branch = ForkBranchName(issueNum, claimID)
+		}
+	}
+	if branch == "" {
+		branch = BranchName(issueNum, title)
+	}
+	return remote, branch
+}
+
 func FetchCommit(repoRoot, remoteName, sha string) error {
 	if strings.TrimSpace(remoteName) == "" {
 		remoteName = "origin"

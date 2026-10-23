@@ -112,6 +112,19 @@ swarm work 42 --phase plan --handoff --backend github
 swarm work --next --all --backend github
 ```
 
+### Taking a Submitted PR Through Acceptance Review
+
+`swarm submit` hands maintainers a Draft PR with the plan, test plan, implementation summary, and validation results together. A `submitted` phase and `completed` lease mean the worker has finished its submission, not that the PR has been reviewed or merged.
+
+The PR's acceptance checkboxes are a **maintainer review checklist**. SwarmOS copies the requirements from the issue and leaves them unchecked; it does not yet store a verification decision for each criterion. Passing required checks provides evidence to review, while `swarm review` approves `PLAN.md` and `TEST_PLAN.md` before implementation—not the finished code.
+
+1. Open the PR and use its attached test plan to find the verification for each criterion.
+2. Compare the implementation with the observed validation results. Run any remaining targeted tests or manual scenarios, record the evidence in the PR, and check off verified criteria in the PR description. Leave anything unverified unchecked.
+3. Mark the Draft PR **Ready for review** in GitHub, or use `gh pr ready <PR-number>`. If it is already ready, request a code review directly.
+4. Complete the repository's normal code review and CI requirements, then merge. `Closes #<issue>` closes the linked issue when the PR merges into the default branch; it does not synchronize the issue's and PR's checkboxes.
+
+Use GitHub for this final handoff; there is no additional `swarm review` or `swarm submit` step to approve acceptance criteria. Retrying an already completed submission returns the existing PR rather than refreshing its description.
+
 ### Recovering from an Interrupted Run
 If an agent exits early, a lease expires, or a validation check fails:
 1. Run `swarm status <issue> --backend github` to inspect the current lease, phase, and published artifacts.

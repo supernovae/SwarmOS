@@ -23,7 +23,14 @@ func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "submit [<issue-number>]",
 		Short: "Validate the exact checkpoint and idempotently open its draft PR",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Validate the exact checkpoint and idempotently open its draft PR.
+
+Submission completes the SwarmOS execution attempt, not final acceptance review.
+The PR includes the plan, test plan, and validation evidence. A maintainer checks
+each acceptance criterion against the implementation and observed results,
+records the decision in the PR, and uses GitHub to mark it ready for review.
+swarm review approves the implementation plan, not the finished PR.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			root := rootOpts.resolveRepoRoot()
 			issue, worktree, err := resolveIssueAndWorktree(root, args)
@@ -285,9 +292,14 @@ func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState) string 
 		}
 	}
 	body.WriteString("\n## Acceptance criteria\n\n")
+	body.WriteString("These checkboxes track final acceptance review by a maintainer, not automated check results. SwarmOS leaves them unchecked at submission; this does not mean the checks failed.\n\n")
 	for _, criterion := range unit.Acceptance {
 		fmt.Fprintf(&body, "- [ ] %s\n", criterion)
 	}
+	body.WriteString("\n## Review handoff\n\n")
+	body.WriteString("1. Use the attached test plan to map each criterion to its verification, then inspect the implementation and validation results. Record supporting test results or manual observations in the PR and check off each verified criterion above; leave unverified criteria open.\n")
+	body.WriteString("2. Mark this PR ready for review in GitHub when the evidence is ready, and request a code review. `swarm review` reviews the plan before implementation; it does not approve this PR.\n")
+	body.WriteString("3. Merge through the repository's normal review and CI requirements. The closing reference above closes the linked issue when this PR merges into the default branch; issue and PR checkboxes are not synchronized.\n")
 	if state != nil {
 		prov := lease.BuildProvenanceAttestation(unit, state)
 		body.WriteString("\n## 🔒 Harness & Model Provenance Attestation\n\n")

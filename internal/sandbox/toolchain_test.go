@@ -141,7 +141,7 @@ func TestResolveHostToolchainsDiscoversMultiLanguageCachesWithoutCredentials(t *
 	}
 
 	sandboxPath := SandboxPath(binds)
-	pathEntries := strings.Split(sandboxPath, ":")
+	pathEntries := filepath.SplitList(sandboxPath)
 	for _, wantBin := range []string{goBin, cargoBin, bunBin, dotnetRoot, dotnetTools, nvmNodeBin} {
 		if !slices.Contains(pathEntries, wantBin) {
 			t.Errorf("SandboxPath %q missing %q", sandboxPath, wantBin)

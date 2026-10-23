@@ -63,7 +63,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	result := &RunResult{Agent: a.agentName, Role: req.Role, Command: command, Output: out.String(), Attestation: att}
 	if err != nil {
 		result.ExitCode = 1
-		return result, fmt.Errorf("isolated %s agent: %w\n%s", req.Role, err, strings.TrimSpace(out.String()))
+		return result, err
 	}
 	return result, nil
 }

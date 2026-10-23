@@ -55,6 +55,7 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 
 	// 1. Test GateAgent rejection when SWARM_MOCK_VERDICT=CHANGES_REQUESTED
 	t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+	var failedEvents []ProgressEvent
 	failed, err := eng.ExecuteWork(ctx, WorkOptions{
 		RepoRoot:       tmp,
 		IssueNumber:    iss.Number,
@@ -65,6 +66,7 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 		Phase:          "all",
 		Gate:           contract.GateAgent,
 		Headless:       true,
+		OnProgress:     func(e ProgressEvent) { failedEvents = append(failedEvents, e) },
 	})
 	if failed == nil || failed.State == nil {
 		t.Fatalf("rejected execution did not retain a fenced state")
@@ -75,9 +77,18 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 	if !errors.Is(err, ErrPlanReviewRejected) {
 		t.Fatalf("expected ErrPlanReviewRejected, got: %v", err)
 	}
+	if last := failedEvents[len(failedEvents)-1]; last.Stage != "review" || last.Status != "failed" {
+		t.Fatalf("rejection progress: %+v", failedEvents)
+	}
+	for _, event := range failedEvents {
+		if event.Stage == "implement" {
+			t.Fatal("rejected review announced implementation")
+		}
+	}
 
 	// 2. Test GateAgent approval and full multi-role execution
 	t.Setenv("SWARM_MOCK_VERDICT", "APPROVED")
+	var completedEvents []ProgressEvent
 	res, err := eng.ExecuteWork(ctx, WorkOptions{
 		RepoRoot:       tmp,
 		IssueNumber:    iss.Number,
@@ -88,12 +99,45 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 		Phase:          "all",
 		Gate:           contract.GateAgent,
 		Headless:       true,
+		OnProgress:     func(e ProgressEvent) { completedEvents = append(completedEvents, e) },
 	})
 	if err != nil {
 		t.Fatalf("expected GateAgent full workflow to succeed, got: %v", err)
 	}
 	if !res.ValidationPassed || res.ReviewVerdict != "APPROVED" {
 		t.Fatalf("unexpected result: %+v", res)
+	}
+	var started []string
+	for _, event := range completedEvents {
+		if event.Status == "started" {
+			started = append(started, event.Stage)
+		}
+	}
+	if !slices.Equal(started, []string{"preflight", "claim", "workspace", "review", "implement", "checkpoint", "test", "required-checks"}) {
+		t.Fatalf("resumed stage sequence: %v", started)
+	}
+	if last := completedEvents[len(completedEvents)-1]; last.Stage != "required-checks" || last.Status != "completed" {
+		t.Fatalf("completion progress: %+v", last)
+	}
+
+	// Resuming an approved plan must preserve the upstream review-skip behavior,
+	// including its progress: neither planning nor review should be announced.
+	var resumedEvents []ProgressEvent
+	resumed, err := eng.ExecuteWork(ctx, WorkOptions{
+		RepoRoot: tmp, IssueNumber: iss.Number, ClaimID: res.State.Lease.ClaimID,
+		AgentName: "mock", Phase: "all", Headless: true,
+		OnProgress: func(e ProgressEvent) { resumedEvents = append(resumedEvents, e) },
+	})
+	if err != nil {
+		t.Fatalf("resume approved plan: %v", err)
+	}
+	if resumed.ReviewVerdict != "APPROVED" || !resumed.ValidationPassed {
+		t.Fatalf("approved resume result: %+v", resumed)
+	}
+	for _, event := range resumedEvents {
+		if event.Stage == "plan" || event.Stage == "review" {
+			t.Fatalf("resumed execution announced a skipped stage: %+v", event)
+		}
 	}
 }
 

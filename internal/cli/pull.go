@@ -32,54 +32,6 @@ type PulledWorkUnit struct {
 	BranchName   string
 }
 
-func newPullCmd(rootOpts *RootOptions) *cobra.Command {
-	var (
-		allRepos    bool
-		asJSON      bool
-		agentName   string
-		durationStr string
-	)
-
-	cmd := &cobra.Command{
-		Use:   "pull",
-		Short: "Claim and prepare the next approved task matching this node",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var dur time.Duration
-			if durationStr != "" {
-				parsed, err := time.ParseDuration(durationStr)
-				if err != nil || parsed <= 0 {
-					return fmt.Errorf("--duration must be a positive duration")
-				}
-				dur = parsed
-			}
-
-			pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all"}, dur)
-			if err != nil {
-				return err
-			}
-			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "pull", "status": "claimed", "selection": pulled})
-			}
-
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Pulled & claimed [%s] issue #%d: %s [phase=%s, expires=%s]\n",
-				pulled.Repo, pulled.Issue.Number, pulled.Issue.Title, pulled.TargetPhase, pulled.State.Lease.ExpiresAt.Format(time.RFC3339))
-			fmt.Fprintf(out, "  Repo Root: %s\n", pulled.RepoRoot)
-			fmt.Fprintf(out, "  Branch:    %s\n", pulled.BranchName)
-			fmt.Fprintf(out, "  Worktree:  %s\n", pulled.WorktreePath)
-			fmt.Fprintf(out, "  Contract:  %s/.swarm/active/WORKUNIT.md\n", pulled.WorktreePath)
-			return nil
-		},
-	}
-
-	cmd.Flags().BoolVar(&allRepos, "all", false, "Scan all registered repositories in ~/.config/swarm/repos.yaml")
-	cmd.Flags().StringVar(&agentName, "agent", "", "Configured agent override")
-	cmd.Flags().StringVar(&durationStr, "duration", "", "Lease duration (approved policy default)")
-	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured selection and claim state")
-	return cmd
-}
-
 func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration) (*PulledWorkUnit, error) {
 	if err := contract.ValidatePhase(opts.Phase); err != nil {
 		return nil, err
@@ -218,7 +170,7 @@ func PullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			}
 			pulled, err := setup()
 			if err != nil {
-				_, releaseErr := mgr.Release(ctx, issue.Number, owner, "pull setup failed")
+				_, releaseErr := mgr.Release(ctx, issue.Number, owner, "claim setup failed")
 				unlockClaim(lock)
 				return nil, errors.Join(err, releaseErr)
 			}

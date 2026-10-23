@@ -1,6 +1,6 @@
 version: 1
 # Linux isolation: Codex native sandbox; other harnesses use isolated tools.
-# Run swarm doctor before work. Models are optional; each harness chooses its default.
+# Run swarm repo doctor before work. Models are optional; each harness chooses its default.
 default_agent: codex
 default_gate: agent
 plan_mode: auto

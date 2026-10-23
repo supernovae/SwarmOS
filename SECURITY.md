@@ -20,7 +20,7 @@ Our [execution architecture](docs/ARCHITECTURE.md#design-decision-use-the-harnes
 | OS or container runtime | Enforce the filesystem, process, and network boundary used by the harness or executor. | Runtime capability checks and tests on supported platforms. |
 | SwarmOS | Approved task scope, leases, artifact acceptance, review provenance, gates, and authorized publication. | Approved-base policy, fenced state transitions, and regression tests. |
 | GitHub | Repository access, protected refs, merge rules, and release authorization. | Repository settings and checks for the submitted commit. |
-| Operator | Choose trusted harnesses and extensions, authenticate with providers, and configure project policy. | `swarm doctor`, task previews, and review of enabled integrations. |
+| Operator | Choose trusted harnesses and extensions, authenticate with providers, and configure project policy. | `swarm repo doctor`, task previews, and review of enabled integrations. |
 
 Provider login, worker identity, and GitHub authorization remain separate. Organizations may later integrate their own identity system or a repository-installed GitHub App for scoped automation credentials. These are optional integrations; a GitHub App supplies GitHub authorization, not an OIDC identity provider.
 
@@ -42,7 +42,7 @@ SwarmOS has two execution modes. `isolated` is the default when no mode is confi
 
 | Mode | Worker boundary | Setup |
 | --- | --- | --- |
-| `isolated` | Codex native sandbox or restricted delegated tools for the selected harness; OCI when required by repository policy. Missing required capabilities block execution. | A supported Linux harness/runtime, its normal provider login, and passing `swarm doctor` checks. |
+| `isolated` | Codex native sandbox or restricted delegated tools for the selected harness; OCI when required by repository policy. Missing required capabilities block execution. | A supported Linux harness/runtime, its normal provider login, and passing `swarm repo doctor` checks. |
 | `trusted-local` | Planner, developer, tester, and validation commands run with the operator's OS permissions. Reviewers retain their separate snapshot sandbox. | Select this mode explicitly for repositories and tools you trust, where approved policy permits it. |
 
 ### Native Codex
@@ -75,7 +75,7 @@ A failed isolated run never falls back to host execution. Native macOS and Windo
 
 The [qualification record](docs/native-qualification.md) separates fresh boundary tests, earlier authenticated workflow evidence, and remaining hosted/platform checks. Stable releases at or above each adapter's minimum must pass interface and runtime capability checks. The actual version is recorded in artifact provenance.
 
-`swarm doctor` and `swarm work <issue> --dry-run` report execution setup and blockers. These checks help prepare the worker environment before acquiring work.
+`swarm repo doctor` and `swarm issue work <issue> --dry-run` report execution setup and blockers. These checks help prepare the worker environment before acquiring work.
 
 ## Boundaries that need operator care
 
@@ -105,5 +105,5 @@ Release publication runs the exact tagged commit through the repository's reusab
 Release archives are built and attested in GitHub Actions after passing the lint, vulnerability, and multi-platform test matrix. You can verify the provenance of any release archive with the GitHub CLI:
 
 ```bash
-gh attestation verify swarm_<version>_<os>_<arch>.tar.gz --repo supernovae/SwarmOS
+gh attestation verify 'swarm_<version>_<os>_<arch>.tar.gz' --repo supernovae/SwarmOS
 ```

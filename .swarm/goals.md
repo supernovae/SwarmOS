@@ -12,5 +12,5 @@ Make GitHub and Git a zero-infrastructure coordination control plane where open-
 
 ## Architectural Priorities
 1. Deterministic Git compare-and-swap (`refs/heads/swarm-state/issue-<N>`) coordination and fenced lease safety under concurrency.
-2. Ergonomic CLI workflows (`swarm plan`, `swarm stage`, `swarm work`, `swarm validate`, `swarm submit`) that support both headless worker pools and interactive human/IDE staging.
+2. Ergonomic CLI workflows (`swarm repo plan`, `swarm issue stage`, `swarm issue work`, `swarm issue validate`, `swarm issue submit`) that support both headless worker pools and interactive human/IDE staging.
 3. Comprehensive race-enabled automated test coverage (`go test -race ./...`) for every new command, contract field, and security boundary.

@@ -41,4 +41,4 @@ jobs:
             echo 'No trusted base: bootstrap and review the harness before enabling this workflow.' >&2
             exit 1
           fi
-          "$RUNNER_TEMP/swarm-bin/swarm" validate --ci --base "$BASE_SHA"
+          "$RUNNER_TEMP/swarm-bin/swarm" repo validate --base "$BASE_SHA"

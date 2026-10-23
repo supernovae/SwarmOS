@@ -18,7 +18,7 @@ Grok Bot gives you persistent AI teammates with their own cloud computer, browse
 flowchart LR
     You["You (Desktop, Mobile, or X)"] --> Grok["Grok Bot<br/>GitHub Connector + Cloud Computer"]
     Grok -->|Explore & scope| Issue["GitHub Issue<br/>Approved WorkUnit"]
-    Grok -->|Run swarm work| Worktree["Isolated Worktree<br/>PLAN.md + TEST_PLAN.md"]
+    Grok -->|Run swarm issue work| Worktree["Isolated Worktree<br/>PLAN.md + TEST_PLAN.md"]
     Worktree -->|Validate & submit| PR["Artifact-Backed<br/>Draft PR"]
     Grok -->|Comment findings| PR
 ```
@@ -75,8 +75,8 @@ SwarmOS supports two review gate styles so you can choose how plans are approved
 
 - **Human Plan Gate (`--gate human`)**: Ask Grok Bot to review the proposed plan and post its findings on the issue or in chat. When you are ready to green-light the plan, record your maintainer decision via the CLI and resume execution:
   ```bash
-  swarm review 42 --approve --notes "Reviewed plan with Grok Bot; ready to implement"
-  swarm work 42 --backend github
+  swarm issue review-plan 42 --approve --notes "Reviewed plan with Grok Bot; ready to implement"
+  swarm issue work 42 --backend github
   ```
 - **Automated Agent Gate (`--gate agent`)**: SwarmOS runs your configured reviewer harness inside an isolated read-only snapshot and verifies that `.swarm/active/REVIEW.md` begins with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED` before starting implementation.
 
@@ -92,7 +92,7 @@ On the computer where Grok Bot will run `swarm`, install `git`, `gh`, the pinned
 
 ```bash
 cd /workspace/your-repo
-swarm doctor --backend github
+swarm repo doctor --backend github
 swarm repo add --backend github
 ```
 
@@ -100,11 +100,11 @@ swarm repo add --backend github
 
 ```text
 Work on OWNER/REPO from its checkout in /workspace/your-repo.
-1. Run `swarm status --backend github` and `swarm work 42 --dry-run --backend github`
+1. Run `swarm issue status --backend github` and `swarm issue work 42 --dry-run --backend github`
    so we can see the resolved agents, plan gate, and base commit.
-2. Run `swarm work 42 --backend github`. If the task pauses on a human gate,
+2. Run `swarm issue work 42 --backend github`. If the task pauses on a human gate,
    share the generated PLAN.md and TEST_PLAN.md with me and wait for my approval.
-3. Once implementation and `swarm validate 42` pass, run `swarm submit 42 --backend github`
+3. Once implementation and `swarm issue validate 42` pass, run `swarm issue submit 42 --backend github`
    and send me the Draft PR link.
 ```
 
@@ -125,14 +125,14 @@ Add `--watch` when you want the worker pool to keep polling for newly approved i
 When Grok Bot (or an external contributor) does not have push access to the upstream repository, it can still claim approved issues and ship changes through a personal GitHub fork:
 
 - **Local working strategy:** SwarmOS provisions an isolated local worktree (`.swarm/worktrees/issue-42`) on branch `swarm/issue-42-<claim_id>` anchored to the upstream approved `BaseSHA`, loading all `.swarm/` policies and checks from that upstream commit.
-- **Remote contribution strategy:** Checkpoints are pushed to the contributor's writable `fork` remote (`refs/heads/swarm/issue-42-<claim_id>`), and `swarm --fork submit 42` opens a fork-qualified Draft PR (`<fork-owner>:swarm/issue-42-<claim_id>` targeting the upstream base branch). Issue approval, human plan gates (`swarm review 42 --approve`), PR review, and merge stay with upstream maintainers.
+- **Remote contribution strategy:** Checkpoints are pushed to the contributor's writable `fork` remote (`refs/heads/swarm/issue-42-<claim_id>`), and `swarm --fork issue submit 42` opens a fork-qualified Draft PR (`<fork-owner>:swarm/issue-42-<claim_id>` targeting the upstream base branch). Issue approval, human plan gates (`swarm issue review-plan 42 --approve`), PR review, and merge stay with upstream maintainers.
 
 **1. Upstream maintainer setup:**
 
 ```bash
-# Generate .github/workflows/swarm-fork-coordinator.yml pinned to your installed release
-# (or pass --swarm-version <tag-or-full-commit-sha> to pin a specific version)
-swarm init --fork-coordinator
+# Generate .github/workflows/swarm-fork-coordinator.yml pinned to a compatible installed release (v0.6.0 or newer)
+# (or pass --swarm-version <compatible-tag-or-full-commit-sha> explicitly)
+swarm repo init --fork-coordinator
 swarm issue approve 42 --backend github
 ```
 
@@ -145,10 +145,10 @@ cd /workspace/your-repo
 gh repo fork --remote=true --remote-name=fork
 
 # Claim, execute, renew if needed, and submit a fork-qualified Draft PR
-swarm --fork claim 42
-swarm --fork work 42
-swarm --fork renew 42
-swarm --fork submit 42
+swarm --fork issue claim 42
+swarm --fork issue work 42
+swarm --fork issue renew 42
+swarm --fork issue submit 42
 ```
 
 See **[Fork Mode (`docs/fork-mode.md`)](fork-mode.md)** for full setup details.
@@ -173,7 +173,7 @@ agents:
 Then route any role to `grok`:
 
 ```bash
-swarm work 42 --planner-agent grok --reviewer-agent grok --developer-agent codex --backend github
+swarm issue work 42 --planner-agent grok --reviewer-agent grok --developer-agent codex --backend github
 ```
 
 ---

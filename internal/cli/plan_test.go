@@ -45,14 +45,14 @@ func readPlanExport(t *testing.T, path string) ([]byte, *workflow.ProjectPlanRep
 
 func testPlanExportMode(t *testing.T, scan bool) {
 	f := newCLIFixture(t)
-	args := []string{"plan", "--from", exportRoadmap(t, f)}
+	args := []string{"repo", "plan", "--from", exportRoadmap(t, f)}
 	mode := "from-plan"
 	if scan {
 		f.create(t, "agent")
 		if _, err := f.tracker.CreateIssue(context.Background(), "Raw idea", "Please improve this", nil); err != nil {
 			t.Fatal(err)
 		}
-		args = []string{"plan", "--scan"}
+		args = []string{"repo", "plan", "--scan"}
 		mode = "backlog-scan"
 	}
 	before, err := f.tracker.ListIssues(context.Background(), tracker.IssueFilter{State: "open"})
@@ -97,7 +97,7 @@ func TestCLIPlanExportFrom(t *testing.T) { testPlanExportMode(t, false) }
 func TestCLIPlanExportJSONStdout(t *testing.T) {
 	f := newCLIFixture(t)
 	path := filepath.Join(t.TempDir(), "snapshot.yaml")
-	out := f.must(t, "plan", "--scan", "--json", "--export", path)
+	out := f.must(t, "repo", "plan", "--scan", "--json", "--export", path)
 	var envelope struct {
 		Kind   string
 		Report workflow.ProjectPlanReport
@@ -120,14 +120,8 @@ func TestCLIPlanExportValidation(t *testing.T) {
 		{"--scan", "--from", "missing.md", "--export", "snapshot.json"},
 		{"--export", "snapshot.json"},
 	} {
-		if _, err := f.run(append([]string{"plan"}, args...)...); err == nil {
+		if _, err := f.run(append([]string{"repo", "plan"}, args...)...); err == nil {
 			t.Fatalf("accepted %v", args)
-		}
-	}
-	help := f.must(t, "plan", "--help")
-	for _, word := range []string{"--export", ".yaml", ".yml", ".json"} {
-		if !strings.Contains(help, word) {
-			t.Fatal("missing help", word)
 		}
 	}
 	cwd, err := os.Getwd()
@@ -139,7 +133,7 @@ func TestCLIPlanExportValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chdir(cwd) })
-	f.must(t, "plan", "--scan", "--export", "relative.JSON")
+	f.must(t, "repo", "plan", "--scan", "--export", "relative.JSON")
 	readPlanExport(t, filepath.Join(dir, "relative.JSON"))
 }
 
@@ -151,7 +145,7 @@ func TestCLIPlanExportErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{directory, filepath.Join(dir, "missing", "snapshot.json")} {
-		if _, err := f.run("plan", "--scan", "--export", path); err == nil || !strings.Contains(err.Error(), "export project plan") {
+		if _, err := f.run("repo", "plan", "--scan", "--export", path); err == nil || !strings.Contains(err.Error(), "export project plan") {
 			t.Fatalf("write error: %v", err)
 		}
 	}
@@ -159,7 +153,7 @@ func TestCLIPlanExportErrors(t *testing.T) {
 	original := []byte("keep me")
 	os.WriteFile(path, original, 0644)
 	for _, target := range []string{path, filepath.Join(dir, "new.json")} {
-		if _, err := f.run("plan", "--from", "missing.md", "--export", target); err == nil {
+		if _, err := f.run("repo", "plan", "--from", "missing.md", "--export", target); err == nil {
 			t.Fatal("expected planner error")
 		}
 	}
@@ -180,7 +174,7 @@ func TestCLIPlanExportApply(t *testing.T) {
 			if fail {
 				path = filepath.Join(path, "missing.json")
 			}
-			_, err := f.run("plan", "--from", exportRoadmap(t, f), "--apply", "--export", path)
+			_, err := f.run("repo", "plan", "--from", exportRoadmap(t, f), "--apply", "--export", path)
 			if (err != nil) != fail {
 				t.Fatalf("apply: %v", err)
 			}

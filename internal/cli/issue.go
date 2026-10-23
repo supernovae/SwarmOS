@@ -12,14 +12,19 @@ import (
 )
 
 func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
-	issueCmd := &cobra.Command{Use: "issue", Short: "Create, approve, lint, or decompose SwarmOS contract-driven issues"}
+	issueCmd := &cobra.Command{
+		Use:   "issue",
+		Short: "Manage issue-backed WorkUnits and their execution lifecycle",
+		Long:  "An issue is the approved WorkUnit contract. approve authorizes execution; review-plan approves the implementation plan; submit opens the linked draft PR for final GitHub code and acceptance review.",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+	}
 	var title, objective, workflowName, gate string
 	var constraints, acceptance, capabilities []string
 	var ready bool
 	var dependsOn []int
 	var parentIssue int
 	var asJSON bool
-	issueCmd.PersistentFlags().BoolVar(&asJSON, "json", false, "Emit structured issue results")
 	createCmd := &cobra.Command{Use: "create", Short: "Create a draft structured SwarmOS WorkUnit issue", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		if strings.TrimSpace(title) == "" {
 			return fmt.Errorf("--title is required")
@@ -90,6 +95,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	createCmd.Flags().IntSliceVar(&dependsOn, "depends-on", nil, "Prerequisite issue numbers that must complete first")
 	createCmd.Flags().StringSliceVar(&capabilities, "capability", nil, "Required volunteer node capabilities (e.g., coding,testing,docs)")
 	createCmd.Flags().IntVar(&parentIssue, "parent", 0, "Parent epic/workunit issue number")
+	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured issue results")
 	approveCmd := &cobra.Command{Use: "approve <issue-number>", Short: "Approve the current immutable WorkUnit revision for execution", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		number, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
 		if err != nil || number <= 0 {
@@ -113,6 +119,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "Approved issue #%d (task=%s policy=%s base=%s)\n", number, st.TaskDigest, st.PolicyDigest, st.BaseSHA)
 		return nil
 	}}
+	approveCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured approval results")
 	lintCmd := &cobra.Command{Use: "lint <issue-number>", Short: "Validate an existing issue against the SwarmOS WorkUnit JSON schema", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		num, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
 		if err != nil || num <= 0 {
@@ -136,7 +143,8 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities)
 		return nil
 	}}
-	issueCmd.AddCommand(createCmd, approveCmd, lintCmd, newDecomposeCmd(rootOpts), newIssueEpicCmd(rootOpts))
+	lintCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured lint results")
+	issueCmd.AddCommand(createCmd, approveCmd, lintCmd, newDecomposeCmd(rootOpts), newIssueEpicCmd(rootOpts), newClaimCmd(rootOpts), newWorkCmd(rootOpts), newStageCmd(rootOpts), newReviewCmd(rootOpts), newValidateCmd(rootOpts), newSubmitCmd(rootOpts), newStatusCmd(rootOpts), newRenewCmd(rootOpts), newReleaseCmd(rootOpts))
 	return issueCmd
 }
 
@@ -174,10 +182,7 @@ func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if asJSON || cmd.Flags().Changed("json") {
-				return writeJSON(cmd, map[string]any{"kind": "epic", "status": "created", "issue": iss})
-			}
-			if parentJSON, err := cmd.InheritedFlags().GetBool("json"); err == nil && parentJSON {
+			if asJSON {
 				return writeJSON(cmd, map[string]any{"kind": "epic", "status": "created", "issue": iss})
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Created Epic issue #%d: %s (%s)\n", iss.Number, iss.Title, iss.HTMLURL)

@@ -33,12 +33,12 @@ Single-agent coding tools are great at editing files, but coordinating several a
 | **Vendor lock-in to a single CLI** | **Multi-Agent Routing** lets you mix **Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`), and OhMyPi (`omp`)**—and coordinate from [**Grok Bot**](docs/grokbot.md) or [**OpenAI Dot**](docs/openai-dot.md). |
 | **Untested or unsafe diffs** | **Baseline Validation** runs the required checks and protected-path rules from the approved base commit before opening an artifact-backed Draft PR. |
 
-### What's New in v0.5.0
+### Capabilities Introduced in v0.5.0
 
-This release makes agent work easier to follow and its results easier to review:
+These capabilities remain available through the resource-owned CLI commands below:
 
-- **Live work progress:** Headless `swarm work` reports stage transitions and a 15-second heartbeat on stderr while keeping stdout and JSON results separate. Use `--progress=false` for quiet runs.
-- **Provenance at the terminal:** `swarm status <issue>` shows recorded per-role harness, model, sandbox boundary, and artifact digests; `--json` includes structured provenance.
+- **Live work progress:** Headless `swarm issue work` reports stage transitions and a 15-second heartbeat on stderr while keeping stdout and JSON results separate. Use `--progress=false` for quiet runs.
+- **Provenance at the terminal:** `swarm issue status <issue>` shows recorded per-role harness, model, sandbox boundary, and artifact digests; `--json` includes structured provenance.
 - **Clearer review handoffs:** Generated PRs distinguish automated validation from the maintainer's acceptance checklist, with guidance for reviewing the finished implementation.
 - **Automatic version metadata:** `swarm version` reads Go's embedded build information when release metadata is not supplied, replacing the old fixed version in source builds.
 - **Nested sandbox compatibility:** Detached sandbox builds work without Git metadata, and regression checks handle restricted nested sandboxes.
@@ -62,17 +62,17 @@ flowchart LR
         Val["4. Validator<br/>Baseline Checks"]
     end
 
-    Issue -->|swarm claim / work| State
+    Issue -->|swarm issue claim or issue work| State
     State -->|git worktree| Plan
     Plan --> Gate
     Gate -->|Approved| Impl --> Val
-    Val -->|swarm submit| PR
+    Val -->|swarm issue submit| PR
 ```
 
-1. **Create & Approve (`swarm issue create` / `swarm issue approve`)**: Author a structured WorkUnit issue via the CLI or GitHub Issue Form, then approve its revision when it is ready for agents to pick up.
-2. **Claim & Provision (`swarm claim` / `swarm work`)**: SwarmOS acquires a fenced lease, creates `.swarm/worktrees/issue-<N>`, and compiles `.swarm/active/WORKUNIT.md` and `SYSTEM_PROMPT.md`.
-3. **Plan & Review (`PLAN.md` + `TEST_PLAN.md`)**: The planner maps out the file-level design and acceptance tests. Depending on your gate (`agent`, `human`, or `none`), an isolated reviewer agent audits the plan or the workflow pauses for a maintainer's `swarm review <issue> --approve`.
-4. **Implement, Validate & Submit (`swarm validate` / `swarm submit`)**: The developer implements the approved plan, SwarmOS verifies protected paths and required checks against the approved baseline, and `swarm submit` opens a Draft PR with the full artifact trail.
+1. **Create & Approve (`swarm issue create` / `swarm issue approve`)**: Author a structured WorkUnit issue via the CLI or GitHub Issue Form. Maintainer approval makes the issue the executable work contract; it does not approve a future implementation.
+2. **Claim & Provision (`swarm issue claim` / `swarm issue work`)**: SwarmOS acquires a fenced lease, creates `.swarm/worktrees/issue-<N>`, and compiles `.swarm/active/WORKUNIT.md` and `SYSTEM_PROMPT.md`.
+3. **Plan & Review (`PLAN.md` + `TEST_PLAN.md`)**: The planner maps out the file-level design and acceptance tests. Depending on your gate (`agent`, `human`, or `none`), an isolated reviewer agent audits the plan or the workflow pauses for a maintainer's `swarm issue review-plan <issue> --approve`. This second approval authorizes implementation, not the final code.
+4. **Implement, Validate & Submit (`swarm issue validate` / `swarm issue submit`)**: The developer implements the approved plan, SwarmOS verifies protected paths and required checks against the approved baseline, and `swarm issue submit <issue>` opens the linked Draft PR. The issue remains the approved contract; the PR proposes its implementation. Use `swarm issue status <issue>` for its recorded PR link and GitHub for final code and acceptance review.
 
 ---
 
@@ -80,11 +80,13 @@ flowchart LR
 
 ### 1. Install `swarm`
 
-Download the latest prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install the latest release with Go 1.26.10+:
+Once a resource-CLI-compatible release (`v0.6.0` or newer) is available, download its prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install that release with Go 1.26.10+. Until then, install from this source checkout (with Go's binary directory on your `PATH`):
 
 ```bash
-go install github.com/supernovae/swarmos/cmd/swarm@latest
+go install ./cmd/swarm
 ```
+
+For generated CI and fork automation from a source build, pass `--swarm-version <full-40-character-commit-sha>` for an explicitly selected compatible commit; there is no automatic pin for a dev/dirty build.
 
 Check the installed binary before starting a worker or reporting an issue:
 
@@ -93,18 +95,18 @@ swarm version
 swarm version --json
 ```
 
-Release binaries include the version, commit, build date, Go toolchain, and platform. Go-installed binaries report their module version. Local `go build` binaries use Go's embedded module and Git metadata, including a `+dirty` suffix for modified checkouts; their date is the source commit time. Metadata that was not embedded remains `dev`, `none`, or `unknown`. Development and dirty builds require an explicit `--swarm-version` when generating the fork coordinator.
+Release binaries include the version, commit, build date, Go toolchain, and platform. Go-installed binaries report their module version. Local `go build` binaries use Go's embedded module and Git metadata, including a `+dirty` suffix for modified checkouts; their date is the source commit time. Metadata that was not embedded remains `dev`, `none`, or `unknown`. Generated automation using this CLI requires a compatible immutable release pin (`v0.6.0` or newer, including prereleases) or an explicitly selected compatible full 40-character commit SHA. Development, dirty, and older release builds are not automatically pinned.
 
 ### 2. Initialize Your Repository
 
 From a Git checkout connected to GitHub (`gh auth login`), scaffold your `.swarm/` harness and run diagnostics:
 
 ```bash
-swarm init --sync-labels --backend github
-swarm doctor --backend github
+swarm repo init --sync-labels --backend github
+swarm repo doctor --backend github
 ```
 
-Example `swarm doctor` output:
+Example `swarm repo doctor` output:
 
 ```text
 CATEGORY   CHECK                                    STATUS   DETAIL
@@ -138,15 +140,15 @@ swarm issue create --backend github \
 swarm issue approve 42 --backend github
 
 # 3. Preview the resolved agents and gate, then run the workflow and open a Draft PR
-swarm work 42 --dry-run --backend github
-swarm work 42 --backend github
-swarm submit 42 --backend github
+swarm issue work 42 --dry-run --backend github
+swarm issue work 42 --backend github
+swarm issue submit 42 --backend github
 ```
 
 > [!TIP]
-> `swarm work` runs headlessly by default. Pass `--headless=false` to pair with your agent, or use `swarm node run --watch` to keep picking up approved tasks. On Linux, isolated execution uses Codex's native sandbox or bounded tools for Claude Code, OpenCode 2, and OhMyPi, with provider login managed by the harness. Start with `swarm doctor`; the [worker guide](docs/developer.md#choose-how-you-work) covers setup and other harnesses. Use `--backend local` to experiment with local coordination storage.
+> `swarm issue work` runs headlessly by default. Pass `--headless=false` to pair with your agent, or use `swarm node run --watch` to keep picking up approved tasks. On Linux, isolated execution uses Codex's native sandbox or bounded tools for Claude Code, OpenCode 2, and OhMyPi, with provider login managed by the harness. Start with `swarm repo doctor`; the [worker guide](docs/developer.md#choose-how-you-work) covers setup and other harnesses. Use `--backend local` to experiment with local coordination storage.
 
-`swarm doctor` highlights your selected agents and reports unused, unqualified harnesses as `OPTIONAL`. The [native qualification guide](docs/native-qualification.md) tracks tested releases and the dogfood workflow.
+`swarm repo doctor` highlights your selected agents and reports unused, unqualified harnesses as `OPTIONAL`. The [native qualification guide](docs/native-qualification.md) tracks tested releases and the dogfood workflow.
 
 ---
 
@@ -155,7 +157,7 @@ swarm submit 42 --backend github
 SwarmOS integrates **Claude Code (`claude`), OpenAI Codex (`codex`), OpenCode 2 (`opencode`), and OhMyPi (`omp`)**. Use a single tool across the workflow or route each role to your favorite harness:
 
 ```bash
-swarm work 42 \
+swarm issue work 42 \
   --planner-agent claude \
   --reviewer-agent omp \
   --developer-agent codex \
@@ -179,10 +181,10 @@ Register the repositories you work on so teammates and worker pools can pull fro
 swarm repo add --backend github
 
 # Checkpoint a completed plan so another teammate or worker can pick up the next phase
-swarm work 42 --phase plan --handoff --backend github
+swarm issue work 42 --phase plan --handoff --backend github
 
 # Claim and run the next ready task across all registered repositories
-swarm work --next --all --backend github
+swarm issue work --next --all --backend github
 
 # Run a bounded worker pool that drains up to 4 tasks and opens Draft PRs
 swarm node init
@@ -198,9 +200,9 @@ External contributors do not need push access to the upstream repository. When m
 
 ```bash
 # Maintainer (once, on the upstream default branch):
-# Generates .github/workflows/swarm-fork-coordinator.yml pinned to your installed release
-# (or pass --swarm-version <tag-or-full-commit-sha> to pin a specific version)
-swarm init --fork-coordinator
+# Generates .github/workflows/swarm-fork-coordinator.yml pinned to a compatible installed release
+# (or pass --swarm-version <compatible-tag-or-full-commit-sha> explicitly)
+swarm repo init --fork-coordinator
 swarm issue approve 42 --backend github
 
 # Contributor (clones upstream as origin, adds writable personal fork as "fork"):
@@ -210,10 +212,10 @@ gh repo fork --remote=true --remote-name=fork
 
 # Claim, work on local branch swarm/issue-42-<claim_id>, push checkpoints to "fork",
 # and open a fork-qualified Draft PR (<fork-owner>:swarm/issue-42-<claim_id> -> upstream):
-swarm --fork claim 42
-swarm --fork work 42
-swarm --fork renew 42   # optional when you need additional lease time
-swarm --fork submit 42
+swarm --fork issue claim 42
+swarm --fork issue work 42
+swarm --fork issue renew 42   # optional when you need additional lease time
+swarm --fork issue submit 42
 ```
 
 See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for architecture details, per-contributor claim caps (`fork.max_active_claims`), and security boundaries.
@@ -223,36 +225,38 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 
 | Command | What It Does |
 | :--- | :--- |
-| `swarm init [--force] [--sync-labels] [--template-dir <dir>] [--swarm-version <ref>] [--fork-coordinator]` | Scaffold `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. |
-| `swarm doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. |
-| `swarm issue create\|epic create\|approve\|lint\|decompose` | Create draft WorkUnits (`--parent`), standalone Epics (`--body-file`), approve revisions, lint schemas, or split WorkUnits into linked draft sub-issues. |
-| `swarm plan [--from <file> \| --scan] [--normalize] [--apply] [--ready]` | Preview `Step N` tasks from a roadmap, publish a native `Epic` with linked draft child WorkUnits (`--apply`), or scan and triage open issues (`--scan`). |
-| `swarm claim <issue>` / `swarm pull [--all]` | Claim a specific approved issue or pull the next ready task across registered repositories. |
-| `swarm work [<issue>] [--next] [--all]` | Run `plan`, `review`, `implement`, and `validate` (supports `--dry-run`, `--handoff`, and role overrides). |
-| `swarm stage [<issue>] [--phase plan\|implement] [--harness <name>] [--model <name>]` | Stage interactive or harness-produced plan and implementation artifacts onto an active lease with provenance metadata. |
-| `swarm review <issue> [--approve\|--reject]` | Run an isolated agent review or record a maintainer's human gate decision. |
-| `swarm validate [<issue>] [--ci --base <sha>]` | Verify artifacts, check protected paths, and run `.swarm/validation/required-checks.yaml`. |
-| `swarm submit [<issue>]` | Clean temporary markers, checkpoint and push the worktree branch, and open or update a Draft PR with collapsible artifacts and provenance attestation. |
-| `swarm status [<issue>] [--all]` | Inspect active claims, lease TTL, current phase, and published artifacts. |
-| `swarm repo add\|list\|remove` | Manage the local multi-repository registry (`~/.config/swarm/repos.yaml`). |
-| `swarm node init\|status\|run` | Configure a worker node profile and run concurrent worker pools (`--concurrency`, `--max-jobs`, `--watch`). |
-| `swarm renew <issue>` / `swarm release <issue>` | Extend an active lease's TTL or release a claim back to the queue. |
+| `swarm repo init [--force] [--sync-labels] [--template-dir <dir>] [--swarm-version <ref>] [--fork-coordinator]` | Scaffold `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. Compatible pins are `v0.6.0` or newer (including prereleases) or an explicitly selected compatible full commit SHA. |
+| `swarm repo doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. |
+| `swarm issue create`, `swarm issue epic create`, `swarm issue approve`, `swarm issue lint`, `swarm issue decompose` | Create draft WorkUnits (`--parent`), standalone Epics (`--body-file`), approve revisions, lint schemas, or split WorkUnits into linked draft sub-issues. |
+| `swarm repo plan [--from <file> \| --scan] [--normalize] [--apply] [--ready] [--export <path>]` | Preview `Step N` tasks from a roadmap, publish a native `Epic` with linked draft child WorkUnits (`--apply`), scan and triage open issues (`--scan`), or export a plan snapshot. |
+| `swarm issue claim <issue>` / `swarm issue claim --next [--all]` | Claim a specific approved issue or select the next ready task across registered repositories without running agents. |
+| `swarm issue work [<issue>] [--next] [--all]` | Run `plan`, `review`, `implement`, and `validate` (supports `--dry-run`, `--handoff`, and role overrides). |
+| `swarm issue stage [<issue>] [--phase plan\|implement] [--harness <name>] [--model <name>]` | Stage interactive or harness-produced plan and implementation artifacts onto an active lease with provenance metadata. |
+| `swarm issue review-plan <issue> [--approve\|--reject]` | Run an isolated agent review or record a maintainer's human gate decision. |
+| `swarm issue validate [<issue>] [--base <sha>]` / `swarm repo validate --base <trusted-full-commit-sha>` | Validate a claimed issue against its approved base and artifacts, or run checkout-only CI validation against a trusted full base without a claim. |
+| `swarm issue submit [<issue>]` | Clean temporary markers, checkpoint and push the worktree branch, and open or reuse its linked Draft PR with collapsible artifacts and provenance attestation. |
+| `swarm issue status [<issue>] [--all]` | Inspect active claims, lease TTL, current phase, and published artifacts. |
+| `swarm repo add`, `swarm repo list`, `swarm repo remove` | Manage the local multi-repository registry (`~/.config/swarm/repos.yaml`). |
+| `swarm node init`, `swarm node status`, `swarm node run` | Configure a worker node profile and run concurrent worker pools (`--concurrency`, `--max-jobs`, `--watch`). |
+| `swarm issue renew <issue>` / `swarm issue release <issue>` | Extend an active lease's TTL or release a claim back to the queue. |
 | `swarm fork-coordinator --event <path> [--json]` | Process a verified `issue_comment.created` fork worker request inside the upstream GitHub Action. |
 | `swarm version [--json]` | Print version, commit, and platform metadata. |
 
-Every lifecycle command supports `--json` for scripts and automation, and worker commands accept `--fork [--fork-remote <name>]` for personal-fork contributions.
+Use `--json` on leaves that offer it (for example, `swarm issue create --json`, `swarm issue claim --json`, `swarm issue status --json`, and `swarm repo validate --base <sha> --json`); bare `issue` and `repo` groups do not expose JSON output. Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions.
+
+When upgrading an existing repository, install a binary with the resource-owned CLI first, then review and update the checked-in workflow, slash-command instructions, and their immutable pin together. Generated files are preserved by default; review individual changes instead of blanket `--force` scaffolding. The namespace change does not provide PR repair or rebase commands: make code changes in your worktree and use GitHub's normal PR review and merge flow.
 
 ---
 
 ## Documentation & Guides
 
-- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](docs/ADMIN_GUIDE.md)** — Daily maintainer playbook for roadmap decomposition (`swarm plan --from`), backlog scanning (`swarm plan --scan`), and auditing provenance-attested Draft PRs.
+- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](docs/ADMIN_GUIDE.md)** — Daily maintainer playbook for roadmap decomposition (`swarm repo plan --from`), backlog scanning (`swarm repo plan --scan`), and auditing provenance-attested Draft PRs.
 - **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](docs/GITHUB.md)** — Configure repository rulesets, `SWARM_GITHUB_TOKEN` auth without `gh` CLI, secret-manager tokens via `SWARM_GITHUB_TOKEN_COMMAND`, and role-separated collaborator allowlists.
 - **[Fork Mode Guide (`docs/fork-mode.md`)](docs/fork-mode.md)** — Contribute from a personal GitHub fork without upstream push access using the upstream fork coordinator Action.
 - **[Working with Grok Bot (`docs/grokbot.md`)](docs/grokbot.md)** — Connect Grok Bot to your repositories, talk to your codebase, run PR reviews, and coordinate SwarmOS workers.
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](docs/openai-dot.md)** — Configure Codex Cloud environments and remote repositories so your Dot can plan, review, and ship changes.
 - **[Project & Maintainer Setup (`docs/project.md`)](docs/project.md)** — Configure `.swarm/config.yaml`, validation rules, plan gates, and repository protections.
-- **[Developer & Worker Guide (`docs/developer.md`)](docs/developer.md)** — Everyday CLI workflows, interactive `swarm stage`, agent harness table, reviewer sandboxing, handoffs, and recovery.
+- **[Developer & Worker Guide (`docs/developer.md`)](docs/developer.md)** — Everyday CLI workflows, interactive `swarm issue stage`, agent harness table, reviewer sandboxing, handoffs, and recovery.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](docs/WORKFLOWS.md)** — Role prompts, `PLAN.md` / `TEST_PLAN.md` / `REVIEW.md` artifacts, provenance attestations, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](docs/ARCHITECTURE.md)** — Git compare-and-swap state refs, claim fencing, worktree checkpoints, and process boundaries.
 - **[Security Policy (`SECURITY.md`)](SECURITY.md)** — Trust model, reviewer isolation, vulnerability reporting, and release attestation verification.

@@ -243,7 +243,7 @@ func CodexAuthentication(ctx context.Context, binary string) (string, error) {
 	var out process.Output
 	err = runNativeCommand(ctx, binary, os.TempDir(), nativeEnv(home, true), []string{"login", "status"}, nil, &out, &out)
 	if err != nil {
-		return "", fmt.Errorf("codex login is unavailable; run codex login, then swarm doctor")
+		return "", fmt.Errorf("codex login is unavailable; run codex login, then swarm repo doctor")
 	}
 	if strings.Contains(out.String(), "Logged in using ChatGPT") {
 		return "Codex-managed ChatGPT login", nil

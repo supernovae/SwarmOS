@@ -132,11 +132,11 @@ func TestCLIApprovalWorkAndIdempotentSubmission(t *testing.T) {
 	if slices.Contains(issue.Labels, "swarm:ready") {
 		t.Fatal("new task was automatically ready")
 	}
-	if _, err := f.run("work", n, "--agent", "mock", "--headless"); err == nil {
+	if _, err := f.run("issue", "work", n, "--agent", "mock", "--headless"); err == nil {
 		t.Fatal("unapproved work executed")
 	}
 	f.must(t, "issue", "approve", n)
-	result := f.must(t, "work", n, "--agent", "mock", "--headless", "--json")
+	result := f.must(t, "issue", "work", n, "--agent", "mock", "--headless", "--json")
 	var outcome struct {
 		Status string              `json:"status"`
 		Result workflow.WorkResult `json:"result"`
@@ -147,12 +147,12 @@ func TestCLIApprovalWorkAndIdempotentSubmission(t *testing.T) {
 	if outcome.Status != "completed" || !outcome.Result.ValidationPassed {
 		t.Fatalf("unexpected workflow outcome: %+v", outcome)
 	}
-	f.must(t, "submit", n)
+	f.must(t, "issue", "submit", n)
 	first := f.state(t, number)
 	if first.PRNumber == 0 || first.Lease.Status != "completed" {
 		t.Fatalf("submission not durably recorded: %+v", first)
 	}
-	f.must(t, "submit", n)
+	f.must(t, "issue", "submit", n)
 	second := f.state(t, number)
 	if second.PRNumber != first.PRNumber || second.HeadSHA != first.HeadSHA {
 		t.Fatal("retry changed the submission identity")
@@ -168,36 +168,36 @@ func TestCLIHumanGateCannotBeBypassedByReviewOrSubmit(t *testing.T) {
 	number := f.create(t, "human")
 	n := strconv.Itoa(number)
 	f.must(t, "issue", "approve", n)
-	f.must(t, "work", n, "--agent", "mock", "--headless")
+	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
 	var paused struct {
 		Status string `json:"status"`
 	}
-	if err := json.Unmarshal([]byte(f.must(t, "work", n, "--agent", "mock", "--json")), &paused); err != nil {
+	if err := json.Unmarshal([]byte(f.must(t, "issue", "work", n, "--agent", "mock", "--json")), &paused); err != nil {
 		t.Fatal(err)
 	}
 	if paused.Status != "paused" {
 		t.Fatalf("retry before human approval must remain paused, got %q", paused.Status)
 	}
-	if _, err := f.run("submit", n); err == nil {
+	if _, err := f.run("issue", "submit", n); err == nil {
 		t.Fatal("submission bypassed human approval")
 	}
-	f.must(t, "review", n, "--agent", "mock")
-	if _, err := f.run("work", n, "--phase", "implement", "--gate", "none", "--agent", "mock"); err == nil {
+	f.must(t, "issue", "review-plan", n, "--agent", "mock")
+	if _, err := f.run("issue", "work", n, "--phase", "implement", "--gate", "none", "--agent", "mock"); err == nil {
 		t.Fatal("agent review satisfied human gate")
 	}
 	t.Setenv("SWARM_USER", "independent-maintainer")
-	f.must(t, "review", n, "--approve", "--notes", "Checked exact plan and test plan")
+	f.must(t, "issue", "review-plan", n, "--approve", "--notes", "Checked exact plan and test plan")
 	t.Setenv("SWARM_USER", "alice")
-	f.must(t, "work", n, "--agent", "mock", "--headless")
-	f.must(t, "submit", n)
+	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+	f.must(t, "issue", "submit", n)
 }
 
 func TestCLISelectorsFailBeforeClaiming(t *testing.T) {
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	for _, args := range [][]string{
-		{"work", "1", "--next"}, {"work", "1", "--phase", "typo"}, {"work", "1", "--phase", "full"},
-		{"work", "1", "--phase", "submitted"}, {"work", "1", "--gate", "typo"}, {"review", "1", "--approve", "--reject"},
+		{"issue", "work", "1", "--next"}, {"issue", "work", "1", "--phase", "typo"}, {"issue", "work", "1", "--phase", "full"},
+		{"issue", "work", "1", "--phase", "submitted"}, {"issue", "work", "1", "--gate", "typo"}, {"issue", "review-plan", "1", "--approve", "--reject"},
 		{"node", "run", "--concurrency", "0"}, {"node", "run", "--max-jobs", "-1"}, {"node", "run", "--poll-interval", "0s"},
 	} {
 		if _, err := f.run(args...); err == nil {
@@ -206,6 +206,194 @@ func TestCLISelectorsFailBeforeClaiming(t *testing.T) {
 	}
 	if _, err := f.manager.GetCurrentState(context.Background(), number); !errors.Is(err, coordination.ErrNotFound) {
 		t.Fatalf("invalid selection changed state: %v", err)
+	}
+}
+
+func TestCLIClaimNextSelectorsAndPreparedWork(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	for _, args := range [][]string{
+		{"issue", "claim", "1", "--next"}, {"issue", "claim"},
+		{"issue", "claim", "1", "--all"}, {"issue", "claim", "1", "--duration", "0s"},
+		{"issue", "claim", "--next", "--duration", "-1m"},
+	} {
+		if _, err := f.run(args...); err == nil {
+			t.Fatalf("invalid claim accepted: %v", args)
+		}
+	}
+	if _, err := f.manager.GetCurrentState(context.Background(), number); !errors.Is(err, coordination.ErrNotFound) {
+		t.Fatalf("invalid claim changed state: %v", err)
+	}
+	if _, err := f.run("issue", "claim", "--next"); !errors.Is(err, ErrNoReadyWork) {
+		t.Fatalf("empty queue: %v", err)
+	}
+	f.must(t, "issue", "approve", n)
+	f.must(t, "repo", "add", "octo/repo", f.root)
+	raw := f.must(t, "issue", "claim", "--next", "--all", "--agent", "mock", "--json")
+	var outcome struct {
+		Kind      string         `json:"kind"`
+		Status    string         `json:"status"`
+		Selection PulledWorkUnit `json:"selection"`
+	}
+	if err := json.Unmarshal([]byte(raw), &outcome); err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Kind != "claim" || outcome.Status != "claimed" || outcome.Selection.Repo != "octo/repo" ||
+		outcome.Selection.Issue == nil || outcome.Selection.Issue.Number != number || outcome.Selection.RepoRoot != f.root ||
+		outcome.Selection.TargetPhase != "all" || outcome.Selection.WorktreePath == "" {
+		t.Fatalf("incorrect selected repository or task: %+v", outcome)
+	}
+	before := f.state(t, number)
+	if before.Lease.Status != "active" || len(before.Artifacts) != 0 {
+		t.Fatalf("selection ran work: %+v", before)
+	}
+	f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+	if after := f.state(t, number); after.Lease.ClaimID != before.Lease.ClaimID {
+		t.Fatal("explicit work did not resume the prepared claim")
+	}
+}
+
+func TestCLIClaimNextResumesHandoffPhase(t *testing.T) {
+	f := newCLIFixture(t)
+	n := strconv.Itoa(f.create(t, "agent"))
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "work", n, "--agent", "mock", "--phase", "plan", "--handoff", "--progress=false")
+	before := f.state(t, 1)
+	worktree := workspace.WorktreePath(f.root, 1)
+	checkpoint, err := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := f.must(t, "issue", "claim", "--next", "--agent", "mock", "--json")
+	var outcome struct {
+		Selection PulledWorkUnit `json:"selection"`
+	}
+	if err := json.Unmarshal([]byte(raw), &outcome); err != nil {
+		t.Fatal(err)
+	}
+	after := f.state(t, 1)
+	selectedHead, err := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Selection.TargetPhase != "review" || !bytes.Equal(selectedHead, checkpoint) || !reflect.DeepEqual(after.Artifacts, before.Artifacts) {
+		t.Fatalf("claim restarted handed-off plan: before=%+v after=%+v selection=%+v", before, after, outcome.Selection)
+	}
+}
+
+func TestCLIValidationNamespacesAndRemovedRoutes(t *testing.T) {
+	f := newCLIFixture(t)
+	issue := f.create(t, "agent")
+	n := strconv.Itoa(issue)
+	for _, args := range [][]string{
+		{"init"}, {"doctor"}, {"plan", "--scan"}, {"claim", n}, {"pull"}, {"work", n},
+		{"stage", n}, {"review", n}, {"validate", n}, {"submit", n}, {"status", n},
+		{"renew", n}, {"release", n}, {"issue", "pull"}, {"issue", "review", n},
+	} {
+		if _, err := f.run(args...); err == nil {
+			t.Fatalf("removed route accepted: %v", args)
+		}
+	}
+	if _, err := f.manager.GetCurrentState(context.Background(), issue); !errors.Is(err, coordination.ErrNotFound) {
+		t.Fatalf("removed routes mutated task state: %v", err)
+	}
+	for _, args := range [][]string{
+		{"repo", "validate"}, {"repo", "validate", n, "--base", "HEAD"},
+		{"repo", "validate", "--base", "HEAD"}, {"repo", "validate", "--ci", "--base", "HEAD"},
+		{"issue", "validate", n, "--ci"},
+	} {
+		if _, err := f.run(args...); err == nil {
+			t.Fatalf("invalid validation accepted: %v", args)
+		}
+	}
+	base, err := exec.Command("git", "-C", f.root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := f.must(t, "repo", "validate", "--base", strings.TrimSpace(string(base)), "--json")
+	var outcome struct {
+		Kind   string `json:"kind"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(raw), &outcome); err != nil || outcome.Kind != "validation" || outcome.Status != "passed" {
+		t.Fatalf("repo validation: %s (%v)", raw, err)
+	}
+	if _, err := f.manager.GetCurrentState(context.Background(), issue); !errors.Is(err, coordination.ErrNotFound) {
+		t.Fatalf("repo validation wrote task artifacts: %v", err)
+	}
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "claim", n, "--agent", "mock")
+	if _, err := f.run("issue", "validate", n, "--base", strings.Repeat("a", 40)); err == nil || !strings.Contains(err.Error(), "approved immutable base") {
+		t.Fatalf("mismatched issue base accepted: %v", err)
+	}
+	if _, err := f.run("issue", "validate", n); err == nil {
+		t.Fatal("issue validation accepted missing task artifacts")
+	}
+}
+
+func TestCLIRepoValidationFailurePreservesJSONAndExitStatus(t *testing.T) {
+	f := newCLIFixture(t)
+	policy := "required_checks:\n  - name: deliberate-failure\n    command: 'false'\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
+	if err := os.WriteFile(filepath.Join(f.root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "failing trusted policy"}} {
+		if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	base, err := exec.Command("git", "-C", f.root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := f.run("repo", "validate", "--base", strings.TrimSpace(string(base)), "--json")
+	if err == nil {
+		t.Fatal("failed trusted check returned success")
+	}
+	var outcome struct {
+		Kind   string `json:"kind"`
+		Status string `json:"status"`
+	}
+	if jsonErr := json.Unmarshal([]byte(raw), &outcome); jsonErr != nil || outcome.Kind != "validation" || outcome.Status != "failed" {
+		t.Fatalf("invalid failed validation JSON: %s (%v)", raw, jsonErr)
+	}
+}
+
+func TestCLIIssueLeafJSONAndReviewDelegation(t *testing.T) {
+	f := newCLIFixture(t)
+	raw := f.must(t, "issue", "create", "--json", "--title", "JSON WorkUnit", "--objective", "Check leaf output",
+		"--constraint", "Keep policy unchanged", "--acceptance", "Pass checks", "--gate", "agent")
+	var created struct {
+		Kind  string         `json:"kind"`
+		Issue *tracker.Issue `json:"issue"`
+	}
+	if err := json.Unmarshal([]byte(raw), &created); err != nil || created.Kind != "issue" || created.Issue == nil {
+		t.Fatalf("create JSON: %s (%v)", raw, err)
+	}
+	n := strconv.Itoa(created.Issue.Number)
+	for _, tc := range []struct {
+		args []string
+		kind string
+	}{
+		{[]string{"issue", "lint", n, "--json"}, "issue-lint"},
+		{[]string{"issue", "approve", n, "--json"}, "task-approval"},
+	} {
+		raw := f.must(t, tc.args...)
+		var result struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal([]byte(raw), &result); err != nil || result.Kind != tc.kind {
+			t.Fatalf("%v: %s (%v)", tc.args, raw, err)
+		}
+	}
+	f.must(t, "issue", "work", n, "--agent", "mock", "--phase", "plan", "--progress=false")
+	raw = f.must(t, "issue", "review-plan", n, "--agent", "mock", "--json")
+	var review struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal([]byte(raw), &review); err != nil || review.Kind != "work" {
+		t.Fatalf("review delegation JSON: %s (%v)", raw, err)
 	}
 }
 
@@ -250,7 +438,7 @@ func TestNodeHumanGateWaitsThenResumesImplementation(t *testing.T) {
 	if after := f.state(t, issue); after.Lease.ClaimID != waiting.Lease.ClaimID {
 		t.Fatal("worker reclaimed a task blocked on human approval")
 	}
-	f.must(t, "review", n, "--approve")
+	f.must(t, "issue", "review-plan", n, "--approve")
 	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1", "--auto-submit")
 	if completed := f.state(t, issue); completed.PRNumber == 0 || completed.Lease.Status != "completed" {
 		t.Fatalf("approved human handoff did not reach submission: %+v", completed)
@@ -262,12 +450,12 @@ func TestCLIRenewalLimitReturnsErrorWithoutChangingLease(t *testing.T) {
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
 	f.must(t, "issue", "approve", n)
-	f.must(t, "claim", n, "--agent", "mock")
+	f.must(t, "issue", "claim", n, "--agent", "mock")
 	for range f.state(t, number).Lease.MaxRenewals {
-		f.must(t, "renew", n, "--json")
+		f.must(t, "issue", "renew", n, "--json")
 	}
 	before := f.state(t, number).Lease
-	if _, err := f.run("renew", n, "--json"); !errors.Is(err, lease.ErrMaxRenewals) {
+	if _, err := f.run("issue", "renew", n, "--json"); !errors.Is(err, lease.ErrMaxRenewals) {
 		t.Fatalf("renewal limit must reach the caller: %v", err)
 	}
 	after := f.state(t, number).Lease
@@ -290,7 +478,7 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 	}
 
 	f.must(t, "issue", "approve", n)
-	f.must(t, "claim", n, "--agent", "mock")
+	f.must(t, "issue", "claim", n, "--agent", "mock")
 
 	wtPath := filepath.Join(f.root, ".swarm", "worktrees", "issue-"+n)
 	activeDir := filepath.Join(wtPath, ".swarm", "active")
@@ -301,14 +489,14 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f.must(t, "stage", n, "--phase", "plan", "--harness", "claude", "--model", "claude-sonnet-4-5")
-	f.must(t, "review", n, "--agent", "mock")
+	f.must(t, "issue", "stage", n, "--phase", "plan", "--harness", "claude", "--model", "claude-sonnet-4-5")
+	f.must(t, "issue", "review-plan", n, "--agent", "mock")
 
 	if err := os.WriteFile(filepath.Join(wtPath, "feature.txt"), []byte("shipped\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	f.must(t, "stage", n, "--phase", "implement", "--harness", "codex", "--model", "gpt-5-codex")
-	f.must(t, "submit", n)
+	f.must(t, "issue", "stage", n, "--phase", "implement", "--harness", "codex", "--model", "gpt-5-codex")
+	f.must(t, "issue", "submit", n)
 
 	state := f.state(t, number)
 	pr, err := f.tracker.FindDraftPR(context.Background(), state.Branch, "main")
@@ -341,17 +529,17 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 		t.Fatalf("expected 1 living projection comment on issue #%d, got %d", number, len(comments))
 	}
 
-	// Verify swarm plan --from preview vs --apply --json and --scan CLI commands
+	// Verify swarm repo plan --from preview vs --apply --json and --scan CLI commands
 	roadmapFile := filepath.Join(f.root, "ROADMAP.md")
 	roadmapContent := "# CLI Roadmap\n\n## First Roadmap Item\n### Objective\nBuild part one.\n### Acceptance Criteria\n- [ ] Check one\n"
 	if err := os.WriteFile(roadmapFile, []byte(roadmapContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	previewOut := f.must(t, "plan", "--from", roadmapFile)
+	previewOut := f.must(t, "repo", "plan", "--from", roadmapFile)
 	if !strings.Contains(previewOut, "`Step 1`") || strings.Contains(previewOut, "`#1`") {
 		t.Fatalf("expected preview output to use Step 1 and not fake #1:\n%s", previewOut)
 	}
-	planJSON := f.must(t, "plan", "--from", roadmapFile, "--apply", "--json")
+	planJSON := f.must(t, "repo", "plan", "--from", roadmapFile, "--apply", "--json")
 	var parsedPlan struct {
 		Kind   string                     `json:"kind"`
 		Report workflow.ProjectPlanReport `json:"report"`
@@ -366,7 +554,7 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 		t.Fatalf("expected 1 created child and 0 existing, got %+v", parsedPlan.Report)
 	}
 	// Repeat apply --json: EpicCreated=false, CreatedIssues=0, ExistingIssues=1
-	repeatJSON := f.must(t, "plan", "--from", roadmapFile, "--apply", "--json")
+	repeatJSON := f.must(t, "repo", "plan", "--from", roadmapFile, "--apply", "--json")
 	var repeatPlan struct {
 		Kind   string                     `json:"kind"`
 		Report workflow.ProjectPlanReport `json:"report"`
@@ -377,7 +565,7 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 	if repeatPlan.Report.EpicCreated || len(repeatPlan.Report.CreatedIssues) != 0 || len(repeatPlan.Report.ExistingIssues) != 1 {
 		t.Fatalf("expected repeat apply JSON to show reused epic and child, got %+v", repeatPlan.Report)
 	}
-	scanOut := f.must(t, "plan", "--scan", "--apply")
+	scanOut := f.must(t, "repo", "plan", "--scan", "--apply")
 	if !strings.Contains(scanOut, "SwarmOS Backlog Sense-Making") {
 		t.Fatalf("unexpected plan --scan output:\n%s", scanOut)
 	}
@@ -436,7 +624,7 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	if _, err := f.run("issue", "approve", epicNumStr); err == nil {
 		t.Fatal("expected issue approve on Epic to fail")
 	}
-	if _, err := f.run("claim", epicNumStr); err == nil {
+	if _, err := f.run("issue", "claim", epicNumStr); err == nil {
 		t.Fatal("expected claim on Epic to fail")
 	}
 
@@ -460,7 +648,7 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	// Even if an Epic is mislabeled swarm:ready, PullNextReadyIssue skips it and claims the approved child
 	_ = f.tracker.AddLabels(ctx, epicRes.Issue.Number, []string{"swarm:ready"})
 	f.must(t, "issue", "approve", strconv.Itoa(childRes.Issue.Number))
-	f.must(t, "work", "--next", "--agent", "mock", "--headless")
+	f.must(t, "issue", "work", "--next", "--agent", "mock", "--headless")
 	if st := f.state(t, childRes.Issue.Number); st.Lease.ClaimID == "" {
 		t.Fatalf("expected child #%d to be pulled and worked past mislabeled Epic #%d", childRes.Issue.Number, epicRes.Issue.Number)
 	}
@@ -489,7 +677,7 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	var docBuf bytes.Buffer
 	docCmd.SetOut(&docBuf)
 	docCmd.SetErr(&docBuf)
-	docCmd.SetArgs([]string{"--root", f.root, "doctor", "--backend", "github"})
+	docCmd.SetArgs([]string{"--root", f.root, "repo", "doctor", "--backend", "github"})
 	if err := docCmd.Execute(); err != nil {
 		t.Fatalf("doctor should report WARN without failing: %v\n%s", err, docBuf.String())
 	}
@@ -940,17 +1128,36 @@ func TestForkCLISmoke(t *testing.T) {
 	}
 
 	// 0. Flag & backend validation checks
-	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--backend", "local", "--fork", "status"); err == nil {
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--backend", "local", "--fork", "issue", "status"); err == nil {
 		t.Fatal("expected --backend local --fork to fail explicitly")
 	}
-	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--fork-remote", "fork", "status"); err == nil {
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--fork-remote", "fork", "issue", "status"); err == nil {
 		t.Fatal("expected --fork-remote without --fork to fail explicitly")
 	}
 	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: aliceTracker}, "--fork", "issue", "approve", "42"); err == nil {
 		t.Fatal("expected maintainer issue command to fail with --fork")
 	}
-	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: aliceTracker}, "--fork", "review", "42", "--approve"); err == nil {
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: aliceTracker}, "--fork", "issue", "review-plan", "42", "--approve"); err == nil {
 		t.Fatal("expected human review --approve to fail with --fork")
+	}
+	for _, args := range [][]string{
+		{"issue", "create", "--title", "forbidden"},
+		{"issue", "lint", "42"},
+		{"issue", "decompose", "42"},
+		{"issue", "epic", "create"},
+	} {
+		call := append([]string{"--fork", "--repo", "octo/swarm"}, args...)
+		if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: aliceTracker}, call...); err == nil || !strings.Contains(err.Error(), "maintainer-only") {
+			t.Fatalf("--repo bypassed fork restriction on %v: %v", args, err)
+		}
+	}
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: aliceTracker},
+		"--fork", "--repo", "octo/swarm", "issue", "review-plan", "42", "--approve"); err == nil || !strings.Contains(err.Error(), "maintainer-only") {
+		t.Fatalf("--repo bypassed human review restriction: %v", err)
+	}
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: aliceTracker},
+		"--fork", "--repo", "octo/swarm", "repo", "plan", "--scan", "--apply"); err == nil || !strings.Contains(err.Error(), "maintainer-only") {
+		t.Fatalf("--repo bypassed project plan restriction: %v", err)
 	}
 
 	// 1. Maintainer approves issue #42 at SHA A on upstream
@@ -966,8 +1173,8 @@ func TestForkCLISmoke(t *testing.T) {
 	git(aliceRoot, "remote", "add", "fork", aliceForkBare)
 	git(aliceRoot, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "no-upstream-push.git"))
 
-	// 3. Alice runs `swarm --fork claim 42 --agent mock`
-	claimOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "claim", "42", "--agent", "mock")
+	// 3. Alice runs `swarm --fork issue claim 42 --agent mock`
+	claimOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "claim", "42", "--agent", "mock")
 	if err != nil {
 		t.Fatalf("alice --fork claim 42 failed: %v\n%s", err, claimOut)
 	}
@@ -998,14 +1205,14 @@ func TestForkCLISmoke(t *testing.T) {
 
 	// 4. Contributor review is advisory: the authenticated maintainer must
 	// approve the current plan before the contributor can resume implementation.
-	workOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "work", "42", "--agent", "mock", "--headless")
+	workOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "work", "42", "--agent", "mock", "--headless")
 	if !errors.Is(err, workflow.ErrPlanApprovalNeeded) {
 		t.Fatalf("expected contributor review to stop at the trusted approval gate, got %v\n%s", err, workOut)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "review", "42", "--approve", "--notes", "Reviewed the contributor plan and test plan"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "issue", "review-plan", "42", "--approve", "--notes", "Reviewed the contributor plan and test plan"); err != nil {
 		t.Fatalf("maintainer review failed: %v\n%s", err, out)
 	}
-	workOut, err = runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "work", "42", "--agent", "mock", "--headless", "--phase", "implement")
+	workOut, err = runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "work", "42", "--agent", "mock", "--headless", "--phase", "implement")
 	if err != nil {
 		t.Fatalf("alice --fork work 42 --phase implement after trusted approval failed: %v\n%s", err, workOut)
 	}
@@ -1024,7 +1231,7 @@ func TestForkCLISmoke(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt42, ".swarm", "validation", "required-checks.yaml"), []byte("required_checks: []\nprotected_paths: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "42"); err == nil {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil {
 		t.Fatalf("expected --fork submit with tampered required-checks.yaml to fail, got:\n%s", out)
 	}
 	// Reset tampered commit back to shaA and restore clean feature change
@@ -1039,7 +1246,7 @@ func TestForkCLISmoke(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt42, ".github", "workflows", "swarm-fork-coordinator.yml"), []byte("name: Tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "42"); err == nil {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil {
 		t.Fatalf("expected --fork submit with tampered workflow to fail, got:\n%s", out)
 	}
 	mu.Lock()
@@ -1058,8 +1265,8 @@ func TestForkCLISmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 6. Alice runs `swarm --fork submit 42`: records checkpoint SHA B on fork & upstream, creates Draft PR with head=alice:swarm/issue-42-<claim_id> and base=main
-	submitOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "42")
+	// 6. Alice runs `swarm --fork issue submit 42`: records checkpoint SHA B on fork & upstream, creates Draft PR with head=alice:swarm/issue-42-<claim_id> and base=main
+	submitOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42")
 	if err != nil {
 		t.Fatalf("alice --fork submit 42 failed: %v\n%s", err, submitOut)
 	}
@@ -1071,7 +1278,7 @@ func TestForkCLISmoke(t *testing.T) {
 		t.Fatalf("unexpected upstream state after submit: %+v (want shaB=%s)", stSubmitted, shaB)
 	}
 	// Repeat submit is idempotent and returns the same PR
-	repeatOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "42")
+	repeatOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42")
 	if err != nil {
 		t.Fatalf("repeat --fork submit 42 failed: %v\n%s", err, repeatOut)
 	}
@@ -1097,7 +1304,7 @@ func TestForkCLISmoke(t *testing.T) {
 	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "issue", "approve", "43"); err != nil {
 		t.Fatalf("approve 43: %v\n%s", err, out)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "claim", "43", "--agent", "mock"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "claim", "43", "--agent", "mock"); err != nil {
 		t.Fatalf("alice claim 43: %v\n%s", err, out)
 	}
 
@@ -1113,7 +1320,7 @@ func TestForkCLISmoke(t *testing.T) {
 	git(bobRoot, "remote", "add", "fork", bobForkBare)
 	git(bobRoot, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "no-upstream-push.git"))
 
-	if out, err := runCmd(RootOptions{RepoRoot: bobRoot, Backend: "github", trackerOverride: bobTracker}, "--fork", "claim", "43", "--agent", "mock"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: bobRoot, Backend: "github", trackerOverride: bobTracker}, "--fork", "issue", "claim", "43", "--agent", "mock"); err != nil {
 		t.Fatalf("bob takeover claim 43 failed: %v\n%s", err, out)
 	}
 	raw43Before, _, err := upstreamStore.Load(ctx, 43)
@@ -1127,10 +1334,10 @@ func TestForkCLISmoke(t *testing.T) {
 	}
 
 	// Alice's stale renew and submit on #43 must fail and leave upstream #43 state untouched
-	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "renew", "43"); err == nil {
+	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "renew", "43"); err == nil {
 		t.Fatal("expected alice stale renew on #43 to fail after bob takeover")
 	}
-	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "submit", "43"); err == nil {
+	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "43"); err == nil {
 		t.Fatal("expected alice stale submit on #43 to fail after bob takeover")
 	}
 	raw43After, _, err := upstreamStore.Load(ctx, 43)
@@ -1166,29 +1373,55 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 
-	Version = "0.4.0"
-	if err := runCmd(root, "init", "--fork-coordinator"); err != nil {
-		t.Fatalf("expected swarm init --fork-coordinator on release v0.4.0 to succeed, got: %v", err)
+	Version = "0.6.0"
+	if err := runCmd(root, "repo", "init", "--fork-coordinator"); err != nil {
+		t.Fatalf("expected repo init --fork-coordinator on release v0.6.0 to succeed, got: %v", err)
 	}
 	for _, rel := range []string{".github/workflows/swarm-validate.yml", ".github/workflows/swarm-fork-coordinator.yml"} {
 		raw, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
 		}
-		if !strings.Contains(string(raw), "SWARM_VERSION: v0.4.0") {
-			t.Fatalf("expected %s to pin v0.4.0, got:\n%s", rel, string(raw))
+		if !strings.Contains(string(raw), "SWARM_VERSION: v0.6.0") {
+			t.Fatalf("expected %s to pin v0.6.0, got:\n%s", rel, string(raw))
 		}
 	}
 
-	for _, version := range []string{"0.4.0-dev", "0.5.0+dirty"} {
+	for _, version := range []string{"0.5.0", "0.6.0-dev", "0.6.0+dirty", "snapshot"} {
 		t.Run(version, func(t *testing.T) {
 			Version = version
 			devRoot := t.TempDir()
 			if out, err := exec.Command("git", "-C", devRoot, "init", "-b", "main").CombinedOutput(); err != nil {
 				t.Fatalf("git init: %v (%s)", err, out)
 			}
-			if err := runCmd(devRoot, "init", "--fork-coordinator"); err == nil {
+			if err := runCmd(devRoot, "repo", "init", "--fork-coordinator"); err == nil {
 				t.Fatal("expected non-release build without --swarm-version to fail")
+			}
+			if err := runCmd(devRoot, "repo", "init"); err != nil {
+				t.Fatalf("ordinary init with %s: %v", version, err)
+			}
+			if _, err := os.Stat(filepath.Join(devRoot, ".swarm", "config.yaml")); err != nil {
+				t.Fatalf("ordinary init omitted the harness: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(devRoot, ".github", "workflows", "swarm-validate.yml")); !os.IsNotExist(err) {
+				t.Fatalf("ordinary init automatically selected incompatible pin %s: %v", version, err)
+			}
+		})
+	}
+	Version = "dev"
+	for _, version := range []string{"v0.5.0", "v0.6.0", "v0.6.0-rc.1", "v1.0.0", strings.Repeat("a", 40)} {
+		t.Run(version, func(t *testing.T) {
+			pinRoot := t.TempDir()
+			if out, err := exec.Command("git", "-C", pinRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v (%s)", err, out)
+			}
+			if err := runCmd(pinRoot, "repo", "init", "--swarm-version", version); (err == nil) == (version == "v0.5.0") {
+				t.Fatalf("unexpected compatibility result for %s: %v", version, err)
+			}
+			if version == "v0.5.0" {
+				if _, err := os.Stat(filepath.Join(pinRoot, ".swarm")); !os.IsNotExist(err) {
+					t.Fatalf("incompatible pin wrote scaffolding: %v", err)
+				}
 			}
 		})
 	}
@@ -1199,13 +1432,13 @@ func TestCLIStatusProvenance(t *testing.T) {
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
 	f.must(t, "issue", "approve", n)
-	f.must(t, "work", n, "--agent", "mock", "--headless")
+	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
 	before := f.state(t, number)
 	roles := []string{"planner", "reviewer", "developer", "tester"}
 	if len(before.Attestations) != len(roles) {
 		t.Fatalf("expected four records: %+v", before.Attestations)
 	}
-	out := f.must(t, "status", n)
+	out := f.must(t, "issue", "status", n)
 	previous := -1
 	for i, record := range before.Attestations {
 		if record.Role != roles[i] {
@@ -1246,7 +1479,7 @@ func TestCLIStatusProvenance(t *testing.T) {
 	if before.PRNumber != 0 && !strings.Contains(out, fmt.Sprintf("PR #%d: %s", before.PRNumber, before.PRURL)) {
 		t.Errorf("missing PR: %s", out)
 	}
-	for _, args := range [][]string{{"status", n, "--json"}, {"status", "--json"}} {
+	for _, args := range [][]string{{"issue", "status", n, "--json"}, {"issue", "status", "--json"}} {
 		var result struct {
 			Kind   string `json:"kind"`
 			Issues []struct {
@@ -1268,7 +1501,7 @@ func TestCLIStatusProvenance(t *testing.T) {
 			t.Fatalf("unexpected status: %+v", entry)
 		}
 	}
-	if listing := f.must(t, "status"); strings.Contains(listing, "Provenance:") || strings.Contains(listing, "Artifact SHA-256:") {
+	if listing := f.must(t, "issue", "status"); strings.Contains(listing, "Provenance:") || strings.Contains(listing, "Artifact SHA-256:") {
 		t.Fatalf("listing contains details: %s", listing)
 	}
 	if !reflect.DeepEqual(before, f.state(t, number)) {
@@ -1287,7 +1520,7 @@ func TestCLIStatusProvenanceMissing(t *testing.T) {
 				f.must(t, "issue", "approve", n)
 				before = f.state(t, number)
 			}
-			out := f.must(t, "status", n)
+			out := f.must(t, "issue", "status", n)
 			want := "draft/unapproved:"
 			if approved {
 				want = "Provenance: none recorded"
@@ -1295,7 +1528,7 @@ func TestCLIStatusProvenanceMissing(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Fatalf("missing %q: %s", want, out)
 			}
-			for _, args := range [][]string{{"status", n, "--json"}, {"status", "--json"}} {
+			for _, args := range [][]string{{"issue", "status", n, "--json"}, {"issue", "status", "--json"}} {
 				var result struct {
 					Issues []struct {
 						Repository string                     `json:"repository"`

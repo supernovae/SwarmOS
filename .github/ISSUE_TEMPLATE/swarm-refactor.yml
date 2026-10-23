@@ -30,7 +30,7 @@ body:
       placeholder: |
         - [ ] Target code is simplified with zero behavioral regressions
         - [ ] Existing and new unit tests pass
-        - [ ] `swarm validate` passes
+        - [ ] `swarm issue validate` passes
     validations:
       required: true
   - type: dropdown

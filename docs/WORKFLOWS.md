@@ -44,23 +44,23 @@ SwarmOS compiles `.swarm/active/WORKUNIT.md` and `.swarm/active/SYSTEM_PROMPT.md
 
 ```bash
 # Preview the effective workflow, resolved gate, and role agents without side effects
-swarm work 42 --dry-run --backend github
+swarm issue work 42 --dry-run --backend github
 
 # Agent gate: planner writes PLAN.md + TEST_PLAN.md, then the sandboxed reviewer audits it
-swarm work 42 --gate agent --planner-agent claude --reviewer-agent omp --developer-agent codex --backend github
+swarm issue work 42 --gate agent --planner-agent claude --reviewer-agent omp --developer-agent codex --backend github
 
 # Human gate: generate and publish the plan, pause for maintainer review, then resume
-swarm work 42 --gate human --phase plan --backend github
-swarm review 42 --approve --notes "Plan looks great; proceed with implementation" --backend github
-swarm work 42 --phase implement --backend github
+swarm issue work 42 --gate human --phase plan --backend github
+swarm issue review-plan 42 --approve --notes "Plan looks great; proceed with implementation" --backend github
+swarm issue work 42 --phase implement --backend github
 ```
 
 How gate verification keeps reviews trustworthy:
 - **Cryptographic plan binding**: Both `agent` and `human` approvals bind to the exact `WorkUnit` digest and the SHA-256 digests of `PLAN.md` and `TEST_PLAN.md`. If the issue or plan files are edited after approval, SwarmOS requires a fresh review before implementation or submission.
 - **Exact reviewer verdicts**: Under `--gate agent`, the isolated reviewer must begin `.swarm/active/REVIEW.md` with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`. Any `CHANGES_REQUESTED` verdict stops the workflow before code is modified and publishes the findings for inspection.
-- **Authenticated human decisions**: Under `--gate human`, planning pauses with label `swarm:plan-review` until a repository maintainer runs `swarm review <issue> --approve` (or `--reject`).
+- **Authenticated human decisions**: Under `--gate human`, planning pauses with label `swarm:plan-review` until a repository maintainer runs `swarm issue review-plan <issue> --approve` or `swarm issue review-plan <issue> --reject`.
 
-Plan approval and final acceptance review are separate checkpoints. `swarm validate` runs the approved-base checks and protected-path policy; it does not record a pass/fail decision for each acceptance criterion. After submission, maintainers use the attached test plan and observed results to check off verified criteria in the PR and complete GitHub code review. See [Taking a Submitted PR Through Acceptance Review](developer.md#taking-a-submitted-pr-through-acceptance-review) for the handoff.
+`swarm issue approve <issue>` makes the issue's WorkUnit the approved work contract before execution; plan approval is a second, separate checkpoint. `swarm issue validate` runs the approved-base checks and protected-path policy, not a pass/fail decision for each acceptance criterion. `swarm issue submit <issue>` links a Draft PR proposing implementation of the issue contract; `swarm issue status <issue>` exposes its PR number and URL. Maintainers use GitHub for final code and acceptance review. PR repair and rebase are not available as SwarmOS commands. See [Taking a Submitted PR Through Acceptance Review](developer.md#taking-a-submitted-pr-through-acceptance-review) for the handoff.
 
 ---
 
@@ -72,13 +72,13 @@ SwarmOS separates per-issue execution planning from repository-wide roadmap plan
   - `/swarm-plan` — Draft `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` for the active WorkUnit.
   - `/swarm-review` — Audit the current plan against all constraints and acceptance criteria.
   - `/swarm-implement` — Implement the approved plan step by step.
-  - `/swarm-validate` — Run the approved checks and test-plan scenarios, reporting observed results and unverified criteria. The coordinator runs claim-bound `swarm validate` and publishes its validation report.
+  - `/swarm-validate` — Run the approved checks and test-plan scenarios, reporting observed results and unverified criteria. The coordinator runs claim-bound `swarm issue validate` and publishes its validation report.
 - **At the repository root for roadmap ideation & backlog triage**:
-  - `/swarm-project-plan` (in Claude Code and OpenCode) or the shared `.swarm/skills/triage-and-plan.md` skill (used as a regular prompt in Codex and `omp`) — Collaboratively refine an idea into a repo-local plan file, preview `Step N` child tasks with `swarm plan --from <file>`, publish a native `Epic` and draft child sub-issues on explicit maintainer instruction (`--apply`), and selectively approve child WorkUnits with `swarm issue approve <N>`, or triage open issues with `swarm plan --scan`.
+  - `/swarm-project-plan` (in Claude Code and OpenCode) or the shared `.swarm/skills/triage-and-plan.md` skill (used as a regular prompt in Codex and `omp`) — Collaboratively refine an idea into a repo-local plan file, preview `Step N` child tasks with `swarm repo plan --from <file>`, publish a native `Epic` and draft child sub-issues on explicit maintainer instruction (`--apply`), and selectively approve child WorkUnits with `swarm issue approve <N>`, or triage open issues with `swarm repo plan --scan`.
 
 ## 5. Headless Progress
 
-`swarm work` reports stage starts, completions, pauses, and handoffs to stderr. During a quiet stage, a local heartbeat prints every 15 seconds with the current stage and elapsed time. This timer reports that execution is still running; lease renewal continues separately.
+`swarm issue work` reports stage starts, completions, pauses, and handoffs to stderr. During a quiet stage, a local heartbeat prints every 15 seconds with the current stage and elapsed time. This timer reports that execution is still running; lease renewal continues separately.
 
 The final result stays on stdout, including when using `--json`. Pass `--progress=false` to silence progress messages. Interactive execution and dry runs do not print these messages.
 

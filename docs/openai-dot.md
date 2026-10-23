@@ -24,8 +24,8 @@ Pairing your Dot with **SwarmOS (`swarm`)** gives it a clean, repo-native engine
 flowchart LR
     You["You (ChatGPT Desktop, Web, Mobile, or Slack)"] --> Dot["Your OpenAI Dot<br/>Always-On Teammate"]
     Dot -->|Delegates coding task| Codex["Codex Cloud Environment<br/>or Connected Dev Host"]
-    Codex -->|swarm work / node run| Worktree["Isolated Git Worktree<br/>PLAN.md + TEST_PLAN.md + Checks"]
-    Worktree -->|swarm submit| PR["Artifact-Backed<br/>Draft PR"]
+    Codex -->|swarm issue work / node run| Worktree["Isolated Git Worktree<br/>PLAN.md + TEST_PLAN.md + Checks"]
+    Worktree -->|swarm issue submit| PR["Artifact-Backed<br/>Draft PR"]
     PR -->|Codex PR review| You
 ```
 
@@ -54,9 +54,9 @@ OpenAI Dots can launch tasks inside [Codex Cloud environments](https://learn.cha
    - Have the environment setup install the pinned `swarm` binary from the [README Quickstart](../README.md#quickstart), along with `git`, `gh`, and the coding harnesses your `.swarm/config.yaml` uses (such as `codex`, `claude`, `opencode`, or `omp`).
    - Make sure the binaries are on the task shell's `PATH` and configure any required model or GitHub credentials in the environment's variables/secrets settings.
 4. **Save and Publish**: click **Publish** (or **Republish** when adding new repositories to an existing environment) so new tasks start from the prepared workspace.
-5. **Register each checkout with SwarmOS**: inside each repository checked out in the environment, register it so `swarm work --next --all` and `swarm node run --all` know where it lives:
+5. **Register each checkout with SwarmOS**: inside each repository checked out in the environment, register it so `swarm issue work --next --all` and `swarm node run --all` know where it lives:
    ```bash
-   swarm doctor --backend github
+   swarm repo doctor --backend github
    swarm repo add --backend github
    swarm repo list
    ```
@@ -92,12 +92,12 @@ After a maintainer approves the task (`swarm issue approve 42 --backend github`)
 
 ```text
 In the Codex environment for OWNER/REPO, run SwarmOS on issue #42:
-1. Run `swarm doctor --backend github` and `swarm work 42 --dry-run --backend github`
+1. Run `swarm repo doctor --backend github` and `swarm issue work 42 --dry-run --backend github`
    to confirm the resolved agents, gate, and base commit.
-2. Run `swarm work 42 --backend github`. Read the generated WORKUNIT.md,
+2. Run `swarm issue work 42 --backend github`. Read the generated WORKUNIT.md,
    PLAN.md, and TEST_PLAN.md inside `.swarm/worktrees/issue-42`.
 3. If the task uses a human gate, send me the plan summary and wait for my approval.
-4. Once implementation and `swarm validate 42` pass, run `swarm submit 42 --backend github`
+4. Once implementation and `swarm issue validate 42` pass, run `swarm issue submit 42 --backend github`
    and share the Draft PR link with me.
 ```
 
@@ -124,8 +124,8 @@ With your repository connected to Codex and [Codex Code Review](https://learn.ch
 When a SwarmOS task uses a **human plan gate (`--gate human`)**, you can use your Dot's or Codex's review notes to inform your decision, then record your approval via the CLI:
 
 ```bash
-swarm review 42 --approve --notes "Plan and acceptance coverage look solid"
-swarm work 42 --backend github
+swarm issue review-plan 42 --approve --notes "Plan and acceptance coverage look solid"
+swarm issue work 42 --backend github
 ```
 
 ### Use Codex CLI Directly in `.swarm/config.yaml`
@@ -149,7 +149,7 @@ agents:
 Then mix and match agents per role from the CLI:
 
 ```bash
-swarm work 42 \
+swarm issue work 42 \
   --planner-agent claude \
   --reviewer-agent dot \
   --developer-agent codex \

@@ -12,12 +12,13 @@ func newReviewCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, notes string
 	var approve, reject, headless, asJSON bool
 	cmd := &cobra.Command{
-		Use:   "review <issue-number>",
+		Use:   "review-plan <issue-number>",
 		Short: "Review the implementation plan with an isolated agent or authorized human",
 		Long: `Review PLAN.md and TEST_PLAN.md before implementation, using an isolated
 agent or an authorized human decision. Approval is bound to the current task
 and plan digests. This command does not review a finished PR or check off its
-acceptance criteria; final code and acceptance review happens in GitHub.`,
+acceptance criteria; final code and acceptance review happens in GitHub after
+issue submit opens the linked draft PR.`,
 		Args: cobra.ExactArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			if approve && reject {

@@ -14,11 +14,24 @@ import (
 
 func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, durationStr string
-	var asJSON bool
-	cmd := &cobra.Command{Use: "claim <issue-number>", Short: "Reserve an approved task and prepare its pinned worktree", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		issue, err := strconv.Atoi(strings.TrimPrefix(args[0], "#"))
-		if err != nil || issue <= 0 {
-			return fmt.Errorf("invalid issue number %q", args[0])
+	var asJSON, next, allRepos bool
+	cmd := &cobra.Command{Use: "claim [<issue-number>]", Short: "Reserve an approved task or select the next eligible phase", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 && next {
+			return fmt.Errorf("<issue-number> and --next are mutually exclusive")
+		}
+		if len(args) == 0 && !next {
+			return fmt.Errorf("issue number is required (or pass --next)")
+		}
+		if allRepos && !next {
+			return fmt.Errorf("--all requires --next")
+		}
+		var issue int
+		var err error
+		if len(args) > 0 {
+			issue, err = strconv.Atoi(strings.TrimPrefix(args[0], "#"))
+			if err != nil || issue <= 0 {
+				return fmt.Errorf("invalid issue number %q", args[0])
+			}
 		}
 		var duration time.Duration
 		if durationStr != "" {
@@ -26,6 +39,19 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil || duration <= 0 {
 				return fmt.Errorf("--duration must be positive")
 			}
+		}
+		if next {
+			pulled, err := PullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all"}, duration)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "claim", "status": "claimed", "selection": pulled})
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Claimed [%s] issue #%d: %s [phase=%s, expires=%s]\n", pulled.Repo, pulled.Issue.Number, pulled.Issue.Title, pulled.TargetPhase, pulled.State.Lease.ExpiresAt.Format(time.RFC3339))
+			fmt.Fprintf(out, "  Repo Root: %s\n  Branch:    %s\n  Worktree:  %s\n  Contract:  %s/.swarm/active/WORKUNIT.md\n", pulled.RepoRoot, pulled.BranchName, pulled.WorktreePath, pulled.WorktreePath)
+			return nil
 		}
 		root := rootOpts.resolveRepoRoot()
 		tr, manager, cfg, err := rootOpts.resolveLeaseManager(cmd)
@@ -84,6 +110,8 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "Claimed issue #%d as %s [agent=%s expires=%s]\nBranch: %s\nWorktree: %s\n", issue, owner, state.Lease.Agent, state.Lease.ExpiresAt.Format(time.RFC3339), branch, path)
 		return nil
 	}}
+	cmd.Flags().BoolVar(&next, "next", false, "Select the next eligible approved WorkUnit")
+	cmd.Flags().BoolVar(&allRepos, "all", false, "Scan all registered repositories (requires --next)")
 	cmd.Flags().StringVar(&agentName, "agent", "", "Configured planner override")
 	cmd.Flags().StringVar(&durationStr, "duration", "", "Lease duration (approved policy default)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured claim outcome")

@@ -34,7 +34,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 				return fmt.Errorf("--ready requires --apply")
 			}
 			if rootOpts.Fork && (apply || ready) {
-				return fmt.Errorf("swarm plan --apply and --ready are maintainer-only and cannot be used with --fork")
+				return fmt.Errorf("swarm repo plan --apply and --ready are maintainer-only and cannot be used with --fork")
 			}
 			var exportFormat string
 			if cmd.Flags().Changed("export") {

@@ -721,7 +721,7 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 - **Test Plan Artifact Path**: `+"`.swarm/active/TEST_PLAN.md`"+`
 - **Review Artifact Path**: `+"`.swarm/active/REVIEW.md`"+`
 - **Slash Commands**: `+"`/swarm-plan`"+`, `+"`/swarm-review`"+`, `+"`/swarm-implement`"+`, `+"`/swarm-validate`"+`, `+"`/swarm-project-plan`"+`
-- **Interactive Staging CLI**: `+"`swarm stage %d --phase plan`"+` -> `+"`swarm review %d`"+` -> `+"`swarm stage %d --phase implement`"+` -> `+"`swarm submit %d`"+`
+- **Interactive Staging CLI**: `+"`swarm issue stage %d --phase plan`"+` -> `+"`swarm issue review-plan %d`"+` -> `+"`swarm issue stage %d --phase implement`"+` -> `+"`swarm issue submit %d`"+`
 
 Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMPT.md`"+` before making changes.
 %s`, ActiveMarkerStart, wu.ID, wu.IssueNumber, role, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, ActiveMarkerEnd)
@@ -748,7 +748,7 @@ func LoadActiveWorkUnit(worktreePath string) (*contract.WorkUnit, error) {
 }
 
 // CleanEphemeralHarnessMarkers removes the managed <!-- swarm:active:start --> block from AGENTS.md and CLAUDE.md
-// so worktree commits remain clean on `swarm submit`.
+// so worktree commits remain clean on `swarm issue submit`.
 func CleanEphemeralHarnessMarkers(worktreePath string) error {
 	safe, err := safefs.Open(worktreePath)
 	if err != nil {

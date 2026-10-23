@@ -8,7 +8,7 @@ Welcome to **SwarmOS (`github.com/supernovae/swarmos`)**. Every coding agent, re
 
 SwarmOS turns GitHub and Git into a shared, zero-infrastructure coordination layer where people and coding agents can pool compute to ship real software together:
 
-- **For Open Source Communities:** Maintainers define and approve structured `WorkUnit` issues. Contributors anywhere in the world can point their own coding agents (`claude`, `codex`, `opencode`, `omp`, Grok Bot, or OpenAI Dot) at the repository with `swarm work --next` or `swarm node run`, donate agent compute to tackle real backlog items in isolated Git worktrees, and return validated, artifact-backed Draft PRs.
+- **For Open Source Communities:** Maintainers define and approve structured `WorkUnit` issues. Contributors anywhere in the world can point their own coding agents (`claude`, `codex`, `opencode`, `omp`, Grok Bot, or OpenAI Dot) at the repository with `swarm issue work --next` or `swarm node run`, donate agent compute to tackle real backlog items in isolated Git worktrees, and return validated, artifact-backed Draft PRs.
 - **For Internal Engineering Organizations:** Engineering teams can run the exact same workflow across private GitHub repositories—using GitHub Issues, Git compare-and-swap state refs, and existing CI runners as a zero-infrastructure control plane to orchestrate internal coding agents without standing up a separate database or proprietary orchestration server.
 
 When writing code, prompts, or documentation in this repository, preserve that spirit: **practical, welcoming, GitHub-native, and built for real builders.**
@@ -36,7 +36,7 @@ Our documentation (`README.md`, `docs/*.md`, `SECURITY.md`) is the front door to
 
 ## 3. Codebase Map & Architectural Invariants
 
-- **`cmd/swarm/` & `internal/cli/`**: Cobra CLI entrypoint and subcommands (`init`, `doctor`, `issue`, `plan`, `claim`, `pull`, `work`, `stage`, `review`, `validate`, `submit`, `status`, `renew`, `release`, `repo`, `node`, `version`).
+- **`cmd/swarm/` & `internal/cli/`**: Cobra CLI entrypoint and resource groups (`repo init`, `repo doctor`, `repo plan`, `repo validate`, `issue create/approve/claim/work/stage/review-plan/validate/submit/status/renew/release`, `node init/status/run`), plus root `version` and `fork-coordinator`.
 - **`internal/contract/`**: Canonical `WorkUnit`, `Lease`, `Artifact`, `WorkflowSpec`, `ValidationSpec`, and `.swarm/config.yaml` types, JSON Schema validation, and HTML comment stripping.
 - **`internal/coordination/` & `internal/lease/`**: Git compare-and-swap state refs (`refs/heads/swarm-state/issue-<N>`), file-locked local CAS store (`--backend local`), fenced claims (`claim_id`), heartbeats, and issue audit comments.
 - **`internal/workspace/`**: Isolated Git worktree provisioning (`.swarm/worktrees/issue-<N>`), checkpoint commits, and active bundle compilation (`.swarm/active/WORKUNIT.md`, `SYSTEM_PROMPT.md`). Note that SwarmOS injects an ephemeral `` pointer block into `AGENTS.md` and `CLAUDE.md` inside task worktrees and strips it automatically before checkpoints and submissions—never delete content outside those markers.

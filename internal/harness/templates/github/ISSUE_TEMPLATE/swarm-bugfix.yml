@@ -30,7 +30,7 @@ body:
       placeholder: |
         - [ ] Root cause is resolved without regressions
         - [ ] Regression test added and passing
-        - [ ] `swarm validate` passes
+        - [ ] `swarm issue validate` passes
     validations:
       required: true
   - type: dropdown

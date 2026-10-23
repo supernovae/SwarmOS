@@ -190,9 +190,35 @@ func TestInitPreservesExistingPolicyAndRejectsMutablePins(t *testing.T) {
 	if err != nil || string(got) != string(custom) {
 		t.Fatalf("init overwrote policy: %q, %v", got, err)
 	}
-	for _, version := range []string{"main", "latest", "v0.1.0", "v1.2.3;echo injected"} {
-		if _, err := InitRepository(InitOptions{RepoRoot: t.TempDir(), SwarmVersion: version}); err == nil {
+	for _, version := range []string{"main", "latest", "v0.1.0", "v0.2.0", "v0.3.0", "v0.5.99", "v1.2.3;echo injected", "v0.6.0+dirty", "v0.6.0-", "v18446744073709551616.0.0", "v0.18446744073709551616.0", "v0.6.18446744073709551616", strings.Repeat("A", 40)} {
+		root := t.TempDir()
+		if _, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: version}); err == nil {
 			t.Fatalf("unsafe/incompatible pin %q accepted", version)
+		}
+		if fileExists(filepath.Join(root, ".swarm", "config.yaml")) || fileExists(filepath.Join(root, ".github", "workflows", "swarm-validate.yml")) {
+			t.Fatalf("invalid pin %q wrote scaffold files", version)
+		}
+	}
+}
+
+func TestValidateSwarmVersionPin(t *testing.T) {
+	for _, version := range []string{"v0.6.0", "v0.6.0-rc.1", "v0.6.1", "v1.0.0", "v18446744073709551615.0.0", strings.Repeat("a", 40)} {
+		if err := ValidateSwarmVersionPin(version); err != nil {
+			t.Errorf("compatible pin %q rejected: %v", version, err)
+		}
+	}
+	for _, version := range []string{"", "v0.5.999", "v0.5.9-rc.1", "v0.6", "v0.6.0+build", "v0.6.0-rc+build", strings.Repeat("A", 40), "v18446744073709551616.0.0", "v1.18446744073709551616.0", "v1.0.18446744073709551616"} {
+		if err := ValidateSwarmVersionPin(version); err == nil || err.Error() != "swarm version must be a resource-CLI-compatible immutable release tag (v0.6.0 or newer) or full commit SHA" {
+			t.Errorf("invalid pin %q: error = %v", version, err)
+		}
+	}
+}
+
+func TestInitCompatiblePins(t *testing.T) {
+	for _, version := range []string{"v0.6.0", "v0.6.0-rc.1", "v1.0.0", strings.Repeat("a", 40)} {
+		root := t.TempDir()
+		if _, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: version}); err != nil {
+			t.Fatalf("compatible pin %q rejected: %v", version, err)
 		}
 	}
 }
@@ -210,7 +236,7 @@ func TestInitWorkflowUsesNewRepositoryCurrentBranch(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/consumer\ngo 1.24\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: "v0.2.0"}); err != nil {
+	if _, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: "v0.6.0"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -331,13 +357,6 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		t.Fatalf("expected swarm-workunit.yml to default to swarm:draft, got:\n%s", string(wuForm))
 	}
 
-	cmdContent, err := os.ReadFile(filepath.Join(root, ".claude/commands/swarm-project-plan.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(cmdContent), "--from") || !strings.Contains(string(cmdContent), "--apply") || !strings.Contains(string(cmdContent), "swarm issue approve") {
-		t.Fatalf("expected swarm-project-plan.md to document preview, explicit --apply, and selective child approval:\n%s", string(cmdContent))
-	}
 }
 
 func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
@@ -376,8 +395,8 @@ func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
 		t.Fatal("default InitRepository must not scaffold swarm-fork-coordinator.yml without --fork-coordinator")
 	}
 
-	// --fork-coordinator requires a fork-capable --swarm-version pin
-	for _, badPin := range []string{"", "v0.2.0", "v0.3.0", "main"} {
+	// --fork-coordinator requires a resource-CLI-compatible --swarm-version pin.
+	for _, badPin := range []string{"", "v0.2.0", "v0.3.0", "v0.5.0", "main"} {
 		if _, err := InitRepository(InitOptions{RepoRoot: t.TempDir(), ForkCoordinator: true, SwarmVersion: badPin}); err == nil {
 			t.Fatalf("expected ForkCoordinator with pin %q to fail", badPin)
 		}

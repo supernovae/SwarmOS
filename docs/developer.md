@@ -8,26 +8,26 @@ This guide covers day-to-day SwarmOS workflows—whether you are an individual d
 
 ```bash
 # Inspect the resolved agents, gate, and base commit without claiming or running processes
-swarm work 42 --dry-run --backend github
+swarm issue work 42 --dry-run --backend github
 
 # Reserve an approved task and provision .swarm/worktrees/issue-42
-swarm claim 42 --backend github
+swarm issue claim 42 --backend github
 
 # Run (or resume) planning, review gate, implementation, and validation
-swarm work 42 --backend github
+swarm issue work 42 --backend github
 
 # Run validation checks directly or submit the validated branch as a Draft PR
-swarm validate 42 --backend github
-swarm submit 42 --backend github
+swarm issue validate 42 --backend github
+swarm issue submit 42 --backend github
 ```
 
 Helpful CLI conventions:
-- **Picking up the next task**: Use `swarm pull` to reserve the next eligible `swarm:ready` issue, or `swarm work --next` to claim and execute it immediately. Add `--all` with `--next` (or `swarm pull --all`) to scan across all repositories registered in `~/.config/swarm/repos.yaml`.
-- **Interactive & harness-driven staging (`swarm stage`)**: Working inside an interactive coding harness without spawning nested subprocesses? Run `swarm claim <issue>`, write `.swarm/active/PLAN.md` and `TEST_PLAN.md`, and stage each phase directly with `swarm stage <issue> --phase plan --harness <name> --model <name>` and `swarm stage <issue> --phase implement --harness <name> --model <name>`.
+- **Picking up the next task**: Use `swarm issue claim --next` to reserve the next eligible `swarm:ready` issue, or `swarm issue work --next` to claim and execute it immediately. Add `--all` with `--next` (or `swarm issue claim --next --all`) to scan across all repositories registered in `~/.config/swarm/repos.yaml`.
+- **Interactive & harness-driven staging (`swarm issue stage`)**: Working inside an interactive coding harness without spawning nested subprocesses? Run `swarm issue claim <issue>`, write `.swarm/active/PLAN.md` and `TEST_PLAN.md`, and stage each phase directly with `swarm issue stage <issue> --phase plan --harness <name> --model <name>` and `swarm issue stage <issue> --phase implement --harness <name> --model <name>`.
 - **Token auth without `gh` CLI**: Set `SWARM_GITHUB_TOKEN` (or `GH_TOKEN` / `GITHUB_TOKEN`) to authenticate directly with GitHub REST and Git HTTPS remotes on headless machines without installing `gh`.
 - **Secret-manager tokens**: Set `SWARM_GITHUB_TOKEN_COMMAND` (for example `op read op://Private/GitHub/swarm-token` or `security find-generic-password -s swarm-github -w`) so the token stays in 1Password, Bitwarden, Keychain, or libsecret instead of your shell. See [Keep tokens out of your shell](GITHUB.md#keep-tokens-out-of-your-shell-with-a-secret-manager).
-- **Headless vs. interactive**: `swarm work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` to follow the agent's work and add instructions between turns.
-- **Structured JSON output**: Add `--json` to any lifecycle command (`issue`, `plan`, `claim`, `pull`, `work`, `stage`, `review`, `validate`, `submit`, `status`, `renew`, `release`, or `node run`) for scripts and automation.
+- **Headless vs. interactive**: `swarm issue work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` to follow the agent's work and add instructions between turns.
+- **Structured JSON output**: Use `--json` on a leaf that supports it, such as `swarm issue claim --next --json`, `swarm issue work 42 --json`, `swarm issue status 42 --json`, or `swarm repo validate --base <trusted-full-commit-sha> --json`. Bare `swarm issue` and `swarm repo` are command groups, not JSON-producing operations.
 
 ### Choose how you work
 
@@ -35,9 +35,9 @@ Start interactively when you want to stay close to the changes. Move repeatable 
 
 | Working style | How to use it |
 | :--- | :--- |
-| **Pair with an agent** | Run `swarm work 42 --headless=false`. Native Codex streams its work, then accepts a follow-up instruction; press Enter to finish the phase. |
-| **Stay in your current agent session** | Use `swarm claim` or `swarm pull`, work in the assigned worktree, and record each phase with `swarm stage`. Your existing session keeps its own permissions. |
-| **Let a worker pick up tasks** | Run `swarm work --next` for one task or `swarm node run --watch` for a continuing queue. Both run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
+| **Pair with an agent** | Run `swarm issue work 42 --headless=false`. Native Codex streams its work, then accepts a follow-up instruction; press Enter to finish the phase. |
+| **Stay in your current agent session** | Use `swarm issue claim <issue>` or `swarm issue claim --next`, work in the assigned worktree, and record each phase with `swarm issue stage`. Your existing session keeps its own permissions. |
+| **Let a worker pick up tasks** | Run `swarm issue work --next` for one task or `swarm node run --watch` for a continuing queue. Both run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
 
 Native Codex uses the same bounded permissions for pairing and unattended work. Allowed commands run without approval prompts; requests for broader access are denied. Each turn uses an ephemeral session, with task files carrying progress forward. For an existing agent session or `trusted-local` setup, keep the harness's approval prompts enabled when pairing. Reserve full-access or “YOLO” settings for disposable workers with independently enforced isolation; CI alone does not provide that boundary.
 
@@ -45,7 +45,7 @@ You can still pause automated work for a maintainer's plan review with `--gate h
 
 ### Choose where agents run
 
-SwarmOS uses your agent's normal login and security controls. On **Linux**, Codex uses its native permission profiles and sandbox. Claude Code, OpenCode 2, and OhMyPi keep their normal provider sessions and use a restricted tool executor for workspace editing and commands. Install your harness, sign in normally, then run `swarm doctor`. The tool executor also needs Bubblewrap, Python 3, Bash, and `prlimit` installed under `/usr`.
+SwarmOS uses your agent's normal login and security controls. On **Linux**, Codex uses its native permission profiles and sandbox. Claude Code, OpenCode 2, and OhMyPi keep their normal provider sessions and use a restricted tool executor for workspace editing and commands. Install your harness, sign in normally, then run `swarm repo doctor`. The tool executor also needs Bubblewrap, Python 3, Bash, and `prlimit` installed under `/usr`.
 
 `doctor` marks the selected agents and their roles. An unavailable selected agent fails the check; `OPTIONAL` identifies unused harnesses that still need setup or qualification. Binary installation is listed separately from execution support. Adapters check minimum versions, supported interfaces, and actual filesystem/network restrictions. Newer stable versions can pass these checks without an exact-version allowlist. See the [qualification guide](native-qualification.md) for tested versions and the dogfood workflow.
 
@@ -57,7 +57,7 @@ SwarmOS uses your agent's normal login and security controls. On **Linux**, Code
 > [!NOTE]
 > Model connectivity stays in the authenticated harness. Isolated tools can use the task snapshot, private scratch space, and system runtime files; tool network access is disabled. Install build tools and dependencies locally. The [capability table](ARCHITECTURE.md#tool-capabilities) describes editing, shell access, and extension restrictions. Native macOS and Windows execution still need qualification; Windows users can use a qualified Linux setup in WSL2. Authenticated OCI workers are a separate roadmap item.
 
-Run `swarm doctor` and `swarm work 42 --dry-run` to check the setup before claiming work. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
+Run `swarm repo doctor` and `swarm issue work 42 --dry-run` to check the setup before claiming work. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
 
 ---
 
@@ -112,37 +112,39 @@ One teammate or node can complete the planning phase, checkpoint the branch and 
 
 ```bash
 # Teammate A generates and checkpoints PLAN.md + TEST_PLAN.md, then releases into handoff mode
-swarm work 42 --phase plan --handoff --backend github
+swarm issue work 42 --phase plan --handoff --backend github
 
 # Teammate B (or a worker node) picks up the handed-off task and continues from the verified checkpoint
-swarm work --next --all --backend github
+swarm issue work --next --all --backend github
 ```
 
 ### Taking a Submitted PR Through Acceptance Review
 
-`swarm submit` hands maintainers a Draft PR with the plan, test plan, implementation summary, and validation results together. A `submitted` phase and `completed` lease mean the worker has finished its submission, not that the PR has been reviewed or merged.
+`swarm issue submit <issue>` hands maintainers a linked Draft PR with the plan, test plan, implementation summary, and validation results together. The approved issue remains the work contract; the PR proposes its implementation. `swarm issue status <issue>` shows the recorded PR number and URL. A `submitted` phase and `completed` lease mean the worker has finished its submission, not that the PR has been reviewed or merged.
 
-The PR's acceptance checkboxes are a **maintainer review checklist**. SwarmOS copies the requirements from the issue and leaves them unchecked; it does not yet store a verification decision for each criterion. Passing required checks provides evidence to review, while `swarm review` approves `PLAN.md` and `TEST_PLAN.md` before implementation—not the finished code.
+The PR's acceptance checkboxes are a **maintainer review checklist**. SwarmOS copies the requirements from the issue and leaves them unchecked; it does not yet store a verification decision for each criterion. `swarm issue approve <issue>` first authorizes execution of the WorkUnit; `swarm issue review-plan <issue> --approve` separately authorizes the implementation plan before code changes. Neither approves the finished code. Passing required checks provides evidence for GitHub PR review.
 
 1. Open the PR and use its attached test plan to find the verification for each criterion.
 2. Compare the implementation with the observed validation results. Run any remaining targeted tests or manual scenarios, record the evidence in the PR, and check off verified criteria in the PR description. Leave anything unverified unchecked.
 3. Mark the Draft PR **Ready for review** in GitHub, or use `gh pr ready <PR-number>`. If it is already ready, request a code review directly.
 4. Complete the repository's normal code review and CI requirements, then merge. `Closes #<issue>` closes the linked issue when the PR merges into the default branch; it does not synchronize the issue's and PR's checkboxes.
 
-Use GitHub for this final handoff; there is no additional `swarm review` or `swarm submit` step to approve acceptance criteria. Retrying an already completed submission returns the existing PR rather than refreshing its description.
+Use GitHub for this final handoff; there is no additional SwarmOS command to approve acceptance criteria, repair a PR, or rebase it. Retrying an already completed `swarm issue submit <issue>` returns the existing PR rather than refreshing its description.
+
+Repair changes the implementation to address failures or review feedback; rebase changes the branch's ancestry or base. Neither is implemented by this CLI cutover. Any future PR-oriented commands will take explicit PR identifiers; issue lifecycle commands continue to take issue numbers after submission.
 
 ### Recovering from an Interrupted Run
 If an agent exits early, a lease expires, or a validation check fails:
-1. Run `swarm status <issue> --backend github` to inspect the current lease, phase, and published artifacts.
+1. Run `swarm issue status <issue> --backend github` to inspect the current lease, phase, and published artifacts.
 2. Fix the code, test, or agent configuration inside `.swarm/worktrees/issue-<N>`.
-3. Re-run `swarm work <issue> --backend github`—if your claim token is still active, SwarmOS resumes in place; if the lease expired, it acquires a fresh attempt on the verified checkpoint branch.
-4. Run `swarm validate <issue>` and `swarm submit <issue>` when all checks pass.
+3. Re-run `swarm issue work <issue> --backend github`—if your claim token is still active, SwarmOS resumes in place; if the lease expired, it acquires a fresh attempt on the verified checkpoint branch.
+4. Run `swarm issue validate <issue>` and `swarm issue submit <issue>` when all checks pass.
 
 ---
 
 ## 3. Multi-Repository Registry & Worker Pools
 
-Register the repositories you want to work on so `swarm pull --all`, `swarm work --next --all`, and `swarm node run --all` can coordinate across them:
+Register the repositories you want to work on so `swarm issue claim --next --all`, `swarm issue work --next --all`, and `swarm node run --all` can coordinate across them:
 
 ```bash
 # Register the current checkout or clone a remote GitHub repository
@@ -163,7 +165,7 @@ By default, `swarm node run` drains the currently available ready queue and exit
 
 ## Related Guides
 
-- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — Roadmap decomposition (`swarm plan`), backlog triage, and Draft PR auditing.
+- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — Roadmap decomposition (`swarm repo plan`), backlog triage, and Draft PR auditing.
 - **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](GITHUB.md)** — Branch rulesets, `SWARM_GITHUB_TOKEN`, and collaborator allowlists.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents and checks, and approve tasks.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.

@@ -1,5 +1,5 @@
 version: 1
-# Native isolation: qualified Codex releases on Linux. Run swarm doctor before work.
+# Native isolation: qualified Codex releases on Linux. Run swarm repo doctor before work.
 default_agent: codex
 plan_mode: auto
 execution:

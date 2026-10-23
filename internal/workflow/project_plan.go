@@ -1331,7 +1331,7 @@ func synthesizeWorkUnitFromRawIssue(iss *tracker.Issue, defaultConstraints []str
 	if len(acceptance) == 0 {
 		acceptance = []string{
 			fmt.Sprintf("Resolve #%d (%s) with automated test coverage", iss.Number, iss.Title),
-			"`swarm validate` passes",
+			"`swarm issue validate` passes",
 		}
 	}
 	gate := contract.GateAgent
@@ -1656,11 +1656,11 @@ func renderBacklogScanMarkdown(report *ProjectPlanReport, applied, normalized bo
 		var nextAction string
 		switch it.RecommendedLabel {
 		case "swarm:ready":
-			nextAction = fmt.Sprintf("`swarm work %d`", it.IssueNumber)
+			nextAction = fmt.Sprintf("`swarm issue work %d`", it.IssueNumber)
 		case "swarm:draft":
 			nextAction = fmt.Sprintf("`swarm issue approve %d`", it.IssueNumber)
 		case "swarm:needs-scope":
-			nextAction = "`swarm plan --scan --apply --normalize`"
+			nextAction = "`swarm repo plan --scan --apply --normalize`"
 		case "swarm:blocked":
 			nextAction = "Resolve dependencies / review protected paths"
 		}

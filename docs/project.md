@@ -26,7 +26,7 @@ swarm repo doctor --backend github
 | `.swarm/validation/required-checks.yaml` | Required check commands and protected-path globs enforced before submission. |
 | `.github/ISSUE_TEMPLATE/{swarm-workunit,swarm-community,swarm-feature,swarm-bugfix,swarm-refactor,config}.yml` | Preset GitHub Issue Forms for structured draft WorkUnits (`swarm:draft`) and community bug/idea intake (`swarm:community`). |
 | `.github/workflows/swarm-validate.yml` | Consumer CI workflow running your repository checks against the trusted base commit. |
-| `.claude/commands/swarm-*.md` & `.opencode/command/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
+| `.claude/commands/swarm-*.md` & `.opencode/commands/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
 
 > [!TIP]
 > - `swarm repo init` pins generated automation to an installed compatible release (`v0.6.0` or newer, including prereleases); for a compatible source build, explicitly pass `--swarm-version <full-40-character-commit-sha>`. Older releases and dev/dirty versions are not selected automatically: without a compatible pin, ordinary init warns and omits consumer CI, while `--fork-coordinator` requires a compatible pin. Commit the reviewed `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.

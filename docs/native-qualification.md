@@ -82,7 +82,7 @@ gh repo clone supernovae/swarm-test
 cd swarm-test
 SWARM=/tmp/swarm-native-review
 dogfood() { "$SWARM" --backend github --repo supernovae/swarm-test "$@"; }
-dogfood doctor
+dogfood repo doctor
 dogfood issue create --title 'Native Codex dogfood greeting' \
   --objective 'Create hello.txt containing exactly hello from SwarmOS followed by a newline.' \
   --constraint 'Keep repository policy unchanged. Make only this small text-file change.' \
@@ -100,22 +100,22 @@ expect_rejection() {
   fi
 }
 dogfood issue approve "$ISSUE"
-dogfood work "$ISSUE" --phase plan --headless=false
-expect_rejection dogfood submit "$ISSUE"
-dogfood review "$ISSUE"
-expect_rejection dogfood work "$ISSUE" --phase implement
-dogfood status "$ISSUE" --json
+dogfood issue work "$ISSUE" --phase plan --headless=false
+expect_rejection dogfood issue submit "$ISSUE"
+dogfood issue review-plan "$ISSUE"
+expect_rejection dogfood issue work "$ISSUE" --phase implement
+dogfood issue status "$ISSUE" --json
 git ls-remote origin "refs/heads/swarm-state/issue-$ISSUE"
 ```
 
 Inspect `.swarm/worktrees/issue-$ISSUE/.swarm/active/PLAN.md` and `TEST_PLAN.md`, then approve the plan and run development, testing, and validation unattended:
 
 ```bash
-dogfood review "$ISSUE" --approve --notes 'Reviewed the bounded greeting plan and test plan'
-dogfood work "$ISSUE" --headless
-dogfood validate "$ISSUE"
-dogfood submit "$ISSUE"
-dogfood status "$ISSUE" --json
+dogfood issue review-plan "$ISSUE" --approve --notes 'Reviewed the bounded greeting plan and test plan'
+dogfood issue work "$ISSUE" --headless
+dogfood issue validate "$ISSUE"
+dogfood issue submit "$ISSUE"
+dogfood issue status "$ISSUE" --json
 gh pr list --repo supernovae/swarm-test --state open --json number,isDraft,headRefName,url
 ```
 

@@ -622,7 +622,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if err = verifyTrust(cfg.Security, issue); err != nil {
 		return nil, err
 	}
-	if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+	if !TaskApprovalCurrent(st, wu, cfg) {
 		return nil, ErrApprovalRequired
 	}
 	now := m.nowFn()
@@ -735,7 +735,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		if err = verifyTrust(cfg.Security, iss); err != nil {
 			return nil, err
 		}
-		if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+		if !TaskApprovalCurrent(st, wu, cfg) {
 			return nil, ErrApprovalRequired
 		}
 		policyDur, err := time.ParseDuration(cfg.Lease.Duration)
@@ -838,7 +838,7 @@ func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState)
 	if err != nil {
 		return err
 	}
-	if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+	if !TaskApprovalCurrent(st, wu, cfg) {
 		return ErrApprovalRequired
 	}
 	return nil
@@ -1533,6 +1533,12 @@ func ReviewBindings(st *IssueState) map[string]string {
 		}
 	}
 	return bindings
+}
+
+// TaskApprovalCurrent reports whether state still approves exactly this
+// WorkUnit revision under the policy approved at its base commit.
+func TaskApprovalCurrent(st *IssueState, wu *contract.WorkUnit, cfg *contract.SwarmConfig) bool {
+	return st != nil && st.TaskDigest == contract.DigestWorkUnit(wu) && st.PolicyDigest == contract.DigestApprovedPolicy(st.BaseSHA, cfg)
 }
 
 func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {

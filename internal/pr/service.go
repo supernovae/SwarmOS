@@ -188,7 +188,7 @@ func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *
 	if err != nil {
 		return nil, err
 	}
-	if st.TaskDigest != contract.DigestWorkUnit(wu) || st.PolicyDigest != contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
+	if !lease.TaskApprovalCurrent(st, wu, cfg) {
 		return nil, lease.ErrApprovalRequired
 	}
 	if st.Branch == "" || pr.HeadSHA == "" || pr.BaseSHA == "" {

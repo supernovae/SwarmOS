@@ -447,6 +447,8 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 		}
 	}
 
+	// The mutation is already durable; the new revision is advisory for the
+	// worker, so a failed re-read reports none rather than failing the request.
 	_, newRev, revErr := readStore.Load(ctx, req.IssueNumber)
 	if revErr != nil {
 		return updated, "", nil

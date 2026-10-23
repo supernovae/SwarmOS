@@ -244,7 +244,7 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	if err != nil {
 		return nil, fmt.Errorf("load approved base config: %w", err)
 	}
-	if state.TaskDigest != contract.DigestWorkUnit(wu) || state.PolicyDigest != contract.DigestApprovedPolicy(state.BaseSHA, cfg) ||
+	if !lease.TaskApprovalCurrent(state, wu, cfg) ||
 		!slices.Contains(iss.Labels, cfg.Security.ReadyLabel) {
 		return nil, lease.ErrApprovalRequired
 	}

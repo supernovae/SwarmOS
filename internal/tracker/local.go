@@ -444,7 +444,7 @@ func (l *LocalTracker) RemoveLabel(_ context.Context, issueNumber int, label str
 	})
 }
 
-func (l *LocalTracker) CreateDraftPR(_ context.Context, req DraftPRRequest) (*PullRequest, error) {
+func (l *LocalTracker) CreateDraftPR(ctx context.Context, req DraftPRRequest) (*PullRequest, error) {
 	var created *PullRequest
 	err := l.withLock(true, func(st *localState) error {
 		num := st.NextPRNum
@@ -462,7 +462,7 @@ func (l *LocalTracker) CreateDraftPR(_ context.Context, req DraftPRRequest) (*Pu
 		}
 		l.refreshPRRefs(pr)
 		if pr.HeadSHA != "" {
-			if err := l.updatePRRef(context.Background(), num, pr.HeadSHA, ""); err != nil {
+			if err := l.updatePRRef(ctx, num, pr.HeadSHA, ""); err != nil {
 				return fmt.Errorf("initialize local PR head: %w", err)
 			}
 		}

@@ -130,9 +130,9 @@ When Grok Bot (or an external contributor) does not have push access to the upst
 **1. Upstream maintainer setup:**
 
 ```bash
-# Set SWARM_VERSION_PIN to an immutable published fork-capable release tag or full 40-char commit SHA
-export SWARM_VERSION_PIN="<published-fork-capable-tag-or-full-commit-sha>"
-swarm init --fork-coordinator --swarm-version "$SWARM_VERSION_PIN"
+# Generate .github/workflows/swarm-fork-coordinator.yml pinned to your installed release
+# (or pass --swarm-version <tag-or-full-commit-sha> to pin a specific version)
+swarm init --fork-coordinator
 swarm issue approve 42 --backend github
 ```
 

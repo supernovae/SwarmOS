@@ -1143,3 +1143,45 @@ func TestForkCLISmoke(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
+	origVersion := Version
+	defer func() { Version = origVersion }()
+
+	runCmd := func(root string, args ...string) error {
+		var buf bytes.Buffer
+		cmd := NewRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs(append([]string{"--root", root, "--backend", "local"}, args...))
+		return cmd.Execute()
+	}
+
+	root := t.TempDir()
+	if out, err := exec.Command("git", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+
+	Version = "0.4.0"
+	if err := runCmd(root, "init", "--fork-coordinator"); err != nil {
+		t.Fatalf("expected swarm init --fork-coordinator on release v0.4.0 to succeed, got: %v", err)
+	}
+	for _, rel := range []string{".github/workflows/swarm-validate.yml", ".github/workflows/swarm-fork-coordinator.yml"} {
+		raw, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if !strings.Contains(string(raw), "SWARM_VERSION: v0.4.0") {
+			t.Fatalf("expected %s to pin v0.4.0, got:\n%s", rel, string(raw))
+		}
+	}
+
+	Version = "0.4.0-dev"
+	devRoot := t.TempDir()
+	if out, err := exec.Command("git", "-C", devRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	if err := runCmd(devRoot, "init", "--fork-coordinator"); err == nil {
+		t.Fatal("expected swarm init --fork-coordinator on dev build without --swarm-version to fail")
+	}
+}

@@ -70,10 +70,10 @@ flowchart LR
 
 ### 1. Install `swarm`
 
-Download the latest prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install `v0.3.0` with Go 1.26.10+:
+Download the latest prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install the latest release with Go 1.26.10+:
 
 ```bash
-go install github.com/supernovae/swarmos/cmd/swarm@v0.3.0
+go install github.com/supernovae/swarmos/cmd/swarm@latest
 ```
 
 ### 2. Initialize Your Repository
@@ -81,7 +81,7 @@ go install github.com/supernovae/swarmos/cmd/swarm@v0.3.0
 From a Git checkout connected to GitHub (`gh auth login`), scaffold your `.swarm/` harness and run diagnostics:
 
 ```bash
-swarm init --sync-labels --backend github --swarm-version v0.3.0
+swarm init --sync-labels --backend github
 swarm doctor --backend github
 ```
 
@@ -179,9 +179,9 @@ External contributors do not need push access to the upstream repository. When m
 
 ```bash
 # Maintainer (once, on the upstream default branch):
-# Set SWARM_VERSION_PIN to an immutable published fork-capable release tag or full 40-char commit SHA
-export SWARM_VERSION_PIN="<published-fork-capable-tag-or-full-commit-sha>"
-swarm init --fork-coordinator --swarm-version "$SWARM_VERSION_PIN"
+# Generates .github/workflows/swarm-fork-coordinator.yml pinned to your installed release
+# (or pass --swarm-version <tag-or-full-commit-sha> to pin a specific version)
+swarm init --fork-coordinator
 swarm issue approve 42 --backend github
 
 # Contributor (clones upstream as origin, adds writable personal fork as "fork"):

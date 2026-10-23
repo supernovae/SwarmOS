@@ -23,10 +23,12 @@ func newInitCmd(rootOpts *RootOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoRoot := rootOpts.resolveRepoRoot()
-			if swarmVersion == "" && !forkCoordinator && Version != "" && !strings.Contains(Version, "dev") && !strings.Contains(Version, "snapshot") {
+			if swarmVersion == "" && Version != "" && !strings.Contains(Version, "dev") && !strings.Contains(Version, "snapshot") {
 				released := "v" + strings.TrimPrefix(Version, "v")
 				if !strings.HasPrefix(released, "v0.1.") && !strings.HasPrefix(released, "v0.0.") {
-					swarmVersion = released
+					if !forkCoordinator || (!strings.HasPrefix(released, "v0.2.") && released != "v0.3.0") {
+						swarmVersion = released
+					}
 				}
 			}
 			res, err := harness.InitRepository(harness.InitOptions{
@@ -72,8 +74,8 @@ func newInitCmd(rootOpts *RootOptions) *cobra.Command {
 
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite existing .swarm/ and template files")
 	cmd.Flags().BoolVar(&syncLabels, "sync-labels", false, "Idempotently create swarm:* labels on the issue tracker")
-	cmd.Flags().StringVar(&swarmVersion, "swarm-version", "", "Immutable SwarmOS release tag or full commit for generated CI")
-	cmd.Flags().BoolVar(&forkCoordinator, "fork-coordinator", false, "Generate .github/workflows/swarm-fork-coordinator.yml for --fork contributor mode (requires --swarm-version)")
+	cmd.Flags().StringVar(&swarmVersion, "swarm-version", "", "Immutable SwarmOS release tag or full commit for generated CI (defaults to installed release)")
+	cmd.Flags().BoolVar(&forkCoordinator, "fork-coordinator", false, "Generate .github/workflows/swarm-fork-coordinator.yml for --fork contributor mode")
 	cmd.Flags().StringVar(&templateDir, "template-dir", "", "Directory of custom GitHub Issue Forms (.yml/.yaml) and .swarm/{rules,skills}/*.md templates")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "List individual created and preserved files")
 	return cmd

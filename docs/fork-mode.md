@@ -78,18 +78,16 @@ Every cross-trust-boundary step in fork mode is designed to fail closed:
 
 ## 3. Maintainer Setup (Enabling Fork Mode on an Upstream Repository)
 
-Maintainers opt in to fork contributions by scaffolding the coordinator workflow pinned to an immutable, fork-capable SwarmOS release tag or full commit SHA:
+Maintainers opt in to fork contributions by scaffolding the coordinator workflow pinned to their installed SwarmOS release (or an explicit release tag / full commit SHA):
 
 ```bash
-# 1. Set an immutable published fork-capable SwarmOS release tag or full 40-char commit SHA
-export SWARM_VERSION_PIN="<published-fork-capable-tag-or-full-commit-sha>"
-
-# 2. Generate .github/workflows/swarm-fork-coordinator.yml pinned to SWARM_VERSION_PIN
-swarm init --fork-coordinator --swarm-version "$SWARM_VERSION_PIN"
+# Generate .github/workflows/swarm-fork-coordinator.yml pinned to your installed release
+# (or pass --swarm-version <tag-or-full-commit-sha> to pin a specific version)
+swarm init --fork-coordinator
 ```
 
 > [!NOTE]
-> Always set `SWARM_VERSION_PIN` to a version or commit SHA that includes fork-coordinator support (do not use `v0.3.0`, which predates fork mode).
+> Fork mode requires a fork-capable SwarmOS release (`v0.4.0` or newer) or full 40-character commit SHA. When running a local development build, pass `--swarm-version <tag-or-full-commit-sha>` explicitly.
 
 ### Optional `.swarm/config.yaml` Settings
 

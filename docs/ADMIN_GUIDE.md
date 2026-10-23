@@ -15,7 +15,7 @@ flowchart LR
 When you initialize a repository (or upgrade an existing `.swarm/` setup), SwarmOS scaffolds local agent factory contracts, preset GitHub Issue Forms (including `.github/ISSUE_TEMPLATE/swarm-community.yml` for community intake and `swarm-workunit.yml` for draft WorkUnits), and syncs `swarm:*` repository labels:
 
 ```bash
-swarm init --sync-labels --backend github --swarm-version v0.3.0
+swarm init --sync-labels --backend github
 swarm doctor --backend github
 ```
 

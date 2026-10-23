@@ -52,7 +52,7 @@ Each claimed issue runs inside its own linked Git worktree at `.swarm/worktrees/
 ## 3. Plan-Bound Gates & Baseline Validation (`internal/workflow/` & `internal/validation/`)
 
 - **Cryptographically Bound Plan Reviews**: Both automated agent reviews (`--gate agent`) and maintainer approvals (`--gate human`) record the hashes of `WORKUNIT.md`, `PLAN.md`, and `TEST_PLAN.md`. Modifying the plan or issue automatically invalidates the prior approval so unreviewed plan changes cannot slip into implementation.
-- **Trusted Baseline Policy**: During `swarm validate` and `swarm submit`, SwarmOS loads `.swarm/validation/required-checks.yaml` directly from the **approved base commit** (`base_sha`) rather than the candidate worktree. It diffs all committed, staged, working-tree, and untracked changes against `protected_paths` before running each required check in a sanitized environment.
+- **Trusted Baseline Policy**: During `swarm issue validate` and `swarm issue submit`, SwarmOS loads `.swarm/validation/required-checks.yaml` directly from the **approved base commit** (`base_sha`) rather than the candidate worktree. It diffs all committed, staged, working-tree, and untracked changes against `protected_paths` before running each required check in a sanitized environment.
 
 ---
 
@@ -74,7 +74,7 @@ The two user-facing modes remain `isolated` and explicit `trusted-local`. `isola
 
 ### Implemented backend selection
 
-`execution.backend` defaults to `native`. On Linux, Codex uses its native sandbox. Claude Code, OpenCode 2, and OhMyPi use their supported tool-control interfaces with a restricted Bubblewrap executor. Provider sessions stay with the authenticated harness. `swarm doctor` checks versions and actual filesystem/network restrictions. It reports login availability through supported status interfaces, and marks unprobed provider sessions explicitly. An unsupported adapter or failed probe stops the run before claiming work.
+`execution.backend` defaults to `native`. On Linux, Codex uses its native sandbox. Claude Code, OpenCode 2, and OhMyPi use their supported tool-control interfaces with a restricted Bubblewrap executor. Provider sessions stay with the authenticated harness. `swarm repo doctor` checks versions and actual filesystem/network restrictions. It reports login availability through supported status interfaces, and marks unprobed provider sessions explicitly. An unsupported adapter or failed probe stops the run before claiming work.
 
 | Approach | Fit and tradeoff |
 | --- | --- |

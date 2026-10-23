@@ -15,7 +15,7 @@ import (
 func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 	repoCmd := &cobra.Command{
 		Use:   "repo",
-		Short: "Register and manage multiple repositories for SwarmOS orchestration",
+		Short: "Initialize, plan, validate, and register SwarmOS repositories",
 	}
 
 	var cloneIfMissing bool
@@ -127,6 +127,6 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 		},
 	}
 
-	repoCmd.AddCommand(addCmd, listCmd, removeCmd)
+	repoCmd.AddCommand(addCmd, listCmd, removeCmd, newInitCmd(rootOpts), newDoctorCmd(rootOpts), newPlanCmd(rootOpts), newRepoValidateCmd(rootOpts))
 	return repoCmd
 }

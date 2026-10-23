@@ -125,7 +125,7 @@ For the adversarial pass, use a fresh WorkUnit in this same staging repository. 
 
 ## Sessions, cancellation, and recovery
 
-Codex handles [login storage and automatic token renewal](https://learn.chatgpt.com/docs/auth). `doctor` reports an existing login from `codex login status`; it does not make a model request to check whether the provider will accept or renew that session. When Codex asks for reauthentication, use `codex login` or its supported `codex login --device-auth`, then rerun `swarm doctor` and resume the WorkUnit with `swarm work <issue-number>`. Completed checkpoints remain available; an interrupted ephemeral model turn starts again from task files.
+Codex handles [login storage and automatic token renewal](https://learn.chatgpt.com/docs/auth). `doctor` reports an existing login from `codex login status`; it does not make a model request to check whether the provider will accept or renew that session. When Codex asks for reauthentication, use `codex login` or its supported `codex login --device-auth`, then rerun `swarm repo doctor` and resume the WorkUnit with `swarm issue work <issue-number>`. Completed checkpoints remain available; an interrupted ephemeral model turn starts again from task files.
 
 Missing-login behavior, failed-run discard, deadlines, and cancellation are tested. Live session expiration, renewal failure, and reauthentication during a WorkUnit still need a provider-supported test account/session. Do not edit credential files or sign out a shared operator account to simulate expiration. Record that scenario separately when a suitable session is available.
 

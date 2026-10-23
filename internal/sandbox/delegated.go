@@ -76,7 +76,7 @@ func ClaudeAuthentication(ctx context.Context, binary string) (string, error) {
 		AuthMethod string `json:"authMethod"`
 	}
 	if err != nil || json.Unmarshal([]byte(output.String()), &status) != nil || !status.LoggedIn {
-		return "", fmt.Errorf("claude login is unavailable; run claude auth login, then swarm doctor")
+		return "", fmt.Errorf("claude login is unavailable; run claude auth login, then swarm repo doctor")
 	}
 	return "Claude-managed " + status.AuthMethod + " login", nil
 }

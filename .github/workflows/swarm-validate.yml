@@ -70,7 +70,17 @@ jobs:
         run: |
           ./swarm-ci.exe version
           ./swarm-ci.exe --help
-          ./swarm-ci.exe work --help
+          ./swarm-ci.exe repo --help
+          ./swarm-ci.exe repo init --help
+          ./swarm-ci.exe repo doctor --help
+          ./swarm-ci.exe repo plan --help
+          ./swarm-ci.exe repo validate --help
+          ./swarm-ci.exe issue --help
+          ./swarm-ci.exe issue claim --help
+          ./swarm-ci.exe issue work --help
+          ./swarm-ci.exe issue review-plan --help
+          ./swarm-ci.exe issue validate --help
+          ./swarm-ci.exe issue submit --help
       - name: Cross-compile all distributions
         if: runner.os == 'Linux'
         run: |

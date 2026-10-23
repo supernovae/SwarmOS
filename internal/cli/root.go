@@ -46,7 +46,9 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 			return fmt.Errorf("unknown tracker backend %q (must be github or local)", opts.Backend)
 		}
 		if opts.Repo != "" {
-			return registry.ValidateRepoSlug(opts.Repo)
+			if err := registry.ValidateRepoSlug(opts.Repo); err != nil {
+				return err
+			}
 		}
 		if !opts.Fork && cmd.Flags().Changed("fork-remote") {
 			return fmt.Errorf("--fork-remote is only valid when --fork is set")
@@ -61,38 +63,39 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 			if strings.EqualFold(strings.TrimSpace(opts.ForkRemote), "origin") {
 				return fmt.Errorf("--fork-remote cannot be origin; configure a separate personal fork remote")
 			}
-			for p := cmd; p != nil; p = p.Parent() {
-				if p.Name() == "issue" {
-					return fmt.Errorf("swarm issue commands are maintainer-only and cannot be used with --fork")
+			for child := cmd; child != nil && child.Parent() != nil; child = child.Parent() {
+				if child.Parent().Name() == "issue" {
+					switch child.Name() {
+					case "create", "approve", "lint", "decompose", "epic":
+						return fmt.Errorf("%s is maintainer-only and cannot be used with --fork", child.CommandPath())
+					}
+					break
 				}
 			}
 		}
 		return nil
 	}
 	rootCmd.AddGroup(
-		&cobra.Group{ID: "setup", Title: "Setup:"},
-		&cobra.Group{ID: "tasks", Title: "Task lifecycle:"},
-		&cobra.Group{ID: "operations", Title: "Operations:"},
+		&cobra.Group{ID: "resources", Title: "Resources:"},
+		&cobra.Group{ID: "tools", Title: "Tools:"},
 	)
 	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", firstNonEmptyStr(opts.Backend, os.Getenv("SWARM_BACKEND")), "Tracker backend: github or local")
 	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", firstNonEmptyStr(opts.Repo, os.Getenv("SWARM_REPO")), "GitHub repository (owner/repo)")
 	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", opts.RepoRoot, "Repository root path")
 	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
 	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", firstNonEmptyStr(opts.ForkRemote, "fork"), "Writable personal fork git remote name (only valid with --fork)")
-	rootCmd.AddCommand(newInitCmd(opts), newDoctorCmd(opts), newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPlanCmd(opts), newClaimCmd(opts), newPullCmd(opts), newWorkCmd(opts), newStageCmd(opts), newReviewCmd(opts), newValidateCmd(opts), newSubmitCmd(opts), newStatusCmd(opts), newRenewCmd(opts), newReleaseCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
+	rootCmd.AddCommand(newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
 	rootCmd.AddCommand(newInternalToolsCmd())
 	for _, command := range rootCmd.Commands() {
 		switch command.Name() {
-		case "init", "doctor", "repo", "version":
-			command.GroupID = "setup"
-		case "status", "node", "renew", "release", "fork-coordinator":
-			command.GroupID = "operations"
+		case "repo", "node", "issue":
+			command.GroupID = "resources"
 		default:
-			command.GroupID = "tasks"
+			command.GroupID = "tools"
 		}
 	}
-	rootCmd.SetHelpCommandGroupID("setup")
-	rootCmd.SetCompletionCommandGroupID("setup")
+	rootCmd.SetHelpCommandGroupID("tools")
+	rootCmd.SetCompletionCommandGroupID("tools")
 	return rootCmd
 }
 func Execute() error { return NewRootCmd().Execute() }
@@ -148,7 +151,7 @@ func loadTrustedUpstreamConfig(root string) (*contract.SwarmConfig, error) {
 		return nil, fmt.Errorf("load SwarmOS configuration: %w", err)
 	}
 	if cfg == nil {
-		return nil, fmt.Errorf("missing .swarm/config.yaml; run swarm init")
+		return nil, fmt.Errorf("missing .swarm/config.yaml; run swarm repo init")
 	}
 	return cfg, nil
 }
@@ -240,7 +243,7 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 		return nil, nil, nil, fmt.Errorf("load SwarmOS configuration: %w", err)
 	}
 	if cfg == nil {
-		return nil, nil, nil, fmt.Errorf("missing .swarm/config.yaml; run swarm init")
+		return nil, nil, nil, fmt.Errorf("missing .swarm/config.yaml; run swarm repo init")
 	}
 	mgr := lease.NewManager(tr, cfg.Security)
 	if o.nowFn != nil {

@@ -28,7 +28,7 @@ body:
       description: Testable conditions required for completion (one bullet per line).
       placeholder: |
         - [ ] Unit tests cover edge cases
-        - [ ] `swarm validate` passes
+        - [ ] `swarm issue validate` passes
     validations:
       required: true
   - type: dropdown

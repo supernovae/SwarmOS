@@ -141,9 +141,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d %s: phase=%s branch=%s validation=%t\n", result.IssueNumber, status, result.PhaseCompleted, result.BranchName, result.ValidationPassed)
 			if result.PausedForHuman {
 				if result.PhaseCompleted == "awaiting-plan" {
-					fmt.Fprintf(cmd.OutOrStdout(), "Interactive plan required: write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md in %s, then run: swarm stage %d --phase plan\n", result.WorktreePath, result.IssueNumber)
+					fmt.Fprintf(cmd.OutOrStdout(), "Interactive plan required: write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md in %s, then run: swarm issue stage %d --phase plan\n", result.WorktreePath, result.IssueNumber)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "Human approval required: swarm review %d --approve\n", result.IssueNumber)
+					fmt.Fprintf(cmd.OutOrStdout(), "Human approval required: swarm issue review-plan %d --approve\n", result.IssueNumber)
 				}
 			}
 			if result.HandedOffToPhase != "" {

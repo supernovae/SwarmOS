@@ -27,7 +27,7 @@ func TestHeadlessWorkProgressKeepsJSONOnStdout(t *testing.T) {
 			var output, diagnostics bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&diagnostics)
-			args := []string{"--root", f.root, "--backend", "local", "work", n, "--agent", "mock", "--json"}
+			args := []string{"--root", f.root, "--backend", "local", "issue", "work", n, "--agent", "mock", "--json"}
 			cmd.SetArgs(append(args, tc.flags...))
 			if err := cmd.Execute(); err != nil {
 				t.Fatalf("%v\n%s", err, diagnostics.String())
@@ -65,7 +65,7 @@ func TestWorkProgressCanBeDisabledAndDryRunIsSilent(t *testing.T) {
 		var output, diagnostics bytes.Buffer
 		cmd.SetOut(&output)
 		cmd.SetErr(&diagnostics)
-		args := []string{"--root", f.root, "--backend", "local", "work", n, "--agent", "mock", "--json"}
+		args := []string{"--root", f.root, "--backend", "local", "issue", "work", n, "--agent", "mock", "--json"}
 		cmd.SetArgs(append(args, flags...))
 		if err := cmd.Execute(); err != nil {
 			t.Fatal(err)
@@ -83,7 +83,7 @@ func TestWorkFailureReportsTerminalStageAndJSON(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "work", n, "--agent", "mock", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "work", n, "--agent", "mock", "--json"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("unapproved work ran")
 	}

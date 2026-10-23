@@ -114,7 +114,7 @@ func authenticatedWorkUnit(t *testing.T, routing string) {
 		t.Fatal(err)
 	}
 	f := &cliFixture{root: root, tracker: tr, manager: manager}
-	f.must(t, "doctor")
+	f.must(t, "repo", "doctor")
 	f.must(t, "issue", "create", "--title", "Native greeting", "--objective", "Create hello.txt containing exactly hello from SwarmOS followed by a newline.", "--constraint", "Keep repository policy unchanged. Make only this small text-file change.", "--acceptance", "The greeting required check passes.", "--gate", "human")
 	issues, err := tr.ListIssues(context.Background(), tracker.IssueFilter{State: "open"})
 	if err != nil || len(issues) != 1 {
@@ -139,19 +139,19 @@ func authenticatedWorkUnit(t *testing.T, routing string) {
 	oldStdin := os.Stdin
 	os.Stdin = input
 	t.Cleanup(func() { os.Stdin = oldStdin })
-	f.must(t, "work", n, "--phase", "plan", "--headless=false")
-	if _, err := f.run("submit", n); err == nil {
+	f.must(t, "issue", "work", n, "--phase", "plan", "--headless=false")
+	if _, err := f.run("issue", "submit", n); err == nil {
 		t.Fatal("submission bypassed human review")
 	}
-	f.must(t, "review", n)
-	if _, err := f.run("work", n, "--phase", "implement"); err == nil {
+	f.must(t, "issue", "review-plan", n)
+	if _, err := f.run("issue", "work", n, "--phase", "implement"); err == nil {
 		t.Fatal("agent review satisfied the human gate")
 	}
 	t.Setenv("SWARM_USER", "native-maintainer")
-	f.must(t, "review", n, "--approve", "--notes", "Verified the bounded greeting plan")
+	f.must(t, "issue", "review-plan", n, "--approve", "--notes", "Verified the bounded greeting plan")
 	t.Setenv("SWARM_USER", "native-worker")
-	f.must(t, "work", n, "--headless")
-	f.must(t, "submit", n)
+	f.must(t, "issue", "work", n, "--headless")
+	f.must(t, "issue", "submit", n)
 	state := f.state(t, number)
 	if state.PRNumber == 0 || state.Lease.Status != "completed" {
 		t.Fatalf("incomplete native workflow: %+v", state)

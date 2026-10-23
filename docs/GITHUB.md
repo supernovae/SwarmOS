@@ -20,8 +20,8 @@ Set only one of `SWARM_GITHUB_TOKEN` or `SWARM_GITHUB_TOKEN_COMMAND`. If both ar
 ```bash
 # Run any SwarmOS command on a headless machine without installing gh
 export SWARM_GITHUB_TOKEN="github_pat_..."
-swarm doctor --backend github
-swarm work --next --backend github
+swarm repo doctor --backend github
+swarm issue work --next --backend github
 ```
 
 > [!NOTE]
@@ -47,8 +47,8 @@ If you already keep secrets in a password manager, point `SWARM_GITHUB_TOKEN_COM
 
 ```bash
 export SWARM_GITHUB_TOKEN_COMMAND="op read op://Private/GitHub/swarm-token"
-swarm doctor --backend github
-swarm work --next --backend github
+swarm repo doctor --backend github
+swarm issue work --next --backend github
 ```
 
 What happens:
@@ -61,7 +61,7 @@ What happens:
 > [!NOTE]
 > `SWARM_GITHUB_TOKEN_COMMAND` is read only from your own environment. Nothing in `.swarm/config.yaml` can set it, so a repository you contribute to can never choose a program to run on your machine. Agents running in `trusted-local` mode still run as your user account. For work from people you don't know, use the default `isolated` [execution mode](../SECURITY.md#execution-modes), which runs agent tools against a detached task snapshot with a clean environment and their own process namespace.
 
-**Model provider keys.** Each agent CLI's own login is the best option where it's available, because it keeps the key in that tool's credential store. If an agent needs an API key from the environment, list only that key under `agents.<name>.env`. Model keys have to reach the agent that uses them, but you can still keep them out of your shell profile by injecting them for a single run, for example `op run --env-file=.env.swarm -- swarm work --next`.
+**Model provider keys.** Each agent CLI's own login is the best option where it's available, because it keeps the key in that tool's credential store. If an agent needs an API key from the environment, list only that key under `agents.<name>.env`. Model keys have to reach the agent that uses them, but you can still keep them out of your shell profile by injecting them for a single run, for example `op run --env-file=.env.swarm -- swarm issue work --next`.
 
 ---
 
@@ -76,9 +76,9 @@ flowchart TD
     Work["refs/heads/swarm/issue-N-slug<br/>Worker Checkpoint Branch<br/>Draft PR Head"]
 
     Main -->|"1. swarm issue approve N<br/>Pins base_sha & policy_digest"| State
-    Main -->|"2. swarm claim / work<br/>Provisions isolated worktree"| Work
-    Work -->|"3. swarm stage / submit<br/>Atomic CAS + branch push"| State
-    Work -->|"4. Draft PR + swarm validate --ci"| Main
+    Main -->|"2. swarm issue claim / issue work<br/>Provisions isolated worktree"| Work
+    Work -->|"3. swarm issue stage / issue submit<br/>Atomic CAS + branch push"| State
+    Work -->|"4. Draft PR + swarm repo validate --base SHA"| Main
 ```
 
 ### Recommended GitHub Repository Rulesets
@@ -113,7 +113,7 @@ Rather than running coding agents under a human maintainer's personal admin toke
 2. Generate a **Fine-Grained Personal Access Token** for each account scoped only to the target repository with:
    - **Contents**: `Read and write` (required to push `refs/heads/swarm/issue-*` and `refs/heads/swarm-state/issue-*`)
    - **Issues**: `Read and write` (required to update the living projection comment and `swarm:*` phase labels)
-   - **Pull requests**: `Read and write` (required for `swarm submit` to open and update Draft PRs)
+   - **Pull requests**: `Read and write` (required for `swarm issue submit` to open and update Draft PRs)
    - **Metadata**: `Read-only`
 
 ### Step 2: Enforce Collaborator Allowlists in `.swarm/config.yaml`
@@ -147,7 +147,7 @@ security:
     - acme-swarm-worker
     - acme-swarm-reviewer
     - alice-maintainer
-  # Only these GitHub identities may publish plan review verdicts (swarm review):
+  # Only these GitHub identities may publish plan review verdicts (swarm issue review-plan):
   reviewer_collaborators:
     - acme-swarm-reviewer
     - alice-maintainer
@@ -185,36 +185,36 @@ With `approved_collaborators` and `reviewer_collaborators` committed to `main`, 
 SWARM_GITHUB_TOKEN="$MAINTAINER_TOKEN" swarm issue approve 42 --backend github
 
 # 2. Worker collaborator claims #42, generates PLAN.md + TEST_PLAN.md, and hands off to review
-SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm work 42 --phase plan --handoff --backend github
+SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue work 42 --phase plan --handoff --backend github
 
-# 3. Reviewer collaborator runs the sandboxed plan audit and publishes REVIEW.md
-#    (If $WORKER_TOKEN attempts `swarm review 42`, SwarmOS rejects it via reviewer_collaborators!)
-SWARM_GITHUB_TOKEN="$REVIEWER_TOKEN" swarm review 42 --handoff --backend github
+# 3. Reviewer collaborator audits the plan, publishes REVIEW.md, and hands off to implementation
+#    (If $WORKER_TOKEN attempts `swarm issue review-plan 42`, SwarmOS rejects it via reviewer_collaborators!)
+SWARM_GITHUB_TOKEN="$REVIEWER_TOKEN" swarm issue work 42 --phase review --handoff --backend github
 
 # 4. Worker collaborator implements the approved plan, validates against base_sha, and opens the Draft PR
-SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm work 42 --phase implement --backend github
-SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm submit 42 --backend github
+SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue work 42 --phase implement --backend github
+SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue submit 42 --backend github
 ```
 
 ### How Each Boundary Is Enforced
 
 | Action | Required GitHub Permission | `.swarm/config.yaml` / Tracker Policy Check |
 | :--- | :--- | :--- |
-| `swarm plan --from <file> --apply` / `swarm issue epic create` | Repository `maintain` or `admin` | Verifies maintainer role (`create-epic`) and enabled organization `Epic` issue type before creating the unlabeled Epic or linking native sub-issues. |
+| `swarm repo plan --from <file> --apply` / `swarm issue epic create` | Repository `maintain` or `admin` | Verifies maintainer role (`create-epic`) and enabled organization `Epic` issue type before creating the unlabeled Epic or linking native sub-issues. |
 | `swarm issue approve <N>` | Repository `write`, `maintain`, or `admin` | Rejects `Epic` issues; must be an authenticated collaborator; pins `task_digest`, `policy_digest`, and `base_sha` and applies `swarm:ready`. |
-| `swarm claim <N>` / `swarm work <N>` | Repository `write` | Rejects `Epic` issues; actor must match `security.approved_collaborators` (when configured) and issue must carry `swarm:ready`. |
-| `swarm review <N>` (Agent Gate) | Repository `write` | Actor must match `security.reviewer_collaborators` (when configured); reviewer subprocess runs in a read-only sandbox. |
-| `swarm review <N> --approve` (Human Gate) | Repository `write`, `maintain`, or `admin` (non-Bot account) | Actor must be a human GitHub user and match `security.reviewer_collaborators` (when configured). |
-| `swarm submit <N>` | Repository `write` | Requires a verified review verdict matching the current `WorkUnit`, `PLAN.md`, and `TEST_PLAN.md` digests plus passing baseline-pinned checks. |
+| `swarm issue claim <N>` / `swarm issue work <N>` | Repository `write` | Rejects `Epic` issues; actor must match `security.approved_collaborators` (when configured) and issue must carry `swarm:ready`. |
+| `swarm issue review-plan <N>` (Agent Gate) | Repository `write` | Actor must match `security.reviewer_collaborators` (when configured); reviewer subprocess runs in a read-only sandbox. |
+| `swarm issue review-plan <N> --approve` (Human Gate) | Repository `write`, `maintain`, or `admin` (non-Bot account) | Actor must be a human GitHub user and match `security.reviewer_collaborators` (when configured). |
+| `swarm issue submit <N>` | Repository `write` | Requires a verified review verdict matching the current `WorkUnit`, `PLAN.md`, and `TEST_PLAN.md` digests plus passing baseline-pinned checks. |
 
 > [!NOTE]
 > **Organization Issue Types & Web Intake:**
-> - Native `Epic` issues and sub-issue hierarchy require GitHub's organization `Epic` issue type to be enabled on the repository. Run `swarm doctor --backend github` to check `Epic` availability and your current actor's `create-epic` permission.
-> - `swarm init --sync-labels --backend github` scaffolds `.github/ISSUE_TEMPLATE/swarm-community.yml` (`swarm:community` intake) and `swarm-workunit.yml` (`swarm:draft`) and syncs labels. Because GitHub's web UI and REST API allow users with repository access to open issues directly, maintainers should review repository issue forms and organization issue-type settings in GitHub Settings; SwarmOS enforces execution gating by requiring explicit `swarm issue approve <N>` on non-Epic WorkUnits.
+> - Native `Epic` issues and sub-issue hierarchy require GitHub's organization `Epic` issue type to be enabled on the repository. Run `swarm repo doctor --backend github` to check `Epic` availability and your current actor's `create-epic` permission.
+> - `swarm repo init --sync-labels --backend github` scaffolds `.github/ISSUE_TEMPLATE/swarm-community.yml` (`swarm:community` intake) and `swarm-workunit.yml` (`swarm:draft`) and syncs labels. Because GitHub's web UI and REST API allow users with repository access to open issues directly, maintainers should review repository issue forms and organization issue-type settings in GitHub Settings; SwarmOS enforces execution gating by requiring explicit `swarm issue approve <N>` on non-Epic WorkUnits.
 ---
 
 ## Related Guides
 
 - **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — End-to-end maintainer playbook for roadmap decomposition, backlog scanning, and PR auditing.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure validation checks, and manage Issue Forms.
-- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Interactive `swarm stage` workflows, handoffs, and multi-repo worker pools.
+- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Interactive `swarm issue stage` workflows, handoffs, and multi-repo worker pools.

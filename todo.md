@@ -30,7 +30,7 @@ Harness-owned authentication is the everyday path. OCI remains an optional bound
 - Offer optional enterprise workload identity or an organization's OIDC integration where it serves a concrete deployment need. Keep provider authentication and worker identity separate.
 - Evaluate repository-installed GitHub Apps for short-lived, scoped coordination/publishing authorization. Keep GitHub App installation optional and separate from OIDC federation.
 - Run real Docker/Podman adversarial tests on Linux, macOS, and Windows: filesystem and credential access, egress, cancellation, detached processes, cgroup/resource limits, and safe artifact import. Record exact runtime and image versions.
-- Document the stronger OS/resource guarantees and residual trust in the runtime, host, harness, and provider integration. `swarm doctor` must report authenticated OCI as unavailable until qualification passes.
+- Document the stronger OS/resource guarantees and residual trust in the runtime, host, harness, and provider integration. `swarm repo doctor` must report authenticated OCI as unavailable until qualification passes.
 
 ## Native adapter qualification
 

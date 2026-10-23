@@ -30,7 +30,7 @@ body:
       placeholder: |
         - [ ] Feature is implemented and documented
         - [ ] Unit tests cover happy path and error cases
-        - [ ] `swarm validate` passes
+        - [ ] `swarm issue validate` passes
     validations:
       required: true
   - type: dropdown

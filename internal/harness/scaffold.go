@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,33 @@ import (
 
 //go:embed all:templates
 var embeddedTemplates embed.FS
+
+var immutableSwarmPin = regexp.MustCompile(`^(?:v([0-9]+)\.([0-9]+)\.([0-9]+)(?:-[0-9A-Za-z.-]+)?|[0-9a-f]{40})$`)
+
+// ValidateSwarmVersionPin accepts immutable releases supporting the resource CLI,
+// or an explicitly selected full commit SHA of a compatible build.
+func ValidateSwarmVersionPin(version string) error {
+	const invalidPin = "swarm version must be a resource-CLI-compatible immutable release tag (v0.6.0 or newer) or full commit SHA"
+	match := immutableSwarmPin.FindStringSubmatch(version)
+	if match == nil {
+		return fmt.Errorf("%s", invalidPin)
+	}
+	if match[1] == "" {
+		return nil
+	}
+	var parts [3]uint64
+	for i, part := range match[1:4] {
+		n, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return fmt.Errorf("%s", invalidPin)
+		}
+		parts[i] = n
+	}
+	if parts[0] == 0 && parts[1] < 6 {
+		return fmt.Errorf("%s", invalidPin)
+	}
+	return nil
+}
 
 type StackProfile struct {
 	Language    string
@@ -206,17 +234,13 @@ type InitResult struct {
 
 func InitRepository(opts InitOptions) (*InitResult, error) {
 	if opts.SwarmVersion != "" {
-		immutable := regexp.MustCompile(`^(v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?|[0-9a-f]{40})$`)
-		if !immutable.MatchString(opts.SwarmVersion) || strings.HasPrefix(opts.SwarmVersion, "v0.1.") || strings.HasPrefix(opts.SwarmVersion, "v0.0.") {
-			return nil, fmt.Errorf("swarm version must be a compatible immutable release tag (v0.2.0 or newer) or full commit SHA")
+		if err := ValidateSwarmVersionPin(opts.SwarmVersion); err != nil {
+			return nil, err
 		}
 	}
 	if opts.ForkCoordinator {
 		if strings.TrimSpace(opts.SwarmVersion) == "" {
-			return nil, fmt.Errorf("--fork-coordinator requires --swarm-version <immutable-compatible-tag-or-SHA>")
-		}
-		if strings.HasPrefix(opts.SwarmVersion, "v0.2.") || opts.SwarmVersion == "v0.3.0" {
-			return nil, fmt.Errorf("--fork-coordinator requires a fork-capable release tag (newer than v0.3.0) or full commit SHA")
+			return nil, fmt.Errorf("--fork-coordinator requires --swarm-version <v0.6.0-or-newer-immutable-release-tag-or-full-commit-SHA>")
 		}
 	}
 	root := opts.RepoRoot
@@ -268,7 +292,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		return nil, err
 	}
 
-	archMD := "# Architecture\n\n- Contract-driven work units live in GitHub Issues and are compiled into `.swarm/active/WORKUNIT.md` per isolated worktree.\n- Protected paths (`.github/workflows/**`, `.swarm/validation/**`, `.swarm/contracts/**`) are enforced by `swarm validate`.\n"
+	archMD := "# Architecture\n\n- Contract-driven work units live in GitHub Issues and are compiled into `.swarm/active/WORKUNIT.md` per isolated worktree.\n- Protected paths (`.github/workflows/**`, `.swarm/validation/**`, `.swarm/contracts/**`) are enforced by `swarm issue validate`.\n"
 	if err := writeFile(".swarm/architecture.md", []byte(archMD)); err != nil {
 		return nil, err
 	}
@@ -360,7 +384,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		}
 	}
 	if opts.SwarmVersion == "" {
-		res.Warnings = append(res.Warnings, "CI workflow omitted: rerun swarm init --swarm-version <compatible-release-tag-or-full-commit-SHA> to pin the validator; v0.1.x lacks trusted-base validation")
+		res.Warnings = append(res.Warnings, "CI workflow omitted: rerun swarm repo init --swarm-version <v0.6.0-or-newer-immutable-release-tag-or-full-commit-SHA> to pin the validator")
 	} else {
 		data, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-validate.yml")
 		if err != nil {
@@ -506,7 +530,7 @@ func copyCustomTemplateDir(templateDir string, writeFile func(relPath string, da
 func LoadConfig(repoRoot string) (*contract.SwarmConfig, error) {
 	data, err := os.ReadFile(filepath.Join(repoRoot, ".swarm", "config.yaml"))
 	if err != nil {
-		return nil, fmt.Errorf("read .swarm/config.yaml (run swarm init first): %w", err)
+		return nil, fmt.Errorf("read .swarm/config.yaml (run swarm repo init first): %w", err)
 	}
 	return decodeConfig(data)
 }
@@ -800,7 +824,7 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 			Category: "harness",
 			Name:     ".swarm/config.yaml",
 			Status:   "FAIL",
-			Detail:   "missing or invalid .swarm/config.yaml (run `swarm init`)",
+			Detail:   "missing or invalid .swarm/config.yaml (run `swarm repo init`)",
 		})
 	}
 

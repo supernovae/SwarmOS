@@ -955,7 +955,7 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 	for kind, name := range required {
 		body := artifacts[kind]
 		if strings.TrimSpace(body) == "" {
-			return fmt.Errorf("missing %s in authoritative state (run `swarm work <issue> --phase plan` first)", name)
+			return fmt.Errorf("missing %s in authoritative state (run `swarm issue work <issue> --phase plan` first)", name)
 		}
 		if err := active.WriteFile(name, []byte(body), 0o644); err != nil {
 			return err

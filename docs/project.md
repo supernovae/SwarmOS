@@ -6,14 +6,14 @@ This guide walks repository maintainers through initializing SwarmOS, configurin
 
 ## 1. Initialize and Commit the Harness
 
-Download the latest `swarm` release from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or run `go install github.com/supernovae/swarmos/cmd/swarm@latest`), then run `swarm init` inside your repository checkout:
+Install a resource-CLI-compatible `swarm` release from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or `go install github.com/supernovae/swarmos/cmd/swarm@<compatible-release>`). Until one is published, build this source checkout with `go build -o swarm ./cmd/swarm` and use that binary. Then run `swarm repo init` inside your repository checkout:
 
 ```bash
-swarm init --sync-labels --backend github
-swarm doctor --backend github
+swarm repo init --sync-labels --backend github
+swarm repo doctor --backend github
 ```
 
-`swarm init` detects your project stack (`Go`, `Rust`, `Python`, or `TypeScript/JavaScript`) and scaffolds:
+`swarm repo init` detects your project stack (`Go`, `Rust`, `Python`, or `TypeScript/JavaScript`) and scaffolds:
 
 | Path | Role |
 | :--- | :--- |
@@ -26,16 +26,18 @@ swarm doctor --backend github
 | `.swarm/validation/required-checks.yaml` | Required check commands and protected-path globs enforced before submission. |
 | `.github/ISSUE_TEMPLATE/{swarm-workunit,swarm-community,swarm-feature,swarm-bugfix,swarm-refactor,config}.yml` | Preset GitHub Issue Forms for structured draft WorkUnits (`swarm:draft`) and community bug/idea intake (`swarm:community`). |
 | `.github/workflows/swarm-validate.yml` | Consumer CI workflow running your repository checks against the trusted base commit. |
-| `.claude/commands/swarm-*.md` & `.opencode/commands/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
+| `.claude/commands/swarm-*.md` & `.opencode/command/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
 
 > [!TIP]
-> - `swarm init` automatically pins the generated `.github/workflows/swarm-validate.yml` to your installed SwarmOS release tag (pass `--swarm-version <tag-or-sha>` to pin a different immutable release tag or commit SHA). Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
-> - `swarm init --sync-labels --backend github` provisions local issue forms and `swarm:*` labels on the repository; it does not configure organization-wide GitHub issue types or restrict direct GitHub web/API issue creation. Enable the organization `Epic` issue type in GitHub Settings, review your repository's issue forms and maintainer permissions manually, and run `swarm doctor --backend github` to verify that `Epic` is enabled and your current actor is authorized for `create-epic`.
+> - `swarm repo init` pins generated automation to an installed compatible release (`v0.6.0` or newer, including prereleases); for a compatible source build, explicitly pass `--swarm-version <full-40-character-commit-sha>`. Older releases and dev/dirty versions are not selected automatically: without a compatible pin, ordinary init warns and omits consumer CI, while `--fork-coordinator` requires a compatible pin. Commit the reviewed `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
+> - `swarm repo init --sync-labels --backend github` provisions local issue forms and `swarm:*` labels on the repository; it does not configure organization-wide GitHub issue types or restrict direct GitHub web/API issue creation. Enable the organization `Epic` issue type in GitHub Settings, review your repository's issue forms and maintainer permissions manually, and run `swarm repo doctor --backend github` to verify that `Epic` is enabled and your current actor is authorized for `create-epic`.
+>
+> When upgrading, install a resource-CLI-compatible binary and review the generated workflow, slash-command instructions, and immutable pin together. Existing generated files are preserved by default; update the relevant tracked copies deliberately rather than using blanket `--force` scaffolding.
 ---
 
 ## Consumer CI and release administration
 
-When run from a tagged release (or when `--swarm-version` is provided), `swarm init` generates `.github/workflows/swarm-validate.yml` configured for your repository's default branch and language toolchain (`Go`, `Node 24`, `Python 3.13` with `pytest`/`ruff`, or `Rust` with `clippy`), then runs `swarm validate --ci --base "$BASE_SHA"` against the pull request or push base SHA.
+With a compatible installed release or explicit compatible pin, `swarm repo init` generates `.github/workflows/swarm-validate.yml` configured for your repository's default branch and language toolchain (`Go`, `Node 24`, `Python 3.13` with `pytest`/`ruff`, or `Rust` with `clippy`), then runs `swarm repo validate --base "$BASE_SHA"` against the pull request or push base SHA. This checkout-only CI command needs a trusted full base commit but no issue claim or task artifacts.
 
 For repositories that mirror SwarmOS's own release and security setup:
 - **Release workflow (`release.yml`)**: Runs the lint, vulnerability, and Linux/macOS/Windows test matrix for the tagged commit, verifies the semantic version tag is reachable from the default branch, and publishes through the `release` GitHub Environment. Configure required reviewers and tag protection rules on that environment in GitHub Settings.
@@ -68,7 +70,7 @@ agents:
     roles: [planner, reviewer, developer, tester]
 ```
 
-Sign in through the selected harness on the worker, then run `swarm doctor`. Isolated adapters use coordinator-selected permissions; agent entries can choose a model and roles, while arbitrary `args`, environment forwarding, and sandbox overrides are rejected. For optional offline containers, select `execution.backend: oci` and follow the [OCI setup](../SECURITY.md#optional-oci-backend).
+Sign in through the selected harness on the worker, then run `swarm repo doctor`. Isolated adapters use coordinator-selected permissions; agent entries can choose a model and roles, while arbitrary `args`, environment forwarding, and sandbox overrides are rejected. For optional offline containers, select `execution.backend: oci` and follow the [OCI setup](../SECURITY.md#optional-oci-backend).
 
 How agent configuration works:
 - **Explicit allowlist**: Only entries under `agents:` can be selected. Each entry can configure `binary`, `harness` (`claude`, `codex`, `omp`, or `opencode`; defaults to the entry name), `args`, `model`, allowed `roles`, permitted `env` variables, and reviewer sandbox settings.
@@ -79,7 +81,7 @@ How agent configuration works:
 
 Keep team defaults in the project root's `.swarm/config.yaml`: agent presets under `agents`, role assignments under `roles`, and the worker environment under `execution`. Commit changes before approving tasks; existing tasks need fresh approval to adopt updated policy. Set `security.require_isolation: true` to require isolated workers.
 
-For teams planning in an existing agent session, set `plan_mode: interactive` so tasks can be claimed without launching a planner. Write the plan in the assigned worktree and record it with `swarm stage <issue> --phase plan`.
+For teams planning in an existing agent session, set `plan_mode: interactive` so tasks can be claimed without launching a planner. Write the plan in the assigned worktree and record it with `swarm issue stage <issue> --phase plan`.
 
 Developers choose from those presets with `--agent` or a role flag such as `--developer-agent`. Use `--headless=false` for pairing, or the default headless mode for automation. `SWARM_EXECUTION_MODE` selects a mode for your shell or CI job within project policy. The user-level `~/.config/swarm/node.yaml` describes worker capabilities for task matching; agent permissions belong in the project presets.
 
@@ -117,13 +119,13 @@ commit_message:
 - **`concise`** (default when omitted): a subject only, such as `Add backlog export (#15)`.
 - **`detailed`**: the same subject plus the approved objective and a summary of files actually staged in that commit. The body includes up to 20 files, with an overflow count; long objectives and paths are shortened.
 
-This setting applies to commits created by `swarm work`, `swarm stage --phase implement`, and `swarm submit`. Messages are derived from task context and Git changes without an additional model call. Commit the configuration before approving tasks: running tasks use the setting from their approved base, not edits in the candidate worktree. Existing commits are never renamed or amended.
+This setting applies to commits created by `swarm issue work`, `swarm issue stage --phase implement`, and `swarm issue submit`. Messages are derived from task context and Git changes without an additional model call. Commit the configuration before approving tasks: running tasks use the setting from their approved base, not edits in the candidate worktree. Existing commits are never renamed or amended.
 
 ---
 
 ## 3. Create, Lint, and Approve WorkUnit Issues
 
-You can create structured WorkUnits from the GitHub Issue Form (`swarm:draft`), fenced YAML blocks, external `.swarm/workunits/<id>.yaml` references, roadmap files (`swarm plan --from <file> --apply`), or the CLI. Community members can submit bugs, ideas, and feedback through the **Community report** form (`swarm:community`), which remains intake until a maintainer scopes and approves a WorkUnit.
+You can create structured WorkUnits from the GitHub Issue Form (`swarm:draft`), fenced YAML blocks, external `.swarm/workunits/<id>.yaml` references, roadmap files (`swarm repo plan --from <file> --apply`), or the CLI. Community members can submit bugs, ideas, and feedback through the **Community report** form (`swarm:community`), which remains intake until a maintainer scopes and approves a WorkUnit.
 
 ```bash
 # Create a standalone non-executable Epic issue (requires maintainer/admin permission)
@@ -178,7 +180,7 @@ protected_paths:
   - .swarm/workflows/**
 ```
 
-During `swarm validate` and `swarm submit`, SwarmOS reads `required-checks.yaml` from the **approved base commit** rather than the candidate worktree, so a task cannot pass validation by weakening its own check commands or protected-path rules. When a maintainer intentionally authors a task that updates `.swarm/` or `.github/workflows/`, set `allow_harness_changes: true` in that issue's WorkUnit before approving it.
+During `swarm issue validate` and `swarm issue submit`, SwarmOS reads `required-checks.yaml` from the **approved base commit** rather than the candidate worktree, so a task cannot pass validation by weakening its own check commands or protected-path rules. When a maintainer intentionally authors a task that updates `.swarm/` or `.github/workflows/`, set `allow_harness_changes: true` in that issue's WorkUnit before approving it.
 
 ---
 
@@ -186,17 +188,19 @@ During `swarm validate` and `swarm submit`, SwarmOS reads `required-checks.yaml`
 
 - **`none`**: Runs the planner to generate `PLAN.md` and `TEST_PLAN.md`, then proceeds directly to implementation and validation.
 - **`agent`**: Runs your configured reviewer agent inside an isolated read-only snapshot. Implementation starts only when `.swarm/active/REVIEW.md` begins with `VERDICT: APPROVED` (bound to the current WorkUnit, plan, and test-plan digests).
-- **`human`**: Pauses after publishing the plan so a maintainer can inspect the design and run `swarm review <issue> --approve` or `--reject`.
+- **`human`**: Pauses after publishing the plan so a maintainer can inspect the design and run `swarm issue review-plan <issue> --approve` or `swarm issue review-plan <issue> --reject`.
 
 A CLI `--gate` flag can always make review stricter (for example, upgrading `none` to `agent` or `human`), while preserving the minimum gate required by the issue and repository policy.
+
+`swarm issue approve <issue>` authorizes the issue's WorkUnit contract for execution; `swarm issue review-plan <issue> --approve` separately approves the implementation plan before code changes. `swarm issue submit <issue>` links a Draft PR proposing the implementation. Review code and acceptance criteria in GitHub before merging; neither PR rebase nor PR repair is a SwarmOS command.
 
 ---
 
 ## Related Guides
 
-- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — Daily maintainer playbook for `swarm plan`, triage labels, and Draft PR provenance review.
+- **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — Daily maintainer playbook for `swarm repo plan`, triage labels, and Draft PR provenance review.
 - **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](GITHUB.md)** — Configure repository rulesets, `SWARM_GITHUB_TOKEN`, and role-separated collaborator accounts.
-- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI workflows, interactive `swarm stage`, agent harness table, reviewer isolation, checkpoints, and recovery.
+- **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI workflows, interactive `swarm issue stage`, agent harness table, reviewer isolation, checkpoints, and recovery.
 - **[Working with Grok Bot (`docs/grokbot.md`)](grokbot.md)** — Connect Grok Bot to GitHub and coordinate SwarmOS tasks.
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](openai-dot.md)** — Configure Codex Cloud environments and remote repositories for OpenAI Dots.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.

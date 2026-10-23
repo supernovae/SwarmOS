@@ -37,7 +37,7 @@ Adapter qualification records a supported version/configuration and exercises it
 3. **Optional OCI and enterprise integration:** follow the [concrete roadmap](../todo.md#oci-authentication-and-enterprise-integrations) for provider-supported OCI authentication, credential separation/revocation, optional workload identity/OIDC, scoped GitHub Apps, and real-container cross-platform tests.
 4. **Repository administration:** verify state-ref permissions, branch/tag rules, release reviewers, and bypass identities in the deployed GitHub repository. Repeat dependency/advisory checks as releases change.
 
-Onboarding is install a supported harness and its runtime prerequisites, sign in through that harness, run `swarm doctor`, and start an approved WorkUnit. The [qualification record](native-qualification.md) lists the evidence for each adapter. OCI authentication is independent follow-up work.
+Onboarding is install a supported harness and its runtime prerequisites, sign in through that harness, run `swarm repo doctor`, and start an approved WorkUnit. The [qualification record](native-qualification.md) lists the evidence for each adapter. OCI authentication is independent follow-up work.
 
 ## Validation record
 

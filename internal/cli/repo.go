@@ -152,7 +152,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 
 	listCmd.Flags().BoolVar(&asJSON, "json", false, "Emit registered repositories as JSON")
 	removeCmd.Flags().BoolVar(&asJSON, "json", false, "Emit the unregistered repository as JSON")
-	repoCmd.AddCommand(addCmd, listCmd, removeCmd, newInitCmd(rootOpts), newDoctorCmd(rootOpts), newPlanCmd(rootOpts), newRepoValidateCmd(rootOpts), newLessonsCmd(rootOpts))
+	repoCmd.AddCommand(addCmd, listCmd, removeCmd, newInitCmd(rootOpts), newOnboardCmd(), newDoctorCmd(rootOpts), newPlanCmd(rootOpts), newRepoValidateCmd(rootOpts), newLessonsCmd(rootOpts))
 	return repoCmd
 }
 

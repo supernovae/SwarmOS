@@ -100,6 +100,9 @@ swarm repo init --sync-labels --backend github
 swarm repo doctor --backend github
 ```
 
+> [!TIP]
+> Bringing SwarmOS into a large or long-lived repository? Preview the changes first with `swarm repo init --dry-run --verbose`, or let your coding agent do the setup with you: `codex "$(swarm repo onboard)"` (any harness works). The agent reads your CI to propose real validation checks, merges SwarmOS files with what you already have, and hands everything back for review before anything is committed.
+
 Example `swarm repo doctor` output:
 
 ```text
@@ -222,7 +225,8 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 
 | Command | What It Does |
 | :--- | :--- |
-| `swarm repo init [--force] [--sync-labels] [--template-dir <dir>] [--fork-coordinator]` | Scaffold or upgrade `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. Rerun it after upgrading swarm: untouched generated files are updated, while your edits and your own files (including other workflows and an existing `AGENTS.md`, which gets a marked SwarmOS section) are kept (`--force` replaces files at SwarmOS paths, never your `AGENTS.md` or other workflows). `--swarm-version <ref>` overrides the pinned release. |
+| `swarm repo init [--dry-run] [--force] [--sync-labels] [--template-dir <dir>] [--fork-coordinator]` | Scaffold or upgrade `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. Rerun it after upgrading swarm: untouched generated files are updated, while your edits and your own files (including other workflows and an existing `AGENTS.md`, which gets a marked SwarmOS section) are kept (`--force` replaces files at SwarmOS paths, never your `AGENTS.md` or other workflows). `--swarm-version <ref>` overrides the pinned release. `--dry-run` previews the changes, with diffs for existing files, and writes nothing. |
+| `swarm repo onboard` | Print a guide your coding agent follows to onboard or upgrade the repository with you: preview init, propose validation checks from your CI, merge with existing files, and hand back a reviewable diff. Also available as `/swarm-onboard`. |
 | `swarm repo doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. |
 | `swarm issue create`, `swarm issue epic create`, `swarm issue approve`, `swarm issue lint`, `swarm issue decompose` | Create draft WorkUnits (`--parent`), standalone Epics (`--body-file`), approve revisions, lint schemas (with hints on how to strengthen an issue), or split WorkUnits into linked draft sub-issues. |
 | `swarm repo lessons [--apply]` | Propose additions to `.swarm/rules/lessons.md` from what agents learned in merged PRs; `--apply` appends them locally for you to review and commit. |
@@ -246,7 +250,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 
 Every leaf command accepts `--json` for scripting (for example, `swarm issue claim --json`, `swarm issue status --json`, `swarm repo doctor --json`, and `swarm repo validate --base <sha> --json`). Each prints one JSON document with a `kind` field, and failures print `{"kind": ..., "status": "failed", "error": ...}`; the `issue`, `repo`, `pr`, and `node` groups themselves only print help. Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions.
 
-To upgrade an existing repository, install the new swarm and rerun `swarm repo init`. It updates every generated file you haven't changed (workflows, their pins, slash commands, prompts, and templates) and lists the customized files it kept so you can merge those by hand. Review the diff and commit it like any other change.
+To upgrade an existing repository, install the new swarm and rerun `swarm repo init`. It updates every generated file you haven't changed (workflows, their pins, slash commands, prompts, and templates) and lists the customized files it kept. Run `swarm repo init --dry-run --verbose` first to see what will change, including diffs for the files you customized, or run `/swarm-onboard` in your coding agent to merge them with you. Review the diff and commit it like any other change.
 
 For an existing approved WorkUnit PR, use `pr work` to develop or fix its implementation, `pr stage` to record an interactive plan or implementation in the PR worktree, and `pr rebase` to update ancestry. None publishes the candidate branch; only `pr submit` does. Maintainers revise PRs with upstream write access; contributors revise their own fork PRs with `--fork`. See [Continuing an Existing PR](docs/developer.md#continuing-an-existing-pr) for approvals, conflicts, and publication.
 

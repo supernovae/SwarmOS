@@ -27,7 +27,7 @@ swarm repo doctor --backend github
 | `AGENTS.md` | Agent quick reference. If your repository already has an `AGENTS.md`, init appends a short SwarmOS section between `<!-- swarm:harness:start -->` and `<!-- swarm:harness:end -->` markers and only ever rewrites that section. |
 | `.github/ISSUE_TEMPLATE/{swarm-workunit,swarm-community,swarm-feature,swarm-bugfix,swarm-refactor}.yml` | Preset GitHub Issue Forms for structured draft WorkUnits (`swarm:draft`) and community bug/idea intake (`swarm:community`). Your issue chooser settings (`config.yml`) stay yours. |
 | `.github/workflows/swarm-validate.yml` | Consumer CI workflow running your repository checks against the trusted base commit. It is a separate workflow file; init never edits your other workflows. |
-| `.claude/commands/swarm-*.md` & `.opencode/commands/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, and `/swarm-project-plan` slash commands. |
+| `.claude/commands/swarm-*.md` & `.opencode/commands/swarm-*.md` | `/swarm-plan`, `/swarm-review`, `/swarm-implement`, `/swarm-validate`, `/swarm-project-plan`, and `/swarm-onboard` slash commands. |
 
 > [!TIP]
 > - `swarm repo init` pins generated automation to the swarm you run it with (a `v0.6.0`+ release, or the exact commit of a clean source build); a build with uncommitted changes keeps your existing pin. Rerun it after upgrading swarm to update untouched generated files; files you edited, and existing files SwarmOS did not generate, are kept and listed. `.swarm/managed.json` records what init generated. Commit the reviewed `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.

@@ -1681,3 +1681,70 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 		t.Fatalf("--force did not replace the customized file: %v", err)
 	}
 }
+
+func TestRepoOnboardAndInitDryRun(t *testing.T) {
+	origVersion, origCommit := Version, Commit
+	defer func() { Version, Commit = origVersion, origCommit }()
+	Version, Commit = "0.6.1", "none"
+	run := func(root string, args ...string) (string, error) {
+		var buf bytes.Buffer
+		cmd := NewRootCmd()
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs(append([]string{"--root", root, "--backend", "local"}, args...))
+		err := cmd.Execute()
+		return buf.String(), err
+	}
+	root := t.TempDir()
+	if out, err := exec.Command("git", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	assertOnlyGit := func(step string) {
+		t.Helper()
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != ".git" {
+			t.Fatalf("%s wrote files: %v", step, entries)
+		}
+	}
+
+	// The guide is available before anything is scaffolded.
+	out, err := run(root, "repo", "onboard")
+	if err != nil || !strings.Contains(out, "swarm repo init --dry-run --json") || strings.HasPrefix(out, "---") {
+		t.Fatalf("repo onboard: %v\n%s", err, out)
+	}
+	assertOnlyGit("repo onboard")
+
+	if _, err := run(root, "repo", "init", "--dry-run", "--sync-labels"); err == nil {
+		t.Fatal("--dry-run --sync-labels should be rejected")
+	}
+	out, err = run(root, "repo", "init", "--dry-run", "--verbose")
+	if err != nil || !strings.Contains(out, "nothing written") || !strings.Contains(out, "would create .swarm/config.yaml") {
+		t.Fatalf("dry run: %v\n%s", err, out)
+	}
+	assertOnlyGit("repo init --dry-run")
+
+	if _, err := run(root, "repo", "init"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".swarm", "goals.md"), []byte("# Our goals\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(root, "repo", "init", "--dry-run", "--json")
+	if err != nil {
+		t.Fatalf("dry run json: %v\n%s", err, out)
+	}
+	var report struct {
+		Status     string            `json:"status"`
+		Customized []string          `json:"customized"`
+		Diffs      map[string]string `json:"diffs"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatalf("decode %q: %v", out, err)
+	}
+	if report.Status != "dry-run" || !slices.Equal(report.Customized, []string{".swarm/goals.md"}) || !strings.Contains(report.Diffs[".swarm/goals.md"], "-# Our goals") {
+		t.Fatalf("dry run report: %+v", report)
+	}
+}

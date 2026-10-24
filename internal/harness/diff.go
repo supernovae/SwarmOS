@@ -96,20 +96,27 @@ func diffLines(a, b []string) ([]diffOp, bool) {
 		a, b = a[:len(a)-1], b[:len(b)-1]
 	}
 	n, m := len(a), len(b)
-	// (n+1)*(m+1) > maxDiffCells, written so it cannot overflow.
-	if n >= maxDiffCells || m >= maxDiffCells || m+1 > maxDiffCells/(n+1) {
+	if n > 0 && m > maxDiffCells/n {
 		return nil, false
 	}
-	lcs := make([][]int32, n+1)
+	// lcs[i][j] is the common subsequence length of a[i:] and b[j:]; at
+	// treats the row and column past either end as zero.
+	lcs := make([][]int32, n)
 	for i := range lcs {
-		lcs[i] = make([]int32, m+1)
+		lcs[i] = make([]int32, m)
+	}
+	at := func(i, j int) int32 {
+		if i == n || j == m {
+			return 0
+		}
+		return lcs[i][j]
 	}
 	for i := n - 1; i >= 0; i-- {
 		for j := m - 1; j >= 0; j-- {
 			if a[i] == b[j] {
-				lcs[i][j] = lcs[i+1][j+1] + 1
+				lcs[i][j] = at(i+1, j+1) + 1
 			} else {
-				lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+				lcs[i][j] = max(at(i+1, j), at(i, j+1))
 			}
 		}
 	}
@@ -119,7 +126,7 @@ func diffLines(a, b []string) ([]diffOp, bool) {
 		case a[i] == b[j]:
 			ops = append(ops, diffOp{' ', a[i]})
 			i, j = i+1, j+1
-		case lcs[i+1][j] >= lcs[i][j+1]:
+		case at(i+1, j) >= at(i, j+1):
 			ops = append(ops, diffOp{'-', a[i]})
 			i++
 		default:

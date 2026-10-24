@@ -691,6 +691,9 @@ func TestOnboardingGuideIsAPlainPrompt(t *testing.T) {
 	if strings.HasPrefix(guide, "---") || strings.Contains(guide, "description:") || !strings.Contains(guide, "swarm repo init --dry-run --json") {
 		t.Fatalf("guide should be the command body without front matter:\n%s", guide)
 	}
+	if got := stripFrontMatter("---\r\ndescription: x\r\n---\r\n\r\nBody\r\n"); got != "Body\n" {
+		t.Fatalf("CRLF front matter not stripped: %q", got)
+	}
 }
 
 func TestInitRemovesRetiredFilesOnlyWhenUntouched(t *testing.T) {

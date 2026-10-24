@@ -17,11 +17,17 @@ func OnboardingGuide() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read embedded onboarding guide: %w", err)
 	}
-	guide := string(data)
-	if rest, ok := strings.CutPrefix(guide, "---\n"); ok {
+	return stripFrontMatter(string(data)), nil
+}
+
+// stripFrontMatter drops a leading "---" front matter block. Line endings are
+// normalized first, since Windows checkouts may embed templates with CRLF.
+func stripFrontMatter(doc string) string {
+	doc = strings.ReplaceAll(doc, "\r\n", "\n")
+	if rest, ok := strings.CutPrefix(doc, "---\n"); ok {
 		if _, body, found := strings.Cut(rest, "\n---\n"); found {
-			guide = body
+			doc = body
 		}
 	}
-	return strings.TrimLeft(guide, "\n"), nil
+	return strings.TrimLeft(doc, "\n")
 }

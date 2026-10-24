@@ -101,7 +101,13 @@ func TestNativeDeadlineAndFailedRunDiscardChanges(t *testing.T) {
 			writeWorkerFixture(t, dir, "source", "original")
 			var snapshot string
 			failed := errors.New("harness session failed")
-			err := withNativeWorkspace(context.Background(), dir, WorkerOptions{Timeout: 100 * time.Millisecond}, func(ctx context.Context, work, _ string) error {
+			// The timeout also covers snapshot setup, which can exceed a short
+			// deadline on slow runners; only the deadline case needs one.
+			timeout := time.Minute
+			if deadline {
+				timeout = 100 * time.Millisecond
+			}
+			err := withNativeWorkspace(context.Background(), dir, WorkerOptions{Timeout: timeout}, func(ctx context.Context, work, _ string) error {
 				snapshot = work
 				if err := os.WriteFile(filepath.Join(work, "source"), []byte("partial"), 0600); err != nil {
 					return err

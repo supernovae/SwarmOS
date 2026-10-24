@@ -183,17 +183,34 @@ Alternatively, after the plan gate, make implementation changes in the managed P
 
 #### Rebasing onto an Updated Base
 
-The target is the existing PR's base branch, pinned to a full commit. If it has advanced beyond the WorkUnit's approved baseline, a maintainer first runs `swarm issue approve <issue>` to approve the current policy. Release an active issue claim before changing that approval. Then:
+The target is the existing PR's base branch, pinned to a full commit. When that branch moves ahead of the WorkUnit's approved baseline, a maintainer re-approves the issue against the new base before rebasing. Approval can't change while a claim is active, including your own claim from earlier `issue work`, so release it first. The next PR command claims the issue again automatically.
 
 ```bash
+# 33 is the PR number, 16 its linked issue.
+swarm issue release 16 --reason "re-approve against the new base for PR #33" --backend github
+swarm issue approve 16 --backend github
 swarm pr rebase 33 --backend github
-# If Git reports conflicts, resolve and stage them in the reported PR worktree.
+
+# If Git reports conflicts, resolve them in .swarm/worktrees/pr-33 and stage them:
+git -C .swarm/worktrees/pr-33 add path/to/resolved_file.go
 swarm pr rebase 33 --continue --backend github
-# Or abandon that in-progress rebase without discarding unrelated work:
+# Or abandon the in-progress rebase and restore the starting commit:
 swarm pr rebase 33 --abort --backend github
 ```
 
-Use `--continue` or `--abort` only when a rebase is in progress. A successful rebase invalidates earlier review and validation evidence. Run `pr work` through its plan gate, validate, and submit the revised branch explicitly. While a PR revision is pending, use the PR commands rather than issue work/stage/validate/submit against the original worktree.
+A successful rebase clears earlier review and validation evidence, because they described the old ancestry. Run `swarm pr work 33` through its plan gate, then `swarm pr validate 33` and `swarm pr submit 33`. While a PR revision is pending, use the PR commands rather than issue work/stage/validate/submit against the original issue worktree.
+
+> [!TIP]
+> If a rebase step stops with one of these errors, the fix is usually one command:
+>
+> | Message | What to do |
+> | --- | --- |
+> | `PR base tip differs from approved issue baseline` | Run `swarm issue release <issue>` if you hold a claim, then `swarm issue approve <issue>`, then retry the rebase. |
+> | `issue is already claimed by another active lease` (from `issue approve`) | An active claim exists, possibly your own. Check `swarm issue status <issue>`, then run `swarm issue release <issue>` on the machine that holds it, or wait for it to expire. |
+> | `rebase PR head … (conflicts preserved)` | Resolve and `git add` the conflicts in `.swarm/worktrees/pr-<PR>`, then `swarm pr rebase <PR> --continue`. |
+> | `PR worktree must be clean before starting rebase` | A rebase is already in progress. Finish it with `--continue`, or use `--abort`; don't start a new one. |
+
+You don't need a separate command to resume a PR after its claim is lost or expires. `pr work`, `pr rebase`, `pr validate`, and `pr submit` each check the issue's lease first. Each one resumes your active claim when this machine holds its token, or takes a fresh claim when the old one has lapsed. `swarm pr status <PR>` shows where the revision stands.
 
 ### Recovering from an Interrupted Run
 If an agent exits early, a lease expires, or a validation check fails:

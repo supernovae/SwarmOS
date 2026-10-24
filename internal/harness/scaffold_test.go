@@ -629,7 +629,8 @@ func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for event, want := range map[string]string{"pull_request": currentTip, "push": staleBase} {
+	merged := git("rev-parse", "HEAD")
+	for event, want := range map[string]string{"pull_request": currentTip, "push": merged} {
 		cmd := exec.Command("bash", "-e", "-c", script)
 		cmd.Dir = repo
 		cmd.Env = append(os.Environ(), "RUNNER_TEMP="+runnerTemp, "BASE_SHA="+staleBase, "EVENT_NAME="+event)

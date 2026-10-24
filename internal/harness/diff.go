@@ -96,7 +96,8 @@ func diffLines(a, b []string) ([]diffOp, bool) {
 		a, b = a[:len(a)-1], b[:len(b)-1]
 	}
 	n, m := len(a), len(b)
-	if (n+1)*(m+1) > maxDiffCells {
+	// (n+1)*(m+1) > maxDiffCells, written so it cannot overflow.
+	if n >= maxDiffCells || m >= maxDiffCells || m+1 > maxDiffCells/(n+1) {
 		return nil, false
 	}
 	lcs := make([][]int32, n+1)

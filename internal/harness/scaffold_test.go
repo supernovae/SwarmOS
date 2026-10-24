@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"os/exec"
@@ -666,6 +667,19 @@ func TestUnifiedDiff(t *testing.T) {
 	}
 	if got := unifiedDiff("x", nil, []byte("one\n")); got != "--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n" {
 		t.Fatalf("diff from empty:\n%s", got)
+	}
+	big := func(prefix string) []byte {
+		var b strings.Builder
+		for i := range 2100 {
+			fmt.Fprintf(&b, "%s%d\n", prefix, i)
+		}
+		return []byte(b.String())
+	}
+	if got := unifiedDiff("x", big("old"), big("new")); !strings.Contains(got, "too large to diff") {
+		t.Fatalf("oversized diff should be summarized, got %d bytes", len(got))
+	}
+	if got := unifiedDiff("x", big("same"), append(big("same"), "tail\n"...)); !strings.HasSuffix(got, "+tail\n") {
+		t.Fatalf("shared lines should be trimmed before the size check:\n%s", got)
 	}
 }
 

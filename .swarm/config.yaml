@@ -6,6 +6,9 @@ execution:
   mode: isolated
   backend: native
 default_gate: agent
+# Plan reviews come from a different harness than the one that wrote the plan.
+roles:
+  reviewer: claude
 lease:
   duration: 4h
   renewable: true

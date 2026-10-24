@@ -684,6 +684,68 @@ func (g *GitHubTracker) FindDraftPR(ctx context.Context, head, base string) (*Pu
 	return nil, nil
 }
 
+// ListPullRequests lists pull requests, most recently updated first, from the
+// list endpoint alone. HeadSHA and BaseSHA come from the list response and are
+// not re-resolved; use GetPullRequest before acting on a PR.
+func (g *GitHubTracker) ListPullRequests(ctx context.Context, filter PullRequestFilter) ([]*PullRequest, error) {
+	state := filter.State
+	if state == "" {
+		state = "open"
+	}
+	var out []*PullRequest
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		q := url.Values{"state": []string{state}, "sort": []string{"updated"}, "direction": []string{"desc"}, "per_page": []string{"100"}, "page": []string{fmt.Sprint(page)}}
+		path := fmt.Sprintf("repos/%s/%s/pulls?%s", g.owner, g.repo, q.Encode())
+		var rawList []struct {
+			Number    int        `json:"number"`
+			Title     string     `json:"title"`
+			Body      string     `json:"body"`
+			State     string     `json:"state"`
+			Draft     bool       `json:"draft"`
+			HTMLURL   string     `json:"html_url"`
+			CreatedAt time.Time  `json:"created_at"`
+			UpdatedAt time.Time  `json:"updated_at"`
+			MergedAt  *time.Time `json:"merged_at"`
+			User      struct {
+				Login string `json:"login"`
+			} `json:"user"`
+			Head struct {
+				Ref  string `json:"ref"`
+				SHA  string `json:"sha"`
+				Repo struct {
+					FullName string `json:"full_name"`
+				} `json:"repo"`
+			} `json:"head"`
+			Base struct {
+				Ref  string `json:"ref"`
+				Repo struct {
+					FullName string `json:"full_name"`
+				} `json:"repo"`
+			} `json:"base"`
+		}
+		if err := g.client.DoWithContext(ctx, "GET", path, nil, &rawList); err != nil {
+			return nil, fmt.Errorf("github ListPullRequests page %d: %w", page, err)
+		}
+		for _, r := range rawList {
+			out = append(out, &PullRequest{
+				Number: r.Number, Title: r.Title, Body: r.Body, State: r.State,
+				Draft: r.Draft && strings.EqualFold(r.State, "open"), Merged: r.MergedAt != nil, HTMLURL: r.HTMLURL,
+				Head: r.Head.Ref, HeadSHA: r.Head.SHA, HeadRepo: r.Head.Repo.FullName, Base: r.Base.Ref, BaseRepo: r.Base.Repo.FullName,
+				Author: r.User.Login, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+			})
+			if filter.Limit > 0 && len(out) == filter.Limit {
+				return out, nil
+			}
+		}
+		if len(rawList) < 100 {
+			return out, nil
+		}
+	}
+}
+
 func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRequest, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

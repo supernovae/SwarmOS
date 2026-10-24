@@ -464,7 +464,10 @@ func (l *LocalTracker) CreateDraftPR(ctx context.Context, req DraftPRRequest) (*
 			State:       "open",
 			Draft:       true,
 			HTMLURL:     fmt.Sprintf("local://pulls/%d", num),
+			Author:      l.user,
+			CreatedAt:   time.Now().UTC(),
 		}
+		pr.UpdatedAt = pr.CreatedAt
 		l.refreshPRRefs(pr)
 		if pr.HeadSHA != "" {
 			if err := l.updatePRRef(ctx, num, pr.HeadSHA, ""); err != nil {
@@ -490,6 +493,7 @@ func (l *LocalTracker) UpdateDraftPR(_ context.Context, prNumber int, title, bod
 			pr.Title = title
 		}
 		pr.Body = body
+		pr.UpdatedAt = time.Now().UTC()
 		cp := *pr
 		updated = &cp
 		return nil
@@ -532,6 +536,38 @@ func (l *LocalTracker) GetPullRequest(ctx context.Context, number int) (*PullReq
 		return nil
 	})
 	return found, err
+}
+
+func (l *LocalTracker) ListPullRequests(ctx context.Context, filter PullRequestFilter) ([]*PullRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	state := filter.State
+	if state == "" {
+		state = "open"
+	}
+	var out []*PullRequest
+	err := l.withLock(false, func(st *localState) error {
+		for _, pr := range st.PullRequests {
+			if state != "all" && pr.State != state {
+				continue
+			}
+			cp := *pr
+			l.refreshPRRefs(&cp)
+			out = append(out, &cp)
+		}
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		}
+		return out[i].Number > out[j].Number
+	})
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return out, err
 }
 
 // refreshPRRefs reads only explicit branch refs. Missing refs retain persisted

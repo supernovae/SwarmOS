@@ -45,6 +45,13 @@ type IssueFilter struct {
 	Labels []string
 }
 
+// PullRequestFilter selects pull requests for listing. Results come most
+// recently updated first; Limit 0 returns every match.
+type PullRequestFilter struct {
+	State string // "open" (default), "closed", or "all"
+	Limit int
+}
+
 type DraftPRRequest struct {
 	IssueNumber int    `json:"issue_number"`
 	Title       string `json:"title"`
@@ -71,6 +78,10 @@ type PullRequest struct {
 	BaseRepo    string `json:"base_repo,omitempty"`
 	Draft       bool   `json:"draft"`
 	HTMLURL     string `json:"html_url"`
+	// Author and timestamps are filled by ListPullRequests.
+	Author    string    `json:"author,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 
 type PullRequestReview struct {
@@ -129,6 +140,7 @@ type Tracker interface {
 	UpdateDraftPR(ctx context.Context, prNumber int, title, body string) (*PullRequest, error)
 	FindDraftPR(ctx context.Context, head, base string) (*PullRequest, error)
 	GetPullRequest(ctx context.Context, number int) (*PullRequest, error)
+	ListPullRequests(ctx context.Context, filter PullRequestFilter) ([]*PullRequest, error)
 	GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error)
 	EnsureLabels(ctx context.Context, labels []LabelSpec) error
 }

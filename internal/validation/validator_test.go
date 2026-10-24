@@ -239,3 +239,26 @@ func TestTemporaryTaskPointerIsNotAProtectedChange(t *testing.T) {
 		t.Fatalf("staged task pointer passed: %v", err)
 	}
 }
+
+func TestRunnerIsolatedChecksDoNotNeedAgentSandbox(t *testing.T) {
+	ctx := context.Background()
+	repo := setupGitRepoForValidation(t)
+	// Standard policy: Codex's native sandbox, which stock CI runners lack.
+	config := "version: 1\ndefault_agent: codex\ndefault_gate: agent\nexecution:\n  mode: isolated\n  backend: native\nlease:\n  duration: 1h\n  max_renewals: 1\nsecurity:\n  require_isolation: true\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  codex:\n    binary: swarm-test-missing-codex\n"
+	if err := os.WriteFile(filepath.Join(repo, ".swarm", "config.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "standard isolation policy"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	base := gitRevision(t, repo, "HEAD")
+	if _, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, BaseSHA: base}); err == nil {
+		t.Fatal("workstation validation ran without the configured sandbox")
+	}
+	report, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, RunnerIsolated: true, BaseSHA: base})
+	if err != nil || !report.Passed {
+		t.Fatalf("CI runner validation = %+v, %v", report, err)
+	}
+}

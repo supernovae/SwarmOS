@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -86,7 +87,7 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 			reportJSONFailure(cmd, asJSON, "validation", err)
 			return err
 		}
-		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, BaseSHA: baseSHA, ForkMode: options.Fork})
+		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork})
 		return writeValidationOutcome(cmd, report, err, asJSON)
 	}}
 	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted full base commit SHA to validate against (required)")
@@ -113,4 +114,11 @@ func writeValidationOutcome(cmd *cobra.Command, report *validation.ValidationRep
 		}
 	}
 	return validationErr
+}
+
+// onCIRunner reports whether repo validate runs on a CI runner (GitHub Actions
+// and most CI systems set CI=true). There the runner is the isolation boundary;
+// on a workstation, checks keep the repository's configured sandbox.
+func onCIRunner() bool {
+	return os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true"
 }

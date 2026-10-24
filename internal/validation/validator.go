@@ -49,6 +49,10 @@ type ValidationReport struct {
 
 type ValidateOptions struct {
 	CIMode bool
+	// RunnerIsolated runs required checks directly on an ephemeral CI runner,
+	// which is the isolation boundary there; agent sandboxes such as Codex's are
+	// not installed on stock runners. Policy still comes from BaseSHA.
+	RunnerIsolated bool
 	// BaseSHA is the immutable approved commit from which policy is loaded and
 	// against which committed candidate changes are compared.
 	BaseSHA  string
@@ -137,22 +141,16 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		start := time.Now()
 		var output process.Output
 		var runErr error
-		if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
+		if opts.RunnerIsolated {
+			runErr = runOnHost(checkCtx, worktreePath, checkHome, check.Command, &output)
+		} else if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
 			runErr = sandbox.RunConfiguredNativeValidation(checkCtx, worktreePath, cfg, check.Command, &output, &output)
 		} else if execution.Mode == contract.ExecutionIsolated {
 			runErr = sandbox.RunWorker(checkCtx, worktreePath, "/bin/sh", []string{"-c", check.Command}, sandbox.WorkerOptions{
 				Runtime: execution.ContainerRuntime, Image: execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,
 			}, nil, &output, &output)
 		} else {
-			cmd := exec.CommandContext(checkCtx, "sh", "-c", check.Command)
-			cmd.Dir = worktreePath
-			cmd.Env = cleanCheckEnv(checkHome)
-			process.Configure(cmd)
-			cmd.Cancel = func() error { process.Stop(cmd); return nil }
-			cmd.WaitDelay = time.Second
-			cmd.Stdout, cmd.Stderr = &output, &output
-			runErr = cmd.Run()
-			process.Stop(cmd)
+			runErr = runOnHost(checkCtx, worktreePath, checkHome, check.Command, &output)
 		}
 		cancel()
 		outcome := CheckRunOutcome{Name: check.Name, Command: check.Command, Duration: time.Since(start), Output: output.String(), Passed: runErr == nil}
@@ -288,6 +286,20 @@ func onlyActivePointer(worktreePath, path string) (bool, error) {
 		return false, nil
 	}
 	return strings.ReplaceAll(stripped, "\r\n", "\n") == strings.ReplaceAll(committed, "\r\n", "\n"), nil
+}
+
+// runOnHost runs a required check directly, with a scrubbed environment.
+func runOnHost(ctx context.Context, dir, home, command string, output *process.Output) error {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Dir = dir
+	cmd.Env = cleanCheckEnv(home)
+	process.Configure(cmd)
+	cmd.Cancel = func() error { process.Stop(cmd); return nil }
+	cmd.WaitDelay = time.Second
+	cmd.Stdout, cmd.Stderr = output, output
+	err := cmd.Run()
+	process.Stop(cmd)
+	return err
 }
 
 func isEphemeral(path string) bool {

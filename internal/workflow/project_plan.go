@@ -77,6 +77,9 @@ type ProjectPlanReport struct {
 	BacklogItems    []IssueSenseItem    `yaml:"backlog_items,omitempty" json:"backlog_items,omitempty"`
 	ExecutionWaves  [][]int             `yaml:"execution_waves,omitempty" json:"execution_waves,omitempty"`
 	Lanes           []BacklogLane       `yaml:"lanes,omitempty" json:"lanes,omitempty"`
+	PullRequests    []PRSenseItem       `yaml:"pull_requests,omitempty" json:"pull_requests,omitempty"`
+	PRLanes         []BacklogLane       `yaml:"pr_lanes,omitempty" json:"pr_lanes,omitempty"`
+	PRScanError     string              `yaml:"pr_scan_error,omitempty" json:"pr_scan_error,omitempty"`
 	SummaryMarkdown string              `yaml:"summary_markdown" json:"summary_markdown"`
 }
 
@@ -350,6 +353,12 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 	}
 
 	report.Lanes = assignLanes(items, opts.StaleDays)
+	// Pull request triage is read-only and must not block issue triage.
+	if prs, prLanes, err := e.triageOpenPullRequests(ctx, now, opts.StaleDays); err != nil {
+		report.PRScanError = err.Error()
+	} else {
+		report.PullRequests, report.PRLanes = prs, prLanes
+	}
 	report.BacklogItems = items
 	report.ExecutionWaves = computeExecutionWaves(items)
 	report.SummaryMarkdown = renderBacklogScanMarkdown(report, opts.Apply, opts.Normalize)
@@ -1679,6 +1688,10 @@ func renderBacklogScanMarkdown(report *ProjectPlanReport, applied, normalized bo
 		sb.WriteString(line)
 	}
 	renderLanesSection(&sb, report.Lanes, report.BacklogItems)
+	renderPRSection(&sb, report.PRLanes, report.PullRequests)
+	if report.PRScanError != "" {
+		sb.WriteString("\n> [!NOTE]\n> Open pull requests were skipped: " + escapeLaneText(report.PRScanError) + "\n")
+	}
 	if len(report.Lanes) > 0 {
 		sb.WriteString("\n#### All Open Issues\n")
 	}

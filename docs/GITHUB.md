@@ -147,10 +147,16 @@ security:
     - acme-swarm-worker
     - acme-swarm-reviewer
     - alice-maintainer
-  # Only these GitHub identities may publish plan review verdicts (swarm issue review-plan):
+  # Only these GitHub identities may publish plan review verdicts (swarm issue review-plan).
+  # When a human gate pauses, SwarmOS assigns them to the issue and @-mentions them:
   reviewer_collaborators:
     - acme-swarm-reviewer
     - alice-maintainer
+  # Only these configured agents may satisfy an agent gate:
+  reviewer_agents: [omp]
+  # The reviewer must differ from the planner (another harness or model for agents,
+  # someone other than the claim owner for humans):
+  independent_review: true
 
 agents:
   claude:
@@ -175,6 +181,19 @@ agents:
     roles: [tester]
     env: [OPENAI_API_KEY]
 ```
+
+#### Name your reviewers
+
+The review gates (`none`, `agent`, `human`) decide *whether* a plan needs approval. These three keys decide *who* can give it:
+
+- **`reviewer_collaborators`** names the people who can approve a plan. When a task pauses at a human gate, SwarmOS assigns those reviewers to the issue and posts one comment that mentions them, with the exact `swarm issue review-plan` commands. If the plan is revised, they get a fresh request. If you leave the list empty, any collaborator with write access can approve, and nobody is notified.
+- **`reviewer_agents`** names the configured agents whose verdicts count for an agent gate. If a run picks a different reviewer through `roles.reviewer` or `--reviewer-agent`, it stops before claiming the issue.
+- **`independent_review: true`** keeps the author from approving their own work. An agent reviewer must use a different harness or model than the planner, and a human reviewer must be someone other than the contributor who claimed the task.
+
+Like the rest of `security:`, SwarmOS reads these keys from the approved `base_sha`, so a contributor's branch can't change who reviews it. Run `swarm repo doctor` to see who can currently satisfy each gate.
+
+> [!TIP]
+> The machine that ran the review reports which agent it used. `reviewer_agents` keeps a well-meaning worker from reviewing with the wrong agent or grading its own plan. For a review the worker can't influence at all, run the review phase under a separate reviewer identity, as in Step 3 below.
 
 ### Step 3: Run Role-Separated Worker and Reviewer Nodes
 
@@ -203,14 +222,54 @@ SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue submit 42 --backend github
 | `swarm repo plan --from <file> --apply` / `swarm issue epic create` | Repository `maintain` or `admin` | Verifies maintainer role (`create-epic`) and enabled organization `Epic` issue type before creating the unlabeled Epic or linking native sub-issues. |
 | `swarm issue approve <N>` | Repository `write`, `maintain`, or `admin` | Rejects `Epic` issues; must be an authenticated collaborator; pins `task_digest`, `policy_digest`, and `base_sha` and applies `swarm:ready`. |
 | `swarm issue claim <N>` / `swarm issue work <N>` | Repository `write` | Rejects `Epic` issues; actor must match `security.approved_collaborators` (when configured) and issue must carry `swarm:ready`. |
-| `swarm issue review-plan <N>` (Agent Gate) | Repository `write` | Actor must match `security.reviewer_collaborators` (when configured); reviewer subprocess runs in a read-only sandbox. |
-| `swarm issue review-plan <N> --approve` (Human Gate) | Repository `write`, `maintain`, or `admin` (non-Bot account) | Actor must be a human GitHub user and match `security.reviewer_collaborators` (when configured). |
+| `swarm issue review-plan <N>` (Agent Gate) | Repository `write` | Actor must match `security.reviewer_collaborators` (when configured); reviewer agent must be listed in `security.reviewer_agents` (when configured) and differ from the planner when `security.independent_review` is set; reviewer subprocess runs in a read-only sandbox. |
+| `swarm issue review-plan <N> --approve` (Human Gate) | Repository `write`, `maintain`, or `admin` (non-Bot account) | Actor must be a human GitHub user and match `security.reviewer_collaborators` (when configured); with `security.independent_review`, the actor can't be the contributor who claimed the task. |
 | `swarm issue submit <N>` | Repository `write` | Requires a verified review verdict matching the current `WorkUnit`, `PLAN.md`, and `TEST_PLAN.md` digests plus passing baseline-pinned checks. |
 
 > [!NOTE]
 > **Organization Issue Types & Web Intake:**
 > - Native `Epic` issues and sub-issue hierarchy require GitHub's organization `Epic` issue type to be enabled on the repository. Run `swarm repo doctor --backend github` to check `Epic` availability and your current actor's `create-epic` permission.
 > - `swarm repo init --sync-labels --backend github` scaffolds `.github/ISSUE_TEMPLATE/swarm-community.yml` (`swarm:community` intake) and `swarm-workunit.yml` (`swarm:draft`) and syncs labels. Because GitHub's web UI and REST API allow users with repository access to open issues directly, maintainers should review repository issue forms and organization issue-type settings in GitHub Settings; SwarmOS enforces execution gating by requiring explicit `swarm issue approve <N>` on non-Epic WorkUnits.
+---
+
+## 4. Working Alongside Hosted Agents & Review Bots
+
+SwarmOS doesn't have to be the only way work gets done in your repository. Many teams already have hosted agents installed as GitHub Apps: Codex code review, Copilot code review, Cursor Bugbot, or the coding agents that come with them. They run on their vendor's infrastructure with the permissions you grant them. SwarmOS doesn't run or own them, and it doesn't need to. They sit comfortably on either side of a SwarmOS task.
+
+**Where each one fits:**
+
+- **SwarmOS gates review the plan.** `PLAN.md` and `TEST_PLAN.md` are reviewed before any code is written, by the reviewers you named in `.swarm/config.yaml` (see [Name your reviewers](#name-your-reviewers)).
+- **Hosted review bots review the pull request.** After `swarm issue submit` opens the Draft PR, they read the diff the same way they read any other PR. Their feedback helps you and the contributor, while your GitHub rulesets decide what is required to merge.
+
+### Hosted review bots
+
+| Bot | How you ask for a review | What it leaves on the PR | Using it as a merge requirement |
+| :--- | :--- | :--- | :--- |
+| [Codex code review](https://developers.openai.com/codex/integrations/github) | Comment `@codex review` (add a focus such as `@codex review for security regressions`), or turn on automatic reviews in Codex settings | A GitHub review with findings; a 👍 reaction when a requested review finds nothing | Advisory. Codex follows the `Review guidelines` in your `AGENTS.md` |
+| [Copilot code review](https://docs.github.com/en/copilot/how-tos/copilot-on-github/use-copilot-agents/copilot-code-review) | Add Copilot as a reviewer, or set up automatic review in a ruleset | Always a "Comment" review | Advisory. Copilot reviews don't count toward required approvals |
+| [Cursor Bugbot](https://cursor.com/docs/bugbot) | Runs when a PR is opened or updated; comment `cursor review` or `bugbot run` to ask again | A check named `Cursor Bugbot` | Add it as a required status check, and configure Bugbot to fail on unresolved findings so the check can block a merge |
+
+> [!TIP]
+> SwarmOS opens pull requests as drafts. Some bots review automatically only when a PR is opened for review or marked ready, so on a draft PR, ask for a review with the bot's comment command.
+
+`swarm pr status <PR>` shows these alongside SwarmOS's own state. You see each check on the published head with the GitHub App that reported it, and each review labeled as either on the current head or stale from an earlier commit:
+
+```bash
+swarm pr status 57
+```
+
+The output lists reviewer logins, states, and commits only, never review text. Comments and reviews from any bot stay advisory inside SwarmOS: they never approve a plan, link a PR, or change coordination state.
+
+### Hosted coding agents
+
+Hosted coding agents (Copilot's coding agent, Codex cloud tasks, Cursor's background agents) open pull requests of their own. To SwarmOS those are ordinary contributor PRs. They don't hold SwarmOS claims, and SwarmOS doesn't validate or attest them.
+
+- **One owner per task.** If you hand an issue to a hosted agent, don't also approve it as a `swarm:ready` WorkUnit, or two agents will race for the same work.
+- **One view of everything waiting on you.** `swarm repo plan --scan` lists every open pull request, whoever opened it. It flags competing PRs that close the same issue and says which PRs belong to a WorkUnit (see [Open pull requests](backlog.md#4-open-pull-requests)).
+- **Your rulesets govern merges.** Required reviews, CODEOWNERS, and required checks apply to every PR the same way, whether SwarmOS, a hosted agent, or a person opened it.
+
+Contributors can come into a SwarmOS task, finish it, and leave, and the rest of your GitHub tooling keeps working alongside it.
+
 ---
 
 ## Related Guides

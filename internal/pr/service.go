@@ -263,6 +263,9 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 		if err != nil {
 			return r, err
 		}
+		for i := range r.Reviews {
+			r.Reviews[i].Current = r.Reviews[i].CommitSHA != "" && r.Reviews[i].CommitSHA == r.PR.HeadSHA
+		}
 	}
 	return r, nil
 }

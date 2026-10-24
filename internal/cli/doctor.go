@@ -45,6 +45,7 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 				checks = append(checks, harness.DoctorCheck{Category: "execution", Name: "mode", Status: status, Detail: detail})
 				checks = append(checks, doctorAgentChecks(cfg, !checkGHAuth, agent.Preflight)...)
+				checks = append(checks, doctorReviewerCheck(cfg))
 			}
 			if checkGHAuth && (strings.EqualFold(rootOpts.Backend, "github") || rootOpts.trackerOverride != nil || rootOpts.Repo != "" || hasGitRemote(repoRoot)) {
 				tr, err := rootOpts.resolveTracker(cmd)
@@ -127,6 +128,25 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit doctor checks as JSON")
 	return cmd
+}
+
+// doctorReviewerCheck reports who can satisfy plan gates under the local policy.
+func doctorReviewerCheck(cfg *contract.SwarmConfig) harness.DoctorCheck {
+	sec := cfg.Security
+	humans, agents := "any repository writer", "any configured reviewer"
+	if len(sec.ReviewerCollaborators) > 0 {
+		humans = strings.Join(sec.ReviewerCollaborators, ", ")
+	}
+	if len(sec.ReviewerAgents) > 0 {
+		agents = strings.Join(sec.ReviewerAgents, ", ")
+	}
+	detail := fmt.Sprintf("default_gate=%s; humans: %s; agents: %s; independent_review=%t", cfg.DefaultGate, humans, agents, sec.IndependentReview)
+	status := "OK"
+	if cfg.DefaultGate == contract.GateHuman && len(sec.ReviewerCollaborators) == 0 {
+		status = "WARN"
+		detail += "; set security.reviewer_collaborators so plan reviews have named, notified reviewers"
+	}
+	return harness.DoctorCheck{Category: "security", Name: "plan-reviewers", Status: status, Detail: detail}
 }
 
 // Check selected roles even when an agent's allowlist excludes that assignment.

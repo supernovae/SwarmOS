@@ -13,6 +13,7 @@ type Issue struct {
 	State             string    `json:"state"` // "open", "closed"
 	Type              string    `json:"type,omitempty"`
 	Labels            []string  `json:"labels"`
+	Assignees         []string  `json:"assignees,omitempty" yaml:"assignees,omitempty"`
 	Author            string    `json:"author"`
 	AuthorAssociation string    `json:"author_association"` // "OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"
 	HTMLURL           string    `json:"html_url"`
@@ -89,12 +90,17 @@ type PullRequestReview struct {
 	State       string    `json:"state"`
 	CommitSHA   string    `json:"commit_sha"`
 	SubmittedAt time.Time `json:"submitted_at"`
+	// Current reports whether the review was submitted against the PR's
+	// published head; reviews of earlier commits are stale.
+	Current bool `json:"current"`
 }
 
 type CheckRunResult struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	// App is the GitHub App that reported the check, when GitHub records one.
+	App string `json:"app,omitempty"`
 }
 
 type LabelSpec struct {
@@ -136,6 +142,7 @@ type Tracker interface {
 	UpdateComment(ctx context.Context, commentID int64, body string) (*Comment, error)
 	AddLabels(ctx context.Context, issueNumber int, labels []string) error
 	RemoveLabel(ctx context.Context, issueNumber int, label string) error
+	AddAssignees(ctx context.Context, issueNumber int, logins []string) error
 	CreateDraftPR(ctx context.Context, req DraftPRRequest) (*PullRequest, error)
 	UpdateDraftPR(ctx context.Context, prNumber int, title, body string) (*PullRequest, error)
 	FindDraftPR(ctx context.Context, head, base string) (*PullRequest, error)

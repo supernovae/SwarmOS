@@ -432,6 +432,17 @@ func (l *LocalTracker) AddLabels(_ context.Context, issueNumber int, labels []st
 	})
 }
 
+func (l *LocalTracker) AddAssignees(_ context.Context, issueNumber int, logins []string) error {
+	return l.withLock(true, func(st *localState) error {
+		iss, ok := st.Issues[issueNumber]
+		if !ok {
+			return fmt.Errorf("issue #%d not found", issueNumber)
+		}
+		iss.Assignees = uniqueStrings(append(iss.Assignees, logins...))
+		return nil
+	})
+}
+
 func (l *LocalTracker) RemoveLabel(_ context.Context, issueNumber int, label string) error {
 	return l.withLock(true, func(st *localState) error {
 		iss, ok := st.Issues[issueNumber]

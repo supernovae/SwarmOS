@@ -572,3 +572,76 @@ func TestInitNamesProjectAfterOriginRepository(t *testing.T) {
 		t.Fatalf("project.md = %q, %v", project, err)
 	}
 }
+
+func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	raw, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-validate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Name string `yaml:"name"`
+				Run  string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	script := ""
+	for _, step := range workflow.Jobs["validate"].Steps {
+		if step.Name == "Validate against trusted base" {
+			script = step.Run
+		}
+	}
+	if script == "" {
+		t.Fatal("trusted-base step not found")
+	}
+
+	repo := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q", "-b", "main")
+	git("commit", "-q", "--allow-empty", "-m", "base when the PR opened")
+	staleBase := git("rev-parse", "HEAD")
+	git("checkout", "-q", "-b", "pr")
+	git("commit", "-q", "--allow-empty", "-m", "PR change")
+	git("checkout", "-q", "main")
+	git("commit", "-q", "--allow-empty", "-m", "maintainer updates a protected workflow")
+	currentTip := git("rev-parse", "HEAD")
+	git("merge", "-q", "--no-ff", "-m", "GitHub merge commit", "pr")
+
+	runnerTemp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(runnerTemp, "swarm-bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/bin/sh\necho \"$@\" > \"$RUNNER_TEMP/args\"\n"
+	if err := os.WriteFile(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for event, want := range map[string]string{"pull_request": currentTip, "push": staleBase} {
+		cmd := exec.Command("bash", "-e", "-c", script)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "RUNNER_TEMP="+runnerTemp, "BASE_SHA="+staleBase, "EVENT_NAME="+event)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s step failed: %v (%s)", event, err, out)
+		}
+		args, err := os.ReadFile(filepath.Join(runnerTemp, "args"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(string(args)); got != "repo validate --base "+want {
+			t.Fatalf("%s validated against %q, want base %s", event, got, want)
+		}
+	}
+}

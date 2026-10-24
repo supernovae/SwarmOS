@@ -329,6 +329,9 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	if err := copyEmbedded("templates/swarm/rules/default.md", ".swarm/rules/default.md"); err != nil {
 		return nil, err
 	}
+	if err := copyEmbedded("templates/swarm/rules/lessons.md", ".swarm/rules/lessons.md"); err != nil {
+		return nil, err
+	}
 	if err := copyEmbedded("templates/swarm/skills/triage-and-plan.md", ".swarm/skills/triage-and-plan.md"); err != nil {
 		return nil, err
 	}

@@ -17,6 +17,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 	var apply bool
 	var ready bool
 	var publishIssue int
+	var staleDays int
 	var asJSON bool
 
 	cmd := &cobra.Command{
@@ -41,6 +42,12 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			if normalize && !scanOpen {
 				return fmt.Errorf("--normalize requires --scan")
+			}
+			if cmd.Flags().Changed("stale-days") && !scanOpen {
+				return fmt.Errorf("--stale-days requires --scan")
+			}
+			if staleDays < 0 {
+				return fmt.Errorf("--stale-days must be zero or a positive number of days")
 			}
 			if rootOpts.Fork && (apply || ready) {
 				return fmt.Errorf("swarm repo plan --apply and --ready are maintainer-only and cannot be used with --fork")
@@ -71,6 +78,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 				Apply:        apply,
 				Ready:        ready,
 				PublishIssue: publishIssue,
+				StaleDays:    staleDays,
 			})
 			if report == nil {
 				return err
@@ -109,6 +117,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&apply, "apply", false, "Create/update issues, apply triage labels, or publish report on the tracker")
 	cmd.Flags().BoolVar(&ready, "ready", false, "When used with --apply, also approve created/normalized WorkUnit issues as swarm:ready")
 	cmd.Flags().IntVar(&publishIssue, "publish-issue", 0, "Optional tracking issue number to post the sense-making report to when --apply is set")
+	cmd.Flags().IntVar(&staleDays, "stale-days", workflow.DefaultStaleDays, "With --scan, days without activity before an issue is listed as quiet (0 turns this off)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured project plan report as JSON")
 	return cmd
 }

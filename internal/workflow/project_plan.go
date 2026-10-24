@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -26,29 +27,40 @@ import (
 
 type ProjectPlanOptions struct {
 	RepoRoot     string
-	FromFile     string // path to markdown/YAML project roadmap or plan
-	ScanOpen     bool   // scan and sense-make open tracker issues
-	Normalize    bool   // when ScanOpen && Apply, rewrite raw open issues into structured WorkUnit markdown and label swarm:draft
-	AgentName    string // optional agent to draft/enrich plan; deterministic analyzer when empty or mock
-	Apply        bool   // create/update draft WorkUnit issues, apply triage labels, or post sense-making report on tracker
-	Ready        bool   // when Apply is true, also approve created/normalized WorkUnits (requires maintainer auth)
-	PublishIssue int    // optional tracking issue number to post the sense-making & goal attestation report to
+	FromFile     string    // path to markdown/YAML project roadmap or plan
+	ScanOpen     bool      // scan and sense-make open tracker issues
+	Normalize    bool      // when ScanOpen && Apply, rewrite raw open issues into structured WorkUnit markdown and label swarm:draft
+	AgentName    string    // optional agent to draft/enrich plan; deterministic analyzer when empty or mock
+	Apply        bool      // create/update draft WorkUnit issues, apply triage labels, or post sense-making report on tracker
+	Ready        bool      // when Apply is true, also approve created/normalized WorkUnits (requires maintainer auth)
+	PublishIssue int       // optional tracking issue number to post the sense-making & goal attestation report to
+	StaleDays    int       // with ScanOpen, days without activity before an issue lands in the quiet lane; 0 disables
+	Now          time.Time // clock for quiet-day math; zero means time.Now
 }
 
 type IssueSenseItem struct {
-	IssueNumber      int                `yaml:"issue_number" json:"issue_number"`
-	Title            string             `yaml:"title" json:"title"`
-	ValidWorkUnit    bool               `yaml:"valid_work_unit" json:"valid_work_unit"`
-	Approved         bool               `yaml:"approved" json:"approved"`
-	RecommendedLabel string             `yaml:"recommended_label" json:"recommended_label"` // "swarm:ready", "swarm:draft", "swarm:needs-scope", "swarm:blocked"
-	Workflow         string             `yaml:"workflow" json:"workflow"`
-	Gate             contract.GateMode  `yaml:"gate" json:"gate"`
-	DependsOn        []int              `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
-	Touchpoints      []string           `yaml:"touchpoints,omitempty" json:"touchpoints,omitempty"`
-	OverlapsWith     []int              `yaml:"overlaps_with,omitempty" json:"overlaps_with,omitempty"`
-	GoalAlignment    string             `yaml:"goal_alignment" json:"goal_alignment"` // "PASS", "NEEDS_SCOPE", "RISK_FLAGGED"
-	SafetyNotes      []string           `yaml:"safety_notes,omitempty" json:"safety_notes,omitempty"`
-	SuggestedUpdate  *contract.WorkUnit `yaml:"suggested_work_unit,omitempty" json:"suggested_work_unit,omitempty"`
+	IssueNumber      int               `yaml:"issue_number" json:"issue_number"`
+	Title            string            `yaml:"title" json:"title"`
+	ValidWorkUnit    bool              `yaml:"valid_work_unit" json:"valid_work_unit"`
+	Approved         bool              `yaml:"approved" json:"approved"`
+	RecommendedLabel string            `yaml:"recommended_label" json:"recommended_label"` // "swarm:ready", "swarm:draft", "swarm:needs-scope", "swarm:blocked"
+	Workflow         string            `yaml:"workflow" json:"workflow"`
+	Gate             contract.GateMode `yaml:"gate" json:"gate"`
+	DependsOn        []int             `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
+	Touchpoints      []string          `yaml:"touchpoints,omitempty" json:"touchpoints,omitempty"`
+	OverlapsWith     []int             `yaml:"overlaps_with,omitempty" json:"overlaps_with,omitempty"`
+	GoalAlignment    string            `yaml:"goal_alignment" json:"goal_alignment"` // "PASS", "NEEDS_SCOPE", "RISK_FLAGGED"
+	SafetyNotes      []string          `yaml:"safety_notes,omitempty" json:"safety_notes,omitempty"`
+	Shape            TaskShape         `yaml:"shape,omitempty" json:"shape,omitempty"` // suggested; the planner confirms it in PLAN.md
+	ShapeSignals     []string          `yaml:"shape_signals,omitempty" json:"shape_signals,omitempty"`
+	ShapeHints       []string          `yaml:"shape_hints,omitempty" json:"shape_hints,omitempty"`
+	QuietDays        int               `yaml:"quiet_days,omitempty" json:"quiet_days,omitempty"`
+	DuplicateOf      int               `yaml:"duplicate_of,omitempty" json:"duplicate_of,omitempty"`
+	Lane             string            `yaml:"lane,omitempty" json:"lane,omitempty"`
+
+	labels          []string           // labels on the issue when scanned
+	originalBody    string             // body before any normalization
+	SuggestedUpdate *contract.WorkUnit `yaml:"suggested_work_unit,omitempty" json:"suggested_work_unit,omitempty"`
 }
 
 type ProjectPlanReport struct {
@@ -64,6 +76,10 @@ type ProjectPlanReport struct {
 	LeftoverIssues  []*tracker.Issue    `yaml:"leftover_issues,omitempty" json:"leftover_issues,omitempty"`
 	BacklogItems    []IssueSenseItem    `yaml:"backlog_items,omitempty" json:"backlog_items,omitempty"`
 	ExecutionWaves  [][]int             `yaml:"execution_waves,omitempty" json:"execution_waves,omitempty"`
+	Lanes           []BacklogLane       `yaml:"lanes,omitempty" json:"lanes,omitempty"`
+	PullRequests    []PRSenseItem       `yaml:"pull_requests,omitempty" json:"pull_requests,omitempty"`
+	PRLanes         []BacklogLane       `yaml:"pr_lanes,omitempty" json:"pr_lanes,omitempty"`
+	PRScanError     string              `yaml:"pr_scan_error,omitempty" json:"pr_scan_error,omitempty"`
 	SummaryMarkdown string              `yaml:"summary_markdown" json:"summary_markdown"`
 }
 
@@ -206,6 +222,12 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 	}
 
 	items := make([]IssueSenseItem, 0, len(issues))
+	shapeInputs := make([]ShapeInput, 0, len(issues))
+	dupCands := make([]dupCandidate, 0, len(issues))
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
 	for _, iss := range issues {
 		if iss.IsEpic() {
 			continue
@@ -216,12 +238,21 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 			tps = extractTouchpoints(root, wu.Title+"\n"+wu.Objective+"\n"+strings.Join(wu.Acceptance, "\n"))
 		}
 		item := IssueSenseItem{
-			IssueNumber: iss.Number,
-			Title:       iss.Title,
-			Touchpoints: tps,
+			IssueNumber:  iss.Number,
+			Title:        iss.Title,
+			Touchpoints:  tps,
+			QuietDays:    quietDays(now, iss.UpdatedAt, iss.CreatedAt),
+			labels:       iss.Labels,
+			originalBody: iss.Body,
 		}
+		shapeIn := ShapeInput{Title: iss.Title, Touchpoints: tps}
 		if parseErr != nil {
 			suggested := synthesizeWorkUnitFromRawIssue(iss, defaultConstraints, cfg)
+			shapeIn.Objective, shapeIn.Workflow = suggested.Objective, suggested.Workflow
+			if strings.TrimSpace(contract.StripHTMLComments(iss.Body)) != "" {
+				// Synthesized fallback criteria say nothing about the reporter's intent.
+				shapeIn.Acceptance = suggested.Acceptance
+			}
 			item.ValidWorkUnit = false
 			item.Workflow = suggested.Workflow
 			item.Gate = suggested.Gate
@@ -239,6 +270,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 			item.Workflow = wu.Workflow
 			item.Gate = wu.Gate
 			item.DependsOn = wu.DependsOn
+			shapeIn.Objective, shapeIn.Acceptance, shapeIn.Workflow, shapeIn.DependsOn = wu.Objective, wu.Acceptance, wu.Workflow, wu.DependsOn
 			st, stErr := e.LeaseManager.GetCurrentState(ctx, iss.Number)
 			if stErr == nil && st != nil && st.TaskDigest == contract.DigestWorkUnit(wu) && st.PolicyDigest == policyDigest && slices.Contains(iss.Labels, readyLabel) {
 				item.Approved = true
@@ -261,10 +293,18 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 				item.RecommendedLabel = "swarm:draft"
 			}
 		}
+		shapeIn.Protected = item.GoalAlignment == "RISK_FLAGGED"
 		items = append(items, item)
+		shapeInputs = append(shapeInputs, shapeIn)
+		dupCands = append(dupCands, newDupCandidate(iss.Number, iss.Title, iss.Body))
 	}
 
 	populateOverlaps(items)
+	for i := range items {
+		shapeInputs[i].Overlaps = len(items[i].OverlapsWith)
+		applyShape(&items[i], AssessTaskShape(shapeInputs[i]))
+	}
+	markDuplicates(items, dupCands)
 	for i := range items {
 		if len(items[i].OverlapsWith) > 0 {
 			var refs []string
@@ -286,7 +326,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 		for i := range items {
 			item := &items[i]
 			if opts.Normalize && !item.ValidWorkUnit && item.SuggestedUpdate != nil {
-				body := contract.FormatIssueMarkdown(item.SuggestedUpdate)
+				body := preserveOriginalReport(contract.FormatIssueMarkdown(item.SuggestedUpdate), item.originalBody)
 				if _, err := e.Tracker.UpdateIssueBody(ctx, item.IssueNumber, body); err != nil {
 					return nil, err
 				}
@@ -297,7 +337,9 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 					item.RecommendedLabel = "swarm:draft"
 				}
 			}
-			if item.RecommendedLabel != "" {
+			// Re-adding a present label still bumps GitHub's updated_at, which
+			// would hide quiet issues on the next scan.
+			if item.RecommendedLabel != "" && !slices.Contains(item.labels, item.RecommendedLabel) {
 				_ = e.Tracker.AddLabels(ctx, item.IssueNumber, []string{item.RecommendedLabel})
 			}
 			if opts.Ready && item.ValidWorkUnit && item.RecommendedLabel != "swarm:blocked" && !item.Approved {
@@ -310,6 +352,13 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 		}
 	}
 
+	report.Lanes = assignLanes(items, opts.StaleDays)
+	// Pull request triage is read-only and must not block issue triage.
+	if prs, prLanes, err := e.triageOpenPullRequests(ctx, now, opts.StaleDays); err != nil {
+		report.PRScanError = err.Error()
+	} else {
+		report.PullRequests, report.PRLanes = prs, prLanes
+	}
 	report.BacklogItems = items
 	report.ExecutionWaves = computeExecutionWaves(items)
 	report.SummaryMarkdown = renderBacklogScanMarkdown(report, opts.Apply, opts.Normalize)
@@ -322,7 +371,7 @@ func (e *Engine) publishProjectPlan(ctx context.Context, opts ProjectPlanOptions
 	if opts.PublishIssue <= 0 || !opts.Apply {
 		return nil
 	}
-	if _, err := e.Tracker.CreateComment(ctx, opts.PublishIssue, report.SummaryMarkdown); err != nil {
+	if _, err := e.Tracker.CreateComment(ctx, opts.PublishIssue, boundPublishedReport(report.SummaryMarkdown)); err != nil {
 		return fmt.Errorf("publish project plan report to issue #%d: %w", opts.PublishIssue, err)
 	}
 	return nil
@@ -1635,8 +1684,19 @@ func renderBacklogScanMarkdown(report *ProjectPlanReport, applied, normalized bo
 	if applied {
 		sb.WriteString(fmt.Sprintf("- **Tracker Actions Applied**: labels synced (`normalize=%t`)\n", normalized))
 	}
-	sb.WriteString("\n| Issue | Recommended Label | Goal Alignment | Touchpoints | Overlaps | Depends On | Next Action |\n")
-	sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
+	if line := renderShapeTally(report.BacklogItems); line != "" {
+		sb.WriteString(line)
+	}
+	renderLanesSection(&sb, report.Lanes, report.BacklogItems)
+	renderPRSection(&sb, report.PRLanes, report.PullRequests)
+	if report.PRScanError != "" {
+		sb.WriteString("\n> [!NOTE]\n> Open pull requests were skipped: " + escapeLaneText(report.PRScanError) + "\n")
+	}
+	if len(report.Lanes) > 0 {
+		sb.WriteString("\n#### All Open Issues\n")
+	}
+	sb.WriteString("\n| Issue | Recommended Label | Shape | Goal Alignment | Touchpoints | Overlaps | Depends On | Next Action |\n")
+	sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
 
 	for _, it := range report.BacklogItems {
 		tps := "-"
@@ -1670,8 +1730,11 @@ func renderBacklogScanMarkdown(report *ProjectPlanReport, applied, normalized bo
 		case "swarm:blocked":
 			nextAction = "Resolve dependencies / review protected paths"
 		}
-		sb.WriteString(fmt.Sprintf("| `#%d` %s | `%s` | `%s` | %s | %s | %s | %s |\n",
-			it.IssueNumber, it.Title, it.RecommendedLabel, it.GoalAlignment, tps, ovs, deps, nextAction))
+		if note := shapeNextStep(it.Shape); note != "" && nextAction != "" {
+			nextAction += " (" + note + ")"
+		}
+		sb.WriteString(fmt.Sprintf("| `#%d` %s | `%s` | %s | `%s` | %s | %s | %s | %s |\n",
+			it.IssueNumber, it.Title, it.RecommendedLabel, it.Shape.Title(), it.GoalAlignment, tps, ovs, deps, nextAction))
 	}
 
 	renderWavesSection(&sb, report.ExecutionWaves)

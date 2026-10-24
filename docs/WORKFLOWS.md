@@ -38,6 +38,23 @@ Each workflow phase binds to a role prompt in `.swarm/prompts/` and reads/writes
 
 SwarmOS compiles `.swarm/active/WORKUNIT.md` and `.swarm/active/SYSTEM_PROMPT.md` freshly for each claimed task and injects managed pointer blocks into `AGENTS.md` and `CLAUDE.md` inside the worktree so interactive and headless tools find the active contract immediately.
 
+### Matching the plan to the work
+
+Not every issue needs the same amount of planning. A typo fix shouldn't come with a ten-step design, and an open question shouldn't get confidently "solved" in one pass. The planner starts `PLAN.md` by naming the work's **shape**, then sizes the plan to fit:
+
+| Shape | What it looks like | What the plan does |
+| :--- | :--- | :--- |
+| **Routine** | Clear fix in a known place | Stays short |
+| **Involved** | Knowable, but spans several packages or has real trade-offs | Names the alternatives and why one wins |
+| **Exploratory** | Nobody knows the right answer yet | Starts with a small probe, keeps the change reversible, and lists follow-up WorkUnits |
+| **Urgent** | Users are affected right now | Stops the harm first; the root cause becomes a follow-up |
+
+Every plan also opens with **What we know** (each fact backed by a file, test, or command output), **What we're assuming**, and **Open questions**. The reviewer checks that the plan's rigor fits its shape and that the facts hold up. Because `PLAN.md` is attached to the Draft PR, the people reviewing the code see the same reasoning.
+
+When something about the repo surprises an agent, it notes it in `.swarm/active/LESSONS.md`. SwarmOS copies those notes into the implementation summary under **What we learned**, and `swarm repo lessons` turns lessons from merged PRs into proposed `.swarm/rules/lessons.md` entries for a maintainer to commit.
+
+You don't have to pick a shape yourself. `swarm repo plan --scan` and `swarm issue lint <N>` suggest one from the issue text, along with hints for making the issue stronger (for example, a bugfix with no reproduction step). The planner confirms or corrects the shape once it has read the code. The shape is never stored on the WorkUnit, so it never changes what you approved.
+
 ---
 
 ## 3. Plan Review Gates (`none | agent | human`)
@@ -86,6 +103,7 @@ Progress messages contain stage metadata only. Failed harness runs report the ro
 
 ## Related Guides
 
+- **[Owning a Busy Repository (`docs/backlog.md`)](backlog.md)** — Backlog lanes, duplicates, quiet issues, and task shapes at scale.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents, and approve issues.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI commands, handoffs, recovery, and worker pools.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, claim fencing, and checkpoint design.

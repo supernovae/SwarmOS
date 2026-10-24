@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/workflow"
 )
 
@@ -139,10 +140,24 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		// Shape and hints are advisory and never change the lint result, so the
+		// working tree's protected paths are good enough here.
+		repoRoot := rootOpts.resolveRepoRoot()
+		spec, _ := harness.LoadValidationSpec(repoRoot)
+		shape := workflow.AssessWorkUnitShape(repoRoot, wu, spec)
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu})
+			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "shape": shape})
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities)
+		out := cmd.OutOrStdout()
+		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities)
+		fmt.Fprintf(out, "Suggested shape: %s", shape.Shape.Title())
+		if len(shape.Signals) > 0 {
+			fmt.Fprintf(out, " (%s)", strings.Join(shape.Signals, "; "))
+		}
+		fmt.Fprintln(out)
+		for _, hint := range shape.Hints {
+			fmt.Fprintf(out, "  hint: %s\n", hint)
+		}
 		return nil
 	}}
 	lintCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured lint results")

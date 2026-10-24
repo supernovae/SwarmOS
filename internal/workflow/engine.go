@@ -1037,7 +1037,8 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 }
 
 // SummarizeImplementationChanges describes a worktree's uncommitted changes for
-// an implementation artifact: a one-line summary and a Markdown body.
+// an implementation artifact: a one-line summary and a Markdown body that also
+// carries any lessons the agent left in .swarm/active/LESSONS.md.
 func SummarizeImplementationChanges(ctx context.Context, wtPath string, issueNum int) (string, string) {
 	statusOut, _ := gitcredential.Output(ctx, wtPath, "status", "--short")
 	diffStat, _ := gitcredential.Output(ctx, wtPath, "diff", "--stat", "HEAD")
@@ -1045,7 +1046,12 @@ func SummarizeImplementationChanges(ctx context.Context, wtPath string, issueNum
 	lines := strings.Split(strings.TrimSpace(string(statusOut)), "\n")
 	count := 0
 	var body strings.Builder
-	fmt.Fprintf(&body, "# Implementation Summary (Issue #%d)\n\n## Working Tree Changes\n```text\n", issueNum)
+	fmt.Fprintf(&body, "# Implementation Summary (Issue #%d)\n\n", issueNum)
+	// Lessons go first so they survive when long artifacts are truncated.
+	if section := formatLessonsSection(ReadActiveLessons(wtPath)); section != "" {
+		body.WriteString(section + "\n")
+	}
+	body.WriteString("## Working Tree Changes\n```text\n")
 	for _, l := range lines {
 		if strings.TrimSpace(l) == "" {
 			continue

@@ -264,3 +264,50 @@ func TestPreparePRRecreatesHandRemovedWorktree(t *testing.T) {
 		t.Fatalf("recreated PR worktree %s on %s", again, branch)
 	}
 }
+
+func TestPreparePRCatchesUpToNewerPublishedHead(t *testing.T) {
+	ctx := context.Background()
+	repo, remote, base, head := prFixture(t)
+	opts := PRWorkspaceOptions{Number: 9, Remote: "origin", HeadBranch: "feature", HeadSHA: head, BaseSHA: base}
+	path, _, err := PreparePR(ctx, repo, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Someone pushes on top of the PR outside SwarmOS.
+	other := filepath.Join(t.TempDir(), "other")
+	runWorkspaceGit(t, filepath.Dir(other), "clone", "-q", "--branch", "feature", remote, other)
+	runWorkspaceGit(t, other, "config", "user.name", "Other")
+	runWorkspaceGit(t, other, "config", "user.email", "other@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "pushed.txt"), []byte("pushed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runWorkspaceGit(t, other, "add", "pushed.txt")
+	runWorkspaceGit(t, other, "commit", "-qm", "pushed outside SwarmOS")
+	runWorkspaceGit(t, other, "push", "-q", "origin", "feature")
+	newer := workspaceGitOutput(t, other, "rev-parse", "HEAD")
+
+	opts.HeadSHA = newer
+	if _, _, err := PreparePR(ctx, repo, opts); err != nil {
+		t.Fatalf("worktree behind the published head did not catch up: %v", err)
+	}
+	if got := workspaceGitOutput(t, path, "rev-parse", "HEAD"); got != newer {
+		t.Fatalf("PR worktree at %s, want %s", got, newer)
+	}
+
+	// A local commit the remote does not have is still divergence.
+	if err := os.WriteFile(filepath.Join(path, "local.txt"), []byte("local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runWorkspaceGit(t, path, "add", "local.txt")
+	runWorkspaceGit(t, path, "commit", "-qm", "unpublished local work")
+	if err := os.WriteFile(filepath.Join(other, "more.txt"), []byte("more\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runWorkspaceGit(t, other, "add", "more.txt")
+	runWorkspaceGit(t, other, "commit", "-qm", "more remote work")
+	runWorkspaceGit(t, other, "push", "-q", "origin", "feature")
+	opts.HeadSHA = workspaceGitOutput(t, other, "rev-parse", "HEAD")
+	if _, _, err := PreparePR(ctx, repo, opts); err == nil || !strings.Contains(err.Error(), "diverged") {
+		t.Fatalf("diverged worktree accepted: %v", err)
+	}
+}

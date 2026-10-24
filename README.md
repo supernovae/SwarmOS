@@ -35,7 +35,7 @@ Single-agent coding tools are great at editing files, but coordinating several a
 
 ### What's New in v0.6.1
 
-A hosted end-to-end run against a real fork and upstream coordinator found and fixed issues in v0.6.0. Upgrade swarm and rerun `swarm repo init` to pick up the regenerated workflows.
+v0.6.1 fixes issues in v0.6.0's fork PR revision and generated CI workflows. Upgrade swarm and rerun `swarm repo init` to pick up the regenerated workflows.
 
 - **Fork PR revisions work end to end:** the coordinator workflow now admits the PR revision requests, PR claims use a configured agent, and later revision rounds catch up to newer PR heads instead of reporting divergence.
 - **Generated CI passes on stock runners:** CI runs required checks on the runner itself, validates pull requests against the commit GitHub merged into, and checks default-branch pushes against their own policy, so harness upgrades no longer turn the branch red.
@@ -167,7 +167,7 @@ swarm issue submit 42 --backend github
 > [!TIP]
 > `swarm issue work` runs headlessly by default. Pass `--headless=false` to pair with your agent, or use `swarm node run --watch` to keep picking up approved tasks. On Linux, isolated execution uses Codex's native sandbox or bounded tools for Claude Code, OpenCode 2, and OhMyPi, with provider login managed by the harness. Start with `swarm repo doctor`; the [worker guide](docs/developer.md#choose-how-you-work) covers setup and other harnesses. Use `--backend local` to experiment with local coordination storage.
 
-`swarm repo doctor` highlights your selected agents and reports unused, unqualified harnesses as `OPTIONAL`. The [native qualification guide](docs/native-qualification.md) tracks tested releases and the dogfood workflow.
+`swarm repo doctor` highlights your selected agents and reports unused, unqualified harnesses as `OPTIONAL`. The [harness guides](docs/harness/README.md) cover setup and boundaries for each agent, and the [qualification guide](docs/native-qualification.md) tracks tested releases.
 
 ---
 
@@ -183,7 +183,7 @@ swarm issue work 42 \
   --tester-agent opencode
 ```
 
-Models are optional in `.swarm/config.yaml`: set `agents.<name>.model` when the project needs a specific model, or leave selection to the harness. The [qualification guide](docs/native-qualification.md) lists tested workflows and remaining provider checks.
+Models are optional in `.swarm/config.yaml`: set `agents.<name>.model` when the project needs a specific model, or leave selection to the harness. Each harness has its own guide covering setup, how SwarmOS runs it, and troubleshooting: [Codex](docs/harness/codex.md), [Claude Code](docs/harness/claude.md), [OpenCode 2](docs/harness/opencode.md), and [OhMyPi](docs/harness/omp.md).
 
 Want to coordinate work from an always-on conversational teammate?
 - **[Working with Grok Bot & SwarmOS](docs/grokbot.md)** — Connect Grok Bot to GitHub, chat with your repository, request PR reviews, or let Grok drive `swarm` on its cloud computer.
@@ -283,6 +283,7 @@ For an existing approved WorkUnit PR, use `pr work` to develop or fix its implem
 - **[Fork Mode Guide (`docs/fork-mode.md`)](docs/fork-mode.md)** — Contribute from a personal GitHub fork without upstream push access using the upstream fork coordinator Action.
 - **[Working with Grok Bot (`docs/grokbot.md`)](docs/grokbot.md)** — Connect Grok Bot to your repositories, talk to your codebase, run PR reviews, and coordinate SwarmOS workers.
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](docs/openai-dot.md)** — Configure Codex Cloud environments and remote repositories so your Dot can plan, review, and ship changes.
+- **[Agent Harness Guides (`docs/harness/`)](docs/harness/README.md)** — Setup, invocation, isolation boundary, and troubleshooting for Codex, Claude Code, OpenCode 2, and OhMyPi.
 - **[Project & Maintainer Setup (`docs/project.md`)](docs/project.md)** — Configure `.swarm/config.yaml`, validation rules, plan gates, and repository protections.
 - **[Developer & Worker Guide (`docs/developer.md`)](docs/developer.md)** — Everyday CLI workflows, interactive `swarm issue stage`, agent harness table, reviewer sandboxing, handoffs, and recovery.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](docs/WORKFLOWS.md)** — Role prompts, `PLAN.md` / `TEST_PLAN.md` / `REVIEW.md` artifacts, provenance attestations, and gate transitions.

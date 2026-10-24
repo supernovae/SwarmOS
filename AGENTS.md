@@ -40,7 +40,7 @@ Our documentation (`README.md`, `docs/*.md`, `SECURITY.md`) is the front door to
 - **`internal/contract/`**: Canonical `WorkUnit`, `Lease`, `Artifact`, `WorkflowSpec`, `ValidationSpec`, and `.swarm/config.yaml` types, JSON Schema validation, and HTML comment stripping.
 - **`internal/coordination/` & `internal/lease/`**: Git compare-and-swap state refs (`refs/heads/swarm-state/issue-<N>`), file-locked local CAS store (`--backend local`), fenced claims (`claim_id`), heartbeats, and issue audit comments.
 - **`internal/workspace/`**: Isolated Git worktree provisioning (`.swarm/worktrees/issue-<N>`), checkpoint commits, and active bundle compilation (`.swarm/active/WORKUNIT.md`, `SYSTEM_PROMPT.md`). Note that SwarmOS injects an ephemeral `` pointer block into `AGENTS.md` and `CLAUDE.md` inside task worktrees and strips it automatically before checkpoints and submissions—never delete content outside those markers.
-- **`internal/agent/` & `internal/sandbox/`**: Adapters for `claude`, `codex`, `opencode`, `omp`, and local/test `mock`, plus isolated read-only snapshot sandboxing (`sandbox-exec`, `bwrap`, or OCI `docker`/`podman`) for the `reviewer` role.
+- **`internal/agent/` & `internal/sandbox/`**: Adapters for `claude`, `codex`, `opencode`, `omp`, and local/test `mock`, plus isolated read-only snapshot sandboxing (`sandbox-exec`, `bwrap`, or OCI `docker`/`podman`) for the `reviewer` role. Each harness's setup, invocation, and boundary is documented in `docs/harness/` — update the matching guide when an adapter's flags, minimum version, or restrictions change.
 - **`internal/workflow/` & `internal/validation/`**: Plan-first execution engine (`plan` $\rightarrow$ `gate` $\rightarrow$ `implement` $\rightarrow$ `validate`), cryptographic binding of review verdicts to `WorkUnit`/`PLAN.md`/`TEST_PLAN.md` digests, and baseline-pinned validation of `required-checks.yaml` and `protected_paths`.
 - **`internal/pr/`**: Continued development of PRs authoritatively linked to approved WorkUnits. PR commands use PR numbers, retain the linked issue's fenced claim and approval gates, prepare changes in separate PR worktrees, and publish only through explicit `pr submit` with an expected remote head. Contributors revise their own fork PRs with `--fork`; `internal/fork` verifies each PR revision step (`acquire-pr` through `complete-pr-revision`) against GitHub before it changes upstream state.
 
@@ -60,6 +60,24 @@ make install
 When touching documentation:
 - Confirm all relative file links, image paths (`docs/assets/*`), and heading anchors resolve.
 - Confirm every `bash` snippet parses cleanly (`bash -n`) and uses real `swarm` flags.
+- Keep project docs about the product. Personal test repositories, staging fixtures, and one-off verification runs belong in PR descriptions, not in `README.md`, `docs/`, or `SECURITY.md`.
+
+---
+
+## 5. Security Invariants (Do Not Regress)
+
+SwarmOS lets maintainers hand real repositories to agents and outside contributors. These invariants are what make that safe. A change that weakens one needs an explicit maintainer decision and an update to `SECURITY.md`, not a quiet refactor.
+
+1. **Policy comes from the trusted base.** Validation checks, `protected_paths`, role prompts, and lease policy load from the approved `base_sha`, never from the candidate worktree or a contributor's fork (`internal/validation/`, `internal/workflow/`).
+2. **Every worker mutation is fenced.** Claim, artifact, checkpoint, PR-revision, and submission writes go through CAS and check `claim_id`, owner, expiry, and the task/policy digests (`internal/lease/`). A stale worker must fail with `ErrClaimFence`, never publish over a successor. Keep `%w` wrapping so callers can detect it.
+3. **Approvals bind to exact content.** Plan approval is tied to the current WorkUnit, policy, `PLAN.md`, and `TEST_PLAN.md` digests. Agent verdicts never satisfy a human gate, and contributor-supplied review artifacts never satisfy a trusted gate.
+4. **Comments are projections, not authority.** Issue comments and PR descriptions can never create claims, approvals, artifacts, or PR links. Fork requests carry parameters only; `internal/fork/coordinator.go` re-verifies each one against GitHub and authoritative state before it writes. When you add a fork operation, add it to `fork.Operations`, the transport, and both coordinator workflow admission lists — `TestOperationListsStayInSync` enforces this.
+5. **Credentials stay with the coordinator.** Agents never receive GitHub tokens, `SWARM_GITHUB_TOKEN_COMMAND`, Git credentials, or SSH agents. Tokens never appear in argv, logs, or files; Git runs with the hardened environment from `internal/gitcredential/`. Agent `env` allowlists reject coordinator and host credential variables (`internal/agent/`).
+6. **Isolation never falls back.** If the selected boundary is unavailable or a canary fails, stop before claiming work. Never add a bypass or "skip verification" flag. A new harness capability (MCP, subagents, hooks, network) needs its own boundary tests before it is enabled.
+7. **File operations are root-bound.** Writes to state, scaffold destinations, active bundles, and imported artifacts use `internal/safefs/` with exclusive temporary files and atomic replacement, and reject symlinks and special files. Do not replace these with plain `os.WriteFile` on paths an agent or contributor can influence.
+8. **Publishing is explicit and head-fenced.** Only `issue submit` and `pr submit` publish, each with an expected remote head. Never force-push over a head SwarmOS did not verify.
+
+Every security fix ships with a regression test that fails against the old behavior. Do not delete or weaken an adversarial test to make a change pass; fix the change instead.
 
 ---
 
@@ -76,3 +94,7 @@ When touching documentation:
 
 - Do not read authoritative validation policy (`required-checks.yaml` or `protected_paths`) from an untrusted candidate worktree when a trusted `base_sha` is available.
   Safe path: load validation policy and role prompts from the approved base commit (`baseSHA`).
+- Flag any state mutation that skips claim fencing, any path where an agent or fork request can supply authority (owner, `base_sha`, policy digest, approval), and any isolated execution path that can fall back to the host.
+  Safe path: route through the `lease.Manager` fenced methods and the fork coordinator's GitHub verification, and fail closed.
+- Flag removed or weakened adversarial tests, and security fixes without a regression test.
+  Safe path: keep the test and add coverage that fails on the old behavior.

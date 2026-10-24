@@ -116,4 +116,5 @@ The executor addresses a specific gap: host file and command tools in these adap
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents, and approve WorkUnits.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI workflows, handoffs, and recovery.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
+- **[Agent Harness Guides (`docs/harness/`)](harness/README.md)** — Per-harness setup, invocation, and isolation boundaries.
 - **[Future Roadmap (`todo.md`)](../todo.md)** — Optional future coordinator service and planned enhancements.

@@ -54,7 +54,7 @@ The trusted Codex process uses its own provider login and session renewal. Agent
 
 SwarmOS uses `codex exec` with user execution settings and rules ignored, disables MCP, plugins, hooks, browser tools, and subagents, and excludes `.codex` and `.agents` directories from the task snapshot. Interactive turns use the same permissions as unattended turns; requests to escalate access are denied. Planner and reviewer source is read-only, with designated artifact output. Developer/tester changes pass through bounded file import, and validation runs approved-base commands through `codex sandbox` in a disposable snapshot.
 
-Codex and its internal tool dispatcher remain trusted host-side software. The boundary protects against agent-directed tools, not a compromised harness binary or OS. Task context is sent to the chosen model through the authenticated harness; keep secrets out of task source. Native execution has a fifteen-minute phase deadline and bounded imports, but does not add OCI's CPU, memory, or disk quotas. Provider spend controls remain with the account owner.
+Codex and its internal tool dispatcher remain trusted host-side software. The boundary protects against agent-directed tools, not a compromised harness binary or OS. Task context is sent to the chosen model through the authenticated harness; keep secrets out of task source. Native execution has a fifteen-minute phase deadline and bounded imports, but does not add OCI's CPU, memory, or disk quotas. Provider spend controls remain with the account owner. See the [Codex guide](docs/harness/codex.md) for setup and troubleshooting.
 
 ### Claude Code, OpenCode 2, and OhMyPi
 
@@ -62,7 +62,7 @@ These adapters keep the authenticated harness in a coordinator-owned control dir
 
 Claude uses its supported restricted mode and an explicit MCP tool server. OhMyPi registers host tools through its RPC interface and verifies the effective tool list before each turn. OpenCode 2 uses a private loopback server, waits for the MCP catalog, and checks the effective agent permissions before work starts. A temporary server password remains between SwarmOS and OpenCode; it is unrelated to provider authentication and never enters the tool environment. The operator's shared OpenCode server is not used.
 
-Native built-ins that would bypass this executor, custom hooks, external MCP servers, plugins, and agent delegation remain restricted. These adapters trust the installed harness to enforce that tool selection; Bubblewrap independently confines the tools it receives. The [capability table](docs/ARCHITECTURE.md#tool-capabilities) and [qualification record](docs/native-qualification.md) describe the tested coverage.
+Native built-ins that would bypass this executor, custom hooks, external MCP servers, plugins, and agent delegation remain restricted. These adapters trust the installed harness to enforce that tool selection; Bubblewrap independently confines the tools it receives. The [capability table](docs/ARCHITECTURE.md#tool-capabilities), [harness guides](docs/harness/README.md), and [qualification guide](docs/native-qualification.md) describe the tested coverage.
 
 Tools have two-minute deadlines and per-process CPU, address-space, file-size, and descriptor limits. Private temporary storage is limited to 256 MiB per call. These limits do not provide aggregate memory or task-workspace disk quotas. Shared worker operators can apply service-level limits; the OCI backend supplies a separate resource boundary.
 
@@ -72,11 +72,11 @@ Set `execution.backend: oci`, `execution.container_runtime` to `docker` or `podm
 
 OCI currently supports **offline workers** with `agents.<name>.authentication: none`. Authenticated provider execution inside OCI is future work, separate from the working native Codex path. Host credential stores are never mounted or copied into these workers.
 
-OCI workers have a read-only image, no host mounts, no network, dropped capabilities, temporary storage, and fixed CPU, memory, process, and wall-time limits. Runtime preflight checks effective cgroup v2 limits and the ability to pause workers. Changes return through bounded import after the container is frozen and destroyed. Agent executables resolve inside the image. The [qualification plan](docs/security-remediation.md#real-container-qualification) covers actual Docker/Podman and cross-platform lifecycle tests.
+OCI workers have a read-only image, no host mounts, no network, dropped capabilities, temporary storage, and fixed CPU, memory, process, and wall-time limits. Runtime preflight checks effective cgroup v2 limits and the ability to pause workers. Changes return through bounded import after the container is frozen and destroyed. Agent executables resolve inside the image. The [OCI qualification tests](docs/harness/README.md#oci-backend-qualification) exercise these controls against a real Docker or Podman runtime.
 
 A failed isolated run never falls back to host execution. Native macOS and Windows execution require runtime qualification; WSL2 can use the Linux path.
 
-The [qualification record](docs/native-qualification.md) separates fresh boundary tests, earlier authenticated workflow evidence, and remaining hosted/platform checks. Stable releases at or above each adapter's minimum must pass interface and runtime capability checks. The actual version is recorded in artifact provenance.
+The [qualification guide](docs/native-qualification.md) lists each harness's tested coverage and what remains. Stable releases at or above each adapter's minimum must pass interface and runtime capability checks. The actual version is recorded in artifact provenance.
 
 `swarm repo doctor` and `swarm issue work <issue> --dry-run` report execution setup and blockers. These checks help prepare the worker environment before acquiring work.
 
@@ -89,6 +89,19 @@ The [qualification record](docs/native-qualification.md) separates fresh boundar
 - GitHub branch protection, repository permissions, and human PR review remain the merge authority. Review the exact submitted SHA before merging or releasing.
 - The local backend is for offline development and tests. It does not replace GitHub authorization.
 - Hosted Grok Bot and OpenAI Dot use their own account, connector, and computer permissions. SwarmOS does not provision those connections or convert their comments into plan approvals. Local entries named `grok` or `dot` must select the supported harness they launch.
+
+## Known limitations
+
+These are current boundaries of the implementation, tracked as future hardening:
+
+- **Multi-file imports are not transactional.** Each imported file is replaced atomically, but a disk error partway through a developer or tester import can leave part of a change set applied. Acceptance and publication still have to succeed separately. Isolated imports do not carry empty-directory changes or symbolic-link outputs.
+- **Comment-triggered workflows still allocate runners.** The fork coordinator runs admission checks before checkout or toolchain setup, but GitHub allocates a runner for every eligible comment event. Watch Actions usage on busy public repositories.
+- **Fork plans need a maintainer decision.** Contributor-supplied review artifacts never satisfy a trusted agent gate, and trusted reviewers are not yet scheduled automatically for fork plans. A maintainer approves fork plans with `swarm issue review-plan <issue> --approve`.
+- **Platform coverage.** Native isolated execution is qualified on Linux (including WSL2). Native macOS and Windows execution, and live provider session expiration, still need qualification. Authenticated harnesses inside OCI are on the [roadmap](todo.md#oci-authentication-and-enterprise-integrations).
+
+## Regression coverage
+
+Security fixes ship with adversarial regression tests that fail against the vulnerable behavior: symlink and path-substitution escapes in state, scaffold, and artifact writes; forged or stale approvals; contributor-supplied review artifacts; fork comment forgery and polling amplification; stale-claim publication; candidate edits to validation policy; and credential exposure through process arguments. Contributors should follow the [security invariants in AGENTS.md](AGENTS.md#5-security-invariants-do-not-regress) so changes keep these protections in place.
 
 ## Operational guidance
 

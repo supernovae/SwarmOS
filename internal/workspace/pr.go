@@ -199,7 +199,17 @@ func PreparePR(ctx context.Context, root string, opts PRWorkspaceOptions) (strin
 				return "", "", fmt.Errorf("managed PR head %s differs from recorded local head %s", local, opts.LocalHeadSHA)
 			}
 		} else if _, err := gitOutputContext(ctx, path, "merge-base", "--is-ancestor", opts.HeadSHA, local); err != nil {
-			return "", "", fmt.Errorf("PR worktree head %s diverged from expected PR head %s", local, opts.HeadSHA)
+			// A worktree left at an earlier published head catches up to the
+			// PR's current head; real divergence is still refused.
+			if _, behind := gitOutputContext(ctx, path, "merge-base", "--is-ancestor", local, opts.HeadSHA); behind != nil {
+				return "", "", fmt.Errorf("PR worktree head %s diverged from expected PR head %s", local, opts.HeadSHA)
+			}
+			if err := CleanEphemeralHarnessMarkers(path); err != nil {
+				return "", "", err
+			}
+			if _, err := gitOutputContext(ctx, path, "merge", "--ff-only", "--quiet", opts.HeadSHA); err != nil {
+				return "", "", fmt.Errorf("fast-forward PR worktree to published head %s: %w", opts.HeadSHA, err)
+			}
 		}
 		return path, branch, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -214,7 +224,13 @@ func PreparePR(ctx context.Context, root string, opts PRWorkspaceOptions) (strin
 				return "", "", fmt.Errorf("existing PR branch %s differs from recorded local head %s", branch, opts.LocalHeadSHA)
 			}
 		} else if _, err := gitOutputContext(ctx, abs, "merge-base", "--is-ancestor", opts.HeadSHA, local); err != nil {
-			return "", "", fmt.Errorf("existing PR branch %s diverged from expected PR head %s", branch, opts.HeadSHA)
+			if _, behind := gitOutputContext(ctx, abs, "merge-base", "--is-ancestor", local, opts.HeadSHA); behind != nil {
+				return "", "", fmt.Errorf("existing PR branch %s diverged from expected PR head %s", branch, opts.HeadSHA)
+			}
+			// Fast-forward only: the branch is strictly behind the published head.
+			if _, err := gitOutputContext(ctx, abs, "update-ref", "refs/heads/"+branch, opts.HeadSHA, local); err != nil {
+				return "", "", fmt.Errorf("fast-forward PR branch %s to published head %s: %w", branch, opts.HeadSHA, err)
+			}
 		}
 	} else {
 		if opts.LocalHeadSHA != "" && opts.LocalHeadSHA != opts.HeadSHA {

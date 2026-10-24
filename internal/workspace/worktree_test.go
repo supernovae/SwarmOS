@@ -236,3 +236,25 @@ func TestManagedInstructionsRejectSymlink(t *testing.T) {
 		t.Fatalf("outside instructions changed: %q, %v", got, err)
 	}
 }
+
+func TestCheckCommitIdentity(t *testing.T) {
+	repo := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, args := range [][]string{{"init", "-q"}, {"config", "user.useConfigOnly", "true"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	if err := CheckCommitIdentity(context.Background(), repo); err == nil || !strings.Contains(err.Error(), "git config user.name") {
+		t.Fatalf("missing identity = %v", err)
+	}
+	for _, args := range [][]string{{"config", "user.name", "Test"}, {"config", "user.email", "test@example.invalid"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	if err := CheckCommitIdentity(context.Background(), repo); err != nil {
+		t.Fatalf("configured identity = %v", err)
+	}
+}

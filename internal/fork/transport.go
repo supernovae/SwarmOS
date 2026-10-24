@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
@@ -45,11 +46,11 @@ func FormatRequestComment(req lease.ForkRequest) (string, error) {
 	if req.IssueNumber <= 0 {
 		return "", fmt.Errorf("fork request issue_number must be positive")
 	}
-	raw, err := json.Marshal(req)
+	raw, err := json.MarshalIndent(req, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal fork request: %w", err)
 	}
-	body := RequestMarker + "\n" + string(raw)
+	body := collapsedComment(RequestMarker, requestSummary(req), "Request details", raw)
 	if len(body) > MaxForkCommentBytes {
 		return "", fmt.Errorf("fork request payload (%d bytes) exceeds maximum GitHub comment size (%d bytes)", len(body), MaxForkCommentBytes)
 	}
@@ -65,11 +66,10 @@ func ParseRequestComment(body string) (*lease.ForkRequest, error) {
 	if len(body) > MaxForkCommentBytes {
 		return nil, fmt.Errorf("fork request exceeds maximum size")
 	}
-	trimmed := strings.TrimSpace(body)
-	if !strings.HasPrefix(trimmed, RequestMarker) {
-		return nil, fmt.Errorf("comment does not start with %s", RequestMarker)
+	payload, err := commentPayload(body, RequestMarker)
+	if err != nil {
+		return nil, err
 	}
-	payload := strings.TrimSpace(strings.TrimPrefix(trimmed, RequestMarker))
 	if payload == "" {
 		return nil, fmt.Errorf("empty fork request payload")
 	}
@@ -96,22 +96,21 @@ func FormatResultComment(res ForkResult) (string, error) {
 	if res.Version == 0 {
 		res.Version = 1
 	}
-	raw, err := json.Marshal(res)
+	raw, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal fork result: %w", err)
 	}
-	return ResultMarker + "\n" + string(raw), nil
+	return collapsedComment(ResultMarker, resultSummary(res), "Coordinator response", raw), nil
 }
 
 func ParseResultComment(body string) (*ForkResult, error) {
 	if len(body) > MaxForkCommentBytes {
 		return nil, fmt.Errorf("fork result exceeds maximum size")
 	}
-	trimmed := strings.TrimSpace(body)
-	if !strings.HasPrefix(trimmed, ResultMarker) {
-		return nil, fmt.Errorf("comment does not start with %s", ResultMarker)
+	payload, err := commentPayload(body, ResultMarker)
+	if err != nil {
+		return nil, err
 	}
-	payload := strings.TrimSpace(strings.TrimPrefix(trimmed, ResultMarker))
 	if payload == "" {
 		return nil, fmt.Errorf("empty fork result payload")
 	}
@@ -129,6 +128,55 @@ func ParseResultComment(body string) (*ForkResult, error) {
 		return nil, fmt.Errorf("invalid fork result metadata")
 	}
 	return &res, nil
+}
+
+// Fork comments show one readable line and keep the machine payload in a
+// collapsed block. The layout is fixed: the summary is display text only and
+// is never parsed for authority.
+var collapsedPayload = regexp.MustCompile("(?s)^\n[^\n]*\n\n<details><summary>[^<\n]*</summary>\n\n```json\n(.*)\n```\n\n</details>\\s*$")
+
+func collapsedComment(marker, summary, label string, payload []byte) string {
+	return marker + "\n" + summary + "\n\n<details><summary>" + label + "</summary>\n\n```json\n" + string(payload) + "\n```\n\n</details>\n"
+}
+
+// commentPayload returns the JSON payload of a fork comment in the collapsed
+// layout, or in the original layout (raw JSON after the marker).
+func commentPayload(body, marker string) (string, error) {
+	normalized := strings.ReplaceAll(strings.TrimLeft(body, " \t\r\n"), "\r\n", "\n")
+	if !strings.HasPrefix(normalized, marker) {
+		return "", fmt.Errorf("comment does not start with %s", marker)
+	}
+	rest := strings.TrimPrefix(normalized, marker)
+	if m := collapsedPayload.FindStringSubmatch(rest); m != nil {
+		return strings.TrimSpace(m[1]), nil
+	}
+	return strings.TrimSpace(rest), nil
+}
+
+func requestSummary(req lease.ForkRequest) string {
+	summary := fmt.Sprintf("📨 **SwarmOS fork request:** `%s` for issue #%d", req.Operation, req.IssueNumber)
+	if req.PRNumber > 0 {
+		summary += fmt.Sprintf(", PR #%d", req.PRNumber)
+	}
+	if len(req.HeadSHA) >= 7 {
+		summary += fmt.Sprintf(" at `%s`", req.HeadSHA[:7])
+	}
+	return summary
+}
+
+var operationName = regexp.MustCompile(`^[a-z][a-z-]{0,39}$`)
+
+func resultSummary(res ForkResult) string {
+	if !operationName.MatchString(res.Operation) {
+		res.Operation = ""
+	}
+	if res.Success && res.Operation != "" {
+		return fmt.Sprintf("✅ **SwarmOS coordinator:** `%s` succeeded", res.Operation)
+	}
+	if res.Operation == "" {
+		return "❌ **SwarmOS coordinator:** request rejected (details below)"
+	}
+	return fmt.Sprintf("❌ **SwarmOS coordinator:** `%s` rejected (details below)", res.Operation)
 }
 
 func IsTrustedBotComment(c *tracker.Comment) bool {
@@ -222,7 +270,7 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, fmt.Errorf("waiting for fork coordinator response to request %d (%s): %w", reqID, req.Operation, ctx.Err())
+			return nil, fmt.Errorf("no response from the upstream fork coordinator to request %d (%s) within %s; check the upstream repository's SwarmOS Fork Coordinator Actions run for that request: %w", reqID, req.Operation, timeout, ctx.Err())
 		case <-timer.C:
 		}
 		if interval < 5*time.Second {

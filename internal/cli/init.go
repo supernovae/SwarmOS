@@ -119,6 +119,9 @@ func resolveSwarmPin(override, version, commit, repoRoot string) (pin, note stri
 	if !strings.HasSuffix(version, "+dirty") {
 		named := strings.Contains(version, "dev") || strings.Contains(version, "snapshot")
 		if release := "v" + strings.TrimPrefix(version, "v"); !named && harness.ValidateSwarmVersionPin(release) == nil {
+			if pseudoVersion.MatchString(release) {
+				return release, fmt.Sprintf("generated workflows install swarm %s, built from an unreleased commit; push that commit before CI runs", release)
+			}
 			return release, ""
 		}
 		if fullCommit.MatchString(commit) {
@@ -129,6 +132,9 @@ func resolveSwarmPin(override, version, commit, repoRoot string) (pin, note stri
 }
 
 var fullCommit = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// pseudoVersion matches Go's version for an untagged commit (vX.Y.Z-0.TIMESTAMP-COMMIT).
+var pseudoVersion = regexp.MustCompile(`-(?:0\.)?\d{14}-[0-9a-f]{12}$`)
 
 // pinFor resolves the default workflow pin for repoRoot without an override.
 func pinFor(repoRoot string) string {

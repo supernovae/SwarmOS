@@ -10,6 +10,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
@@ -22,6 +23,11 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 			repoRoot := rootOpts.resolveRepoRoot()
 			checkGHAuth := !strings.EqualFold(rootOpts.Backend, "local")
 			checks := harness.RunDoctor(repoRoot, checkGHAuth)
+			if err := workspace.CheckCommitIdentity(cmd.Context(), repoRoot); err != nil {
+				checks = append(checks, harness.DoctorCheck{Category: "system", Name: "git-identity", Status: "FAIL", Detail: err.Error()})
+			} else {
+				checks = append(checks, harness.DoctorCheck{Category: "system", Name: "git-identity", Status: "OK", Detail: "checkpoint commits can be authored"})
+			}
 			if cfg, err := harness.LoadConfig(repoRoot); err == nil {
 				execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
 				status, detail := "OK", ""

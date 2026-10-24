@@ -50,9 +50,11 @@ Our documentation (`README.md`, `docs/*.md`, `SECURITY.md`) is the front door to
 
 ```bash
 # Format, vet, static analysis, and race-enabled test suite
-gofmt -s -w .
-go vet ./...
-go test -race ./...
+make fmt
+make check
+
+# Install the checkout's build into $HOME/go/bin for hands-on testing
+make install
 ```
 
 When touching documentation:

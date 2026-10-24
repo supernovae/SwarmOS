@@ -291,6 +291,30 @@ func (s *Service) contributorRemote(r *Result) (string, error) {
 	return s.ForkRemote, nil
 }
 
+// PublishVisibilityTimeout bounds how long pr submit waits for GitHub to report
+// a pushed head on the PR; the API updates a PR's head shortly after the push.
+var (
+	PublishVisibilityTimeout = 30 * time.Second
+	publishPollInterval      = 2 * time.Second
+)
+
+// awaitPublishedHead re-reads the PR until it reports head, stops changing for
+// another reason, or PublishVisibilityTimeout passes.
+func (s *Service) awaitPublishedHead(ctx context.Context, number int, head string) (*tracker.PullRequest, error) {
+	deadline := time.Now().Add(PublishVisibilityTimeout)
+	for {
+		observed, err := s.Tracker.GetPullRequest(ctx, number)
+		if err != nil || observed == nil || observed.HeadSHA == head || !strings.EqualFold(observed.State, "open") || observed.Merged || !time.Now().Before(deadline) {
+			return observed, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(publishPollInterval):
+		}
+	}
+}
+
 // RecordedValidationCheck names the check synthesized from SwarmOS's own
 // validation evidence when the tracker reports no CI checks (local backend, or
 // a repository without CI).
@@ -395,7 +419,7 @@ func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, fn func(
 			return nil, err
 		}
 	} else {
-		st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, "pr", "all", duration, cfg.Lease.MaxRenewals)
+		st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, cfg.DefaultAgent, "all", duration, cfg.Lease.MaxRenewals)
 		if err != nil {
 			return nil, err
 		}
@@ -723,7 +747,9 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		if e != nil {
 			return nil, e
 		}
-		if fresh == nil || !strings.EqualFold(fresh.State, "open") || fresh.Merged || fresh.Head != r.PR.Head || fresh.HeadRepo != r.PR.HeadRepo || fresh.BaseSHA != r.BaseSHA {
+		if fresh == nil || !strings.EqualFold(fresh.State, "open") || fresh.Merged || fresh.Head != r.PR.Head || fresh.HeadRepo != r.PR.HeadRepo || fresh.Base != r.PR.Base {
+			// The target branch may advance; the revision is validated against
+			// the approved base and GitHub tests the merge. A retarget is not.
 			return nil, fmt.Errorf("PR changed remotely before publish; refusing stale head")
 		}
 		if fresh.HeadSHA != head {
@@ -751,12 +777,12 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 				if e != nil {
 					return nil, e
 				}
-				observed, observeErr := s.Tracker.GetPullRequest(ctx, number)
+				observed, observeErr := s.awaitPublishedHead(ctx, number, head)
 				if observeErr != nil {
 					return nil, observeErr
 				}
 				if observed == nil || observed.HeadSHA != head || !strings.EqualFold(observed.State, "open") || observed.Merged {
-					return nil, fmt.Errorf("PR head or state changed after publication; coordination remains pending")
+					return nil, fmt.Errorf("PR head or state changed after publication; coordination remains pending (rerun swarm pr submit %d to reconcile)", number)
 				}
 				st, e = s.Manager.CompletePRRevisionLocal(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
 				if e != nil {

@@ -26,7 +26,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 - <<'PYTHON'
-          import json, os, urllib.request
+          import json, os, re, urllib.request
 
           with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
               event = json.load(stream)
@@ -37,8 +37,12 @@ jobs:
           body = comment.get("body", "")
           if len(body.encode("utf-8")) > 60000 or not body.startswith(marker):
               raise SystemExit("Invalid fork request size or marker")
-          payload = json.loads(body[len(marker):].strip())
-          operations = {"acquire", "renew", "release", "handoff", "require-gate", "update-phase", "update-artifact", "record-checkpoint", "record-submission"}
+          # Comments show a summary line with the JSON in a collapsed block;
+          # the original layout put raw JSON right after the marker.
+          rest = body.replace("\r\n", "\n")[len(marker):]
+          collapsed = re.fullmatch(r"\n[^\n]*\n\n<details><summary>[^<\n]*</summary>\n\n```json\n(.*)\n```\n\n</details>\s*", rest, re.S)
+          payload = json.loads(collapsed.group(1) if collapsed else rest.strip())
+          operations = {"acquire", "renew", "release", "handoff", "require-gate", "update-phase", "update-artifact", "record-checkpoint", "record-submission", "acquire-pr", "begin-pr-revision", "record-pr-head", "invalidate-pr-evidence", "complete-pr-revision"}
           if (payload.get("version") != 1 or payload.get("issue_number") != issue["number"]
                   or payload.get("operation") not in operations):
               raise SystemExit("Invalid fork request metadata")

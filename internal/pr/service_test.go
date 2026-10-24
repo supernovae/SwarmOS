@@ -481,6 +481,9 @@ type loopbackGateway struct {
 
 func (g *loopbackGateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.IssueState, error) {
 	g.operations = append(g.operations, req.Operation)
+	if req.Operation == "acquire-pr" && req.Agent != "mock" {
+		g.t.Errorf("acquire-pr requested agent %q, want the configured default agent", req.Agent)
+	}
 	up, n, actor := g.upstream, req.IssueNumber, g.actor
 	if req.ClaimID != "" {
 		up.BindClaim(n, req.ClaimID)
@@ -568,6 +571,8 @@ func TestForkContributorRevisesOwnPR(t *testing.T) {
 	if worked.HeadSHA == base {
 		t.Fatal("contributor revision produced no new commit")
 	}
+	// Upstream main advancing after approval must not block the revision.
+	contributorView.baseTip = strings.Repeat("d", 40)
 	submitted, err := svc.Submit(ctx, number)
 	if err != nil {
 		t.Fatalf("contributor pr submit: %v", err)
@@ -598,6 +603,9 @@ type forkPRTracker struct {
 	tracker.Tracker
 	branch string
 	head   func() string
+	// baseTip and target, when set, report the target branch advancing or the
+	// PR being retargeted.
+	baseTip, target string
 }
 
 func (f *forkPRTracker) UpstreamRepo() string { return "octo/swarm" }
@@ -607,7 +615,52 @@ func (f *forkPRTracker) GetPullRequest(ctx context.Context, number int) (*tracke
 	if pr != nil {
 		copy := *pr
 		copy.BaseRepo, copy.HeadRepo, copy.Head, copy.HeadSHA = "octo/swarm", "alice/swarm", f.branch, f.head()
+		if f.baseTip != "" {
+			copy.BaseSHA = f.baseTip
+		}
+		if f.target != "" {
+			copy.Base = f.target
+		}
 		pr = &copy
 	}
 	return pr, err
+}
+
+// laggingTracker reports a PR's previous head for a few reads, as GitHub does
+// briefly after a push.
+type laggingTracker struct {
+	tracker.Tracker
+	stale string
+	reads int
+}
+
+func (l *laggingTracker) GetPullRequest(ctx context.Context, number int) (*tracker.PullRequest, error) {
+	pr, err := l.Tracker.GetPullRequest(ctx, number)
+	if pr != nil && l.reads > 0 {
+		l.reads--
+		copy := *pr
+		copy.HeadSHA = l.stale
+		pr = &copy
+	}
+	return pr, err
+}
+
+func TestAwaitPublishedHeadToleratesGitHubLag(t *testing.T) {
+	s, _, number, base := fixture(t)
+	publishPollInterval = time.Millisecond
+	t.Cleanup(func() { publishPollInterval = 2 * time.Second })
+	lagging := &laggingTracker{Tracker: s.Tracker, stale: strings.Repeat("e", 40), reads: 3}
+	svc := *s
+	svc.Tracker = lagging
+	observed, err := svc.awaitPublishedHead(context.Background(), number, base)
+	if err != nil || observed.HeadSHA != base || lagging.reads != 0 {
+		t.Fatalf("awaited head = %+v, %v (stale reads left %d)", observed, err, lagging.reads)
+	}
+	lagging.reads = 1 << 30
+	old := PublishVisibilityTimeout
+	PublishVisibilityTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { PublishVisibilityTimeout = old })
+	if observed, err = svc.awaitPublishedHead(context.Background(), number, base); err != nil || observed.HeadSHA == base {
+		t.Fatalf("wait did not give up on a head that never appears: %+v, %v", observed, err)
+	}
 }

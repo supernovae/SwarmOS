@@ -46,6 +46,8 @@ SwarmOS has two execution modes. `isolated` is the default when no mode is confi
 | `isolated` | Codex native sandbox or restricted delegated tools for the selected harness; OCI when required by repository policy. Missing required capabilities block execution. | A supported Linux harness/runtime, its normal provider login, and passing `swarm repo doctor` checks. |
 | `trusted-local` | Planner, developer, tester, and validation commands run with the operator's OS permissions. Reviewers retain their separate snapshot sandbox. | Select this mode explicitly for repositories and tools you trust, where approved policy permits it. |
 
+Generated CI runs `swarm repo validate` on a CI runner (detected through `CI=true` or `GITHUB_ACTIONS=true`). There, the ephemeral runner is the isolation boundary: required checks run directly on it with a scrubbed environment, so stock runners need no agent harness such as Codex. Checks and protected paths still come from the trusted base commit, and fork pull requests receive GitHub's read-only token. On a workstation, `swarm repo validate` keeps using the repository's configured sandbox.
+
 ### Native Codex
 
 The trusted Codex process uses its own provider login and session renewal. Agent tools run with a named permission profile: a detached task snapshot, private scratch space, and Codex's minimal system runtime files. Live Git metadata, coordinator state, and host credential stores are outside that profile. Shell environments exclude provider and publishing tokens; tool networking is disabled. Code execution and subprocess restrictions come from Codex's Linux sandbox. SwarmOS checks outside-file, symlink, write, and loopback canaries before running work.

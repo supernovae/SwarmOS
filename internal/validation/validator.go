@@ -17,6 +17,7 @@ import (
 	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/sandbox"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 var (
@@ -48,6 +49,10 @@ type ValidationReport struct {
 
 type ValidateOptions struct {
 	CIMode bool
+	// RunnerIsolated runs required checks directly on an ephemeral CI runner,
+	// which is the isolation boundary there; agent sandboxes such as Codex's are
+	// not installed on stock runners. Policy still comes from BaseSHA.
+	RunnerIsolated bool
 	// BaseSHA is the immutable approved commit from which policy is loaded and
 	// against which committed candidate changes are compared.
 	BaseSHA  string
@@ -136,22 +141,16 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		start := time.Now()
 		var output process.Output
 		var runErr error
-		if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
+		if opts.RunnerIsolated {
+			runErr = runOnHost(checkCtx, worktreePath, checkHome, check.Command, &output)
+		} else if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
 			runErr = sandbox.RunConfiguredNativeValidation(checkCtx, worktreePath, cfg, check.Command, &output, &output)
 		} else if execution.Mode == contract.ExecutionIsolated {
 			runErr = sandbox.RunWorker(checkCtx, worktreePath, "/bin/sh", []string{"-c", check.Command}, sandbox.WorkerOptions{
 				Runtime: execution.ContainerRuntime, Image: execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,
 			}, nil, &output, &output)
 		} else {
-			cmd := exec.CommandContext(checkCtx, "sh", "-c", check.Command)
-			cmd.Dir = worktreePath
-			cmd.Env = cleanCheckEnv(checkHome)
-			process.Configure(cmd)
-			cmd.Cancel = func() error { process.Stop(cmd); return nil }
-			cmd.WaitDelay = time.Second
-			cmd.Stdout, cmd.Stderr = &output, &output
-			runErr = cmd.Run()
-			process.Stop(cmd)
+			runErr = runOnHost(checkCtx, worktreePath, checkHome, check.Command, &output)
 		}
 		cancel()
 		outcome := CheckRunOutcome{Name: check.Name, Command: check.Command, Duration: time.Since(start), Output: output.String(), Passed: runErr == nil}
@@ -221,10 +220,11 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 			return nil, fmt.Errorf("%w: tracked control path %q", ErrUnsafePath, name)
 		}
 	}
-	commands := [][]string{{"diff", "--name-only", "-z", baseSHA + "...HEAD"}, {"diff", "--name-only", "-z"}, {"diff", "--cached", "--name-only", "-z"}, {"ls-files", "--others", "--exclude-standard", "-z"}}
+	commands := [][]string{{"diff", "--name-only", "-z", baseSHA + "...HEAD"}, {"diff", "--cached", "--name-only", "-z"}, {"diff", "--name-only", "-z"}, {"ls-files", "--others", "--exclude-standard", "-z"}}
 	seen := make(map[string]struct{})
+	recorded := make(map[string]bool) // committed or staged, never ephemeral
 	var files []string
-	for _, args := range commands {
+	for i, args := range commands {
 		out, err := gitOutput(worktreePath, args...)
 		if err != nil {
 			return nil, err
@@ -240,6 +240,17 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 			if isEphemeral(path) {
 				continue
 			}
+			if i < 2 {
+				recorded[path] = true
+			} else if !recorded[path] {
+				pointerOnly, err := onlyActivePointer(worktreePath, path)
+				if err != nil {
+					return nil, err
+				}
+				if pointerOnly {
+					continue
+				}
+			}
 			if _, ok := seen[path]; !ok {
 				seen[path] = struct{}{}
 				files = append(files, path)
@@ -247,6 +258,48 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 		}
 	}
 	return files, nil
+}
+
+// onlyActivePointer reports whether an unstaged change to an agent instruction
+// file is exactly SwarmOS's temporary task block, which is injected for agents
+// and removed before every checkpoint.
+func onlyActivePointer(worktreePath, path string) (bool, error) {
+	if path != "AGENTS.md" && path != "CLAUDE.md" {
+		return false, nil
+	}
+	current, err := safefs.ReadFile(worktreePath, path, 16<<20)
+	if err != nil {
+		return false, nil
+	}
+	committed := ""
+	if listing, err := gitOutput(worktreePath, "ls-tree", "--name-only", "HEAD", "--", path); err != nil {
+		return false, err
+	} else if len(bytes.TrimSpace(listing)) != 0 {
+		out, err := gitOutput(worktreePath, "show", "HEAD:"+path)
+		if err != nil {
+			return false, err
+		}
+		committed = string(out)
+	}
+	stripped := workspace.StripActivePointer(string(current))
+	if stripped == string(current) {
+		return false, nil
+	}
+	return strings.ReplaceAll(stripped, "\r\n", "\n") == strings.ReplaceAll(committed, "\r\n", "\n"), nil
+}
+
+// runOnHost runs a required check directly, with a scrubbed environment.
+func runOnHost(ctx context.Context, dir, home, command string, output *process.Output) error {
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Dir = dir
+	cmd.Env = cleanCheckEnv(home)
+	process.Configure(cmd)
+	cmd.Cancel = func() error { process.Stop(cmd); return nil }
+	cmd.WaitDelay = time.Second
+	cmd.Stdout, cmd.Stderr = output, output
+	err := cmd.Run()
+	process.Stop(cmd)
+	return err
 }
 
 func isEphemeral(path string) bool {

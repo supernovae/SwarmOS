@@ -209,11 +209,9 @@ func projectRuntimeSetup(stack StackProfile) string {
           rustflags: ''
 `
 	default:
-		return `      - name: Configure project runtime
-        run: |
-          echo 'Configure project-specific runtime prerequisites and required checks in .swarm/validation/required-checks.yaml.' >&2
-          exit 1
-`
+		// No runtime was detected. Unconfigured required checks already fail
+		// closed, so a repository whose checks need only a shell can pass.
+		return "      # No language runtime was detected; add setup steps here if your required checks need one.\n"
 	}
 }
 
@@ -294,7 +292,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	}
 
 	// 2. .swarm/{project,architecture,conventions}.md
-	projectName := filepath.Base(mustAbs(root))
+	projectName := repositoryName(root)
 	projectMD := fmt.Sprintf("# Project: %s\n\n- **Primary Stack**: %s\n- **Build Command**: `%s`\n- **Test Command**: `%s`\n",
 		projectName, stack.Language, stack.BuildCmd, stack.TestCmd)
 	if err := writeFile(".swarm/project.md", []byte(projectMD)); err != nil {
@@ -911,4 +909,18 @@ func mustAbs(p string) string {
 		return p
 	}
 	return abs
+}
+
+// repositoryName names the project after its origin repository, so the
+// generated description does not depend on the local clone's folder name.
+func repositoryName(root string) string {
+	out, err := gitcredential.Output(context.Background(), root, "remote", "get-url", "origin")
+	if err == nil {
+		url := strings.TrimSuffix(strings.TrimSpace(string(out)), "/")
+		url = strings.TrimSuffix(url, ".git")
+		if i := strings.LastIndexAny(url, "/:"); i >= 0 && i < len(url)-1 {
+			return url[i+1:]
+		}
+	}
+	return filepath.Base(mustAbs(root))
 }

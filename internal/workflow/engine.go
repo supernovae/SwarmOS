@@ -298,6 +298,14 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 			agents[role], binaries[role] = name, resolved
 		}
 	}
+	if slices.Contains(roles, "developer") {
+		if err := workspace.CheckCommitIdentity(ctx, opts.RepoRoot); err != nil {
+			if !opts.InspectOnly {
+				return nil, err
+			}
+			blockers = append(blockers, err.Error())
+		}
+	}
 	if execution.Mode == contract.ExecutionIsolated && slices.Contains(roles, "developer") && len(checks.RequiredChecks) > 0 {
 		var runtimeErr error
 		if execution.Backend == contract.BackendNative {
@@ -386,7 +394,8 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	var st *lease.IssueState
 	progress.next("claim")
-	if opts.ClaimID != "" {
+	resumed := opts.ClaimID != ""
+	if resumed {
 		e.LeaseManager.BindClaim(opts.IssueNumber, opts.ClaimID)
 		st, err = e.LeaseManager.Resume(ctx, opts.IssueNumber, opts.Owner, opts.ClaimID)
 	} else {
@@ -397,7 +406,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	setupComplete := false
 	defer func() {
-		if !setupComplete {
+		// Release only a claim this run acquired; a resumed claim may hold
+		// work (such as uncommitted agent changes) its owner still needs.
+		if !setupComplete && !resumed {
 			_, _ = e.LeaseManager.Release(context.Background(), opts.IssueNumber, opts.Owner, "workflow setup failed")
 		}
 	}()

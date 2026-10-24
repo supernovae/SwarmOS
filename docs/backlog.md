@@ -77,13 +77,77 @@ Below the issue lanes, the scan lists **Open Pull Requests** in lanes of their o
 | Lane | What lands here | What to do |
 | :--- | :--- | :--- |
 | **Competing PRs** | Two or more open PRs that close the same issue | Pick one to continue and close the rest |
+| **Dependency updates** | PRs opened by Dependabot or Renovate | Merge the ones that pass, or adopt them as one WorkUnit (see [section 5](#5-dependency-updates-without-the-noise)) |
 | **Quiet PRs** | No activity for `--stale-days` | Ask the author whether to continue, or close it |
 | **Ready for review** | Out of draft | Review it |
 | **In progress** | Drafts | Nothing yet |
 
 Each PR shows whether it belongs to a WorkUnit. SwarmOS only says so when the issue's coordination state records that exact PR, so a PR body that says "Closes #12" is shown as a mention, not a link. PRs from outside SwarmOS show up too, so you get one view of everything waiting on you. The scan only reads pull requests.
 
-## 5. Let the repo remember what it learned
+## 5. Dependency updates without the noise
+
+Dependabot is great at noticing that something is out of date, and less great at knowing when to bother you. Left alone, it opens a PR per package per week, each one red or green for its own reasons, and they pile up until someone closes them all and does the upgrade by hand. A little configuration plus the scan turns that stream into a few owned pieces of work.
+
+### Group the updates
+
+Ask Dependabot for fewer, larger PRs. This `.github/dependabot.yml` sends one weekly PR for all GitHub Actions bumps and one for Go minor and patch updates, and keeps each major Go upgrade in its own PR because those are the ones most likely to need code changes:
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies", "ci"]
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    groups:
+      go-minor-and-patch:
+        update-types: ["minor", "patch"]
+```
+
+Swap `gomod` for your ecosystems (`npm`, `pip`, `cargo`, and so on). See GitHub's [Dependabot options reference](https://docs.github.com/en/code-security/dependabot/working-with-dependabot/dependabot-options-reference) for everything else you can tune.
+
+### See them in one place
+
+`swarm repo plan --scan` puts every PR opened by `dependabot[bot]` or `renovate[bot]` in the **Dependency updates** lane, so they don't crowd out PRs from people. SwarmOS recognizes them by the author GitHub records, and it never copies a dependency PR's body into the report or into an agent's prompt. That text carries upstream release notes, which are written by package authors, not by you.
+
+### Why GitHub Actions bumps fail SwarmOS Validation
+
+An Actions update edits `.github/workflows/**`, which `.swarm/validation/required-checks.yaml` lists under `protected_paths`. `swarm repo validate` in CI therefore fails on those PRs. That's on purpose: a bot re-pinning the actions your CI runs is exactly the kind of change a maintainer should look at. You have two ways through:
+
+1. **Review and merge it yourself.** Read the new pins, then merge with that check failing.
+2. **Adopt it as a WorkUnit** with `allow_harness_changes: true`, as described below. Approving that WorkUnit is your explicit sign-off for touching workflows.
+
+### Adopt updates as a WorkUnit
+
+When an update needs code changes (a major version, a deprecated API, a test that broke), or you'd rather land a batch as one reviewed change, turn it into a WorkUnit and let an agent own it:
+
+```bash
+swarm issue create \
+  --title "Upgrade GitHub Actions: checkout 4 to 7, setup-go 5 to 7" \
+  --objective "Apply the pending Dependabot updates for GitHub Actions and keep CI green" \
+  --constraint "Pin every action to a full commit SHA with a version comment" \
+  --acceptance "All workflows use the new major versions" \
+  --acceptance "SwarmOS Validation and the existing CI checks pass" \
+  --backend github
+```
+
+For an update that touches `.github/workflows/**` or `.swarm/`, edit the new issue's WorkUnit to set `allow_harness_changes: true`, then run `swarm issue approve <N>`. The agent works in its own worktree, validates against the approved base, and opens one Draft PR. Once that merges, Dependabot normally closes its own PRs for the same updates, because the dependencies are already current.
+
+> [!NOTE]
+> Contributors working through `--fork` can't change `.github/workflows/**` or `.swarm/**`, even with `allow_harness_changes: true`. Workflow updates need a worker with access to the upstream repository.
+
+## 6. Let the repo remember what it learned
 
 Agents hit the same surprises people do: a test that needs a service running, a package with a misleading name, a script that only works from the repo root. When that happens, the agent writes a one-line note in `.swarm/active/LESSONS.md`, and SwarmOS adds it to the PR's implementation summary under **What we learned**. Reviewers see it next to the change.
 
@@ -103,11 +167,11 @@ git diff .swarm/rules/lessons.md
 > [!TIP]
 > Edit freely before committing. Merge similar lessons, delete ones that went stale, and keep each line short. A tight `lessons.md` helps more than a long one.
 
-## 6. Keep it calm
+## 7. Keep it calm
 
 A short routine keeps the backlog from piling up again:
 
-1. **Weekly**: run the scan, clear **Stabilize first** and **Competing PRs**, and close or merge anything in **Probably duplicates**.
+1. **Weekly**: run the scan, clear **Stabilize first** and **Competing PRs**, merge or adopt **Dependency updates**, and close or merge anything in **Probably duplicates**.
 2. **Monthly**: walk **Quiet for a while** and **Quiet PRs**, and ask authors whether those still matter.
 3. **After a release**: run `swarm repo lessons --apply` and commit what's worth keeping.
 

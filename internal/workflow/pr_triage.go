@@ -28,6 +28,7 @@ type PRSenseItem struct {
 
 var prLaneOrder = []struct{ key, title, advice string }{
 	{"competing", "Competing PRs", "Several open PRs target the same issue. Pick one to continue and close the rest."},
+	{"dependencies", "Dependency updates", "Opened by a dependency bot. Merge the ones whose checks pass; adopt breaking or workflow-changing updates as one WorkUnit."},
 	{"quiet", "Quiet PRs", "No activity in a long time. Ask the author whether to continue, or close it."},
 	{"review", "Ready for review", "Out of draft and waiting on a reviewer."},
 	{"in-progress", "In progress", "Drafts still being worked on. Nothing to do yet."},
@@ -88,12 +89,14 @@ func (e *Engine) triageOpenPullRequests(ctx context.Context, now time.Time, stal
 		switch {
 		case competing[it.Number]:
 			idx = 0
-		case staleDays > 0 && it.QuietDays >= staleDays:
+		case isDependencyBot(it.Author):
 			idx = 1
-		case !it.Draft:
+		case staleDays > 0 && it.QuietDays >= staleDays:
 			idx = 2
-		default:
+		case !it.Draft:
 			idx = 3
+		default:
+			idx = 4
 		}
 		it.Lane = lanes[idx].Key
 		lanes[idx].Issues = append(lanes[idx].Issues, it.Number)
@@ -105,6 +108,19 @@ func (e *Engine) triageOpenPullRequests(ctx context.Context, now time.Time, stal
 		}
 	}
 	return items, out, nil
+}
+
+// dependencyBots are GitHub App logins that open dependency update PRs. The
+// author login is recorded by GitHub, so a PR can't claim it through its text.
+var dependencyBots = []string{"dependabot[bot]", "renovate[bot]"}
+
+func isDependencyBot(author string) bool {
+	for _, bot := range dependencyBots {
+		if strings.EqualFold(author, bot) {
+			return true
+		}
+	}
+	return false
 }
 
 func renderPRSection(sb *strings.Builder, lanes []BacklogLane, items []PRSenseItem) {
@@ -152,7 +168,7 @@ func prDetail(lane string, it *PRSenseItem) string {
 	if it.Author != "" {
 		parts = append(parts, "by "+escapeLaneText(it.Author))
 	}
-	if lane == "quiet" {
+	if lane == "quiet" || (lane == "dependencies" && it.QuietDays > 0) {
 		parts = append(parts, fmt.Sprintf("quiet for %d days", it.QuietDays))
 	}
 	return strings.Join(parts, ", ")

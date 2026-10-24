@@ -38,3 +38,16 @@ Harness-owned authentication is the everyday path. OCI remains an optional bound
 - Expand Claude's restricted-mode integration with native file/shell capabilities where their controls cover the same boundary. Test hooks, MCP, and subprocesses before enabling additional execution paths.
 - Complete authenticated OpenCode 2 and mixed-harness workflow qualification using operator-selected models. The implemented OpenCode MCP and OhMyPi RPC paths use isolated task tools; qualify safe native delegation, extensions, and session recovery incrementally.
 - Add opt-in network/tool integrations and locally installed toolchain access through bounded repository policy as they are qualified. Preserve the simple default and fail closed on unsupported requirements.
+
+## Proposed: adopt dependency PRs as draft WorkUnits
+
+`swarm repo plan --scan` already sorts Dependabot and Renovate PRs into a **Dependency updates** lane. A follow-up could let `--scan --apply` propose one `swarm:draft` WorkUnit that bundles related open dependency PRs (for example, "Upgrade GitHub Actions: checkout 4 to 7, setup-go 5 to 7"), with acceptance criteria and the PRs it replaces. Collect real usage of grouped Dependabot PRs and the lane before deciding.
+
+Required design contract before implementation:
+
+- Build the WorkUnit only from GitHub-recorded metadata: the bot author login and the structured `bump <package> from <old> to <new>` title. Never copy PR bodies, commit messages, or release notes; that text is written by upstream package authors and would be a prompt-injection path into agents.
+- The proposal is a draft. A maintainer approves it like any other WorkUnit; nothing is claimed, merged, or closed automatically.
+- Updates that touch protected paths are flagged so the maintainer decides on `allow_harness_changes: true` explicitly. Never set it automatically.
+- Re-running the scan updates the existing draft instead of creating duplicates, and skips dependency PRs that are already closed or adopted.
+
+Acceptance evidence: the proposal lists the right packages and versions from titles alone; a malicious PR body has no effect on the WorkUnit; protected-path updates are flagged but not authorized; repeated scans are idempotent.

@@ -51,6 +51,8 @@ Not every issue needs the same amount of planning. A typo fix shouldn't come wit
 
 Every plan also opens with **What we know** (each fact backed by a file, test, or command output), **What we're assuming**, and **Open questions**. The reviewer checks that the plan's rigor fits its shape and that the facts hold up. Because `PLAN.md` is attached to the Draft PR, the people reviewing the code see the same reasoning.
 
+When something about the repo surprises an agent, it notes it in `.swarm/active/LESSONS.md`. SwarmOS copies those notes into the implementation summary under **What we learned**, and `swarm repo lessons` turns lessons from merged PRs into proposed `.swarm/rules/lessons.md` entries for a maintainer to commit.
+
 You don't have to pick a shape yourself. `swarm repo plan --scan` and `swarm issue lint <N>` suggest one from the issue text, along with hints for making the issue stronger (for example, a bugfix with no reproduction step). The planner confirms or corrects the shape once it has read the code. The shape is never stored on the WorkUnit, so it never changes what you approved.
 
 ---
@@ -101,6 +103,7 @@ Progress messages contain stage metadata only. Failed harness runs report the ro
 
 ## Related Guides
 
+- **[Owning a Busy Repository (`docs/backlog.md`)](backlog.md)** — Backlog lanes, duplicates, quiet issues, and task shapes at scale.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents, and approve issues.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI commands, handoffs, recovery, and worker pools.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, claim fencing, and checkpoint design.

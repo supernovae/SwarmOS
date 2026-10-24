@@ -161,7 +161,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		return nil
 	}}
 	lintCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured lint results")
-	issueCmd.AddCommand(createCmd, approveCmd, lintCmd, newDecomposeCmd(rootOpts), newIssueEpicCmd(rootOpts), newClaimCmd(rootOpts), newWorkCmd(rootOpts), newStageCmd(rootOpts), newReviewCmd(rootOpts), newValidateCmd(rootOpts), newSubmitCmd(rootOpts), newStatusCmd(rootOpts), newRenewCmd(rootOpts), newReleaseCmd(rootOpts))
+	issueCmd.AddCommand(newReconcileCmd(rootOpts), newCleanupCmd(rootOpts), createCmd, approveCmd, lintCmd, newDecomposeCmd(rootOpts), newIssueEpicCmd(rootOpts), newClaimCmd(rootOpts), newWorkCmd(rootOpts), newStageCmd(rootOpts), newReviewCmd(rootOpts), newValidateCmd(rootOpts), newSubmitCmd(rootOpts), newStatusCmd(rootOpts), newRenewCmd(rootOpts), newReleaseCmd(rootOpts))
 	return issueCmd
 }
 

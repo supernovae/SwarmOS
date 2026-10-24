@@ -175,3 +175,14 @@ func TestLocalPRRefreshesExplicitBranchRefsWithoutInventingChecks(t *testing.T) 
 		t.Fatalf("invented missing checks: %+v %v", checks, err)
 	}
 }
+
+func TestGitHubMergedPRMetadata(t *testing.T) {
+	stamp := "2026-10-23T11:12:13Z"
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(t, w, map[string]any{"number": 25, "state": "closed", "merged": true, "merge_commit_sha": "merge", "merged_at": stamp, "head": map[string]any{"ref": "task", "sha": "submitted"}, "base": map[string]any{"ref": "main", "sha": "base"}})
+	}))
+	pr, err := tr.GetPullRequest(context.Background(), 25)
+	if err != nil || pr.MergeCommitSHA != "merge" || pr.MergedAt == nil || pr.MergedAt.Format(time.RFC3339) != stamp || pr.HeadSHA != "submitted" {
+		t.Fatalf("merge evidence: %+v %v", pr, err)
+	}
+}

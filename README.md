@@ -238,6 +238,8 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm issue validate [<issue>] [--base <approved-base-sha>]` / `swarm repo validate --base <trusted-full-commit-sha>` | Validate a claimed issue against its approved base and artifacts (`--base`, if given, must match it), or run checkout-only CI validation against a trusted full base without a claim. |
 | `swarm issue submit [<issue>] [--base <target-branch>]` | Clean temporary markers, checkpoint and push the worktree branch, and open or reuse its linked Draft PR (targeting the default branch unless `--base` names another) with collapsible artifacts and provenance attestation. |
 | `swarm issue status [<issue>] [--all]` | Inspect active claims, lease TTL, current phase, and published artifacts. |
+| `swarm issue reconcile <issue>` | Record the linked PR outcome and repair its issue label and audit projection. |
+| `swarm issue cleanup <issue> [--apply]` | Preview task resources; explicitly retire an eligible merged remote branch while retaining local work and provenance. |
 | `swarm pr status <PR>` / `swarm pr work <PR> [--instructions <text>]` | Inspect or continue developing a PR linked to an approved WorkUnit, including failing tests and review feedback, in a separate PR worktree. Contributors add `--fork` to revise their own fork PRs. |
 | `swarm pr stage <PR> [--phase plan\|implement] [--harness <name>] [--model <name>] [--handoff] [--json]` | Stage an interactive plan or local implementation checkpoint in the separate managed PR worktree; links artifacts to the original issue without publishing the PR. |
 | `swarm pr rebase <PR> [--continue\|--abort]` | Rebase onto the PR's approved target base; retain conflicts for deliberate resolution. |

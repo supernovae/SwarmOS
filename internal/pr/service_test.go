@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -195,7 +196,10 @@ func TestPRLinkRejectsUnrecordedAndClosedCandidates(t *testing.T) {
 	if err = os.WriteFile(path, encoded, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.Status(ctx, number); err == nil {
+	if r, e := s.Status(ctx, number); e != nil || r.Status != "closed-unmerged" {
+		t.Fatalf("closed PR status unavailable: %+v %v", r, e)
+	}
+	if _, _, err = s.openForMutation(ctx, number, false); err == nil {
 		t.Fatal("closed PR accepted as active WorkUnit revision")
 	}
 }
@@ -662,5 +666,59 @@ func TestAwaitPublishedHeadToleratesGitHubLag(t *testing.T) {
 	t.Cleanup(func() { PublishVisibilityTimeout = old })
 	if observed, err = svc.awaitPublishedHead(context.Background(), number, base); err != nil || observed.HeadSHA == base {
 		t.Fatalf("wait did not give up on a head that never appears: %+v, %v", observed, err)
+	}
+}
+
+type terminalTracker struct {
+	tracker.Tracker
+	pr *tracker.PullRequest
+}
+
+func (t terminalTracker) GetPullRequest(context.Context, int) (*tracker.PullRequest, error) {
+	return t.pr, nil
+}
+func (t terminalTracker) GetCheckStatus(context.Context, string) ([]tracker.CheckRunResult, error) {
+	return nil, fmt.Errorf("terminal status must not query checks")
+}
+func TestMergedStatusAndClosedStatusRemainReadOnly(t *testing.T) {
+	for _, merged := range []bool{false, true} {
+		t.Run(strconv.FormatBool(merged), func(t *testing.T) {
+			s, issue, n, _ := fixture(t)
+			ctx := context.Background()
+			before, e := s.Manager.GetCurrentState(ctx, issue)
+			if e != nil {
+				t.Fatal(e)
+			}
+			p, e := s.Tracker.GetPullRequest(ctx, n)
+			if e != nil {
+				t.Fatal(e)
+			}
+			p.State = "closed"
+			p.Merged = merged
+			s.Tracker = terminalTracker{Tracker: s.Tracker, pr: p}
+			r, e := s.Status(ctx, n)
+			if e != nil {
+				t.Fatal(e)
+			}
+			expected := "closed-unmerged"
+			if merged {
+				expected = "merged"
+			}
+			if r.Status != expected || r.Worktree != "" {
+				t.Fatalf("terminal status: %+v", r)
+			}
+			if _, e = s.Work(ctx, Options{Number: n}); e == nil {
+				t.Fatal("terminal PR allowed work")
+			}
+			after, e := s.Manager.GetCurrentState(ctx, issue)
+			if e != nil {
+				t.Fatal(e)
+			}
+			a, _ := json.Marshal(before)
+			b, _ := json.Marshal(after)
+			if string(a) != string(b) {
+				t.Fatal("status mutated state")
+			}
+		})
 	}
 }

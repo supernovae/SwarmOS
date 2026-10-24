@@ -75,6 +75,17 @@ func revisionHead(st *lease.IssueState) string {
 // only choose which issue's state to read first; a hinted issue that does not
 // record this PR falls back to scanning every issue.
 func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
+	r, err := s.linkedInspection(ctx, number)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(r.PR.State, "open") || r.PR.Merged {
+		return nil, fmt.Errorf("PR #%d must be open and unmerged", number)
+	}
+	return r, nil
+}
+
+func (s *Service) linkedInspection(ctx context.Context, number int) (*Result, error) {
 	if number <= 0 {
 		return nil, fmt.Errorf("positive PR number required")
 	}
@@ -82,8 +93,8 @@ func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if pr == nil || pr.Number != number || !strings.EqualFold(pr.State, "open") || pr.Merged {
-		return nil, fmt.Errorf("PR #%d must be open and unmerged", number)
+	if pr == nil || pr.Number != number {
+		return nil, fmt.Errorf("PR #%d identity mismatch", number)
 	}
 	var result *Result
 	for _, hint := range linkHints(pr) {
@@ -124,6 +135,13 @@ func (s *Service) linked(ctx context.Context, number int) (*Result, error) {
 	}
 	if result == nil {
 		return nil, fmt.Errorf("PR #%d is not linked to an approved WorkUnit", number)
+	}
+	if !strings.EqualFold(pr.State, "open") || pr.Merged {
+		result.Status = "closed-unmerged"
+		if pr.Merged {
+			result.Status = "merged"
+		}
+		return result, nil
 	}
 	if result.State.PRRevision != nil {
 		rev := result.State.PRRevision
@@ -223,9 +241,13 @@ func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *
 }
 
 func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
-	r, err := s.linked(ctx, number)
+	r, err := s.linkedInspection(ctx, number)
 	if err != nil {
 		return nil, err
+	}
+	if r.Status == "merged" || r.Status == "closed-unmerged" {
+		r.Worktree = ""
+		return r, nil
 	}
 	if _, statErr := os.Lstat(r.Worktree); os.IsNotExist(statErr) {
 		r.Worktree = ""
@@ -474,6 +496,9 @@ func (s *Service) openForMutation(ctx context.Context, number int, reconciles bo
 	r, err := s.linked(ctx, number)
 	if err != nil {
 		return nil, "", err
+	}
+	if !strings.EqualFold(r.PR.State, "open") || r.PR.Merged {
+		return nil, "", fmt.Errorf("PR #%d must be open and unmerged", number)
 	}
 	if r.Status == StatusPublishedPending && !reconciles {
 		return nil, "", fmt.Errorf("PR head has been published; run swarm pr submit %d to reconcile state", number)

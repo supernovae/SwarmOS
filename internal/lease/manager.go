@@ -54,6 +54,10 @@ type PRRevision struct {
 }
 
 type IssueState struct {
+	CleanupHistory      []CleanupReservation       `json:"cleanup_history,omitempty"`
+	Cleanup             *CleanupReservation        `json:"cleanup,omitempty"`
+	PROutcome           *PROutcome                 `json:"pr_outcome,omitempty"`
+	SubmittedHeadSHA    string                     `json:"submitted_head_sha,omitempty"`
 	Lease               contract.Lease             `json:"lease"`
 	Artifacts           []contract.Artifact        `json:"artifacts,omitempty"`
 	Attestations        []contract.RoleAttestation `json:"attestations,omitempty"`
@@ -205,6 +209,14 @@ func (m *Manager) VerifyDependencies(ctx context.Context, wu *contract.WorkUnit)
 	return nil
 }
 func (m *Manager) load(ctx context.Context, n int) (*IssueState, string, error) {
+	st, rev, err := m.loadReadOnly(ctx, n)
+	if err == nil && st.Cleanup != nil {
+		return nil, "", fmt.Errorf("%w: issue cleanup reservation is active", ErrClaimFence)
+	}
+	return st, rev, err
+}
+
+func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string, error) {
 	if m.store == nil {
 		return nil, "", ErrStoreUnconfigured
 	}
@@ -448,6 +460,15 @@ func RenderStateProjection(wu *contract.WorkUnit, st *IssueState) string {
 	sb.WriteString("| Field | Value |\n| :--- | :--- |\n")
 	sb.WriteString(fmt.Sprintf("| **Phase** | `%s` |\n", phase))
 	sb.WriteString(fmt.Sprintf("| **Status** | `%s` |\n", status))
+	if o := st.PROutcome; o != nil {
+		sb.WriteString(fmt.Sprintf("| **PR outcome** | `%s` |\n", o.Status))
+		if o.MergeCommitSHA != "" {
+			sb.WriteString(fmt.Sprintf("| **Merge commit** | `%s` |\n", o.MergeCommitSHA))
+		}
+		if o.MergedAt != nil {
+			sb.WriteString(fmt.Sprintf("| **Merged at** | %s |\n", o.MergedAt.UTC().Format(time.RFC3339)))
+		}
+	}
 	sb.WriteString(fmt.Sprintf("| **Effective Gate** | `%s` |\n", gate))
 	sb.WriteString(fmt.Sprintf("| **Base SHA** | `%s` |\n", short(st.BaseSHA)))
 	sb.WriteString(fmt.Sprintf("| **Checkpoint SHA** | %s |\n", head))
@@ -652,6 +673,9 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	}
 	st, rev, err := m.load(ctx, n)
 	if err != nil {
+		if errors.Is(err, ErrClaimFence) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
 	}
 	if st.PRRevision != nil && prNumber != st.PRRevision.Number {
@@ -768,6 +792,9 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 	for attempt := range 4 {
 		st, rev, err := m.load(ctx, issue)
 		if err != nil {
+			if errors.Is(err, ErrClaimFence) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
 		}
 		if st.PRRevision != nil {
@@ -1220,6 +1247,8 @@ func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, num
 
 		st.PRNumber = number
 		st.PRURL = url
+		st.SubmittedHeadSHA = st.HeadSHA
+		st.PROutcome = nil
 		st.Lease.Status = "completed"
 		st.Lease.Phase = "submitted"
 		return nil
@@ -1484,7 +1513,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	return m.save(ctx, n, rev, st)
 }
 func (m *Manager) GetCurrentState(ctx context.Context, n int) (*IssueState, error) {
-	st, _, err := m.load(ctx, n)
+	st, _, err := m.loadReadOnly(ctx, n)
 	return st, err
 }
 
@@ -1589,6 +1618,8 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 	}
 	st.PRRevision = nil
 	st.HeadSHA = published
+	st.SubmittedHeadSHA = published
+	st.PROutcome = nil
 	st.Lease.Status = "completed"
 	st.Lease.Phase = "submitted"
 	if atomicOrigin {

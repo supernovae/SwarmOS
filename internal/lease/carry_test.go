@@ -16,7 +16,7 @@ import (
 )
 
 func TestApprovalCarryForward(t *testing.T) {
-	for _, tc := range []string{"descendant", "policy edit", "WorkUnit edit", "nonancestor", "legacy review", "invalid review", "repeated carry"} {
+	for _, tc := range []string{"descendant", "policy edit", "WorkUnit edit", "nonancestor", "legacy review", "invalid review", "repeated carry", "same base", "same-base WorkUnit edit", "missing base", "policy paths unavailable"} {
 		t.Run(tc, func(t *testing.T) {
 			ctx := context.Background()
 			m, lt, issue := testManager(t)
@@ -56,7 +56,14 @@ func TestApprovalCarryForward(t *testing.T) {
 			case "invalid review":
 				st.Artifacts[2].Body += "tampered"
 			}
+			if tc == "missing base" || tc == "policy paths unavailable" {
+				st.BaseSHA = strings.Repeat("0", 40)
+			}
 			st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactImplementation, Body: "old implementation"}, contract.Artifact{Type: contract.ArtifactValidation, Body: "old validation"})
+			st.Attestations = nil
+			for _, a := range st.Artifacts {
+				st.Attestations = append(st.Attestations, contract.RoleAttestation{ArtifactType: string(a.Type), ArtifactDigest: hash(a.Body)})
+			}
 			if _, err := m.save(ctx, issue.Number, rev, st); err != nil {
 				t.Fatal(err)
 			}
@@ -64,7 +71,7 @@ func TestApprovalCarryForward(t *testing.T) {
 				git("checkout", "--orphan", "sibling")
 			}
 			name := "source.txt"
-			if tc == "policy edit" {
+			if tc == "policy edit" || tc == "policy paths unavailable" {
 				name = ".swarm/rules/new.md"
 			}
 			if err := os.MkdirAll(filepath.Dir(filepath.Join(m.repoRoot, name)), 0700); err != nil {
@@ -73,9 +80,11 @@ func TestApprovalCarryForward(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(m.repoRoot, name), []byte("new"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			git("add", name)
-			git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "new base")
-			if tc == "WorkUnit edit" {
+			if tc != "same base" && tc != "same-base WorkUnit edit" {
+				git("add", name)
+				git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "new base")
+			}
+			if tc == "WorkUnit edit" || tc == "same-base WorkUnit edit" {
 				issue.Body = strings.Replace(issue.Body, "Harden coordination state", "Changed task", 1)
 				if _, err := lt.UpdateIssueBody(ctx, issue.Number, issue.Body); err != nil {
 					t.Fatal(err)
@@ -89,9 +98,18 @@ func TestApprovalCarryForward(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if tc == "same base" {
+				if len(st.Artifacts) != 5 || len(st.Attestations) != 5 || VerifyApproval(st, wu) != nil {
+					t.Fatal("unchanged reapproval discarded evidence")
+				}
+				return
+			}
 			carry := tc == "descendant" || tc == "repeated carry"
 			if !carry {
-				if len(st.Artifacts) != 0 || st.ApprovalTransition != nil {
+				if tc == "policy paths unavailable" && !strings.Contains(st.CarryReason, "paths unavailable") {
+					t.Fatalf("missing path lookup failure explanation: %q", st.CarryReason)
+				}
+				if len(st.Artifacts) != 0 || len(st.Attestations) != 0 || st.ApprovalTransition != nil {
 					t.Fatalf("ineligible evidence retained: %+v", st)
 				}
 				if !errors.Is(VerifyApproval(st, wu), ErrApprovalRequired) {
@@ -99,7 +117,7 @@ func TestApprovalCarryForward(t *testing.T) {
 				}
 				return
 			}
-			if len(st.Artifacts) != 3 || VerifyApproval(st, wu) != nil || st.Artifacts[2].Metadata["base_sha"] != origin {
+			if len(st.Artifacts) != 3 || len(st.Attestations) != 3 || VerifyApproval(st, wu) != nil || st.Artifacts[2].Metadata["base_sha"] != origin {
 				t.Fatalf("carry lost approval or rewrote origin: %+v", st)
 			}
 			if tc == "repeated carry" {
@@ -121,6 +139,10 @@ func TestApprovalCarryForward(t *testing.T) {
 				},
 				func() error {
 					_, e := m.RecordCheckpoint(ctx, issue.Number, "local-dev", workspace.BranchName(issue.Number, "test"), "head")
+					return e
+				},
+				func() error {
+					_, e := m.RecordPRHead(ctx, issue.Number, "local-dev", 37, "swarm/pr-37", "head")
 					return e
 				},
 				func() error { _, e := m.RecordSubmission(ctx, issue.Number, "local-dev", 37, "local://37"); return e },

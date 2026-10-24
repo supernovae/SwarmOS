@@ -769,4 +769,50 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	if _, err := applyBob(complete); !errors.Is(err, lease.ErrClaimFence) {
 		t.Fatalf("completed revision accepted a second completion: %v", err)
 	}
+
+	// A real trusted-base move is approved upstream before the contributor
+	// requests a rebase. Neither request supplies a digest or retention verdict.
+	git(upstreamCheckout, "commit", "--allow-empty", "-m", "advance trusted base")
+	git(upstreamCheckout, "push", "origin", "main")
+	nextBase := git(upstreamCheckout, "rev-parse", "HEAD")
+	ghState.mu.Lock()
+	ghState.baseSHA = nextBase
+	ghState.mu.Unlock()
+	approved, err := maintMgr.ApproveTask(ctx, 42, "maintainer")
+	if err != nil || approved.ApprovalTransition == nil || approved.BaseSHA != nextBase {
+		t.Fatalf("approve descendant base: %v %+v", err, approved)
+	}
+	stRev, err = applyBob(lease.ForkRequest{Operation: "acquire-pr", PRNumber: 55, Agent: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revClaim = stRev.Lease.ClaimID
+	stRev, err = applyBob(lease.ForkRequest{Operation: "begin-pr-revision", RevisionIntent: "rebase", ClaimID: revClaim, PRNumber: 55, ExpectedHeadSHA: revHead, HeadSHA: revHead, Branch: "swarm/pr-55"})
+	if err != nil || len(stRev.Artifacts) != 3 || stRev.ApprovalTransition == nil || stRev.LastRebase.NewBase != nextBase {
+		t.Fatalf("coordinator lost carried plan after base move: %v %+v", err, stRev)
+	}
+	if _, err := applyBob(lease.ForkRequest{Operation: "release", ClaimID: revClaim}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(upstreamCheckout, ".swarm", "rules", "changed.md"), []byte("new trusted policy\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git(upstreamCheckout, "add", ".swarm/rules/changed.md")
+	git(upstreamCheckout, "commit", "-m", "change trusted policy")
+	git(upstreamCheckout, "push", "origin", "main")
+	ghState.mu.Lock()
+	ghState.baseSHA = git(upstreamCheckout, "rev-parse", "HEAD")
+	ghState.mu.Unlock()
+	approved, err = maintMgr.ApproveTask(ctx, 42, "maintainer")
+	if err != nil || len(approved.Artifacts) != 0 {
+		t.Fatalf("changed upstream policy retained evidence: %v %+v", err, approved)
+	}
+	stRev, err = applyBob(lease.ForkRequest{Operation: "acquire-pr", PRNumber: 55, Agent: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stRev, err = applyBob(lease.ForkRequest{Operation: "begin-pr-revision", RevisionIntent: "rebase", ClaimID: stRev.Lease.ClaimID, PRNumber: 55, ExpectedHeadSHA: revHead, HeadSHA: revHead, Branch: "swarm/pr-55"})
+	if err != nil || len(stRev.Artifacts) != 0 || stRev.ApprovalTransition != nil || stRev.CarryReason != "policy files changed" {
+		t.Fatalf("fork rebase intent overrode trusted policy change: %v %+v", err, stRev)
+	}
 }

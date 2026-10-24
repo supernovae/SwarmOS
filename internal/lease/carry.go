@@ -39,7 +39,12 @@ func (m *Manager) carryApproval(ctx context.Context, st *IssueState, wu *contrac
 		st.CarryReason = "review lacks policy tree metadata"
 	case st.PolicyTreeDigest != tree:
 		st.CarryReason = "policy files changed"
-		st.ChangedPolicyPaths, _ = workspace.ChangedPolicyPaths(ctx, m.repoRoot, st.BaseSHA, base)
+		paths, err := workspace.ChangedPolicyPaths(ctx, m.repoRoot, st.BaseSHA, base)
+		if err != nil {
+			st.CarryReason = "policy files changed (changed paths unavailable; previous base could not be compared)"
+		} else {
+			st.ChangedPolicyPaths = paths
+		}
 	case VerifyApproval(st, wu) != nil:
 		st.CarryReason = "plan approval is missing or stale"
 	default:

@@ -33,6 +33,17 @@ Single-agent coding tools are great at editing files, but coordinating several a
 | **Vendor lock-in to a single CLI** | **Multi-Agent Routing** lets you mix **Claude Code (`claude`), Codex (`codex`), OpenCode (`opencode`), and OhMyPi (`omp`)**—and coordinate from [**Grok Bot**](docs/grokbot.md) or [**OpenAI Dot**](docs/openai-dot.md). |
 | **Untested or unsafe diffs** | **Baseline Validation** runs the required checks and protected-path rules from the approved base commit before opening an artifact-backed Draft PR. |
 
+### What's New in v0.6.1
+
+A hosted end-to-end run against a real fork and upstream coordinator found and fixed issues in v0.6.0. Upgrade swarm and rerun `swarm repo init` to pick up the regenerated workflows.
+
+- **Fork PR revisions work end to end:** the coordinator workflow now admits the PR revision requests, PR claims use a configured agent, and later revision rounds catch up to newer PR heads instead of reporting divergence.
+- **Generated CI passes on stock runners:** CI runs required checks on the runner itself, validates pull requests against the commit GitHub merged into, and checks default-branch pushes against their own policy, so harness upgrades no longer turn the branch red.
+- **Smoother publishing:** `pr submit` works after the target branch advances and waits briefly for GitHub to report a pushed fork head.
+- **Safer recovery:** validation ignores SwarmOS's temporary task pointer in protected instruction files, a failed resume keeps its claim, and `repo doctor` checks for a git commit identity before agents run.
+- **Readable fork activity:** fork requests and coordinator replies show a one-line summary with the JSON collapsed underneath.
+- **`make install`** builds a checkout into `$HOME/go/bin` for local testing.
+
 ### What's New in v0.6.0
 
 - **Resource-oriented CLI:** Commands are grouped by what they act on—`swarm repo`, `swarm issue`, `swarm pr`, and `swarm node`—so the same verbs (`work`, `stage`, `validate`, `submit`, `status`) mean the same thing everywhere. Every leaf command accepts `--json`.

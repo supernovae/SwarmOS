@@ -1,5 +1,7 @@
 version: 2
 updates:
+  # One weekly PR for Go minor and patch updates; each major upgrade stays
+  # separate because those are the ones likely to need code changes.
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
@@ -8,7 +10,12 @@ updates:
     labels:
       - "dependencies"
       - "security"
+    groups:
+      go-minor-and-patch:
+        update-types: ["minor", "patch"]
 
+  # One weekly PR for all GitHub Actions updates. These edit a protected path,
+  # so review the new pins before merging (see docs/backlog.md).
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -17,3 +24,6 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      actions:
+        patterns: ["*"]

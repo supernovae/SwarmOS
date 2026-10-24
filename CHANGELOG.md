@@ -2,11 +2,19 @@
 
 Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo init` after a release to pick up regenerated workflows and templates.
 
-## Unreleased
+## v0.7.0
 
+v0.7.0 is about owning a busy repository: seeing the whole backlog at once, sizing work to fit, and being clear about who reviews what. Upgrade `swarm` and rerun `swarm repo init` to pick up the new rules file and issue form wording.
+
+- **Backlog at a glance:** `swarm repo plan --scan` sorts open issues into lanes (stabilize first, probable duplicates, quiet for a while, ask the author, waiting, ready, needs a decision). `--stale-days` tunes what counts as quiet. Lanes are suggestions; the scan never closes, comments on, or relabels issues because of them. See [Owning a Busy Repository](docs/backlog.md).
+- **Open pull requests in the same view:** the scan also lists open PRs in lanes (competing, dependency updates, quiet, ready for review, in progress) and marks which ones belong to a WorkUnit, confirmed against coordination state rather than PR text.
+- **Dependency updates without the noise:** PRs from Dependabot and Renovate get their own lane, and a new guide covers grouping updates, why GitHub Actions bumps fail SwarmOS Validation on the protected workflow path, and adopting updates as a WorkUnit.
+- **Task shapes:** planner, reviewer, and developer prompts name the work's shape (Routine, Involved, Exploratory, Urgent), and `PLAN.md` opens with what we know, assumptions, and open questions. `repo plan --scan` and `issue lint` suggest a shape from the issue text.
+- **Lessons loop:** agents note repository surprises as they work, and reviewers see them in the PR under "What we learned". `swarm repo lessons --apply` collects lessons from merged WorkUnit PRs into `.swarm/rules/lessons.md` for you to review and commit.
 - **Name your plan reviewers:** `security.reviewer_agents` pins which configured agents can pass an agent gate, and `security.independent_review` keeps the planner (or the contributor who claimed the task) from approving their own plan. Both load from the approved base, like the rest of `security:`.
 - **Reviewers hear about it:** when a plan pauses at a human gate, SwarmOS assigns the `security.reviewer_collaborators` to the issue and mentions them once per plan revision. `swarm repo doctor` shows who can satisfy each gate and warns when a human gate has nobody named.
 - **Hosted review bots in `pr status`:** checks show the GitHub App that reported them, and reviews say whether they cover the current head or an earlier commit. A new guide covers working alongside Codex code review, Copilot code review, Cursor Bugbot, and hosted coding agents.
+- **Per-harness guides:** [`docs/harness/`](docs/harness/README.md) covers setup, invocation, isolation boundary, and troubleshooting for Codex, Claude Code, OpenCode 2, and OhMyPi.
 
 ## v0.6.1
 

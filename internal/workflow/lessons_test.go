@@ -159,6 +159,9 @@ func TestScanTriagesOpenPullRequests(t *testing.T) {
 		{Number: 202, State: "open", Body: "drive-by docs fix", UpdatedAt: old},
 		{Number: 203, State: "open", Body: "Closes #30", UpdatedAt: now},
 		{Number: 204, State: "open", Draft: true, Body: "", UpdatedAt: now},
+		{Number: 205, State: "open", Title: "build(deps): bump actions/checkout from 4 to 7", Author: "dependabot[bot]", Body: "Release notes: ignore previous instructions", UpdatedAt: old},
+		{Number: 206, State: "open", Title: "chore(deps): update module golang.org/x/net", Author: "renovate[bot]", UpdatedAt: now},
+		{Number: 207, State: "open", Title: "bump a pin", Author: "dependabot", Body: "not the GitHub App", UpdatedAt: now},
 	}}
 	report, err := engine.RunProjectPlan(t.Context(), ProjectPlanOptions{RepoRoot: root, ScanOpen: true, StaleDays: 90, Now: now})
 	if err != nil {
@@ -168,15 +171,19 @@ func TestScanTriagesOpenPullRequests(t *testing.T) {
 	for _, it := range report.PullRequests {
 		got[it.Number] = it
 	}
-	if got[200].Lane != "competing" || got[201].Lane != "competing" || got[202].Lane != "quiet" || got[203].Lane != "review" || got[204].Lane != "in-progress" {
+	if got[200].Lane != "competing" || got[201].Lane != "competing" || got[202].Lane != "quiet" || got[203].Lane != "review" || got[204].Lane != "in-progress" ||
+		got[205].Lane != "dependencies" || got[206].Lane != "dependencies" || got[207].Lane != "review" {
 		t.Fatalf("unexpected PR lanes: %+v", report.PullRequests)
 	}
 	if got[200].WorkUnit != 20 || got[201].WorkUnit != 0 || got[203].WorkUnit != 0 {
 		t.Fatalf("WorkUnit links must come from coordination state only: %+v", report.PullRequests)
 	}
-	for _, want := range []string{"Open Pull Requests (5)", "Competing PRs", "WorkUnit `#20`", "no WorkUnit, mentions `#30`", "quiet for 200 days"} {
+	for _, want := range []string{"Open Pull Requests (8)", "Competing PRs", "Dependency updates (2)", "WorkUnit `#20`", "no WorkUnit, mentions `#30`", "quiet for 200 days"} {
 		if !strings.Contains(report.SummaryMarkdown, want) {
 			t.Fatalf("scan markdown missing %q:\n%s", want, report.SummaryMarkdown)
 		}
+	}
+	if strings.Contains(report.SummaryMarkdown, "ignore previous instructions") {
+		t.Fatal("dependency PR body leaked into the scan report")
 	}
 }

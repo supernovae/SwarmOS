@@ -571,6 +571,8 @@ func TestForkContributorRevisesOwnPR(t *testing.T) {
 	if worked.HeadSHA == base {
 		t.Fatal("contributor revision produced no new commit")
 	}
+	// Upstream main advancing after approval must not block the revision.
+	contributorView.baseTip = strings.Repeat("d", 40)
 	submitted, err := svc.Submit(ctx, number)
 	if err != nil {
 		t.Fatalf("contributor pr submit: %v", err)
@@ -601,6 +603,9 @@ type forkPRTracker struct {
 	tracker.Tracker
 	branch string
 	head   func() string
+	// baseTip and target, when set, report the target branch advancing or the
+	// PR being retargeted.
+	baseTip, target string
 }
 
 func (f *forkPRTracker) UpstreamRepo() string { return "octo/swarm" }
@@ -610,6 +615,12 @@ func (f *forkPRTracker) GetPullRequest(ctx context.Context, number int) (*tracke
 	if pr != nil {
 		copy := *pr
 		copy.BaseRepo, copy.HeadRepo, copy.Head, copy.HeadSHA = "octo/swarm", "alice/swarm", f.branch, f.head()
+		if f.baseTip != "" {
+			copy.BaseSHA = f.baseTip
+		}
+		if f.target != "" {
+			copy.Base = f.target
+		}
 		pr = &copy
 	}
 	return pr, err

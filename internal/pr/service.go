@@ -723,7 +723,9 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		if e != nil {
 			return nil, e
 		}
-		if fresh == nil || !strings.EqualFold(fresh.State, "open") || fresh.Merged || fresh.Head != r.PR.Head || fresh.HeadRepo != r.PR.HeadRepo || fresh.BaseSHA != r.BaseSHA {
+		if fresh == nil || !strings.EqualFold(fresh.State, "open") || fresh.Merged || fresh.Head != r.PR.Head || fresh.HeadRepo != r.PR.HeadRepo || fresh.Base != r.PR.Base {
+			// The target branch may advance; the revision is validated against
+			// the approved base and GitHub tests the merge. A retarget is not.
 			return nil, fmt.Errorf("PR changed remotely before publish; refusing stale head")
 		}
 		if fresh.HeadSHA != head {

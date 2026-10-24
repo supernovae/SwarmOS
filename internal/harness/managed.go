@@ -62,12 +62,25 @@ func (m *manifest) save(safe *safefs.Root) error {
 
 // managedWriter writes generated files. A file is replaced only when it is
 // missing, still matches what SwarmOS last generated, matches a legacy install
-// of the same template, or --force is set; customized files are kept.
+// of the same template, or --force is set; customized files are kept. In dry
+// run it only reports what it would do, with a diff for each existing file it
+// would change or keep.
 type managedWriter struct {
 	safe     *safefs.Root
 	manifest *manifest
 	force    bool
+	dryRun   bool
 	res      *InitResult
+}
+
+func (w *managedWriter) recordDiff(rel string, existing, proposed []byte) {
+	if !w.dryRun {
+		return
+	}
+	if w.res.Diffs == nil {
+		w.res.Diffs = map[string]string{}
+	}
+	w.res.Diffs[rel] = unifiedDiff(rel, existing, proposed)
 }
 
 // write records data as the generated content of rel. legacy, when set,
@@ -89,14 +102,18 @@ func (w *managedWriter) write(rel string, data []byte, legacy func(existing []by
 		} else {
 			w.res.PreservedFiles = append(w.res.PreservedFiles, rel)
 		}
+		w.recordDiff(rel, existing, data)
 		return nil
 	}
-	if err := w.safe.WriteFile(rel, data, 0o644); err != nil {
-		return err
+	if !w.dryRun {
+		if err := w.safe.WriteFile(rel, data, 0o644); err != nil {
+			return err
+		}
 	}
 	w.manifest.Files[rel] = digest(data)
 	if exists {
 		w.res.UpdatedFiles = append(w.res.UpdatedFiles, rel)
+		w.recordDiff(rel, existing, data)
 	} else {
 		w.res.CreatedFiles = append(w.res.CreatedFiles, rel)
 	}
@@ -172,8 +189,10 @@ func (w *managedWriter) retire() error {
 		if !untouched {
 			continue
 		}
-		if err := w.safe.Remove(rel); err != nil {
-			return err
+		if !w.dryRun {
+			if err := w.safe.Remove(rel); err != nil {
+				return err
+			}
 		}
 		w.res.RemovedFiles = append(w.res.RemovedFiles, rel)
 	}
@@ -223,8 +242,11 @@ func (w *managedWriter) writeAgentsFile(rel string, template []byte) error {
 		w.res.CurrentFiles = append(w.res.CurrentFiles, rel)
 		return nil
 	}
-	if err := w.safe.WriteFile(rel, []byte(updated), 0o644); err != nil {
-		return err
+	w.recordDiff(rel, existing, []byte(updated))
+	if !w.dryRun {
+		if err := w.safe.WriteFile(rel, []byte(updated), 0o644); err != nil {
+			return err
+		}
 	}
 	w.res.SectionFiles = append(w.res.SectionFiles, rel)
 	return nil

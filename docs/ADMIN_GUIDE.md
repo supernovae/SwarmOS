@@ -19,6 +19,21 @@ swarm repo init --sync-labels --backend github
 swarm repo doctor --backend github
 ```
 
+### Onboarding an existing repository
+
+A repository with years of history, its own CI, and an established `AGENTS.md` deserves a gentler start than a fresh scaffold. Two tools help:
+
+- **Preview first.** `swarm repo init --dry-run --verbose` lists every file init would create, update, or keep, with diffs for files that already exist, and writes nothing. Add `--json` for a machine-readable report.
+- **Onboard with your coding agent.** `swarm repo onboard` prints a guide any harness can follow, so it works before SwarmOS has written a single file:
+
+  ```bash
+  codex "$(swarm repo onboard)"
+  ```
+
+  The agent surveys your build and CI, proposes `.swarm/validation/required-checks.yaml` entries that match what CI really runs, runs `swarm repo init`, fills in `.swarm/project.md` and friends, merges SwarmOS files with anything you already had, runs each check once, and shows you the diff. It asks before writing and leaves committing to you.
+
+After the first run, Claude Code and OpenCode also have the guide as `/swarm-onboard`. Use it again after upgrading `swarm` to merge any files you've customized.
+
 > [!NOTE]
 > **GitHub Organization & Repository Checklist:**
 > 1. **Enable the `Epic` Issue Type**: In your GitHub Organization Settings (**Settings → Issues → Issue types**), ensure the `Epic` issue type is enabled so `swarm repo plan --from <file> --apply` and `swarm issue epic create` can publish native Epic hierarchy and sub-issues.

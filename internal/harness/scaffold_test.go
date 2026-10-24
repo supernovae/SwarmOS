@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -343,6 +344,8 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		".github/ISSUE_TEMPLATE/org-custom.yml",
 		".claude/commands/swarm-project-plan.md",
 		".opencode/commands/swarm-project-plan.md",
+		".claude/commands/swarm-onboard.md",
+		".opencode/commands/swarm-onboard.md",
 	}
 	for _, rel := range expectedFiles {
 		if !fileExists(filepath.Join(root, rel)) {
@@ -534,6 +537,145 @@ func TestInitSharesRepositoryFilesWithoutTakingThemOver(t *testing.T) {
 	}
 	if got := read("AGENTS.md"); got != agents+"\n## Added later by the team\n" {
 		t.Fatalf("section refresh touched content outside the markers:\n%s", got)
+	}
+}
+
+// snapshotTree maps every file under root, outside .git, to its content.
+func snapshotTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		files[filepath.ToSlash(rel)] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestInitDryRunReportsWithoutWriting(t *testing.T) {
+	root := t.TempDir()
+	if out, err := exec.Command("git", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v (%s)", err, out)
+	}
+	write := func(rel, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ownAgents := "# Team agent guide\n\nRun make check before committing.\n"
+	write("AGENTS.md", ownAgents)
+	write(".github/ISSUE_TEMPLATE/swarm-bugfix.yml", "name: Our bug form\n")
+	write(".github/ISSUE_TEMPLATE/config.yml", retiredFiles[".github/ISSUE_TEMPLATE/config.yml"][0])
+	opts := InitOptions{RepoRoot: root, SwarmVersion: "v0.6.0"}
+
+	assertDryRunMatches := func(step string) *InitResult {
+		t.Helper()
+		before := snapshotTree(t, root)
+		dryOpts := opts
+		dryOpts.DryRun = true
+		preview, err := InitRepository(dryOpts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after := snapshotTree(t, root); !maps.Equal(before, after) {
+			t.Fatalf("%s: dry run changed the repository", step)
+		}
+		// The real run must do exactly what the preview reported.
+		applied, err := InitRepository(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, pair := range map[string][2][]string{
+			"created":    {preview.CreatedFiles, applied.CreatedFiles},
+			"updated":    {preview.UpdatedFiles, applied.UpdatedFiles},
+			"current":    {preview.CurrentFiles, applied.CurrentFiles},
+			"customized": {preview.CustomizedFiles, applied.CustomizedFiles},
+			"preserved":  {preview.PreservedFiles, applied.PreservedFiles},
+			"sections":   {preview.SectionFiles, applied.SectionFiles},
+			"removed":    {preview.RemovedFiles, applied.RemovedFiles},
+		} {
+			if !slices.Equal(pair[0], pair[1]) {
+				t.Fatalf("%s: dry run %s %v, real run %v", step, name, pair[0], pair[1])
+			}
+		}
+		if applied.Diffs != nil {
+			t.Fatalf("%s: real run reported diffs", step)
+		}
+		return preview
+	}
+
+	// First onboarding: a section for the team's AGENTS.md, a kept form, a
+	// retired file to remove, and diffs only for files that already exist.
+	first := assertDryRunMatches("first run")
+	if len(first.CreatedFiles) == 0 || !slices.Contains(first.SectionFiles, "AGENTS.md") || !slices.Contains(first.RemovedFiles, ".github/ISSUE_TEMPLATE/config.yml") {
+		t.Fatalf("unexpected first preview: %+v", first)
+	}
+	agentsDiff := first.Diffs["AGENTS.md"]
+	if !strings.Contains(agentsDiff, "+"+harnessSectionStart) || strings.Contains(agentsDiff, "\n-") {
+		t.Fatalf("AGENTS.md diff should only add the SwarmOS section:\n%s", agentsDiff)
+	}
+	if !strings.Contains(first.Diffs[".github/ISSUE_TEMPLATE/swarm-bugfix.yml"], "-name: Our bug form") {
+		t.Fatalf("preserved file diff missing: %q", first.Diffs[".github/ISSUE_TEMPLATE/swarm-bugfix.yml"])
+	}
+	for _, rel := range first.CreatedFiles {
+		if _, ok := first.Diffs[rel]; ok {
+			t.Fatalf("new file %s should not get a diff", rel)
+		}
+	}
+
+	// Upgrade preview: a customized file is kept and its diff shows what this
+	// version would bring.
+	write(".swarm/goals.md", "# Our goals\n")
+	upgrade := assertDryRunMatches("upgrade")
+	if !slices.Equal(upgrade.CustomizedFiles, []string{".swarm/goals.md"}) {
+		t.Fatalf("customized files: %v", upgrade.CustomizedFiles)
+	}
+	if diff := upgrade.Diffs[".swarm/goals.md"]; !strings.HasPrefix(diff, "--- a/.swarm/goals.md\n+++ b/.swarm/goals.md\n@@ ") || !strings.Contains(diff, "-# Our goals\n") {
+		t.Fatalf("customized diff:\n%s", diff)
+	}
+}
+
+func TestUnifiedDiff(t *testing.T) {
+	before := "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n"
+	after := "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\n"
+	want := "--- a/x\n+++ b/x\n" +
+		"@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n d\n e\n" +
+		"@@ -10,3 +10,4 @@\n j\n k\n l\n+m\n"
+	if got := unifiedDiff("x", []byte(before), []byte(after)); got != want {
+		t.Fatalf("diff mismatch:\n%s\nwant:\n%s", got, want)
+	}
+	if got := unifiedDiff("x", nil, []byte("one\n")); got != "--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+one\n" {
+		t.Fatalf("diff from empty:\n%s", got)
+	}
+}
+
+func TestOnboardingGuideIsAPlainPrompt(t *testing.T) {
+	guide, err := OnboardingGuide()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(guide, "---") || strings.Contains(guide, "description:") || !strings.Contains(guide, "swarm repo init --dry-run --json") {
+		t.Fatalf("guide should be the command body without front matter:\n%s", guide)
 	}
 }
 

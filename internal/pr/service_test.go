@@ -481,6 +481,9 @@ type loopbackGateway struct {
 
 func (g *loopbackGateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.IssueState, error) {
 	g.operations = append(g.operations, req.Operation)
+	if req.Operation == "acquire-pr" && req.Agent != "mock" {
+		g.t.Errorf("acquire-pr requested agent %q, want the configured default agent", req.Agent)
+	}
 	up, n, actor := g.upstream, req.IssueNumber, g.actor
 	if req.ClaimID != "" {
 		up.BindClaim(n, req.ClaimID)

@@ -395,7 +395,7 @@ func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, fn func(
 			return nil, err
 		}
 	} else {
-		st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, "pr", "all", duration, cfg.Lease.MaxRenewals)
+		st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, cfg.DefaultAgent, "all", duration, cfg.Lease.MaxRenewals)
 		if err != nil {
 			return nil, err
 		}

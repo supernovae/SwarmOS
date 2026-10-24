@@ -244,6 +244,14 @@ func (c *Coordinator) postResult(ctx context.Context, issueNumber int, res ForkR
 	_, _ = c.Tracker.CreateComment(ctx, issueNumber, body)
 }
 
+// Operations lists every request operation the coordinator executes. The
+// generated workflow admits exactly these before checkout; a test keeps the
+// two in sync.
+var Operations = []string{
+	"acquire", "renew", "release", "handoff", "require-gate", "update-phase", "update-artifact", "record-checkpoint", "record-submission",
+	"acquire-pr", "begin-pr-revision", "record-pr-head", "invalidate-pr-evidence", "complete-pr-revision",
+}
+
 func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor string, req lease.ForkRequest) (*lease.IssueState, string, error) {
 	readStore := coordination.NewGitStore(c.RepoRoot)
 	rawCurrent, _, err := readStore.Load(ctx, req.IssueNumber)

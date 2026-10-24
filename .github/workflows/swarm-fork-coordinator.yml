@@ -38,7 +38,7 @@ jobs:
           if len(body.encode("utf-8")) > 60000 or not body.startswith(marker):
               raise SystemExit("Invalid fork request size or marker")
           payload = json.loads(body[len(marker):].strip())
-          operations = {"acquire", "renew", "release", "handoff", "require-gate", "update-phase", "update-artifact", "record-checkpoint", "record-submission"}
+          operations = {"acquire", "renew", "release", "handoff", "require-gate", "update-phase", "update-artifact", "record-checkpoint", "record-submission", "acquire-pr", "begin-pr-revision", "record-pr-head", "invalidate-pr-evidence", "complete-pr-revision"}
           if (payload.get("version") != 1 or payload.get("issue_number") != issue["number"]
                   or payload.get("operation") not in operations):
               raise SystemExit("Invalid fork request metadata")

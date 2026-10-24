@@ -553,3 +553,22 @@ func TestInitRemovesRetiredFilesOnlyWhenUntouched(t *testing.T) {
 		})
 	}
 }
+
+func TestInitNamesProjectAfterOriginRepository(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "local-clone-name")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"remote", "add", "origin", "https://github.com/octo/widgets.git"}} {
+		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	project, err := os.ReadFile(filepath.Join(root, ".swarm", "project.md"))
+	if err != nil || !strings.HasPrefix(string(project), "# Project: widgets\n") {
+		t.Fatalf("project.md = %q, %v", project, err)
+	}
+}

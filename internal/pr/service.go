@@ -291,6 +291,30 @@ func (s *Service) contributorRemote(r *Result) (string, error) {
 	return s.ForkRemote, nil
 }
 
+// PublishVisibilityTimeout bounds how long pr submit waits for GitHub to report
+// a pushed head on the PR; the API updates a PR's head shortly after the push.
+var (
+	PublishVisibilityTimeout = 30 * time.Second
+	publishPollInterval      = 2 * time.Second
+)
+
+// awaitPublishedHead re-reads the PR until it reports head, stops changing for
+// another reason, or PublishVisibilityTimeout passes.
+func (s *Service) awaitPublishedHead(ctx context.Context, number int, head string) (*tracker.PullRequest, error) {
+	deadline := time.Now().Add(PublishVisibilityTimeout)
+	for {
+		observed, err := s.Tracker.GetPullRequest(ctx, number)
+		if err != nil || observed == nil || observed.HeadSHA == head || !strings.EqualFold(observed.State, "open") || observed.Merged || !time.Now().Before(deadline) {
+			return observed, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(publishPollInterval):
+		}
+	}
+}
+
 // RecordedValidationCheck names the check synthesized from SwarmOS's own
 // validation evidence when the tracker reports no CI checks (local backend, or
 // a repository without CI).
@@ -753,12 +777,12 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 				if e != nil {
 					return nil, e
 				}
-				observed, observeErr := s.Tracker.GetPullRequest(ctx, number)
+				observed, observeErr := s.awaitPublishedHead(ctx, number, head)
 				if observeErr != nil {
 					return nil, observeErr
 				}
 				if observed == nil || observed.HeadSHA != head || !strings.EqualFold(observed.State, "open") || observed.Merged {
-					return nil, fmt.Errorf("PR head or state changed after publication; coordination remains pending")
+					return nil, fmt.Errorf("PR head or state changed after publication; coordination remains pending (rerun swarm pr submit %d to reconcile)", number)
 				}
 				st, e = s.Manager.CompletePRRevisionLocal(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
 				if e != nil {

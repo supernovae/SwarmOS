@@ -625,3 +625,42 @@ func (f *forkPRTracker) GetPullRequest(ctx context.Context, number int) (*tracke
 	}
 	return pr, err
 }
+
+// laggingTracker reports a PR's previous head for a few reads, as GitHub does
+// briefly after a push.
+type laggingTracker struct {
+	tracker.Tracker
+	stale string
+	reads int
+}
+
+func (l *laggingTracker) GetPullRequest(ctx context.Context, number int) (*tracker.PullRequest, error) {
+	pr, err := l.Tracker.GetPullRequest(ctx, number)
+	if pr != nil && l.reads > 0 {
+		l.reads--
+		copy := *pr
+		copy.HeadSHA = l.stale
+		pr = &copy
+	}
+	return pr, err
+}
+
+func TestAwaitPublishedHeadToleratesGitHubLag(t *testing.T) {
+	s, _, number, base := fixture(t)
+	publishPollInterval = time.Millisecond
+	t.Cleanup(func() { publishPollInterval = 2 * time.Second })
+	lagging := &laggingTracker{Tracker: s.Tracker, stale: strings.Repeat("e", 40), reads: 3}
+	svc := *s
+	svc.Tracker = lagging
+	observed, err := svc.awaitPublishedHead(context.Background(), number, base)
+	if err != nil || observed.HeadSHA != base || lagging.reads != 0 {
+		t.Fatalf("awaited head = %+v, %v (stale reads left %d)", observed, err, lagging.reads)
+	}
+	lagging.reads = 1 << 30
+	old := PublishVisibilityTimeout
+	PublishVisibilityTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { PublishVisibilityTimeout = old })
+	if observed, err = svc.awaitPublishedHead(context.Background(), number, base); err != nil || observed.HeadSHA == base {
+		t.Fatalf("wait did not give up on a head that never appears: %+v, %v", observed, err)
+	}
+}

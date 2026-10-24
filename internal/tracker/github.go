@@ -715,16 +715,17 @@ func (g *GitHubTracker) ListPullRequests(ctx context.Context, filter PullRequest
 		q := url.Values{"state": []string{state}, "sort": []string{"updated"}, "direction": []string{"desc"}, "per_page": []string{"100"}, "page": []string{fmt.Sprint(page)}}
 		path := fmt.Sprintf("repos/%s/%s/pulls?%s", g.owner, g.repo, q.Encode())
 		var rawList []struct {
-			Number    int        `json:"number"`
-			Title     string     `json:"title"`
-			Body      string     `json:"body"`
-			State     string     `json:"state"`
-			Draft     bool       `json:"draft"`
-			HTMLURL   string     `json:"html_url"`
-			CreatedAt time.Time  `json:"created_at"`
-			UpdatedAt time.Time  `json:"updated_at"`
-			MergedAt  *time.Time `json:"merged_at"`
-			User      struct {
+			Number         int        `json:"number"`
+			Title          string     `json:"title"`
+			Body           string     `json:"body"`
+			State          string     `json:"state"`
+			Draft          bool       `json:"draft"`
+			HTMLURL        string     `json:"html_url"`
+			CreatedAt      time.Time  `json:"created_at"`
+			UpdatedAt      time.Time  `json:"updated_at"`
+			MergedAt       *time.Time `json:"merged_at"`
+			MergeCommitSHA string     `json:"merge_commit_sha"`
+			User           struct {
 				Login string `json:"login"`
 			} `json:"user"`
 			Head struct {
@@ -750,6 +751,7 @@ func (g *GitHubTracker) ListPullRequests(ctx context.Context, filter PullRequest
 				Draft: r.Draft && strings.EqualFold(r.State, "open"), Merged: r.MergedAt != nil, HTMLURL: r.HTMLURL,
 				Head: r.Head.Ref, HeadSHA: r.Head.SHA, HeadRepo: r.Head.Repo.FullName, Base: r.Base.Ref, BaseRepo: r.Base.Repo.FullName,
 				Author: r.User.Login, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
+				MergedAt: r.MergedAt, MergeCommitSHA: r.MergeCommitSHA,
 			})
 			if filter.Limit > 0 && len(out) == filter.Limit {
 				return out, nil
@@ -770,14 +772,16 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d", g.owner, g.repo, number)
 	var resp struct {
-		Number  int    `json:"number"`
-		Title   string `json:"title"`
-		Body    string `json:"body"`
-		State   string `json:"state"`
-		Merged  bool   `json:"merged"`
-		Draft   bool   `json:"draft"`
-		HTMLURL string `json:"html_url"`
-		Head    struct {
+		Number         int        `json:"number"`
+		Title          string     `json:"title"`
+		Body           string     `json:"body"`
+		State          string     `json:"state"`
+		Merged         bool       `json:"merged"`
+		MergeCommitSHA string     `json:"merge_commit_sha"`
+		MergedAt       *time.Time `json:"merged_at"`
+		Draft          bool       `json:"draft"`
+		HTMLURL        string     `json:"html_url"`
+		Head           struct {
 			Ref  string `json:"ref"`
 			SHA  string `json:"sha"`
 			Repo struct {
@@ -820,19 +824,21 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 		draft = false
 	}
 	return &PullRequest{
-		Number:   resp.Number,
-		Title:    resp.Title,
-		Body:     resp.Body,
-		Head:     resp.Head.Ref,
-		State:    resp.State,
-		Merged:   resp.Merged,
-		HeadRepo: resp.Head.Repo.FullName,
-		HeadSHA:  resp.Head.SHA,
-		Base:     resp.Base.Ref,
-		BaseSHA:  resp.Base.SHA,
-		BaseRepo: resp.Base.Repo.FullName,
-		Draft:    draft,
-		HTMLURL:  resp.HTMLURL,
+		Number:         resp.Number,
+		Title:          resp.Title,
+		Body:           resp.Body,
+		Head:           resp.Head.Ref,
+		State:          resp.State,
+		Merged:         resp.Merged,
+		MergeCommitSHA: resp.MergeCommitSHA,
+		MergedAt:       resp.MergedAt,
+		HeadRepo:       resp.Head.Repo.FullName,
+		HeadSHA:        resp.Head.SHA,
+		Base:           resp.Base.Ref,
+		BaseSHA:        resp.Base.SHA,
+		BaseRepo:       resp.Base.Repo.FullName,
+		Draft:          draft,
+		HTMLURL:        resp.HTMLURL,
 	}, nil
 }
 

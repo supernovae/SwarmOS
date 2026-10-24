@@ -77,6 +77,9 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				continue
 			}
 			state := entry.State
+			if o := state.PROutcome; o != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "PR outcome: %s (merge=%s)\n", o.Status, o.MergeCommitSHA)
+			}
 			status := state.Lease.Status
 			if status == "" {
 				status = "approved"

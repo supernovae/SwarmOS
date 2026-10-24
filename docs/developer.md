@@ -29,6 +29,24 @@ Helpful CLI conventions:
 - **Headless vs. interactive**: `swarm issue work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` to follow the agent's work and add instructions between turns.
 - **Structured JSON output**: Use `--json` on a leaf that supports it, such as `swarm issue claim --next --json`, `swarm issue work 42 --json`, `swarm issue status 42 --json`, or `swarm repo validate --base <trusted-full-commit-sha> --json`. Bare `swarm issue` and `swarm repo` are command groups, not JSON-producing operations.
 
+### After a pull request is merged or closed
+
+Keep the issue's recorded submission connected to its GitHub outcome with an explicit reconciliation. Repository operators with write access can refresh the PR outcome and repair the `swarm:pr-open` label and audit comment:
+
+```bash
+swarm issue reconcile 42 --backend github
+swarm issue status 42 --backend github
+swarm issue cleanup 42 --backend github
+```
+
+Reconciliation distinguishes open, merged, and closed without merge; closing an issue alone never marks its PR merged. Status commands remain read-only. The cleanup preview reports the remote branch, local branches, managed worktrees, and retained state ledgers separately.
+
+Run `swarm issue cleanup 42 --apply --backend github` to retire an eligible upstream remote task branch. Cleanup requires the merged PR's final head to match the recorded submitted head, including for squash and rebase merges. An advanced branch, incomplete merge evidence, active attempt, pending revision, or branch used by an open PR blocks retirement. Fork branches remain with their owners.
+
+Remote deletion and its state progress record use one atomic Git push with exact expected heads. Local branches and worktrees stay in place: Git's worktree removal can discard ignored files, and local checkout activity cannot be fenced by a remote state reservation. State and contributor ledgers remain available for status and provenance inspection.
+
+If an interrupted cleanup leaves a reservation, run `swarm issue cleanup 42 --recover-reservation --backend github` to fence that operation and preview again, then rerun cleanup explicitly. Recovery retains the operation's audit history. GitHub cannot transact PR creation together with Git ref deletion; cleanup rechecks open PRs immediately before deletion, but a PR created after that check can race with it.
+
 ### Choose how you work
 
 Start interactively when you want to stay close to the changes. Move repeatable tasks to unattended workers once the tools and permissions are set up.

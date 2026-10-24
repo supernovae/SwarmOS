@@ -7,7 +7,7 @@ body:
     id: objective
     attributes:
       label: Objective
-      description: Describe the observed bug, reproduction steps, and expected behavior.
+      description: Describe the observed bug, reproduction steps, and expected behavior. If users are affected right now, say so; the plan will put stopping the harm first.
       placeholder: Fix race condition / crash / incorrect output when ...
     validations:
       required: true
@@ -15,7 +15,7 @@ body:
     id: constraints
     attributes:
       label: Constraints
-      description: Scope and safety boundaries for the fix (one bullet per line).
+      description: Scope and safety boundaries for the fix, including anything you already know must stay true (one bullet per line).
       value: |
         - Keep the fix minimal and targeted to the root cause
         - Preserve existing public API and CLI contracts
@@ -28,6 +28,7 @@ body:
       label: Acceptance Criteria
       description: Testable conditions proving the bug is fixed (one bullet per line).
       placeholder: |
+        - [ ] `<repro command>` fails before the fix and passes after
         - [ ] Root cause is resolved without regressions
         - [ ] Regression test added and passing
         - [ ] `swarm issue validate` passes

@@ -7,7 +7,7 @@ body:
     id: objective
     attributes:
       label: Objective
-      description: Clear, single-purpose statement of the feature to build.
+      description: Clear, single-purpose statement of the feature to build. If the best approach is still an open question, say so and the plan will start with a small probe.
       placeholder: Add support for ...
     validations:
       required: true
@@ -15,7 +15,7 @@ body:
     id: constraints
     attributes:
       label: Constraints
-      description: Architectural, dependency, or scope boundaries (one bullet per line).
+      description: Architectural, dependency, or scope boundaries, including anything you already know must stay true (one bullet per line).
       value: |
         - Follow project conventions in .swarm/conventions.md and .swarm/rules/
         - Do not modify protected harness or CI files

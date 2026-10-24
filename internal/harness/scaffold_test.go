@@ -324,6 +324,7 @@ func TestInitScaffoldsGoalsSkillsIssueFormsAndCustomTemplateDir(t *testing.T) {
 		".swarm/goals.md",
 		".swarm/SKILLS.md",
 		".swarm/rules/default.md",
+		".swarm/rules/lessons.md",
 		".swarm/rules/security.md",
 		".swarm/skills/triage-and-plan.md",
 		".github/ISSUE_TEMPLATE/swarm-workunit.yml",

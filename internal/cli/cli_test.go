@@ -396,11 +396,20 @@ func TestCLIIssueLeafJSONAndReviewDelegation(t *testing.T) {
 	} {
 		raw := f.must(t, tc.args...)
 		var result struct {
-			Kind string `json:"kind"`
+			Kind  string `json:"kind"`
+			Shape *struct {
+				Shape string `json:"shape"`
+			} `json:"shape"`
 		}
 		if err := json.Unmarshal([]byte(raw), &result); err != nil || result.Kind != tc.kind {
 			t.Fatalf("%v: %s (%v)", tc.args, raw, err)
 		}
+		if tc.kind == "issue-lint" && (result.Shape == nil || result.Shape.Shape == "") {
+			t.Fatalf("lint JSON should include an advisory shape: %s", raw)
+		}
+	}
+	if out := f.must(t, "issue", "lint", n); !strings.Contains(out, "is a valid WorkUnit") || !strings.Contains(out, "Suggested shape:") || !strings.Contains(out, "hint:") {
+		t.Fatalf("lint text should keep its verdict and add a shape and hints:\n%s", out)
 	}
 	f.must(t, "issue", "work", n, "--agent", "mock", "--phase", "plan", "--progress=false")
 	raw = f.must(t, "issue", "review-plan", n, "--agent", "mock", "--json")

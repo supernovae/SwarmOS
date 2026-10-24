@@ -134,10 +134,21 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					fmt.Fprintln(cmd.OutOrStdout(), "Checks on the published head:")
 				}
 				for _, check := range result.Checks {
-					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s %s\n", check.Name, check.Status, check.Conclusion)
+					reporter := ""
+					if check.App != "" {
+						reporter = " (app: " + check.App + ")"
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s %s%s\n", check.Name, check.Status, check.Conclusion, reporter)
+				}
+				if len(result.Reviews) != 0 {
+					fmt.Fprintln(cmd.OutOrStdout(), "Reviews:")
 				}
 				for _, review := range result.Reviews {
-					fmt.Fprintf(cmd.OutOrStdout(), "  Review by %s: %s (commit %s)\n", review.Author, review.State, review.CommitSHA)
+					freshness := "stale: earlier commit"
+					if review.Current {
+						freshness = "current head"
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s (%s %s)\n", review.Author, review.State, freshness, shortSHA(review.CommitSHA))
 				}
 				if result.Validation != nil {
 					for _, check := range result.Validation.CheckOutcomes {
@@ -190,4 +201,11 @@ func requireIssueWorkspace(state *lease.IssueState) error {
 // prService builds the PR lifecycle service for this invocation's repository.
 func (o *RootOptions) prService(tr tracker.Tracker, manager *lease.Manager) *pr.Service {
 	return &pr.Service{Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now}
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 12 {
+		return sha[:12]
+	}
+	return sha
 }

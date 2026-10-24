@@ -143,6 +143,13 @@ type SecurityConfig struct {
 	ReadyLabel            string   `yaml:"ready_label" json:"ready_label"`
 	ApprovedCollaborators []string `yaml:"approved_collaborators,omitempty" json:"approved_collaborators,omitempty"`
 	ReviewerCollaborators []string `yaml:"reviewer_collaborators,omitempty" json:"reviewer_collaborators,omitempty"`
+	// ReviewerAgents names the configured agents whose verdicts may satisfy
+	// an agent plan gate. Empty allows any configured reviewer.
+	ReviewerAgents []string `yaml:"reviewer_agents,omitempty" json:"reviewer_agents,omitempty"`
+	// IndependentReview requires plan reviewers to differ from the planner:
+	// a different harness or model for agents, and a different login than
+	// the claim owner for humans.
+	IndependentReview bool `yaml:"independent_review,omitempty" json:"independent_review,omitempty"`
 }
 
 type AgentConfig struct {

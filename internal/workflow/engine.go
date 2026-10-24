@@ -66,10 +66,14 @@ type WorkResult struct {
 	PhaseCompleted   string
 	HandedOffToPhase string
 	PausedForHuman   bool
-	ReviewVerdict    string
-	ValidationPassed bool
-	RoleAgentsUsed   map[string]string
-	State            *lease.IssueState
+	// PlanReviewers are the reviewer_collaborators asked to review a paused
+	// plan; ReviewerNoticeError reports a best-effort notification failure.
+	PlanReviewers       []string
+	ReviewerNoticeError string
+	ReviewVerdict       string
+	ValidationPassed    bool
+	RoleAgentsUsed      map[string]string
+	State               *lease.IssueState
 }
 
 // Outcome summarizes how a run ended: completed, paused for a human, or
@@ -287,6 +291,13 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 			name := resolveRoleAgent(cfg, role, opts)
 			if name == "" {
 				return nil, fmt.Errorf("no configured %s agent", role)
+			}
+			if role == "reviewer" && len(cfg.Security.ReviewerAgents) > 0 && !slices.Contains(cfg.Security.ReviewerAgents, name) {
+				err := fmt.Errorf("reviewer agent %q is not in security.reviewer_agents; choose one of %v with roles.reviewer or a reviewer override flag", name, cfg.Security.ReviewerAgents)
+				if !opts.InspectOnly {
+					return nil, err
+				}
+				blockers = append(blockers, err.Error())
 			}
 			resolved, err := agent.Preflight(name, cfg, e.Tracker.BackendName() == "local", role)
 			if err != nil {
@@ -599,6 +610,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 				return res, err
 			}
 			res.State = st
+		}
+		reviewers, noticeErr := e.LeaseManager.NotifyPlanReviewers(ctx, opts.IssueNumber)
+		res.PlanReviewers = reviewers
+		if noticeErr != nil {
+			res.ReviewerNoticeError = noticeErr.Error()
 		}
 		res.PausedForHuman, res.PhaseCompleted = true, "plan"
 		return res, nil

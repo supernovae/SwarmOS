@@ -85,6 +85,27 @@ func TestGitHubPRReviewsPaginationAndMetadataOnly(t *testing.T) {
 	}
 }
 
+func TestGitHubCheckRunsRecordReportingApp(t *testing.T) {
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/octo/swarm/commits/bbbb/check-runs" {
+			t.Errorf("unexpected request %s", r.URL.String())
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		writeJSON(t, w, map[string]any{"check_runs": []map[string]any{
+			{"name": "Hosted Review", "status": "completed", "conclusion": "neutral", "app": map[string]any{"slug": "review-app"}},
+			{"name": "legacy", "status": "completed", "conclusion": "success"},
+		}})
+	}))
+	checks, err := tr.GetCheckStatus(context.Background(), "bbbb")
+	if err != nil || len(checks) != 2 {
+		t.Fatalf("checks: %+v %v", checks, err)
+	}
+	if checks[0].App != "review-app" || checks[0].Conclusion != "neutral" || checks[1].App != "" || checks[1].Name != "legacy" {
+		t.Fatalf("check metadata: %+v", checks)
+	}
+}
+
 func TestLocalPRRefreshesExplicitBranchRefsWithoutInventingChecks(t *testing.T) {
 	repo := t.TempDir()
 	git := func(args ...string) string {

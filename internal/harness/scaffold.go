@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -591,6 +592,15 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 		}
 		if _, ok := cfg.Agents[name]; !ok {
 			return nil, fmt.Errorf("role %s uses unapproved agent %q", role, name)
+		}
+	}
+	for _, name := range cfg.Security.ReviewerAgents {
+		agent, ok := cfg.Agents[name]
+		if !ok {
+			return nil, fmt.Errorf("security.reviewer_agents uses unapproved agent %q", name)
+		}
+		if len(agent.Roles) > 0 && !slices.Contains(agent.Roles, "reviewer") {
+			return nil, fmt.Errorf("security.reviewer_agents entry %q is not allowed the reviewer role", name)
 		}
 	}
 	for name, agent := range cfg.Agents {

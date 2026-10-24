@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -153,6 +154,44 @@ func matchesCollaboratorAllowlist(actor string, allowlist []string) bool {
 	}
 	return false
 }
+
+// checkAgentReviewer enforces the reviewer identity declared by the approved
+// base policy. Identity comes from the reviewer's recorded attestation.
+func checkAgentReviewer(sec contract.SecurityConfig, st *IssueState, meta map[string]string) error {
+	agent := strings.TrimSpace(meta["agent"])
+	if agent == "" {
+		agent = strings.TrimSpace(meta["harness"])
+	}
+	if len(sec.ReviewerAgents) > 0 && !slices.Contains(sec.ReviewerAgents, agent) {
+		return fmt.Errorf("%w: reviewer agent %q is not in security.reviewer_agents %v", ErrApprovalRequired, agent, sec.ReviewerAgents)
+	}
+	if !sec.IndependentReview {
+		return nil
+	}
+	harnessName, model := strings.TrimSpace(meta["harness"]), strings.TrimSpace(meta["model"])
+	if harnessName == "" {
+		harnessName = agent
+	}
+	if model == "" {
+		model = "default"
+	}
+	for _, att := range st.Attestations {
+		if att.Role == "planner" && strings.EqualFold(att.Harness, harnessName) && strings.EqualFold(att.Model, model) {
+			return fmt.Errorf("%w: security.independent_review requires a reviewer other than the planner (%s/%s)", ErrApprovalRequired, harnessName, model)
+		}
+	}
+	return nil
+}
+
+// checkHumanReviewer keeps the claim owner from approving their own plan
+// when the approved policy asks for independent review.
+func checkHumanReviewer(sec contract.SecurityConfig, st *IssueState, actor string) error {
+	if sec.IndependentReview && strings.EqualFold(strings.TrimSpace(st.Lease.Owner), strings.TrimSpace(actor)) {
+		return fmt.Errorf("%w: security.independent_review forbids %q from reviewing a plan they claimed", ErrApprovalRequired, actor)
+	}
+	return nil
+}
+
 func (m *Manager) VerifyDependencies(ctx context.Context, wu *contract.WorkUnit) error {
 	for _, n := range wu.DependsOn {
 		if n == wu.IssueNumber {
@@ -1007,6 +1046,66 @@ func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status s
 	return st, err
 }
 
+// NotifyPlanReviewers assigns the approved policy's reviewer_collaborators and
+// mentions them once per plan revision. The notice is a projection only: it
+// grants nothing, and delivery failures never block the workflow.
+func (m *Manager) NotifyPlanReviewers(ctx context.Context, n int) ([]string, error) {
+	if m.gateway != nil || m.tracker == nil {
+		return nil, nil
+	}
+	st, err := m.GetCurrentState(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load approved reviewer policy: %w", err)
+	}
+	var reviewers []string
+	for _, login := range cfg.Security.ReviewerCollaborators {
+		login = strings.TrimSpace(login)
+		if login == "" || (cfg.Security.IndependentReview && strings.EqualFold(login, st.Lease.Owner)) {
+			continue
+		}
+		reviewers = append(reviewers, login)
+	}
+	if len(reviewers) == 0 {
+		return nil, nil
+	}
+	var planDigest string
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactDesign {
+			planDigest = hash(a.Body)
+		}
+	}
+	marker := fmt.Sprintf("<!-- swarm:plan-review-request:v1 plan=%s -->", planDigest)
+	self, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	comments, err := m.tracker.ListComments(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range comments {
+		if strings.EqualFold(c.Author, self) && strings.Contains(c.Body, marker) {
+			return reviewers, nil
+		}
+	}
+	mentions := make([]string, len(reviewers))
+	for i, login := range reviewers {
+		mentions[i] = "@" + login
+	}
+	body := fmt.Sprintf("%s\n**Plan ready for review:** %s\n\nPlease review `PLAN.md` and `TEST_PLAN.md` for this WorkUnit, then record your decision:\n\n```bash\nswarm issue review-plan %d --approve\nswarm issue review-plan %d --reject --notes \"what to change\"\n```\n", marker, strings.Join(mentions, " "), n, n)
+	if err := m.tracker.AddAssignees(ctx, n, reviewers); err != nil {
+		return reviewers, err
+	}
+	if _, err := m.tracker.CreateComment(ctx, n, body); err != nil {
+		return reviewers, err
+	}
+	return reviewers, nil
+}
+
 // RecordHumanReview records an authenticated maintainer decision without
 // borrowing or extending the worker's lease.
 func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes string) (*IssueState, error) {
@@ -1039,6 +1138,9 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	}
 	if !matchesCollaboratorAllowlist(actor, cfg.Security.ReviewerCollaborators) {
 		return nil, fmt.Errorf("actor %q is not in security.reviewer_collaborators", actor)
+	}
+	if err := checkHumanReviewer(cfg.Security, st, actor); err != nil {
+		return nil, err
 	}
 	var plan, test *contract.Artifact
 	for i := range st.Artifacts {
@@ -1206,6 +1308,13 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 				}
 				if !matchesCollaboratorAllowlist(actor, cfg.Security.ReviewerCollaborators) {
 					return fmt.Errorf("actor %q is not in security.reviewer_collaborators", actor)
+				}
+				if kind == "agent" {
+					if err := checkAgentReviewer(cfg.Security, st, art.Metadata); err != nil {
+						return err
+					}
+				} else if err := checkHumanReviewer(cfg.Security, st, actor); err != nil {
+					return err
 				}
 				art.Metadata["review_source"] = "authenticated-" + kind
 			}

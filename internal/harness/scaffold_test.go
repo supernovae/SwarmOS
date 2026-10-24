@@ -19,13 +19,16 @@ func TestConfigRejectsInvalidSecurityPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		"syntax":             "security: [",
-		"unknown field":      string(valid) + "require_reddy_label: false\n",
-		"second document":    string(valid) + "---\nsecurity: {}\n",
-		"readiness disabled": strings.Replace(string(valid), "require_ready_label: true", "require_ready_label: false", 1),
-		"unknown gate":       strings.Replace(string(valid), "default_gate: agent", "default_gate: typo", 1),
-		"nonpositive lease":  strings.Replace(string(valid), "duration: 4h", "duration: 0s", 1),
-		"unapproved default": strings.Replace(string(valid), "default_agent: codex", "default_agent: unapproved", 1),
+		"syntax":                    "security: [",
+		"unknown field":             string(valid) + "require_reddy_label: false\n",
+		"second document":           string(valid) + "---\nsecurity: {}\n",
+		"readiness disabled":        strings.Replace(string(valid), "require_ready_label: true", "require_ready_label: false", 1),
+		"unknown gate":              strings.Replace(string(valid), "default_gate: agent", "default_gate: typo", 1),
+		"nonpositive lease":         strings.Replace(string(valid), "duration: 4h", "duration: 0s", 1),
+		"unapproved default":        strings.Replace(string(valid), "default_agent: codex", "default_agent: unapproved", 1),
+		"unapproved reviewer agent": strings.Replace(string(valid), `ready_label: "swarm:ready"`, "ready_label: \"swarm:ready\"\n  reviewer_agents: [unapproved]", 1),
+		"reviewer agent without reviewer role": strings.Replace(strings.Replace(string(valid), `ready_label: "swarm:ready"`, "ready_label: \"swarm:ready\"\n  reviewer_agents: [codex]", 1),
+			"    binary: codex", "    binary: codex\n    roles: [developer]", 1),
 	}
 	for name, data := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -38,6 +41,11 @@ func TestConfigRejectsInvalidSecurityPolicy(t *testing.T) {
 	cfg, err := LoadConfig(t.TempDir())
 	if err == nil || cfg != nil {
 		t.Fatalf("missing config received defaults: cfg=%v err=%v", cfg, err)
+	}
+	pinned := strings.Replace(string(valid), `ready_label: "swarm:ready"`, "ready_label: \"swarm:ready\"\n  reviewer_agents: [claude]\n  independent_review: true", 1)
+	cfg, err = decodeConfig([]byte(pinned))
+	if err != nil || len(cfg.Security.ReviewerAgents) != 1 || !cfg.Security.IndependentReview {
+		t.Fatalf("declared reviewer policy rejected: cfg=%+v err=%v", cfg, err)
 	}
 }
 

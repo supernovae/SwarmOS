@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -130,6 +131,12 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "Interactive plan required: write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md in %s, then run: swarm issue stage %d --phase plan\n", result.WorktreePath, result.IssueNumber)
 				} else {
 					fmt.Fprintf(cmd.OutOrStdout(), "Plan approval required: swarm issue review-plan %d --approve\n", result.IssueNumber)
+					if len(result.PlanReviewers) > 0 {
+						fmt.Fprintf(cmd.OutOrStdout(), "Reviewers requested: %s\n", strings.Join(result.PlanReviewers, ", "))
+					}
+					if result.ReviewerNoticeError != "" {
+						fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not notify plan reviewers: %s\n", result.ReviewerNoticeError)
+					}
 				}
 			}
 			if result.HandedOffToPhase != "" {

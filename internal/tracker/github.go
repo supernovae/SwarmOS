@@ -248,6 +248,9 @@ type ghIssueResponse struct {
 	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
+	Assignees []struct {
+		Login string `json:"login"`
+	} `json:"assignees"`
 	PullRequest *struct {
 		URL string `json:"url"`
 	} `json:"pull_request,omitempty"`
@@ -257,6 +260,10 @@ func convertGHIssue(r ghIssueResponse) *Issue {
 	var labels []string
 	for _, l := range r.Labels {
 		labels = append(labels, l.Name)
+	}
+	var assignees []string
+	for _, a := range r.Assignees {
+		assignees = append(assignees, a.Login)
 	}
 	var issueType string
 	if r.Type != nil {
@@ -269,6 +276,7 @@ func convertGHIssue(r ghIssueResponse) *Issue {
 		State:             r.State,
 		Type:              issueType,
 		Labels:            labels,
+		Assignees:         assignees,
 		Author:            r.User.Login,
 		AuthorAssociation: r.AuthorAssociation,
 		HTMLURL:           r.HTMLURL,
@@ -571,6 +579,13 @@ func (g *GitHubTracker) AddLabels(ctx context.Context, issueNumber int, labels [
 	return g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp)
 }
 
+func (g *GitHubTracker) AddAssignees(ctx context.Context, issueNumber int, logins []string) error {
+	raw, _ := json.Marshal(map[string]any{"assignees": logins})
+	path := fmt.Sprintf("repos/%s/%s/issues/%d/assignees", g.owner, g.repo, issueNumber)
+	var resp any
+	return g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp)
+}
+
 func (g *GitHubTracker) RemoveLabel(ctx context.Context, issueNumber int, label string) error {
 	path := fmt.Sprintf("repos/%s/%s/issues/%d/labels/%s", g.owner, g.repo, issueNumber, url.PathEscape(label))
 	err := g.client.DoWithContext(ctx, "DELETE", path, nil, nil)
@@ -864,12 +879,25 @@ func (g *GitHubTracker) GetPullRequestReviews(ctx context.Context, number int) (
 func (g *GitHubTracker) GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error) {
 	path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs", g.owner, g.repo, url.PathEscape(ref))
 	var resp struct {
-		CheckRuns []CheckRunResult `json:"check_runs"`
+		CheckRuns []struct {
+			CheckRunResult
+			App *struct {
+				Slug string `json:"slug"`
+			} `json:"app"`
+		} `json:"check_runs"`
 	}
 	if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, err
 	}
-	return resp.CheckRuns, nil
+	runs := make([]CheckRunResult, 0, len(resp.CheckRuns))
+	for _, run := range resp.CheckRuns {
+		result := run.CheckRunResult
+		if run.App != nil {
+			result.App = run.App.Slug
+		}
+		runs = append(runs, result)
+	}
+	return runs, nil
 }
 
 func (g *GitHubTracker) EnsureLabels(ctx context.Context, labels []LabelSpec) error {

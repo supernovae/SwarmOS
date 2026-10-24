@@ -208,6 +208,7 @@ func (l *LocalTracker) CreateIssue(_ context.Context, title, body string, labels
 			AuthorAssociation: l.assoc,
 			HTMLURL:           fmt.Sprintf("local://issues/%d", num),
 			CreatedAt:         now,
+			UpdatedAt:         now,
 		}
 		st.Issues[num] = iss
 		cp := *iss
@@ -243,6 +244,7 @@ func (l *LocalTracker) CreateTypedIssue(ctx context.Context, title, body string,
 			AuthorAssociation: l.assoc,
 			HTMLURL:           fmt.Sprintf("local://issues/%d", num),
 			CreatedAt:         now,
+			UpdatedAt:         now,
 		}
 		st.Issues[num] = iss
 		cp := *iss
@@ -311,6 +313,7 @@ func (l *LocalTracker) UpdateIssueBody(_ context.Context, number int, body strin
 			return fmt.Errorf("issue #%d not found in local tracker", number)
 		}
 		iss.Body = body
+		iss.UpdatedAt = time.Now().UTC()
 		cp := *iss
 		cp.Labels = append([]string(nil), iss.Labels...)
 		updated = &cp
@@ -369,12 +372,14 @@ func (l *LocalTracker) ListComments(_ context.Context, issueNumber int) ([]*Comm
 func (l *LocalTracker) CreateComment(_ context.Context, issueNumber int, body string) (*Comment, error) {
 	var created *Comment
 	err := l.withLock(true, func(st *localState) error {
-		if _, ok := st.Issues[issueNumber]; !ok {
+		iss, ok := st.Issues[issueNumber]
+		if !ok {
 			return fmt.Errorf("issue #%d not found", issueNumber)
 		}
 		cid := st.NextCommentID
 		st.NextCommentID++
 		now := time.Now().UTC()
+		iss.UpdatedAt = now
 		c := &Comment{
 			ID:                cid,
 			IssueNum:          issueNumber,

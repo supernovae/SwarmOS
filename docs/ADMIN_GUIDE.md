@@ -87,6 +87,7 @@ What `swarm repo plan --scan` does for you (while automatically skipping non-exe
   - `swarm:needs-scope` — Raw or `swarm:community` intake issue missing structured `Objective`, `Constraints`, or `Acceptance Criteria`. Passing `--normalize` with `--apply` converts the issue body into a structured `WorkUnit` draft (`swarm:draft`) for maintainer review.
   - `swarm:blocked` — Issue waiting on open `depends_on` prerequisites or touching `protected_paths` (`.github/workflows/**`, `.swarm/**`) without `allow_harness_changes: true`.
   - If Issue `#12` and Issue `#15` both reference `internal/api/handler.go`, `swarm repo plan --scan` flags the overlap and places them into **sequential Execution Waves** (`Wave 1`, `Wave 2`) so two parallel agents never cause merge conflicts on the same file.
+- **Sorts the backlog into lanes** (stabilize first, probable duplicates, quiet for a while, ask the author, waiting, ready, needs a decision) so a large backlog reads as a short to-do list. See [Owning a Busy Repository](backlog.md) for the full walkthrough and `--stale-days`.
 - **Suggests a shape for each issue** so you can tell a quick fix from a research project at a glance. See [Matching the plan to the work](WORKFLOWS.md#matching-the-plan-to-the-work). Routine issues make great first tasks for new contributors. Exploratory raw issues get a `human` plan gate in their normalized draft, so you see the plan before any code is written. Urgent ones get at least an `agent` gate. The shape is only a suggestion and never becomes a label.
 
 ---

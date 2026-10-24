@@ -38,4 +38,5 @@ Use this skill when running `/swarm-project-plan` (in Claude Code or OpenCode) o
    - **Involved**: knowable but needs analysis. Name the touchpoints and the decision the plan must make.
    - **Exploratory**: nobody knows the answer yet. Start with a small probe task whose acceptance criteria record what was learned, then plan follow-ups.
    - **Urgent**: users are affected now. Write a minimal mitigation task first and a separate root-cause task.
-6. Write acceptance criteria someone can check: a command, a test, or an observable behavior. Words like "improve" or "cleaner" alone usually mean the task needs more scoping.
+6. Work the scan's **Backlog at a Glance** lanes top to bottom. Suggest closing duplicates and quiet issues to the maintainer, but never close, relabel, or comment on issues yourself.
+7. Write acceptance criteria someone can check: a command, a test, or an observable behavior. Words like "improve" or "cleaner" alone usually mean the task needs more scoping.

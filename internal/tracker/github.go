@@ -238,6 +238,7 @@ type ghIssueResponse struct {
 	HTMLURL           string    `json:"html_url"`
 	AuthorAssociation string    `json:"author_association"`
 	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 	Type              *struct {
 		Name string `json:"name"`
 	} `json:"type,omitempty"`
@@ -272,6 +273,7 @@ func convertGHIssue(r ghIssueResponse) *Issue {
 		AuthorAssociation: r.AuthorAssociation,
 		HTMLURL:           r.HTMLURL,
 		CreatedAt:         r.CreatedAt,
+		UpdatedAt:         r.UpdatedAt,
 	}
 }
 

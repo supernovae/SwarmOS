@@ -17,6 +17,7 @@ type Issue struct {
 	AuthorAssociation string    `json:"author_association"` // "OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"
 	HTMLURL           string    `json:"html_url"`
 	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"` // last activity; zero when the backend does not record it
 }
 
 func IsEpicIssueType(issueType string) bool {

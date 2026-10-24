@@ -279,6 +279,7 @@ For an existing approved WorkUnit PR, use `pr work` to develop or fix its implem
 ## Documentation & Guides
 
 - **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](docs/ADMIN_GUIDE.md)** — Daily maintainer playbook for roadmap decomposition (`swarm repo plan --from`), backlog scanning (`swarm repo plan --scan`), and auditing provenance-attested Draft PRs.
+- **[Owning a Busy Repository (`docs/backlog.md`)](docs/backlog.md)** — Turn a big pile of open issues into calm lanes: what to stabilize, likely duplicates, quiet issues, and work that's ready for agents.
 - **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](docs/GITHUB.md)** — Configure repository rulesets, `SWARM_GITHUB_TOKEN` auth without `gh` CLI, secret-manager tokens via `SWARM_GITHUB_TOKEN_COMMAND`, and role-separated collaborator allowlists.
 - **[Fork Mode Guide (`docs/fork-mode.md`)](docs/fork-mode.md)** — Contribute from a personal GitHub fork without upstream push access using the upstream fork coordinator Action.
 - **[Working with Grok Bot (`docs/grokbot.md`)](docs/grokbot.md)** — Connect Grok Bot to your repositories, talk to your codebase, run PR reviews, and coordinate SwarmOS workers.

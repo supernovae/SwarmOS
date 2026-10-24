@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -61,6 +62,10 @@ func TestForkCommentsCollapseJSONBehindAReadableSummary(t *testing.T) {
 // The workflow screens requests in Python before checkout; it must accept the
 // generated layout and the original one, and reject trailing content.
 func TestWorkflowAdmissionParsesForkComments(t *testing.T) {
+	// The coordinator workflow runs on Ubuntu; Windows python3 may be a stub.
+	if runtime.GOOS == "windows" {
+		t.Skip("coordinator admission runs on Linux runners")
+	}
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 unavailable")

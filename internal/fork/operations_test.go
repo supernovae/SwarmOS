@@ -21,14 +21,19 @@ func TestOperationListsStayInSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		body := string(src)
+		// Windows checkouts may convert source files to CRLF.
+		body := strings.ReplaceAll(string(src), "\r\n", "\n")
 		if function != "" {
 			start := strings.Index(body, function)
 			if start < 0 {
 				t.Fatalf("%s not found in %s", function, path)
 			}
 			body = body[start:]
-			body = body[:strings.Index(body, "\n}\n")]
+			end := strings.Index(body, "\n}\n")
+			if end < 0 {
+				t.Fatalf("end of %s not found in %s", function, path)
+			}
+			body = body[:end]
 		}
 		var ops []string
 		for _, m := range regexp.MustCompile(`case "([a-z-]+)"`).FindAllStringSubmatch(body, -1) {

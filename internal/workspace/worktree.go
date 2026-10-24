@@ -503,7 +503,7 @@ func gitOutputContext(ctx context.Context, repoRoot string, args ...string) (str
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%w: git %s: %s", errGitFailed, strings.Join(args, " "), redact(strings.TrimSpace(string(out))))
+		return "", fmt.Errorf("%w: git %s: %s", errGitFailed, strings.Join(args, " "), redact(strings.TrimSpace(normalizeGitOutput(string(out)))))
 	}
 	return redact(string(out)), nil
 }

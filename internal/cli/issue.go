@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/lease"
 	"os"
 	"strings"
 
@@ -113,6 +115,10 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		}
 		st, err := mgr.ApproveTask(cmd.Context(), number, owner)
 		if err != nil {
+			var claimed *lease.AlreadyClaimedError
+			if errors.As(err, &claimed) && claimed.Owner == owner {
+				return fmt.Errorf("%w; release your claim with swarm issue release %d", err, number)
+			}
 			return err
 		}
 		if asJSON {

@@ -12,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	prservice "github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 
@@ -476,7 +477,7 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			if currentState.PRRevision == nil && req.HeadSHA != req.ExpectedHeadSHA {
 				return nil, "", fmt.Errorf("a new PR revision must start at the published head %s", req.ExpectedHeadSHA)
 			}
-			updated, err = mgr.BeginPRRevision(ctx, req.IssueNumber, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA, req.Branch)
+			updated, err = mgr.BeginPRRevision(ctx, req.IssueNumber, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA, req.Branch, req.RevisionIntent)
 			if err != nil {
 				return nil, "", err
 			}
@@ -493,7 +494,11 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			}
 
 		case "invalidate-pr-evidence":
-			updated, err = mgr.InvalidatePRRevisionEvidence(ctx, req.IssueNumber, actor, req.PRNumber)
+			if req.RebaseContext != nil {
+				updated, err = mgr.UpdateRebaseContext(ctx, req.IssueNumber, actor, req.PRNumber, *req.RebaseContext)
+			} else {
+				updated, err = mgr.InvalidatePRRevisionEvidence(ctx, req.IssueNumber, actor, req.PRNumber, req.RevisionIntent)
+			}
 			if err != nil {
 				return nil, "", err
 			}
@@ -515,6 +520,20 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			}
 			if err := c.verifyRevisionEvidence(ctx, req.IssueNumber, &currentState, req.HeadSHA); err != nil {
 				return nil, "", err
+			}
+			// Project after GitHub verification but before completing the claim,
+			// so projection failures remain retryable through the pending revision.
+			if r := currentState.LastRebase; r != nil && r.Status == "completed" {
+				r.NewHead = req.HeadSHA
+				r.PatchIdentity = "unavailable"
+				r.Verified = false
+				if identity, e := workspace.RebasePatchIdentity(ctx, c.RepoRoot, r.OldBase, r.OldHead, r.NewBase, r.NewHead); e == nil {
+					r.PatchIdentity = identity
+					r.Verified = true
+				}
+			}
+			if err = prservice.ProjectRebase(ctx, c.Tracker, &currentState, req.PRNumber); err != nil {
+				return nil, "", fmt.Errorf("PR head published; retry pr submit to update rebase context: %w", err)
 			}
 			updated, err = mgr.CompletePRRevisionLocal(ctx, req.IssueNumber, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA)
 			if err != nil {

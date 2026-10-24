@@ -124,35 +124,42 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	}
 }
 
-func TestCLIPRRebaseRequiresApprovedBaseAndFreshReview(t *testing.T) {
-	f, issue, number := submittedPRFixture(t, "agent")
-	p := strconv.Itoa(number)
-	before := f.state(t, issue)
-	if err := os.WriteFile(filepath.Join(f.root, "upstream.txt"), []byte("new upstream base\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	prGit(t, f.root, "add", "upstream.txt")
-	prGit(t, f.root, "commit", "-m", "Advance approved base")
-	base := prGit(t, f.root, "rev-parse", "HEAD")
-	if _, err := f.run("pr", "rebase", p); err == nil {
-		t.Fatal("rebase accepted an unapproved target base")
-	}
-	if after := f.state(t, issue); !reflect.DeepEqual(before, after) {
-		t.Fatal("rejected rebase mutated state")
-	}
-	f.must(t, "issue", "approve", strconv.Itoa(issue))
-	rebased := readPROutcome(t, f.must(t, "pr", "rebase", p, "--json"))
-	if rebased.BaseSHA != base || rebased.HeadSHA == before.HeadSHA {
-		t.Fatalf("rebase did not move onto new base: %+v", rebased)
-	}
-	prGit(t, rebased.Worktree, "merge-base", "--is-ancestor", base, "HEAD")
-	if _, err := f.run("pr", "submit", p); err == nil {
-		t.Fatal("rebase reused stale approval or validation")
-	}
-	f.must(t, "pr", "work", p, "--agent", "mock", "--progress=false")
-	f.must(t, "pr", "submit", p)
-	if state := f.state(t, issue); state.PRNumber != number || state.BaseSHA != base {
-		t.Fatalf("rebase changed linked contract identity: %+v", state)
+func TestCLIPRRebaseCarriesApprovedPlanAndRequiresFreshValidation(t *testing.T) {
+	for _, gate := range []string{"agent", "human"} {
+		t.Run(gate, func(t *testing.T) {
+			f, issue, number := submittedPRFixture(t, gate)
+			p := strconv.Itoa(number)
+			before := f.state(t, issue)
+			if err := os.WriteFile(filepath.Join(f.root, "upstream.txt"), []byte("new upstream base\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			prGit(t, f.root, "add", "upstream.txt")
+			prGit(t, f.root, "commit", "-m", "Advance approved base")
+			base := prGit(t, f.root, "rev-parse", "HEAD")
+			if _, err := f.run("pr", "rebase", p); err == nil {
+				t.Fatal("rebase accepted an unapproved target base")
+			}
+			if after := f.state(t, issue); !reflect.DeepEqual(before, after) {
+				t.Fatal("rejected rebase mutated state")
+			}
+			f.must(t, "issue", "approve", strconv.Itoa(issue))
+			rebased := readPROutcome(t, f.must(t, "pr", "rebase", p, "--json"))
+			if rebased.BaseSHA != base || rebased.HeadSHA == before.HeadSHA {
+				t.Fatalf("rebase did not move onto new base: %+v", rebased)
+			}
+			prGit(t, rebased.Worktree, "merge-base", "--is-ancestor", base, "HEAD")
+			if rebased.State.ApprovalTransition == nil {
+				t.Fatalf("plan was not carried: reason=%s", rebased.State.CarryReason)
+			}
+			validated := readPROutcome(t, f.must(t, "pr", "validate", p, "--json"))
+			if validated.Validation == nil || !validated.Validation.Passed || validated.Validation.BaseSHA != base {
+				t.Fatalf("fresh validation missing: %+v", validated.Validation)
+			}
+			f.must(t, "pr", "submit", p)
+			if state := f.state(t, issue); state.PRNumber != number || state.BaseSHA != base {
+				t.Fatalf("rebase changed linked contract identity: %+v", state)
+			}
+		})
 	}
 }
 
@@ -402,7 +409,13 @@ func TestCLIPRRebaseConflictAbortAndContinue(t *testing.T) {
 		t.Fatal("conflicting rebase reported success")
 	}
 	worktree := workspace.PRWorktreePath(f.root, number)
+	if _, err := f.run("pr", "rebase", p); err == nil || !strings.Contains(err.Error(), "--continue or --abort") {
+		t.Fatalf("missing recovery guidance: %v", err)
+	}
 	f.must(t, "pr", "rebase", p, "--abort")
+	if r := f.state(t, issue).LastRebase; r == nil || r.Status != "aborted" || r.Verified {
+		t.Fatalf("abort recorded success: %+v", r)
+	}
 	if head := prGit(t, worktree, "rev-parse", "HEAD"); head != before.HeadSHA {
 		t.Fatalf("abort left PR head at %s, want %s", head, before.HeadSHA)
 	}
@@ -421,5 +434,86 @@ func TestCLIPRRebaseConflictAbortAndContinue(t *testing.T) {
 	prGit(t, worktree, "merge-base", "--is-ancestor", base, "HEAD")
 	if state := f.state(t, issue); state.PRRevision == nil || state.PRRevision.LocalHeadSHA != rebased.HeadSHA {
 		t.Fatalf("rebased head not recorded: %+v", state.PRRevision)
+	}
+	evidence := rebased.State.LastRebase
+	if evidence == nil || evidence.Status != "completed" || evidence.PatchIdentity != "changed" || !reflect.DeepEqual(evidence.ConflictedPaths, []string{conflicting}) {
+		t.Fatalf("missing conflict context: %+v", evidence)
+	}
+	f.must(t, "pr", "validate", p)
+	f.must(t, "pr", "submit", p)
+	updated, err := f.tracker.GetPullRequest(context.Background(), number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(updated.Body, "Patch identity: changed") || !strings.Contains(updated.Body, conflicting) {
+		t.Fatal("PR lacks rebase context")
+	}
+	f.must(t, "pr", "submit", p)
+	retried, err := f.tracker.GetPullRequest(context.Background(), number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Body != updated.Body {
+		t.Fatal("submit retry duplicated context")
+	}
+}
+
+func TestCLIApprovalClaimRecovery(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "claim", n, "--agent", "mock")
+	if _, err := f.run("issue", "approve", n); err == nil || !strings.Contains(err.Error(), "alice") || !strings.Contains(err.Error(), "until") || !strings.Contains(err.Error(), "swarm issue release "+n) {
+		t.Fatalf("own claim recovery: %v", err)
+	}
+	t.Setenv("SWARM_USER", "other-maintainer")
+	if _, err := f.run("issue", "approve", n); err == nil || !strings.Contains(err.Error(), "alice") || strings.Contains(err.Error(), "swarm issue release") {
+		t.Fatalf("other claim recovery: %v", err)
+	}
+}
+
+func TestCLIPRRebaseExplainsReplan(t *testing.T) {
+	for _, reason := range []string{"WorkUnit changed", "policy files changed"} {
+		t.Run(reason, func(t *testing.T) {
+			f, issue, number := submittedPRFixture(t, "agent")
+			n := strconv.Itoa(issue)
+			p := strconv.Itoa(number)
+			name := "upstream.txt"
+			if reason == "policy files changed" {
+				name = ".swarm/rules/rebase-test.md"
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(f.root, name)), 0755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				current, err := f.tracker.GetIssue(context.Background(), issue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.tracker.UpdateIssueBody(context.Background(), issue, strings.ReplaceAll(current.Body, "Exercise the lifecycle", "Exercise the revised lifecycle")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(f.root, name), []byte("new upstream content\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			prGit(t, f.root, "add", name)
+			prGit(t, f.root, "commit", "-m", "Advance base")
+			f.must(t, "issue", "approve", n)
+			output := f.must(t, "pr", "rebase", p)
+			if !strings.Contains(output, reason) || !strings.Contains(output, "swarm pr work "+p) {
+				t.Fatalf("missing replan reason: %s", output)
+			}
+			status := f.must(t, "pr", "status", p)
+			if !strings.Contains(status, reason) || (reason == "policy files changed" && !strings.Contains(status, name)) {
+				t.Fatalf("missing status detail: %s", status)
+			}
+			if _, err := f.run("pr", "validate", p); err == nil {
+				t.Fatal("validation accepted invalidated plan")
+			}
+			if _, err := f.run("pr", "submit", p); err == nil {
+				t.Fatal("submit accepted invalidated plan")
+			}
+		})
 	}
 }

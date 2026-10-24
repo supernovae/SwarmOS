@@ -115,6 +115,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				}
 			} else if result != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "PR #%d %s: issue=#%d head=%s base=%s\n", opts.Number, result.Status, result.IssueNumber, result.HeadSHA, result.BaseSHA)
+				fmt.Fprint(cmd.OutOrStdout(), pr.RebaseSummary(result.State, opts.Number))
 				if result.Worktree != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "Worktree: %s\nBranch: %s\n", result.Worktree, result.Branch)
 				}

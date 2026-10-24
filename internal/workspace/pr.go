@@ -381,6 +381,13 @@ func RebasePR(ctx context.Context, path, baseSHA string, resume, abort bool) (st
 	if err != nil || !samePath(strings.TrimSpace(top), path) {
 		return "", fmt.Errorf("not a registered PR worktree: %s", path)
 	}
+	head, dirty, rebasing, err := PRHead(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	if rebasing && !resume && !abort {
+		return "", fmt.Errorf("rebase already in progress; run swarm pr rebase %d --continue or --abort", number)
+	}
 	branch, err := gitOutputContext(ctx, path, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil || strings.TrimSpace(branch) != PRBranchName(number) {
 		if !resume && !abort {
@@ -390,10 +397,7 @@ func RebasePR(ctx context.Context, path, baseSHA string, resume, abort bool) (st
 			return "", err
 		}
 	}
-	head, dirty, rebasing, err := PRHead(ctx, path)
-	if err != nil {
-		return "", err
-	}
+
 	if resume || abort {
 		if !rebasing {
 			return "", fmt.Errorf("no managed rebase in progress")
@@ -418,13 +422,16 @@ func RebasePR(ctx context.Context, path, baseSHA string, resume, abort bool) (st
 		cmd.Env = append(cmd.Env, "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "GIT_TERMINAL_PROMPT=0")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			return "", fmt.Errorf("git rebase %s: %w: %s", operation, err, redact(strings.TrimSpace(string(out))))
+			return "", fmt.Errorf("git rebase %s: %w: %s", operation, err, redact(strings.TrimSpace(normalizeGitOutput(string(out)))))
 		}
 		newHead, _, _, err := PRHead(ctx, path)
 		return newHead, err
 	}
-	if rebasing || dirty {
-		return "", fmt.Errorf("PR worktree is dirty or already rebasing; preserve it before retrying")
+	if rebasing {
+		return "", fmt.Errorf("rebase already in progress; run swarm pr rebase %d --continue or --abort", number)
+	}
+	if dirty {
+		return "", fmt.Errorf("PR worktree is dirty; preserve it before retrying")
 	}
 	if err := prCommit(ctx, path, baseSHA); err != nil {
 		return "", err

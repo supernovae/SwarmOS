@@ -47,13 +47,33 @@ func (e *AlreadyClaimedError) Unwrap() error { return ErrAlreadyClaimed }
 // PRRevision tracks unpublished work on the linked pull request. The remote
 // head is an immutable publication expectation until a successful submit.
 type PRRevision struct {
+	Intent        string `json:"intent,omitempty"`
 	Number        int    `json:"number"`
 	RemoteHeadSHA string `json:"remote_head_sha"`
 	LocalHeadSHA  string `json:"local_head_sha"`
 	Branch        string `json:"branch"`
 }
 
+// ApprovalTransition is coordinator-owned evidence connecting an authenticated
+// review origin to the current approved baseline. Worker artifacts cannot set it.
+type ApprovalTransition struct {
+	OriginBase       string `json:"origin_base"`
+	OriginPolicy     string `json:"origin_policy"`
+	TargetBase       string `json:"target_base"`
+	TargetPolicy     string `json:"target_policy"`
+	TaskDigest       string `json:"task_digest"`
+	PolicyTreeDigest string `json:"policy_tree_digest"`
+	ReviewDigest     string `json:"review_digest"`
+}
+
 type IssueState struct {
+	SubmittedBaseSHA    string                     `json:"submitted_base_sha,omitempty"`
+	PreviousBaseSHA     string                     `json:"previous_base_sha,omitempty"`
+	LastRebase          *RebaseEvidence            `json:"last_rebase,omitempty"`
+	PolicyTreeDigest    string                     `json:"policy_tree_digest,omitempty"`
+	ApprovalTransition  *ApprovalTransition        `json:"approval_transition,omitempty"`
+	CarryReason         string                     `json:"carry_reason,omitempty"`
+	ChangedPolicyPaths  []string                   `json:"changed_policy_paths,omitempty"`
 	CleanupHistory      []CleanupReservation       `json:"cleanup_history,omitempty"`
 	Cleanup             *CleanupReservation        `json:"cleanup,omitempty"`
 	PROutcome           *PROutcome                 `json:"pr_outcome,omitempty"`
@@ -561,13 +581,19 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	}
 	sec := cfg.Security
 	digest := contract.DigestApprovedPolicy(base, cfg)
+	tree, err := workspace.PolicyTreeDigest(ctx, m.repoRoot, base)
+	if err != nil {
+		return nil, err
+	}
 	if old, rev, err := m.load(ctx, n); err == nil {
 		if old.Lease.Status == "active" && old.Lease.ExpiresAt.After(m.nowFn()) {
-			return nil, ErrAlreadyClaimed
+			return nil, &AlreadyClaimedError{IssueNumber: n, Owner: old.Lease.Owner, ExpiresAt: old.Lease.ExpiresAt, CommentID: old.ProjectionCommentID}
 		}
 		if old.BaseSHA != base || old.TaskDigest != contract.DigestWorkUnit(wu) || old.PolicyDigest != digest {
-			invalidatePRRevisionEvidence(old)
+			old.PreviousBaseSHA = old.BaseSHA
+			m.carryApproval(ctx, old, wu, base, digest, tree)
 		}
+		old.PolicyTreeDigest = tree
 		old.TaskDigest = contract.DigestWorkUnit(wu)
 		old.PolicyDigest = digest
 		old.BaseSHA = base
@@ -587,7 +613,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	} else if !errors.Is(err, coordination.ErrNotFound) {
 		return nil, err
 	}
-	st := &IssueState{Lease: contract.Lease{Version: 1, IssueNumber: n, Status: "draft"}, TaskDigest: contract.DigestWorkUnit(wu), PolicyDigest: digest, BaseSHA: base, EffectiveGate: gate, ApprovedBy: owner, ApprovedAt: m.nowFn()}
+	st := &IssueState{Lease: contract.Lease{Version: 1, IssueNumber: n, Status: "draft"}, TaskDigest: contract.DigestWorkUnit(wu), PolicyDigest: digest, PolicyTreeDigest: tree, BaseSHA: base, EffectiveGate: gate, ApprovedBy: owner, ApprovedAt: m.nowFn()}
 	if _, err = m.save(ctx, n, "", st); err != nil {
 		return nil, err
 	}
@@ -1185,8 +1211,10 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	if !reviewBodyMatchesVerdict(body, verdict) {
 		return nil, fmt.Errorf("review notes contain a conflicting verdict")
 	}
+	st.ApprovalTransition = nil
+	st.CarryReason = ""
 	digest := hash(body)
-	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", n), IssueNumber: n, Type: contract.ArtifactReview, Producer: "human:" + actor, Verdict: verdict, Summary: "human plan review", Body: body, CreatedAt: m.nowFn(), Metadata: map[string]string{"kind": "human", "actor": actor, "task_digest": st.TaskDigest, "policy_digest": st.PolicyDigest, "plan_digest": hash(plan.Body), "test_plan_digest": hash(test.Body), "content_sha256": digest, "review_source": "authenticated-human", "base_sha": st.BaseSHA}}
+	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", n), IssueNumber: n, Type: contract.ArtifactReview, Producer: "human:" + actor, Verdict: verdict, Summary: "human plan review", Body: body, CreatedAt: m.nowFn(), Metadata: map[string]string{"kind": "human", "actor": actor, "task_digest": st.TaskDigest, "policy_digest": st.PolicyDigest, "policy_tree_digest": st.PolicyTreeDigest, "plan_digest": hash(plan.Body), "test_plan_digest": hash(test.Body), "content_sha256": digest, "review_source": "authenticated-human", "base_sha": st.BaseSHA}}
 	if err := contract.ValidateArtifact(&art); err != nil {
 		return nil, err
 	}
@@ -1248,6 +1276,7 @@ func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, num
 		st.PRNumber = number
 		st.PRURL = url
 		st.SubmittedHeadSHA = st.HeadSHA
+		st.SubmittedBaseSHA = st.BaseSHA
 		st.PROutcome = nil
 		st.Lease.Status = "completed"
 		st.Lease.Phase = "submitted"
@@ -1362,6 +1391,8 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			if plan == nil || test == nil {
 				return fmt.Errorf("review requires current design and test-plan artifacts")
 			}
+			st.ApprovalTransition = nil
+			st.CarryReason = ""
 			bindings := ReviewBindings(st)
 			if kind == "agent" && !advisory {
 				for key, expected := range bindings {
@@ -1518,13 +1549,14 @@ func (m *Manager) GetCurrentState(ctx context.Context, n int) (*IssueState, erro
 }
 
 // BeginPRRevision fences a new local revision without changing the submitted
-// issue checkpoint. It invalidates approval and head-dependent evidence.
-func (m *Manager) BeginPRRevision(ctx context.Context, n int, owner string, number int, remoteHead, localHead, branch string) (*IssueState, error) {
+// issue checkpoint. Development invalidates approval; rebase retains only
+// authenticated eligible plans and always renews head-dependent evidence.
+func (m *Manager) BeginPRRevision(ctx context.Context, n int, owner string, number int, remoteHead, localHead, branch string, intent ...string) (*IssueState, error) {
 	if number <= 0 || remoteHead == "" || localHead == "" || branch == "" {
 		return nil, fmt.Errorf("incomplete PR revision identity")
 	}
 	if m.gateway != nil {
-		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "begin-pr-revision", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, ExpectedHeadSHA: remoteHead, HeadSHA: localHead, Branch: branch})
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "begin-pr-revision", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, ExpectedHeadSHA: remoteHead, HeadSHA: localHead, Branch: branch, RevisionIntent: revisionIntent(intent)})
 	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if st.PRNumber != number {
@@ -1537,15 +1569,39 @@ func (m *Manager) BeginPRRevision(ctx context.Context, n int, owner string, numb
 			if st.PRRevision.LocalHeadSHA != localHead {
 				return fmt.Errorf("local PR head changed outside the recorded revision")
 			}
+			if revisionIntent(intent) == "rebase" {
+				startRebaseEvidence(st, localHead)
+				m.rebaseEvidence(ctx, st, n)
+				st.PRRevision.Intent = "rebase"
+			} else if st.PRRevision.Intent == "rebase" {
+				invalidatePRRevisionEvidence(st)
+				st.CarryReason = "new development requires plan review"
+				st.PRRevision.Intent = "work"
+			}
 			return nil
 		}
-		st.PRRevision = &PRRevision{Number: number, RemoteHeadSHA: remoteHead, LocalHeadSHA: localHead, Branch: branch}
-		invalidatePRRevisionEvidence(st)
+		st.PRRevision = &PRRevision{Number: number, RemoteHeadSHA: remoteHead, LocalHeadSHA: localHead, Branch: branch, Intent: revisionIntent(intent)}
+		if revisionIntent(intent) == "rebase" {
+			startRebaseEvidence(st, localHead)
+			verifiedHead := st.SubmittedHeadSHA
+			if verifiedHead == "" {
+				verifiedHead = st.HeadSHA
+			}
+			if verifiedHead != remoteHead {
+				invalidatePRRevisionEvidence(st)
+				st.CarryReason = "published head changed outside SwarmOS"
+			} else {
+				m.rebaseEvidence(ctx, st, n)
+			}
+		} else {
+			invalidatePRRevisionEvidence(st)
+		}
 		return nil
 	})
 }
 
 func invalidatePRRevisionEvidence(st *IssueState) {
+	st.ApprovalTransition = nil
 	st.Artifacts = nil
 	st.Attestations = nil
 }
@@ -1616,9 +1672,11 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 	if r == nil || st.PRNumber != number || r.Number != number || r.RemoteHeadSHA != expected || r.LocalHeadSHA != published {
 		return nil, fmt.Errorf("PR publication snapshot changed")
 	}
+	verifyRebaseEvidence(ctx, m.repoRoot, st, published)
 	st.PRRevision = nil
 	st.HeadSHA = published
 	st.SubmittedHeadSHA = published
+	st.SubmittedBaseSHA = st.BaseSHA
 	st.PROutcome = nil
 	st.Lease.Status = "completed"
 	st.Lease.Phase = "submitted"
@@ -1642,15 +1700,19 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 }
 
 // InvalidatePRRevisionEvidence requires the same claim fence as execution.
-func (m *Manager) InvalidatePRRevisionEvidence(ctx context.Context, n int, owner string, number int) (*IssueState, error) {
+func (m *Manager) InvalidatePRRevisionEvidence(ctx context.Context, n int, owner string, number int, intent ...string) (*IssueState, error) {
 	if m.gateway != nil {
-		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "invalidate-pr-evidence", IssueNumber: n, ClaimID: m.token(n), PRNumber: number})
+		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "invalidate-pr-evidence", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, RevisionIntent: revisionIntent(intent)})
 	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
 		if st.PRRevision == nil || st.PRRevision.Number != number {
 			return fmt.Errorf("no pending revision for PR #%d", number)
 		}
-		invalidatePRRevisionEvidence(st)
+		if revisionIntent(intent) == "rebase" {
+			m.rebaseEvidence(ctx, st, n)
+		} else {
+			invalidatePRRevisionEvidence(st)
+		}
 		return nil
 	})
 }
@@ -1678,6 +1740,9 @@ func ReviewBindings(st *IssueState) map[string]string {
 	}
 	bindings["task_digest"] = st.TaskDigest
 	bindings["policy_digest"] = st.PolicyDigest
+	if st.PolicyTreeDigest != "" {
+		bindings["policy_tree_digest"] = st.PolicyTreeDigest
+	}
 	bindings["base_sha"] = st.BaseSHA
 	bindings["review_claim_id"] = st.Lease.ClaimID
 	for _, art := range st.Artifacts {
@@ -1728,11 +1793,14 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 		return ErrApprovalRequired
 	}
 	if review.Metadata["actor"] == "" || review.Metadata["review_source"] != "authenticated-"+review.Metadata["kind"] ||
-		review.Metadata["base_sha"] != st.BaseSHA || review.Metadata["content_sha256"] != hash(review.Body) ||
+		!reviewBaseMatches(st, review) || review.Metadata["content_sha256"] != hash(review.Body) ||
 		!reviewBodyMatchesVerdict(review.Body, review.Verdict) {
 		return ErrApprovalRequired
 	}
-	if review.Metadata["task_digest"] != st.TaskDigest || review.Metadata["policy_digest"] != st.PolicyDigest || review.Metadata["plan_digest"] != hash(plan.Body) || review.Metadata["test_plan_digest"] != hash(test.Body) {
+	if review.Metadata["task_digest"] != st.TaskDigest || review.Metadata["plan_digest"] != hash(plan.Body) || review.Metadata["test_plan_digest"] != hash(test.Body) {
+		return ErrApprovalRequired
+	}
+	if tree := review.Metadata["policy_tree_digest"]; tree != "" && tree != st.PolicyTreeDigest {
 		return ErrApprovalRequired
 	}
 	kind := review.Metadata["kind"]

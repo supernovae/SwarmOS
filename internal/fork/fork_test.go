@@ -693,6 +693,19 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	if _, err := applyBob(lease.ForkRequest{Operation: "begin-pr-revision", ClaimID: revClaim, PRNumber: 55, ExpectedHeadSHA: baseSHA, HeadSHA: baseSHA, Branch: "swarm/pr-55"}); err == nil || !strings.Contains(err.Error(), "pull request #55 head is") {
 		t.Fatalf("begin-pr-revision accepted a head that is not the published PR head: %v", err)
 	}
+	// Rebase intent can retain an authenticated modern plan, but cannot
+	// recover evidence after an ordinary work revision invalidates it.
+	stRev, err = applyBob(lease.ForkRequest{Operation: "begin-pr-revision", RevisionIntent: "rebase", ClaimID: revClaim, PRNumber: 55, ExpectedHeadSHA: aliceHead, HeadSHA: aliceHead, Branch: "swarm/pr-55"})
+	if err != nil || len(stRev.Artifacts) == 0 || stRev.LastRebase == nil || stRev.LastRebase.Verified {
+		t.Fatalf("coordinator rebase retention: %v %+v", err, stRev)
+	}
+	if _, err = applyBob(lease.ForkRequest{Operation: "invalidate-pr-evidence", ClaimID: revClaim, PRNumber: 55}); err != nil {
+		t.Fatal(err)
+	}
+	stRev, err = applyBob(lease.ForkRequest{Operation: "invalidate-pr-evidence", RevisionIntent: "rebase", ClaimID: revClaim, PRNumber: 55})
+	if err != nil || len(stRev.Artifacts) != 0 {
+		t.Fatalf("forged rebase intent restored evidence: %v", err)
+	}
 	if stRev, err = applyBob(lease.ForkRequest{Operation: "begin-pr-revision", ClaimID: revClaim, PRNumber: 55, ExpectedHeadSHA: aliceHead, HeadSHA: aliceHead, Branch: "swarm/pr-55"}); err != nil {
 		t.Fatalf("begin-pr-revision: %v", err)
 	}

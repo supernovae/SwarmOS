@@ -2,6 +2,11 @@
 
 Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo init` after a release to pick up regenerated workflows and templates.
 
+## Unreleased
+
+- Approved plans can carry across descendant PR rebases when the WorkUnit and committed policy tree are unchanged. Fresh validation and explicit submission remain required; status explains when a new plan cycle is needed.
+- Rebase status and PR updates include heads, bases, conflict paths, and Git patch identity. Claim and interrupted-rebase errors include recovery commands, and Git errors render carriage returns cleanly.
+
 ## v0.7.0
 
 v0.7.0 is about owning a busy repository: seeing the whole backlog at once, sizing work to fit, and being clear about who reviews what. Upgrade `swarm` and rerun `swarm repo init` to pick up the new rules file and issue form wording.

@@ -643,23 +643,34 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 				if !rebasing {
 					return nil, fmt.Errorf("no managed PR rebase in progress")
 				}
-			} else if dirty || rebasing {
+			} else if rebasing {
+				return nil, fmt.Errorf("rebase already in progress; run swarm pr rebase %d --continue or --abort", opts.Number)
+			} else if dirty {
 				return nil, fmt.Errorf("PR worktree must be clean before starting rebase")
 			}
 			if !rebasing {
-				st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch)
+				st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch, "rebase")
 				if e != nil {
 					return nil, e
 				}
 			}
 			if !opts.Abort {
-				if _, e = s.Manager.InvalidatePRRevisionEvidence(ctx, r.IssueNumber, owner, opts.Number); e != nil {
+				if _, e = s.Manager.InvalidatePRRevisionEvidence(ctx, r.IssueNumber, owner, opts.Number, "rebase"); e != nil {
 					return nil, e
 				}
 			}
 			newHead, e := workspace.RebasePR(ctx, path, r.PR.BaseSHA, opts.Continue, opts.Abort)
 			if e != nil {
 				r.Status = "rebasing"
+				conflicts, readErr := workspace.RebaseConflicts(ctx, path)
+				if readErr != nil {
+					return r, fmt.Errorf("%w; read conflicts: %v", e, readErr)
+				}
+				updated, recordErr := s.Manager.UpdateRebaseContext(ctx, r.IssueNumber, owner, opts.Number, lease.RebaseContext{ConflictedPaths: conflicts, Status: "in-progress"})
+				if recordErr != nil {
+					return r, fmt.Errorf("%w; record conflicts: %v", e, recordErr)
+				}
+				r.State = updated
 				return r, e
 			}
 			if newHead != "" {
@@ -670,6 +681,15 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 				r.State = st
 				r.HeadSHA = newHead
 			}
+			status := "completed"
+			if opts.Abort {
+				status = "aborted"
+			}
+			st, e = s.Manager.UpdateRebaseContext(ctx, r.IssueNumber, owner, opts.Number, lease.RebaseContext{Status: status})
+			if e != nil {
+				return r, e
+			}
+			r.State = st
 			r.Status = "pending"
 			return r, nil
 		})
@@ -714,6 +734,9 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string) (*Resu
 			if e != nil {
 				return nil, e
 			}
+			if e = restoreApprovedPlan(r.Worktree, st); e != nil {
+				return r, e
+			}
 			report, valErr := validation.Validate(ctx, r.Worktree, wu, validation.ValidateOptions{BaseSHA: st.BaseSHA})
 			checkedHead, changed, activeRebase, checkErr := workspace.PRHead(ctx, r.Worktree)
 			if checkErr != nil {
@@ -748,6 +771,11 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 			return nil, fmt.Errorf("PR head changed since the last verified submission; run swarm pr work %d before submitting", number)
 		}
 		r.Status = "submitted"
+		if !s.Fork {
+			if e := ProjectRebase(ctx, s.Tracker, r.State, number); e != nil {
+				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update rebase context: %w", number, e)
+			}
+		}
 		return r, nil
 	}
 	r, err = s.validate(ctx, r, remote)
@@ -828,6 +856,11 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		r.State = st
 		r.HeadSHA = head
 		r.Status = "submitted"
+		if !s.Fork {
+			if e := ProjectRebase(ctx, s.Tracker, st, number); e != nil {
+				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update rebase context: %w", number, e)
+			}
+		}
 		return r, nil
 	})
 }

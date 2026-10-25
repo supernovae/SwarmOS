@@ -458,6 +458,9 @@ func PublishPR(ctx context.Context, root, remote, branch, expectedHead, head str
 	if err := prCommit(ctx, root, head); err != nil {
 		return err
 	}
+	if err := RejectRecoveryOutput(ctx, root, head); err != nil {
+		return err
+	}
 	if _, err := gitOutputContext(ctx, root, "remote", "get-url", remote); err != nil {
 		return fmt.Errorf("remote %q unavailable: %w", remote, err)
 	}

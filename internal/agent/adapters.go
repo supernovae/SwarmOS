@@ -20,6 +20,7 @@ import (
 )
 
 type CLIAdapter struct {
+	executionPolicy  contract.ExecutionConfig
 	executionMode    string
 	authentication   string
 	agentName        string

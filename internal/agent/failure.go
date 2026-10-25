@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"os/exec"
 )
 
@@ -15,6 +16,10 @@ type runFailure struct {
 }
 
 func (e *runFailure) Error() string {
+	var timeout *sandbox.AgentTimeoutError
+	if errors.As(e.cause, &timeout) {
+		return timeout.Error()
+	}
 	status := "failed"
 	if errors.Is(e.cause, context.Canceled) {
 		status = "canceled"

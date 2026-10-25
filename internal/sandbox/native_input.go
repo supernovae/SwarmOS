@@ -12,6 +12,10 @@ import (
 // Read a line without prefetching the next turn or leaving a blocked reader
 // behind on cancellation. Live CLI input is a file (terminal or pipe).
 func nativeInstruction(ctx context.Context, input io.Reader) (string, error) {
+	if budget, ok := ctx.Value(agentBudgetKey{}).(*agentBudget); ok {
+		budget.pause()
+		defer budget.resume()
+	}
 	var line strings.Builder
 	for line.Len() < 64<<10 {
 		if err := ctx.Err(); err != nil {

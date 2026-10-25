@@ -955,3 +955,43 @@ func TestRunDoctorSandboxReadiness(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentTimeoutConfigAndDoctor(t *testing.T) {
+	valid, err := embeddedTemplates.ReadFile("templates/swarm/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, setting := range []string{"agent_timeout: 0s", "agent_timeout: ''", "agent_timeout: wat", "role_timeouts: {developer: -2h}", "role_timeouts: {unknown: 1m}", "agent_timeout: [1m]"} {
+		data := strings.Replace(string(valid), "execution:", "execution:\n  "+setting, 1)
+		if _, err := decodeConfig([]byte(data)); err == nil || !strings.Contains(err.Error(), "execution") && !strings.Contains(err.Error(), "unmarshal") {
+			t.Fatalf("%s: %v", setting, err)
+		}
+	}
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	data := strings.Replace(string(valid), "execution:", "execution:\n  agent_timeout: 90m\n  role_timeouts: {developer: 2h}", 1)
+	if err := os.WriteFile(filepath.Join(root, ".swarm", "config.yaml"), []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	checks := RunDoctor(root, false)
+	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+		found := false
+		for _, check := range checks {
+			if check.Name == role+" timeout" {
+				found = true
+				want := "1h30m0s"
+				if role == "developer" {
+					want = "2h0m0s"
+				}
+				if !strings.Contains(check.Detail, want) || !strings.Contains(check.Detail, "4h0m0s") || !strings.Contains(check.Detail, "approved-base") {
+					t.Fatal(check)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("missing timeout for %s", role)
+		}
+	}
+}

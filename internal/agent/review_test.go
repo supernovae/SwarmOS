@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
@@ -325,5 +326,54 @@ func TestSnapshotSymlinkPolicy(t *testing.T) {
 				t.Fatal("unsafe link accepted")
 			}
 		})
+	}
+}
+
+type timeoutRecoveryReviewer struct {
+	helperReviewer
+	t        *testing.T
+	original string
+	snapshot string
+}
+
+func (r *timeoutRecoveryReviewer) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
+	r.t.Helper()
+	r.snapshot = req.WorktreePath
+	if req.RecoveryRoot != r.original || req.WorktreePath == r.original {
+		r.t.Fatalf("recovery root lost: %+v", req)
+	}
+	// The sandbox exporter has its own patch safety tests. This runner verifies
+	// the outer review snapshot's durable coordinator-selected destination.
+	root, err := safefs.Open(req.RecoveryRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	if err := root.MkdirAll(".swarm/active-output", 0700); err != nil {
+		return nil, err
+	}
+	if err := root.WriteFile(".swarm/active-output/reviewer-timeout.patch", []byte("retained patch"), 0600); err != nil {
+		return nil, err
+	}
+	return nil, context.DeadlineExceeded
+}
+func TestReviewTimeoutRecoveryRootSurvivesSnapshotCleanup(t *testing.T) {
+	root := t.TempDir()
+	mustWriteReviewFixture(t, root, ".swarm/active/REVIEW.md", "existing review")
+	runner := &timeoutRecoveryReviewer{t: t, original: root}
+	_, err := RunReview(context.Background(), runner, RunRequest{Role: "reviewer", WorktreePath: root})
+	if err != context.DeadlineExceeded {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(runner.snapshot); !os.IsNotExist(err) {
+		t.Fatalf("snapshot remains: %v", err)
+	}
+	patch, err := os.ReadFile(filepath.Join(root, ".swarm/active-output/reviewer-timeout.patch"))
+	if err != nil || string(patch) != "retained patch" {
+		t.Fatalf("%s %v", patch, err)
+	}
+	review, err := os.ReadFile(filepath.Join(root, ".swarm/active/REVIEW.md"))
+	if err != nil || string(review) != "existing review" {
+		t.Fatalf("review changed: %s %v", review, err)
 	}
 }

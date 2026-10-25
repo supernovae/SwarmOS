@@ -36,8 +36,12 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 		in = os.Stdin
 		stdout, stderr = io.MultiWriter(os.Stdout, &out), io.MultiWriter(os.Stderr, &out)
 	}
+	limits, limitErr := contract.ResolveAgentLimits(a.executionPolicy, req.Role, strings.EqualFold(req.Mode, "interactive"), 0)
+	if limitErr != nil {
+		return nil, limitErr
+	}
 	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
-		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Timeout: sandbox.AgentRunLimit}
+		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot}
 	options.ProjectPlan = req.ProjectPlan
 	if req.ReadOnly && req.Role == "reviewer" {
 		options.OutputDir = filepath.Join(req.WorktreePath, ".swarm", "active-output")

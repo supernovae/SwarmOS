@@ -21,12 +21,16 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
 )
 
 // WorkerOptions describes a disposable Linux OCI worker. OutputDir is a trusted
 // coordinator-owned destination used by the review snapshot's output channel.
 type WorkerOptions struct {
+	Limits                          contract.AgentLimits
+	Warning                         io.Writer
+	RecoveryRoot                    string
 	ProjectPlan                     bool
 	Runtime, Image, Role, OutputDir string
 	ReadOnly                        bool
@@ -343,12 +347,13 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 	if err != nil {
 		return err
 	}
-	timeout := opts.Timeout
-	if timeout <= 0 || timeout > AgentRunLimit {
-		timeout = AgentRunLimit
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	ctx, budget := startAgentBudget(ctx, opts)
+	defer budget.close()
+	defer func() {
+		if budget.timedOut() {
+			err = &AgentTimeoutError{cause: budget.timeoutError(), diagnostic: "OCI timeout: no patch available"}
+		}
+	}()
 	scratch, err := os.MkdirTemp("", "swarm-worker-*")
 	if err != nil {
 		return err
@@ -464,6 +469,7 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 		return fmt.Errorf("terminate worker before import: %w", err)
 	}
 	removed = true
+	budget.finish()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -513,9 +519,8 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 	return importWorker(ctx, original, extracted, initial, manifest)
 }
 
-// AgentRunLimit bounds one isolated agent run, including the tool server that
-// delegated harnesses call. Validation checks pass shorter deadlines of their
-// own, which this ceiling never extends.
+// AgentRunLimit is the default agent budget for callers without resolved policy.
+// Required-check execution bypasses agent budgeting.
 const AgentRunLimit = 60 * time.Minute
 
 func workerOutputs(opts WorkerOptions) []string {
@@ -573,7 +578,7 @@ func workerPath(name string) (string, error) {
 			return "", fmt.Errorf("worker rejects reserved device path")
 		}
 	}
-	for _, prefix := range []string{".swarm/coordination", ".swarm/local-tracker", ".swarm/worktrees"} {
+	for _, prefix := range []string{".swarm/coordination", ".swarm/local-tracker", ".swarm/worktrees", ".swarm/active-output"} {
 		if strings.EqualFold(name, prefix) || strings.HasPrefix(strings.ToLower(name), prefix+"/") {
 			return "", fmt.Errorf("worker cannot access coordinator state")
 		}
@@ -639,7 +644,7 @@ func packWorker(ctx context.Context, source, archive string, outputs []string, r
 					return err
 				}
 				name := path.Join(dir, entry.Name())
-				if entry.Name() == ".git" || name == ".swarm/coordination" || name == ".swarm/local-tracker" || name == ".swarm/worktrees" || (entry.IsDir() && IsEphemeralBuildDir(entry.Name())) {
+				if entry.Name() == ".git" || name == ".swarm/coordination" || name == ".swarm/local-tracker" || name == ".swarm/worktrees" || name == ".swarm/active-output" || (entry.IsDir() && IsEphemeralBuildDir(entry.Name())) {
 					continue
 				}
 				if _, err := workerPath(name); err != nil {

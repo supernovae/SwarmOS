@@ -36,7 +36,7 @@ Each turn is ephemeral. Task files carry progress between turns and phases, so a
 - **Disabled.** User configuration and rules, MCP, plugins, hooks, browser tools, and subagents.
 - **Checks before work.** SwarmOS tests outside-file, symlink, write, and loopback canaries, and confirms the required `codex exec` flags exist.
 
-The Codex process and its internal tool dispatcher run on the host and are trusted. The boundary protects against agent-directed tools, not a compromised Codex binary. Each phase has a 60-minute deadline and bounded imports, but no CPU, memory, or disk quotas. Use the OCI backend if you need those.
+The Codex process and its internal tool dispatcher run on the host and are trusted. The boundary protects against agent-directed tools, not a compromised Codex binary. Each unattended phase defaults to a 60-minute agent budget with bounded imports, but no CPU, memory, or disk quotas. Use the OCI backend if you need those.
 
 ## Troubleshooting
 
@@ -54,3 +54,5 @@ The Codex process and its internal tool dispatcher run on the host and are trust
 Qualified on Linux/amd64 with an authenticated WorkUnit covering all four roles, interactive planning, a human gate, unattended development and testing, native validation, and submission. It has also run through hosted GitHub issue, PR, and fork PR revision flows. The test commands are in the [qualification guide](../native-qualification.md#codex).
 
 Codex's [permission profiles](https://learn.chatgpt.com/docs/permissions) are still beta, so review each new release before raising the minimum version.
+
+Agent budgets default to 60 minutes and can be configured globally or per role in [approved execution policy](../project.md#agent-run-budgets). Interactive native sessions count working time across turns, exclude waits for coordinator input, and have a four-hour wall cap. A warning appears before the deadline. On timeout, native Codex and harness-tools Bubblewrap preserve a bounded recovery patch for [manual inspection](../developer.md#recovering-from-an-interrupted-run). Interactive OCI counts wall time without idle exclusion, and OCI has no timeout patch export. Individual tool-call limits remain separate.

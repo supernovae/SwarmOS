@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -311,13 +312,17 @@ func RunNativeValidation(ctx context.Context, dir, binary, command string, stdou
 
 // Reuse the OCI filesystem acceptance rules. Native workers also operate on a
 // detached snapshot, so tools cannot access live Git or coordinator state.
-func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, run func(context.Context, string, string) error) error {
-	timeout := AgentRunLimit
-	if opts.Timeout > 0 && opts.Timeout < timeout {
-		timeout = opts.Timeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, run func(context.Context, string, string) error) (resultErr error) {
+	ctx, budget := startAgentBudget(ctx, opts)
+	defer budget.close()
+	defer func() {
+		if budget.timedOut() {
+			var reported *AgentTimeoutError
+			if !errors.As(resultErr, &reported) {
+				resultErr = &AgentTimeoutError{cause: budget.timeoutError(), diagnostic: "timeout during workspace setup; no patch available"}
+			}
+		}
+	}()
 	root, err := os.MkdirTemp("", "swarm-native-*")
 	if err != nil {
 		return err
@@ -350,8 +355,23 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 	if err := os.MkdirAll(filepath.Join(work, ".swarm", "active"), 0700); err != nil {
 		return err
 	}
-	if err := run(ctx, work, scratch); err != nil {
-		return err
+	runErr := run(ctx, work, scratch)
+	budget.finish()
+	if budget.timedOut() {
+		destination := opts.RecoveryRoot
+		if destination == "" {
+			destination = dir
+		}
+		recoveryCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+		defer stop()
+		patch, preserveErr := preserveTimeoutPatch(recoveryCtx, input, work, destination, opts.Role)
+		if preserveErr != nil {
+			return &AgentTimeoutError{cause: budget.timeoutError(), diagnostic: fmt.Sprintf("timeout patch preservation failed: %q", preserveErr.Error())}
+		}
+		return &AgentTimeoutError{cause: budget.timeoutError(), diagnostic: fmt.Sprintf("recovery patch: %s", patch)}
+	}
+	if runErr != nil {
+		return runErr
 	}
 	if err := ctx.Err(); err != nil {
 		return err

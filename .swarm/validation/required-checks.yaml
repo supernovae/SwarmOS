@@ -19,3 +19,10 @@ protected_paths:
     - .swarm/SKILLS.md
     - .swarm/rules/**
     - .swarm/skills/**
+    - .swarm/project.md
+    - .swarm/architecture.md
+    - .swarm/conventions.md
+    - .claude/commands/**
+    - .opencode/commands/**
+    - AGENTS.md
+    - CLAUDE.md

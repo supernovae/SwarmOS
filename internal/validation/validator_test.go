@@ -297,3 +297,27 @@ func TestReportProtectedChangesListsPolicyEditsAndStillRunsBaseChecks(t *testing
 		t.Fatal("fork mode must refuse report mode")
 	}
 }
+
+func TestDefaultProtectedPathsCoverAgentInstructions(t *testing.T) {
+	matches := func(file string) bool {
+		for _, pattern := range contract.DefaultProtectedPaths() {
+			if matchGlobPattern(pattern, file) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, file := range []string{
+		"AGENTS.md", "CLAUDE.md", ".swarm/project.md", ".swarm/architecture.md", ".swarm/conventions.md",
+		".claude/commands/swarm-plan.md", ".opencode/commands/swarm-review.md", ".swarm/prompts/planner.md",
+	} {
+		if !matches(file) {
+			t.Errorf("%s is not protected by default", file)
+		}
+	}
+	for _, file := range []string{"docs/AGENTS.md", "internal/harness/templates/swarm/prompts/planner.md", "README.md", ".claude/settings.json"} {
+		if matches(file) {
+			t.Errorf("%s should stay editable", file)
+		}
+	}
+}

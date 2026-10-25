@@ -1474,18 +1474,7 @@ func touchesProtectedPath(touchpoints []string, spec *contract.ValidationSpec) b
 	if spec != nil && len(spec.ProtectedPaths) > 0 {
 		patterns = spec.ProtectedPaths
 	} else {
-		patterns = []string{
-			".github/workflows/**",
-			".swarm/validation/**",
-			".swarm/contracts/**",
-			".swarm/config.yaml",
-			".swarm/prompts/**",
-			".swarm/workflows/**",
-			".swarm/goals.md",
-			".swarm/SKILLS.md",
-			".swarm/rules/**",
-			".swarm/skills/**",
-		}
+		patterns = contract.DefaultProtectedPaths()
 	}
 	for _, tp := range touchpoints {
 		for _, p := range patterns {

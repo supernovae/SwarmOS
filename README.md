@@ -111,7 +111,7 @@ CATEGORY   CHECK                                    STATUS   DETAIL
 system     git                                      OK       git version 2.54.0
 tracker    gh-cli                                   OK       /usr/local/bin/gh
 harness    .swarm/config.yaml                       OK       v1 (default_agent=codex, default_gate=agent)
-harness    .swarm/validation/required-checks.yaml   OK       3 checks, 6 protected paths
+harness    .swarm/validation/required-checks.yaml   OK       3 checks, 17 protected paths
 binary     claude                                   OK       /usr/local/bin/claude
 binary     codex                                    OK       /usr/local/bin/codex
 binary     omp                                      OK       /usr/local/bin/omp

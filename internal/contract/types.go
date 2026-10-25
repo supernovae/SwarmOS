@@ -87,6 +87,31 @@ type ValidationSpec struct {
 	ProtectedPaths []string    `yaml:"protected_paths" json:"protected_paths"`
 }
 
+// DefaultProtectedPaths returns the protected paths `swarm repo init` writes:
+// CI, SwarmOS policy, and every file that becomes part of an agent's
+// instructions, so agent work cannot change what later agents are told.
+func DefaultProtectedPaths() []string {
+	return []string{
+		".github/workflows/**",
+		".swarm/validation/**",
+		".swarm/contracts/**",
+		".swarm/config.yaml",
+		".swarm/prompts/**",
+		".swarm/workflows/**",
+		".swarm/goals.md",
+		".swarm/SKILLS.md",
+		".swarm/rules/**",
+		".swarm/skills/**",
+		".swarm/project.md",
+		".swarm/architecture.md",
+		".swarm/conventions.md",
+		".claude/commands/**",
+		".opencode/commands/**",
+		"AGENTS.md",
+		"CLAUDE.md",
+	}
+}
+
 type CheckSpec struct {
 	Name    string `yaml:"name" json:"name"`
 	Command string `yaml:"command" json:"command"`

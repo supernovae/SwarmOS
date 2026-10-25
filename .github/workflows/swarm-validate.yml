@@ -42,10 +42,11 @@ jobs:
       fail-fast: false
       matrix:
         # Ubuntu 26.04 ships the AppArmor policy needed for bwrap user/network namespaces.
-        # Windows tests are paused while the suite is too slow there; Windows
-        # binaries are still cross-compiled below. Re-add windows-latest (and a
-        # non-race test step for it) to bring them back.
-        os: [ubuntu-26.04, macos-latest]
+        # Windows and macOS tests are paused while the suite is too slow there
+        # (#105); their binaries are still cross-compiled below. Re-add
+        # macos-latest, or windows-latest with a non-race test step, to bring
+        # them back.
+        os: [ubuntu-26.04]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

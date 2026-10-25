@@ -501,7 +501,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return nil, fmt.Errorf("PR worktree is dirty, rebasing, or differs from its recorded checkpoint")
 		}
 	} else {
-		wtPath, branch, err = workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA)
+		wtPath, branch, err = workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA, st.DroppedCheckpoint)
 		if err != nil {
 			return nil, err
 		}

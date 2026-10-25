@@ -24,6 +24,12 @@ type PublishingStore interface {
 	CompareAndSwapAndPublish(context.Context, int, string, []byte, string, string) (string, error)
 }
 
+// ExpectedCheckpointPublishingStore retains the retired checkpoint as the
+// publication fence until recovery is atomically committed.
+type ExpectedCheckpointPublishingStore interface {
+	CompareAndSwapAndPublishExpected(context.Context, int, string, []byte, string, string, string) (string, error)
+}
+
 // ExpectedPRPublishingStore atomically advances a linked PR branch and issue
 // state using the caller's captured remote head, never a freshly read value.
 type ExpectedPRPublishingStore interface {
@@ -201,6 +207,23 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 	return commit, nil
 }
 func (s *GitStore) CompareAndSwapAndPublish(ctx context.Context, n int, old string, next []byte, branch, head string) (string, error) {
+	return s.publishCheckpoint(ctx, n, old, next, branch, head, nil)
+}
+
+func (s *GitStore) CompareAndSwapAndPublishExpected(ctx context.Context, n int, old string, next []byte, branch, head, expected string) (string, error) {
+	if len(expected) != 40 {
+		return "", fmt.Errorf("invalid retired checkpoint")
+	}
+	if _, err := hex.DecodeString(expected); err != nil {
+		return "", err
+	}
+	if _, err := s.run(ctx, "", "merge-base", "--is-ancestor", expected, head); err != nil {
+		return "", fmt.Errorf("checkpoint recovery must fast-forward: %w", err)
+	}
+	return s.publishCheckpoint(ctx, n, old, next, branch, head, &expected)
+}
+
+func (s *GitStore) publishCheckpoint(ctx context.Context, n int, old string, next []byte, branch, head string, expected *string) (string, error) {
 	if !strings.HasPrefix(branch, "swarm/issue-") || strings.Contains(branch, "..") || head == "" {
 		return "", fmt.Errorf("invalid checkpoint branch or head")
 	}
@@ -228,6 +251,12 @@ func (s *GitStore) CompareAndSwapAndPublish(ctx context.Context, n int, old stri
 	} else if branchErr != nil {
 		return "", branchErr
 	}
+	if expected != nil {
+		if oldBranch != *expected {
+			return "", fmt.Errorf("%w: remote checkpoint is %s, expected %s", ErrConflict, oldBranch, *expected)
+		}
+		oldBranch = *expected
+	}
 	stateLease := stateRef + ":" + old
 	if old == "" {
 		stateLease = stateRef + ":"
@@ -237,6 +266,9 @@ func (s *GitStore) CompareAndSwapAndPublish(ctx context.Context, n int, old stri
 		branchLease = branchRef + ":"
 	}
 	if _, err = s.run(ctx, "", "push", "--atomic", "origin", "--force-with-lease="+stateLease, "--force-with-lease="+branchLease, commit+":"+stateRef, head+":"+branchRef); err != nil {
+		if expected != nil {
+			return "", fmt.Errorf("%w: atomic checkpoint push: %w", ErrConflict, err)
+		}
 		return "", fmt.Errorf("atomic checkpoint push: %w", err)
 	}
 	return commit, nil

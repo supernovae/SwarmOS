@@ -67,34 +67,36 @@ type ApprovalTransition struct {
 }
 
 type IssueState struct {
-	SubmittedBaseSHA    string                     `json:"submitted_base_sha,omitempty"`
-	PreviousBaseSHA     string                     `json:"previous_base_sha,omitempty"`
-	LastRebase          *RebaseEvidence            `json:"last_rebase,omitempty"`
-	PolicyTreeDigest    string                     `json:"policy_tree_digest,omitempty"`
-	ApprovalTransition  *ApprovalTransition        `json:"approval_transition,omitempty"`
-	CarryReason         string                     `json:"carry_reason,omitempty"`
-	ChangedPolicyPaths  []string                   `json:"changed_policy_paths,omitempty"`
-	CleanupHistory      []CleanupReservation       `json:"cleanup_history,omitempty"`
-	Cleanup             *CleanupReservation        `json:"cleanup,omitempty"`
-	PROutcome           *PROutcome                 `json:"pr_outcome,omitempty"`
-	SubmittedHeadSHA    string                     `json:"submitted_head_sha,omitempty"`
-	Lease               contract.Lease             `json:"lease"`
-	Artifacts           []contract.Artifact        `json:"artifacts,omitempty"`
-	Attestations        []contract.RoleAttestation `json:"attestations,omitempty"`
-	ProjectionCommentID int64                      `json:"projection_comment_id,omitempty"`
-	TaskDigest          string                     `json:"task_digest"`
-	PolicyDigest        string                     `json:"policy_digest"`
-	BaseSHA             string                     `json:"base_sha"`
-	HeadSHA             string                     `json:"head_sha,omitempty"`
-	Branch              string                     `json:"branch,omitempty"`
-	ApprovedBy          string                     `json:"approved_by,omitempty"`
-	ApprovedAt          time.Time                  `json:"approved_at,omitempty"`
-	PRNumber            int                        `json:"pr_number,omitempty"`
-	PRRevision          *PRRevision                `json:"pr_revision,omitempty"`
-	EffectiveGate       contract.GateMode          `json:"effective_gate,omitempty"`
-	PRURL               string                     `json:"pr_url,omitempty"`
-	ForkRepo            string                     `json:"fork_repo,omitempty"`
-	LastForkRequestID   int64                      `json:"last_fork_request_id,omitempty"`
+	DroppedCheckpoint   *workspace.DroppedCheckpoint `json:"dropped_checkpoint,omitempty"`
+	CheckpointDropped   bool                         `json:"-"`
+	SubmittedBaseSHA    string                       `json:"submitted_base_sha,omitempty"`
+	PreviousBaseSHA     string                       `json:"previous_base_sha,omitempty"`
+	LastRebase          *RebaseEvidence              `json:"last_rebase,omitempty"`
+	PolicyTreeDigest    string                       `json:"policy_tree_digest,omitempty"`
+	ApprovalTransition  *ApprovalTransition          `json:"approval_transition,omitempty"`
+	CarryReason         string                       `json:"carry_reason,omitempty"`
+	ChangedPolicyPaths  []string                     `json:"changed_policy_paths,omitempty"`
+	CleanupHistory      []CleanupReservation         `json:"cleanup_history,omitempty"`
+	Cleanup             *CleanupReservation          `json:"cleanup,omitempty"`
+	PROutcome           *PROutcome                   `json:"pr_outcome,omitempty"`
+	SubmittedHeadSHA    string                       `json:"submitted_head_sha,omitempty"`
+	Lease               contract.Lease               `json:"lease"`
+	Artifacts           []contract.Artifact          `json:"artifacts,omitempty"`
+	Attestations        []contract.RoleAttestation   `json:"attestations,omitempty"`
+	ProjectionCommentID int64                        `json:"projection_comment_id,omitempty"`
+	TaskDigest          string                       `json:"task_digest"`
+	PolicyDigest        string                       `json:"policy_digest"`
+	BaseSHA             string                       `json:"base_sha"`
+	HeadSHA             string                       `json:"head_sha,omitempty"`
+	Branch              string                       `json:"branch,omitempty"`
+	ApprovedBy          string                       `json:"approved_by,omitempty"`
+	ApprovedAt          time.Time                    `json:"approved_at,omitempty"`
+	PRNumber            int                          `json:"pr_number,omitempty"`
+	PRRevision          *PRRevision                  `json:"pr_revision,omitempty"`
+	EffectiveGate       contract.GateMode            `json:"effective_gate,omitempty"`
+	PRURL               string                       `json:"pr_url,omitempty"`
+	ForkRepo            string                       `json:"fork_repo,omitempty"`
+	LastForkRequestID   int64                        `json:"last_fork_request_id,omitempty"`
 }
 type Manager struct {
 	tracker     tracker.Tracker
@@ -592,6 +594,22 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		if old.BaseSHA != base || old.TaskDigest != contract.DigestWorkUnit(wu) || old.PolicyDigest != digest {
 			old.PreviousBaseSHA = old.BaseSHA
 			m.carryApproval(ctx, old, wu, base, digest, tree)
+		}
+		if old.BaseSHA != base && old.ForkRepo == "" && old.PRNumber == 0 && old.PRRevision == nil {
+			if pending := old.DroppedCheckpoint; pending != nil {
+				contained, ancestryErr := workspace.BaseIsAncestor(ctx, m.repoRoot, pending.HeadSHA, base)
+				if ancestryErr != nil || !contained {
+					old.Branch, old.HeadSHA = pending.Branch, pending.HeadSHA
+					old.DroppedCheckpoint = nil
+				}
+			} else if old.HeadSHA != "" && old.Branch != "" {
+				contained, ancestryErr := workspace.BaseIsAncestor(ctx, m.repoRoot, old.HeadSHA, base)
+				if ancestryErr == nil && contained {
+					old.DroppedCheckpoint = &workspace.DroppedCheckpoint{Branch: old.Branch, HeadSHA: old.HeadSHA}
+					old.Branch, old.HeadSHA = "", ""
+					old.CheckpointDropped = true
+				}
+			}
 		}
 		old.PolicyTreeDigest = tree
 		old.TaskDigest = contract.DigestWorkUnit(wu)
@@ -1525,14 +1543,36 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 			st.ProjectionCommentID = existingID
 		}
 	}
+	pending := st.DroppedCheckpoint
+	if pending != nil {
+		if pending.Branch != branch || st.ForkRepo != "" || st.PRNumber != 0 {
+			return nil, fmt.Errorf("checkpoint differs from pending recovery identity")
+		}
+		for _, pair := range [][2]string{{pending.HeadSHA, st.BaseSHA}, {st.BaseSHA, head}} {
+			contained, ancestryErr := workspace.BaseIsAncestor(ctx, m.repoRoot, pair[0], pair[1])
+			if ancestryErr != nil || !contained {
+				return nil, fmt.Errorf("checkpoint recovery ancestry could not be verified")
+			}
+		}
+	}
 	st.Branch = branch
 	st.HeadSHA = head
+	st.DroppedCheckpoint = nil
 	if ps, ok := m.store.(coordination.PublishingStore); ok {
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return nil, err
 		}
-		if _, err = ps.CompareAndSwapAndPublish(ctx, n, rev, raw, branch, head); err != nil {
+		if pending != nil {
+			expected, ok := m.store.(coordination.ExpectedCheckpointPublishingStore)
+			if !ok {
+				return nil, fmt.Errorf("store does not support fenced checkpoint recovery")
+			}
+			_, err = expected.CompareAndSwapAndPublishExpected(ctx, n, rev, raw, branch, head, pending.HeadSHA)
+		} else {
+			_, err = ps.CompareAndSwapAndPublish(ctx, n, rev, raw, branch, head)
+		}
+		if err != nil {
 			if errors.Is(err, coordination.ErrConflict) {
 				return nil, ErrClaimFence
 			}

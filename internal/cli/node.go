@@ -215,6 +215,10 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								return
 							}
 							result, err := execute(pulled)
+							if errors.Is(err, lease.ErrPlanReplanLimit) {
+								admitted.Add(-1)
+								continue
+							}
 							completed.Add(1)
 							outputMu.Lock()
 							if err != nil {

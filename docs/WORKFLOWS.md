@@ -147,3 +147,13 @@ Issue submission announces checkpoint creation, validation, checkpoint push/reco
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents, and approve issues.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI commands, handoffs, recovery, and worker pools.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, claim fencing, and checkpoint design.
+
+### Recovering from a rejected agent plan
+
+When a reviewer returns `CHANGES_REQUESTED`, SwarmOS records planning as the next phase and prints the rejected review plus the command to revise it: `swarm issue work <N> --phase plan`, or `swarm pr work <PR> --phase plan` for PR work. Each invocation runs at most one planning and review round. After plan-only work, run `swarm issue review-plan <N>` to review the revised reports.
+
+Automatic retries are limited per approved task revision. The default allows two extra planner attempts: initial plan → reject → retry 1 → reject → retry 2 → reject → refused. Failed planner runs and unchanged reports also consume attempts; review-only runs do not. `swarm issue status <N>` shows the used count, approved limit, and next-phase reason. `swarm node run` skips capped tasks and continues with other ready issues.
+
+To recover when the budget is exhausted, revise both reports in the managed worktree and use `swarm issue stage <N> --phase plan` or `swarm pr stage <PR> --phase plan`. Successful non-fork staging resets the count. An authenticated human review of either verdict, or maintainer approval of a changed WorkUnit revision, also resets it. Automatic plans, new claims, and approval of identical content preserve the count.
+
+With `plan_mode: agent`, manual staging is disabled: use `swarm issue review-plan <N>` to review existing reports, or edit the WorkUnit and have a maintainer approve the changed revision. With `plan_mode: interactive`, work pauses for manual staging even when the stored budget is exhausted, without spending an attempt. Fork staging preserves the count; fork tasks need maintainer human review or a changed approved revision to reset it. Exhaustion never approves a plan or bypasses its review gate.

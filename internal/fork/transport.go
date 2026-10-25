@@ -434,6 +434,8 @@ func expectedResultPresent(st *lease.IssueState, req lease.ForkRequest) bool {
 func mapCoordinatorError(op, msg string) error {
 	lower := strings.ToLower(msg)
 	switch {
+	case strings.Contains(lower, lease.ErrPlanReplanLimit.Error()):
+		return fmt.Errorf("%w: %s", lease.ErrPlanReplanLimit, msg)
 	case strings.Contains(lower, lease.ErrClaimFence.Error()):
 		return fmt.Errorf("%w: %s", lease.ErrClaimFence, msg)
 	case strings.Contains(lower, lease.ErrApprovalRequired.Error()):

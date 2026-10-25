@@ -50,6 +50,8 @@ As a repo admin, tailor three foundational files before your team or community s
    - `default_gate: none | agent | human` — Sets the minimum review a plan needs before implementation. A WorkUnit or workflow can ask for a stricter gate, but never a weaker one.
    - `security.reviewer_collaborators`, `security.reviewer_agents`, and `security.independent_review` — Name who can approve plans. Reviewers listed in `reviewer_collaborators` are assigned and mentioned when a plan pauses at a human gate. See [Name your reviewers](GITHUB.md#name-your-reviewers).
 
+Set `lease.plan_replan_limit` to control automatic planner retries after an agent rejects a plan. Omit it for two extra attempts, set it to `0` to require manual recovery after the initial rejection, or choose another nonnegative integer. The limit comes from each task's approved baseline; changing the checkout's config does not change a running task's budget. Node workers skip tasks that exhaust it. See [Recovering from a rejected agent plan](WORKFLOWS.md#recovering-from-a-rejected-agent-plan) for staging, human review, and fork reset behavior.
+
 Commit your `.swarm/` and `.github/` changes to `main` so they become the immutable baseline for all tasks.
 
 ---

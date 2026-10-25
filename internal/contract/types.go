@@ -146,6 +146,7 @@ func (c *SwarmConfig) CommitMessageDetail() string {
 }
 
 type LeaseConfig struct {
+	PlanReplanLimit   *int   `yaml:"plan_replan_limit,omitempty" json:"plan_replan_limit,omitempty"`
 	RebaseRepairLimit *int   `yaml:"rebase_repair_limit,omitempty" json:"rebase_repair_limit,omitempty"`
 	Duration          string `yaml:"duration" json:"duration"`
 	Renewable         bool   `yaml:"renewable" json:"renewable"`
@@ -266,4 +267,12 @@ func (c LeaseConfig) RebaseRepairAttempts() int {
 		return 2
 	}
 	return *c.RebaseRepairLimit
+}
+
+// PlanReplanAttempts is the number of automatic retries after a rejected plan.
+func (c LeaseConfig) PlanReplanAttempts() int {
+	if c.PlanReplanLimit == nil {
+		return 2
+	}
+	return *c.PlanReplanLimit
 }

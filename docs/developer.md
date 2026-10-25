@@ -347,3 +347,9 @@ By default, `swarm node run` drains the currently available ready queue and exit
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS state refs, fencing, and checkpoint mechanics.
 - **[Security Policy (`SECURITY.md`)](../SECURITY.md)** — Trust boundaries, reviewer isolation, and release verification.
+
+### Revising rejected plans
+
+After `CHANGES_REQUESTED`, issue and PR work print the review identity and the next planning command. Run that command once, then review with `swarm issue review-plan <issue>`. Work does not repeat planning and review within the same invocation. By default, the initial rejected plan can receive two additional automatic planner attempts; failed or unchanged attempts count toward that limit.
+
+Check `swarm issue status <issue>` for the count and limit. When automation reaches the limit, stage revised reports in the appropriate issue or PR worktree (`swarm issue stage <issue> --phase plan` or `swarm pr stage <PR> --phase plan`), request an authenticated human review, or revise the WorkUnit for maintainer approval. Successful non-fork staging resets the count; fork staging preserves it and needs a maintainer review or changed approved revision to reset. `plan_mode: agent` disables manual staging, while `plan_mode: interactive` always pauses for it without spending automatic attempts. Node workers move past capped tasks. See [the recovery workflow](WORKFLOWS.md#recovering-from-a-rejected-agent-plan) for the complete sequence.

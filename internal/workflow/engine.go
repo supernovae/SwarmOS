@@ -293,6 +293,11 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	if err != nil {
 		return nil, err
 	}
+	if opts.Phase == "plan" || opts.Phase == "all" && (!hasDesignAndTestPlanArtifacts(state) || hasRejectedReview(state)) {
+		if err := e.LeaseManager.CheckPlanReplan(state); err != nil {
+			return nil, err
+		}
+	}
 	agents := make(map[string]string, 4)
 	binaries := make(map[string]string, 4)
 	approvalState := *state
@@ -1231,7 +1236,7 @@ func truncateStr(s string, maxLen int) string {
 // cause a new plan to be rejected.
 func hasRejectedReview(st *lease.IssueState) bool {
 	_, _, findings := rejectedPlanContext(st)
-	return findings != ""
+	return findings != "" || st != nil && st.PendingPlanReview != nil
 }
 func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 	if st == nil {

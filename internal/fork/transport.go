@@ -193,12 +193,15 @@ func IsTrustedBotComment(c *tracker.Comment) bool {
 }
 
 type Gateway struct {
-	Tracker      tracker.Tracker
-	Store        coordination.Store
-	ForkRepo     string
-	PollInterval time.Duration
-	PollTimeout  time.Duration
-	Dispatcher   func(ctx context.Context, issueNumber int, comment *tracker.Comment) error
+	OnProgress    func(ProgressEvent)
+	progressTicks <-chan time.Time
+	progressNow   func() time.Time
+	Tracker       tracker.Tracker
+	Store         coordination.Store
+	ForkRepo      string
+	PollInterval  time.Duration
+	PollTimeout   time.Duration
+	Dispatcher    func(ctx context.Context, issueNumber int, comment *tracker.Comment) error
 }
 
 func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.IssueState, error) {
@@ -242,6 +245,8 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 		return nil, fmt.Errorf("github tracker returned invalid comment ID for fork request")
 	}
 	reqID := comment.ID
+	reporting := startRequestProgress(ctx, req.Operation, reqID, g.OnProgress, g.progressTicks, g.progressNow)
+	defer reporting.stop()
 
 	if g.Dispatcher != nil {
 		_ = g.Dispatcher(ctx, req.IssueNumber, comment)
@@ -259,11 +264,12 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 	// visibility cannot be skipped when newer comments appear first.
 	since = since.Add(-time.Second)
 	for {
-		st, done, checkErr := g.checkRequestOutcome(ctx, req, reqID, &since)
+		st, done, checkErr := g.checkRequestOutcomeReporting(ctx, req, reqID, &since, func() { reporting.finish("rejected") })
 		if checkErr != nil {
 			return nil, checkErr
 		}
 		if done {
+			reporting.finish("accepted")
 			return st, nil
 		}
 		timer := time.NewTimer(interval)
@@ -283,6 +289,10 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 }
 
 func (g *Gateway) checkRequestOutcome(ctx context.Context, req lease.ForkRequest, reqID int64, since *time.Time) (*lease.IssueState, bool, error) {
+	return g.checkRequestOutcomeReporting(ctx, req, reqID, since, nil)
+}
+
+func (g *Gateway) checkRequestOutcomeReporting(ctx context.Context, req lease.ForkRequest, reqID int64, since *time.Time, rejected func()) (*lease.IssueState, bool, error) {
 	var comments []*tracker.Comment
 	var err error
 	if incremental, ok := g.Tracker.(interface {
@@ -324,6 +334,9 @@ func (g *Gateway) checkRequestOutcome(ctx context.Context, req lease.ForkRequest
 			continue
 		}
 		if !res.Success {
+			if rejected != nil {
+				rejected()
+			}
 			return nil, false, mapCoordinatorError(req.Operation, res.Error)
 		}
 		st, err := g.loadUpstreamState(ctx, req.IssueNumber)

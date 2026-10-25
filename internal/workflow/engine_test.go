@@ -445,8 +445,27 @@ func TestEngineSetupProgressSharedSessionBundles(t *testing.T) {
 	if _, err = engine.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
 		t.Fatal(err)
 	}
+	// The mock's real child command checks evidence recorded synchronously by
+	// the observer, so final-output ordering alone cannot satisfy this test.
+	marker := filepath.Join(t.TempDir(), "setup-delivered")
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "test -f '"+marker+"' && printf 'changed\\n' > implementation.txt && printf 'private-child-output secret-token\\n'")
 	var events []ProgressEvent
-	reporter := NewProgressReporter(t.Context(), func(event ProgressEvent) { events = append(events, event) })
+	reporter := NewProgressReporter(t.Context(), func(event ProgressEvent) {
+		events = append(events, event)
+		if event.Stage == "bundle" && event.Status == "started" {
+			var starts []string
+			for _, e := range events {
+				if e.Status == "started" && (e.Stage == "claim" || e.Stage == "workspace" || e.Stage == "bundle") {
+					starts = append(starts, e.Stage)
+				}
+			}
+			if len(starts) >= 3 && slices.Equal(starts[:3], []string{"claim", "workspace", "bundle"}) {
+				if err := os.WriteFile(marker, []byte("delivered"), 0600); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+	})
 	defer reporter.Close()
 	result, err := engine.ExecuteWork(t.Context(), WorkOptions{
 		RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Headless: true,

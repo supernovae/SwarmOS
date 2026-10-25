@@ -3,10 +3,14 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/supernovae/swarmos/internal/pr"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHeadlessWorkProgressKeepsJSONOnStdout(t *testing.T) {
@@ -148,6 +152,7 @@ func assertSetupProgress(t *testing.T, text string, claims, workspaces int) {
 }
 
 func TestIssueWorkSetupProgressModes(t *testing.T) {
+	stable := map[string]any{}
 	for _, headless := range []bool{false, true} {
 		for _, next := range []bool{false, true} {
 			for _, enabled := range []bool{false, true} {
@@ -163,9 +168,17 @@ func TestIssueWorkSetupProgressModes(t *testing.T) {
 					if next {
 						target = "--next"
 					}
-					cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "work", target, "--agent", "mock", "--phase", "plan", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(enabled)})
+					args := []string{"--root", f.root, "--backend", "local", "issue", "work", target, "--agent", "mock", "--phase", "plan", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(enabled)}
+					if headless {
+						args = append(args, "--json")
+					}
+					cmd.SetArgs(args)
 					if err := cmd.Execute(); err != nil {
 						t.Fatalf("%v: %s", err, diagnostics.String())
+					}
+					if headless {
+						key := strconv.FormatBool(next)
+						assertStableSetupJSON(t, output.Bytes(), stable, key)
 					}
 					if enabled {
 						count := 1
@@ -189,19 +202,27 @@ func TestIssueWorkSetupProgressModes(t *testing.T) {
 }
 
 func TestPRWorkSetupProgressModes(t *testing.T) {
+	stable := map[string]any{}
 	for _, headless := range []bool{false, true} {
 		for _, enabled := range []bool{false, true} {
 			t.Run(strconv.FormatBool(headless)+"/"+strconv.FormatBool(enabled), func(t *testing.T) {
 				f, _, number := submittedPRFixture(t, "none")
 				// Repeat to cover fresh acquisition followed by persisted claim resumption.
-				for range 2 {
+				for attempt := range 2 {
 					cmd := NewRootCmd()
 					var output, diagnostics bytes.Buffer
 					cmd.SetOut(&output)
 					cmd.SetErr(&diagnostics)
-					cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "pr", "work", strconv.Itoa(number), "--agent", "mock", "--phase", "plan", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(enabled)})
+					args := []string{"--root", f.root, "--backend", "local", "pr", "work", strconv.Itoa(number), "--agent", "mock", "--phase", "plan", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(enabled)}
+					if headless {
+						args = append(args, "--json")
+					}
+					cmd.SetArgs(args)
 					if err := cmd.Execute(); err != nil {
 						t.Fatalf("%v: %s", err, diagnostics.String())
+					}
+					if headless {
+						assertStableSetupJSON(t, output.Bytes(), stable, strconv.Itoa(attempt))
 					}
 					if enabled {
 						assertSetupProgress(t, diagnostics.String(), 2, 1)
@@ -237,4 +258,59 @@ func TestClaimSetupProgressStopsAtFailure(t *testing.T) {
 	if !strings.Contains(text, "claim started") || strings.Contains(text, "workspace started") || strings.Contains(text, "bundle started") {
 		t.Fatalf("failure progress: %s", text)
 	}
+}
+
+func TestSetupProgressHeartbeatFormatting(t *testing.T) {
+	for _, phase := range []string{"claim", "workspace", "bundle"} {
+		t.Run(phase, func(t *testing.T) {
+			cmd := NewRootCmd()
+			var stdout, stderr bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			workProgressPrinter(progressWriter(cmd))(workflow.ProgressEvent{
+				IssueNumber: 42, Stage: phase, Status: "running", StageElapsed: 15 * time.Second, Elapsed: 31 * time.Second,
+			})
+			want := "Issue #42: " + phase + " running (stage 15s, elapsed 31s)\n"
+			if stderr.String() != want || stdout.Len() != 0 {
+				t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// Compare stable outcome fields while allowing paths, IDs and timestamps to vary.
+func assertStableSetupJSON(t *testing.T, data []byte, previous map[string]any, key string) {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	var outcome struct {
+		Kind, Status string
+		Result       json.RawMessage
+	}
+	if err := decoder.Decode(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		t.Fatalf("extra stdout: %v", err)
+	}
+	var work workflow.WorkResult
+	if outcome.Kind == "pr-work" {
+		var result pr.Result
+		if err := json.Unmarshal(outcome.Result, &result); err != nil || result.Work == nil {
+			t.Fatalf("missing PR work: %s (%v)", data, err)
+		}
+		work = *result.Work
+	} else {
+		if err := json.Unmarshal(outcome.Result, &work); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if work.IssueNumber == 0 || work.PhaseCompleted == "" {
+		t.Fatalf("missing work fields: %s", data)
+	}
+	stable := []any{outcome.Kind, outcome.Status, work.IssueNumber, work.PhaseCompleted, work.ValidationPassed, work.PausedForHuman, work.HandedOffToPhase, work.RoleAgentsUsed}
+	if before, ok := previous[key]; ok && !reflect.DeepEqual(before, stable) {
+		t.Fatalf("progress changed outcome: %v != %v", before, stable)
+	}
+	previous[key] = stable
 }

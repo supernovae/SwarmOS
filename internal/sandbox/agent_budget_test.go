@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -174,6 +175,9 @@ func TestLongAgentBudgetWarnsTwoMinutesBeforeDeadline(t *testing.T) {
 // All four native turn loops use nativeInstruction; only this coordinator-owned
 // input boundary may pause the working budget.
 func TestNativeInstructionPausesBudget(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("native input is qualified on Linux")
+	}
 	f := &fakeBudgetClock{now: time.Now()}
 	ctx, b := newAgentBudget(context.Background(), WorkerOptions{Limits: contract.AgentLimits{Active: time.Minute, Wall: 4 * time.Hour, ExcludeIdle: true}}, f.clock())
 	defer b.close()

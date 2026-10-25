@@ -16,12 +16,14 @@ import (
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1175,18 +1177,52 @@ func TestForkCLISmoke(t *testing.T) {
 		return err
 	}
 
+	var lastDiagnostics string
 	runCmd := func(opts RootOptions, args ...string) (string, error) {
 		opts.forkPollInterval = 5 * time.Millisecond
 		opts.forkPollTimeout = 30 * time.Second
 		opts.forkDispatcher = dispatch
 		opts.nowFn = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 		cmd := newRootCmdWithOptions(&opts)
-		var out bytes.Buffer
+		var out, diagnostics bytes.Buffer
 		cmd.SetOut(&out)
-		cmd.SetErr(&out)
+		cmd.SetErr(&diagnostics)
 		cmd.SetArgs(args)
 		err := cmd.ExecuteContext(ctx)
+		if strings.Contains(out.String(), "upstream fork coordinator Action") {
+			t.Fatal("fork progress on stdout")
+		}
+		if slices.Contains(args, "--json") {
+			decoder := json.NewDecoder(strings.NewReader(out.String()))
+			var result map[string]any
+			if e := decoder.Decode(&result); e != nil {
+				t.Fatalf("invalid JSON stdout: %v: %s", e, out.String())
+			}
+			if result["kind"] == nil {
+				t.Fatalf("missing JSON kind: %v", result)
+			}
+			if e := decoder.Decode(new(any)); e != io.EOF {
+				t.Fatalf("extra stdout: %v", e)
+			}
+		}
+		lastDiagnostics = diagnostics.String()
 		return out.String(), err
+	}
+
+	// Require reporting at explicit mutation calls, including rejected requests.
+	runMutation := func(operation, outcome string, opts RootOptions, args ...string) (string, error) {
+		t.Helper()
+		out, err := runCmd(opts, args...)
+		posted := regexp.MustCompile(`(?m)^Fork ` + operation + ` request ([1-9][0-9]*): waiting on the upstream fork coordinator Action$`).FindStringSubmatchIndex(lastDiagnostics)
+		if posted == nil {
+			t.Fatalf("missing posted %s progress: %s", operation, lastDiagnostics)
+		}
+		id := lastDiagnostics[posted[2]:posted[3]]
+		terminal := regexp.MustCompile(`(?m)^Fork ` + operation + ` request ` + id + `: ` + outcome + ` \(elapsed [0-9]+(?:h|m|s)[0-9hms.]*\)$`).FindStringIndex(lastDiagnostics)
+		if terminal == nil || terminal[0] <= posted[1] {
+			t.Fatalf("missing ordered %s outcome: %s", outcome, lastDiagnostics)
+		}
+		return out, err
 	}
 
 	// 0. Flag & backend validation checks
@@ -1236,11 +1272,26 @@ func TestForkCLISmoke(t *testing.T) {
 	git(aliceRoot, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "no-upstream-push.git"))
 
 	// 3. Alice runs `swarm --fork issue claim 42 --agent mock`
-	claimOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "claim", "42", "--agent", "mock")
+	claimOut, err := runMutation("acquire", "accepted", RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "claim", "42", "--agent", "mock")
 	if err != nil {
 		t.Fatalf("alice --fork claim 42 failed: %v\n%s", err, claimOut)
 	}
 	t.Logf("claim output:\n%s", claimOut)
+	if out, err := runMutation("renew", "accepted", RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "renew", "42", "--json"); err != nil {
+		t.Fatalf("JSON renew: %v %s", err, out)
+	} else {
+		var result struct {
+			Kind        string           `json:"kind"`
+			IssueNumber int              `json:"issue_number"`
+			State       lease.IssueState `json:"state"`
+		}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Kind != "renew" || result.IssueNumber != 42 || result.State.Lease.Owner != "alice" || result.State.Lease.Status != "active" || result.State.BaseSHA != shaA || result.State.ForkRepo != "alice/swarm" {
+			t.Fatalf("unexpected renew JSON: %s", out)
+		}
+	}
 
 	upstreamStore := coordination.NewGitStore(upstreamRoot)
 	readUpstreamState := func() *lease.IssueState {
@@ -1370,7 +1421,7 @@ func TestForkCLISmoke(t *testing.T) {
 	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "issue", "approve", "43"); err != nil {
 		t.Fatalf("approve 43: %v\n%s", err, out)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "claim", "43", "--agent", "mock"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "claim", "43", "--agent", "mock", "--json"); err != nil {
 		t.Fatalf("alice claim 43: %v\n%s", err, out)
 	}
 
@@ -1386,7 +1437,7 @@ func TestForkCLISmoke(t *testing.T) {
 	git(bobRoot, "remote", "add", "fork", bobForkBare)
 	git(bobRoot, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "no-upstream-push.git"))
 
-	if out, err := runCmd(RootOptions{RepoRoot: bobRoot, Backend: "github", trackerOverride: bobTracker}, "--fork", "issue", "claim", "43", "--agent", "mock"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: bobRoot, Backend: "github", trackerOverride: bobTracker}, "--fork", "issue", "claim", "43", "--agent", "mock", "--json"); err != nil {
 		t.Fatalf("bob takeover claim 43 failed: %v\n%s", err, out)
 	}
 	raw43Before, _, err := upstreamStore.Load(ctx, 43)
@@ -1400,7 +1451,7 @@ func TestForkCLISmoke(t *testing.T) {
 	}
 
 	// Alice's stale renew and submit on #43 must fail and leave upstream #43 state untouched
-	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "renew", "43"); err == nil {
+	if _, err := runMutation("renew", "rejected", RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "renew", "43", "--json"); err == nil {
 		t.Fatal("expected alice stale renew on #43 to fail after bob takeover")
 	}
 	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "43"); err == nil {
@@ -1414,6 +1465,9 @@ func TestForkCLISmoke(t *testing.T) {
 	_ = json.Unmarshal(raw43After, &st43After)
 	if st43After.Lease.Owner != "bob" || st43After.Lease.ClaimID != st43Before.Lease.ClaimID || st43After.ForkRepo != "bob/swarm" {
 		t.Fatalf("alice stale operations modified #43 state after takeover: %+v", st43After)
+	}
+	if out, err := runMutation("release", "accepted", RootOptions{RepoRoot: bobRoot, Backend: "github", trackerOverride: bobTracker}, "--fork", "issue", "release", "43", "--json"); err != nil {
+		t.Fatalf("JSON release: %v %s", err, out)
 	}
 }
 

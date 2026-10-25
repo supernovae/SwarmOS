@@ -115,7 +115,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				return writeJSON(cmd, map[string]any{"kind": "work-dry-run", "issue_number": opts.IssueNumber, "effective_plan": preflight})
 			}
 			if headless && progressOutput {
-				opts.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
+				opts.OnProgress = workProgressPrinter(progressWriter(cmd))
 			}
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
 			if err != nil {

@@ -95,3 +95,66 @@ jobs:
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
           done
+
+  policy:
+    name: SwarmOS policy validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      # Same rule as the shipped template: maintainers' own branches list
+      # protected changes; agent branches, forks, and other authors are enforced.
+      - name: Decide protected-path handling
+        id: protected
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          mode=enforce
+          case "$HEAD_REF" in
+            swarm/*) ;;
+            *)
+              if [ "$HEAD_REPO" = "$REPO" ]; then
+                permission=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission 2>/dev/null || true)
+                case "$permission" in admin|maintain|write) mode=report ;; esac
+              fi
+              ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+      # Build the validator from the trusted base so a pull request never
+      # chooses the code that judges it.
+      - name: Build validator from the trusted base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          BASE_SHA=$(git rev-parse HEAD)
+          if [ "$EVENT_NAME" = pull_request ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
+            BASE_SHA=$(git rev-parse HEAD^1)
+          fi
+          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/trusted" "$BASE_SHA"
+          (cd "$RUNNER_TEMP/trusted" && go build -o "$RUNNER_TEMP/swarm-bin/swarm" ./cmd/swarm)
+      - name: Validate against trusted base
+        env:
+          PROTECTED_MODE: ${{ steps.protected.outputs.mode || 'enforce' }}
+        run: |
+          swarm="$RUNNER_TEMP/swarm-bin/swarm"
+          if ! "$swarm" repo validate --help | grep -q -- '--protected-paths'; then
+            echo "::notice::The validator at the trusted base predates protected-path reporting; this check starts with the next pull request."
+            exit 0
+          fi
+          status=0
+          "$swarm" repo validate --base "$BASE_SHA" --protected-paths "$PROTECTED_MODE" > "$RUNNER_TEMP/swarm-validate.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/swarm-validate.txt"
+          { echo '### SwarmOS validation'; echo '```text'; cat "$RUNNER_TEMP/swarm-validate.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

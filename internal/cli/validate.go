@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -79,7 +80,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 }
 
 func newRepoValidateCmd(options *RootOptions) *cobra.Command {
-	var baseSHA string
+	var baseSHA, protectedMode string
 	var asJSON bool
 	cmd := &cobra.Command{Use: "validate", Short: "Validate a repository checkout against a trusted immutable base", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		if baseSHA == "" {
@@ -87,12 +88,34 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 			reportJSONFailure(cmd, asJSON, "validation", err)
 			return err
 		}
-		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork})
+		if protectedMode != "enforce" && protectedMode != "report" {
+			err := fmt.Errorf("--protected-paths must be enforce or report, not %q", protectedMode)
+			reportJSONFailure(cmd, asJSON, "validation", err)
+			return err
+		}
+		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork, ReportProtectedChanges: protectedMode == "report"})
+		if !asJSON && report != nil {
+			writeProtectedChanges(cmd, report.ProtectedChanges)
+		}
 		return writeValidationOutcome(cmd, report, err, asJSON)
 	}}
 	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted full base commit SHA to validate against (required)")
+	cmd.Flags().StringVar(&protectedMode, "protected-paths", "enforce", "Protected-path changes: enforce (fail) or report (list them and run checks, for maintainer pull requests)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured validation outcome")
 	return cmd
+}
+
+// writeProtectedChanges lists reported protected-path changes so reviewers see
+// policy edits at a glance, and says when merging will require re-approval.
+func writeProtectedChanges(cmd *cobra.Command, files []string) {
+	policy := false
+	for _, file := range files {
+		fmt.Fprintf(cmd.OutOrStdout(), "PROTECTED %s\n", file)
+		policy = policy || strings.HasPrefix(file, ".swarm/")
+	}
+	if policy {
+		fmt.Fprintln(cmd.OutOrStdout(), "NOTE .swarm/ policy changed; approved WorkUnits need swarm issue approve again after this merges")
+	}
 }
 
 func writeValidationOutcome(cmd *cobra.Command, report *validation.ValidationReport, validationErr error, asJSON bool) error {

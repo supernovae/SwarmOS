@@ -39,12 +39,15 @@ type CheckRunOutcome struct {
 }
 
 type ValidationReport struct {
-	Passed        bool              `json:"passed"`
-	BaseSHA       string            `json:"base_sha"`
-	HeadSHA       string            `json:"head_sha"`
-	ModifiedFiles []string          `json:"modified_files"`
-	CheckOutcomes []CheckRunOutcome `json:"check_outcomes"`
-	Artifact      contract.Artifact `json:"artifact"`
+	Passed        bool     `json:"passed"`
+	BaseSHA       string   `json:"base_sha"`
+	HeadSHA       string   `json:"head_sha"`
+	ModifiedFiles []string `json:"modified_files"`
+	// ProtectedChanges lists changed files that match the trusted protected
+	// paths when they were reported rather than rejected.
+	ProtectedChanges []string          `json:"protected_changes,omitempty"`
+	CheckOutcomes    []CheckRunOutcome `json:"check_outcomes"`
+	Artifact         contract.Artifact `json:"artifact"`
 }
 
 type ValidateOptions struct {
@@ -57,6 +60,11 @@ type ValidateOptions struct {
 	// against which committed candidate changes are compared.
 	BaseSHA  string
 	ForkMode bool
+	// ReportProtectedChanges lists protected-path changes in the report instead
+	// of rejecting them, then runs the required checks as usual. It is honored
+	// only in CIMode, where `swarm repo validate` checks a maintainer-authored
+	// pull request at merge time; agent work and fork mode always reject.
+	ReportProtectedChanges bool
 }
 
 // Validate loads checks and protected paths exclusively from the immutable base.
@@ -87,6 +95,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err != nil {
 		return nil, err
 	}
+	if opts.ReportProtectedChanges && (!opts.CIMode || opts.ForkMode) {
+		return nil, errors.New("protected-path reporting is only available for repository validation outside fork mode")
+	}
 	if opts.ForkMode {
 		for _, file := range modified {
 			if file == ".swarm" || strings.HasPrefix(file, ".swarm/") || file == ".github/workflows" || strings.HasPrefix(file, ".github/workflows/") {
@@ -96,11 +107,16 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	}
 	// Authorization for explicit protected-path exceptions is checked by the
 	// approval state machine before this call. This boolean is only its input.
+	var protected []string
 	if !wu.AllowHarnessChanges {
 		for _, file := range modified {
 			for _, pattern := range spec.ProtectedPaths {
 				if matchGlobPattern(pattern, file) {
-					return nil, fmt.Errorf("%w: file %q matches protected pattern %q", ErrProtectedPathModified, file, pattern)
+					if !opts.ReportProtectedChanges {
+						return nil, fmt.Errorf("%w: file %q matches protected pattern %q", ErrProtectedPathModified, file, pattern)
+					}
+					protected = append(protected, file)
+					break
 				}
 			}
 		}
@@ -117,7 +133,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err != nil {
 		return nil, err
 	}
-	report := &ValidationReport{Passed: true, BaseSHA: baseSHA, HeadSHA: headSHA, ModifiedFiles: modified}
+	report := &ValidationReport{Passed: true, BaseSHA: baseSHA, HeadSHA: headSHA, ModifiedFiles: modified, ProtectedChanges: protected}
 	var markdown strings.Builder
 	markdown.WriteString("# Validation Report\n\n")
 	markdown.WriteString(fmt.Sprintf("Trusted base: `%s`  \nCandidate head: `%s`\n\n", baseSHA, headSHA))

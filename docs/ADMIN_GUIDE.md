@@ -153,7 +153,7 @@ When a worker runs `swarm issue submit <N>`, SwarmOS opens (or reuses) a linked 
 3. **`## 📦 Attached SwarmOS Artifacts`**:
    - Collapsible `<details>` sections containing the exact `PLAN.md`, `TEST_PLAN.md`, `REVIEW.md` audit, implementation diff stat, and baseline-pinned validation check results.
 4. **Independent CI Verification**:
-   - The consumer `.github/workflows/swarm-validate.yml` runs `swarm repo validate --base "$BASE_SHA"` in GitHub Actions to confirm all required checks pass and no protected paths were modified without requiring an issue claim.
+   - The consumer `.github/workflows/swarm-validate.yml` runs `swarm repo validate --base "$BASE_SHA"` in GitHub Actions to confirm all required checks pass and no protected paths were modified without requiring an issue claim. For pull requests that maintainers open from branches in the repository, it lists protected-path changes in the job summary instead of failing, so policy edits stay visible without blocking the people allowed to make them.
 
 5. **Hosted Review Bots (optional)**:
    - If your organization uses Codex code review, Copilot code review, or Cursor Bugbot, they can review the Draft PR like any other. `swarm pr status <PR>` lists their checks and reviews and says whether each one covers the current head. See [Working Alongside Hosted Agents & Review Bots](GITHUB.md#4-working-alongside-hosted-agents--review-bots).

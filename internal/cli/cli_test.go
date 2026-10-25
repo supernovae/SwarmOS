@@ -40,33 +40,20 @@ type cliFixture struct {
 
 func newCLIFixture(t *testing.T) *cliFixture {
 	t.Helper()
+	return newCLIFixtureAt(t, t.TempDir())
+}
+
+func newCLIFixtureAt(t *testing.T, root string) *cliFixture {
+	t.Helper()
 	// This fixture intentionally runs local mock agents and validation.
 	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
-	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("APPDATA", t.TempDir())
 	t.Setenv("SWARM_USER", "alice")
 	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
 	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
-	git := func(args ...string) {
-		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
-	git("init", "-b", "main")
-	git("config", "user.name", "CLI Test")
-	git("config", "user.email", "test@example.invalid")
-	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: root}); err != nil {
-		t.Fatal(err)
-	}
-	policy := "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
-	if err := os.WriteFile(filepath.Join(root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git("add", ".")
-	git("commit", "-m", "approved harness")
+	materializeCLISeed(t, root)
 	tr := tracker.NewLocalTracker(root)
 	cfg, err := harness.LoadConfig(root)
 	if err != nil {

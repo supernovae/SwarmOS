@@ -22,7 +22,13 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	for _, root := range cliSeeds.cleanup {
+		if err := os.RemoveAll(root); err != nil && code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
 }
 
 // This opt-in test uses the operator's existing Codex login and model quota.

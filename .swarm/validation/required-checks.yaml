@@ -1,13 +1,19 @@
 required_checks:
+    - name: fmt
+      command: 'unformatted=$(gofmt -s -l .); if [ -n "$unformatted" ]; then printf "%s\n" "$unformatted"; exit 1; fi'
+      timeout: 2m
     - name: build
       command: go build ./...
+      timeout: 5m
+    - name: lint
+      command: go vet ./...
+      timeout: 5m
+    - name: staticcheck
+      command: go tool staticcheck ./...
       timeout: 5m
     - name: test
       command: go test ./...
       timeout: 10m
-    - name: lint
-      command: go vet ./...
-      timeout: 5m
 protected_paths:
     - .github/workflows/**
     - .swarm/validation/**

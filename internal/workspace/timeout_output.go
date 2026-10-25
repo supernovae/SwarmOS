@@ -97,7 +97,6 @@ func HasCheckpointableChanges(ctx context.Context, root string) (bool, error) {
 		}
 		name := e[3:]
 		if e[0] == 'R' || e[0] == 'C' || e[1] == 'R' || e[1] == 'C' {
-			i++
 			return true, nil
 		}
 		if name == ".swarm/active-output" || strings.HasPrefix(name, ".swarm/active-output/") {

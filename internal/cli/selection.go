@@ -98,6 +98,14 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			if phase == "all" && state.Lease.Status == "handoff" && state.Lease.NextPhase != "" {
 				phase = state.Lease.NextPhase
 			}
+			if phase == "all" || phase == "plan" {
+				if err := mgr.CheckPlanReplan(state); err != nil {
+					if errors.Is(err, lease.ErrPlanReplanLimit) {
+						continue
+					}
+					return nil, err
+				}
+			}
 			if state.EffectiveGate == contract.GateHuman && phase != "plan" {
 				hasPlan := false
 				for _, artifact := range state.Artifacts {

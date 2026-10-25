@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -134,6 +135,10 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			case "submit":
 				result, err = service.Submit(cmd.Context(), opts.Number)
 			}
+			recovery := ""
+			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
+				recovery = planReviewRecovery(rootOpts, result.State, "pr", opts.Number)
+			}
 			opts.Work.SetupProgress.Close()
 			if asJSON || opts.Work.InspectOnly {
 				status := "completed"
@@ -141,6 +146,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					status = result.Status
 				}
 				outcome := map[string]any{"kind": "pr-" + operation, "status": status, "result": result}
+				if recovery != "" {
+					outcome["recovery"] = recovery
+				}
 				if err != nil {
 					outcome["status"], outcome["error"] = "failed", err.Error()
 				}
@@ -148,6 +156,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					return outputErr
 				}
 			} else if result != nil {
+				if recovery != "" {
+					fmt.Fprintln(cmd.OutOrStdout(), recovery)
+				}
 				fmt.Fprintf(cmd.OutOrStdout(), "PR #%d %s: issue=#%d head=%s base=%s\n", opts.Number, result.Status, result.IssueNumber, result.HeadSHA, result.BaseSHA)
 				if result.WorkPreflight != nil {
 					for _, warning := range result.WorkPreflight.Warnings {

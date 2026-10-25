@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -125,6 +126,13 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
 			opts.SetupProgress.Close()
+			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
+				recovery := planReviewRecovery(rootOpts, result.State, "issue", opts.IssueNumber)
+				if jsonOutput {
+					return &planRecoveryError{err: err, recovery: recovery}
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), recovery)
+			}
 			if err != nil {
 				return err
 			}

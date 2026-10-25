@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/spf13/cobra"
 )
@@ -14,6 +15,11 @@ func writeJSON(cmd *cobra.Command, value any) error {
 // command returns an error, so scripted callers always receive JSON.
 func reportJSONFailure(cmd *cobra.Command, asJSON bool, kind string, err error) {
 	if asJSON && err != nil {
-		_ = writeJSON(cmd, map[string]any{"kind": kind, "status": "failed", "error": err.Error()})
+		outcome := map[string]any{"kind": kind, "status": "failed", "error": err.Error()}
+		var recovery *planRecoveryError
+		if errors.As(err, &recovery) {
+			outcome["recovery"] = recovery.recovery
+		}
+		_ = writeJSON(cmd, outcome)
 	}
 }

@@ -13,11 +13,12 @@ import (
 )
 
 type issueStatus struct {
-	Checkpoint *workspace.CheckpointState `json:"checkpoint,omitempty"`
-	Repository string                     `json:"repository"`
-	Issue      *tracker.Issue             `json:"issue"`
-	State      *lease.IssueState          `json:"state"`
-	Provenance []contract.RoleAttestation `json:"provenance"`
+	PlanReplanLimit int                        `json:"plan_replan_limit"`
+	Checkpoint      *workspace.CheckpointState `json:"checkpoint,omitempty"`
+	Repository      string                     `json:"repository"`
+	Issue           *tracker.Issue             `json:"issue"`
+	State           *lease.IssueState          `json:"state"`
+	Provenance      []contract.RoleAttestation `json:"provenance"`
 }
 
 func newStatusCmd(options *RootOptions) *cobra.Command {
@@ -68,6 +69,12 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 					provenance = append(provenance, state.Attestations...)
 				}
 				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance}
+				if state != nil {
+					entry.PlanReplanLimit, err = manager.PlanReplanLimit(state)
+					if err != nil {
+						return err
+					}
+				}
 				if issueNumber != 0 && state != nil && state.Branch != "" {
 					remote := "origin"
 					if options.Fork {
@@ -90,6 +97,10 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			state := entry.State
 			if o := state.PROutcome; o != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "PR outcome: %s (merge=%s)\n", o.Status, o.MergeCommitSHA)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Automatic plan retries: %d/%d\n", state.PlanReplanCount, entry.PlanReplanLimit)
+			if state.NextPhaseReason != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s (%s)\n", state.Lease.NextPhase, state.NextPhaseReason)
 			}
 			status := state.Lease.Status
 			if status == "" {

@@ -174,9 +174,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				if err != nil || strings.TrimSpace(string(testBytes)) == "" {
 					return fmt.Errorf("missing or empty .swarm/active/TEST_PLAN.md in %s", worktree)
 				}
-				if _, err := manager.UpdatePhase(ctx, issue, owner, "plan", "active"); err != nil {
-					return err
-				}
+
 				if _, err := manager.UpdateArtifact(ctx, issue, owner, contract.Artifact{
 					Type:     contract.ArtifactDesign,
 					Producer: harnessName + ":planner",
@@ -195,6 +193,21 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				})
 				if err != nil {
 					return err
+				}
+				if !manager.HasWorkerGateway() && state.ForkRepo == "" {
+					designVersion, testVersion := 0, 0
+					for _, a := range state.Artifacts {
+						if a.Type == contract.ArtifactDesign {
+							designVersion = a.Version
+						}
+						if a.Type == contract.ArtifactTestPlan {
+							testVersion = a.Version
+						}
+					}
+					state, err = manager.ResetPlanReplansAfterStage(ctx, issue, owner, designVersion, testVersion)
+					if err != nil {
+						return err
+					}
 				}
 				// Plan-review label projection is handled by LeaseManager.UpdateArtifact.
 				nextPhase := ""

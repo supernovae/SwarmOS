@@ -67,6 +67,9 @@ type ApprovalTransition struct {
 }
 
 type IssueState struct {
+	PlanReplanCount     int                          `json:"plan_replan_count"`
+	PendingPlanReview   *PlanRejection               `json:"pending_plan_review,omitempty"`
+	NextPhaseReason     string                       `json:"next_phase_reason,omitempty"`
 	ClaimPreviousBase   string                       `json:"-"`
 	RebaseApprovalAudit string                       `json:"rebase_approval_audit,omitempty"`
 	DroppedCheckpoint   *workspace.DroppedCheckpoint `json:"dropped_checkpoint,omitempty"`
@@ -254,6 +257,23 @@ func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string,
 	}
 	if st.Lease.IssueNumber != 0 && st.Lease.IssueNumber != n {
 		return nil, "", fmt.Errorf("state issue identity mismatch")
+	}
+	// Upgrade legacy rejected reviews without trusting contributor artifacts.
+	if st.PendingPlanReview == nil {
+		for _, a := range st.Artifacts {
+			if a.Type != contract.ArtifactReview || a.Verdict != "CHANGES_REQUESTED" || a.Metadata["review_source"] != "authenticated-agent" || a.Metadata["content_sha256"] != hash(a.Body) || !reviewBodyMatchesVerdict(a.Body, a.Verdict) {
+				continue
+			}
+			applicable := true
+			for k, v := range ReviewBindings(&st) {
+				if k != "review_claim_id" && a.Metadata[k] != v {
+					applicable = false
+				}
+			}
+			if applicable {
+				recordPlanReviewTransition(&st, a, false)
+			}
+		}
 	}
 	return &st, rev, nil
 }
@@ -594,6 +614,10 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 			return nil, &AlreadyClaimedError{IssueNumber: n, Owner: old.Lease.Owner, ExpiresAt: old.Lease.ExpiresAt, CommentID: old.ProjectionCommentID}
 		}
 		if old.BaseSHA != base || old.TaskDigest != contract.DigestWorkUnit(wu) || old.PolicyDigest != digest {
+			old.PlanReplanCount = 0
+			old.PendingPlanReview = nil
+			old.NextPhaseReason = ""
+			old.Lease.NextPhase = ""
 			old.PreviousBaseSHA = old.BaseSHA
 			m.carryApproval(ctx, old, wu, base, digest, tree)
 		}
@@ -778,6 +802,9 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	}
 	st.Lease = contract.Lease{Version: 1, IssueNumber: n, ClaimID: id, Owner: owner, Agent: agent, Phase: phase, Status: "active", ClaimedAt: now, ExpiresAt: now.Add(duration), MaxRenewals: max}
 	st.Lease.Contributors = contributors
+	if st.PendingPlanReview != nil {
+		st.Lease.NextPhase = "plan"
+	}
 	if m.nodeProfile != nil {
 		st.Lease.NodeID = m.nodeProfile.NodeID
 		st.Lease.Capabilities = append([]string(nil), m.nodeProfile.Capabilities...)
@@ -917,6 +944,9 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			ExpiresAt:    now.Add(effectiveDur),
 			MaxRenewals:  effectiveMax,
 			Contributors: contributors,
+		}
+		if st.PendingPlanReview != nil {
+			st.Lease.NextPhase = "plan"
 		}
 		if m.nodeProfile != nil {
 			st.Lease.NodeID = m.nodeProfile.NodeID
@@ -1120,6 +1150,11 @@ func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status s
 			if err := contract.ValidatePhase(phase); err != nil {
 				return err
 			}
+			if phase == "plan" {
+				if err := m.reservePlanReplan(st); err != nil {
+					return err
+				}
+			}
 			st.Lease.Phase = phase
 		}
 		if status != "" {
@@ -1245,6 +1280,10 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	if !reviewBodyMatchesVerdict(body, verdict) {
 		return nil, fmt.Errorf("review notes contain a conflicting verdict")
 	}
+	st.PlanReplanCount = 0
+	st.PendingPlanReview = nil
+	st.NextPhaseReason = ""
+	st.Lease.NextPhase = ""
 	st.ApprovalTransition = nil
 	st.CarryReason = ""
 	digest := hash(body)
@@ -1498,10 +1537,12 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			if a.Type == art.Type {
 				art.Version = a.Version + 1
 				st.Artifacts[i] = art
+				recordPlanReviewTransition(st, art, advisory)
 				return nil
 			}
 		}
 		st.Artifacts = append(st.Artifacts, art)
+		recordPlanReviewTransition(st, art, advisory)
 		return nil
 	})
 	if err != nil {

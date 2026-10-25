@@ -1543,6 +1543,13 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 			st.ProjectionCommentID = existingID
 		}
 	}
+	predecessor := st.HeadSHA
+	if predecessor != "" && predecessor != head {
+		ancestor, e := workspace.BaseIsAncestor(ctx, m.repoRoot, predecessor, head)
+		if e != nil || !ancestor {
+			return nil, fmt.Errorf("checkpoint rewrite requires explicit reconciliation: swarm issue reconcile %d --checkpoint --expected-head %s --candidate-head %s --dry-run", n, predecessor, head)
+		}
+	}
 	pending := st.DroppedCheckpoint
 	if pending != nil {
 		if pending.Branch != branch || st.ForkRepo != "" || st.PRNumber != 0 {
@@ -1558,7 +1565,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	st.Branch = branch
 	st.HeadSHA = head
 	st.DroppedCheckpoint = nil
-	if ps, ok := m.store.(coordination.PublishingStore); ok {
+	if _, ok := m.store.(coordination.PublishingStore); ok {
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return nil, err
@@ -1569,8 +1576,31 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 				return nil, fmt.Errorf("store does not support fenced checkpoint recovery")
 			}
 			_, err = expected.CompareAndSwapAndPublishExpected(ctx, n, rev, raw, branch, head, pending.HeadSHA)
+		} else if predecessor != "" {
+			expected, ok := m.store.(coordination.ExpectedCheckpointPublishingStore)
+			if !ok {
+				return nil, fmt.Errorf("store does not support fenced checkpoint publication")
+			}
+			_, err = expected.CompareAndSwapAndPublishExpected(ctx, n, rev, raw, branch, head, predecessor)
 		} else {
-			_, err = ps.CompareAndSwapAndPublish(ctx, n, rev, raw, branch, head)
+			expected, ok := m.store.(coordination.ExpectedCheckpointPublishingStore)
+			if !ok {
+				return nil, fmt.Errorf("store does not support fenced checkpoint publication")
+			}
+			// A first publication may create a branch or acknowledge this exact
+			// candidate, but cannot adopt and overwrite an unrelated live head.
+			observed := workspace.InspectCheckpoint(ctx, m.repoRoot, "origin", n, branch, "")
+			if observed.RemoteBranch.Error != "" {
+				return nil, fmt.Errorf("inspect first checkpoint remote: %s", observed.RemoteBranch.Error)
+			}
+			captured := ""
+			if !observed.RemoteBranch.Missing {
+				captured = observed.RemoteBranch.SHA
+				if captured != head {
+					return nil, fmt.Errorf("%w: unrecorded remote branch is %s, candidate %s; preserve and inspect it before publication", ErrClaimFence, captured, head)
+				}
+			}
+			_, err = expected.CompareAndSwapAndPublishExpected(ctx, n, rev, raw, branch, head, captured)
 		}
 		if err != nil {
 			if errors.Is(err, coordination.ErrConflict) {

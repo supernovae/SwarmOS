@@ -1246,6 +1246,10 @@ func TestForkCLISmoke(t *testing.T) {
 	t.Logf("work output:\n%s", workOut)
 
 	wt42 := workspace.WorktreePath(aliceRoot, 42)
+	legitimateCheckpoint := readUpstreamState().HeadSHA
+	if got := git(originBare, "rev-parse", coordination.CheckpointRef(42, legitimateCheckpoint)); got != legitimateCheckpoint {
+		t.Fatal("verified fork checkpoint was not retained upstream")
+	}
 	if err := os.WriteFile(filepath.Join(wt42, "feature.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1261,8 +1265,8 @@ func TestForkCLISmoke(t *testing.T) {
 	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil {
 		t.Fatalf("expected --fork submit with tampered required-checks.yaml to fail, got:\n%s", out)
 	}
-	// Reset tampered commit back to shaA and restore clean feature change
-	git(wt42, "reset", "--hard", shaA)
+	// Discard the rejected tamper while preserving the recorded checkpoint.
+	git(wt42, "reset", "--hard", legitimateCheckpoint)
 	if err := os.WriteFile(filepath.Join(wt42, ".swarm", "validation", "required-checks.yaml"), origChecks, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1283,8 +1287,8 @@ func TestForkCLISmoke(t *testing.T) {
 		t.Fatalf("expected 0 PRs created after rejected fork submissions, got %d", prCountAfterTamper)
 	}
 
-	// Restore clean worktree at shaA with legitimate feature.go change
-	git(wt42, "reset", "--hard", shaA)
+	// Continue additively from the recorded checkpoint with legitimate feature.go.
+	git(wt42, "reset", "--hard", legitimateCheckpoint)
 	if err := os.WriteFile(filepath.Join(wt42, ".github", "workflows", "swarm-fork-coordinator.yml"), origWorkflow, 0o644); err != nil {
 		t.Fatal(err)
 	}

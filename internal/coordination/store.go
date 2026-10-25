@@ -24,8 +24,8 @@ type PublishingStore interface {
 	CompareAndSwapAndPublish(context.Context, int, string, []byte, string, string) (string, error)
 }
 
-// ExpectedCheckpointPublishingStore retains the retired checkpoint as the
-// publication fence until recovery is atomically committed.
+// ExpectedCheckpointPublishingStore uses the recorded or captured remote head
+// as the publication fence. An empty expectation requires an absent branch.
 type ExpectedCheckpointPublishingStore interface {
 	CompareAndSwapAndPublishExpected(context.Context, int, string, []byte, string, string, string) (string, error)
 }
@@ -211,14 +211,29 @@ func (s *GitStore) CompareAndSwapAndPublish(ctx context.Context, n int, old stri
 }
 
 func (s *GitStore) CompareAndSwapAndPublishExpected(ctx context.Context, n int, old string, next []byte, branch, head, expected string) (string, error) {
-	if len(expected) != 40 {
+	if expected != "" && len(expected) != 40 {
 		return "", fmt.Errorf("invalid retired checkpoint")
 	}
 	if _, err := hex.DecodeString(expected); err != nil {
 		return "", err
 	}
-	if _, err := s.run(ctx, "", "merge-base", "--is-ancestor", expected, head); err != nil {
-		return "", fmt.Errorf("checkpoint recovery must fast-forward: %w", err)
+	if expected != "" {
+		if _, err := s.run(ctx, "", "merge-base", "--is-ancestor", expected, head); err != nil {
+			return "", fmt.Errorf("checkpoint recovery must fast-forward: %w", err)
+		}
+	}
+	return s.publishCheckpoint(ctx, n, old, next, branch, head, &expected)
+}
+
+// CompareAndSwapAndReconcileCheckpoint permits an explicitly authorized rewrite.
+// Unlike recovery, it does not impose fast-forward ancestry; the manager checks
+// reviewed lineage before invoking this expected-head transaction.
+func (s *GitStore) CompareAndSwapAndReconcileCheckpoint(ctx context.Context, n int, old string, next []byte, branch, head, expected string) (string, error) {
+	if len(expected) != 40 {
+		return "", fmt.Errorf("invalid predecessor checkpoint")
+	}
+	if _, err := hex.DecodeString(expected); err != nil {
+		return "", err
 	}
 	return s.publishCheckpoint(ctx, n, old, next, branch, head, &expected)
 }
@@ -265,7 +280,12 @@ func (s *GitStore) publishCheckpoint(ctx context.Context, n int, old string, nex
 	if oldBranch == "" {
 		branchLease = branchRef + ":"
 	}
-	if _, err = s.run(ctx, "", "push", "--atomic", "origin", "--force-with-lease="+stateLease, "--force-with-lease="+branchLease, commit+":"+stateRef, head+":"+branchRef); err != nil {
+	retention, err := s.historicalRetentionArgs(ctx, n, old, oldBranch, head)
+	if err != nil {
+		return "", err
+	}
+	push := append([]string{"push", "--atomic", "origin", "--force-with-lease=" + stateLease, "--force-with-lease=" + branchLease, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
+	if _, err = s.run(ctx, "", push...); err != nil {
 		if expected != nil {
 			return "", fmt.Errorf("%w: atomic checkpoint push: %w", ErrConflict, err)
 		}
@@ -304,10 +324,12 @@ func (s *GitStore) CompareAndSwapAndPublishPR(ctx context.Context, n int, oldSta
 		return "", err
 	}
 	stateRef := s.ref(n)
-	if _, err = s.run(ctx, "", "push", "--atomic", "origin",
-		"--force-with-lease="+stateRef+":"+oldState,
-		"--force-with-lease="+branchRef+":"+expectedHead,
-		commit+":"+stateRef, head+":"+branchRef); err != nil {
+	retention, err := s.historicalRetentionArgs(ctx, n, oldState, expectedHead, head)
+	if err != nil {
+		return "", err
+	}
+	push := append([]string{"push", "--atomic", "origin", "--force-with-lease=" + stateRef + ":" + oldState, "--force-with-lease=" + branchRef + ":" + expectedHead, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
+	if _, err = s.run(ctx, "", push...); err != nil {
 		return "", fmt.Errorf("atomic PR publication rejected (issue state or remote head changed): %w", err)
 	}
 	return commit, nil
@@ -326,7 +348,8 @@ type contributorIndexedClaim struct {
 }
 
 type forkStateEnvelope struct {
-	Lease struct {
+	HeadSHA string `json:"head_sha"`
+	Lease   struct {
 		IssueNumber int       `json:"issue_number"`
 		ClaimID     string    `json:"claim_id"`
 		Owner       string    `json:"owner"`
@@ -522,7 +545,16 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 	isLeave := priorEnv.Lease.Status == "active" && nextEnv.Lease.Status != "active"
 
 	if !isAcquire && !isLeave {
-		if _, err := s.git.run(ctx, "", "push", "origin", "--force-with-lease="+stateLease, stateCommit+":"+stateRef); err != nil {
+		heads := []string{}
+		if nextEnv.HeadSHA != priorEnv.HeadSHA {
+			heads = append(heads, priorEnv.HeadSHA, nextEnv.HeadSHA)
+		}
+		retention, err := s.git.historicalRetentionArgs(ctx, n, old, heads...)
+		if err != nil {
+			return "", err
+		}
+		push := append([]string{"push", "--atomic", "origin", "--force-with-lease=" + stateLease, stateCommit + ":" + stateRef}, retention...)
+		if _, err := s.git.run(ctx, "", push...); err != nil {
 			actual, readErr := s.git.remoteSHA(ctx, stateRef)
 			if readErr == nil && actual != old {
 				return "", ErrConflict

@@ -9,9 +9,11 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 type issueStatus struct {
+	Checkpoint *workspace.CheckpointState `json:"checkpoint,omitempty"`
 	Repository string                     `json:"repository"`
 	Issue      *tracker.Issue             `json:"issue"`
 	State      *lease.IssueState          `json:"state"`
@@ -65,7 +67,16 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				if state != nil {
 					provenance = append(provenance, state.Attestations...)
 				}
-				entries = append(entries, issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance})
+				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance}
+				if issueNumber != 0 && state != nil && state.Branch != "" {
+					remote := "origin"
+					if options.Fork {
+						remote = options.effectiveForkRemote()
+					}
+					observed := workspace.InspectCheckpoint(cmd.Context(), target.Path, remote, issueNumber, state.Branch, state.HeadSHA)
+					entry.Checkpoint = &observed
+				}
+				entries = append(entries, entry)
 			}
 		}
 		if asJSON {
@@ -89,6 +100,9 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s #%d %s: owner=%s phase=%s gate=%s\n", entry.Repository, entry.Issue.Number, status, state.Lease.Owner, state.Lease.Phase, state.EffectiveGate)
 			if issueNumber != 0 {
+				if entry.Checkpoint != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "Checkpoint: %s\n", entry.Checkpoint.String())
+				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Base: %s\nTask: %s\nApproved by: %s\n", state.BaseSHA, state.TaskDigest, state.ApprovedBy)
 				for _, artifact := range state.Artifacts {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s (%s)\n", artifact.Type, artifact.Verdict, artifact.Producer)

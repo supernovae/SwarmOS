@@ -4,6 +4,7 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Isolated agent runs, including the tool server for Claude Code, OpenCode, and OMP, now get up to 60 minutes instead of 15, so larger implementations can finish on slower machines. Required-check deadlines are unchanged.
 - Re-approving an issue on a newer base drops a checkpoint whose commits are already contained in that base. Resuming moves clean local work forward and retains the original remote head as the next publication fence; checkpoints with unique commits remain preserved.
 
 - Approved plans can carry across descendant PR rebases when the WorkUnit and committed policy tree are unchanged. Fresh validation and explicit submission remain required; status explains when a new plan cycle is needed.

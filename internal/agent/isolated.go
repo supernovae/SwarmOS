@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
@@ -38,7 +37,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 		stdout, stderr = io.MultiWriter(os.Stdout, &out), io.MultiWriter(os.Stderr, &out)
 	}
 	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
-		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Timeout: 15 * time.Minute}
+		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Timeout: sandbox.AgentRunLimit}
 	options.ProjectPlan = req.ProjectPlan
 	if req.ReadOnly && req.Role == "reviewer" {
 		options.OutputDir = filepath.Join(req.WorktreePath, ".swarm", "active-output")

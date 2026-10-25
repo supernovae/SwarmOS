@@ -113,7 +113,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				service.ResolveLog = cmd.ErrOrStderr()
 			}
 			if operation == "work" && opts.Work.Headless && progress && !opts.Work.InspectOnly {
-				opts.Work.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
+				opts.Work.OnProgress = workProgressPrinter(progressWriter(cmd))
 			}
 			var result *pr.Result
 			switch operation {

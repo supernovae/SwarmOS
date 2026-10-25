@@ -237,6 +237,7 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 			PollInterval: o.forkPollInterval,
 			PollTimeout:  o.forkPollTimeout,
 			Dispatcher:   o.forkDispatcher,
+			OnProgress:   forkProgressPrinter(progressWriter(cmd)),
 		})
 		return tr, mgr, cfg, nil
 	}

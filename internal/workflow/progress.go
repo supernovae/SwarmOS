@@ -18,7 +18,7 @@ func startWorkProgress(ctx context.Context, issue int, emit func(ProgressEvent))
 	return &workProgress{session: progress.Start(ctx, issue, 0, emit)}
 }
 func newWorkProgress(ctx context.Context, issue int, emit func(ProgressEvent), ticks <-chan time.Time) *workProgress {
-	p := progress.New(ctx, issue, 0, emit, ticks, time.Now, nil)
+	p := progress.NewSession(ctx, issue, 0, emit, ticks, time.Now, nil)
 	return &workProgress{session: p, done: p.Done()}
 }
 func (p *workProgress) next(stage string) { p.session.Next(stage) }

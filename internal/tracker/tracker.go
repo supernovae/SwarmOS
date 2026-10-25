@@ -136,6 +136,7 @@ type Tracker interface {
 	CreateIssue(ctx context.Context, title, body string, labels []string) (*Issue, error)
 	CreateTypedIssue(ctx context.Context, title, body string, labels []string, issueType string) (*Issue, error)
 	UpdateIssueBody(ctx context.Context, number int, body string) (*Issue, error)
+	UpdateIssueTitle(ctx context.Context, number int, title string) (*Issue, error)
 	ParentIssueNumber(ctx context.Context, childNumber int) (int, error)
 	LinkSubIssue(ctx context.Context, parentNumber, childNumber int) error
 	ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error)

@@ -4,6 +4,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- `swarm issue edit` replaces selected WorkUnit sections on GitHub and local backends, previews diffs and approval impact, lints before writing, and blocks active claims. Changed contracts require separate approval.
+
 - Protected paths now cover the files that become part of agent instructions: `.swarm/project.md`, `.swarm/architecture.md`, `.swarm/conventions.md`, `.claude/commands/**`, `.opencode/commands/**`, `AGENTS.md`, and `CLAUDE.md`. New repositories get them from `swarm repo init`; existing repositories can add them to `.swarm/validation/required-checks.yaml`. Agent work that needs to edit them sets `allow_harness_changes: true` on its WorkUnit.
 - Maintainer pull requests can change protected policy without failing CI. `swarm repo validate --protected-paths report` lists the changed protected files, notes when `.swarm/` policy changed, and still runs every required check; the generated workflow uses it only for maintainers' own branches, keeping agent branches, forks, and other authors on strict enforcement. SwarmOS's own CI now runs this check with a validator built from the trusted base.
 - Agent run budgets now support approved global and per-role durations, with a 60-minute default and a warning before the deadline. Interactive native sessions exclude waits for operator input and have a four-hour wall cap; native Codex and Bubblewrap preserve bounded timeout patches for manual recovery. OCI uses wall time and reports that no timeout patch is available. Required-check deadlines are unchanged.

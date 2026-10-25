@@ -29,6 +29,31 @@ Helpful CLI conventions:
 - **Headless vs. interactive**: `swarm issue work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` to follow the agent's work and add instructions between turns.
 - **Structured JSON output**: Use `--json` on a leaf that supports it, such as `swarm issue claim --next --json`, `swarm issue work 42 --json`, `swarm issue status 42 --json`, or `swarm repo validate --base <trusted-full-commit-sha> --json`. Bare `swarm issue` and `swarm repo` are command groups, not JSON-producing operations.
 
+### Revise a WorkUnit
+
+Use `swarm issue edit` to revise a WorkUnit with a lint check and a clear view of its approval impact. Maintainers and repository collaborators with write access can use it on the GitHub backend; the local backend supports the same flow.
+
+```bash
+swarm issue edit 42 --objective 'Add structured WorkUnit editing' --dry-run --backend github
+swarm issue edit 42 --objective 'Add structured WorkUnit editing' --backend github
+swarm issue approve 42 --backend github
+```
+
+`--title`, `--objective`, `--constraint`, `--acceptance`, `--depends-on`, `--gate`, and `--workflow` replace their named fields. Omitted sections keep their original bytes. Repeat `--constraint` or `--acceptance` to supply the complete replacement list. Use `--depends-on=` to clear prerequisites. The edited contract must pass the same validation as `swarm issue lint`.
+
+```bash
+swarm issue edit 42 --constraint 'Keep claims fenced' --constraint 'Preserve existing formats' --dry-run
+swarm issue edit 42 --depends-on= --dry-run --json --backend local
+```
+
+`--dry-run` shows the body diff, title change, lint result, and approval and claim impact without writing. Add `--json` for structured results. An active claim blocks editing and identifies its owner and expiry; coordinate with the worker and use `swarm issue release 42` before revising the contract.
+
+Changing an approved task's parsed content moves its ready label to `swarm:draft` and requires a separate `swarm issue approve 42`. Formatting changes that preserve the task digest retain approval and labels. Editing never grants approval.
+
+Inline Markdown and fenced YAML WorkUnits are supported. For a `swarm-workunit-path` reference, edit the referenced repository file instead. Ambiguous duplicate sections and YAML anchors or aliases must be simplified before editing. Epics use their own planning workflow and cannot be edited with this command. Fork contributors work with an upstream maintainer to revise the contract.
+
+The command re-reads the issue and claim state before writing and refuses a detected concurrent edit. GitHub's issue PATCH is unconditional, leaving a short interval between that final read and the write; coordinate edits with other maintainers. If a body, title, or label request fails after an earlier request succeeds, the error identifies completed steps so you can inspect the issue and retry.
+
 ### After a pull request is merged or closed
 
 Keep the issue's recorded submission connected to its GitHub outcome with an explicit reconciliation. Repository operators with write access can refresh the PR outcome and repair the `swarm:pr-open` label and audit comment:

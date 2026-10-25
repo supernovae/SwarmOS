@@ -132,7 +132,11 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				continue
 			}
 			role := workflow.LeadRole(phase)
-			claimed, err := mgr.Acquire(ctx, issue.Number, owner, preflight.Agents[role], phase, duration, preflight.Config.Lease.MaxRenewals)
+			var claimed *lease.IssueState
+			err = opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "claim", func() error {
+				claimed, err = mgr.Acquire(ctx, issue.Number, owner, preflight.Agents[role], phase, duration, preflight.Config.Lease.MaxRenewals)
+				return err
+			})
 			if err != nil {
 				lease.UnlockClaim(lock)
 				if errors.Is(err, lease.ErrAlreadyClaimed) || errors.Is(err, lease.ErrClaimRaceLost) {
@@ -145,11 +149,17 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					return nil, err
 				}
 				checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue.Number, issue.Title, claimed.Lease.ClaimID, claimed.Branch)
-				worktree, branch, err := workspace.ProvisionFromRemoteAt(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA, claimed.DroppedCheckpoint)
+				var worktree, branch string
+				err = opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "workspace", func() error {
+					worktree, branch, err = workspace.ProvisionFromRemoteAt(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA, claimed.DroppedCheckpoint)
+					return err
+				})
 				if err != nil {
 					return nil, err
 				}
-				if err := workspace.CompileHarnessBundleAt(worktree, wu, preflight.Workflow, claimed.Artifacts, role, claimed.BaseSHA); err != nil {
+				if err := opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "bundle", func() error {
+					return workspace.CompileHarnessBundleAt(worktree, wu, preflight.Workflow, claimed.Artifacts, role, claimed.BaseSHA)
+				}); err != nil {
 					return nil, err
 				}
 				return &pulledWorkUnit{Repo: target.Repo, RepoRoot: target.Path, Backend: target.Backend, Issue: issue,

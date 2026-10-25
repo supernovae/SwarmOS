@@ -145,6 +145,10 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					fmt.Fprintln(progressWriter(cmd), refusal)
 					continue
 				}
+				if errors.Is(err, lease.ErrApprovalRequired) {
+					fmt.Fprintf(progressWriter(cmd), "Issue #%d: %v\n", issue.Number, err)
+					continue
+				}
 				if errors.Is(err, lease.ErrAlreadyClaimed) || errors.Is(err, lease.ErrClaimRaceLost) {
 					continue
 				}

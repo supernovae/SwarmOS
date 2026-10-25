@@ -1930,3 +1930,63 @@ func TestFreshClaimBaseCommands(t *testing.T) {
 		})
 	}
 }
+
+func TestCLIQueueSkipsResumedStaleApproval(t *testing.T) {
+	for _, mode := range []string{"work", "node"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCLIFixture(t)
+			ctx := context.Background()
+			stale := f.create(t, "agent")
+			n := strconv.Itoa(stale)
+			f.must(t, "issue", "approve", n)
+			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			f.must(t, "issue", "release", n)
+			before := f.state(t, stale)
+			if before.Branch == "" || before.HeadSHA == "" || before.PRNumber != 0 || before.Lease.Status == "active" {
+				t.Fatalf("expected released checkpoint without a PR: %+v", before)
+			}
+			issue, err := f.tracker.GetIssue(ctx, stale)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := strings.Replace(issue.Body, "Exercise the lifecycle", "Changed objective", 1)
+			issue, err = f.tracker.UpdateIssueBody(ctx, stale, body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wu, err := contract.ParseWorkUnitFromIssue(stale, issue.Title, issue.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.TaskDigest == contract.DigestWorkUnit(wu) {
+				t.Fatal("edited task must have stale approval")
+			}
+			ready := f.create(t, "agent")
+			f.must(t, "issue", "approve", strconv.Itoa(ready))
+			issues, err := f.tracker.ListIssues(ctx, tracker.IssueFilter{State: "open", Labels: []string{"swarm:ready"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(issues) != 2 || issues[0].Number != stale || issues[1].Number != ready {
+				t.Fatalf("expected stale issue before ready issue: %+v", issues)
+			}
+			args := []string{"issue", "work", "--next", "--agent", "mock", "--headless"}
+			if mode == "node" {
+				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
+			}
+			f.must(t, args...)
+			got := f.state(t, ready)
+			if got.Branch == "" || got.HeadSHA == "" || len(got.Artifacts) == 0 {
+				t.Fatalf("valid issue was not processed: %+v", got)
+			}
+			if after := f.state(t, stale); !reflect.DeepEqual(before, after) {
+				t.Fatalf("stale issue state changed: before=%+v after=%+v", before, after)
+			}
+			lock, err := lease.LockClaim(f.root, stale)
+			if err != nil {
+				t.Fatalf("stale claim lock was not released: %v", err)
+			}
+			lease.UnlockClaim(lock)
+		})
+	}
+}

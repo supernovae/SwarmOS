@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -50,6 +51,10 @@ func TestCommittedPolicyTreeAndAncestry(t *testing.T) {
 		t.Fatal("checkout influenced policy")
 	}
 	for _, name := range []string{"config.yaml", "validation/required-checks.yaml", "workflows/feature.yaml", "prompts/developer.md", "rules/rule.md", "contracts/schema.json", "newline\npath"} {
+		if runtime.GOOS == "windows" && name == "newline\npath" {
+			// Windows forbids newline characters in file names.
+			continue
+		}
 		old := next
 		write(".swarm/"+name, "changed")
 		next = commit()

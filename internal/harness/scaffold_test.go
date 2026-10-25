@@ -897,9 +897,13 @@ func TestValidateWorkflowReportsProtectedChangesOnlyForMaintainerBranches(t *tes
 func TestDoctorSandboxSelection(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir)
+	suffix := ""
+	if runtime.GOOS == "windows" {
+		suffix = ".exe"
+	}
 	marker := filepath.Join(dir, "executed")
 	for _, bin := range []string{"bwrap", "sandbox-exec", "docker", "podman"} {
-		if err := os.WriteFile(filepath.Join(dir, bin), []byte(fmt.Sprintf("#!/bin/sh\nprintf executed > %q\n", marker)), 0700); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, bin+suffix), []byte(fmt.Sprintf("#!/bin/sh\nprintf executed > %q\n", marker)), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -959,7 +963,7 @@ func TestDoctorSandboxSelection(t *testing.T) {
 				if check.Status != "WARN" || !strings.Contains(check.Detail, "configure") {
 					t.Fatalf("%+v", check)
 				}
-			} else if check.Status != "OK" || !strings.Contains(check.Detail, filepath.Join(dir, want)) {
+			} else if check.Status != "OK" || !strings.Contains(check.Detail, filepath.Join(dir, want+suffix)) {
 				t.Fatalf("%+v", check)
 			}
 		})

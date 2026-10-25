@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -47,7 +48,11 @@ func TestResolveReadOnlyRuntime(t *testing.T) {
 func TestCheckReadOnlyRuntime(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", dir)
-	if err := os.WriteFile(filepath.Join(dir, "podman"), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+	bin := "podman"
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, bin), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	for _, image := range []string{"", "image"} {
@@ -56,7 +61,7 @@ func TestCheckReadOnlyRuntime(t *testing.T) {
 		if (err == nil) != (compat == nil) {
 			t.Fatalf("resolver=%v compatibility=%v", err, compat)
 		}
-		if image != "" && (err != nil || path != filepath.Join(dir, "podman")) {
+		if image != "" && (err != nil || path != filepath.Join(dir, bin)) {
 			t.Fatalf("%q %v", path, err)
 		}
 	}

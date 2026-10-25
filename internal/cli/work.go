@@ -56,6 +56,14 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				Instructions: instructions, Gate: contract.GateMode(gate), Headless: headless, Handoff: handoff,
 				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),
 			}
+			if progressOutput && !dryRun {
+				printer := workProgressPrinter(progressWriter(cmd))
+				opts.SetupProgress = workflow.NewProgressReporter(cmd.Context(), printer)
+				defer opts.SetupProgress.Close()
+				if headless {
+					opts.OnProgress = printer
+				}
+			}
 			var tr tracker.Tracker
 			var mgr *lease.Manager
 			var cfg *contract.SwarmConfig
@@ -114,10 +122,8 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 				return writeJSON(cmd, map[string]any{"kind": "work-dry-run", "issue_number": opts.IssueNumber, "effective_plan": preflight})
 			}
-			if headless && progressOutput {
-				opts.OnProgress = workProgressPrinter(progressWriter(cmd))
-			}
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
+			opts.SetupProgress.Close()
 			if err != nil {
 				return err
 			}
@@ -159,6 +165,6 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&allRepos, "all", false, "With --next, scan registered repositories")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit a structured outcome")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the effective policy as JSON without claiming or running agents")
-	cmd.Flags().BoolVar(&progressOutput, "progress", true, "Report headless stages and a 15-second heartbeat to stderr (false disables)")
+	cmd.Flags().BoolVar(&progressOutput, "progress", true, "Report setup, headless stages, and a 15-second heartbeat to stderr (false disables)")
 	return cmd
 }

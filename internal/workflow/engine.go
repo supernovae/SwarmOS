@@ -56,7 +56,8 @@ type WorkOptions struct {
 	OnClaim         func(*lease.IssueState) error // persist fencing token before setup
 	// OnProgress receives serialized local status events. It must return promptly
 	// and must not call back into execution. No callback runs after ExecuteWork returns.
-	OnProgress func(ProgressEvent)
+	OnProgress    func(ProgressEvent)
+	SetupProgress *ProgressReporter
 }
 
 type WorkResult struct {
@@ -372,7 +373,16 @@ func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool)
 }
 
 func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *WorkResult, workErr error) {
-	progress := startWorkProgress(ctx, opts.IssueNumber, opts.OnProgress)
+	var progress *workProgress
+	if opts.SetupProgress != nil && opts.OnProgress != nil {
+		progress = opts.SetupProgress
+		progress.mu.Lock()
+		progress.issue = opts.IssueNumber
+		progress.mu.Unlock()
+		progress.next("preflight")
+	} else {
+		progress = startWorkProgress(ctx, opts.IssueNumber, opts.OnProgress)
+	}
 	defer func() { progress.finish(result, workErr) }()
 	// Inspection never weakens execution preflight, even for direct API callers.
 	opts.InspectOnly = false
@@ -412,14 +422,19 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		primaryAgent = pre.Agents["tester"]
 	}
 	var st *lease.IssueState
-	progress.next("claim")
-	resumed := opts.ClaimID != ""
-	if resumed {
-		e.LeaseManager.BindClaim(opts.IssueNumber, opts.ClaimID)
-		st, err = e.LeaseManager.Resume(ctx, opts.IssueNumber, opts.Owner, opts.ClaimID)
-	} else {
-		st, err = e.LeaseManager.Acquire(ctx, opts.IssueNumber, opts.Owner, primaryAgent, opts.Phase, duration, pre.Config.Lease.MaxRenewals)
+	if opts.SetupProgress == nil {
+		progress.next("claim")
 	}
+	resumed := opts.ClaimID != ""
+	err = opts.SetupProgress.ReportSetupPhase(ctx, opts.IssueNumber, "claim", func() error {
+		if resumed {
+			e.LeaseManager.BindClaim(opts.IssueNumber, opts.ClaimID)
+			st, err = e.LeaseManager.Resume(ctx, opts.IssueNumber, opts.Owner, opts.ClaimID)
+		} else {
+			st, err = e.LeaseManager.Acquire(ctx, opts.IssueNumber, opts.Owner, primaryAgent, opts.Phase, duration, pre.Config.Lease.MaxRenewals)
+		}
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +509,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		forkRemote = workspace.DefaultForkRemote
 	}
 	checkpointRemote, targetBranch := workspace.ClaimCheckpoint(forkMode, forkRemote, opts.IssueNumber, pre.Issue.Title, st.Lease.ClaimID, st.Branch)
-	progress.next("workspace")
+	if opts.SetupProgress == nil {
+		progress.next("workspace")
+	} else if opts.PRNumber != 0 {
+		progress.next("workspace-check")
+	}
 	var wtPath, branch string
 	if opts.PRNumber != 0 {
 		if opts.PRWorktree == "" || st.PRRevision == nil || st.PRRevision.Number != opts.PRNumber {
@@ -509,7 +528,10 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return nil, fmt.Errorf("PR worktree is dirty, rebasing, or differs from its recorded checkpoint")
 		}
 	} else {
-		wtPath, branch, err = workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA, st.DroppedCheckpoint)
+		err = opts.SetupProgress.ReportSetupPhase(ctx, opts.IssueNumber, "workspace", func() error {
+			wtPath, branch, err = workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA, st.DroppedCheckpoint)
+			return err
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -544,7 +566,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 		if strings.EqualFold(cfg.PlanMode, "interactive") {
 			res.RoleAgentsUsed["planner"] = "interactive"
-			if err := compileExecutionBundle(wtPath, pre.WorkUnit, wf, st, "planner", opts.PRNumber); err != nil {
+			if err := compileSetupBundle(ctx, opts.SetupProgress, wtPath, pre.WorkUnit, wf, st, "planner", opts.PRNumber); err != nil {
 				return res, err
 			}
 			if st, err = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "plan", "active"); err != nil {
@@ -564,7 +586,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if _, err := e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "plan", "active"); err != nil {
 			return res, err
 		}
-		if err := compileExecutionBundle(wtPath, pre.WorkUnit, wf, st, "planner", opts.PRNumber); err != nil {
+		if err := compileSetupBundle(ctx, opts.SetupProgress, wtPath, pre.WorkUnit, wf, st, "planner", opts.PRNumber); err != nil {
 			return res, err
 		}
 		planPrompt := "Execute /swarm-plan and write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md."
@@ -657,7 +679,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		res.State = st
 		reviewer := pre.Agents["reviewer"]
 		res.RoleAgentsUsed["reviewer"] = reviewer
-		verdict, reviewed, err := e.RunAgentReview(ctx, wtPath, pre.WorkUnit, wf, st, opts.Owner, reviewer, mode, opts.Instructions, opts.PRNumber)
+		verdict, reviewed, err := e.RunAgentReview(ctx, wtPath, pre.WorkUnit, wf, st, opts.Owner, reviewer, mode, opts.Instructions, opts.PRNumber, opts.SetupProgress)
 		res.ReviewVerdict = verdict
 		if reviewed != nil {
 			st, res.State = reviewed, reviewed
@@ -709,7 +731,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if _, err := e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "implement", "active"); err != nil {
 		return res, err
 	}
-	if err := compileExecutionBundle(wtPath, pre.WorkUnit, wf, st, "developer", opts.PRNumber); err != nil {
+	if err := compileSetupBundle(ctx, opts.SetupProgress, wtPath, pre.WorkUnit, wf, st, "developer", opts.PRNumber); err != nil {
 		return res, err
 	}
 	devPrompt := "Execute /swarm-implement step-by-step using the approved plan and test plan."
@@ -813,7 +835,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err != nil {
 		return res, err
 	}
-	if err := compileExecutionBundle(wtPath, pre.WorkUnit, wf, st, "tester", opts.PRNumber); err != nil {
+	if err := compileSetupBundle(ctx, opts.SetupProgress, wtPath, pre.WorkUnit, wf, st, "tester", opts.PRNumber); err != nil {
 		return res, err
 	}
 	testPrompt := "Execute /swarm-validate and record acceptance evidence."
@@ -948,7 +970,7 @@ func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.Wor
 	return workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA)
 }
 
-func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int) (string, *lease.IssueState, error) {
+func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, reporters ...*ProgressReporter) (string, *lease.IssueState, error) {
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
 		return "", st, fmt.Errorf("%w: %w", ErrLeaseLost, err)
 	}
@@ -958,7 +980,11 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	if err := ensurePlanArtifactsInWorktree(wtPath, st); err != nil {
 		return "", st, err
 	}
-	if err := compileExecutionBundle(wtPath, wu, wf, st, "reviewer", prNumber); err != nil {
+	var reporter *ProgressReporter
+	if len(reporters) > 0 {
+		reporter = reporters[0]
+	}
+	if err := compileSetupBundle(ctx, reporter, wtPath, wu, wf, st, "reviewer", prNumber); err != nil {
 		return "", st, err
 	}
 	runner, err := agent.NewConfiguredRunner(reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
@@ -1232,4 +1258,8 @@ func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 		return "", "", ""
 	}
 	return "", "", ""
+}
+
+func compileSetupBundle(ctx context.Context, reporter *ProgressReporter, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int) error {
+	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error { return compileExecutionBundle(path, wu, wf, st, role, prNumber) })
 }

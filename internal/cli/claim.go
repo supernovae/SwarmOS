@@ -40,11 +40,14 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 				return fmt.Errorf("--duration must be positive")
 			}
 		}
+		reporter := workflow.NewProgressReporter(cmd.Context(), workProgressPrinter(cmd.ErrOrStderr()))
+		defer reporter.Close()
 		if next {
-			pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all"}, duration)
+			pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all", SetupProgress: reporter}, duration)
 			if err != nil {
 				return err
 			}
+			reporter.Close()
 			if asJSON {
 				return writeJSON(cmd, map[string]any{"kind": "claim", "status": "claimed", "selection": pulled})
 			}
@@ -78,7 +81,11 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			return err
 		}
 		defer lease.UnlockClaim(lock)
-		state, err := manager.Acquire(cmd.Context(), issue, owner, preflight.Agents["planner"], "plan", duration, preflight.Config.Lease.MaxRenewals)
+		var state *lease.IssueState
+		err = reporter.ReportSetupPhase(cmd.Context(), issue, "claim", func() error {
+			state, err = manager.Acquire(cmd.Context(), issue, owner, preflight.Agents["planner"], "plan", duration, preflight.Config.Lease.MaxRenewals)
+			return err
+		})
 		if err != nil {
 			return err
 		}
@@ -90,13 +97,20 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			return fail(err)
 		}
 		checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, preflight.Issue.Title, state.Lease.ClaimID, state.Branch)
-		path, branch, err := workspace.ProvisionFromRemoteAt(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA, state.DroppedCheckpoint)
+		var path, branch string
+		err = reporter.ReportSetupPhase(cmd.Context(), issue, "workspace", func() error {
+			path, branch, err = workspace.ProvisionFromRemoteAt(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA, state.DroppedCheckpoint)
+			return err
+		})
 		if err != nil {
 			return fail(err)
 		}
-		if err := workspace.CompileHarnessBundleAt(path, preflight.WorkUnit, preflight.Workflow, state.Artifacts, "planner", state.BaseSHA); err != nil {
+		if err := reporter.ReportSetupPhase(cmd.Context(), issue, "bundle", func() error {
+			return workspace.CompileHarnessBundleAt(path, preflight.WorkUnit, preflight.Workflow, state.Artifacts, "planner", state.BaseSHA)
+		}); err != nil {
 			return fail(err)
 		}
+		reporter.Close()
 		if asJSON {
 			return writeJSON(cmd, map[string]any{"kind": "claim", "issue_number": issue, "state": state, "branch": branch, "worktree": path})
 		}

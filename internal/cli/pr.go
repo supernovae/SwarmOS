@@ -10,6 +10,7 @@ import (
 	"github.com/supernovae/swarmos/internal/pr"
 	progresspkg "github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workflow"
 )
 
 func newPRCmd(rootOpts *RootOptions) *cobra.Command {
@@ -112,8 +113,13 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			if operation == "rebase" && opts.Resolve && progress {
 				service.ResolveLog = cmd.ErrOrStderr()
 			}
-			if operation == "work" && opts.Work.Headless && progress && !opts.Work.InspectOnly {
-				opts.Work.OnProgress = workProgressPrinter(progressWriter(cmd))
+			if operation == "work" && progress && !opts.Work.InspectOnly {
+				printer := workProgressPrinter(progressWriter(cmd))
+				opts.Work.SetupProgress = workflow.NewProgressReporter(cmd.Context(), printer)
+				defer opts.Work.SetupProgress.Close()
+				if opts.Work.Headless {
+					opts.Work.OnProgress = printer
+				}
 			}
 			var result *pr.Result
 			switch operation {
@@ -128,6 +134,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			case "submit":
 				result, err = service.Submit(cmd.Context(), opts.Number)
 			}
+			opts.Work.SetupProgress.Close()
 			if asJSON || opts.Work.InspectOnly {
 				status := "completed"
 				if result != nil && result.Status != "" {

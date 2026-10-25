@@ -430,3 +430,69 @@ func configureValidation(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 }
+
+func TestEngineSetupProgressSharedSessionBundles(t *testing.T) {
+	root, engine, tr := setupProjectPlanTestRepo(t)
+	configureValidation(t, root)
+	if out, err := exec.Command("git", "-C", root, "commit", "-am", "validation policy").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	wu := &contract.WorkUnit{Objective: "Setup status", Constraints: []string{"Keep reporting private"}, Acceptance: []string{"Progress precedes execution"}, Workflow: "feature", Gate: contract.GateAgent}
+	issue, err := tr.CreateIssue(t.Context(), "private-title\nsecret-token", contract.FormatIssueMarkdown(wu), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = engine.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+		t.Fatal(err)
+	}
+	// The mock's real child command checks evidence recorded synchronously by
+	// the observer, so final-output ordering alone cannot satisfy this test.
+	marker := filepath.Join(t.TempDir(), "setup-delivered")
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "test -f '"+marker+"' && printf 'changed\\n' > implementation.txt && printf 'private-child-output secret-token\\n'")
+	var events []ProgressEvent
+	reporter := NewProgressReporter(t.Context(), func(event ProgressEvent) {
+		events = append(events, event)
+		if event.Stage == "bundle" && event.Status == "started" {
+			var starts []string
+			for _, e := range events {
+				if e.Status == "started" && (e.Stage == "claim" || e.Stage == "workspace" || e.Stage == "bundle") {
+					starts = append(starts, e.Stage)
+				}
+			}
+			if len(starts) >= 3 && slices.Equal(starts[:3], []string{"claim", "workspace", "bundle"}) {
+				if err := os.WriteFile(marker, []byte("delivered"), 0600); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+	})
+	defer reporter.Close()
+	result, err := engine.ExecuteWork(t.Context(), WorkOptions{
+		RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Headless: true,
+		SetupProgress: reporter, OnProgress: func(ProgressEvent) { t.Error("second callback invoked") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ValidationPassed {
+		t.Fatal("validation did not run")
+	}
+	// ExecuteWork must leave the supplied session alive for its command owner.
+	reporter.mu.Lock()
+	closed := reporter.closed
+	reporter.mu.Unlock()
+	if closed {
+		t.Fatal("engine closed command session")
+	}
+	reporter.Close()
+	var starts []string
+	for _, event := range events {
+		if event.Status == "started" {
+			starts = append(starts, event.Stage)
+		}
+	}
+	want := []string{"preflight", "claim", "workspace", "plan", "bundle", "review", "bundle", "implement", "bundle", "checkpoint", "test", "bundle", "required-checks"}
+	if !slices.Equal(starts, want) {
+		t.Fatalf("starts: %v", starts)
+	}
+}

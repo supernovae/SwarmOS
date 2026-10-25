@@ -116,3 +116,166 @@ func TestWorkProgressWithoutObserver(t *testing.T) {
 		t.Fatal("unobserved work started a timer")
 	}
 }
+
+// setupProgressFixture uses the command reporter path, with a real timer only
+// for reset/re-arm coverage. Its channel never drives test heartbeats.
+func setupProgressFixture(t *testing.T) (*workProgress, chan ProgressEvent, func(time.Duration)) {
+	t.Helper()
+	ticks := make(chan time.Time)
+	events := make(chan ProgressEvent, 30)
+	reads := make(chan struct{}, 30)
+	p := newSetupProgress(t.Context(), 0, func(e ProgressEvent) { events <- e }, ticks)
+	now := time.Now()
+	p.mu.Lock()
+	p.shared = true
+	p.timer = time.NewTimer(time.Hour)
+	p.started = now
+	p.now = func() time.Time { reads <- struct{}{}; return now }
+	p.mu.Unlock()
+	t.Cleanup(p.Close)
+	return p, events, func(delta time.Duration) {
+		p.mu.Lock()
+		now = now.Add(delta)
+		for len(reads) > 0 {
+			<-reads
+		}
+		p.mu.Unlock()
+		ticks <- now
+		select {
+		case <-reads:
+		case <-time.After(5 * time.Second):
+			t.Fatal("tick was not processed")
+		}
+		// The clock is read under the lock; acquiring it joins heartbeat processing.
+		p.mu.Lock()
+		closed := p.closed
+		p.mu.Unlock()
+		if closed {
+			t.Fatal("reporter closed before tick completed")
+		}
+	}
+}
+
+func TestSetupProgressOwnsHeartbeatAndRestoresStage(t *testing.T) {
+	for _, stage := range []string{"plan", "implement", "review", "test"} {
+		t.Run(stage, func(t *testing.T) {
+			p, events, tick := setupProgressFixture(t)
+			p.mu.Lock()
+			p.issue = 42
+			p.mu.Unlock()
+			p.next(stage)
+			receiveProgress(t, events, stage, "started")
+			sentinel := errors.New("operation failure")
+			err := p.ReportSetupPhase(t.Context(), 42, "bundle", func() error {
+				receiveProgress(t, events, "bundle", "started")
+				tick(15 * time.Second)
+				receiveProgress(t, events, "bundle", "running")
+				return sentinel
+			})
+			if err != sentinel {
+				t.Fatalf("changed operation error: %v", err)
+			}
+			tick(15 * time.Second)
+			receiveProgress(t, events, stage, "running")
+			p.finish(nil, err)
+			receiveProgress(t, events, stage, "failed")
+			p.Close()
+			if err := p.ReportSetupPhase(t.Context(), 42, "claim", func() error { return sentinel }); err != sentinel {
+				t.Fatal(err)
+			}
+			select {
+			case event := <-events:
+				t.Fatalf("late event: %+v", event)
+			default:
+			}
+		})
+	}
+}
+
+func TestSetupProgressFreshDeadline(t *testing.T) {
+	for _, phase := range []string{"claim", "workspace", "bundle"} {
+		t.Run(phase, func(t *testing.T) {
+			p, events, tick := setupProgressFixture(t)
+			p.mu.Lock()
+			p.issue = 42
+			p.mu.Unlock()
+			p.next("plan")
+			receiveProgress(t, events, "plan", "started")
+			tick(14 * time.Second)
+			p.ReportSetupPhase(t.Context(), 42, phase, func() error {
+				receiveProgress(t, events, phase, "started")
+				tick(14 * time.Second)
+				select {
+				case e := <-events:
+					t.Fatalf("early heartbeat: %+v", e)
+				default:
+				}
+				tick(time.Second)
+				if e := receiveProgress(t, events, phase, "running"); e.StageElapsed != 15*time.Second {
+					t.Fatal(e)
+				}
+				tick(15 * time.Second)
+				if e := receiveProgress(t, events, phase, "running"); e.StageElapsed != 30*time.Second {
+					t.Fatal(e)
+				}
+				return nil
+			})
+			p.mu.Lock()
+			remaining := p.deadline.Sub(p.now())
+			p.mu.Unlock()
+			if remaining != 15*time.Second {
+				t.Fatalf("restored deadline: %s", remaining)
+			}
+			tick(14 * time.Second)
+			select {
+			case e := <-events:
+				t.Fatalf("early restored heartbeat: %+v", e)
+			default:
+			}
+			tick(time.Second)
+			receiveProgress(t, events, "plan", "running")
+			p.Close()
+			select {
+			case <-p.done:
+			default:
+				t.Fatal("heartbeat goroutine not joined")
+			}
+		})
+	}
+}
+
+func TestSetupProgressCanceledSessionStillRunsOperation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	var events []ProgressEvent
+	p := NewProgressReporter(ctx, func(e ProgressEvent) { events = append(events, e) })
+	cancel()
+	<-p.done
+	called := false
+	p.ReportSetupPhase(t.Context(), 42, "claim", func() error { called = true; return nil })
+	p.Close()
+	if !called || len(events) != 0 {
+		t.Fatalf("called=%v events=%v", called, events)
+	}
+}
+
+func TestSetupProgressChildCancellationSuppressesHeartbeat(t *testing.T) {
+	events := make(chan ProgressEvent, 10)
+	p := NewProgressReporter(t.Context(), func(event ProgressEvent) { events <- event })
+	defer p.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	p.ReportSetupPhase(ctx, 42, "bundle", func() error {
+		receiveProgress(t, events, "bundle", "started")
+		cancel()
+		p.mu.Lock()
+		p.deadline = time.Time{}
+		p.mu.Unlock()
+		p.heartbeat(t.Context())
+		select {
+		case event := <-events:
+			t.Fatalf("heartbeat after phase cancellation: %+v", event)
+		default:
+		}
+		return ctx.Err()
+	})
+}

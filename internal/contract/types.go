@@ -146,9 +146,10 @@ func (c *SwarmConfig) CommitMessageDetail() string {
 }
 
 type LeaseConfig struct {
-	Duration    string `yaml:"duration" json:"duration"`
-	Renewable   bool   `yaml:"renewable" json:"renewable"`
-	MaxRenewals int    `yaml:"max_renewals" json:"max_renewals"`
+	RebaseRepairLimit *int   `yaml:"rebase_repair_limit,omitempty" json:"rebase_repair_limit,omitempty"`
+	Duration          string `yaml:"duration" json:"duration"`
+	Renewable         bool   `yaml:"renewable" json:"renewable"`
+	MaxRenewals       int    `yaml:"max_renewals" json:"max_renewals"`
 }
 
 type ForkConfig struct {
@@ -257,4 +258,12 @@ type ProvenanceAttestation struct {
 	ReviewVerdict  string            `yaml:"review_verdict,omitempty" json:"review_verdict,omitempty"`
 	ValidationPass bool              `yaml:"validation_passed" json:"validation_passed"`
 	Roles          []RoleAttestation `yaml:"roles" json:"roles"`
+}
+
+// RebaseRepairAttempts returns the trusted policy's bounded repair budget.
+func (c LeaseConfig) RebaseRepairAttempts() int {
+	if c.RebaseRepairLimit == nil {
+		return 2
+	}
+	return *c.RebaseRepairLimit
 }

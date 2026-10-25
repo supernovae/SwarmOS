@@ -31,12 +31,13 @@ var (
 )
 
 type CheckRunOutcome struct {
-	Name     string        `json:"name"`
-	Command  string        `json:"command"`
-	ExitCode int           `json:"exit_code"`
-	Duration time.Duration `json:"duration"`
-	Output   string        `json:"output"`
-	Passed   bool          `json:"passed"`
+	InfrastructureError bool          `json:"infrastructure_error,omitempty"`
+	Name                string        `json:"name"`
+	Command             string        `json:"command"`
+	ExitCode            int           `json:"exit_code"`
+	Duration            time.Duration `json:"duration"`
+	Output              string        `json:"output"`
+	Passed              bool          `json:"passed"`
 }
 
 type ValidationReport struct {
@@ -177,6 +178,8 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		cancel()
 		outcome := CheckRunOutcome{Name: check.Name, Command: check.Command, Duration: time.Since(start), Output: output.String(), Passed: runErr == nil}
 		if runErr != nil {
+			var exitErr *exec.ExitError
+			outcome.InfrastructureError = !errors.As(runErr, &exitErr)
 			report.Passed = false
 			outcome.ExitCode = 1
 			if exit, ok := runErr.(*exec.ExitError); ok {

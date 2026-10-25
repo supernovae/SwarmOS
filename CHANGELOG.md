@@ -4,6 +4,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Extend `swarm pr rebase --resolve` with recorded per-conflict micro-plans, trusted post-rebase validation, and bounded local repair (default two attempts, configurable with `lease.rebase_repair_limit`). Successful runs print the explicit submit command. Eligible maintainers can re-pin unchanged task/policy approval automatically; policy changes require explicit approval before unchanged plans receive a fresh agent review. Fork workers retain explicit maintainer approval and review steps.
+
 - `swarm pr rebase <PR> --resolve` lets the configured developer agent resolve routine rebase conflicts. At each conflicted commit the agent gets one turn on a disposable workspace holding only the conflicted files, both sides, the WorkUnit, and the approved plan. SwarmOS accepts edits limited to those files with no remaining markers, stages them, and continues; anything else leaves the rebase paused as before. Resolutions appear in `pr status` and the PR's rebase context, and `pr work` and `pr stage` now point at a paused rebase's recovery commands.
 
 - Feed current-head failing and cancelled PR checks into `swarm pr work` through quoted `.swarm/active/CI.md` evidence, including annotations and bounded GitHub Actions log tails. `pr status` notes when evidence will be available.

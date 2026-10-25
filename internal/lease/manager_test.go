@@ -808,3 +808,149 @@ func TestIssueEditApprovalRemainsBoundToContent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func freshPlanRebaseFixture(t *testing.T) (*Manager, int, *IssueState) {
+	t.Helper()
+	m, _, issue := testManager(t)
+	ctx := context.Background()
+	if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	st, rev, err := m.load(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.PRNumber = 37
+	st.PRRevision = &PRRevision{Number: 37, Intent: "rebase", RemoteHeadSHA: strings.Repeat("a", 40), LocalHeadSHA: strings.Repeat("b", 40), Branch: "swarm/pr-37"}
+	st.ApprovalTransition = &ApprovalTransition{OriginBase: st.BaseSHA}
+	st.LastRebase = &RebaseEvidence{Verified: true, NewHead: st.PRRevision.LocalHeadSHA}
+	for _, typ := range []contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan, contract.ArtifactReview, contract.ArtifactImplementation, contract.ArtifactValidation} {
+		st.Artifacts = append(st.Artifacts, contract.Artifact{Type: typ, Body: "old evidence"})
+	}
+	st.Attestations = []contract.RoleAttestation{{Role: "tester", Harness: "old"}}
+	if _, err := m.save(ctx, issue.Number, rev, st); err != nil {
+		t.Fatal(err)
+	}
+	return m, issue.Number, st
+}
+
+func TestPRRevisionFreshPlan(t *testing.T) {
+	for _, first := range []contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan} {
+		t.Run(string(first), func(t *testing.T) {
+			m, n, before := freshPlanRebaseFixture(t)
+			ctx := context.Background()
+			other := contract.ArtifactDesign
+			if first == other {
+				other = contract.ArtifactTestPlan
+			}
+			for i, typ := range []contract.ArtifactType{first, other, first} {
+				st, err := m.UpdateArtifact(ctx, n, "local-dev", contract.Artifact{Type: typ, Producer: "mock:planner", Summary: "fresh", Body: "fresh " + string(typ), Metadata: map[string]string{"harness": "mock"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				identity := *before.PRRevision
+				identity.Intent = "work"
+				if *st.PRRevision != identity || st.EffectiveGate != before.EffectiveGate || st.LastRebase == nil {
+					t.Fatalf("revision identity changed: %+v", st)
+				}
+				want := 2
+				if i == 0 {
+					want = 1
+				}
+				if len(st.Artifacts) != want || st.ApprovalTransition != nil {
+					t.Fatalf("old evidence retained: %+v", st)
+				}
+				for _, a := range st.Attestations {
+					if a.Harness != "mock" || a.Role != "planner" {
+						t.Fatalf("old attestation retained: %+v", a)
+					}
+				}
+				if len(st.Attestations) == 0 {
+					t.Fatal("new planner provenance lost")
+				}
+				if i == 0 {
+					if _, err := m.RecordHumanReview(ctx, n, "APPROVED", "partial plan"); err == nil {
+						t.Fatal("partial staging accepted review")
+					}
+				}
+				wu, err := contract.ParseWorkUnitFromIssue(n, "test", testWorkUnit())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !errors.Is(VerifyApproval(st, wu), ErrApprovalRequired) {
+					t.Fatal("fresh plan inherited approval")
+				}
+			}
+			st, err := m.BeginPRRevision(ctx, n, "local-dev", 37, before.PRRevision.RemoteHeadSHA, before.PRRevision.LocalHeadSHA, before.PRRevision.Branch)
+			if err != nil || len(st.Artifacts) != 2 {
+				t.Fatalf("resume lost fresh artifacts: %v %+v", err, st)
+			}
+		})
+	}
+}
+
+func TestPRRevisionFreshPlanRejectedWrites(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(map[bool]string{false: "invalid", true: "stale claim"}[stale], func(t *testing.T) {
+			m, n, before := freshPlanRebaseFixture(t)
+			art := contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock", Summary: "fresh", Body: "fresh"}
+			if stale {
+				m.BindClaim(n, "stale")
+			} else {
+				art.Type = "invalid"
+			}
+			_, err := m.UpdateArtifact(context.Background(), n, "local-dev", art)
+			if err == nil || (stale && !errors.Is(err, ErrClaimFence)) {
+				t.Fatalf("rejected write: %v", err)
+			}
+			after, err := m.GetCurrentState(context.Background(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a, _ := json.Marshal(before)
+			b, _ := json.Marshal(after)
+			if string(a) != string(b) {
+				t.Fatal("rejected write changed evidence")
+			}
+		})
+	}
+}
+
+func TestPRRevisionUnstagedRebaseResumeInvalidatesEvidence(t *testing.T) {
+	m, n, before := freshPlanRebaseFixture(t)
+	st, err := m.BeginPRRevision(context.Background(), n, "local-dev", 37, before.PRRevision.RemoteHeadSHA, before.PRRevision.LocalHeadSHA, before.PRRevision.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PRRevision.Intent != "work" || len(st.Artifacts) != 0 || len(st.Attestations) != 0 || st.ApprovalTransition != nil {
+		t.Fatalf("unstaged resume retained evidence: %+v", st)
+	}
+}
+
+func TestPRRevisionFreshPlanOrdinaryUpdatesRetainEvidence(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(map[bool]string{false: "issue", true: "work revision"}[pending], func(t *testing.T) {
+			m, n, before := freshPlanRebaseFixture(t)
+			st, rev, err := m.load(context.Background(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pending {
+				st.PRRevision.Intent = "work"
+			} else {
+				st.PRRevision = nil
+			}
+			if _, err := m.save(context.Background(), n, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			after, err := m.UpdateArtifact(context.Background(), n, "local-dev", contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock", Summary: "plan", Body: "new plan"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Ordinary plan edits remove review artifacts, but do not reset all revision evidence.
+			if len(after.Artifacts) != len(before.Artifacts)-1 || len(after.Attestations) != len(before.Attestations) || after.ApprovalTransition == nil {
+				t.Fatal("ordinary update unexpectedly reset revision evidence")
+			}
+		})
+	}
+}

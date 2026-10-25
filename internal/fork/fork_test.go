@@ -815,4 +815,36 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	if err != nil || len(stRev.Artifacts) != 0 || stRev.ApprovalTransition != nil || stRev.CarryReason != "policy files changed" {
 		t.Fatalf("fork rebase intent overrode trusted policy change: %v %+v", err, stRev)
 	}
+	t.Run("TestForkPRRebaseStagePlanSurvivesWork", func(t *testing.T) {
+		before := *stRev.PRRevision
+		for _, typ := range []contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan} {
+			art := contract.Artifact{Type: typ, Producer: "claude:planner", Summary: "Fresh post-rebase plan", Body: "fresh " + string(typ)}
+			stRev, err = applyBob(lease.ForkRequest{Operation: "update-artifact", ClaimID: stRev.Lease.ClaimID, Artifact: &art})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stRev.PRRevision.Intent != "work" || stRev.ApprovalTransition != nil {
+				t.Fatalf("fresh fork plan retained rebase intent or approval: %+v", stRev)
+			}
+		}
+		before.Intent = "work"
+		if *stRev.PRRevision != before {
+			t.Fatal("staging changed revision identity")
+		}
+		stRev, err = applyBob(lease.ForkRequest{Operation: "begin-pr-revision", ClaimID: stRev.Lease.ClaimID, PRNumber: 55, ExpectedHeadSHA: before.RemoteHeadSHA, HeadSHA: before.LocalHeadSHA, Branch: before.Branch})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(stRev.Artifacts) != 2 {
+			t.Fatalf("resume lost staged fork plans: %+v", stRev.Artifacts)
+		}
+		for _, art := range stRev.Artifacts {
+			if art.Body != "fresh "+string(art.Type) {
+				t.Fatalf("stale fork evidence: %+v", art)
+			}
+		}
+		if !errors.Is(lease.VerifyApproval(stRev, wu), lease.ErrApprovalRequired) {
+			t.Fatal("contributor staging bypassed trusted gate")
+		}
+	})
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -96,7 +97,8 @@ func TestImportResolvedRollsBackOnFailure(t *testing.T) {
 	}
 	data, readErr := os.ReadFile(filepath.Join(root, "a.txt"))
 	info, statErr := os.Stat(filepath.Join(root, "a.txt"))
-	if readErr != nil || statErr != nil || string(data) != "conflicted a\n" || info.Mode().Perm() != 0o640 {
+	// Windows has no Unix permission bits, so only content is comparable there.
+	if readErr != nil || statErr != nil || string(data) != "conflicted a\n" || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o640) {
 		t.Fatalf("a.txt not restored: %q mode=%v", data, info.Mode())
 	}
 }

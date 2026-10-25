@@ -62,6 +62,8 @@ type DraftPRRequest struct {
 }
 
 type PullRequest struct {
+	Mergeable      *bool      `json:"mergeable"`
+	MergeableState string     `json:"mergeable_state"`
 	Number         int        `json:"number"`
 	Title          string     `json:"title"`
 	Body           string     `json:"body"`

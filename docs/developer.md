@@ -180,6 +180,8 @@ Use the same verbs for the same kind of work: `issue work` implements an approve
 
 PR commands require an open PR recorded in an approved WorkUnit's authoritative state. A closing reference in a PR description helps SwarmOS find that link quickly, but the link itself always comes from coordination state.
 
+Before claiming work or starting agents, `pr work` checks GitHub mergeability and compares the target branch tip with the issue's approved baseline. Known conflicts stop early with commands for the linked PR and issue. If GitHub is still computing mergeability, SwarmOS retries briefly (up to three observations within three seconds), then continues with an unknown notice and the usual approval checks. `pr work --dry-run` reports these results, blockers, and recovery commands as JSON without taking a claim. The local backend skips this GitHub check.
+
 Who can revise a PR:
 
 - **Maintainers** with upstream write permission can revise any linked PR. For a PR whose head lives in a contributor's fork, add a writable Git remote for that fork and select it with `--fork-remote <name>` (default `fork`), without `--fork`.
@@ -229,6 +231,8 @@ swarm pr rebase 33 --continue --backend github
 swarm pr rebase 33 --abort --backend github
 ```
 
+A conflict at the current approved baseline needs a rebase, without another issue approval. When the target has moved, follow the release → maintainer approval → rebase sequence above. Contributors add `--fork --fork-remote <name>` to their PR commands; issue approval is a maintainer action against upstream, without fork flags. After a paused rebase, finish with `--continue` after staging files, use `--continue --resolve`, or restore the starting commit with `--abort`.
+
 ##### Let the developer agent resolve conflicts
 
 Most rebase conflicts are routine: imports added next to each other, tests both branches appended, or a docs paragraph both sides reworded. Add `--resolve` and your configured developer agent handles them while SwarmOS keeps control of Git:
@@ -247,7 +251,7 @@ At each conflicted commit, the agent gets one turn on a disposable copy of just 
 
 Use `--continue` or `--abort` only when a rebase is in progress. An approved plan carries forward when the WorkUnit and the committed `.swarm/` policy tree are unchanged, the previous baseline is an ancestor of the new one, and the review recorded that policy tree. In that case, run `swarm pr validate 33` and `swarm pr submit 33` right after rebasing. Implementation and validation evidence always need renewal, and a human gate still requires an authenticated human review.
 
-When a plan can't carry forward, `pr status` explains why, lists the changed policy paths when available, and points to `swarm pr work <PR>`, which starts a new plan cycle. Reviews recorded before policy tree binding need a fresh review after a baseline move.
+When a plan can't carry forward, `pr status` explains why, lists the changed policy paths when available, and points to `swarm pr work <PR>`, which starts a new plan cycle. Reviews recorded before policy tree binding need a fresh review after a baseline move. A completed unpublished rebase can enter this new planning cycle even while GitHub reports the old published head as conflicting. SwarmOS checks the existing local worktree and recorded rebase evidence without changing them, and requires the rebase base, approved baseline, and current target tip to match. It prints `published head superseded by local rebase` when this applies; the new plan still follows its configured approval gate.
 
 `pr status` and the submitted PR description show the old and new heads and bases, the paths that had conflicts, and the aggregate Git patch identity. Unchanged patch identity helps reviewers focus on conflict resolutions; trusted validation is still required either way. In fork mode, conflict paths are labeled as contributor reports, and the coordinator checks patch identity from the published commits. While a PR revision is pending, use the PR commands against its separate worktree rather than issue work/stage/validate/submit against the original issue worktree.
 

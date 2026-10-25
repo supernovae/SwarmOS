@@ -317,11 +317,24 @@ func prRebasing(ctx context.Context, path string) (bool, error) {
 }
 
 func PRHead(ctx context.Context, path string) (string, bool, bool, error) {
+	return prHead(ctx, path, false)
+}
+
+// InspectPRHead reads worktree state without refreshing the Git index.
+func InspectPRHead(ctx context.Context, path string) (string, bool, bool, error) {
+	return prHead(ctx, path, true)
+}
+
+func prHead(ctx context.Context, path string, readOnly bool) (string, bool, bool, error) {
 	head, err := gitOutputContext(ctx, path, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return "", false, false, err
 	}
-	status, err := gitOutputContext(ctx, path, "status", "--porcelain", "-z", "--untracked-files=all")
+	args := []string{"status", "--porcelain", "-z", "--untracked-files=all"}
+	if readOnly {
+		args = append([]string{"--no-optional-locks"}, args...)
+	}
+	status, err := gitOutputContext(ctx, path, args...)
 	if err != nil {
 		return "", false, false, err
 	}

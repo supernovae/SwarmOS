@@ -224,7 +224,13 @@ func ProvisionAt(repoRoot string, issueNum int, title, baseSHA, branch, headSHA 
 // fetching baseSHA from origin if needed and restoring any pinned checkpoint
 // headSHA from checkpointRemote ("origin" in same-repo mode, or the verified
 // fork remote in --fork mode).
-func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, title, baseSHA, branch, headSHA string) (string, string, error) {
+func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, title, baseSHA, branch, headSHA string, recovery ...*DroppedCheckpoint) (string, string, error) {
+	if len(recovery) > 0 && recovery[0] != nil {
+		if checkpointRemote != "origin" || headSHA != "" {
+			return "", "", fmt.Errorf("invalid checkpoint recovery context")
+		}
+		return provisionDroppedCheckpoint(repoRoot, issueNum, title, baseSHA, recovery[0])
+	}
 	if issueNum <= 0 || baseSHA == "" {
 		return "", "", errors.New("issue number and approved base SHA are required")
 	}
@@ -822,7 +828,7 @@ func CleanEphemeralHarnessMarkers(worktreePath string) error {
 				continue
 			}
 		}
-		if err := safe.WriteFile(docName, []byte(cleaned), 0o644); err != nil {
+		if err := safe.WriteFile(docName, []byte(cleaned), info.Mode().Perm()); err != nil {
 			return err
 		}
 	}

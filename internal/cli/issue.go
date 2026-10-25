@@ -124,6 +124,9 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if asJSON {
 			return writeJSON(cmd, map[string]any{"kind": "task-approval", "issue_number": number, "state": st})
 		}
+		if st.CheckpointDropped {
+			fmt.Fprintln(cmd.OutOrStdout(), "Dropped empty checkpoint already contained in the approved base.")
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Approved issue #%d (task=%s policy=%s base=%s)\n", number, st.TaskDigest, st.PolicyDigest, st.BaseSHA)
 		return nil
 	}}

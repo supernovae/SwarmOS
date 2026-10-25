@@ -4,6 +4,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Re-approving an issue on a newer base drops a checkpoint whose commits are already contained in that base. Resuming moves clean local work forward and retains the original remote head as the next publication fence; checkpoints with unique commits remain preserved.
+
 - Approved plans can carry across descendant PR rebases when the WorkUnit and committed policy tree are unchanged. Fresh validation and explicit submission remain required; status explains when a new plan cycle is needed.
 - Rebase status and PR updates include heads, bases, conflict paths, and Git patch identity. Claim and interrupted-rebase errors include recovery commands, and Git errors render carriage returns cleanly.
 

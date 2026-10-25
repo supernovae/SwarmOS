@@ -145,7 +145,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					return nil, err
 				}
 				checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue.Number, issue.Title, claimed.Lease.ClaimID, claimed.Branch)
-				worktree, branch, err := workspace.ProvisionFromRemoteAt(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA)
+				worktree, branch, err := workspace.ProvisionFromRemoteAt(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA, claimed.DroppedCheckpoint)
 				if err != nil {
 					return nil, err
 				}

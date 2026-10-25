@@ -255,6 +255,16 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 	}
 	baseSHA = resolvedBase
 	if headSHA != "" {
+		observation := InspectCheckpoint(context.Background(), absRoot, checkpointRemote, issueNum, branch, headSHA)
+		remoteConfigured := false
+		if _, err := gitOutput(absRoot, "remote", "get-url", checkpointRemote); err == nil {
+			remoteConfigured = true
+		}
+		if (remoteConfigured && observation.RemoteBranch.SHA != headSHA) ||
+			(!observation.LocalBranch.Missing && observation.LocalBranch.SHA != headSHA) ||
+			(!observation.Worktree.Missing && (observation.Worktree.SHA != headSHA || observation.AttachedBranch != branch)) {
+			return "", "", &CheckpointDivergenceError{Issue: issueNum, State: observation}
+		}
 		if _, err := gitOutput(absRoot, "remote", "get-url", checkpointRemote); err == nil {
 			remote, err := gitOutput(absRoot, "ls-remote", "--refs", checkpointRemote, "refs/heads/"+branch)
 			if err != nil {

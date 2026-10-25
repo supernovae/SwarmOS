@@ -81,6 +81,40 @@ How gate verification keeps reviews trustworthy:
 
 ---
 
+## Continuing from a rewritten checkpoint
+
+Keep task history additive when possible: commit further changes or merge required upstream fixes. If you deliberately rebase an upstream issue checkpoint, SwarmOS keeps the recorded checkpoint and asks you to reconcile the replacement explicitly. `swarm issue status 29` shows the recorded checkpoint, worktree HEAD and attached branch, local task branch, and live remote branch as full SHAs. Its `--json` output includes the same observations, with missing refs and lookup errors reported separately.
+
+With your active claim, finish the rewrite on the attached task branch and leave the worktree clean. Copy the recorded and replacement SHAs into the commands below:
+
+```bash
+issue=29
+expected=FULL_RECORDED_CHECKPOINT_SHA
+candidate=FULL_LOCAL_REPLACEMENT_SHA
+swarm issue reconcile "$issue" --checkpoint --expected-head "$expected" --candidate-head "$candidate" --dry-run
+swarm issue reconcile "$issue" --checkpoint --expected-head "$expected" --candidate-head "$candidate"
+```
+
+The preview reports whether validation or fresh plan review is needed. An unchanged patch can retain its current authenticated plan approval. For a changed patch, update `PLAN.md` to describe the replacement and include its full candidate SHA, stage the revised plan with `swarm issue stage 29 --phase plan`, and obtain a new `swarm issue review-plan 29` decision before reconciling. The existing human gate still requires an authorized maintainer's approval.
+
+Reconciliation validates a pinned candidate snapshot using the approved base's checks and protected paths. It then atomically updates the remote task branch and authoritative checkpoint, recording predecessor and replacement heads in the existing rebase evidence. A changed remote head, claim, task, plan, or local candidate stops publication; preserve your work and inspect status again. This mode supports upstream Git-backed issue work before PR submission. For a linked PR, use the [PR revision workflow](developer.md#continuing-an-existing-pr). Local file-backed stores and fork checkpoint reconciliation are unsupported. Running `issue reconcile` without `--checkpoint` retains its existing PR-outcome repair behavior.
+
+### Checkpoint retention
+
+Git-backed checkpoint publication, PR publication, and verified fork recording retain commits permanently under `refs/heads/swarm-checkpoints/issue-<number>/<full-SHA>`. Task-branch cleanup preserves these refs, so historical checkpoints survive branch rewrites, deletion, and Git garbage collection. Fetch a retained checkpoint explicitly:
+
+```bash
+issue=29
+checkpoint=FULL_CHECKPOINT_SHA
+ref="refs/heads/swarm-checkpoints/issue-$issue/$checkpoint"
+git fetch origin "$ref:refs/remotes/origin/swarm-checkpoints/issue-$issue/$checkpoint"
+git show "$checkpoint"
+```
+
+These refs appear as branches in the hosting UI. Allow the coordinator to create `swarm-checkpoints/**` refs and exclude that namespace from branch-protection or ruleset patterns that would block creation. Publication requires the server's atomic-push support. Keep `swarm-state/**` refs as audit ledgers; they are separate from task code history.
+
+Available legacy checkpoints are retained during subsequent publication. SwarmOS reports older missing objects by full SHA and continues with available history; an already garbage-collected object needs recovery from another clone or backup. The current predecessor and candidate must both be available before a replacement can publish.
+
 ## 4. Interactive Slash Commands & Shared Skills
 
 SwarmOS separates per-issue execution planning from repository-wide roadmap planning (and never overrides a harness's built-in `/plan` command):

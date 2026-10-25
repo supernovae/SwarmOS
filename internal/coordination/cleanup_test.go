@@ -10,7 +10,7 @@ import (
 )
 
 func TestCleanupAtomicBranchAndStateFences(t *testing.T) {
-	for _, scenario := range []string{"success", "advanced-branch", "changed-state", "unsupported-atomic", "protected-state", "protected-contributors", "wrong-push-remote"} {
+	for _, scenario := range []string{"success", "advanced-branch", "changed-state", "unsupported-atomic", "protected-state", "protected-contributors", "protected-checkpoints", "wrong-push-remote"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
 			root := t.TempDir()
@@ -52,6 +52,9 @@ func TestCleanupAtomicBranchAndStateFences(t *testing.T) {
 				git(remote, "config", "receive.advertiseAtomic", "false")
 			case "protected-state":
 				branch = "swarm-state/issue-1"
+			case "protected-checkpoints":
+				branch = "swarm-checkpoints/issue-1/" + head
+				git(local, "push", "origin", head+":refs/heads/"+branch)
 			case "protected-contributors":
 				branch = "swarm-contributors/alice"
 			}
@@ -61,6 +64,9 @@ func TestCleanupAtomicBranchAndStateFences(t *testing.T) {
 			if scenario == "success" {
 				if e != nil {
 					t.Fatal(e)
+				}
+				if got := git(remote, "rev-parse", CheckpointRef(1, head)); got != head {
+					t.Fatal("cleanup lost retained checkpoint")
 				}
 				if out := git(remote, "for-each-ref", "refs/heads/swarm/issue-1-cleanup"); out != "" {
 					t.Fatal("branch survived")

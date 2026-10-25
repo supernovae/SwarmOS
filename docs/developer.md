@@ -187,6 +187,10 @@ Who can revise a PR:
 
 `pr status` shows the published head and target, local revision, check runs, and GitHub review records with their commit SHAs. Checks on the published head are separate from local `pr validate` results; reviews against an older commit remain visible as history. When the tracker reports no CI checks (for example, on the local backend), `pr status` shows the SwarmOS validation recorded for the published head as a `swarm-validation` check.
 
+When checks fail or are cancelled on the published PR head, `swarm pr work <PR>` automatically prepares `.swarm/active/CI.md` in the PR worktree. It includes each affected check's name, conclusion, tested SHA, annotations, and the tail of its GitHub Actions job log. The developer receives a pointer to this quoted diagnostic evidence and works within the approved plan. You can still use `--instructions` to describe the outcome you want.
+
+Logs retain the newest 32 KiB per check, with 128 KiB of logs and 64 KiB of annotations across a report; the complete file is capped at 256 KiB. Truncation is marked, terminal control characters are normalized, and GitHub's `***` masking is preserved. Expired logs, missing Actions read permissions, cancelled jobs without logs, and other check providers keep their available metadata with a note explaining that the log is unavailable. The coordinator retrieves this evidence with its own credentials. Checks from older heads are excluded, and each work run clears previous evidence when there are no current failures. The local backend continues without CI data.
+
 If commits are pushed to the PR branch outside SwarmOS, `pr status` reports `unverified-head`: the recorded plan, validation, and provenance attestation describe the last verified head, not the current one. Run `swarm pr work <PR>` to start a revision from the current head; it re-plans, re-validates, and records new evidence before `pr submit`.
 
 ```bash

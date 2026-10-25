@@ -4,6 +4,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Feed current-head failing and cancelled PR checks into `swarm pr work` through quoted `.swarm/active/CI.md` evidence, including annotations and bounded GitHub Actions log tails. `pr status` notes when evidence will be available.
+
 - Fail no-op and explicitly blocked implementations before testing, and refuse empty issue submissions with a recovery command.
 - Add `swarm issue work --instructions` and record delivered operator guidance in role reports, status, and PR review evidence.
 - Replan after requested changes, mark earlier role attempts as superseded, and keep unmerged lessons out of agent system prompts.

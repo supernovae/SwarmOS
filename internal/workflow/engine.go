@@ -30,6 +30,8 @@ var (
 )
 
 type WorkOptions struct {
+	CIEvidence []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
+
 	InspectOnly     bool // report execution blockers without claiming or running work
 	RepoRoot        string
 	IssueNumber     int
@@ -519,6 +521,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if opts.PRNumber != 0 {
 		implementationBase = st.PRRevision.LocalHeadSHA
 	}
+	if opts.PRNumber != 0 {
+		if _, err := workspace.WriteCIEvidence(wtPath, opts.CIEvidence); err != nil {
+			return res, err
+		}
+	}
 	rejectedPlan, rejectedTest, rejectedFindings := rejectedPlanContext(st)
 	runPlan := opts.Phase == "all" || opts.Phase == "plan"
 	if opts.Phase == "all" && (hasDesignAndTestPlanArtifacts(st) && !hasRejectedReview(st)) {
@@ -704,6 +711,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if hasFailedValidationArtifact(st) {
 		devPrompt = "Execute /swarm-implement step-by-step using the approved plan and test plan. A prior validation check failed; inspect .swarm/active/VALIDATION.md and .swarm/active/WORKUNIT.md and fix all failing checks."
 		checkpointPurpose = "repair"
+	}
+	var ciErr error
+	devPrompt, ciErr = developerCIPrompt(wtPath, opts, devPrompt)
+	if ciErr != nil {
+		return res, ciErr
 	}
 	if opts.Instructions != "" {
 		devPrompt += "\nOperator instructions: " + opts.Instructions

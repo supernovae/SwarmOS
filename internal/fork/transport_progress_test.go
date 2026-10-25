@@ -124,6 +124,11 @@ func TestGatewayProgressOutcomes(t *testing.T) {
 				}
 			}
 			if name == "timeout" {
+				for _, event := range events {
+					if event.Status == "accepted" || event.Status == "rejected" {
+						t.Fatalf("timeout reported an outcome: %+v", events)
+					}
+				}
 				expected := "no response from the upstream fork coordinator to request 100 (release) within 10ms; check the upstream repository's SwarmOS Fork Coordinator Actions run for that request: context deadline exceeded"
 				if err == nil || err.Error() != expected || !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatal(err)
@@ -176,6 +181,79 @@ func TestGatewayProgressHeartbeatDuringDispatch(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "stop") {
 		t.Fatal(err)
 	}
+	select {
+	case e := <-events:
+		t.Fatal("late event", e)
+	default:
+	}
+}
+
+func TestGatewayProgressHeartbeatDuringPoll(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ticks := make(chan time.Time)
+	events := make(chan ProgressEvent, 8)
+	polling, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	now := time.Now()
+	tr := &pollingTracker{list: func(ctx context.Context) ([]*tracker.Comment, error) {
+		close(polling)
+		select {
+		case <-release:
+			return nil, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}}
+	state := lease.IssueState{LastForkRequestID: 100}
+	state.Lease.Status = "released"
+	g := Gateway{Tracker: tr, Store: progressStore{state: state}, progressTicks: ticks,
+		progressNow: func() time.Time { mu.Lock(); defer mu.Unlock(); return now },
+		OnProgress:  func(e ProgressEvent) { events <- e },
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := g.Apply(ctx, lease.ForkRequest{Operation: "release", IssueNumber: 1, ClaimID: "private"})
+		done <- err
+	}()
+	next := func(status string, elapsed time.Duration) {
+		t.Helper()
+		select {
+		case e := <-events:
+			if e.Status != status || e.Elapsed != elapsed || e.Operation != "release" || e.RequestID != 100 {
+				t.Fatalf("unexpected progress: %+v", e)
+			}
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for progress")
+		}
+	}
+	next("posted", 0)
+	select {
+	case <-polling:
+	case <-ctx.Done():
+		t.Fatal("poll did not start")
+	}
+	for i := 1; i <= 2; i++ {
+		mu.Lock()
+		now = now.Add(15 * time.Second)
+		mu.Unlock()
+		select {
+		case ticks <- time.Time{}:
+		case <-ctx.Done():
+			t.Fatal("reporter did not receive tick")
+		}
+		next("waiting", time.Duration(i)*15*time.Second)
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Apply did not finish")
+	}
+	next("accepted", 30*time.Second)
 	select {
 	case e := <-events:
 		t.Fatal("late event", e)

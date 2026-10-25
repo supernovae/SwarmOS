@@ -81,6 +81,24 @@ Every security fix ships with a regression test that fails against the old behav
 
 ---
 
+## 6. Keeping WorkUnits Scoped
+
+A WorkUnit should finish in one plan → implement → validate cycle. Scope that keeps growing stalls the queue, so whether you write the issue, plan it, or review the plan, keep it to the outcome that was asked for.
+
+**When writing a WorkUnit** (`swarm issue create`, `swarm repo plan`, `swarm issue decompose`):
+
+1. State one outcome in the objective, followed by one sentence for what is in scope and one for what is out of scope.
+2. Name the backends, harnesses, and platforms the change covers (for example "native Codex and harness-tools Bubblewrap; OCI is out of scope"). Never write "every backend" unless the change needs it.
+3. Write acceptance criteria that can be checked inside the agent sandbox or by CI. Anything that needs an environment agents can't reach, such as an OCI image, a Windows host, or a live GitHub flow, goes in the PR review checklist or a follow-up issue.
+4. Keep nice-to-haves out of the acceptance criteria. File them as their own issue, linked with `--depends-on` if they build on this one.
+5. If `swarm issue lint` suggests decomposing, split the parts that can merge independently. Keep tightly coupled parts together rather than leaving half-finished pieces.
+
+**When planning:** plan exactly the acceptance criteria. If one can't be met without proving something the sandbox can't verify, say so under the plan's open questions and plan the part you can verify. Don't add a step that stops implementation until an unreachable environment is proven; the reviewer then decides whether the WorkUnit needs editing. Never drop a criterion silently.
+
+**When reviewing a plan:** ask for whatever the acceptance criteria and invariants need, and flag work the WorkUnit didn't ask for. Recommend a follow-up issue for related work rather than growing this one.
+
+---
+
 ## Code Review Rules
 
 ### Documentation voice and accuracy
@@ -98,3 +116,8 @@ Every security fix ships with a regression test that fails against the old behav
   Safe path: route through the `lease.Manager` fenced methods and the fork coordinator's GitHub verification, and fail closed.
 - Flag removed or weakened adversarial tests, and security fixes without a regression test.
   Safe path: keep the test and add coverage that fails on the old behavior.
+
+### WorkUnit scope
+
+- Flag changes that implement work beyond the linked WorkUnit's acceptance criteria, and plans that make implementation wait on environments the agent sandbox can't reach.
+  Safe path: keep the change to the stated scope, note the gap in the plan, and propose a follow-up issue.

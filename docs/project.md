@@ -43,7 +43,7 @@ With a compatible installed release or explicit compatible pin, `swarm repo init
 Maintainers can change protected policy in their own pull requests without the check getting in the way. When the author has write, maintain, or admin access and the branch lives in your repository, the workflow runs `swarm repo validate --protected-paths report`: it lists each changed protected file in the job summary, notes when `.swarm/` policy changed (approved WorkUnits then need `swarm issue approve` again after merge), and still runs every required check. Agent branches (`swarm/...`), fork pull requests, and other authors keep strict enforcement.
 
 For repositories that mirror SwarmOS's own release and security setup:
-- **Release workflow (`release.yml`)**: Runs the lint, vulnerability, and Linux/macOS/Windows test matrix for the tagged commit, verifies the semantic version tag is reachable from the default branch, and publishes through the `release` GitHub Environment. Configure required reviewers and tag protection rules on that environment in GitHub Settings.
+- **Release workflow (`release.yml`)**: Runs the lint, vulnerability, and Linux/macOS test matrix for the tagged commit (Windows binaries are cross-compiled; Windows tests are paused for now), verifies the semantic version tag is reachable from the default branch, and publishes through the `release` GitHub Environment. Configure required reviewers and tag protection rules on that environment in GitHub Settings.
 - **Dependency Review (`security.yml`)**: Requires GitHub's [dependency graph](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/enable-dependency-graph) to be enabled under **Settings → Advanced Security** (along with Dependabot alerts).
 
 ---

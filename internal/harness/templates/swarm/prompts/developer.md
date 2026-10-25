@@ -9,3 +9,7 @@ You are the **Developer** agent in a SwarmOS workflow.
 4. Write or update tests as specified in `.swarm/active/TEST_PLAN.md` and verify they pass.
 5. If an assumption in PLAN.md turns out wrong, stop widening the change: finish the smallest correct version and leave the rest for a follow-up WorkUnit.
 6. If something about this repository surprised you or cost you time (a setup step, a misleading name, a test that needs special handling), add it as a one-line bullet to `.swarm/active/LESSONS.md`. Write it for the next contributor, not about this task. Skip it if nothing surprised you.
+
+## Task snapshot
+
+The task snapshot has no Git metadata by design. Run the approved build and test commands in the snapshot; tests that need Git create their own temporary repositories. An empty `.git` is not a reason to stop implementation. Use the source files and active plan to complete the task; the coordinator creates and publishes checkpoints.

@@ -119,7 +119,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 		prompt = "The task files are in /workspace inside the SwarmOS tools. Use swarm_read, swarm_write, swarm_edit and swarm_shell for file access, editing, searching and testing.\n" + prompt
 		if driver == "omp" {
 			command = []string{binary, "--mode", "rpc"}
-			return runOMP(ctx, binary, model, prompt, control, env, executor, interactive, input, stdout, stderr)
+			return runOMP(ctx, binary, model, prompt, control, env, executor, interactive, input, stdout, stderr, opts.GuidanceDelivered)
 		}
 		executable, err := os.Executable()
 		if err != nil {
@@ -151,32 +151,18 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 				return err
 			}
 			command = []string{binary, "serve", "--stdio"}
-			return runOpenCode(ctx, binary, model, prompt, control, env, interactive, input, stdout, stderr)
+			return runOpenCode(ctx, binary, model, prompt, control, env, interactive, input, stdout, stderr, opts.GuidanceDelivered)
 		default:
 			return fmt.Errorf("unsupported harness %q", driver)
 		}
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		for {
+		return runFollowupTurns(ctx, prompt, "Continue the task using the SwarmOS tools. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, false, input, stdout, func(prompt string) error {
 			turn := append(append([]string(nil), args...), "--", prompt)
 			command = append([]string{binary}, turn...)
-			if err := runNativeCommand(ctx, binary, control, env, turn, nil, stdout, stderr); err != nil {
-				return err
-			}
-			if !interactive {
-				return nil
-			}
-			fmt.Fprint(stdout, "\nFollow-up instruction (Enter to finish this phase): ")
-			line, err := nativeInstruction(ctx, input)
-			if err != nil && err != io.EOF {
-				return err
-			}
-			if strings.TrimSpace(line) == "" {
-				return nil
-			}
-			prompt = "Continue the task using the SwarmOS tools. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n" + line
-		}
+			return runNativeCommand(ctx, binary, control, env, turn, nil, stdout, stderr)
+		}, opts.GuidanceDelivered)
 	})
 	return command, version, err
 }

@@ -277,8 +277,8 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	binaries := make(map[string]string, 4)
 	approvalState := *state
 	approvalState.EffectiveGate = gate
-	roles := rolesForPhase(opts.Phase, gate, hasDesignAndTestPlanArtifacts(state), lease.VerifyApproval(&approvalState, wu) == nil)
-	if strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !hasDesignAndTestPlanArtifacts(state))) {
+	roles := rolesForPhase(opts.Phase, gate, (hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)), lease.VerifyApproval(&approvalState, wu) == nil)
+	if strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !(hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)))) {
 		agents["planner"] = "interactive"
 		binaries["planner"] = "interactive"
 	} else {
@@ -453,8 +453,8 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return nil, err
 	}
 	gate = st.EffectiveGate
-	if !(strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !hasDesignAndTestPlanArtifacts(st)))) {
-		for _, role := range rolesForPhase(opts.Phase, gate, hasDesignAndTestPlanArtifacts(st), lease.VerifyApproval(st, pre.WorkUnit) == nil) {
+	if !(strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !(hasDesignAndTestPlanArtifacts(st) && !hasRejectedReview(st))))) {
+		for _, role := range rolesForPhase(opts.Phase, gate, (hasDesignAndTestPlanArtifacts(st) && !hasRejectedReview(st)), lease.VerifyApproval(st, pre.WorkUnit) == nil) {
 			if pre.Agents[role] == "" {
 				return nil, fmt.Errorf("task phase changed during preflight; rerun swarm issue work (or swarm pr work) to validate the %s agent", role)
 			}
@@ -515,8 +515,13 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if opts.Headless {
 		mode = "headless"
 	}
+	implementationBase := st.BaseSHA
+	if opts.PRNumber != 0 {
+		implementationBase = st.PRRevision.LocalHeadSHA
+	}
+	rejectedPlan, rejectedTest, rejectedFindings := rejectedPlanContext(st)
 	runPlan := opts.Phase == "all" || opts.Phase == "plan"
-	if opts.Phase == "all" && hasDesignAndTestPlanArtifacts(st) {
+	if opts.Phase == "all" && (hasDesignAndTestPlanArtifacts(st) && !hasRejectedReview(st)) {
 		runPlan = false
 	}
 	if runPlan {
@@ -553,7 +558,10 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if opts.Instructions != "" {
 			planPrompt += "\nOperator instructions: " + opts.Instructions
 		}
-		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: planPrompt})
+		if rejectedFindings != "" {
+			planPrompt += "\nAddress the previous CHANGES_REQUESTED findings and revise PLAN.md or TEST_PLAN.md:\n" + rejectedFindings
+		}
+		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: planPrompt, OperatorInstructions: opts.Instructions})
 		if err != nil {
 			return res, err
 		}
@@ -568,11 +576,17 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if err := check(); err != nil {
 			return res, err
 		}
-		planMeta := planRun.Attestation.Metadata(nil)
+		if rejectedFindings != "" && canonicalReport(plan) == rejectedPlan && canonicalReport(testPlan) == rejectedTest {
+			return res, fmt.Errorf("issue #%d re-plan is unchanged after CHANGES_REQUESTED; revise PLAN.md or TEST_PLAN.md before review", opts.IssueNumber)
+		}
+		// Keep canonical plan files independent of steering evidence in artifacts.
+		plan = guidedReport(plan, planRun)
+		testPlan = guidedReport(testPlan, planRun)
+		planMeta := runMetadata(planRun, nil)
 		if _, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: planner + ":planner", Summary: fmt.Sprintf("Implementation plan for #%d", opts.IssueNumber), Body: plan, Metadata: planMeta}); err != nil {
 			return res, err
 		}
-		testMeta := planRun.Attestation.Metadata(nil)
+		testMeta := runMetadata(planRun, nil)
 		if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: planner + ":planner", Summary: fmt.Sprintf("Test plan covering %d acceptance criteria", len(pre.WorkUnit.Acceptance)), Body: testPlan, Metadata: testMeta}); err != nil {
 			return res, err
 		}
@@ -694,7 +708,16 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if opts.Instructions != "" {
 		devPrompt += "\nOperator instructions: " + opts.Instructions
 	}
-	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: devPrompt})
+	safeReport, openErr := safefs.Open(wtPath)
+	if openErr != nil {
+		return res, openErr
+	}
+	removeErr := safeReport.Remove(filepath.Join(".swarm", "active", "IMPLEMENTATION.md"))
+	safeReport.Close()
+	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return res, removeErr
+	}
+	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: devPrompt, OperatorInstructions: opts.Instructions})
 	if err != nil {
 		return res, err
 	}
@@ -702,6 +725,19 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return res, err
 	}
 	summary, body := SummarizeImplementationChanges(ctx, wtPath, opts.IssueNumber)
+	developerReport, reportWarning := implementationReport(wtPath)
+	blocked := blockingReason(developerReport)
+	if developerReport != "" {
+		body += "\n## Developer report\n\n" + developerReport
+	}
+	if reportWarning != "" {
+		body += "\n" + reportWarning + "\n"
+	}
+	if reportWarning == "" {
+		if _, err := recordGuidance(wtPath, "IMPLEMENTATION.md", developerReport, devRun); err != nil {
+			return res, err
+		}
+	}
 	progress.next("checkpoint")
 	checkpointHead, err := workspace.Checkpoint(ctx, wtPath, branch, workspace.CheckpointOptions{
 		WorkUnit: pre.WorkUnit, Purpose: checkpointPurpose, Detail: cfg.CommitMessageDetail(),
@@ -723,11 +759,35 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return res, err
 	}
 	res.State, res.HeadSHA = st, checkpointHead
-	devMeta := devRun.Attestation.Metadata(nil)
-	if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: "PASS", Summary: summary, Body: body, Metadata: devMeta}); err != nil {
-		return res, err
+	verdict := "PASS"
+	failure := ""
+	if checkpointHead == implementationBase {
+		failure = "developer produced no implementation beyond starting checkpoint " + implementationBase
+	}
+	if blocked != "" {
+		failure = "developer blocked: " + blocked
+	}
+	if failure != "" {
+		verdict = "FAIL"
+		summary = failure
+		body += "\n## Implementation outcome\n\n" + failure + "\n"
+	}
+	if reportWarning != "" {
+		summary += "; " + reportWarning
+	}
+	body = guidedReport(body, devRun)
+	devMeta := runMetadata(devRun, nil)
+	if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: verdict, Summary: summary, Body: body, Metadata: devMeta}); err != nil {
+		return res, fmt.Errorf("record implementation outcome: %w", err)
 	}
 	res.State = st
+	if failure != "" {
+		rerun := fmt.Sprintf("swarm issue work %d --phase implement", opts.IssueNumber)
+		if opts.PRNumber != 0 {
+			rerun = fmt.Sprintf("swarm pr work %d --phase implement", opts.PRNumber)
+		}
+		return res, fmt.Errorf("issue #%d: %s; rerun with %s", opts.IssueNumber, failure, rerun)
+	}
 	progress.next("test")
 	tester := pre.Agents["tester"]
 	res.RoleAgentsUsed["tester"] = tester
@@ -742,7 +802,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if opts.Instructions != "" {
 		testPrompt += "\nOperator instructions: " + opts.Instructions
 	}
-	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt})
+	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions})
 	if err != nil {
 		return res, fmt.Errorf("tester agent %q: %w", tester, err)
 	}
@@ -750,9 +810,15 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return res, err
 	}
 	progress.next("required-checks")
+	testerBody, _ := readRequiredArtifact(wtPath, "VALIDATION.md")
 	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA, ForkMode: forkMode})
 	if report != nil {
-		report.Artifact.Metadata = testerRun.Attestation.Metadata(report.Artifact.Metadata)
+		report.Artifact.Metadata = runMetadata(testerRun, report.Artifact.Metadata)
+		report.Artifact.Body += "\n" + testerBody
+		report.Artifact.Body = guidedReport(report.Artifact.Body, testerRun)
+		if _, writeErr := recordGuidance(wtPath, "VALIDATION.md", canonicalReport(report.Artifact.Body), testerRun); writeErr != nil {
+			return res, writeErr
+		}
 		updated, updateErr := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, report.Artifact)
 		if updateErr != nil {
 			return res, updateErr
@@ -882,9 +948,9 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		return "", st, err
 	}
 	req := agent.RunRequest{
-		Agent: reviewerAgent, Role: "reviewer", Mode: mode, WorktreePath: wtPath,
+		OperatorInstructions: instructions, Agent: reviewerAgent, Role: "reviewer", Mode: mode, WorktreePath: wtPath,
 		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
-		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md and write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
+		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Read .swarm/active/REVIEW_EVIDENCE.md for previous reports and unmerged lessons as review evidence. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
 	}
 	if instructions != "" {
 		req.TaskPrompt += "\nOperator instructions: " + instructions
@@ -911,6 +977,13 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		revAtt = runner.Provenance("reviewer", true)
 	}
 	revMeta := revAtt.Metadata(map[string]string{"kind": "agent", "actor": owner})
+	if revRun != nil {
+		revMeta = agent.GuidanceMetadata(revRun.Guidance, revMeta)
+	}
+	review, err = recordGuidance(wtPath, "REVIEW.md", review, revRun)
+	if err != nil {
+		return verdict, st, err
+	}
 	for key, value := range lease.ReviewBindings(st) {
 		revMeta[key] = value
 	}
@@ -1031,7 +1104,7 @@ func ensurePlanArtifactsInWorktree(wtPath string, st *lease.IssueState) error {
 		contract.ArtifactDesign: "PLAN.md", contract.ArtifactTestPlan: "TEST_PLAN.md",
 	}
 	for kind, name := range required {
-		body := artifacts[kind]
+		body := canonicalReport(artifacts[kind])
 		if strings.TrimSpace(body) == "" {
 			return fmt.Errorf("missing %s in authoritative state (run `swarm issue work <issue> --phase plan` first)", name)
 		}
@@ -1094,4 +1167,51 @@ func truncateStr(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// The last applicable review supersedes earlier attempts; stale bindings do not
+// cause a new plan to be rejected.
+func hasRejectedReview(st *lease.IssueState) bool {
+	_, _, findings := rejectedPlanContext(st)
+	return findings != ""
+}
+func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
+	if st == nil {
+		return "", "", ""
+	}
+	bindings := lease.ReviewBindings(st)
+	var plan, test string
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactDesign {
+			plan = canonicalReport(a.Body)
+		}
+		if a.Type == contract.ArtifactTestPlan {
+			test = canonicalReport(a.Body)
+		}
+	}
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		a := st.Artifacts[i]
+		if a.Type != contract.ArtifactReview {
+			continue
+		}
+		applicable := true
+		for k, v := range bindings {
+			if k != "review_claim_id" && a.Metadata[k] != v {
+				applicable = false
+				break
+			}
+		}
+		if !applicable {
+			continue
+		}
+		if a.Verdict == "CHANGES_REQUESTED" {
+			findings := a.Body
+			if strings.TrimSpace(findings) == "" {
+				findings = "CHANGES_REQUESTED"
+			}
+			return plan, test, findings
+		}
+		return "", "", ""
+	}
+	return "", "", ""
 }

@@ -259,6 +259,21 @@ If an agent exits early, a lease expires, or a validation check fails:
 3. Re-run `swarm issue work <issue> --backend github`—if your claim token is still active, SwarmOS resumes in place; if the lease expired, it acquires a fresh attempt on the verified checkpoint branch.
 4. Run `swarm issue validate <issue>` and `swarm issue submit <issue>` when all checks pass.
 
+An implementation that produces no checkpoint beyond the approved base fails before testing. An explicit blocked outcome in `IMPLEMENTATION.md` also fails, and `swarm issue status <issue>` shows its reason. For PR revisions, the implementation must advance the revision's starting head. Issue reruns can reuse an existing checkpoint ahead of the approved base to repeat testing.
+
+Steer a recovery with specific instructions:
+
+```bash
+swarm issue work 56 --phase implement --instructions "Use temporary Git repositories for the Git-dependent tests"
+swarm pr work 123 --phase implement --instructions "Fix the failing acceptance test"
+```
+
+Flag instructions and supported interactive follow-ups appear in role reports and PR review evidence, with a message count and SHA-256 in status output. Earlier same-role reports are marked as superseded attempts. Lessons from the current task stay in review evidence until the PR merges and a maintainer applies them with `swarm repo lessons --apply`.
+
+After a plan review requests changes, the default `swarm issue work <issue>` or `swarm pr work <PR>` runs the planner again with the review findings. The planner must change `PLAN.md` or `TEST_PLAN.md` before another review; changing only operator guidance does not qualify.
+
+`swarm issue submit` refuses an empty branch and points to an implementation rerun. Claims saved by this version carry a local base hint so this refusal happens before contacting GitHub. Older claim files use the authoritative check after loading state; running `swarm issue work` refreshes the hint. Real uncommitted edits are checkpointed normally.
+
 If a checkpoint no longer descends from the approved base, a maintainer can re-approve the issue with `swarm issue approve <issue> --backend github`. Release any active claim first with `swarm issue release <issue> --backend github`. When the new base contains every commit in the checkpoint, approval drops that checkpoint and reports it. The next `swarm issue work` moves the clean local task branch and worktree forward to the new base; the remote task branch advances with the next checkpoint publication. Eligible plan approval carries forward when the WorkUnit and policy are unchanged, while implementation and validation evidence are cleared.
 
 Save or move aside local edits before resuming. A checkpoint containing commits absent from the new base still requires explicit reconciliation; SwarmOS keeps those commits and refuses to reset the branch. A task branch changed by someone else also requires inspection before recovery can continue.

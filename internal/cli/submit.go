@@ -42,6 +42,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return err
 			}
 			defer lease.UnlockClaim(lock)
+			if err := refuseEmptySubmitEarly(cmd.Context(), root, worktree, issue); err != nil {
+				return err
+			}
 			tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
 				return err
@@ -109,9 +112,13 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
+			if head == state.BaseSHA {
+				return emptySubmitError(issue, state.BaseSHA)
+			}
 			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
 			if report != nil {
 				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
+				lease.PreserveTesterGuidance(state, &report.Artifact)
 				if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
 					return err
 				}
@@ -277,6 +284,9 @@ func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState) string 
 			}
 			body.WriteString("\n")
 			for _, a := range state.Artifacts {
+				if a.Metadata["operator_steered"] == "true" {
+					fmt.Fprintf(&body, "Operator-steered %s: %s messages; SHA-256 `%s`.\n\n", a.Type, a.Metadata["guidance_count"], a.Metadata["guidance_sha256"])
+				}
 				digest := a.Metadata["content_sha256"]
 				if len(digest) > 12 {
 					digest = digest[:12]
@@ -301,4 +311,23 @@ func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState) string 
 		}
 	}
 	return body.String()
+}
+
+func emptySubmitError(issue int, base string) error {
+	return fmt.Errorf("issue #%d has no commits beyond approved base %s; run swarm issue work %d --phase implement", issue, base, issue)
+}
+func refuseEmptySubmitEarly(ctx context.Context, root, worktree string, issue int) error {
+	base, err := lease.LoadClaimBaseHint(root, issue)
+	if err != nil || base == "" {
+		return nil
+	}
+	count, err := workspace.CommitsBeyond(ctx, worktree, base)
+	if err != nil || count != 0 {
+		return nil
+	}
+	dirty, err := workspace.HasCheckpointableChanges(ctx, worktree)
+	if err != nil || dirty {
+		return nil
+	}
+	return emptySubmitError(issue, base)
 }

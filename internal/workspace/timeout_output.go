@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/supernovae/swarmos/internal/safefs"
 )
 
 // RejectRecoveryOutput keeps coordinator recovery files out of published trees,
@@ -51,4 +53,63 @@ func stageCheckpointFiles(ctx context.Context, root string) error {
 		}
 	}
 	return flush()
+}
+
+// onlyActivePointer reports whether an unstaged change to an agent instruction
+// file is exactly SwarmOS's temporary task block, which is injected for agents
+// and removed before every checkpoint.
+func OnlyActivePointer(worktreePath, path string) (bool, error) {
+	if path != "AGENTS.md" && path != "CLAUDE.md" {
+		return false, nil
+	}
+	current, err := safefs.ReadFile(worktreePath, path, 16<<20)
+	if err != nil {
+		return false, nil
+	}
+	committed := ""
+	if listing, err := gitOutputContext(context.Background(), worktreePath, "ls-tree", "--name-only", "HEAD", "--", path); err != nil {
+		return false, err
+	} else if len(strings.TrimSpace(listing)) != 0 {
+		out, err := gitOutputContext(context.Background(), worktreePath, "show", "HEAD:"+path)
+		if err != nil {
+			return false, err
+		}
+		committed = string(out)
+	}
+	stripped := StripActivePointer(string(current))
+	if stripped == string(current) {
+		return false, nil
+	}
+	return strings.ReplaceAll(stripped, "\r\n", "\n") == strings.ReplaceAll(committed, "\r\n", "\n"), nil
+}
+
+// HasCheckpointableChanges observes the same file set as Checkpoint without writes.
+func HasCheckpointableChanges(ctx context.Context, root string) (bool, error) {
+	out, err := gitOutputContext(ctx, root, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return false, err
+	}
+	entries := strings.Split(out, "\x00")
+	for i := 0; i < len(entries); i++ {
+		e := entries[i]
+		if len(e) < 4 {
+			continue
+		}
+		name := e[3:]
+		if e[0] == 'R' || e[0] == 'C' || e[1] == 'R' || e[1] == 'C' {
+			i++
+			return true, nil
+		}
+		if name == ".swarm/active-output" || strings.HasPrefix(name, ".swarm/active-output/") {
+			continue
+		}
+		only, err := OnlyActivePointer(root, name)
+		if err != nil {
+			return false, err
+		}
+		if !only {
+			return true, nil
+		}
+	}
+	return false, nil
 }

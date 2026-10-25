@@ -100,7 +100,7 @@ func fixture(t *testing.T) (*Service, int, int, string) {
 	if _, e = manager.RecordSubmission(ctx, issue.Number, "alice", pr.Number, pr.HTMLURL); e != nil {
 		t.Fatal(e)
 	}
-	if e = lease.SaveClaimToken(root, issue.Number, state.Lease.ClaimID); e != nil {
+	if e = lease.SaveClaimToken(root, issue.Number, state.Lease.ClaimID, state.BaseSHA); e != nil {
 		t.Fatal(e)
 	}
 	return &Service{Root: root, Tracker: tr, Manager: manager}, issue.Number, pr.Number, base

@@ -17,7 +17,7 @@ import (
 
 // RPC host tools are an OMP-supported execution interface. Authentication and
 // model transport remain entirely within OMP, using its existing login.
-func runOMP(ctx context.Context, binary, model, prompt, control string, env []string, executor ToolExecutor, interactive bool, input io.Reader, stdout, stderr io.Writer) error {
+func runOMP(ctx context.Context, binary, model, prompt, control string, env []string, executor ToolExecutor, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) error {
 	config := filepath.Join(control, "omp.json")
 	settings := map[string]any{
 		"disabledProviders": []string{"native", "claude", "codex", "gemini", "github", "opencode", "cursor", "agents-md"},
@@ -223,6 +223,9 @@ func runOMP(ctx context.Context, binary, model, prompt, control string, env []st
 			}
 			turn++
 			completed = false
+			if len(guidance) > 0 && guidance[0] != nil {
+				guidance[0](line)
+			}
 			prompt = "Continue the SwarmOS task.\n" + line
 			if err := send(map[string]any{"id": "swarm-inspect", "type": "get_state"}); err != nil {
 				return err

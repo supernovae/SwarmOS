@@ -115,7 +115,7 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	if after.PRNumber != number || after.HeadSHA != worked.HeadSHA || after.Lease.Status != "completed" {
 		t.Fatalf("incorrect submission state: %+v", after)
 	}
-	if updated.Title != original.Title || updated.Body != original.Body || updated.Draft != original.Draft || updated.HTMLURL != original.HTMLURL {
+	if updated.Title != original.Title || !strings.HasPrefix(updated.Body, original.Body) || updated.Draft != original.Draft || updated.HTMLURL != original.HTMLURL {
 		t.Fatal("PR submission replaced identity or review content")
 	}
 	f.must(t, "pr", "submit", p, "--json")
@@ -176,6 +176,7 @@ func TestCLIPRHumanGateRequiresNewIndependentApproval(t *testing.T) {
 	t.Setenv("SWARM_USER", "independent-maintainer")
 	f.must(t, "issue", "review-plan", strconv.Itoa(issue), "--approve", "--notes", "Checked PR revision plan")
 	t.Setenv("SWARM_USER", "alice")
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'revision\n' > human-approved-revision.txt")
 	f.must(t, "pr", "work", p, "--agent", "mock", "--progress=false")
 	f.must(t, "pr", "submit", p)
 }

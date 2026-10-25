@@ -448,7 +448,7 @@ func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, fn func(
 		if err != nil {
 			return nil, err
 		}
-		if err = lease.SaveClaimToken(s.Root, r.IssueNumber, st.Lease.ClaimID); err != nil {
+		if err = lease.SaveClaimToken(s.Root, r.IssueNumber, st.Lease.ClaimID, st.BaseSHA); err != nil {
 			return nil, err
 		}
 	}
@@ -596,7 +596,9 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 			opts.Work.Owner = owner
 			opts.Work.ClaimID = st.Lease.ClaimID
 			opts.Work.PRWorktree = path
-			opts.Work.OnClaim = func(st *lease.IssueState) error { return lease.SaveClaimToken(s.Root, r.IssueNumber, st.Lease.ClaimID) }
+			opts.Work.OnClaim = func(st *lease.IssueState) error {
+				return lease.SaveClaimToken(s.Root, r.IssueNumber, st.Lease.ClaimID, st.BaseSHA)
+			}
 			worked, e := engine.ExecuteWork(ctx, opts.Work)
 			if worked != nil {
 				r.Work = worked
@@ -747,6 +749,7 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string) (*Resu
 			}
 			if report != nil {
 				report.Artifact.Metadata = lease.TesterMetadata(st, report.Artifact.Metadata)
+				lease.PreserveTesterGuidance(st, &report.Artifact)
 				r.Validation = report
 				st, e = s.Manager.UpdateArtifact(ctx, r.IssueNumber, owner, report.Artifact)
 				if e != nil {
@@ -772,6 +775,9 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		}
 		r.Status = "submitted"
 		if !s.Fork {
+			if e := ProjectReviewEvidence(ctx, s.Tracker, r.State, number); e != nil {
+				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update review evidence: %w", number, e)
+			}
 			if e := ProjectRebase(ctx, s.Tracker, r.State, number); e != nil {
 				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update rebase context: %w", number, e)
 			}
@@ -857,6 +863,9 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		r.HeadSHA = head
 		r.Status = "submitted"
 		if !s.Fork {
+			if e := ProjectReviewEvidence(ctx, s.Tracker, st, number); e != nil {
+				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update review evidence: %w", number, e)
+			}
 			if e := ProjectRebase(ctx, s.Tracker, st, number); e != nil {
 				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update rebase context: %w", number, e)
 			}

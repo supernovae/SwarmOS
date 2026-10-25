@@ -20,7 +20,7 @@ import (
 // OpenCode owns provider authentication. A private, loopback-only server keeps
 // this task separate from the operator's shared service. Its temporary local
 // password authenticates SwarmOS to that server, never a model provider.
-func runOpenCode(ctx context.Context, binary, model, prompt, control string, env []string, interactive bool, input io.Reader, stdout, stderr io.Writer) error {
+func runOpenCode(ctx context.Context, binary, model, prompt, control string, env []string, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) error {
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return err
@@ -137,6 +137,9 @@ func runOpenCode(ctx context.Context, binary, model, prompt, control string, env
 		}
 		if !slices.Contains(args, "--continue") {
 			args = append(args, "--continue")
+		}
+		if len(guidance) > 0 && guidance[0] != nil {
+			guidance[0](line)
 		}
 		prompt = "Continue the SwarmOS task.\n" + line
 	}

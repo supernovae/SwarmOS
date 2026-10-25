@@ -150,6 +150,13 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 }
 
 func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult, runErr error) {
+	collector := &GuidanceCollector{}
+	collector.Delivered(req.OperatorInstructions)
+	defer func() {
+		if result != nil {
+			result.Guidance = append(collector.Messages(), result.Guidance...)
+		}
+	}()
 	defer func() { runErr = safeRunFailure(ctx, req.Role, result, runErr) }()
 	if a.executionMode == contract.ExecutionIsolated {
 		return a.runIsolated(ctx, req)
@@ -428,6 +435,12 @@ func newVersionCmd() *cobra.Command {
 		att.Model = strings.TrimSpace(req.Model)
 	}
 	return &RunResult{
+		Guidance: func() []string {
+			if strings.TrimSpace(req.OperatorInstructions) != "" {
+				return []string{req.OperatorInstructions}
+			}
+			return nil
+		}(),
 		Agent:       "mock",
 		Role:        req.Role,
 		Command:     append([]string{"mock"}, args...),

@@ -14,7 +14,7 @@ import (
 )
 
 func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
-	var agentName, plannerAgent, reviewerAgent, developerAgent, testerAgent, phase, gate string
+	var agentName, plannerAgent, reviewerAgent, developerAgent, testerAgent, phase, gate, instructions string
 	var headless, handoff, nextReady, allRepos, jsonOutput, dryRun bool
 	var progressOutput bool
 	cmd := &cobra.Command{
@@ -53,7 +53,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			opts := workflow.WorkOptions{
 				AgentName: agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
 				DeveloperAgent: developerAgent, TesterAgent: testerAgent, Phase: phase,
-				Gate: contract.GateMode(gate), Headless: headless, Handoff: handoff,
+				Instructions: instructions, Gate: contract.GateMode(gate), Headless: headless, Handoff: handoff,
 				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),
 			}
 			var tr tracker.Tracker
@@ -103,7 +103,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					}
 				}
 				opts.OnClaim = func(state *lease.IssueState) error {
-					return lease.SaveClaimToken(opts.RepoRoot, opts.IssueNumber, state.Lease.ClaimID)
+					return lease.SaveClaimToken(opts.RepoRoot, opts.IssueNumber, state.Lease.ClaimID, state.BaseSHA)
 				}
 			}
 			if dryRun {
@@ -150,6 +150,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().StringVar(&reviewerAgent, "reviewer-agent", "", "Configured reviewer override")
 	cmd.Flags().StringVar(&developerAgent, "developer-agent", "", "Configured developer override")
 	cmd.Flags().StringVar(&testerAgent, "tester-agent", "", "Configured tester override")
+	cmd.Flags().StringVar(&instructions, "instructions", "", "Additional operator instructions for the run")
 	cmd.Flags().StringVar(&phase, "phase", "all", "Phase: all, plan, review, or implement")
 	cmd.Flags().StringVar(&gate, "gate", "", "Require gate none, agent, or human; cannot weaken policy")
 	cmd.Flags().BoolVar(&headless, "headless", true, "Run agents non-interactively (false requires a terminal)")

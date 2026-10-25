@@ -141,7 +141,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				return nil, err
 			}
 			setup := func() (*pulledWorkUnit, error) {
-				if err := lease.SaveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID); err != nil {
+				if err := lease.SaveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID, claimed.BaseSHA); err != nil {
 					return nil, err
 				}
 				checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue.Number, issue.Title, claimed.Lease.ClaimID, claimed.Branch)

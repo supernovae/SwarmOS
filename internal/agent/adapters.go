@@ -362,6 +362,31 @@ func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error
 		output = fmt.Sprintf("Mock reviewer generated .swarm/active/REVIEW.md with VERDICT: %s", verdict)
 
 	case "developer":
+		if strings.HasPrefix(req.TaskPrompt, "Write only .swarm/active/REBASE_PLAN.md.") {
+			manifest, err := safe.ReadFile(".swarm/active/CONFLICTS.md", 1<<20)
+			if err != nil {
+				return nil, err
+			}
+			var plan strings.Builder
+			for _, line := range strings.Split(string(manifest), "\n") {
+				if !strings.HasPrefix(line, "## ") {
+					continue
+				}
+				_, rest, ok := strings.Cut(line, "`")
+				if !ok {
+					continue
+				}
+				path, _, ok := strings.Cut(rest, "`")
+				if !ok {
+					continue
+				}
+				fmt.Fprintf(&plan, "## %s\nOurs: upstream changes.\nTheirs: approved PR changes.\nResolution: combine both sides.\nApproved behavior: preserve PLAN.md behavior.\n\n", path)
+			}
+			if err := safe.WriteFile(".swarm/active/REBASE_PLAN.md", []byte(plan.String()), 0644); err != nil {
+				return nil, err
+			}
+			break
+		}
 		if customCmd := os.Getenv("SWARM_MOCK_DEVELOPER_CMD"); customCmd != "" {
 			c := exec.CommandContext(ctx, "sh", "-c", customCmd)
 			c.Dir = req.WorktreePath

@@ -35,6 +35,10 @@ func (m *Manager) carryApproval(ctx context.Context, st *IssueState, wu *contrac
 	switch {
 	case st.TaskDigest != contract.DigestWorkUnit(wu):
 		st.CarryReason = "WorkUnit changed"
+	case st.EffectiveGate == contract.GateNone && st.PolicyTreeDigest != "" && st.PolicyTreeDigest == tree:
+		clearHeadEvidence(st)
+		st.CarryReason = "approved plan carried forward"
+		return
 	case st.PolicyTreeDigest == "" || review == nil || review.Metadata["policy_tree_digest"] == "":
 		st.CarryReason = "review lacks policy tree metadata"
 	case st.PolicyTreeDigest != tree:
@@ -44,6 +48,14 @@ func (m *Manager) carryApproval(ctx context.Context, st *IssueState, wu *contrac
 			st.CarryReason = "policy files changed (changed paths unavailable; previous base could not be compared)"
 		} else {
 			st.ChangedPolicyPaths = paths
+		}
+		// Retain exact plan bytes as stale evidence for an explicit review
+		// under the newly approved policy. VerifyApproval still rejects the
+		// old base/policy bindings; this does not carry its verdict forward.
+		if st.PRNumber > 0 && st.ForkRepo == "" && st.CarryReason == "policy files changed" {
+			st.ApprovalTransition = nil
+			clearHeadEvidence(st)
+			return
 		}
 	case VerifyApproval(st, wu) != nil:
 		st.CarryReason = "plan approval is missing or stale"
@@ -90,10 +102,19 @@ func (m *Manager) rebaseEvidence(ctx context.Context, st *IssueState, n int) {
 	if err == nil {
 		wu, parseErr := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 		if parseErr == nil && st.PolicyTreeDigest != "" && VerifyApproval(st, wu) == nil {
+			if st.EffectiveGate == contract.GateNone {
+				clearHeadEvidence(st)
+				st.CarryReason = "approved plan carried forward"
+				return
+			}
 			for _, a := range st.Artifacts {
 				if a.Type == contract.ArtifactReview && a.Metadata["policy_tree_digest"] == st.PolicyTreeDigest {
 					clearHeadEvidence(st)
-					st.CarryReason = "approved plan carried forward"
+					if st.CarryReason == "policy files changed" || st.CarryReason == "approved plan re-reviewed" {
+						st.CarryReason = "approved plan re-reviewed"
+					} else {
+						st.CarryReason = "approved plan carried forward"
+					}
 					return
 				}
 			}

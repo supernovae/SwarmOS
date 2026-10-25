@@ -824,3 +824,126 @@ func TestForkContributorResolvesRebaseConflictsAsReports(t *testing.T) {
 		t.Fatalf("summary does not label the report:\n%s", summary)
 	}
 }
+
+func TestRebaseRoutineReapprovalRejectsChangedAuthority(t *testing.T) {
+	for _, kind := range []string{"non-maintainer", "policy", "task", "active", "stale base", "stale head"} {
+		t.Run(kind, func(t *testing.T) {
+			s, issue, number, base := fixture(t)
+			ctx := context.Background()
+			path := "upstream.txt"
+			if kind == "policy" {
+				path = ".swarm/project.md"
+			}
+			if err := os.WriteFile(filepath.Join(s.Root, path), []byte("target change\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command("git", "-C", s.Root, "add", path)
+			if out, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("add: %v %s", err, out)
+			}
+			command = exec.Command("git", "-C", s.Root, "commit", "-qm", "target")
+			if out, err := command.CombinedOutput(); err != nil {
+				t.Fatalf("commit: %v %s", err, out)
+			}
+			pr, err := s.Tracker.GetPullRequest(ctx, number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := s.Manager
+			if kind == "non-maintainer" {
+				tr := s.Tracker.(*tracker.LocalTracker).WithUser("bob", "CONTRIBUTOR")
+				m = lease.NewManager(tr, contract.SecurityConfig{})
+				m.SetStore(s.Root, s.Manager.Store())
+			}
+			if kind == "task" {
+				i, e := s.Tracker.GetIssue(ctx, issue)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if _, e = s.Tracker.UpdateIssueBody(ctx, issue, strings.Replace(i.Body, "Revise linked PR", "Different task", 1)); e != nil {
+					t.Fatal(e)
+				}
+			}
+			if kind == "active" {
+				if _, err = m.AcquirePR(ctx, issue, number, "alice", "mock", "all", time.Hour, 3); err != nil {
+					t.Fatal(err)
+				}
+			}
+			expectedBase, expectedHead := base, pr.HeadSHA
+			if kind == "stale base" {
+				expectedBase = strings.Repeat("0", 40)
+			}
+			if kind == "stale head" {
+				expectedHead = strings.Repeat("0", 40)
+			}
+			before, err := m.GetCurrentState(ctx, issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = m.ReapproveRebase(ctx, issue, number, expectedBase, pr.BaseSHA, expectedHead)
+			if err == nil {
+				t.Fatal("unsafe approval accepted")
+			}
+			after, e := m.GetCurrentState(ctx, issue)
+			if e != nil {
+				t.Fatal(e)
+			}
+			b, _ := json.Marshal(before)
+			a, _ := json.Marshal(after)
+			if string(b) != string(a) {
+				t.Fatal("rejected approval changed state")
+			}
+		})
+	}
+}
+
+type auditRetryTracker struct {
+	tracker.Tracker
+	failAudit bool
+}
+
+func (t *auditRetryTracker) CreateComment(ctx context.Context, n int, body string) (*tracker.Comment, error) {
+	if t.failAudit && strings.Contains(body, "re-pinned") {
+		return nil, fmt.Errorf("audit unavailable")
+	}
+	return t.Tracker.CreateComment(ctx, n, body)
+}
+
+func TestRebaseApprovalAuditRetriesWithoutReapproval(t *testing.T) {
+	s, issue, number, base := fixture(t)
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(s.Root, "upstream.txt"), []byte("target\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "upstream.txt"}, {"commit", "-qm", "target"}} {
+		cmd := exec.Command("git", append([]string{"-C", s.Root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git: %v %s", err, out)
+		}
+	}
+	tr := &auditRetryTracker{Tracker: s.Tracker, failAudit: true}
+	m := lease.NewManager(tr, contract.SecurityConfig{})
+	m.SetStore(s.Root, s.Manager.Store())
+	pr, err := tr.GetPullRequest(ctx, number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.ReapproveRebase(ctx, issue, number, base, pr.BaseSHA, pr.HeadSHA); err == nil || !strings.Contains(err.Error(), "audit") {
+		t.Fatalf("missing audit failure: %v", err)
+	}
+	approved, err := m.GetCurrentState(ctx, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.BaseSHA != pr.BaseSHA || approved.RebaseApprovalAudit == "" {
+		t.Fatal("approval/audit checkpoint missing")
+	}
+	tr.failAudit = false
+	projected, err := m.ProjectRebaseApprovalAudit(ctx, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.RebaseApprovalAudit != "" || projected.BaseSHA != approved.BaseSHA || projected.ApprovedBy != approved.ApprovedBy || !projected.ApprovedAt.Equal(approved.ApprovedAt) {
+		t.Fatal("audit retry changed approval")
+	}
+}

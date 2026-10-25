@@ -23,18 +23,22 @@ func RebaseSummary(st *lease.IssueState, number int) string {
 		if len(st.ChangedPolicyPaths) > 0 {
 			fmt.Fprintf(&b, "Policy paths: %s\n", strings.Join(st.ChangedPolicyPaths, ", "))
 		}
-		if st.CarryReason != "approved plan carried forward" {
+		if st.CarryReason != "approved plan carried forward" && st.CarryReason != "approved plan re-reviewed" {
 			fmt.Fprintf(&b, "Next: swarm pr work %d\n", number)
 		}
 	}
 	if r := st.LastRebase; r != nil {
 		fmt.Fprintf(&b, "Rebase: %s\nHeads: %s -> %s\nBases: %s -> %s\nPatch identity: %s (verified: %t)\n", r.Status, r.OldHead, r.NewHead, r.OldBase, r.NewBase, r.PatchIdentity, r.Verified)
+		fmt.Fprintf(&b, "Conflicts resolved: %d\nRepair attempts: %d\n", len(r.Resolutions), r.RepairAttempts)
 		if len(r.ConflictedPaths) > 0 {
 			label := "Conflicted paths"
 			if r.ConflictPathsReported {
 				label = "Reported conflicted paths"
 			}
 			fmt.Fprintf(&b, "%s: %s\n", label, strings.Join(r.ConflictedPaths, ", "))
+		}
+		for _, plan := range r.Plans {
+			fmt.Fprintf(&b, "Rebase micro-plan at %s (digest %s):\n%s\n", plan.Commit, plan.Digest, plan.Body)
 		}
 		for _, res := range r.Resolutions {
 			label := "Resolved by"

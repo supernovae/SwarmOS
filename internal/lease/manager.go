@@ -67,6 +67,7 @@ type ApprovalTransition struct {
 }
 
 type IssueState struct {
+	RebaseApprovalAudit string                       `json:"rebase_approval_audit,omitempty"`
 	DroppedCheckpoint   *workspace.DroppedCheckpoint `json:"dropped_checkpoint,omitempty"`
 	CheckpointDropped   bool                         `json:"-"`
 	SubmittedBaseSHA    string                       `json:"submitted_base_sha,omitempty"`
@@ -1706,6 +1707,14 @@ func (m *Manager) RecordPRHead(ctx context.Context, n int, owner string, number 
 			st.Attestations = attestations
 		}
 		st.PRRevision.LocalHeadSHA = head
+		if st.PRRevision.Intent == "rebase" && st.LastRebase != nil && st.LastRebase.Status == "completed" {
+			st.LastRebase.NewHead = head
+			st.LastRebase.Verified = false
+			st.LastRebase.PatchIdentity = "unavailable"
+			if st.ForkRepo == "" {
+				verifyRebaseEvidence(ctx, m.repoRoot, st, head)
+			}
+		}
 		return nil
 	})
 }

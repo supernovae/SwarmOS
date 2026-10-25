@@ -7,11 +7,16 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 // RebaseEvidence is durable review context, never an authorization input.
 type RebaseEvidence struct {
+	RepairScopeSet        bool     `json:"repair_scope_set,omitempty"`
+	RepairPaths           []string `json:"repair_paths,omitempty"`
+	RepairAttempts        int      `json:"repair_attempts,omitempty"`
 	ConflictPathsReported bool     `json:"conflict_paths_reported,omitempty"`
 	OldHead               string   `json:"old_head"`
 	NewHead               string   `json:"new_head,omitempty"`
@@ -22,7 +27,23 @@ type RebaseEvidence struct {
 	PatchIdentity         string   `json:"patch_identity"`
 	Verified              bool     `json:"verified"`
 	// Resolutions record agent conflict resolutions as review evidence only.
+	Plans       []RebasePlanReport `json:"plans,omitempty"`
 	Resolutions []RebaseResolution `json:"resolutions,omitempty"`
+}
+
+// RebasePlanReport is bounded, non-authoritative evidence for one conflict stop.
+type RebasePlanReport struct {
+	Harness        string   `json:"harness,omitempty"`
+	HarnessVersion string   `json:"harness_version,omitempty"`
+	Model          string   `json:"model,omitempty"`
+	Sandbox        string   `json:"sandbox,omitempty"`
+	Commit         string   `json:"commit"`
+	Paths          []string `json:"paths"`
+	Body           string   `json:"body"`
+	Digest         string   `json:"digest"`
+	PlanDigest     string   `json:"plan_digest"`
+	BaseSHA        string   `json:"base_sha"`
+	Agent          string   `json:"agent"`
 }
 
 // RebaseResolutionReport is the wire form of one agent conflict resolution.
@@ -52,8 +73,11 @@ const (
 
 // RebaseContext reports local progress. Fork reports cannot assert Git identity.
 type RebaseContext struct {
+	RepairPaths     *[]string               `json:"repair_paths,omitempty"`
+	RepairAttempt   *int                    `json:"repair_attempt,omitempty"`
 	ConflictedPaths []string                `json:"conflicted_paths,omitempty"`
 	Status          string                  `json:"status"`
+	Plan            *RebasePlanReport       `json:"plan,omitempty"`
 	Resolution      *RebaseResolutionReport `json:"resolution,omitempty"`
 }
 
@@ -125,11 +149,59 @@ func (m *Manager) UpdateRebaseContext(ctx context.Context, n int, owner string, 
 			return fmt.Errorf("invalid rebase status")
 		}
 		r := st.LastRebase
+		if report.RepairPaths != nil {
+			paths := append([]string(nil), (*report.RepairPaths)...)
+			if len(paths) > 4096 {
+				return fmt.Errorf("too many repair paths")
+			}
+			for _, p := range paths {
+				if !validRebasePath(p) {
+					return fmt.Errorf("invalid repair path")
+				}
+			}
+			slices.Sort(paths)
+			paths = slices.Compact(paths)
+			if r.RepairScopeSet && !slices.Equal(r.RepairPaths, paths) {
+				return fmt.Errorf("repair scope is already fixed")
+			}
+			r.RepairPaths = paths
+			r.RepairScopeSet = true
+		}
+		if report.RepairAttempt != nil {
+			cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+			if err != nil {
+				return err
+			}
+			if *report.RepairAttempt != r.RepairAttempts+1 || *report.RepairAttempt > cfg.Lease.RebaseRepairAttempts() {
+				return fmt.Errorf("repair budget exhausted or attempt changed")
+			}
+			r.RepairAttempts = *report.RepairAttempt
+		}
 		for _, p := range report.ConflictedPaths {
 			if !validRebasePath(p) {
 				return fmt.Errorf("invalid conflict path")
 			}
 			r.ConflictedPaths = append(r.ConflictedPaths, p)
+		}
+		if report.Plan != nil {
+			plan := *report.Plan
+			if len(r.Plans) >= maxRebaseResolutions || len(plan.Body) == 0 || len(plan.Body) > 64<<10 || hash(plan.Body) != plan.Digest || plan.BaseSHA != st.BaseSHA {
+				return fmt.Errorf("invalid rebase plan evidence")
+			}
+			if err := validateRebaseResolution(&RebaseResolutionReport{Commit: plan.Commit, Paths: plan.Paths, Agent: plan.Agent, Harness: plan.Harness, HarnessVersion: plan.HarnessVersion, Model: plan.Model, Sandbox: plan.Sandbox}); err != nil {
+				return err
+			}
+			approved := ""
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactDesign {
+					approved = hash(a.Body)
+				}
+			}
+			if approved == "" || approved != plan.PlanDigest {
+				return fmt.Errorf("rebase plan does not match approved design")
+			}
+			plan.Paths = append([]string(nil), plan.Paths...)
+			r.Plans = append(r.Plans, plan)
 		}
 		if report.Resolution != nil {
 			res := *report.Resolution

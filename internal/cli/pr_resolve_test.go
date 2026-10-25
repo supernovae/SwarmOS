@@ -116,13 +116,26 @@ func TestCLIPRRebaseResolveMultiCommitWithAddAdd(t *testing.T) {
 			t.Fatalf("resolution %d = %+v", i, res)
 		}
 	}
-	// Resolution is code evidence only: no validation, and plan approval untouched.
+	// Micro-plans remain evidence only; validation now binds to the final head.
 	after := f.state(t, issue)
+	validated := false
 	for _, a := range after.Artifacts {
-		if a.Type == contract.ArtifactValidation {
-			t.Fatal("resolve recorded validation evidence")
+		if a.Type == contract.ArtifactValidation && a.Verdict == "PASS" && a.Metadata["head_sha"] == after.PRRevision.LocalHeadSHA {
+			validated = true
 		}
 	}
+	if !validated {
+		t.Fatal("resolve did not validate its final checkpoint")
+	}
+	if len(evidence.Plans) != 2 {
+		t.Fatalf("micro-plans = %+v", evidence.Plans)
+	}
+	for _, plan := range evidence.Plans {
+		if plan.Body == "" || plan.PlanDigest == "" || plan.Digest == "" {
+			t.Fatalf("incomplete plan evidence: %+v", plan)
+		}
+	}
+
 	review := func(st []contract.Artifact) []contract.Artifact {
 		var out []contract.Artifact
 		for _, a := range st {
@@ -369,5 +382,188 @@ func TestCLIPRRebaseResolveFailsClosedWithoutIsolation(t *testing.T) {
 	again, _ := os.ReadFile(filepath.Join(worktree, paths[0]))
 	if prGit(t, worktree, "rev-parse", "REBASE_HEAD") != stopped || string(again) != string(data) || prGit(t, worktree, "diff", "--name-only", "--diff-filter=U") != paths[0] {
 		t.Fatal("failed preflight changed the paused rebase")
+	}
+}
+
+func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
+	for _, kind := range []string{"pass", "repair", "exhausted", "outside", "zero", "custom"} {
+		t.Run(kind, func(t *testing.T) {
+			f, issue, number := submittedPRFixture(t, "agent")
+			p := strconv.Itoa(number)
+			before := f.state(t, issue)
+			original, err := f.tracker.GetPullRequest(context.Background(), number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := strings.Fields(prGit(t, f.root, "diff", "--name-only", before.BaseSHA, before.HeadSHA))[0]
+			// Change trusted policy at the target base, requiring explicit task
+			// reapproval and a fresh review of the unchanged plans on the retry.
+			command := "test \"$(cat " + name + ")\" = fixed"
+			if kind == "pass" {
+				command = "git --version"
+			}
+			policy := "required_checks:\n  - name: repaired-behavior\n    command: '" + command + "'\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
+			if err = os.WriteFile(filepath.Join(f.root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(f.root, name), []byte("upstream\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "zero" || kind == "custom" {
+				limit := "0"
+				if kind == "custom" {
+					limit = "1"
+				}
+				configPath := filepath.Join(f.root, ".swarm/config.yaml")
+				data, e := os.ReadFile(configPath)
+				if e != nil {
+					t.Fatal(e)
+				}
+				data = []byte(strings.Replace(string(data), "max_renewals: 3", "max_renewals: 3\n  rebase_repair_limit: "+limit, 1))
+				if e = os.WriteFile(configPath, data, 0644); e != nil {
+					t.Fatal(e)
+				}
+			}
+			prGit(t, f.root, "add", ".")
+			prGit(t, f.root, "commit", "-m", "New target policy and conflicting source")
+			f.must(t, "issue", "approve", strconv.Itoa(issue))
+			script := "printf 'resolved\\n' > " + name
+			switch kind {
+			case "repair":
+				script = "if [ -f .swarm/active/REPAIR_PATHS.md ]; then printf fixed > " + name + "; else printf resolved > " + name + "; fi"
+			case "exhausted", "zero", "custom":
+				script = "if [ -f .swarm/active/REPAIR_PATHS.md ]; then printf x >> " + name + "; else printf resolved > " + name + "; fi"
+			case "outside":
+				script = "if [ -f .swarm/active/REPAIR_PATHS.md ]; then printf fixed > " + name + "; printf unsafe > outside.txt; else printf resolved > " + name + "; fi"
+			}
+			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", script)
+			output, runErr := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--json")
+			if (runErr == nil) != (kind == "pass" || kind == "repair") {
+				t.Fatalf("rebase: %v\n%s", runErr, output)
+			}
+			st := f.state(t, issue)
+			want := map[string]int{"pass": 0, "repair": 1, "exhausted": 2, "outside": 1, "zero": 0, "custom": 1}[kind]
+			if st.LastRebase == nil || st.LastRebase.RepairAttempts != want {
+				t.Fatalf("repair evidence: %+v", st.LastRebase)
+			}
+			worktree := workspace.PRWorktreePath(f.root, number)
+			if _, err = os.Lstat(filepath.Join(worktree, "outside.txt")); !os.IsNotExist(err) {
+				t.Fatalf("rejected addition imported: %v", err)
+			}
+			if kind == "pass" || kind == "repair" {
+				result := readPROutcome(t, output)
+				if result.Validation == nil || !result.Validation.Passed || result.SubmitCommand != "swarm pr submit "+p || result.Validation.HeadSHA != result.HeadSHA {
+					t.Fatalf("not submit ready: %+v", result)
+				}
+			} else {
+				if !strings.Contains(runErr.Error(), "swarm pr validate "+p) || !strings.Contains(runErr.Error(), "Last local checkpoint") {
+					t.Fatalf("missing recovery evidence: %v", runErr)
+				}
+				checkpoint := st.PRRevision.LocalHeadSHA
+				if checkpoint != prGit(t, worktree, "rev-parse", "HEAD") {
+					t.Fatal("last checkpoint lost")
+				}
+				if kind == "exhausted" {
+					_, retryErr := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
+					if retryErr == nil || f.state(t, issue).LastRebase.RepairAttempts != 2 || f.state(t, issue).PRRevision.LocalHeadSHA != checkpoint {
+						t.Fatalf("retry reset repair budget: %v", retryErr)
+					}
+				}
+			}
+			current, err := f.tracker.GetPullRequest(context.Background(), number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if current.HeadSHA != original.HeadSHA || current.Body != original.Body {
+				t.Fatal("rebase published the candidate or PR body")
+			}
+		})
+	}
+}
+
+func TestCLIPRRebaseRoutineReapproval(t *testing.T) {
+	f, issue, number := submittedPRFixture(t, "agent")
+	before := f.state(t, issue)
+	original, err := f.tracker.GetPullRequest(context.Background(), number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(f.root, "upstream.txt"), []byte("new target\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, f.root, "add", "upstream.txt")
+	prGit(t, f.root, "commit", "-m", "Advance identical policy target")
+	output := f.must(t, "pr", "rebase", strconv.Itoa(number), "--resolve", "--agent", "mock", "--progress=false")
+	after := f.state(t, issue)
+	if after.BaseSHA == before.BaseSHA || after.TaskDigest != before.TaskDigest || after.PolicyTreeDigest != before.PolicyTreeDigest || after.ApprovedBy != "alice" {
+		t.Fatalf("bad reapproval: %+v", after)
+	}
+	if !strings.Contains(output, "Validation: PASS") || !strings.Contains(output, "swarm pr submit "+strconv.Itoa(number)) {
+		t.Fatalf("missing handoff: %s", output)
+	}
+	comments, err := f.tracker.ListComments(context.Background(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audited := false
+	for _, c := range comments {
+		if strings.Contains(c.Body, "alice re-pinned") && strings.Contains(c.Body, before.BaseSHA) && strings.Contains(c.Body, after.BaseSHA) {
+			audited = true
+		}
+	}
+	if !audited {
+		t.Fatal("missing actor/base audit")
+	}
+	current, err := f.tracker.GetPullRequest(context.Background(), number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Body != original.Body || current.HeadSHA != original.HeadSHA {
+		t.Fatal("reapproval published PR")
+	}
+}
+
+func TestCLIPRRebasePolicyReviewStopsBeforeGit(t *testing.T) {
+	for _, kind := range []string{"human", "rejected"} {
+		t.Run(kind, func(t *testing.T) {
+			gate := "agent"
+			if kind == "human" {
+				gate = "human"
+			}
+			f, issue, number := submittedPRFixture(t, gate)
+			path := filepath.Join(f.root, ".swarm/project.md")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(path, append(data, []byte("\nNew review guidance\n")...), 0644); err != nil {
+				t.Fatal(err)
+			}
+			prGit(t, f.root, "add", ".")
+			prGit(t, f.root, "commit", "-m", "Change policy")
+			// Changed policy cannot receive routine task reapproval.
+			p := strconv.Itoa(number)
+			if _, err = f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false"); err == nil || !strings.Contains(err.Error(), "swarm issue approve ") {
+				t.Fatalf("policy silently reapproved: %v", err)
+			}
+			f.must(t, "issue", "approve", strconv.Itoa(issue))
+			if kind == "rejected" {
+				t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+			}
+			_, err = f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
+			if err == nil {
+				t.Fatal("rebase passed a closed plan gate")
+			}
+			if kind == "human" && !strings.Contains(err.Error(), "swarm issue review-plan "+strconv.Itoa(issue)+" --approve") {
+				t.Fatalf("missing human step: %v", err)
+			}
+			if kind == "rejected" && !strings.Contains(err.Error(), "CHANGES_REQUESTED") {
+				t.Fatalf("lost rejection: %v", err)
+			}
+			st := f.state(t, issue)
+			if st.LastRebase != nil || st.PRRevision != nil {
+				t.Fatalf("changed rebase before review approval: %+v", st.LastRebase)
+			}
+		})
 	}
 }

@@ -30,7 +30,7 @@ You are resolving merge conflicts from a managed rebase of an existing pull requ
 
 1. Read .swarm/active/CONFLICTS.md. It lists each conflicted file and where to find both sides.
 2. Read .swarm/active/WORKUNIT.md and .swarm/active/PLAN.md. The resolved files must keep the behavior the approved plan describes while keeping the new base's changes.
-3. Edit only the listed conflicted files. Remove every conflict marker and leave a version that combines both sides' intent.
+3. Read .swarm/active/REBASE_PLAN.md when present and follow its intended resolutions. Edit only the listed conflicted files. Remove every conflict marker and leave a version that combines both sides' intent.
 4. Do not create, delete, rename, or edit any other file outside .swarm/active/. There is no Git repository here; do not try to run Git.
 
 Stop when every listed file is resolved. The coordinator verifies your edits, stages them, continues the rebase, and runs validation separately.
@@ -110,6 +110,13 @@ func (s *Service) resolveStop(ctx context.Context, rv *resolver, worktree string
 	defer os.RemoveAll(dir)
 	original, err := writeResolverWorkspace(dir, inputs, rv.unit, st)
 	if err != nil {
+		return nil, err
+	}
+	plan, err := s.planRebaseStop(ctx, rv, dir, issue, owner, stopped, paths, st)
+	if err != nil {
+		return nil, err
+	}
+	if err = safefs.WriteFile(worktree, ".swarm/active/REBASE_PLAN.md", []byte(plan), 0644); err != nil {
 		return nil, err
 	}
 	run, runErr := rv.runner.Run(ctx, agent.RunRequest{Agent: rv.agentName, Role: "developer", Mode: rv.mode, WorktreePath: dir,

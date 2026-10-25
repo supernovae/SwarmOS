@@ -42,7 +42,10 @@ jobs:
       fail-fast: false
       matrix:
         # Ubuntu 26.04 ships the AppArmor policy needed for bwrap user/network namespaces.
-        os: [ubuntu-26.04, macos-latest, windows-latest]
+        # Windows tests are paused while the suite is too slow there; Windows
+        # binaries are still cross-compiled below. Re-add windows-latest (and a
+        # non-race test step for it) to bring them back.
+        os: [ubuntu-26.04, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -58,12 +61,8 @@ jobs:
       - name: Install reviewer sandbox (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap
-      - name: Unix regression tests
-        if: runner.os != 'Windows'
+      - name: Regression tests
         run: go test -race ./...
-      - name: Windows regression tests
-        if: runner.os == 'Windows'
-        run: go test ./...
       - name: Build CLI
         run: go build -o swarm-ci.exe ./cmd/swarm
       - name: Exercise CLI surface

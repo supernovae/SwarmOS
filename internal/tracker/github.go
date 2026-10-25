@@ -785,6 +785,8 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 	}
 	path := fmt.Sprintf("repos/%s/%s/pulls/%d", g.owner, g.repo, number)
 	var resp struct {
+		Mergeable      *bool      `json:"mergeable"`
+		MergeableState string     `json:"mergeable_state"`
 		Number         int        `json:"number"`
 		Title          string     `json:"title"`
 		Body           string     `json:"body"`
@@ -837,6 +839,7 @@ func (g *GitHubTracker) GetPullRequest(ctx context.Context, number int) (*PullRe
 		draft = false
 	}
 	return &PullRequest{
+		Mergeable: resp.Mergeable, MergeableState: resp.MergeableState,
 		Number:         resp.Number,
 		Title:          resp.Title,
 		Body:           resp.Body,

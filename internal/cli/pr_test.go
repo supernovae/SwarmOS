@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -514,6 +517,97 @@ func TestCLIPRRebaseExplainsReplan(t *testing.T) {
 			}
 			if _, err := f.run("pr", "submit", p); err == nil {
 				t.Fatal("submit accepted invalidated plan")
+			}
+		})
+	}
+}
+
+func TestCLIPRWorkDryRunReportsLocalSkip(t *testing.T) {
+	f, issue, number := submittedPRFixture(t, "agent")
+	before := f.state(t, issue)
+	result := readPROutcome(t, f.must(t, "pr", "work", strconv.Itoa(number), "--dry-run"))
+	if result.WorkPreflight == nil || result.WorkPreflight.Status != "skipped" || result.WorkPreflight.BaseResult != "skipped" || result.Preflight == nil {
+		t.Fatalf("missing dry-run checks: %+v", result)
+	}
+	if !reflect.DeepEqual(before, f.state(t, issue)) {
+		t.Fatal("dry-run changed state")
+	}
+	if _, err := os.Stat(workspace.PRWorktreePath(f.root, number)); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created worktree: %v", err)
+	}
+}
+
+type workCLITracker struct {
+	tracker.Tracker
+	pr tracker.PullRequest
+}
+
+func (w workCLITracker) BackendName() string { return "github" }
+func (w workCLITracker) GetPullRequest(context.Context, int) (*tracker.PullRequest, error) {
+	p := w.pr
+	return &p, nil
+}
+
+func TestCLIPRWorkGitHubDryRun(t *testing.T) {
+	f, issue, number := submittedPRFixture(t, "agent")
+	ctx := context.Background()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	prGit(t, f.root, "init", "--bare", remote)
+	prGit(t, f.root, "remote", "add", "origin", remote)
+	prGit(t, f.root, "push", "origin", "main")
+	raw, _, err := f.manager.Store().Load(ctx, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := coordination.NewGitStore(f.root)
+	if _, err = store.CompareAndSwap(ctx, issue, "", raw); err != nil {
+		t.Fatal(err)
+	}
+	original, err := f.tracker.GetPullRequest(ctx, number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		mergeable bool
+		moved     bool
+		blocked   bool
+	}{
+		{name: "clean", mergeable: true}, {name: "conflict", blocked: true}, {name: "moved", mergeable: true, moved: true, blocked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := *original
+			p.Mergeable = &tc.mergeable
+			p.MergeableState = "clean"
+			if !tc.mergeable {
+				p.MergeableState = "dirty"
+			}
+			if tc.moved {
+				p.BaseSHA = "advanced"
+			}
+			opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: workCLITracker{Tracker: f.tracker, pr: p}}
+			cmd := newRootCmdWithOptions(opts)
+			var out, diagnostics bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&diagnostics)
+			cmd.SetArgs([]string{"pr", "work", strconv.Itoa(number), "--dry-run"})
+			if err := cmd.ExecuteContext(ctx); err != nil {
+				t.Fatalf("%v %s", err, diagnostics.String())
+			}
+			result := readPROutcome(t, out.String())
+			w := result.WorkPreflight
+			if w == nil || (w.Status == "blocked") != tc.blocked || w.TargetBase != p.BaseSHA || w.ApprovedBase != original.BaseSHA || w.Mergeable == nil || *w.Mergeable != tc.mergeable {
+				t.Fatalf("%+v", w)
+			}
+			if tc.blocked && !strings.Contains(strings.Join(w.Commands, " "), fmt.Sprintf("rebase %d", number)) {
+				t.Fatal("missing recovery")
+			}
+			after, _, err := store.Load(ctx, issue)
+			if err != nil || !bytes.Equal(raw, after) {
+				t.Fatal("dry-run mutated Git state", err)
+			}
+			if _, err := os.Stat(workspace.PRWorktreePath(f.root, number)); !os.IsNotExist(err) {
+				t.Fatal("worktree created", err)
 			}
 		})
 	}

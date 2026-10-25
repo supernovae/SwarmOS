@@ -186,3 +186,33 @@ func TestGitHubMergedPRMetadata(t *testing.T) {
 		t.Fatalf("merge evidence: %+v %v", pr, err)
 	}
 }
+
+func TestGitHubPRMergeabilityMetadata(t *testing.T) {
+	for _, raw := range []string{`"mergeable":false,"mergeable_state":"dirty",`, `"mergeable":true,"mergeable_state":"clean",`, `"mergeable":null,"mergeable_state":"unknown",`, ``} {
+		t.Run(raw, func(t *testing.T) {
+			tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "git/ref/") {
+					writeJSON(t, w, map[string]any{"object": map[string]string{"sha": "fresh"}})
+					return
+				}
+				_, _ = w.Write([]byte(`{` + raw + `"number":55,"state":"open","base":{"ref":"main","sha":"stale"}}`))
+			}))
+			p, err := tr.GetPullRequest(context.Background(), 55)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.BaseSHA != "fresh" {
+				t.Fatal("stale target")
+			}
+			if strings.Contains(raw, "false") && (p.Mergeable == nil || *p.Mergeable || p.MergeableState != "dirty") {
+				t.Fatalf("%+v", p)
+			}
+			if strings.Contains(raw, "true") && (p.Mergeable == nil || !*p.Mergeable || p.MergeableState != "clean") {
+				t.Fatalf("%+v", p)
+			}
+			if (raw == "" || strings.Contains(raw, "null")) && p.Mergeable != nil {
+				t.Fatalf("%+v", p)
+			}
+		})
+	}
+}

@@ -26,6 +26,7 @@ import (
 )
 
 type Service struct {
+	workWait   func(context.Context) error
 	OnProgress func(progress.Event)
 	// Progress is an optional CLI-owned session spanning repository resolution.
 	Progress *progress.Session
@@ -52,22 +53,23 @@ type Options struct {
 	Resolve      bool
 }
 type Result struct {
-	CIFailures  bool                         `json:"ci_failures,omitempty"`
-	PR          *tracker.PullRequest         `json:"pr"`
-	IssueNumber int                          `json:"issue_number"`
-	State       *lease.IssueState            `json:"state,omitempty"`
-	Worktree    string                       `json:"worktree,omitempty"`
-	Branch      string                       `json:"branch,omitempty"`
-	HeadSHA     string                       `json:"head_sha,omitempty"`
-	BaseSHA     string                       `json:"base_sha,omitempty"`
-	Checks      []tracker.CheckRunResult     `json:"checks,omitempty"`
-	Reviews     []tracker.PullRequestReview  `json:"reviews,omitempty"`
-	Status      string                       `json:"status"`
-	Dirty       bool                         `json:"dirty"`
-	Rebasing    bool                         `json:"rebasing"`
-	Validation  *validation.ValidationReport `json:"validation,omitempty"`
-	Preflight   *workflow.PreflightResult    `json:"preflight,omitempty"`
-	Work        *workflow.WorkResult         `json:"work,omitempty"`
+	WorkPreflight *WorkPreflightResult         `json:"work_preflight,omitempty"`
+	CIFailures    bool                         `json:"ci_failures,omitempty"`
+	PR            *tracker.PullRequest         `json:"pr"`
+	IssueNumber   int                          `json:"issue_number"`
+	State         *lease.IssueState            `json:"state,omitempty"`
+	Worktree      string                       `json:"worktree,omitempty"`
+	Branch        string                       `json:"branch,omitempty"`
+	HeadSHA       string                       `json:"head_sha,omitempty"`
+	BaseSHA       string                       `json:"base_sha,omitempty"`
+	Checks        []tracker.CheckRunResult     `json:"checks,omitempty"`
+	Reviews       []tracker.PullRequestReview  `json:"reviews,omitempty"`
+	Status        string                       `json:"status"`
+	Dirty         bool                         `json:"dirty"`
+	Rebasing      bool                         `json:"rebasing"`
+	Validation    *validation.ValidationReport `json:"validation,omitempty"`
+	Preflight     *workflow.PreflightResult    `json:"preflight,omitempty"`
+	Work          *workflow.WorkResult         `json:"work,omitempty"`
 }
 
 func headBranch(pr *tracker.PullRequest) string {
@@ -559,6 +561,16 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 	r, remote, err := s.openForMutation(ctx, opts.Number, false)
 	if err != nil {
 		return nil, err
+	}
+	if err = s.checkWork(ctx, r); err != nil {
+		return r, err
+	}
+	if len(r.WorkPreflight.Blockers) > 0 {
+		r.Status = "blocked"
+		if opts.Work.InspectOnly {
+			return r, nil
+		}
+		return r, fmt.Errorf("%s\n%s", strings.Join(r.WorkPreflight.Blockers, "\n"), strings.Join(r.WorkPreflight.Commands, "\n"))
 	}
 	opts.Work.RepoRoot = s.Root
 	opts.Work.IssueNumber = r.IssueNumber

@@ -83,3 +83,9 @@ func forkProgressPrinter(out io.Writer) func(fork.ProgressEvent) {
 		}
 	}
 }
+
+func baseChangePrinter(out io.Writer) func(int, string, string) {
+	return func(n int, old, base string) {
+		fmt.Fprintf(out, "Issue #%d: base %s -> %s\n", n, old, base)
+	}
+}

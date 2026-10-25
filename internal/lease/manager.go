@@ -67,6 +67,7 @@ type ApprovalTransition struct {
 }
 
 type IssueState struct {
+	ClaimPreviousBase   string                       `json:"-"`
 	RebaseApprovalAudit string                       `json:"rebase_approval_audit,omitempty"`
 	DroppedCheckpoint   *workspace.DroppedCheckpoint `json:"dropped_checkpoint,omitempty"`
 	CheckpointDropped   bool                         `json:"-"`
@@ -739,12 +740,26 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if err = verifyTrust(cfg.Security, issue); err != nil {
 		return nil, err
 	}
+	now := m.nowFn()
+	fresh := freshClaimBase(st, prNumber) && !(st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now))
 	if !TaskApprovalCurrent(st, wu, cfg) {
+		if fresh {
+			reason := "old-base approved policy digest changed"
+			if st.TaskDigest != contract.DigestWorkUnit(wu) {
+				reason = "WorkUnit digest changed"
+			}
+			return nil, &ClaimBaseApprovalError{IssueNumber: n, Reason: reason}
+		}
 		return nil, ErrApprovalRequired
 	}
-	now := m.nowFn()
 	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
 		return nil, &AlreadyClaimedError{IssueNumber: n, Owner: st.Lease.Owner, ExpiresAt: st.Lease.ExpiresAt}
+	}
+	if fresh {
+		st, err = m.prepareClaimBase(ctx, n, st, wu, cfg)
+		if err != nil {
+			return nil, err
+		}
 	}
 	id := claimID()
 	contributors := append([]string(nil), st.Lease.Contributors...)
@@ -769,7 +784,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	}
 	if _, err = m.save(ctx, n, rev, st); err != nil {
 		if errors.Is(err, coordination.ErrConflict) {
-			return nil, ErrClaimRaceLost
+			return nil, fmt.Errorf("%w: %w", ErrClaimRaceLost, err)
 		}
 		return nil, err
 	}
@@ -1856,6 +1871,10 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 	if gate == contract.GateNone {
 		return nil
 	}
+	return verifyReviewBinding(st, gate)
+}
+
+func verifyReviewBinding(st *IssueState, gate contract.GateMode) error {
 	var plan, test, review *contract.Artifact
 	for i := range st.Artifacts {
 		a := &st.Artifacts[i]

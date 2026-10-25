@@ -51,7 +51,8 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() { reportJSONFailure(cmd, jsonOutput, "work", runErr) }()
 			opts := workflow.WorkOptions{
-				AgentName: agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
+				OnBaseChange: baseChangePrinter(progressWriter(cmd)),
+				AgentName:    agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
 				DeveloperAgent: developerAgent, TesterAgent: testerAgent, Phase: phase,
 				Instructions: instructions, Gate: contract.GateMode(gate), Headless: headless, Handoff: handoff,
 				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),

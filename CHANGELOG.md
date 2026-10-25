@@ -4,6 +4,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Fresh same-repository claims start at the current default-branch tip when task, committed policy tree and ancestry checks pass. Existing plan evidence requires authenticated review carry; human gates require explicit approval of a moved base. Queued work reports and skips fresh candidates needing approval, including stale task approval at an unchanged tip.
+
 - Extend `swarm pr rebase --resolve` with recorded per-conflict micro-plans, trusted post-rebase validation, and bounded local repair (default two attempts, configurable with `lease.rebase_repair_limit`). Successful runs print the explicit submit command. Eligible maintainers can re-pin unchanged task/policy approval automatically; policy changes require explicit approval before unchanged plans receive a fresh agent review. Fork workers retain explicit maintainer approval and review steps.
 
 - `swarm pr rebase <PR> --resolve` lets the configured developer agent resolve routine rebase conflicts. At each conflicted commit the agent gets one turn on a disposable workspace holding only the conflicted files, both sides, the WorkUnit, and the approved plan. SwarmOS accepts edits limited to those files with no remaining markers, stages them, and continues; anything else leaves the rebase paused as before. Resolutions appear in `pr status` and the PR's rebase context, and `pr work` and `pr stage` now point at a paused rebase's recovery commands.

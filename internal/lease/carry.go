@@ -21,9 +21,13 @@ func reviewBaseMatches(st *IssueState, review *contract.Artifact) bool {
 		b.ReviewDigest == hash(review.Body)
 }
 
-// carryApproval runs only inside authenticated task approval, before replacing
+// carryApproval runs inside coordinator approval or checked fresh acquisition, before replacing
 // the old baseline. All inputs come from trusted Git objects and stored state.
 func (m *Manager) carryApproval(ctx context.Context, st *IssueState, wu *contract.WorkUnit, base, policy, tree string) {
+	m.carryApprovalEvidence(ctx, st, wu, base, policy, tree, false)
+}
+
+func (m *Manager) carryApprovalEvidence(ctx context.Context, st *IssueState, wu *contract.WorkUnit, base, policy, tree string, requireReview bool) {
 	st.CarryReason = ""
 	st.ChangedPolicyPaths = nil
 	var review *contract.Artifact
@@ -35,7 +39,7 @@ func (m *Manager) carryApproval(ctx context.Context, st *IssueState, wu *contrac
 	switch {
 	case st.TaskDigest != contract.DigestWorkUnit(wu):
 		st.CarryReason = "WorkUnit changed"
-	case st.EffectiveGate == contract.GateNone && st.PolicyTreeDigest != "" && st.PolicyTreeDigest == tree:
+	case !requireReview && st.EffectiveGate == contract.GateNone && st.PolicyTreeDigest != "" && st.PolicyTreeDigest == tree:
 		clearHeadEvidence(st)
 		st.CarryReason = "approved plan carried forward"
 		return
@@ -57,7 +61,7 @@ func (m *Manager) carryApproval(ctx context.Context, st *IssueState, wu *contrac
 			clearHeadEvidence(st)
 			return
 		}
-	case VerifyApproval(st, wu) != nil:
+	case (requireReview && verifyReviewBinding(st, contract.GateAgent) != nil) || VerifyApproval(st, wu) != nil:
 		st.CarryReason = "plan approval is missing or stale"
 	default:
 		ancestor, err := workspace.BaseIsAncestor(ctx, m.repoRoot, st.BaseSHA, base)

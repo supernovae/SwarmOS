@@ -142,7 +142,8 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			options := workflow.WorkOptions{
-				AgentName: agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
+				OnBaseChange: baseChangePrinter(progressWriter(cmd)),
+				AgentName:    agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
 				DeveloperAgent: developerAgent, TesterAgent: testerAgent,
 				Handoff: true,
 				Phase:   "all", Gate: contract.GateMode(gate), Headless: true,

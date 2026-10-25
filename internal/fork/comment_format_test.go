@@ -122,10 +122,16 @@ func TestWorkflowAdmissionParsesForkComments(t *testing.T) {
 }
 
 func TestForkRequestRejectsCarryAuthority(t *testing.T) {
-	for _, field := range []string{`"policy_tree_digest":"forged"`, `"carry_forward":true`, `"approval_transition":{}`, `"base_sha":"forged"`, `"rebase_context":{"status":"completed","patch_identity":"unchanged","verified":true}`} {
+	for _, field := range []string{`"policy_tree_digest":"forged"`, `"carry_forward":true`, `"approval_transition":{}`, `"base_sha":"forged"`, `"rebase_context":{"status":"completed","patch_identity":"unchanged","verified":true}`, `"rebase_context":{"status":"completed","resolution":{"commit":"` + strings.Repeat("a", 40) + `","paths":["x.go"],"agent":"codex","reported":false}}`} {
 		body := RequestMarker + "\n" + `{"version":1,"operation":"begin-pr-revision","issue_number":7,"revision_intent":"rebase",` + field + "}"
 		if _, err := ParseRequestComment(body); err == nil || !strings.Contains(err.Error(), "unknown field") {
 			t.Fatalf("authority field %s: expected unknown field rejection, got %v", field, err)
 		}
+	}
+	// A resolution report without authority fields is accepted as a report.
+	body := RequestMarker + "\n" + `{"version":1,"operation":"invalidate-pr-evidence","issue_number":7,"pr_number":9,"revision_intent":"rebase","rebase_context":{"status":"completed","resolution":{"commit":"` + strings.Repeat("a", 40) + `","paths":["x.go"],"agent":"codex"}}}`
+	req, err := ParseRequestComment(body)
+	if err != nil || req.RebaseContext == nil || req.RebaseContext.Resolution == nil || req.RebaseContext.Resolution.Agent != "codex" {
+		t.Fatalf("resolution report rejected: %+v, %v", req, err)
 	}
 }

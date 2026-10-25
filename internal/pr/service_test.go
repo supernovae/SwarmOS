@@ -481,6 +481,7 @@ type loopbackGateway struct {
 	upstream   *lease.Manager
 	actor      string
 	operations []string
+	contexts   []lease.RebaseContext
 }
 
 func (g *loopbackGateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.IssueState, error) {
@@ -496,10 +497,21 @@ func (g *loopbackGateway) Apply(ctx context.Context, req lease.ForkRequest) (*le
 	case "acquire-pr":
 		return up.AcquirePR(ctx, n, req.PRNumber, actor, req.Agent, req.Phase, time.Hour, 3)
 	case "begin-pr-revision":
+		if req.RevisionIntent != "" {
+			return up.BeginPRRevision(ctx, n, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA, req.Branch, req.RevisionIntent)
+		}
 		return up.BeginPRRevision(ctx, n, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA, req.Branch)
 	case "record-pr-head":
 		return up.RecordPRHead(ctx, n, actor, req.PRNumber, req.Branch, req.HeadSHA)
 	case "invalidate-pr-evidence":
+		// Mirrors the coordinator: rebase context is replayed, never trusted as-is.
+		if req.RebaseContext != nil {
+			g.contexts = append(g.contexts, *req.RebaseContext)
+			return up.UpdateRebaseContext(ctx, n, actor, req.PRNumber, *req.RebaseContext)
+		}
+		if req.RevisionIntent != "" {
+			return up.InvalidatePRRevisionEvidence(ctx, n, actor, req.PRNumber, req.RevisionIntent)
+		}
 		return up.InvalidatePRRevisionEvidence(ctx, n, actor, req.PRNumber)
 	case "complete-pr-revision":
 		return up.CompletePRRevisionLocal(ctx, n, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA)
@@ -720,5 +732,95 @@ func TestMergedStatusAndClosedStatusRemainReadOnly(t *testing.T) {
 				t.Fatal("status mutated state")
 			}
 		})
+	}
+}
+
+func TestForkContributorResolvesRebaseConflictsAsReports(t *testing.T) {
+	s, issue, number, base := fixture(t)
+	ctx := context.Background()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if _, err := s.Manager.ApproveTask(ctx, issue, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.Manager.GetCurrentState(ctx, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forked, err := s.Manager.AcquireFork(ctx, issue, "alice", "mock", "all", "alice/swarm", time.Hour, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := workspace.ForkBranchName(issue, forked.Lease.ClaimID)
+	forkBare := filepath.Join(t.TempDir(), "alice-swarm.git")
+	git(s.Root, "init", "-q", "--bare", forkBare)
+	git(s.Root, "remote", "add", "fork", forkBare)
+	git(s.Root, "config", "remote.fork.swarmSlug", "alice/swarm")
+	git(s.Root, "push", "-q", "fork", base+":refs/heads/"+branch)
+	if _, err = s.Manager.RecordCheckpoint(ctx, issue, "alice", branch, base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Manager.RecordSubmission(ctx, issue, "alice", number, st.PRURL); err != nil {
+		t.Fatal(err)
+	}
+	forkHead := func() string { return strings.Fields(git(s.Root, "ls-remote", forkBare, "refs/heads/"+branch))[0] }
+	contributorView := &forkPRTracker{Tracker: s.Tracker, branch: branch, head: forkHead}
+	gateway := &loopbackGateway{t: t, upstream: s.Manager, actor: "alice"}
+	contributor := lease.NewManager(contributorView, contract.SecurityConfig{RequireReadyLabel: true, ReadyLabel: "swarm:ready"})
+	contributor.SetStore(s.Root, s.Manager.Store())
+	contributor.SetWorkerGateway(gateway)
+	svc := &Service{Root: s.Root, Tracker: contributorView, Manager: contributor, Fork: true, ForkRemote: "fork"}
+
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'fork change\\n' > conflict.txt")
+	if _, err := svc.Work(ctx, Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock"}}); err != nil {
+		t.Fatalf("contributor pr work: %v", err)
+	}
+	if _, err := svc.Submit(ctx, number); err != nil {
+		t.Fatalf("contributor pr submit: %v", err)
+	}
+
+	// Upstream moves to a base that conflicts with the contribution and is re-approved.
+	if err := os.WriteFile(filepath.Join(s.Root, "conflict.txt"), []byte("upstream change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(s.Root, "add", "conflict.txt")
+	git(s.Root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "upstream conflict")
+	if _, err := s.Manager.ApproveTask(ctx, issue, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	contributorView.baseTip = git(s.Root, "rev-parse", "HEAD")
+
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'resolved\\n' > conflict.txt")
+	gateway.operations = nil
+	rebased, err := svc.Rebase(ctx, Options{Number: number, Resolve: true, Work: workflow.WorkOptions{AgentName: "mock", Headless: true}})
+	if err != nil {
+		t.Fatalf("contributor rebase --resolve: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(rebased.Worktree, "conflict.txt")); string(data) != "resolved\n" {
+		t.Fatalf("resolution not imported: %q", data)
+	}
+	sent := false
+	for _, c := range gateway.contexts {
+		sent = sent || c.Resolution != nil
+	}
+	if !slices.Contains(gateway.operations, "invalidate-pr-evidence") || !sent {
+		t.Fatalf("resolution never went through the coordinator: ops=%v contexts=%+v", gateway.operations, gateway.contexts)
+	}
+	upstream, err := s.Manager.GetCurrentState(ctx, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := upstream.LastRebase
+	if r == nil || r.Status != "completed" || len(r.Resolutions) != 1 || !r.Resolutions[0].Reported || r.Verified {
+		t.Fatalf("upstream rebase evidence = %+v", r)
+	}
+	if summary := RebaseSummary(upstream, number); !strings.Contains(summary, "Reported resolved by mock") {
+		t.Fatalf("summary does not label the report:\n%s", summary)
 	}
 }

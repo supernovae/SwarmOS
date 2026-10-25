@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
@@ -66,6 +67,16 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			if opts.Continue && opts.Abort {
 				return fmt.Errorf("--continue and --abort are mutually exclusive")
 			}
+			if operation == "rebase" && !opts.Resolve {
+				for _, name := range []string{"agent", "developer-agent", "headless"} {
+					if cmd.Flags().Changed(name) {
+						return fmt.Errorf("--%s requires --resolve", name)
+					}
+				}
+			}
+			if opts.Resolve && opts.Abort {
+				return fmt.Errorf("--resolve cannot be combined with --abort")
+			}
 			if operation == "work" {
 				if err := contract.ValidatePhase(opts.Work.Phase); err != nil {
 					return fmt.Errorf("invalid --phase: %w", err)
@@ -98,6 +109,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			}
 			service := rootOpts.prService(tr, manager)
 			service.Progress = session
+			if operation == "rebase" && opts.Resolve && progress {
+				service.ResolveLog = cmd.ErrOrStderr()
+			}
 			if operation == "work" && opts.Work.Headless && progress && !opts.Work.InspectOnly {
 				opts.Work.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
 			}
@@ -207,6 +221,11 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 	if operation == "rebase" {
 		cmd.Flags().BoolVar(&opts.Continue, "continue", false, "Continue after resolving and staging conflicts in the PR worktree")
 		cmd.Flags().BoolVar(&opts.Abort, "abort", false, "Abort the managed rebase and restore its starting local commit")
+		cmd.Flags().BoolVar(&opts.Resolve, "resolve", false, "Let the developer agent resolve each conflicted commit; anything it cannot resolve stays paused")
+		cmd.Flags().StringVar(&opts.Work.AgentName, "agent", "", "Configured agent for conflict resolution (with --resolve)")
+		cmd.Flags().StringVar(&opts.Work.DeveloperAgent, "developer-agent", "", "Configured developer override for conflict resolution (with --resolve)")
+		cmd.Flags().BoolVar(&opts.Work.Headless, "headless", true, "Run the resolver non-interactively (false requires a terminal)")
+		cmd.Flags().BoolVar(&progress, "progress", true, "Report conflict resolution progress on stderr")
 	}
 	return cmd
 }
@@ -219,8 +238,11 @@ func requireIssueWorkspace(state *lease.IssueState) error {
 }
 
 // prService builds the PR lifecycle service for this invocation's repository.
+// testResolverRunner lets tests substitute the conflict resolver's runner.
+var testResolverRunner func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error)
+
 func (o *RootOptions) prService(tr tracker.Tracker, manager *lease.Manager) *pr.Service {
-	return &pr.Service{Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now}
+	return &pr.Service{Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now, NewRunner: testResolverRunner}
 }
 
 func shortSHA(sha string) string {

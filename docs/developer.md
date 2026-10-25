@@ -229,6 +229,22 @@ swarm pr rebase 33 --continue --backend github
 swarm pr rebase 33 --abort --backend github
 ```
 
+##### Let the developer agent resolve conflicts
+
+Most rebase conflicts are routine: imports added next to each other, tests both branches appended, or a docs paragraph both sides reworded. Add `--resolve` and your configured developer agent handles them while SwarmOS keeps control of Git:
+
+```bash
+# Start the rebase and resolve each conflicted commit with the developer agent
+swarm pr rebase 33 --resolve --backend github
+
+# Already paused? Resolve what is still unmerged; files you staged by hand stay as they are
+swarm pr rebase 33 --continue --resolve --backend github
+```
+
+At each conflicted commit, the agent gets one turn on a disposable copy of just the conflicted files, both sides of each conflict, the WorkUnit, and the approved plan. The turn uses the developer role's normal time limits. SwarmOS accepts the result only when the agent changed nothing but those files and left no conflict markers. It then stages them and continues to the next commit. If the agent fails, times out, touches anything else, or leaves markers, the rebase stays paused exactly as Git left it, and the command lists the conflicted files with the manual `--continue` and `--abort` steps.
+
+`--resolve` uses the same developer agent selection as `pr work`, so `--agent`, `--developer-agent`, `--headless=false`, and `--progress=false` work here too. Deleted or renamed files, links, binary or very large files, SwarmOS control paths, and protected paths (unless the WorkUnit sets `allow_harness_changes`) always stay paused for you. So do files that legitimately contain conflict-marker lines, such as marker test fixtures. `pr status` and the PR's rebase context list each agent resolution with its commit and provenance. Resolutions are code changes, not approvals: run `swarm pr validate 33` and `swarm pr submit 33` as usual.
+
 Use `--continue` or `--abort` only when a rebase is in progress. An approved plan carries forward when the WorkUnit and the committed `.swarm/` policy tree are unchanged, the previous baseline is an ancestor of the new one, and the review recorded that policy tree. In that case, run `swarm pr validate 33` and `swarm pr submit 33` right after rebasing. Implementation and validation evidence always need renewal, and a human gate still requires an authenticated human review.
 
 When a plan can't carry forward, `pr status` explains why, lists the changed policy paths when available, and points to `swarm pr work <PR>`, which starts a new plan cycle. Reviews recorded before policy tree binding need a fresh review after a baseline move.
@@ -242,7 +258,8 @@ When a plan can't carry forward, `pr status` explains why, lists the changed pol
 > | --- | --- |
 > | `PR base tip differs from approved issue baseline` | Run `swarm issue release <issue>` if you hold a claim, then `swarm issue approve <issue>`, then retry the rebase. |
 > | `issue is already claimed by another active lease` (from `issue approve`) | The message names the claim's owner and expiry. If it's yours, run the `swarm issue release <issue>` command it prints; otherwise wait for the claim to expire or ask its holder to release it. |
-> | `rebase PR head … (conflicts preserved)` | Resolve the conflicts in `.swarm/worktrees/pr-<PR>`, `git add` each resolved file, then run `swarm pr rebase <PR> --continue`. |
+> | `rebase PR head … (conflicts preserved)` | Run `swarm pr rebase <PR> --continue --resolve` to let the developer agent try, or resolve the conflicts in `.swarm/worktrees/pr-<PR>`, `git add` each resolved file, then run `swarm pr rebase <PR> --continue`. |
+> | `PR #<PR> has a paused rebase` (from `pr work` or `pr stage`) | Finish the rebase first: `swarm pr rebase <PR> --continue` after staging, `--resolve`, or `--abort`. |
 > | `git rebase --continue: … needs merge` | Some files still have conflict markers or aren't staged. Check `git -C .swarm/worktrees/pr-<PR> status`, finish resolving, `git add` them, and continue again. |
 > | `rebase already in progress` | Finish the paused rebase with `--continue`, or use `--abort`; don't start a new one. |
 > | `PR worktree must be clean before starting rebase` | The PR worktree has uncommitted changes. Check `git -C .swarm/worktrees/pr-<PR> status`, keep them with `swarm pr stage <PR> --phase implement` or remove them, then retry. |

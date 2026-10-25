@@ -83,8 +83,11 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				if prStatus.State.PRRevision == nil || prStatus.Status == pr.StatusDiverged || prStatus.Status == pr.StatusPublishedPending {
 					return fmt.Errorf("PR #%d requires an existing pending unpublished revision; run swarm pr work %d or reconcile with swarm pr submit %d", prNumber, prNumber, prNumber)
 				}
-				if worktree == "" || prStatus.Rebasing {
+				if worktree == "" {
 					return fmt.Errorf("PR #%d requires an existing managed worktree that is not rebasing", prNumber)
+				}
+				if prStatus.Rebasing {
+					return pr.PausedRebaseError(ctx, worktree, prNumber)
 				}
 			}
 			lock, err := lease.LockClaim(root, issue)
@@ -98,7 +101,10 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				if e != nil {
 					return e
 				}
-				if fresh.Status == pr.StatusDiverged || fresh.Status == pr.StatusPublishedPending || fresh.Rebasing || fresh.Worktree != worktree || fresh.State.PRRevision == nil || fresh.State.PRRevision.LocalHeadSHA != prStatus.State.PRRevision.LocalHeadSHA {
+				if fresh.Rebasing {
+					return pr.PausedRebaseError(ctx, worktree, prNumber)
+				}
+				if fresh.Status == pr.StatusDiverged || fresh.Status == pr.StatusPublishedPending || fresh.Worktree != worktree || fresh.State.PRRevision == nil || fresh.State.PRRevision.LocalHeadSHA != prStatus.State.PRRevision.LocalHeadSHA {
 					return fmt.Errorf("PR #%d revision changed or is rebasing; refusing to stage", prNumber)
 				}
 				prStatus = fresh

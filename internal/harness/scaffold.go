@@ -373,18 +373,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 			{Name: "test", Command: stack.TestCmd, Timeout: "10m"},
 			{Name: "lint", Command: stack.LintCmd, Timeout: "5m"},
 		},
-		ProtectedPaths: []string{
-			".github/workflows/**",
-			".swarm/validation/**",
-			".swarm/contracts/**",
-			".swarm/config.yaml",
-			".swarm/prompts/**",
-			".swarm/workflows/**",
-			".swarm/goals.md",
-			".swarm/SKILLS.md",
-			".swarm/rules/**",
-			".swarm/skills/**",
-		},
+		ProtectedPaths: contract.DefaultProtectedPaths(),
 	}
 	valBytes, err := yaml.Marshal(&valSpec)
 	if err != nil {

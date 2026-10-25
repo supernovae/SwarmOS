@@ -7,9 +7,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/progress"
 )
 
 func setupGitRepoForValidation(t *testing.T) string {
@@ -320,4 +323,102 @@ func TestDefaultProtectedPathsCoverAgentInstructions(t *testing.T) {
 			t.Errorf("%s should stay editable", file)
 		}
 	}
+}
+
+func TestValidationProgressUsesTrustedChecks(t *testing.T) {
+	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
+	candidate := "required_checks:\n  - name: candidate-secret\n    command: false\nprotected_paths: []\n"
+	if err := os.WriteFile(filepath.Join(repo, ".swarm/validation/required-checks.yaml"), []byte(candidate), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var events []progress.Event
+	report, err := Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1, AllowHarnessChanges: true}, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) { events = append(events, e) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Check != "ok" || events[0].Status != "started" || events[1].Check != "ok" || events[1].Status != "PASS" || events[1].StageElapsed != report.CheckOutcomes[0].Duration {
+		t.Fatalf("unexpected lifecycle %+v", events)
+	}
+}
+
+func TestValidationProgressFailureTimeoutAndCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, timeout string
+		cancel                 bool
+	}{
+		{"failure", "printf 'PRIVATE_OUTPUT'; exit 7", "1m", false},
+		{"timeout", "sleep 5", "10ms", false},
+		{"cancel", "true", "1m", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := setupGitRepoForValidation(t)
+			policy := "required_checks:\n  - name: trusted\n    command: \"" + tc.command + "\"\n    timeout: " + tc.timeout + "\nprotected_paths:\n  - protected/**\n"
+			if err := os.WriteFile(filepath.Join(repo, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"add", "."}, {"commit", "-m", "check policy"}} {
+				if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+					t.Fatalf("%v %s", err, out)
+				}
+			}
+			base := gitRevision(t, repo, "HEAD")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var events []progress.Event
+			report, err := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+				events = append(events, e)
+				if tc.cancel && e.Status == "started" {
+					cancel()
+				}
+			}})
+			if err == nil || report == nil || report.Passed {
+				t.Fatalf("missing failed result: %+v %v", report, err)
+			}
+			if len(events) != 2 || events[0].Status != "started" || events[1].Status != "FAIL" || events[1].Check != "trusted" {
+				t.Fatalf("unexpected events %+v", events)
+			}
+		})
+	}
+}
+
+func TestValidatorSessionHeartbeatAdapter(t *testing.T) {
+	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
+	ticks := make(chan time.Time)
+	events := make(chan progress.Event, 10)
+	var seconds atomic.Int64
+	now := func() time.Time { return time.Unix(seconds.Load(), 0) }
+	session := progress.New(t.Context(), 1, 0, func(e progress.Event) { events <- e }, ticks, now, func() {})
+	<-events // preflight
+	session.Next("validation")
+	<-events
+	<-events
+	_, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+		session.Observe(e)
+		if e.Status == "started" {
+			started := <-events
+			if started.Check != "ok" || started.Status != "started" {
+				t.Fatalf("bad start %+v", started)
+			}
+			seconds.Store(15)
+			ticks <- now()
+			select {
+			case running := <-events:
+				if running.Check != "ok" || running.Status != "running" || running.StageElapsed != 15*time.Second {
+					t.Fatalf("bad heartbeat %+v", running)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("missing heartbeat")
+			}
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := <-events
+	if finish.Check != "ok" || finish.Status != "PASS" {
+		t.Fatalf("bad finish %+v", finish)
+	}
+	session.Finish("completed")
 }

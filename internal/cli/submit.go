@@ -18,6 +18,7 @@ import (
 func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 	var baseBranch string
 	var asJSON bool
+	var showProgress bool
 	cmd := &cobra.Command{
 		Use:   "submit [<issue-number>]",
 		Short: "Validate the exact checkpoint and idempotently open its draft PR",
@@ -31,6 +32,14 @@ records the decision in the PR, and uses GitHub to mark it ready for review.
 swarm issue review-plan approves the implementation plan, not the finished PR.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			p := operationProgress(cmd.Context(), cmd.ErrOrStderr(), showProgress)
+			defer func() {
+				status := "completed"
+				if runErr != nil {
+					status = "failed"
+				}
+				p.Finish(status)
+			}()
 			defer func() { reportJSONFailure(cmd, asJSON, "submission", runErr) }()
 			root := rootOpts.resolveRepoRoot()
 			issue, worktree, err := resolveIssueAndWorktree(root, args)
@@ -106,6 +115,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			defer heartbeat.Stop()
 			ctx = heartbeat.Context()
 			_, branch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, iss.Title, state.Lease.ClaimID, state.Branch)
+			p.Next("checkpoint")
 			head, err := workspace.Checkpoint(ctx, worktree, branch, workspace.CheckpointOptions{
 				WorkUnit: unit, Purpose: "submit", Detail: cfg.CommitMessageDetail(),
 			})
@@ -115,7 +125,8 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if head == state.BaseSHA {
 				return emptySubmitError(issue, state.BaseSHA)
 			}
-			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
+			p.Next("validation")
+			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
 			if report != nil {
 				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 				lease.PreserveTesterGuidance(state, &report.Artifact)
@@ -129,6 +140,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := requireCleanHead(ctx, worktree, head); err != nil {
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
 			}
+			p.Next("checkpoint push/record")
 			// GitHub publishes this head and the fenced state in one atomic Git push.
 			if rootOpts.Fork {
 				if err := workspace.PushForkCheckpoint(ctx, root, rootOpts.effectiveForkRemote(), branch, head); err != nil {
@@ -152,6 +164,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				}
 				prHead = forkOwner + ":" + branch
 			}
+			p.Next("draft PR create/update")
 			pr, err := tr.FindDraftPR(ctx, prHead, baseBranch)
 			if err != nil {
 				return err
@@ -166,6 +179,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 					pr = updatedPR
 				}
 			}
+			p.Next("submission record")
 			submittedState, err := manager.RecordSubmission(ctx, issue, owner, pr.Number, pr.HTMLURL)
 			if err != nil {
 				return err
@@ -182,6 +196,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 	}
 	cmd.Flags().StringVar(&baseBranch, "base", "", "Target branch name for the draft PR (defaults to the repository default branch)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the durable submission identity")
+	cmd.Flags().BoolVar(&showProgress, "progress", true, "Report progress on stderr")
 	return cmd
 }
 

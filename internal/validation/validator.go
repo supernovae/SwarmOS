@@ -15,6 +15,7 @@ import (
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -51,7 +52,9 @@ type ValidationReport struct {
 }
 
 type ValidateOptions struct {
-	CIMode bool
+	// OnProgress observes trusted check metadata only; callbacks must return promptly.
+	OnProgress func(progress.Event)
+	CIMode     bool
 	// RunnerIsolated runs required checks directly on an ephemeral CI runner,
 	// which is the isolation boundary there; agent sandboxes such as Codex's are
 	// not installed on stock runners. Policy still comes from BaseSHA.
@@ -154,6 +157,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			}
 		}
 		checkCtx, cancel := context.WithTimeout(ctx, duration)
+		if opts.OnProgress != nil {
+			opts.OnProgress(progress.Event{Check: check.Name, Status: "started"})
+		}
 		start := time.Now()
 		var output process.Output
 		var runErr error
@@ -179,6 +185,13 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%w: check %q (%s) exited with %d: %v", ErrRequiredCheckFailed, check.Name, check.Command, outcome.ExitCode, runErr)
 			}
+		}
+		if opts.OnProgress != nil {
+			status := "PASS"
+			if !outcome.Passed {
+				status = "FAIL"
+			}
+			opts.OnProgress(progress.Event{Check: check.Name, Status: status, StageElapsed: outcome.Duration})
 		}
 		report.CheckOutcomes = append(report.CheckOutcomes, outcome)
 		status := "PASS"

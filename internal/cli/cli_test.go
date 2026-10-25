@@ -375,6 +375,41 @@ func TestCLIRepoValidationFailurePreservesJSONAndExitStatus(t *testing.T) {
 	}
 }
 
+func TestCLIRepoValidateReportsProtectedChangesForMaintainers(t *testing.T) {
+	f := newCLIFixture(t)
+	checks := filepath.Join(f.root, ".swarm", "validation", "required-checks.yaml")
+	policy := "required_checks:\n  - name: ok\n    command: 'true'\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n"
+	if err := os.WriteFile(checks, []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "trusted policy"}} {
+		if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	out, err := exec.Command("git", "-C", f.root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := strings.TrimSpace(string(out))
+	if err := os.WriteFile(checks, []byte(policy+"# maintainer edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.run("repo", "validate", "--base", base); err == nil {
+		t.Fatal("protected change passed the default enforce mode")
+	}
+	if _, err := f.run("repo", "validate", "--base", base, "--protected-paths", "skip"); err == nil {
+		t.Fatal("unknown --protected-paths mode accepted")
+	}
+	got := f.must(t, "repo", "validate", "--base", base, "--protected-paths", "report")
+	for _, want := range []string{"PROTECTED .swarm/validation/required-checks.yaml", "NOTE .swarm/ policy changed", "PASS ok"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("report output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestCLIIssueLeafJSONAndReviewDelegation(t *testing.T) {
 	f := newCLIFixture(t)
 	raw := f.must(t, "issue", "create", "--json", "--title", "JSON WorkUnit", "--objective", "Check leaf output",

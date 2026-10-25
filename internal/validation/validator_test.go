@@ -262,3 +262,38 @@ func TestRunnerIsolatedChecksDoNotNeedAgentSandbox(t *testing.T) {
 		t.Fatalf("CI runner validation = %+v, %v", report, err)
 	}
 }
+
+func TestReportProtectedChangesListsPolicyEditsAndStillRunsBaseChecks(t *testing.T) {
+	ctx := context.Background()
+	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
+	for _, rel := range []string{".github/workflows/swarm-validate.yml", ".swarm/validation/required-checks.yaml"} {
+		// The candidate also tries to drop every required check.
+		if err := os.WriteFile(filepath.Join(repo, rel), []byte("required_checks: []\nprotected_paths: []\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, ReportProtectedChanges: true})
+	if err != nil {
+		t.Fatalf("report mode: %v", err)
+	}
+	want := []string{".github/workflows/swarm-validate.yml", ".swarm/validation/required-checks.yaml"}
+	if len(report.ProtectedChanges) != len(want) || report.ProtectedChanges[0] != want[0] || report.ProtectedChanges[1] != want[1] {
+		t.Fatalf("protected changes = %v, want %v", report.ProtectedChanges, want)
+	}
+	if len(report.CheckOutcomes) != 1 || report.CheckOutcomes[0].Name != "ok" || !report.Passed {
+		t.Fatalf("base checks must still run in report mode: %+v", report.CheckOutcomes)
+	}
+
+	if _, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, BaseSHA: base}); !errors.Is(err, ErrProtectedPathModified) {
+		t.Fatalf("enforce mode must still reject: %v", err)
+	}
+	wu := &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}
+	if _, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base, ReportProtectedChanges: true}); err == nil || errors.Is(err, ErrProtectedPathModified) {
+		t.Fatalf("agent validation must refuse report mode before checking files: %v", err)
+	}
+	if _, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, ForkMode: true, BaseSHA: base, ReportProtectedChanges: true}); err == nil {
+		t.Fatal("fork mode must refuse report mode")
+	}
+}

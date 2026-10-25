@@ -4,6 +4,7 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Maintainer pull requests can change protected policy without failing CI. `swarm repo validate --protected-paths report` lists the changed protected files, notes when `.swarm/` policy changed, and still runs every required check; the generated workflow uses it only for maintainers' own branches, keeping agent branches, forks, and other authors on strict enforcement. SwarmOS's own CI now runs this check with a validator built from the trusted base.
 - Agent run budgets now support approved global and per-role durations, with a 60-minute default and a warning before the deadline. Interactive native sessions exclude waits for operator input and have a four-hour wall cap; native Codex and Bubblewrap preserve bounded timeout patches for manual recovery. OCI uses wall time and reports that no timeout patch is available. Required-check deadlines are unchanged.
 - Re-approving an issue on a newer base drops a checkpoint whose commits are already contained in that base. Resuming moves clean local work forward and retains the original remote head as the next publication fence; checkpoints with unique commits remain preserved.
 

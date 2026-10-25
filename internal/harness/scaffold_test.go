@@ -799,10 +799,11 @@ func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	merged := git("rev-parse", "HEAD")
+	summary := filepath.Join(runnerTemp, "summary.md")
 	for event, want := range map[string]string{"pull_request": currentTip, "push": merged} {
 		cmd := exec.Command("bash", "-e", "-c", script)
 		cmd.Dir = repo
-		cmd.Env = append(os.Environ(), "RUNNER_TEMP="+runnerTemp, "BASE_SHA="+staleBase, "EVENT_NAME="+event)
+		cmd.Env = append(os.Environ(), "RUNNER_TEMP="+runnerTemp, "BASE_SHA="+staleBase, "EVENT_NAME="+event, "GITHUB_STEP_SUMMARY="+summary)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("%s step failed: %v (%s)", event, err, out)
 		}
@@ -810,9 +811,86 @@ func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := strings.TrimSpace(string(args)); got != "repo validate --base "+want {
+		if got := strings.TrimSpace(string(args)); got != "repo validate --base "+want+" --protected-paths enforce" {
 			t.Fatalf("%s validated against %q, want base %s", event, got, want)
 		}
+	}
+	if data, err := os.ReadFile(summary); err != nil || !strings.Contains(string(data), "### SwarmOS validation") {
+		t.Fatalf("job summary not written: %q %v", data, err)
+	}
+
+	// A failing validator fails the step, and the maintainer mode is passed through.
+	failing := "#!/bin/sh\necho \"$@\" > \"$RUNNER_TEMP/args\"\necho 'FAIL ok'\nexit 3\n"
+	if err := os.WriteFile(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(failing), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-e", "-c", script)
+	cmd.Dir = repo
+	cmd.Env = append(os.Environ(), "RUNNER_TEMP="+runnerTemp, "BASE_SHA="+staleBase, "EVENT_NAME=pull_request", "PROTECTED_MODE=report", "GITHUB_STEP_SUMMARY="+summary)
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "FAIL ok") {
+		t.Fatalf("failing validation must fail the step and show its output: %v (%s)", err, out)
+	}
+	if args, _ := os.ReadFile(filepath.Join(runnerTemp, "args")); !strings.HasSuffix(strings.TrimSpace(string(args)), "--protected-paths report") {
+		t.Fatalf("maintainer mode not passed: %q", args)
+	}
+}
+
+func TestValidateWorkflowReportsProtectedChangesOnlyForMaintainerBranches(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	raw, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-validate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Name string `yaml:"name"`
+				Run  string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	script := ""
+	for _, step := range workflow.Jobs["validate"].Steps {
+		if step.Name == "Decide protected-path handling" {
+			script = step.Run
+		}
+	}
+	if script == "" {
+		t.Fatal("protected-path step not found")
+	}
+	bin := t.TempDir()
+	// The fake gh answers with the permission named in FAKE_PERMISSION, or fails.
+	gh := "#!/bin/sh\n[ -n \"$FAKE_PERMISSION\" ] || exit 1\necho \"$FAKE_PERMISSION\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(gh), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, ref, headRepo, permission, want string
+	}{
+		{"maintainer branch", "docs/scope", "octo/widgets", "write", "report"},
+		{"admin branch", "fix/thing", "octo/widgets", "admin", "report"},
+		{"agent branch", "swarm/issue-7-x", "octo/widgets", "admin", "enforce"},
+		{"read-only author", "docs/scope", "octo/widgets", "read", "enforce"},
+		{"fork head", "docs/scope", "someone/widgets", "write", "enforce"},
+		{"permission lookup fails", "docs/scope", "octo/widgets", "", "enforce"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := filepath.Join(t.TempDir(), "output")
+			cmd := exec.Command("bash", "-e", "-c", script)
+			cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"), "GITHUB_OUTPUT="+output,
+				"REPO=octo/widgets", "AUTHOR=maintainer", "HEAD_REF="+tc.ref, "HEAD_REPO="+tc.headRepo, "FAKE_PERMISSION="+tc.permission)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("step failed: %v (%s)", err, out)
+			}
+			if data, err := os.ReadFile(output); err != nil || strings.TrimSpace(string(data)) != "mode="+tc.want {
+				t.Fatalf("mode = %q (%v), want %s", data, err, tc.want)
+			}
+		})
 	}
 }
 

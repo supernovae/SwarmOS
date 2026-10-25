@@ -79,7 +79,7 @@ func (l *LocalTracker) Authorize(ctx context.Context, permission string) error {
 		return err
 	}
 	switch permission {
-	case "approve-task", "review-human":
+	case "approve-task", "review-human", "edit-task":
 		if l.assoc == "OWNER" || l.assoc == "MEMBER" || l.assoc == "COLLABORATOR" {
 			return nil
 		}
@@ -313,6 +313,23 @@ func (l *LocalTracker) UpdateIssueBody(_ context.Context, number int, body strin
 			return fmt.Errorf("issue #%d not found in local tracker", number)
 		}
 		iss.Body = body
+		iss.UpdatedAt = time.Now().UTC()
+		cp := *iss
+		cp.Labels = append([]string(nil), iss.Labels...)
+		updated = &cp
+		return nil
+	})
+	return updated, err
+}
+
+func (l *LocalTracker) UpdateIssueTitle(_ context.Context, number int, title string) (*Issue, error) {
+	var updated *Issue
+	err := l.withLock(true, func(st *localState) error {
+		iss, ok := st.Issues[number]
+		if !ok {
+			return fmt.Errorf("issue #%d not found in local tracker", number)
+		}
+		iss.Title = title
 		iss.UpdatedAt = time.Now().UTC()
 		cp := *iss
 		cp.Labels = append([]string(nil), iss.Labels...)

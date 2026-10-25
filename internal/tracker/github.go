@@ -166,7 +166,7 @@ func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if permission != "approve-task" && permission != "review-human" && permission != "create-epic" {
+	if permission != "approve-task" && permission != "review-human" && permission != "create-epic" && permission != "edit-task" {
 		return fmt.Errorf("unknown permission %q", permission)
 	}
 	var me struct {
@@ -409,6 +409,16 @@ func (g *GitHubTracker) UpdateIssueBody(ctx context.Context, number int, body st
 	path := fmt.Sprintf("repos/%s/%s/issues/%d", g.owner, g.repo, number)
 	if err := g.client.DoWithContext(ctx, "PATCH", path, bytes.NewReader(raw), &resp); err != nil {
 		return nil, fmt.Errorf("github UpdateIssueBody #%d: %w", number, err)
+	}
+	return convertGHIssue(resp), nil
+}
+
+func (g *GitHubTracker) UpdateIssueTitle(ctx context.Context, number int, title string) (*Issue, error) {
+	raw, _ := json.Marshal(map[string]any{"title": title})
+	var resp ghIssueResponse
+	path := fmt.Sprintf("repos/%s/%s/issues/%d", g.owner, g.repo, number)
+	if err := g.client.DoWithContext(ctx, "PATCH", path, bytes.NewReader(raw), &resp); err != nil {
+		return nil, fmt.Errorf("github UpdateIssueTitle #%d: %w", number, err)
 	}
 	return convertGHIssue(resp), nil
 }

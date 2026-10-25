@@ -14,6 +14,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
 
@@ -742,5 +743,68 @@ func TestCompletePRRevisionPublishesHeadAndStateAtomically(t *testing.T) {
 	persisted, err := gm.GetCurrentState(ctx, iss.Number)
 	if err != nil || persisted.PRRevision != nil || persisted.HeadSHA != candidate {
 		t.Fatalf("persisted state = %+v, %v", persisted, err)
+	}
+}
+
+func TestIssueEditApprovalRemainsBoundToContent(t *testing.T) {
+	m, tr, issue := testManager(t)
+	ctx := context.Background()
+	before, err := m.GetCurrentState(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Presentation changes outside the parsed contract preserve its approval.
+	if _, err := tr.UpdateIssueBody(ctx, issue.Number, issue.Body+"\n<!-- note -->\n"); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body+"\n<!-- note -->\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := harness.LoadConfigAt(m.repoRoot, before.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !TaskApprovalCurrent(before, unchanged, cfg) {
+		t.Fatal("unchanged content lost task approval")
+	}
+	objective := "Revised coordination contract"
+	_, edited, err := contract.EditWorkUnitIssue(issue.Number, issue.Title, issue.Body, contract.WorkUnitEdit{Objective: &objective})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.UpdateIssueBody(ctx, issue.Number, edited); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyApproval(before, changed); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("changed contract retained approval: %v", err)
+	}
+	if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 3); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("changed contract acquired: %v", err)
+	}
+	current, err := m.GetCurrentState(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.TaskDigest != contract.DigestWorkUnit(original) {
+		t.Fatal("editing minted approval")
+	}
+	renewed, err := m.ApproveTask(ctx, issue.Number, "local-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !TaskApprovalCurrent(renewed, changed, cfg) {
+		t.Fatal("explicit approval did not authorize edited content")
+	}
+	if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 3); err != nil {
+		t.Fatal(err)
 	}
 }

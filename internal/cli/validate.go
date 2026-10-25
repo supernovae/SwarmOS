@@ -13,8 +13,17 @@ import (
 
 func newValidateCmd(options *RootOptions) *cobra.Command {
 	var asJSON bool
+	var showProgress bool
 	var baseSHA string
 	cmd := &cobra.Command{Use: "validate [<issue-number>]", Short: "Run issue checks and protected-path policy from the approved immutable base", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		p := operationProgress(cmd.Context(), cmd.ErrOrStderr(), showProgress)
+		defer func() {
+			status := "completed"
+			if runErr != nil {
+				status = "failed"
+			}
+			p.Finish(status)
+		}()
 		reported := false
 		defer func() {
 			if !reported {
@@ -65,7 +74,8 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		heartbeat := manager.StartHeartbeat(ctx, issue, owner, duration)
 		defer heartbeat.Stop()
 		ctx = heartbeat.Context()
-		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork})
+		p.Next("validation")
+		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork})
 		if report != nil {
 			report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 			lease.PreserveTesterGuidance(state, &report.Artifact)
@@ -77,6 +87,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 	}}
 	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted base commit SHA; must equal the issue's approved base (defaults to it)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured validation outcome")
+	cmd.Flags().BoolVar(&showProgress, "progress", true, "Report progress on stderr")
 	return cmd
 }
 

@@ -7,6 +7,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
+	progresspkg "github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
 
@@ -79,12 +80,24 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			}
 			return nil
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			var session *progresspkg.Session
+			if operation == "validate" || operation == "submit" {
+				session = operationProgress(cmd.Context(), cmd.ErrOrStderr(), progress)
+				defer func() {
+					status := "completed"
+					if runErr != nil {
+						status = "failed"
+					}
+					session.Finish(status)
+				}()
+			}
 			tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
 				return err
 			}
 			service := rootOpts.prService(tr, manager)
+			service.Progress = session
 			if operation == "work" && opts.Work.Headless && progress && !opts.Work.InspectOnly {
 				opts.Work.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
 			}
@@ -184,6 +197,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 		cmd.Flags().BoolVar(&opts.Work.Headless, "headless", true, "Run agents non-interactively (false requires a terminal)")
 		cmd.Flags().BoolVar(&opts.Work.InspectOnly, "dry-run", false, "Print the linked task and execution policy as JSON without changing state")
 		cmd.Flags().BoolVar(&progress, "progress", true, "Report headless progress on stderr")
+	}
+	if operation == "validate" || operation == "submit" {
+		cmd.Flags().BoolVar(&progress, "progress", true, "Report progress on stderr")
 	}
 	if operation == "rebase" {
 		cmd.Flags().BoolVar(&opts.Continue, "continue", false, "Continue after resolving and staging conflicts in the PR worktree")

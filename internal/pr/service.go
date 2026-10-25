@@ -16,6 +16,7 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -23,6 +24,10 @@ import (
 )
 
 type Service struct {
+	OnProgress func(progress.Event)
+	// Progress is an optional CLI-owned session spanning repository resolution.
+	Progress *progress.Session
+
 	Root       string
 	Tracker    tracker.Tracker
 	Manager    *lease.Manager
@@ -698,17 +703,29 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 	})
 }
 
-func (s *Service) Validate(ctx context.Context, number int) (*Result, error) {
+func (s *Service) Validate(ctx context.Context, number int) (result *Result, runErr error) {
+	p := s.Progress
+	if p == nil {
+		p = progress.Start(ctx, 0, number, s.OnProgress)
+		defer func() {
+			status := "completed"
+			if runErr != nil {
+				status = "failed"
+			}
+			p.Finish(status)
+		}()
+	}
+
 	r, remote, err := s.openForMutation(ctx, number, true)
 	if err != nil {
 		return nil, err
 	}
-	return s.validate(ctx, r, remote)
+	return s.validate(ctx, r, remote, p)
 }
 
 // validate runs required checks on the pending revision under the renewed claim
 // and records the report as that revision's validation evidence.
-func (s *Service) validate(ctx context.Context, r *Result, remote string) (*Result, error) {
+func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session) (*Result, error) {
 	number := r.PR.Number
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
@@ -739,7 +756,8 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string) (*Resu
 			if e = restoreApprovedPlan(r.Worktree, st); e != nil {
 				return r, e
 			}
-			report, valErr := validation.Validate(ctx, r.Worktree, wu, validation.ValidateOptions{BaseSHA: st.BaseSHA})
+			p.Next("validation")
+			report, valErr := validation.Validate(ctx, r.Worktree, wu, validation.ValidateOptions{BaseSHA: st.BaseSHA, OnProgress: p.Observe})
 			checkedHead, changed, activeRebase, checkErr := workspace.PRHead(ctx, r.Worktree)
 			if checkErr != nil {
 				return nil, checkErr
@@ -764,7 +782,19 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string) (*Resu
 	})
 }
 
-func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
+func (s *Service) Submit(ctx context.Context, number int) (result *Result, runErr error) {
+	p := s.Progress
+	if p == nil {
+		p = progress.Start(ctx, 0, number, s.OnProgress)
+		defer func() {
+			status := "completed"
+			if runErr != nil {
+				status = "failed"
+			}
+			p.Finish(status)
+		}()
+	}
+
 	r, remote, err := s.openForMutation(ctx, number, true)
 	if err != nil {
 		return nil, err
@@ -775,16 +805,18 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		}
 		r.Status = "submitted"
 		if !s.Fork {
+			p.Next("review evidence update")
 			if e := ProjectReviewEvidence(ctx, s.Tracker, r.State, number); e != nil {
 				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update review evidence: %w", number, e)
 			}
+			p.Next("rebase metadata update")
 			if e := ProjectRebase(ctx, s.Tracker, r.State, number); e != nil {
 				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update rebase context: %w", number, e)
 			}
 		}
 		return r, nil
 	}
-	r, err = s.validate(ctx, r, remote)
+	r, err = s.validate(ctx, r, remote, p)
 	if err != nil {
 		return r, err
 	}
@@ -819,6 +851,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 				return nil, fmt.Errorf("PR head moved concurrently; refusing stale publish")
 			}
 			if remote == "origin" {
+				p.Next("publish/submission record")
 				st, e = s.Manager.CompletePRRevision(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
 				if e != nil {
 					return nil, e
@@ -827,6 +860,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 				if e = s.Manager.CheckClaim(ctx, r.IssueNumber, owner); e != nil {
 					return nil, e
 				}
+				p.Next("publish")
 				if remote == "" {
 					local, ok := s.Tracker.(*tracker.LocalTracker)
 					if !ok {
@@ -846,6 +880,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 				if observed == nil || observed.HeadSHA != head || !strings.EqualFold(observed.State, "open") || observed.Merged {
 					return nil, fmt.Errorf("PR head or state changed after publication; coordination remains pending (rerun swarm pr submit %d to reconcile)", number)
 				}
+				p.Next("submission record")
 				st, e = s.Manager.CompletePRRevisionLocal(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
 				if e != nil {
 					return nil, fmt.Errorf("PR head published but state reconciliation is required: %w", e)
@@ -853,6 +888,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 			}
 		} else {
 			// Retry after a local or fork head update succeeded but its state CAS failed.
+			p.Next("submission record")
 			st, e = s.Manager.CompletePRRevisionLocal(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
 			if e != nil {
 				return nil, e
@@ -863,9 +899,11 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 		r.HeadSHA = head
 		r.Status = "submitted"
 		if !s.Fork {
+			p.Next("review evidence update")
 			if e := ProjectReviewEvidence(ctx, s.Tracker, st, number); e != nil {
 				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update review evidence: %w", number, e)
 			}
+			p.Next("rebase metadata update")
 			if e := ProjectRebase(ctx, s.Tracker, st, number); e != nil {
 				return r, fmt.Errorf("PR submitted; retry swarm pr submit %d to update rebase context: %w", number, e)
 			}

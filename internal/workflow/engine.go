@@ -159,6 +159,12 @@ func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manage
 	}
 }
 
+// ResolveRoleAgent exposes role agent precedence for coordinator turns outside
+// ExecuteWork, such as PR rebase conflict resolution.
+func ResolveRoleAgent(cfg *contract.SwarmConfig, role string, opts WorkOptions) string {
+	return resolveRoleAgent(cfg, role, opts)
+}
+
 // resolveRoleAgent applies role override, generic override, repository role,
 // then repository default precedence. It performs no availability check.
 func resolveRoleAgent(cfg *contract.SwarmConfig, role string, opts WorkOptions) string {

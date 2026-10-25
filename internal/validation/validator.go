@@ -386,6 +386,9 @@ func resolveCommit(repoRoot, revision string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// MatchProtectedPath reports whether target matches a protected_paths pattern.
+func MatchProtectedPath(pattern, target string) bool { return matchGlobPattern(pattern, target) }
+
 func matchGlobPattern(pattern, target string) bool {
 	pattern, target = filepath.ToSlash(strings.TrimSpace(pattern)), filepath.ToSlash(target)
 	if strings.HasSuffix(pattern, "/**") {

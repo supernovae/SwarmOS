@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,6 +37,11 @@ type Service struct {
 	ForkRemote string
 	// Now overrides the clock used for lease expiry checks (tests).
 	Now func() time.Time
+	// NewRunner builds the developer runner for rebase conflict resolution;
+	// nil uses the configured runner from approved policy.
+	NewRunner func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error)
+	// ResolveLog receives coordinator-owned conflict resolution progress.
+	ResolveLog io.Writer
 }
 type Options struct {
 	Number       int
@@ -43,6 +49,7 @@ type Options struct {
 	Instructions string
 	Continue     bool
 	Abort        bool
+	Resolve      bool
 }
 type Result struct {
 	CIFailures  bool                         `json:"ci_failures,omitempty"`
@@ -597,7 +604,10 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 			if e != nil {
 				return nil, e
 			}
-			if dirty || rebasing {
+			if rebasing {
+				return nil, PausedRebaseError(ctx, path, opts.Number)
+			}
+			if dirty {
 				return nil, fmt.Errorf("PR worktree must be clean and not rebasing before work")
 			}
 			st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch)
@@ -670,6 +680,9 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Continue && opts.Abort {
 		return nil, fmt.Errorf("--continue and --abort are mutually exclusive")
 	}
+	if opts.Resolve && opts.Abort {
+		return nil, fmt.Errorf("--resolve cannot be combined with --abort")
+	}
 	r, remote, err := s.openForMutation(ctx, opts.Number, false)
 	if err != nil {
 		return nil, err
@@ -684,6 +697,14 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 		}
 		if _, _, rebasing, e := workspace.PRHead(ctx, r.Worktree); e != nil || !rebasing {
 			return nil, fmt.Errorf("no managed PR rebase in progress")
+		}
+	}
+	var rv *resolver
+	if opts.Resolve {
+		// Policy, agent selection, and the runner come from the approved base and
+		// fail closed before any claim or rebase mutation.
+		if rv, err = s.newResolver(ctx, r, opts); err != nil {
+			return nil, err
 		}
 	}
 	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
@@ -716,19 +737,54 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 					return nil, e
 				}
 			}
-			newHead, e := workspace.RebasePR(ctx, path, r.PR.BaseSHA, opts.Continue, opts.Abort)
-			if e != nil {
+			// A resolution is recorded only after Git has moved past its commit.
+			var pending *lease.RebaseResolutionReport
+			pause := func(cause error) (*Result, error) {
 				r.Status = "rebasing"
 				conflicts, readErr := workspace.RebaseConflicts(ctx, path)
 				if readErr != nil {
-					return r, fmt.Errorf("%w; read conflicts: %v", e, readErr)
+					return r, fmt.Errorf("%w; read conflicts: %v", cause, readErr)
 				}
-				updated, recordErr := s.Manager.UpdateRebaseContext(ctx, r.IssueNumber, owner, opts.Number, lease.RebaseContext{ConflictedPaths: conflicts, Status: "in-progress"})
+				updated, recordErr := s.Manager.UpdateRebaseContext(ctx, r.IssueNumber, owner, opts.Number, lease.RebaseContext{ConflictedPaths: conflicts, Status: "in-progress", Resolution: pending})
+				if recordErr != nil {
+					return r, fmt.Errorf("%w; record conflicts: %v", cause, recordErr)
+				}
+				r.State = updated
+				if rv != nil {
+					cause = fmt.Errorf("%w\n%s", cause, resolveGuidance(opts.Number, conflicts))
+				}
+				return r, cause
+			}
+			if rv != nil && opts.Continue {
+				// Resolve only what is still unmerged; hand-staged files stay as they are.
+				res, resolveErr := s.resolveStop(ctx, rv, path, r.IssueNumber, owner, st)
+				if resolveErr != nil {
+					return pause(resolveErr)
+				}
+				pending = res
+			}
+			newHead, e := workspace.RebasePR(ctx, path, r.PR.BaseSHA, opts.Continue, opts.Abort)
+			for e != nil && rv != nil {
+				conflicts, readErr := workspace.RebaseConflicts(ctx, path)
+				if readErr != nil || len(conflicts) == 0 {
+					// Not a conflict stop: leave Git's state for the operator.
+					pending = nil
+					break
+				}
+				updated, recordErr := s.Manager.UpdateRebaseContext(ctx, r.IssueNumber, owner, opts.Number, lease.RebaseContext{ConflictedPaths: conflicts, Status: "in-progress", Resolution: pending})
 				if recordErr != nil {
 					return r, fmt.Errorf("%w; record conflicts: %v", e, recordErr)
 				}
-				r.State = updated
-				return r, e
+				r.State, pending = updated, nil
+				res, resolveErr := s.resolveStop(ctx, rv, path, r.IssueNumber, owner, st)
+				if resolveErr != nil {
+					return pause(resolveErr)
+				}
+				pending = res
+				newHead, e = workspace.RebasePR(ctx, path, r.PR.BaseSHA, true, false)
+			}
+			if e != nil {
+				return pause(e)
 			}
 			if newHead != "" {
 				st, e = s.Manager.RecordPRHead(ctx, r.IssueNumber, owner, opts.Number, branch, newHead)
@@ -742,7 +798,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			if opts.Abort {
 				status = "aborted"
 			}
-			st, e = s.Manager.UpdateRebaseContext(ctx, r.IssueNumber, owner, opts.Number, lease.RebaseContext{Status: status})
+			st, e = s.Manager.UpdateRebaseContext(ctx, r.IssueNumber, owner, opts.Number, lease.RebaseContext{Status: status, Resolution: pending})
 			if e != nil {
 				return r, e
 			}
@@ -751,6 +807,48 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			return r, nil
 		})
 	})
+}
+
+// newResolver selects and preflights the developer agent from the approved
+// base's policy. Nothing here reads the PR worktree or a mid-rebase tree.
+func (s *Service) newResolver(ctx context.Context, r *Result, opts Options) (*resolver, error) {
+	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := harness.LoadValidationSpecAt(s.Root, r.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	local := s.Tracker.BackendName() == "local"
+	name := workflow.ResolveRoleAgent(cfg, "developer", opts.Work)
+	if name == "" {
+		return nil, fmt.Errorf("no configured developer agent")
+	}
+	if _, err := agent.Preflight(name, cfg, local, "developer"); err != nil {
+		return nil, fmt.Errorf("developer agent preflight: %w", err)
+	}
+	newRunner := s.NewRunner
+	if newRunner == nil {
+		newRunner = agent.NewConfiguredRunner
+	}
+	runner, err := newRunner(name, cfg, local)
+	if err != nil {
+		return nil, fmt.Errorf("developer agent preflight: %w", err)
+	}
+	issue, err := s.Tracker.GetIssue(ctx, r.IssueNumber)
+	if err != nil {
+		return nil, err
+	}
+	unit, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		return nil, err
+	}
+	mode := "headless"
+	if !opts.Work.Headless {
+		mode = "interactive"
+	}
+	return &resolver{runner: runner, agentName: name, mode: mode, local: local, unit: unit, protected: spec.ProtectedPaths, log: s.ResolveLog}, nil
 }
 
 func (s *Service) Validate(ctx context.Context, number int) (result *Result, runErr error) {

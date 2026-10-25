@@ -36,6 +36,20 @@ func RebaseSummary(st *lease.IssueState, number int) string {
 			}
 			fmt.Fprintf(&b, "%s: %s\n", label, strings.Join(r.ConflictedPaths, ", "))
 		}
+		for _, res := range r.Resolutions {
+			label := "Resolved by"
+			if res.Reported {
+				label = "Reported resolved by"
+			}
+			tool := strings.TrimSpace(strings.Join([]string{res.Harness, res.HarnessVersion}, " "))
+			if res.Sandbox != "" {
+				tool = strings.TrimSpace(tool + ", " + res.Sandbox)
+			}
+			if tool != "" {
+				tool = " (" + strings.TrimPrefix(tool, ", ") + ")"
+			}
+			fmt.Fprintf(&b, "%s %s%s at %s: %s\n", label, res.Agent, tool, res.Commit, strings.Join(res.Paths, ", "))
+		}
 	}
 	return b.String()
 }

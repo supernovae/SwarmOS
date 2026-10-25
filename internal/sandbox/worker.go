@@ -28,6 +28,7 @@ import (
 // WorkerOptions describes a disposable Linux OCI worker. OutputDir is a trusted
 // coordinator-owned destination used by the review snapshot's output channel.
 type WorkerOptions struct {
+	GuidanceDelivered               func(string) // coordinator callback for forwarded interactive guidance
 	Limits                          contract.AgentLimits
 	Warning                         io.Writer
 	RecoveryRoot                    string

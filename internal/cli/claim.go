@@ -86,7 +86,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			_, releaseErr := manager.Release(cmd.Context(), issue, owner, "claim setup failed")
 			return errors.Join(cause, releaseErr)
 		}
-		if err := lease.SaveClaimToken(root, issue, state.Lease.ClaimID); err != nil {
+		if err := lease.SaveClaimToken(root, issue, state.Lease.ClaimID, state.BaseSHA); err != nil {
 			return fail(err)
 		}
 		checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, preflight.Issue.Title, state.Lease.ClaimID, state.Branch)

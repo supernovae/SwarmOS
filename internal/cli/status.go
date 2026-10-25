@@ -106,6 +106,10 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "Base: %s\nTask: %s\nApproved by: %s\n", state.BaseSHA, state.TaskDigest, state.ApprovedBy)
 				for _, artifact := range state.Artifacts {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s (%s)\n", artifact.Type, artifact.Verdict, artifact.Producer)
+					fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", artifact.Summary)
+					if artifact.Metadata["operator_steered"] == "true" {
+						fmt.Fprintf(cmd.OutOrStdout(), "    Operator-steered: %s messages; SHA-256 %s\n", artifact.Metadata["guidance_count"], artifact.Metadata["guidance_sha256"])
+					}
 				}
 				if len(entry.Provenance) == 0 {
 					fmt.Fprintln(cmd.OutOrStdout(), "Provenance: none recorded")

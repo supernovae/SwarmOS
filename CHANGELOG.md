@@ -4,6 +4,10 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Fail no-op and explicitly blocked implementations before testing, and refuse empty issue submissions with a recovery command.
+- Add `swarm issue work --instructions` and record delivered operator guidance in role reports, status, and PR review evidence.
+- Replan after requested changes, mark earlier role attempts as superseded, and keep unmerged lessons out of agent system prompts.
+
 - `swarm issue edit` replaces selected WorkUnit sections on GitHub and local backends, previews diffs and approval impact, lints before writing, and blocks active claims. Changed contracts require separate approval.
 
 - Protected paths now cover the files that become part of agent instructions: `.swarm/project.md`, `.swarm/architecture.md`, `.swarm/conventions.md`, `.claude/commands/**`, `.opencode/commands/**`, `AGENTS.md`, and `CLAUDE.md`. New repositories get them from `swarm repo init`; existing repositories can add them to `.swarm/validation/required-checks.yaml`. Agent work that needs to edit them sets `allow_harness_changes: true` on its WorkUnit.

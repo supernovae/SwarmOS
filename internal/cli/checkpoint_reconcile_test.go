@@ -44,7 +44,7 @@ func TestCLICheckpointReconciliationAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = lease.SaveClaimToken(f.root, n, st.Lease.ClaimID); err != nil {
+	if err = lease.SaveClaimToken(f.root, n, st.Lease.ClaimID, st.BaseSHA); err != nil {
 		t.Fatal(err)
 	}
 	path, branch, err := workspace.ProvisionAt(f.root, n, "test", st.BaseSHA, "", "")

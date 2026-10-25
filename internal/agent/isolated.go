@@ -42,6 +42,8 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	}
 	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
 		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot}
+	collector := &GuidanceCollector{}
+	options.GuidanceDelivered = collector.Delivered
 	options.ProjectPlan = req.ProjectPlan
 	if req.ReadOnly && req.Role == "reviewer" {
 		options.OutputDir = filepath.Join(req.WorktreePath, ".swarm", "active-output")
@@ -63,7 +65,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	if nativeVersion != "" {
 		att.HarnessVersion = nativeVersion
 	}
-	result := &RunResult{Agent: a.agentName, Role: req.Role, Command: command, Output: out.String(), Attestation: att}
+	result := &RunResult{Agent: a.agentName, Role: req.Role, Command: command, Output: out.String(), Attestation: att, Guidance: collector.Messages()}
 	if err != nil {
 		result.ExitCode = 1
 		return result, err

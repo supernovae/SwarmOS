@@ -17,6 +17,7 @@ import (
 type persistedClaim struct {
 	IssueNumber int    `json:"issue_number"`
 	ClaimID     string `json:"claim_id"`
+	BaseSHA     string `json:"base_sha,omitempty"`
 }
 
 // Control files live outside agent worktrees and are shared by this clone's
@@ -39,7 +40,7 @@ func claimControlPath(repoRoot string, issueNumber int) (string, error) {
 	return filepath.Join(configDir, "swarm", "claims", hex.EncodeToString(digest[:]), fmt.Sprintf("%d.json", issueNumber)), nil
 }
 
-func SaveClaimToken(repoRoot string, issueNumber int, claimID string) error {
+func SaveClaimToken(repoRoot string, issueNumber int, claimID, baseSHA string) error {
 	if claimID == "" {
 		return fmt.Errorf("claim token is empty")
 	}
@@ -50,7 +51,8 @@ func SaveClaimToken(repoRoot string, issueNumber int, claimID string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	payload, err := json.Marshal(persistedClaim{IssueNumber: issueNumber, ClaimID: claimID})
+	hint := baseSHA
+	payload, err := json.Marshal(persistedClaim{IssueNumber: issueNumber, ClaimID: claimID, BaseSHA: hint})
 	if err != nil {
 		return err
 	}
@@ -116,4 +118,25 @@ func UnlockClaim(file *os.File) {
 		_ = filelock.Unlock(file)
 		_ = file.Close()
 	}
+}
+
+// LoadClaimBaseHint returns local evidence for refusal only, never authority.
+func LoadClaimBaseHint(repoRoot string, issueNumber int) (string, error) {
+	path, err := claimControlPath(repoRoot, issueNumber)
+	if err != nil {
+		return "", err
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var token persistedClaim
+	if err := json.Unmarshal(payload, &token); err != nil {
+		return "", err
+	}
+	decoded, err := hex.DecodeString(token.BaseSHA)
+	if err != nil || len(decoded) != 20 || token.IssueNumber != issueNumber {
+		return "", fmt.Errorf("invalid claim base hint")
+	}
+	return token.BaseSHA, nil
 }

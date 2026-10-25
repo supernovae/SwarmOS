@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -86,11 +87,28 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 		}
 	}
 
+	// A default rerun must plan again, but the deterministic mock planner
+	// returns the rejected documents unchanged and must not reach review.
+	unchanged, unchangedErr := eng.ExecuteWork(ctx, WorkOptions{RepoRoot: tmp, IssueNumber: iss.Number, AgentName: "mock", Phase: "all", Headless: true})
+	if unchanged.RoleAgentsUsed["planner"] != "mock" || unchanged.RoleAgentsUsed["reviewer"] != "" {
+		t.Fatalf("unchanged plan was reviewed: %+v", unchanged.RoleAgentsUsed)
+	}
+	if unchangedErr == nil || !strings.Contains(unchangedErr.Error(), "re-plan is unchanged") {
+		t.Fatalf("unchanged replan accepted: %v", unchangedErr)
+	}
+	// Explicit review remains available to an operator who wants to re-review
+	// the current plan rather than ask for a new default planning attempt.
+	t.Setenv("SWARM_MOCK_VERDICT", "APPROVED")
+	reviewed, reviewErr := eng.ExecuteWork(ctx, WorkOptions{RepoRoot: tmp, IssueNumber: iss.Number, ClaimID: unchanged.State.Lease.ClaimID, AgentName: "mock", Phase: "review", Headless: true})
+	if reviewErr != nil {
+		t.Fatal(reviewErr)
+	}
 	// 2. Test GateAgent approval and full multi-role execution
 	t.Setenv("SWARM_MOCK_VERDICT", "APPROVED")
 	var completedEvents []ProgressEvent
 	res, err := eng.ExecuteWork(ctx, WorkOptions{
 		RepoRoot:       tmp,
+		ClaimID:        reviewed.State.Lease.ClaimID,
 		IssueNumber:    iss.Number,
 		PlannerAgent:   "mock",
 		ReviewerAgent:  "mock",
@@ -113,7 +131,7 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 			started = append(started, event.Stage)
 		}
 	}
-	if !slices.Equal(started, []string{"preflight", "claim", "workspace", "review", "implement", "checkpoint", "test", "required-checks"}) {
+	if !slices.Equal(started, []string{"preflight", "claim", "workspace", "implement", "checkpoint", "test", "required-checks"}) {
 		t.Fatalf("resumed stage sequence: %v", started)
 	}
 	if last := completedEvents[len(completedEvents)-1]; last.Stage != "required-checks" || last.Status != "completed" {

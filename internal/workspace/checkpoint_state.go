@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/gitcredential"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/supernovae/swarmos/internal/gitcredential"
 )
 
 // HeadObservation distinguishes a missing ref from an unsuccessful lookup.
@@ -139,4 +141,17 @@ type CheckpointDivergenceError struct {
 
 func (e *CheckpointDivergenceError) Error() string {
 	return fmt.Sprintf("checkpoint divergence: %s; preserve local work, then inspect with swarm issue status %d; reconcile explicitly with swarm issue reconcile %d --checkpoint --expected-head %s --candidate-head %s --dry-run", e.State.String(), e.Issue, e.Issue, e.State.Recorded.SHA, e.State.Worktree.SHA)
+}
+
+// CommitsBeyond counts local commits beyond a resolved base.
+func CommitsBeyond(ctx context.Context, root, base string) (int, error) {
+	resolved, err := gitOutputContext(ctx, root, "rev-parse", "--verify", base+"^{commit}")
+	if err != nil {
+		return 0, err
+	}
+	out, err := gitOutputContext(ctx, root, "rev-list", "--count", strings.TrimSpace(resolved)+"..HEAD")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(out))
 }

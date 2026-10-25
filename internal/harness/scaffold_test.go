@@ -1077,3 +1077,19 @@ func TestAgentTimeoutConfigAndDoctor(t *testing.T) {
 		}
 	}
 }
+
+func TestDeveloperSnapshotInstructions(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".swarm/prompts/developer.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"no Git metadata by design", "temporary repositories", "empty `.git` is not a reason to stop"} {
+		if !strings.Contains(string(data), text) {
+			t.Fatalf("missing snapshot instruction %q", text)
+		}
+	}
+}

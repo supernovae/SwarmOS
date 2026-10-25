@@ -68,6 +68,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork})
 		if report != nil {
 			report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
+			lease.PreserveTesterGuidance(state, &report.Artifact)
 			_, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact)
 			validationErr = errors.Join(validationErr, err)
 		}

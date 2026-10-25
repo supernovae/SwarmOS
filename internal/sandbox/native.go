@@ -276,25 +276,13 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		if model != "" {
 			args = append(args, "--model", model)
 		}
-		for {
-			command = append(append([]string{binary}, args...), prompt)
+		return runFollowupTurns(ctx, prompt, "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, true, stdin, stdout, func(turn string) error {
+			command = append(append([]string{binary}, args...), turn)
 			if err := runNativeCommand(ctx, binary, work, nativeEnv(home, true), command[1:], nil, stdout, stderr); err != nil {
 				return fmt.Errorf("native Codex run: %w", err)
 			}
-			if !interactive {
-				return nil
-			}
-			fmt.Fprint(stdout, "\nFollow-up instruction (Enter to finish this phase): ")
-			line, err := nativeInstruction(ctx, stdin)
-			if err != nil && err != io.EOF {
-				return err
-			}
-			line = strings.TrimSpace(line)
-			if line == "" {
-				return nil
-			}
-			prompt = "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n" + line
-		}
+			return nil
+		}, opts.GuidanceDelivered)
 	})
 	return command, version, err
 }

@@ -259,7 +259,7 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 			if i < 2 {
 				recorded[path] = true
 			} else if !recorded[path] {
-				pointerOnly, err := onlyActivePointer(worktreePath, path)
+				pointerOnly, err := workspace.OnlyActivePointer(worktreePath, path)
 				if err != nil {
 					return nil, err
 				}
@@ -274,34 +274,6 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 		}
 	}
 	return files, nil
-}
-
-// onlyActivePointer reports whether an unstaged change to an agent instruction
-// file is exactly SwarmOS's temporary task block, which is injected for agents
-// and removed before every checkpoint.
-func onlyActivePointer(worktreePath, path string) (bool, error) {
-	if path != "AGENTS.md" && path != "CLAUDE.md" {
-		return false, nil
-	}
-	current, err := safefs.ReadFile(worktreePath, path, 16<<20)
-	if err != nil {
-		return false, nil
-	}
-	committed := ""
-	if listing, err := gitOutput(worktreePath, "ls-tree", "--name-only", "HEAD", "--", path); err != nil {
-		return false, err
-	} else if len(bytes.TrimSpace(listing)) != 0 {
-		out, err := gitOutput(worktreePath, "show", "HEAD:"+path)
-		if err != nil {
-			return false, err
-		}
-		committed = string(out)
-	}
-	stripped := workspace.StripActivePointer(string(current))
-	if stripped == string(current) {
-		return false, nil
-	}
-	return strings.ReplaceAll(stripped, "\r\n", "\n") == strings.ReplaceAll(committed, "\r\n", "\n"), nil
 }
 
 // runOnHost runs a required check directly, with a scrubbed environment.

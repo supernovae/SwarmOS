@@ -718,7 +718,18 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 			return err
 		}
 	}
-	workunitMD := renderWorkUnitMarkdown(wu, wf, artifacts)
+	// Complete evidence is a report attachment, never system-prompt guidance.
+	var evidence strings.Builder
+	for _, a := range artifacts {
+		fmt.Fprintf(&evidence, "## %s (%s)\n\n%s\n\n", a.Type, a.Verdict, a.Body)
+	}
+	if lessons, readErr := active.ReadFile("LESSONS.md", 1<<20); readErr == nil {
+		evidence.WriteString("## Active lessons\n\n" + string(lessons))
+	}
+	if err := active.WriteFile("REVIEW_EVIDENCE.md", []byte(evidence.String()), 0644); err != nil {
+		return err
+	}
+	workunitMD := renderWorkUnitMarkdown(wu, wf, artifacts, role)
 	if err := active.WriteFile("WORKUNIT.md", []byte(workunitMD), 0o644); err != nil {
 		return err
 	}
@@ -742,6 +753,17 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	sys.WriteString("## Approved validation policy\n\n```yaml\n")
 	sys.WriteString(strings.TrimSpace(validationDoc))
 	sys.WriteString("\n```\n\nRun these check commands directly. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
+	if role == "planner" {
+		for i := len(artifacts) - 1; i >= 0; i-- {
+			a := artifacts[i]
+			if a.Type == contract.ArtifactReview {
+				if a.Verdict == "CHANGES_REQUESTED" {
+					sys.WriteString("Address the previous CHANGES_REQUESTED findings by revising PLAN.md or TEST_PLAN.md before requesting review.\n\n")
+				}
+				break
+			}
+		}
+	}
 	sys.WriteString("---\n\n")
 	sys.WriteString(workunitMD)
 
@@ -852,7 +874,7 @@ func CleanEphemeralHarnessMarkers(worktreePath string) error {
 	return nil
 }
 
-func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact) string {
+func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, roles ...string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("# Work Unit %s: %s\n\n", wu.ID, wu.Title))
 	sb.WriteString(fmt.Sprintf("- **Issue Number**: #%d\n", wu.IssueNumber))
@@ -889,9 +911,11 @@ func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, ar
 
 	if len(artifacts) > 0 {
 		sb.WriteString("## Prior Artifacts\n\n")
-		for _, a := range artifacts {
-			sb.WriteString(fmt.Sprintf("### %s (by `%s`, verdict: `%s`)\n\n%s\n\n", a.Type, a.Producer, a.Verdict, strings.TrimSpace(a.Body)))
+		role := ""
+		if len(roles) > 0 {
+			role = roles[0]
 		}
+		sb.WriteString(renderArtifactContext(artifacts, role))
 	}
 
 	return sb.String()

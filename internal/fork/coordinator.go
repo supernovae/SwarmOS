@@ -532,6 +532,9 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 					r.Verified = true
 				}
 			}
+			if err = prservice.ProjectReviewEvidence(ctx, c.Tracker, &currentState, req.PRNumber); err != nil {
+				return nil, "", fmt.Errorf("PR head published; retry pr submit to update review evidence: %w", err)
+			}
 			if err = prservice.ProjectRebase(ctx, c.Tracker, &currentState, req.PRNumber); err != nil {
 				return nil, "", fmt.Errorf("PR head published; retry pr submit to update rebase context: %w", err)
 			}

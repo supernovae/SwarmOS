@@ -165,7 +165,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				selected.RepoRoot, selected.IssueNumber = pulled.RepoRoot, pulled.Issue.Number
 				selected.Phase, selected.ClaimID = pulled.TargetPhase, pulled.State.Lease.ClaimID
 				selected.OnClaim = func(state *lease.IssueState) error {
-					return lease.SaveClaimToken(pulled.RepoRoot, pulled.Issue.Number, state.Lease.ClaimID)
+					return lease.SaveClaimToken(pulled.RepoRoot, pulled.Issue.Number, state.Lease.ClaimID, state.BaseSHA)
 				}
 				result, err := engine.ExecuteWork(ctx, selected)
 				lease.UnlockClaim(lock)

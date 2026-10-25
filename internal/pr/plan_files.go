@@ -36,7 +36,7 @@ func restoreApprovedPlan(root string, st *lease.IssueState) error {
 		}
 		old, err := active.ReadFile(name, 8<<20)
 		if err == nil {
-			if string(old) != a.Body {
+			if string(old) != a.Body && string(old) != contract.CanonicalArtifactBody(a.Body) {
 				return fmt.Errorf("%s differs from the approved plan; run pr work to review the change", name)
 			}
 			continue
@@ -44,7 +44,7 @@ func restoreApprovedPlan(root string, st *lease.IssueState) error {
 		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if err := active.WriteFile(name, []byte(a.Body), 0644); err != nil {
+		if err := active.WriteFile(name, []byte(contract.CanonicalArtifactBody(a.Body)), 0644); err != nil {
 			return err
 		}
 	}

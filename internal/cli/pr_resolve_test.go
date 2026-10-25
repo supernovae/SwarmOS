@@ -18,9 +18,12 @@ import (
 
 // resolverScript resolves every listed conflict and copies each snapshot it
 // receives into out/<n> so the test can inspect exactly what the agent saw.
-func resolverScript(out string) string {
-	return fmt.Sprintf(`n=$(ls %[1]s | wc -l); d=%[1]s/$n; mkdir -p "$d"; find . -mindepth 1 | sort > "$d/find.txt"; cp -R .swarm/active "$d/active"
-for p in $(sed -n 's/^## [0-9]*\. `+"`"+`\(.*\)`+"`"+`$/\1/p' .swarm/active/CONFLICTS.md); do printf 'resolved %%s\n' "$p" > "$p"; done`, out)
+// The output directory travels in the environment in slash form so Windows
+// paths survive the shell.
+func resolverScript(t *testing.T, out string) string {
+	t.Setenv("SWARM_TEST_RESOLVER_OUT", filepath.ToSlash(out))
+	return `n=$(ls "$SWARM_TEST_RESOLVER_OUT" | wc -l | tr -d ' '); d="$SWARM_TEST_RESOLVER_OUT/$n"; mkdir -p "$d"; find . -mindepth 1 | sort > "$d/find.txt"; cp -R .swarm/active "$d/active"
+for p in $(sed -n 's/^## [0-9]*\. ` + "`" + `\(.*\)` + "`" + `$/\1/p' .swarm/active/CONFLICTS.md); do printf 'resolved %s\n' "$p" > "$p"; done`
 }
 
 // twoStopPRFixture returns a submitted PR with two commits that both conflict
@@ -51,7 +54,7 @@ func TestCLIPRRebaseResolveMultiCommitWithAddAdd(t *testing.T) {
 	base := prGit(t, f.root, "rev-parse", "HEAD")
 	approved := f.state(t, issue)
 	out := t.TempDir()
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(out))
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(t, out))
 
 	rebased := readPROutcome(t, f.must(t, "pr", "rebase", p, "--resolve", "--agent", "mock", "--json"))
 	worktree := workspace.PRWorktreePath(f.root, number)
@@ -277,7 +280,7 @@ func TestCLIPRRebaseContinueResolveKeepsHandStagedFiles(t *testing.T) {
 	f, issue, p, worktree := oneStopTwoFiles(t)
 	handResolve(t, worktree, "a.txt")
 	out := t.TempDir()
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(out))
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(t, out))
 	f.must(t, "pr", "rebase", p, "--continue", "--resolve", "--agent", "mock", "--progress=false")
 	listing, err := os.ReadFile(filepath.Join(out, "0", "find.txt"))
 	if err != nil {

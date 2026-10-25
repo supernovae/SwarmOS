@@ -312,7 +312,7 @@ func RunNativeValidation(ctx context.Context, dir, binary, command string, stdou
 // Reuse the OCI filesystem acceptance rules. Native workers also operate on a
 // detached snapshot, so tools cannot access live Git or coordinator state.
 func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, run func(context.Context, string, string) error) error {
-	timeout := 15 * time.Minute
+	timeout := AgentRunLimit
 	if opts.Timeout > 0 && opts.Timeout < timeout {
 		timeout = opts.Timeout
 	}

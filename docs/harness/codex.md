@@ -36,7 +36,7 @@ Each turn is ephemeral. Task files carry progress between turns and phases, so a
 - **Disabled.** User configuration and rules, MCP, plugins, hooks, browser tools, and subagents.
 - **Checks before work.** SwarmOS tests outside-file, symlink, write, and loopback canaries, and confirms the required `codex exec` flags exist.
 
-The Codex process and its internal tool dispatcher run on the host and are trusted. The boundary protects against agent-directed tools, not a compromised Codex binary. Each phase has a fifteen-minute deadline and bounded imports, but no CPU, memory, or disk quotas. Use the OCI backend if you need those.
+The Codex process and its internal tool dispatcher run on the host and are trusted. The boundary protects against agent-directed tools, not a compromised Codex binary. Each phase has a 60-minute deadline and bounded imports, but no CPU, memory, or disk quotas. Use the OCI backend if you need those.
 
 ## Troubleshooting
 

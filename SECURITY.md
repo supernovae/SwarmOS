@@ -54,7 +54,7 @@ The trusted Codex process uses its own provider login and session renewal. Agent
 
 SwarmOS uses `codex exec` with user execution settings and rules ignored, disables MCP, plugins, hooks, browser tools, and subagents, and excludes `.codex` and `.agents` directories from the task snapshot. Interactive turns use the same permissions as unattended turns; requests to escalate access are denied. Planner and reviewer source is read-only, with designated artifact output. Developer/tester changes pass through bounded file import, and validation runs approved-base commands through `codex sandbox` in a disposable snapshot.
 
-Codex and its internal tool dispatcher remain trusted host-side software. The boundary protects against agent-directed tools, not a compromised harness binary or OS. Task context is sent to the chosen model through the authenticated harness; keep secrets out of task source. Native execution has a fifteen-minute phase deadline and bounded imports, but does not add OCI's CPU, memory, or disk quotas. Provider spend controls remain with the account owner. See the [Codex guide](docs/harness/codex.md) for setup and troubleshooting.
+Codex and its internal tool dispatcher remain trusted host-side software. The boundary protects against agent-directed tools, not a compromised harness binary or OS. Task context is sent to the chosen model through the authenticated harness; keep secrets out of task source. Native execution has a 60-minute phase deadline and bounded imports, but does not add OCI's CPU, memory, or disk quotas. Provider spend controls remain with the account owner. See the [Codex guide](docs/harness/codex.md) for setup and troubleshooting.
 
 ### Claude Code, OpenCode 2, and OhMyPi
 

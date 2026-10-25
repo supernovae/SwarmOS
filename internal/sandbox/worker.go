@@ -344,8 +344,8 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 		return err
 	}
 	timeout := opts.Timeout
-	if timeout <= 0 || timeout > 15*time.Minute {
-		timeout = 15 * time.Minute
+	if timeout <= 0 || timeout > AgentRunLimit {
+		timeout = AgentRunLimit
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -512,6 +512,11 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 	}
 	return importWorker(ctx, original, extracted, initial, manifest)
 }
+
+// AgentRunLimit bounds one isolated agent run, including the tool server that
+// delegated harnesses call. Validation checks pass shorter deadlines of their
+// own, which this ceiling never extends.
+const AgentRunLimit = 60 * time.Minute
 
 func workerOutputs(opts WorkerOptions) []string {
 	if !opts.ReadOnly {

@@ -86,7 +86,7 @@ func TestGitHubCIEvidenceIdentityAndUnavailable(t *testing.T) {
 				case strings.HasSuffix(r.URL.Path, "/jobs/22/logs"):
 					logRequests++
 					if mode == "expired" || mode == "cancelled" {
-						http.Error(w, "SECRET https://private/token", 403)
+						http.Error(w, "SECRET https://private/token", http.StatusForbidden)
 						return
 					}
 					fmt.Fprint(w, strings.Repeat("x", 100000)+"newest ***\r\n")

@@ -8,7 +8,6 @@
 GO        ?= go
 GOBIN     ?= $(shell $(GO) env GOPATH)/bin
 BIN_DIR   ?= bin
-STATICCHECK_VERSION ?= v0.8.2
 
 .PHONY: all build install test race fmt lint check clean version
 
@@ -39,7 +38,7 @@ fmt:
 lint:
 	@unformatted=$$(gofmt -s -l cmd internal); if [ -n "$$unformatted" ]; then echo "$$unformatted"; exit 1; fi
 	$(GO) vet ./...
-	$(GO) run honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION) ./...
+	$(GO) tool staticcheck ./...
 
 ## check: everything CI checks before a PR (lint and race tests)
 check: lint race

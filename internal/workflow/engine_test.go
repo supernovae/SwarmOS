@@ -430,3 +430,50 @@ func configureValidation(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 }
+
+func TestEngineSetupProgressSharedSessionBundles(t *testing.T) {
+	root, engine, tr := setupProjectPlanTestRepo(t)
+	configureValidation(t, root)
+	if out, err := exec.Command("git", "-C", root, "commit", "-am", "validation policy").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	wu := &contract.WorkUnit{Objective: "Setup status", Constraints: []string{"Keep reporting private"}, Acceptance: []string{"Progress precedes execution"}, Workflow: "feature", Gate: contract.GateAgent}
+	issue, err := tr.CreateIssue(t.Context(), "private-title\nsecret-token", contract.FormatIssueMarkdown(wu), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = engine.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+		t.Fatal(err)
+	}
+	var events []ProgressEvent
+	reporter := NewProgressReporter(t.Context(), func(event ProgressEvent) { events = append(events, event) })
+	defer reporter.Close()
+	result, err := engine.ExecuteWork(t.Context(), WorkOptions{
+		RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Headless: true,
+		SetupProgress: reporter, OnProgress: func(ProgressEvent) { t.Error("second callback invoked") },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.ValidationPassed {
+		t.Fatal("validation did not run")
+	}
+	// ExecuteWork must leave the supplied session alive for its command owner.
+	reporter.mu.Lock()
+	closed := reporter.closed
+	reporter.mu.Unlock()
+	if closed {
+		t.Fatal("engine closed command session")
+	}
+	reporter.Close()
+	var starts []string
+	for _, event := range events {
+		if event.Status == "started" {
+			starts = append(starts, event.Stage)
+		}
+	}
+	want := []string{"preflight", "claim", "workspace", "plan", "bundle", "review", "bundle", "implement", "bundle", "checkpoint", "test", "bundle", "required-checks"}
+	if !slices.Equal(starts, want) {
+		t.Fatalf("starts: %v", starts)
+	}
+}

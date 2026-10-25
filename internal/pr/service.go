@@ -403,7 +403,7 @@ func (s *Service) now() time.Time {
 // withClaim runs fn under the issue's fenced claim. Long-running validation and
 // publication pass renew=true so the lease is kept alive until fn returns; the
 // workflow engine renews its own claim during pr work.
-func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, fn func(context.Context, string, *lease.IssueState) (*Result, error)) (*Result, error) {
+func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, reporter *workflow.ProgressReporter, fn func(context.Context, string, *lease.IssueState) (*Result, error)) (*Result, error) {
 	lock, err := lease.LockClaim(s.Root, r.IssueNumber)
 	if err != nil {
 		return nil, err
@@ -439,12 +439,15 @@ func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, fn func(
 		if token == "" || st.Lease.ClaimID != token {
 			return nil, lease.ErrClaimFence
 		}
-		st, err = s.Manager.Resume(ctx, r.IssueNumber, owner, token)
+		err = reporter.ReportSetupPhase(ctx, r.IssueNumber, "claim", func() error { st, err = s.Manager.Resume(ctx, r.IssueNumber, owner, token); return err })
 		if err != nil {
 			return nil, err
 		}
 	} else {
-		st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, cfg.DefaultAgent, "all", duration, cfg.Lease.MaxRenewals)
+		err = reporter.ReportSetupPhase(ctx, r.IssueNumber, "claim", func() error {
+			st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, cfg.DefaultAgent, "all", duration, cfg.Lease.MaxRenewals)
+			return err
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -575,8 +578,13 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		}
 		return r, nil
 	}
-	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
-		path, branch, e := s.preparePR(ctx, r, remote, revisionHead(r.State), false)
+	return s.withClaim(ctx, r, false, opts.Work.SetupProgress, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+		var path, branch string
+		e := opts.Work.SetupProgress.ReportSetupPhase(ctx, r.IssueNumber, "workspace", func() error {
+			var setupErr error
+			path, branch, setupErr = s.preparePR(ctx, r, remote, revisionHead(r.State), false)
+			return setupErr
+		})
 		if e != nil {
 			return nil, e
 		}
@@ -631,7 +639,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("no managed PR rebase in progress")
 		}
 	}
-	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+	return s.withClaim(ctx, r, false, nil, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		path, branch, e := s.preparePR(ctx, r, remote, revisionHead(r.State), false)
 		if e != nil {
 			return nil, e
@@ -713,7 +721,7 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string) (*Resu
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
 	}
-	return s.withClaim(ctx, r, true, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+	return s.withClaim(ctx, r, true, nil, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		if st.PRRevision == nil || st.PRRevision.Number != number {
 			return nil, fmt.Errorf("pending PR revision changed during validation")
 		}
@@ -790,7 +798,7 @@ func (s *Service) Submit(ctx context.Context, number int) (*Result, error) {
 	}
 	// Validation acquired the issue lock and released it; acquire again for the
 	// final head comparison, exact-old-head push, and coordination CAS.
-	return s.withClaim(ctx, r, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+	return s.withClaim(ctx, r, false, nil, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		rev := st.PRRevision
 		if rev == nil || (rev.RemoteHeadSHA != r.PR.HeadSHA && rev.LocalHeadSHA != r.PR.HeadSHA) {
 			return nil, fmt.Errorf("PR revision changed during validation")

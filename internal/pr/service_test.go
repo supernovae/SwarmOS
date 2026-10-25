@@ -133,7 +133,7 @@ func TestLinkedPRIdentityAndPendingState(t *testing.T) {
 func TestPRRevisionCannotPublishViaIssueCheckpoint(t *testing.T) {
 	s, issue, number, base := fixture(t)
 	ctx := context.Background()
-	r, e := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+	r, e := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, false, nil, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		if st.PRNumber != number {
 			t.Fatalf("incorrect claim identity: %+v", st)
 		}
@@ -445,7 +445,7 @@ func TestLinkedReportsRevisionPublicationStatus(t *testing.T) {
 	s, issue, number, base := fixture(t)
 	ctx := context.Background()
 	local := strings.Repeat("b", 40)
-	if _, err := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, false, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+	if _, err := s.withClaim(ctx, &Result{PR: &tracker.PullRequest{Number: number, HeadSHA: base}, IssueNumber: issue}, false, nil, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		_, err := s.Manager.BeginPRRevision(ctx, issue, owner, number, base, local, "swarm/pr-1")
 		return nil, err
 	}); err != nil {
@@ -720,5 +720,37 @@ func TestMergedStatusAndClosedStatusRemainReadOnly(t *testing.T) {
 				t.Fatal("status mutated state")
 			}
 		})
+	}
+}
+
+func TestPRSetupProgressBeforePreparation(t *testing.T) {
+	s, issue, number, _ := fixture(t)
+	var events []workflow.ProgressEvent
+	reporter := workflow.NewProgressReporter(t.Context(), func(event workflow.ProgressEvent) {
+		// Actual PR provisioning has not happened when workspace starts.
+		if event.Stage == "workspace" && event.Status == "started" {
+			if _, err := os.Stat(workspace.PRWorktreePath(s.Root, number)); !os.IsNotExist(err) {
+				t.Errorf("workspace progress after preparation: %v", err)
+			}
+		}
+		if event.IssueNumber != issue {
+			t.Errorf("wrong issue: %+v", event)
+		}
+		events = append(events, event)
+	})
+	defer reporter.Close()
+	_, err := s.Work(t.Context(), Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock", Phase: "plan", SetupProgress: reporter}})
+	reporter.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phases []string
+	for _, event := range events {
+		if event.Status == "started" {
+			phases = append(phases, event.Stage)
+		}
+	}
+	if strings.Join(phases, ",") != "claim,workspace,claim,bundle" {
+		t.Fatalf("setup phases: %v", phases)
 	}
 }

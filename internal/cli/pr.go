@@ -8,6 +8,7 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workflow"
 )
 
 func newPRCmd(rootOpts *RootOptions) *cobra.Command {
@@ -85,8 +86,13 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				return err
 			}
 			service := rootOpts.prService(tr, manager)
-			if operation == "work" && opts.Work.Headless && progress && !opts.Work.InspectOnly {
-				opts.Work.OnProgress = workProgressPrinter(cmd.ErrOrStderr())
+			if operation == "work" && progress && !opts.Work.InspectOnly {
+				printer := workProgressPrinter(cmd.ErrOrStderr())
+				opts.Work.SetupProgress = workflow.NewProgressReporter(cmd.Context(), printer)
+				defer opts.Work.SetupProgress.Close()
+				if opts.Work.Headless {
+					opts.Work.OnProgress = printer
+				}
 			}
 			var result *pr.Result
 			switch operation {
@@ -101,6 +107,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			case "submit":
 				result, err = service.Submit(cmd.Context(), opts.Number)
 			}
+			opts.Work.SetupProgress.Close()
 			if asJSON || opts.Work.InspectOnly {
 				status := "completed"
 				if result != nil && result.Status != "" {

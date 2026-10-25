@@ -154,6 +154,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					}
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s %s%s\n", check.Name, check.Status, check.Conclusion, reporter)
 				}
+				if operation == "status" && result.CIFailures {
+					fmt.Fprintln(cmd.OutOrStdout(), "Failing checks on the published head will be provided to the next swarm pr work run")
+				}
 				if len(result.Reviews) != 0 {
 					fmt.Fprintln(cmd.OutOrStdout(), "Reviews:")
 				}

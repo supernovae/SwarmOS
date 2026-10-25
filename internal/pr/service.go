@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ type Options struct {
 	Abort        bool
 }
 type Result struct {
+	CIFailures  bool                         `json:"ci_failures,omitempty"`
 	PR          *tracker.PullRequest         `json:"pr"`
 	IssueNumber int                          `json:"issue_number"`
 	State       *lease.IssueState            `json:"state,omitempty"`
@@ -279,6 +281,11 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 	r.Checks, err = s.Tracker.GetCheckStatus(ctx, r.PR.HeadSHA)
 	if err != nil {
 		return r, err
+	}
+	for _, c := range r.Checks {
+		if tracker.CurrentCIFailure(c, r.PR.HeadSHA) {
+			r.CIFailures = true
+		}
 	}
 	if len(r.Checks) == 0 {
 		r.Checks = recordedValidationChecks(r.State, r.PR.HeadSHA)
@@ -603,6 +610,49 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 			opts.Work.PRWorktree = path
 			opts.Work.OnClaim = func(st *lease.IssueState) error {
 				return lease.SaveClaimToken(s.Root, r.IssueNumber, st.Lease.ClaimID, st.BaseSHA)
+			}
+			checks, ciErr := s.Tracker.GetCheckStatus(ctx, r.PR.HeadSHA)
+			if ciErr != nil {
+				return nil, ciErr
+			}
+			opts.Work.CIEvidence = nil
+			for _, c := range checks {
+				if tracker.CurrentCIFailure(c, r.PR.HeadSHA) {
+					opts.Work.CIEvidence = append(opts.Work.CIEvidence, tracker.CheckEvidence{Check: c})
+				}
+			}
+			// Reserve metadata before downloading any diagnostic payload.
+			if _, ciErr = workspace.RenderCIEvidence(opts.Work.CIEvidence); ciErr != nil {
+				return nil, ciErr
+			}
+			sort.SliceStable(opts.Work.CIEvidence, func(i, j int) bool { return opts.Work.CIEvidence[i].Check.ID < opts.Work.CIEvidence[j].Check.ID })
+			logBudget, annotationBudget := 128<<10, 64<<10
+			for i, entry := range opts.Work.CIEvidence {
+				evidence := tracker.CheckEvidence{Check: entry.Check, Unavailable: "Check details unavailable for this backend."}
+				if reader, ok := s.Tracker.(tracker.CheckEvidenceReader); ok {
+					evidence, ciErr = reader.GetCheckEvidence(ctx, entry.Check)
+					if ciErr != nil {
+						return nil, ciErr
+					}
+				}
+				if len(evidence.LogTail) > logBudget {
+					evidence.LogTail = evidence.LogTail[len(evidence.LogTail)-logBudget:]
+					evidence.Truncated = true
+				}
+				logBudget -= len(evidence.LogTail)
+				bounded := []string{}
+				for _, text := range evidence.Annotations {
+					if len(text) > annotationBudget {
+						text = text[:annotationBudget]
+						evidence.Truncated = true
+					}
+					if text != "" {
+						bounded = append(bounded, text)
+						annotationBudget -= len(text)
+					}
+				}
+				evidence.Annotations = bounded
+				opts.Work.CIEvidence[i] = evidence
 			}
 			worked, e := engine.ExecuteWork(ctx, opts.Work)
 			if worked != nil {

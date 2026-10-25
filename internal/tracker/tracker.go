@@ -98,6 +98,11 @@ type PullRequestReview struct {
 }
 
 type CheckRunResult struct {
+	ID         int64  `json:"id,omitempty"`
+	HeadSHA    string `json:"head_sha,omitempty"`
+	CheckSuite struct {
+		ID int64 `json:"id"`
+	} `json:"check_suite"`
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`

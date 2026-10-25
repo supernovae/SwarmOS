@@ -19,9 +19,10 @@ import (
 )
 
 type GitHubTracker struct {
-	owner  string
-	repo   string
-	client *api.RESTClient
+	owner    string
+	repo     string
+	client   *api.RESTClient
+	ciClient *api.RESTClient
 }
 
 // ResolveGitHubToken returns the configured GitHub API token in precedence order:
@@ -53,27 +54,29 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 	if err != nil {
 		return nil, err
 	}
-	var client *api.RESTClient
+	options := api.ClientOptions{}
 	if token != "" && (source == "SWARM_GITHUB_TOKEN" || source == gitcredential.TokenCommandEnv) {
 		host := strings.TrimSpace(os.Getenv("GH_HOST"))
 		if host == "" {
 			host = "github.com"
 		}
-		client, err = api.NewRESTClient(api.ClientOptions{
-			Host:      host,
-			AuthToken: token,
-		})
-	} else {
-		client, err = api.DefaultRESTClient()
+		options.Host = host
+		options.AuthToken = token
 	}
+	client, err := api.NewRESTClient(options)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize GitHub REST client (set SWARM_GITHUB_TOKEN_COMMAND, SWARM_GITHUB_TOKEN, or GH_TOKEN, or run gh auth login): %w", err)
 	}
-	return &GitHubTracker{
-		owner:  owner,
-		repo:   name,
-		client: client,
-	}, nil
+	// Evidence has a separate transport policy so storage redirects never
+	// affect ordinary repository requests or enable verbose signed-URL logging.
+	options.CheckRedirect = ciRedirect
+	options.LogIgnoreEnv = true
+	ciClient, err := api.NewRESTClient(options)
+	if err != nil {
+		return nil, errors.New("failed to initialize CI evidence client")
+	}
+	return &GitHubTracker{owner: owner, repo: name, client: client, ciClient: ciClient}, nil
 }
 
 func NewGitHubTrackerWithClient(owner, repo string, client *api.RESTClient) *GitHubTracker {
@@ -893,27 +896,32 @@ func (g *GitHubTracker) GetPullRequestReviews(ctx context.Context, number int) (
 }
 
 func (g *GitHubTracker) GetCheckStatus(ctx context.Context, ref string) ([]CheckRunResult, error) {
-	path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs", g.owner, g.repo, url.PathEscape(ref))
-	var resp struct {
-		CheckRuns []struct {
-			CheckRunResult
-			App *struct {
-				Slug string `json:"slug"`
-			} `json:"app"`
-		} `json:"check_runs"`
-	}
-	if err := g.client.DoWithContext(ctx, "GET", path, nil, &resp); err != nil {
-		return nil, err
-	}
-	runs := make([]CheckRunResult, 0, len(resp.CheckRuns))
-	for _, run := range resp.CheckRuns {
-		result := run.CheckRunResult
-		if run.App != nil {
-			result.App = run.App.Slug
+	runs := []CheckRunResult{}
+	for page := 1; ; page++ {
+		path := fmt.Sprintf("repos/%s/%s/commits/%s/check-runs?per_page=100&page=%d", g.owner, g.repo, url.PathEscape(ref), page)
+		var resp struct {
+			CheckRuns []struct {
+				CheckRunResult
+				App *struct {
+					Slug string `json:"slug"`
+				} `json:"app"`
+			} `json:"check_runs"`
 		}
-		runs = append(runs, result)
+		if err := g.ciJSON(ctx, path, &resp); err != nil {
+			return nil, err
+		}
+		for _, run := range resp.CheckRuns {
+			result := run.CheckRunResult
+			if run.App != nil {
+				result.App = run.App.Slug
+			}
+			runs = append(runs, result)
+		}
+		if len(resp.CheckRuns) < 100 {
+			return runs, nil
+		}
 	}
-	return runs, nil
+
 }
 
 func (g *GitHubTracker) EnsureLabels(ctx context.Context, labels []LabelSpec) error {

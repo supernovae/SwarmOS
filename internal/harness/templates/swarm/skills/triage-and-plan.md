@@ -40,3 +40,5 @@ Use this skill when running `/swarm-project-plan` (in Claude Code or OpenCode) o
    - **Urgent**: users are affected now. Write a minimal mitigation task first and a separate root-cause task.
 6. Work the scan's **Backlog at a Glance** lanes top to bottom. Suggest closing duplicates and quiet issues to the maintainer, but never close, relabel, or comment on issues yourself.
 7. Write acceptance criteria someone can check: a command, a test, or an observable behavior. Words like "improve" or "cleaner" alone usually mean the task needs more scoping.
+8. Give each task one outcome. Say what is in scope and what is out of scope, and name the backends, harnesses, and platforms it covers instead of writing "every backend".
+9. Keep acceptance criteria checkable inside the agent sandbox or by CI. Checks that need an environment agents can't reach, such as a container image, another OS, or a live GitHub flow, belong in the PR review checklist or a follow-up task. Probes are their own Exploratory task, never a step that blocks another task's implementation. Nice-to-haves become follow-up tasks.

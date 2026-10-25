@@ -1447,6 +1447,13 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		if err := contract.ValidateArtifact(&art); err != nil {
 			return err
 		}
+		if (art.Type == contract.ArtifactDesign || art.Type == contract.ArtifactTestPlan) &&
+			st.PRRevision != nil && st.PRRevision.Intent == "rebase" {
+			// Fresh planning supersedes rebase evidence before its provenance is recorded.
+			invalidatePRRevisionEvidence(st)
+			st.PRRevision.Intent = "work"
+			st.CarryReason = "new development requires plan review"
+		}
 		if harnessName := strings.TrimSpace(art.Metadata["harness"]); harnessName != "" {
 			role := strings.TrimSpace(art.Metadata["role"])
 			if role == "" {

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -208,7 +210,7 @@ func TestCLIPRSelectorsAndUnlinkedPRCannotAcquire(t *testing.T) {
 	}
 }
 
-func submittedInteractivePRFixture(t *testing.T) (*cliFixture, int, int) {
+func submittedInteractivePRFixture(t *testing.T, gates ...string) (*cliFixture, int, int) {
 	t.Helper()
 	f := newCLIFixture(t)
 	cfgPath := filepath.Join(f.root, ".swarm", "config.yaml")
@@ -227,7 +229,11 @@ func submittedInteractivePRFixture(t *testing.T) (*cliFixture, int, int) {
 	prGit(t, f.root, "commit", "-m", "Approve interactive plan policy")
 
 	f.create(t, "agent") // PR and issue numbers must remain distinct.
-	issue := f.create(t, "human")
+	gate := "human"
+	if len(gates) > 0 {
+		gate = gates[0]
+	}
+	issue := f.create(t, gate)
 	n := strconv.Itoa(issue)
 	f.must(t, "issue", "approve", n)
 	f.must(t, "issue", "claim", n, "--agent", "mock")
@@ -610,5 +616,81 @@ func TestCLIPRWorkGitHubDryRun(t *testing.T) {
 				t.Fatal("worktree created", err)
 			}
 		})
+	}
+}
+
+// Reproduce the recovery sequence after a policy change prevents plan carry-forward.
+func TestCLIPRRebaseStagePlanSurvivesReview(t *testing.T) {
+	f, issue, number := submittedInteractivePRFixture(t, "agent")
+	p := strconv.Itoa(number)
+	name := ".swarm/rules/rebase-stage.md"
+	if err := os.WriteFile(filepath.Join(f.root, name), []byte("new policy\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, f.root, "add", name)
+	prGit(t, f.root, "commit", "-m", "Change approved policy")
+	f.must(t, "issue", "approve", strconv.Itoa(issue))
+	f.must(t, "pr", "rebase", p)
+	before := f.state(t, issue)
+	if before.PRRevision == nil || before.PRRevision.Intent != "rebase" || len(before.Artifacts) != 0 {
+		t.Fatalf("expected ineligible rebase: %+v", before)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace.PRWorktreePath(f.root, number), ".swarm", "active"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	bodies := map[string]string{"PLAN.md": "# Replacement plan\n", "TEST_PLAN.md": "# Replacement tests\n"}
+	for name, body := range bodies {
+		if err := os.WriteFile(filepath.Join(workspace.PRWorktreePath(f.root, number), ".swarm", "active", name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.must(t, "pr", "stage", p, "--phase", "plan")
+	staged := f.state(t, issue)
+	identity := *before.PRRevision
+	identity.Intent = "work"
+	if staged.PRRevision == nil || *staged.PRRevision != identity {
+		t.Fatalf("staging did not transition revision: %+v", staged.PRRevision)
+	}
+	f.must(t, "pr", "work", p, "--phase", "review", "--agent", "mock", "--progress=false")
+	after := f.state(t, issue)
+	for _, art := range staged.Artifacts {
+		found := false
+		for _, current := range after.Artifacts {
+			if current.Type == art.Type && current.Body == art.Body {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("staged %s lost during review", art.Type)
+		}
+	}
+	bindings := lease.ReviewBindings(after)
+	reviewed := false
+	for _, art := range after.Artifacts {
+		if art.Type == contract.ArtifactReview {
+			reviewed = true
+			for key, value := range bindings {
+				if value == "" || art.Metadata[key] != value {
+					t.Fatalf("review binding %s mismatch", key)
+				}
+			}
+		}
+	}
+	if !reviewed {
+		t.Fatal("no fresh review")
+	}
+}
+
+func TestCLIPRRebaseWithoutStageRequiresNewPlan(t *testing.T) {
+	f, issue, number := submittedInteractivePRFixture(t)
+	p := strconv.Itoa(number)
+	f.must(t, "pr", "rebase", p)
+	result := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--progress=false", "--json"))
+	if result.Work == nil || result.Work.PhaseCompleted != "awaiting-plan" {
+		t.Fatalf("expected new plan cycle: %+v", result.Work)
+	}
+	st := f.state(t, issue)
+	if st.PRRevision.Intent != "work" || len(st.Artifacts) != 0 || st.ApprovalTransition != nil {
+		t.Fatalf("unstaged resume retained evidence: %+v", st)
 	}
 }

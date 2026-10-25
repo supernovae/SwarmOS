@@ -29,7 +29,7 @@ func startRequestProgress(ctx context.Context, operation string, id int64, emit 
 	}
 	// Announce synchronously before dispatcher execution and the first poll.
 	emit(ProgressEvent{Operation: operation, RequestID: id, Status: "posted"})
-	p.reporter = progress.New(ctx, func(elapsed time.Duration) { p.send("waiting", elapsed) }, ticks, now)
+	p.reporter = progress.NewReporter(ctx, func(elapsed time.Duration) { p.send("waiting", elapsed) }, ticks, now)
 	return p
 }
 func (p *requestProgress) send(status string, elapsed time.Duration) {

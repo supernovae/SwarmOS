@@ -14,7 +14,7 @@ func TestCheckHeartbeatAndShutdown(t *testing.T) {
 	var seconds atomic.Int64
 	clock := func() time.Time { return time.Unix(seconds.Load(), 0) }
 	resets := 0
-	p := NewSession(t.Context(), 7, 9, func(e Event) { events <- e }, ticks, clock, func() { resets++ })
+	p := New(t.Context(), 7, 9, func(e Event) { events <- e }, ticks, clock, func() { resets++ })
 	receive := func(check, status string, elapsed time.Duration) {
 		t.Helper()
 		select {
@@ -69,7 +69,7 @@ func TestCheckHeartbeatAndShutdown(t *testing.T) {
 func TestObserverCanInspectStateAndCancellationJoins(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	var p *Session
-	p = NewSession(ctx, 1, 0, func(e Event) {
+	p = New(ctx, 1, 0, func(e Event) {
 		if p != nil {
 			_ = p.Snapshot()
 		}
@@ -102,7 +102,7 @@ func TestProgressLifecycle(t *testing.T) {
 	now := time.Now()
 	var mu sync.Mutex
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
-	p := New(t.Context(), func(d time.Duration) { events <- d }, ticks, clock)
+	p := NewReporter(t.Context(), func(d time.Duration) { events <- d }, ticks, clock)
 	select {
 	case <-events:
 		t.Fatal("immediate heartbeat")
@@ -136,7 +136,7 @@ func TestProgressShutdown(t *testing.T) {
 	for _, cancelWorker := range []bool{false, true} {
 		ctx, cancel := context.WithCancel(t.Context())
 		ticks := make(chan time.Time)
-		p := New(ctx, func(time.Duration) {}, ticks, nil)
+		p := NewReporter(ctx, func(time.Duration) {}, ticks, nil)
 		if cancelWorker {
 			cancel()
 		} else {
@@ -150,7 +150,7 @@ func TestProgressShutdown(t *testing.T) {
 		p.Stop()
 		cancel()
 	}
-	p := New(t.Context(), nil, nil, nil)
+	p := NewReporter(t.Context(), nil, nil, nil)
 	p.Do(func(time.Duration) { t.Fatal("nil observer") })
 	p.Stop()
 	if p.Done != nil {
@@ -161,7 +161,7 @@ func TestProgressShutdown(t *testing.T) {
 func TestProgressSerializesCallbacks(t *testing.T) {
 	ticks := make(chan time.Time, 100)
 	var events []time.Duration
-	p := New(t.Context(), func(d time.Duration) { events = append(events, d) }, ticks, nil)
+	p := NewReporter(t.Context(), func(d time.Duration) { events = append(events, d) }, ticks, nil)
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Go(func() {

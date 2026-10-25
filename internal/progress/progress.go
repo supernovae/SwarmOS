@@ -42,13 +42,13 @@ func Start(ctx context.Context, issue, pr int, emit func(Event)) *Session {
 		return &Session{}
 	}
 	ticker := time.NewTicker(15 * time.Second)
-	p := NewSession(ctx, issue, pr, emit, ticker.C, time.Now, func() { ticker.Reset(15 * time.Second) })
+	p := New(ctx, issue, pr, emit, ticker.C, time.Now, func() { ticker.Reset(15 * time.Second) })
 	p.stopTicker = ticker.Stop
 	return p
 }
 
-// NewSession accepts injected ticks and a clock for deterministic tests.
-func NewSession(ctx context.Context, issue, pr int, emit func(Event), ticks <-chan time.Time, now func() time.Time, reset func()) *Session {
+// New accepts injected ticks and a clock for deterministic tests.
+func New(ctx context.Context, issue, pr int, emit func(Event), ticks <-chan time.Time, now func() time.Time, reset func()) *Session {
 	if emit == nil {
 		return &Session{}
 	}
@@ -185,9 +185,9 @@ type Reporter struct {
 	heartbeat  func(time.Duration)
 }
 
-// New starts a reporter. Nil heartbeat disables reporting. Nil ticks uses the
+// NewReporter starts a reporter. Nil heartbeat disables reporting. Nil ticks uses the
 // production ticker; callers may inject ticks and a clock for deterministic tests.
-func New(ctx context.Context, heartbeat func(time.Duration), ticks <-chan time.Time, now func() time.Time) *Reporter {
+func NewReporter(ctx context.Context, heartbeat func(time.Duration), ticks <-chan time.Time, now func() time.Time) *Reporter {
 	p := &Reporter{heartbeat: heartbeat}
 	if heartbeat == nil {
 		return p

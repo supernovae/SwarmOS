@@ -15,10 +15,12 @@ const (
 // ExecutionConfig selects the default worker boundary. RequireIsolation is the
 // repository minimum; an operator may always request a stronger boundary.
 type ExecutionConfig struct {
-	Mode             string `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Backend          string `yaml:"backend,omitempty" json:"backend,omitempty"`
-	ContainerRuntime string `yaml:"container_runtime,omitempty" json:"container_runtime,omitempty"`
-	ContainerImage   string `yaml:"container_image,omitempty" json:"container_image,omitempty"`
+	AgentTimeout     *string           `yaml:"agent_timeout,omitempty" json:"agent_timeout,omitempty"`
+	RoleTimeouts     map[string]string `yaml:"role_timeouts,omitempty" json:"role_timeouts,omitempty"`
+	Mode             string            `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Backend          string            `yaml:"backend,omitempty" json:"backend,omitempty"`
+	ContainerRuntime string            `yaml:"container_runtime,omitempty" json:"container_runtime,omitempty"`
+	ContainerImage   string            `yaml:"container_image,omitempty" json:"container_image,omitempty"`
 }
 
 func ResolveExecution(cfg *SwarmConfig, operatorMode string) (ExecutionConfig, error) {
@@ -26,6 +28,9 @@ func ResolveExecution(cfg *SwarmConfig, operatorMode string) (ExecutionConfig, e
 		return ExecutionConfig{}, fmt.Errorf("execution requires approved repository policy")
 	}
 	e := cfg.Execution
+	if err := validateAgentTimeouts(e); err != nil {
+		return e, err
+	}
 	for _, mode := range []string{e.Mode, operatorMode} {
 		if mode != "" && mode != ExecutionIsolated && mode != ExecutionTrustedLocal {
 			return e, fmt.Errorf("execution mode %q must be isolated or trusted-local", mode)

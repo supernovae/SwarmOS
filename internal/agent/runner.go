@@ -7,6 +7,7 @@ import (
 )
 
 type RunRequest struct {
+	RecoveryRoot string // coordinator-owned durable timeout recovery destination
 	ProjectPlan  bool   // coordinator-selected project roadmap output for planner
 	Agent        string // configured allowlisted provider/harness name
 	Role         string // "planner", "reviewer", "developer", "tester"

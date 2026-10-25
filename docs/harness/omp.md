@@ -42,3 +42,5 @@ In RPC mode, SwarmOS answers OhMyPi's host tool calls itself, routing each one t
 ## Qualification
 
 The real RPC interface exposes exactly the approved task tools. An authenticated interactive tool task has passed with synthetic host-file denial and workspace editing and testing. A full authenticated WorkUnit is next. The test commands are in the [qualification guide](../native-qualification.md#claude-code-opencode-2-and-ohmypi).
+
+Agent budgets default to 60 minutes and can be configured globally or per role in [approved execution policy](../project.md#agent-run-budgets). Interactive native sessions count working time across turns, exclude waits for coordinator input, and have a four-hour wall cap. A warning appears before the deadline. On timeout, native Codex and harness-tools Bubblewrap preserve a bounded recovery patch for [manual inspection](../developer.md#recovering-from-an-interrupted-run). Interactive OCI counts wall time without idle exclusion, and OCI has no timeout patch export. Individual tool-call limits remain separate.

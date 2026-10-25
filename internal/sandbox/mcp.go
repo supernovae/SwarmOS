@@ -12,7 +12,7 @@ import (
 // ServeTools exposes task tools over stdio, with cancellation and bounded
 // concurrency. It has no credential, resource or orchestration operations.
 func ServeTools(ctx context.Context, e ToolExecutor, input io.Reader, output io.Writer) error {
-	ctx, stop := context.WithTimeout(ctx, AgentRunLimit)
+	ctx, stop := context.WithCancel(ctx)
 	var writes sync.Mutex
 	write := func(value any) error {
 		writes.Lock()

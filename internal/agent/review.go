@@ -36,6 +36,7 @@ func RunReview(ctx context.Context, runner Runner, req RunRequest) (result *RunR
 		return nil, fmt.Errorf("review worktree path is required")
 	}
 	originalWorktree := req.WorktreePath
+	req.RecoveryRoot = originalWorktree
 	destination, err := safefs.Open(originalWorktree)
 	if err != nil {
 		return nil, err
@@ -160,7 +161,7 @@ func copySnapshotContext(ctx context.Context, source, target string, limits snap
 					return err
 				}
 				rel := filepath.Join(dir, entry.Name())
-				if rel == ".git" || (entry.IsDir() && isEphemeralReviewDir(entry.Name())) {
+				if rel == ".git" || rel == filepath.Join(".swarm", "active-output") && entry.IsDir() || (entry.IsDir() && isEphemeralReviewDir(entry.Name())) {
 					continue
 				}
 				count++

@@ -52,6 +52,7 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 	}
 	a := &CLIAdapter{agentName: name, driver: driver, binary: ac.Binary, prefixArgs: append([]string(nil), ac.Args...), model: ac.Model, envAllow: append([]string(nil), ac.Env...), sandboxRuntime: ac.Sandbox, reviewNetwork: ac.ReviewNetwork, containerRuntime: ac.ContainerRuntime, container: ac.ContainerImage}
 	a.executionMode = execution.Mode
+	a.executionPolicy = execution
 	a.authentication = ac.Authentication
 	if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
 		if driver != "codex" && driver != "claude" && driver != "opencode" && driver != "omp" {

@@ -78,6 +78,28 @@ How agent configuration works:
 - **Precedence**: Role-specific CLI flag (`--planner-agent`, `--reviewer-agent`, `--developer-agent`, `--tester-agent`) $\rightarrow$ generic `--agent` $\rightarrow$ `roles.<role>` $\rightarrow$ `default_agent`.
 - **Maintainer-controlled approvals**: When `security.require_ready_label` is `true`, an issue must be approved by a user with repository write/maintain/admin permissions via `swarm issue approve <issue>` (or `swarm issue create --ready`) before any worker can claim it.
 
+### Agent run budgets
+
+Give slower workers more time through approved execution policy:
+
+```yaml
+execution:
+  mode: isolated
+  backend: native
+  agent_timeout: 90m
+  role_timeouts:
+    developer: 2h
+    reviewer: 45m
+```
+
+Both settings accept positive Go durations such as `30m` or `2h30m`. The optional `role_timeouts` map accepts `planner`, `reviewer`, `developer`, and `tester`; a role override takes precedence over `agent_timeout`. Omitted settings give unattended agents 60 minutes. Invalid settings fail `swarm repo doctor` and `swarm repo validate`.
+
+Native Codex and harness-tools Bubblewrap interactive sessions count cumulative agent working time, excluding coordinator prompts waiting for your next instruction. A separate four-hour wall cap continues during input waits. Interactive OCI sessions use a four-hour wall cap without idle exclusion; an explicit timeout shortens that cap when smaller. Unattended OCI uses the configured timeout or the 60-minute default.
+
+Run `swarm repo doctor` to see each role's budgets for your local configuration. Actual runs load policy from the approved base commit; editing a candidate checkout cannot change it. Coordinator limits can shorten these budgets. Required-check deadlines and individual tool-call deadlines remain separate.
+
+SwarmOS warns once shortly before a deadline, naming the role and remaining time. The warning lead is two minutes, or ten percent of the budget when shorter. Interactive warnings appear in the terminal. For manual recovery after a timeout, see [Recovering from an Interrupted Run](developer.md#recovering-from-an-interrupted-run).
+
 ### Shared defaults and personal choices
 
 Keep team defaults in the project root's `.swarm/config.yaml`: agent presets under `agents`, role assignments under `roles`, and the worker environment under `execution`. Commit changes before approving tasks; existing tasks need fresh approval to adopt updated policy. Set `security.require_isolation: true` to require isolated workers.

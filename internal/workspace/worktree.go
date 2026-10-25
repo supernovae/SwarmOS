@@ -168,6 +168,9 @@ func PushForkCheckpoint(ctx context.Context, repoRoot, forkRemote, branch, headS
 	if !strings.HasPrefix(branch, "swarm/issue-") || strings.Contains(branch, "..") || strings.TrimSpace(headSHA) == "" {
 		return fmt.Errorf("invalid fork checkpoint branch %q or head SHA %q", branch, headSHA)
 	}
+	if err := RejectRecoveryOutput(ctx, repoRoot, headSHA); err != nil {
+		return err
+	}
 	branchRef := "refs/heads/" + branch
 	lsOut, err := gitOutputContext(ctx, repoRoot, "ls-remote", "--refs", forkRemote, branchRef)
 	if err != nil {
@@ -380,6 +383,9 @@ func Checkpoint(ctx context.Context, wtPath, branch string, opts CheckpointOptio
 	if err := verifyWorktree(wtPath, branch, ""); err != nil {
 		return "", err
 	}
+	if err := RejectRecoveryOutput(ctx, wtPath, "HEAD"); err != nil {
+		return "", err
+	}
 	if err := CleanEphemeralHarnessMarkers(wtPath); err != nil {
 		return "", err
 	}
@@ -388,7 +394,7 @@ func Checkpoint(ctx context.Context, wtPath, branch string, opts CheckpointOptio
 		return "", err
 	}
 	if strings.TrimSpace(status) != "" {
-		if _, err := gitOutputContext(ctx, wtPath, "add", "-A"); err != nil {
+		if err := stageCheckpointFiles(ctx, wtPath); err != nil {
 			return "", err
 		}
 		// Staged changes can cancel unstaged changes, leaving no commit to make.
@@ -945,7 +951,7 @@ func configureWorktreeExclude(wtPath string) error {
 		return err
 	}
 	content := string(existing)
-	entries := []string{".swarm/active/", ".swarm/worktrees/", ".swarm/local-tracker/"}
+	entries := []string{".swarm/active-output/", ".swarm/active/", ".swarm/worktrees/", ".swarm/local-tracker/"}
 	var sb strings.Builder
 	sb.WriteString(content)
 	if len(content) > 0 && !strings.HasSuffix(content, "\n") {

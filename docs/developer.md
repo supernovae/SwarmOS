@@ -219,6 +219,15 @@ When a plan can't carry forward, `pr status` explains why, lists the changed pol
 You don't need a separate command to resume a PR after its claim is lost or expires. `pr work`, `pr rebase`, `pr validate`, and `pr submit` each check the issue's lease first. Each one resumes your active claim when this machine holds its token, or takes a fresh claim when the old one has lapsed. `swarm pr status <PR>` shows where the revision stands.
 
 ### Recovering from an Interrupted Run
+
+When native Codex or a harness-tools Bubblewrap run reaches its agent budget, SwarmOS leaves the task worktree and role artifacts untouched and reports a recovery patch at `.swarm/active-output/<role>-timeout.patch` in the original task workspace, including for reviewers. Inspect that patch before recovering useful edits manually in a separate checkout. It compares the sandbox's starting files, including dirty and untracked inputs, with its final contents; those starting files may differ from HEAD.
+
+Recovery patches are limited to 4 MiB. Binary files, oversized files, and entries that would exceed export bounds are omitted with a diagnostic. Unsafe symlinks or special files stop preservation and produce an explicit failure message. An empty patch means no recoverable text changes were exported. A later timeout for the same role replaces the previous patch, so copy one you want to keep.
+
+Recovery output is excluded from snapshots and checkpoints. Submission rejects recovery files that were manually staged or committed. Patches are never applied or registered as artifacts automatically. OCI timeouts report that no patch is available.
+
+Agent budgets default to 60 minutes. Interactive native Codex and Bubblewrap sessions exclude waits at coordinator input prompts and have a four-hour wall cap. Interactive OCI counts all wall time, capped at four hours and shortened by an explicit approved timeout. Configure global and per-role budgets in [Agent run budgets](project.md#agent-run-budgets); a warning appears shortly before the deadline.
+
 If an agent exits early, a lease expires, or a validation check fails:
 1. Run `swarm issue status <issue> --backend github` to inspect the current lease, phase, and published artifacts.
 2. Fix the code, test, or agent configuration inside `.swarm/worktrees/issue-<N>`.

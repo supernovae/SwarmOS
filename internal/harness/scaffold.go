@@ -850,8 +850,23 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 			Category: "harness",
 			Name:     ".swarm/config.yaml",
 			Status:   "FAIL",
-			Detail:   "missing or invalid .swarm/config.yaml (run `swarm repo init`)",
+			Detail:   fmt.Sprintf("missing or invalid .swarm/config.yaml: %v (run `swarm repo init`)", configErr),
 		})
+	}
+
+	if configErr == nil {
+		execution, err := contract.ResolveExecution(cfg, "")
+		if err == nil {
+			for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+				normal, _ := contract.ResolveAgentLimits(execution, role, false, 0)
+				interactive, _ := contract.ResolveAgentLimits(execution, role, true, 0)
+				detail := fmt.Sprintf("unattended %s; interactive wall %s", normal.Wall, interactive.Wall)
+				if interactive.ExcludeIdle {
+					detail += fmt.Sprintf("; working time %s (operator input excluded)", interactive.Active)
+				}
+				checks = append(checks, DoctorCheck{Category: "execution", Name: role + " timeout", Status: "OK", Detail: detail + "; runs use approved-base policy"})
+			}
+		}
 	}
 
 	if spec, err := LoadValidationSpec(repoRoot); err == nil {

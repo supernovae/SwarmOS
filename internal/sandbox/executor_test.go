@@ -171,3 +171,20 @@ func TestMCPDoesNotExposeCoordinatorOperations(t *testing.T) {
 		t.Fatal("unregistered tool accepted")
 	}
 }
+
+func TestToolServerFollowsCoordinatorCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	requests, input := io.Pipe()
+	defer input.Close()
+	done := make(chan error, 1)
+	go func() { done <- ServeTools(ctx, ToolExecutor{}, requests, io.Discard) }()
+	cancel()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tool server ignored coordinator cancellation")
+	}
+}

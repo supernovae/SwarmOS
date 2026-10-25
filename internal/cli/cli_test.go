@@ -1841,3 +1841,92 @@ func TestRepoOnboardAndInitDryRun(t *testing.T) {
 		t.Fatalf("dry run report: %+v", report)
 	}
 }
+
+func TestFreshClaimBaseCommands(t *testing.T) {
+	for _, mode := range []string{"claim", "work", "next", "node", "stale next"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCLIFixture(t)
+			refused := 0
+			if mode == "next" || mode == "node" || mode == "stale next" {
+				refused = f.create(t, "human")
+				f.must(t, "issue", "approve", strconv.Itoa(refused))
+				if mode == "stale next" {
+					issue, err := f.tracker.GetIssue(context.Background(), refused)
+					if err != nil {
+						t.Fatal(err)
+					}
+					body := strings.Replace(issue.Body, "Exercise the lifecycle", "Changed objective", 1)
+					if _, err = f.tracker.UpdateIssueBody(context.Background(), refused, body); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			n := f.create(t, "agent")
+			f.must(t, "issue", "approve", strconv.Itoa(n))
+			old := f.state(t, n).BaseSHA
+			cmdGit := exec.Command("git", "-C", f.root, "commit", "--allow-empty", "-m", "advance")
+			if out, err := cmdGit.CombinedOutput(); err != nil {
+				t.Fatalf("%v %s", err, out)
+			}
+			cmd := NewRootCmd()
+			var out, diagnostics bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&diagnostics)
+			args := []string{"issue", "claim", strconv.Itoa(n), "--agent", "mock", "--json"}
+			switch mode {
+			case "work":
+				args = []string{"issue", "work", strconv.Itoa(n), "--agent", "mock", "--json", "--progress=false"}
+			case "next", "stale next":
+				args = []string{"issue", "work", "--next", "--agent", "mock", "--json", "--progress=false"}
+			case "node":
+				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
+			}
+			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("%v: %s %s", err, out.String(), diagnostics.String())
+			}
+			got := f.state(t, n)
+			if got.BaseSHA == old || got.PreviousBaseSHA != old {
+				t.Fatal("did not repin")
+			}
+			if !strings.Contains(diagnostics.String(), old+" -> "+got.BaseSHA) {
+				t.Fatalf("missing transition: %s", diagnostics.String())
+			}
+			if mode == "work" || mode == "next" || mode == "stale next" {
+				issue, err := f.tracker.GetIssue(context.Background(), n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = lease.VerifyApproval(got, wu); err != nil {
+					t.Fatal(err)
+				}
+				for _, a := range got.Artifacts {
+					if a.Type == contract.ArtifactReview && a.Metadata["base_sha"] != got.BaseSHA {
+						t.Fatal("review used old base")
+					}
+				}
+				f.must(t, "issue", "submit", strconv.Itoa(n))
+			}
+			if mode != "node" && !json.Valid(out.Bytes()) {
+				t.Fatalf("invalid JSON %s", out.String())
+			}
+			if refused != 0 {
+				if !strings.Contains(diagnostics.String(), fmt.Sprintf("swarm issue approve %d", refused)) {
+					t.Fatalf("missing refusal: %s", diagnostics.String())
+				}
+				if f.state(t, refused).Lease.Status == "active" {
+					t.Fatal("claimed refused issue")
+				}
+				lock, err := lease.LockClaim(f.root, refused)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lease.UnlockClaim(lock)
+			}
+		})
+	}
+}

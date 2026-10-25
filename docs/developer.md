@@ -142,6 +142,10 @@ In `trusted-local` mode, agent subprocesses start with a clean temporary `HOME` 
 
 ## 2. Checkpoints, Handoffs & Recovery
 
+Fresh same-repository claims on the GitHub and local backends start at the current default-branch tip when the WorkUnit and committed `.swarm/` tree are unchanged and the old base is an ancestor. The command prints both bases. With no plan artifacts, planning and review run at the new base; existing plan artifacts require a complete authenticated review that can carry forward. Policy, role prompts and validation then load from that new immutable base.
+
+A human gate, changed task or policy, incomplete review evidence, or failed ancestry check requires `swarm issue approve <issue>`. Direct claims stop with the reason; queued work reports the issue and tries the next candidate. Existing checkpoints, branches, PRs and fork claims keep their pinned base. Human-gated claims remain available when the base has not moved.
+
 Every claim records a unique fencing token (`claim_id`), approved base SHA, branch name, and checkpoint commit SHA. The local claim token is stored in your user config directory (`swarm/claims/<git-common-dir-hash>/<issue>.json`) so same-machine commands resume cleanly without colliding.
 
 ### Readable task history

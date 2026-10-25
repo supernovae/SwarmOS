@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/registry"
@@ -77,7 +78,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			if err != nil {
 				return nil, err
 			}
-			if state == nil || state.TaskDigest != contract.DigestWorkUnit(wu) || state.Lease.Status == "completed" ||
+			if state == nil || state.Lease.Status == "completed" ||
 				state.Lease.Status == "active" && state.Lease.ExpiresAt.After(rootOpts.now()) {
 				continue
 			}
@@ -116,7 +117,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			}
 			selection := opts
 			selection.RepoRoot, selection.IssueNumber, selection.Phase = target.Path, issue.Number, phase
-			preflight, err := engine.Preflight(ctx, selection)
+			preflight, err := engine.PreflightForClaim(ctx, selection)
 			if err != nil {
 				return nil, err
 			}
@@ -139,10 +140,18 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			})
 			if err != nil {
 				lease.UnlockClaim(lock)
+				var refusal *lease.ClaimBaseApprovalError
+				if errors.As(err, &refusal) {
+					fmt.Fprintln(progressWriter(cmd), refusal)
+					continue
+				}
 				if errors.Is(err, lease.ErrAlreadyClaimed) || errors.Is(err, lease.ErrClaimRaceLost) {
 					continue
 				}
 				return nil, err
+			}
+			if claimed.ClaimPreviousBase != "" {
+				fmt.Fprintf(progressWriter(cmd), "Issue #%d: base %s -> %s\n", issue.Number, claimed.ClaimPreviousBase, claimed.BaseSHA)
 			}
 			setup := func() (*pulledWorkUnit, error) {
 				if err := lease.SaveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID, claimed.BaseSHA); err != nil {
@@ -158,7 +167,11 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					return nil, err
 				}
 				if err := opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "bundle", func() error {
-					return workspace.CompileHarnessBundleAt(worktree, wu, preflight.Workflow, claimed.Artifacts, role, claimed.BaseSHA)
+					wf, err := harness.LoadWorkflowAt(target.Path, wu.Workflow, claimed.BaseSHA)
+					if err != nil {
+						return err
+					}
+					return workspace.CompileHarnessBundleAt(worktree, wu, wf, claimed.Artifacts, role, claimed.BaseSHA)
 				}); err != nil {
 					return nil, err
 				}

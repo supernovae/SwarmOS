@@ -56,6 +56,7 @@ type WorkOptions struct {
 	OnClaim         func(*lease.IssueState) error // persist fencing token before setup
 	// OnProgress receives serialized local status events. It must return promptly
 	// and must not call back into execution. No callback runs after ExecuteWork returns.
+	OnBaseChange  func(int, string, string)
 	OnProgress    func(ProgressEvent)
 	SetupProgress *ProgressReporter
 }
@@ -203,7 +204,17 @@ func resolveRoleAgent(cfg *contract.SwarmConfig, role string, opts WorkOptions) 
 
 // Preflight rejects selector, policy, contract, workflow, and runner errors
 // before acquiring a lease or provisioning a worktree.
+// PreflightForClaim defers task approval classification to acquisition, which
+// checks authenticated actor and trust before deciding whether queues may skip.
+func (e *Engine) PreflightForClaim(ctx context.Context, opts WorkOptions) (*PreflightResult, error) {
+	return e.preflight(ctx, opts, opts.PRNumber == 0 && opts.ClaimID == "")
+}
+
 func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightResult, error) {
+	return e.preflight(ctx, opts, false)
+}
+
+func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskApproval bool) (*PreflightResult, error) {
 	if opts.RepoRoot == "" {
 		opts.RepoRoot = e.repoRoot
 	}
@@ -257,7 +268,7 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	if err != nil {
 		return nil, fmt.Errorf("load approved base config: %w", err)
 	}
-	if !lease.TaskApprovalCurrent(state, wu, cfg) ||
+	if (!deferTaskApproval && !lease.TaskApprovalCurrent(state, wu, cfg)) ||
 		!slices.Contains(iss.Labels, cfg.Security.ReadyLabel) {
 		return nil, lease.ErrApprovalRequired
 	}
@@ -398,7 +409,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return nil, err
 		}
 	}
-	pre, err := e.Preflight(ctx, opts)
+	pre, err := e.PreflightForClaim(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -446,8 +457,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			_, _ = e.LeaseManager.Release(context.Background(), opts.IssueNumber, opts.Owner, "workflow setup failed")
 		}
 	}()
-	if st.BaseSHA != pre.BaseSHA {
+	if st.BaseSHA != pre.BaseSHA && (resumed || st.ClaimPreviousBase != pre.BaseSHA) {
 		return nil, errors.New("approved task base changed during preflight; rerun swarm issue work (or swarm pr work)")
+	}
+	if st.ClaimPreviousBase != "" && opts.OnBaseChange != nil {
+		opts.OnBaseChange(opts.IssueNumber, st.ClaimPreviousBase, st.BaseSHA)
 	}
 	if opts.OnClaim != nil {
 		if err := opts.OnClaim(st); err != nil {

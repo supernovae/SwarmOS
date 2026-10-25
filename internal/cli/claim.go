@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -62,7 +63,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			return err
 		}
 		engine := workflow.NewEngineWithManager(root, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
-		preflight, err := engine.Preflight(cmd.Context(), workflow.WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: agentName, Phase: "plan"})
+		preflight, err := engine.PreflightForClaim(cmd.Context(), workflow.WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: agentName, Phase: "plan"})
 		if err != nil {
 			return err
 		}
@@ -89,6 +90,9 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if state.ClaimPreviousBase != "" {
+			fmt.Fprintf(progressWriter(cmd), "Issue #%d: base %s -> %s\n", issue, state.ClaimPreviousBase, state.BaseSHA)
+		}
 		fail := func(cause error) error {
 			_, releaseErr := manager.Release(cmd.Context(), issue, owner, "claim setup failed")
 			return errors.Join(cause, releaseErr)
@@ -106,7 +110,11 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			return fail(err)
 		}
 		if err := reporter.ReportSetupPhase(cmd.Context(), issue, "bundle", func() error {
-			return workspace.CompileHarnessBundleAt(path, preflight.WorkUnit, preflight.Workflow, state.Artifacts, "planner", state.BaseSHA)
+			wf, err := harness.LoadWorkflowAt(root, preflight.WorkUnit.Workflow, state.BaseSHA)
+			if err != nil {
+				return err
+			}
+			return workspace.CompileHarnessBundleAt(path, preflight.WorkUnit, wf, state.Artifacts, "planner", state.BaseSHA)
 		}); err != nil {
 			return fail(err)
 		}

@@ -10,7 +10,7 @@ Read `.swarm/goals.md`, `.swarm/SKILLS.md`, `.swarm/skills/triage-and-plan.md`, 
 
 1. **Clarify the Goal**: Ask for the feature idea, problem statement, and desired outcome if not already specified.
 2. **Inspect Context & Open Backlog**: Read `.swarm/goals.md`, `.swarm/rules/`, relevant implementation packages, and open tracker issues (`swarm repo plan --scan`) so proposed tasks fit the architecture and avoid duplicate work.
-3. **Draft Independent Tasks & Explicit Dependencies**: Propose a breakdown of small, independently verifiable tasks, calling out only true ordering prerequisites (`depends on: <earlier-step-number>`), and ask for corrections before writing.
+3. **Draft Independent Tasks & Explicit Dependencies**: Propose a breakdown of small, independently verifiable tasks, calling out only true ordering prerequisites (`depends on: <earlier-step-number>`), and ask for corrections before writing. Give each task one outcome, say what is out of scope, name the backends or platforms it covers, and keep its acceptance criteria checkable in the agent sandbox or CI. Move nice-to-haves into their own tasks.
 4. **Write a Repo-Local Plan File**: Ask the user which repo-local path to write (for example `ROADMAP.md` or `plans/<feature>.md`). Do not overwrite an existing file unless the user explicitly instructs you to update it. Format the document with a top-level `# <Epic Title>` heading and one `## <Task Title>` section per child WorkUnit:
    ```markdown
    # <Epic Title>
@@ -21,6 +21,7 @@ Read `.swarm/goals.md`, `.swarm/SKILLS.md`, `.swarm/skills/triage-and-plan.md`, 
 
    ### Constraints
    - <Architectural or scope boundary>
+   - Out of scope: <related work left for a follow-up task>
 
    ### Acceptance Criteria
    - [ ] <Observable, testable requirement>

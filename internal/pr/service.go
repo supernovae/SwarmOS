@@ -685,6 +685,14 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 				evidence.Annotations = bounded
 				opts.Work.CIEvidence[i] = evidence
 			}
+			evidence := tracker.ReviewEvidence{Unavailable: "Review evidence is unavailable for this backend."}
+			if reader, ok := s.Tracker.(tracker.ReviewEvidenceReader); ok {
+				evidence, e = reader.GetReviewEvidence(ctx, opts.Number)
+				if e != nil {
+					return nil, e
+				}
+			}
+			opts.Work.ReviewEvidence = evidence
 			worked, e := engine.ExecuteWork(ctx, opts.Work)
 			if worked != nil {
 				r.Work = worked

@@ -39,6 +39,25 @@ func TestCompilePRHarnessBundlePreservesUnmanagedInstructions(t *testing.T) {
 	if err := CompilePRHarnessBundleAt(path, wu, wf, nil, "developer", base, 31); err != nil {
 		t.Fatal(err)
 	}
+	for _, role := range []string{"planner", "reviewer", "developer"} {
+		c := &RevisionPlanContext{Original: PlanPair{Plan: "full approved plan", TestPlan: "full approved tests"}}
+		if err := CompilePRHarnessBundleAt(path, wu, wf, nil, role, base, 31, c); err != nil {
+			t.Fatal(err)
+		}
+		for file, want := range map[string]string{"ORIGINAL_PLAN.md": "full approved plan", "ORIGINAL_TEST_PLAN.md": "full approved tests", "SYSTEM_PROMPT.md": "## PR revision"} {
+			data, err := os.ReadFile(filepath.Join(path, ".swarm", "active", file))
+			if err != nil || !strings.Contains(string(data), want) {
+				t.Fatalf("%s %s: %s %v", role, file, data, err)
+			}
+		}
+	}
+	if err := CompilePRHarnessBundleAt(path, wu, wf, nil, "planner", base, 31); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(path, ".swarm", "active", "SYSTEM_PROMPT.md"))
+	if err != nil || strings.Contains(string(data), "## PR revision\n") {
+		t.Fatal("revision guidance leaked to first plan", err)
+	}
 	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
 		content, err := os.ReadFile(filepath.Join(path, name))
 		if err != nil {

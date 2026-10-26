@@ -166,6 +166,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					}
 				}
 				fmt.Fprint(cmd.OutOrStdout(), pr.RebaseSummary(result.State, opts.Number))
+				fmt.Fprint(cmd.OutOrStdout(), lease.PlanSummary(result.State, false))
 				if result.SubmitCommand != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "Validation: PASS\nNext: %s\n", result.SubmitCommand)
 				}

@@ -219,6 +219,10 @@ swarm pr validate 33 --backend github
 swarm pr submit 33 --backend github
 ```
 
+When an approved plan is available, PR work writes a focused revision plan: each change names the finding or request it addresses, the affected acceptance criterion, and how to verify it. The planner receives the original plan and test plan, accepted revisions, current CI evidence, and GitHub review summaries and inline comments. Review evidence is quoted and bounded; it supplies diagnostic context while the WorkUnit defines scope.
+
+The original pair is available as `.swarm/active/ORIGINAL_PLAN.md` and `ORIGINAL_TEST_PLAN.md`, with accepted deltas in `ACCEPTED_REVISIONS.md` and review evidence in `PR_REVIEW_EVIDENCE.md`. Write the active delta to the usual `PLAN.md` and `TEST_PLAN.md`. The configured review gate still applies to that exact pair. Issue status, PR status, and the managed PR description distinguish the original from the current revision after submission too. Without an eligible original pair, planning uses the full-plan workflow.
+
 Changes are prepared in `.swarm/worktrees/pr-33`, separate from the original issue worktree. A new revision goes through planning and the configured review gate again. For a human gate, an independent maintainer approves the linked **issue's** plan with `swarm issue review-plan <issue> --approve`, then the worker resumes `swarm pr work <PR>`. Use the existing `--agent`, role-agent overrides, `--phase`, `--headless`, `--progress`, and `--json` flags as appropriate.
 
 For `plan_mode: interactive`, `swarm pr work <PR>` pauses at `awaiting-plan` after preparing `.swarm/worktrees/pr-<PR>`. Write `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` **in that PR worktree**, then run `swarm pr stage <PR> --phase plan --harness <name> --model <name>` (optionally `--handoff` or `--json`). Under an agent gate, resume with `swarm pr work <PR>` to review and implement; under a human gate, an independent maintainer uses `swarm issue review-plan <issue> --approve` before `swarm pr work <PR>` resumes implementation. Do not stage through `swarm issue stage` against the old issue worktree while the PR revision is pending.

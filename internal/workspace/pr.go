@@ -19,11 +19,18 @@ var prCommitSHA = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
 // CompilePRHarnessBundleAt reads the approved issue's base-pinned harness,
 // then replaces only the managed active pointer for the PR lifecycle.
-func CompilePRHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, arts []contract.Artifact, role, baseSHA string, prNumber int) error {
+func CompilePRHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, arts []contract.Artifact, role, baseSHA string, prNumber int, revision ...*RevisionPlanContext) error {
 	if prNumber <= 0 || wu == nil {
 		return fmt.Errorf("PR number and linked WorkUnit are required")
 	}
 	if err := CompileHarnessBundleAt(worktreePath, wu, wf, arts, role, baseSHA); err != nil {
+		return err
+	}
+	var c *RevisionPlanContext
+	if len(revision) > 0 {
+		c = revision[0]
+	}
+	if err := WriteRevisionContext(worktreePath, c); err != nil {
 		return err
 	}
 	if role == "" {

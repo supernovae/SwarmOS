@@ -8,6 +8,9 @@ func developerCIPrompt(path string, opts WorkOptions, prompt string) (string, er
 	if opts.PRNumber == 0 {
 		return prompt, nil
 	}
+	if err := workspace.WriteReviewEvidence(path, opts.ReviewEvidence); err != nil {
+		return "", err
+	}
 	present, err := workspace.WriteCIEvidence(path, opts.CIEvidence)
 	if err != nil {
 		return "", err

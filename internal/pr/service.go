@@ -54,24 +54,25 @@ type Options struct {
 	Resolve      bool
 }
 type Result struct {
-	WorkPreflight *WorkPreflightResult         `json:"work_preflight,omitempty"`
-	SubmitCommand string                       `json:"submit_command,omitempty"`
-	CIFailures    bool                         `json:"ci_failures,omitempty"`
-	PR            *tracker.PullRequest         `json:"pr"`
-	IssueNumber   int                          `json:"issue_number"`
-	State         *lease.IssueState            `json:"state,omitempty"`
-	Worktree      string                       `json:"worktree,omitempty"`
-	Branch        string                       `json:"branch,omitempty"`
-	HeadSHA       string                       `json:"head_sha,omitempty"`
-	BaseSHA       string                       `json:"base_sha,omitempty"`
-	Checks        []tracker.CheckRunResult     `json:"checks,omitempty"`
-	Reviews       []tracker.PullRequestReview  `json:"reviews,omitempty"`
-	Status        string                       `json:"status"`
-	Dirty         bool                         `json:"dirty"`
-	Rebasing      bool                         `json:"rebasing"`
-	Validation    *validation.ValidationReport `json:"validation,omitempty"`
-	Preflight     *workflow.PreflightResult    `json:"preflight,omitempty"`
-	Work          *workflow.WorkResult         `json:"work,omitempty"`
+	WorkPreflight *WorkPreflightResult          `json:"work_preflight,omitempty"`
+	SubmitCommand string                        `json:"submit_command,omitempty"`
+	CIFailures    bool                          `json:"ci_failures,omitempty"`
+	PR            *tracker.PullRequest          `json:"pr"`
+	IssueNumber   int                           `json:"issue_number"`
+	State         *lease.IssueState             `json:"state,omitempty"`
+	Worktree      string                        `json:"worktree,omitempty"`
+	Branch        string                        `json:"branch,omitempty"`
+	HeadSHA       string                        `json:"head_sha,omitempty"`
+	BaseSHA       string                        `json:"base_sha,omitempty"`
+	Checks        []tracker.CheckRunResult      `json:"checks,omitempty"`
+	CodeScanning  *tracker.CodeScanningEvidence `json:"code_scanning,omitempty"`
+	Reviews       []tracker.PullRequestReview   `json:"reviews,omitempty"`
+	Status        string                        `json:"status"`
+	Dirty         bool                          `json:"dirty"`
+	Rebasing      bool                          `json:"rebasing"`
+	Validation    *validation.ValidationReport  `json:"validation,omitempty"`
+	Preflight     *workflow.PreflightResult     `json:"preflight,omitempty"`
+	Work          *workflow.WorkResult          `json:"work,omitempty"`
 	// LocalDroppedPaths is the fork contributor coordinator's own comparison,
 	// never upstream evidence; upstream records it when the head is published.
 	LocalDroppedPaths *LocalDroppedPaths `json:"local_dropped_paths,omitempty"`
@@ -290,6 +291,23 @@ func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *
 	return &Result{PR: pr, IssueNumber: issue.Number, State: st, Worktree: workspace.PRWorktreePath(root, number), Branch: workspace.PRBranchName(number), HeadSHA: pr.HeadSHA, BaseSHA: st.BaseSHA, Status: "open"}, nil
 }
 
+// codeScanning reads open alerts for the PR merge ref. Backends without the
+// capability report none; any reader error becomes the fixed unavailable
+// report so raw API text never reaches output and never fails the command.
+func (s *Service) codeScanning(ctx context.Context, number int) *tracker.CodeScanningEvidence {
+	evidence := tracker.CodeScanningEvidence{Ref: tracker.CodeScanningMergeRef(number)}
+	if reader, ok := s.Tracker.(tracker.CodeScanningEvidenceReader); ok {
+		got, err := reader.GetCodeScanningAlerts(ctx, number)
+		if err != nil {
+			got = tracker.CodeScanningEvidence{Unavailable: true}
+		}
+		got.Ref = evidence.Ref
+		evidence = got
+	}
+	evidence = evidence.Normalize()
+	return &evidence
+}
+
 func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 	r, err := s.linkedInspection(ctx, number)
 	if err != nil {
@@ -334,6 +352,7 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 	if len(r.Checks) == 0 {
 		r.Checks = recordedValidationChecks(r.State, r.PR.HeadSHA)
 	}
+	r.CodeScanning = s.codeScanning(ctx, number)
 	if reviewer, ok := s.Tracker.(interface {
 		GetPullRequestReviews(context.Context, int) ([]tracker.PullRequestReview, error)
 	}); ok {
@@ -720,6 +739,13 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 				}
 				evidence.Annotations = bounded
 				opts.Work.CIEvidence[i] = evidence
+			}
+			// Alerts are read once per run, after the metadata preflight, and
+			// attached to the lowest check ID so they render exactly once.
+			r.CodeScanning = nil
+			if len(opts.Work.CIEvidence) != 0 {
+				r.CodeScanning = s.codeScanning(ctx, opts.Number)
+				opts.Work.CIEvidence[0].CodeScanning = r.CodeScanning
 			}
 			evidence := tracker.ReviewEvidence{Unavailable: "Review evidence is unavailable for this backend."}
 			if reader, ok := s.Tracker.(tracker.ReviewEvidenceReader); ok {

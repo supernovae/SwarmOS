@@ -24,6 +24,8 @@ type CheckEvidence struct {
 	LogTail     string
 	Unavailable string
 	Truncated   bool
+	// CodeScanning is PR-wide; the coordinator attaches it to one entry.
+	CodeScanning *CodeScanningEvidence
 }
 
 type CheckEvidenceReader interface {

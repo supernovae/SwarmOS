@@ -161,11 +161,11 @@ func recordWaits(g *Gateway) *[]time.Duration {
 
 func requestNonce(t *testing.T, body string) string {
 	t.Helper()
-	req, err := ParseRequestComment(body)
-	if err != nil || req.RequestNonce == "" {
-		t.Fatalf("request comment without nonce: %v", err)
+	nonce := requestCommentNonce(body)
+	if nonce == "" {
+		t.Fatalf("request comment without nonce: %q", body)
 	}
-	return req.RequestNonce
+	return nonce
 }
 
 func TestTransientErrorClassification(t *testing.T) {
@@ -196,25 +196,49 @@ func TestTransientErrorClassification(t *testing.T) {
 }
 
 func TestRequestNonceRoundTrip(t *testing.T) {
-	req := lease.ForkRequest{Version: 1, Operation: "renew", IssueNumber: 7, ClaimID: "c1", RequestNonce: "N0NCE"}
-	body, err := FormatRequestComment(req)
+	const nonce = "N0NCEN0NCEN0NCEN0NCE"
+	req := lease.ForkRequest{Version: 1, Operation: "renew", IssueNumber: 7, ClaimID: "c1"}
+	body, err := formatRequestComment(req, nonce)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := ParseRequestComment(body); err != nil || got.RequestNonce != "N0NCE" {
+	if got := requestCommentNonce(body); got != nonce {
+		t.Fatalf("nonce = %q in %q", got, body)
+	}
+	if got, err := ParseRequestComment(body); err != nil || *got != req {
 		t.Fatalf("collapsed round trip = %+v, %v", got, err)
 	}
-	legacy := RequestMarker + "\n" + `{"version":1,"operation":"renew","issue_number":7,"request_nonce":"N0NCE"}`
-	if got, err := ParseRequestComment(legacy); err != nil || got.RequestNonce != "N0NCE" {
-		t.Fatalf("raw layout = %+v, %v", got, err)
+	if got := requestCommentNonce(strings.ReplaceAll(body, "\n", "\r\n")); got != nonce {
+		t.Fatalf("CRLF nonce = %q", got)
 	}
-	old := RequestMarker + "\n" + `{"version":1,"operation":"renew","issue_number":7}`
-	if got, err := ParseRequestComment(old); err != nil || got.RequestNonce != "" {
-		t.Fatalf("request without nonce = %+v, %v", got, err)
+	plain, err := FormatRequestComment(req)
+	if err != nil || requestCommentNonce(plain) != "" {
+		t.Fatalf("request without nonce: %q, %v", plain, err)
 	}
-	unknown := RequestMarker + "\n" + `{"version":1,"operation":"renew","issue_number":7,"request_token":"x"}`
-	if _, err := ParseRequestComment(unknown); err == nil {
-		t.Fatal("accepted an unknown field")
+	// The nonce is never part of the JSON payload, so a payload naming it is
+	// an unknown field like any other.
+	for name, raw := range map[string]string{
+		"raw nonce field": RequestMarker + "\n" + `{"version":1,"operation":"renew","issue_number":7,"request_nonce":"x"}`,
+		"unknown field":   RequestMarker + "\n" + `{"version":1,"operation":"renew","issue_number":7,"request_token":"x"}`,
+	} {
+		if _, err := ParseRequestComment(raw); err == nil {
+			t.Fatalf("%s: accepted an unknown field", name)
+		}
+	}
+	for _, bad := range []string{"short", "has space in it 0123", "-->injected<!--0123456"} {
+		if _, err := formatRequestComment(req, bad); err == nil {
+			t.Fatalf("accepted nonce %q", bad)
+		}
+	}
+	// Only the summary line position counts.
+	for name, other := range map[string]string{
+		"own line": strings.Replace(plain, "\n", "\n<!-- swarm:request-nonce:"+nonce+" -->\n", 1),
+		"in json":  strings.Replace(plain, "```json\n", "```json\n<!-- swarm:request-nonce:"+nonce+" -->\n", 1),
+		"raw":      RequestMarker + " <!-- swarm:request-nonce:" + nonce + " -->\n" + `{"version":1,"operation":"renew","issue_number":7}`,
+	} {
+		if got := requestCommentNonce(other); got != "" {
+			t.Fatalf("%s: nonce %q", name, got)
+		}
 	}
 
 	nonces := map[string]bool{}
@@ -346,54 +370,56 @@ func httpStatusOf(err error) int {
 func TestGatewayPostRecoveryCandidates(t *testing.T) {
 	now := time.Now()
 	// candidate builds a comment from the worker's own request, altered.
-	type alter func(req *lease.ForkRequest, c *tracker.Comment)
+	const nonce = "N0NCEN0NCEN0NCEN0NCE"
+	type alter func(req *lease.ForkRequest, nonce *string, c *tracker.Comment)
 	build := func(req lease.ForkRequest, id int64, change alter) *tracker.Comment {
 		c := &tracker.Comment{ID: id, IssueNum: req.IssueNumber, CreatedAt: now, UpdatedAt: now}
-		change(&req, c)
+		n := nonce
+		change(&req, &n, c)
 		if c.Body == "" {
-			c.Body, _ = FormatRequestComment(req)
+			c.Body, _ = formatRequestComment(req, n)
 		}
 		return c
 	}
 	nonMatching := map[string]alter{
-		"invalid id":    func(_ *lease.ForkRequest, c *tracker.Comment) { c.ID = 0 },
-		"wrong nonce":   func(r *lease.ForkRequest, _ *tracker.Comment) { r.RequestNonce = "OTHER" },
-		"no nonce":      func(r *lease.ForkRequest, _ *tracker.Comment) { r.RequestNonce = "" },
-		"wrong issue":   func(_ *lease.ForkRequest, c *tracker.Comment) { c.IssueNum = 2 },
-		"payload issue": func(r *lease.ForkRequest, _ *tracker.Comment) { r.IssueNumber = 2 },
-		"operation":     func(r *lease.ForkRequest, _ *tracker.Comment) { r.Operation = "renew" },
-		"fork repo":     func(r *lease.ForkRequest, _ *tracker.Comment) { r.ForkRepo = "attacker/repo" },
-		"claim":         func(r *lease.ForkRequest, _ *tracker.Comment) { r.ClaimID = "other" },
-		"edited":        func(_ *lease.ForkRequest, c *tracker.Comment) { c.UpdatedAt = now.Add(time.Second) },
-		"malformed":     func(_ *lease.ForkRequest, c *tracker.Comment) { c.Body = RequestMarker + "\n{not json" },
-		"oversized": func(r *lease.ForkRequest, c *tracker.Comment) {
-			body, _ := FormatRequestComment(*r)
+		"invalid id":    func(_ *lease.ForkRequest, _ *string, c *tracker.Comment) { c.ID = 0 },
+		"wrong nonce":   func(_ *lease.ForkRequest, n *string, _ *tracker.Comment) { *n = "OTHEROTHEROTHEROTHER" },
+		"no nonce":      func(_ *lease.ForkRequest, n *string, _ *tracker.Comment) { *n = "" },
+		"wrong issue":   func(_ *lease.ForkRequest, _ *string, c *tracker.Comment) { c.IssueNum = 2 },
+		"payload issue": func(r *lease.ForkRequest, _ *string, _ *tracker.Comment) { r.IssueNumber = 2 },
+		"operation":     func(r *lease.ForkRequest, _ *string, _ *tracker.Comment) { r.Operation = "renew" },
+		"fork repo":     func(r *lease.ForkRequest, _ *string, _ *tracker.Comment) { r.ForkRepo = "attacker/repo" },
+		"claim":         func(r *lease.ForkRequest, _ *string, _ *tracker.Comment) { r.ClaimID = "other" },
+		"edited":        func(_ *lease.ForkRequest, _ *string, c *tracker.Comment) { c.UpdatedAt = now.Add(time.Second) },
+		"malformed":     func(_ *lease.ForkRequest, _ *string, c *tracker.Comment) { c.Body = RequestMarker + "\n{not json" },
+		"oversized": func(r *lease.ForkRequest, n *string, c *tracker.Comment) {
+			body, _ := formatRequestComment(*r, *n)
 			c.Body = body + strings.Repeat(" ", MaxForkCommentBytes)
 		},
 	}
-	req := lease.ForkRequest{Version: 1, Operation: "release", IssueNumber: 1, ClaimID: "c1", RequestNonce: "N0NCE"}
+	req := lease.ForkRequest{Version: 1, Operation: "release", IssueNumber: 1, ClaimID: "c1"}
 	want := mustMarshal(t, req)
 	for name, change := range nonMatching {
 		t.Run(name, func(t *testing.T) {
-			got, err := matchRequestComment(t.Context(), []*tracker.Comment{nil, build(req, 100, change)}, req, want)
+			got, err := matchRequestComment(t.Context(), []*tracker.Comment{nil, build(req, 100, change)}, req, nonce, want)
 			if err != nil || got != nil {
 				t.Fatalf("matched %+v err=%v", got, err)
 			}
 		})
 	}
-	exact := func(*lease.ForkRequest, *tracker.Comment) {}
-	if got, err := matchRequestComment(t.Context(), []*tracker.Comment{build(req, 100, exact)}, req, want); err != nil || got == nil || got.ID != 100 {
+	exact := func(*lease.ForkRequest, *string, *tracker.Comment) {}
+	if got, err := matchRequestComment(t.Context(), []*tracker.Comment{build(req, 100, exact)}, req, nonce, want); err != nil || got == nil || got.ID != 100 {
 		t.Fatalf("exact match = %+v, %v", got, err)
 	}
-	if _, err := matchRequestComment(t.Context(), []*tracker.Comment{build(req, 100, exact), build(req, 101, exact)}, req, want); err == nil || !strings.Contains(err.Error(), "multiple comments") {
+	if _, err := matchRequestComment(t.Context(), []*tracker.Comment{build(req, 100, exact), build(req, 101, exact)}, req, nonce, want); err == nil || !strings.Contains(err.Error(), "multiple comments") {
 		t.Fatalf("ambiguous match err=%v", err)
 	}
 	many := make([]*tracker.Comment, 1001)
-	if _, err := matchRequestComment(t.Context(), many, req, want); err == nil {
+	if _, err := matchRequestComment(t.Context(), many, req, nonce, want); err == nil {
 		t.Fatal("record budget not enforced")
 	}
 	big := strings.Repeat("x", 5<<20)
-	if _, err := matchRequestComment(t.Context(), []*tracker.Comment{{ID: 1, Body: big}, {ID: 2, Body: big}}, req, want); err == nil {
+	if _, err := matchRequestComment(t.Context(), []*tracker.Comment{{ID: 1, Body: big}, {ID: 2, Body: big}}, req, nonce, want); err == nil {
 		t.Fatal("byte budget not enforced")
 	}
 
@@ -584,7 +610,7 @@ func TestGatewayFallbackLoadErrorsKeepPolling(t *testing.T) {
 
 func TestGatewayOldCoordinatorRejection(t *testing.T) {
 	now := time.Now()
-	parseErr := `invalid fork request JSON: json: unknown field "request_nonce"`
+	parseErr := `invalid fork request JSON: json: unknown field "future_field"`
 	type alter func(r *ForkResult, c *tracker.Comment)
 	run := func(t *testing.T, change alter) (bool, int, error) {
 		res := ForkResult{Version: 1, RequestID: 100, IssueNumber: 1, Success: false, Error: parseErr}

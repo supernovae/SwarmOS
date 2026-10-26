@@ -35,6 +35,22 @@ type ForkResult struct {
 }
 
 func FormatRequestComment(req lease.ForkRequest) (string, error) {
+	return formatRequestComment(req, "")
+}
+
+// The request nonce rides at the end of the summary line as an HTML comment,
+// outside the JSON payload, because released coordinators decode the payload
+// strictly and accept exactly one line between the marker and the details
+// block. It is correlation only; coordinators never read it.
+var (
+	requestNonceValue = regexp.MustCompile(`^[A-Za-z0-9]{16,64}$`)
+	requestNonceTag   = regexp.MustCompile(` <!-- swarm:request-nonce:([A-Za-z0-9]{16,64}) -->$`)
+)
+
+func formatRequestComment(req lease.ForkRequest, nonce string) (string, error) {
+	if nonce != "" && !requestNonceValue.MatchString(nonce) {
+		return "", fmt.Errorf("invalid fork request nonce")
+	}
 	if req.Version == 0 {
 		req.Version = 1
 	}
@@ -51,7 +67,11 @@ func FormatRequestComment(req lease.ForkRequest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal fork request: %w", err)
 	}
-	body := collapsedComment(RequestMarker, requestSummary(req), "Request details", raw)
+	summary := requestSummary(req)
+	if nonce != "" {
+		summary += " <!-- swarm:request-nonce:" + nonce + " -->"
+	}
+	body := collapsedComment(RequestMarker, summary, "Request details", raw)
 	if len(body) > MaxForkCommentBytes {
 		return "", fmt.Errorf("fork request payload (%d bytes) exceeds maximum GitHub comment size (%d bytes)", len(body), MaxForkCommentBytes)
 	}
@@ -154,6 +174,21 @@ func commentPayload(body, marker string) (string, error) {
 	return strings.TrimSpace(rest), nil
 }
 
+// requestCommentNonce returns the nonce on a collapsed request comment's
+// summary line, or "" when there is none.
+func requestCommentNonce(body string) string {
+	normalized := strings.ReplaceAll(strings.TrimLeft(body, " \t\r\n"), "\r\n", "\n")
+	rest, ok := strings.CutPrefix(normalized, RequestMarker)
+	if !ok || !collapsedPayload.MatchString(rest) {
+		return ""
+	}
+	summary, _, _ := strings.Cut(strings.TrimPrefix(rest, "\n"), "\n")
+	if m := requestNonceTag.FindStringSubmatch(summary); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 func requestSummary(req lease.ForkRequest) string {
 	summary := fmt.Sprintf("📨 **SwarmOS fork request:** `%s` for issue #%d", req.Operation, req.IssueNumber)
 	if req.PRNumber > 0 {
@@ -235,12 +270,12 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 		return nil, lease.ErrClaimFence
 	}
 
-	req.RequestNonce = rand.Text()
-	body, err := FormatRequestComment(req)
+	nonce := rand.Text()
+	body, err := formatRequestComment(req, nonce)
 	if err != nil {
 		return nil, err
 	}
-	comment, err := g.postRequest(ctx, req, body, time.Now())
+	comment, err := g.postRequest(ctx, req, nonce, body, time.Now())
 	if err != nil {
 		return nil, err
 	}

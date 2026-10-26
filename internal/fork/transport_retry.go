@@ -79,7 +79,7 @@ func (g *Gateway) listComments(ctx context.Context, issueNumber int, since time.
 // postRequest creates the request comment. When GitHub reports a 5xx or
 // timeout, the write may still have been stored, so it looks for the comment
 // carrying this request's nonce before re-posting, and re-posts at most once.
-func (g *Gateway) postRequest(ctx context.Context, req lease.ForkRequest, body string, startedAt time.Time) (*tracker.Comment, error) {
+func (g *Gateway) postRequest(ctx context.Context, req lease.ForkRequest, nonce, body string, startedAt time.Time) (*tracker.Comment, error) {
 	since := startedAt.Add(-reconcileLookback)
 	for attempt := 1; ; attempt++ {
 		comment, err := g.Tracker.CreateComment(ctx, req.IssueNumber, body)
@@ -90,23 +90,23 @@ func (g *Gateway) postRequest(ctx context.Context, req lease.ForkRequest, body s
 			return comment, nil
 		}
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("fork request (nonce %s) posting outcome unknown: %w", req.RequestNonce, err)
+			return nil, fmt.Errorf("fork request (nonce %s) posting outcome unknown: %w", nonce, err)
 		}
 		if !isTransientError(ctx, err) {
 			if attempt == 1 {
 				return nil, fmt.Errorf("post fork request comment: %w", err)
 			}
-			return nil, fmt.Errorf("re-post fork request comment (nonce %s): %w", req.RequestNonce, err)
+			return nil, fmt.Errorf("re-post fork request comment (nonce %s): %w", nonce, err)
 		}
-		found, scanErr := g.findPostedRequest(ctx, req, since)
+		found, scanErr := g.findPostedRequest(ctx, req, nonce, since)
 		if scanErr != nil {
-			return nil, fmt.Errorf("fork request (nonce %s) posting outcome unknown after %v; not posting again: %w", req.RequestNonce, err, scanErr)
+			return nil, fmt.Errorf("fork request (nonce %s) posting outcome unknown after %v; not posting again: %w", nonce, err, scanErr)
 		}
 		if found != nil {
 			return found, nil
 		}
 		if attempt == 2 {
-			return nil, fmt.Errorf("fork request (nonce %s) posting outcome unknown: re-post failed and no matching comment was found; not posting again: %w", req.RequestNonce, err)
+			return nil, fmt.Errorf("fork request (nonce %s) posting outcome unknown: re-post failed and no matching comment was found; not posting again: %w", nonce, err)
 		}
 	}
 }
@@ -114,7 +114,7 @@ func (g *Gateway) postRequest(ctx context.Context, req lease.ForkRequest, body s
 // findPostedRequest scans recent comments up to three times for the request
 // comment. A nil comment and nil error mean every scan completed without a
 // match; a failed or over-budget scan is never treated as absence.
-func (g *Gateway) findPostedRequest(ctx context.Context, req lease.ForkRequest, since time.Time) (*tracker.Comment, error) {
+func (g *Gateway) findPostedRequest(ctx context.Context, req lease.ForkRequest, nonce string, since time.Time) (*tracker.Comment, error) {
 	want, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -124,7 +124,7 @@ func (g *Gateway) findPostedRequest(ctx context.Context, req lease.ForkRequest, 
 		if err != nil {
 			return nil, fmt.Errorf("scan for request comment: %w", err)
 		}
-		found, err := matchRequestComment(ctx, comments, req, want)
+		found, err := matchRequestComment(ctx, comments, req, nonce, want)
 		if err != nil || found != nil {
 			return found, err
 		}
@@ -137,7 +137,7 @@ func (g *Gateway) findPostedRequest(ctx context.Context, req lease.ForkRequest, 
 	}
 }
 
-func matchRequestComment(ctx context.Context, comments []*tracker.Comment, req lease.ForkRequest, want []byte) (*tracker.Comment, error) {
+func matchRequestComment(ctx context.Context, comments []*tracker.Comment, req lease.ForkRequest, nonce string, want []byte) (*tracker.Comment, error) {
 	if len(comments) > 1000 {
 		return nil, fmt.Errorf("fork comment scan exceeds 1000 records")
 	}
@@ -160,8 +160,11 @@ func matchRequestComment(ctx context.Context, comments []*tracker.Comment, req l
 		if !c.UpdatedAt.IsZero() && !c.CreatedAt.Equal(c.UpdatedAt) {
 			continue
 		}
+		if requestCommentNonce(c.Body) != nonce {
+			continue
+		}
 		parsed, err := ParseRequestComment(c.Body)
-		if err != nil || parsed.RequestNonce != req.RequestNonce {
+		if err != nil {
 			continue
 		}
 		got, err := json.Marshal(parsed)
@@ -169,7 +172,7 @@ func matchRequestComment(ctx context.Context, comments []*tracker.Comment, req l
 			continue
 		}
 		if found != nil && found.ID != c.ID {
-			return nil, fmt.Errorf("multiple comments match fork request nonce %s (%d and %d)", req.RequestNonce, found.ID, c.ID)
+			return nil, fmt.Errorf("multiple comments match fork request nonce %s (%d and %d)", nonce, found.ID, c.ID)
 		}
 		found = c
 	}

@@ -30,9 +30,6 @@ type ForkRequest struct {
 	PRNumber        int    `json:"pr_number,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	NextPhase       string `json:"next_phase,omitempty"`
-	// RequestNonce lets a worker find its own request comment after an
-	// ambiguous post. It is a correlation id only and grants no authority.
-	RequestNonce string `json:"request_nonce,omitempty"`
 }
 
 // WorkerGateway forwards worker-side lease mutations in --fork mode to the

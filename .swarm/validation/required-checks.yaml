@@ -16,6 +16,8 @@ required_checks:
       timeout: 10m
 protected_paths:
     - .github/workflows/**
+    - .gitattributes
+    - '**/.gitattributes'
     - .swarm/validation/**
     - .swarm/contracts/**
     - .swarm/config.yaml

@@ -45,6 +45,13 @@ type CheckRunOutcome struct {
 	Duration            time.Duration `json:"duration"`
 	Output              string        `json:"output"`
 	Passed              bool          `json:"passed"`
+	// Preliminary marks the changed-package pass that runs before a full
+	// go test check. It can fail validation early but never passes a check.
+	Preliminary bool     `json:"preliminary,omitempty"`
+	Packages    []string `json:"packages,omitempty"`
+	// FallbackReason explains a preliminary attempt that did not finish, such
+	// as a timeout or sandbox error. The full check decided the result instead.
+	FallbackReason string `json:"fallback_reason,omitempty"`
 }
 
 type ValidationReport struct {
@@ -81,6 +88,11 @@ type ValidateOptions struct {
 	// only in CIMode, where `swarm repo validate` checks a maintainer-authored
 	// pull request at merge time; agent work and fork mode always reject.
 	ReportProtectedChanges bool
+	// GoFastPass first runs go test on the Go packages changed since BaseSHA,
+	// and their in-module reverse dependencies, before each required
+	// `go test ./...` check. A failure there stops validation early; a pass
+	// always continues to the unchanged full check. Ignored in CIMode.
+	GoFastPass bool
 }
 
 // Validate loads checks and protected paths exclusively from the immutable base.
@@ -162,73 +174,73 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	markdown.WriteString("| Check | Command | Status | Duration |\n| :--- | :--- | :--- | :--- |\n")
 	var details strings.Builder
 	var firstErr error
+	stoppedEarly := false
 	checkHome, err := os.MkdirTemp("", "swarm-check-home-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(checkHome)
-	for _, check := range spec.RequiredChecks {
-		duration := 15 * time.Minute
-		if check.Timeout != "" {
-			configured, _ := time.ParseDuration(check.Timeout)
-			if configured < duration {
-				duration = configured
-			}
-		}
-		checkCtx, cancel := context.WithTimeout(ctx, duration)
-		if opts.OnProgress != nil {
-			opts.OnProgress(progress.Event{Check: check.Name, Status: "started"})
-		}
-		start := time.Now()
-		var output checkCapture
-		var runErr error
-		if opts.RunnerIsolated {
-			runErr = runOnHost(checkCtx, worktreePath, checkHome, check.Command, &output)
-		} else if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
-			runErr = sandbox.RunConfiguredNativeValidation(checkCtx, worktreePath, cfg, check.Command, &output, &output)
-		} else if execution.Mode == contract.ExecutionIsolated {
-			runErr = sandbox.RunWorker(checkCtx, worktreePath, "/bin/sh", []string{"-c", check.Command}, sandbox.WorkerOptions{
-				Runtime: execution.ContainerRuntime, Image: execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,
-			}, nil, &output, &output)
-		} else {
-			runErr = runOnHost(checkCtx, worktreePath, checkHome, check.Command, &output)
-		}
-		cancel()
-		outcome := CheckRunOutcome{Name: check.Name, Command: check.Command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil}
-		if runErr != nil {
-			outcome.OutputTail, outcome.FailingTests = output.diagnostics()
-			var exitErr *exec.ExitError
-			outcome.InfrastructureError = !errors.As(runErr, &exitErr)
-			report.Passed = false
-			outcome.ExitCode = 1
-			if exit, ok := runErr.(*exec.ExitError); ok {
-				outcome.ExitCode = exit.ExitCode()
-			}
-			if firstErr == nil {
-				firstErr = fmt.Errorf("%w: check %q (%s) exited with %d: %v", ErrRequiredCheckFailed, check.Name, check.Command, outcome.ExitCode, runErr)
-			}
-		}
-		if opts.OnProgress != nil {
-			status := "PASS"
-			if !outcome.Passed {
-				status = "FAIL"
-			}
-			opts.OnProgress(progress.Event{Check: check.Name, Status: status, StageElapsed: outcome.Duration})
-		}
+	runner := &checkRunner{worktree: worktreePath, home: checkHome, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated}
+	record := func(outcome CheckRunOutcome) {
 		report.CheckOutcomes = append(report.CheckOutcomes, outcome)
 		status := "PASS"
-		if !outcome.Passed {
+		if outcome.FallbackReason != "" {
+			status = "SKIPPED (" + outcome.FallbackReason + ")"
+		} else if !outcome.Passed {
 			status = fmt.Sprintf("FAIL (exit %d)", outcome.ExitCode)
 		}
-		markdown.WriteString(fmt.Sprintf("| `%s` | `%s` | **%s** | `%s` |\n", check.Name, check.Command, status, outcome.Duration.Round(time.Millisecond)))
+		markdown.WriteString(fmt.Sprintf("| `%s` | `%s` | **%s** | `%s` |\n", outcome.Name, outcome.Command, status, outcome.Duration.Round(time.Millisecond)))
 		if strings.TrimSpace(outcome.Output) != "" {
-			details.WriteString(fmt.Sprintf("\n### Output: `%s`\n```text\n%s\n```\n", check.Name, strings.TrimSpace(outcome.Output)))
+			details.WriteString(fmt.Sprintf("\n### Output: `%s`\n```text\n%s\n```\n", outcome.Name, strings.TrimSpace(outcome.Output)))
 		}
 	}
+	fail := func(outcome *CheckRunOutcome, runErr error) {
+		report.Passed = false
+		if firstErr == nil {
+			firstErr = fmt.Errorf("%w: check %q (%s) exited with %d: %v", ErrRequiredCheckFailed, outcome.Name, outcome.Command, outcome.ExitCode, runErr)
+		}
+	}
+	// The changed-package pass only runs for the explicitly requested
+	// interactive operations, never for CI or repository validation.
+	var fastPass *goFastPass
+	if opts.GoFastPass && !opts.CIMode {
+		fastPass = &goFastPass{runner: runner, worktree: worktreePath, baseSHA: baseSHA}
+	}
+	required := 0
+	for i, check := range spec.RequiredChecks {
+		duration := checkTimeout(check.Timeout)
+		if fastPass != nil {
+			outcome, stop, runErr := fastPass.run(ctx, check, duration, opts.OnProgress)
+			if outcome != nil {
+				record(*outcome)
+			}
+			if fastPass.note != "" {
+				details.WriteString(fmt.Sprintf("\nChanged-package pass for `%s` skipped: %s\n", check.Name, fastPass.note))
+				fastPass.note = ""
+			}
+			if stop {
+				fail(outcome, runErr)
+				if remaining := len(spec.RequiredChecks) - i; remaining > 0 {
+					details.WriteString(fmt.Sprintf("\nValidation stopped after the changed-package pass failed; %d required check(s) did not run, including the full `%s`.\n", remaining, check.Name))
+				}
+				stoppedEarly = true
+				break
+			}
+		}
+		required++
+		outcome, runErr := runner.runCheck(ctx, check.Name, check.Command, duration, opts.OnProgress)
+		if runErr != nil {
+			fail(&outcome, runErr)
+		}
+		record(outcome)
+	}
 	markdown.WriteString(details.String())
-	verdict, summary := "PASS", fmt.Sprintf("All %d required checks passed", len(report.CheckOutcomes))
+	verdict, summary := "PASS", fmt.Sprintf("All %d required checks passed", required)
 	if !report.Passed {
 		verdict, summary = "FAIL", "One or more required checks failed"
+		if stoppedEarly {
+			summary = "Tests for changed packages failed; the full required checks did not run"
+		}
 	}
 	issue := wu.IssueNumber
 	if issue <= 0 {
@@ -333,15 +345,82 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 	return files, nil
 }
 
+// checkTimeout caps a configured check timeout at 15 minutes.
+func checkTimeout(configured string) time.Duration {
+	duration := 15 * time.Minute
+	if configured != "" {
+		parsed, _ := time.ParseDuration(configured)
+		if parsed < duration {
+			duration = parsed
+		}
+	}
+	return duration
+}
+
+// checkRunner runs commands inside the execution boundary selected by the
+// approved policy. Required checks, Go package discovery, and the
+// changed-package pass all share it.
+type checkRunner struct {
+	worktree, home string
+	cfg            *contract.SwarmConfig
+	execution      contract.ExecutionConfig
+	runnerIsolated bool
+}
+
+// run executes command under ctx, which the caller bounds by duration.
+func (r *checkRunner) run(ctx context.Context, command string, duration time.Duration, stdout, stderr io.Writer) error {
+	if r.runnerIsolated {
+		return runOnHost(ctx, r.worktree, r.home, command, stdout, stderr)
+	} else if r.execution.Mode == contract.ExecutionIsolated && r.execution.Backend == contract.BackendNative {
+		return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, stdout, stderr)
+	} else if r.execution.Mode == contract.ExecutionIsolated {
+		return sandbox.RunWorker(ctx, r.worktree, "/bin/sh", []string{"-c", command}, sandbox.WorkerOptions{
+			Runtime: r.execution.ContainerRuntime, Image: r.execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,
+		}, nil, stdout, stderr)
+	}
+	return runOnHost(ctx, r.worktree, r.home, command, stdout, stderr)
+}
+
+// runCheck runs one named command with a fresh timeout derived from ctx and
+// reports its lifecycle to onProgress.
+func (r *checkRunner) runCheck(ctx context.Context, name, command string, duration time.Duration, onProgress func(progress.Event)) (CheckRunOutcome, error) {
+	checkCtx, cancel := context.WithTimeout(ctx, duration)
+	defer cancel()
+	if onProgress != nil {
+		onProgress(progress.Event{Check: name, Status: "started"})
+	}
+	start := time.Now()
+	var output checkCapture
+	runErr := r.run(checkCtx, command, duration, &output, &output)
+	outcome := CheckRunOutcome{Name: name, Command: command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil}
+	if runErr != nil {
+		outcome.OutputTail, outcome.FailingTests = output.diagnostics()
+		var exitErr *exec.ExitError
+		outcome.InfrastructureError = !errors.As(runErr, &exitErr)
+		outcome.ExitCode = 1
+		if exit, ok := runErr.(*exec.ExitError); ok {
+			outcome.ExitCode = exit.ExitCode()
+		}
+	}
+	if onProgress != nil {
+		status := "PASS"
+		if !outcome.Passed {
+			status = "FAIL"
+		}
+		onProgress(progress.Event{Check: name, Status: status, StageElapsed: outcome.Duration})
+	}
+	return outcome, runErr
+}
+
 // runOnHost runs a required check directly, with a scrubbed environment.
-func runOnHost(ctx context.Context, dir, home, command string, output io.Writer) error {
+func runOnHost(ctx context.Context, dir, home, command string, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = cleanCheckEnv(home)
 	process.Configure(cmd)
 	cmd.Cancel = func() error { process.Stop(cmd); return nil }
 	cmd.WaitDelay = time.Second
-	cmd.Stdout, cmd.Stderr = output, output
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 	process.Stop(cmd)
 	return err
@@ -409,7 +488,11 @@ func cleanCheckEnv(home string) []string {
 }
 
 func gitOutput(repoRoot string, args ...string) ([]byte, error) {
-	cmd, redact, err := gitcredential.Command(context.Background(), repoRoot, args...)
+	return gitOutputContext(context.Background(), repoRoot, args...)
+}
+
+func gitOutputContext(ctx context.Context, repoRoot string, args ...string) ([]byte, error) {
+	cmd, redact, err := gitcredential.Command(ctx, repoRoot, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -125,14 +125,22 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 	if !res.ValidationPassed || res.ReviewVerdict != "APPROVED" {
 		t.Fatalf("unexpected result: %+v", res)
 	}
-	var started []string
+	var started, checks []string
 	for _, event := range completedEvents {
-		if event.Status == "started" {
+		if event.Check != "" {
+			if event.Stage != "required-checks" {
+				t.Fatalf("check event outside required checks: %+v", event)
+			}
+			checks = append(checks, event.Check+" "+event.Status)
+		} else if event.Status == "started" {
 			started = append(started, event.Stage)
 		}
 	}
 	if !slices.Equal(started, []string{"preflight", "claim", "workspace", "implement", "checkpoint", "test", "required-checks"}) {
 		t.Fatalf("resumed stage sequence: %v", started)
+	}
+	if len(checks) == 0 || !strings.HasSuffix(checks[0], " started") || !strings.HasSuffix(checks[len(checks)-1], " PASS") {
+		t.Fatalf("issue work check progress: %v", checks)
 	}
 	if last := completedEvents[len(completedEvents)-1]; last.Stage != "required-checks" || last.Status != "completed" {
 		t.Fatalf("completion progress: %+v", last)
@@ -485,11 +493,19 @@ func TestEngineSetupProgressSharedSessionBundles(t *testing.T) {
 		t.Fatal("engine closed command session")
 	}
 	reporter.Close()
-	var starts []string
+	var starts, checks []string
 	for _, event := range events {
-		if event.Status == "started" {
+		if event.Check != "" {
+			if event.Stage != "required-checks" || event.IssueNumber != issue.Number {
+				t.Fatalf("check event lacks stage context: %+v", event)
+			}
+			checks = append(checks, event.Check+" "+event.Status)
+		} else if event.Status == "started" {
 			starts = append(starts, event.Stage)
 		}
+	}
+	if len(checks) == 0 || !strings.HasSuffix(checks[0], " started") || !strings.HasSuffix(checks[len(checks)-1], " PASS") {
+		t.Fatalf("shared reporter check progress: %v", checks)
 	}
 	want := []string{"preflight", "claim", "workspace", "plan", "bundle", "review", "bundle", "implement", "bundle", "checkpoint", "test", "bundle", "required-checks"}
 	if !slices.Equal(starts, want) {

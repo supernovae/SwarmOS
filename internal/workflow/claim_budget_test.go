@@ -250,7 +250,7 @@ func TestBudgetPauseDuringRequiredChecksDoesNotRecordFailure(t *testing.T) {
 		}}, nil
 	}
 	opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, OnProgress: func(event ProgressEvent) {
-		if event.Stage != "required-checks" || event.Status != "started" {
+		if event.Stage != "required-checks" || event.Status != "started" || event.Check != "" {
 			return
 		}
 		timer := <-timers

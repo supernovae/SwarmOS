@@ -26,7 +26,9 @@ type workProgress struct {
 	emit                  func(ProgressEvent)
 	issue                 int
 	stage                 string
+	check                 string // active validation check, if any
 	started, stageStarted time.Time
+	checkStarted          time.Time
 	stop                  chan struct{}
 	done                  <-chan struct{}
 	stopTicker            func()
@@ -66,8 +68,39 @@ func newSetupProgress(ctx context.Context, issue int, emit func(ProgressEvent), 
 
 func (p *workProgress) send(status string) {
 	now := p.now()
-	p.emit(ProgressEvent{IssueNumber: p.issue, Stage: p.stage, Status: status,
-		Elapsed: now.Sub(p.started), StageElapsed: now.Sub(p.stageStarted)})
+	origin := p.stageStarted
+	if p.check != "" {
+		origin = p.checkStarted
+	}
+	p.emit(ProgressEvent{IssueNumber: p.issue, Stage: p.stage, Check: p.check, Status: status,
+		Elapsed: now.Sub(p.started), StageElapsed: now.Sub(origin)})
+}
+
+// observeCheck reports validator check lifecycle events within the current stage.
+func (p *workProgress) observeCheck(e ProgressEvent) {
+	if p == nil {
+		return
+	}
+	if p.session != nil {
+		p.session.Observe(e)
+		return
+	}
+	if p.emit == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.ctx.Err() != nil || p.stage == "" {
+		return
+	}
+	if e.Status == "started" {
+		p.check, p.checkStarted = e.Check, p.now()
+		p.send("started")
+	} else {
+		p.send(e.Status)
+		p.check = ""
+	}
+	p.resetDeadline()
 }
 
 func (p *workProgress) next(stage string) {
@@ -83,6 +116,7 @@ func (p *workProgress) next(stage string) {
 	if p.closed || p.ctx.Err() != nil {
 		return
 	}
+	p.check = ""
 	if p.stage != "" {
 		p.send("completed")
 	}
@@ -130,6 +164,7 @@ func (p *workProgress) finish(result *WorkResult, err error) {
 			status = "handed-off"
 		}
 	}
+	p.check = ""
 	if p.stage != "" {
 		p.send(status)
 	}

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
@@ -1057,5 +1058,28 @@ func TestPRSetupProgressBeforePreparation(t *testing.T) {
 	}
 	if strings.Join(phases, ",") != "claim,workspace,claim,bundle" {
 		t.Fatalf("setup phases: %v", phases)
+	}
+}
+
+func TestServiceCarriesLookupIntoEnginesAndRunners(t *testing.T) {
+	t.Setenv("SWARM_EXECUTION_MODE", contract.ExecutionIsolated)
+	trusted := func(name string) (string, bool) {
+		if name == "SWARM_EXECUTION_MODE" {
+			return contract.ExecutionTrustedLocal, true
+		}
+		return "", false
+	}
+	s := &Service{Root: t.TempDir(), Tracker: tracker.NewLocalTracker(t.TempDir()), LookupEnv: trusted, NodeProfilePath: filepath.Join(t.TempDir(), "node.yaml")}
+	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{}}
+	if engine := s.newEngine(cfg); engine.LookupEnv == nil {
+		t.Fatal("engine lost the service lookup")
+	} else if mode, _ := engine.LookupEnv("SWARM_EXECUTION_MODE"); mode != contract.ExecutionTrustedLocal {
+		t.Fatalf("engine mode = %q", mode)
+	}
+	if _, err := agent.NewConfiguredRunnerWithOptions("mock", cfg, true, s.runnerOptions()); err != nil {
+		t.Fatalf("service runner options ignored the injected mode: %v", err)
+	}
+	if _, err := agent.NewConfiguredRunnerWithOptions("mock", cfg, true, (&Service{}).runnerOptions()); err == nil {
+		t.Fatal("default service runner options ignored the process execution mode")
 	}
 }

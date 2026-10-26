@@ -2,6 +2,10 @@ package agent
 
 import (
 	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -9,6 +13,21 @@ import (
 
 func TestAgentEnvironmentHelper(t *testing.T) {
 	if os.Getenv("SWARM_AGENT_ENV_HELPER") != "1" {
+		return
+	}
+	if os.Getenv("GITHUB_TOKEN") != "" {
+		os.Exit(23)
+	}
+	if os.Getenv("MODEL_API_KEY") != "model-secret" {
+		os.Exit(24)
+	}
+	os.Exit(0)
+}
+
+// TestAgentLookupEnvironmentHelper is gated by argv, so a missing injected
+// environment fails instead of skipping the checks.
+func TestAgentLookupEnvironmentHelper(t *testing.T) {
+	if !slices.Contains(os.Args, "--swarm-lookup-helper") {
 		return
 	}
 	if os.Getenv("GITHUB_TOKEN") != "" {
@@ -88,6 +107,123 @@ func TestRestrictedEnvRemovesPublishingCredentials(t *testing.T) {
 	}
 	if seen["SWARM_GITHUB_TOKEN_COMMAND=op read op://vault/github/token"] {
 		t.Fatal("coordinator credential command reached agent environment")
+	}
+}
+
+// mapLookup is an injected environment holding exactly vars.
+func mapLookup(vars map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		value, ok := vars[name]
+		return value, ok
+	}
+}
+
+func TestRestrictedEnvWithLookupKeepsAllowlist(t *testing.T) {
+	// Conflicting process values must not reach the agent when a lookup is injected.
+	t.Setenv("MODEL_API_KEY", "process-secret")
+	t.Setenv("PATH", "/process/bin")
+	home := t.TempDir()
+	lookup := mapLookup(map[string]string{
+		"PATH": "/injected/bin", "MODEL_API_KEY": "model-secret", "EMPTY_MODEL_KEY": "",
+		"GITHUB_TOKEN": "publish-secret", "GH_TOKEN": "publish-secret", "SWARM_GITHUB_TOKEN_COMMAND": "op read op://vault/github/token",
+		"SSH_AUTH_SOCK": "/host/agent.sock", "GIT_ASKPASS": "/host/askpass", "HOME": "/host/home", "XDG_CONFIG_HOME": "/host/config",
+		"UNLISTED": "value", "SWARM_MOCK_DEVELOPER_CMD": "exit 1",
+	})
+	env := restrictedEnvWithLookup([]string{"MODEL_API_KEY", "EMPTY_MODEL_KEY", "UNSET_MODEL_KEY"}, home, lookup)
+	got := map[string]string{}
+	for _, entry := range env {
+		name, value, _ := strings.Cut(entry, "=")
+		got[name] = value
+	}
+	for name, want := range map[string]string{"PATH": "/injected/bin", "MODEL_API_KEY": "model-secret", "EMPTY_MODEL_KEY": "", "HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config")} {
+		if value, ok := got[name]; !ok || value != want {
+			t.Errorf("%s = %q (present %v), want %q", name, value, ok, want)
+		}
+	}
+	for _, name := range []string{"UNSET_MODEL_KEY", "GITHUB_TOKEN", "GH_TOKEN", "SWARM_GITHUB_TOKEN_COMMAND", "SSH_AUTH_SOCK", "GIT_ASKPASS", "UNLISTED", "SWARM_MOCK_DEVELOPER_CMD"} {
+		if value, ok := got[name]; ok {
+			t.Errorf("%s=%q reached the agent environment", name, value)
+		}
+	}
+}
+
+func TestConfiguredRunnerWithLookupRejectsCredentialNames(t *testing.T) {
+	lookup := mapLookup(map[string]string{"SWARM_EXECUTION_MODE": contract.ExecutionTrustedLocal})
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "SWARM_GITHUB_TOKEN_COMMAND", "GIT_ASKPASS", "SSH_AUTH_SOCK", "HOME", "XDG_CONFIG_HOME"} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{"claude": {Binary: os.Args[0], Env: []string{name}}}}
+			lookup := func(key string) (string, bool) {
+				if key == name {
+					return "host-credential", true
+				}
+				return lookup(key)
+			}
+			if _, err := NewConfiguredRunnerWithOptions("claude", cfg, false, RunnerOptions{LookupEnv: lookup}); err == nil || !strings.Contains(err.Error(), "credential") {
+				t.Fatalf("%s accepted as agent authentication: %v", name, err)
+			}
+			if _, err := PreflightWithOptions("claude", cfg, false, "planner", RunnerOptions{LookupEnv: lookup}); err == nil || !strings.Contains(err.Error(), "credential") {
+				t.Fatalf("%s accepted by preflight: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestConfiguredRunnerExecutionModeLookup(t *testing.T) {
+	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{}}
+	t.Setenv("SWARM_EXECUTION_MODE", "process-mode")
+	if _, err := NewConfiguredRunner("mock", cfg, true); err == nil || !strings.Contains(err.Error(), `"process-mode"`) {
+		t.Fatalf("default runner did not read the process environment: %v", err)
+	}
+	trusted := RunnerOptions{LookupEnv: mapLookup(map[string]string{"SWARM_EXECUTION_MODE": contract.ExecutionTrustedLocal})}
+	if _, err := NewConfiguredRunnerWithOptions("mock", cfg, true, trusted); err != nil {
+		t.Fatalf("injected trusted-local mode was ignored: %v", err)
+	}
+	isolated := RunnerOptions{LookupEnv: mapLookup(map[string]string{"SWARM_EXECUTION_MODE": contract.ExecutionIsolated})}
+	if _, err := NewConfiguredRunnerWithOptions("mock", cfg, true, isolated); err == nil || !strings.Contains(err.Error(), "trusted-local") {
+		t.Fatalf("injected isolated mode admitted the host mock: %v", err)
+	}
+	if _, err := NewConfiguredRunnerWithOptions("mock", cfg, true, RunnerOptions{LookupEnv: mapLookup(nil)}); err == nil || !strings.Contains(err.Error(), "trusted-local") {
+		t.Fatalf("unset injected mode did not default to isolated: %v", err)
+	}
+}
+
+func TestAdapterProcessUsesLookupWithoutPublishingCredentials(t *testing.T) {
+	lookup := mapLookup(map[string]string{
+		"PATH": os.Getenv("PATH"), "MODEL_API_KEY": "model-secret", "GITHUB_TOKEN": "publish-secret",
+	})
+	runner := &CLIAdapter{agentName: "custom", binary: os.Args[0], prefixArgs: []string{"-test.run=^TestAgentLookupEnvironmentHelper$", "--", "--swarm-lookup-helper"}, envAllow: []string{"MODEL_API_KEY"}, lookupEnv: lookup}
+	req := RunRequest{Role: "planner", WorktreePath: t.TempDir(), TaskPrompt: "task"}
+	if _, args := runner.BuildCommand(req); strings.Contains(strings.Join(args, " "), "secret") {
+		t.Fatalf("credential reached argv: %q", args)
+	}
+	if _, err := runner.Run(t.Context(), req); err != nil {
+		t.Fatalf("injected model auth did not reach the agent, or a publishing credential did: %v", err)
+	}
+}
+
+func TestMockRunnerControlsUseLookup(t *testing.T) {
+	worktree := t.TempDir()
+	envDump := filepath.Join(t.TempDir(), "env.txt")
+	runner := &MockRunner{lookupEnv: mapLookup(map[string]string{
+		"SWARM_MOCK_VERDICT":       "CHANGES_REQUESTED",
+		"SWARM_MOCK_DEVELOPER_CMD": "env > " + strconv.Quote(envDump),
+	})}
+	if _, err := runner.Run(t.Context(), RunRequest{Role: "reviewer", WorktreePath: worktree}); err != nil {
+		t.Fatal(err)
+	}
+	review, err := os.ReadFile(filepath.Join(worktree, ".swarm", "active", "REVIEW.md"))
+	if err != nil || !strings.Contains(string(review), "VERDICT: CHANGES_REQUESTED") {
+		t.Fatalf("injected verdict ignored: %v\n%s", err, review)
+	}
+	if _, err := runner.Run(t.Context(), RunRequest{Role: "developer", WorktreePath: worktree, TaskPrompt: "implement"}); err != nil {
+		t.Fatal(err)
+	}
+	dump, err := os.ReadFile(envDump)
+	if err != nil {
+		t.Fatalf("injected developer command did not run: %v", err)
+	}
+	if strings.Contains(string(dump), "SWARM_MOCK_") {
+		t.Fatalf("mock control reached the developer command environment:\n%s", dump)
 	}
 }
 

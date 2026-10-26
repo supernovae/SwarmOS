@@ -178,7 +178,7 @@ func runJSON(t *testing.T, opts *RootOptions, args ...string) (map[string]any, e
 
 func (f *cliFixture) runJSON(t *testing.T, args ...string) (map[string]any, error) {
 	t.Helper()
-	return runJSON(t, &RootOptions{}, append([]string{"--root", f.root, "--backend", "local"}, args...)...)
+	return runJSON(t, f.options(nil), append([]string{"--root", f.root, "--backend", "local"}, args...)...)
 }
 
 func assertNextAction(t *testing.T, doc map[string]any, err error, reason string, human bool, code int, argv ...string) {
@@ -241,6 +241,7 @@ func localArgv(f *cliFixture, args ...string) []string {
 }
 
 func TestIssueWorkNextAction(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)
@@ -252,7 +253,7 @@ func TestIssueWorkNextAction(t *testing.T) {
 	}
 
 	f.must(t, "issue", "approve", n)
-	t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 	doc, err = f.runJSON(t, "issue", "work", n, "--agent", "mock", "--progress=false", "--json")
 	assertNextAction(t, doc, err, ReasonChangesRequested, false, ExitChangesRequested, localArgv(f, "issue", "work", n, "--phase", "plan")...)
 	if recovery, _ := doc["recovery"].(string); !strings.Contains(recovery, "issue work "+n+" --phase plan") || !errors.Is(err, workflow.ErrPlanReviewRejected) {
@@ -270,7 +271,7 @@ func TestIssueWorkNextAction(t *testing.T) {
 	other := f.create(t, "agent")
 	o := strconv.Itoa(other)
 	f.must(t, "issue", "approve", o)
-	t.Setenv("SWARM_MOCK_VERDICT", "APPROVED")
+	f.setenv("SWARM_MOCK_VERDICT", "APPROVED")
 	doc, err = f.runJSON(t, "issue", "work", o, "--agent", "mock", "--progress=false", "--json")
 	assertNoNextAction(t, doc, err)
 	if doc["status"] != "completed" {
@@ -281,6 +282,7 @@ func TestIssueWorkNextAction(t *testing.T) {
 }
 
 func TestIssueWorkHumanGatePauseIsSuccess(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := strconv.Itoa(f.create(t, "human"))
 	f.must(t, "issue", "approve", n)
@@ -295,6 +297,7 @@ func TestIssueWorkHumanGatePauseIsSuccess(t *testing.T) {
 }
 
 func TestIssueSubmitNextAction(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)
@@ -316,6 +319,7 @@ func TestIssueSubmitNextAction(t *testing.T) {
 }
 
 func TestPRWorkNextAction(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	p := strconv.Itoa(number)
 	restore := reviseTask(t, f, issue)
@@ -330,13 +334,13 @@ func TestPRWorkNextAction(t *testing.T) {
 	}
 
 	restore()
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' >> next-action.txt")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' >> next-action.txt")
 	for _, args := range [][]string{{"work", p, "--agent", "mock", "--progress=false"}, {"rebase", p}, {"validate", p}, {"submit", p, "--progress=false"}} {
 		doc, err = f.runJSON(t, append(append([]string{"pr"}, args...), "--json")...)
 		assertNoNextAction(t, doc, err)
 	}
 
-	t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 	doc, err = f.runJSON(t, "pr", "work", p, "--agent", "mock", "--progress=false", "--json")
 	assertNextAction(t, doc, err, ReasonChangesRequested, false, ExitChangesRequested, localArgv(f, "pr", "work", p, "--phase", "plan")...)
 	if doc["kind"] != "pr-work" || doc["result"] == nil || doc["recovery"] == nil || !errors.Is(err, workflow.ErrPlanReviewRejected) {
@@ -345,6 +349,7 @@ func TestPRWorkNextAction(t *testing.T) {
 }
 
 func TestPRRebaseConflictNextAction(t *testing.T) {
+	t.Parallel()
 	f, issue, number, _ := twoStopPRFixture(t)
 	p := strconv.Itoa(number)
 	doc, err := f.runJSON(t, "pr", "rebase", p, "--json")
@@ -359,10 +364,9 @@ func TestPRRebaseConflictNextAction(t *testing.T) {
 		t.Fatal("conflict stop changed the revision")
 	}
 
-	testResolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 		return timeoutRunner{&agent.MockRunner{}}, nil
 	}
-	t.Cleanup(func() { testResolverRunner = nil })
 	doc, err = f.runJSON(t, "pr", "rebase", p, "--continue", "--resolve", "--agent", "mock", "--progress=false", "--json")
 	assertNextAction(t, doc, err, ReasonConflict, true, ExitConflict, localArgv(f, "pr", "rebase", p, "--continue")...)
 	if _, _, rebasing, _ := workspace.PRHead(context.Background(), workspace.PRWorktreePath(f.root, number)); !rebasing {
@@ -371,6 +375,7 @@ func TestPRRebaseConflictNextAction(t *testing.T) {
 }
 
 func TestPRWorkGitHubBlockersNextAction(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	ctx := context.Background()
 	remote := filepath.Join(t.TempDir(), "remote.git")
@@ -409,7 +414,7 @@ func TestPRWorkGitHubBlockersNextAction(t *testing.T) {
 				pull.BaseSHA = "advanced"
 			}
 			opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: workCLITracker{Tracker: f.tracker, pr: pull}}
-			doc, err := runJSON(t, opts, "pr", "work", p, "--agent", "mock", "--progress=false", "--json")
+			doc, err := runJSON(t, f.options(opts), "pr", "work", p, "--agent", "mock", "--progress=false", "--json")
 			assertNextAction(t, doc, err, tc.reason, tc.human, tc.code, tc.argv...)
 			if _, statErr := os.Stat(workspace.PRWorktreePath(f.root, number)); !os.IsNotExist(statErr) {
 				t.Fatal("blocked work prepared a worktree")

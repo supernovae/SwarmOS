@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/fork"
@@ -36,20 +38,75 @@ type cliFixture struct {
 	root    string
 	tracker *tracker.LocalTracker
 	manager *lease.Manager
+	env     *fixtureEnv
+	// resolverRunner replaces PR work and conflict resolver runners for this
+	// fixture's later commands.
+	resolverRunner func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error)
+}
+
+// fixtureEnv is the environment one fixture's commands see in place of the
+// process environment. Names it does not hold read the process environment,
+// whose user directories TestMain points at a temporary root.
+type fixtureEnv struct {
+	mu   sync.Mutex
+	vars map[string]*string
+}
+
+// newFixtureEnv owns execution mode, user directories and profile paths, and
+// clears the SWARM_* selectors and mock controls a host might have set.
+func newFixtureEnv(t *testing.T) *fixtureEnv {
+	t.Helper()
+	e := &fixtureEnv{vars: map[string]*string{}}
+	// Fixtures intentionally run local mock agents and validation.
+	e.set("SWARM_EXECUTION_MODE", "trusted-local")
+	for _, name := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "APPDATA"} {
+		e.set(name, t.TempDir())
+	}
+	e.set("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
+	e.set("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
+	for _, name := range []string{"SWARM_BACKEND", "SWARM_REPO", "SWARM_REPOS_DIR", "SWARM_MOCK_VERDICT", "SWARM_MOCK_DEVELOPER_CMD"} {
+		e.unset(name)
+	}
+	return e
+}
+
+func (e *fixtureEnv) set(name, value string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.vars[name] = &value
+}
+
+func (e *fixtureEnv) unset(name string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.vars[name] = nil
+}
+
+// lookup returns a snapshot, so later set calls never change a command that
+// is already built.
+func (e *fixtureEnv) lookup() func(string) (string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	vars := make(map[string]*string, len(e.vars))
+	for name, value := range e.vars {
+		vars[name] = value
+	}
+	return func(name string) (string, bool) {
+		if value, held := vars[name]; held {
+			if value == nil {
+				return "", false
+			}
+			return *value, true
+		}
+		return os.LookupEnv(name)
+	}
 }
 
 func newCLIFixture(t *testing.T) *cliFixture {
 	t.Helper()
-	// This fixture intentionally runs local mock agents and validation.
-	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
+	env := newFixtureEnv(t)
+	env.set("SWARM_USER", "alice")
 	root := t.TempDir()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("APPDATA", t.TempDir())
-	t.Setenv("SWARM_USER", "alice")
-	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
-	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
 	git := func(args ...string) {
 		t.Helper()
 		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
@@ -68,7 +125,7 @@ func newCLIFixture(t *testing.T) *cliFixture {
 	}
 	git("add", ".")
 	git("commit", "-m", "approved harness")
-	tr := tracker.NewLocalTracker(root)
+	tr := tracker.NewLocalTracker(root).WithUser("alice", "")
 	cfg, err := harness.LoadConfig(root)
 	if err != nil {
 		t.Fatal(err)
@@ -77,11 +134,31 @@ func newCLIFixture(t *testing.T) *cliFixture {
 	if err := manager.ConfigureStore(root); err != nil {
 		t.Fatal(err)
 	}
-	return &cliFixture{root: root, tracker: tr, manager: manager}
+	return &cliFixture{root: root, tracker: tr, manager: manager, env: env}
+}
+
+// setenv changes a variable for this fixture's later commands only.
+func (f *cliFixture) setenv(name, value string) { f.env.set(name, value) }
+
+// options gives opts (nil for defaults) this fixture's environment and
+// resolver runner in place of the process environment.
+func (f *cliFixture) options(opts *RootOptions) *RootOptions {
+	if opts == nil {
+		opts = &RootOptions{}
+	}
+	opts.lookupEnv = f.env.lookup()
+	opts.resolverRunner = f.resolverRunner
+	return opts
+}
+
+// command builds a root command from opts (nil for defaults) that reads this
+// fixture's environment.
+func (f *cliFixture) command(opts *RootOptions) *cobra.Command {
+	return newRootCmdWithOptions(f.options(opts))
 }
 
 func (f *cliFixture) run(args ...string) (string, error) {
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
@@ -125,6 +202,7 @@ func (f *cliFixture) state(t *testing.T, issue int) *lease.IssueState {
 }
 
 func TestCLIApprovalWorkAndIdempotentSubmission(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
@@ -167,6 +245,7 @@ func TestCLIApprovalWorkAndIdempotentSubmission(t *testing.T) {
 }
 
 func TestCLIHumanGateCannotBeBypassedByReviewOrSubmit(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "human")
 	n := strconv.Itoa(number)
@@ -188,14 +267,15 @@ func TestCLIHumanGateCannotBeBypassedByReviewOrSubmit(t *testing.T) {
 	if _, err := f.run("issue", "work", n, "--phase", "implement", "--gate", "none", "--agent", "mock"); err == nil {
 		t.Fatal("agent review satisfied human gate")
 	}
-	t.Setenv("SWARM_USER", "independent-maintainer")
+	f.setenv("SWARM_USER", "independent-maintainer")
 	f.must(t, "issue", "review-plan", n, "--approve", "--notes", "Checked exact plan and test plan")
-	t.Setenv("SWARM_USER", "alice")
+	f.setenv("SWARM_USER", "alice")
 	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
 	f.must(t, "issue", "submit", n)
 }
 
 func TestCLISelectorsFailBeforeClaiming(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	for _, args := range [][]string{
@@ -213,6 +293,7 @@ func TestCLISelectorsFailBeforeClaiming(t *testing.T) {
 }
 
 func TestCLIClaimNextSelectorsAndPreparedWork(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
@@ -270,6 +351,7 @@ func TestCLIClaimNextSelectorsAndPreparedWork(t *testing.T) {
 }
 
 func TestCLIClaimNextResumesHandoffPhase(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := strconv.Itoa(f.create(t, "agent"))
 	f.must(t, "issue", "approve", n)
@@ -298,6 +380,7 @@ func TestCLIClaimNextResumesHandoffPhase(t *testing.T) {
 }
 
 func TestCLIValidationNamespacesAndRemovedRoutes(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)
@@ -351,6 +434,7 @@ func TestCLIValidationNamespacesAndRemovedRoutes(t *testing.T) {
 }
 
 func TestCLIRepoValidationFailurePreservesJSONAndExitStatus(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	policy := "required_checks:\n  - name: deliberate-failure\n    command: 'false'\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
 	if err := os.WriteFile(filepath.Join(f.root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
@@ -379,6 +463,7 @@ func TestCLIRepoValidationFailurePreservesJSONAndExitStatus(t *testing.T) {
 }
 
 func TestCLIRepoValidateReportsProtectedChangesForMaintainers(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	checks := filepath.Join(f.root, ".swarm", "validation", "required-checks.yaml")
 	policy := "required_checks:\n  - name: ok\n    command: 'true'\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n"
@@ -414,6 +499,7 @@ func TestCLIRepoValidateReportsProtectedChangesForMaintainers(t *testing.T) {
 }
 
 func TestCLIIssueLeafJSONAndReviewDelegation(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	raw := f.must(t, "issue", "create", "--json", "--title", "JSON WorkUnit", "--objective", "Check leaf output",
 		"--constraint", "Keep policy unchanged", "--acceptance", "Pass checks", "--gate", "agent")
@@ -460,6 +546,7 @@ func TestCLIIssueLeafJSONAndReviewDelegation(t *testing.T) {
 }
 
 func TestNodeAdmissionLimitAndFailedExecutionStatus(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	for i := 0; i < 6; i++ {
 		n := f.create(t, "agent")
@@ -475,18 +562,20 @@ func TestNodeAdmissionLimitAndFailedExecutionStatus(t *testing.T) {
 	if claimed != 1 {
 		t.Fatalf("max-jobs=1 admitted %d tasks", claimed)
 	}
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 17")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 17")
 	if _, err := f.run("node", "run", "--max-jobs", "1", "--agent", "mock"); err == nil {
 		t.Fatal("failed developer produced successful node exit")
 	}
 }
 
 func TestEmptyNodeQueueIsSuccessfulDrain(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	f.must(t, "node", "run", "--agent", "mock")
 }
 
 func TestNodeHumanGateWaitsThenResumesImplementation(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "human")
 	n := strconv.Itoa(issue)
@@ -508,6 +597,7 @@ func TestNodeHumanGateWaitsThenResumesImplementation(t *testing.T) {
 }
 
 func TestCLIRenewalLimitReturnsErrorWithoutChangingLease(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
@@ -527,6 +617,7 @@ func TestCLIRenewalLimitReturnsErrorWithoutChangingLease(t *testing.T) {
 }
 
 func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
@@ -662,6 +753,7 @@ func (m *mockDoctorTracker) CreateTypedIssue(ctx context.Context, title, body st
 }
 
 func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	ctx := context.Background()
 
@@ -731,7 +823,7 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 		epicTypeErr: errors.New("issue type \"Epic\" is not enabled"),
 		authErr:     errors.New("actor lacks maintainer permission"),
 	}
-	docCmd := newRootCmdWithOptions(&RootOptions{
+	docCmd := f.command(&RootOptions{
 		RepoRoot:        f.root,
 		Backend:         "github",
 		trackerOverride: mockTr,
@@ -753,14 +845,10 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 }
 
 func TestForkCLISmoke(t *testing.T) {
-	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
+	t.Parallel()
+	env := newFixtureEnv(t)
 	ctx := context.Background()
 	tmp := t.TempDir()
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("APPDATA", t.TempDir())
-	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
-	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
 
 	git := func(dir string, args ...string) string {
 		t.Helper()
@@ -1193,6 +1281,7 @@ func TestForkCLISmoke(t *testing.T) {
 		opts.forkPollTimeout = 30 * time.Second
 		opts.forkDispatcher = dispatch
 		opts.nowFn = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+		opts.lookupEnv = env.lookup()
 		cmd := newRootCmdWithOptions(&opts)
 		var out, diagnostics bytes.Buffer
 		cmd.SetOut(&out)
@@ -1581,6 +1670,7 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 }
 
 func TestCLIStatusProvenance(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
@@ -1663,6 +1753,7 @@ func TestCLIStatusProvenance(t *testing.T) {
 }
 
 func TestCLIStatusProvenanceMissing(t *testing.T) {
+	t.Parallel()
 	for _, approved := range []bool{false, true} {
 		t.Run(fmt.Sprintf("approved=%t", approved), func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -1875,6 +1966,7 @@ func TestRepoOnboardAndInitDryRun(t *testing.T) {
 }
 
 func TestFreshClaimBaseCommands(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"claim", "work", "next", "node", "stale next"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -1900,7 +1992,7 @@ func TestFreshClaimBaseCommands(t *testing.T) {
 			if out, err := cmdGit.CombinedOutput(); err != nil {
 				t.Fatalf("%v %s", err, out)
 			}
-			cmd := NewRootCmd()
+			cmd := f.command(nil)
 			var out, diagnostics bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&diagnostics)
@@ -1964,6 +2056,7 @@ func TestFreshClaimBaseCommands(t *testing.T) {
 }
 
 func TestCLIQueueSkipsResumedStaleApproval(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"work", "node"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)

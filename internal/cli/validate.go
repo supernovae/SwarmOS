@@ -75,7 +75,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		defer heartbeat.Stop()
 		ctx = heartbeat.Context()
 		p.Next("validation")
-		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork, GoFastPass: true})
+		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork, GoFastPass: true, LookupEnv: options.lookupEnv})
 		if report != nil {
 			report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 			lease.PreserveTesterGuidance(state, &report.Artifact)
@@ -105,7 +105,7 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 			reportJSONFailure(cmd, asJSON, "validation", err)
 			return err
 		}
-		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork, ReportProtectedChanges: protectedMode == "report"})
+		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork, ReportProtectedChanges: protectedMode == "report", LookupEnv: options.lookupEnv})
 		if !asJSON && report != nil {
 			writeProtectedChanges(cmd, report.ProtectedChanges)
 		}

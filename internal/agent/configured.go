@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,13 +11,25 @@ import (
 	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
+// RunnerOptions carries one invocation's environment into configured runners.
+// A nil LookupEnv reads the process environment.
+type RunnerOptions struct {
+	LookupEnv func(string) (string, bool)
+}
+
 // NewConfiguredRunner creates only an explicitly allowlisted agent. It performs
 // executable availability checks before a caller can claim work.
 func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Runner, error) {
+	return NewConfiguredRunnerWithOptions(name, cfg, local, RunnerOptions{})
+}
+
+// NewConfiguredRunnerWithOptions is NewConfiguredRunner reading execution mode,
+// allowlisted model variables and mock controls through opts.LookupEnv.
+func NewConfiguredRunnerWithOptions(name string, cfg *contract.SwarmConfig, local bool, opts RunnerOptions) (Runner, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("agent policy is required")
 	}
-	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+	execution, err := contract.ResolveExecution(cfg, getenvWith(opts.LookupEnv, "SWARM_EXECUTION_MODE"))
 	if err != nil {
 		return nil, err
 	}
@@ -34,7 +45,7 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 		if !local && !allowlisted {
 			return nil, fmt.Errorf("mock runner is available only with the local backend")
 		}
-		return &configuredRunner{Runner: &MockRunner{}, name: name}, nil
+		return &configuredRunner{Runner: &MockRunner{lookupEnv: opts.LookupEnv}, name: name}, nil
 	}
 	ac, ok := cfg.Agents[name]
 	if !ok {
@@ -50,7 +61,7 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 	if err != nil {
 		return nil, err
 	}
-	a := &CLIAdapter{agentName: name, driver: driver, binary: ac.Binary, prefixArgs: append([]string(nil), ac.Args...), model: ac.Model, envAllow: append([]string(nil), ac.Env...), sandboxRuntime: ac.Sandbox, reviewNetwork: ac.ReviewNetwork, containerRuntime: ac.ContainerRuntime, container: ac.ContainerImage}
+	a := &CLIAdapter{agentName: name, driver: driver, binary: ac.Binary, prefixArgs: append([]string(nil), ac.Args...), model: ac.Model, envAllow: append([]string(nil), ac.Env...), sandboxRuntime: ac.Sandbox, reviewNetwork: ac.ReviewNetwork, containerRuntime: ac.ContainerRuntime, container: ac.ContainerImage, lookupEnv: opts.LookupEnv}
 	a.executionMode = execution.Mode
 	a.executionPolicy = execution
 	a.authentication = ac.Authentication
@@ -108,7 +119,12 @@ func NewConfiguredRunner(name string, cfg *contract.SwarmConfig, local bool) (Ru
 
 // Preflight resolves and validates the selected configured agent before leasing work.
 func Preflight(name string, cfg *contract.SwarmConfig, local bool, role string) (string, error) {
-	r, err := NewConfiguredRunner(name, cfg, local)
+	return PreflightWithOptions(name, cfg, local, role, RunnerOptions{})
+}
+
+// PreflightWithOptions is Preflight for a runner built with opts.
+func PreflightWithOptions(name string, cfg *contract.SwarmConfig, local bool, role string, opts RunnerOptions) (string, error) {
+	r, err := NewConfiguredRunnerWithOptions(name, cfg, local, opts)
 	if err != nil {
 		return "", err
 	}

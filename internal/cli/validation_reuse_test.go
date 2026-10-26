@@ -46,7 +46,7 @@ func latestValidation(t *testing.T, f *cliFixture, n int) contract.Artifact {
 }
 func submitWithDiagnostics(t *testing.T, f *cliFixture, args ...string) (string, string) {
 	t.Helper()
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var out, diag bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diag)
@@ -162,7 +162,7 @@ func TestPRSubmitValidationReuse(t *testing.T) {
 			f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
 			f.must(t, "issue", "submit", number)
 			prNumber := strconv.Itoa(f.state(t, n).PRNumber)
-			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf revision > revision.txt")
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf revision > revision.txt")
 			f.must(t, "pr", "work", prNumber, "--agent", "mock", "--progress=false")
 			explicitBefore := checkCount(t, counter)
 			f.must(t, "pr", "validate", prNumber, "--json", "--progress=false")
@@ -239,7 +239,7 @@ func TestSubmitValidationReuseFallbackFailureBlocksPublication(t *testing.T) {
 			if resource == "pr" {
 				f.must(t, "issue", "submit", number)
 				number = strconv.Itoa(f.state(t, n).PRNumber)
-				t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf revision > revision.txt")
+				f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf revision > revision.txt")
 				f.must(t, "pr", "work", number, "--agent", "mock", "--progress=false", "--json")
 			}
 			before := checkCount(t, counter)

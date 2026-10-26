@@ -239,7 +239,7 @@ func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		eng, err := workflow.NewEngine(repoRoot, tr)
+		eng, err := workflow.NewEngineWithOptions(repoRoot, tr, rootOpts.engineOptions())
 		if err != nil {
 			return err
 		}

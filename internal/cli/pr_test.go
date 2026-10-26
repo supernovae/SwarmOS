@@ -30,18 +30,23 @@ func prGit(t *testing.T, root string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func submittedPRFixture(t *testing.T, gate string) (*cliFixture, int, int) {
+// submittedPRFixture submits a PR for a new issue; setup runs on the fresh
+// fixture before any command.
+func submittedPRFixture(t *testing.T, gate string, setup ...func(*cliFixture)) (*cliFixture, int, int) {
 	t.Helper()
 	f := newCLIFixture(t)
+	for _, fn := range setup {
+		fn(f)
+	}
 	f.create(t, "agent") // PR and issue IDs deliberately differ.
 	n := f.create(t, gate)
 	issue := strconv.Itoa(n)
 	f.must(t, "issue", "approve", issue)
 	f.must(t, "issue", "work", issue, "--agent", "mock", "--progress=false")
 	if gate == "human" {
-		t.Setenv("SWARM_USER", "independent-maintainer")
+		f.setenv("SWARM_USER", "independent-maintainer")
 		f.must(t, "issue", "review-plan", issue, "--approve", "--notes", "Checked initial plan")
-		t.Setenv("SWARM_USER", "alice")
+		f.setenv("SWARM_USER", "alice")
 		f.must(t, "issue", "work", issue, "--agent", "mock", "--progress=false")
 	}
 	f.must(t, "issue", "submit", issue)
@@ -67,6 +72,7 @@ func readPROutcome(t *testing.T, raw string) *pr.Result {
 }
 
 func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	p := strconv.Itoa(number)
 	before := f.state(t, issue)
@@ -84,7 +90,7 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	}
 	issueTree := workspace.WorktreePath(f.root, issue)
 	issueHead := prGit(t, issueTree, "rev-parse", "HEAD")
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
 	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--instructions", "Fix the implementation within the approved acceptance criteria", "--progress=false", "--json"))
 	if worked.State.RevisionPlan == nil {
 		t.Fatal("approved original missing from revision")
@@ -146,6 +152,7 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 }
 
 func TestCLIPRRebaseCarriesApprovedPlanAndRequiresFreshValidation(t *testing.T) {
+	t.Parallel()
 	for _, gate := range []string{"agent", "human"} {
 		t.Run(gate, func(t *testing.T) {
 			f, issue, number := submittedPRFixture(t, gate)
@@ -185,6 +192,7 @@ func TestCLIPRRebaseCarriesApprovedPlanAndRequiresFreshValidation(t *testing.T) 
 }
 
 func TestCLIPRHumanGateRequiresNewIndependentApproval(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "human")
 	p := strconv.Itoa(number)
 	result := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--progress=false", "--json"))
@@ -194,15 +202,16 @@ func TestCLIPRHumanGateRequiresNewIndependentApproval(t *testing.T) {
 	if _, err := f.run("pr", "submit", p); err == nil {
 		t.Fatal("submission bypassed human plan gate")
 	}
-	t.Setenv("SWARM_USER", "independent-maintainer")
+	f.setenv("SWARM_USER", "independent-maintainer")
 	f.must(t, "issue", "review-plan", strconv.Itoa(issue), "--approve", "--notes", "Checked PR revision plan")
-	t.Setenv("SWARM_USER", "alice")
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'revision\n' > human-approved-revision.txt")
+	f.setenv("SWARM_USER", "alice")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'revision\n' > human-approved-revision.txt")
 	f.must(t, "pr", "work", p, "--agent", "mock", "--progress=false")
 	f.must(t, "pr", "submit", p)
 }
 
 func TestCLIPRSelectorsAndUnlinkedPRCannotAcquire(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	f.must(t, "issue", "approve", strconv.Itoa(issue))
@@ -262,9 +271,9 @@ func submittedInteractivePRFixture(t *testing.T, gates ...string) (*cliFixture, 
 		t.Fatal(err)
 	}
 	f.must(t, "issue", "stage", n, "--phase", "plan")
-	t.Setenv("SWARM_USER", "independent-maintainer")
+	f.setenv("SWARM_USER", "independent-maintainer")
 	f.must(t, "issue", "review-plan", n, "--approve", "--notes", "Checked initial interactive plan")
-	t.Setenv("SWARM_USER", "alice")
+	f.setenv("SWARM_USER", "alice")
 	if err := os.WriteFile(filepath.Join(issueTree, "initial.txt"), []byte("initial implementation\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -278,9 +287,10 @@ func submittedInteractivePRFixture(t *testing.T, gates ...string) (*cliFixture, 
 }
 
 func TestCLIPRSubmitKeepsApprovedPlanAfterFailedImplementation(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	p := strconv.Itoa(number)
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 1")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 1")
 	if _, err := f.run("pr", "work", p, "--agent", "mock", "--progress=false"); err == nil {
 		t.Fatal("failing developer reported success")
 	}
@@ -292,7 +302,7 @@ func TestCLIPRSubmitKeepsApprovedPlanAfterFailedImplementation(t *testing.T) {
 	if after := f.state(t, issue); !reflect.DeepEqual(before, after) {
 		t.Fatal("refused submit changed authoritative state")
 	}
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
 	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--phase", "implement", "--progress=false", "--json"))
 	if worked.HeadSHA == before.HeadSHA {
 		t.Fatalf("resumed implementation produced no checkpoint: %+v", worked)
@@ -304,6 +314,7 @@ func TestCLIPRSubmitKeepsApprovedPlanAfterFailedImplementation(t *testing.T) {
 }
 
 func TestCLIPRInteractivePlanStageAndResume(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedInteractivePRFixture(t)
 	p := strconv.Itoa(number)
 	if _, err := f.run("pr", "stage", p, "--phase", "plan"); err == nil {
@@ -349,10 +360,10 @@ func TestCLIPRInteractivePlanStageAndResume(t *testing.T) {
 	if _, err := f.run("pr", "submit", p); err == nil {
 		t.Fatal("PR submit bypassed independent plan approval")
 	}
-	t.Setenv("SWARM_USER", "independent-maintainer")
+	f.setenv("SWARM_USER", "independent-maintainer")
 	f.must(t, "issue", "review-plan", strconv.Itoa(issue), "--approve", "--notes", "Reviewed PR interactive plan")
-	t.Setenv("SWARM_USER", "alice")
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR implementation\\n' > pr-interactive.txt")
+	f.setenv("SWARM_USER", "alice")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR implementation\\n' > pr-interactive.txt")
 	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--progress=false", "--json"))
 	if worked.HeadSHA == initial.HeadSHA || worked.State.PRRevision == nil {
 		t.Fatalf("PR implementation did not checkpoint locally: %+v", worked)
@@ -367,6 +378,7 @@ func TestCLIPRInteractivePlanStageAndResume(t *testing.T) {
 }
 
 func TestCLIPRManualImplementationStageRemainsUnpublished(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedInteractivePRFixture(t)
 	p := strconv.Itoa(number)
 	before := f.state(t, issue)
@@ -378,9 +390,9 @@ func TestCLIPRManualImplementationStageRemainsUnpublished(t *testing.T) {
 		}
 	}
 	f.must(t, "pr", "stage", p, "--phase", "plan")
-	t.Setenv("SWARM_USER", "independent-maintainer")
+	f.setenv("SWARM_USER", "independent-maintainer")
 	f.must(t, "issue", "review-plan", strconv.Itoa(issue), "--approve", "--notes", "Checked manual PR plan")
-	t.Setenv("SWARM_USER", "alice")
+	f.setenv("SWARM_USER", "alice")
 	if err := os.WriteFile(filepath.Join(paused.Worktree, "manual-pr.txt"), []byte("unpublished PR revision\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -406,6 +418,7 @@ func TestCLIPRManualImplementationStageRemainsUnpublished(t *testing.T) {
 }
 
 func TestCLIIssueInteractivePlanPauseKeepsClaimActive(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	cfgPath := filepath.Join(f.root, ".swarm", "config.yaml")
 	cfg, err := os.ReadFile(cfgPath)
@@ -438,6 +451,7 @@ func TestCLIIssueInteractivePlanPauseKeepsClaimActive(t *testing.T) {
 }
 
 func TestCLIPRRebaseConflictAbortAndContinue(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	p := strconv.Itoa(number)
 	before := f.state(t, issue)
@@ -511,6 +525,7 @@ func TestCLIPRRebaseConflictAbortAndContinue(t *testing.T) {
 }
 
 func TestCLIApprovalClaimRecovery(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
@@ -519,13 +534,14 @@ func TestCLIApprovalClaimRecovery(t *testing.T) {
 	if _, err := f.run("issue", "approve", n); err == nil || !strings.Contains(err.Error(), "alice") || !strings.Contains(err.Error(), "until") || !strings.Contains(err.Error(), "swarm issue release "+n) {
 		t.Fatalf("own claim recovery: %v", err)
 	}
-	t.Setenv("SWARM_USER", "other-maintainer")
+	f.setenv("SWARM_USER", "other-maintainer")
 	if _, err := f.run("issue", "approve", n); err == nil || !strings.Contains(err.Error(), "alice") || strings.Contains(err.Error(), "swarm issue release") {
 		t.Fatalf("other claim recovery: %v", err)
 	}
 }
 
 func TestCLIPRRebaseExplainsReplan(t *testing.T) {
+	t.Parallel()
 	for _, reason := range []string{"WorkUnit changed", "policy files changed"} {
 		t.Run(reason, func(t *testing.T) {
 			f, issue, number := submittedPRFixture(t, "agent")
@@ -571,6 +587,7 @@ func TestCLIPRRebaseExplainsReplan(t *testing.T) {
 }
 
 func TestCLIPRWorkDryRunReportsLocalSkip(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	before := f.state(t, issue)
 	result := readPROutcome(t, f.must(t, "pr", "work", strconv.Itoa(number), "--dry-run"))
@@ -597,6 +614,7 @@ func (w workCLITracker) GetPullRequest(context.Context, int) (*tracker.PullReque
 }
 
 func TestCLIPRWorkGitHubDryRun(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	ctx := context.Background()
 	remote := filepath.Join(t.TempDir(), "remote.git")
@@ -634,7 +652,7 @@ func TestCLIPRWorkGitHubDryRun(t *testing.T) {
 				p.BaseSHA = "advanced"
 			}
 			opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: workCLITracker{Tracker: f.tracker, pr: p}}
-			cmd := newRootCmdWithOptions(opts)
+			cmd := f.command(opts)
 			var out, diagnostics bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&diagnostics)
@@ -663,6 +681,7 @@ func TestCLIPRWorkGitHubDryRun(t *testing.T) {
 
 // Reproduce the recovery sequence after a policy change prevents plan carry-forward.
 func TestCLIPRRebaseStagePlanSurvivesReview(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedInteractivePRFixture(t, "agent")
 	p := strconv.Itoa(number)
 	name := ".swarm/rules/rebase-stage.md"
@@ -724,6 +743,7 @@ func TestCLIPRRebaseStagePlanSurvivesReview(t *testing.T) {
 }
 
 func TestCLIPRRebaseWithoutStageRequiresNewPlan(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedInteractivePRFixture(t)
 	p := strconv.Itoa(number)
 	f.must(t, "pr", "rebase", p)

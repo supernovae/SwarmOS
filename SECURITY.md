@@ -41,6 +41,14 @@ The enforced controls in the Git-CAS workflow are:
 
 HTML comments are stripped before parsing an issue contract. This reduces one hidden-text input path; it does **not** prevent prompt injection in visible issue text, source files, tool output, dependencies, or an agent's external context. Treat all untrusted content as data and review generated plans and changes.
 
+## Writable agent returns
+
+Before importing developer or tester results, SwarmOS checks every added, changed, removed, or mode-changed file against protected paths from the approved base. Protected edits require an approved WorkUnit with `allow_harness_changes`. Fork runs retain the stricter prohibition on `.swarm/` and `.github/workflows/` changes, with exact role reports permitted.
+
+Within `.swarm/active/`, developers may return only `IMPLEMENTATION.md` and `LESSONS.md`; testers may return only `VALIDATION.md` and `LESSONS.md`. Approved inputs remain restricted even with harness permission. Before testing, the coordinator restores the approved plan, test plan, and WorkUnit. These checks cover native Codex, harness-tools Bubblewrap, and OCI through their shared import boundary. Symlinks and special files are rejected before import.
+
+A policy rejection imports none of the returned changes and creates no report artifact or checkpoint for that run. Status records the rejected paths and the command to retry implementation.
+
 ## Execution modes
 
 SwarmOS has two execution modes. `isolated` is the default when no mode is configured. Choose a repository default with `execution.mode` in `.swarm/config.yaml`, or select a local mode with `SWARM_EXECUTION_MODE`. The approved base commit supplies the task's policy. Setting `security.require_isolation: true` prevents an operator from selecting `trusted-local` for that task.

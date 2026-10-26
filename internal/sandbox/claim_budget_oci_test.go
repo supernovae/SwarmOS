@@ -88,7 +88,7 @@ case "$1" in
 			defer cancel(context.Canceled)
 			ctx = claimpause.WithParent(ctx, t.Context())
 			imported := false
-			opts := WorkerOptions{Runtime: binary, Image: "local/image@sha256:" + strings.Repeat("b", 64), Role: "developer", CheckPauseImport: func(context.Context, []string) error {
+			opts := WorkerOptions{Runtime: binary, Image: "local/image@sha256:" + strings.Repeat("b", 64), Role: "developer", CheckImport: func(context.Context, []string) error {
 				imported = true
 				calls, _ := os.ReadFile(filepath.Join(root, "calls"))
 				lines := string(calls)
@@ -111,5 +111,96 @@ case "$1" in
 				t.Fatalf("failed cleanup imported: %s %v", data, err)
 			}
 		})
+	}
+}
+
+func TestOCIWritableImportPreflight(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake OCI runtime uses a Unix shell")
+	}
+	for _, role := range []string{"developer", "tester"} {
+		for _, failure := range []string{"", "import"} {
+			t.Run(role+"/failure="+failure, func(t *testing.T) {
+				root, dir, result := t.TempDir(), t.TempDir(), t.TempDir()
+				writeWorkerFixture(t, dir, "source", "before")
+				writeWorkerFixture(t, result, "source", "saved")
+				archive := filepath.Join(root, "result.tar")
+				if _, err := packWorker(t.Context(), result, archive, nil, false); err != nil {
+					t.Fatal(err)
+				}
+				image := []any{map[string]any{"Os": "linux", "Config": map[string]any{"Volumes": nil}}}
+				host := map[string]any{"Privileged": false, "NetworkMode": "none", "PidMode": "private", "IpcMode": "private", "CgroupnsMode": "private", "ReadonlyRootfs": true, "CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges"}, "Memory": int64(2 << 30), "MemorySwap": int64(2 << 30), "NanoCpus": int64(2000000000), "PidsLimit": 128, "Tmpfs": map[string]string{
+					"/workspace":   "rw,nosuid,nodev,size=512m,mode=0755,uid=65534,gid=65534",
+					"/output":      "rw,nosuid,nodev,size=64m,mode=0700,uid=65534,gid=65534",
+					"/home/worker": "rw,nosuid,nodev,size=64m,mode=0700,uid=65534,gid=65534",
+					"/tmp":         "rw,nosuid,nodev,size=64m,mode=1777,uid=0,gid=0",
+				}}
+				container := []any{map[string]any{"HostConfig": host, "Mounts": []any{}}}
+				for name, value := range map[string]any{"image.json": image, "container.json": container} {
+					raw, _ := json.Marshal(value)
+					if err := os.WriteFile(filepath.Join(root, name), raw, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+				script := `#!/bin/sh
+root=` + quote(root) + `
+printf '%s\n' "$*" >> "$root/calls"
+case "$1" in
+ image) cat "$root/image.json";;
+ inspect) cat "$root/container.json";;
+ create) printf '%s\n' '` + strings.Repeat("a", 64) + `';;
+ exec) :;;
+ cp) if test "$2" = --archive; then cat >/dev/null; else `
+				if failure == "export" {
+					script += "exit 19; "
+				}
+				script += `cat "$root/result.tar"; fi;;
+ pause) `
+				if failure == "freeze" {
+					script += "exit 18"
+				} else {
+					script += ":"
+				}
+				script += `;;
+ rm) `
+				if failure == "termination" {
+					script += "exit 17"
+				} else {
+					script += ":"
+				}
+				script += ";;\n *) :;;\nesac\n"
+				binary := filepath.Join(root, "docker")
+				if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(context.Canceled)
+				ctx = claimpause.WithParent(ctx, t.Context())
+				imported := false
+				opts := WorkerOptions{Runtime: binary, Image: "local/image@sha256:" + strings.Repeat("b", 64), Role: role, CheckImport: func(context.Context, []string) error {
+					imported = true
+					calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+					lines := string(calls)
+					pause, export, termination := strings.Index(lines, "pause "), strings.Index(lines, "cp "+strings.Repeat("a", 64)+":/workspace/. -"), strings.Index(lines, "rm --force")
+					if pause < 0 || export < pause || termination < export {
+						t.Fatalf("unsafe ordering: %s", lines)
+					}
+					if failure == "import" {
+						return errors.New("import rejected")
+					}
+					return nil
+				}}
+				err := RunWorker(ctx, dir, "worker-payload", nil, opts, nil, io.Discard, io.Discard)
+				data, _ := os.ReadFile(filepath.Join(dir, "source"))
+				if failure == "" {
+					if err != nil || !imported || string(data) != "saved" {
+						t.Fatalf("lost paused output: %s %v", data, err)
+					}
+				} else if err == nil || errors.Is(err, claimpause.ErrBudget) || string(data) != "before" {
+					t.Fatalf("failed cleanup imported: %s %v", data, err)
+				}
+			})
+		}
 	}
 }

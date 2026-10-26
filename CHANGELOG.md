@@ -4,6 +4,35 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Reject developer and tester changes to protected paths and approved active inputs before importing any results across native Codex, Bubblewrap, and OCI. Restore approved inputs before testing, and show rejected paths and implementation retry guidance in errors and issue status.
+
+- Show bounded, terminal-safe failed-check output and Go failing test names during repository, issue, and PR validation and submission. JSON failed-check outcomes include `output_tail` and `failing_tests`.
+- `swarm issue cleanup --apply` retires clean merged issue and PR worktrees and local code branches, with per-resource results and exact-tip branch deletion. Local backends need no origin; dirty or unsafe worktrees and their branches remain available.
+
+- `swarm issue submit` reports target-branch drift and the behind count before publishing. Conflicting submissions still open a draft PR, with conflicted paths and a numbered `swarm pr rebase <PR> --resolve` recovery command in the terminal and PR description. Unavailable freshness checks are skipped, and JSON output includes `base_freshness`.
+
+- Fresh same-repository claims start at the current default-branch tip when task, committed policy tree and ancestry checks pass. Existing plan evidence requires authenticated review carry; human gates require explicit approval of a moved base. Queued work reports and skips fresh candidates needing approval, including stale task approval at an unchanged tip.
+
+- Extend `swarm pr rebase --resolve` with recorded per-conflict micro-plans, trusted post-rebase validation, and bounded local repair (default two attempts, configurable with `lease.rebase_repair_limit`). Successful runs print the explicit submit command. Eligible maintainers can re-pin unchanged task/policy approval automatically; policy changes require explicit approval before unchanged plans receive a fresh agent review. Fork workers retain explicit maintainer approval and review steps.
+
+- `swarm pr rebase <PR> --resolve` lets the configured developer agent resolve routine rebase conflicts. At each conflicted commit the agent gets one turn on a disposable workspace holding only the conflicted files, both sides, the WorkUnit, and the approved plan. SwarmOS accepts edits limited to those files with no remaining markers, stages them, and continues; anything else leaves the rebase paused as before. Resolutions appear in `pr status` and the PR's rebase context, and `pr work` and `pr stage` now point at a paused rebase's recovery commands.
+
+- Feed current-head failing and cancelled PR checks into `swarm pr work` through quoted `.swarm/active/CI.md` evidence, including annotations and bounded GitHub Actions log tails. `pr status` notes when evidence will be available.
+
+- Fail no-op and explicitly blocked implementations before testing, and refuse empty issue submissions with a recovery command.
+- Add `swarm issue work --instructions` and record delivered operator guidance in role reports, status, and PR review evidence.
+- Replan after requested changes, mark earlier role attempts as superseded, and keep unmerged lessons out of agent system prompts.
+
+- `swarm issue edit` replaces selected WorkUnit sections on GitHub and local backends, previews diffs and approval impact, lints before writing, and blocks active claims. Changed contracts require separate approval.
+
+- Protected paths now cover the files that become part of agent instructions: `.swarm/project.md`, `.swarm/architecture.md`, `.swarm/conventions.md`, `.claude/commands/**`, `.opencode/commands/**`, `AGENTS.md`, and `CLAUDE.md`. New repositories get them from `swarm repo init`; existing repositories can add them to `.swarm/validation/required-checks.yaml`. Agent work that needs to edit them sets `allow_harness_changes: true` on its WorkUnit.
+- Maintainer pull requests can change protected policy without failing CI. `swarm repo validate --protected-paths report` lists the changed protected files, notes when `.swarm/` policy changed, and still runs every required check; the generated workflow uses it only for maintainers' own branches, keeping agent branches, forks, and other authors on strict enforcement. SwarmOS's own CI now runs this check with a validator built from the trusted base.
+- Agent run budgets now support approved global and per-role durations, with a 60-minute default and a warning before the deadline. Interactive native sessions exclude waits for operator input and have a four-hour wall cap; native Codex and Bubblewrap preserve bounded timeout patches for manual recovery. OCI uses wall time and reports that no timeout patch is available. Required-check deadlines are unchanged.
+- Re-approving an issue on a newer base drops a checkpoint whose commits are already contained in that base. Resuming moves clean local work forward and retains the original remote head as the next publication fence; checkpoints with unique commits remain preserved.
+
+- Approved plans can carry across descendant PR rebases when the WorkUnit and committed policy tree are unchanged. Fresh validation and explicit submission remain required; status explains when a new plan cycle is needed.
+- Rebase status and PR updates include heads, bases, conflict paths, and Git patch identity. Claim and interrupted-rebase errors include recovery commands, and Git errors render carriage returns cleanly.
+
 ## v0.7.0
 
 v0.7.0 is about owning a busy repository: seeing the whole backlog at once, sizing work to fit, and being clear about who reviews what. Upgrade `swarm` and rerun `swarm repo init` to pick up the new rules file and issue form wording.

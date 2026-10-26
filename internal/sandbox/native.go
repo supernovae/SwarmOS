@@ -428,10 +428,8 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 	if err != nil {
 		return err
 	}
-	if paused {
-		if err := checkPauseImport(ctx, opts, initial, final); err != nil {
-			return err
-		}
+	if err := checkImport(ctx, opts, initial, final); err != nil {
+		return err
 	}
 	if err := importWorker(ctx, original, result, initial, final); err != nil {
 		return err

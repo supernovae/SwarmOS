@@ -21,6 +21,8 @@ swarm issue validate 42 --backend github
 swarm issue submit 42 --backend github
 ```
 
+Developer and tester results are checked before import. If a run changes protected files or approved inputs in `.swarm/active/`, the error and `swarm issue status 42` list every rejected path. The returned changes are discarded and the worktree stays as it was at launch. Retry with `swarm issue work 42 --phase implement` after addressing the cause. Developers may write `IMPLEMENTATION.md` and `LESSONS.md` in the active bundle; testers may write `VALIDATION.md` and `LESSONS.md`. The coordinator restores approved plan inputs before the tester starts.
+
 Helpful CLI conventions:
 
 - **Picking up the next task**: Use `swarm issue claim --next` to reserve the next eligible `swarm:ready` issue, or `swarm issue work --next` to claim and execute it immediately. Add `--all` with `--next` (or `swarm issue claim --next --all`) to scan across all repositories registered in `~/.config/swarm/repos.yaml`.

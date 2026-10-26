@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/coordination"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -618,14 +617,14 @@ func TestCLIPRWorkGitHubDryRun(t *testing.T) {
 	f, issue, number := submittedPRFixture(t, "agent")
 	ctx := context.Background()
 	remote := filepath.Join(t.TempDir(), "remote.git")
-	prGit(t, f.root, "init", "--bare", remote)
+	prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
 	prGit(t, f.root, "remote", "add", "origin", remote)
 	prGit(t, f.root, "push", "origin", "main")
 	raw, _, err := f.manager.Store().Load(ctx, issue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := coordination.NewGitStore(f.root)
+	store := trustedLedgerStore(t, f.root, "")
 	if _, err = store.CompareAndSwap(ctx, issue, "", raw); err != nil {
 		t.Fatal(err)
 	}

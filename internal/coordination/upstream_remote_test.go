@@ -38,7 +38,7 @@ func TestGitStoreWithNamedUpstreamRemote(t *testing.T) {
 	if got := f.git(f.remote, "rev-parse", "refs/heads/"+branch); got != head {
 		t.Fatalf("upstream branch = %s", got)
 	}
-	if got := f.git(f.remote, "rev-parse", CheckpointRef(9, head)); got != head {
+	if got := f.git(f.remote, "rev-parse", BranchLayout.CheckpointRef(9, head)); got != head {
 		t.Fatalf("upstream retention = %s", got)
 	}
 	if body, _, err := store.Load(ctx, 9); err != nil || string(body) != `{"n":3}` {

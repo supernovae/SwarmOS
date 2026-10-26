@@ -203,7 +203,7 @@ func (f *upstreamRemoteFixture) dispatch(ctx context.Context, issueNumber int, c
 
 func (f *upstreamRemoteFixture) state() *lease.IssueState {
 	f.t.Helper()
-	raw, _, err := coordination.NewGitStore(f.upstreamRoot).Load(context.Background(), 42)
+	raw, _, err := trustedLedgerStore(f.t, f.upstreamRoot, "").Load(context.Background(), 42)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -465,13 +465,14 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 	}
 	// Authoritative state and retention live upstream; the fork holds only
 	// the task branch, and the project holds no task branch.
-	if got := f.git(f.aliceBare, "for-each-ref", "refs/heads/swarm-state", "refs/heads/swarm-checkpoints", "refs/heads/swarm-contributors"); got != "" {
+	if got := f.git(f.aliceBare, "for-each-ref", "refs/heads/swarm-state", "refs/heads/swarm-checkpoints", "refs/heads/swarm-contributors", "refs/swarm"); got != "" {
 		t.Fatalf("coordination refs written to the fork:\n%s", got)
 	}
 	if got := f.git(f.projectBare, "for-each-ref", "--format=%(refname)", "refs/heads/swarm/"); got != "" {
 		t.Fatalf("task branch written to the project:\n%s", got)
 	}
-	if f.git(f.projectBare, "rev-parse", "refs/heads/swarm-state/issue-42") == "" || f.git(f.projectBare, "rev-parse", coordination.CheckpointRef(42, head)) != head {
+	// New repositories scaffold ledger_namespace: hidden.
+	if f.git(f.projectBare, "rev-parse", coordination.HiddenLayout.StateRef(42)) == "" || f.git(f.projectBare, "rev-parse", coordination.HiddenLayout.CheckpointRef(42, head)) != head {
 		t.Fatal("upstream state or checkpoint retention missing")
 	}
 	if f.git(f.projectBare, "rev-parse", "refs/heads/main") != f.baseSHA {
@@ -593,7 +594,7 @@ func TestUpstreamRemoteSameRepository(t *testing.T) {
 	}
 	st = f.state()
 	head := f.git(workspace.WorktreePath(root, 42), "rev-parse", "HEAD")
-	if st.HeadSHA != head || st.PRNumber != 1 || f.git(f.projectBare, "rev-parse", "refs/heads/"+st.Branch) != head || f.git(f.projectBare, "rev-parse", coordination.CheckpointRef(42, head)) != head {
+	if st.HeadSHA != head || st.PRNumber != 1 || f.git(f.projectBare, "rev-parse", "refs/heads/"+st.Branch) != head || f.git(f.projectBare, "rev-parse", coordination.HiddenLayout.CheckpointRef(42, head)) != head {
 		t.Fatalf("checkpoint %s not published to the named upstream: %+v", head, st)
 	}
 	f.mu.Lock()

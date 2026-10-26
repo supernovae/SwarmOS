@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/workflow"
 )
@@ -206,7 +205,7 @@ func TestCLIForkStatusMissingClaimBudget(t *testing.T) {
 		t.Fatalf("supplied budget output changed:\n%s", supplied)
 	}
 
-	store := coordination.NewGitStore(f.upstreamRoot)
+	store := trustedLedgerStore(t, f.upstreamRoot, "")
 	raw, rev, err := store.Load(t.Context(), 42)
 	if err != nil {
 		t.Fatal(err)

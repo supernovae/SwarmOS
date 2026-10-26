@@ -141,7 +141,7 @@ func inspectCleanup(ctx context.Context, root string, m *Manager, n int, snap *C
 		}
 		p.Resources = append(p.Resources, r)
 	}
-	for _, name := range []string{fmt.Sprintf("refs/heads/swarm-state/issue-%d", n), "refs/heads/swarm-contributors/*"} {
+	for _, name := range []string{m.LedgerLayout().StateRef(n), m.LedgerLayout().ContributorPrefix() + "*"} {
 		p.Resources = append(p.Resources, CleanupResource{Kind: "ledger", Name: name, Reason: "retained authoritative state and provenance"})
 	}
 	return p, nil

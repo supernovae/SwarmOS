@@ -83,7 +83,7 @@ func TestCheckpointRetentionSurvivesRewriteDeletionAndGC(t *testing.T) {
 			fresh := filepath.Join(f.root, "fresh")
 			f.git(f.root, "clone", "--single-branch", f.remote, fresh)
 			for i, head := range heads {
-				ref := CheckpointRef(1, head)
+				ref := BranchLayout.CheckpointRef(1, head)
 				f.git(fresh, "fetch", "origin", ref)
 				if got := f.git(fresh, "rev-parse", "FETCH_HEAD"); got != head {
 					t.Fatalf("retained %s, want %s", got, head)
@@ -116,9 +116,9 @@ func TestRetentionAtomicRejectionAndLegacyHistory(t *testing.T) {
 			b := f.git(f.clone, "rev-parse", "HEAD")
 			switch scenario {
 			case "identical":
-				f.git(f.clone, "push", "origin", b+":"+CheckpointRef(1, b))
+				f.git(f.clone, "push", "origin", b+":"+BranchLayout.CheckpointRef(1, b))
 			case "conflict":
-				f.git(f.clone, "push", "origin", a+":"+CheckpointRef(1, b))
+				f.git(f.clone, "push", "origin", a+":"+BranchLayout.CheckpointRef(1, b))
 			case "atomic unsupported":
 				f.git(f.remote, "config", "receive.advertiseAtomic", "false")
 			case "unavailable predecessor":
@@ -150,7 +150,7 @@ func TestRetentionAtomicRejectionAndLegacyHistory(t *testing.T) {
 				t.Fatal("rejection changed branch")
 			}
 			if !success && scenario != "conflict" {
-				if _, err := exec.Command("git", "-C", f.remote, "show-ref", "--verify", CheckpointRef(1, b)).Output(); err == nil {
+				if _, err := exec.Command("git", "-C", f.remote, "show-ref", "--verify", BranchLayout.CheckpointRef(1, b)).Output(); err == nil {
 					t.Fatal("rejected push created retention ref")
 				}
 			}

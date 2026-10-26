@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -39,7 +38,7 @@ func TestCLICheckpointReconciliationAndStatus(t *testing.T) {
 	if err != nil || len(cfg) == 0 {
 		t.Fatal(err)
 	}
-	f.manager.SetStore(f.root, coordination.NewGitStore(f.root))
+	f.manager.SetStore(f.root, trustedLedgerStore(t, f.root, ""))
 	if _, err = f.manager.ApproveTask(ctx, n, "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +117,7 @@ func TestCLICheckpointReconciliationAndStatus(t *testing.T) {
 	if _, _, err = workspace.ProvisionAt(f.root, n, "test", st.BaseSHA, branch, b); err != nil {
 		t.Fatal(err)
 	}
-	if prGit(t, remote, "rev-parse", coordination.CheckpointRef(n, a)) != a {
+	if prGit(t, remote, "rev-parse", f.manager.LedgerLayout().CheckpointRef(n, a)) != a {
 		t.Fatal("lost predecessor")
 	}
 	// Missing local worktrees do not hide authoritative status.

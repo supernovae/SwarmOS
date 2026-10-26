@@ -35,7 +35,20 @@ func (e *budgetAdmissionError) Error() string {
 	return fmt.Sprintf("%s. Continue: swarm %s work %d --phase %s", e.budgetReason(), resource, number, e.phase)
 }
 func (e *budgetAdmissionError) budgetReason() string {
+	if e.budget.LeaseExpiryOnly() {
+		return fmt.Sprintf("paused for claim budget: %s available before lease expiry (reserve %s); upstream coordinator supplied no renewal budget", e.budget.Available, e.budget.Threshold)
+	}
 	return fmt.Sprintf("paused for claim budget: %s available (reserve %s), %d renewals used, %d remaining", e.budget.Available, e.budget.Threshold, e.budget.RenewalsUsed, e.budget.RenewalsRemaining)
+}
+
+// workBudget times wind-down, falling back to lease expiry in fork mode when
+// the upstream coordinator supplies no budget.
+func (e *Engine) workBudget(st *lease.IssueState) (*lease.ClaimBudget, error) {
+	var duration time.Duration
+	if e.Config != nil {
+		duration, _ = time.ParseDuration(e.Config.Lease.Duration)
+	}
+	return e.LeaseManager.WorkBudget(st, duration)
 }
 
 func (e *Engine) admitStage(ctx context.Context, issue int, owner, phase string) error {
@@ -52,7 +65,7 @@ func (e *Engine) admitStage(ctx context.Context, issue int, owner, phase string)
 	if err != nil {
 		return err
 	}
-	b, err := e.LeaseManager.Budget(st)
+	b, err := e.workBudget(st)
 	if err != nil {
 		return err
 	}
@@ -71,7 +84,12 @@ func setBudgetPause(res *WorkResult, b *lease.ClaimBudget, phase string, opts Wo
 	if opts.PRNumber != 0 {
 		resource, number = "pr", opts.PRNumber
 	}
-	res.ClaimBudgetPause = &ClaimBudgetPause{Budget: b, Reason: (&budgetAdmissionError{budget: b}).budgetReason(), ContinueCommand: fmt.Sprintf("swarm %s work %d --phase %s", resource, number, phase)}
+	reported := b
+	if b.LeaseExpiryOnly() {
+		// Placeholder renewal counts are not upstream facts.
+		reported = nil
+	}
+	res.ClaimBudgetPause = &ClaimBudgetPause{Budget: reported, Reason: (&budgetAdmissionError{budget: b}).budgetReason(), ContinueCommand: fmt.Sprintf("swarm %s work %d --phase %s", resource, number, phase)}
 	res.HandedOffToPhase = phase
 	res.ValidationPassed = false
 }
@@ -94,7 +112,7 @@ func (e *Engine) pauseWork(parent context.Context, res *WorkResult, opts WorkOpt
 	if err != nil {
 		return err
 	}
-	b, err := e.LeaseManager.Budget(st)
+	b, err := e.workBudget(st)
 	if err != nil {
 		return err
 	}
@@ -135,7 +153,7 @@ func (e *Engine) pauseAdmission(parent context.Context, opts WorkOptions, phase 
 	if err != nil {
 		return err
 	}
-	b, err := e.LeaseManager.Budget(st)
+	b, err := e.workBudget(st)
 	if err != nil {
 		return err
 	}

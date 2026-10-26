@@ -373,3 +373,123 @@ func TestBudgetCleanupExpiryDuringHandoffRemainsFenceError(t *testing.T) {
 		t.Fatalf("expired handoff became a successful pause: %+v %v", res, err)
 	}
 }
+
+// legacyBudgetGateway is an upstream coordinator that predates claim budgets:
+// it fences handoffs through a real manager but stores no projection.
+type legacyBudgetGateway struct {
+	t     *testing.T
+	coord *lease.Manager
+	owner string
+}
+
+func (g *legacyBudgetGateway) Apply(ctx context.Context, r lease.ForkRequest) (*lease.IssueState, error) {
+	if r.Operation != "handoff" {
+		return nil, errors.New("unexpected " + r.Operation)
+	}
+	g.coord.BindClaim(r.IssueNumber, r.ClaimID)
+	if _, err := g.coord.Handoff(ctx, r.IssueNumber, g.owner, r.Phase, r.NextPhase, r.Reason); err != nil {
+		return nil, err
+	}
+	stripStoredClaimBudget(g.t, g.coord, r.IssueNumber)
+	return g.coord.GetCurrentState(ctx, r.IssueNumber)
+}
+
+func stripStoredClaimBudget(t *testing.T, m *lease.Manager, n int) {
+	t.Helper()
+	raw, rev, err := m.Store().Load(context.Background(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st map[string]any
+	if err = json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	delete(st, "claim_budget")
+	if raw, err = json.Marshal(st); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.Store().CompareAndSwap(context.Background(), n, rev, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// legacyForkEngine claims issue for 4h with no renewals and returns a
+// fork-mode engine whose coordinator sends no claim budget.
+func legacyForkEngine(t *testing.T, e *Engine, issue int, phase string, now func() time.Time) (*Engine, *lease.IssueState) {
+	t.Helper()
+	e.LeaseManager.SetNowFunc(now)
+	st, err := e.LeaseManager.Acquire(t.Context(), issue, "maintainer", "mock", phase, 4*time.Hour, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripStoredClaimBudget(t, e.LeaseManager, issue)
+	worker := lease.NewManager(e.Tracker, e.Config.Security)
+	worker.SetStore(e.repoRoot, e.LeaseManager.Store())
+	worker.SetNowFunc(now)
+	worker.SetWorkerGateway(&legacyBudgetGateway{t: t, coord: e.LeaseManager, owner: "maintainer"})
+	worker.BindClaim(issue, st.Lease.ClaimID)
+	return NewEngineWithManager(e.repoRoot, e.Tracker, worker, e.Config, true, ""), st
+}
+
+func TestForkStageAdmissionWithoutUpstreamBudgetUsesLeaseExpiry(t *testing.T) {
+	for _, offset := range []time.Duration{-time.Nanosecond, 0, time.Nanosecond} {
+		t.Run(offset.String(), func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			reserve, err := time.ParseDuration(e.Config.Lease.Duration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reserve /= 3
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			fork, st := legacyForkEngine(t, e, issue.Number, "plan", func() time.Time { return now })
+			now = st.Lease.ExpiresAt.Add(-reserve).Add(-offset)
+			err = fork.admitStage(t.Context(), issue.Number, "maintainer", "plan")
+			if offset >= 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var paused *budgetAdmissionError
+			if !errors.As(err, &paused) || paused.state.Lease.Status != "handoff" || paused.state.Lease.NextPhase != "plan" {
+				t.Fatalf("admission: %v %+v", err, paused)
+			}
+			if !strings.Contains(err.Error(), "available before lease expiry") || strings.Contains(err.Error(), "renewals") {
+				t.Fatalf("fallback reason: %v", err)
+			}
+		})
+	}
+}
+
+func TestForkBudgetPauseWithoutUpstreamBudgetKeepsFence(t *testing.T) {
+	e, issue := budgetEngine(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base
+	fork, st := legacyForkEngine(t, e, issue.Number, "implement", func() time.Time { return now })
+	opts := WorkOptions{IssueNumber: issue.Number, Owner: "maintainer"}
+
+	now = st.Lease.ExpiresAt
+	res := &WorkResult{IssueNumber: issue.Number}
+	if err := fork.pauseWork(t.Context(), res, opts, nil, "implement", false, false, ""); !errors.Is(err, lease.ErrClaimFence) || res.ClaimBudgetPause != nil {
+		t.Fatalf("expired pause: %v %+v", err, res)
+	}
+
+	now = base.Add(3 * time.Hour)
+	if err := fork.pauseWork(t.Context(), res, opts, nil, "implement", false, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	p := res.ClaimBudgetPause
+	if p == nil || p.Budget != nil || !strings.HasPrefix(p.Reason, "paused for claim budget: 1h0m0s available before lease expiry (reserve ") || !strings.HasSuffix(p.Reason, "upstream coordinator supplied no renewal budget") || res.State.Lease.Status != "handoff" {
+		t.Fatalf("fallback pause: %+v %+v", p, res.State)
+	}
+	if strings.Contains(p.Reason, "renewals") {
+		t.Fatalf("fallback pause claims renewal counts: %s", p.Reason)
+	}
+}
+
+func TestSuppliedBudgetReasonUnchanged(t *testing.T) {
+	b := &lease.ClaimBudget{Available: time.Hour, Threshold: 20 * time.Minute, RenewalsUsed: 2, RenewalsRemaining: 1}
+	if got, want := (&budgetAdmissionError{budget: b}).budgetReason(), "paused for claim budget: 1h0m0s available (reserve 20m0s), 2 renewals used, 1 remaining"; got != want {
+		t.Fatalf("reason %q, want %q", got, want)
+	}
+}

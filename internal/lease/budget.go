@@ -19,7 +19,14 @@ type ClaimBudget struct {
 	Remaining         time.Duration `json:"remaining"`
 	Available         time.Duration `json:"available"`
 	Threshold         time.Duration `json:"threshold"`
+
+	expiryOnly bool
 }
+
+// LeaseExpiryOnly reports a WorkBudget timed from the current lease expiry
+// because the upstream coordinator supplied no projection. Its renewal
+// counts are placeholders, not coordinator facts.
+func (b *ClaimBudget) LeaseExpiryOnly() bool { return b != nil && b.expiryOnly }
 
 func policyBudget(cfg contract.LeaseConfig) (time.Duration, time.Duration, error) {
 	d, err := time.ParseDuration(cfg.Duration)
@@ -30,13 +37,15 @@ func policyBudget(cfg contract.LeaseConfig) (time.Duration, time.Duration, error
 }
 
 // Budget loads policy from the approved base and uses the manager clock.
+// In fork mode it returns nil when the upstream coordinator predates claim
+// budgets and supplied no projection.
 func (m *Manager) Budget(st *IssueState) (*ClaimBudget, error) {
 	if st == nil || st.Lease.ClaimedAt.IsZero() {
 		return nil, nil
 	}
 	if m.gateway != nil {
 		if st.ClaimBudget == nil {
-			return nil, fmt.Errorf("upstream coordinator did not supply claim budget")
+			return nil, nil
 		}
 		b := *st.ClaimBudget
 		b.Active = st.Lease.Status == "active" && st.Lease.ExpiresAt.After(m.nowFn())
@@ -55,6 +64,28 @@ func (m *Manager) Budget(st *IssueState) (*ClaimBudget, error) {
 		return nil, fmt.Errorf("load approved budget policy: %w", err)
 	}
 	return projectBudget(st.Lease, cfg.Lease, m.nowFn())
+}
+
+// WorkBudget is Budget for wind-down timing. When the upstream coordinator
+// supplied no projection, it times wind-down from the current lease expiry
+// with a reserve of a third of duration. The fallback grants nothing: the
+// coordinator still fences every renewal and claim check.
+func (m *Manager) WorkBudget(st *IssueState, duration time.Duration) (*ClaimBudget, error) {
+	b, err := m.Budget(st)
+	if err != nil || b != nil || m.gateway == nil || st == nil || st.Lease.ClaimedAt.IsZero() {
+		return b, err
+	}
+	if duration <= 0 {
+		return nil, fmt.Errorf("lease duration is required to time wind-down without an upstream claim budget")
+	}
+	now := m.nowFn()
+	b = &ClaimBudget{Active: st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now), RenewalsUsed: st.Lease.Renewals, Deadline: st.Lease.ExpiresAt, Threshold: duration / 3, expiryOnly: true}
+	b.Remaining = max(time.Duration(0), st.Lease.ExpiresAt.Sub(now))
+	b.Available = b.Remaining
+	if !b.Active {
+		b.Available = 0
+	}
+	return b, nil
 }
 
 func projectBudget(l contract.Lease, cfg contract.LeaseConfig, now time.Time) (*ClaimBudget, error) {

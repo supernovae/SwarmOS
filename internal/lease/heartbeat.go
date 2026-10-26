@@ -35,7 +35,7 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 			}
 			var b *ClaimBudget
 			if err == nil {
-				b, err = m.Budget(st)
+				b, err = m.WorkBudget(st, duration)
 			}
 			if err != nil {
 				h.fail(err)
@@ -62,7 +62,7 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 				err = m.CheckClaim(ctx, issue, owner)
 			}
 			if err == nil {
-				b, err = m.Budget(st)
+				b, err = m.WorkBudget(st, duration)
 			}
 			if err != nil {
 				h.fail(err)
@@ -72,7 +72,9 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 				h.fail(claimpause.ErrBudget)
 				return
 			}
-			if b != nil && b.RenewalsRemaining == 0 {
+			// Without an upstream budget the coordinator alone decides
+			// whether another renewal is allowed.
+			if b != nil && b.RenewalsRemaining == 0 && !b.LeaseExpiryOnly() {
 				continue
 			}
 			renewed, renewErr := m.Renew(ctx, issue, owner, duration)

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/workflow"
 )
@@ -177,5 +178,70 @@ func TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestCLIForkStatusMissingClaimBudget reads state written by an upstream
+// coordinator that predates claim budgets.
+func TestCLIForkStatusMissingClaimBudget(t *testing.T) {
+	f := newUpstreamRemoteFixture(t)
+	alice := f.aliceClone("alice")
+	opts := f.as("alice", alice)
+	if out, err := f.run(opts, "--upstream-remote", "upstream", "--fork", "issue", "claim", "42", "--agent", "mock"); err != nil {
+		t.Fatalf("claim: %v\n%s", err, out)
+	}
+	status := func(args ...string) string {
+		t.Helper()
+		out, err := f.run(opts, append([]string{"--upstream-remote", "upstream", "--fork", "issue", "status", "42"}, args...)...)
+		if err != nil {
+			t.Fatalf("status: %v\n%s", err, out)
+		}
+		return out
+	}
+	supplied := status()
+	if !strings.Contains(supplied, "Claim budget: 0 renewals used, ") || strings.Contains(supplied, "unavailable from upstream coordinator") {
+		t.Fatalf("supplied budget output changed:\n%s", supplied)
+	}
+
+	store := coordination.NewGitStore(f.upstreamRoot)
+	raw, rev, err := store.Load(t.Context(), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err = json.Unmarshal(raw, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy, "claim_budget")
+	if raw, err = json.Marshal(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CompareAndSwap(t.Context(), 42, rev, raw); err != nil {
+		t.Fatal(err)
+	}
+	if f.state().ClaimBudget != nil {
+		t.Fatal("fixture still serves a claim budget")
+	}
+
+	text := status()
+	for _, want := range []string{"claim budget: unavailable from upstream coordinator\n", "octo/swarm #42 active: owner=alice", "Base: " + f.baseSHA} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "Claim budget: ") {
+		t.Fatalf("status fabricated a budget:\n%s", text)
+	}
+	var result struct {
+		Issues []struct {
+			ClaimBudget            *lease.ClaimBudget `json:"claim_budget"`
+			ClaimBudgetUnavailable bool               `json:"claim_budget_unavailable"`
+		}
+	}
+	if err = json.Unmarshal([]byte(status("--json")), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Issues) != 1 || result.Issues[0].ClaimBudget != nil || !result.Issues[0].ClaimBudgetUnavailable {
+		t.Fatalf("status JSON: %+v", result)
 	}
 }

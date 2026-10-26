@@ -15,6 +15,7 @@ import (
 	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/workflow"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
@@ -51,6 +52,15 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 
 			cfgPath := node.DefaultNodeConfigPath()
+			// --upstream-remote saves the node default (origin clears it);
+			// without it, re-initializing keeps the saved default.
+			if remote := strings.TrimSpace(rootOpts.UpstreamRemote); remote != "" {
+				if remote != workspace.DefaultUpstreamRemote {
+					prof.UpstreamRemote = remote
+				}
+			} else if saved, err := node.LoadUpstreamRemote(cfgPath); err == nil {
+				prof.UpstreamRemote = saved
+			}
 			if err := node.SaveProfile(cfgPath, prof); err != nil {
 				return err
 			}
@@ -296,4 +306,5 @@ func printNodeProfile(cmd *cobra.Command, prof *contract.NodeProfile) {
 	fmt.Fprintf(out, "  Models:       %s\n", strings.Join(prof.Models, ", "))
 	fmt.Fprintf(out, "  Resources:    %s/%s, %d CPUs, %s RAM\n",
 		prof.Resources.OS, prof.Resources.Arch, prof.Resources.CPUs, prof.Resources.RAM)
+	fmt.Fprintf(out, "  Upstream:     %s\n", workspace.UpstreamRemoteOrDefault(prof.UpstreamRemote))
 }

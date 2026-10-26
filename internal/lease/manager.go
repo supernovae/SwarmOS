@@ -128,6 +128,7 @@ type Manager struct {
 	security         contract.SecurityConfig
 	store            coordination.Store
 	repoRoot         string
+	upstreamRemote   string
 	nodeProfile      *contract.NodeProfile
 	nowFn            func() time.Time
 	gateway          WorkerGateway
@@ -140,6 +141,15 @@ func NewManager(tr tracker.Tracker, security contract.SecurityConfig) *Manager {
 }
 
 func (m *Manager) SetNodeProfile(profile *contract.NodeProfile) { m.nodeProfile = profile }
+
+// SetUpstreamRemote names the project remote holding authoritative state and
+// approved bases. Call it before ConfigureStore; empty means origin.
+func (m *Manager) SetUpstreamRemote(name string) { m.upstreamRemote = strings.TrimSpace(name) }
+
+// UpstreamRemote names the project remote, origin unless configured.
+func (m *Manager) UpstreamRemote() string {
+	return workspace.UpstreamRemoteOrDefault(m.upstreamRemote)
+}
 func (m *Manager) ConfigureStore(root string) error {
 	if strings.TrimSpace(root) == "" {
 		return fmt.Errorf("empty repository root")
@@ -156,7 +166,7 @@ func (m *Manager) ConfigureStore(root string) error {
 	root = filepath.Clean(canonical)
 	m.repoRoot = root
 	if strings.HasPrefix(m.tracker.BackendName(), "github") {
-		m.store = coordination.NewGitStore(root)
+		m.store = coordination.NewGitStoreWithRemote(root, m.upstreamRemote)
 	} else {
 		m.store = coordination.NewFileStore(root)
 	}
@@ -703,7 +713,7 @@ func (m *Manager) trustedBase() (string, error) {
 	if m.repoRoot == "" {
 		return "", ErrStoreUnconfigured
 	}
-	return workspace.ResolveBase(m.repoRoot)
+	return workspace.ResolveBaseFrom(m.repoRoot, m.UpstreamRemote())
 }
 
 // AcquirePR reuses the approved WorkUnit lease for a linked PR revision.
@@ -1761,7 +1771,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 			}
 			// A first publication may create a branch or acknowledge this exact
 			// candidate, but cannot adopt and overwrite an unrelated live head.
-			observed := workspace.InspectCheckpoint(ctx, m.repoRoot, "origin", n, branch, "")
+			observed := workspace.InspectCheckpoint(ctx, m.repoRoot, m.UpstreamRemote(), n, branch, "")
 			if observed.RemoteBranch.Error != "" {
 				return nil, fmt.Errorf("inspect first checkpoint remote: %s", observed.RemoteBranch.Error)
 			}

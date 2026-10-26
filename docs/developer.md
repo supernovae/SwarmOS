@@ -81,7 +81,7 @@ Stop editors, agents, and other writers in completed checkouts before applying c
 
 Remote deletion and its state progress record use one atomic Git push with exact expected heads. Local branch deletion uses the original expected tip in a Git compare-and-swap; a moved branch stays intact. Rerun cleanup to handle remaining resources, including after the remote branch is already absent. State and contributor ledgers remain available for status and provenance inspection.
 
-With `--backend local`, local resources are scoped to the current repository and remote branch verification is reported as not applicable. Local open PRs with no repository identity conflict by branch name against both the issue branch and `swarm/pr-<N>`; unrelated branches do not block cleanup. The local backend consumes recorded merged outcomes but currently has no offline merge or mark-merged command. The GitHub backend continues to require matching upstream, origin, and PR repository identities.
+With `--backend local`, local resources are scoped to the current repository and remote branch verification is reported as not applicable. Local open PRs with no repository identity conflict by branch name against both the issue branch and `swarm/pr-<N>`; unrelated branches do not block cleanup. The local backend consumes recorded merged outcomes but currently has no offline merge or mark-merged command. The GitHub backend continues to require matching upstream, PR, and project-remote repository identities; the project remote is `origin` unless you [select another one](#choose-your-git-remote-layout).
 
 If an interrupted cleanup leaves a reservation, run `swarm issue cleanup 42 --recover-reservation --backend github` to fence that operation and preview again, then rerun cleanup explicitly. Recovery retains the operation's audit history. GitHub cannot transact PR creation together with Git ref deletion; cleanup rechecks open PRs immediately before deletion, but a PR created after that check can race with it.
 
@@ -128,7 +128,47 @@ SwarmOS uses your agent's normal login and security controls. On **Linux**, Code
 > [!NOTE]
 > Model connectivity stays in the authenticated harness. Isolated tools can use the task snapshot, private scratch space, and system runtime files; tool network access is disabled. Install build tools and dependencies locally. The [capability table](ARCHITECTURE.md#tool-capabilities) describes editing, shell access, and extension restrictions. Native macOS and Windows execution still need qualification; Windows users can use a qualified Linux setup in WSL2. Authenticated OCI workers are a separate roadmap item.
 
-Run `swarm repo doctor` and `swarm issue work 42 --dry-run` to check the setup before claiming work. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
+Run `swarm repo doctor` and `swarm issue work 42 --dry-run` to check the setup before claiming work.
+
+### Choose your Git remote layout
+
+On the GitHub backend, swarm needs to know which Git remote is the project and, with `--fork`, which one is your writable fork. Both common layouts work:
+
+| Layout | How you get it | What to pass |
+| :--- | :--- | :--- |
+| `origin` is the project, `fork` is your fork | `git clone` the project, then `gh repo fork --remote=true --remote-name=fork` | Nothing extra: `swarm --fork issue work 42` |
+| `origin` is your fork, `upstream` is the project | `gh repo clone <your-login>/REPO`, or `gh repo fork --remote` in a clone of the project | `swarm --upstream-remote upstream --fork issue work 42` |
+
+Check which layout you have with `git remote -v`. If your fork clone has no `upstream` remote, add one:
+
+```bash
+git remote -v
+git remote add upstream https://github.com/OWNER/REPO.git
+```
+
+With the second layout, run your usual commands with `--upstream-remote upstream`, or save it in this machine's node profile (`upstream_remote` in `~/.config/swarm/node.yaml`) so you can leave the flag out:
+
+```bash
+swarm --upstream-remote upstream --fork issue work 42
+swarm --upstream-remote upstream --fork issue submit 42
+
+# Save the default once; later commands use it
+swarm --upstream-remote upstream node init
+swarm node status
+swarm --fork issue work 42
+
+# Use a different writable fork remote for one command
+swarm --fork --fork-remote my-fork issue work 42
+```
+
+swarm picks the remotes in this order:
+
+- **Project remote:** `--upstream-remote`, then the node profile's `upstream_remote`, then `origin`. `--upstream-remote origin` overrides a saved default for one command, and `swarm --upstream-remote origin node init` clears it. Running `swarm node init` without the flag keeps the saved value.
+- **Fork remote (with `--fork`):** `--fork-remote` when you pass it. Otherwise `fork` while the project remote is `origin`, and `origin` when the project remote has another name. `--fork-remote origin` is only allowed when the project remote is not `origin`.
+
+Before anything is written (claims, coordinator requests, worktrees, checkpoints, or pushes), swarm checks that the project remote resolves to the repository named by `--repo` when you pass it, that the fork remote is a GitHub repository owned by your authenticated account that you can push to, and that the two are different repositories, including when their URLs are spelled differently. If a check fails, swarm stops instead of trying another remote. The error names the remote and how to fix it: add or correct the remote, pass `--upstream-remote <project-remote>`, or pass `--fork-remote <your-fork-remote>`. swarm never renames or rewrites your remotes.
+
+The same selection applies without `--fork`: maintainers and collaborators whose `origin` is a personal fork pass `--upstream-remote upstream`, and swarm reads and writes coordination state, approved bases, and task branches on that remote. `--upstream-remote` applies only to the GitHub backend. The fork coordinator Action runs in a fresh checkout of the project, where `origin` is the project, so it needs no setting. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
 
 ---
 
@@ -197,7 +237,7 @@ swarm issue work --next --all --backend github
 
 `swarm issue submit <issue>` hands maintainers a linked Draft PR with the plan, test plan, implementation summary, and validation results together. The approved issue remains the work contract; the PR proposes its implementation. `swarm issue status <issue>` shows the recorded PR number and URL. A `submitted` phase and `completed` lease mean the worker has finished its submission, not that the PR has been reviewed or merged.
 
-Before publishing, `swarm issue submit` checks the selected target branch against the approved base. If it has moved, the command reports how many target commits the base is behind and checks whether the validated checkpoint merges cleanly. Conflicts are informational: submission still opens the draft PR, lists the conflicted paths, and adds the recovery command to its description. For PR #123, run `swarm pr rebase 123 --resolve`; fork contributors use `swarm --fork pr rebase 123 --resolve` (add `--fork-remote <name>` for a custom fork remote).
+Before publishing, `swarm issue submit` checks the selected target branch against the approved base. If it has moved, the command reports how many target commits the base is behind and checks whether the validated checkpoint merges cleanly. Conflicts are informational: submission still opens the draft PR, lists the conflicted paths, and adds the recovery command to its description. For PR #123, run `swarm pr rebase 123 --resolve`; fork contributors use `swarm --fork pr rebase 123 --resolve` (add `--fork-remote <name>` for a custom fork remote). The suggested command repeats any `--upstream-remote` you passed.
 
 The moved base needs approval re-pinned before or during rebase. Fork contributors first need a maintainer to run `swarm issue approve <issue>` upstream; see the approval steps below. Submission never rebases the branch or changes its approval. If the target cannot be fetched or inspected, it reports a skipped freshness check and proceeds. Results describe the target observed at submit time; it can move again afterward. `--json` includes a `base_freshness` object with status, drift, behind count, and conflicted paths; unknown drift and counts are `null`.
 
@@ -220,7 +260,7 @@ Before claiming work or starting agents, `pr work` checks GitHub mergeability an
 
 Who can revise a PR:
 
-- **Maintainers** with upstream write permission can revise any linked PR. For a PR whose head lives in a contributor's fork, add a writable Git remote for that fork and select it with `--fork-remote <name>` (default `fork`), without `--fork`.
+- **Maintainers** with upstream write permission can revise any linked PR. For a PR whose head lives in a contributor's fork, add a writable Git remote for that fork and select it with `--fork-remote <name>` (default `fork`, or `origin` when `--upstream-remote` names another remote), without `--fork`.
 - **Contributors** revise their own fork PRs with `swarm --fork pr ...`. Changes publish to the branch in their fork, and the upstream fork coordinator records each step after checking that they own that fork, that the published head is the one they validated, and that the revised plan is approved. See [Revising your PR](fork-mode.md#revising-your-pr-after-review).
 
 `pr status` shows the published head and target, local revision, check runs, and GitHub review records with their commit SHAs. Checks on the published head are separate from local `pr validate` results; reviews against an older commit remain visible as history. When the tracker reports no CI checks (for example, on the local backend), `pr status` shows the SwarmOS validation recorded for the published head as a `swarm-validation` check.
@@ -281,7 +321,7 @@ swarm pr rebase 33 --continue --backend github
 swarm pr rebase 33 --abort --backend github
 ```
 
-A conflict at the current approved baseline needs a rebase, without another issue approval. When the target has moved, follow the release → maintainer approval → rebase sequence above. Contributors add `--fork --fork-remote <name>` to their PR commands; issue approval is a maintainer action against upstream, without fork flags. After a paused rebase, finish with `--continue` after staging files, use `--continue --resolve`, or restore the starting commit with `--abort`.
+A conflict at the current approved baseline needs a rebase, without another issue approval. When the target has moved, follow the release → maintainer approval → rebase sequence above. Contributors add `--fork` (and `--fork-remote <name>` for a custom fork remote) to their PR commands; issue approval is a maintainer action against upstream, without fork flags. After a paused rebase, finish with `--continue` after staging files, use `--continue --resolve`, or restore the starting commit with `--abort`.
 
 ##### Let the developer agent resolve conflicts
 
@@ -423,7 +463,7 @@ Check `swarm issue status <issue>` for the count and limit. When automation reac
 ```
 
 - `reason` is `changes_requested`, `needs_approval`, or `conflict`.
-- `argv` is the suggested command as separate literal arguments, starting with `swarm`. Run it without a shell, or quote each element yourself. It repeats the `--backend`, `--repo`, and `--root` you used, and for worker commands `--fork` and `--fork-remote`. Maintainer commands (`issue approve`, `issue review-plan --approve`) are run upstream, so they leave out fork flags, and in fork mode they also leave out `--root`.
+- `argv` is the suggested command as separate literal arguments, starting with `swarm`. Run it without a shell, or quote each element yourself. It repeats the `--backend`, `--repo`, `--root`, and `--upstream-remote` you used, and for worker commands `--fork` and `--fork-remote`. Maintainer commands (`issue approve`, `issue review-plan --approve`) are run upstream, so they leave out fork flags, and in fork mode they also leave out `--root`.
 - `human_required` is `true` when a person has to act, such as a maintainer approving or someone resolving files by hand.
 
 `next_action` is advisory. It never grants authority and contains no credentials: the command it names still goes through every approval, claim, and policy check. Existing fields such as `error`, `recovery`, `report`, and `result` are unchanged.

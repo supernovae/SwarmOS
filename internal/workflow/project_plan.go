@@ -135,7 +135,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 		return nil, fmt.Errorf("specify --from <file> to decompose a project plan or --scan to sense-make open issues")
 	}
 
-	baseSHA, _ := workspace.ResolveBase(root)
+	baseSHA, _ := workspace.ResolveBaseFrom(root, e.upstreamRemote())
 	cfg := e.Config
 	if baseSHA != "" {
 		if pinnedCfg, err := harness.LoadConfigAt(root, baseSHA); err == nil {

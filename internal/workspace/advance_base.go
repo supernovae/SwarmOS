@@ -19,23 +19,28 @@ type ProvisionContext struct {
 	// no recorded checkpoint. An untouched branch and worktree still at this
 	// commit are fast-forwarded to the newly approved base.
 	PreviousBase string
+	// UpstreamRemote names the project remote that holds approved bases and
+	// same-repository checkpoints; empty means origin. A checkpoint remote
+	// with any other name is a fork, even when it is called origin.
+	UpstreamRemote string
 }
 
 // ProvisionWithContext is ProvisionFromRemoteAt with explicit recovery context.
 func ProvisionWithContext(repoRoot, checkpointRemote string, issueNum int, title, baseSHA, branch, headSHA string, pc ProvisionContext) (string, string, error) {
+	upstream := UpstreamRemoteOrDefault(pc.UpstreamRemote)
 	if pc.Dropped != nil {
-		return ProvisionFromRemoteAt(repoRoot, checkpointRemote, issueNum, title, baseSHA, branch, headSHA, pc.Dropped)
+		return provisionFromRemote(repoRoot, upstream, checkpointRemote, issueNum, title, baseSHA, branch, headSHA, pc.Dropped)
 	}
 	previous := strings.TrimSpace(pc.PreviousBase)
-	if previous != "" && headSHA == "" && (checkpointRemote == "" || checkpointRemote == "origin") && issueNum > 0 && baseSHA != "" {
+	if previous != "" && headSHA == "" && (checkpointRemote == "" || checkpointRemote == upstream) && issueNum > 0 && baseSHA != "" {
 		if branch == "" {
 			branch = BranchName(issueNum, title)
 		}
-		if err := advanceUntouchedBase(repoRoot, issueNum, branch, previous, baseSHA, nil); err != nil {
+		if err := advanceUntouchedBaseFrom(repoRoot, upstream, issueNum, branch, previous, baseSHA, nil); err != nil {
 			return "", "", err
 		}
 	}
-	return ProvisionFromRemoteAt(repoRoot, checkpointRemote, issueNum, title, baseSHA, branch, headSHA)
+	return provisionFromRemote(repoRoot, upstream, checkpointRemote, issueNum, title, baseSHA, branch, headSHA, nil)
 }
 
 // staleActiveEvidence lists generated active files that describe the old
@@ -48,6 +53,10 @@ var staleActiveEvidence = []string{"PLAN.md", "TEST_PLAN.md", "REVIEW.md", "VALI
 // refused with a recovery hint before anything changes. beforeCAS lets tests
 // move the branch between the eligibility checks and the ref update.
 func advanceUntouchedBase(root string, issue int, branch, previous, base string, beforeCAS func() error) error {
+	return advanceUntouchedBaseFrom(root, DefaultUpstreamRemote, issue, branch, previous, base, beforeCAS)
+}
+
+func advanceUntouchedBaseFrom(root, upstreamRemote string, issue int, branch, previous, base string, beforeCAS func() error) error {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return err
@@ -70,7 +79,7 @@ func advanceUntouchedBase(root string, issue int, branch, previous, base string,
 	}
 	resolvedBase, err := resolveCommit(absRoot, base)
 	if err != nil {
-		if fetchErr := FetchCommit(absRoot, "origin", base); fetchErr != nil {
+		if fetchErr := FetchCommit(absRoot, upstreamRemote, base); fetchErr != nil {
 			return nil
 		}
 		if resolvedBase, err = resolveCommit(absRoot, base); err != nil {

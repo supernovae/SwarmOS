@@ -82,7 +82,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 					}
 				}
 				if issueNumber != 0 && state != nil && state.Branch != "" {
-					remote := "origin"
+					remote := manager.UpstreamRemote()
 					if options.Fork {
 						remote = options.effectiveForkRemote()
 					}

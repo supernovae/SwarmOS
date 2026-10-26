@@ -100,10 +100,12 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		if err := lease.SaveClaimToken(root, issue, state.Lease.ClaimID, state.BaseSHA); err != nil {
 			return fail(err)
 		}
-		checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, preflight.Issue.Title, state.Lease.ClaimID, state.Branch)
+		checkpointRemote, targetBranch := workspace.ClaimCheckpointFrom(manager.UpstreamRemote(), rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, preflight.Issue.Title, state.Lease.ClaimID, state.Branch)
 		var path, branch string
 		err = reporter.ReportSetupPhase(cmd.Context(), issue, "workspace", func() error {
-			path, branch, err = workspace.ProvisionWithContext(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA, state.ProvisionContext(rootOpts.Fork))
+			pc := state.ProvisionContext(rootOpts.Fork)
+			pc.UpstreamRemote = manager.UpstreamRemote()
+			path, branch, err = workspace.ProvisionWithContext(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA, pc)
 			return err
 		})
 		if err != nil {

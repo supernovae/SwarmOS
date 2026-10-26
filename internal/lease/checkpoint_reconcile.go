@@ -64,7 +64,7 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		return nil, fmt.Errorf("%w: authoritative checkpoint %s differs from expected %s", ErrClaimFence, st.HeadSHA, expected)
 	}
 	inspect := func() (workspace.CheckpointState, error) {
-		o := workspace.InspectCheckpoint(ctx, m.repoRoot, "origin", n, st.Branch, expected)
+		o := workspace.InspectCheckpoint(ctx, m.repoRoot, m.UpstreamRemote(), n, st.Branch, expected)
 		if o.Error != "" || o.Worktree.Error != "" || o.LocalBranch.Error != "" || o.RemoteBranch.Error != "" ||
 			o.Dirty || o.Rebasing || o.AttachedBranch != st.Branch || o.Worktree.SHA != candidate || o.LocalBranch.SHA != candidate || o.RemoteBranch.SHA != expected {
 			return o, fmt.Errorf("%w: reconciliation preconditions failed: %s", ErrClaimFence, o.String())
@@ -80,7 +80,7 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		if dryRun {
 			return nil, fmt.Errorf("predecessor %s unavailable locally; fetch %s before inspecting lineage", expected, coordination.CheckpointRef(n, expected))
 		}
-		if _, err = checkpointGit(ctx, m.repoRoot, "fetch", "--no-write-fetch-head", "origin", coordination.CheckpointRef(n, expected)); err != nil {
+		if _, err = checkpointGit(ctx, m.repoRoot, "fetch", "--no-write-fetch-head", m.UpstreamRemote(), coordination.CheckpointRef(n, expected)); err != nil {
 			return nil, fmt.Errorf("predecessor %s unavailable: %w", expected, err)
 		}
 	}

@@ -175,10 +175,12 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				if err := lease.SaveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID, claimed.BaseSHA); err != nil {
 					return nil, err
 				}
-				checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue.Number, issue.Title, claimed.Lease.ClaimID, claimed.Branch)
+				checkpointRemote, targetBranch := workspace.ClaimCheckpointFrom(mgr.UpstreamRemote(), rootOpts.Fork, rootOpts.effectiveForkRemote(), issue.Number, issue.Title, claimed.Lease.ClaimID, claimed.Branch)
 				var worktree, branch string
 				err = opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "workspace", func() error {
-					worktree, branch, err = workspace.ProvisionWithContext(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA, claimed.ProvisionContext(rootOpts.Fork))
+					pc := claimed.ProvisionContext(rootOpts.Fork)
+					pc.UpstreamRemote = mgr.UpstreamRemote()
+					worktree, branch, err = workspace.ProvisionWithContext(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA, pc)
 					return err
 				})
 				if err != nil {
@@ -225,7 +227,7 @@ func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error
 	root := o.resolveRepoRoot()
 	slug := o.Repo
 	if slug == "" {
-		slug = registry.DetectGitHubSlug(root)
+		slug = o.detectUpstreamSlug(root)
 		if slug == "" {
 			slug = "local/repo"
 		}

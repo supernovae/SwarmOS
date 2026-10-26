@@ -140,6 +140,14 @@ type Engine struct {
 	ForkRemote   string
 }
 
+// upstreamRemote names the project remote configured on the lease manager.
+func (e *Engine) upstreamRemote() string {
+	if e.LeaseManager == nil {
+		return workspace.DefaultUpstreamRemote
+	}
+	return e.LeaseManager.UpstreamRemote()
+}
+
 func NewEngine(repoRoot string, tr tracker.Tracker) (*Engine, error) {
 	cfg, err := harness.LoadConfig(repoRoot)
 	if err != nil {
@@ -276,7 +284,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 		copyState.Attestations = nil
 		state = &copyState
 	}
-	_ = workspace.FetchCommit(opts.RepoRoot, "origin", state.BaseSHA)
+	_ = workspace.FetchCommit(opts.RepoRoot, e.upstreamRemote(), state.BaseSHA)
 	cfg, err := harness.LoadConfigAt(opts.RepoRoot, state.BaseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load approved base config: %w", err)
@@ -540,7 +548,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if err := e.LeaseManager.CheckClaim(coordinatorCtx, opts.IssueNumber, opts.Owner); err != nil {
 			return nil, err
 		}
-		if err := workspace.PushForkCheckpoint(coordinatorCtx, opts.RepoRoot, forkRemote, st.Branch, st.HeadSHA); err != nil {
+		if err := workspace.PushForkCheckpointFrom(coordinatorCtx, opts.RepoRoot, e.upstreamRemote(), forkRemote, st.Branch, st.HeadSHA); err != nil {
 			return nil, err
 		}
 		if err := workspace.RebindBudgetCheckpoint(coordinatorCtx, opts.RepoRoot, opts.IssueNumber, st.ResumeCheckpointBranch, st.Branch, st.HeadSHA); err != nil {
@@ -551,7 +559,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return nil, err
 		}
 	}
-	checkpointRemote, targetBranch := workspace.ClaimCheckpoint(forkMode, forkRemote, opts.IssueNumber, pre.Issue.Title, st.Lease.ClaimID, st.Branch)
+	checkpointRemote, targetBranch := workspace.ClaimCheckpointFrom(e.upstreamRemote(), forkMode, forkRemote, opts.IssueNumber, pre.Issue.Title, st.Lease.ClaimID, st.Branch)
 	if opts.SetupProgress == nil {
 		progress.next("workspace")
 	} else if opts.PRNumber != 0 {
@@ -572,7 +580,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 	} else {
 		err = opts.SetupProgress.ReportSetupPhase(ctx, opts.IssueNumber, "workspace", func() error {
-			wtPath, branch, err = workspace.ProvisionWithContext(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA, st.ProvisionContext(forkMode))
+			pc := st.ProvisionContext(forkMode)
+			pc.UpstreamRemote = e.upstreamRemote()
+			wtPath, branch, err = workspace.ProvisionWithContext(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA, pc)
 			return err
 		})
 		if err != nil {
@@ -934,7 +944,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			st, err = e.LeaseManager.RecordPRHead(ctx, opts.IssueNumber, opts.Owner, opts.PRNumber, branch, checkpointHead)
 		} else {
 			if forkMode {
-				if err := workspace.PushForkCheckpoint(ctx, opts.RepoRoot, forkRemote, branch, checkpointHead); err != nil {
+				if err := workspace.PushForkCheckpointFrom(ctx, opts.RepoRoot, e.upstreamRemote(), forkRemote, branch, checkpointHead); err != nil {
 					return res, err
 				}
 			}

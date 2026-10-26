@@ -49,6 +49,7 @@ change, with diffs for existing files, and writes nothing.`,
 				SwarmVersion:    pin,
 				TemplateDir:     templateDir,
 				ForkCoordinator: forkCoordinator,
+				UpstreamRemote:  rootOpts.effectiveUpstreamRemote(),
 				DryRun:          dryRun,
 			})
 			if err != nil {

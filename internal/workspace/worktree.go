@@ -62,11 +62,39 @@ func ForkBranchName(issueNum int, claimID string) string {
 // DefaultForkRemote names a contributor's personal fork remote.
 const DefaultForkRemote = "fork"
 
+// DefaultUpstreamRemote names the project remote when none is selected.
+const DefaultUpstreamRemote = "origin"
+
+var remoteNameRegex = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// ValidateRemoteName rejects names that Git could read as an option, a URL,
+// or a path before one is used as a command argument or ref component.
+func ValidateRemoteName(name string) error {
+	if !remoteNameRegex.MatchString(name) || strings.Contains(name, "..") || strings.HasSuffix(name, ".lock") || strings.HasSuffix(name, ".") {
+		return fmt.Errorf("invalid git remote name %q", name)
+	}
+	return nil
+}
+
+// UpstreamRemoteOrDefault returns name, or origin when it is empty.
+func UpstreamRemoteOrDefault(name string) string {
+	if name = strings.TrimSpace(name); name != "" {
+		return name
+	}
+	return DefaultUpstreamRemote
+}
+
 // ClaimCheckpoint returns where a claim's work is checkpointed: the recorded
 // branch on origin (or the issue branch), or in fork mode a claim-scoped branch
 // on the contributor's fork remote.
 func ClaimCheckpoint(forkMode bool, forkRemote string, issueNum int, title, claimID, recorded string) (remote, branch string) {
-	remote, branch = "origin", recorded
+	return ClaimCheckpointFrom(DefaultUpstreamRemote, forkMode, forkRemote, issueNum, title, claimID, recorded)
+}
+
+// ClaimCheckpointFrom is ClaimCheckpoint with same-repository checkpoints on
+// the named upstream remote.
+func ClaimCheckpointFrom(upstreamRemote string, forkMode bool, forkRemote string, issueNum int, title, claimID, recorded string) (remote, branch string) {
+	remote, branch = UpstreamRemoteOrDefault(upstreamRemote), recorded
 	if forkMode {
 		remote = forkRemote
 		if branch == "" {
@@ -102,19 +130,29 @@ func FetchCommit(repoRoot, remoteName, sha string) error {
 // ResolveRemoteGitHubSlug resolves a git remote's owner/repo slug and rejects
 // missing remotes or a fork remote that points to the same URL as origin.
 func ResolveRemoteGitHubSlug(repoRoot, remoteName string) (string, error) {
+	return ResolveForkRemoteSlug(repoRoot, DefaultUpstreamRemote, remoteName)
+}
+
+// ResolveForkRemoteSlug resolves a git remote's owner/repo slug. Any remote
+// other than upstreamRemote must not point to the same URL as the upstream.
+func ResolveForkRemoteSlug(repoRoot, upstreamRemote, remoteName string) (string, error) {
 	remoteName = strings.TrimSpace(remoteName)
+	upstreamRemote = UpstreamRemoteOrDefault(upstreamRemote)
 	if remoteName == "" {
 		return "", fmt.Errorf("remote name is required")
+	}
+	if err := ValidateRemoteName(remoteName); err != nil {
+		return "", err
 	}
 	rawURL, err := gitOutput(repoRoot, "remote", "get-url", remoteName)
 	if err != nil {
 		return "", fmt.Errorf("git remote %q is not configured: %w", remoteName, err)
 	}
 	rawURL = strings.TrimSpace(rawURL)
-	if remoteName != "origin" {
-		if originURL, origErr := gitOutput(repoRoot, "remote", "get-url", "origin"); origErr == nil {
-			if strings.TrimSpace(originURL) == rawURL {
-				return "", fmt.Errorf("fork remote %q must not point to the same URL as upstream origin", remoteName)
+	if remoteName != upstreamRemote {
+		if upstreamURL, upErr := gitOutput(repoRoot, "remote", "get-url", upstreamRemote); upErr == nil {
+			if strings.TrimSpace(upstreamURL) == rawURL {
+				return "", fmt.Errorf("fork remote %q must not point to the same URL as upstream %s", remoteName, upstreamRemote)
 			}
 		}
 	}
@@ -127,7 +165,7 @@ func ResolveRemoteGitHubSlug(repoRoot, remoteName string) (string, error) {
 }
 
 func parseGitRemoteSlug(rawURL string) (string, error) {
-	u := strings.TrimSpace(rawURL)
+	u := strings.TrimRight(strings.TrimSpace(rawURL), "/")
 	if u == "" {
 		return "", fmt.Errorf("empty git remote URL")
 	}
@@ -136,7 +174,7 @@ func parseGitRemoteSlug(rawURL string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("parse remote URL %q: %w", rawURL, err)
 		}
-		path := strings.Trim(strings.TrimSuffix(parsed.Path, ".git"), "/")
+		path := strings.Trim(strings.TrimSuffix(strings.TrimRight(parsed.Path, "/"), ".git"), "/")
 		parts := strings.Split(path, "/")
 		if len(parts) >= 2 && parts[len(parts)-2] != "" && parts[len(parts)-1] != "" {
 			return parts[len(parts)-2] + "/" + parts[len(parts)-1], nil
@@ -161,9 +199,22 @@ func parseGitRemoteSlug(rawURL string) (string, error) {
 // PushForkCheckpoint pushes a local checkpoint commit to the verified fork
 // remote using explicit --force-with-lease expectations (never to origin).
 func PushForkCheckpoint(ctx context.Context, repoRoot, forkRemote, branch, headSHA string) error {
+	return PushForkCheckpointFrom(ctx, repoRoot, DefaultUpstreamRemote, forkRemote, branch, headSHA)
+}
+
+// PushForkCheckpointFrom is PushForkCheckpoint that never pushes to the named
+// upstream remote.
+func PushForkCheckpointFrom(ctx context.Context, repoRoot, upstreamRemote, forkRemote, branch, headSHA string) error {
 	forkRemote = strings.TrimSpace(forkRemote)
-	if forkRemote == "" || forkRemote == "origin" {
-		return fmt.Errorf("fork checkpoint push requires a non-origin fork remote (got %q)", forkRemote)
+	upstreamRemote = UpstreamRemoteOrDefault(upstreamRemote)
+	if forkRemote == "" || strings.EqualFold(forkRemote, upstreamRemote) {
+		if upstreamRemote == DefaultUpstreamRemote {
+			return fmt.Errorf("fork checkpoint push requires a non-origin fork remote (got %q)", forkRemote)
+		}
+		return fmt.Errorf("fork checkpoint push requires a fork remote other than upstream %s (got %q)", upstreamRemote, forkRemote)
+	}
+	if err := ValidateRemoteName(forkRemote); err != nil {
+		return err
 	}
 	if !strings.HasPrefix(branch, "swarm/issue-") || strings.Contains(branch, "..") || strings.TrimSpace(headSHA) == "" {
 		return fmt.Errorf("invalid fork checkpoint branch %q or head SHA %q", branch, headSHA)
@@ -195,32 +246,52 @@ func PushForkCheckpoint(ctx context.Context, repoRoot, forkRemote, branch, headS
 // origin exists, its advertised default branch is authoritative; a local
 // checkout branch must never become the base accidentally.
 func ResolveBase(repoRoot string) (string, error) {
+	return ResolveBaseFrom(repoRoot, DefaultUpstreamRemote)
+}
+
+// ResolveBaseFrom is ResolveBase with the named upstream remote's default
+// branch as the authority. Only a missing origin falls back to local HEAD; a
+// missing named upstream remote is an error.
+func ResolveBaseFrom(repoRoot, upstreamRemote string) (string, error) {
+	upstreamRemote = UpstreamRemoteOrDefault(upstreamRemote)
+	if err := ValidateRemoteName(upstreamRemote); err != nil {
+		return "", err
+	}
 	if _, err := gitOutput(repoRoot, "rev-parse", "--show-toplevel"); err != nil {
 		return "", fmt.Errorf("resolve repository root: %w", err)
 	}
-	if _, err := gitOutput(repoRoot, "remote", "get-url", "origin"); err != nil {
+	if _, err := gitOutput(repoRoot, "remote", "get-url", upstreamRemote); err != nil {
 		if !errors.Is(err, errGitFailed) {
 			return "", err
 		}
+		if upstreamRemote != DefaultUpstreamRemote {
+			return "", MissingUpstreamRemoteError(upstreamRemote)
+		}
 		return resolveCommit(repoRoot, "HEAD")
 	}
-	if _, err := gitOutput(repoRoot, "fetch", "--no-write-fetch-head", "--prune", "origin"); err != nil {
-		return "", fmt.Errorf("fetch origin before resolving base: %w", err)
+	if _, err := gitOutput(repoRoot, "fetch", "--no-write-fetch-head", "--prune", upstreamRemote); err != nil {
+		return "", fmt.Errorf("fetch %s before resolving base: %w", upstreamRemote, err)
 	}
-	if _, err := gitOutput(repoRoot, "remote", "set-head", "origin", "--auto"); err != nil {
-		return "", fmt.Errorf("discover advertised origin default branch: %w", err)
+	if _, err := gitOutput(repoRoot, "remote", "set-head", upstreamRemote, "--auto"); err != nil {
+		return "", fmt.Errorf("discover advertised %s default branch: %w", upstreamRemote, err)
 	}
-	out, err := gitOutput(repoRoot, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+	out, err := gitOutput(repoRoot, "symbolic-ref", "--quiet", "refs/remotes/"+upstreamRemote+"/HEAD")
 	if err != nil {
-		return "", fmt.Errorf("origin has no advertised default branch: %w", err)
+		return "", fmt.Errorf("%s has no advertised default branch: %w", upstreamRemote, err)
 	}
 	return resolveCommit(repoRoot, strings.TrimSpace(out))
+}
+
+// MissingUpstreamRemoteError names a selected upstream remote that is not
+// configured and how to fix it.
+func MissingUpstreamRemoteError(upstreamRemote string) error {
+	return fmt.Errorf("upstream remote %q is not configured; add it with git remote add %s <project-url>, or pass --upstream-remote <project-remote>", upstreamRemote, upstreamRemote)
 }
 
 // ProvisionAt creates or reopens exactly the requested worktree branch.
 // It never resets an existing branch and refuses an unrelated directory.
 func ProvisionAt(repoRoot string, issueNum int, title, baseSHA, branch, headSHA string) (string, string, error) {
-	return ProvisionFromRemoteAt(repoRoot, "origin", issueNum, title, baseSHA, branch, headSHA)
+	return ProvisionFromRemoteAt(repoRoot, DefaultUpstreamRemote, issueNum, title, baseSHA, branch, headSHA)
 }
 
 // ProvisionFromRemoteAt creates or reopens the requested worktree branch,
@@ -229,17 +300,34 @@ func ProvisionAt(repoRoot string, issueNum int, title, baseSHA, branch, headSHA 
 // fork remote in --fork mode).
 // Callers that know a previous approved base use ProvisionWithContext.
 func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, title, baseSHA, branch, headSHA string, recovery ...*DroppedCheckpoint) (string, string, error) {
-	if len(recovery) > 0 && recovery[0] != nil {
-		if checkpointRemote != "origin" || headSHA != "" {
+	var dropped *DroppedCheckpoint
+	if len(recovery) > 0 {
+		dropped = recovery[0]
+	}
+	return provisionFromRemote(repoRoot, DefaultUpstreamRemote, checkpointRemote, issueNum, title, baseSHA, branch, headSHA, dropped)
+}
+
+// provisionFromRemote fetches the approved base from upstreamRemote; only a
+// checkpoint on that same remote is a same-repository checkpoint.
+func provisionFromRemote(repoRoot, upstreamRemote, checkpointRemote string, issueNum int, title, baseSHA, branch, headSHA string, dropped *DroppedCheckpoint) (string, string, error) {
+	upstreamRemote = UpstreamRemoteOrDefault(upstreamRemote)
+	if err := ValidateRemoteName(upstreamRemote); err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(checkpointRemote) == "" {
+		checkpointRemote = upstreamRemote
+	}
+	if err := ValidateRemoteName(checkpointRemote); err != nil {
+		return "", "", err
+	}
+	if dropped != nil {
+		if checkpointRemote != upstreamRemote || headSHA != "" {
 			return "", "", fmt.Errorf("invalid checkpoint recovery context")
 		}
-		return provisionDroppedCheckpoint(repoRoot, issueNum, title, baseSHA, recovery[0])
+		return provisionDroppedCheckpoint(repoRoot, upstreamRemote, issueNum, title, baseSHA, dropped)
 	}
 	if issueNum <= 0 || baseSHA == "" {
 		return "", "", errors.New("issue number and approved base SHA are required")
-	}
-	if strings.TrimSpace(checkpointRemote) == "" {
-		checkpointRemote = "origin"
 	}
 	if branch == "" {
 		branch = BranchName(issueNum, title)
@@ -250,7 +338,7 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 	}
 	resolvedBase, err := resolveCommit(absRoot, baseSHA)
 	if err != nil {
-		if fetchErr := FetchCommit(absRoot, "origin", baseSHA); fetchErr == nil {
+		if fetchErr := FetchCommit(absRoot, upstreamRemote, baseSHA); fetchErr == nil {
 			resolvedBase, err = resolveCommit(absRoot, baseSHA)
 		}
 		if err != nil {

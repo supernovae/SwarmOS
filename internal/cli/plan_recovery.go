@@ -30,6 +30,9 @@ func planReviewRecovery(opts *RootOptions, st *lease.IssueState, resource string
 	if opts.RepoRoot != "" {
 		command += " --root " + quote(opts.RepoRoot)
 	}
+	if opts.UpstreamRemote != "" {
+		command += " --upstream-remote " + quote(opts.UpstreamRemote)
+	}
 	if opts.Fork {
 		command += " --fork"
 	}

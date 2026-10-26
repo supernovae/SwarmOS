@@ -21,11 +21,11 @@ func (s *GitStore) CompareAndSwapAndDeleteBranch(ctx context.Context, n int, old
 	if _, err := s.run(ctx, "", "check-ref-format", ref); err != nil {
 		return "", err
 	}
-	fetchURL, err := s.run(ctx, "", "remote", "get-url", "--all", "origin")
+	fetchURL, err := s.run(ctx, "", "remote", "get-url", "--all", s.Remote())
 	if err != nil {
 		return "", err
 	}
-	pushURL, err := s.run(ctx, "", "remote", "get-url", "--push", "--all", "origin")
+	pushURL, err := s.run(ctx, "", "remote", "get-url", "--push", "--all", s.Remote())
 	if err != nil {
 		return "", err
 	}

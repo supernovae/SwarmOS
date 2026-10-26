@@ -37,6 +37,9 @@ type Service struct {
 	Manager    *lease.Manager
 	Fork       bool
 	ForkRemote string
+	// UpstreamRemote names the project remote; empty uses the lease
+	// manager's, which defaults to origin.
+	UpstreamRemote string
 	// Now overrides the clock used for lease expiry checks (tests).
 	Now func() time.Time
 	// NewRunner builds role runners for work and rebase conflict resolution;
@@ -359,10 +362,11 @@ func (s *Service) contributorRemote(r *Result) (string, error) {
 	if strings.EqualFold(r.PR.HeadRepo, provider.UpstreamRepo()) || r.State == nil || !strings.EqualFold(r.PR.HeadRepo, r.State.ForkRepo) {
 		return "", fmt.Errorf("--fork can only revise a PR whose head is in the contributor fork recorded for issue #%d", r.IssueNumber)
 	}
-	if s.ForkRemote == "" || s.ForkRemote == "origin" {
+	upstream := s.upstreamRemote()
+	if s.ForkRemote == "" || strings.EqualFold(s.ForkRemote, upstream) {
 		return "", fmt.Errorf("--fork PR revisions require --fork-remote naming your fork %s", r.PR.HeadRepo)
 	}
-	slug, err := workspace.ResolveRemoteGitHubSlug(s.Root, s.ForkRemote)
+	slug, err := workspace.ResolveForkRemoteSlug(s.Root, upstream, s.ForkRemote)
 	if err != nil {
 		return "", err
 	}
@@ -419,18 +423,31 @@ func recordedValidationChecks(st *lease.IssueState, head string) []tracker.Check
 	return nil
 }
 
+// upstreamRemote names the project remote holding approved bases and
+// same-repository PR heads.
+func (s *Service) upstreamRemote() string {
+	if strings.TrimSpace(s.UpstreamRemote) != "" {
+		return strings.TrimSpace(s.UpstreamRemote)
+	}
+	if s.Manager != nil {
+		return s.Manager.UpstreamRemote()
+	}
+	return workspace.DefaultUpstreamRemote
+}
+
 func (s *Service) remote(ctx context.Context, r *Result) (string, error) {
 	if s.Fork {
 		return s.contributorRemote(r)
 	}
 	remote := ""
 	if provider, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
-		remote = "origin"
+		upstream := s.upstreamRemote()
+		remote = upstream
 		if !strings.EqualFold(r.PR.HeadRepo, provider.UpstreamRepo()) {
-			if s.ForkRemote == "" || s.ForkRemote == "origin" {
+			if s.ForkRemote == "" || strings.EqualFold(s.ForkRemote, upstream) {
 				return "", fmt.Errorf("fork PR head requires an explicit writable remote matching %s", r.PR.HeadRepo)
 			}
-			slug, err := workspace.ResolveRemoteGitHubSlug(s.Root, s.ForkRemote)
+			slug, err := workspace.ResolveForkRemoteSlug(s.Root, upstream, s.ForkRemote)
 			if err != nil {
 				return "", err
 			}
@@ -575,7 +592,13 @@ func (s *Service) openForMutation(ctx context.Context, number int, reconciles bo
 // preparePR checks out the managed PR worktree at localHead and verifies it is
 // the worktree recorded for this PR.
 func (s *Service) preparePR(ctx context.Context, r *Result, remote, localHead string, requireBaseAncestor bool) (string, string, error) {
-	return workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: r.PR.Number, Remote: remote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: localHead, AllowHarnessMarkers: true, RequireBaseAncestor: requireBaseAncestor})
+	baseRemote := ""
+	if remote != "" && remote != s.upstreamRemote() {
+		if _, ok := s.Tracker.(interface{ UpstreamRepo() string }); ok {
+			baseRemote = s.upstreamRemote()
+		}
+	}
+	return workspace.PreparePR(ctx, s.Root, workspace.PRWorkspaceOptions{Number: r.PR.Number, Remote: remote, BaseRemote: baseRemote, HeadBranch: headBranch(r.PR), HeadSHA: r.PR.HeadSHA, BaseSHA: r.BaseSHA, LocalHeadSHA: localHead, AllowHarnessMarkers: true, RequireBaseAncestor: requireBaseAncestor})
 }
 
 // requireApproval re-reads the issue and requires the claimed state to still
@@ -1144,7 +1167,7 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 			if fresh.HeadSHA != rev.RemoteHeadSHA {
 				return nil, fmt.Errorf("PR head moved concurrently; refusing stale publish")
 			}
-			if remote == "origin" {
+			if remote == s.upstreamRemote() {
 				p.Next("publish/submission record")
 				st, e = s.Manager.CompletePRRevision(ctx, r.IssueNumber, owner, number, rev.RemoteHeadSHA, head)
 				if e != nil {

@@ -205,6 +205,8 @@ type NodeProfile struct {
 	Capabilities []string      `yaml:"capabilities" json:"capabilities"` // "coding", "testing", "review", "docs"
 	Models       []string      `yaml:"models" json:"models"`             // "claude", "codex", "opencode", "omp"
 	Resources    NodeResources `yaml:"resources" json:"resources"`
+	// UpstreamRemote names the project Git remote when it is not origin.
+	UpstreamRemote string `yaml:"upstream_remote,omitempty" json:"upstream_remote,omitempty"`
 }
 
 type RoleAttestation struct {

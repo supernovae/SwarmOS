@@ -33,7 +33,7 @@ func (s *GitStore) retentionArgs(ctx context.Context, n int, heads ...string) ([
 		}
 		ref := CheckpointRef(n, head)
 		if _, err := s.run(ctx, "", "cat-file", "-e", head+"^{commit}"); err != nil {
-			if _, fetchErr := s.run(ctx, "", "fetch", "--no-write-fetch-head", "origin", ref); fetchErr != nil {
+			if _, fetchErr := s.run(ctx, "", "fetch", "--no-write-fetch-head", s.Remote(), ref); fetchErr != nil {
 				return nil, fmt.Errorf("checkpoint object %s unavailable (including retention ref %s): %w", head, ref, fetchErr)
 			}
 			if _, err := s.run(ctx, "", "cat-file", "-e", head+"^{commit}"); err != nil {

@@ -72,13 +72,20 @@ func (a *actionTracker) Authorize(_ context.Context, permission string) error {
 }
 
 type Coordinator struct {
-	RepoRoot        string
-	UpstreamRepo    string
+	RepoRoot     string
+	UpstreamRepo string
+	// UpstreamRemote names the coordinator checkout's project remote; empty
+	// means origin. It is local configuration, never taken from requests.
+	UpstreamRemote  string
 	Tracker         tracker.Tracker
 	NowFn           func() time.Time
 	ForkGitURLFunc  func(forkRepo string) string
 	VerifyForkFunc  func(ctx context.Context, forkSlug, expectedOwner string) (string, error)
 	DefaultBaseFunc func(repoRoot string) (string, error)
+}
+
+func (c *Coordinator) upstreamRemote() string {
+	return workspace.UpstreamRemoteOrDefault(c.UpstreamRemote)
 }
 
 func (c *Coordinator) now() time.Time {
@@ -184,6 +191,9 @@ func (c *Coordinator) HandleEvent(ctx context.Context, ev IssueCommentEvent) (*F
 	if c == nil || c.Tracker == nil || strings.TrimSpace(c.RepoRoot) == "" {
 		return nil, fmt.Errorf("fork coordinator is not configured")
 	}
+	if err := workspace.ValidateRemoteName(c.upstreamRemote()); err != nil {
+		return nil, fmt.Errorf("fork coordinator upstream remote: %w", err)
+	}
 	if !IsRequestComment(ev.Comment.Body) {
 		return nil, nil
 	}
@@ -254,7 +264,7 @@ var Operations = []string{
 }
 
 func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor string, req lease.ForkRequest) (*lease.IssueState, string, error) {
-	readStore := coordination.NewGitStore(c.RepoRoot)
+	readStore := coordination.NewGitStoreWithRemote(c.RepoRoot, c.upstreamRemote())
 	rawCurrent, _, err := readStore.Load(ctx, req.IssueNumber)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: approve task first", lease.ErrApprovalRequired)
@@ -269,18 +279,19 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 	if strings.TrimSpace(currentState.BaseSHA) == "" {
 		return nil, "", lease.ErrApprovalRequired
 	}
-	_ = workspace.FetchCommit(c.RepoRoot, "origin", currentState.BaseSHA)
+	_ = workspace.FetchCommit(c.RepoRoot, c.upstreamRemote(), currentState.BaseSHA)
 
 	cfg, err := harness.LoadConfigAt(c.RepoRoot, currentState.BaseSHA)
 	if err != nil {
 		return nil, "", fmt.Errorf("load approved policy at %s: %w", currentState.BaseSHA, err)
 	}
 
-	idxStore := coordination.NewForkIndexedStore(c.RepoRoot, actor, cfg.MaxActiveForkClaims(), requestID)
+	idxStore := coordination.NewForkIndexedStoreWithRemote(c.RepoRoot, c.upstreamRemote(), actor, cfg.MaxActiveForkClaims(), requestID)
 	idxStore.SetNowFunc(c.now)
 
 	actTracker := &actionTracker{Tracker: c.Tracker, actor: actor}
 	mgr := lease.NewManager(actTracker, cfg.Security)
+	mgr.SetUpstreamRemote(c.upstreamRemote())
 	mgr.SetStore(c.RepoRoot, idxStore)
 	mgr.SetNowFunc(c.now)
 
@@ -645,9 +656,10 @@ func (c *Coordinator) resolveDefaultBase() (string, error) {
 	if c.DefaultBaseFunc != nil {
 		return c.DefaultBaseFunc(c.RepoRoot)
 	}
-	out, err := runGitWithToken(context.Background(), c.RepoRoot, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	remote := c.upstreamRemote()
+	out, err := runGitWithToken(context.Background(), c.RepoRoot, "symbolic-ref", "--quiet", "--short", "refs/remotes/"+remote+"/HEAD")
 	if err == nil {
-		if b := strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"); b != "" {
+		if b := strings.TrimPrefix(strings.TrimSpace(string(out)), remote+"/"); b != "" {
 			return b, nil
 		}
 	}

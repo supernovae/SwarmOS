@@ -44,7 +44,7 @@ func newLeaseMutationCmd(options *RootOptions, renew bool) *cobra.Command {
 			return err
 		}
 		if renew {
-			cfg, approved, loadErr := approvedLeasePolicy(options.resolveRepoRoot(), state.BaseSHA)
+			cfg, approved, loadErr := approvedLeasePolicy(options.resolveRepoRoot(), manager.UpstreamRemote(), state.BaseSHA)
 			if loadErr != nil {
 				return loadErr
 			}

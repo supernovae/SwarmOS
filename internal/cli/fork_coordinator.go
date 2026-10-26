@@ -45,9 +45,10 @@ func newForkCoordinatorCmd(rootOpts *RootOptions) *cobra.Command {
 				upstreamRepo = gh.UpstreamRepo()
 			}
 			coord := &fork.Coordinator{
-				RepoRoot:     repoRoot,
-				UpstreamRepo: upstreamRepo,
-				Tracker:      tr,
+				RepoRoot:       repoRoot,
+				UpstreamRepo:   upstreamRepo,
+				UpstreamRemote: rootOpts.effectiveUpstreamRemote(),
+				Tracker:        tr,
 			}
 			res, err := coord.HandleEvent(cmd.Context(), *ev)
 			if err != nil {

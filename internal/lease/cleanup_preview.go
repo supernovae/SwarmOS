@@ -60,7 +60,7 @@ func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Man
 	p.RemoteApplicable = !m.cleanupLocal()
 	r := CleanupResource{Kind: "remote-code-branch", Name: st.Branch, ExpectedHead: o.SubmittedHeadSHA, Reason: reason}
 	if reason == "" && p.RemoteApplicable {
-		out, e := cleanupGitOutput(ctx, root, "ls-remote", "--refs", "origin", "refs/heads/"+st.Branch)
+		out, e := cleanupGitOutput(ctx, root, "ls-remote", "--refs", m.UpstreamRemote(), "refs/heads/"+st.Branch)
 		if e != nil {
 			return nil, e
 		}

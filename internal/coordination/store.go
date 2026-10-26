@@ -127,10 +127,24 @@ func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next 
 	return digest(next), nil
 }
 
-type GitStore struct{ root string }
+type GitStore struct{ root, remote string }
 
+// NewGitStore keeps authoritative state on the origin remote.
 func NewGitStore(root string) *GitStore { return &GitStore{root: root} }
-func (s *GitStore) ref(n int) string    { return fmt.Sprintf("refs/heads/swarm-state/issue-%d", n) }
+
+// NewGitStoreWithRemote keeps authoritative state on the named upstream remote.
+func NewGitStoreWithRemote(root, remote string) *GitStore {
+	return &GitStore{root: root, remote: strings.TrimSpace(remote)}
+}
+
+// Remote names the upstream remote holding authoritative state.
+func (s *GitStore) Remote() string {
+	if s.remote == "" {
+		return "origin"
+	}
+	return s.remote
+}
+func (s *GitStore) ref(n int) string { return fmt.Sprintf("refs/heads/swarm-state/issue-%d", n) }
 func (s *GitStore) run(ctx context.Context, input string, args ...string) (string, error) {
 	c, redact, err := gitcredential.Command(ctx, s.root, args...)
 	if err != nil {
@@ -144,7 +158,7 @@ func (s *GitStore) run(ctx context.Context, input string, args ...string) (strin
 	return redact(strings.TrimSpace(string(b))), nil
 }
 func (s *GitStore) remoteSHA(ctx context.Context, ref string) (string, error) {
-	out, err := s.run(ctx, "", "ls-remote", "--refs", "origin", ref)
+	out, err := s.run(ctx, "", "ls-remote", "--refs", s.Remote(), ref)
 	if err != nil {
 		return "", err
 	}
@@ -163,7 +177,7 @@ func (s *GitStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err = s.run(ctx, "", "fetch", "--no-write-fetch-head", "origin", sha); err != nil {
+	if _, err = s.run(ctx, "", "fetch", "--no-write-fetch-head", s.Remote(), sha); err != nil {
 		return nil, "", fmt.Errorf("fetch pinned state %s: %w", ref, err)
 	}
 	body, err := s.run(ctx, "", "show", sha+":state.json")
@@ -194,7 +208,7 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 	if old == "" {
 		leaseArg = ref + ":"
 	}
-	if _, err = s.run(ctx, "", "push", "origin", "--force-with-lease="+leaseArg, commit+":"+ref); err != nil {
+	if _, err = s.run(ctx, "", "push", s.Remote(), "--force-with-lease="+leaseArg, commit+":"+ref); err != nil {
 		actual, readErr := s.remoteSHA(ctx, ref)
 		if readErr == nil && actual != old {
 			return "", ErrConflict
@@ -284,7 +298,7 @@ func (s *GitStore) publishCheckpoint(ctx context.Context, n int, old string, nex
 	if err != nil {
 		return "", err
 	}
-	push := append([]string{"push", "--atomic", "origin", "--force-with-lease=" + stateLease, "--force-with-lease=" + branchLease, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
+	push := append([]string{"push", "--atomic", s.Remote(), "--force-with-lease=" + stateLease, "--force-with-lease=" + branchLease, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
 	if _, err = s.run(ctx, "", push...); err != nil {
 		if expected != nil {
 			return "", fmt.Errorf("%w: atomic checkpoint push: %w", ErrConflict, err)
@@ -328,7 +342,7 @@ func (s *GitStore) CompareAndSwapAndPublishPR(ctx context.Context, n int, oldSta
 	if err != nil {
 		return "", err
 	}
-	push := append([]string{"push", "--atomic", "origin", "--force-with-lease=" + stateRef + ":" + oldState, "--force-with-lease=" + branchRef + ":" + expectedHead, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
+	push := append([]string{"push", "--atomic", s.Remote(), "--force-with-lease=" + stateRef + ":" + oldState, "--force-with-lease=" + branchRef + ":" + expectedHead, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
 	if _, err = s.run(ctx, "", push...); err != nil {
 		return "", fmt.Errorf("atomic PR publication rejected (issue state or remote head changed): %w", err)
 	}
@@ -370,11 +384,16 @@ type ForkIndexedStore struct {
 }
 
 func NewForkIndexedStore(root, actor string, maxActive int, requestID int64) *ForkIndexedStore {
+	return NewForkIndexedStoreWithRemote(root, "", actor, maxActive, requestID)
+}
+
+// NewForkIndexedStoreWithRemote is NewForkIndexedStore on a named upstream remote.
+func NewForkIndexedStoreWithRemote(root, remote, actor string, maxActive int, requestID int64) *ForkIndexedStore {
 	if maxActive <= 0 {
 		maxActive = 1
 	}
 	return &ForkIndexedStore{
-		git:       NewGitStore(root),
+		git:       NewGitStoreWithRemote(root, remote),
 		actor:     strings.TrimSpace(actor),
 		maxActive: maxActive,
 		requestID: requestID,
@@ -404,7 +423,7 @@ func (s *ForkIndexedStore) loadStateAtCommit(ctx context.Context, sha string) (*
 	if sha == "" {
 		return &forkStateEnvelope{}, nil
 	}
-	if _, err := s.git.run(ctx, "", "fetch", "--no-write-fetch-head", "origin", sha); err != nil {
+	if _, err := s.git.run(ctx, "", "fetch", "--no-write-fetch-head", s.git.Remote(), sha); err != nil {
 		return nil, fmt.Errorf("fetch state commit %s: %w", sha, err)
 	}
 	body, err := s.git.run(ctx, "", "show", sha+":state.json")
@@ -464,7 +483,7 @@ func (s *ForkIndexedStore) loadAndRevalidateIndex(ctx context.Context, contribRe
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err := s.git.run(ctx, "", "fetch", "--no-write-fetch-head", "origin", oldSHA); err != nil {
+	if _, err := s.git.run(ctx, "", "fetch", "--no-write-fetch-head", s.git.Remote(), oldSHA); err != nil {
 		return nil, "", fmt.Errorf("fetch contributor index %s: %w", contribRef, err)
 	}
 	body, err := s.git.run(ctx, "", "show", oldSHA+":index.json")
@@ -553,7 +572,7 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 		if err != nil {
 			return "", err
 		}
-		push := append([]string{"push", "--atomic", "origin", "--force-with-lease=" + stateLease, stateCommit + ":" + stateRef}, retention...)
+		push := append([]string{"push", "--atomic", s.git.Remote(), "--force-with-lease=" + stateLease, stateCommit + ":" + stateRef}, retention...)
 		if _, err := s.git.run(ctx, "", push...); err != nil {
 			actual, readErr := s.git.remoteSHA(ctx, stateRef)
 			if readErr == nil && actual != old {
@@ -597,7 +616,7 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 			return "", err
 		}
 		contribLease := contribRef + ":" + oldIndexSHA
-		if _, err := s.git.run(ctx, "", "push", "--atomic", "origin", "--force-with-lease="+stateLease, "--force-with-lease="+contribLease, stateCommit+":"+stateRef, indexCommit+":"+contribRef); err != nil {
+		if _, err := s.git.run(ctx, "", "push", "--atomic", s.git.Remote(), "--force-with-lease="+stateLease, "--force-with-lease="+contribLease, stateCommit+":"+stateRef, indexCommit+":"+contribRef); err != nil {
 			actualState, stateReadErr := s.git.remoteSHA(ctx, stateRef)
 			if (stateReadErr == nil && actualState != old) || (errors.Is(stateReadErr, ErrNotFound) && old != "") {
 				return "", ErrConflict

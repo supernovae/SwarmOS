@@ -707,3 +707,171 @@ func TestCleanupLocalRelativeRootRecoverFailedApply(t *testing.T) {
 		t.Fatal("recovered token still usable")
 	}
 }
+
+func revisedCleanupFixture(t *testing.T) (*cliFixture, int, int, string) {
+	t.Helper()
+	f, n, pr := submittedPRFixture(t, "agent")
+	old := f.state(t, n).HeadSHA
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
+	f.must(t, "pr", "work", strconv.Itoa(pr), "--agent", "mock", "--instructions", "Revise implementation", "--progress=false")
+	f.must(t, "pr", "validate", strconv.Itoa(pr))
+	f.must(t, "pr", "submit", strconv.Itoa(pr))
+	seedLocalCleanupMergedPR(t, f, pr)
+	return f, n, pr, old
+}
+
+func TestCleanupLocalRevisedPRRetire(t *testing.T) {
+	f, n, _, old := revisedCleanupFixture(t)
+	before := f.state(t, n)
+	if before.HeadSHA == old {
+		t.Fatal("PR did not advance")
+	}
+	recorded := false
+	for _, h := range before.CheckpointHeads {
+		if h == old {
+			recorded = true
+		}
+	}
+	if !recorded {
+		t.Fatal("FileStore lost predecessor checkpoint")
+	}
+	if ok, err := workspace.BaseIsAncestor(context.Background(), f.root, old, before.HeadSHA); err != nil || !ok {
+		t.Fatalf("not an ancestor: %v", err)
+	}
+	raw := f.must(t, "issue", "cleanup", strconv.Itoa(n), "--json")
+	var p lease.CleanupPreview
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range p.Resources {
+		if r.Name == workspace.WorktreePath(f.root, n) || (r.Kind == "local-code-branch" && r.Name == before.Branch) {
+			if !r.Eligible || r.ExpectedHead != old {
+				t.Fatalf("ancestor not eligible: %+v", r)
+			}
+		}
+	}
+	if !reflect.DeepEqual(before, f.state(t, n)) {
+		t.Fatal("preview changed state")
+	}
+	p = localCleanupApply(t, f, n)
+	for _, r := range p.Resources {
+		if r.Name == workspace.WorktreePath(f.root, n) && !r.Retired {
+			t.Fatalf("ancestor retained: %+v", r)
+		}
+	}
+	localCleanupApply(t, f, n)
+}
+
+func TestCleanupLocalDirtyLineageAncestor(t *testing.T) {
+	for _, kind := range []string{"tracked", "staged", "untracked", "ignored"} {
+		t.Run(kind, func(t *testing.T) {
+			f, n, _, _ := revisedCleanupFixture(t)
+			path := workspace.WorktreePath(f.root, n)
+			name := "user-file"
+			if kind == "tracked" || kind == "staged" {
+				name = "AGENTS.md"
+			}
+			if kind == "ignored" {
+				name = ".swarm/user-file"
+				fpath := filepath.Join(t.TempDir(), "ignore")
+				prGit(t, path, "config", "core.excludesFile", fpath)
+				if err := os.WriteFile(fpath, []byte(".swarm/\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(path, name), []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "staged" {
+				prGit(t, path, "add", name)
+			}
+			p := localCleanupApply(t, f, n)
+			for _, r := range p.Resources {
+				if (r.Name == path || r.Name == f.state(t, n).Branch) && r.Retired {
+					t.Fatal("dirty ancestor retired")
+				}
+			}
+			if b, err := os.ReadFile(filepath.Join(path, name)); err != nil || string(b) != "keep" {
+				t.Fatal("lost user file")
+			}
+		})
+	}
+}
+
+func TestCleanupLocalNonLineageAncestor(t *testing.T) {
+	f, n, pr := submittedPRFixture(t, "agent")
+	path := workspace.WorktreePath(f.root, n)
+	prGit(t, path, "commit", "--allow-empty", "-m", "unrecorded")
+	unknown := prGit(t, path, "rev-parse", "HEAD")
+	prGit(t, path, "commit", "--allow-empty", "-m", "final")
+	final := prGit(t, path, "rev-parse", "HEAD")
+	st := f.state(t, n)
+	st.CheckpointHeads = []string{st.HeadSHA, final}
+	st.HeadSHA, st.SubmittedHeadSHA = final, final
+	store := coordination.NewFileStore(f.root)
+	_, rev, err := store.Load(context.Background(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(st)
+	if _, err = store.CompareAndSwap(context.Background(), n, rev, raw); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, f.root, "update-ref", "refs/swarm/pr-head/"+strconv.Itoa(pr), final)
+	seedLocalCleanupMergedPR(t, f, pr)
+	prGit(t, path, "reset", "--hard", unknown)
+	p, err := lease.InspectCleanup(context.Background(), f.root, f.tracker, f.manager, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range p.Resources {
+		if r.Name == path && (r.Eligible || !strings.Contains(r.Reason, "lineage")) {
+			t.Fatalf("unrecorded ancestor: %+v", r)
+		}
+	}
+	// Forging preview eligibility must not bypass fresh apply authorization.
+	reservation, err := f.manager.BeginCleanup(context.Background(), n, p.Outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range p.Resources {
+		r := &p.Resources[i]
+		if r.Name == path {
+			r.Eligible = true
+			r.ExpectedHead = unknown
+		}
+	}
+	if err = f.manager.RetireCleanupLocalResources(context.Background(), n, reservation.OperationID, p); err != nil {
+		t.Fatal(err)
+	}
+	if got := prGit(t, path, "rev-parse", "HEAD"); got != unknown {
+		t.Fatal("unrecorded ancestor changed")
+	}
+}
+
+func TestCleanupLocalLineageMovedTip(t *testing.T) {
+	f, n, _, old := revisedCleanupFixture(t)
+	ctx := context.Background()
+	p, err := lease.InspectCleanup(ctx, f.root, f.tracker, f.manager, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := f.manager.BeginCleanup(ctx, n, p.Outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := workspace.WorktreePath(f.root, n)
+	prGit(t, path, "commit", "--allow-empty", "-m", "moved after preview")
+	moved := prGit(t, path, "rev-parse", "HEAD")
+	if err = f.manager.RetireCleanupLocalResources(ctx, n, reservation.OperationID, p); err != nil {
+		t.Fatal(err)
+	}
+	if got := prGit(t, path, "rev-parse", "HEAD"); got != moved {
+		t.Fatal("adopted or removed new tip")
+	}
+	for _, r := range p.Resources {
+		if r.Name == path && (r.Retired || r.ExpectedHead != old) {
+			t.Fatalf("lost captured tip: %+v", r)
+		}
+	}
+}

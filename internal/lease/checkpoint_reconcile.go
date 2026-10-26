@@ -175,6 +175,7 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if _, err = inspect(); err != nil {
 		return nil, err
 	}
+	preserveCheckpointHeads(st, st.HeadSHA, st.SubmittedHeadSHA, candidate)
 	clearHeadEvidence(st)
 	st.HeadSHA = candidate
 	st.LastRebase = &RebaseEvidence{OldHead: expected, NewHead: candidate, OldBase: st.BaseSHA, NewBase: st.BaseSHA, Status: "completed", PatchIdentity: identity, Verified: identityErr == nil}

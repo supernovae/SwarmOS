@@ -755,125 +755,137 @@ type DoctorCheck struct {
 }
 
 func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
+	return RunDoctorWithRunner(repoRoot, checkGitHubAuth, nil)
+}
+
+func RunDoctorWithRunner(repoRoot string, checkGitHubAuth bool, run DoctorRunner) []DoctorCheck {
 	var checks []DoctorCheck
 
-	// 1. Git binary
-	if gitPath, err := exec.LookPath("git"); err == nil {
-		out, _ := exec.Command(gitPath, "--version").CombinedOutput()
-		checks = append(checks, DoctorCheck{
-			Category: "system",
-			Name:     "git",
-			Status:   "OK",
-			Detail:   strings.TrimSpace(string(out)),
-		})
-	} else {
-		checks = append(checks, DoctorCheck{
-			Category: "system",
-			Name:     "git",
-			Status:   "FAIL",
-			Detail:   "git binary not found in PATH",
-		})
-	}
-
-	// 2. GitHub Token / CLI Auth
-	if _, source, err := gitcredential.GitHubToken(); err != nil {
-		checks = append(checks, DoctorCheck{
-			Category: "tracker",
-			Name:     "github-token",
-			Status:   "FAIL",
-			Detail:   err.Error(),
-		})
-	} else if source != "" {
-		checks = append(checks, DoctorCheck{
-			Category: "tracker",
-			Name:     "github-token",
-			Status:   "OK",
-			Detail:   fmt.Sprintf("authenticated via %s (gh CLI not required)", source),
-		})
-	} else if ghPath, err := exec.LookPath("gh"); err == nil {
-		if checkGitHubAuth {
-			if out, err := exec.Command(ghPath, "auth", "status").CombinedOutput(); err == nil {
-				firstLine := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
-				checks = append(checks, DoctorCheck{
-					Category: "tracker",
-					Name:     "gh-auth",
-					Status:   "OK",
-					Detail:   firstLine,
-				})
-			} else {
-				checks = append(checks, DoctorCheck{
-					Category: "tracker",
-					Name:     "gh-auth",
-					Status:   "WARN",
-					Detail:   "gh installed but not authenticated (run gh auth login or set SWARM_GITHUB_TOKEN_COMMAND)",
-				})
+	checks = append(checks, run.Run("system", "git", func() DoctorCheck {
+		// 1. Git binary
+		if gitPath, err := exec.LookPath("git"); err == nil {
+			out, _ := exec.Command(gitPath, "--version").CombinedOutput()
+			return DoctorCheck{
+				Category: "system",
+				Name:     "git",
+				Status:   "OK",
+				Detail:   strings.TrimSpace(string(out)),
 			}
 		} else {
-			checks = append(checks, DoctorCheck{
-				Category: "tracker",
-				Name:     "gh-cli",
-				Status:   "OK",
-				Detail:   ghPath,
-			})
+			return DoctorCheck{
+				Category: "system",
+				Name:     "git",
+				Status:   "FAIL",
+				Detail:   "git binary not found in PATH",
+			}
 		}
-	} else {
-		checks = append(checks, DoctorCheck{
-			Category: "tracker",
-			Name:     "github-auth",
-			Status:   "WARN",
-			Detail:   "no SWARM_GITHUB_TOKEN_COMMAND/SWARM_GITHUB_TOKEN/GH_TOKEN set and gh CLI not found (local tracker still available)",
-		})
-	}
-
+	}))
+	checks = append(checks, run.Run("tracker", "github-auth", func() DoctorCheck {
+		// 2. GitHub Token / CLI Auth
+		if _, source, err := gitcredential.GitHubToken(); err != nil {
+			return DoctorCheck{
+				Category: "tracker",
+				Name:     "github-token",
+				Status:   "FAIL",
+				Detail:   err.Error(),
+			}
+		} else if source != "" {
+			return DoctorCheck{
+				Category: "tracker",
+				Name:     "github-token",
+				Status:   "OK",
+				Detail:   fmt.Sprintf("authenticated via %s (gh CLI not required)", source),
+			}
+		} else if ghPath, err := exec.LookPath("gh"); err == nil {
+			if checkGitHubAuth {
+				if out, err := exec.Command(ghPath, "auth", "status").CombinedOutput(); err == nil {
+					firstLine := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
+					return DoctorCheck{
+						Category: "tracker",
+						Name:     "gh-auth",
+						Status:   "OK",
+						Detail:   firstLine,
+					}
+				} else {
+					return DoctorCheck{
+						Category: "tracker",
+						Name:     "gh-auth",
+						Status:   "WARN",
+						Detail:   "gh installed but not authenticated (run gh auth login or set SWARM_GITHUB_TOKEN_COMMAND)",
+					}
+				}
+			} else {
+				return DoctorCheck{
+					Category: "tracker",
+					Name:     "gh-cli",
+					Status:   "OK",
+					Detail:   ghPath,
+				}
+			}
+		} else {
+			return DoctorCheck{
+				Category: "tracker",
+				Name:     "github-auth",
+				Status:   "WARN",
+				Detail:   "no SWARM_GITHUB_TOKEN_COMMAND/SWARM_GITHUB_TOKEN/GH_TOKEN set and gh CLI not found (local tracker still available)",
+			}
+		}
+	}))
 	// 3. .swarm/ Harness configuration
-	cfg, configErr := LoadConfig(repoRoot)
-	if configErr == nil && cfg.Version >= 1 {
-		checks = append(checks, DoctorCheck{
-			Category: "harness",
-			Name:     ".swarm/config.yaml",
-			Status:   "OK",
-			Detail:   fmt.Sprintf("v%d (default_agent=%s, default_gate=%s)", cfg.Version, cfg.DefaultAgent, cfg.DefaultGate),
-		})
-	} else {
-		checks = append(checks, DoctorCheck{
-			Category: "harness",
-			Name:     ".swarm/config.yaml",
-			Status:   "FAIL",
-			Detail:   fmt.Sprintf("missing or invalid .swarm/config.yaml: %v (run `swarm repo init`)", configErr),
-		})
-	}
-
+	var cfg *contract.SwarmConfig
+	var configErr error
+	checks = append(checks, run.Run("harness", ".swarm/config.yaml", func() DoctorCheck {
+		cfg, configErr = LoadConfig(repoRoot)
+		if configErr == nil && cfg.Version >= 1 {
+			return DoctorCheck{
+				Category: "harness",
+				Name:     ".swarm/config.yaml",
+				Status:   "OK",
+				Detail:   fmt.Sprintf("v%d (default_agent=%s, default_gate=%s)", cfg.Version, cfg.DefaultAgent, cfg.DefaultGate),
+			}
+		} else {
+			return DoctorCheck{
+				Category: "harness",
+				Name:     ".swarm/config.yaml",
+				Status:   "FAIL",
+				Detail:   fmt.Sprintf("missing or invalid .swarm/config.yaml: %v (run `swarm repo init`)", configErr),
+			}
+		}
+	}))
 	if configErr == nil {
 		execution, err := contract.ResolveExecution(cfg, "")
 		if err == nil {
 			for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
-				normal, _ := contract.ResolveAgentLimits(execution, role, false, 0)
-				interactive, _ := contract.ResolveAgentLimits(execution, role, true, 0)
-				detail := fmt.Sprintf("unattended %s; interactive wall %s", normal.Wall, interactive.Wall)
-				if interactive.ExcludeIdle {
-					detail += fmt.Sprintf("; working time %s (operator input excluded)", interactive.Active)
-				}
-				checks = append(checks, DoctorCheck{Category: "execution", Name: role + " timeout", Status: "OK", Detail: detail + "; runs use approved-base policy"})
+				checks = append(checks, run.Run("execution", role+" timeout", func() DoctorCheck {
+					normal, _ := contract.ResolveAgentLimits(execution, role, false, 0)
+					interactive, _ := contract.ResolveAgentLimits(execution, role, true, 0)
+					detail := fmt.Sprintf("unattended %s; interactive wall %s", normal.Wall, interactive.Wall)
+					if interactive.ExcludeIdle {
+						detail += fmt.Sprintf("; working time %s (operator input excluded)", interactive.Active)
+					}
+					return DoctorCheck{Category: "execution", Name: role + " timeout", Status: "OK", Detail: detail + "; runs use approved-base policy"}
+				}))
 			}
 		}
 	}
 
-	if spec, err := LoadValidationSpec(repoRoot); err == nil {
-		checks = append(checks, DoctorCheck{
-			Category: "harness",
-			Name:     ".swarm/validation/required-checks.yaml",
-			Status:   "OK",
-			Detail:   fmt.Sprintf("%d checks, %d protected paths", len(spec.RequiredChecks), len(spec.ProtectedPaths)),
-		})
-	} else {
-		checks = append(checks, DoctorCheck{
-			Category: "harness",
-			Name:     ".swarm/validation/required-checks.yaml",
-			Status:   "FAIL",
-			Detail:   err.Error(),
-		})
-	}
-
+	checks = append(checks, run.Run("harness", ".swarm/validation/required-checks.yaml", func() DoctorCheck {
+		if spec, err := LoadValidationSpec(repoRoot); err == nil {
+			return DoctorCheck{
+				Category: "harness",
+				Name:     ".swarm/validation/required-checks.yaml",
+				Status:   "OK",
+				Detail:   fmt.Sprintf("%d checks, %d protected paths", len(spec.RequiredChecks), len(spec.ProtectedPaths)),
+			}
+		} else {
+			return DoctorCheck{
+				Category: "harness",
+				Name:     ".swarm/validation/required-checks.yaml",
+				Status:   "FAIL",
+				Detail:   err.Error(),
+			}
+		}
+	}))
 	// Probe configured executables rather than assuming particular installed CLIs.
 	if cfg, err := LoadConfig(repoRoot); err == nil {
 		names := make([]string, 0, len(cfg.Agents))
@@ -882,19 +894,21 @@ func RunDoctor(repoRoot string, checkGitHubAuth bool) []DoctorCheck {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			binary := cfg.Agents[name].Binary
-			check := DoctorCheck{Category: "binary", Name: name, Status: "OPTIONAL", Detail: "executable not found: " + binary}
-			if path, err := exec.LookPath(binary); err == nil {
-				check.Status, check.Detail = "OK", path+"; installation only; see execution checks"
-			}
-			checks = append(checks, check)
+			checks = append(checks, run.Run("binary", name, func() DoctorCheck {
+				binary := cfg.Agents[name].Binary
+				check := DoctorCheck{Category: "binary", Name: name, Status: "OPTIONAL", Detail: "executable not found: " + binary}
+				if path, err := exec.LookPath(binary); err == nil {
+					check.Status, check.Detail = "OK", path+"; installation only; see execution checks"
+				}
+				return check
+			}))
 		}
 	}
 
 	if configErr != nil || cfg.Version < 1 {
 		cfg = nil
 	}
-	checks = append(checks, doctorSandboxCheck(cfg))
+	checks = append(checks, run.Run("sandbox", "reviewer-runtime", func() DoctorCheck { return doctorSandboxCheck(cfg) }))
 	return checks
 }
 

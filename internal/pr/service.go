@@ -259,7 +259,7 @@ func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *
 		return nil, err
 	}
 	if !lease.TaskApprovalCurrent(st, wu, cfg) {
-		return nil, lease.ErrApprovalRequired
+		return nil, &lease.TaskApprovalError{IssueNumber: issue.Number}
 	}
 	if st.Branch == "" || pr.HeadSHA == "" || pr.BaseSHA == "" {
 		return nil, fmt.Errorf("PR #%d lacks exact branch/head/base identity", number)
@@ -608,7 +608,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		if opts.Work.InspectOnly {
 			return r, nil
 		}
-		return r, fmt.Errorf("%s\n%s", strings.Join(r.WorkPreflight.Blockers, "\n"), strings.Join(r.WorkPreflight.Commands, "\n"))
+		return r, r.WorkPreflight.stopError(r)
 	}
 	opts.Work.Version = s.Version
 	opts.Work.RepoRoot = s.Root
@@ -766,14 +766,14 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 	}
 	if !opts.Abort && r.PR.BaseSHA != r.BaseSHA {
 		if !opts.Resolve || s.Fork {
-			return nil, fmt.Errorf("PR base tip differs from approved issue baseline: swarm issue approve %d then retry (release active claim first if needed)", r.IssueNumber)
+			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("PR base tip differs from approved issue baseline: swarm issue approve %d then retry (release active claim first if needed)", r.IssueNumber)}
 		}
 		// Preflight before changing approval or Git state.
 		if _, err = s.newResolver(ctx, r, opts); err != nil {
 			return nil, err
 		}
 		if _, err = s.Manager.ReapproveRebase(ctx, r.IssueNumber, opts.Number, r.BaseSHA, r.PR.BaseSHA, r.PR.HeadSHA); err != nil {
-			return nil, fmt.Errorf("routine reapproval: %w; run swarm issue approve %d", err, r.IssueNumber)
+			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("routine reapproval: %w; run swarm issue approve %d", err, r.IssueNumber)}
 		}
 		r, remote, err = s.openForMutation(ctx, opts.Number, false)
 		if err != nil {
@@ -790,7 +790,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 	if !opts.Abort && r.PR.BaseSHA != r.BaseSHA {
-		return nil, fmt.Errorf("PR target moved during approval: swarm issue approve %d", r.IssueNumber)
+		return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("PR target moved during approval: swarm issue approve %d", r.IssueNumber)}
 	}
 	var rv *resolver
 	if opts.Resolve {
@@ -818,7 +818,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 					return nil, fmt.Errorf("no managed PR rebase in progress")
 				}
 			} else if rebasing {
-				return nil, fmt.Errorf("rebase already in progress; run swarm pr rebase %d --continue or --abort", opts.Number)
+				return nil, &ConflictError{PRNumber: opts.Number, Paused: true, Err: fmt.Errorf("rebase already in progress; run swarm pr rebase %d --continue or --abort", opts.Number)}
 			} else if dirty {
 				return nil, fmt.Errorf("PR worktree must be clean before starting rebase")
 			}
@@ -861,6 +861,9 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 				r.State = updated
 				if rv != nil {
 					cause = fmt.Errorf("%w\n%s", cause, resolveGuidance(opts.Number, conflicts))
+				}
+				if len(conflicts) > 0 {
+					cause = &ConflictError{PRNumber: opts.Number, Paused: true, Manual: rv != nil, Err: cause}
 				}
 				return r, cause
 			}
@@ -993,6 +996,10 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string, p *pro
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
 	}
+	// Inspect only an existing worktree: a paused rebase must finish first.
+	if _, _, rebasing, err := workspace.InspectPRHead(ctx, r.Worktree); err == nil && rebasing {
+		return nil, PausedRebaseError(ctx, r.Worktree, number)
+	}
 	return s.withClaim(ctx, r, true, nil, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		if st.PRRevision == nil || st.PRRevision.Number != number {
 			return nil, fmt.Errorf("pending PR revision changed during validation")
@@ -1017,7 +1024,10 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 	if e != nil {
 		return nil, e
 	}
-	if dirty || rebasing || head != st.PRRevision.LocalHeadSHA {
+	if rebasing {
+		return nil, PausedRebaseError(ctx, r.Worktree, r.PR.Number)
+	}
+	if dirty || head != st.PRRevision.LocalHeadSHA {
 		return nil, fmt.Errorf("PR worktree is dirty, rebasing, or differs from recorded checkpoint")
 	}
 	wu, e := s.requireApproval(ctx, r, st)

@@ -45,7 +45,11 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			defer func() {
 				if runErr != nil && failedReport != nil {
 					if asJSON {
-						_ = writeJSON(cmd, map[string]any{"kind": "submission", "status": "failed", "error": runErr.Error(), "report": failedReport})
+						outcome := map[string]any{"kind": "submission", "status": "failed", "error": runErr.Error(), "report": failedReport}
+						if action := nextActionOf(runErr); action != nil {
+							outcome["next_action"] = action
+						}
+						_ = writeJSON(cmd, outcome)
 					} else {
 						writeValidationChecks(cmd, failedReport)
 					}
@@ -53,11 +57,14 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 					reportJSONFailure(cmd, asJSON, "submission", runErr)
 				}
 			}()
+			stops := stopContext{opts: rootOpts, resource: "issue"}
+			defer func() { runErr = stops.stop(runErr) }()
 			root := rootOpts.resolveRepoRoot()
 			issue, worktree, err := resolveIssueAndWorktree(root, args)
 			if err != nil {
 				return err
 			}
+			stops.number = issue
 			lock, err := lease.LockClaim(root, issue)
 			if err != nil {
 				return err

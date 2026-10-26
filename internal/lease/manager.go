@@ -762,7 +762,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 		if errors.Is(err, ErrClaimFence) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
+		return nil, &TaskApprovalError{IssueNumber: n, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
 	}
 	if st.PRRevision != nil && prNumber != st.PRRevision.Number {
 		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", n, st.PRRevision.Number)
@@ -790,7 +790,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 			}
 			return nil, &ClaimBaseApprovalError{IssueNumber: n, Reason: reason}
 		}
-		return nil, ErrApprovalRequired
+		return nil, &TaskApprovalError{IssueNumber: n}
 	}
 	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
 		return nil, &AlreadyClaimedError{IssueNumber: n, Owner: st.Lease.Owner, ExpiresAt: st.Lease.ExpiresAt}
@@ -917,7 +917,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			if errors.Is(err, ErrClaimFence) {
 				return nil, err
 			}
-			return nil, fmt.Errorf("%w: approve task first", ErrApprovalRequired)
+			return nil, &TaskApprovalError{IssueNumber: issue, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
 		}
 		if st.PRRevision != nil {
 			return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", issue, st.PRRevision.Number)
@@ -933,7 +933,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			return nil, err
 		}
 		if !TaskApprovalCurrent(st, wu, cfg) {
-			return nil, ErrApprovalRequired
+			return nil, &TaskApprovalError{IssueNumber: issue}
 		}
 		policyDur, err := time.ParseDuration(cfg.Lease.Duration)
 		if err != nil || policyDur <= 0 {
@@ -1050,7 +1050,7 @@ func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState)
 		return err
 	}
 	if !TaskApprovalCurrent(st, wu, cfg) {
-		return ErrApprovalRequired
+		return &TaskApprovalError{IssueNumber: n}
 	}
 	return nil
 }
@@ -2008,8 +2008,11 @@ func TaskApprovalCurrent(st *IssueState, wu *contract.WorkUnit, cfg *contract.Sw
 }
 
 func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
-	if st == nil || wu == nil || st.TaskDigest != contract.DigestWorkUnit(wu) {
+	if st == nil || wu == nil {
 		return ErrApprovalRequired
+	}
+	if st.TaskDigest != contract.DigestWorkUnit(wu) {
+		return &TaskApprovalError{IssueNumber: wu.IssueNumber}
 	}
 	gate := st.EffectiveGate
 	if gate == "" {
@@ -2022,7 +2025,13 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 	if gate == contract.GateNone {
 		return nil
 	}
-	return verifyReviewBinding(st, gate)
+	if err := verifyReviewBinding(st, gate); err != nil {
+		if gate == contract.GateHuman {
+			return &HumanPlanApprovalError{IssueNumber: wu.IssueNumber, Err: err}
+		}
+		return err
+	}
+	return nil
 }
 
 func verifyReviewBinding(st *IssueState, gate contract.GateMode) error {

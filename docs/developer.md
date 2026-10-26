@@ -400,6 +400,65 @@ After `CHANGES_REQUESTED`, issue and PR work print the review identity and the n
 
 Check `swarm issue status <issue>` for the count and limit. When automation reaches the limit, stage revised reports in the appropriate issue or PR worktree (`swarm issue stage <issue> --phase plan` or `swarm pr stage <PR> --phase plan`), request an authenticated human review, or revise the WorkUnit for maintainer approval. Successful non-fork staging resets the count; fork staging preserves it and needs a maintainer review or changed approved revision to reset. `plan_mode: agent` disables manual staging, while `plan_mode: interactive` always pauses for it without spending automatic attempts. Node workers move past capped tasks. See [the recovery workflow](WORKFLOWS.md#recovering-from-a-rejected-agent-plan) for the complete sequence.
 
+### Reacting to stops in scripts
+
+`swarm issue work`, `swarm issue submit`, `swarm pr work`, `swarm pr rebase`, and `swarm pr submit` tell scripts and driving agents why they stopped, without any prose parsing. When one of these commands stops for a known reason, its `--json` failure document adds a `next_action` object, and the process exits with a code for that reason:
+
+```json
+{"kind": "work", "status": "failed", "error": "...", "recovery": "...",
+ "next_action": {"reason": "changes_requested", "argv": ["swarm", "--backend", "github", "issue", "work", "42", "--phase", "plan"], "human_required": false}}
+```
+
+- `reason` is `changes_requested`, `needs_approval`, or `conflict`.
+- `argv` is the suggested command as separate literal arguments, starting with `swarm`. Run it without a shell, or quote each element yourself. It repeats the `--backend`, `--repo`, and `--root` you used, and for worker commands `--fork` and `--fork-remote`. Maintainer commands (`issue approve`, `issue review-plan --approve`) are run upstream, so they leave out fork flags, and in fork mode they also leave out `--root`.
+- `human_required` is `true` when a person has to act, such as a maintainer approving or someone resolving files by hand.
+
+`next_action` is advisory. It never grants authority and contains no credentials: the command it names still goes through every approval, claim, and policy check. Existing fields such as `error`, `recovery`, `report`, and `result` are unchanged.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Success. No `next_action`. |
+| `1` | Any other failure, including invalid arguments, claim fences, unknown mergeability, and approval problems that don't name a single human decision. No `next_action`. |
+| `3` | `changes_requested`: the agent reviewer returned `CHANGES_REQUESTED`. |
+| `4` | `needs_approval`: a maintainer has to approve before work can continue. |
+| `5` | `conflict`: the PR conflicts with its base, or a managed rebase is paused on conflicts. |
+
+Code `2` is left unused so it stays free for usage errors. Text mode exits with the same codes, so `set -e` scripts and anything that checks for a nonzero status keep working.
+
+Each reason suggests these commands:
+
+| Reason | Suggested `argv` | `human_required` |
+| --- | --- | --- |
+| `changes_requested` | `swarm issue work <issue> --phase plan`, or `swarm pr work <PR> --phase plan` | `false` |
+| `needs_approval` (task) | `swarm issue approve <issue>`. This is the linked issue, even when a PR command stopped. | `true` |
+| `needs_approval` (human plan gate) | `swarm issue review-plan <issue> --approve` | `true` |
+| `conflict` (GitHub reports the PR as conflicting) | `swarm pr rebase <PR> --resolve` | `false` |
+| `conflict` (a managed rebase is paused) | `swarm pr rebase <PR> --continue --resolve` | `false` |
+| `conflict` (the resolver left files for you) | `swarm pr rebase <PR> --continue`, after you resolve and stage the files | `true` |
+
+A stale task approval comes before a conflict. If the PR's target base has moved, `pr work` reports `needs_approval`, even when GitHub also reports conflicts, because the new base needs approval before any rebase. If a managed rebase is already paused, finishing it comes first. If the reviewer rejected the plan, that rejection is reported over any other stop.
+
+Not every command can return every reason:
+
+| Command | `changes_requested` | `needs_approval` | `conflict` |
+| --- | --- | --- | --- |
+| `issue work` | yes | yes | no (there is no PR yet) |
+| `issue submit` | no (it runs no review) | yes | no (conflicting submissions still open the draft PR) |
+| `pr work` | yes | yes | yes (GitHub mergeability, or a paused rebase on any backend) |
+| `pr rebase` | yes (re-review of a carried plan under `--resolve`) | yes | yes |
+| `pr submit` | no (it runs no review) | yes | yes (a paused rebase) |
+
+A human plan gate that pauses after planning is a successful run. `issue work` prints `"status": "paused"` and `pr work` sets `result.work.PausedForHuman`. Both exit `0` and have no `next_action`. Waiting for `swarm issue review-plan <issue> --approve` is the expected next step there. Dry runs (`--dry-run`) never report a `next_action`.
+
+```bash
+swarm issue work 42 --json > outcome.json
+case $? in
+  0) echo "done or paused at a human gate" ;;
+  3|4|5) jq -r '.next_action.argv | @sh' outcome.json ;;  # inspect, then run the suggestion
+  *) echo "failed: $(jq -r .error outcome.json)" ;;
+esac
+```
+
 ## Changelog fragments
 
 Independent fragments let parallel contributions merge without sharing a changelog edit. Add a file under `changes/unreleased/` for each change and leave `CHANGELOG.md` for maintainer releases. Use a unique issue-based name such as `126.md`; add a descriptive suffix such as `126-fix.md` if another fragment uses that number.

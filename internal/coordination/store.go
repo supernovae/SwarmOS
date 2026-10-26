@@ -408,11 +408,16 @@ func (s *ForkIndexedStore) SetNowFunc(fn func() time.Time) {
 }
 
 func (s *ForkIndexedStore) contributorRef() (string, error) {
-	actor := strings.ToLower(strings.TrimSpace(s.actor))
-	if actor == "" || strings.ContainsAny(actor, " /\\:~^?*[]@") || strings.Contains(actor, "..") {
-		return "", fmt.Errorf("invalid contributor actor %q", s.actor)
+	return contributorIndexRef(s.actor)
+}
+
+// contributorIndexRef names the normalized per-contributor fork claim index.
+func contributorIndexRef(actor string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(actor))
+	if normalized == "" || strings.ContainsAny(normalized, " /\\:~^?*[]@") || strings.Contains(normalized, "..") {
+		return "", fmt.Errorf("invalid contributor actor %q", actor)
 	}
-	return "refs/heads/swarm-contributors/" + actor, nil
+	return "refs/heads/swarm-contributors/" + normalized, nil
 }
 
 func (s *ForkIndexedStore) Load(ctx context.Context, n int) ([]byte, string, error) {
@@ -460,11 +465,15 @@ func (s *ForkIndexedStore) stampRequestID(next []byte) ([]byte, *forkStateEnvelo
 }
 
 func (s *ForkIndexedStore) commitBlob(ctx context.Context, fileName string, content []byte, parent string, msg string) (string, error) {
-	blob, err := s.git.run(ctx, string(content), "hash-object", "-w", "--stdin")
+	return s.git.commitBlob(ctx, fileName, content, parent, msg)
+}
+
+func (s *GitStore) commitBlob(ctx context.Context, fileName string, content []byte, parent string, msg string) (string, error) {
+	blob, err := s.run(ctx, string(content), "hash-object", "-w", "--stdin")
 	if err != nil {
 		return "", err
 	}
-	tree, err := s.git.run(ctx, fmt.Sprintf("100644 blob %s\t%s\n", blob, fileName), "mktree")
+	tree, err := s.run(ctx, fmt.Sprintf("100644 blob %s\t%s\n", blob, fileName), "mktree")
 	if err != nil {
 		return "", err
 	}
@@ -472,7 +481,7 @@ func (s *ForkIndexedStore) commitBlob(ctx context.Context, fileName string, cont
 	if parent != "" {
 		args = append(args, "-p", parent)
 	}
-	return s.git.run(ctx, msg+"\n", args...)
+	return s.run(ctx, msg+"\n", args...)
 }
 
 func (s *ForkIndexedStore) loadAndRevalidateIndex(ctx context.Context, contribRef string, currentIssue int) ([]contributorIndexedClaim, string, error) {

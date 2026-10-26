@@ -50,3 +50,9 @@ version:
 ## clean: remove local build output
 clean:
 	rm -rf $(BIN_DIR)
+
+.PHONY: changelog
+
+## changelog: fold unreleased fragments into VERSION (maintainers)
+changelog:
+	$(GO) run ./cmd/changelog "$(VERSION)"

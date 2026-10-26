@@ -85,8 +85,9 @@ func TestTrustedClaimBudgetCeiling(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !st.Lease.ExpiresAt.Equal(ceiling) {
-					t.Fatalf("expiry %s != %s", st.Lease.ExpiresAt, ceiling)
+				// Each renewal is capped at the approved 4h, never the edited 999h.
+				if want := now.Add(4 * time.Hour); !st.Lease.ExpiresAt.Equal(want) || st.Lease.ExpiresAt.After(ceiling) {
+					t.Fatalf("expiry %s != %s", st.Lease.ExpiresAt, want)
 				}
 			}
 			before, err := m.GetCurrentState(ctx, iss.Number)

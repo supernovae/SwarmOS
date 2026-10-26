@@ -133,6 +133,19 @@ As workers claim tasks and move through `plan` $\rightarrow$ `review` $\rightarr
 - **Harness & Model Provenance Table**: Shows the exact role (`planner`, `reviewer`, `developer`, `tester`), configured agent, harness driver (`claude`, `codex`, `opencode`, `omp`), CLI version, model selector, sandbox boundary (`host`, `sandbox-exec`, `bwrap`, `container`), and artifact SHA-256 digest.
 - **Collapsible `<details>` Artifacts**: Click to expand the full `PLAN.md`, `TEST_PLAN.md`, `REVIEW.md` verdict, implementation diff summary, and validation check logs directly inside the issue thread.
 
+### Capping and Revoking Claims
+Every claim and renewal lasts at most the `lease.duration` in the task's approved baseline, whether the worker is a same-repository collaborator or a fork contributor. `swarm issue work` and `swarm node run` use the approved duration. `swarm issue claim --duration` and `swarm issue renew --duration` can ask for less time, but a longer request is clamped to the approved duration. Editing the checkout's `.swarm/config.yaml` does not raise it. `lease.max_renewals` and the total claim budget work as before.
+
+If a claim is abandoned or held without progress, a maintainer with `approve-task` permission can end it:
+
+```bash
+swarm issue revoke 12 --reason "No progress since Monday; returning to the queue" --backend github
+```
+
+Revoke works on the github backend for same-repository and fork-coordinated claims. It records your login, the reason, and the time in `refs/heads/swarm-state/issue-<N>`, posts an audit comment naming you and the reason, and removes the `swarm:claimed` and `swarm:in-progress` labels. For a fork claim, the same atomic push removes the claim from the contributor's `refs/heads/swarm-contributors/<login>` index, so it no longer counts toward `fork.max_active_claims`.
+
+Revoke only ends the claim. It does not approve, edit, or publish anything. The task approval, artifacts, and checkpoints stay in place, and the issue can be claimed again right away. The next same-repository claimer resumes from a retained same-repository checkpoint. A fork contributor's checkpoint branch stays in their fork, but as with any takeover of fork work, the next claim starts from the approved base. The previous holder's next heartbeat, checkpoint, artifact, stage, or submit fails with a claim-fence error. If the claim changes while you revoke (for example, a new worker claims it), the command fails without touching the new claim; check `swarm issue status <N>` and retry if needed. Revoke is refused when the issue has no active claim, when you lack `approve-task` permission, and in `--fork` contributor mode.
+
 ### Reviewing Human-Gated Plans (`--gate human`)
 For sensitive architectural tasks where you set `gate: human`:
 1. The worker generates `PLAN.md` and `TEST_PLAN.md` and pauses with label `swarm:plan-review`.
@@ -182,6 +195,7 @@ Once you merge the PR for a Wave 1 issue, any Wave 2 issues that listed it under
 | Lint and approve a child WorkUnit issue for agent execution | `swarm issue lint <N> && swarm issue approve <N> --backend github` |
 | Approve or reject a human-gated plan | `swarm issue review-plan <N> --approve --notes "..." --backend github` |
 | Inspect active leases and artifacts across the repo | `swarm issue status --backend github` |
+| End an abandoned or hoarded claim, keeping its checkpoints | `swarm issue revoke <N> --reason "..." --backend github` |
 
 ---
 

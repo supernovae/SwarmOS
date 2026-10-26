@@ -108,6 +108,7 @@ type IssueState struct {
 	PRURL                  string                          `json:"pr_url,omitempty"`
 	ForkRepo               string                          `json:"fork_repo,omitempty"`
 	LastForkRequestID      int64                           `json:"last_fork_request_id,omitempty"`
+	ClaimRevocations       []ClaimRevocation               `json:"claim_revocations,omitempty"`
 }
 
 // ProvisionContext returns the authoritative recovery identity for issue
@@ -559,6 +560,10 @@ func RenderStateProjection(wu *contract.WorkUnit, st *IssueState) string {
 	sb.WriteString(fmt.Sprintf("| **Task Digest** | `%s` |\n", short(st.TaskDigest)))
 	sb.WriteString(fmt.Sprintf("| **Policy Digest** | `%s` |\n", short(st.PolicyDigest)))
 	sb.WriteString(fmt.Sprintf("| **Draft PR** | %s |\n", prDisplay))
+	if n := len(st.ClaimRevocations); n > 0 {
+		r := st.ClaimRevocations[n-1]
+		sb.WriteString(fmt.Sprintf("| **Last claim revoked** | `%s` by %s at %s: %s |\n", short(r.ClaimID), escapeMarkdown(r.RevokedBy), r.RevokedAt.UTC().Format(time.RFC3339), escapeMarkdown(strings.Join(strings.Fields(r.Reason), " "))))
+	}
 
 	prov := BuildProvenanceAttestation(wu, st)
 	if len(prov.Roles) > 0 {
@@ -834,6 +839,11 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if !known {
 		contributors = append(contributors, owner)
 	}
+	// Same-repository claims share fork mode's approved per-lease ceiling.
+	duration, err = approvedLeaseDuration(cfg.Lease.Duration, duration)
+	if err != nil {
+		return nil, err
+	}
 	// A fresh issue claim replaces a fork contributor's checkpoint. PR work keeps
 	// the PR link and its head repository so the revision can be published there.
 	if st.ForkRepo != "" && prNumber == 0 {
@@ -959,13 +969,9 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		if !TaskApprovalCurrent(st, wu, cfg) {
 			return nil, &TaskApprovalError{IssueNumber: issue}
 		}
-		policyDur, err := time.ParseDuration(cfg.Lease.Duration)
-		if err != nil || policyDur <= 0 {
-			return nil, fmt.Errorf("invalid approved lease duration")
-		}
-		effectiveDur := duration
-		if effectiveDur <= 0 || effectiveDur > policyDur {
-			effectiveDur = policyDur
+		effectiveDur, err := approvedLeaseDuration(cfg.Lease.Duration, duration)
+		if err != nil {
+			return nil, err
 		}
 		effectiveMax := cfg.Lease.MaxRenewals
 		if !cfg.Lease.Renewable {
@@ -1034,6 +1040,20 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 	}
 	return nil, ErrClaimRaceLost
 }
+
+// approvedLeaseDuration caps a requested lease or renewal at the approved
+// policy duration. A nonpositive request selects the policy duration.
+func approvedLeaseDuration(policy string, requested time.Duration) (time.Duration, error) {
+	policyDur, err := time.ParseDuration(policy)
+	if err != nil || policyDur <= 0 {
+		return 0, fmt.Errorf("invalid approved lease duration")
+	}
+	if requested <= 0 || requested > policyDur {
+		return policyDur, nil
+	}
+	return requested, nil
+}
+
 func claimID() string { b := make([]byte, 16); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func (m *Manager) Resume(ctx context.Context, n int, owner, id string) (*IssueState, error) {
 	m.BindClaim(n, id)
@@ -1138,9 +1158,9 @@ func (m *Manager) Renew(ctx context.Context, n int, owner string, d time.Duratio
 		if st.Lease.Renewals >= min(st.Lease.MaxRenewals, cfg.Lease.MaxRenewals) {
 			return ErrMaxRenewals
 		}
-		effectiveDur := d
-		if policyDur, err := time.ParseDuration(cfg.Lease.Duration); err == nil && policyDur > 0 && st.ForkRepo != "" && effectiveDur > policyDur {
-			effectiveDur = policyDur
+		effectiveDur, err := approvedLeaseDuration(cfg.Lease.Duration, d)
+		if err != nil {
+			return err
 		}
 		st.Lease.Renewals++
 		st.Lease.ExpiresAt = m.nowFn().Add(effectiveDur)

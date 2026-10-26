@@ -134,7 +134,7 @@ func TestCLIIssueWorkJSONReportsDiagnosticsPath(t *testing.T) {
 	f.must(t, "issue", "approve", n)
 	inheritState(t, f, "file")
 	state := useDiagnosticsState(t, f)
-	raw, err := f.run("issue", "work", n, "--agent", "failing", "--headless", "--progress=false", "--json")
+	raw, err := f.run("issue", "work", n, "--agent", "mock", "--planner-agent", "failing", "--headless", "--progress=false", "--json")
 	if err == nil || !diagnosticsPointer.MatchString(err.Error()) || strings.Contains(err.Error(), "PRIVATE") {
 		t.Fatalf("err = %v", err)
 	}
@@ -147,7 +147,7 @@ func TestCLIPRWorkJSONReportsDiagnosticsPath(t *testing.T) {
 	f.must(t, "issue", "approve", strconv.Itoa(issue)) // approve the base that allowlists the harness
 	inheritState(t, f, "unset")
 	state := useDiagnosticsState(t, f)
-	raw, err := f.run("pr", "work", strconv.Itoa(number), "--agent", "failing", "--progress=false", "--json")
+	raw, err := f.run("pr", "work", strconv.Itoa(number), "--agent", "mock", "--planner-agent", "failing", "--progress=false", "--json")
 	if err == nil {
 		t.Fatal("failing harness succeeded")
 	}
@@ -167,17 +167,11 @@ func TestCLIPRRebaseResolveJSONReportsDiagnosticsPath(t *testing.T) {
 	f.must(t, "issue", "approve", strconv.Itoa(issue))
 	inheritState(t, f, "inside fixture")
 	state := useDiagnosticsState(t, f)
-	raw, err := f.run("pr", "rebase", strconv.Itoa(number), "--resolve", "--agent", "failing", "--progress=false", "--json")
+	raw, err := f.run("pr", "rebase", strconv.Itoa(number), "--resolve", "--agent", "mock", "--developer-agent", "failing", "--progress=false", "--json")
 	if err == nil {
 		t.Fatal("failing resolver succeeded")
 	}
-	data := jsonDiagnostics(t, raw, state)
-	// The resolver runs inside the read-only host sandbox; the saved log then
-	// explains a host that cannot start it instead of the harness transcript.
-	if strings.HasPrefix(data, "bwrap: ") {
-		t.Skipf("host sandbox unavailable; diagnostics recorded %q", data)
-	}
-	checkTranscript(t, data)
+	checkJSONDiagnostics(t, raw, state)
 }
 
 func TestCLIIssueWorkJSONReportsDiagnosticsUnavailable(t *testing.T) {
@@ -187,7 +181,7 @@ func TestCLIIssueWorkJSONReportsDiagnosticsUnavailable(t *testing.T) {
 	f.must(t, "issue", "approve", n)
 	inheritState(t, f, "file")
 	blocked := os.Getenv("XDG_STATE_HOME")
-	raw, err := f.run("issue", "work", n, "--agent", "failing", "--headless", "--progress=false", "--json")
+	raw, err := f.run("issue", "work", n, "--agent", "mock", "--planner-agent", "failing", "--headless", "--progress=false", "--json")
 	if err == nil {
 		t.Fatal("failing harness succeeded")
 	}

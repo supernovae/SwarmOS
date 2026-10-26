@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,7 @@ func TestCheckCaptureDiagnostics(t *testing.T) {
 		_, _ = c.Write([]byte(s))
 	}
 	tail, names := c.diagnostics()
-	if strings.Join(names, ",") != "TestAlpha,TestAlpha/sub,TestEnd" || !strings.HasSuffix(tail, "--- FAIL: TestEnd (0.00s)") || !strings.HasPrefix(tail, truncationMarker) {
+	if strings.Join(names, ",") != "TestAlpha,TestAlpha/sub,TestEnd" || !strings.HasPrefix(tail, "--- FAIL: TestAlpha (0.00s)\n    --- FAIL: TestAlpha/sub (0.00s)") || !strings.Contains(tail, "--- FAIL: TestEnd (0.00s)") || !strings.Contains(tail, truncationMarker+"\nnoise") {
 		t.Fatalf("%q %v", tail, names)
 	}
 	if !strings.Contains(c.raw.String(), "1 MiB") {
@@ -59,6 +60,133 @@ func TestDiagnosticBounds(t *testing.T) {
 		if len(c.pending) > diagnosticBytes {
 			t.Fatal("unbounded parser")
 		}
+	}
+}
+
+func TestDiagnosticFailBlocksSurviveTrailingNoise(t *testing.T) {
+	input := "--- FAIL: TestAlpha (0.00s)\n" +
+		"    --- FAIL: TestAlpha/sub (0.00s)\n" +
+		"        alpha_test.go:10: want 1\n" +
+		"            got 2\n" +
+		"--- FAIL: TestBeta (0.00s)\n" +
+		"\tbeta_test.go:7: tab message\n" +
+		"unindented ends block\n" +
+		"    not a message\n" +
+		"FAIL\n" + strings.Repeat("usage: help text\n", 100) + "--- FAIL: TestLast (0.00s)\n    last_test.go:1: unterminated"
+	want := "--- FAIL: TestAlpha (0.00s)\n" +
+		"    --- FAIL: TestAlpha/sub (0.00s)\n" +
+		"        alpha_test.go:10: want 1\n" +
+		"            got 2\n" +
+		"--- FAIL: TestBeta (0.00s)\n" +
+		"\\tbeta_test.go:7: tab message\n" +
+		"--- FAIL: TestLast (0.00s)\n" +
+		"    last_test.go:1: unterminated\n" +
+		truncationMarker + "\n" + strings.Repeat("usage: help text\n", 51)
+	want = strings.TrimSuffix(want, "\n")
+	for _, size := range []int{len(input), 1, 7} {
+		var c checkCapture
+		for i := 0; i < len(input); i += size {
+			_, _ = c.Write([]byte(input[i:min(i+size, len(input))]))
+		}
+		for range 2 {
+			tail, names := c.diagnostics()
+			if tail != want || strings.Join(names, ",") != "TestAlpha,TestAlpha/sub,TestBeta,TestLast" {
+				t.Fatalf("chunk %d:\n%s\n%v", size, tail, names)
+			}
+		}
+	}
+	// Failures stay visible after the 1 MiB raw capture limit.
+	var c checkCapture
+	_, _ = c.Write([]byte(strings.Repeat("noise\n", 300000) + "--- FAIL: TestLate (0.00s)\n    late_test.go:3: late message\n" + strings.Repeat("noise\n", 100)))
+	tail, _ := c.diagnostics()
+	if !strings.HasPrefix(tail, "--- FAIL: TestLate (0.00s)\n    late_test.go:3: late message\n"+truncationMarker+"\nnoise") {
+		t.Fatalf("%q", tail)
+	}
+}
+
+func TestDiagnosticFailBlockBounds(t *testing.T) {
+	assertBounds := func(t *testing.T, tail string) {
+		t.Helper()
+		if len(tail) > diagnosticBytes || strings.Count(tail, "\n")+1 > diagnosticLines || !utf8.ValidString(tail) {
+			t.Fatalf("bounds bytes=%d lines=%d", len(tail), strings.Count(tail, "\n")+1)
+		}
+		for _, r := range tail {
+			if r != '\n' && unicode.IsControl(r) {
+				t.Fatalf("active control %q", r)
+			}
+		}
+	}
+	noise := strings.Repeat("noise\n", 100)
+	t.Run("long block", func(t *testing.T) {
+		var c checkCapture
+		_, _ = c.Write([]byte("--- FAIL: TestLong (0.00s)\n" + strings.Repeat("    message\n", 20) + noise))
+		tail, _ := c.diagnostics()
+		assertBounds(t, tail)
+		want := "--- FAIL: TestLong (0.00s)\n" + strings.Repeat("    message\n", failBlockLines-2) + truncationMarker + "\n" + truncationMarker + "\nnoise"
+		if !strings.HasPrefix(tail, want) {
+			t.Fatalf("%q", tail)
+		}
+	})
+	t.Run("huge escaped lines", func(t *testing.T) {
+		var c checkCapture
+		_, _ = c.Write([]byte("--- FAIL: Test" + strings.Repeat("\x1b世", 2000) + "\n    " + strings.Repeat("\x00", 3000) + "\n    " + strings.Repeat("x", 3*diagnosticBytes) + "\n" + noise))
+		tail, _ := c.diagnostics()
+		assertBounds(t, tail)
+		block := tail[:strings.Index(tail, truncationMarker)+len(truncationMarker)]
+		if len(block) > failBlockBytes || !strings.HasPrefix(block, "--- FAIL: Test\\x1b\\u4e16") || strings.Count(block, "\n") != 1 {
+			t.Fatalf("%q", block)
+		}
+	})
+	t.Run("many failures", func(t *testing.T) {
+		var c checkCapture
+		for i := range 200 {
+			_, _ = c.Write([]byte("--- FAIL: TestMany" + strconv.Itoa(i) + " (0.00s)\n    many_test.go:1: " + strings.Repeat("m", 300) + "\n"))
+		}
+		_, _ = c.Write([]byte(noise))
+		tail, _ := c.diagnostics()
+		assertBounds(t, tail)
+		section := tail[:strings.Index(tail, "\n"+truncationMarker+"\n")]
+		if !strings.HasPrefix(section, "--- FAIL: TestMany0 (0.00s)\n") || len(section) > failSectionBytes || strings.Count(section, "\n")+2 > failSectionLines {
+			t.Fatalf("section bytes=%d lines=%d", len(section), strings.Count(section, "\n")+1)
+		}
+		if !strings.HasSuffix(tail, "noise") || strings.Contains(tail, "TestMany199 ") {
+			t.Fatalf("%q", tail)
+		}
+		if len(c.fails.blocks) > failSectionLines || c.fails.size > failSectionBytes {
+			t.Fatal("unbounded block storage")
+		}
+	})
+}
+
+func TestDiagnosticNoFailUnchanged(t *testing.T) {
+	lines := func(n int) string {
+		var b strings.Builder
+		for i := range n {
+			b.WriteString("line" + strconv.Itoa(i) + "\n")
+		}
+		return b.String()
+	}
+	for _, tc := range []struct{ name, input, want string }{
+		{"59 lines", lines(59), strings.TrimSuffix(lines(59), "\n")},
+		{"60 lines", lines(60), strings.TrimSuffix(lines(60), "\n")},
+		{"61 lines", lines(61), truncationMarker + "\n" + strings.TrimSuffix(lines(61)[len(lines(2)):], "\n")},
+		{"exact bytes", strings.Repeat("x", diagnosticBytes), strings.Repeat("x", diagnosticBytes)},
+		{"over bytes", strings.Repeat("x", diagnosticBytes+1), truncationMarker + "\n" + strings.Repeat("x", diagnosticBytes-len(truncationMarker)-1)},
+		{"escaped overflow", strings.Repeat("\x1b", diagnosticBytes/4+1), truncationMarker + "\n" + strings.Repeat("\\x1b", (diagnosticBytes-len(truncationMarker)-1)/4)},
+		{"invalid utf8", "a\xffb\n", "a\\ufffdb"},
+		{"short failure", "--- FAIL: TestShort (0.00s)\n    short_test.go:1: boom\nFAIL\n", "--- FAIL: TestShort (0.00s)\n    short_test.go:1: boom\nFAIL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, size := range []int{len(tc.input) + 1, 3} {
+				var c checkCapture
+				for i := 0; i < len(tc.input); i += size {
+					_, _ = c.Write([]byte(tc.input[i:min(i+size, len(tc.input))]))
+				}
+				if tail, _ := c.diagnostics(); tail != tc.want {
+					t.Fatalf("chunk %d: %q", size, tail)
+				}
+			}
+		})
 	}
 }
 
@@ -118,9 +246,23 @@ func TestCheckOutcomeJSON(t *testing.T) {
 	}
 }
 
+func TestCheckOutcomeJSONFailBlocks(t *testing.T) {
+	var c checkCapture
+	_, _ = c.Write([]byte("--- FAIL: TestJSON (0.00s)\n    json_test.go:1: \x1bboom\n" + strings.Repeat("noise\n", 100)))
+	tail, names := c.diagnostics()
+	data, err := json.Marshal(CheckRunOutcome{Name: "test", ExitCode: 1, OutputTail: tail, FailingTests: names})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded CheckRunOutcome
+	if err = json.Unmarshal(data, &decoded); err != nil || decoded.OutputTail != tail || !strings.HasPrefix(decoded.OutputTail, "--- FAIL: TestJSON (0.00s)\n    json_test.go:1: \\x1bboom\n"+truncationMarker) {
+		t.Fatalf("%s %v", data, err)
+	}
+}
+
 func TestHostFailureDiagnostics(t *testing.T) {
 	repo := setupGitRepoForValidation(t)
-	policy := "required_checks:\n  - name: failing-go\n    command: |\n      printf '%s\\n' '--- FAIL: TestHost (0.00s)'; exit 7\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n"
+	policy := "required_checks:\n  - name: failing-go\n    command: |\n      printf '%s\\n' '--- FAIL: TestHost (0.00s)' '    host_test.go:1: host message'; seq 100; exit 7\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n"
 	if err := os.WriteFile(filepath.Join(repo, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +276,7 @@ func TestHostFailureDiagnostics(t *testing.T) {
 		t.Fatalf("%+v %v", report, err)
 	}
 	check := report.CheckOutcomes[0]
-	if check.ExitCode != 7 || strings.Join(check.FailingTests, ",") != "TestHost" || !strings.Contains(check.OutputTail, "TestHost") {
+	if check.ExitCode != 7 || strings.Join(check.FailingTests, ",") != "TestHost" || !strings.HasPrefix(check.OutputTail, "--- FAIL: TestHost (0.00s)\n    host_test.go:1: host message\n"+truncationMarker+"\n") || !strings.HasSuffix(check.OutputTail, "\n100") {
 		t.Fatalf("%+v", check)
 	}
 }

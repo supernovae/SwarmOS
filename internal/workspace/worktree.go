@@ -376,6 +376,9 @@ func provisionFromRemote(repoRoot, upstreamRemote, checkpointRemote string, issu
 		checkpoint = baseSHA
 	}
 	if _, err := gitOutput(absRoot, "merge-base", "--is-ancestor", baseSHA, checkpoint); err != nil {
+		if headSHA != "" && checkpointRemote == upstreamRemote {
+			return "", "", fmt.Errorf("checkpoint %s does not descend from approved base %s; to continue it, reconcile the branch without resetting it; %s: %w", checkpoint, baseSHA, DiscardCheckpointHint(issueNum, headSHA), err)
+		}
 		return "", "", fmt.Errorf("checkpoint %s does not descend from approved base %s; reconcile the branch without resetting it: %w", checkpoint, baseSHA, err)
 	}
 	wtPath := WorktreePath(absRoot, issueNum)

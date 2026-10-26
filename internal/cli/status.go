@@ -130,6 +130,12 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "Checkpoint: %s\n", entry.Checkpoint.String())
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Base: %s\nTask: %s\nApproved by: %s\n", state.BaseSHA, state.TaskDigest, state.ApprovedBy)
+				if fs := state.FreshStart; fs != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "Fresh start: next claim begins on %s at the approved base\n", fs.Branch)
+				}
+				for _, d := range state.DiscardedCheckpoints {
+					fmt.Fprintf(cmd.OutOrStdout(), "Discarded checkpoint: %s (branch %s, base %s) by %s at %s; retained at %s\n", d.HeadSHA, d.Branch, d.BaseSHA, d.DiscardedBy, d.DiscardedAt.Format(time.RFC3339), d.RetentionRef)
+				}
 				for _, artifact := range state.Artifacts {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s (%s)\n", artifact.Type, artifact.Verdict, artifact.Producer)
 					fmt.Fprintf(cmd.OutOrStdout(), "    %s\n", artifact.Summary)

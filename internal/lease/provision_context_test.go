@@ -31,3 +31,23 @@ func TestIssueStateProvisionContext(t *testing.T) {
 		})
 	}
 }
+
+func TestIssueStateProvisionContextFreshStart(t *testing.T) {
+	fresh := &workspace.FreshStart{Branch: "swarm/issue-1-restart-c", AbandonedBranch: "swarm/issue-1-x", AbandonedHeadSHA: "c"}
+	for _, tc := range []struct {
+		name string
+		st   IssueState
+		fork bool
+		want *workspace.FreshStart
+	}{
+		{"same repository", IssueState{FreshStart: fresh}, false, fresh},
+		{"fork mode", IssueState{FreshStart: fresh}, true, nil},
+		{"fork state", IssueState{FreshStart: fresh, ForkRepo: "me/repo"}, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.st.ProvisionContext(tc.fork).FreshStart; got != tc.want {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}

@@ -68,6 +68,7 @@ type ApprovalTransition struct {
 }
 
 type IssueState struct {
+	CheckpointHeads        []string                       `json:"checkpoint_heads,omitempty"`
 	ResumeCheckpointBranch string                         `json:"resume_checkpoint_branch,omitempty"`
 	ClaimBudget            *ClaimBudget                   `json:"claim_budget,omitempty"`
 	RevisionPlan           *workspace.RevisionPlanContext `json:"revision_plan,omitempty"`
@@ -1695,6 +1696,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	}
 	st.Branch = branch
 	st.ResumeCheckpointBranch = ""
+	preserveCheckpointHeads(st, st.HeadSHA, st.SubmittedHeadSHA, head)
 	st.HeadSHA = head
 	st.DroppedCheckpoint = nil
 	if _, ok := m.store.(coordination.PublishingStore); ok {
@@ -1891,6 +1893,7 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 	}
 	verifyRebaseEvidence(ctx, m.repoRoot, st, published)
 	st.PRRevision = nil
+	preserveCheckpointHeads(st, st.HeadSHA, st.SubmittedHeadSHA, published)
 	st.HeadSHA = published
 	st.SubmittedHeadSHA = published
 	st.SubmittedBaseSHA = st.BaseSHA

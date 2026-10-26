@@ -44,7 +44,7 @@ func (m *Manager) RetireCleanupLocalResources(ctx context.Context, n int, token 
 		if !r.Eligible || (r.Kind != "worktree" && r.Kind != "local-code-branch") {
 			continue
 		}
-		st, _, err := m.reservedCleanup(ctx, n, token)
+		st, revision, err := m.reservedCleanup(ctx, n, token)
 		if err != nil {
 			return err
 		}
@@ -61,7 +61,18 @@ func (m *Manager) RetireCleanupLocalResources(ctx context.Context, n int, token 
 		if reason := m.cleanupPolicy(ctx, st, o, true); reason != "" {
 			return fmt.Errorf("cleanup refused: %s", reason)
 		}
-		if o.FinalHeadSHA != st.Cleanup.ExpectedHead || o.MergeCommitSHA != st.Cleanup.Evidence.MergeCommitSHA || r.ExpectedHead != st.Cleanup.ExpectedHead {
+		if o.FinalHeadSHA != st.Cleanup.ExpectedHead || o.MergeCommitSHA != st.Cleanup.Evidence.MergeCommitSHA {
+			return fmt.Errorf("cleanup evidence changed")
+		}
+
+		original := (r.Kind == "worktree" && r.Name == workspace.WorktreePath(m.repoRoot, n)) || (r.Kind == "local-code-branch" && r.Name == st.Branch)
+		if original {
+			if why := m.cleanupHeadReason(ctx, n, st, revision, r.ExpectedHead, st.Cleanup.ExpectedHead); why != "" {
+				r.Eligible = false
+				r.Reason = "retained: " + why
+				continue
+			}
+		} else if r.ExpectedHead != st.Cleanup.ExpectedHead {
 			return fmt.Errorf("cleanup evidence changed")
 		}
 		if r.Kind == "worktree" {

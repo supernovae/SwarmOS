@@ -277,6 +277,32 @@ func submittedInteractivePRFixture(t *testing.T, gates ...string) (*cliFixture, 
 	return f, issue, number
 }
 
+func TestCLIPRSubmitKeepsApprovedPlanAfterFailedImplementation(t *testing.T) {
+	f, issue, number := submittedPRFixture(t, "agent")
+	p := strconv.Itoa(number)
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 1")
+	if _, err := f.run("pr", "work", p, "--agent", "mock", "--progress=false"); err == nil {
+		t.Fatal("failing developer reported success")
+	}
+	before := f.state(t, issue)
+	out, err := f.run("pr", "submit", p, "--progress=false")
+	if err == nil || !strings.Contains(err.Error(), "swarm pr work "+p+" --phase implement") || strings.Contains(out, "submitted") {
+		t.Fatalf("submit without implementation = %q, %v", out, err)
+	}
+	if after := f.state(t, issue); !reflect.DeepEqual(before, after) {
+		t.Fatal("refused submit changed authoritative state")
+	}
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
+	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--phase", "implement", "--progress=false", "--json"))
+	if worked.HeadSHA == before.HeadSHA {
+		t.Fatalf("resumed implementation produced no checkpoint: %+v", worked)
+	}
+	f.must(t, "pr", "submit", p)
+	if state := f.state(t, issue); state.PRRevision != nil || state.HeadSHA != worked.HeadSHA {
+		t.Fatalf("submit after implementation: %+v", state)
+	}
+}
+
 func TestCLIPRInteractivePlanStageAndResume(t *testing.T) {
 	f, issue, number := submittedInteractivePRFixture(t)
 	p := strconv.Itoa(number)

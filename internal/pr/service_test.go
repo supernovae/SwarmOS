@@ -533,8 +533,10 @@ func (g *loopbackGateway) Apply(ctx context.Context, req lease.ForkRequest) (*le
 	}
 }
 
-func TestForkContributorRevisesOwnPR(t *testing.T) {
-	s, issue, number, base := fixture(t)
+// forkContributor re-records the fixture's submission as a fork contribution
+// whose head lives in alice/swarm and returns the contributor's service.
+func forkContributor(t *testing.T, s *Service, issue, number int, base string) (*Service, *loopbackGateway, *forkPRTracker, func() string) {
+	t.Helper()
 	ctx := context.Background()
 	git := func(dir string, args ...string) string {
 		t.Helper()
@@ -581,6 +583,22 @@ func TestForkContributorRevisesOwnPR(t *testing.T) {
 	contributor.SetStore(s.Root, s.Manager.Store())
 	contributor.SetWorkerGateway(gateway)
 	svc := &Service{Root: s.Root, Tracker: contributorView, Manager: contributor, Fork: true, ForkRemote: "fork"}
+	return svc, gateway, contributorView, forkHead
+}
+
+func TestForkContributorRevisesOwnPR(t *testing.T) {
+	s, issue, number, base := fixture(t)
+	ctx := context.Background()
+	git := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	svc, gateway, contributorView, forkHead := forkContributor(t, s, issue, number, base)
+	branch := contributorView.branch
 
 	if r, err := svc.Status(ctx, number); err != nil || r.Status != "open" {
 		t.Fatalf("contributor status = %+v, %v", r, err)

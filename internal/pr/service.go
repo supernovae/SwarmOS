@@ -1097,6 +1097,9 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 		}
 		return r, nil
 	}
+	if err = s.refuseUnimplementedRevision(ctx, r); err != nil {
+		return r, err
+	}
 	r, err = s.validate(ctx, r, remote, p, true)
 	if err != nil {
 		return r, err
@@ -1191,4 +1194,61 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 		}
 		return r, nil
 	})
+}
+
+// refuseUnimplementedRevision stops submit of a development revision whose
+// approved plan has no implementation yet: the recorded, published, and
+// worktree heads are unchanged and no passing implementation is bound to them.
+// Completing it would consume the plan, so this check reads state only and
+// runs before any claim or fenced write.
+func (s *Service) refuseUnimplementedRevision(ctx context.Context, r *Result) error {
+	rev := r.State.PRRevision
+	if rev == nil || rev.Intent == "rebase" || rev.RemoteHeadSHA != rev.LocalHeadSHA || r.PR.HeadSHA != rev.LocalHeadSHA {
+		return nil
+	}
+	hasPlan := false
+	for _, art := range r.State.Artifacts {
+		switch {
+		case art.Type == contract.ArtifactDesign:
+			hasPlan = true
+		case art.Type == contract.ArtifactImplementation && art.Verdict == "PASS" && art.Metadata["head_sha"] == rev.LocalHeadSHA && implementationBound(r.State, art):
+			return nil
+		}
+	}
+	if !hasPlan {
+		return nil
+	}
+	if _, err := s.requireApproval(ctx, r, r.State); errors.Is(err, lease.ErrApprovalRequired) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(r.Worktree); err == nil {
+		head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
+		if e != nil {
+			return fmt.Errorf("inspect managed PR worktree: %w", e)
+		}
+		// Other candidates keep the existing checkpoint rejection.
+		if dirty || rebasing || head != rev.LocalHeadSHA {
+			return nil
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	command := "swarm"
+	if s.Fork {
+		command += " --fork"
+	}
+	return fmt.Errorf("PR #%d has no new implementation to publish; its approved revision plan is kept. Run %s pr work %d --phase implement", r.PR.Number, command, r.PR.Number)
+}
+
+// implementationBound reports whether an implementation artifact was produced
+// for the current approved plan and task.
+func implementationBound(st *lease.IssueState, art contract.Artifact) bool {
+	for key, value := range lease.ReviewBindings(st) {
+		if key != "review_claim_id" && (value == "" || art.Metadata[key] != value) {
+			return false
+		}
+	}
+	return true
 }

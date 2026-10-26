@@ -262,6 +262,8 @@ Issue and PR `validate` and `submit` commands report phases, check starts, and P
 
 `pr submit` runs trusted validation or reuses matching passing evidence from the current claim and publishes to the existing PR branch. It preserves the PR's title, human-written description, draft/ready state, and identity, and updates a managed rebase context section; GitHub applies the repository's review rules to the new commits. Publication uses the remote head observed when the revision began; a concurrent remote update is rejected rather than overwritten. Same-repository publication updates the PR branch and issue coordination state atomically.
 
+If the implementation step fails before it commits anything, the revision keeps its approved plan and review. `pr submit` then refuses with nothing new to publish, without claiming the issue or changing coordination state. Resume implementation with `swarm pr work <PR> --phase implement` (contributors use `swarm --fork pr work <PR> --phase implement`), then submit again.
+
 #### Rebasing onto an Updated Base
 
 The target is the existing PR's base branch, pinned to a full commit. When that branch moves ahead of the WorkUnit's approved baseline, `--resolve` can re-pin approval automatically for an actor with task-approval permission when the WorkUnit and committed `.swarm/` policy tree are unchanged. It records the actor and both bases in an issue audit comment. Changed tasks or policy require explicit `swarm issue approve`; fork workers also use that explicit approval step. Approval can't change while a claim is active, including your own claim from earlier `issue work`, so release it first. The next PR command claims the issue again automatically.

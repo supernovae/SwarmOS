@@ -572,7 +572,7 @@ func TestCleanupLocalPolicyTransitions(t *testing.T) {
 }
 
 func TestCleanupLocalRelativeRootPreview(t *testing.T) {
-	f, n, _ := cleanupLocalFixture(t)
+	f, n, pr := cleanupLocalFixture(t)
 	before := f.state(t, n)
 	refs := prGit(t, f.root, "show-ref")
 	trees := prGit(t, f.root, "worktree", "list", "--porcelain")
@@ -615,5 +615,95 @@ func TestCleanupLocalRelativeRootPreview(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, f.state(t, n)) || refs != prGit(t, f.root, "show-ref") || trees != prGit(t, f.root, "worktree", "list", "--porcelain") {
 		t.Fatal("preview mutated resources")
+	}
+
+	cmd := NewRootCmd()
+	var output strings.Builder
+	cmd.SetOut(&output)
+	cmd.SetArgs([]string{"--root", ".", "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--apply", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	var result lease.CleanupPreview
+	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range result.Resources {
+		if (r.Kind == "worktree" || r.Kind == "local-code-branch") && !r.Retired {
+			t.Fatalf("resource not retired: %+v", r)
+		}
+	}
+	assertCleanupLocalsRetired(t, f, n, pr, before.Branch)
+}
+
+func assertCleanupLocalsRetired(t *testing.T, f *cliFixture, n, pr int, branch string) {
+	t.Helper()
+	for _, path := range []string{workspace.WorktreePath(f.root, n), workspace.PRWorktreePath(f.root, pr)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("worktree remains %s: %v", path, err)
+		}
+	}
+	for _, branch := range []string{branch, workspace.PRBranchName(pr)} {
+		if err := exec.Command("git", "-C", f.root, "show-ref", "--verify", "refs/heads/"+branch).Run(); err == nil {
+			t.Fatalf("branch remains: %s", branch)
+		}
+	}
+	if f.state(t, n).Cleanup != nil {
+		t.Fatal("cleanup reservation remains")
+	}
+}
+
+func TestCleanupLocalRelativeRootRecoverFailedApply(t *testing.T) {
+	f, n, _ := cleanupLocalFixture(t)
+	ctx := context.Background()
+	preview, err := lease.InspectCleanup(ctx, f.root, f.tracker, f.manager, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := f.manager.BeginCleanup(ctx, n, preview.Outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an interrupted apply after its resource identity check fails.
+	for i := range preview.Resources {
+		if preview.Resources[i].Kind == "worktree" {
+			preview.Resources[i].Name += "-unexpected"
+			break
+		}
+	}
+	if err := f.manager.RetireCleanupLocalResources(ctx, n, reservation.OperationID, preview); err == nil {
+		t.Fatal("expected failed apply")
+	}
+	if f.state(t, n).Cleanup == nil {
+		t.Fatal("missing interrupted reservation")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(f.root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Error(err)
+		}
+	})
+	cmd := NewRootCmd()
+	var output strings.Builder
+	cmd.SetOut(&output)
+	cmd.SetArgs([]string{"--root", ".", "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--recover-reservation", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	st := f.state(t, n)
+	if st.Cleanup != nil {
+		t.Fatal("reservation remains after recovery")
+	}
+	if len(st.CleanupHistory) == 0 || st.CleanupHistory[len(st.CleanupHistory)-1].OperationID != reservation.OperationID {
+		t.Fatal("recovered reservation not recorded")
+	}
+	if err := f.manager.RetireCleanupLocalResources(ctx, n, reservation.OperationID, preview); err == nil {
+		t.Fatal("recovered token still usable")
 	}
 }

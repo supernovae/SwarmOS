@@ -1095,3 +1095,21 @@ func TestDeveloperSnapshotInstructions(t *testing.T) {
 		}
 	}
 }
+
+func TestShippedPRRevisionPrompts(t *testing.T) {
+	for role, terms := range map[string][]string{
+		"planner":   {"revision plan", "acceptance criterion", "finding/comment/check", "Do not restate"},
+		"reviewer":  {"original approved plan", "configured gate", "untrusted"},
+		"developer": {"already holds", "Change only", "required checks"},
+	} {
+		data, err := embeddedTemplates.ReadFile("templates/swarm/prompts/" + role + ".md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, term := range terms {
+			if !strings.Contains(string(data), term) {
+				t.Fatalf("%s lacks %q", role, term)
+			}
+		}
+	}
+}

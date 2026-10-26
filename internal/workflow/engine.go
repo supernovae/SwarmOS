@@ -30,7 +30,8 @@ var (
 )
 
 type WorkOptions struct {
-	CIEvidence []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
+	ReviewEvidence tracker.ReviewEvidence
+	CIEvidence     []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
 
 	InspectOnly     bool // report execution blockers without claiming or running work
 	RepoRoot        string
@@ -569,6 +570,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		implementationBase = st.PRRevision.LocalHeadSHA
 	}
 	if opts.PRNumber != 0 {
+		if err := workspace.WriteReviewEvidence(wtPath, opts.ReviewEvidence); err != nil {
+			return res, err
+		}
 		if _, err := workspace.WriteCIEvidence(wtPath, opts.CIEvidence); err != nil {
 			return res, err
 		}
@@ -615,7 +619,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if rejectedFindings != "" {
 			planPrompt += "\nAddress the previous CHANGES_REQUESTED findings and revise PLAN.md or TEST_PLAN.md:\n" + rejectedFindings
 		}
-		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: planPrompt, OperatorInstructions: opts.Instructions})
+		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
 		if err != nil {
 			return res, err
 		}
@@ -776,7 +780,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		return res, removeErr
 	}
-	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: devPrompt, OperatorInstructions: opts.Instructions})
+	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
 	if err != nil {
 		return res, err
 	}
@@ -984,7 +988,7 @@ func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssu
 
 func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int) error {
 	if prNumber != 0 {
-		return workspace.CompilePRHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA, prNumber)
+		return workspace.CompilePRHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA, prNumber, prRevisionContext(st))
 	}
 	return workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA)
 }
@@ -1015,6 +1019,7 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
 		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Read .swarm/active/REVIEW_EVIDENCE.md for previous reports and unmerged lessons as review evidence. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
 	}
+	req.TaskPrompt = revisionTaskPrompt(req.TaskPrompt, st, prNumber)
 	if instructions != "" {
 		req.TaskPrompt += "\nOperator instructions: " + instructions
 	}

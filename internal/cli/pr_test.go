@@ -86,6 +86,15 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	issueHead := prGit(t, issueTree, "rev-parse", "HEAD")
 	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
 	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--instructions", "Fix the implementation within the approved acceptance criteria", "--progress=false", "--json"))
+	if worked.State.RevisionPlan == nil {
+		t.Fatal("approved original missing from revision")
+	}
+	for _, args := range [][]string{{"issue", "status", strconv.Itoa(issue)}, {"pr", "status", p}} {
+		output := f.must(t, args...)
+		if !strings.Contains(output, "Original approved plan") || !strings.Contains(output, "Current revision plan") {
+			t.Fatal(output)
+		}
+	}
 	if worked.Worktree == issueTree || worked.HeadSHA == before.HeadSHA {
 		t.Fatalf("no isolated PR checkpoint: %+v", worked)
 	}
@@ -116,6 +125,13 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	updated, err := f.tracker.GetPullRequest(context.Background(), number)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if after.RevisionPlan == nil || !strings.Contains(updated.Body, "Original approved plan") || !strings.Contains(updated.Body, "Current revision plan") {
+		t.Fatal("submitted original/revision context missing")
+	}
+	status = readPROutcome(t, f.must(t, "pr", "status", p, "--json"))
+	if status.State.RevisionPlan == nil || status.State.RevisionPlan.Original.Plan != worked.State.RevisionPlan.Original.Plan {
+		t.Fatal("completed JSON lost original")
 	}
 	if after.PRNumber != number || after.HeadSHA != worked.HeadSHA || after.Lease.Status != "completed" {
 		t.Fatalf("incorrect submission state: %+v", after)

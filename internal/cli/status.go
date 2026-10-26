@@ -111,6 +111,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s #%d %s: owner=%s phase=%s gate=%s\n", entry.Repository, entry.Issue.Number, status, state.Lease.Owner, state.Lease.Phase, state.EffectiveGate)
 			if issueNumber != 0 {
+				fmt.Fprint(cmd.OutOrStdout(), lease.PlanSummary(state, false))
 				if entry.Checkpoint != nil {
 					fmt.Fprintf(cmd.OutOrStdout(), "Checkpoint: %s\n", entry.Checkpoint.String())
 				}

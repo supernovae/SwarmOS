@@ -565,6 +565,11 @@ func TestForkContributorRevisesOwnPR(t *testing.T) {
 	if _, err = s.Manager.RecordCheckpoint(ctx, issue, "alice", branch, base); err != nil {
 		t.Fatal(err)
 	}
+	for _, a := range []contract.Artifact{{Type: contract.ArtifactDesign, Body: "original fork plan", Producer: "mock", Summary: "original"}, {Type: contract.ArtifactTestPlan, Body: "original fork tests", Producer: "mock", Summary: "original tests"}} {
+		if _, err = s.Manager.UpdateArtifact(ctx, issue, "alice", a); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err = s.Manager.RecordSubmission(ctx, issue, "alice", number, st.PRURL); err != nil {
 		t.Fatal(err)
 	}
@@ -580,9 +585,28 @@ func TestForkContributorRevisesOwnPR(t *testing.T) {
 	if r, err := svc.Status(ctx, number); err != nil || r.Status != "open" {
 		t.Fatalf("contributor status = %+v, %v", r, err)
 	}
+	if len(contributorView.reviewRequests) != 0 {
+		t.Fatal("status fetched review bodies")
+	}
+	if _, err := svc.Work(ctx, Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock", InspectOnly: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(contributorView.reviewRequests) != 0 {
+		t.Fatal("dry-run fetched review bodies")
+	}
 	worked, err := svc.Work(ctx, Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock"}})
 	if err != nil {
 		t.Fatalf("contributor pr work: %v", err)
+	}
+	if worked.State.RevisionPlan == nil || worked.State.RevisionPlan.Original.Plan != "original fork plan" {
+		t.Fatal("coordinator original missing in fork response")
+	}
+	if len(contributorView.reviewRequests) != 1 || contributorView.reviewRequests[0] != number {
+		t.Fatal("wrong upstream review identity")
+	}
+	report, err := os.ReadFile(filepath.Join(worked.Worktree, ".swarm/active/PR_REVIEW_EVIDENCE.md"))
+	if err != nil || !strings.Contains(string(report), "> fork review finding") {
+		t.Fatal(string(report), err)
 	}
 	if worked.HeadSHA == base {
 		t.Fatal("contributor revision produced no new commit")
@@ -616,12 +640,18 @@ func TestForkContributorRevisesOwnPR(t *testing.T) {
 // forkPRTracker presents the fixture's PR as GitHub would for a fork
 // contribution: head in alice/swarm, base in the upstream repository.
 type forkPRTracker struct {
+	reviewRequests []int
 	tracker.Tracker
 	branch string
 	head   func() string
 	// baseTip and target, when set, report the target branch advancing or the
 	// PR being retargeted.
 	baseTip, target string
+}
+
+func (f *forkPRTracker) GetReviewEvidence(ctx context.Context, number int) (tracker.ReviewEvidence, error) {
+	f.reviewRequests = append(f.reviewRequests, number)
+	return tracker.ReviewEvidence{Records: []tracker.ReviewEvidenceRecord{{Body: "fork review finding", CommitSHA: "older"}}}, nil
 }
 
 func (f *forkPRTracker) UpstreamRepo() string { return "octo/swarm" }

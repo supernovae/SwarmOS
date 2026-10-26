@@ -4,6 +4,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,7 @@ func TestReviewProjectionPreservesTextAndUpdatesWithoutRebase(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := &lease.IssueState{Artifacts: []contract.Artifact{{Type: contract.ArtifactImplementation, Verdict: "PASS", Body: "Report\n## What we learned\n- reviewer-lesson", Metadata: map[string]string{"operator_steered": "true", "guidance_count": "2", "guidance_sha256": "hash"}}}}
+	st.RevisionPlan = &workspace.RevisionPlanContext{Original: workspace.PlanPair{Plan: "original plan", TestPlan: "original tests", PlanDigest: "original digest"}}
 	if err := ProjectReviewEvidence(t.Context(), tr, st, pr.Number); err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +25,7 @@ func TestReviewProjectionPreservesTextAndUpdatesWithoutRebase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(first.Body, original) || !strings.Contains(first.Body, "Operator-steered: 2") || !strings.Contains(first.Body, "reviewer-lesson") {
+	if !strings.Contains(first.Body, "Original approved plan") || !strings.Contains(first.Body, "original tests") || !strings.Contains(first.Body, "original digest") || !strings.Contains(first.Body, original) || !strings.Contains(first.Body, "Operator-steered: 2") || !strings.Contains(first.Body, "reviewer-lesson") {
 		t.Fatal(first.Body)
 	}
 	if err := ProjectReviewEvidence(t.Context(), tr, st, pr.Number); err != nil {

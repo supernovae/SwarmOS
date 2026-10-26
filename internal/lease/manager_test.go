@@ -173,6 +173,9 @@ func TestPRRevisionFencesIssueCheckpointAndInvalidatesApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if st.RevisionPlan == nil || st.RevisionPlan.Original.Plan != "plan" || st.RevisionPlan.Original.TestPlan != "tests" {
+		t.Fatal("lost approved original", st)
+	}
 	if st.PRRevision == nil || len(st.Artifacts) != 0 || len(st.Attestations) != 0 {
 		t.Fatalf("revision retained stale evidence: %+v", st)
 	}

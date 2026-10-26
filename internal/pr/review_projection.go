@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
@@ -23,7 +24,11 @@ func ProjectReviewEvidence(ctx context.Context, tr tracker.Tracker, st *lease.Is
 	}
 	var b strings.Builder
 	b.WriteString(reviewStart + "\n## SwarmOS review evidence\n\n")
+	b.WriteString(lease.PlanSummary(st, true))
 	for _, a := range st.Artifacts {
+		if st.RevisionPlan != nil && (a.Type == contract.ArtifactDesign || a.Type == contract.ArtifactTestPlan) {
+			continue
+		}
 		fmt.Fprintf(&b, "### %s: %s\n\n%s\n\n", a.Type, a.Verdict, a.Summary)
 		if a.Metadata["operator_steered"] == "true" {
 			fmt.Fprintf(&b, "Operator-steered: %s messages; SHA-256 `%s`.\n\n", a.Metadata["guidance_count"], a.Metadata["guidance_sha256"])

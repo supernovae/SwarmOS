@@ -152,11 +152,12 @@ func verifyRecoveryIndex(path, head string) error {
 	if err != nil {
 		return err
 	}
+	pointerPaths := instructionPaths(path)
 	for _, name := range strings.Split(names, "\x00") {
 		if name == "" {
 			continue
 		}
-		if name != "AGENTS.md" && name != "CLAUDE.md" {
+		if !pointerPaths[name] {
 			return fmt.Errorf("staged changes in %s", name)
 		}
 		staged, err := gitOutput(path, "show", ":"+name)

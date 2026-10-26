@@ -68,15 +68,27 @@ func CheckpointTree(ctx context.Context, root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Resolve instruction links before staging, refusing any that leave the
+	// worktree. Links are committed as they are; only the regular files they
+	// resolve to are stripped.
+	safe, err := safefs.Open(root)
+	if err != nil {
+		return "", err
+	}
+	defer safe.Close()
+	targets, err := instructionTargets(safe)
+	if err != nil {
+		return "", err
+	}
 	// Remember tracking before staging: an injected, untracked pointer-only file
 	// is removed by checkpoint cleanup, whereas a tracked empty file is retained.
 	tracked := map[string]bool{}
-	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		out, e := run("ls-files", "--", name)
+	for _, target := range targets {
+		out, e := run("ls-files", "--", target.path)
 		if e != nil {
 			return "", e
 		}
-		tracked[name] = out != ""
+		tracked[target.path] = out != ""
 	}
 	// Reject unmerged entries before rebuilding. Keep the original staged names,
 	// including intent-to-add paths that write-tree would otherwise omit.
@@ -102,18 +114,12 @@ func CheckpointTree(ctx context.Context, root string) (string, error) {
 	if err := stageCheckpointFilesWith(run); err != nil {
 		return "", err
 	}
-	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		info, e := os.Lstat(filepath.Join(root, name))
-		if os.IsNotExist(e) {
+	for _, target := range targets {
+		if !target.exists {
 			continue
 		}
-		if e != nil {
-			return "", e
-		}
-		if !info.Mode().IsRegular() {
-			return "", fmt.Errorf("refuse non-regular instruction file %s", name)
-		}
-		data, e := safefs.ReadFile(root, name, 16<<20)
+		name := target.path
+		data, e := safe.ReadFile(name, 16<<20)
 		if e != nil {
 			return "", e
 		}
@@ -121,7 +127,7 @@ func CheckpointTree(ctx context.Context, root string) (string, error) {
 		if cleaned == string(data) {
 			continue
 		}
-		if cleaned == "" && !tracked[name] {
+		if cleaned == "" && !tracked[name] && !target.linked {
 			if _, e := run("update-index", "--force-remove", "--", name); e != nil {
 				return "", e
 			}
@@ -138,6 +144,9 @@ func CheckpointTree(ctx context.Context, root string) (string, error) {
 		fields := strings.Fields(entry)
 		if len(fields) < 3 {
 			continue
+		}
+		if fields[0] != "100644" && fields[0] != "100755" {
+			return "", fmt.Errorf("refuse non-regular index entry for instruction file %s", name)
 		}
 		if _, e := run("update-index", "--add", "--cacheinfo", fields[0], strings.TrimSpace(blob), name); e != nil {
 			return "", e

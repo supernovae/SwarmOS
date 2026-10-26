@@ -214,7 +214,8 @@ var harnessSectionPattern = regexp.MustCompile(`(?s)` + regexp.QuoteMeta(harness
 
 // writeAgentsFile creates AGENTS.md from the template, or adds a marked SwarmOS
 // section to a repository's own AGENTS.md. Only text between the markers is
-// ever rewritten; the rest of the file stays the repository's.
+// ever rewritten; the rest of the file stays the repository's. rel is the file
+// AGENTS.md resolves to, which a repository may link to CLAUDE.md or elsewhere.
 func (w *managedWriter) writeAgentsFile(rel string, template []byte) error {
 	existing, err := w.safe.ReadFile(rel, 16<<20)
 	if errors.Is(err, os.ErrNotExist) {

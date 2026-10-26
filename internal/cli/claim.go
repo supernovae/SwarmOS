@@ -103,7 +103,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, preflight.Issue.Title, state.Lease.ClaimID, state.Branch)
 		var path, branch string
 		err = reporter.ReportSetupPhase(cmd.Context(), issue, "workspace", func() error {
-			path, branch, err = workspace.ProvisionFromRemoteAt(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA, state.DroppedCheckpoint)
+			path, branch, err = workspace.ProvisionWithContext(root, checkpointRemote, issue, preflight.Issue.Title, state.BaseSHA, targetBranch, state.HeadSHA, state.ProvisionContext(rootOpts.Fork))
 			return err
 		})
 		if err != nil {

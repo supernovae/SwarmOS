@@ -361,6 +361,17 @@ If a checkpoint no longer descends from the approved base, a maintainer can re-a
 
 Save or move aside local edits before resuming. A checkpoint containing commits absent from the new base still requires explicit reconciliation; SwarmOS keeps those commits and refuses to reset the branch. A task branch changed by someone else also requires inspection before recovery can continue.
 
+A task can also be re-approved on a newer base before it has any checkpoint, for example after planning paused for human review. The next `swarm issue work <issue>` (or `swarm issue claim`) fast-forwards the local task branch and worktree to the new base, provided all of these hold:
+
+- the branch and worktree are still exactly at the previously approved base;
+- the new base descends from it;
+- the worktree has no changes other than SwarmOS's own `.swarm/active/` files and the generated pointer in `AGENTS.md` and `CLAUDE.md`;
+- checking out the new base would not overwrite any untracked or ignored file.
+
+The branch moves with a compare-and-swap, so if anything else moved it, nothing changes. SwarmOS then rebuilds `.swarm/active/` from the issue's recorded state. The carried plan, test plan and review come from that state, never from files left in the old worktree. This applies to same-repository work only; `--fork` tasks keep the existing behavior.
+
+When a worktree has commits or edits of its own, SwarmOS still refuses and prints the recovery commands. First copy out any edits you want to keep. Then remove the worktree with `git worktree remove --force -- '<path>'` and rename the task branch with `git branch -m '<branch>' 'swarm-backup/issue-<N>'`, which keeps its commits. Finally, run `swarm issue work <issue>` again.
+
 
 ---
 

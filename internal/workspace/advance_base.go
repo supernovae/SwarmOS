@@ -1,0 +1,241 @@
+package workspace
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/supernovae/swarmos/internal/safefs"
+)
+
+// ProvisionContext carries coordinator-owned identity for provisioning. It is
+// built only from authoritative issue state, never from a worktree's files.
+type ProvisionContext struct {
+	// Dropped recovers a checkpoint contained in the approved base.
+	Dropped *DroppedCheckpoint
+	// PreviousBase is the prior approved base of a same-repository task with
+	// no recorded checkpoint. An untouched branch and worktree still at this
+	// commit are fast-forwarded to the newly approved base.
+	PreviousBase string
+}
+
+// ProvisionWithContext is ProvisionFromRemoteAt with explicit recovery context.
+func ProvisionWithContext(repoRoot, checkpointRemote string, issueNum int, title, baseSHA, branch, headSHA string, pc ProvisionContext) (string, string, error) {
+	if pc.Dropped != nil {
+		return ProvisionFromRemoteAt(repoRoot, checkpointRemote, issueNum, title, baseSHA, branch, headSHA, pc.Dropped)
+	}
+	previous := strings.TrimSpace(pc.PreviousBase)
+	if previous != "" && headSHA == "" && (checkpointRemote == "" || checkpointRemote == "origin") && issueNum > 0 && baseSHA != "" {
+		if branch == "" {
+			branch = BranchName(issueNum, title)
+		}
+		if err := advanceUntouchedBase(repoRoot, issueNum, branch, previous, baseSHA, nil); err != nil {
+			return "", "", err
+		}
+	}
+	return ProvisionFromRemoteAt(repoRoot, checkpointRemote, issueNum, title, baseSHA, branch, headSHA)
+}
+
+// staleActiveEvidence lists generated active files that describe the old
+// base. Callers re-materialize them from authoritative state.
+var staleActiveEvidence = []string{"PLAN.md", "TEST_PLAN.md", "REVIEW.md", "VALIDATION.md", "IMPLEMENTATION.md", "REVIEW_EVIDENCE.md", "SYSTEM_PROMPT.md", "WORKUNIT.md", "workunit.json"}
+
+// advanceUntouchedBase fast-forwards a task branch, and its worktree when one
+// exists, from the previous approved base to the new one. It does nothing
+// unless the branch is exactly at previous; any other ineligible state is
+// refused with a recovery hint before anything changes. beforeCAS lets tests
+// move the branch between the eligibility checks and the ref update.
+func advanceUntouchedBase(root string, issue int, branch, previous, base string, beforeCAS func() error) error {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	path := WorktreePath(absRoot, issue)
+	refuse := func(cause error) error {
+		return fmt.Errorf("cannot advance untouched worktree to the approved base: %w; %s", cause, RecoveryHint(issue, path, branch))
+	}
+	ref := "refs/heads/" + branch
+	if !strings.HasPrefix(branch, fmt.Sprintf("swarm/issue-%d-", issue)) {
+		return nil
+	}
+	if _, err := gitOutput(absRoot, "check-ref-format", ref); err != nil {
+		return refuse(err)
+	}
+	previous, err = resolveCommit(absRoot, previous)
+	if err != nil {
+		// Without the exact previous commit nothing can match it.
+		return nil
+	}
+	resolvedBase, err := resolveCommit(absRoot, base)
+	if err != nil {
+		if fetchErr := FetchCommit(absRoot, "origin", base); fetchErr != nil {
+			return nil
+		}
+		if resolvedBase, err = resolveCommit(absRoot, base); err != nil {
+			return nil
+		}
+	}
+	base = resolvedBase
+	tip, err := resolveCommit(absRoot, ref)
+	if err != nil || tip != previous || previous == base {
+		// Missing, already advanced, or carrying other commits: the ordinary
+		// provisioning checks decide, never this path.
+		return nil
+	}
+	if _, err := gitOutput(absRoot, "merge-base", "--is-ancestor", previous, base); err != nil {
+		return refuse(fmt.Errorf("approved base %s does not descend from previous base %s", base, previous))
+	}
+	info, statErr := os.Lstat(path)
+	switch {
+	case statErr == nil:
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return refuse(errors.New("worktree path must be a real directory"))
+		}
+		if err := verifyUntouchedWorktree(absRoot, path, branch, previous, base); err != nil {
+			return refuse(err)
+		}
+	case errors.Is(statErr, os.ErrNotExist):
+		registered, err := gitOutput(absRoot, "worktree", "list", "--porcelain")
+		if err != nil {
+			return refuse(err)
+		}
+		if strings.Contains(registered, "branch "+ref+"\n") {
+			return refuse(errors.New("task branch is registered to another worktree"))
+		}
+	default:
+		return refuse(statErr)
+	}
+	// Every eligibility check precedes the compare-and-swap; nothing has
+	// changed yet if it fails.
+	if beforeCAS != nil {
+		if err := beforeCAS(); err != nil {
+			return refuse(err)
+		}
+	}
+	if _, err := gitOutput(absRoot, "update-ref", "-m", "swarm: advance untouched task to approved base", ref, base, previous); err != nil {
+		return refuse(fmt.Errorf("branch moved during advancement: %w", err))
+	}
+	if statErr != nil {
+		return nil
+	}
+	if err := checkoutAdvancedBase(path, branch, previous, base); err != nil {
+		// Roll back only if the branch is still exactly where we put it.
+		if _, rollbackErr := gitOutput(absRoot, "update-ref", ref, previous, base); rollbackErr != nil {
+			return fmt.Errorf("advanced branch %s to %s but could not update worktree %q (%v) or restore the branch (%v); %s", branch, base, path, err, rollbackErr, RecoveryHint(issue, path, branch))
+		}
+		return refuse(err)
+	}
+	return nil
+}
+
+// verifyUntouchedWorktree confirms the worktree holds nothing but the
+// previous base and SwarmOS-managed changes, and that checking out base
+// cannot overwrite any untracked or ignored file.
+func verifyUntouchedWorktree(root, path, branch, previous, base string) error {
+	if err := verifyWorktree(path, branch, previous); err != nil {
+		return err
+	}
+	common, err := gitOutput(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	expected, err := gitOutput(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil || !samePath(strings.TrimSpace(common), strings.TrimSpace(expected)) {
+		return errors.New("worktree belongs to another repository")
+	}
+	for _, marker := range []string{"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "REBASE_HEAD", "rebase-merge", "rebase-apply", "BISECT_LOG"} {
+		gitPath, err := gitOutput(path, "rev-parse", "--path-format=absolute", "--git-path", marker)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Lstat(strings.TrimSpace(gitPath)); err == nil {
+			return fmt.Errorf("a Git operation is in progress (%s)", marker)
+		}
+	}
+	if err := verifyRecoveryIndex(path, previous); err != nil {
+		return err
+	}
+	if err := verifyUncheckpointedWorktree(path, previous); err != nil {
+		return err
+	}
+	return verifyCheckoutCollisions(path, previous, base)
+}
+
+// verifyCheckoutCollisions refuses when a path base adds already exists, or a
+// parent of it is not a directory. Git would overwrite ignored files silently.
+func verifyCheckoutCollisions(path, previous, base string) error {
+	changes, err := gitOutput(path, "diff", "--name-status", "-z", "--no-renames", previous, base)
+	if err != nil {
+		return err
+	}
+	parts := strings.Split(changes, "\x00")
+	for i := 0; i+1 < len(parts); i += 2 {
+		if parts[i] != "A" {
+			continue
+		}
+		name := parts[i+1]
+		for p := name; p != "." && p != ""; p = filepath.Dir(p) {
+			info, err := os.Lstat(filepath.Join(path, filepath.FromSlash(p)))
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if p == name || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("untracked file %s would be overwritten by the approved base", p)
+			}
+		}
+	}
+	return nil
+}
+
+// checkoutAdvancedBase moves the index and files from previous to base after
+// the branch CAS. The verified marker-only changes are dropped first; the
+// active bundle is regenerated by the caller from authoritative state.
+func checkoutAdvancedBase(path, branch, previous, base string) error {
+	if err := verifyWorktree(path, branch, base); err != nil {
+		return err
+	}
+	if _, err := gitOutput(path, "read-tree", previous); err != nil {
+		return err
+	}
+	if err := CleanEphemeralHarnessMarkers(path); err != nil {
+		return err
+	}
+	_, _ = gitOutput(path, "update-index", "-q", "--refresh")
+	if err := verifyCheckoutCollisions(path, previous, base); err != nil {
+		return err
+	}
+	if _, err := gitOutput(path, "read-tree", "-m", "-u", previous, base); err != nil {
+		return err
+	}
+	if err := verifyWorktree(path, branch, base); err != nil {
+		return err
+	}
+	safe, err := safefs.Open(path)
+	if err != nil {
+		return err
+	}
+	defer safe.Close()
+	for _, name := range staleActiveEvidence {
+		err := safe.Remove(filepath.Join(".swarm", "active", name))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// RecoveryHint names the manual recovery for a task worktree SwarmOS cannot
+// reuse. Edits are saved and commits kept on a renamed branch before removal.
+func RecoveryHint(issue int, path, branch string) string {
+	return fmt.Sprintf("to start over from the approved base, copy any edits you want to keep outside the worktree, then run git worktree remove --force -- %s and git branch -m %s %s (which keeps its commits), and retry swarm issue work %d",
+		shellQuote(path), shellQuote(branch), shellQuote(fmt.Sprintf("swarm-backup/issue-%d", issue)), issue)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}

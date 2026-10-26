@@ -178,7 +178,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				checkpointRemote, targetBranch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue.Number, issue.Title, claimed.Lease.ClaimID, claimed.Branch)
 				var worktree, branch string
 				err = opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "workspace", func() error {
-					worktree, branch, err = workspace.ProvisionFromRemoteAt(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA, claimed.DroppedCheckpoint)
+					worktree, branch, err = workspace.ProvisionWithContext(target.Path, checkpointRemote, issue.Number, issue.Title, claimed.BaseSHA, targetBranch, claimed.HeadSHA, claimed.ProvisionContext(rootOpts.Fork))
 					return err
 				})
 				if err != nil {

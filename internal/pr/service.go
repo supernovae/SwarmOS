@@ -325,7 +325,7 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 	} else if statErr != nil {
 		return nil, statErr
 	} else {
-		head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
+		head, dirty, rebasing, e := workspace.StatusPRHead(ctx, r.Worktree)
 		if e != nil {
 			return nil, fmt.Errorf("inspect managed PR worktree: %w", e)
 		}

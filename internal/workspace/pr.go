@@ -337,29 +337,50 @@ func prRebasing(ctx context.Context, path string) (bool, error) {
 }
 
 func PRHead(ctx context.Context, path string) (string, bool, bool, error) {
-	return prHead(ctx, path, false)
+	return prHead(ctx, path, prHeadRaw)
 }
 
 // InspectPRHead reads worktree state without refreshing the Git index.
 func InspectPRHead(ctx context.Context, path string) (string, bool, bool, error) {
-	return prHead(ctx, path, true)
+	return prHead(ctx, path, prHeadReadOnly)
 }
 
-func prHead(ctx context.Context, path string, readOnly bool) (string, bool, bool, error) {
+// StatusPRHead is InspectPRHead for display: SwarmOS's own instruction
+// pointer block does not make the worktree dirty.
+func StatusPRHead(ctx context.Context, path string) (string, bool, bool, error) {
+	return prHead(ctx, path, prHeadStatus)
+}
+
+type prHeadMode int
+
+const (
+	prHeadRaw prHeadMode = iota
+	prHeadReadOnly
+	prHeadStatus
+)
+
+func prHead(ctx context.Context, path string, mode prHeadMode) (string, bool, bool, error) {
 	head, err := gitOutputContext(ctx, path, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return "", false, false, err
 	}
-	args := []string{"status", "--porcelain", "-z", "--untracked-files=all"}
-	if readOnly {
-		args = append([]string{"--no-optional-locks"}, args...)
+	var dirty bool
+	if mode == prHeadStatus {
+		dirty, err = hasStatusChanges(ctx, path)
+	} else {
+		args := []string{"status", "--porcelain", "-z", "--untracked-files=all"}
+		if mode == prHeadReadOnly {
+			args = append([]string{"--no-optional-locks"}, args...)
+		}
+		var status string
+		status, err = gitOutputContext(ctx, path, args...)
+		dirty = status != ""
 	}
-	status, err := gitOutputContext(ctx, path, args...)
 	if err != nil {
 		return "", false, false, err
 	}
 	rebasing, err := prRebasing(ctx, path)
-	return strings.TrimSpace(head), status != "", rebasing, err
+	return strings.TrimSpace(head), dirty, rebasing, err
 }
 
 func prRebaseValue(ctx context.Context, path, key string) (string, error) {

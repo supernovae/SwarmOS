@@ -46,7 +46,11 @@ func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Man
 		return nil, fmt.Errorf("resolve cleanup root: %w", err)
 	}
 	root = filepath.Clean(root)
-	st, o, err := m.InspectSubmission(ctx, n)
+	st, revision, err := m.loadReadOnly(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	o, err := m.observeSubmission(ctx, st)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +87,17 @@ func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Man
 	var retiring []string
 	for _, item := range []struct{ path, branch string }{{workspace.WorktreePath(root, n), st.Branch}, {workspace.PRWorktreePath(root, st.PRNumber), workspace.PRBranchName(st.PRNumber)}} {
 		i := workspace.InspectCleanupWorktree(ctx, root, item.path, item.branch, o.SubmittedHeadSHA)
-		r := CleanupResource{Kind: "worktree", Name: item.path, ExpectedHead: o.SubmittedHeadSHA, CurrentHead: i.Head, Absent: i.Absent, Eligible: i.Eligible, Reason: i.Reason}
+		expected := o.SubmittedHeadSHA
+		if item.path == workspace.WorktreePath(root, n) && !i.Absent && i.Head != "" {
+			if why := m.cleanupHeadReason(ctx, n, st, revision, i.Head, o.SubmittedHeadSHA); why != "" {
+				i.Eligible = false
+				i.Reason = "retained: " + why
+			} else {
+				expected = i.Head
+				i = workspace.InspectCleanupWorktree(ctx, root, item.path, item.branch, expected)
+			}
+		}
+		r := CleanupResource{Kind: "worktree", Name: item.path, ExpectedHead: expected, CurrentHead: i.Head, Absent: i.Absent, Eligible: i.Eligible, Reason: i.Reason}
 		if reason != "" {
 			r.Eligible = false
 			r.Reason = reason
@@ -95,7 +109,17 @@ func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Man
 	}
 	for _, b := range []string{st.Branch, workspace.PRBranchName(st.PRNumber)} {
 		i := workspace.InspectCleanupBranch(ctx, root, b, o.SubmittedHeadSHA, retiring)
-		r := CleanupResource{Kind: "local-code-branch", Name: b, ExpectedHead: o.SubmittedHeadSHA, CurrentHead: i.Head, Absent: i.Absent, Eligible: i.Eligible, Reason: i.Reason}
+		expected := o.SubmittedHeadSHA
+		if b == st.Branch && !i.Absent && i.Head != "" {
+			if why := m.cleanupHeadReason(ctx, n, st, revision, i.Head, o.SubmittedHeadSHA); why != "" {
+				i.Eligible = false
+				i.Reason = "retained: " + why
+			} else {
+				expected = i.Head
+				i = workspace.InspectCleanupBranch(ctx, root, b, expected, retiring)
+			}
+		}
+		r := CleanupResource{Kind: "local-code-branch", Name: b, ExpectedHead: expected, CurrentHead: i.Head, Absent: i.Absent, Eligible: i.Eligible, Reason: i.Reason}
 		if reason != "" {
 			r.Eligible = false
 			r.Reason = reason

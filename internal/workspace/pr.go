@@ -55,8 +55,10 @@ Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMP
 }
 
 type PRWorkspaceOptions struct {
-	Number              int
-	Remote              string
+	Number int
+	Remote string
+	// BaseRemote, when set, supplies the approved base instead of Remote.
+	BaseRemote          string
 	HeadBranch          string
 	HeadSHA             string
 	LocalHeadSHA        string
@@ -137,7 +139,18 @@ func PreparePR(ctx context.Context, root string, opts PRWorkspaceOptions) (strin
 			}
 		}
 		if err := prCommit(ctx, abs, opts.BaseSHA); err != nil {
-			if _, err := gitOutputContext(ctx, abs, "fetch", "--no-write-fetch-head", opts.Remote, opts.BaseSHA); err != nil {
+			baseRemote := opts.Remote
+			if opts.BaseRemote != "" {
+				if err := ValidateRemoteName(opts.BaseRemote); err != nil {
+					return "", "", err
+				}
+				baseRemote = opts.BaseRemote
+			}
+			_, err := gitOutputContext(ctx, abs, "fetch", "--no-write-fetch-head", baseRemote, opts.BaseSHA)
+			if err != nil && baseRemote != opts.Remote {
+				_, err = gitOutputContext(ctx, abs, "fetch", "--no-write-fetch-head", opts.Remote, opts.BaseSHA)
+			}
+			if err != nil {
 				return "", "", fmt.Errorf("fetch approved PR base: %w", err)
 			}
 		}

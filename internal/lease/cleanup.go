@@ -118,7 +118,7 @@ func (m *Manager) DeleteCleanupBranch(ctx context.Context, n int, token string) 
 	if o.Status != "merged" || o.FinalHeadSHA != r.ExpectedHead || o.MergeCommitSHA != r.Evidence.MergeCommitSHA || o.MergedAt == nil {
 		return fmt.Errorf("merge evidence changed during cleanup")
 	}
-	out, err := cleanupGitOutput(ctx, m.repoRoot, "ls-remote", "--refs", "origin", "refs/heads/"+r.Branch)
+	out, err := cleanupGitOutput(ctx, m.repoRoot, "ls-remote", "--refs", m.UpstreamRemote(), "refs/heads/"+r.Branch)
 	if err != nil {
 		return err
 	}
@@ -173,22 +173,22 @@ func (m *Manager) FinishCleanup(ctx context.Context, n int, token string) error 
 }
 
 func (m *Manager) verifyCleanupRemote(ctx context.Context, o *PROutcome) error {
-	fetchURL, err := cleanupGitOutput(ctx, m.repoRoot, "remote", "get-url", "--all", "origin")
+	fetchURL, err := cleanupGitOutput(ctx, m.repoRoot, "remote", "get-url", "--all", m.UpstreamRemote())
 	if err != nil {
 		return err
 	}
-	pushURL, err := cleanupGitOutput(ctx, m.repoRoot, "remote", "get-url", "--push", "--all", "origin")
+	pushURL, err := cleanupGitOutput(ctx, m.repoRoot, "remote", "get-url", "--push", "--all", m.UpstreamRemote())
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(fetchURL) != strings.TrimSpace(pushURL) || len(strings.Split(strings.TrimSpace(fetchURL), "\n")) != 1 {
 		return fmt.Errorf("cleanup requires one identical fetch and push destination")
 	}
-	upstream, err := workspace.ResolveRemoteGitHubSlug(m.repoRoot, "origin")
+	upstream, err := workspace.ResolveForkRemoteSlug(m.repoRoot, m.UpstreamRemote(), m.UpstreamRemote())
 	if err != nil || upstream == "" || !strings.EqualFold(upstream, o.BaseRepo) || !strings.EqualFold(upstream, o.HeadRepo) {
-		return fmt.Errorf("cleanup origin repository identity mismatch")
+		return fmt.Errorf("cleanup %s repository identity mismatch", m.UpstreamRemote())
 	}
-	out, err := cleanupGitOutput(ctx, m.repoRoot, "ls-remote", "--symref", "origin", "HEAD")
+	out, err := cleanupGitOutput(ctx, m.repoRoot, "ls-remote", "--symref", m.UpstreamRemote(), "HEAD")
 	if err != nil {
 		return err
 	}

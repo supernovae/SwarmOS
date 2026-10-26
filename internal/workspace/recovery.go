@@ -17,7 +17,7 @@ type DroppedCheckpoint struct {
 	HeadSHA string `json:"head_sha"`
 }
 
-func provisionDroppedCheckpoint(root string, issue int, title, base string, retired *DroppedCheckpoint) (string, string, error) {
+func provisionDroppedCheckpoint(root, upstreamRemote string, issue int, title, base string, retired *DroppedCheckpoint) (string, string, error) {
 	refuse := func(err error) (string, string, error) {
 		return "", "", fmt.Errorf("cannot recover dropped checkpoint: %w", err)
 	}
@@ -47,8 +47,8 @@ func provisionDroppedCheckpoint(root string, issue int, title, base string, reti
 	}
 	// A missing remote branch also fails closed: publication must still expect
 	// exactly the recorded retired head.
-	if _, err := gitOutput(root, "remote", "get-url", "origin"); err == nil {
-		out, err := gitOutput(root, "ls-remote", "--refs", "origin", "refs/heads/"+retired.Branch)
+	if _, err := gitOutput(root, "remote", "get-url", upstreamRemote); err == nil {
+		out, err := gitOutput(root, "ls-remote", "--refs", upstreamRemote, "refs/heads/"+retired.Branch)
 		if err != nil {
 			return refuse(err)
 		}
@@ -142,7 +142,7 @@ func provisionDroppedCheckpoint(root string, issue int, title, base string, reti
 			return refuse(err)
 		}
 	}
-	return ProvisionFromRemoteAt(root, "origin", issue, title, base, retired.Branch, "")
+	return provisionFromRemote(root, upstreamRemote, upstreamRemote, issue, title, base, retired.Branch, "", nil)
 }
 
 // Check the index independently: matching working bytes cannot authorize

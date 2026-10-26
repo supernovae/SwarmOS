@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/registry"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
@@ -30,6 +31,9 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() { reportJSONFailure(cmd, asJSON, "repo-add", runErr) }()
 			var slug, localPath string
+			// A fresh clone names the project origin; an existing checkout
+			// uses the selected upstream remote.
+			upstreamRemote := rootOpts.effectiveUpstreamRemote()
 			if len(args) == 1 {
 				// Could be a local path or an owner/repo slug
 				if info, err := os.Stat(args[0]); err == nil && info.IsDir() {
@@ -69,18 +73,19 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 					if out, err := exec.CommandContext(cmd.Context(), "git", "clone", cloneURL, localPath).CombinedOutput(); err != nil {
 						return fmt.Errorf("git clone %s failed: %w (%s)", cloneURL, err, strings.TrimSpace(string(out)))
 					}
+					upstreamRemote = workspace.DefaultUpstreamRemote
 				}
 			}
 
 			reg := registry.New("")
-			entry, err := reg.Add(slug, localPath, rootOpts.Backend)
+			entry, err := reg.AddFromRemote(slug, localPath, rootOpts.Backend, upstreamRemote)
 			if err != nil {
 				return err
 			}
 
 			// Ensure .swarm/ harness is initialized in the registered repository
 			if _, err := os.Stat(filepath.Join(entry.Path, ".swarm", "config.yaml")); err != nil {
-				if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: entry.Path, SwarmVersion: pinFor(entry.Path)}); err != nil {
+				if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: entry.Path, SwarmVersion: pinFor(entry.Path), UpstreamRemote: upstreamRemote}); err != nil {
 					return fmt.Errorf("registered %s but could not initialize its .swarm/ harness (run swarm repo init --root %s): %w", entry.Repo, entry.Path, err)
 				}
 			}

@@ -54,7 +54,7 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 		return nil, fmt.Errorf("WorkUnit changed")
 	}
 	if m.tracker.BackendName() == "github" {
-		if err = workspace.FetchCommit(m.repoRoot, "origin", target); err != nil {
+		if err = workspace.FetchCommit(m.repoRoot, m.UpstreamRemote(), target); err != nil {
 			return nil, fmt.Errorf("fetch verified PR target: %w", err)
 		}
 	}

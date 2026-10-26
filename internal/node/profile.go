@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -148,4 +149,25 @@ func detectHostRAM() string {
 		}
 	}
 	return "16GB"
+}
+
+// LoadUpstreamRemote returns the profile's upstream_remote, or "" when the
+// profile is missing or does not set it. A malformed profile is an error so a
+// broken file never silently changes which remote is the project.
+func LoadUpstreamRemote(customPath string) (string, error) {
+	if customPath == "" {
+		customPath = DefaultNodeConfigPath()
+	}
+	data, err := os.ReadFile(customPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read node profile %s: %w", customPath, err)
+	}
+	var prof contract.NodeProfile
+	if err := yaml.Unmarshal(data, &prof); err != nil {
+		return "", fmt.Errorf("parse node profile %s: %w", customPath, err)
+	}
+	return strings.TrimSpace(prof.UpstreamRemote), nil
 }

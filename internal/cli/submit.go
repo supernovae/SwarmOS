@@ -97,7 +97,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return fmt.Errorf("submission gate: %w", err)
 			}
 			if baseBranch == "" {
-				baseBranch, err = defaultBaseBranch(root)
+				baseBranch, err = defaultBaseBranch(root, manager.UpstreamRemote())
 				if err != nil {
 					return err
 				}
@@ -126,14 +126,14 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 				return err
 			}
-			cfg, duration, err := approvedLeasePolicy(root, state.BaseSHA)
+			cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), state.BaseSHA)
 			if err != nil {
 				return err
 			}
 			heartbeat := manager.StartHeartbeat(ctx, issue, owner, duration)
 			defer heartbeat.Stop()
 			ctx = heartbeat.Context()
-			_, branch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, iss.Title, state.Lease.ClaimID, state.Branch)
+			_, branch := workspace.ClaimCheckpointFrom(manager.UpstreamRemote(), rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, iss.Title, state.Lease.ClaimID, state.Branch)
 			p.Next("checkpoint")
 			head, err := workspace.Checkpoint(ctx, worktree, branch, workspace.CheckpointOptions{
 				WorkUnit: unit, Purpose: "submit", Detail: cfg.CommitMessageDetail(),
@@ -167,7 +167,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := requireCleanHead(ctx, worktree, head); err != nil {
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
 			}
-			freshness := checkSubmissionFreshness(ctx, root, baseBranch, state.BaseSHA, head)
+			freshness := checkSubmissionFreshnessFrom(ctx, root, manager.UpstreamRemote(), baseBranch, state.BaseSHA, head)
 			advisoryOut := cmd.OutOrStdout()
 			if asJSON {
 				advisoryOut = cmd.ErrOrStderr()
@@ -176,7 +176,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			p.Next("checkpoint push/record")
 			// GitHub publishes this head and the fenced state in one atomic Git push.
 			if rootOpts.Fork {
-				if err := workspace.PushForkCheckpoint(ctx, root, rootOpts.effectiveForkRemote(), branch, head); err != nil {
+				if err := workspace.PushForkCheckpointFrom(ctx, root, manager.UpstreamRemote(), rootOpts.effectiveForkRemote(), branch, head); err != nil {
 					return err
 				}
 			}
@@ -270,16 +270,16 @@ func projectSubmitted(ctx context.Context, tr tracker.Tracker, issue int) error 
 	return tr.AddLabels(ctx, issue, []string{"swarm:pr-open"})
 }
 
-func defaultBaseBranch(root string) (string, error) {
-	if hasSubmissionOrigin(context.Background(), root) {
+func defaultBaseBranch(root, upstreamRemote string) (string, error) {
+	if hasSubmissionRemote(context.Background(), root, upstreamRemote) {
 		// Retain advertised-default discovery, but a failed refresh must not prevent
 		// submission when the cached name still identifies its target branch.
-		_, _ = workspace.ResolveBase(root)
-		out, err := gitcredential.Output(context.Background(), root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+		_, _ = workspace.ResolveBaseFrom(root, upstreamRemote)
+		out, err := gitcredential.Output(context.Background(), root, "symbolic-ref", "--quiet", "--short", "refs/remotes/"+upstreamRemote+"/HEAD")
 		if err != nil {
 			return "", fmt.Errorf("cannot discover remote default branch; specify --base")
 		}
-		return strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"), nil
+		return strings.TrimPrefix(strings.TrimSpace(string(out)), upstreamRemote+"/"), nil
 	}
 	out, err := gitcredential.Output(context.Background(), root, "branch", "--show-current")
 	if err != nil {

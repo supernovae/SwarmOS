@@ -218,6 +218,24 @@ swarm --fork pr work 55
 swarm --fork pr submit 55
 ```
 
+Many contributors already have the other common layout: `origin` is their fork and `upstream` is the project. `gh repo clone <your-login>/REPO` sets this up for a fork, and `gh repo fork --remote` sets it up in an existing clone of the project. Tell swarm which remote is the project with `--upstream-remote`; swarm then uses `origin` as your fork, so you don't need `--fork-remote`:
+
+```bash
+# Contributor (origin is your fork, upstream is the project):
+gh repo clone YOUR-LOGIN/REPO
+cd REPO
+git remote -v   # if there is no upstream remote: git remote add upstream https://github.com/OWNER/REPO.git
+
+swarm --upstream-remote upstream --fork issue work 42
+swarm --upstream-remote upstream --fork issue submit 42
+
+# Or save the setting once in this machine's node profile, then omit the flag:
+swarm --upstream-remote upstream node init
+swarm --fork issue work 42
+```
+
+Before swarm writes anything, it checks that `upstream` is the repository named by `--repo` (when given), that `origin` is a repository you own and can push to, and that the two are different repositories. If a check fails, the error names the remote and the flag that fixes it. Pass `--fork-remote <name>` to use a different fork remote. Your remotes are used as they are and are never renamed.
+
 See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for architecture details, per-contributor claim caps (`fork.max_active_claims`), and security boundaries.
 ---
 
@@ -253,7 +271,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 
 `swarm issue validate` and `swarm pr validate` always run the required checks. With a released build, `issue submit` and `pr submit` reuse a passing validation from the same worker and claim when the checkpoint content, approved base, trusted policy, and swarm version match exactly. Submit reports the original validation's age and tree SHA and includes that provenance in the PR. Edits, context changes, development builds, and fork submissions run checks again. CI always runs its checks.
 
-Every leaf command accepts `--json` for scripting (for example, `swarm issue claim --json`, `swarm issue status --json`, `swarm repo doctor --json`, and `swarm repo validate --base <sha> --json`). Each prints one JSON document with a `kind` field, and failures print `{"kind": ..., "status": "failed", "error": ...}`; the `issue`, `repo`, `pr`, and `node` groups themselves only print help. When `issue work`, `issue submit`, `pr work`, `pr rebase`, or `pr submit` stops because the plan got changes requested, a maintainer needs to approve, or there is a conflict, the failure also carries an advisory `next_action` (`reason`, `argv`, `human_required`). The command then exits with `3`, `4`, or `5` instead of `1`. See [Reacting to stops in scripts](docs/developer.md#reacting-to-stops-in-scripts). Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions.
+Every leaf command accepts `--json` for scripting (for example, `swarm issue claim --json`, `swarm issue status --json`, `swarm repo doctor --json`, and `swarm repo validate --base <sha> --json`). Each prints one JSON document with a `kind` field, and failures print `{"kind": ..., "status": "failed", "error": ...}`; the `issue`, `repo`, `pr`, and `node` groups themselves only print help. When `issue work`, `issue submit`, `pr work`, `pr rebase`, or `pr submit` stops because the plan got changes requested, a maintainer needs to approve, or there is a conflict, the failure also carries an advisory `next_action` (`reason`, `argv`, `human_required`). The command then exits with `3`, `4`, or `5` instead of `1`. See [Reacting to stops in scripts](docs/developer.md#reacting-to-stops-in-scripts). Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions, and `--upstream-remote <name>` when the project remote is not `origin`.
 
 To upgrade an existing repository, install the new swarm and rerun `swarm repo init`. It updates every generated file you haven't changed (workflows, their pins, slash commands, prompts, and templates) and lists the customized files it kept. Run `swarm repo init --dry-run --verbose` first to see what will change, including diffs for the files you customized, or run `/swarm-onboard` in your coding agent to merge them with you. Review the diff and commit it like any other change.
 

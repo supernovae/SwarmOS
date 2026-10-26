@@ -148,6 +148,9 @@ func (c stopContext) argv(maintainer bool, resource string, args ...string) []st
 	if o.RepoRoot != "" && !(maintainer && o.Fork) {
 		argv = append(argv, "--root", o.RepoRoot)
 	}
+	if remote := o.UpstreamRemote; remote != "" && !(maintainer && o.Fork) {
+		argv = append(argv, "--upstream-remote", remote)
+	}
 	if !maintainer {
 		if o.Fork {
 			argv = append(argv, "--fork")

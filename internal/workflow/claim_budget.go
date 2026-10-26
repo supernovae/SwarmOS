@@ -110,7 +110,7 @@ func (e *Engine) pauseWork(parent context.Context, res *WorkResult, opts WorkOpt
 				if err = e.LeaseManager.CheckClaim(cleanup, opts.IssueNumber, opts.Owner); err != nil {
 					return err
 				}
-				if err = workspace.PushForkCheckpoint(cleanup, opts.RepoRoot, forkRemote, res.BranchName, head); err != nil {
+				if err = workspace.PushForkCheckpointFrom(cleanup, opts.RepoRoot, e.upstreamRemote(), forkRemote, res.BranchName, head); err != nil {
 					return err
 				}
 			}

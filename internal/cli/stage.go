@@ -141,7 +141,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cfg, duration, err := approvedLeasePolicy(root, state.BaseSHA)
+			cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), state.BaseSHA)
 			if err != nil {
 				return err
 			}
@@ -251,7 +251,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			if _, err := manager.UpdatePhase(ctx, issue, owner, "implement", "active"); err != nil {
 				return err
 			}
-			_, branch := workspace.ClaimCheckpoint(rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, iss.Title, state.Lease.ClaimID, state.Branch)
+			_, branch := workspace.ClaimCheckpointFrom(manager.UpstreamRemote(), rootOpts.Fork, rootOpts.effectiveForkRemote(), issue, iss.Title, state.Lease.ClaimID, state.Branch)
 			if prStage {
 				branch = state.PRRevision.Branch
 			}
@@ -292,7 +292,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			}
 			if !prStage {
 				if rootOpts.Fork {
-					if err := workspace.PushForkCheckpoint(ctx, root, rootOpts.effectiveForkRemote(), branch, head); err != nil {
+					if err := workspace.PushForkCheckpointFrom(ctx, root, manager.UpstreamRemote(), rootOpts.effectiveForkRemote(), branch, head); err != nil {
 						return err
 					}
 				}

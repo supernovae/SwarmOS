@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 type submissionFreshness struct {
@@ -22,13 +23,19 @@ type submissionFreshness struct {
 // Fetch refreshes only the selected remote-tracking ref. Merge inspection may
 // write loose objects, but changes no branch refs, index or worktree.
 func checkSubmissionFreshness(ctx context.Context, root, branch, base, head string) submissionFreshness {
+	return checkSubmissionFreshnessFrom(ctx, root, workspace.DefaultUpstreamRemote, branch, base, head)
+}
+
+// checkSubmissionFreshnessFrom compares against the named upstream remote's
+// target branch, never a fork's copy of it.
+func checkSubmissionFreshnessFrom(ctx context.Context, root, upstreamRemote, branch, base, head string) submissionFreshness {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	f := submissionFreshness{Status: "skipped", ConflictedPaths: []string{}}
 	ref := "refs/heads/" + branch
-	if hasSubmissionOrigin(ctx, root) {
-		ref = "refs/remotes/origin/" + branch
-		if _, err := gitcredential.Output(ctx, root, "fetch", "--no-tags", "--no-write-fetch-head", "origin", "+refs/heads/"+branch+":"+ref); err != nil {
+	if hasSubmissionRemote(ctx, root, upstreamRemote) {
+		ref = "refs/remotes/" + upstreamRemote + "/" + branch
+		if _, err := gitcredential.Output(ctx, root, "fetch", "--no-tags", "--no-write-fetch-head", upstreamRemote, "+refs/heads/"+branch+":"+ref); err != nil {
 			return f
 		}
 	}
@@ -138,9 +145,14 @@ func (f submissionFreshness) conflictPaths() string {
 
 func submissionRecoveryCommand(pr int, opts *RootOptions) string {
 	command := "swarm"
+	if remote := strings.TrimSpace(opts.UpstreamRemote); remote != "" {
+		command += " --upstream-remote " + submissionShellWord(remote)
+	}
 	if opts.Fork {
 		command += " --fork"
-		if remote := opts.effectiveForkRemote(); remote != "fork" {
+		defaults := *opts
+		defaults.ForkRemote = ""
+		if remote := opts.effectiveForkRemote(); remote != defaults.effectiveForkRemote() {
 			command += " --fork-remote " + submissionShellWord(remote)
 		}
 	}
@@ -159,8 +171,11 @@ func (f submissionFreshness) conflictNote(pr, issue int, opts *RootOptions) stri
 	return b.String()
 }
 
-func hasSubmissionOrigin(ctx context.Context, root string) bool {
-	_, err := gitcredential.Output(ctx, root, "remote", "get-url", "origin")
+func hasSubmissionRemote(ctx context.Context, root, remote string) bool {
+	if workspace.ValidateRemoteName(remote) != nil {
+		return false
+	}
+	_, err := gitcredential.Output(ctx, root, "remote", "get-url", remote)
 	return err == nil
 }
 func submissionShellWord(s string) string {

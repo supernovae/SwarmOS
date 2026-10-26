@@ -134,19 +134,26 @@ const (
 )
 
 func workflowDefaultBranch(repoRoot string) (string, string) {
+	return workflowDefaultBranchFrom(repoRoot, "")
+}
+
+func workflowDefaultBranchFrom(repoRoot, remote string) (string, string) {
+	if remote == "" {
+		remote = "origin"
+	}
 	runGit := func(args ...string) (string, error) {
 		out, err := gitcredential.Output(context.Background(), repoRoot, args...)
 		return strings.TrimSpace(string(out)), err
 	}
 
-	if ref, err := runGit("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"); err == nil {
-		if branch, ok := strings.CutPrefix(ref, "origin/"); ok && branch != "" {
+	if ref, err := runGit("symbolic-ref", "--quiet", "--short", "refs/remotes/"+remote+"/HEAD"); err == nil {
+		if branch, ok := strings.CutPrefix(ref, remote+"/"); ok && branch != "" {
 			return branch, ""
 		}
 	}
 
-	if _, err := runGit("config", "--get", "remote.origin.url"); err == nil {
-		if refs, err := runGit("ls-remote", "--symref", "origin", "HEAD"); err == nil {
+	if _, err := runGit("config", "--get", "remote."+remote+".url"); err == nil {
+		if refs, err := runGit("ls-remote", "--symref", remote, "HEAD"); err == nil {
 			for _, line := range strings.Split(refs, "\n") {
 				fields := strings.Fields(line)
 				if len(fields) == 3 && fields[0] == "ref:" && fields[2] == "HEAD" {
@@ -156,7 +163,7 @@ func workflowDefaultBranch(repoRoot string) (string, string) {
 				}
 			}
 		}
-		return "", "CI workflow omitted: could not resolve origin's default branch; fetch origin and rerun swarm repo init"
+		return "", fmt.Sprintf("CI workflow omitted: could not resolve %s's default branch; fetch %s and rerun swarm repo init", remote, remote)
 	}
 
 	if branch, err := runGit("symbolic-ref", "--quiet", "--short", "HEAD"); err == nil && branch != "" {
@@ -224,6 +231,9 @@ type InitOptions struct {
 	SwarmVersion    string
 	TemplateDir     string
 	ForkCoordinator bool
+	// UpstreamRemote names the project remote used for the repository name
+	// and default branch; empty means origin.
+	UpstreamRemote string
 	// DryRun reports what init would do without writing anything.
 	DryRun bool
 }
@@ -306,7 +316,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	}
 
 	// 2. .swarm/{project,architecture,conventions}.md
-	projectName := repositoryName(root)
+	projectName := repositoryName(root, opts.UpstreamRemote)
 	projectMD := fmt.Sprintf("# Project: %s\n\n- **Primary Stack**: %s\n- **Build Command**: `%s`\n- **Test Command**: `%s`\n",
 		projectName, stack.Language, stack.BuildCmd, stack.TestCmd)
 	if err := writeFile(".swarm/project.md", []byte(projectMD)); err != nil {
@@ -407,7 +417,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		branch, warning := workflowDefaultBranch(root)
+		branch, warning := workflowDefaultBranchFrom(root, opts.UpstreamRemote)
 		if warning != "" {
 			res.Warnings = append(res.Warnings, warning)
 		}
@@ -1017,8 +1027,11 @@ func mustAbs(p string) string {
 
 // repositoryName names the project after its origin repository, so the
 // generated description does not depend on the local clone's folder name.
-func repositoryName(root string) string {
-	out, err := gitcredential.Output(context.Background(), root, "remote", "get-url", "origin")
+func repositoryName(root, remote string) string {
+	if remote == "" {
+		remote = "origin"
+	}
+	out, err := gitcredential.Output(context.Background(), root, "remote", "get-url", remote)
 	if err == nil {
 		url := strings.TrimSuffix(strings.TrimSpace(string(out)), "/")
 		url = strings.TrimSuffix(url, ".git")

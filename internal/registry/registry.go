@@ -118,6 +118,12 @@ func (r *Registry) withLock(mutate bool, fn func(rf *registryFile) error) error 
 // 1. Path must be a valid git repository top-level root.
 // 2. If the git repository has an origin remote pointing to a GitHub owner/repo, it must match `repo` (preventing cross-repo mixups).
 func (r *Registry) Add(repo, localPath, backend string) (*RepoEntry, error) {
+	return r.AddFromRemote(repo, localPath, backend, "")
+}
+
+// AddFromRemote is Add with the repository identity read from the named
+// upstream remote; empty means origin.
+func (r *Registry) AddFromRemote(repo, localPath, backend, upstreamRemote string) (*RepoEntry, error) {
 	if localPath == "" {
 		localPath = "."
 	}
@@ -132,7 +138,7 @@ func (r *Registry) Add(repo, localPath, backend string) (*RepoEntry, error) {
 	}
 	gitRoot := strings.TrimSpace(string(topOut))
 
-	detectedSlug := DetectGitHubSlug(gitRoot)
+	detectedSlug := DetectGitHubSlugFrom(gitRoot, upstreamRemote)
 	if repo == "" {
 		if detectedSlug != "" {
 			repo = detectedSlug
@@ -217,7 +223,20 @@ func (r *Registry) List() ([]RepoEntry, error) {
 }
 
 func DetectGitHubSlug(repoRoot string) string {
-	out, err := exec.Command("git", "-C", repoRoot, "remote", "get-url", "origin").Output()
+	return DetectGitHubSlugFrom(repoRoot, "")
+}
+
+// DetectGitHubSlugFrom reads the GitHub owner/repo of the named remote; empty
+// means origin. It returns "" for a missing, invalid, or non-GitHub remote.
+func DetectGitHubSlugFrom(repoRoot, remote string) string {
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		remote = "origin"
+	}
+	if strings.HasPrefix(remote, "-") || strings.ContainsAny(remote, " /\\:\x00\n") {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", repoRoot, "remote", "get-url", remote).Output()
 	if err != nil {
 		return ""
 	}

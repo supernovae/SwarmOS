@@ -1,0 +1,2 @@
+# Parallel PRs all append to "## Unreleased"; keep both sides instead of conflicting.
+CHANGELOG.md merge=union

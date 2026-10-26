@@ -164,7 +164,7 @@ func TestReconcileRejectsIdentityAndActiveAttempts(t *testing.T) {
 	}
 }
 func TestCleanupReservationFencesAcquireAndStaleToken(t *testing.T) {
-	m, tr, n := lifecycleFixture(t)
+	m, tr, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	stamp := time.Now()
 	tr.pr.State = "closed"
@@ -200,7 +200,7 @@ func TestCleanupReservationFencesAcquireAndStaleToken(t *testing.T) {
 }
 
 func TestCleanupRecoveryFencesOldOperation(t *testing.T) {
-	m, tr, n := lifecycleFixture(t)
+	m, tr, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	stamp := time.Now()
 	tr.pr.State = "closed"

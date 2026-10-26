@@ -5,6 +5,7 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 ## Unreleased
 
 - Show bounded, terminal-safe failed-check output and Go failing test names during repository, issue, and PR validation and submission. JSON failed-check outcomes include `output_tail` and `failing_tests`.
+- `swarm issue cleanup --apply` retires clean merged issue and PR worktrees and local code branches, with per-resource results and exact-tip branch deletion. Local backends need no origin; dirty or unsafe worktrees and their branches remain available.
 
 - `swarm issue submit` reports target-branch drift and the behind count before publishing. Conflicting submissions still open a draft PR, with conflicted paths and a numbered `swarm pr rebase <PR> --resolve` recovery command in the terminal and PR description. Unavailable freshness checks are skipped, and JSON output includes `base_freshness`.
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -128,6 +129,16 @@ func (m *Manager) ConfigureStore(root string) error {
 	if strings.TrimSpace(root) == "" {
 		return fmt.Errorf("empty repository root")
 	}
+	// Store and resource identities must use the same canonical repository root.
+	canonical, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolve repository root: %w", err)
+	}
+	canonical, err = filepath.EvalSymlinks(canonical)
+	if err != nil {
+		return fmt.Errorf("resolve repository root: %w", err)
+	}
+	root = filepath.Clean(canonical)
 	m.repoRoot = root
 	if strings.HasPrefix(m.tracker.BackendName(), "github") {
 		m.store = coordination.NewGitStore(root)

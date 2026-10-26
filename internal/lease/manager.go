@@ -1227,6 +1227,10 @@ func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status s
 		if status != "" {
 			st.Lease.Status = status
 		}
+		if status == "active" && (phase == st.Lease.NextPhase || phase == "implement" && strings.HasPrefix(st.NextPhaseReason, "rejected agent changes to:")) {
+			st.NextPhaseReason = ""
+			st.Lease.NextPhase = ""
+		}
 		return nil
 	})
 	if err == nil && m.tracker != nil && st.EffectiveGate != contract.GateNone && phase == "review" {

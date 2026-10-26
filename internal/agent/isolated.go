@@ -43,7 +43,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 		return nil, limitErr
 	}
 	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
-		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckPauseImport: req.CheckPauseImport}
+		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckImport: req.CheckImport}
 	collector := &GuidanceCollector{}
 	options.GuidanceDelivered = collector.Delivered
 	options.ProjectPlan = req.ProjectPlan

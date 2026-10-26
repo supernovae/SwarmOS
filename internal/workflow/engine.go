@@ -598,25 +598,36 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}()
 	activePhase, preserveCheckpoint := "plan", false
 	defer func() {
-		if workErr != nil && budgetInterrupted(ctx, workErr) {
+		var rejection *importRejection
+		if workErr != nil && !errors.As(workErr, &rejection) && budgetInterrupted(ctx, workErr) {
 			workErr = e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, activePhase, preserveCheckpoint, forkMode, forkRemote)
 			result = res
 		}
 	}()
-	checkPauseImport := func(importCtx context.Context, paths []string) error {
-		if err := e.LeaseManager.CheckClaim(importCtx, opts.IssueNumber, opts.Owner); err != nil {
-			return err
-		}
-		if !pre.WorkUnit.AllowHarnessChanges {
-			for _, path := range paths {
-				for _, pattern := range pre.Validation.ProtectedPaths {
-					if validation.MatchProtectedPath(pattern, path) {
-						return fmt.Errorf("paused snapshot changed protected path %s", path)
-					}
-				}
+	checkImport := func(role string) func(context.Context, []string) error {
+		return func(importCtx context.Context, paths []string) error {
+			if err := e.LeaseManager.CheckClaim(importCtx, opts.IssueNumber, opts.Owner); err != nil {
+				return err
 			}
+			return writableImportPolicy(role, paths, pre.Validation.ProtectedPaths, pre.WorkUnit.AllowHarnessChanges, forkMode)
 		}
-		return nil
+	}
+	rejectImport := func(runErr error) error {
+		var rejection *importRejection
+		if !errors.As(runErr, &rejection) {
+			return runErr
+		}
+		rerun := fmt.Sprintf("swarm issue work %d --phase implement", opts.IssueNumber)
+		if opts.PRNumber != 0 {
+			rerun = fmt.Sprintf("swarm pr work %d --phase implement", opts.PRNumber)
+		}
+		reason := fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; rerun with %s", rejection, rerun)
+		updated, err := e.LeaseManager.Handoff(coordinatorCtx, opts.IssueNumber, opts.Owner, "implement", "implement", reason)
+		if err != nil {
+			return fmt.Errorf("%w: record import rejection: %w", runErr, err)
+		}
+		res.State = updated
+		return fmt.Errorf("%s: %w", reason, runErr)
 	}
 	pauseInterrupted := func(runErr error, phase string, checkpoint bool) (bool, error) {
 		if !budgetInterrupted(ctx, runErr) {
@@ -829,6 +840,10 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := check(); err != nil {
 		return res, err
 	}
+	if st, err = e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "implement", "active"); err != nil {
+		return res, err
+	}
+	res.State = st
 	activePhase, preserveCheckpoint = "implement", true
 	if !implementationProven(st, res.HeadSHA) {
 		if err := admit("implement"); err != nil {
@@ -873,7 +888,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if err := admit("implement"); err != nil {
 			return res, err
 		}
-		devRun, err := devRunner.Run(ctx, agent.RunRequest{CheckPauseImport: checkPauseImport, Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
+		devRun, err := devRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("developer"), Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
+		var rejection *importRejection
+		if errors.As(err, &rejection) {
+			return res, rejectImport(err)
+		}
 		if paused, pauseErr := pauseInterrupted(err, "implement", true); paused {
 			return res, pauseErr
 		}
@@ -966,6 +985,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := compileSetupBundle(ctx, opts.SetupProgress, wtPath, pre.WorkUnit, wf, st, "tester", opts.PRNumber); err != nil {
 		return res, err
 	}
+	if err := ensurePlanArtifactsInWorktree(wtPath, st); err != nil {
+		return res, err
+	}
 	testPrompt := "Execute /swarm-validate and record acceptance evidence."
 	if opts.Instructions != "" {
 		testPrompt += "\nOperator instructions: " + opts.Instructions
@@ -973,7 +995,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := admit("implement"); err != nil {
 		return res, err
 	}
-	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{CheckPauseImport: checkPauseImport, Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions})
+	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("tester"), Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions})
+	var rejection *importRejection
+	if errors.As(err, &rejection) {
+		return res, rejectImport(err)
+	}
 	if paused, pauseErr := pauseInterrupted(err, "implement", true); paused {
 		return res, pauseErr
 	}

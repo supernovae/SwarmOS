@@ -2,7 +2,7 @@ package sandbox
 
 import "context"
 
-func checkPauseImport(ctx context.Context, opts WorkerOptions, initial, final workerManifest) error {
+func checkImport(ctx context.Context, opts WorkerOptions, initial, final workerManifest) error {
 	var changed []string
 	for name, before := range initial {
 		if after, ok := final[name]; !ok || before != after {
@@ -14,8 +14,8 @@ func checkPauseImport(ctx context.Context, opts WorkerOptions, initial, final wo
 			changed = append(changed, name)
 		}
 	}
-	if opts.CheckPauseImport != nil {
-		return opts.CheckPauseImport(ctx, changed)
+	if opts.CheckImport != nil {
+		return opts.CheckImport(ctx, changed)
 	}
 	return ctx.Err()
 }

@@ -4,6 +4,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Reject developer and tester changes to protected paths and approved active inputs before importing any results across native Codex, Bubblewrap, and OCI. Restore approved inputs before testing, and show rejected paths and implementation retry guidance in errors and issue status.
+
 - Show bounded, terminal-safe failed-check output and Go failing test names during repository, issue, and PR validation and submission. JSON failed-check outcomes include `output_tail` and `failing_tests`.
 - `swarm issue cleanup --apply` retires clean merged issue and PR worktrees and local code branches, with per-resource results and exact-tip branch deletion. Local backends need no origin; dirty or unsafe worktrees and their branches remain available.
 

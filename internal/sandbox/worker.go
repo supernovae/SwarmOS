@@ -29,7 +29,7 @@ import (
 // WorkerOptions describes a disposable Linux OCI worker. OutputDir is a trusted
 // coordinator-owned destination used by the review snapshot's output channel.
 type WorkerOptions struct {
-	CheckPauseImport                func(context.Context, []string) error
+	CheckImport                     func(context.Context, []string) error
 	GuidanceDelivered               func(string) // coordinator callback for forwarded interactive guidance
 	Limits                          contract.AgentLimits
 	Warning                         io.Writer
@@ -526,10 +526,8 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 		}
 		return nil
 	}
-	if paused {
-		if err := checkPauseImport(ctx, opts, initial, manifest); err != nil {
-			return err
-		}
+	if err := checkImport(ctx, opts, initial, manifest); err != nil {
+		return err
 	}
 	if err := importWorker(ctx, original, extracted, initial, manifest); err != nil {
 		return err

@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
@@ -71,6 +72,44 @@ func RebasePatchIdentity(ctx context.Context, root, oldBase, oldHead, newBase, n
 		return "unchanged", nil
 	}
 	return "changed", nil
+}
+
+// RebaseDroppedPaths returns the sorted paths the PR changed against oldBase
+// that it no longer changes against newBase. Disabling rename detection counts
+// both endpoints; failures never imply that nothing was dropped.
+func RebaseDroppedPaths(ctx context.Context, root, oldBase, oldHead, newBase, newHead string) ([]string, error) {
+	changed := func(base, head string) ([]string, error) {
+		for _, sha := range []string{base, head} {
+			if err := prCommit(ctx, root, sha); err != nil {
+				return nil, err
+			}
+		}
+		out, err := gitOutputContext(ctx, root, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", base, head, "--")
+		if err != nil {
+			return nil, err
+		}
+		return nulPaths(out), nil
+	}
+	before, err := changed(oldBase, oldHead)
+	if err != nil {
+		return nil, err
+	}
+	after, err := changed(newBase, newHead)
+	if err != nil {
+		return nil, err
+	}
+	kept := make(map[string]bool, len(after))
+	for _, p := range after {
+		kept[p] = true
+	}
+	dropped := []string{}
+	for _, p := range before {
+		if !kept[p] {
+			dropped = append(dropped, p)
+		}
+	}
+	slices.Sort(dropped)
+	return slices.Compact(dropped), nil
 }
 
 func normalizeGitOutput(out string) string {

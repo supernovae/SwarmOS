@@ -1875,6 +1875,7 @@ func (m *Manager) RecordPRHead(ctx context.Context, n int, owner string, number 
 			st.LastRebase.NewHead = head
 			st.LastRebase.Verified = false
 			st.LastRebase.PatchIdentity = "unavailable"
+			st.LastRebase.resetDroppedPaths()
 			if st.ForkRepo == "" {
 				verifyRebaseEvidence(ctx, m.repoRoot, st, head)
 			}

@@ -9,7 +9,8 @@ import (
 )
 
 // CheckpointRebase is a coordinator-recorded rebase transition. Only completed,
-// verified records with unchanged patch identity can connect cleanup lineage.
+// verified records with unchanged or changed patch identity can connect
+// cleanup lineage.
 type CheckpointRebase struct {
 	OldHead       string `json:"old_head"`
 	NewHead       string `json:"new_head,omitempty"`

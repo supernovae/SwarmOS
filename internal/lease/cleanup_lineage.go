@@ -29,9 +29,12 @@ func (r *RebaseEvidence) checkpoint() coordination.CheckpointRebase {
 	return coordination.CheckpointRebase{OldHead: r.OldHead, NewHead: r.NewHead, OldBase: r.OldBase, NewBase: r.NewBase, Status: r.Status, PatchIdentity: r.PatchIdentity, Verified: r.Verified}
 }
 
-// verifiedRebase reports whether a recorded transition preserves its patch.
+// verifiedRebase reports whether a recorded transition is completed
+// coordinator evidence. Conflict resolutions that changed the patch count;
+// identities the coordinator could not compute do not.
 func verifiedRebase(r coordination.CheckpointRebase) bool {
-	return r.Status == "completed" && r.Verified && r.PatchIdentity == "unchanged" && r.OldHead != "" && r.NewHead != "" && r.OldHead != r.NewHead
+	identity := r.PatchIdentity == "unchanged" || r.PatchIdentity == "changed"
+	return r.Status == "completed" && r.Verified && identity && r.OldHead != "" && r.NewHead != "" && r.OldHead != r.NewHead
 }
 
 // recordRebaseTransition keeps a published verified rebase after a later
@@ -74,15 +77,19 @@ func (m *Manager) cleanupHeadReason(ctx context.Context, n int, st *IssueState, 
 			break
 		}
 	}
-	if !found {
+	if found {
+		ancestor, err := workspace.BaseIsAncestor(ctx, m.repoRoot, head, submitted)
+		if err != nil {
+			return "checkpoint ancestry unavailable: " + err.Error()
+		}
+		if ancestor {
+			return ""
+		}
+	}
+	// A verified rebase's old endpoint is lineage on its own; any other
+	// head must already be a recorded checkpoint.
+	if !found && !rebaseStartsAt(rebases, head) {
 		return "head is not in recorded checkpoint lineage"
-	}
-	ancestor, err := workspace.BaseIsAncestor(ctx, m.repoRoot, head, submitted)
-	if err != nil {
-		return "checkpoint ancestry unavailable: " + err.Error()
-	}
-	if ancestor {
-		return ""
 	}
 	if st.ForkRepo != "" || len(rebases) == 0 {
 		return "recorded checkpoint is not an ancestor of submitted tip"
@@ -90,9 +97,19 @@ func (m *Manager) cleanupHeadReason(ctx context.Context, n int, st *IssueState, 
 	return m.rebasePathReason(ctx, head, submitted, rebases)
 }
 
-// rebasePathReason searches directed paths from head to submitted whose edges
-// are Git ancestry or verified unchanged-patch rebases. Evidence that cannot
-// be evaluated is never an edge.
+func rebaseStartsAt(rebases []coordination.CheckpointRebase, head string) bool {
+	for _, r := range rebases {
+		if verifiedRebase(r) && r.OldHead == head {
+			return true
+		}
+	}
+	return false
+}
+
+// rebasePathReason searches directed paths from head to submitted. The first
+// edge must be a verified rebase whose old head is exactly head; later edges
+// are Git ancestry or verified rebases. Evidence that cannot be evaluated is
+// never an edge.
 func (m *Manager) rebasePathReason(ctx context.Context, head, submitted string, rebases []coordination.CheckpointRebase) string {
 	var verified []coordination.CheckpointRebase
 	for _, r := range rebases {
@@ -101,7 +118,10 @@ func (m *Manager) rebasePathReason(ctx context.Context, head, submitted string, 
 		}
 	}
 	if len(verified) == 0 {
-		return "recorded checkpoint is not an ancestor of submitted tip and no rebase has verified unchanged patch identity"
+		return "recorded checkpoint is not an ancestor of submitted tip and no rebase has verified evidence"
+	}
+	if !rebaseStartsAt(verified, head) {
+		return "recorded checkpoint is not an ancestor of submitted tip or the old head of a verified rebase"
 	}
 	// Equal heads still go through Git so every endpoint must be a commit.
 	contains := func(a, b string) bool {
@@ -114,7 +134,7 @@ func (m *Manager) rebasePathReason(ctx context.Context, head, submitted string, 
 		cur := queue[0]
 		queue = queue[1:]
 		for _, r := range verified {
-			if visited[r.NewHead] || !contains(cur, r.OldHead) {
+			if visited[r.NewHead] || (cur == head && r.OldHead != head) || !contains(cur, r.OldHead) {
 				continue
 			}
 			if contains(r.NewHead, submitted) {

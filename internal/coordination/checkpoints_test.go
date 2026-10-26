@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -155,4 +156,69 @@ func TestRetentionAtomicRejectionAndLegacyHistory(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckpointRetentionWithStateWrite(t *testing.T) {
+	ctx := context.Background()
+	t.Run("git", func(t *testing.T) {
+		f := newRetentionFixture(t)
+		f.git(f.clone, "commit", "--allow-empty", "-m", "abandoned")
+		head := f.git(f.clone, "rev-parse", "HEAD")
+		stale, err := f.store.CompareAndSwap(ctx, 1, "", []byte(`{"v":0}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rev, err := f.store.CompareAndSwap(ctx, 1, stale, []byte(`{"v":1}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A stale state lease rejects the whole atomic push, retention included.
+		if _, err := f.store.CompareAndSwapRetaining(ctx, 1, stale, []byte(`{"v":2}`), head); !errors.Is(err, ErrConflict) {
+			t.Fatalf("stale write: %v", err)
+		}
+		if out := f.git(f.remote, "for-each-ref", CheckpointRef(1, head)); out != "" {
+			t.Fatalf("failed write retained %s", out)
+		}
+		if _, err := f.store.CompareAndSwapRetaining(ctx, 1, rev, []byte(`{"v":2}`), strings.Repeat("1", 40)); err == nil {
+			t.Fatal("retained an unavailable commit")
+		}
+		if _, err := f.store.CompareAndSwapRetaining(ctx, 1, rev, []byte(`{"v":2}`), head); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.git(f.remote, "rev-parse", CheckpointRef(1, head)); got != head {
+			t.Fatalf("retention ref is %s", got)
+		}
+		if body, _, err := f.store.Load(ctx, 1); err != nil || string(body) != `{"v":2}` {
+			t.Fatalf("state %s %v", body, err)
+		}
+	})
+	t.Run("file", func(t *testing.T) {
+		f := newRetentionFixture(t)
+		store := NewFileStore(f.clone)
+		f.git(f.clone, "commit", "--allow-empty", "-m", "abandoned")
+		head := f.git(f.clone, "rev-parse", "HEAD")
+		if _, err := store.CompareAndSwapRetaining(ctx, 1, "", []byte(`{"v":1}`), strings.Repeat("1", 40)); err == nil {
+			t.Fatal("retained an unavailable commit")
+		}
+		if _, _, err := store.Load(ctx, 1); !errors.Is(err, ErrNotFound) {
+			t.Fatal("failed retention wrote state")
+		}
+		rev, err := store.CompareAndSwapRetaining(ctx, 1, "", []byte(`{"v":1}`), head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// An existing correct ref is accepted; a wrong one is never rewritten.
+		if _, err := store.CompareAndSwapRetaining(ctx, 1, rev, []byte(`{"v":2}`), head); err != nil {
+			t.Fatal(err)
+		}
+		f.git(f.clone, "commit", "--allow-empty", "-m", "other")
+		other := f.git(f.clone, "rev-parse", "HEAD")
+		f.git(f.clone, "update-ref", CheckpointRef(1, other), head)
+		if _, err := store.CompareAndSwapRetaining(ctx, 1, rev, []byte(`{"v":3}`), other); !errors.Is(err, ErrConflict) {
+			t.Fatalf("corrupt ref: %v", err)
+		}
+		if got := f.git(f.clone, "rev-parse", CheckpointRef(1, other)); got != head {
+			t.Fatal("rewrote a retention ref")
+		}
+	})
 }

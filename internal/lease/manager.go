@@ -79,6 +79,8 @@ type IssueState struct {
 	RebaseApprovalAudit    string                          `json:"rebase_approval_audit,omitempty"`
 	DroppedCheckpoint      *workspace.DroppedCheckpoint    `json:"dropped_checkpoint,omitempty"`
 	CheckpointDropped      bool                            `json:"-"`
+	DiscardedCheckpoints   []DiscardedCheckpoint           `json:"discarded_checkpoints,omitempty"`
+	FreshStart             *workspace.FreshStart           `json:"fresh_start,omitempty"`
 	SubmittedBaseSHA       string                          `json:"submitted_base_sha,omitempty"`
 	PreviousBaseSHA        string                          `json:"previous_base_sha,omitempty"`
 	LastRebase             *RebaseEvidence                 `json:"last_rebase,omitempty"`
@@ -115,6 +117,9 @@ type IssueState struct {
 // checkpoint or PR may advance from its previous approved base.
 func (st *IssueState) ProvisionContext(forkMode bool) workspace.ProvisionContext {
 	pc := workspace.ProvisionContext{Dropped: st.DroppedCheckpoint}
+	if !forkMode && st.ForkRepo == "" {
+		pc.FreshStart = st.FreshStart
+	}
 	if !forkMode && st.ForkRepo == "" && st.PRNumber == 0 && st.PRRevision == nil && st.HeadSHA == "" &&
 		st.DroppedCheckpoint == nil && st.PreviousBaseSHA != st.BaseSHA {
 		pc.PreviousBase = st.PreviousBaseSHA
@@ -559,6 +564,9 @@ func RenderStateProjection(wu *contract.WorkUnit, st *IssueState) string {
 	sb.WriteString(fmt.Sprintf("| **Task Digest** | `%s` |\n", short(st.TaskDigest)))
 	sb.WriteString(fmt.Sprintf("| **Policy Digest** | `%s` |\n", short(st.PolicyDigest)))
 	sb.WriteString(fmt.Sprintf("| **Draft PR** | %s |\n", prDisplay))
+	for _, d := range st.DiscardedCheckpoints {
+		sb.WriteString(fmt.Sprintf("| **Discarded checkpoint** | `%s` retained at `%s` |\n", short(d.HeadSHA), d.RetentionRef))
+	}
 
 	prov := BuildProvenanceAttestation(wu, st)
 	if len(prov.Roles) > 0 {
@@ -1747,6 +1755,8 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	preserveCheckpointHeads(st, st.HeadSHA, st.SubmittedHeadSHA, head)
 	st.HeadSHA = head
 	st.DroppedCheckpoint = nil
+	// The fresh attempt now has its own checkpoint; discard history stays.
+	st.FreshStart = nil
 	if _, ok := m.store.(coordination.PublishingStore); ok {
 		raw, err := json.Marshal(st)
 		if err != nil {

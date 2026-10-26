@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -16,6 +17,17 @@ import (
 )
 
 const CIFileLimit = 256 << 10
+
+// CINoticeReserve is rendered space held back from check metadata for the
+// evidence-truncation marker and one fixed-format code-scanning notice, so
+// metadata capacity never depends on alert text.
+const CINoticeReserve = 512
+
+// CIAlertLimit bounds the rendered code-scanning alert section.
+const CIAlertLimit = 32 << 10
+
+// ciNoticeMax bounds the quoted size of the closing code-scanning notice.
+const ciNoticeMax = 256
 
 var ciANSI = regexp.MustCompile("\x1b(?:\\[[0-?]*[ -/]*[@-~]|\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|[@-_])")
 
@@ -29,6 +41,12 @@ func normalizeCI(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// escapeCI matches validation.EscapeDiagnostic, which imports this package.
+func escapeCI(s string) string {
+	q := strconv.QuoteToASCII(s)
+	return q[1 : len(q)-1]
 }
 
 func quoteCI(payload string) string {
@@ -60,7 +78,7 @@ func RenderCIEvidence(evidence []tracker.CheckEvidence) ([]byte, error) {
 		fmt.Fprintf(&metadata, "Check ID: %d\nName: %s\nConclusion: %s\nPublished head SHA: %s\n\n", e.Check.ID, normalizeCI(e.Check.Name), normalizeCI(e.Check.Conclusion), normalizeCI(e.Check.HeadSHA))
 	}
 	payload := metadata.String()
-	if len(quoteCI(payload)) > CIFileLimit {
+	if len(quoteCI(payload))+CINoticeReserve > CIFileLimit {
 		return nil, fmt.Errorf("CI metadata for %d checks exceeds the 256 KiB report limit; provide selected diagnostics with --instructions", len(evidence))
 	}
 	// This marker also covers evidence omitted to fit the rendered-file ceiling.
@@ -68,6 +86,7 @@ func RenderCIEvidence(evidence []tracker.CheckEvidence) ([]byte, error) {
 	if len(quoteCI(payload+marker)) <= CIFileLimit {
 		payload += marker
 	}
+	payload = renderCodeScanning(payload, evidence)
 	logs, annotations := 128<<10, 64<<10
 	for _, e := range evidence {
 		add := func(text string) {
@@ -120,6 +139,52 @@ func RenderCIEvidence(evidence []tracker.CheckEvidence) ([]byte, error) {
 		}
 	}
 	return []byte(quoteCI(payload)), nil
+}
+
+// renderCodeScanning adds the PR-wide alert report once, before optional logs
+// and annotations. Alert fields are ASCII-escaped and whole alerts that do not
+// fit are counted as omitted; overflow never fails rendering.
+func renderCodeScanning(payload string, evidence []tracker.CheckEvidence) string {
+	var cs *tracker.CodeScanningEvidence
+	for _, e := range evidence {
+		if e.CodeScanning != nil {
+			cs = e.CodeScanning
+			break
+		}
+	}
+	if cs == nil {
+		return payload
+	}
+	if cs.Unavailable {
+		return payload + "\nCode-scanning alerts on the PR merge ref: " + tracker.CodeScanningUnavailable + "\n"
+	}
+	start := len(quoteCI(payload))
+	payload += "\nCode-scanning alerts on the PR merge ref:\n"
+	shown := 0
+	for _, a := range cs.Alerts {
+		line := fmt.Sprintf("Alert #%d: %s (severity: %s) at %s:%d\n  Message: %s\n", a.Number, escapeCI(a.RuleID), escapeCI(a.Severity), escapeCI(a.Path), a.Line, escapeCI(a.Message))
+		size := len(quoteCI(payload + line))
+		if size-start > CIAlertLimit || size+ciNoticeMax > CIFileLimit {
+			continue
+		}
+		payload += line
+		shown++
+	}
+	omitted := cs.Omitted + len(cs.Alerts) - shown
+	if len(cs.Alerts) == 0 && omitted == 0 {
+		payload += "None open.\n"
+	}
+	if omitted > 0 {
+		bound := ""
+		if cs.OmittedLowerBound {
+			bound = "at least "
+		}
+		payload += fmt.Sprintf("[%s%d more alerts omitted to fit report limits.]\n", bound, omitted)
+	}
+	if cs.TextTruncated {
+		payload += "[Alert text truncated to fit report limits.]\n"
+	}
+	return payload
 }
 
 // WriteCIEvidence refreshes ephemeral coordinator evidence, including removal

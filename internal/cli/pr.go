@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/agent"
@@ -11,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/pr"
 	progresspkg "github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
 )
 
@@ -217,6 +219,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					}
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s %s%s\n", check.Name, check.Status, check.Conclusion, reporter)
 				}
+				if result.CodeScanning != nil {
+					writeCodeScanning(cmd.OutOrStdout(), result.CodeScanning)
+				}
 				if operation == "status" && result.CIFailures {
 					fmt.Fprintln(cmd.OutOrStdout(), "Failing checks on the published head will be provided to the next swarm pr work run")
 				}
@@ -271,6 +276,33 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 		cmd.Flags().BoolVar(&progress, "progress", true, "Report conflict resolution progress on stderr")
 	}
 	return cmd
+}
+
+// writeCodeScanning prints untrusted alert fields escaped for the terminal.
+func writeCodeScanning(w io.Writer, cs *tracker.CodeScanningEvidence) {
+	ref := validation.EscapeDiagnostic(cs.Ref)
+	switch {
+	case cs.Unavailable:
+		fmt.Fprintf(w, "Code-scanning alerts on %s: %s\n", ref, tracker.CodeScanningUnavailable)
+		return
+	case len(cs.Alerts) == 0 && cs.Omitted == 0:
+		fmt.Fprintf(w, "Code-scanning alerts on %s: none open\n", ref)
+		return
+	}
+	fmt.Fprintf(w, "Code-scanning alerts on %s:\n", ref)
+	for _, a := range cs.Alerts {
+		fmt.Fprintf(w, "  #%d %s (%s) %s:%d: %s\n", a.Number, validation.EscapeDiagnostic(a.RuleID), validation.EscapeDiagnostic(a.Severity), validation.EscapeDiagnostic(a.Path), a.Line, validation.EscapeDiagnostic(a.Message))
+	}
+	if cs.Omitted > 0 {
+		bound := ""
+		if cs.OmittedLowerBound {
+			bound = "at least "
+		}
+		fmt.Fprintf(w, "  %s%d more alerts not shown\n", bound, cs.Omitted)
+	}
+	if cs.TextTruncated {
+		fmt.Fprintln(w, "  Alert text truncated to fit limits")
+	}
 }
 
 func requireIssueWorkspace(state *lease.IssueState) error {

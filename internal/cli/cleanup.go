@@ -9,7 +9,7 @@ import (
 
 func newCleanupCmd(opts *RootOptions) *cobra.Command {
 	var apply, asJSON, recoverReservation bool
-	cmd := &cobra.Command{Use: "cleanup <issue-number>", Short: "Preview retained task resources or retire a verified merged remote branch", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+	cmd := &cobra.Command{Use: "cleanup <issue-number>", Short: "Preview or retire verified merged task worktrees and branches", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 		var preview *lease.CleanupPreview
 		defer func() {
 			if !asJSON {
@@ -79,35 +79,43 @@ func newCleanupCmd(opts *RootOptions) *cobra.Command {
 		if err = tr.Authorize(cmd.Context(), "approve-task"); err != nil {
 			return err
 		}
-		remote := preview.Resources[0]
-		if remote.Absent {
-			return nil
+		if preview.Blocked != "" {
+			return fmt.Errorf("cleanup refused: %s", preview.Blocked)
 		}
-		if !remote.Eligible {
+		remote := preview.Resources[0]
+		if preview.RemoteApplicable && !remote.Absent && !remote.Eligible {
 			return fmt.Errorf("cleanup refused: %s", remote.Reason)
 		}
 		reservation, err := m.BeginCleanup(cmd.Context(), n, preview.Outcome)
 		if err != nil {
 			return err
 		}
-		deleteErr := m.DeleteCleanupBranch(cmd.Context(), n, reservation.OperationID)
-		// The remote action is a synchronous atomic transaction. Once it returns,
-		// releasing this token cannot let a delayed action publish over a successor.
+		var actionErr error
+		if preview.RemoteApplicable {
+			actionErr = m.DeleteCleanupBranch(cmd.Context(), n, reservation.OperationID)
+			if actionErr == nil && !remote.Absent {
+				preview.RemoteDeleted = true
+				preview.Resources[0].Retired = true
+				preview.Resources[0].Eligible = false
+				preview.Resources[0].Reason = "retired"
+			}
+		}
+		if actionErr == nil {
+			actionErr = m.RetireCleanupLocalResources(cmd.Context(), n, reservation.OperationID, preview)
+		}
 		finishErr := m.FinishCleanup(cmd.Context(), n, reservation.OperationID)
-		if deleteErr != nil {
-			return fmt.Errorf("remote cleanup failed; inspect resources before retry: %w", errors.Join(deleteErr, finishErr))
-		}
-		preview.RemoteDeleted = true
-		if finishErr != nil {
-			return fmt.Errorf("remote cleanup completed; reservation release failed: %w", finishErr)
-		}
 		if !asJSON {
-			fmt.Fprintln(cmd.OutOrStdout(), "Remote task branch retired; local resources and provenance retained.")
+			for _, r := range preview.Resources {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s %s: %s\n", r.Kind, r.Name, r.Reason)
+			}
+		}
+		if actionErr != nil || finishErr != nil {
+			return fmt.Errorf("cleanup incomplete; inspect resources before retry; recover reservation if necessary: %w", errors.Join(actionErr, finishErr))
 		}
 		return nil
 	}}
-	cmd.Flags().BoolVar(&recoverReservation, "recover-reservation", false, "Fence and release an interrupted remote cleanup before previewing again")
-	cmd.Flags().BoolVar(&apply, "apply", false, "Retire the eligible remote task branch; retain local resources and ledgers")
+	cmd.Flags().BoolVar(&recoverReservation, "recover-reservation", false, "Fence and release an interrupted cleanup before previewing again")
+	cmd.Flags().BoolVar(&apply, "apply", false, "Retire eligible merged task worktrees and code branches; retain ledgers")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured cleanup preview")
 	return cmd
 }

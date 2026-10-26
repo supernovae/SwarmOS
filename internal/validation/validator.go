@@ -10,8 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/gitcredential"
@@ -265,6 +268,11 @@ func loadTrustedValidationSpec(repoRoot, baseSHA string) (*contract.ValidationSp
 	if err != nil {
 		return nil, fmt.Errorf("%w: load validation policy at %s: %v", ErrInvalidPolicy, baseSHA, err)
 	}
+	for _, pattern := range spec.ProtectedPaths {
+		if err := checkProtectedPattern(pattern); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrInvalidPolicy, err)
+		}
+	}
 	return spec, nil
 }
 
@@ -425,12 +433,114 @@ func resolveCommit(repoRoot, revision string) (string, error) {
 // MatchProtectedPath reports whether target matches a protected_paths pattern.
 func MatchProtectedPath(pattern, target string) bool { return matchGlobPattern(pattern, target) }
 
+// matchGlobPattern matches like filepath.Match, except that a whole "**"
+// path component matches zero or more directories and a trailing "/**" matches
+// a directory and everything below it.
 func matchGlobPattern(pattern, target string) bool {
 	pattern, target = filepath.ToSlash(strings.TrimSpace(pattern)), filepath.ToSlash(target)
 	if strings.HasSuffix(pattern, "/**") {
 		prefix := strings.TrimSuffix(pattern, "/**")
-		return target == prefix || strings.HasPrefix(target, prefix+"/")
+		if target == prefix || strings.HasPrefix(target, prefix+"/") {
+			return true
+		}
 	}
-	ok, err := filepath.Match(pattern, target)
-	return (err == nil && ok) || pattern == target
+	if ok, err := filepath.Match(pattern, target); (err == nil && ok) || pattern == target {
+		return true
+	}
+	parts := strings.Split(pattern, "/")
+	if !slices.Contains(parts, "**") {
+		return false
+	}
+	return matchComponents(parts, strings.Split(target, "/"))
+}
+
+// matchComponents memoizes (pattern, target) positions so repeated "**"
+// components stay polynomial.
+func matchComponents(pattern, target []string) bool {
+	failed := make(map[[2]int]bool)
+	var match func(p, t int) bool
+	match = func(p, t int) bool {
+		if p == len(pattern) {
+			return t == len(target)
+		}
+		if failed[[2]int{p, t}] {
+			return false
+		}
+		if pattern[p] == "**" {
+			for next := t; next <= len(target); next++ {
+				if match(p+1, next) {
+					return true
+				}
+			}
+		} else if t < len(target) {
+			if ok, err := filepath.Match(pattern[p], target[t]); err == nil && ok && match(p+1, t+1) {
+				return true
+			}
+		}
+		failed[[2]int{p, t}] = true
+		return false
+	}
+	return match(0, 0)
+}
+
+// checkProtectedPattern rejects filepath.Match syntax errors anywhere in a
+// pattern. filepath.Match itself stops parsing at the first mismatch, so it
+// accepts patterns such as "a*b[" when matched against a short target.
+func checkProtectedPattern(pattern string) error {
+	p := filepath.ToSlash(strings.TrimSpace(pattern))
+	for len(p) > 0 {
+		switch p[0] {
+		case '\\':
+			if runtime.GOOS != "windows" {
+				if len(p) < 2 {
+					return fmt.Errorf("protected path pattern %q: %w", pattern, filepath.ErrBadPattern)
+				}
+				p = p[2:]
+				continue
+			}
+		case '[':
+			rest, err := skipClass(p[1:])
+			if err != nil {
+				return fmt.Errorf("protected path pattern %q: %w", pattern, err)
+			}
+			p = rest
+			continue
+		}
+		p = p[1:]
+	}
+	return nil
+}
+
+// skipClass follows filepath.Match's character class grammar and returns the
+// pattern after the closing bracket.
+func skipClass(p string) (string, error) {
+	p = strings.TrimPrefix(p, "^")
+	for n := 0; ; n++ {
+		if n > 0 && strings.HasPrefix(p, "]") {
+			return p[1:], nil
+		}
+		var err error
+		if p, err = skipClassChar(p); err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(p, "-") {
+			if p, err = skipClassChar(p[1:]); err != nil {
+				return "", err
+			}
+		}
+	}
+}
+
+func skipClassChar(p string) (string, error) {
+	if p == "" || p[0] == '-' || p[0] == ']' {
+		return "", filepath.ErrBadPattern
+	}
+	if p[0] == '\\' && runtime.GOOS != "windows" {
+		p = p[1:]
+	}
+	r, n := utf8.DecodeRuneInString(p)
+	if (r == utf8.RuneError && n <= 1) || len(p) == n {
+		return "", filepath.ErrBadPattern
+	}
+	return p[n:], nil
 }

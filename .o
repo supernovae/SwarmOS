@@ -1,0 +1,63 @@
+=== RUN   TestCLICheckpointReconciliationAndStatus
+--- PASS: TestCLICheckpointReconciliationAndStatus (0.75s)
+=== RUN   TestCLIStatusClaimBudgetUsesManagerClock
+--- PASS: TestCLIStatusClaimBudgetUsesManagerClock (0.10s)
+=== RUN   TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable
+=== RUN   TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable/issue/json=false
+=== RUN   TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable/issue/json=true
+=== RUN   TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable/node/json=false
+=== RUN   TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable/node/json=true
+--- PASS: TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable (0.65s)
+    --- PASS: TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable/issue/json=false (0.13s)
+    --- PASS: TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable/issue/json=true (0.13s)
+    --- PASS: TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable/node/json=false (0.19s)
+    --- PASS: TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable/node/json=true (0.20s)
+=== RUN   TestCLIReconcileAndCleanupPreviewReadOnly
+--- PASS: TestCLIReconcileAndCleanupPreviewReadOnly (0.79s)
+=== RUN   TestCLICleanupApplyRefusalHasJSONFailure
+--- PASS: TestCLICleanupApplyRefusalHasJSONFailure (0.77s)
+=== RUN   TestCLIApprovalWorkAndIdempotentSubmission
+--- PASS: TestCLIApprovalWorkAndIdempotentSubmission (0.73s)
+=== RUN   TestCLIHumanGateCannotBeBypassedByReviewOrSubmit
+--- PASS: TestCLIHumanGateCannotBeBypassedByReviewOrSubmit (0.89s)
+=== RUN   TestCLISelectorsFailBeforeClaiming
+--- PASS: TestCLISelectorsFailBeforeClaiming (0.03s)
+=== RUN   TestCLIClaimNextSelectorsAndPreparedWork
+--- PASS: TestCLIClaimNextSelectorsAndPreparedWork (0.60s)
+=== RUN   TestCLIClaimNextResumesHandoffPhase
+--- PASS: TestCLIClaimNextResumesHandoffPhase (0.27s)
+=== RUN   TestCLIValidationNamespacesAndRemovedRoutes
+--- PASS: TestCLIValidationNamespacesAndRemovedRoutes (0.21s)
+=== RUN   TestCLIRepoValidationFailurePreservesJSONAndExitStatus
+--- PASS: TestCLIRepoValidationFailurePreservesJSONAndExitStatus (0.05s)
+=== RUN   TestCLIRepoValidateReportsProtectedChangesForMaintainers
+--- PASS: TestCLIRepoValidateReportsProtectedChangesForMaintainers (0.07s)
+=== RUN   TestCLIIssueLeafJSONAndReviewDelegation
+--- PASS: TestCLIIssueLeafJSONAndReviewDelegation (0.32s)
+=== RUN   TestCLIRenewalLimitReturnsErrorWithoutChangingLease
+--- PASS: TestCLIRenewalLimitReturnsErrorWithoutChangingLease (0.18s)
+=== RUN   TestCLIInteractiveStageProvenanceAndPlanCommand
+--- PASS: TestCLIInteractiveStageProvenanceAndPlanCommand (0.73s)
+=== RUN   TestCLIEpicCommandsParentLinkingPullSkipAndDoctor
+--- PASS: TestCLIEpicCommandsParentLinkingPullSkipAndDoctor (0.68s)
+=== RUN   TestCLIStatusProvenance
+--- PASS: TestCLIStatusProvenance (0.65s)
+=== RUN   TestCLIStatusProvenanceMissing
+=== RUN   TestCLIStatusProvenanceMissing/approved=false
+=== RUN   TestCLIStatusProvenanceMissing/approved=true
+--- PASS: TestCLIStatusProvenanceMissing (0.11s)
+    --- PASS: TestCLIStatusProvenanceMissing/approved=false (0.04s)
+    --- PASS: TestCLIStatusProvenanceMissing/approved=true (0.07s)
+=== RUN   TestCLIQueueSkipsResumedStaleApproval
+=== RUN   TestCLIQueueSkipsResumedStaleApproval/work
+=== RUN   TestCLIQueueSkipsResumedStaleApproval/node
+--- PASS: TestCLIQueueSkipsResumedStaleApproval (2.72s)
+    --- PASS: TestCLIQueueSkipsResumedStaleApproval/work (1.33s)
+    --- PASS: TestCLIQueueSkipsResumedStaleApproval/node (1.38s)
+=== RUN   TestCLIStatusImportRejection
+--- PASS: TestCLIStatusImportRejection (0.08s)
+=== RUN   TestCLIIssueInteractivePlanPauseKeepsClaimActive
+--- PASS: TestCLIIssueInteractivePlanPauseKeepsClaimActive (0.38s)
+=== RUN   TestCLIApprovalClaimRecovery
+--- PASS: TestCLIApprovalClaimRecovery (0.25s)
+PASS

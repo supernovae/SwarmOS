@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -23,6 +24,7 @@ type WorkPreflightResult struct {
 	Blockers       []string `json:"blockers"`
 	Warnings       []string `json:"warnings"`
 	Commands       []string `json:"commands"`
+	pausedRebase   bool
 }
 
 func mergeability(p *tracker.PullRequest) string {
@@ -77,7 +79,7 @@ func (s *Service) checkWork(ctx context.Context, r *Result) error {
 	}
 	// Inspect only an existing worktree; never prepare one during the advisory check.
 	if _, _, rebasing, err := workspace.InspectPRHead(ctx, r.Worktree); err == nil && rebasing {
-		w.Status = "blocked"
+		w.Status, w.pausedRebase = "blocked", true
 		w.Blockers = append(w.Blockers, PausedRebaseError(ctx, r.Worktree, r.PR.Number).Error())
 		w.Commands = []string{s.workCommand(r, "rebase", "--continue"), s.workCommand(r, "rebase", "--continue --resolve"), s.workCommand(r, "rebase", "--abort")}
 		return nil
@@ -163,4 +165,15 @@ func (s *Service) checkWork(ctx context.Context, r *Result) error {
 		w.Commands = append(w.Commands, s.workCommand(r, "rebase", ""), "After resolving and staging conflicts: "+s.workCommand(r, "rebase", "--continue"), "Or resolve with the developer agent: "+s.workCommand(r, "rebase", "--continue --resolve"), s.workCommand(r, "validate", ""), s.workCommand(r, "submit", ""))
 	}
 	return nil
+}
+
+// stopError explains a blocked preflight. A paused rebase must be finished
+// first; a moved base then needs task approval before any new rebase;
+// otherwise the blockers are conflicts.
+func (w *WorkPreflightResult) stopError(r *Result) error {
+	err := fmt.Errorf("%s\n%s", strings.Join(w.Blockers, "\n"), strings.Join(w.Commands, "\n"))
+	if !w.pausedRebase && w.BaseResult == "moved" {
+		return &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: err}
+	}
+	return &ConflictError{PRNumber: r.PR.Number, Paused: w.pausedRebase, Err: err}
 }

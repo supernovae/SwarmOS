@@ -39,7 +39,7 @@ func (s *Service) preflightRebaseReview(ctx context.Context, r *Result, opts Opt
 		return nil
 	}
 	if r.State.EffectiveGate == contract.GateHuman {
-		return fmt.Errorf("human plan approval required: swarm issue review-plan %d --approve", r.IssueNumber)
+		return &lease.HumanPlanApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("human plan approval required: swarm issue review-plan %d --approve", r.IssueNumber)}
 	}
 	if s.Fork || !policyReviewNeeded(r.State, rv.unit) {
 		return fmt.Errorf("plan review required: swarm issue review-plan %d", r.IssueNumber)

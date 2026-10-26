@@ -105,8 +105,11 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					session.Finish(status)
 				}()
 			}
+			// Only work, rebase, and submit report a next action; dry runs inspect.
+			classifies := (operation == "work" || operation == "rebase" || operation == "submit") && !opts.Work.InspectOnly
 			tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
+				reportJSONFailure(cmd, asJSON && classifies, "pr-"+operation, err)
 				return err
 			}
 			service := rootOpts.prService(tr, manager)
@@ -143,6 +146,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
 				recovery = planReviewRecovery(rootOpts, result.State, "pr", opts.Number)
 			}
+			if classifies {
+				err = stopContext{opts: rootOpts, resource: "pr", number: opts.Number}.stop(err)
+			}
 			opts.Work.SetupProgress.Close()
 			if result != nil && result.Validation != nil && result.Validation.Reused {
 				fmt.Fprintln(cmd.ErrOrStderr(), result.Validation.Artifact.Summary)
@@ -155,6 +161,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				outcome := map[string]any{"kind": "pr-" + operation, "status": status, "result": result}
 				if recovery != "" {
 					outcome["recovery"] = recovery
+				}
+				if action := nextActionOf(err); action != nil {
+					outcome["next_action"] = action
 				}
 				if err != nil {
 					outcome["status"], outcome["error"] = "failed", err.Error()

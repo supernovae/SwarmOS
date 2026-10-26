@@ -20,6 +20,9 @@ func reportJSONFailure(cmd *cobra.Command, asJSON bool, kind string, err error) 
 		if errors.As(err, &recovery) {
 			outcome["recovery"] = recovery.recovery
 		}
+		if action := nextActionOf(err); action != nil {
+			outcome["next_action"] = action
+		}
 		_ = writeJSON(cmd, outcome)
 	}
 }

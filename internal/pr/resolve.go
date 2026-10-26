@@ -73,7 +73,7 @@ func PausedRebaseError(ctx context.Context, worktree string, number int) error {
 	if len(paths) > 0 {
 		msg += " with conflicts in " + strings.Join(paths, ", ")
 	}
-	return fmt.Errorf("%s; run swarm pr rebase %d --continue after staging resolved files, swarm pr rebase %d --resolve, or swarm pr rebase %d --abort", msg, number, number, number)
+	return &ConflictError{PRNumber: number, Paused: true, Err: fmt.Errorf("%s; run swarm pr rebase %d --continue after staging resolved files, swarm pr rebase %d --resolve, or swarm pr rebase %d --abort", msg, number, number, number)}
 }
 
 // resolveStop gives the developer agent one turn on the current rebase stop and

@@ -51,6 +51,13 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() { reportJSONFailure(cmd, jsonOutput, "work", runErr) }()
+			guidanceOpts := *rootOpts
+			stops := stopContext{opts: &guidanceOpts, resource: "issue"}
+			defer func() {
+				if !dryRun {
+					runErr = stops.stop(runErr)
+				}
+			}()
 			opts := workflow.WorkOptions{Version: Version,
 				OnBaseChange: baseChangePrinter(progressWriter(cmd)),
 				AgentName:    agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
@@ -66,7 +73,6 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					opts.OnProgress = printer
 				}
 			}
-			guidanceOpts := *rootOpts
 			var tr tracker.Tracker
 			var mgr *lease.Manager
 			var cfg *contract.SwarmConfig
@@ -93,6 +99,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					return err
 				}
 			}
+			stops.number = opts.IssueNumber
 			engine := workflow.NewEngineWithManager(opts.RepoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
 			if !dryRun {
 				lock, err := lease.LockClaim(opts.RepoRoot, opts.IssueNumber)
@@ -129,7 +136,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
 			opts.SetupProgress.Close()
 			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
-				recovery := planReviewRecovery(rootOpts, result.State, "issue", opts.IssueNumber)
+				recovery := planReviewRecovery(&guidanceOpts, result.State, "issue", opts.IssueNumber)
 				if jsonOutput {
 					return &planRecoveryError{err: err, recovery: recovery}
 				}

@@ -13,6 +13,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/claimpause"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -247,10 +248,15 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	}
 	state, err := e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber)
 	if err != nil {
-		return nil, fmt.Errorf("read approved task state: %w", err)
+		err = fmt.Errorf("read approved task state: %w", err)
+		if errors.Is(err, coordination.ErrNotFound) {
+			// A task that was never approved has no coordination state.
+			return nil, &lease.TaskApprovalError{IssueNumber: opts.IssueNumber, Err: err}
+		}
+		return nil, err
 	}
 	if state == nil || state.BaseSHA == "" {
-		return nil, errors.New("task has no approved immutable base")
+		return nil, &lease.TaskApprovalError{IssueNumber: opts.IssueNumber, Err: errors.New("task has no approved immutable base")}
 	}
 	if state.PRRevision != nil && opts.PRNumber == 0 {
 		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work/validate/submit", opts.IssueNumber)
@@ -277,7 +283,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	}
 	if (!deferTaskApproval && !lease.TaskApprovalCurrent(state, wu, cfg)) ||
 		!slices.Contains(iss.Labels, cfg.Security.ReadyLabel) {
-		return nil, lease.ErrApprovalRequired
+		return nil, &lease.TaskApprovalError{IssueNumber: opts.IssueNumber}
 	}
 	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
 	if err != nil {

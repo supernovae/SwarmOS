@@ -272,3 +272,17 @@ func TestFoldRejectsSpecialFile(t *testing.T) {
 		})
 	}
 }
+func TestRepositoryUnreleasedEmpty(t *testing.T) {
+	text := read(t, filepath.Join("..", ".."), "CHANGELOG.md")
+	anchor := "## Unreleased\n"
+	if strings.Count(text, anchor) != 1 || !(strings.HasPrefix(text, anchor) || strings.Contains(text, "\n"+anchor)) {
+		t.Fatal("CHANGELOG.md needs exactly one ## Unreleased heading")
+	}
+	tail := text[strings.Index(text, anchor)+len(anchor):]
+	if offset := strings.Index(tail, "\n## "); offset >= 0 {
+		tail = tail[:offset+1]
+	}
+	if body := strings.TrimSpace(tail); body != "" {
+		t.Fatalf("CHANGELOG.md Unreleased section must be empty; add one file per entry under changes/unreleased/ instead:\n%s", body)
+	}
+}

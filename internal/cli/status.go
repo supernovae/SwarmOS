@@ -14,13 +14,15 @@ import (
 )
 
 type issueStatus struct {
-	ClaimBudget     *lease.ClaimBudget         `json:"claim_budget,omitempty"`
-	PlanReplanLimit int                        `json:"plan_replan_limit"`
-	Checkpoint      *workspace.CheckpointState `json:"checkpoint,omitempty"`
-	Repository      string                     `json:"repository"`
-	Issue           *tracker.Issue             `json:"issue"`
-	State           *lease.IssueState          `json:"state"`
-	Provenance      []contract.RoleAttestation `json:"provenance"`
+	ClaimBudget *lease.ClaimBudget `json:"claim_budget,omitempty"`
+	// Set for a fork-mode claim whose upstream coordinator predates budgets.
+	ClaimBudgetUnavailable bool                       `json:"claim_budget_unavailable,omitempty"`
+	PlanReplanLimit        int                        `json:"plan_replan_limit"`
+	Checkpoint             *workspace.CheckpointState `json:"checkpoint,omitempty"`
+	Repository             string                     `json:"repository"`
+	Issue                  *tracker.Issue             `json:"issue"`
+	State                  *lease.IssueState          `json:"state"`
+	Provenance             []contract.RoleAttestation `json:"provenance"`
 }
 
 func newStatusCmd(options *RootOptions) *cobra.Command {
@@ -76,6 +78,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 					if err != nil {
 						return err
 					}
+					entry.ClaimBudgetUnavailable = entry.ClaimBudget == nil && manager.HasWorkerGateway() && !state.Lease.ClaimedAt.IsZero()
 					entry.PlanReplanLimit, err = manager.PlanReplanLimit(state)
 					if err != nil {
 						return err
@@ -103,6 +106,8 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			state := entry.State
 			if b := entry.ClaimBudget; b != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Claim budget: %d renewals used, %d remaining; total allowance left=%s deadline=%s; available=%s current expiry=%s (active=%t)\n", b.RenewalsUsed, b.RenewalsRemaining, b.Remaining, b.Deadline.Format(time.RFC3339), b.Available, state.Lease.ExpiresAt.Format(time.RFC3339), b.Active)
+			} else if entry.ClaimBudgetUnavailable {
+				fmt.Fprintln(cmd.OutOrStdout(), "claim budget: unavailable from upstream coordinator")
 			}
 			if o := state.PROutcome; o != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "PR outcome: %s (merge=%s)\n", o.Status, o.MergeCommitSHA)

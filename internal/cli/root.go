@@ -370,7 +370,16 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		store := coordination.NewGitStoreWithRemote(root, o.effectiveUpstreamRemote())
+		// Only the upstream default branch selects the ledger namespace.
+		ns, err := workspace.TrustedLedgerNamespace(root, o.effectiveUpstreamRemote())
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("configure authoritative state store: %w", err)
+		}
+		layout, err := coordination.LayoutFor(ns)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		store := coordination.NewGitStoreWithLayout(root, o.effectiveUpstreamRemote(), layout)
 		mgr := lease.NewManager(tr, cfg.Security)
 		if o.nowFn != nil {
 			mgr.SetNowFunc(o.nowFn)

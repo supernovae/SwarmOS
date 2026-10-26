@@ -7,6 +7,10 @@ plan_mode: auto
 # Checkpoint commit messages: concise (default) or detailed.
 commit_message:
   detail: concise
+# Ledger refs: hidden keeps state under refs/swarm/* (out of the branch list,
+# not protectable by rulesets); branch keeps refs/heads/swarm-* (the default
+# when omitted). Only the upstream default branch's value is used.
+ledger_namespace: hidden
 execution:
   mode: isolated
   backend: native

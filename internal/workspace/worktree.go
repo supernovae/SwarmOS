@@ -269,6 +269,29 @@ func ResolveBaseFrom(repoRoot, upstreamRemote string) (string, error) {
 		}
 		return resolveCommit(repoRoot, "HEAD")
 	}
+	return resolveAdvertisedDefault(repoRoot, upstreamRemote)
+}
+
+// ResolveTrustedDefault resolves the upstream remote's advertised default
+// branch commit with no fallback: a missing remote, even origin, is an error.
+func ResolveTrustedDefault(repoRoot, upstreamRemote string) (string, error) {
+	upstreamRemote = UpstreamRemoteOrDefault(upstreamRemote)
+	if err := ValidateRemoteName(upstreamRemote); err != nil {
+		return "", err
+	}
+	if _, err := gitOutput(repoRoot, "rev-parse", "--show-toplevel"); err != nil {
+		return "", fmt.Errorf("resolve repository root: %w", err)
+	}
+	if _, err := gitOutput(repoRoot, "remote", "get-url", upstreamRemote); err != nil {
+		if !errors.Is(err, errGitFailed) {
+			return "", err
+		}
+		return "", MissingUpstreamRemoteError(upstreamRemote)
+	}
+	return resolveAdvertisedDefault(repoRoot, upstreamRemote)
+}
+
+func resolveAdvertisedDefault(repoRoot, upstreamRemote string) (string, error) {
 	if _, err := gitOutput(repoRoot, "fetch", "--no-write-fetch-head", "--prune", upstreamRemote); err != nil {
 		return "", fmt.Errorf("fetch %s before resolving base: %w", upstreamRemote, err)
 	}

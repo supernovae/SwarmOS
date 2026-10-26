@@ -111,17 +111,20 @@ This command needs the same authority as `swarm issue approve`. It is refused wh
 
 ### Checkpoint retention
 
-Git-backed checkpoint publication, PR publication, and verified fork recording retain commits permanently under `refs/heads/swarm-checkpoints/issue-<number>/<full-SHA>`. Task-branch cleanup preserves these refs, so historical checkpoints survive branch rewrites, deletion, and Git garbage collection. Fetch a retained checkpoint explicitly:
+Git-backed checkpoint publication, PR publication, and verified fork recording retain commits permanently. With `ledger_namespace: branch` (the default when the key is absent), retention refs are `refs/heads/swarm-checkpoints/issue-<number>/<full-SHA>`. With `ledger_namespace: hidden`, they are `refs/swarm/checkpoints/issue-<number>/<full-SHA>`. Task-branch cleanup preserves these refs, so historical checkpoints survive branch rewrites, deletion, and Git garbage collection. Fetch a retained checkpoint explicitly:
 
 ```bash
 issue=29
 checkpoint=FULL_CHECKPOINT_SHA
-ref="refs/heads/swarm-checkpoints/issue-$issue/$checkpoint"
+prefix="refs/heads/swarm-checkpoints"   # hidden mode: prefix="refs/swarm/checkpoints"
+ref="$prefix/issue-$issue/$checkpoint"
 git fetch origin "$ref:refs/remotes/origin/swarm-checkpoints/issue-$issue/$checkpoint"
 git show "$checkpoint"
 ```
 
-These refs appear as branches in the hosting UI. Allow the coordinator to create `swarm-checkpoints/**` refs and exclude that namespace from branch-protection or ruleset patterns that would block creation. Publication requires the server's atomic-push support. Keep `swarm-state/**` refs as audit ledgers; they are separate from task code history.
+In branch mode these refs appear as branches in the hosting UI. Allow the coordinator to create `swarm-checkpoints/**` refs and exclude that namespace from branch-protection or ruleset patterns that would block creation. Hidden-mode refs stay out of the branch list, and rulesets cannot restrict them. Publication requires the server's atomic-push support in both modes. Keep the issue state refs (`swarm-state/**` or `refs/swarm/state/**`) as audit ledgers; they are separate from task code history.
+
+The namespace comes only from `.swarm/config.yaml` on the upstream default branch. To move an existing repository to hidden refs, pause workers, run `swarm repo migrate-refs`, then merge `ledger_namespace: hidden`. See [Ledger ref namespaces](GITHUB.md#ledger-ref-namespaces) for the full procedure and the security tradeoff.
 
 Available legacy checkpoints are retained during subsequent publication. SwarmOS reports older missing objects by full SHA and continues with available history; an already garbage-collected object needs recovery from another clone or backup. The current predecessor and candidate must both be available before a replacement can publish.
 

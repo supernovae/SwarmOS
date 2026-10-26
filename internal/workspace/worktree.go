@@ -227,6 +227,7 @@ func ProvisionAt(repoRoot string, issueNum int, title, baseSHA, branch, headSHA 
 // fetching baseSHA from origin if needed and restoring any pinned checkpoint
 // headSHA from checkpointRemote ("origin" in same-repo mode, or the verified
 // fork remote in --fork mode).
+// Callers that know a previous approved base use ProvisionWithContext.
 func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, title, baseSHA, branch, headSHA string, recovery ...*DroppedCheckpoint) (string, string, error) {
 	if len(recovery) > 0 && recovery[0] != nil {
 		if checkpointRemote != "origin" || headSHA != "" {
@@ -305,11 +306,14 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 			return "", "", fmt.Errorf("worktree path %q must be a real directory", wtPath)
 		}
 		if err := verifyWorktree(wtPath, branch, checkpoint); err != nil {
+			if headSHA == "" {
+				return "", "", fmt.Errorf("%w; %s", err, RecoveryHint(issueNum, wtPath, branch))
+			}
 			return "", "", err
 		}
 		if headSHA == "" {
 			if err := verifyUncheckpointedWorktree(wtPath, checkpoint); err != nil {
-				return "", "", err
+				return "", "", fmt.Errorf("%w; %s", err, RecoveryHint(issueNum, wtPath, branch))
 			}
 		}
 		if err := configureWorktreeExclude(wtPath); err != nil {
@@ -336,7 +340,7 @@ func ProvisionFromRemoteAt(repoRoot, checkpointRemote string, issueNum int, titl
 		}
 	}
 	if existing, err := resolveCommit(absRoot, branch); err == nil && existing != checkpoint {
-		return "", "", fmt.Errorf("existing branch %q is at %s, expected approved checkpoint %s; preserve it under another branch before retrying", branch, existing, checkpoint)
+		return "", "", fmt.Errorf("existing branch %q is at %s, expected approved checkpoint %s; preserve it under another branch with git branch -m %s %s before retrying", branch, existing, checkpoint, shellQuote(branch), shellQuote(fmt.Sprintf("swarm-backup/issue-%d", issueNum)))
 	}
 	if _, err := gitOutput(absRoot, "worktree", "add", "--", wtPath, branch); err != nil {
 		return "", "", fmt.Errorf("add worktree: %w", err)

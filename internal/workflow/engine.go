@@ -566,7 +566,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 	} else {
 		err = opts.SetupProgress.ReportSetupPhase(ctx, opts.IssueNumber, "workspace", func() error {
-			wtPath, branch, err = workspace.ProvisionFromRemoteAt(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA, st.DroppedCheckpoint)
+			wtPath, branch, err = workspace.ProvisionWithContext(opts.RepoRoot, checkpointRemote, opts.IssueNumber, pre.Issue.Title, st.BaseSHA, targetBranch, st.HeadSHA, st.ProvisionContext(forkMode))
 			return err
 		})
 		if err != nil {

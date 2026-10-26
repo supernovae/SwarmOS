@@ -108,6 +108,19 @@ type IssueState struct {
 	ForkRepo               string                         `json:"fork_repo,omitempty"`
 	LastForkRequestID      int64                          `json:"last_fork_request_id,omitempty"`
 }
+
+// ProvisionContext returns the authoritative recovery identity for issue
+// worktree provisioning. Only a same-repository task without a recorded
+// checkpoint or PR may advance from its previous approved base.
+func (st *IssueState) ProvisionContext(forkMode bool) workspace.ProvisionContext {
+	pc := workspace.ProvisionContext{Dropped: st.DroppedCheckpoint}
+	if !forkMode && st.ForkRepo == "" && st.PRNumber == 0 && st.PRRevision == nil && st.HeadSHA == "" &&
+		st.DroppedCheckpoint == nil && st.PreviousBaseSHA != st.BaseSHA {
+		pc.PreviousBase = st.PreviousBaseSHA
+	}
+	return pc
+}
+
 type Manager struct {
 	heartbeatTimerFn func(time.Duration) HeartbeatTimer
 	tracker          tracker.Tracker

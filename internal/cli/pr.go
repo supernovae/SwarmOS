@@ -208,13 +208,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s (%s %s)\n", review.Author, review.State, freshness, shortSHA(review.CommitSHA))
 				}
 				if result.Validation != nil {
-					for _, check := range result.Validation.CheckOutcomes {
-						status := "PASS"
-						if !check.Passed {
-							status = "FAIL"
-						}
-						fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", status, check.Name)
-					}
+					writeValidationChecks(cmd, result.Validation)
 				}
 				if result.Work != nil && result.Work.PausedForHuman {
 					if result.Work.PhaseCompleted == "awaiting-plan" {

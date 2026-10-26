@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +32,8 @@ var (
 )
 
 type CheckRunOutcome struct {
+	OutputTail          string        `json:"output_tail,omitempty"`
+	FailingTests        []string      `json:"failing_tests,omitempty"`
 	InfrastructureError bool          `json:"infrastructure_error,omitempty"`
 	Name                string        `json:"name"`
 	Command             string        `json:"command"`
@@ -162,7 +165,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			opts.OnProgress(progress.Event{Check: check.Name, Status: "started"})
 		}
 		start := time.Now()
-		var output process.Output
+		var output checkCapture
 		var runErr error
 		if opts.RunnerIsolated {
 			runErr = runOnHost(checkCtx, worktreePath, checkHome, check.Command, &output)
@@ -176,8 +179,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			runErr = runOnHost(checkCtx, worktreePath, checkHome, check.Command, &output)
 		}
 		cancel()
-		outcome := CheckRunOutcome{Name: check.Name, Command: check.Command, Duration: time.Since(start), Output: output.String(), Passed: runErr == nil}
+		outcome := CheckRunOutcome{Name: check.Name, Command: check.Command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil}
 		if runErr != nil {
+			outcome.OutputTail, outcome.FailingTests = output.diagnostics()
 			var exitErr *exec.ExitError
 			outcome.InfrastructureError = !errors.As(runErr, &exitErr)
 			report.Passed = false
@@ -293,7 +297,7 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 }
 
 // runOnHost runs a required check directly, with a scrubbed environment.
-func runOnHost(ctx context.Context, dir, home, command string, output *process.Output) error {
+func runOnHost(ctx context.Context, dir, home, command string, output io.Writer) error {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
 	cmd.Env = cleanCheckEnv(home)

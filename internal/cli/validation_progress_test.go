@@ -168,6 +168,10 @@ func TestValidationFailureDoesNotAnnouncePublication(t *testing.T) {
 		t.Fatal("expected failed check")
 	}
 	for _, operation := range []string{"validate", "submit"} {
+		text, _, textErr := runProgressCommand(t, f, "issue", operation, n, "--progress=false")
+		if textErr == nil || !strings.Contains(text, "FAIL trusted-failure (exit 7)\nPRIVATE_CHECK_OUTPUT") {
+			t.Fatalf("missing text failure: %v %s", textErr, text)
+		}
 		out, diag, err := runProgressCommand(t, f, "issue", operation, n, "--json")
 		if err == nil {
 			t.Fatal("failure accepted")
@@ -177,6 +181,9 @@ func TestValidationFailureDoesNotAnnouncePublication(t *testing.T) {
 			if strings.Contains(diag, private) {
 				t.Fatalf("unexpected %q in progress: %s", private, diag)
 			}
+		}
+		if !strings.Contains(out, `"output_tail":"PRIVATE_CHECK_OUTPUT"`) || !strings.Contains(out, `"failing_tests":[]`) {
+			t.Fatalf("missing failure diagnostics: %s", out)
 		}
 		d := json.NewDecoder(strings.NewReader(out))
 		var v any

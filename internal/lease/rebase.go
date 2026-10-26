@@ -13,6 +13,8 @@ import (
 )
 
 // RebaseEvidence is durable review context, never an authorization input.
+// Cleanup may treat coordinator-verified unchanged patch identity as lineage;
+// it never grants plan approval or publication authority.
 type RebaseEvidence struct {
 	RepairScopeSet        bool     `json:"repair_scope_set,omitempty"`
 	RepairPaths           []string `json:"repair_paths,omitempty"`

@@ -2,6 +2,8 @@ package lease
 
 import (
 	"context"
+
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -23,6 +25,26 @@ func preserveCheckpointHeads(st *IssueState, heads ...string) {
 	}
 }
 
+func (r *RebaseEvidence) checkpoint() coordination.CheckpointRebase {
+	return coordination.CheckpointRebase{OldHead: r.OldHead, NewHead: r.NewHead, OldBase: r.OldBase, NewBase: r.NewBase, Status: r.Status, PatchIdentity: r.PatchIdentity, Verified: r.Verified}
+}
+
+// verifiedRebase reports whether a recorded transition preserves its patch.
+func verifiedRebase(r coordination.CheckpointRebase) bool {
+	return r.Status == "completed" && r.Verified && r.PatchIdentity == "unchanged" && r.OldHead != "" && r.NewHead != "" && r.OldHead != r.NewHead
+}
+
+// recordRebaseTransition keeps a published verified rebase after a later
+// rebase replaces LastRebase, so local state can prove a chain.
+func recordRebaseTransition(st *IssueState, published string) {
+	if st.LastRebase == nil || st.LastRebase.NewHead != published {
+		return
+	}
+	if r := st.LastRebase.checkpoint(); verifiedRebase(r) {
+		st.RebaseTransitions = coordination.AppendCheckpointRebases(st.RebaseTransitions, r)
+	}
+}
+
 func (m *Manager) cleanupHeadReason(ctx context.Context, n int, st *IssueState, revision, head, submitted string) string {
 	if head == submitted && head != "" {
 		return ""
@@ -31,14 +53,19 @@ func (m *Manager) cleanupHeadReason(ctx context.Context, n int, st *IssueState, 
 		return "local head unavailable"
 	}
 	heads := append([]string{st.HeadSHA, st.SubmittedHeadSHA}, st.CheckpointHeads...)
+	rebases := append([]coordination.CheckpointRebase(nil), st.RebaseTransitions...)
+	if st.LastRebase != nil {
+		rebases = coordination.AppendCheckpointRebases(rebases, st.LastRebase.checkpoint())
+	}
 	if reader, ok := m.store.(interface {
-		CheckpointLineage(context.Context, int, string) ([]string, error)
+		CheckpointHistory(context.Context, int, string) (*coordination.CheckpointHistory, error)
 	}); ok {
-		history, err := reader.CheckpointLineage(ctx, n, revision)
+		history, err := reader.CheckpointHistory(ctx, n, revision)
 		if err != nil {
 			return "checkpoint history unavailable: " + err.Error()
 		}
-		heads = append(heads, history...)
+		heads = append(heads, history.Heads...)
+		rebases = coordination.AppendCheckpointRebases(rebases, history.Rebases...)
 	}
 	found := false
 	for _, h := range heads {
@@ -54,8 +81,48 @@ func (m *Manager) cleanupHeadReason(ctx context.Context, n int, st *IssueState, 
 	if err != nil {
 		return "checkpoint ancestry unavailable: " + err.Error()
 	}
-	if !ancestor {
+	if ancestor {
+		return ""
+	}
+	if st.ForkRepo != "" || len(rebases) == 0 {
 		return "recorded checkpoint is not an ancestor of submitted tip"
 	}
-	return ""
+	return m.rebasePathReason(ctx, head, submitted, rebases)
+}
+
+// rebasePathReason searches directed paths from head to submitted whose edges
+// are Git ancestry or verified unchanged-patch rebases. Evidence that cannot
+// be evaluated is never an edge.
+func (m *Manager) rebasePathReason(ctx context.Context, head, submitted string, rebases []coordination.CheckpointRebase) string {
+	var verified []coordination.CheckpointRebase
+	for _, r := range rebases {
+		if verifiedRebase(r) {
+			verified = append(verified, r)
+		}
+	}
+	if len(verified) == 0 {
+		return "recorded checkpoint is not an ancestor of submitted tip and no rebase has verified unchanged patch identity"
+	}
+	// Equal heads still go through Git so every endpoint must be a commit.
+	contains := func(a, b string) bool {
+		ok, err := workspace.BaseIsAncestor(ctx, m.repoRoot, a, b)
+		return err == nil && ok
+	}
+	visited := map[string]bool{head: true}
+	queue := []string{head}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, r := range verified {
+			if visited[r.NewHead] || !contains(cur, r.OldHead) {
+				continue
+			}
+			if contains(r.NewHead, submitted) {
+				return ""
+			}
+			visited[r.NewHead] = true
+			queue = append(queue, r.NewHead)
+		}
+	}
+	return "recorded checkpoint is not an ancestor of submitted tip and no verified rebase path reaches it"
 }

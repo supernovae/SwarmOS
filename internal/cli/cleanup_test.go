@@ -875,3 +875,239 @@ func TestCleanupLocalLineageMovedTip(t *testing.T) {
 		}
 	}
 }
+
+// rebasedCleanupFixture publishes count real PR rebases onto advanced bases
+// and returns the original issue checkpoint.
+func rebasedCleanupFixture(t *testing.T, count int) (*cliFixture, int, int, string) {
+	t.Helper()
+	f, n, pr := submittedPRFixture(t, "agent")
+	p := strconv.Itoa(pr)
+	old := f.state(t, n).HeadSHA
+	for i := 0; i < count; i++ {
+		name := "upstream-" + strconv.Itoa(i) + ".txt"
+		if err := os.WriteFile(filepath.Join(f.root, name), []byte("new upstream base\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		prGit(t, f.root, "add", name)
+		prGit(t, f.root, "commit", "-m", "Advance approved base")
+		f.must(t, "issue", "approve", strconv.Itoa(n))
+		f.must(t, "pr", "rebase", p)
+		f.must(t, "pr", "validate", p)
+		f.must(t, "pr", "submit", p)
+	}
+	seedLocalCleanupMergedPR(t, f, pr)
+	st := f.state(t, n)
+	if ok, err := workspace.BaseIsAncestor(context.Background(), f.root, old, st.SubmittedHeadSHA); err != nil || ok {
+		t.Fatalf("rebase kept the original checkpoint as an ancestor: %v", err)
+	}
+	if got := prGit(t, workspace.WorktreePath(f.root, n), "rev-parse", "HEAD"); got != old {
+		t.Fatalf("issue worktree moved: %s", got)
+	}
+	return f, n, pr, old
+}
+
+func assertCleanupIssueResources(t *testing.T, f *cliFixture, n int, p lease.CleanupPreview, eligible bool, head string) {
+	t.Helper()
+	path, branch := workspace.WorktreePath(f.root, n), f.state(t, n).Branch
+	seen := 0
+	for _, r := range p.Resources {
+		if r.Name == path || (r.Kind == "local-code-branch" && r.Name == branch) {
+			seen++
+			if r.Eligible != eligible || (eligible && r.ExpectedHead != head) || (!eligible && (r.Retired || r.Reason == "")) {
+				t.Fatalf("issue resource: %+v", r)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("missing issue resources: %+v", p.Resources)
+	}
+}
+
+func TestCleanupLocalVerifiedRebaseRetire(t *testing.T) {
+	f, n, pr, old := rebasedCleanupFixture(t, 1)
+	before := f.state(t, n)
+	if r := before.LastRebase; r == nil || r.OldHead != old || r.NewHead != before.SubmittedHeadSHA || !r.Verified || r.PatchIdentity != "unchanged" {
+		t.Fatalf("rebase evidence: %+v", r)
+	}
+	if len(before.RebaseTransitions) != 1 {
+		t.Fatalf("transition not persisted: %+v", before.RebaseTransitions)
+	}
+	p, err := lease.InspectCleanup(context.Background(), f.root, f.tracker, f.manager, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCleanupIssueResources(t, f, n, *p, true, old)
+	if !reflect.DeepEqual(before, f.state(t, n)) {
+		t.Fatal("preview changed state")
+	}
+	localCleanupApply(t, f, n)
+	assertCleanupLocalsRetired(t, f, n, pr, before.Branch)
+	if f.state(t, n).SubmittedHeadSHA != before.SubmittedHeadSHA {
+		t.Fatal("submission changed")
+	}
+	localCleanupApply(t, f, n)
+}
+
+func TestCleanupLocalChainedVerifiedRebasesRetire(t *testing.T) {
+	f, n, pr, old := rebasedCleanupFixture(t, 2)
+	before := f.state(t, n)
+	if before.LastRebase == nil || before.LastRebase.OldHead == old {
+		t.Fatalf("second rebase did not replace LastRebase: %+v", before.LastRebase)
+	}
+	if len(before.RebaseTransitions) != 2 || before.RebaseTransitions[0].OldHead != old || before.RebaseTransitions[0].NewHead != before.RebaseTransitions[1].OldHead || before.RebaseTransitions[1].NewHead != before.SubmittedHeadSHA {
+		t.Fatalf("chain not persisted: %+v", before.RebaseTransitions)
+	}
+	p, err := lease.InspectCleanup(context.Background(), f.root, f.tracker, f.manager, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCleanupIssueResources(t, f, n, *p, true, old)
+	localCleanupApply(t, f, n)
+	assertCleanupLocalsRetired(t, f, n, pr, before.Branch)
+}
+
+func TestCleanupRebaseIdentityRetention(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(r *coordination.CheckpointRebase, old, final string)
+	}{
+		{"unverified", func(r *coordination.CheckpointRebase, _, _ string) { r.Verified = false }},
+		{"changed", func(r *coordination.CheckpointRebase, _, _ string) { r.PatchIdentity = "changed" }},
+		{"unavailable", func(r *coordination.CheckpointRebase, _, _ string) { r.PatchIdentity = "unavailable" }},
+		{"empty identity", func(r *coordination.CheckpointRebase, _, _ string) { r.PatchIdentity = "" }},
+		{"in-progress", func(r *coordination.CheckpointRebase, _, _ string) { r.Status = "in-progress" }},
+		{"aborted", func(r *coordination.CheckpointRebase, _, _ string) { r.Status = "aborted" }},
+		{"missing endpoint", func(r *coordination.CheckpointRebase, _, _ string) { r.NewHead = "" }},
+		{"reversed", func(r *coordination.CheckpointRebase, old, final string) { r.OldHead, r.NewHead = final, old }},
+		{"disconnected", func(r *coordination.CheckpointRebase, _, _ string) { r.OldHead = strings.Repeat("c", 40) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, n, _, old := rebasedCleanupFixture(t, 1)
+			store := coordination.NewFileStore(f.root)
+			st := f.state(t, n)
+			tc.mutate(&st.RebaseTransitions[0], old, st.SubmittedHeadSHA)
+			st.LastRebase = &lease.RebaseEvidence{OldHead: st.RebaseTransitions[0].OldHead, NewHead: st.RebaseTransitions[0].NewHead, OldBase: st.RebaseTransitions[0].OldBase, NewBase: st.RebaseTransitions[0].NewBase, Status: st.RebaseTransitions[0].Status, PatchIdentity: st.RebaseTransitions[0].PatchIdentity, Verified: st.RebaseTransitions[0].Verified}
+			_, rev, err := store.Load(context.Background(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(st)
+			if _, err = store.CompareAndSwap(context.Background(), n, rev, raw); err != nil {
+				t.Fatal(err)
+			}
+			p, err := lease.InspectCleanup(context.Background(), f.root, f.tracker, f.manager, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCleanupIssueResources(t, f, n, *p, false, "")
+			p2 := localCleanupApply(t, f, n)
+			assertCleanupIssueResources(t, f, n, p2, false, "")
+			path := workspace.WorktreePath(f.root, n)
+			if got := prGit(t, path, "rev-parse", "HEAD"); got != old {
+				t.Fatal("retained worktree changed")
+			}
+			prGit(t, f.root, "show-ref", "--verify", "refs/heads/"+st.Branch)
+		})
+	}
+}
+
+func TestCleanupLocalDirtyVerifiedRebase(t *testing.T) {
+	for _, kind := range []string{"tracked", "staged", "untracked", "ignored", "after-preview"} {
+		t.Run(kind, func(t *testing.T) {
+			f, n, _, old := rebasedCleanupFixture(t, 1)
+			path := workspace.WorktreePath(f.root, n)
+			branch := f.state(t, n).Branch
+			name := "user-file"
+			if kind == "tracked" || kind == "staged" {
+				name = "AGENTS.md"
+			}
+			if kind == "ignored" {
+				name = ".swarm/user-file"
+				fpath := filepath.Join(t.TempDir(), "ignore")
+				prGit(t, path, "config", "core.excludesFile", fpath)
+				if err := os.WriteFile(fpath, []byte(".swarm/\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := context.Background()
+			var preview *lease.CleanupPreview
+			var operation string
+			if kind == "after-preview" {
+				p, err := lease.InspectCleanup(ctx, f.root, f.tracker, f.manager, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertCleanupIssueResources(t, f, n, *p, true, old)
+				reservation, err := f.manager.BeginCleanup(ctx, n, p.Outcome)
+				if err != nil {
+					t.Fatal(err)
+				}
+				preview, operation = p, reservation.OperationID
+			}
+			if err := os.WriteFile(filepath.Join(path, name), []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "staged" {
+				prGit(t, path, "add", name)
+			}
+			var p lease.CleanupPreview
+			if preview != nil {
+				if err := f.manager.RetireCleanupLocalResources(ctx, n, operation, preview); err != nil {
+					t.Fatal(err)
+				}
+				p = *preview
+			} else {
+				p = localCleanupApply(t, f, n)
+			}
+			for _, r := range p.Resources {
+				if (r.Name == path || r.Name == branch) && r.Retired {
+					t.Fatalf("dirty rebased checkpoint retired: %+v", r)
+				}
+			}
+			if b, err := os.ReadFile(filepath.Join(path, name)); err != nil || string(b) != "keep" {
+				t.Fatal("lost user file")
+			}
+			if got := prGit(t, path, "rev-parse", "--abbrev-ref", "HEAD"); got != branch {
+				t.Fatalf("issue branch not checked out: %s", got)
+			}
+		})
+	}
+}
+
+func TestCleanupLocalVerifiedRebaseEvidenceChangedBeforeApply(t *testing.T) {
+	f, n, _, old := rebasedCleanupFixture(t, 1)
+	ctx := context.Background()
+	p, err := lease.InspectCleanup(ctx, f.root, f.tracker, f.manager, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCleanupIssueResources(t, f, n, *p, true, old)
+	reservation, err := f.manager.BeginCleanup(ctx, n, p.Outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Evidence withdrawn after preview must not authorize deletion.
+	store := coordination.NewFileStore(f.root)
+	raw, rev, err := store.Load(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st lease.IssueState
+	if err = json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	st.RebaseTransitions[0].PatchIdentity = "changed"
+	st.LastRebase.PatchIdentity = "changed"
+	raw, _ = json.Marshal(&st)
+	if _, err = store.CompareAndSwap(ctx, n, rev, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.manager.RetireCleanupLocalResources(ctx, n, reservation.OperationID, p); err != nil {
+		t.Fatal(err)
+	}
+	path := workspace.WorktreePath(f.root, n)
+	if got := prGit(t, path, "rev-parse", "HEAD"); got != old {
+		t.Fatal("stale preview retired the issue worktree")
+	}
+	prGit(t, f.root, "show-ref", "--verify", "refs/heads/"+st.Branch)
+}

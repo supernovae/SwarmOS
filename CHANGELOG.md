@@ -4,6 +4,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- `swarm issue cleanup --apply` retires clean merged issue and PR worktrees and local code branches, with per-resource results and exact-tip branch deletion. Local backends need no origin; dirty or unsafe worktrees and their branches remain available.
+
 - `swarm issue submit` reports target-branch drift and the behind count before publishing. Conflicting submissions still open a draft PR, with conflicted paths and a numbered `swarm pr rebase <PR> --resolve` recovery command in the terminal and PR description. Unavailable freshness checks are skipped, and JSON output includes `base_freshness`.
 
 - Fresh same-repository claims start at the current default-branch tip when task, committed policy tree and ancestry checks pass. Existing plan evidence requires authenticated review carry; human gates require explicit approval of a moved base. Queued work reports and skips fresh candidates needing approval, including stale task approval at an unchanged tip.

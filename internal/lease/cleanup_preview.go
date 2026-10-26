@@ -3,7 +3,6 @@ package lease
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
@@ -16,77 +15,37 @@ type CleanupResource struct {
 	Name         string `json:"name"`
 	ExpectedHead string `json:"expected_head,omitempty"`
 	CurrentHead  string `json:"current_head,omitempty"`
+	Retired      bool   `json:"retired,omitempty"`
 	Eligible     bool   `json:"eligible"`
 	Absent       bool   `json:"absent"`
 	Reason       string `json:"reason"`
 }
 type CleanupPreview struct {
-	RemoteDeleted bool              `json:"remote_deleted,omitempty"`
-	Status        string            `json:"status"`
-	Error         string            `json:"error,omitempty"`
-	Kind          string            `json:"kind"`
-	IssueNumber   int               `json:"issue_number"`
-	Outcome       *PROutcome        `json:"outcome"`
-	Resources     []CleanupResource `json:"resources"`
+	Blocked          string            `json:"blocked,omitempty"`
+	RemoteApplicable bool              `json:"remote_applicable"`
+	RemoteDeleted    bool              `json:"remote_deleted,omitempty"`
+	Status           string            `json:"status"`
+	Error            string            `json:"error,omitempty"`
+	Kind             string            `json:"kind"`
+	IssueNumber      int               `json:"issue_number"`
+	Outcome          *PROutcome        `json:"outcome"`
+	Resources        []CleanupResource `json:"resources"`
 }
 
 // InspectCleanup never acquires a claim or reservation, updates projections,
-// fetches refs, or changes worktree files. Local resources are conservatively
-// retained: Git cannot fence outside filesystem writers during removal.
+// fetches refs, or changes worktree files. Apply reinspects eligible resources
+// before retiring them; outside filesystem writers must be stopped.
 func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Manager, n int) (*CleanupPreview, error) {
 	st, o, err := m.InspectSubmission(ctx, n)
 	if err != nil {
 		return nil, err
 	}
 	p := &CleanupPreview{Kind: "cleanup", IssueNumber: n, Outcome: o}
-	reason := ""
-	switch {
-	case st.Lease.Status == "active" || st.PRRevision != nil:
-		reason = "active attempt or pending PR revision"
-	case st.Cleanup != nil:
-		reason = "cleanup reservation is active; explicit recovery is required"
-	case o.Status != "merged":
-		reason = "recorded PR is not merged"
-	case o.MergeCommitSHA == "" || o.MergedAt == nil || o.MergedAt.IsZero():
-		reason = "merge evidence is incomplete"
-	case o.SubmittedHeadSHA == "" || o.FinalHeadSHA != o.SubmittedHeadSHA:
-		reason = "final PR head differs from recorded submission or submission evidence is missing"
-	case st.ForkRepo != "":
-		reason = "fork branch retirement is unsupported"
-	case !strings.HasPrefix(st.Branch, fmt.Sprintf("swarm/issue-%d-", n)):
-		reason = "branch is outside the issue task namespace"
-	}
-	upstream, err := workspace.ResolveRemoteGitHubSlug(root, "origin")
-	if err != nil || !strings.EqualFold(upstream, o.BaseRepo) || !strings.EqualFold(upstream, o.HeadRepo) || o.HeadRepo == "" {
-		reason = "origin and PR repository identity could not be verified"
-	}
-	if st.Branch == o.TargetBranch || o.TargetBranch == "" || st.Branch == "main" || st.Branch == "master" {
-		reason = "base/default branches are retained"
-	}
-	if reason == "" {
-		if e := m.verifyCleanupRemote(ctx, o); e != nil {
-			reason = e.Error()
-		}
-	}
-	prs, err := tr.ListPullRequests(ctx, tracker.PullRequestFilter{State: "open"})
-	if err != nil {
-		return nil, err
-	}
-	for _, pr := range prs {
-		if pr == nil || pr.HeadRepo == "" {
-			reason = "open PR repository identity is incomplete"
-			continue
-		}
-		branch := pr.Head
-		if i := strings.IndexByte(branch, ':'); i >= 0 {
-			branch = branch[i+1:]
-		}
-		if strings.EqualFold(pr.HeadRepo, o.HeadRepo) && branch == st.Branch {
-			reason = "branch is used by an open PR"
-		}
-	}
+	reason := m.cleanupPolicy(ctx, st, o, false)
+	p.Blocked = reason
+	p.RemoteApplicable = !m.cleanupLocal()
 	r := CleanupResource{Kind: "remote-code-branch", Name: st.Branch, ExpectedHead: o.SubmittedHeadSHA, Reason: reason}
-	if reason == "" {
+	if reason == "" && p.RemoteApplicable {
 		out, e := cleanupGitOutput(ctx, root, "ls-remote", "--refs", "origin", "refs/heads/"+st.Branch)
 		if e != nil {
 			return nil, e
@@ -107,39 +66,29 @@ func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Man
 			}
 		}
 	}
+	if !p.RemoteApplicable {
+		r.Reason = "remote branch verification not applicable to local backend"
+	}
 	p.Resources = append(p.Resources, r)
-	for _, b := range []string{st.Branch, workspace.PRBranchName(st.PRNumber)} {
-		r := CleanupResource{Kind: "local-code-branch", Name: b, ExpectedHead: o.SubmittedHeadSHA, Reason: "retained: local checkout creation cannot be fenced against ref deletion"}
-
-		if b != "" {
-			out, e := cleanupGitOutput(ctx, root, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"+b)
-			if e != nil {
-				r.Reason = "local ref inspection failed"
-			} else {
-				for _, line := range strings.Split(out, "\n") {
-					fields := strings.Fields(line)
-					if len(fields) == 2 && fields[0] == "refs/heads/"+b {
-						r.CurrentHead = fields[1]
-					}
-				}
-				if r.CurrentHead == "" {
-					r.Absent = true
-					r.Reason = "already absent"
-				} else if r.CurrentHead != r.ExpectedHead {
-					r.Reason = "retained: local branch advanced since submission"
-				}
-			}
+	var retiring []string
+	for _, item := range []struct{ path, branch string }{{workspace.WorktreePath(root, n), st.Branch}, {workspace.PRWorktreePath(root, st.PRNumber), workspace.PRBranchName(st.PRNumber)}} {
+		i := workspace.InspectCleanupWorktree(ctx, root, item.path, item.branch, o.SubmittedHeadSHA)
+		r := CleanupResource{Kind: "worktree", Name: item.path, ExpectedHead: o.SubmittedHeadSHA, CurrentHead: i.Head, Absent: i.Absent, Eligible: i.Eligible, Reason: i.Reason}
+		if reason != "" {
+			r.Eligible = false
+			r.Reason = reason
 		}
-
+		if r.Eligible {
+			retiring = append(retiring, item.path)
+		}
 		p.Resources = append(p.Resources, r)
 	}
-	for _, path := range []string{workspace.WorktreePath(root, n), workspace.PRWorktreePath(root, st.PRNumber)} {
-		r := CleanupResource{Kind: "worktree", Name: path, ExpectedHead: o.SubmittedHeadSHA, Reason: "retained: Git removal can discard concurrently created ignored artifacts"}
-		if _, e := os.Lstat(path); os.IsNotExist(e) {
-			r.Absent = true
-			r.Reason = "already absent"
-		} else if e != nil {
-			r.Reason = "worktree inspection failed"
+	for _, b := range []string{st.Branch, workspace.PRBranchName(st.PRNumber)} {
+		i := workspace.InspectCleanupBranch(ctx, root, b, o.SubmittedHeadSHA, retiring)
+		r := CleanupResource{Kind: "local-code-branch", Name: b, ExpectedHead: o.SubmittedHeadSHA, CurrentHead: i.Head, Absent: i.Absent, Eligible: i.Eligible, Reason: i.Reason}
+		if reason != "" {
+			r.Eligible = false
+			r.Reason = reason
 		}
 		p.Resources = append(p.Resources, r)
 	}

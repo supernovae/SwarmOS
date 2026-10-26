@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,6 +69,14 @@ func TestCleanupApplyMergedSubmissionRetainsLocalArtifacts(t *testing.T) {
 	if e := os.WriteFile(path, []byte("task evidence"), 0600); e != nil {
 		t.Fatal(e)
 	}
+	// Keep the foreign issue directory while retiring an independent registered
+	// PR worktree on the GitHub/atomic-remote path.
+	prPath := workspace.PRWorktreePath(m.repoRoot, 25)
+	branch := workspace.PRBranchName(25)
+	c := exec.Command("git", "-C", m.repoRoot, "worktree", "add", "-b", branch, prPath, "HEAD")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
 	p, e := InspectCleanup(ctx, m.repoRoot, m.tracker, m, n)
 	if e != nil {
 		t.Fatal(e)
@@ -72,10 +84,14 @@ func TestCleanupApplyMergedSubmissionRetainsLocalArtifacts(t *testing.T) {
 	if !p.Resources[0].Eligible {
 		t.Fatalf("merged branch ineligible: %+v", p.Resources[0])
 	}
-	for _, r := range p.Resources[1:] {
-		if r.Eligible {
-			t.Fatal("local resource unexpectedly eligible")
+	eligible := 0
+	for _, resource := range p.Resources[1:] {
+		if resource.Eligible {
+			eligible++
 		}
+	}
+	if eligible != 2 {
+		t.Fatalf("registered clean PR resources not eligible: %+v", p.Resources)
 	}
 	r, e := m.BeginCleanup(ctx, n, p.Outcome)
 	if e != nil {
@@ -86,6 +102,12 @@ func TestCleanupApplyMergedSubmissionRetainsLocalArtifacts(t *testing.T) {
 	}
 	if e = m.DeleteCleanupBranch(ctx, n, r.OperationID); e != nil {
 		t.Fatal(e)
+	}
+	if e = m.RetireCleanupLocalResources(ctx, n, r.OperationID, p); e != nil {
+		t.Fatal(e)
+	}
+	if _, err := os.Stat(prPath); !os.IsNotExist(err) {
+		t.Fatalf("registered PR worktree survived: %v", err)
 	}
 	if e = m.FinishCleanup(ctx, n, r.OperationID); e != nil {
 		t.Fatal(e)
@@ -132,5 +154,174 @@ func TestCleanupEligibilityAdvancedBranchAndChangedPRHead(t *testing.T) {
 				t.Fatal("advanced evidence eligible")
 			}
 		})
+	}
+}
+
+type cleanupIdentityTracker struct {
+	*lifecycleTracker
+	upstream string
+}
+
+func (t *cleanupIdentityTracker) UpstreamRepo() string { return t.upstream }
+
+func TestCleanupGitHubIdentityRefusal(t *testing.T) {
+	for _, kind := range []string{"head-empty", "base-empty", "both-empty", "upstream-empty", "origin-mismatch", "valid"} {
+		t.Run(kind, func(t *testing.T) {
+			for _, entry := range []string{"preview", "apply"} {
+				t.Run(entry, func(t *testing.T) {
+					m, tr, n, _ := mergedCleanupFixture(t)
+					ctx := context.Background()
+					_, observed, err := m.InspectSubmission(ctx, n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					provider := &cleanupIdentityTracker{lifecycleTracker: tr, upstream: "octo/swarm"}
+					m.tracker = provider
+					switch kind {
+					case "head-empty":
+						tr.pr.HeadRepo = ""
+					case "base-empty":
+						tr.pr.BaseRepo = ""
+					case "both-empty":
+						tr.pr.HeadRepo = ""
+						tr.pr.BaseRepo = ""
+					case "upstream-empty":
+						provider.upstream = ""
+					case "origin-mismatch":
+						c := exec.Command("git", "-C", m.repoRoot, "config", "remote.origin.swarmSlug", "other/repo")
+						if out, e := c.CombinedOutput(); e != nil {
+							t.Fatalf("%s %v", out, e)
+						}
+					}
+					before, rev, err := m.store.Load(ctx, n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if entry == "preview" {
+						p, e := InspectCleanup(ctx, m.repoRoot, tr, m, n)
+						err = e
+						if e == nil && p.Blocked != "" {
+							err = errors.New(p.Blocked)
+						}
+					} else {
+						_, err = m.BeginCleanup(ctx, n, observed)
+					}
+					if kind == "valid" {
+						if err != nil {
+							t.Fatal(err)
+						}
+						return
+					}
+					if err == nil {
+						t.Fatal("invalid GitHub identity accepted")
+					}
+					after, next, e := m.store.Load(ctx, n)
+					if e != nil || next != rev || string(after) != string(before) {
+						t.Fatal("identity refusal mutated state")
+					}
+					if _, err = os.Stat(filepath.Join(m.repoRoot, ".git", "swarm-cleanup.lock")); !os.IsNotExist(err) {
+						t.Fatal("identity refusal acquired local mutation lock")
+					}
+				})
+			}
+		})
+	}
+}
+
+type cleanupLocalTracker struct {
+	tracker.Tracker
+	pr      *tracker.PullRequest
+	barrier func()
+}
+
+func (t *cleanupLocalTracker) GetPullRequest(context.Context, int) (*tracker.PullRequest, error) {
+	return t.pr, nil
+}
+func (t *cleanupLocalTracker) ListPullRequests(context.Context, tracker.PullRequestFilter) ([]*tracker.PullRequest, error) {
+	if t.barrier != nil {
+		t.barrier()
+	}
+	return nil, nil
+}
+
+func TestCleanupLocalActionRecoverySerialization(t *testing.T) {
+	m, tr, n, _ := mergedCleanupFixture(t)
+	ctx := context.Background()
+	local := &cleanupLocalTracker{Tracker: tr.Tracker, pr: tr.pr}
+	m.tracker = local
+	p, err := InspectCleanup(ctx, m.repoRoot, local, m, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := m.BeginCleanup(ctx, n, p.Outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	local.barrier = func() { once.Do(func() { close(entered); <-release }) }
+	// One eligible absent branch suffices to exercise the synchronous action lock.
+	p.Resources = []CleanupResource{{Kind: "local-code-branch", Name: tr.pr.Head, ExpectedHead: r.ExpectedHead, Eligible: true}}
+	actionDone := make(chan error, 1)
+	go func() { actionDone <- m.RetireCleanupLocalResources(ctx, n, r.OperationID, p) }()
+	<-entered
+	dir, err := cleanupGitOutput(ctx, m.repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(strings.TrimSpace(dir), "swarm-cleanup.lock"), os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = filelock.TryLockExclusive(f); err == nil {
+		filelock.Unlock(f)
+		t.Fatal("local action does not hold operation lock")
+	}
+	f.Close()
+	recovered := make(chan error, 1)
+	go func() { recovered <- m.RecoverCleanup(ctx, n) }()
+	close(release)
+	if err = <-actionDone; err != nil {
+		t.Fatal(err)
+	}
+	if err = <-recovered; err != nil {
+		t.Fatal(err)
+	}
+	p.Resources[0].Eligible = true
+	if err = m.RetireCleanupLocalResources(ctx, n, r.OperationID, p); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("old local action retained authority: %v", err)
+	}
+}
+
+type cleanupFinishFailStore struct{ coordination.Store }
+
+func (s cleanupFinishFailStore) CompareAndSwap(ctx context.Context, n int, rev string, raw []byte) (string, error) {
+	var st IssueState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return "", err
+	}
+	if st.Cleanup == nil {
+		return "", errors.New("injected finish failure")
+	}
+	return s.Store.CompareAndSwap(ctx, n, rev, raw)
+}
+func TestCleanupFinishFailurePreservesReservation(t *testing.T) {
+	m, _, n, _ := mergedCleanupFixture(t)
+	ctx := context.Background()
+	p, err := InspectCleanup(ctx, m.repoRoot, m.tracker, m, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := m.BeginCleanup(ctx, n, p.Outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.store = cleanupFinishFailStore{m.store}
+	if err = m.FinishCleanup(ctx, n, r.OperationID); err == nil {
+		t.Fatal("finish failure hidden")
+	}
+	st, _, err := m.reservedCleanup(ctx, n, r.OperationID)
+	if err != nil || st.Cleanup == nil {
+		t.Fatal("finish failure lost reservation")
 	}
 }

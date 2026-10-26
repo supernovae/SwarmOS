@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"strings"
 )
@@ -39,7 +38,7 @@ func (m *Manager) BeginCleanup(ctx context.Context, n int, observed *PROutcome) 
 	if actor == "" {
 		return nil, fmt.Errorf("cleanup operator identity missing")
 	}
-	st, rev, err := m.load(ctx, n)
+	st, rev, err := m.loadReadOnly(ctx, n)
 	if err != nil {
 		return nil, err
 	}
@@ -52,6 +51,9 @@ func (m *Manager) BeginCleanup(ctx context.Context, n int, observed *PROutcome) 
 	}
 	if observed == nil || o.Status != "merged" || o.MergeCommitSHA == "" || o.MergedAt == nil || o.MergedAt.IsZero() || o.SubmittedHeadSHA == "" || o.FinalHeadSHA != o.SubmittedHeadSHA || observed.FinalHeadSHA != o.FinalHeadSHA || observed.MergeCommitSHA != o.MergeCommitSHA || observed.Number != o.Number || observed.Branch != o.Branch || st.ForkRepo != "" {
 		return nil, fmt.Errorf("cleanup merge evidence changed or incomplete")
+	}
+	if reason := m.cleanupPolicy(ctx, st, o, false); reason != "" {
+		return nil, fmt.Errorf("cleanup refused: %s", reason)
 	}
 	token := make([]byte, 32)
 	if _, err = rand.Read(token); err != nil {
@@ -83,8 +85,8 @@ func (m *Manager) reservedCleanup(ctx context.Context, n int, token string) (*Is
 	return &st, rev, nil
 }
 
-// DeleteCleanupBranch performs only the remote transaction. Local worktrees
-// and refs remain intact because filesystem writers cannot be fenced by Git.
+// DeleteCleanupBranch performs only the atomic remote transaction. Local
+// resources are handled separately by RetireCleanupLocalResources.
 func (m *Manager) DeleteCleanupBranch(ctx context.Context, n int, token string) error {
 	st, rev, err := m.reservedCleanup(ctx, n, token)
 	if err != nil {
@@ -101,6 +103,12 @@ func (m *Manager) DeleteCleanupBranch(ctx context.Context, n int, token string) 
 		return err
 	}
 	r := st.Cleanup
+	if reason := m.cleanupPolicy(ctx, st, o, true); reason != "" {
+		return fmt.Errorf("cleanup refused: %s", reason)
+	}
+	if m.cleanupLocal() {
+		return fmt.Errorf("remote cleanup not applicable to local backend")
+	}
 	if err = m.verifyCleanupRemote(ctx, o); err != nil {
 		return err
 	}
@@ -118,18 +126,6 @@ func (m *Manager) DeleteCleanupBranch(ctx context.Context, n int, token string) 
 	absent := len(fields) == 0
 	if !absent && (len(fields) != 2 || fields[0] != r.ExpectedHead || fields[1] != "refs/heads/"+r.Branch) {
 		return fmt.Errorf("remote cleanup branch head changed")
-	}
-	prs, err := m.tracker.ListPullRequests(ctx, tracker.PullRequestFilter{State: "open"})
-	if err != nil {
-		return err
-	}
-	for _, p := range prs {
-		if p == nil || p.HeadRepo == "" {
-			return fmt.Errorf("open PR identity unavailable")
-		}
-		if strings.EqualFold(p.HeadRepo, o.HeadRepo) && strings.TrimPrefix(p.Head, strings.Split(p.Head, ":")[0]+":") == r.Branch {
-			return fmt.Errorf("branch is used by an open PR")
-		}
 	}
 	ds, ok := m.store.(interface {
 		CompareAndSwapAndDeleteBranch(context.Context, int, string, []byte, string, string) (string, error)
@@ -151,6 +147,11 @@ func (m *Manager) DeleteCleanupBranch(ctx context.Context, n int, token string) 
 }
 
 func (m *Manager) FinishCleanup(ctx context.Context, n int, token string) error {
+	unlock, err := m.cleanupLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if m.gateway != nil {
 		return fmt.Errorf("cleanup requires an operator")
 	}
@@ -201,10 +202,14 @@ func (m *Manager) verifyCleanupRemote(ctx context.Context, o *PROutcome) error {
 	return nil
 }
 
-// RecoverCleanup releases an interrupted remote-only operation with a CAS.
-// Every old operation's atomic deletion includes the old state lease, so this
-// state transition fences even an already prepared push from that operation.
+// RecoverCleanup serializes with local actions and releases an interrupted
+// reservation with a CAS. The state transition also fences an old atomic push.
 func (m *Manager) RecoverCleanup(ctx context.Context, n int) error {
+	unlock, err := m.cleanupLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if m.gateway != nil {
 		return fmt.Errorf("cleanup recovery requires a repository operator")
 	}

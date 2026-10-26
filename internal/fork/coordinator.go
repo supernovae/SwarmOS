@@ -366,7 +366,7 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			}
 
 		case "handoff":
-			updated, err = mgr.Handoff(ctx, req.IssueNumber, actor, req.Phase, req.NextPhase)
+			updated, err = mgr.Handoff(ctx, req.IssueNumber, actor, req.Phase, req.NextPhase, req.Reason)
 			if err != nil {
 				return nil, "", err
 			}

@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/claimpause"
 	"io"
 	"os"
 	"path/filepath"
@@ -41,7 +43,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 		return nil, limitErr
 	}
 	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
-		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot}
+		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckPauseImport: req.CheckPauseImport}
 	collector := &GuidanceCollector{}
 	options.GuidanceDelivered = collector.Delivered
 	options.ProjectPlan = req.ProjectPlan
@@ -67,6 +69,9 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	}
 	result := &RunResult{Agent: a.agentName, Role: req.Role, Command: command, Output: out.String(), Attestation: att, Guidance: collector.Messages()}
 	if err != nil {
+		if (req.Role == "developer" || req.Role == "tester") && context.Cause(ctx) == claimpause.ErrBudget && !errors.Is(err, claimpause.ErrBudget) {
+			err = &claimpause.PreservationError{Err: err}
+		}
 		result.ExitCode = 1
 		return result, err
 	}

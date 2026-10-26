@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/supernovae/swarmos/internal/claimpause"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
 )
@@ -28,6 +29,7 @@ import (
 // WorkerOptions describes a disposable Linux OCI worker. OutputDir is a trusted
 // coordinator-owned destination used by the review snapshot's output channel.
 type WorkerOptions struct {
+	CheckPauseImport                func(context.Context, []string) error
 	GuidanceDelivered               func(string) // coordinator callback for forwarded interactive guidance
 	Limits                          contract.AgentLimits
 	Warning                         io.Writer
@@ -427,8 +429,15 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 	runArgs = append(runArgs, args...)
 	cmd := workerCommand(ctx, runtime, runArgs...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("isolated worker failed: %w", err)
+	runErr := cmd.Run()
+	paused := false
+	interrupted := ctx.Err() != nil && (errors.Is(runErr, context.Canceled) || (cmd.ProcessState != nil && !cmd.ProcessState.Exited()))
+	if cleanup, cancel, ok := claimpause.Cleanup(ctx, opts.Role); ok && interrupted && !opts.ReadOnly && !opts.DiscardChanges {
+		defer cancel()
+		ctx = cleanup
+		paused = true
+	} else if runErr != nil {
+		return fmt.Errorf("isolated worker failed: %w", runErr)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -517,7 +526,18 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 		}
 		return nil
 	}
-	return importWorker(ctx, original, extracted, initial, manifest)
+	if paused {
+		if err := checkPauseImport(ctx, opts, initial, manifest); err != nil {
+			return err
+		}
+	}
+	if err := importWorker(ctx, original, extracted, initial, manifest); err != nil {
+		return err
+	}
+	if paused {
+		return claimpause.ErrBudget
+	}
+	return nil
 }
 
 // AgentRunLimit is the default agent budget for callers without resolved policy.

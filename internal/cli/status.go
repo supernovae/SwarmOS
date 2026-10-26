@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -13,6 +14,7 @@ import (
 )
 
 type issueStatus struct {
+	ClaimBudget     *lease.ClaimBudget         `json:"claim_budget,omitempty"`
 	PlanReplanLimit int                        `json:"plan_replan_limit"`
 	Checkpoint      *workspace.CheckpointState `json:"checkpoint,omitempty"`
 	Repository      string                     `json:"repository"`
@@ -70,6 +72,10 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				}
 				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance}
 				if state != nil {
+					entry.ClaimBudget, err = manager.Budget(state)
+					if err != nil {
+						return err
+					}
 					entry.PlanReplanLimit, err = manager.PlanReplanLimit(state)
 					if err != nil {
 						return err
@@ -95,6 +101,9 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				continue
 			}
 			state := entry.State
+			if b := entry.ClaimBudget; b != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Claim budget: %d renewals used, %d remaining; total allowance left=%s deadline=%s; available=%s current expiry=%s (active=%t)\n", b.RenewalsUsed, b.RenewalsRemaining, b.Remaining, b.Deadline.Format(time.RFC3339), b.Available, state.Lease.ExpiresAt.Format(time.RFC3339), b.Active)
+			}
 			if o := state.PROutcome; o != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "PR outcome: %s (merge=%s)\n", o.Status, o.MergeCommitSHA)
 			}

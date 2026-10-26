@@ -149,6 +149,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				Phase:   "all", Gate: contract.GateMode(gate), Headless: true,
 				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),
 			}
+			var pauses []*workflow.ClaimBudgetPause
 			execute := func(pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
 				tr, manager, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
 					Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend,
@@ -173,7 +174,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				if err != nil {
 					return result, err
 				}
-				if autoSubmit && result.ValidationPassed {
+				if autoSubmit && result.ValidationPassed && result.ClaimBudgetPause == nil {
 					submitOpts := *rootOpts
 					submitOpts.Repo = pulled.Repo
 					submitOpts.RepoRoot = pulled.RepoRoot
@@ -226,6 +227,12 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								fmt.Fprintf(out, "[worker-%d] %s #%d failed: %v\n", worker+1, pulled.Repo, pulled.Issue.Number, err)
 							} else {
 								fmt.Fprintf(out, "[worker-%d] %s #%d %s: phase=%s validation=%t\n", worker+1, pulled.Repo, pulled.Issue.Number, result.Outcome(), result.PhaseCompleted, result.ValidationPassed)
+								selectedRoot := *rootOpts
+								selectedRoot.Repo, selectedRoot.RepoRoot, selectedRoot.Backend = pulled.Repo, pulled.RepoRoot, pulled.Backend
+								if guidance := claimBudgetGuidance(&selectedRoot, result, "issue", pulled.Issue.Number); guidance != "" {
+									fmt.Fprintln(out, guidance)
+									pauses = append(pauses, result.ClaimBudgetPause)
+								}
 							}
 							outputMu.Unlock()
 							if err != nil {
@@ -240,7 +247,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				runBatch()
 				if failures.Load() > 0 {
 					if asJSON {
-						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load()})
+						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses})
 					}
 					return fmt.Errorf("node %q encountered %d failure(s)", profile.NodeID, failures.Load())
 				}
@@ -257,7 +264,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load()})
+				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses})
 			}
 			fmt.Fprintf(out, "Node %q finished: %d task attempt(s)\n", profile.NodeID, completed.Load())
 			return nil

@@ -7,12 +7,13 @@ import (
 )
 
 type RunRequest struct {
-	OperatorInstructions string // coordinator-supplied flag guidance, separate from attestations
-	RecoveryRoot         string // coordinator-owned durable timeout recovery destination
-	ProjectPlan          bool   // coordinator-selected project roadmap output for planner
-	Agent                string // configured allowlisted provider/harness name
-	Role                 string // "planner", "reviewer", "developer", "tester"
-	Mode                 string // "interactive", "headless"
+	CheckPauseImport     func(context.Context, []string) error // coordinator-only fencing and trusted protected-path check
+	OperatorInstructions string                                // coordinator-supplied flag guidance, separate from attestations
+	RecoveryRoot         string                                // coordinator-owned durable timeout recovery destination
+	ProjectPlan          bool                                  // coordinator-selected project roadmap output for planner
+	Agent                string                                // configured allowlisted provider/harness name
+	Role                 string                                // "planner", "reviewer", "developer", "tester"
+	Mode                 string                                // "interactive", "headless"
 	WorktreePath         string
 	SystemPrompt         string // relative or absolute path to .swarm/active/SYSTEM_PROMPT.md
 	TaskPrompt           string

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/claimpause"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/safefs"
@@ -132,10 +133,12 @@ func runNativeCommand(ctx context.Context, binary, dir string, env, args []strin
 	cmd.Dir, cmd.Env = dir, env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	process.Configure(cmd)
-	cmd.Cancel = func() error { process.Stop(cmd); return nil }
+	cmd.Cancel = func() error { return process.StopVerified(cmd) }
 	cmd.WaitDelay = time.Second
 	err := cmd.Run()
-	process.Stop(cmd)
+	if stopErr := process.StopVerified(cmd); stopErr != nil {
+		return fmt.Errorf("terminate native worker: %w", stopErr)
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -358,7 +361,12 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 		}
 		return &AgentTimeoutError{cause: budget.timeoutError(), diagnostic: fmt.Sprintf("recovery patch: %s", patch)}
 	}
-	if runErr != nil {
+	paused := false
+	if cleanup, cancel, ok := claimpause.Cleanup(ctx, opts.Role); ok && !opts.ReadOnly && !opts.DiscardChanges && (runErr == nil || errors.Is(runErr, context.Canceled)) {
+		defer cancel()
+		ctx = cleanup
+		paused = true
+	} else if runErr != nil {
 		return runErr
 	}
 	if err := ctx.Err(); err != nil {
@@ -401,6 +409,13 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 		}
 		return nil
 	}
+	if paused {
+		for _, name := range []string{".git", ".swarm/coordination", ".swarm/local-tracker", ".swarm/worktrees", ".swarm/active-output"} {
+			if _, err := os.Lstat(filepath.Join(work, filepath.FromSlash(name))); !os.IsNotExist(err) {
+				return fmt.Errorf("paused snapshot contains control path %s", name)
+			}
+		}
+	}
 	archive := filepath.Join(root, "result.tar")
 	if _, err := packWorker(ctx, work, archive, nil, false, ".codex", ".agents"); err != nil {
 		return err
@@ -413,5 +428,16 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 	if err != nil {
 		return err
 	}
-	return importWorker(ctx, original, result, initial, final)
+	if paused {
+		if err := checkPauseImport(ctx, opts, initial, final); err != nil {
+			return err
+		}
+	}
+	if err := importWorker(ctx, original, result, initial, final); err != nil {
+		return err
+	}
+	if paused {
+		return claimpause.ErrBudget
+	}
+	return nil
 }

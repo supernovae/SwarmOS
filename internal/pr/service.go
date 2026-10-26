@@ -38,7 +38,7 @@ type Service struct {
 	ForkRemote string
 	// Now overrides the clock used for lease expiry checks (tests).
 	Now func() time.Time
-	// NewRunner builds the developer runner for rebase conflict resolution;
+	// NewRunner builds role runners for work and rebase conflict resolution;
 	// nil uses the configured runner from approved policy.
 	NewRunner func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error)
 	// ResolveLog receives coordinator-owned conflict resolution progress.
@@ -597,6 +597,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 	engine := workflow.NewEngineWithManager(s.Root, s.Tracker, s.Manager, cfg, false, "")
+	engine.NewRunner = s.NewRunner
 	pre, preflightErr := engine.Preflight(ctx, opts.Work)
 	if preflightErr != nil {
 		return nil, preflightErr
@@ -699,6 +700,9 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 				r.State = worked.State
 				r.HeadSHA = worked.HeadSHA
 				r.Status = "pending"
+				if worked.ClaimBudgetPause != nil {
+					r.Status = worked.Outcome()
+				}
 			}
 			return r, e
 		})

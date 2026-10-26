@@ -194,3 +194,42 @@ func TestCleanupTrackedManagedArtifact(t *testing.T) {
 		t.Fatalf("tracked managed file removed before Git: %v", err)
 	}
 }
+
+func TestCleanupWorktreeRelativePaths(t *testing.T) {
+	for _, alias := range []bool{false, true} {
+		t.Run(fmt.Sprint(alias), func(t *testing.T) {
+			root, path, head, _ := cleanupWorkspaceFixture(t)
+			if alias {
+				link := filepath.Join(t.TempDir(), "repo")
+				if err := os.Symlink(root, link); err != nil {
+					t.Skip(err)
+				}
+				root = link
+				path = WorktreePath(root, 1)
+			}
+			cwd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			relativeRoot, err := filepath.Rel(cwd, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			relativePath, err := filepath.Rel(cwd, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			r := InspectCleanupWorktree(ctx, relativeRoot, relativePath, "swarm/issue-1-test", head)
+			if !r.Eligible {
+				t.Fatalf("relative inspection: %+v", r)
+			}
+			if err := RetireCleanupWorktree(ctx, relativeRoot, relativePath, "swarm/issue-1-test", head); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(path); !os.IsNotExist(err) {
+				t.Fatalf("worktree remains: %v", err)
+			}
+		})
+	}
+}

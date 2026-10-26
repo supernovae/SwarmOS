@@ -3,6 +3,7 @@ package lease
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
@@ -36,6 +37,15 @@ type CleanupPreview struct {
 // fetches refs, or changes worktree files. Apply reinspects eligible resources
 // before retiring them; outside filesystem writers must be stopped.
 func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Manager, n int) (*CleanupPreview, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve cleanup root: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve cleanup root: %w", err)
+	}
+	root = filepath.Clean(root)
 	st, o, err := m.InspectSubmission(ctx, n)
 	if err != nil {
 		return nil, err

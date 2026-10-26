@@ -37,10 +37,35 @@ func cleanupManaged(name string) bool {
 	return strings.HasPrefix(name, ".swarm/active/") || strings.HasPrefix(name, ".swarm/active-output/")
 }
 
+// Normalize the repository anchor only: resolving the worktree itself would
+// conceal symlink traversal from the component-by-component safety checks.
+func cleanupPaths(root, path string) (string, string, error) {
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", "", err
+	}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", err
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return "", "", err
+	}
+	if rel, err := filepath.Rel(absoluteRoot, absolutePath); err == nil && filepath.IsLocal(rel) {
+		absolutePath = filepath.Join(canonicalRoot, rel)
+	}
+	return filepath.Clean(canonicalRoot), filepath.Clean(absolutePath), nil
+}
+
 // InspectCleanupWorktree accepts only registered task worktrees in this repository.
 func InspectCleanupWorktree(ctx context.Context, root, path, branch, expected string) CleanupInspection {
 	r := CleanupInspection{Branch: branch}
 	fail := func(reason string) CleanupInspection { r.Reason = reason; return r }
+	root, path, err := cleanupPaths(root, path)
+	if err != nil {
+		return fail("resolve cleanup paths: " + err.Error())
+	}
 	rel, err := filepath.Rel(root, path)
 	if err != nil || !filepath.IsLocal(rel) || !strings.HasPrefix(filepath.ToSlash(rel), ".swarm/worktrees/") {
 		return fail("outside managed worktree paths")
@@ -68,7 +93,7 @@ func InspectCleanupWorktree(ctx context.Context, root, path, branch, expected st
 		return fail("different common Git directory")
 	}
 	invoking, _ := cleanupOutput(ctx, root, "rev-parse", "--show-toplevel")
-	if invoking == path {
+	if filepath.Clean(invoking) == path {
 		return fail("invoking checkout is retained")
 	}
 	registrations, e := cleanupOutput(ctx, root, "worktree", "list", "--porcelain", "-z")
@@ -78,7 +103,7 @@ func InspectCleanupWorktree(ctx context.Context, root, path, branch, expected st
 	found := false
 	for _, record := range strings.Split(registrations, "\x00\x00") {
 		fields := strings.Split(record, "\x00")
-		if len(fields) > 0 && fields[0] == "worktree "+path {
+		if len(fields) > 0 && strings.HasPrefix(fields[0], "worktree ") && filepath.Clean(strings.TrimPrefix(fields[0], "worktree ")) == path {
 			found = true
 			for _, field := range fields {
 				if strings.HasPrefix(field, "locked") {
@@ -156,6 +181,10 @@ func InspectCleanupWorktree(ctx context.Context, root, path, branch, expected st
 // RetireCleanupWorktree reinspects before removing disposable artifacts and invoking Git.
 // Writers must be stopped: inspection and Git removal are not an atomic operation.
 func RetireCleanupWorktree(ctx context.Context, root, path, branch, expected string) error {
+	root, path, err := cleanupPaths(root, path)
+	if err != nil {
+		return fmt.Errorf("resolve cleanup paths: %w", err)
+	}
 	r := InspectCleanupWorktree(ctx, root, path, branch, expected)
 	if r.Absent {
 		return nil

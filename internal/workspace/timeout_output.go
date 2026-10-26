@@ -60,10 +60,11 @@ func stageCheckpointFilesWith(run func(...string) (string, error)) error {
 }
 
 // onlyActivePointer reports whether an unstaged change to an agent instruction
-// file is exactly SwarmOS's temporary task block, which is injected for agents
-// and removed before every checkpoint.
+// file, or the file an instruction link resolves to, is exactly SwarmOS's
+// temporary task block, which is injected for agents and removed before every
+// checkpoint.
 func OnlyActivePointer(worktreePath, path string) (bool, error) {
-	if path != "AGENTS.md" && path != "CLAUDE.md" {
+	if !instructionPaths(worktreePath)[path] {
 		return false, nil
 	}
 	current, err := safefs.ReadFile(worktreePath, path, 16<<20)

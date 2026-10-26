@@ -575,6 +575,7 @@ func verifyUncheckpointedWorktree(wtPath, base string) error {
 	if err != nil {
 		return err
 	}
+	pointerPaths := instructionPaths(wtPath)
 	reject := func() error {
 		return fmt.Errorf("worktree %q contains uncommitted changes without a recorded checkpoint; to keep them as this task's implementation, run swarm issue stage <issue> --phase implement while your claim is active, otherwise move them aside before retrying", wtPath)
 	}
@@ -586,7 +587,7 @@ func verifyUncheckpointedWorktree(wtPath, base string) error {
 			return reject()
 		}
 		name := entry[3:]
-		if name != "AGENTS.md" && name != "CLAUDE.md" {
+		if !pointerPaths[name] {
 			return reject()
 		}
 		if strings.ContainsAny(entry[:2], "RCDU") {
@@ -797,14 +798,88 @@ Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMP
 }
 
 // injectActivePointer writes the ephemeral active-task block into the agent
-// instruction files; CleanEphemeralHarnessMarkers removes it again.
+// instruction files; CleanEphemeralHarnessMarkers removes it again. Names
+// linked to one file get a single block.
 func injectActivePointer(worktreePath, block string) error {
-	for _, docName := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if err := injectManagedBlock(filepath.Join(worktreePath, docName), block); err != nil {
+	safe, err := safefs.Open(worktreePath)
+	if err != nil {
+		return err
+	}
+	defer safe.Close()
+	targets, err := instructionTargets(safe)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if err := injectInto(safe, target.path, block); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// instructionTarget is a regular file that AGENTS.md or CLAUDE.md resolves to.
+type instructionTarget struct {
+	path   string
+	exists bool
+	// linked targets are kept even when only a pointer remains, so the
+	// repository's instruction link never dangles.
+	linked bool
+}
+
+// instructionTargets resolves both instruction names inside safe, refusing any
+// unsafe link before a caller changes either file, and merges shared targets.
+func instructionTargets(safe *safefs.Root) ([]instructionTarget, error) {
+	resolved, err := safe.ResolveInstructions()
+	if err != nil {
+		return nil, err
+	}
+	var targets []instructionTarget
+	index := map[string]int{}
+	for _, in := range resolved {
+		path := filepath.ToSlash(in.Target)
+		if i, ok := index[path]; ok {
+			targets[i].linked = targets[i].linked || in.Link
+			continue
+		}
+		index[path] = len(targets)
+		targets = append(targets, instructionTarget{path: path, exists: in.Exists, linked: in.Link})
+	}
+	return targets, nil
+}
+
+// instructionPaths lists the paths that may carry a generated pointer: the
+// instruction names and the files they safely resolve to. A refused link adds
+// no target, which leaves the stricter name-only set.
+func instructionPaths(root string) map[string]bool {
+	paths := map[string]bool{"AGENTS.md": true, "CLAUDE.md": true}
+	safe, err := safefs.Open(root)
+	if err != nil {
+		return paths
+	}
+	defer safe.Close()
+	if targets, err := instructionTargets(safe); err == nil {
+		for _, target := range targets {
+			paths[target.path] = true
+		}
+	}
+	return paths
+}
+
+// readInstruction reads a resolved instruction target and its permissions,
+// refusing any link substituted after resolution.
+func readInstruction(safe *safefs.Root, name string) ([]byte, os.FileMode, error) {
+	f, err := safe.OpenRegular(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	info, err := f.Stat()
+	f.Close()
+	if err != nil {
+		return nil, 0, err
+	}
+	data, err := safe.ReadFile(name, 16<<20)
+	return data, info.Mode().Perm(), err
 }
 
 func LoadActiveWorkUnit(worktreePath string) (*contract.WorkUnit, error) {
@@ -835,26 +910,23 @@ func StripActivePointer(content string) string {
 }
 
 // CleanEphemeralHarnessMarkers removes the managed <!-- swarm:active:start --> block from AGENTS.md and CLAUDE.md
-// so worktree commits remain clean on `swarm issue submit`.
+// so worktree commits remain clean on `swarm issue submit`. Links stay as they
+// are; the block is removed from the file they resolve to.
 func CleanEphemeralHarnessMarkers(worktreePath string) error {
 	safe, err := safefs.Open(worktreePath)
 	if err != nil {
 		return err
 	}
 	defer safe.Close()
-	for _, docName := range []string{"AGENTS.md", "CLAUDE.md"} {
-		full := filepath.Join(worktreePath, docName)
-		info, err := os.Lstat(full)
-		if errors.Is(err, os.ErrNotExist) {
+	targets, err := instructionTargets(safe)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if !target.exists {
 			continue
 		}
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("refuse to rewrite non-regular instruction file %s", docName)
-		}
-		data, err := safe.ReadFile(docName, 16<<20)
+		data, perm, err := readInstruction(safe, target.path)
 		if err != nil {
 			return err
 		}
@@ -862,15 +934,15 @@ func CleanEphemeralHarnessMarkers(worktreePath string) error {
 			continue
 		}
 		cleaned := activeBlockRegex.ReplaceAllString(string(data), "")
-		if cleaned == "" {
-			if _, err := gitOutput(worktreePath, "ls-files", "--error-unmatch", docName); err != nil {
-				if err := safe.Remove(docName); err != nil {
+		if cleaned == "" && !target.linked {
+			if _, err := gitOutput(worktreePath, "ls-files", "--error-unmatch", "--", target.path); err != nil {
+				if err := safe.Remove(target.path); err != nil {
 					return err
 				}
 				continue
 			}
 		}
-		if err := safe.WriteFile(docName, []byte(cleaned), info.Mode().Perm()); err != nil {
+		if err := safe.WriteFile(target.path, []byte(cleaned), perm); err != nil {
 			return err
 		}
 	}
@@ -931,15 +1003,17 @@ func injectManagedBlock(filePath, block string) error {
 		return err
 	}
 	defer safe.Close()
-	name := filepath.Base(filePath)
-	if info, err := os.Lstat(filePath); err == nil {
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("refusing non-regular instruction file %s", filePath)
-		}
-	} else if !os.IsNotExist(err) {
+	in, err := safe.ResolveInstruction(filepath.Base(filePath))
+	if err != nil {
 		return err
 	}
-	existing, err := safe.ReadFile(name, 16<<20)
+	return injectInto(safe, in.Target, block)
+}
+
+// injectInto adds or replaces the block in a resolved instruction target,
+// creating the file when it is missing.
+func injectInto(safe *safefs.Root, name, block string) error {
+	existing, perm, err := readInstruction(safe, name)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -949,10 +1023,10 @@ func injectManagedBlock(filePath, block string) error {
 	content := string(existing)
 	if activeBlockRegex.MatchString(content) {
 		updated := activeBlockRegex.ReplaceAllStringFunc(content, func(string) string { return block + "\n\n" })
-		return safe.WriteFile(name, []byte(updated), 0o644)
+		return safe.WriteFile(name, []byte(updated), perm)
 	}
 	updated := block + "\n\n" + content
-	return safe.WriteFile(name, []byte(updated), 0o644)
+	return safe.WriteFile(name, []byte(updated), perm)
 }
 
 func configureWorktreeExclude(wtPath string) error {

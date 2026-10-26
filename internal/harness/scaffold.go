@@ -278,6 +278,12 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		return nil, err
 	}
 	defer safe.Close()
+	// Refuse an unsafe AGENTS.md or CLAUDE.md link before writing anything. A
+	// safe link shares its target, so the SwarmOS section is written there once.
+	instructions, err := safe.ResolveInstructions()
+	if err != nil {
+		return nil, err
+	}
 
 	recorded, err := loadManifest(safe)
 	if err != nil {
@@ -331,7 +337,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := writer.writeAgentsFile("AGENTS.md", agentsTemplate); err != nil {
+	if err := writer.writeAgentsFile(filepath.ToSlash(instructions[0].Target), agentsTemplate); err != nil {
 		return nil, err
 	}
 	if err := copyEmbedded("templates/swarm/rules/default.md", ".swarm/rules/default.md"); err != nil {

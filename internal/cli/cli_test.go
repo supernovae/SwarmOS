@@ -1083,6 +1083,15 @@ func TestForkCLISmoke(t *testing.T) {
 					http.Error(w, "not found", http.StatusNotFound)
 					return
 				}
+				var payload struct {
+					Title string `json:"title"`
+					Body  string `json:"body"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+				}
+				pr.Title, pr.Body = payload.Title, payload.Body
+
 				writeResp(map[string]any{
 					"number":   pr.Number,
 					"title":    pr.Title,
@@ -1382,11 +1391,26 @@ func TestForkCLISmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Origin moves independently while the writable fork keeps its old main.
+	if err := os.WriteFile(filepath.Join(upstreamRoot, "feature.go"), []byte("package upstream\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	git(upstreamRoot, "add", "feature.go")
+	git(upstreamRoot, "commit", "-m", "Advance target with conflicting feature")
+	git(upstreamRoot, "push", "origin", "main")
+	if got := git(aliceForkBare, "rev-parse", "main"); got != shaA {
+		t.Fatal("fork main moved unexpectedly", got)
+	}
+
 	// 6. Alice runs `swarm --fork issue submit 42`: records checkpoint SHA B on fork & upstream, creates Draft PR with head=alice:swarm/issue-42-<claim_id> and base=main
 	submitOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42")
 	if err != nil {
 		t.Fatalf("alice --fork submit 42 failed: %v\n%s", err, submitOut)
 	}
+	if !strings.Contains(submitOut, "behind the target by 1 commits") || !strings.Contains(submitOut, "swarm --fork pr rebase 1 --resolve") || !strings.Contains(submitOut, "feature.go") {
+		t.Fatal(submitOut)
+	}
+
 	t.Logf("submit output:\n%s", submitOut)
 
 	shaB := git(wt42, "rev-parse", "HEAD")
@@ -1405,6 +1429,13 @@ func TestForkCLISmoke(t *testing.T) {
 	mu.Unlock()
 	if totalPRs != 1 || createdPR == nil || createdPR.Head != expectedAliceBranch || createdPR.HeadRepo != "alice/swarm" || createdPR.Base != "main" {
 		t.Fatalf("unexpected PR state after repeat submit: count=%d pr=%+v", totalPRs, createdPR)
+	}
+
+	if !strings.Contains(createdPR.Body, "swarm --fork pr rebase 1 --resolve") || !strings.Contains(createdPR.Body, "feature.go") {
+		t.Fatal("missing fork freshness note", createdPR.Body)
+	}
+	if stSubmitted.BaseSHA != shaA {
+		t.Fatal("freshness changed approved base")
 	}
 
 	// 7. Expiry and bob takeover on a second issue #43: alice's old claim cannot mutate upstream state

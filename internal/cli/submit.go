@@ -140,6 +140,12 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := requireCleanHead(ctx, worktree, head); err != nil {
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
 			}
+			freshness := checkSubmissionFreshness(ctx, root, baseBranch, state.BaseSHA, head)
+			advisoryOut := cmd.OutOrStdout()
+			if asJSON {
+				advisoryOut = cmd.ErrOrStderr()
+			}
+			fmt.Fprint(advisoryOut, freshness.advisory())
 			p.Next("checkpoint push/record")
 			// GitHub publishes this head and the fenced state in one atomic Git push.
 			if rootOpts.Fork {
@@ -175,8 +181,18 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 					return err
 				}
 			} else {
-				if updatedPR, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody); updateErr == nil && updatedPR != nil {
-					pr = updatedPR
+				if freshness.Status != "conflicts" {
+					if updatedPR, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody); updateErr == nil && updatedPR != nil {
+						pr = updatedPR
+					}
+				}
+			}
+			if note := freshness.conflictNote(pr.Number, issue, rootOpts); note != "" {
+				fmt.Fprint(advisoryOut, note)
+				if updated, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody+note); updateErr != nil || updated == nil {
+					fmt.Fprintf(advisoryOut, "PR description lacks the freshness note; run `%s`.\n", submissionRecoveryCommand(pr.Number, rootOpts))
+				} else {
+					pr = updated
 				}
 			}
 			p.Next("submission record")
@@ -188,7 +204,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				pr.HTMLURL = submittedState.PRURL
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head})
+				return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head, "base_freshness": freshness})
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Submitted draft PR #%d for issue #%d on %s (%s)\n", pr.Number, issue, branch, pr.HTMLURL)
 			return nil
@@ -228,13 +244,13 @@ func projectSubmitted(ctx context.Context, tr tracker.Tracker, issue int) error 
 }
 
 func defaultBaseBranch(root string) (string, error) {
-	if hasGitRemote(root) {
-		if _, err := workspace.ResolveBase(root); err != nil {
-			return "", err
-		}
+	if hasSubmissionOrigin(context.Background(), root) {
+		// Retain advertised-default discovery, but a failed refresh must not prevent
+		// submission when the cached name still identifies its target branch.
+		_, _ = workspace.ResolveBase(root)
 		out, err := gitcredential.Output(context.Background(), root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
 		if err != nil {
-			return "", fmt.Errorf("discover remote default branch: %w", err)
+			return "", fmt.Errorf("cannot discover remote default branch; specify --base")
 		}
 		return strings.TrimPrefix(strings.TrimSpace(string(out)), "origin/"), nil
 	}

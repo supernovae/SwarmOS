@@ -102,3 +102,94 @@ func TestCoordinatorGitDoesNotExecuteCandidateSelectedHelpers(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeTreeNeutralizesCustomDriver(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell sentinel")
+	}
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("init", "-b", "main")
+	git("config", "user.name", "Fixture")
+	git("config", "user.email", "fixture@example.invalid")
+	write(".gitattributes", "file merge=candidate filter=candidate\n")
+	write("file", "base\n")
+	git("add", ".")
+	git("commit", "-m", "base")
+	git("checkout", "-b", "candidate")
+	write("file", "candidate\n")
+	git("commit", "-am", "candidate")
+	head := git("rev-parse", "HEAD")
+	git("checkout", "main")
+	write("file", "target\n")
+	git("commit", "-am", "target")
+	git("config", "merge.renormalize", "true")
+	git("config", "filter.candidate.clean", "touch filter-sentinel; cat")
+	git("config", "merge.candidate.driver", "touch sentinel; true")
+	git("config", "merge.candidate.recursive", "candidate")
+	cmd, _, err := Command(context.Background(), root, "merge-tree", "--write-tree", "--name-only", "-z", "--no-messages", "HEAD", head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := strings.Join(cmd.Env, "\n")
+	if !strings.Contains(env, "merge.candidate.driver") || !strings.Contains(env, "=false") || !strings.Contains(env, "merge.candidate.recursive") || !strings.Contains(env, "=binary") {
+		t.Fatal("missing driver neutralization")
+	}
+	_, err = cmd.Output()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		t.Fatalf("expected conservative conflict: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "sentinel")); !os.IsNotExist(err) {
+		t.Fatal("custom driver executed")
+	}
+	if _, err := os.Stat(filepath.Join(root, "filter-sentinel")); !os.IsNotExist(err) {
+		t.Fatal("custom filter executed")
+	}
+	if got := git("config", "merge.candidate.driver"); got != "touch sentinel; true" {
+		t.Fatal("persistent configuration changed")
+	}
+}
+
+func TestMergeTreeConfigurationProbeFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	cmd := exec.Command("git", "init", root)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git", "config"), []byte("[invalid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if cmd, _, err := Command(context.Background(), root, "merge-tree", "--write-tree", "HEAD", "HEAD"); err == nil || cmd != nil {
+		t.Fatal("invalid configuration allowed inspection")
+	}
+}
+
+func TestMergeTreeConfigurationBudgetFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	cmd := exec.Command("git", "init", root)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	config := "[merge \"" + strings.Repeat("x", (1<<20)+1) + "\"]\n driver = true\n"
+	if err := os.WriteFile(filepath.Join(root, ".git", "config"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if cmd, _, err := Command(context.Background(), root, "merge-tree", "--write-tree", "HEAD", "HEAD"); err == nil || cmd != nil {
+		t.Fatal("oversized driver configuration allowed inspection")
+	}
+}

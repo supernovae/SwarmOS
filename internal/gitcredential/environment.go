@@ -70,8 +70,26 @@ func Command(ctx context.Context, root string, args ...string) (*exec.Cmd, func(
 	if len(args) == 0 {
 		return cmd, redact, nil
 	}
+	if args[0] == "merge-tree" {
+		probe := exec.CommandContext(ctx, "git", "config", "--null", "--name-only", "--get-regexp", `^merge\..*\.driver$`)
+		probe.Dir, probe.Env = root, cmd.Env
+		var keys bytes.Buffer
+		probe.Stdout = &limitedWriter{dst: &keys, remaining: 1 << 20}
+		if err := probe.Run(); err != nil {
+			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+				return nil, nil, fmt.Errorf("inspect Git merge drivers: %w", err)
+			}
+		}
+		for _, key := range strings.Split(keys.String(), "\x00") {
+			if key == "" {
+				continue
+			}
+			appendConfig(cmd, key, "false")
+			appendConfig(cmd, strings.TrimSuffix(key, ".driver")+".recursive", "binary")
+		}
+	}
 	switch args[0] {
-	case "add", "commit", "status", "worktree", "checkout", "reset", "diff":
+	case "add", "commit", "status", "worktree", "checkout", "reset", "diff", "merge-tree":
 		probe := exec.CommandContext(ctx, "git", "config", "--null", "--name-only", "--get-regexp", `^filter\..*\.(clean|smudge|process|required)$`)
 		probe.Dir = root
 		probe.Env = cmd.Env

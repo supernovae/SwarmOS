@@ -67,7 +67,7 @@ What happens:
 
 ## 2. Recommended Git Branch & Ref Strategy
 
-SwarmOS separates repository history into three Git ref namespaces so agent checkpoints and coordination state never pollute your default branch:
+SwarmOS separates repository history into three kinds of Git refs so agent checkpoints and coordination state never pollute your default branch. The diagram shows the branch ledger namespace; see [Ledger ref namespaces](#ledger-ref-namespaces) for the hidden alternative:
 
 ```mermaid
 flowchart TD
@@ -80,6 +80,39 @@ flowchart TD
     Work -->|"3. swarm issue stage / issue submit<br/>Atomic CAS + branch push"| State
     Work -->|"4. Draft PR + swarm repo validate --base SHA"| Main
 ```
+
+### Ledger ref namespaces
+
+SwarmOS keeps three ledgers on the upstream remote: authoritative issue state, permanent checkpoint retention, and fork contributor claim indexes. `ledger_namespace` in `.swarm/config.yaml` chooses where they live:
+
+| Ledger | `ledger_namespace: branch` | `ledger_namespace: hidden` |
+|---|---|---|
+| Issue state | `refs/heads/swarm-state/issue-<N>` | `refs/swarm/state/issue-<N>` |
+| Checkpoint retention | `refs/heads/swarm-checkpoints/issue-<N>/<SHA>` | `refs/swarm/checkpoints/issue-<N>/<SHA>` |
+| Fork contributor index | `refs/heads/swarm-contributors/<login>` | `refs/swarm/contributors/<login>` |
+
+- **branch** keeps the ledgers as branches, so they appear in the branch list and can trigger GitHub's "Compare & pull request" banner, but GitHub rulesets can protect them. Repositories whose configuration omits the key use this mode, exactly as before.
+- **hidden** keeps the ledgers outside `refs/heads/`, so they stay out of the branch list. GitHub rulesets cannot target these refs: any identity with write access can update or delete them. Choosing hidden mode is a security tradeoff for the maintainer; see [SECURITY.md](../SECURITY.md#boundaries-that-need-operator-care).
+- `swarm repo init` writes `ledger_namespace: hidden` when it creates a new `.swarm/config.yaml`. It never changes an existing configuration.
+- Task branches (`refs/heads/swarm/issue-<N>-<slug>`) are PR heads and stay branches in both modes.
+
+SwarmOS reads the setting only from `.swarm/config.yaml` on the upstream remote's default branch. Task worktrees, candidate commits, uncommitted edits, and contributor forks never select the namespace, and SwarmOS stops with an error if it cannot read the upstream default branch. There is no fallback between namespaces: if a ledger ref exists in the namespace you did not select, alone or alongside the selected one, commands fail and name both refs.
+
+#### Moving an existing repository to hidden refs
+
+`swarm repo migrate-refs` moves every branch-namespace ledger ref to the hidden namespace in one `git push --atomic`. Each move creates the hidden ref and deletes the old branch with `--force-with-lease`, so any concurrent change rejects the whole push. The command refuses while any issue has an active claim, refuses duplicates and malformed ledger refs, and does nothing once everything has moved, so it is safe to rerun.
+
+```bash
+# 1. Pause headless workers and let active claims finish or be released.
+#    If you run the fork coordinator, disable its workflow for the window.
+# 2. Preview, then move the refs while the default branch still selects branch mode.
+swarm repo migrate-refs --dry-run
+swarm repo migrate-refs
+# 3. Merge "ledger_namespace: hidden" into .swarm/config.yaml on the default branch.
+# 4. Resume workers and the fork coordinator.
+```
+
+Between steps 2 and 3, SwarmOS commands refuse to read or recreate the moved ledgers. If an issue was approved or claimed while the migration ran, its branch ref was not moved; rerun `swarm repo migrate-refs` after that claim ends. If you ran `swarm repo init` with a new configuration on a repository that already has branch ledgers, either set `ledger_namespace: branch` or migrate before resuming work.
 
 ### Recommended GitHub Repository Rulesets
 
@@ -100,6 +133,7 @@ In your GitHub repository, open **Settings → Rules → Rulesets** and configur
 #### Ruleset B: Allow Atomic CAS on Coordination State Refs (`refs/heads/swarm-state/**`)
 SwarmOS updates `refs/heads/swarm-state/issue-<N>` using `git push --force-with-lease` so concurrent workers detect lease conflicts deterministically.
 - Keep `refs/heads/swarm-state/**` and `refs/heads/swarm/**` **exempt from "Block force pushes"** (or scope your force-push block strictly to `Default branch`), while granting Collaborator `Write` access to your authorized worker accounts.
+- This ruleset applies to `ledger_namespace: branch`. With `ledger_namespace: hidden`, the ledgers live under `refs/swarm/` and rulesets cannot restrict them; Ruleset B then covers only the task branches under `refs/heads/swarm/**`.
 
 ---
 
@@ -111,7 +145,7 @@ Rather than running coding agents under a human maintainer's personal admin toke
 
 1. Create two dedicated GitHub accounts (for example, `acme-swarm-worker` and `acme-swarm-reviewer`) and invite them to your repository with the **Write** role (never `Admin` or `Maintain` if `main` requires maintainer merge approval).
 2. Generate a **Fine-Grained Personal Access Token** for each account scoped only to the target repository with:
-   - **Contents**: `Read and write` (required to push `refs/heads/swarm/issue-*` and `refs/heads/swarm-state/issue-*`)
+   - **Contents**: `Read and write` (required to push `refs/heads/swarm/issue-*` and the ledger refs: `refs/heads/swarm-state/issue-*` in branch mode, `refs/swarm/*` in hidden mode)
    - **Issues**: `Read and write` (required to update the living projection comment and `swarm:*` phase labels)
    - **Pull requests**: `Read and write` (required for `swarm issue submit` to open and update Draft PRs)
    - **Metadata**: `Read-only`

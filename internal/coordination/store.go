@@ -127,14 +127,24 @@ func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next 
 	return digest(next), nil
 }
 
-type GitStore struct{ root, remote string }
+type GitStore struct {
+	root, remote string
+	layout       RefLayout
+}
 
 // NewGitStore keeps authoritative state on the origin remote.
 func NewGitStore(root string) *GitStore { return &GitStore{root: root} }
 
-// NewGitStoreWithRemote keeps authoritative state on the named upstream remote.
+// NewGitStoreWithRemote keeps authoritative state on the named upstream remote
+// in the branch namespace.
 func NewGitStoreWithRemote(root, remote string) *GitStore {
-	return &GitStore{root: root, remote: strings.TrimSpace(remote)}
+	return NewGitStoreWithLayout(root, remote, BranchLayout)
+}
+
+// NewGitStoreWithLayout keeps authoritative state on the named upstream remote
+// in the ledger namespace the trusted default branch selected.
+func NewGitStoreWithLayout(root, remote string, layout RefLayout) *GitStore {
+	return &GitStore{root: root, remote: strings.TrimSpace(remote), layout: layout}
 }
 
 // Remote names the upstream remote holding authoritative state.
@@ -144,7 +154,7 @@ func (s *GitStore) Remote() string {
 	}
 	return s.remote
 }
-func (s *GitStore) ref(n int) string { return fmt.Sprintf("refs/heads/swarm-state/issue-%d", n) }
+func (s *GitStore) ref(n int) string { return s.layout.StateRef(n) }
 func (s *GitStore) run(ctx context.Context, input string, args ...string) (string, error) {
 	c, redact, err := gitcredential.Command(ctx, s.root, args...)
 	if err != nil {
@@ -157,19 +167,27 @@ func (s *GitStore) run(ctx context.Context, input string, args ...string) (strin
 	}
 	return redact(strings.TrimSpace(string(b))), nil
 }
+
+// remoteSHA reads ref and, for ledger refs, its other-namespace counterpart in
+// the same request. Any counterpart fails closed instead of being chosen.
 func (s *GitStore) remoteSHA(ctx context.Context, ref string) (string, error) {
-	out, err := s.run(ctx, "", "ls-remote", "--refs", s.Remote(), ref)
+	refs := []string{ref}
+	counterpart, ledger := s.layout.counterpartRef(ref)
+	if ledger {
+		refs = append(refs, counterpart)
+	}
+	found, err := s.remoteRefs(ctx, refs...)
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(out) == "" {
+	sha, ok := found[ref]
+	if _, dup := found[counterpart]; ledger && dup {
+		return "", s.layout.ledgerConflict(ref, counterpart, ok)
+	}
+	if !ok {
 		return "", ErrNotFound
 	}
-	fields := strings.Fields(out)
-	if len(fields) != 2 || fields[1] != ref {
-		return "", fmt.Errorf("invalid ls-remote result for %s", ref)
-	}
-	return fields[0], nil
+	return sha, nil
 }
 func (s *GitStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	ref := s.ref(n)
@@ -204,6 +222,9 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 		return "", err
 	}
 	ref := s.ref(n)
+	if err := s.checkLedger(ctx, ref); err != nil {
+		return "", err
+	}
 	leaseArg := ref + ":" + old
 	if old == "" {
 		leaseArg = ref + ":"
@@ -273,6 +294,9 @@ func (s *GitStore) publishCheckpoint(ctx context.Context, n int, old string, nex
 		return "", err
 	}
 	stateRef := s.ref(n)
+	if err := s.checkLedger(ctx, stateRef); err != nil {
+		return "", err
+	}
 	branchRef := "refs/heads/" + branch
 	oldBranch, branchErr := s.remoteSHA(ctx, branchRef)
 	if errors.Is(branchErr, ErrNotFound) {
@@ -338,6 +362,9 @@ func (s *GitStore) CompareAndSwapAndPublishPR(ctx context.Context, n int, oldSta
 		return "", err
 	}
 	stateRef := s.ref(n)
+	if err := s.checkLedger(ctx, stateRef); err != nil {
+		return "", err
+	}
 	retention, err := s.historicalRetentionArgs(ctx, n, oldState, expectedHead, head)
 	if err != nil {
 		return "", err
@@ -389,17 +416,26 @@ func NewForkIndexedStore(root, actor string, maxActive int, requestID int64) *Fo
 
 // NewForkIndexedStoreWithRemote is NewForkIndexedStore on a named upstream remote.
 func NewForkIndexedStoreWithRemote(root, remote, actor string, maxActive int, requestID int64) *ForkIndexedStore {
+	return NewForkIndexedStoreWithLayout(root, remote, BranchLayout, actor, maxActive, requestID)
+}
+
+// NewForkIndexedStoreWithLayout is NewForkIndexedStoreWithRemote in the ledger
+// namespace the trusted default branch selected.
+func NewForkIndexedStoreWithLayout(root, remote string, layout RefLayout, actor string, maxActive int, requestID int64) *ForkIndexedStore {
 	if maxActive <= 0 {
 		maxActive = 1
 	}
 	return &ForkIndexedStore{
-		git:       NewGitStoreWithRemote(root, remote),
+		git:       NewGitStoreWithLayout(root, remote, layout),
 		actor:     strings.TrimSpace(actor),
 		maxActive: maxActive,
 		requestID: requestID,
 		nowFn:     time.Now,
 	}
 }
+
+// Layout is the ledger namespace this store reads and writes.
+func (s *ForkIndexedStore) Layout() RefLayout { return s.git.layout }
 
 func (s *ForkIndexedStore) SetNowFunc(fn func() time.Time) {
 	if fn != nil {
@@ -408,16 +444,17 @@ func (s *ForkIndexedStore) SetNowFunc(fn func() time.Time) {
 }
 
 func (s *ForkIndexedStore) contributorRef() (string, error) {
-	return contributorIndexRef(s.actor)
+	return contributorIndexRef(s.git.layout, s.actor)
 }
 
-// contributorIndexRef names the normalized per-contributor fork claim index.
-func contributorIndexRef(actor string) (string, error) {
+// contributorIndexRef names the normalized per-contributor fork claim index
+// in the given ledger namespace.
+func contributorIndexRef(layout RefLayout, actor string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(actor))
 	if normalized == "" || strings.ContainsAny(normalized, " /\\:~^?*[]@") || strings.Contains(normalized, "..") {
 		return "", fmt.Errorf("invalid contributor actor %q", actor)
 	}
-	return "refs/heads/swarm-contributors/" + normalized, nil
+	return layout.ContributorRef(normalized), nil
 }
 
 func (s *ForkIndexedStore) Load(ctx context.Context, n int) ([]byte, string, error) {
@@ -542,6 +579,10 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 	if s.requestID <= 0 {
 		return "", fmt.Errorf("fork indexed store requires a positive request ID")
 	}
+	stateRef := s.git.ref(n)
+	if err := s.git.checkLedger(ctx, stateRef); err != nil {
+		return "", err
+	}
 	priorEnv, err := s.loadStateAtCommit(ctx, old)
 	if err != nil {
 		return "", err
@@ -557,7 +598,6 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 	if err != nil {
 		return "", err
 	}
-	stateRef := s.git.ref(n)
 	stateLease := stateRef + ":" + old
 
 	now := s.nowFn()

@@ -1303,7 +1303,7 @@ func TestForkCLISmoke(t *testing.T) {
 		}
 	}
 
-	upstreamStore := coordination.NewGitStore(upstreamRoot)
+	upstreamStore := trustedLedgerStore(t, upstreamRoot, "")
 	readUpstreamState := func() *lease.IssueState {
 		t.Helper()
 		raw, _, err := upstreamStore.Load(ctx, 42)
@@ -1343,7 +1343,7 @@ func TestForkCLISmoke(t *testing.T) {
 
 	wt42 := workspace.WorktreePath(aliceRoot, 42)
 	legitimateCheckpoint := readUpstreamState().HeadSHA
-	if got := git(originBare, "rev-parse", coordination.CheckpointRef(42, legitimateCheckpoint)); got != legitimateCheckpoint {
+	if got := git(originBare, "rev-parse", upstreamStore.Layout().CheckpointRef(42, legitimateCheckpoint)); got != legitimateCheckpoint {
 		t.Fatal("verified fork checkpoint was not retained upstream")
 	}
 	if err := os.WriteFile(filepath.Join(wt42, "feature.go"), []byte("package main\n"), 0o644); err != nil {

@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -50,7 +49,7 @@ func testUntouchedBaseAdvance(t *testing.T, backend string) {
 		git(f.root, "init", "--bare", "--initial-branch=main", remote)
 		git(f.root, "remote", "add", "origin", remote)
 		git(f.root, "push", "origin", "main")
-		f.manager.SetStore(f.root, coordination.NewGitStore(f.root))
+		f.manager.SetStore(f.root, trustedLedgerStore(t, f.root, ""))
 		tr := checkpointCLITracker{f.tracker}
 		run = func(args ...string) (string, error) {
 			cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: tr})

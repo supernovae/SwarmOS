@@ -2,16 +2,18 @@ package workspace
 
 import (
 	"context"
-	"github.com/supernovae/swarmos/internal/contract"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/supernovae/swarmos/internal/contract"
 )
 
 func TestValidationTreeCheckpointParity(t *testing.T) {
-	for _, kind := range []string{"clean", "unstaged", "staged", "partial", "cancelled", "new", "deleted", "renamed", "executable", "ignored", "tracked-ignored", "literal", "pointer", "pointer-only", "tracked-pointer-only", "filter", "split-index", "deleted-instructions", "tracked-empty", "user-pointer", "missing-index"} {
+	for _, kind := range []string{"clean", "unstaged", "staged", "partial", "cancelled", "new", "deleted", "renamed", "executable", "ignored", "tracked-ignored", "literal", "pointer", "pointer-only", "tracked-pointer-only", "filter", "split-index", "deleted-instructions", "tracked-empty", "user-pointer", "missing-index", "staged-new-ignored", "intent-new-ignored", "racy", "racy-split", "racy-untracked", "racy-split-untracked"} {
 		t.Run(kind, func(t *testing.T) {
 			root := t.TempDir()
 			git := func(args ...string) string {
@@ -41,6 +43,14 @@ func TestValidationTreeCheckpointParity(t *testing.T) {
 			indexPath := strings.TrimSpace(git("rev-parse", "--git-path", "index"))
 			pointer := "<!-- swarm:active:start -->\nactive\n<!-- swarm:active:end -->\n\n"
 			switch kind {
+			case "staged-new-ignored", "intent-new-ignored":
+				write("new", "new\n")
+				if kind == "intent-new-ignored" {
+					git("add", "-N", "new")
+				} else {
+					git("add", "new")
+				}
+				write(".gitignore", "new\n")
 			case "unstaged":
 				write("file", "changed\n")
 			case "staged":
@@ -101,11 +111,68 @@ func TestValidationTreeCheckpointParity(t *testing.T) {
 				git("config", "filter.upper.clean", "tr a-z A-Z")
 				write("file", "changed\n")
 			}
+			// Establish an old, equal-size/equal-mtime edit without a refreshing
+			// Git command afterwards. A copied index incorrectly makes it clean.
+			racy := strings.HasPrefix(kind, "racy")
+			if racy {
+				git("config", "core.checkStat", "minimal")
+				git("config", "core.trustctime", "false")
+				if strings.Contains(kind, "untracked") {
+					git("config", "core.untrackedCache", "true")
+				}
+				stamp := time.Unix(1700000000, 0)
+				file := filepath.Join(root, "file")
+				if e := os.Chtimes(file, stamp, stamp); e != nil {
+					t.Fatal(e)
+				}
+				git("add", "file")
+				if strings.Contains(kind, "split") {
+					git("update-index", "--split-index")
+					if strings.TrimSpace(git("rev-parse", "--shared-index-path")) == "" {
+						t.Fatal("split index not active")
+					}
+				}
+				write("file", "changed\n")
+				paths, e := filepath.Glob(filepath.Join(filepath.Dir(indexPath), "sharedindex.*"))
+				if e != nil {
+					t.Fatal(e)
+				}
+				paths = append(paths, indexPath, file)
+				for _, path := range paths {
+					if e := os.Chtimes(path, stamp, stamp); e != nil {
+						t.Fatal(e)
+					}
+					info, e := os.Stat(path)
+					if e != nil || !info.ModTime().Equal(stamp) {
+						t.Fatalf("timestamp %s: %v", path, e)
+					}
+				}
+				info, e := os.Stat(file)
+				if e != nil || info.Size() != int64(len("initial\n")) {
+					t.Fatal("size precondition failed")
+				}
+			}
+			beforeConfig := git("config", "--local", "--list")
+			shared := map[string]string{}
+			paths, e := filepath.Glob(filepath.Join(filepath.Dir(indexPath), "sharedindex.*"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			for _, path := range paths {
+				data, e := os.ReadFile(path)
+				if e != nil {
+					t.Fatal(e)
+				}
+				shared[path] = string(data)
+			}
 			beforeIndex, e := os.ReadFile(indexPath)
 			if e != nil && !os.IsNotExist(e) {
 				t.Fatal(e)
 			}
-			beforeStatus := git("--no-optional-locks", "status", "--porcelain=v1", "-z")
+			beforeStatus := ""
+			if !racy {
+				beforeStatus = git("--no-optional-locks", "status", "--porcelain=v1", "-z")
+			}
 			beforeHead := git("rev-parse", "HEAD")
 			beforeFiles := map[string]string{}
 			beforeModes := map[string]os.FileMode{}
@@ -144,8 +211,21 @@ func TestValidationTreeCheckpointParity(t *testing.T) {
 			if e != nil && !os.IsNotExist(e) {
 				t.Fatal(e)
 			}
-			if string(beforeIndex) != string(afterIndex) || beforeStatus != git("--no-optional-locks", "status", "--porcelain=v1", "-z") || beforeHead != git("rev-parse", "HEAD") {
+			if string(beforeIndex) != string(afterIndex) || (!racy && beforeStatus != git("--no-optional-locks", "status", "--porcelain=v1", "-z")) || beforeHead != git("rev-parse", "HEAD") {
 				t.Fatal("fingerprint changed index, status or HEAD")
+			}
+			if beforeConfig != git("config", "--local", "--list") {
+				t.Fatal("changed config")
+			}
+			afterShared, e := filepath.Glob(filepath.Join(filepath.Dir(indexPath), "sharedindex.*"))
+			if e != nil || len(afterShared) != len(shared) {
+				t.Fatal("changed shared indexes")
+			}
+			for _, path := range afterShared {
+				data, e := os.ReadFile(path)
+				if e != nil || string(data) != shared[path] {
+					t.Fatal("changed shared index")
+				}
 			}
 			for path, want := range beforeFiles {
 				got, e := os.ReadFile(path)
@@ -153,6 +233,9 @@ func TestValidationTreeCheckpointParity(t *testing.T) {
 				if e != nil || string(got) != want || statErr != nil || info.Mode() != beforeModes[path] {
 					t.Fatalf("changed %s", path)
 				}
+			}
+			if racy && git("show", tree+":file") != "changed\n" {
+				t.Fatal("fingerprint reused stale cached blob")
 			}
 			head, e := Checkpoint(context.Background(), root, "test-checkpoint", CheckpointOptions{WorkUnit: &contract.WorkUnit{IssueNumber: 1, Title: "Test"}, Purpose: "submit"})
 			if e != nil {
@@ -163,7 +246,7 @@ func TestValidationTreeCheckpointParity(t *testing.T) {
 				t.Fatal(e)
 			}
 			if tree+"\n" != want {
-				t.Fatalf("tree %s != checkpoint %s", tree, want)
+				t.Fatalf("tree %s != checkpoint %s: %s", tree, want, git("diff", tree, strings.TrimSpace(want)))
 			}
 		})
 	}

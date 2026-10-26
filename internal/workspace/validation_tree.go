@@ -29,6 +29,9 @@ func CheckpointTree(ctx context.Context, root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// Apply Git options after Command has inspected the subcommand and
+		// installed its credential, filter, and execution protections.
+		cmd.Args = append([]string{cmd.Args[0], "-c", "core.splitIndex=false", "-c", "core.untrackedCache=false"}, cmd.Args[1:]...)
 		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+index)
 		cmd.Stdin = strings.NewReader(input)
 		var stderr bytes.Buffer
@@ -74,6 +77,27 @@ func CheckpointTree(ctx context.Context, root string) (string, error) {
 			return "", e
 		}
 		tracked[name] = out != ""
+	}
+	// Reject unmerged entries before rebuilding. Keep the original staged names,
+	// including intent-to-add paths that write-tree would otherwise omit.
+	if _, err := run("write-tree"); err != nil {
+		return "", err
+	}
+	entries, err := run("ls-files", "--stage", "-z")
+	if err != nil {
+		return "", err
+	}
+	// A copied index has a new timestamp but old stat entries, making racy
+	// edits appear clean. Rebuild with cache entries only, so staging rehashes
+	// every file. No stat data or split-index references survive this step.
+	if err := os.Remove(index); err != nil {
+		return "", err
+	}
+	if _, err := run("read-tree", "--empty"); err != nil {
+		return "", err
+	}
+	if _, err := runInput(entries, "update-index", "-z", "--index-info"); err != nil {
+		return "", err
 	}
 	if err := stageCheckpointFilesWith(run); err != nil {
 		return "", err

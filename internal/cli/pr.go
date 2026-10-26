@@ -140,6 +140,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				recovery = planReviewRecovery(rootOpts, result.State, "pr", opts.Number)
 			}
 			opts.Work.SetupProgress.Close()
+			if result != nil && result.Validation != nil && result.Validation.Reused {
+				fmt.Fprintln(cmd.ErrOrStderr(), result.Validation.Artifact.Summary)
+			}
 			if asJSON || opts.Work.InspectOnly {
 				status := "completed"
 				if result != nil && result.Status != "" {
@@ -263,7 +266,7 @@ func requireIssueWorkspace(state *lease.IssueState) error {
 var testResolverRunner func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error)
 
 func (o *RootOptions) prService(tr tracker.Tracker, manager *lease.Manager) *pr.Service {
-	return &pr.Service{Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now, NewRunner: testResolverRunner}
+	return &pr.Service{Version: Version, Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now, NewRunner: testResolverRunner}
 }
 
 func shortSHA(sha string) string {

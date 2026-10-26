@@ -180,7 +180,7 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 		return r, fmt.Errorf("%w\n%s\nLast local checkpoint: %s. Run swarm %spr work %d to repair manually, then swarm %spr validate %d; publication remains swarm %spr submit %d", cause, evidence, r.HeadSHA, forkFlag(s.Fork), r.PR.Number, forkFlag(s.Fork), r.PR.Number, forkFlag(s.Fork), r.PR.Number)
 	}
 	for {
-		checked, valErr := s.validateClaim(ctx, r, owner, r.State, s.Progress)
+		checked, valErr := s.validateClaim(ctx, r, owner, r.State, s.Progress, false)
 		if checked != nil {
 			r = checked
 		}

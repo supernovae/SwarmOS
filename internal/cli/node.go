@@ -141,7 +141,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					}
 				}
 			}
-			options := workflow.WorkOptions{
+			options := workflow.WorkOptions{Version: Version,
 				OnBaseChange: baseChangePrinter(progressWriter(cmd)),
 				AgentName:    agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
 				DeveloperAgent: developerAgent, TesterAgent: testerAgent,

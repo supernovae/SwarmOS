@@ -278,7 +278,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
+			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
 			if report != nil {
 				if report.Artifact.Metadata == nil {
 					report.Artifact.Metadata = make(map[string]string)
@@ -286,7 +286,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				for k, v := range metaForRole("tester") {
 					report.Artifact.Metadata[k] = v
 				}
-				if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
+				if _, err := manager.RecordTrustedValidation(ctx, issue, owner, report.Artifact); err != nil {
 					return err
 				}
 			}

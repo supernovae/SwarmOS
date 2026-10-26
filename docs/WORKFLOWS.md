@@ -139,7 +139,7 @@ Progress messages contain stage metadata only. Failed harness runs report the ro
 
 `swarm issue validate`, `swarm issue submit`, `swarm pr validate`, and `swarm pr submit` also report progress to stderr by default. Each trusted required check gets a start line and a PASS/FAIL line with elapsed time; while it runs, a heartbeat names the check every 15 seconds. Phases between checks also receive running lines. Use `--progress=false` to silence progress while keeping the same stdout and `--json` results.
 
-Issue submission announces checkpoint creation, validation, checkpoint push/record, draft PR creation or update, and submission recording. PR submission validates the existing checkpoint, publishes and records the revision, then updates review evidence and rebase metadata. Retries announce only the phases they execute. Check output remains captured in the validation report.
+Issue submission announces checkpoint creation, validation, checkpoint push/record, draft PR creation or update, and submission recording. PR submission validates the existing checkpoint or reuses an exact matching passing run from the same worker and claim, publishes and records the revision, then updates review evidence and rebase metadata. Retries announce only the phases they execute. Check output remains captured in the validation report.
 
 ## Related Guides
 
@@ -157,3 +157,5 @@ Automatic retries are limited per approved task revision. The default allows two
 To recover when the budget is exhausted, revise both reports in the managed worktree and use `swarm issue stage <N> --phase plan` or `swarm pr stage <PR> --phase plan`. Successful non-fork staging resets the count. An authenticated human review of either verdict, or maintainer approval of a changed WorkUnit revision, also resets it. Automatic plans, new claims, and approval of identical content preserve the count.
 
 With `plan_mode: agent`, manual staging is disabled: use `swarm issue review-plan <N>` to review existing reports, or edit the WorkUnit and have a maintainer approve the changed revision. With `plan_mode: interactive`, work pauses for manual staging even when the stored budget is exhausted, without spending an attempt. Fork staging preserves the count; fork tasks need maintainer human review or a changed approved revision to reset it. Exhaustion never approves a plan or bypasses its review gate.
+
+Released builds can reuse coordinator-recorded validation during `swarm issue submit` and `swarm pr submit` when the checkpoint tree, approved base, trusted policy, claim, worker, and swarm version match. Reuse output and PR evidence show the original run's age and tree SHA. Explicit `issue validate` and `pr validate` always run checks, as do CI, development builds, and fork submissions.

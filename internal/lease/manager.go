@@ -150,6 +150,16 @@ func (m *Manager) SetUpstreamRemote(name string) { m.upstreamRemote = strings.Tr
 func (m *Manager) UpstreamRemote() string {
 	return workspace.UpstreamRemoteOrDefault(m.upstreamRemote)
 }
+
+// LedgerLayout is the ledger namespace of the configured Git store; stores
+// without ledger refs report the branch layout.
+func (m *Manager) LedgerLayout() coordination.RefLayout {
+	if s, ok := m.store.(interface{ Layout() coordination.RefLayout }); ok {
+		return s.Layout()
+	}
+	return coordination.BranchLayout
+}
+
 func (m *Manager) ConfigureStore(root string) error {
 	if strings.TrimSpace(root) == "" {
 		return fmt.Errorf("empty repository root")
@@ -166,7 +176,16 @@ func (m *Manager) ConfigureStore(root string) error {
 	root = filepath.Clean(canonical)
 	m.repoRoot = root
 	if strings.HasPrefix(m.tracker.BackendName(), "github") {
-		m.store = coordination.NewGitStoreWithRemote(root, m.upstreamRemote)
+		// Only the upstream default branch selects the ledger namespace.
+		ns, err := workspace.TrustedLedgerNamespace(root, m.upstreamRemote)
+		if err != nil {
+			return err
+		}
+		layout, err := coordination.LayoutFor(ns)
+		if err != nil {
+			return err
+		}
+		m.store = coordination.NewGitStoreWithLayout(root, m.upstreamRemote, layout)
 	} else {
 		m.store = coordination.NewFileStore(root)
 	}
@@ -368,7 +387,7 @@ func (m *Manager) project(ctx context.Context, n int, st *IssueState) {
 	if iss, err := m.tracker.GetIssue(ctx, n); err == nil && iss != nil {
 		wu, _ = contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
 	}
-	body := RenderStateProjection(wu, st)
+	body := RenderStateProjection(wu, st, m.LedgerLayout())
 	commentID := st.ProjectionCommentID
 	if commentID == 0 {
 		commentID = m.findProjectionCommentID(ctx, n)
@@ -393,12 +412,13 @@ func short(s string) string {
 
 const maxProjectedArtifactChars = 12000
 
-func TruncateArtifactBody(body string, issueNum int) string {
+// TruncateArtifactBody bounds a projected artifact, pointing at stateRef for the full body.
+func TruncateArtifactBody(body, stateRef string) string {
 	trimmed := strings.TrimSpace(body)
 	if len(trimmed) <= maxProjectedArtifactChars {
 		return trimmed
 	}
-	return fmt.Sprintf("%s\n\n...(truncated at %d chars; full artifact stored in `refs/heads/swarm-state/issue-%d`)", trimmed[:maxProjectedArtifactChars], maxProjectedArtifactChars, issueNum)
+	return fmt.Sprintf("%s\n\n...(truncated at %d chars; full artifact stored in `%s`)", trimmed[:maxProjectedArtifactChars], maxProjectedArtifactChars, stateRef)
 }
 
 func roleOrder(role string) int {
@@ -503,7 +523,8 @@ func BuildProvenanceAttestation(wu *contract.WorkUnit, st *IssueState) *contract
 	return att
 }
 
-func RenderStateProjection(wu *contract.WorkUnit, st *IssueState) string {
+// RenderStateProjection renders st; layout names the ref holding full artifacts.
+func RenderStateProjection(wu *contract.WorkUnit, st *IssueState, layout coordination.RefLayout) string {
 	if st == nil {
 		return "<!-- swarm:audit:v1 -->\n### 🐝 SwarmOS Orchestration & Provenance State\n"
 	}
@@ -597,7 +618,7 @@ func RenderStateProjection(wu *contract.WorkUnit, st *IssueState) string {
 			default:
 				title = fmt.Sprintf("📄 Artifact (%s — sha256:%s)", a.Type, short(digest))
 			}
-			sb.WriteString(fmt.Sprintf("<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, TruncateArtifactBody(a.Body, issueNum)))
+			sb.WriteString(fmt.Sprintf("<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, TruncateArtifactBody(a.Body, layout.StateRef(issueNum))))
 		}
 	}
 	return sb.String()

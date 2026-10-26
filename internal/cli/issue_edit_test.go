@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cli/go-gh/v2/pkg/api"
-	"github.com/supernovae/swarmos/internal/coordination"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -366,12 +365,12 @@ func TestIssueEditBackendGitHub(t *testing.T) {
 	}
 	// Keep all Git coordination traffic inside a temporary bare origin.
 	origin := filepath.Join(t.TempDir(), "origin.git")
-	for _, args := range [][]string{{"init", "--bare", origin}, {"-C", f.root, "remote", "add", "origin", origin}} {
+	for _, args := range [][]string{{"init", "--bare", "--initial-branch=main", origin}, {"-C", f.root, "remote", "add", "origin", origin}, {"-C", f.root, "push", "origin", "HEAD:refs/heads/main"}} {
 		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
 	}
-	store := coordination.NewGitStore(f.root)
+	store := trustedLedgerStore(t, f.root, "")
 	data, _ := json.Marshal(state)
 	if _, err := store.CompareAndSwap(ctx, i.Number, "", data); err != nil {
 		t.Fatal(err)

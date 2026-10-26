@@ -589,6 +589,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	if err := contract.ValidatePlanMode(cfg.PlanMode); err != nil {
 		return nil, err
 	}
+	if err := contract.ValidateLedgerNamespace(cfg.LedgerNamespace); err != nil {
+		return nil, err
+	}
 	if cfg.CommitMessage != nil {
 		if err := contract.ValidateCommitMessageDetail(cfg.CommitMessage.Detail); err != nil {
 			return nil, err
@@ -636,14 +639,21 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	return &cfg, nil
 }
 
-func readAt(root, sha, path string) ([]byte, error) {
+func validCommitSHA(sha string) error {
 	if len(sha) != 40 && len(sha) != 64 {
-		return nil, fmt.Errorf("approved base must be a full commit SHA")
+		return fmt.Errorf("approved base must be a full commit SHA")
 	}
 	for _, c := range sha {
 		if !strings.ContainsRune("0123456789abcdef", c) {
-			return nil, fmt.Errorf("invalid approved base SHA")
+			return fmt.Errorf("invalid approved base SHA")
 		}
+	}
+	return nil
+}
+
+func readAt(root, sha, path string) ([]byte, error) {
+	if err := validCommitSHA(sha); err != nil {
+		return nil, err
 	}
 	out, err := gitcredential.Output(context.Background(), root, "show", sha+":"+path)
 	if err != nil {
@@ -1062,4 +1072,28 @@ func repositoryName(root, remote string) string {
 		}
 	}
 	return filepath.Base(mustAbs(root))
+}
+
+// LedgerNamespaceAt reads ledger_namespace from the trusted commit sha. A
+// commit without .swarm/config.yaml selects branch, as an omitted key does;
+// an unreadable or invalid configuration is an error, never a default.
+func LedgerNamespaceAt(repoRoot, sha string) (string, error) {
+	if err := validCommitSHA(sha); err != nil {
+		return "", err
+	}
+	if _, err := gitcredential.Output(context.Background(), repoRoot, "cat-file", "-e", sha+"^{commit}"); err != nil {
+		return "", fmt.Errorf("trusted commit %s unavailable: %w", sha, err)
+	}
+	listed, err := gitcredential.Output(context.Background(), repoRoot, "ls-tree", "--name-only", sha, "--", ".swarm/config.yaml")
+	if err != nil {
+		return "", fmt.Errorf("inspect trusted .swarm/config.yaml at %s: %w", sha, err)
+	}
+	if strings.TrimSpace(string(listed)) == "" {
+		return contract.LedgerNamespaceBranch, nil
+	}
+	cfg, err := LoadConfigAt(repoRoot, sha)
+	if err != nil {
+		return "", err
+	}
+	return cfg.EffectiveLedgerNamespace(), nil
 }

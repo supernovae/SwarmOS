@@ -21,16 +21,12 @@ func (s *GitStore) CompareAndSwapAndDeleteBranch(ctx context.Context, n int, old
 	if _, err := s.run(ctx, "", "check-ref-format", ref); err != nil {
 		return "", err
 	}
-	fetchURL, err := s.run(ctx, "", "remote", "get-url", "--all", s.Remote())
+	pushURL, err := s.singleDestination(ctx, "cleanup")
 	if err != nil {
 		return "", err
 	}
-	pushURL, err := s.run(ctx, "", "remote", "get-url", "--push", "--all", s.Remote())
-	if err != nil {
+	if err := s.checkLedger(ctx, s.ref(n)); err != nil {
 		return "", err
-	}
-	if strings.Contains(fetchURL, "\n") || strings.Contains(pushURL, "\n") || fetchURL == "" || fetchURL != pushURL {
-		return "", fmt.Errorf("cleanup requires one identical fetch and push destination")
 	}
 	blob, err := s.run(ctx, string(next), "hash-object", "-w", "--stdin")
 	if err != nil {
@@ -53,4 +49,21 @@ func (s *GitStore) CompareAndSwapAndDeleteBranch(ctx context.Context, n int, old
 		return "", fmt.Errorf("%w: atomic cleanup rejected: %v", ErrConflict, err)
 	}
 	return commit, nil
+}
+
+// singleDestination returns the push URL when fetches and pushes reach exactly
+// one identical destination, so leases observed by fetch fence the push.
+func (s *GitStore) singleDestination(ctx context.Context, operation string) (string, error) {
+	fetchURL, err := s.run(ctx, "", "remote", "get-url", "--all", s.Remote())
+	if err != nil {
+		return "", err
+	}
+	pushURL, err := s.run(ctx, "", "remote", "get-url", "--push", "--all", s.Remote())
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(fetchURL, "\n") || strings.Contains(pushURL, "\n") || fetchURL == "" || fetchURL != pushURL {
+		return "", fmt.Errorf("%s requires one identical fetch and push destination", operation)
+	}
+	return pushURL, nil
 }

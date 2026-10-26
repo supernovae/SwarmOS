@@ -156,7 +156,7 @@ func (m *Manager) projectSubmission(ctx context.Context, n int, st *IssueState) 
 		return err
 	}
 	var wu *contract.WorkUnit
-	body := RenderStateProjection(wu, st)
+	body := RenderStateProjection(wu, st, m.LedgerLayout())
 	for _, c := range comments {
 		if strings.HasPrefix(strings.TrimSpace(c.Body), "<!-- swarm:audit:v1 -->") {
 			if c.Body == body {

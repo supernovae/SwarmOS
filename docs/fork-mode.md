@@ -1,6 +1,6 @@
 # Fork Mode (`--fork`) — Open-Source Contributions Without Upstream Push Access
 
-SwarmOS uses Git compare-and-swap (CAS) refs (`refs/heads/swarm-state/issue-<N>`) to coordinate task leases, checkpoint bindings, and review gates without standing up an external database. In same-repository mode (the default), workers push state refs and task branches directly to `origin`.
+SwarmOS uses Git compare-and-swap (CAS) refs (`refs/heads/swarm-state/issue-<N>`, or `refs/swarm/state/issue-<N>` with `ledger_namespace: hidden`) to coordinate task leases, checkpoint bindings, and review gates without standing up an external database. In same-repository mode (the default), workers push state refs and task branches directly to `origin`.
 
 Open-source contributors typically do not have write access to the upstream repository. **Fork Mode (`--fork`)** lets external contributors claim approved `WorkUnit` issues, run coding agents in isolated worktrees, push checkpoints to their own personal GitHub fork, open validated cross-repository Draft PRs, and keep revising those PRs after review—while keeping issue approval, validation policy, and human review strictly under upstream maintainer control.
 
@@ -39,6 +39,8 @@ sequenceDiagram
     A->>GH: Verify Draft PR head repo, branch, exact HeadSHA, and upstream base
     A->>U: Atomic CAS: mark Submitted & update issue labels
 ```
+
+The diagram shows branch-mode ref names. With `ledger_namespace: hidden`, the same steps use `refs/swarm/state/issue-42` and `refs/swarm/contributors/<login>`.
 
 ### Core Security Invariants
 
@@ -80,7 +82,7 @@ Every cross-trust-boundary step in fork mode is designed to fail closed:
 - **Pushes Outside SwarmOS:**
   Contributors can always push to their own fork branch directly. SwarmOS does not block this, but it never mistakes those commits for verified work: `swarm pr status` reports `unverified-head` when the PR head differs from the last verified head, and the PR's recorded plan, validation, and provenance attestation keep describing that earlier head. Upstream CI (`swarm repo validate --base <PR base>`) still runs the trusted-base required checks and protected-path policy on every pushed head, and maintainers merge through GitHub review as usual.
 - **Disabled Actions, Oversized Payloads, or Denied Ref Pushes:**
-  Payloads exceeding GitHub's comment size limit are rejected by the client before posting. If GitHub Actions is disabled or branch protection blocks the Action from pushing `refs/heads/swarm-state/*` or `refs/heads/swarm-contributors/*`, the client times out with setup guidance and never falls back to treating comments as leases.
+  Payloads exceeding GitHub's comment size limit are rejected by the client before posting. If GitHub Actions is disabled or branch protection blocks the Action from pushing the state and contributor ledger refs (`refs/heads/swarm-state/*` and `refs/heads/swarm-contributors/*`, or `refs/swarm/state/*` and `refs/swarm/contributors/*` in hidden mode), the client times out with setup guidance and never falls back to treating comments as leases.
 
 ---
 
@@ -107,6 +109,8 @@ By default, each fork contributor can hold `1` active fork claim at a time. Main
 fork:
   max_active_claims: 1
 ```
+
+`ledger_namespace` chooses where the coordinator keeps issue state, checkpoint retention, and contributor indexes: `branch` (`refs/heads/swarm-state/`, `swarm-checkpoints/`, `swarm-contributors/`; the default when the key is absent) or `hidden` (`refs/swarm/state/`, `checkpoints/`, `contributors/`). The coordinator reads it from the upstream default branch before handling each request, never from the approved issue base or a contributor's fork, so a fork cannot redirect the ledgers. Hidden refs cannot be protected by rulesets; see [Ledger ref namespaces](GITHUB.md#ledger-ref-namespaces) before switching, and pause the coordinator workflow while running `swarm repo migrate-refs`.
 
 ### Approving Issues for Contributors
 

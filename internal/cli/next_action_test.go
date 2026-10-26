@@ -374,14 +374,14 @@ func TestPRWorkGitHubBlockersNextAction(t *testing.T) {
 	f, issue, number := submittedPRFixture(t, "agent")
 	ctx := context.Background()
 	remote := filepath.Join(t.TempDir(), "remote.git")
-	prGit(t, f.root, "init", "--bare", remote)
+	prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
 	prGit(t, f.root, "remote", "add", "origin", remote)
 	prGit(t, f.root, "push", "origin", "main")
 	raw, _, err := f.manager.Store().Load(ctx, issue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = coordination.NewGitStore(f.root).CompareAndSwap(ctx, issue, "", raw); err != nil {
+	if _, err = trustedLedgerStore(t, f.root, "").CompareAndSwap(ctx, issue, "", raw); err != nil {
 		t.Fatal(err)
 	}
 	original, err := f.tracker.GetPullRequest(ctx, number)

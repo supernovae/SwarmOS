@@ -79,6 +79,21 @@ Remote deletion and its state progress record use one atomic Git push with exact
 
 If an interrupted cleanup leaves a reservation, run `swarm issue cleanup 42 --recover-reservation --backend github` to fence that operation and preview again, then rerun cleanup explicitly. Recovery retains the operation's audit history. GitHub cannot transact PR creation together with Git ref deletion; cleanup rechecks open PRs immediately before deletion, but a PR created after that check can race with it.
 
+### Resume after a claim-budget pause
+
+Long runs save their progress before running out of claim time. The approved lease policy sets an absolute ceiling of `lease.duration × (1 + lease.max_renewals)` from acquisition. Heartbeats count as renewals, and early renewals can leave the current claim expiring before that ceiling. `swarm issue status 42` shows renewals used and remaining, the nominal allowance left, and the current expiry.
+
+Before starting an agent stage, SwarmOS reserves one third of the approved lease duration for shutdown and checkpointing. Once the final renewal is used, reaching that reserve stops the agent. Developer and tester edits are safely imported, checkpointed, and handed back to the implementation phase while the claim is valid. Planning and review restart their pending phase. The pause prints the command to continue with a new claim:
+
+```bash
+swarm issue work 42 --phase implement
+swarm pr work 123 --phase implement
+```
+
+Issue checkpoints use the existing fenced publication path. PR revision checkpoints remain local until explicit `swarm pr submit`. A paused tester resumes validation directly when the saved head still has matching implementation evidence; changed code follows the implementation path again. Node workers report a budget pause without counting a failure or automatically submitting it. If shutdown or publication outlasts the lease, claim fencing stops the operation and reports an error.
+
+This automatic pause is separate from an agent execution timeout, whose recovery patch requires inspection before use.
+
 ### Choose how you work
 
 Start interactively when you want to stay close to the changes. Move repeatable tasks to unattended workers once the tools and permissions are set up.

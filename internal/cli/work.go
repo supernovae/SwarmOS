@@ -66,6 +66,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					opts.OnProgress = printer
 				}
 			}
+			guidanceOpts := *rootOpts
 			var tr tracker.Tracker
 			var mgr *lease.Manager
 			var cfg *contract.SwarmConfig
@@ -76,6 +77,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					return err
 				}
 				opts.IssueNumber, opts.RepoRoot, opts.Phase, opts.ClaimID = pulled.Issue.Number, pulled.RepoRoot, pulled.TargetPhase, pulled.State.Lease.ClaimID
+				guidanceOpts.Repo, guidanceOpts.RepoRoot, guidanceOpts.Backend = pulled.Repo, pulled.RepoRoot, pulled.Backend
 				tr, mgr, cfg, err = rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend})
 				if err != nil {
 					return err
@@ -136,11 +138,15 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			guidance := claimBudgetGuidance(&guidanceOpts, result, "issue", result.IssueNumber)
 			status := result.Outcome()
 			if jsonOutput {
 				return writeJSON(cmd, map[string]any{"kind": "work", "status": status, "result": result})
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d %s: phase=%s branch=%s validation=%t\n", result.IssueNumber, status, result.PhaseCompleted, result.BranchName, result.ValidationPassed)
+			if guidance != "" {
+				fmt.Fprintln(cmd.OutOrStdout(), guidance)
+			}
 			if result.PausedForHuman {
 				if result.PhaseCompleted == "awaiting-plan" {
 					fmt.Fprintf(cmd.OutOrStdout(), "Interactive plan required: write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md in %s, then run: swarm issue stage %d --phase plan\n", result.WorktreePath, result.IssueNumber)

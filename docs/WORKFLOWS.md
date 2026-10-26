@@ -131,6 +131,10 @@ SwarmOS separates per-issue execution planning from repository-wide roadmap plan
 
 ## 5. Command Progress
 
+Long-running issue, PR, and node work can pause for the claim budget. Each claim has an absolute allowance of the approved lease duration times one plus the approved renewal count; heartbeat renewals consume that count. Before each agent run, the coordinator checks that at least one third of the approved lease duration remains available. After the last renewal, it stops a running developer or tester when expiry reaches that reserve, preserves safe edits through the fenced checkpoint path, and hands off to `implement` without a failed verdict. Incomplete planner/reviewer output is discarded, and that phase restarts.
+
+Follow the printed continuation command, such as `swarm issue work 42 --phase implement` or `swarm pr work 123 --phase implement`, to acquire a fresh budget and resume. Backend, repository, and fork selections appear in the command when selected. `swarm issue status 42` distinguishes the nominal total allowance from current expiry and shows renewals used and remaining. PR checkpoints remain unpublished until `swarm pr submit`; node workers count budget pauses as task attempts without counting failures or triggering automatic submission.
+
 `swarm issue work` reports stage starts, completions, pauses, and handoffs to stderr. During a quiet stage, a local heartbeat prints every 15 seconds with the current stage and elapsed time. This timer reports that execution is still running; lease renewal continues separately.
 
 The final result stays on stdout, including when using `--json`. Pass `--progress=false` to silence progress messages. Interactive execution and dry runs do not print these messages.

@@ -67,53 +67,56 @@ type ApprovalTransition struct {
 }
 
 type IssueState struct {
-	RevisionPlan        *workspace.RevisionPlanContext `json:"revision_plan,omitempty"`
-	PlanReplanCount     int                            `json:"plan_replan_count"`
-	PendingPlanReview   *PlanRejection                 `json:"pending_plan_review,omitempty"`
-	NextPhaseReason     string                         `json:"next_phase_reason,omitempty"`
-	ClaimPreviousBase   string                         `json:"-"`
-	RebaseApprovalAudit string                         `json:"rebase_approval_audit,omitempty"`
-	DroppedCheckpoint   *workspace.DroppedCheckpoint   `json:"dropped_checkpoint,omitempty"`
-	CheckpointDropped   bool                           `json:"-"`
-	SubmittedBaseSHA    string                         `json:"submitted_base_sha,omitempty"`
-	PreviousBaseSHA     string                         `json:"previous_base_sha,omitempty"`
-	LastRebase          *RebaseEvidence                `json:"last_rebase,omitempty"`
-	PolicyTreeDigest    string                         `json:"policy_tree_digest,omitempty"`
-	ApprovalTransition  *ApprovalTransition            `json:"approval_transition,omitempty"`
-	CarryReason         string                         `json:"carry_reason,omitempty"`
-	ChangedPolicyPaths  []string                       `json:"changed_policy_paths,omitempty"`
-	CleanupHistory      []CleanupReservation           `json:"cleanup_history,omitempty"`
-	Cleanup             *CleanupReservation            `json:"cleanup,omitempty"`
-	PROutcome           *PROutcome                     `json:"pr_outcome,omitempty"`
-	SubmittedHeadSHA    string                         `json:"submitted_head_sha,omitempty"`
-	Lease               contract.Lease                 `json:"lease"`
-	Artifacts           []contract.Artifact            `json:"artifacts,omitempty"`
-	Attestations        []contract.RoleAttestation     `json:"attestations,omitempty"`
-	ProjectionCommentID int64                          `json:"projection_comment_id,omitempty"`
-	TaskDigest          string                         `json:"task_digest"`
-	PolicyDigest        string                         `json:"policy_digest"`
-	BaseSHA             string                         `json:"base_sha"`
-	HeadSHA             string                         `json:"head_sha,omitempty"`
-	Branch              string                         `json:"branch,omitempty"`
-	ApprovedBy          string                         `json:"approved_by,omitempty"`
-	ApprovedAt          time.Time                      `json:"approved_at,omitempty"`
-	PRNumber            int                            `json:"pr_number,omitempty"`
-	PRRevision          *PRRevision                    `json:"pr_revision,omitempty"`
-	EffectiveGate       contract.GateMode              `json:"effective_gate,omitempty"`
-	PRURL               string                         `json:"pr_url,omitempty"`
-	ForkRepo            string                         `json:"fork_repo,omitempty"`
-	LastForkRequestID   int64                          `json:"last_fork_request_id,omitempty"`
+	ResumeCheckpointBranch string                         `json:"resume_checkpoint_branch,omitempty"`
+	ClaimBudget            *ClaimBudget                   `json:"claim_budget,omitempty"`
+	RevisionPlan           *workspace.RevisionPlanContext `json:"revision_plan,omitempty"`
+	PlanReplanCount        int                            `json:"plan_replan_count"`
+	PendingPlanReview      *PlanRejection                 `json:"pending_plan_review,omitempty"`
+	NextPhaseReason        string                         `json:"next_phase_reason,omitempty"`
+	ClaimPreviousBase      string                         `json:"-"`
+	RebaseApprovalAudit    string                         `json:"rebase_approval_audit,omitempty"`
+	DroppedCheckpoint      *workspace.DroppedCheckpoint   `json:"dropped_checkpoint,omitempty"`
+	CheckpointDropped      bool                           `json:"-"`
+	SubmittedBaseSHA       string                         `json:"submitted_base_sha,omitempty"`
+	PreviousBaseSHA        string                         `json:"previous_base_sha,omitempty"`
+	LastRebase             *RebaseEvidence                `json:"last_rebase,omitempty"`
+	PolicyTreeDigest       string                         `json:"policy_tree_digest,omitempty"`
+	ApprovalTransition     *ApprovalTransition            `json:"approval_transition,omitempty"`
+	CarryReason            string                         `json:"carry_reason,omitempty"`
+	ChangedPolicyPaths     []string                       `json:"changed_policy_paths,omitempty"`
+	CleanupHistory         []CleanupReservation           `json:"cleanup_history,omitempty"`
+	Cleanup                *CleanupReservation            `json:"cleanup,omitempty"`
+	PROutcome              *PROutcome                     `json:"pr_outcome,omitempty"`
+	SubmittedHeadSHA       string                         `json:"submitted_head_sha,omitempty"`
+	Lease                  contract.Lease                 `json:"lease"`
+	Artifacts              []contract.Artifact            `json:"artifacts,omitempty"`
+	Attestations           []contract.RoleAttestation     `json:"attestations,omitempty"`
+	ProjectionCommentID    int64                          `json:"projection_comment_id,omitempty"`
+	TaskDigest             string                         `json:"task_digest"`
+	PolicyDigest           string                         `json:"policy_digest"`
+	BaseSHA                string                         `json:"base_sha"`
+	HeadSHA                string                         `json:"head_sha,omitempty"`
+	Branch                 string                         `json:"branch,omitempty"`
+	ApprovedBy             string                         `json:"approved_by,omitempty"`
+	ApprovedAt             time.Time                      `json:"approved_at,omitempty"`
+	PRNumber               int                            `json:"pr_number,omitempty"`
+	PRRevision             *PRRevision                    `json:"pr_revision,omitempty"`
+	EffectiveGate          contract.GateMode              `json:"effective_gate,omitempty"`
+	PRURL                  string                         `json:"pr_url,omitempty"`
+	ForkRepo               string                         `json:"fork_repo,omitempty"`
+	LastForkRequestID      int64                          `json:"last_fork_request_id,omitempty"`
 }
 type Manager struct {
-	tracker     tracker.Tracker
-	security    contract.SecurityConfig
-	store       coordination.Store
-	repoRoot    string
-	nodeProfile *contract.NodeProfile
-	nowFn       func() time.Time
-	gateway     WorkerGateway
-	mu          sync.Mutex
-	tokens      map[int]string
+	heartbeatTimerFn func(time.Duration) HeartbeatTimer
+	tracker          tracker.Tracker
+	security         contract.SecurityConfig
+	store            coordination.Store
+	repoRoot         string
+	nodeProfile      *contract.NodeProfile
+	nowFn            func() time.Time
+	gateway          WorkerGateway
+	mu               sync.Mutex
+	tokens           map[int]string
 }
 
 func NewManager(tr tracker.Tracker, security contract.SecurityConfig) *Manager {
@@ -802,6 +805,24 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 		st.ForkRepo = ""
 	}
 	st.Lease = contract.Lease{Version: 1, IssueNumber: n, ClaimID: id, Owner: owner, Agent: agent, Phase: phase, Status: "active", ClaimedAt: now, ExpiresAt: now.Add(duration), MaxRenewals: max}
+	_, total, budgetErr := policyBudget(cfg.Lease)
+	if budgetErr != nil {
+		return nil, budgetErr
+	}
+	st.Lease.MaxRenewals = min(st.Lease.MaxRenewals, cfg.Lease.MaxRenewals)
+	if !cfg.Lease.Renewable {
+		st.Lease.MaxRenewals = 0
+	}
+	if st.Lease.MaxRenewals < 0 {
+		return nil, fmt.Errorf("negative max renewals")
+	}
+	if deadline := now.Add(total); st.Lease.ExpiresAt.After(deadline) {
+		st.Lease.ExpiresAt = deadline
+	}
+	st.ClaimBudget, err = projectBudget(st.Lease, cfg.Lease, now)
+	if err != nil {
+		return nil, err
+	}
 	st.Lease.Contributors = contributors
 	if st.PendingPlanReview != nil {
 		st.Lease.NextPhase = "plan"
@@ -826,6 +847,7 @@ func clearCheckpointAndHeadArtifacts(st *IssueState) {
 		return
 	}
 	st.Branch = ""
+	st.ResumeCheckpointBranch = ""
 	st.HeadSHA = ""
 	st.PRNumber = 0
 	st.PRURL = ""
@@ -931,7 +953,14 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		if !known {
 			contributors = append(contributors, owner)
 		}
-		clearCheckpointAndHeadArtifacts(st)
+		resumeBudget := st.Lease.Status == "handoff" && st.NextPhaseReason == "claim budget" && st.ForkRepo == forkRepo && st.Lease.Owner == owner && st.Branch != "" && st.HeadSHA != ""
+		if resumeBudget {
+			st.ResumeCheckpointBranch = st.Branch
+			st.Branch = fmt.Sprintf("swarm/issue-%d-%s", issue, id)
+		} else {
+			clearCheckpointAndHeadArtifacts(st)
+			st.ResumeCheckpointBranch = ""
+		}
 		st.ForkRepo = forkRepo
 		st.Lease = contract.Lease{
 			Version:      1,
@@ -945,6 +974,10 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			ExpiresAt:    now.Add(effectiveDur),
 			MaxRenewals:  effectiveMax,
 			Contributors: contributors,
+		}
+		st.ClaimBudget, err = projectBudget(st.Lease, cfg.Lease, now)
+		if err != nil {
+			return nil, err
 		}
 		if st.PendingPlanReview != nil {
 			st.Lease.NextPhase = "plan"
@@ -1059,7 +1092,14 @@ func (m *Manager) Renew(ctx context.Context, n int, owner string, d time.Duratio
 		if !cfg.Lease.Renewable {
 			return fmt.Errorf("approved policy disallows lease renewal")
 		}
-		if st.Lease.Renewals >= st.Lease.MaxRenewals {
+		_, total, err := policyBudget(cfg.Lease)
+		if err != nil {
+			return err
+		}
+		if !st.Lease.ClaimedAt.Add(total).After(m.nowFn()) {
+			return fmt.Errorf("%w: approved claim budget expired", ErrClaimFence)
+		}
+		if st.Lease.Renewals >= min(st.Lease.MaxRenewals, cfg.Lease.MaxRenewals) {
 			return ErrMaxRenewals
 		}
 		effectiveDur := d
@@ -1068,7 +1108,11 @@ func (m *Manager) Renew(ctx context.Context, n int, owner string, d time.Duratio
 		}
 		st.Lease.Renewals++
 		st.Lease.ExpiresAt = m.nowFn().Add(effectiveDur)
-		return nil
+		if deadline := st.Lease.ClaimedAt.Add(total); st.Lease.ExpiresAt.After(deadline) {
+			st.Lease.ExpiresAt = deadline
+		}
+		st.ClaimBudget, err = projectBudget(st.Lease, cfg.Lease, m.nowFn())
+		return err
 	})
 }
 func (m *Manager) Release(ctx context.Context, n int, owner, reason string) (*IssueState, error) {
@@ -1088,27 +1132,38 @@ func (m *Manager) Release(ctx context.Context, n int, owner, reason string) (*Is
 	}
 	return st, err
 }
-func (m *Manager) Handoff(ctx context.Context, n int, owner, done, next string) (*IssueState, error) {
+func (m *Manager) Handoff(ctx context.Context, n int, owner, done, next string, reason ...string) (*IssueState, error) {
+	handoffReason := ""
+	if len(reason) > 0 {
+		handoffReason = reason[0]
+	}
 	if m.gateway != nil {
 		return m.gateway.Apply(ctx, ForkRequest{
 			Version:     1,
 			Operation:   "handoff",
+			Reason:      handoffReason,
 			IssueNumber: n,
 			ClaimID:     m.token(n),
 			Phase:       done,
 			NextPhase:   next,
 		})
 	}
+	var validUntil time.Time
 	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+		validUntil = st.Lease.ExpiresAt
 		if err := contract.ValidatePhase(next); err != nil {
 			return err
 		}
 		st.Lease.Phase = done
+		st.NextPhaseReason = handoffReason
 		st.Lease.NextPhase = next
 		st.Lease.Status = "handoff"
 		st.Lease.ExpiresAt = m.nowFn()
 		return nil
 	})
+	if err == nil && !validUntil.After(m.nowFn()) {
+		return nil, fmt.Errorf("%w: claim expired during handoff", ErrClaimFence)
+	}
 	if err == nil && m.tracker != nil && st.EffectiveGate != contract.GateNone && (done == "plan" || next == "review") {
 		_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
 	}
@@ -1628,6 +1683,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 		}
 	}
 	st.Branch = branch
+	st.ResumeCheckpointBranch = ""
 	st.HeadSHA = head
 	st.DroppedCheckpoint = nil
 	if _, ok := m.store.(coordination.PublishingStore); ok {
@@ -1680,6 +1736,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 }
 func (m *Manager) GetCurrentState(ctx context.Context, n int) (*IssueState, error) {
 	st, _, err := m.loadReadOnly(ctx, n)
+
 	return st, err
 }
 

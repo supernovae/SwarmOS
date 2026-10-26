@@ -993,3 +993,42 @@ func configureWorktreeExclude(wtPath string) error {
 	}
 	return nil
 }
+
+// RebindBudgetCheckpoint reuses a clean managed worktree after the same fork
+// contributor acquires a new claim. Both claim branches retain their history.
+func RebindBudgetCheckpoint(ctx context.Context, root string, issue int, oldBranch, newBranch, head string) error {
+	path := WorktreePath(root, issue)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("budget resume worktree must be a real directory")
+	}
+	onNew := verifyWorktree(path, newBranch, head) == nil
+	if !onNew {
+		if err := verifyWorktree(path, oldBranch, head); err != nil {
+			return err
+		}
+	}
+	if err := CleanEphemeralHarnessMarkers(path); err != nil {
+		return err
+	}
+	dirty, err := gitOutputContext(ctx, path, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(dirty) != "" {
+		return fmt.Errorf("budget resume requires a clean checkpoint worktree")
+	}
+	if onNew {
+		return nil
+	}
+	if _, err := gitOutputContext(ctx, path, "switch", "--no-track", "-c", newBranch, head); err != nil {
+		return fmt.Errorf("switch to new claim checkpoint: %w", err)
+	}
+	return verifyWorktree(path, newBranch, head)
+}

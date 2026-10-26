@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/agent"
+	"github.com/supernovae/swarmos/internal/claimpause"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
@@ -63,6 +64,7 @@ type WorkOptions struct {
 }
 
 type WorkResult struct {
+	ClaimBudgetPause *ClaimBudgetPause `json:"claim_budget_pause,omitempty"`
 	IssueNumber      int
 	WorktreePath     string
 	BranchName       string
@@ -85,6 +87,8 @@ type WorkResult struct {
 // handed off to the next phase.
 func (r *WorkResult) Outcome() string {
 	switch {
+	case r.ClaimBudgetPause != nil:
+		return "paused-claim-budget"
 	case r.PausedForHuman:
 		return "paused"
 	case r.HandedOffToPhase != "":
@@ -125,6 +129,7 @@ type PreflightResult struct {
 }
 
 type Engine struct {
+	NewRunner    func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
 	Tracker      tracker.Tracker
 	LeaseManager *lease.Manager
 	Config       *contract.SwarmConfig
@@ -504,22 +509,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 	}
 	e.Config = cfg
+	coordinatorCtx := ctx
 	heartbeat := e.LeaseManager.StartHeartbeat(ctx, opts.IssueNumber, opts.Owner, duration)
 	defer heartbeat.Stop()
-	ctx = heartbeat.Context()
-	check := func() error {
-		if heartbeatErr := heartbeat.Err(); heartbeatErr != nil {
-			return fmt.Errorf("%w: %w", ErrLeaseLost, heartbeatErr)
-		}
-		if err := e.LeaseManager.CheckClaim(ctx, opts.IssueNumber, opts.Owner); err != nil {
-			heartbeat.Stop()
-			return fmt.Errorf("%w: %w", ErrLeaseLost, err)
-		}
-		return nil
-	}
-	if err := check(); err != nil {
-		return nil, err
-	}
 	forkMode := e.ForkMode || opts.ForkMode
 	forkRemote := strings.TrimSpace(opts.ForkRemote)
 	if forkRemote == "" {
@@ -527,6 +519,30 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	if forkRemote == "" {
 		forkRemote = workspace.DefaultForkRemote
+	}
+	if forkMode && opts.PRNumber == 0 && st.ResumeCheckpointBranch != "" {
+		// Verify the recorded old claim branch before creating the new claim's
+		// namespaced checkpoint. The upstream state supplies both identities.
+		observed := workspace.InspectCheckpoint(coordinatorCtx, opts.RepoRoot, forkRemote, opts.IssueNumber, st.ResumeCheckpointBranch, st.HeadSHA)
+		if observed.RemoteBranch.SHA != st.HeadSHA {
+			return nil, fmt.Errorf("budget resume fork checkpoint differs from recorded head")
+		}
+		if err := workspace.FetchCommit(opts.RepoRoot, forkRemote, st.HeadSHA); err != nil {
+			return nil, err
+		}
+		if err := e.LeaseManager.CheckClaim(coordinatorCtx, opts.IssueNumber, opts.Owner); err != nil {
+			return nil, err
+		}
+		if err := workspace.PushForkCheckpoint(coordinatorCtx, opts.RepoRoot, forkRemote, st.Branch, st.HeadSHA); err != nil {
+			return nil, err
+		}
+		if err := workspace.RebindBudgetCheckpoint(coordinatorCtx, opts.RepoRoot, opts.IssueNumber, st.ResumeCheckpointBranch, st.Branch, st.HeadSHA); err != nil {
+			return nil, err
+		}
+		st, err = e.LeaseManager.RecordCheckpoint(coordinatorCtx, opts.IssueNumber, opts.Owner, st.Branch, st.HeadSHA)
+		if err != nil {
+			return nil, err
+		}
 	}
 	checkpointRemote, targetBranch := workspace.ClaimCheckpoint(forkMode, forkRemote, opts.IssueNumber, pre.Issue.Title, st.Lease.ClaimID, st.Branch)
 	if opts.SetupProgress == nil {
@@ -561,11 +577,67 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if opts.PRNumber != 0 {
 		res.HeadSHA = st.PRRevision.LocalHeadSHA
 	}
+	ctx = heartbeat.Context()
+	check := func() error {
+		if heartbeatErr := heartbeat.Err(); heartbeatErr != nil && !budgetInterrupted(ctx, context.Canceled) {
+			return fmt.Errorf("%w: %w", ErrLeaseLost, heartbeatErr)
+		}
+		if err := e.LeaseManager.CheckClaim(coordinatorCtx, opts.IssueNumber, opts.Owner); err != nil {
+			heartbeat.Stop()
+			return fmt.Errorf("%w: %w", ErrLeaseLost, err)
+		}
+		return nil
+	}
+	defer func() {
+		var admission *budgetAdmissionError
+		if errors.As(workErr, &admission) {
+			res.State = admission.state
+			setBudgetPause(res, admission.budget, admission.state.Lease.NextPhase, opts)
+			result, workErr = res, nil
+		}
+	}()
+	activePhase, preserveCheckpoint := "plan", false
+	defer func() {
+		if workErr != nil && budgetInterrupted(ctx, workErr) {
+			workErr = e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, activePhase, preserveCheckpoint, forkMode, forkRemote)
+			result = res
+		}
+	}()
+	checkPauseImport := func(importCtx context.Context, paths []string) error {
+		if err := e.LeaseManager.CheckClaim(importCtx, opts.IssueNumber, opts.Owner); err != nil {
+			return err
+		}
+		if !pre.WorkUnit.AllowHarnessChanges {
+			for _, path := range paths {
+				for _, pattern := range pre.Validation.ProtectedPaths {
+					if validation.MatchProtectedPath(pattern, path) {
+						return fmt.Errorf("paused snapshot changed protected path %s", path)
+					}
+				}
+			}
+		}
+		return nil
+	}
+	pauseInterrupted := func(runErr error, phase string, checkpoint bool) (bool, error) {
+		if !budgetInterrupted(ctx, runErr) {
+			return false, runErr
+		}
+		return true, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, phase, checkpoint, forkMode, forkRemote)
+	}
+	admit := func(phase string) error {
+		if budgetInterrupted(ctx, context.Canceled) {
+			return e.pauseAdmission(coordinatorCtx, opts, phase)
+		}
+		return e.admitStage(ctx, opts.IssueNumber, opts.Owner, phase)
+	}
 	mode := "interactive"
 	if opts.Headless {
 		mode = "headless"
 	}
 	implementationBase := st.BaseSHA
+	if st.NextPhaseReason == "claim budget" && st.HeadSHA != "" {
+		implementationBase = st.HeadSHA
+	}
 	if opts.PRNumber != 0 {
 		implementationBase = st.PRRevision.LocalHeadSHA
 	}
@@ -583,6 +655,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		runPlan = false
 	}
 	if runPlan {
+		if err := admit("plan"); err != nil {
+			return res, err
+		}
 		progress.next("plan")
 		if err := check(); err != nil {
 			return res, err
@@ -602,7 +677,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 		planner := pre.Agents["planner"]
 		res.RoleAgentsUsed["planner"] = planner
-		runner, err := agent.NewConfiguredRunner(planner, cfg, e.Tracker.BackendName() == "local")
+		runner, err := e.configuredRunner(planner, cfg, e.Tracker.BackendName() == "local")
 		if err != nil {
 			return res, err
 		}
@@ -619,7 +694,13 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if rejectedFindings != "" {
 			planPrompt += "\nAddress the previous CHANGES_REQUESTED findings and revise PLAN.md or TEST_PLAN.md:\n" + rejectedFindings
 		}
+		if err := admit("plan"); err != nil {
+			return res, err
+		}
 		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
+		if paused, pauseErr := pauseInterrupted(err, "plan", false); paused {
+			return res, pauseErr
+		}
 		if err != nil {
 			return res, err
 		}
@@ -702,7 +783,11 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		res.State = st
 		reviewer := pre.Agents["reviewer"]
 		res.RoleAgentsUsed["reviewer"] = reviewer
+		activePhase = "review"
 		verdict, reviewed, err := e.RunAgentReview(ctx, wtPath, pre.WorkUnit, wf, st, opts.Owner, reviewer, mode, opts.Instructions, opts.PRNumber, opts.SetupProgress)
+		if paused, pauseErr := pauseInterrupted(err, "review", false); paused {
+			return res, pauseErr
+		}
 		res.ReviewVerdict = verdict
 		if reviewed != nil {
 			st, res.State = reviewed, reviewed
@@ -744,117 +829,137 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := check(); err != nil {
 		return res, err
 	}
-	progress.next("implement")
-	developer := pre.Agents["developer"]
-	res.RoleAgentsUsed["developer"] = developer
-	devRunner, err := agent.NewConfiguredRunner(developer, cfg, e.Tracker.BackendName() == "local")
-	if err != nil {
-		return res, err
-	}
-	if _, err := e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "implement", "active"); err != nil {
-		return res, err
-	}
-	if err := compileSetupBundle(ctx, opts.SetupProgress, wtPath, pre.WorkUnit, wf, st, "developer", opts.PRNumber); err != nil {
-		return res, err
-	}
-	devPrompt := "Execute /swarm-implement step-by-step using the approved plan and test plan."
-	checkpointPurpose := "implement"
-	if hasFailedValidationArtifact(st) {
-		devPrompt = "Execute /swarm-implement step-by-step using the approved plan and test plan. A prior validation check failed; inspect .swarm/active/VALIDATION.md and .swarm/active/WORKUNIT.md and fix all failing checks."
-		checkpointPurpose = "repair"
-	}
-	var ciErr error
-	devPrompt, ciErr = developerCIPrompt(wtPath, opts, devPrompt)
-	if ciErr != nil {
-		return res, ciErr
-	}
-	if opts.Instructions != "" {
-		devPrompt += "\nOperator instructions: " + opts.Instructions
-	}
-	safeReport, openErr := safefs.Open(wtPath)
-	if openErr != nil {
-		return res, openErr
-	}
-	removeErr := safeReport.Remove(filepath.Join(".swarm", "active", "IMPLEMENTATION.md"))
-	safeReport.Close()
-	if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		return res, removeErr
-	}
-	devRun, err := devRunner.Run(ctx, agent.RunRequest{Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
-	if err != nil {
-		return res, err
-	}
-	if err := check(); err != nil {
-		return res, err
-	}
-	summary, body := SummarizeImplementationChanges(ctx, wtPath, opts.IssueNumber)
-	developerReport, reportWarning := implementationReport(wtPath)
-	blocked := blockingReason(developerReport)
-	if developerReport != "" {
-		body += "\n## Developer report\n\n" + developerReport
-	}
-	if reportWarning != "" {
-		body += "\n" + reportWarning + "\n"
-	}
-	if reportWarning == "" {
-		if _, err := recordGuidance(wtPath, "IMPLEMENTATION.md", developerReport, devRun); err != nil {
+	activePhase, preserveCheckpoint = "implement", true
+	if !implementationProven(st, res.HeadSHA) {
+		if err := admit("implement"); err != nil {
 			return res, err
 		}
-	}
-	progress.next("checkpoint")
-	checkpointHead, err := workspace.Checkpoint(ctx, wtPath, branch, workspace.CheckpointOptions{
-		WorkUnit: pre.WorkUnit, Purpose: checkpointPurpose, Detail: cfg.CommitMessageDetail(),
-	})
-	if err != nil {
-		return res, err
-	}
-	if opts.PRNumber != 0 {
-		st, err = e.LeaseManager.RecordPRHead(ctx, opts.IssueNumber, opts.Owner, opts.PRNumber, branch, checkpointHead)
-	} else {
-		if forkMode {
-			if err := workspace.PushForkCheckpoint(ctx, opts.RepoRoot, forkRemote, branch, checkpointHead); err != nil {
+		progress.next("implement")
+		developer := pre.Agents["developer"]
+		res.RoleAgentsUsed["developer"] = developer
+		devRunner, err := e.configuredRunner(developer, cfg, e.Tracker.BackendName() == "local")
+		if err != nil {
+			return res, err
+		}
+		if _, err := e.LeaseManager.UpdatePhase(ctx, opts.IssueNumber, opts.Owner, "implement", "active"); err != nil {
+			return res, err
+		}
+		if err := compileSetupBundle(ctx, opts.SetupProgress, wtPath, pre.WorkUnit, wf, st, "developer", opts.PRNumber); err != nil {
+			return res, err
+		}
+		devPrompt := "Execute /swarm-implement step-by-step using the approved plan and test plan."
+		checkpointPurpose := "implement"
+		if hasFailedValidationArtifact(st) {
+			devPrompt = "Execute /swarm-implement step-by-step using the approved plan and test plan. A prior validation check failed; inspect .swarm/active/VALIDATION.md and .swarm/active/WORKUNIT.md and fix all failing checks."
+			checkpointPurpose = "repair"
+		}
+		var ciErr error
+		devPrompt, ciErr = developerCIPrompt(wtPath, opts, devPrompt)
+		if ciErr != nil {
+			return res, ciErr
+		}
+		if opts.Instructions != "" {
+			devPrompt += "\nOperator instructions: " + opts.Instructions
+		}
+		safeReport, openErr := safefs.Open(wtPath)
+		if openErr != nil {
+			return res, openErr
+		}
+		removeErr := safeReport.Remove(filepath.Join(".swarm", "active", "IMPLEMENTATION.md"))
+		safeReport.Close()
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return res, removeErr
+		}
+		if err := admit("implement"); err != nil {
+			return res, err
+		}
+		devRun, err := devRunner.Run(ctx, agent.RunRequest{CheckPauseImport: checkPauseImport, Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
+		if paused, pauseErr := pauseInterrupted(err, "implement", true); paused {
+			return res, pauseErr
+		}
+		if err != nil {
+			return res, err
+		}
+		if err := check(); err != nil {
+			return res, err
+		}
+		summary, body := SummarizeImplementationChanges(ctx, wtPath, opts.IssueNumber)
+		developerReport, reportWarning := implementationReport(wtPath)
+		blocked := blockingReason(developerReport)
+		if developerReport != "" {
+			body += "\n## Developer report\n\n" + developerReport
+		}
+		if reportWarning != "" {
+			body += "\n" + reportWarning + "\n"
+		}
+		if reportWarning == "" {
+			if _, err := recordGuidance(wtPath, "IMPLEMENTATION.md", developerReport, devRun); err != nil {
 				return res, err
 			}
 		}
-		st, err = e.LeaseManager.RecordCheckpoint(ctx, opts.IssueNumber, opts.Owner, branch, checkpointHead)
-	}
-	if err != nil {
-		return res, err
-	}
-	res.State, res.HeadSHA = st, checkpointHead
-	verdict := "PASS"
-	failure := ""
-	if checkpointHead == implementationBase {
-		failure = "developer produced no implementation beyond starting checkpoint " + implementationBase
-	}
-	if blocked != "" {
-		failure = "developer blocked: " + blocked
-	}
-	if failure != "" {
-		verdict = "FAIL"
-		summary = failure
-		body += "\n## Implementation outcome\n\n" + failure + "\n"
-	}
-	if reportWarning != "" {
-		summary += "; " + reportWarning
-	}
-	body = guidedReport(body, devRun)
-	devMeta := runMetadata(devRun, nil)
-	if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: verdict, Summary: summary, Body: body, Metadata: devMeta}); err != nil {
-		return res, fmt.Errorf("record implementation outcome: %w", err)
-	}
-	res.State = st
-	if failure != "" {
-		rerun := fmt.Sprintf("swarm issue work %d --phase implement", opts.IssueNumber)
-		if opts.PRNumber != 0 {
-			rerun = fmt.Sprintf("swarm pr work %d --phase implement", opts.PRNumber)
+		progress.next("checkpoint")
+		checkpointHead, err := workspace.Checkpoint(ctx, wtPath, branch, workspace.CheckpointOptions{
+			WorkUnit: pre.WorkUnit, Purpose: checkpointPurpose, Detail: cfg.CommitMessageDetail(),
+		})
+		if err != nil {
+			return res, err
 		}
-		return res, fmt.Errorf("issue #%d: %s; rerun with %s", opts.IssueNumber, failure, rerun)
+		if opts.PRNumber != 0 {
+			st, err = e.LeaseManager.RecordPRHead(ctx, opts.IssueNumber, opts.Owner, opts.PRNumber, branch, checkpointHead)
+		} else {
+			if forkMode {
+				if err := workspace.PushForkCheckpoint(ctx, opts.RepoRoot, forkRemote, branch, checkpointHead); err != nil {
+					return res, err
+				}
+			}
+			st, err = e.LeaseManager.RecordCheckpoint(ctx, opts.IssueNumber, opts.Owner, branch, checkpointHead)
+		}
+		if err != nil {
+			return res, err
+		}
+		res.State, res.HeadSHA = st, checkpointHead
+		verdict := "PASS"
+		failure := ""
+		if checkpointHead == implementationBase {
+			failure = "developer produced no implementation beyond starting checkpoint " + implementationBase
+		}
+		if blocked != "" {
+			failure = "developer blocked: " + blocked
+		}
+		if failure != "" {
+			verdict = "FAIL"
+			summary = failure
+			body += "\n## Implementation outcome\n\n" + failure + "\n"
+		}
+		if reportWarning != "" {
+			summary += "; " + reportWarning
+		}
+		body = guidedReport(body, devRun)
+		devMeta := runMetadata(devRun, nil)
+		for key, value := range lease.ReviewBindings(st) {
+			devMeta[key] = value
+		}
+		devMeta["head_sha"] = checkpointHead
+		if st, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: verdict, Summary: summary, Body: body, Metadata: devMeta}); err != nil {
+			return res, fmt.Errorf("record implementation outcome: %w", err)
+		}
+		res.State = st
+		if failure != "" {
+			rerun := fmt.Sprintf("swarm issue work %d --phase implement", opts.IssueNumber)
+			if opts.PRNumber != 0 {
+				rerun = fmt.Sprintf("swarm pr work %d --phase implement", opts.PRNumber)
+			}
+			return res, fmt.Errorf("issue #%d: %s; rerun with %s", opts.IssueNumber, failure, rerun)
+		}
+
+	}
+	if err := admit("implement"); err != nil {
+		return res, err
 	}
 	progress.next("test")
 	tester := pre.Agents["tester"]
 	res.RoleAgentsUsed["tester"] = tester
-	testerRunner, err := agent.NewConfiguredRunner(tester, cfg, e.Tracker.BackendName() == "local")
+	testerRunner, err := e.configuredRunner(tester, cfg, e.Tracker.BackendName() == "local")
 	if err != nil {
 		return res, err
 	}
@@ -865,7 +970,13 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if opts.Instructions != "" {
 		testPrompt += "\nOperator instructions: " + opts.Instructions
 	}
-	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions})
+	if err := admit("implement"); err != nil {
+		return res, err
+	}
+	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{CheckPauseImport: checkPauseImport, Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions})
+	if paused, pauseErr := pauseInterrupted(err, "implement", true); paused {
+		return res, pauseErr
+	}
 	if err != nil {
 		return res, fmt.Errorf("tester agent %q: %w", tester, err)
 	}
@@ -875,6 +986,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	progress.next("required-checks")
 	testerBody, _ := readRequiredArtifact(wtPath, "VALIDATION.md")
 	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA, ForkMode: forkMode})
+	if context.Cause(ctx) == claimpause.ErrBudget {
+		return res, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, "implement", true, forkMode, forkRemote)
+	}
 	if report != nil {
 		report.Artifact.Metadata = runMetadata(testerRun, report.Artifact.Metadata)
 		report.Artifact.Body += "\n" + testerBody
@@ -994,6 +1108,14 @@ func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.Wor
 }
 
 func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, reporters ...*ProgressReporter) (string, *lease.IssueState, error) {
+	if err := e.admitStage(ctx, wu.IssueNumber, owner, "review"); err != nil {
+		var admission *budgetAdmissionError
+		if errors.As(err, &admission) {
+			admission.prNumber = prNumber
+			return "", admission.state, err
+		}
+		return "", st, err
+	}
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
 		return "", st, fmt.Errorf("%w: %w", ErrLeaseLost, err)
 	}
@@ -1010,7 +1132,7 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	if err := compileSetupBundle(ctx, reporter, wtPath, wu, wf, st, "reviewer", prNumber); err != nil {
 		return "", st, err
 	}
-	runner, err := agent.NewConfiguredRunner(reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
+	runner, err := e.configuredRunner(reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
 	if err != nil {
 		return "", st, err
 	}
@@ -1022,6 +1144,14 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	req.TaskPrompt = revisionTaskPrompt(req.TaskPrompt, st, prNumber)
 	if instructions != "" {
 		req.TaskPrompt += "\nOperator instructions: " + instructions
+	}
+	if err := e.admitStage(ctx, wu.IssueNumber, owner, "review"); err != nil {
+		var admission *budgetAdmissionError
+		if errors.As(err, &admission) {
+			admission.prNumber = prNumber
+			return "", admission.state, err
+		}
+		return "", st, err
 	}
 	revRun, err := agent.RunReview(ctx, runner, req)
 	if err != nil {
@@ -1286,4 +1416,11 @@ func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 
 func compileSetupBundle(ctx context.Context, reporter *ProgressReporter, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int) error {
 	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error { return compileExecutionBundle(path, wu, wf, st, role, prNumber) })
+}
+
+func (e *Engine) configuredRunner(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+	if e.NewRunner != nil {
+		return e.NewRunner(name, cfg, local)
+	}
+	return agent.NewConfiguredRunner(name, cfg, local)
 }

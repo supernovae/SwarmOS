@@ -135,6 +135,10 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			case "submit":
 				result, err = service.Submit(cmd.Context(), opts.Number)
 			}
+			budgetGuidance := ""
+			if result != nil {
+				budgetGuidance = claimBudgetGuidance(rootOpts, result.Work, "pr", opts.Number)
+			}
 			recovery := ""
 			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
 				recovery = planReviewRecovery(rootOpts, result.State, "pr", opts.Number)
@@ -156,6 +160,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					return outputErr
 				}
 			} else if result != nil {
+				if budgetGuidance != "" {
+					fmt.Fprintln(cmd.OutOrStdout(), budgetGuidance)
+				}
 				if recovery != "" {
 					fmt.Fprintln(cmd.OutOrStdout(), recovery)
 				}

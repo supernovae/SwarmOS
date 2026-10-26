@@ -22,12 +22,19 @@ swarm issue submit 42 --backend github
 ```
 
 Helpful CLI conventions:
+
 - **Picking up the next task**: Use `swarm issue claim --next` to reserve the next eligible `swarm:ready` issue, or `swarm issue work --next` to claim and execute it immediately. Add `--all` with `--next` (or `swarm issue claim --next --all`) to scan across all repositories registered in `~/.config/swarm/repos.yaml`.
 - **Interactive & harness-driven staging (`swarm issue stage`)**: Working inside an interactive coding harness without spawning nested subprocesses? Run `swarm issue claim <issue>`, write `.swarm/active/PLAN.md` and `TEST_PLAN.md`, and stage each phase directly with `swarm issue stage <issue> --phase plan --harness <name> --model <name>` and `swarm issue stage <issue> --phase implement --harness <name> --model <name>`.
 - **Token auth without `gh` CLI**: Set `SWARM_GITHUB_TOKEN` (or `GH_TOKEN` / `GITHUB_TOKEN`) to authenticate directly with GitHub REST and Git HTTPS remotes on headless machines without installing `gh`.
 - **Secret-manager tokens**: Set `SWARM_GITHUB_TOKEN_COMMAND` (for example `op read op://Private/GitHub/swarm-token` or `security find-generic-password -s swarm-github -w`) so the token stays in 1Password, Bitwarden, Keychain, or libsecret instead of your shell. See [Keep tokens out of your shell](GITHUB.md#keep-tokens-out-of-your-shell-with-a-secret-manager).
 - **Headless vs. interactive**: `swarm issue work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` to follow the agent's work and add instructions between turns.
 - **Structured JSON output**: Use `--json` on a leaf that supports it, such as `swarm issue claim --next --json`, `swarm issue work 42 --json`, `swarm issue status 42 --json`, or `swarm repo validate --base <trusted-full-commit-sha> --json`. Bare `swarm issue` and `swarm repo` are command groups, not JSON-producing operations.
+
+Automatic selection tries the lowest issue number first within each repository. Ready candidates sharing a native parent Epic take that epic's sub-issue order within the positions those siblings occupy. For example, issues 10, 20, 30 with siblings ordered 30, 10 are tried as 30, 20, 10: an earlier sibling can move ahead of a lower-numbered standalone issue.
+
+Dependencies, capabilities, gates, and leases still determine eligibility; an ineligible sibling is skipped. With `--all`, repository traversal order stays unchanged.
+
+If ordering metadata cannot be read, SwarmOS warns on stderr and keeps numeric order for the affected siblings. Existing local links use numeric order; new local links retain their append order.
 
 ### Revise a WorkUnit
 
@@ -80,7 +87,7 @@ Start interactively when you want to stay close to the changes. Move repeatable 
 | :--- | :--- |
 | **Pair with an agent** | Run `swarm issue work 42 --headless=false`. Native Codex streams its work, then accepts a follow-up instruction; press Enter to finish the phase. |
 | **Stay in your current agent session** | Use `swarm issue claim <issue>` or `swarm issue claim --next`, work in the assigned worktree, and record each phase with `swarm issue stage`. Your existing session keeps its own permissions. |
-| **Let a worker pick up tasks** | Run `swarm issue work --next` for one task or `swarm node run --watch` for a continuing queue. Both run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
+| **Let a worker pick up tasks** | Run `swarm issue work --next` for one task or `swarm node run --watch` for a continuing queue. Both use the same numeric and epic sibling ordering as `claim --next` and run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
 
 Native Codex uses the same bounded permissions for pairing and unattended work. Allowed commands run without approval prompts; requests for broader access are denied. Each turn uses an ephemeral session, with task files carrying progress forward. For an existing agent session or `trusted-local` setup, keep the harness's approval prompts enabled when pairing. Reserve full-access or “YOLO” settings for disposable workers with independently enforced isolation; CI alone does not provide that boundary.
 
@@ -335,7 +342,7 @@ swarm node init
 swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 ```
 
-By default, `swarm node run` drains the currently available ready queue and exits cleanly. Add `--watch` (and optional `--poll-interval 30s`) when you want the worker pool to keep polling for newly approved tasks.
+Workers use the same selection order as `swarm issue claim --next` and `swarm issue work --next`, skipping candidates that are not eligible. By default, `swarm node run` drains the currently available ready queue and exits cleanly. Add `--watch` (and optional `--poll-interval 30s`) when you want the worker pool to keep polling for newly approved tasks.
 
 ---
 

@@ -232,8 +232,8 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm issue edit <issue> [--dry-run] [--json]` | Replace selected WorkUnit sections with lint and approval/claim checks; preview a diff before editing and reapprove changed contracts separately. |
 | `swarm repo lessons [--apply]` | Propose additions to `.swarm/rules/lessons.md` from what agents learned in merged PRs; `--apply` appends them locally for you to review and commit. |
 | `swarm repo plan [--from <file> \| --scan] [--normalize] [--apply] [--ready] [--export <path>]` | Preview `Step N` tasks from a roadmap, publish a native `Epic` with linked draft child WorkUnits (`--apply`), scan and triage open issues and pull requests (`--scan`), or export a plan snapshot. |
-| `swarm issue claim <issue>` / `swarm issue claim --next [--all]` | Claim a specific approved issue or select the next ready task across registered repositories without running agents. |
-| `swarm issue work [<issue>] [--next] [--all]` | Run `plan`, `review`, `implement`, and `validate` (supports `--dry-run`, `--handoff`, and role overrides). |
+| `swarm issue claim <issue>` / `swarm issue claim --next [--all]` | Claim a specific approved issue or select ready work by lowest issue number, with native epic sibling order, without running agents. |
+| `swarm issue work [<issue>] [--next] [--all]` | Run `plan`, `review`, `implement`, and `validate`; `--next` shares claim selection order (supports `--dry-run`, `--handoff`, and role overrides). |
 | `swarm issue stage [<issue>] [--phase plan\|implement] [--harness <name>] [--model <name>] [--handoff]` | Stage interactive or harness-produced plan and implementation artifacts onto an active lease with provenance metadata. |
 | `swarm issue review-plan <issue> [--approve\|--reject]` | Run an isolated agent review or record a maintainer's human gate decision. |
 | `swarm issue validate [<issue>] [--base <approved-base-sha>]` / `swarm repo validate --base <trusted-full-commit-sha> [--protected-paths enforce\|report]` | Validate a claimed issue against its approved base and artifacts (`--base`, if given, must match it), or run checkout-only CI validation against a trusted full base without a claim. |
@@ -246,7 +246,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm pr rebase <PR> [--continue\|--abort]` | Rebase onto the PR's approved target base; retain conflicts for deliberate resolution. |
 | `swarm pr validate <PR>` / `swarm pr submit <PR>` | Validate the local revision and explicitly publish it to the same PR, refusing to overwrite a concurrent remote update. |
 | `swarm repo add`, `swarm repo list`, `swarm repo remove` | Manage the local multi-repository registry (`~/.config/swarm/repos.yaml`). |
-| `swarm node init`, `swarm node status`, `swarm node run` | Configure a worker node profile and run concurrent worker pools (`--concurrency`, `--max-jobs`, `--watch`). |
+| `swarm node init`, `swarm node status`, `swarm node run` | Configure a worker node profile and run concurrent worker pools using the same selection order as `issue claim --next` (`--concurrency`, `--max-jobs`, `--watch`). |
 | `swarm issue renew <issue>` / `swarm issue release <issue>` | Extend an active lease's TTL or release a claim back to the queue. |
 | `swarm fork-coordinator --event <path> [--json]` | Process a verified `issue_comment.created` fork worker request inside the upstream GitHub Action. |
 | `swarm version [--json]` | Print version, commit, and platform metadata. |

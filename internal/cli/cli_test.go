@@ -45,6 +45,7 @@ func newCLIFixture(t *testing.T) *cliFixture {
 	root := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("APPDATA", t.TempDir())
 	t.Setenv("SWARM_USER", "alice")
 	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))

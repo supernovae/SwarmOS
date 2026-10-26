@@ -5,7 +5,6 @@ package gitcredential
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,9 +34,8 @@ func Configure(cmd *exec.Cmd) (func(string) string, error) {
 		{"commit.gpgsign", "false"}, {"tag.gpgsign", "false"},
 		{"gc.auto", "0"}, {"maintenance.auto", "false"},
 	}
-	basic := ""
 	if token != "" {
-		basic = base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+		basic := basicAuth(token)
 		config = append(config, [2]string{"credential.helper", ""}, [2]string{"http.https://github.com/.extraheader", "AUTHORIZATION: basic " + basic})
 	}
 	env = append(env, "GIT_CONFIG_COUNT="+strconv.Itoa(len(config)))
@@ -45,13 +43,7 @@ func Configure(cmd *exec.Cmd) (func(string) string, error) {
 		env = append(env, "GIT_CONFIG_KEY_"+strconv.Itoa(i)+"="+entry[0], "GIT_CONFIG_VALUE_"+strconv.Itoa(i)+"="+entry[1])
 	}
 	cmd.Env = append(env, "GIT_NO_REPLACE_OBJECTS=1")
-	return func(output string) string {
-		if token != "" {
-			output = strings.ReplaceAll(output, token, "[REDACTED]")
-			output = strings.ReplaceAll(output, basic, "[REDACTED]")
-		}
-		return output
-	}, nil
+	return redactionFor(token).Redact, nil
 }
 
 // Command constructs a coordinator Git command. Working-tree operations disable

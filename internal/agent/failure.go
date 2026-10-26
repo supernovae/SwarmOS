@@ -13,9 +13,18 @@ import (
 type runFailure struct {
 	role  string
 	cause error
+	// diagnostics is coordinator-rendered text naming the saved transcript.
+	diagnostics string
 }
 
 func (e *runFailure) Error() string {
+	if e.diagnostics == "" {
+		return e.status()
+	}
+	return e.status() + "; " + e.diagnostics
+}
+
+func (e *runFailure) status() string {
 	var timeout *sandbox.AgentTimeoutError
 	if errors.As(e.cause, &timeout) {
 		return timeout.Error()
@@ -35,11 +44,16 @@ func (e *runFailure) Error() string {
 
 func (e *runFailure) Unwrap() error { return e.cause }
 
-func safeRunFailure(ctx context.Context, role string, result *RunResult, err error) error {
+func safeRunFailure(ctx context.Context, role, worktree string, result *RunResult, err error) error {
 	if err == nil {
 		return nil
 	}
+	diagnostics := ""
 	if result != nil {
+		if result.transcript != nil {
+			diagnostics = failureDiagnosticsNote(worktree, result.transcript)
+			result.transcript = nil
+		}
 		// A failed RunResult may itself be serialized by a caller.
 		result.Output = ""
 		result.Command = nil
@@ -52,5 +66,5 @@ func safeRunFailure(ctx context.Context, role string, result *RunResult, err err
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), err)
 	}
-	return &runFailure{role: role, cause: err}
+	return &runFailure{role: role, cause: err, diagnostics: diagnostics}
 }

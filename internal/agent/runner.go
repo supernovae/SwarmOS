@@ -7,7 +7,7 @@ import (
 )
 
 type RunRequest struct {
-	CheckPauseImport     func(context.Context, []string) error // coordinator-only fencing and trusted protected-path check
+	CheckImport          func(context.Context, []string) error // coordinator-only fencing and trusted protected-path check
 	OperatorInstructions string                                // coordinator-supplied flag guidance, separate from attestations
 	RecoveryRoot         string                                // coordinator-owned durable timeout recovery destination
 	ProjectPlan          bool                                  // coordinator-selected project roadmap output for planner

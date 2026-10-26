@@ -3,6 +3,7 @@ package fork
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -196,6 +197,7 @@ type Gateway struct {
 	OnProgress    func(ProgressEvent)
 	progressTicks <-chan time.Time
 	progressNow   func() time.Time
+	wait          func(context.Context, time.Duration) error
 	Tracker       tracker.Tracker
 	Store         coordination.Store
 	ForkRepo      string
@@ -233,16 +235,14 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 		return nil, lease.ErrClaimFence
 	}
 
+	req.RequestNonce = rand.Text()
 	body, err := FormatRequestComment(req)
 	if err != nil {
 		return nil, err
 	}
-	comment, err := g.Tracker.CreateComment(ctx, req.IssueNumber, body)
+	comment, err := g.postRequest(ctx, req, body, time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("post fork request comment: %w", err)
-	}
-	if comment == nil || comment.ID <= 0 {
-		return nil, fmt.Errorf("github tracker returned invalid comment ID for fork request")
+		return nil, err
 	}
 	reqID := comment.ID
 	reporting := startRequestProgress(ctx, req.Operation, reqID, g.OnProgress, g.progressTicks, g.progressNow)
@@ -293,17 +293,9 @@ func (g *Gateway) checkRequestOutcome(ctx context.Context, req lease.ForkRequest
 }
 
 func (g *Gateway) checkRequestOutcomeReporting(ctx context.Context, req lease.ForkRequest, reqID int64, since *time.Time, rejected func()) (*lease.IssueState, bool, error) {
-	var comments []*tracker.Comment
-	var err error
-	if incremental, ok := g.Tracker.(interface {
-		ListCommentsSince(context.Context, int, time.Time) ([]*tracker.Comment, error)
-	}); ok {
-		comments, err = incremental.ListCommentsSince(ctx, req.IssueNumber, *since)
-	} else {
-		comments, err = g.Tracker.ListComments(ctx, req.IssueNumber)
-	}
+	comments, err := g.listComments(ctx, req.IssueNumber, *since)
 	if err != nil {
-		return nil, false, fmt.Errorf("poll fork coordinator comments: %w", err)
+		return nil, false, fmt.Errorf("poll fork coordinator comments for request %d: %w", reqID, err)
 	}
 	if len(comments) > 1000 {
 		return nil, false, fmt.Errorf("fork comment scan exceeds 1000 records")
@@ -327,11 +319,21 @@ func (g *Gateway) checkRequestOutcomeReporting(ctx context.Context, req lease.Fo
 			continue
 		}
 		res, parseErr := ParseResultComment(c.Body)
-		if parseErr != nil || res.RequestID != reqID || res.IssueNumber != req.IssueNumber || res.Operation != req.Operation {
+		if parseErr != nil || res.RequestID != reqID || res.IssueNumber != req.IssueNumber {
 			continue
 		}
 		if !IsTrustedBotComment(c) || (!c.UpdatedAt.IsZero() && !c.CreatedAt.Equal(c.UpdatedAt)) {
 			continue
+		}
+		if res.Operation != req.Operation {
+			// Only a rejection of an unparseable request may omit the operation.
+			if res.Operation != "" || res.Success {
+				continue
+			}
+			if rejected != nil {
+				rejected()
+			}
+			return nil, false, legacyCoordinatorRejection(req, reqID, res.Error)
 		}
 		if !res.Success {
 			if rejected != nil {

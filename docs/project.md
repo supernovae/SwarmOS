@@ -207,6 +207,8 @@ protected_paths:
 
 During `swarm issue validate` and `swarm issue submit`, SwarmOS reads `required-checks.yaml` from the **approved base commit** rather than the candidate worktree, so a task cannot pass validation by weakening its own check commands or protected-path rules. When a maintainer intentionally authors a task that updates `.swarm/` or `.github/workflows/`, set `allow_harness_changes: true` in that issue's WorkUnit before approving it.
 
+Released builds can reuse a coordinator-recorded passing validation at `swarm issue submit` or `swarm pr submit` when the checkpoint tree, approved base, policy digest, worker, claim, and swarm version still match. Submit shows the original run's age and short tree SHA in its output and PR evidence. Explicit validation, CI, development builds, and fork submissions continue to run checks.
+
 ---
 
 ## 4. Plan Review Gates (`none | agent | human`)

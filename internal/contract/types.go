@@ -223,7 +223,7 @@ type RoleAttestation struct {
 // Metadata returns base extended with the attestation's nonempty provenance
 // fields, in the key format artifacts record.
 func (a RoleAttestation) Metadata(base map[string]string) map[string]string {
-	m := make(map[string]string, len(base)+8)
+	m := make(map[string]string, len(base))
 	for k, v := range base {
 		m[k] = v
 	}

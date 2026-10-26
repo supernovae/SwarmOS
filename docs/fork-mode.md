@@ -163,6 +163,8 @@ swarm --fork pr work 55
 swarm --fork pr submit 55
 ```
 
+Fork submissions always run the required checks; contributor-supplied validation evidence is not eligible for automatic reuse.
+
 `pr submit` revalidates against the approved base, pushes the new head to your fork branch (refusing to overwrite a head you did not start from), and asks the coordinator to record the revision. If the base branch moved, a maintainer re-approves the issue and you run `swarm --fork pr rebase 55` before working again.
 
 ### Supported vs. Maintainer-Only Commands in `--fork` Mode

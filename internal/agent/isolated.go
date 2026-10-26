@@ -32,11 +32,13 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	}
 	bin, args := a.BuildCommand(req)
 	var out process.Output
+	transcript := newDiagnosticsTail()
 	var in io.Reader
-	var stdout, stderr io.Writer = &out, &out
+	capture := io.MultiWriter(&out, transcript)
+	var stdout, stderr io.Writer = capture, capture
 	if strings.EqualFold(req.Mode, "interactive") {
 		in = os.Stdin
-		stdout, stderr = io.MultiWriter(os.Stdout, &out), io.MultiWriter(os.Stderr, &out)
+		stdout, stderr = io.MultiWriter(os.Stdout, &out, transcript), io.MultiWriter(os.Stderr, &out, transcript)
 	}
 	limits, limitErr := contract.ResolveAgentLimits(a.executionPolicy, req.Role, strings.EqualFold(req.Mode, "interactive"), 0)
 	if limitErr != nil {
@@ -73,6 +75,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 			err = &claimpause.PreservationError{Err: err}
 		}
 		result.ExitCode = 1
+		result.transcript = transcript
 		return result, err
 	}
 	return result, nil

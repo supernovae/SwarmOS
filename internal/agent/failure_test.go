@@ -58,7 +58,7 @@ func TestSafeRunFailureHidesNestedHarnessErrors(t *testing.T) {
 		fmt.Errorf("private-diagnostics: %w", context.DeadlineExceeded),
 	} {
 		result := &RunResult{Output: "private-transcript", Command: []string{"private-prompt"}}
-		err := safeRunFailure(t.Context(), "private-role", result, cause)
+		err := safeRunFailure(t.Context(), "private-role", "", result, cause)
 		if strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "\x1b") {
 			t.Fatal("unsafe error rendering")
 		}
@@ -71,7 +71,7 @@ func TestSafeRunFailureHidesNestedHarnessErrors(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	err := safeRunFailure(ctx, "tester", nil, errors.New("signal: killed; private details"))
+	err := safeRunFailure(ctx, "tester", "", nil, errors.New("signal: killed; private details"))
 	if !errors.Is(err, context.Canceled) || err.Error() != "tester agent canceled (harness diagnostics withheld)" {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/process"
 )
 
 type RunRequest struct {
@@ -31,6 +32,9 @@ type RunResult struct {
 	ExitCode    int                      `json:"exit_code"`
 	Output      string                   `json:"output"`
 	Attestation contract.RoleAttestation `json:"attestation"`
+	// transcript holds a failed run's output tail until the coordinator saves it
+	// to private diagnostics; it is never serialized or returned to callers.
+	transcript *process.Tail
 }
 
 type Runner interface {

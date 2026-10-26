@@ -157,7 +157,7 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 			result.Guidance = append(collector.Messages(), result.Guidance...)
 		}
 	}()
-	defer func() { runErr = safeRunFailure(ctx, req.Role, result, runErr) }()
+	defer func() { runErr = safeRunFailure(ctx, req.Role, req.WorktreePath, result, runErr) }()
 	if a.executionMode == contract.ExecutionIsolated {
 		return a.runIsolated(ctx, req)
 	}
@@ -217,12 +217,14 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 	cmd.WaitDelay = time.Second
 
 	var outBuf process.Output
+	transcript := newDiagnosticsTail()
 	if strings.EqualFold(req.Mode, "interactive") && !req.ReadOnly {
 		cmd.Stdin = os.Stdin
-		cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf)
-		cmd.Stderr = io.MultiWriter(os.Stderr, &outBuf)
+		cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf, transcript)
+		cmd.Stderr = io.MultiWriter(os.Stderr, &outBuf, transcript)
 	} else {
-		cmd.Stdout, cmd.Stderr = &outBuf, &outBuf
+		capture := io.MultiWriter(&outBuf, transcript)
+		cmd.Stdout, cmd.Stderr = capture, capture
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start agent %q: %w", a.agentName, err)
@@ -256,7 +258,7 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 		} else {
 			exitCode = 1
 		}
-		return &RunResult{Agent: a.agentName, Role: req.Role, ExitCode: exitCode, Attestation: att}, err
+		return &RunResult{Agent: a.agentName, Role: req.Role, ExitCode: exitCode, Attestation: att, transcript: transcript}, err
 	}
 	return &RunResult{Agent: a.agentName, Role: req.Role, Command: fullCmd, ExitCode: 0, Output: outBuf.String(), Attestation: att}, nil
 }

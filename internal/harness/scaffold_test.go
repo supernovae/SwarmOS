@@ -1113,3 +1113,19 @@ func TestShippedPRRevisionPrompts(t *testing.T) {
 		}
 	}
 }
+
+func TestDeveloperChangelogInstructions(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".swarm/prompts/developer.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, term := range []string{"If the repository uses `changes/unreleased/`", "unique issue-based filename", "one `- ` bullet", "Leave `CHANGELOG.md` for maintainer releases"} {
+		if !strings.Contains(string(data), term) {
+			t.Fatalf("missing guidance %q", term)
+		}
+	}
+}

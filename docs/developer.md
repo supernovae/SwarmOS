@@ -391,3 +391,21 @@ Workers use the same selection order as `swarm issue claim --next` and `swarm is
 After `CHANGES_REQUESTED`, issue and PR work print the review identity and the next planning command. Run that command once, then review with `swarm issue review-plan <issue>`. Work does not repeat planning and review within the same invocation. By default, the initial rejected plan can receive two additional automatic planner attempts; failed or unchanged attempts count toward that limit.
 
 Check `swarm issue status <issue>` for the count and limit. When automation reaches the limit, stage revised reports in the appropriate issue or PR worktree (`swarm issue stage <issue> --phase plan` or `swarm pr stage <PR> --phase plan`), request an authenticated human review, or revise the WorkUnit for maintainer approval. Successful non-fork staging resets the count; fork staging preserves it and needs a maintainer review or changed approved revision to reset. `plan_mode: agent` disables manual staging, while `plan_mode: interactive` always pauses for it without spending automatic attempts. Node workers move past capped tasks. See [the recovery workflow](WORKFLOWS.md#recovering-from-a-rejected-agent-plan) for the complete sequence.
+
+## Changelog fragments
+
+Independent fragments let parallel contributions merge without sharing a changelog edit. Add a file under `changes/unreleased/` for each change and leave `CHANGELOG.md` for maintainer releases. Use a unique issue-based name such as `126.md`; add a descriptive suffix such as `126-fix.md` if another fragment uses that number.
+
+Each file contains one `- ` Markdown bullet. Indented prose continuation lines are allowed; additional list items, nested lists, headings, and unrelated paragraphs are rejected. For example:
+
+```markdown
+- Add a release helper that combines changelog fragments.
+```
+
+Maintainers fold all fragments in filename order and delete the consumed files with:
+
+```bash
+make changelog VERSION=1.2.3
+```
+
+The command inserts a version heading below the empty Unreleased heading and preserves released history. With no fragments it changes nothing. All fragments are validated before the changelog is replaced. Replacement and fragment deletion are separate operations: if deletion fails, inspect the changelog and remaining files before retrying to avoid duplicate entries. Review the resulting changes before committing the release.

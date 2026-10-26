@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 // PROutcome records GitHub's observation separately from the execution lease.
@@ -47,6 +48,11 @@ func (m *Manager) observeSubmission(ctx context.Context, st *IssueState) (*PROut
 	if err != nil {
 		return nil, err
 	}
+	return m.submissionOutcome(st, p)
+}
+
+// submissionOutcome validates one tracker observation of the recorded PR.
+func (m *Manager) submissionOutcome(st *IssueState, p *tracker.PullRequest) (*PROutcome, error) {
 	if p == nil || p.Number != st.PRNumber || p.HTMLURL != st.PRURL {
 		return nil, fmt.Errorf("recorded PR identity differs from tracker")
 	}

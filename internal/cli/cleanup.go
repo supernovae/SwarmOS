@@ -1,15 +1,20 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 func newCleanupCmd(opts *RootOptions) *cobra.Command {
-	var apply, asJSON, recoverReservation bool
-	cmd := &cobra.Command{Use: "cleanup <issue-number>", Short: "Preview or retire verified merged task worktrees and branches", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+	var apply, asJSON, recoverReservation, allMerged bool
+	cmd := &cobra.Command{Use: "cleanup <issue-number> | --all-merged", Short: "Preview or retire verified merged task worktrees and branches", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+		if allMerged {
+			return runBulkCleanup(cmd, opts, args, apply, asJSON, recoverReservation)
+		}
 		var preview *lease.CleanupPreview
 		defer func() {
 			if !asJSON {
@@ -41,6 +46,9 @@ func newCleanupCmd(opts *RootOptions) *cobra.Command {
 			}
 		}()
 
+		if len(args) != 1 {
+			return fmt.Errorf("cleanup requires an issue number or --all-merged")
+		}
 		n, err := parseNumberArg(args[0], "issue")
 		if err != nil {
 			return err
@@ -76,46 +84,55 @@ func newCleanupCmd(opts *RootOptions) *cobra.Command {
 		if !apply {
 			return nil
 		}
-		if err = tr.Authorize(cmd.Context(), "approve-task"); err != nil {
-			return err
-		}
-		if preview.Blocked != "" {
-			return fmt.Errorf("cleanup refused: %s", preview.Blocked)
-		}
-		remote := preview.Resources[0]
-		if preview.RemoteApplicable && !remote.Absent && !remote.Eligible {
-			return fmt.Errorf("cleanup refused: %s", remote.Reason)
-		}
-		reservation, err := m.BeginCleanup(cmd.Context(), n, preview.Outcome)
-		if err != nil {
-			return err
-		}
-		var actionErr error
-		if preview.RemoteApplicable {
-			actionErr = m.DeleteCleanupBranch(cmd.Context(), n, reservation.OperationID)
-			if actionErr == nil && !remote.Absent {
-				preview.RemoteDeleted = true
-				preview.Resources[0].Retired = true
-				preview.Resources[0].Eligible = false
-				preview.Resources[0].Reason = "retired"
-			}
-		}
-		if actionErr == nil {
-			actionErr = m.RetireCleanupLocalResources(cmd.Context(), n, reservation.OperationID, preview)
-		}
-		finishErr := m.FinishCleanup(cmd.Context(), n, reservation.OperationID)
-		if !asJSON {
+		started, err := applyIssueCleanup(cmd.Context(), tr, m, n, preview)
+		if started && !asJSON {
 			for _, r := range preview.Resources {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s %s: %s\n", r.Kind, r.Name, r.Reason)
 			}
 		}
-		if actionErr != nil || finishErr != nil {
-			return fmt.Errorf("cleanup incomplete; inspect resources before retry; recover reservation if necessary: %w", errors.Join(actionErr, finishErr))
-		}
-		return nil
+		return err
 	}}
 	cmd.Flags().BoolVar(&recoverReservation, "recover-reservation", false, "Fence and release an interrupted cleanup before previewing again")
 	cmd.Flags().BoolVar(&apply, "apply", false, "Retire eligible merged task worktrees and code branches; retain ledgers")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured cleanup preview")
+	cmd.Flags().BoolVar(&allMerged, "all-merged", false, "Preview or retire every local issue and PR worktree's merged task resources")
 	return cmd
+}
+
+// applyIssueCleanup retires the eligible resources of a fresh preview under a
+// cleanup reservation and records the outcome in preview. started reports
+// whether the reservation was taken, after which resources may have changed.
+func applyIssueCleanup(ctx context.Context, tr tracker.Tracker, m *lease.Manager, n int, preview *lease.CleanupPreview) (started bool, err error) {
+	if err = tr.Authorize(ctx, "approve-task"); err != nil {
+		return false, err
+	}
+	if preview.Blocked != "" {
+		return false, fmt.Errorf("cleanup refused: %s", preview.Blocked)
+	}
+	remote := preview.Resources[0]
+	if preview.RemoteApplicable && !remote.Absent && !remote.Eligible {
+		return false, fmt.Errorf("cleanup refused: %s", remote.Reason)
+	}
+	reservation, err := m.BeginCleanup(ctx, n, preview.Outcome)
+	if err != nil {
+		return false, err
+	}
+	var actionErr error
+	if preview.RemoteApplicable {
+		actionErr = m.DeleteCleanupBranch(ctx, n, reservation.OperationID)
+		if actionErr == nil && !remote.Absent {
+			preview.RemoteDeleted = true
+			preview.Resources[0].Retired = true
+			preview.Resources[0].Eligible = false
+			preview.Resources[0].Reason = "retired"
+		}
+	}
+	if actionErr == nil {
+		actionErr = m.RetireCleanupLocalResources(ctx, n, reservation.OperationID, preview)
+	}
+	finishErr := m.FinishCleanup(ctx, n, reservation.OperationID)
+	if actionErr != nil || finishErr != nil {
+		return true, fmt.Errorf("cleanup incomplete; inspect resources before retry; recover reservation if necessary: %w", errors.Join(actionErr, finishErr))
+	}
+	return true, nil
 }

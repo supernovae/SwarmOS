@@ -49,7 +49,7 @@ func (s *Service) preflightRebaseReview(ctx context.Context, r *Result, opts Opt
 		return err
 	}
 	name := workflow.ResolveRoleAgent(cfg, "reviewer", opts.Work)
-	_, err = agent.Preflight(name, cfg, s.Tracker.BackendName() == "local", "reviewer")
+	_, err = agent.PreflightWithOptions(name, cfg, s.Tracker.BackendName() == "local", "reviewer", s.runnerOptions())
 	return err
 }
 
@@ -72,7 +72,7 @@ func (s *Service) reviewRebasePlan(ctx context.Context, r *Result, owner string,
 		return st, err
 	}
 	name := workflow.ResolveRoleAgent(cfg, "reviewer", opts.Work)
-	engine := workflow.NewEngineWithManager(s.Root, s.Tracker, s.Manager, cfg, false, "")
+	engine := s.newEngine(cfg)
 	_, updated, err := engine.RunAgentReview(ctx, r.Worktree, rv.unit, wf, st, owner, name, rv.mode, "Review the unchanged approved plan under the new policy; do not re-plan.", r.PR.Number)
 	if cleanErr := workspace.CleanEphemeralHarnessMarkers(r.Worktree); cleanErr != nil {
 		return updated, cleanErr

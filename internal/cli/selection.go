@@ -46,7 +46,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 	if err != nil {
 		return nil, err
 	}
-	nodeProf, err := node.LoadOrDetectProfile("")
+	nodeProf, err := node.LoadOrDetectProfile(rootOpts.nodeConfigPath())
 	if err != nil {
 		return nil, err
 	}
@@ -68,7 +68,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 		if err != nil || owner == "" {
 			return nil, fmt.Errorf("resolve worker identity: %w", err)
 		}
-		engine := workflow.NewEngineWithManager(target.Path, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
+		engine := workflow.NewEngineWithManagerOptions(target.Path, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
 		for _, issue := range issues {
 			if issue.IsEpic() || slices.Contains(issue.Labels, "swarm:pr-open") {
 				continue
@@ -213,7 +213,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 
 func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error) {
 	if allRepos {
-		reg := registry.New("")
+		reg := registry.New(o.registryPath())
 		entries, err := reg.List()
 		if err != nil {
 			return nil, err

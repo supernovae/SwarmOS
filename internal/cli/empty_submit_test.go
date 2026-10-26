@@ -32,6 +32,7 @@ func (t *untouchedSubmitTracker) GetIssue(context.Context, int) (*tracker.Issue,
 	return nil, fmt.Errorf("unexpected tracker call")
 }
 func TestEmptySubmitBeforeAnyTrackerCall(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"human", "json", "fork"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -52,7 +53,7 @@ func TestEmptySubmitBeforeAnyTrackerCall(t *testing.T) {
 			checkpointWrite(".swarm/active/IMPLEMENTATION.md", "Blocked before implementation")
 			tr := &untouchedSubmitTracker{}
 			opts := &RootOptions{RepoRoot: f.root, Backend: "github", Repo: "owner/repo", trackerOverride: tr}
-			cmd := newRootCmdWithOptions(opts)
+			cmd := f.command(opts)
 			var out bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&out)
@@ -78,12 +79,13 @@ func TestEmptySubmitBeforeAnyTrackerCall(t *testing.T) {
 	}
 }
 func TestEmptySubmitHintNeverAuthorizes(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := f.create(t, "agent")
 	number := strconv.Itoa(n)
 	f.must(t, "issue", "approve", number)
 	// A failed no-op implementation leaves approved plans and an empty checkpoint.
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
 	if _, err := f.run("issue", "work", number, "--agent", "mock", "--progress=false"); err == nil {
 		t.Fatal("no-op passed")
 	}
@@ -106,13 +108,14 @@ func TestEmptySubmitHintNeverAuthorizes(t *testing.T) {
 	}
 }
 func TestSubmitCheckpointsRealUncommittedWork(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"tracked", "untracked", "commit"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newCLIFixture(t)
 			n := f.create(t, "agent")
 			number := strconv.Itoa(n)
 			f.must(t, "issue", "approve", number)
-			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
 			if _, err := f.run("issue", "work", number, "--agent", "mock", "--progress=false"); err == nil {
 				t.Fatal("no-op passed")
 			}
@@ -139,6 +142,7 @@ func TestSubmitCheckpointsRealUncommittedWork(t *testing.T) {
 	}
 }
 func TestIssueInstructionsAndStatusEvidence(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := f.create(t, "agent")
 	number := strconv.Itoa(n)
@@ -173,12 +177,13 @@ func TestIssueInstructionsAndStatusEvidence(t *testing.T) {
 }
 
 func TestPRNoopFailsAgainstRevisionStartingHead(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	starting := f.state(t, issue).HeadSHA
 	if starting == f.state(t, issue).BaseSHA {
 		t.Fatal("fixture must begin ahead of base")
 	}
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
 	output, err := f.run("pr", "work", strconv.Itoa(number), "--agent", "mock", "--progress=false")
 	if err == nil || !strings.Contains(err.Error(), "swarm pr work "+strconv.Itoa(number)+" --phase implement") {
 		t.Fatalf("no-op revision: %v %s", err, output)
@@ -195,15 +200,16 @@ func TestPRNoopFailsAgainstRevisionStartingHead(t *testing.T) {
 }
 
 func TestIssueBlockedRerunAheadOfBase(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := f.create(t, "agent")
 	number := strconv.Itoa(n)
 	f.must(t, "issue", "approve", number)
 	f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
 	// An existing issue checkpoint may be tested again without new work.
 	f.must(t, "issue", "work", number, "--agent", "mock", "--phase", "implement", "--progress=false")
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf '# Blocked before implementation\n\nMissing recovery fixture\n' > .swarm/active/IMPLEMENTATION.md")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf '# Blocked before implementation\n\nMissing recovery fixture\n' > .swarm/active/IMPLEMENTATION.md")
 	output, err := f.run("issue", "work", number, "--agent", "mock", "--phase", "implement", "--progress=false")
 	if err == nil || !strings.Contains(err.Error(), "Missing recovery fixture") {
 		t.Fatalf("blocked rerun: %v %s", err, output)
@@ -219,14 +225,15 @@ func TestIssueBlockedRerunAheadOfBase(t *testing.T) {
 }
 
 func TestPRRejectedReviewReplansBeforeReview(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
-	t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 	args := []string{"pr", "work", strconv.Itoa(number), "--agent", "mock", "--progress=false"}
 	if output, err := f.run(args...); err == nil || !strings.Contains(err.Error(), "CHANGES_REQUESTED") {
 		t.Fatalf("expected rejection: %v %s", err, output)
 	}
 	before := f.state(t, issue)
-	t.Setenv("SWARM_MOCK_VERDICT", "APPROVED")
+	f.setenv("SWARM_MOCK_VERDICT", "APPROVED")
 	if output, err := f.run(args...); err == nil || !strings.Contains(err.Error(), "re-plan is unchanged") {
 		t.Fatalf("rejected PR plan reviewed unchanged: %v %s", err, output)
 	}

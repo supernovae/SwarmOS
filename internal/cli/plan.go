@@ -68,7 +68,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			eng := workflow.NewEngineWithManager(repoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
+			eng := workflow.NewEngineWithManagerOptions(repoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
 			report, err := eng.RunProjectPlan(cmd.Context(), workflow.ProjectPlanOptions{
 				RepoRoot:     repoRoot,
 				FromFile:     fromFile,

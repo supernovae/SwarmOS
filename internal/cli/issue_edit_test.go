@@ -111,6 +111,7 @@ func TestIssueEditFlags(t *testing.T) {
 	}
 }
 func TestIssueEditReplacement(t *testing.T) {
+	t.Parallel()
 	f, i, r := newEditFixture(t)
 	out, err := runEdit(f, r, time.Now(), fmt.Sprint(i.Number), "--constraint", "one", "--constraint", "two", "--depends-on=")
 	if err != nil {
@@ -123,6 +124,7 @@ func TestIssueEditReplacement(t *testing.T) {
 	}
 }
 func TestIssueEditDryRunAndLint(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		args    []string
@@ -159,6 +161,7 @@ func TestIssueEditDryRunAndLint(t *testing.T) {
 	}
 }
 func TestIssueEditApproval(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		args    []string
@@ -204,6 +207,7 @@ func TestIssueEditApproval(t *testing.T) {
 	}
 }
 func TestIssueEditClaim(t *testing.T) {
+	t.Parallel()
 	for _, owner := range []string{"alice", "bob"} {
 		t.Run(owner, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
@@ -244,6 +248,7 @@ func TestIssueEditClaim(t *testing.T) {
 	}
 }
 func TestIssueEditConcurrent(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"body", "title", "epic", "error", "claim"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
@@ -284,6 +289,7 @@ func TestIssueEditConcurrent(t *testing.T) {
 	}
 }
 func TestIssueEditEpicAuthorizationFork(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"epic", "unauthorized", "fork"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
@@ -305,6 +311,7 @@ func TestIssueEditEpicAuthorizationFork(t *testing.T) {
 	}
 }
 func TestIssueEditApprovalPartialFailure(t *testing.T) {
+	t.Parallel()
 	for _, step := range []string{"body", "title", "remove", "labels"} {
 		t.Run(step, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
@@ -355,6 +362,7 @@ func TestIssueEditClaimBoundary(t *testing.T) {
 }
 
 func TestIssueEditBackendGitHub(t *testing.T) {
+	t.Parallel()
 	f, i, _ := newEditFixture(t)
 	ctx := context.Background()
 	if _, err := f.manager.ApproveTask(ctx, i.Number, "alice"); err != nil {
@@ -441,6 +449,7 @@ func TestIssueEditBackendGitHub(t *testing.T) {
 }
 
 func TestIssueEditState(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"corrupt", "unreadable", "missing"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
@@ -472,6 +481,7 @@ func TestIssueEditState(t *testing.T) {
 }
 
 func TestIssueEditApprovalStaleAndTrustedLabel(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"stale", "trusted label", "ready without state"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
@@ -534,6 +544,7 @@ func TestIssueEditApprovalStaleAndTrustedLabel(t *testing.T) {
 }
 
 func TestIssueEditConcurrentStateRecheck(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"claim", "corrupt state"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
@@ -573,6 +584,7 @@ func TestIssueEditConcurrentStateRecheck(t *testing.T) {
 }
 
 func TestIssueEditDryRunApprovedAndClaimJSON(t *testing.T) {
+	t.Parallel()
 	for _, claim := range []bool{false, true} {
 		t.Run(fmt.Sprint(claim), func(t *testing.T) {
 			f, i, r := newEditFixture(t)

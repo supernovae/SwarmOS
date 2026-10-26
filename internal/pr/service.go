@@ -45,6 +45,13 @@ type Service struct {
 	// NewRunner builds role runners for work and rebase conflict resolution;
 	// nil uses the configured runner from approved policy.
 	NewRunner func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error)
+	// LookupEnv resolves execution mode and agent environment for PR work,
+	// conflict resolution, plan review and validation; nil reads the process
+	// environment.
+	LookupEnv func(string) (string, bool)
+	// NodeProfilePath locates the node profile for engines; empty uses the
+	// default path.
+	NodeProfilePath string
 	// ResolveLog receives coordinator-owned conflict resolution progress.
 	ResolveLog io.Writer
 }
@@ -668,12 +675,12 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 	}
 	for _, override := range []struct{ role, name string }{{"planner", opts.Work.PlannerAgent}, {"reviewer", opts.Work.ReviewerAgent}, {"developer", opts.Work.DeveloperAgent}, {"tester", opts.Work.TesterAgent}} {
 		if override.name != "" {
-			if _, e := agent.Preflight(override.name, cfg, s.Tracker.BackendName() == "local", override.role); e != nil {
+			if _, e := agent.PreflightWithOptions(override.name, cfg, s.Tracker.BackendName() == "local", override.role, s.runnerOptions()); e != nil {
 				return nil, fmt.Errorf("%s agent preflight: %w", override.role, e)
 			}
 		}
 	}
-	engine := workflow.NewEngineWithManager(s.Root, s.Tracker, s.Manager, cfg, false, "")
+	engine := s.newEngine(cfg)
 	engine.NewRunner = s.NewRunner
 	pre, preflightErr := engine.Preflight(ctx, opts.Work)
 	if preflightErr != nil {
@@ -992,12 +999,14 @@ func (s *Service) newResolver(ctx context.Context, r *Result, opts Options) (*re
 	if name == "" {
 		return nil, fmt.Errorf("no configured developer agent")
 	}
-	if _, err := agent.Preflight(name, cfg, local, "developer"); err != nil {
+	if _, err := agent.PreflightWithOptions(name, cfg, local, "developer", s.runnerOptions()); err != nil {
 		return nil, fmt.Errorf("developer agent preflight: %w", err)
 	}
 	newRunner := s.NewRunner
 	if newRunner == nil {
-		newRunner = agent.NewConfiguredRunner
+		newRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+			return agent.NewConfiguredRunnerWithOptions(name, cfg, local, s.runnerOptions())
+		}
 	}
 	runner, err := newRunner(name, cfg, local)
 	if err != nil {
@@ -1092,7 +1101,7 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 		p.Next("validation")
 		observe = p.Observe
 	}
-	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass}
+	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass, LookupEnv: s.LookupEnv}
 	var report *validation.ValidationReport
 	var valErr error
 	if reuse {
@@ -1311,4 +1320,12 @@ func implementationBound(st *lease.IssueState, art contract.Artifact) bool {
 		}
 	}
 	return true
+}
+
+func (s *Service) runnerOptions() agent.RunnerOptions {
+	return agent.RunnerOptions{LookupEnv: s.LookupEnv}
+}
+
+func (s *Service) newEngine(cfg *contract.SwarmConfig) *workflow.Engine {
+	return workflow.NewEngineWithManagerOptions(s.Root, s.Tracker, s.Manager, cfg, false, "", workflow.EngineOptions{LookupEnv: s.LookupEnv, NodeProfilePath: s.NodeProfilePath})
 }

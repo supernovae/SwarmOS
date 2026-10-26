@@ -8,6 +8,7 @@ import (
 )
 
 func TestCLIStatusImportRejection(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)

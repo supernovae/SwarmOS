@@ -33,6 +33,7 @@ type CLIAdapter struct {
 	reviewNetwork    bool
 	containerRuntime string
 	container        string
+	lookupEnv        func(string) (string, bool)
 }
 
 func (a *CLIAdapter) Name() string {
@@ -212,7 +213,7 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 		cmd = exec.Command(bin, args...)
 		cmd.Dir = req.WorktreePath
 	}
-	cmd.Env = restrictedEnv(a.envAllow, agentHome)
+	cmd.Env = restrictedEnvWithLookup(a.envAllow, agentHome, a.lookupEnv)
 	process.Configure(cmd)
 	cmd.WaitDelay = time.Second
 
@@ -266,6 +267,9 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 // MockRunner is a deterministic adapter for unit/CI tests and offline dry-runs (--agent mock).
 type MockRunner struct {
 	ReviewVerdict string // defaults to "APPROVED" unless SWARM_MOCK_VERDICT is set
+	// lookupEnv reads SWARM_MOCK_VERDICT and SWARM_MOCK_DEVELOPER_CMD; nil
+	// reads the process environment. Neither control enters a child process.
+	lookupEnv func(string) (string, bool)
 }
 
 func (m *MockRunner) Name() string {
@@ -350,7 +354,7 @@ func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error
 
 	case "reviewer":
 		verdict := m.ReviewVerdict
-		if envV := os.Getenv("SWARM_MOCK_VERDICT"); envV != "" {
+		if envV := getenvWith(m.lookupEnv, "SWARM_MOCK_VERDICT"); envV != "" {
 			verdict = envV
 		}
 		if verdict == "" {
@@ -392,7 +396,7 @@ func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error
 			}
 			break
 		}
-		if customCmd := os.Getenv("SWARM_MOCK_DEVELOPER_CMD"); customCmd != "" {
+		if customCmd := getenvWith(m.lookupEnv, "SWARM_MOCK_DEVELOPER_CMD"); customCmd != "" {
 			c := exec.CommandContext(ctx, "sh", "-c", customCmd)
 			c.Dir = req.WorktreePath
 			out, err := c.CombinedOutput()

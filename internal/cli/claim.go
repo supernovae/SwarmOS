@@ -62,7 +62,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		engine := workflow.NewEngineWithManager(root, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
+		engine := workflow.NewEngineWithManagerOptions(root, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
 		preflight, err := engine.PreflightForClaim(cmd.Context(), workflow.WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: agentName, Phase: "plan"})
 		if err != nil {
 			return err

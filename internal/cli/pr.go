@@ -6,7 +6,6 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
-	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
@@ -317,11 +316,8 @@ func requireIssueWorkspace(state *lease.IssueState) error {
 }
 
 // prService builds the PR lifecycle service for this invocation's repository.
-// testResolverRunner lets tests substitute the conflict resolver's runner.
-var testResolverRunner func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error)
-
 func (o *RootOptions) prService(tr tracker.Tracker, manager *lease.Manager) *pr.Service {
-	return &pr.Service{Version: Version, Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now, NewRunner: testResolverRunner}
+	return &pr.Service{Version: Version, Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now, NewRunner: o.resolverRunner, LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath()}
 }
 
 func shortSHA(sha string) string {

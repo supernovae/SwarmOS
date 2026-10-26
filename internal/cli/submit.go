@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -40,7 +41,18 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				}
 				p.Finish(status)
 			}()
-			defer func() { reportJSONFailure(cmd, asJSON, "submission", runErr) }()
+			var failedReport *validation.ValidationReport
+			defer func() {
+				if runErr != nil && failedReport != nil {
+					if asJSON {
+						_ = writeJSON(cmd, map[string]any{"kind": "submission", "status": "failed", "error": runErr.Error(), "report": failedReport})
+					} else {
+						writeValidationChecks(cmd, failedReport)
+					}
+				} else {
+					reportJSONFailure(cmd, asJSON, "submission", runErr)
+				}
+			}()
 			root := rootOpts.resolveRepoRoot()
 			issue, worktree, err := resolveIssueAndWorktree(root, args)
 			if err != nil {
@@ -128,10 +140,11 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			p.Next("validation")
 			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
 			if report != nil {
+				failedReport = report
 				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 				lease.PreserveTesterGuidance(state, &report.Artifact)
 				if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
-					return err
+					return errors.Join(valErr, err)
 				}
 			}
 			if valErr != nil {

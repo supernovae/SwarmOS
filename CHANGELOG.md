@@ -4,6 +4,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+- Show bounded, terminal-safe failed-check output and Go failing test names during repository, issue, and PR validation and submission. JSON failed-check outcomes include `output_tail` and `failing_tests`.
+
 - Fresh same-repository claims start at the current default-branch tip when task, committed policy tree and ancestry checks pass. Existing plan evidence requires authenticated review carry; human gates require explicit approval of a moved base. Queued work reports and skips fresh candidates needing approval, including stale task approval at an unchanged tip.
 
 - Extend `swarm pr rebase --resolve` with recorded per-conflict micro-plans, trusted post-rebase validation, and bounded local repair (default two attempts, configurable with `lease.rebase_repair_limit`). Successful runs print the explicit submit command. Eligible maintainers can re-pin unchanged task/policy approval automatically; policy changes require explicit approval before unchanged plans receive a fresh agent review. Fork workers retain explicit maintainer approval and review steps.

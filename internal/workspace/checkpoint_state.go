@@ -94,11 +94,11 @@ func InspectCheckpoint(ctx context.Context, root, remote string, n int, branch, 
 			if err == nil {
 				s.AttachedBranch = strings.TrimSpace(attached)
 			}
-			status, err := gitOutputContext(ctx, s.WorktreePath, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all")
+			dirty, err := hasStatusChanges(ctx, s.WorktreePath)
 			if err != nil {
 				s.Error = err.Error()
 			} else {
-				s.Dirty = status != ""
+				s.Dirty = dirty
 			}
 			for _, name := range []string{"rebase-merge", "rebase-apply"} {
 				path, err := gitOutputContext(ctx, s.WorktreePath, "rev-parse", "--git-path", name)

@@ -71,21 +71,29 @@ func OnlyActivePointer(worktreePath, path string) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	committed := ""
-	if listing, err := gitOutputContext(context.Background(), worktreePath, "ls-tree", "--name-only", "HEAD", "--", path); err != nil {
+	committed, err := committedInstruction(context.Background(), worktreePath, path)
+	if err != nil {
 		return false, err
-	} else if len(strings.TrimSpace(listing)) != 0 {
-		out, err := gitOutputContext(context.Background(), worktreePath, "show", "HEAD:"+path)
-		if err != nil {
-			return false, err
-		}
-		committed = string(out)
 	}
 	stripped := StripActivePointer(string(current))
 	if stripped == string(current) {
 		return false, nil
 	}
-	return strings.ReplaceAll(stripped, "\r\n", "\n") == strings.ReplaceAll(committed, "\r\n", "\n"), nil
+	return sameInstructionText(stripped, committed), nil
+}
+
+// committedInstruction returns path's content at HEAD, or "" when HEAD has no
+// such entry.
+func committedInstruction(ctx context.Context, worktreePath, path string) (string, error) {
+	listing, err := gitOutputContext(ctx, worktreePath, "ls-tree", "--name-only", "HEAD", "--", path)
+	if err != nil || len(strings.TrimSpace(listing)) == 0 {
+		return "", err
+	}
+	return gitOutputContext(ctx, worktreePath, "show", "HEAD:"+path)
+}
+
+func sameInstructionText(a, b string) bool {
+	return strings.ReplaceAll(a, "\r\n", "\n") == strings.ReplaceAll(b, "\r\n", "\n")
 }
 
 // HasCheckpointableChanges observes the same file set as Checkpoint without writes.

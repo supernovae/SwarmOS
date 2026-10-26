@@ -38,7 +38,10 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 				b, err = m.WorkBudget(st, duration)
 			}
 			if err != nil {
-				h.fail(err)
+				// Stop cancels ctx; a load it interrupts is not a failure.
+				if ctx.Err() == nil {
+					h.fail(err)
+				}
 				return
 			}
 			delay := interval
@@ -65,7 +68,10 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 				b, err = m.WorkBudget(st, duration)
 			}
 			if err != nil {
-				h.fail(err)
+				// Stop cancels ctx; a reload it interrupts is not a failure.
+				if ctx.Err() == nil {
+					h.fail(err)
+				}
 				return
 			}
 			if b != nil && b.Available <= b.Threshold {

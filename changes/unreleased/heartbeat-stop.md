@@ -1,0 +1,1 @@
+- Fix `swarm` heartbeats reporting a deliberate stop as a failure when the stop landed while the heartbeat was loading claim state.

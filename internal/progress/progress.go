@@ -14,7 +14,7 @@ type Event struct {
 	PRNumber     int
 	Check        string
 	Stage        string
-	Status       string // started, completed, running, paused, handed-off, failed, canceled, PASS, FAIL
+	Status       string // started, completed, running, paused, handed-off, failed, canceled, PASS, FAIL, skipped
 	Elapsed      time.Duration
 	StageElapsed time.Duration
 }

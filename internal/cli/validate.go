@@ -75,7 +75,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		defer heartbeat.Stop()
 		ctx = heartbeat.Context()
 		p.Next("validation")
-		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork})
+		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork, GoFastPass: true})
 		if report != nil {
 			report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 			lease.PreserveTesterGuidance(state, &report.Artifact)
@@ -157,6 +157,10 @@ func writeValidationChecks(cmd *cobra.Command, report *validation.ValidationRepo
 		name := validation.EscapeDiagnostic(check.Name)
 		if check.Passed {
 			fmt.Fprintf(cmd.OutOrStdout(), "PASS %s\n", name)
+			continue
+		}
+		if check.FallbackReason != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "SKIP %s: %s\n", name, validation.EscapeDiagnostic(check.FallbackReason))
 			continue
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "FAIL %s (exit %d)\n", name, check.ExitCode)

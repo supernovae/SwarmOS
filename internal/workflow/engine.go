@@ -1028,7 +1028,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	progress.next("required-checks")
 	testerBody, _ := readRequiredArtifact(wtPath, "VALIDATION.md")
-	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode})
+	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode, OnProgress: progress.observeCheck, GoFastPass: true})
 	if context.Cause(ctx) == claimpause.ErrBudget {
 		return res, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, "implement", true, forkMode, forkRemote)
 	}

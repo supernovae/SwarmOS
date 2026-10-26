@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/supernovae/swarmos/internal/pr"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"io"
 	"reflect"
@@ -275,6 +276,37 @@ func TestSetupProgressHeartbeatFormatting(t *testing.T) {
 				t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func TestWorkProgressNamesChangedPackagePass(t *testing.T) {
+	cmd := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	printer := workProgressPrinter(progressWriter(cmd))
+	for _, check := range []string{"test (changed packages)", "test"} {
+		printer(workflow.ProgressEvent{IssueNumber: 7, Stage: "required-checks", Check: check, Status: "PASS", StageElapsed: 2 * time.Second, Elapsed: 9 * time.Second})
+	}
+	want := "Issue #7: required-checks check \"test (changed packages)\" PASS (check 2s, elapsed 9s)\n" +
+		"Issue #7: required-checks check \"test\" PASS (check 2s, elapsed 9s)\n"
+	if stderr.String() != want || stdout.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestValidationChecksShowChangedPackagePass(t *testing.T) {
+	cmd := NewRootCmd()
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	writeValidationChecks(cmd, &validation.ValidationReport{CheckOutcomes: []validation.CheckRunOutcome{
+		{Name: "test (changed packages)", Preliminary: true, FallbackReason: "timed out; the full check decides"},
+		{Name: "test", Passed: true},
+		{Name: "lint (changed packages)", Preliminary: true, ExitCode: 1, FailingTests: []string{"TestLeaf"}, OutputTail: "FAIL\texample.com/m/leaf"},
+	}})
+	want := "SKIP test (changed packages): timed out; the full check decides\nPASS test\nFAIL lint (changed packages) (exit 1)\nfailing tests: TestLeaf\nFAIL\texample.com/m/leaf\n"
+	if stdout.String() != want {
+		t.Fatalf("got %q", stdout.String())
 	}
 }
 

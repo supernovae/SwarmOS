@@ -279,3 +279,55 @@ func TestSetupProgressChildCancellationSuppressesHeartbeat(t *testing.T) {
 		return ctx.Err()
 	})
 }
+
+func TestWorkProgressObservesChecks(t *testing.T) {
+	expectCheck := func(t *testing.T, events <-chan ProgressEvent, check, status string) {
+		t.Helper()
+		if event := receiveProgress(t, events, "required-checks", status); event.Check != check {
+			t.Fatalf("check %q, want %q", event.Check, check)
+		}
+	}
+	t.Run("session", func(t *testing.T) {
+		events := make(chan ProgressEvent, 30)
+		p := newWorkProgress(t.Context(), 42, func(e ProgressEvent) { events <- e }, make(chan time.Time))
+		receiveProgress(t, events, "preflight", "started")
+		p.next("required-checks")
+		receiveProgress(t, events, "preflight", "completed")
+		receiveProgress(t, events, "required-checks", "started")
+		for _, check := range []string{"test (changed packages)", "test"} {
+			p.observeCheck(ProgressEvent{Check: check, Status: "started"})
+			expectCheck(t, events, check, "started")
+			p.observeCheck(ProgressEvent{Check: check, Status: "PASS"})
+			expectCheck(t, events, check, "PASS")
+		}
+		p.finish(nil, nil)
+		expectCheck(t, events, "", "completed")
+	})
+	t.Run("shared reporter", func(t *testing.T) {
+		p, events, tick := setupProgressFixture(t)
+		p.mu.Lock()
+		p.issue = 42
+		p.mu.Unlock()
+		p.next("required-checks")
+		receiveProgress(t, events, "required-checks", "started")
+		p.observeCheck(ProgressEvent{Check: "test (changed packages)", Status: "started"})
+		expectCheck(t, events, "test (changed packages)", "started")
+		tick(15 * time.Second)
+		expectCheck(t, events, "test (changed packages)", "running")
+		p.observeCheck(ProgressEvent{Check: "test (changed packages)", Status: "FAIL"})
+		expectCheck(t, events, "test (changed packages)", "FAIL")
+		tick(15 * time.Second)
+		expectCheck(t, events, "", "running")
+		p.Close()
+		p.observeCheck(ProgressEvent{Check: "test", Status: "started"})
+		select {
+		case event := <-events:
+			t.Fatalf("event after close: %+v", event)
+		default:
+		}
+	})
+	t.Run("no observer", func(t *testing.T) {
+		startWorkProgress(t.Context(), 42, nil).observeCheck(ProgressEvent{Check: "test", Status: "started"})
+		(&workProgress{}).observeCheck(ProgressEvent{Check: "test", Status: "started"})
+	})
+}

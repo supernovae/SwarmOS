@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -55,6 +57,10 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 		}
 		mgr.SetNodeProfile(nodeProf)
 		issues, err := tr.ListIssues(ctx, tracker.IssueFilter{State: "open", Labels: []string{cfg.Security.ReadyLabel}})
+		if err != nil {
+			return nil, err
+		}
+		issues, err = orderReadyIssues(ctx, tr, issues, cmd.ErrOrStderr())
 		if err != nil {
 			return nil, err
 		}
@@ -231,4 +237,95 @@ func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error
 			Backend: o.Backend,
 		},
 	}, nil
+}
+
+// orderReadyIssues permutes only supplied candidates. Each epic retains its
+// numeric slots, avoiding a cyclic comparator for mixed standalone/sibling work.
+func orderReadyIssues(ctx context.Context, tr tracker.Tracker, issues []*tracker.Issue, stderr io.Writer) ([]*tracker.Issue, error) {
+	out := append([]*tracker.Issue(nil), issues...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Number < out[j].Number })
+	groups := make(map[int][]int)
+	var parents []int
+	warn := func(n int, err error) {
+		fmt.Fprintf(stderr, "warning: cannot read sub-issue order for #%d; using issue-number order: %v\n", n, err)
+	}
+	for i, issue := range out {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		parent, err := tr.ParentIssueNumber(ctx, issue.Number)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			warn(issue.Number, err)
+			continue
+		}
+		if parent != 0 {
+			if len(groups[parent]) == 0 {
+				parents = append(parents, parent)
+			}
+			groups[parent] = append(groups[parent], i)
+		}
+	}
+	for _, parent := range parents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		slots := groups[parent]
+		if len(slots) < 2 {
+			continue
+		}
+		epic, err := tr.GetIssue(ctx, parent)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			warn(parent, err)
+			continue
+		}
+		if epic == nil {
+			warn(parent, fmt.Errorf("missing parent"))
+			continue
+		}
+		if !epic.IsEpic() {
+			continue
+		}
+		children, err := tr.ListSubIssues(ctx, parent)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err != nil {
+			warn(parent, err)
+			continue
+		}
+		candidates := make(map[int]*tracker.Issue)
+		for _, slot := range slots {
+			candidates[out[slot].Number] = out[slot]
+		}
+		seen := make(map[int]bool)
+		var ordered []*tracker.Issue
+		valid := true
+		for _, child := range children {
+			if child == nil || child.Number <= 0 || seen[child.Number] {
+				valid = false
+				break
+			}
+			seen[child.Number] = true
+			if candidate := candidates[child.Number]; candidate != nil {
+				ordered = append(ordered, candidate)
+			}
+		}
+		if !valid || len(ordered) != len(slots) {
+			warn(parent, fmt.Errorf("incomplete or duplicate sibling list"))
+			continue
+		}
+		for i, slot := range slots {
+			out[slot] = ordered[i]
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

@@ -367,6 +367,29 @@ func (g *GitHubTracker) ParentIssueNumber(ctx context.Context, childNumber int) 
 	return resp.Number, nil
 }
 
+func (g *GitHubTracker) ListSubIssues(ctx context.Context, parentNumber int) ([]*Issue, error) {
+	if parentNumber <= 0 {
+		return nil, fmt.Errorf("invalid parent issue number %d", parentNumber)
+	}
+	var out []*Issue
+	for page := 1; ; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		path := fmt.Sprintf("repos/%s/%s/issues/%d/sub_issues?per_page=100&page=%d", g.owner, g.repo, parentNumber, page)
+		var rows []ghIssueResponse
+		if err := g.client.DoWithContext(ctx, "GET", path, nil, &rows); err != nil {
+			return nil, fmt.Errorf("github ListSubIssues #%d page %d: %w", parentNumber, page, err)
+		}
+		for _, row := range rows {
+			out = append(out, convertGHIssue(row))
+		}
+		if len(rows) < 100 {
+			return out, nil
+		}
+	}
+}
+
 func (g *GitHubTracker) LinkSubIssue(ctx context.Context, parentNumber, childNumber int) error {
 	if err := ctx.Err(); err != nil {
 		return err

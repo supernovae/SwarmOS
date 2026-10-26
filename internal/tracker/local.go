@@ -19,6 +19,7 @@ import (
 )
 
 type localState struct {
+	ChildOrder    map[int][]int        `json:"child_order,omitempty"`
 	NextIssueNum  int                  `json:"next_issue_num"`
 	NextCommentID int64                `json:"next_comment_id"`
 	NextPRNum     int                  `json:"next_pr_num"`
@@ -163,6 +164,9 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 			st.DefinedLabels = make(map[string]LabelSpec)
 		}
 	}
+	if st.ChildOrder == nil {
+		st.ChildOrder = make(map[int][]int)
+	}
 	if err := fn(st); err != nil {
 		return err
 	}
@@ -272,6 +276,45 @@ func (l *LocalTracker) ParentIssueNumber(ctx context.Context, childNumber int) (
 	return parent, err
 }
 
+func localChildNumbers(st *localState, parent int) []int {
+	order := append([]int(nil), st.ChildOrder[parent]...)
+	seen := make(map[int]bool)
+	for _, n := range order {
+		seen[n] = true
+	}
+	var missing []int
+	for child, p := range st.Parents {
+		if p == parent && !seen[child] {
+			missing = append(missing, child)
+		}
+	}
+	sort.Ints(missing)
+	return append(order, missing...)
+}
+
+func (l *LocalTracker) ListSubIssues(ctx context.Context, parentNumber int) ([]*Issue, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var out []*Issue
+	err := l.withLock(false, func(st *localState) error {
+		if st.Issues[parentNumber] == nil {
+			return fmt.Errorf("parent issue #%d not found in local tracker", parentNumber)
+		}
+		for _, n := range localChildNumbers(st, parentNumber) {
+			issue := st.Issues[n]
+			if issue == nil {
+				return fmt.Errorf("sub-issue #%d missing", n)
+			}
+			cp := *issue
+			cp.Labels = append([]string(nil), issue.Labels...)
+			out = append(out, &cp)
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (l *LocalTracker) LinkSubIssue(ctx context.Context, parentNumber, childNumber int) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -300,6 +343,7 @@ func (l *LocalTracker) LinkSubIssue(ctx context.Context, parentNumber, childNumb
 				return fmt.Errorf("linking issue #%d under #%d would create a parent cycle", childNumber, parentNumber)
 			}
 		}
+		st.ChildOrder[parentNumber] = append(localChildNumbers(st, parentNumber), childNumber)
 		st.Parents[childNumber] = parentNumber
 		return nil
 	})

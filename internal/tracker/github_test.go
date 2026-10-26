@@ -578,3 +578,80 @@ func TestForkGitHubTrackerVerifyForkAndGetPullRequest(t *testing.T) {
 		t.Fatalf("unexpected GetPullRequest fields: %+v", pr)
 	}
 }
+
+func TestGitHubListSubIssues(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			calls := 0
+			tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path != "/repos/octo/swarm/issues/500/sub_issues" || r.URL.Query().Get("per_page") != "100" {
+					t.Fatalf("unexpected request %s", r.URL)
+				}
+				if r.URL.Query().Get("page") == "1" {
+					rows := make([]map[string]any, 100)
+					for i := range rows {
+						rows[i] = map[string]any{"number": 200 - i}
+					}
+					writeJSON(t, w, rows)
+					return
+				}
+				if fail {
+					http.Error(w, "offline", 500)
+					return
+				}
+				writeJSON(t, w, []map[string]any{{"number": 1}})
+			}))
+			issues, err := tr.ListSubIssues(context.Background(), 500)
+			if fail {
+				if err == nil || issues != nil {
+					t.Fatalf("partial order: %v %v", issues, err)
+				}
+				return
+			}
+			if err != nil || len(issues) != 101 || issues[0].Number != 200 || issues[100].Number != 1 || calls != 2 {
+				t.Fatalf("order/pages: %v %v %d", issues, err, calls)
+			}
+		})
+	}
+}
+
+func TestLocalListSubIssues(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	tr := NewLocalTracker(root)
+	parent, err := tr.CreateTypedIssue(ctx, "Epic", "", nil, "Epic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := tr.CreateIssue(ctx, "a", "", nil)
+	b, _ := tr.CreateIssue(ctx, "b", "", nil)
+	c, _ := tr.CreateIssue(ctx, "c", "", nil)
+	for _, n := range []int{b.Number, a.Number, b.Number} {
+		if err := tr.LinkSubIssue(ctx, parent.Number, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertOrder := func(want ...int) {
+		t.Helper()
+		children, err := NewLocalTracker(root).ListSubIssues(ctx, parent.Number)
+		if err != nil || len(children) != len(want) {
+			t.Fatalf("%v %v", children, err)
+		}
+		for i, n := range want {
+			if children[i].Number != n {
+				t.Fatalf("position %d: got %d want %d", i, children[i].Number, n)
+			}
+		}
+	}
+	assertOrder(b.Number, a.Number)
+	// Model a legacy state with only the historical child-to-parent map.
+	if err := tr.withLock(true, func(st *localState) error { st.ChildOrder = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	assertOrder(a.Number, b.Number)
+	if err := tr.LinkSubIssue(ctx, parent.Number, c.Number); err != nil {
+		t.Fatal(err)
+	}
+	assertOrder(a.Number, b.Number, c.Number)
+}

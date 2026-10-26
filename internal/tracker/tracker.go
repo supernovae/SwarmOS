@@ -145,6 +145,8 @@ type Tracker interface {
 	UpdateIssueBody(ctx context.Context, number int, body string) (*Issue, error)
 	UpdateIssueTitle(ctx context.Context, number int, title string) (*Issue, error)
 	ParentIssueNumber(ctx context.Context, childNumber int) (int, error)
+	// ListSubIssues returns native sibling order; it grants no eligibility.
+	ListSubIssues(ctx context.Context, parentNumber int) ([]*Issue, error)
 	LinkSubIssue(ctx context.Context, parentNumber, childNumber int) error
 	ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error)
 	ListComments(ctx context.Context, issueNumber int) ([]*Comment, error)

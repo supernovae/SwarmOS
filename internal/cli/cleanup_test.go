@@ -570,3 +570,50 @@ func TestCleanupLocalPolicyTransitions(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanupLocalRelativeRootPreview(t *testing.T) {
+	f, n, _ := cleanupLocalFixture(t)
+	before := f.state(t, n)
+	refs := prGit(t, f.root, "show-ref")
+	trees := prGit(t, f.root, "worktree", "list", "--porcelain")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chdir(f.root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(cwd); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, args := range [][]string{{"--root", "."}, nil} {
+		cmd := NewRootCmd()
+		var output strings.Builder
+		cmd.SetOut(&output)
+		cmd.SetArgs(append(args, "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--json"))
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		var preview lease.CleanupPreview
+		if err := json.Unmarshal([]byte(output.String()), &preview); err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, r := range preview.Resources {
+			if r.Kind == "worktree" || r.Kind == "local-code-branch" {
+				count++
+				if !r.Eligible || r.Absent || r.Retired {
+					t.Errorf("relative root %v: resource not eligible: %+v", args, r)
+				}
+			}
+		}
+		if count != 4 {
+			t.Fatalf("missing local resources: %+v", preview)
+		}
+	}
+	if !reflect.DeepEqual(before, f.state(t, n)) || refs != prGit(t, f.root, "show-ref") || trees != prGit(t, f.root, "worktree", "list", "--porcelain") {
+		t.Fatal("preview mutated resources")
+	}
+}

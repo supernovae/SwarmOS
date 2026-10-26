@@ -58,9 +58,14 @@ func (f *revokeFixture) state(issue int, claimID, owner, status, forkRepo string
 }
 
 // forkClaim acquires issue as owner through the fork coordinator's indexed store.
+// It seeds a draft state only when the issue has none, so a retry after a
+// refused claim starts from the existing revision.
 func (f *revokeFixture) forkClaim(base *GitStore, owner string, issue, maxActive int, requestID int64) (string, error) {
 	f.t.Helper()
-	rev, err := base.CompareAndSwap(context.Background(), issue, "", []byte(fmt.Sprintf(`{"lease":{"issue_number":%d,"status":"draft"}}`, issue)))
+	_, rev, err := base.Load(context.Background(), issue)
+	if errors.Is(err, ErrNotFound) {
+		rev, err = base.CompareAndSwap(context.Background(), issue, "", []byte(fmt.Sprintf(`{"lease":{"issue_number":%d,"status":"draft"}}`, issue)))
+	}
 	if err != nil {
 		f.t.Fatal(err)
 	}

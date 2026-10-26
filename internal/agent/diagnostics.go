@@ -44,17 +44,36 @@ var (
 
 var errNoDiagnostics = errors.New("no harness output")
 
+// diagnosticsUnavailable is the fixed reason reported when no private log can
+// be written. Underlying errors may carry paths or provider text, so only these
+// literals ever reach the operator.
+type diagnosticsUnavailable string
+
+const (
+	unavailableStateDir  diagnosticsUnavailable = "state directory unavailable"
+	unavailableUnsafe    diagnosticsUnavailable = "unsafe state directory"
+	unavailablePrivate   diagnosticsUnavailable = "private directory unavailable"
+	unavailableRedaction diagnosticsUnavailable = "credential redaction unavailable"
+	unavailableWrite     diagnosticsUnavailable = "log write failed"
+)
+
+func (r diagnosticsUnavailable) Error() string { return string(r) }
+
 func newDiagnosticsTail() *process.Tail { return process.NewTail(diagnosticsMaxBytes) }
 
 // failureDiagnosticsNote saves the transcript and returns coordinator-rendered
-// text naming only the saved file. Storage errors are never interpolated.
+// text naming only the saved file or a fixed unavailable reason. Storage errors
+// are never interpolated.
 func failureDiagnosticsNote(worktree string, transcript *process.Tail) string {
 	path, size, err := saveDiagnostics(worktree, transcript)
+	var reason diagnosticsUnavailable
 	switch {
 	case errors.Is(err, errNoDiagnostics):
 		return "no harness output to save"
+	case errors.As(err, &reason):
+		return "diagnostics unavailable: " + string(reason)
 	case err != nil:
-		return "diagnostics could not be saved"
+		return "diagnostics unavailable: " + string(unavailableWrite)
 	}
 	return fmt.Sprintf("diagnostics saved to %s (%d bytes)", path, size)
 }
@@ -66,7 +85,7 @@ func saveDiagnostics(worktree string, transcript *process.Tail) (string, int, er
 	}
 	redaction, err := diagnosticsRedaction()
 	if err != nil {
-		return "", 0, err
+		return "", 0, unavailableRedaction
 	}
 	data := renderDiagnostics(raw, truncated, redaction)
 	dirPath, dir, err := openDiagnosticsDir(worktree)
@@ -76,19 +95,19 @@ func saveDiagnostics(worktree string, transcript *process.Tail) (string, int, er
 	defer dir.Close()
 	lock, err := dir.OpenLock(".lock")
 	if err != nil {
-		return "", 0, err
+		return "", 0, unavailableWrite
 	}
 	defer lock.Close()
 	if err := filelock.LockExclusive(lock); err != nil {
-		return "", 0, err
+		return "", 0, unavailableWrite
 	}
 	defer filelock.Unlock(lock)
 	name := diagnosticsNewName()
 	if !diagnosticsFileName.MatchString(name) {
-		return "", 0, fmt.Errorf("invalid diagnostics file name")
+		return "", 0, unavailableWrite
 	}
 	if err := dir.WriteFile(name, data, 0o600); err != nil {
-		return "", 0, err
+		return "", 0, unavailableWrite
 	}
 	pruneDiagnostics(dir, name, diagnosticsNow())
 	return filepath.Join(dirPath, name), len(data), nil
@@ -164,10 +183,10 @@ func userStateDir() (string, error) {
 func openDiagnosticsDir(worktree string) (string, *safefs.Root, error) {
 	state, err := diagnosticsStateDir()
 	if err != nil {
-		return "", nil, err
+		return "", nil, unavailableStateDir
 	}
 	if !filepath.IsAbs(state) || !printablePath(state) {
-		return "", nil, fmt.Errorf("unsafe diagnostics state directory")
+		return "", nil, unavailableUnsafe
 	}
 	state = filepath.Clean(state)
 	existing, missing := state, []string{}
@@ -175,13 +194,13 @@ func openDiagnosticsDir(worktree string) (string, *safefs.Root, error) {
 		info, err := os.Stat(existing)
 		if err == nil {
 			if !info.IsDir() {
-				return "", nil, fmt.Errorf("unsafe diagnostics state directory")
+				return "", nil, unavailableUnsafe
 			}
 			break
 		}
 		parent := filepath.Dir(existing)
 		if !errors.Is(err, os.ErrNotExist) || parent == existing {
-			return "", nil, fmt.Errorf("unsafe diagnostics state directory")
+			return "", nil, unavailableUnsafe
 		}
 		missing = append([]string{filepath.Base(existing)}, missing...)
 		existing = parent
@@ -189,20 +208,20 @@ func openDiagnosticsDir(worktree string) (string, *safefs.Root, error) {
 	rel := filepath.Join(append(missing, "swarm", "diagnostics")...)
 	dirPath := filepath.Join(existing, rel)
 	if resolved, err := filepath.EvalSymlinks(existing); err != nil || insideWorktree(worktree, dirPath) || insideWorktree(worktree, filepath.Join(resolved, rel)) {
-		return "", nil, fmt.Errorf("unsafe diagnostics state directory")
+		return "", nil, unavailableUnsafe
 	}
 	base, err := safefs.Open(existing)
 	if err != nil {
-		return "", nil, err
+		return "", nil, unavailablePrivate
 	}
 	defer base.Close()
 	dir, err := base.Sub(rel, true, 0o700)
 	if err != nil {
-		return "", nil, err
+		return "", nil, unavailablePrivate
 	}
 	if err := privateDirectory(dir); err != nil {
 		dir.Close()
-		return "", nil, err
+		return "", nil, unavailablePrivate
 	}
 	return dirPath, dir, nil
 }

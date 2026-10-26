@@ -329,9 +329,17 @@ planner agent failed (exit 1; harness diagnostics withheld); diagnostics saved t
 Open that file with any pager, for example `less <path>`. It holds the last stdout and stderr output of the failed run:
 
 - Location: `$XDG_STATE_HOME/swarm/diagnostics/` when `XDG_STATE_HOME` is set, otherwise `~/.local/state/swarm/diagnostics/` on Linux and the user configuration directory (for example `~/Library/Application Support/swarm/diagnostics/`) on macOS and Windows. It is outside every worktree and is never committed, uploaded, or shown on issues or PRs.
-- Permissions: the directory is `0700` and each file `0600`. SwarmOS refuses to write through a symlink or into a directory other users can read; the error then says `diagnostics could not be saved`.
+- Permissions: the directory is `0700` and each file `0600`. SwarmOS refuses to write through a symlink or into a directory other users can read.
 - Contents: at most 64 KiB of the most recent output. The coordinator's GitHub token is redacted the same way as in Git diagnostics. Control characters, terminal escapes, and invalid UTF-8 are written as printable escapes such as `\x1b`, so viewing the file cannot drive your terminal. Other secrets a harness prints are not detected, so treat the file as private.
 - Retention: logs older than seven days are deleted, and only the newest 20 are kept.
+
+When no private copy can be written, the error ends with `diagnostics unavailable: <reason>` instead of a path. SwarmOS never falls back to another location. The reason is always one of these:
+
+- `state directory unavailable`: SwarmOS could not determine your user state directory, for example because no home directory is set. Set `XDG_STATE_HOME` to an absolute path.
+- `unsafe state directory`: the state directory is relative, contains control characters, passes through a regular file, or resolves inside the agent's worktree.
+- `private directory unavailable`: the `swarm/diagnostics` directory could not be created or opened without following symlinks, or other users can access it. Remove the symlink or run `chmod 700` on the directory.
+- `credential redaction unavailable`: the coordinator's GitHub token could not be resolved for redaction, so nothing was written. Check `SWARM_GITHUB_TOKEN` or `SWARM_GITHUB_TOKEN_COMMAND` (see [GITHUB.md](GITHUB.md)).
+- `log write failed`: the log file could not be locked or written, for example because a symlink or other non-regular file already sits at its path.
 
 A run that printed nothing reports `no harness output to save`. Successful runs save no log. Isolated workers are not given access to the diagnostics directory. Trusted-local agents run as your user, though, so they can read earlier logs. The files are private from other users, not from trusted-local agents. Interactive (`--headless=false`) runs still stream harness output live to your terminal.
 

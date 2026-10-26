@@ -15,13 +15,11 @@ var diagnosticsPointer = regexp.MustCompile(`diagnostics saved to (/\S+) \((\d+)
 
 // useFailingHarness allowlists a trusted-local "claude" harness that prints a
 // private transcript, including a terminal escape, and exits non-zero.
-func useFailingHarness(t *testing.T, f *cliFixture) string {
+func useFailingHarness(t *testing.T, f *cliFixture) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell harness fixture")
 	}
-	state := filepath.Join(t.TempDir(), "state")
-	t.Setenv("XDG_STATE_HOME", state)
 	script := filepath.Join(t.TempDir(), "failing-harness")
 	body := "#!/bin/sh\nprintf 'PRIVATE-TRANSCRIPT stdout\\n'\nprintf 'PRIVATE-TRANSCRIPT \\033]52;c;eA==\\007 stderr\\n' >&2\nexit 9\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
@@ -38,7 +36,58 @@ func useFailingHarness(t *testing.T, f *cliFixture) string {
 	}
 	prGit(t, f.root, "add", path)
 	prGit(t, f.root, "commit", "-m", "Allowlist failing harness")
+}
+
+// inheritState simulates the state setting the test binary inherited, such as
+// a hardened check environment that sets none or one that is unusable.
+func inheritState(t *testing.T, f *cliFixture, mode string) {
+	t.Helper()
+	switch mode {
+	case "unset":
+		t.Setenv("XDG_STATE_HOME", "")
+		os.Unsetenv("XDG_STATE_HOME")
+	case "file":
+		blocker := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("XDG_STATE_HOME", blocker)
+	case "inside fixture":
+		t.Setenv("XDG_STATE_HOME", filepath.Join(f.root, ".state"))
+	default:
+		t.Fatalf("unknown inherited state %q", mode)
+	}
+}
+
+// useDiagnosticsState selects a fresh, symlink-free state root outside the
+// fixture after all setup, so where a failed run is saved never depends on the
+// inherited environment. Run it immediately before the failing command.
+func useDiagnosticsState(t *testing.T, f *cliFixture) string {
+	t.Helper()
+	parent, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(parent, "state")
+	for _, root := range []string{f.root, mustEvalSymlinks(t, f.root)} {
+		if rel, err := filepath.Rel(root, state); !filepath.IsAbs(state) || err != nil || filepath.IsLocal(rel) {
+			t.Fatalf("state root %s is not outside fixture %s", state, root)
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", state)
+	if got := os.Getenv("XDG_STATE_HOME"); got != state {
+		t.Fatalf("XDG_STATE_HOME = %q, want %q", got, state)
+	}
 	return state
+}
+
+func mustEvalSymlinks(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 // checkJSONDiagnostics decodes one failure document and checks that it points
@@ -80,9 +129,11 @@ func checkTranscript(t *testing.T, data string) {
 
 func TestCLIIssueWorkJSONReportsDiagnosticsPath(t *testing.T) {
 	f := newCLIFixture(t)
-	state := useFailingHarness(t, f)
+	useFailingHarness(t, f)
 	n := strconv.Itoa(f.create(t, "agent"))
 	f.must(t, "issue", "approve", n)
+	inheritState(t, f, "file")
+	state := useDiagnosticsState(t, f)
 	raw, err := f.run("issue", "work", n, "--agent", "failing", "--headless", "--progress=false", "--json")
 	if err == nil || !diagnosticsPointer.MatchString(err.Error()) || strings.Contains(err.Error(), "PRIVATE") {
 		t.Fatalf("err = %v", err)
@@ -92,8 +143,10 @@ func TestCLIIssueWorkJSONReportsDiagnosticsPath(t *testing.T) {
 
 func TestCLIPRWorkJSONReportsDiagnosticsPath(t *testing.T) {
 	f, issue, number := submittedPRFixture(t, "agent")
-	state := useFailingHarness(t, f)
+	useFailingHarness(t, f)
 	f.must(t, "issue", "approve", strconv.Itoa(issue)) // approve the base that allowlists the harness
+	inheritState(t, f, "unset")
+	state := useDiagnosticsState(t, f)
 	raw, err := f.run("pr", "work", strconv.Itoa(number), "--agent", "failing", "--progress=false", "--json")
 	if err == nil {
 		t.Fatal("failing harness succeeded")
@@ -110,8 +163,10 @@ func TestCLIPRRebaseResolveJSONReportsDiagnosticsPath(t *testing.T) {
 	}
 	prGit(t, f.root, "add", conflicting)
 	prGit(t, f.root, "commit", "-m", "Conflicting upstream change")
-	state := useFailingHarness(t, f)
+	useFailingHarness(t, f)
 	f.must(t, "issue", "approve", strconv.Itoa(issue))
+	inheritState(t, f, "inside fixture")
+	state := useDiagnosticsState(t, f)
 	raw, err := f.run("pr", "rebase", strconv.Itoa(number), "--resolve", "--agent", "failing", "--progress=false", "--json")
 	if err == nil {
 		t.Fatal("failing resolver succeeded")
@@ -123,4 +178,32 @@ func TestCLIPRRebaseResolveJSONReportsDiagnosticsPath(t *testing.T) {
 		t.Skipf("host sandbox unavailable; diagnostics recorded %q", data)
 	}
 	checkTranscript(t, data)
+}
+
+func TestCLIIssueWorkJSONReportsDiagnosticsUnavailable(t *testing.T) {
+	f := newCLIFixture(t)
+	useFailingHarness(t, f)
+	n := strconv.Itoa(f.create(t, "agent"))
+	f.must(t, "issue", "approve", n)
+	inheritState(t, f, "file")
+	blocked := os.Getenv("XDG_STATE_HOME")
+	raw, err := f.run("issue", "work", n, "--agent", "failing", "--headless", "--progress=false", "--json")
+	if err == nil {
+		t.Fatal("failing harness succeeded")
+	}
+	var outcome struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.NewDecoder(strings.NewReader(raw)).Decode(&outcome); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, raw)
+	}
+	if outcome.Status != "failed" || !strings.HasSuffix(outcome.Error, "; diagnostics unavailable: unsafe state directory") {
+		t.Fatalf("missing unavailable reason: %s", raw)
+	}
+	for _, leaked := range []string{"PRIVATE-TRANSCRIPT", "52;c", "\\u001b", "diagnostics saved", blocked} {
+		if strings.Contains(raw, leaked) {
+			t.Fatalf("JSON leaked %q: %s", leaked, raw)
+		}
+	}
 }

@@ -296,24 +296,34 @@ func TestDiagnosticsFilePermissions(t *testing.T) {
 	}
 }
 
+// errDiagnosticsSecret carries text that must never reach coordinator output.
+var errDiagnosticsSecret = errors.New("PRIVATE-STORAGE-ERROR " + diagnosticsTestToken + " \x1b]52;c;eA==\a")
+
 func TestDiagnosticsRefusesUnsafeLocations(t *testing.T) {
 	const name = "failure-0123456789abcdef0123456789abcdef.log"
-	tests := map[string]func(t *testing.T, state, worktree string) string{
-		"symlink at target": func(t *testing.T, state, _ string) string {
+	tests := map[string]struct {
+		want  diagnosticsUnavailable
+		setup func(t *testing.T, state, worktree string) string
+	}{
+		"state lookup error": {unavailableStateDir, func(t *testing.T, _, _ string) string {
+			diagnosticsStateDir = func() (string, error) { return "", errDiagnosticsSecret }
+			return ""
+		}},
+		"symlink at target": {unavailableWrite, func(t *testing.T, state, _ string) string {
 			dir := filepath.Join(state, "swarm", "diagnostics")
 			mustMkdir(t, dir)
 			outside := filepath.Join(t.TempDir(), "sentinel")
 			mustWrite(t, outside, "sentinel")
 			mustSymlink(t, outside, filepath.Join(dir, name))
 			return outside
-		},
-		"symlinked diagnostics directory": func(t *testing.T, state, _ string) string {
+		}},
+		"symlinked diagnostics directory": {unavailablePrivate, func(t *testing.T, state, _ string) string {
 			mustMkdir(t, filepath.Join(state, "swarm"))
 			outside := t.TempDir()
 			mustSymlink(t, outside, filepath.Join(state, "swarm", "diagnostics"))
 			return filepath.Join(outside, name)
-		},
-		"fifo at target": func(t *testing.T, state, _ string) string {
+		}},
+		"fifo at target": {unavailableWrite, func(t *testing.T, state, _ string) string {
 			if runtime.GOOS == "windows" {
 				t.Skip("no FIFOs")
 			}
@@ -323,8 +333,12 @@ func TestDiagnosticsRefusesUnsafeLocations(t *testing.T) {
 				t.Fatal(err)
 			}
 			return ""
-		},
-		"shared directory": func(t *testing.T, state, _ string) string {
+		}},
+		"invalid generated name": {unavailableWrite, func(t *testing.T, _, _ string) string {
+			diagnosticsNewName = func() string { return "../escape.log" }
+			return ""
+		}},
+		"shared directory": {unavailablePrivate, func(t *testing.T, state, _ string) string {
 			if runtime.GOOS == "windows" {
 				t.Skip("POSIX modes")
 			}
@@ -334,30 +348,36 @@ func TestDiagnosticsRefusesUnsafeLocations(t *testing.T) {
 				t.Fatal(err)
 			}
 			return ""
-		},
-		"inside worktree": func(t *testing.T, _, worktree string) string {
+		}},
+		"inside worktree": {unavailableUnsafe, func(t *testing.T, _, worktree string) string {
 			diagnosticsStateDir = func() (string, error) { return filepath.Join(worktree, ".state"), nil }
 			return ""
-		},
-		"relative state": func(t *testing.T, _, _ string) string {
+		}},
+		"relative state": {unavailableUnsafe, func(t *testing.T, _, _ string) string {
 			diagnosticsStateDir = func() (string, error) { return "relative/state", nil }
 			return ""
-		},
-		"control characters in path": func(t *testing.T, state, _ string) string {
+		}},
+		"control characters in path": {unavailableUnsafe, func(t *testing.T, state, _ string) string {
 			diagnosticsStateDir = func() (string, error) { return state + "\x1b[2J", nil }
 			return ""
-		},
+		}},
+		"state blocked by a file": {unavailableUnsafe, func(t *testing.T, state, _ string) string {
+			blocker := filepath.Join(state, "blocker")
+			mustWrite(t, blocker, "sentinel")
+			diagnosticsStateDir = func() (string, error) { return filepath.Join(blocker, "state"), nil }
+			return blocker
+		}},
 	}
-	for label, setup := range tests {
+	for label, tc := range tests {
 		t.Run(label, func(t *testing.T) {
 			state := useDiagnosticsState(t)
 			fixedDiagnosticsName(t, name)
 			mustMkdir(t, state)
 			worktree := t.TempDir()
-			sentinel := setup(t, state, worktree)
+			sentinel := tc.setup(t, state, worktree)
 			note := failureDiagnosticsNote(worktree, tailWith("secret transcript\n"))
-			if note != "diagnostics could not be saved" {
-				t.Fatalf("note = %q", note)
+			if want := "diagnostics unavailable: " + string(tc.want); note != want {
+				t.Fatalf("note = %q, want %q", note, want)
 			}
 			if sentinel != "" {
 				if data, err := os.ReadFile(sentinel); err == nil && string(data) != "sentinel" {
@@ -371,14 +391,34 @@ func TestDiagnosticsRefusesUnsafeLocations(t *testing.T) {
 	}
 }
 
+func TestDiagnosticsUnavailableKeepsRunFailure(t *testing.T) {
+	previous := diagnosticsStateDir
+	diagnosticsStateDir = func() (string, error) { return "", errDiagnosticsSecret }
+	t.Cleanup(func() { diagnosticsStateDir = previous })
+	cause := &exec.ExitError{}
+	result := &RunResult{Output: "PRIVATE-TRANSCRIPT", Command: []string{"harness"}, transcript: tailWith("PRIVATE-TRANSCRIPT\n")}
+	err := safeRunFailure(t.Context(), "planner", t.TempDir(), result, cause)
+	if !strings.HasSuffix(err.Error(), "; diagnostics unavailable: state directory unavailable") || !errors.Is(err, cause) {
+		t.Fatal(err)
+	}
+	for _, leaked := range []string{"PRIVATE", diagnosticsTestToken, "\x1b", "52;c", "diagnostics saved"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("error leaked %q: %q", leaked, err)
+		}
+	}
+	if result.Output != "" || result.Command != nil || result.transcript != nil {
+		t.Fatalf("failed result not sanitized: %+v", result)
+	}
+}
+
 func TestDiagnosticsRedactionFailureFailsClosed(t *testing.T) {
 	state := useDiagnosticsState(t)
 	previous := diagnosticsRedaction
-	diagnosticsRedaction = func() (*gitcredential.Redaction, error) { return nil, errors.New("private token error") }
+	diagnosticsRedaction = func() (*gitcredential.Redaction, error) { return nil, errDiagnosticsSecret }
 	t.Cleanup(func() { diagnosticsRedaction = previous })
 	cause := &exec.ExitError{}
 	err := safeRunFailure(t.Context(), "tester", t.TempDir(), &RunResult{transcript: tailWith("x\n")}, cause)
-	if !strings.HasSuffix(err.Error(), "; diagnostics could not be saved") || strings.Contains(err.Error(), "private") || !errors.Is(err, cause) {
+	if !strings.HasSuffix(err.Error(), "; diagnostics unavailable: credential redaction unavailable") || strings.Contains(err.Error(), "PRIVATE") || !errors.Is(err, cause) {
 		t.Fatal(err)
 	}
 	if files := diagnosticsFiles(t, state); len(files) != 0 {

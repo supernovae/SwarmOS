@@ -19,7 +19,14 @@ func workProgressPrinter(out io.Writer) func(workflow.ProgressEvent) {
 	return func(event workflow.ProgressEvent) {
 		mu.Lock()
 		defer mu.Unlock()
-		// All text fields come from coordinator-owned enums, never child output.
+		// Stage and status come from coordinator-owned enums, never child
+		// output; check names come from the trusted policy and are quoted.
+		if event.Check != "" {
+			fmt.Fprintf(out, "Issue #%d: %s check %+q %s (check %s, elapsed %s)\n",
+				event.IssueNumber, event.Stage, event.Check, event.Status,
+				event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second))
+			return
+		}
 		fmt.Fprintf(out, "Issue #%d: %s %s (stage %s, elapsed %s)\n",
 			event.IssueNumber, event.Stage, event.Status,
 			event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second))

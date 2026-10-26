@@ -28,6 +28,10 @@ func TestDelegatedValidationWithoutCodex(t *testing.T) {
 	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "test \"$(cat source)\" = original; echo changed > source", &out, &out); err != nil {
 		t.Fatal(err, out.String())
 	}
+	var failed strings.Builder
+	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "printf '%s\\n' '--- FAIL: TestNative (0.00s)'; exit 7", &failed, &failed); err == nil || !strings.Contains(failed.String(), "--- FAIL: TestNative") {
+		t.Fatalf("native failed output: %q, %v", failed.String(), err)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "source"))
 	if err != nil || string(data) != "original" {
 		t.Fatal("validation changed coordinator workspace", err, string(data))

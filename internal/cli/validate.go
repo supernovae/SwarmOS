@@ -140,13 +140,7 @@ func writeValidationOutcome(cmd *cobra.Command, report *validation.ValidationRep
 			return err
 		}
 	} else if report != nil {
-		for _, check := range report.CheckOutcomes {
-			status := "PASS"
-			if !check.Passed {
-				status = "FAIL"
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", status, check.Name)
-		}
+		writeValidationChecks(cmd, report)
 	}
 	return validationErr
 }
@@ -156,4 +150,21 @@ func writeValidationOutcome(cmd *cobra.Command, report *validation.ValidationRep
 // on a workstation, checks keep the repository's configured sandbox.
 func onCIRunner() bool {
 	return os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true"
+}
+
+func writeValidationChecks(cmd *cobra.Command, report *validation.ValidationReport) {
+	for _, check := range report.CheckOutcomes {
+		name := validation.EscapeDiagnostic(check.Name)
+		if check.Passed {
+			fmt.Fprintf(cmd.OutOrStdout(), "PASS %s\n", name)
+			continue
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "FAIL %s (exit %d)\n", name, check.ExitCode)
+		if len(check.FailingTests) > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "failing tests: %s\n", strings.Join(check.FailingTests, ", "))
+		}
+		if check.OutputTail != "" {
+			fmt.Fprintln(cmd.OutOrStdout(), check.OutputTail)
+		}
+	}
 }

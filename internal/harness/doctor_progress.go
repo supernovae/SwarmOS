@@ -32,9 +32,11 @@ func NewDoctorRunner(ctx context.Context, observe func(progress.Event), ticksFac
 		emit := func(status string, elapsed time.Duration) {
 			observe(progress.Event{Check: name, Status: status, StageElapsed: elapsed})
 		}
-		emit("started", 0)
+		// Start the clock before announcing the check so observers that react to
+		// "started" never race the reporter's start time.
 		reporter := progress.NewReporter(ctx, func(elapsed time.Duration) { emit("running", elapsed) }, ticks, now)
 		defer reporter.Stop()
+		emit("started", 0)
 		result := check()
 		reporter.Stop()
 		reporter.Do(func(elapsed time.Duration) { emit(result.Status, elapsed) })

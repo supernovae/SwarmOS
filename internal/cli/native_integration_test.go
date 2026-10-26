@@ -22,7 +22,16 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	// Keep the persistent Go build cache that host validation creates under
+	// XDG_CACHE_HOME out of the real user cache directory.
+	cache, err := os.MkdirTemp("", "swarm-test-cache-*")
+	if err != nil {
+		os.Exit(1)
+	}
+	os.Setenv("XDG_CACHE_HOME", cache)
+	code := m.Run()
+	os.RemoveAll(cache)
+	os.Exit(code)
 }
 
 // This opt-in test uses the operator's existing Codex login and model quota.

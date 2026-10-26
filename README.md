@@ -111,7 +111,8 @@ CATEGORY   CHECK                                    STATUS   DETAIL
 system     git                                      OK       git version 2.54.0
 tracker    gh-cli                                   OK       /usr/local/bin/gh
 harness    .swarm/config.yaml                       OK       v1 (default_agent=codex, default_gate=agent)
-harness    .swarm/validation/required-checks.yaml   OK       3 checks, 17 protected paths
+harness    .swarm/validation/required-checks.yaml   OK       4 checks, 17 protected paths
+harness    ci lint/format coverage                  OK       required checks cover every recognized lint/format tool in .github/workflows
 binary     claude                                   OK       /usr/local/bin/claude
 binary     codex                                    OK       /usr/local/bin/codex
 binary     omp                                      OK       /usr/local/bin/omp
@@ -227,7 +228,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | :--- | :--- |
 | `swarm repo init [--dry-run] [--force] [--sync-labels] [--template-dir <dir>] [--fork-coordinator]` | Scaffold or upgrade `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. Rerun it after upgrading swarm: untouched generated files are updated, while your edits and your own files (including other workflows and an existing `AGENTS.md`, which gets a marked SwarmOS section) are kept (`--force` replaces files at SwarmOS paths, never your `AGENTS.md` or other workflows). `--swarm-version <ref>` overrides the pinned release. `--dry-run` previews the changes, with diffs for existing files, and writes nothing. |
 | `swarm repo onboard` | Print a guide your coding agent follows to onboard or upgrade the repository with you: preview init, propose validation checks from your CI, merge with existing files, and hand back a reviewable diff. Also available as `/swarm-onboard`. |
-| `swarm repo doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. |
+| `swarm repo doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. Warns, with a suggested `required-checks.yaml` entry, when CI runs a lint or format tool that no required check runs. |
 | `swarm issue create`, `swarm issue epic create`, `swarm issue approve`, `swarm issue lint`, `swarm issue decompose` | Create draft WorkUnits (`--parent`), standalone Epics (`--body-file`), approve revisions, lint schemas (with hints on how to strengthen an issue), or split WorkUnits into linked draft sub-issues. |
 | `swarm issue edit <issue> [--dry-run] [--json]` | Replace selected WorkUnit sections with lint and approval/claim checks; preview a diff before editing and reapprove changed contracts separately. |
 | `swarm repo lessons [--apply]` | Propose additions to `.swarm/rules/lessons.md` from what agents learned in merged PRs; `--apply` appends them locally for you to review and commit. |
@@ -251,7 +252,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm fork-coordinator --event <path> [--json]` | Process a verified `issue_comment.created` fork worker request inside the upstream GitHub Action. |
 | `swarm version [--json]` | Print version, commit, and platform metadata. |
 
-`swarm issue validate` and `swarm pr validate` always run the required checks. With a released build, `issue submit` and `pr submit` reuse a passing validation from the same worker and claim when the checkpoint content, approved base, trusted policy, and swarm version match exactly. Submit reports the original validation's age and tree SHA and includes that provenance in the PR. Edits, context changes, development builds, and fork submissions run checks again. CI always runs its checks.
+`swarm issue validate` and `swarm pr validate` always run the required checks. With a released build, `issue submit` and `pr submit` reuse a passing validation from the same worker and claim when the checkpoint content, approved base, trusted policy, and swarm version match exactly. Submit reports the original validation's age and tree SHA and includes that provenance in the PR. Edits, context changes, development builds, and fork submissions run checks again. CI always runs its checks. Checks that run on the host share a persistent SwarmOS-owned Go build cache per repository, so repeat runs stay fast; see [validation policy](docs/project.md#validation-policy-and-protected-paths).
 
 Every leaf command accepts `--json` for scripting (for example, `swarm issue claim --json`, `swarm issue status --json`, `swarm repo doctor --json`, and `swarm repo validate --base <sha> --json`). Each prints one JSON document with a `kind` field, and failures print `{"kind": ..., "status": "failed", "error": ...}`; the `issue`, `repo`, `pr`, and `node` groups themselves only print help. When `issue work`, `issue submit`, `pr work`, `pr rebase`, or `pr submit` stops because the plan got changes requested, a maintainer needs to approve, or there is a conflict, the failure also carries an advisory `next_action` (`reason`, `argv`, `human_required`). The command then exits with `3`, `4`, or `5` instead of `1`. See [Reacting to stops in scripts](docs/developer.md#reacting-to-stops-in-scripts). Worker commands accept the global `--fork [--fork-remote <name>]` for personal-fork contributions.
 

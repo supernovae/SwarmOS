@@ -1129,3 +1129,117 @@ func TestDeveloperChangelogInstructions(t *testing.T) {
 		}
 	}
 }
+
+func TestInitGoScaffoldChecksFormatting(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/fmtcheck\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadValidationSpec(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := map[string]string{}
+	for _, check := range spec.RequiredChecks {
+		commands[check.Name] = check.Command
+	}
+	want := map[string]string{"fmt": GoFmtCheckCommand, "build": "go build ./...", "test": "go test ./...", "lint": "go vet ./..."}
+	if !maps.Equal(commands, want) {
+		t.Fatalf("Go required checks = %v; want %v", commands, want)
+	}
+	if _, err := exec.LookPath("gofmt"); err != nil {
+		t.Skip("gofmt not installed")
+	}
+	run := func(path string) (string, error) {
+		cmd := exec.Command("sh", "-c", commands["fmt"])
+		cmd.Dir = root
+		if path != "" {
+			cmd.Env = append(os.Environ(), "PATH="+path)
+		}
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(""); err != nil {
+		t.Fatalf("formatted tree failed fmt check: %v (%s)", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(root, "bad.go"), []byte("package main\nfunc  bad( ) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(""); err == nil || !strings.Contains(out, "bad.go") {
+		t.Fatalf("unformatted tree passed fmt check or did not list it: %v (%s)", err, out)
+	}
+	if runtime.GOOS != "windows" {
+		bin := t.TempDir()
+		if err := os.WriteFile(filepath.Join(bin, "gofmt"), []byte("#!/bin/sh\necho broken >&2\nexit 2\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(root, "bad.go")); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := run(bin + string(os.PathListSeparator) + os.Getenv("PATH")); err == nil {
+			t.Fatalf("failing gofmt passed fmt check: %s", out)
+		}
+	}
+}
+
+func TestInitNonGoScaffoldHasNoGoChecks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Cargo.toml"), []byte("[package]\nname = \"x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := LoadValidationSpec(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range spec.RequiredChecks {
+		if check.Name == "fmt" || strings.Contains(check.Command, "gofmt") || strings.HasPrefix(check.Command, "go ") {
+			t.Fatalf("non-Go scaffold has Go check %+v", check)
+		}
+	}
+}
+
+func TestInitPreservesCustomizedRequiredChecks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/custom\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".swarm", "validation", "required-checks.yaml")
+	custom := []byte("required_checks:\n  - name: build\n    command: go build ./...\n    timeout: 5m\nprotected_paths:\n  - .swarm/validation/**\n")
+	if err := os.WriteFile(path, custom, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(custom) {
+		t.Fatalf("init replaced customized required checks: %q, %v", got, err)
+	}
+}
+
+func TestDeveloperRequiredCheckInstructions(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".swarm/prompts/developer.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"run every command in the trusted required checks", "Fix lint and format findings", "rather than leaving them for CI"} {
+		if !strings.Contains(string(data), text) {
+			t.Fatalf("generated developer prompt lacks %q", text)
+		}
+	}
+}

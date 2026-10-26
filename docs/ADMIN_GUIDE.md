@@ -19,6 +19,8 @@ swarm repo init --sync-labels --backend github
 swarm repo doctor --backend github
 ```
 
+In a Go repository, the generated `.swarm/validation/required-checks.yaml` includes a gofmt `fmt` check next to `build`, `test`, and `go vet`. If your CI runs other lint or format tools, such as staticcheck or golangci-lint, `swarm repo doctor` warns about each one that no required check covers and suggests an entry. Add the ones you want to the policy on your default branch so agents catch those findings before CI does. See [validation policy](project.md#validation-policy-and-protected-paths).
+
 ### Onboarding an existing repository
 
 A repository with years of history, its own CI, and an established `AGENTS.md` deserves a gentler start than a fresh scaffold. Two tools help:

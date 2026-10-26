@@ -138,12 +138,19 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return emptySubmitError(issue, state.BaseSHA)
 			}
 			p.Next("validation")
-			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork})
+			validationOpts := validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork || manager.HasWorkerGateway()}
+			report, valErr := validation.Reuse(ctx, worktree, validationOpts, owner, state.Artifacts)
+			if valErr == nil && report == nil {
+				report, valErr = validation.Validate(ctx, worktree, unit, validationOpts)
+			}
+			if report != nil && report.Reused {
+				fmt.Fprintln(cmd.ErrOrStderr(), report.Artifact.Summary)
+			}
 			if report != nil {
 				failedReport = report
 				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 				lease.PreserveTesterGuidance(state, &report.Artifact)
-				if _, err := manager.UpdateArtifact(ctx, issue, owner, report.Artifact); err != nil {
+				if _, err := manager.RecordTrustedValidation(ctx, issue, owner, report.Artifact); err != nil {
 					return errors.Join(valErr, err)
 				}
 			}
@@ -217,7 +224,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				pr.HTMLURL = submittedState.PRURL
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head, "base_freshness": freshness})
+				return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head, "base_freshness": freshness, "report": report})
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Submitted draft PR #%d for issue #%d on %s (%s)\n", pr.Number, issue, branch, pr.HTMLURL)
 			return nil

@@ -28,7 +28,11 @@ func RejectRecoveryOutput(ctx context.Context, root, head string) error {
 // Enumerate literal file paths so candidate ignore rules cannot re-include
 // recovery files, and exclusion pathspecs cannot turn ignored dirs into errors.
 func stageCheckpointFiles(ctx context.Context, root string) error {
-	paths, err := gitOutputContext(ctx, root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+	return stageCheckpointFilesWith(func(args ...string) (string, error) { return gitOutputContext(ctx, root, args...) })
+}
+
+func stageCheckpointFilesWith(run func(...string) (string, error)) error {
+	paths, err := run("ls-files", "--cached", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return err
 	}
@@ -37,7 +41,7 @@ func stageCheckpointFiles(ctx context.Context, root string) error {
 		if len(args) == 3 {
 			return nil
 		}
-		_, err := gitOutputContext(ctx, root, args...)
+		_, err := run(args...)
 		args = []string{"add", "-A", "--"}
 		return err
 	}

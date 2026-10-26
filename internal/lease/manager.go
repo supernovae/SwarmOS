@@ -1444,14 +1444,29 @@ func (m *Manager) UpdateAdvisoryReview(ctx context.Context, n int, owner string,
 	if art.Type != contract.ArtifactReview || art.Metadata["kind"] == "human" {
 		return nil, fmt.Errorf("advisory review requires an agent review artifact")
 	}
-	return m.updateArtifact(ctx, n, owner, art, true)
+	return m.updateArtifact(ctx, n, owner, art, true, false)
 }
 
 func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art contract.Artifact) (*IssueState, error) {
-	return m.updateArtifact(ctx, n, owner, art, false)
+	return m.updateArtifact(ctx, n, owner, art, false, false)
 }
 
-func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art contract.Artifact, advisory bool) (*IssueState, error) {
+// RecordTrustedValidation records coordinator-produced evidence under the claim fence.
+func (m *Manager) RecordTrustedValidation(ctx context.Context, n int, owner string, art contract.Artifact) (*IssueState, error) {
+	if art.Type != contract.ArtifactValidation {
+		return nil, fmt.Errorf("expected validation artifact")
+	}
+	return m.updateArtifact(ctx, n, owner, art, false, m.gateway == nil)
+}
+
+func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art contract.Artifact, advisory, trusted bool) (*IssueState, error) {
+	metadata := make(map[string]string, len(art.Metadata))
+	for k, v := range art.Metadata {
+		if !strings.HasPrefix(k, "validation_trusted_") {
+			metadata[k] = v
+		}
+	}
+	art.Metadata = metadata
 	if m.gateway != nil {
 		artCopy := art
 		return m.gateway.Apply(ctx, ForkRequest{
@@ -1463,6 +1478,11 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		})
 	}
 	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if trusted {
+			art.Metadata["validation_trusted_origin"] = "coordinator"
+			art.Metadata["validation_trusted_owner"] = st.Lease.Owner
+			art.Metadata["validation_trusted_claim"] = st.Lease.ClaimID
+		}
 		if art.IssueNumber == 0 {
 			art.IssueNumber = n
 		}

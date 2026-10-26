@@ -3,6 +3,7 @@ package validation
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +45,7 @@ type CheckRunOutcome struct {
 }
 
 type ValidationReport struct {
+	Reused        bool     `json:"reused,omitempty"`
 	Passed        bool     `json:"passed"`
 	BaseSHA       string   `json:"base_sha"`
 	HeadSHA       string   `json:"head_sha"`
@@ -56,6 +58,10 @@ type ValidationReport struct {
 }
 
 type ValidateOptions struct {
+	// Version and ClaimID identify the coordinator validation context. Empty
+	// context preserves ordinary validation without reusable evidence.
+	Version string
+	ClaimID string
 	// OnProgress observes trusted check metadata only; callbacks must return promptly.
 	OnProgress func(progress.Event)
 	CIMode     bool
@@ -78,6 +84,12 @@ type ValidateOptions struct {
 func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, opts ValidateOptions) (*ValidationReport, error) {
 	if opts.BaseSHA == "" {
 		return nil, ErrMissingBaseSHA
+	}
+	// Include protected-path and artifact inspection in the stability window,
+	// so an edit during policy checking cannot earn reusable evidence.
+	var before map[string]string
+	if !opts.CIMode && opts.Version != "" && opts.ClaimID != "" {
+		before, _ = fingerprint(ctx, worktreePath, opts)
 	}
 	spec, err := loadTrustedValidationSpec(worktreePath, opts.BaseSHA)
 	if err != nil {
@@ -220,6 +232,23 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		issue = 1
 	}
 	report.Artifact = contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-validation", issue), IssueNumber: issue, Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: verdict, Summary: summary, Body: markdown.String(), CreatedAt: time.Now().UTC(), Metadata: map[string]string{"base_sha": baseSHA, "head_sha": headSHA}}
+	if report.Passed && before != nil {
+		after, e := fingerprint(ctx, worktreePath, opts)
+		stable := e == nil
+		for k, v := range before {
+			if after[k] != v {
+				stable = false
+			}
+		}
+		if stable {
+			for k, v := range before {
+				report.Artifact.Metadata[k] = v
+			}
+			// Serialize before embedding so evidence does not recursively contain itself.
+			evidence, _ := json.Marshal(report)
+			report.Artifact.Metadata["validation_report"] = string(evidence)
+		}
+	}
 	if !opts.CIMode {
 		if err := safefs.WriteFile(worktreePath, filepath.Join(".swarm", "active", "VALIDATION.md"), []byte(markdown.String()), 0o644); err != nil {
 			return nil, err

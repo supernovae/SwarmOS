@@ -26,6 +26,7 @@ import (
 )
 
 type Service struct {
+	Version    string
 	workWait   func(context.Context) error
 	OnProgress func(progress.Event)
 	// Progress is an optional CLI-owned session spanning repository resolution.
@@ -576,6 +577,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		}
 		return r, fmt.Errorf("%s\n%s", strings.Join(r.WorkPreflight.Blockers, "\n"), strings.Join(r.WorkPreflight.Commands, "\n"))
 	}
+	opts.Work.Version = s.Version
 	opts.Work.RepoRoot = s.Root
 	opts.Work.IssueNumber = r.IssueNumber
 	opts.Work.PRNumber = opts.Number
@@ -946,12 +948,12 @@ func (s *Service) Validate(ctx context.Context, number int) (result *Result, run
 	if err != nil {
 		return nil, err
 	}
-	return s.validate(ctx, r, remote, p)
+	return s.validate(ctx, r, remote, p, false)
 }
 
 // validate runs required checks on the pending revision under the renewed claim
 // and records the report as that revision's validation evidence.
-func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session) (*Result, error) {
+func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session, reuse bool) (*Result, error) {
 	number := r.PR.Number
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
@@ -968,14 +970,14 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string, p *pro
 			return nil, fmt.Errorf("PR worktree identity differs from recorded revision")
 		}
 		return withCleanPRMarkers(path, func() (*Result, error) {
-			return s.validateClaim(ctx, r, owner, st, p)
+			return s.validateClaim(ctx, r, owner, st, p, reuse)
 
 		})
 	})
 }
 
 // validateClaim shares the existing fenced claim with rebase and repair.
-func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st *lease.IssueState, p *progress.Session) (*Result, error) {
+func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st *lease.IssueState, p *progress.Session, reuse bool) (*Result, error) {
 	head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
 	if e != nil {
 		return nil, e
@@ -995,7 +997,15 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 		p.Next("validation")
 		observe = p.Observe
 	}
-	report, valErr := validation.Validate(ctx, r.Worktree, wu, validation.ValidateOptions{BaseSHA: st.BaseSHA, OnProgress: observe})
+	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway()}
+	var report *validation.ValidationReport
+	var valErr error
+	if reuse {
+		report, valErr = validation.Reuse(ctx, r.Worktree, opts, owner, st.Artifacts)
+	}
+	if report == nil && valErr == nil {
+		report, valErr = validation.Validate(ctx, r.Worktree, wu, opts)
+	}
 	checkedHead, changed, activeRebase, checkErr := workspace.PRHead(ctx, r.Worktree)
 	if checkErr != nil {
 		return nil, checkErr
@@ -1007,7 +1017,7 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 		report.Artifact.Metadata = lease.TesterMetadata(st, report.Artifact.Metadata)
 		lease.PreserveTesterGuidance(st, &report.Artifact)
 		r.Validation = report
-		st, e = s.Manager.UpdateArtifact(ctx, r.IssueNumber, owner, report.Artifact)
+		st, e = s.Manager.RecordTrustedValidation(ctx, r.IssueNumber, owner, report.Artifact)
 		if e != nil {
 			return r, e
 		}
@@ -1052,7 +1062,7 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 		}
 		return r, nil
 	}
-	r, err = s.validate(ctx, r, remote, p)
+	r, err = s.validate(ctx, r, remote, p, true)
 	if err != nil {
 		return r, err
 	}

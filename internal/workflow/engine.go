@@ -31,6 +31,7 @@ var (
 )
 
 type WorkOptions struct {
+	Version        string
 	ReviewEvidence tracker.ReviewEvidence
 	CIEvidence     []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
 
@@ -985,7 +986,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	progress.next("required-checks")
 	testerBody, _ := readRequiredArtifact(wtPath, "VALIDATION.md")
-	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{BaseSHA: st.BaseSHA, ForkMode: forkMode})
+	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode})
 	if context.Cause(ctx) == claimpause.ErrBudget {
 		return res, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, "implement", true, forkMode, forkRemote)
 	}
@@ -996,7 +997,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if _, writeErr := recordGuidance(wtPath, "VALIDATION.md", canonicalReport(report.Artifact.Body), testerRun); writeErr != nil {
 			return res, writeErr
 		}
-		updated, updateErr := e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, report.Artifact)
+		updated, updateErr := e.LeaseManager.RecordTrustedValidation(ctx, opts.IssueNumber, opts.Owner, report.Artifact)
 		if updateErr != nil {
 			return res, updateErr
 		}

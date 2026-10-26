@@ -37,6 +37,10 @@ type CleanupPreview struct {
 // fetches refs, or changes worktree files. Apply reinspects eligible resources
 // before retiring them; outside filesystem writers must be stopped.
 func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Manager, n int) (*CleanupPreview, error) {
+	return inspectCleanup(ctx, root, m, n, nil)
+}
+
+func inspectCleanup(ctx context.Context, root string, m *Manager, n int, snap *CleanupSnapshot) (*CleanupPreview, error) {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve cleanup root: %w", err)
@@ -50,12 +54,23 @@ func InspectCleanup(ctx context.Context, root string, tr tracker.Tracker, m *Man
 	if err != nil {
 		return nil, err
 	}
-	o, err := m.observeSubmission(ctx, st)
+	if snap != nil && st.PRNumber <= 0 {
+		return unsubmittedCleanupPreview(ctx, root, m, n, st), nil
+	}
+	var o *PROutcome
+	if snap != nil {
+		var pr *tracker.PullRequest
+		if pr, err = snap.pullRequest(st.PRNumber); err == nil {
+			o, err = m.submissionOutcome(st, pr)
+		}
+	} else {
+		o, err = m.observeSubmission(ctx, st)
+	}
 	if err != nil {
 		return nil, err
 	}
 	p := &CleanupPreview{Kind: "cleanup", IssueNumber: n, Outcome: o}
-	reason := m.cleanupPolicy(ctx, st, o, false)
+	reason := m.cleanupPolicyFrom(ctx, st, o, false, snap)
 	p.Blocked = reason
 	p.RemoteApplicable = !m.cleanupLocal()
 	r := CleanupResource{Kind: "remote-code-branch", Name: st.Branch, ExpectedHead: o.SubmittedHeadSHA, Reason: reason}

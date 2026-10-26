@@ -24,6 +24,11 @@ func cleanupBranchName(branch string) string {
 // cleanupPolicy is shared by preview and every apply entry point. Only the
 // absence of an upstream provider selects local scope; missing identity cannot.
 func (m *Manager) cleanupPolicy(ctx context.Context, st *IssueState, o *PROutcome, reserved bool) string {
+	return m.cleanupPolicyFrom(ctx, st, o, reserved, nil)
+}
+
+// cleanupPolicyFrom reads open PRs from snap when given; apply never passes one.
+func (m *Manager) cleanupPolicyFrom(ctx context.Context, st *IssueState, o *PROutcome, reserved bool, snap *CleanupSnapshot) string {
 	switch {
 	case st.Lease.Status == "active" || st.PRRevision != nil:
 		return "active attempt or pending PR revision"
@@ -47,7 +52,13 @@ func (m *Manager) cleanupPolicy(ctx context.Context, st *IssueState, o *PROutcom
 			return err.Error()
 		}
 	}
-	prs, err := m.tracker.ListPullRequests(ctx, tracker.PullRequestFilter{State: "open"})
+	var prs []*tracker.PullRequest
+	var err error
+	if snap != nil {
+		prs, err = snap.openPullRequests()
+	} else {
+		prs, err = m.tracker.ListPullRequests(ctx, tracker.PullRequestFilter{State: "open"})
+	}
 	if err != nil {
 		return err.Error()
 	}

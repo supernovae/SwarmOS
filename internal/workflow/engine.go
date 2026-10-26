@@ -75,6 +75,11 @@ type WorkResult struct {
 	PhaseCompleted   string
 	HandedOffToPhase string
 	PausedForHuman   bool
+	// SplitRecommended reports a run stopped after planning because the
+	// recorded plan recommends splitting the WorkUnit.
+	SplitRecommended bool `json:"split_recommended,omitempty"`
+	// DecomposeCommand is the command the CLI suggests after a split stop.
+	DecomposeCommand string `json:"decompose_command,omitempty"`
 	// PlanReviewers are the reviewer_collaborators asked to review a paused
 	// plan; ReviewerNoticeError reports a best-effort notification failure.
 	PlanReviewers       []string
@@ -91,6 +96,8 @@ func (r *WorkResult) Outcome() string {
 	switch {
 	case r.ClaimBudgetPause != nil:
 		return "paused-claim-budget"
+	case r.SplitRecommended:
+		return "split-recommended"
 	case r.PausedForHuman:
 		return "paused"
 	case r.HandedOffToPhase != "":
@@ -677,6 +684,15 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return res, err
 		}
 	}
+	// A recorded split recommendation ends the run after planning. It only
+	// stops work: no review, implementation, verdict, or decomposition follows.
+	stopForSplit := func() bool {
+		if !splitRecommended(st) {
+			return false
+		}
+		res.State, res.PhaseCompleted, res.SplitRecommended = st, "plan", true
+		return true
+	}
 	rejectedPlan, rejectedTest, rejectedFindings := rejectedPlanContext(st)
 	runPlan := opts.Phase == "all" || opts.Phase == "plan"
 	if opts.Phase == "all" && (hasDesignAndTestPlanArtifacts(st) && !hasRejectedReview(st)) {
@@ -758,6 +774,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return res, err
 		}
 		res.State, res.PhaseCompleted = st, "plan"
+		if stopForSplit() {
+			return res, nil
+		}
 		if opts.Phase == "plan" {
 			if opts.Handoff {
 				progress.next("handoff")
@@ -775,6 +794,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			}
 			return res, nil
 		}
+	}
+	if stopForSplit() {
+		return res, nil
 	}
 	if gate == contract.GateHuman && (opts.Phase == "review" || opts.Phase == "all" && (runPlan || lease.VerifyApproval(st, pre.WorkUnit) != nil)) {
 		progress.next("awaiting-approval")

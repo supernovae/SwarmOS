@@ -4,12 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/lease"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
 )
 
@@ -113,6 +115,18 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil || strings.TrimSpace(owner) == "" {
 			return fmt.Errorf("determine approving actor: %w", err)
 		}
+		// Shape advice is printed before approving so oversized work gets split
+		// first. It never blocks approval; ApproveTask stays authoritative.
+		shape, shapeErr := approvalShape(cmd, tr, rootOpts.resolveRepoRoot(), number)
+		advice := cmd.OutOrStdout()
+		if asJSON {
+			advice = cmd.ErrOrStderr()
+		}
+		if shapeErr != nil {
+			fmt.Fprintf(advice, "Suggested shape: unavailable (%v)\n", shapeErr)
+		} else {
+			writeShapeAdvice(advice, shape)
+		}
 		st, err := mgr.ApproveTask(cmd.Context(), number, owner)
 		if err != nil {
 			var claimed *lease.AlreadyClaimedError
@@ -122,7 +136,11 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 			return err
 		}
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "task-approval", "issue_number": number, "state": st})
+			result := map[string]any{"kind": "task-approval", "issue_number": number, "state": st}
+			if shapeErr == nil {
+				result["shape"] = shape
+			}
+			return writeJSON(cmd, result)
 		}
 		if st.CheckpointDropped {
 			fmt.Fprintln(cmd.OutOrStdout(), "Dropped empty checkpoint already contained in the approved base.")
@@ -149,29 +167,53 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		// Shape and hints are advisory and never change the lint result, so the
-		// working tree's protected paths are good enough here.
-		repoRoot := rootOpts.resolveRepoRoot()
-		spec, _ := harness.LoadValidationSpec(repoRoot)
-		shape := workflow.AssessWorkUnitShape(repoRoot, wu, spec)
+		shape := assessShape(rootOpts.resolveRepoRoot(), wu)
 		if asJSON {
 			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "shape": shape})
 		}
 		out := cmd.OutOrStdout()
 		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities)
-		fmt.Fprintf(out, "Suggested shape: %s", shape.Shape.Title())
-		if len(shape.Signals) > 0 {
-			fmt.Fprintf(out, " (%s)", strings.Join(shape.Signals, "; "))
-		}
-		fmt.Fprintln(out)
-		for _, hint := range shape.Hints {
-			fmt.Fprintf(out, "  hint: %s\n", hint)
-		}
+		writeShapeAdvice(out, shape)
 		return nil
 	}}
 	lintCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured lint results")
 	issueCmd.AddCommand(newIssueEditCmd(rootOpts), newReconcileCmd(rootOpts), newCleanupCmd(rootOpts), createCmd, approveCmd, lintCmd, newDecomposeCmd(rootOpts), newIssueEpicCmd(rootOpts), newClaimCmd(rootOpts), newWorkCmd(rootOpts), newStageCmd(rootOpts), newReviewCmd(rootOpts), newValidateCmd(rootOpts), newSubmitCmd(rootOpts), newStatusCmd(rootOpts), newRenewCmd(rootOpts), newReleaseCmd(rootOpts))
 	return issueCmd
+}
+
+// assessShape suggests a shape for lint and approval. Shape and hints are
+// advisory and never change either result, so the working tree's protected
+// paths are good enough here.
+func assessShape(repoRoot string, wu *contract.WorkUnit) workflow.ShapeAssessment {
+	spec, _ := harness.LoadValidationSpec(repoRoot)
+	return workflow.AssessWorkUnitShape(repoRoot, wu, spec)
+}
+
+// approvalShape reads and parses the issue to assess its shape. An error only
+// means the advice is unavailable; approval decides validity on its own.
+func approvalShape(cmd *cobra.Command, tr tracker.Tracker, repoRoot string, number int) (workflow.ShapeAssessment, error) {
+	iss, err := tr.GetIssue(cmd.Context(), number)
+	if err != nil {
+		return workflow.ShapeAssessment{}, err
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
+	if err != nil {
+		return workflow.ShapeAssessment{}, err
+	}
+	return assessShape(repoRoot, wu), nil
+}
+
+// writeShapeAdvice prints the suggested shape, its signals, and any hints in
+// the form swarm issue lint uses.
+func writeShapeAdvice(out io.Writer, shape workflow.ShapeAssessment) {
+	fmt.Fprintf(out, "Suggested shape: %s", shape.Shape.Title())
+	if len(shape.Signals) > 0 {
+		fmt.Fprintf(out, " (%s)", strings.Join(shape.Signals, "; "))
+	}
+	fmt.Fprintln(out)
+	for _, hint := range shape.Hints {
+		fmt.Fprintf(out, "  hint: %s\n", hint)
+	}
 }
 
 func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {

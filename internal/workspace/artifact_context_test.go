@@ -20,7 +20,7 @@ func TestRoleContextAndReviewOnlyLessons(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkpointWrite(t, filepath.Join(root, ".swarm/active"), "LESSONS.md", "- active-lesson-marker")
-			err := compileHarnessBundle(root, &contract.WorkUnit{ID: "ISSUE-56", IssueNumber: 56}, nil, artifacts, role, "role prompt", "", "", "", "checks")
+			err := compileHarnessBundle(root, &contract.WorkUnit{ID: "ISSUE-56", IssueNumber: 56}, nil, artifacts, role, "role prompt", "", "", "", "checks", "")
 			if err != nil {
 				t.Fatal(err)
 			}

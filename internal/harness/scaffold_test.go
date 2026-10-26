@@ -1243,3 +1243,28 @@ func TestDeveloperRequiredCheckInstructions(t *testing.T) {
 		}
 	}
 }
+
+func TestPlannerSplitRecommendationInstructions(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".swarm", "prompts", "planner.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := string(raw)
+	for _, want := range []string{
+		"total claim budget (lease.duration × (1 + max_renewals))",
+		"one plan, implement, and validate cycle can finish within it",
+		"\n   Split recommendation: required\n",
+		"Immediately after it, list the proposed child WorkUnits",
+		"`### <title>`, an **Objective**, and **Acceptance Criteria**",
+		"Omit the line entirely for a normal plan",
+		"a maintainer decides whether to decompose",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("planner prompt missing %q", want)
+		}
+	}
+}

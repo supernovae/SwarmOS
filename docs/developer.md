@@ -104,6 +104,28 @@ Issue checkpoints use the existing fenced publication path. PR revision checkpoi
 
 This automatic pause is separate from an agent execution timeout, whose recovery patch requires inspection before use.
 
+### When the planner recommends a split
+
+Some WorkUnits are too large to plan, implement, and validate within one claim. The planner's instructions state the approved total claim budget, `lease.duration × (1 + lease.max_renewals)`. If one plan, implement, and validate cycle cannot fit, the planner puts this exact line on its own line in `PLAN.md`:
+
+```text
+Split recommendation: required
+```
+
+Right after it, the planner proposes child WorkUnits, each with a title, an objective, and checkable acceptance criteria. A normal plan leaves the line out.
+
+When the recorded plan contains that line, `swarm issue work`, `swarm pr work`, and `swarm node run` stop after planning. They skip review and implementation, record no `FAIL` verdict, and report the outcome `split-recommended` together with the command to run next:
+
+```bash
+swarm issue decompose 42
+```
+
+For `swarm pr work`, the command names the linked issue, not the PR. With `--json`, the result carries `split_recommended` and `decompose_command`, and `swarm node run --json` lists them under `split_recommendations`. Node workers never auto-submit a stopped run.
+
+The recommendation can only stop work. It does not approve the plan, create issues, or change the WorkUnit, and the plan gate still applies to any later plan. Decomposing is a maintainer decision: `swarm issue decompose` turns the WorkUnit's acceptance criteria into draft child issues and does not read the proposed children in `PLAN.md`. To use the planner's proposals as written, create the children with `swarm issue create --parent 42`. Either way, each child needs its own `swarm issue approve` and passes through the usual plan gate.
+
+If you disagree with the recommendation, re-plan with `swarm issue work 42 --phase plan` (or `swarm pr work <PR> --phase plan`). Until then, later runs reuse the recorded plan and stop again. A new plan without the line continues through the usual gates.
+
 ### Choose how you work
 
 Start interactively when you want to stay close to the changes. Move repeatable tasks to unattended workers once the tools and permissions are set up.

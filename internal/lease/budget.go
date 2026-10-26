@@ -2,7 +2,6 @@ package lease
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -29,11 +28,7 @@ type ClaimBudget struct {
 func (b *ClaimBudget) LeaseExpiryOnly() bool { return b != nil && b.expiryOnly }
 
 func policyBudget(cfg contract.LeaseConfig) (time.Duration, time.Duration, error) {
-	d, err := time.ParseDuration(cfg.Duration)
-	if err != nil || d <= 0 || cfg.MaxRenewals < 0 || uint64(cfg.MaxRenewals) >= uint64(math.MaxInt64)/uint64(d) {
-		return 0, 0, fmt.Errorf("invalid or overflowing approved lease budget")
-	}
-	return d, d * (time.Duration(cfg.MaxRenewals) + 1), nil
+	return cfg.ClaimBudget()
 }
 
 // Budget loads policy from the approved base and uses the manager clock.

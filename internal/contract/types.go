@@ -1,6 +1,10 @@
 package contract
 
-import "time"
+import (
+	"fmt"
+	"math"
+	"time"
+)
 
 type GateMode string
 
@@ -269,6 +273,16 @@ func (c LeaseConfig) RebaseRepairAttempts() int {
 		return 2
 	}
 	return *c.RebaseRepairLimit
+}
+
+// ClaimBudget returns the lease duration and the total claim budget,
+// duration * (1 + max_renewals), rejecting invalid or overflowing policy.
+func (c LeaseConfig) ClaimBudget() (time.Duration, time.Duration, error) {
+	d, err := time.ParseDuration(c.Duration)
+	if err != nil || d <= 0 || c.MaxRenewals < 0 || uint64(c.MaxRenewals) >= uint64(math.MaxInt64)/uint64(d) {
+		return 0, 0, fmt.Errorf("invalid or overflowing approved lease budget")
+	}
+	return d, d * (time.Duration(c.MaxRenewals) + 1), nil
 }
 
 // PlanReplanAttempts is the number of automatic retries after a rejected plan.

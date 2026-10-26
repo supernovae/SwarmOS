@@ -784,7 +784,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 				r.State = worked.State
 				r.HeadSHA = worked.HeadSHA
 				r.Status = "pending"
-				if worked.ClaimBudgetPause != nil {
+				if worked.ClaimBudgetPause != nil || worked.SplitRecommended {
 					r.Status = worked.Outcome()
 				}
 			}

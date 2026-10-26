@@ -3,15 +3,18 @@ package validation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/progress"
 )
 
@@ -421,4 +424,271 @@ func TestValidatorSessionHeartbeatAdapter(t *testing.T) {
 		t.Fatalf("bad finish %+v", finish)
 	}
 	session.Finish("completed")
+}
+
+func TestProtectedPathGlob(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, target string
+		want            bool
+	}{
+		{"**/.gitattributes", ".gitattributes", true},
+		{"**/.gitattributes", "docs/.gitattributes", true},
+		{"**/.gitattributes", "a/b/.gitattributes", true},
+		{"**/.gitattributes", ".gitattributes.bak", false},
+		{"**/.gitattributes", "a/b/.gitattributes.bak", false},
+		{"**/.gitattributes", "a/.gitattributes/x", false},
+		{"**/.gitattributes", "main.go", false},
+		{"a/**/b.yaml", "a/b.yaml", true},
+		{"a/**/b.yaml", "a/x/b.yaml", true},
+		{"a/**/b.yaml", "a/x/y/b.yaml", true},
+		{"a/**/b.yaml", "ab/b.yaml", false},
+		{"a/**/b.yaml", "a/b.yml", false},
+		{"a/**/b.yaml", "a/x/b.yaml/extra", false},
+		{"a/**/b.yaml", "x/a/b.yaml", false},
+		{"a/**/**/b.yaml", "a/b.yaml", true},
+		{"a/**/**/b.yaml", "a/x/y/z/b.yaml", true},
+		{"**/x/**/*.yml", "x/ci.yml", true},
+		{"**/x/**/*.yml", "p/q/x/r/ci.yml", true},
+		{"**/x/**/*.yml", "p/q/y/r/ci.yml", false},
+		{"**/x/**/*.yml", "x/ci.yaml", false},
+		{"**", "any/depth/file", true},
+		{"**/**/**/**/**/**/**/**/**/**/**/**/z", "a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r/s/t/y", false},
+	} {
+		if got := matchGlobPattern(tc.pattern, tc.target); got != tc.want {
+			t.Errorf("matchGlobPattern(%q, %q) = %v, want %v", tc.pattern, tc.target, got, tc.want)
+		}
+	}
+}
+
+// legacyMatchGlobPattern is the matcher before recursive ** support. Every
+// target it matched must still match.
+func legacyMatchGlobPattern(pattern, target string) bool {
+	pattern, target = filepath.ToSlash(strings.TrimSpace(pattern)), filepath.ToSlash(target)
+	if strings.HasSuffix(pattern, "/**") {
+		prefix := strings.TrimSuffix(pattern, "/**")
+		return target == prefix || strings.HasPrefix(target, prefix+"/")
+	}
+	ok, err := filepath.Match(pattern, target)
+	return (err == nil && ok) || pattern == target
+}
+
+func TestProtectedPathGlobCompatibility(t *testing.T) {
+	// Only rows marked widened may match more than the legacy matcher did.
+	for _, tc := range []struct {
+		pattern, target string
+		want, widened   bool
+	}{
+		// Patterns from .swarm/validation/required-checks.yaml.
+		{".github/workflows/**", ".github/workflows", true, false},
+		{".github/workflows/**", ".github/workflows/ci.yml", true, false},
+		{".github/workflows/**", ".github/workflows/nested/ci.yml", true, false},
+		{".github/workflows/**", ".github/workflowsx/ci.yml", false, false},
+		{".github/workflows/**", ".github/ci.yml", false, false},
+		{".gitattributes", ".gitattributes", true, false},
+		{".gitattributes", "docs/.gitattributes", false, false},
+		{"**/.gitattributes", "docs/.gitattributes", true, false},
+		{"**/.gitattributes", ".gitattributes", true, true},
+		{"**/.gitattributes", "a/b/.gitattributes", true, true},
+		{"**/.gitattributes", "docs/gitattributes", false, false},
+		{".swarm/validation/**", ".swarm/validation/required-checks.yaml", true, false},
+		{".swarm/validation/**", ".swarm/validation", true, false},
+		{".swarm/validation/**", ".swarm/validationx", false, false},
+		{".swarm/contracts/**", ".swarm/contracts/a/b.json", true, false},
+		{".swarm/config.yaml", ".swarm/config.yaml", true, false},
+		{".swarm/config.yaml", ".swarm/config.yml", false, false},
+		{".swarm/prompts/**", ".swarm/prompts/planner.md", true, false},
+		{".swarm/workflows/**", ".swarm/workflows/bugfix.yaml", true, false},
+		{".swarm/goals.md", ".swarm/goals.md", true, false},
+		{".swarm/SKILLS.md", ".swarm/SKILLS.md", true, false},
+		{".swarm/SKILLS.md", ".swarm/skills.md", false, false},
+		{".swarm/rules/**", ".swarm/rules/lessons.md", true, false},
+		{".swarm/skills/**", ".swarm/skills/triage-and-plan.md", true, false},
+		{".swarm/project.md", ".swarm/project.md", true, false},
+		{".swarm/architecture.md", ".swarm/architecture.md", true, false},
+		{".swarm/conventions.md", ".swarm/conventions.md", true, false},
+		{".claude/commands/**", ".claude/commands/swarm-plan.md", true, false},
+		{".claude/commands/**", ".claude/settings.json", false, false},
+		{".opencode/commands/**", ".opencode/commands/swarm-review.md", true, false},
+		{"AGENTS.md", "AGENTS.md", true, false},
+		{"AGENTS.md", "docs/AGENTS.md", false, false},
+		{"CLAUDE.md", "CLAUDE.md", true, false},
+		// Ordinary filepath.Match patterns.
+		{"docs/*.md", "docs/a.md", true, false},
+		{"docs/*.md", "docs/a/b.md", false, false},
+		{"docs/?.md", "docs/a.md", true, false},
+		{"docs/?.md", "docs/ab.md", false, false},
+		{"docs/[ab].md", "docs/b.md", true, false},
+		{"docs/[^ab].md", "docs/b.md", false, false},
+		{"a**b", "axxb", true, false},
+		{"a**b", "ax/xb", false, false},
+		{"  AGENTS.md  ", "AGENTS.md", true, false},
+		// Legacy literal prefix shortcut for wildcard prefixes.
+		{"*/**", "*/x", true, false},
+		{"*/**", "dir/x", true, true},
+		{"docs/*/**", "docs/a/b/c", true, true},
+	} {
+		got, legacy := matchGlobPattern(tc.pattern, tc.target), legacyMatchGlobPattern(tc.pattern, tc.target)
+		if got != tc.want {
+			t.Errorf("matchGlobPattern(%q, %q) = %v, want %v", tc.pattern, tc.target, got, tc.want)
+		}
+		if legacy && !got {
+			t.Errorf("%q no longer matches %q", tc.pattern, tc.target)
+		}
+		if got != legacy && !tc.widened {
+			t.Errorf("%q on %q changed from %v without being marked widened", tc.pattern, tc.target, legacy)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		if !matchGlobPattern(`docs/\*.md`, "docs/*.md") || matchGlobPattern(`docs/\*.md`, "docs/a.md") {
+			t.Error("escaped star must stay literal")
+		}
+	}
+
+	// Every pattern in this repository's policy must appear in the table above.
+	data, err := os.ReadFile(filepath.Join("..", "..", ".swarm", "validation", "required-checks.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := harness.DecodeValidationSpec(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pattern := range spec.ProtectedPaths {
+		if err := checkProtectedPattern(pattern); err != nil {
+			t.Errorf("repository pattern rejected: %v", err)
+		}
+		if !matchGlobPattern(pattern, strings.TrimSuffix(strings.ReplaceAll(pattern, "**/", ""), "/**")) {
+			t.Errorf("repository pattern %q does not match its own path", pattern)
+		}
+	}
+}
+
+func commitPolicy(t *testing.T, repo, policy string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "policy"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	return gitRevision(t, repo, "HEAD")
+}
+
+func TestTrustedProtectedPatternValidation(t *testing.T) {
+	malformed := []string{"[", "docs/[a-", "a*b[", "a/**/[", "[/**", "x*/[a-/**", "[]", "[a-]"}
+	if runtime.GOOS != "windows" {
+		malformed = append(malformed, `docs\`, `*[\`)
+	}
+	for _, pattern := range malformed {
+		t.Run(pattern, func(t *testing.T) {
+			repo := setupGitRepoForValidation(t)
+			policy := "required_checks:\n  - name: ran\n    command: \"touch ran\"\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - '" + pattern + "'\n"
+			base := commitPolicy(t, repo, policy)
+			// A valid candidate policy cannot repair the trusted one.
+			valid := "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n"
+			if err := os.WriteFile(filepath.Join(repo, ".swarm", "validation", "required-checks.yaml"), []byte(valid), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			check := func(name string, err error) {
+				t.Helper()
+				if !errors.Is(err, ErrInvalidPolicy) || !strings.Contains(err.Error(), fmt.Sprintf("%q", pattern)) {
+					t.Errorf("%s: got %v, want ErrInvalidPolicy naming %q", name, err, pattern)
+				}
+			}
+			_, err := loadTrustedValidationSpec(repo, base)
+			check("load", err)
+			_, err = Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1, AllowHarnessChanges: true}, ValidateOptions{BaseSHA: base})
+			check("harness changes allowed", err)
+			_, err = Validate(t.Context(), repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, ReportProtectedChanges: true})
+			check("CI report mode", err)
+			if _, err := os.Stat(filepath.Join(repo, "ran")); !os.IsNotExist(err) {
+				t.Errorf("checks ran despite a malformed policy: %v", err)
+			}
+		})
+	}
+	for _, pattern := range []string{"[a-c]/**", "**/.gitattributes", "a/**/b.yaml", "docs/[^x]?.md", `\*`} {
+		if err := checkProtectedPattern(pattern); err != nil {
+			t.Errorf("valid pattern %q rejected: %v", pattern, err)
+		}
+	}
+}
+
+func TestNestedProtectedPathValidation(t *testing.T) {
+	const policy = "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - '**/.gitattributes'\n"
+	git := func(t *testing.T, repo string, args ...string) {
+		t.Helper()
+		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	write := func(t *testing.T, repo, rel string) {
+		t.Helper()
+		full := filepath.Join(repo, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte("*.bin binary\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setup := func(t *testing.T) (string, string) {
+		repo := setupGitRepoForValidation(t)
+		if err := os.MkdirAll(filepath.Join(repo, "a", "b"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, "a", "b", ".gitattributes"), []byte("*.txt text\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return repo, commitPolicy(t, repo, policy)
+	}
+	for _, state := range []string{"committed", "staged", "unstaged", "untracked"} {
+		t.Run(state, func(t *testing.T) {
+			repo, base := setup(t)
+			file := "a/b/.gitattributes"
+			switch state {
+			case "committed":
+				write(t, repo, file)
+				git(t, repo, "add", file)
+				git(t, repo, "commit", "-qm", "edit nested attributes")
+			case "staged":
+				write(t, repo, file)
+				git(t, repo, "add", file)
+			case "unstaged":
+				write(t, repo, file)
+			case "untracked":
+				file = "x/y/.gitattributes"
+				write(t, repo, file)
+			}
+			want := fmt.Sprintf("file %q matches protected pattern %q", file, "**/.gitattributes")
+			for name, opts := range map[string]ValidateOptions{
+				"issue": {BaseSHA: base},
+				"CI":    {BaseSHA: base, CIMode: true},
+				"fork":  {BaseSHA: base, ForkMode: true},
+			} {
+				var wu *contract.WorkUnit
+				if !opts.CIMode {
+					wu = &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}
+				}
+				_, err := Validate(t.Context(), repo, wu, opts)
+				if !errors.Is(err, ErrProtectedPathModified) || !strings.Contains(err.Error(), want) {
+					t.Errorf("%s: got %v, want protected-path violation %s", name, err, want)
+				}
+			}
+			report, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base, CIMode: true, ReportProtectedChanges: true})
+			if err != nil || len(report.ProtectedChanges) != 1 || report.ProtectedChanges[0] != file || len(report.CheckOutcomes) != 1 || !report.Passed {
+				t.Errorf("report mode = %+v, %v", report, err)
+			}
+		})
+	}
+	t.Run("unrelated file", func(t *testing.T) {
+		repo, base := setup(t)
+		if err := os.WriteFile(filepath.Join(repo, "a", "b", "notes.txt"), []byte("ok\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base}); err != nil {
+			t.Fatalf("unrelated nested edit rejected: %v", err)
+		}
+	})
 }

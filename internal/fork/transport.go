@@ -3,6 +3,7 @@ package fork
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,6 +35,22 @@ type ForkResult struct {
 }
 
 func FormatRequestComment(req lease.ForkRequest) (string, error) {
+	return formatRequestComment(req, "")
+}
+
+// The request nonce rides at the end of the summary line as an HTML comment,
+// outside the JSON payload, because released coordinators decode the payload
+// strictly and accept exactly one line between the marker and the details
+// block. It is correlation only; coordinators never read it.
+var (
+	requestNonceValue = regexp.MustCompile(`^[A-Za-z0-9]{16,64}$`)
+	requestNonceTag   = regexp.MustCompile(` <!-- swarm:request-nonce:([A-Za-z0-9]{16,64}) -->$`)
+)
+
+func formatRequestComment(req lease.ForkRequest, nonce string) (string, error) {
+	if nonce != "" && !requestNonceValue.MatchString(nonce) {
+		return "", fmt.Errorf("invalid fork request nonce")
+	}
 	if req.Version == 0 {
 		req.Version = 1
 	}
@@ -50,7 +67,11 @@ func FormatRequestComment(req lease.ForkRequest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("marshal fork request: %w", err)
 	}
-	body := collapsedComment(RequestMarker, requestSummary(req), "Request details", raw)
+	summary := requestSummary(req)
+	if nonce != "" {
+		summary += " <!-- swarm:request-nonce:" + nonce + " -->"
+	}
+	body := collapsedComment(RequestMarker, summary, "Request details", raw)
 	if len(body) > MaxForkCommentBytes {
 		return "", fmt.Errorf("fork request payload (%d bytes) exceeds maximum GitHub comment size (%d bytes)", len(body), MaxForkCommentBytes)
 	}
@@ -153,6 +174,21 @@ func commentPayload(body, marker string) (string, error) {
 	return strings.TrimSpace(rest), nil
 }
 
+// requestCommentNonce returns the nonce on a collapsed request comment's
+// summary line, or "" when there is none.
+func requestCommentNonce(body string) string {
+	normalized := strings.ReplaceAll(strings.TrimLeft(body, " \t\r\n"), "\r\n", "\n")
+	rest, ok := strings.CutPrefix(normalized, RequestMarker)
+	if !ok || !collapsedPayload.MatchString(rest) {
+		return ""
+	}
+	summary, _, _ := strings.Cut(strings.TrimPrefix(rest, "\n"), "\n")
+	if m := requestNonceTag.FindStringSubmatch(summary); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 func requestSummary(req lease.ForkRequest) string {
 	summary := fmt.Sprintf("📨 **SwarmOS fork request:** `%s` for issue #%d", req.Operation, req.IssueNumber)
 	if req.PRNumber > 0 {
@@ -196,6 +232,7 @@ type Gateway struct {
 	OnProgress    func(ProgressEvent)
 	progressTicks <-chan time.Time
 	progressNow   func() time.Time
+	wait          func(context.Context, time.Duration) error
 	Tracker       tracker.Tracker
 	Store         coordination.Store
 	ForkRepo      string
@@ -233,16 +270,14 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 		return nil, lease.ErrClaimFence
 	}
 
-	body, err := FormatRequestComment(req)
+	nonce := rand.Text()
+	body, err := formatRequestComment(req, nonce)
 	if err != nil {
 		return nil, err
 	}
-	comment, err := g.Tracker.CreateComment(ctx, req.IssueNumber, body)
+	comment, err := g.postRequest(ctx, req, nonce, body, time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("post fork request comment: %w", err)
-	}
-	if comment == nil || comment.ID <= 0 {
-		return nil, fmt.Errorf("github tracker returned invalid comment ID for fork request")
+		return nil, err
 	}
 	reqID := comment.ID
 	reporting := startRequestProgress(ctx, req.Operation, reqID, g.OnProgress, g.progressTicks, g.progressNow)
@@ -293,17 +328,9 @@ func (g *Gateway) checkRequestOutcome(ctx context.Context, req lease.ForkRequest
 }
 
 func (g *Gateway) checkRequestOutcomeReporting(ctx context.Context, req lease.ForkRequest, reqID int64, since *time.Time, rejected func()) (*lease.IssueState, bool, error) {
-	var comments []*tracker.Comment
-	var err error
-	if incremental, ok := g.Tracker.(interface {
-		ListCommentsSince(context.Context, int, time.Time) ([]*tracker.Comment, error)
-	}); ok {
-		comments, err = incremental.ListCommentsSince(ctx, req.IssueNumber, *since)
-	} else {
-		comments, err = g.Tracker.ListComments(ctx, req.IssueNumber)
-	}
+	comments, err := g.listComments(ctx, req.IssueNumber, *since)
 	if err != nil {
-		return nil, false, fmt.Errorf("poll fork coordinator comments: %w", err)
+		return nil, false, fmt.Errorf("poll fork coordinator comments for request %d: %w", reqID, err)
 	}
 	if len(comments) > 1000 {
 		return nil, false, fmt.Errorf("fork comment scan exceeds 1000 records")
@@ -327,11 +354,21 @@ func (g *Gateway) checkRequestOutcomeReporting(ctx context.Context, req lease.Fo
 			continue
 		}
 		res, parseErr := ParseResultComment(c.Body)
-		if parseErr != nil || res.RequestID != reqID || res.IssueNumber != req.IssueNumber || res.Operation != req.Operation {
+		if parseErr != nil || res.RequestID != reqID || res.IssueNumber != req.IssueNumber {
 			continue
 		}
 		if !IsTrustedBotComment(c) || (!c.UpdatedAt.IsZero() && !c.CreatedAt.Equal(c.UpdatedAt)) {
 			continue
+		}
+		if res.Operation != req.Operation {
+			// Only a rejection of an unparseable request may omit the operation.
+			if res.Operation != "" || res.Success {
+				continue
+			}
+			if rejected != nil {
+				rejected()
+			}
+			return nil, false, legacyCoordinatorRejection(req, reqID, res.Error)
 		}
 		if !res.Success {
 			if rejected != nil {

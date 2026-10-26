@@ -16,7 +16,7 @@ import (
 
 func runProgressCommand(t *testing.T, f *cliFixture, args ...string) (string, string, error) {
 	t.Helper()
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var out, diag bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diag)
@@ -36,6 +36,7 @@ func assertProgressOrder(t *testing.T, text string, parts ...string) {
 	}
 }
 func TestValidationSubmissionProgressOutput(t *testing.T) {
+	t.Parallel()
 	for _, family := range []string{"issue", "pr"} {
 		for _, operation := range []string{"validate", "submit"} {
 			for _, mode := range []string{"default", "true", "false"} {
@@ -53,7 +54,7 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 							var prNumber int
 							f, _, prNumber = submittedPRFixture(t, "agent")
 							number = prNumber
-							t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'revision\\n' > revision.txt")
+							f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'revision\\n' > revision.txt")
 							f.must(t, "pr", "work", strconv.Itoa(number), "--agent", "mock", "--progress=false")
 						}
 						args := []string{family, operation, strconv.Itoa(number)}
@@ -115,6 +116,7 @@ func TestProgressContainsOnlyMetadata(t *testing.T) {
 	}
 }
 func TestImmediateProgressOnEarlyFailure(t *testing.T) {
+	t.Parallel()
 	for _, family := range []string{"issue", "pr"} {
 		for _, op := range []string{"validate", "submit"} {
 			f := newCLIFixture(t)
@@ -130,6 +132,7 @@ func TestImmediateProgressOnEarlyFailure(t *testing.T) {
 }
 
 func TestSubmissionRetryAnnouncesOnlyExecutedPhases(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	for _, tc := range []struct {
 		family string
@@ -154,6 +157,7 @@ func TestSubmissionRetryAnnouncesOnlyExecutedPhases(t *testing.T) {
 }
 
 func TestValidationFailureDoesNotAnnouncePublication(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	policy := "required_checks:\n  - name: trusted-failure\n    command: printf PRIVATE_CHECK_OUTPUT; exit 7\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
 	if err := os.WriteFile(filepath.Join(f.root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
@@ -197,6 +201,7 @@ func TestValidationFailureDoesNotAnnouncePublication(t *testing.T) {
 }
 
 func TestProgressObserverDoesNotBlockLeaseRenewal(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "none")
 	f.must(t, "issue", "approve", strconv.Itoa(number))

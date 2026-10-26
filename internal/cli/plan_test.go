@@ -91,10 +91,17 @@ func testPlanExportMode(t *testing.T, scan bool) {
 		t.Fatal("preview changed tracker", err)
 	}
 }
-func TestCLIPlanExportScan(t *testing.T) { testPlanExportMode(t, true) }
-func TestCLIPlanExportFrom(t *testing.T) { testPlanExportMode(t, false) }
+func TestCLIPlanExportScan(t *testing.T) {
+	t.Parallel()
+	testPlanExportMode(t, true)
+}
+func TestCLIPlanExportFrom(t *testing.T) {
+	t.Parallel()
+	testPlanExportMode(t, false)
+}
 
 func TestCLIPlanExportJSONStdout(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	path := filepath.Join(t.TempDir(), "snapshot.yaml")
 	out := f.must(t, "repo", "plan", "--scan", "--json", "--export", path)
@@ -138,6 +145,7 @@ func TestCLIPlanExportValidation(t *testing.T) {
 }
 
 func TestCLIPlanExportErrors(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	dir := t.TempDir()
 	directory := filepath.Join(dir, "directory.yaml")
@@ -167,6 +175,7 @@ func TestCLIPlanExportErrors(t *testing.T) {
 }
 
 func TestCLIPlanExportApply(t *testing.T) {
+	t.Parallel()
 	for _, fail := range []bool{false, true} {
 		t.Run(map[bool]string{false: "success", true: "write-failure"}[fail], func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -193,6 +202,7 @@ func TestCLIPlanExportApply(t *testing.T) {
 }
 
 func TestCLIPlanRejectsFlagsThatWouldBeIgnored(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	for args, want := range map[string]string{
 		"--scan --publish-issue 1":              "--publish-issue requires --apply",

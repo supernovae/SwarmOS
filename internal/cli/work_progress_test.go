@@ -15,6 +15,7 @@ import (
 )
 
 func TestHeadlessWorkProgressKeepsJSONOnStdout(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, gate, status, terminal string
 		flags                        []string
@@ -28,7 +29,7 @@ func TestHeadlessWorkProgressKeepsJSONOnStdout(t *testing.T) {
 			f := newCLIFixture(t)
 			n := strconv.Itoa(f.create(t, tc.gate))
 			f.must(t, "issue", "approve", n)
-			cmd := NewRootCmd()
+			cmd := f.command(nil)
 			var output, diagnostics bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&diagnostics)
@@ -62,11 +63,12 @@ func TestHeadlessWorkProgressKeepsJSONOnStdout(t *testing.T) {
 }
 
 func TestWorkProgressCanBeDisabledAndDryRunIsSilent(t *testing.T) {
+	t.Parallel()
 	for _, flags := range [][]string{{"--progress=false", "--phase", "plan"}, {"--dry-run"}} {
 		f := newCLIFixture(t)
 		n := strconv.Itoa(f.create(t, "agent"))
 		f.must(t, "issue", "approve", n)
-		cmd := NewRootCmd()
+		cmd := f.command(nil)
 		var output, diagnostics bytes.Buffer
 		cmd.SetOut(&output)
 		cmd.SetErr(&diagnostics)
@@ -82,9 +84,10 @@ func TestWorkProgressCanBeDisabledAndDryRunIsSilent(t *testing.T) {
 }
 
 func TestWorkFailureReportsTerminalStageAndJSON(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := strconv.Itoa(f.create(t, "agent")) // Deliberately unapproved.
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
@@ -104,12 +107,13 @@ func TestWorkFailureReportsTerminalStageAndJSON(t *testing.T) {
 }
 
 func TestClaimSetupProgressJSON(t *testing.T) {
+	t.Parallel()
 	for _, next := range []bool{false, true} {
 		t.Run(strconv.FormatBool(next), func(t *testing.T) {
 			f := newCLIFixture(t)
 			n := strconv.Itoa(f.create(t, "agent"))
 			f.must(t, "issue", "approve", n)
-			cmd := NewRootCmd()
+			cmd := f.command(nil)
 			var output, diagnostics bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&diagnostics)
@@ -153,6 +157,7 @@ func assertSetupProgress(t *testing.T, text string, claims, workspaces int) {
 }
 
 func TestIssueWorkSetupProgressModes(t *testing.T) {
+	t.Parallel()
 	stable := map[string]any{}
 	for _, headless := range []bool{false, true} {
 		for _, next := range []bool{false, true} {
@@ -161,7 +166,7 @@ func TestIssueWorkSetupProgressModes(t *testing.T) {
 					f := newCLIFixture(t)
 					n := strconv.Itoa(f.create(t, "none"))
 					f.must(t, "issue", "approve", n)
-					cmd := NewRootCmd()
+					cmd := f.command(nil)
 					var output, diagnostics bytes.Buffer
 					cmd.SetOut(&output)
 					cmd.SetErr(&diagnostics)
@@ -203,6 +208,7 @@ func TestIssueWorkSetupProgressModes(t *testing.T) {
 }
 
 func TestPRWorkSetupProgressModes(t *testing.T) {
+	t.Parallel()
 	stable := map[string]any{}
 	for _, headless := range []bool{false, true} {
 		for _, enabled := range []bool{false, true} {
@@ -210,7 +216,7 @@ func TestPRWorkSetupProgressModes(t *testing.T) {
 				f, _, number := submittedPRFixture(t, "none")
 				// Repeat to cover fresh acquisition followed by persisted claim resumption.
 				for attempt := range 2 {
-					cmd := NewRootCmd()
+					cmd := f.command(nil)
 					var output, diagnostics bytes.Buffer
 					cmd.SetOut(&output)
 					cmd.SetErr(&diagnostics)
@@ -243,11 +249,12 @@ func TestPRWorkSetupProgressModes(t *testing.T) {
 }
 
 func TestClaimSetupProgressStopsAtFailure(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := strconv.Itoa(f.create(t, "none"))
 	f.must(t, "issue", "approve", n)
 	f.must(t, "issue", "claim", n, "--agent", "mock")
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)

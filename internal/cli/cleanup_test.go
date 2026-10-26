@@ -19,6 +19,7 @@ import (
 )
 
 func TestCLIReconcileAndCleanupPreviewReadOnly(t *testing.T) {
+	t.Parallel()
 	f, n, _ := submittedPRFixture(t, "agent")
 	number := strconv.Itoa(n)
 	before := f.state(t, n)
@@ -55,6 +56,7 @@ func TestCLIReconcileAndCleanupPreviewReadOnly(t *testing.T) {
 }
 
 func TestCLICleanupApplyRefusalHasJSONFailure(t *testing.T) {
+	t.Parallel()
 	f, n, _ := submittedPRFixture(t, "agent")
 	raw, err := f.run("issue", "cleanup", strconv.Itoa(n), "--apply", "--json")
 	if err == nil {
@@ -137,6 +139,7 @@ func localCleanupApply(t *testing.T, f *cliFixture, n int) lease.CleanupPreview 
 }
 
 func TestCleanupLocalCleanRetire(t *testing.T) {
+	t.Parallel()
 	f, n, pr := cleanupLocalFixture(t)
 	st := f.state(t, n)
 	evidence := prGit(t, f.root, "rev-parse", "refs/swarm/pr-head/"+strconv.Itoa(pr))
@@ -168,6 +171,7 @@ func TestCleanupLocalCleanRetire(t *testing.T) {
 }
 
 func TestCleanupLocalDirtyRetention(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"untracked", "tracked", "staged", "different-head", "newline", "staged-cancelled", "hidden", "managed-staged", "deleted", "renamed"} {
 		t.Run(kind, func(t *testing.T) {
 			f, n, _ := cleanupLocalFixture(t)
@@ -241,6 +245,7 @@ func TestCleanupLocalDirtyRetention(t *testing.T) {
 }
 
 func TestCleanupLocalIgnoredRetention(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"ignored", ".swarm/unexpected", "hidden dir/ignored"} {
 		t.Run(name, func(t *testing.T) {
 			f, n, _ := cleanupLocalFixture(t)
@@ -275,6 +280,7 @@ func TestCleanupLocalIgnoredRetention(t *testing.T) {
 }
 
 func TestCleanupLocalPreviewReadOnly(t *testing.T) {
+	t.Parallel()
 	f, n, _ := cleanupLocalFixture(t)
 	before := f.state(t, n)
 	refs := prGit(t, f.root, "show-ref")
@@ -289,6 +295,7 @@ func TestCleanupLocalPreviewReadOnly(t *testing.T) {
 }
 
 func TestCleanupLocalActiveClaimRefusal(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"claim", "revision"} {
 		t.Run(kind, func(t *testing.T) {
 			f, n, _ := cleanupLocalFixture(t)
@@ -321,6 +328,7 @@ func TestCleanupLocalActiveClaimRefusal(t *testing.T) {
 }
 
 func TestCleanupLocalOpenPRRefusal(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"linked", "issue", "pr", "normalized", "unrelated"} {
 		t.Run(kind, func(t *testing.T) {
 			f, n, pr := cleanupLocalFixture(t)
@@ -373,6 +381,7 @@ func TestCleanupLocalOpenPRRefusal(t *testing.T) {
 }
 
 func TestCleanupLocalRetireIdempotentEvidence(t *testing.T) {
+	t.Parallel()
 	for _, absent := range []bool{false, true} {
 		t.Run(strconv.FormatBool(absent), func(t *testing.T) {
 			f, n, pr := cleanupLocalFixture(t)
@@ -386,6 +395,7 @@ func TestCleanupLocalRetireIdempotentEvidence(t *testing.T) {
 }
 
 func TestCleanupLocalOutcomeHeadChangedRefusal(t *testing.T) {
+	t.Parallel()
 	for _, absent := range []bool{false, true} {
 		t.Run(strconv.FormatBool(absent), func(t *testing.T) {
 			f, n, pr := cleanupLocalFixture(t)
@@ -509,6 +519,7 @@ func TestCleanupLocalRemovalFailure(t *testing.T) {
 }
 
 func TestCleanupLocalPolicyTransitions(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"claim", "revision", "issue-branch", "pr-branch"} {
 		t.Run(kind, func(t *testing.T) {
 			f, n, pr := cleanupLocalFixture(t)
@@ -589,7 +600,7 @@ func TestCleanupLocalRelativeRootPreview(t *testing.T) {
 		}
 	})
 	for _, args := range [][]string{{"--root", "."}, nil} {
-		cmd := NewRootCmd()
+		cmd := f.command(nil)
 		var output strings.Builder
 		cmd.SetOut(&output)
 		cmd.SetArgs(append(args, "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--json"))
@@ -617,7 +628,7 @@ func TestCleanupLocalRelativeRootPreview(t *testing.T) {
 		t.Fatal("preview mutated resources")
 	}
 
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var output strings.Builder
 	cmd.SetOut(&output)
 	cmd.SetArgs([]string{"--root", ".", "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--apply", "--json"})
@@ -689,7 +700,7 @@ func TestCleanupLocalRelativeRootRecoverFailedApply(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var output strings.Builder
 	cmd.SetOut(&output)
 	cmd.SetArgs([]string{"--root", ".", "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--recover-reservation", "--json"})
@@ -712,7 +723,7 @@ func revisedCleanupFixture(t *testing.T) (*cliFixture, int, int, string) {
 	t.Helper()
 	f, n, pr := submittedPRFixture(t, "agent")
 	old := f.state(t, n).HeadSHA
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
 	f.must(t, "pr", "work", strconv.Itoa(pr), "--agent", "mock", "--instructions", "Revise implementation", "--progress=false")
 	f.must(t, "pr", "validate", strconv.Itoa(pr))
 	f.must(t, "pr", "submit", strconv.Itoa(pr))
@@ -721,6 +732,7 @@ func revisedCleanupFixture(t *testing.T) (*cliFixture, int, int, string) {
 }
 
 func TestCleanupLocalRevisedPRRetire(t *testing.T) {
+	t.Parallel()
 	f, n, _, old := revisedCleanupFixture(t)
 	before := f.state(t, n)
 	if before.HeadSHA == old {
@@ -763,6 +775,7 @@ func TestCleanupLocalRevisedPRRetire(t *testing.T) {
 }
 
 func TestCleanupLocalDirtyLineageAncestor(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"tracked", "staged", "untracked", "ignored"} {
 		t.Run(kind, func(t *testing.T) {
 			f, n, _, _ := revisedCleanupFixture(t)
@@ -799,6 +812,7 @@ func TestCleanupLocalDirtyLineageAncestor(t *testing.T) {
 }
 
 func TestCleanupLocalNonLineageAncestor(t *testing.T) {
+	t.Parallel()
 	f, n, pr := submittedPRFixture(t, "agent")
 	path := workspace.WorktreePath(f.root, n)
 	prGit(t, path, "commit", "--allow-empty", "-m", "unrecorded")
@@ -850,6 +864,7 @@ func TestCleanupLocalNonLineageAncestor(t *testing.T) {
 }
 
 func TestCleanupLocalLineageMovedTip(t *testing.T) {
+	t.Parallel()
 	f, n, _, old := revisedCleanupFixture(t)
 	ctx := context.Background()
 	p, err := lease.InspectCleanup(ctx, f.root, f.tracker, f.manager, n)
@@ -948,6 +963,7 @@ func assertCleanupIssueResources(t *testing.T, f *cliFixture, n int, p lease.Cle
 }
 
 func TestCleanupLocalVerifiedRebaseRetire(t *testing.T) {
+	t.Parallel()
 	for _, identity := range []string{"unchanged", "changed"} {
 		t.Run(identity, func(t *testing.T) {
 			f, n, pr, old := rebasedCleanupFixture(t, identity)
@@ -977,6 +993,7 @@ func TestCleanupLocalVerifiedRebaseRetire(t *testing.T) {
 }
 
 func TestCleanupLocalChainedVerifiedRebasesRetire(t *testing.T) {
+	t.Parallel()
 	for _, identities := range [][]string{{"unchanged", "unchanged"}, {"changed", "changed"}, {"changed", "unchanged"}} {
 		t.Run(strings.Join(identities, "-"), func(t *testing.T) {
 			f, n, pr, old := rebasedCleanupFixture(t, identities...)
@@ -1006,6 +1023,7 @@ func TestCleanupLocalChainedVerifiedRebasesRetire(t *testing.T) {
 // A head that is not the old head of a verified rebase stays retained even
 // when it is a recorded checkpoint or shares the old head's content.
 func TestCleanupLocalRebaseNonMatchingHead(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"recorded child", "equal tree"} {
 		t.Run(kind, func(t *testing.T) {
 			f, n, _, old := rebasedCleanupFixture(t, "changed")
@@ -1046,6 +1064,7 @@ func TestCleanupLocalRebaseNonMatchingHead(t *testing.T) {
 }
 
 func TestCleanupRebaseIdentityRetention(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		mutate func(r *coordination.CheckpointRebase, old, final string)
@@ -1091,6 +1110,7 @@ func TestCleanupRebaseIdentityRetention(t *testing.T) {
 }
 
 func TestCleanupLocalDirtyVerifiedRebase(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ identity, kind string }{
 		{"unchanged", "tracked"}, {"unchanged", "staged"}, {"unchanged", "untracked"}, {"unchanged", "ignored"}, {"unchanged", "after-preview"},
 		{"changed", "tracked"}, {"changed", "untracked"}, {"changed", "ignored"}, {"changed", "after-preview"},
@@ -1158,6 +1178,7 @@ func TestCleanupLocalDirtyVerifiedRebase(t *testing.T) {
 }
 
 func TestCleanupLocalVerifiedRebaseEvidenceChangedBeforeApply(t *testing.T) {
+	t.Parallel()
 	for _, identity := range []string{"unchanged", "changed"} {
 		t.Run(identity, func(t *testing.T) {
 			f, n, _, old := rebasedCleanupFixture(t, identity)

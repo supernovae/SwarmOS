@@ -51,6 +51,7 @@ func TestResolveIssueAndWorktreeNeverGuesses(t *testing.T) {
 }
 
 func TestJSONCommandsReportFailuresAsJSON(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := strconv.Itoa(f.create(t, "agent"))
 	for kind, args := range map[string][]string{
@@ -77,6 +78,7 @@ func TestJSONCommandsReportFailuresAsJSON(t *testing.T) {
 }
 
 func TestUtilityCommandsEmitJSON(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	for kind, args := range map[string][]string{
 		"version":     {"version", "--json"},
@@ -106,6 +108,7 @@ func TestUtilityCommandsEmitJSON(t *testing.T) {
 }
 
 func TestFailedResumeKeepsClaimForStagingRecovery(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := f.create(t, "agent")
 	issue := strconv.Itoa(n)

@@ -138,6 +138,29 @@ type Engine struct {
 	repoRoot     string
 	ForkMode     bool
 	ForkRemote   string
+	// LookupEnv resolves execution mode and agent environment for this engine;
+	// nil reads the process environment.
+	LookupEnv func(string) (string, bool)
+}
+
+// EngineOptions carries one invocation's environment into engine
+// construction. Zero values keep the process environment and the default node
+// profile path.
+type EngineOptions struct {
+	LookupEnv       func(string) (string, bool)
+	NodeProfilePath string
+}
+
+func (e *Engine) getenv(name string) string {
+	if e.LookupEnv == nil {
+		return os.Getenv(name)
+	}
+	value, _ := e.LookupEnv(name)
+	return value
+}
+
+func (e *Engine) runnerOptions() agent.RunnerOptions {
+	return agent.RunnerOptions{LookupEnv: e.LookupEnv}
 }
 
 // upstreamRemote names the project remote configured on the lease manager.
@@ -149,6 +172,10 @@ func (e *Engine) upstreamRemote() string {
 }
 
 func NewEngine(repoRoot string, tr tracker.Tracker) (*Engine, error) {
+	return NewEngineWithOptions(repoRoot, tr, EngineOptions{})
+}
+
+func NewEngineWithOptions(repoRoot string, tr tracker.Tracker, opts EngineOptions) (*Engine, error) {
 	cfg, err := harness.LoadConfig(repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("load SwarmOS config: %w", err)
@@ -157,14 +184,18 @@ func NewEngine(repoRoot string, tr tracker.Tracker) (*Engine, error) {
 	if err := mgr.ConfigureStore(repoRoot); err != nil {
 		return nil, fmt.Errorf("configure coordination store: %w", err)
 	}
-	if prof, err := node.LoadOrDetectProfile(""); err == nil {
+	if prof, err := node.LoadOrDetectProfile(opts.NodeProfilePath); err == nil {
 		mgr.SetNodeProfile(prof)
 	}
-	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot}, nil
+	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv}, nil
 }
 
 func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string) *Engine {
-	if prof, err := node.LoadOrDetectProfile(""); err == nil && mgr != nil {
+	return NewEngineWithManagerOptions(repoRoot, tr, mgr, cfg, forkMode, forkRemote, EngineOptions{})
+}
+
+func NewEngineWithManagerOptions(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string, opts EngineOptions) *Engine {
+	if prof, err := node.LoadOrDetectProfile(opts.NodeProfilePath); err == nil && mgr != nil {
 		mgr.SetNodeProfile(prof)
 	}
 	return &Engine{
@@ -174,6 +205,7 @@ func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manage
 		repoRoot:     repoRoot,
 		ForkMode:     forkMode,
 		ForkRemote:   forkRemote,
+		LookupEnv:    opts.LookupEnv,
 	}
 }
 
@@ -293,7 +325,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 		!slices.Contains(iss.Labels, cfg.Security.ReadyLabel) {
 		return nil, &lease.TaskApprovalError{IssueNumber: opts.IssueNumber}
 	}
-	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+	execution, err := contract.ResolveExecution(cfg, e.getenv("SWARM_EXECUTION_MODE"))
 	if err != nil {
 		return nil, err
 	}
@@ -345,7 +377,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 				}
 				blockers = append(blockers, err.Error())
 			}
-			resolved, err := agent.Preflight(name, cfg, e.Tracker.BackendName() == "local", role)
+			resolved, err := agent.PreflightWithOptions(name, cfg, e.Tracker.BackendName() == "local", role, e.runnerOptions())
 			if err != nil {
 				if !opts.InspectOnly {
 					return nil, fmt.Errorf("%s agent preflight: %w", role, err)
@@ -1028,7 +1060,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	progress.next("required-checks")
 	testerBody, _ := readRequiredArtifact(wtPath, "VALIDATION.md")
-	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode, OnProgress: progress.observeCheck, GoFastPass: true})
+	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode, OnProgress: progress.observeCheck, GoFastPass: true, LookupEnv: e.LookupEnv})
 	if context.Cause(ctx) == claimpause.ErrBudget {
 		return res, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, "implement", true, forkMode, forkRemote)
 	}
@@ -1465,5 +1497,5 @@ func (e *Engine) configuredRunner(name string, cfg *contract.SwarmConfig, local 
 	if e.NewRunner != nil {
 		return e.NewRunner(name, cfg, local)
 	}
-	return agent.NewConfiguredRunner(name, cfg, local)
+	return agent.NewConfiguredRunnerWithOptions(name, cfg, local, e.runnerOptions())
 }

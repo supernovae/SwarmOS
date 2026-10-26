@@ -35,6 +35,7 @@ func TestValidationOutput(t *testing.T) {
 }
 
 func TestFailedDiagnosticsAcrossCommands(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	policy := "required_checks:\n  - name: trusted-failure\n    command: |\n      if test -f fail-check; then printf '%s\\n' '--- FAIL: TestCommand (0.00s)' '    command_test.go:1: command message'; seq 70; exit 7; fi\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
 	if err := os.WriteFile(filepath.Join(f.root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
@@ -48,7 +49,7 @@ func TestFailedDiagnosticsAcrossCommands(t *testing.T) {
 	f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
 	f.must(t, "issue", "submit", number)
 	prNumber := strconv.Itoa(f.state(t, n).PRNumber)
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "echo fail > fail-check")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo fail > fail-check")
 	failing := strconv.Itoa(f.create(t, "none"))
 	f.must(t, "issue", "approve", failing)
 	if _, err := f.run("issue", "work", failing, "--agent", "mock", "--progress=false"); err == nil {

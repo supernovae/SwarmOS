@@ -23,6 +23,9 @@ type checkpointCLITracker struct{ tracker.Tracker }
 func (checkpointCLITracker) BackendName() string { return "github-checkpoint-fixture" }
 
 func TestCLICheckpointReconciliationAndStatus(t *testing.T) {
+	// Serial: checkpoint reconciliation validates through internal/lease,
+	// which reads SWARM_EXECUTION_MODE from the process environment.
+	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	f := newCLIFixture(t)
 	n := f.create(t, "agent")
 	ctx := context.Background()
@@ -72,7 +75,7 @@ func TestCLICheckpointReconciliationAndStatus(t *testing.T) {
 	b := prGit(t, path, "rev-parse", "HEAD")
 	run := func(args ...string) (string, error) {
 		opts := &RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: tr}
-		cmd := newRootCmdWithOptions(opts)
+		cmd := f.command(opts)
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
@@ -127,6 +130,7 @@ func TestCLICheckpointReconciliationAndStatus(t *testing.T) {
 }
 
 func TestCheckpointReconcileFlags(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	help := f.must(t, "issue", "reconcile", "--help")
 	for _, flag := range []string{"--checkpoint", "--expected-head", "--candidate-head", "--dry-run"} {

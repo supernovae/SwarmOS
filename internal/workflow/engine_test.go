@@ -512,3 +512,26 @@ func TestEngineSetupProgressSharedSessionBundles(t *testing.T) {
 		t.Fatalf("starts: %v", starts)
 	}
 }
+
+func TestEngineOptionsResolveExecutionThroughLookup(t *testing.T) {
+	t.Setenv("SWARM_EXECUTION_MODE", contract.ExecutionIsolated)
+	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
+	cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{}}
+	tr := tracker.NewLocalTracker(t.TempDir())
+	if _, err := NewEngineWithManager(t.TempDir(), tr, nil, cfg, false, "").configuredRunner("mock", cfg, true); err == nil {
+		t.Fatal("default engine ignored the process execution mode")
+	}
+	trusted := func(name string) (string, bool) {
+		if name == "SWARM_EXECUTION_MODE" {
+			return contract.ExecutionTrustedLocal, true
+		}
+		return "", false
+	}
+	e := NewEngineWithManagerOptions(t.TempDir(), tr, nil, cfg, false, "", EngineOptions{LookupEnv: trusted, NodeProfilePath: filepath.Join(t.TempDir(), "node.yaml")})
+	if _, err := e.configuredRunner("mock", cfg, true); err != nil {
+		t.Fatalf("engine ignored the injected execution mode: %v", err)
+	}
+	if got := e.getenv("SWARM_EXECUTION_MODE"); got != contract.ExecutionTrustedLocal {
+		t.Fatalf("engine mode = %q", got)
+	}
+}

@@ -37,7 +37,7 @@ func TestGoFastPassEntryPoints(t *testing.T) {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "mkdir -p leaf && printf 'package leaf\\n' > leaf/leaf.go")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "mkdir -p leaf && printf 'package leaf\\n' > leaf/leaf.go")
 	n := strconv.Itoa(f.create(t, "agent"))
 	f.must(t, "issue", "approve", n)
 	invocations := func() string {

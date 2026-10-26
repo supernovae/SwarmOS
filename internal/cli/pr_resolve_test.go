@@ -18,11 +18,10 @@ import (
 
 // resolverScript resolves every listed conflict and copies each snapshot it
 // receives into out/<n> so the test can inspect exactly what the agent saw.
-// The output directory travels in the environment in slash form so Windows
+// The output directory is quoted into the script in slash form so Windows
 // paths survive the shell.
-func resolverScript(t *testing.T, out string) string {
-	t.Setenv("SWARM_TEST_RESOLVER_OUT", filepath.ToSlash(out))
-	return `n=$(ls "$SWARM_TEST_RESOLVER_OUT" | wc -l | tr -d ' '); d="$SWARM_TEST_RESOLVER_OUT/$n"; mkdir -p "$d"; find . -mindepth 1 | sort > "$d/find.txt"; cp -R .swarm/active "$d/active"
+func resolverScript(out string) string {
+	return "SWARM_TEST_RESOLVER_OUT='" + strings.ReplaceAll(filepath.ToSlash(out), "'", `'\''`) + "'\n" + `n=$(ls "$SWARM_TEST_RESOLVER_OUT" | wc -l | tr -d ' '); d="$SWARM_TEST_RESOLVER_OUT/$n"; mkdir -p "$d"; find . -mindepth 1 | sort > "$d/find.txt"; cp -R .swarm/active "$d/active"
 for p in $(sed -n 's/^## [0-9]*\. ` + "`" + `\(.*\)` + "`" + `$/\1/p' .swarm/active/CONFLICTS.md); do printf 'resolved %s\n' "$p" > "$p"; done`
 }
 
@@ -35,10 +34,10 @@ func twoStopPRFixture(t *testing.T) (*cliFixture, int, int, []string) {
 	p := strconv.Itoa(number)
 	before := f.state(t, issue)
 	first := strings.Fields(prGit(t, f.root, "diff", "--name-only", before.BaseSHA, before.HeadSHA))[0]
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' >> "+first)
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' >> "+first)
 	f.must(t, "pr", "work", p, "--agent", "mock", "--progress=false")
 	f.must(t, "pr", "submit", p)
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "")
 	if err := os.WriteFile(filepath.Join(f.root, first), []byte("upstream content\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -49,12 +48,13 @@ func twoStopPRFixture(t *testing.T) (*cliFixture, int, int, []string) {
 }
 
 func TestCLIPRRebaseResolveMultiCommitWithAddAdd(t *testing.T) {
+	t.Parallel()
 	f, issue, number, paths := twoStopPRFixture(t)
 	p := strconv.Itoa(number)
 	base := prGit(t, f.root, "rev-parse", "HEAD")
 	approved := f.state(t, issue)
 	out := t.TempDir()
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(t, out))
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(out))
 
 	rebased := readPROutcome(t, f.must(t, "pr", "rebase", p, "--resolve", "--agent", "mock", "--json"))
 	worktree := workspace.PRWorktreePath(f.root, number)
@@ -162,6 +162,7 @@ func TestCLIPRRebaseResolveMultiCommitWithAddAdd(t *testing.T) {
 }
 
 func TestCLIPRRebaseResolveRejectsUnsafeResults(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	p := strconv.Itoa(number)
 	st := f.state(t, issue)
@@ -188,7 +189,7 @@ func TestCLIPRRebaseResolveRejectsUnsafeResults(t *testing.T) {
 	}
 	slices.Sort(names)
 	for _, name := range names {
-		t.Setenv("SWARM_MOCK_DEVELOPER_CMD", cases[name])
+		f.setenv("SWARM_MOCK_DEVELOPER_CMD", cases[name])
 		_, err := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
 		if err == nil || !strings.Contains(err.Error(), conflicting) || !strings.Contains(err.Error(), "--abort") {
 			t.Fatalf("%s: err = %v", name, err)
@@ -227,12 +228,12 @@ func (timeoutRunner) Run(_ context.Context, req agent.RunRequest) (*agent.RunRes
 }
 
 func TestCLIPRRebaseResolveTimeoutLeavesRebasePaused(t *testing.T) {
+	t.Parallel()
 	f, issue, number, paths := twoStopPRFixture(t)
 	p := strconv.Itoa(number)
-	testResolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 		return timeoutRunner{&agent.MockRunner{}}, nil
 	}
-	t.Cleanup(func() { testResolverRunner = nil })
 	_, err := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
 	if err == nil || !strings.Contains(err.Error(), "timeout") || !strings.Contains(err.Error(), paths[0]) {
 		t.Fatalf("timeout err = %v", err)
@@ -258,7 +259,7 @@ func oneStopTwoFiles(t *testing.T) (*cliFixture, int, string, string) {
 	t.Helper()
 	f, issue, number := submittedPRFixture(t, "agent")
 	p := strconv.Itoa(number)
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'pr a\\n' > a.txt; printf 'pr b\\n' > b.txt")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'pr a\\n' > a.txt; printf 'pr b\\n' > b.txt")
 	f.must(t, "pr", "work", p, "--agent", "mock", "--progress=false")
 	f.must(t, "pr", "submit", p)
 	for _, name := range []string{"a.txt", "b.txt"} {
@@ -290,10 +291,11 @@ func handResolve(t *testing.T, worktree string, names ...string) {
 }
 
 func TestCLIPRRebaseContinueResolveKeepsHandStagedFiles(t *testing.T) {
+	t.Parallel()
 	f, issue, p, worktree := oneStopTwoFiles(t)
 	handResolve(t, worktree, "a.txt")
 	out := t.TempDir()
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(t, out))
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(out))
 	f.must(t, "pr", "rebase", p, "--continue", "--resolve", "--agent", "mock", "--progress=false")
 	listing, err := os.ReadFile(filepath.Join(out, "0", "find.txt"))
 	if err != nil {
@@ -318,9 +320,10 @@ func TestCLIPRRebaseContinueResolveKeepsHandStagedFiles(t *testing.T) {
 }
 
 func TestCLIPRRebaseContinueResolveWithEverythingStagedSkipsTheAgent(t *testing.T) {
+	t.Parallel()
 	f, issue, p, worktree := oneStopTwoFiles(t)
 	handResolve(t, worktree, "a.txt", "b.txt")
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 9") // fails the run if the resolver is invoked
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 9") // fails the run if the resolver is invoked
 	f.must(t, "pr", "rebase", p, "--continue", "--resolve", "--agent", "mock", "--progress=false")
 	if _, _, rebasing, _ := workspace.PRHead(context.Background(), worktree); rebasing {
 		t.Fatal("rebase did not complete")
@@ -331,6 +334,7 @@ func TestCLIPRRebaseContinueResolveWithEverythingStagedSkipsTheAgent(t *testing.
 }
 
 func TestCLIPRWorkAndStageReportPausedRebase(t *testing.T) {
+	t.Parallel()
 	f, issue, number, paths := twoStopPRFixture(t)
 	p := strconv.Itoa(number)
 	if _, err := f.run("pr", "rebase", p); err == nil {
@@ -348,12 +352,13 @@ func TestCLIPRWorkAndStageReportPausedRebase(t *testing.T) {
 }
 
 func TestCLIPRRebaseResolveFailsClosedWithoutIsolation(t *testing.T) {
+	t.Parallel()
 	f, issue, number, paths := twoStopPRFixture(t)
 	p := strconv.Itoa(number)
 	worktree := workspace.PRWorktreePath(f.root, number)
 	before := f.state(t, issue)
 	headBefore := prGit(t, worktree, "rev-parse", "HEAD")
-	t.Setenv("SWARM_EXECUTION_MODE", "isolated")
+	f.setenv("SWARM_EXECUTION_MODE", "isolated")
 	_, err := f.run("pr", "rebase", p, "--resolve", "--agent", "mock")
 	if err == nil || !strings.Contains(err.Error(), "preflight") {
 		t.Fatalf("isolated mock resolver err = %v", err)
@@ -369,13 +374,13 @@ func TestCLIPRRebaseResolveFailsClosedWithoutIsolation(t *testing.T) {
 	}
 
 	// A paused rebase stays byte-for-byte intact when --continue --resolve cannot preflight.
-	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
+	f.setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	if _, err := f.run("pr", "rebase", p); err == nil {
 		t.Fatal("conflicting rebase reported success")
 	}
 	stopped := prGit(t, worktree, "rev-parse", "REBASE_HEAD")
 	data, _ := os.ReadFile(filepath.Join(worktree, paths[0]))
-	t.Setenv("SWARM_EXECUTION_MODE", "isolated")
+	f.setenv("SWARM_EXECUTION_MODE", "isolated")
 	if _, err := f.run("pr", "rebase", p, "--continue", "--resolve", "--agent", "mock"); err == nil {
 		t.Fatal("isolated mock resolver accepted on continue")
 	}
@@ -386,6 +391,7 @@ func TestCLIPRRebaseResolveFailsClosedWithoutIsolation(t *testing.T) {
 }
 
 func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"pass", "repair", "exhausted", "outside", "zero", "custom"} {
 		t.Run(kind, func(t *testing.T) {
 			f, issue, number := submittedPRFixture(t, "agent")
@@ -436,7 +442,7 @@ func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
 			case "outside":
 				script = "if [ -f .swarm/active/REPAIR_PATHS.md ]; then printf fixed > " + name + "; printf unsafe > outside.txt; else printf resolved > " + name + "; fi"
 			}
-			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", script)
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", script)
 			output, runErr := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--json")
 			if (runErr == nil) != (kind == "pass" || kind == "repair") {
 				t.Fatalf("rebase: %v\n%s", runErr, output)
@@ -482,6 +488,7 @@ func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
 }
 
 func TestCLIPRRebaseRoutineReapproval(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	before := f.state(t, issue)
 	original, err := f.tracker.GetPullRequest(context.Background(), number)
@@ -524,6 +531,7 @@ func TestCLIPRRebaseRoutineReapproval(t *testing.T) {
 }
 
 func TestCLIPRRebasePolicyReviewStopsBeforeGit(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"human", "rejected"} {
 		t.Run(kind, func(t *testing.T) {
 			gate := "agent"
@@ -548,7 +556,7 @@ func TestCLIPRRebasePolicyReviewStopsBeforeGit(t *testing.T) {
 			}
 			f.must(t, "issue", "approve", strconv.Itoa(issue))
 			if kind == "rejected" {
-				t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+				f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 			}
 			_, err = f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
 			if err == nil {

@@ -100,7 +100,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			stops.number = opts.IssueNumber
-			engine := workflow.NewEngineWithManager(opts.RepoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
+			engine := workflow.NewEngineWithManagerOptions(opts.RepoRoot, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
 			if !dryRun {
 				lock, err := lease.LockClaim(opts.RepoRoot, opts.IssueNumber)
 				if err != nil {

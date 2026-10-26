@@ -52,7 +52,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 						return err
 					}
 					parts := strings.Split(slug, "/")
-					localPath = filepath.Join(registry.DefaultCloneBaseDir(), parts[0], parts[1])
+					localPath = filepath.Join(rootOpts.cloneBaseDir(), parts[0], parts[1])
 				} else {
 					localPath = rootOpts.resolveRepoRoot()
 				}
@@ -77,7 +77,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 
-			reg := registry.New("")
+			reg := registry.New(rootOpts.registryPath())
 			entry, err := reg.AddFromRemote(slug, localPath, rootOpts.Backend, upstreamRemote)
 			if err != nil {
 				return err
@@ -107,7 +107,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() { reportJSONFailure(cmd, asJSON, "repo-list", runErr) }()
-			reg := registry.New("")
+			reg := registry.New(rootOpts.registryPath())
 			entries, err := reg.List()
 			if err != nil {
 				return err
@@ -143,7 +143,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() { reportJSONFailure(cmd, asJSON, "repo-remove", runErr) }()
-			reg := registry.New("")
+			reg := registry.New(rootOpts.registryPath())
 			if err := reg.Remove(args[0]); err != nil {
 				return err
 			}

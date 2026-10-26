@@ -40,6 +40,7 @@ func TestClaimBudgetGuidanceRetainsSelection(t *testing.T) {
 }
 
 func TestCLIStatusClaimBudgetUsesManagerClock(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "none")
 	n := strconv.Itoa(issue)
@@ -53,7 +54,7 @@ func TestCLIStatusClaimBudgetUsesManagerClock(t *testing.T) {
 	now := base.Add(time.Hour)
 	run := func(args ...string) string {
 		t.Helper()
-		cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, Backend: "local", nowFn: func() time.Time { return now }})
+		cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", nowFn: func() time.Time { return now }})
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
@@ -110,6 +111,7 @@ func (tr *budgetClockTracker) GetIssue(ctx context.Context, number int) (*tracke
 }
 
 func TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable(t *testing.T) {
+	t.Parallel()
 	for _, resource := range []string{"issue", "node"} {
 		for _, asJSON := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/json=%t", resource, asJSON), func(t *testing.T) {
@@ -135,7 +137,7 @@ func TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable(t *testing.T) {
 				base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 				var elapsed atomic.Int64
 				tr := &budgetClockTracker{Tracker: f.tracker, manager: f.manager, elapsed: &elapsed}
-				cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr, nowFn: func() time.Time { return base.Add(time.Duration(elapsed.Load())) }})
+				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr, nowFn: func() time.Time { return base.Add(time.Duration(elapsed.Load())) }})
 				var out, diag bytes.Buffer
 				cmd.SetOut(&out)
 				cmd.SetErr(&diag)
@@ -184,6 +186,7 @@ func TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable(t *testing.T) {
 // TestCLIForkStatusMissingClaimBudget reads state written by an upstream
 // coordinator that predates claim budgets.
 func TestCLIForkStatusMissingClaimBudget(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	alice := f.aliceClone("alice")
 	opts := f.as("alice", alice)

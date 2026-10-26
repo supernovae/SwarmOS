@@ -37,6 +37,7 @@ type upstreamRemoteFixture struct {
 	aliceBare    string
 	upstreamRoot string
 	nodeConfig   string
+	env          *fixtureEnv
 	baseSHA      string
 	forkMainSHA  string
 
@@ -62,19 +63,14 @@ func (f *upstreamRemoteFixture) git(dir string, args ...string) string {
 
 func newUpstreamRemoteFixture(t *testing.T) *upstreamRemoteFixture {
 	t.Helper()
-	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("APPDATA", t.TempDir())
-	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
 	f := &upstreamRemoteFixture{
-		t: t, tmp: t.TempDir(),
+		t: t, tmp: t.TempDir(), env: newFixtureEnv(t),
 		now:      time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC),
 		comments: map[int64]*tracker.Comment{},
 		prs:      map[int]*tracker.PullRequest{},
 	}
 	f.nodeConfig = filepath.Join(t.TempDir(), "node.yaml")
-	t.Setenv("SWARM_NODE_CONFIG", f.nodeConfig)
+	f.env.set("SWARM_NODE_CONFIG", f.nodeConfig)
 	f.projectBare = filepath.Join(f.tmp, "octo", "swarm.git")
 	f.aliceBare = filepath.Join(f.tmp, "alice", "swarm.git")
 	for _, dir := range []string{f.projectBare, f.aliceBare} {
@@ -179,6 +175,7 @@ func (f *upstreamRemoteFixture) run(opts RootOptions, args ...string) (string, e
 	opts.forkPollTimeout = 30 * time.Second
 	opts.forkDispatcher = f.dispatch
 	opts.nowFn = func() time.Time { f.mu.Lock(); defer f.mu.Unlock(); return f.now }
+	opts.lookupEnv = f.env.lookup()
 	cmd := newRootCmdWithOptions(&opts)
 	var out, diagnostics bytes.Buffer
 	cmd.SetOut(&out)
@@ -406,6 +403,7 @@ func (f *upstreamRemoteFixture) headSHA(head string) string {
 // upstream = the project, selected first by flag and then by node profile,
 // without --fork-remote.
 func TestUpstreamRemoteForkFlow(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	alice := f.aliceClone("alice")
 	opts := f.as("alice", alice)
@@ -488,6 +486,7 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 // TestUpstreamRemoteValidation proves each misconfiguration names the remote
 // and the fix before any claim, coordinator request, push or worktree.
 func TestUpstreamRemoteValidation(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	for _, tc := range []struct {
 		name   string
@@ -550,6 +549,7 @@ func TestUpstreamRemoteValidation(t *testing.T) {
 // TestUpstreamRemoteSameRepository directs same-repository coordination to a
 // named upstream while a decoy origin stays untouched.
 func TestUpstreamRemoteSameRepository(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	decoy := filepath.Join(f.tmp, "decoy", "swarm.git")
 	f.git(f.tmp, "clone", "--bare", f.projectBare, decoy)
@@ -647,11 +647,12 @@ func TestForkRemoteDefaults(t *testing.T) {
 }
 
 func TestUpstreamRemoteConfiguration(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	t.Parallel()
+	env := newFixtureEnv(t)
 	cfg := filepath.Join(t.TempDir(), "node.yaml")
-	t.Setenv("SWARM_NODE_CONFIG", cfg)
+	env.set("SWARM_NODE_CONFIG", cfg)
 	run := func(args ...string) (string, error) {
-		cmd := newRootCmdWithOptions(&RootOptions{})
+		cmd := newRootCmdWithOptions(&RootOptions{lookupEnv: env.lookup()})
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,15 +23,38 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	// Keep the persistent Go build cache that host validation creates under
-	// XDG_CACHE_HOME out of the real user cache directory.
-	cache, err := os.MkdirTemp("", "swarm-test-cache-*")
+	// Point every user directory at one temporary root before any test runs, so
+	// parallel tests write nothing under the real home, config, state, app-data
+	// or cache directories. That includes the persistent Go build cache that host
+	// validation creates under XDG_CACHE_HOME, claim records under the user
+	// config directory, agent diagnostics under XDG_STATE_HOME and the global Git
+	// configuration that fixture Git commands read from HOME.
+	root, err := os.MkdirTemp("", "swarm-test-home-*")
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
 		os.Exit(1)
 	}
-	os.Setenv("XDG_CACHE_HOME", cache)
+	for _, dir := range []struct{ name, sub string }{
+		{"HOME", "home"},
+		{"XDG_CONFIG_HOME", "config"},
+		{"XDG_STATE_HOME", "state"},
+		{"XDG_CACHE_HOME", "cache"},
+		{"APPDATA", "appdata"},
+	} {
+		path := filepath.Join(root, dir.sub)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain:", err)
+			os.RemoveAll(root)
+			os.Exit(1)
+		}
+		if err := os.Setenv(dir.name, path); err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain:", err)
+			os.RemoveAll(root)
+			os.Exit(1)
+		}
+	}
 	code := m.Run()
-	os.RemoveAll(cache)
+	os.RemoveAll(root)
 	os.Exit(code)
 }
 

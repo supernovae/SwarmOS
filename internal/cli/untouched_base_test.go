@@ -16,6 +16,7 @@ import (
 )
 
 func TestCLIIssueWorkUntouchedBaseAdvance(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		t.Run(backend, func(t *testing.T) { testUntouchedBaseAdvance(t, backend) })
 	}
@@ -53,7 +54,7 @@ func testUntouchedBaseAdvance(t *testing.T, backend string) {
 		f.manager.SetStore(f.root, coordination.NewGitStore(f.root))
 		tr := checkpointCLITracker{f.tracker}
 		run = func(args ...string) (string, error) {
-			cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: tr})
 			var out bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&out)
@@ -70,9 +71,9 @@ func testUntouchedBaseAdvance(t *testing.T, backend string) {
 	}
 	must("issue", "approve", n)
 	must("issue", "work", n, "--agent", "mock", "--headless")
-	t.Setenv("SWARM_USER", "independent-maintainer")
+	f.setenv("SWARM_USER", "independent-maintainer")
 	must("issue", "review-plan", n, "--approve", "--notes", "Checked exact plan and test plan")
-	t.Setenv("SWARM_USER", "alice")
+	f.setenv("SWARM_USER", "alice")
 	must("issue", "release", n)
 	planned := f.state(t, number)
 	if planned.HeadSHA != "" {

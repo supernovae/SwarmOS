@@ -318,6 +318,23 @@ A completed unpublished rebase can enter this new planning cycle even while GitH
 
 You don't need a separate command to resume a PR after its claim is lost or expires. `pr work`, `pr rebase`, `pr validate`, and `pr submit` each check the issue's lease first. Each one resumes your active claim when this machine holds its token, or takes a fresh claim when the old one has lapsed. `swarm pr status <PR>` shows where the revision stands.
 
+### Reading a failed agent's output
+
+SwarmOS never prints harness output in failure errors or `--json` results, because a harness can emit terminal escapes, prompts, or credentials. When `swarm issue work`, `swarm pr work`, or `swarm pr rebase --resolve` reports a failed agent, the error ends with a pointer to a private local copy instead:
+
+```text
+planner agent failed (exit 1; harness diagnostics withheld); diagnostics saved to /home/you/.local/state/swarm/diagnostics/failure-3f9c….log (2048 bytes)
+```
+
+Open that file with any pager, for example `less <path>`. It holds the last stdout and stderr output of the failed run:
+
+- Location: `$XDG_STATE_HOME/swarm/diagnostics/` when `XDG_STATE_HOME` is set, otherwise `~/.local/state/swarm/diagnostics/` on Linux and the user configuration directory (for example `~/Library/Application Support/swarm/diagnostics/`) on macOS and Windows. It is outside every worktree and is never committed, uploaded, or shown on issues or PRs.
+- Permissions: the directory is `0700` and each file `0600`. SwarmOS refuses to write through a symlink or into a directory other users can read; the error then says `diagnostics could not be saved`.
+- Contents: at most 64 KiB of the most recent output. The coordinator's GitHub token is redacted the same way as in Git diagnostics. Control characters, terminal escapes, and invalid UTF-8 are written as printable escapes such as `\x1b`, so viewing the file cannot drive your terminal. Other secrets a harness prints are not detected, so treat the file as private.
+- Retention: logs older than seven days are deleted, and only the newest 20 are kept.
+
+A run that printed nothing reports `no harness output to save`. Successful runs save no log. Isolated workers are not given access to the diagnostics directory. Trusted-local agents run as your user, though, so they can read earlier logs. The files are private from other users, not from trusted-local agents. Interactive (`--headless=false`) runs still stream harness output live to your terminal.
+
 ### Recovering from an Interrupted Run
 
 When native Codex or a harness-tools Bubblewrap run reaches its agent budget, SwarmOS leaves the task worktree and role artifacts untouched and reports a recovery patch at `.swarm/active-output/<role>-timeout.patch` in the original task workspace, including for reviewers. Inspect that patch before recovering useful edits manually in a separate checkout. It compares the sandbox's starting files, including dirty and untracked inputs, with its final contents; those starting files may differ from HEAD.

@@ -63,6 +63,9 @@ type StackProfile struct {
 	Conventions []string
 }
 
+// GoFmtCheckCommand fails when gofmt lists unformatted files or cannot run.
+const GoFmtCheckCommand = `unformatted=$(gofmt -l .) || exit 1; if [ -n "$unformatted" ]; then printf '%s\n' "$unformatted"; exit 1; fi`
+
 func DetectStack(repoRoot string) StackProfile {
 	switch {
 	case fileExists(filepath.Join(repoRoot, "go.mod")):
@@ -390,6 +393,10 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 			{Name: "lint", Command: stack.LintCmd, Timeout: "5m"},
 		},
 		ProtectedPaths: contract.DefaultProtectedPaths(),
+	}
+	if stack.Language == "Go" {
+		// Formatting drift otherwise first shows up in CI after submit.
+		valSpec.RequiredChecks = append([]contract.CheckSpec{{Name: "fmt", Command: GoFmtCheckCommand, Timeout: "2m"}}, valSpec.RequiredChecks...)
 	}
 	valBytes, err := yaml.Marshal(&valSpec)
 	if err != nil {
@@ -885,8 +892,10 @@ func RunDoctorWithRunner(repoRoot string, checkGitHubAuth bool, run DoctorRunner
 		}
 	}
 
+	var spec *contract.ValidationSpec
 	checks = append(checks, run.Run("harness", ".swarm/validation/required-checks.yaml", func() DoctorCheck {
-		if spec, err := LoadValidationSpec(repoRoot); err == nil {
+		var err error
+		if spec, err = LoadValidationSpec(repoRoot); err == nil {
 			return DoctorCheck{
 				Category: "harness",
 				Name:     ".swarm/validation/required-checks.yaml",
@@ -902,6 +911,19 @@ func RunDoctorWithRunner(repoRoot string, checkGitHubAuth bool, run DoctorRunner
 			}
 		}
 	}))
+	if spec != nil {
+		// Advisory only: CI lint and format commands that no required check
+		// covers show up as WARN suggestions; policy is never edited here.
+		var drift []DoctorCheck
+		summary := run.Run("harness", ciDriftCheckName, func() DoctorCheck {
+			drift = doctorRequiredCheckDrift(repoRoot, spec)
+			return drift[0]
+		})
+		checks = append(checks, summary)
+		if len(drift) > 1 {
+			checks = append(checks, drift[1:]...)
+		}
+	}
 	// Probe configured executables rather than assuming particular installed CLIs.
 	if cfg, err := LoadConfig(repoRoot); err == nil {
 		names := make([]string, 0, len(cfg.Agents))

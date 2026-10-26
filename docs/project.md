@@ -187,6 +187,9 @@ swarm issue decompose 42 --sequential --backend github
 
 ```yaml
 required_checks:
+  - name: fmt
+    command: unformatted=$(gofmt -l .) || exit 1; if [ -n "$unformatted" ]; then printf '%s\n' "$unformatted"; exit 1; fi
+    timeout: 2m
   - name: build
     command: go build ./...
     timeout: 5m
@@ -206,6 +209,12 @@ protected_paths:
 ```
 
 During `swarm issue validate` and `swarm issue submit`, SwarmOS reads `required-checks.yaml` from the **approved base commit** rather than the candidate worktree, so a task cannot pass validation by weakening its own check commands or protected-path rules. Protected-path patterns use Go's `filepath.Match` syntax, where `*` stays within one directory. A `**` path component matches any number of directories: `**/.gitattributes` covers `.gitattributes` at the root and in every subdirectory, `a/**/b.yaml` covers `a/b.yaml` and `a/x/y/b.yaml`, and `dir/**` covers `dir` and everything below it. Negation (`!pattern`) and other gitignore features are not supported. Validation stops with an error naming any pattern it cannot parse, such as `[`. When a maintainer intentionally authors a task that updates `.swarm/` or `.github/workflows/`, set `allow_harness_changes: true` in that issue's WorkUnit before approving it.
+
+For Go repositories, `swarm repo init` writes the `fmt`, `build`, `test`, and `lint` checks shown above. The `fmt` check fails when `gofmt -l` lists any file. Other stacks get `build`, `test`, and `lint` from their own toolchain.
+
+`swarm repo doctor` compares the `run:` steps in `.github/workflows/*.yml` and `*.yaml` with these checks. When a workflow runs gofmt, `go vet`, staticcheck, golangci-lint, eslint, `prettier --check`, ruff, `black --check`, `cargo fmt --check`, or `cargo clippy` and no required check runs the same tool, doctor prints a `WARN` naming the workflow and command, with a suggested entry you can paste into `required_checks`. These warnings never fail doctor, and doctor never edits the policy: adding a check stays a maintainer change on the default branch. Doctor reads the commands as written. It does not follow `make` targets, scripts, reusable workflows, or `${{ }}` expressions, so a tool that only runs inside one of those is not reported.
+
+Checks that run on the host (trusted-local execution, and `swarm repo validate` on CI runners) share a persistent Go build cache. SwarmOS sets `GOCACHE` to a private directory under your user cache directory, `swarm/go-build/<repository key>`, so repeated validations reuse compiled packages. All worktrees of one repository share it, it stays separate from your own `GOCACHE`, and it is never mounted into agent or validation sandboxes. Delete the directory at any time to reclaim space.
 
 Released builds can reuse a coordinator-recorded passing validation at `swarm issue submit` or `swarm pr submit` when the checkpoint tree, approved base, policy digest, worker, claim, and swarm version still match. Submit shows the original run's age and short tree SHA in its output and PR evidence. Explicit validation, CI, development builds, and fork submissions continue to run checks.
 

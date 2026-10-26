@@ -72,6 +72,38 @@ type Result struct {
 	Validation    *validation.ValidationReport `json:"validation,omitempty"`
 	Preflight     *workflow.PreflightResult    `json:"preflight,omitempty"`
 	Work          *workflow.WorkResult         `json:"work,omitempty"`
+	// LocalDroppedPaths is the fork contributor coordinator's own comparison,
+	// never upstream evidence; upstream records it when the head is published.
+	LocalDroppedPaths *LocalDroppedPaths `json:"local_dropped_paths,omitempty"`
+}
+
+// LocalDroppedPaths labels a changed-path comparison made from local Git objects.
+type LocalDroppedPaths struct {
+	Source string   `json:"source"`
+	Paths  []string `json:"paths"`
+}
+
+const localDroppedSource = "contributor coordinator (local Git objects; upstream records it at swarm --fork pr submit)"
+
+// diagnoseLocalDroppedPaths compares a completed fork rebase that upstream
+// could not inspect yet, using the commits in the local PR worktree.
+func (s *Service) diagnoseLocalDroppedPaths(ctx context.Context, r *Result) {
+	if r == nil {
+		return
+	}
+	r.LocalDroppedPaths = nil
+	if r.State == nil || r.State.ForkRepo == "" || r.Worktree == "" || r.Rebasing {
+		return
+	}
+	ev := r.State.LastRebase
+	if ev == nil || ev.Status != "completed" || ev.DroppedPathsVerified || ev.NewHead == "" {
+		return
+	}
+	local := *ev
+	local.VerifyDroppedPaths(ctx, r.Worktree)
+	if local.DroppedPathsVerified {
+		r.LocalDroppedPaths = &LocalDroppedPaths{Source: localDroppedSource, Paths: local.DroppedPaths}
+	}
 }
 
 func headBranch(pr *tracker.PullRequest) string {
@@ -289,6 +321,7 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 			}
 		}
 	}
+	s.diagnoseLocalDroppedPaths(ctx, r)
 	r.Checks, err = s.Tracker.GetCheckStatus(ctx, r.PR.HeadSHA)
 	if err != nil {
 		return r, err
@@ -770,7 +803,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			return nil, err
 		}
 	}
-	return s.withClaim(ctx, r, opts.Resolve, nil, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+	result, err := s.withClaim(ctx, r, opts.Resolve, nil, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		path, branch, e := s.preparePR(ctx, r, remote, revisionHead(r.State), false)
 		if e != nil {
 			return nil, e
@@ -887,6 +920,8 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			return r, nil
 		})
 	})
+	s.diagnoseLocalDroppedPaths(ctx, result)
+	return result, err
 }
 
 // newResolver selects and preflights the developer agent from the approved

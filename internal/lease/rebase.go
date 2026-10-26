@@ -26,6 +26,10 @@ type RebaseEvidence struct {
 	Status                string   `json:"status"`
 	PatchIdentity         string   `json:"patch_identity"`
 	Verified              bool     `json:"verified"`
+	// DroppedPaths lists paths the PR changed against OldBase but no longer
+	// changes against NewBase. Absent DroppedPathsVerified means unknown.
+	DroppedPaths         []string `json:"dropped_paths,omitempty"`
+	DroppedPathsVerified bool     `json:"dropped_paths_verified,omitempty"`
 	// Resolutions record agent conflict resolutions as review evidence only.
 	Plans       []RebasePlanReport `json:"plans,omitempty"`
 	Resolutions []RebaseResolution `json:"resolutions,omitempty"`
@@ -134,6 +138,21 @@ func verifyRebaseEvidence(ctx context.Context, root string, st *IssueState, head
 		r.PatchIdentity = identity
 		r.Verified = true
 	}
+	r.VerifyDroppedPaths(ctx, root)
+}
+
+// VerifyDroppedPaths recomputes dropped paths from Git objects in root.
+func (r *RebaseEvidence) VerifyDroppedPaths(ctx context.Context, root string) {
+	r.resetDroppedPaths()
+	if dropped, err := workspace.RebaseDroppedPaths(ctx, root, r.OldBase, r.OldHead, r.NewBase, r.NewHead); err == nil {
+		r.DroppedPaths = dropped
+		r.DroppedPathsVerified = true
+	}
+}
+
+func (r *RebaseEvidence) resetDroppedPaths() {
+	r.DroppedPaths = nil
+	r.DroppedPathsVerified = false
 }
 
 // UpdateRebaseContext uses the same fenced operation as evidence invalidation.
@@ -225,6 +244,7 @@ func (m *Manager) UpdateRebaseContext(ctx context.Context, n int, owner string, 
 		r.Status = report.Status
 		r.PatchIdentity = "unavailable"
 		r.Verified = false
+		r.resetDroppedPaths()
 		if r.Status == "completed" {
 			r.NewHead = st.PRRevision.LocalHeadSHA
 			if st.ForkRepo == "" {

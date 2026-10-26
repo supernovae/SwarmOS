@@ -176,6 +176,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					}
 				}
 				fmt.Fprint(cmd.OutOrStdout(), pr.RebaseSummary(result.State, opts.Number))
+				if local := result.LocalDroppedPaths; local != nil && result.State != nil && result.State.LastRebase != nil {
+					fmt.Fprint(cmd.OutOrStdout(), pr.DroppedPathsWarning(local.Paths, local.Source, result.State.LastRebase.OldHead, result.State.LastRebase.NewHead, opts.Number, true))
+				}
 				fmt.Fprint(cmd.OutOrStdout(), lease.PlanSummary(result.State, false))
 				if result.SubmitCommand != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "Validation: PASS\nNext: %s\n", result.SubmitCommand)

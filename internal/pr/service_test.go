@@ -807,7 +807,7 @@ func TestForkContributorResolvesRebaseConflictsAsReports(t *testing.T) {
 	contributor.SetWorkerGateway(gateway)
 	svc := &Service{Root: s.Root, Tracker: contributorView, Manager: contributor, Fork: true, ForkRemote: "fork"}
 
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'fork change\\n' > conflict.txt")
+	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'fork change\\n' > conflict.txt; printf 'fork other\\n' > other.txt")
 	if _, err := svc.Work(ctx, Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock"}}); err != nil {
 		t.Fatalf("contributor pr work: %v", err)
 	}
@@ -819,7 +819,11 @@ func TestForkContributorResolvesRebaseConflictsAsReports(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.Root, "conflict.txt"), []byte("upstream change\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	git(s.Root, "add", "conflict.txt")
+	// Upstream absorbs other.txt verbatim, so the PR no longer changes it.
+	if err := os.WriteFile(filepath.Join(s.Root, "other.txt"), []byte("fork other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(s.Root, "add", "conflict.txt", "other.txt")
 	git(s.Root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "upstream conflict")
 	if _, err := s.Manager.ApproveTask(ctx, issue, "alice"); err != nil {
 		t.Fatal(err)
@@ -852,6 +856,34 @@ func TestForkContributorResolvesRebaseConflictsAsReports(t *testing.T) {
 	}
 	if summary := RebaseSummary(upstream, number); !strings.Contains(summary, "Reported resolved by mock") {
 		t.Fatalf("summary does not label the report:\n%s", summary)
+	}
+	// Upstream cannot inspect the unpublished head; the contributor's own
+	// coordinator reports the comparison, labeled as local.
+	if r.DroppedPathsVerified || len(r.DroppedPaths) != 0 || !strings.Contains(RebaseSummary(upstream, number), "Changed-path comparison: unavailable") {
+		t.Fatalf("upstream claimed an unverifiable comparison: %+v", r)
+	}
+	if local := rebased.LocalDroppedPaths; local == nil || local.Source == "" || !slices.Equal(local.Paths, []string{"other.txt"}) {
+		t.Fatalf("local dropped-path diagnostics = %+v", local)
+	}
+	status, err := svc.Status(ctx, number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.LocalDroppedPaths == nil || !slices.Equal(status.LocalDroppedPaths.Paths, []string{"other.txt"}) {
+		t.Fatalf("status local diagnostics = %+v", status.LocalDroppedPaths)
+	}
+	if _, err = svc.Submit(ctx, number); err != nil {
+		t.Fatalf("contributor submit after rebase: %v", err)
+	}
+	published, err := s.Manager.GetCurrentState(ctx, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := published.LastRebase; r == nil || !r.DroppedPathsVerified || !slices.Equal(r.DroppedPaths, []string{"other.txt"}) {
+		t.Fatalf("published upstream evidence = %+v", r)
+	}
+	if summary := RebaseSummary(published, number); !strings.Contains(summary, "Warning: no longer changed: other.txt\n") || !strings.Contains(summary, "swarm --fork pr work "+strconv.Itoa(number)) {
+		t.Fatalf("published summary:\n%s", summary)
 	}
 }
 

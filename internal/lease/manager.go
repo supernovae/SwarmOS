@@ -68,45 +68,46 @@ type ApprovalTransition struct {
 }
 
 type IssueState struct {
-	CheckpointHeads        []string                       `json:"checkpoint_heads,omitempty"`
-	ResumeCheckpointBranch string                         `json:"resume_checkpoint_branch,omitempty"`
-	ClaimBudget            *ClaimBudget                   `json:"claim_budget,omitempty"`
-	RevisionPlan           *workspace.RevisionPlanContext `json:"revision_plan,omitempty"`
-	PlanReplanCount        int                            `json:"plan_replan_count"`
-	PendingPlanReview      *PlanRejection                 `json:"pending_plan_review,omitempty"`
-	NextPhaseReason        string                         `json:"next_phase_reason,omitempty"`
-	ClaimPreviousBase      string                         `json:"-"`
-	RebaseApprovalAudit    string                         `json:"rebase_approval_audit,omitempty"`
-	DroppedCheckpoint      *workspace.DroppedCheckpoint   `json:"dropped_checkpoint,omitempty"`
-	CheckpointDropped      bool                           `json:"-"`
-	SubmittedBaseSHA       string                         `json:"submitted_base_sha,omitempty"`
-	PreviousBaseSHA        string                         `json:"previous_base_sha,omitempty"`
-	LastRebase             *RebaseEvidence                `json:"last_rebase,omitempty"`
-	PolicyTreeDigest       string                         `json:"policy_tree_digest,omitempty"`
-	ApprovalTransition     *ApprovalTransition            `json:"approval_transition,omitempty"`
-	CarryReason            string                         `json:"carry_reason,omitempty"`
-	ChangedPolicyPaths     []string                       `json:"changed_policy_paths,omitempty"`
-	CleanupHistory         []CleanupReservation           `json:"cleanup_history,omitempty"`
-	Cleanup                *CleanupReservation            `json:"cleanup,omitempty"`
-	PROutcome              *PROutcome                     `json:"pr_outcome,omitempty"`
-	SubmittedHeadSHA       string                         `json:"submitted_head_sha,omitempty"`
-	Lease                  contract.Lease                 `json:"lease"`
-	Artifacts              []contract.Artifact            `json:"artifacts,omitempty"`
-	Attestations           []contract.RoleAttestation     `json:"attestations,omitempty"`
-	ProjectionCommentID    int64                          `json:"projection_comment_id,omitempty"`
-	TaskDigest             string                         `json:"task_digest"`
-	PolicyDigest           string                         `json:"policy_digest"`
-	BaseSHA                string                         `json:"base_sha"`
-	HeadSHA                string                         `json:"head_sha,omitempty"`
-	Branch                 string                         `json:"branch,omitempty"`
-	ApprovedBy             string                         `json:"approved_by,omitempty"`
-	ApprovedAt             time.Time                      `json:"approved_at,omitempty"`
-	PRNumber               int                            `json:"pr_number,omitempty"`
-	PRRevision             *PRRevision                    `json:"pr_revision,omitempty"`
-	EffectiveGate          contract.GateMode              `json:"effective_gate,omitempty"`
-	PRURL                  string                         `json:"pr_url,omitempty"`
-	ForkRepo               string                         `json:"fork_repo,omitempty"`
-	LastForkRequestID      int64                          `json:"last_fork_request_id,omitempty"`
+	CheckpointHeads        []string                        `json:"checkpoint_heads,omitempty"`
+	ResumeCheckpointBranch string                          `json:"resume_checkpoint_branch,omitempty"`
+	ClaimBudget            *ClaimBudget                    `json:"claim_budget,omitempty"`
+	RevisionPlan           *workspace.RevisionPlanContext  `json:"revision_plan,omitempty"`
+	PlanReplanCount        int                             `json:"plan_replan_count"`
+	PendingPlanReview      *PlanRejection                  `json:"pending_plan_review,omitempty"`
+	NextPhaseReason        string                          `json:"next_phase_reason,omitempty"`
+	ClaimPreviousBase      string                          `json:"-"`
+	RebaseApprovalAudit    string                          `json:"rebase_approval_audit,omitempty"`
+	DroppedCheckpoint      *workspace.DroppedCheckpoint    `json:"dropped_checkpoint,omitempty"`
+	CheckpointDropped      bool                            `json:"-"`
+	SubmittedBaseSHA       string                          `json:"submitted_base_sha,omitempty"`
+	PreviousBaseSHA        string                          `json:"previous_base_sha,omitempty"`
+	LastRebase             *RebaseEvidence                 `json:"last_rebase,omitempty"`
+	RebaseTransitions      []coordination.CheckpointRebase `json:"rebase_transitions,omitempty"`
+	PolicyTreeDigest       string                          `json:"policy_tree_digest,omitempty"`
+	ApprovalTransition     *ApprovalTransition             `json:"approval_transition,omitempty"`
+	CarryReason            string                          `json:"carry_reason,omitempty"`
+	ChangedPolicyPaths     []string                        `json:"changed_policy_paths,omitempty"`
+	CleanupHistory         []CleanupReservation            `json:"cleanup_history,omitempty"`
+	Cleanup                *CleanupReservation             `json:"cleanup,omitempty"`
+	PROutcome              *PROutcome                      `json:"pr_outcome,omitempty"`
+	SubmittedHeadSHA       string                          `json:"submitted_head_sha,omitempty"`
+	Lease                  contract.Lease                  `json:"lease"`
+	Artifacts              []contract.Artifact             `json:"artifacts,omitempty"`
+	Attestations           []contract.RoleAttestation      `json:"attestations,omitempty"`
+	ProjectionCommentID    int64                           `json:"projection_comment_id,omitempty"`
+	TaskDigest             string                          `json:"task_digest"`
+	PolicyDigest           string                          `json:"policy_digest"`
+	BaseSHA                string                          `json:"base_sha"`
+	HeadSHA                string                          `json:"head_sha,omitempty"`
+	Branch                 string                          `json:"branch,omitempty"`
+	ApprovedBy             string                          `json:"approved_by,omitempty"`
+	ApprovedAt             time.Time                       `json:"approved_at,omitempty"`
+	PRNumber               int                             `json:"pr_number,omitempty"`
+	PRRevision             *PRRevision                     `json:"pr_revision,omitempty"`
+	EffectiveGate          contract.GateMode               `json:"effective_gate,omitempty"`
+	PRURL                  string                          `json:"pr_url,omitempty"`
+	ForkRepo               string                          `json:"fork_repo,omitempty"`
+	LastForkRequestID      int64                           `json:"last_fork_request_id,omitempty"`
 }
 
 // ProvisionContext returns the authoritative recovery identity for issue
@@ -1930,6 +1931,9 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 		return nil, fmt.Errorf("PR publication snapshot changed")
 	}
 	verifyRebaseEvidence(ctx, m.repoRoot, st, published)
+	if st.ForkRepo == "" {
+		recordRebaseTransition(st, published)
+	}
 	st.PRRevision = nil
 	preserveCheckpointHeads(st, st.HeadSHA, st.SubmittedHeadSHA, published)
 	st.HeadSHA = published

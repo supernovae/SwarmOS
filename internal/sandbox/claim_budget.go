@@ -1,11 +1,18 @@
 package sandbox
 
-import "context"
+import (
+	"context"
+	"sort"
+)
 
 func checkImport(ctx context.Context, opts WorkerOptions, initial, final workerManifest) error {
-	var changed []string
+	var changed, deleted []string
 	for name, before := range initial {
-		if after, ok := final[name]; !ok || before != after {
+		after, ok := final[name]
+		if !ok {
+			deleted = append(deleted, name)
+		}
+		if !ok || before != after {
 			changed = append(changed, name)
 		}
 	}
@@ -14,8 +21,9 @@ func checkImport(ctx context.Context, opts WorkerOptions, initial, final workerM
 			changed = append(changed, name)
 		}
 	}
+	sort.Strings(deleted)
 	if opts.CheckImport != nil {
-		return opts.CheckImport(ctx, changed)
+		return opts.CheckImport(ctx, changed, deleted)
 	}
 	return ctx.Err()
 }

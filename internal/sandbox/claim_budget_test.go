@@ -24,7 +24,7 @@ func TestNativeClaimBudgetPreservesOnlyCoordinatorPause(t *testing.T) {
 				ctx = claimpause.WithParent(ctx, context.Background())
 				opts := WorkerOptions{Role: role, ReadOnly: role == "planner" || role == "reviewer"}
 				checked := false
-				opts.CheckImport = func(ctx context.Context, paths []string) error { checked = true; return ctx.Err() }
+				opts.CheckImport = func(ctx context.Context, _, _ []string) error { checked = true; return ctx.Err() }
 				err := withNativeWorkspace(ctx, dir, opts, func(_ context.Context, work, _ string) error {
 					writeWorkerFixture(t, work, "source", "after")
 					writeWorkerFixture(t, work, "added", "saved")
@@ -69,7 +69,7 @@ func TestNativeClaimBudgetRejectsUnsafeOutput(t *testing.T) {
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(context.Canceled)
 			ctx = claimpause.WithParent(ctx, context.Background())
-			opts := WorkerOptions{Role: "developer", CheckImport: func(_ context.Context, paths []string) error {
+			opts := WorkerOptions{Role: "developer", CheckImport: func(context.Context, []string, []string) error {
 				if kind == "protected" || kind == "fence" {
 					return fmt.Errorf("rejected %s", kind)
 				}

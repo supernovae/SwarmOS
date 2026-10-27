@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -127,7 +128,7 @@ func TestImportRejectionRecovery(t *testing.T) {
 			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
 					if req.Role == role {
-						return nil, req.CheckImport(ctx, []string{".swarm/active/TEST_PLAN.md", ".swarm/active/PLAN.md"})
+						return nil, req.CheckImport(ctx, []string{".swarm/active/TEST_PLAN.md", ".swarm/active/PLAN.md"}, nil)
 					}
 					return mock.Run(ctx, req)
 				}}, nil
@@ -284,5 +285,156 @@ func TestWritableImportPolicyUsesTrustedPatterns(t *testing.T) {
 	}
 	if err := writableImportPolicy("developer", []string{".swarm/active/IMPLEMENTATION.md.extra"}, nil, true, true); err == nil {
 		t.Fatal("output prefix authorized an unrelated file")
+	}
+}
+
+func TestDeletionDirectivePlanLines(t *testing.T) {
+	const path = "internal/workspace/recovery.go"
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{"- Delete internal/workspace/recovery.go", true},
+		{"Delete internal/workspace/recovery.go", true},
+		{"* remove `internal/workspace/recovery.go` because it moved", true},
+		{"12. RM internal/workspace/recovery.go", true},
+		{"1) Drop `internal/workspace/recovery.go`", true},
+		{"  + delete\tinternal/workspace/recovery.go\r", true},
+		{"- Create new file internal/workspace/recovery.go", false},
+		{"- Modify `internal/workspace/recovery.go`", false},
+		{"- New: internal/workspace/recovery.go (Delete internal/workspace/recovery.go later)", false},
+		{"Do not delete internal/workspace/recovery.go", false},
+		{"- Delete the file internal/workspace/recovery.go", false},
+		{"- Deleted internal/workspace/recovery.go", false},
+		{"- Deletes internal/workspace/recovery.go", false},
+		{"-Delete internal/workspace/recovery.go", false},
+		{"> Delete internal/workspace/recovery.go", false},
+		{"- Delete internal/workspace/recovery.go.bak", false},
+		{"- Delete internal/workspace/recovery.go.", false},
+		{"- Delete `internal/workspace/recovery.go`.", false},
+		{"- Delete workspace/recovery.go", false},
+		{"- Delete recovery.go", false},
+		{"- Delete ./internal/workspace/recovery.go", false},
+		{"- Delete\ninternal/workspace/recovery.go", false},
+	} {
+		if got := plannedDeletions("# Plan\n\n" + tc.line + "\n")[path]; got != tc.want {
+			t.Errorf("%q: planned=%v want %v", tc.line, got, tc.want)
+		}
+	}
+}
+
+func TestDeletionImportPolicy(t *testing.T) {
+	const recovery = "internal/workspace/recovery.go"
+	base := map[string]bool{recovery: true, "internal/api/handler.go": true}
+	for _, tc := range []struct {
+		name, role, plan string
+		deleted          []string
+		want             []string
+	}{
+		// #207: the plan wrongly called the existing file new.
+		{name: "plan calls it new", role: "developer", plan: "- New file `" + recovery + "`\n", deleted: []string{recovery}, want: []string{recovery}},
+		{name: "plan mentions it", role: "developer", plan: "Refactor " + recovery + " carefully.\n", deleted: []string{recovery}, want: []string{recovery}},
+		{name: "unmentioned", role: "developer", deleted: []string{"internal/api/handler.go", recovery, recovery}, want: []string{"internal/api/handler.go", recovery}},
+		{name: "directive", role: "developer", plan: "- Delete " + recovery + "\n", deleted: []string{recovery}},
+		{name: "directive covers one path", role: "developer", plan: "- Delete " + recovery + "\n", deleted: []string{recovery, "internal/api/handler.go"}, want: []string{"internal/api/handler.go"}},
+		{name: "non-base file", role: "developer", deleted: []string{"scratch.go"}},
+		{name: "no deletions", role: "developer"},
+		{name: "tester", role: "tester", deleted: []string{recovery}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := deletionImportPolicy(tc.role, tc.deleted, base, tc.plan)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var rejection *importRejection
+			if !errors.As(err, &rejection) || !rejection.Deleted || rejection.Recoverable || !reflect.DeepEqual(rejection.Paths, tc.want) {
+				t.Fatalf("rejection: %#v", err)
+			}
+			for _, pr := range []int{0, 42} {
+				reason := importRejectionReason(rejection, 7, pr)
+				rerun := "rerun with swarm issue work 7 --phase implement"
+				if pr != 0 {
+					rerun = "rerun with swarm pr work 42 --phase implement"
+				}
+				for _, text := range []string{"rejected agent changes to: " + strings.Join(tc.want, ", "), "unplanned deletion of approved-base files", "worktree was left unchanged", "restore approved-base files", ".swarm/active/REPAIR.md", "`- Delete path/to/file.go`", rerun} {
+					if !strings.Contains(reason, text) {
+						t.Fatalf("reason %q lacks %q", reason, text)
+					}
+				}
+				if strings.Contains(reason, "recover-import") {
+					t.Fatalf("offered recovery: %s", reason)
+				}
+			}
+		})
+	}
+}
+
+// deletionBase commits files as the approved base of a fresh repository.
+func deletionBase(t *testing.T, files map[string]string) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q", "-b", "main")
+	for name, content := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git("add", "-A")
+	git("commit", "-q", "-m", "base")
+	return root, git("rev-parse", "HEAD")
+}
+
+func TestDeletionCheckUsesTrustedState(t *testing.T) {
+	const recovery = "internal/workspace/recovery.go"
+	root, base := deletionBase(t, map[string]string{recovery: "package workspace\n"})
+	plan := func(body string) *lease.IssueState {
+		return &lease.IssueState{BaseSHA: base, Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: body}}}
+	}
+	// A candidate PLAN.md directive never authorizes deletion.
+	if err := os.MkdirAll(filepath.Join(root, ".swarm", "active"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".swarm", "active", "PLAN.md"), []byte("- Delete "+recovery+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var rejection *importRejection
+	if err := checkDeletions(t.Context(), root, plan("- New file "+recovery+"\n"), "developer", []string{recovery}, false); !errors.As(err, &rejection) || !rejection.Deleted {
+		t.Fatalf("candidate plan authorized deletion: %v", err)
+	}
+	if err := checkDeletions(t.Context(), root, plan("- Delete "+recovery+"\n"), "developer", []string{recovery}, false); err != nil {
+		t.Fatalf("approved directive: %v", err)
+	}
+	if err := checkDeletions(t.Context(), root, plan(""), "developer", []string{recovery}, true); err != nil {
+		t.Fatalf("fork mode is out of scope: %v", err)
+	}
+	if err := checkDeletions(t.Context(), root, plan(""), "developer", []string{"untracked.go"}, false); err != nil {
+		t.Fatalf("non-base deletion: %v", err)
+	}
+	// Lookup failures fail closed without becoming a policy rejection.
+	for name, st := range map[string]*lease.IssueState{
+		"no state":         nil,
+		"invalid base":     {BaseSHA: "--output=x", Artifacts: plan("- Delete " + recovery).Artifacts},
+		"unknown base":     {BaseSHA: strings.Repeat("0", 40), Artifacts: plan("- Delete " + recovery).Artifacts},
+		"no approved plan": {BaseSHA: base},
+	} {
+		err := checkDeletions(t.Context(), root, st, "developer", []string{recovery}, false)
+		if err == nil || errors.As(err, &rejection) {
+			t.Fatalf("%s: %v", name, err)
+		}
 	}
 }

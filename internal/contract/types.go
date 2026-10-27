@@ -213,6 +213,10 @@ type NodeProfile struct {
 	Resources    NodeResources `yaml:"resources" json:"resources"`
 	// UpstreamRemote names the project Git remote when it is not origin.
 	UpstreamRemote string `yaml:"upstream_remote,omitempty" json:"upstream_remote,omitempty"`
+	// ShareHostDependencyCaches mounts host-wide caches of adapter-backed
+	// ecosystems (such as GOMODCACHE) read-only instead of per-repository
+	// caches. It is a node setting only; .swarm/config.yaml cannot set it.
+	ShareHostDependencyCaches bool `yaml:"share_host_dependency_caches,omitempty" json:"share_host_dependency_caches,omitempty"`
 }
 
 type RoleAttestation struct {

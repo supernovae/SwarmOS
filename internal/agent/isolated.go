@@ -49,6 +49,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	collector := &GuidanceCollector{}
 	options.GuidanceDelivered = collector.Delivered
 	options.ProjectPlan = req.ProjectPlan
+	options.Dependencies = req.Dependencies
 	if req.ReadOnly && req.Role == "reviewer" {
 		options.OutputDir = filepath.Join(req.WorktreePath, ".swarm", "active-output")
 	}

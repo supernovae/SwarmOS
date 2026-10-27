@@ -23,7 +23,7 @@ func InspectDelegatedHarness(ctx context.Context, driver, binary string) (string
 		return "", err
 	}
 	defer os.RemoveAll(home)
-	env := nativeEnv(home, false)
+	env := nativeEnv(home, false, Dependencies{})
 	var version, diagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, env, []string{"--version"}, nil, &version, &diagnostics); err != nil {
 		return "", fmt.Errorf("%s version check: %w", driver, err)
@@ -70,7 +70,7 @@ func ClaudeAuthentication(ctx context.Context, binary string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var output, diagnostics process.Output
-	err = runNativeCommand(ctx, binary, os.TempDir(), nativeEnv(home, true), []string{"auth", "status"}, nil, &output, &diagnostics)
+	err = runNativeCommand(ctx, binary, os.TempDir(), nativeEnv(home, true, Dependencies{}), []string{"auth", "status"}, nil, &output, &diagnostics)
 	var status struct {
 		LoggedIn   bool   `json:"loggedIn"`
 		AuthMethod string `json:"authMethod"`
@@ -114,13 +114,13 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 		if err != nil {
 			return err
 		}
-		env := nativeEnv(home, true)
+		env := nativeEnv(home, true, opts.Dependencies)
 		// dir is the real worktree, so the cache key names its repository.
 		caches, err := agentBuildCaches(ctx, dir, scratch, opts)
 		if err != nil {
 			return err
 		}
-		executor := ToolExecutor{Work: work, ReadOnly: opts.ReadOnly, BuildCaches: caches}
+		executor := ToolExecutor{Work: work, ReadOnly: opts.ReadOnly, BuildCaches: caches, Dependencies: opts.Dependencies}
 		prompt = "The task files are in /workspace inside the SwarmOS tools. Use swarm_read, swarm_write, swarm_edit and swarm_shell for file access, editing, searching and testing.\n" + prompt
 		if driver == "omp" {
 			command = []string{binary, "--mode", "rpc"}
@@ -178,6 +178,12 @@ func internalToolArgs(executor ToolExecutor) []string {
 	}
 	for _, c := range executor.BuildCaches {
 		args = append(args, "--build-cache", buildCacheFlag(c))
+	}
+	if executor.Dependencies.Mode == SharedHostCaches {
+		args = append(args, "--share-host-dependency-caches")
+	}
+	for _, c := range executor.Dependencies.Caches {
+		args = append(args, "--dependency-cache", dependencyCacheFlag(c))
 	}
 	return args
 }

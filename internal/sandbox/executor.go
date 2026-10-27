@@ -23,6 +23,9 @@ type ToolExecutor struct {
 	// BuildCaches are bound at their host paths; overlay caches are read-only
 	// with a write layer discarded when the command exits.
 	BuildCaches []BuildCache
+	// Dependencies are always bound read-only; only the host prefetch
+	// writes them.
+	Dependencies Dependencies
 }
 
 func (e ToolExecutor) command(ctx context.Context, script string, args ...string) (*exec.Cmd, error) {
@@ -40,7 +43,7 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 	if !filepath.IsAbs(work) || work == "/" {
 		return nil, fmt.Errorf("executor requires an absolute task workspace")
 	}
-	flags, err := executorFlags(work, e.ReadOnly, e.BuildCaches, script, args)
+	flags, err := executorFlags(work, e.ReadOnly, e.BuildCaches, e.Dependencies, script, args)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +56,7 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 }
 
 // executorFlags builds the Bubblewrap arguments for a resolved workspace.
-func executorFlags(work string, readOnly bool, caches []BuildCache, script string, args []string) ([]string, error) {
+func executorFlags(work string, readOnly bool, caches []BuildCache, deps Dependencies, script string, args []string) ([]string, error) {
 	flags := []string{"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv",
 		"--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev", "--size", "1073741824", "--tmpfs", "/tmp"}
 	// Account for both merged-/usr and older Linux distributions.
@@ -75,7 +78,7 @@ func executorFlags(work string, readOnly bool, caches []BuildCache, script strin
 			flags = append(flags, "--ro-bind", path, path)
 		}
 	}
-	toolchains := HostToolchains()
+	toolchains := deps.toolchains()
 	for _, mount := range ToolchainMounts(toolchains, true) {
 		if mount != work && !isSubpath(mount, work) {
 			flags = append(flags, "--ro-bind", mount, mount)
@@ -98,6 +101,20 @@ func executorFlags(work string, readOnly bool, caches []BuildCache, script strin
 		} else {
 			flags = append(flags, "--bind", dir, dir)
 		}
+		cacheEnv = append(cacheEnv, "--setenv", c.EnvKey, dir)
+	}
+	for _, c := range deps.Caches {
+		if err := checkDependencyCache(c, work); err != nil {
+			return nil, err
+		}
+		dir, err := filepath.EvalSymlinks(c.Dir)
+		if err != nil {
+			return nil, fmt.Errorf("dependency cache %s: %w", c.Ecosystem, err)
+		}
+		if isSubpath(dir, work) || isSubpath(work, dir) {
+			return nil, fmt.Errorf("dependency cache %s must be an absolute directory outside the workspace", c.Ecosystem)
+		}
+		flags = append(flags, "--ro-bind", dir, dir)
 		cacheEnv = append(cacheEnv, "--setenv", c.EnvKey, dir)
 	}
 	bind := "--bind"

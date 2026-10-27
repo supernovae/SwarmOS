@@ -27,6 +27,17 @@ func validatorBuildCaches(ctx context.Context, worktree, checkHome string) ([]sa
 	return sandbox.PrepareBuildCaches(ctx, sandbox.ValidatorBuildCache, worktree, base, checkHome)
 }
 
+// validatorDependencyCaches prefetches the approved base's dependencies into
+// <user-cache>/swarm/validate-deps/<key>/<eco>. Unlike build caches there is
+// no scratch fallback: an error stops validation.
+func validatorDependencyCaches(ctx context.Context, worktree, baseSHA string, mode sandbox.DependencyCacheMode) (sandbox.Dependencies, error) {
+	base, err := userCacheDir()
+	if err != nil {
+		base = ""
+	}
+	return sandbox.PrepareDependencyCaches(ctx, sandbox.ValidatorDependencyCache, worktree, baseSHA, base, mode)
+}
+
 // warmBuildCaches runs the trusted required checks against a clean checkout
 // of the approved base, once per base. It is the only run that writes the
 // persistent validator caches; candidate runs reuse them read-only or not at

@@ -80,6 +80,9 @@ func TestResolveHostToolchainsDiscoversMultiLanguageCachesWithoutCredentials(t *
 		if b.EnvKey != "" {
 			envVars[b.EnvKey] = b.EnvVal
 		}
+		if b.EnvKey == "GOMODCACHE" && b.Ecosystem != "go" {
+			t.Errorf("GOMODCACHE bind has ecosystem %q, want go", b.Ecosystem)
+		}
 	}
 
 	wantEnv := map[string]string{
@@ -199,7 +202,7 @@ func TestNativeAndBubblewrapOfflineLanguageBuildAndTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out strings.Builder
-	if err := (ToolExecutor{Work: absWT}).Run(context.Background(), "go version && go build ./... && go vet ./internal/cli", &out, &out); err != nil {
+	if err := (ToolExecutor{Work: absWT, Dependencies: Dependencies{Mode: SharedHostCaches}}).Run(context.Background(), "go version && go build ./... && go vet ./internal/cli", &out, &out); err != nil {
 		t.Fatalf("Bubblewrap offline Go build/vet failed: %v\n%s", err, out.String())
 	}
 	if binary := os.Getenv("SWARM_TEST_CODEX_BINARY"); binary != "" {
@@ -208,7 +211,7 @@ func TestNativeAndBubblewrapOfflineLanguageBuildAndTest(t *testing.T) {
 			t.Fatal(err)
 		}
 		out.Reset()
-		if err := RunNativeValidation(context.Background(), absWT, resolved, "go build ./... && go test ./... && go vet ./...", nil, false, &out, &out); err != nil {
+		if err := RunNativeValidation(context.Background(), absWT, resolved, "go build ./... && go test ./... && go vet ./...", nil, Dependencies{Mode: SharedHostCaches}, false, &out, &out); err != nil {
 			t.Fatalf("Codex native offline Go build/test/vet failed: %v\n%s", err, out.String())
 		}
 		if strings.Contains(out.String(), "Refusing to create helper binaries under temporary dir") {
@@ -304,7 +307,7 @@ func TestToolchainMountsExcludeGoSrc(t *testing.T) {
 	}
 	work, scratch := resolvedTempDir(t), resolvedTempDir(t)
 
-	policy := strings.Join(codexPolicy("/usr/bin/codex", work, scratch, false, nil), "\n")
+	policy := strings.Join(codexPolicy("/usr/bin/codex", work, scratch, false, nil, Dependencies{}), "\n")
 	for _, bad := range []string{filepath.Join(home, "go"), filepath.Join(home, "go", "src")} {
 		if strings.Contains(policy, strconv.Quote(bad)+`="read"`) {
 			t.Errorf("codex policy mounts %q", bad)
@@ -319,7 +322,7 @@ func TestToolchainMountsExcludeGoSrc(t *testing.T) {
 		}
 	}
 
-	flags, err := executorFlags(work, false, nil, "true", nil)
+	flags, err := executorFlags(work, false, nil, Dependencies{}, "true", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

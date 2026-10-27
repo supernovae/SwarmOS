@@ -8,6 +8,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/registry"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workflow"
 )
 
@@ -101,4 +102,11 @@ func (o *RootOptions) runnerOptions() agent.RunnerOptions {
 
 func (o *RootOptions) engineOptions() workflow.EngineOptions {
 	return workflow.EngineOptions{LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath()}
+}
+
+// dependencyMode is the node profile's dependency cache mode. A malformed
+// profile keeps the default per-repository caches.
+func (o *RootOptions) dependencyMode() sandbox.DependencyCacheMode {
+	mode, _ := node.DependencyCacheMode(o.nodeConfigPath())
+	return mode
 }

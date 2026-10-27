@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 func TestNodeProfileSaveLoadAndCapabilities(t *testing.T) {
@@ -73,5 +74,32 @@ func TestNodeProfileUpstreamRemote(t *testing.T) {
 	}
 	if _, err := LoadUpstreamRemote(path); err == nil || !strings.Contains(err.Error(), "parse node profile") {
 		t.Fatalf("malformed profile = %v", err)
+	}
+}
+
+func TestDependencyCacheModeFromProfile(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       sandbox.DependencyCacheMode
+		wantErr    bool
+	}{
+		{"no file", "", sandbox.PerRepository, false},
+		{"field absent", "node_id: n\n", sandbox.PerRepository, false},
+		{"false", "node_id: n\nshare_host_dependency_caches: false\n", sandbox.PerRepository, false},
+		{"true", "node_id: n\nshare_host_dependency_caches: true\n", sandbox.SharedHostCaches, false},
+		{"malformed", "share_host_dependency_caches: [\n", sandbox.PerRepository, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "node.yaml")
+			if tc.body != "" {
+				if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := DependencyCacheMode(path)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("DependencyCacheMode = %q, %v; want %q (error %t)", got, err, tc.want, tc.wantErr)
+			}
+		})
 	}
 }

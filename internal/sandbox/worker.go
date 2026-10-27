@@ -39,6 +39,9 @@ type WorkerOptions struct {
 	ReadOnly                        bool
 	DiscardChanges                  bool
 	Timeout                         time.Duration
+	// Dependencies are the coordinator's prepared dependency caches, mounted
+	// read-only for native and harness-tool runs.
+	Dependencies Dependencies
 }
 
 const workerMaxBytes int64 = 512 << 20

@@ -78,9 +78,9 @@ func TestProtocolFollowupGuidance(t *testing.T) {
 				defer cancel()
 				var err error
 				if driver == "omp" {
-					err = runOMP(ctx, binary, "", "initial task", control, nativeEnv(control, false), ToolExecutor{Work: t.TempDir()}, true, strings.NewReader(input), io.Discard, io.Discard, callback)
+					err = runOMP(ctx, binary, "", "initial task", control, nativeEnv(control, false, Dependencies{}), ToolExecutor{Work: t.TempDir()}, true, strings.NewReader(input), io.Discard, io.Discard, callback)
 				} else {
-					err = runOpenCode(ctx, binary, "", "initial task", control, nativeEnv(control, false), true, strings.NewReader(input), io.Discard, io.Discard, callback)
+					err = runOpenCode(ctx, binary, "", "initial task", control, nativeEnv(control, false, Dependencies{}), true, strings.NewReader(input), io.Discard, io.Discard, callback)
 				}
 				if err != nil {
 					t.Fatal(err)

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"gopkg.in/yaml.v3"
 )
 
@@ -170,4 +171,33 @@ func LoadUpstreamRemote(customPath string) (string, error) {
 		return "", fmt.Errorf("parse node profile %s: %w", customPath, err)
 	}
 	return strings.TrimSpace(prof.UpstreamRemote), nil
+}
+
+// DependencyCacheMode returns the profile's dependency cache mode. A missing
+// profile, an unset field or a malformed profile all give the default
+// sandbox.PerRepository; the error reports a malformed profile.
+func DependencyCacheMode(customPath string) (sandbox.DependencyCacheMode, error) {
+	if customPath == "" {
+		customPath = DefaultNodeConfigPath()
+	}
+	data, err := os.ReadFile(customPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return sandbox.PerRepository, nil
+	}
+	if err != nil {
+		return sandbox.PerRepository, fmt.Errorf("read node profile %s: %w", customPath, err)
+	}
+	var prof contract.NodeProfile
+	if err := yaml.Unmarshal(data, &prof); err != nil {
+		return sandbox.PerRepository, fmt.Errorf("parse node profile %s: %w", customPath, err)
+	}
+	return ProfileDependencyCacheMode(&prof), nil
+}
+
+// ProfileDependencyCacheMode is the dependency cache mode prof selects.
+func ProfileDependencyCacheMode(prof *contract.NodeProfile) sandbox.DependencyCacheMode {
+	if prof != nil && prof.ShareHostDependencyCaches {
+		return sandbox.SharedHostCaches
+	}
+	return sandbox.PerRepository
 }

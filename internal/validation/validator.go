@@ -96,6 +96,9 @@ type ValidateOptions struct {
 	// LookupEnv resolves SWARM_EXECUTION_MODE for this validation; nil reads
 	// the process environment. Check subprocesses still receive cleanCheckEnv.
 	LookupEnv func(string) (string, bool)
+	// DependencyMode is the node profile's dependency cache mode. The zero
+	// value keeps per-repository caches; CI never shares host caches.
+	DependencyMode sandbox.DependencyCacheMode
 }
 
 // Validate loads checks and protected paths exclusively from the immutable base.
@@ -187,14 +190,20 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		return nil, err
 	}
 	defer os.RemoveAll(checkHome)
-	// Resolve the validator's build caches once. OCI checks get none.
+	// Resolve the validator's build and dependency caches once. OCI checks
+	// get none. Dependency caches never fall back, so a failed prefetch
+	// stops validation before any check runs.
 	var caches []sandbox.BuildCache
+	var deps sandbox.Dependencies
 	if opts.RunnerIsolated || execution.Mode != contract.ExecutionIsolated || execution.Backend == contract.BackendNative {
 		if caches, err = validatorBuildCaches(ctx, worktreePath, checkHome); err != nil {
 			return nil, err
 		}
+		if deps, err = validatorDependencyCaches(ctx, worktreePath, baseSHA, opts.DependencyMode); err != nil {
+			return nil, fmt.Errorf("validation preflight: %w", err)
+		}
 	}
-	runner := &checkRunner{worktree: worktreePath, home: checkHome, buildCaches: caches, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated}
+	runner := &checkRunner{worktree: worktreePath, home: checkHome, buildCaches: caches, deps: deps, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated}
 	// Only the trusted base writes the persistent caches, and only where a
 	// candidate can read them back (sandbox.ValidatorCacheReusable).
 	warmNote := ""
@@ -387,6 +396,7 @@ type checkRunner struct {
 	// run, the only one sandbox.ValidatorCacheMounts lets write them.
 	buildCaches    []sandbox.BuildCache
 	warmup         bool
+	deps           sandbox.Dependencies // read-only in every run
 	cfg            *contract.SwarmConfig
 	execution      contract.ExecutionConfig
 	runnerIsolated bool
@@ -397,7 +407,7 @@ func (r *checkRunner) run(ctx context.Context, command string, duration time.Dur
 	if r.runnerIsolated {
 		return r.runOnHost(ctx, command, stdout, stderr)
 	} else if r.execution.Mode == contract.ExecutionIsolated && r.execution.Backend == contract.BackendNative {
-		return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, r.buildCaches, r.warmup, stdout, stderr)
+		return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, r.buildCaches, r.deps, r.warmup, stdout, stderr)
 	} else if r.execution.Mode == contract.ExecutionIsolated {
 		return sandbox.RunWorker(ctx, r.worktree, "/bin/sh", []string{"-c", command}, sandbox.WorkerOptions{
 			Runtime: r.execution.ContainerRuntime, Image: r.execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,
@@ -445,7 +455,7 @@ func (r *checkRunner) runOnHost(ctx context.Context, command string, stdout, std
 	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = r.worktree
-	cmd.Env = cleanCheckEnv(r.home, caches)
+	cmd.Env = cleanCheckEnv(r.home, caches, r.deps)
 	process.Configure(cmd)
 	cmd.Cancel = func() error { process.Stop(cmd); return nil }
 	cmd.WaitDelay = time.Second
@@ -493,7 +503,7 @@ func safeRepoPath(root, path string) error {
 	return nil
 }
 
-func cleanCheckEnv(home string, caches []sandbox.BuildCache) []string {
+func cleanCheckEnv(home string, caches []sandbox.BuildCache, deps sandbox.Dependencies) []string {
 	// Do not inherit a user home, credential helper, publishing token, or SSH
 	// agent. Checks get only deterministic process basics.
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "USERPROFILE=" + home,
@@ -502,8 +512,9 @@ func cleanCheckEnv(home string, caches []sandbox.BuildCache) []string {
 		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_TERMINAL_PROMPT=0"}
 	// Preserve public language toolchain and package cache directories outside
 	// the scratch HOME, without exposing credential files such as ~/.cargo/credentials.toml,
-	// ~/.npmrc, or ~/.pypirc.
-	for _, b := range sandbox.HostToolchains() {
+	// ~/.npmrc, or ~/.pypirc. Adapter-backed ecosystems use the validator's
+	// per-repository dependency caches instead of the host-wide ones.
+	for _, b := range sandbox.HostToolchainsFor(deps.Mode) {
 		if b.EnvKey != "" && !sandbox.IsBuildCacheKey(b.EnvKey) && b.EnvVal != "" {
 			env = append(env, b.EnvKey+"="+b.EnvVal)
 		}
@@ -511,6 +522,7 @@ func cleanCheckEnv(home string, caches []sandbox.BuildCache) []string {
 	// Build caches are SwarmOS-owned validator caches or scratch, never the
 	// user's own GOCACHE or CCACHE_DIR.
 	env = append(env, sandbox.BuildCacheEnv(caches)...)
+	env = append(env, sandbox.DependencyCacheEnv(deps.Caches)...)
 	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ"} {
 		if value := os.Getenv(key); value != "" {
 			env = append(env, key+"="+value)

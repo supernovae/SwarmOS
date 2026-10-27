@@ -117,7 +117,7 @@ func (s *Service) planRebaseStop(ctx context.Context, rv *resolver, dir string, 
 	if err != nil {
 		return "", err
 	}
-	run, err := rv.runner.Run(ctx, agent.RunRequest{Agent: rv.agentName, Role: "developer", Mode: rv.mode, WorktreePath: dir, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: rebasePlanTask, Local: rv.local})
+	run, err := rv.runner.Run(ctx, agent.RunRequest{Agent: rv.agentName, Role: "developer", Mode: rv.mode, WorktreePath: dir, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: rebasePlanTask, Local: rv.local, Dependencies: rv.deps})
 	if err != nil {
 		return "", fmt.Errorf("%w: planning turn failed: %s", ErrResolveRejected, strings.ReplaceAll(err.Error(), dir, "<resolver workspace>"))
 	}

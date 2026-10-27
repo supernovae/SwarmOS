@@ -5,6 +5,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 type RunRequest struct {
@@ -22,6 +23,9 @@ type RunRequest struct {
 	ReadOnly             bool     // requests an enforced read-only execution boundary
 	Local                bool     // permits deterministic local-only mock execution
 	DenyPaths            []string // internal isolation denylist supplied by RunReview
+	// Dependencies are the coordinator's prefetched dependency caches,
+	// mounted read-only in isolated runs.
+	Dependencies sandbox.Dependencies
 }
 
 type RunResult struct {

@@ -45,14 +45,15 @@ func NativeValidationBinary(cfg *contract.SwarmConfig) (string, error) {
 	return filepath.EvalSymlinks(binary)
 }
 
-func nativeEnv(home string, authentication bool) []string {
-	toolchains := HostToolchains()
+func nativeEnv(home string, authentication bool, deps Dependencies) []string {
+	toolchains := deps.toolchains()
 	env := []string{"PATH=" + SandboxPath(toolchains), "HOME=" + home, "GOFLAGS=-buildvcs=false"}
 	for _, b := range toolchains {
 		if b.EnvKey != "" && b.EnvVal != "" {
 			env = append(env, b.EnvKey+"="+b.EnvVal)
 		}
 	}
+	env = append(env, DependencyCacheEnv(deps.Caches)...)
 	if authentication {
 		// The harness alone opens its normal credential store. Never read or copy it here.
 		for _, key := range []string{"CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"} {
@@ -78,13 +79,13 @@ func codexHostHome(fallback string) string {
 // codexPolicy uses a named native profile rather than workspace-write's broad
 // default read access. :minimal supplies Codex's platform runtime files. Each
 // build cache is writable; Codex cannot layer a read-only cache, so callers
-// pass only caches the run may write.
-func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCache) []string {
+// pass only caches the run may write. Dependency caches are always read-only.
+func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCache, deps Dependencies) []string {
 	access := "write"
 	if readOnly {
 		access = "read"
 	}
-	toolchains := HostToolchains()
+	toolchains := deps.toolchains()
 	fs := []string{`":root"="deny"`, `":minimal"="read"`, strconv.Quote(binary) + `="read"`}
 	cacheDirs := map[string]bool{}
 	for _, c := range caches {
@@ -98,6 +99,9 @@ func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCach
 	fs = append(fs, strconv.Quote(work)+"="+strconv.Quote(access), strconv.Quote(scratch)+`="write"`)
 	for _, c := range caches {
 		fs = append(fs, strconv.Quote(c.Dir)+`="write"`)
+	}
+	for _, c := range deps.Caches {
+		fs = append(fs, strconv.Quote(c.Dir)+`="read"`)
 	}
 	if readOnly {
 		fs = append(fs, strconv.Quote(filepath.Join(work, ".swarm", "active"))+`="write"`)
@@ -117,6 +121,9 @@ func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCach
 		}
 	}
 	for _, c := range caches {
+		envPairs = append(envPairs, c.EnvKey+"="+strconv.Quote(c.Dir))
+	}
+	for _, c := range deps.Caches {
 		envPairs = append(envPairs, c.EnvKey+"="+strconv.Quote(c.Dir))
 	}
 	config := []string{
@@ -187,7 +194,7 @@ func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 		}
 	}
 	var version, versionDiagnostics process.Output
-	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false), []string{"--version"}, nil, &version, &versionDiagnostics); err != nil {
+	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false, Dependencies{}), []string{"--version"}, nil, &version, &versionDiagnostics); err != nil {
 		return "", fmt.Errorf("check Codex version: %w", err)
 	}
 	qualified, err := qualifiedNativeCodexVersion(version.String())
@@ -195,7 +202,7 @@ func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 		return "", err
 	}
 	var help process.Output
-	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false), []string{"exec", "--help"}, nil, &help, &versionDiagnostics); err != nil {
+	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false, Dependencies{}), []string{"exec", "--help"}, nil, &help, &versionDiagnostics); err != nil {
 		return "", fmt.Errorf("inspect Codex execution interface: %w", err)
 	}
 	for _, flag := range []string{"--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check"} {
@@ -236,10 +243,10 @@ test -x /bin/bash
 /bin/bash -c 'exit 0'
 if /bin/bash -c 'echo forbidden > /dev/tcp/127.0.0.1/'"$2" 2>/dev/null; then exit 42; fi
 printf SWARM_NATIVE_BOUNDARY_OK`
-	args := codexPolicy(binary, work, home, false, nil)
+	args := codexPolicy(binary, work, home, false, nil, Dependencies{})
 	args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-canary", canary, port)
 	var out, diagnostics process.Output
-	if err := runNativeCommand(ctx, binary, home, nativeEnv(codexHostHome(home), false), args, nil, &out, &diagnostics); err != nil {
+	if err := runNativeCommand(ctx, binary, home, nativeEnv(codexHostHome(home), false, Dependencies{}), args, nil, &out, &diagnostics); err != nil {
 		return "", fmt.Errorf("codex native boundary check failed: %w: %s", err, diagnostics.String())
 	}
 	data, err := os.ReadFile(canary)
@@ -257,7 +264,7 @@ func CodexAuthentication(ctx context.Context, binary string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var out process.Output
-	err = runNativeCommand(ctx, binary, os.TempDir(), nativeEnv(home, true), []string{"login", "status"}, nil, &out, &out)
+	err = runNativeCommand(ctx, binary, os.TempDir(), nativeEnv(home, true, Dependencies{}), []string{"login", "status"}, nil, &out, &out)
 	if err != nil {
 		return "", fmt.Errorf("codex login is unavailable; run codex login, then swarm repo doctor")
 	}
@@ -291,14 +298,14 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		if err != nil {
 			return err
 		}
-		args := codexPolicy(binary, work, scratch, opts.ReadOnly, caches)
+		args := codexPolicy(binary, work, scratch, opts.ReadOnly, caches, opts.Dependencies)
 		args = append(args, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-C", work)
 		if model != "" {
 			args = append(args, "--model", model)
 		}
 		return runFollowupTurns(ctx, prompt, "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, true, stdin, stdout, func(turn string) error {
 			command = append(append([]string{binary}, args...), turn)
-			if err := runNativeCommand(ctx, binary, work, nativeEnv(home, true), command[1:], nil, stdout, stderr); err != nil {
+			if err := runNativeCommand(ctx, binary, work, nativeEnv(home, true, opts.Dependencies), command[1:], nil, stdout, stderr); err != nil {
 				return fmt.Errorf("native Codex run: %w", err)
 			}
 			return nil
@@ -309,7 +316,8 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 
 // RunNativeValidation runs command with the validator's caches as selected by
 // ValidatorCacheMounts: writable only during warm-up, scratch otherwise.
-func RunNativeValidation(ctx context.Context, dir, binary, command string, caches []BuildCache, warmup bool, stdout, stderr io.Writer) error {
+// Dependency caches are read-only in every run.
+func RunNativeValidation(ctx context.Context, dir, binary, command string, caches []BuildCache, deps Dependencies, warmup bool, stdout, stderr io.Writer) error {
 	if err := CheckNativeCodex(ctx, binary); err != nil {
 		return err
 	}
@@ -318,9 +326,9 @@ func RunNativeValidation(ctx context.Context, dir, binary, command string, cache
 		if err != nil {
 			return err
 		}
-		args := codexPolicy(binary, work, scratch, false, mounts)
+		args := codexPolicy(binary, work, scratch, false, mounts, deps)
 		args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", command)
-		return runNativeCommand(ctx, binary, scratch, nativeEnv(codexHostHome(scratch), false), args, nil, stdout, stderr)
+		return runNativeCommand(ctx, binary, scratch, nativeEnv(codexHostHome(scratch), false, deps), args, nil, stdout, stderr)
 	})
 }
 

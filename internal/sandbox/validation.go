@@ -42,13 +42,14 @@ func NativeValidationReusesCache(cfg *contract.SwarmConfig) bool {
 
 // RunConfiguredNativeValidation runs command with the validator's caches.
 // warmup is true only for the trusted approved base; see ValidatorCacheMounts.
-func RunConfiguredNativeValidation(ctx context.Context, dir string, cfg *contract.SwarmConfig, command string, caches []BuildCache, warmup bool, stdout, stderr io.Writer) error {
+// deps are mounted read-only in every run.
+func RunConfiguredNativeValidation(ctx context.Context, dir string, cfg *contract.SwarmConfig, command string, caches []BuildCache, deps Dependencies, warmup bool, stdout, stderr io.Writer) error {
 	if nativeValidationUsesCodex(cfg) {
 		binary, err := NativeValidationBinary(cfg)
 		if err != nil {
 			return err
 		}
-		return RunNativeValidation(ctx, dir, binary, command, caches, warmup, stdout, stderr)
+		return RunNativeValidation(ctx, dir, binary, command, caches, deps, warmup, stdout, stderr)
 	}
 	if err := CheckToolExecutor(ctx); err != nil {
 		return err
@@ -58,7 +59,7 @@ func RunConfiguredNativeValidation(ctx context.Context, dir string, cfg *contrac
 		if err != nil {
 			return err
 		}
-		return (ToolExecutor{Work: work, BuildCaches: mounts}).Run(ctx, command, stdout, stderr)
+		return (ToolExecutor{Work: work, BuildCaches: mounts, Dependencies: deps}).Run(ctx, command, stdout, stderr)
 	})
 }
 

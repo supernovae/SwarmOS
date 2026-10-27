@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,6 +36,22 @@ type pulledWorkUnit struct {
 	TargetPhase  string
 	WorktreePath string
 	BranchName   string
+	Overlap      *overlapSelection
+}
+
+// overlapSelection explains how in-flight touchpoint overlap ordered a --next
+// selection. It is advisory: it reorders candidates but never refuses one.
+type overlapSelection struct {
+	workflow.TouchpointOverlap
+	// Complete is false when some in-flight work could not be read, so the
+	// score may undercount overlap.
+	Complete bool `json:"complete"`
+	// InFlight is the number of active claims whose touchpoints were compared.
+	InFlight int `json:"in_flight"`
+	// Deferred lists candidates the ready order placed earlier that were
+	// moved behind this one because they overlap more in-flight work.
+	Deferred []int  `json:"deferred,omitempty"`
+	Reason   string `json:"reason"`
 }
 
 func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration) (*pulledWorkUnit, error) {
@@ -61,6 +80,10 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			return nil, err
 		}
 		issues, err = orderReadyIssues(ctx, tr, issues, cmd.ErrOrStderr())
+		if err != nil {
+			return nil, err
+		}
+		issues, overlaps, err := orderByOverlap(ctx, tr, mgr, target.Path, issues, rootOpts.now(), cmd.ErrOrStderr())
 		if err != nil {
 			return nil, err
 		}
@@ -171,6 +194,10 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			if claimed.ClaimPreviousBase != "" {
 				fmt.Fprintf(progressWriter(cmd), "Issue #%d: base %s -> %s\n", issue.Number, claimed.ClaimPreviousBase, claimed.BaseSHA)
 			}
+			overlap := overlaps[issue.Number]
+			if overlap.InFlight > 0 || !overlap.Complete {
+				fmt.Fprintf(progressWriter(cmd), "Issue #%d selected: %s\n", issue.Number, overlap.Reason)
+			}
 			setup := func() (*pulledWorkUnit, error) {
 				if err := lease.SaveClaimToken(target.Path, issue.Number, claimed.Lease.ClaimID, claimed.BaseSHA); err != nil {
 					return nil, err
@@ -196,7 +223,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					return nil, err
 				}
 				return &pulledWorkUnit{Repo: target.Repo, RepoRoot: target.Path, Backend: target.Backend, Issue: issue,
-					WorkUnit: wu, State: claimed, TargetPhase: phase, WorktreePath: worktree, BranchName: branch}, nil
+					WorkUnit: wu, State: claimed, TargetPhase: phase, WorktreePath: worktree, BranchName: branch, Overlap: overlap}, nil
 			}
 			pulled, err := setup()
 			if err != nil {
@@ -248,6 +275,112 @@ func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error
 			Backend: o.Backend,
 		},
 	}, nil
+}
+
+// orderByOverlap stable-sorts candidates (already in ready order) by how many
+// in-flight claims their likely touchpoints overlap, so equal scores keep the
+// ready order. In-flight work is read from every open issue, ready or not,
+// with an active unexpired lease. The snapshot is advisory and only orders
+// candidates: read failures other than cancellation degrade to a warning and a
+// partial signal, and eligibility is still checked against current state.
+func orderByOverlap(ctx context.Context, tr tracker.Tracker, mgr *lease.Manager, repoRoot string, issues []*tracker.Issue, now time.Time, stderr io.Writer) ([]*tracker.Issue, map[int]*overlapSelection, error) {
+	inFlight := make(map[int][]string)
+	complete, failed := true, 0
+	var firstErr error
+	open, listErr := tr.ListIssues(ctx, tracker.IssueFilter{State: "open"})
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
+	if listErr != nil {
+		complete = false
+		fmt.Fprintf(stderr, "warning: cannot list open issues for overlap scheduling; using ready order: %v\n", listErr)
+	}
+	for _, issue := range open {
+		if issue == nil || issue.IsEpic() {
+			continue
+		}
+		state, err := mgr.GetCurrentState(ctx, issue.Number)
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		if errors.Is(err, coordination.ErrNotFound) || err == nil && state == nil {
+			continue
+		}
+		if err == nil && (state.Lease.Status != "active" || !state.Lease.ExpiresAt.After(now)) {
+			continue
+		}
+		var wu *contract.WorkUnit
+		if err == nil {
+			wu, err = contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+		}
+		if err != nil {
+			failed++
+			firstErr = cmp.Or(firstErr, fmt.Errorf("#%d: %w", issue.Number, err))
+			continue
+		}
+		inFlight[issue.Number] = workflow.WorkUnitTouchpoints(repoRoot, wu)
+	}
+	if failed > 0 {
+		complete = false
+		fmt.Fprintf(stderr, "warning: overlap scheduling signal is partial; %d in-flight issue(s) unreadable: %v\n", failed, firstErr)
+	}
+
+	out := append([]*tracker.Issue(nil), issues...)
+	overlaps := make(map[int]*overlapSelection, len(out))
+	for _, issue := range out {
+		active := inFlight
+		if _, ok := inFlight[issue.Number]; ok {
+			active = maps.Clone(inFlight)
+			delete(active, issue.Number)
+		}
+		var tps []string
+		if wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body); err == nil {
+			tps = workflow.WorkUnitTouchpoints(repoRoot, wu)
+		}
+		overlaps[issue.Number] = &overlapSelection{TouchpointOverlap: workflow.AssessTouchpointOverlap(tps, active), Complete: complete, InFlight: len(active)}
+	}
+	for i, issue := range out {
+		o := overlaps[issue.Number]
+		for _, earlier := range out[:i] {
+			if overlaps[earlier.Number].Score > o.Score {
+				o.Deferred = append(o.Deferred, earlier.Number)
+			}
+		}
+		o.Reason = overlapReason(o)
+		if listErr != nil {
+			o.Reason = "overlap signal unavailable; kept ready order"
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return overlaps[out[i].Number].Score < overlaps[out[j].Number].Score })
+	return out, overlaps, nil
+}
+
+func overlapReason(o *overlapSelection) string {
+	var reason string
+	switch {
+	case o.Score == 0:
+		reason = fmt.Sprintf("overlap score 0; no likely touchpoint overlap with %d in-flight claim(s)", o.InFlight)
+	default:
+		reason = fmt.Sprintf("overlap score %d; shares %s with in-flight %s; lower scores were tried first and ties keep ready order",
+			o.Score, strings.Join(o.Paths, ", "), issueRefs(o.Issues))
+	}
+	if len(o.Deferred) > 0 {
+		reason += fmt.Sprintf("; preferred over %s, which overlap more in-flight work", issueRefs(o.Deferred))
+	} else if o.Score == 0 {
+		reason += "; ties keep ready order"
+	}
+	if !o.Complete {
+		reason += " (partial signal)"
+	}
+	return reason
+}
+
+func issueRefs(numbers []int) string {
+	refs := make([]string, len(numbers))
+	for i, n := range numbers {
+		refs[i] = fmt.Sprintf("#%d", n)
+	}
+	return strings.Join(refs, ", ")
 }
 
 // orderReadyIssues permutes only supplied candidates. Each epic retains its

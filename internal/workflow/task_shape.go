@@ -2,7 +2,9 @@ package workflow
 
 import (
 	"fmt"
+	"path"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -157,10 +159,75 @@ func AssessTaskShape(in ShapeInput) ShapeAssessment {
 	return out
 }
 
+// WorkUnitTouchpoints derives a WorkUnit's likely repository-relative
+// touchpoints from its title, objective, and acceptance criteria, the same way
+// backlog scans and shape assessment do.
+func WorkUnitTouchpoints(repoRoot string, wu *contract.WorkUnit) []string {
+	if wu == nil {
+		return nil
+	}
+	return extractTouchpoints(repoRoot, wu.Title+"\n"+wu.Objective+"\n"+strings.Join(wu.Acceptance, "\n"))
+}
+
+// TouchpointOverlap is an advisory measure of how much a candidate's likely
+// touchpoints collide with work already in flight. It never blocks a claim.
+type TouchpointOverlap struct {
+	Score  int      `json:"score"`
+	Issues []int    `json:"overlaps_with,omitempty"`
+	Paths  []string `json:"paths,omitempty"`
+}
+
+// AssessTouchpointOverlap scores a candidate by the number of distinct
+// in-flight issues whose touchpoints overlap its own. Touchpoints overlap when
+// they are equal, one is a directory ancestor of the other, or both are Go
+// files in the same package directory. Paths lists the candidate touchpoints
+// that matched, so callers can explain the score.
+func AssessTouchpointOverlap(candidate []string, inFlight map[int][]string) TouchpointOverlap {
+	var out TouchpointOverlap
+	paths := make(map[string]bool)
+	for issue, tps := range inFlight {
+		matched := false
+		for _, x := range candidate {
+			for _, y := range tps {
+				if touchpointsOverlap(x, y) {
+					matched, paths[normalizeTouchpoint(x)] = true, true
+				}
+			}
+		}
+		if matched {
+			out.Issues = append(out.Issues, issue)
+		}
+	}
+	sort.Ints(out.Issues)
+	for p := range paths {
+		out.Paths = append(out.Paths, p)
+	}
+	sort.Strings(out.Paths)
+	out.Score = len(out.Issues)
+	return out
+}
+
+func normalizeTouchpoint(p string) string {
+	return path.Clean(strings.ReplaceAll(p, "\\", "/"))
+}
+
+func touchpointsOverlap(a, b string) bool {
+	a, b = normalizeTouchpoint(a), normalizeTouchpoint(b)
+	for _, p := range []string{a, b} {
+		if p == "." || p == ".." || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/") {
+			return false
+		}
+	}
+	if a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/") {
+		return true
+	}
+	return path.Ext(a) == ".go" && path.Ext(b) == ".go" && path.Dir(a) == path.Dir(b)
+}
+
 // AssessWorkUnitShape assesses a parsed WorkUnit, deriving touchpoints from its
 // text the same way backlog scans do.
 func AssessWorkUnitShape(repoRoot string, wu *contract.WorkUnit, spec *contract.ValidationSpec) ShapeAssessment {
-	tps := extractTouchpoints(repoRoot, wu.Title+"\n"+wu.Objective+"\n"+strings.Join(wu.Acceptance, "\n"))
+	tps := WorkUnitTouchpoints(repoRoot, wu)
 	return AssessTaskShape(ShapeInput{
 		Title:       wu.Title,
 		Objective:   wu.Objective,

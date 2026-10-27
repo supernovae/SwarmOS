@@ -79,11 +79,13 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			var mgr *lease.Manager
 			var cfg *contract.SwarmConfig
 			var err error
+			var selection *overlapSelection
 			if nextReady {
 				pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, opts, 0)
 				if err != nil {
 					return err
 				}
+				selection = pulled.Overlap
 				opts.IssueNumber, opts.RepoRoot, opts.Phase, opts.ClaimID = pulled.Issue.Number, pulled.RepoRoot, pulled.TargetPhase, pulled.State.Lease.ClaimID
 				guidanceOpts.Repo, guidanceOpts.RepoRoot, guidanceOpts.Backend = pulled.Repo, pulled.RepoRoot, pulled.Backend
 				tr, mgr, cfg, err = rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend})
@@ -154,7 +156,11 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			split := splitGuidance(&guidanceOpts, result, result.IssueNumber)
 			status := result.Outcome()
 			if jsonOutput {
-				return writeJSON(cmd, map[string]any{"kind": "work", "status": status, "result": result})
+				outcome := map[string]any{"kind": "work", "status": status, "result": result}
+				if selection != nil {
+					outcome["selection"] = selection
+				}
+				return writeJSON(cmd, outcome)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d %s: phase=%s branch=%s validation=%t\n", result.IssueNumber, status, result.PhaseCompleted, result.BranchName, result.ValidationPassed)
 			if guidance != "" {

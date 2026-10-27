@@ -93,11 +93,16 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				return err
 			}
 			mode := node.ProfileDependencyCacheMode(prof)
+			private := node.PrivateGoEntries(prof, rootOpts.registryPath())
 			if profileJSON {
-				return writeJSON(cmd, map[string]any{"kind": "node-status", "profile": prof, "dependency_caches": sandbox.DependencyCacheModes(mode)})
+				if private == nil {
+					private = []node.PrivateGoEntry{}
+				}
+				return writeJSON(cmd, map[string]any{"kind": "node-status", "profile": prof, "dependency_caches": sandbox.DependencyCacheModes(mode), "private_go_modules": private})
 			}
 			printNodeProfile(cmd, prof)
 			fmt.Fprintf(cmd.OutOrStdout(), "  Dependency caches: %s\n", dependencyCacheSummary(mode))
+			fmt.Fprintf(cmd.OutOrStdout(), "  Private Go modules: %s\n", privateGoSummary(private))
 			return nil
 		},
 	}

@@ -49,7 +49,7 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 				}
 			}))
 			checks = append(checks, run.Run("execution", "dependency-caches", func() harness.DoctorCheck {
-				return doctorDependencyCacheCheck(rootOpts.nodeConfigPath())
+				return doctorDependencyCacheCheck(rootOpts.nodeConfigPath(), rootOpts.registryPath(), repoRoot)
 			}))
 			if cfg, err := harness.LoadConfig(repoRoot); err == nil {
 				checks = append(checks, run.Run("execution", "mode", func() harness.DoctorCheck {
@@ -196,8 +196,10 @@ func doctorAgentChecksWithRunner(cfg *contract.SwarmConfig, local bool, prefligh
 
 // doctorDependencyCacheCheck reports how each ecosystem's dependencies reach
 // sandboxes, naming those that share host caches. The node profile opt-in is
-// a warning because it exposes every package the host has fetched.
-func doctorDependencyCacheCheck(profilePath string) harness.DoctorCheck {
+// a warning because it exposes every package the host has fetched. So is a
+// private_go_modules entry that allows nothing or names an unregistered
+// repository.
+func doctorDependencyCacheCheck(profilePath, registryPath, repoRoot string) harness.DoctorCheck {
 	mode, err := node.DependencyCacheMode(profilePath)
 	status, detail := "OK", dependencyCacheSummary(mode)+"; Go detects the root go.mod only; Python detects root uv.lock and requirements*.txt only"
 	if err != nil {
@@ -205,7 +207,48 @@ func doctorDependencyCacheCheck(profilePath string) harness.DoctorCheck {
 	} else if mode == sandbox.SharedHostCaches {
 		status = "WARN"
 	}
+	policy, warnings, _ := node.LoadDependencyPolicy(profilePath, registryPath, repoRoot)
+	if repo := policy.PrivateGo.Repository; repo != "" {
+		allowed := "none"
+		if len(policy.PrivateGo.Patterns) > 0 {
+			allowed = strings.Join(policy.PrivateGo.Patterns, ", ")
+		}
+		detail += "; private Go modules for " + repo + ": " + allowed
+	} else {
+		detail += "; private Go modules: none (repository not registered)"
+	}
+	if prof, err := node.LoadOrDetectProfile(profilePath); err == nil {
+		for _, entry := range node.PrivateGoEntries(prof, registryPath) {
+			if entry.Problem == "" && !entry.Registered {
+				warnings = append(warnings, fmt.Sprintf("private_go_modules[%q] names an unregistered repository", entry.Repository))
+			}
+		}
+	}
+	if len(warnings) > 0 {
+		status, detail = "WARN", detail+"; "+strings.Join(warnings, "; ")
+	}
+	if len(policy.PrivateGo.Patterns) > 0 {
+		detail += "; withdrawing an allowance stops prefetch but keeps modules already in that repository's cache"
+	}
 	return harness.DoctorCheck{Category: "execution", Name: "dependency-caches", Status: status, Detail: detail}
+}
+
+// privateGoSummary lists each private_go_modules entry for node status.
+func privateGoSummary(entries []node.PrivateGoEntry) string {
+	if len(entries) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		part := e.Repository
+		if e.Problem != "" {
+			part += " (allows nothing: " + e.Problem + ")"
+		} else if !e.Registered {
+			part += " (unregistered)"
+		}
+		parts = append(parts, part+": "+strings.Join(e.Patterns, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // dependencyCacheSummary lists each ecosystem's mode, grouping those that

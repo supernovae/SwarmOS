@@ -12,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
@@ -59,7 +60,7 @@ func approvedDependencyTask(t *testing.T) (*Engine, string, int) {
 	return eng, tmp, iss.Number
 }
 
-func stubAgentDependencies(t *testing.T, stub func(context.Context, contract.ExecutionConfig, string, string, sandbox.DependencyCacheMode) (sandbox.Dependencies, error)) {
+func stubAgentDependencies(t *testing.T, stub func(context.Context, contract.ExecutionConfig, string, string, sandbox.DependencyPolicy) (sandbox.Dependencies, error)) {
 	t.Helper()
 	previous := prepareAgentDependencies
 	prepareAgentDependencies = stub
@@ -69,7 +70,7 @@ func stubAgentDependencies(t *testing.T, stub func(context.Context, contract.Exe
 func TestPreflightStopsBeforeClaimWhenDependencyCacheFails(t *testing.T) {
 	eng, root, issue := approvedDependencyTask(t)
 	ctx := context.Background()
-	stubAgentDependencies(t, func(context.Context, contract.ExecutionConfig, string, string, sandbox.DependencyCacheMode) (sandbox.Dependencies, error) {
+	stubAgentDependencies(t, func(context.Context, contract.ExecutionConfig, string, string, sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
 		return sandbox.Dependencies{}, errors.New("prefetch go modules for base abc: example.com/missing@v1.0.0: not found")
 	})
 	ran := false
@@ -100,16 +101,16 @@ func TestAgentsStartWithPrefetchedDependencies(t *testing.T) {
 	eng, root, issue := approvedDependencyTask(t)
 	cache := filepath.Join(t.TempDir(), "agent-deps", "go")
 	var bases []string
-	stubAgentDependencies(t, func(_ context.Context, _ contract.ExecutionConfig, repo, base string, mode sandbox.DependencyCacheMode) (sandbox.Dependencies, error) {
+	stubAgentDependencies(t, func(_ context.Context, _ contract.ExecutionConfig, repo, base string, policy sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
 		bases = append(bases, base)
-		if mode != sandbox.PerRepository {
-			t.Errorf("mode = %q, want the per-repository default", mode)
+		if policy.Mode != sandbox.PerRepository || len(policy.PrivateGo.Patterns) != 0 {
+			t.Errorf("policy = %+v, want the per-repository default", policy)
 		}
 		// Stands in for the host prefetch: the module appears only now.
 		if err := os.MkdirAll(filepath.Join(cache, "example.com", "needed@v1.0.0"), 0o700); err != nil {
 			return sandbox.Dependencies{}, err
 		}
-		return sandbox.Dependencies{Mode: mode, Caches: []sandbox.DependencyCache{{Ecosystem: "go", EnvKey: "GOMODCACHE", Dir: cache}}}, nil
+		return sandbox.Dependencies{Mode: policy.Mode, Caches: []sandbox.DependencyCache{{Ecosystem: "go", EnvKey: "GOMODCACHE", Dir: cache}}}, nil
 	})
 	var seen []sandbox.Dependencies
 	eng.NewRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
@@ -148,9 +149,48 @@ func TestPrepareAgentDependenciesOnlyForNativeIsolation(t *testing.T) {
 		{Mode: contract.ExecutionTrustedLocal},
 		{Mode: contract.ExecutionIsolated, Backend: contract.BackendOCI},
 	} {
-		deps, err := prepareAgentDependencies(context.Background(), execution, t.TempDir(), "abc", sandbox.PerRepository)
+		deps, err := prepareAgentDependencies(context.Background(), execution, t.TempDir(), "abc", sandbox.DependencyPolicy{Mode: sandbox.PerRepository})
 		if err != nil || len(deps.Caches) != 0 {
 			t.Fatalf("%+v: deps = %+v, %v", execution, deps, err)
+		}
+	}
+}
+
+func TestAgentDependenciesUseRepositoryPolicy(t *testing.T) {
+	ctx := context.Background()
+	repo := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "-b", "main", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v (%s)", err, out)
+	}
+	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: repo}); err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(t.TempDir(), "repos.yaml")
+	if _, err := registry.New(registryPath).Add("acme/a", repo, "local"); err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(t.TempDir(), "node.yaml")
+	if err := os.WriteFile(profile, []byte("node_id: n\nprivate_go_modules:\n  acme/a: [example.com/priv]\n  acme/b: [example.com/other]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := EngineOptions{NodeProfilePath: profile, RegistryPath: registryPath}
+	lt := tracker.NewLocalTracker(repo).WithUser("local-dev", "OWNER")
+	eng, err := NewEngineWithOptions(repo, lt, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sandbox.DependencyPolicy{Mode: sandbox.PerRepository, PrivateGo: sandbox.PrivateGo{Repository: "acme/a", Patterns: []string{"example.com/priv"}}}
+	for name, e := range map[string]*Engine{"NewEngineWithOptions": eng, "NewEngineWithManagerOptions": NewEngineWithManagerOptions(repo, lt, nil, eng.Config, false, "", opts)} {
+		var got sandbox.DependencyPolicy
+		stubAgentDependencies(t, func(_ context.Context, _ contract.ExecutionConfig, _, _ string, policy sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
+			got = policy
+			return sandbox.Dependencies{Mode: policy.Mode}, nil
+		})
+		if _, err := e.AgentDependencies(ctx, e.Config, repo, "abc"); err != nil {
+			t.Fatal(err)
+		}
+		if got.Mode != want.Mode || got.PrivateGo.Repository != want.PrivateGo.Repository || strings.Join(got.PrivateGo.Patterns, ",") != "example.com/priv" {
+			t.Fatalf("%s: agent prefetch policy = %+v, want %+v", name, got, want)
 		}
 	}
 }

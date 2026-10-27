@@ -111,9 +111,10 @@ type ValidateOptions struct {
 	// LookupEnv resolves SWARM_EXECUTION_MODE for this validation; nil reads
 	// the process environment. Check subprocesses still receive cleanCheckEnv.
 	LookupEnv func(string) (string, bool)
-	// DependencyMode is the node profile's dependency cache mode. The zero
-	// value keeps per-repository caches; CI never shares host caches.
-	DependencyMode sandbox.DependencyCacheMode
+	// DependencyPolicy is the node profile's dependency cache policy for
+	// this repository. The zero value keeps per-repository caches and allows
+	// no private Go modules; CI never shares host caches.
+	DependencyPolicy sandbox.DependencyPolicy
 }
 
 // Validate loads checks and protected paths exclusively from the immutable base.
@@ -214,7 +215,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		if caches, err = validatorBuildCaches(ctx, worktreePath, checkHome); err != nil {
 			return nil, err
 		}
-		if deps, err = validatorDependencyCaches(ctx, worktreePath, baseSHA, opts.DependencyMode); err != nil {
+		if deps, err = validatorDependencyCaches(ctx, worktreePath, baseSHA, opts.DependencyPolicy); err != nil {
 			return nil, fmt.Errorf("validation preflight: %w", err)
 		}
 	}

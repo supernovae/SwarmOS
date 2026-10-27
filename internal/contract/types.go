@@ -221,6 +221,11 @@ type NodeProfile struct {
 	// ecosystems (such as GOMODCACHE) read-only instead of per-repository
 	// caches. It is a node setting only; .swarm/config.yaml cannot set it.
 	ShareHostDependencyCaches bool `yaml:"share_host_dependency_caches,omitempty" json:"share_host_dependency_caches,omitempty"`
+	// PrivateGoModules maps a registered repository (owner/repo) to the
+	// module path patterns (GOPRIVATE syntax) its dependency prefetch may
+	// fetch on the host with the user's own Go and git credentials. It is a
+	// node setting only; .swarm/config.yaml cannot set it.
+	PrivateGoModules map[string][]string `yaml:"private_go_modules,omitempty" json:"private_go_modules,omitempty"`
 }
 
 type RoleAttestation struct {

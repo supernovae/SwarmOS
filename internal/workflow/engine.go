@@ -673,11 +673,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if !errors.As(runErr, &rejection) {
 			return runErr
 		}
-		rerun := fmt.Sprintf("swarm issue work %d --phase implement", opts.IssueNumber)
-		if opts.PRNumber != 0 {
-			rerun = fmt.Sprintf("swarm pr work %d --phase implement", opts.PRNumber)
-		}
-		reason := fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; rerun with %s", rejection, rerun)
+		reason := importRejectionReason(rejection, opts.IssueNumber, opts.PRNumber)
 		updated, err := e.LeaseManager.Handoff(coordinatorCtx, opts.IssueNumber, opts.Owner, "implement", "implement", reason)
 		if err != nil {
 			return fmt.Errorf("%w: record import rejection: %w", runErr, err)

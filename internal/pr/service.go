@@ -18,7 +18,9 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -1040,7 +1042,11 @@ func (s *Service) newResolver(ctx context.Context, r *Result, opts Options) (*re
 	if !opts.Work.Headless {
 		mode = "interactive"
 	}
-	return &resolver{runner: runner, agentName: name, mode: mode, local: local, unit: unit, protected: spec.ProtectedPaths, log: s.ResolveLog}, nil
+	deps, err := s.newEngine(cfg).AgentDependencies(ctx, cfg, s.Root, r.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	return &resolver{runner: runner, agentName: name, mode: mode, local: local, unit: unit, protected: spec.ProtectedPaths, log: s.ResolveLog, deps: deps}, nil
 }
 
 func (s *Service) Validate(ctx context.Context, number int) (result *Result, runErr error) {
@@ -1117,7 +1123,7 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 		p.Next("validation")
 		observe = p.Observe
 	}
-	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass, LookupEnv: s.LookupEnv}
+	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass, LookupEnv: s.LookupEnv, DependencyMode: s.dependencyMode()}
 	var report *validation.ValidationReport
 	var valErr error
 	if reuse {
@@ -1340,6 +1346,13 @@ func implementationBound(st *lease.IssueState, art contract.Artifact) bool {
 
 func (s *Service) runnerOptions() agent.RunnerOptions {
 	return agent.RunnerOptions{LookupEnv: s.LookupEnv}
+}
+
+// dependencyMode is the node profile's dependency cache mode. A malformed
+// profile keeps the default per-repository caches.
+func (s *Service) dependencyMode() sandbox.DependencyCacheMode {
+	mode, _ := node.DependencyCacheMode(s.NodeProfilePath)
+	return mode
 }
 
 func (s *Service) newEngine(cfg *contract.SwarmConfig) *workflow.Engine {

@@ -521,7 +521,7 @@ func TestCodexPolicyBuildCacheIsolation(t *testing.T) {
 	for role, caches := range buildCacheRoles(t, repo, scratch) {
 		t.Run(role, func(t *testing.T) {
 			readOnly := role == "planner" || role == "reviewer"
-			args := strings.Join(codexPolicy("/usr/bin/codex", work, filepath.Join(scratch, "home"), readOnly, caches), "\n")
+			args := strings.Join(codexPolicy("/usr/bin/codex", work, filepath.Join(scratch, "home"), readOnly, caches, Dependencies{}), "\n")
 			checkRoleCaches(t, role, scratch, caches, args)
 			for _, c := range caches {
 				if !strings.Contains(args, fmt.Sprintf("%q=\"write\"", c.Dir)) {
@@ -549,7 +549,7 @@ func TestExecutorFlagsBuildCacheIsolation(t *testing.T) {
 	t.Setenv("CCACHE_DIR", userCC)
 	for role, caches := range buildCacheRoles(t, repo, scratch) {
 		t.Run(role, func(t *testing.T) {
-			flags, err := executorFlags(work, role == "planner" || role == "reviewer", caches, "true", nil)
+			flags, err := executorFlags(work, role == "planner" || role == "reviewer", caches, Dependencies{}, "true", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -584,7 +584,7 @@ func TestExecutorFlagsBuildCacheIsolation(t *testing.T) {
 		{Ecosystem: "go", EnvKey: "GOCACHE", Dir: "relative"},
 		{Ecosystem: "go", EnvKey: "HOME", Dir: scratch},
 	} {
-		if _, err := executorFlags(work, false, []BuildCache{bad}, "true", nil); err == nil {
+		if _, err := executorFlags(work, false, []BuildCache{bad}, Dependencies{}, "true", nil); err == nil {
 			t.Fatalf("executorFlags accepted %+v", bad)
 		}
 	}

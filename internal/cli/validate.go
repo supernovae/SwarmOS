@@ -76,7 +76,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		defer heartbeat.Stop()
 		ctx = heartbeat.Context()
 		p.Next("validation")
-		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork, GoFastPass: true, LookupEnv: options.lookupEnv})
+		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork, GoFastPass: true, LookupEnv: options.lookupEnv, DependencyMode: options.dependencyMode()})
 		if report != nil {
 			report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 			lease.PreserveTesterGuidance(state, &report.Artifact)

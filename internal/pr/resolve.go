@@ -16,6 +16,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -48,6 +49,8 @@ type resolver struct {
 	unit      *contract.WorkUnit
 	protected []string
 	log       io.Writer
+	// deps are the agent dependency caches prefetched for the approved base.
+	deps sandbox.Dependencies
 }
 
 func (r *resolver) logf(format string, args ...any) {
@@ -120,7 +123,7 @@ func (s *Service) resolveStop(ctx context.Context, rv *resolver, worktree string
 		return nil, err
 	}
 	run, runErr := rv.runner.Run(ctx, agent.RunRequest{Agent: rv.agentName, Role: "developer", Mode: rv.mode, WorktreePath: dir,
-		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: resolverTaskPrompt, Local: rv.local})
+		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: resolverTaskPrompt, Local: rv.local, Dependencies: rv.deps})
 	if runErr != nil {
 		// Never surface the disposable workspace path.
 		msg := strings.ReplaceAll(runErr.Error(), dir, "<resolver workspace>")

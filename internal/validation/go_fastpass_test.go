@@ -293,10 +293,18 @@ func installFakeGo(t *testing.T, testScript string) string {
 	return log
 }
 
+// readLog returns the check commands the fake go saw. The coordinator's
+// dependency prefetch also runs go on the host; those calls are dropped.
 func readLog(t *testing.T, log string) []string {
 	t.Helper()
 	data, _ := os.ReadFile(log)
-	return strings.Split(strings.TrimSpace(string(data)), "\n")
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line != "env GOVERSION" && !strings.HasPrefix(line, "mod download") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func TestGoFastPassProgress(t *testing.T) {

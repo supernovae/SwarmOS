@@ -254,7 +254,7 @@ func TestCleanCheckEnvUsesOnlyValidatorCaches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := cleanCheckEnv("/scratch/home", caches)
+	env := cleanCheckEnv("/scratch/home", caches, sandbox.Dependencies{})
 	for _, key := range cacheEnvKeys {
 		var values []string
 		for _, entry := range env {
@@ -272,7 +272,7 @@ func TestCleanCheckEnvUsesOnlyValidatorCaches(t *testing.T) {
 			t.Fatalf("host value leaked into check environment: %q", entry)
 		}
 	}
-	for _, entry := range cleanCheckEnv("/scratch/home", nil) {
+	for _, entry := range cleanCheckEnv("/scratch/home", nil, sandbox.Dependencies{}) {
 		for _, key := range cacheEnvKeys {
 			if strings.HasPrefix(entry, key+"=") {
 				t.Fatalf("no caches still set %q", entry)

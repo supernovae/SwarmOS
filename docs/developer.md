@@ -336,6 +336,17 @@ For a required check of the form `go test [flags] ./...`, each failing test is r
 
 The repair prompt points the developer at `REPAIR.md`. When every failure is a pre-existing Go test, a developer round can't fix it. The run then stops with the `pre_existing_failures` next action, which needs a person to act, and no developer starts. This applies both right after validation fails and when work resumes. To start the round anyway, pass `--instructions` to `swarm issue work` or `swarm pr work`. Mixed, flaky, unclassified, and non-Go failures always go to the developer.
 
+`swarm issue work` and `swarm pr work` repair a failed validation in the same run. After the trusted checks fail, the coordinator regenerates `REPAIR.md`, runs a developer repair round, records it as a fenced `Repair validation:` checkpoint, and runs the tester and every required check again on the new head. Only that coordinator validation decides whether the run passed, whatever the developer or tester reports. Progress names each round, for example `Issue #42: repair 1/1 implement started targeting "example.com/m/broken.TestBroken"`, and later stages of the round keep the `repair 1/1` label. With `--json`, `repair_rounds` counts the rounds that started, and the validation report always describes the latest round.
+
+The trusted configuration's optional `lease.validation_repair_limit` sets how many repair rounds one run may start: omission gives one round, and zero disables automatic repair. The limit comes from the approved base, so a candidate change can't raise it. The rounds stop early when:
+
+- every failure is pre-existing at the approved base (`pre_existing_failures`, exit `1`);
+- the limit is used up and checks still fail. The error lists the failing tests and says whether they are the same as in the previous round (`validation_repair_exhausted`, exit `3`);
+- a round changes nothing outside `.swarm/active/` (`validation_repair_no_changes`, exit `3`);
+- the claim is close to its budget. The run hands off with `validation=false`, like any claim-budget pause, and prints the continue command (exit `0`).
+
+A developer that reports itself blocked, an import rejection, or a claim fence (`ErrClaimFence`) also ends the run, and no further rounds start. Rerun `swarm issue work <issue> --phase implement` or `swarm pr work <PR> --phase implement` to continue with a fresh repair budget.
+
 `swarm issue status <issue>` and `swarm pr status <PR>` show the failed checks and each test's classification, and `--json` includes the same summary under `repair` (`result.repair` for PR status). Status reads only the recorded validation and never reruns tests. Evidence recorded for another base or head, or by an older SwarmOS, shows as `unavailable`.
 
 Issue and PR `validate` and `submit` commands report phases, check starts, and PASS/FAIL results with elapsed time on stderr. A running line appears every 15 seconds during a check or phase. Add `--progress=false` for quiet operation; stdout, PR URLs, and `--json` results stay the same. Issue submission creates a checkpoint and creates or updates its draft PR; PR submission publishes the existing checkpoint and updates review evidence and rebase metadata.
@@ -537,7 +548,7 @@ Check `swarm issue status <issue>` for the count and limit. When automation reac
  "next_action": {"reason": "changes_requested", "argv": ["swarm", "--backend", "github", "issue", "work", "42", "--phase", "plan"], "human_required": false}}
 ```
 
-- `reason` is `changes_requested`, `needs_approval`, `conflict`, or `pre_existing_failures`.
+- `reason` is `changes_requested`, `needs_approval`, `conflict`, `pre_existing_failures`, `validation_repair_exhausted`, or `validation_repair_no_changes`.
 - `argv` is the suggested command as separate literal arguments, starting with `swarm`. Run it without a shell, or quote each element yourself. It repeats the `--backend`, `--repo`, `--root`, and `--upstream-remote` you used, and for worker commands `--fork` and `--fork-remote`. Maintainer commands (`issue approve`, `issue review-plan --approve`) are run upstream, so they leave out fork flags, and in fork mode they also leave out `--root`.
 - `human_required` is `true` when a person has to act, such as a maintainer approving or someone resolving files by hand.
 
@@ -547,7 +558,7 @@ Check `swarm issue status <issue>` for the count and limit. When automation reac
 | --- | --- |
 | `0` | Success. No `next_action`. |
 | `1` | `pre_existing_failures` (with its `next_action`), or any other failure, including invalid arguments, claim fences, unknown mergeability, and approval problems that don't name a single human decision. No `next_action` for those. |
-| `3` | `changes_requested`: the agent reviewer returned `CHANGES_REQUESTED`. |
+| `3` | `changes_requested`: the agent reviewer returned `CHANGES_REQUESTED`. Also `validation_repair_exhausted` and `validation_repair_no_changes`, when automatic validation repair stopped and another implement run may continue it. |
 | `4` | `needs_approval`: a maintainer has to approve before work can continue. |
 | `5` | `conflict`: the PR conflicts with its base, or a managed rebase is paused on conflicts. |
 
@@ -564,6 +575,8 @@ Each reason suggests these commands:
 | `conflict` (a managed rebase is paused) | `swarm pr rebase <PR> --continue --resolve` | `false` |
 | `conflict` (the resolver left files for you) | `swarm pr rebase <PR> --continue`, after you resolve and stage the files | `true` |
 | `pre_existing_failures` (every failing test also fails at the approved base) | `swarm issue status <issue>`, or `swarm pr status <PR>`, to inspect the classification. Exits `1`. | `true` |
+| `validation_repair_exhausted` (checks still fail after `lease.validation_repair_limit` repair rounds) | `swarm issue work <issue> --phase implement`, or `swarm pr work <PR> --phase implement` | `false` |
+| `validation_repair_no_changes` (a repair round changed nothing outside `.swarm/active/`) | `swarm issue work <issue> --phase implement`, or `swarm pr work <PR> --phase implement` | `false` |
 
 A stale task approval comes before a conflict. If the PR's target base has moved, `pr work` reports `needs_approval`, even when GitHub also reports conflicts, because the new base needs approval before any rebase. If a managed rebase is already paused, finishing it comes first. If the reviewer rejected the plan, that rejection is reported over any other stop.
 

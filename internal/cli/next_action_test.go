@@ -76,6 +76,10 @@ func TestNextActionMatrix(t *testing.T) {
 		{"pr submit", "pr", 9, paused, want{ReasonConflict, argv("pr", "rebase", "9", "--continue", "--resolve"), false, ExitConflict}},
 		{"issue work", "issue", 7, fmt.Errorf("issue #7: %w", workflow.ErrPreExistingFailures), want{ReasonPreExistingFailures, argv("issue", "status", "7"), true, ExitFailure}},
 		{"pr work", "pr", 9, fmt.Errorf("%w: %w", workflow.ErrPreExistingFailures, errors.New("required validation check failed")), want{ReasonPreExistingFailures, argv("pr", "status", "9"), true, ExitFailure}},
+		{"issue work", "issue", 7, fmt.Errorf("issue #7: %w after 1 of 1 repair rounds: %w", workflow.ErrValidationRepairExhausted, errors.New("required validation check failed")), want{ReasonValidationRepairExhausted, argv("issue", "work", "7", "--phase", "implement"), false, ExitChangesRequested}},
+		{"issue work", "issue", 7, fmt.Errorf("issue #7: %w in repair round 1/1", workflow.ErrValidationRepairNoChanges), want{ReasonValidationRepairNoChanges, argv("issue", "work", "7", "--phase", "implement"), false, ExitChangesRequested}},
+		{"pr work", "pr", 9, fmt.Errorf("issue #7: %w after 2 of 2 repair rounds: %w", workflow.ErrValidationRepairExhausted, errors.New("required validation check failed")), want{ReasonValidationRepairExhausted, argv("pr", "work", "9", "--phase", "implement"), false, ExitChangesRequested}},
+		{"pr work", "pr", 9, fmt.Errorf("issue #7: %w in repair round 1/1", workflow.ErrValidationRepairNoChanges), want{ReasonValidationRepairNoChanges, argv("pr", "work", "9", "--phase", "implement"), false, ExitChangesRequested}},
 		// Precedence: rejection over approval, task approval over plan approval.
 		{"pr work", "pr", 9, errors.Join(rejected, task), want{ReasonChangesRequested, argv("pr", "work", "9", "--phase", "plan"), false, ExitChangesRequested}},
 		{"pr work", "pr", 9, &lease.HumanPlanApprovalError{IssueNumber: 7, Err: task}, want{ReasonNeedsApproval, approve, true, ExitNeedsApproval}},

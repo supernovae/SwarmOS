@@ -30,6 +30,7 @@ func TestConfigRejectsInvalidSecurityPolicy(t *testing.T) {
 		"unknown gate":               strings.Replace(string(valid), "default_gate: agent", "default_gate: typo", 1),
 		"negative plan retry budget": strings.Replace(string(valid), "max_renewals: 3", "max_renewals: 3\n  plan_replan_limit: -1", 1),
 		"negative repair budget":     strings.Replace(string(valid), "max_renewals: 3", "max_renewals: 3\n  rebase_repair_limit: -1", 1),
+		"negative validation repair": strings.Replace(string(valid), "max_renewals: 3", "max_renewals: 3\n  validation_repair_limit: -1", 1),
 		"nonpositive lease":          strings.Replace(string(valid), "duration: 4h", "duration: 0s", 1),
 		"unapproved default":         strings.Replace(string(valid), "default_agent: codex", "default_agent: unapproved", 1),
 		"unapproved reviewer agent":  strings.Replace(string(valid), `ready_label: "swarm:ready"`, "ready_label: \"swarm:ready\"\n  reviewer_agents: [unapproved]", 1),
@@ -1488,5 +1489,30 @@ func TestPlannerSplitRecommendationInstructions(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("planner prompt missing %q", want)
 		}
+	}
+}
+
+func TestValidationRepairLimitConfig(t *testing.T) {
+	valid, err := embeddedTemplates.ReadFile("templates/swarm/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, line string
+		want       int
+	}{
+		{name: "omitted", want: 1},
+		{name: "zero disables", line: "\n  validation_repair_limit: 0", want: 0},
+		{name: "positive", line: "\n  validation_repair_limit: 3", want: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := decodeConfig([]byte(strings.Replace(string(valid), "max_renewals: 3", "max_renewals: 3"+tc.line, 1)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Lease.ValidationRepairAttempts(); got != tc.want {
+				t.Fatalf("validation repair attempts = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

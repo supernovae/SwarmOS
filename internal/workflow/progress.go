@@ -27,6 +27,9 @@ type workProgress struct {
 	issue                 int
 	stage                 string
 	check                 string // active validation check, if any
+	repairRound           int    // automatic validation repair round, if any
+	repairLimit           int
+	repairTargets         []string
 	started, stageStarted time.Time
 	checkStarted          time.Time
 	stop                  chan struct{}
@@ -73,7 +76,8 @@ func (p *workProgress) send(status string) {
 		origin = p.checkStarted
 	}
 	p.emit(ProgressEvent{IssueNumber: p.issue, Stage: p.stage, Check: p.check, Status: status,
-		Elapsed: now.Sub(p.started), StageElapsed: now.Sub(origin)})
+		Elapsed: now.Sub(p.started), StageElapsed: now.Sub(origin),
+		Repair: p.repairRound, RepairLimit: p.repairLimit, Targets: p.repairTargets})
 }
 
 // observeCheck reports validator check lifecycle events within the current stage.
@@ -103,9 +107,21 @@ func (p *workProgress) observeCheck(e ProgressEvent) {
 	p.resetDeadline()
 }
 
-func (p *workProgress) next(stage string) {
+func (p *workProgress) next(stage string) { p.nextRound(stage, false, 0, 0, nil) }
+
+// repair starts a validation repair round's developer stage. Later stages and
+// heartbeats keep naming the round.
+func (p *workProgress) repair(round, limit int, targets []string) {
+	p.nextRound("implement", true, round, limit, targets)
+}
+
+func (p *workProgress) nextRound(stage string, repair bool, round, limit int, targets []string) {
 	if p.session != nil {
-		p.session.Next(stage)
+		if repair {
+			p.session.Repair(stage, round, limit, targets)
+		} else {
+			p.session.Next(stage)
+		}
 		return
 	}
 	if p.emit == nil {
@@ -119,6 +135,9 @@ func (p *workProgress) next(stage string) {
 	p.check = ""
 	if p.stage != "" {
 		p.send("completed")
+	}
+	if repair {
+		p.repairRound, p.repairLimit, p.repairTargets = round, limit, append([]string(nil), targets...)
 	}
 	p.stage, p.stageStarted = stage, p.now()
 	p.send("started")

@@ -183,3 +183,30 @@ func TestProgressSerializesCallbacks(t *testing.T) {
 		}
 	}
 }
+
+func TestRepairRoundStaysOnLaterEvents(t *testing.T) {
+	ticks := make(chan time.Time)
+	events := make(chan Event, 20)
+	now := time.Unix(0, 0)
+	p := New(t.Context(), 7, 0, func(e Event) { events <- e }, ticks, func() time.Time { return now }, nil)
+	<-events // preflight started
+	targets := []string{"example.com/m.TestBroken"}
+	p.Repair("implement", 1, 2, targets)
+	targets[0] = "mutated"
+	if e := <-events; e.Stage != "preflight" || e.Status != "completed" || e.RepairLimit != 0 {
+		t.Fatalf("previous stage carried the round: %+v", e)
+	}
+	if e := <-events; e.Stage != "implement" || e.Repair != 1 || e.RepairLimit != 2 || len(e.Targets) != 1 || e.Targets[0] != "example.com/m.TestBroken" {
+		t.Fatalf("repair start: %+v", e)
+	}
+	p.Next("test")
+	<-events
+	if e := <-events; e.Stage != "test" || e.Repair != 1 || e.RepairLimit != 2 {
+		t.Fatalf("later stage lost the round: %+v", e)
+	}
+	ticks <- now
+	if e := <-events; e.Status != "running" || e.Repair != 1 {
+		t.Fatalf("heartbeat lost the round: %+v", e)
+	}
+	p.Finish("completed")
+}

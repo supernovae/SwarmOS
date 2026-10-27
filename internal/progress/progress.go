@@ -17,6 +17,12 @@ type Event struct {
 	Status       string // started, completed, running, paused, handed-off, failed, canceled, PASS, FAIL, skipped
 	Elapsed      time.Duration
 	StageElapsed time.Duration
+	// Repair and RepairLimit name the automatic validation repair round
+	// (repair Repair/RepairLimit) for every event after it starts. Targets are
+	// the escaped, bounded failing tests or checks the round addresses.
+	Repair      int
+	RepairLimit int
+	Targets     []string
 }
 
 // Session serializes observers independently of claim renewal. Observers must
@@ -95,7 +101,17 @@ func (p *Session) send(status string) {
 		p.emit(e)
 	}
 }
-func (p *Session) Next(stage string) {
+func (p *Session) Next(stage string) { p.next(stage, nil) }
+
+// Repair starts stage as validation repair round of limit. The round stays on
+// later events, including heartbeats, until another round starts.
+func (p *Session) Repair(stage string, round, limit int, targets []string) {
+	p.next(stage, func(e *Event) {
+		e.Repair, e.RepairLimit, e.Targets = round, limit, append([]string(nil), targets...)
+	})
+}
+
+func (p *Session) next(stage string, update func(*Event)) {
 	if p == nil || p.emit == nil {
 		return
 	}
@@ -110,6 +126,9 @@ func (p *Session) Next(stage string) {
 	p.mu.Lock()
 	p.event.Stage = stage
 	p.event.Check = ""
+	if update != nil {
+		update(&p.event)
+	}
 	p.active = p.now()
 	p.phaseStarted = p.active
 	p.mu.Unlock()

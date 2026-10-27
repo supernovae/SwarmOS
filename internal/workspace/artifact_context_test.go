@@ -20,7 +20,8 @@ func TestRoleContextAndReviewOnlyLessons(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkpointWrite(t, filepath.Join(root, ".swarm/active"), "LESSONS.md", "- active-lesson-marker")
-			err := compileHarnessBundle(root, &contract.WorkUnit{ID: "ISSUE-56", IssueNumber: 56}, nil, artifacts, role, "role prompt", "", "", "", "checks", "")
+			wu := &contract.WorkUnit{ID: "ISSUE-56", IssueNumber: 56, Title: "workunit-title-marker", Objective: "workunit-objective-marker"}
+			err := compileHarnessBundle(root, wu, nil, artifacts, role, "role prompt", "", "", "", "checks", "", bundleGuidance{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -33,13 +34,20 @@ func TestRoleContextAndReviewOnlyLessons(t *testing.T) {
 				if strings.Contains(text, "private-lesson-marker") || strings.Contains(text, "active-lesson-marker") || strings.Contains(text, "private-detail") {
 					t.Fatal("unmerged lesson leaked into prompt")
 				}
-				if !strings.Contains(text, "keep-this-section") || !strings.Contains(text, "not current findings") {
-					t.Fatal(text)
+				// Task context lives only in WORKUNIT.md; the system prompt points to it.
+				inWorkUnit := name == "WORKUNIT.md"
+				for _, marker := range []string{"keep-this-section", "not current findings", "workunit-title-marker", "workunit-objective-marker"} {
+					if strings.Contains(text, marker) != inWorkUnit {
+						t.Fatalf("%s: marker %q present=%v:\n%s", name, marker, !inWorkUnit, text)
+					}
 				}
 				for _, a := range artifacts {
-					if artifactRole(a.Type) == role && !strings.Contains(text, "Superseded previous attempt: "+string(a.Type)) {
-						t.Fatal("same-role context not superseded")
+					if artifactRole(a.Type) == role && strings.Contains(text, "Superseded previous attempt: "+string(a.Type)) != inWorkUnit {
+						t.Fatalf("%s: same-role superseded context present=%v", name, !inWorkUnit)
 					}
+				}
+				if !inWorkUnit && !strings.Contains(text, "`.swarm/active/WORKUNIT.md`") {
+					t.Fatal("system prompt does not point to WORKUNIT.md")
 				}
 			}
 			evidence, err := os.ReadFile(filepath.Join(root, ".swarm/active/REVIEW_EVIDENCE.md"))

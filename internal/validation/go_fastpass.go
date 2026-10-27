@@ -156,6 +156,7 @@ func (f *goFastPass) run(ctx context.Context, check contract.CheckSpec, duration
 		outcome.FallbackReason, status = "timed out; the full check decides", "skipped"
 	case errors.As(runErr, &exitErr):
 		outcome.OutputTail, outcome.FailingTests = output.diagnostics()
+		outcome.goFailures = output.evidence(check.Command)
 		outcome.ExitCode, status = exitErr.ExitCode(), "FAIL"
 	default:
 		outcome.FallbackReason, status = "did not run: "+EscapeDiagnostic(runErr.Error())+"; the full check decides", "skipped"

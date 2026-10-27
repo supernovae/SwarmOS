@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -31,4 +33,5 @@ func writeWorkValidationFailure(cmd *cobra.Command, result *workflow.WorkResult)
 		}
 	}
 	writeValidationChecks(cmd, &failed)
+	fmt.Fprint(cmd.OutOrStdout(), validation.RepairStatusText(report.Repair))
 }

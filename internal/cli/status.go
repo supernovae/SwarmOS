@@ -11,6 +11,7 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -25,6 +26,9 @@ type issueStatus struct {
 	State                  *lease.IssueState           `json:"state"`
 	Provenance             []contract.RoleAttestation  `json:"provenance"`
 	RoleRuns               []contract.RoleRunTelemetry `json:"role_runs"`
+	// Repair is the trusted summary of a failed validation, read from the
+	// recorded validation artifact; status never reruns checks.
+	Repair *validation.RepairSummary `json:"repair,omitempty"`
 }
 
 // writeRoleRuns prints the compact per-run telemetry table shared with pr status.
@@ -86,6 +90,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				}
 				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance, RoleRuns: lease.RoleRuns(state)}
 				if state != nil {
+					entry.Repair = validation.RepairFromArtifact(state.Artifacts, state.BaseSHA)
 					entry.ClaimBudget, err = manager.Budget(state)
 					if err != nil {
 						return err
@@ -170,6 +175,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 							record.Role, value(record.Agent), value(record.Harness), value(record.HarnessVersion), value(record.Model), value(record.Sandbox), value(record.ArtifactType), value(record.ArtifactDigest))
 					}
 				}
+				fmt.Fprint(cmd.OutOrStdout(), validation.RepairStatusText(entry.Repair))
 				writeRoleRuns(cmd.OutOrStdout(), entry.RoleRuns)
 				if state.PRNumber != 0 {
 					fmt.Fprintf(cmd.OutOrStdout(), "PR #%d: %s\n", state.PRNumber, state.PRURL)

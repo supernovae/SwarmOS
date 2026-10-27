@@ -88,6 +88,7 @@ func TestProvisionUntouchedBase(t *testing.T) {
 			f := newAdvanceFixture(t)
 			advanceWrite(t, f.path, ".swarm/active/PLAN.md", "stale plan\n")
 			advanceWrite(t, f.path, ".swarm/active/REVIEW.md", "VERDICT: APPROVED\nstale\n")
+			advanceWrite(t, f.path, ".swarm/active/REPAIR.md", "stale brief\n")
 			advanceWrite(t, f.path, ".swarm/active/LESSONS.md", "kept\n")
 			switch scenario {
 			case "markers", "staged markers":
@@ -122,7 +123,7 @@ func TestProvisionUntouchedBase(t *testing.T) {
 				t.Fatalf("source = %q", got)
 			}
 			if scenario != "branch only" {
-				for _, name := range []string{"PLAN.md", "REVIEW.md"} {
+				for _, name := range []string{"PLAN.md", "REVIEW.md", "REPAIR.md"} {
 					if _, err := os.Stat(filepath.Join(path, ".swarm", "active", name)); !errors.Is(err, os.ErrNotExist) {
 						t.Fatalf("stale %s kept: %v", name, err)
 					}

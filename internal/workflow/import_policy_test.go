@@ -28,7 +28,7 @@ func TestWritableImportPolicy(t *testing.T) {
 					if err := writableImportPolicy(role, paths, []string{"policy/**"}, harness, fork); err != nil {
 						t.Fatal(err)
 					}
-					paths = []string{".swarm/active/PLAN.md", ".swarm/active/TEST_PLAN.md", ".swarm/active/WORKUNIT.md", ".swarm/active/SYSTEM_PROMPT.md", ".swarm/active/unknown", ".swarm/active/" + other}
+					paths = []string{".swarm/active/PLAN.md", ".swarm/active/REPAIR.md", ".swarm/active/TEST_PLAN.md", ".swarm/active/WORKUNIT.md", ".swarm/active/SYSTEM_PROMPT.md", ".swarm/active/unknown", ".swarm/active/" + other}
 					paths = append(paths, "policy/checks", ".swarm/config.yaml", ".github/workflows/ci.yml", paths[0])
 					err := writableImportPolicy(role, paths, []string{"policy/**"}, harness, fork)
 					var rejected *importRejection
@@ -36,7 +36,7 @@ func TestWritableImportPolicy(t *testing.T) {
 						t.Fatal(err)
 					}
 					want := []string{}
-					want = append(want, paths[:6]...)
+					want = append(want, paths[:7]...)
 					if !harness {
 						want = append(want, "policy/checks")
 					}

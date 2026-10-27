@@ -41,7 +41,22 @@ type checkCapture struct {
 	names          []string
 	namesBytes     int
 	namesTruncated bool
+	// goTests attributes raw failing test names to the package summary line
+	// that follows them in plain `go test` output.
+	goTests        []goFailure
+	pendingTests   []string
+	unattributed   []string
+	testsTruncated bool
 }
+
+// goFailure is one failing Go test and the package whose summary line
+// reported it. Both are raw, untrusted output and must be escaped for display.
+type goFailure struct {
+	pkg, name string
+}
+
+// maxGoFailures bounds the attributed failures kept for repair diagnosis.
+const maxGoFailures = 60
 
 func (c *checkCapture) Write(p []byte) (int, error) {
 	c.mu.Lock()
@@ -66,6 +81,7 @@ func (c *checkCapture) Write(p []byte) (int, error) {
 				line := string(c.pending)
 				c.fails.line(line, c.lineNo)
 				c.parseName(line)
+				c.goLine(line)
 			}
 			c.pending = c.pending[:0]
 			c.longLine = false
@@ -104,6 +120,67 @@ func (c *checkCapture) parseName(line string) {
 	}
 	c.names = append(c.names, name)
 	c.namesBytes += len(name)
+}
+
+// goLine collects raw `--- FAIL:` names and assigns them to the following
+// `FAIL\t<pkg>\t...` summary line. A failed package without named tests, such
+// as a build failure or a panic in TestMain, is recorded as unattributed.
+func (c *checkCapture) goLine(line string) {
+	if trimmed := strings.TrimLeft(line, " \t"); strings.HasPrefix(trimmed, "--- FAIL: ") {
+		fields := strings.Fields(strings.TrimPrefix(trimmed, "--- FAIL: "))
+		switch {
+		case len(fields) == 0, slices.Contains(c.pendingTests, fields[0]):
+		case len(c.pendingTests) >= maxGoFailures:
+			c.testsTruncated = true
+		default:
+			c.pendingTests = append(c.pendingTests, fields[0])
+		}
+		return
+	}
+	switch {
+	case strings.HasPrefix(line, "ok  \t"), strings.HasPrefix(line, "?   \t"):
+		c.pendingTests = c.pendingTests[:0]
+	case strings.HasPrefix(line, "FAIL\t"):
+		pkg, _, _ := strings.Cut(strings.TrimPrefix(line, "FAIL\t"), "\t")
+		pkg, _, _ = strings.Cut(pkg, " ")
+		if pkg == "" {
+			return
+		}
+		if len(c.pendingTests) == 0 {
+			if len(c.unattributed) < maxGoFailures {
+				c.unattributed = append(c.unattributed, pkg)
+			} else {
+				c.testsTruncated = true
+			}
+		}
+		for _, name := range c.pendingTests {
+			if len(c.goTests) >= maxGoFailures {
+				c.testsTruncated = true
+				break
+			}
+			c.goTests = append(c.goTests, goFailure{pkg: pkg, name: name})
+		}
+		c.pendingTests = c.pendingTests[:0]
+	}
+}
+
+// goFailures returns the attributed failing tests, the packages that failed
+// without a named test, and whether either list was cut.
+// An unterminated final line is parsed on a copy, as in diagnostics.
+func (c *checkCapture) goFailures() ([]goFailure, []string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	tmp := checkCapture{goTests: slices.Clone(c.goTests), pendingTests: slices.Clone(c.pendingTests), unattributed: slices.Clone(c.unattributed), testsTruncated: c.testsTruncated || c.longLine}
+	if !c.longLine && len(c.pending) > 0 {
+		tmp.goLine(string(c.pending))
+	}
+	return tmp.goTests, tmp.unattributed, tmp.testsTruncated || len(tmp.pendingTests) > 0
+}
+
+// evidence packages goFailures for a failed run of the trusted command source.
+func (c *checkCapture) evidence(source string) *goEvidence {
+	tests, unattributed, truncated := c.goFailures()
+	return &goEvidence{source: source, tests: tests, unattributed: unattributed, truncated: truncated}
 }
 
 func (c *checkCapture) diagnostics() (string, []string) {

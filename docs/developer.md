@@ -21,7 +21,7 @@ swarm issue validate 42 --backend github
 swarm issue submit 42 --backend github
 ```
 
-Developer and tester results are checked before import. If a run changes protected files or approved inputs in `.swarm/active/`, the error and `swarm issue status 42` list every rejected path. The returned changes are discarded and the worktree stays as it was at launch. Retry with `swarm issue work 42 --phase implement` after addressing the cause. Developers may write `IMPLEMENTATION.md` and `LESSONS.md` in the active bundle; testers may write `VALIDATION.md` and `LESSONS.md`. The coordinator restores approved plan inputs before the tester starts.
+Developer and tester results are checked before import. If a run changes protected files or approved inputs in `.swarm/active/`, the error and `swarm issue status 42` list every rejected path. The returned changes are discarded and the worktree stays as it was at launch. Retry with `swarm issue work 42 --phase implement` after addressing the cause. Developers may write `IMPLEMENTATION.md` and `LESSONS.md` in the active bundle, and never the coordinator's `REPAIR.md`; testers may write `VALIDATION.md` and `LESSONS.md`. The coordinator restores approved plan inputs before the tester starts.
 
 Helpful CLI conventions:
 
@@ -328,6 +328,16 @@ Failed checks in `swarm repo validate`, `swarm issue validate`, `swarm pr valida
 
 With `--json`, failed check outcomes add `output_tail` and `failing_tests` (an empty array for non-Go failures); passing outcomes omit both fields. Issue submission and `swarm issue work` failures include the validation `report` alongside `kind`, `status`, and `error`. `swarm pr work` carries the same report at `result.work.validation`, and successful work results include it there too (`result.validation` for issue work). Existing raw output and validation artifact fields remain available.
 
+#### Repair brief for failed validation
+
+When required checks fail in `swarm issue work`, `swarm pr work`, `swarm issue validate`, `swarm pr validate`, issue or PR submission, or `swarm issue stage --phase implement`, the coordinator writes `.swarm/active/REPAIR.md`. The brief lists each failed check with its exit code, failing test names, the bounded FAIL blocks and output tail, the changed files, and the changed Go package directories. It comes from the trusted validation report: check output and file names are escaped and quoted as untrusted data, as in `CI.md`. Developers can't edit it, because changes to `REPAIR.md` are rejected like any other approved input. Before the next repair round, the brief is regenerated from the recorded validation, and a passing validation or a new approved base removes it.
+
+For a required check of the form `go test [flags] ./...`, each failing test is rerun on its own, in the same sandbox as the check and without the test cache. The rerun keeps the check's build flags, such as `-race` and `-tags`. A test that passes on this candidate rerun is **flaky**. If it fails again, it is rerun once in a clean checkout of the approved base: it is a **regression** if it passes there and **pre-existing** if it fails there. A test that can't be observed reliably stays **unclassified**, with the reason. That covers checks with any other command form, failures without a package name (for example from `-json` output), build failures, timeouts, and more than 20 failing tests. Classification never changes the validation result. Flaky failures still fail validation.
+
+The repair prompt points the developer at `REPAIR.md`. When every failure is a pre-existing Go test, a developer round can't fix it. The run then stops with the `pre_existing_failures` next action, which needs a person to act, and no developer starts. This applies both right after validation fails and when work resumes. To start the round anyway, pass `--instructions` to `swarm issue work` or `swarm pr work`. Mixed, flaky, unclassified, and non-Go failures always go to the developer.
+
+`swarm issue status <issue>` and `swarm pr status <PR>` show the failed checks and each test's classification, and `--json` includes the same summary under `repair` (`result.repair` for PR status). Status reads only the recorded validation and never reruns tests. Evidence recorded for another base or head, or by an older SwarmOS, shows as `unavailable`.
+
 Issue and PR `validate` and `submit` commands report phases, check starts, and PASS/FAIL results with elapsed time on stderr. A running line appears every 15 seconds during a check or phase. Add `--progress=false` for quiet operation; stdout, PR URLs, and `--json` results stay the same. Issue submission creates a checkpoint and creates or updates its draft PR; PR submission publishes the existing checkpoint and updates review evidence and rebase metadata.
 
 #### Changed-package validation
@@ -527,7 +537,7 @@ Check `swarm issue status <issue>` for the count and limit. When automation reac
  "next_action": {"reason": "changes_requested", "argv": ["swarm", "--backend", "github", "issue", "work", "42", "--phase", "plan"], "human_required": false}}
 ```
 
-- `reason` is `changes_requested`, `needs_approval`, or `conflict`.
+- `reason` is `changes_requested`, `needs_approval`, `conflict`, or `pre_existing_failures`.
 - `argv` is the suggested command as separate literal arguments, starting with `swarm`. Run it without a shell, or quote each element yourself. It repeats the `--backend`, `--repo`, `--root`, and `--upstream-remote` you used, and for worker commands `--fork` and `--fork-remote`. Maintainer commands (`issue approve`, `issue review-plan --approve`) are run upstream, so they leave out fork flags, and in fork mode they also leave out `--root`.
 - `human_required` is `true` when a person has to act, such as a maintainer approving or someone resolving files by hand.
 
@@ -536,7 +546,7 @@ Check `swarm issue status <issue>` for the count and limit. When automation reac
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Success. No `next_action`. |
-| `1` | Any other failure, including invalid arguments, claim fences, unknown mergeability, and approval problems that don't name a single human decision. No `next_action`. |
+| `1` | `pre_existing_failures` (with its `next_action`), or any other failure, including invalid arguments, claim fences, unknown mergeability, and approval problems that don't name a single human decision. No `next_action` for those. |
 | `3` | `changes_requested`: the agent reviewer returned `CHANGES_REQUESTED`. |
 | `4` | `needs_approval`: a maintainer has to approve before work can continue. |
 | `5` | `conflict`: the PR conflicts with its base, or a managed rebase is paused on conflicts. |
@@ -553,6 +563,7 @@ Each reason suggests these commands:
 | `conflict` (GitHub reports the PR as conflicting) | `swarm pr rebase <PR> --resolve` | `false` |
 | `conflict` (a managed rebase is paused) | `swarm pr rebase <PR> --continue --resolve` | `false` |
 | `conflict` (the resolver left files for you) | `swarm pr rebase <PR> --continue`, after you resolve and stage the files | `true` |
+| `pre_existing_failures` (every failing test also fails at the approved base) | `swarm issue status <issue>`, or `swarm pr status <PR>`, to inspect the classification. Exits `1`. | `true` |
 
 A stale task approval comes before a conflict. If the PR's target base has moved, `pr work` reports `needs_approval`, even when GitHub also reports conflicts, because the new base needs approval before any rebase. If a managed rebase is already paused, finishing it comes first. If the reviewer rejected the plan, that rejection is reported over any other stop.
 

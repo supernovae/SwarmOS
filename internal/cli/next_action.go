@@ -16,6 +16,9 @@ const (
 	ReasonChangesRequested = "changes_requested"
 	ReasonNeedsApproval    = "needs_approval"
 	ReasonConflict         = "conflict"
+	// ReasonPreExistingFailures stops a run whose failing tests all fail at
+	// the approved base; a maintainer inspects the status and decides.
+	ReasonPreExistingFailures = "pre_existing_failures"
 )
 
 // Process exit codes. 2 is left unused so it stays free for usage errors.
@@ -87,6 +90,9 @@ type stopContext struct {
 func (c stopContext) classify(err error) *NextAction {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, workflow.ErrPreExistingFailures) {
+		return &NextAction{Reason: ReasonPreExistingFailures, Argv: c.argv(false, c.resource, "status", strconv.Itoa(c.number)), HumanRequired: true}
 	}
 	if errors.Is(err, workflow.ErrPlanReviewRejected) {
 		return &NextAction{Reason: ReasonChangesRequested, Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "plan")}

@@ -1397,8 +1397,10 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	if err != nil {
 		return nil, err
 	}
-	if st.Lease.Status == "completed" {
-		return nil, ErrApprovalRequired
+	// A submitted issue keeps a completed lease while its linked PR is
+	// revised; a policy move on rebase then needs a fresh human review here.
+	if st.Lease.Status == "completed" && st.PRNumber == 0 {
+		return nil, fmt.Errorf("issue #%d is completed with no linked PR; there is no plan left to review: %w", n, ErrApprovalRequired)
 	}
 	if err := m.checkApprovedState(ctx, n, st); err != nil {
 		return nil, err

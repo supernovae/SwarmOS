@@ -2,6 +2,7 @@ package lease
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -178,5 +179,41 @@ func TestOriginalReviewCannotApproveRevision(t *testing.T) {
 	st.Artifacts[0].Body = "rejected delta"
 	if err := captureRevisionPlan(st); err != nil || len(st.RevisionPlan.Accepted) != 0 {
 		t.Fatal("rejected delta promoted", err)
+	}
+}
+
+func TestHumanReviewAfterSubmissionWithLinkedPR(t *testing.T) {
+	m, _, issue := testManager(t)
+	ctx := t.Context()
+	if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []contract.Artifact{{Type: contract.ArtifactDesign, Producer: "mock", Summary: "plan", Body: "original"}, {Type: contract.ArtifactTestPlan, Producer: "mock", Summary: "tests", Body: "original tests"}} {
+		if _, err := m.UpdateArtifact(ctx, issue.Number, "local-dev", a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	complete := func(pr int) {
+		t.Helper()
+		st, rev, err := m.load(ctx, issue.Number)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Lease.Status, st.PRNumber = "completed", pr
+		if _, err := m.save(ctx, issue.Number, rev, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	complete(0)
+	if _, err := m.RecordHumanReview(ctx, issue.Number, "APPROVED", "checked"); !errors.Is(err, ErrApprovalRequired) || !strings.Contains(err.Error(), "no linked PR") {
+		t.Fatalf("completed issue without PR accepted review: %v", err)
+	}
+	complete(42)
+	st, err := m.RecordHumanReview(ctx, issue.Number, "APPROVED", "re-reviewed after policy move")
+	if err != nil {
+		t.Fatalf("submitted issue with linked PR refused human review: %v", err)
+	}
+	if err := verifyReviewBinding(st, contract.GateHuman); err != nil {
+		t.Fatalf("recorded review does not satisfy the human gate: %v", err)
 	}
 }

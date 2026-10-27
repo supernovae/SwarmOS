@@ -264,7 +264,7 @@ func TestBudgetPauseDuringRequiredChecksDoesNotRecordFailure(t *testing.T) {
 		<-agentCtx.Done()
 	}}
 	res, err := e.ExecuteWork(t.Context(), opts)
-	if err != nil || res.ClaimBudgetPause == nil || res.ValidationPassed {
+	if err != nil || res.ClaimBudgetPause == nil || res.ValidationPassed || res.Validation != nil {
 		t.Fatalf("checks pause: %+v %v", res, err)
 	}
 	for _, a := range res.State.Artifacts {

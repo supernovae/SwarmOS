@@ -11,6 +11,7 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
 )
 
@@ -50,7 +51,8 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
-			defer func() { reportJSONFailure(cmd, jsonOutput, "work", runErr) }()
+			var failedReport *validation.ValidationReport
+			defer func() { reportJSONFailureWithReport(cmd, jsonOutput, "work", runErr, failedReport) }()
 			guidanceOpts := *rootOpts
 			stops := stopContext{opts: &guidanceOpts, resource: "issue"}
 			defer func() {
@@ -143,6 +145,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), recovery)
 			}
 			if err != nil {
+				if failedReport = failedWorkValidation(result); !jsonOutput {
+					writeWorkValidationFailure(cmd, result)
+				}
 				return err
 			}
 			guidance := claimBudgetGuidance(&guidanceOpts, result, "issue", result.IssueNumber)

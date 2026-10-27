@@ -86,8 +86,11 @@ type WorkResult struct {
 	ReviewerNoticeError string
 	ReviewVerdict       string
 	ValidationPassed    bool
-	RoleAgentsUsed      map[string]string
-	State               *lease.IssueState
+	// Validation is the trusted required-check report from the implement
+	// phase, kept on failure so callers can show its diagnostics.
+	Validation     *validation.ValidationReport `json:"validation,omitempty"`
+	RoleAgentsUsed map[string]string
+	State          *lease.IssueState
 }
 
 // Outcome summarizes how a run ended: completed, paused for a human, or
@@ -1085,6 +1088,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return res, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, "implement", true, forkMode, forkRemote)
 	}
 	if report != nil {
+		res.Validation = report
 		observeRun(testerRun, st, false)
 		report.Artifact.Metadata = runMetadata(testerRun, report.Artifact.Metadata)
 		report.Artifact.Body += "\n" + testerBody

@@ -10,10 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,15 +34,16 @@ import (
 // cache mounts, because resolving its dependencies can run package code.
 type dependencyEcosystem struct {
 	Name       string   // also the ToolchainBind.Ecosystem tag
-	Detect     []string // base-tree files that enable the adapter
-	Lockfiles  []string // read from the approved base, never the worktree
+	Detect     []string // base names, anywhere in the base tree, that enable the adapter
+	Lockfiles  []string // base names read from the approved base, never the worktree
 	EnvKey     string
 	Prefetch   prefetchFunc
 	NoPrefetch string // why there is no fetch-only prefetch
 }
 
 // prefetchRequest is one host prefetch. Dir is the only directory it may
-// write; Files holds the lockfiles present in the approved base.
+// write; Files holds the lockfiles present in the approved base, keyed by
+// slash-separated path from the repository root.
 type prefetchRequest struct {
 	BaseSHA string
 	Dir     string
@@ -54,7 +58,7 @@ type prefetchFunc func(context.Context, prefetchRequest) error
 // TestEveryMountedEcosystemIsClassified; see "Dependency caches" in
 // docs/project.md.
 var dependencyEcosystems = []dependencyEcosystem{
-	{Name: "go", Detect: []string{"go.mod"}, Lockfiles: []string{"go.mod", "go.sum"}, EnvKey: "GOMODCACHE", Prefetch: goModDownload},
+	{Name: "go", Detect: []string{"go.mod", "go.work"}, Lockfiles: []string{"go.mod", "go.sum", "go.work", "go.work.sum"}, EnvKey: "GOMODCACHE", Prefetch: goModDownload},
 	{Name: "rust", NoPrefetch: "adapter is a follow-up"},
 	{Name: "python", NoPrefetch: "adapter is a follow-up"},
 	{Name: "node", NoPrefetch: "adapter is a follow-up"},
@@ -215,10 +219,23 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 	if _, err := gitcredential.Output(ctx, worktree, "rev-parse", "--verify", "--quiet", baseSHA+"^{commit}"); err != nil {
 		return deps, fmt.Errorf("read approved base %s: %w", baseSHA, err)
 	}
+	tree, err := baseTree(ctx, worktree, baseSHA)
+	if err != nil {
+		return deps, err
+	}
 	var detected []dependencyEcosystem
+	selected := map[string][]treeEntry{}
 	for _, eco := range dependencyEcosystems {
-		if eco.Prefetch != nil && baseHasAny(ctx, worktree, baseSHA, eco.Detect) {
+		if eco.Prefetch == nil {
+			continue
+		}
+		entries, err := selectLockfiles(tree, eco)
+		if err != nil {
+			return deps, fmt.Errorf("prefetch %s modules for base %s: %w", eco.Name, shortSHA(baseSHA), err)
+		}
+		if slices.ContainsFunc(entries, func(e treeEntry) bool { return slices.Contains(eco.Detect, path.Base(e.Path)) }) {
 			detected = append(detected, eco)
+			selected[eco.Name] = entries
 		}
 	}
 	if len(detected) == 0 {
@@ -251,15 +268,12 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 		}
 		dir := filepath.Join(keyDir, eco.Name)
 		files := map[string][]byte{}
-		for _, name := range eco.Lockfiles {
-			if !baseHasAny(ctx, worktree, baseSHA, []string{name}) {
-				continue
-			}
-			data, err := gitcredential.Output(ctx, worktree, "cat-file", "blob", baseSHA+":"+name)
+		for _, e := range selected[eco.Name] {
+			data, err := gitcredential.Output(ctx, worktree, "cat-file", "blob", e.Object)
 			if err != nil {
-				return deps, fmt.Errorf("read %s from approved base: %w", name, err)
+				return deps, fmt.Errorf("read %s from approved base: %w", e.Path, err)
 			}
-			files[name] = data
+			files[e.Path] = data
 		}
 		// v3 re-prepares caches filled before downloaded Go toolchains were finished.
 		marker := ".prefetched-v3-" + eco.Name + "-" + lockfileDigest(files)
@@ -278,13 +292,64 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 	return deps, nil
 }
 
-func baseHasAny(ctx context.Context, worktree, baseSHA string, names []string) bool {
-	for _, name := range names {
-		if _, err := gitcredential.Output(ctx, worktree, "cat-file", "-e", baseSHA+":"+name); err == nil {
-			return true
+// maxGoModules bounds how many go.mod files, and separately go.work files, a
+// base may hold. A larger base is an error rather than a partial prefetch.
+const maxGoModules = 128
+
+// treeEntry is one git ls-tree entry of the approved base.
+type treeEntry struct{ Mode, Type, Object, Path string }
+
+// baseTree lists every entry of baseSHA's tree, never the worktree.
+func baseTree(ctx context.Context, worktree, baseSHA string) ([]treeEntry, error) {
+	out, err := gitcredential.Output(ctx, worktree, "ls-tree", "-r", "-z", "--full-tree", baseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("list approved base %s: %w", shortSHA(baseSHA), err)
+	}
+	var entries []treeEntry
+	for _, record := range strings.Split(string(out), "\x00") {
+		if record == "" {
+			continue
+		}
+		meta, name, ok := strings.Cut(record, "\t")
+		fields := strings.Fields(meta)
+		if !ok || len(fields) != 3 {
+			return nil, fmt.Errorf("list approved base %s: unexpected entry %q", shortSHA(baseSHA), record)
+		}
+		entries = append(entries, treeEntry{Mode: fields[0], Type: fields[1], Object: fields[2], Path: name})
+	}
+	return entries, nil
+}
+
+// selectLockfiles keeps the regular files whose base name is one of eco's
+// lockfiles, outside vendor and testdata directories. Symlinks, submodules
+// and non-local paths are never read.
+func selectLockfiles(entries []treeEntry, eco dependencyEcosystem) ([]treeEntry, error) {
+	var selected []treeEntry
+	counts := map[string]int{}
+	for _, e := range entries {
+		if e.Type != "blob" || (e.Mode != "100644" && e.Mode != "100755") {
+			continue
+		}
+		name := path.Base(e.Path)
+		if !slices.Contains(eco.Lockfiles, name) || !filepath.IsLocal(e.Path) || strings.Contains(e.Path, "\\") {
+			continue
+		}
+		parts := strings.Split(path.Dir(e.Path), "/")
+		if slices.Contains(parts, "vendor") || slices.Contains(parts, "testdata") {
+			continue
+		}
+		if slices.Contains(eco.Detect, name) {
+			counts[name]++
+		}
+		selected = append(selected, e)
+	}
+	for _, name := range eco.Detect {
+		if counts[name] > maxGoModules {
+			return nil, fmt.Errorf("approved base has %d %s files; the prefetch limit is %d", counts[name], name, maxGoModules)
 		}
 	}
-	return false
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Path < selected[j].Path })
+	return selected, nil
 }
 
 func lockfileDigest(files map[string][]byte) string {
@@ -331,24 +396,37 @@ var runPrefetchCommand = func(ctx context.Context, dir string, env, argv []strin
 // repository or package code (`go help mod download`).
 var goModDownloadArgv = []string{"go", "mod", "download", "-json"}
 
-// goModDownload runs go mod download for the base's go.mod and go.sum in a
-// temporary copy, because it writes go.sum into its working directory. It
-// seeds from the host module cache before the host's GOPROXY. GOTOOLCHAIN is
-// local, so no downloaded toolchain runs. When go.mod needs a newer Go than
+// goModDownload runs go mod download for every go.mod and go.work in the
+// base, in a temporary tree that places each file at its base path, because
+// it writes go.sum into its working directory and relative replace and use
+// directives must resolve. Each module runs with GOWORK=off, then each
+// workspace runs in workspace mode, all into the one cache. It seeds from the
+// host module cache before the host's GOPROXY. GOTOOLCHAIN is local, so no
+// downloaded toolchain runs. When a go.mod or go.work needs a newer Go than
 // the host's, the matching golang.org/toolchain module is fetched too, so the
 // sandboxed go command can switch to it offline.
 func goModDownload(ctx context.Context, req prefetchRequest) error {
-	gomod, ok := req.Files["go.mod"]
-	if !ok {
-		return errors.New("approved base has no go.mod")
+	var modules, workspaces []string
+	for name := range req.Files {
+		switch path.Base(name) {
+		case "go.mod":
+			modules = append(modules, name)
+		case "go.work":
+			workspaces = append(workspaces, name)
+		}
 	}
+	if len(modules)+len(workspaces) == 0 {
+		return errors.New("approved base has no go.mod or go.work")
+	}
+	sort.Strings(modules)
+	sort.Strings(workspaces)
 	tmp, err := os.MkdirTemp("", "swarm-prefetch-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	module, outside := filepath.Join(tmp, "module"), filepath.Join(tmp, "outside")
-	for _, dir := range []string{module, outside} {
+	tree, outside := filepath.Join(tmp, "tree"), filepath.Join(tmp, "outside")
+	for _, dir := range []string{tree, outside} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return err
 		}
@@ -370,9 +448,16 @@ func goModDownload(ctx context.Context, req prefetchRequest) error {
 	if fields := strings.Fields(string(stdout)); len(fields) > 0 && strings.HasPrefix(fields[0], "go1") {
 		local = strings.TrimPrefix(fields[0], "go")
 	}
+	need := ""
+	for _, name := range append(slices.Clone(modules), workspaces...) {
+		if v := requiredGoToolchain(req.Files[name]); v != "" && (need == "" || compareGoVersions(v, need) > 0) {
+			need = v
+		}
+	}
+	files := req.Files
 	// An unrecognized host version (such as a devel build) skips the
 	// toolchain step; go mod download then reports any mismatch itself.
-	if need := requiredGoToolchain(gomod); local != "" && need != "" && compareGoVersions(need, local) > 0 {
+	if local != "" && need != "" && compareGoVersions(need, local) > 0 {
 		toolchain := "golang.org/toolchain@v0.0.1-go" + need + "." + runtime.GOOS + "-" + runtime.GOARCH
 		stdout, stderr, err = runPrefetchCommand(ctx, outside, env, append(append([]string(nil), goModDownloadArgv...), toolchain))
 		if err != nil {
@@ -384,19 +469,47 @@ func goModDownload(ctx context.Context, req prefetchRequest) error {
 		if err := finishGoToolchain(filepath.Join(req.Dir, "golang.org", strings.TrimPrefix(toolchain, "golang.org/"))); err != nil {
 			return fmt.Errorf("prepare Go toolchain %s: %s", need, redact(err.Error()))
 		}
-		gomod = lowerGoDirective(gomod, local)
+		files = maps.Clone(req.Files)
+		for _, name := range append(slices.Clone(modules), workspaces...) {
+			files[name] = lowerGoDirective(files[name], local)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(module, "go.mod"), gomod, 0o600); err != nil {
-		return err
-	}
-	if sum, ok := req.Files["go.sum"]; ok {
-		if err := os.WriteFile(filepath.Join(module, "go.sum"), sum, 0o600); err != nil {
+	for name, data := range files {
+		target := filepath.Join(tree, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, data, 0o600); err != nil {
 			return err
 		}
 	}
-	stdout, stderr, err = runPrefetchCommand(ctx, module, env, goModDownloadArgv)
-	if err != nil {
-		return errors.New(redact(prefetchFailure(stdout, stderr, err)))
+	download := func(name string, env []string) error {
+		dir := filepath.Join(tree, filepath.FromSlash(path.Dir(name)))
+		stdout, stderr, err := runPrefetchCommand(ctx, dir, env, goModDownloadArgv)
+		if err == nil {
+			return nil
+		}
+		msg := redact(prefetchFailure(stdout, stderr, err))
+		if name != "go.mod" {
+			msg = name + ": " + msg
+		}
+		return errors.New(msg)
+	}
+	for _, name := range modules {
+		if err := download(name, env); err != nil {
+			return err
+		}
+	}
+	for _, name := range workspaces {
+		workEnv := slices.Clone(env)
+		for i, entry := range workEnv {
+			if strings.HasPrefix(entry, "GOWORK=") {
+				workEnv[i] = "GOWORK=" + filepath.Join(tree, filepath.FromSlash(name))
+			}
+		}
+		if err := download(name, workEnv); err != nil {
+			return err
+		}
 	}
 	return nil
 }

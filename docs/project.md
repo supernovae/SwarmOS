@@ -251,8 +251,8 @@ Sandboxes have no network, so downloaded dependencies must already be on disk. F
 
 | Cache | Path under the user cache directory | Filled for | Read by |
 | --- | --- | --- | --- |
-| Agent | `swarm/agent-deps/<repository key>/go` and `.../rust` | Planner, reviewer, developer, tester and resolver runs | Those runs, read-only |
-| Validator | `swarm/validate-deps/<repository key>/go` and `.../rust` | Validation, including warm-up | Validation checks, read-only |
+| Agent | `swarm/agent-deps/<repository key>/<go, rust or python>` | Planner, reviewer, developer, tester and resolver runs | Those runs, read-only |
+| Validator | `swarm/validate-deps/<repository key>/<go, rust or python>` | Validation, including warm-up | Validation checks, read-only |
 
 The prefetch runs `go mod download -json` on a temporary copy of the approved base's `go.mod` and `go.sum`, never the candidate worktree. It reads modules from your own module cache first and then from your `GOPROXY`. It runs with a fresh environment: no GitHub token, `SWARM_GITHUB_TOKEN_COMMAND`, SSH agent, Git credential helper or `GOFLAGS`, and with `GOTOOLCHAIN=local`, so it only downloads, verifies and extracts. When `go.mod` asks for a newer Go than the one installed, the prefetch also downloads that Go release so sandboxed `go` commands can switch to it offline. A `.prefetched-go-<digest>` file records each completed prefetch, so it runs again only when `go.mod` or `go.sum` changes.
 
@@ -260,11 +260,24 @@ For Rust, a root `Cargo.lock` in the approved base enables the cache, and sandbo
 
 Unlike build caches, dependency caches never fall back. If the cache directory cannot be prepared safely, or a module cannot be downloaded, `swarm issue work` and `swarm pr work` stop before claiming the task, and validation stops before any check runs. The error names the module or crate, for example `prefetch go modules for base 1a2b3c4d5e6f: example.com/missing@v1.0.0: ...` or `prefetch rust modules for base 1a2b3c4d5e6f: dependency missing-crate: ...`. Only the root `go.mod` is detected; nested modules and `go.work` get no prefetch.
 
+#### Python
+
+A repository whose approved base has a root `uv.lock` or `requirements*.txt` gets its own Python wheel cache, and sandboxes no longer see your pip, uv or Poetry caches. uv-managed interpreters stay mounted. The prefetch never builds a package and never runs package code:
+
+- For `uv.lock`, it runs `uv export --frozen --offline --no-build --no-config` on a temporary copy of the base's `uv.lock` and `pyproject.toml`, which only reads the lockfile.
+- For the export and each `requirements*.txt`, it runs `python3 -I -m pip download --only-binary=:all:` into the cache. pip downloads wheels only, so an sdist's `setup.py` or build backend never runs. The export is downloaded with `--no-deps --require-hashes`.
+
+Before pip runs, every requirements file must contain only registry requirements (a name, extras, version specifiers and markers), `--hash` options, and `-r` or `-c` references to another root `requirements*.txt`. Editable installs, paths, URLs, VCS and `name @ url` references, `${VAR}` expansion and every other option, such as `--no-binary` or `--index-url`, are rejected with the file and line. The prefetch environment has no GitHub token, SSH agent, Git credential helper, pip or uv configuration file, or `PYTHONPATH`; it copies only `PATH`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_TRUSTED_HOST`, `PIP_CERT` and `SSL_CERT_FILE`.
+
+A dependency that publishes only an sdist is reported, not built, and the run stops before it claims work, for example `prefetch python modules for base 1a2b3c4d5e6f: requirements.txt: missing==2.0: no compatible wheel (sdist-only dependencies are not built)`. Wheels are chosen for the host's `python3`.
+
+Sandboxes find the wheels through `PIP_FIND_LINKS`, so `pip install --no-index -r requirements.txt` works offline. With uv, run `uv pip install --offline --find-links "$PIP_FIND_LINKS" -r requirements.txt`. A Python repository with neither file, for example a Poetry project, keeps read-only access to your host pip, uv and Poetry caches.
+
 Other ecosystems have no fetch-only download command yet, so they keep read-only access to your host caches, as before:
 
 | Ecosystem | Host caches still mounted read-only | Why |
 | --- | --- | --- |
-| Python, Node | pip, uv, Poetry, npm, pnpm, Yarn, Bun, Playwright, Cypress | Adapters are planned |
+| Node | npm, pnpm, Yarn, Bun, Playwright, Cypress | Adapters are planned |
 | .NET | NuGet packages | Restore runs MSBuild |
 | Maven | `~/.m2/repository` | Plugins run during resolve |
 | Gradle | `~/.gradle/caches`, `~/.gradle/wrapper` | Build scripts run during resolve |
@@ -272,7 +285,7 @@ Other ecosystems have no fetch-only download command yet, so they keep read-only
 
 `swarm repo doctor` shows a `dependency-caches` check that lists each ecosystem's mode and names those sharing host caches. `swarm node status` shows the same, and `swarm node status --json` reports it as `dependency_caches`.
 
-To mount your host-wide Go module cache and Cargo caches read-only again on one machine, set `share_host_dependency_caches: true` in the node profile (`~/.config/swarm/node.yaml`, or the file named by `SWARM_NODE_CONFIG`). This is off by default, it is a node setting only, and `.swarm/config.yaml` rejects it. Doctor reports the opt-in as a `WARN`. Validation in CI always uses per-repository caches.
+To mount your host-wide Go module cache, Cargo caches and Python caches read-only again on one machine, set `share_host_dependency_caches: true` in the node profile (`~/.config/swarm/node.yaml`, or the file named by `SWARM_NODE_CONFIG`). This is off by default, it is a node setting only, and `.swarm/config.yaml` rejects it. Doctor reports the opt-in as a `WARN`. Validation in CI always uses per-repository caches.
 
 **Adding an ecosystem:** add an entry to `dependencyEcosystems` in `internal/sandbox/dependency_cache.go`. An adapter needs a `Prefetch` that runs only a fetch-only command; anything that can run package code stays `NoPrefetch`. Every `addCache` call in `internal/sandbox/toolchain.go` names its ecosystem, and `TestEveryMountedEcosystemIsClassified` fails until the ecosystem is in the table.
 

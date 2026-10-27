@@ -198,7 +198,8 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	if xdgData != "" {
 		uvPythonFallbacks = append(uvPythonFallbacks, filepath.Join(xdgData, "uv", "python"))
 	}
-	addCache("python", "UV_PYTHON_INSTALL_DIR", firstCandidate("UV_PYTHON_INSTALL_DIR", uvPythonFallbacks...))
+	// uv-managed interpreters are a toolchain, not downloaded dependencies.
+	addToolchainRoot("UV_PYTHON_INSTALL_DIR", firstCandidate("UV_PYTHON_INSTALL_DIR", uvPythonFallbacks...))
 
 	poetryFallbacks := []string{}
 	if xdgCache != "" {

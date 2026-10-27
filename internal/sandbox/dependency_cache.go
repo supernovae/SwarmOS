@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -29,14 +30,17 @@ import (
 // never mounted, and each repository gets its own cache filled on the host
 // from the approved base. A NoPrefetch entry keeps today's read-only host
 // cache mounts, because resolving its dependencies can run package code.
+// HostWithoutLockfile keeps an adapter's read-only host caches in
+// repositories whose base has none of its Detect files, so they still build.
 type dependencyEcosystem struct {
-	Name       string   // also the ToolchainBind.Ecosystem tag
-	Detect     []string // base-tree files that enable the adapter
-	Lockfiles  []string // read from the approved base, never the worktree
-	TreeFiles  string   // basename also read at every path of the base tree
-	EnvKey     string
-	Prefetch   prefetchFunc
-	NoPrefetch string // why there is no fetch-only prefetch
+	Name                string   // also the ToolchainBind.Ecosystem tag
+	Detect              []string // root-level base-tree patterns that enable the adapter
+	Lockfiles           []string // read from the approved base, never the worktree
+	TreeFiles           string   // basename also read at every path of the base tree
+	EnvKey              string
+	Prefetch            prefetchFunc
+	NoPrefetch          string // why there is no fetch-only prefetch
+	HostWithoutLockfile bool
 }
 
 // prefetchRequest is one host prefetch. Dir is the only directory it may
@@ -58,7 +62,7 @@ type prefetchFunc func(context.Context, prefetchRequest) error
 var dependencyEcosystems = []dependencyEcosystem{
 	{Name: "go", Detect: []string{"go.mod"}, Lockfiles: []string{"go.mod", "go.sum"}, EnvKey: "GOMODCACHE", Prefetch: goModDownload},
 	{Name: "rust", Detect: []string{"Cargo.lock"}, Lockfiles: []string{"Cargo.lock"}, TreeFiles: "Cargo.toml", EnvKey: "CARGO_HOME", Prefetch: cargoFetch},
-	{Name: "python", NoPrefetch: "adapter is a follow-up"},
+	{Name: "python", Detect: []string{"uv.lock", "requirements*.txt"}, Lockfiles: []string{"uv.lock", "pyproject.toml", "requirements*.txt"}, EnvKey: "PIP_FIND_LINKS", Prefetch: pythonWheelDownload, HostWithoutLockfile: true},
 	{Name: "node", NoPrefetch: "adapter is a follow-up"},
 	{Name: "dotnet", NoPrefetch: "restore runs MSBuild"},
 	{Name: "maven", NoPrefetch: "plugins run during resolve"},
@@ -94,22 +98,28 @@ type Dependencies struct {
 
 // toolchains returns the host toolchain binds this run may mount.
 func (d Dependencies) toolchains() []ToolchainBind {
-	return HostToolchainsFor(d.Mode)
+	return HostToolchainsFor(d)
 }
 
 // HostToolchainsFor is HostToolchains without the host-wide caches of
-// adapter-backed ecosystems, unless mode shares them.
-func HostToolchainsFor(mode DependencyCacheMode) []ToolchainBind {
-	return filterDependencyBinds(HostToolchains(), mode)
+// adapter-backed ecosystems, unless deps shares them. An ecosystem marked
+// HostWithoutLockfile loses its host caches only when deps has its
+// per-repository cache.
+func HostToolchainsFor(deps Dependencies) []ToolchainBind {
+	return filterDependencyBinds(HostToolchains(), deps)
 }
 
-func filterDependencyBinds(binds []ToolchainBind, mode DependencyCacheMode) []ToolchainBind {
-	if mode == SharedHostCaches {
+func filterDependencyBinds(binds []ToolchainBind, deps Dependencies) []ToolchainBind {
+	if deps.Mode == SharedHostCaches {
 		return binds
+	}
+	prepared := map[string]bool{}
+	for _, c := range deps.Caches {
+		prepared[c.Ecosystem] = true
 	}
 	filtered := make([]ToolchainBind, 0, len(binds))
 	for _, b := range binds {
-		if eco, ok := dependencyEcosystemNamed(b.Ecosystem); ok && eco.Prefetch != nil {
+		if eco, ok := dependencyEcosystemNamed(b.Ecosystem); ok && eco.Prefetch != nil && (!eco.HostWithoutLockfile || prepared[eco.Name]) {
 			continue
 		}
 		filtered = append(filtered, b)
@@ -190,6 +200,8 @@ func DependencyCacheModes(mode DependencyCacheMode) []EcosystemMode {
 			m = "per-repository"
 			if mode == SharedHostCaches {
 				m = "host-shared (opt-in)"
+			} else if eco.HostWithoutLockfile {
+				m += " with " + strings.Join(eco.Detect, " or ") + ", else sharing host caches (no supported lockfile)"
 			}
 		}
 		modes = append(modes, EcosystemMode{Name: eco.Name, Mode: m})
@@ -217,9 +229,13 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 	if _, err := gitcredential.Output(ctx, worktree, "rev-parse", "--verify", "--quiet", baseSHA+"^{commit}"); err != nil {
 		return deps, fmt.Errorf("read approved base %s: %w", baseSHA, err)
 	}
+	tree, err := baseTree(ctx, worktree, baseSHA)
+	if err != nil {
+		return deps, err
+	}
 	var detected []dependencyEcosystem
 	for _, eco := range dependencyEcosystems {
-		if eco.Prefetch != nil && baseHasAny(ctx, worktree, baseSHA, eco.Detect) {
+		if eco.Prefetch != nil && len(matchBaseFiles(tree, eco.Detect)) > 0 {
 			detected = append(detected, eco)
 		}
 	}
@@ -253,10 +269,7 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 		}
 		dir := filepath.Join(keyDir, eco.Name)
 		files := map[string][]byte{}
-		for _, name := range eco.Lockfiles {
-			if !baseHasAny(ctx, worktree, baseSHA, []string{name}) {
-				continue
-			}
+		for _, name := range matchBaseFiles(tree, eco.Lockfiles) {
 			data, err := gitcredential.Output(ctx, worktree, "cat-file", "blob", baseSHA+":"+name)
 			if err != nil {
 				return deps, fmt.Errorf("read %s from approved base: %w", name, err)
@@ -283,13 +296,35 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 	return deps, nil
 }
 
-func baseHasAny(ctx context.Context, worktree, baseSHA string, names []string) bool {
-	for _, name := range names {
-		if _, err := gitcredential.Output(ctx, worktree, "cat-file", "-e", baseSHA+":"+name); err == nil {
-			return true
+// baseTree lists the files at the root of baseSHA's tree.
+func baseTree(ctx context.Context, worktree, baseSHA string) ([]string, error) {
+	out, err := gitcredential.Output(ctx, worktree, "ls-tree", "-z", baseSHA)
+	if err != nil {
+		return nil, fmt.Errorf("read approved base %s: %w", shortSHA(baseSHA), err)
+	}
+	var names []string
+	for _, entry := range strings.Split(string(out), "\x00") {
+		meta, name, ok := strings.Cut(entry, "\t")
+		if fields := strings.Fields(meta); ok && len(fields) == 3 && fields[1] == "blob" {
+			names = append(names, name)
 		}
 	}
-	return false
+	return names, nil
+}
+
+// matchBaseFiles returns the sorted root-level files matching any pattern.
+func matchBaseFiles(tree, patterns []string) []string {
+	var names []string
+	for _, name := range tree {
+		for _, pattern := range patterns {
+			if ok, _ := path.Match(pattern, name); ok {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // readBaseTreeFiles adds every regular file named basename in the base tree

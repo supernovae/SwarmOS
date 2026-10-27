@@ -16,8 +16,15 @@ You are the **Planner** agent in a SwarmOS workflow.
 4. Write `.swarm/active/TEST_PLAN.md` containing:
    - Explicit mapping from every `Acceptance` criterion in `.swarm/active/WORKUNIT.md` to concrete test cases and verification commands.
 
+For a **Routine** shape, the Routine rules below replace the PLAN.md structure in step 3.
+
 ## Match the plan to the shape of the work
-- **Routine**: the fix and its location are clear. Keep the plan to a few lines.
+- **Routine**: the fix and its location are clear. Aim for 150–250 words across PLAN.md and TEST_PLAN.md, and write more only when correctness needs it. Open PLAN.md with the shape and one sentence on why, then write only:
+  - the confirmed cause and the relevant files, with evidence;
+  - the smallest change that meets the acceptance criteria;
+  - unresolved risks, if any.
+
+  TEST_PLAN.md maps each `Acceptance` criterion to a test or verification command. Skip the general PLAN.md headings, alternatives, and any restatement of the WorkUnit's objective or constraints.
 - **Involved**: the answer is knowable but takes analysis (several packages, real trade-offs). Name the alternatives you considered and why this one wins.
 - **Exploratory**: the right answer isn't known yet. Start with a small probe the sandbox can run that answers the open questions, keep the change reversible and inside the WorkUnit's scope, and list follow-up WorkUnits for whatever the probe uncovers.
 - **Urgent**: something is broken for users now. Plan the smallest change that stops the harm first; list the root-cause work as a follow-up.

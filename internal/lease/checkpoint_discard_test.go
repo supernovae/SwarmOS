@@ -26,8 +26,9 @@ type discardFixture struct {
 }
 
 // newDiscardFixture approves a task on the local FileStore backend, or for the
-// github variant on the real atomic GitStore with a bare upstream remote.
-func newDiscardFixture(t *testing.T, github bool) discardFixture {
+// github variant on the real atomic GitStore in layout with a bare upstream
+// remote. The FileStore ignores layout.
+func newDiscardFixture(t *testing.T, github bool, layout coordination.RefLayout) discardFixture {
 	t.Helper()
 	m, lt, issue := testManager(t)
 	git := func(dir string, args ...string) string {
@@ -46,7 +47,7 @@ func newDiscardFixture(t *testing.T, github bool) discardFixture {
 		main := git(m.repoRoot, "symbolic-ref", "--short", "HEAD")
 		git(remote, "symbolic-ref", "HEAD", "refs/heads/"+main)
 		git(m.repoRoot, "push", "origin", main)
-		m.SetStore(m.repoRoot, coordination.NewGitStore(m.repoRoot))
+		m.SetStore(m.repoRoot, coordination.NewGitStoreWithLayout(m.repoRoot, "", layout))
 	}
 	if _, err := m.ApproveTask(context.Background(), issue.Number, "local-dev"); err != nil {
 		t.Fatal(err)
@@ -120,7 +121,7 @@ func TestDiscardCheckpointRegression(t *testing.T) {
 	for _, backend := range []string{"local", "github"} {
 		t.Run(backend, func(t *testing.T) {
 			ctx := context.Background()
-			f := newDiscardFixture(t, backend == "github")
+			f := newDiscardFixture(t, backend == "github", coordination.BranchLayout)
 			n := f.issue.Number
 			c, abandoned, base := f.abandon(t)
 
@@ -141,7 +142,7 @@ func TestDiscardCheckpointRegression(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ref := coordination.CheckpointRef(n, c)
+			ref := f.m.LedgerLayout().CheckpointRef(n, c)
 			if len(discarded.DiscardedCheckpoints) != 1 {
 				t.Fatalf("audit: %+v", discarded.DiscardedCheckpoints)
 			}
@@ -227,11 +228,49 @@ func TestDiscardCheckpointRegression(t *testing.T) {
 	}
 }
 
+// TestDiscardCheckpointHiddenNamespace pins the audit and retention of a
+// discard to refs/swarm/ and proves it writes nothing under refs/heads/.
+func TestDiscardCheckpointHiddenNamespace(t *testing.T) {
+	ctx := context.Background()
+	f := newDiscardFixture(t, true, coordination.HiddenLayout)
+	n := f.issue.Number
+	c, _, _ := f.abandon(t)
+	branches := func() string {
+		return f.git(f.remote, "for-each-ref", "--sort=refname", "--format=%(refname) %(objectname)", "refs/heads/")
+	}
+	before := branches()
+
+	discarded, err := f.m.DiscardCheckpoint(ctx, n, "local-dev", c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := coordination.HiddenLayout.CheckpointRef(n, c)
+	if len(discarded.DiscardedCheckpoints) != 1 || discarded.DiscardedCheckpoints[0].RetentionRef != ref {
+		t.Fatalf("audit retention ref is not %s: %+v", ref, discarded.DiscardedCheckpoints)
+	}
+	if got := f.git(f.remote, "rev-parse", "--verify", ref); got != c {
+		t.Fatalf("%s resolves to %q, want abandoned %s", ref, got, c)
+	}
+	if out := f.git(f.remote, "for-each-ref", coordination.BranchLayout.CheckpointPrefix()); out != "" {
+		t.Fatalf("discard created branch-namespace retention refs:\n%s", out)
+	}
+	if after := branches(); after != before {
+		t.Fatalf("discard changed refs/heads/:\n%s\n---\n%s", before, after)
+	}
+	st, err := f.m.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.HeadSHA != "" || len(st.DiscardedCheckpoints) != 1 || st.DiscardedCheckpoints[0].RetentionRef != ref {
+		t.Fatalf("active checkpoint not cleared: %+v", st)
+	}
+}
+
 func TestDiscardCheckpointRefusals(t *testing.T) {
 	for _, scenario := range []string{"active claim", "open PR", "pending PR revision", "submitted", "fork repo", "fork gateway", "unauthorized", "owner mismatch", "wrong expected head", "short expected head", "no checkpoint", "missing commit", "corrupt retention ref"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
-			f := newDiscardFixture(t, false)
+			f := newDiscardFixture(t, false, coordination.BranchLayout)
 			n := f.issue.Number
 			c, _, _ := f.abandon(t)
 			m, owner, expected := f.m, "local-dev", c
@@ -275,7 +314,7 @@ func TestDiscardCheckpointRefusals(t *testing.T) {
 				expected = strings.Repeat("1", 40)
 				edit(func(st *IssueState) { st.HeadSHA = expected })
 			case "corrupt retention ref":
-				f.git(m.repoRoot, "update-ref", coordination.CheckpointRef(n, c), f.git(m.repoRoot, "rev-parse", "HEAD"))
+				f.git(m.repoRoot, "update-ref", m.LedgerLayout().CheckpointRef(n, c), f.git(m.repoRoot, "rev-parse", "HEAD"))
 			}
 			before, _, err := f.m.store.Load(ctx, n)
 			if err != nil {
@@ -305,7 +344,7 @@ func TestDiscardCheckpointRefusals(t *testing.T) {
 
 func TestDiscardCheckpointExpiredClaimIsEligible(t *testing.T) {
 	ctx := context.Background()
-	f := newDiscardFixture(t, false)
+	f := newDiscardFixture(t, false, coordination.BranchLayout)
 	c, _, _ := f.abandon(t)
 	st, err := f.m.Acquire(ctx, f.issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
 	if err != nil {
@@ -321,7 +360,7 @@ func TestDiscardCheckpointConflictIsOneWrite(t *testing.T) {
 	for _, backend := range []string{"local", "github"} {
 		t.Run(backend, func(t *testing.T) {
 			ctx := context.Background()
-			f := newDiscardFixture(t, backend == "github")
+			f := newDiscardFixture(t, backend == "github", coordination.BranchLayout)
 			n := f.issue.Number
 			c, _, _ := f.abandon(t)
 			racing := &racingRetainingStore{Store: f.m.store}

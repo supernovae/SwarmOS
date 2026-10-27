@@ -15,9 +15,11 @@ func newDiscardCheckpointCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "discard-checkpoint <issue-number>",
 		Short: "Abandon an unsubmitted checkpoint so the next claim starts from the approved base (maintainer only)",
-		Long: "Records the issue's unsubmitted checkpoint as discarded and keeps its commit reachable under a\n" +
-			"refs/heads/swarm-checkpoints retention ref. The next claim starts on a new branch at the approved\n" +
-			"base. Refused while the issue is claimed, has a pull request, or holds a fork contributor's work.\n" +
+		Long: "Records the issue's unsubmitted checkpoint as discarded and keeps its commit permanently reachable\n" +
+			"under a retention ref in the repository's ledger namespace: refs/heads/swarm-checkpoints/... in\n" +
+			"branch mode, refs/swarm/checkpoints/... in hidden mode. The next claim starts on a new branch at\n" +
+			"the approved base. Refused while the issue is claimed, has a pull request, or holds a fork\n" +
+			"contributor's work.\n" +
 			"Only a maintainer may run it: it needs the same authority as swarm issue approve.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {

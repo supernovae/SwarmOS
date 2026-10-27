@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -348,6 +351,15 @@ func TestInspectionIsolatedCodexPreflightToLaunch(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("native Codex isolation is qualified on Linux")
 	}
+	// The mandatory native network canary listens on loopback.
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		t.Skipf("host denies loopback sockets for the native network canary: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.Close()
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "codex")
 	script := `#!/bin/sh

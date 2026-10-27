@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -407,6 +409,21 @@ func requireLinuxInspection(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("native Codex inspection is qualified on Linux")
 	}
+	requireLoopbackCanary(t)
+}
+
+// requireLoopbackCanary skips when the host denies the loopback socket that the
+// mandatory native network canary listens on.
+func requireLoopbackCanary(t *testing.T) {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		t.Skipf("host denies loopback sockets for the native network canary: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.Close()
 }
 
 func TestInspectionReusesInterfaceAndRerunsCanaries(t *testing.T) {

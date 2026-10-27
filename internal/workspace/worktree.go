@@ -795,28 +795,39 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 	if err != nil {
 		return err
 	}
-	var extraDocs []string
+	var guidance bundleGuidance
 	for _, optPath := range []string{".swarm/goals.md", ".swarm/SKILLS.md"} {
 		if content, optErr := showHarnessFile(worktreePath, baseSHA, optPath); optErr == nil && strings.TrimSpace(content) != "" {
-			extraDocs = append(extraDocs, strings.TrimSpace(content))
+			guidance.policy = append(guidance.policy, strings.TrimSpace(content))
 		}
 	}
-	for _, dirPath := range []string{".swarm/rules", ".swarm/skills"} {
-		if treeOut, treeErr := gitOutput(worktreePath, "ls-tree", "-r", "--name-only", baseSHA, dirPath); treeErr == nil {
-			var files []string
-			for _, line := range strings.Split(strings.TrimSpace(treeOut), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasSuffix(strings.ToLower(line), ".md") {
-					files = append(files, line)
-				}
-			}
-			sort.Strings(files)
-			for _, f := range files {
-				if content, fErr := showHarnessFile(worktreePath, baseSHA, f); fErr == nil && strings.TrimSpace(content) != "" {
-					extraDocs = append(extraDocs, strings.TrimSpace(content))
-				}
-			}
+	rules, err := approvedMarkdownFiles(worktreePath, baseSHA, ".swarm/rules")
+	if err != nil {
+		return err
+	}
+	for _, f := range rules {
+		content, err := showHarnessFile(worktreePath, baseSHA, f)
+		if err != nil {
+			return err
 		}
+		if strings.TrimSpace(content) != "" {
+			guidance.policy = append(guidance.policy, strings.TrimSpace(content))
+		}
+	}
+	skills, err := approvedMarkdownFiles(worktreePath, baseSHA, ".swarm/skills")
+	if err != nil {
+		return err
+	}
+	for _, f := range skills {
+		content, err := showHarnessFile(worktreePath, baseSHA, f)
+		if err != nil {
+			return err
+		}
+		skill, err := parseGuidanceSkill(f, content)
+		if err != nil {
+			return err
+		}
+		guidance.skills = append(guidance.skills, skill)
 	}
 	var budgetDoc string
 	if role == "planner" {
@@ -828,7 +839,24 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 			return err
 		}
 	}
-	return compileHarnessBundle(worktreePath, wu, wf, artifacts, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, budgetDoc, extraDocs...)
+	return compileHarnessBundle(worktreePath, wu, wf, artifacts, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, budgetDoc, guidance)
+}
+
+// approvedMarkdownFiles lists Markdown files under dir in the approved base,
+// sorted by path. A directory missing from the base lists nothing.
+func approvedMarkdownFiles(worktreePath, baseSHA, dir string) ([]string, error) {
+	out, err := gitOutput(worktreePath, "ls-tree", "-r", "-z", "--name-only", baseSHA, "--", dir)
+	if err != nil {
+		return nil, fmt.Errorf("list approved guidance in %s: %w", dir, err)
+	}
+	var files []string
+	for _, name := range strings.Split(out, "\x00") {
+		if strings.HasSuffix(strings.ToLower(name), ".md") {
+			files = append(files, name)
+		}
+	}
+	sort.Strings(files)
+	return files, nil
 }
 
 // claimBudgetDoc states the approved total claim budget the planner sizes the
@@ -841,7 +869,7 @@ func claimBudgetDoc(lc contract.LeaseConfig) (string, error) {
 	return fmt.Sprintf("## Claim budget\n\nThe approved lease policy grants %s per lease and up to %d renewals, so the total claim budget is %s (lease.duration × (1 + max_renewals)). Planning, implementation, and validation of this WorkUnit must all finish within %s. If they cannot, recommend a split as your role instructions describe.", per, lc.MaxRenewals, total, total), nil
 }
 
-func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, budgetDoc string, extraDocs ...string) error {
+func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, budgetDoc string, guidance bundleGuidance) error {
 	safe, err := safefs.Open(worktreePath)
 	if err != nil {
 		return err
@@ -852,6 +880,12 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 		return err
 	}
 	defer active.Close()
+	// Rebuild approved copies before any prompt is written, so a failed
+	// cleanup never leaves a new prompt pointing at stale guidance.
+	archText, archSnapshot := renderArchitecture(archDoc)
+	if err := writeApprovedGuidance(active, guidance.skills, archDoc, archSnapshot); err != nil {
+		return err
+	}
 	if rawJSON, err := json.MarshalIndent(wu, "", "  "); err == nil {
 		if err := active.WriteFile("workunit.json", rawJSON, 0o644); err != nil {
 			return err
@@ -873,18 +907,10 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 		return err
 	}
 
+	// Stable policy comes first and task-specific text last, so prompts for
+	// the same base, role, and workflow share a prefix.
 	var sys strings.Builder
-	sys.WriteString(strings.TrimSpace(rolePrompt) + "\n\n")
-	if projectDoc != "" {
-		sys.WriteString(strings.TrimSpace(projectDoc) + "\n\n")
-	}
-	if archDoc != "" {
-		sys.WriteString(strings.TrimSpace(archDoc) + "\n\n")
-	}
-	if convDoc != "" {
-		sys.WriteString(strings.TrimSpace(convDoc) + "\n\n")
-	}
-	for _, doc := range extraDocs {
+	for _, doc := range append([]string{projectDoc, convDoc}, guidance.policy...) {
 		if strings.TrimSpace(doc) != "" {
 			sys.WriteString(strings.TrimSpace(doc) + "\n\n")
 		}
@@ -892,9 +918,16 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	sys.WriteString("## Approved validation policy\n\n```yaml\n")
 	sys.WriteString(strings.TrimSpace(validationDoc))
 	sys.WriteString("\n```\n\nRun these check commands directly. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
+	sys.WriteString(strings.TrimSpace(rolePrompt) + "\n\n")
 	if budgetDoc != "" {
 		sys.WriteString(strings.TrimSpace(budgetDoc) + "\n\n")
 	}
+	sys.WriteString(archText)
+	workflow := wu.Workflow
+	if wf != nil && wf.Name != "" {
+		workflow = wf.Name
+	}
+	sys.WriteString(renderSkillGuidance(guidance.skills, role, workflow))
 	if role == "planner" {
 		for i := len(artifacts) - 1; i >= 0; i-- {
 			a := artifacts[i]
@@ -907,7 +940,7 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 		}
 	}
 	sys.WriteString("---\n\n")
-	sys.WriteString(workunitMD)
+	fmt.Fprintf(&sys, "# Task\n\nYour task is Work Unit %s (#%d). Read `.swarm/active/WORKUNIT.md` for its objective, constraints, acceptance criteria, workflow steps, and prior artifacts.\n", wu.ID, wu.IssueNumber)
 
 	if err := active.WriteFile("SYSTEM_PROMPT.md", []byte(sys.String()), 0o644); err != nil {
 		return err

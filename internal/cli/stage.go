@@ -278,7 +278,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork, LookupEnv: rootOpts.lookupEnv, DependencyMode: rootOpts.dependencyMode()})
+			report, valErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork, LookupEnv: rootOpts.lookupEnv, DependencyPolicy: rootOpts.dependencyPolicy(worktree)})
 			if report != nil {
 				if report.Artifact.Metadata == nil {
 					report.Artifact.Metadata = make(map[string]string)

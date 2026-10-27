@@ -30,20 +30,25 @@ import (
 // from the approved base. A NoPrefetch entry keeps today's read-only host
 // cache mounts, because resolving its dependencies can run package code.
 type dependencyEcosystem struct {
-	Name       string   // also the ToolchainBind.Ecosystem tag
-	Detect     []string // base-tree files that enable the adapter
-	Lockfiles  []string // read from the approved base, never the worktree
-	EnvKey     string
-	Prefetch   prefetchFunc
+	Name      string   // also the ToolchainBind.Ecosystem tag
+	Detect    []string // base-tree files that enable the adapter
+	Lockfiles []string // read from the approved base, never the worktree
+	EnvKey    string
+	Prefetch  prefetchFunc
+	// Preflight runs before every prefetch, even when the cache is already
+	// filled, so a withdrawn node allowance stops the run.
+	Preflight  prefetchFunc
 	NoPrefetch string // why there is no fetch-only prefetch
 }
 
 // prefetchRequest is one host prefetch. Dir is the only directory it may
-// write; Files holds the lockfiles present in the approved base.
+// write; Files holds the lockfiles present in the approved base. PrivateGo
+// is the node profile's private module allowance for this repository.
 type prefetchRequest struct {
-	BaseSHA string
-	Dir     string
-	Files   map[string][]byte
+	BaseSHA   string
+	Dir       string
+	Files     map[string][]byte
+	PrivateGo PrivateGo
 }
 
 type prefetchFunc func(context.Context, prefetchRequest) error
@@ -54,7 +59,7 @@ type prefetchFunc func(context.Context, prefetchRequest) error
 // TestEveryMountedEcosystemIsClassified; see "Dependency caches" in
 // docs/project.md.
 var dependencyEcosystems = []dependencyEcosystem{
-	{Name: "go", Detect: []string{"go.mod"}, Lockfiles: []string{"go.mod", "go.sum"}, EnvKey: "GOMODCACHE", Prefetch: goModDownload},
+	{Name: "go", Detect: []string{"go.mod"}, Lockfiles: []string{"go.mod", "go.sum"}, EnvKey: "GOMODCACHE", Prefetch: goModDownload, Preflight: goPrivatePreflight},
 	{Name: "rust", NoPrefetch: "adapter is a follow-up"},
 	{Name: "python", NoPrefetch: "adapter is a follow-up"},
 	{Name: "node", NoPrefetch: "adapter is a follow-up"},
@@ -199,10 +204,11 @@ func DependencyCacheModes(mode DependencyCacheMode) []EcosystemMode {
 // adapter-backed ecosystem detected in baseSHA, under
 // <userCache>/swarm/<owner>/<repo-key>/<ecosystem>. Unlike build caches it
 // never falls back: any failure is an error, so callers stop before work
-// starts. SharedHostCaches prepares nothing.
-func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktree, baseSHA, userCache string, mode DependencyCacheMode) (Dependencies, error) {
-	deps := Dependencies{Mode: mode}
-	if mode == SharedHostCaches {
+// starts. SharedHostCaches prepares nothing. Private Go modules are fetched
+// only as policy.PrivateGo allows.
+func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktree, baseSHA, userCache string, policy DependencyPolicy) (Dependencies, error) {
+	deps := Dependencies{Mode: policy.Mode}
+	if policy.Mode == SharedHostCaches {
 		return deps, nil
 	}
 	deps.Mode = PerRepository
@@ -261,10 +267,16 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 			}
 			files[name] = data
 		}
+		req := prefetchRequest{BaseSHA: baseSHA, Dir: dir, Files: files, PrivateGo: policy.PrivateGo}
+		if eco.Preflight != nil {
+			if err := eco.Preflight(ctx, req); err != nil {
+				return deps, fmt.Errorf("prefetch %s modules for base %s: %w", eco.Name, shortSHA(baseSHA), err)
+			}
+		}
 		// v3 re-prepares caches filled before downloaded Go toolchains were finished.
-		marker := ".prefetched-v3-" + eco.Name + "-" + lockfileDigest(files)
+		marker := ".prefetched-v3-" + eco.Name + "-" + prefetchDigest(files, policy.PrivateGo.Patterns)
 		if _, err := os.Lstat(filepath.Join(keyDir, marker)); errors.Is(err, os.ErrNotExist) {
-			if err := eco.Prefetch(ctx, prefetchRequest{BaseSHA: baseSHA, Dir: dir, Files: files}); err != nil {
+			if err := eco.Prefetch(ctx, req); err != nil {
 				return deps, fmt.Errorf("prefetch %s modules for base %s: %w", eco.Name, shortSHA(baseSHA), err)
 			}
 			if err := safefs.WriteFile(keyDir, marker, nil, 0o600); err != nil {
@@ -285,6 +297,23 @@ func baseHasAny(ctx context.Context, worktree, baseSHA string, names []string) b
 		}
 	}
 	return false
+}
+
+// prefetchDigest is lockfileDigest, extended with the allowed private module
+// patterns when there are any, so caches without an allowance keep their
+// markers and a changed allowance prefetches again.
+func prefetchDigest(files map[string][]byte, patterns []string) string {
+	if len(patterns) == 0 {
+		return lockfileDigest(files)
+	}
+	sorted := append([]string(nil), patterns...)
+	sort.Strings(sorted)
+	withPatterns := make(map[string][]byte, len(files)+1)
+	for name, data := range files {
+		withPatterns[name] = data
+	}
+	withPatterns["\x00private"] = []byte(strings.Join(sorted, "\n"))
+	return lockfileDigest(withPatterns)
 }
 
 func lockfileDigest(files map[string][]byte) string {
@@ -353,9 +382,13 @@ func goModDownload(ctx context.Context, req prefetchRequest) error {
 			return err
 		}
 	}
-	env := goPrefetchEnv(os.Getenv, tmp, req.Dir, hostGoModCache())
+	allowed, err := checkPrivateGoModules(os.Getenv, req.Files, req.PrivateGo)
+	if err != nil {
+		return err
+	}
+	env := withPrivatePatterns(goPrefetchEnv(os.Getenv, tmp, req.Dir, hostGoModCache()), req.PrivateGo.Patterns)
 	redact := func(s string) string {
-		for _, p := range []string{req.Dir, tmp, hostGoModCache()} {
+		for _, p := range []string{req.Dir, tmp, hostGoModCache(), os.Getenv("HOME")} {
 			if p != "" {
 				s = strings.ReplaceAll(s, p, "<"+filepath.Base(p)+">")
 			}
@@ -386,6 +419,15 @@ func goModDownload(ctx context.Context, req prefetchRequest) error {
 		}
 		gomod = lowerGoDirective(gomod, local)
 	}
+	// Only allowed private modules are fetched with the user's credentials,
+	// first, so the credential-free download below finds them in the cache.
+	if len(allowed) > 0 {
+		private := goPrivateFetchEnv(os.Getenv, tmp, req.Dir, req.PrivateGo.Patterns)
+		stdout, stderr, err = runPrefetchCommand(ctx, outside, private, append(append([]string(nil), goModDownloadArgv...), allowed...))
+		if err != nil {
+			return fmt.Errorf("fetch private modules for %s: %s", req.PrivateGo.Repository, redact(prefetchFailure(stdout, stderr, err)))
+		}
+	}
 	if err := os.WriteFile(filepath.Join(module, "go.mod"), gomod, 0o600); err != nil {
 		return err
 	}
@@ -396,9 +438,22 @@ func goModDownload(ctx context.Context, req prefetchRequest) error {
 	}
 	stdout, stderr, err = runPrefetchCommand(ctx, module, env, goModDownloadArgv)
 	if err != nil {
-		return errors.New(redact(prefetchFailure(stdout, stderr, err)))
+		msg := redact(prefetchFailure(stdout, stderr, err))
+		if len(allowed) == 0 && strings.Contains(msg, "@") {
+			// The host may mark modules private outside its environment
+			// (go env -w), which the preflight cannot see.
+			msg += " (if a listed module is private, allow it with the node setting private_go_modules)"
+		}
+		return errors.New(msg)
 	}
 	return nil
+}
+
+// goPrivatePreflight fails before any prefetch, even into a filled cache,
+// when the base requires a private module the allowance does not cover.
+func goPrivatePreflight(_ context.Context, req prefetchRequest) error {
+	_, err := checkPrivateGoModules(os.Getenv, req.Files, req.PrivateGo)
+	return err
 }
 
 // goPrefetchEnv builds the prefetch environment from scratch. It copies only

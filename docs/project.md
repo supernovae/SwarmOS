@@ -269,6 +269,22 @@ Other ecosystems have no fetch-only download command yet, so they keep read-only
 
 To mount your host-wide Go module cache read-only again on one machine, set `share_host_dependency_caches: true` in the node profile (`~/.config/swarm/node.yaml`, or the file named by `SWARM_NODE_CONFIG`). This is off by default, it is a node setting only, and `.swarm/config.yaml` rejects it. Doctor reports the opt-in as a `WARN`. Validation in CI always uses per-repository caches.
 
+#### Private Go modules
+
+A module that your `GOPRIVATE` or `GONOPROXY` marks private is never copied from your own module cache and never fetched with credentials, so by default a repository that requires one stops with an error naming the module and the `private_go_modules` node setting. To let one repository's prefetch fetch them, register the repository (`swarm repo add`) and list its private module patterns in the node profile:
+
+```yaml
+private_go_modules:
+  acme/payments:
+    - github.com/acme/*
+```
+
+Keys are registered repositories in `owner/repo` form; issue and PR worktrees resolve to the repository they belong to. Patterns use `GOPRIVATE` syntax, one per entry, and must start with a literal host name such as `github.com`, so `*` and `*.corp.example.com` are rejected. An entry with an invalid repository or pattern allows nothing. Like `share_host_dependency_caches`, this is a node setting only, and `.swarm/config.yaml` rejects it.
+
+With the allowance, the prefetch first runs `go mod download` for only the allowed modules the approved base lists, on the host, with your own `HOME`, Git configuration, SSH agent, `NETRC` and `GOAUTH`, and `GOPROXY=direct`. SwarmOS and GitHub tokens are never passed. The modules land only in that repository's cache; another repository requiring the same module still fails unless it has its own entry. The usual credential-free download then runs with the allowed patterns added to `GOPRIVATE`, `GONOPROXY` and `GONOSUMDB`, so private paths are never sent to a proxy or checksum database. Agents and validation checks only see the read-only cache, never the credentials.
+
+Removing an entry stops the next prefetch for that repository, even with a filled cache, but modules already fetched stay in that repository's cache until you delete it. Private patterns set only with `go env -w` are not seen by the preflight; such a module still fails to download, with a hint to add the setting. CI has no node profile, so validation in CI cannot prefetch private modules. `swarm node status` lists every entry and whether its repository is registered (`private_go_modules` in `--json`), and `swarm repo doctor` shows the patterns allowed for the current repository, with a `WARN` for an invalid entry or an unregistered repository.
+
 **Adding an ecosystem:** add an entry to `dependencyEcosystems` in `internal/sandbox/dependency_cache.go`. An adapter needs a `Prefetch` that runs only a fetch-only command; anything that can run package code stays `NoPrefetch`. Every `addCache` call in `internal/sandbox/toolchain.go` names its ecosystem, and `TestEveryMountedEcosystemIsClassified` fails until the ecosystem is in the table.
 
 Released builds can reuse a coordinator-recorded passing validation at `swarm issue submit` or `swarm pr submit` when the checkpoint tree, approved base, policy digest, worker, claim, and swarm version still match. Submit shows the original run's age and short tree SHA in its output and PR evidence. Explicit validation, CI, development builds, and fork submissions continue to run checks.

@@ -40,7 +40,7 @@ func TestValidateUsesValidatorDependencyCache(t *testing.T) {
 		shared bool
 	}{{"", false}, {sandbox.PerRepository, false}, {sandbox.SharedHostCaches, true}} {
 		cacheRoot := useCacheRoot(t)
-		report, err := Validate(context.Background(), repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, DependencyMode: tc.mode})
+		report, err := Validate(context.Background(), repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, DependencyPolicy: sandbox.DependencyPolicy{Mode: tc.mode}})
 		if err != nil || !report.Passed {
 			t.Fatalf("mode %q: validate = %+v, %v", tc.mode, report, err)
 		}
@@ -90,5 +90,38 @@ func TestCleanCheckEnvUsesDependencyCaches(t *testing.T) {
 	}
 	if env := cleanCheckEnv("/scratch/home", nil, sandbox.Dependencies{Mode: sandbox.SharedHostCaches}); !slices.Contains(env, "GOMODCACHE="+hostCache) {
 		t.Fatalf("shared mode env = %q", env)
+	}
+}
+
+// The validator prefetch applies the repository's private Go module policy:
+// the preflight error names the repository the policy was resolved for.
+func TestValidatorDependenciesUseRepositoryPolicy(t *testing.T) {
+	repo, base, _ := goModuleValidationRepo(t, "module example.com/v\n\ngo 1.21\n\nrequire example.com/priv/lib v1.0.0\n")
+	useCacheRoot(t)
+	t.Setenv("GOPRIVATE", "example.com/priv")
+	t.Setenv("GONOPROXY", "")
+	for _, patterns := range [][]string{nil, {"example.com/other"}} {
+		policy := sandbox.DependencyPolicy{Mode: sandbox.PerRepository, PrivateGo: sandbox.PrivateGo{Repository: "acme/a", Patterns: patterns}}
+		var started []string
+		report, err := Validate(context.Background(), repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, OnProgress: recordEvents(&started), DependencyPolicy: policy})
+		if err == nil || report != nil || !strings.Contains(err.Error(), "example.com/priv/lib@v1.0.0") || !strings.Contains(err.Error(), `private_go_modules["acme/a"]`) {
+			t.Fatalf("patterns %q: validate = %+v, %v; want the private module preflight error for acme/a", patterns, report, err)
+		}
+		if len(started) != 0 {
+			t.Fatalf("checks ran after a failed preflight: %v", started)
+		}
+	}
+}
+
+func TestCleanCheckEnvHasNoPrefetchCredentials(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/ssh-agent.sock")
+	t.Setenv("NETRC", "/home/user/.netrc")
+	t.Setenv("GOAUTH", "netrc")
+	deps := sandbox.Dependencies{Mode: sandbox.PerRepository, Caches: []sandbox.DependencyCache{{Ecosystem: "go", EnvKey: "GOMODCACHE", Dir: "/cache/validate-deps/key/go"}}}
+	for _, entry := range cleanCheckEnv("/scratch/home", nil, deps) {
+		key, _, _ := strings.Cut(entry, "=")
+		if key == "SSH_AUTH_SOCK" || key == "NETRC" || key == "GOAUTH" {
+			t.Errorf("check environment passes %s", entry)
+		}
 	}
 }

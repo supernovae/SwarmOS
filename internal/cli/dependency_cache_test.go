@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/supernovae/swarmos/internal/registry"
 )
 
 func writeNodeProfile(t *testing.T, f *cliFixture, body string) {
@@ -91,6 +93,87 @@ func TestNodeStatusReportsDependencyCacheMode(t *testing.T) {
 			check := doctorDependencyCheck(t, f)
 			if detail, _ := check["detail"].(string); check["status"] != tc.doctorStatus || !strings.Contains(detail, "go: "+tc.goMode) {
 				t.Fatalf("doctor dependency-caches = %v", check)
+			}
+		})
+	}
+}
+
+// registerFixture registers f's repository as acme/a in a fresh registry.
+func registerFixture(t *testing.T, f *cliFixture) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "repos.yaml")
+	if _, err := registry.New(path).Add("acme/a", f.root, "local"); err != nil {
+		t.Fatal(err)
+	}
+	f.setenv("SWARM_REGISTRY_PATH", path)
+}
+
+func TestNodeStatusReportsPrivateGoModules(t *testing.T) {
+	t.Parallel()
+	f := newCLIFixture(t)
+	registerFixture(t, f)
+	writeNodeProfile(t, f, "node_id: n\nprivate_go_modules:\n  acme/a: [example.com/priv]\n  acme/other: [example.com/other]\n")
+	out := f.must(t, "node", "status")
+	if !strings.Contains(out, "Private Go modules: acme/a: example.com/priv; acme/other (unregistered): example.com/other") {
+		t.Fatalf("node status does not report private Go modules:\n%s", out)
+	}
+	var status struct {
+		PrivateGoModules []struct {
+			Repository string   `json:"repository"`
+			Patterns   []string `json:"patterns"`
+			Registered bool     `json:"registered"`
+		} `json:"private_go_modules"`
+	}
+	out = f.must(t, "node", "status", "--json")
+	if err := json.Unmarshal([]byte(out), &status); err != nil {
+		t.Fatal(err)
+	}
+	got := status.PrivateGoModules
+	if len(got) != 2 || got[0].Repository != "acme/a" || !got[0].Registered || strings.Join(got[0].Patterns, ",") != "example.com/priv" ||
+		got[1].Repository != "acme/other" || got[1].Registered {
+		t.Fatalf("node status --json private_go_modules = %+v", got)
+	}
+
+	writeNodeProfile(t, f, "node_id: n\n")
+	if out := f.must(t, "node", "status"); !strings.Contains(out, "Private Go modules: none") {
+		t.Fatalf("node status without private modules:\n%s", out)
+	}
+	if out := f.must(t, "node", "status", "--json"); !strings.Contains(out, `"private_go_modules":[]`) {
+		t.Fatalf("node status --json without private modules: %s", out)
+	}
+}
+
+func TestDoctorReportsPrivateGoModules(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, profile, status string
+		register              bool
+		want                  []string
+	}{
+		{"allowed", "node_id: n\nprivate_go_modules:\n  acme/a: [example.com/priv, git.example.org/team]\n", "OK", true,
+			[]string{"go: per-repository", "private Go modules for acme/a: example.com/priv, git.example.org/team", "withdrawing an allowance"}},
+		{"other repository", "node_id: n\nprivate_go_modules:\n  acme/b: [example.com/priv]\n", "WARN", true,
+			[]string{"private Go modules for acme/a: none", `private_go_modules["acme/b"] names an unregistered repository`}},
+		{"invalid entry", "node_id: n\nprivate_go_modules:\n  acme/a: ['*']\n", "WARN", true,
+			[]string{"private Go modules for acme/a: none", `private_go_modules["acme/a"] allows nothing`}},
+		{"unregistered", "node_id: n\n", "OK", false, []string{"private Go modules: none (repository not registered)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCLIFixture(t)
+			if tc.register {
+				registerFixture(t, f)
+			}
+			writeNodeProfile(t, f, tc.profile)
+			check := doctorDependencyCheck(t, f)
+			detail, _ := check["detail"].(string)
+			if check["status"] != tc.status {
+				t.Fatalf("doctor dependency-caches = %v, want %s", check, tc.status)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(detail, want) {
+					t.Errorf("doctor detail %q does not contain %q", detail, want)
+				}
 			}
 		})
 	}

@@ -60,7 +60,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			stops := stopContext{opts: rootOpts, resource: "issue"}
 			defer func() { runErr = stops.stop(runErr) }()
 			root := rootOpts.resolveRepoRoot()
-			issue, worktree, err := resolveIssueAndWorktree(root, args)
+			issue, worktree, err := resolveIssueAndWorktree(root, rootOpts.issueArgs(args))
 			if err != nil {
 				return err
 			}

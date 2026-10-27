@@ -221,6 +221,15 @@ func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error
 		if len(entries) == 0 {
 			return nil, fmt.Errorf("no repositories registered (run `swarm repo add` first)")
 		}
+		// Resolve every target before any is used, so one unknown main
+		// checkout cannot leave earlier targets half processed.
+		for i := range entries {
+			root, _, err := workspace.ResolveCoordinatorRoot(context.Background(), entries[i].Path)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", entries[i].Repo, err)
+			}
+			entries[i].Path = root
+		}
 		return entries, nil
 	}
 

@@ -32,7 +32,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		}()
 		root := options.resolveRepoRoot()
 		ctx := cmd.Context()
-		issue, worktree, err := resolveIssueAndWorktree(root, args)
+		issue, worktree, err := resolveIssueAndWorktree(root, options.issueArgs(args))
 		if err != nil {
 			return err
 		}

@@ -57,7 +57,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 					return err
 				}
 			} else {
-				issue, worktree, err = resolveIssueAndWorktree(root, args)
+				issue, worktree, err = resolveIssueAndWorktree(root, rootOpts.issueArgs(args))
 				if err != nil {
 					return err
 				}

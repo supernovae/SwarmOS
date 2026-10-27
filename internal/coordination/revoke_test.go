@@ -69,7 +69,7 @@ func (f *revokeFixture) forkClaim(base *GitStore, owner string, issue, maxActive
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	s := NewForkIndexedStoreWithRemote(f.clone, base.Remote(), owner, maxActive, requestID)
+	s := NewForkIndexedStoreWithLayout(f.clone, base.Remote(), base.Layout(), owner, maxActive, requestID)
 	s.SetNowFunc(func() time.Time { return f.now })
 	active := fmt.Sprintf(`{"fork_repo":"%s/fork","lease":{"issue_number":%d,"claim_id":"c%d","owner":%q,"status":"active","expires_at":%q}}`, owner, issue, issue, owner, f.expires)
 	return s.CompareAndSwap(context.Background(), issue, rev, []byte(active))
@@ -88,6 +88,20 @@ func (f *revokeFixture) index(ref string) contributorIndex {
 	return idx
 }
 
+// requireNoLegacyLedger fails when a hidden-layout run left ledger refs
+// under refs/heads/.
+func (f *revokeFixture) requireNoLegacyLedger(layout RefLayout) {
+	f.t.Helper()
+	if layout != HiddenLayout {
+		return
+	}
+	for _, prefix := range BranchLayout.prefixes() {
+		if out := f.git(f.remote, "for-each-ref", prefix); out != "" {
+			f.t.Fatalf("hidden layout created branch ledger refs:\n%s", out)
+		}
+	}
+}
+
 func revokedFrom(t *testing.T, body []byte) []byte {
 	t.Helper()
 	var raw map[string]any
@@ -103,39 +117,47 @@ func revokedFrom(t *testing.T, body []byte) []byte {
 }
 
 func TestRevokeForkClaimRemovesContributorIndexEntryAtomically(t *testing.T) {
-	ctx := context.Background()
-	f := newRevokeFixture(t, "upstream")
-	base := NewGitStoreWithRemote(f.clone, "upstream")
-	for issue := 1; issue <= 2; issue++ {
-		if _, err := f.forkClaim(base, "Alice", issue, 2, int64(100+issue)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := f.forkClaim(base, "Alice", 3, 2, 103); !errors.Is(err, ErrForkClaimLimit) {
-		t.Fatalf("expected limit before revoke, got %v", err)
-	}
-	ref := "refs/heads/swarm-contributors/alice"
-	if got := f.index(ref).Claims; len(got) != 2 {
-		t.Fatalf("index before revoke: %+v", got)
-	}
-	body, rev, err := base.Load(ctx, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := base.CompareAndSwapAndRevokeClaim(ctx, 1, rev, "c1", revokedFrom(t, body)); err != nil {
-		t.Fatal(err)
-	}
-	idx := f.index(ref)
-	if len(idx.Claims) != 1 || idx.Claims[0] != (contributorIndexedClaim{IssueNumber: 2, ClaimID: "c2"}) || idx.Actor != "alice" {
-		t.Fatalf("index after revoke: %+v", idx)
-	}
-	after, _, err := base.Load(ctx, 1)
-	if err != nil || !strings.Contains(string(after), `"status":"revoked"`) {
-		t.Fatalf("state after revoke: %s %v", after, err)
-	}
-	// Freed capacity admits a new claim under the same max_active_claims.
-	if _, err := f.forkClaim(base, "Alice", 3, 2, 104); err != nil {
-		t.Fatalf("revoked claim still counted: %v", err)
+	for _, layout := range []RefLayout{BranchLayout, HiddenLayout} {
+		t.Run(layout.Name(), func(t *testing.T) {
+			ctx := context.Background()
+			f := newRevokeFixture(t, "upstream")
+			base := NewGitStoreWithLayout(f.clone, "upstream", layout)
+			for issue := 1; issue <= 2; issue++ {
+				if _, err := f.forkClaim(base, "Alice", issue, 2, int64(100+issue)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := f.forkClaim(base, "Alice", 3, 2, 103); !errors.Is(err, ErrForkClaimLimit) {
+				t.Fatalf("expected limit before revoke, got %v", err)
+			}
+			ref := layout.ContributorRef("alice")
+			if got := f.index(ref).Claims; len(got) != 2 {
+				t.Fatalf("index before revoke: %+v", got)
+			}
+			body, rev, err := base.Load(ctx, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := base.CompareAndSwapAndRevokeClaim(ctx, 1, rev, "c1", revokedFrom(t, body)); err != nil {
+				t.Fatal(err)
+			}
+			idx := f.index(ref)
+			if len(idx.Claims) != 1 || idx.Claims[0] != (contributorIndexedClaim{IssueNumber: 2, ClaimID: "c2"}) || idx.Actor != "alice" {
+				t.Fatalf("index after revoke: %+v", idx)
+			}
+			after, _, err := base.Load(ctx, 1)
+			if err != nil || !strings.Contains(string(after), `"status":"revoked"`) {
+				t.Fatalf("state after revoke: %s %v", after, err)
+			}
+			if f.remoteRef(layout.StateRef(1)) == "" {
+				t.Fatalf("revoked state missing at %s", layout.StateRef(1))
+			}
+			// Freed capacity admits a new claim under the same max_active_claims.
+			if _, err := f.forkClaim(base, "Alice", 3, 2, 104); err != nil {
+				t.Fatalf("revoked claim still counted: %v", err)
+			}
+			f.requireNoLegacyLedger(layout)
+		})
 	}
 }
 
@@ -214,27 +236,36 @@ func TestRevokeForkClaimIndexEdgeCases(t *testing.T) {
 }
 
 func TestRevokeForkClaimOneRefRejectionMovesNeither(t *testing.T) {
-	ctx := context.Background()
-	f := newRevokeFixture(t, "origin")
-	store := NewGitStore(f.clone)
-	if _, err := f.forkClaim(store, "frank", 7, 1, 107); err != nil {
-		t.Fatal(err)
-	}
-	indexRef := "refs/heads/swarm-contributors/frank"
-	stateRef := "refs/heads/swarm-state/issue-7"
-	beforeIndex, beforeState := f.remoteRef(indexRef), f.remoteRef(stateRef)
-	hook := filepath.Join(f.remote, "hooks", "update")
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\ncase \"$1\" in refs/heads/swarm-contributors/*) exit 1;; esac\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body, rev, err := store.Load(ctx, 7)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.CompareAndSwapAndRevokeClaim(ctx, 7, rev, "c7", revokedFrom(t, body)); err == nil {
-		t.Fatal("rejected index push reported success")
-	}
-	if f.remoteRef(indexRef) != beforeIndex || f.remoteRef(stateRef) != beforeState {
-		t.Fatal("atomic revoke push advanced one ref")
+	for _, layout := range []RefLayout{BranchLayout, HiddenLayout} {
+		t.Run(layout.Name(), func(t *testing.T) {
+			ctx := context.Background()
+			f := newRevokeFixture(t, "origin")
+			store := NewGitStoreWithLayout(f.clone, "", layout)
+			if _, err := f.forkClaim(store, "frank", 7, 1, 107); err != nil {
+				t.Fatal(err)
+			}
+			indexRef := layout.ContributorRef("frank")
+			stateRef := layout.StateRef(7)
+			beforeIndex, beforeState := f.remoteRef(indexRef), f.remoteRef(stateRef)
+			if beforeIndex == "" || beforeState == "" {
+				t.Fatalf("claim did not create %s and %s", indexRef, stateRef)
+			}
+			hook := filepath.Join(f.remote, "hooks", "update")
+			script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in %s*) exit 1;; esac\nexit 0\n", layout.ContributorPrefix())
+			if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body, rev, err := store.Load(ctx, 7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.CompareAndSwapAndRevokeClaim(ctx, 7, rev, "c7", revokedFrom(t, body)); err == nil {
+				t.Fatal("rejected index push reported success")
+			}
+			if f.remoteRef(indexRef) != beforeIndex || f.remoteRef(stateRef) != beforeState {
+				t.Fatal("atomic revoke push advanced one ref")
+			}
+			f.requireNoLegacyLedger(layout)
+		})
 	}
 }

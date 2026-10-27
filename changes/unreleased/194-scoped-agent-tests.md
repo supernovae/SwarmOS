@@ -1,0 +1,1 @@
+- Developer and tester agents now run the test plan commands and changed-package tests first, and run the full test suite at most once at the end when the test plan requires it; the coordinator still reruns every required check.

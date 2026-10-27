@@ -1237,7 +1237,15 @@ func TestDeveloperRequiredCheckInstructions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"run every command in the trusted required checks", "Fix lint and format findings", "rather than leaving them for CI"} {
+	for _, text := range []string{
+		"coordinator independently reruns every required check",
+		"`.swarm/active/TEST_PLAN.md` commands",
+		"targeted tests for changed packages first",
+		"full test suite at most once, at the end, and only when `.swarm/active/TEST_PLAN.md` requires it",
+		"on changed files and packages (for Go: `gofmt`, `go vet`, and `go tool staticcheck`)",
+		"Fix lint and format findings",
+		"rather than leaving them for CI",
+	} {
 		if !strings.Contains(string(data), text) {
 			t.Fatalf("generated developer prompt lacks %q", text)
 		}

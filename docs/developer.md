@@ -57,6 +57,8 @@ swarm issue edit 42 --depends-on= --dry-run --json --backend local
 
 `--dry-run` shows the body diff, title change, lint result, and approval and claim impact without writing. Add `--json` for structured results. An active claim blocks editing and identifies its owner and expiry; coordinate with the worker and use `swarm issue release 42` before revising the contract.
 
+A task's branch is named from its title at the first claim and recorded in coordination state, so later title edits keep that branch and its worktree; `--dry-run` reports the recorded branch (`task_branch` in `--json`) when the title changes.
+
 Changing an approved task's parsed content moves its ready label to `swarm:draft` and requires a separate `swarm issue approve 42`. Formatting changes that preserve the task digest retain approval and labels. Editing never grants approval.
 
 Inline Markdown and fenced YAML WorkUnits are supported. For a `swarm-workunit-path` reference, edit the referenced repository file instead. Ambiguous duplicate sections and YAML anchors or aliases must be simplified before editing. Epics use their own planning workflow and cannot be edited with this command. Fork contributors work with an upstream maintainer to revise the contract.

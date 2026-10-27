@@ -101,7 +101,7 @@ func TestRevokeEndsClaimAndRecordsMaintainer(t *testing.T) {
 	ctx := t.Context()
 	f := newRevokeFixture(t)
 	holder, claimed := f.claim(t, "worker")
-	branch := "swarm/issue-1-" + claimed.Lease.ClaimID
+	branch := claimed.Branch
 	if _, err := holder.RecordCheckpoint(ctx, f.issue, "worker", branch, claimed.BaseSHA); err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestRevokeRetainsCheckpointForNextClaimer(t *testing.T) {
 	ctx := t.Context()
 	f := newRevokeFixture(t)
 	holder, claimed := f.claim(t, "worker")
-	branch := "swarm/issue-1-" + claimed.Lease.ClaimID
+	branch := claimed.Branch
 	if _, err := holder.RecordCheckpoint(ctx, f.issue, "worker", branch, claimed.BaseSHA); err != nil {
 		t.Fatal(err)
 	}

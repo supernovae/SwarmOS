@@ -15,6 +15,9 @@ import (
 // A nil LookupEnv reads the process environment.
 type RunnerOptions struct {
 	LookupEnv func(string) (string, bool)
+	// Inspections reuses harness interface inspection within one command,
+	// partitioned by the approved config. Nil inspects on every call.
+	Inspections *sandbox.InspectionSession
 }
 
 // NewConfiguredRunner creates only an explicitly allowlisted agent. It performs
@@ -65,6 +68,12 @@ func NewConfiguredRunnerWithOptions(name string, cfg *contract.SwarmConfig, loca
 	a.executionMode = execution.Mode
 	a.executionPolicy = execution
 	a.authentication = ac.Authentication
+	if opts.Inspections != nil {
+		if a.inspectionPolicy, err = sandbox.InspectionPolicy(cfg); err != nil {
+			return nil, err
+		}
+		a.inspections = opts.Inspections
+	}
 	if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
 		if driver != "codex" && driver != "claude" && driver != "opencode" && driver != "omp" {
 			return nil, fmt.Errorf("agent %q: no verified isolated adapter for native %s; choose a qualified Codex agent or explicitly configure execution.backend: oci", name, driver)
@@ -135,7 +144,7 @@ func PreflightWithOptions(name string, cfg *contract.SwarmConfig, local bool, ro
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "codex-native" {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		version, err := sandbox.InspectNativeCodex(ctx, adapter.binary)
+		version, err := adapter.inspections.InspectNativeCodex(ctx, adapter.binary, adapter.inspectionPolicy)
 		if err != nil {
 			return "", err
 		}
@@ -148,7 +157,7 @@ func PreflightWithOptions(name string, cfg *contract.SwarmConfig, local bool, ro
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "harness-tools-bwrap" {
 		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 		defer cancel()
-		version, err := sandbox.InspectDelegatedHarness(ctx, adapter.driver, adapter.binary)
+		version, err := adapter.inspections.InspectDelegatedHarness(ctx, adapter.driver, adapter.binary, adapter.inspectionPolicy)
 		if err != nil {
 			return "", err
 		}
@@ -197,7 +206,7 @@ func PreflightWithOptions(name string, cfg *contract.SwarmConfig, local bool, ro
 		return "", fmt.Errorf("agent %q became unavailable", name)
 	}
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.driver == "opencode" {
-		version, err := sandbox.InspectDelegatedHarness(context.Background(), adapter.driver, path)
+		version, err := adapter.inspections.InspectDelegatedHarness(context.Background(), adapter.driver, path, adapter.inspectionPolicy)
 		if err != nil {
 			return "", err
 		}

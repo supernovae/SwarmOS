@@ -470,7 +470,7 @@ func (e *Engine) parseOrSynthesizeRoadmap(ctx context.Context, root, absSource, 
 	// An explicitly requested agent must satisfy execution policy. Never hide a
 	// failed boundary or authentication setup behind deterministic synthesis.
 	if strings.TrimSpace(agentName) != "" && !strings.EqualFold(agentName, "mock") && cfg != nil {
-		runner, err := agent.NewConfiguredRunnerWithOptions(agentName, cfg, e.Tracker.BackendName() == "local", e.runnerOptions())
+		runner, err := agent.NewConfiguredRunnerWithOptions(agentName, cfg, e.Tracker.BackendName() == "local", e.runnerOptions(ctx))
 		if err != nil {
 			return nil, err
 		}

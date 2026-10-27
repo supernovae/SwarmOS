@@ -51,6 +51,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 	options.GuidanceDelivered = collector.Delivered
 	options.ProjectPlan = req.ProjectPlan
 	options.Dependencies = req.Dependencies
+	options.Inspections, options.InspectionPolicy = a.inspections, a.inspectionPolicy
 	if req.ReadOnly && req.Role == "reviewer" {
 		options.OutputDir = filepath.Join(req.WorktreePath, ".swarm", "active-output")
 	}

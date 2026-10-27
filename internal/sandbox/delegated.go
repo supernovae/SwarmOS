@@ -93,7 +93,7 @@ func writeHarnessJSON(path string, value any) error {
 // in candidate code. Its only execution surface is the selected tool transport.
 func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt string, opts WorkerOptions, interactive bool, input io.Reader, stdout, stderr io.Writer) ([]string, string, error) {
 	preflight := time.Now()
-	version, err := InspectDelegatedHarness(ctx, driver, binary)
+	version, err := opts.Inspections.InspectDelegatedHarness(ctx, driver, binary, opts.InspectionPolicy)
 	if err != nil {
 		return nil, "", err
 	}

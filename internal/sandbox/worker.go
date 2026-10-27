@@ -46,6 +46,10 @@ type WorkerOptions struct {
 	// Dependencies are the coordinator's prepared dependency caches, mounted
 	// read-only for native and harness-tool runs.
 	Dependencies Dependencies
+	// Inspections reuses the command's interface inspection, partitioned by
+	// InspectionPolicy; nil inspects at every launch.
+	Inspections      *InspectionSession
+	InspectionPolicy string
 }
 
 const workerMaxBytes int64 = 512 << 20

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -164,7 +165,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			var pauses []*workflow.ClaimBudgetPause
 			var splits []map[string]any
-			execute := func(pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
+			execute := func(ctx context.Context, pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
 				tr, manager, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
 					Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend,
 				})
@@ -218,7 +219,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					go func(worker int) {
 						defer workers.Done()
 						for ctx.Err() == nil && reserve() {
-							pulled, err := pullNextReadyIssue(ctx, cmd, rootOpts, allRepos, options, 0)
+							// Each claimed task is its own command for inspection reuse.
+							taskCtx := sandbox.WithInspectionSession(ctx, sandbox.NewInspectionSession())
+							pulled, err := pullNextReadyIssue(taskCtx, cmd, rootOpts, allRepos, options, 0)
 							if err != nil {
 								admitted.Add(-1)
 								if !errors.Is(err, errNoReadyWork) {
@@ -229,7 +232,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								}
 								return
 							}
-							result, err := execute(pulled)
+							result, err := execute(taskCtx, pulled)
 							if errors.Is(err, lease.ErrPlanReplanLimit) {
 								admitted.Add(-1)
 								continue

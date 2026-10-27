@@ -141,6 +141,44 @@ func TestToolExecutorBoundary(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(work, "survived")); !os.IsNotExist(err) {
 		t.Fatal("detached child survived")
 	}
+	t.Run("toolchain mounts exclude go/src", func(t *testing.T) {
+		bwrap, err := exec.LookPath("bwrap")
+		if err != nil {
+			t.Skip("bwrap is not installed")
+		}
+		goBinary, err := exec.LookPath("go")
+		if err != nil {
+			t.Skip("go is not installed")
+		}
+		goroot, err := exec.Command(goBinary, "env", "GOROOT").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		home := resolvedTempDir(t)
+		goBin := filepath.Join(home, "go", "bin")
+		secret := filepath.Join(home, "go", "src", "private", "secret.txt")
+		for _, dir := range []string{goBin, filepath.Dir(secret)} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(secret, []byte("dummy-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", home)
+		t.Setenv("PATH", strings.Join([]string{goBin, filepath.Dir(goBinary), filepath.Dir(bwrap)}, string(os.PathListSeparator)))
+		t.Setenv("GOROOT", strings.TrimSpace(string(goroot)))
+		var out strings.Builder
+		if err := e.Run(ctx, `test -d "$1" && test ! -r "$2" && go version`, &out, &out, goBin, secret); err != nil {
+			t.Fatal(err, out.String())
+		}
+		if !strings.Contains(out.String(), "go version") {
+			t.Fatalf("go did not run: %s", out.String())
+		}
+		if data, _ := os.ReadFile(secret); string(data) != "dummy-secret" {
+			t.Fatal("host secret changed")
+		}
+	})
 }
 
 func TestOMPRealToolRegistration(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -213,5 +214,127 @@ func TestNativeAndBubblewrapOfflineLanguageBuildAndTest(t *testing.T) {
 		if strings.Contains(out.String(), "Refusing to create helper binaries under temporary dir") {
 			t.Fatalf("unexpected Codex temporary-dir warning: %s", out.String())
 		}
+	}
+}
+
+func TestIsSafeHomeToolchainPathComponents(t *testing.T) {
+	home := "/home/user"
+	for _, tc := range []struct {
+		rel  string
+		want bool
+	}{
+		{"go/bin", true},
+		{"go/bin/x", true},
+		{".dotnet", true},
+		{".dotnet/tools", true},
+		{".local/bin", true},
+		{".nvm/versions/node/v22/bin", true},
+		{"go/pkg/mod/x", true},
+		{"go/binaries", false},
+		{".dotnet-x", false},
+		{".local/bin-x", false},
+		{".nvm-x/bin", false},
+		{"go", false},
+		{".", false},
+		{"../outside", false},
+	} {
+		if got := isSafeHomeToolchainPath(filepath.Join(home, tc.rel), home); got != tc.want {
+			t.Errorf("isSafeHomeToolchainPath(%q) = %v, want %v", tc.rel, got, tc.want)
+		}
+	}
+}
+
+func TestToolchainMountForBinKnownLayouts(t *testing.T) {
+	home := "/home/user"
+	for _, tc := range []struct {
+		bin, goos, want string
+	}{
+		// Known install layouts mount their installation root.
+		{home + "/.nvm/versions/node/v22.0.0/bin", "linux", home + "/.nvm/versions/node/v22.0.0"},
+		{home + "/.pyenv/versions/3.13.0/bin", "linux", home + "/.pyenv/versions/3.13.0"},
+		{home + "/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin", "linux", home + "/.rustup/toolchains/stable-x86_64-unknown-linux-gnu"},
+		{home + "/.asdf/installs/nodejs/22/bin", "linux", home + "/.asdf/installs/nodejs/22"},
+		{home + "/.local/share/mise/installs/go/1.26/bin", "linux", home + "/.local/share/mise/installs/go/1.26"},
+		{home + "/.local/share/fnm/node-versions/v22/installation/bin", "linux", home + "/.local/share/fnm/node-versions/v22/installation"},
+		{home + "/.fnm/node-versions/v22/installation/bin", "linux", home + "/.fnm/node-versions/v22/installation"},
+		{home + "/.volta/tools/image/node/22/bin", "linux", home + "/.volta/tools/image/node/22"},
+		{home + "/.sdkman/candidates/java/21/bin", "linux", home + "/.sdkman/candidates/java/21"},
+		{"/usr/local/go/bin", "linux", "/usr/local/go"},
+		{"/opt/homebrew/bin", "darwin", "/opt/homebrew"},
+		{"/opt/homebrew/sbin", "darwin", "/opt/homebrew"},
+		{"/home/linuxbrew/.linuxbrew/bin", "linux", "/home/linuxbrew/.linuxbrew"},
+		{"/home/linuxbrew/.linuxbrew/sbin", "linux", "/home/linuxbrew/.linuxbrew"},
+		{"/usr/local/bin", "darwin", "/usr/local"},
+		// Everything else mounts only the bin directory itself.
+		{home + "/go/bin", "linux", home + "/go/bin"},
+		{"/opt/x/bin", "linux", "/opt/x/bin"},
+		{"/opt/x/sbin", "linux", "/opt/x/sbin"},
+		{"/usr/local/bin", "linux", "/usr/local/bin"},
+		{home + "/.local/bin", "linux", home + "/.local/bin"},
+		{home + "/.cargo/bin", "linux", home + "/.cargo/bin"},
+		{home + "/.nvm/versions/node/bin", "linux", home + "/.nvm/versions/node/bin"},
+		{home + "/.nvm/versions/node/v1/extra/bin", "linux", home + "/.nvm/versions/node/v1/extra/bin"},
+		{home + "/.nvm-x/versions/node/v1/bin", "linux", home + "/.nvm-x/versions/node/v1/bin"},
+		{"/srv/.nvm/versions/node/v1/bin", "linux", "/srv/.nvm/versions/node/v1/bin"},
+		{"/bin", "linux", "/bin"},
+		{"/usr/bin", "linux", "/usr/bin"},
+	} {
+		if got := toolchainMountForBin(tc.bin, home, tc.goos); got != tc.want {
+			t.Errorf("toolchainMountForBin(%q, %s) = %q, want %q", tc.bin, tc.goos, got, tc.want)
+		}
+	}
+}
+
+func TestToolchainMountsExcludeGoSrc(t *testing.T) {
+	home := resolvedTempDir(t)
+	goBin := filepath.Join(home, "go", "bin")
+	secret := filepath.Join(home, "go", "src", "private", "secret.txt")
+	for _, dir := range []string{goBin, filepath.Dir(secret)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(secret, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", strings.Join([]string{goBin, "/usr/bin", "/bin"}, string(os.PathListSeparator)))
+	for _, key := range []string{"GOROOT", "GOPATH", "GOMODCACHE"} {
+		t.Setenv(key, "")
+	}
+	work, scratch := resolvedTempDir(t), resolvedTempDir(t)
+
+	policy := strings.Join(codexPolicy("/usr/bin/codex", work, scratch, false, nil), "\n")
+	for _, bad := range []string{filepath.Join(home, "go"), filepath.Join(home, "go", "src")} {
+		if strings.Contains(policy, strconv.Quote(bad)+`="read"`) {
+			t.Errorf("codex policy mounts %q", bad)
+		}
+	}
+	if !strings.Contains(policy, strconv.Quote(goBin)+`="read"`) {
+		t.Errorf("codex policy does not mount %q", goBin)
+	}
+	for dir := secret; dir != "/"; dir = filepath.Dir(dir) {
+		if strings.Contains(policy, strconv.Quote(dir)+`="read"`) {
+			t.Errorf("codex policy mounts %q, which exposes %q", dir, secret)
+		}
+	}
+
+	flags, err := executorFlags(work, false, nil, "true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundGoBin := false
+	for i, flag := range flags[:len(flags)-1] {
+		if flag != "--ro-bind" {
+			continue
+		}
+		source := flags[i+1]
+		if isSubpath(secret, source) {
+			t.Errorf("bwrap mounts %q, which exposes %q", source, secret)
+		}
+		foundGoBin = foundGoBin || source == goBin
+	}
+	if !foundGoBin {
+		t.Errorf("bwrap does not mount %q in %v", goBin, flags)
 	}
 }

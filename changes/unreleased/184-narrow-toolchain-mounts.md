@@ -1,0 +1,1 @@
+- Sandboxes now mount only the toolchain directories they need: a bin directory on PATH such as `~/go/bin` or `/opt/<x>/bin` no longer exposes its parent, and home toolchain paths must match whole path components (so `go/binaries` or `.dotnet-x` are no longer admitted).

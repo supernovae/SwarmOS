@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func requireNpm(t *testing.T) {
@@ -27,6 +29,23 @@ func requireNpm(t *testing.T) {
 	if _, err := exec.LookPath("npm"); err != nil {
 		t.Skip("npm is not on PATH")
 	}
+}
+
+// requireLoopback skips when this environment denies loopback sockets, which
+// the httptest registry needs. It dials too: an unconfigured network
+// namespace can listen but not connect, and npm would retry until timeout.
+func requireLoopback(t *testing.T) {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("loopback sockets are not permitted here: %v", err)
+	}
+	defer l.Close()
+	c, err := net.DialTimeout("tcp", l.Addr().String(), 5*time.Second)
+	if err != nil {
+		t.Skipf("loopback connections are not permitted here: %v", err)
+	}
+	_ = c.Close()
 }
 
 // npmPackage is one tarball an npmRegistry serves.
@@ -72,6 +91,7 @@ type npmRegistry struct {
 
 func newNpmRegistry(t *testing.T, packages ...*npmPackage) *npmRegistry {
 	t.Helper()
+	requireLoopback(t)
 	r := &npmRegistry{packages: map[string]*npmPackage{}}
 	for _, p := range packages {
 		p.build(t)

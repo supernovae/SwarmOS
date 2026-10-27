@@ -21,7 +21,9 @@ import (
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
-func fixture(t *testing.T) (*Service, int, int, string) {
+// fixture submits a linked PR; a policy argument replaces the trusted
+// required checks committed at its base.
+func fixture(t *testing.T, policy ...string) (*Service, int, int, string) {
 	t.Helper()
 	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	controlHome := t.TempDir()
@@ -29,7 +31,7 @@ func fixture(t *testing.T) (*Service, int, int, string) {
 	t.Setenv("XDG_CONFIG_HOME", controlHome)
 	t.Setenv("APPDATA", controlHome)
 	root := t.TempDir()
-	for name, body := range map[string]string{
+	files := map[string]string{
 		".swarm/config.yaml":                     "version: 1\ndefault_agent: mock\ndefault_gate: none\nlease:\n  duration: 4h\n  renewable: true\n  max_renewals: 3\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  mock:\n    binary: mock\n",
 		".swarm/workflows/feature.yaml":          "name: feature\ndefault_gate: none\nsteps:\n  - name: design\n    role: planner\n    artifact: design\n",
 		".swarm/project.md":                      "# Project\n",
@@ -40,7 +42,11 @@ func fixture(t *testing.T) (*Service, int, int, string) {
 		".swarm/prompts/developer.md":            "# Developer\n",
 		".swarm/prompts/tester.md":               "# Tester\n",
 		".swarm/validation/required-checks.yaml": "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n",
-	} {
+	}
+	for _, p := range policy {
+		files[".swarm/validation/required-checks.yaml"] = p
+	}
+	for name, body := range files {
 		path := filepath.Join(root, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			t.Fatal(err)

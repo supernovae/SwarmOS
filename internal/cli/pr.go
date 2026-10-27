@@ -242,6 +242,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				if result.Validation != nil {
 					writeValidationChecks(cmd, result.Validation)
 				}
+				if err != nil {
+					writeWorkValidationFailure(cmd, result.Work)
+				}
 				if result.Work != nil && result.Work.PausedForHuman {
 					if result.Work.PhaseCompleted == "awaiting-plan" {
 						fmt.Fprintf(cmd.OutOrStdout(), "Interactive plan required: write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md in %s, then run: swarm pr stage %d --phase plan\n", result.Worktree, opts.Number)

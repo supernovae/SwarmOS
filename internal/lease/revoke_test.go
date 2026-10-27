@@ -47,6 +47,13 @@ type revokeFixture struct {
 // origin remote, as with the GitHub backend.
 func newRevokeFixture(t *testing.T) *revokeFixture {
 	t.Helper()
+	return newRevokeFixtureWithLayout(t, coordination.BranchLayout)
+}
+
+// newRevokeFixtureWithLayout is newRevokeFixture with the ledger, including
+// the approval state, in layout's namespace.
+func newRevokeFixtureWithLayout(t *testing.T, layout coordination.RefLayout) *revokeFixture {
+	t.Helper()
 	m, lt, iss := testManager(t)
 	git := func(args ...string) {
 		t.Helper()
@@ -64,7 +71,7 @@ func newRevokeFixture(t *testing.T) *revokeFixture {
 	git("push", "origin", "HEAD:refs/heads/"+strings.TrimSpace(string(branch)))
 	git("--git-dir="+remote, "symbolic-ref", "HEAD", "refs/heads/"+strings.TrimSpace(string(branch)))
 	git("fetch", "origin")
-	f := &revokeFixture{lt: lt, store: coordination.NewGitStore(m.repoRoot), root: m.repoRoot, sec: m.security, issue: iss.Number, now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	f := &revokeFixture{lt: lt, store: coordination.NewGitStoreWithLayout(m.repoRoot, "", layout), root: m.repoRoot, sec: m.security, issue: iss.Number, now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
 	maintainer, _ := f.manager("maint", "OWNER")
 	if _, err := maintainer.ApproveTask(t.Context(), iss.Number, "maint"); err != nil {
 		t.Fatal(err)
@@ -241,52 +248,63 @@ func TestRevokeRetainsCheckpointForNextClaimer(t *testing.T) {
 }
 
 func TestRevokeForkClaimLeavesContributorIndex(t *testing.T) {
-	ctx := t.Context()
-	f := newRevokeFixture(t)
-	holder, _ := f.manager("worker", "NONE")
-	forkStore := func(actor string, requestID int64) coordination.Store {
-		s := coordination.NewForkIndexedStore(f.root, actor, 1, requestID)
-		s.SetNowFunc(func() time.Time { return f.now })
-		return s
-	}
-	holder.SetStore(f.root, forkStore("Worker", 41))
-	claimed, err := holder.AcquireFork(ctx, f.issue, "worker", "mock", "implement", "worker/repo", time.Hour, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if claimed.LastForkRequestID != 41 {
-		t.Fatalf("fixture request ID = %d", claimed.LastForkRequestID)
-	}
-	indexClaims := func() string {
-		t.Helper()
-		out, err := exec.Command("git", "-C", f.root, "fetch", "origin", "refs/heads/swarm-contributors/worker").CombinedOutput()
-		if err != nil {
-			t.Fatalf("fetch index: %v: %s", err, out)
-		}
-		index, err := exec.Command("git", "-C", f.root, "show", "FETCH_HEAD:index.json").Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(index)
-	}
-	if !strings.Contains(indexClaims(), claimed.Lease.ClaimID) {
-		t.Fatal("fixture claim missing from contributor index")
-	}
-	maintainer, _ := f.manager("maint", "OWNER")
-	if _, _, err := maintainer.Revoke(ctx, f.issue, "fork contributor unresponsive"); err != nil {
-		t.Fatal(err)
-	}
-	if index := indexClaims(); strings.Contains(index, claimed.Lease.ClaimID) {
-		t.Fatalf("index after revoke = %s", index)
-	}
-	after, err := maintainer.GetCurrentState(ctx, f.issue)
-	if err != nil || after.LastForkRequestID != 41 || after.ForkRepo != "worker/repo" || after.ClaimRevocations[0].ForkRepo != "worker/repo" {
-		t.Fatalf("fork state after revoke = %+v %v", after, err)
-	}
-	// The contributor's next fork claim fits under max_active_claims again.
-	holder.SetStore(f.root, forkStore("worker", 42))
-	if _, err := holder.AcquireFork(ctx, f.issue, "worker", "mock", "implement", "worker/repo", time.Hour, 1); err != nil {
-		t.Fatalf("revoked fork claim still counted: %v", err)
+	for _, layout := range []coordination.RefLayout{coordination.BranchLayout, coordination.HiddenLayout} {
+		t.Run(layout.Name(), func(t *testing.T) {
+			ctx := t.Context()
+			f := newRevokeFixtureWithLayout(t, layout)
+			holder, _ := f.manager("worker", "NONE")
+			forkStore := func(actor string, requestID int64) coordination.Store {
+				s := coordination.NewForkIndexedStoreWithLayout(f.root, "", layout, actor, 1, requestID)
+				s.SetNowFunc(func() time.Time { return f.now })
+				return s
+			}
+			holder.SetStore(f.root, forkStore("Worker", 41))
+			claimed, err := holder.AcquireFork(ctx, f.issue, "worker", "mock", "implement", "worker/repo", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if claimed.LastForkRequestID != 41 {
+				t.Fatalf("fixture request ID = %d", claimed.LastForkRequestID)
+			}
+			indexClaims := func() string {
+				t.Helper()
+				out, err := exec.Command("git", "-C", f.root, "fetch", "origin", layout.ContributorRef("worker")).CombinedOutput()
+				if err != nil {
+					t.Fatalf("fetch index: %v: %s", err, out)
+				}
+				index, err := exec.Command("git", "-C", f.root, "show", "FETCH_HEAD:index.json").Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(index)
+			}
+			if !strings.Contains(indexClaims(), claimed.Lease.ClaimID) {
+				t.Fatal("fixture claim missing from contributor index")
+			}
+			maintainer, _ := f.manager("maint", "OWNER")
+			if _, _, err := maintainer.Revoke(ctx, f.issue, "fork contributor unresponsive"); err != nil {
+				t.Fatal(err)
+			}
+			if index := indexClaims(); strings.Contains(index, claimed.Lease.ClaimID) {
+				t.Fatalf("index after revoke = %s", index)
+			}
+			after, err := maintainer.GetCurrentState(ctx, f.issue)
+			if err != nil || after.LastForkRequestID != 41 || after.ForkRepo != "worker/repo" || after.ClaimRevocations[0].ForkRepo != "worker/repo" {
+				t.Fatalf("fork state after revoke = %+v %v", after, err)
+			}
+			// The contributor's next fork claim fits under max_active_claims again.
+			holder.SetStore(f.root, forkStore("worker", 42))
+			if _, err := holder.AcquireFork(ctx, f.issue, "worker", "mock", "implement", "worker/repo", time.Hour, 1); err != nil {
+				t.Fatalf("revoked fork claim still counted: %v", err)
+			}
+			if layout == coordination.HiddenLayout {
+				for _, prefix := range []string{coordination.BranchLayout.StatePrefix(), coordination.BranchLayout.CheckpointPrefix(), coordination.BranchLayout.ContributorPrefix()} {
+					if out, err := exec.Command("git", "-C", f.root, "ls-remote", "origin", prefix+"*").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "" {
+						t.Fatalf("hidden layout created branch ledger refs: %s %v", out, err)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -471,7 +489,7 @@ func TestRevokeCommentEscapesReason(t *testing.T) {
 	if strings.Count(body, "<!--") != 1 {
 		t.Fatalf("reason injected a marker:\n%s", body)
 	}
-	projection := RenderStateProjection(nil, &IssueState{ClaimRevocations: []ClaimRevocation{{ClaimID: "c", RevokedBy: "maint", Reason: "a\nb | c"}}})
+	projection := RenderStateProjection(nil, &IssueState{ClaimRevocations: []ClaimRevocation{{ClaimID: "c", RevokedBy: "maint", Reason: "a\nb | c"}}}, coordination.BranchLayout)
 	if !strings.Contains(projection, "| **Last claim revoked** | `c` by maint at 0001-01-01T00:00:00Z: a b &#124; c |") {
 		t.Fatalf("projection row:\n%s", projection)
 	}

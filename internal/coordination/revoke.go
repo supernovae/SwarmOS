@@ -69,7 +69,7 @@ func (s *GitStore) CompareAndSwapAndRevokeClaim(ctx context.Context, n int, old,
 		}
 		return stateCommit, nil
 	}
-	contribRef, err := contributorIndexRef(prior.Lease.Owner)
+	contribRef, err := contributorIndexRef(s.layout, prior.Lease.Owner)
 	if err != nil {
 		return "", err
 	}

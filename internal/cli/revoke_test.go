@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 )
@@ -103,7 +104,9 @@ func TestCLIRevokeForkClaimClearsContributorIndex(t *testing.T) {
 		t.Fatalf("fork claim: %v\n%s", err, out)
 	}
 	claimed := f.state()
-	index := func() string { return f.git(f.projectBare, "show", "refs/heads/swarm-contributors/alice:index.json") }
+	index := func() string {
+		return f.git(f.projectBare, "show", coordination.HiddenLayout.ContributorRef("alice")+":index.json")
+	}
 	if claimed.ForkRepo != "alice/swarm" || !strings.Contains(index(), claimed.Lease.ClaimID) {
 		t.Fatalf("fork claim fixture: %+v %s", claimed.Lease, index())
 	}

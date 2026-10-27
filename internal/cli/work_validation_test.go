@@ -196,3 +196,46 @@ func assertWorkValidationJSON(t *testing.T, family, check, out string) {
 		}
 	}
 }
+
+func TestWorkValidationRepairNextAction(t *testing.T) {
+	t.Parallel()
+	for _, family := range []string{"issue", "pr"} {
+		for _, tc := range []struct {
+			name, developer, reason string
+		}{
+			{name: "exhausted", developer: "date +%s%N >> fail-shell", reason: ReasonValidationRepairExhausted},
+			{name: "no changes", developer: "echo fail > fail-shell", reason: ReasonValidationRepairNoChanges},
+			{name: "repaired", developer: "if test -f fail-shell; then rm fail-shell; else echo fail > fail-shell; fi"},
+		} {
+			t.Run(family+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				var f *cliFixture
+				var number string
+				if family == "issue" {
+					f = newCLIFixture(t)
+					setupWorkValidationPolicy(t, f)
+					number = strconv.Itoa(f.create(t, "none"))
+					f.must(t, "issue", "approve", number)
+				} else {
+					var prNumber int
+					f, _, prNumber = submittedPRFixture(t, "none", func(f *cliFixture) { setupWorkValidationPolicy(t, f) })
+					number = strconv.Itoa(prNumber)
+				}
+				f.setenv("SWARM_MOCK_DEVELOPER_CMD", tc.developer)
+				doc, err := f.runJSON(t, family, "work", number, "--agent", "mock", "--progress=false", "--json")
+				if tc.reason == "" {
+					assertNoNextAction(t, doc, err)
+					raw, _ := json.Marshal(doc)
+					if !strings.Contains(string(raw), `"repair_rounds":1`) || !strings.Contains(string(raw), `"ValidationPassed":true`) {
+						t.Fatalf("repaired run: %s", raw)
+					}
+					return
+				}
+				assertNextAction(t, doc, err, tc.reason, false, ExitChangesRequested, localArgv(f, family, "work", number, "--phase", "implement")...)
+				if !strings.Contains(err.Error(), "required validation check failed") {
+					t.Fatalf("stop lost the validation failure: %v", err)
+				}
+			})
+		}
+	}
+}

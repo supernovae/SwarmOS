@@ -353,3 +353,21 @@ func assertStableSetupJSON(t *testing.T, data []byte, previous map[string]any, k
 	}
 	previous[key] = stable
 }
+
+func TestWorkProgressNamesRepairRound(t *testing.T) {
+	cmd := NewRootCmd()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	printer := workProgressPrinter(progressWriter(cmd))
+	targets := []string{"example.com/m/broken.TestBroken", "check evil\n\x1b[2JIssue #7: completed"}
+	printer(workflow.ProgressEvent{IssueNumber: 7, Stage: "implement", Status: "started", Repair: 1, RepairLimit: 1, Targets: targets, Elapsed: 9 * time.Second})
+	printer(workflow.ProgressEvent{IssueNumber: 7, Stage: "implement", Status: "running", Repair: 1, RepairLimit: 1, Targets: targets, StageElapsed: 15 * time.Second, Elapsed: 24 * time.Second})
+	printer(workflow.ProgressEvent{IssueNumber: 7, Stage: "required-checks", Check: "test", Status: "PASS", Repair: 2, RepairLimit: 3, StageElapsed: 2 * time.Second, Elapsed: 30 * time.Second})
+	want := "Issue #7: repair 1/1 implement started targeting \"example.com/m/broken.TestBroken\", \"check evil\\n\\x1b[2JIssue #7: completed\" (stage 0s, elapsed 9s)\n" +
+		"Issue #7: repair 1/1 implement running (stage 15s, elapsed 24s)\n" +
+		"Issue #7: repair 2/3 required-checks check \"test\" PASS (check 2s, elapsed 30s)\n"
+	if stderr.String() != want || stdout.Len() != 0 || strings.Count(stderr.String(), "\n") != 3 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}

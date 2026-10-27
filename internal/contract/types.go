@@ -152,11 +152,14 @@ func (c *SwarmConfig) CommitMessageDetail() string {
 }
 
 type LeaseConfig struct {
-	PlanReplanLimit   *int   `yaml:"plan_replan_limit,omitempty" json:"plan_replan_limit,omitempty"`
-	RebaseRepairLimit *int   `yaml:"rebase_repair_limit,omitempty" json:"rebase_repair_limit,omitempty"`
-	Duration          string `yaml:"duration" json:"duration"`
-	Renewable         bool   `yaml:"renewable" json:"renewable"`
-	MaxRenewals       int    `yaml:"max_renewals" json:"max_renewals"`
+	PlanReplanLimit   *int `yaml:"plan_replan_limit,omitempty" json:"plan_replan_limit,omitempty"`
+	RebaseRepairLimit *int `yaml:"rebase_repair_limit,omitempty" json:"rebase_repair_limit,omitempty"`
+	// ValidationRepairLimit bounds the developer repair rounds issue and PR
+	// work run after a failed validation; nil means one, zero disables them.
+	ValidationRepairLimit *int   `yaml:"validation_repair_limit,omitempty" json:"validation_repair_limit,omitempty"`
+	Duration              string `yaml:"duration" json:"duration"`
+	Renewable             bool   `yaml:"renewable" json:"renewable"`
+	MaxRenewals           int    `yaml:"max_renewals" json:"max_renewals"`
 }
 
 type ForkConfig struct {
@@ -275,6 +278,15 @@ func (c LeaseConfig) RebaseRepairAttempts() int {
 		return 2
 	}
 	return *c.RebaseRepairLimit
+}
+
+// ValidationRepairAttempts returns the trusted policy's budget of developer
+// repair rounds after a failed validation in one work run.
+func (c LeaseConfig) ValidationRepairAttempts() int {
+	if c.ValidationRepairLimit == nil {
+		return 1
+	}
+	return *c.ValidationRepairLimit
 }
 
 // ClaimBudget returns the lease duration and the total claim budget,

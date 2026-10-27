@@ -603,8 +603,8 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	if !cfg.Security.RequireReadyLabel || strings.TrimSpace(cfg.Security.ReadyLabel) == "" {
 		return nil, fmt.Errorf("security requires require_ready_label: true and a nonempty ready_label")
 	}
-	if d, err := time.ParseDuration(cfg.Lease.Duration); err != nil || d <= 0 || cfg.Lease.MaxRenewals < 0 || cfg.Lease.RebaseRepairAttempts() < 0 || cfg.Lease.PlanReplanAttempts() < 0 {
-		return nil, fmt.Errorf("lease requires a positive duration and nonnegative max_renewals, rebase_repair_limit and plan_replan_limit")
+	if d, err := time.ParseDuration(cfg.Lease.Duration); err != nil || d <= 0 || cfg.Lease.MaxRenewals < 0 || cfg.Lease.RebaseRepairAttempts() < 0 || cfg.Lease.PlanReplanAttempts() < 0 || cfg.Lease.ValidationRepairAttempts() < 0 {
+		return nil, fmt.Errorf("lease requires a positive duration and nonnegative max_renewals, rebase_repair_limit, plan_replan_limit and validation_repair_limit")
 	}
 	if cfg.Fork != nil && cfg.Fork.MaxActiveClaims <= 0 {
 		return nil, fmt.Errorf("fork.max_active_claims must be positive")

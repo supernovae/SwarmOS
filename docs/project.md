@@ -63,6 +63,7 @@ lease:
   duration: 4h
   renewable: true
   max_renewals: 3
+  validation_repair_limit: 1
 security:
   require_ready_label: true
   ready_label: swarm:ready
@@ -74,6 +75,8 @@ agents:
 ```
 
 Sign in through the selected harness on the worker, then run `swarm repo doctor`. Isolated adapters use coordinator-selected permissions; agent entries can choose a model and roles, while arbitrary `args`, environment forwarding, and sandbox overrides are rejected. For optional offline containers, select `execution.backend: oci` and follow the [OCI setup](../SECURITY.md#optional-oci-backend).
+
+`lease.validation_repair_limit` is optional. It sets how many developer repair rounds `swarm issue work` and `swarm pr work` may start after the trusted checks fail: omission gives one round, and zero disables automatic repair. See [Repair brief for failed validation](developer.md#repair-brief-for-failed-validation).
 
 How agent configuration works:
 - **Explicit allowlist**: Only entries under `agents:` can be selected. Each entry can configure `binary`, `harness` (`claude`, `codex`, `omp`, or `opencode`; defaults to the entry name), `args`, `model`, allowed `roles`, permitted `env` variables, and reviewer sandbox settings.

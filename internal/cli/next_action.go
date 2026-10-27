@@ -19,6 +19,10 @@ const (
 	// ReasonPreExistingFailures stops a run whose failing tests all fail at
 	// the approved base; a maintainer inspects the status and decides.
 	ReasonPreExistingFailures = "pre_existing_failures"
+	// ReasonValidationRepairExhausted and ReasonValidationRepairNoChanges stop
+	// automatic validation repair; another implement run may continue it.
+	ReasonValidationRepairExhausted = "validation_repair_exhausted"
+	ReasonValidationRepairNoChanges = "validation_repair_no_changes"
 )
 
 // Process exit codes. 2 is left unused so it stays free for usage errors.
@@ -57,7 +61,7 @@ func ExitCode(err error) int {
 		return ExitFailure
 	}
 	switch stop.action.Reason {
-	case ReasonChangesRequested:
+	case ReasonChangesRequested, ReasonValidationRepairExhausted, ReasonValidationRepairNoChanges:
 		return ExitChangesRequested
 	case ReasonNeedsApproval:
 		return ExitNeedsApproval
@@ -93,6 +97,12 @@ func (c stopContext) classify(err error) *NextAction {
 	}
 	if errors.Is(err, workflow.ErrPreExistingFailures) {
 		return &NextAction{Reason: ReasonPreExistingFailures, Argv: c.argv(false, c.resource, "status", strconv.Itoa(c.number)), HumanRequired: true}
+	}
+	if errors.Is(err, workflow.ErrValidationRepairExhausted) {
+		return &NextAction{Reason: ReasonValidationRepairExhausted, Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "implement")}
+	}
+	if errors.Is(err, workflow.ErrValidationRepairNoChanges) {
+		return &NextAction{Reason: ReasonValidationRepairNoChanges, Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "implement")}
 	}
 	if errors.Is(err, workflow.ErrPlanReviewRejected) {
 		return &NextAction{Reason: ReasonChangesRequested, Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "plan")}

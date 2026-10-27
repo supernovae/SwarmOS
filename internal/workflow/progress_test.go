@@ -331,3 +331,37 @@ func TestWorkProgressObservesChecks(t *testing.T) {
 		(&workProgress{}).observeCheck(ProgressEvent{Check: "test", Status: "started"})
 	})
 }
+
+func TestWorkProgressRepairRound(t *testing.T) {
+	ticks := make(chan time.Time, 1)
+	events := make(chan ProgressEvent, 20)
+	p := newWorkProgress(t.Context(), 42, func(e ProgressEvent) { events <- e }, ticks)
+	receiveProgress(t, events, "preflight", "started")
+	p.repair(1, 1, []string{"example.com/m/broken.TestBroken"})
+	if e := receiveProgress(t, events, "preflight", "completed"); e.RepairLimit != 0 {
+		t.Fatalf("previous stage carried the round: %+v", e)
+	}
+	if e := receiveProgress(t, events, "implement", "started"); e.Repair != 1 || e.RepairLimit != 1 || len(e.Targets) != 1 {
+		t.Fatalf("repair start: %+v", e)
+	}
+	ticks <- time.Now()
+	if e := receiveProgress(t, events, "implement", "running"); e.Repair != 1 {
+		t.Fatalf("heartbeat lost the round: %+v", e)
+	}
+	p.finish(&WorkResult{}, nil)
+	receiveProgress(t, events, "implement", "completed")
+
+	// The shared setup reporter keeps the round as well.
+	setup := make(chan ProgressEvent, 20)
+	s := newSetupProgress(t.Context(), 42, func(e ProgressEvent) { setup <- e }, nil)
+	receiveProgress(t, setup, "preflight", "started")
+	s.repair(2, 3, nil)
+	receiveProgress(t, setup, "preflight", "completed")
+	s.next("test")
+	receiveProgress(t, setup, "implement", "started")
+	receiveProgress(t, setup, "implement", "completed")
+	if e := receiveProgress(t, setup, "test", "started"); e.Repair != 2 || e.RepairLimit != 3 {
+		t.Fatalf("setup reporter lost the round: %+v", e)
+	}
+	s.Close()
+}

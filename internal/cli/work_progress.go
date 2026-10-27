@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/supernovae/swarmos/internal/progress"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
@@ -21,14 +22,27 @@ func workProgressPrinter(out io.Writer) func(workflow.ProgressEvent) {
 		defer mu.Unlock()
 		// Stage and status come from coordinator-owned enums, never child
 		// output; check names come from the trusted policy and are quoted.
+		stage := event.Stage
+		if event.RepairLimit > 0 {
+			stage = fmt.Sprintf("repair %d/%d %s", event.Repair, event.RepairLimit, stage)
+		}
 		if event.Check != "" {
 			fmt.Fprintf(out, "Issue #%d: %s check %+q %s (check %s, elapsed %s)\n",
-				event.IssueNumber, event.Stage, event.Check, event.Status,
+				event.IssueNumber, stage, event.Check, event.Status,
 				event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second))
 			return
 		}
-		fmt.Fprintf(out, "Issue #%d: %s %s (stage %s, elapsed %s)\n",
-			event.IssueNumber, event.Stage, event.Status,
+		targets := ""
+		if event.Repair > 0 && event.Stage == "implement" && event.Status == "started" && len(event.Targets) > 0 {
+			// Targets are diagnostics from check output; quote each one.
+			quoted := make([]string, len(event.Targets))
+			for i, target := range event.Targets {
+				quoted[i] = fmt.Sprintf("%+q", target)
+			}
+			targets = " targeting " + strings.Join(quoted, ", ")
+		}
+		fmt.Fprintf(out, "Issue #%d: %s %s%s (stage %s, elapsed %s)\n",
+			event.IssueNumber, stage, event.Status, targets,
 			event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second))
 	}
 }

@@ -599,7 +599,9 @@ func TestDependencyTableSafety(t *testing.T) {
 		if (eco.Prefetch != nil) != (eco.EnvKey != "") || (eco.Prefetch != nil) != (len(eco.Detect) > 0 && len(eco.Lockfiles) > 0) {
 			t.Errorf("%s: adapters need an env key, detection files and lockfiles", eco.Name)
 		}
-		if IsBuildCacheKey(eco.EnvKey) || slices.Contains(denied, eco.EnvKey) {
+		// CARGO_HOME is a reviewed exception: cargoFetch fails unless the
+		// per-repository cache holds only cargo's download directories.
+		if IsBuildCacheKey(eco.EnvKey) || (slices.Contains(denied, eco.EnvKey) && (eco.Name != "rust" || eco.EnvKey != "CARGO_HOME")) {
 			t.Errorf("%s env key %q is a build cache or credential home key", eco.Name, eco.EnvKey)
 		}
 	}
@@ -608,15 +610,18 @@ func TestDependencyTableSafety(t *testing.T) {
 			t.Errorf("%s must be classified no-prefetch", name)
 		}
 	}
-	if eco, ok := dependencyEcosystemNamed("go"); !ok || eco.Prefetch == nil {
-		t.Error("go must be adapter-backed")
+	for _, name := range []string{"go", "rust"} {
+		if eco, ok := dependencyEcosystemNamed(name); !ok || eco.Prefetch == nil {
+			t.Errorf("%s must be adapter-backed", name)
+		}
 	}
 }
 
 func TestNoPrefetchEcosystemsKeepHostMounts(t *testing.T) {
 	home := resolvedTempDir(t)
 	paths := map[string]string{}
-	for _, rel := range []string{"go/pkg/mod", ".m2/repository", ".gradle/caches", ".nuget/packages", ".cache/vcpkg", ".npm"} {
+	adapters := []string{"go/pkg/mod", ".cargo/registry", ".cargo/git"}
+	for _, rel := range append([]string{".m2/repository", ".gradle/caches", ".nuget/packages", ".cache/vcpkg", ".npm"}, adapters...) {
 		paths[rel] = filepath.Join(home, rel)
 		if err := os.MkdirAll(paths[rel], 0o755); err != nil {
 			t.Fatal(err)
@@ -630,7 +635,7 @@ func TestNoPrefetchEcosystemsKeepHostMounts(t *testing.T) {
 	}{{PerRepository, false, "per-repository"}, {"", false, "zero value"}, {SharedHostCaches, true, "opt-in"}} {
 		mounts := ToolchainMounts(filterDependencyBinds(binds, tc.mode), true)
 		for rel, path := range paths {
-			want := rel != "go/pkg/mod" || tc.goMod
+			want := !slices.Contains(adapters, rel) || tc.goMod
 			if got := slices.Contains(mounts, path); got != want {
 				t.Errorf("%s: mount %s = %t, want %t", tc.reason, rel, got, want)
 			}
@@ -680,7 +685,7 @@ func TestDependencyCacheFlagsRoundTrip(t *testing.T) {
 			}
 		}
 	}
-	for _, value := range []string{"go", "go=relative", "go=/", "rust=" + dir, "maven=" + dir, "unknown=" + dir, "go=" + work, "go=" + filepath.Join(work, "sub")} {
+	for _, value := range []string{"go", "go=relative", "go=/", "python=" + dir, "rust=" + work, "maven=" + dir, "unknown=" + dir, "go=" + work, "go=" + filepath.Join(work, "sub")} {
 		if c, err := ParseDependencyCache(value, work); err == nil {
 			t.Errorf("ParseDependencyCache(%q) = %+v", value, c)
 		}

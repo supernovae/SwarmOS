@@ -41,21 +41,23 @@ func TestDoctorReportsDependencyCacheModes(t *testing.T) {
 	writeNodeProfile(t, f, "node_id: n\n")
 	check := doctorDependencyCheck(t, f)
 	detail, _ := check["detail"].(string)
-	if check["status"] != "OK" || !strings.Contains(detail, "go: per-repository") {
+	if check["status"] != "OK" || !strings.Contains(detail, "go: per-repository") || !strings.Contains(detail, "rust: per-repository") {
 		t.Fatalf("default dependency-caches check = %v", check)
 	}
 	_, shared, ok := strings.Cut(detail, "sharing host caches read-only")
 	if !ok {
 		t.Fatalf("doctor does not name ecosystems sharing host caches: %q", detail)
 	}
-	for _, name := range []string{"rust", "python", "node", "dotnet", "maven", "gradle", "c-cpp"} {
+	for _, name := range []string{"python", "node", "dotnet", "maven", "gradle", "c-cpp"} {
 		if !strings.Contains(shared, name) {
 			t.Errorf("doctor does not name %s as sharing host caches: %q", name, detail)
 		}
 	}
 	shared, _, _ = strings.Cut(shared, ";")
-	if strings.Contains(shared, "go") {
-		t.Errorf("go is listed as sharing host caches by default: %q", detail)
+	for _, name := range []string{"go", "rust"} {
+		if strings.Contains(shared, name) {
+			t.Errorf("%s is listed as sharing host caches by default: %q", name, detail)
+		}
 	}
 }
 

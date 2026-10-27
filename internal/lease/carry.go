@@ -61,6 +61,29 @@ func (m *Manager) carryApprovalEvidence(ctx context.Context, st *IssueState, wu 
 			clearHeadEvidence(st)
 			return
 		}
+		// A human-gated issue without a PR keeps its exact plan bytes too, but
+		// the old maintainer decision is superseded: the gate waits for a fresh
+		// `swarm issue review-plan N --approve` under the new policy.
+		if st.PRNumber == 0 && st.ForkRepo == "" && st.PRRevision == nil && st.EffectiveGate == contract.GateHuman &&
+			st.CarryReason == "policy files changed" && !requireReview && verifyReviewBinding(st, contract.GateHuman) == nil {
+			ancestor, err := workspace.BaseIsAncestor(ctx, m.repoRoot, st.BaseSHA, base)
+			if err != nil {
+				st.CarryReason = "base ancestry could not be verified"
+				break
+			}
+			if !ancestor {
+				st.CarryReason = "base not an ancestor"
+				break
+			}
+			st.ApprovalTransition = nil
+			clearHeadEvidence(st)
+			for i := range st.Artifacts {
+				if st.Artifacts[i].Type == contract.ArtifactReview {
+					st.Artifacts[i].Metadata["superseded_by"] = st.CarryReason
+				}
+			}
+			return
+		}
 	case (requireReview && verifyReviewBinding(st, contract.GateAgent) != nil) || VerifyApproval(st, wu) != nil:
 		st.CarryReason = "plan approval is missing or stale"
 	default:
@@ -77,6 +100,19 @@ func (m *Manager) carryApprovalEvidence(ctx context.Context, st *IssueState, wu 
 		}
 	}
 	invalidatePRRevisionEvidence(st)
+}
+
+// SupersededReview reports why a kept plan's human review no longer counts.
+func SupersededReview(st *IssueState) (string, bool) {
+	if st == nil {
+		return "", false
+	}
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactReview && a.Metadata["superseded_by"] != "" {
+			return a.Metadata["superseded_by"], true
+		}
+	}
+	return "", false
 }
 
 func clearHeadEvidence(st *IssueState) {

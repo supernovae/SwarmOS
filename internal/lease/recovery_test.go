@@ -104,8 +104,8 @@ func TestApprovalDropsContainedCheckpoint(t *testing.T) {
 				t.Fatalf("checkpoint not retired: %+v", result)
 			}
 			if scenario == "policy changed" {
-				if len(result.Artifacts) != 0 {
-					t.Fatal("policy change retained evidence")
+				if reason, superseded := SupersededReview(result); len(result.Artifacts) != 3 || !superseded || reason != "policy files changed" {
+					t.Fatalf("policy change did not keep the plan for human re-review: %v", result.Artifacts)
 				}
 			} else {
 				if len(result.Artifacts) != 3 {

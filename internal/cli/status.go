@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -142,6 +143,13 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "Checkpoint: %s\n", entry.Checkpoint.String())
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Base: %s\nTask: %s\nApproved by: %s\n", state.BaseSHA, state.TaskDigest, state.ApprovedBy)
+				if reason, ok := lease.SupersededReview(state); ok {
+					fmt.Fprintf(cmd.OutOrStdout(), "Plan: %s\n", reason)
+					if len(state.ChangedPolicyPaths) > 0 {
+						fmt.Fprintf(cmd.OutOrStdout(), "Policy paths: %s\n", strings.Join(state.ChangedPolicyPaths, ", "))
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "Plan review required: swarm issue review-plan %d --approve\n", entry.Issue.Number)
+				}
 				if fs := state.FreshStart; fs != nil {
 					fmt.Fprintf(cmd.OutOrStdout(), "Fresh start: next claim begins on %s at the approved base\n", fs.Branch)
 				}

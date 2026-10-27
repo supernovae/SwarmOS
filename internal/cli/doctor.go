@@ -10,7 +10,9 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -45,6 +47,9 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 				} else {
 					return harness.DoctorCheck{Category: "system", Name: "git-identity", Status: "OK", Detail: "checkpoint commits can be authored"}
 				}
+			}))
+			checks = append(checks, run.Run("execution", "dependency-caches", func() harness.DoctorCheck {
+				return doctorDependencyCacheCheck(rootOpts.nodeConfigPath())
 			}))
 			if cfg, err := harness.LoadConfig(repoRoot); err == nil {
 				checks = append(checks, run.Run("execution", "mode", func() harness.DoctorCheck {
@@ -187,4 +192,35 @@ func doctorAgentChecksWithRunner(cfg *contract.SwarmConfig, local bool, prefligh
 		}
 	}
 	return checks
+}
+
+// doctorDependencyCacheCheck reports how each ecosystem's dependencies reach
+// sandboxes, naming those that share host caches. The node profile opt-in is
+// a warning because it exposes every package the host has fetched.
+func doctorDependencyCacheCheck(profilePath string) harness.DoctorCheck {
+	mode, err := node.DependencyCacheMode(profilePath)
+	status, detail := "OK", dependencyCacheSummary(mode)+"; Go detects the root go.mod only"
+	if err != nil {
+		status, detail = "WARN", detail+"; "+err.Error()
+	} else if mode == sandbox.SharedHostCaches {
+		status = "WARN"
+	}
+	return harness.DoctorCheck{Category: "execution", Name: "dependency-caches", Status: status, Detail: detail}
+}
+
+// dependencyCacheSummary lists each ecosystem's mode, grouping those that
+// share host caches.
+func dependencyCacheSummary(mode sandbox.DependencyCacheMode) string {
+	var parts, shared []string
+	for _, eco := range sandbox.DependencyCacheModes(mode) {
+		if strings.HasPrefix(eco.Mode, "host-shared (no fetch-only prefetch") {
+			shared = append(shared, eco.Name)
+			continue
+		}
+		parts = append(parts, eco.Name+": "+eco.Mode)
+	}
+	if len(shared) > 0 {
+		parts = append(parts, "sharing host caches read-only (no fetch-only prefetch): "+strings.Join(shared, ", "))
+	}
+	return strings.Join(parts, "; ")
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/registry"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -90,10 +91,12 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			mode := node.ProfileDependencyCacheMode(prof)
 			if profileJSON {
-				return writeJSON(cmd, map[string]any{"kind": "node-status", "profile": prof})
+				return writeJSON(cmd, map[string]any{"kind": "node-status", "profile": prof, "dependency_caches": sandbox.DependencyCacheModes(mode)})
 			}
 			printNodeProfile(cmd, prof)
+			fmt.Fprintf(cmd.OutOrStdout(), "  Dependency caches: %s\n", dependencyCacheSummary(mode))
 			return nil
 		},
 	}

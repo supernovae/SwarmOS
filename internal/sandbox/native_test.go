@@ -217,7 +217,7 @@ func TestNativeCodexBoundary(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "test.txt"), []byte("source"), 0600)
 	var output strings.Builder
-	if err := RunNativeValidation(ctx, dir, binary, "cat test.txt; printf changed > test.txt; go version", nil, false, &output, &output); err != nil {
+	if err := RunNativeValidation(ctx, dir, binary, "cat test.txt; printf changed > test.txt; go version", nil, Dependencies{}, false, &output, &output); err != nil {
 		t.Fatal(err, output.String())
 	}
 	if strings.Contains(output.String(), "Refusing to create helper binaries under temporary dir") {
@@ -254,7 +254,7 @@ func TestNativeCodexReadOnlyAndCancellation(t *testing.T) {
 	t.Setenv("GH_TOKEN", "dummy-publishing-token")
 	t.Setenv("GITHUB_TOKEN", "dummy-publishing-token")
 	t.Setenv("OPENAI_API_KEY", "dummy-provider-token")
-	args := codexPolicy(binary, work, scratch, true, nil)
+	args := codexPolicy(binary, work, scratch, true, nil, Dependencies{})
 	script := `set -eu
 test -z "${GH_TOKEN+x}"
 test -z "${GITHUB_TOKEN+x}"
@@ -265,7 +265,7 @@ printf 'VERDICT: APPROVED\n' > .swarm/active/REVIEW.md`
 	var output strings.Builder
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if err := runNativeCommand(ctx, binary, scratch, nativeEnv(scratch, false), args, nil, &output, &output); err != nil {
+	if err := runNativeCommand(ctx, binary, scratch, nativeEnv(scratch, false, Dependencies{}), args, nil, &output, &output); err != nil {
 		t.Fatal(err, output.String())
 	}
 	data, _ := os.ReadFile(filepath.Join(work, "source.txt"))
@@ -273,11 +273,11 @@ printf 'VERDICT: APPROVED\n' > .swarm/active/REVIEW.md`
 		t.Fatal("reviewer changed source")
 	}
 	// A new session must not let a tool survive the harness cancellation.
-	args = codexPolicy(binary, work, scratch, false, nil)
+	args = codexPolicy(binary, work, scratch, false, nil, Dependencies{})
 	args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", `test -x /usr/bin/setsid; printf started > started; setsid /bin/sh -c 'sleep 2; printf escaped > escaped' & wait`)
 	short, stop := context.WithTimeout(context.Background(), time.Second)
 	defer stop()
-	err = runNativeCommand(short, binary, scratch, nativeEnv(scratch, false), args, nil, &output, &output)
+	err = runNativeCommand(short, binary, scratch, nativeEnv(scratch, false, Dependencies{}), args, nil, &output, &output)
 	if err == nil || short.Err() == nil {
 		t.Fatal("expected cancellation", err, output.String())
 	}
@@ -349,11 +349,11 @@ func TestNativeCodexAgentBuildCacheReuse(t *testing.T) {
 	read := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/m")" = run1; done; test ! -r "$1"; if (printf x > "$1/agent-wrote") 2>/dev/null; then exit 9; fi`
 	for _, script := range []string{write, read} {
 		work, scratch := resolvedTempDir(t), resolvedTempDir(t)
-		args := codexPolicy(binary, work, scratch, false, caches)
+		args := codexPolicy(binary, work, scratch, false, caches, Dependencies{})
 		args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-cache", validator[0].Dir)
 		var output strings.Builder
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-		err := runNativeCommand(ctx, binary, scratch, nativeEnv(codexHostHome(scratch), false), args, nil, &output, &output)
+		err := runNativeCommand(ctx, binary, scratch, nativeEnv(codexHostHome(scratch), false, Dependencies{}), args, nil, &output, &output)
 		cancel()
 		if err != nil {
 			t.Fatal(err, output.String())

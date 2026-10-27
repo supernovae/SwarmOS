@@ -11,18 +11,21 @@ import (
 // ToolchainBind represents a verified read-only host directory containing
 // language compilers, SDKs, or immutable package caches, along with any
 // associated environment variable name/value and PATH binary subdirectories.
+// Ecosystem names the dependencyEcosystems entry of a package cache bind.
 type ToolchainBind struct {
-	EnvKey  string
-	EnvVal  string
-	Mount   string
-	PathDir string
+	EnvKey    string
+	EnvVal    string
+	Mount     string
+	PathDir   string
+	Ecosystem string
 }
 
 // HostToolchains discovers existing, canonicalized host toolchain and package
 // cache directories across supported ecosystems (Go, Rust/Cargo, Python/pip/uv,
 // Node/npm/pnpm/Yarn/Bun/nvm/fnm/volta, .NET/NuGet, Java/Maven/Gradle, C/C++
 // vcpkg, pyenv/asdf/mise/sdkman/homebrew). Writable build caches are not
-// discovered here; see BuildCache.
+// discovered here; see BuildCache. Sandboxes use HostToolchainsFor, which
+// drops the host-wide caches of adapter-backed ecosystems.
 //
 // Only public compiler and package/module cache trees are returned so isolated
 // sandboxes and clean validation environments can build, lint, and test offline
@@ -63,12 +66,12 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 		return resolved, true
 	}
 
-	addCache := func(envKey, rawCandidate string) string {
+	addCache := func(ecosystem, envKey, rawCandidate string) string {
 		dir, ok := canonicalDir(rawCandidate)
 		if !ok {
 			return ""
 		}
-		var b ToolchainBind
+		b := ToolchainBind{Ecosystem: ecosystem}
 		if !seenMounts[dir] {
 			seenMounts[dir] = true
 			b.Mount = dir
@@ -156,7 +159,7 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	if goModCache == "" && home != "" {
 		goModCache = filepath.Join(home, "go", "pkg", "mod")
 	}
-	addCache("GOMODCACHE", goModCache)
+	addCache("go", "GOMODCACHE", goModCache)
 	if home != "" {
 		addToolchainRoot("", filepath.Join(home, "go", "bin"), ".")
 	}
@@ -174,8 +177,8 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	}
 	if cargoHome != "" {
 		addToolchainRoot("", filepath.Join(cargoHome, "bin"), ".")
-		addCache("", filepath.Join(cargoHome, "registry"))
-		addCache("", filepath.Join(cargoHome, "git"))
+		addCache("rust", "", filepath.Join(cargoHome, "registry"))
+		addCache("rust", "", filepath.Join(cargoHome, "git"))
 	}
 
 	// 3. Python: pip, uv, poetry, virtualenv, pyenv, conda.
@@ -183,25 +186,25 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	if xdgCache != "" {
 		pipFallbacks = append(pipFallbacks, filepath.Join(xdgCache, "pip"))
 	}
-	addCache("PIP_CACHE_DIR", firstCandidate("PIP_CACHE_DIR", pipFallbacks...))
+	addCache("python", "PIP_CACHE_DIR", firstCandidate("PIP_CACHE_DIR", pipFallbacks...))
 
 	uvCacheFallbacks := []string{}
 	if xdgCache != "" {
 		uvCacheFallbacks = append(uvCacheFallbacks, filepath.Join(xdgCache, "uv"))
 	}
-	addCache("UV_CACHE_DIR", firstCandidate("UV_CACHE_DIR", uvCacheFallbacks...))
+	addCache("python", "UV_CACHE_DIR", firstCandidate("UV_CACHE_DIR", uvCacheFallbacks...))
 
 	uvPythonFallbacks := []string{}
 	if xdgData != "" {
 		uvPythonFallbacks = append(uvPythonFallbacks, filepath.Join(xdgData, "uv", "python"))
 	}
-	addCache("UV_PYTHON_INSTALL_DIR", firstCandidate("UV_PYTHON_INSTALL_DIR", uvPythonFallbacks...))
+	addCache("python", "UV_PYTHON_INSTALL_DIR", firstCandidate("UV_PYTHON_INSTALL_DIR", uvPythonFallbacks...))
 
 	poetryFallbacks := []string{}
 	if xdgCache != "" {
 		poetryFallbacks = append(poetryFallbacks, filepath.Join(xdgCache, "pypoetry"))
 	}
-	addCache("POETRY_CACHE_DIR", firstCandidate("POETRY_CACHE_DIR", poetryFallbacks...))
+	addCache("python", "POETRY_CACHE_DIR", firstCandidate("POETRY_CACHE_DIR", poetryFallbacks...))
 
 	pyenvFallbacks := []string{}
 	if home != "" {
@@ -217,7 +220,7 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	if xdgCache != "" {
 		npmFallbacks = append(npmFallbacks, filepath.Join(xdgCache, "npm"))
 	}
-	addCache("npm_config_cache", firstCandidate("npm_config_cache", npmFallbacks...))
+	addCache("node", "npm_config_cache", firstCandidate("npm_config_cache", npmFallbacks...))
 
 	pnpmFallbacks := []string{}
 	if xdgData != "" {
@@ -226,7 +229,7 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	if home != "" {
 		pnpmFallbacks = append(pnpmFallbacks, filepath.Join(home, ".pnpm-store"))
 	}
-	addCache("PNPM_STORE_PATH", firstCandidate("PNPM_STORE_PATH", pnpmFallbacks...))
+	addCache("node", "PNPM_STORE_PATH", firstCandidate("PNPM_STORE_PATH", pnpmFallbacks...))
 
 	yarnFallbacks := []string{}
 	if xdgCache != "" {
@@ -235,7 +238,7 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	if home != "" {
 		yarnFallbacks = append(yarnFallbacks, filepath.Join(home, ".yarn", "berry", "cache"))
 	}
-	addCache("YARN_CACHE_FOLDER", firstCandidate("YARN_CACHE_FOLDER", yarnFallbacks...))
+	addCache("node", "YARN_CACHE_FOLDER", firstCandidate("YARN_CACHE_FOLDER", yarnFallbacks...))
 
 	bunInstall := strings.TrimSpace(getenv("BUN_INSTALL"))
 	if bunInstall == "" && home != "" {
@@ -243,7 +246,7 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	}
 	if bunInstall != "" {
 		addToolchainRoot("", filepath.Join(bunInstall, "bin"), ".")
-		addCache("BUN_INSTALL_CACHE_DIR", firstCandidate("BUN_INSTALL_CACHE_DIR", filepath.Join(bunInstall, "install", "cache")))
+		addCache("node", "BUN_INSTALL_CACHE_DIR", firstCandidate("BUN_INSTALL_CACHE_DIR", filepath.Join(bunInstall, "install", "cache")))
 	}
 
 	nvmFallbacks := []string{}
@@ -259,8 +262,8 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	addToolchainRoot("VOLTA_HOME", firstCandidate("VOLTA_HOME", voltaFallbacks...), "bin")
 
 	if xdgCache != "" {
-		addCache("PLAYWRIGHT_BROWSERS_PATH", firstCandidate("PLAYWRIGHT_BROWSERS_PATH", filepath.Join(xdgCache, "ms-playwright")))
-		addCache("CYPRESS_CACHE_FOLDER", firstCandidate("CYPRESS_CACHE_FOLDER", filepath.Join(xdgCache, "Cypress")))
+		addCache("node", "PLAYWRIGHT_BROWSERS_PATH", firstCandidate("PLAYWRIGHT_BROWSERS_PATH", filepath.Join(xdgCache, "ms-playwright")))
+		addCache("node", "CYPRESS_CACHE_FOLDER", firstCandidate("CYPRESS_CACHE_FOLDER", filepath.Join(xdgCache, "Cypress")))
 	}
 
 	// 5. C / C++ / C# / .NET / Java / JVM / Polyglot managers.
@@ -268,7 +271,7 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	if home != "" {
 		nugetFallbacks = append(nugetFallbacks, filepath.Join(home, ".nuget", "packages"))
 	}
-	addCache("NUGET_PACKAGES", firstCandidate("NUGET_PACKAGES", nugetFallbacks...))
+	addCache("dotnet", "NUGET_PACKAGES", firstCandidate("NUGET_PACKAGES", nugetFallbacks...))
 
 	dotnetFallbacks := []string{}
 	if home != "" {
@@ -283,12 +286,12 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	if xdgCache != "" {
 		vcpkgFallbacks = append(vcpkgFallbacks, filepath.Join(xdgCache, "vcpkg"))
 	}
-	addCache("VCPKG_DEFAULT_BINARY_CACHE", firstCandidate("VCPKG_DEFAULT_BINARY_CACHE", vcpkgFallbacks...))
+	addCache("c-cpp", "VCPKG_DEFAULT_BINARY_CACHE", firstCandidate("VCPKG_DEFAULT_BINARY_CACHE", vcpkgFallbacks...))
 
 	if home != "" {
-		addCache("", filepath.Join(home, ".m2", "repository"))
-		addCache("", filepath.Join(home, ".gradle", "caches"))
-		addCache("", filepath.Join(home, ".gradle", "wrapper"))
+		addCache("maven", "", filepath.Join(home, ".m2", "repository"))
+		addCache("gradle", "", filepath.Join(home, ".gradle", "caches"))
+		addCache("gradle", "", filepath.Join(home, ".gradle", "wrapper"))
 		addToolchainRoot("SDKMAN_DIR", firstCandidate("SDKMAN_DIR", filepath.Join(home, ".sdkman")))
 		addToolchainRoot("ASDF_DATA_DIR", firstCandidate("ASDF_DATA_DIR", filepath.Join(home, ".asdf")), "shims", "bin")
 		addToolchainRoot("", filepath.Join(home, ".local", "bin"), ".")

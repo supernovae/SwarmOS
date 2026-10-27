@@ -160,7 +160,7 @@ func openCodeToolFixture(t *testing.T, behavior string) {
 	defer server.Close()
 	executable, _ := os.Executable()
 	toolArgs := []string{"internal-tools", "--workspace", work}
-	env, err := prepareOpenCode(control, executable, toolArgs, nativeEnv(home, false))
+	env, err := prepareOpenCode(control, executable, toolArgs, nativeEnv(home, false, Dependencies{}))
 	if err != nil {
 		t.Fatal(err)
 	}

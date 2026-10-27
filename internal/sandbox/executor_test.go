@@ -28,11 +28,11 @@ func TestDelegatedValidationWithoutCodex(t *testing.T) {
 	var out strings.Builder
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "test \"$(cat source)\" = original; echo changed > source", nil, false, &out, &out); err != nil {
+	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "test \"$(cat source)\" = original; echo changed > source", nil, Dependencies{}, false, &out, &out); err != nil {
 		t.Fatal(err, out.String())
 	}
 	var failed strings.Builder
-	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "printf '%s\\n' '--- FAIL: TestNative (0.00s)'; exit 7", nil, false, &failed, &failed); err == nil || !strings.Contains(failed.String(), "--- FAIL: TestNative") {
+	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "printf '%s\\n' '--- FAIL: TestNative (0.00s)'; exit 7", nil, Dependencies{}, false, &failed, &failed); err == nil || !strings.Contains(failed.String(), "--- FAIL: TestNative") {
 		t.Fatalf("native failed output: %q, %v", failed.String(), err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "source"))
@@ -196,7 +196,7 @@ func TestOMPRealToolRegistration(t *testing.T) {
 	}
 	t.Log("OMP", version)
 	var output strings.Builder
-	env := append(nativeEnv(home, false), "OPENAI_API_KEY=synthetic-offline-fixture")
+	env := append(nativeEnv(home, false, Dependencies{}), "OPENAI_API_KEY=synthetic-offline-fixture")
 	if err := runOMP(ctx, binary, "openai/gpt-4.1", "", control, env, ToolExecutor{Work: t.TempDir()}, false, nil, &output, &output); err != nil {
 		t.Fatal(err, output.String())
 	}
@@ -298,7 +298,7 @@ func TestBubblewrapValidationBuildCacheIsolation(t *testing.T) {
 		script := fmt.Sprintf(`set -eu; test ! -e %q; test ! -e %q; test "$%s" = %q; printf warm > "$%s/validator-marker"`,
 			filepath.Join(c.Dir, "agent-marker"), c.Dir, v.EnvKey, v.Dir, v.EnvKey)
 		var out strings.Builder
-		if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, true, &out, &out); err != nil {
+		if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, Dependencies{}, true, &out, &out); err != nil {
 			t.Fatal(err, out.String())
 		}
 		if _, err := os.Stat(filepath.Join(v.Dir, "validator-marker")); err != nil {
@@ -332,7 +332,7 @@ func TestBubblewrapCandidateWritesDiscarded(t *testing.T) {
 	cfg := &contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: "omp", Binary: "not-used-by-validation"}}}
 	script := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/warm-marker")" = warm; printf bad > "$d/candidate-marker"; printf bad > "$d/warm-marker"; done`
 	var out strings.Builder
-	if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, false, &out, &out); err != nil {
+	if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, Dependencies{}, false, &out, &out); err != nil {
 		t.Fatal(err, out.String())
 	}
 	for _, c := range validator {

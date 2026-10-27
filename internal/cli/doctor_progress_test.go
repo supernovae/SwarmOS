@@ -19,12 +19,12 @@ func TestDoctorProgressOutput(t *testing.T) {
 	for _, jsonMode := range []bool{false, true} {
 		for _, failing := range []bool{false, true} {
 			t.Run(fmt.Sprintf("json=%v/fail=%v", jsonMode, failing), func(t *testing.T) {
-				statuses := []string{"OK", "WARN", "OPTIONAL", "OK", "OK", "OK"}
+				statuses := []string{"OK", "WARN", "OPTIONAL", "OK", "OK", "OK", "OK"}
 				if failing {
 					statuses[3] = "FAIL"
 				}
-				names := []string{"git", "github-auth", ".swarm/config.yaml", ".swarm/validation/required-checks.yaml", "reviewer-runtime", "git-identity"}
-				categories := []string{"system", "tracker", "harness", "harness", "sandbox", "system"}
+				names := []string{"git", "github-auth", ".swarm/config.yaml", ".swarm/validation/required-checks.yaml", "reviewer-runtime", "git-identity", "dependency-caches"}
+				categories := []string{"system", "tracker", "harness", "harness", "sandbox", "system", "execution"}
 				var stdout, stderr bytes.Buffer
 				count := 0
 				factory := func(ctx context.Context, observe func(progress.Event)) harness.DoctorRunner {
@@ -58,7 +58,7 @@ func TestDoctorProgressOutput(t *testing.T) {
 				} else if err != nil {
 					t.Fatal(err)
 				}
-				if count != 6 {
+				if count != len(names) {
 					t.Fatal(count)
 				}
 				var expected strings.Builder

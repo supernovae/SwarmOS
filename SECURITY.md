@@ -86,6 +86,10 @@ Tools have two-minute deadlines and per-process CPU, address-space, file-size, a
 
 Agents and validation use separate SwarmOS-owned build caches for each repository, never your own cache directories. Agent sandboxes never see the validator cache, and validation never reads an agent cache. Only a warm-up run of the trusted approved base writes the validator cache. Candidate checks see it read-only through a discarded write layer on Bubblewrap, or not at all on other backends. Planner and reviewer runs get scratch caches only. See [Build caches and who can write them](docs/project.md#build-caches-and-who-can-write-them).
 
+### Dependency caches
+
+Sandboxes do not see your host-wide Go module cache. Each repository gets its own read-only module cache, which the coordinator fills on the host from the approved base's `go.mod` and `go.sum` with a fetch-only `go mod download`. That command never receives GitHub tokens, Git credential helpers or SSH agents. Ecosystems without a fetch-only download command (.NET, Maven, Gradle, C/C++, and for now Rust, Python and Node) still mount their host caches read-only, and `swarm repo doctor` names them. Only the node profile can opt back into sharing the host Go module cache. See [Dependency caches](docs/project.md#dependency-caches).
+
 ### Optional OCI backend
 
 Set `execution.backend: oci`, `execution.container_runtime` to `docker` or `podman`, and `execution.container_image` to a locally available image pinned by SHA-256 digest. Existing policies that explicitly configure container settings retain OCI selection. Conflicting native/container requirements are rejected.

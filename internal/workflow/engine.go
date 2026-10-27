@@ -142,6 +142,8 @@ type PreflightResult struct {
 	TaskDigest   string
 	PolicyDigest string
 	Phase        string
+	// Dependencies are the agent dependency caches prefetched for BaseSHA.
+	Dependencies sandbox.Dependencies
 }
 
 type Engine struct {
@@ -155,6 +157,8 @@ type Engine struct {
 	// LookupEnv resolves execution mode and agent environment for this engine;
 	// nil reads the process environment.
 	LookupEnv func(string) (string, bool)
+	// DependencyMode comes from the node profile, never the repository.
+	DependencyMode sandbox.DependencyCacheMode
 }
 
 // EngineOptions carries one invocation's environment into engine
@@ -201,7 +205,9 @@ func NewEngineWithOptions(repoRoot string, tr tracker.Tracker, opts EngineOption
 	if prof, err := node.LoadOrDetectProfile(opts.NodeProfilePath); err == nil {
 		mgr.SetNodeProfile(prof)
 	}
-	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv}, nil
+	// A malformed profile keeps the default per-repository caches.
+	mode, _ := node.DependencyCacheMode(opts.NodeProfilePath)
+	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv, DependencyMode: mode}, nil
 }
 
 func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string) *Engine {
@@ -212,14 +218,16 @@ func NewEngineWithManagerOptions(repoRoot string, tr tracker.Tracker, mgr *lease
 	if prof, err := node.LoadOrDetectProfile(opts.NodeProfilePath); err == nil && mgr != nil {
 		mgr.SetNodeProfile(prof)
 	}
+	mode, _ := node.DependencyCacheMode(opts.NodeProfilePath)
 	return &Engine{
-		Tracker:      tr,
-		LeaseManager: mgr,
-		Config:       cfg,
-		repoRoot:     repoRoot,
-		ForkMode:     forkMode,
-		ForkRemote:   forkRemote,
-		LookupEnv:    opts.LookupEnv,
+		DependencyMode: mode,
+		Tracker:        tr,
+		LeaseManager:   mgr,
+		Config:         cfg,
+		repoRoot:       repoRoot,
+		ForkMode:       forkMode,
+		ForkRemote:     forkRemote,
+		LookupEnv:      opts.LookupEnv,
 	}
 }
 
@@ -423,8 +431,16 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			blockers = append(blockers, fmt.Sprintf("validation runtime preflight: %v", err))
 		}
 	}
+	// Prefetch from the approved base before claiming, so a missing module
+	// stops here rather than inside a sandbox.
+	var deps sandbox.Dependencies
+	if !opts.InspectOnly {
+		if deps, err = e.AgentDependencies(ctx, cfg, opts.RepoRoot, state.BaseSHA); err != nil {
+			return nil, err
+		}
+	}
 	return &PreflightResult{Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
-		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase}, nil
+		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}, nil
 }
 
 func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool) []string {
@@ -547,6 +563,14 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	wf, err := harness.LoadWorkflowAt(opts.RepoRoot, pre.WorkUnit.Workflow, st.BaseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load approved base workflow: %w", err)
+	}
+	// A fresh claim may move the base; prefetch for the claimed one. A
+	// failure releases the claim through the setup defer.
+	deps := pre.Dependencies
+	if st.BaseSHA != pre.BaseSHA {
+		if deps, err = e.AgentDependencies(ctx, cfg, opts.RepoRoot, st.BaseSHA); err != nil {
+			return nil, err
+		}
 	}
 	gate, err := contract.ResolveGate(pre.WorkUnit.Gate, wf.DefaultGate, cfg.DefaultGate)
 	if err != nil {
@@ -804,7 +828,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if err := admit("plan"); err != nil {
 			return res, err
 		}
-		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
+		planRun, err := runner.Run(ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions, Dependencies: deps})
 		if paused, pauseErr := pauseInterrupted(err, "plan", false); paused {
 			return res, pauseErr
 		}
@@ -1002,7 +1026,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if err := admit("implement"); err != nil {
 			return res, err
 		}
-		devRun, err := devRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("developer"), PreserveRejected: preserveRejected("developer"), Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
+		devRun, err := devRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("developer"), PreserveRejected: preserveRejected("developer"), Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions, Dependencies: deps})
 		var rejection *importRejection
 		if errors.As(err, &rejection) {
 			return res, rejectImport(err)
@@ -1110,7 +1134,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := admit("implement"); err != nil {
 		return res, err
 	}
-	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("tester"), PreserveRejected: preserveRejected("tester"), Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions})
+	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("tester"), PreserveRejected: preserveRejected("tester"), Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions, Dependencies: deps})
 	var rejection *importRejection
 	if errors.As(err, &rejection) {
 		return res, rejectImport(err)
@@ -1126,7 +1150,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	}
 	progress.next("required-checks")
 	testerBody, _ := readRequiredArtifact(wtPath, "VALIDATION.md")
-	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode, OnProgress: progress.observeCheck, GoFastPass: true, LookupEnv: e.LookupEnv})
+	report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode, OnProgress: progress.observeCheck, GoFastPass: true, LookupEnv: e.LookupEnv, DependencyMode: e.DependencyMode})
 	if context.Cause(ctx) == claimpause.ErrBudget {
 		return res, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, "implement", true, forkMode, forkRemote)
 	}
@@ -1282,7 +1306,12 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	if err != nil {
 		return "", st, err
 	}
+	deps, err := e.AgentDependencies(ctx, e.Config, wtPath, st.BaseSHA)
+	if err != nil {
+		return "", st, err
+	}
 	req := agent.RunRequest{
+		Dependencies:         deps,
 		OperatorInstructions: instructions, Agent: reviewerAgent, Role: "reviewer", Mode: mode, WorktreePath: wtPath,
 		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
 		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Read .swarm/active/REVIEW_EVIDENCE.md for previous reports and unmerged lessons as review evidence. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",

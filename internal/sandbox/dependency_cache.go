@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,19 +39,27 @@ type dependencyEcosystem struct {
 	Detect              []string // root-level base-tree patterns that enable the adapter
 	Lockfiles           []string // read from the approved base, never the worktree
 	TreeFiles           string   // basename also read at every path of the base tree
-	EnvKey              string
+	Env                 []cacheEnvKey
 	Prefetch            prefetchFunc
 	NoPrefetch          string // why there is no fetch-only prefetch
 	HostWithoutLockfile bool
+	// NeedsManifests also reads every package manifest in the base tree.
+	NeedsManifests bool
 }
+
+// cacheEnvKey points one environment variable at Subdir of the
+// ecosystem's cache. The first key identifies the cache.
+type cacheEnvKey struct{ Key, Subdir string }
 
 // prefetchRequest is one host prefetch. Dir is the only directory it may
 // write; Files holds the lockfiles and tree files present in the approved
-// base, keyed by their path relative to the repository root.
+// base, keyed by their path relative to the repository root, and Manifests
+// every manifest by base-tree path when the adapter needs them.
 type prefetchRequest struct {
-	BaseSHA string
-	Dir     string
-	Files   map[string][]byte
+	BaseSHA   string
+	Dir       string
+	Files     map[string][]byte
+	Manifests map[string][]byte
 }
 
 type prefetchFunc func(context.Context, prefetchRequest) error
@@ -60,10 +70,11 @@ type prefetchFunc func(context.Context, prefetchRequest) error
 // TestEveryMountedEcosystemIsClassified; see "Dependency caches" in
 // docs/project.md.
 var dependencyEcosystems = []dependencyEcosystem{
-	{Name: "go", Detect: []string{"go.mod"}, Lockfiles: []string{"go.mod", "go.sum"}, EnvKey: "GOMODCACHE", Prefetch: goModDownload},
-	{Name: "rust", Detect: []string{"Cargo.lock"}, Lockfiles: []string{"Cargo.lock"}, TreeFiles: "Cargo.toml", EnvKey: "CARGO_HOME", Prefetch: cargoFetch},
-	{Name: "python", Detect: []string{"uv.lock", "requirements*.txt"}, Lockfiles: []string{"uv.lock", "pyproject.toml", "requirements*.txt"}, EnvKey: "PIP_FIND_LINKS", Prefetch: pythonWheelDownload, HostWithoutLockfile: true},
-	{Name: "node", NoPrefetch: "adapter is a follow-up"},
+	{Name: "go", Detect: []string{"go.mod"}, Lockfiles: []string{"go.mod", "go.sum"}, Env: []cacheEnvKey{{Key: "GOMODCACHE"}}, Prefetch: goModDownload},
+	{Name: "rust", Detect: []string{"Cargo.lock"}, Lockfiles: []string{"Cargo.lock"}, TreeFiles: "Cargo.toml", Env: []cacheEnvKey{{Key: "CARGO_HOME"}}, Prefetch: cargoFetch},
+	{Name: "python", Detect: []string{"uv.lock", "requirements*.txt"}, Lockfiles: []string{"uv.lock", "pyproject.toml", "requirements*.txt"}, Env: []cacheEnvKey{{Key: "PIP_FIND_LINKS"}}, Prefetch: pythonWheelDownload, HostWithoutLockfile: true},
+	{Name: "node", Detect: nodeLockfiles, Lockfiles: append(slices.Clone(nodeLockfiles), "package.json", "pnpm-workspace.yaml"), Env: nodeCacheEnv, Prefetch: nodePrefetch, NeedsManifests: true},
+	{Name: "node-browsers", NoPrefetch: "browser binaries, not lockfile packages"},
 	{Name: "dotnet", NoPrefetch: "restore runs MSBuild"},
 	{Name: "maven", NoPrefetch: "plugins run during resolve"},
 	{Name: "gradle", NoPrefetch: "build scripts run during resolve"},
@@ -136,11 +147,32 @@ func dependencyEcosystemNamed(name string) (dependencyEcosystem, bool) {
 	return dependencyEcosystem{}, false
 }
 
+// envKey is the key that identifies an ecosystem's cache.
+func (eco dependencyEcosystem) envKey() string {
+	if len(eco.Env) == 0 {
+		return ""
+	}
+	return eco.Env[0].Key
+}
+
+// env returns the cache's KEY=dir entries from the table, one per key.
+func (c DependencyCache) env() []string {
+	eco, ok := dependencyEcosystemNamed(c.Ecosystem)
+	if !ok || eco.envKey() != c.EnvKey {
+		return []string{c.EnvKey + "=" + c.Dir}
+	}
+	env := make([]string, 0, len(eco.Env))
+	for _, k := range eco.Env {
+		env = append(env, k.Key+"="+filepath.Join(c.Dir, k.Subdir))
+	}
+	return env
+}
+
 // DependencyCacheEnv returns KEY=dir entries for caches.
 func DependencyCacheEnv(caches []DependencyCache) []string {
 	env := make([]string, 0, len(caches))
 	for _, c := range caches {
-		env = append(env, c.EnvKey+"="+c.Dir)
+		env = append(env, c.env()...)
 	}
 	return env
 }
@@ -149,7 +181,7 @@ func DependencyCacheEnv(caches []DependencyCache) []string {
 // absolute directory outside the workspace.
 func checkDependencyCache(c DependencyCache, work string) error {
 	eco, ok := dependencyEcosystemNamed(c.Ecosystem)
-	if !ok || eco.Prefetch == nil || eco.EnvKey != c.EnvKey {
+	if !ok || eco.Prefetch == nil || eco.envKey() != c.EnvKey {
 		return fmt.Errorf("dependency cache %q has no table entry", c.EnvKey)
 	}
 	if !filepath.IsAbs(c.Dir) || filepath.Clean(c.Dir) == "/" {
@@ -172,7 +204,7 @@ func ParseDependencyCache(value, workspace string) (DependencyCache, error) {
 	if !found || eco.Prefetch == nil {
 		return DependencyCache{}, fmt.Errorf("unknown dependency cache ecosystem %q", name)
 	}
-	c := DependencyCache{Ecosystem: name, EnvKey: eco.EnvKey, Dir: filepath.Clean(dir)}
+	c := DependencyCache{Ecosystem: name, EnvKey: eco.envKey(), Dir: filepath.Clean(dir)}
 	if !filepath.IsAbs(dir) {
 		return DependencyCache{}, fmt.Errorf("dependency cache %s: %q is not an absolute directory", name, dir)
 	}
@@ -279,10 +311,21 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 		if err := readBaseTreeFiles(ctx, worktree, baseSHA, eco.TreeFiles, files); err != nil {
 			return deps, err
 		}
+		digested := files
+		var manifests map[string][]byte
+		if eco.NeedsManifests {
+			if manifests, err = baseManifests(ctx, worktree, baseSHA); err != nil {
+				return deps, fmt.Errorf("read %s manifests from approved base: %w", eco.Name, err)
+			}
+			digested = maps.Clone(files)
+			for name, data := range manifests {
+				digested["manifest:"+name] = data
+			}
+		}
 		// v3 re-prepares caches filled before downloaded Go toolchains were finished.
-		marker := ".prefetched-v3-" + eco.Name + "-" + lockfileDigest(files)
+		marker := ".prefetched-v3-" + eco.Name + "-" + lockfileDigest(digested)
 		if _, err := os.Lstat(filepath.Join(keyDir, marker)); errors.Is(err, os.ErrNotExist) {
-			if err := eco.Prefetch(ctx, prefetchRequest{BaseSHA: baseSHA, Dir: dir, Files: files}); err != nil {
+			if err := eco.Prefetch(ctx, prefetchRequest{BaseSHA: baseSHA, Dir: dir, Files: files, Manifests: manifests}); err != nil {
 				return deps, fmt.Errorf("prefetch %s modules for base %s: %w", eco.Name, shortSHA(baseSHA), err)
 			}
 			if err := safefs.WriteFile(keyDir, marker, nil, 0o600); err != nil {
@@ -291,7 +334,7 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 		} else if err != nil {
 			return deps, fmt.Errorf("check %s prefetch: %w", eco.Name, err)
 		}
-		deps.Caches = append(deps.Caches, DependencyCache{Ecosystem: eco.Name, EnvKey: eco.EnvKey, Dir: dir})
+		deps.Caches = append(deps.Caches, DependencyCache{Ecosystem: eco.Name, EnvKey: eco.envKey(), Dir: dir})
 	}
 	return deps, nil
 }

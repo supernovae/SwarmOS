@@ -42,21 +42,27 @@ func TestDoctorReportsDependencyCacheModes(t *testing.T) {
 	check := doctorDependencyCheck(t, f)
 	detail, _ := check["detail"].(string)
 	if check["status"] != "OK" || !strings.Contains(detail, "go: per-repository") || !strings.Contains(detail, "rust: per-repository") ||
-		!strings.Contains(detail, "python: per-repository") || !strings.Contains(detail, "sharing host caches (no supported lockfile)") {
+		!strings.Contains(detail, "python: per-repository") || !strings.Contains(detail, "node: per-repository") ||
+		!strings.Contains(detail, "sharing host caches (no supported lockfile)") {
 		t.Fatalf("default dependency-caches check = %v", check)
 	}
 	_, shared, ok := strings.Cut(detail, "sharing host caches read-only")
 	if !ok {
 		t.Fatalf("doctor does not name ecosystems sharing host caches: %q", detail)
 	}
-	for _, name := range []string{"node", "dotnet", "maven", "gradle", "c-cpp"} {
+	for _, name := range []string{"node-browsers", "dotnet", "maven", "gradle", "c-cpp"} {
 		if !strings.Contains(shared, name) {
 			t.Errorf("doctor does not name %s as sharing host caches: %q", name, detail)
 		}
 	}
 	shared, _, _ = strings.Cut(shared, ";")
-	for _, name := range []string{"go", "rust", "python"} {
-		if strings.Contains(shared, name) {
+	// Match whole names, so node-browsers does not count as node.
+	names := map[string]bool{}
+	for _, name := range strings.FieldsFunc(shared, func(r rune) bool { return strings.ContainsRune(",:;() ", r) }) {
+		names[name] = true
+	}
+	for _, name := range []string{"go", "rust", "python", "node"} {
+		if names[name] {
 			t.Errorf("%s is listed as sharing host caches by default: %q", name, detail)
 		}
 	}

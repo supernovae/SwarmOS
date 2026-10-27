@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,7 +261,8 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 			}
 			files[name] = data
 		}
-		marker := ".prefetched-" + eco.Name + "-" + lockfileDigest(files)
+		// v3 re-prepares caches filled before downloaded Go toolchains were finished.
+		marker := ".prefetched-v3-" + eco.Name + "-" + lockfileDigest(files)
 		if _, err := os.Lstat(filepath.Join(keyDir, marker)); errors.Is(err, os.ErrNotExist) {
 			if err := eco.Prefetch(ctx, prefetchRequest{BaseSHA: baseSHA, Dir: dir, Files: files}); err != nil {
 				return deps, fmt.Errorf("prefetch %s modules for base %s: %w", eco.Name, shortSHA(baseSHA), err)
@@ -376,6 +378,12 @@ func goModDownload(ctx context.Context, req prefetchRequest) error {
 		if err != nil {
 			return errors.New(redact(prefetchFailure(stdout, stderr, err)))
 		}
+		// The sandbox mounts this cache read-only, but the go command finishes
+		// a downloaded toolchain on its first switch. Do that here, without
+		// running the toolchain, so the prefetch stays fetch-only.
+		if err := finishGoToolchain(filepath.Join(req.Dir, "golang.org", strings.TrimPrefix(toolchain, "golang.org/"))); err != nil {
+			return fmt.Errorf("prepare Go toolchain %s: %s", need, redact(err.Error()))
+		}
 		gomod = lowerGoDirective(gomod, local)
 	}
 	if err := os.WriteFile(filepath.Join(module, "go.mod"), gomod, 0o600); err != nil {
@@ -484,6 +492,92 @@ func dedupe(lines []string) []string {
 
 // requiredGoToolchain returns the Go version go.mod selects (its toolchain
 // line, else its go line), without the "go" prefix, or "".
+// finishGoToolchain repeats what cmd/go's toolchain switch
+// (cmd/go/internal/toolchain, Go 1.21+) does to a freshly extracted
+// golang.org/toolchain module on first use: add execute bits under pkg/tool,
+// lib, and bin, then copy each _go.mod to go.mod, src/go.mod last. Both steps
+// are skipped when already done, exactly as the go command checks.
+func finishGoToolchain(dir string) error {
+	if info, err := os.Stat(filepath.Join(dir, "bin", "go")); err == nil && info.Mode()&0o111 == 0 {
+		for _, step := range []struct{ dir, pattern string }{{"pkg/tool", ""}, {"lib", "go_?*_?*_exec"}, {"bin/gofmt", ""}, {"bin", ""}} {
+			if err := allowToolchainExec(filepath.Join(dir, filepath.FromSlash(step.dir)), step.pattern); err != nil {
+				return err
+			}
+		}
+	}
+	srcUGoMod, srcGoMod := filepath.Join(dir, "src", "_go.mod"), filepath.Join(dir, "src", "go.mod")
+	if fileSize(srcGoMod) == fileSize(srcUGoMod) {
+		return nil
+	}
+	if err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == srcUGoMod || d.Name() != "_go.mod" {
+			return err
+		}
+		return copyToolchainGoMod(path, filepath.Join(filepath.Dir(path), "go.mod"))
+	}); err != nil {
+		return err
+	}
+	return copyToolchainGoMod(srcUGoMod, srcGoMod)
+}
+
+func allowToolchainExec(dir, pattern string) error {
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if pattern != "" {
+			if ok, _ := filepath.Match(pattern, d.Name()); !ok {
+				return nil
+			}
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		return os.Chmod(path, info.Mode()&0o777|0o111)
+	})
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return -1
+	}
+	return info.Size()
+}
+
+// copyToolchainGoMod writes new from old inside a read-only module cache
+// directory, restoring the directory's mode afterwards.
+func copyToolchainGoMod(old, new string) error {
+	oldInfo, err := os.Stat(old)
+	if err != nil {
+		return err
+	}
+	if fileSize(new) == oldInfo.Size() {
+		return nil
+	}
+	data, err := os.ReadFile(old)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(old)
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, dirInfo.Mode()|0o200); err != nil {
+		return err
+	}
+	defer os.Chmod(dir, dirInfo.Mode())
+	if err := os.WriteFile(new, data, 0o644); err != nil {
+		return err
+	}
+	return os.Chmod(new, oldInfo.Mode())
+}
+
 func requiredGoToolchain(gomod []byte) string {
 	goLine, toolchain := "", ""
 	scanner := bufio.NewScanner(bytes.NewReader(gomod))

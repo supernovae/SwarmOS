@@ -11,6 +11,7 @@ type RunRequest struct {
 	CheckImport          func(context.Context, []string) error // coordinator-only fencing and trusted protected-path check
 	OperatorInstructions string                                // coordinator-supplied flag guidance, separate from attestations
 	RecoveryRoot         string                                // coordinator-owned durable timeout recovery destination
+	PreserveRejected     func(context.Context, error, []byte)  // coordinator-only receiver of a recoverable rejected run's patch
 	ProjectPlan          bool                                  // coordinator-selected project roadmap output for planner
 	Agent                string                                // configured allowlisted provider/harness name
 	Role                 string                                // "planner", "reviewer", "developer", "tester"

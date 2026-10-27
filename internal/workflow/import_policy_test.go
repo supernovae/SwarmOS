@@ -52,6 +52,66 @@ func TestWritableImportPolicy(t *testing.T) {
 		}
 	}
 }
+func TestImportPolicyRecoverable(t *testing.T) {
+	const (
+		implementation = ".swarm/active/IMPLEMENTATION.md"
+		validation     = ".swarm/active/VALIDATION.md"
+		review         = ".swarm/active/REVIEW.md"
+	)
+	patterns := []string{"policy/**", ".swarm/validation/**"}
+	for _, tc := range []struct {
+		name        string
+		role        string
+		paths       []string
+		fork        bool
+		recoverable bool
+	}{
+		{"developer validation", "developer", []string{"src/a.go", implementation, ".swarm/active/LESSONS.md", validation}, false, true},
+		{"tester implementation", "tester", []string{"src/a.go", validation, implementation}, false, true},
+		{"developer review", "developer", []string{review}, false, true},
+		{"duplicate output", "developer", []string{validation, validation}, false, true},
+		{"plan", "developer", []string{validation, ".swarm/active/PLAN.md"}, false, false},
+		{"workunit", "developer", []string{validation, ".swarm/active/WORKUNIT.md"}, false, false},
+		{"test plan", "developer", []string{validation, ".swarm/active/TEST_PLAN.md"}, false, false},
+		{"system prompt", "developer", []string{validation, ".swarm/active/SYSTEM_PROMPT.md"}, false, false},
+		{"workunit json", "developer", []string{validation, ".swarm/active/workunit.json"}, false, false},
+		{"guidance", "developer", []string{validation, ".swarm/active/guidance/x"}, false, false},
+		{"protected policy", "developer", []string{validation, ".swarm/validation/required-checks.yaml"}, false, false},
+		{"protected pattern", "developer", []string{validation, "policy/checks"}, false, false},
+		{"fork", "developer", []string{validation}, true, false},
+	} {
+		err := writableImportPolicy(tc.role, tc.paths, patterns, false, tc.fork)
+		var rejection *importRejection
+		if !errors.As(err, &rejection) {
+			t.Fatalf("%s: expected rejection, got %v", tc.name, err)
+		}
+		if rejection.Recoverable != tc.recoverable || rejection.RecoverableImport() != tc.recoverable {
+			t.Fatalf("%s: recoverable=%v want %v (%v)", tc.name, rejection.Recoverable, tc.recoverable, rejection.Paths)
+		}
+	}
+	// A role output under a protected pattern is a protected-path rejection.
+	if err := writableImportPolicy("developer", []string{validation}, []string{".swarm/**"}, false, false); err.(*importRejection).Recoverable {
+		t.Fatal("protected role output was recoverable")
+	}
+	for _, tc := range []struct {
+		rejected []string
+		want     bool
+	}{
+		{[]string{validation}, true},
+		{[]string{validation, review}, true},
+		{[]string{implementation}, false}, // the developer may write it; nothing to drop
+		{[]string{".swarm/active/PLAN.md"}, false},
+		{[]string{".swarm/active/WORKUNIT.md"}, false},
+		{[]string{"policy/checks"}, false},
+		{[]string{validation, "src/a.go"}, false},
+		{nil, false},
+	} {
+		if got := RecoverableRejection("developer", tc.rejected, patterns, false); got != tc.want {
+			t.Fatalf("RecoverableRejection(%v) = %v", tc.rejected, got)
+		}
+	}
+}
+
 func boolInt(b bool) int {
 	if b {
 		return 1

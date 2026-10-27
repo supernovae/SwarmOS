@@ -88,7 +88,7 @@ func saveDiagnostics(worktree string, transcript *process.Tail) (string, int, er
 		return "", 0, unavailableRedaction
 	}
 	data := renderDiagnostics(raw, truncated, redaction)
-	dirPath, dir, err := openDiagnosticsDir(worktree)
+	dirPath, dir, err := openStateDir(worktree, "diagnostics")
 	if err != nil {
 		return "", 0, err
 	}
@@ -109,7 +109,7 @@ func saveDiagnostics(worktree string, transcript *process.Tail) (string, int, er
 	if err := dir.WriteFile(name, data, 0o600); err != nil {
 		return "", 0, unavailableWrite
 	}
-	pruneDiagnostics(dir, name, diagnosticsNow())
+	pruneStateFiles(dir, diagnosticsFileName, name, diagnosticsNow())
 	return filepath.Join(dirPath, name), len(data), nil
 }
 
@@ -177,10 +177,10 @@ func userStateDir() (string, error) {
 	return filepath.Join(home, ".local", "state"), nil
 }
 
-// openDiagnosticsDir pins <state>/swarm/diagnostics, creating missing
-// directories at 0700 without following symlinks, and refuses a location that
-// is shared with other users or inside the agent's worktree.
-func openDiagnosticsDir(worktree string) (string, *safefs.Root, error) {
+// openStateDir pins <state>/swarm/<sub>, creating missing directories at 0700
+// without following symlinks, and refuses a location that is shared with other
+// users or inside the agent's worktree.
+func openStateDir(worktree, sub string) (string, *safefs.Root, error) {
 	state, err := diagnosticsStateDir()
 	if err != nil {
 		return "", nil, unavailableStateDir
@@ -205,7 +205,7 @@ func openDiagnosticsDir(worktree string) (string, *safefs.Root, error) {
 		missing = append([]string{filepath.Base(existing)}, missing...)
 		existing = parent
 	}
-	rel := filepath.Join(append(missing, "swarm", "diagnostics")...)
+	rel := filepath.Join(append(missing, "swarm", sub)...)
 	dirPath := filepath.Join(existing, rel)
 	if resolved, err := filepath.EvalSymlinks(existing); err != nil || insideWorktree(worktree, dirPath) || insideWorktree(worktree, filepath.Join(resolved, rel)) {
 		return "", nil, unavailableUnsafe
@@ -240,7 +240,7 @@ func privateDirectory(dir *safefs.Root) error {
 		return err
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("diagnostics directory is accessible to other users")
+		return fmt.Errorf("state directory is accessible to other users")
 	}
 	return nil
 }
@@ -275,10 +275,11 @@ func printablePath(path string) bool {
 	return true
 }
 
-// pruneDiagnostics removes logs older than diagnosticsMaxAge and the oldest
-// beyond diagnosticsMaxCount. It only removes matching regular files and is
-// best effort: a pruning failure never hides the saved log or the run error.
-func pruneDiagnostics(dir *safefs.Root, keep string, now time.Time) {
+// pruneStateFiles removes files older than diagnosticsMaxAge and the oldest
+// beyond diagnosticsMaxCount. It only removes regular files matching pattern
+// and is best effort: a pruning failure never hides the saved file or the run
+// error.
+func pruneStateFiles(dir *safefs.Root, pattern *regexp.Regexp, keep string, now time.Time) {
 	f, err := dir.OpenDirectory(".")
 	if err != nil {
 		return
@@ -290,7 +291,7 @@ func pruneDiagnostics(dir *safefs.Root, keep string, now time.Time) {
 		scanned += len(entries)
 		for _, entry := range entries {
 			name := entry.Name()
-			if name == keep || !diagnosticsFileName.MatchString(name) || !entry.Type().IsRegular() {
+			if name == keep || !pattern.MatchString(name) || !entry.Type().IsRegular() {
 				continue
 			}
 			info, err := entry.Info()
@@ -316,7 +317,7 @@ func pruneDiagnostics(dir *safefs.Root, keep string, now time.Time) {
 		}
 		return kept[i].Name() > kept[j].Name()
 	})
-	// The just-saved log counts toward the limit and is always retained.
+	// The just-saved file counts toward the limit and is always retained.
 	for _, info := range kept[min(len(kept), diagnosticsMaxCount-1):] {
 		_ = dir.Remove(info.Name())
 	}

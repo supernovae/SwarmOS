@@ -208,6 +208,32 @@ func preserveTimeoutPatch(ctx context.Context, input, work, destination, role st
 	if err != nil {
 		return "", err
 	}
+	patch, omitted, err := buildPatch(ctx, before, after)
+	if err != nil {
+		return "", err
+	}
+	root, err := safefs.Open(destination)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	rel := filepath.Join(".swarm", "active-output", role+"-timeout.patch")
+	if err := root.MkdirAll(filepath.Dir(rel), 0700); err != nil {
+		return "", err
+	}
+	if err := root.WriteFile(rel, patch, 0600); err != nil {
+		return "", err
+	}
+	result := filepath.Join(destination, rel)
+	if omitted > 0 {
+		result += fmt.Sprintf(" (%d binary or oversized changes omitted)", omitted)
+	}
+	return result, nil
+}
+
+// buildPatch renders a bounded text patch from before to after. Binary,
+// oversized, or over-budget changes are counted in omitted, not rendered.
+func buildPatch(ctx context.Context, before, after map[string]timeoutFile) ([]byte, int, error) {
 	names := map[string]bool{}
 	for name := range before {
 		names[name] = true
@@ -224,7 +250,7 @@ func preserveTimeoutPatch(ctx context.Context, input, work, destination, role st
 	omitted := 0
 	for _, name := range sorted {
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return nil, 0, err
 		}
 		a, existed := before[name]
 		b, exists := after[name]
@@ -257,21 +283,5 @@ func preserveTimeoutPatch(ctx context.Context, input, work, destination, role st
 		}
 		patch.Write(hunk)
 	}
-	root, err := safefs.Open(destination)
-	if err != nil {
-		return "", err
-	}
-	defer root.Close()
-	rel := filepath.Join(".swarm", "active-output", role+"-timeout.patch")
-	if err := root.MkdirAll(filepath.Dir(rel), 0700); err != nil {
-		return "", err
-	}
-	if err := root.WriteFile(rel, patch.Bytes(), 0600); err != nil {
-		return "", err
-	}
-	result := filepath.Join(destination, rel)
-	if omitted > 0 {
-		result += fmt.Sprintf(" (%d binary or oversized changes omitted)", omitted)
-	}
-	return result, nil
+	return patch.Bytes(), omitted, nil
 }

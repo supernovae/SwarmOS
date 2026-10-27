@@ -45,7 +45,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 		return nil, limitErr
 	}
 	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
-		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckImport: req.CheckImport}
+		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckImport: req.CheckImport, PreserveRejected: req.PreserveRejected}
 	options.Lifecycle = lifecycle
 	collector := &GuidanceCollector{}
 	options.GuidanceDelivered = collector.Delivered

@@ -671,6 +671,30 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return writableImportPolicy(role, paths, pre.Validation.ProtectedPaths, pre.WorkUnit.AllowHarnessChanges, forkMode)
 		}
 	}
+	// preserveRejected saves a recoverable rejected run as a private patch for
+	// recover-import. The patch is bound to the clean head the run starts from.
+	preserveRejected := func(role string) func(context.Context, error, []byte) {
+		head, dirty, rebasing, headErr := workspace.StatusPRHead(ctx, wtPath)
+		return func(_ context.Context, runErr error, patch []byte) {
+			var rejection *importRejection
+			if !errors.As(runErr, &rejection) || !rejection.Recoverable {
+				return
+			}
+			switch {
+			case headErr != nil || dirty || rebasing:
+				rejection.PatchNote = "worktree was not clean when the run started"
+			case patch == nil:
+				rejection.PatchNote = "binary or oversized changes"
+			default:
+				path, err := agent.SaveRecoveryPatch(wtPath, agent.RecoveryHeader{Issue: opts.IssueNumber, PR: opts.PRNumber, Role: role, HeadSHA: head, Rejected: rejection.Paths}, patch)
+				if err != nil {
+					rejection.PatchNote = err.Error()
+				} else {
+					rejection.Patch = path
+				}
+			}
+		}
+	}
 	rejectImport := func(runErr error) error {
 		var rejection *importRejection
 		if !errors.As(runErr, &rejection) {
@@ -682,6 +706,10 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return fmt.Errorf("%w: record import rejection: %w", runErr, err)
 		}
 		res.State = updated
+		if rejection.Patch != "" {
+			// Only the local error names the private path; the projected reason does not.
+			return fmt.Errorf("%s (saved at %s): %w", reason, rejection.Patch, runErr)
+		}
 		return fmt.Errorf("%s: %w", reason, runErr)
 	}
 	pauseInterrupted := func(runErr error, phase string, checkpoint bool) (bool, error) {
@@ -959,7 +987,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		if err := admit("implement"); err != nil {
 			return res, err
 		}
-		devRun, err := devRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("developer"), Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
+		devRun, err := devRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("developer"), PreserveRejected: preserveRejected("developer"), Agent: developer, Role: "developer", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, st, opts.PRNumber), OperatorInstructions: opts.Instructions})
 		var rejection *importRejection
 		if errors.As(err, &rejection) {
 			return res, rejectImport(err)
@@ -1067,7 +1095,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := admit("implement"); err != nil {
 		return res, err
 	}
-	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("tester"), Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions})
+	testerRun, err := testerRunner.Run(ctx, agent.RunRequest{CheckImport: checkImport("tester"), PreserveRejected: preserveRejected("tester"), Agent: tester, Role: "tester", Mode: mode, WorktreePath: wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: opts.Instructions})
 	var rejection *importRejection
 	if errors.As(err, &rejection) {
 		return res, rejectImport(err)

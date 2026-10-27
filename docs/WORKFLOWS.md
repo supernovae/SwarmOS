@@ -31,12 +31,20 @@ Each workflow phase binds to a role prompt in `.swarm/prompts/` and reads/writes
 
 | Role | Prompt File | Reads | Produces |
 | :--- | :--- | :--- | :--- |
-| **Planner** (`planner`) | `.swarm/prompts/planner.md` | `WORKUNIT.md` and repository context | `.swarm/active/PLAN.md` (`design`) & `.swarm/active/TEST_PLAN.md` (`test-plan`) |
+| **Planner** (`planner`) | `.swarm/prompts/planner.md` | `WORKUNIT.md` and repository context | `.swarm/active/PLAN.md` (`design`, ending with a `## HANDOFF` section) & `.swarm/active/TEST_PLAN.md` (`test-plan`) |
 | **Reviewer** (`reviewer`) | `.swarm/prompts/reviewer.md` | `WORKUNIT.md`, `PLAN.md`, `TEST_PLAN.md` | `.swarm/active/REVIEW.md` (`review` starting with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`) |
-| **Developer** (`developer`) | `.swarm/prompts/developer.md` | Approved `PLAN.md` and `TEST_PLAN.md` | Working-tree implementation changes + checkpoint commit |
-| **Tester / Validator** (`tester`) | `.swarm/prompts/tester.md` | Implementation and approved-base validation policy | Validation check output (`validation` artifact) |
+| **Developer** (`developer`) | `.swarm/prompts/developer.md` | Approved `PLAN.md` (including its handoff) and `TEST_PLAN.md` | Working-tree implementation changes + checkpoint commit, and `.swarm/active/IMPLEMENTATION.md` (`implementation`, ending with a `## HANDOFF` section) |
+| **Tester / Validator** (`tester`) | `.swarm/prompts/tester.md` | Implementation, the developer's handoff in `WORKUNIT.md`, and approved-base validation policy | Validation check output (`validation` artifact) |
 
 SwarmOS compiles `.swarm/active/WORKUNIT.md` and `.swarm/active/SYSTEM_PROMPT.md` freshly for each claimed task and injects managed pointer blocks into `AGENTS.md` and `CLAUDE.md` inside the worktree so interactive and headless tools find the active contract immediately.
+
+### Handoffs between roles
+
+Developers and testers start from what earlier roles already checked instead of rediscovering the repository. The planner ends `PLAN.md` with a `## HANDOFF` section: entry points and symbols, tests and fixtures to extend, exact focused verification commands, assumptions already checked, conditions that reopen the plan, and **What this change breaks**, a list of existing tests, docs, templates, and call sites that depend on what the plan changes, found by searching the repository. Every file the plan calls new must be absent at the approved base; otherwise the plan names it as modified.
+
+The developer ends `IMPLEMENTATION.md` with its own handoff for the tester: changed behavior, changed files, acceptance gaps, and the commands it ran with their results. SwarmOS records that report in the `implementation` artifact, so the tester reads it under **Prior Artifacts** in `WORKUNIT.md` even when the run resumes in a fresh session.
+
+Handoffs are evidence, not authority. Each role verifies the claims against the source, and a handoff never changes the approved inputs, the plan review gate, or validation. The tester still checks every acceptance criterion independently, and the coordinator still reruns the required checks.
 
 ### Matching the plan to the work
 

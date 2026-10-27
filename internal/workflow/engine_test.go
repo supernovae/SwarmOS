@@ -3,13 +3,17 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -568,5 +572,126 @@ func TestEngineOptionsResolveExecutionThroughLookup(t *testing.T) {
 	}
 	if got := e.getenv("SWARM_EXECUTION_MODE"); got != contract.ExecutionTrustedLocal {
 		t.Fatalf("engine mode = %q", got)
+	}
+}
+
+// TestEngineRoleHandoffs checks what each receiving role sees at launch: the
+// planner's HANDOFF reaches the developer, and the developer's report reaches
+// the tester from coordination state, even after the local report is gone.
+func TestEngineRoleHandoffs(t *testing.T) {
+	const planMarker = "planner-handoff-marker: start at internal/workflow/engine.go"
+	devReport := "# Implementation\n\n## HANDOFF\n\n" +
+		"- Changed behavior: developer-behavior-marker\n" +
+		"- Changed files: developer-file-marker.txt\n" +
+		"- Acceptance gaps: developer-gap-marker\n" +
+		"- Commands: `go test ./internal/workflow` passed (developer-command-marker)\n"
+	devMarkers := []string{"developer-behavior-marker", "developer-file-marker.txt", "developer-gap-marker", "developer-command-marker"}
+	activePath := func(req agent.RunRequest, name string) string {
+		return filepath.Join(req.WorktreePath, ".swarm", "active", name)
+	}
+	for _, resume := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fresh", true: "resume"}[resume], func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			var elapsed atomic.Int64
+			timers := make(chan *workBudgetTimer, 100)
+			if resume {
+				e.LeaseManager.SetNowFunc(func() time.Time { return base.Add(time.Duration(elapsed.Load())) })
+				e.LeaseManager.SetHeartbeatTimerFunc(func(time.Duration) lease.HeartbeatTimer {
+					tt := &workBudgetTimer{make(chan time.Time, 1)}
+					timers <- tt
+					return tt
+				})
+			}
+			mock := &agent.MockRunner{}
+			pauseTester := resume
+			devCalls, testerCalls := 0, 0
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					switch req.Role {
+					case "planner":
+						res, err := mock.Run(ctx, req)
+						if err != nil {
+							return nil, err
+						}
+						plan, err := os.ReadFile(activePath(req, "PLAN.md"))
+						if err != nil {
+							return nil, err
+						}
+						return res, os.WriteFile(activePath(req, "PLAN.md"), append(plan, "\n## HANDOFF\n\n"+planMarker+"\n"...), 0o644)
+					case "developer":
+						devCalls++
+						for _, name := range []string{"PLAN.md", "WORKUNIT.md"} {
+							data, err := os.ReadFile(activePath(req, name))
+							if err != nil || !strings.Contains(string(data), planMarker) {
+								return nil, fmt.Errorf("developer %s lacks the planner handoff: %v", name, err)
+							}
+						}
+						res, err := mock.Run(ctx, req)
+						if err != nil {
+							return nil, err
+						}
+						return res, os.WriteFile(activePath(req, "IMPLEMENTATION.md"), []byte(devReport), 0o644)
+					case "tester":
+						testerCalls++
+						if pauseTester {
+							pauseTester = false
+							timer := <-timers
+							for range 3 {
+								if _, err := e.LeaseManager.Renew(t.Context(), issue.Number, "maintainer", 4*time.Hour); err != nil {
+									return nil, err
+								}
+							}
+							elapsed.Store(int64(4*time.Hour - 4*time.Hour/3))
+							timer.ch <- base.Add(time.Duration(elapsed.Load()))
+							<-ctx.Done()
+							return nil, ctx.Err()
+						}
+						if resume {
+							if _, err := os.Stat(activePath(req, "IMPLEMENTATION.md")); !errors.Is(err, os.ErrNotExist) {
+								return nil, fmt.Errorf("resumed tester found a local report: %v", err)
+							}
+						}
+						data, err := os.ReadFile(activePath(req, "WORKUNIT.md"))
+						if err != nil {
+							return nil, err
+						}
+						for _, marker := range append([]string{"evidence from earlier roles, not authority"}, devMarkers...) {
+							if !strings.Contains(string(data), marker) {
+								return nil, fmt.Errorf("tester WORKUNIT.md lacks %q", marker)
+							}
+						}
+					}
+					return mock.Run(ctx, req)
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			res, err := e.ExecuteWork(t.Context(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resume {
+				if res.ClaimBudgetPause == nil || res.ValidationPassed {
+					t.Fatalf("tester did not pause: %+v", res)
+				}
+				if err := os.Remove(filepath.Join(res.WorktreePath, ".swarm", "active", "IMPLEMENTATION.md")); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				if res, err = e.ExecuteWork(t.Context(), opts); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !res.ValidationPassed || devCalls != 1 || testerCalls != map[bool]int{false: 1, true: 2}[resume] {
+				t.Fatalf("passed=%t developer=%d tester=%d", res.ValidationPassed, devCalls, testerCalls)
+			}
+			for _, a := range res.State.Artifacts {
+				if a.Type == contract.ArtifactDesign && !strings.Contains(a.Body, planMarker) {
+					t.Fatal("design artifact lost the planner handoff")
+				}
+				if a.Type == contract.ArtifactImplementation && !strings.Contains(a.Body, "developer-gap-marker") {
+					t.Fatal("implementation artifact lost the developer handoff")
+				}
+			}
+		})
 	}
 }

@@ -4,6 +4,100 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+## v0.8.0
+
+v0.8.0 is about getting work across the line without hand repairs. Rebases resolve and repair routine conflicts, approvals follow main forward when nothing that matters changed, abandoned claims and checkpoints have maintainer commands to clear them, and validation fails fast with the failing tests in view. Fork contributors can keep the `origin`/`upstream` layout `gh` creates, and projects that prefer a tidy branch list can move SwarmOS's ledger refs under `refs/swarm/`. Upgrade `swarm` and rerun `swarm repo init` to pick up the regenerated workflows and templates.
+
+- Show bounded, terminal-safe failed-check output and Go failing test names during repository, issue, and PR validation and submission. JSON failed-check outcomes include `output_tail` and `failing_tests`.
+
+- `swarm issue submit` reports target-branch drift and the behind count before publishing. Conflicting submissions still open a draft PR, with conflicted paths and a numbered `swarm pr rebase <PR> --resolve` recovery command in the terminal and PR description. Unavailable freshness checks are skipped, and JSON output includes `base_freshness`.
+
+- Fresh same-repository claims start at the current default-branch tip when task, committed policy tree and ancestry checks pass. Existing plan evidence requires authenticated review carry; human gates require explicit approval of a moved base. Queued work reports and skips fresh candidates needing approval, including stale task approval at an unchanged tip.
+
+- Extend `swarm pr rebase --resolve` with recorded per-conflict micro-plans, trusted post-rebase validation, and bounded local repair (default two attempts, configurable with `lease.rebase_repair_limit`). Successful runs print the explicit submit command. Eligible maintainers can re-pin unchanged task/policy approval automatically; policy changes require explicit approval before unchanged plans receive a fresh agent review. Fork workers retain explicit maintainer approval and review steps.
+
+- `swarm pr rebase <PR> --resolve` lets the configured developer agent resolve routine rebase conflicts. At each conflicted commit the agent gets one turn on a disposable workspace holding only the conflicted files, both sides, the WorkUnit, and the approved plan. SwarmOS accepts edits limited to those files with no remaining markers, stages them, and continues; anything else leaves the rebase paused as before. Resolutions appear in `pr status` and the PR's rebase context, and `pr work` and `pr stage` now point at a paused rebase's recovery commands.
+
+- Feed current-head failing and cancelled PR checks into `swarm pr work` through quoted `.swarm/active/CI.md` evidence, including annotations and bounded GitHub Actions log tails. `pr status` notes when evidence will be available.
+
+- Fail no-op and explicitly blocked implementations before testing, and refuse empty issue submissions with a recovery command.
+
+- Add `swarm issue work --instructions` and record delivered operator guidance in role reports, status, and PR review evidence.
+
+- Replan after requested changes, mark earlier role attempts as superseded, and keep unmerged lessons out of agent system prompts.
+
+- `swarm issue edit` replaces selected WorkUnit sections on GitHub and local backends, previews diffs and approval impact, lints before writing, and blocks active claims. Changed contracts require separate approval.
+
+- Protected paths now cover the files that become part of agent instructions: `.swarm/project.md`, `.swarm/architecture.md`, `.swarm/conventions.md`, `.claude/commands/**`, `.opencode/commands/**`, `AGENTS.md`, and `CLAUDE.md`. New repositories get them from `swarm repo init`; existing repositories can add them to `.swarm/validation/required-checks.yaml`. Agent work that needs to edit them sets `allow_harness_changes: true` on its WorkUnit.
+
+- Maintainer pull requests can change protected policy without failing CI. `swarm repo validate --protected-paths report` lists the changed protected files, notes when `.swarm/` policy changed, and still runs every required check; the generated workflow uses it only for maintainers' own branches, keeping agent branches, forks, and other authors on strict enforcement. SwarmOS's own CI now runs this check with a validator built from the trusted base.
+
+- Agent run budgets now support approved global and per-role durations, with a 60-minute default and a warning before the deadline. Interactive native sessions exclude waits for operator input and have a four-hour wall cap; native Codex and Bubblewrap preserve bounded timeout patches for manual recovery. OCI uses wall time and reports that no timeout patch is available. Required-check deadlines are unchanged.
+
+- Re-approving an issue on a newer base drops a checkpoint whose commits are already contained in that base. Resuming moves clean local work forward and retains the original remote head as the next publication fence; checkpoints with unique commits remain preserved.
+
+- Approved plans can carry across descendant PR rebases when the WorkUnit and committed policy tree are unchanged. Fresh validation and explicit submission remain required; status explains when a new plan cycle is needed.
+
+- Rebase status and PR updates include heads, bases, conflict paths, and Git patch identity. Claim and interrupted-rebase errors include recovery commands, and Git errors render carriage returns cleanly.
+
+- Contributors whose `origin` is their personal fork and whose `upstream` is the project (the layout `gh repo clone <fork>` and `gh repo fork --remote` create) can now use swarm without renaming remotes. Pass `--upstream-remote upstream`, or save it once with `swarm --upstream-remote upstream node init` (the `upstream_remote` node profile setting). swarm then reads and writes coordination state, approved bases, and same-repository task branches on that remote, and with `--fork` uses `origin` as the fork remote unless `--fork-remote` names another one. Before any write, swarm checks that `origin` is a repository you own and can push to and that it is a different repository from the project. If a check fails, the error names the remote and the fix. Without the setting nothing changes: `origin` is the project and the fork remote defaults to `fork`.
+
+- `swarm issue cleanup --apply` retires clean merged issue and PR worktrees and local code branches, with per-resource results and exact-tip branch deletion. Local backends need no origin; dirty or unsafe worktrees and their branches remain available.
+
+- `swarm issue work`, `swarm issue validate`, and `swarm pr validate` first run `go test` on the packages changed since the approved base, and their in-module reverse dependencies, before a required `go test ./...` check. A failure there stops validation early and names the packages. A pass always continues to the unchanged full check, which decides the result. Submit, staging, `repo validate`, and CI are unchanged.
+
+- `swarm issue work`, `issue submit`, `pr work`, `pr rebase`, and `pr submit` report why they stopped. Their `--json` failures add an advisory `next_action` (`reason`, literal `argv`, `human_required`), and the process exits with `3` for `changes_requested`, `4` for `needs_approval`, or `5` for `conflict`. Other failures still exit `1`, and successful runs, including human-gate pauses, exit `0` without `next_action`.
+
+- **`**` in protected paths matches at any depth:** `**/.gitattributes` now also protects `.gitattributes` at the root and in nested directories, and `a/**/b.yaml` matches `a/b.yaml` and `a/x/y/b.yaml`. Previously `**` matched exactly one directory there, so those files could change without tripping the protected-path check. Trailing `dir/**` and ordinary patterns match as before. A malformed pattern in the trusted policy, such as `[`, now fails validation with an error naming it instead of silently matching nothing.
+
+- `swarm pr status` now lists open code-scanning alerts (for example, from CodeQL) on the PR's merge ref with rule ID, severity, `path:line`, and message, and `--json` includes them under `result.code_scanning`. When checks fail, `swarm pr work` adds the same alerts to the developer's `.swarm/active/CI.md`. Alert text is escaped and size-limited, at most 50 alerts are shown with a count of the rest, and a token without code-scanning access reports `unavailable (no access or not enabled)` without failing either command. Check metadata in `CI.md` now reserves 512 bytes for these notices.
+
+- Use independent changelog fragments and `make changelog VERSION=x.y.z` to keep parallel changes from conflicting.
+
+- `swarm issue cleanup --apply` now retires original issue worktrees and local branches at recorded checkpoint ancestors of a verified merged PR tip, including PRs revised after submission.
+
+- `swarm issue cleanup --all-merged` previews every local issue and PR worktree with a reason for each resource, using one pull request listing. With `--apply` it retires eligible resources one issue at a time through the single-issue checks, keeps going after a failed issue, and prints retired, retained, and failed counts per issue and in total. `--json` prints one summary.
+
+- Save a bounded, redacted, and escaped tail of a failed agent run's output to a private local log under the user state directory. `swarm issue work`, `swarm pr work`, and `swarm pr rebase --resolve` failures, including `--json` errors, report only the log's path and size. Logs older than seven days or beyond the newest 20 are pruned.
+
+- `swarm issue cleanup --apply` now retires original issue worktrees and local branches after a PR was rebased with `swarm pr rebase`, including rebases that resolved conflicts and changed patch identity, when the worktree is at the old head of a coordinator-verified rebase chain that reaches the merged tip. A worktree at an earlier checkpoint that is only an ancestor of a rebase's old head is now retained.
+
+- `swarm pr rebase` and `swarm pr status` now warn with `no longer changed: <path>` when a rebase, conflict resolution, or repair leaves a path the PR used to change identical to the new base, and record the paths as `last_rebase.dropped_paths` in the rebase evidence.
+
+- `swarm pr submit` now refuses a PR revision that has an approved plan but no new commits, for example after a failed implementation step, and keeps the plan and review. Run `swarm pr work <PR> --phase implement` (`swarm --fork pr work <PR> --phase implement` for contributors) to resume without re-planning.
+
+- `swarm issue work` and `swarm issue claim` now fast-forward an untouched task worktree to the newly approved base after re-approval, instead of failing with `expected checkpoint`. The branch moves with a compare-and-swap. The plan, test plan and review come from authoritative state. Worktrees with commits or edits are still refused, and the error now names the recovery commands.
+
+- When a failed check's output is too long to show in full, validation now prints each Go `--- FAIL:` line and its indented messages first, followed by a shorter tail of the output. The text and `--json` `output_tail` keep the same size limits and show a `[swarm: output truncated]` marker where output is cut. Previously, unrelated output printed after the failures could push the failure messages out of the tail.
+
+- `swarm repo init` and task worktrees support an `AGENTS.md` or `CLAUDE.md` that is a relative symlink to a regular file inside the repository, such as `AGENTS.md -> CLAUDE.md`. Init writes its marked SwarmOS section into the linked file once and keeps the link; task worktrees add and remove a single pointer block. Links that leave the repository or lead to a directory, special file, or missing file are refused before any write.
+
+- `swarm --fork issue status` works again against an upstream coordinator running a swarm release from before claim budgets. Status now prints `claim budget: unavailable from upstream coordinator` and the rest of the task details, and `--json` reports `"claim_budget_unavailable": true` with no `claim_budget` instead of failing with `upstream coordinator did not supply claim budget`. Fork-mode work against such a coordinator times its wind-down from the current lease expiry and keeps a reserve of a third of the lease duration. The coordinator still decides every renewal and claim check. When the coordinator does send a claim budget, output and behavior are unchanged.
+
+- In `--fork` mode, a GitHub server error (5xx) or timeout while posting a coordinator request no longer leads to a duplicate request. Each request comment now carries a random request nonce in a hidden marker on its summary line, outside the request details. After an ambiguous post, swarm looks through the issue's recent comments for that nonce and continues with the comment it finds. If the comment is not there, swarm posts it once more. It never posts a third time, and if it cannot tell whether the request was posted, it says so and gives the nonce. Comment reads that fail with a server error or timeout are retried briefly, and an error that persists names the request. The nonce is only used to match the comment; coordinators ignore it and still check every request against GitHub and coordination state. The request details are unchanged, so released Fork Coordinator workflows keep accepting these requests without an update. If a coordinator ever rejects a request it cannot read, swarm now reports that rejection right away instead of waiting for the timeout.
+
+- `swarm issue status` and `swarm pr status` no longer report a task worktree as dirty when its only change is the SwarmOS pointer block in `AGENTS.md` or `CLAUDE.md` (including a generated `CLAUDE.md` and linked instruction files). Any other edit, including text outside the block, still shows as dirty.
+
+- Maintainers can now discard an abandoned task checkpoint with `swarm issue discard-checkpoint <issue> --expected-head <sha>`. Use it when an unsubmitted checkpoint should not be continued, for example after the WorkUnit was edited and re-approved on a base the checkpoint does not descend from. Before, `swarm issue claim` and `swarm issue work` failed in that case, and the only fix was editing the ledger by hand. The command needs the same authority as `swarm issue approve`. It is refused while the issue is claimed, has a pull request, or holds a fork contributor's checkpoint. The discarded commit stays reachable under `refs/heads/swarm-checkpoints/issue-<n>/<sha>`, and `swarm issue status` lists it. The next claim starts on a fresh branch at the approved base and plans from scratch. A local worktree still holding the old attempt is moved aside unchanged. When provisioning hits a checkpoint that does not descend from the approved base, the error now names this command. Works on the GitHub and local backends in same-repository mode.
+
+- Coordinator commands run from inside a task or PR worktree (by `cd` or `--root`) now use the main checkout, with a one-line notice, instead of creating nested worktrees under `.swarm/worktrees/issue-N/.swarm/worktrees`. When the main checkout cannot be verified, the command refuses before writing anything and asks you to cd to the main checkout or pass `--root`.
+
+- Reject developer and tester changes to protected files and approved plan inputs before importing returned work, leaving the worktree unchanged when a run is rejected.
+
+- **Ledger refs out of the branch list:** a new `ledger_namespace` setting in `.swarm/config.yaml` chooses where issue state, checkpoint retention, and fork contributor indexes live. `branch` keeps `refs/heads/swarm-state/`, `swarm-checkpoints/`, and `swarm-contributors/`, and is what existing configurations without the key get. `hidden` uses `refs/swarm/state/`, `checkpoints/`, and `contributors/`, which stay out of the branch list and the "Compare & pull request" banner, but GitHub rulesets cannot protect them. `swarm repo init` writes `hidden` for new configurations. SwarmOS reads the setting only from the upstream default branch, and stops with an error naming both refs when a ledger ref exists in the namespace it did not select. Task branches stay branches. `swarm repo migrate-refs` moves an existing repository's ledgers in one atomic, leased push; see [Ledger ref namespaces](docs/GITHUB.md#ledger-ref-namespaces).
+
+- Add `swarm issue revoke <issue> --reason <text>` so maintainers with `approve-task` permission can end an abandoned claim on the github backend. Revoke records the maintainer and reason in authoritative state, removes fork claims from the contributor's active-claim index in the same atomic push, keeps approval, artifacts, and checkpoints, and fences the previous holder's writes.
+
+- Same-repository claims and renewals are now capped at the approved `lease.duration`, as in fork mode; a longer `--duration` is clamped and shorter requests are kept.
+
+- `swarm issue approve` prints the `swarm issue lint` shape and hints before approving, and planners see the approved total claim budget. A plan that contains the line `Split recommendation: required` stops `swarm issue work`, `swarm pr work`, and `swarm node run` after planning, without review, implementation, or a FAIL verdict, and prints the `swarm issue decompose` command for the linked issue.
+
+- Catch lint and format failures before CI. `swarm repo init` adds a gofmt `fmt` required check for Go repositories, and `swarm repo doctor` warns, with a suggested `required-checks.yaml` entry, when a GitHub workflow runs gofmt, `go vet`, staticcheck, golangci-lint, eslint, `prettier --check`, ruff, `black --check`, `cargo fmt --check`, or `cargo clippy` but no required check does. The warnings never fail doctor or edit policy. The shipped developer prompt asks agents to run every required check before finishing. Host-executed required checks now share a persistent, SwarmOS-owned Go build cache per repository under the user cache directory, separate from your own `GOCACHE` and never mounted into sandboxes.
+
+- `swarm issue submit` and `swarm pr submit` reuse a passing validation from the same claim when the exact tree, base, policy, claim, and swarm build are unchanged, printing its age and short tree SHA and noting the reuse in the PR description; any mismatch, a prior failure, or a `dev` build validates as before.
+
+- Fix `swarm` heartbeats reporting a deliberate stop as a failure when the stop landed while the heartbeat was loading claim state.
+
 ## v0.7.0
 
 v0.7.0 is about owning a busy repository: seeing the whole backlog at once, sizing work to fit, and being clear about who reviews what. Upgrade `swarm` and rerun `swarm repo init` to pick up the new rules file and issue form wording.

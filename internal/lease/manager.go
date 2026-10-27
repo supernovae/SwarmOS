@@ -885,6 +885,15 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 		clearCheckpointAndHeadArtifacts(st)
 		st.ForkRepo = ""
 	}
+	// The first issue claim binds the task branch, so later title edits do not
+	// strand its worktree. A retained recovery identity keeps its own branch.
+	if prNumber == 0 && st.Branch == "" {
+		if st.DroppedCheckpoint != nil {
+			st.Branch = st.DroppedCheckpoint.Branch
+		} else {
+			st.Branch = workspace.BranchName(n, issue.Title)
+		}
+	}
 	st.Lease = contract.Lease{Version: 1, IssueNumber: n, ClaimID: id, Owner: owner, Agent: agent, Phase: phase, Status: "active", ClaimedAt: now, ExpiresAt: now.Add(duration), MaxRenewals: max}
 	_, total, budgetErr := policyBudget(cfg.Lease)
 	if budgetErr != nil {

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 type editRecordingTracker struct {
@@ -379,6 +381,8 @@ func TestIssueEditBackendGitHub(t *testing.T) {
 		}
 	}
 	store := trustedLedgerStore(t, f.root, "")
+	// A recorded task branch is reported as unchanged by the title edit.
+	state.Branch = workspace.BranchName(i.Number, "title")
 	data, _ := json.Marshal(state)
 	if _, err := store.CompareAndSwap(ctx, i.Number, "", data); err != nil {
 		t.Fatal(err)
@@ -437,6 +441,9 @@ func TestIssueEditBackendGitHub(t *testing.T) {
 	out, err := runEdit(f, tr, time.Now(), fmt.Sprint(i.Number), "--objective", "new objective", "--title", "new title")
 	if err != nil {
 		t.Fatalf("%v: %s", err, out)
+	}
+	if !strings.Contains(out, "Task branch: "+state.Branch+" (task branch stays as recorded") {
+		t.Fatalf("missing branch notice: %s", out)
 	}
 	if reads != 2 || patches != 2 || labelWrites != 2 || current.Title != "new title" || !strings.Contains(current.Body, "new objective") {
 		t.Fatalf("reads=%d patches=%d labels=%d issue=%+v", reads, patches, labelWrites, current)
@@ -644,5 +651,191 @@ func TestIssueEditDiffContext(t *testing.T) {
 	large := issueEditDiff(strings.Repeat("a\n", 3000), strings.Repeat("b\n", 3000))
 	if strings.Count(large, "-a\n") != 3000 || strings.Count(large, "+b\n") != 3000 {
 		t.Fatal("large diff omitted content")
+	}
+}
+
+func worktreeBranch(t *testing.T, f *cliFixture, issue int) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", workspace.WorktreePath(f.root, issue), "symbolic-ref", "--short", "HEAD").CombinedOutput()
+	if err != nil {
+		t.Fatalf("worktree branch: %v %s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// A title edit after the first claim leaves the recorded task branch in place,
+// so claim and work reuse the original worktree instead of refusing it.
+func TestIssueEditTitleEditRecordedBranch(t *testing.T) {
+	t.Parallel()
+	for _, planned := range []bool{false, true} {
+		t.Run(fmt.Sprintf("planned=%v", planned), func(t *testing.T) {
+			f := newCLIFixture(t)
+			issue := f.create(t, "agent")
+			n := strconv.Itoa(issue)
+			f.must(t, "issue", "approve", n)
+			f.must(t, "issue", "claim", n, "--agent", "mock")
+			original := workspace.BranchName(issue, "Approved task")
+			if got := f.state(t, issue).Branch; got != original {
+				t.Fatalf("claim recorded %q, want %q", got, original)
+			}
+			if planned {
+				f.must(t, "issue", "work", n, "--agent", "mock", "--phase", "plan", "--progress=false")
+				if len(f.state(t, issue).Artifacts) == 0 {
+					t.Fatal("plan did not record artifacts")
+				}
+			}
+			f.must(t, "issue", "release", n)
+			preview := f.must(t, "issue", "edit", n, "--title", "Renamed task", "--dry-run")
+			if !strings.Contains(preview, "Task branch: "+original+" (task branch stays as recorded") {
+				t.Fatalf("dry run lacks branch notice:\n%s", preview)
+			}
+			f.must(t, "issue", "edit", n, "--title", "Renamed task")
+			f.must(t, "issue", "approve", n)
+			out := f.must(t, "issue", "claim", n, "--agent", "mock")
+			if !strings.Contains(out, "Branch: "+original) {
+				t.Fatalf("claim used another branch:\n%s", out)
+			}
+			if got := worktreeBranch(t, f, issue); got != original {
+				t.Fatalf("worktree on %q, want %q", got, original)
+			}
+			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			st := f.state(t, issue)
+			if st.Branch != original || st.HeadSHA == "" || worktreeBranch(t, f, issue) != original {
+				t.Fatalf("work moved off the recorded branch: %q", st.Branch)
+			}
+			renamed := workspace.BranchName(issue, "Renamed task")
+			if out, err := exec.Command("git", "-C", f.root, "branch", "--list", renamed).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "" {
+				t.Fatalf("created replacement branch %q: %s %v", renamed, out, err)
+			}
+		})
+	}
+}
+
+// A checkpoint dropped by reapproval keeps its branch through a title edit:
+// the next claim reserves the recovery branch and staging consumes it.
+func TestIssueEditTitleEditRecordedBranchDroppedCheckpoint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newCLIFixture(t)
+	issue := f.create(t, "agent")
+	n := strconv.Itoa(issue)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "claim", n, "--agent", "mock")
+	st := f.state(t, issue)
+	original := st.Branch
+	f.manager.BindClaim(issue, st.Lease.ClaimID)
+	if _, err := f.manager.RecordCheckpoint(ctx, issue, "alice", original, st.BaseSHA); err != nil {
+		t.Fatal(err)
+	}
+	f.must(t, "issue", "release", n)
+	f.must(t, "issue", "edit", n, "--title", "Renamed task")
+	if out, err := exec.Command("git", "-C", f.root, "commit", "--allow-empty", "-m", "new base").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v %s", err, out)
+	}
+	f.must(t, "issue", "approve", n)
+	approved := f.state(t, issue)
+	if approved.DroppedCheckpoint == nil || approved.DroppedCheckpoint.Branch != original || approved.Branch != "" {
+		t.Fatalf("approval did not retain recovery identity: %+v", approved.DroppedCheckpoint)
+	}
+	raw := f.must(t, "issue", "edit", n, "--objective", "Exercise the lifecycle again", "--title", "Renamed again", "--dry-run", "--json")
+	var preview issueEditPreview
+	if err := json.Unmarshal([]byte(raw), &preview); err != nil || preview.TaskBranch != original {
+		t.Fatalf("preview branch %q, want %q: %v", preview.TaskBranch, original, err)
+	}
+	f.must(t, "issue", "claim", n, "--agent", "mock")
+	claimed := f.state(t, issue)
+	if claimed.Branch != original || claimed.DroppedCheckpoint == nil {
+		t.Fatalf("claim reserved %q, want %q", claimed.Branch, original)
+	}
+	if got := worktreeBranch(t, f, issue); got != original {
+		t.Fatalf("worktree on %q, want %q", got, original)
+	}
+	active := filepath.Join(workspace.WorktreePath(f.root, issue), ".swarm", "active")
+	for name, body := range map[string]string{"PLAN.md": "# Plan\n", "TEST_PLAN.md": "# Tests\n"} {
+		if err := os.WriteFile(filepath.Join(active, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.must(t, "issue", "stage", n, "--phase", "plan", "--harness", "claude", "--model", "test")
+	f.must(t, "issue", "review-plan", n, "--agent", "mock")
+	if err := os.WriteFile(filepath.Join(workspace.WorktreePath(f.root, issue), "feature.txt"), []byte("shipped\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.must(t, "issue", "stage", n, "--phase", "implement", "--harness", "claude", "--model", "test")
+	staged := f.state(t, issue)
+	if staged.Branch != original || staged.DroppedCheckpoint != nil || staged.HeadSHA == "" {
+		t.Fatalf("stage did not consume recovery on %q: branch=%q dropped=%v", original, staged.Branch, staged.DroppedCheckpoint)
+	}
+}
+
+func TestIssueEditDryRunRecordedBranch(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, state string
+		args        []string
+		notice      bool
+	}{
+		{"recorded", "released", []string{"--title", "new title"}, true},
+		{"missing", "approved", []string{"--title", "new title"}, false},
+		{"same title", "released", []string{"--objective", "new objective"}, false},
+		{"active claim", "active", []string{"--title", "new title"}, true},
+	} {
+		for _, asJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%v", tc.name, asJSON), func(t *testing.T) {
+				f, i, r := newEditFixture(t)
+				ctx := context.Background()
+				if _, err := f.manager.ApproveTask(ctx, i.Number, "alice"); err != nil {
+					t.Fatal(err)
+				}
+				now := time.Now()
+				f.manager.SetNowFunc(func() time.Time { return now })
+				if tc.state != "approved" {
+					if _, err := f.manager.Acquire(ctx, i.Number, "alice", "mock", "plan", time.Hour, 3); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if tc.state == "released" {
+					if _, err := f.manager.Release(ctx, i.Number, "alice", "test"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, _, err := f.manager.Store().Load(ctx, i.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				oldIssue, _ := f.tracker.GetIssue(ctx, i.Number)
+				args := append([]string{fmt.Sprint(i.Number), "--dry-run"}, tc.args...)
+				if asJSON {
+					args = append(args, "--json")
+				}
+				out, err := runEdit(f, r, now, args...)
+				if (err != nil) != (tc.state == "active") {
+					t.Fatalf("%v %s", err, out)
+				}
+				branch := workspace.BranchName(i.Number, "title")
+				if asJSON {
+					var preview issueEditPreview
+					if err := json.Unmarshal([]byte(out), &preview); err != nil {
+						t.Fatal(err, out)
+					}
+					if tc.notice != (preview.TaskBranch == branch && strings.Contains(preview.TaskBranchNote, "stays as recorded")) {
+						t.Fatalf("%+v", preview)
+					}
+					if !tc.notice && (preview.TaskBranch != "" || preview.TaskBranchNote != "") {
+						t.Fatalf("unexpected notice %+v", preview)
+					}
+				} else if strings.Contains(out, "Task branch: "+branch+" (task branch stays as recorded") != tc.notice || (!tc.notice && strings.Contains(out, "Task branch:")) {
+					t.Fatal(out)
+				}
+				after, _, err := f.manager.Store().Load(ctx, i.Number)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatal("state changed", err)
+				}
+				got, _ := f.tracker.GetIssue(ctx, i.Number)
+				if r.writes != 0 || !reflect.DeepEqual(oldIssue, got) {
+					t.Fatal("dry run wrote tracker")
+				}
+			})
+		}
 	}
 }

@@ -20,8 +20,12 @@ func (e *ClaimBaseApprovalError) Error() string {
 }
 func (e *ClaimBaseApprovalError) Unwrap() error { return ErrApprovalRequired }
 
+// freshClaimBase reports whether a task is untouched. A same-repository branch
+// reserved at claim time, without a checkpoint, still counts as untouched; a
+// fresh start after a discarded checkpoint does not.
 func freshClaimBase(st *IssueState, pr int) bool {
-	if pr != 0 || st.ForkRepo != "" || st.Branch != "" || st.HeadSHA != "" ||
+	if pr != 0 || st.ForkRepo != "" || st.HeadSHA != "" || st.FreshStart != nil ||
+		st.ResumeCheckpointBranch != "" ||
 		st.PRNumber != 0 || st.PRURL != "" || st.PRRevision != nil ||
 		st.SubmittedBaseSHA != "" || st.SubmittedHeadSHA != "" || st.DroppedCheckpoint != nil {
 		return false

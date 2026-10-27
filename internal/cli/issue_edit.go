@@ -27,9 +27,12 @@ type issueEditPreview struct {
 	AllowHarnessChanges bool   `json:"allow_harness_changes"`
 	Approval            string `json:"approval"`
 	Claim               string `json:"claim"`
-	Next                string `json:"next_command,omitempty"`
-	Status              string `json:"status"`
-	Error               string `json:"error,omitempty"`
+	// TaskBranch is the recorded task branch a title edit leaves unchanged.
+	TaskBranch     string `json:"task_branch,omitempty"`
+	TaskBranchNote string `json:"task_branch_note,omitempty"`
+	Next           string `json:"next_command,omitempty"`
+	Status         string `json:"status"`
+	Error          string `json:"error,omitempty"`
 }
 
 func newIssueEditCmd(opts *RootOptions) *cobra.Command {
@@ -107,6 +110,10 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 		if proposed != nil {
 			p.AllowHarnessChanges = proposed.AllowHarnessChanges
 		}
+		if branch := issueEditTaskBranch(st); branch != "" && newTitle != issue.Title {
+			p.TaskBranch = branch
+			p.TaskBranchNote = "task branch stays as recorded; the title edit does not rename it"
+		}
 		if lintErr != nil {
 			p.Lint = lintErr.Error()
 			runErr = fmt.Errorf("lint refused edit: %w", lintErr)
@@ -158,6 +165,9 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 			out := cmd.OutOrStdout()
 			if p.OldTitle != p.Title {
 				fmt.Fprintf(out, "Title: %q -> %q\n", p.OldTitle, p.Title)
+			}
+			if p.TaskBranch != "" {
+				fmt.Fprintf(out, "Task branch: %s (%s)\n", p.TaskBranch, p.TaskBranchNote)
 			}
 			fmt.Fprint(out, p.Diff)
 			fmt.Fprintf(out, "Lint: %s\nApproval: %s\nClaim: %s\nStatus: %s\n", p.Lint, p.Approval, p.Claim, p.Status)
@@ -229,6 +239,18 @@ func readIssueEditState(ctx context.Context, mgr *lease.Manager, n int) (*lease.
 		return nil, fmt.Errorf("read authoritative issue state: %w", err)
 	}
 	return st, nil
+}
+
+// issueEditTaskBranch is the branch the next claim reuses: the recorded one,
+// or a retained recovery identity that the claim will reserve.
+func issueEditTaskBranch(st *lease.IssueState) string {
+	if st == nil || st.ForkRepo != "" {
+		return ""
+	}
+	if st.Branch == "" && st.DroppedCheckpoint != nil {
+		return st.DroppedCheckpoint.Branch
+	}
+	return st.Branch
 }
 func issueEditClaim(st *lease.IssueState, n int, now time.Time) error {
 	if st != nil && st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {

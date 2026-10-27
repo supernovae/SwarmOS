@@ -14,10 +14,11 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func TestFreshClaimBase(t *testing.T) {
-	for _, tc := range []string{"none", "agent", "human", "unchanged", "policy", "task", "old digest", "missing tree", "nonancestor", "checkpoint", "branch", "partial none", "partial agent", "test only", "review only", "plan and test", "task unchanged", "old digest unchanged", "reviewed", "reviewed none"} {
+	for _, tc := range []string{"none", "agent", "human", "unchanged", "policy", "task", "old digest", "missing tree", "nonancestor", "checkpoint", "branch", "fresh start", "partial none", "partial agent", "test only", "review only", "plan and test", "task unchanged", "old digest unchanged", "reviewed", "reviewed none"} {
 		t.Run(tc, func(t *testing.T) {
 			ctx := context.Background()
 			m, lt, issue := testManager(t)
@@ -71,6 +72,9 @@ func TestFreshClaimBase(t *testing.T) {
 				st.HeadSHA = initial.BaseSHA
 			case "branch":
 				st.Branch = "existing"
+			case "fresh start":
+				st.Branch = workspace.FreshStartBranch(issue.Number, initial.BaseSHA)
+				st.FreshStart = &workspace.FreshStart{Branch: st.Branch, AbandonedBranch: "swarm/issue-1-old", AbandonedHeadSHA: initial.BaseSHA}
 			case "missing tree":
 				st.PolicyTreeDigest = ""
 			case "old digest", "old digest unchanged":
@@ -131,11 +135,22 @@ func TestFreshClaimBase(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := git("rev-parse", "HEAD")
-			if tc == "checkpoint" || tc == "branch" {
+			if tc == "checkpoint" || tc == "fresh start" {
 				want = initial.BaseSHA
 			}
 			if got.BaseSHA != want {
 				t.Fatalf("base %s want %s", got.BaseSHA, want)
+			}
+			// A reserved branch without a checkpoint stays untouched and keeps its name.
+			wantBranch := workspace.BranchName(issue.Number, issue.Title)
+			switch tc {
+			case "branch":
+				wantBranch = "existing"
+			case "fresh start":
+				wantBranch = workspace.FreshStartBranch(issue.Number, initial.BaseSHA)
+			}
+			if got.Branch != wantBranch {
+				t.Fatalf("branch %q want %q", got.Branch, wantBranch)
 			}
 			if got.ApprovedBy != initial.ApprovedBy || !got.ApprovedAt.Equal(initial.ApprovedAt) {
 				t.Fatal("approval identity changed")
@@ -296,6 +311,7 @@ func TestFreshClaimBaseEarlyErrors(t *testing.T) {
 				st.Lease.ExpiresAt = time.Now().Add(time.Hour)
 			case "resumed stale":
 				st.Branch = "existing"
+				st.HeadSHA = st.BaseSHA
 				st.TaskDigest = "stale"
 			}
 			if tc == "config" || tc == "active" || tc == "resumed stale" {

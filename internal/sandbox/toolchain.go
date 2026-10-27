@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -303,6 +304,12 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 
 	// Also preserve any existing non-home compiler directories already on host PATH
 	// (for example, nvm/fnm/asdf/mise/nix/usr-local versioned bin directories).
+	cleanHome := ""
+	if home != "" {
+		if resolved, err := filepath.EvalSymlinks(home); err == nil {
+			cleanHome = filepath.Clean(resolved)
+		}
+	}
 	for _, entry := range filepath.SplitList(getenv("PATH")) {
 		dir, ok := canonicalDir(entry)
 		if !ok {
@@ -311,16 +318,12 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 		if strings.HasPrefix(dir, "/mnt/") || dir == "/usr/bin" || dir == "/bin" || dir == "/usr/sbin" || dir == "/sbin" {
 			continue
 		}
-		if home != "" {
-			if cleanHome, err := filepath.EvalSymlinks(home); err == nil && isSubpath(dir, filepath.Clean(cleanHome)) {
-				// Only admit known toolchain/version-manager subdirectories under HOME,
-				// never arbitrary user dot-directories that might hold credentials.
-				if !isSafeHomeToolchainPath(dir, filepath.Clean(cleanHome)) {
-					continue
-				}
-			}
+		// Only admit known toolchain/version-manager subdirectories under HOME,
+		// never arbitrary user dot-directories that might hold credentials.
+		if cleanHome != "" && isSubpath(dir, cleanHome) && !isSafeHomeToolchainPath(dir, cleanHome) {
+			continue
 		}
-		rootMount := toolchainMountForBin(dir)
+		rootMount := toolchainMountForBin(dir, cleanHome, runtime.GOOS)
 		mount := ""
 		if !seenMounts[rootMount] {
 			seenMounts[rootMount] = true
@@ -365,26 +368,93 @@ func isSafeHomeToolchainPath(dir, cleanHome string) bool {
 		".local/share/pnpm/",
 	}
 	for _, prefix := range safePrefixes {
-		if rel == strings.TrimSuffix(prefix, "/") || strings.HasPrefix(rel, prefix) {
+		if hasPathComponents(rel, strings.TrimSuffix(prefix, "/")) {
 			return true
 		}
 	}
 	return false
 }
 
-// toolchainMountForBin returns the enclosing installation directory for a `.../bin`
-// directory (such as `/usr/local/go` for `/usr/local/go/bin` or an nvm node
-// version root for `~/.nvm/versions/node/v22.0.0/bin`) so relative `../lib` and
-// `../share` lookups inside the toolchain work inside the sandbox.
-func toolchainMountForBin(binDir string) string {
-	base := filepath.Base(binDir)
-	if (base == "bin" || base == "sbin") && filepath.Dir(binDir) != "/" && filepath.Dir(binDir) != "/usr" {
-		parent := filepath.Dir(binDir)
-		if filepath.Base(parent) != ".local" && filepath.Base(parent) != ".cargo" && filepath.Base(parent) != ".bun" {
-			return parent
+// hasPathComponents reports whether the slash-separated components of prefix
+// are the leading components of rel, so "go/bin" matches "go/bin/x" but not
+// "go/binaries".
+func hasPathComponents(rel, prefix string) bool {
+	relParts, prefixParts := strings.Split(rel, "/"), strings.Split(prefix, "/")
+	return len(relParts) >= len(prefixParts) && slices.Equal(relParts[:len(prefixParts)], prefixParts)
+}
+
+// Known install layouts whose bin directory must be mounted with its parent so
+// relative `../lib` and `../share` lookups inside the toolchain work. A `*`
+// matches exactly one path component. Home layouts are relative to the
+// canonical HOME.
+var (
+	homeInstallLayouts = []string{
+		".nvm/versions/node/*/bin",
+		".pyenv/versions/*/bin",
+		".rustup/toolchains/*/bin",
+		".asdf/installs/*/*/bin",
+		".local/share/mise/installs/*/*/bin",
+		".local/share/fnm/node-versions/*/installation/bin",
+		".fnm/node-versions/*/installation/bin",
+		".volta/tools/image/*/*/bin",
+		".sdkman/candidates/*/*/bin",
+	}
+	systemInstallLayouts = []string{
+		"/usr/local/go/bin",
+		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
+		"/home/linuxbrew/.linuxbrew/bin",
+		"/home/linuxbrew/.linuxbrew/sbin",
+	}
+	// Intel-Mac Homebrew links /usr/local/bin into /usr/local/Cellar.
+	darwinInstallLayouts = []string{
+		"/usr/local/bin",
+		"/usr/local/sbin",
+	}
+)
+
+// toolchainMountForBin returns the enclosing installation directory for a bin
+// directory that matches a known install layout (such as `/usr/local/go` for
+// `/usr/local/go/bin` or an nvm node version root for
+// `~/.nvm/versions/node/v22.0.0/bin`). Any other directory, including
+// `~/go/bin` and `/opt/<x>/bin`, is returned unchanged so its siblings are
+// never exposed.
+func toolchainMountForBin(binDir, cleanHome, goos string) string {
+	layouts := systemInstallLayouts
+	if goos == "darwin" {
+		layouts = append(slices.Clip(layouts), darwinInstallLayouts...)
+	}
+	for _, layout := range layouts {
+		if matchLayout(binDir, layout) {
+			return filepath.Dir(binDir)
+		}
+	}
+	if cleanHome == "" || !isSubpath(binDir, cleanHome) || !isSafeHomeToolchainPath(binDir, cleanHome) {
+		return binDir
+	}
+	rel, err := filepath.Rel(cleanHome, binDir)
+	if err != nil {
+		return binDir
+	}
+	for _, layout := range homeInstallLayouts {
+		if matchLayout(filepath.ToSlash(rel), layout) {
+			return filepath.Dir(binDir)
 		}
 	}
 	return binDir
+}
+
+func matchLayout(path, layout string) bool {
+	pathParts, layoutParts := strings.Split(path, "/"), strings.Split(layout, "/")
+	if len(pathParts) != len(layoutParts) {
+		return false
+	}
+	for i, part := range layoutParts {
+		if part != "*" && part != pathParts[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // SandboxPath constructs the deterministic PATH string for sandboxed commands,

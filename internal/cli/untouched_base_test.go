@@ -14,14 +14,24 @@ import (
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
+// TestCLIIssueWorkUntouchedBaseAdvance re-approves an untouched task once,
+// twice with a moved base each time, and twice at the same base (#210), then
+// resumes it with issue work or issue claim.
 func TestCLIIssueWorkUntouchedBaseAdvance(t *testing.T) {
 	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
-		t.Run(backend, func(t *testing.T) { testUntouchedBaseAdvance(t, backend) })
+		for _, sequence := range []string{"once", "twice", "same base"} {
+			for _, entry := range []string{"work", "claim"} {
+				t.Run(backend+"/"+sequence+"/"+entry, func(t *testing.T) {
+					t.Parallel()
+					testUntouchedBaseAdvance(t, backend, sequence, entry)
+				})
+			}
+		}
 	}
 }
 
-func testUntouchedBaseAdvance(t *testing.T, backend string) {
+func testUntouchedBaseAdvance(t *testing.T, backend, sequence, entry string) {
 	f := newCLIFixture(t)
 	number := f.create(t, "human")
 	n := strconv.Itoa(number)
@@ -83,18 +93,48 @@ func testUntouchedBaseAdvance(t *testing.T, backend string) {
 	if head := git(wt, "rev-parse", "HEAD"); head != oldBase {
 		t.Fatalf("worktree is at %s before resume, want old base %s", head, oldBase)
 	}
-	if err := os.WriteFile(filepath.Join(f.root, "moved.txt"), []byte("base moved\n"), 0o644); err != nil {
-		t.Fatal(err)
+	moveBase := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(f.root, name), []byte("base moved\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		git(f.root, "add", name)
+		git(f.root, "commit", "-m", "move base")
+		if backend == "github" {
+			git(f.root, "push", "origin", "main")
+		}
 	}
-	git(f.root, "add", "moved.txt")
-	git(f.root, "commit", "-m", "move base")
-	if backend == "github" {
-		git(f.root, "push", "origin", "main")
-	}
+	moveBase("moved.txt")
 	must("issue", "approve", n)
 	reapproved := f.state(t, number)
 	if reapproved.BaseSHA == oldBase || reapproved.PreviousBaseSHA != oldBase {
 		t.Fatalf("approval did not re-pin: base=%s previous=%s", reapproved.BaseSHA, reapproved.PreviousBaseSHA)
+	}
+	// Re-approve again without a claim in between, so state no longer names
+	// the worktree's base as the previous one.
+	switch sequence {
+	case "twice":
+		moveBase("moved-again.txt")
+	case "same base":
+		issue, err := f.tracker.GetIssue(context.Background(), number)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := strings.Replace(issue.Body, "Exercise the lifecycle", "Exercise the lifecycle again", 1)
+		if _, err := f.tracker.UpdateIssueBody(context.Background(), number, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sequence != "once" {
+		intermediate := reapproved.BaseSHA
+		must("issue", "approve", n)
+		reapproved = f.state(t, number)
+		if reapproved.PreviousBaseSHA != intermediate || (sequence == "same base") != (reapproved.BaseSHA == intermediate) {
+			t.Fatalf("second approval: base=%s previous=%s intermediate=%s", reapproved.BaseSHA, reapproved.PreviousBaseSHA, intermediate)
+		}
+		if head := git(wt, "rev-parse", "HEAD"); head != oldBase {
+			t.Fatalf("worktree moved to %s before resume, want %s", head, oldBase)
+		}
 	}
 	// Stale local evidence must never stand in for authoritative state.
 	active := filepath.Join(wt, ".swarm", "active")
@@ -104,6 +144,26 @@ func testUntouchedBaseAdvance(t *testing.T, backend string) {
 		}
 	}
 
+	if entry == "claim" || sequence == "same base" {
+		// A changed WorkUnit needs a new plan, so resume with planning.
+		args := []string{"issue", "work", n, "--agent", "mock", "--headless", "--progress=false"}
+		if entry == "claim" {
+			args = []string{"issue", "claim", n, "--agent", "mock"}
+		}
+		must(args...)
+		if head := git(wt, "rev-parse", "HEAD"); head != reapproved.BaseSHA {
+			t.Fatalf("worktree is at %s after %s, want approved base %s", head, entry, reapproved.BaseSHA)
+		}
+		if _, err := os.Stat(filepath.Join(wt, "moved.txt")); err != nil {
+			t.Fatalf("worktree did not advance to the new base: %v", err)
+		}
+		for _, name := range []string{"PLAN.md", "TEST_PLAN.md", "REVIEW.md", "VALIDATION.md"} {
+			if got, err := os.ReadFile(filepath.Join(active, name)); err == nil && strings.Contains(string(got), "poisoned") {
+				t.Fatalf("stale %s survived advancement", name)
+			}
+		}
+		return
+	}
 	must("issue", "work", n, "--agent", "mock", "--headless", "--phase", "implement", "--progress=false")
 
 	final := f.state(t, number)

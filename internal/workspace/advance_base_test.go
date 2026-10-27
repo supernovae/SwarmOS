@@ -60,6 +60,42 @@ func newAdvanceFixture(t *testing.T) advanceFixture {
 	return f
 }
 
+// reapprove moves main past the approved base without touching the task, as
+// a second approval before any claim does. It returns the intermediate base,
+// which the stale context names as previous.
+func (f *advanceFixture) reapprove(t *testing.T) string {
+	t.Helper()
+	intermediate := f.base
+	advanceWrite(t, f.root, "later.txt", "later\n")
+	f.git(t, f.root, "add", "later.txt")
+	f.git(t, f.root, "commit", "-m", "later")
+	f.base = f.git(t, f.root, "rev-parse", "HEAD")
+	return intermediate
+}
+
+// previousFor returns the PreviousBase state holds after the named sequence of
+// approvals; the branch stays at f.previous in every case.
+func (f *advanceFixture) previousFor(t *testing.T, context string) string {
+	t.Helper()
+	switch context {
+	case "stale":
+		// A->B->C: state names B.
+		return f.reapprove(t)
+	case "same base":
+		// A->B->B (#210): re-approved at B, so state names B as both.
+		return f.base
+	case "missing":
+		// State names a base this clone never fetched.
+		missing := strings.Repeat("ab", 20)
+		if out, err := exec.Command("git", "-C", f.root, "cat-file", "-e", missing+"^{commit}").CombinedOutput(); err == nil {
+			t.Fatalf("missing previous base exists locally: %s", out)
+		}
+		f.reapprove(t)
+		return missing
+	}
+	return f.previous
+}
+
 // snapshot captures refs, raw index bytes, status and file bytes.
 func (f advanceFixture) snapshot(t *testing.T) string {
 	t.Helper()
@@ -81,123 +117,129 @@ func (f advanceFixture) snapshot(t *testing.T) string {
 	return b.String()
 }
 
+var advanceContexts = []string{"previous", "stale", "same base", "missing"}
+
 func TestProvisionUntouchedBase(t *testing.T) {
 	pointer := "<!-- swarm:active:start -->\npointer\n<!-- swarm:active:end -->\n\n"
 	for _, scenario := range []string{"clean", "markers", "staged markers", "branch only", "repeat"} {
-		t.Run(scenario, func(t *testing.T) {
-			f := newAdvanceFixture(t)
-			advanceWrite(t, f.path, ".swarm/active/PLAN.md", "stale plan\n")
-			advanceWrite(t, f.path, ".swarm/active/REVIEW.md", "VERDICT: APPROVED\nstale\n")
-			advanceWrite(t, f.path, ".swarm/active/REPAIR.md", "stale brief\n")
-			advanceWrite(t, f.path, ".swarm/active/LESSONS.md", "kept\n")
-			switch scenario {
-			case "markers", "staged markers":
-				advanceWrite(t, f.path, "AGENTS.md", pointer+"instructions\n")
-				advanceWrite(t, f.path, "CLAUDE.md", pointer)
-				if scenario == "staged markers" {
-					f.git(t, f.path, "add", "AGENTS.md")
-				}
-			case "branch only":
-				f.git(t, f.root, "worktree", "remove", "--force", f.path)
+		for _, context := range advanceContexts {
+			t.Run(scenario+"/"+context, func(t *testing.T) { testProvisionUntouchedBase(t, pointer, scenario, context) })
+		}
+	}
+}
+
+func testProvisionUntouchedBase(t *testing.T, pointer, scenario, context string) {
+	f := newAdvanceFixture(t)
+	previous := f.previousFor(t, context)
+	advanceWrite(t, f.path, ".swarm/active/PLAN.md", "stale plan\n")
+	advanceWrite(t, f.path, ".swarm/active/REVIEW.md", "VERDICT: APPROVED\nstale\n")
+	advanceWrite(t, f.path, ".swarm/active/REPAIR.md", "stale brief\n")
+	advanceWrite(t, f.path, ".swarm/active/LESSONS.md", "kept\n")
+	switch scenario {
+	case "markers", "staged markers":
+		advanceWrite(t, f.path, "AGENTS.md", pointer+"instructions\n")
+		advanceWrite(t, f.path, "CLAUDE.md", pointer)
+		if scenario == "staged markers" {
+			f.git(t, f.path, "add", "AGENTS.md")
+		}
+	case "branch only":
+		f.git(t, f.root, "worktree", "remove", "--force", f.path)
+	}
+	pc := ProvisionContext{PreviousBase: previous}
+	path, branch, err := ProvisionWithContext(f.root, "origin", 7, "task", f.base, "", "", pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scenario == "repeat" {
+		if path, branch, err = ProvisionWithContext(f.root, "origin", 7, "task", f.base, "", "", pc); err != nil {
+			t.Fatalf("retry at the new base: %v", err)
+		}
+	}
+	if path != f.path || branch != f.branch {
+		t.Fatalf("provisioned %s %s", path, branch)
+	}
+	if head := f.git(t, path, "rev-parse", "HEAD"); head != f.base {
+		t.Fatalf("HEAD %s, want %s", head, f.base)
+	}
+	if status := f.git(t, path, "status", "--porcelain", "--untracked-files=all"); status != "" {
+		t.Fatalf("worktree not clean at new base: %q", status)
+	}
+	if got, _ := os.ReadFile(filepath.Join(path, "source")); string(got) != "new\n" {
+		t.Fatalf("source = %q", got)
+	}
+	if scenario != "branch only" {
+		for _, name := range []string{"PLAN.md", "REVIEW.md", "REPAIR.md"} {
+			if _, err := os.Stat(filepath.Join(path, ".swarm", "active", name)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("stale %s kept: %v", name, err)
 			}
-			pc := ProvisionContext{PreviousBase: f.previous}
-			path, branch, err := ProvisionWithContext(f.root, "origin", 7, "task", f.base, "", "", pc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if scenario == "repeat" {
-				if path, branch, err = ProvisionWithContext(f.root, "origin", 7, "task", f.base, "", "", pc); err != nil {
-					t.Fatalf("retry at the new base: %v", err)
-				}
-			}
-			if path != f.path || branch != f.branch {
-				t.Fatalf("provisioned %s %s", path, branch)
-			}
-			if head := f.git(t, path, "rev-parse", "HEAD"); head != f.base {
-				t.Fatalf("HEAD %s, want %s", head, f.base)
-			}
-			if status := f.git(t, path, "status", "--porcelain", "--untracked-files=all"); status != "" {
-				t.Fatalf("worktree not clean at new base: %q", status)
-			}
-			if got, _ := os.ReadFile(filepath.Join(path, "source")); string(got) != "new\n" {
-				t.Fatalf("source = %q", got)
-			}
-			if scenario != "branch only" {
-				for _, name := range []string{"PLAN.md", "REVIEW.md", "REPAIR.md"} {
-					if _, err := os.Stat(filepath.Join(path, ".swarm", "active", name)); !errors.Is(err, os.ErrNotExist) {
-						t.Fatalf("stale %s kept: %v", name, err)
-					}
-				}
-				if got, _ := os.ReadFile(filepath.Join(path, ".swarm", "active", "LESSONS.md")); string(got) != "kept\n" {
-					t.Fatal("lessons removed")
-				}
-			}
-		})
+		}
+		if got, _ := os.ReadFile(filepath.Join(path, ".swarm", "active", "LESSONS.md")); string(got) != "kept\n" {
+			t.Fatal("lessons removed")
+		}
 	}
 }
 
 func TestProvisionUntouchedBaseRefusals(t *testing.T) {
-	for _, scenario := range []string{"commit", "dirty", "staged", "untracked", "instruction edit", "mode", "symlink", "ignored collision", "divergent base", "previous mismatch", "wrong branch"} {
-		t.Run(scenario, func(t *testing.T) {
-			f := newAdvanceFixture(t)
-			previous := f.previous
-			advanceWrite(t, f.path, ".swarm/active/PLAN.md", "stale plan\n")
-			switch scenario {
-			case "commit":
-				advanceWrite(t, f.path, "extra", "work\n")
-				f.git(t, f.path, "add", "extra")
-				f.git(t, f.path, "commit", "-m", "task work")
-			case "dirty":
-				advanceWrite(t, f.path, "source", "user edit\n")
-			case "staged":
-				advanceWrite(t, f.path, "source", "user edit\n")
-				f.git(t, f.path, "add", "source")
-			case "untracked":
-				advanceWrite(t, f.path, "extra", "user file\n")
-			case "instruction edit":
-				advanceWrite(t, f.path, "AGENTS.md", "<!-- swarm:active:start -->\np\n<!-- swarm:active:end -->\n\nuser edit\n")
-			case "mode":
-				if err := os.Chmod(filepath.Join(f.path, "source"), 0o755); err != nil {
-					t.Fatal(err)
-				}
-			case "symlink":
-				if err := os.Remove(filepath.Join(f.path, "AGENTS.md")); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink("source", filepath.Join(f.path, "AGENTS.md")); err != nil {
-					t.Fatal(err)
-				}
-			case "ignored collision":
-				advanceWrite(t, f.path, "added.log", "ignored user output\n")
-			case "divergent base":
-				f.git(t, f.root, "checkout", "-q", "--orphan", "other")
-				advanceWrite(t, f.root, "source", "unrelated\n")
-				f.git(t, f.root, "add", "source")
-				f.git(t, f.root, "commit", "-m", "unrelated")
-				f.base = f.git(t, f.root, "rev-parse", "HEAD")
-			case "previous mismatch":
-				// Re-approved twice: state names an intermediate base.
-				previous = f.base
-				f.git(t, f.root, "commit", "--allow-empty", "-m", "newer")
-				f.base = f.git(t, f.root, "rev-parse", "HEAD")
-			case "wrong branch":
-				f.git(t, f.path, "switch", "-q", "-c", "elsewhere")
-			}
-			before := f.snapshot(t)
-			_, _, err := ProvisionWithContext(f.root, "origin", 7, "task", f.base, f.branch, "", ProvisionContext{PreviousBase: previous})
-			if err == nil {
-				t.Fatal("ineligible worktree was advanced")
-			}
-			for _, want := range []string{"git worktree remove --force -- '" + f.path + "'", "swarm issue work 7"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("refusal %q does not name %q", err, want)
-				}
-			}
-			after := f.snapshot(t)
-			if after != before {
-				t.Fatalf("refusal changed the worktree:\nbefore %q\nafter  %q", before, after)
-			}
-		})
+	for _, scenario := range []string{"commit", "dirty", "staged", "untracked", "instruction edit", "mode", "symlink", "ignored collision", "divergent base", "wrong branch"} {
+		for _, context := range []string{"previous", "stale"} {
+			t.Run(scenario+"/"+context, func(t *testing.T) { testProvisionUntouchedBaseRefusal(t, scenario, context) })
+		}
+	}
+}
+
+func testProvisionUntouchedBaseRefusal(t *testing.T, scenario, context string) {
+	f := newAdvanceFixture(t)
+	previous := f.previousFor(t, context)
+	advanceWrite(t, f.path, ".swarm/active/PLAN.md", "stale plan\n")
+	switch scenario {
+	case "commit":
+		advanceWrite(t, f.path, "extra", "work\n")
+		f.git(t, f.path, "add", "extra")
+		f.git(t, f.path, "commit", "-m", "task work")
+	case "dirty":
+		advanceWrite(t, f.path, "source", "user edit\n")
+	case "staged":
+		advanceWrite(t, f.path, "source", "user edit\n")
+		f.git(t, f.path, "add", "source")
+	case "untracked":
+		advanceWrite(t, f.path, "extra", "user file\n")
+	case "instruction edit":
+		advanceWrite(t, f.path, "AGENTS.md", "<!-- swarm:active:start -->\np\n<!-- swarm:active:end -->\n\nuser edit\n")
+	case "mode":
+		if err := os.Chmod(filepath.Join(f.path, "source"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	case "symlink":
+		if err := os.Remove(filepath.Join(f.path, "AGENTS.md")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("source", filepath.Join(f.path, "AGENTS.md")); err != nil {
+			t.Fatal(err)
+		}
+	case "ignored collision":
+		advanceWrite(t, f.path, "added.log", "ignored user output\n")
+	case "divergent base":
+		f.git(t, f.root, "checkout", "-q", "--orphan", "other")
+		advanceWrite(t, f.root, "source", "unrelated\n")
+		f.git(t, f.root, "add", "source")
+		f.git(t, f.root, "commit", "-m", "unrelated")
+		f.base = f.git(t, f.root, "rev-parse", "HEAD")
+	case "wrong branch":
+		f.git(t, f.path, "switch", "-q", "-c", "elsewhere")
+	}
+	before := f.snapshot(t)
+	_, _, err := ProvisionWithContext(f.root, "origin", 7, "task", f.base, f.branch, "", ProvisionContext{PreviousBase: previous})
+	if err == nil {
+		t.Fatal("ineligible worktree was advanced")
+	}
+	for _, want := range []string{"git worktree remove --force -- '" + f.path + "'", "swarm issue work 7"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not name %q", err, want)
+		}
+	}
+	after := f.snapshot(t)
+	if after != before {
+		t.Fatalf("refusal changed the worktree:\nbefore %q\nafter  %q", before, after)
 	}
 }
 
@@ -216,12 +258,19 @@ func TestProvisionContextIgnoredOutsideSameRepositoryTasks(t *testing.T) {
 }
 
 func TestAdvanceUntouchedBaseCASRace(t *testing.T) {
+	for _, context := range []string{"previous", "stale"} {
+		t.Run(context, func(t *testing.T) { testAdvanceUntouchedBaseCASRace(t, context) })
+	}
+}
+
+func testAdvanceUntouchedBaseCASRace(t *testing.T, context string) {
 	f := newAdvanceFixture(t)
+	previous := f.previousFor(t, context)
 	advanceWrite(t, f.path, "AGENTS.md", "<!-- swarm:active:start -->\npointer\n<!-- swarm:active:end -->\n\ninstructions\n")
 	advanceWrite(t, f.path, ".swarm/active/PLAN.md", "local plan\n")
 	successor := f.git(t, f.root, "commit-tree", "-p", f.previous, "-m", "concurrent", f.previous+"^{tree}")
 	var before string
-	err := advanceUntouchedBase(f.root, 7, f.branch, f.previous, f.base, func() error {
+	err := advanceUntouchedBase(f.root, 7, f.branch, previous, f.base, func() error {
 		before = f.snapshot(t)
 		f.git(t, f.root, "update-ref", "refs/heads/"+f.branch, successor, f.previous)
 		before = strings.Replace(before, f.previous, successor, 1)
@@ -240,25 +289,30 @@ func TestAdvanceUntouchedBaseCASRace(t *testing.T) {
 
 func TestAdvanceUntouchedBaseRollsBackFailedCheckout(t *testing.T) {
 	for _, name := range []string{"added.txt", "added.log"} {
-		t.Run(name, func(t *testing.T) {
-			f := newAdvanceFixture(t)
-			err := advanceUntouchedBase(f.root, 7, f.branch, f.previous, f.base, func() error {
-				// A file appearing after the checks obstructs the checkout.
-				advanceWrite(t, f.path, name, "late user output\n")
-				return nil
-			})
-			if err == nil || !strings.Contains(err.Error(), "git worktree remove") {
-				t.Fatalf("obstructed checkout not reported: %v", err)
-			}
-			if tip := f.git(t, f.root, "rev-parse", "refs/heads/"+f.branch); tip != f.previous {
-				t.Fatalf("branch not restored: %s", tip)
-			}
-			if got, _ := os.ReadFile(filepath.Join(f.path, name)); string(got) != "late user output\n" {
-				t.Fatalf("user file overwritten: %q", got)
-			}
-			if status := f.git(t, f.path, "status", "--porcelain"); status != "?? "+name && name == "added.txt" {
-				t.Fatalf("worktree not left at the previous base: %q", status)
-			}
-		})
+		for _, context := range []string{"previous", "stale"} {
+			t.Run(name+"/"+context, func(t *testing.T) { testAdvanceUntouchedBaseRollback(t, name, context) })
+		}
+	}
+}
+
+func testAdvanceUntouchedBaseRollback(t *testing.T, name, context string) {
+	f := newAdvanceFixture(t)
+	previous := f.previousFor(t, context)
+	err := advanceUntouchedBase(f.root, 7, f.branch, previous, f.base, func() error {
+		// A file appearing after the checks obstructs the checkout.
+		advanceWrite(t, f.path, name, "late user output\n")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "git worktree remove") {
+		t.Fatalf("obstructed checkout not reported: %v", err)
+	}
+	if tip := f.git(t, f.root, "rev-parse", "refs/heads/"+f.branch); tip != f.previous {
+		t.Fatalf("branch not restored: %s", tip)
+	}
+	if got, _ := os.ReadFile(filepath.Join(f.path, name)); string(got) != "late user output\n" {
+		t.Fatalf("user file overwritten: %q", got)
+	}
+	if status := f.git(t, f.path, "status", "--porcelain"); status != "?? "+name && name == "added.txt" {
+		t.Fatalf("worktree not left at the previous base: %q", status)
 	}
 }

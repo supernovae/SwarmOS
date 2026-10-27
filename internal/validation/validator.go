@@ -549,7 +549,7 @@ func cleanCheckEnv(home string, caches []sandbox.BuildCache, deps sandbox.Depend
 	// the scratch HOME, without exposing credential files such as ~/.cargo/credentials.toml,
 	// ~/.npmrc, or ~/.pypirc. Adapter-backed ecosystems use the validator's
 	// per-repository dependency caches instead of the host-wide ones.
-	for _, b := range sandbox.HostToolchainsFor(deps.Mode) {
+	for _, b := range sandbox.HostToolchainsFor(deps) {
 		if b.EnvKey != "" && !sandbox.IsBuildCacheKey(b.EnvKey) && b.EnvVal != "" {
 			env = append(env, b.EnvKey+"="+b.EnvVal)
 		}

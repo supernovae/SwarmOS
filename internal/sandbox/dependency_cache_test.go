@@ -580,8 +580,8 @@ func TestEveryMountedEcosystemIsClassified(t *testing.T) {
 			t.Errorf("bind %+v has an unclassified ecosystem", b)
 		}
 	}
-	if cached != 18 {
-		t.Errorf("found %d cache binds, want 18", cached)
+	if cached != 17 {
+		t.Errorf("found %d cache binds, want 17", cached)
 	}
 }
 
@@ -610,7 +610,7 @@ func TestDependencyTableSafety(t *testing.T) {
 			t.Errorf("%s must be classified no-prefetch", name)
 		}
 	}
-	for _, name := range []string{"go", "rust"} {
+	for _, name := range []string{"go", "rust", "python"} {
 		if eco, ok := dependencyEcosystemNamed(name); !ok || eco.Prefetch == nil {
 			t.Errorf("%s must be adapter-backed", name)
 		}
@@ -633,7 +633,7 @@ func TestNoPrefetchEcosystemsKeepHostMounts(t *testing.T) {
 		goMod  bool
 		reason string
 	}{{PerRepository, false, "per-repository"}, {"", false, "zero value"}, {SharedHostCaches, true, "opt-in"}} {
-		mounts := ToolchainMounts(filterDependencyBinds(binds, tc.mode), true)
+		mounts := ToolchainMounts(filterDependencyBinds(binds, Dependencies{Mode: tc.mode}), true)
 		for rel, path := range paths {
 			want := !slices.Contains(adapters, rel) || tc.goMod
 			if got := slices.Contains(mounts, path); got != want {
@@ -685,7 +685,7 @@ func TestDependencyCacheFlagsRoundTrip(t *testing.T) {
 			}
 		}
 	}
-	for _, value := range []string{"go", "go=relative", "go=/", "python=" + dir, "rust=" + work, "maven=" + dir, "unknown=" + dir, "go=" + work, "go=" + filepath.Join(work, "sub")} {
+	for _, value := range []string{"go", "go=relative", "go=/", "python=" + work, "rust=" + work, "maven=" + dir, "node=" + dir, "unknown=" + dir, "go=" + work, "go=" + filepath.Join(work, "sub")} {
 		if c, err := ParseDependencyCache(value, work); err == nil {
 			t.Errorf("ParseDependencyCache(%q) = %+v", value, c)
 		}

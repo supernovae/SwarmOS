@@ -199,7 +199,7 @@ func doctorAgentChecksWithRunner(cfg *contract.SwarmConfig, local bool, prefligh
 // a warning because it exposes every package the host has fetched.
 func doctorDependencyCacheCheck(profilePath string) harness.DoctorCheck {
 	mode, err := node.DependencyCacheMode(profilePath)
-	status, detail := "OK", dependencyCacheSummary(mode)+"; Go detects the root go.mod only"
+	status, detail := "OK", dependencyCacheSummary(mode)+"; Go detects the root go.mod only; Python detects root uv.lock and requirements*.txt only"
 	if err != nil {
 		status, detail = "WARN", detail+"; "+err.Error()
 	} else if mode == sandbox.SharedHostCaches {

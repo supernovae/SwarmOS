@@ -26,6 +26,11 @@ func TestMain(m *testing.M) {
 		flags := flag.NewFlagSet("internal-tools", flag.ExitOnError)
 		flags.StringVar(&executor.Work, "workspace", "", "workspace")
 		flags.BoolVar(&executor.ReadOnly, "read-only", false, "read-only")
+		flags.Func("build-cache", "ecosystem=dir", func(value string) error {
+			cache, err := ParseBuildCache(value, executor.Work)
+			executor.BuildCaches = append(executor.BuildCaches, cache)
+			return err
+		})
 		_ = flags.Parse(os.Args[2:])
 		if err := ServeTools(context.Background(), executor, os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -33,7 +38,16 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	// Agent build caches never touch the real user cache in tests.
+	cache, err := os.MkdirTemp("", "swarm-sandbox-cache-*")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	userCacheDir = func() (string, error) { return cache, nil }
+	code := m.Run()
+	os.RemoveAll(cache)
+	os.Exit(code)
 }
 
 func TestAuthenticatedDelegatedTools(t *testing.T) {

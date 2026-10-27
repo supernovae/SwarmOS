@@ -143,3 +143,70 @@ func TestParentReplacementCannotEscape(t *testing.T) {
 		t.Fatalf("outside canary changed: %q %v", b, err)
 	}
 }
+
+func TestRootRename(t *testing.T) {
+	tests := []struct {
+		name     string
+		from, to string
+		setup    func(t *testing.T, root, outside string)
+		ok       bool
+	}{
+		{"moves directory", "a/src", "b/dst", func(t *testing.T, root, _ string) {
+			for _, dir := range []string{"a/src", "b"} {
+				if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}, true},
+		{"escape", "a/src", "../dst", func(t *testing.T, root, _ string) {
+			if err := os.MkdirAll(filepath.Join(root, "a/src"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"symlinked source parent", "a/src", "b/dst", func(t *testing.T, root, outside string) {
+			if err := os.MkdirAll(filepath.Join(outside, "src"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(root, "b"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(root, "a")); err != nil {
+				t.Skip(err)
+			}
+		}, false},
+		{"symlinked destination parent", "a/src", "b/dst", func(t *testing.T, root, outside string) {
+			if err := os.MkdirAll(filepath.Join(root, "a/src"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outside, filepath.Join(root, "b")); err != nil {
+				t.Skip(err)
+			}
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, outside := t.TempDir(), t.TempDir()
+			tt.setup(t, root, outside)
+			r, err := Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			err = r.Rename(tt.from, tt.to)
+			if (err == nil) != tt.ok {
+				t.Fatalf("Rename(%q, %q) = %v, want ok=%v", tt.from, tt.to, err, tt.ok)
+			}
+			if tt.ok {
+				if info, err := os.Lstat(filepath.Join(root, tt.to)); err != nil || !info.IsDir() {
+					t.Fatalf("destination missing: %v", err)
+				}
+			}
+			if entries, _ := os.ReadDir(outside); !tt.ok && len(entries) > 1 {
+				t.Fatalf("rename reached outside the root: %v", entries)
+			}
+			if _, err := os.Lstat(filepath.Join(outside, "dst")); !tt.ok && err == nil {
+				t.Fatal("rename created a destination outside the root")
+			}
+		})
+	}
+}

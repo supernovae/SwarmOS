@@ -76,20 +76,29 @@ func codexHostHome(fallback string) string {
 }
 
 // codexPolicy uses a named native profile rather than workspace-write's broad
-// default read access. :minimal supplies Codex's platform runtime files.
-func codexPolicy(binary, work, scratch string, readOnly bool) []string {
+// default read access. :minimal supplies Codex's platform runtime files. Each
+// build cache is writable; Codex cannot layer a read-only cache, so callers
+// pass only caches the run may write.
+func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCache) []string {
 	access := "write"
 	if readOnly {
 		access = "read"
 	}
 	toolchains := HostToolchains()
 	fs := []string{`":root"="deny"`, `":minimal"="read"`, strconv.Quote(binary) + `="read"`}
+	cacheDirs := map[string]bool{}
+	for _, c := range caches {
+		cacheDirs[c.Dir] = true
+	}
 	for _, mount := range ToolchainMounts(toolchains, false) {
-		if mount != work && mount != scratch && !isSubpath(mount, work) && !isSubpath(mount, scratch) {
+		if mount != work && mount != scratch && !isSubpath(mount, work) && !isSubpath(mount, scratch) && !cacheDirs[mount] {
 			fs = append(fs, strconv.Quote(mount)+`="read"`)
 		}
 	}
 	fs = append(fs, strconv.Quote(work)+"="+strconv.Quote(access), strconv.Quote(scratch)+`="write"`)
+	for _, c := range caches {
+		fs = append(fs, strconv.Quote(c.Dir)+`="write"`)
+	}
 	if readOnly {
 		fs = append(fs, strconv.Quote(filepath.Join(work, ".swarm", "active"))+`="write"`)
 	}
@@ -103,9 +112,12 @@ func codexPolicy(binary, work, scratch string, readOnly bool) []string {
 		`GOFLAGS="-buildvcs=false"`,
 	}
 	for _, b := range toolchains {
-		if b.EnvKey != "" && b.EnvVal != "" {
+		if b.EnvKey != "" && b.EnvVal != "" && !IsBuildCacheKey(b.EnvKey) {
 			envPairs = append(envPairs, b.EnvKey+"="+strconv.Quote(b.EnvVal))
 		}
+	}
+	for _, c := range caches {
+		envPairs = append(envPairs, c.EnvKey+"="+strconv.Quote(c.Dir))
 	}
 	config := []string{
 		`default_permissions="swarm"`,
@@ -224,7 +236,7 @@ test -x /bin/bash
 /bin/bash -c 'exit 0'
 if /bin/bash -c 'echo forbidden > /dev/tcp/127.0.0.1/'"$2" 2>/dev/null; then exit 42; fi
 printf SWARM_NATIVE_BOUNDARY_OK`
-	args := codexPolicy(binary, work, home, false)
+	args := codexPolicy(binary, work, home, false, nil)
 	args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-canary", canary, port)
 	var out, diagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, nativeEnv(codexHostHome(home), false), args, nil, &out, &diagnostics); err != nil {
@@ -274,7 +286,12 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 	}
 	var command []string
 	err = withNativeWorkspace(ctx, dir, opts, func(ctx context.Context, work, scratch string) error {
-		args := codexPolicy(binary, work, scratch, opts.ReadOnly)
+		// dir is the real worktree, so the cache key names its repository.
+		caches, err := agentBuildCaches(ctx, dir, scratch, opts)
+		if err != nil {
+			return err
+		}
+		args := codexPolicy(binary, work, scratch, opts.ReadOnly, caches)
 		args = append(args, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-C", work)
 		if model != "" {
 			args = append(args, "--model", model)
@@ -290,12 +307,18 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 	return command, version, err
 }
 
-func RunNativeValidation(ctx context.Context, dir, binary, command string, stdout, stderr io.Writer) error {
+// RunNativeValidation runs command with the validator's caches as selected by
+// ValidatorCacheMounts: writable only during warm-up, scratch otherwise.
+func RunNativeValidation(ctx context.Context, dir, binary, command string, caches []BuildCache, warmup bool, stdout, stderr io.Writer) error {
 	if err := CheckNativeCodex(ctx, binary); err != nil {
 		return err
 	}
 	return withNativeWorkspace(ctx, dir, WorkerOptions{DiscardChanges: true}, func(ctx context.Context, work, scratch string) error {
-		args := codexPolicy(binary, work, scratch, false)
+		mounts, err := ValidatorCacheMounts(caches, ValidationCodex, warmup, false, scratch)
+		if err != nil {
+			return err
+		}
+		args := codexPolicy(binary, work, scratch, false, mounts)
 		args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", command)
 		return runNativeCommand(ctx, binary, scratch, nativeEnv(codexHostHome(scratch), false), args, nil, stdout, stderr)
 	})

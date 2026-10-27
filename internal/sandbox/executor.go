@@ -20,6 +20,9 @@ import (
 type ToolExecutor struct {
 	Work     string
 	ReadOnly bool
+	// BuildCaches are bound at their host paths; overlay caches are read-only
+	// with a write layer discarded when the command exits.
+	BuildCaches []BuildCache
 }
 
 func (e ToolExecutor) command(ctx context.Context, script string, args ...string) (*exec.Cmd, error) {
@@ -37,6 +40,20 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 	if !filepath.IsAbs(work) || work == "/" {
 		return nil, fmt.Errorf("executor requires an absolute task workspace")
 	}
+	flags, err := executorFlags(work, e.ReadOnly, e.BuildCaches, script, args)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, binary, flags...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
+	process.Configure(cmd)
+	cmd.Cancel = func() error { process.Stop(cmd); return nil }
+	cmd.WaitDelay = time.Second
+	return cmd, nil
+}
+
+// executorFlags builds the Bubblewrap arguments for a resolved workspace.
+func executorFlags(work string, readOnly bool, caches []BuildCache, script string, args []string) ([]string, error) {
 	flags := []string{"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv",
 		"--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev", "--size", "1073741824", "--tmpfs", "/tmp"}
 	// Account for both merged-/usr and older Linux distributions.
@@ -64,32 +81,46 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 			flags = append(flags, "--ro-bind", mount, mount)
 		}
 	}
+	var cacheEnv []string
+	for _, c := range caches {
+		if !IsBuildCacheKey(c.EnvKey) {
+			return nil, fmt.Errorf("build cache %q has no table entry", c.EnvKey)
+		}
+		dir, err := filepath.EvalSymlinks(c.Dir)
+		if err != nil {
+			return nil, fmt.Errorf("build cache %s: %w", c.Ecosystem, err)
+		}
+		if !filepath.IsAbs(dir) || dir == "/" || isSubpath(dir, work) || isSubpath(work, dir) {
+			return nil, fmt.Errorf("build cache %s must be an absolute directory outside the workspace", c.Ecosystem)
+		}
+		if c.Overlay {
+			flags = append(flags, "--overlay-src", dir, "--tmp-overlay", dir)
+		} else {
+			flags = append(flags, "--bind", dir, dir)
+		}
+		cacheEnv = append(cacheEnv, "--setenv", c.EnvKey, dir)
+	}
 	bind := "--bind"
-	if e.ReadOnly {
+	if readOnly {
 		bind = "--ro-bind"
 	}
 	flags = append(flags, bind, work, "/workspace")
-	if e.ReadOnly {
+	if readOnly {
 		flags = append(flags, "--bind", filepath.Join(work, ".swarm", "active"), "/workspace/.swarm/active")
 	}
 	flags = append(flags, "--dir", "/home/worker", "--setenv", "HOME", "/home/worker", "--setenv", "TMPDIR", "/tmp",
 		"--setenv", "XDG_CACHE_HOME", "/home/worker/.cache", "--setenv", "XDG_CONFIG_HOME", "/home/worker/.config", "--setenv", "XDG_DATA_HOME", "/home/worker/.local/share",
 		"--setenv", "GOFLAGS", "-buildvcs=false", "--setenv", "PATH", SandboxPath(toolchains))
 	for _, b := range toolchains {
-		if b.EnvKey != "" && b.EnvVal != "" {
+		if b.EnvKey != "" && b.EnvVal != "" && !IsBuildCacheKey(b.EnvKey) {
 			flags = append(flags, "--setenv", b.EnvKey, b.EnvVal)
 		}
 	}
+	flags = append(flags, cacheEnv...)
 	flags = append(flags, "--chdir", "/workspace", "--",
 		"/usr/bin/prlimit", "--as=8589934592", "--cpu=300", "--nproc=1024", "--nofile=4096", "--fsize=268435456", "--core=0", "--",
 		"/bin/sh", "-c", script, "swarm-tool")
-	flags = append(flags, args...)
-	cmd := exec.CommandContext(ctx, binary, flags...)
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
-	process.Configure(cmd)
-	cmd.Cancel = func() error { process.Stop(cmd); return nil }
-	cmd.WaitDelay = time.Second
-	return cmd, nil
+	return append(flags, args...), nil
 }
 
 func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.Writer, args ...string) error {

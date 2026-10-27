@@ -20,7 +20,8 @@ type ToolchainBind struct {
 // HostToolchains discovers existing, canonicalized host toolchain and package
 // cache directories across supported ecosystems (Go, Rust/Cargo, Python/pip/uv,
 // Node/npm/pnpm/Yarn/Bun/nvm/fnm/volta, .NET/NuGet, Java/Maven/Gradle, C/C++
-// ccache, pyenv/asdf/mise/sdkman/homebrew).
+// vcpkg, pyenv/asdf/mise/sdkman/homebrew). Writable build caches are not
+// discovered here; see BuildCache.
 //
 // Only public compiler and package/module cache trees are returned so isolated
 // sandboxes and clean validation environments can build, lint, and test offline
@@ -274,14 +275,8 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	}
 	addToolchainRoot("DOTNET_ROOT", firstCandidate("DOTNET_ROOT", dotnetFallbacks...), ".", "tools")
 
-	ccacheFallbacks := []string{}
-	if xdgCache != "" {
-		ccacheFallbacks = append(ccacheFallbacks, filepath.Join(xdgCache, "ccache"))
-	}
-	if home != "" {
-		ccacheFallbacks = append(ccacheFallbacks, filepath.Join(home, ".ccache"))
-	}
-	addCache("CCACHE_DIR", firstCandidate("CCACHE_DIR", ccacheFallbacks...))
+	// Build caches such as ccache come from the SwarmOS build cache table
+	// (build_cache.go), never from the user's own cache directories.
 
 	vcpkgFallbacks := []string{}
 	if xdgCache != "" {

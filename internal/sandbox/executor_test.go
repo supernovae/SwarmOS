@@ -3,8 +3,11 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,11 +28,11 @@ func TestDelegatedValidationWithoutCodex(t *testing.T) {
 	var out strings.Builder
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
-	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "test \"$(cat source)\" = original; echo changed > source", &out, &out); err != nil {
+	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "test \"$(cat source)\" = original; echo changed > source", nil, false, &out, &out); err != nil {
 		t.Fatal(err, out.String())
 	}
 	var failed strings.Builder
-	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "printf '%s\\n' '--- FAIL: TestNative (0.00s)'; exit 7", &failed, &failed); err == nil || !strings.Contains(failed.String(), "--- FAIL: TestNative") {
+	if err := RunConfiguredNativeValidation(ctx, dir, cfg, "printf '%s\\n' '--- FAIL: TestNative (0.00s)'; exit 7", nil, false, &failed, &failed); err == nil || !strings.Contains(failed.String(), "--- FAIL: TestNative") {
 		t.Fatalf("native failed output: %q, %v", failed.String(), err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "source"))
@@ -190,5 +193,116 @@ func TestToolServerFollowsCoordinatorCancellation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("tool server ignored coordinator cancellation")
+	}
+}
+
+func requireExecutor(t *testing.T) {
+	t.Helper()
+	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
+		t.Skip("set SWARM_TEST_EXECUTOR=1 for real Bubblewrap tests")
+	}
+}
+
+func TestBubblewrapAgentBuildCacheReuse(t *testing.T) {
+	requireExecutor(t)
+	useUserCache(t)
+	repo := cacheTestRepo(t)
+	caches, err := agentBuildCaches(t.Context(), repo, resolvedTempDir(t), WorkerOptions{Role: "developer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := resolvedTempDir(t)
+	writeWorkerFixture(t, work, "go.mod", "module example.com/reuse\n\ngo 1.21\n")
+	writeWorkerFixture(t, work, "main.go", "package main\n\nfunc main() {}\n")
+	e := ToolExecutor{Work: work, BuildCaches: caches}
+	write := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do printf run1 > "$d/m"; done`
+	read := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/m")" = run1; done`
+	for _, script := range []string{write, read} {
+		var out strings.Builder
+		if err := e.Run(t.Context(), script, &out, &out); err != nil {
+			t.Fatal(err, out.String())
+		}
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		return
+	}
+	var outputs []string
+	for range 2 {
+		var out strings.Builder
+		if err := e.Run(t.Context(), "go build -x -o /tmp/reuse . 2>&1", &out, &out); err != nil {
+			t.Skip("go build unavailable in the sandbox:", err, out.String())
+		}
+		outputs = append(outputs, out.String())
+	}
+	if !strings.Contains(outputs[0], "/compile ") {
+		t.Fatalf("first build did not compile, so reuse is unproven:\n%s", outputs[0])
+	}
+	if strings.Contains(outputs[1], "/compile ") {
+		t.Fatalf("second build recompiled despite the agent cache:\n%s", outputs[1])
+	}
+}
+
+func TestBubblewrapValidationBuildCacheIsolation(t *testing.T) {
+	requireExecutor(t)
+	root := useUserCache(t)
+	repo := cacheTestRepo(t)
+	agent := mustPrepare(t, AgentBuildCache, repo, root, resolvedTempDir(t))
+	validator := mustPrepare(t, ValidatorBuildCache, repo, root, resolvedTempDir(t))
+	for _, c := range agent {
+		if err := os.WriteFile(filepath.Join(c.Dir, "agent-marker"), []byte("agent"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: "omp", Binary: "not-used-by-validation"}}}
+	for i, c := range agent {
+		v := validator[i]
+		// Warm-up is the only validation run that writes the persistent cache.
+		script := fmt.Sprintf(`set -eu; test ! -e %q; test ! -e %q; test "$%s" = %q; printf warm > "$%s/validator-marker"`,
+			filepath.Join(c.Dir, "agent-marker"), c.Dir, v.EnvKey, v.Dir, v.EnvKey)
+		var out strings.Builder
+		if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, true, &out, &out); err != nil {
+			t.Fatal(err, out.String())
+		}
+		if _, err := os.Stat(filepath.Join(v.Dir, "validator-marker")); err != nil {
+			t.Fatalf("%s: warm-up did not write the validator cache: %v", v.Ecosystem, err)
+		}
+		// Agents can neither see nor write the validator cache.
+		e := ToolExecutor{Work: resolvedTempDir(t), BuildCaches: agent}
+		out.Reset()
+		if err := e.Run(t.Context(), `set -eu; test ! -e "$1"; if (printf x > "$1/agent-wrote") 2>/dev/null; then exit 9; fi`, &out, &out, v.Dir); err != nil {
+			t.Fatalf("%s: agent reached the validator cache: %v %s", v.Ecosystem, err, out.String())
+		}
+		if _, err := os.Stat(filepath.Join(v.Dir, "agent-wrote")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: agent wrote the validator cache: %v", v.Ecosystem, err)
+		}
+	}
+}
+
+func TestBubblewrapCandidateWritesDiscarded(t *testing.T) {
+	requireExecutor(t)
+	if !bubblewrapOverlay() {
+		t.Skip("Bubblewrap overlay mounts are unavailable here")
+	}
+	root := useUserCache(t)
+	repo := cacheTestRepo(t)
+	validator := mustPrepare(t, ValidatorBuildCache, repo, root, resolvedTempDir(t))
+	for _, c := range validator {
+		if err := os.WriteFile(filepath.Join(c.Dir, "warm-marker"), []byte("warm"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: "omp", Binary: "not-used-by-validation"}}}
+	script := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/warm-marker")" = warm; printf bad > "$d/candidate-marker"; printf bad > "$d/warm-marker"; done`
+	var out strings.Builder
+	if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, false, &out, &out); err != nil {
+		t.Fatal(err, out.String())
+	}
+	for _, c := range validator {
+		if data, err := os.ReadFile(filepath.Join(c.Dir, "warm-marker")); err != nil || string(data) != "warm" {
+			t.Fatalf("%s: candidate changed the warm cache: %q, %v", c.Ecosystem, data, err)
+		}
+		if _, err := os.Stat(filepath.Join(c.Dir, "candidate-marker")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s: candidate write persisted: %v", c.Ecosystem, err)
+		}
 	}
 }

@@ -329,6 +329,9 @@ func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error
 		planSB.WriteString("1. Inspect existing CLI and domain packages.\n")
 		planSB.WriteString("2. Implement the requested behavior in clean, self-contained Go files.\n")
 		planSB.WriteString("3. Add unit tests verifying all acceptance criteria.\n")
+		if extra := os.Getenv("SWARM_MOCK_PLAN_APPEND"); extra != "" {
+			planSB.WriteString("\n" + extra + "\n")
+		}
 
 		if err := active.WriteFile("PLAN.md", []byte(planSB.String()), 0o644); err != nil {
 			return nil, err

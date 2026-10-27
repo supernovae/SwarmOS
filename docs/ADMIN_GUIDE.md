@@ -126,6 +126,19 @@ swarm issue approve 14 --backend github
 
 `swarm issue approve` removes `swarm:draft` / `swarm:needs-scope` / `swarm:blocked`, applies `swarm:ready`, and records the cryptographic `task_digest`, `policy_digest`, and `base_sha` in `refs/heads/swarm-state/issue-<N>`. This approves the issue's WorkUnit contract for execution, not the plan or completed code.
 
+Before approving, `swarm issue approve` prints the same suggested shape, signals, and hints as `swarm issue lint`. With `--json`, the advice goes to stderr and the approval document gains a `shape` field. The advice never blocks approval. A hint such as "consider `swarm issue decompose`" is a good moment to split the issue before a worker spends a long claim on it.
+
+### When a Planner Recommends a Split
+
+The planner sizes each WorkUnit against the approved total claim budget, `lease.duration × (1 + lease.max_renewals)`. If one plan, implement, and validate cycle cannot fit, the planner writes the line `Split recommendation: required` in `PLAN.md`, followed by proposed child WorkUnits, each with an objective and acceptance criteria. `swarm issue work`, `swarm pr work`, and `swarm node run` then stop after planning, skip review and implementation, and print `swarm issue decompose <issue>` for the linked issue.
+
+The recommendation never approves, creates issues, or edits the WorkUnit; deciding is up to you. Read the proposed children in the living issue comment's plan, then either:
+
+- run `swarm issue decompose 12 --backend github`, which creates one draft child per acceptance criterion (it does not read the proposals in `PLAN.md`), or
+- create the proposed children yourself with `swarm issue create --parent 12 ... --backend github`.
+
+Children start as `swarm:draft` and need their own `swarm issue approve` and plan gate. To overrule the recommendation, re-plan the parent with `swarm issue work 12 --phase plan`; later runs reuse a recorded split plan until a new plan replaces it.
+
 ### Following Progress in the Single Living Issue Comment
 As workers claim tasks and move through `plan` $\rightarrow$ `review` $\rightarrow$ `implement` $\rightarrow$ `validate`, SwarmOS updates a **single living comment** (`### 🐝 SwarmOS Orchestration & Provenance State`) on each GitHub Issue rather than spamming new comments on every heartbeat:
 

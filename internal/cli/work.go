@@ -146,6 +146,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				return err
 			}
 			guidance := claimBudgetGuidance(&guidanceOpts, result, "issue", result.IssueNumber)
+			split := splitGuidance(&guidanceOpts, result, result.IssueNumber)
 			status := result.Outcome()
 			if jsonOutput {
 				return writeJSON(cmd, map[string]any{"kind": "work", "status": status, "result": result})
@@ -153,6 +154,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d %s: phase=%s branch=%s validation=%t\n", result.IssueNumber, status, result.PhaseCompleted, result.BranchName, result.ValidationPassed)
 			if guidance != "" {
 				fmt.Fprintln(cmd.OutOrStdout(), guidance)
+			}
+			if split != "" {
+				fmt.Fprintln(cmd.OutOrStdout(), split)
 			}
 			if result.PausedForHuman {
 				if result.PhaseCompleted == "awaiting-plan" {

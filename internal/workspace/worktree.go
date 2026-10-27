@@ -792,10 +792,30 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 			}
 		}
 	}
-	return compileHarnessBundle(worktreePath, wu, wf, artifacts, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, extraDocs...)
+	var budgetDoc string
+	if role == "planner" {
+		cfg, err := harness.LoadConfigAt(worktreePath, baseSHA)
+		if err != nil {
+			return fmt.Errorf("load approved lease policy: %w", err)
+		}
+		if budgetDoc, err = claimBudgetDoc(cfg.Lease); err != nil {
+			return err
+		}
+	}
+	return compileHarnessBundle(worktreePath, wu, wf, artifacts, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, budgetDoc, extraDocs...)
 }
 
-func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc string, extraDocs ...string) error {
+// claimBudgetDoc states the approved total claim budget the planner sizes the
+// work against. It is the policy total, not the time left on any claim.
+func claimBudgetDoc(lc contract.LeaseConfig) (string, error) {
+	per, total, err := lc.ClaimBudget()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("## Claim budget\n\nThe approved lease policy grants %s per lease and up to %d renewals, so the total claim budget is %s (lease.duration × (1 + max_renewals)). Planning, implementation, and validation of this WorkUnit must all finish within %s. If they cannot, recommend a split as your role instructions describe.", per, lc.MaxRenewals, total, total), nil
+}
+
+func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, budgetDoc string, extraDocs ...string) error {
 	safe, err := safefs.Open(worktreePath)
 	if err != nil {
 		return err
@@ -846,6 +866,9 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	sys.WriteString("## Approved validation policy\n\n```yaml\n")
 	sys.WriteString(strings.TrimSpace(validationDoc))
 	sys.WriteString("\n```\n\nRun these check commands directly. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
+	if budgetDoc != "" {
+		sys.WriteString(strings.TrimSpace(budgetDoc) + "\n\n")
+	}
 	if role == "planner" {
 		for i := len(artifacts) - 1; i >= 0; i-- {
 			a := artifacts[i]

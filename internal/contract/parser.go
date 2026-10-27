@@ -257,5 +257,15 @@ func FormatIssueMarkdown(wu *WorkUnit) string {
 			sb.WriteString("- " + capName + "\n")
 		}
 	}
+	// Omitted when false so bodies, and the project-plan hashes over them,
+	// stay unchanged for WorkUnits that never opt in.
+	if wu.AllowHarnessChanges {
+		sb.WriteString("\n### Allow Harness Changes\n\n" + allowHarnessChangesChecked + "\n")
+	}
 	return sb.String()
 }
+
+const (
+	allowHarnessChangesChecked   = "- [x] Allow edits to protected harness paths"
+	allowHarnessChangesUnchecked = "- [ ] Allow edits to protected harness paths"
+)

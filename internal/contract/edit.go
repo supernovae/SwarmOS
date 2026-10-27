@@ -13,6 +13,7 @@ type WorkUnitEdit struct {
 	Title, Objective, Workflow, Gate *string
 	Constraints, Acceptance          *[]string
 	DependsOn                        *[]int
+	AllowHarnessChanges              *bool
 }
 
 type editSpan struct {
@@ -49,6 +50,9 @@ func EditWorkUnitIssue(number int, title, body string, edit WorkUnitEdit) (strin
 	}
 	if edit.DependsOn != nil {
 		fields["depends_on"] = *edit.DependsOn
+	}
+	if edit.AllowHarnessChanges != nil {
+		fields["allow_harness_changes"] = *edit.AllowHarnessChanges
 	}
 	old, oldErr := editableWorkUnit(number, title, body)
 	candidate := body
@@ -95,6 +99,9 @@ func EditWorkUnitIssue(number int, title, body string, edit WorkUnitEdit) (strin
 		if edit.DependsOn != nil {
 			expected.DependsOn = *edit.DependsOn
 		}
+		if edit.AllowHarnessChanges != nil {
+			expected.AllowHarnessChanges = *edit.AllowHarnessChanges
+		}
 		a := DigestWorkUnit(&expected)
 		b := DigestWorkUnit(parsed)
 		if a != b {
@@ -129,6 +136,8 @@ func sectionKey(header string) string {
 		return "gate"
 	case "depends on", "dependencies":
 		return "depends_on"
+	case "allow harness changes":
+		return "allow_harness_changes"
 	}
 	return ""
 }
@@ -165,10 +174,10 @@ func editMarkdown(body string, fields map[string]any) (string, error) {
 	if strings.Contains(body, "\r\n") {
 		newline = "\r\n"
 	}
-	names := map[string]string{"objective": "Objective", "constraints": "Constraints", "acceptance": "Acceptance Criteria", "workflow": "Workflow", "gate": "Plan Gate", "depends_on": "Depends On"}
+	names := map[string]string{"objective": "Objective", "constraints": "Constraints", "acceptance": "Acceptance Criteria", "workflow": "Workflow", "gate": "Plan Gate", "depends_on": "Depends On", "allow_harness_changes": "Allow Harness Changes"}
 	var spans []editSpan
 	var additions strings.Builder
-	for _, key := range []string{"objective", "constraints", "acceptance", "workflow", "gate", "depends_on"} {
+	for _, key := range []string{"objective", "constraints", "acceptance", "workflow", "gate", "depends_on", "allow_harness_changes"} {
 		value, ok := fields[key]
 		if !ok {
 			continue
@@ -187,6 +196,8 @@ func editMarkdown(body string, fields map[string]any) (string, error) {
 			fragment.Gate = GateMode(value.(string))
 		case "depends_on":
 			fragment.DependsOn = value.([]int)
+		case "allow_harness_changes":
+			fragment.AllowHarnessChanges = value.(bool)
 		}
 		rendered := FormatIssueMarkdown(fragment)
 		content := ""
@@ -203,6 +214,11 @@ func editMarkdown(body string, fields map[string]any) (string, error) {
 		if key == "gate" && value.(string) == "" {
 			content = ""
 		}
+		// The formatter omits a false permission; an existing section needs an
+		// unchecked box, while a missing one already parses as false.
+		if key == "allow_harness_changes" && !value.(bool) {
+			content = allowHarnessChangesUnchecked
+		}
 		content = strings.ReplaceAll(content, "\n", newline) + newline
 
 		found := false
@@ -214,9 +230,15 @@ func editMarkdown(body string, fields map[string]any) (string, error) {
 				return body, fmt.Errorf("ambiguous duplicate %s sections", key)
 			}
 			found = true
-			spans = append(spans, editSpan{s.start, s.end, newline + content + newline})
+			// A final section has no following heading to separate from, so
+			// rewriting it with its current value leaves the body unchanged.
+			separator := newline
+			if s.end == len(body) {
+				separator = ""
+			}
+			spans = append(spans, editSpan{s.start, s.end, newline + content + separator})
 		}
-		if !found {
+		if !found && (key != "allow_harness_changes" || value.(bool)) {
 			additions.WriteString(newline + "### " + names[key] + newline + newline + content)
 		}
 	}

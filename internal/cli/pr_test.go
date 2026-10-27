@@ -766,3 +766,36 @@ func TestCLIPRRebaseWithoutStageRequiresNewPlan(t *testing.T) {
 		t.Fatalf("unstaged resume retained evidence: %+v", st)
 	}
 }
+
+func TestCLIPRWorkRestorationEvidence(t *testing.T) {
+	t.Parallel()
+	f, issue, number := submittedPRFixture(t, "agent", func(f *cliFixture) {
+		if err := os.MkdirAll(filepath.Join(f.root, "lib"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(f.root, "lib", "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		prGit(t, f.root, "add", "lib/keep.txt")
+		prGit(t, f.root, "commit", "-m", "base file")
+	})
+	p := strconv.Itoa(number)
+	// A blocked PR round checkpoints the deletion, as in #207.
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "rm lib/keep.txt && printf 'Status: blocked - removed lib/keep.txt\\n' > .swarm/active/IMPLEMENTATION.md")
+	if _, err := f.run("pr", "work", p, "--agent", "mock", "--progress=false"); err == nil || !strings.Contains(err.Error(), "developer blocked") {
+		t.Fatalf("blocked round: %v", err)
+	}
+	captured := filepath.Join(t.TempDir(), "REPAIR.md")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "cp .swarm/active/REPAIR.md '"+captured+"' && printf 'keep\\n' > lib/keep.txt")
+	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--phase", "implement", "--progress=false", "--json"))
+	brief, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(brief), "# Approved-base restoration evidence") || !strings.Contains(string(brief), "## File \"lib/keep.txt\"") || !strings.Contains(string(brief), "```text\nkeep\n```\n") {
+		t.Fatalf("PR round lacks restoration evidence:\n%s", brief)
+	}
+	if got := prGit(t, worked.Worktree, "show", worked.HeadSHA+":lib/keep.txt"); got != "keep" || f.state(t, issue).PRRevision == nil {
+		t.Fatalf("restored file at PR head = %q", got)
+	}
+}

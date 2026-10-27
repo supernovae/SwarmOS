@@ -87,15 +87,16 @@ func TestImportRejectionReasonRouting(t *testing.T) {
 const rejectedTestPatch = "diff --git a/src/main.go b/src/main.go\nnew file mode 100644\n--- /dev/null\n+++ b/src/main.go\n@@ -0,0 +1 @@\n+package main\n"
 
 // rejectingRunner returns the developer's import check like the sandbox does,
-// handing a recoverable rejection's patch to the coordinator first.
-func rejectingRunner(paths []string) func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+// handing a recoverable rejection's patch to the coordinator first. deleted
+// lists the subset of paths the run deleted.
+func rejectingRunner(paths []string, deleted ...string) func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 	mock := &agent.MockRunner{}
 	return func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
 			if req.Role != "developer" {
 				return mock.Run(ctx, req)
 			}
-			err := req.CheckImport(ctx, paths)
+			err := req.CheckImport(ctx, paths, deleted)
 			var recoverable sandbox.RecoverableImport
 			if req.PreserveRejected != nil && errors.As(err, &recoverable) && recoverable.RecoverableImport() {
 				req.PreserveRejected(ctx, err, []byte(rejectedTestPatch))
@@ -212,5 +213,77 @@ func TestImportRejectionReasonWithPatch(t *testing.T) {
 		if !strings.HasSuffix(got, tc.want) || strings.Contains(got, "/home/") {
 			t.Fatalf("got %q want suffix %q", got, tc.want)
 		}
+	}
+}
+
+var errStopAfterImport = errors.New("stop after import check")
+
+func TestDeletionImportRejection(t *testing.T) {
+	const handler = "internal/api/handler.go"
+	for _, tc := range []struct {
+		name, plan string
+		paths      []string
+		deleted    bool // want an unplanned-deletion rejection
+		protected  bool // want the existing protected-path rejection
+	}{
+		{name: "unmentioned", paths: []string{"src/main.go", handler}, deleted: true},
+		{name: "plan calls it new", plan: "- Create new file `" + handler + "`", paths: []string{"src/main.go", handler}, deleted: true},
+		{name: "directive", plan: "- Delete `" + handler + "` (replaced by src/main.go)", paths: []string{"src/main.go", handler}},
+		{name: "protected path first", paths: []string{handler, ".swarm/validation/required-checks.yaml"}, protected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("SWARM_MOCK_PLAN_APPEND", tc.plan)
+			var importErr error
+			mock := &agent.MockRunner{}
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role != "developer" {
+						return mock.Run(ctx, req)
+					}
+					if importErr = req.CheckImport(ctx, tc.paths, []string{handler}); importErr != nil {
+						return nil, importErr
+					}
+					return nil, errStopAfterImport
+				}}, nil
+			}
+			res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			if !tc.deleted && !tc.protected {
+				if importErr != nil || !errors.Is(err, errStopAfterImport) {
+					t.Fatalf("planned deletion rejected: %v / %v", importErr, err)
+				}
+				return
+			}
+			var rejection *importRejection
+			if !errors.As(err, &rejection) || rejection.Deleted != tc.deleted || rejection.Recoverable {
+				t.Fatalf("rejection: %v", err)
+			}
+			st, loadErr := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if st.Lease.NextPhase != "implement" || st.HeadSHA != "" {
+				t.Fatalf("checkpoint advanced: %+v", st)
+			}
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactImplementation {
+					t.Fatalf("rejected run recorded artifact: %+v", a)
+				}
+			}
+			if _, statErr := os.Stat(filepath.Join(res.WorktreePath, filepath.FromSlash(handler))); statErr != nil {
+				t.Fatalf("worktree changed: %v", statErr)
+			}
+			if tc.deleted {
+				for _, text := range []string{handler + " (unplanned deletion of approved-base files)", ".swarm/active/REPAIR.md", "`- Delete path/to/file.go`", "rerun with swarm issue work " + strconv.Itoa(issue.Number) + " --phase implement"} {
+					if !strings.Contains(st.NextPhaseReason, text) || !strings.Contains(err.Error(), text) {
+						t.Fatalf("missing %q: %v / %s", text, err, st.NextPhaseReason)
+					}
+				}
+				if strings.Contains(err.Error(), "src/main.go") {
+					t.Fatalf("edit named as deletion: %v", err)
+				}
+			}
+		})
 	}
 }

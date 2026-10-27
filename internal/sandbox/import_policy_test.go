@@ -30,11 +30,14 @@ func TestWritableImportPreflight(t *testing.T) {
 				ctx = claimpause.WithParent(ctx, t.Context())
 				rejection := errors.New("protected snapshot rejected")
 				checked := false
-				opts := WorkerOptions{Role: role, CheckImport: func(_ context.Context, paths []string) error {
+				opts := WorkerOptions{Role: role, CheckImport: func(_ context.Context, paths, deleted []string) error {
 					checked = true
 					sort.Strings(paths)
 					if !reflect.DeepEqual(paths, []string{".swarm/active/PLAN.md", "added", "deleted", "mode", "source"}) {
 						t.Fatalf("changes: %v", paths)
+					}
+					if !reflect.DeepEqual(deleted, []string{"deleted"}) {
+						t.Fatalf("deleted: %v", deleted)
 					}
 					return rejection
 				}}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -14,6 +15,9 @@ import (
 type importRejection struct {
 	Paths []string
 	Role  string
+	// Deleted marks a run that deleted approved-base files the approved plan
+	// does not delete. It is never recoverable.
+	Deleted bool
 	// Recoverable is set when every rejected path is another role's output, so
 	// a maintainer may re-apply the rest of the run with recover-import.
 	Recoverable bool
@@ -34,7 +38,52 @@ var roleOutputs = map[string]bool{
 }
 
 func (e *importRejection) Error() string {
+	if e.Deleted {
+		return fmt.Sprintf("rejected agent changes to: %s (unplanned deletion of approved-base files)", strings.Join(e.Paths, ", "))
+	}
 	return fmt.Sprintf("rejected agent changes to: %s", strings.Join(e.Paths, ", "))
+}
+
+// deletionDirective matches one physical PLAN.md line that deletes a path: an
+// optional list marker, a delete verb, and the exact path, bare or in
+// backticks, followed by whitespace or the end of the line.
+var deletionDirective = regexp.MustCompile("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?i:delete|remove|rm|drop)[ \t]+(?:`([^`\\s]+)`|([^`\\s]+))(?:[ \t]|$)")
+
+// plannedDeletions returns the paths an approved plan explicitly deletes.
+// Mentioning a path, or calling it new or modified, never authorizes deletion.
+func plannedDeletions(plan string) map[string]bool {
+	planned := map[string]bool{}
+	for _, line := range strings.Split(plan, "\n") {
+		match := deletionDirective.FindStringSubmatch(strings.TrimSuffix(line, "\r"))
+		if match != nil {
+			planned[match[1]+match[2]] = true
+		}
+	}
+	return planned
+}
+
+// deletionImportPolicy rejects a developer run that deletes files tracked at
+// the approved base unless the approved plan deletes them.
+func deletionImportPolicy(role string, deleted []string, base map[string]bool, plan string) error {
+	if role != "developer" {
+		return nil
+	}
+	planned := plannedDeletions(plan)
+	unique := map[string]bool{}
+	for _, path := range deleted {
+		if base[path] && !planned[path] {
+			unique[path] = true
+		}
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(unique))
+	for name := range unique {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return &importRejection{Paths: names, Role: role, Deleted: true}
 }
 
 func writableImportPolicy(role string, paths, patterns []string, allowHarness, fork bool) error {
@@ -117,6 +166,9 @@ func importRejectionReason(rejection *importRejection, issue, pr int) string {
 		rerun = fmt.Sprintf("swarm pr work %d --phase implement", pr)
 	}
 	reason := fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; rerun with %s", rejection, rerun)
+	if rejection.Deleted {
+		reason = fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; keep or restore approved-base files the approved plan does not delete (the next developer round's .swarm/active/REPAIR.md carries the approved-base contents of any file a checkpoint lacks); an intentional removal needs an approved PLAN.md line such as `- Delete path/to/file.go`; rerun with %s", rejection, rerun)
+	}
 	if rejection.developerOutputOnly() {
 		reason = fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; developers record results in .swarm/active/IMPLEMENTATION.md, not %s; rerun with %s --instructions '%s'", rejection, strings.Join(rejection.Paths, ", "), rerun, developerOutputInstructions)
 	}

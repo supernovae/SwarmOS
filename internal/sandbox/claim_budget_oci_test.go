@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -88,7 +89,7 @@ case "$1" in
 			defer cancel(context.Canceled)
 			ctx = claimpause.WithParent(ctx, t.Context())
 			imported := false
-			opts := WorkerOptions{Runtime: binary, Image: "local/image@sha256:" + strings.Repeat("b", 64), Role: "developer", CheckImport: func(context.Context, []string) error {
+			opts := WorkerOptions{Runtime: binary, Image: "local/image@sha256:" + strings.Repeat("b", 64), Role: "developer", CheckImport: func(context.Context, []string, []string) error {
 				imported = true
 				calls, _ := os.ReadFile(filepath.Join(root, "calls"))
 				lines := string(calls)
@@ -123,6 +124,7 @@ func TestOCIWritableImportPreflight(t *testing.T) {
 			t.Run(role+"/failure="+failure, func(t *testing.T) {
 				root, dir, result := t.TempDir(), t.TempDir(), t.TempDir()
 				writeWorkerFixture(t, dir, "source", "before")
+				writeWorkerFixture(t, dir, "deleted", "before")
 				writeWorkerFixture(t, result, "source", "saved")
 				archive := filepath.Join(root, "result.tar")
 				if _, err := packWorker(t.Context(), result, archive, nil, false); err != nil {
@@ -178,8 +180,15 @@ case "$1" in
 				defer cancel(context.Canceled)
 				ctx = claimpause.WithParent(ctx, t.Context())
 				imported := false
-				opts := WorkerOptions{Runtime: binary, Image: "local/image@sha256:" + strings.Repeat("b", 64), Role: role, CheckImport: func(context.Context, []string) error {
+				opts := WorkerOptions{Runtime: binary, Image: "local/image@sha256:" + strings.Repeat("b", 64), Role: role, CheckImport: func(_ context.Context, _, deleted []string) error {
 					imported = true
+					// Final-manifest absence reaches the policy before any worktree mutation.
+					if !reflect.DeepEqual(deleted, []string{"deleted"}) {
+						t.Fatalf("deleted: %v", deleted)
+					}
+					if _, err := os.Stat(filepath.Join(dir, "deleted")); err != nil {
+						t.Fatalf("deleted before import check: %v", err)
+					}
 					calls, _ := os.ReadFile(filepath.Join(root, "calls"))
 					lines := string(calls)
 					pause, export, termination := strings.Index(lines, "pause "), strings.Index(lines, "cp "+strings.Repeat("a", 64)+":/workspace/. -"), strings.Index(lines, "rm --force")
@@ -199,6 +208,10 @@ case "$1" in
 					}
 				} else if err == nil || errors.Is(err, claimpause.ErrBudget) || string(data) != "before" {
 					t.Fatalf("failed cleanup imported: %s %v", data, err)
+				}
+				_, statErr := os.Stat(filepath.Join(dir, "deleted"))
+				if (failure == "") != errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("deletion imported=%v with failure %q", statErr, failure)
 				}
 			})
 		}

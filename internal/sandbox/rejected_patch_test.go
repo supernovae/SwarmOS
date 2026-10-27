@@ -34,7 +34,7 @@ func TestPreserveRejectedOnlyWhenRecoverable(t *testing.T) {
 			called := false
 			var got []byte
 			opts := WorkerOptions{Role: "developer",
-				CheckImport: func(context.Context, []string) error { return tc.err },
+				CheckImport: func(context.Context, []string, []string) error { return tc.err },
 				PreserveRejected: func(_ context.Context, importErr error, patch []byte) {
 					called = true
 					got = patch

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 concurrency:
   group: swarm-validation-${{ github.workflow }}-${{ github.ref }}
@@ -31,7 +32,6 @@ jobs:
           GOBIN: ${{ runner.temp }}/swarm-bin
         working-directory: ${{ runner.temp }}
         run: go install github.com/supernovae/swarmos/cmd/swarm@"$SWARM_VERSION"
-      # PROJECT_RUNTIME_SETUP
       # Maintainers may change protected policy in their own pull requests; the
       # check lists those files instead of failing. Agent branches (swarm/...),
       # fork heads, and other authors keep strict enforcement.
@@ -46,8 +46,18 @@ jobs:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           mode=enforce
+          issue=
           case "$HEAD_REF" in
-            swarm/*) ;;
+            swarm/*)
+              # A same-repository issue branch names the issue whose approved
+              # state the trusted validator checks. The name grants nothing.
+              if [ "$HEAD_REPO" = "$REPO" ]; then
+                case "$HEAD_REF" in
+                  swarm/issue-[0-9]*-*) issue=${HEAD_REF#swarm/issue-}; issue=${issue%%-*} ;;
+                esac
+                case "$issue" in *[!0-9]*) issue= ;; esac
+              fi
+              ;;
             *)
               if [ "$HEAD_REPO" = "$REPO" ]; then
                 permission=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission 2>/dev/null || true)
@@ -56,6 +66,31 @@ jobs:
               ;;
           esac
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "issue=$issue" >> "$GITHUB_OUTPUT"
+      # This step holds a token, so it runs only the trusted validator, never
+      # candidate code: it checks the linked issue's authoritative approved
+      # state and records the verified grant for the validate step.
+      - name: Verify approved harness grant
+        if: steps.protected.outputs.issue != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINKED_ISSUE: ${{ steps.protected.outputs.issue }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          swarm="$RUNNER_TEMP/swarm-bin/swarm"
+          grant="$RUNNER_TEMP/swarm-harness-grant.json"
+          rm -f "$grant"
+          if ! "$swarm" repo validate --help | grep -q -- '--grant-only'; then
+            echo "::notice::The validator at the trusted base predates approved harness grants; protected paths stay enforced."
+            exit 0
+          fi
+          if ! git rev-parse -q --verify HEAD^2 >/dev/null; then
+            exit 0
+          fi
+          "$swarm" repo validate --base "$(git rev-parse HEAD^1)" --issue "$LINKED_ISSUE" --pr "$PR_NUMBER" --grant-only --grant-file "$grant"
+      # Runtime setup may run candidate code (dependency installs), so it
+      # comes after every step that holds a token.
+      # PROJECT_RUNTIME_SETUP
       # Check commands come from the trusted base, never the candidate's policy.
       - name: Validate against trusted base
         env:
@@ -78,8 +113,12 @@ jobs:
             echo 'No trusted base: bootstrap and review the harness before enabling this workflow.' >&2
             exit 1
           fi
+          set --
+          if [ -f "$RUNNER_TEMP/swarm-harness-grant.json" ]; then
+            set -- --grant-file "$RUNNER_TEMP/swarm-harness-grant.json"
+          fi
           status=0
-          "$RUNNER_TEMP/swarm-bin/swarm" repo validate --base "$BASE_SHA" --protected-paths "${PROTECTED_MODE:-enforce}" > "$RUNNER_TEMP/swarm-validate.txt" 2>&1 || status=$?
+          "$RUNNER_TEMP/swarm-bin/swarm" repo validate --base "$BASE_SHA" --protected-paths "${PROTECTED_MODE:-enforce}" "$@" > "$RUNNER_TEMP/swarm-validate.txt" 2>&1 || status=$?
           cat "$RUNNER_TEMP/swarm-validate.txt"
           if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
             { echo '### SwarmOS validation'; echo '```text'; cat "$RUNNER_TEMP/swarm-validate.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

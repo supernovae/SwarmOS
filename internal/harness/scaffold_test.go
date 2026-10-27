@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -821,6 +822,24 @@ func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
 		t.Fatalf("job summary not written: %q %v", data, err)
 	}
 
+	// A grant recorded by the grant step is handed to the validator to re-check.
+	grant := filepath.Join(runnerTemp, "swarm-harness-grant.json")
+	if err := os.WriteFile(grant, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	granted := exec.Command("bash", "-e", "-c", script)
+	granted.Dir = repo
+	granted.Env = append(os.Environ(), "RUNNER_TEMP="+runnerTemp, "BASE_SHA="+staleBase, "EVENT_NAME=pull_request", "GITHUB_STEP_SUMMARY="+summary)
+	if out, err := granted.CombinedOutput(); err != nil {
+		t.Fatalf("granted step failed: %v (%s)", err, out)
+	}
+	if args, _ := os.ReadFile(filepath.Join(runnerTemp, "args")); strings.TrimSpace(string(args)) != "repo validate --base "+currentTip+" --protected-paths enforce --grant-file "+grant {
+		t.Fatalf("grant file not passed: %q", args)
+	}
+	if err := os.Remove(grant); err != nil {
+		t.Fatal(err)
+	}
+
 	// A failing validator fails the step, and the maintainer mode is passed through.
 	failing := "#!/bin/sh\necho \"$@\" > \"$RUNNER_TEMP/args\"\necho 'FAIL ok'\nexit 3\n"
 	if err := os.WriteFile(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(failing), 0o755); err != nil {
@@ -872,14 +891,18 @@ func TestValidateWorkflowReportsProtectedChangesOnlyForMaintainerBranches(t *tes
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name, ref, headRepo, permission, want string
+		name, ref, headRepo, permission, want, issue string
 	}{
-		{"maintainer branch", "docs/scope", "octo/widgets", "write", "report"},
-		{"admin branch", "fix/thing", "octo/widgets", "admin", "report"},
-		{"agent branch", "swarm/issue-7-x", "octo/widgets", "admin", "enforce"},
-		{"read-only author", "docs/scope", "octo/widgets", "read", "enforce"},
-		{"fork head", "docs/scope", "someone/widgets", "write", "enforce"},
-		{"permission lookup fails", "docs/scope", "octo/widgets", "", "enforce"},
+		{"maintainer branch", "docs/scope", "octo/widgets", "write", "report", ""},
+		{"admin branch", "fix/thing", "octo/widgets", "admin", "report", ""},
+		{"agent branch", "swarm/issue-7-x", "octo/widgets", "admin", "enforce", "7"},
+		{"agent fork head", "swarm/issue-7-x", "someone/widgets", "admin", "enforce", ""},
+		{"agent branch without issue", "swarm/issue-x", "octo/widgets", "admin", "enforce", ""},
+		{"agent branch with malformed issue", "swarm/issue-7a-x", "octo/widgets", "admin", "enforce", ""},
+		{"agent PR branch", "swarm/pr-12", "octo/widgets", "admin", "enforce", ""},
+		{"read-only author", "docs/scope", "octo/widgets", "read", "enforce", ""},
+		{"fork head", "docs/scope", "someone/widgets", "write", "enforce", ""},
+		{"permission lookup fails", "docs/scope", "octo/widgets", "", "enforce", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			output := filepath.Join(t.TempDir(), "output")
@@ -889,10 +912,201 @@ func TestValidateWorkflowReportsProtectedChangesOnlyForMaintainerBranches(t *tes
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("step failed: %v (%s)", err, out)
 			}
-			if data, err := os.ReadFile(output); err != nil || strings.TrimSpace(string(data)) != "mode="+tc.want {
-				t.Fatalf("mode = %q (%v), want %s", data, err, tc.want)
+			if data, err := os.ReadFile(output); err != nil || strings.TrimSpace(string(data)) != "mode="+tc.want+"\nissue="+tc.issue {
+				t.Fatalf("output = %q (%v), want mode=%s issue=%s", data, err, tc.want, tc.issue)
 			}
 		})
+	}
+}
+
+type workflowStep struct {
+	Name string            `yaml:"name"`
+	If   string            `yaml:"if"`
+	Env  map[string]string `yaml:"env"`
+	Run  string            `yaml:"run"`
+}
+
+// validateWorkflowCopies returns the policy steps of the shipped template and
+// of this repository's own CI, which must apply the same protected-path rules.
+func validateWorkflowCopies(t *testing.T) map[string][]workflowStep {
+	t.Helper()
+	template, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-validate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "swarm-validate.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copies := map[string][]workflowStep{}
+	for _, c := range []struct {
+		name, job string
+		raw       []byte
+	}{{"template", "validate", template}, {"repository", "policy", own}} {
+		var workflow struct {
+			Jobs map[string]struct {
+				Steps []workflowStep `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
+		// Windows checkouts may convert workflow files to CRLF.
+		if err := yaml.Unmarshal([]byte(strings.ReplaceAll(string(c.raw), "\r\n", "\n")), &workflow); err != nil {
+			t.Fatal(err)
+		}
+		steps := workflow.Jobs[c.job].Steps
+		if len(steps) == 0 {
+			t.Fatalf("%s job %s has no steps", c.name, c.job)
+		}
+		copies[c.name] = steps
+	}
+	return copies
+}
+
+func findWorkflowStep(t *testing.T, steps []workflowStep, name string) workflowStep {
+	t.Helper()
+	for _, step := range steps {
+		if step.Name == name {
+			return step
+		}
+	}
+	t.Fatalf("step %q not found", name)
+	return workflowStep{}
+}
+
+const workflowGrantArgs = `set --
+if [ -f "$RUNNER_TEMP/swarm-harness-grant.json" ]; then
+  set -- --grant-file "$RUNNER_TEMP/swarm-harness-grant.json"
+fi
+`
+
+func TestValidateWorkflowCopiesStayInSync(t *testing.T) {
+	copies := validateWorkflowCopies(t)
+	template, own := copies["template"], copies["repository"]
+	for _, name := range []string{"Decide protected-path handling", "Verify approved harness grant"} {
+		if a, b := findWorkflowStep(t, template, name), findWorkflowStep(t, own, name); !reflect.DeepEqual(a, b) {
+			t.Fatalf("%q differs between the template and .github/workflows/swarm-validate.yml:\n%+v\n%+v", name, a, b)
+		}
+	}
+	for name, steps := range copies {
+		run := findWorkflowStep(t, steps, "Validate against trusted base").Run
+		if !strings.Contains(run, workflowGrantArgs) || !strings.Contains(run, `--protected-paths "${PROTECTED_MODE:-enforce}" "$@"`) && !strings.Contains(run, `--protected-paths "$PROTECTED_MODE" "$@"`) {
+			t.Fatalf("%s validate step does not pass the verified grant file:\n%s", name, run)
+		}
+		order := map[string]int{}
+		for i, step := range steps {
+			order[step.Name] = i
+		}
+		if !(order["Decide protected-path handling"] < order["Verify approved harness grant"] && order["Verify approved harness grant"] < order["Validate against trusted base"]) {
+			t.Fatalf("%s policy steps out of order: %v", name, order)
+		}
+	}
+}
+
+// Candidate code runs only in the validate step (and runtime setup before it),
+// so no token may reach those steps.
+func TestValidateWorkflowGrantStepIsolation(t *testing.T) {
+	for name, steps := range validateWorkflowCopies(t) {
+		var holders []string
+		validateIndex, grantIndex := -1, -1
+		for i, step := range steps {
+			for key, value := range step.Env {
+				if strings.Contains(key, "TOKEN") || strings.Contains(value, "github.token") || strings.Contains(value, "secrets.") {
+					holders = append(holders, step.Name)
+					break
+				}
+			}
+			switch step.Name {
+			case "Validate against trusted base":
+				validateIndex = i
+			case "Verify approved harness grant":
+				grantIndex = i
+			}
+		}
+		if want := []string{"Decide protected-path handling", "Verify approved harness grant"}; !slices.Equal(holders, want) {
+			t.Fatalf("%s token-holding steps = %q, want %q", name, holders, want)
+		}
+		// Only the trusted validator runs in the grant step.
+		grant := steps[grantIndex]
+		if grant.If != "steps.protected.outputs.issue != ''" || !strings.Contains(grant.Run, "--grant-only") {
+			t.Fatalf("%s grant step is not gated on the linked issue or runs checks:\n%+v", name, grant)
+		}
+		for _, step := range steps[grantIndex+1 : validateIndex] {
+			if step.Name == "Decide protected-path handling" {
+				t.Fatalf("%s decides protected paths after candidate setup", name)
+			}
+		}
+		for _, step := range steps[:grantIndex] {
+			if strings.Contains(step.Run, "npm") || strings.Contains(step.Run, "pip install") {
+				t.Fatalf("%s runs dependency installs before a token-holding step: %q", name, step.Name)
+			}
+		}
+	}
+	// Generated workflows place runtime setup, which may run candidate code,
+	// after every token-holding step.
+	raw, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-validate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	if setup, grant := strings.Index(body, "# PROJECT_RUNTIME_SETUP"), strings.Index(body, "name: Verify approved harness grant"); setup < grant || grant < 0 {
+		t.Fatal("runtime setup placeholder precedes the token-holding grant step")
+	}
+}
+
+func TestValidateWorkflowGrantStepRunsOnlyGrantVerification(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	script := findWorkflowStep(t, validateWorkflowCopies(t)["template"], "Verify approved harness grant").Run
+	repo := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q", "-b", "main")
+	git("commit", "-q", "--allow-empty", "-m", "base")
+	git("checkout", "-q", "-b", "pr")
+	git("commit", "-q", "--allow-empty", "-m", "PR change")
+	git("checkout", "-q", "main")
+	git("commit", "-q", "--allow-empty", "-m", "newer main")
+	base := git("rev-parse", "HEAD")
+	git("merge", "-q", "--no-ff", "-m", "GitHub merge commit", "pr")
+	runnerTemp := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(runnerTemp, "swarm-bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(runnerTemp, "swarm-harness-grant.json")
+	run := func(help string) string {
+		t.Helper()
+		stub := "#!/bin/sh\ncase \"$*\" in *--help*) echo '" + help + "'; exit 0 ;; esac\necho \"$@\" > \"$RUNNER_TEMP/args\"\n"
+		if err := os.WriteFile(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(stub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stale, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Remove(filepath.Join(runnerTemp, "args"))
+		cmd := exec.Command("bash", "-e", "-c", script)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(), "RUNNER_TEMP="+runnerTemp, "LINKED_ISSUE=7", "PR_NUMBER=12")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("grant step failed: %v (%s)", err, out)
+		}
+		if _, err := os.Stat(stale); !os.IsNotExist(err) {
+			t.Fatal("grant step kept a stale grant file")
+		}
+		args, _ := os.ReadFile(filepath.Join(runnerTemp, "args"))
+		return strings.TrimSpace(string(args))
+	}
+	if got := run("--protected-paths"); got != "" {
+		t.Fatalf("old validator was asked for a grant: %q", got)
+	}
+	want := "repo validate --base " + base + " --issue 7 --pr 12 --grant-only --grant-file " + stale
+	if got := run("--grant-only"); got != want {
+		t.Fatalf("grant args = %q, want %q", got, want)
 	}
 }
 

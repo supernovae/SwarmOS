@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/validation"
 )
@@ -92,20 +93,75 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 }
 
 func newRepoValidateCmd(options *RootOptions) *cobra.Command {
-	var baseSHA, protectedMode string
-	var asJSON bool
+	var baseSHA, protectedMode, grantFile string
+	var issue, prNumber int
+	var asJSON, grantOnly bool
 	cmd := &cobra.Command{Use: "validate", Short: "Validate a repository checkout against a trusted immutable base", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
-		if baseSHA == "" {
-			err := fmt.Errorf("--base <trusted-full-commit-SHA> is required")
+		usage := func(err error) error {
 			reportJSONFailure(cmd, asJSON, "validation", err)
 			return err
+		}
+		if baseSHA == "" {
+			return usage(fmt.Errorf("--base <trusted-full-commit-SHA> is required"))
 		}
 		if protectedMode != "enforce" && protectedMode != "report" {
-			err := fmt.Errorf("--protected-paths must be enforce or report, not %q", protectedMode)
-			reportJSONFailure(cmd, asJSON, "validation", err)
-			return err
+			return usage(fmt.Errorf("--protected-paths must be enforce or report, not %q", protectedMode))
 		}
-		report, err := validation.Validate(cmd.Context(), options.resolveRepoRoot(), nil, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork, ReportProtectedChanges: protectedMode == "report", LookupEnv: options.lookupEnv})
+		linked := issue != 0 || prNumber != 0
+		if linked && (issue <= 0 || prNumber <= 0) {
+			return usage(fmt.Errorf("--issue and --pr must be given together as positive numbers"))
+		}
+		if (linked || grantFile != "") && options.Fork {
+			return usage(fmt.Errorf("--issue, --pr, and --grant-file cannot be used with --fork; fork pull requests keep strict enforcement"))
+		}
+		if (linked || grantFile != "") && protectedMode == "report" {
+			return usage(fmt.Errorf("--issue, --pr, and --grant-file apply only to --protected-paths enforce"))
+		}
+		if grantOnly && (!linked || grantFile == "") {
+			return usage(fmt.Errorf("--grant-only requires --issue, --pr, and --grant-file"))
+		}
+		if !grantOnly && linked && grantFile != "" {
+			return usage(fmt.Errorf("--grant-file without --grant-only cannot be combined with --issue and --pr"))
+		}
+		ctx, root := cmd.Context(), options.resolveRepoRoot()
+		notes := cmd.OutOrStdout()
+		if asJSON {
+			notes = cmd.ErrOrStderr()
+		}
+		var unit *contract.WorkUnit
+		switch {
+		case grantOnly:
+			// Verify and record the grant without running any check, so a
+			// token-holding CI step never executes candidate code.
+			_ = os.Remove(grantFile)
+			record, err := resolveHarnessGrant(ctx, options, cmd, root, baseSHA, issue, prNumber)
+			if err != nil {
+				writeHarnessGrantRefusal(notes, issue, err)
+				return nil
+			}
+			if err := writeHarnessGrantFile(grantFile, record); err != nil {
+				return err
+			}
+			writeHarnessGrantAccepted(notes, issue)
+			return nil
+		case linked:
+			record, err := resolveHarnessGrant(ctx, options, cmd, root, baseSHA, issue, prNumber)
+			if err != nil {
+				writeHarnessGrantRefusal(notes, issue, err)
+			} else {
+				unit = record.WorkUnit
+				writeHarnessGrantAccepted(notes, issue)
+			}
+		case grantFile != "":
+			wu, err := readHarnessGrantFile(ctx, root, grantFile, baseSHA)
+			if err != nil {
+				fmt.Fprintf(notes, "NOTE harness grant ignored; protected paths stay enforced: %s\n", validation.EscapeDiagnostic(err.Error()))
+			} else {
+				unit = wu
+				writeHarnessGrantAccepted(notes, wu.IssueNumber)
+			}
+		}
+		report, err := validation.Validate(ctx, root, unit, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork, ReportProtectedChanges: protectedMode == "report", LookupEnv: options.lookupEnv})
 		if !asJSON && report != nil {
 			writeProtectedChanges(cmd, report.ProtectedChanges)
 		}
@@ -113,6 +169,10 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 	}}
 	cmd.Flags().StringVar(&baseSHA, "base", "", "Trusted full base commit SHA to validate against (required)")
 	cmd.Flags().StringVar(&protectedMode, "protected-paths", "enforce", "Protected-path changes: enforce (fail) or report (list them and run checks, for maintainer pull requests)")
+	cmd.Flags().IntVar(&issue, "issue", 0, "Linked issue whose approved state may authorize protected changes (requires --pr)")
+	cmd.Flags().IntVar(&prNumber, "pr", 0, "Pull request that must match the linked issue's submitted PR")
+	cmd.Flags().BoolVar(&grantOnly, "grant-only", false, "Verify the linked issue's harness grant and write it to --grant-file without running checks")
+	cmd.Flags().StringVar(&grantFile, "grant-file", "", "Harness grant file written by --grant-only; re-checked against this checkout before use")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured validation outcome")
 	return cmd
 }

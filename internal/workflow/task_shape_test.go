@@ -97,3 +97,61 @@ func TestBacklogScanReportsShapeAndGatesExploratorySuggestions(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkUnitTouchpoints(t *testing.T) {
+	wu := &contract.WorkUnit{
+		Title:      "Tune internal/lease/manager.go",
+		Objective:  "Adjust internal/cli/selection.go and ignore /etc/passwd and ../outside/x.go",
+		Acceptance: []string{"`go test ./internal/lease` passes", "docs/WORKFLOWS.md mentions it"},
+	}
+	got := WorkUnitTouchpoints(t.TempDir(), wu)
+	for _, want := range []string{"internal/lease/manager.go", "internal/cli/selection.go", "docs/WORKFLOWS.md"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("touchpoints %v missing %s", got, want)
+		}
+	}
+	for _, tp := range got {
+		if strings.HasPrefix(tp, "/") || strings.HasPrefix(tp, "..") {
+			t.Fatalf("touchpoints %v include %s", got, tp)
+		}
+	}
+	if got := WorkUnitTouchpoints(t.TempDir(), &contract.WorkUnit{Title: "Polish", Objective: "No paths here"}); len(got) != 0 {
+		t.Fatalf("unknown touchpoints = %v", got)
+	}
+	if got := WorkUnitTouchpoints(t.TempDir(), nil); got != nil {
+		t.Fatalf("nil WorkUnit touchpoints = %v", got)
+	}
+}
+
+func TestTouchpointOverlap(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		candidate []string
+		inFlight  map[int][]string
+		score     int
+		issues    []int
+		paths     []string
+	}{
+		{"same file", []string{"internal/lease/a.go"}, map[int][]string{7: {"internal/lease/a.go"}}, 1, []int{7}, []string{"internal/lease/a.go"}},
+		{"same go package", []string{"internal/lease/b.go"}, map[int][]string{7: {"internal/lease/a.go"}}, 1, []int{7}, []string{"internal/lease/b.go"}},
+		{"parent directory", []string{"internal/lease"}, map[int][]string{7: {"internal/lease/sub/a.go"}}, 1, []int{7}, []string{"internal/lease"}},
+		{"child of directory", []string{"docs/guide/intro.md"}, map[int][]string{7: {"docs"}}, 1, []int{7}, []string{"docs/guide/intro.md"}},
+		{"sibling directories", []string{"internal/lease/a.go"}, map[int][]string{7: {"internal/leasex/a.go", "internal/cli/a.go"}}, 0, nil, nil},
+		{"string prefix is not ancestry", []string{"internal/lease"}, map[int][]string{7: {"internal/leases"}}, 0, nil, nil},
+		{"same directory non-go files", []string{"docs/a.md"}, map[int][]string{7: {"docs/b.md"}}, 0, nil, nil},
+		{"subpackage is a different package", []string{"internal/lease/a.go"}, map[int][]string{7: {"internal/lease/sub/b.go"}}, 0, nil, nil},
+		{"duplicate paths count one issue", []string{"internal/lease/a.go", "internal/lease/a.go", "internal/lease/b.go"}, map[int][]string{7: {"internal/lease/a.go", "internal/lease/c.go"}}, 1, []int{7}, []string{"internal/lease/a.go", "internal/lease/b.go"}},
+		{"multiple issues", []string{"internal/lease/a.go"}, map[int][]string{9: {"internal/lease"}, 7: {"internal/lease/z.go"}, 8: {"docs/x.md"}}, 2, []int{7, 9}, []string{"internal/lease/a.go"}},
+		{"normalized separators", []string{"internal\\lease\\a.go"}, map[int][]string{7: {"internal/lease/./b.go"}}, 1, []int{7}, []string{"internal/lease/a.go"}},
+		{"empty candidate", nil, map[int][]string{7: {"internal/lease/a.go"}}, 0, nil, nil},
+		{"no in-flight work", []string{"internal/lease/a.go"}, nil, 0, nil, nil},
+		{"absolute and traversal rejected", []string{"/internal/lease/a.go", "../internal/lease/a.go", "."}, map[int][]string{7: {"internal/lease/a.go", "/internal/lease/b.go", ".."}}, 0, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AssessTouchpointOverlap(tc.candidate, tc.inFlight)
+			if got.Score != tc.score || !slices.Equal(got.Issues, tc.issues) || !slices.Equal(got.Paths, tc.paths) {
+				t.Fatalf("got %+v, want score %d issues %v paths %v", got, tc.score, tc.issues, tc.paths)
+			}
+		})
+	}
+}

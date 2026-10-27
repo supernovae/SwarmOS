@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/tracker"
@@ -280,5 +281,227 @@ func TestNextSelectionFallbackEligibility(t *testing.T) {
 	}
 	if result.Selection.Issue.Number != winner || !strings.Contains(diagnostics.String(), "warning:") {
 		t.Fatalf("selected %d: %s", result.Selection.Issue.Number, &diagnostics)
+	}
+}
+
+// createTouching creates an approved task whose objective names touchpoint.
+func (f *cliFixture) createTouching(t *testing.T, touchpoint string) int {
+	t.Helper()
+	f.must(t, "issue", "create", "--title", "Approved task", "--objective", "Change "+touchpoint, "--constraint", "Keep policy unchanged", "--acceptance", "Produce a checked checkpoint", "--gate", "agent")
+	issues, err := f.tracker.ListIssues(context.Background(), tracker.IssueFilter{State: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	number := 0
+	for _, issue := range issues {
+		number = max(number, issue.Number)
+	}
+	f.must(t, "issue", "approve", strconv.Itoa(number))
+	return number
+}
+
+// claimInFlight claims issue and drops its ready label, so in-flight discovery
+// cannot rely on the ready filter.
+func (f *cliFixture) claimInFlight(t *testing.T, issue int) {
+	t.Helper()
+	f.must(t, "issue", "claim", strconv.Itoa(issue), "--agent", "mock")
+	if err := f.tracker.RemoveLabel(context.Background(), issue, "swarm:ready"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOverlapSelectionPrefersNonOverlapping(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"claim", "work", "node"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			f := newCLIFixture(t)
+			active := f.createTouching(t, "internal/lease/a.go")
+			f.claimInFlight(t, active)
+			overlapping := f.createTouching(t, "internal/lease/b.go")
+			free := f.createTouching(t, "docs/guide.md")
+			cmd := f.command(nil)
+			var output, diagnostics bytes.Buffer
+			cmd.SetOut(&output)
+			cmd.SetErr(&diagnostics)
+			args := []string{"issue", "claim", "--next", "--agent", "mock", "--json"}
+			if mode == "work" {
+				args = []string{"issue", "work", "--next", "--agent", "mock", "--phase", "plan", "--headless", "--json", "--progress=false"}
+			}
+			if mode == "node" {
+				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock", "--json"}
+			}
+			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("%v %s %s", err, &output, &diagnostics)
+			}
+			if f.state(t, free).Lease.ClaimID == "" || f.state(t, overlapping).Lease.ClaimID != "" {
+				t.Fatalf("expected #%d over #%d: %s", free, overlapping, &diagnostics)
+			}
+			why := "Issue #" + strconv.Itoa(free) + " selected: overlap score 0"
+			if !strings.Contains(diagnostics.String(), why) || !strings.Contains(diagnostics.String(), "preferred over #"+strconv.Itoa(overlapping)) {
+				t.Fatalf("missing explanation: %s", &diagnostics)
+			}
+			if strings.Contains(output.String(), "selected:") {
+				t.Fatal("explanation on stdout")
+			}
+			var doc struct {
+				Overlap    *overlapSelection `json:"selection"`
+				Selections []struct {
+					IssueNumber int               `json:"issue_number"`
+					Overlap     *overlapSelection `json:"overlap"`
+				}
+			}
+			decoder := json.NewDecoder(&output)
+			if mode == "claim" {
+				var claim struct {
+					Selection struct{ Overlap *overlapSelection }
+				}
+				if err := decoder.Decode(&claim); err != nil {
+					t.Fatal(err)
+				}
+				doc.Overlap = claim.Selection.Overlap
+			} else if err := decoder.Decode(&doc); err != nil {
+				t.Fatal(err)
+			}
+			if decoder.More() {
+				t.Fatal("extra stdout after JSON")
+			}
+			got := doc.Overlap
+			if mode == "node" {
+				if len(doc.Selections) != 1 || doc.Selections[0].IssueNumber != free {
+					t.Fatalf("node selections: %+v", doc.Selections)
+				}
+				got = doc.Selections[0].Overlap
+			}
+			if got == nil || got.Score != 0 || !got.Complete || got.InFlight != 1 || !reflect.DeepEqual(got.Deferred, []int{overlapping}) || !strings.Contains(got.Reason, "preferred over") {
+				t.Fatalf("selection metadata: %+v", got)
+			}
+		})
+	}
+}
+
+func TestOverlapSelectionIsAdvisory(t *testing.T) {
+	t.Parallel()
+	f := newCLIFixture(t)
+	active := f.createTouching(t, "internal/lease/a.go")
+	f.claimInFlight(t, active)
+	first := f.createTouching(t, "internal/lease/b.go internal/lease/c.go")
+	second := f.createTouching(t, "internal/lease")
+	cmd := f.command(nil)
+	var output, diagnostics bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&diagnostics)
+	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "claim", "--next", "--agent", "mock", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("overlap refused a claim: %v %s", err, &diagnostics)
+	}
+	var result struct{ Selection pulledWorkUnit }
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	got := result.Selection.Overlap
+	// Equal scores keep ready order, and two matched paths still count one issue.
+	if result.Selection.Issue.Number != first || got == nil || got.Score != 1 || !reflect.DeepEqual(got.Issues, []int{active}) ||
+		!reflect.DeepEqual(got.Paths, []string{"internal/lease/b.go", "internal/lease/c.go"}) || len(got.Deferred) != 0 {
+		t.Fatalf("selection %d: %+v", result.Selection.Issue.Number, got)
+	}
+	if !strings.Contains(diagnostics.String(), "overlap score 1") || !strings.Contains(diagnostics.String(), "ties keep ready order") {
+		t.Fatalf("missing explanation: %s", &diagnostics)
+	}
+	// An explicit claim of an overlapping task is unaffected.
+	f.must(t, "issue", "claim", strconv.Itoa(second), "--agent", "mock")
+}
+
+type listFailTracker struct {
+	tracker.Tracker
+	err error
+}
+
+func (l *listFailTracker) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
+	if len(filter.Labels) == 0 {
+		return nil, l.err
+	}
+	return l.Tracker.ListIssues(ctx, filter)
+}
+
+func TestOverlapSelectionSnapshot(t *testing.T) {
+	t.Parallel()
+	f := newCLIFixture(t)
+	ctx := context.Background()
+	active := f.createTouching(t, "internal/lease/a.go")
+	f.claimInFlight(t, active)
+	overlapping := f.createTouching(t, "internal/lease/b.go")
+	free := f.createTouching(t, "docs/guide.md")
+	unknown := f.createTouching(t, "nothing in particular")
+	candidates := func() []*tracker.Issue {
+		var out []*tracker.Issue
+		for _, n := range []int{overlapping, free, unknown} {
+			issue, err := f.tracker.GetIssue(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, issue)
+		}
+		return out
+	}
+	expires := f.state(t, active).Lease.ExpiresAt
+	for _, tc := range []struct {
+		name     string
+		now      time.Time
+		tr       tracker.Tracker
+		want     []int
+		complete bool
+		inFlight int
+		warning  string
+	}{
+		{"active", expires.Add(-time.Minute), f.tracker, []int{free, unknown, overlapping}, true, 1, ""},
+		{"expires at now", expires, f.tracker, []int{overlapping, free, unknown}, true, 0, ""},
+		{"expired", expires.Add(time.Minute), f.tracker, []int{overlapping, free, unknown}, true, 0, ""},
+		{"list failure", expires.Add(-time.Minute), &listFailTracker{Tracker: f.tracker, err: errors.New("offline")}, []int{overlapping, free, unknown}, false, 0, "warning: cannot list open issues"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var diagnostics bytes.Buffer
+			got, overlaps, err := orderByOverlap(ctx, tc.tr, f.manager, f.root, candidates(), tc.now, &diagnostics)
+			if err != nil || !reflect.DeepEqual(issueNumbers(got), tc.want) {
+				t.Fatalf("got %v, %v", issueNumbers(got), err)
+			}
+			for _, n := range tc.want {
+				if o := overlaps[n]; o == nil || o.Complete != tc.complete || o.InFlight != tc.inFlight || o.Reason == "" {
+					t.Fatalf("#%d overlap: %+v", n, o)
+				}
+			}
+			if tc.warning == "" && diagnostics.Len() != 0 || !strings.Contains(diagnostics.String(), tc.warning) {
+				t.Fatalf("diagnostics: %s", &diagnostics)
+			}
+		})
+	}
+
+	// Released claims no longer count as in-flight work.
+	if err := f.tracker.AddLabels(ctx, active, []string{"swarm:ready"}); err != nil {
+		t.Fatal(err)
+	}
+	f.must(t, "issue", "release", strconv.Itoa(active))
+	var diagnostics bytes.Buffer
+	got, overlaps, err := orderByOverlap(ctx, f.tracker, f.manager, f.root, candidates(), time.Now(), &diagnostics)
+	if err != nil || !reflect.DeepEqual(issueNumbers(got), []int{overlapping, free, unknown}) || overlaps[overlapping].InFlight != 0 {
+		t.Fatalf("released: %v %v %+v", issueNumbers(got), err, overlaps[overlapping])
+	}
+
+	// A claimed issue whose text no longer parses yields a partial signal, not a refusal.
+	f.claimInFlight(t, free)
+	if _, err := f.tracker.UpdateIssueBody(ctx, free, "not a work unit"); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics.Reset()
+	got, overlaps, err = orderByOverlap(ctx, f.tracker, f.manager, f.root, candidates()[:1], time.Now(), &diagnostics)
+	if err != nil || len(got) != 1 || overlaps[overlapping].Complete || !strings.Contains(overlaps[overlapping].Reason, "partial") || !strings.Contains(diagnostics.String(), "warning: overlap scheduling signal is partial") {
+		t.Fatalf("partial: %v %+v %s", err, overlaps[overlapping], &diagnostics)
+	}
+
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, _, err := orderByOverlap(canceled, f.tracker, f.manager, f.root, candidates(), time.Now(), &diagnostics); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation: %v", err)
 	}
 }

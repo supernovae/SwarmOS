@@ -164,6 +164,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			var pauses []*workflow.ClaimBudgetPause
 			var splits []map[string]any
+			var selections []map[string]any
 			execute := func(pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
 				tr, manager, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
 					Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend,
@@ -229,6 +230,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								}
 								return
 							}
+							outputMu.Lock()
+							selections = append(selections, map[string]any{"repo": pulled.Repo, "issue_number": pulled.Issue.Number, "overlap": pulled.Overlap})
+							outputMu.Unlock()
 							result, err := execute(pulled)
 							if errors.Is(err, lease.ErrPlanReplanLimit) {
 								admitted.Add(-1)
@@ -265,7 +269,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				runBatch()
 				if failures.Load() > 0 {
 					if asJSON {
-						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits})
+						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections})
 					}
 					return fmt.Errorf("node %q encountered %d failure(s)", profile.NodeID, failures.Load())
 				}
@@ -282,7 +286,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits})
+				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections})
 			}
 			fmt.Fprintf(out, "Node %q finished: %d task attempt(s)\n", profile.NodeID, completed.Load())
 			return nil

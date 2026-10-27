@@ -1,0 +1,1 @@
+- Go repositories whose `go.mod` needs a newer Go than the host's now validate and build in sandboxes again with per-repository dependency caches. The prefetch finishes the downloaded toolchain the way the `go` command does on first use (execute bits and `go.mod` files), without running it, so the read-only cache mount no longer fails with `chmod ... read-only file system`.

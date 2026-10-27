@@ -259,7 +259,7 @@ func TestDiscardCheckpointRefusals(t *testing.T) {
 			case "fork repo":
 				edit(func(st *IssueState) { st.ForkRepo = "contributor/fork" })
 			case "fork gateway":
-				m.SetWorkerGateway(refusingGateway{})
+				m.SetWorkerGateway(refusingGateway{t})
 			case "unauthorized":
 				m = NewManager(f.lt.WithUser("local-dev", "NONE"), m.security)
 				m.SetStore(f.m.repoRoot, f.m.store)
@@ -367,10 +367,4 @@ func (s *racingRetainingStore) CompareAndSwapRetaining(ctx context.Context, n in
 		return "", err
 	}
 	return s.Store.(coordination.RetainingStore).CompareAndSwapRetaining(ctx, n, old, next, heads...)
-}
-
-type refusingGateway struct{}
-
-func (refusingGateway) Apply(context.Context, ForkRequest) (*IssueState, error) {
-	return nil, errors.New("gateway must not be used")
 }

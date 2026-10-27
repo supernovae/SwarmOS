@@ -93,7 +93,10 @@ func InspectCleanupWorktree(ctx context.Context, root, path, branch, expected st
 		return fail("different common Git directory")
 	}
 	invoking, _ := cleanupOutput(ctx, root, "rev-parse", "--show-toplevel")
-	if filepath.Clean(invoking) == path {
+	// The process may run inside a task worktree while root is its main
+	// checkout; that physical checkout is retained too.
+	physical, _ := cleanupOutput(ctx, ".", "rev-parse", "--show-toplevel")
+	if filepath.Clean(invoking) == path || physical != "" && samePath(physical, path) {
 		return fail("invoking checkout is retained")
 	}
 	registrations, e := cleanupOutput(ctx, root, "worktree", "list", "--porcelain", "-z")

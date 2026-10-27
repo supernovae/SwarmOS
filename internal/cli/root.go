@@ -14,6 +14,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/fork"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
@@ -45,6 +46,9 @@ type RootOptions struct {
 	forkDispatcher        func(context.Context, int, *tracker.Comment) error
 	forkVerifyFunc        func(ctx context.Context, forkSlug, expectedOwner string, requirePush bool) (string, error)
 	nowFn                 func() time.Time
+	// invokingCheckout is the task or PR worktree a command was started
+	// from after RepoRoot was redirected to its main checkout.
+	invokingCheckout string
 }
 
 func NewRootCmd() *cobra.Command {
@@ -88,7 +92,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 				}
 			}
 		}
-		return nil
+		return opts.normalizeCoordinatorRoot(cmd)
 	}
 	rootCmd.AddGroup(
 		&cobra.Group{ID: "resources", Title: "Resources:"},
@@ -258,6 +262,46 @@ func (o *RootOptions) resolveRepoRoot() string {
 		}
 	}
 	return "."
+}
+
+// normalizeCoordinatorRoot points RepoRoot at the main checkout when the
+// selected root lies in a SwarmOS task or PR worktree, so coordinator state
+// and new worktrees never nest inside another task.
+func (o *RootOptions) normalizeCoordinatorRoot(cmd *cobra.Command) error {
+	top := cmd
+	for top.Parent() != nil && top.Parent().Parent() != nil {
+		top = top.Parent()
+	}
+	switch top.Name() {
+	case "version", "help", "completion", "internal-tools", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+		return nil
+	}
+	if top.Name() == "repo" && cmd.Name() == "validate" {
+		return nil // Validates the selected checkout itself, not coordinator state.
+	}
+	o.invokingCheckout = ""
+	selected := o.resolveRepoRoot()
+	root, redirected, err := workspace.ResolveCoordinatorRoot(cmd.Context(), selected)
+	if err != nil || !redirected {
+		return err
+	}
+	if checkout, err := gitcredential.Output(cmd.Context(), selected, "rev-parse", "--show-toplevel"); err == nil {
+		o.invokingCheckout = strings.TrimSpace(string(checkout))
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "swarm: %s is inside a task worktree; using main checkout %s\n", selected, root)
+	o.RepoRoot = root
+	return nil
+}
+
+// issueArgs supplies the invoking task worktree's issue when a redirected
+// command omits it, as resolveIssueAndWorktree would have found it there.
+func (o *RootOptions) issueArgs(args []string) []string {
+	if len(args) == 0 && o.invokingCheckout != "" {
+		if wu, err := workspace.LoadActiveWorkUnit(o.invokingCheckout); err == nil && wu.IssueNumber > 0 {
+			return []string{strconv.Itoa(wu.IssueNumber)}
+		}
+	}
+	return args
 }
 func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error) {
 	if o.trackerOverride != nil {

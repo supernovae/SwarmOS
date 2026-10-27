@@ -99,6 +99,16 @@ The preview reports whether validation or fresh plan review is needed. An unchan
 
 Reconciliation validates a pinned candidate snapshot using the approved base's checks and protected paths. It then atomically updates the remote task branch and authoritative checkpoint, recording predecessor and replacement heads in the existing rebase evidence. A changed remote head, claim, task, plan, or local candidate stops publication; preserve your work and inspect status again. This mode supports upstream Git-backed issue work before PR submission. For a linked PR, use the [PR revision workflow](developer.md#continuing-an-existing-pr). Local file-backed stores and fork checkpoint reconciliation are unsupported. Running `issue reconcile` without `--checkpoint` retains its existing PR-outcome repair behavior.
 
+## Discarding an abandoned checkpoint
+
+Sometimes a recorded checkpoint should not be continued. For example, an attempt was released, the WorkUnit was edited and re-approved on a newer base, and the old checkpoint no longer descends from it. `swarm issue claim` and `swarm issue work` then stop with `checkpoint ... does not descend from approved base ...`. If nobody holds a claim and the issue has no PR, a maintainer can discard the checkpoint. Copy the full SHA from `swarm issue status 29`:
+
+```bash
+swarm issue discard-checkpoint 29 --expected-head FULL_RECORDED_CHECKPOINT_SHA
+```
+
+This command needs the same authority as `swarm issue approve`. It is refused while the issue is claimed, after a PR is opened, or for a fork contributor's checkpoint. The command keeps the commit under its `refs/heads/swarm-checkpoints/...` retention ref and leaves the old task branch where it is. `swarm issue status` lists every discarded checkpoint with its retention ref. The next claim starts on a new `swarm/issue-29-restart-<sha>` branch at the approved base and plans again from scratch. If your clone still has the old worktree at `.swarm/worktrees/issue-29`, it is moved, unchanged, to `.swarm/worktrees/issue-29-discarded-<sha>`.
+
 ### Checkpoint retention
 
 Git-backed checkpoint publication, PR publication, and verified fork recording retain commits permanently under `refs/heads/swarm-checkpoints/issue-<number>/<full-SHA>`. Task-branch cleanup preserves these refs, so historical checkpoints survive branch rewrites, deletion, and Git garbage collection. Fetch a retained checkpoint explicitly:

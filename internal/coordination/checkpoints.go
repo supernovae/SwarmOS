@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -13,6 +14,98 @@ import (
 // the ledger's code-free ancestry. Cleanup must never remove this namespace.
 func CheckpointRef(n int, head string) string {
 	return fmt.Sprintf("refs/heads/swarm-checkpoints/issue-%d/%s", n, head)
+}
+
+func validCheckpointSHA(head string) error {
+	if len(head) != 40 {
+		return fmt.Errorf("invalid checkpoint SHA %q", head)
+	}
+	if _, err := hex.DecodeString(head); err != nil {
+		return fmt.Errorf("invalid checkpoint SHA %q", head)
+	}
+	return nil
+}
+
+// CompareAndSwapRetaining pushes the state commit and the retention refs for
+// heads atomically, leased on the loaded state revision. A head missing locally
+// is fetched from the upstream remote first; an unavailable commit fails closed.
+func (s *GitStore) CompareAndSwapRetaining(ctx context.Context, n int, old string, next []byte, heads ...string) (string, error) {
+	if len(heads) == 0 {
+		return "", fmt.Errorf("no checkpoint to retain")
+	}
+	for _, head := range heads {
+		if err := validCheckpointSHA(head); err != nil {
+			return "", err
+		}
+		if _, err := s.run(ctx, "", "cat-file", "-e", head+"^{commit}"); err != nil {
+			// Best effort: retentionArgs reports the commit as unavailable.
+			_, _ = s.run(ctx, "", "fetch", "--no-write-fetch-head", s.Remote(), head)
+		}
+	}
+	blob, err := s.run(ctx, string(next), "hash-object", "-w", "--stdin")
+	if err != nil {
+		return "", err
+	}
+	tree, err := s.run(ctx, fmt.Sprintf("100644 blob %s\tstate.json\n", blob), "mktree")
+	if err != nil {
+		return "", err
+	}
+	args := []string{"-c", "user.name=SwarmOS", "-c", "user.email=swarmos@localhost", "commit-tree", tree}
+	if old != "" {
+		args = append(args, "-p", old)
+	}
+	commit, err := s.run(ctx, "swarm coordination checkpoint retained\n", args...)
+	if err != nil {
+		return "", err
+	}
+	retention, err := s.historicalRetentionArgs(ctx, n, old, heads...)
+	if err != nil {
+		return "", err
+	}
+	stateRef := s.ref(n)
+	stateLease := stateRef + ":" + old
+	if old == "" {
+		stateLease = stateRef + ":"
+	}
+	push := append([]string{"push", "--atomic", s.Remote(), "--force-with-lease=" + stateLease, commit + ":" + stateRef}, retention...)
+	if _, err = s.run(ctx, "", push...); err != nil {
+		actual, readErr := s.remoteSHA(ctx, stateRef)
+		if (readErr == nil && actual != old) || (errors.Is(readErr, ErrNotFound) && old != "") {
+			return "", fmt.Errorf("%w: %w", ErrConflict, err)
+		}
+		return "", fmt.Errorf("atomic retained state push: %w", err)
+	}
+	return commit, nil
+}
+
+// CompareAndSwapRetaining creates each local retention ref (or verifies the
+// existing one) before the single locked state write. A losing write leaves at
+// most an extra retention ref for a real commit, never a second state write.
+func (s *FileStore) CompareAndSwapRetaining(ctx context.Context, n int, old string, next []byte, heads ...string) (string, error) {
+	if len(heads) == 0 {
+		return "", fmt.Errorf("no checkpoint to retain")
+	}
+	git := &GitStore{root: s.repoRoot}
+	for _, head := range heads {
+		if err := validCheckpointSHA(head); err != nil {
+			return "", err
+		}
+		if _, err := git.run(ctx, "", "cat-file", "-e", head+"^{commit}"); err != nil {
+			return "", fmt.Errorf("checkpoint object %s unavailable: %w", head, err)
+		}
+		ref := CheckpointRef(n, head)
+		if actual, err := git.run(ctx, "", "rev-parse", "--verify", "--quiet", ref); err == nil {
+			if actual != head {
+				return "", fmt.Errorf("%w: retention ref %s contains %s", ErrConflict, ref, actual)
+			}
+			continue
+		}
+		// The zero old value makes this create-only.
+		if _, err := git.run(ctx, "", "update-ref", ref, head, strings.Repeat("0", 40)); err != nil {
+			return "", fmt.Errorf("create retention ref %s: %w", ref, err)
+		}
+	}
+	return s.CompareAndSwap(ctx, n, old, next)
 }
 
 // retentionArgs builds create-only leases for an atomic publication. A ref

@@ -36,6 +36,13 @@ type ExpectedPRPublishingStore interface {
 	CompareAndSwapAndPublishPR(context.Context, int, string, []byte, string, string, string) (string, error)
 }
 
+// RetainingStore advances issue state and permanently retains the named
+// checkpoint commits in one fenced write. A retention ref that already exists
+// must name exactly its commit; none is ever rewritten.
+type RetainingStore interface {
+	CompareAndSwapRetaining(ctx context.Context, n int, old string, next []byte, heads ...string) (string, error)
+}
+
 var ErrConflict = errors.New("coordination compare-and-swap conflict")
 var ErrNotFound = errors.New("coordination state not found")
 var ErrReplay = errors.New("fork request comment ID already processed")

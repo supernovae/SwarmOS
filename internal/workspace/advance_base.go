@@ -23,6 +23,10 @@ type ProvisionContext struct {
 	// same-repository checkpoints; empty means origin. A checkpoint remote
 	// with any other name is a fork, even when it is called origin.
 	UpstreamRemote string
+	// FreshStart is the attempt following a maintainer-discarded checkpoint.
+	// A worktree still holding the abandoned attempt is set aside, intact,
+	// so the fresh branch starts at the approved base.
+	FreshStart *FreshStart
 }
 
 // ProvisionWithContext is ProvisionFromRemoteAt with explicit recovery context.
@@ -30,6 +34,11 @@ func ProvisionWithContext(repoRoot, checkpointRemote string, issueNum int, title
 	upstream := UpstreamRemoteOrDefault(pc.UpstreamRemote)
 	if pc.Dropped != nil {
 		return provisionFromRemote(repoRoot, upstream, checkpointRemote, issueNum, title, baseSHA, branch, headSHA, pc.Dropped)
+	}
+	if fs := pc.FreshStart; fs != nil && headSHA == "" && branch == fs.Branch && (checkpointRemote == "" || checkpointRemote == upstream) {
+		if err := setAsideAbandonedWorktree(repoRoot, issueNum, fs); err != nil {
+			return "", "", err
+		}
 	}
 	previous := strings.TrimSpace(pc.PreviousBase)
 	if previous != "" && headSHA == "" && (checkpointRemote == "" || checkpointRemote == upstream) && issueNum > 0 && baseSHA != "" {

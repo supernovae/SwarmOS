@@ -116,14 +116,16 @@ type IssueState struct {
 
 // ProvisionContext returns the authoritative recovery identity for issue
 // worktree provisioning. Only a same-repository task without a recorded
-// checkpoint or PR may advance from its previous approved base.
+// checkpoint or PR that was re-approved may advance; the workspace decides
+// eligibility from the branch tip's ancestry, because several re-approvals,
+// or one at the same base, leave PreviousBaseSHA naming a later commit.
 func (st *IssueState) ProvisionContext(forkMode bool) workspace.ProvisionContext {
 	pc := workspace.ProvisionContext{Dropped: st.DroppedCheckpoint}
 	if !forkMode && st.ForkRepo == "" {
 		pc.FreshStart = st.FreshStart
 	}
 	if !forkMode && st.ForkRepo == "" && st.PRNumber == 0 && st.PRRevision == nil && st.HeadSHA == "" &&
-		st.DroppedCheckpoint == nil && st.PreviousBaseSHA != st.BaseSHA {
+		st.DroppedCheckpoint == nil && st.PreviousBaseSHA != "" {
 		pc.PreviousBase = st.PreviousBaseSHA
 	}
 	return pc

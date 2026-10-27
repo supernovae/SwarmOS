@@ -16,8 +16,10 @@ type ProvisionContext struct {
 	// Dropped recovers a checkpoint contained in the approved base.
 	Dropped *DroppedCheckpoint
 	// PreviousBase is the prior approved base of a same-repository task with
-	// no recorded checkpoint. An untouched branch and worktree still at this
-	// commit are fast-forwarded to the newly approved base.
+	// no recorded checkpoint; non-empty means the task was re-approved. It may
+	// name a later base than the branch after several re-approvals, so an
+	// untouched branch and worktree at any ancestor of the newly approved base
+	// are fast-forwarded to it.
 	PreviousBase string
 	// UpstreamRemote names the project remote that holds approved bases and
 	// same-repository checkpoints; empty means origin. A checkpoint remote
@@ -57,9 +59,10 @@ func ProvisionWithContext(repoRoot, checkpointRemote string, issueNum int, title
 var staleActiveEvidence = []string{"PLAN.md", "TEST_PLAN.md", "REVIEW.md", "VALIDATION.md", "REPAIR.md", "IMPLEMENTATION.md", "REVIEW_EVIDENCE.md", "SYSTEM_PROMPT.md", "WORKUNIT.md", "workunit.json"}
 
 // advanceUntouchedBase fast-forwards a task branch, and its worktree when one
-// exists, from the previous approved base to the new one. It does nothing
-// unless the branch is exactly at previous; any other ineligible state is
-// refused with a recovery hint before anything changes. beforeCAS lets tests
+// exists, from an earlier approved base to the new one. It does nothing
+// without a previous base or when the branch is missing or already at base;
+// a tip outside base or any other ineligible state is refused with a
+// recovery hint before anything changes. beforeCAS lets tests
 // move the branch between the eligibility checks and the ref update.
 func advanceUntouchedBase(root string, issue int, branch, previous, base string, beforeCAS func() error) error {
 	return advanceUntouchedBaseFrom(root, DefaultUpstreamRemote, issue, branch, previous, base, beforeCAS)
@@ -81,9 +84,7 @@ func advanceUntouchedBaseFrom(root, upstreamRemote string, issue int, branch, pr
 	if _, err := gitOutput(absRoot, "check-ref-format", ref); err != nil {
 		return refuse(err)
 	}
-	previous, err = resolveCommit(absRoot, previous)
-	if err != nil {
-		// Without the exact previous commit nothing can match it.
+	if strings.TrimSpace(previous) == "" {
 		return nil
 	}
 	resolvedBase, err := resolveCommit(absRoot, base)
@@ -96,14 +97,15 @@ func advanceUntouchedBaseFrom(root, upstreamRemote string, issue int, branch, pr
 		}
 	}
 	base = resolvedBase
+	// Eligibility rests on the branch tip, not previous: re-approvals may have
+	// moved previous past the tip, and that commit may not exist locally.
 	tip, err := resolveCommit(absRoot, ref)
-	if err != nil || tip != previous || previous == base {
-		// Missing, already advanced, or carrying other commits: the ordinary
-		// provisioning checks decide, never this path.
+	if err != nil || tip == base {
+		// Missing or already advanced: ordinary provisioning decides.
 		return nil
 	}
-	if _, err := gitOutput(absRoot, "merge-base", "--is-ancestor", previous, base); err != nil {
-		return refuse(fmt.Errorf("approved base %s does not descend from previous base %s", base, previous))
+	if _, err := gitOutput(absRoot, "merge-base", "--is-ancestor", tip, base); err != nil {
+		return refuse(fmt.Errorf("task branch %s carries commits not contained in approved base %s", tip, base))
 	}
 	info, statErr := os.Lstat(path)
 	switch {
@@ -111,7 +113,7 @@ func advanceUntouchedBaseFrom(root, upstreamRemote string, issue int, branch, pr
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return refuse(errors.New("worktree path must be a real directory"))
 		}
-		if err := verifyUntouchedWorktree(absRoot, path, branch, previous, base); err != nil {
+		if err := verifyUntouchedWorktree(absRoot, path, branch, tip, base); err != nil {
 			return refuse(err)
 		}
 	case errors.Is(statErr, os.ErrNotExist):
@@ -132,15 +134,15 @@ func advanceUntouchedBaseFrom(root, upstreamRemote string, issue int, branch, pr
 			return refuse(err)
 		}
 	}
-	if _, err := gitOutput(absRoot, "update-ref", "-m", "swarm: advance untouched task to approved base", ref, base, previous); err != nil {
+	if _, err := gitOutput(absRoot, "update-ref", "-m", "swarm: advance untouched task to approved base", ref, base, tip); err != nil {
 		return refuse(fmt.Errorf("branch moved during advancement: %w", err))
 	}
 	if statErr != nil {
 		return nil
 	}
-	if err := checkoutAdvancedBase(path, branch, previous, base); err != nil {
+	if err := checkoutAdvancedBase(path, branch, tip, base); err != nil {
 		// Roll back only if the branch is still exactly where we put it.
-		if _, rollbackErr := gitOutput(absRoot, "update-ref", ref, previous, base); rollbackErr != nil {
+		if _, rollbackErr := gitOutput(absRoot, "update-ref", ref, tip, base); rollbackErr != nil {
 			return fmt.Errorf("advanced branch %s to %s but could not update worktree %q (%v) or restore the branch (%v); %s", branch, base, path, err, rollbackErr, RecoveryHint(issue, path, branch))
 		}
 		return refuse(err)
@@ -149,7 +151,7 @@ func advanceUntouchedBaseFrom(root, upstreamRemote string, issue int, branch, pr
 }
 
 // verifyUntouchedWorktree confirms the worktree holds nothing but the
-// previous base and SwarmOS-managed changes, and that checking out base
+// branch tip and SwarmOS-managed changes, and that checking out base
 // cannot overwrite any untracked or ignored file.
 func verifyUntouchedWorktree(root, path, branch, previous, base string) error {
 	if err := verifyWorktree(path, branch, previous); err != nil {

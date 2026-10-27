@@ -32,13 +32,15 @@ type dependencyEcosystem struct {
 	Name       string   // also the ToolchainBind.Ecosystem tag
 	Detect     []string // base-tree files that enable the adapter
 	Lockfiles  []string // read from the approved base, never the worktree
+	TreeFiles  string   // basename also read at every path of the base tree
 	EnvKey     string
 	Prefetch   prefetchFunc
 	NoPrefetch string // why there is no fetch-only prefetch
 }
 
 // prefetchRequest is one host prefetch. Dir is the only directory it may
-// write; Files holds the lockfiles present in the approved base.
+// write; Files holds the lockfiles and tree files present in the approved
+// base, keyed by their path relative to the repository root.
 type prefetchRequest struct {
 	BaseSHA string
 	Dir     string
@@ -54,7 +56,7 @@ type prefetchFunc func(context.Context, prefetchRequest) error
 // docs/project.md.
 var dependencyEcosystems = []dependencyEcosystem{
 	{Name: "go", Detect: []string{"go.mod"}, Lockfiles: []string{"go.mod", "go.sum"}, EnvKey: "GOMODCACHE", Prefetch: goModDownload},
-	{Name: "rust", NoPrefetch: "adapter is a follow-up"},
+	{Name: "rust", Detect: []string{"Cargo.lock"}, Lockfiles: []string{"Cargo.lock"}, TreeFiles: "Cargo.toml", EnvKey: "CARGO_HOME", Prefetch: cargoFetch},
 	{Name: "python", NoPrefetch: "adapter is a follow-up"},
 	{Name: "node", NoPrefetch: "adapter is a follow-up"},
 	{Name: "dotnet", NoPrefetch: "restore runs MSBuild"},
@@ -260,6 +262,9 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 			}
 			files[name] = data
 		}
+		if err := readBaseTreeFiles(ctx, worktree, baseSHA, eco.TreeFiles, files); err != nil {
+			return deps, err
+		}
 		marker := ".prefetched-" + eco.Name + "-" + lockfileDigest(files)
 		if _, err := os.Lstat(filepath.Join(keyDir, marker)); errors.Is(err, os.ErrNotExist) {
 			if err := eco.Prefetch(ctx, prefetchRequest{BaseSHA: baseSHA, Dir: dir, Files: files}); err != nil {
@@ -283,6 +288,34 @@ func baseHasAny(ctx context.Context, worktree, baseSHA string, names []string) b
 		}
 	}
 	return false
+}
+
+// readBaseTreeFiles adds every regular file named basename in the base tree
+// to files. Symlinks and submodules are skipped.
+func readBaseTreeFiles(ctx context.Context, worktree, baseSHA, basename string, files map[string][]byte) error {
+	if basename == "" {
+		return nil
+	}
+	list, err := gitcredential.Output(ctx, worktree, "ls-tree", "-r", "-z", baseSHA)
+	if err != nil {
+		return fmt.Errorf("list approved base %s: %w", shortSHA(baseSHA), err)
+	}
+	for _, entry := range strings.Split(string(list), "\x00") {
+		meta, path, ok := strings.Cut(entry, "\t")
+		fields := strings.Fields(meta)
+		if !ok || len(fields) != 3 || fields[1] != "blob" || (fields[0] != "100644" && fields[0] != "100755") {
+			continue
+		}
+		if filepath.Base(filepath.FromSlash(path)) != basename || !filepath.IsLocal(filepath.FromSlash(path)) {
+			continue
+		}
+		data, err := gitcredential.Output(ctx, worktree, "cat-file", "blob", fields[2])
+		if err != nil {
+			return fmt.Errorf("read %s from approved base: %w", path, err)
+		}
+		files[path] = data
+	}
+	return nil
 }
 
 func lockfileDigest(files map[string][]byte) string {
@@ -568,4 +601,152 @@ func goVersionKey(v string) [4]int {
 		n, _ = strconv.Atoi(parts[2])
 	}
 	return [4]int{major, minor, kind, n}
+}
+
+// cargoFetchArgv only downloads the locked dependencies' sources into
+// CARGO_HOME; it compiles nothing and runs no build script
+// (`cargo help fetch`).
+var cargoFetchArgv = []string{"cargo", "fetch", "--locked"}
+
+// cargoHomeAllowed is everything cargo fetch may leave in CARGO_HOME. Any
+// other entry, such as config.toml or credentials.toml, fails the prefetch so
+// it is never mounted into a sandbox.
+var cargoHomeAllowed = map[string]bool{
+	"registry": true, "git": true,
+	".package-cache": true, ".package-cache-mutate": true, ".global-cache": true,
+}
+
+// cargoFetch runs cargo fetch for the base's Cargo.lock and manifests in a
+// temporary copy beside the cache. Only manifests and empty src/lib.rs stubs
+// are written: no build.rs, .cargo/config.toml or rust-toolchain file, so no
+// repository code or configuration reaches cargo. The copy lives under the
+// private cache key directory rather than $TMPDIR, because cargo also reads
+// .cargo/config.toml from every ancestor directory.
+func cargoFetch(ctx context.Context, req prefetchRequest) error {
+	if _, ok := req.Files["Cargo.lock"]; !ok {
+		return errors.New("approved base has no Cargo.lock")
+	}
+	if _, ok := req.Files["Cargo.toml"]; !ok {
+		return errors.New("approved base has no root Cargo.toml")
+	}
+	if err := checkCargoHome(req.Dir); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(req.Dir), ".prefetch-rust-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	work := filepath.Join(tmp, "work")
+	for rel, data := range req.Files {
+		path := filepath.Join(work, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			return err
+		}
+	}
+	for rel := range req.Files {
+		if filepath.Base(filepath.FromSlash(rel)) != "Cargo.toml" {
+			continue
+		}
+		stub := filepath.Join(work, filepath.Dir(filepath.FromSlash(rel)), "src", "lib.rs")
+		if _, err := os.Lstat(stub); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(stub), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(stub, nil, 0o600); err != nil {
+			return err
+		}
+	}
+	env := cargoPrefetchEnv(os.Getenv, tmp, req.Dir, hostRustupHome())
+	_, stderr, err := runPrefetchCommand(ctx, work, env, cargoFetchArgv)
+	if err != nil {
+		failure := cargoFetchFailure(stderr, err)
+		for _, p := range []string{req.Dir, tmp} {
+			failure = strings.ReplaceAll(failure, p, "<"+filepath.Base(p)+">")
+		}
+		return errors.New(failure)
+	}
+	return checkCargoHome(req.Dir)
+}
+
+// checkCargoHome rejects anything in the cache cargo fetch would not write.
+func checkCargoHome(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		wantDir := e.Name() == "registry" || e.Name() == "git"
+		if !cargoHomeAllowed[e.Name()] || e.Type()&os.ModeSymlink != 0 || e.IsDir() != wantDir {
+			return fmt.Errorf("cargo cache holds unexpected %q", e.Name())
+		}
+	}
+	return nil
+}
+
+// cargoPrefetchEnv builds the prefetch environment from scratch. It copies
+// only PATH and the host's rustup selection, so no token, credential helper,
+// SSH agent, registry credential, RUSTFLAGS or rustc wrapper reaches cargo,
+// and rustup never installs a toolchain.
+func cargoPrefetchEnv(getenv func(string) string, tmp, cache, rustupHome string) []string {
+	env := []string{
+		"PATH=" + getenv("PATH"), "TMPDIR=" + tmp, "HOME=" + tmp,
+		"CARGO_HOME=" + cache, "CARGO_TARGET_DIR=" + filepath.Join(tmp, "target"),
+		"CARGO_BUILD_RUSTC_WRAPPER=", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER=", "RUSTC_WRAPPER=", "RUSTC_WORKSPACE_WRAPPER=",
+		"CARGO_NET_GIT_FETCH_WITH_CLI=false", "CARGO_TERM_COLOR=never", "RUSTUP_AUTO_INSTALL=0",
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_TERMINAL_PROMPT=0",
+	}
+	if rustupHome != "" {
+		env = append(env, "RUSTUP_HOME="+rustupHome)
+	}
+	if toolchain := strings.TrimSpace(getenv("RUSTUP_TOOLCHAIN")); toolchain != "" {
+		env = append(env, "RUSTUP_TOOLCHAIN="+toolchain)
+	}
+	return env
+}
+
+// hostRustupHome is the host's rustup home, so a rustup cargo proxy finds the
+// installed toolchains under the prefetch's temporary HOME.
+func hostRustupHome() string {
+	for _, b := range HostToolchains() {
+		if b.EnvKey == "RUSTUP_HOME" {
+			return b.EnvVal
+		}
+	}
+	return ""
+}
+
+// cargoFetchFailure names the dependencies cargo reported, followed by its
+// root cause (the last error line), else returns its stderr.
+func cargoFetchFailure(stderr []byte, runErr error) string {
+	var names []string
+	cause := ""
+	for _, line := range strings.Split(string(stderr), "\n") {
+		line = strings.TrimSpace(line)
+		for _, prefix := range []string{"failed to load source for dependency `", "failed to download `", "failed to get `"} {
+			if _, rest, ok := strings.Cut(line, prefix); ok {
+				if name, _, ok := strings.Cut(rest, "`"); ok {
+					name, _, _ = strings.Cut(name, " ")
+					names = append(names, name)
+				}
+			}
+		}
+		if line != "" && !strings.HasPrefix(line, "warning:") && !strings.HasPrefix(line, "Caused by:") && !strings.HasPrefix(line, "Updating ") && !strings.HasPrefix(line, "Downloading ") && !strings.HasPrefix(line, "Downloaded ") {
+			cause = strings.TrimPrefix(line, "error: ")
+		}
+	}
+	names = dedupe(names)
+	switch {
+	case len(names) > 0 && cause != "":
+		return "dependency " + strings.Join(names, ", ") + ": " + cause
+	case strings.TrimSpace(string(stderr)) != "":
+		return strings.TrimSpace(string(stderr))
+	default:
+		return runErr.Error()
+	}
 }

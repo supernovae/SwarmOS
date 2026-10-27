@@ -244,22 +244,24 @@ Because Rust's `CARGO_TARGET_DIR` points at the agent cache, agent runs do not l
 
 ### Dependency caches
 
-Sandboxes have no network, so downloaded dependencies must already be on disk. For Go, SwarmOS does not mount your own `GOMODCACHE`, which holds every module you have ever fetched, including private ones. Each repository gets its own module cache instead, filled on the host before any agent or validation run starts, and mounted read-only in every sandbox.
+Sandboxes have no network, so downloaded dependencies must already be on disk. For Go and Rust, SwarmOS does not mount your own `GOMODCACHE` or Cargo `registry` and `git` caches, which hold everything you have ever fetched, including private dependencies. Each repository gets its own cache instead, filled on the host before any agent or validation run starts, and mounted read-only in every sandbox.
 
 | Cache | Path under the user cache directory | Filled for | Read by |
 | --- | --- | --- | --- |
-| Agent | `swarm/agent-deps/<repository key>/go` | Planner, reviewer, developer, tester and resolver runs | Those runs, read-only |
-| Validator | `swarm/validate-deps/<repository key>/go` | Validation, including warm-up | Validation checks, read-only |
+| Agent | `swarm/agent-deps/<repository key>/go` and `.../rust` | Planner, reviewer, developer, tester and resolver runs | Those runs, read-only |
+| Validator | `swarm/validate-deps/<repository key>/go` and `.../rust` | Validation, including warm-up | Validation checks, read-only |
 
 The prefetch runs `go mod download -json` on a temporary copy of the approved base's `go.mod` and `go.sum`, never the candidate worktree. It reads modules from your own module cache first and then from your `GOPROXY`. It runs with a fresh environment: no GitHub token, `SWARM_GITHUB_TOKEN_COMMAND`, SSH agent, Git credential helper or `GOFLAGS`, and with `GOTOOLCHAIN=local`, so it only downloads, verifies and extracts. When `go.mod` asks for a newer Go than the one installed, the prefetch also downloads that Go release so sandboxed `go` commands can switch to it offline. A `.prefetched-go-<digest>` file records each completed prefetch, so it runs again only when `go.mod` or `go.sum` changes.
 
-Unlike build caches, dependency caches never fall back. If the cache directory cannot be prepared safely, or a module cannot be downloaded, `swarm issue work` and `swarm pr work` stop before claiming the task, and validation stops before any check runs. The error names the module, for example `prefetch go modules for base 1a2b3c4d5e6f: example.com/missing@v1.0.0: ...`. Only the root `go.mod` is detected; nested modules and `go.work` get no prefetch.
+For Rust, a root `Cargo.lock` in the approved base enables the cache, and sandboxes see it as a read-only `CARGO_HOME`. The prefetch runs `cargo fetch --locked` on a temporary copy, beside the cache, of the base's `Cargo.lock` and every `Cargo.toml` with an empty `src/lib.rs` stub; no `build.rs`, `.cargo/config.toml` or `rust-toolchain` file is copied, so no build script, rustc wrapper or repository toolchain runs. It runs with a fresh environment: no GitHub token, SSH agent, registry token, `RUSTFLAGS` or rustc wrapper, and rustup does not install toolchains. Your own `~/.cargo/config.toml`, including registry mirrors, does not apply. The prefetch fails if the cache then holds anything besides Cargo's `registry` and `git` downloads and lock files, so no Cargo `config.toml` or `credentials.toml` reaches a sandbox. A `.prefetched-rust-<digest>` file records each completed prefetch, so it runs again only when `Cargo.lock` or a `Cargo.toml` changes.
+
+Unlike build caches, dependency caches never fall back. If the cache directory cannot be prepared safely, or a module cannot be downloaded, `swarm issue work` and `swarm pr work` stop before claiming the task, and validation stops before any check runs. The error names the module or crate, for example `prefetch go modules for base 1a2b3c4d5e6f: example.com/missing@v1.0.0: ...` or `prefetch rust modules for base 1a2b3c4d5e6f: dependency missing-crate: ...`. Only the root `go.mod` is detected; nested modules and `go.work` get no prefetch.
 
 Other ecosystems have no fetch-only download command yet, so they keep read-only access to your host caches, as before:
 
 | Ecosystem | Host caches still mounted read-only | Why |
 | --- | --- | --- |
-| Rust, Python, Node | Cargo registry and git, pip, uv, Poetry, npm, pnpm, Yarn, Bun, Playwright, Cypress | Adapters are planned |
+| Python, Node | pip, uv, Poetry, npm, pnpm, Yarn, Bun, Playwright, Cypress | Adapters are planned |
 | .NET | NuGet packages | Restore runs MSBuild |
 | Maven | `~/.m2/repository` | Plugins run during resolve |
 | Gradle | `~/.gradle/caches`, `~/.gradle/wrapper` | Build scripts run during resolve |
@@ -267,7 +269,7 @@ Other ecosystems have no fetch-only download command yet, so they keep read-only
 
 `swarm repo doctor` shows a `dependency-caches` check that lists each ecosystem's mode and names those sharing host caches. `swarm node status` shows the same, and `swarm node status --json` reports it as `dependency_caches`.
 
-To mount your host-wide Go module cache read-only again on one machine, set `share_host_dependency_caches: true` in the node profile (`~/.config/swarm/node.yaml`, or the file named by `SWARM_NODE_CONFIG`). This is off by default, it is a node setting only, and `.swarm/config.yaml` rejects it. Doctor reports the opt-in as a `WARN`. Validation in CI always uses per-repository caches.
+To mount your host-wide Go module cache and Cargo caches read-only again on one machine, set `share_host_dependency_caches: true` in the node profile (`~/.config/swarm/node.yaml`, or the file named by `SWARM_NODE_CONFIG`). This is off by default, it is a node setting only, and `.swarm/config.yaml` rejects it. Doctor reports the opt-in as a `WARN`. Validation in CI always uses per-repository caches.
 
 **Adding an ecosystem:** add an entry to `dependencyEcosystems` in `internal/sandbox/dependency_cache.go`. An adapter needs a `Prefetch` that runs only a fetch-only command; anything that can run package code stays `NoPrefetch`. Every `addCache` call in `internal/sandbox/toolchain.go` names its ecosystem, and `TestEveryMountedEcosystemIsClassified` fails until the ecosystem is in the table.
 

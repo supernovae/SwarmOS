@@ -1,0 +1,1 @@
+- Planners end PLAN.md with a HANDOFF section (entry points, tests to extend, focused commands, checked assumptions, reopen conditions, and a searched "What this change breaks" list), developers hand their changes, gaps, and command results to testers through IMPLEMENTATION.md, and both roles verify handoffs against source as evidence rather than authority.

@@ -109,6 +109,32 @@ func TestRoutinePlannerPromptContractAndSync(t *testing.T) {
 	}
 }
 
+func TestRoutinePlannerHandoffRequirements(t *testing.T) {
+	copies := routinePromptCopies(t, "planner.md")
+	step4 := "4. Write `.swarm/active/TEST_PLAN.md` containing:\n" +
+		"   - Explicit mapping from every `Acceptance` criterion in `.swarm/active/WORKUNIT.md` to concrete test cases and verification commands.\n"
+	assertPromptContains(t, "planner.md", copies, []string{
+		// The handoff is its own step directly after the complete TEST_PLAN.md step.
+		step4 + "5. End PLAN.md with a `## HANDOFF` section for the developer and tester, for every shape.",
+		"evidence to verify against source, never as authority over approved inputs, gates, or validation.",
+		"entry points and symbols to change, each with a `path:line` reference;",
+		"existing tests and fixtures to extend;",
+		"the exact focused verification commands;",
+		"assumptions you already checked",
+		"conditions that should reopen the plan",
+
+		// Dependents found by searching, each with a planned update.
+		"**What this change breaks**: existing tests, docs, templates, and call sites that assert or depend on the text, symbols, or behavior the plan changes, found by searching the repository",
+		"each with its planned update",
+
+		// Proposed additions must be absent at the approved base.
+		"Confirm that every file the plan calls new is absent at the approved base. If it already exists, the plan names it as modified, never as new.",
+
+		// Routine plans keep the handoff as an explicit exception.
+		"The step 5 HANDOFF section still applies to Routine plans as an exception to the compact structure above; keep it concise.",
+	})
+}
+
 func TestRoutineReviewerPromptContractAndSync(t *testing.T) {
 	copies := routinePromptCopies(t, "reviewer.md")
 	assertPromptContains(t, "reviewer.md", copies, []string{

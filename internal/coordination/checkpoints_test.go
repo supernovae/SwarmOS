@@ -176,7 +176,7 @@ func TestCheckpointRetentionWithStateWrite(t *testing.T) {
 		if _, err := f.store.CompareAndSwapRetaining(ctx, 1, stale, []byte(`{"v":2}`), head); !errors.Is(err, ErrConflict) {
 			t.Fatalf("stale write: %v", err)
 		}
-		if out := f.git(f.remote, "for-each-ref", CheckpointRef(1, head)); out != "" {
+		if out := f.git(f.remote, "for-each-ref", f.store.Layout().CheckpointRef(1, head)); out != "" {
 			t.Fatalf("failed write retained %s", out)
 		}
 		if _, err := f.store.CompareAndSwapRetaining(ctx, 1, rev, []byte(`{"v":2}`), strings.Repeat("1", 40)); err == nil {
@@ -185,7 +185,7 @@ func TestCheckpointRetentionWithStateWrite(t *testing.T) {
 		if _, err := f.store.CompareAndSwapRetaining(ctx, 1, rev, []byte(`{"v":2}`), head); err != nil {
 			t.Fatal(err)
 		}
-		if got := f.git(f.remote, "rev-parse", CheckpointRef(1, head)); got != head {
+		if got := f.git(f.remote, "rev-parse", f.store.Layout().CheckpointRef(1, head)); got != head {
 			t.Fatalf("retention ref is %s", got)
 		}
 		if body, _, err := f.store.Load(ctx, 1); err != nil || string(body) != `{"v":2}` {
@@ -213,11 +213,11 @@ func TestCheckpointRetentionWithStateWrite(t *testing.T) {
 		}
 		f.git(f.clone, "commit", "--allow-empty", "-m", "other")
 		other := f.git(f.clone, "rev-parse", "HEAD")
-		f.git(f.clone, "update-ref", CheckpointRef(1, other), head)
+		f.git(f.clone, "update-ref", BranchLayout.CheckpointRef(1, other), head)
 		if _, err := store.CompareAndSwapRetaining(ctx, 1, rev, []byte(`{"v":3}`), other); !errors.Is(err, ErrConflict) {
 			t.Fatalf("corrupt ref: %v", err)
 		}
-		if got := f.git(f.clone, "rev-parse", CheckpointRef(1, other)); got != head {
+		if got := f.git(f.clone, "rev-parse", BranchLayout.CheckpointRef(1, other)); got != head {
 			t.Fatal("rewrote a retention ref")
 		}
 	})

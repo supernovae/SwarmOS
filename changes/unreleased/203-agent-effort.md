@@ -1,0 +1,1 @@
+- Let Claude Code and Codex agent entries set an optional `effort:` from a fixed per-harness allowlist (Claude: `low`, `medium`, `high`, `max`; Codex: `minimal`, `low`, `medium`, `high`), passed as `--effort` or `-c model_reasoning_effort` and recorded with the model in run provenance; other harnesses and unknown values fail config validation.

@@ -13,7 +13,10 @@ agents:
   codex:
     binary: codex
     model: your-preferred-model   # optional
+    effort: high                  # optional: minimal, low, medium or high
 ```
+
+`effort` sets Codex's reasoning effort with `-c model_reasoning_effort="<effort>"`. SwarmOS accepts only the values above and records the effort in each run's provenance. For a different effort per role, add one entry per role (for example `codex-reviewer` with `harness: codex`) and map it under `roles:`.
 
 [OpenAI Dot](../openai-dot.md) setups can define a `dot` entry with `harness: codex` so Dot-driven runs show up under their own audit name.
 
@@ -21,7 +24,7 @@ agents:
 
 | Mode | Invocation |
 | --- | --- |
-| Isolated, unattended | `codex exec --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check -C <snapshot>` with a SwarmOS permission profile |
+| Isolated, unattended | `codex exec --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check -C <snapshot>` with a SwarmOS permission profile, plus `--model <model>` and `-c model_reasoning_effort="<effort>"` when configured |
 | Isolated, interactive | The same `codex exec` settings. After each turn, SwarmOS asks for a follow-up instruction; press Enter to finish the phase. |
 | Isolated validation | `codex sandbox -P swarm` runs approved-base commands in a disposable snapshot without provider credentials |
 | `trusted-local` | `codex exec "<prompt>"` unattended, or `codex "<task>"` interactively |

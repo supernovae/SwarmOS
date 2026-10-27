@@ -211,7 +211,7 @@ The following are the `trusted-local` CLI drivers. Isolated adapters use the sam
 | **[OpenAI Codex](https://learn.chatgpt.com/docs/codex/cli)** (`codex`, native integration checked with `0.163.0`) | `codex exec <combined prompt>` | `codex <task>` |
 | **[OpenCode 2](https://dev.opencode.ai/v2/docs/)** (`opencode`, V2; checked with `2.1.2`) | `opencode run --standalone <combined prompt>` | `opencode mini --standalone --prompt <task>` |
 
-When an entry sets `model: <name>`, SwarmOS passes that exact choice to the harness. With no model set, the harness selects its default; SwarmOS has no built-in model-name mapping. Isolated runs use controlled execution settings, so choose a project model here when you need a consistent selection across workers. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner with explicit `trusted-local` execution.
+When an entry sets `model: <name>`, SwarmOS passes that exact choice to the harness. With no model set, the harness selects its default; SwarmOS has no built-in model-name mapping. Claude Code and Codex entries can also set `effort:` to choose reasoning effort from a fixed list (Claude: `low`, `medium`, `high`, `max`; Codex: `minimal`, `low`, `medium`, `high`); other harnesses reject it. Model and effort are recorded in run provenance, and a separate entry per role, mapped under `roles:`, gives each role its own setting. Isolated runs use controlled execution settings, so choose a project model here when you need a consistent selection across workers. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner with explicit `trusted-local` execution.
 
 ### Grok Bot and OpenAI Dot
 

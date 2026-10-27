@@ -191,6 +191,7 @@ type AgentConfig struct {
 	Harness          string   `yaml:"harness,omitempty" json:"harness,omitempty"`
 	Args             []string `yaml:"args,omitempty" json:"args,omitempty"`
 	Model            string   `yaml:"model,omitempty" json:"model,omitempty"`
+	Effort           string   `yaml:"effort,omitempty" json:"effort,omitempty"` // allowlisted per harness by ValidateAgentEffort; empty is the harness default
 	Roles            []string `yaml:"roles,omitempty" json:"roles,omitempty"`
 	Env              []string `yaml:"env,omitempty" json:"env,omitempty"`
 	Sandbox          string   `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
@@ -222,12 +223,13 @@ type NodeProfile struct {
 type RoleAttestation struct {
 	ExecutionMode  string `yaml:"execution_mode,omitempty" json:"execution_mode,omitempty"`
 	Authentication string `yaml:"authentication,omitempty" json:"authentication,omitempty"`
-	Role           string `yaml:"role" json:"role"`                       // "planner", "reviewer", "developer", "tester"
-	Agent          string `yaml:"agent" json:"agent"`                     // configured policy key in .swarm/config.yaml
-	Harness        string `yaml:"harness" json:"harness"`                 // "claude", "codex", "opencode", "omp", "mock"
-	HarnessVersion string `yaml:"harness_version" json:"harness_version"` // sanitized first-line CLI version or "builtin"
-	Model          string `yaml:"model" json:"model"`                     // configured model selector or "default"
-	Sandbox        string `yaml:"sandbox" json:"sandbox"`                 // "sandbox-exec", "bwrap", "container", "host", "mock"
+	Role           string `yaml:"role" json:"role"`                         // "planner", "reviewer", "developer", "tester"
+	Agent          string `yaml:"agent" json:"agent"`                       // configured policy key in .swarm/config.yaml
+	Harness        string `yaml:"harness" json:"harness"`                   // "claude", "codex", "opencode", "omp", "mock"
+	HarnessVersion string `yaml:"harness_version" json:"harness_version"`   // sanitized first-line CLI version or "builtin"
+	Model          string `yaml:"model" json:"model"`                       // configured model selector or "default"
+	Effort         string `yaml:"effort,omitempty" json:"effort,omitempty"` // configured reasoning effort; empty is the harness default
+	Sandbox        string `yaml:"sandbox" json:"sandbox"`                   // "sandbox-exec", "bwrap", "container", "host", "mock"
 	ArtifactType   string `yaml:"artifact_type,omitempty" json:"artifact_type,omitempty"`
 	ArtifactDigest string `yaml:"artifact_digest,omitempty" json:"artifact_digest,omitempty"`
 }
@@ -245,6 +247,7 @@ func (a RoleAttestation) Metadata(base map[string]string) map[string]string {
 		"harness":         a.Harness,
 		"harness_version": a.HarnessVersion,
 		"model":           a.Model,
+		"effort":          a.Effort,
 		"sandbox":         a.Sandbox,
 		"execution_mode":  a.ExecutionMode,
 		"authentication":  a.Authentication,

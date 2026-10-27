@@ -55,6 +55,39 @@ func TestConfigRejectsInvalidSecurityPolicy(t *testing.T) {
 	}
 }
 
+func TestDecodeConfigAgentEffort(t *testing.T) {
+	valid, err := embeddedTemplates.ReadFile("templates/swarm/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withEffort := func(agent, effort string) []byte {
+		return []byte(strings.Replace(string(valid), "    binary: "+agent+"\n", "    binary: "+agent+"\n    effort: "+effort+"\n", 1))
+	}
+	for _, tc := range []struct {
+		agent, effort, wantErr string
+	}{
+		{"claude", "max", ""},
+		{"codex", "minimal", ""},
+		{"claude", "minimal", `agent "claude": effort "minimal" must be one of low, medium, high, max`},
+		{"codex", "turbo", `agent "codex": effort "turbo" must be one of minimal, low, medium, high`},
+		{"omp", "high", `agent "omp": effort is supported only for claude and codex harnesses, not "omp"`},
+		{"opencode", "high", `not "opencode"`},
+	} {
+		t.Run(tc.agent+"/"+tc.effort, func(t *testing.T) {
+			cfg, err := decodeConfig(withEffort(tc.agent, tc.effort))
+			if tc.wantErr == "" {
+				if err != nil || cfg.Agents[tc.agent].Effort != tc.effort {
+					t.Fatalf("valid effort rejected: cfg=%+v err=%v", cfg, err)
+				}
+				return
+			}
+			if cfg != nil || err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("cfg=%v err=%v, want %q", cfg, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestCommitMessageConfigModesAndLegacyPolicy(t *testing.T) {
 	const legacy = `version: 1
 default_agent: codex

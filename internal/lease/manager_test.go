@@ -957,3 +957,39 @@ func TestPRRevisionFreshPlanOrdinaryUpdatesRetainEvidence(t *testing.T) {
 		})
 	}
 }
+
+func TestArtifactProvenanceRecordsEffort(t *testing.T) {
+	m, _, iss := testManager(t)
+	ctx := context.Background()
+	if _, err := m.ApproveTask(ctx, iss.Number, "local-dev"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Acquire(ctx, iss.Number, "local-dev", "claude", "plan", time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	att := contract.RoleAttestation{Role: "planner", Agent: "claude-planner", Harness: "claude", Model: "claude-opus", Effort: "high", Sandbox: "host"}
+	st, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", contract.Artifact{
+		Type:     contract.ArtifactDesign,
+		Producer: "claude:planner",
+		Summary:  "plan summary",
+		Body:     "# Plan",
+		Metadata: att.Metadata(nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(st.Attestations, func(a contract.RoleAttestation) bool { return a.Role == "planner" })
+	if i < 0 || st.Attestations[i].Model != "claude-opus" || st.Attestations[i].Effort != "high" {
+		t.Fatalf("attestations = %+v", st.Attestations)
+	}
+
+	var plain IssueState
+	RecordRoleAttestation(&plain, contract.RoleAttestation{Role: "developer", Agent: "codex", Harness: "codex", Model: "gpt"})
+	raw, err := json.Marshal(plain.Attestations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "effort") {
+		t.Fatalf("attestation without effort changed serialization: %s", raw)
+	}
+}

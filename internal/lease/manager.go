@@ -1691,6 +1691,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 				Harness:        harnessName,
 				HarnessVersion: art.Metadata["harness_version"],
 				Model:          art.Metadata["model"],
+				Effort:         art.Metadata["effort"],
 				Sandbox:        art.Metadata["sandbox"],
 				ArtifactType:   string(art.Type),
 				ArtifactDigest: digest,

@@ -635,6 +635,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 		if strings.TrimSpace(name) == "" || strings.TrimSpace(agent.Binary) == "" {
 			return nil, fmt.Errorf("agents require nonempty names and executable paths")
 		}
+		if err := contract.ValidateAgentEffort(name, agent); err != nil {
+			return nil, err
+		}
 	}
 	return &cfg, nil
 }

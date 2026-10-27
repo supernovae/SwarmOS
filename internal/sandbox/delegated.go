@@ -16,6 +16,12 @@ import (
 // InspectDelegatedHarness checks supported interfaces without opening private
 // credential stores. Runtime enforcement is checked separately by the executor.
 func InspectDelegatedHarness(ctx context.Context, driver, binary string) (string, error) {
+	return inspectDelegatedHarness(ctx, driver, binary, nil)
+}
+
+// inspectDelegatedHarness also requires the extra flags a configured run uses,
+// such as --effort, so an older harness fails before work starts.
+func inspectDelegatedHarness(ctx context.Context, driver, binary string, extra []string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	home, err := os.MkdirTemp("", "swarm-harness-inspect-*")
@@ -54,7 +60,7 @@ func InspectDelegatedHarness(ctx context.Context, driver, binary string) (string
 	if err := runNativeCommand(ctx, binary, home, env, args, nil, &help, &diagnostics); err != nil {
 		return "", fmt.Errorf("%s interface inspection: %w", driver, err)
 	}
-	for _, flag := range flags {
+	for _, flag := range append(flags, extra...) {
 		if !strings.Contains(help.String(), flag) {
 			return "", fmt.Errorf("%s %s lacks required interface %s", driver, qualified, flag)
 		}
@@ -93,7 +99,11 @@ func writeHarnessJSON(path string, value any) error {
 // in candidate code. Its only execution surface is the selected tool transport.
 func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt string, opts WorkerOptions, interactive bool, input io.Reader, stdout, stderr io.Writer) ([]string, string, error) {
 	preflight := time.Now()
-	version, err := InspectDelegatedHarness(ctx, driver, binary)
+	var extra []string
+	if driver == "claude" && opts.Effort != "" {
+		extra = []string{"--effort"}
+	}
+	version, err := inspectDelegatedHarness(ctx, driver, binary, extra)
 	if err != nil {
 		return nil, "", err
 	}
@@ -148,7 +158,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 			if err := writeHarnessJSON(settings, map[string]any{"disableAllHooks": true, "enabledPlugins": map[string]any{}, "permissions": map[string]any{"allow": []string{"mcp__swarm__*"}}}); err != nil {
 				return err
 			}
-			args = []string{"--restricted", "--strict-mcp-config", "--mcp-config", config, "--tools", "", "--disable-slash-commands", "--no-chrome", "--settings", settings, "--permission-mode", "dontAsk", "--permission-prompts", "none", "--no-session-persistence", "--print"}
+			args = claudeArgs(config, settings, model, opts.Effort)
 		case "opencode":
 			env, err = prepareOpenCode(control, executable, toolArgs, env)
 			if err != nil {
@@ -159,9 +169,6 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 		default:
 			return fmt.Errorf("unsupported harness %q", driver)
 		}
-		if model != "" {
-			args = append(args, "--model", model)
-		}
 		return runFollowupTurns(ctx, prompt, "Continue the task using the SwarmOS tools. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, false, input, stdout, func(prompt string) error {
 			turn := append(append([]string(nil), args...), "--", prompt)
 			command = append([]string{binary}, turn...)
@@ -169,6 +176,19 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 		}, opts.GuidanceDelivered)
 	})
 	return command, version, err
+}
+
+// claudeArgs is the complete isolated Claude Code argv before the prompt. Only
+// the approved model and effort selectors vary.
+func claudeArgs(config, settings, model, effort string) []string {
+	args := []string{"--restricted", "--strict-mcp-config", "--mcp-config", config, "--tools", "", "--disable-slash-commands", "--no-chrome", "--settings", settings, "--permission-mode", "dontAsk", "--permission-prompts", "none", "--no-session-persistence", "--print"}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
+	}
+	return args
 }
 
 // internalToolArgs starts the separate `swarm internal-tools` process. It sees

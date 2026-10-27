@@ -61,7 +61,10 @@ func NewConfiguredRunnerWithOptions(name string, cfg *contract.SwarmConfig, loca
 	if err != nil {
 		return nil, err
 	}
-	a := &CLIAdapter{agentName: name, driver: driver, binary: ac.Binary, prefixArgs: append([]string(nil), ac.Args...), model: ac.Model, envAllow: append([]string(nil), ac.Env...), sandboxRuntime: ac.Sandbox, reviewNetwork: ac.ReviewNetwork, containerRuntime: ac.ContainerRuntime, container: ac.ContainerImage, lookupEnv: opts.LookupEnv}
+	if err := contract.ValidateAgentEffort(name, ac); err != nil {
+		return nil, err
+	}
+	a := &CLIAdapter{agentName: name, driver: driver, binary: ac.Binary, prefixArgs: append([]string(nil), ac.Args...), model: ac.Model, effort: ac.Effort, envAllow: append([]string(nil), ac.Env...), sandboxRuntime: ac.Sandbox, reviewNetwork: ac.ReviewNetwork, containerRuntime: ac.ContainerRuntime, container: ac.ContainerImage, lookupEnv: opts.LookupEnv}
 	a.executionMode = execution.Mode
 	a.executionPolicy = execution
 	a.authentication = ac.Authentication

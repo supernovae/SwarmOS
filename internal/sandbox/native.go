@@ -301,10 +301,7 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 			return err
 		}
 		args := codexPolicy(binary, work, scratch, opts.ReadOnly, caches, opts.Dependencies)
-		args = append(args, "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-C", work)
-		if model != "" {
-			args = append(args, "--model", model)
-		}
+		args = append(args, codexExecArgs(work, model, opts.Effort)...)
 		return runFollowupTurns(ctx, prompt, "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, true, stdin, stdout, func(turn string) error {
 			command = append(append([]string{binary}, args...), turn)
 			if err := runNativeCommand(ctx, binary, work, nativeEnv(home, true, opts.Dependencies), command[1:], nil, stdout, stderr); err != nil {
@@ -314,6 +311,24 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		}, opts.GuidanceDelivered)
 	})
 	return command, version, err
+}
+
+// codexExecArgs is the native `codex exec` argv after the sandbox policy and
+// before the prompt. Only the approved model and effort selectors vary.
+func codexExecArgs(work, model, effort string) []string {
+	args := []string{"exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-C", work}
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if effort != "" {
+		args = append(args, "-c", CodexEffortConfig(effort))
+	}
+	return args
+}
+
+// CodexEffortConfig is the Codex -c override that selects reasoning effort.
+func CodexEffortConfig(effort string) string {
+	return "model_reasoning_effort=" + strconv.Quote(effort)
 }
 
 // RunNativeValidation runs command with the validator's caches as selected by

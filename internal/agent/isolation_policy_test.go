@@ -2,6 +2,7 @@ package agent
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -65,6 +66,29 @@ func TestNativeCodexRejectsPolicyOverrides(t *testing.T) {
 		cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{"codex": ac}}
 		if _, err := NewConfiguredRunner("codex", cfg, false); err == nil {
 			t.Fatalf("accepted native override %+v", ac)
+		}
+	}
+}
+
+func TestNativeIsolatedEffortAdmitsNoOtherArguments(t *testing.T) {
+	t.Setenv("SWARM_EXECUTION_MODE", "")
+	for name, effort := range map[string]string{"codex": "high", "claude": "max"} {
+		cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{name: {Binary: os.Args[0], Effort: effort}}}
+		r, err := NewConfiguredRunner(name, cfg, false)
+		if err != nil {
+			t.Fatalf("%s rejected approved effort: %v", name, err)
+		}
+		if got := r.Provenance("developer", false).Effort; got != effort {
+			t.Fatalf("%s provenance effort = %q", name, got)
+		}
+		for _, ac := range []contract.AgentConfig{
+			{Binary: os.Args[0], Effort: effort, Args: []string{"--effort", "low"}},
+			{Binary: os.Args[0], Effort: effort, Env: []string{"OPENAI_API_KEY"}},
+		} {
+			cfg := &contract.SwarmConfig{Agents: map[string]contract.AgentConfig{name: ac}}
+			if _, err := NewConfiguredRunner(name, cfg, false); err == nil || !strings.Contains(err.Error(), "remove args, env") {
+				t.Fatalf("%s accepted native override %+v: %v", name, ac, err)
+			}
 		}
 	}
 }

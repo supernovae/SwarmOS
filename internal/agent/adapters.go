@@ -28,6 +28,7 @@ type CLIAdapter struct {
 	binary           string
 	prefixArgs       []string
 	model            string
+	effort           string
 	envAllow         []string
 	sandboxRuntime   string
 	reviewNetwork    bool
@@ -92,6 +93,7 @@ func (a *CLIAdapter) Provenance(role string, readOnly bool) contract.RoleAttesta
 		Harness:        harnessName,
 		HarnessVersion: version,
 		Model:          model,
+		Effort:         a.effort,
 		Sandbox:        boundary,
 	}
 }
@@ -145,6 +147,14 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 			args = append([]string{"--model", req.Model}, args...)
 		case "opencode":
 			args = append(args, "--model", req.Model)
+		}
+	}
+	if a.effort != "" {
+		switch a.driver {
+		case "claude":
+			args = append([]string{"--effort", a.effort}, args...)
+		case "codex":
+			args = append([]string{"-c", sandbox.CodexEffortConfig(a.effort)}, args...)
 		}
 	}
 	return a.binary, append(append([]string(nil), a.prefixArgs...), args...)

@@ -88,6 +88,15 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 	st.ApprovedBy = actor
 	st.ApprovedAt = m.nowFn()
 
+	if st.EffectiveGate != contract.GateNone {
+		if err = VerifyApproval(st, wu); err != nil {
+			if st.EffectiveGate == contract.GateHuman {
+				return nil, &HumanPlanApprovalError{IssueNumber: n, Err: fmt.Errorf("human plan approval required: swarm issue review-plan %d --approve: %w", n, err)}
+			}
+			return nil, fmt.Errorf("plan review required: swarm pr work %d --phase review: %w", number, err)
+		}
+	}
+
 	latest, err := m.tracker.GetPullRequest(ctx, number)
 	if err != nil {
 		return nil, err

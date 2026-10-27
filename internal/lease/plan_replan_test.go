@@ -293,3 +293,16 @@ func TestAgentApprovalPreservesConsumedBudget(t *testing.T) {
 		t.Fatalf("approval transition: %+v", st)
 	}
 }
+
+func TestPlanReplanPendingPRGuidance(t *testing.T) {
+	m, _, st := rejectedReplanFixture(t)
+	st.PlanReplanCount = 100
+	st.PRRevision = &PRRevision{Number: 37}
+	err := m.CheckPlanReplan(st)
+	if !errors.Is(err, ErrPlanReplanLimit) || !strings.Contains(err.Error(), "swarm pr work 37 --phase review") || strings.Contains(err.Error(), "issue review-plan") {
+		t.Fatal(err)
+	}
+	if !strings.Contains(err.Error(), "swarm pr stage 37 --phase plan") {
+		t.Fatal(err)
+	}
+}

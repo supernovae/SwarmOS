@@ -39,5 +39,9 @@ func planReviewRecovery(opts *RootOptions, st *lease.IssueState, resource string
 	if opts.ForkRemote != "" && (opts.Fork || resource == "pr") {
 		command += " --fork-remote " + quote(opts.ForkRemote)
 	}
-	return fmt.Sprintf("%s. Revise the plan: %s %s work %d --phase plan; then run %s issue review-plan %d. Automatic retries remain subject to the per-revision cap.", st.NextPhaseReason, command, resource, number, command, st.Lease.IssueNumber)
+	review := fmt.Sprintf("%s issue review-plan %d", command, st.Lease.IssueNumber)
+	if resource == "pr" {
+		review = fmt.Sprintf("%s pr work %d --phase review", command, number)
+	}
+	return fmt.Sprintf("%s. Revise the plan: %s %s work %d --phase plan; then run %s. Automatic retries remain subject to the per-revision cap.", st.NextPhaseReason, command, resource, number, review)
 }

@@ -66,6 +66,9 @@ func (m *Manager) CheckPlanReplan(st *IssueState) error {
 		return nil
 	}
 	guidance := fmt.Sprintf("run swarm issue review-plan %d, or edit and reapprove the WorkUnit", st.Lease.IssueNumber)
+	if st.PRRevision != nil {
+		guidance = fmt.Sprintf("run swarm pr work %d --phase review, or edit and reapprove the WorkUnit", st.PRRevision.Number)
+	}
 	if !strings.EqualFold(cfg.PlanMode, "agent") {
 		resource, number := "issue", st.Lease.IssueNumber
 		if st.PRRevision != nil {

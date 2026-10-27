@@ -42,7 +42,7 @@ func (s *Service) preflightRebaseReview(ctx context.Context, r *Result, opts Opt
 		return &lease.HumanPlanApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("human plan approval required: swarm issue review-plan %d --approve", r.IssueNumber)}
 	}
 	if s.Fork || !policyReviewNeeded(r.State, rv.unit) {
-		return fmt.Errorf("plan review required: swarm issue review-plan %d", r.IssueNumber)
+		return fmt.Errorf("plan review required: swarm pr work %d --phase review", r.PR.Number)
 	}
 	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
 	if err != nil {
@@ -58,7 +58,7 @@ func (s *Service) reviewRebasePlan(ctx context.Context, r *Result, owner string,
 		return st, nil
 	}
 	if s.Fork || !policyReviewNeeded(st, rv.unit) {
-		return st, fmt.Errorf("plan approval required: swarm issue review-plan %d", r.IssueNumber)
+		return st, fmt.Errorf("plan approval required: swarm pr work %d --phase review", r.PR.Number)
 	}
 	if err := restoreApprovedPlan(r.Worktree, st); err != nil {
 		return st, err

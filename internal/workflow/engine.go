@@ -793,6 +793,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		// Keep canonical plan files independent of steering evidence in artifacts.
 		plan = guidedReport(plan, planRun)
 		testPlan = guidedReport(testPlan, planRun)
+		observeRun(planRun, st, false)
 		planMeta := runMetadata(planRun, nil)
 		if _, err = e.LeaseManager.UpdateArtifact(ctx, opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: planner + ":planner", Summary: fmt.Sprintf("Implementation plan for #%d", opts.IssueNumber), Body: plan, Metadata: planMeta}); err != nil {
 			return res, err
@@ -1021,6 +1022,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			summary += "; " + reportWarning
 		}
 		body = guidedReport(body, devRun)
+		observeRun(devRun, st, checkpointPurpose == "repair")
 		devMeta := runMetadata(devRun, nil)
 		for key, value := range lease.ReviewBindings(st) {
 			devMeta[key] = value
@@ -1083,6 +1085,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		return res, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, "implement", true, forkMode, forkRemote)
 	}
 	if report != nil {
+		observeRun(testerRun, st, false)
 		report.Artifact.Metadata = runMetadata(testerRun, report.Artifact.Metadata)
 		report.Artifact.Body += "\n" + testerBody
 		report.Artifact.Body = guidedReport(report.Artifact.Body, testerRun)
@@ -1270,6 +1273,8 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	revMeta := revAtt.Metadata(map[string]string{"kind": "agent", "actor": owner})
 	if revRun != nil {
 		revMeta = agent.GuidanceMetadata(revRun.Guidance, revMeta)
+		observeRun(revRun, st, false)
+		revMeta = telemetryMetadata(revRun, revMeta)
 	}
 	review, err = recordGuidance(wtPath, "REVIEW.md", review, revRun)
 	if err != nil {

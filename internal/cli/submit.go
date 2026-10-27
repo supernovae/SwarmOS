@@ -333,6 +333,16 @@ func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState, stateRe
 			body.Write(rawJSON)
 			body.WriteString("\n```\n\n</details>\n")
 		}
+		if runs := lease.RoleRuns(state); len(runs) > 0 {
+			body.WriteString("\n## ⏱️ Role Run Telemetry\n\n")
+			body.WriteString("Observed per-run timing and the usage each harness reported; `unavailable` means it was not observed. Descriptive only, never a gate input.\n\n")
+			body.WriteString(lease.RoleRunTable(runs))
+			if rawJSON, err := json.MarshalIndent(runs, "", "  "); err == nil {
+				body.WriteString("\n<details>\n<summary>Machine-Readable Role Run Telemetry (JSON)</summary>\n\n```json\n")
+				body.Write(rawJSON)
+				body.WriteString("\n```\n\n</details>\n")
+			}
+		}
 		if len(state.Artifacts) > 0 {
 			body.WriteString("\n## 📦 Attached SwarmOS Artifacts\n\n")
 			body.WriteString("| Type | Producer | Verdict | Summary |\n| --- | --- | --- | --- |\n")

@@ -76,6 +76,7 @@ func (m *Manager) prepareClaimBase(ctx context.Context, n int, original *IssueSt
 	st := *original
 	st.Artifacts = append([]contract.Artifact(nil), original.Artifacts...)
 	st.Attestations = append([]contract.RoleAttestation(nil), original.Attestations...)
+	st.RoleRuns = append([]contract.RoleRunTelemetry(nil), original.RoleRuns...)
 	hasEvidence := len(st.Artifacts) > 0
 	if hasEvidence {
 		m.carryApprovalEvidence(ctx, &st, wu, base, policy, tree, true)

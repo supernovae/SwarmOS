@@ -165,6 +165,41 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 			t.Fatalf("resumed execution announced a skipped stage: %+v", event)
 		}
 	}
+	assertRoleRunHistory(t, resumed.State)
+}
+
+// assertRoleRunHistory checks the telemetry recorded by TestEnginePlanGateLifecycle:
+// one row per artifact-producing run, including the negative review, and none
+// for the unchanged re-plan that produced no artifact.
+func assertRoleRunHistory(t *testing.T, st *lease.IssueState) {
+	t.Helper()
+	var roles []string
+	for _, run := range st.RoleRuns {
+		roles = append(roles, run.Role)
+		if run.Validate() != nil || run.UsageSource != contract.UsageSourceMock || run.ElapsedMS == nil || run.RepairAttempt == nil || *run.RepairAttempt != 0 || run.ReplanCount == nil {
+			t.Fatalf("invalid recorded run: %+v", run)
+		}
+	}
+	if want := []string{"planner", "reviewer", "reviewer", "developer", "tester", "developer", "tester"}; !slices.Equal(roles, want) {
+		t.Fatalf("role run history = %v, want %v", roles, want)
+	}
+	if st.RoleRuns[1].SnapshotMS == nil {
+		t.Fatalf("reviewer snapshot not measured: %+v", st.RoleRuns[1])
+	}
+	runIDs := map[contract.ArtifactType]string{}
+	for _, a := range st.Artifacts {
+		tel, err := contract.ParseRoleRunTelemetry(a.Metadata[contract.RoleRunTelemetryKey])
+		if err != nil {
+			t.Fatalf("%s artifact lacks telemetry: %v", a.Type, err)
+		}
+		runIDs[a.Type] = tel.RunID
+	}
+	if runIDs[contract.ArtifactDesign] == "" || runIDs[contract.ArtifactDesign] != runIDs[contract.ArtifactTestPlan] || runIDs[contract.ArtifactDesign] != st.RoleRuns[0].RunID {
+		t.Fatalf("planner artifacts do not share one run: %v", runIDs)
+	}
+	if runIDs[contract.ArtifactValidation] != st.RoleRuns[6].RunID || runIDs[contract.ArtifactImplementation] != st.RoleRuns[5].RunID {
+		t.Fatalf("latest artifacts and history disagree: %v", runIDs)
+	}
 }
 
 func TestCollaborativeHandoffAndDecomposition(t *testing.T) {

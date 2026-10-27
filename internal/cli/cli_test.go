@@ -1730,6 +1730,7 @@ func TestCLIStatusProvenance(t *testing.T) {
 				Issue      *tracker.Issue             `json:"issue"`
 				State      *lease.IssueState          `json:"state"`
 				Provenance []contract.RoleAttestation `json:"provenance"`
+				RoleRuns   []map[string]any           `json:"role_runs"`
 			} `json:"issues"`
 		}
 		raw := f.must(t, args...)
@@ -1743,8 +1744,28 @@ func TestCLIStatusProvenance(t *testing.T) {
 		if entry.Repository == "" || entry.Issue == nil || entry.Issue.Number != number || !reflect.DeepEqual(entry.State, before) || !reflect.DeepEqual(entry.Provenance, before.Attestations) {
 			t.Fatalf("unexpected status: %+v", entry)
 		}
+		if len(entry.RoleRuns) != len(before.RoleRuns) || len(entry.RoleRuns) != len(roles) {
+			t.Fatalf("role runs = %+v", entry.RoleRuns)
+		}
+		for i, run := range entry.RoleRuns {
+			// Unavailable values are explicit JSON nulls; measured values are numbers.
+			if run["role"] != roles[i] || run["run_id"] != before.RoleRuns[i].RunID || run["effort"] != nil || run["input_tokens"] != float64(1200) || run["cached_input_tokens"] != float64(0) {
+				t.Fatalf("role run JSON = %+v", run)
+			}
+			if value, ok := run["model_ms"]; !ok || value != nil {
+				t.Fatalf("unavailable model time must be null: %+v", run)
+			}
+		}
 	}
-	if listing := f.must(t, "issue", "status"); strings.Contains(listing, "Provenance:") || strings.Contains(listing, "Artifact SHA-256:") {
+	if !strings.Contains(out, "Role runs:\n"+lease.RoleRunTableHeader) {
+		t.Fatalf("missing role run table: %s", out)
+	}
+	for _, run := range before.RoleRuns {
+		if !strings.Contains(out, "| "+run.Role+" | "+run.RunID[:8]+" | ") || !strings.Contains(out, "| 1200/300/0 | 0/0 | 0/0 | mock/unavailable |") {
+			t.Fatalf("missing %s run row: %s", run.Role, out)
+		}
+	}
+	if listing := f.must(t, "issue", "status"); strings.Contains(listing, "Provenance:") || strings.Contains(listing, "Artifact SHA-256:") || strings.Contains(listing, "Role runs:") {
 		t.Fatalf("listing contains details: %s", listing)
 	}
 	if !reflect.DeepEqual(before, f.state(t, number)) {
@@ -1768,6 +1789,9 @@ func TestCLIStatusProvenanceMissing(t *testing.T) {
 			want := "draft/unapproved:"
 			if approved {
 				want = "Provenance: none recorded"
+				if !strings.Contains(out, "Role runs: none recorded") {
+					t.Fatalf("missing empty role runs: %s", out)
+				}
 			}
 			if !strings.Contains(out, want) {
 				t.Fatalf("missing %q: %s", want, out)

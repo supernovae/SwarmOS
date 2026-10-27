@@ -83,6 +83,12 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	if status.IssueNumber != issue || status.PR.Number != number {
 		t.Fatalf("PR/issue identity confused: %+v", status)
 	}
+	if len(status.RoleRuns) != 4 || !reflect.DeepEqual(status.RoleRuns, lease.RoleRuns(before)) {
+		t.Fatalf("PR status role runs = %+v", status.RoleRuns)
+	}
+	if !strings.Contains(original.Body, "## ⏱️ Role Run Telemetry") || !strings.Contains(original.Body, lease.RoleRunTable(status.RoleRuns)) || !strings.Contains(original.Body, `"run_id": "`+before.RoleRuns[0].RunID+`"`) {
+		t.Fatalf("PR evidence lacks role run telemetry: %s", original.Body)
+	}
 	f.must(t, "pr", "work", p, "--agent", "mock", "--dry-run", "--json")
 	if after := f.state(t, issue); !reflect.DeepEqual(before, after) {
 		t.Fatal("dry-run changed authoritative state")
@@ -94,10 +100,15 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	if worked.State.RevisionPlan == nil {
 		t.Fatal("approved original missing from revision")
 	}
+	revised := lease.RoleRunTable(lease.RoleRuns(f.state(t, issue)))
 	for _, args := range [][]string{{"issue", "status", strconv.Itoa(issue)}, {"pr", "status", p}} {
 		output := f.must(t, args...)
 		if !strings.Contains(output, "Original approved plan") || !strings.Contains(output, "Current revision plan") {
 			t.Fatal(output)
+		}
+		// Issue and PR status show the same rows, including the revision's runs.
+		if !strings.Contains(output, "Role runs:\n"+revised) || strings.Count(revised, "\n") <= 6 {
+			t.Fatalf("%v role runs:\n%s", args, output)
 		}
 	}
 	if worked.Worktree == issueTree || worked.HeadSHA == before.HeadSHA {

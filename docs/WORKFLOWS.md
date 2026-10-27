@@ -79,6 +79,15 @@ How gate verification keeps reviews trustworthy:
 
 `swarm issue approve <issue>` makes the issue's WorkUnit the approved work contract before execution; plan approval is a second, separate checkpoint. `swarm issue validate` runs the approved-base checks and protected-path policy, not a pass/fail decision for each acceptance criterion. `swarm issue submit <issue>` links a Draft PR proposing implementation of the issue contract; `swarm issue status <issue>` exposes its PR number and URL. Continue implementation with `swarm pr work <PR>`, stage interactive PR plans or implementation with `swarm pr stage <PR> --phase plan|implement` in `.swarm/worktrees/pr-<PR>` (not the original issue worktree), update ancestry with `swarm pr rebase <PR>`, and publish only through `swarm pr submit <PR>`. These operations retain the issue's approval gates; maintainers use GitHub for final code and acceptance review. See [Continuing an Existing PR](developer.md#continuing-an-existing-pr).
 
+### Where a WorkUnit's time went
+
+Each role run that produces an artifact records a breakdown in that artifact's metadata. `swarm issue status <issue>` and `swarm pr status <PR>` show these runs as a compact per-role table, and `--json` adds a `role_runs` list. The Draft PR evidence includes the same table. A planner run produces both the plan and the test plan, so it appears once. A run that fails or is cancelled before producing an artifact records nothing.
+
+- **Measured by SwarmOS**: total elapsed time, preflight time (locating the harness and its version and login checks), setup time (temporary workspace and home), and snapshot time (copying the worktree into the run's isolated workspace, including the reviewer's read-only copy). Repair and re-plan counters are SwarmOS's own attempt numbers, starting at 0.
+- **Reported by the harness**: input, output, and cached-input tokens, tool calls and repeated identical shell commands, and the model and reasoning effort actually used. SwarmOS reads these only from the harness's own session log in the run's private home directory after the run ends: Claude Code's `~/.claude/projects` logs and Codex's `~/.codex/sessions` logs. It never reads your own home directory, and the configured model shown under provenance is never copied into this table. Claude Code reports input tokens without cache reads, while Codex counts cached tokens in its input total.
+
+A value that was not observed shows as `unavailable` in text and `null` in JSON; a measured zero shows as `0`. With the current isolated Claude Code and Codex settings, session persistence is turned off, so expect tokens and the actual model to show as `unavailable` on those runs for now. Large, malformed, or unexpected logs are ignored rather than partly counted. Model time and tool time are not reported by any supported harness yet. These figures describe a run; they never decide approval, review, or validation.
+
 ---
 
 ## Continuing from a rewritten checkpoint

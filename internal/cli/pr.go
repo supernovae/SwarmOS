@@ -211,6 +211,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					if result.PR != nil {
 						fmt.Fprintf(cmd.OutOrStdout(), "Published head: %s\nTarget: %s at %s\nDraft: %t\n", result.PR.HeadSHA, result.PR.Base, result.PR.BaseSHA, result.PR.Draft)
 					}
+					writeRoleRuns(cmd.OutOrStdout(), result.RoleRuns)
 				}
 				if len(result.Checks) != 0 {
 					fmt.Fprintln(cmd.OutOrStdout(), "Checks on the published head:")

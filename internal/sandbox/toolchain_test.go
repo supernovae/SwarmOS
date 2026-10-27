@@ -93,7 +93,6 @@ func TestResolveHostToolchainsDiscoversMultiLanguageCachesWithoutCredentials(t *
 		"BUN_INSTALL_CACHE_DIR": bunCache,
 		"NUGET_PACKAGES":        nugetPkgs,
 		"DOTNET_ROOT":           dotnetRoot,
-		"CCACHE_DIR":            ccacheDir,
 	}
 	for k, want := range wantEnv {
 		if got := envVars[k]; got != want {
@@ -105,7 +104,7 @@ func TestResolveHostToolchainsDiscoversMultiLanguageCachesWithoutCredentials(t *
 	for _, wantMount := range []string{
 		goModCache, goBin, rustupHome, cargoBin, cargoReg, cargoGit,
 		pipCache, uvCache, uvPython, npmCache, pnpmStore, yarnCache,
-		bunBin, bunCache, nugetPkgs, dotnetRoot, ccacheDir, m2Repo, gradleCaches,
+		bunBin, bunCache, nugetPkgs, dotnetRoot, m2Repo, gradleCaches,
 	} {
 		covered := false
 		for _, m := range mounts {
@@ -137,6 +136,16 @@ func TestResolveHostToolchainsDiscoversMultiLanguageCachesWithoutCredentials(t *
 			if m == bad || isSubpath(bad, m) {
 				t.Errorf("mount %q exposes forbidden path %q", m, bad)
 			}
+		}
+	}
+
+	// The user's own ccache is a writable build cache, never a toolchain.
+	if _, ok := envVars["CCACHE_DIR"]; ok {
+		t.Errorf("CCACHE_DIR discovered from the user's cache: %q", envVars["CCACHE_DIR"])
+	}
+	for _, m := range mounts {
+		if isSubpath(ccacheDir, m) {
+			t.Errorf("mount %q exposes the user's ccache %q", m, ccacheDir)
 		}
 	}
 
@@ -198,7 +207,7 @@ func TestNativeAndBubblewrapOfflineLanguageBuildAndTest(t *testing.T) {
 			t.Fatal(err)
 		}
 		out.Reset()
-		if err := RunNativeValidation(context.Background(), absWT, resolved, "go build ./... && go test ./... && go vet ./...", &out, &out); err != nil {
+		if err := RunNativeValidation(context.Background(), absWT, resolved, "go build ./... && go test ./... && go vet ./...", nil, false, &out, &out); err != nil {
 			t.Fatalf("Codex native offline Go build/test/vet failed: %v\n%s", err, out.String())
 		}
 		if strings.Contains(out.String(), "Refusing to create helper binaries under temporary dir") {

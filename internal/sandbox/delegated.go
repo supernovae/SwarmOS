@@ -115,7 +115,12 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 			return err
 		}
 		env := nativeEnv(home, true)
-		executor := ToolExecutor{Work: work, ReadOnly: opts.ReadOnly}
+		// dir is the real worktree, so the cache key names its repository.
+		caches, err := agentBuildCaches(ctx, dir, scratch, opts)
+		if err != nil {
+			return err
+		}
+		executor := ToolExecutor{Work: work, ReadOnly: opts.ReadOnly, BuildCaches: caches}
 		prompt = "The task files are in /workspace inside the SwarmOS tools. Use swarm_read, swarm_write, swarm_edit and swarm_shell for file access, editing, searching and testing.\n" + prompt
 		if driver == "omp" {
 			command = []string{binary, "--mode", "rpc"}
@@ -129,10 +134,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 		if err != nil {
 			return err
 		}
-		toolArgs := []string{"internal-tools", "--workspace", work}
-		if opts.ReadOnly {
-			toolArgs = append(toolArgs, "--read-only")
-		}
+		toolArgs := internalToolArgs(executor)
 		var args []string
 		switch driver {
 		case "claude":
@@ -165,6 +167,19 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 		}, opts.GuidanceDelivered)
 	})
 	return command, version, err
+}
+
+// internalToolArgs starts the separate `swarm internal-tools` process. It sees
+// only the detached snapshot, so the agent caches travel as flags.
+func internalToolArgs(executor ToolExecutor) []string {
+	args := []string{"internal-tools", "--workspace", executor.Work}
+	if executor.ReadOnly {
+		args = append(args, "--read-only")
+	}
+	for _, c := range executor.BuildCaches {
+		args = append(args, "--build-cache", buildCacheFlag(c))
+	}
+	return args
 }
 
 func prepareOpenCode(control, executable string, toolArgs, env []string) ([]string, error) {

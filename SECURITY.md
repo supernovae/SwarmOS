@@ -82,6 +82,10 @@ Native built-ins that would bypass this executor, custom hooks, external MCP ser
 
 Tools have two-minute deadlines and per-process CPU, address-space, file-size, and descriptor limits. Private temporary storage is limited to 256 MiB per call. These limits do not provide aggregate memory or task-workspace disk quotas. Shared worker operators can apply service-level limits; the OCI backend supplies a separate resource boundary.
 
+### Build caches
+
+Agents and validation use separate SwarmOS-owned build caches for each repository, never your own cache directories. Agent sandboxes never see the validator cache, and validation never reads an agent cache. Only a warm-up run of the trusted approved base writes the validator cache. Candidate checks see it read-only through a discarded write layer on Bubblewrap, or not at all on other backends. Planner and reviewer runs get scratch caches only. See [Build caches and who can write them](docs/project.md#build-caches-and-who-can-write-them).
+
 ### Optional OCI backend
 
 Set `execution.backend: oci`, `execution.container_runtime` to `docker` or `podman`, and `execution.container_image` to a locally available image pinned by SHA-256 digest. Existing policies that explicitly configure container settings retain OCI selection. Conflicting native/container requirements are rejected.

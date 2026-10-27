@@ -263,6 +263,30 @@ func (r *Root) Remove(name string) error {
 	defer d.Close()
 	return d.Remove(filepath.Base(name))
 }
+
+// Rename moves oldname to newname within the root. Both parent directories
+// must already exist and contain no symlinked components; the final names are
+// replaced as directory entries, so a symlink is moved rather than followed.
+func (r *Root) Rename(oldname, newname string) error {
+	oldname, err := local(oldname)
+	if err != nil {
+		return err
+	}
+	newname, err = local(newname)
+	if err != nil {
+		return err
+	}
+	for _, parent := range []string{filepath.Dir(oldname), filepath.Dir(newname)} {
+		d, err := r.directory(parent, false, 0)
+		if err != nil {
+			return err
+		}
+		d.Close()
+	}
+	// os.Root confines both names even if a parent changes after the check.
+	return r.root.Rename(oldname, newname)
+}
+
 func ReadFile(root, name string, maxBytes int64) ([]byte, error) {
 	r, err := Open(root)
 	if err != nil {

@@ -1,0 +1,1 @@
+- Reuse compiled Go, Rust and C/C++ output across agent runs and validations, with separate per-repository caches for agents and the validator. Only trusted warm-up of the approved base writes the validator cache.

@@ -187,15 +187,20 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		return nil, err
 	}
 	defer os.RemoveAll(checkHome)
-	// Resolve the persistent build cache once, and only when checks run on the
-	// host; sandboxed checks never see it.
-	var goCache string
-	if opts.RunnerIsolated || execution.Mode != contract.ExecutionIsolated {
-		if goCache, err = hostGoCache(worktreePath); err != nil {
+	// Resolve the validator's build caches once. OCI checks get none.
+	var caches []sandbox.BuildCache
+	if opts.RunnerIsolated || execution.Mode != contract.ExecutionIsolated || execution.Backend == contract.BackendNative {
+		if caches, err = validatorBuildCaches(ctx, worktreePath, checkHome); err != nil {
 			return nil, err
 		}
 	}
-	runner := &checkRunner{worktree: worktreePath, home: checkHome, goCache: goCache, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated}
+	runner := &checkRunner{worktree: worktreePath, home: checkHome, buildCaches: caches, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated}
+	// Only the trusted base writes the persistent caches, and only where a
+	// candidate can read them back (sandbox.ValidatorCacheReusable).
+	warmNote := ""
+	if !opts.RunnerIsolated && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative && sandbox.NativeValidationReusesCache(cfg) {
+		warmNote = warmBuildCaches(ctx, runner, spec.RequiredChecks, baseSHA)
+	}
 	record := func(outcome CheckRunOutcome) {
 		report.CheckOutcomes = append(report.CheckOutcomes, outcome)
 		status := "PASS"
@@ -249,6 +254,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		}
 		record(outcome)
 	}
+	details.WriteString(warmNote)
 	markdown.WriteString(details.String())
 	verdict, summary := "PASS", fmt.Sprintf("All %d required checks passed", required)
 	if !report.Passed {
@@ -377,7 +383,10 @@ func checkTimeout(configured string) time.Duration {
 // changed-package pass all share it.
 type checkRunner struct {
 	worktree, home string
-	goCache        string
+	// buildCaches are the validator's caches. warmup marks the trusted base
+	// run, the only one sandbox.ValidatorCacheMounts lets write them.
+	buildCaches    []sandbox.BuildCache
+	warmup         bool
 	cfg            *contract.SwarmConfig
 	execution      contract.ExecutionConfig
 	runnerIsolated bool
@@ -386,15 +395,15 @@ type checkRunner struct {
 // run executes command under ctx, which the caller bounds by duration.
 func (r *checkRunner) run(ctx context.Context, command string, duration time.Duration, stdout, stderr io.Writer) error {
 	if r.runnerIsolated {
-		return runOnHost(ctx, r.worktree, r.home, r.goCache, command, stdout, stderr)
+		return r.runOnHost(ctx, command, stdout, stderr)
 	} else if r.execution.Mode == contract.ExecutionIsolated && r.execution.Backend == contract.BackendNative {
-		return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, stdout, stderr)
+		return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, r.buildCaches, r.warmup, stdout, stderr)
 	} else if r.execution.Mode == contract.ExecutionIsolated {
 		return sandbox.RunWorker(ctx, r.worktree, "/bin/sh", []string{"-c", command}, sandbox.WorkerOptions{
 			Runtime: r.execution.ContainerRuntime, Image: r.execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,
 		}, nil, stdout, stderr)
 	}
-	return runOnHost(ctx, r.worktree, r.home, r.goCache, command, stdout, stderr)
+	return r.runOnHost(ctx, command, stdout, stderr)
 }
 
 // runCheck runs one named command with a fresh timeout derived from ctx and
@@ -429,15 +438,19 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 }
 
 // runOnHost runs a required check directly, with a scrubbed environment.
-func runOnHost(ctx context.Context, dir, home, goCache, command string, stdout, stderr io.Writer) error {
+func (r *checkRunner) runOnHost(ctx context.Context, command string, stdout, stderr io.Writer) error {
+	caches, err := sandbox.ValidatorCacheMounts(r.buildCaches, sandbox.ValidationOnHost, r.warmup, false, r.home)
+	if err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
-	cmd.Dir = dir
-	cmd.Env = cleanCheckEnv(home, goCache)
+	cmd.Dir = r.worktree
+	cmd.Env = cleanCheckEnv(r.home, caches)
 	process.Configure(cmd)
 	cmd.Cancel = func() error { process.Stop(cmd); return nil }
 	cmd.WaitDelay = time.Second
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	process.Stop(cmd)
 	return err
 }
@@ -480,7 +493,7 @@ func safeRepoPath(root, path string) error {
 	return nil
 }
 
-func cleanCheckEnv(home, goCache string) []string {
+func cleanCheckEnv(home string, caches []sandbox.BuildCache) []string {
 	// Do not inherit a user home, credential helper, publishing token, or SSH
 	// agent. Checks get only deterministic process basics.
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "USERPROFILE=" + home,
@@ -491,15 +504,13 @@ func cleanCheckEnv(home, goCache string) []string {
 	// the scratch HOME, without exposing credential files such as ~/.cargo/credentials.toml,
 	// ~/.npmrc, or ~/.pypirc.
 	for _, b := range sandbox.HostToolchains() {
-		if b.EnvKey != "" && b.EnvKey != "GOCACHE" && b.EnvVal != "" {
+		if b.EnvKey != "" && !sandbox.IsBuildCacheKey(b.EnvKey) && b.EnvVal != "" {
 			env = append(env, b.EnvKey+"="+b.EnvVal)
 		}
 	}
-	// A SwarmOS-owned persistent build cache, never the user's GOCACHE or the
-	// scratch HOME, lets repeated validations reuse compiled packages.
-	if goCache != "" {
-		env = append(env, "GOCACHE="+goCache)
-	}
+	// Build caches are SwarmOS-owned validator caches or scratch, never the
+	// user's own GOCACHE or CCACHE_DIR.
+	env = append(env, sandbox.BuildCacheEnv(caches)...)
 	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ"} {
 		if value := os.Getenv(key); value != "" {
 			env = append(env, key+"="+value)

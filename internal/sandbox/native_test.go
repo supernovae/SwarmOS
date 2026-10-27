@@ -217,7 +217,7 @@ func TestNativeCodexBoundary(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "test.txt"), []byte("source"), 0600)
 	var output strings.Builder
-	if err := RunNativeValidation(ctx, dir, binary, "cat test.txt; printf changed > test.txt; go version", &output, &output); err != nil {
+	if err := RunNativeValidation(ctx, dir, binary, "cat test.txt; printf changed > test.txt; go version", nil, false, &output, &output); err != nil {
 		t.Fatal(err, output.String())
 	}
 	if strings.Contains(output.String(), "Refusing to create helper binaries under temporary dir") {
@@ -254,7 +254,7 @@ func TestNativeCodexReadOnlyAndCancellation(t *testing.T) {
 	t.Setenv("GH_TOKEN", "dummy-publishing-token")
 	t.Setenv("GITHUB_TOKEN", "dummy-publishing-token")
 	t.Setenv("OPENAI_API_KEY", "dummy-provider-token")
-	args := codexPolicy(binary, work, scratch, true)
+	args := codexPolicy(binary, work, scratch, true, nil)
 	script := `set -eu
 test -z "${GH_TOKEN+x}"
 test -z "${GITHUB_TOKEN+x}"
@@ -273,7 +273,7 @@ printf 'VERDICT: APPROVED\n' > .swarm/active/REVIEW.md`
 		t.Fatal("reviewer changed source")
 	}
 	// A new session must not let a tool survive the harness cancellation.
-	args = codexPolicy(binary, work, scratch, false)
+	args = codexPolicy(binary, work, scratch, false, nil)
 	args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", `test -x /usr/bin/setsid; printf started > started; setsid /bin/sh -c 'sleep 2; printf escaped > escaped' & wait`)
 	short, stop := context.WithTimeout(context.Background(), time.Second)
 	defer stop()
@@ -327,4 +327,39 @@ func TestNativeCodexAuthenticatedFileTools(t *testing.T) {
 	}
 	// Retain the dummy-only tool transcript in verbose output for qualification.
 	t.Log(output.String())
+}
+
+func TestNativeCodexAgentBuildCacheReuse(t *testing.T) {
+	binary := os.Getenv("SWARM_TEST_CODEX_BINARY")
+	if binary == "" {
+		t.Skip("set SWARM_TEST_CODEX_BINARY to run real Codex sandbox tests")
+	}
+	binary, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := useUserCache(t)
+	repo := cacheTestRepo(t)
+	caches, err := agentBuildCaches(t.Context(), repo, resolvedTempDir(t), WorkerOptions{Role: "developer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := mustPrepare(t, ValidatorBuildCache, repo, root, resolvedTempDir(t))
+	write := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do printf run1 > "$d/m"; done`
+	read := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/m")" = run1; done; test ! -r "$1"; if (printf x > "$1/agent-wrote") 2>/dev/null; then exit 9; fi`
+	for _, script := range []string{write, read} {
+		work, scratch := resolvedTempDir(t), resolvedTempDir(t)
+		args := codexPolicy(binary, work, scratch, false, caches)
+		args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-cache", validator[0].Dir)
+		var output strings.Builder
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		err := runNativeCommand(ctx, binary, scratch, nativeEnv(codexHostHome(scratch), false), args, nil, &output, &output)
+		cancel()
+		if err != nil {
+			t.Fatal(err, output.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(validator[0].Dir, "agent-wrote")); !os.IsNotExist(err) {
+		t.Fatal("agent wrote the validator cache", err)
+	}
 }

@@ -123,8 +123,9 @@ func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCach
 	for _, c := range caches {
 		envPairs = append(envPairs, c.EnvKey+"="+strconv.Quote(c.Dir))
 	}
-	for _, c := range deps.Caches {
-		envPairs = append(envPairs, c.EnvKey+"="+strconv.Quote(c.Dir))
+	for _, entry := range DependencyCacheEnv(deps.Caches) {
+		key, value, _ := strings.Cut(entry, "=")
+		envPairs = append(envPairs, key+"="+strconv.Quote(value))
 	}
 	config := []string{
 		`default_permissions="swarm"`,

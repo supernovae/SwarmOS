@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/process"
@@ -115,7 +116,11 @@ func executorFlags(work string, readOnly bool, caches []BuildCache, deps Depende
 			return nil, fmt.Errorf("dependency cache %s must be an absolute directory outside the workspace", c.Ecosystem)
 		}
 		flags = append(flags, "--ro-bind", dir, dir)
-		cacheEnv = append(cacheEnv, "--setenv", c.EnvKey, dir)
+		c.Dir = dir
+		for _, entry := range c.env() {
+			key, value, _ := strings.Cut(entry, "=")
+			cacheEnv = append(cacheEnv, "--setenv", key, value)
+		}
 	}
 	bind := "--bind"
 	if readOnly {

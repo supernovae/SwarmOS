@@ -587,7 +587,7 @@ func TestEveryMountedEcosystemIsClassified(t *testing.T) {
 
 func TestDependencyTableSafety(t *testing.T) {
 	denied := []string{"HOME", "CARGO_HOME", "GRADLE_USER_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "GOPATH", "PATH"}
-	seen := map[string]bool{}
+	seen, keys := map[string]bool{}, map[string]bool{}
 	for _, eco := range dependencyEcosystems {
 		if seen[eco.Name] || eco.Name == "" || strings.ContainsAny(eco.Name, "/= ") {
 			t.Errorf("ecosystem name %q is empty, duplicated or not plain", eco.Name)
@@ -596,11 +596,17 @@ func TestDependencyTableSafety(t *testing.T) {
 		if (eco.Prefetch == nil) == (eco.NoPrefetch == "") {
 			t.Errorf("%s must have exactly one of Prefetch and NoPrefetch", eco.Name)
 		}
-		if (eco.Prefetch != nil) != (eco.EnvKey != "") || (eco.Prefetch != nil) != (len(eco.Detect) > 0 && len(eco.Lockfiles) > 0) {
+		if (eco.Prefetch != nil) != (eco.envKey() != "") || (eco.Prefetch != nil) != (len(eco.Detect) > 0 && len(eco.Lockfiles) > 0) {
 			t.Errorf("%s: adapters need an env key, detection files and lockfiles", eco.Name)
 		}
-		if IsBuildCacheKey(eco.EnvKey) || slices.Contains(denied, eco.EnvKey) {
-			t.Errorf("%s env key %q is a build cache or credential home key", eco.Name, eco.EnvKey)
+		for _, k := range eco.Env {
+			if IsBuildCacheKey(k.Key) || slices.Contains(denied, k.Key) || keys[k.Key] {
+				t.Errorf("%s env key %q is a build cache or credential home key, or duplicated", eco.Name, k.Key)
+			}
+			keys[k.Key] = true
+			if !filepath.IsLocal(filepath.Join(".", k.Subdir)) {
+				t.Errorf("%s env key %s subdirectory %q leaves the cache", eco.Name, k.Key, k.Subdir)
+			}
 		}
 	}
 	for _, name := range []string{"dotnet", "maven", "gradle", "c-cpp"} {
@@ -608,15 +614,17 @@ func TestDependencyTableSafety(t *testing.T) {
 			t.Errorf("%s must be classified no-prefetch", name)
 		}
 	}
-	if eco, ok := dependencyEcosystemNamed("go"); !ok || eco.Prefetch == nil {
-		t.Error("go must be adapter-backed")
+	for _, name := range []string{"go", "node"} {
+		if eco, ok := dependencyEcosystemNamed(name); !ok || eco.Prefetch == nil {
+			t.Errorf("%s must be adapter-backed", name)
+		}
 	}
 }
 
 func TestNoPrefetchEcosystemsKeepHostMounts(t *testing.T) {
 	home := resolvedTempDir(t)
 	paths := map[string]string{}
-	for _, rel := range []string{"go/pkg/mod", ".m2/repository", ".gradle/caches", ".nuget/packages", ".cache/vcpkg", ".npm"} {
+	for _, rel := range []string{"go/pkg/mod", ".m2/repository", ".gradle/caches", ".nuget/packages", ".cache/vcpkg", ".npm", ".cache/ms-playwright"} {
 		paths[rel] = filepath.Join(home, rel)
 		if err := os.MkdirAll(paths[rel], 0o755); err != nil {
 			t.Fatal(err)
@@ -625,12 +633,12 @@ func TestNoPrefetchEcosystemsKeepHostMounts(t *testing.T) {
 	binds := resolveHostToolchains(home, func(string) string { return "" })
 	for _, tc := range []struct {
 		mode   DependencyCacheMode
-		goMod  bool
+		goMod  bool // also the host npm cache
 		reason string
 	}{{PerRepository, false, "per-repository"}, {"", false, "zero value"}, {SharedHostCaches, true, "opt-in"}} {
 		mounts := ToolchainMounts(filterDependencyBinds(binds, tc.mode), true)
 		for rel, path := range paths {
-			want := rel != "go/pkg/mod" || tc.goMod
+			want := (rel != "go/pkg/mod" && rel != ".npm") || tc.goMod
 			if got := slices.Contains(mounts, path); got != want {
 				t.Errorf("%s: mount %s = %t, want %t", tc.reason, rel, got, want)
 			}
@@ -663,6 +671,7 @@ func TestDependencyCacheFlagsRoundTrip(t *testing.T) {
 	dir := resolvedTempDir(t)
 	for _, deps := range []Dependencies{
 		{Mode: PerRepository, Caches: []DependencyCache{{Ecosystem: "go", EnvKey: "GOMODCACHE", Dir: dir}}},
+		{Mode: PerRepository, Caches: []DependencyCache{{Ecosystem: "node", EnvKey: "npm_config_cache", Dir: dir}}},
 		{Mode: SharedHostCaches},
 	} {
 		args := internalToolArgs(ToolExecutor{Work: work, Dependencies: deps})
@@ -671,7 +680,7 @@ func TestDependencyCacheFlagsRoundTrip(t *testing.T) {
 		}
 		for _, c := range deps.Caches {
 			i := slices.Index(args, "--dependency-cache")
-			if i < 0 || args[i+1] != "go="+dir {
+			if i < 0 || args[i+1] != c.Ecosystem+"="+dir {
 				t.Fatalf("args = %v", args)
 			}
 			parsed, err := ParseDependencyCache(args[i+1], work)
@@ -680,14 +689,15 @@ func TestDependencyCacheFlagsRoundTrip(t *testing.T) {
 			}
 		}
 	}
-	for _, value := range []string{"go", "go=relative", "go=/", "rust=" + dir, "maven=" + dir, "unknown=" + dir, "go=" + work, "go=" + filepath.Join(work, "sub")} {
+	for _, value := range []string{"go", "go=relative", "go=/", "rust=" + dir, "maven=" + dir, "node-browsers=" + dir, "unknown=" + dir, "go=" + work, "go=" + filepath.Join(work, "sub")} {
 		if c, err := ParseDependencyCache(value, work); err == nil {
 			t.Errorf("ParseDependencyCache(%q) = %+v", value, c)
 		}
 	}
-	bad := Dependencies{Caches: []DependencyCache{{Ecosystem: "go", EnvKey: "GOCACHE", Dir: dir}}}
-	if _, err := executorFlags(work, false, nil, bad, "true", nil); err == nil {
-		t.Fatal("executor accepted a dependency cache key outside the table")
+	for _, bad := range []DependencyCache{{Ecosystem: "go", EnvKey: "GOCACHE", Dir: dir}, {Ecosystem: "node", EnvKey: "YARN_CACHE_FOLDER", Dir: dir}} {
+		if _, err := executorFlags(work, false, nil, Dependencies{Caches: []DependencyCache{bad}}, "true", nil); err == nil {
+			t.Fatalf("executor accepted dependency cache %+v outside the table", bad)
+		}
 	}
 }
 
@@ -701,11 +711,11 @@ func TestDependencyCacheModes(t *testing.T) {
 			t.Fatalf("modes = %+v", modes)
 		}
 		for _, m := range modes {
-			if m.Name == "go" && m.Mode != tc.want {
-				t.Errorf("go mode = %q, want %q", m.Mode, tc.want)
+			if (m.Name == "go" || m.Name == "node") && m.Mode != tc.want {
+				t.Errorf("%s mode = %q, want %q", m.Name, m.Mode, tc.want)
 			}
-			if m.Name == "maven" && !strings.HasPrefix(m.Mode, "host-shared (no fetch-only prefetch") {
-				t.Errorf("maven mode = %q", m.Mode)
+			if (m.Name == "maven" || m.Name == "node-browsers") && !strings.HasPrefix(m.Mode, "host-shared (no fetch-only prefetch") {
+				t.Errorf("%s mode = %q", m.Name, m.Mode)
 			}
 		}
 	}

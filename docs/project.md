@@ -244,22 +244,41 @@ Because Rust's `CARGO_TARGET_DIR` points at the agent cache, agent runs do not l
 
 ### Dependency caches
 
-Sandboxes have no network, so downloaded dependencies must already be on disk. For Go, SwarmOS does not mount your own `GOMODCACHE`, which holds every module you have ever fetched, including private ones. Each repository gets its own module cache instead, filled on the host before any agent or validation run starts, and mounted read-only in every sandbox.
+Sandboxes have no network, so downloaded dependencies must already be on disk. For Go and Node, SwarmOS does not mount your own host-wide caches (`GOMODCACHE`, or the npm, pnpm, Yarn and Bun caches), which hold every package you have ever fetched, including private ones. Each repository gets its own cache instead, filled on the host before any agent or validation run starts, and mounted read-only in every sandbox.
 
 | Cache | Path under the user cache directory | Filled for | Read by |
 | --- | --- | --- | --- |
-| Agent | `swarm/agent-deps/<repository key>/go` | Planner, reviewer, developer, tester and resolver runs | Those runs, read-only |
-| Validator | `swarm/validate-deps/<repository key>/go` | Validation, including warm-up | Validation checks, read-only |
+| Agent | `swarm/agent-deps/<repository key>/<go or node>` | Planner, reviewer, developer, tester and resolver runs | Those runs, read-only |
+| Validator | `swarm/validate-deps/<repository key>/<go or node>` | Validation, including warm-up | Validation checks, read-only |
 
 The prefetch runs `go mod download -json` on a temporary copy of the approved base's `go.mod` and `go.sum`, never the candidate worktree. It reads modules from your own module cache first and then from your `GOPROXY`. It runs with a fresh environment: no GitHub token, `SWARM_GITHUB_TOKEN_COMMAND`, SSH agent, Git credential helper or `GOFLAGS`, and with `GOTOOLCHAIN=local`, so it only downloads, verifies and extracts. When `go.mod` asks for a newer Go than the one installed, the prefetch also downloads that Go release so sandboxed `go` commands can switch to it offline. A `.prefetched-go-<digest>` file records each completed prefetch, so it runs again only when `go.mod` or `go.sum` changes.
 
-Unlike build caches, dependency caches never fall back. If the cache directory cannot be prepared safely, or a module cannot be downloaded, `swarm issue work` and `swarm pr work` stop before claiming the task, and validation stops before any check runs. The error names the module, for example `prefetch go modules for base 1a2b3c4d5e6f: example.com/missing@v1.0.0: ...`. Only the root `go.mod` is detected; nested modules and `go.work` get no prefetch.
+For Node, a `package-lock.json`, `pnpm-lock.yaml` or `yarn.lock` at the root of the approved base turns the cache on. Each lockfile present gets its own fetch-only command, run in a temporary copy that holds only that lockfile, `pnpm-workspace.yaml` and the base's `package.json` files:
+
+| Lockfile | Command | Sandbox variable |
+| --- | --- | --- |
+| `package-lock.json` | `npm ci --ignore-scripts --no-audit --no-fund` | `npm_config_cache` = `<cache>/npm` |
+| `pnpm-lock.yaml` | `pnpm fetch --frozen-lockfile` | `npm_config_store_dir` = `<cache>/pnpm-store` |
+| `yarn.lock` (Yarn 1) | `yarn install --frozen-lockfile --ignore-scripts --non-interactive` | `YARN_CACHE_FOLDER` = `<cache>/yarn` |
+| `yarn.lock` (Yarn 2 and later) | `yarn install --immutable --mode=skip-build` | `YARN_CACHE_FOLDER` = `<cache>/yarn` |
+
+No package lifecycle script, `binding.gyp` build or `.pnpmfile.cjs` hook runs. The environment is fresh, as for Go: it carries `PATH`, your `npm_config_registry` or `YARN_NPM_REGISTRY_SERVER` if set, empty user and global npmrc files, and switches that turn scripts and corepack downloads off. No GitHub token, npm token, SSH agent or `NODE_OPTIONS` reaches it. The repository's `.npmrc`, `.yarnrc*`, `.yarn/` and `.pnpmfile.cjs` are never copied, and the `packageManager` field is dropped, so a repository cannot change the registry or run its own package manager build. A `.prefetched-node-<digest>` file records each completed prefetch, so it runs again only when a lockfile or `package.json` changes.
+
+Node has these limits:
+
+- Git-hosted dependencies (`git+`, `github:`, codeload tarballs and Yarn `#commit=`) are refused before anything runs, because fetching them runs their `prepare` script. The error names each one.
+- Private registries that need credentials are not supported, because no npmrc or token reaches the prefetch.
+- pnpm and Yarn must already be installed on the host; the prefetch never downloads them. Only npm installs from the read-only cache are covered by tests so far, so pnpm and Yarn installs from a read-only store or cache are not yet verified.
+- Playwright and Cypress browser downloads are not lockfile packages, so their host caches stay mounted read-only (`node-browsers` below).
+
+Unlike build caches, dependency caches never fall back. If the cache directory cannot be prepared safely, or a module cannot be downloaded, `swarm issue work` and `swarm pr work` stop before claiming the task, and validation stops before any check runs. The error names the module or package, for example `prefetch go modules for base 1a2b3c4d5e6f: example.com/missing@v1.0.0: ...` or `prefetch node modules for base 1a2b3c4d5e6f: package-lock.json: absent@1.0.0`. Only the root `go.mod` is detected; nested modules and `go.work` get no prefetch.
 
 Other ecosystems have no fetch-only download command yet, so they keep read-only access to your host caches, as before:
 
 | Ecosystem | Host caches still mounted read-only | Why |
 | --- | --- | --- |
-| Rust, Python, Node | Cargo registry and git, pip, uv, Poetry, npm, pnpm, Yarn, Bun, Playwright, Cypress | Adapters are planned |
+| Rust, Python | Cargo registry and git, pip, uv, Poetry | Adapters are planned |
+| Node browsers (`node-browsers`) | Playwright, Cypress | Browser binaries, not lockfile packages |
 | .NET | NuGet packages | Restore runs MSBuild |
 | Maven | `~/.m2/repository` | Plugins run during resolve |
 | Gradle | `~/.gradle/caches`, `~/.gradle/wrapper` | Build scripts run during resolve |
@@ -267,7 +286,7 @@ Other ecosystems have no fetch-only download command yet, so they keep read-only
 
 `swarm repo doctor` shows a `dependency-caches` check that lists each ecosystem's mode and names those sharing host caches. `swarm node status` shows the same, and `swarm node status --json` reports it as `dependency_caches`.
 
-To mount your host-wide Go module cache read-only again on one machine, set `share_host_dependency_caches: true` in the node profile (`~/.config/swarm/node.yaml`, or the file named by `SWARM_NODE_CONFIG`). This is off by default, it is a node setting only, and `.swarm/config.yaml` rejects it. Doctor reports the opt-in as a `WARN`. Validation in CI always uses per-repository caches.
+To mount your host-wide Go module cache and Node package caches read-only again on one machine, set `share_host_dependency_caches: true` in the node profile (`~/.config/swarm/node.yaml`, or the file named by `SWARM_NODE_CONFIG`). This is off by default, it is a node setting only, and `.swarm/config.yaml` rejects it. Doctor reports the opt-in as a `WARN`. Validation in CI always uses per-repository caches.
 
 **Adding an ecosystem:** add an entry to `dependencyEcosystems` in `internal/sandbox/dependency_cache.go`. An adapter needs a `Prefetch` that runs only a fetch-only command; anything that can run package code stays `NoPrefetch`. Every `addCache` call in `internal/sandbox/toolchain.go` names its ecosystem, and `TestEveryMountedEcosystemIsClassified` fails until the ecosystem is in the table.
 

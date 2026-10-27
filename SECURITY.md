@@ -88,7 +88,7 @@ Agents and validation use separate SwarmOS-owned build caches for each repositor
 
 ### Dependency caches
 
-Sandboxes do not see your host-wide Go module cache. Each repository gets its own read-only module cache, which the coordinator fills on the host from the approved base's `go.mod` and `go.sum` with a fetch-only `go mod download`. That command never receives GitHub tokens, Git credential helpers or SSH agents. Ecosystems without a fetch-only download command (.NET, Maven, Gradle, C/C++, and for now Rust, Python and Node) still mount their host caches read-only, and `swarm repo doctor` names them. Only the node profile can opt back into sharing the host Go module cache. See [Dependency caches](docs/project.md#dependency-caches).
+Sandboxes do not see your host-wide Go module cache or Node package caches. Each repository gets its own read-only cache, which the coordinator fills on the host from the approved base's `go.mod` and `go.sum` with a fetch-only `go mod download`, or from its Node lockfiles with `npm ci --ignore-scripts`, `pnpm fetch` or a script-free Yarn install. These commands never receive GitHub tokens, npm tokens, Git credential helpers or SSH agents, and run no package lifecycle scripts; Node git-hosted dependencies are refused because fetching them runs package code. Ecosystems without a fetch-only download command (.NET, Maven, Gradle, C/C++, Playwright and Cypress browsers, and for now Rust and Python) still mount their host caches read-only, and `swarm repo doctor` names them. Only the node profile can opt back into sharing the host caches. See [Dependency caches](docs/project.md#dependency-caches).
 
 ### Optional OCI backend
 

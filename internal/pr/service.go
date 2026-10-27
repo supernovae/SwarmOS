@@ -83,6 +83,8 @@ type Result struct {
 	Validation    *validation.ValidationReport  `json:"validation,omitempty"`
 	Preflight     *workflow.PreflightResult     `json:"preflight,omitempty"`
 	Work          *workflow.WorkResult          `json:"work,omitempty"`
+	// RoleRuns is the issue's validated per-run telemetry, set by Status.
+	RoleRuns []contract.RoleRunTelemetry `json:"role_runs,omitempty"`
 	// LocalDroppedPaths is the fork contributor coordinator's own comparison,
 	// never upstream evidence; upstream records it when the head is published.
 	LocalDroppedPaths *LocalDroppedPaths `json:"local_dropped_paths,omitempty"`
@@ -323,6 +325,7 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.RoleRuns = lease.RoleRuns(r.State)
 	if r.Status == "merged" || r.Status == "closed-unmerged" {
 		r.Worktree = ""
 		return r, nil

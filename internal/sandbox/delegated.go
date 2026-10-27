@@ -92,6 +92,7 @@ func writeHarnessJSON(path string, value any) error {
 // The host-side harness starts in a coordinator-owned control directory, never
 // in candidate code. Its only execution surface is the selected tool transport.
 func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt string, opts WorkerOptions, interactive bool, input io.Reader, stdout, stderr io.Writer) ([]string, string, error) {
+	preflight := time.Now()
 	version, err := InspectDelegatedHarness(ctx, driver, binary)
 	if err != nil {
 		return nil, "", err
@@ -104,6 +105,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 			return nil, "", err
 		}
 	}
+	opts.Lifecycle.addPreflight(preflight)
 	var command []string
 	err = withNativeWorkspace(ctx, dir, opts, func(ctx context.Context, work, scratch string) error {
 		control := filepath.Join(filepath.Dir(scratch), "control")

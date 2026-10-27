@@ -15,7 +15,7 @@ import (
 	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
-func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResult, error) {
+func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle *sandbox.Lifecycle) (*RunResult, error) {
 	if a.sandboxRuntime != "codex-native" && a.sandboxRuntime != "harness-tools-bwrap" && (a.authentication != "none" || len(a.envAllow) != 0 || a.reviewNetwork) {
 		return nil, fmt.Errorf("isolated agent requires a verified authentication adapter and restricted networking")
 	}
@@ -46,6 +46,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest) (*RunResul
 	}
 	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
 		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckImport: req.CheckImport}
+	options.Lifecycle = lifecycle
 	collector := &GuidanceCollector{}
 	options.GuidanceDelivered = collector.Delivered
 	options.ProjectPlan = req.ProjectPlan

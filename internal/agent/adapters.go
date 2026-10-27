@@ -159,9 +159,16 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 		}
 	}()
 	defer func() { runErr = safeRunFailure(ctx, req.Role, req.WorktreePath, result, runErr) }()
+	observation := newRunObservation(a.driver)
+	defer func() {
+		if result != nil {
+			result.Telemetry = observation.telemetry(req.Role, result.Attestation.Harness)
+		}
+	}()
 	if a.executionMode == contract.ExecutionIsolated {
-		return a.runIsolated(ctx, req)
+		return a.runIsolated(ctx, req, &observation.lifecycle)
 	}
+	preflight := time.Now()
 	if a.driver == "opencode" && a.sandboxRuntime != "container" {
 		if _, err := sandbox.InspectDelegatedHarness(ctx, a.driver, a.binary); err != nil {
 			return nil, err
@@ -176,6 +183,8 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 		bin = resolvedBin
 	}
 	fullCmd := append([]string{bin}, args...)
+	observation.lifecycle.Preflight = durationSince(preflight)
+	setup := time.Now()
 	agentHome, err := os.MkdirTemp("", "swarm-agent-home-*")
 	if err != nil {
 		return nil, fmt.Errorf("create isolated agent home: %w", err)
@@ -227,6 +236,7 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 		capture := io.MultiWriter(&outBuf, transcript)
 		cmd.Stdout, cmd.Stderr = capture, capture
 	}
+	observation.lifecycle.Setup = durationSince(setup)
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start agent %q: %w", a.agentName, err)
 	}
@@ -242,6 +252,8 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 		}
 	}
 	process.Stop(cmd)
+	// The harness has exited; its session log, if any, is in the run's own HOME.
+	observation.lifecycle.ObserveScratch(agentHome)
 	if err != nil && containerIDFile != "" {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err = errors.Join(err, sandbox.RemoveContainer(cleanupCtx, cmd.Path, cmd.Env, containerIDFile))
@@ -296,6 +308,7 @@ func (m *MockRunner) Provenance(role string, readOnly bool) contract.RoleAttesta
 }
 
 func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
+	started := time.Now()
 	safe, err := safefs.Open(req.WorktreePath)
 	if err != nil {
 		return nil, err
@@ -481,5 +494,24 @@ func newVersionCmd() *cobra.Command {
 		ExitCode:    0,
 		Output:      output,
 		Attestation: att,
+		Telemetry:   mockTelemetry(req.Role, started),
 	}, nil
+}
+
+// mockTelemetry gives deterministic usage so workflows exercise both reported
+// and unavailable values. It has no preflight or setup stage to measure.
+func mockTelemetry(role string, started time.Time) *contract.RoleRunTelemetry {
+	t := contract.NewRoleRunTelemetry(role, "mock", started)
+	t.ElapsedMS = contract.Millis(time.Since(started))
+	t.PreflightMS, t.SetupMS = contract.Count(0), contract.Count(0)
+	t.InputTokens, t.OutputTokens, t.CachedInputTokens = contract.Count(1200), contract.Count(300), contract.Count(0)
+	t.ToolCalls, t.RepeatedCommands = contract.Count(0), contract.Count(0)
+	t.ActualModel = contract.Label("mock")
+	t.UsageSource = contract.UsageSourceMock
+	return t
+}
+
+func durationSince(start time.Time) *time.Duration {
+	d := time.Since(start)
+	return &d
 }

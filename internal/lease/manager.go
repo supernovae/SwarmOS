@@ -96,6 +96,7 @@ type IssueState struct {
 	Lease                  contract.Lease                  `json:"lease"`
 	Artifacts              []contract.Artifact             `json:"artifacts,omitempty"`
 	Attestations           []contract.RoleAttestation      `json:"attestations,omitempty"`
+	RoleRuns               []contract.RoleRunTelemetry     `json:"role_runs,omitempty"` // bounded history of artifact-producing runs
 	ProjectionCommentID    int64                           `json:"projection_comment_id,omitempty"`
 	TaskDigest             string                          `json:"task_digest"`
 	PolicyDigest           string                          `json:"policy_digest"`
@@ -1646,6 +1647,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		if art.Metadata == nil {
 			art.Metadata = make(map[string]string)
 		}
+		recordRoleRun(st, &art)
 		digest := hash(art.Body)
 		art.Metadata["content_sha256"] = digest
 		if err := contract.ValidateArtifact(&art); err != nil {

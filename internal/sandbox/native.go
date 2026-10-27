@@ -273,6 +273,7 @@ func CodexAuthentication(ctx context.Context, binary string) (string, error) {
 // RunNativeCodex leaves provider authentication in the trusted Codex process.
 // Model-controlled commands use Codex's native profile, with no host credentials.
 func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts WorkerOptions, interactive bool, stdin io.Reader, stdout, stderr io.Writer) ([]string, string, error) {
+	preflight := time.Now()
 	version, err := InspectNativeCodex(ctx, binary)
 	if err != nil {
 		return nil, "", err
@@ -280,6 +281,7 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 	if _, err := CodexAuthentication(ctx, binary); err != nil {
 		return nil, version, err
 	}
+	opts.Lifecycle.addPreflight(preflight)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, version, err
@@ -337,6 +339,7 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 			}
 		}
 	}()
+	setup := time.Now()
 	root, err := os.MkdirTemp("", "swarm-native-*")
 	if err != nil {
 		return err
@@ -359,6 +362,8 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 	defer original.Close()
 	outputs := workerOutputs(opts)
 	input := filepath.Join(root, "input.tar")
+	opts.Lifecycle.addSetup(setup)
+	snapshot := time.Now()
 	initial, err := packWorker(ctx, dir, input, outputs, opts.ReadOnly, ".codex", ".agents")
 	if err != nil {
 		return err
@@ -366,10 +371,13 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 	if _, err := unpackWorker(ctx, input, work); err != nil {
 		return err
 	}
+	opts.Lifecycle.addSnapshot(snapshot)
 	if err := os.MkdirAll(filepath.Join(work, ".swarm", "active"), 0700); err != nil {
 		return err
 	}
 	runErr := run(ctx, work, scratch)
+	// Observe the harness's own scratch-HOME session log before cleanup.
+	opts.Lifecycle.observe(scratch)
 	budget.finish()
 	if budget.timedOut() {
 		destination := opts.RecoveryRoot

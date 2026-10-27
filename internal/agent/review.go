@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
 )
 
@@ -35,6 +36,7 @@ func RunReview(ctx context.Context, runner Runner, req RunRequest) (result *RunR
 	if req.WorktreePath == "" {
 		return nil, fmt.Errorf("review worktree path is required")
 	}
+	started := time.Now()
 	originalWorktree := req.WorktreePath
 	req.RecoveryRoot = originalWorktree
 	destination, err := safefs.Open(originalWorktree)
@@ -56,6 +58,7 @@ func RunReview(ctx context.Context, runner Runner, req RunRequest) (result *RunR
 		return nil, fmt.Errorf("resolve review snapshot: %w", err)
 	}
 	snapshot := filepath.Join(temp, "source")
+	snapshotStart := time.Now()
 	if err := copySnapshotContext(ctx, originalWorktree, snapshot, defaultSnapshotLimits); err != nil {
 		return nil, err
 	}
@@ -89,7 +92,19 @@ func RunReview(ctx context.Context, runner Runner, req RunRequest) (result *RunR
 		req.DenyPaths = append(req.DenyPaths, originalWorktree)
 	}
 	req.WorktreePath, req.ReadOnly = snapshot, true
+	snapshotTime := time.Since(snapshotStart)
 	result, err = runner.Run(ctx, req)
+	if result != nil && result.Telemetry != nil {
+		// The outer snapshot is a separate copy from any inner workspace copy;
+		// the outer elapsed time replaces, never adds to, the inner one.
+		t := result.Telemetry
+		outer := snapshotTime.Milliseconds()
+		if t.SnapshotMS != nil {
+			outer += *t.SnapshotMS
+		}
+		t.SnapshotMS, t.ElapsedMS = contract.Count(outer), contract.Millis(time.Since(started))
+		t.StartedAt = started.UTC().Truncate(time.Millisecond)
+	}
 	if err != nil {
 		return result, err
 	}

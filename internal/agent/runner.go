@@ -32,6 +32,9 @@ type RunResult struct {
 	ExitCode    int                      `json:"exit_code"`
 	Output      string                   `json:"output"`
 	Attestation contract.RoleAttestation `json:"attestation"`
+	// Telemetry is the coordinator's observation of this run, shared by every
+	// artifact the run produces. It is descriptive and never feeds a gate.
+	Telemetry *contract.RoleRunTelemetry `json:"-"`
 	// transcript holds a failed run's output tail until the coordinator saves it
 	// to private diagnostics; it is never serialized or returned to callers.
 	transcript *process.Tail

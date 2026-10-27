@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,13 +17,24 @@ import (
 type issueStatus struct {
 	ClaimBudget *lease.ClaimBudget `json:"claim_budget,omitempty"`
 	// Set for a fork-mode claim whose upstream coordinator predates budgets.
-	ClaimBudgetUnavailable bool                       `json:"claim_budget_unavailable,omitempty"`
-	PlanReplanLimit        int                        `json:"plan_replan_limit"`
-	Checkpoint             *workspace.CheckpointState `json:"checkpoint,omitempty"`
-	Repository             string                     `json:"repository"`
-	Issue                  *tracker.Issue             `json:"issue"`
-	State                  *lease.IssueState          `json:"state"`
-	Provenance             []contract.RoleAttestation `json:"provenance"`
+	ClaimBudgetUnavailable bool                        `json:"claim_budget_unavailable,omitempty"`
+	PlanReplanLimit        int                         `json:"plan_replan_limit"`
+	Checkpoint             *workspace.CheckpointState  `json:"checkpoint,omitempty"`
+	Repository             string                      `json:"repository"`
+	Issue                  *tracker.Issue              `json:"issue"`
+	State                  *lease.IssueState           `json:"state"`
+	Provenance             []contract.RoleAttestation  `json:"provenance"`
+	RoleRuns               []contract.RoleRunTelemetry `json:"role_runs"`
+}
+
+// writeRoleRuns prints the compact per-run telemetry table shared with pr status.
+func writeRoleRuns(w io.Writer, runs []contract.RoleRunTelemetry) {
+	if len(runs) == 0 {
+		fmt.Fprintln(w, "Role runs: none recorded")
+		return
+	}
+	fmt.Fprintln(w, "Role runs:")
+	fmt.Fprint(w, lease.RoleRunTable(runs))
 }
 
 func newStatusCmd(options *RootOptions) *cobra.Command {
@@ -72,7 +84,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				if state != nil {
 					provenance = append(provenance, state.Attestations...)
 				}
-				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance}
+				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance, RoleRuns: lease.RoleRuns(state)}
 				if state != nil {
 					entry.ClaimBudget, err = manager.Budget(state)
 					if err != nil {
@@ -158,6 +170,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 							record.Role, value(record.Agent), value(record.Harness), value(record.HarnessVersion), value(record.Model), value(record.Sandbox), value(record.ArtifactType), value(record.ArtifactDigest))
 					}
 				}
+				writeRoleRuns(cmd.OutOrStdout(), entry.RoleRuns)
 				if state.PRNumber != 0 {
 					fmt.Fprintf(cmd.OutOrStdout(), "PR #%d: %s\n", state.PRNumber, state.PRURL)
 				}

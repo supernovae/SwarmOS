@@ -31,6 +31,7 @@ import (
 type WorkerOptions struct {
 	CheckImport                     func(context.Context, []string) error
 	GuidanceDelivered               func(string) // coordinator callback for forwarded interactive guidance
+	Lifecycle                       *Lifecycle   // optional coordinator timing and scratch-log observer
 	Limits                          contract.AgentLimits
 	Warning                         io.Writer
 	RecoveryRoot                    string

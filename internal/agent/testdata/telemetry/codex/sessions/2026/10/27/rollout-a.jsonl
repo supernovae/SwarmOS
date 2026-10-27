@@ -1,0 +1,7 @@
+{"type":"session_meta","payload":{"id":"synthetic-a","cwd":"/workspace"}}
+{"type":"turn_context","payload":{"cwd":"/workspace","model":"gpt-5-codex","effort":"high"}}
+{"type":"event_msg","payload":{"type":"token_count","info":null}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"go\",\"test\",\"./...\"]}","call_id":"call_1"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"ok"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":1600,"output_tokens":100}}}}

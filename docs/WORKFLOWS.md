@@ -107,7 +107,7 @@ Sometimes a recorded checkpoint should not be continued. For example, an attempt
 swarm issue discard-checkpoint 29 --expected-head FULL_RECORDED_CHECKPOINT_SHA
 ```
 
-This command needs the same authority as `swarm issue approve`. It is refused while the issue is claimed, after a PR is opened, or for a fork contributor's checkpoint. The command keeps the commit under its `refs/heads/swarm-checkpoints/...` retention ref and leaves the old task branch where it is. `swarm issue status` lists every discarded checkpoint with its retention ref. The next claim starts on a new `swarm/issue-29-restart-<sha>` branch at the approved base and plans again from scratch. If your clone still has the old worktree at `.swarm/worktrees/issue-29`, it is moved, unchanged, to `.swarm/worktrees/issue-29-discarded-<sha>`.
+This command needs the same authority as `swarm issue approve`. It is refused while the issue is claimed, after a PR is opened, or for a fork contributor's checkpoint. The command keeps the commit permanently under its retention ref in the repository's ledger namespace (`refs/heads/swarm-checkpoints/issue-29/<sha>` in branch mode, `refs/swarm/checkpoints/issue-29/<sha>` in hidden mode; see [Checkpoint retention](#checkpoint-retention)) and leaves the old task branch where it is. `swarm issue status` lists every discarded checkpoint with its retention ref. The next claim starts on a new `swarm/issue-29-restart-<sha>` branch at the approved base and plans again from scratch. If your clone still has the old worktree at `.swarm/worktrees/issue-29`, it is moved, unchanged, to `.swarm/worktrees/issue-29-discarded-<sha>`.
 
 ### Checkpoint retention
 

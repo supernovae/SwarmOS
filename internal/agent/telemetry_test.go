@@ -14,12 +14,21 @@ import (
 )
 
 // The fixtures under testdata/telemetry are synthetic format samples, not
-// captured CLI output; see testdata/telemetry/README.md.
+// captured CLI output; see testdata/telemetry/README.md. They are stored
+// without the harness's dot-directory, which exports and snapshots may drop,
+// and are copied under sessionLogDir in an absolute scratch HOME.
 
 func copyTelemetryFixture(t *testing.T, name string) string {
 	t.Helper()
+	src, err := filepath.Abs(filepath.Join("testdata", "telemetry", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(src); err != nil || !info.IsDir() {
+		t.Fatalf("missing telemetry fixture %s: %v", src, err)
+	}
 	home := t.TempDir()
-	if err := os.CopyFS(home, os.DirFS(filepath.Join("testdata", "telemetry", name))); err != nil {
+	if err := os.CopyFS(filepath.Join(home, sessionLogDir(name)), os.DirFS(src)); err != nil {
 		t.Fatal(err)
 	}
 	return home

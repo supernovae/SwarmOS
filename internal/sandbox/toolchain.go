@@ -263,8 +263,8 @@ func resolveHostToolchains(home string, getenv func(string) string) []ToolchainB
 	addToolchainRoot("VOLTA_HOME", firstCandidate("VOLTA_HOME", voltaFallbacks...), "bin")
 
 	if xdgCache != "" {
-		addCache("node", "PLAYWRIGHT_BROWSERS_PATH", firstCandidate("PLAYWRIGHT_BROWSERS_PATH", filepath.Join(xdgCache, "ms-playwright")))
-		addCache("node", "CYPRESS_CACHE_FOLDER", firstCandidate("CYPRESS_CACHE_FOLDER", filepath.Join(xdgCache, "Cypress")))
+		addCache("node-browsers", "PLAYWRIGHT_BROWSERS_PATH", firstCandidate("PLAYWRIGHT_BROWSERS_PATH", filepath.Join(xdgCache, "ms-playwright")))
+		addCache("node-browsers", "CYPRESS_CACHE_FOLDER", firstCandidate("CYPRESS_CACHE_FOLDER", filepath.Join(xdgCache, "Cypress")))
 	}
 
 	// 5. C / C++ / C# / .NET / Java / JVM / Polyglot managers.

@@ -190,8 +190,10 @@ func (e *Engine) getenv(name string) string {
 	return value
 }
 
-func (e *Engine) runnerOptions() agent.RunnerOptions {
-	return agent.RunnerOptions{LookupEnv: e.LookupEnv}
+// runnerOptions reuses inspection only within the command session carried by
+// ctx, so a reused Engine never shares results across commands.
+func (e *Engine) runnerOptions(ctx context.Context) agent.RunnerOptions {
+	return agent.RunnerOptions{LookupEnv: e.LookupEnv, Inspections: sandbox.InspectionSessionFrom(ctx)}
 }
 
 // upstreamRemote names the project remote configured on the lease manager.
@@ -412,7 +414,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 				}
 				blockers = append(blockers, err.Error())
 			}
-			resolved, err := agent.PreflightWithOptions(name, cfg, e.Tracker.BackendName() == "local", role, e.runnerOptions())
+			resolved, err := agent.PreflightWithOptions(name, cfg, e.Tracker.BackendName() == "local", role, e.runnerOptions(ctx))
 			if err != nil {
 				if !opts.InspectOnly {
 					return nil, fmt.Errorf("%s agent preflight: %w", role, err)
@@ -824,7 +826,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 		planner := pre.Agents["planner"]
 		res.RoleAgentsUsed["planner"] = planner
-		runner, err := e.configuredRunner(planner, cfg, e.Tracker.BackendName() == "local")
+		runner, err := e.configuredRunner(ctx, planner, cfg, e.Tracker.BackendName() == "local")
 		if err != nil {
 			return res, err
 		}
@@ -1019,7 +1021,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 		developer := pre.Agents["developer"]
 		res.RoleAgentsUsed["developer"] = developer
-		devRunner, err := e.configuredRunner(developer, cfg, e.Tracker.BackendName() == "local")
+		devRunner, err := e.configuredRunner(ctx, developer, cfg, e.Tracker.BackendName() == "local")
 		if err != nil {
 			return false, err
 		}
@@ -1181,7 +1183,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		progress.next("test")
 		tester := pre.Agents["tester"]
 		res.RoleAgentsUsed["tester"] = tester
-		testerRunner, err := e.configuredRunner(tester, cfg, e.Tracker.BackendName() == "local")
+		testerRunner, err := e.configuredRunner(ctx, tester, cfg, e.Tracker.BackendName() == "local")
 		if err != nil {
 			return false, err
 		}
@@ -1476,7 +1478,7 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	if err := compileSetupBundle(ctx, reporter, wtPath, wu, wf, st, "reviewer", prNumber); err != nil {
 		return "", st, err
 	}
-	runner, err := e.configuredRunner(reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
+	runner, err := e.configuredRunner(ctx, reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
 	if err != nil {
 		return "", st, err
 	}
@@ -2016,9 +2018,9 @@ func compileSetupBundle(ctx context.Context, reporter *ProgressReporter, path st
 	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error { return compileExecutionBundle(path, wu, wf, st, role, prNumber) })
 }
 
-func (e *Engine) configuredRunner(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+func (e *Engine) configuredRunner(ctx context.Context, name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
 	if e.NewRunner != nil {
 		return e.NewRunner(name, cfg, local)
 	}
-	return agent.NewConfiguredRunnerWithOptions(name, cfg, local, e.runnerOptions())
+	return agent.NewConfiguredRunnerWithOptions(name, cfg, local, e.runnerOptions(ctx))
 }

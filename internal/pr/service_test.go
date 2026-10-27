@@ -16,6 +16,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -1082,10 +1083,25 @@ func TestServiceCarriesLookupIntoEnginesAndRunners(t *testing.T) {
 	} else if mode, _ := engine.LookupEnv("SWARM_EXECUTION_MODE"); mode != contract.ExecutionTrustedLocal {
 		t.Fatalf("engine mode = %q", mode)
 	}
-	if _, err := agent.NewConfiguredRunnerWithOptions("mock", cfg, true, s.runnerOptions()); err != nil {
+	if _, err := agent.NewConfiguredRunnerWithOptions("mock", cfg, true, s.runnerOptions(context.Background())); err != nil {
 		t.Fatalf("service runner options ignored the injected mode: %v", err)
 	}
-	if _, err := agent.NewConfiguredRunnerWithOptions("mock", cfg, true, (&Service{}).runnerOptions()); err == nil {
+	if _, err := agent.NewConfiguredRunnerWithOptions("mock", cfg, true, (&Service{}).runnerOptions(context.Background())); err == nil {
 		t.Fatal("default service runner options ignored the process execution mode")
+	}
+}
+
+func TestInspectionServiceUsesCommandSession(t *testing.T) {
+	s := &Service{}
+	if got := s.runnerOptions(context.Background()).Inspections; got != nil {
+		t.Fatal("service invented an inspection session outside a command")
+	}
+	first, second := sandbox.NewInspectionSession(), sandbox.NewInspectionSession()
+	// Override preflight and later execution in one command share its session;
+	// a reused Service takes the next command's session.
+	for _, session := range []*sandbox.InspectionSession{first, first, second} {
+		if got := s.runnerOptions(sandbox.WithInspectionSession(context.Background(), session)).Inspections; got != session {
+			t.Fatal("service did not use the command's inspection session")
+		}
 	}
 }

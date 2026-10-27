@@ -686,7 +686,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 	}
 	for _, override := range []struct{ role, name string }{{"planner", opts.Work.PlannerAgent}, {"reviewer", opts.Work.ReviewerAgent}, {"developer", opts.Work.DeveloperAgent}, {"tester", opts.Work.TesterAgent}} {
 		if override.name != "" {
-			if _, e := agent.PreflightWithOptions(override.name, cfg, s.Tracker.BackendName() == "local", override.role, s.runnerOptions()); e != nil {
+			if _, e := agent.PreflightWithOptions(override.name, cfg, s.Tracker.BackendName() == "local", override.role, s.runnerOptions(ctx)); e != nil {
 				return nil, fmt.Errorf("%s agent preflight: %w", override.role, e)
 			}
 		}
@@ -1017,13 +1017,13 @@ func (s *Service) newResolver(ctx context.Context, r *Result, opts Options) (*re
 	if name == "" {
 		return nil, fmt.Errorf("no configured developer agent")
 	}
-	if _, err := agent.PreflightWithOptions(name, cfg, local, "developer", s.runnerOptions()); err != nil {
+	if _, err := agent.PreflightWithOptions(name, cfg, local, "developer", s.runnerOptions(ctx)); err != nil {
 		return nil, fmt.Errorf("developer agent preflight: %w", err)
 	}
 	newRunner := s.NewRunner
 	if newRunner == nil {
 		newRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
-			return agent.NewConfiguredRunnerWithOptions(name, cfg, local, s.runnerOptions())
+			return agent.NewConfiguredRunnerWithOptions(name, cfg, local, s.runnerOptions(ctx))
 		}
 	}
 	runner, err := newRunner(name, cfg, local)
@@ -1344,8 +1344,8 @@ func implementationBound(st *lease.IssueState, art contract.Artifact) bool {
 	return true
 }
 
-func (s *Service) runnerOptions() agent.RunnerOptions {
-	return agent.RunnerOptions{LookupEnv: s.LookupEnv}
+func (s *Service) runnerOptions(ctx context.Context) agent.RunnerOptions {
+	return agent.RunnerOptions{LookupEnv: s.LookupEnv, Inspections: sandbox.InspectionSessionFrom(ctx)}
 }
 
 // dependencyMode is the node profile's dependency cache mode. A malformed

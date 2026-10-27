@@ -3,12 +3,14 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 func TestAgentEnvironmentHelper(t *testing.T) {
@@ -349,5 +351,130 @@ func TestConfiguredEffortReachesHarnessAndProvenance(t *testing.T) {
 	}
 	if meta := res.Attestation.Metadata(nil); meta["effort"] != "high" || meta["model"] != "approved-model" {
 		t.Fatalf("metadata = %v", meta)
+	}
+}
+
+func countedCalls(t *testing.T, dir, kind string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, kind))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(data)
+}
+
+func TestInspectionTrustedLocalOpenCodeCallers(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "opencode")
+	script := `#!/bin/sh
+case "$1 ${2:-}" in
+"--version ") printf x >> '` + dir + `/version'; echo "opencode v2.1.2" ;;
+"run --help") echo "--standalone --server --continue --model --agent --format --title" ;;
+*) printf x >> '` + dir + `/run' ;;
+esac
+`
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{"opencode": {Binary: binary}}}
+	lookup := mapLookup(map[string]string{"SWARM_EXECUTION_MODE": contract.ExecutionTrustedLocal})
+	command := func(opts RunnerOptions, config *contract.SwarmConfig) {
+		t.Helper()
+		for _, role := range []string{"planner", "developer"} {
+			if _, err := PreflightWithOptions("opencode", config, false, role, opts); err != nil {
+				t.Fatal(err)
+			}
+		}
+		runner, err := NewConfiguredRunnerWithOptions("opencode", config, false, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runner.Run(t.Context(), RunRequest{Role: "developer", WorktreePath: t.TempDir(), Mode: "headless"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := sandbox.NewInspectionSession()
+	command(RunnerOptions{LookupEnv: lookup, Inspections: session}, cfg)
+	if got := countedCalls(t, dir, "version"); got != 1 {
+		t.Fatalf("shared session inspected %d times, want 1", got)
+	}
+	if got := countedCalls(t, dir, "run"); got != 1 {
+		t.Fatalf("agent ran %d times, want 1", got)
+	}
+	// Changed approved policy re-inspects in the same session.
+	changed := *cfg
+	changed.DefaultAgent = "opencode"
+	command(RunnerOptions{LookupEnv: lookup, Inspections: session}, &changed)
+	if got := countedCalls(t, dir, "version"); got != 2 {
+		t.Fatalf("changed policy inspected %d times in total, want 2", got)
+	}
+	command(RunnerOptions{LookupEnv: lookup}, cfg)
+	if got := countedCalls(t, dir, "version"); got != 5 {
+		t.Fatalf("nil session inspected %d times in total, want 5", got)
+	}
+}
+
+func TestInspectionIsolatedCodexPreflightToLaunch(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("native Codex isolation is qualified on Linux")
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "codex")
+	script := `#!/bin/sh
+for a; do [ "$a" = swarm-canary ] && canary=1; [ "$a" = exec ] && run=1; done
+case "$1 ${2:-}" in
+"--version ") printf x >> '` + dir + `/version'; echo "codex-cli 0.163.0" ;;
+"exec --help") echo "--ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check" ;;
+"login status") printf x >> '` + dir + `/auth'; echo "Logged in using an API key" ;;
+*) if [ -n "${canary:-}" ]; then
+     printf x >> '` + dir + `/canary'
+     [ -e '` + dir + `/fail-canary' ] && exit 3
+     printf SWARM_NATIVE_BOUNDARY_OK
+   elif [ -n "${run:-}" ]; then printf x >> '` + dir + `/run'
+   fi ;;
+esac
+`
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}, Agents: map[string]contract.AgentConfig{
+		"codex": {Binary: binary, Roles: []string{"planner", "reviewer", "developer"}},
+	}}
+	lookup := mapLookup(map[string]string{"SWARM_EXECUTION_MODE": contract.ExecutionIsolated})
+	opts := RunnerOptions{LookupEnv: lookup, Inspections: sandbox.NewInspectionSession()}
+	for _, role := range []string{"planner", "reviewer", "developer"} {
+		if _, err := PreflightWithOptions("codex", cfg, false, role, opts); err != nil {
+			t.Fatalf("%s: %v", role, err)
+		}
+	}
+	// Role authorization still runs on every preflight.
+	if _, err := PreflightWithOptions("codex", cfg, false, "tester", opts); err == nil || !strings.Contains(err.Error(), "not permitted") {
+		t.Fatalf("unauthorized role passed preflight: %v", err)
+	}
+	runner, err := NewConfiguredRunnerWithOptions("codex", cfg, false, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	if err := os.WriteFile(filepath.Join(work, "README.md"), []byte("task"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Run(t.Context(), RunRequest{Role: "developer", WorktreePath: work, Mode: "headless"}); err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[string]int{"version": 1, "canary": 4, "auth": 4, "run": 1} {
+		if got := countedCalls(t, dir, kind); got != want {
+			t.Fatalf("%s ran %d times, want %d", kind, got, want)
+		}
+	}
+	// A failing canary stops preflight even on a cache hit.
+	if err := os.WriteFile(filepath.Join(dir, "fail-canary"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PreflightWithOptions("codex", cfg, false, "developer", opts); err == nil {
+		t.Fatal("cached inspection skipped the failing canary")
 	}
 }

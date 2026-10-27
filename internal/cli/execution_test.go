@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -9,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -59,5 +62,29 @@ func TestDryRunReportsIsolationBlockersWithoutClaim(t *testing.T) {
 	}
 	if st := f.state(t, issue); st.Lease.Status == "active" || st.Lease.ClaimID != "" {
 		t.Fatal("blocked execution acquired a lease")
+	}
+}
+
+func TestInspectionCommandSessionPerExecution(t *testing.T) {
+	opts := &RootOptions{RepoRoot: t.TempDir(), lookupEnv: func(name string) (string, bool) {
+		if name == "SWARM_NODE_CONFIG" {
+			return filepath.Join(t.TempDir(), "node.yaml"), true
+		}
+		return "", false
+	}}
+	root := newRootCmdWithOptions(opts)
+	var seen []*sandbox.InspectionSession
+	root.AddCommand(&cobra.Command{Use: "probe", RunE: func(cmd *cobra.Command, args []string) error {
+		seen = append(seen, sandbox.InspectionSessionFrom(cmd.Context()))
+		return nil
+	}})
+	for range 2 {
+		root.SetArgs([]string{"probe", "--backend", "local"})
+		if err := root.ExecuteContext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 2 || seen[0] == nil || seen[1] == nil || seen[0] == seen[1] {
+		t.Fatalf("commands did not each receive a fresh inspection session: %v", seen)
 	}
 }

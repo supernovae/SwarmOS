@@ -825,8 +825,15 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("PR base tip differs from approved issue baseline: swarm issue approve %d then retry (release active claim first if needed)", r.IssueNumber)}
 		}
 		// Preflight before changing approval or Git state.
-		if _, err = s.newResolver(ctx, r, opts); err != nil {
+		earlyResolver, resolveErr := s.newResolver(ctx, r, opts)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		if err = s.preflightRebaseReview(ctx, r, opts, earlyResolver); err != nil {
 			return nil, err
+		}
+		if policyReviewNeeded(r.State, earlyResolver.unit) {
+			return nil, fmt.Errorf("plan review required: swarm pr work %d --phase review", opts.Number)
 		}
 		if _, err = s.Manager.ReapproveRebase(ctx, r.IssueNumber, opts.Number, r.BaseSHA, r.PR.BaseSHA, r.PR.HeadSHA); err != nil {
 			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("routine reapproval: %w; run swarm issue approve %d", err, r.IssueNumber)}

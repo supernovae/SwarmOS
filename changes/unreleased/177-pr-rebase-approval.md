@@ -1,0 +1,1 @@
+- Keep PR approval unchanged when rebase plan review refuses, block revision work outside its approved baseline, and guide plan recovery through PR commands.

@@ -68,21 +68,32 @@ func (s *Service) localRebaseSupersedes(ctx context.Context, r *Result) bool {
 func (s *Service) checkWork(ctx context.Context, r *Result) error {
 	w := &WorkPreflightResult{Status: "ready", Mergeable: r.PR.Mergeable, MergeableState: r.PR.MergeableState, Mergeability: mergeability(r.PR), ApprovedBase: r.BaseSHA, TargetBase: r.PR.BaseSHA, BaseResult: "matching"}
 	r.WorkPreflight = w
-	if s.Tracker.BackendName() != "github" {
-		w.Status = "skipped"
-		w.BaseResult = "skipped"
-		w.Mergeability = "skipped"
-		return nil
-	}
-	if r.PR.BaseSHA != r.BaseSHA {
-		w.BaseResult = "moved"
-	}
 	// Inspect only an existing worktree; never prepare one during the advisory check.
 	if _, _, rebasing, err := workspace.InspectPRHead(ctx, r.Worktree); err == nil && rebasing {
 		w.Status, w.pausedRebase = "blocked", true
 		w.Blockers = append(w.Blockers, PausedRebaseError(ctx, r.Worktree, r.PR.Number).Error())
 		w.Commands = []string{s.workCommand(r, "rebase", "--continue"), s.workCommand(r, "rebase", "--continue --resolve"), s.workCommand(r, "rebase", "--abort")}
 		return nil
+	}
+
+	if rev := r.State.PRRevision; rev != nil {
+		ancestor, err := workspace.BaseIsAncestor(ctx, s.Root, r.BaseSHA, rev.LocalHeadSHA)
+		if err != nil {
+			return fmt.Errorf("inspect pending PR revision: %w; run swarm pr rebase %d --resolve", err, r.PR.Number)
+		}
+		if !ancestor {
+			w.Status = "blocked"
+			w.Blockers = append(w.Blockers, "pending PR revision does not descend from the approved baseline")
+			w.Commands = []string{fmt.Sprintf("swarm pr rebase %d --resolve", r.PR.Number)}
+			return nil
+		}
+	}
+	if s.Tracker.BackendName() != "github" {
+		w.Status, w.BaseResult, w.Mergeability = "skipped", "skipped", "skipped"
+		return nil
+	}
+	if r.PR.BaseSHA != r.BaseSHA {
+		w.BaseResult = "moved"
 	}
 	budget, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

@@ -403,3 +403,69 @@ func TestPRWorkPausedPreflight(t *testing.T) {
 		t.Fatalf("%+v", result.WorkPreflight)
 	}
 }
+
+func TestPRWorkRejectsRevisionOutsideApprovedBase(t *testing.T) {
+	for _, hosted := range []bool{false, true} {
+		for _, inspect := range []bool{false, true} {
+			t.Run(fmt.Sprintf("hosted=%t/inspect=%t", hosted, inspect), func(t *testing.T) {
+				s, issue, number, base := fixture(t)
+				ctx := context.Background()
+				if _, err := s.Work(ctx, Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock", Phase: "plan"}}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.Manager.Release(ctx, issue, "alice", "advance"); err != nil {
+					t.Fatal(err)
+				}
+				revisionGit(t, s.Root, "commit", "--allow-empty", "-qm", "target")
+				if _, err := s.Manager.ApproveTask(ctx, issue, "alice"); err != nil {
+					t.Fatal(err)
+				}
+				pr, err := s.Tracker.GetPullRequest(ctx, number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if hosted {
+					pr.Mergeable = boolValue(true)
+					pr.MergeableState = "clean"
+					s.Tracker = &workTracker{Tracker: s.Tracker, observations: []tracker.PullRequest{*pr}}
+				}
+				before, _, err := s.Manager.Store().Load(ctx, issue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r, err := s.Work(ctx, Options{Number: number, Work: workflow.WorkOptions{InspectOnly: inspect}})
+				if inspect {
+					if err != nil || r.Status != "blocked" {
+						t.Fatalf("%+v %v", r, err)
+					}
+				} else if err == nil {
+					t.Fatal("unsafe work accepted")
+				}
+				if r == nil || !strings.Contains(strings.Join(r.WorkPreflight.Commands, " "), fmt.Sprintf("swarm pr rebase %d --resolve", number)) {
+					t.Fatalf("missing recovery: %+v %v", r, err)
+				}
+				after, _, err := s.Manager.Store().Load(ctx, issue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(before) != string(after) || revisionGit(t, s.Root, "rev-parse", pr.Head) != base {
+					t.Fatal("refused work mutated state or branch")
+				}
+			})
+		}
+	}
+}
+
+func TestWorkPreflightRevisionAncestry(t *testing.T) {
+	s, _, number, base := fixture(t)
+	for _, head := range []string{base, strings.Repeat("0", 40)} {
+		r := &Result{PR: &tracker.PullRequest{Number: number, BaseSHA: base}, BaseSHA: base, State: &lease.IssueState{PRRevision: &lease.PRRevision{LocalHeadSHA: head}}}
+		err := s.checkWork(context.Background(), r)
+		if head == base && err != nil {
+			t.Fatal(err)
+		}
+		if head != base && (err == nil || !strings.Contains(err.Error(), "--resolve")) {
+			t.Fatalf("missing commit accepted: %v", err)
+		}
+	}
+}

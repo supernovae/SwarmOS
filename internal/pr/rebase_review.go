@@ -49,7 +49,7 @@ func (s *Service) preflightRebaseReview(ctx context.Context, r *Result, opts Opt
 		return err
 	}
 	name := workflow.ResolveRoleAgent(cfg, "reviewer", opts.Work)
-	_, err = agent.PreflightWithOptions(name, cfg, s.Tracker.BackendName() == "local", "reviewer", s.runnerOptions())
+	_, err = agent.PreflightWithOptions(name, cfg, s.Tracker.BackendName() == "local", "reviewer", s.runnerOptions(ctx))
 	return err
 }
 

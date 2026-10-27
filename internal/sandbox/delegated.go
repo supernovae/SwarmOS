@@ -103,7 +103,15 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 	if driver == "claude" && opts.Effort != "" {
 		extra = []string{"--effort"}
 	}
-	version, err := inspectDelegatedHarness(ctx, driver, binary, extra)
+	// A cached entry only proves the base interface, so a run that needs extra
+	// flags inspects in full rather than reuse an under-qualified result.
+	var version string
+	var err error
+	if len(extra) > 0 {
+		version, err = inspectDelegatedHarness(ctx, driver, binary, extra)
+	} else {
+		version, err = opts.Inspections.InspectDelegatedHarness(ctx, driver, binary, opts.InspectionPolicy)
+	}
 	if err != nil {
 		return nil, "", err
 	}

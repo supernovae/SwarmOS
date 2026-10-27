@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
 )
 
@@ -361,5 +366,447 @@ func TestNativeCodexAgentBuildCacheReuse(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(validator[0].Dir, "agent-wrote")); !os.IsNotExist(err) {
 		t.Fatal("agent wrote the validator cache", err)
+	}
+}
+
+// countingCodex writes a fake Codex that records each version, help and
+// canary invocation under dir. The canary fails while dir/fail-canary exists.
+func countingCodex(t *testing.T, dir, name, version string) string {
+	t.Helper()
+	script := `#!/bin/sh
+for a; do [ "$a" = swarm-canary ] && canary=1; done
+case "$1" in
+--version) printf x >> '` + dir + `/version'; echo "codex-cli ` + version + `" ;;
+exec) printf x >> '` + dir + `/help'; echo "--ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check" ;;
+*) if [ -n "${canary:-}" ]; then
+     printf x >> '` + dir + `/canary'
+     [ -e '` + dir + `/fail-canary' ] && exit 3
+     printf SWARM_NATIVE_BOUNDARY_OK
+   fi ;;
+esac
+`
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func invocations(t *testing.T, dir, kind string) int {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, kind))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(data)
+}
+
+func requireLinuxInspection(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("native Codex inspection is qualified on Linux")
+	}
+	requireLoopbackCanary(t)
+}
+
+// requireLoopbackCanary skips when the host denies the loopback socket that the
+// mandatory native network canary listens on.
+func requireLoopbackCanary(t *testing.T) {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+		t.Skipf("host denies loopback sockets for the native network canary: %v", err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.Close()
+}
+
+func TestInspectionReusesInterfaceAndRerunsCanaries(t *testing.T) {
+	requireLinuxInspection(t)
+	dir := t.TempDir()
+	binary := countingCodex(t, dir, "codex", "0.163.0")
+	ctx := context.Background()
+	session := NewInspectionSession()
+	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+		version, err := session.InspectNativeCodex(ctx, binary, "policy")
+		if err != nil || version != "0.163.0" {
+			t.Fatalf("%s: %q, %v", role, version, err)
+		}
+	}
+	if got := invocations(t, dir, "version"); got != 1 {
+		t.Fatalf("version inspected %d times, want 1", got)
+	}
+	if got := invocations(t, dir, "help"); got != 1 {
+		t.Fatalf("interface inspected %d times, want 1", got)
+	}
+	if got := invocations(t, dir, "canary"); got != 4 {
+		t.Fatalf("boundary canaries ran %d times, want 4", got)
+	}
+	// A failing canary is rejected even though the interface is cached.
+	if err := os.WriteFile(filepath.Join(dir, "fail-canary"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.InspectNativeCodex(ctx, binary, "policy"); err == nil || !strings.Contains(err.Error(), "boundary check failed") {
+		t.Fatalf("cached inspection accepted a failing canary: %v", err)
+	}
+	if got := invocations(t, dir, "version"); got != 1 {
+		t.Fatalf("version inspected %d times after canary failure, want 1", got)
+	}
+}
+
+func TestInspectionNilAndIndependentSessionsDoNotShare(t *testing.T) {
+	requireLinuxInspection(t)
+	dir := t.TempDir()
+	binary := countingCodex(t, dir, "codex", "0.163.0")
+	ctx := context.Background()
+	var none *InspectionSession
+	for range 2 {
+		if _, err := none.InspectNativeCodex(ctx, binary, "policy"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if _, err := NewInspectionSession().InspectNativeCodex(ctx, binary, "policy"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := invocations(t, dir, "version"); got != 4 {
+		t.Fatalf("version inspected %d times, want 4", got)
+	}
+}
+
+func TestInspectionInvalidatesOnExecutableIdentity(t *testing.T) {
+	requireLinuxInspection(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, dir, binary string) string
+	}{
+		{"path", func(t *testing.T, dir, binary string) string {
+			data, err := os.ReadFile(binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			moved := filepath.Join(dir, "codex-copy")
+			if err := os.WriteFile(moved, data, 0700); err != nil {
+				t.Fatal(err)
+			}
+			return moved
+		}},
+		{"size", func(t *testing.T, dir, binary string) string {
+			f, err := os.OpenFile(binary, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			if _, err := f.WriteString("# grown\n"); err != nil {
+				t.Fatal(err)
+			}
+			return binary
+		}},
+		{"mtime", func(t *testing.T, dir, binary string) string {
+			later := time.Now().Add(time.Hour)
+			if err := os.Chtimes(binary, later, later); err != nil {
+				t.Fatal(err)
+			}
+			return binary
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binary := countingCodex(t, dir, "codex", "0.163.0")
+			session := NewInspectionSession()
+			if _, err := session.InspectNativeCodex(ctx, binary, "policy"); err != nil {
+				t.Fatal(err)
+			}
+			changed := tc.change(t, dir, binary)
+			if _, err := session.InspectNativeCodex(ctx, changed, "policy"); err != nil {
+				t.Fatal(err)
+			}
+			if got := invocations(t, dir, "version"); got != 2 {
+				t.Fatalf("version inspected %d times after %s change, want 2", got, tc.name)
+			}
+		})
+	}
+}
+
+func TestInspectionSameSizeSameMtimeReplacement(t *testing.T) {
+	requireLinuxInspection(t)
+	dir := t.TempDir()
+	binary := countingCodex(t, dir, "codex", "0.163.0")
+	info, err := os.Stat(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	session := NewInspectionSession()
+	if version, err := session.InspectNativeCodex(ctx, binary, "policy"); err != nil || version != "0.163.0" {
+		t.Fatal(version, err)
+	}
+	countingCodex(t, dir, "codex", "0.163.1")
+	if err := os.Chtimes(binary, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if replaced, err := os.Stat(binary); err != nil || replaced.Size() != info.Size() || !replaced.ModTime().Equal(info.ModTime()) {
+		t.Fatalf("replacement changed size or mtime: %v", err)
+	}
+	version, err := session.InspectNativeCodex(ctx, binary, "policy")
+	if err != nil || version != "0.163.1" {
+		t.Fatalf("same-size same-mtime replacement reused %q, %v", version, err)
+	}
+	if got := invocations(t, dir, "version"); got != 2 {
+		t.Fatalf("version inspected %d times, want 2", got)
+	}
+}
+
+func TestInspectionSymlinkRetargeting(t *testing.T) {
+	requireLinuxInspection(t)
+	dir := t.TempDir()
+	first := countingCodex(t, dir, "codex-a", "0.163.0")
+	second := countingCodex(t, dir, "codex-b", "0.164.0")
+	link := filepath.Join(dir, "codex")
+	if err := os.Symlink(first, link); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	session := NewInspectionSession()
+	if version, err := session.InspectNativeCodex(ctx, link, "policy"); err != nil || version != "0.163.0" {
+		t.Fatal(version, err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(second, link); err != nil {
+		t.Fatal(err)
+	}
+	if version, err := session.InspectNativeCodex(ctx, link, "policy"); err != nil || version != "0.164.0" {
+		t.Fatalf("retargeted symlink reused %q, %v", version, err)
+	}
+	if got := invocations(t, dir, "version"); got != 2 {
+		t.Fatalf("version inspected %d times, want 2", got)
+	}
+}
+
+func TestInspectionPartitionsByDriverAndPolicy(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "harness")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	base := &contract.SwarmConfig{DefaultAgent: "codex", Roles: map[string]string{"tester": "codex"}, Agents: map[string]contract.AgentConfig{"codex": {Binary: "codex"}, "claude": {Binary: "claude"}}}
+	same := &contract.SwarmConfig{DefaultAgent: "codex", Roles: map[string]string{"tester": "codex"}, Agents: map[string]contract.AgentConfig{"claude": {Binary: "claude"}, "codex": {Binary: "codex"}}}
+	changed := *same
+	changed.DefaultAgent = "claude"
+	policy := func(cfg *contract.SwarmConfig) string {
+		digest, err := InspectionPolicy(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return digest
+	}
+	session := NewInspectionSession()
+	calls := 0
+	inspect := func(context.Context) (string, error) { calls++; return "1", nil }
+	ctx := context.Background()
+	for _, step := range []struct {
+		driver, policy string
+		calls          int
+	}{
+		{"claude", policy(base), 1},
+		{"claude", policy(same), 1}, // identical values in a different allocation
+		{"omp", policy(same), 2},
+		{"claude", policy(&changed), 3},
+		{"claude", policy(base), 3},
+	} {
+		if _, err := session.reuse(ctx, step.driver, binary, step.policy, inspect); err != nil {
+			t.Fatal(err)
+		}
+		if calls != step.calls {
+			t.Fatalf("%s/%s: %d inspections, want %d", step.driver, step.policy[:8], calls, step.calls)
+		}
+	}
+}
+
+func TestInspectionFailuresAreNotCached(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "harness")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	session := NewInspectionSession()
+	calls := 0
+	fail := func(context.Context) (string, error) { calls++; return "", errors.New("unqualified") }
+	succeed := func(context.Context) (string, error) { calls++; return "1", nil }
+	if _, err := session.reuse(ctx, "omp", binary, "p", fail); err == nil {
+		t.Fatal("failure accepted")
+	}
+	if _, err := session.reuse(ctx, "omp", binary, "p", succeed); err != nil || calls != 2 {
+		t.Fatalf("failed inspection was retained: calls=%d err=%v", calls, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	other := filepath.Join(t.TempDir(), "other")
+	if err := os.WriteFile(other, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.reuse(cancelled, "omp", other, "p", func(ctx context.Context) (string, error) { calls++; return "", ctx.Err() }); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if _, err := session.reuse(ctx, "omp", other, "p", succeed); err != nil || calls != 4 {
+		t.Fatalf("cancelled inspection was retained: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestInspectionRejectsMissingAndMutatedExecutables(t *testing.T) {
+	ctx := context.Background()
+	session := NewInspectionSession()
+	calls := 0
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := session.reuse(ctx, "omp", missing, "p", func(context.Context) (string, error) { calls++; return "1", nil }); err == nil || calls != 0 {
+		t.Fatalf("missing executable inspected: calls=%d err=%v", calls, err)
+	}
+	unreadable := filepath.Join(t.TempDir(), "unreadable")
+	if err := os.WriteFile(unreadable, []byte("#!/bin/sh\n"), 0100); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := os.Open(unreadable); err == nil {
+		f.Close()
+		t.Log("running with privileges that read mode 0100 files; skipping unreadable case")
+	} else if _, err := session.reuse(ctx, "omp", unreadable, "p", func(context.Context) (string, error) { calls++; return "1", nil }); err == nil || calls != 0 {
+		t.Fatalf("unreadable executable inspected: calls=%d err=%v", calls, err)
+	}
+	binary := filepath.Join(t.TempDir(), "harness")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	mutate := func(context.Context) (string, error) {
+		calls++
+		return "1", os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700)
+	}
+	if _, err := session.reuse(ctx, "omp", binary, "p", mutate); err == nil || !strings.Contains(err.Error(), "changed during inspection") {
+		t.Fatalf("mutation during inspection accepted: %v", err)
+	}
+	if _, err := session.reuse(ctx, "omp", binary, "p", func(context.Context) (string, error) { calls++; return "1", nil }); err != nil || calls != 2 {
+		t.Fatalf("mutated inspection was retained: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestInspectionConcurrentRequestsShareOneInspection(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "harness")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	session := NewInspectionSession()
+	var mu sync.Mutex
+	calls := 0
+	inspect := func(context.Context) (string, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		return "1", nil
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := session.reuse(context.Background(), "omp", binary, "p", inspect)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("concurrent requests inspected %d times, want 1", calls)
+	}
+}
+
+func TestInspectionDelegatedHarnessReuse(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "omp")
+	script := `#!/bin/sh
+case "$1" in
+--version) printf x >> '` + dir + `/version'; echo "omp/18.12.6" ;;
+--help) echo "--mode --no-tools --no-extensions --no-rules --config --no-session" ;;
+esac
+`
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	session := NewInspectionSession()
+	for range 3 {
+		if version, err := session.InspectDelegatedHarness(ctx, "omp", binary, "p"); err != nil || version != "18.12.6" {
+			t.Fatal(version, err)
+		}
+	}
+	if _, err := InspectDelegatedHarness(ctx, "omp", binary); err != nil {
+		t.Fatal(err)
+	}
+	if got := invocations(t, dir, "version"); got != 2 {
+		t.Fatalf("version inspected %d times, want 2 (one session, one direct)", got)
+	}
+}
+
+func TestInspectionValidationPathsStayUncached(t *testing.T) {
+	requireLinuxInspection(t)
+	dir := t.TempDir()
+	binary := countingCodex(t, dir, "codex", "0.163.0")
+	ctx := context.Background()
+	session := NewInspectionSession()
+	if _, err := session.InspectNativeCodex(ctx, binary, "policy"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &contract.SwarmConfig{DefaultAgent: "codex", Agents: map[string]contract.AgentConfig{"codex": {Binary: binary}}}
+	work := t.TempDir()
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{"CheckNativeCodex", func() error { return CheckNativeCodex(ctx, binary) }},
+		{"CheckNativeValidation", func() error { return CheckNativeValidation(ctx, cfg) }},
+		{"RunNativeValidation", func() error {
+			return RunNativeValidation(ctx, work, binary, "true", nil, Dependencies{}, false, io.Discard, io.Discard)
+		}},
+	}
+	for i, check := range checks {
+		if err := check.run(); err != nil {
+			t.Fatalf("%s: %v", check.name, err)
+		}
+		if got := invocations(t, dir, "version"); got != i+2 {
+			t.Fatalf("%s reused version inspection: %d, want %d", check.name, got, i+2)
+		}
+		if got := invocations(t, dir, "canary"); got != i+2 {
+			t.Fatalf("%s skipped boundary canaries: %d, want %d", check.name, got, i+2)
+		}
+	}
+	// A later interface or canary failure fails validation despite the cache.
+	if err := os.WriteFile(filepath.Join(dir, "fail-canary"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range checks {
+		if err := check.run(); err == nil {
+			t.Fatalf("%s accepted a failing canary", check.name)
+		}
+	}
+	if err := os.Remove(filepath.Join(dir, "fail-canary")); err != nil {
+		t.Fatal(err)
+	}
+	countingCodex(t, dir, "codex", "0.162.0")
+	for _, check := range checks {
+		if err := check.run(); err == nil || !strings.Contains(err.Error(), "0.162.0") && !strings.Contains(err.Error(), "version") {
+			t.Fatalf("%s accepted an unqualified interface: %v", check.name, err)
+		}
 	}
 }

@@ -35,6 +35,8 @@ type CLIAdapter struct {
 	containerRuntime string
 	container        string
 	lookupEnv        func(string) (string, bool)
+	inspections      *sandbox.InspectionSession
+	inspectionPolicy string
 }
 
 func (a *CLIAdapter) Name() string {
@@ -180,7 +182,7 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 	}
 	preflight := time.Now()
 	if a.driver == "opencode" && a.sandboxRuntime != "container" {
-		if _, err := sandbox.InspectDelegatedHarness(ctx, a.driver, a.binary); err != nil {
+		if _, err := a.inspections.InspectDelegatedHarness(ctx, a.driver, a.binary, a.inspectionPolicy); err != nil {
 			return nil, err
 		}
 	}

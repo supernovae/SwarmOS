@@ -2,6 +2,9 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/claimpause"
@@ -165,6 +169,177 @@ func runNativeCommand(ctx context.Context, binary, dir string, env, args []strin
 	return err
 }
 
+// InspectionSession reuses successful version and interface inspection within
+// one command. Callers create it per command and discard it afterwards; a nil
+// session inspects every time. It never caches authentication, executor
+// checks or boundary canaries.
+type InspectionSession struct {
+	mu      sync.Mutex
+	entries map[inspectionKey]*inspectionEntry
+}
+
+type inspectionKey struct {
+	driver, path, policy string
+	size, mtime          int64
+	hash                 [sha256.Size]byte
+}
+
+type inspectionEntry struct {
+	done    chan struct{}
+	version string
+	err     error
+}
+
+// NewInspectionSession starts an empty command-scoped inspection session.
+func NewInspectionSession() *InspectionSession {
+	return &InspectionSession{entries: map[inspectionKey]*inspectionEntry{}}
+}
+
+type inspectionSessionKey struct{}
+
+// WithInspectionSession attaches a command's session to ctx.
+func WithInspectionSession(ctx context.Context, s *InspectionSession) context.Context {
+	return context.WithValue(ctx, inspectionSessionKey{}, s)
+}
+
+// InspectionSessionFrom returns the command's session, or nil when none.
+func InspectionSessionFrom(ctx context.Context) *InspectionSession {
+	if ctx == nil {
+		return nil
+	}
+	s, _ := ctx.Value(inspectionSessionKey{}).(*InspectionSession)
+	return s
+}
+
+// InspectionPolicy digests the complete approved config. Inspection takes no
+// policy input; the digest only partitions reuse so any approved config change
+// re-inspects.
+func InspectionPolicy(cfg *contract.SwarmConfig) (string, error) {
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("digest approved config for inspection reuse: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// executableIdentity names the resolved file by path, size, mtime and content.
+// A file that changes while being hashed is rejected rather than trusted.
+func executableIdentity(binary string) (inspectionKey, error) {
+	var key inspectionKey
+	path, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		return key, fmt.Errorf("resolve inspected executable: %w", err)
+	}
+	if path, err = filepath.Abs(path); err != nil {
+		return key, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return key, fmt.Errorf("open inspected executable: %w", err)
+	}
+	defer f.Close()
+	before, err := f.Stat()
+	if err != nil {
+		return key, err
+	}
+	if !before.Mode().IsRegular() {
+		return key, fmt.Errorf("inspected executable %s is not a regular file", filepath.Base(path))
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return key, fmt.Errorf("hash inspected executable: %w", err)
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return key, err
+	}
+	named, err := os.Stat(path)
+	if err != nil {
+		return key, err
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !os.SameFile(after, named) {
+		return key, fmt.Errorf("inspected executable %s changed while being identified", filepath.Base(path))
+	}
+	key.path, key.size, key.mtime = path, before.Size(), before.ModTime().UnixNano()
+	copy(key.hash[:], h.Sum(nil))
+	return key, nil
+}
+
+// reuse returns a successful inspection of the same executable, driver and
+// policy, or runs inspect. Identity is recomputed on every lookup and checked
+// again after inspection; failures are never retained.
+func (s *InspectionSession) reuse(ctx context.Context, driver, binary, policy string, inspect func(context.Context) (string, error)) (string, error) {
+	if s == nil {
+		return inspect(ctx)
+	}
+	key, err := executableIdentity(binary)
+	if err != nil {
+		return "", err
+	}
+	key.driver, key.policy = driver, policy
+	for {
+		s.mu.Lock()
+		entry, ok := s.entries[key]
+		if !ok {
+			entry = &inspectionEntry{done: make(chan struct{})}
+			s.entries[key] = entry
+		}
+		s.mu.Unlock()
+		if ok {
+			select {
+			case <-entry.done:
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+			if entry.err == nil {
+				return entry.version, nil
+			}
+			// The owner's failure may be its own cancellation; inspect again.
+			continue
+		}
+		entry.version, entry.err = inspect(ctx)
+		if entry.err == nil {
+			if after, err := executableIdentity(binary); err != nil {
+				entry.err = err
+			} else if after.path != key.path || after.size != key.size || after.mtime != key.mtime || after.hash != key.hash {
+				entry.err = fmt.Errorf("inspected executable %s changed during inspection", filepath.Base(key.path))
+			}
+		}
+		if entry.err != nil {
+			s.mu.Lock()
+			delete(s.entries, key)
+			s.mu.Unlock()
+		}
+		close(entry.done)
+		return entry.version, entry.err
+	}
+}
+
+// InspectNativeCodex is the package InspectNativeCodex with version and
+// interface qualification reused from s. Boundary canaries run on every call.
+func (s *InspectionSession) InspectNativeCodex(ctx context.Context, binary, policy string) (string, error) {
+	if runtime.GOOS != "linux" {
+		return "", errNativeCodexPlatform
+	}
+	version, err := s.reuse(ctx, "codex", binary, policy, func(ctx context.Context) (string, error) {
+		return inspectNativeCodexInterface(ctx, binary)
+	})
+	if err != nil {
+		return "", err
+	}
+	return version, checkNativeCodexBoundary(ctx, binary)
+}
+
+// InspectDelegatedHarness is the package InspectDelegatedHarness reused from s.
+func (s *InspectionSession) InspectDelegatedHarness(ctx context.Context, driver, binary, policy string) (string, error) {
+	return s.reuse(ctx, driver, binary, policy, func(ctx context.Context) (string, error) {
+		return InspectDelegatedHarness(ctx, driver, binary)
+	})
+}
+
+var errNativeCodexPlatform = errors.New("native Codex isolation is currently qualified on Linux; use a qualified Linux worker (OCI is a separate offline backend)")
+
 // CheckNativeCodex verifies actual filesystem and loopback restrictions using
 // dummy data. No login or provider request is needed for these checks.
 func CheckNativeCodex(ctx context.Context, binary string) error {
@@ -172,27 +347,31 @@ func CheckNativeCodex(ctx context.Context, binary string) error {
 	return err
 }
 
-// InspectNativeCodex returns the version whose boundary checks passed.
+// InspectNativeCodex returns the version whose boundary checks passed. It
+// never reuses an earlier inspection.
 func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 	if runtime.GOOS != "linux" {
-		return "", fmt.Errorf("native Codex isolation is currently qualified on Linux; use a qualified Linux worker (OCI is a separate offline backend)")
+		return "", errNativeCodexPlatform
 	}
+	qualified, err := inspectNativeCodexInterface(ctx, binary)
+	if err != nil {
+		return "", err
+	}
+	return qualified, checkNativeCodexBoundary(ctx, binary)
+}
+
+// inspectNativeCodexInterface qualifies the version and exec interface in an
+// empty temporary home.
+func inspectNativeCodexInterface(ctx context.Context, binary string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	root, err := os.MkdirTemp("", "swarm-native-check-*")
+	home, err := os.MkdirTemp("", "swarm-native-inspect-*")
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(root)
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
+	defer os.RemoveAll(home)
+	if home, err = filepath.EvalSymlinks(home); err != nil {
 		return "", err
-	}
-	work, home := filepath.Join(root, "work"), filepath.Join(root, "home")
-	for _, dir := range []string{work, home} {
-		if err := os.Mkdir(dir, 0700); err != nil {
-			return "", err
-		}
 	}
 	var version, versionDiagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false, Dependencies{}), []string{"--version"}, nil, &version, &versionDiagnostics); err != nil {
@@ -211,23 +390,46 @@ func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 			return "", fmt.Errorf("codex %s lacks required execution interface %s", qualified, flag)
 		}
 	}
+	return qualified, nil
+}
+
+// checkNativeCodexBoundary runs the filesystem and loopback canaries. Callers
+// run it on every inspection, cached or not.
+func checkNativeCodexBoundary(ctx context.Context, binary string) error {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	root, err := os.MkdirTemp("", "swarm-native-check-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(root)
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	work, home := filepath.Join(root, "work"), filepath.Join(root, "home")
+	for _, dir := range []string{work, home} {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			return err
+		}
+	}
 	canary := filepath.Join(root, "coordinator-token")
 	if err := os.WriteFile(canary, []byte("SWARM_DUMMY_CREDENTIAL"), 0600); err != nil {
-		return "", err
+		return err
 	}
 	if err := os.Symlink(canary, filepath.Join(work, "outside-link")); err != nil {
-		return "", err
+		return err
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return "", fmt.Errorf("native network canary: %w", err)
+		return fmt.Errorf("native network canary: %w", err)
 	}
 	defer listener.Close()
 	// Establish reachability outside the tool boundary so ambient runner policy
 	// cannot masquerade as enforcement by Codex.
 	connection, err := net.DialTimeout("tcp4", listener.Addr().String(), time.Second)
 	if err != nil {
-		return "", fmt.Errorf("native network canary is unreachable before sandboxing: %w", err)
+		return fmt.Errorf("native network canary is unreachable before sandboxing: %w", err)
 	}
 	connection.Close()
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
@@ -248,13 +450,13 @@ printf SWARM_NATIVE_BOUNDARY_OK`
 	args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-canary", canary, port)
 	var out, diagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, nativeEnv(codexHostHome(home), false, Dependencies{}), args, nil, &out, &diagnostics); err != nil {
-		return "", fmt.Errorf("codex native boundary check failed: %w: %s", err, diagnostics.String())
+		return fmt.Errorf("codex native boundary check failed: %w: %s", err, diagnostics.String())
 	}
 	data, err := os.ReadFile(canary)
 	if err != nil || string(data) != "SWARM_DUMMY_CREDENTIAL" || strings.TrimSpace(out.String()) != "SWARM_NATIVE_BOUNDARY_OK" {
-		return "", fmt.Errorf("codex native boundary check did not preserve the outside canary")
+		return fmt.Errorf("codex native boundary check did not preserve the outside canary")
 	}
-	return qualified, nil
+	return nil
 }
 
 func CodexAuthentication(ctx context.Context, binary string) (string, error) {
@@ -282,7 +484,7 @@ func CodexAuthentication(ctx context.Context, binary string) (string, error) {
 // Model-controlled commands use Codex's native profile, with no host credentials.
 func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts WorkerOptions, interactive bool, stdin io.Reader, stdout, stderr io.Writer) ([]string, string, error) {
 	preflight := time.Now()
-	version, err := InspectNativeCodex(ctx, binary)
+	version, err := opts.Inspections.InspectNativeCodex(ctx, binary, opts.InspectionPolicy)
 	if err != nil {
 		return nil, "", err
 	}

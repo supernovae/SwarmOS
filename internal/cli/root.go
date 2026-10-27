@@ -20,6 +20,7 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
 	"github.com/supernovae/swarmos/internal/registry"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"time"
@@ -100,6 +101,9 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 				}
 			}
 		}
+		// Roles in one command reuse harness inspection; the next command,
+		// even in the same process, starts empty.
+		cmd.SetContext(sandbox.WithInspectionSession(cmd.Context(), sandbox.NewInspectionSession()))
 		return opts.normalizeCoordinatorRoot(cmd)
 	}
 	rootCmd.AddGroup(

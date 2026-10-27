@@ -124,3 +124,58 @@ func TestEditWorkUnitIssueYAMLFields(t *testing.T) {
 		}
 	}
 }
+func TestEditWorkUnitIssueAllowHarnessChanges(t *testing.T) {
+	yes, no := true, false
+	plain := FormatIssueMarkdown(&WorkUnit{Objective: "Edit CI", Constraints: []string{"keep"}, Acceptance: []string{"works"}, Workflow: "feature"})
+	enabled := FormatIssueMarkdown(&WorkUnit{Objective: "Edit CI", Constraints: []string{"keep"}, Acceptance: []string{"works"}, Workflow: "feature", AllowHarnessChanges: true})
+	yamlBody := "```yaml swarm-workunit\nobjective: Edit CI\nconstraints: [keep]\nacceptance: [works]\nworkflow: feature\n```\n"
+	for _, tc := range []struct {
+		name, body string
+		edit       WorkUnitEdit
+		want       bool
+		section    bool
+	}{
+		{"omitted keeps false", plain, WorkUnitEdit{Objective: editString("New objective")}, false, false},
+		{"omitted keeps true", enabled, WorkUnitEdit{Objective: editString("New objective")}, true, true},
+		{"enable inserts section", plain, WorkUnitEdit{AllowHarnessChanges: &yes}, true, true},
+		{"disable without section", plain, WorkUnitEdit{AllowHarnessChanges: &no}, false, false},
+		{"disable replaces section", enabled, WorkUnitEdit{AllowHarnessChanges: &no}, false, true},
+		{"enable existing section", enabled, WorkUnitEdit{AllowHarnessChanges: &yes}, true, true},
+		{"enable unchecked section", plain + "\n### Allow Harness Changes\n\n- [ ] Allow edits to protected harness paths\n", WorkUnitEdit{AllowHarnessChanges: &yes}, true, true},
+		{"yaml enable", yamlBody, WorkUnitEdit{AllowHarnessChanges: &yes}, true, false},
+		{"yaml disable", strings.Replace(yamlBody, "workflow: feature\n", "workflow: feature\nallow_harness_changes: true\n", 1), WorkUnitEdit{AllowHarnessChanges: &no}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, got, err := EditWorkUnitIssue(1, "title", tc.body, tc.edit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wu, err := ParseWorkUnitFromIssue(1, "title", got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if wu.AllowHarnessChanges != tc.want {
+				t.Fatalf("allow=%v want %v:\n%s", wu.AllowHarnessChanges, tc.want, got)
+			}
+			if n := strings.Count(got, "### Allow Harness Changes"); n != map[bool]int{true: 1, false: 0}[tc.section] {
+				t.Fatalf("%d sections:\n%s", n, got)
+			}
+			if !strings.Contains(got, "works") {
+				t.Fatalf("unrelated content lost:\n%s", got)
+			}
+		})
+	}
+	if _, _, err := EditWorkUnitIssue(1, "title", enabled+"\n### Allow Harness Changes\n\n- [x] again\n", WorkUnitEdit{AllowHarnessChanges: &no}); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate sections accepted: %v", err)
+	}
+	for _, body := range []string{enabled, plain} {
+		if _, got, err := EditWorkUnitIssue(1, "title", body, WorkUnitEdit{AllowHarnessChanges: &[]bool{body == enabled}[0], Gate: editString("none")}); err != nil || got != body {
+			t.Fatalf("setting current values changed the body: %v %q", err, got)
+		}
+	}
+	prefix := "Intro\n" + plain
+	_, got, err := EditWorkUnitIssue(1, "title", prefix, WorkUnitEdit{AllowHarnessChanges: &yes})
+	if err != nil || !strings.HasPrefix(got, prefix) {
+		t.Fatalf("existing bytes changed: %v %q", err, got)
+	}
+}

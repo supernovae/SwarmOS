@@ -1,0 +1,1 @@
+- `swarm issue create --allow-harness-changes` and `swarm issue edit --allow-harness-changes=true|false` set a WorkUnit's permission to edit protected harness paths, and `swarm issue lint` reports it. Changing the permission on an approved WorkUnit requires approving it again.

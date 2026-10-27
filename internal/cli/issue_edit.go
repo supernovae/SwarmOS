@@ -23,18 +23,20 @@ type issueEditPreview struct {
 	Diff          string `json:"diff"`
 	Lint          string `json:"lint"`
 	DigestChanged bool   `json:"digest_changed"`
-	Approval      string `json:"approval"`
-	Claim         string `json:"claim"`
-	Next          string `json:"next_command,omitempty"`
-	Status        string `json:"status"`
-	Error         string `json:"error,omitempty"`
+	// AllowHarnessChanges is the proposed contract's permission.
+	AllowHarnessChanges bool   `json:"allow_harness_changes"`
+	Approval            string `json:"approval"`
+	Claim               string `json:"claim"`
+	Next                string `json:"next_command,omitempty"`
+	Status              string `json:"status"`
+	Error               string `json:"error,omitempty"`
 }
 
 func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 	var title, objective, workflowName, gate string
 	var constraints, acceptance []string
 	var depends []int
-	var dryRun, asJSON bool
+	var dryRun, asJSON, allowHarnessChanges bool
 	cmd := &cobra.Command{Use: "edit <issue-number>", Short: "Preview and lint structured WorkUnit replacements before editing", Args: cobra.ExactArgs(1)}
 	cmd.RunE = func(cmd *cobra.Command, args []string) (runErr error) {
 		if asJSON {
@@ -90,6 +92,9 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 		if cmd.Flags().Changed("depends-on") {
 			edit.DependsOn = &depends
 		}
+		if cmd.Flags().Changed("allow-harness-changes") {
+			edit.AllowHarnessChanges = &allowHarnessChanges
+		}
 		st, err := readIssueEditState(cmd.Context(), mgr, number)
 		if err != nil {
 			return err
@@ -99,6 +104,9 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 		proposed, _ := contract.ParseWorkUnitFromIssue(number, newTitle, body)
 		p := issueEditPreview{Issue: number, OldTitle: issue.Title, Title: newTitle, Diff: issueEditDiff(issue.Body, body), Lint: "valid", Approval: "unapproved", Claim: "no active claim", Status: "preview"}
 		p.DigestChanged = contract.DigestWorkUnit(old) != contract.DigestWorkUnit(proposed)
+		if proposed != nil {
+			p.AllowHarnessChanges = proposed.AllowHarnessChanges
+		}
 		if lintErr != nil {
 			p.Lint = lintErr.Error()
 			runErr = fmt.Errorf("lint refused edit: %w", lintErr)
@@ -206,6 +214,7 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 	f.Lookup("depends-on").Value = &emptyIntSliceValue{f.Lookup("depends-on").Value}
 	f.StringVar(&workflowName, "workflow", "", "Replace workflow (feature, bugfix, refactor)")
 	f.StringVar(&gate, "gate", "", "Replace plan gate (none, agent, human)")
+	f.BoolVar(&allowHarnessChanges, "allow-harness-changes", false, "Replace permission to edit protected harness paths (true or false)")
 	f.BoolVar(&dryRun, "dry-run", false, "Preview changes without writing")
 	f.BoolVar(&asJSON, "json", false, "Emit structured edit results")
 	return cmd

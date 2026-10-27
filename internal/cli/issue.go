@@ -25,7 +25,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	}
 	var title, objective, workflowName, gate string
 	var constraints, acceptance, capabilities []string
-	var ready bool
+	var ready, allowHarnessChanges bool
 	var dependsOn []int
 	var parentIssue int
 	var asJSON bool
@@ -40,7 +40,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if parentIssue < 0 {
 			return fmt.Errorf("invalid --parent %d", parentIssue)
 		}
-		wu := &contract.WorkUnit{ID: "ISSUE-NEW", ParentIssue: parentIssue, DependsOn: dependsOn, RequiredCapabilities: capabilities, Title: title, Objective: objective, Constraints: constraints, Acceptance: acceptance, Workflow: workflowName, Gate: contract.GateMode(gate)}
+		wu := &contract.WorkUnit{ID: "ISSUE-NEW", ParentIssue: parentIssue, DependsOn: dependsOn, RequiredCapabilities: capabilities, Title: title, Objective: objective, Constraints: constraints, Acceptance: acceptance, Workflow: workflowName, Gate: contract.GateMode(gate), AllowHarnessChanges: allowHarnessChanges}
 		if err := contract.ValidateWorkUnit(wu); err != nil {
 			return err
 		}
@@ -85,7 +85,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 			kind = "approved"
 		}
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "issue", "status": kind, "issue": iss})
+			return writeJSON(cmd, map[string]any{"kind": "issue", "status": kind, "issue": iss, "allow_harness_changes": allowHarnessChanges})
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Created %s issue #%d: %s (%s)\n", kind, iss.Number, iss.Title, iss.HTMLURL)
 		return nil
@@ -99,6 +99,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	createCmd.Flags().BoolVar(&ready, "ready", false, "Approve the immutable task revision after creation")
 	createCmd.Flags().IntSliceVar(&dependsOn, "depends-on", nil, "Prerequisite issue numbers that must complete first")
 	createCmd.Flags().StringSliceVar(&capabilities, "capability", nil, "Required volunteer node capabilities (e.g., coding,testing,docs)")
+	createCmd.Flags().BoolVar(&allowHarnessChanges, "allow-harness-changes", false, "Allow the WorkUnit to edit protected harness paths")
 	createCmd.Flags().IntVar(&parentIssue, "parent", 0, "Parent epic/workunit issue number")
 	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured issue results")
 	approveCmd := &cobra.Command{Use: "approve <issue-number>", Short: "Approve the current immutable WorkUnit revision for execution", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
@@ -169,10 +170,10 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		}
 		shape := assessShape(rootOpts.resolveRepoRoot(), wu)
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "shape": shape})
+			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "shape": shape})
 		}
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities)
+		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v, allow_harness_changes=%t]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities, wu.AllowHarnessChanges)
 		writeShapeAdvice(out, shape)
 		return nil
 	}}

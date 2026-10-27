@@ -48,7 +48,7 @@ swarm issue edit 42 --objective 'Add structured WorkUnit editing' --backend gith
 swarm issue approve 42 --backend github
 ```
 
-`--title`, `--objective`, `--constraint`, `--acceptance`, `--depends-on`, `--gate`, and `--workflow` replace their named fields. Omitted sections keep their original bytes. Repeat `--constraint` or `--acceptance` to supply the complete replacement list. Use `--depends-on=` to clear prerequisites. The edited contract must pass the same validation as `swarm issue lint`.
+`--title`, `--objective`, `--constraint`, `--acceptance`, `--depends-on`, `--gate`, and `--workflow` replace their named fields. Omitted sections keep their original bytes. Repeat `--constraint` or `--acceptance` to supply the complete replacement list. Use `--depends-on=` to clear prerequisites. `--allow-harness-changes=true` or `--allow-harness-changes=false` grants or removes the WorkUnit's permission to edit protected harness paths; `swarm issue create --allow-harness-changes` grants it at creation, and `swarm issue lint` reports it as `allow_harness_changes`. The edited contract must pass the same validation as `swarm issue lint`.
 
 ```bash
 swarm issue edit 42 --constraint 'Keep claims fenced' --constraint 'Preserve existing formats' --dry-run

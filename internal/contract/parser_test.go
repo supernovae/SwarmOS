@@ -130,3 +130,19 @@ func TestValidateArtifact(t *testing.T) {
 		t.Fatalf("expected valid artifact, got: %v", err)
 	}
 }
+
+func TestFormatIssueMarkdownAllowHarnessChanges(t *testing.T) {
+	for _, allow := range []bool{true, false} {
+		body := FormatIssueMarkdown(&WorkUnit{Objective: "Edit CI", Constraints: []string{"keep"}, Acceptance: []string{"works"}, Workflow: "feature", AllowHarnessChanges: allow})
+		if strings.Contains(body, "### Allow Harness Changes") != allow {
+			t.Fatalf("allow=%v section presence wrong:\n%s", allow, body)
+		}
+		wu, err := ParseWorkUnitFromIssue(1, "title", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wu.AllowHarnessChanges != allow {
+			t.Fatalf("round trip allow=%v parsed %v", allow, wu.AllowHarnessChanges)
+		}
+	}
+}

@@ -17,6 +17,7 @@ import (
 )
 
 func TestCLIDiscardCheckpointAndStatus(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := f.create(t, "agent")
 	ctx := context.Background()
@@ -48,7 +49,7 @@ func TestCLIDiscardCheckpointAndStatus(t *testing.T) {
 	}
 	run := func(args ...string) (string, error) {
 		opts := &RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: checkpointCLITracker{f.tracker}}
-		cmd := newRootCmdWithOptions(opts)
+		cmd := f.command(opts)
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
@@ -113,6 +114,7 @@ func TestCLIDiscardCheckpointAndStatus(t *testing.T) {
 }
 
 func TestDiscardCheckpointFlags(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	help := f.must(t, "issue", "discard-checkpoint", "--help")
 	for _, want := range []string{"--expected-head", "--json", "maintainer"} {

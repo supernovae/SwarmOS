@@ -83,7 +83,7 @@ func newEditFixture(t *testing.T) (*cliFixture, *tracker.Issue, *editRecordingTr
 	return f, i, &editRecordingTracker{Tracker: f.tracker}
 }
 func runEdit(f *cliFixture, r tracker.Tracker, now time.Time, args ...string) (string, error) {
-	opts := &RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: r, nowFn: func() time.Time { return now }}
+	opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: r, nowFn: func() time.Time { return now }})
 	cmd := newIssueEditCmd(opts)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -299,7 +299,7 @@ func TestIssueEditEpicAuthorizationFork(t *testing.T) {
 			if kind == "unauthorized" {
 				r.Tracker = f.tracker.WithUser("outsider", "NONE")
 			}
-			opts := &RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: r, Fork: kind == "fork"}
+			opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: r, Fork: kind == "fork"})
 			cmd := newIssueEditCmd(opts)
 			cmd.SetOut(&bytes.Buffer{})
 			cmd.SetErr(&bytes.Buffer{})
@@ -555,7 +555,7 @@ func TestIssueEditConcurrentStateRecheck(t *testing.T) {
 			now := time.Now()
 			f.manager.SetNowFunc(func() time.Time { return now })
 			calls := 0
-			opts := &RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: r, nowFn: func() time.Time {
+			opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: r, nowFn: func() time.Time {
 				calls++
 				if calls == 1 { // Initial state has been inspected; the final read must catch this.
 					if kind == "claim" {
@@ -570,7 +570,7 @@ func TestIssueEditConcurrentStateRecheck(t *testing.T) {
 					}
 				}
 				return now
-			}}
+			}})
 			cmd := newIssueEditCmd(opts)
 			var out bytes.Buffer
 			cmd.SetOut(&out)

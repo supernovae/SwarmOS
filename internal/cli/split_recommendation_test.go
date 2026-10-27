@@ -12,11 +12,14 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 )
 
+// cliSplitPlan is appended to mock plans through SWARM_MOCK_PLAN_APPEND. The
+// mock agent reads that variable from the process environment, not the
+// fixture lookup, so tests that set it stay serial.
 const cliSplitPlan = "Split recommendation: required\n\n### Child one\n\n**Objective**: First half.\n\n**Acceptance Criteria**\n- [ ] `go test ./a` passes"
 
 // runSplit runs swarm and returns stdout and stderr separately.
 func (f *cliFixture) runSplit(args ...string) (string, string, error) {
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -37,6 +40,7 @@ func shapeLines(out string) []string {
 }
 
 func TestApprovalPrintsLintShapeBeforeApproving(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	acceptance := []string{"Update `internal/alpha/a.go`", "Update `internal/beta/b.go`", "Update `cmd/gamma/main.go`", "Document it", "Keep it tidy", "Make it nicer"}
 	args := []string{"issue", "create", "--title", "Oversized task", "--objective", "Change many areas", "--constraint", "Keep policy unchanged", "--gate", "agent"}
@@ -194,6 +198,7 @@ func TestNodeRunSplitRecommendationJSON(t *testing.T) {
 }
 
 func TestNormalPlansProceedWithoutSplit(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)

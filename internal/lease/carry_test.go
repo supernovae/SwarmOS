@@ -104,6 +104,16 @@ func TestApprovalCarryForward(t *testing.T) {
 				}
 				return
 			}
+			if tc == "policy edit" {
+				if len(st.Artifacts) != 3 || st.Artifacts[0].Body != "plan" || st.Artifacts[1].Body != "tests" || st.Artifacts[2].Metadata["superseded_by"] != "policy files changed" || st.ApprovalTransition != nil {
+					t.Fatalf("human plan not kept for re-review: %+v", st)
+				}
+				var human *HumanPlanApprovalError
+				if !errors.As(VerifyApproval(st, wu), &human) {
+					t.Fatal("superseded review accepted")
+				}
+				return
+			}
 			carry := tc == "descendant" || tc == "repeated carry"
 			if !carry {
 				if tc == "policy paths unavailable" && !strings.Contains(st.CarryReason, "paths unavailable") {

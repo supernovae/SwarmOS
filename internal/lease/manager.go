@@ -717,6 +717,9 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		old.PolicyDigest = digest
 		old.BaseSHA = base
 		old.EffectiveGate = gate
+		if _, superseded := SupersededReview(old); superseded && gate != contract.GateHuman {
+			invalidatePRRevisionEvidence(old)
+		}
 		old.ApprovedBy = owner
 		old.ApprovedAt = m.nowFn()
 		if _, err = m.save(ctx, n, rev, old); err != nil {
@@ -2127,7 +2130,7 @@ func verifyReviewBinding(st *IssueState, gate contract.GateMode) error {
 			review = a
 		}
 	}
-	if plan == nil || test == nil || review == nil || review.Verdict != "APPROVED" {
+	if plan == nil || test == nil || review == nil || review.Verdict != "APPROVED" || review.Metadata["superseded_by"] != "" {
 		return ErrApprovalRequired
 	}
 	if review.Metadata["actor"] == "" || review.Metadata["review_source"] != "authenticated-"+review.Metadata["kind"] ||

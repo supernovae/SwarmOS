@@ -86,9 +86,10 @@ func TestDelegatedAuthenticatedWorkUnit(t *testing.T) {
 }
 
 func authenticatedWorkUnit(t *testing.T, routing string) {
-	t.Setenv("SWARM_EXECUTION_MODE", "isolated")
-	t.Setenv("SWARM_USER", "native-worker")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	// Serial: the interactive phase below swaps the process stdin.
+	env := newFixtureEnv(t)
+	env.set("SWARM_EXECUTION_MODE", "isolated")
+	env.set("SWARM_USER", "native-worker")
 	root := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
@@ -137,7 +138,7 @@ func authenticatedWorkUnit(t *testing.T, routing string) {
 	}
 	git("add", ".")
 	git("commit", "-m", "approved native workflow fixture")
-	tr := tracker.NewLocalTracker(root)
+	tr := tracker.NewLocalTracker(root).WithUser("native-worker", "")
 	cfg, err := harness.LoadConfig(root)
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +147,7 @@ func authenticatedWorkUnit(t *testing.T, routing string) {
 	if err := manager.ConfigureStore(root); err != nil {
 		t.Fatal(err)
 	}
-	f := &cliFixture{root: root, tracker: tr, manager: manager}
+	f := &cliFixture{root: root, tracker: tr, manager: manager, env: env}
 	f.must(t, "repo", "doctor")
 	f.must(t, "issue", "create", "--title", "Native greeting", "--objective", "Create hello.txt containing exactly hello from SwarmOS followed by a newline.", "--constraint", "Keep repository policy unchanged. Make only this small text-file change.", "--acceptance", "The greeting required check passes.", "--gate", "human")
 	issues, err := tr.ListIssues(context.Background(), tracker.IssueFilter{State: "open"})
@@ -180,9 +181,9 @@ func authenticatedWorkUnit(t *testing.T, routing string) {
 	if _, err := f.run("issue", "work", n, "--phase", "implement"); err == nil {
 		t.Fatal("agent review satisfied the human gate")
 	}
-	t.Setenv("SWARM_USER", "native-maintainer")
+	f.setenv("SWARM_USER", "native-maintainer")
 	f.must(t, "issue", "review-plan", n, "--approve", "--notes", "Verified the bounded greeting plan")
-	t.Setenv("SWARM_USER", "native-worker")
+	f.setenv("SWARM_USER", "native-worker")
 	f.must(t, "issue", "work", n, "--headless")
 	f.must(t, "issue", "submit", n)
 	state := f.state(t, number)

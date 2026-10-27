@@ -27,6 +27,7 @@ func leaseLength(t *testing.T, st *lease.IssueState, from time.Time) time.Durati
 }
 
 func TestCLIClaimAndRenewDurationCappedAtApprovedPolicy(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		requested string
 		want      time.Duration
@@ -73,6 +74,7 @@ func TestCLIClaimAndRenewDurationCappedAtApprovedPolicy(t *testing.T) {
 // node run selects work with no duration override; a longer checkout policy
 // cannot raise the lease above the approved base.
 func TestCLINodeSelectionDurationUsesApprovedPolicy(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	f.must(t, "issue", "approve", strconv.Itoa(issue))
@@ -92,7 +94,7 @@ func TestCLINodeSelectionDurationUsesApprovedPolicy(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cmd := &cobra.Command{}
 			cmd.SetContext(context.Background())
-			pulled, err := pullNextReadyIssue(context.Background(), cmd, &RootOptions{RepoRoot: f.root, Backend: "local"}, false, workflow.WorkOptions{AgentName: "mock", Phase: "all"}, override)
+			pulled, err := pullNextReadyIssue(context.Background(), cmd, f.options(&RootOptions{RepoRoot: f.root, Backend: "local"}), false, workflow.WorkOptions{AgentName: "mock", Phase: "all"}, override)
 			if err != nil {
 				t.Fatal(err)
 			}

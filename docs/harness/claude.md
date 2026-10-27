@@ -14,15 +14,18 @@ agents:
   claude:
     binary: claude
     model: your-preferred-model   # optional
+    effort: high                  # optional: low, medium, high or max
 ```
+
+`effort` sets Claude Code's reasoning effort with `--effort`. SwarmOS accepts only the values above and records the effort in each run's provenance. For a different effort per role, add one entry per role (for example `claude-planner` with `harness: claude`) and map it under `roles:`.
 
 ## How SwarmOS runs Claude Code
 
 | Mode | Invocation |
 | --- | --- |
-| Isolated | `claude --restricted --strict-mcp-config --mcp-config <swarm tools> --tools "" --disable-slash-commands --no-chrome --settings <swarm settings> --permission-mode dontAsk --permission-prompts none --no-session-persistence --print` |
+| Isolated | `claude --restricted --strict-mcp-config --mcp-config <swarm tools> --tools "" --disable-slash-commands --no-chrome --settings <swarm settings> --permission-mode dontAsk --permission-prompts none --no-session-persistence --print`, plus `--model <model>` and `--effort <effort>` when configured |
 | Isolated, interactive | The same settings, one turn at a time. After each turn, SwarmOS asks for a follow-up instruction; press Enter to finish the phase. |
-| `trusted-local` | `claude -p --append-system-prompt-file <system prompt> "<task>"` unattended, or the same without `-p` interactively |
+| `trusted-local` | `claude -p --append-system-prompt-file <system prompt> "<task>"` unattended, or the same without `-p` interactively; `--model` and `--effort` come first when configured |
 
 Claude starts in a coordinator-owned control directory, never inside candidate code. Its only way to act on the task is the `swarm` MCP server, which provides `swarm_read`, `swarm_write`, `swarm_edit`, and `swarm_shell`.
 

@@ -278,3 +278,76 @@ func TestOpenCodeV2CommandsPreserveOptionalModel(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentEffortHelper(t *testing.T) {
+	if os.Getenv("SWARM_AGENT_EFFORT_HELPER") != "1" {
+		return
+	}
+	model, effort := false, false
+	for i, arg := range os.Args[:len(os.Args)-1] {
+		model = model || arg == "--model" && os.Args[i+1] == "approved-model"
+		effort = effort || arg == "--effort" && os.Args[i+1] == "high"
+	}
+	if model && effort {
+		os.Exit(0)
+	}
+	os.Exit(25)
+}
+
+func TestEffortArgvMapsOnlySupportedFlag(t *testing.T) {
+	for _, tc := range []struct {
+		driver, effort string
+		extra          []string
+	}{
+		{"claude", "", nil},
+		{"claude", "max", []string{"--effort", "max"}},
+		{"codex", "", nil},
+		{"codex", "minimal", []string{"-c", `model_reasoning_effort="minimal"`}},
+	} {
+		for _, mode := range []string{"headless", "interactive"} {
+			req := RunRequest{Mode: mode, Model: "m", TaskPrompt: "task"}
+			_, base := (&CLIAdapter{driver: tc.driver, binary: tc.driver}).BuildCommand(req)
+			_, got := (&CLIAdapter{driver: tc.driver, binary: tc.driver, effort: tc.effort}).BuildCommand(req)
+			if want := append(slices.Clone(tc.extra), base...); !slices.Equal(got, want) {
+				t.Fatalf("%s %s effort=%q:\n got %q\nwant %q", tc.driver, mode, tc.effort, got, want)
+			}
+		}
+	}
+}
+
+func TestConfiguredRunnerRejectsInvalidEffort(t *testing.T) {
+	for name, ac := range map[string]contract.AgentConfig{
+		"claude": {Binary: os.Args[0], Effort: "minimal"},
+		"codex":  {Binary: os.Args[0], Effort: "max"},
+		"omp":    {Binary: os.Args[0], Effort: "high"},
+	} {
+		cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{name: ac}}
+		if _, err := NewConfiguredRunner(name, cfg, false); err == nil || !strings.Contains(err.Error(), "effort") {
+			t.Fatalf("%s accepted effort %q: %v", name, ac.Effort, err)
+		}
+	}
+}
+
+func TestConfiguredEffortReachesHarnessAndProvenance(t *testing.T) {
+	t.Setenv("SWARM_AGENT_EFFORT_HELPER", "1")
+	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{
+		"claude-planner": {Binary: os.Args[0], Harness: "claude", Args: []string{"-test.run=TestAgentEffortHelper", "--"}, Model: "approved-model", Effort: "high"},
+	}}
+	runner, err := NewConfiguredRunner("claude-planner", cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if att := runner.Provenance("planner", false); att.Model != "approved-model" || att.Effort != "high" {
+		t.Fatalf("provenance = %+v", att)
+	}
+	res, err := runner.Run(t.Context(), RunRequest{Role: "planner", WorktreePath: t.TempDir(), Mode: "headless"})
+	if err != nil {
+		t.Fatalf("configured effort did not reach harness: %v", err)
+	}
+	if res.Attestation.Model != "approved-model" || res.Attestation.Effort != "high" {
+		t.Fatalf("run attestation = %+v", res.Attestation)
+	}
+	if meta := res.Attestation.Metadata(nil); meta["effort"] != "high" || meta["model"] != "approved-model" {
+		t.Fatalf("metadata = %v", meta)
+	}
+}

@@ -43,6 +43,9 @@ type WorkerOptions struct {
 	ReadOnly                        bool
 	DiscardChanges                  bool
 	Timeout                         time.Duration
+	// Effort is the approved reasoning effort that native and harness-tool
+	// launchers map to their harness flag. Empty keeps the harness default.
+	Effort string
 	// Dependencies are the coordinator's prepared dependency caches, mounted
 	// read-only for native and harness-tool runs.
 	Dependencies Dependencies

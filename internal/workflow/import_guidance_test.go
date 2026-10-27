@@ -3,12 +3,16 @@ package workflow
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 const developerOutputRerun = " --phase implement --instructions 'Record notes, test results, and blocked checks in .swarm/active/IMPLEMENTATION.md. Do not change other .swarm/active/ files except LESSONS.md.'"
@@ -80,39 +84,133 @@ func TestImportRejectionReasonRouting(t *testing.T) {
 	}
 }
 
-func TestDeveloperOutputImportRecoveryGuidance(t *testing.T) {
-	e, issue := budgetEngine(t)
+const rejectedTestPatch = "diff --git a/src/main.go b/src/main.go\nnew file mode 100644\n--- /dev/null\n+++ b/src/main.go\n@@ -0,0 +1 @@\n+package main\n"
+
+// rejectingRunner returns the developer's import check like the sandbox does,
+// handing a recoverable rejection's patch to the coordinator first.
+func rejectingRunner(paths []string) func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 	mock := &agent.MockRunner{}
-	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+	return func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
-			if req.Role == "developer" {
-				return nil, req.CheckImport(ctx, []string{"src/main.go", ".swarm/active/IMPLEMENTATION.md", ".swarm/active/VALIDATION.md"})
+			if req.Role != "developer" {
+				return mock.Run(ctx, req)
 			}
-			return mock.Run(ctx, req)
+			err := req.CheckImport(ctx, paths)
+			var recoverable sandbox.RecoverableImport
+			if req.PreserveRejected != nil && errors.As(err, &recoverable) && recoverable.RecoverableImport() {
+				req.PreserveRejected(ctx, err, []byte(rejectedTestPatch))
+			}
+			return nil, err
 		}}, nil
 	}
+}
+
+func recoveryDirEntries(t *testing.T, state string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(state, "swarm", "recovery"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	var patches []os.DirEntry
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".patch") {
+			patches = append(patches, entry)
+		}
+	}
+	return patches
+}
+
+func TestDeveloperOutputImportRecoveryGuidance(t *testing.T) {
+	e, issue := budgetEngine(t)
+	state := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", state)
+	e.NewRunner = rejectingRunner([]string{"src/main.go", ".swarm/active/IMPLEMENTATION.md", ".swarm/active/VALIDATION.md"})
 	opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
 	res, err := e.ExecuteWork(t.Context(), opts)
 	var rejection *importRejection
 	if !errors.As(err, &rejection) {
 		t.Fatalf("expected rejection: %v", err)
 	}
-	state, loadErr := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+	st, loadErr := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
-	rerun := "swarm issue work " + strconv.Itoa(issue.Number) + developerOutputRerun
-	for _, text := range []string{"rejected agent changes to: .swarm/active/VALIDATION.md;", "worktree was left unchanged", "developers record results in .swarm/active/IMPLEMENTATION.md, not .swarm/active/VALIDATION.md", rerun} {
-		if !strings.Contains(err.Error(), text) || !strings.Contains(state.NextPhaseReason, text) {
-			t.Fatalf("missing %q: %v %+v", text, err, state)
+	patches := recoveryDirEntries(t, state)
+	if len(patches) != 1 {
+		t.Fatalf("saved %d recovery patches", len(patches))
+	}
+	name := patches[0].Name()
+	n := strconv.Itoa(issue.Number)
+	rerun := "swarm issue work " + n + developerOutputRerun
+	for _, text := range []string{"rejected agent changes to: .swarm/active/VALIDATION.md;", "worktree was left unchanged", "developers record results in .swarm/active/IMPLEMENTATION.md, not .swarm/active/VALIDATION.md", rerun, "recovery patch " + name, "recover with swarm issue recover-import " + n + " " + name} {
+		if !strings.Contains(err.Error(), text) || !strings.Contains(st.NextPhaseReason, text) {
+			t.Fatalf("missing %q: %v %+v", text, err, st)
 		}
 	}
-	if state.Lease.NextPhase != "implement" || res.ClaimBudgetPause != nil {
+	// Only the local error names the private path; the projected reason does not.
+	path := filepath.Join(state, "swarm", "recovery", name)
+	if !strings.Contains(err.Error(), path) || strings.Contains(st.NextPhaseReason, state) {
+		t.Fatalf("path placement: %v / %s", err, st.NextPhaseReason)
+	}
+	if !strings.HasPrefix(st.NextPhaseReason, "rejected agent changes to:") {
+		t.Fatalf("reason prefix changed: %s", st.NextPhaseReason)
+	}
+	header, body, loadErr := agent.LoadRecoveryPatch(name)
+	if loadErr != nil || string(body) != rejectedTestPatch || header.Issue != issue.Number || header.PR != 0 || header.Role != "developer" || len(header.HeadSHA) != 40 || !reflect.DeepEqual(header.Rejected, []string{".swarm/active/VALIDATION.md"}) {
+		t.Fatalf("saved patch: %+v %q %v", header, body, loadErr)
+	}
+	if st.Lease.NextPhase != "implement" || res.ClaimBudgetPause != nil {
 		t.Fatalf("bad recovery: %+v", res)
 	}
-	for _, a := range state.Artifacts {
+	for _, a := range st.Artifacts {
 		if a.Type == contract.ArtifactValidation || a.Type == contract.ArtifactImplementation {
 			t.Fatalf("rejected run recorded artifact: %+v", a)
+		}
+	}
+}
+
+func TestRejectedImportNonRecoverableSavesNothing(t *testing.T) {
+	for _, path := range []string{".swarm/active/PLAN.md", ".swarm/active/WORKUNIT.md", ".swarm/active/TEST_PLAN.md", ".swarm/validation/required-checks.yaml"} {
+		t.Run(path, func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			state := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", state)
+			e.NewRunner = rejectingRunner([]string{"src/main.go", ".swarm/active/VALIDATION.md", path})
+			_, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			var rejection *importRejection
+			if !errors.As(err, &rejection) || rejection.Recoverable {
+				t.Fatalf("expected a non-recoverable rejection: %v", err)
+			}
+			if patches := recoveryDirEntries(t, state); len(patches) != 0 {
+				t.Fatalf("saved %v", patches)
+			}
+			st, loadErr := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if strings.Contains(err.Error(), "recover-import") || strings.Contains(st.NextPhaseReason, "recover") {
+				t.Fatalf("offered recovery: %v", err)
+			}
+		})
+	}
+}
+
+func TestImportRejectionReasonWithPatch(t *testing.T) {
+	const name = "rejected-0123456789abcdef0123456789abcdef.patch"
+	saved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, Patch: "/home/someone/.local/state/swarm/recovery/" + name}
+	unsaved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, PatchNote: "binary or oversized changes"}
+	for _, tc := range []struct {
+		rejection *importRejection
+		issue, pr int
+		want      string
+	}{
+		{saved, 7, 0, "rerun with swarm issue work 7 --phase implement; or keep the other changes: recovery patch " + name + " was saved to your state directory; recover with swarm issue recover-import 7 " + name},
+		{saved, 7, 42, "rerun with swarm pr work 42 --phase implement; or keep the other changes: recovery patch " + name + " was saved to your state directory; recover with swarm pr recover-import 42 " + name},
+		{unsaved, 7, 0, "rerun with swarm issue work 7 --phase implement; no recovery patch: binary or oversized changes"},
+	} {
+		got := importRejectionReason(tc.rejection, tc.issue, tc.pr)
+		if !strings.HasSuffix(got, tc.want) || strings.Contains(got, "/home/") {
+			t.Fatalf("got %q want suffix %q", got, tc.want)
 		}
 	}
 }

@@ -29,7 +29,10 @@ import (
 // WorkerOptions describes a disposable Linux OCI worker. OutputDir is a trusted
 // coordinator-owned destination used by the review snapshot's output channel.
 type WorkerOptions struct {
-	CheckImport                     func(context.Context, []string) error
+	CheckImport func(context.Context, []string) error
+	// PreserveRejected receives the patch of a run whose import was refused
+	// with a RecoverableImport error; patch is nil when none could be built.
+	PreserveRejected                func(ctx context.Context, importErr error, patch []byte)
 	GuidanceDelivered               func(string) // coordinator callback for forwarded interactive guidance
 	Lifecycle                       *Lifecycle   // optional coordinator timing and scratch-log observer
 	Limits                          contract.AgentLimits
@@ -528,7 +531,7 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 		return nil
 	}
 	if err := checkImport(ctx, opts, initial, manifest); err != nil {
-		return err
+		return preserveRejected(ctx, opts, input, extracted, err)
 	}
 	if err := importWorker(ctx, original, extracted, initial, manifest); err != nil {
 		return err

@@ -460,7 +460,7 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 		return err
 	}
 	if err := checkImport(ctx, opts, initial, final); err != nil {
-		return err
+		return preserveRejected(ctx, opts, input, result, err)
 	}
 	if err := importWorker(ctx, original, result, initial, final); err != nil {
 		return err

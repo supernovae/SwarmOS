@@ -123,17 +123,19 @@ type CheckSpec struct {
 }
 
 type SwarmConfig struct {
-	Execution     ExecutionConfig        `yaml:"execution,omitempty" json:"execution,omitempty"`
-	Version       int                    `yaml:"version" json:"version"`
-	DefaultAgent  string                 `yaml:"default_agent" json:"default_agent"`
-	DefaultGate   GateMode               `yaml:"default_gate" json:"default_gate"`
-	PlanMode      string                 `yaml:"plan_mode,omitempty" json:"plan_mode,omitempty"`
-	CommitMessage *CommitMessageConfig   `yaml:"commit_message,omitempty" json:"commit_message,omitempty"`
-	Roles         map[string]string      `yaml:"roles,omitempty" json:"roles,omitempty"`
-	Lease         LeaseConfig            `yaml:"lease" json:"lease"`
-	Security      SecurityConfig         `yaml:"security" json:"security"`
-	Agents        map[string]AgentConfig `yaml:"agents" json:"agents"`
-	Fork          *ForkConfig            `yaml:"fork,omitempty" json:"fork,omitempty"`
+	Execution     ExecutionConfig      `yaml:"execution,omitempty" json:"execution,omitempty"`
+	Version       int                  `yaml:"version" json:"version"`
+	DefaultAgent  string               `yaml:"default_agent" json:"default_agent"`
+	DefaultGate   GateMode             `yaml:"default_gate" json:"default_gate"`
+	PlanMode      string               `yaml:"plan_mode,omitempty" json:"plan_mode,omitempty"`
+	CommitMessage *CommitMessageConfig `yaml:"commit_message,omitempty" json:"commit_message,omitempty"`
+	// LedgerNamespace is read only from the upstream default branch.
+	LedgerNamespace string                 `yaml:"ledger_namespace,omitempty" json:"ledger_namespace,omitempty"`
+	Roles           map[string]string      `yaml:"roles,omitempty" json:"roles,omitempty"`
+	Lease           LeaseConfig            `yaml:"lease" json:"lease"`
+	Security        SecurityConfig         `yaml:"security" json:"security"`
+	Agents          map[string]AgentConfig `yaml:"agents" json:"agents"`
+	Fork            *ForkConfig            `yaml:"fork,omitempty" json:"fork,omitempty"`
 }
 
 type CommitMessageConfig struct {

@@ -159,7 +159,7 @@ func TestReconcileCheckpointThenResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sha := range []string{f.a, f.b} {
-		if f.git(f.remote, "rev-parse", coordination.CheckpointRef(f.n, sha)) != sha {
+		if f.git(f.remote, "rev-parse", coordination.BranchLayout.CheckpointRef(f.n, sha)) != sha {
 			t.Fatal("checkpoint not retained")
 		}
 	}

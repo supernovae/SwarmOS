@@ -65,7 +65,7 @@ func TestCleanupAtomicBranchAndStateFences(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				if got := git(remote, "rev-parse", CheckpointRef(1, head)); got != head {
+				if got := git(remote, "rev-parse", BranchLayout.CheckpointRef(1, head)); got != head {
 					t.Fatal("cleanup lost retained checkpoint")
 				}
 				if out := git(remote, "for-each-ref", "refs/heads/swarm/issue-1-cleanup"); out != "" {

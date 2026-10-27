@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -78,9 +77,9 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	// Fetch only immutable object retention, never reset or fetch into task refs.
 	if _, err = checkpointGit(ctx, m.repoRoot, "cat-file", "-e", expected+"^{commit}"); err != nil {
 		if dryRun {
-			return nil, fmt.Errorf("predecessor %s unavailable locally; fetch %s before inspecting lineage", expected, coordination.CheckpointRef(n, expected))
+			return nil, fmt.Errorf("predecessor %s unavailable locally; fetch %s before inspecting lineage", expected, m.LedgerLayout().CheckpointRef(n, expected))
 		}
-		if _, err = checkpointGit(ctx, m.repoRoot, "fetch", "--no-write-fetch-head", m.UpstreamRemote(), coordination.CheckpointRef(n, expected)); err != nil {
+		if _, err = checkpointGit(ctx, m.repoRoot, "fetch", "--no-write-fetch-head", m.UpstreamRemote(), m.LedgerLayout().CheckpointRef(n, expected)); err != nil {
 			return nil, fmt.Errorf("predecessor %s unavailable: %w", expected, err)
 		}
 	}

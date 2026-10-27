@@ -264,7 +264,17 @@ var Operations = []string{
 }
 
 func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor string, req lease.ForkRequest) (*lease.IssueState, string, error) {
-	readStore := coordination.NewGitStoreWithRemote(c.RepoRoot, c.upstreamRemote())
+	// The namespace routes the first state read, so it comes from the current
+	// upstream default branch, never the contributor fork or issue base.
+	ns, err := workspace.TrustedLedgerNamespace(c.RepoRoot, c.upstreamRemote())
+	if err != nil {
+		return nil, "", err
+	}
+	layout, err := coordination.LayoutFor(ns)
+	if err != nil {
+		return nil, "", err
+	}
+	readStore := coordination.NewGitStoreWithLayout(c.RepoRoot, c.upstreamRemote(), layout)
 	rawCurrent, _, err := readStore.Load(ctx, req.IssueNumber)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: approve task first", lease.ErrApprovalRequired)
@@ -286,7 +296,7 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 		return nil, "", fmt.Errorf("load approved policy at %s: %w", currentState.BaseSHA, err)
 	}
 
-	idxStore := coordination.NewForkIndexedStoreWithRemote(c.RepoRoot, c.upstreamRemote(), actor, cfg.MaxActiveForkClaims(), requestID)
+	idxStore := coordination.NewForkIndexedStoreWithLayout(c.RepoRoot, c.upstreamRemote(), layout, actor, cfg.MaxActiveForkClaims(), requestID)
 	idxStore.SetNowFunc(c.now)
 
 	actTracker := &actionTracker{Tracker: c.Tracker, actor: actor}

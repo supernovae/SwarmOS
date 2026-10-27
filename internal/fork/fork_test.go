@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -288,6 +289,29 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
+	for _, ns := range []string{contract.LedgerNamespaceBranch, contract.LedgerNamespaceHidden} {
+		t.Run(ns, func(t *testing.T) { testForkCoordinatorSecurityAndLifecycle(t, ns) })
+	}
+}
+
+// setLedgerNamespace rewrites the scaffolded ledger_namespace line.
+func setLedgerNamespace(t *testing.T, root, ns string) {
+	t.Helper()
+	path := filepath.Join(root, ".swarm", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := regexp.MustCompile(`(?m)^ledger_namespace: .*$`).ReplaceAll(data, []byte("ledger_namespace: "+ns))
+	if string(next) == string(data) && !strings.Contains(string(data), "ledger_namespace: "+ns) {
+		t.Fatal("scaffolded config has no ledger_namespace line")
+	}
+	if err := os.WriteFile(path, next, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	git := func(dir string, args ...string) string {
@@ -311,6 +335,11 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: upstreamCheckout}); err != nil {
 		t.Fatal(err)
 	}
+	setLedgerNamespace(t, upstreamCheckout, ns)
+	layout, err := coordination.LayoutFor(ns)
+	if err != nil {
+		t.Fatal(err)
+	}
 	git(upstreamCheckout, "add", ".")
 	git(upstreamCheckout, "commit", "-m", "initial approved policy")
 	git(upstreamCheckout, "push", "origin", "main")
@@ -326,6 +355,14 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	}
 	git(tmp, "clone", "--bare", originBare, aliceForkBare)
 	git(tmp, "clone", "--bare", originBare, bobForkBare)
+	// A contributor fork selecting the other namespace must have no effect.
+	forkEdit := filepath.Join(tmp, "alice-fork-edit")
+	git(tmp, "clone", aliceForkBare, forkEdit)
+	git(forkEdit, "config", "user.name", "Alice")
+	git(forkEdit, "config", "user.email", "alice@example.invalid")
+	setLedgerNamespace(t, forkEdit, layout.Counterpart().Name())
+	git(forkEdit, "commit", "-am", "select the other ledger namespace")
+	git(forkEdit, "push", "origin", "HEAD:main")
 
 	ghState := newFakeGitHubState()
 	ghState.baseSHA = baseSHA
@@ -423,7 +460,7 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	// Block upstream push from alice's clone to prove zero upstream ref push
 	git(aliceClone, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "denied-upstream.git"))
 
-	aliceStore := coordination.NewGitStore(aliceClone)
+	aliceStore := coordination.NewGitStoreWithLayout(aliceClone, "", layout)
 	aliceGateway := &Gateway{
 		Tracker:      aliceTracker,
 		Store:        aliceStore,
@@ -847,4 +884,23 @@ func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 			t.Fatal("contributor staging bypassed trusted gate")
 		}
 	})
+
+	// Every ledger write landed in the selected namespace; only task branches
+	// and the default branch live under refs/heads/ in hidden mode.
+	refs := strings.Fields(git(originBare, "for-each-ref", "--format=%(refname)"))
+	var contributors int
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, layout.ContributorPrefix()) {
+			contributors++
+		}
+		if coordination.IsLedgerRef(ref) && !strings.HasPrefix(ref, layout.StatePrefix()) && !strings.HasPrefix(ref, layout.CheckpointPrefix()) && !strings.HasPrefix(ref, layout.ContributorPrefix()) {
+			t.Errorf("ledger ref %s outside the %s namespace", ref, ns)
+		}
+		if ns == contract.LedgerNamespaceHidden && strings.HasPrefix(ref, "refs/heads/") && ref != "refs/heads/main" && !strings.HasPrefix(ref, "refs/heads/swarm/issue-") {
+			t.Errorf("hidden mode created branch %s", ref)
+		}
+	}
+	if contributors == 0 || !slices.Contains(refs, layout.StateRef(42)) {
+		t.Fatalf("fork coordination left no %s ledger: %v", ns, refs)
+	}
 }

@@ -76,7 +76,7 @@ func (m *Manager) DiscardCheckpoint(ctx context.Context, n int, owner, expectedH
 	st.DiscardedCheckpoints = append(st.DiscardedCheckpoints, DiscardedCheckpoint{
 		Branch:       st.Branch,
 		HeadSHA:      head,
-		RetentionRef: coordination.CheckpointRef(n, head),
+		RetentionRef: m.LedgerLayout().CheckpointRef(n, head),
 		BaseSHA:      st.BaseSHA,
 		DiscardedBy:  actor,
 		DiscardedAt:  m.nowFn(),

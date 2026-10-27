@@ -83,7 +83,7 @@ func unsubmittedCleanupPreview(ctx context.Context, root string, m *Manager, n i
 		b := workspace.InspectCleanupBranch(ctx, root, st.Branch, "", nil)
 		p.Resources = append(p.Resources, CleanupResource{Kind: "local-code-branch", Name: st.Branch, CurrentHead: b.Head, Absent: b.Absent, Reason: reason})
 	}
-	for _, name := range []string{fmt.Sprintf("refs/heads/swarm-state/issue-%d", n), "refs/heads/swarm-contributors/*"} {
+	for _, name := range []string{m.LedgerLayout().StateRef(n), m.LedgerLayout().ContributorPrefix() + "*"} {
 		p.Resources = append(p.Resources, CleanupResource{Kind: "ledger", Name: name, Reason: "retained authoritative state and provenance"})
 	}
 	return p

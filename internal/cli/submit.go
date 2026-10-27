@@ -188,7 +188,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return err
 			}
 			prTitle := fmt.Sprintf("%s (#%d)", iss.Title, issue)
-			prBody := formatDraftPRBody(unit, state)
+			prBody := formatDraftPRBody(unit, state, manager.LedgerLayout().StateRef(issue))
 			prHead := branch
 			if rootOpts.Fork {
 				forkOwner := owner
@@ -292,7 +292,7 @@ func defaultBaseBranch(root, upstreamRemote string) (string, error) {
 	return branch, nil
 }
 
-func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState) string {
+func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState, stateRef string) string {
 	var body strings.Builder
 	fmt.Fprintf(&body, "Closes #%d\n\n## Objective\n\n%s\n", unit.IssueNumber, strings.TrimSpace(unit.Objective))
 	if len(unit.Constraints) > 0 {
@@ -364,7 +364,7 @@ func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState) string 
 				default:
 					title = fmt.Sprintf("📄 Artifact (%s — sha256:%s)", a.Type, digest)
 				}
-				fmt.Fprintf(&body, "<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, lease.TruncateArtifactBody(a.Body, unit.IssueNumber))
+				fmt.Fprintf(&body, "<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, lease.TruncateArtifactBody(a.Body, stateRef))
 			}
 		}
 	}

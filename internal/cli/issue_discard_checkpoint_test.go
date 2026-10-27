@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,6 +19,18 @@ import (
 
 func TestCLIDiscardCheckpointAndStatus(t *testing.T) {
 	t.Parallel()
+	for _, ns := range []string{"branch", "hidden"} {
+		t.Run(ns, func(t *testing.T) {
+			t.Parallel()
+			testCLIDiscardCheckpointAndStatus(t, ns)
+		})
+	}
+}
+
+// testCLIDiscardCheckpointAndStatus selects ns on the published default
+// branch, the only configuration that chooses the ledger namespace, and gives
+// the fixture manager the layout every github command resolves from it.
+func testCLIDiscardCheckpointAndStatus(t *testing.T, ns string) {
 	f := newCLIFixture(t)
 	n := f.create(t, "agent")
 	ctx := context.Background()
@@ -25,8 +38,26 @@ func TestCLIDiscardCheckpointAndStatus(t *testing.T) {
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
 	prGit(t, f.root, "remote", "add", "origin", remote)
+	config := filepath.Join(f.root, ".swarm", "config.yaml")
+	data, err := os.ReadFile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := regexp.MustCompile(`(?m)^ledger_namespace: .*$`).ReplaceAllString(string(data), "ledger_namespace: "+ns)
+	if err = os.WriteFile(config, []byte(selected), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, f.root, "commit", "--allow-empty", "-am", "select "+ns+" ledger refs")
 	prGit(t, f.root, "push", "origin", "main")
-	f.manager.SetStore(f.root, coordination.NewGitStore(f.root))
+	trusted, err := workspace.TrustedLedgerNamespace(f.root, "")
+	if err != nil || trusted != ns {
+		t.Fatalf("trusted namespace = %q, %v; want %s", trusted, err, ns)
+	}
+	layout, err := coordination.LayoutFor(trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.manager.SetStore(f.root, coordination.NewGitStoreWithLayout(f.root, "", layout))
 	if _, err := f.manager.ApproveTask(ctx, n, "alice"); err != nil {
 		t.Fatal(err)
 	}
@@ -82,12 +113,15 @@ func TestCLIDiscardCheckpointAndStatus(t *testing.T) {
 		Kind      string                    `json:"kind"`
 		Discarded lease.DiscardedCheckpoint `json:"discarded"`
 	}
-	ref := coordination.CheckpointRef(n, c)
+	ref := layout.CheckpointRef(n, c)
 	if err = json.Unmarshal([]byte(raw), &result); err != nil || result.Kind != "checkpoint-discard" || result.Discarded.HeadSHA != c || result.Discarded.RetentionRef != ref || result.Discarded.DiscardedBy != "alice" {
 		t.Fatalf("discard output: %s %v", raw, err)
 	}
 	if prGit(t, remote, "rev-parse", ref) != c {
 		t.Fatal("abandoned checkpoint not retained upstream")
+	}
+	if out := prGit(t, remote, "for-each-ref", layout.Counterpart().CheckpointPrefix()); out != "" {
+		t.Fatalf("retention landed in the unselected namespace:\n%s", out)
 	}
 	text := must("issue", "status", number)
 	for _, want := range []string{"Discarded checkpoint: " + c, "retained at " + ref, "Fresh start: next claim begins on " + workspace.FreshStartBranch(n, c)} {
@@ -117,7 +151,7 @@ func TestDiscardCheckpointFlags(t *testing.T) {
 	t.Parallel()
 	f := newCLIFixture(t)
 	help := f.must(t, "issue", "discard-checkpoint", "--help")
-	for _, want := range []string{"--expected-head", "--json", "maintainer"} {
+	for _, want := range []string{"--expected-head", "--json", "maintainer", "refs/heads/swarm-checkpoints/", "refs/swarm/checkpoints/"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("help lacks %s", want)
 		}

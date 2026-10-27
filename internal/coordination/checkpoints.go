@@ -10,12 +10,6 @@ import (
 	"strings"
 )
 
-// CheckpointRef is permanent object retention, independent of task branches and
-// the ledger's code-free ancestry. Cleanup must never remove this namespace.
-func CheckpointRef(n int, head string) string {
-	return fmt.Sprintf("refs/heads/swarm-checkpoints/issue-%d/%s", n, head)
-}
-
 func validCheckpointSHA(head string) error {
 	if len(head) != 40 {
 		return fmt.Errorf("invalid checkpoint SHA %q", head)
@@ -93,7 +87,7 @@ func (s *FileStore) CompareAndSwapRetaining(ctx context.Context, n int, old stri
 		if _, err := git.run(ctx, "", "cat-file", "-e", head+"^{commit}"); err != nil {
 			return "", fmt.Errorf("checkpoint object %s unavailable: %w", head, err)
 		}
-		ref := CheckpointRef(n, head)
+		ref := BranchLayout.CheckpointRef(n, head)
 		if actual, err := git.run(ctx, "", "rev-parse", "--verify", "--quiet", ref); err == nil {
 			if actual != head {
 				return "", fmt.Errorf("%w: retention ref %s contains %s", ErrConflict, ref, actual)
@@ -124,7 +118,7 @@ func (s *GitStore) retentionArgs(ctx context.Context, n int, heads ...string) ([
 		if _, err := hex.DecodeString(head); err != nil {
 			return nil, fmt.Errorf("invalid checkpoint SHA %q", head)
 		}
-		ref := CheckpointRef(n, head)
+		ref := s.layout.CheckpointRef(n, head)
 		if _, err := s.run(ctx, "", "cat-file", "-e", head+"^{commit}"); err != nil {
 			if _, fetchErr := s.run(ctx, "", "fetch", "--no-write-fetch-head", s.Remote(), ref); fetchErr != nil {
 				return nil, fmt.Errorf("checkpoint object %s unavailable (including retention ref %s): %w", head, ref, fetchErr)
@@ -140,7 +134,7 @@ func (s *GitStore) retentionArgs(ctx context.Context, n int, heads ...string) ([
 			}
 			// Include even an existing ref: the lease detects concurrent corruption.
 			args = append(args, "--force-with-lease="+ref+":"+head, head+":"+ref)
-		} else if err == ErrNotFound {
+		} else if errors.Is(err, ErrNotFound) {
 			args = append(args, "--force-with-lease="+ref+":", head+":"+ref)
 		} else {
 			return nil, err

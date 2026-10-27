@@ -6,7 +6,7 @@ SwarmOS is built around a simple premise: **your Git repository and GitHub Issue
 flowchart TB
     subgraph ControlPlane["Git & GitHub Control Plane"]
         Issue["GitHub Issue #N<br/>WorkUnit Contract"]
-        Ref["Git CAS Ref<br/>refs/heads/swarm-state/issue-N"]
+        Ref["Git CAS Ref<br/>refs/heads/swarm-state/issue-N<br/>or refs/swarm/state/issue-N"]
         Comment["Living Issue Comment<br/>Human-Readable Audit Projection"]
         Branch["Checkpoint Branch<br/>swarm/issue-N-slug"]
     end
@@ -29,7 +29,9 @@ flowchart TB
 
 ## 1. Git Compare-and-Swap Coordination (`internal/coordination/` & `internal/lease/`)
 
-SwarmOS stores authoritative task coordination state in dedicated Git refs (`refs/heads/swarm-state/issue-<N>` on GitHub, or a file-locked CAS store when `--backend local` is explicitly selected) and projects a human-readable summary comment onto the GitHub Issue.
+SwarmOS stores authoritative task coordination state in dedicated Git refs (`refs/heads/swarm-state/issue-<N>` or `refs/swarm/state/issue-<N>` on GitHub, or a file-locked CAS store when `--backend local` is explicitly selected) and projects a human-readable summary comment onto the GitHub Issue.
+
+The `ledger_namespace` setting selects one ref layout per repository for issue state, checkpoint retention, and fork contributor indexes: `branch` (`refs/heads/swarm-state/`, `swarm-checkpoints/`, `swarm-contributors/`; the default when the key is absent) or `hidden` (`refs/swarm/state/`, `checkpoints/`, `contributors/`; written by `swarm repo init` for new repositories). The CLI, lease manager, and fork coordinator resolve it from `.swarm/config.yaml` on the upstream remote's advertised default branch before their first ledger read, never from a worktree, candidate commit, or fork. Every ledger read and write also checks the same entry in the other namespace and fails with both ref names if it exists, so there is never a fallback or a second authority. Task branches stay under `refs/heads/swarm/` in both modes. `swarm repo migrate-refs` moves an existing repository's ledgers in one atomic, leased push; see [Ledger ref namespaces](GITHUB.md#ledger-ref-namespaces).
 
 Each state transition uses **Git compare-and-swap (`git push --force-with-lease`)** so concurrent workers serialize cleanly:
 
@@ -46,7 +48,7 @@ Each state transition uses **Git compare-and-swap (`git push --force-with-lease`
 Each claimed issue runs inside its own linked Git worktree at `.swarm/worktrees/issue-<N>` on branch `swarm/issue-<N>-<slug>`, pinned to the approved base commit:
 
 - **Compiled Active Bundle**: SwarmOS generates `.swarm/active/WORKUNIT.md` and `.swarm/active/SYSTEM_PROMPT.md` inside the worktree, adds `.swarm/active/` to the worktree's `.git/info/exclude`, and injects managed pointer blocks into `AGENTS.md` and `CLAUDE.md`.
-- **Atomic Branch Checkpoints**: On handoff or phase completion, SwarmOS strips temporary harness markers, commits the worktree state without rewriting history, and pushes both the checkpoint branch and the updated `swarm-state/issue-<N>` ref together. Another teammate or worker node pulling the handed-off task fetches and verifies that exact checkpoint SHA before continuing.
+- **Atomic Branch Checkpoints**: On handoff or phase completion, SwarmOS strips temporary harness markers, commits the worktree state without rewriting history, and pushes both the checkpoint branch and the updated issue state ref together. Another teammate or worker node pulling the handed-off task fetches and verifies that exact checkpoint SHA before continuing.
 - **Dependency Ordering**: When a `WorkUnit` declares `depends_on`, SwarmOS waits until prerequisite issues are merged/closed (or share an explicitly verified stacked base/checkpoint lineage) before treating the task as ready.
 
 ---

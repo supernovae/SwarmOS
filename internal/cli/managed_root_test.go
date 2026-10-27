@@ -18,14 +18,12 @@ import (
 )
 
 // runManaged executes swarm from dir without the fixture's --root, so the
-// command resolves its root the way an interactive shell would.
-func runManaged(t *testing.T, opts *RootOptions, dir string, args ...string) (string, string, error) {
+// command resolves its root the way an interactive shell would. It reads the
+// fixture's environment; changing the working directory keeps callers serial.
+func runManaged(t *testing.T, f *cliFixture, opts *RootOptions, dir string, args ...string) (string, string, error) {
 	t.Helper()
 	t.Chdir(dir)
-	if opts == nil {
-		opts = &RootOptions{}
-	}
-	cmd := newRootCmdWithOptions(opts)
+	cmd := f.command(opts)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
@@ -34,9 +32,9 @@ func runManaged(t *testing.T, opts *RootOptions, dir string, args ...string) (st
 	return stdout.String(), stderr.String(), err
 }
 
-func mustManaged(t *testing.T, dir string, args ...string) (string, string) {
+func mustManaged(t *testing.T, f *cliFixture, dir string, args ...string) (string, string) {
 	t.Helper()
-	stdout, stderr, err := runManaged(t, nil, dir, append([]string{"--backend", "local"}, args...)...)
+	stdout, stderr, err := runManaged(t, f, nil, dir, append([]string{"--backend", "local"}, args...)...)
 	if err != nil {
 		t.Fatalf("swarm %v in %s: %v\n%s%s", args, dir, err, stdout, stderr)
 	}
@@ -93,7 +91,7 @@ func TestManagedRootSecondIssueWork(t *testing.T) {
 				dir, args = t.TempDir(), []string{"--root", firstWorktree}
 			}
 			args = append(args, "issue", "work", strconv.Itoa(second), "--agent", "mock", "--headless", "--json", "--progress=false")
-			stdout, stderr := mustManaged(t, dir, args...)
+			stdout, stderr := mustManaged(t, f, dir, args...)
 			var outcome struct {
 				Status string              `json:"status"`
 				Result workflow.WorkResult `json:"result"`
@@ -125,10 +123,10 @@ func TestManagedRootSecondIssueWork(t *testing.T) {
 func TestManagedRootIssueLifecycle(t *testing.T) {
 	f, _, second, firstWorktree := managedRootFixture(t)
 	n := strconv.Itoa(second)
-	mustManaged(t, firstWorktree, "issue", "work", n, "--agent", "mock", "--headless", "--progress=false")
+	mustManaged(t, f, firstWorktree, "issue", "work", n, "--agent", "mock", "--headless", "--progress=false")
 	secondWorktree := workspace.WorktreePath(f.root, second)
 
-	stdout, stderr := mustManaged(t, firstWorktree, "issue", "status", n, "--json")
+	stdout, stderr := mustManaged(t, f, firstWorktree, "issue", "status", n, "--json")
 	assertRedirectNotice(t, stderr)
 	var status struct {
 		Issues []issueStatus `json:"issues"`
@@ -139,28 +137,28 @@ func TestManagedRootIssueLifecycle(t *testing.T) {
 	if len(status.Issues) != 1 || status.Issues[0].Checkpoint == nil || canonicalDir(t, status.Issues[0].Checkpoint.WorktreePath) != canonicalDir(t, secondWorktree) || status.Issues[0].Checkpoint.Worktree.Error != "" {
 		t.Fatalf("status did not find the second worktree under main: %s", stdout)
 	}
-	if _, stderr := mustManaged(t, f.root, "issue", "status", n, "--json"); stderr != "" {
+	if _, stderr := mustManaged(t, f, f.root, "issue", "status", n, "--json"); stderr != "" {
 		t.Fatalf("main checkout printed a notice: %s", stderr)
 	}
 
-	mustManaged(t, firstWorktree, "issue", "submit", n)
+	mustManaged(t, f, firstWorktree, "issue", "submit", n)
 	submitted := f.state(t, second)
 	if submitted.PRNumber == 0 || submitted.Lease.Status != "completed" {
 		t.Fatalf("submission not recorded in main checkout state: %+v", submitted)
 	}
-	mustManaged(t, filepath.Join(firstWorktree, "internal"), "issue", "submit", n)
+	mustManaged(t, f, filepath.Join(firstWorktree, "internal"), "issue", "submit", n)
 	if retry := f.state(t, second); retry.PRNumber != submitted.PRNumber || retry.HeadSHA != submitted.HeadSHA {
 		t.Fatal("retry changed the submission identity")
 	}
 
 	seedLocalCleanupMergedPR(t, f, submitted.PRNumber)
 	// The checkout a command runs in is never retired, even after redirection.
-	stdout, _ = mustManaged(t, secondWorktree, "issue", "cleanup", n, "--json")
+	stdout, _ = mustManaged(t, f, secondWorktree, "issue", "cleanup", n, "--json")
 	if !strings.Contains(stdout, "invoking checkout is retained") {
 		t.Fatalf("cleanup from the second worktree did not retain it: %s", stdout)
 	}
-	mustManaged(t, firstWorktree, "issue", "cleanup", n, "--json")
-	stdout, _ = mustManaged(t, firstWorktree, "issue", "cleanup", n, "--apply", "--json")
+	mustManaged(t, f, firstWorktree, "issue", "cleanup", n, "--json")
+	stdout, _ = mustManaged(t, f, firstWorktree, "issue", "cleanup", n, "--apply", "--json")
 	if _, err := os.Stat(secondWorktree); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("second worktree survives cleanup: %v\n%s", err, stdout)
 	}
@@ -197,7 +195,7 @@ func snapshotTree(t *testing.T, roots ...string) map[string]string {
 }
 
 func TestManagedRootRefusesBeforeWrites(t *testing.T) {
-	assertRefusals := func(t *testing.T, dir string, issue int, roots ...string) {
+	assertRefusals := func(t *testing.T, f *cliFixture, dir string, issue int, roots ...string) {
 		t.Helper()
 		n := strconv.Itoa(issue)
 		for _, args := range [][]string{
@@ -207,7 +205,7 @@ func TestManagedRootRefusesBeforeWrites(t *testing.T) {
 			{"issue", "status", n},
 		} {
 			before := snapshotTree(t, roots...)
-			stdout, stderr, err := runManaged(t, nil, dir, append([]string{"--backend", "local"}, args...)...)
+			stdout, stderr, err := runManaged(t, f, nil, dir, append([]string{"--backend", "local"}, args...)...)
 			if err == nil {
 				t.Fatalf("swarm %v succeeded without a main checkout: %s", args, stdout)
 			}
@@ -237,7 +235,7 @@ func TestManagedRootRefusesBeforeWrites(t *testing.T) {
 		if err := os.Rename(filepath.Join(f.root, ".git"), moved); err != nil {
 			t.Fatal(err)
 		}
-		assertRefusals(t, filepath.Join(firstWorktree, "internal"), second, f.root, moved)
+		assertRefusals(t, f, filepath.Join(firstWorktree, "internal"), second, f.root, moved)
 	})
 	t.Run("enclosing checkout is another repository", func(t *testing.T) {
 		f, _, second, _ := managedRootFixture(t)
@@ -246,9 +244,9 @@ func TestManagedRootRefusesBeforeWrites(t *testing.T) {
 		prGit(t, other, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "--allow-empty", "-m", "other")
 		stray := filepath.Join(other, ".swarm", "worktrees", "issue-99")
 		prGit(t, f.root, "worktree", "add", "-b", "stray", stray)
-		assertRefusals(t, stray, second, f.root, other)
+		assertRefusals(t, f, stray, second, f.root, other)
 		// Naming the verified main checkout explicitly still works.
-		stdout, _, err := runManaged(t, nil, stray, "--backend", "local", "--root", f.root, "issue", "status", strconv.Itoa(second), "--json")
+		stdout, _, err := runManaged(t, f, nil, stray, "--backend", "local", "--root", f.root, "issue", "status", strconv.Itoa(second), "--json")
 		if err != nil || !strings.Contains(stdout, `"kind": "status"`) && !strings.Contains(stdout, `"kind":"status"`) {
 			t.Fatalf("explicit main --root: %v %s", err, stdout)
 		}
@@ -266,7 +264,7 @@ func TestManagedRootBackendRouting(t *testing.T) {
 			return "acme/widgets"
 		},
 	}
-	stdout, stderr, err := runManaged(t, opts, firstWorktree, "issue", "status", strconv.Itoa(first), "--json")
+	stdout, stderr, err := runManaged(t, f, opts, firstWorktree, "issue", "status", strconv.Itoa(first), "--json")
 	if err != nil {
 		t.Fatalf("%v\n%s%s", err, stdout, stderr)
 	}
@@ -283,11 +281,11 @@ func TestManagedRootBackendRouting(t *testing.T) {
 
 func TestManagedRootRegistryTargets(t *testing.T) {
 	f, first, _, firstWorktree := managedRootFixture(t)
-	reg := registry.New("")
+	opts := f.options(&RootOptions{Backend: "local"})
+	reg := registry.New(opts.registryPath())
 	if _, err := reg.Add("local/main", firstWorktree, "local"); err != nil {
 		t.Fatal(err)
 	}
-	opts := &RootOptions{Backend: "local"}
 	if _, err := opts.resolveTargets(true); err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +293,7 @@ func TestManagedRootRegistryTargets(t *testing.T) {
 	if len(targets) != 1 || canonicalDir(t, targets[0].Path) != canonicalDir(t, f.root) {
 		t.Fatalf("registry target not normalized: %+v", targets)
 	}
-	stdout, _ := mustManaged(t, t.TempDir(), "issue", "status", "--all", "--json")
+	stdout, _ := mustManaged(t, f, t.TempDir(), "issue", "status", "--all", "--json")
 	if !strings.Contains(stdout, `"number": `+strconv.Itoa(first)) && !strings.Contains(stdout, `"number":`+strconv.Itoa(first)) {
 		t.Fatalf("status --all did not read main checkout state: %s", stdout)
 	}
@@ -319,15 +317,16 @@ func TestManagedRootNonCoordinatorCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"version"}, {"help"}, {"completion", "bash"}} {
-		if stdout, stderr, err := runManaged(t, nil, firstWorktree, args...); err != nil {
+		if stdout, stderr, err := runManaged(t, f, nil, firstWorktree, args...); err != nil {
 			t.Fatalf("swarm %v probed the repository: %v %s%s", args, err, stdout, stderr)
 		}
 	}
 }
 
 func TestManagedRootIssueArgsFromInvokingWorktree(t *testing.T) {
+	t.Parallel()
 	f, first, _, firstWorktree := managedRootFixture(t)
-	opts := &RootOptions{RepoRoot: firstWorktree}
+	opts := f.options(&RootOptions{RepoRoot: firstWorktree})
 	cmd := newRootCmdWithOptions(opts)
 	cmd.SetErr(new(bytes.Buffer))
 	cmd.SetArgs([]string{"--backend", "local", "issue", "status", strconv.Itoa(first)})

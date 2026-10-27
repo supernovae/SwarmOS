@@ -52,6 +52,7 @@ func (f *upstreamRemoteFixture) revokeComments() []string {
 }
 
 func TestCLIRevokeSameRepositoryClaim(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	holder, claimed := f.sameRepoClaim("bob")
 	out, err := f.run(f.maintainerOpts(), "issue", "revoke", "42", "--reason", "Abandoned since March", "--json")
@@ -97,6 +98,7 @@ func TestCLIRevokeSameRepositoryClaim(t *testing.T) {
 }
 
 func TestCLIRevokeForkClaimClearsContributorIndex(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	alice := f.aliceClone("alice")
 	if out, err := f.run(f.as("alice", alice), "--upstream-remote", "upstream", "--fork", "issue", "claim", "42", "--agent", "mock"); err != nil {
@@ -120,6 +122,7 @@ func TestCLIRevokeForkClaimClearsContributorIndex(t *testing.T) {
 }
 
 func TestCLIRevokeRefusals(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	f.sameRepoClaim("bob")
 	alice := f.aliceClone("alice")
@@ -153,6 +156,7 @@ func TestCLIRevokeRefusals(t *testing.T) {
 }
 
 func TestCLIRevokeRefusesLocalBackend(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	if out, err := f.run("issue", "revoke", "1", "--reason", "offline"); err == nil || !strings.Contains(err.Error(), "github backend") {

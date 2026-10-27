@@ -14,6 +14,7 @@ import (
 // TestStatusPointerOnlyWorktreeIsClean covers issue and PR status after a
 // harness leaves SwarmOS's pointer block in the task worktrees.
 func TestStatusPointerOnlyWorktreeIsClean(t *testing.T) {
+	t.Parallel()
 	block := workspace.ActiveMarkerStart + "\nRead .swarm/active/WORKUNIT.md.\n" + workspace.ActiveMarkerEnd + "\n\n"
 	for _, layout := range []struct {
 		name    string
@@ -45,7 +46,7 @@ func TestStatusPointerOnlyWorktreeIsClean(t *testing.T) {
 			f.must(t, "issue", "work", issue, "--agent", "mock", "--progress=false")
 			f.must(t, "issue", "submit", issue)
 			p := strconv.Itoa(f.state(t, n).PRNumber)
-			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
 			worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--instructions", "Fix the implementation within the approved acceptance criteria", "--progress=false", "--json"))
 			trees := []string{workspace.WorktreePath(f.root, n), worked.Worktree}
 
@@ -105,9 +106,10 @@ func TestStatusPointerOnlyWorktreeIsClean(t *testing.T) {
 }
 
 func TestStatusPointerOtherFileIsDirty(t *testing.T) {
+	t.Parallel()
 	f, n, number := submittedPRFixture(t, "agent")
 	p := strconv.Itoa(number)
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
 	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--instructions", "Fix the implementation within the approved acceptance criteria", "--progress=false", "--json"))
 	for _, wt := range []string{workspace.WorktreePath(f.root, n), worked.Worktree} {
 		if err := os.WriteFile(filepath.Join(wt, "notes.txt"), []byte("unsaved\n"), 0o644); err != nil {

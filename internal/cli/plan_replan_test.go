@@ -17,11 +17,12 @@ import (
 )
 
 func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)
 	f.must(t, "issue", "approve", n)
-	t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 	out, err := f.run("issue", "work", n, "--agent", "mock", "--progress=false")
 	if !errors.Is(err, workflow.ErrPlanReviewRejected) || !strings.Contains(out, "issue work "+n+" --phase plan") || !strings.Contains(out, "review art-") {
 		t.Fatalf("recovery: %v %s", err, out)
@@ -57,7 +58,7 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1")
 	other := f.create(t, "agent")
 	f.must(t, "issue", "approve", strconv.Itoa(other))
-	t.Setenv("SWARM_MOCK_VERDICT", "APPROVED")
+	f.setenv("SWARM_MOCK_VERDICT", "APPROVED")
 	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1")
 	if f.state(t, other).Lease.ClaimID == "" {
 		t.Fatal("node did not advance past capped issue")
@@ -68,12 +69,13 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 }
 
 func TestRejectedReviewJSONRecovery(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)
 	f.must(t, "issue", "approve", n)
-	t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
-	cmd := NewRootCmd()
+	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+	cmd := f.command(nil)
 	var out, diagnostic bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diagnostic)
@@ -92,8 +94,9 @@ func TestRejectedReviewJSONRecovery(t *testing.T) {
 }
 
 func TestPRPlanReplanCap(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
-	t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 	args := []string{"pr", "work", strconv.Itoa(number), "--agent", "mock", "--progress=false"}
 	out, err := f.run(args...)
 	if !errors.Is(err, workflow.ErrPlanReviewRejected) || !strings.Contains(out, "pr work "+strconv.Itoa(number)+" --phase plan") {
@@ -113,6 +116,7 @@ func TestPRPlanReplanCap(t *testing.T) {
 }
 
 func TestManualStageResetsPlanBudget(t *testing.T) {
+	t.Parallel()
 	for _, resource := range []string{"issue", "pr"} {
 		t.Run(resource, func(t *testing.T) {
 			var f *cliFixture
@@ -125,7 +129,7 @@ func TestManualStageResetsPlanBudget(t *testing.T) {
 				number = issue
 				f.must(t, "issue", "approve", strconv.Itoa(issue))
 			}
-			t.Setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+			f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 			args := []string{resource, "work", strconv.Itoa(number), "--agent", "mock", "--progress=false"}
 			if _, err := f.run(args...); !errors.Is(err, workflow.ErrPlanReviewRejected) {
 				t.Fatal(err)
@@ -157,6 +161,7 @@ func TestManualStageResetsPlanBudget(t *testing.T) {
 }
 
 func TestInteractiveWorkIgnoresExhaustedAutomaticBudget(t *testing.T) {
+	t.Parallel()
 	for _, resource := range []string{"issue", "node"} {
 		t.Run(resource, func(t *testing.T) {
 			f := newCLIFixture(t)

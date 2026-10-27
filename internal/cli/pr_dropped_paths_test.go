@@ -15,9 +15,10 @@ import (
 // twoFilePRFixture submits a PR that adds a.txt and b.txt.
 func twoFilePRFixture(t *testing.T) (*cliFixture, int, int) {
 	t.Helper()
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'pr a\\n' > a.txt; printf 'pr b\\n' > b.txt")
-	f, issue, number := submittedPRFixture(t, "agent")
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "")
+	f, issue, number := submittedPRFixture(t, "agent", func(f *cliFixture) {
+		f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'pr a\\n' > a.txt; printf 'pr b\\n' > b.txt")
+	})
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "")
 	st := f.state(t, issue)
 	if got := strings.Fields(prGit(t, f.root, "diff", "--name-only", st.BaseSHA, st.HeadSHA)); !reflect.DeepEqual(got, []string{"a.txt", "b.txt"}) {
 		t.Fatalf("fixture PR changed %q", got)
@@ -26,6 +27,7 @@ func twoFilePRFixture(t *testing.T) (*cliFixture, int, int) {
 }
 
 func TestCLIPRRebaseReportsDroppedPathsFromConflictResolution(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		resolved string
@@ -104,6 +106,7 @@ func TestCLIPRRebaseReportsDroppedPathsFromConflictResolution(t *testing.T) {
 }
 
 func TestCLIPRResolvedRebaseReportsPathDroppedByRepair(t *testing.T) {
+	t.Parallel()
 	f, issue, number := twoFilePRFixture(t)
 	p := strconv.Itoa(number)
 	before := f.state(t, issue)
@@ -118,7 +121,7 @@ func TestCLIPRResolvedRebaseReportsPathDroppedByRepair(t *testing.T) {
 	prGit(t, f.root, "commit", "-m", "New target policy and conflicting a.txt")
 	f.must(t, "issue", "approve", strconv.Itoa(issue))
 	// The resolver keeps both PR paths; the repair removes b.txt's change.
-	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "if [ -f .swarm/active/REPAIR_PATHS.md ]; then rm b.txt; else printf 'resolved a\\n' > a.txt; fi")
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "if [ -f .swarm/active/REPAIR_PATHS.md ]; then rm b.txt; else printf 'resolved a\\n' > a.txt; fi")
 	out := f.must(t, "pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
 	for _, want := range []string{"Warning: no longer changed: b.txt\n", "swarm pr work " + p, "swarm pr rebase " + p + " --abort", "Validation: PASS"} {
 		if !strings.Contains(out, want) {

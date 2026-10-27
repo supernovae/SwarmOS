@@ -269,6 +269,70 @@ func TestRunnerIsolatedChecksDoNotNeedAgentSandbox(t *testing.T) {
 	}
 }
 
+func TestValidateExecutionModeLookup(t *testing.T) {
+	ctx := context.Background()
+	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
+	mode := func(value string) func(string) (string, bool) {
+		return func(name string) (string, bool) {
+			if name == "SWARM_EXECUTION_MODE" {
+				return value, true
+			}
+			return "", false
+		}
+	}
+	t.Setenv("SWARM_EXECUTION_MODE", "process-mode")
+	if _, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, BaseSHA: base}); err == nil || !strings.Contains(err.Error(), `execution mode "process-mode"`) {
+		t.Fatalf("default validation did not read the process environment: %v", err)
+	}
+	if _, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, LookupEnv: mode("injected-mode")}); err == nil || !strings.Contains(err.Error(), `execution mode "injected-mode"`) {
+		t.Fatalf("validation did not resolve the injected mode: %v", err)
+	}
+	report, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, LookupEnv: mode(contract.ExecutionTrustedLocal)})
+	if err != nil || !report.Passed {
+		t.Fatalf("injected trusted-local validation = %+v, %v", report, err)
+	}
+}
+
+func TestValidateLookupDoesNotReachCheckEnvironment(t *testing.T) {
+	ctx := context.Background()
+	repo := setupGitRepoForValidation(t)
+	out := filepath.Join(t.TempDir(), "env.txt")
+	policy := "required_checks:\n  - name: env\n    command: 'env > \"" + filepath.ToSlash(out) + "\"'\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - .swarm/validation/**\n"
+	if err := os.WriteFile(filepath.Join(repo, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "environment probe"}} {
+		if out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, out)
+		}
+	}
+	base := gitRevision(t, repo, "HEAD")
+	t.Setenv("LANG", "C.process")
+	injected := map[string]string{"SWARM_EXECUTION_MODE": contract.ExecutionTrustedLocal, "LANG": "C.injected", "GITHUB_TOKEN": "publish-secret", "HOME": "/injected/home"}
+	lookup := func(name string) (string, bool) {
+		value, ok := injected[name]
+		return value, ok
+	}
+	report, err := Validate(ctx, repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, LookupEnv: lookup})
+	if err != nil || !report.Passed {
+		t.Fatalf("validation = %+v, %v", report, err)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := string(raw)
+	if !strings.Contains(env, "LANG=C.process\n") {
+		t.Fatalf("check lost the process LANG:\n%s", env)
+	}
+	for _, leaked := range []string{"C.injected", "publish-secret", "/injected/home", "SWARM_EXECUTION_MODE"} {
+		if strings.Contains(env, leaked) {
+			t.Fatalf("injected %q reached the check environment:\n%s", leaked, env)
+		}
+	}
+}
+
 func TestReportProtectedChangesListsPolicyEditsAndStillRunsBaseChecks(t *testing.T) {
 	ctx := context.Background()
 	repo := setupGitRepoForValidation(t)

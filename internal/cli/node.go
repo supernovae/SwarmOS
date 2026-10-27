@@ -51,7 +51,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				prof.Resources.RAM = ramOverride
 			}
 
-			cfgPath := node.DefaultNodeConfigPath()
+			cfgPath := rootOpts.nodeConfigPath()
 			// --upstream-remote saves the node default (origin clears it);
 			// without it, re-initializing keeps the saved default.
 			if remote := strings.TrimSpace(rootOpts.UpstreamRemote); remote != "" {
@@ -86,7 +86,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() { reportJSONFailure(cmd, profileJSON, "node-status", runErr) }()
-			prof, err := node.LoadOrDetectProfile("")
+			prof, err := node.LoadOrDetectProfile(rootOpts.nodeConfigPath())
 			if err != nil {
 				return err
 			}
@@ -127,7 +127,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			if err := contract.ValidateGate(contract.GateMode(gate)); err != nil {
 				return err
 			}
-			profile, err := node.LoadOrDetectProfile("")
+			profile, err := node.LoadOrDetectProfile(rootOpts.nodeConfigPath())
 			if err != nil {
 				return err
 			}
@@ -169,7 +169,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					return nil, err
 				}
 				manager.BindClaim(pulled.Issue.Number, pulled.State.Lease.ClaimID)
-				engine := workflow.NewEngineWithManager(pulled.RepoRoot, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote())
+				engine := workflow.NewEngineWithManagerOptions(pulled.RepoRoot, tr, manager, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
 				lock, err := lease.LockClaim(pulled.RepoRoot, pulled.Issue.Number)
 				if err != nil {
 					return nil, err

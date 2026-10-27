@@ -16,6 +16,7 @@ import (
 )
 
 func TestDryRunReportsIsolationBlockersWithoutClaim(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	// Exercise a missing harness even when the developer has Codex installed.
 	cfg, err := harness.LoadConfig(f.root)
@@ -39,7 +40,7 @@ func TestDryRunReportsIsolationBlockersWithoutClaim(t *testing.T) {
 	}
 	n := strconv.Itoa(f.create(t, "agent"))
 	f.must(t, "issue", "approve", n)
-	t.Setenv("SWARM_EXECUTION_MODE", "")
+	f.setenv("SWARM_EXECUTION_MODE", "")
 	var result struct {
 		Plan workflow.PreflightResult `json:"effective_plan"`
 	}

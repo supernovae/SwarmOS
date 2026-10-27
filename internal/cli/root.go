@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/fork"
@@ -49,6 +50,13 @@ type RootOptions struct {
 	// invokingCheckout is the task or PR worktree a command was started
 	// from after RepoRoot was redirected to its main checkout.
 	invokingCheckout string
+	// lookupEnv replaces the process environment for this command's
+	// SWARM_* settings, identity, profile paths and agent execution; nil
+	// reads the process environment.
+	lookupEnv func(string) (string, bool)
+	// resolverRunner stands in for PR work and conflict resolver runners in
+	// tests; nil uses the configured runner from approved policy.
+	resolverRunner func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error)
 }
 
 func NewRootCmd() *cobra.Command {
@@ -98,8 +106,8 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		&cobra.Group{ID: "resources", Title: "Resources:"},
 		&cobra.Group{ID: "tools", Title: "Tools:"},
 	)
-	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", firstNonEmptyStr(opts.Backend, os.Getenv("SWARM_BACKEND")), "Tracker backend: github or local")
-	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", firstNonEmptyStr(opts.Repo, os.Getenv("SWARM_REPO")), "GitHub repository (owner/repo)")
+	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", firstNonEmptyStr(opts.Backend, opts.getenv("SWARM_BACKEND")), "Tracker backend: github or local")
+	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", firstNonEmptyStr(opts.Repo, opts.getenv("SWARM_REPO")), "GitHub repository (owner/repo)")
 	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", opts.RepoRoot, "Repository root path")
 	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
 	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", opts.ForkRemote, `Writable fork remote for --fork coordination or upstream-authorized PR updates (default "fork", or "origin" when the upstream remote is not origin)`)
@@ -133,7 +141,7 @@ func (o *RootOptions) loadUpstreamRemote(cmd *cobra.Command) error {
 	nodeInit := cmd.Name() == "init" && cmd.Parent() != nil && cmd.Parent().Name() == "node"
 	if !nodeInit && cmd.Name() != "version" {
 		if strings.TrimSpace(o.UpstreamRemote) == "" {
-			remote, err := node.LoadUpstreamRemote("")
+			remote, err := node.LoadUpstreamRemote(o.nodeConfigPath())
 			if err != nil {
 				return fmt.Errorf("%w; fix or remove the profile, or pass --upstream-remote <project-remote>", err)
 			}
@@ -255,7 +263,7 @@ func (o *RootOptions) resolveRepoRoot() string {
 		return o.RepoRoot
 	}
 	if o.Repo != "" {
-		if entry, ok, err := registry.New("").Get(o.Repo); err == nil && ok {
+		if entry, ok, err := registry.New(o.registryPath()).Get(o.Repo); err == nil && ok {
 			if info, statErr := os.Stat(entry.Path); statErr == nil && info.IsDir() {
 				return entry.Path
 			}
@@ -310,7 +318,7 @@ func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error
 	root := o.resolveRepoRoot()
 	backend := strings.ToLower(strings.TrimSpace(o.Backend))
 	if backend == "" && o.Repo != "" {
-		if entry, ok, err := registry.New("").Get(o.Repo); err == nil && ok && entry.Backend != "" {
+		if entry, ok, err := registry.New(o.registryPath()).Get(o.Repo); err == nil && ok && entry.Backend != "" {
 			backend = strings.ToLower(entry.Backend)
 		}
 	}
@@ -322,7 +330,11 @@ func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error
 		if o.Fork {
 			return nil, fmt.Errorf("--fork requires the github backend and cannot be used with --backend local")
 		}
-		return tracker.NewLocalTracker(root), nil
+		local := tracker.NewLocalTracker(root)
+		if o.lookupEnv != nil {
+			local = local.WithUser(o.localUser(), "")
+		}
+		return local, nil
 	case "github":
 		upstream := o.effectiveUpstreamRemote()
 		detected := o.detectUpstreamSlug(root)

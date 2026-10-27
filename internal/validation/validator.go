@@ -93,6 +93,9 @@ type ValidateOptions struct {
 	// `go test ./...` check. A failure there stops validation early; a pass
 	// always continues to the unchanged full check. Ignored in CIMode.
 	GoFastPass bool
+	// LookupEnv resolves SWARM_EXECUTION_MODE for this validation; nil reads
+	// the process environment. Check subprocesses still receive cleanCheckEnv.
+	LookupEnv func(string) (string, bool)
 }
 
 // Validate loads checks and protected paths exclusively from the immutable base.
@@ -163,7 +166,11 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err != nil {
 		return nil, fmt.Errorf("load approved execution policy: %w", err)
 	}
-	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+	mode := os.Getenv("SWARM_EXECUTION_MODE")
+	if opts.LookupEnv != nil {
+		mode, _ = opts.LookupEnv("SWARM_EXECUTION_MODE")
+	}
+	execution, err := contract.ResolveExecution(cfg, mode)
 	if err != nil {
 		return nil, err
 	}

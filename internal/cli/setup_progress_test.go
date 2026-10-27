@@ -23,6 +23,7 @@ type setupGitHubTracker struct{ tracker.Tracker }
 func (setupGitHubTracker) BackendName() string { return "github" }
 
 func TestSetupProgressNativeGitHub(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"claim", "interactive", "headless"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -56,7 +57,7 @@ func TestSetupProgressNativeGitHub(t *testing.T) {
 			if _, err := manager.ApproveTask(t.Context(), n, "alice"); err != nil {
 				t.Fatal(err)
 			}
-			cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: tr})
 			var stdout, stderr bytes.Buffer
 			cmd.SetOut(&stdout)
 			cmd.SetErr(&stderr)

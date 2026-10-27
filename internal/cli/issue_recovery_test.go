@@ -14,6 +14,7 @@ import (
 )
 
 func TestApprovalDroppedCheckpointOutput(t *testing.T) {
+	t.Parallel()
 	for _, jsonOutput := range []bool{false, true} {
 		t.Run(strconv.FormatBool(jsonOutput), func(t *testing.T) {
 			f := newCLIFixture(t)

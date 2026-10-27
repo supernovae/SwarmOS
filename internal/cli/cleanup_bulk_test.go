@@ -65,7 +65,7 @@ func editLocalPR(t *testing.T, f *cliFixture, number int, edit func(*tracker.Pul
 }
 
 func runSplit(f *cliFixture, args ...string) (string, string, error) {
-	cmd := NewRootCmd()
+	cmd := f.command(nil)
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
@@ -175,6 +175,7 @@ func bulkFingerprint(t *testing.T, f *cliFixture, issues ...int) string {
 }
 
 func TestCleanupBulkPreviewReadOnly(t *testing.T) {
+	t.Parallel()
 	x := bulkMixedFixture(t)
 	f := x.f
 	issues := []int{x.merged.issue, x.dirty.issue, x.open.issue, x.unsubmitted}
@@ -269,6 +270,7 @@ func TestCleanupBulkPreviewReadOnly(t *testing.T) {
 }
 
 func TestCleanupBulkApplyMixed(t *testing.T) {
+	t.Parallel()
 	x := bulkMixedFixture(t)
 	f := x.f
 	text := f.must(t, "issue", "cleanup", "--all-merged", "--apply")
@@ -318,6 +320,7 @@ func TestCleanupBulkApplyMixed(t *testing.T) {
 }
 
 func TestCleanupBulkContinuesAfterFailure(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	f.create(t, "agent")
 	first, broken, last := bulkMerged(t, f), bulkMerged(t, f), bulkMerged(t, f)
@@ -425,6 +428,7 @@ func TestCleanupBulkFreshApplyEvidence(t *testing.T) {
 }
 
 func TestCleanupBulkJSONEmptyAndDiagnostics(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	for _, args := range [][]string{{"--all-merged", "--json"}, {"--all-merged", "--apply", "--json"}} {
 		stdout, stderr, err := runSplit(f, append([]string{"issue", "cleanup"}, args...)...)
@@ -447,6 +451,7 @@ func TestCleanupBulkJSONEmptyAndDiagnostics(t *testing.T) {
 }
 
 func TestCleanupBulkArguments(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	for _, tc := range []struct {
 		args []string

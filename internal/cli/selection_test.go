@@ -124,6 +124,7 @@ func TestReadyIssueOrderingReadFailure(t *testing.T) {
 }
 
 func TestNextSelectionEntryPoints(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"claim", "work", "node", "fallback"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -148,7 +149,7 @@ func TestNextSelectionEntryPoints(t *testing.T) {
 				tr = &orderingTracker{Tracker: f.tracker, parents: map[int]int{first: epic.Number, second: epic.Number}, listErr: errors.New("offline"), calls: map[int]int{}}
 				want = first
 			}
-			cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
 			var output, diagnostics bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&diagnostics)
@@ -185,6 +186,7 @@ func TestNextSelectionEntryPoints(t *testing.T) {
 // Repository traversal retains the registry's existing order, regardless of
 // relative issue numbers in different repositories.
 func TestNextSelectionRepositoryOrder(t *testing.T) {
+	t.Parallel()
 	for _, emptyFirst := range []bool{false, true} {
 		t.Run(strconv.FormatBool(emptyFirst), func(t *testing.T) {
 			a := newCLIFixture(t)
@@ -215,6 +217,7 @@ func TestNextSelectionRepositoryOrder(t *testing.T) {
 }
 
 func TestNextSelectionFallbackEligibility(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	ctx := context.Background()
 	epic, err := f.tracker.CreateTypedIssue(ctx, "Epic", "", []string{"swarm:ready"}, "Epic")
@@ -263,7 +266,7 @@ func TestNextSelectionFallbackEligibility(t *testing.T) {
 		parents[n] = epic.Number
 	}
 	tr := &orderingTracker{Tracker: f.tracker, parents: parents, listErr: errors.New("offline"), calls: map[int]int{}}
-	cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+	cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
 	var out, diagnostics bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diagnostics)

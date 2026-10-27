@@ -145,7 +145,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return emptySubmitError(issue, state.BaseSHA)
 			}
 			p.Next("validation")
-			validationOpts := validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork || manager.HasWorkerGateway()}
+			validationOpts := validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork || manager.HasWorkerGateway(), LookupEnv: rootOpts.lookupEnv}
 			report, valErr := validation.Reuse(ctx, worktree, validationOpts, owner, state.Artifacts)
 			if valErr == nil && report == nil {
 				report, valErr = validation.Validate(ctx, worktree, unit, validationOpts)

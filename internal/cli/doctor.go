@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -49,7 +48,7 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 			}))
 			if cfg, err := harness.LoadConfig(repoRoot); err == nil {
 				checks = append(checks, run.Run("execution", "mode", func() harness.DoctorCheck {
-					execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+					execution, err := contract.ResolveExecution(cfg, rootOpts.getenv("SWARM_EXECUTION_MODE"))
 					status, detail := "OK", ""
 					if err != nil {
 						status, detail = "FAIL", err.Error()
@@ -65,7 +64,10 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 					}
 					return harness.DoctorCheck{Category: "execution", Name: "mode", Status: status, Detail: detail}
 				}))
-				checks = append(checks, doctorAgentChecksWithRunner(cfg, !checkGHAuth, agent.Preflight, run)...)
+				preflight := func(name string, cfg *contract.SwarmConfig, local bool, role string) (string, error) {
+					return agent.PreflightWithOptions(name, cfg, local, role, rootOpts.runnerOptions())
+				}
+				checks = append(checks, doctorAgentChecksWithRunner(cfg, !checkGHAuth, preflight, run)...)
 				checks = append(checks, run.Run("security", "plan-reviewers", func() harness.DoctorCheck { return doctorReviewerCheck(cfg) }))
 			}
 			if checkGHAuth && (strings.EqualFold(rootOpts.Backend, "github") || rootOpts.trackerOverride != nil || rootOpts.Repo != "" || hasGitRemote(repoRoot)) {

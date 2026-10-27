@@ -125,6 +125,7 @@ func TestSubmitFreshnessGuidance(t *testing.T) {
 	}
 }
 func TestSubmitFreshnessJSON(t *testing.T) {
+	t.Parallel()
 	for _, drift := range []bool{false, true} {
 		for _, asJSON := range []bool{false, true} {
 			t.Run(fmt.Sprintf("drift=%t/json=%t", drift, asJSON), func(t *testing.T) {
@@ -182,6 +183,7 @@ func TestSubmitFreshnessJSON(t *testing.T) {
 }
 
 func TestSubmitFreshnessFetchFailure(t *testing.T) {
+	t.Parallel()
 	for _, explicit := range []bool{false, true} {
 		t.Run(strconv.FormatBool(explicit), func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -218,11 +220,12 @@ func TestSubmitFreshnessFetchFailure(t *testing.T) {
 }
 
 func TestSubmitFreshnessConflicts(t *testing.T) {
+	t.Parallel()
 	for _, existing := range []bool{false, true} {
 		t.Run(strconv.FormatBool(existing), func(t *testing.T) {
 			f := newCLIFixture(t)
 			// Both branches independently add the same path, producing add/add conflicts.
-			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'candidate\\n' > conflict.txt")
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'candidate\\n' > conflict.txt")
 			number := f.create(t, "agent")
 			n := strconv.Itoa(number)
 			f.must(t, "issue", "approve", n)
@@ -306,10 +309,11 @@ func (t *freshnessUpdateFailure) UpdateDraftPR(context.Context, int, string, str
 	return nil, fmt.Errorf("sensitive diagnostic must not escape")
 }
 func TestSubmitFreshnessFailedDescriptionUpdate(t *testing.T) {
+	t.Parallel()
 	for _, existing := range []bool{false, true} {
 		t.Run(strconv.FormatBool(existing), func(t *testing.T) {
 			f := newCLIFixture(t)
-			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'candidate\\n' > conflict.txt")
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'candidate\\n' > conflict.txt")
 			issue := f.create(t, "agent")
 			n := strconv.Itoa(issue)
 			f.must(t, "issue", "approve", n)
@@ -325,7 +329,7 @@ func TestSubmitFreshnessFailedDescriptionUpdate(t *testing.T) {
 			freshnessGit(t, f.root, "commit", "-m", "target")
 			tr := &freshnessUpdateFailure{Tracker: f.tracker}
 			run := func() (string, string) {
-				cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
 				var out, diagnostics bytes.Buffer
 				cmd.SetOut(&out)
 				cmd.SetErr(&diagnostics)

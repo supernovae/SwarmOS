@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -117,5 +118,57 @@ func assertCommandFailureDiagnostics(t *testing.T, out string, err error, asJSON
 		}
 	} else if !strings.Contains(out, "FAIL trusted-failure (exit 7)\nfailing tests: TestCommand\n"+commandFailureTail) || !strings.Contains(out, "\n70\n") {
 		t.Fatalf("missing text diagnostics: %s", out)
+	}
+}
+
+func TestIssueStatusShowsPreExistingRepair(t *testing.T) {
+	f := newCLIFixture(t)
+	policy := "required_checks:\n  - name: test\n    command: go test -count=1 ./...\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
+	if err := os.WriteFile(filepath.Join(f.root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"commit", "-am", "go policy"}} {
+		if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	// Checks run with the process PATH; this fake go fails TestBroken on the
+	// candidate and at the approved base.
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho '--- FAIL: TestBroken (0.00s)'; echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
+	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	issue := f.create(t, "none")
+	n := strconv.Itoa(issue)
+	f.must(t, "issue", "approve", n)
+	doc, err := f.runJSON(t, "issue", "work", n, "--agent", "mock", "--progress=false", "--json")
+	assertNextAction(t, doc, err, ReasonPreExistingFailures, true, ExitFailure, "swarm", "--backend", "local", "--root", f.root, "issue", "status", n)
+	if report, _ := doc["report"].(map[string]any); report == nil || report["repair"] == nil {
+		t.Fatalf("work JSON lacks the repair summary: %v", doc)
+	}
+	raw := f.must(t, "issue", "status", n, "--json")
+	var status struct {
+		Issues []struct {
+			Repair *validation.RepairSummary `json:"repair"`
+		} `json:"issues"`
+	}
+	if err := json.Unmarshal([]byte(raw), &status); err != nil || len(status.Issues) != 1 {
+		t.Fatalf("%v: %s", err, raw)
+	}
+	repair := status.Issues[0].Repair
+	if repair == nil || !repair.AllPreExisting || len(repair.Tests) != 1 || repair.Tests[0].Classification != validation.TestPreExisting || repair.Tests[0].Package != "example.com/m/broken" {
+		t.Fatalf("status repair: %s", raw)
+	}
+	// A forged local brief does not change the recorded evidence.
+	if err := os.WriteFile(filepath.Join(f.root, ".swarm", "worktrees", "issue-"+n, ".swarm", "active", validation.RepairFile), []byte("regression: none\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := f.must(t, "issue", "status", n)
+	for _, want := range []string{"Validation repair: failed checks test", "pre-existing: TestBroken (example.com/m/broken) in test", "Every failure also fails at the approved base"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status text lacks %q:\n%s", want, text)
+		}
 	}
 }

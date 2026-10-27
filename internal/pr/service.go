@@ -85,6 +85,9 @@ type Result struct {
 	Work          *workflow.WorkResult          `json:"work,omitempty"`
 	// RoleRuns is the issue's validated per-run telemetry, set by Status.
 	RoleRuns []contract.RoleRunTelemetry `json:"role_runs,omitempty"`
+	// Repair is the trusted summary of the issue's failed validation, set by
+	// Status from the recorded artifact; status never reruns checks.
+	Repair *validation.RepairSummary `json:"repair,omitempty"`
 	// LocalDroppedPaths is the fork contributor coordinator's own comparison,
 	// never upstream evidence; upstream records it when the head is published.
 	LocalDroppedPaths *LocalDroppedPaths `json:"local_dropped_paths,omitempty"`
@@ -326,6 +329,9 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 		return nil, err
 	}
 	r.RoleRuns = lease.RoleRuns(r.State)
+	if r.State != nil {
+		r.Repair = validation.RepairFromArtifact(r.State.Artifacts, r.State.BaseSHA)
+	}
 	if r.Status == "merged" || r.Status == "closed-unmerged" {
 		r.Worktree = ""
 		return r, nil

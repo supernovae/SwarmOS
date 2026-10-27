@@ -54,7 +54,7 @@ func ProvisionWithContext(repoRoot, checkpointRemote string, issueNum int, title
 
 // staleActiveEvidence lists generated active files that describe the old
 // base. Callers re-materialize them from authoritative state.
-var staleActiveEvidence = []string{"PLAN.md", "TEST_PLAN.md", "REVIEW.md", "VALIDATION.md", "IMPLEMENTATION.md", "REVIEW_EVIDENCE.md", "SYSTEM_PROMPT.md", "WORKUNIT.md", "workunit.json"}
+var staleActiveEvidence = []string{"PLAN.md", "TEST_PLAN.md", "REVIEW.md", "VALIDATION.md", "REPAIR.md", "IMPLEMENTATION.md", "REVIEW_EVIDENCE.md", "SYSTEM_PROMPT.md", "WORKUNIT.md", "workunit.json"}
 
 // advanceUntouchedBase fast-forwards a task branch, and its worktree when one
 // exists, from the previous approved base to the new one. It does nothing

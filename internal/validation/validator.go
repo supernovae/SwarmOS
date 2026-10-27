@@ -52,6 +52,18 @@ type CheckRunOutcome struct {
 	// FallbackReason explains a preliminary attempt that did not finish, such
 	// as a timeout or sandbox error. The full check decided the result instead.
 	FallbackReason string `json:"fallback_reason,omitempty"`
+	// goFailures is the raw, package-attributed Go test evidence of a failed
+	// check, kept in memory only for repair diagnosis.
+	goFailures *goEvidence
+}
+
+// goEvidence is a failed check's attributed Go test failures. source is the
+// trusted required-check command whose flags a targeted rerun reuses.
+type goEvidence struct {
+	source       string
+	tests        []goFailure
+	unattributed []string
+	truncated    bool
 }
 
 type ValidationReport struct {
@@ -64,7 +76,10 @@ type ValidationReport struct {
 	// paths when they were reported rather than rejected.
 	ProtectedChanges []string          `json:"protected_changes,omitempty"`
 	CheckOutcomes    []CheckRunOutcome `json:"check_outcomes"`
-	Artifact         contract.Artifact `json:"artifact"`
+	// Repair is the trusted repair summary of a failed interactive
+	// validation, including base-rerun classification of failing Go tests.
+	Repair   *RepairSummary    `json:"repair,omitempty"`
+	Artifact contract.Artifact `json:"artifact"`
 }
 
 type ValidateOptions struct {
@@ -255,6 +270,17 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		record(outcome)
 	}
 	details.WriteString(warmNote)
+	// Diagnosis is coordinator work after the verdict; it never changes it.
+	if !report.Passed && !opts.CIMode && ctx.Err() == nil {
+		report.Repair = diagnoseRepair(ctx, runner, report)
+		if len(report.Repair.Tests) > 0 {
+			details.WriteString("\n### Failing tests compared with the approved base\n")
+			for _, test := range report.Repair.Tests {
+				details.WriteString("- `" + strings.ReplaceAll(testLine(test), "`", "'") + "`\n")
+			}
+			details.WriteString("\nSee `.swarm/active/REPAIR.md` for the repair brief.\n")
+		}
+	}
 	markdown.WriteString(details.String())
 	verdict, summary := "PASS", fmt.Sprintf("All %d required checks passed", required)
 	if !report.Passed {
@@ -268,6 +294,10 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		issue = 1
 	}
 	report.Artifact = contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-validation", issue), IssueNumber: issue, Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: verdict, Summary: summary, Body: markdown.String(), CreatedAt: time.Now().UTC(), Metadata: map[string]string{"base_sha": baseSHA, "head_sha": headSHA}}
+	if report.Repair != nil {
+		evidence, _ := json.Marshal(report.Repair)
+		report.Artifact.Metadata[RepairMetadataKey] = string(evidence)
+	}
 	if report.Passed && before != nil {
 		after, e := fingerprint(ctx, worktreePath, opts)
 		stable := e == nil
@@ -287,6 +317,10 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	}
 	if !opts.CIMode {
 		if err := safefs.WriteFile(worktreePath, filepath.Join(".swarm", "active", "VALIDATION.md"), []byte(markdown.String()), 0o644); err != nil {
+			return nil, err
+		}
+		// A passing validation clears any earlier brief.
+		if err := WriteRepairBrief(worktreePath, report.Repair); err != nil {
 			return nil, err
 		}
 	}
@@ -420,6 +454,7 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 	outcome := CheckRunOutcome{Name: name, Command: command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil}
 	if runErr != nil {
 		outcome.OutputTail, outcome.FailingTests = output.diagnostics()
+		outcome.goFailures = output.evidence(command)
 		var exitErr *exec.ExitError
 		outcome.InfrastructureError = !errors.As(runErr, &exitErr)
 		outcome.ExitCode = 1

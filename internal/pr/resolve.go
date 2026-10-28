@@ -51,6 +51,26 @@ type resolver struct {
 	log       io.Writer
 	// deps are the agent dependency caches prefetched for the approved base.
 	deps sandbox.Dependencies
+	// instructions is operator guidance for every resolver turn.
+	instructions string
+}
+
+// request builds one resolver turn, carrying operator guidance the way issue
+// and PR work turns do.
+func (r *resolver) request(dir, task string) agent.RunRequest {
+	if r.instructions != "" {
+		task += "\nOperator instructions: " + r.instructions
+	}
+	return agent.RunRequest{Agent: r.agentName, Role: "developer", Mode: r.mode, WorktreePath: dir, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
+		TaskPrompt: task, OperatorInstructions: r.instructions, Local: r.local, Dependencies: r.deps}
+}
+
+// runGuidance is the guidance a turn received, bounded for rebase evidence.
+func runGuidance(run *agent.RunResult) []string {
+	if run == nil {
+		return nil
+	}
+	return lease.TrimRebaseGuidance(run.Guidance)
 }
 
 func (r *resolver) logf(format string, args ...any) {
@@ -64,7 +84,7 @@ func resolveGuidance(number int, paths []string) string {
 	if len(paths) > 0 {
 		fmt.Fprintf(&b, "Conflicted paths: %s\n", strings.Join(paths, ", "))
 	}
-	fmt.Fprintf(&b, "The rebase is still paused. Resolve the files in .swarm/worktrees/pr-%d, git add them, and run swarm pr rebase %d --continue; retry with --resolve; or run swarm pr rebase %d --abort.\n", number, number, number)
+	fmt.Fprintf(&b, "The rebase is still paused. Resolve the files in .swarm/worktrees/pr-%d, git add them, and run swarm pr rebase %d --continue; run swarm pr rebase %d --resolve to retry the agent; or run swarm pr rebase %d --abort.\n", number, number, number, number)
 	b.WriteString("Files that contain literal conflict-marker lines (such as marker test fixtures) always need manual resolution.")
 	return b.String()
 }
@@ -122,8 +142,7 @@ func (s *Service) resolveStop(ctx context.Context, rv *resolver, worktree string
 	if err = safefs.WriteFile(worktree, ".swarm/active/REBASE_PLAN.md", []byte(plan), 0644); err != nil {
 		return nil, err
 	}
-	run, runErr := rv.runner.Run(ctx, agent.RunRequest{Agent: rv.agentName, Role: "developer", Mode: rv.mode, WorktreePath: dir,
-		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: resolverTaskPrompt, Local: rv.local, Dependencies: rv.deps})
+	run, runErr := rv.runner.Run(ctx, rv.request(dir, resolverTaskPrompt))
 	if runErr != nil {
 		// Never surface the disposable workspace path.
 		msg := strings.ReplaceAll(runErr.Error(), dir, "<resolver workspace>")
@@ -163,7 +182,7 @@ func (s *Service) resolveStop(ctx context.Context, rv *resolver, worktree string
 		att = rv.runner.Provenance("developer", false)
 	}
 	return &lease.RebaseResolutionReport{Commit: stopped, Paths: paths, Agent: firstNonEmpty(att.Agent, rv.agentName),
-		Harness: att.Harness, HarnessVersion: att.HarnessVersion, Model: att.Model, Sandbox: att.Sandbox}, nil
+		Harness: att.Harness, HarnessVersion: att.HarnessVersion, Model: att.Model, Sandbox: att.Sandbox, Guidance: runGuidance(run)}, nil
 }
 
 func firstNonEmpty(values ...string) string {

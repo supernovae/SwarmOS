@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/safefs"
@@ -234,7 +233,7 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 			if err != nil {
 				return err
 			}
-			_, err = rv.runner.Run(ctx, agent.RunRequest{Agent: rv.agentName, Role: "developer", Mode: rv.mode, WorktreePath: dir, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: repairTask, Local: rv.local, Dependencies: rv.deps})
+			_, err = rv.runner.Run(ctx, rv.request(dir, repairTask))
 			if err != nil {
 				return fmt.Errorf("repair agent failed: %s", strings.ReplaceAll(err.Error(), dir, "<repair workspace>"))
 			}

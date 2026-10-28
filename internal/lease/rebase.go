@@ -50,6 +50,8 @@ type RebasePlanReport struct {
 	PlanDigest     string   `json:"plan_digest"`
 	BaseSHA        string   `json:"base_sha"`
 	Agent          string   `json:"agent"`
+	// Guidance is the operator guidance delivered to the planning turn.
+	Guidance []string `json:"guidance,omitempty"`
 }
 
 // RebaseResolutionReport is the wire form of one agent conflict resolution.
@@ -62,6 +64,8 @@ type RebaseResolutionReport struct {
 	HarnessVersion string   `json:"harness_version,omitempty"`
 	Model          string   `json:"model,omitempty"`
 	Sandbox        string   `json:"sandbox,omitempty"`
+	// Guidance is the operator guidance delivered to the resolve turn.
+	Guidance []string `json:"guidance,omitempty"`
 }
 
 // RebaseResolution is a stored resolution. Reported marks fork contributor
@@ -75,7 +79,23 @@ const (
 	maxRebaseResolutions     = 64
 	maxRebaseResolutionPaths = 256
 	maxRebaseResolutionField = 200
+	maxRebaseGuidance        = 8
+	maxRebaseGuidanceBytes   = 4096
 )
+
+// TrimRebaseGuidance bounds delivered guidance to what rebase evidence stores.
+func TrimRebaseGuidance(messages []string) []string {
+	if len(messages) == 0 {
+		return nil
+	}
+	out := append([]string(nil), messages[:min(len(messages), maxRebaseGuidance)]...)
+	for i, m := range out {
+		if len(m) > maxRebaseGuidanceBytes {
+			out[i] = strings.ToValidUTF8(m[:maxRebaseGuidanceBytes], "")
+		}
+	}
+	return out
+}
 
 // RebaseContext reports local progress. Fork reports cannot assert Git identity.
 type RebaseContext struct {
@@ -109,6 +129,14 @@ func validateRebaseResolution(r *RebaseResolutionReport) error {
 	for _, field := range []string{r.Agent, r.Harness, r.HarnessVersion, r.Model, r.Sandbox} {
 		if len(field) > maxRebaseResolutionField || strings.IndexFunc(field, func(c rune) bool { return c < 0x20 || c == 0x7f }) >= 0 {
 			return fmt.Errorf("invalid resolution provenance")
+		}
+	}
+	if len(r.Guidance) > maxRebaseGuidance {
+		return fmt.Errorf("too many guidance messages")
+	}
+	for _, m := range r.Guidance {
+		if len(m) > maxRebaseGuidanceBytes {
+			return fmt.Errorf("guidance message too long")
 		}
 	}
 	return nil
@@ -209,7 +237,7 @@ func (m *Manager) UpdateRebaseContext(ctx context.Context, n int, owner string, 
 			if len(r.Plans) >= maxRebaseResolutions || len(plan.Body) == 0 || len(plan.Body) > 64<<10 || hash(plan.Body) != plan.Digest || plan.BaseSHA != st.BaseSHA {
 				return fmt.Errorf("invalid rebase plan evidence")
 			}
-			if err := validateRebaseResolution(&RebaseResolutionReport{Commit: plan.Commit, Paths: plan.Paths, Agent: plan.Agent, Harness: plan.Harness, HarnessVersion: plan.HarnessVersion, Model: plan.Model, Sandbox: plan.Sandbox}); err != nil {
+			if err := validateRebaseResolution(&RebaseResolutionReport{Commit: plan.Commit, Paths: plan.Paths, Agent: plan.Agent, Harness: plan.Harness, HarnessVersion: plan.HarnessVersion, Model: plan.Model, Sandbox: plan.Sandbox, Guidance: plan.Guidance}); err != nil {
 				return err
 			}
 			approved := ""
@@ -222,6 +250,7 @@ func (m *Manager) UpdateRebaseContext(ctx context.Context, n int, owner string, 
 				return fmt.Errorf("rebase plan does not match approved design")
 			}
 			plan.Paths = append([]string(nil), plan.Paths...)
+			plan.Guidance = append([]string(nil), plan.Guidance...)
 			r.Plans = append(r.Plans, plan)
 		}
 		if report.Resolution != nil {
@@ -229,6 +258,7 @@ func (m *Manager) UpdateRebaseContext(ctx context.Context, n int, owner string, 
 			res.Paths = append([]string(nil), res.Paths...)
 			slices.Sort(res.Paths)
 			res.Paths = slices.Compact(res.Paths)
+			res.Guidance = append([]string(nil), res.Guidance...)
 			if err := validateRebaseResolution(&res); err != nil {
 				return err
 			}

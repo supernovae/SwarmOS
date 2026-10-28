@@ -266,7 +266,15 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 	go func() { done <- cmd.Wait() }()
 	defer func() { retErr = errors.Join(retErr, process.StopVerified(cmd)) }()
 	ready := make(chan string, 1)
-	go func() { b, _ := io.ReadAll(io.LimitReader(readyRead, 256)); ready <- string(b) }()
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		ready <- readRestoreReadyFrame(readyRead)
+	}()
+	defer func() {
+		_ = readyRead.Close()
+		<-readerDone
+	}()
 	timer := time.NewTimer(20 * time.Second)
 	defer timer.Stop()
 	select {
@@ -277,6 +285,7 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 			return "", fmt.Errorf("restore capability unavailable: %s", safeRestoreStatus(status))
 		}
 	case <-done:
+		_ = readyRead.Close()
 		status := <-ready
 		if status != "" && status != "READY\n" {
 			return "", fmt.Errorf("restore capability unavailable: %s", safeRestoreStatus(status))
@@ -325,6 +334,23 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 	}
 	return output, nil
 }
+
+// readRestoreReadyFrame reads one bounded control frame, without requiring EOF:
+// the launcher may retain a writer while the helper waits for our acknowledgement.
+// Incomplete and oversized frames cannot equal any accepted status.
+func readRestoreReadyFrame(r io.Reader) string {
+	var frame [256]byte
+	for i := range frame {
+		if _, err := io.ReadFull(r, frame[i:i+1]); err != nil {
+			return ""
+		}
+		if frame[i] == '\n' {
+			return string(frame[:i+1])
+		}
+	}
+	return ""
+}
+
 func safeRestoreStatus(s string) string {
 	switch s {
 	case "NETWORK\n":

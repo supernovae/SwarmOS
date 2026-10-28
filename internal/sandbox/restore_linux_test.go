@@ -365,3 +365,33 @@ func TestRestoreLinuxSourceSpecialFile(t *testing.T) {
 		t.Fatal("special file accepted")
 	}
 }
+
+func TestRestoreReadyFrameOpenWriter(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	fd, err := syscall.Dup(int(w.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperWriter := os.NewFile(uintptr(fd), "helper-ready")
+	defer helperWriter.Close()
+	result := make(chan string, 1)
+	go func() { result <- readRestoreReadyFrame(r) }()
+	if _, err := io.WriteString(helperWriter, "READY\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = helperWriter.Close()
+	// Keep the pipe writer open, as Bubblewrap does after the helper closes stdout.
+	select {
+	case got := <-result:
+		if got != "READY\n" {
+			t.Fatalf("frame = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("readiness waited for pipe EOF")
+	}
+}

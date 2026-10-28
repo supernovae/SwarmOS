@@ -510,3 +510,58 @@ func TestRestoreCleanupErrors(t *testing.T) {
 		t.Fatal("helper cleanup failure suppressed", err)
 	}
 }
+
+func TestRestoreReadyFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name, frame, want string
+	}{
+		{"ready", "READY\n", "READY\n"},
+		{"failure", "NETWORK\n", "NETWORK\n"},
+		{"crlf", "READY\r\n", "READY\r\n"},
+		{"prefix", "xREADY\n", "xREADY\n"},
+		{"partial", "READY", ""},
+		{"empty", "", ""},
+		{"oversized", strings.Repeat("x", 256) + "\n", ""},
+		{"unterminated", strings.Repeat("x", 512), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := readRestoreReadyFrame(strings.NewReader(tc.frame)); got != tc.want {
+				t.Fatalf("frame = %q, want %q", got, tc.want)
+			}
+			if tc.name != "ready" && readRestoreReadyFrame(strings.NewReader(tc.frame)) == "READY\n" {
+				t.Fatal("malformed frame accepted as ready")
+			}
+		})
+	}
+}
+
+func TestRestoreReadyFrameCancellation(t *testing.T) {
+	for _, prefix := range []string{"", "REA"} {
+		t.Run(prefix, func(t *testing.T) {
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			defer w.Close()
+			if _, err := io.WriteString(w, prefix); err != nil {
+				t.Fatal(err)
+			}
+			result := make(chan string, 1)
+			go func() { result <- readRestoreReadyFrame(r) }()
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			<-ctx.Done()
+			// The lifecycle owner closes the reader on cancellation or deadline.
+			_ = r.Close()
+			select {
+			case got := <-result:
+				if got != "" {
+					t.Fatalf("cancelled frame = %q", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("cancelled reader did not stop")
+			}
+		})
+	}
+}

@@ -1,1 +1,0 @@
-- Let CI policy validation accept protected-path changes in an agent pull request whose WorkUnit was approved with `allow_harness_changes: true`, verified from the issue's authoritative swarm state for the exact PR head, with the token kept out of the step that runs checks; fork pull requests and unlinked branches stay strictly enforced.

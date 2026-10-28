@@ -1,1 +1,0 @@
-- Rust repositories with a `Cargo.lock` get a per-repository, read-only Cargo cache instead of your host-wide Cargo registry and git caches, filled on the host by `cargo fetch --locked` from the approved base's manifests without running build scripts, rustc wrappers or repository toolchains; a dependency that cannot be fetched stops the run before it claims work.

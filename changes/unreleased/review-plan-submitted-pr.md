@@ -1,1 +1,0 @@
-- `swarm issue review-plan N --approve` now records a fresh human review for a submitted issue that still has a linked PR, so a human-gated PR can be rebased after a policy change. Previously it failed with `task approval is missing or stale`. An issue that is completed with no linked PR now says so instead.

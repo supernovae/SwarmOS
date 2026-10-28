@@ -6,7 +6,7 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## v0.8.0
 
-v0.8.0 is about getting work across the line without hand repairs. Rebases resolve and repair routine conflicts, approvals follow main forward when nothing that matters changed, abandoned claims and checkpoints have maintainer commands to clear them, and validation fails fast with the failing tests in view. Fork contributors can keep the `origin`/`upstream` layout `gh` creates, and projects that prefer a tidy branch list can move SwarmOS's ledger refs under `refs/swarm/`. Upgrade `swarm` and rerun `swarm repo init` to pick up the regenerated workflows and templates.
+v0.8.0 is about getting work across the line without hand repairs. Rebases resolve and repair routine conflicts, approvals follow main forward when nothing that matters changed, abandoned claims and checkpoints have maintainer commands to clear them, and validation fails fast with the failing tests in view. Fork contributors can keep the `origin`/`upstream` layout `gh` creates, and projects that prefer a tidy branch list can move SwarmOS's ledger refs under `refs/swarm/`. Upgrade `swarm` and rerun `swarm repo init` to pick up the regenerated workflows and templates. Sandboxes now get per-repository, read-only dependency and build caches for Go, Rust, Node and Python, filled on the host from the approved base, and mount only the toolchain directories they need. Agents get a trusted repair brief when checks fail and can repair within the same run, WorkUnits carry size, uncertainty and risk dimensions that select leaner prompts for small tasks, and every role run records its time, tokens and model.
 
 - Show bounded, terminal-safe failed-check output and Go failing test names during repository, issue, and PR validation and submission. JSON failed-check outcomes include `output_tail` and `failing_tests`.
 
@@ -97,6 +97,88 @@ v0.8.0 is about getting work across the line without hand repairs. Rebases resol
 - `swarm issue submit` and `swarm pr submit` reuse a passing validation from the same claim when the exact tree, base, policy, claim, and swarm build are unchanged, printing its age and short tree SHA and noting the reuse in the PR description; any mismatch, a prior failure, or a `dev` build validates as before.
 
 - Fix `swarm` heartbeats reporting a deliberate stop as a failure when the stop landed while the heartbeat was loading claim state.
+
+- Show failed required-check diagnostics (output tail, failing Go tests and their FAIL blocks) at the end of `swarm issue work` and `swarm pr work`, in text and `--json`, as validate and submit already do.
+
+- Keep PR approval unchanged when rebase plan review refuses, block revision work outside its approved baseline, and guide plan recovery through PR commands.
+
+- Tell developer agents to record notes, test results, and blocked checks in `.swarm/active/IMPLEMENTATION.md`, and when a developer run is rejected only for writing `VALIDATION.md`, suggest a rerun command with matching `--instructions`.
+
+- Sandboxes no longer see your host-wide Go module cache: each repository gets its own read-only module cache, filled on the host from the approved base's `go.mod` and `go.sum` before agents or validation start, and a missing module stops the run before it claims work. Ecosystems without a fetch-only download keep read-only host caches, `swarm repo doctor` and `swarm node status` report each ecosystem's mode, and `share_host_dependency_caches: true` in the node profile restores the shared Go cache.
+
+- Sandboxes now mount only the toolchain directories they need: a bin directory on PATH such as `~/go/bin` or `/opt/<x>/bin` no longer exposes its parent, and home toolchain paths must match whole path components (so `go/binaries` or `.dotnet-x` are no longer admitted).
+
+- Rust repositories with a `Cargo.lock` get a per-repository, read-only Cargo cache instead of your host-wide Cargo registry and git caches, filled on the host by `cargo fetch --locked` from the approved base's manifests without running build scripts, rustc wrappers or repository toolchains; a dependency that cannot be fetched stops the run before it claims work.
+
+- Node repositories with a `package-lock.json`, `pnpm-lock.yaml` or `yarn.lock` now get their own read-only package cache, filled on the host from the approved base by `npm ci --ignore-scripts`, `pnpm fetch` or a script-free Yarn install, so sandboxes no longer see your host-wide npm, pnpm, Yarn or Bun caches. No package script runs and no token reaches the prefetch, git-hosted dependencies are refused, and a missing package stops the run before it claims work, naming the package.
+
+- Python repositories with a root `uv.lock` or `requirements*.txt` get their own read-only wheel cache, filled on the host before agents or validation start by `uv export` and `pip download --only-binary=:all:`, so no package code runs; sdist-only dependencies and requirement lines that would build are reported before the run claims work, and Python repositories without either file keep read-only host caches.
+
+- `swarm issue create --allow-harness-changes` and `swarm issue edit --allow-harness-changes=true|false` set a WorkUnit's permission to edit protected harness paths, and `swarm issue lint` reports it. Changing the permission on an approved WorkUnit requires approving it again.
+
+- Write a trusted `.swarm/active/REPAIR.md` when required checks fail, classify each failing Go test as a regression, pre-existing at the approved base, or flaky by rerunning only that test, stop for a maintainer when every failure is pre-existing, and show the classification in `swarm issue status` and `swarm pr status` (text and `--json`).
+
+- Repair a failed validation within the same `swarm issue work` or `swarm pr work` run: up to `lease.validation_repair_limit` developer rounds (default one, zero disables), each a fenced checkpoint followed by the full trusted checks, with `repair 1/1` progress and `validation_repair_exhausted` or `validation_repair_no_changes` next actions (exit `3`).
+
+- Reuse compiled Go, Rust and C/C++ output across agent runs and validations, with separate per-repository caches for agents and the validator. Only trusted warm-up of the approved base writes the validator cache.
+
+- Developer and tester agents now run the test plan commands and changed-package tests first, and run the full test suite at most once at the end when the test plan requires it; the coordinator still reruns every required check.
+
+- Let CI policy validation accept protected-path changes in an agent pull request whose WorkUnit was approved with `allow_harness_changes: true`, verified from the issue's authoritative swarm state for the exact PR head, with the token kept out of the step that runs checks; fork pull requests and unlinked branches stay strictly enforced.
+
+- Give WorkUnits using the compact profile a compact plan (cause and files, smallest change, acceptance-to-test mapping, risks; about 150–250 words) and a compact review (verdict plus actionable findings, no audit table), and sync the repository planner and reviewer prompts with their templates.
+
+- Planners end PLAN.md with a HANDOFF section (entry points, tests to extend, focused commands, checked assumptions, reopen conditions, and a searched "What this change breaks" list), developers hand their changes, gaps, and command results to testers through IMPLEMENTATION.md, and both roles verify handoffs against source as evidence rather than authority.
+
+- Record per-run timing, harness-reported token and tool usage, repair and re-plan counts, and the actual model and effort for each artifact-producing role run, shown in `swarm issue status`, `swarm pr status` (text and `--json`), and the Draft PR evidence; values a harness does not report, including tokens and model from isolated Claude Code and Codex runs whose session logs are off, show as `unavailable`.
+
+- Keep role system prompts small: project, conventions, goals, rules, and validation policy stay inline, but skills are listed in an index and only inlined when their `roles`/`workflows` front matter selects the active role and workflow. Large architecture documents are referenced by section from `.swarm/active/ARCHITECTURE.md`, and the WorkUnit now appears only in `WORKUNIT.md`.
+
+- `swarm issue work`, `swarm pr work` and each `swarm node run` task now inspect a harness's version and interface once per command for every role sharing the same executable and approved config. A changed executable (path, size, modification time or content) or config inspects again. Role authorization, authentication, executor checks, boundary canaries and validation preflight still run every time.
+
+- `swarm issue work --next`, `swarm issue claim --next`, and `swarm node run` now prefer ready WorkUnits whose likely file and package touchpoints do not overlap active claims, print why a task was chosen, and report the advisory overlap score in `--json`; equal scores keep the existing ready order, and overlap never refuses a claim.
+
+- Let Claude Code and Codex agent entries set an optional `effort:` from a fixed per-harness allowlist (Claude: `low`, `medium`, `high`, `max`; Codex: `minimal`, `low`, `medium`, `high`), passed as `--effort` or `-c model_reasoning_effort` and recorded with the model in run provenance; other harnesses and unknown values fail config validation.
+
+- Add maintainer-approved size, uncertainty and risk dimensions with policy-selected execution prompts and evidence expectations; gates and required checks stay unchanged. The repository policy update requires in-flight claims to refresh their policy approval.
+
+- Re-approving a human-gated issue on a base whose `.swarm/` policy changed now keeps its approved plan and test plan instead of deleting them. `swarm issue status` reports the changed policy paths, and a maintainer approves the kept plan again with `swarm issue review-plan <issue> --approve`.
+
+- The Go dependency prefetch now covers every module in the approved base, including nested `go.mod` files and `go.work` workspaces, so those repositories build offline in sandboxes. Files under `vendor/` and `testdata/` are ignored, and a base with more than 128 modules stops with an error.
+
+- Add the `private_go_modules` node profile setting, which lets a registered repository's dependency prefetch fetch the listed private Go module patterns on the host with your own Go and Git credentials, into that repository's cache only. Without it, a private module the repository requires stops the run with an error naming the module and the setting. `swarm node status` and `swarm repo doctor` report the allowed patterns.
+
+- Record a task's branch at its first claim so editing the issue title no longer strands its worktree; `swarm issue edit --dry-run` reports the recorded branch when the title changes.
+
+- `swarm issue work` and `swarm issue claim` now fast-forward an untouched task worktree to the newly approved base after any number of re-approvals, including a re-approval at the same base. Previously a second re-approval before the next claim made them refuse with `expected checkpoint` and suggest removing the worktree. Worktrees with commits outside the approved base or real edits are still refused.
+
+- `swarm issue work` and `swarm pr work` now refuse a developer run that deletes a file present at the approved base unless the approved PLAN.md has a line such as `- Delete path/to/file.go`; nothing is imported and the message names the files. When a checkpoint already lacks such a file, the next developer round's `.swarm/active/REPAIR.md` carries its approved-base contents so the agent can restore it.
+
+- Classify a failing Go test that a test file added or changed by the candidate defines, and that does not exist at the approved base, as a regression, so repair rounds fix it instead of leaving it unclassified.
+
+- Role-run telemetry now reports tokens (including reasoning where the harness records it), tool calls and the actual model for isolated Claude Code, Codex, OhMyPi and OpenCode runs, read only from that run's own session. To make this possible, isolated runs now keep their transcripts in your own harness history (`~/.claude/projects`, `$CODEX_HOME/sessions` or `~/.codex/sessions`, `~/.omp/agent/sessions`, or OpenCode's data store), as an interactive session would. SwarmOS never copies, moves or deletes them. The role-run table gains a `Reasoning tokens` column.
+
+- `swarm pr rebase <PR> --resolve` now resumes a paused rebase (like `--continue --resolve`), so the retry command printed after a rejected resolution works as shown; micro-plan labels accept bold, list, and next-line forms; a resolution rejected only for a malformed micro-plan gets one automatic planning retry on same-repository PRs; and `--resolve` accepts `--instructions` for the resolver, recorded with the rebase evidence.
+
+- Report skipped Go tests in trusted validation evidence and work/submit notices, including newly added tests and cached test results.
+
+- Explain recognized provider capacity, usage, rate-limit, and network failures with a phase-specific resume command, and show their fixed classification in role-run status.
+
+- Preserve assertion messages in validation failure blocks from JSON Go test output, including long messages and failing subtests.
+
+- Add role-scoped operator guidance to issue and PR work, and accurately report completed runs whose output import is refused for writing another role’s control file.
+
+- Direct agent scratch output to TMPDIR and report completed runs refused for unauthorized active-directory files accurately, while keeping imports fail-closed.
+
+- Use advisory size, uncertainty, and risk dimensions consistently in issue advice, backlog reports, and planning guidance, with execution variants selected only by approved profiles.
+
+- Warn before issue and PR submission when target policy changes may invalidate an approved harness change, and avoid duplicate reapproval guidance.
+
+- Raise the default `test` check timeout that `swarm repo init` writes from 10 to 30 minutes, and the generated validation workflow job limit from 30 to 60 minutes, so slow shared CI runners do not fail a correct change.
+
+- Go repositories whose `go.mod` needs a newer Go than the host's now validate and build in sandboxes again with per-repository dependency caches. The prefetch finishes the downloaded toolchain the way the `go` command does on first use (execute bits and `go.mod` files), without running it, so the read-only cache mount no longer fails with `chmod ... read-only file system`.
+
+- `swarm issue review-plan N --approve` now records a fresh human review for a submitted issue that still has a linked PR, so a human-gated PR can be rebased after a policy change. Previously it failed with `task approval is missing or stale`. An issue that is completed with no linked PR now says so instead.
 
 ## v0.7.0
 

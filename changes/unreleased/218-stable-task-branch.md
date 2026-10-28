@@ -1,1 +1,0 @@
-- Record a task's branch at its first claim so editing the issue title no longer strands its worktree; `swarm issue edit --dry-run` reports the recorded branch when the title changes.

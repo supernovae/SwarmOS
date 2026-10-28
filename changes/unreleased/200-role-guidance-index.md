@@ -1,1 +1,0 @@
-- Keep role system prompts small: project, conventions, goals, rules, and validation policy stay inline, but skills are listed in an index and only inlined when their `roles`/`workflows` front matter selects the active role and workflow. Large architecture documents are referenced by section from `.swarm/active/ARCHITECTURE.md`, and the WorkUnit now appears only in `WORKUNIT.md`.

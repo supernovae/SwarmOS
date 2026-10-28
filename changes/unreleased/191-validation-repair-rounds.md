@@ -1,1 +1,0 @@
-- Repair a failed validation within the same `swarm issue work` or `swarm pr work` run: up to `lease.validation_repair_limit` developer rounds (default one, zero disables), each a fenced checkpoint followed by the full trusted checks, with `repair 1/1` progress and `validation_repair_exhausted` or `validation_repair_no_changes` next actions (exit `3`).

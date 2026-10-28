@@ -2,12 +2,13 @@ package gitcredential
 
 import (
 	"context"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 func clearTokenEnv(t *testing.T) {
@@ -113,7 +114,7 @@ func TestCommandTokenStaysOutOfArgumentsAndAgentInputs(t *testing.T) {
 	clearTokenEnv(t)
 	const token = "synthetic-command-secret"
 	script := filepath.Join(t.TempDir(), "token.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' "+token+"\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(script, []byte("#!/bin/sh\nprintf '%s\\n' "+token+"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(TokenCommandEnv, script)

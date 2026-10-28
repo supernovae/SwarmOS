@@ -3,6 +3,7 @@ package gitcredential
 import (
 	"context"
 	"encoding/base64"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
@@ -64,7 +65,7 @@ func TestCoordinatorGitDoesNotExecuteCandidateSelectedHelpers(t *testing.T) {
 	git("config", "user.name", "Security fixture")
 	git("config", "user.email", "fixture@example.invalid")
 	script := filepath.Join(root, "helper.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf invoked > helper-invoked\ncat\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(script, []byte("#!/bin/sh\nprintf invoked > helper-invoked\ncat\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	git("config", "filter.candidate.clean", script)
@@ -78,7 +79,7 @@ func TestCoordinatorGitDoesNotExecuteCandidateSelectedHelpers(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "hooks"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "hooks", "pre-commit"), []byte("#!/bin/sh\nprintf invoked > hook-invoked\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(root, "hooks", "pre-commit"), []byte("#!/bin/sh\nprintf invoked > hook-invoked\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, ".gitattributes"), []byte("*.txt filter=candidate diff=candidate\n"), 0600); err != nil {

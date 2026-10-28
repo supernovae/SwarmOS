@@ -18,6 +18,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 func TestNativeWorkspaceExcludesControlAndImportsChanges(t *testing.T) {
@@ -395,7 +396,7 @@ exec) printf x >> '` + dir + `/help'; echo "--ignore-user-config --ignore-rules 
 esac
 `
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+	if err := testutil.WriteExecutable(path, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -505,18 +506,17 @@ func TestInspectionInvalidatesOnExecutableIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			moved := filepath.Join(dir, "codex-copy")
-			if err := os.WriteFile(moved, data, 0700); err != nil {
+			if err := testutil.WriteExecutable(moved, data, 0700); err != nil {
 				t.Fatal(err)
 			}
 			return moved
 		}},
 		{"size", func(t *testing.T, dir, binary string) string {
-			f, err := os.OpenFile(binary, os.O_APPEND|os.O_WRONLY, 0)
+			data, err := os.ReadFile(binary)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer f.Close()
-			if _, err := f.WriteString("# grown\n"); err != nil {
+			if err := testutil.WriteExecutable(binary, append(data, []byte("# grown\n")...), 0700); err != nil {
 				t.Fatal(err)
 			}
 			return binary
@@ -609,7 +609,7 @@ func TestInspectionSymlinkRetargeting(t *testing.T) {
 func TestInspectionPartitionsByDriverAndPolicy(t *testing.T) {
 	t.Parallel()
 	binary := filepath.Join(t.TempDir(), "harness")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	base := &contract.SwarmConfig{DefaultAgent: "codex", Roles: map[string]string{"tester": "codex"}, Agents: map[string]contract.AgentConfig{"codex": {Binary: "codex"}, "claude": {Binary: "claude"}}}
@@ -649,7 +649,7 @@ func TestInspectionPartitionsByDriverAndPolicy(t *testing.T) {
 func TestInspectionFailuresAreNotCached(t *testing.T) {
 	t.Parallel()
 	binary := filepath.Join(t.TempDir(), "harness")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -666,7 +666,7 @@ func TestInspectionFailuresAreNotCached(t *testing.T) {
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
 	other := filepath.Join(t.TempDir(), "other")
-	if err := os.WriteFile(other, []byte("#!/bin/sh\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(other, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := session.reuse(cancelled, "omp", other, "p", func(ctx context.Context) (string, error) { calls++; return "", ctx.Err() }); !errors.Is(err, context.Canceled) {
@@ -687,7 +687,7 @@ func TestInspectionRejectsMissingAndMutatedExecutables(t *testing.T) {
 		t.Fatalf("missing executable inspected: calls=%d err=%v", calls, err)
 	}
 	unreadable := filepath.Join(t.TempDir(), "unreadable")
-	if err := os.WriteFile(unreadable, []byte("#!/bin/sh\n"), 0100); err != nil {
+	if err := testutil.WriteExecutable(unreadable, []byte("#!/bin/sh\n"), 0100); err != nil {
 		t.Fatal(err)
 	}
 	if f, err := os.Open(unreadable); err == nil {
@@ -697,12 +697,12 @@ func TestInspectionRejectsMissingAndMutatedExecutables(t *testing.T) {
 		t.Fatalf("unreadable executable inspected: calls=%d err=%v", calls, err)
 	}
 	binary := filepath.Join(t.TempDir(), "harness")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	mutate := func(context.Context) (string, error) {
 		calls++
-		return "1", os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0700)
+		return "1", testutil.WriteExecutable(binary, []byte("#!/bin/sh\nexit 0\n"), 0700)
 	}
 	if _, err := session.reuse(ctx, "omp", binary, "p", mutate); err == nil || !strings.Contains(err.Error(), "changed during inspection") {
 		t.Fatalf("mutation during inspection accepted: %v", err)
@@ -715,7 +715,7 @@ func TestInspectionRejectsMissingAndMutatedExecutables(t *testing.T) {
 func TestInspectionConcurrentRequestsShareOneInspection(t *testing.T) {
 	t.Parallel()
 	binary := filepath.Join(t.TempDir(), "harness")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	session := NewInspectionSession()
@@ -760,7 +760,7 @@ case "$1" in
 --help) echo "--mode --no-tools --no-extensions --no-rules --config --no-session" ;;
 esac
 `
-	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
@@ -805,7 +805,7 @@ case "$1" in
 *) echo "` + tc.help + `" ;;
 esac
 `
-			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+			if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			ctx := context.Background()
@@ -854,7 +854,7 @@ case "$1" in
 *) cat '` + help + `' ;;
 esac
 `
-	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()

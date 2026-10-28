@@ -11,10 +11,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/claimpause"
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 type pauseWorkerWriter struct {
@@ -85,7 +85,7 @@ case "$1" in
 			}
 			script += ";;\n *) :;;\nesac\n"
 			binary := filepath.Join(root, "docker")
-			if err := writeFakeExecutable(binary, script); err != nil {
+			if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithCancelCause(t.Context())
@@ -178,7 +178,7 @@ case "$1" in
 				}
 				script += ";;\n *) :;;\nesac\n"
 				binary := filepath.Join(root, "docker")
-				if err := writeFakeExecutable(binary, script); err != nil {
+				if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
 					t.Fatal(err)
 				}
 				ctx, cancel := context.WithCancelCause(t.Context())
@@ -221,13 +221,4 @@ case "$1" in
 			})
 		}
 	}
-}
-
-// writeFakeExecutable holds the fork lock while the file is open for writing, so a
-// parallel test's fork cannot inherit the descriptor and make exec fail with
-// "text file busy" (golang/go#22315).
-func writeFakeExecutable(path, script string) error {
-	syscall.ForkLock.RLock()
-	defer syscall.ForkLock.RUnlock()
-	return os.WriteFile(path, []byte(script), 0700)
 }

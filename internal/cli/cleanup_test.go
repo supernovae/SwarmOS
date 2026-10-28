@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -462,7 +463,7 @@ func TestCleanupLocalMovedTipCAS(t *testing.T) {
 				script += " if [ ! -f " + shellCleanupQuote(marker) + " ]; then\n"
 			}
 			script += "  " + shellCleanupQuote(realGit) + " -C " + shellCleanupQuote(f.root) + " update-ref " + shellCleanupQuote("refs/heads/"+st.Branch) + " " + shellCleanupQuote(moved) + "\n fi\n : > " + shellCleanupQuote(marker) + "\nfi\nexec " + shellCleanupQuote(realGit) + " \"$@\"\n"
-			if err = os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+			if err = testutil.WriteExecutable(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -506,7 +507,7 @@ func TestCleanupLocalRemovalFailure(t *testing.T) {
 	}
 	bin := t.TempDir()
 	script := "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = remove ] && [ \"$3\" = " + shellCleanupQuote(path) + " ]; then exit 1; fi\nexec " + shellCleanupQuote(realGit) + " \"$@\"\n"
-	if err = os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+	if err = testutil.WriteExecutable(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -252,7 +252,7 @@ func TestRevokeForkClaimOneRefRejectionMovesNeither(t *testing.T) {
 			}
 			hook := filepath.Join(f.remote, "hooks", "update")
 			script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in %s*) exit 1;; esac\nexit 0\n", layout.ContributorPrefix())
-			if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+			if err := testutil.WriteExecutable(hook, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			body, rev, err := store.Load(ctx, 7)

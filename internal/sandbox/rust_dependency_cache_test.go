@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
@@ -87,7 +88,7 @@ func rustRepo(t *testing.T, dep string) rustFixture {
 	}
 
 	wrapper := filepath.Join(resolvedTempDir(t), "wrapper.sh")
-	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\ntouch "+f.sentinels[3]+"\nexec \"$@\"\n"), 0o755); err != nil {
+	if err := testutil.WriteExecutable(wrapper, []byte("#!/bin/sh\ntouch "+f.sentinels[3]+"\nexec \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	f.repo = cacheTestRepo(t)

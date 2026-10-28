@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
@@ -22,7 +23,7 @@ func TestGoFastPassEntryPoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\nif [ \"$1\" = list ]; then cat '" + metadata + "'; fi\n"
-	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

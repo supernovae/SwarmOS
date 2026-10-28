@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 var migrationNow = time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC)
@@ -44,7 +46,7 @@ func installReceiveLog(t *testing.T, f *ledgerFixture) string {
 	t.Helper()
 	log := filepath.Join(f.root, "receive.log")
 	hook := "#!/bin/sh\n{ cat; echo ---; } >> " + log + "\n"
-	if err := os.WriteFile(filepath.Join(f.remote, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(f.remote, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return log

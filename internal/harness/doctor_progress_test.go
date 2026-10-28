@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 func TestDoctorRunnerLifecycle(t *testing.T) {
@@ -150,7 +151,7 @@ func TestRunDoctorAuthAndConfiguredChecks(t *testing.T) {
 				if auth == "gh-failure" {
 					code = "1"
 				}
-				if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\necho fixture\nexit "+code+"\n"), 0700); err != nil {
+				if err := testutil.WriteExecutable(filepath.Join(bin, "gh"), []byte("#!/bin/sh\necho fixture\nexit "+code+"\n"), 0700); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -152,3 +152,71 @@ func TestRoleRunTableShowsUnavailableAndZero(t *testing.T) {
 		t.Fatalf("legacy state: %v %+v", err, legacy.RoleRuns)
 	}
 }
+
+func TestFailedRoleRunPersistence(t *testing.T) {
+	for _, class := range []string{"capacity", "usage_limit", "rate_limit", "network", "unknown"} {
+		t.Run(class, func(t *testing.T) {
+			ctx := context.Background()
+			m, _, iss := testManager(t)
+			_, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			successful := contract.NewRoleRunTelemetry("developer", "mock", time.Now())
+			successful.RepairAttempt = contract.Count(2)
+			st, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", contract.Artifact{Type: contract.ArtifactImplementation, Producer: "mock:developer", Summary: "done", Body: "done", Metadata: map[string]string{contract.RoleRunTelemetryKey: roleRunValue(t, successful)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal(st.Artifacts)
+			failed := contract.NewRoleRunTelemetry("developer", "mock", time.Now())
+			failed.FailureClass = class
+			for _, attempt := range []*int64{nil, contract.Count(99)} {
+				failed.RepairAttempt = attempt
+				st, err = m.RecordFailedRoleRun(ctx, iss.Number, "local-dev", failed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if NextRepairAttempt(st, "developer", true) != 3 || NextRepairAttempt(st, "tester", false) != 2 {
+					t.Fatal("failed run changed counter")
+				}
+			}
+			if len(st.RoleRuns) != 2 {
+				t.Fatal("duplicate failure recorded")
+			}
+			after, _ := json.Marshal(st.Artifacts)
+			if string(before) != string(after) {
+				t.Fatal("failure changed artifacts")
+			}
+			if !strings.Contains(RoleRunTable(RoleRuns(st)), class) {
+				t.Fatal("missing failure in status")
+			}
+
+			successful = contract.NewRoleRunTelemetry("developer", "mock", time.Now())
+			successful.RepairAttempt = contract.Count(3)
+			st, err = m.UpdateArtifact(ctx, iss.Number, "local-dev", contract.Artifact{Type: contract.ArtifactImplementation, Producer: "mock:developer", Summary: "repair", Body: "done", Metadata: map[string]string{contract.RoleRunTelemetryKey: roleRunValue(t, successful)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if NextRepairAttempt(st, "tester", false) != 3 {
+				t.Fatal("tester lost successful repair")
+			}
+			firstClaim := st.Lease.ClaimID
+			if _, err := m.RecordFailedRoleRun(ctx, iss.Number, "wrong-owner", failed); err == nil {
+				t.Fatal("unfenced mutation")
+			}
+			m.SetNowFunc(func() time.Time { return st.Lease.ExpiresAt.Add(time.Second) })
+			if _, err := m.RecordFailedRoleRun(ctx, iss.Number, "local-dev", failed); !errors.Is(err, ErrClaimFence) {
+				t.Fatalf("expired claim: %v", err)
+			}
+			if _, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
+				t.Fatal(err)
+			}
+			m.BindClaim(iss.Number, firstClaim)
+			if _, err := m.RecordFailedRoleRun(ctx, iss.Number, "local-dev", failed); !errors.Is(err, ErrClaimFence) {
+				t.Fatalf("stale claim: %v", err)
+			}
+
+		})
+	}
+}

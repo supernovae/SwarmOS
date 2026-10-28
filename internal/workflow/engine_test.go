@@ -695,3 +695,45 @@ func TestEngineRoleHandoffs(t *testing.T) {
 		})
 	}
 }
+
+type providerFixtureError struct{ class string }
+
+func (e *providerFixtureError) Error() string        { return "safe failure" }
+func (e *providerFixtureError) FailureClass() string { return e.class }
+
+func TestProviderFailureResume(t *testing.T) {
+	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+		phase := "implement"
+		if role == "planner" {
+			phase = "plan"
+		}
+		if role == "reviewer" {
+			phase = "review"
+		}
+		for _, pr := range []int{0, 42} {
+			opts := WorkOptions{IssueNumber: 249, PRNumber: pr, DeveloperAgent: "other'agent"}
+			command := failureResume(opts, role)
+			prefix := "swarm issue work 249"
+			if pr != 0 {
+				prefix = "swarm pr work 42"
+			}
+			if !strings.HasPrefix(command, prefix+" --phase "+phase) {
+				t.Fatal(command)
+			}
+			script := "set -- " + command + "; test \"$7\" = \"--developer-agent\" && test \"$8\" = \"other'agent\""
+			if out, err := exec.Command("bash", "-c", script).CombinedOutput(); err != nil {
+				t.Fatalf("quote: %s %v %s", command, err, out)
+			}
+			original := &providerFixtureError{"capacity"}
+			_, err := (&Engine{}).failedRun(context.Background(), nil, opts, nil, original, role)
+			if !errors.Is(err, original) || !strings.Contains(err.Error(), "provider model at capacity; resume: "+command) {
+				t.Fatal(err)
+			}
+		}
+	}
+	original := &providerFixtureError{"unknown"}
+	_, err := (&Engine{}).failedRun(context.Background(), nil, WorkOptions{}, nil, original, "developer")
+	if err != original {
+		t.Fatal("unknown message changed")
+	}
+}

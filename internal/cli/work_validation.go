@@ -35,3 +35,19 @@ func writeWorkValidationFailure(cmd *cobra.Command, result *workflow.WorkResult)
 	writeValidationChecks(cmd, &failed)
 	fmt.Fprint(cmd.OutOrStdout(), validation.RepairStatusText(report.Repair))
 }
+
+func writeValidationSkipNotice(cmd *cobra.Command, report *validation.ValidationReport) {
+	if report == nil || !report.Passed || report.SkippedTotal == 0 {
+		return
+	}
+	name := ""
+	if len(report.SkippedTests) > 0 {
+		s := report.SkippedTests[0]
+		name = validation.EscapeDiagnostic(s.Package + "." + s.Test)
+		if len(name) > 240 {
+			name = name[:240] + "..."
+		}
+		name = " (" + name + ")"
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "Validation passed with %d skipped test(s)%s; see .swarm/active/VALIDATION.md (validation artifact).\n", report.SkippedTotal, name)
+}

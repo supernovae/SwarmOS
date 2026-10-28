@@ -280,3 +280,105 @@ func TestHostFailureDiagnostics(t *testing.T) {
 		t.Fatalf("%+v", check)
 	}
 }
+
+func TestJSONSkipCapture(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		c := &checkCapture{jsonMode: true, preserveJSON: preserve}
+		event := func(action, pkg, test, output string) {
+			b, _ := json.Marshal(map[string]string{"Action": action, "Package": pkg, "Test": test, "Output": output})
+			b = append(b, '\n')
+			for _, v := range b {
+				_, _ = c.Write([]byte{v})
+			}
+		}
+		event("output", "p", "TestSandbox/sub", "    x_test.go:4: nested bwrap unavailable\n")
+		event("skip", "p", "TestSandbox/sub", "")
+		event("skip", "p", "", "")
+		for i := 0; i < 65; i++ {
+			event("skip", "p", "Test"+strconv.Itoa(i), "")
+		}
+		event("output", "p", "", "ok  \tp\t(cached)\n")
+		c.finish()
+		if c.skipTotal != 66 || len(c.skips) != 60 || !strings.Contains(c.skips[0].Message, "nested bwrap unavailable") {
+			t.Fatalf("%+v %d", c.skips, c.skipTotal)
+		}
+		if strings.Contains(c.raw.String(), `"Action"`) != preserve {
+			t.Fatalf("output mode: %s", c.raw.String())
+		}
+		tail, _ := c.diagnostics()
+		if !strings.Contains(tail, "(cached)") {
+			t.Fatal(tail)
+		}
+	}
+}
+
+func TestJSONBuildFailure(t *testing.T) {
+	c := &checkCapture{jsonMode: true}
+	for _, e := range []map[string]string{
+		{"Action": "build-output", "ImportPath": "p", "Output": "# p\nx.go:3: undefined: missing\n"},
+		{"Action": "build-fail", "ImportPath": "p"},
+		{"Action": "fail", "Package": "p", "FailedBuild": "p"},
+	} {
+		b, _ := json.Marshal(e)
+		_, _ = c.Write(append(b, '\n'))
+	}
+	c.finish()
+	tests, pkgs, _ := c.goFailures()
+	if len(tests) != 0 || len(pkgs) != 1 || pkgs[0] != "p" {
+		t.Fatalf("%v %v", tests, pkgs)
+	}
+	if !strings.Contains(c.raw.String(), "undefined: missing") || strings.Contains(c.raw.String(), `"Action"`) {
+		t.Fatal(c.raw.String())
+	}
+}
+
+func TestJSONLateSkipAndFailureRetention(t *testing.T) {
+	c := &checkCapture{jsonMode: true}
+	event := func(e map[string]string) { t.Helper(); b, _ := json.Marshal(e); _, _ = c.Write(append(b, '\n')) }
+	event(map[string]string{"Action": "build-output", "ImportPath": "broken", "Output": "broken.go:3: undefined: missing\n"})
+	event(map[string]string{"Action": "build-fail", "ImportPath": "broken"})
+	event(map[string]string{"Action": "output", "Package": "a", "Test": "TestA", "Output": "    a_test.go:1: failure detail\n--- FAIL: TestA (0.00s)\n"})
+	event(map[string]string{"Action": "fail", "Package": "a", "Test": "TestA"})
+	event(map[string]string{"Action": "output", "Package": "b", "Output": "ok  \tb\t0.001s\n"})
+	event(map[string]string{"Action": "fail", "Package": "a"})
+	event(map[string]string{"Action": "fail", "Package": "broken", "FailedBuild": "broken"})
+	for i := 0; i < 1500; i++ {
+		event(map[string]string{"Action": "output", "Package": "noise", "Output": strings.Repeat("noise", 100) + "\n"})
+	}
+	event(map[string]string{"Action": "output", "Package": "p", "Test": "TestLate", "Output": "    late_test.go:1: sockets denied\n"})
+	// Finish an unterminated JSON event.
+	_, _ = c.Write([]byte(`{"Action":"skip","Package":"p","Test":"TestLate"}`))
+	c.finish()
+	tail, _ := c.diagnostics()
+	tests, pkgs, _ := c.goFailures()
+	if c.skipTotal != 1 || c.skips[0].Test != "TestLate" || len(tests) != 1 || tests[0].pkg != "a" || len(pkgs) != 1 || pkgs[0] != "broken" {
+		t.Fatalf("%+v %v %v", c.skips, tests, pkgs)
+	}
+	if !strings.Contains(tail, "undefined: missing") || !strings.Contains(tail, "failure detail") {
+		t.Fatal(tail)
+	}
+}
+
+func TestJSONMalformedAndOversized(t *testing.T) {
+	c := &checkCapture{jsonMode: true}
+	_, _ = c.Write([]byte("not an event\n"))
+	_, _ = c.Write([]byte(strings.Repeat("x", (1<<20)+1) + "\n"))
+	_, _ = c.Write([]byte(`{"Action":"output","Package":"p","Test":"TestLong","Output":"` + strings.Repeat("a", 4096) + `\n    x_test.go:4: capability denied\n"}` + "\n"))
+	_, _ = c.Write([]byte(`{"Action":"skip","Package":"p","Test":"TestLong"}` + "\n"))
+	c.finish()
+	before := c.raw.String()
+	c.finish()
+	if c.raw.String() != before || c.skipTotal != 1 || len(c.skips[0].Message) > 2048 || !strings.Contains(c.skips[0].Message, "capability denied") || !strings.Contains(before, "not an event") || !strings.Contains(before, truncationMarker) {
+		t.Fatalf("capture=%+v raw length=%d", c.skips, len(before))
+	}
+}
+
+func TestJSONCapturePlainFallbackAttribution(t *testing.T) {
+	c := &checkCapture{jsonMode: true}
+	_, _ = c.Write([]byte("--- FAIL: TestBroken (0.00s)\n    x_test.go:1: broken\nFAIL\nFAIL\texample.com/m/broken\t0.01s\n"))
+	c.finish()
+	tests, pkgs, truncated := c.goFailures()
+	if len(tests) != 1 || tests[0].pkg != "example.com/m/broken" || tests[0].name != "TestBroken" || len(pkgs) != 0 || truncated {
+		t.Fatalf("%v %v %t", tests, pkgs, truncated)
+	}
+}

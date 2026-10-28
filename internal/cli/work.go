@@ -138,6 +138,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				return writeJSON(cmd, map[string]any{"kind": "work-dry-run", "issue_number": opts.IssueNumber, "effective_plan": preflight})
 			}
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
+			if result != nil {
+				writeValidationSkipNotice(cmd, result.Validation)
+			}
 			opts.SetupProgress.Close()
 			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
 				recovery := planReviewRecovery(&guidanceOpts, result.State, "issue", opts.IssueNumber)

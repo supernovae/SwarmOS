@@ -36,6 +36,8 @@ var (
 )
 
 type CheckRunOutcome struct {
+	SkippedTests        []SkippedTest `json:"skipped_tests,omitempty"`
+	SkippedTotal        int           `json:"skipped_total,omitempty"`
 	OutputTail          string        `json:"output_tail,omitempty"`
 	FailingTests        []string      `json:"failing_tests,omitempty"`
 	InfrastructureError bool          `json:"infrastructure_error,omitempty"`
@@ -67,11 +69,13 @@ type goEvidence struct {
 }
 
 type ValidationReport struct {
-	Reused        bool     `json:"reused,omitempty"`
-	Passed        bool     `json:"passed"`
-	BaseSHA       string   `json:"base_sha"`
-	HeadSHA       string   `json:"head_sha"`
-	ModifiedFiles []string `json:"modified_files"`
+	SkippedTests  []SkippedTest `json:"skipped_tests,omitempty"`
+	SkippedTotal  int           `json:"skipped_total,omitempty"`
+	Reused        bool          `json:"reused,omitempty"`
+	Passed        bool          `json:"passed"`
+	BaseSHA       string        `json:"base_sha"`
+	HeadSHA       string        `json:"head_sha"`
+	ModifiedFiles []string      `json:"modified_files"`
 	// ProtectedChanges lists changed files that match the trusted protected
 	// paths when they were reported rather than rejected.
 	ProtectedChanges []string          `json:"protected_changes,omitempty"`
@@ -227,6 +231,15 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		warmNote = warmBuildCaches(ctx, runner, spec.RequiredChecks, baseSHA)
 	}
 	record := func(outcome CheckRunOutcome) {
+		if outcome.Passed && !outcome.Preliminary {
+			report.SkippedTotal += outcome.SkippedTotal
+			for _, skip := range outcome.SkippedTests {
+				if len(report.SkippedTests) < 60 {
+					skip.Status = skipStatus(ctx, worktreePath, baseSHA, modified, skip)
+					report.SkippedTests = append(report.SkippedTests, skip)
+				}
+			}
+		}
 		report.CheckOutcomes = append(report.CheckOutcomes, outcome)
 		status := "PASS"
 		if outcome.FallbackReason != "" {
@@ -291,6 +304,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			details.WriteString("\nSee `.swarm/active/REPAIR.md` for the repair brief.\n")
 		}
 	}
+	renderSkips(&details, report)
 	markdown.WriteString(details.String())
 	verdict, summary := "PASS", fmt.Sprintf("All %d required checks passed", required)
 	if !report.Passed {
@@ -460,9 +474,14 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 		onProgress(progress.Event{Check: name, Status: "started"})
 	}
 	start := time.Now()
-	var output checkCapture
-	runErr := r.run(checkCtx, command, duration, &output, &output)
+	actual, output := r.goCapture(command)
+	runErr := r.run(checkCtx, actual, duration, output, output)
+	output.finish()
 	outcome := CheckRunOutcome{Name: name, Command: command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil}
+	if runErr == nil {
+		outcome.SkippedTests = output.skips
+		outcome.SkippedTotal = output.skipTotal
+	}
 	if runErr != nil {
 		outcome.OutputTail, outcome.FailingTests = output.diagnostics()
 		outcome.goFailures = output.evidence(command)
@@ -706,4 +725,19 @@ func skipClassChar(p string) (string, error) {
 		return "", filepath.ErrBadPattern
 	}
 	return p[n:], nil
+}
+
+func renderSkips(b *strings.Builder, report *ValidationReport) {
+	if report.SkippedTotal == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n### Skipped Go tests\n\n%d test skip events across passing required checks (excluding package skips, preliminary runs and cache warm-up). CI is the next place sandbox-limited tests can run.\n\n", report.SkippedTotal)
+	for _, s := range report.SkippedTests {
+		// Indented code keeps Markdown from interpreting test-controlled text.
+		line := EscapeDiagnostic(s.Package + "." + s.Test + " [" + s.Status + "]: " + s.Message)
+		fmt.Fprintf(b, "    %s\n", line)
+	}
+	if n := report.SkippedTotal - len(report.SkippedTests); n > 0 {
+		fmt.Fprintf(b, "\n%d additional skip events omitted.\n", n)
+	}
 }

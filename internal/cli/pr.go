@@ -139,6 +139,13 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			case "submit":
 				result, err = service.Submit(cmd.Context(), opts.Number)
 			}
+			if result != nil && (operation == "work" || operation == "rebase" || operation == "submit") {
+				report := result.Validation
+				if report == nil && result.Work != nil {
+					report = result.Work.Validation
+				}
+				writeValidationSkipNotice(cmd, report)
+			}
 			budgetGuidance, split := "", ""
 			if result != nil {
 				budgetGuidance = claimBudgetGuidance(rootOpts, result.Work, "pr", opts.Number)

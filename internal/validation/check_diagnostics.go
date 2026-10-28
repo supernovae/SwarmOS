@@ -29,6 +29,19 @@ func EscapeDiagnostic(s string) string {
 }
 
 type checkCapture struct {
+	finished       bool
+	compiler       []string
+	compilerBytes  int
+	jsonMode       bool
+	decodingEvent  bool
+	preserveJSON   bool
+	jsonPending    []byte
+	jsonLong       bool
+	skips          []SkippedTest
+	skipTotal      int
+	contexts       map[string]string
+	buildFailures  map[string]bool
+	summaries      map[string]bool
 	mu             sync.Mutex
 	raw            process.Output
 	tail           []byte
@@ -62,7 +75,34 @@ func (c *checkCapture) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n := len(p)
-	_, _ = c.raw.Write(p)
+	if c.jsonMode {
+		if c.preserveJSON {
+			_, _ = c.raw.Write(p)
+		}
+		for _, b := range p {
+			if b == '\n' {
+				c.eventLine()
+				c.jsonPending = nil
+				c.jsonLong = false
+			} else if !c.jsonLong {
+				if len(c.jsonPending) < 1<<20 {
+					c.jsonPending = append(c.jsonPending, b)
+				} else {
+					c.jsonLong = true
+					c.jsonPending = nil
+				}
+			}
+		}
+		return n, nil
+	}
+	c.readable(p)
+	return n, nil
+}
+
+func (c *checkCapture) readable(p []byte) {
+	if !c.preserveJSON {
+		_, _ = c.raw.Write(p)
+	}
 	if len(p) >= diagnosticBytes {
 		c.dropped = c.dropped || len(c.tail)+len(p) > diagnosticBytes
 		c.tail = append(c.tail[:0], p[len(p)-diagnosticBytes:]...)
@@ -81,7 +121,9 @@ func (c *checkCapture) Write(p []byte) (int, error) {
 				line := string(c.pending)
 				c.fails.line(line, c.lineNo)
 				c.parseName(line)
-				c.goLine(line)
+				if !c.jsonMode || !c.decodingEvent {
+					c.goLine(line)
+				}
 			}
 			c.pending = c.pending[:0]
 			c.longLine = false
@@ -96,7 +138,6 @@ func (c *checkCapture) Write(p []byte) (int, error) {
 			}
 		}
 	}
-	return n, nil
 }
 
 func (c *checkCapture) parseName(line string) {
@@ -430,4 +471,146 @@ func (c CheckRunOutcome) MarshalJSON() ([]byte, error) {
 		OutputTail   string   `json:"output_tail"`
 		FailingTests []string `json:"failing_tests"`
 	}{alias(c), c.OutputTail, names})
+}
+
+// SkippedTest is bounded evidence from a trusted required Go test stream.
+type SkippedTest struct {
+	Package string `json:"package"`
+	Test    string `json:"test"`
+	Message string `json:"message"`
+	Status  string `json:"status"`
+}
+
+func boundedSkip(s string) string {
+	if len(s) > 2048 {
+		return s[:2048] + truncationMarker
+	}
+	return s
+}
+
+func (c *checkCapture) eventLine() {
+	if c.jsonLong {
+		c.readable([]byte(truncationMarker + "\n"))
+		return
+	}
+	var e struct{ Action, Package, Test, Output, ImportPath, FailedBuild string }
+	if json.Unmarshal(c.jsonPending, &e) != nil || e.Action == "" {
+		c.readable(append(slices.Clone(c.jsonPending), '\n'))
+		return
+	}
+	if e.Output != "" {
+		c.decodingEvent = true
+		c.readable([]byte(e.Output))
+		c.decodingEvent = false
+		if e.Action == "build-output" {
+			for _, line := range strings.Split(strings.TrimSuffix(e.Output, "\n"), "\n") {
+				if len(c.compiler) < 8 && c.compilerBytes < 2048 {
+					line, _ = escapeWithin(line, 2048-c.compilerBytes)
+					c.compiler = append(c.compiler, line)
+					c.compilerBytes += len(line)
+				}
+			}
+		}
+	}
+	if c.buildFailures == nil {
+		c.buildFailures = map[string]bool{}
+		c.summaries = map[string]bool{}
+	}
+	if e.Action == "build-fail" && len(c.buildFailures) < 60 {
+		c.buildFailures[boundedSkip(e.ImportPath)] = true
+	}
+	if e.Action == "fail" && e.Test == "" && e.FailedBuild != "" && len(c.buildFailures) < 60 {
+		delete(c.buildFailures, boundedSkip(e.FailedBuild))
+		c.buildFailures[boundedSkip(e.Package)] = true
+	}
+	if strings.HasPrefix(e.Output, "FAIL\t") {
+		pkg, _, _ := strings.Cut(strings.TrimPrefix(e.Output, "FAIL\t"), "\t")
+		pkg, _, _ = strings.Cut(pkg, " ")
+		if len(c.summaries) < 60 {
+			c.summaries[boundedSkip(pkg)] = true
+		}
+	}
+	if e.Action == "fail" && e.Package != "" {
+		if e.Test != "" {
+			if len(c.goTests) < maxGoFailures {
+				c.goTests = append(c.goTests, goFailure{pkg: e.Package, name: e.Test})
+			} else {
+				c.testsTruncated = true
+			}
+		} else {
+			named := false
+			for _, test := range c.goTests {
+				if test.pkg == e.Package {
+					named = true
+					break
+				}
+			}
+			if !named && !slices.Contains(c.unattributed, e.Package) && len(c.unattributed) < maxGoFailures {
+				c.unattributed = append(c.unattributed, e.Package)
+			}
+		}
+	}
+	if e.Package == "" || e.Test == "" {
+		return
+	}
+	key := boundedSkip(e.Package) + "\x00" + boundedSkip(e.Test)
+	if c.contexts == nil {
+		c.contexts = map[string]string{}
+	}
+	if e.Output != "" && (len(c.contexts) < 120 || c.contexts[key] != "") {
+		text := c.contexts[key] + e.Output
+		if len(text) > 2048 {
+			text = text[len(text)-2048:]
+		}
+		c.contexts[key] = text
+	}
+	switch e.Action {
+	case "skip":
+		c.skipTotal++
+		if len(c.skips) < 60 {
+			c.skips = append(c.skips, SkippedTest{Package: boundedSkip(e.Package), Test: boundedSkip(e.Test), Message: strings.TrimSpace(c.contexts[key]), Status: "unknown"})
+		}
+		delete(c.contexts, key)
+	case "fail":
+		for _, line := range strings.Split(c.contexts[key], "\n") {
+			if isIndented(line) {
+				c.fails.line(line, c.lineNo)
+			}
+		}
+		delete(c.contexts, key)
+	case "pass":
+		delete(c.contexts, key)
+	}
+}
+
+// finish is called after process completion, before any output is read.
+func (c *checkCapture) finish() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.jsonMode || c.finished {
+		return
+	}
+	c.finished = true
+	if len(c.jsonPending) > 0 || c.jsonLong {
+		c.eventLine()
+		c.jsonPending = nil
+		c.jsonLong = false
+	}
+	if len(c.compiler) > 0 {
+		c.fails.close()
+		c.fails.blocks = append(c.fails.blocks, failBlock{lines: c.compiler, first: -100, size: c.compilerBytes})
+		c.fails.lines += len(c.compiler)
+		c.fails.size += c.compilerBytes
+	}
+	for pkg := range c.buildFailures {
+		if pkg != "" && !slices.Contains(c.unattributed, pkg) && len(c.unattributed) < maxGoFailures {
+			c.unattributed = append(c.unattributed, pkg)
+		}
+		if pkg != "" && !c.summaries[pkg] {
+			c.decodingEvent = true
+			c.readable([]byte("FAIL\t" + pkg + " [build failed]\n"))
+			c.decodingEvent = false
+			c.summaries[pkg] = true
+		}
+	}
 }

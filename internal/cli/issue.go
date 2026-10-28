@@ -58,7 +58,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		}
 		initialLabels := []string{"swarm:draft"}
 		if ready {
-			initialLabels = nil
+			initialLabels = []string{}
 		}
 		iss, err := tr.CreateIssue(cmd.Context(), title, contract.FormatIssueMarkdown(wu), initialLabels)
 		if err != nil {

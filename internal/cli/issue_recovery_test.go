@@ -3,7 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,7 +32,7 @@ func TestApprovalDroppedCheckpointOutput(t *testing.T) {
 			if _, err := f.manager.Release(context.Background(), issue, "alice", "test"); err != nil {
 				t.Fatal(err)
 			}
-			out, err := exec.Command("git", "-C", f.root, "commit", "--allow-empty", "-m", "new base").CombinedOutput()
+			out, err := gitfixture.Command(t, "", "-C", f.root, "commit", "--allow-empty", "-m", "new base").CombinedOutput()
 			if err != nil {
 				t.Fatalf("commit: %v %s", err, out)
 			}

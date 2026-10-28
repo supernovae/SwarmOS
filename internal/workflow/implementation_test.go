@@ -5,8 +5,8 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -42,7 +42,7 @@ func TestImplementationOutcomeStopsBeforeTester(t *testing.T) {
 			root, eng, tr := setupProjectPlanTestRepo(t)
 			configureValidation(t, root)
 			for _, args := range [][]string{{"add", "."}, {"commit", "-m", "validation"}} {
-				if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+				if out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
 					t.Fatalf("%v %s", err, out)
 				}
 			}

@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,7 +38,7 @@ func TestWorkValidationReportPropagation(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if out, err := exec.Command("git", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
+			if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
 				t.Fatalf("%v: %s", err, out)
 			}
 			wu := &contract.WorkUnit{Objective: "Report checks", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Carry the report"}, Workflow: "feature", Gate: contract.GateNone}
@@ -124,7 +124,7 @@ func TestWorkRepairBriefAndPreExistingStop(t *testing.T) {
 			}
 			// This test resumes manually, so automatic repair rounds are off.
 			setRepairLimit(t, root, "0")
-			if out, err := exec.Command("git", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
+			if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
 				t.Fatalf("%v: %s", err, out)
 			}
 			installRepairGo(t, tc.basePasses)
@@ -225,7 +225,7 @@ func repairFixture(t *testing.T, limit string, edits ...func(root string)) (*Eng
 	for _, edit := range edits {
 		edit(root)
 	}
-	if out, err := exec.Command("git", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	wu := &contract.WorkUnit{Objective: "Repair checks", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Repair failures"}, Workflow: "feature", Gate: contract.GateNone}
@@ -330,7 +330,7 @@ func TestWorkValidationRepairRounds(t *testing.T) {
 				if res.Validation.HeadSHA != res.HeadSHA || res.State.HeadSHA != res.HeadSHA {
 					t.Fatalf("report head %s, result head %s, state head %s", res.Validation.HeadSHA, res.HeadSHA, res.State.HeadSHA)
 				}
-				subject, gitErr := exec.Command("git", "-C", res.WorktreePath, "log", "-1", "--format=%s").Output()
+				subject, gitErr := gitfixture.Command(t, "", "-C", res.WorktreePath, "log", "-1", "--format=%s").Output()
 				if gitErr != nil || !strings.HasPrefix(string(subject), "Repair validation: ") {
 					t.Fatalf("repair checkpoint subject %q %v", subject, gitErr)
 				}
@@ -697,7 +697,7 @@ func TestWorkRepairRestorationEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if out, err := exec.Command("git", "-C", root, "add", "-A").CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", "-C", root, "add", "-A").CombinedOutput(); err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
 	}
@@ -758,7 +758,7 @@ func TestWorkRepairRestorationEvidence(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(e.repoRoot, filepath.FromSlash(handler)), []byte("package api // newer\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if out, err := exec.Command("git", "-C", e.repoRoot, "commit", "-qam", "newer").CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", "-C", e.repoRoot, "commit", "-qam", "newer").CombinedOutput(); err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
 		if err := os.WriteFile(filepath.Join(res.WorktreePath, ".swarm", "active", validation.RepairFile), []byte("forged\n"), 0o644); err != nil {
@@ -777,12 +777,12 @@ func TestWorkRepairRestorationEvidence(t *testing.T) {
 		if strings.Contains(string(evidence), "Validation repair brief") {
 			t.Fatalf("evidence-only brief carries validation diagnostics:\n%s", evidence)
 		}
-		subject, gitErr := exec.Command("git", "-C", res.WorktreePath, "log", "-1", "--format=%s").Output()
+		subject, gitErr := gitfixture.Command(t, "", "-C", res.WorktreePath, "log", "-1", "--format=%s").Output()
 		if gitErr != nil || strings.HasPrefix(string(subject), "Repair validation: ") {
 			t.Fatalf("evidence-only round became a repair checkpoint: %q %v", subject, gitErr)
 		}
 		for name, want := range map[string]string{handler: "package api\n", logo: string(logoBytes)} {
-			got, gitErr := exec.Command("git", "-C", res.WorktreePath, "show", "HEAD:"+name).Output()
+			got, gitErr := gitfixture.Command(t, "", "-C", res.WorktreePath, "show", "HEAD:"+name).Output()
 			if gitErr != nil || string(got) != want {
 				t.Fatalf("%s at HEAD = %q %v", name, got, gitErr)
 			}
@@ -816,7 +816,7 @@ func TestWorkRepairRestorationEvidence(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "huge.txt"), []byte(strings.Repeat("a", restorationEvidenceCap)+"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if out, err := exec.Command("git", "-C", root, "add", "-A").CombinedOutput(); err != nil {
+			if out, err := gitfixture.Command(t, "", "-C", root, "add", "-A").CombinedOutput(); err != nil {
 				t.Fatalf("%v: %s", err, out)
 			}
 		})

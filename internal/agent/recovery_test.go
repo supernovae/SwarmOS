@@ -3,8 +3,8 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -52,7 +52,7 @@ func TestRecoveryHeaderRoundTrip(t *testing.T) {
 		t.Fatalf("round trip: %+v %q", header, body)
 	}
 	// Maintainers can inspect the saved file directly; Git skips the header.
-	cmd := exec.Command("git", "apply", "--stat", path)
+	cmd := gitfixture.Command(t, "", "apply", "--stat", path)
 	cmd.Dir = t.TempDir()
 	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "src/main.go") {
 		t.Fatalf("git apply --stat: %v %s", err, out)

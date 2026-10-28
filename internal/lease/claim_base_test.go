@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,7 +24,7 @@ func TestFreshClaimBase(t *testing.T) {
 			m, lt, issue := testManager(t)
 			git := func(args ...string) string {
 				t.Helper()
-				cmd := exec.Command("git", args...)
+				cmd := gitfixture.Command(t, "", args...)
 				cmd.Dir = m.repoRoot
 				out, err := cmd.CombinedOutput()
 				if err != nil {
@@ -207,7 +207,7 @@ func TestFreshClaimBaseCASConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "advance")
+	cmd := gitfixture.Command(t, "", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "advance")
 	cmd.Dir = m.repoRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
@@ -240,7 +240,7 @@ func TestFreshClaimBaseRemoteDefault(t *testing.T) {
 	}
 	git := func(root string, args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitfixture.Command(t, "", args...)
 		cmd.Dir = root
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -294,7 +294,7 @@ func TestFreshClaimBaseEarlyErrors(t *testing.T) {
 				if e = os.WriteFile(path, body, 0600); e != nil {
 					t.Fatal(e)
 				}
-				cmd := exec.Command("git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-am", "restrict collaborators")
+				cmd := gitfixture.Command(t, "", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-am", "restrict collaborators")
 				cmd.Dir = m.repoRoot
 				if out, e := cmd.CombinedOutput(); e != nil {
 					t.Fatalf("%v %s", e, out)

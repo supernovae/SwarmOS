@@ -2,7 +2,7 @@ package workflow
 
 import (
 	"context"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -16,7 +16,7 @@ import (
 func TestExecuteWorkTitleEditRecordedBranch(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, out)
 	}
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: tmp}); err != nil {
@@ -24,7 +24,7 @@ func TestExecuteWorkTitleEditRecordedBranch(t *testing.T) {
 	}
 	configureValidation(t, tmp)
 	for _, args := range [][]string{{"add", "."}, {"-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initialize harness"}} {
-		if out, err := exec.Command("git", append([]string{"-C", tmp}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", tmp}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}

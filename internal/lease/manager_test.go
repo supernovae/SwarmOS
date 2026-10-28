@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,15 +21,15 @@ import (
 
 // fixtureGitCommand prevents detached maintenance from outliving fixture cleanup,
 // matching production Git's automatic maintenance policy.
-func fixtureGitCommand(args ...string) *exec.Cmd {
-	return exec.Command("git", append([]string{"-c", "gc.auto=0", "-c", "maintenance.auto=false"}, args...)...)
+func fixtureGitCommand(t testing.TB, args ...string) *exec.Cmd {
+	return gitfixture.Command(t, "", args...)
 }
 
 func TestFixtureGitPolicy(t *testing.T) {
 	root := t.TempDir()
 	run := func(args ...string) string {
 		t.Helper()
-		cmd := fixtureGitCommand(args...)
+		cmd := fixtureGitCommand(t, args...)
 		cmd.Dir = root
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -69,7 +70,7 @@ func testManager(t *testing.T) (*Manager, *tracker.LocalTracker, *tracker.Issue)
 	mustWrite(".swarm/config.yaml", "version: 1\ndefault_agent: claude\ndefault_gate: agent\nlease:\n  duration: 4h\n  renewable: true\n  max_renewals: 3\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  claude:\n    binary: claude\n")
 	mustWrite(".swarm/workflows/feature.yaml", "name: feature\ndefault_gate: agent\nsteps:\n  - name: design\n    role: planner\n    artifact: design\n")
 	for _, args := range [][]string{{"init"}, {"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture"}} {
-		cmd := fixtureGitCommand(args...)
+		cmd := fixtureGitCommand(t, args...)
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
@@ -345,7 +346,7 @@ func TestCollaboratorAllowlistsEnforceWorkerAndReviewerSeparation(t *testing.T) 
 	mustWrite(".swarm/config.yaml", "version: 1\ndefault_agent: claude\ndefault_gate: agent\nlease:\n  duration: 4h\n  renewable: true\n  max_renewals: 3\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\n  approved_collaborators: [worker-bot, reviewer-bot]\n  reviewer_collaborators: [reviewer-bot]\nagents:\n  claude:\n    binary: claude\n")
 	mustWrite(".swarm/workflows/feature.yaml", "name: feature\ndefault_gate: agent\nsteps:\n  - name: design\n    role: planner\n    artifact: design\n")
 	for _, args := range [][]string{{"init"}, {"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture"}} {
-		cmd := fixtureGitCommand(args...)
+		cmd := fixtureGitCommand(t, args...)
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
@@ -714,14 +715,14 @@ func TestCompletePRRevisionPublishesHeadAndStateAtomically(t *testing.T) {
 	root := m.repoRoot
 	git := func(args ...string) string {
 		t.Helper()
-		out, err := fixtureGitCommand(append([]string{"-C", root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
+		out, err := fixtureGitCommand(t, append([]string{"-C", root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 		return strings.TrimSpace(string(out))
 	}
 	origin := filepath.Join(t.TempDir(), "origin.git")
-	if out, err := fixtureGitCommand("init", "--bare", "--initial-branch=main", origin).CombinedOutput(); err != nil {
+	if out, err := fixtureGitCommand(t, "init", "--bare", "--initial-branch=main", origin).CombinedOutput(); err != nil {
 		t.Fatalf("init origin: %v: %s", err, out)
 	}
 	git("remote", "add", "origin", origin)
@@ -771,7 +772,7 @@ func TestCompletePRRevisionPublishesHeadAndStateAtomically(t *testing.T) {
 		t.Fatalf("completed state = %+v", st)
 	}
 	if got := strings.TrimSpace(func() string {
-		out, _ := fixtureGitCommand("-C", origin, "rev-parse", "refs/heads/"+branch).Output()
+		out, _ := fixtureGitCommand(t, "-C", origin, "rev-parse", "refs/heads/"+branch).Output()
 		return string(out)
 	}()); got != candidate {
 		t.Fatalf("origin PR branch = %s, want %s", got, candidate)

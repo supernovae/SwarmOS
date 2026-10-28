@@ -7,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -376,7 +376,7 @@ func TestIssueEditBackendGitHub(t *testing.T) {
 	// Keep all Git coordination traffic inside a temporary bare origin.
 	origin := filepath.Join(t.TempDir(), "origin.git")
 	for _, args := range [][]string{{"init", "--bare", "--initial-branch=main", origin}, {"-C", f.root, "remote", "add", "origin", origin}, {"-C", f.root, "push", "origin", "HEAD:refs/heads/main"}} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", args...).CombinedOutput(); err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
 	}
@@ -508,7 +508,7 @@ func TestIssueEditApprovalStaleAndTrustedLabel(t *testing.T) {
 						t.Fatal(err)
 					}
 					for _, args := range [][]string{{"add", ".swarm/config.yaml"}, {"commit", "-m", "custom ready label"}} {
-						if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+						if out, err := gitfixture.Command(t, "", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
 							t.Fatalf("%v %s", err, out)
 						}
 					}
@@ -656,7 +656,7 @@ func TestIssueEditDiffContext(t *testing.T) {
 
 func worktreeBranch(t *testing.T, f *cliFixture, issue int) string {
 	t.Helper()
-	out, err := exec.Command("git", "-C", workspace.WorktreePath(f.root, issue), "symbolic-ref", "--short", "HEAD").CombinedOutput()
+	out, err := gitfixture.Command(t, "", "-C", workspace.WorktreePath(f.root, issue), "symbolic-ref", "--short", "HEAD").CombinedOutput()
 	if err != nil {
 		t.Fatalf("worktree branch: %v %s", err, out)
 	}
@@ -704,7 +704,7 @@ func TestIssueEditTitleEditRecordedBranch(t *testing.T) {
 				t.Fatalf("work moved off the recorded branch: %q", st.Branch)
 			}
 			renamed := workspace.BranchName(issue, "Renamed task")
-			if out, err := exec.Command("git", "-C", f.root, "branch", "--list", renamed).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "" {
+			if out, err := gitfixture.Command(t, "", "-C", f.root, "branch", "--list", renamed).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "" {
 				t.Fatalf("created replacement branch %q: %s %v", renamed, out, err)
 			}
 		})
@@ -729,7 +729,7 @@ func TestIssueEditTitleEditRecordedBranchDroppedCheckpoint(t *testing.T) {
 	}
 	f.must(t, "issue", "release", n)
 	f.must(t, "issue", "edit", n, "--title", "Renamed task")
-	if out, err := exec.Command("git", "-C", f.root, "commit", "--allow-empty", "-m", "new base").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", f.root, "commit", "--allow-empty", "-m", "new base").CombinedOutput(); err != nil {
 		t.Fatalf("commit: %v %s", err, out)
 	}
 	f.must(t, "issue", "approve", n)

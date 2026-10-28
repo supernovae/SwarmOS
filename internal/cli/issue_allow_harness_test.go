@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -153,7 +153,7 @@ func addTestOrigin(t *testing.T, f *cliFixture) {
 	t.Helper()
 	origin := filepath.Join(t.TempDir(), "origin.git")
 	for _, args := range [][]string{{"init", "--bare", "--initial-branch=main", origin}, {"-C", f.root, "remote", "add", "origin", origin}, {"-C", f.root, "push", "origin", "HEAD:refs/heads/main"}} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", args...).CombinedOutput(); err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
 	}

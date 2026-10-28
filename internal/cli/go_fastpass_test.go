@@ -1,8 +1,8 @@
 package cli
 
 import (
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,7 +33,7 @@ func TestGoFastPassEntryPoints(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "go policy"}} {
-		if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}

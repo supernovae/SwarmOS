@@ -29,7 +29,7 @@ type reconciliationFixture struct {
 
 func (f *reconciliationFixture) git(dir string, args ...string) string {
 	f.t.Helper()
-	out, err := fixtureGitCommand(append([]string{"-C", dir}, args...)...).CombinedOutput()
+	out, err := fixtureGitCommand(f.t, append([]string{"-C", dir}, args...)...).CombinedOutput()
 	if err != nil {
 		f.t.Fatalf("git %v: %v %s", args, err, out)
 	}
@@ -235,7 +235,7 @@ func TestCheckpointReconciliationRejectsInvalidInputs(t *testing.T) {
 			case "conflicts":
 				// Seed real unmerged index entries.
 				blob := f.git(f.path, "rev-parse", "HEAD:feature.txt")
-				cmd := fixtureGitCommand("-C", f.path, "update-index", "--index-info")
+				cmd := fixtureGitCommand(t, "-C", f.path, "update-index", "--index-info")
 				cmd.Stdin = strings.NewReader(fmt.Sprintf("0 %040d\tfeature.txt\n100644 %s 1\tfeature.txt\n100644 %s 2\tfeature.txt\n", 0, blob, blob))
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("conflict: %v %s", err, out)

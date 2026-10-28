@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"gopkg.in/yaml.v3"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -127,7 +127,7 @@ func TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable(t *testing.T) {
 				if err = os.WriteFile(filepath.Join(f.root, ".swarm/config.yaml"), raw, 0600); err != nil {
 					t.Fatal(err)
 				}
-				if out, err := exec.Command("git", "-C", f.root, "commit", "-am", "zero renewal policy").CombinedOutput(); err != nil {
+				if out, err := gitfixture.Command(t, "", "-C", f.root, "commit", "-am", "zero renewal policy").CombinedOutput(); err != nil {
 					t.Fatalf("%s %v", out, err)
 				}
 				number := f.create(t, "none")

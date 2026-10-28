@@ -2,8 +2,8 @@ package workspace
 
 import (
 	"context"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,7 +18,7 @@ func TestValidationTreeCheckpointParity(t *testing.T) {
 			root := t.TempDir()
 			git := func(args ...string) string {
 				t.Helper()
-				out, e := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+				out, e := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput()
 				if e != nil {
 					t.Fatalf("git %v: %v %s", args, e, out)
 				}
@@ -255,7 +255,7 @@ func TestValidationTreeCheckpointParity(t *testing.T) {
 func TestValidationTreeRejectsInstructionSymlink(t *testing.T) {
 	root := t.TempDir()
 	for _, args := range [][]string{{"init"}, {"-c", "user.name=Test", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "base"}} {
-		if out, e := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); e != nil {
+		if out, e := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); e != nil {
 			t.Fatalf("%v %s", e, out)
 		}
 	}
@@ -271,7 +271,7 @@ func TestValidationTreeRecoveryOutputAndFailurePreserveIndex(t *testing.T) {
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		out, e := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+		out, e := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput()
 		if e != nil {
 			t.Fatalf("git: %v %s", e, out)
 		}

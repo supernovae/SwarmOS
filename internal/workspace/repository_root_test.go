@@ -3,8 +3,8 @@ package workspace
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,7 +12,7 @@ import (
 
 func rootGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	c := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...)
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %s %v", args, out, err)
 	}

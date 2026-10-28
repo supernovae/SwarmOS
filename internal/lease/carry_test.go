@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,7 +22,7 @@ func TestApprovalCarryForward(t *testing.T) {
 			m, lt, issue := testManager(t)
 			git := func(args ...string) string {
 				t.Helper()
-				cmd := exec.Command("git", args...)
+				cmd := gitfixture.Command(t, "", args...)
 				cmd.Dir = m.repoRoot
 				out, err := cmd.CombinedOutput()
 				if err != nil {

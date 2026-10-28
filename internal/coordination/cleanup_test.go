@@ -3,7 +3,7 @@ package coordination
 import (
 	"context"
 	"errors"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,7 +16,7 @@ func TestCleanupAtomicBranchAndStateFences(t *testing.T) {
 			root := t.TempDir()
 			git := func(dir string, args ...string) string {
 				t.Helper()
-				out, e := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+				out, e := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 				if e != nil {
 					t.Fatalf("git %v: %s %v", args, out, e)
 				}

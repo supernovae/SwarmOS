@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -25,7 +25,7 @@ func budgetEngine(t *testing.T) (*Engine, *tracker.Issue) {
 	t.Helper()
 	root, e, tr := setupProjectPlanTestRepo(t)
 	configureValidation(t, root)
-	if out, err := exec.Command("git", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	wu := &contract.WorkUnit{Objective: "Preserve work", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Resume checkpoint"}, Workflow: "feature", Gate: contract.GateNone}
@@ -88,7 +88,7 @@ func TestBudgetPauseCheckpointsAndResumes(t *testing.T) {
 				if backend == "git" {
 					remote := t.TempDir()
 					for _, args := range [][]string{{"init", "--bare", "-b", "main", remote}, {"-C", e.repoRoot, "remote", "add", "origin", remote}, {"-C", e.repoRoot, "push", "origin", "main"}} {
-						if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+						if out, err := gitfixture.Command(t, "", args...).CombinedOutput(); err != nil {
 							t.Fatalf("%v: %s", err, out)
 						}
 					}
@@ -150,13 +150,13 @@ func TestBudgetPauseCheckpointsAndResumes(t *testing.T) {
 					}
 				}
 				if role == "developer" {
-					out, err := exec.Command("git", "-C", e.repoRoot, "show", res.HeadSHA+":partial.go").CombinedOutput()
+					out, err := gitfixture.Command(t, "", "-C", e.repoRoot, "show", res.HeadSHA+":partial.go").CombinedOutput()
 					if err != nil || string(out) != "package partial\n" {
 						t.Fatalf("checkpoint lost edits: %s %v", out, err)
 					}
 				}
 				if backend == "git" {
-					out, err := exec.Command("git", "-C", e.repoRoot, "ls-remote", "origin", "refs/heads/"+res.BranchName).CombinedOutput()
+					out, err := gitfixture.Command(t, "", "-C", e.repoRoot, "ls-remote", "origin", "refs/heads/"+res.BranchName).CombinedOutput()
 					if err != nil || !strings.HasPrefix(string(out), res.HeadSHA+"\t") {
 						t.Fatalf("unpublished checkpoint: %s %v", out, err)
 					}

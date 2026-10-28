@@ -1,6 +1,7 @@
 package changelog
 
 import (
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -213,9 +214,9 @@ func TestFragmentBranchesMerge(t *testing.T) {
 	r := fixture(t)
 	git := func(args ...string) string {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitfixture.Command(t, "", args...)
 		c.Dir = r
-		c.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_ATTR_NOSYSTEM=1", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.attributesFile", "GIT_CONFIG_VALUE_0=/dev/null")
+		c.Env = append(c.Env, "GIT_ATTR_NOSYSTEM=1", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.attributesFile", "GIT_CONFIG_VALUE_0=/dev/null")
 		out, e := c.CombinedOutput()
 		if e != nil {
 			t.Fatalf("git %v: %v: %s", args, e, out)

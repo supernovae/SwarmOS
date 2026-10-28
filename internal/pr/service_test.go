@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -58,7 +58,7 @@ func fixture(t *testing.T, policy ...string) (*Service, int, int, string) {
 	}
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitfixture.Command(t, "", args...)
 		cmd.Dir = root
 		out, e := cmd.CombinedOutput()
 		if e != nil {
@@ -298,7 +298,7 @@ func assertNoPRMarkers(t *testing.T, path string) {
 func TestPRSubmitRejectsUnrecordedRemoteUpdate(t *testing.T) {
 	s, issue, number, base := fixture(t)
 	ctx := context.Background()
-	cmd := exec.Command("git", "-C", s.Root, "commit-tree", base+"^{tree}", "-p", base, "-m", "External PR update")
+	cmd := gitfixture.Command(t, "", "-C", s.Root, "commit-tree", base+"^{tree}", "-p", base, "-m", "External PR update")
 	raw, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("external commit: %v: %s", err, raw)
@@ -412,7 +412,7 @@ func TestRemoteSelectsUpstreamOrVerifiedForkHead(t *testing.T) {
 	ctx := context.Background()
 	git := func(args ...string) {
 		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", s.Root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", s.Root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
@@ -548,7 +548,7 @@ func forkContributor(t *testing.T, s *Service, issue, number int, base string) (
 	ctx := context.Background()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -599,7 +599,7 @@ func TestForkContributorRevisesOwnPR(t *testing.T) {
 	ctx := context.Background()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -796,7 +796,7 @@ func TestForkContributorResolvesRebaseConflictsAsReports(t *testing.T) {
 	ctx := context.Background()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -925,11 +925,11 @@ func TestRebaseRoutineReapprovalRejectsChangedAuthority(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(s.Root, path), []byte("target change\n"), 0644); err != nil {
 				t.Fatal(err)
 			}
-			command := exec.Command("git", "-C", s.Root, "add", path)
+			command := gitfixture.Command(t, "", "-C", s.Root, "add", path)
 			if out, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("add: %v %s", err, out)
 			}
-			command = exec.Command("git", "-C", s.Root, "commit", "-qm", "target")
+			command = gitfixture.Command(t, "", "-C", s.Root, "commit", "-qm", "target")
 			if out, err := command.CombinedOutput(); err != nil {
 				t.Fatalf("commit: %v %s", err, out)
 			}
@@ -1004,7 +1004,7 @@ func TestRebaseApprovalAuditRetriesWithoutReapproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"add", "upstream.txt"}, {"commit", "-qm", "target"}} {
-		cmd := exec.Command("git", append([]string{"-C", s.Root}, args...)...)
+		cmd := gitfixture.Command(t, "", append([]string{"-C", s.Root}, args...)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git: %v %s", err, out)
 		}

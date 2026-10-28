@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -174,7 +174,7 @@ func TestInteractiveWorkIgnoresExhaustedAutomaticBudget(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, args := range [][]string{{"add", "."}, {"commit", "-m", "interactive planning"}} {
-				if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+				if out, err := gitfixture.Command(t, "", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
 					t.Fatal(err, string(out))
 				}
 			}

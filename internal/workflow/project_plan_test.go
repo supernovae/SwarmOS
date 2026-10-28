@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"gopkg.in/yaml.v3"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -25,7 +25,7 @@ func setupProjectPlanTestRepo(t *testing.T) (string, *Engine, *tracker.LocalTrac
 	t.Setenv("SWARM_USER", "maintainer")
 	git := func(args ...string) {
 		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}

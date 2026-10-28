@@ -1,8 +1,8 @@
 package workspace
 
 import (
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,7 +20,7 @@ func newDiscardFixture(t *testing.T) discardFixture {
 	root := t.TempDir()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=Test", "-c", "user.email=test@example.test"}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir, "-c", "user.name=Test", "-c", "user.email=test@example.test"}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v %s", args, err, out)
 		}

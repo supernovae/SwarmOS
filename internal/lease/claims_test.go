@@ -2,8 +2,8 @@ package lease
 
 import (
 	"encoding/json"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"testing"
 )
 
@@ -11,7 +11,7 @@ func TestClaimBaseHint(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("APPDATA", t.TempDir())
-	if out, err := exec.Command("git", "init", root).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", root).CombinedOutput(); err != nil {
 		t.Fatalf("%v %s", err, out)
 	}
 	base := "0123456789abcdef0123456789abcdef01234567"

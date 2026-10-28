@@ -2,7 +2,7 @@ package lease
 
 import (
 	"context"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -97,7 +97,7 @@ func TestAcquireRecordedBranchUsesDroppedCheckpoint(t *testing.T) {
 	m, lt, issue := testManager(t)
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitfixture.Command(t, "", args...)
 		cmd.Dir = m.repoRoot
 		out, err := cmd.CombinedOutput()
 		if err != nil {

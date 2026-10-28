@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -23,7 +23,7 @@ func setupGitRepoForValidation(t *testing.T) string {
 	tmp := t.TempDir()
 	runGit := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", tmp}, args...)...)
+		cmd := gitfixture.Command(t, "", append([]string{"-C", tmp}, args...)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v (%s)", args, err, string(out))
 		}
@@ -70,7 +70,7 @@ func TestProtectedPathTamperDetection(t *testing.T) {
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
 	// Git's nonfatal line-ending warnings must never become filename data.
-	if out, err := exec.Command("git", "-C", repo, "config", "core.autocrlf", "true").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", repo, "config", "core.autocrlf", "true").CombinedOutput(); err != nil {
 		t.Fatalf("configure CRLF conversion: %v (%s)", err, out)
 	}
 
@@ -103,7 +103,7 @@ func TestCommittedPolicyTamperingUsesTrustedBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := func(args ...string) {
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
@@ -157,7 +157,7 @@ func TestSymlinkEscapeFailsClosed(t *testing.T) {
 
 func gitRevision(t *testing.T, repo, revision string) string {
 	t.Helper()
-	out, err := exec.Command("git", "-C", repo, "rev-parse", revision).Output()
+	out, err := gitfixture.Command(t, "", "-C", repo, "rev-parse", revision).Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestTemporaryTaskPointerIsNotAProtectedChange(t *testing.T) {
 	repo := setupGitRepoForValidation(t)
 	git := func(args ...string) {
 		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=Test", "-c", "user.email=test@localhost"}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo, "-c", "user.name=Test", "-c", "user.email=test@localhost"}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -255,7 +255,7 @@ func TestRunnerIsolatedChecksDoNotNeedAgentSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "standard isolation policy"}} {
-		if out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost"}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost"}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -303,7 +303,7 @@ func TestValidateLookupDoesNotReachCheckEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "environment probe"}} {
-		if out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost"}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost"}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -425,7 +425,7 @@ func TestValidationProgressFailureTimeoutAndCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, args := range [][]string{{"add", "."}, {"commit", "-m", "check policy"}} {
-				if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+				if out, err := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
 					t.Fatalf("%v %s", err, out)
 				}
 			}
@@ -633,7 +633,7 @@ func commitPolicy(t *testing.T, repo, policy string) string {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "policy"}} {
-		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -683,7 +683,7 @@ func TestNestedProtectedPathValidation(t *testing.T) {
 	const policy = "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - '**/.gitattributes'\n"
 	git := func(t *testing.T, repo string, args ...string) {
 		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}

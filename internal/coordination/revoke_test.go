@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,7 +37,7 @@ func newRevokeFixture(t *testing.T, remoteName string) *revokeFixture {
 
 func (f *revokeFixture) git(dir string, args ...string) string {
 	f.t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(f.t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	if err != nil {
 		f.t.Fatalf("git %v: %v: %s", args, err, out)
 	}
@@ -46,7 +46,7 @@ func (f *revokeFixture) git(dir string, args ...string) string {
 
 func (f *revokeFixture) remoteRef(ref string) string {
 	f.t.Helper()
-	out, err := exec.Command("git", "--git-dir="+f.remote, "rev-parse", "--verify", "--quiet", ref).CombinedOutput()
+	out, err := gitfixture.Command(f.t, "", "--git-dir="+f.remote, "rev-parse", "--verify", "--quiet", ref).CombinedOutput()
 	if err != nil {
 		return ""
 	}
@@ -77,7 +77,7 @@ func (f *revokeFixture) forkClaim(base *GitStore, owner string, issue, maxActive
 
 func (f *revokeFixture) index(ref string) contributorIndex {
 	f.t.Helper()
-	out, err := exec.Command("git", "--git-dir="+f.remote, "show", ref+":index.json").CombinedOutput()
+	out, err := gitfixture.Command(f.t, "", "--git-dir="+f.remote, "show", ref+":index.json").CombinedOutput()
 	if err != nil {
 		f.t.Fatalf("read index: %v: %s", err, out)
 	}

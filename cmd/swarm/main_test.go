@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,7 +57,7 @@ func (p process) must(args ...string) string {
 
 func (p process) git(args ...string) string {
 	p.t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", p.root}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(p.t, "", append([]string{"-C", p.root}, args...)...).CombinedOutput()
 	if err != nil {
 		p.t.Fatalf("git %v: %v: %s", args, err, out)
 	}

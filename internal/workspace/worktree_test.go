@@ -2,8 +2,8 @@ package workspace
 
 import (
 	"context"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,7 +14,7 @@ import (
 
 func TestHarnessCleanupPreservesUserInstructions(t *testing.T) {
 	tmp := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, string(out))
 	}
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: tmp}); err != nil {
@@ -37,7 +37,7 @@ func TestHarnessCleanupPreservesUserInstructions(t *testing.T) {
 		{"add", "."},
 		{"commit", "-m", "harness"},
 	} {
-		if out, err := exec.Command("git", append([]string{"-C", tmp}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", tmp}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v failed: %v (%s)", args, err, out)
 		}
 	}
@@ -155,7 +155,7 @@ func TestCheckpointPreservesPrimaryDirtyCheckout(t *testing.T) {
 
 func runWorkspaceGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v (%s)", args, err, out)
 	}
@@ -211,7 +211,7 @@ func TestProvisionAtRestoresExactCheckpointInFreshClone(t *testing.T) {
 
 func workspaceGitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("git %v: %v", args, err)
@@ -242,7 +242,7 @@ func TestCheckCommitIdentity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, args := range [][]string{{"init", "-q"}, {"config", "user.useConfigOnly", "true"}} {
-		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -250,7 +250,7 @@ func TestCheckCommitIdentity(t *testing.T) {
 		t.Fatalf("missing identity = %v", err)
 	}
 	for _, args := range [][]string{{"config", "user.name", "Test"}, {"config", "user.email", "test@example.invalid"}} {
-		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}

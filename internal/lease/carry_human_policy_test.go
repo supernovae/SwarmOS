@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -33,7 +33,7 @@ func TestHumanPlanKeptOnPolicyChange(t *testing.T) {
 			m, lt, issue := testManager(t)
 			git := func(args ...string) {
 				t.Helper()
-				cmd := exec.Command("git", append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.test"}, args...)...)
+				cmd := gitfixture.Command(t, "", append([]string{"-c", "user.name=Test", "-c", "user.email=test@example.test"}, args...)...)
 				cmd.Dir = m.repoRoot
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("git %v: %v %s", args, err, out)

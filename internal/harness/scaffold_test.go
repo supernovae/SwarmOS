@@ -3,6 +3,7 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"maps"
 	"os"
 	"os/exec"
@@ -177,7 +178,7 @@ func TestApprovedPolicyIgnoresCandidateChanges(t *testing.T) {
 	}
 	git := func(args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -276,7 +277,7 @@ func TestInitWorkflowUsesNewRepositoryCurrentBranch(t *testing.T) {
 	root := t.TempDir()
 	runGit := func(args ...string) {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -312,7 +313,7 @@ func TestWorkflowDefaultBranchPrefersOriginSymbolicRef(t *testing.T) {
 	root := t.TempDir()
 	runGit := func(args ...string) {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -458,7 +459,7 @@ func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
 
 	pin := "a1b2c3d4e5f60123456789abcdef0123456789ab"
 	optInRoot := t.TempDir()
-	if out, err := exec.Command("git", "-C", optInRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", optInRoot, "init", "-b", "main").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	if _, err := InitRepository(InitOptions{RepoRoot: optInRoot, ForkCoordinator: true, SwarmVersion: pin}); err != nil {
@@ -515,7 +516,7 @@ func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
 
 func TestInitSharesRepositoryFilesWithoutTakingThemOver(t *testing.T) {
 	root := t.TempDir()
-	if out, err := exec.Command("git", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	write := func(rel, body string) {
@@ -609,7 +610,7 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 
 func TestInitDryRunReportsWithoutWriting(t *testing.T) {
 	root := t.TempDir()
-	if out, err := exec.Command("git", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	write := func(rel, body string) {
@@ -766,7 +767,7 @@ func TestInitNamesProjectAfterOriginRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"remote", "add", "origin", "https://github.com/octo/widgets.git"}} {
-		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -811,7 +812,7 @@ func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
 	repo := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
@@ -1094,7 +1095,7 @@ func TestValidateWorkflowGrantStepRunsOnlyGrantVerification(t *testing.T) {
 	repo := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", repo, "-c", "user.name=T", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}

@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,7 +61,7 @@ func commitRepoChange(t *testing.T, repo, rel, contents string) string {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", rel}} {
-		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -175,14 +175,14 @@ func TestWarmupRunsOncePerBase(t *testing.T) {
 	if note := warmBuildCaches(context.Background(), runner, checks, base); note != "" || log() != "base\n" {
 		t.Fatalf("second warm-up at the same base ran: %q, log %q", note, log())
 	}
-	if out, err := exec.Command("git", "-C", repo, "stash", "-q").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", repo, "stash", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git stash: %v (%s)", err, out)
 	}
 	next := commitRepoChange(t, repo, "version", "next\n")
 	if note := warmBuildCaches(context.Background(), runner, checks, next); note == "" || log() != "base\nnext\n" {
 		t.Fatalf("new base did not warm: %q, log %q", note, log())
 	}
-	out, err := exec.Command("git", "-C", repo, "worktree", "list", "--porcelain").Output()
+	out, err := gitfixture.Command(t, "", "-C", repo, "worktree", "list", "--porcelain").Output()
 	if err != nil || strings.Count(string(out), "worktree ") != 1 {
 		t.Fatalf("warm-up left a linked worktree: %s %v", out, err)
 	}

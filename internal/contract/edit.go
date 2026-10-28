@@ -100,7 +100,7 @@ func EditWorkUnitIssue(number int, title, body string, edit WorkUnitEdit) (strin
 		if edit.Constraints != nil {
 			expected.Constraints = *edit.Constraints
 			if len(expected.Constraints) == 0 && !fencedYAMLBlockRegex.MatchString(body) {
-				expected.Constraints = nil
+				expected.Constraints = []string{}
 			}
 		}
 		if edit.Acceptance != nil {

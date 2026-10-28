@@ -143,6 +143,10 @@ func parseMarkdownSections(cleanBody string) (*WorkUnit, bool) {
 		DependsOn:            parseIssueNumbers(firstNonEmpty(sections["depends on"], sections["dependencies"])),
 	}
 
+	if _, present := sections["constraints"]; present && wu.Constraints == nil {
+		wu.Constraints = []string{}
+	}
+
 	if parentRaw := strings.TrimSpace(sections["parent issue"]); parentRaw != "" {
 		if nums := parseIssueNumbers(parentRaw); len(nums) > 0 {
 			wu.ParentIssue = nums[0]

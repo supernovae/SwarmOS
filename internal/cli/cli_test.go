@@ -2201,3 +2201,33 @@ func copyFixtureTree(t *testing.T, dst, src string) {
 		t.Fatal(err)
 	}
 }
+
+func TestCLIEmptyConstraintsWork(t *testing.T) {
+	t.Parallel()
+	f := newCLIFixture(t)
+	f.must(t, "issue", "create", "--title", "Empty constraints", "--objective", "Exercise empty constraints lifecycle", "--acceptance", "Produce a checked checkpoint", "--gate", "agent")
+	number := 1
+	n := strconv.Itoa(number)
+	issue, err := f.tracker.GetIssue(context.Background(), number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(issue.Labels, "swarm:ready") {
+		t.Fatal("new task was automatically ready")
+	}
+	if _, err := f.run("issue", "work", n, "--agent", "mock", "--headless"); err == nil {
+		t.Fatal("unapproved work executed")
+	}
+	f.must(t, "issue", "approve", n)
+	result := f.must(t, "issue", "work", n, "--agent", "mock", "--headless", "--json")
+	var outcome struct {
+		Status string              `json:"status"`
+		Result workflow.WorkResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(result), &outcome); err != nil {
+		t.Fatalf("invalid JSON outcome: %v: %s", err, result)
+	}
+	if outcome.Status != "completed" || !outcome.Result.ValidationPassed {
+		t.Fatalf("unexpected workflow outcome: %+v", outcome)
+	}
+}

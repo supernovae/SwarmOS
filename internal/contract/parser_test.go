@@ -1,8 +1,12 @@
 package contract
 
 import (
+	"bytes"
+	"encoding/json"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -144,5 +148,144 @@ func TestFormatIssueMarkdownAllowHarnessChanges(t *testing.T) {
 		if wu.AllowHarnessChanges != allow {
 			t.Fatalf("round trip allow=%v parsed %v", allow, wu.AllowHarnessChanges)
 		}
+	}
+}
+
+func TestParseWorkUnitMissingConstraintsTriage(t *testing.T) {
+	for _, tc := range []struct {
+		name, section string
+		valid         bool
+	}{
+		{"missing", "", false}, {"present empty", "### Constraints\n\n", true},
+		{"whitespace", "### Constraints\n \t\n", true}, {"no response", "### Constraints\n_No response_\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "### Objective\nFix triage parsing\n\n" + tc.section + "### Acceptance Criteria\n- [ ] Tests pass\n### Workflow\nbugfix\n"
+			wu, err := ParseWorkUnitFromIssue(1, "triage", body)
+			if !tc.valid {
+				if err == nil || !strings.Contains(err.Error(), "constraints") {
+					t.Fatalf("missing heading accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertEmptyConstraints(t, wu)
+		})
+	}
+}
+
+func assertEmptyConstraints(t *testing.T, wu *WorkUnit) {
+	t.Helper()
+	if wu.Constraints == nil || len(wu.Constraints) != 0 {
+		t.Fatalf("expected allocated empty constraints: %#v", wu.Constraints)
+	}
+	if err := ValidateWorkUnit(wu); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(wu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields["constraints"]) != "[]" {
+		t.Fatalf("constraints JSON: %s", raw)
+	}
+}
+
+func TestEmptyConstraintsMarkdownRoundTrip(t *testing.T) {
+	for _, constraints := range [][]string{{}, {"one"}, {"one", "two"}} {
+		original := &WorkUnit{Objective: "Fix constraints round trips", Constraints: constraints, Acceptance: []string{"Tests pass"}, Workflow: "bugfix", Gate: GateAgent}
+		body := FormatIssueMarkdown(original)
+		for i := 0; i < 2; i++ {
+			wu, err := ParseWorkUnitFromIssue(1, "title", body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(wu.Constraints, constraints) || !reflect.DeepEqual(wu.Acceptance, original.Acceptance) || wu.Objective != original.Objective || wu.Workflow != original.Workflow || wu.Gate != original.Gate {
+				t.Fatalf("round trip: %+v", wu)
+			}
+			if len(constraints) == 0 {
+				assertEmptyConstraints(t, wu)
+				section := strings.Split(strings.Split(body, "### Constraints\n")[1], "### Acceptance Criteria")[0]
+				if strings.TrimSpace(section) != "" {
+					t.Fatal(section)
+				}
+			}
+			body = FormatIssueMarkdown(wu)
+		}
+	}
+}
+
+func TestParseWorkUnitEmptyConstraintsMissingAcceptance(t *testing.T) {
+	_, err := ParseWorkUnitFromIssue(1, "title", "### Objective\nFix parsing\n### Constraints\n\n### Workflow\nbugfix\n")
+	if err == nil || !strings.Contains(err.Error(), "missing or empty required fields [acceptance]") {
+		t.Fatalf("unexpected diagnostic: %v", err)
+	}
+}
+
+func TestParseWorkUnitConstraintsYAML(t *testing.T) {
+	for _, tc := range []struct {
+		line  string
+		valid bool
+	}{{"", false}, {"constraints: null\n", false}, {"constraints: []\n", true}} {
+		wu, err := ParseWorkUnitFromIssue(1, "title", "```yaml swarm-workunit\nobjective: Fix parsing\n"+tc.line+"acceptance: [Tests pass]\nworkflow: bugfix\n```\n")
+		if tc.valid {
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertEmptyConstraints(t, wu)
+		} else if err == nil {
+			t.Fatalf("accepted %q", tc.line)
+		}
+	}
+}
+
+func TestWorkUnitConstraintsSchemas(t *testing.T) {
+	repo, err := os.ReadFile("../../.swarm/contracts/workunit.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"embedded": WorkUnitSchemaBytes(), "repository": repo} {
+		t.Run(name, func(t *testing.T) {
+			compiler := jsonschema.NewCompiler()
+			doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := compiler.AddResource("test.json", doc); err != nil {
+				t.Fatal(err)
+			}
+			schema, err := compiler.Compile("test.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tc := range []struct {
+				name, key   string
+				value       any
+				omit, valid bool
+			}{
+				{"empty", "constraints", []any{}, false, true}, {"single", "constraints", []any{"one"}, false, true}, {"repeated", "constraints", []any{"one", "two"}, false, true},
+				{"missing", "constraints", nil, true, false}, {"null", "constraints", nil, false, false}, {"string", "constraints", "bad", false, false}, {"object", "constraints", map[string]any{}, false, false}, {"numeric item", "constraints", []any{1}, false, false}, {"empty item", "constraints", []any{""}, false, false},
+				{"acceptance missing", "acceptance", nil, true, false}, {"acceptance null", "acceptance", nil, false, false}, {"acceptance empty", "acceptance", []any{}, false, false}, {"acceptance empty item", "acceptance", []any{""}, false, false}, {"acceptance numeric", "acceptance", []any{1}, false, false},
+				{"workflow", "workflow", "invalid", false, false}, {"objective", "objective", "", false, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					instance := map[string]any{"id": "ISSUE-1", "objective": "Fix constraints parsing", "constraints": []any{}, "acceptance": []any{"Tests pass"}, "workflow": "bugfix"}
+					if tc.omit {
+						delete(instance, tc.key)
+					} else {
+						instance[tc.key] = tc.value
+					}
+					if err := schema.Validate(instance); (err == nil) != tc.valid {
+						t.Fatalf("valid=%v error=%v", tc.valid, err)
+					}
+				})
+			}
+		})
 	}
 }

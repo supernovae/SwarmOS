@@ -1,0 +1,1 @@
+- Explain recognized provider capacity, usage, rate-limit, and network failures with a phase-specific resume command, and show their fixed classification in role-run status.

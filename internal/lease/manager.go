@@ -96,7 +96,7 @@ type IssueState struct {
 	Lease                  contract.Lease                  `json:"lease"`
 	Artifacts              []contract.Artifact             `json:"artifacts,omitempty"`
 	Attestations           []contract.RoleAttestation      `json:"attestations,omitempty"`
-	RoleRuns               []contract.RoleRunTelemetry     `json:"role_runs,omitempty"` // bounded history of artifact-producing runs
+	RoleRuns               []contract.RoleRunTelemetry     `json:"role_runs,omitempty"` // bounded history of artifact-producing runs and classified failed runs; failed rows do not advance attempt counters
 	ProjectionCommentID    int64                           `json:"projection_comment_id,omitempty"`
 	TaskDigest             string                          `json:"task_digest"`
 	PolicyDigest           string                          `json:"policy_digest"`

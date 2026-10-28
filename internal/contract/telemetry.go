@@ -38,6 +38,7 @@ var (
 // Durations are milliseconds. Repair and re-plan counters are coordinator
 // attempt numbers (initial run = 0), not inferred agent retries.
 type RoleRunTelemetry struct {
+	FailureClass      string    `json:"failure_class,omitempty"`
 	Version           int       `json:"version"`
 	RunID             string    `json:"run_id"`
 	Role              string    `json:"role"`
@@ -100,6 +101,11 @@ func Label(s string) *string {
 func (t *RoleRunTelemetry) Validate() error {
 	if t == nil {
 		return fmt.Errorf("telemetry is nil")
+	}
+	switch t.FailureClass {
+	case "", "capacity", "usage_limit", "rate_limit", "network", "unknown":
+	default:
+		return fmt.Errorf("invalid telemetry failure class")
 	}
 	if t.Version != RoleRunTelemetryVersion {
 		return fmt.Errorf("unsupported telemetry version %d", t.Version)

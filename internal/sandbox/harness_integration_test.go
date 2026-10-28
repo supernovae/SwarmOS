@@ -116,6 +116,7 @@ func openCodeToolFixture(t *testing.T, behavior string) {
 	work, control, home := t.TempDir(), t.TempDir(), t.TempDir()
 	secret := filepath.Join(home, "coordinator-token")
 	os.WriteFile(secret, []byte("synthetic-secret"), 0600)
+	requireLoopback(t)
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

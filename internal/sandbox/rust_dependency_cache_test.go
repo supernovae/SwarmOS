@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,7 +34,7 @@ func crateManifest(name, extra string) string {
 func gitCrate(t *testing.T, name, sentinel string) string {
 	t.Helper()
 	dir := filepath.Join(resolvedTempDir(t), name)
-	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-q", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	writeWorkerFixture(t, dir, "Cargo.toml", crateManifest(name, ""))

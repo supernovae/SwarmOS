@@ -3,8 +3,8 @@ package pr
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -31,7 +31,7 @@ func conflictedRepo(t *testing.T, name string) string {
 	t.Helper()
 	root := t.TempDir()
 	git := func(args ...string) {
-		cmd := exec.Command("git", args...)
+		cmd := gitfixture.Command(t, "", args...)
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil && args[0] != "rebase" {
 			t.Fatalf("git %v: %v: %s", args, err, out)

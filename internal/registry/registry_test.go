@@ -1,7 +1,7 @@
 package registry
 
 import (
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,11 +10,11 @@ import (
 func initTestGitRepo(t *testing.T, remoteURL string) string {
 	t.Helper()
 	tmp := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, string(out))
 	}
 	if remoteURL != "" {
-		if out, err := exec.Command("git", "-C", tmp, "remote", "add", "origin", remoteURL).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", "-C", tmp, "remote", "add", "origin", remoteURL).CombinedOutput(); err != nil {
 			t.Fatalf("git remote add failed: %v (%s)", err, string(out))
 		}
 	}

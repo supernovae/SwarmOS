@@ -1,8 +1,8 @@
 package node
 
 import (
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -19,7 +19,7 @@ func gitRepo(t *testing.T) string {
 		dir = resolved
 	}
 	for _, args := range [][]string{{"init", "-q", "-b", "main"}, {"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "base"}} {
-		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -29,7 +29,7 @@ func gitRepo(t *testing.T) string {
 func TestPrivateGoModulesResolvesRegisteredRepository(t *testing.T) {
 	repoA, repoB, unregistered := gitRepo(t), gitRepo(t), gitRepo(t)
 	worktree := filepath.Join(repoA, ".swarm", "worktrees", "issue-7")
-	if out, err := exec.Command("git", "-C", repoA, "worktree", "add", "-q", "--detach", worktree).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", repoA, "worktree", "add", "-q", "--detach", worktree).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v (%s)", err, out)
 	}
 	registryPath := filepath.Join(t.TempDir(), "repos.yaml")

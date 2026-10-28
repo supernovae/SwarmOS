@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -18,7 +18,7 @@ func TestGitCASAcrossClonesAndAtomicCheckpointFence(t *testing.T) {
 	root := t.TempDir()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -101,7 +101,7 @@ func TestPRPublishRequiresCapturedStateAndRemoteHead(t *testing.T) {
 	root := t.TempDir()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
@@ -152,7 +152,7 @@ func TestConcurrentIssueReadsStayPinnedAndTransportErrorsSurface(t *testing.T) {
 	remote := filepath.Join(root, "remote.git")
 	clone := filepath.Join(root, "clone")
 	for _, args := range [][]string{{"init", "--bare", remote}, {"clone", remote, clone}} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
@@ -175,7 +175,7 @@ func TestConcurrentIssueReadsStayPinnedAndTransportErrorsSurface(t *testing.T) {
 		}(issue)
 	}
 	workers.Wait()
-	if out, err := exec.Command("git", "-C", clone, "remote", "set-url", "origin", filepath.Join(root, "missing")).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", clone, "remote", "set-url", "origin", filepath.Join(root, "missing")).CombinedOutput(); err != nil {
 		t.Fatalf("set-url: %v: %s", err, out)
 	}
 	if _, _, err := store.Load(ctx, 1); err == nil || errors.Is(err, ErrNotFound) {
@@ -188,7 +188,7 @@ func TestForkIndexedStoreAtomicCapAndReplay(t *testing.T) {
 	root := t.TempDir()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}

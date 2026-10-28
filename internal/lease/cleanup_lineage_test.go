@@ -3,8 +3,8 @@ package lease
 import (
 	"context"
 	"encoding/json"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,7 +19,7 @@ func TestCleanupRevisedLegacyLineage(t *testing.T) {
 	ctx := context.Background()
 	git := func(args ...string) string {
 		t.Helper()
-		b, e := exec.Command("git", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput()
+		b, e := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput()
 		if e != nil {
 			t.Fatalf("git: %s %v", b, e)
 		}
@@ -79,7 +79,7 @@ func TestCleanupHeadLineage(t *testing.T) {
 
 	git := func(args ...string) string {
 		t.Helper()
-		b, e := exec.Command("git", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput()
+		b, e := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput()
 		if e != nil {
 			t.Fatalf("git: %s %v", b, e)
 		}
@@ -129,7 +129,7 @@ func TestCleanupRebasedLegacyLineage(t *testing.T) {
 			ctx := context.Background()
 			git := func(args ...string) string {
 				t.Helper()
-				b, e := exec.Command("git", append([]string{"-C", m.repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
+				b, e := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
 				if e != nil {
 					t.Fatalf("git: %s %v", b, e)
 				}
@@ -195,7 +195,7 @@ func TestCleanupRebasePaths(t *testing.T) {
 	ctx := context.Background()
 	git := func(args ...string) string {
 		t.Helper()
-		b, e := exec.Command("git", append([]string{"-C", m.repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
+		b, e := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
 		if e != nil {
 			t.Fatalf("git: %s %v", b, e)
 		}
@@ -313,7 +313,7 @@ func TestCompletePRRevisionRecordsVerifiedRebase(t *testing.T) {
 			ctx := context.Background()
 			git := func(args ...string) string {
 				t.Helper()
-				b, e := exec.Command("git", append([]string{"-C", m.repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
+				b, e := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid"}, args...)...).CombinedOutput()
 				if e != nil {
 					t.Fatalf("git: %s %v", b, e)
 				}

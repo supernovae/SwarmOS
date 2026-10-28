@@ -2,7 +2,7 @@ package workflow
 
 import (
 	"context"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,7 +20,7 @@ func TestEngineDroppedCheckpointRecovery(t *testing.T) {
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v %s", args, err, out)

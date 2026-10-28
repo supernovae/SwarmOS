@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,7 +38,7 @@ func revisionState(t *testing.T, s *Service, issue int, edit func(*lease.IssueSt
 
 func revisionGit(t *testing.T, root string, args ...string) string {
 	t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v %s", args, err, out)
 	}

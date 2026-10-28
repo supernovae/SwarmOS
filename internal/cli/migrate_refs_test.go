@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -52,7 +52,7 @@ func newLedgerCLIFixture(t *testing.T, ns string) *ledgerCLIFixture {
 
 func (f *ledgerCLIFixture) git(dir string, args ...string) string {
 	f.t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(f.t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	if err != nil {
 		f.t.Fatalf("git %v: %v: %s", args, err, out)
 	}

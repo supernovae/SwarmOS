@@ -3,7 +3,7 @@ package lease
 import (
 	"context"
 	"errors"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"reflect"
 	"strings"
 	"testing"
@@ -57,14 +57,14 @@ func newRevokeFixtureWithLayout(t *testing.T, layout coordination.RefLayout) *re
 	m, lt, iss := testManager(t)
 	git := func(args ...string) {
 		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
 	remote := t.TempDir() + "/origin.git"
 	git("init", "--bare", remote)
 	git("remote", "add", "origin", remote)
-	branch, err := exec.Command("git", "-C", m.repoRoot, "symbolic-ref", "--short", "HEAD").Output()
+	branch, err := gitfixture.Command(t, "", "-C", m.repoRoot, "symbolic-ref", "--short", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestRevokeRetainsCheckpointForNextClaimer(t *testing.T) {
 	if next.Branch != branch || next.HeadSHA != claimed.BaseSHA {
 		t.Fatalf("next claimer lost checkpoint: branch=%q head=%q", next.Branch, next.HeadSHA)
 	}
-	if out, err := exec.Command("git", "-C", f.root, "ls-remote", "origin", "refs/heads/"+branch).CombinedOutput(); err != nil || !strings.Contains(string(out), claimed.BaseSHA) {
+	if out, err := gitfixture.Command(t, "", "-C", f.root, "ls-remote", "origin", "refs/heads/"+branch).CombinedOutput(); err != nil || !strings.Contains(string(out), claimed.BaseSHA) {
 		t.Fatalf("checkpoint branch removed: %s %v", out, err)
 	}
 }
@@ -268,11 +268,11 @@ func TestRevokeForkClaimLeavesContributorIndex(t *testing.T) {
 			}
 			indexClaims := func() string {
 				t.Helper()
-				out, err := exec.Command("git", "-C", f.root, "fetch", "origin", layout.ContributorRef("worker")).CombinedOutput()
+				out, err := gitfixture.Command(t, "", "-C", f.root, "fetch", "origin", layout.ContributorRef("worker")).CombinedOutput()
 				if err != nil {
 					t.Fatalf("fetch index: %v: %s", err, out)
 				}
-				index, err := exec.Command("git", "-C", f.root, "show", "FETCH_HEAD:index.json").Output()
+				index, err := gitfixture.Command(t, "", "-C", f.root, "show", "FETCH_HEAD:index.json").Output()
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -299,7 +299,7 @@ func TestRevokeForkClaimLeavesContributorIndex(t *testing.T) {
 			}
 			if layout == coordination.HiddenLayout {
 				for _, prefix := range []string{coordination.BranchLayout.StatePrefix(), coordination.BranchLayout.CheckpointPrefix(), coordination.BranchLayout.ContributorPrefix()} {
-					if out, err := exec.Command("git", "-C", f.root, "ls-remote", "origin", prefix+"*").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "" {
+					if out, err := gitfixture.Command(t, "", "-C", f.root, "ls-remote", "origin", prefix+"*").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "" {
 						t.Fatalf("hidden layout created branch ledger refs: %s %v", out, err)
 					}
 				}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
@@ -431,11 +432,12 @@ func TestCleanupLocalMovedTipCAS(t *testing.T) {
 			st := f.state(t, n)
 			path := workspace.WorktreePath(f.root, n)
 			tree := prGit(t, f.root, "rev-parse", st.HeadSHA+"^{tree}")
+			// Resolve Git for the shim that intercepts production cleanup commands.
 			realGit, err := exec.LookPath("git")
 			if err != nil {
 				t.Fatal(err)
 			}
-			c := exec.Command(realGit, "-C", f.root, "commit-tree", tree, "-p", st.HeadSHA, "-m", "moved")
+			c := gitfixture.Command(t, f.root, "commit-tree", tree, "-p", st.HeadSHA, "-m", "moved")
 			out, err := c.Output()
 			if err != nil {
 				t.Fatal(err)
@@ -493,6 +495,7 @@ func TestCleanupLocalRemovalFailure(t *testing.T) {
 	f, n, _ := cleanupLocalFixture(t)
 	st := f.state(t, n)
 	path := workspace.WorktreePath(f.root, n)
+	// Resolve Git for the shim that intercepts production cleanup commands.
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
@@ -655,7 +658,7 @@ func assertCleanupLocalsRetired(t *testing.T, f *cliFixture, n, pr int, branch s
 		}
 	}
 	for _, branch := range []string{branch, workspace.PRBranchName(pr)} {
-		if err := exec.Command("git", "-C", f.root, "show-ref", "--verify", "refs/heads/"+branch).Run(); err == nil {
+		if err := gitfixture.Command(t, "", "-C", f.root, "show-ref", "--verify", "refs/heads/"+branch).Run(); err == nil {
 			t.Fatalf("branch remains: %s", branch)
 		}
 	}

@@ -3,8 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -93,7 +93,7 @@ func authenticatedWorkUnit(t *testing.T, routing string) {
 	root := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}

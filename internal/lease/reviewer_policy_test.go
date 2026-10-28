@@ -3,8 +3,8 @@ package lease
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,7 +31,7 @@ func reviewerPolicyManager(t *testing.T, security string) (*Manager, *tracker.Lo
 	mustWrite(".swarm/config.yaml", "version: 1\ndefault_agent: claude\ndefault_gate: agent\nlease:\n  duration: 4h\n  renewable: true\n  max_renewals: 3\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\n"+security+"agents:\n  claude:\n    binary: claude\n  codex:\n    binary: codex\n    roles: [reviewer]\n")
 	mustWrite(".swarm/workflows/feature.yaml", "name: feature\ndefault_gate: agent\nsteps:\n  - name: design\n    role: planner\n    artifact: design\n")
 	for _, args := range [][]string{{"init"}, {"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture"}} {
-		cmd := exec.Command("git", args...)
+		cmd := gitfixture.Command(t, "", args...)
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)

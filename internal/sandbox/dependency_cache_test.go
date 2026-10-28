@@ -3,6 +3,7 @@ package sandbox
 import (
 	"archive/zip"
 	"context"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -76,11 +77,11 @@ func makeWritableOnCleanup(t *testing.T, dir string) {
 func gitCommitAll(t *testing.T, repo, message string) string {
 	t.Helper()
 	for _, args := range [][]string{{"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", message}} {
-		if out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
-	out, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	out, err := gitfixture.Command(t, "", "-C", repo, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +207,7 @@ func TestDependencyCachePathAndOwners(t *testing.T) {
 	stubPrefetch(t, "go1.21.0", nil)
 	repo, base := goModuleRepo(t)
 	linked := filepath.Join(resolvedTempDir(t), "linked")
-	if out, err := exec.Command("git", "-C", repo, "worktree", "add", "-q", "--detach", linked, base).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", repo, "worktree", "add", "-q", "--detach", linked, base).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v (%s)", err, out)
 	}
 	userCache := resolvedTempDir(t)

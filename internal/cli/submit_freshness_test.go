@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"os"
 	"os/exec"
@@ -17,7 +18,7 @@ import (
 
 func freshnessGit(t *testing.T, root string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
+	cmd := gitfixture.Command(t, "", args...)
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -379,6 +380,7 @@ func TestSubmitFreshnessInspectionFailure(t *testing.T) {
 	if got := checkSubmissionFreshness(t.Context(), root, "main", strings.Repeat("0", 40), head); got.Status != "skipped" || got.BehindCount != nil {
 		t.Fatal(got)
 	}
+	// Resolve Git for the shim that exercises production merge-tree failure handling.
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)

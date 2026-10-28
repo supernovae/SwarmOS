@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -195,7 +195,7 @@ func TestWorkPreflightLocalRebaseEvidence(t *testing.T) {
 		}
 		git := func(dir string, args ...string) string {
 			t.Helper()
-			out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+			out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 			if err != nil {
 				t.Fatalf("git %v: %v %s", args, err, out)
 			}
@@ -297,7 +297,7 @@ func TestPRWorkForkRefusesBeforeGateway(t *testing.T) {
 	ctx := context.Background()
 	git := func(args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", s.Root}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", s.Root}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("%v: %v %s", args, err, out)
 		}
@@ -385,7 +385,7 @@ func TestPRWorkPausedPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command("git", "-C", path, "rev-parse", "--git-path", "rebase-merge").Output()
+	out, err := gitfixture.Command(t, "", "-C", path, "rev-parse", "--git-path", "rebase-merge").Output()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,8 +1,8 @@
 package harness
 
 import (
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,7 +14,7 @@ import (
 func instructionRepo(t *testing.T, entries map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
-	if out, err := exec.Command("git", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "init", "-q", "-b", "main").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	for rel, value := range entries {

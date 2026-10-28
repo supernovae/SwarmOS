@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -316,7 +316,7 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	tmp := t.TempDir()
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v in %s: %v (%s)", args, dir, err, out)
 		}

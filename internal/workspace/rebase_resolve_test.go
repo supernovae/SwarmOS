@@ -3,8 +3,8 @@ package workspace
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,9 +36,9 @@ func pausedRebase(t *testing.T, setup, onMain, onBranch func(root string)) strin
 	root := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitfixture.Command(t, "", args...)
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "GIT_EDITOR=true")
+		cmd.Env = append(cmd.Env, "GIT_EDITOR=true")
 		if out, err := cmd.CombinedOutput(); err != nil && args[0] != "rebase" {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}

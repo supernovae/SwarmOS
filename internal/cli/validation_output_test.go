@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -128,7 +128,7 @@ func TestIssueStatusShowsPreExistingRepair(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"commit", "-am", "go policy"}} {
-		if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("%v: %s", err, out)
 		}
 	}

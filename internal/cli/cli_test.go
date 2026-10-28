@@ -15,6 +15,7 @@ import (
 	"github.com/supernovae/swarmos/internal/fork"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -22,7 +23,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -109,7 +109,7 @@ func newCLIFixture(t *testing.T) *cliFixture {
 	root := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
-		if out, err := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
@@ -358,7 +358,7 @@ func TestCLIClaimNextResumesHandoffPhase(t *testing.T) {
 	f.must(t, "issue", "work", n, "--agent", "mock", "--phase", "plan", "--handoff", "--progress=false")
 	before := f.state(t, 1)
 	worktree := workspace.WorktreePath(f.root, 1)
-	checkpoint, err := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
+	checkpoint, err := gitfixture.Command(t, "", "-C", worktree, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestCLIClaimNextResumesHandoffPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := f.state(t, 1)
-	selectedHead, err := exec.Command("git", "-C", worktree, "rev-parse", "HEAD").Output()
+	selectedHead, err := gitfixture.Command(t, "", "-C", worktree, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestCLIValidationNamespacesAndRemovedRoutes(t *testing.T) {
 			t.Fatalf("invalid validation accepted: %v", args)
 		}
 	}
-	base, err := exec.Command("git", "-C", f.root, "rev-parse", "HEAD").Output()
+	base, err := gitfixture.Command(t, "", "-C", f.root, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,11 +441,11 @@ func TestCLIRepoValidationFailurePreservesJSONAndExitStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "failing trusted policy"}} {
-		if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
-	base, err := exec.Command("git", "-C", f.root, "rev-parse", "HEAD").Output()
+	base, err := gitfixture.Command(t, "", "-C", f.root, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,11 +471,11 @@ func TestCLIRepoValidateReportsProtectedChangesForMaintainers(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "trusted policy"}} {
-		if out, err := exec.Command("git", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", f.root}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
-	out, err := exec.Command("git", "-C", f.root, "rev-parse", "HEAD").Output()
+	out, err := gitfixture.Command(t, "", "-C", f.root, "rev-parse", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +852,7 @@ func TestForkCLISmoke(t *testing.T) {
 
 	git := func(dir string, args ...string) string {
 		t.Helper()
-		out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+		out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v in %s: %v (%s)", args, dir, err, out)
 		}
@@ -935,7 +935,7 @@ func TestForkCLISmoke(t *testing.T) {
 				bare = bobForkBare
 			}
 		}
-		out, err := exec.Command("git", "-C", bare, "rev-parse", "refs/heads/"+branch).Output()
+		out, err := gitfixture.Command(t, "", "-C", bare, "rev-parse", "refs/heads/"+branch).Output()
 		if err != nil {
 			return ""
 		}
@@ -1611,7 +1611,7 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 	}
 
 	root := t.TempDir()
-	if out, err := exec.Command("git", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 
@@ -1633,7 +1633,7 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 		t.Run(version, func(t *testing.T) {
 			Version = version
 			devRoot := t.TempDir()
-			if out, err := exec.Command("git", "-C", devRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+			if out, err := gitfixture.Command(t, "", "-C", devRoot, "init", "-b", "main").CombinedOutput(); err != nil {
 				t.Fatalf("git init: %v (%s)", err, out)
 			}
 			if err := runCmd(devRoot, "repo", "init", "--fork-coordinator"); err == nil {
@@ -1654,7 +1654,7 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 	for _, version := range []string{"v0.5.0", "v0.6.0", "v0.6.0-rc.1", "v1.0.0", strings.Repeat("a", 40)} {
 		t.Run(version, func(t *testing.T) {
 			pinRoot := t.TempDir()
-			if out, err := exec.Command("git", "-C", pinRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+			if out, err := gitfixture.Command(t, "", "-C", pinRoot, "init", "-b", "main").CombinedOutput(); err != nil {
 				t.Fatalf("git init: %v (%s)", err, out)
 			}
 			if err := runCmd(pinRoot, "repo", "init", "--swarm-version", version); (err == nil) == (version == "v0.5.0") {
@@ -1849,7 +1849,7 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 		return string(raw)
 	}
 	root := t.TempDir()
-	if out, err := exec.Command("git", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 
@@ -1866,7 +1866,7 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 
 	// A source build Go stamps with a pseudo-version pins it, with the same reminder.
 	pseudoRoot := t.TempDir()
-	if out, err := exec.Command("git", "-C", pseudoRoot, "init", "-b", "main").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", pseudoRoot, "init", "-b", "main").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	Version = "0.6.1-0.20261023222858-9ad1652a4325"
@@ -1936,7 +1936,7 @@ func TestRepoOnboardAndInitDryRun(t *testing.T) {
 		return buf.String(), err
 	}
 	root := t.TempDir()
-	if out, err := exec.Command("git", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "init", "-b", "main").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	assertOnlyGit := func(step string) {
@@ -2012,7 +2012,7 @@ func TestFreshClaimBaseCommands(t *testing.T) {
 			n := f.create(t, "agent")
 			f.must(t, "issue", "approve", strconv.Itoa(n))
 			old := f.state(t, n).BaseSHA
-			cmdGit := exec.Command("git", "-C", f.root, "commit", "--allow-empty", "-m", "advance")
+			cmdGit := gitfixture.Command(t, "", "-C", f.root, "commit", "--allow-empty", "-m", "advance")
 			if out, err := cmdGit.CombinedOutput(); err != nil {
 				t.Fatalf("%v %s", err, out)
 			}

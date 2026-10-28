@@ -3,7 +3,7 @@ package lease
 import (
 	"context"
 	"fmt"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,7 +21,7 @@ func TestCleanupUsesNamedUpstreamRemote(t *testing.T) {
 			ctx := context.Background()
 			git := func(args ...string) string {
 				t.Helper()
-				out, e := exec.Command("git", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput()
+				out, e := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput()
 				if e != nil {
 					t.Fatalf("git %v: %s %v", args, out, e)
 				}
@@ -47,13 +47,13 @@ func TestCleanupUsesNamedUpstreamRemote(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if out, _ := exec.Command("git", "--git-dir="+remote, "rev-parse", fmt.Sprintf("refs/heads/swarm-state/issue-%d", n)).CombinedOutput(); len(strings.TrimSpace(string(out))) != 40 {
+				if out, _ := gitfixture.Command(t, "", "--git-dir="+remote, "rev-parse", fmt.Sprintf("refs/heads/swarm-state/issue-%d", n)).CombinedOutput(); len(strings.TrimSpace(string(out))) != 40 {
 					t.Fatalf("state not on upstream: %s", out)
 				}
 			} else if err == nil || !strings.Contains(err.Error(), "cleanup upstream repository identity mismatch") {
 				t.Fatalf("mismatch = %v", err)
 			}
-			if out, _ := exec.Command("git", "--git-dir="+decoy, "for-each-ref").CombinedOutput(); strings.TrimSpace(string(out)) != "" {
+			if out, _ := gitfixture.Command(t, "", "--git-dir="+decoy, "for-each-ref").CombinedOutput(); strings.TrimSpace(string(out)) != "" {
 				t.Fatalf("decoy origin changed: %s", out)
 			}
 		})

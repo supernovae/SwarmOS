@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,7 +32,7 @@ func newRetentionFixture(t *testing.T) *retentionFixture {
 }
 func (f *retentionFixture) git(dir string, args ...string) string {
 	f.t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(f.t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	if err != nil {
 		f.t.Fatalf("git %v: %v: %s", args, err, out)
 	}
@@ -93,7 +93,7 @@ func TestCheckpointRetentionSurvivesRewriteDeletionAndGC(t *testing.T) {
 				}
 			}
 			// Ledger ancestry remains independent of task code.
-			if out, err := exec.Command("git", "-C", f.clone, "merge-base", "--is-ancestor", a, rev).CombinedOutput(); err == nil {
+			if out, err := gitfixture.Command(t, "", "-C", f.clone, "merge-base", "--is-ancestor", a, rev).CombinedOutput(); err == nil {
 				t.Fatalf("code became ledger ancestor: %s", out)
 			}
 		})
@@ -150,7 +150,7 @@ func TestRetentionAtomicRejectionAndLegacyHistory(t *testing.T) {
 				t.Fatal("rejection changed branch")
 			}
 			if !success && scenario != "conflict" {
-				if _, err := exec.Command("git", "-C", f.remote, "show-ref", "--verify", BranchLayout.CheckpointRef(1, b)).Output(); err == nil {
+				if _, err := gitfixture.Command(t, "", "-C", f.remote, "show-ref", "--verify", BranchLayout.CheckpointRef(1, b)).Output(); err == nil {
 					t.Fatal("rejected push created retention ref")
 				}
 			}

@@ -3,7 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"slices"
 	"strings"
 	"sync"
@@ -94,7 +94,7 @@ func splitEngine(t *testing.T, gate contract.GateMode) (*Engine, *tracker.LocalT
 	t.Helper()
 	root, e, tr := setupProjectPlanTestRepo(t)
 	configureValidation(t, root)
-	if out, err := exec.Command("git", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "test validation").CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	wu := &contract.WorkUnit{Objective: "Large work", Constraints: []string{"Keep fencing"}, Acceptance: []string{"go test passes"}, Workflow: "feature", Gate: gate}

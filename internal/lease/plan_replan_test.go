@@ -3,8 +3,8 @@ package lease
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -206,7 +206,7 @@ func TestPlanReplanTrustedPolicyModes(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, args := range [][]string{{"add", "."}, {"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "policy"}} {
-				cmd := exec.Command("git", args...)
+				cmd := gitfixture.Command(t, "", args...)
 				cmd.Dir = m.repoRoot
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatal(err, string(out))

@@ -3,6 +3,7 @@ package gitcredential
 import (
 	"context"
 	"encoding/base64"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ func TestCredentialsNeverEnterArgumentsOrDiagnostics(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
 	t.Setenv("GIT_CONFIG_VALUE_0", "untrusted-helper")
+	// Raw command tests production credential/environment hardening via Configure.
 	cmd := exec.Command("git", "ls-remote", "origin")
 	redact, err := Configure(cmd)
 	if err != nil {
@@ -52,7 +54,7 @@ func TestCoordinatorGitDoesNotExecuteCandidateSelectedHelpers(t *testing.T) {
 	root := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitfixture.Command(t, "", args...)
 		cmd.Dir = root
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("fixture git %v: %v: %s", args, err, out)
@@ -110,7 +112,7 @@ func TestMergeTreeNeutralizesCustomDriver(t *testing.T) {
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
+		cmd := gitfixture.Command(t, "", args...)
 		cmd.Dir = root
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -167,7 +169,7 @@ func TestMergeTreeNeutralizesCustomDriver(t *testing.T) {
 
 func TestMergeTreeConfigurationProbeFailsClosed(t *testing.T) {
 	root := t.TempDir()
-	cmd := exec.Command("git", "init", root)
+	cmd := gitfixture.Command(t, "", "init", root)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatal(err, string(out))
 	}
@@ -181,7 +183,7 @@ func TestMergeTreeConfigurationProbeFailsClosed(t *testing.T) {
 
 func TestMergeTreeConfigurationBudgetFailsClosed(t *testing.T) {
 	root := t.TempDir()
-	cmd := exec.Command("git", "init", root)
+	cmd := gitfixture.Command(t, "", "init", root)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatal(err, string(out))
 	}

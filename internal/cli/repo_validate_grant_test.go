@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -48,7 +48,7 @@ func harnessGrantFixture(t *testing.T, setup ...func(*cliFixture)) (f *cliFixtur
 
 func gitRun(t *testing.T, root string, args ...string) string {
 	t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", root, "-c", "user.name=T", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(t, "", append([]string{"-C", root, "-c", "user.name=T", "-c", "user.email=t@example.invalid"}, args...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v (%s)", args, err, out)
 	}

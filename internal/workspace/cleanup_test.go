@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,7 +18,7 @@ func TestCleanupArtifactNonForcedGitRemovalProbe(t *testing.T) {
 	root := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
-		c := exec.Command("git", args...)
+		c := gitfixture.Command(t, "", args...)
 		c.Dir = root
 		if out, e := c.CombinedOutput(); e != nil {
 			t.Fatalf("git %v: %s %v", args, out, e)
@@ -49,7 +50,7 @@ func cleanupWorkspaceFixture(t *testing.T) (string, string, string, func(...stri
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		c := exec.Command("git", append([]string{"-C", root}, args...)...)
+		c := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...)
 		out, err := c.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %s %v", args, out, err)

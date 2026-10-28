@@ -38,7 +38,7 @@ func TestRoleRunsShowReasoningTokens(t *testing.T) {
 	}
 	var text strings.Builder
 	writeRoleRuns(&text, runs)
-	for _, want := range []string{"Role runs:\n" + lease.RoleRunTableHeader, "| 1806/66/1200 |", "| 21 |\n", "unavailable/unavailable | unavailable |\n"} {
+	for _, want := range []string{"Role runs:\n" + lease.RoleRunTableHeader, "| 1806/66/1200 |", "| 21 | unavailable |\n", "unavailable/unavailable | unavailable | unavailable |\n"} {
 		if !strings.Contains(text.String(), want) {
 			t.Fatalf("role runs lack %q:\n%s", want, text.String())
 		}

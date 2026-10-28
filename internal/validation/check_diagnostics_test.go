@@ -382,3 +382,117 @@ func TestJSONCapturePlainFallbackAttribution(t *testing.T) {
 		t.Fatalf("%v %v %t", tests, pkgs, truncated)
 	}
 }
+
+func TestJSONFailureMessagePrefix(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		for _, fragmented := range []bool{false, true} {
+			for _, rows := range []int{5, 20} {
+				c := &checkCapture{jsonMode: true, preserveJSON: preserve}
+				emit := func(action, pkg, name, out string) {
+					b, _ := json.Marshal(map[string]string{"Action": action, "Package": pkg, "Test": name, "Output": out})
+					b = append(b, '\n')
+					if fragmented {
+						for _, v := range b {
+							_, _ = c.Write([]byte{v})
+						}
+					} else {
+						_, _ = c.Write(b)
+					}
+				}
+				name := "TestRoleRunsShowReasoningTokens"
+				emit("run", "p", name, "")
+				body := "    role_run_reasoning_test.go:43: role runs lack reasoning\x1b\n"
+				for i := 0; i < rows; i++ {
+					body += "        row" + strconv.Itoa(i) + strings.Repeat("x", 300) + "\n"
+				}
+				emit("output", "p", name, body)
+				emit("output", "p", name, "--- FAIL: "+name+" (0.00s)\n")
+				emit("fail", "p", name, "")
+				emit("output", "noise", "", strings.Repeat("noise\n", 4000))
+				c.finish()
+				got, _ := c.diagnostics()
+				again, _ := c.diagnostics()
+				if got != again || !strings.Contains(got, "role_run_reasoning_test.go:43: role runs lack reasoning\\x1b") {
+					t.Fatalf("rows=%d preserve=%v fragmented=%v: %s", rows, preserve, fragmented, got)
+				}
+				if len(got) > diagnosticBytes || len(strings.Split(got, "\n")) > diagnosticLines {
+					t.Fatal("diagnostic bounds exceeded")
+				}
+				if c.fails.lines > failSectionLines || c.fails.size > failSectionBytes {
+					t.Fatal("section bounds exceeded")
+				}
+				if len(c.jsonFailures) != 0 {
+					t.Fatal("completed contexts retained")
+				}
+				if !strings.Contains(got, "row0") || strings.Index(got, "row0") > strings.Index(got, "row1") {
+					t.Fatal("prefix order lost")
+				}
+				for _, b := range c.fails.blocks {
+					lines, size := b.rendered()
+					if lines > failBlockLines || size > failBlockBytes {
+						t.Fatal("block bounds exceeded")
+					}
+					if rows == 20 && !b.cut {
+						t.Fatal("missing in-block truncation")
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestJSONSubtestFailureMessages(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		for _, fragmented := range []bool{false, true} {
+			c := &checkCapture{jsonMode: true, preserveJSON: preserve}
+			emit := func(action, pkg, name, out string) {
+				b, _ := json.Marshal(map[string]string{"Action": action, "Package": pkg, "Test": name, "Output": out})
+				b = append(b, '\n')
+				if fragmented {
+					for _, v := range b {
+						_, _ = c.Write([]byte{v})
+					}
+				} else {
+					_, _ = c.Write(b)
+				}
+			}
+			for _, pkg := range []string{"a", "b"} {
+				for _, sub := range []string{"one", "two"} {
+					emit("run", pkg, "Parent/"+sub, "")
+					emit("output", pkg, "Parent/"+sub, "    "+pkg+"_"+sub+"_test.go:4: detail\n")
+				}
+			}
+			for _, pkg := range []string{"a", "b"} {
+				for _, sub := range []string{"one", "two"} {
+					emit("output", pkg, "Parent/"+sub, "    --- FAIL: Parent/"+sub+" (0.00s)\n")
+					emit("fail", pkg, "Parent/"+sub, "")
+				}
+				emit("output", pkg, "Parent", "--- FAIL: Parent (0.00s)\n")
+				emit("fail", pkg, "Parent", "")
+			}
+			emit("output", "noise", "", strings.Repeat("noise\n", 4000))
+			c.finish()
+			got, _ := c.diagnostics()
+			if strings.Count(got, "--- FAIL: Parent/one") != 2 || strings.Count(got, "--- FAIL: Parent/two") != 2 {
+				t.Fatal(got)
+			}
+			for i, b := range c.fails.blocks {
+				if i%3 == 2 {
+					continue
+				}
+				pkg := "a"
+				if i >= 3 {
+					pkg = "b"
+				}
+				sub := []string{"one", "two"}[i%3]
+				if len(b.lines) != 2 || !strings.Contains(b.lines[1], pkg+"_"+sub+"_test.go:4") {
+					t.Fatalf("wrong block: %+v", b)
+				}
+			}
+			tests, _, _ := c.goFailures()
+			if len(tests) != 6 {
+				t.Fatal(tests)
+			}
+		}
+	}
+}

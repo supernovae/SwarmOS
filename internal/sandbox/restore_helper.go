@@ -21,6 +21,9 @@ import (
 // destination and trust paths are fixed; argv never controls bridge routing.
 func RunRestoreHelper(args []string) (retErr error) {
 	if len(args) < 2 || args[1] != "--" {
+		// A fixed frame lets startup tests distinguish argument validation from
+		// runtime failure without exposing arguments or runtime diagnostics.
+		_, _ = io.WriteString(os.Stdout, "ARGUMENTS\n")
 		return errors.New("restore helper arguments")
 	}
 	control := os.Stdout

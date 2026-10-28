@@ -14,6 +14,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Bound runtime parallelism before Go/cgo startup: the runtime sizes per-P
+// allocations from GOMAXPROCS before main, and host CPU counts can exhaust the
+// address-space limit even before the helper validates its arguments. This is
+// helper-only; the payload receives its own explicit environment.
+const restoreHelperMaxProcs = "2"
+
+func restoreResourceFlags() []string {
+	return []string{"--as=1073741824", "--cpu=300", "--nproc=128", "--nofile=128", "--fsize=268435456", "--core=0"}
+}
+
 func restoreCommand(ctx context.Context, control, cache, positive string, argv []string) (*exec.Cmd, error) {
 	binary, err := exec.LookPath("bwrap")
 	if err != nil {
@@ -54,9 +64,10 @@ func restoreFlags(control, cache, positive string, argv []string) ([]string, err
 	flags = append(flags, "--ro-bind", filepath.Join(control, "source"), "/source", "--bind", cache, "/cache",
 		"--ro-bind", filepath.Join(control, "trust"), "/restore-trust", "--ro-bind", filepath.Join(control, "socket"), "/restore-broker",
 		"--ro-bind", filepath.Join(control, "helper"), "/restore-helper", "--remount-ro", "/proc", "--remount-ro", "/dev", "--remount-ro", "/",
-		"--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/cache/home", "--setenv", "TMPDIR", "/cache/tmp", "--chdir", "/source", "--",
-		"/usr/bin/prlimit", "--as=1073741824", "--cpu=300", "--nproc=128", "--nofile=128", "--fsize=268435456", "--core=0", "--",
-		"/restore-helper", positive, "--")
+		"--setenv", "GOMAXPROCS", restoreHelperMaxProcs, "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/cache/home", "--setenv", "TMPDIR", "/cache/tmp", "--chdir", "/source", "--",
+		"/usr/bin/prlimit")
+	flags = append(flags, restoreResourceFlags()...)
+	flags = append(flags, "--", "/restore-helper", positive, "--")
 	return append(flags, argv...), nil
 }
 

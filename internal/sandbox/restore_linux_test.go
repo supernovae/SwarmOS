@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -65,7 +67,7 @@ func TestRestoreLinuxFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(flags, "\n")
-	for _, s := range []string{"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop\nALL", "--clearenv", "--remount-ro\n/", "--ro-bind\n/control/source\n/source", "--bind\n/private-cache\n/cache", "/restore-helper", "literal;$(no-shell)"} {
+	for _, s := range []string{"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop\nALL", "--clearenv", "--setenv\nGOMAXPROCS\n2", "--as=1073741824", "--nproc=128", "--cpu=300", "--nofile=128", "--fsize=268435456", "--core=0", "--remount-ro\n/", "--ro-bind\n/control/source\n/source", "--bind\n/private-cache\n/cache", "/restore-helper", "literal;$(no-shell)"} {
 		if !strings.Contains(joined, s) {
 			t.Fatalf("missing isolation flag %q", s)
 		}
@@ -86,13 +88,111 @@ func TestRestoreLinuxFlags(t *testing.T) {
 		t.Fatal("host environment/descriptors inherited")
 	}
 }
+
+// This regression needs no listener, broker or namespace. Run the actual helper
+// under the launcher's limits. Require proof of argument validation, or the
+// independently verified NPROC exhaustion outcome when sharing a busy host UID.
+// A nonzero exit alone also accepts unrelated Go/cgo startup crashes.
 func TestRestoreLinuxHelperStartup(t *testing.T) {
-	helper := buildRestoreHelper(t)
-	cmd := exec.Command(helper)
-	if err := cmd.Run(); err == nil {
-		t.Fatal("helper accepted missing control arguments")
+	for _, mode := range []string{"default", "pure-go"} {
+		t.Run(mode, func(t *testing.T) {
+			var helper string
+			if mode == "pure-go" {
+				helper = buildRestoreHelper(t)
+			} else {
+				helper = filepath.Join(t.TempDir(), "restore-helper")
+				build := exec.Command("go", "build", "-o", helper, "../../cmd/swarm-restore-helper")
+				if output, err := build.CombinedOutput(); err != nil {
+					t.Fatalf("build default helper: %v: %s", err, output)
+				}
+			}
+			processLimitRejected := false
+			for _, limit := range []string{"none", "address-space", "processes", "combined"} {
+				t.Run(limit, func(t *testing.T) {
+					var flags []string
+					switch limit {
+					case "address-space":
+						flags = []string{"--as=1073741824", "--core=0"}
+					case "processes":
+						flags = []string{"--nproc=128", "--core=0"}
+					case "combined":
+						flags = restoreResourceFlags()
+					}
+					// Baseline uses an empty environment. Limited cases use only
+					// the trusted pre-runtime setting from the real launcher.
+					cmd := exec.CommandContext(t.Context(), "/usr/bin/prlimit", append(flags, "--", helper)...)
+					cmd.Env = []string{}
+					if limit != "none" {
+						cmd.Env = []string{"GOMAXPROCS=" + restoreHelperMaxProcs}
+					}
+					var stdout, stderr bytes.Buffer
+					cmd.Stdout, cmd.Stderr = &stdout, &stderr
+					err := cmd.Run()
+					var exit *exec.ExitError
+					// Outside a user namespace NPROC accounts for the entire host
+					// UID, including concurrent packages in make check. Validate
+					// that specific fail-closed outcome separately; it must never
+					// excuse an AS-only failure or a real boundary failure.
+					if limit == "processes" || limit == "combined" && processLimitRejected {
+						if restoreStartupTaskExhausted(err, stdout.Bytes(), stderr.Bytes()) {
+							processLimitRejected = true
+							t.Log("host UID task exhaustion under NPROC128: fail-closed runtime rejection verified")
+							return
+						}
+					}
+					if !errors.As(err, &exit) || exit.ExitCode() != 1 || stdout.String() != "ARGUMENTS\n" || stderr.Len() != 0 {
+						// Runtime diagnostics can contain host paths; keep them out
+						// of coordinator-facing test output.
+						t.Fatalf("helper did not reach argument validation: exit=%v stdout-bytes=%d stderr-bytes=%d", err, stdout.Len(), stderr.Len())
+					}
+				})
+			}
+		})
 	}
 }
+
+// Match only runtime thread-creation EAGAIN, never arbitrary startup errors,
+// memory-allocation failures, malformed control frames or payload failures.
+func restoreStartupTaskExhausted(err error, stdout, stderr []byte) bool {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || len(stdout) != 0 {
+		return false
+	}
+	if exit.ExitCode() == 2 && bytes.Contains(stderr, []byte("runtime: failed to create new OS thread")) && bytes.Contains(stderr, []byte("errno=11")) {
+		return true
+	}
+	status, ok := exit.Sys().(syscall.WaitStatus)
+	// Go may handle SIGABRT and exit 2 after the cgo diagnostic, or
+	// terminate directly with SIGABRT, depending on the runtime/build.
+	return (exit.ExitCode() == 2 || ok && status.Signaled() && status.Signal() == syscall.SIGABRT) && bytes.Contains(stderr, []byte("runtime/cgo: pthread_create failed: Resource temporarily unavailable"))
+}
+
+func TestRestoreLinuxStartupResourceClassification(t *testing.T) {
+	cmd := exec.Command("/usr/bin/prlimit", "--core=0", "--", "/bin/sh", "-c", "exit 2")
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("exit fixture succeeded")
+	}
+	for _, tc := range []struct {
+		name, stdout, stderr string
+		want                 bool
+	}{
+		{"task-exhaustion", "", "runtime: failed to create new OS thread (have 2 already; errno=11)", true},
+		{"cgo-task-exhaustion", "", "runtime/cgo: pthread_create failed: Resource temporarily unavailable", true},
+		{"cgo-other-error", "", "runtime/cgo: pthread_create failed: Cannot allocate memory", false},
+		{"memory", "", "fatal error: runtime: cannot allocate memory", false},
+		{"other-errno", "", "runtime: failed to create new OS thread (errno=12)", false},
+		{"framing", "READY\nextra", "runtime: failed to create new OS thread (errno=11)", false},
+		{"arbitrary", "", "payload failed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := restoreStartupTaskExhausted(err, []byte(tc.stdout), []byte(tc.stderr)); got != tc.want {
+				t.Fatalf("resource classification = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRestoreLinuxBoundary(t *testing.T) {
 	helper := buildRestoreHelper(t)
 	b := RestoreBoundary{Helper: helper}

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/agent"
@@ -573,5 +574,239 @@ func TestCLIPRRebasePolicyReviewStopsBeforeGit(t *testing.T) {
 				t.Fatalf("changed rebase before review approval: %+v", st.LastRebase)
 			}
 		})
+	}
+}
+
+// scriptedResolver answers developer turns itself: planning turn n writes the
+// plan plans[n] names ("valid", "malformed", or "none"), and resolve turns
+// overwrite each conflicted file. It records every developer request.
+type scriptedResolver struct {
+	*agent.MockRunner
+	plans []string
+	mu    sync.Mutex
+	plan  []agent.RunRequest
+	turns []agent.RunRequest
+}
+
+func (s *scriptedResolver) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	if req.Role != "developer" {
+		return s.MockRunner.Run(ctx, req)
+	}
+	manifest, err := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm", "active", "CONFLICTS.md"))
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(string(manifest), "\n") {
+		if _, rest, ok := strings.Cut(line, ". `"); ok && strings.HasPrefix(line, "## ") {
+			paths = append(paths, strings.TrimSuffix(rest, "`"))
+		}
+	}
+	s.mu.Lock()
+	planning := strings.HasPrefix(req.TaskPrompt, "Write only .swarm/active/REBASE_PLAN.md.")
+	kind := "valid"
+	if planning {
+		if n := len(s.plan); n < len(s.plans) {
+			kind = s.plans[n]
+		}
+		s.plan = append(s.plan, req)
+	} else {
+		s.turns = append(s.turns, req)
+	}
+	s.mu.Unlock()
+	if planning {
+		var plan strings.Builder
+		for _, p := range paths {
+			ours := "upstream changes"
+			if kind == "malformed" {
+				ours = ""
+			}
+			fmt.Fprintf(&plan, "## %s\n- **Ours:** %s\n- **Theirs:**\n  approved PR changes\nResolution: combine\nApproved behavior: kept\n\n", p, ours)
+		}
+		if kind != "none" {
+			if err := os.WriteFile(filepath.Join(req.WorktreePath, ".swarm", "active", "REBASE_PLAN.md"), []byte(plan.String()), 0o644); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		for _, p := range paths {
+			if err := os.WriteFile(filepath.Join(req.WorktreePath, p), []byte("resolved "+p+"\n"), 0o644); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var guidance []string
+	if req.OperatorInstructions != "" {
+		guidance = []string{req.OperatorInstructions}
+	}
+	return &agent.RunResult{Agent: "mock", Role: req.Role, Attestation: s.Provenance(req.Role, false), Guidance: guidance}, nil
+}
+
+func (s *scriptedResolver) counts() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.plan), len(s.turns)
+}
+
+func (f *cliFixture) useResolver(s *scriptedResolver) {
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return s, nil }
+}
+
+// recoveryCommand pulls the printed "swarm pr rebase N --resolve" retry out of
+// an error and returns its arguments after "swarm".
+func recoveryCommand(t *testing.T, err error, p string) []string {
+	t.Helper()
+	want := "swarm pr rebase " + p + " --resolve"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error lacks %q: %v", want, err)
+	}
+	return strings.Fields(want)[1:]
+}
+
+func TestCLIPRRebaseResolveRecoveryCommandResumes(t *testing.T) {
+	t.Parallel()
+	f, issue, number, paths := twoStopPRFixture(t)
+	p := strconv.Itoa(number)
+	worktree := workspace.PRWorktreePath(f.root, number)
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf '<<<<<<< ours\\nx\\n>>>>>>> theirs\\n' > "+paths[0])
+	_, err := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
+	if err == nil || strings.Contains(err.Error(), "retry with --resolve") {
+		t.Fatalf("rejected resolution err = %v", err)
+	}
+	retry := recoveryCommand(t, err, p)
+	if _, _, rebasing, _ := workspace.PRHead(context.Background(), worktree); !rebasing {
+		t.Fatal("rejected resolution ended the rebase")
+	}
+	// Without --resolve a paused rebase is still refused.
+	if _, err := f.run("pr", "rebase", p); err == nil || !strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("plain rebase on a paused rebase: %v", err)
+	}
+
+	out := t.TempDir()
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(out))
+	f.must(t, append(retry, "--agent", "mock", "--progress=false")...)
+	if _, _, rebasing, _ := workspace.PRHead(context.Background(), worktree); rebasing {
+		t.Fatal("recovery command did not finish the rebase")
+	}
+	evidence := f.state(t, issue).LastRebase
+	if evidence == nil || evidence.Status != "completed" || len(evidence.Resolutions) != 2 {
+		t.Fatalf("resolutions = %+v", evidence)
+	}
+}
+
+func TestCLIPRRebasePausedHintResolves(t *testing.T) {
+	t.Parallel()
+	f, issue, p, worktree := oneStopTwoFiles(t)
+	_, err := f.run("pr", "work", p, "--agent", "mock", "--progress=false")
+	retry := recoveryCommand(t, err, p)
+	out := t.TempDir()
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(out))
+	f.must(t, append(retry, "--agent", "mock", "--progress=false")...)
+	if _, _, rebasing, _ := workspace.PRHead(context.Background(), worktree); rebasing {
+		t.Fatal("paused-rebase hint did not finish the rebase")
+	}
+	if res := f.state(t, issue).LastRebase.Resolutions; len(res) != 1 || !reflect.DeepEqual(res[0].Paths, []string{"a.txt", "b.txt"}) {
+		t.Fatalf("resolution = %+v", res)
+	}
+}
+
+func TestCLIPRRebaseResolveRetriesMalformedMicroPlanOnce(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		plans  []string
+		passed bool
+	}{
+		{name: "malformed then valid", plans: []string{"malformed", "valid"}, passed: true},
+		{name: "missing then valid", plans: []string{"none", "valid"}, passed: true},
+		{name: "malformed twice", plans: []string{"malformed", "malformed"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, issue, p, worktree := oneStopTwoFiles(t)
+			runner := &scriptedResolver{MockRunner: &agent.MockRunner{}, plans: tc.plans}
+			f.useResolver(runner)
+			_, err := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
+			planning, resolving := runner.counts()
+			if planning != 2 {
+				t.Fatalf("planning turns = %d, want 2", planning)
+			}
+			if tc.plans[0] == "malformed" && !strings.Contains(runner.plan[1].TaskPrompt, "rebase plan lacks Ours: for a.txt") {
+				t.Fatalf("retry prompt lacks the rejection: %q", runner.plan[1].TaskPrompt)
+			}
+			_, _, rebasing, _ := workspace.PRHead(context.Background(), worktree)
+			resolutions := f.state(t, issue).LastRebase.Resolutions
+			if tc.passed {
+				if err != nil || rebasing || resolving != 1 || len(resolutions) != 1 {
+					t.Fatalf("err=%v rebasing=%v resolve turns=%d resolutions=%+v", err, rebasing, resolving, resolutions)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "lacks Ours:") || !rebasing || resolving != 0 || len(resolutions) != 0 {
+				t.Fatalf("err=%v rebasing=%v resolve turns=%d resolutions=%+v", err, rebasing, resolving, resolutions)
+			}
+			recoveryCommand(t, err, p)
+		})
+	}
+}
+
+func TestCLIPRRebaseResolveMarkersAreNotRetried(t *testing.T) {
+	t.Parallel()
+	f, _, p, worktree := oneStopTwoFiles(t)
+	// A resolve turn that leaves markers stays manual: no automatic retry.
+	runner := &scriptedResolver{MockRunner: &agent.MockRunner{}}
+	markers := &markerResolver{scriptedResolver: runner}
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return markers, nil }
+	_, err := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
+	if err == nil || !strings.Contains(err.Error(), "conflict markers remain") {
+		t.Fatalf("err = %v", err)
+	}
+	if planning, resolving := runner.counts(); planning != 1 || resolving != 1 {
+		t.Fatalf("turns = %d planning, %d resolve; want 1 and 1", planning, resolving)
+	}
+	if _, _, rebasing, _ := workspace.PRHead(context.Background(), worktree); !rebasing {
+		t.Fatal("marker rejection ended the rebase")
+	}
+}
+
+// markerResolver leaves conflict markers in every file its resolve turn edits.
+type markerResolver struct{ *scriptedResolver }
+
+func (m *markerResolver) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	res, err := m.scriptedResolver.Run(ctx, req)
+	if err != nil || req.Role != "developer" || strings.HasPrefix(req.TaskPrompt, "Write only .swarm/active/REBASE_PLAN.md.") {
+		return res, err
+	}
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(req.WorktreePath, name), []byte("<<<<<<< ours\nx\n>>>>>>> theirs\n"), 0o644); err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func TestCLIPRRebaseResolveDeliversInstructions(t *testing.T) {
+	t.Parallel()
+	f, issue, p, _ := oneStopTwoFiles(t)
+	if _, err := f.run("pr", "rebase", p, "--instructions", "x"); err == nil || !strings.Contains(err.Error(), "--instructions requires --resolve") {
+		t.Fatalf("--instructions without --resolve: %v", err)
+	}
+	runner := &scriptedResolver{MockRunner: &agent.MockRunner{}}
+	f.useResolver(runner)
+	const guidance = "keep upstream imports"
+	f.must(t, "pr", "rebase", p, "--resolve", "--instructions", guidance, "--agent", "mock", "--progress=false")
+	requests := append(append([]agent.RunRequest(nil), runner.plan...), runner.turns...)
+	if len(requests) != 2 {
+		t.Fatalf("developer turns = %d, want 2", len(requests))
+	}
+	for _, req := range requests {
+		if req.OperatorInstructions != guidance || !strings.Contains(req.TaskPrompt, "Operator instructions: "+guidance) {
+			t.Fatalf("turn lacks instructions: %+v", req)
+		}
+	}
+	evidence := f.state(t, issue).LastRebase
+	want := []string{guidance}
+	if len(evidence.Plans) != 1 || !reflect.DeepEqual(evidence.Plans[0].Guidance, want) || len(evidence.Resolutions) != 1 || !reflect.DeepEqual(evidence.Resolutions[0].Guidance, want) {
+		t.Fatalf("guidance not recorded: plans=%+v resolutions=%+v", evidence.Plans, evidence.Resolutions)
 	}
 }

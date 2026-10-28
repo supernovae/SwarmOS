@@ -894,9 +894,9 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 				if !rebasing {
 					return nil, fmt.Errorf("no managed PR rebase in progress")
 				}
-			} else if rebasing {
+			} else if rebasing && !opts.Resolve {
 				return nil, &ConflictError{PRNumber: opts.Number, Paused: true, Err: fmt.Errorf("rebase already in progress; run swarm pr rebase %d --continue or --abort", opts.Number)}
-			} else if dirty {
+			} else if dirty && !rebasing {
 				return nil, fmt.Errorf("PR worktree must be clean before starting rebase")
 			}
 			if opts.Resolve {
@@ -944,7 +944,9 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 				}
 				return r, cause
 			}
-			if rv != nil && opts.Continue {
+			// --resolve on a paused rebase resumes it exactly like --continue --resolve.
+			resume := opts.Continue || (rv != nil && rebasing)
+			if rv != nil && resume {
 				// Resolve only what is still unmerged; hand-staged files stay as they are.
 				res, resolveErr := s.resolveStop(ctx, rv, path, r.IssueNumber, owner, st)
 				if resolveErr != nil {
@@ -952,7 +954,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 				}
 				pending = res
 			}
-			newHead, e := workspace.RebasePR(ctx, path, r.PR.BaseSHA, opts.Continue, opts.Abort)
+			newHead, e := workspace.RebasePR(ctx, path, r.PR.BaseSHA, resume, opts.Abort)
 			for e != nil && rv != nil {
 				conflicts, readErr := workspace.RebaseConflicts(ctx, path)
 				if readErr != nil || len(conflicts) == 0 {
@@ -1049,7 +1051,7 @@ func (s *Service) newResolver(ctx context.Context, r *Result, opts Options) (*re
 	if err != nil {
 		return nil, err
 	}
-	return &resolver{runner: runner, agentName: name, mode: mode, local: local, unit: unit, protected: spec.ProtectedPaths, log: s.ResolveLog, deps: deps}, nil
+	return &resolver{runner: runner, agentName: name, mode: mode, local: local, unit: unit, protected: spec.ProtectedPaths, log: s.ResolveLog, deps: deps, instructions: opts.Instructions}, nil
 }
 
 func (s *Service) Validate(ctx context.Context, number int) (result *Result, runErr error) {

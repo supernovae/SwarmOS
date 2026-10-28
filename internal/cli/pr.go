@@ -71,7 +71,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				return fmt.Errorf("--continue and --abort are mutually exclusive")
 			}
 			if operation == "rebase" && !opts.Resolve {
-				for _, name := range []string{"agent", "developer-agent", "headless"} {
+				for _, name := range []string{"agent", "developer-agent", "headless", "instructions"} {
 					if cmd.Flags().Changed(name) {
 						return fmt.Errorf("--%s requires --resolve", name)
 					}
@@ -280,6 +280,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 		cmd.Flags().BoolVar(&opts.Resolve, "resolve", false, "Plan and resolve conflicts, validate, and repair within the trusted limit; stop ready for explicit submit")
 		cmd.Flags().StringVar(&opts.Work.AgentName, "agent", "", "Configured agent for conflict resolution (with --resolve)")
 		cmd.Flags().StringVar(&opts.Work.DeveloperAgent, "developer-agent", "", "Configured developer override for conflict resolution (with --resolve)")
+		cmd.Flags().StringVar(&opts.Instructions, "instructions", "", "Operator guidance for the conflict resolver within the approved WorkUnit scope (with --resolve)")
 		cmd.Flags().BoolVar(&opts.Work.Headless, "headless", true, "Run the resolver non-interactively (false requires a terminal)")
 		cmd.Flags().BoolVar(&progress, "progress", true, "Report conflict resolution progress on stderr")
 	}

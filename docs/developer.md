@@ -624,6 +624,13 @@ make changelog VERSION=1.2.3
 
 The command inserts a version heading below the empty Unreleased heading and preserves released history. With no fragments it changes nothing. All fragments are validated before the changelog is replaced. Replacement and fragment deletion are separate operations: if deletion fails, inspect the changelog and remaining files before retrying to avoid duplicate entries. Review the resulting changes before committing the release.
 
+Refresh the fork protocol compatibility fixture after publishing each release so contributors can test against the coordinator version projects install. The current frozen baseline is [v0.8.0](../internal/fork/testdata/releasedv080/README.md).
+
+1. Select the newly published tag and its immutable commit, and obtain its exact Go module source, zip, and origin metadata.
+2. Extract the request/result parsers, result formatter, envelope and summary helpers, constants, and complete nested wire types into a new versioned package under `internal/fork/testdata/`. Preserve decoding logic and JSON tags; adapt only package names, imports, and references to frozen local types.
+3. Copy the release license and record the commit, module checksum, source SHA-256 hashes, symbol mappings, and mechanical adaptations in the fixture README. Compare the extracted declarations with the release source.
+4. Update the import and explicit request/result expectations in `internal/fork/compat_released_test.go`, remove the superseded fixture, and run the compatibility tests and `make check`. Review the fixture diff alongside the original release source before merging.
+
 Use `swarm issue create --size small --uncertainty known --risk standard` with
 your title, objective, constraints and acceptance criteria to record the work's
 execution dimensions. Size accepts `small` or `multi_area`, uncertainty accepts

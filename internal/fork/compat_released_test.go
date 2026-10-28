@@ -3,85 +3,13 @@ package fork
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
-	"regexp"
+	"github.com/supernovae/swarmos/internal/contract"
+	released "github.com/supernovae/swarmos/internal/fork/testdata/releasedv080"
+	"github.com/supernovae/swarmos/internal/lease"
+	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/lease"
 )
-
-// releasedForkRequest is the request field set released coordinators decode
-// strictly. It is copied from the v0.6.1 module source (v0.7.0 parses the same
-// way); fields added since are omitempty and unset in these tests, so a
-// smaller set only makes the check stricter.
-type releasedForkRequest struct {
-	Version         int                `json:"version"`
-	Operation       string             `json:"operation"`
-	IssueNumber     int                `json:"issue_number"`
-	ForkRepo        string             `json:"fork_repo,omitempty"`
-	ClaimID         string             `json:"claim_id,omitempty"`
-	Agent           string             `json:"agent,omitempty"`
-	Phase           string             `json:"phase,omitempty"`
-	Status          string             `json:"status,omitempty"`
-	Duration        string             `json:"duration,omitempty"`
-	Gate            contract.GateMode  `json:"gate,omitempty"`
-	Artifact        *contract.Artifact `json:"artifact,omitempty"`
-	Branch          string             `json:"branch,omitempty"`
-	HeadSHA         string             `json:"head_sha,omitempty"`
-	ExpectedHeadSHA string             `json:"expected_head_sha,omitempty"`
-	PRNumber        int                `json:"pr_number,omitempty"`
-	Reason          string             `json:"reason,omitempty"`
-	NextPhase       string             `json:"next_phase,omitempty"`
-}
-
-var releasedCollapsedPayload = regexp.MustCompile("(?s)^\n[^\n]*\n\n<details><summary>[^<\n]*</summary>\n\n```json\n(.*)\n```\n\n</details>\\s*$")
-
-// releasedCommentPayload is a copy of the released commentPayload.
-func releasedCommentPayload(body, marker string) (string, error) {
-	normalized := strings.ReplaceAll(strings.TrimLeft(body, " \t\r\n"), "\r\n", "\n")
-	if !strings.HasPrefix(normalized, marker) {
-		return "", fmt.Errorf("comment does not start with %s", marker)
-	}
-	rest := strings.TrimPrefix(normalized, marker)
-	if m := releasedCollapsedPayload.FindStringSubmatch(rest); m != nil {
-		return strings.TrimSpace(m[1]), nil
-	}
-	return strings.TrimSpace(rest), nil
-}
-
-// releasedParseRequestComment is a copy of the released ParseRequestComment.
-func releasedParseRequestComment(body string) (*releasedForkRequest, error) {
-	if len(body) > MaxForkCommentBytes {
-		return nil, fmt.Errorf("fork request exceeds maximum size")
-	}
-	payload, err := releasedCommentPayload(body, RequestMarker)
-	if err != nil {
-		return nil, err
-	}
-	if payload == "" {
-		return nil, fmt.Errorf("empty fork request payload")
-	}
-	dec := json.NewDecoder(bytes.NewReader([]byte(payload)))
-	dec.DisallowUnknownFields()
-	var req releasedForkRequest
-	if err := dec.Decode(&req); err != nil {
-		return nil, fmt.Errorf("invalid fork request JSON: %w", err)
-	}
-	var extra any
-	if dec.Decode(&extra) != io.EOF {
-		return nil, fmt.Errorf("unexpected trailing data in fork request JSON")
-	}
-	if req.Version != 1 {
-		return nil, fmt.Errorf("unsupported fork request version %d", req.Version)
-	}
-	if strings.TrimSpace(req.Operation) == "" || req.IssueNumber <= 0 {
-		return nil, fmt.Errorf("fork request requires operation and positive issue_number")
-	}
-	return &req, nil
-}
 
 func TestReleasedCoordinatorAcceptsRequestComment(t *testing.T) {
 	// The comment Apply actually posts, nonce included.
@@ -92,7 +20,7 @@ func TestReleasedCoordinatorAcceptsRequestComment(t *testing.T) {
 	}
 	posted := tr.bodies[0]
 	requestNonce(t, posted)
-	got, err := releasedParseRequestComment(posted)
+	got, err := released.ParseRequestComment(posted)
 	if err != nil {
 		t.Fatalf("released coordinator rejects posted request: %v\n%s", err, posted)
 	}
@@ -111,7 +39,7 @@ func TestReleasedCoordinatorAcceptsRequestComment(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, b := range map[string]string{"lf": body, "crlf": strings.ReplaceAll(body, "\n", "\r\n")} {
-		old, err := releasedParseRequestComment(b)
+		old, err := released.ParseRequestComment(b)
 		if err != nil {
 			t.Fatalf("%s: released coordinator rejects request: %v", name, err)
 		}
@@ -131,8 +59,193 @@ func TestReleasedCoordinatorAcceptsRequestComment(t *testing.T) {
 	inPayload := RequestMarker + "\n" + `{"version":1,"operation":"release","issue_number":1,"request_nonce":"x"}`
 	ownLine := strings.Replace(body, "\n", "\n<!-- swarm:request-nonce:N0NCEN0NCEN0NCEN0NCE -->\n", 1)
 	for name, b := range map[string]string{"payload field": inPayload, "own line": ownLine} {
-		if _, err := releasedParseRequestComment(b); err == nil {
+		if _, err := released.ParseRequestComment(b); err == nil {
 			t.Fatalf("%s: released copy unexpectedly accepted it", name)
 		}
+	}
+}
+
+// Explicit cases are independent of Operations: extending the protocol requires
+// choosing representative parameters here as well as updating the frozen oracle.
+func releasedRequestCases() map[string]lease.ForkRequest {
+	return map[string]lease.ForkRequest{
+		"acquire":                {ForkRepo: "contributor/repo", Agent: "codex", Duration: "1h"},
+		"renew":                  {ClaimID: "claim", Duration: "1h"},
+		"release":                {ClaimID: "claim", Reason: "done"},
+		"handoff":                {ClaimID: "claim", Phase: "implement", NextPhase: "validate"},
+		"require-gate":           {ClaimID: "claim", Gate: "human", Reason: "review"},
+		"update-phase":           {ClaimID: "claim", Phase: "implement", Status: "active"},
+		"update-artifact":        {ClaimID: "claim", Artifact: &contract.Artifact{Type: "implementation", Body: "evidence"}},
+		"record-checkpoint":      {ClaimID: "claim", Branch: "swarm/7", HeadSHA: "abcdef0123456789"},
+		"record-submission":      {ClaimID: "claim", PRNumber: 9, Branch: "swarm/7", HeadSHA: "abcdef0123456789"},
+		"acquire-pr":             {PRNumber: 9, Agent: "codex", Duration: "1h"},
+		"begin-pr-revision":      {ClaimID: "claim", PRNumber: 9, ExpectedHeadSHA: "abcdef0123456789", HeadSHA: "123456789abcdef", RevisionIntent: "rebase", RebaseContext: &lease.RebaseContext{Status: "clean"}},
+		"record-pr-head":         {ClaimID: "claim", PRNumber: 9, HeadSHA: "123456789abcdef"},
+		"invalidate-pr-evidence": {ClaimID: "claim", PRNumber: 9, Reason: "changed"},
+		"complete-pr-revision":   {ClaimID: "claim", PRNumber: 9, ExpectedHeadSHA: "abcdef0123456789", HeadSHA: "123456789abcdef"},
+	}
+}
+
+func TestReleasedCompatibilityOperationCoverage(t *testing.T) {
+	cases := releasedRequestCases()
+	seen := map[string]bool{}
+	for _, op := range Operations {
+		if seen[op] {
+			t.Errorf("duplicate operation %s", op)
+		}
+		seen[op] = true
+		if _, ok := cases[op]; !ok {
+			t.Errorf("missing compatibility case for %s", op)
+		}
+	}
+	for op := range cases {
+		if !seen[op] {
+			t.Errorf("extra compatibility case %s", op)
+		}
+	}
+	t.Logf("v0.8.0 (58f33b8101acecb2c479e548addae8760a7e8733): %d operations", len(cases))
+}
+
+// This literal deliberately lists every wire field, including nested payloads.
+// Reflection below checks it but never fills it, so new omitempty fields fail.
+const denseReleasedRequest = `{
+ "version":1,"operation":"begin-pr-revision","issue_number":7,
+ "fork_repo":"contributor/repo","claim_id":"claim","agent":"codex",
+ "phase":"implement","status":"active","duration":"1h","gate":"human",
+ "branch":"swarm/7","head_sha":"abcdef0123456789","expected_head_sha":"123456789abcdef",
+ "pr_number":9,"reason":"revision","next_phase":"validate","revision_intent":"rebase",
+ "artifact":{"version":1,"id":"artifact","issue_number":7,"type":"implementation","producer":"codex:developer","verdict":"PASS","summary":"summary","body":"body","created_at":"2026-10-28T00:00:00Z","metadata":{"key":"value"}},
+ "rebase_context":{"repair_paths":["a.go"],"repair_attempt":1,"conflicted_paths":["a.go"],"status":"resolved",
+ "plan":{"harness":"codex","harness_version":"1","model":"model","sandbox":"native","commit":"abc","paths":["a.go"],"body":"plan","digest":"digest","plan_digest":"plan","base_sha":"base","agent":"codex","guidance":["repair"]},
+ "resolution":{"commit":"abc","paths":["a.go"],"agent":"codex","harness":"codex","harness_version":"1","model":"model","sandbox":"native","guidance":["repair"]}}
+}`
+
+func TestReleasedCompatibilityFieldCoverage(t *testing.T) {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(denseReleasedRequest), &payload); err != nil {
+		t.Fatal(err)
+	}
+	var check func(reflect.Type, map[string]any, string)
+	check = func(typ reflect.Type, fields map[string]any, path string) {
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			name := strings.Split(f.Tag.Get("json"), ",")[0]
+			value, ok := fields[name]
+			if !ok || value == nil {
+				t.Errorf("missing populated field %s%s", path, name)
+				continue
+			}
+			nested := f.Type
+			for nested.Kind() == reflect.Pointer {
+				nested = nested.Elem()
+			}
+			if nested.Kind() == reflect.Struct {
+				if obj, ok := value.(map[string]any); ok {
+					check(nested, obj, path+name+".")
+				}
+			}
+		}
+	}
+	check(reflect.TypeFor[lease.ForkRequest](), payload, "")
+}
+
+func assertReleasedWireEqual(t *testing.T, want, got any) {
+	t.Helper()
+	normalize := func(v any) any {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj any
+		if err = json.Unmarshal(raw, &obj); err != nil {
+			t.Fatal(err)
+		}
+		return obj
+	}
+	if !reflect.DeepEqual(normalize(want), normalize(got)) {
+		t.Fatalf("wire values differ:\nwant %+v\ngot %+v", want, got)
+	}
+}
+
+func TestReleasedCoordinatorAcceptsAllOperations(t *testing.T) {
+	cases := releasedRequestCases()
+	var dense lease.ForkRequest
+	if err := json.Unmarshal([]byte(denseReleasedRequest), &dense); err != nil {
+		t.Fatal(err)
+	}
+	cases["dense"] = dense
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			req.Version = 1
+			req.IssueNumber = 7
+			if name != "dense" {
+				req.Operation = name
+			}
+			for _, nonce := range []string{"", "N0NCEN0NCEN0NCEN0NCE"} {
+				var body string
+				var err error
+				if nonce == "" {
+					body, err = FormatRequestComment(req)
+				} else {
+					body, err = formatRequestComment(req, nonce)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, wire := range []string{body, strings.ReplaceAll(body, "\n", "\r\n")} {
+					got, err := released.ParseRequestComment(wire)
+					if err != nil {
+						t.Fatalf("released parser: %v", err)
+					}
+					assertReleasedWireEqual(t, req, got)
+				}
+			}
+		})
+	}
+}
+
+func TestReleasedCoordinatorRejectsUnknownRequestField(t *testing.T) {
+	body, err := FormatRequestComment(lease.ForkRequest{Operation: "release", IssueNumber: 7, ClaimID: "claim"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = released.ParseRequestComment(body); err != nil {
+		t.Fatal(err)
+	}
+	body = strings.Replace(body, "{", "{\n  \"request_nonce\": \"unknown\",", 1)
+	if _, err = released.ParseRequestComment(body); err == nil || !strings.Contains(err.Error(), `unknown field "request_nonce"`) {
+		t.Fatalf("expected unknown field rejection, got %v", err)
+	}
+	t.Log(err)
+}
+
+func TestCurrentWorkerParsesReleasedResults(t *testing.T) {
+	for op := range releasedRequestCases() {
+		t.Run(op, func(t *testing.T) {
+			for _, res := range []released.ForkResult{
+				{RequestID: 123, IssueNumber: 7, Operation: op, Success: true, Revision: "revision", ClaimID: "claim"},
+				{RequestID: 123, IssueNumber: 7, Operation: op, Error: "claim fence"},
+				{RequestID: 123, IssueNumber: 7, Operation: op, Success: true},
+				{RequestID: 123, Error: "invalid request"},
+			} {
+				body, err := released.FormatResultComment(res)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res.Version = 1
+				for _, wire := range []string{body, strings.ReplaceAll(body, "\n", "\r\n")} {
+					old, err := released.ParseResultComment(wire)
+					if err != nil {
+						t.Fatal(err)
+					}
+					assertReleasedWireEqual(t, res, old)
+					got, err := ParseResultComment(wire)
+					if err != nil {
+						t.Fatalf("current parser rejects v0.8.0 result: %v", err)
+					}
+					assertReleasedWireEqual(t, res, got)
+				}
+			}
+		})
 	}
 }

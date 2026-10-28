@@ -13,3 +13,11 @@ directory (`claude/` mirrors `~/.claude/projects`, `codex/` mirrors
 `~/.codex/sessions`). The leading dot-directory is omitted so the samples
 survive exports that drop dot-directories; tests copy them into place under a
 `t.TempDir()` scratch HOME.
+
+`sessions/<harness>-<version>/` holds the host-HOME session records read for
+isolated delegated and native runs (#238), one directory per harness version.
+Each has a `SOURCE.md` saying whether its files were captured from that
+version (`omp-18.12.6`) or are hand-written to its expected shape
+(`unverified-shape`: `claude-2.1.311`, `codex-0.164.0`, `opencode-2.1.2`) and
+must be replaced by a redacted real capture before merge. `/CONTROL` stands for
+the run's control directory and is substituted by the tests.

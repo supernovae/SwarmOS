@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -185,9 +186,15 @@ type inspectionKey struct {
 }
 
 type inspectionEntry struct {
-	done    chan struct{}
-	version string
-	err     error
+	done   chan struct{}
+	result inspection
+	err    error
+}
+
+// inspection is one qualified executable. Delegated harnesses also keep the
+// inspected help, so a reused result still names the optional flags it lists.
+type inspection struct {
+	version, help string
 }
 
 // NewInspectionSession starts an empty command-scoped inspection session.
@@ -270,12 +277,21 @@ func executableIdentity(binary string) (inspectionKey, error) {
 // policy, or runs inspect. Identity is recomputed on every lookup and checked
 // again after inspection; failures are never retained.
 func (s *InspectionSession) reuse(ctx context.Context, driver, binary, policy string, inspect func(context.Context) (string, error)) (string, error) {
+	result, err := s.reuseInspection(ctx, driver, binary, policy, func(ctx context.Context) (inspection, error) {
+		version, err := inspect(ctx)
+		return inspection{version: version}, err
+	})
+	return result.version, err
+}
+
+// reuseInspection is reuse for the complete inspection result.
+func (s *InspectionSession) reuseInspection(ctx context.Context, driver, binary, policy string, inspect func(context.Context) (inspection, error)) (inspection, error) {
 	if s == nil {
 		return inspect(ctx)
 	}
 	key, err := executableIdentity(binary)
 	if err != nil {
-		return "", err
+		return inspection{}, err
 	}
 	key.driver, key.policy = driver, policy
 	for {
@@ -290,15 +306,15 @@ func (s *InspectionSession) reuse(ctx context.Context, driver, binary, policy st
 			select {
 			case <-entry.done:
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return inspection{}, ctx.Err()
 			}
 			if entry.err == nil {
-				return entry.version, nil
+				return entry.result, nil
 			}
 			// The owner's failure may be its own cancellation; inspect again.
 			continue
 		}
-		entry.version, entry.err = inspect(ctx)
+		entry.result, entry.err = inspect(ctx)
 		if entry.err == nil {
 			if after, err := executableIdentity(binary); err != nil {
 				entry.err = err
@@ -312,7 +328,7 @@ func (s *InspectionSession) reuse(ctx context.Context, driver, binary, policy st
 			s.mu.Unlock()
 		}
 		close(entry.done)
-		return entry.version, entry.err
+		return entry.result, entry.err
 	}
 }
 
@@ -333,8 +349,16 @@ func (s *InspectionSession) InspectNativeCodex(ctx context.Context, binary, poli
 
 // InspectDelegatedHarness is the package InspectDelegatedHarness reused from s.
 func (s *InspectionSession) InspectDelegatedHarness(ctx context.Context, driver, binary, policy string) (string, error) {
-	return s.reuse(ctx, driver, binary, policy, func(ctx context.Context) (string, error) {
-		return InspectDelegatedHarness(ctx, driver, binary)
+	result, err := s.inspectDelegated(ctx, driver, binary, policy)
+	return result.version, err
+}
+
+// inspectDelegated also returns the inspected help, so a run reusing a doctor
+// or preflight inspection still passes the optional session flags.
+func (s *InspectionSession) inspectDelegated(ctx context.Context, driver, binary, policy string) (inspection, error) {
+	return s.reuseInspection(ctx, driver, binary, policy, func(ctx context.Context) (inspection, error) {
+		version, help, err := inspectDelegatedHarness(ctx, driver, binary, nil)
+		return inspection{version: version, help: help}, err
 	})
 }
 
@@ -385,7 +409,7 @@ func inspectNativeCodexInterface(ctx context.Context, binary string) (string, er
 	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false, Dependencies{}), []string{"exec", "--help"}, nil, &help, &versionDiagnostics); err != nil {
 		return "", fmt.Errorf("inspect Codex execution interface: %w", err)
 	}
-	for _, flag := range []string{"--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check"} {
+	for _, flag := range []string{"--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"} {
 		if !strings.Contains(help.String(), flag) {
 			return "", fmt.Errorf("codex %s lacks required execution interface %s", qualified, flag)
 		}
@@ -505,6 +529,13 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		}
 		args := codexPolicy(binary, work, scratch, opts.ReadOnly, caches, opts.Dependencies)
 		args = append(args, codexExecArgs(work, model, opts.Effort)...)
+		// Each exec turn is its own Codex session, named on stderr. Only those
+		// ids are looked up afterwards; observation never changes the result.
+		ids := &sessionIDWriter{w: stderr}
+		stderr := io.Writer(ids)
+		defer func() {
+			opts.Lifecycle.observeSession(HarnessSession{Driver: "codex", Home: home, CodexHome: os.Getenv("CODEX_HOME"), SessionIDs: ids.ids})
+		}()
 		return runFollowupTurns(ctx, prompt, "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, true, stdin, stdout, func(turn string) error {
 			command = append(append([]string{binary}, args...), turn)
 			if err := runNativeCommand(ctx, binary, work, nativeEnv(home, true, opts.Dependencies), command[1:], nil, stdout, stderr); err != nil {
@@ -516,10 +547,45 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 	return command, version, err
 }
 
+var codexSessionLine = regexp.MustCompile(`^session id: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\r?$`)
+
+const (
+	sessionLineMax = 4 << 10
+	sessionIDsMax  = 64
+)
+
+// sessionIDWriter passes every byte through unchanged before scanning it for
+// Codex "session id: <uuid>" lines. Over-long lines are skipped, not buffered.
+type sessionIDWriter struct {
+	w        io.Writer
+	line     []byte
+	skipping bool
+	ids      []string
+}
+
+func (s *sessionIDWriter) Write(p []byte) (int, error) {
+	n, err := s.w.Write(p)
+	for _, c := range p[:n] {
+		if c != '\n' {
+			if !s.skipping {
+				if s.line = append(s.line, c); len(s.line) > sessionLineMax {
+					s.line, s.skipping = s.line[:0], true
+				}
+			}
+			continue
+		}
+		if m := codexSessionLine.FindSubmatch(s.line); !s.skipping && m != nil && len(s.ids) < sessionIDsMax {
+			s.ids = append(s.ids, string(m[1]))
+		}
+		s.line, s.skipping = s.line[:0], false
+	}
+	return n, err
+}
+
 // codexExecArgs is the native `codex exec` argv after the sandbox policy and
 // before the prompt. Only the approved model and effort selectors vary.
 func codexExecArgs(work, model, effort string) []string {
-	args := []string{"exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-C", work}
+	args := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "-C", work}
 	if model != "" {
 		args = append(args, "--model", model)
 	}

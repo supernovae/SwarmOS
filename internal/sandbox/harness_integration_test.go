@@ -105,6 +105,7 @@ func openCodeToolFixture(t *testing.T, behavior string) {
 	if binary == "" {
 		t.Skip("set SWARM_TEST_OPENCODE_BINARY for OpenCode 2 tool integration")
 	}
+	requireLoopbackCanary(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	version, err := InspectDelegatedHarness(ctx, "opencode", binary)

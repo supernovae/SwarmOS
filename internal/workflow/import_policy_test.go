@@ -441,3 +441,24 @@ func TestDeletionCheckUsesTrustedState(t *testing.T) {
 		}
 	}
 }
+
+func TestActiveDirectoryImportDiagnostic(t *testing.T) {
+	for _, tc := range []struct {
+		paths  []string
+		active bool
+	}{
+		{[]string{".swarm/active/VALIDATION_CHECK.log"}, true},
+		{[]string{".swarm/active/nested/log", ".swarm/active/WORKUNIT.md"}, true},
+		{[]string{".swarm/active/PLAN.md"}, true},
+		{[]string{".swarm/active/VALIDATION_CHECK.log", "policy/checks"}, false},
+	} {
+		err := writableImportPolicy("tester", tc.paths, []string{"policy/**", ".swarm/active/PLAN.md"}, false, false)
+		var rejection *importRejection
+		if !errors.As(err, &rejection) || rejection.ActiveDirectoryImport() != tc.active || rejection.OutputOnly || rejection.Recoverable || RecoverableRejection("tester", tc.paths, nil, false) {
+			t.Fatalf("classification: %+v", err)
+		}
+	}
+	if (&importRejection{ActiveOnly: true, Deleted: true}).ActiveDirectoryImport() {
+		t.Fatal("deletion classified as active-only")
+	}
+}

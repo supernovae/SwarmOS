@@ -13,6 +13,7 @@ import (
 
 // importRejection distinguishes a rejected snapshot from a budget interruption.
 type importRejection struct {
+	ActiveOnly bool // diagnostic only: every rejected path is under the active directory
 	OutputOnly bool // rejected solely for writing another role output, independent of recovery support
 	Completed  bool
 	Paths      []string
@@ -30,6 +31,8 @@ type importRejection struct {
 
 // RecoverableImport lets the sandbox preserve a patch without knowing policy.
 func (e *importRejection) RecoverableImport() bool { return e.Recoverable }
+
+func (e *importRejection) ActiveDirectoryImport() bool { return e.ActiveOnly && !e.Deleted }
 
 func (e *importRejection) RoleOutputImport() bool { return e.OutputOnly }
 
@@ -118,12 +121,16 @@ func writableImportPolicy(role string, paths, patterns []string, allowHarness, f
 	if len(rejected) == 0 {
 		return nil
 	}
+	activeOnly := true
 	names := make([]string, 0, len(rejected))
 	for name := range rejected {
+		if name != ".swarm/active" && !strings.HasPrefix(name, ".swarm/active/") {
+			activeOnly = false
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return &importRejection{Paths: names, Role: role, Recoverable: outputOnly && !fork, OutputOnly: outputOnly}
+	return &importRejection{Paths: names, Role: role, Recoverable: outputOnly && !fork, OutputOnly: outputOnly, ActiveOnly: activeOnly}
 }
 
 // RecoverableRejection reports whether the import policy refuses exactly
@@ -176,12 +183,14 @@ func importRejectionReason(rejection *importRejection, issue, pr int) string {
 	if rejection.developerOutputOnly() {
 		reason = fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; developers record results in .swarm/active/IMPLEMENTATION.md, not %s; rerun with %s --developer-instructions '%s'", rejection, strings.Join(rejection.Paths, ", "), rerun, developerOutputInstructions)
 	}
-	if rejection.Completed && rejection.OutputOnly {
+	if rejection.Completed && (rejection.OutputOnly || rejection.ActiveDirectoryImport()) {
 		reason = fmt.Sprintf("%s run completed; returned changes were not imported because the role cannot write %s; worktree was left unchanged; rerun with %s", rejection.Role, strings.Join(rejection.Paths, ", "), rerun)
 		if rejection.developerOutputOnly() {
 			reason += " --developer-instructions '" + developerOutputInstructions + "'"
 		}
-		if rejection.Role == "tester" {
+		if !rejection.OutputOnly {
+			reason += " --" + rejection.Role + "-instructions 'Write logs and scratch output to the sandbox temporary directory (TMPDIR), never under the workspace or .swarm/active/. Redirect output to \"$TMPDIR/check.log\".'"
+		} else if rejection.Role == "tester" {
 			reason += " --tester-instructions 'Record validation results in .swarm/active/VALIDATION.md; leave other roles output files unchanged.'"
 		}
 	}

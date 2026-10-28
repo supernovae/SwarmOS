@@ -111,3 +111,58 @@ func TestCompletedTesterImportRejected(t *testing.T) {
 		})
 	}
 }
+
+type scratchRejection struct{}
+
+func (*scratchRejection) Error() string               { return "forbidden active file" }
+func (*scratchRejection) ActiveDirectoryImport() bool { return true }
+func TestCompletedTesterScratchImportRejected(t *testing.T) {
+	for _, exit := range []error{nil, errors.New("nonzero exit"), context.Canceled, context.DeadlineExceeded} {
+		t.Run(fmt.Sprint(exit), func(t *testing.T) {
+			dir := t.TempDir()
+			writeWorkerFixture(t, dir, "source", "before")
+			policy := &scratchRejection{}
+			err := withNativeWorkspace(t.Context(), dir, WorkerOptions{Role: "tester", PreserveRejected: func(context.Context, error, []byte) { t.Fatal("scratch rejection preserved") }, CheckImport: func(_ context.Context, paths, _ []string) error {
+				if !slices.Contains(paths, ".swarm/active/VALIDATION_CHECK.log") {
+					t.Fatalf("paths: %v", paths)
+				}
+				return policy
+			}}, func(_ context.Context, work, _ string) error {
+				writeWorkerFixture(t, work, ".swarm/active/VALIDATION_CHECK.log", "wrong output")
+				writeWorkerFixture(t, work, "source", "after")
+				return exit
+			})
+			var completed *CompletedImportError
+			if errors.As(err, &completed) != (exit == nil) {
+				t.Fatalf("classification: %v", err)
+			}
+			if exit == nil && !errors.Is(err, policy) {
+				t.Fatalf("lost cause: %v", err)
+			}
+			if exit != nil && !errors.Is(err, exit) {
+				t.Fatalf("lost exit: %v", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, ".swarm/active/VALIDATION_CHECK.log")); !os.IsNotExist(statErr) {
+				t.Fatalf("log imported: %v", statErr)
+			}
+			body, _ := os.ReadFile(filepath.Join(dir, "source"))
+			if string(body) != "before" {
+				t.Fatal("imported rejected change")
+			}
+		})
+	}
+}
+
+func TestCompletedImportDiagnosticOnly(t *testing.T) {
+	for _, err := range []error{&scratchRejection{}, fmt.Errorf("wrapped: %w", &scratchRejection{}), errors.New("outside policy"), &testRejection{}} {
+		for _, success := range []bool{false, true} {
+			got := completedImport(err, success)
+			var active *scratchRejection
+			var completed *CompletedImportError
+			want := success && errors.As(err, &active)
+			if errors.As(got, &completed) != want || !errors.Is(got, err) {
+				t.Fatalf("classification: %v", got)
+			}
+		}
+	}
+}

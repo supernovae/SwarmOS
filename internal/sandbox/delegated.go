@@ -130,15 +130,15 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 	}
 	// A cached entry only proves the base interface, so a run that needs extra
 	// flags inspects in full rather than reuse an under-qualified result. The
-	// cache carries no help text, so a cached run leaves help empty and skips
-	// the optional session flags.
-	var version, help string
+	// cached help still names the optional session flags.
+	var inspected inspection
 	var err error
 	if len(extra) > 0 {
-		version, help, err = inspectDelegatedHarness(ctx, driver, binary, extra)
+		inspected.version, inspected.help, err = inspectDelegatedHarness(ctx, driver, binary, extra)
 	} else {
-		version, err = opts.Inspections.InspectDelegatedHarness(ctx, driver, binary, opts.InspectionPolicy)
+		inspected, err = opts.Inspections.inspectDelegated(ctx, driver, binary, opts.InspectionPolicy)
 	}
+	version, help := inspected.version, inspected.help
 	if err != nil {
 		return nil, "", err
 	}

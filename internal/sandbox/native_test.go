@@ -759,6 +759,104 @@ esac
 	}
 }
 
+// A run reusing a doctor or preflight inspection must still see the optional
+// session flags the harness lists, and only those listed exactly.
+func TestInspectionDelegatedHarnessKeepsOptionalFlags(t *testing.T) {
+	claudeBase := "--restricted --strict-mcp-config --tools --settings --permission-mode"
+	openCodeBase := "--standalone --server --continue --model --agent --format --title"
+	for _, tc := range []struct {
+		name, driver, version, help, flag string
+		listed                            bool
+	}{
+		{"claude listed", "claude", "2.1.311 (Claude Code)", claudeBase + " --session-id <uuid>", "--session-id", true},
+		{"claude absent", "claude", "2.1.311 (Claude Code)", claudeBase, "--session-id", false},
+		{"claude prefix only", "claude", "2.1.311 (Claude Code)", claudeBase + " --session-id-file", "--session-id", false},
+		{"opencode listed", "opencode", "opencode v2.1.2", openCodeBase + " --session=<id>", "--session", true},
+		{"opencode absent", "opencode", "opencode v2.1.2", openCodeBase, "--session", false},
+		{"opencode prefix only", "opencode", "opencode v2.1.2", openCodeBase + " --sessions", "--session", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			binary := filepath.Join(dir, tc.driver)
+			script := `#!/bin/sh
+case "$1" in
+--version) printf x >> '` + dir + `/version'; echo "` + tc.version + `" ;;
+*) echo "` + tc.help + `" ;;
+esac
+`
+			if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			session := NewInspectionSession()
+			// Doctor and preflight warm the cache through the version-only method.
+			if _, err := session.InspectDelegatedHarness(ctx, tc.driver, binary, "p"); err != nil {
+				t.Fatal(err)
+			}
+			for range 2 {
+				result, err := session.inspectDelegated(ctx, tc.driver, binary, "p")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := helpLists(result.help, tc.flag); got != tc.listed {
+					t.Fatalf("cached %s listed = %v, want %v", tc.flag, got, tc.listed)
+				}
+			}
+			if got := invocations(t, dir, "version"); got != 1 {
+				t.Fatalf("version inspected %d times, want 1", got)
+			}
+			var none *InspectionSession
+			result, err := none.inspectDelegated(ctx, tc.driver, binary, "p")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := helpLists(result.help, tc.flag); got != tc.listed {
+				t.Fatalf("uncached %s listed = %v, want %v", tc.flag, got, tc.listed)
+			}
+		})
+	}
+}
+
+// Optional flags never relax the base interface: a harness missing a required
+// flag fails and is not retained, and extra run flags are still required.
+func TestInspectionDelegatedHarnessRequiresBaseInterface(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "claude")
+	help := filepath.Join(dir, "help")
+	if err := os.WriteFile(help, []byte("--restricted --strict-mcp-config --tools --settings --session-id\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+case "$1" in
+--version) printf x >> '` + dir + `/version'; echo "2.1.311 (Claude Code)" ;;
+*) cat '` + help + `' ;;
+esac
+`
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	session := NewInspectionSession()
+	if _, err := session.inspectDelegated(ctx, "claude", binary, "p"); err == nil || !strings.Contains(err.Error(), "--permission-mode") {
+		t.Fatalf("missing required interface accepted: %v", err)
+	}
+	if _, err := session.inspectDelegated(ctx, "claude", binary, "p"); err == nil {
+		t.Fatal("failed inspection was retained")
+	}
+	if got := invocations(t, dir, "version"); got != 2 {
+		t.Fatalf("version inspected %d times, want 2", got)
+	}
+	if err := os.WriteFile(help, []byte("--restricted --strict-mcp-config --tools --settings --permission-mode --session-id\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := inspectDelegatedHarness(ctx, "claude", binary, []string{"--effort"}); err == nil || !strings.Contains(err.Error(), "--effort") {
+		t.Fatalf("missing extra interface accepted: %v", err)
+	}
+	if result, err := session.inspectDelegated(ctx, "claude", binary, "p"); err != nil || !helpLists(result.help, "--session-id") {
+		t.Fatalf("qualified inspection = %+v, %v", result, err)
+	}
+}
+
 func TestInspectionValidationPathsStayUncached(t *testing.T) {
 	requireLinuxInspection(t)
 	dir := t.TempDir()

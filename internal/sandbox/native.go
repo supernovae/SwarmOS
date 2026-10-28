@@ -186,9 +186,15 @@ type inspectionKey struct {
 }
 
 type inspectionEntry struct {
-	done    chan struct{}
-	version string
-	err     error
+	done   chan struct{}
+	result inspection
+	err    error
+}
+
+// inspection is one qualified executable. Delegated harnesses also keep the
+// inspected help, so a reused result still names the optional flags it lists.
+type inspection struct {
+	version, help string
 }
 
 // NewInspectionSession starts an empty command-scoped inspection session.
@@ -271,12 +277,21 @@ func executableIdentity(binary string) (inspectionKey, error) {
 // policy, or runs inspect. Identity is recomputed on every lookup and checked
 // again after inspection; failures are never retained.
 func (s *InspectionSession) reuse(ctx context.Context, driver, binary, policy string, inspect func(context.Context) (string, error)) (string, error) {
+	result, err := s.reuseInspection(ctx, driver, binary, policy, func(ctx context.Context) (inspection, error) {
+		version, err := inspect(ctx)
+		return inspection{version: version}, err
+	})
+	return result.version, err
+}
+
+// reuseInspection is reuse for the complete inspection result.
+func (s *InspectionSession) reuseInspection(ctx context.Context, driver, binary, policy string, inspect func(context.Context) (inspection, error)) (inspection, error) {
 	if s == nil {
 		return inspect(ctx)
 	}
 	key, err := executableIdentity(binary)
 	if err != nil {
-		return "", err
+		return inspection{}, err
 	}
 	key.driver, key.policy = driver, policy
 	for {
@@ -291,15 +306,15 @@ func (s *InspectionSession) reuse(ctx context.Context, driver, binary, policy st
 			select {
 			case <-entry.done:
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return inspection{}, ctx.Err()
 			}
 			if entry.err == nil {
-				return entry.version, nil
+				return entry.result, nil
 			}
 			// The owner's failure may be its own cancellation; inspect again.
 			continue
 		}
-		entry.version, entry.err = inspect(ctx)
+		entry.result, entry.err = inspect(ctx)
 		if entry.err == nil {
 			if after, err := executableIdentity(binary); err != nil {
 				entry.err = err
@@ -313,7 +328,7 @@ func (s *InspectionSession) reuse(ctx context.Context, driver, binary, policy st
 			s.mu.Unlock()
 		}
 		close(entry.done)
-		return entry.version, entry.err
+		return entry.result, entry.err
 	}
 }
 
@@ -334,8 +349,16 @@ func (s *InspectionSession) InspectNativeCodex(ctx context.Context, binary, poli
 
 // InspectDelegatedHarness is the package InspectDelegatedHarness reused from s.
 func (s *InspectionSession) InspectDelegatedHarness(ctx context.Context, driver, binary, policy string) (string, error) {
-	return s.reuse(ctx, driver, binary, policy, func(ctx context.Context) (string, error) {
-		return InspectDelegatedHarness(ctx, driver, binary)
+	result, err := s.inspectDelegated(ctx, driver, binary, policy)
+	return result.version, err
+}
+
+// inspectDelegated also returns the inspected help, so a run reusing a doctor
+// or preflight inspection still passes the optional session flags.
+func (s *InspectionSession) inspectDelegated(ctx context.Context, driver, binary, policy string) (inspection, error) {
+	return s.reuseInspection(ctx, driver, binary, policy, func(ctx context.Context) (inspection, error) {
+		version, help, err := inspectDelegatedHarness(ctx, driver, binary, nil)
+		return inspection{version: version, help: help}, err
 	})
 }
 

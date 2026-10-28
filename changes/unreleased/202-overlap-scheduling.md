@@ -1,1 +1,0 @@
-- `swarm issue work --next`, `swarm issue claim --next`, and `swarm node run` now prefer ready WorkUnits whose likely file and package touchpoints do not overlap active claims, print why a task was chosen, and report the advisory overlap score in `--json`; equal scores keep the existing ready order, and overlap never refuses a claim.

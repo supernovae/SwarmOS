@@ -1,1 +1,0 @@
-- Write a trusted `.swarm/active/REPAIR.md` when required checks fail, classify each failing Go test as a regression, pre-existing at the approved base, or flaky by rerunning only that test, stop for a maintainer when every failure is pre-existing, and show the classification in `swarm issue status` and `swarm pr status` (text and `--json`).

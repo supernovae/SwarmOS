@@ -1,1 +1,0 @@
-- Use advisory size, uncertainty, and risk dimensions consistently in issue advice, backlog reports, and planning guidance, with execution variants selected only by approved profiles.

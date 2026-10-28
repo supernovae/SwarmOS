@@ -1,1 +1,0 @@
-- Show failed required-check diagnostics (output tail, failing Go tests and their FAIL blocks) at the end of `swarm issue work` and `swarm pr work`, in text and `--json`, as validate and submit already do.

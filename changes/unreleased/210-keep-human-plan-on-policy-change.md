@@ -1,1 +1,0 @@
-- Re-approving a human-gated issue on a base whose `.swarm/` policy changed now keeps its approved plan and test plan instead of deleting them. `swarm issue status` reports the changed policy paths, and a maintainer approves the kept plan again with `swarm issue review-plan <issue> --approve`.

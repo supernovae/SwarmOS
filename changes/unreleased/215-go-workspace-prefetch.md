@@ -1,1 +1,0 @@
-- The Go dependency prefetch now covers every module in the approved base, including nested `go.mod` files and `go.work` workspaces, so those repositories build offline in sandboxes. Files under `vendor/` and `testdata/` are ignored, and a base with more than 128 modules stops with an error.

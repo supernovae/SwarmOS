@@ -1,1 +1,0 @@
-- Tell developer agents to record notes, test results, and blocked checks in `.swarm/active/IMPLEMENTATION.md`, and when a developer run is rejected only for writing `VALIDATION.md`, suggest a rerun command with matching `--instructions`.

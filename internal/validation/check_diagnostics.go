@@ -40,6 +40,7 @@ type checkCapture struct {
 	skips          []SkippedTest
 	skipTotal      int
 	contexts       map[string]string
+	jsonFailures   map[goFailure]*jsonFailure
 	buildFailures  map[string]bool
 	summaries      map[string]bool
 	mu             sync.Mutex
@@ -116,10 +117,14 @@ func (c *checkCapture) readable(p []byte) {
 	for _, b := range p {
 		if b == '\n' {
 			if c.longLine {
-				c.fails.overlong(c.longIndented)
+				if !c.decodingEvent {
+					c.fails.overlong(c.longIndented)
+				}
 			} else {
 				line := string(c.pending)
-				c.fails.line(line, c.lineNo)
+				if !c.decodingEvent {
+					c.fails.line(line, c.lineNo)
+				}
 				c.parseName(line)
 				if !c.jsonMode || !c.decodingEvent {
 					c.goLine(line)
@@ -319,15 +324,17 @@ func renderTail(lines []string, dropped bool, maxLines, maxBytes int) (string, b
 // failBlock is one escaped Go "--- FAIL:" header and the indented message
 // lines that follow it, starting at stream line first.
 type failBlock struct {
-	lines []string
-	first int
-	size  int
-	cut   bool
+	lines     []string
+	first     int
+	size      int
+	cut       bool
+	synthetic bool
 }
 
 // failSection collects the earliest failure blocks that fit the section
-// budget while output streams. It assumes non-verbose go test output, where
-// messages follow their header; -v log lines printed before it are not kept.
+// budget while output streams. Plain output supplies header-before-message blocks.
+// JSON output supplies messages before the header; eventLine buffers their prefix
+// per package/test and assembles a header-first block at the named fail event.
 type failSection struct {
 	blocks  []failBlock
 	cur     failBlock
@@ -433,7 +440,7 @@ func (f failSection) clone() failSection {
 
 func (f *failSection) covers(n int) bool {
 	for _, b := range f.blocks {
-		if n >= b.first && n < b.first+len(b.lines) {
+		if !b.synthetic && n >= b.first && n < b.first+len(b.lines) {
 			return true
 		}
 	}
@@ -553,6 +560,24 @@ func (c *checkCapture) eventLine() {
 	if e.Package == "" || e.Test == "" {
 		return
 	}
+	failureKey := goFailure{pkg: boundedSkip(e.Package), name: boundedSkip(e.Test)}
+	if c.jsonFailures == nil {
+		c.jsonFailures = map[goFailure]*jsonFailure{}
+	}
+	if e.Output != "" && (len(c.jsonFailures) < 120 || c.jsonFailures[failureKey] != nil) {
+		prefix := c.jsonFailures[failureKey]
+		if prefix == nil {
+			prefix = &jsonFailure{}
+			c.jsonFailures[failureKey] = prefix
+		}
+		prefix.output(e.Output)
+	}
+	defer func() {
+		switch e.Action {
+		case "pass", "skip", "fail":
+			delete(c.jsonFailures, failureKey)
+		}
+	}()
 	key := boundedSkip(e.Package) + "\x00" + boundedSkip(e.Test)
 	if c.contexts == nil {
 		c.contexts = map[string]string{}
@@ -572,10 +597,8 @@ func (c *checkCapture) eventLine() {
 		}
 		delete(c.contexts, key)
 	case "fail":
-		for _, line := range strings.Split(c.contexts[key], "\n") {
-			if isIndented(line) {
-				c.fails.line(line, c.lineNo)
-			}
+		if prefix := c.jsonFailures[failureKey]; prefix != nil {
+			c.fails.jsonBlock(prefix)
 		}
 		delete(c.contexts, key)
 	case "pass":
@@ -613,4 +636,59 @@ func (c *checkCapture) finish() {
 			c.summaries[pkg] = true
 		}
 	}
+}
+
+// jsonFailure retains the earliest message lines independently of the skip tail.
+type jsonFailure struct {
+	header   string
+	messages []string
+	size     int
+	cut      bool
+}
+
+func (p *jsonFailure) output(output string) {
+	for line := range strings.SplitSeq(strings.TrimSuffix(output, "\n"), "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "--- FAIL: ") {
+			p.header = line[:min(len(line), failBlockBytes)]
+			continue
+		}
+		if p.cut || !isIndented(line) || strings.HasPrefix(trimmed, "--- ") || strings.HasPrefix(trimmed, "=== ") {
+			continue
+		}
+		if len(p.messages) >= failBlockLines || p.size >= failBlockBytes {
+			p.cut = true
+			continue
+		}
+		n := min(len(line), failBlockBytes-p.size)
+		p.messages = append(p.messages, line[:n])
+		p.size += n
+		p.cut = n < len(line)
+	}
+}
+
+func (f *failSection) jsonBlock(p *jsonFailure) {
+	f.close()
+	if p.header == "" || f.omitted {
+		return
+	}
+	f.line(p.header, 0)
+	f.cur.synthetic = true
+	for _, line := range p.messages {
+		if len(f.cur.lines) >= failBlockLines-1 {
+			f.cur.cut = true
+			break
+		}
+		message, cut := escapeWithin(line, failBlockBytes-f.cur.size-2-len(truncationMarker))
+		if message != "" {
+			f.cur.lines = append(f.cur.lines, message)
+			f.cur.size += len(message) + 1
+		}
+		if cut {
+			f.cur.cut = true
+			break
+		}
+	}
+	f.cur.cut = f.cur.cut || p.cut
+	f.close()
 }

@@ -83,6 +83,31 @@ func Fold(root, version string) error {
 		return fmt.Errorf("unreleased section must be empty; move entries into fragments first")
 	}
 	output := text[:end] + "\n## " + version + "\n\n" + strings.Join(bullets, "\n\n") + "\n\n" + suffix
+	// Match whole heading lines so versions such as v1 and v10 stay distinct.
+	targetStart, targetEnd := -1, len(text)
+	position := len(text) - len(suffix)
+	for _, line := range strings.SplitAfter(suffix, "\n") {
+		heading := strings.TrimSuffix(line, "\n")
+		if heading == "## "+version {
+			if targetStart >= 0 {
+				return fmt.Errorf("CHANGELOG.md has multiple ## %s headings", version)
+			}
+			targetStart = position
+		} else if targetStart >= 0 && targetEnd == len(text) && strings.HasPrefix(heading, "## ") {
+			targetEnd = position
+		}
+		position += len(line)
+	}
+	if targetStart >= 0 {
+		prefix := text[:targetEnd]
+		separator := "\n\n"
+		if strings.HasSuffix(prefix, "\n\n") {
+			separator = ""
+		} else if strings.HasSuffix(prefix, "\n") {
+			separator = "\n"
+		}
+		output = prefix + separator + strings.Join(bullets, "\n\n") + "\n\n" + text[targetEnd:]
+	}
 	if err := r.WriteFile("CHANGELOG.md", []byte(output), 0644); err != nil {
 		return err
 	}
@@ -98,7 +123,7 @@ func fragment(text string) (string, error) {
 	text = strings.Trim(text, " \t\r\n")
 	lines := strings.Split(text, "\n")
 	if !strings.HasPrefix(text, "- ") || strings.TrimSpace(strings.TrimPrefix(lines[0], "- ")) == "" {
-		return "", fmt.Errorf("expected one nonempty '- ' bullet")
+		return "", fmt.Errorf("each fragment holds exactly one bullet; expected one nonempty '- ' bullet")
 	}
 	for _, line := range lines[1:] {
 		trimmed := strings.TrimSpace(line)
@@ -106,7 +131,7 @@ func fragment(text string) (string, error) {
 			continue
 		}
 		if !(strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "\t")) || listItem.MatchString(trimmed) || strings.HasPrefix(trimmed, "#") {
-			return "", fmt.Errorf("expected only indented prose after the bullet")
+			return "", fmt.Errorf("each fragment holds exactly one bullet; expected only indented prose after the bullet")
 		}
 	}
 	return text, nil

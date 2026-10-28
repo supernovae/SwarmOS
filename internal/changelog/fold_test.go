@@ -89,13 +89,65 @@ func TestFoldPreservesReleasedHistory(t *testing.T) {
 		t.Fatal("history changed")
 	}
 }
+func TestFoldExistingSection(t *testing.T) {
+	prefix := "# Changelog\n\n## Unreleased\n\n## v10\n\n- Other.\n\n## v1\n\nRelease introduction.\n\n- First.  \n\n- Second."
+	for _, ending := range []string{"", "\n", "\n\n", "\n\n" + history} {
+		t.Run(ending, func(t *testing.T) {
+			r := fixture(t)
+			put(t, r, "CHANGELOG.md", prefix+ending)
+			put(t, r, "changes/unreleased/20.md", "- Twenty")
+			put(t, r, "changes/unreleased/03.md", "- Three")
+			if err := Fold(r, "v1"); err != nil {
+				t.Fatal(err)
+			}
+			separator := "\n\n"
+			if strings.HasPrefix(ending, "\n\n") {
+				separator = ""
+			} else if ending == "\n" {
+				separator = "\n"
+			}
+			boundary := len(prefix) + len(ending)
+			if strings.HasSuffix(ending, history) {
+				boundary -= len(history)
+			}
+			before := prefix + ending
+			want := before[:boundary] + separator + "- Three\n\n- Twenty\n\n" + before[boundary:]
+			got := read(t, r, "CHANGELOG.md")
+			if got != want {
+				t.Fatalf("got %q want %q", got, want)
+			}
+			if strings.Count(got, "## v1\n") != 1 {
+				t.Fatal("duplicate heading")
+			}
+			for _, name := range []string{"03.md", "20.md"} {
+				if _, err := os.Stat(filepath.Join(r, "changes/unreleased", name)); !os.IsNotExist(err) {
+					t.Fatalf("fragment remains: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestFoldRejectsDuplicateRelease(t *testing.T) {
+	r := fixture(t)
+	before := baseline + "\n## v1\n\n- First\n\n## v1\n\n- Second\n"
+	put(t, r, "CHANGELOG.md", before)
+	put(t, r, "changes/unreleased/1.md", "- New")
+	if err := Fold(r, "v1"); err == nil || !strings.Contains(err.Error(), "multiple ## v1 headings") {
+		t.Fatalf("error: %v", err)
+	}
+	if read(t, r, "CHANGELOG.md") != before || read(t, r, "changes/unreleased/1.md") != "- New" {
+		t.Fatal("mutated on rejection")
+	}
+}
+
 func TestFoldRejectsInvalidFragments(t *testing.T) {
 	for _, s := range []string{"", " \n", "- one\n- two", "- one\n  - two", "- one\n  * two", "- one\n  + two", "- one\n  1. two", "paragraph", "- one\nparagraph", "- one\n  # heading"} {
 		t.Run(s, func(t *testing.T) {
 			r := fixture(t)
 			put(t, r, "changes/unreleased/01.md", "- Valid")
 			put(t, r, "changes/unreleased/02.md", s)
-			if e := Fold(r, "1"); e == nil || !strings.Contains(e.Error(), "02.md") {
+			if e := Fold(r, "1"); e == nil || !strings.Contains(e.Error(), "02.md") || !strings.Contains(e.Error(), "each fragment holds exactly one bullet") {
 				t.Fatalf("error %v", e)
 			}
 			if read(t, r, "CHANGELOG.md") != baseline || read(t, r, "changes/unreleased/02.md") != s || read(t, r, "changes/unreleased/01.md") != "- Valid" {
@@ -202,8 +254,15 @@ func TestMakeChangelog(t *testing.T) {
 	if read(t, r, "CHANGELOG.md") != before {
 		t.Fatal("second run changed")
 	}
-	put(t, r, "changes/unreleased/bad.md", "")
-	if out, e := run("2"); e == nil || !strings.Contains(string(out), "bad.md") {
+	put(t, r, "changes/unreleased/2.md", "- Another")
+	if out, e := run("1.2.3"); e != nil {
+		t.Fatalf("%v: %s", e, out)
+	}
+	if got := read(t, r, "CHANGELOG.md"); strings.Count(got, "## 1.2.3\n") != 1 || !strings.Contains(got, "- New\n\n- Another\n\n") {
+		t.Fatalf("unexpected second batch: %q", got)
+	}
+	put(t, r, "changes/unreleased/bad.md", "- One\n- Two")
+	if out, e := run("2"); e == nil || !strings.Contains(string(out), "bad.md") || !strings.Contains(string(out), "each fragment holds exactly one bullet") {
 		t.Fatalf("%v: %s", e, out)
 	}
 }

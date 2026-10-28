@@ -622,7 +622,7 @@ Maintainers fold all fragments in filename order and delete the consumed files w
 make changelog VERSION=1.2.3
 ```
 
-The command inserts a version heading below the empty Unreleased heading and preserves released history. With no fragments it changes nothing. All fragments are validated before the changelog is replaced. Replacement and fragment deletion are separate operations: if deletion fails, inspect the changelog and remaining files before retrying to avoid duplicate entries. Review the resulting changes before committing the release.
+The command appends entries to an existing section for that version, or inserts a new version heading below the empty Unreleased heading. It preserves existing release text. With no fragments it changes nothing. All fragments are validated before the changelog is replaced. Replacement and fragment deletion are separate operations: if deletion fails, inspect the changelog and remaining files before retrying to avoid duplicate entries. Review the resulting changes before committing the release.
 
 Use `swarm issue create --size small --uncertainty known --risk standard` with
 your title, objective, constraints and acceptance criteria to record the work's

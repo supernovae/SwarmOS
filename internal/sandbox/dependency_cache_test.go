@@ -320,6 +320,181 @@ func TestGoPrefetchReadsBaseNotWorktree(t *testing.T) {
 	}
 }
 
+// workspaceRepo commits a root module, a nested module in go.work, a module
+// outside go.work, and vendor and testdata modules that must be ignored.
+func workspaceRepo(t *testing.T) (string, string) {
+	t.Helper()
+	repo := cacheTestRepo(t)
+	for name, data := range map[string]string{
+		"go.mod":            "module example.com/repo\n\ngo 1.21\n\nrequire example.com/a v1.0.0\n",
+		"nested/go.mod":     "module example.com/repo/nested\n\ngo 1.21\n\nrequire example.com/b v1.0.0\n",
+		"go.work":           "go 1.21\n\nuse (\n\t.\n\t./nested\n)\n",
+		"tools/go.mod":      "module example.com/repo/tools\n\ngo 1.21\n\nrequire example.com/c v1.0.0\n",
+		"vendor/v/go.mod":   "module example.com/v\n\ngo 1.21\n\nrequire example.com/absent v1.0.0\n",
+		"testdata/t/go.mod": "module example.com/t\n\ngo 1.21\n\nrequire example.com/absent v1.0.0\n",
+	} {
+		writeWorkerFixture(t, repo, name, data)
+	}
+	return repo, gitCommitAll(t, repo, "base")
+}
+
+func TestGoPrefetchWorkspaceAndNestedModules(t *testing.T) {
+	requireGo(t)
+	proxy := resolvedTempDir(t)
+	writeModuleProxy(t, proxy, "example.com/a@v1.0.0", "example.com/b@v1.0.0", "example.com/c@v1.0.0")
+	hostGoEnv(t, "file://"+filepath.ToSlash(proxy))
+	repo, base := workspaceRepo(t)
+	// An uncommitted module is not part of the approved base.
+	writeWorkerFixture(t, repo, "extra/go.mod", "module example.com/extra\n\ngo 1.21\n\nrequire example.com/absent v1.0.0\n")
+	userCache := resolvedTempDir(t)
+	makeWritableOnCleanup(t, userCache)
+	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, PerRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps.Caches) != 1 {
+		t.Fatalf("caches = %+v", deps.Caches)
+	}
+	dir := deps.Caches[0].Dir
+	for _, mod := range []string{"example.com/a@v1.0.0", "example.com/b@v1.0.0", "example.com/c@v1.0.0"} {
+		if !moduleExtracted(dir, mod) {
+			t.Errorf("%s was not downloaded", mod)
+		}
+	}
+	if moduleExtracted(dir, "example.com/absent@v1.0.0") {
+		t.Error("a vendor, testdata or uncommitted module was prefetched")
+	}
+}
+
+func TestGoPrefetchRunsEachModuleAndWorkspace(t *testing.T) {
+	type run struct{ dir, gowork string }
+	var runs []run
+	stubPrefetch(t, "go1.21.0", func(dir string, env, argv []string) {
+		if !slices.Equal(argv, goModDownloadArgv) {
+			return
+		}
+		r := run{dir: dir}
+		for _, entry := range env {
+			if v, ok := strings.CutPrefix(entry, "GOWORK="); ok {
+				r.gowork = v
+			}
+		}
+		runs = append(runs, r)
+	})
+	repo, base := workspaceRepo(t)
+	if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), PerRepository); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 4 {
+		t.Fatalf("download runs = %+v, want three modules and one workspace", runs)
+	}
+	tree := runs[0].dir
+	for i, rel := range []string{"", "nested", "tools"} {
+		if want := filepath.Join(tree, rel); runs[i].dir != want || runs[i].gowork != "off" {
+			t.Errorf("module run %d = %+v, want %s with GOWORK=off", i, runs[i], want)
+		}
+	}
+	if work := runs[3]; work.dir != tree || work.gowork != filepath.Join(tree, "go.work") {
+		t.Errorf("workspace run = %+v, want GOWORK=%s", work, filepath.Join(tree, "go.work"))
+	}
+	for _, r := range runs {
+		if insideDir(repo, r.dir) {
+			t.Fatalf("prefetch ran inside the worktree: %s", r.dir)
+		}
+	}
+}
+
+func TestSelectGoLockfiles(t *testing.T) {
+	eco, _ := dependencyEcosystemNamed("go")
+	blob := func(p string) treeEntry { return treeEntry{Mode: "100644", Type: "blob", Object: "x", Path: p} }
+	for _, tc := range []struct {
+		name    string
+		entries []treeEntry
+		want    []string
+	}{
+		{"lockfiles anywhere", []treeEntry{blob("go.mod"), blob("a/b/go.mod"), blob("go.work"), blob("go.work.sum"), blob("a/go.sum"),
+			{Mode: "100755", Type: "blob", Object: "x", Path: "exec/go.mod"}}, []string{"a/b/go.mod", "a/go.sum", "exec/go.mod", "go.mod", "go.work", "go.work.sum"}},
+		{"vendor and testdata", []treeEntry{blob("vendor/x/go.mod"), blob("a/vendor/go.mod"), blob("testdata/go.mod"), blob("x/testdata/y/go.mod")}, nil},
+		{"similar names", []treeEntry{blob("vendorx/go.mod"), blob("mytestdata/go.mod")}, []string{"mytestdata/go.mod", "vendorx/go.mod"}},
+		{"symlinks and submodules", []treeEntry{{Mode: "120000", Type: "blob", Object: "x", Path: "go.mod"}, {Mode: "160000", Type: "commit", Object: "x", Path: "sub/go.mod"}}, nil},
+		{"other files", []treeEntry{blob("go.mod.bak"), blob("README.md"), blob("../go.mod"), blob(`a\go.mod`)}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := selectLockfiles(tc.entries, eco)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var paths []string
+			for _, e := range got {
+				paths = append(paths, e.Path)
+			}
+			if !slices.Equal(paths, tc.want) {
+				t.Fatalf("selected %q, want %q", paths, tc.want)
+			}
+		})
+	}
+	for _, name := range []string{"go.mod", "go.work"} {
+		var entries []treeEntry
+		for i := range maxGoModules + 1 {
+			entries = append(entries, blob(strconv.Itoa(i)+"/"+name))
+		}
+		if _, err := selectLockfiles(entries[:maxGoModules], eco); err != nil {
+			t.Errorf("%d %s files: %v", maxGoModules, name, err)
+		}
+		if _, err := selectLockfiles(entries, eco); err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoModules+1)+" "+name) {
+			t.Errorf("%d %s files: error = %v", maxGoModules+1, name, err)
+		}
+	}
+}
+
+func TestDependencyCacheSkipsVendoredOnlyModules(t *testing.T) {
+	stubPrefetch(t, "go1.21.0", func(string, []string, []string) { t.Fatal("prefetch ran for vendor and testdata modules") })
+	repo := cacheTestRepo(t)
+	writeWorkerFixture(t, repo, "vendor/x/go.mod", "module example.com/x\n")
+	writeWorkerFixture(t, repo, "testdata/go.work", "go 1.21\n")
+	base := gitCommitAll(t, repo, "base")
+	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, "", PerRepository)
+	if err != nil || len(deps.Caches) != 0 {
+		t.Fatalf("PrepareDependencyCaches = %+v, %v", deps, err)
+	}
+}
+
+func TestGoPrefetchModuleBound(t *testing.T) {
+	for _, tc := range []struct {
+		modules int
+		ok      bool
+	}{{maxGoModules, true}, {maxGoModules + 1, false}} {
+		t.Run(strconv.Itoa(tc.modules), func(t *testing.T) {
+			calls, downloads := 0, 0
+			stubPrefetch(t, "go1.21.0", func(_ string, _, argv []string) {
+				calls++
+				if slices.Equal(argv, goModDownloadArgv) {
+					downloads++
+				}
+			})
+			repo := cacheTestRepo(t)
+			for i := range tc.modules {
+				writeWorkerFixture(t, repo, "m"+strconv.Itoa(i)+"/go.mod", "module example.com/m"+strconv.Itoa(i)+"\n\ngo 1.21\n")
+			}
+			base := gitCommitAll(t, repo, "base")
+			_, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), PerRepository)
+			if tc.ok {
+				if err != nil || downloads != tc.modules {
+					t.Fatalf("err = %v, downloads = %d, want %d", err, downloads, tc.modules)
+				}
+				return
+			}
+			want := "approved base has " + strconv.Itoa(tc.modules) + " go.mod files; the prefetch limit is " + strconv.Itoa(maxGoModules)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err = %v, want %q", err, want)
+			}
+			if calls != 0 {
+				t.Fatalf("prefetch ran %d commands past the module limit", calls)
+			}
+		})
+	}
+}
+
 func TestGoPrefetchSeedsFromHostCacheFirst(t *testing.T) {
 	requireGo(t)
 	upstream := resolvedTempDir(t)

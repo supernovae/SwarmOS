@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path"
@@ -32,7 +35,8 @@ const RepairMetadataKey = "validation_repair"
 type TestClassification string
 
 const (
-	// TestRegression failed twice on the candidate and passed on the base.
+	// TestRegression failed twice on the candidate and passed on the base, or
+	// is defined only by a test file this change added or changed.
 	TestRegression TestClassification = "regression"
 	// TestPreExisting failed on the candidate and on the base.
 	TestPreExisting TestClassification = "pre-existing"
@@ -156,7 +160,7 @@ func diagnoseRepair(ctx context.Context, runner *checkRunner, report *Validation
 				test.Reason = fmt.Sprintf("more than %d failing tests; not rerun", maxRepairReruns)
 			default:
 				reruns++
-				test.Classification, test.Reason = classify(ctx, runner, base, cmd, failure, checkTimeout(""))
+				test.Classification, test.Reason = classify(ctx, runner, base, cmd, failure, report.ModifiedFiles, checkTimeout(""))
 			}
 			summary.Tests = append(summary.Tests, test)
 		}
@@ -177,8 +181,9 @@ func diagnoseRepair(ctx context.Context, runner *checkRunner, report *Validation
 }
 
 // classify reruns one failing test once on the candidate, then, when it
-// still fails, once at the approved base.
-func classify(ctx context.Context, runner *checkRunner, base *baseRerun, cmd goTestCommand, failure goFailure, duration time.Duration) (TestClassification, string) {
+// still fails, once at the approved base. A test that does not exist at the
+// base is a regression when a changed test file defines it.
+func classify(ctx context.Context, runner *checkRunner, base *baseRerun, cmd goTestCommand, failure goFailure, changed []string, duration time.Duration) (TestClassification, string) {
 	command, err := rerunCommand(cmd, failure)
 	if err != nil {
 		return TestUnclassified, EscapeDiagnostic(err.Error())
@@ -194,14 +199,22 @@ func classify(ctx context.Context, runner *checkRunner, base *baseRerun, cmd goT
 	if err != nil {
 		return TestUnclassified, "approved base checkout: " + EscapeDiagnostic(err.Error())
 	}
-	switch result, reason := rerun(ctx, baseRunner, command, failure.name, duration); result {
+	result, reason := rerun(ctx, baseRunner, command, failure.name, duration)
+	switch result {
 	case rerunPassed:
 		return TestRegression, ""
 	case rerunFailed:
 		return TestPreExisting, ""
-	default:
-		return TestUnclassified, "base rerun: " + reason
 	}
+	// Only a test the base package lacks, or a package the base lacks, is
+	// new; a base build failure or timeout stays unclassified.
+	absent := result == rerunAbsent || (reason == packageFailedReason && baseLacksPackage(ctx, runner.worktree, base.baseSHA, failure.pkg))
+	if absent {
+		if file, ok := candidateDefines(runner.worktree, changed, failure.pkg, failure.name); ok {
+			return TestRegression, "not at the approved base; defined in " + EscapeDiagnostic(file)
+		}
+	}
+	return TestUnclassified, "base rerun: " + reason
 }
 
 type rerunResult int
@@ -210,10 +223,15 @@ const (
 	rerunUnknown rerunResult = iota
 	rerunPassed
 	rerunFailed
+	// rerunAbsent: the package built and ran, but has no such test.
+	rerunAbsent
 )
 
+const packageFailedReason = "the package failed without a result for this test"
+
 // rerun runs command and reports whether name itself passed or failed. A
-// missing result line, a build failure, or a timeout is unknown.
+// missing result line, a build failure, or a timeout is unknown, except that
+// a package that reports no tests to run lacks the test.
 func rerun(ctx context.Context, runner *checkRunner, command, name string, duration time.Duration) (rerunResult, string) {
 	if ctx.Err() != nil {
 		return rerunUnknown, "diagnosis time limit reached"
@@ -240,13 +258,98 @@ func rerun(ctx context.Context, runner *checkRunner, command, name string, durat
 		return rerunPassed, ""
 	case errors.As(err, &exitErr) && failed:
 		return rerunFailed, ""
+	case err == nil && !failed && !passed && (bytes.Contains(output.buf.Bytes(), []byte("[no tests to run]")) || bytes.Contains(output.buf.Bytes(), []byte("testing: warning: no tests to run"))):
+		return rerunAbsent, "the test did not run"
 	case err == nil:
 		return rerunUnknown, "the test did not run"
 	case errors.As(err, &exitErr):
-		return rerunUnknown, "the package failed without a result for this test"
+		return rerunUnknown, packageFailedReason
 	default:
 		return rerunUnknown, "did not run: " + EscapeDiagnostic(err.Error())
 	}
+}
+
+// maxTestSource bounds each changed test file parsed by candidateDefines.
+const maxTestSource = 1 << 20
+
+// candidateDefines reports which changed _test.go file in pkg's directory
+// declares the top-level test of name. It only parses files, read without
+// following links; it never builds or runs candidate code.
+func candidateDefines(worktree string, changed []string, pkg, name string) (string, bool) {
+	dir, ok := packageDir(worktree, pkg)
+	if !ok {
+		return "", false
+	}
+	top, _, _ := strings.Cut(name, "/")
+	for _, file := range changed {
+		if path.Dir(file) != dir || !strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		data, err := safefs.ReadFile(worktree, filepath.FromSlash(file), maxTestSource)
+		if err != nil {
+			continue
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), file, data, parser.SkipObjectResolution)
+		if err != nil {
+			continue
+		}
+		for _, decl := range parsed.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == top {
+				return file, true
+			}
+		}
+	}
+	return "", false
+}
+
+// packageDir maps an import path of the root module to its slash-separated
+// directory, "." for the module root.
+func packageDir(worktree, pkg string) (string, bool) {
+	data, err := safefs.ReadFile(worktree, "go.mod", maxTestSource)
+	if err != nil {
+		return "", false
+	}
+	module := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		line, _, _ = strings.Cut(line, "//")
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "module" {
+			module = strings.Trim(fields[1], "\"`")
+			break
+		}
+	}
+	switch {
+	case module == "" || !validImportPath(pkg):
+		return "", false
+	case pkg == module:
+		return ".", true
+	case strings.HasPrefix(pkg, module+"/"):
+		return strings.TrimPrefix(pkg, module+"/"), true
+	}
+	return "", false
+}
+
+// baseLacksPackage reports whether the approved base has no Go file in pkg's
+// directory. It reads the base tree from Git and runs no code.
+func baseLacksPackage(ctx context.Context, worktree, baseSHA, pkg string) bool {
+	dir, ok := packageDir(worktree, pkg)
+	if !ok || baseSHA == "" {
+		return false
+	}
+	args := []string{"ls-tree", "--name-only", "-z", baseSHA}
+	if dir != "." {
+		args = append(args, "--", dir+"/")
+	}
+	out, err := gitOutputContext(ctx, worktree, args...)
+	if err != nil {
+		return false
+	}
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		if bytes.HasSuffix(entry, []byte(".go")) {
+			return false
+		}
+	}
+	return true
 }
 
 // rerunFlags are the trusted check flags kept for a targeted rerun; result
@@ -388,7 +491,7 @@ func RenderRepairBrief(s *RepairSummary) []byte {
 	var b strings.Builder
 	b.WriteString("# Validation repair brief\n\n")
 	b.WriteString("The SwarmOS coordinator wrote this file from the trusted validation report. It is regenerated before each repair round, and edits to it are rejected.\n\n")
-	b.WriteString("Each failing Go test was rerun once on the candidate and, if it failed again, once at the approved base: **regression** passes on the base, **pre-existing** fails on the base, **flaky** passed on the candidate rerun, and **unclassified** could not be observed reliably.\n\n")
+	b.WriteString("Each failing Go test was rerun once on the candidate and, if it failed again, once at the approved base: **regression** passes on the base or is new in this change, **pre-existing** fails on the base, **flaky** passed on the candidate rerun, and **unclassified** could not be observed reliably.\n\n")
 	if s.AllPreExisting {
 		b.WriteString("Every failure also fails at the approved base. A maintainer decides how to proceed.\n\n")
 	} else {

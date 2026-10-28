@@ -1,6 +1,9 @@
 package workflow
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -71,4 +74,55 @@ func telemetryMetadata(run *agent.RunResult, metadata map[string]string) map[str
 		metadata[contract.RoleRunTelemetryKey] = value
 	}
 	return metadata
+}
+
+// failedRun preserves the safe run error and any fencing error independently.
+func (e *Engine) failedRun(ctx context.Context, st *lease.IssueState, opts WorkOptions, run *agent.RunResult, runErr error, role string) (*lease.IssueState, error) {
+	var classified interface{ FailureClass() string }
+	if !errors.As(runErr, &classified) || classified.FailureClass() == "" {
+		return st, runErr
+	}
+	class := classified.FailureClass()
+	if run != nil && run.Telemetry != nil {
+		updated, err := e.LeaseManager.RecordFailedRoleRun(ctx, opts.IssueNumber, opts.Owner, run.Telemetry)
+		if err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("record failed role run: %w", err))
+		} else {
+			st = updated
+		}
+	}
+	if cause := agent.FailureCause(class); cause != "" {
+		runErr = fmt.Errorf("%w; %s; resume: %s", runErr, cause, failureResume(opts, role))
+	}
+	return st, runErr
+}
+
+func shellArgument(s string) string {
+	return "\x27" + strings.ReplaceAll(s, "\x27", "\x27\\\x27\x27") + "\x27"
+}
+
+func failureResume(opts WorkOptions, role string) string {
+	phase := "implement"
+	if role == "planner" {
+		phase = "plan"
+	} else if role == "reviewer" {
+		phase = "review"
+	}
+	command := fmt.Sprintf("swarm issue work %d", opts.IssueNumber)
+	if opts.PRNumber != 0 {
+		command = fmt.Sprintf("swarm pr work %d", opts.PRNumber)
+	}
+	if opts.ForkMode {
+		command = strings.Replace(command, "swarm ", "swarm --fork ", 1)
+	}
+	command += " --phase " + phase
+	for _, option := range []struct{ flag, value string }{
+		{"agent", opts.AgentName}, {"planner-agent", opts.PlannerAgent}, {"reviewer-agent", opts.ReviewerAgent},
+		{"developer-agent", opts.DeveloperAgent}, {"tester-agent", opts.TesterAgent}, {"fork-remote", opts.ForkRemote},
+	} {
+		if option.value != "" {
+			command += " --" + option.flag + " " + shellArgument(option.value)
+		}
+	}
+	return command
 }

@@ -170,7 +170,9 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 			result.Guidance = append(collector.Messages(), result.Guidance...)
 		}
 	}()
-	defer func() { runErr = safeRunFailure(ctx, req.Role, req.WorktreePath, result, runErr) }()
+	defer func() {
+		runErr = safeRunFailure(ctx, req.Role, req.WorktreePath, result, runErr, a.sandboxRuntime != "container" && (a.driver == "claude" || a.driver == "codex" || a.driver == "opencode" || a.driver == "omp"))
+	}()
 	observation := newRunObservation(a.driver)
 	defer func() {
 		if result != nil {

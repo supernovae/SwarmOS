@@ -76,3 +76,84 @@ func TestSafeRunFailureHidesNestedHarnessErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestProviderFailurePatterns(t *testing.T) {
+	for _, row := range []struct {
+		class    string
+		patterns []string
+	}{
+		{"usage_limit", []string{"usage limit reached", "you've hit your limit", "insufficient_quota"}},
+		{"rate_limit", []string{"rate limit exceeded", "rate_limit_exceeded", "too many requests"}},
+		{"capacity", []string{"model is at capacity", "model is overloaded", "overloaded_error"}},
+		{"network", []string{"getaddrinfo", "ENOTFOUND", "EAI_AGAIN", "temporary failure in name resolution", "could not resolve host", "connection refused", "connection reset"}},
+		{"unknown", []string{"429 503 limit", "", "unmatched fixture"}},
+	} {
+		for _, pattern := range row.patterns {
+			t.Run(pattern, func(t *testing.T) {
+				raw := strings.ToUpper(pattern) + " synthetic-private-token\x1b[31m"
+				if got := classifyFailure(raw); got != row.class {
+					t.Fatalf("class = %q", got)
+				}
+				tail := newDiagnosticsTail()
+				_, _ = tail.Write([]byte(raw))
+				result := &RunResult{transcript: tail, Output: raw, Command: []string{raw}}
+				err := safeRunFailure(context.Background(), "developer", t.TempDir(), result, errors.New("private underlying cause"), true)
+				var classified interface{ FailureClass() string }
+				if !errors.As(err, &classified) || classified.FailureClass() != row.class {
+					t.Fatal("missing classification")
+				}
+				if strings.Contains(err.Error(), "synthetic-private-token") || strings.Contains(err.Error(), "private underlying cause") || strings.Contains(err.Error(), "\x1b") {
+					t.Fatalf("unsafe error: %s", err)
+				}
+				if result.Output != "" || result.Command != nil || result.transcript != nil {
+					t.Fatal("diagnostics retained")
+				}
+			})
+		}
+	}
+	if classifyFailure("model is overloaded; usage limit reached; connection refused") != "usage_limit" {
+		t.Fatal("precedence")
+	}
+}
+
+func TestProviderFailureExclusions(t *testing.T) {
+	for _, row := range []struct {
+		name     string
+		cause    error
+		eligible bool
+		want     string
+	}{
+		{"unknown", errors.New("exit"), true, "unknown"},
+		{"unsupported", errors.New("exit"), false, ""},
+		{"success", nil, true, ""},
+		{"canceled", context.Canceled, true, ""},
+		{"deadline", context.DeadlineExceeded, true, ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			tail := newDiagnosticsTail()
+			_, _ = tail.Write([]byte("model is overloaded"))
+			result := &RunResult{transcript: tail}
+			err := safeRunFailure(context.Background(), "developer", t.TempDir(), result, row.cause, row.eligible)
+			if row.cause == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var classified interface{ FailureClass() string }
+			if !errors.As(err, &classified) {
+				t.Fatal("missing typed error")
+			}
+			want := row.want
+			if row.name == "unknown" {
+				want = "capacity"
+			}
+			if classified.FailureClass() != want {
+				t.Fatalf("got %q want %q", classified.FailureClass(), want)
+			}
+			if !errors.Is(err, row.cause) {
+				t.Fatal("cause lost")
+			}
+		})
+	}
+}

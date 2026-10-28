@@ -1,6 +1,7 @@
 package lease
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"strings"
@@ -45,6 +46,10 @@ func recordRoleRun(st *IssueState, art *contract.Artifact) {
 		return
 	}
 	art.Metadata[contract.RoleRunTelemetryKey] = canonical
+	appendRoleRun(st, t)
+}
+
+func appendRoleRun(st *IssueState, t *contract.RoleRunTelemetry) {
 	for _, run := range st.RoleRuns {
 		if run.RunID == t.RunID {
 			return // the planner's second artifact or a redelivered update
@@ -63,7 +68,7 @@ func NextRepairAttempt(st *IssueState, role string, repair bool) int64 {
 	var previous int64
 	if st != nil {
 		for i := len(st.RoleRuns) - 1; i >= 0; i-- {
-			if run := st.RoleRuns[i]; run.Role == "developer" {
+			if run := st.RoleRuns[i]; run.Role == "developer" && run.FailureClass == "" {
 				if run.RepairAttempt != nil {
 					previous = *run.RepairAttempt
 				}
@@ -97,7 +102,7 @@ func RoleRuns(st *IssueState) []contract.RoleRunTelemetry {
 
 // RoleRunTableHeader is the compact text table header shared by issue status,
 // pr status and PR evidence.
-const RoleRunTableHeader = "| Role | Run | Elapsed | Setup | Preflight | Snapshot | Model time | Tool time | Tokens in/out/cached | Tool calls/repeats | Repair/replan | Model/effort |"
+const RoleRunTableHeader = "| Role | Run | Elapsed | Setup | Preflight | Snapshot | Model time | Tool time | Tokens in/out/cached | Tool calls/repeats | Repair/replan | Model/effort | Failure |"
 
 // RoleRunTable renders runs as a Markdown table. Unobserved values read
 // "unavailable"; measured zero stays 0.
@@ -107,12 +112,12 @@ func RoleRunTable(runs []contract.RoleRunTelemetry) string {
 	}
 	var b strings.Builder
 	b.WriteString(RoleRunTableHeader + "\n")
-	b.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
+	b.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
 	for _, r := range runs {
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s/%s/%s | %s/%s | %s/%s | %s/%s |\n",
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s/%s/%s | %s/%s | %s/%s | %s/%s | %s |\n",
 			r.Role, r.RunID[:8], ms(r.ElapsedMS), ms(r.SetupMS), ms(r.PreflightMS), ms(r.SnapshotMS), ms(r.ModelMS), ms(r.ToolMS),
 			count(r.InputTokens), count(r.OutputTokens), count(r.CachedInputTokens), count(r.ToolCalls), count(r.RepeatedCommands),
-			count(r.RepairAttempt), count(r.ReplanCount), label(r.ActualModel), label(r.Effort))
+			count(r.RepairAttempt), count(r.ReplanCount), label(r.ActualModel), label(r.Effort), failureLabel(r.FailureClass))
 	}
 	return b.String()
 }
@@ -140,4 +145,30 @@ func label(v *string) string {
 		return "unavailable"
 	}
 	return strings.ReplaceAll(html.EscapeString(*v), "|", "\\|")
+}
+
+func failureLabel(class string) string {
+	if class == "" {
+		return "unavailable"
+	}
+	return label(&class)
+}
+
+// RecordFailedRoleRun records descriptive telemetry without producing gate evidence.
+func (m *Manager) RecordFailedRoleRun(ctx context.Context, n int, owner string, t *contract.RoleRunTelemetry) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("failed-run telemetry is unavailable through worker gateway")
+	}
+	value, err := t.Encode()
+	if err != nil {
+		return nil, err
+	}
+	copy, err := contract.ParseRoleRunTelemetry(value)
+	if err != nil {
+		return nil, err
+	}
+	if copy.FailureClass == "" {
+		return nil, fmt.Errorf("failure class is required")
+	}
+	return m.mutate(ctx, n, owner, func(st *IssueState) error { appendRoleRun(st, copy); return nil })
 }

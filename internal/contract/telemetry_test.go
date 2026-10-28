@@ -77,3 +77,25 @@ func TestTelemetryMetadataPassesArtifactValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFailureClassValidation(t *testing.T) {
+	for _, class := range []string{"", "capacity", "usage_limit", "rate_limit", "network", "unknown", "secret-token", "\x1b"} {
+		run := NewRoleRunTelemetry("developer", "codex", time.Now())
+		run.FailureClass = class
+		value, err := run.Encode()
+		invalid := class == "secret-token" || class == "\x1b"
+		if invalid {
+			if err == nil {
+				t.Fatal("accepted unsafe class")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := ParseRoleRunTelemetry(value)
+		if err != nil || parsed.FailureClass != class {
+			t.Fatal("class round trip")
+		}
+	}
+}

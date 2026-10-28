@@ -854,6 +854,8 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return res, pauseErr
 		}
 		if err != nil {
+			st, err = e.failedRun(ctx, st, opts, planRun, err, "planner")
+			res.State = st
 			return res, err
 		}
 		plan, err := readRequiredArtifact(wtPath, "PLAN.md")
@@ -943,7 +945,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		reviewer := pre.Agents["reviewer"]
 		res.RoleAgentsUsed["reviewer"] = reviewer
 		activePhase = "review"
-		verdict, reviewed, err := e.RunAgentReview(ctx, wtPath, pre.WorkUnit, wf, st, opts.Owner, reviewer, mode, opts.Instructions, opts.PRNumber, opts.SetupProgress)
+		verdict, reviewed, err := e.runAgentReview(ctx, wtPath, pre.WorkUnit, wf, st, opts.Owner, reviewer, mode, opts.Instructions, opts.PRNumber, opts, opts.SetupProgress)
 		if paused, pauseErr := pauseInterrupted(err, "review", false); paused {
 			return res, pauseErr
 		}
@@ -1097,6 +1099,8 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return true, pauseErr
 		}
 		if err != nil {
+			st, err = e.failedRun(ctx, st, opts, devRun, err, "developer")
+			res.State = st
 			return false, err
 		}
 		if err := check(); err != nil {
@@ -1212,7 +1216,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 			return true, pauseErr
 		}
 		if err != nil {
-			return false, fmt.Errorf("tester agent %q: %w", tester, err)
+			st, err = e.failedRun(ctx, st, opts, testerRun, err, "tester")
+			res.State = st
+			return false, err
 		}
 		if err := check(); err != nil {
 			return false, err
@@ -1457,6 +1463,10 @@ func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.Wor
 }
 
 func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, reporters ...*ProgressReporter) (string, *lease.IssueState, error) {
+	return e.runAgentReview(ctx, wtPath, wu, wf, st, owner, reviewerAgent, mode, instructions, prNumber, WorkOptions{IssueNumber: wu.IssueNumber, Owner: owner, PRNumber: prNumber, ReviewerAgent: reviewerAgent}, reporters...)
+}
+
+func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, recovery WorkOptions, reporters ...*ProgressReporter) (string, *lease.IssueState, error) {
 	if err := e.admitStage(ctx, wu.IssueNumber, owner, "review"); err != nil {
 		var admission *budgetAdmissionError
 		if errors.As(err, &admission) {
@@ -1509,6 +1519,7 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	}
 	revRun, err := agent.RunReview(ctx, runner, req)
 	if err != nil {
+		st, err = e.failedRun(ctx, st, recovery, revRun, err, "reviewer")
 		return "", st, err
 	}
 	review, err := readRequiredArtifact(wtPath, "REVIEW.md")

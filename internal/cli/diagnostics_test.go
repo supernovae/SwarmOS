@@ -15,13 +15,16 @@ var diagnosticsPointer = regexp.MustCompile(`diagnostics saved to (/\S+) \((\d+)
 
 // useFailingHarness allowlists a trusted-local "claude" harness that prints a
 // private transcript, including a terminal escape, and exits non-zero.
-func useFailingHarness(t *testing.T, f *cliFixture) {
+func useFailingHarness(t *testing.T, f *cliFixture, patterns ...string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell harness fixture")
 	}
 	script := filepath.Join(t.TempDir(), "failing-harness")
 	body := "#!/bin/sh\nprintf 'PRIVATE-TRANSCRIPT stdout\\n'\nprintf 'PRIVATE-TRANSCRIPT \\033]52;c;eA==\\007 stderr\\n' >&2\nexit 9\n"
+	if len(patterns) > 0 {
+		body = strings.Replace(body, "exit 9", "printf '%s\\n' '"+patterns[0]+"' >&2\nexit 9", 1)
+	}
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +201,37 @@ func TestCLIIssueWorkJSONReportsDiagnosticsUnavailable(t *testing.T) {
 	for _, leaked := range []string{"PRIVATE-TRANSCRIPT", "52;c", "\\u001b", "diagnostics saved", blocked} {
 		if strings.Contains(raw, leaked) {
 			t.Fatalf("JSON leaked %q: %s", leaked, raw)
+		}
+	}
+}
+
+func TestCLIProviderFailureStatus(t *testing.T) {
+	f := newCLIFixture(t)
+	useFailingHarness(t, f, "model is overloaded synthetic-private-token")
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	f.must(t, "issue", "approve", n)
+	useDiagnosticsState(t, f)
+	raw, err := f.run("issue", "work", n, "--agent", "mock", "--planner-agent", "failing", "--headless", "--progress=false", "--json")
+	if err == nil {
+		t.Fatal("fixture succeeded")
+	}
+	for _, text := range []string{raw, err.Error()} {
+		if !strings.Contains(text, "provider model at capacity; resume: swarm issue work "+n+" --phase plan") {
+			t.Fatal(text)
+		}
+		if strings.Contains(text, "synthetic-private-token") || strings.Contains(text, "model is overloaded") || strings.Contains(text, "PRIVATE-TRANSCRIPT") {
+			t.Fatal("diagnostic leaked")
+		}
+	}
+	st := f.state(t, number)
+	if len(st.RoleRuns) != 1 || st.RoleRuns[0].FailureClass != "capacity" || len(st.Artifacts) != 0 {
+		t.Fatalf("failed history: %+v", st)
+	}
+	for _, args := range [][]string{{"issue", "status", n}, {"issue", "status", n, "--json"}} {
+		status := f.must(t, args...)
+		if !strings.Contains(status, "capacity") || strings.Contains(status, "synthetic-private-token") {
+			t.Fatal(status)
 		}
 	}
 }

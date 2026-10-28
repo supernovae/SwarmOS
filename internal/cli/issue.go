@@ -119,17 +119,17 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil || strings.TrimSpace(owner) == "" {
 			return fmt.Errorf("determine approving actor: %w", err)
 		}
-		// Shape advice is printed before approving so oversized work gets split
+		// Dimension advice is printed before approving so oversized work gets split
 		// first. It never blocks approval; ApproveTask stays authoritative.
-		shape, shapeErr := approvalShape(cmd, tr, rootOpts.resolveRepoRoot(), number)
+		assessment, assessmentErr := approvalDimensions(cmd, tr, rootOpts.resolveRepoRoot(), number)
 		advice := cmd.OutOrStdout()
 		if asJSON {
 			advice = cmd.ErrOrStderr()
 		}
-		if shapeErr != nil {
-			fmt.Fprintf(advice, "Suggested shape: unavailable (%v)\n", shapeErr)
+		if assessmentErr != nil {
+			fmt.Fprintf(advice, "Suggested dimensions: unavailable (%v)\n", assessmentErr)
 		} else {
-			writeShapeAdvice(advice, shape)
+			writeDimensionAdvice(advice, assessment)
 		}
 		st, err := mgr.ApproveTask(cmd.Context(), number, owner)
 		if err != nil {
@@ -141,8 +141,10 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		}
 		if asJSON {
 			result := map[string]any{"kind": "task-approval", "issue_number": number, "state": st}
-			if shapeErr == nil {
-				result["shape"] = shape
+			if assessmentErr == nil {
+				result["suggested_dimensions"] = assessment.SuggestedDimensions
+				result["signals"] = assessment.Signals
+				result["hints"] = assessment.Hints
 			}
 			return writeJSON(cmd, result)
 		}
@@ -171,14 +173,14 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		shape := assessShape(rootOpts.resolveRepoRoot(), wu)
+		assessment := assessDimensions(rootOpts.resolveRepoRoot(), wu)
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "shape": shape, "dimensions": workflow.Dimensions{Size: wu.Size, Uncertainty: wu.Uncertainty, Risk: wu.Risk}, "suggested_dimensions": suggestedDimensions(rootOpts.resolveRepoRoot(), wu, shape)})
+			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "signals": assessment.Signals, "hints": assessment.Hints, "dimensions": workflow.Dimensions{Size: wu.Size, Uncertainty: wu.Uncertainty, Risk: wu.Risk}, "suggested_dimensions": assessment.SuggestedDimensions})
 		}
 		out := cmd.OutOrStdout()
 		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v, allow_harness_changes=%t]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities, wu.AllowHarnessChanges)
-		fmt.Fprintf(out, "Dimensions: size=%s uncertainty=%s risk=%s\nSuggested dimensions: %+v\n", wu.Size, wu.Uncertainty, wu.Risk, suggestedDimensions(rootOpts.resolveRepoRoot(), wu, shape))
-		writeShapeAdvice(out, shape)
+		fmt.Fprintf(out, "Dimensions: size=%s uncertainty=%s risk=%s\n", wu.Size, wu.Uncertainty, wu.Risk)
+		writeDimensionAdvice(out, assessment)
 		return nil
 	}}
 	lintCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured lint results")
@@ -186,37 +188,37 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	return issueCmd
 }
 
-// assessShape suggests a shape for lint and approval. Shape and hints are
+// assessDimensions suggests dimensions for lint and approval. Dimensions and hints are
 // advisory and never change either result, so the working tree's protected
 // paths are good enough here.
-func assessShape(repoRoot string, wu *contract.WorkUnit) workflow.ShapeAssessment {
+func assessDimensions(repoRoot string, wu *contract.WorkUnit) workflow.DimensionAssessment {
 	spec, _ := harness.LoadValidationSpec(repoRoot)
-	return workflow.AssessWorkUnitShape(repoRoot, wu, spec)
+	return workflow.AssessWorkUnitDimensions(repoRoot, wu, spec)
 }
 
-// approvalShape reads and parses the issue to assess its shape. An error only
+// approvalDimensions reads and parses the issue to assess its dimensions. An error only
 // means the advice is unavailable; approval decides validity on its own.
-func approvalShape(cmd *cobra.Command, tr tracker.Tracker, repoRoot string, number int) (workflow.ShapeAssessment, error) {
+func approvalDimensions(cmd *cobra.Command, tr tracker.Tracker, repoRoot string, number int) (workflow.DimensionAssessment, error) {
 	iss, err := tr.GetIssue(cmd.Context(), number)
 	if err != nil {
-		return workflow.ShapeAssessment{}, err
+		return workflow.DimensionAssessment{}, err
 	}
 	wu, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
 	if err != nil {
-		return workflow.ShapeAssessment{}, err
+		return workflow.DimensionAssessment{}, err
 	}
-	return assessShape(repoRoot, wu), nil
+	return assessDimensions(repoRoot, wu), nil
 }
 
-// writeShapeAdvice prints the suggested shape, its signals, and any hints in
+// writeDimensionAdvice prints the suggested dimensions, their signals, and any hints in
 // the form swarm issue lint uses.
-func writeShapeAdvice(out io.Writer, shape workflow.ShapeAssessment) {
-	fmt.Fprintf(out, "Suggested shape: %s", shape.Shape.Title())
-	if len(shape.Signals) > 0 {
-		fmt.Fprintf(out, " (%s)", strings.Join(shape.Signals, "; "))
+func writeDimensionAdvice(out io.Writer, assessment workflow.DimensionAssessment) {
+	fmt.Fprintf(out, "Suggested dimensions: %s", assessment.SuggestedDimensions.String())
+	if len(assessment.Signals) > 0 {
+		fmt.Fprintf(out, " (%s)", strings.Join(assessment.Signals, "; "))
 	}
 	fmt.Fprintln(out)
-	for _, hint := range shape.Hints {
+	for _, hint := range assessment.Hints {
 		fmt.Fprintf(out, "  hint: %s\n", hint)
 	}
 }
@@ -307,9 +309,4 @@ func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&sequential, "sequential", true, "Chain child issues sequentially via depends_on")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured child issues")
 	return cmd
-}
-
-func suggestedDimensions(root string, wu *contract.WorkUnit, shape workflow.ShapeAssessment) workflow.Dimensions {
-	spec, _ := harness.LoadValidationSpec(root)
-	return workflow.SuggestWorkUnitDimensions(root, wu, shape, spec)
 }

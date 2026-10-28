@@ -48,20 +48,21 @@ Handoffs are evidence, not authority. Each role verifies the claims against the 
 
 ### Matching the plan to the work
 
-Not every issue needs the same amount of planning. A typo fix shouldn't come with a ten-step design, and an open question shouldn't get confidently "solved" in one pass. The planner starts `PLAN.md` by naming the work's **shape**, then sizes the plan to fit:
+Not every issue needs the same amount of planning. Maintainers record `size`, `uncertainty`, and `risk` on a WorkUnit, and approved policy selects the matching execution profile:
 
-| Shape | What it looks like | What the plan does |
+| Dimension | Values | What it describes |
 | :--- | :--- | :--- |
-| **Routine** | Clear fix in a known place | Stays short |
-| **Involved** | Knowable, but spans several packages or has real trade-offs | Names the alternatives and why one wins |
-| **Exploratory** | Nobody knows the right answer yet | Starts with a small probe, keeps the change reversible, and lists follow-up WorkUnits |
-| **Urgent** | Users are affected right now | Stops the harm first; the root cause becomes a follow-up |
+| `size` | `small`, `multi_area` | How widely the change reaches |
+| `uncertainty` | `known`, `unknown` | Whether the solution is understood |
+| `risk` | `standard`, `sensitive`, `urgent` | The care and response the work needs |
 
-Every plan also opens with **What we know** (each fact backed by a file, test, or command output), **What we're assuming**, and **Open questions**. The reviewer checks that the plan's rigor fits its shape and that the facts hold up. Because `PLAN.md` is attached to the Draft PR, the people reviewing the code see the same reasoning.
+Profiles tailor planning and review guidance: compact plans for small changes, detailed handoffs for changes across areas, bounded investigations for unknown solutions, independent review for sensitive work, and mitigation first when users are affected now. Existing gates and required checks still apply.
+
+Plans ground decisions in evidence, assumptions, and open questions. Reviewers check those facts and acceptance coverage using the compiled profile. Because `PLAN.md` is attached to the Draft PR, people reviewing the code see the same reasoning.
 
 When something about the repo surprises an agent, it notes it in `.swarm/active/LESSONS.md`. SwarmOS copies those notes into the implementation summary under **What we learned**, and `swarm repo lessons` turns lessons from merged PRs into proposed `.swarm/rules/lessons.md` entries for a maintainer to commit.
 
-You don't have to pick a shape yourself. `swarm repo plan --scan` and `swarm issue lint <N>` suggest one from the issue text, along with hints for making the issue stronger (for example, a bugfix with no reproduction step). The planner confirms or corrects the shape once it has read the code. The shape is never stored on the WorkUnit, so it never changes what you approved.
+`swarm repo plan --scan` and `swarm issue lint <N>` suggest dimensions from the issue text and touchpoints, with signals and hints such as a missing reproduction step. These suggestions stay advisory. Only maintainer-set dimensions on the approved WorkUnit select a profile. If dimensions are absent, the planner records advisory suggestions and follows general evidence and acceptance coverage guidance.
 
 ---
 
@@ -177,7 +178,7 @@ Issue submission announces checkpoint creation, validation, checkpoint push/reco
 
 ## Related Guides
 
-- **[Owning a Busy Repository (`docs/backlog.md`)](backlog.md)** — Backlog lanes, duplicates, quiet issues, and task shapes at scale.
+- **[Owning a Busy Repository (`docs/backlog.md`)](backlog.md)** — Backlog lanes, duplicates, quiet issues, and dimensions at scale.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure agents, and approve issues.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Everyday CLI commands, handoffs, recovery, and worker pools.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, claim fencing, and checkpoint design.
@@ -205,5 +206,5 @@ a bounded investigation and decision artifact, sensitive work gets compact
 planning with strong independent review and adversarial cases, multi-area work
 gets a detailed handoff, and small work gets compact guidance. Profiles supply
 prompt variants and evidence expectations; all existing gates and required
-checks still apply. Planners follow the compiled profile. Prose shapes remain
-available for WorkUnits whose dimensions have not been assessed.
+checks still apply. Planners follow the compiled profile. When dimensions are
+absent, suggested dimensions remain advisory and general planning guidance applies.

@@ -1,1 +1,1 @@
-- Give Routine WorkUnits a compact plan (cause and files, smallest change, acceptance-to-test mapping, risks; about 150–250 words) and a compact review (verdict plus actionable findings, no audit table), and sync the repository planner and reviewer prompts with their templates.
+- Give WorkUnits using the compact profile a compact plan (cause and files, smallest change, acceptance-to-test mapping, risks; about 150–250 words) and a compact review (verdict plus actionable findings, no audit table), and sync the repository planner and reviewer prompts with their templates.

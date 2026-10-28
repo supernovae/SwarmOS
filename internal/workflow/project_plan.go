@@ -39,24 +39,24 @@ type ProjectPlanOptions struct {
 }
 
 type IssueSenseItem struct {
-	IssueNumber      int               `yaml:"issue_number" json:"issue_number"`
-	Title            string            `yaml:"title" json:"title"`
-	ValidWorkUnit    bool              `yaml:"valid_work_unit" json:"valid_work_unit"`
-	Approved         bool              `yaml:"approved" json:"approved"`
-	RecommendedLabel string            `yaml:"recommended_label" json:"recommended_label"` // "swarm:ready", "swarm:draft", "swarm:needs-scope", "swarm:blocked"
-	Workflow         string            `yaml:"workflow" json:"workflow"`
-	Gate             contract.GateMode `yaml:"gate" json:"gate"`
-	DependsOn        []int             `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
-	Touchpoints      []string          `yaml:"touchpoints,omitempty" json:"touchpoints,omitempty"`
-	OverlapsWith     []int             `yaml:"overlaps_with,omitempty" json:"overlaps_with,omitempty"`
-	GoalAlignment    string            `yaml:"goal_alignment" json:"goal_alignment"` // "PASS", "NEEDS_SCOPE", "RISK_FLAGGED"
-	SafetyNotes      []string          `yaml:"safety_notes,omitempty" json:"safety_notes,omitempty"`
-	Shape            TaskShape         `yaml:"shape,omitempty" json:"shape,omitempty"` // suggested; the planner confirms it in PLAN.md
-	ShapeSignals     []string          `yaml:"shape_signals,omitempty" json:"shape_signals,omitempty"`
-	ShapeHints       []string          `yaml:"shape_hints,omitempty" json:"shape_hints,omitempty"`
-	QuietDays        int               `yaml:"quiet_days,omitempty" json:"quiet_days,omitempty"`
-	DuplicateOf      int               `yaml:"duplicate_of,omitempty" json:"duplicate_of,omitempty"`
-	Lane             string            `yaml:"lane,omitempty" json:"lane,omitempty"`
+	IssueNumber         int               `yaml:"issue_number" json:"issue_number"`
+	Title               string            `yaml:"title" json:"title"`
+	ValidWorkUnit       bool              `yaml:"valid_work_unit" json:"valid_work_unit"`
+	Approved            bool              `yaml:"approved" json:"approved"`
+	RecommendedLabel    string            `yaml:"recommended_label" json:"recommended_label"` // "swarm:ready", "swarm:draft", "swarm:needs-scope", "swarm:blocked"
+	Workflow            string            `yaml:"workflow" json:"workflow"`
+	Gate                contract.GateMode `yaml:"gate" json:"gate"`
+	DependsOn           []int             `yaml:"depends_on,omitempty" json:"depends_on,omitempty"`
+	Touchpoints         []string          `yaml:"touchpoints,omitempty" json:"touchpoints,omitempty"`
+	OverlapsWith        []int             `yaml:"overlaps_with,omitempty" json:"overlaps_with,omitempty"`
+	GoalAlignment       string            `yaml:"goal_alignment" json:"goal_alignment"` // "PASS", "NEEDS_SCOPE", "RISK_FLAGGED"
+	SafetyNotes         []string          `yaml:"safety_notes,omitempty" json:"safety_notes,omitempty"`
+	SuggestedDimensions Dimensions        `yaml:"suggested_dimensions" json:"suggested_dimensions"`
+	Signals             []string          `yaml:"signals,omitempty" json:"signals,omitempty"`
+	Hints               []string          `yaml:"hints,omitempty" json:"hints,omitempty"`
+	QuietDays           int               `yaml:"quiet_days,omitempty" json:"quiet_days,omitempty"`
+	DuplicateOf         int               `yaml:"duplicate_of,omitempty" json:"duplicate_of,omitempty"`
+	Lane                string            `yaml:"lane,omitempty" json:"lane,omitempty"`
 
 	labels          []string           // labels on the issue when scanned
 	originalBody    string             // body before any normalization
@@ -222,7 +222,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 	}
 
 	items := make([]IssueSenseItem, 0, len(issues))
-	shapeInputs := make([]ShapeInput, 0, len(issues))
+	dimensionInputs := make([]DimensionInput, 0, len(issues))
 	dupCands := make([]dupCandidate, 0, len(issues))
 	now := opts.Now
 	if now.IsZero() {
@@ -245,13 +245,13 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 			labels:       iss.Labels,
 			originalBody: iss.Body,
 		}
-		shapeIn := ShapeInput{Title: iss.Title, Touchpoints: tps}
+		dimensionIn := DimensionInput{Title: iss.Title, Touchpoints: tps}
 		if parseErr != nil {
 			suggested := synthesizeWorkUnitFromRawIssue(iss, defaultConstraints, cfg)
-			shapeIn.Objective, shapeIn.Workflow = suggested.Objective, suggested.Workflow
+			dimensionIn.Objective, dimensionIn.Workflow = suggested.Objective, suggested.Workflow
 			if strings.TrimSpace(contract.StripHTMLComments(iss.Body)) != "" {
 				// Synthesized fallback criteria say nothing about the reporter's intent.
-				shapeIn.Acceptance = suggested.Acceptance
+				dimensionIn.Acceptance = suggested.Acceptance
 			}
 			item.ValidWorkUnit = false
 			item.Workflow = suggested.Workflow
@@ -270,7 +270,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 			item.Workflow = wu.Workflow
 			item.Gate = wu.Gate
 			item.DependsOn = wu.DependsOn
-			shapeIn.Objective, shapeIn.Acceptance, shapeIn.Workflow, shapeIn.DependsOn = wu.Objective, wu.Acceptance, wu.Workflow, wu.DependsOn
+			dimensionIn.Objective, dimensionIn.Acceptance, dimensionIn.Workflow, dimensionIn.DependsOn = wu.Objective, wu.Acceptance, wu.Workflow, wu.DependsOn
 			st, stErr := e.LeaseManager.GetCurrentState(ctx, iss.Number)
 			if stErr == nil && st != nil && st.TaskDigest == contract.DigestWorkUnit(wu) && st.PolicyDigest == policyDigest && slices.Contains(iss.Labels, readyLabel) {
 				item.Approved = true
@@ -293,16 +293,16 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 				item.RecommendedLabel = "swarm:draft"
 			}
 		}
-		shapeIn.Protected = item.GoalAlignment == "RISK_FLAGGED"
+		dimensionIn.Protected = item.GoalAlignment == "RISK_FLAGGED"
 		items = append(items, item)
-		shapeInputs = append(shapeInputs, shapeIn)
+		dimensionInputs = append(dimensionInputs, dimensionIn)
 		dupCands = append(dupCands, newDupCandidate(iss.Number, iss.Title, iss.Body))
 	}
 
 	populateOverlaps(items)
 	for i := range items {
-		shapeInputs[i].Overlaps = len(items[i].OverlapsWith)
-		applyShape(&items[i], AssessTaskShape(shapeInputs[i]))
+		dimensionInputs[i].Overlaps = len(items[i].OverlapsWith)
+		applyDimensions(&items[i], AssessTaskDimensions(dimensionInputs[i]))
 	}
 	markDuplicates(items, dupCands)
 	for i := range items {
@@ -1673,7 +1673,7 @@ func renderBacklogScanMarkdown(report *ProjectPlanReport, applied, normalized bo
 	if applied {
 		sb.WriteString(fmt.Sprintf("- **Tracker Actions Applied**: labels synced (`normalize=%t`)\n", normalized))
 	}
-	if line := renderShapeTally(report.BacklogItems); line != "" {
+	if line := renderDimensionTally(report.BacklogItems); line != "" {
 		sb.WriteString(line)
 	}
 	renderLanesSection(&sb, report.Lanes, report.BacklogItems)
@@ -1684,7 +1684,7 @@ func renderBacklogScanMarkdown(report *ProjectPlanReport, applied, normalized bo
 	if len(report.Lanes) > 0 {
 		sb.WriteString("\n#### All Open Issues\n")
 	}
-	sb.WriteString("\n| Issue | Recommended Label | Shape | Goal Alignment | Touchpoints | Overlaps | Depends On | Next Action |\n")
+	sb.WriteString("\n| Issue | Recommended Label | Suggested dimensions | Goal Alignment | Touchpoints | Overlaps | Depends On | Next Action |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
 
 	for _, it := range report.BacklogItems {
@@ -1719,11 +1719,11 @@ func renderBacklogScanMarkdown(report *ProjectPlanReport, applied, normalized bo
 		case "swarm:blocked":
 			nextAction = "Resolve dependencies / review protected paths"
 		}
-		if note := shapeNextStep(it.Shape); note != "" && nextAction != "" {
+		if note := dimensionNextStep(it.SuggestedDimensions); note != "" && nextAction != "" {
 			nextAction += " (" + note + ")"
 		}
 		sb.WriteString(fmt.Sprintf("| `#%d` %s | `%s` | %s | `%s` | %s | %s | %s | %s |\n",
-			it.IssueNumber, it.Title, it.RecommendedLabel, it.Shape.Title(), it.GoalAlignment, tps, ovs, deps, nextAction))
+			it.IssueNumber, it.Title, it.RecommendedLabel, it.SuggestedDimensions.String(), it.GoalAlignment, tps, ovs, deps, nextAction))
 	}
 
 	renderWavesSection(&sb, report.ExecutionWaves)

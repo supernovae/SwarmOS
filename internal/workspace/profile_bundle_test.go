@@ -30,6 +30,23 @@ func TestProfileCannotChangeGateOrChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(string(baseline), "## Execution profile:") {
+		t.Fatal("dimensionless WorkUnit selected a profile")
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".swarm/active/PLAN.md"), []byte("Suggested dimensions: size=small uncertainty=known risk=standard\nProfile: compact"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := CompileHarnessBundleAt(wt, wu, wf, nil, "planner", base); err != nil {
+		t.Fatal(err)
+	}
+	suggested, err := os.ReadFile(filepath.Join(wt, ".swarm/active/SYSTEM_PROMPT.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(suggested) != string(baseline) {
+		t.Fatal("PLAN suggestions selected a profile or changed the bundle")
+	}
+
 	for _, p := range cfg.Profiles {
 		wu.Size = p.Match.Size
 		wu.Uncertainty = p.Match.Uncertainty

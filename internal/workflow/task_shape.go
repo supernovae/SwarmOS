@@ -10,36 +10,8 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 )
 
-// TaskShape describes how much is already known about a piece of work, which
-// decides how much rigor its plan needs. It is advisory: scan and lint suggest
-// a shape from issue text, and the planner confirms or corrects it in PLAN.md.
-// It is never stored on the WorkUnit.
-type TaskShape string
-
-const (
-	ShapeRoutine     TaskShape = "routine"     // clear fix in a known place
-	ShapeInvolved    TaskShape = "involved"    // knowable, but needs analysis across several areas
-	ShapeExploratory TaskShape = "exploratory" // the right answer is not known yet
-	ShapeUrgent      TaskShape = "urgent"      // users are affected now; stabilize first
-)
-
-// Title returns the display form used in reports and prompts.
-func (s TaskShape) Title() string {
-	switch s {
-	case ShapeRoutine:
-		return "Routine"
-	case ShapeInvolved:
-		return "Involved"
-	case ShapeExploratory:
-		return "Exploratory"
-	case ShapeUrgent:
-		return "Urgent"
-	}
-	return "-"
-}
-
-// ShapeInput is the issue information shape assessment reads.
-type ShapeInput struct {
+// DimensionInput contains advisory issue assessment inputs.
+type DimensionInput struct {
 	Title       string
 	Objective   string
 	Acceptance  []string
@@ -50,12 +22,11 @@ type ShapeInput struct {
 	Protected   bool
 }
 
-// ShapeAssessment is a suggested shape plus the plain-language signals behind
-// it. Hints are suggestions for strengthening the issue; they never fail lint.
-type ShapeAssessment struct {
-	Shape   TaskShape `yaml:"shape" json:"shape"`
-	Signals []string  `yaml:"signals,omitempty" json:"signals,omitempty"`
-	Hints   []string  `yaml:"hints,omitempty" json:"hints,omitempty"`
+// DimensionAssessment never changes approved WorkUnit fields or selects profiles.
+type DimensionAssessment struct {
+	SuggestedDimensions Dimensions `yaml:"suggested_dimensions" json:"suggested_dimensions"`
+	Signals             []string   `yaml:"signals,omitempty" json:"signals,omitempty"`
+	Hints               []string   `yaml:"hints,omitempty" json:"hints,omitempty"`
 }
 
 var (
@@ -77,9 +48,8 @@ func wordPattern(words ...string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)\b(` + strings.Join(quoted, "|") + `)\b`)
 }
 
-// AssessTaskShape suggests a shape for an issue. Urgent wins over Exploratory,
-// which wins over Involved; anything else is Routine.
-func AssessTaskShape(in ShapeInput) ShapeAssessment {
+// AssessTaskDimensions suggests dimensions from issue text and scope.
+func AssessTaskDimensions(in DimensionInput) DimensionAssessment {
 	text := in.Title + "\n" + in.Objective
 	var urgent, exploratory, involved []string
 
@@ -115,29 +85,34 @@ func AssessTaskShape(in ShapeInput) ShapeAssessment {
 		involved = append(involved, fmt.Sprintf("touches %d separate areas", areas))
 	}
 	if in.Overlaps > 0 {
-		involved = append(involved, fmt.Sprintf("overlaps with %d other open issue(s)", in.Overlaps))
+		involved = append(involved, fmt.Sprintf("scope note: overlaps with %d other open issue(s)", in.Overlaps))
 	}
 	if len(in.DependsOn) > 0 {
-		involved = append(involved, "depends on other issues")
+		involved = append(involved, "scope note: depends on other issues")
 	}
 	if in.Protected {
 		involved = append(involved, "touches protected harness or CI paths")
 	}
 	if len(in.Acceptance) >= 6 {
-		involved = append(involved, fmt.Sprintf("%d acceptance criteria", len(in.Acceptance)))
+		involved = append(involved, fmt.Sprintf("scope note: %d acceptance criteria", len(in.Acceptance)))
 	}
 
-	var out ShapeAssessment
-	switch {
-	case len(urgent) > 0:
-		out.Shape, out.Signals = ShapeUrgent, urgent
-	case len(exploratory) > 0:
-		out.Shape, out.Signals = ShapeExploratory, exploratory
-	case len(involved) > 0:
-		out.Shape, out.Signals = ShapeInvolved, involved
-	default:
-		out.Shape = ShapeRoutine
+	out := DimensionAssessment{SuggestedDimensions: Dimensions{"small", "known", "standard"}}
+	if touchpointAreas(in.Touchpoints) >= 3 {
+		out.SuggestedDimensions.Size = "multi_area"
 	}
+	if len(exploratory) > 0 && len(urgent) == 0 {
+		out.SuggestedDimensions.Uncertainty = "unknown"
+	}
+	if in.Protected {
+		out.SuggestedDimensions.Risk = "sensitive"
+	}
+	if len(urgent) > 0 {
+		out.SuggestedDimensions.Risk = "urgent"
+	}
+	out.Signals = append(out.Signals, urgent...)
+	out.Signals = append(out.Signals, exploratory...)
+	out.Signals = append(out.Signals, involved...)
 
 	if len(in.Acceptance) > 0 && checkable == 0 {
 		out.Hints = append(out.Hints, "No acceptance criterion names a command, test, or observable result; add one so reviewers can check the outcome.")
@@ -150,10 +125,10 @@ func AssessTaskShape(in ShapeInput) ShapeAssessment {
 	if touchpointAreas(in.Touchpoints) >= 3 {
 		out.Hints = append(out.Hints, "Spans several areas; consider `swarm issue decompose` so parallel work merges cleanly.")
 	}
-	switch out.Shape {
-	case ShapeExploratory:
+	switch {
+	case out.SuggestedDimensions.Uncertainty == "unknown":
 		out.Hints = append(out.Hints, "The answer isn't known yet; write down the open question so the plan can start with a small probe.")
-	case ShapeUrgent:
+	case out.SuggestedDimensions.Risk == "urgent":
 		out.Hints = append(out.Hints, "Users may be affected now; keep this task to the smallest mitigation and file the root cause separately.")
 	}
 	return out
@@ -161,7 +136,7 @@ func AssessTaskShape(in ShapeInput) ShapeAssessment {
 
 // WorkUnitTouchpoints derives a WorkUnit's likely repository-relative
 // touchpoints from its title, objective, and acceptance criteria, the same way
-// backlog scans and shape assessment do.
+// backlog scans and dimension assessment do.
 func WorkUnitTouchpoints(repoRoot string, wu *contract.WorkUnit) []string {
 	if wu == nil {
 		return nil
@@ -224,18 +199,18 @@ func touchpointsOverlap(a, b string) bool {
 	return path.Ext(a) == ".go" && path.Ext(b) == ".go" && path.Dir(a) == path.Dir(b)
 }
 
-// AssessWorkUnitShape assesses a parsed WorkUnit, deriving touchpoints from its
+// AssessWorkUnitDimensions assesses a parsed WorkUnit, deriving touchpoints from its
 // text the same way backlog scans do.
-func AssessWorkUnitShape(repoRoot string, wu *contract.WorkUnit, spec *contract.ValidationSpec) ShapeAssessment {
+func AssessWorkUnitDimensions(repoRoot string, wu *contract.WorkUnit, spec *contract.ValidationSpec) DimensionAssessment {
 	tps := WorkUnitTouchpoints(repoRoot, wu)
-	return AssessTaskShape(ShapeInput{
+	return AssessTaskDimensions(DimensionInput{
 		Title:       wu.Title,
 		Objective:   wu.Objective,
 		Acceptance:  wu.Acceptance,
 		Workflow:    wu.Workflow,
 		DependsOn:   wu.DependsOn,
 		Touchpoints: tps,
-		Protected:   touchesProtectedPath(tps, spec) && !wu.AllowHarnessChanges,
+		Protected:   touchesProtectedPath(tps, spec),
 	})
 }
 
@@ -259,81 +234,63 @@ func touchpointAreas(tps []string) int {
 	return len(areas)
 }
 
-// shapeNextStep is a short, shape-aware note appended to a backlog row's next action.
-func shapeNextStep(s TaskShape) string {
-	switch s {
-	case ShapeRoutine:
-		return "good first task"
-	case ShapeInvolved:
-		return "plan should weigh alternatives"
-	case ShapeExploratory:
-		return "start with a probe"
-	case ShapeUrgent:
+// dimensionNextStep gives a short advisory next action.
+func dimensionNextStep(d Dimensions) string {
+	switch {
+	case d.Risk == "urgent":
 		return "stabilize first"
+	case d.Uncertainty == "unknown":
+		return "start with a probe"
+	case d.Size == "multi_area" || d.Risk == "sensitive":
+		return "plan should weigh alternatives"
+	default:
+		return "good first task"
 	}
-	return ""
 }
 
-// applyShape records an assessment on a backlog item. Exploratory raw issues
-// get a human plan gate in their suggested WorkUnit, and Urgent ones at least an
-// agent gate; the maintainer still reviews and approves the suggestion.
-func applyShape(item *IssueSenseItem, a ShapeAssessment) {
-	item.Shape, item.ShapeSignals, item.ShapeHints = a.Shape, a.Signals, a.Hints
+func applyDimensions(item *IssueSenseItem, a DimensionAssessment) {
+	item.SuggestedDimensions, item.Signals, item.Hints = a.SuggestedDimensions, a.Signals, a.Hints
 	if item.SuggestedUpdate == nil {
 		return
 	}
 	switch {
-	case a.Shape == ShapeExploratory:
+	case a.SuggestedDimensions.Risk == "urgent":
+		if item.SuggestedUpdate.Gate == "" || item.SuggestedUpdate.Gate == contract.GateNone {
+			item.SuggestedUpdate.Gate = contract.GateAgent
+		}
+	case a.SuggestedDimensions.Uncertainty == "unknown":
 		item.SuggestedUpdate.Gate = contract.GateHuman
-	case a.Shape == ShapeUrgent && (item.SuggestedUpdate.Gate == "" || item.SuggestedUpdate.Gate == contract.GateNone):
-		item.SuggestedUpdate.Gate = contract.GateAgent
 	}
 	item.Gate = item.SuggestedUpdate.Gate
 }
 
-// renderShapeTally summarizes suggested shapes in one report line.
-func renderShapeTally(items []IssueSenseItem) string {
-	counts := make(map[TaskShape]int)
+func renderDimensionTally(items []IssueSenseItem) string {
+	counts := make(map[string]int)
 	for _, it := range items {
-		counts[it.Shape]++
+		counts[it.SuggestedDimensions.String()]++
 	}
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var parts []string
-	for _, s := range []TaskShape{ShapeRoutine, ShapeInvolved, ShapeExploratory, ShapeUrgent} {
-		if counts[s] > 0 {
-			parts = append(parts, fmt.Sprintf("`%d` %s", counts[s], strings.ToLower(s.Title())))
-		}
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("`%d` %s", counts[k], k))
 	}
 	if len(parts) == 0 {
 		return ""
 	}
-	return "- **Suggested Shapes**: " + strings.Join(parts, ", ") + " (planners confirm the shape when they read the code)\n"
+	return "- **Suggested Dimensions**: " + strings.Join(parts, "; ") + " (advisory until set by a maintainer)\n"
 }
 
 // Dimensions are advisory suggestions until a maintainer sets the WorkUnit fields.
 type Dimensions struct {
-	Size        string `json:"size"`
-	Uncertainty string `json:"uncertainty"`
-	Risk        string `json:"risk"`
+	Size        string `json:"size" yaml:"size"`
+	Uncertainty string `json:"uncertainty" yaml:"uncertainty"`
+	Risk        string `json:"risk" yaml:"risk"`
 }
 
-func SuggestDimensions(a ShapeAssessment, in ShapeInput) Dimensions {
-	d := Dimensions{"small", "known", "standard"}
-	if touchpointAreas(in.Touchpoints) >= 3 {
-		d.Size = "multi_area"
-	}
-	if a.Shape == ShapeExploratory {
-		d.Uncertainty = "unknown"
-	}
-	if in.Protected {
-		d.Risk = "sensitive"
-	}
-	if a.Shape == ShapeUrgent {
-		d.Risk = "urgent"
-	}
-	return d
-}
-
-func SuggestWorkUnitDimensions(root string, wu *contract.WorkUnit, shape ShapeAssessment, spec *contract.ValidationSpec) Dimensions {
-	tps := WorkUnitTouchpoints(root, wu)
-	return SuggestDimensions(shape, ShapeInput{Touchpoints: tps, Protected: touchesProtectedPath(tps, spec)})
+func (d Dimensions) String() string {
+	return fmt.Sprintf("size=%s uncertainty=%s risk=%s", d.Size, d.Uncertainty, d.Risk)
 }

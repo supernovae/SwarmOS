@@ -8,59 +8,59 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 )
 
-func TestAssessTaskShape(t *testing.T) {
+func TestAssessTaskDimensions(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name string
-		in   ShapeInput
-		want TaskShape
+		in   DimensionInput
+		want Dimensions
 	}{
-		{"routine typo", ShapeInput{Title: "Fix typo in README", Objective: "Correct the install command spelling", Acceptance: []string{"`make check` passes"}, Workflow: "bugfix", Touchpoints: []string{"README.md"}}, ShapeRoutine},
-		{"bugfix crash is urgent", ShapeInput{Title: "CLI panics on empty config", Objective: "swarm crashes when config.yaml is empty", Acceptance: []string{"Regression test fails before the fix"}, Workflow: "bugfix"}, ShapeUrgent},
-		{"outage is urgent for any workflow", ShapeInput{Title: "Webhook outage", Objective: "Deliveries stopped", Workflow: "feature"}, ShapeUrgent},
-		{"feature mentioning security is not urgent", ShapeInput{Title: "Add security docs", Objective: "Document the security model", Acceptance: []string{"docs/security.md exists"}, Workflow: "feature"}, ShapeRoutine},
-		{"feature adding regression tests is not urgent", ShapeInput{Title: "Add regression tests", Objective: "Cover the parser with regression tests", Acceptance: []string{"`go test ./...` passes"}, Workflow: "feature"}, ShapeRoutine},
-		{"investigate is exploratory", ShapeInput{Title: "Caching layer", Objective: "Investigate whether a cache helps scan latency", Acceptance: []string{"Findings written up"}, Workflow: "feature"}, ShapeExploratory},
-		{"question title is exploratory", ShapeInput{Title: "Support Windows paths?", Objective: "Users ask for Windows support", Acceptance: []string{"`go test ./...` passes"}, Workflow: "feature"}, ShapeExploratory},
-		{"all vague criteria is exploratory", ShapeInput{Title: "CLI output", Objective: "Make the CLI output nicer", Acceptance: []string{"Output is cleaner", "Errors are better"}, Workflow: "feature"}, ShapeExploratory},
-		{"wide touchpoints are involved", ShapeInput{Title: "Rename claim id", Objective: "Rename across packages", Acceptance: []string{"`make check` passes"}, Workflow: "refactor", Touchpoints: []string{"internal/lease/manager.go", "internal/cli/claim.go", "docs/WORKFLOWS.md"}}, ShapeInvolved},
-		{"overlaps are involved", ShapeInput{Title: "Tweak handler", Objective: "Adjust the handler", Acceptance: []string{"handler returns 204"}, Workflow: "feature", Overlaps: 1}, ShapeInvolved},
-		{"protected paths are involved", ShapeInput{Title: "CI tweak", Objective: "Speed up CI", Acceptance: []string{"`make check` passes"}, Workflow: "feature", Protected: true}, ShapeInvolved},
-		{"urgent beats exploratory", ShapeInput{Title: "Investigate data loss", Objective: "Investigate data loss on resume", Workflow: "bugfix"}, ShapeUrgent},
+		{"routine typo", DimensionInput{Title: "Fix typo in README", Objective: "Correct the install command spelling", Acceptance: []string{"`make check` passes"}, Workflow: "bugfix", Touchpoints: []string{"README.md"}}, Dimensions{"small", "known", "standard"}},
+		{"bugfix crash is urgent", DimensionInput{Title: "CLI panics on empty config", Objective: "swarm crashes when config.yaml is empty", Acceptance: []string{"Regression test fails before the fix"}, Workflow: "bugfix"}, Dimensions{"small", "known", "urgent"}},
+		{"outage is urgent for any workflow", DimensionInput{Title: "Webhook outage", Objective: "Deliveries stopped", Workflow: "feature"}, Dimensions{"small", "known", "urgent"}},
+		{"feature mentioning security is not urgent", DimensionInput{Title: "Add security docs", Objective: "Document the security model", Acceptance: []string{"docs/security.md exists"}, Workflow: "feature"}, Dimensions{"small", "known", "standard"}},
+		{"feature adding regression tests is not urgent", DimensionInput{Title: "Add regression tests", Objective: "Cover the parser with regression tests", Acceptance: []string{"`go test ./...` passes"}, Workflow: "feature"}, Dimensions{"small", "known", "standard"}},
+		{"investigate is exploratory", DimensionInput{Title: "Caching layer", Objective: "Investigate whether a cache helps scan latency", Acceptance: []string{"Findings written up"}, Workflow: "feature"}, Dimensions{"small", "unknown", "standard"}},
+		{"question title is exploratory", DimensionInput{Title: "Support Windows paths?", Objective: "Users ask for Windows support", Acceptance: []string{"`go test ./...` passes"}, Workflow: "feature"}, Dimensions{"small", "unknown", "standard"}},
+		{"all vague criteria is exploratory", DimensionInput{Title: "CLI output", Objective: "Make the CLI output nicer", Acceptance: []string{"Output is cleaner", "Errors are better"}, Workflow: "feature"}, Dimensions{"small", "unknown", "standard"}},
+		{"wide touchpoints are involved", DimensionInput{Title: "Rename claim id", Objective: "Rename across packages", Acceptance: []string{"`make check` passes"}, Workflow: "refactor", Touchpoints: []string{"internal/lease/manager.go", "internal/cli/claim.go", "docs/WORKFLOWS.md"}}, Dimensions{"multi_area", "known", "standard"}},
+		{"overlaps are involved", DimensionInput{Title: "Tweak handler", Objective: "Adjust the handler", Acceptance: []string{"handler returns 204"}, Workflow: "feature", Overlaps: 1}, Dimensions{"small", "known", "standard"}},
+		{"protected paths are involved", DimensionInput{Title: "CI tweak", Objective: "Speed up CI", Acceptance: []string{"`make check` passes"}, Workflow: "feature", Protected: true}, Dimensions{"small", "known", "sensitive"}},
+		{"urgent beats exploratory", DimensionInput{Title: "Investigate data loss", Objective: "Investigate data loss on resume", Workflow: "bugfix"}, Dimensions{"small", "known", "urgent"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := AssessTaskShape(tc.in)
-			if got.Shape != tc.want {
-				t.Fatalf("shape = %s (signals %v), want %s", got.Shape, got.Signals, tc.want)
+			got := AssessTaskDimensions(tc.in)
+			if got.SuggestedDimensions != tc.want {
+				t.Fatalf("dimensions = %s (signals %v), want %s", got.SuggestedDimensions, got.Signals, tc.want)
 			}
-			if got.Shape != ShapeRoutine && len(got.Signals) == 0 {
-				t.Fatalf("%s shape has no explaining signal", got.Shape)
+			if got.SuggestedDimensions != (Dimensions{"small", "known", "standard"}) && len(got.Signals) == 0 {
+				t.Fatalf("%s dimensions have no explaining signal", got.SuggestedDimensions)
 			}
 		})
 	}
 }
 
-func TestAssessTaskShapeHints(t *testing.T) {
+func TestAssessTaskDimensionsHints(t *testing.T) {
 	t.Parallel()
-	hasHint := func(a ShapeAssessment, sub string) bool {
+	hasHint := func(a DimensionAssessment, sub string) bool {
 		return slices.ContainsFunc(a.Hints, func(h string) bool { return strings.Contains(h, sub) })
 	}
-	noRepro := AssessTaskShape(ShapeInput{Title: "Wrong exit code", Objective: "swarm exits 0 on failure", Acceptance: []string{"exits 1 on failure"}, Workflow: "bugfix"})
+	noRepro := AssessTaskDimensions(DimensionInput{Title: "Wrong exit code", Objective: "swarm exits 0 on failure", Acceptance: []string{"exits 1 on failure"}, Workflow: "bugfix"})
 	if !hasHint(noRepro, "reproduction") {
 		t.Fatalf("bugfix without repro should get a hint: %v", noRepro.Hints)
 	}
-	unverifiable := AssessTaskShape(ShapeInput{Title: "Docs", Objective: "Document it", Acceptance: []string{"Feature is documented"}, Workflow: "feature"})
+	unverifiable := AssessTaskDimensions(DimensionInput{Title: "Docs", Objective: "Document it", Acceptance: []string{"Feature is documented"}, Workflow: "feature"})
 	if !hasHint(unverifiable, "observable result") {
 		t.Fatalf("criteria with nothing checkable should get a hint: %v", unverifiable.Hints)
 	}
-	clean := AssessTaskShape(ShapeInput{Title: "Fix typo", Objective: "Fix typo; regression test added", Acceptance: []string{"`make check` passes"}, Workflow: "bugfix", Touchpoints: []string{"README.md"}})
+	clean := AssessTaskDimensions(DimensionInput{Title: "Fix typo", Objective: "Fix typo; regression test added", Acceptance: []string{"`make check` passes"}, Workflow: "bugfix", Touchpoints: []string{"README.md"}})
 	if len(clean.Hints) != 0 {
 		t.Fatalf("well-formed routine issue should have no hints: %v", clean.Hints)
 	}
 }
 
-func TestBacklogScanReportsShapeAndGatesExploratorySuggestions(t *testing.T) {
+func TestBacklogScanReportsDimensionsAndGatesUnknownSuggestions(t *testing.T) {
 	root, engine, tr := setupProjectPlanTestRepo(t)
 	ctx := t.Context()
 	vague, err := tr.CreateIssue(ctx, "Should we cache scan results?", "Investigate whether caching helps large backlogs.", nil)
@@ -83,18 +83,33 @@ func TestBacklogScanReportsShapeAndGatesExploratorySuggestions(t *testing.T) {
 	for _, it := range report.BacklogItems {
 		byNum[it.IssueNumber] = it
 	}
-	if it := byNum[vague.Number]; it.Shape != ShapeExploratory || it.SuggestedUpdate == nil || it.SuggestedUpdate.Gate != contract.GateHuman || it.Gate != contract.GateHuman {
+	if it := byNum[vague.Number]; it.SuggestedDimensions.Uncertainty != "unknown" || it.SuggestedUpdate == nil || it.SuggestedUpdate.Gate != contract.GateHuman || it.Gate != contract.GateHuman {
 		t.Fatalf("exploratory raw issue should suggest a human gate: %+v", it)
 	}
-	if it := byNum[crash.Number]; it.Shape != ShapeUrgent || it.SuggestedUpdate == nil || it.SuggestedUpdate.Gate == contract.GateNone {
+	if it := byNum[crash.Number]; it.SuggestedDimensions.Risk != "urgent" || it.SuggestedUpdate == nil || it.SuggestedUpdate.Gate == contract.GateNone {
 		t.Fatalf("urgent raw issue should suggest at least an agent gate: %+v", it)
 	}
-	// The valid WorkUnit overlaps the crash report on handler.go, which makes it Involved.
-	if it := byNum[routine.Number]; it.Shape != ShapeInvolved || it.Gate != contract.GateNone {
-		t.Fatalf("valid WorkUnit shape/gate: %+v", it)
+	// The valid WorkUnit overlaps the crash report on handler.go, which adds a scope note without changing dimensions.
+	if it := byNum[routine.Number]; it.SuggestedDimensions != (Dimensions{"small", "known", "standard"}) || it.Gate != contract.GateNone {
+		t.Fatalf("valid WorkUnit dimensions/gate: %+v", it)
 	}
+	for _, format := range []string{"json", "yaml"} {
+		raw, err := MarshalProjectPlanReport(report, format)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"suggested_dimensions", "signals", "unknown", "urgent"} {
+			if !strings.Contains(string(raw), want) {
+				t.Fatalf("%s export missing %s: %s", format, want, raw)
+			}
+		}
+		if strings.Contains(string(raw), "shape") {
+			t.Fatalf("obsolete export field: %s", raw)
+		}
+	}
+
 	md := report.SummaryMarkdown
-	for _, want := range []string{"| Shape |", "Suggested Shapes", "Exploratory", "start with a probe", "stabilize first"} {
+	for _, want := range []string{"| Suggested dimensions |", "Suggested Dimensions", "uncertainty=unknown", "start with a probe", "stabilize first"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("scan markdown missing %q:\n%s", want, md)
 		}
@@ -162,21 +177,33 @@ func TestTouchpointOverlap(t *testing.T) {
 	}
 }
 
-func TestSuggestDimensions(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		shape                   TaskShape
-		in                      ShapeInput
-		size, uncertainty, risk string
-	}{
-		{ShapeRoutine, ShapeInput{}, "small", "known", "standard"},
-		{ShapeUrgent, ShapeInput{Protected: true}, "small", "known", "urgent"},
-		{ShapeExploratory, ShapeInput{}, "small", "unknown", "standard"},
-		{ShapeInvolved, ShapeInput{Protected: true, Touchpoints: []string{"internal/cli/a.go", "internal/workspace/a.go", "docs/a.md"}}, "multi_area", "known", "sensitive"},
-	} {
-		d := SuggestDimensions(ShapeAssessment{Shape: tc.shape}, tc.in)
-		if d.Size != tc.size || d.Uncertainty != tc.uncertainty || d.Risk != tc.risk {
-			t.Fatalf("%+v: %+v", tc, d)
+func TestDimensionGatePrecedence(t *testing.T) {
+	for _, in := range []DimensionInput{{Title: "Investigate outage"}, {Title: "Investigate cache"}} {
+		a := AssessTaskDimensions(in)
+		item := IssueSenseItem{SuggestedUpdate: &contract.WorkUnit{Gate: contract.GateNone}}
+		applyDimensions(&item, a)
+		want := contract.GateHuman
+		if a.SuggestedDimensions.Risk == "urgent" {
+			want = contract.GateAgent
+		}
+		if item.Gate != want {
+			t.Fatalf("%+v: gate %s want %s", a, item.Gate, want)
+		}
+	}
+	mixed := IssueSenseItem{SuggestedUpdate: &contract.WorkUnit{Gate: contract.GateNone}}
+	applyDimensions(&mixed, DimensionAssessment{SuggestedDimensions: Dimensions{"small", "unknown", "urgent"}})
+	if mixed.Gate != contract.GateAgent {
+		t.Fatal("urgent risk must take precedence over unknown uncertainty", mixed.Gate)
+	}
+
+	// Scope notes explain coordination work, without changing dimensions.
+	a := AssessTaskDimensions(DimensionInput{DependsOn: []int{1}, Overlaps: 1, Acceptance: make([]string, 6)})
+	if a.SuggestedDimensions != (Dimensions{"small", "known", "standard"}) {
+		t.Fatal(a)
+	}
+	for _, signal := range a.Signals {
+		if !strings.HasPrefix(signal, "scope note:") {
+			t.Fatal(signal)
 		}
 	}
 }

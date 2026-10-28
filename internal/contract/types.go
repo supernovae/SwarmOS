@@ -37,6 +37,9 @@ type WorkUnit struct {
 	Workflow             string     `yaml:"workflow" json:"workflow"`
 	Gate                 GateMode   `yaml:"gate,omitempty" json:"gate,omitempty"`
 	AllowHarnessChanges  bool       `yaml:"allow_harness_changes,omitempty" json:"allow_harness_changes,omitempty"`
+	Size                 string     `yaml:"size,omitempty" json:"size,omitempty"`
+	Uncertainty          string     `yaml:"uncertainty,omitempty" json:"uncertainty,omitempty"`
+	Risk                 string     `yaml:"risk,omitempty" json:"risk,omitempty"`
 	Subtasks             []WorkUnit `yaml:"subtasks,omitempty" json:"subtasks,omitempty"`
 }
 
@@ -123,6 +126,7 @@ type CheckSpec struct {
 }
 
 type SwarmConfig struct {
+	Profiles      []ProfileSpec        `yaml:"profiles,omitempty" json:"profiles,omitempty"`
 	Execution     ExecutionConfig      `yaml:"execution,omitempty" json:"execution,omitempty"`
 	Version       int                  `yaml:"version" json:"version"`
 	DefaultAgent  string               `yaml:"default_agent" json:"default_agent"`

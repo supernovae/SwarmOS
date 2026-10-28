@@ -23,7 +23,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	var title, objective, workflowName, gate string
+	var title, objective, workflowName, gate, size, uncertainty, risk string
 	var constraints, acceptance, capabilities []string
 	var ready, allowHarnessChanges bool
 	var dependsOn []int
@@ -40,7 +40,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if parentIssue < 0 {
 			return fmt.Errorf("invalid --parent %d", parentIssue)
 		}
-		wu := &contract.WorkUnit{ID: "ISSUE-NEW", ParentIssue: parentIssue, DependsOn: dependsOn, RequiredCapabilities: capabilities, Title: title, Objective: objective, Constraints: constraints, Acceptance: acceptance, Workflow: workflowName, Gate: contract.GateMode(gate), AllowHarnessChanges: allowHarnessChanges}
+		wu := &contract.WorkUnit{ID: "ISSUE-NEW", ParentIssue: parentIssue, DependsOn: dependsOn, RequiredCapabilities: capabilities, Title: title, Objective: objective, Constraints: constraints, Acceptance: acceptance, Workflow: workflowName, Gate: contract.GateMode(gate), AllowHarnessChanges: allowHarnessChanges, Size: size, Uncertainty: uncertainty, Risk: risk}
 		if err := contract.ValidateWorkUnit(wu); err != nil {
 			return err
 		}
@@ -100,6 +100,9 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	createCmd.Flags().IntSliceVar(&dependsOn, "depends-on", nil, "Prerequisite issue numbers that must complete first")
 	createCmd.Flags().StringSliceVar(&capabilities, "capability", nil, "Required volunteer node capabilities (e.g., coding,testing,docs)")
 	createCmd.Flags().BoolVar(&allowHarnessChanges, "allow-harness-changes", false, "Allow the WorkUnit to edit protected harness paths")
+	createCmd.Flags().StringVar(&size, "size", "", "WorkUnit size (small, multi_area)")
+	createCmd.Flags().StringVar(&uncertainty, "uncertainty", "", "WorkUnit uncertainty (known, unknown)")
+	createCmd.Flags().StringVar(&risk, "risk", "", "WorkUnit risk (standard, sensitive, urgent)")
 	createCmd.Flags().IntVar(&parentIssue, "parent", 0, "Parent epic/workunit issue number")
 	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured issue results")
 	approveCmd := &cobra.Command{Use: "approve <issue-number>", Short: "Approve the current immutable WorkUnit revision for execution", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
@@ -170,10 +173,11 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		}
 		shape := assessShape(rootOpts.resolveRepoRoot(), wu)
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "shape": shape})
+			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "shape": shape, "dimensions": workflow.Dimensions{Size: wu.Size, Uncertainty: wu.Uncertainty, Risk: wu.Risk}, "suggested_dimensions": suggestedDimensions(rootOpts.resolveRepoRoot(), wu, shape)})
 		}
 		out := cmd.OutOrStdout()
 		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v, allow_harness_changes=%t]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities, wu.AllowHarnessChanges)
+		fmt.Fprintf(out, "Dimensions: size=%s uncertainty=%s risk=%s\nSuggested dimensions: %+v\n", wu.Size, wu.Uncertainty, wu.Risk, suggestedDimensions(rootOpts.resolveRepoRoot(), wu, shape))
 		writeShapeAdvice(out, shape)
 		return nil
 	}}
@@ -303,4 +307,9 @@ func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&sequential, "sequential", true, "Chain child issues sequentially via depends_on")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured child issues")
 	return cmd
+}
+
+func suggestedDimensions(root string, wu *contract.WorkUnit, shape workflow.ShapeAssessment) workflow.Dimensions {
+	spec, _ := harness.LoadValidationSpec(root)
+	return workflow.SuggestWorkUnitDimensions(root, wu, shape, spec)
 }

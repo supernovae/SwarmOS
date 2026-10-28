@@ -195,3 +195,15 @@ With `plan_mode: agent`, manual staging is disabled: use `swarm issue review-pla
 When required checks fail during issue or PR work, the coordinator writes a trusted repair brief, `.swarm/active/REPAIR.md`. It names the failing checks and tests and marks each failing Go test as a regression, pre-existing at the approved base, or flaky. If every failure is pre-existing, the run stops for a maintainer instead of starting a developer round. Otherwise the same run starts up to `lease.validation_repair_limit` developer repair rounds (one by default, zero disables them). Each round is a fenced checkpoint followed by the full trusted checks, and only those checks decide whether the run passed. When the limit is used up, or a round changes nothing, the run stops with exit code `3` and suggests `--phase implement`. `swarm issue status` and `swarm pr status` show the same classification. See [Repair brief for failed validation](developer.md#repair-brief-for-failed-validation).
 
 Released builds can reuse coordinator-recorded validation during `swarm issue submit` and `swarm pr submit` when the checkpoint tree, approved base, trusted policy, claim, worker, and swarm version match. Reuse output and PR evidence show the original run's age and tree SHA. Explicit `issue validate` and `pr validate` always run checks, as do CI, development builds, and fork submissions.
+
+### Policy-selected execution profiles
+
+Maintainers can record `size`, `uncertainty` and `risk` on a WorkUnit to get
+planning guidance suited to its needs. Approved policy selects the first matching
+profile: urgent work starts with the smallest mitigation, unknown solutions get
+a bounded investigation and decision artifact, sensitive work gets compact
+planning with strong independent review and adversarial cases, multi-area work
+gets a detailed handoff, and small work gets compact guidance. Profiles supply
+prompt variants and evidence expectations; all existing gates and required
+checks still apply. Planners follow the compiled profile. Prose shapes remain
+available for WorkUnits whose dimensions have not been assessed.

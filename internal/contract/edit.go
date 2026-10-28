@@ -10,6 +10,7 @@ import (
 
 // WorkUnitEdit distinguishes omitted fields from explicitly empty replacements.
 type WorkUnitEdit struct {
+	Size, Uncertainty, Risk          *string
 	Title, Objective, Workflow, Gate *string
 	Constraints, Acceptance          *[]string
 	DependsOn                        *[]int
@@ -53,6 +54,15 @@ func EditWorkUnitIssue(number int, title, body string, edit WorkUnitEdit) (strin
 	}
 	if edit.AllowHarnessChanges != nil {
 		fields["allow_harness_changes"] = *edit.AllowHarnessChanges
+	}
+	if edit.Size != nil {
+		fields["size"] = *edit.Size
+	}
+	if edit.Uncertainty != nil {
+		fields["uncertainty"] = *edit.Uncertainty
+	}
+	if edit.Risk != nil {
+		fields["risk"] = *edit.Risk
 	}
 	old, oldErr := editableWorkUnit(number, title, body)
 	candidate := body
@@ -102,6 +112,15 @@ func EditWorkUnitIssue(number int, title, body string, edit WorkUnitEdit) (strin
 		if edit.AllowHarnessChanges != nil {
 			expected.AllowHarnessChanges = *edit.AllowHarnessChanges
 		}
+		if edit.Size != nil {
+			expected.Size = *edit.Size
+		}
+		if edit.Uncertainty != nil {
+			expected.Uncertainty = *edit.Uncertainty
+		}
+		if edit.Risk != nil {
+			expected.Risk = *edit.Risk
+		}
 		a := DigestWorkUnit(&expected)
 		b := DigestWorkUnit(parsed)
 		if a != b {
@@ -124,6 +143,8 @@ func applyEditSpans(body string, spans []editSpan) string {
 
 func sectionKey(header string) string {
 	switch strings.ToLower(strings.TrimSpace(header)) {
+	case "size", "uncertainty", "risk":
+		return strings.ToLower(strings.TrimSpace(header))
 	case "objective":
 		return "objective"
 	case "constraints":
@@ -147,8 +168,9 @@ func editMarkdown(body string, fields map[string]any) (string, error) {
 		return body, nil
 	}
 	type section struct {
-		key        string
-		start, end int
+		key         string
+		start, end  int
+		headerStart int
 	}
 	var sections []section
 	offset := 0
@@ -166,7 +188,7 @@ func editMarkdown(body string, fields map[string]any) (string, error) {
 			if len(sections) > 0 {
 				sections[len(sections)-1].end = offset
 			}
-			sections = append(sections, section{sectionKey(strings.TrimPrefix(trimmed, "### ")), offset + len(line), len(body)})
+			sections = append(sections, section{key: sectionKey(strings.TrimPrefix(trimmed, "### ")), start: offset + len(line), end: len(body), headerStart: offset})
 		}
 		offset += len(line)
 	}
@@ -174,16 +196,23 @@ func editMarkdown(body string, fields map[string]any) (string, error) {
 	if strings.Contains(body, "\r\n") {
 		newline = "\r\n"
 	}
-	names := map[string]string{"objective": "Objective", "constraints": "Constraints", "acceptance": "Acceptance Criteria", "workflow": "Workflow", "gate": "Plan Gate", "depends_on": "Depends On", "allow_harness_changes": "Allow Harness Changes"}
+	names := map[string]string{"size": "Size", "uncertainty": "Uncertainty", "risk": "Risk", "objective": "Objective", "constraints": "Constraints", "acceptance": "Acceptance Criteria", "workflow": "Workflow", "gate": "Plan Gate", "depends_on": "Depends On", "allow_harness_changes": "Allow Harness Changes"}
 	var spans []editSpan
 	var additions strings.Builder
-	for _, key := range []string{"objective", "constraints", "acceptance", "workflow", "gate", "depends_on", "allow_harness_changes"} {
+	for _, key := range []string{"size", "uncertainty", "risk", "objective", "constraints", "acceptance", "workflow", "gate", "depends_on", "allow_harness_changes"} {
 		value, ok := fields[key]
 		if !ok {
 			continue
 		}
 		fragment := &WorkUnit{}
 		switch key {
+		case "size":
+			fragment.Size = value.(string)
+		case "uncertainty":
+			fragment.Uncertainty = value.(string)
+		case "risk":
+			fragment.Risk = value.(string)
+
 		case "objective":
 			fragment.Objective = value.(string)
 		case "constraints":
@@ -236,9 +265,13 @@ func editMarkdown(body string, fields map[string]any) (string, error) {
 			if s.end == len(body) {
 				separator = ""
 			}
-			spans = append(spans, editSpan{s.start, s.end, newline + content + separator})
+			if (key == "size" || key == "uncertainty" || key == "risk") && value.(string) == "" {
+				spans = append(spans, editSpan{s.headerStart, s.end, ""})
+			} else {
+				spans = append(spans, editSpan{s.start, s.end, newline + content + separator})
+			}
 		}
-		if !found && (key != "allow_harness_changes" || value.(bool)) {
+		if !found && content != newline && (key != "allow_harness_changes" || value.(bool)) {
 			additions.WriteString(newline + "### " + names[key] + newline + newline + content)
 		}
 	}

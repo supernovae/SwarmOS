@@ -155,3 +155,21 @@ func TestTouchpointOverlap(t *testing.T) {
 		})
 	}
 }
+
+func TestSuggestDimensions(t *testing.T) {
+	for _, tc := range []struct {
+		shape                   TaskShape
+		in                      ShapeInput
+		size, uncertainty, risk string
+	}{
+		{ShapeRoutine, ShapeInput{}, "small", "known", "standard"},
+		{ShapeUrgent, ShapeInput{Protected: true}, "small", "known", "urgent"},
+		{ShapeExploratory, ShapeInput{}, "small", "unknown", "standard"},
+		{ShapeInvolved, ShapeInput{Protected: true, Touchpoints: []string{"internal/cli/a.go", "internal/workspace/a.go", "docs/a.md"}}, "multi_area", "known", "sensitive"},
+	} {
+		d := SuggestDimensions(ShapeAssessment{Shape: tc.shape}, tc.in)
+		if d.Size != tc.size || d.Uncertainty != tc.uncertainty || d.Risk != tc.risk {
+			t.Fatalf("%+v: %+v", tc, d)
+		}
+	}
+}

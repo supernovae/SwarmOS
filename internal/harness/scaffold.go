@@ -377,6 +377,14 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		}
 	}
 
+	for _, role := range []string{"planner", "reviewer"} {
+		for _, variant := range []string{"compact", "sensitive", "detailed", "investigation", "urgent"} {
+			name := role + "." + variant + ".md"
+			if err := copyEmbedded("templates/swarm/prompts/variants/"+name, ".swarm/prompts/variants/"+name); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// 5. Schemas
 	if err := writeFile(".swarm/contracts/workunit.schema.json", contract.WorkUnitSchemaBytes()); err != nil {
 		return nil, err
@@ -585,6 +593,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	}
 	if cfg.DefaultGate != contract.GateNone && cfg.DefaultGate != contract.GateAgent && cfg.DefaultGate != contract.GateHuman {
 		return nil, fmt.Errorf("default_gate must be none, agent, or human")
+	}
+	if err := contract.ValidateProfiles(cfg.Profiles); err != nil {
+		return nil, err
 	}
 	if err := contract.ValidatePlanMode(cfg.PlanMode); err != nil {
 		return nil, err
@@ -1099,4 +1110,29 @@ func LedgerNamespaceAt(repoRoot, sha string) (string, error) {
 		return "", err
 	}
 	return cfg.EffectiveLedgerNamespace(), nil
+}
+
+// LoadPromptVariantAt reads an optional prompt exclusively from approved policy.
+func LoadPromptVariantAt(root, role, variant, base string) (string, error) {
+	if err := contract.ValidateProfiles([]contract.ProfileSpec{{Name: "variant", PromptVariant: variant}}); err != nil {
+		return "", err
+	}
+	switch role {
+	case "planner", "reviewer", "developer", "tester":
+	default:
+		return "", fmt.Errorf("unknown role %q", role)
+	}
+	path := ".swarm/prompts/variants/" + role + "." + variant + ".md"
+	if err := validCommitSHA(base); err != nil {
+		return "", err
+	}
+	out, err := gitcredential.Output(context.Background(), root, "ls-tree", "--name-only", base, "--", path)
+	if err != nil {
+		return "", err
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
+		return "", nil
+	}
+	data, err := readAt(root, base, path)
+	return string(data), err
 }

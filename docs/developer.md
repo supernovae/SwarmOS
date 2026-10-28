@@ -623,3 +623,11 @@ make changelog VERSION=1.2.3
 ```
 
 The command inserts a version heading below the empty Unreleased heading and preserves released history. With no fragments it changes nothing. All fragments are validated before the changelog is replaced. Replacement and fragment deletion are separate operations: if deletion fails, inspect the changelog and remaining files before retrying to avoid duplicate entries. Review the resulting changes before committing the release.
+
+Use `swarm issue create --size small --uncertainty known --risk standard` with
+your title, objective, constraints and acceptance criteria to record the work's
+execution dimensions. Size accepts `small` or `multi_area`, uncertainty accepts
+`known` or `unknown`, and risk accepts `standard`, `sensitive` or `urgent`.
+`swarm issue edit <issue-number>` accepts the same flags; an empty value clears
+that dimension. Changing a dimension requires approval of the revised WorkUnit.
+`swarm issue lint <issue-number>` suggests dimensions for maintainer review.

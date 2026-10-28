@@ -308,3 +308,32 @@ func renderShapeTally(items []IssueSenseItem) string {
 	}
 	return "- **Suggested Shapes**: " + strings.Join(parts, ", ") + " (planners confirm the shape when they read the code)\n"
 }
+
+// Dimensions are advisory suggestions until a maintainer sets the WorkUnit fields.
+type Dimensions struct {
+	Size        string `json:"size"`
+	Uncertainty string `json:"uncertainty"`
+	Risk        string `json:"risk"`
+}
+
+func SuggestDimensions(a ShapeAssessment, in ShapeInput) Dimensions {
+	d := Dimensions{"small", "known", "standard"}
+	if touchpointAreas(in.Touchpoints) >= 3 {
+		d.Size = "multi_area"
+	}
+	if a.Shape == ShapeExploratory {
+		d.Uncertainty = "unknown"
+	}
+	if in.Protected {
+		d.Risk = "sensitive"
+	}
+	if a.Shape == ShapeUrgent {
+		d.Risk = "urgent"
+	}
+	return d
+}
+
+func SuggestWorkUnitDimensions(root string, wu *contract.WorkUnit, shape ShapeAssessment, spec *contract.ValidationSpec) Dimensions {
+	tps := WorkUnitTouchpoints(root, wu)
+	return SuggestDimensions(shape, ShapeInput{Touchpoints: tps, Protected: touchesProtectedPath(tps, spec)})
+}

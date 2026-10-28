@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -36,7 +36,7 @@ func resolvedTempDir(t *testing.T) string {
 func cacheTestRepo(t *testing.T) string {
 	t.Helper()
 	repo := resolvedTempDir(t)
-	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v (%s)", err, out)
 	}
 	return repo
@@ -235,12 +235,12 @@ func TestValidatorMigratesLegacyGoCache(t *testing.T) {
 func TestRepositoryCacheKeyPerRepository(t *testing.T) {
 	ctx := context.Background()
 	repo := cacheTestRepo(t)
-	gitCommit := exec.Command("git", "-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost", "commit", "-q", "--allow-empty", "-m", "init")
+	gitCommit := gitfixture.Command(t, "", "-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost", "commit", "-q", "--allow-empty", "-m", "init")
 	if out, err := gitCommit.CombinedOutput(); err != nil {
 		t.Fatalf("git commit: %v (%s)", err, out)
 	}
 	linked := filepath.Join(resolvedTempDir(t), "linked")
-	if out, err := exec.Command("git", "-C", repo, "worktree", "add", "-q", "--detach", linked).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", repo, "worktree", "add", "-q", "--detach", linked).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add: %v (%s)", err, out)
 	}
 	main, err := repositoryCacheKey(ctx, repo)

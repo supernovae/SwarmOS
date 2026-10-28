@@ -3,7 +3,7 @@ package lease
 import (
 	"context"
 	"errors"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,7 +22,7 @@ func TestDroppedCheckpointPublicationFence(t *testing.T) {
 			m, _, issue := testManager(t)
 			git := func(args ...string) string {
 				t.Helper()
-				cmd := exec.Command("git", args...)
+				cmd := gitfixture.Command(t, "", args...)
 				cmd.Dir = m.repoRoot
 				out, err := cmd.CombinedOutput()
 				if err != nil {

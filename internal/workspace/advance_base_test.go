@@ -2,8 +2,8 @@ package workspace
 
 import (
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,7 +15,7 @@ type advanceFixture struct {
 
 func (f advanceFixture) git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v %s", args, err, out)
 	}
@@ -87,7 +87,7 @@ func (f *advanceFixture) previousFor(t *testing.T, context string) string {
 	case "missing":
 		// State names a base this clone never fetched.
 		missing := strings.Repeat("ab", 20)
-		if out, err := exec.Command("git", "-C", f.root, "cat-file", "-e", missing+"^{commit}").CombinedOutput(); err == nil {
+		if out, err := gitfixture.Command(t, "", "-C", f.root, "cat-file", "-e", missing+"^{commit}").CombinedOutput(); err == nil {
 			t.Fatalf("missing previous base exists locally: %s", out)
 		}
 		f.reapprove(t)

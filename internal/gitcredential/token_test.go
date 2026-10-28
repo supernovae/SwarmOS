@@ -117,6 +117,7 @@ func TestCommandTokenStaysOutOfArgumentsAndAgentInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(TokenCommandEnv, script)
+	// Raw command tests production credential/environment hardening via Configure.
 	cmd := exec.Command("git", "ls-remote", "origin")
 	redact, err := Configure(cmd)
 	if err != nil {

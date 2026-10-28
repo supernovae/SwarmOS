@@ -2,9 +2,9 @@ package tracker
 
 import (
 	"context"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -110,7 +110,7 @@ func TestLocalPRRefreshesExplicitBranchRefsWithoutInventingChecks(t *testing.T) 
 	repo := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %s: %v", args, out, err)

@@ -3,8 +3,8 @@ package workflow
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,7 +32,7 @@ func approvedDependencyTask(t *testing.T) (*Engine, string, int) {
 	t.Helper()
 	ctx := context.Background()
 	tmp := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, out)
 	}
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: tmp}); err != nil {
@@ -40,7 +40,7 @@ func approvedDependencyTask(t *testing.T) (*Engine, string, int) {
 	}
 	configureValidation(t, tmp)
 	for _, args := range [][]string{{"add", "."}, {"commit", "-qm", "initialize harness"}} {
-		if out, err := exec.Command("git", append([]string{"-C", tmp}, args...)...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", tmp}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
@@ -159,7 +159,7 @@ func TestPrepareAgentDependenciesOnlyForNativeIsolation(t *testing.T) {
 func TestAgentDependenciesUseRepositoryPolicy(t *testing.T) {
 	ctx := context.Background()
 	repo := t.TempDir()
-	if out, err := exec.Command("git", "init", "-q", "-b", "main", repo).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-q", "-b", "main", repo).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, out)
 	}
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: repo}); err != nil {

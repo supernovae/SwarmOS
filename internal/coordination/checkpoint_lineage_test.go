@@ -2,7 +2,7 @@ package coordination
 
 import (
 	"context"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,7 +13,7 @@ func TestCheckpointLineage(t *testing.T) {
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()
-		b, e := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput()
+		b, e := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput()
 		if e != nil {
 			t.Fatalf("git: %s %v", b, e)
 		}
@@ -63,7 +63,7 @@ func TestCheckpointRebases(t *testing.T) {
 	root := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
-		if b, e := exec.Command("git", append([]string{"-C", root}, args...)...).CombinedOutput(); e != nil {
+		if b, e := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); e != nil {
 			t.Fatalf("git: %s %v", b, e)
 		}
 	}

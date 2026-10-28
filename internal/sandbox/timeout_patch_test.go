@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,7 +43,7 @@ func TestNativeTimeoutPreservesPatchWithoutImport(t *testing.T) {
 	writeWorkerFixture(t, fixture, "deleted", "gone\n")
 	writeWorkerFixture(t, fixture, "untracked", "original untracked\n")
 	patch := filepath.Join(dir, ".swarm", "active-output", "developer-timeout.patch")
-	cmd := exec.Command("git", "apply", "--unsafe-paths", patch)
+	cmd := gitfixture.Command(t, "", "apply", "--unsafe-paths", patch)
 	cmd.Dir = fixture
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("apply: %s %v\n%s", output, err, data)
@@ -156,8 +156,8 @@ func TestTimeoutPatchContextEmptyFilesAndExecutable(t *testing.T) {
 	fixture := t.TempDir()
 	writeWorkerFixture(t, fixture, "middle", original)
 	writeWorkerFixture(t, fixture, "empty-deleted", "")
-	cmd := exec.Command("git", "apply", "filepath-placeholder")
-	cmd.Args[2] = filepath.Join(dest, ".swarm", "active-output", "developer-timeout.patch")
+	cmd := gitfixture.Command(t, "", "apply", "filepath-placeholder")
+	cmd.Args[len(cmd.Args)-1] = filepath.Join(dest, ".swarm", "active-output", "developer-timeout.patch")
 	cmd.Dir = fixture
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%s %v", out, err)

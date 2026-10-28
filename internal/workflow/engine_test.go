@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,17 +24,17 @@ import (
 func TestEnginePlanGateLifecycle(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, string(out))
 	}
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: tmp}); err != nil {
 		t.Fatal(err)
 	}
 	configureValidation(t, tmp)
-	if out, err := exec.Command("git", "-C", tmp, "add", ".").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", tmp, "add", ".").CombinedOutput(); err != nil {
 		t.Fatalf("git add harness failed: %v (%s)", err, string(out))
 	}
-	if out, err := exec.Command("git", "-C", tmp, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initialize harness").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", tmp, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initialize harness").CombinedOutput(); err != nil {
 		t.Fatalf("git commit harness failed: %v (%s)", err, string(out))
 	}
 
@@ -209,17 +210,17 @@ func assertRoleRunHistory(t *testing.T, st *lease.IssueState) {
 func TestCollaborativeHandoffAndDecomposition(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, string(out))
 	}
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: tmp}); err != nil {
 		t.Fatal(err)
 	}
 	configureValidation(t, tmp)
-	if out, err := exec.Command("git", "-C", tmp, "add", ".").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", tmp, "add", ".").CombinedOutput(); err != nil {
 		t.Fatalf("git add harness failed: %v (%s)", err, string(out))
 	}
-	if out, err := exec.Command("git", "-C", tmp, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initialize harness").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", tmp, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initialize harness").CombinedOutput(); err != nil {
 		t.Fatalf("git commit harness failed: %v (%s)", err, string(out))
 	}
 
@@ -337,27 +338,27 @@ func TestCollaborativeHandoffAndDecomposition(t *testing.T) {
 func TestReviewPhaseHandoff(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, string(out))
 	}
 	const originalREADME = "SwarmOS test repository\n"
 	if err := os.WriteFile(filepath.Join(tmp, "README.md"), []byte(originalREADME), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("git", "-C", tmp, "add", "README.md").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", tmp, "add", "README.md").CombinedOutput(); err != nil {
 		t.Fatalf("git add failed: %v (%s)", err, string(out))
 	}
-	if out, err := exec.Command("git", "-C", tmp, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initial README").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", tmp, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initial README").CombinedOutput(); err != nil {
 		t.Fatalf("git commit failed: %v (%s)", err, string(out))
 	}
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: tmp}); err != nil {
 		t.Fatal(err)
 	}
 	configureValidation(t, tmp)
-	if out, err := exec.Command("git", "-C", tmp, "add", ".").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", tmp, "add", ".").CombinedOutput(); err != nil {
 		t.Fatalf("git add harness failed: %v (%s)", err, string(out))
 	}
-	if out, err := exec.Command("git", "-C", tmp, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initialize harness").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", tmp, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@example.test", "commit", "-m", "initialize harness").CombinedOutput(); err != nil {
 		t.Fatalf("git commit harness failed: %v (%s)", err, string(out))
 	}
 
@@ -467,7 +468,7 @@ func configureValidation(t *testing.T, root string) {
 		{"-C", root, "config", "user.name", "SwarmOS"},
 		{"-C", root, "config", "user.email", "swarm@example.test"},
 	} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, string(out))
 		}
 	}
@@ -481,7 +482,7 @@ func configureValidation(t *testing.T, root string) {
 func TestEngineSetupProgressSharedSessionBundles(t *testing.T) {
 	root, engine, tr := setupProjectPlanTestRepo(t)
 	configureValidation(t, root)
-	if out, err := exec.Command("git", "-C", root, "commit", "-am", "validation policy").CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "validation policy").CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, out)
 	}
 	wu := &contract.WorkUnit{Objective: "Setup status", Constraints: []string{"Keep reporting private"}, Acceptance: []string{"Progress precedes execution"}, Workflow: "feature", Gate: contract.GateAgent}

@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -24,7 +24,7 @@ func mergedCleanupFixture(t *testing.T) (*Manager, *lifecycleTracker, int, strin
 	ctx := context.Background()
 	git := func(args ...string) string {
 		t.Helper()
-		out, e := exec.Command("git", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput()
+		out, e := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput()
 		if e != nil {
 			t.Fatalf("git %v: %s %v", args, out, e)
 		}
@@ -73,7 +73,7 @@ func TestCleanupApplyMergedSubmissionRetainsLocalArtifacts(t *testing.T) {
 	// PR worktree on the GitHub/atomic-remote path.
 	prPath := workspace.PRWorktreePath(m.repoRoot, 25)
 	branch := workspace.PRBranchName(25)
-	c := exec.Command("git", "-C", m.repoRoot, "worktree", "add", "-b", branch, prPath, "HEAD")
+	c := gitfixture.Command(t, "", "-C", m.repoRoot, "worktree", "add", "-b", branch, prPath, "HEAD")
 	if out, err := c.CombinedOutput(); err != nil {
 		t.Fatalf("%s %v", out, err)
 	}
@@ -116,7 +116,7 @@ func TestCleanupApplyMergedSubmissionRetainsLocalArtifacts(t *testing.T) {
 	if e != nil || string(b) != "task evidence" {
 		t.Fatal("cleanup discarded artifacts")
 	}
-	out, e := exec.Command("git", "--git-dir="+remote, "for-each-ref", "refs/heads/swarm/issue-1-fixture").CombinedOutput()
+	out, e := gitfixture.Command(t, "", "--git-dir="+remote, "for-each-ref", "refs/heads/swarm/issue-1-fixture").CombinedOutput()
 	if e != nil || len(out) != 0 {
 		t.Fatalf("remote branch survived: %s %v", out, e)
 	}
@@ -139,7 +139,7 @@ func TestCleanupEligibilityAdvancedBranchAndChangedPRHead(t *testing.T) {
 				tr.pr.HeadSHA = strings.Repeat("c", 40)
 			} else {
 				for _, args := range [][]string{{"-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "advance"}, {"push", "origin", "HEAD:refs/heads/" + tr.pr.Head}} {
-					c := exec.Command("git", args...)
+					c := gitfixture.Command(t, "", args...)
 					c.Dir = m.repoRoot
 					if out, e := c.CombinedOutput(); e != nil {
 						t.Fatalf("%s %v", out, e)
@@ -188,7 +188,7 @@ func TestCleanupGitHubIdentityRefusal(t *testing.T) {
 					case "upstream-empty":
 						provider.upstream = ""
 					case "origin-mismatch":
-						c := exec.Command("git", "-C", m.repoRoot, "config", "remote.origin.swarmSlug", "other/repo")
+						c := gitfixture.Command(t, "", "-C", m.repoRoot, "config", "remote.origin.swarmSlug", "other/repo")
 						if out, e := c.CombinedOutput(); e != nil {
 							t.Fatalf("%s %v", out, e)
 						}

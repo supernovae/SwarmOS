@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -40,7 +40,7 @@ func newLedgerFixture(t *testing.T, layout RefLayout) *ledgerFixture {
 
 func (f *ledgerFixture) git(dir string, args ...string) string {
 	f.t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(f.t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	if err != nil {
 		f.t.Fatalf("git %v: %v: %s", args, err, out)
 	}

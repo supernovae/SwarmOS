@@ -1,8 +1,8 @@
 package workspace
 
 import (
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,7 +16,7 @@ func TestTrustedLedgerNamespaceIgnoresLocalAndForkConfig(t *testing.T) {
 			tmp := t.TempDir()
 			git := func(dir string, args ...string) string {
 				t.Helper()
-				out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+				out, err := gitfixture.Command(t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 				if err != nil {
 					t.Fatalf("git %v: %v: %s", args, err, out)
 				}

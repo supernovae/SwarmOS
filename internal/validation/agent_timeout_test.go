@@ -2,8 +2,8 @@ package validation
 
 import (
 	"context"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -36,7 +36,7 @@ func TestRequiredChecksIgnoreAgentTimeoutPolicy(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, args := range [][]string{{"add", "."}, {"commit", "-m", "timeout policy"}} {
-				cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+				cmd := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("%s %v", out, err)
 				}

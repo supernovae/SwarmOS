@@ -2,8 +2,8 @@ package workflow
 
 import (
 	"context"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,7 +16,7 @@ import (
 func TestPreflightRejectsReviewerOutsideReviewerAgents(t *testing.T) {
 	ctx := context.Background()
 	tmp := t.TempDir()
-	if out, err := exec.Command("git", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
+	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, string(out))
 	}
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: tmp}); err != nil {
@@ -33,7 +33,7 @@ func TestPreflightRejectsReviewerOutsideReviewerAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"-C", tmp, "add", "."}, {"-C", tmp, "commit", "-m", "pin reviewer"}} {
-		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+		if out, err := gitfixture.Command(t, "", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v (%s)", args, err, string(out))
 		}
 	}

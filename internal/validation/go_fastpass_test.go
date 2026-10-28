@@ -3,8 +3,8 @@ package validation
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -76,7 +76,7 @@ func writeRepoFile(t *testing.T, repo, name, contents string) {
 
 func runRepoGit(t *testing.T, repo string, args ...string) string {
 	t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", repo}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(t, "", append([]string{"-C", repo}, args...)...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v (%s)", args, err, out)
 	}

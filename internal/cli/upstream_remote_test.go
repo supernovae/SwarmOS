@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -54,7 +54,7 @@ type upstreamRemoteFixture struct {
 
 func (f *upstreamRemoteFixture) git(dir string, args ...string) string {
 	f.t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	out, err := gitfixture.Command(f.t, "", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	if err != nil {
 		f.t.Fatalf("git %v in %s: %v (%s)", args, dir, err, out)
 	}
@@ -392,7 +392,7 @@ func (f *upstreamRemoteFixture) headSHA(head string) string {
 		branch = b
 		bare = filepath.Join(f.tmp, owner, "swarm.git")
 	}
-	out, err := exec.Command("git", "-C", bare, "rev-parse", "refs/heads/"+branch).Output()
+	out, err := gitfixture.Command(f.t, "", "-C", bare, "rev-parse", "refs/heads/"+branch).Output()
 	if err != nil {
 		return ""
 	}

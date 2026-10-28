@@ -2,8 +2,8 @@ package harness
 
 import (
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,7 +17,7 @@ func TestTimeoutPolicyIgnoresCandidateConfig(t *testing.T) {
 	}
 	git := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...)
 		data, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%v: %s %v", args, data, err)

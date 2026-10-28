@@ -62,7 +62,8 @@ func rejectedPatch(ctx context.Context, input, result string) ([]byte, error) {
 }
 
 // CompletedImportError records a successful harness execution followed by a
-// refusal to import another role's output. It preserves the policy cause.
+// refusal to import forbidden active-directory files. This diagnostic does not
+// authorize recovery and preserves the policy cause.
 type CompletedImportError struct{ Cause error }
 
 func (e *CompletedImportError) Error() string {
@@ -72,7 +73,9 @@ func (e *CompletedImportError) Unwrap() error { return e.Cause }
 
 func completedImport(err error, completed bool) error {
 	var policy interface{ RoleOutputImport() bool }
-	if completed && errors.As(err, &policy) && policy.RoleOutputImport() {
+	var active interface{ ActiveDirectoryImport() bool }
+	if completed && ((errors.As(err, &policy) && policy.RoleOutputImport()) ||
+		(errors.As(err, &active) && active.ActiveDirectoryImport())) {
 		return &CompletedImportError{Cause: err}
 	}
 	return err

@@ -30,3 +30,7 @@ For PR work identified as a revision by the compiled system instructions, read `
 ## Changelog
 
 If the repository uses `changes/unreleased/`, add one change fragment with a unique issue-based filename (for example `126.md`, or `126-fix.md` when needed), containing one `- ` bullet. Leave `CHANGELOG.md` for maintainer releases.
+
+## Scratch output
+
+Write logs and scratch output to the sandbox temporary directory (`TMPDIR`), never under the workspace or `.swarm/active/`. For example, redirect command output with `go build ./... > "$TMPDIR/build.log" 2>&1`. Keep the authorized role artifacts described above in their specified locations.

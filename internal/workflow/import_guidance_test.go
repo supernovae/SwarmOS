@@ -329,3 +329,51 @@ func TestCompletedTesterRejectionReason(t *testing.T) {
 		}
 	}
 }
+
+func TestCompletedTesterScratchRejectionReason(t *testing.T) {
+	for _, pr := range []int{0, 42} {
+		e, issue := budgetEngine(t)
+		mock := &agent.MockRunner{}
+		e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+			return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+				if req.Role != "tester" {
+					return mock.Run(ctx, req)
+				}
+				err := req.CheckImport(ctx, []string{".swarm/active/VALIDATION_CHECK.log"}, nil)
+				return &agent.RunResult{Role: "tester"}, &sandbox.CompletedImportError{Cause: err}
+			}}, nil
+		}
+		// PR routing is tested directly: a PR ExecuteWork requires its revision state.
+		res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+		var rejection *importRejection
+		if !errors.As(err, &rejection) || !rejection.Completed {
+			t.Fatalf("classification: %v", err)
+		}
+		if rejection.OutputOnly || rejection.Recoverable || !rejection.ActiveDirectoryImport() {
+			t.Fatalf("recovery broadened: %+v", rejection)
+		}
+		reason := importRejectionReason(rejection, issue.Number, pr)
+		rerun := "swarm issue work " + strconv.Itoa(issue.Number)
+		if pr != 0 {
+			rerun = "swarm pr work 42"
+		}
+		for _, text := range []string{reason, err.Error(), res.State.NextPhaseReason} {
+			for _, want := range []string{"tester run completed", ".swarm/active/VALIDATION_CHECK.log", "--phase implement", "--tester-instructions", "TMPDIR", "worktree was left unchanged"} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("missing %s: %s", want, text)
+				}
+			}
+			for _, forbidden := range []string{"agent failed", "binary or oversized changes", "recover-import"} {
+				if strings.Contains(text, forbidden) {
+					t.Fatal(text)
+				}
+			}
+		}
+		if strings.Count(reason, "'") != 2 {
+			t.Fatalf("unsafe quoted guidance: %s", reason)
+		}
+		if !strings.Contains(reason, rerun) {
+			t.Fatal(reason)
+		}
+	}
+}

@@ -99,3 +99,31 @@ func TestWorkerTestScopeInstructionsAndPromptSync(t *testing.T) {
 		})
 	}
 }
+
+func TestScratchOutputInstructionsAndPromptSync(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"developer", "tester"} {
+		path := "swarm/prompts/" + role + ".md"
+		template, err := embeddedTemplates.ReadFile("templates/" + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"../../." + path, filepath.Join(root, "."+path)} {
+			data, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n")), template) {
+				t.Fatalf("prompt mismatch: %s", name)
+			}
+		}
+		for _, want := range []string{"logs and scratch output", "sandbox temporary directory", "TMPDIR", "never under the workspace or `.swarm/active/`", "> \"$TMPDIR/build.log\" 2>&1"} {
+			if !strings.Contains(string(template), want) {
+				t.Errorf("%s lacks %q", role, want)
+			}
+		}
+	}
+}

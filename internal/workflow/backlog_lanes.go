@@ -39,7 +39,7 @@ var laneOrder = []struct {
 	match              func(it *IssueSenseItem, staleDays int) bool
 }{
 	{"stabilize", "Stabilize first", "Users may be affected now. Approve a minimal mitigation and file the root cause separately.",
-		func(it *IssueSenseItem, _ int) bool { return it.Shape == ShapeUrgent }},
+		func(it *IssueSenseItem, _ int) bool { return it.SuggestedDimensions.Risk == "urgent" }},
 	{"duplicates", "Probably duplicates", "Compare each with the older issue it resembles; close the duplicate or merge the details by hand.",
 		func(it *IssueSenseItem, _ int) bool { return it.DuplicateOf != 0 }},
 	{"quiet", "Quiet for a while", "No activity in a long time. Ask whether it still matters, or close it.",
@@ -52,7 +52,7 @@ var laneOrder = []struct {
 		func(it *IssueSenseItem, _ int) bool { return it.RecommendedLabel == "swarm:blocked" }},
 	{"ready", "Ready for agents", "Approved and claimable with `swarm issue work --next`.",
 		func(it *IssueSenseItem, _ int) bool { return it.Approved }},
-	{"decide", "Needs a maintainer decision", "Valid drafts. Routine ones can be approved in a batch; read Exploratory ones first.",
+	{"decide", "Needs a maintainer decision", "Valid drafts. Batch small, known fixes; read unknown solutions first.",
 		func(it *IssueSenseItem, _ int) bool { return true }},
 }
 
@@ -210,10 +210,10 @@ func laneDetail(key string, it *IssueSenseItem) string {
 		return fmt.Sprintf(" — looks like `#%d`", it.DuplicateOf)
 	case key == "quiet":
 		return fmt.Sprintf(" — quiet for %d days", it.QuietDays)
-	case len(it.ShapeSignals) > 0:
-		return " — " + it.Shape.Title() + ": " + escapeLaneText(strings.Join(it.ShapeSignals, "; "))
-	case it.Shape != "":
-		return " — " + it.Shape.Title()
+	case len(it.Signals) > 0:
+		return " — " + it.SuggestedDimensions.String() + ": " + escapeLaneText(strings.Join(it.Signals, "; "))
+	case it.SuggestedDimensions.Size != "":
+		return " — " + it.SuggestedDimensions.String()
 	}
 	return ""
 }

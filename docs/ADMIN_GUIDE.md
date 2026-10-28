@@ -110,7 +110,7 @@ What `swarm repo plan --scan` does for you (while automatically skipping non-exe
   - If Issue `#12` and Issue `#15` both reference `internal/api/handler.go`, `swarm repo plan --scan` flags the overlap and places them into **sequential Execution Waves** (`Wave 1`, `Wave 2`) so two parallel agents never cause merge conflicts on the same file.
 - **Sorts open pull requests into lanes too** (competing, dependency updates, quiet, ready for review, in progress), noting which belong to a WorkUnit. See [Dependency updates without the noise](backlog.md#5-dependency-updates-without-the-noise) for taming Dependabot.
 - **Sorts the backlog into lanes** (stabilize first, probable duplicates, quiet for a while, ask the author, waiting, ready, needs a decision) so a large backlog reads as a short to-do list. See [Owning a Busy Repository](backlog.md) for the full walkthrough and `--stale-days`.
-- **Suggests a shape for each issue** so you can tell a quick fix from a research project at a glance. See [Matching the plan to the work](WORKFLOWS.md#matching-the-plan-to-the-work). Routine issues make great first tasks for new contributors. Exploratory raw issues get a `human` plan gate in their normalized draft, so you see the plan before any code is written. Urgent ones get at least an `agent` gate. The shape is only a suggestion and never becomes a label.
+- **Suggests dimensions for each issue** so you can see its size, uncertainty, and risk at a glance. See [Matching the plan to the work](WORKFLOWS.md#matching-the-plan-to-the-work). Raw issues with `uncertainty=unknown` get a suggested `human` plan gate in their normalized draft; `risk=urgent` takes precedence and suggests at least an `agent` gate. Maintainers review these drafts before approval.
 
 ---
 
@@ -126,7 +126,7 @@ swarm issue approve 14 --backend github
 
 `swarm issue approve` removes `swarm:draft` / `swarm:needs-scope` / `swarm:blocked`, applies `swarm:ready`, and records the cryptographic `task_digest`, `policy_digest`, and `base_sha` in `refs/heads/swarm-state/issue-<N>`. This approves the issue's WorkUnit contract for execution, not the plan or completed code.
 
-Before approving, `swarm issue approve` prints the same suggested shape, signals, and hints as `swarm issue lint`. With `--json`, the advice goes to stderr and the approval document gains a `shape` field. The advice never blocks approval. A hint such as "consider `swarm issue decompose`" is a good moment to split the issue before a worker spends a long claim on it.
+Before approving, `swarm issue approve` prints the same suggested dimensions, signals, and hints as `swarm issue lint`. With `--json`, the advice goes to stderr and the approval document gains `suggested_dimensions`, `signals`, and `hints` fields. The advice never blocks approval. A hint such as "consider `swarm issue decompose`" is a good moment to split the issue before a worker spends a long claim on it.
 
 ### When a Planner Recommends a Split
 

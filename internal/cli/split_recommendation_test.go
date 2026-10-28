@@ -28,18 +28,18 @@ func (f *cliFixture) runSplit(args ...string) (string, string, error) {
 	return stdout.String(), stderr.String(), err
 }
 
-// shapeLines returns the "Suggested shape" line and the hints after it.
-func shapeLines(out string) []string {
+// dimensionLines returns the "Suggested dimensions" line and the hints after it.
+func dimensionLines(out string) []string {
 	var lines []string
 	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "Suggested shape:") || strings.HasPrefix(line, "  hint: ") {
+		if strings.HasPrefix(line, "Suggested dimensions:") || strings.HasPrefix(line, "  hint: ") {
 			lines = append(lines, line)
 		}
 	}
 	return lines
 }
 
-func TestApprovalPrintsLintShapeBeforeApproving(t *testing.T) {
+func TestApprovalPrintsLintDimensionsBeforeApproving(t *testing.T) {
 	t.Parallel()
 	f := newCLIFixture(t)
 	acceptance := []string{"Update `internal/alpha/a.go`", "Update `internal/beta/b.go`", "Update `cmd/gamma/main.go`", "Document it", "Keep it tidy", "Make it nicer"}
@@ -50,19 +50,59 @@ func TestApprovalPrintsLintShapeBeforeApproving(t *testing.T) {
 	f.must(t, args...)
 	oversized := strconv.Itoa(f.create(t, "agent") - 1)
 
-	lint := shapeLines(f.must(t, "issue", "lint", oversized))
+	lint := dimensionLines(f.must(t, "issue", "lint", oversized))
 	if len(lint) < 2 || !slices.ContainsFunc(lint, func(l string) bool { return strings.Contains(l, "swarm issue decompose") }) {
 		t.Fatalf("fixture should carry a decomposition hint: %v", lint)
 	}
 	out := f.must(t, "issue", "approve", oversized)
-	if got := shapeLines(out); !slices.Equal(got, lint) {
+	if got := dimensionLines(out); !slices.Equal(got, lint) {
 		t.Fatalf("approval advice %v differs from lint %v", got, lint)
 	}
-	if advice, approved := strings.Index(out, "Suggested shape:"), strings.Index(out, "Approved issue"); advice < 0 || approved < advice {
+	if advice, approved := strings.Index(out, "Suggested dimensions:"), strings.Index(out, "Approved issue"); advice < 0 || approved < advice {
 		t.Fatalf("advice must precede approval:\n%s", out)
 	}
 	if f.state(t, mustAtoi(t, oversized)).TaskDigest == "" {
 		t.Fatal("decomposition hint blocked approval")
+	}
+
+	if strings.Count(out, "Suggested dimensions:") != 1 || strings.Contains(out, "Suggested shape:") || strings.Contains(out, "{Size:") {
+		t.Fatal(out)
+	}
+	if !strings.Contains(out, "size=multi_area uncertainty=known risk=standard") || !strings.Contains(out, "scope note: 6 acceptance criteria") {
+		t.Fatal(out)
+	}
+	lintJSON := f.must(t, "issue", "lint", oversized, "--json")
+	var advice map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(lintJSON), &advice); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := advice["shape"]; ok {
+		t.Fatal(lintJSON)
+	}
+	if len(advice["signals"]) == 0 || len(advice["suggested_dimensions"]) == 0 {
+		t.Fatal(lintJSON)
+	}
+	var lintResult struct {
+		WorkUnit contract.WorkUnit `json:"work_unit"`
+	}
+	if err := json.Unmarshal([]byte(lintJSON), &lintResult); err != nil {
+		t.Fatal(err)
+	}
+	if lintResult.WorkUnit.Size != "" || lintResult.WorkUnit.Uncertainty != "" || lintResult.WorkUnit.Risk != "" {
+		t.Fatal("advice filled absent dimensions")
+	}
+
+	f.must(t, "issue", "edit", oversized, "--size", "small", "--uncertainty", "unknown", "--risk", "sensitive")
+	f.must(t, "issue", "approve", oversized)
+	recorded := f.must(t, "issue", "lint", oversized, "--json")
+	if err := json.Unmarshal([]byte(recorded), &lintResult); err != nil {
+		t.Fatal(err)
+	}
+	if lintResult.WorkUnit.Size != "small" || lintResult.WorkUnit.Uncertainty != "unknown" || lintResult.WorkUnit.Risk != "sensitive" {
+		t.Fatal("advice changed maintainer dimensions")
+	}
+	if !strings.Contains(f.must(t, "issue", "lint", oversized), "Suggested dimensions: size=multi_area uncertainty=known risk=standard") {
+		t.Fatal("advice depends on recorded dimensions")
 	}
 
 	// JSON keeps one document on stdout, with the shape added, and the
@@ -73,22 +113,22 @@ func TestApprovalPrintsLintShapeBeforeApproving(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result struct {
-		Kind  string `json:"kind"`
-		Shape *struct {
-			Shape string `json:"shape"`
-		} `json:"shape"`
+		Kind                string `json:"kind"`
+		SuggestedDimensions *struct {
+			Size string `json:"size"`
+		} `json:"suggested_dimensions"`
 	}
 	dec := json.NewDecoder(strings.NewReader(stdout))
-	if err := dec.Decode(&result); err != nil || result.Kind != "task-approval" || result.Shape == nil || result.Shape.Shape == "" || dec.More() {
+	if err := dec.Decode(&result); err != nil || result.Kind != "task-approval" || result.SuggestedDimensions == nil || result.SuggestedDimensions.Size == "" || dec.More() {
 		t.Fatalf("approval JSON: %s (%v)", stdout, err)
 	}
-	if !strings.Contains(stderr, "Suggested shape:") || strings.Contains(stdout, "Suggested shape:") {
+	if !strings.Contains(stderr, "Suggested dimensions:") || strings.Contains(stdout, "Suggested dimensions:") {
 		t.Fatalf("advice belongs on stderr in JSON mode:\nstdout=%s\nstderr=%s", stdout, stderr)
 	}
 
 	// Approval stays authoritative: advice never turns a rejection into
 	// success.
-	if out, err := f.run("issue", "approve", "999"); err == nil || !strings.Contains(out, "Suggested shape: unavailable") {
+	if out, err := f.run("issue", "approve", "999"); err == nil || !strings.Contains(out, "Suggested dimensions: unavailable") {
 		t.Fatalf("missing issue: advice should be unavailable and approval should fail: %v\n%s", err, out)
 	}
 }

@@ -75,7 +75,7 @@ func TestMarkDuplicates(t *testing.T) {
 func TestAssignLanesUsesFirstMatchingLane(t *testing.T) {
 	t.Parallel()
 	items := []IssueSenseItem{
-		{IssueNumber: 1, Shape: ShapeUrgent, QuietDays: 400, RecommendedLabel: "swarm:needs-scope"},
+		{IssueNumber: 1, SuggestedDimensions: Dimensions{Risk: "urgent"}, QuietDays: 400, RecommendedLabel: "swarm:needs-scope"},
 		{IssueNumber: 2, DuplicateOf: 1, RecommendedLabel: "swarm:draft"},
 		{IssueNumber: 3, QuietDays: 120, RecommendedLabel: "swarm:needs-scope"},
 		{IssueNumber: 4, RecommendedLabel: "swarm:needs-scope"},

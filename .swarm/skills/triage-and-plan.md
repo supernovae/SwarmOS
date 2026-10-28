@@ -33,12 +33,8 @@ Use this skill when running `/swarm-project-plan` (in Claude Code or OpenCode) o
 2. Identify concrete file or package touchpoints for each issue.
 3. Use `depends on: <step>` for true prerequisite ordering; treat overlapping touchpoints in `Execution Waves` as scheduling advice.
 4. Flag any issue that touches protected paths without `allow_harness_changes: true`.
-5. Note each task's shape (`swarm repo plan --scan` suggests one) and shape the task to fit:
-   - **Routine**: clear fix, one place. Good first tasks; batch these for approval.
-   - **Involved**: knowable but needs analysis. Name the touchpoints and the decision the plan must make.
-   - **Exploratory**: nobody knows the answer yet. Start with a small probe task whose acceptance criteria record what was learned, then plan follow-ups.
-   - **Urgent**: users are affected now. Write a minimal mitigation task first and a separate root-cause task.
+5. Note advisory size, uncertainty, and risk dimensions (`swarm repo plan --scan` suggests them). Identify touchpoints and open decisions; use a small probe task for unknown answers and a minimal mitigation task when users are affected now. Only maintainer-set dimensions on approved WorkUnits select execution profiles.
 6. Work the scan's **Backlog at a Glance** lanes top to bottom. Suggest closing duplicates and quiet issues to the maintainer, but never close, relabel, or comment on issues yourself.
 7. Write acceptance criteria someone can check: a command, a test, or an observable behavior. Words like "improve" or "cleaner" alone usually mean the task needs more scoping.
 8. Give each task one outcome. Say what is in scope and what is out of scope, and name the backends, harnesses, and platforms it covers instead of writing "every backend".
-9. Keep acceptance criteria checkable inside the agent sandbox or by CI. Checks that need an environment agents can't reach, such as a container image, another OS, or a live GitHub flow, belong in the PR review checklist or a follow-up task. Probes are their own Exploratory task, never a step that blocks another task's implementation. Nice-to-haves become follow-up tasks.
+9. Keep acceptance criteria checkable inside the agent sandbox or by CI. Checks that need an environment agents can't reach, such as a container image, another OS, or a live GitHub flow, belong in the PR review checklist or a follow-up task. Probes are their own investigation task, never a step that blocks another task's implementation. Nice-to-haves become follow-up tasks.

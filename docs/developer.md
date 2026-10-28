@@ -630,4 +630,7 @@ execution dimensions. Size accepts `small` or `multi_area`, uncertainty accepts
 `known` or `unknown`, and risk accepts `standard`, `sensitive` or `urgent`.
 `swarm issue edit <issue-number>` accepts the same flags; an empty value clears
 that dimension. Changing a dimension requires approval of the revised WorkUnit.
-`swarm issue lint <issue-number>` suggests dimensions for maintainer review.
+`swarm issue lint <issue-number>` suggests dimensions for maintainer review,
+for example `Suggested dimensions: size=small uncertainty=known risk=standard`,
+with signals explaining the advice. Only recorded dimensions on the approved
+WorkUnit select an execution profile.

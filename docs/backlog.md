@@ -2,7 +2,7 @@
 
 A popular project collects issues faster than anyone can read them. After a while the tracker turns into one long list where a typo fix, an open design question, a live regression, and a duplicate from last year all look alike. Maintainers spend their evenings sorting, and contributors give up trying to find something they can actually finish.
 
-SwarmOS can't make a backlog smaller, but it can make it legible. One scan sorts open issues into a few **lanes** by what you should do next, suggests a **shape** for each one so you can tell quick fixes from research projects, and points out likely duplicates and issues nobody has touched in months. The same scan covers open pull requests, and a second command turns what agents learned in merged work into notes for the next contributor. You make every decision; SwarmOS never closes, comments on, or relabels anything on its own.
+SwarmOS can't make a backlog smaller, but it can make it legible. One scan sorts open issues into a few **lanes** by what you should do next, suggests **size, uncertainty, and risk dimensions** for each one so you can tell quick fixes from research projects, and points out likely duplicates and issues nobody has touched in months. The same scan covers open pull requests, and a second command turns what agents learned in merged work into notes for the next contributor. You make every decision; SwarmOS never closes, comments on, or relabels anything on its own.
 
 ```mermaid
 flowchart LR
@@ -32,23 +32,18 @@ At the top of the report is **Backlog at a Glance**, one row per lane:
 | **Ask the author** | Raw issues missing an Objective, Constraints, or Acceptance Criteria | Let `--normalize` draft them, then ask the author to confirm |
 | **Waiting on something** | Blocked by open dependencies or by protected paths | Unblock the prerequisite first |
 | **Ready for agents** | Approved WorkUnits | Nothing; contributors pick these up with `swarm issue work --next` |
-| **Needs a maintainer decision** | Valid drafts awaiting your approval | Approve Routine ones in a batch; read Exploratory ones first |
+| **Needs a maintainer decision** | Valid drafts awaiting your approval | Batch small, known fixes; read unknown solutions first |
 
 Each issue appears in exactly one lane, the first that applies, so the most pressing issues surface first. Expand a lane to see its issues, each with a short note on why it is there. The full table of every open issue follows.
 
 > [!TIP]
-> Save the whole report with `--export backlog.yaml` (or `.json`). It includes every issue's lane, shape, signals, and suggested WorkUnit, which is handy for a spreadsheet or a weekly triage meeting.
+> Save the whole report with `--export backlog.yaml` (or `.json`). It includes every issue's lane, suggested dimensions, signals, and suggested WorkUnit, which is handy for a spreadsheet or a weekly triage meeting.
 
-## 2. Read the shapes
+## 2. Read the dimensions
 
-Every issue gets a suggested shape, so you can see how much thinking it needs before anyone starts:
+Every issue gets advisory suggestions for `size` (`small` or `multi_area`), `uncertainty` (`known` or `unknown`), and `risk` (`standard`, `sensitive`, or `urgent`). The report lists the signals behind them, with overlap and dependency information labeled as scope notes. The urgent lane uses suggested `risk=urgent` so work affecting users now comes first.
 
-- **Routine**: a clear fix in a known place. Great first tasks for new contributors.
-- **Involved**: knowable, but spans several areas or overlaps other issues. The plan will need to weigh alternatives.
-- **Exploratory**: nobody knows the right answer yet. Its plan should start with a small probe.
-- **Urgent**: users are affected now. Stop the harm first.
-
-The shape comes from the issue's own words and touchpoints, and the report lists the signals behind it. It is a starting point, not a verdict: the planner confirms or corrects it after reading the code. See [Matching the plan to the work](WORKFLOWS.md#matching-the-plan-to-the-work).
+Only maintainer-set dimensions on approved WorkUnits select an execution profile. Suggestions help triage without changing recorded dimensions or policy. See [Matching the plan to the work](WORKFLOWS.md#matching-the-plan-to-the-work).
 
 ## 3. Apply what you agree with
 
@@ -59,7 +54,7 @@ swarm repo plan --scan --apply --normalize --backend github
 ```
 
 - Labels are only added when an issue doesn't already have them, so re-running the scan doesn't make every issue look freshly active.
-- `--normalize` rewrites a raw issue into structured WorkUnit sections and keeps the reporter's original text below them, under **Original Report**. Exploratory issues get a `human` plan gate so you see the plan before any code is written, and Urgent ones get at least an `agent` gate.
+- `--normalize` rewrites a raw issue into structured WorkUnit sections and keeps the reporter's original text below them, under **Original Report**. Issues with suggested `uncertainty=unknown` get a `human` plan gate so you see the plan before any code is written. Suggested `risk=urgent` takes precedence and gets at least an `agent` gate.
 - Nothing is approved unless you also pass `--ready` or run `swarm issue approve <N>`.
 
 To share the report with your team, post it to a tracking issue:
@@ -179,12 +174,12 @@ A short routine keeps the backlog from piling up again:
 
 You don't need to understand the whole backlog to help:
 
-1. Pick an issue from **Ready for agents**, ideally a Routine one, or let `swarm issue work --next` choose for you.
+1. Pick an issue from **Ready for agents**, ideally a small, known fix, or let `swarm issue work --next` choose for you.
 2. Your agent reads `.swarm/rules/lessons.md` first, so it starts out knowing what tripped up the contributors before you. Its `PLAN.md` opens with what it found in the code. If the task turns out bigger than it looked, the plan says so and suggests a split instead of quietly growing.
 3. If you spot a duplicate or an issue that no longer applies, mention it on the issue. A maintainer will take care of it.
 
 ## Related Guides
 
 - **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)**: the daily maintainer playbook
-- **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)**: role prompts, plan gates, and task shapes
+- **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)**: role prompts, plan gates, and dimensions and profiles
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)**: everyday commands for contributors

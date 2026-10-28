@@ -18,17 +18,21 @@ import (
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 // fakeGitHubIssues serves the issue REST calls create, lint, and edit make.
 type fakeGitHubIssues struct {
-	t      *testing.T
-	mu     sync.Mutex
-	next   int
-	issues map[int]*tracker.Issue
-	writes int
+	t            *testing.T
+	mu           sync.Mutex
+	next         int
+	issues       map[int]*tracker.Issue
+	writes       int
+	createLabels []json.RawMessage
+	permission   string
+	requests     []string
 }
 
 func newFakeGitHubTracker(t *testing.T, seed ...*tracker.Issue) (*fakeGitHubIssues, tracker.Tracker) {
@@ -57,24 +61,36 @@ func newFakeGitHubTracker(t *testing.T, seed ...*tracker.Issue) (*fakeGitHubIssu
 func (g *fakeGitHubIssues) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.requests = append(g.requests, r.Method+" "+r.URL.Path)
 	w.Header().Set("Content-Type", "application/json")
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/octo/swarm/issues"), "/")
 	switch {
 	case r.URL.Path == "/user":
 		_ = json.NewEncoder(w).Encode(map[string]string{"login": "alice", "type": "User"})
 	case strings.HasSuffix(r.URL.Path, "/permission"):
-		_ = json.NewEncoder(w).Encode(map[string]string{"permission": "write"})
+		permission := g.permission
+		if permission == "" {
+			permission = "write"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"permission": permission})
 	case r.URL.Path == "/repos/octo/swarm/issues" && r.Method == "POST":
 		g.writes++
 		var p struct {
-			Title  string   `json:"title"`
-			Body   string   `json:"body"`
-			Labels []string `json:"labels"`
+			Title  string          `json:"title"`
+			Body   string          `json:"body"`
+			Labels json.RawMessage `json:"labels"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 			g.t.Error(err)
 		}
-		issue := &tracker.Issue{Number: g.next, Title: p.Title, Body: p.Body, Labels: p.Labels}
+		g.createLabels = append(g.createLabels, append(json.RawMessage(nil), p.Labels...))
+		var labels []string
+		if len(p.Labels) == 0 || p.Labels[0] != '[' || json.Unmarshal(p.Labels, &labels) != nil {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "Invalid request. properties/labels nil is not an array"})
+			return
+		}
+		issue := &tracker.Issue{Number: g.next, Title: p.Title, Body: p.Body, Labels: labels}
 		g.issues[issue.Number] = issue
 		g.next++
 		g.encode(w, issue)
@@ -393,5 +409,133 @@ func TestIssueEditAllowHarnessChangesApproval(t *testing.T) {
 				t.Fatalf("approval record mutated: %v", err)
 			}
 		})
+	}
+}
+
+// These regressions exercise the real REST serialization and CLI approval path.
+func TestIssueCreateGitHubNullLabels(t *testing.T) {
+	fake, tr := newFakeGitHubTracker(t)
+	_, err := tr.CreateIssue(context.Background(), "title", "body", nil)
+	if err == nil || !strings.Contains(err.Error(), "422") || !strings.Contains(err.Error(), "properties/labels nil is not an array") {
+		t.Fatalf("expected labels 422, got %v", err)
+	}
+	if len(fake.createLabels) != 1 || string(fake.createLabels[0]) != "null" || len(fake.issues) != 0 || len(fake.requests) != 1 {
+		t.Fatalf("unexpected null create effects: %+v", fake)
+	}
+}
+
+func TestIssueCreateReadyGitHubLabels(t *testing.T) {
+	checkIssueCreateGitHubLabels(t, true, false)
+}
+func TestIssueCreateDraftGitHubLabels(t *testing.T) {
+	checkIssueCreateGitHubLabels(t, false, false)
+}
+func TestIssueCreateReadyGitHubDenied(t *testing.T) {
+	checkIssueCreateGitHubLabels(t, true, true)
+}
+
+func checkIssueCreateGitHubLabels(t *testing.T, ready, denied bool) {
+	t.Helper()
+	f := newCLIFixture(t)
+	addTestOrigin(t, f)
+	fake, tr := newFakeGitHubTracker(t)
+	if denied {
+		fake.permission = "read"
+	}
+	args := []string{"create", "--title", "Labels regression", "--objective", "Send valid labels", "--constraint", "Preserve approval", "--acceptance", "Approval enforces policy"}
+	if ready {
+		args = append(args, "--ready")
+	}
+	out, err := runIssueCmd(f, tr, args...)
+	if denied {
+		if err == nil || !strings.Contains(err.Error(), "lacks write permission") || strings.Contains(out, "Created approved") {
+			t.Fatalf("expected denied approval: %v %s", err, out)
+		}
+	} else if err != nil {
+		t.Fatalf("create failed: %v %s", err, out)
+	}
+	want := "[]"
+	if !ready {
+		want = `["swarm:draft"]`
+	}
+	if len(fake.createLabels) != 1 || string(fake.createLabels[0]) != want {
+		t.Fatalf("create labels = %s, want %s", fake.createLabels, want)
+	}
+	if len(fake.issues) != 1 {
+		t.Fatal("issue was not created")
+	}
+	opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr, nowFn: time.Now})
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	_, mgr, _, err := opts.resolveLeaseManager(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permissionRequests := func() int {
+		count := 0
+		for _, req := range fake.requests {
+			if strings.HasSuffix(req, "/collaborators/alice/permission") {
+				count++
+			}
+		}
+		return count
+	}
+	if !ready || denied {
+		st, stateErr := mgr.GetCurrentState(context.Background(), 1)
+		if stateErr == nil && st.ApprovedBy != "" {
+			t.Fatalf("unexpected approval: %+v", st)
+		}
+		if denied {
+			if permissionRequests() != 1 || len(fake.labels(1)) != 0 {
+				t.Fatal("denied approval changed labels or skipped authorization")
+			}
+			return
+		}
+		if permissionRequests() != 0 || !strings.Contains(out, "Created draft") {
+			t.Fatal("draft creation authorized approval")
+		}
+		fake.mu.Lock()
+		fake.issues[1].Labels = append(fake.issues[1].Labels, "custom")
+		fake.mu.Unlock()
+		out, err = runIssueCmd(f, tr, "approve", "1")
+		if err != nil {
+			t.Fatalf("separate approve: %v %s", err, out)
+		}
+	} else if !strings.Contains(out, "Created approved") {
+		t.Fatalf("missing approved output: %s", out)
+	}
+	st, err := mgr.GetCurrentState(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ApprovedBy != "alice" || st.TaskDigest == "" || st.PolicyDigest == "" || st.BaseSHA == "" || st.EffectiveGate != contract.GateAgent {
+		t.Fatalf("missing ordinary approval bindings: %+v", st)
+	}
+	if permissionRequests() != 1 {
+		t.Fatal("approval did not authorize authenticated alice")
+	}
+	labels := fake.labels(1)
+	wantLabels := []string{"swarm:ready"}
+	if !ready {
+		wantLabels = []string{"custom", "swarm:ready"}
+	}
+	if !reflect.DeepEqual(labels, wantLabels) {
+		t.Fatalf("labels = %v, want %v", labels, wantLabels)
+	}
+	if fake.requests[0] != "POST /repos/octo/swarm/issues" {
+		t.Fatal("creation must precede approval")
+	}
+	for i, req := range fake.requests {
+		if strings.Contains(req, "/labels") {
+			authorized := false
+			for _, prev := range fake.requests[:i] {
+				if strings.HasSuffix(prev, "/collaborators/alice/permission") {
+					authorized = true
+				}
+			}
+			if !authorized {
+				t.Fatal("labels changed before authorization")
+			}
+		}
 	}
 }

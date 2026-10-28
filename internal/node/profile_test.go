@@ -87,6 +87,7 @@ func TestDependencyCacheModeFromProfile(t *testing.T) {
 		{"field absent", "node_id: n\n", sandbox.PerRepository, false},
 		{"false", "node_id: n\nshare_host_dependency_caches: false\n", sandbox.PerRepository, false},
 		{"true", "node_id: n\nshare_host_dependency_caches: true\n", sandbox.SharedHostCaches, false},
+		{"private modules", "node_id: n\nprivate_go_modules:\n  acme/a: [example.com/x]\n", sandbox.PerRepository, false},
 		{"malformed", "share_host_dependency_caches: [\n", sandbox.PerRepository, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

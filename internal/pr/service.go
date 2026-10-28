@@ -54,6 +54,9 @@ type Service struct {
 	// NodeProfilePath locates the node profile for engines; empty uses the
 	// default path.
 	NodeProfilePath string
+	// RegistryPath locates the repository registry that keys the node
+	// profile's private Go modules; empty uses the registry default.
+	RegistryPath string
 	// ResolveLog receives coordinator-owned conflict resolution progress.
 	ResolveLog io.Writer
 }
@@ -1123,7 +1126,7 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 		p.Next("validation")
 		observe = p.Observe
 	}
-	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass, LookupEnv: s.LookupEnv, DependencyMode: s.dependencyMode()}
+	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass, LookupEnv: s.LookupEnv, DependencyPolicy: s.dependencyPolicy(r.Worktree)}
 	var report *validation.ValidationReport
 	var valErr error
 	if reuse {
@@ -1348,13 +1351,13 @@ func (s *Service) runnerOptions(ctx context.Context) agent.RunnerOptions {
 	return agent.RunnerOptions{LookupEnv: s.LookupEnv, Inspections: sandbox.InspectionSessionFrom(ctx)}
 }
 
-// dependencyMode is the node profile's dependency cache mode. A malformed
-// profile keeps the default per-repository caches.
-func (s *Service) dependencyMode() sandbox.DependencyCacheMode {
-	mode, _ := node.DependencyCacheMode(s.NodeProfilePath)
-	return mode
+// dependencyPolicy is the node profile's dependency cache policy for
+// worktree's repository. A malformed profile keeps the default
+// per-repository caches and allows no private Go modules.
+func (s *Service) dependencyPolicy(worktree string) sandbox.DependencyPolicy {
+	return node.DependencyPolicy(s.NodeProfilePath, s.RegistryPath, worktree)
 }
 
 func (s *Service) newEngine(cfg *contract.SwarmConfig) *workflow.Engine {
-	return workflow.NewEngineWithManagerOptions(s.Root, s.Tracker, s.Manager, cfg, false, "", workflow.EngineOptions{LookupEnv: s.LookupEnv, NodeProfilePath: s.NodeProfilePath})
+	return workflow.NewEngineWithManagerOptions(s.Root, s.Tracker, s.Manager, cfg, false, "", workflow.EngineOptions{LookupEnv: s.LookupEnv, NodeProfilePath: s.NodeProfilePath, RegistryPath: s.RegistryPath})
 }

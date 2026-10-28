@@ -16,15 +16,15 @@ var userCacheDir = os.UserCacheDir
 // caches from the approved base on the host. Only native isolated agents
 // mount host caches, so other execution modes prepare nothing. Replaced in
 // tests.
-var prepareAgentDependencies = func(ctx context.Context, execution contract.ExecutionConfig, repo, baseSHA string, mode sandbox.DependencyCacheMode) (sandbox.Dependencies, error) {
+var prepareAgentDependencies = func(ctx context.Context, execution contract.ExecutionConfig, repo, baseSHA string, policy sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
 	if execution.Mode != contract.ExecutionIsolated || execution.Backend != contract.BackendNative {
-		return sandbox.Dependencies{Mode: mode}, nil
+		return sandbox.Dependencies{Mode: policy.Mode}, nil
 	}
 	userCache, err := userCacheDir()
 	if err != nil {
 		userCache = ""
 	}
-	return sandbox.PrepareDependencyCaches(ctx, sandbox.AgentDependencyCache, repo, baseSHA, userCache, mode)
+	return sandbox.PrepareDependencyCaches(ctx, sandbox.AgentDependencyCache, repo, baseSHA, userCache, policy)
 }
 
 // AgentDependencies prepares the agent dependency caches for baseSHA. It
@@ -35,7 +35,7 @@ func (e *Engine) AgentDependencies(ctx context.Context, cfg *contract.SwarmConfi
 	if err != nil {
 		return sandbox.Dependencies{}, err
 	}
-	deps, err := prepareAgentDependencies(ctx, execution, repo, baseSHA, e.DependencyMode)
+	deps, err := prepareAgentDependencies(ctx, execution, repo, baseSHA, e.DependencyPolicy)
 	if err != nil {
 		return sandbox.Dependencies{}, fmt.Errorf("dependency cache preflight: %w", err)
 	}

@@ -322,7 +322,7 @@ func requireIssueWorkspace(state *lease.IssueState) error {
 
 // prService builds the PR lifecycle service for this invocation's repository.
 func (o *RootOptions) prService(tr tracker.Tracker, manager *lease.Manager) *pr.Service {
-	return &pr.Service{Version: Version, Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now, NewRunner: o.resolverRunner, LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath()}
+	return &pr.Service{Version: Version, Root: o.resolveRepoRoot(), Tracker: tr, Manager: manager, Fork: o.Fork, ForkRemote: o.effectiveForkRemote(), Now: o.now, NewRunner: o.resolverRunner, LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath(), RegistryPath: o.registryPath()}
 }
 
 func shortSHA(sha string) string {

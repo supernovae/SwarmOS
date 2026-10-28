@@ -101,12 +101,12 @@ func (o *RootOptions) runnerOptions() agent.RunnerOptions {
 }
 
 func (o *RootOptions) engineOptions() workflow.EngineOptions {
-	return workflow.EngineOptions{LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath()}
+	return workflow.EngineOptions{LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath(), RegistryPath: o.registryPath()}
 }
 
-// dependencyMode is the node profile's dependency cache mode. A malformed
-// profile keeps the default per-repository caches.
-func (o *RootOptions) dependencyMode() sandbox.DependencyCacheMode {
-	mode, _ := node.DependencyCacheMode(o.nodeConfigPath())
-	return mode
+// dependencyPolicy is the node profile's dependency cache policy for
+// worktree's repository. A malformed profile keeps the default
+// per-repository caches and allows no private Go modules.
+func (o *RootOptions) dependencyPolicy(worktree string) sandbox.DependencyPolicy {
+	return node.DependencyPolicy(o.nodeConfigPath(), o.registryPath(), worktree)
 }

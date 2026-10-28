@@ -166,7 +166,7 @@ func TestDependencyCacheExcludesUnrequiredHostModule(t *testing.T) {
 	repo, base := goModuleRepo(t, "example.com/needed@v1.0.0")
 	userCache := resolvedTempDir(t)
 	makeWritableOnCleanup(t, userCache)
-	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, PerRepository)
+	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, DependencyPolicy{Mode: PerRepository})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestDependencyCachePathAndOwners(t *testing.T) {
 	dirs := map[BuildCacheOwner]string{}
 	for _, owner := range []BuildCacheOwner{AgentDependencyCache, ValidatorDependencyCache} {
 		for _, wt := range []string{repo, linked} {
-			deps, err := PrepareDependencyCaches(t.Context(), owner, wt, base, userCache, PerRepository)
+			deps, err := PrepareDependencyCaches(t.Context(), owner, wt, base, userCache, DependencyPolicy{Mode: PerRepository})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -236,7 +236,7 @@ func TestDependencyCachePathAndOwners(t *testing.T) {
 			t.Fatalf("build cache %s shares a dependency cache directory", c.Dir)
 		}
 	}
-	if _, err := PrepareDependencyCaches(t.Context(), AgentBuildCache, repo, base, userCache, PerRepository); err == nil {
+	if _, err := PrepareDependencyCaches(t.Context(), AgentBuildCache, repo, base, userCache, DependencyPolicy{Mode: PerRepository}); err == nil {
 		t.Fatal("a build cache owner must not own dependency caches")
 	}
 }
@@ -274,7 +274,7 @@ func TestDependencyCacheNoFallback(t *testing.T) {
 				t.Skip("permission bits are not checked on Windows")
 			}
 			repo, base := goModuleRepo(t)
-			deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, tc.setup(t, repo), PerRepository)
+			deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, tc.setup(t, repo), DependencyPolicy{Mode: PerRepository})
 			if err == nil || len(deps.Caches) != 0 {
 				t.Fatalf("PrepareDependencyCaches = %+v, %v; want an error and no cache", deps, err)
 			}
@@ -287,11 +287,11 @@ func TestDependencyCacheSkipsRepositoriesWithoutAdapter(t *testing.T) {
 	repo := cacheTestRepo(t)
 	writeWorkerFixture(t, repo, "README.md", "no modules\n")
 	base := gitCommitAll(t, repo, "base")
-	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, "", PerRepository)
+	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, "", DependencyPolicy{Mode: PerRepository})
 	if err != nil || len(deps.Caches) != 0 || deps.Mode != PerRepository {
 		t.Fatalf("PrepareDependencyCaches = %+v, %v", deps, err)
 	}
-	if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, strings.Repeat("0", 40), "", PerRepository); err == nil {
+	if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, strings.Repeat("0", 40), "", DependencyPolicy{Mode: PerRepository}); err == nil {
 		t.Fatal("an unknown base must be an error")
 	}
 }
@@ -304,7 +304,7 @@ func TestGoPrefetchReadsBaseNotWorktree(t *testing.T) {
 	writeWorkerFixture(t, repo, "go.mod", candidate)
 	userCache := resolvedTempDir(t)
 	makeWritableOnCleanup(t, userCache)
-	deps, err := PrepareDependencyCaches(t.Context(), ValidatorDependencyCache, repo, base, userCache, PerRepository)
+	deps, err := PrepareDependencyCaches(t.Context(), ValidatorDependencyCache, repo, base, userCache, DependencyPolicy{Mode: PerRepository})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +503,7 @@ func TestGoPrefetchSeedsFromHostCacheFirst(t *testing.T) {
 	repo, base := goModuleRepo(t, "example.com/needed@v1.0.0", "example.com/other@v1.0.0")
 	userCache := resolvedTempDir(t)
 	makeWritableOnCleanup(t, userCache)
-	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, PerRepository)
+	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, DependencyPolicy{Mode: PerRepository})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +520,7 @@ func TestGoPrefetchFailureNamesModule(t *testing.T) {
 	repo, base := goModuleRepo(t, "example.com/needed@v1.0.0", "example.com/missing@v1.0.0")
 	userCache := resolvedTempDir(t)
 	makeWritableOnCleanup(t, userCache)
-	_, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, PerRepository)
+	_, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, DependencyPolicy{Mode: PerRepository})
 	if err == nil {
 		t.Fatal("a module missing from every source must fail the prefetch")
 	}
@@ -593,7 +593,7 @@ func TestGoPrefetchMarkerSkipsRepeat(t *testing.T) {
 	userCache := resolvedTempDir(t)
 	prepare := func(base string) {
 		t.Helper()
-		if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, PerRepository); err != nil {
+		if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, DependencyPolicy{Mode: PerRepository}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -650,7 +650,7 @@ func TestGoPrefetchCommandIsFetchOnly(t *testing.T) {
 				dirs = append(dirs, dir)
 				return previous(ctx, dir, env, argv)
 			}
-			if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), PerRepository); err != nil {
+			if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), DependencyPolicy{Mode: PerRepository}); err != nil {
 				t.Fatal(err)
 			}
 			want := [][]string{{"go", "env", "GOVERSION"}}
@@ -828,7 +828,7 @@ func TestSharedHostCachesMountsHostGoModCache(t *testing.T) {
 	stubPrefetch(t, "go1.21.0", func(string, []string, []string) { t.Fatal("shared mode must not prefetch") })
 	_, hostCache := hostGoEnv(t, "off", "example.com/needed@v1.0.0")
 	repo, base := goModuleRepo(t, "example.com/needed@v1.0.0")
-	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), SharedHostCaches)
+	deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, resolvedTempDir(t), DependencyPolicy{Mode: SharedHostCaches})
 	if err != nil || len(deps.Caches) != 0 || deps.Mode != SharedHostCaches {
 		t.Fatalf("PrepareDependencyCaches = %+v, %v", deps, err)
 	}

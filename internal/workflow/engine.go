@@ -170,8 +170,8 @@ type Engine struct {
 	// LookupEnv resolves execution mode and agent environment for this engine;
 	// nil reads the process environment.
 	LookupEnv func(string) (string, bool)
-	// DependencyMode comes from the node profile, never the repository.
-	DependencyMode sandbox.DependencyCacheMode
+	// DependencyPolicy comes from the node profile, never the repository.
+	DependencyPolicy sandbox.DependencyPolicy
 }
 
 // EngineOptions carries one invocation's environment into engine
@@ -180,6 +180,9 @@ type Engine struct {
 type EngineOptions struct {
 	LookupEnv       func(string) (string, bool)
 	NodeProfilePath string
+	// RegistryPath locates the repository registry that keys the node
+	// profile's private Go modules; empty uses the registry default.
+	RegistryPath string
 }
 
 func (e *Engine) getenv(name string) string {
@@ -220,9 +223,10 @@ func NewEngineWithOptions(repoRoot string, tr tracker.Tracker, opts EngineOption
 	if prof, err := node.LoadOrDetectProfile(opts.NodeProfilePath); err == nil {
 		mgr.SetNodeProfile(prof)
 	}
-	// A malformed profile keeps the default per-repository caches.
-	mode, _ := node.DependencyCacheMode(opts.NodeProfilePath)
-	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv, DependencyMode: mode}, nil
+	// A malformed profile keeps the default per-repository caches and
+	// allows no private modules.
+	policy := node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot)
+	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv, DependencyPolicy: policy}, nil
 }
 
 func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string) *Engine {
@@ -233,16 +237,15 @@ func NewEngineWithManagerOptions(repoRoot string, tr tracker.Tracker, mgr *lease
 	if prof, err := node.LoadOrDetectProfile(opts.NodeProfilePath); err == nil && mgr != nil {
 		mgr.SetNodeProfile(prof)
 	}
-	mode, _ := node.DependencyCacheMode(opts.NodeProfilePath)
 	return &Engine{
-		DependencyMode: mode,
-		Tracker:        tr,
-		LeaseManager:   mgr,
-		Config:         cfg,
-		repoRoot:       repoRoot,
-		ForkMode:       forkMode,
-		ForkRemote:     forkRemote,
-		LookupEnv:      opts.LookupEnv,
+		DependencyPolicy: node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot),
+		Tracker:          tr,
+		LeaseManager:     mgr,
+		Config:           cfg,
+		repoRoot:         repoRoot,
+		ForkMode:         forkMode,
+		ForkRemote:       forkRemote,
+		LookupEnv:        opts.LookupEnv,
 	}
 }
 
@@ -1216,7 +1219,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 		progress.next("required-checks")
 		testerBody, _ := readRequiredArtifact(wtPath, "VALIDATION.md")
-		report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode, OnProgress: progress.observeCheck, GoFastPass: round == 0, LookupEnv: e.LookupEnv, DependencyMode: e.DependencyMode})
+		report, err := validation.Validate(ctx, wtPath, pre.WorkUnit, validation.ValidateOptions{Version: opts.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, ForkMode: forkMode, OnProgress: progress.observeCheck, GoFastPass: round == 0, LookupEnv: e.LookupEnv, DependencyPolicy: e.DependencyPolicy})
 		if context.Cause(ctx) == claimpause.ErrBudget {
 			return true, e.pauseWork(coordinatorCtx, res, opts, pre.WorkUnit, "implement", true, forkMode, forkRemote)
 		}

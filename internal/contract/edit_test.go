@@ -14,6 +14,7 @@ func TestEditWorkUnitIssueReplacement(t *testing.T) {
 	}{
 		{"title", WorkUnitEdit{Title: editString("New title")}},
 		{"objective", WorkUnitEdit{Objective: editString("New objective")}},
+		{"clear constraints", WorkUnitEdit{Constraints: &[]string{}}},
 		{"constraints", WorkUnitEdit{Constraints: &[]string{"new one", "new two"}}},
 		{"acceptance", WorkUnitEdit{Acceptance: &[]string{"new acceptance"}}},
 		{"workflow", WorkUnitEdit{Workflow: editString("bugfix")}},
@@ -82,7 +83,6 @@ func TestEditWorkUnitIssueRefusalAndRepair(t *testing.T) {
 		edit       WorkUnitEdit
 	}{
 		{"empty objective", base, WorkUnitEdit{Objective: editString("")}},
-		{"empty constraints", base, WorkUnitEdit{Constraints: &[]string{}}},
 		{"empty acceptance", base, WorkUnitEdit{Acceptance: &[]string{}}},
 		{"invalid gate", base, WorkUnitEdit{Gate: editString("bad")}},
 		{"invalid workflow", base, WorkUnitEdit{Workflow: editString("bad")}},
@@ -107,6 +107,7 @@ func TestEditWorkUnitIssueRefusalAndRepair(t *testing.T) {
 func TestEditWorkUnitIssueYAMLFields(t *testing.T) {
 	body := "Before\n```yaml\nobjective: Old objective\nconstraints: [old]\nacceptance: [works]\nworkflow: feature\ngate: agent\ndepends_on: [2]\n```\nAfter"
 	for _, edit := range []WorkUnitEdit{
+		{Constraints: &[]string{}},
 		{Constraints: &[]string{"new constraint", "other"}},
 		{Acceptance: &[]string{"new criterion"}},
 		{Workflow: editString("refactor")},
@@ -177,5 +178,31 @@ func TestEditWorkUnitIssueAllowHarnessChanges(t *testing.T) {
 	_, got, err := EditWorkUnitIssue(1, "title", prefix, WorkUnitEdit{AllowHarnessChanges: &yes})
 	if err != nil || !strings.HasPrefix(got, prefix) {
 		t.Fatalf("existing bytes changed: %v %q", err, got)
+	}
+}
+
+func TestEditWorkUnitEmptyConstraints(t *testing.T) {
+	for _, body := range []string{FormatIssueMarkdown(&WorkUnit{Objective: "Original objective", Constraints: []string{"keep"}, Acceptance: []string{"works"}, Workflow: "bugfix"}), "```yaml swarm-workunit\nobjective: Original objective\nconstraints: [keep]\nacceptance: [works]\nworkflow: bugfix\n```\n"} {
+		_, got, err := EditWorkUnitIssue(1, "title", body, WorkUnitEdit{Constraints: &[]string{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wu, err := ParseWorkUnitFromIssue(1, "title", got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEmptyConstraints(t, wu)
+		_, got, err = EditWorkUnitIssue(1, "title", got, WorkUnitEdit{Objective: editString("Changed objective")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wu, err = ParseWorkUnitFromIssue(1, "title", got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertEmptyConstraints(t, wu)
+		if wu.Objective != "Changed objective" {
+			t.Fatal(wu)
+		}
 	}
 }

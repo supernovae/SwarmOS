@@ -40,6 +40,9 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if parentIssue < 0 {
 			return fmt.Errorf("invalid --parent %d", parentIssue)
 		}
+		if constraints == nil {
+			constraints = []string{}
+		}
 		wu := &contract.WorkUnit{ID: "ISSUE-NEW", ParentIssue: parentIssue, DependsOn: dependsOn, RequiredCapabilities: capabilities, Title: title, Objective: objective, Constraints: constraints, Acceptance: acceptance, Workflow: workflowName, Gate: contract.GateMode(gate), AllowHarnessChanges: allowHarnessChanges, Size: size, Uncertainty: uncertainty, Risk: risk}
 		if err := contract.ValidateWorkUnit(wu); err != nil {
 			return err

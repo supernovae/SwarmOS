@@ -93,7 +93,7 @@ func formatValidationError(wu *WorkUnit, schemaErr error) error {
 	if strings.TrimSpace(wu.Objective) == "" {
 		missing = append(missing, "objective")
 	}
-	if len(wu.Constraints) == 0 {
+	if wu.Constraints == nil {
 		missing = append(missing, "constraints")
 	}
 	if len(wu.Acceptance) == 0 {

@@ -1,0 +1,1 @@
+- Classify a failing Go test that a test file added or changed by the candidate defines, and that does not exist at the approved base, as a regression, so repair rounds fix it instead of leaving it unclassified.

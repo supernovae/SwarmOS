@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 )
@@ -290,5 +292,120 @@ func TestRepairFromArtifact(t *testing.T) {
 	}
 	if text := RepairStatusText(got); !strings.Contains(text, "regression: TestA in test") || !strings.Contains(text, "failed checks test") {
 		t.Fatalf("status text: %s", text)
+	}
+}
+
+func TestRepairClassifiesNewTestAsRegression(t *testing.T) {
+	const newTest = "package leaf\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) { t.Fatal(\"new\") }\n"
+	const brokenBase = "package leaf\n\nfunc Broken( {\n"
+	tests := []struct {
+		name      string
+		base      map[string]string
+		file      string
+		contents  string
+		extra     map[string]string // committed alongside the change
+		test, pkg string
+		want      TestClassification
+		reason    string
+	}{
+		{"new test file", nil, "leaf/new_test.go", newTest, nil, "TestNew", "example.com/m/leaf", TestRegression, "not at the approved base; defined in leaf/new_test.go"},
+		{"new test in existing file", nil, "leaf/leaf_test.go", goModuleFixture["leaf/leaf_test.go"] + "\nfunc TestAdded(t *testing.T) { t.Fatal(\"new\") }\n", nil, "TestAdded", "example.com/m/leaf", TestRegression, "not at the approved base; defined in leaf/leaf_test.go"},
+		{"new package", nil, "fresh/fresh_test.go", "package fresh\n\nimport \"testing\"\n\nfunc TestFresh(t *testing.T) { t.Fatal(\"new\") }\n", nil, "TestFresh", "example.com/m/fresh", TestRegression, "not at the approved base; defined in fresh/fresh_test.go"},
+		{"base build failure", map[string]string{"leaf/broken.go": brokenBase}, "leaf/new_test.go", newTest, map[string]string{"leaf/broken.go": "package leaf\n"}, "TestNew", "example.com/m/leaf", TestUnclassified, "base rerun: the package failed without a result for this test"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, base := setupGoFastPassRepo(t, repairCheck, tt.base)
+			for name, contents := range tt.extra {
+				writeRepoFile(t, repo, name, contents)
+				runRepoGit(t, repo, "add", name)
+			}
+			commitRepoFile(t, repo, tt.file, tt.contents)
+			report := validateRepair(t, repo, base)
+			test := onlyTest(t, report.Repair)
+			if test.Name != tt.test || test.Package != tt.pkg || test.Classification != tt.want || test.Reason != tt.reason {
+				t.Fatalf("classification: %+v", test)
+			}
+			if report.Repair.AllPreExisting {
+				t.Fatal("a new failing test must keep the repair round")
+			}
+		})
+	}
+}
+
+func TestClassifyTimeout(t *testing.T) {
+	cmd, ok := parseGoTestAll("go test ./...")
+	if !ok {
+		t.Fatal("command not recognized")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	class, reason := classify(ctx, &checkRunner{}, &baseRerun{}, cmd, goFailure{"example.com/m/leaf", "TestNew"}, []string{"leaf/new_test.go"}, time.Minute)
+	if class != TestUnclassified || !strings.Contains(reason, "diagnosis time limit reached") {
+		t.Fatalf("timeout: %s %q", class, reason)
+	}
+}
+
+func TestCandidateDefines(t *testing.T) {
+	const defines = "package leaf\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) {}\n"
+	tests := []struct {
+		name    string
+		files   map[string]string
+		changed []string
+		pkg     string
+		test    string
+		want    string
+	}{
+		{"changed file", map[string]string{"leaf/new_test.go": defines}, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew", "leaf/new_test.go"},
+		{"subtest", map[string]string{"leaf/new_test.go": defines}, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew/case", "leaf/new_test.go"},
+		{"root package", map[string]string{"root_test.go": "package m\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) {}\n"}, []string{"root_test.go"}, "example.com/m", "TestNew", "root_test.go"},
+		{"quoted module", map[string]string{"go.mod": "module \"example.com/m\" // comment\n", "leaf/new_test.go": defines}, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew", "leaf/new_test.go"},
+		{"unchanged file", map[string]string{"leaf/new_test.go": defines}, []string{"leaf/other_test.go"}, "example.com/m/leaf", "TestNew", ""},
+		{"method", map[string]string{"leaf/new_test.go": "package leaf\n\ntype s struct{}\n\nfunc (s) TestNew() {}\n"}, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew", ""},
+		{"non-test file", map[string]string{"leaf/new.go": defines}, []string{"leaf/new.go"}, "example.com/m/leaf", "TestNew", ""},
+		{"no go.mod", map[string]string{"go.mod": "", "leaf/new_test.go": defines}, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew", ""},
+		{"no module line", map[string]string{"go.mod": "go 1.21\n", "leaf/new_test.go": defines}, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew", ""},
+		{"oversized", map[string]string{"leaf/new_test.go": defines + "//" + strings.Repeat("x", maxTestSource) + "\n"}, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew", ""},
+		{"other directory", map[string]string{"other/new_test.go": defines}, []string{"other/new_test.go"}, "example.com/m/leaf", "TestNew", ""},
+		{"other module", map[string]string{"leaf/new_test.go": defines}, []string{"leaf/new_test.go"}, "example.com/other/leaf", "TestNew", ""},
+		{"deleted file", nil, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew", ""},
+		{"syntax error", map[string]string{"leaf/new_test.go": defines + "func ("}, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			files := map[string]string{"go.mod": "module example.com/m\n\ngo 1.21\n"}
+			for name, contents := range tt.files {
+				files[name] = contents
+			}
+			for name, contents := range files {
+				if name == "go.mod" && contents == "" {
+					continue
+				}
+				writeRepoFile(t, dir, name, contents)
+			}
+			got, ok := candidateDefines(dir, tt.changed, tt.pkg, tt.test)
+			if got != tt.want || ok != (tt.want != "") {
+				t.Fatalf("candidateDefines = %q, %v", got, ok)
+			}
+		})
+	}
+}
+
+func TestCandidateDefinesRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	writeRepoFile(t, dir, "go.mod", "module example.com/m\n")
+	outside := filepath.Join(t.TempDir(), "outside_test.go")
+	if err := os.WriteFile(outside, []byte("package leaf\n\nimport \"testing\"\n\nfunc TestNew(t *testing.T) {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "leaf"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "leaf", "new_test.go")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if file, ok := candidateDefines(dir, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew"); ok {
+		t.Fatalf("a symlinked test file must not define a test: %q", file)
 	}
 }

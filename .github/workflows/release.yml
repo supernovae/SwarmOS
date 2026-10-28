@@ -15,8 +15,10 @@ concurrency:
 jobs:
   checks:
     uses: ./.github/workflows/swarm-validate.yml
+    # Grant everything the called jobs request; a missing scope fails the run at startup.
     permissions:
       contents: read
+      issues: read
 
   eligibility:
     runs-on: ubuntu-latest

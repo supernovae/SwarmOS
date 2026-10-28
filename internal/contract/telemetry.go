@@ -24,7 +24,7 @@ const (
 // Usage sources say where token, model and tool counts came from.
 const (
 	UsageSourceNone       = "none"        // nothing was observed
-	UsageSourceSessionLog = "session-log" // the harness's own session log in the run's scratch HOME
+	UsageSourceSessionLog = "session-log" // the harness's own record of the run's session
 	UsageSourceMock       = "mock"        // deterministic mock adapter values
 )
 
@@ -52,6 +52,7 @@ type RoleRunTelemetry struct {
 	InputTokens       *int64    `json:"input_tokens"`
 	OutputTokens      *int64    `json:"output_tokens"`
 	CachedInputTokens *int64    `json:"cached_input_tokens"`
+	ReasoningTokens   *int64    `json:"reasoning_tokens"`
 	ToolCalls         *int64    `json:"tool_calls"`
 	RepeatedCommands  *int64    `json:"repeated_commands"`
 	RepairAttempt     *int64    `json:"repair_attempt"`
@@ -123,7 +124,7 @@ func (t *RoleRunTelemetry) Validate() error {
 		return fmt.Errorf("telemetry start time is required")
 	}
 	for _, v := range []*int64{t.ElapsedMS, t.SetupMS, t.PreflightMS, t.SnapshotMS, t.ModelMS, t.ToolMS,
-		t.InputTokens, t.OutputTokens, t.CachedInputTokens, t.ToolCalls, t.RepeatedCommands, t.RepairAttempt, t.ReplanCount} {
+		t.InputTokens, t.OutputTokens, t.CachedInputTokens, t.ReasoningTokens, t.ToolCalls, t.RepeatedCommands, t.RepairAttempt, t.ReplanCount} {
 		if v != nil && (*v < 0 || *v > maxTelemetryValue) {
 			return fmt.Errorf("telemetry value out of range")
 		}

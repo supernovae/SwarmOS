@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,41 +17,43 @@ import (
 // InspectDelegatedHarness checks supported interfaces without opening private
 // credential stores. Runtime enforcement is checked separately by the executor.
 func InspectDelegatedHarness(ctx context.Context, driver, binary string) (string, error) {
-	return inspectDelegatedHarness(ctx, driver, binary, nil)
+	version, _, err := inspectDelegatedHarness(ctx, driver, binary, nil)
+	return version, err
 }
 
 // inspectDelegatedHarness also requires the extra flags a configured run uses,
-// such as --effort, so an older harness fails before work starts.
-func inspectDelegatedHarness(ctx context.Context, driver, binary string, extra []string) (string, error) {
+// such as --effort, so an older harness fails before work starts. It also
+// returns the inspected help text so optional flags are used only when listed.
+func inspectDelegatedHarness(ctx context.Context, driver, binary string, extra []string) (string, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	home, err := os.MkdirTemp("", "swarm-harness-inspect-*")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer os.RemoveAll(home)
 	env := nativeEnv(home, false, Dependencies{})
 	var version, diagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, env, []string{"--version"}, nil, &version, &diagnostics); err != nil {
-		return "", fmt.Errorf("%s version check: %w", driver, err)
+		return "", "", fmt.Errorf("%s version check: %w", driver, err)
 	}
 	var qualified string
 	var flags []string
 	switch driver {
 	case "claude":
 		qualified, err = harnessVersion(version.String(), "", " (Claude Code)", [3]int{2, 1, 308})
-		flags = []string{"--restricted", "--strict-mcp-config", "--tools", "--settings", "--permission-mode", "--no-session-persistence"}
+		flags = []string{"--restricted", "--strict-mcp-config", "--tools", "--settings", "--permission-mode"}
 	case "omp":
 		qualified, err = harnessVersion(version.String(), "omp/", "", [3]int{18, 12, 5})
-		flags = []string{"--mode", "--no-tools", "--no-extensions", "--no-rules", "--config", "--no-session"}
+		flags = []string{"--mode", "--no-tools", "--no-extensions", "--no-rules", "--config"}
 	case "opencode":
 		qualified, err = harnessVersion(version.String(), "opencode v", "", [3]int{2, 1, 2})
 		flags = []string{"--standalone", "--server", "--continue", "--model", "--agent", "--format", "--title"}
 	default:
-		return "", fmt.Errorf("unknown delegated harness %q", driver)
+		return "", "", fmt.Errorf("unknown delegated harness %q", driver)
 	}
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", driver, err)
+		return "", "", fmt.Errorf("%s: %w", driver, err)
 	}
 	var help process.Output
 	args := []string{"--help"}
@@ -58,14 +61,36 @@ func inspectDelegatedHarness(ctx context.Context, driver, binary string, extra [
 		args = []string{"run", "--help"}
 	}
 	if err := runNativeCommand(ctx, binary, home, env, args, nil, &help, &diagnostics); err != nil {
-		return "", fmt.Errorf("%s interface inspection: %w", driver, err)
+		return "", "", fmt.Errorf("%s interface inspection: %w", driver, err)
 	}
 	for _, flag := range append(flags, extra...) {
 		if !strings.Contains(help.String(), flag) {
-			return "", fmt.Errorf("%s %s lacks required interface %s", driver, qualified, flag)
+			return "", "", fmt.Errorf("%s %s lacks required interface %s", driver, qualified, flag)
 		}
 	}
-	return qualified, nil
+	return qualified, help.String(), nil
+}
+
+// helpLists reports whether help names flag exactly, not merely a longer flag
+// that starts with it.
+func helpLists(help, flag string) bool {
+	fields := strings.FieldsFunc(help, func(r rune) bool { return strings.ContainsRune(" \t\r\n,=[]", r) })
+	for _, field := range fields {
+		if field == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// newSessionID returns a random RFC 4122 version 4 UUID.
+func newSessionID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	b[6], b[8] = b[6]&0x0f|0x40, b[8]&0x3f|0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:]), nil
 }
 
 func ClaudeAuthentication(ctx context.Context, binary string) (string, error) {
@@ -103,7 +128,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 	if driver == "claude" && opts.Effort != "" {
 		extra = []string{"--effort"}
 	}
-	version, err := inspectDelegatedHarness(ctx, driver, binary, extra)
+	version, help, err := inspectDelegatedHarness(ctx, driver, binary, extra)
 	if err != nil {
 		return nil, "", err
 	}
@@ -127,6 +152,10 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 			return err
 		}
 		env := nativeEnv(home, true, opts.Dependencies)
+		// The harness keeps its session in its own store under the host HOME.
+		// Only this run's session is named; observation never changes the result.
+		session := HarnessSession{Driver: driver, Home: home, Control: control}
+		defer func() { opts.Lifecycle.observeSession(session) }()
 		// dir is the real worktree, so the cache key names its repository.
 		caches, err := agentBuildCaches(ctx, dir, scratch, opts)
 		if err != nil {
@@ -165,12 +194,23 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 				return err
 			}
 			command = []string{binary, "serve", "--stdio"}
-			return runOpenCode(ctx, binary, model, prompt, control, env, interactive, input, stdout, stderr, opts.GuidanceDelivered)
+			return runOpenCodeSession(ctx, binary, model, prompt, control, env, helpLists(help, "--session"), &session, interactive, input, stdout, stderr, opts.GuidanceDelivered)
 		default:
 			return fmt.Errorf("unsupported harness %q", driver)
 		}
 		return runFollowupTurns(ctx, prompt, "Continue the task using the SwarmOS tools. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, false, input, stdout, func(prompt string) error {
-			turn := append(append([]string(nil), args...), "--", prompt)
+			turn := append([]string(nil), args...)
+			// Each print turn is a new Claude session; naming it lets only this
+			// run's own session file be read afterwards.
+			if helpLists(help, "--session-id") {
+				id, err := newSessionID()
+				if err != nil {
+					return err
+				}
+				session.SessionIDs = append(session.SessionIDs, id)
+				turn = append(turn, "--session-id", id)
+			}
+			turn = append(turn, "--", prompt)
 			command = append([]string{binary}, turn...)
 			return runNativeCommand(ctx, binary, control, env, turn, nil, stdout, stderr)
 		}, opts.GuidanceDelivered)
@@ -181,7 +221,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 // claudeArgs is the complete isolated Claude Code argv before the prompt. Only
 // the approved model and effort selectors vary.
 func claudeArgs(config, settings, model, effort string) []string {
-	args := []string{"--restricted", "--strict-mcp-config", "--mcp-config", config, "--tools", "", "--disable-slash-commands", "--no-chrome", "--settings", settings, "--permission-mode", "dontAsk", "--permission-prompts", "none", "--no-session-persistence", "--print"}
+	args := []string{"--restricted", "--strict-mcp-config", "--mcp-config", config, "--tools", "", "--disable-slash-commands", "--no-chrome", "--settings", settings, "--permission-mode", "dontAsk", "--permission-prompts", "none", "--print"}
 	if model != "" {
 		args = append(args, "--model", model)
 	}

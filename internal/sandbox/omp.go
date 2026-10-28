@@ -30,7 +30,7 @@ func runOMP(ctx context.Context, binary, model, prompt, control string, env []st
 	if err := writeHarnessJSON(config, settings); err != nil {
 		return err
 	}
-	args := []string{"--mode", "rpc", "--no-ui", "--no-tools", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--no-pty", "--no-session", "--config", config}
+	args := []string{"--mode", "rpc", "--no-ui", "--no-tools", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--no-pty", "--config", config}
 	if model != "" {
 		args = append(args, "--model", model)
 	}

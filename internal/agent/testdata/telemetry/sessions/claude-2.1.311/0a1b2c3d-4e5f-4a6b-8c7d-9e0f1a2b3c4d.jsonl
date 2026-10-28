@@ -1,0 +1,1 @@
+{"type":"assistant","sessionId":"0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d","cwd":"/CONTROL","version":"2.1.311","uuid":"b1","message":{"id":"msg_03","type":"message","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":4000,"output_tokens":20}}}

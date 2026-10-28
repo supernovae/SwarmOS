@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -205,7 +206,7 @@ func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 	if err := runNativeCommand(ctx, binary, home, nativeEnv(home, false, Dependencies{}), []string{"exec", "--help"}, nil, &help, &versionDiagnostics); err != nil {
 		return "", fmt.Errorf("inspect Codex execution interface: %w", err)
 	}
-	for _, flag := range []string{"--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check"} {
+	for _, flag := range []string{"--ignore-user-config", "--ignore-rules", "--skip-git-repo-check"} {
 		if !strings.Contains(help.String(), flag) {
 			return "", fmt.Errorf("codex %s lacks required execution interface %s", qualified, flag)
 		}
@@ -302,6 +303,13 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		}
 		args := codexPolicy(binary, work, scratch, opts.ReadOnly, caches, opts.Dependencies)
 		args = append(args, codexExecArgs(work, model, opts.Effort)...)
+		// Each exec turn is its own Codex session, named on stderr. Only those
+		// ids are looked up afterwards; observation never changes the result.
+		ids := &sessionIDWriter{w: stderr}
+		stderr := io.Writer(ids)
+		defer func() {
+			opts.Lifecycle.observeSession(HarnessSession{Driver: "codex", Home: home, CodexHome: os.Getenv("CODEX_HOME"), SessionIDs: ids.ids})
+		}()
 		return runFollowupTurns(ctx, prompt, "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, true, stdin, stdout, func(turn string) error {
 			command = append(append([]string{binary}, args...), turn)
 			if err := runNativeCommand(ctx, binary, work, nativeEnv(home, true, opts.Dependencies), command[1:], nil, stdout, stderr); err != nil {
@@ -313,10 +321,45 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 	return command, version, err
 }
 
+var codexSessionLine = regexp.MustCompile(`^session id: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\r?$`)
+
+const (
+	sessionLineMax = 4 << 10
+	sessionIDsMax  = 64
+)
+
+// sessionIDWriter passes every byte through unchanged before scanning it for
+// Codex "session id: <uuid>" lines. Over-long lines are skipped, not buffered.
+type sessionIDWriter struct {
+	w        io.Writer
+	line     []byte
+	skipping bool
+	ids      []string
+}
+
+func (s *sessionIDWriter) Write(p []byte) (int, error) {
+	n, err := s.w.Write(p)
+	for _, c := range p[:n] {
+		if c != '\n' {
+			if !s.skipping {
+				if s.line = append(s.line, c); len(s.line) > sessionLineMax {
+					s.line, s.skipping = s.line[:0], true
+				}
+			}
+			continue
+		}
+		if m := codexSessionLine.FindSubmatch(s.line); !s.skipping && m != nil && len(s.ids) < sessionIDsMax {
+			s.ids = append(s.ids, string(m[1]))
+		}
+		s.line, s.skipping = s.line[:0], false
+	}
+	return n, err
+}
+
 // codexExecArgs is the native `codex exec` argv after the sandbox policy and
 // before the prompt. Only the approved model and effort selectors vary.
 func codexExecArgs(work, model, effort string) []string {
-	args := []string{"exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-C", work}
+	args := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "-C", work}
 	if model != "" {
 		args = append(args, "--model", model)
 	}

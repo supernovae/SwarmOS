@@ -174,6 +174,11 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				advisoryOut = cmd.ErrOrStderr()
 			}
 			fmt.Fprint(advisoryOut, freshness.advisory())
+			var policyWarning *workspace.HarnessPolicyWarning
+			if unit.AllowHarnessChanges && freshness.TargetSHA != "" {
+				policyWarning, _ = workspace.ObserveHarnessPolicy(ctx, root, state.BaseSHA, state.PolicyTreeDigest, freshness.TargetSHA)
+				fmt.Fprint(advisoryOut, prepareHarnessPolicyWarning(policyWarning, issue, state.PRNumber, rootOpts))
+			}
 			p.Next("checkpoint push/record")
 			// GitHub publishes this head and the fenced state in one atomic Git push.
 			if rootOpts.Fork {
@@ -232,7 +237,12 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				pr.HTMLURL = submittedState.PRURL
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head, "base_freshness": freshness, "report": report})
+				outcome := map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head, "base_freshness": freshness, "report": report}
+				if policyWarning != nil {
+					prepareHarnessPolicyWarning(policyWarning, issue, pr.Number, rootOpts)
+					outcome["harness_policy_warning"] = policyWarning
+				}
+				return writeJSON(cmd, outcome)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Submitted draft PR #%d for issue #%d on %s (%s)\n", pr.Number, issue, branch, pr.HTMLURL)
 			return nil

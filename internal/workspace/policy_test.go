@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -46,6 +47,19 @@ func TestCommittedPolicyTreeAndAncestry(t *testing.T) {
 	if err != nil || got != tree {
 		t.Fatalf("source edit changed tree: %s %v", got, err)
 	}
+	for _, recorded := range []string{"", tree} {
+		w, err := ObserveHarnessPolicy(ctx, root, base, recorded, next)
+		if err != nil || w != nil {
+			t.Fatalf("ordinary advance: %+v %v", w, err)
+		}
+	}
+	if _, err := ObserveHarnessPolicy(ctx, root, base, tree, strings.Repeat("0", 40)); err == nil {
+		t.Fatal("missing target accepted")
+	}
+	w, err := ObserveHarnessPolicy(ctx, root, base, strings.Repeat("a", 40), next)
+	if err != nil || w == nil {
+		t.Fatalf("recorded mismatch ignored: %+v %v", w, err)
+	}
 	write(".swarm/config.yaml", "uncommitted")
 	got, err = PolicyTreeDigest(ctx, root, next)
 	if err != nil || got != tree {
@@ -66,6 +80,12 @@ func TestCommittedPolicyTreeAndAncestry(t *testing.T) {
 		paths, err := ChangedPolicyPaths(ctx, root, old, next)
 		if err != nil || !reflect.DeepEqual(paths, []string{".swarm/" + name}) {
 			t.Fatalf("paths=%q err=%v", paths, err)
+		}
+		for _, recorded := range []string{"", tree} {
+			w, err := ObserveHarnessPolicy(ctx, root, old, recorded, next)
+			if err != nil || w == nil || w.ApprovedPolicyDigest != tree || w.TargetPolicyDigest != got {
+				t.Fatalf("drift: %+v %v", w, err)
+			}
 		}
 		tree = got
 	}

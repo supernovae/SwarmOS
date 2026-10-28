@@ -816,3 +816,45 @@ func TestCLIPRWorkRestorationEvidence(t *testing.T) {
 		t.Fatalf("restored file at PR head = %q", got)
 	}
 }
+
+func TestCLIPRSubmitHarnessPolicyWarning(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		t.Run(strconv.FormatBool(asJSON), func(t *testing.T) {
+			f := newCLIFixture(t)
+			issue := f.create(t, "agent")
+			n := strconv.Itoa(issue)
+			f.must(t, "issue", "edit", n, "--allow-harness-changes")
+			f.must(t, "issue", "approve", n)
+			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			f.must(t, "issue", "submit", n)
+			number := f.state(t, issue).PRNumber
+			p := strconv.Itoa(number)
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'revision\n' > revision.txt")
+			f.must(t, "pr", "work", p, "--agent", "mock", "--headless")
+			old := f.state(t, issue)
+			freshnessWrite(t, f.root, ".swarm/prompts/developer.md", "# Changed target prompt\n")
+			freshnessGit(t, f.root, "add", ".swarm/prompts/developer.md")
+			freshnessGit(t, f.root, "commit", "-m", "target policy")
+			args := []string{"pr", "submit", p}
+			if asJSON {
+				args = append(args, "--json")
+			}
+			out, stderr, err := runSplit(f, args...)
+			if err != nil {
+				t.Fatal(err, out, stderr)
+			}
+			text := out
+			if asJSON {
+				text = stderr
+				result := readPROutcome(t, out)
+				w := result.HarnessPolicyWarning
+				if w == nil || w.PRNumber != number || w.ApprovedPolicyDigest != old.PolicyTreeDigest || len(w.RecoveryCommands) != 2 {
+					t.Fatalf("%+v", w)
+				}
+			}
+			if strings.Count(text, "Warning: target policy changed") != 1 || !strings.Contains(text, "swarm issue approve "+n) || !strings.Contains(text, "swarm pr rebase "+p+" --resolve") {
+				t.Fatal(text)
+			}
+		})
+	}
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
@@ -28,9 +29,10 @@ import (
 )
 
 type Service struct {
-	Version    string
-	workWait   func(context.Context) error
-	OnProgress func(progress.Event)
+	OnHarnessPolicyWarning func(*workspace.HarnessPolicyWarning)
+	Version                string
+	workWait               func(context.Context) error
+	OnProgress             func(progress.Event)
 	// Progress is an optional CLI-owned session spanning repository resolution.
 	Progress *progress.Session
 
@@ -69,25 +71,26 @@ type Options struct {
 	Resolve      bool
 }
 type Result struct {
-	WorkPreflight *WorkPreflightResult          `json:"work_preflight,omitempty"`
-	SubmitCommand string                        `json:"submit_command,omitempty"`
-	CIFailures    bool                          `json:"ci_failures,omitempty"`
-	PR            *tracker.PullRequest          `json:"pr"`
-	IssueNumber   int                           `json:"issue_number"`
-	State         *lease.IssueState             `json:"state,omitempty"`
-	Worktree      string                        `json:"worktree,omitempty"`
-	Branch        string                        `json:"branch,omitempty"`
-	HeadSHA       string                        `json:"head_sha,omitempty"`
-	BaseSHA       string                        `json:"base_sha,omitempty"`
-	Checks        []tracker.CheckRunResult      `json:"checks,omitempty"`
-	CodeScanning  *tracker.CodeScanningEvidence `json:"code_scanning,omitempty"`
-	Reviews       []tracker.PullRequestReview   `json:"reviews,omitempty"`
-	Status        string                        `json:"status"`
-	Dirty         bool                          `json:"dirty"`
-	Rebasing      bool                          `json:"rebasing"`
-	Validation    *validation.ValidationReport  `json:"validation,omitempty"`
-	Preflight     *workflow.PreflightResult     `json:"preflight,omitempty"`
-	Work          *workflow.WorkResult          `json:"work,omitempty"`
+	HarnessPolicyWarning *workspace.HarnessPolicyWarning `json:"harness_policy_warning,omitempty"`
+	WorkPreflight        *WorkPreflightResult            `json:"work_preflight,omitempty"`
+	SubmitCommand        string                          `json:"submit_command,omitempty"`
+	CIFailures           bool                            `json:"ci_failures,omitempty"`
+	PR                   *tracker.PullRequest            `json:"pr"`
+	IssueNumber          int                             `json:"issue_number"`
+	State                *lease.IssueState               `json:"state,omitempty"`
+	Worktree             string                          `json:"worktree,omitempty"`
+	Branch               string                          `json:"branch,omitempty"`
+	HeadSHA              string                          `json:"head_sha,omitempty"`
+	BaseSHA              string                          `json:"base_sha,omitempty"`
+	Checks               []tracker.CheckRunResult        `json:"checks,omitempty"`
+	CodeScanning         *tracker.CodeScanningEvidence   `json:"code_scanning,omitempty"`
+	Reviews              []tracker.PullRequestReview     `json:"reviews,omitempty"`
+	Status               string                          `json:"status"`
+	Dirty                bool                            `json:"dirty"`
+	Rebasing             bool                            `json:"rebasing"`
+	Validation           *validation.ValidationReport    `json:"validation,omitempty"`
+	Preflight            *workflow.PreflightResult       `json:"preflight,omitempty"`
+	Work                 *workflow.WorkResult            `json:"work,omitempty"`
 	// RoleRuns is the issue's validated per-run telemetry, set by Status.
 	RoleRuns []contract.RoleRunTelemetry `json:"role_runs,omitempty"`
 	// Repair is the trusted summary of the issue's failed validation, set by
@@ -850,7 +853,12 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("plan review required: swarm pr work %d --phase review", opts.Number)
 		}
 		if _, err = s.Manager.ReapproveRebase(ctx, r.IssueNumber, opts.Number, r.BaseSHA, r.PR.BaseSHA, r.PR.HeadSHA); err != nil {
-			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("routine reapproval: %w; run swarm issue approve %d", err, r.IssueNumber)}
+			hint := fmt.Sprintf("swarm issue approve %d", r.IssueNumber)
+			wrapped := fmt.Errorf("routine reapproval: %w", err)
+			if !strings.Contains(err.Error(), hint) {
+				wrapped = fmt.Errorf("%w; run %s", wrapped, hint)
+			}
+			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: wrapped}
 		}
 		r, remote, err = s.openForMutation(ctx, opts.Number, false)
 		if err != nil {
@@ -1214,7 +1222,8 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 		if dirty || rebasing || head != rev.LocalHeadSHA || r.Validation == nil || !r.Validation.Passed || r.Validation.HeadSHA != head {
 			return nil, fmt.Errorf("PR candidate changed after validation")
 		}
-		if _, e = s.requireApproval(ctx, r, st); e != nil {
+		unit, e := s.requireApproval(ctx, r, st)
+		if e != nil {
 			return nil, e
 		}
 		fresh, e := s.Tracker.GetPullRequest(ctx, number)
@@ -1225,6 +1234,25 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 			// The target branch may advance; the revision is validated against
 			// the approved base and GitHub tests the merge. A retarget is not.
 			return nil, fmt.Errorf("PR changed remotely before publish; refusing stale head")
+		}
+		if unit.AllowHarnessChanges {
+			available := true
+			if s.Tracker.BackendName() == "github" {
+				observationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				_, fetchErr := gitcredential.Output(observationCtx, s.Root, "fetch", "--no-tags", "--no-write-fetch-head", s.upstreamRemote(), fresh.BaseSHA)
+				cancel()
+				available = fetchErr == nil
+			}
+			if available {
+				r.HarnessPolicyWarning, _ = workspace.ObserveHarnessPolicy(ctx, s.Root, st.BaseSHA, st.PolicyTreeDigest, fresh.BaseSHA)
+				if w := r.HarnessPolicyWarning; w != nil {
+					w.IssueNumber, w.PRNumber = r.IssueNumber, number
+					w.RecoveryCommands = []string{fmt.Sprintf("swarm issue approve %d", r.IssueNumber), fmt.Sprintf("swarm pr rebase %d --resolve", number)}
+					if s.OnHarnessPolicyWarning != nil {
+						s.OnHarnessPolicyWarning(w)
+					}
+				}
+			}
 		}
 		if fresh.HeadSHA != head {
 			if fresh.HeadSHA != rev.RemoteHeadSHA {

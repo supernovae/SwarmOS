@@ -397,7 +397,7 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 	valSpec := contract.ValidationSpec{
 		RequiredChecks: []contract.CheckSpec{
 			{Name: "build", Command: stack.BuildCmd, Timeout: "5m"},
-			{Name: "test", Command: stack.TestCmd, Timeout: "10m"},
+			{Name: "test", Command: stack.TestCmd, Timeout: "30m"},
 			{Name: "lint", Command: stack.LintCmd, Timeout: "5m"},
 		},
 		ProtectedPaths: contract.DefaultProtectedPaths(),

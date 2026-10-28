@@ -1,0 +1,512 @@
+package sandbox
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestRestorePolicyAuthorities(t *testing.T) {
+	policy, err := newRegistryPolicy([]string{restoreFixtureHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host, err := parseRegistryTarget("registry.example:443", policy); err != nil || host != restoreFixtureHost {
+		t.Fatal(host, err)
+	}
+	for _, authority := range []string{"cdn.example:443", "registry.example.evil:443", "evilregistry.example:443", "*.registry.example:443", "REGISTRY.example:443", "registry.example.:443", "registry.example:0443", "registry.example:80", "registry.example", "registry.example:", "registry.example:443:443", "u:p@registry.example:443", "registry.example%00:443", "%72egistry.example:443", "registry.example\\evil:443", "registry.example :443", "registry.example\n:443", "https://registry.example:443", "127.0.0.1:443", "[::1]:443", "2130706433:443"} {
+		t.Run(authority, func(t *testing.T) {
+			if _, err := parseRegistryTarget(authority, policy); err == nil {
+				t.Fatal("unsafe authority accepted")
+			}
+		})
+	}
+	for _, host := range []string{"*.example", "registry.example.", "REGISTRY.example", "127.0.0.1", "[::1]", "localhost", restoreCanaryHost, "x..example", "-x.example", "x-.example", "x.123", "x_foo.example"} {
+		if _, err := newRegistryPolicy([]string{host}); err == nil {
+			t.Fatalf("unsafe policy accepted %q", host)
+		}
+	}
+	if _, err := newRegistryPolicy(nil); err == nil {
+		t.Fatal("empty policy")
+	}
+}
+func TestRestoreAddressSafety(t *testing.T) {
+	for _, s := range []string{"0.0.0.0", "0.1.2.3", "10.1.1.1", "100.64.1.1", "127.0.0.1", "169.254.169.254", "172.31.1.1", "192.0.0.8", "192.0.2.1", "192.88.99.1", "192.168.1.1", "198.18.1.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1", "255.255.255.255", "::", "::1", "::ffff:8.8.8.8", "64:ff9b::808:808", "100::1", "2001::1", "2001:db8::1", "2002::1", "3fff::1", "fc00::1", "fe80::1", "ff02::1", "4000::1"} {
+		if safeRegistryAddress(netip.MustParseAddr(s)) {
+			t.Errorf("unsafe address accepted %s", s)
+		}
+	}
+	for _, s := range []string{"8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"} {
+		if !safeRegistryAddress(netip.MustParseAddr(s)) {
+			t.Errorf("public address denied %s", s)
+		}
+	}
+	for _, ips := range [][]netip.Addr{nil, {netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("127.0.0.1")}, {netip.MustParseAddr("::ffff:8.8.8.8")}} {
+		if _, err := resolveRegistryAddresses(context.Background(), restoreFixtureHost, func(context.Context, string) ([]netip.Addr, error) { return ips, nil }); err == nil {
+			t.Fatal("unsafe DNS set accepted")
+		}
+	}
+}
+func TestRestoreAddressRebinding(t *testing.T) {
+	f := newRestoreFixture(t, nil)
+	calls := 0
+	f.broker.resolve = func(context.Context, string) ([]netip.Addr, error) {
+		calls++
+		if calls == 1 {
+			return []netip.Addr{netip.MustParseAddr("8.8.8.8")}, nil
+		}
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	client := f.client()
+	defer client.CloseIdleConnections()
+	_, _ = fixtureRead(t, client, "GET", "https://registry.example/a", nil)
+	r, err := client.Get("https://registry.example/b")
+	if err == nil {
+		_ = r.Body.Close()
+		t.Fatal("rebound address accepted")
+	}
+	if f.dials.Load() != 1 || calls != 2 {
+		t.Fatalf("dials=%d resolutions=%d", f.dials.Load(), calls)
+	}
+}
+func TestRestoreConnectRejectedBeforeDial(t *testing.T) {
+	for _, request := range []string{
+		"CONNECT registry.example:443 HTTP/1.1\r\nHost: cdn.example:443\r\n\r\n",
+		"CONNECT evil.example:443 HTTP/1.1\r\nHost: evil.example:443\r\n\r\n",
+		"GET http://registry.example/ HTTP/1.1\r\nHost: registry.example\r\n\r\n",
+		"CONNECT registry.example:443 HTTP/1.1\r\nHost: registry.example:443\r\nProxy-Authorization: Basic SYNTHETIC\r\n\r\n",
+		"\x16\x03\x03not CONNECT\r\n\r\n",
+	} {
+		t.Run(request, func(t *testing.T) {
+			f := newRestoreFixture(t, nil)
+			c, err := f.listener.dial(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			_ = c.SetDeadline(time.Now().Add(time.Second))
+			_, _ = io.WriteString(c, request)
+			if _, err := http.ReadResponse(bufio.NewReader(c), nil); err == nil {
+				t.Fatal("invalid CONNECT accepted")
+			}
+			if f.dials.Load() != 0 {
+				t.Fatal("CONNECT caused upstream dial")
+			}
+		})
+	}
+}
+func TestRestoreCanaryTransport(t *testing.T) {
+	f := newRestoreFixture(t, nil)
+	f.broker.preflight.Store(true)
+	client := f.client()
+	defer client.CloseIdleConnections()
+	_, data := fixtureRead(t, client, "GET", "https://"+restoreCanaryHost+"/canary", nil)
+	if string(data) != "SWARM_RESTORE_OK" || f.dials.Load() != 0 {
+		t.Fatal("preflight used outbound transport")
+	}
+	f.broker.preflight.Store(false)
+	r, err := client.Get("https://" + restoreCanaryHost + "/canary")
+	if err == nil {
+		_ = r.Body.Close()
+		t.Fatal("canary remained accessible after preflight")
+	}
+}
+func TestRestoreCleanupAndFailClosed(t *testing.T) {
+	for i := 0; i < 10; i++ {
+		f := newRestoreFixture(t, nil)
+		c, err := f.listener.dial(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(c, "CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n")
+		select {
+		case <-f.broker.ctx.Done():
+		case <-time.After(time.Second):
+			t.Fatal("policy failure did not cancel run")
+		}
+		if err = f.broker.close(); err == nil {
+			t.Fatal("policy failure ignored")
+		}
+		if _, err = f.listener.dial(context.Background()); err == nil {
+			t.Fatal("listener survived close")
+		}
+		_ = c.SetReadDeadline(time.Now().Add(time.Second))
+		if _, err = c.Read(make([]byte, 1)); err == nil {
+			t.Fatal("active socket survived")
+		}
+		_ = c.Close()
+	}
+}
+func TestRestoreCleanupPartialHandshake(t *testing.T) {
+	f := newRestoreFixture(t, nil)
+	c, err := f.listener.dial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = io.WriteString(c, "CONNECT registry.example:443 HTTP/1.1\r\nHost:")
+	done := make(chan error, 1)
+	go func() { done <- f.broker.close() }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("partial handshake blocked teardown")
+	}
+}
+func TestRestoreBoundedBody(t *testing.T) {
+	for _, test := range []struct{ left, total int64 }{{2, 0}, {99, restoreAggregateLimit}} {
+		b := &registryBroker{}
+		b.bytes.Store(test.total)
+		r := &restoreCountingBody{ReadCloser: io.NopCloser(strings.NewReader("artifact")), b: b, left: test.left}
+		if _, err := io.ReadAll(r); err == nil {
+			t.Fatal("body budget ignored")
+		}
+	}
+}
+func TestRestoreSourceSnapshot(t *testing.T) {
+	root := t.TempDir()
+	srcPath := filepath.Join(root, "input")
+	dstPath := filepath.Join(root, "snapshot")
+	if err := os.Mkdir(srcPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dstPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	src, err := openRestoreDirectory(srcPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst, err := openRestoreDirectory(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	if err = src.WriteFile("nested/build", []byte("approved"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = copyRestoreSource(src, dst, "", new(int64)); err != nil {
+		t.Fatal(err)
+	}
+	if err = src.WriteFile("nested/build", []byte("changed"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := dst.ReadFile("nested/build", 64)
+	if err != nil || string(data) != "approved" {
+		t.Fatal("snapshot not detached", err)
+	}
+	for _, test := range []string{"symlink", "git", "hardlink"} {
+		t.Run(test, func(t *testing.T) {
+			path := t.TempDir()
+			r, err := openRestoreDirectory(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			switch test {
+			case "symlink":
+				err = os.Symlink(srcPath, filepath.Join(path, "escape"))
+			case "git":
+				err = r.WriteFile("nested/.git/config", []byte("token"), 0600)
+			case "hardlink":
+				err = os.Link(filepath.Join(srcPath, "nested/build"), filepath.Join(path, "alias"))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = copyRestoreSource(r, dst, "", new(int64)); err == nil {
+				t.Fatal("unsafe source accepted")
+			}
+		})
+	}
+}
+func TestRestoreInputSafety(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	source := filepath.Join(root, "source")
+	cache := filepath.Join(repo, "cache")
+	for _, p := range []string{repo, source, cache} {
+		if err := os.MkdirAll(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	helper := filepath.Join(root, "helper")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	request := RestoreRequest{Source: source, RepositoryRoot: repo, CacheRoot: cache, Registries: []string{restoreFixtureHost}, Argv: []string{"/usr/bin/true"}}
+	tests := []struct {
+		name   string
+		change func(*RestoreRequest, *RestoreBoundary)
+	}{
+		{"outside cache", func(r *RestoreRequest, b *RestoreBoundary) { r.CacheRoot = root }},
+		{"overlap", func(r *RestoreRequest, b *RestoreBoundary) { r.Source = repo }},
+		{"relative", func(r *RestoreRequest, b *RestoreBoundary) { r.Source = "source" }},
+		{"traversal", func(r *RestoreRequest, b *RestoreBoundary) { r.Source = source + "/../source" }},
+		{"helper missing", func(r *RestoreRequest, b *RestoreBoundary) { b.Helper = filepath.Join(root, "absent") }},
+		{"argv", func(r *RestoreRequest, b *RestoreBoundary) { r.Argv = []string{"true"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := request
+			b := RestoreBoundary{Helper: helper}
+			test.change(&r, &b)
+			if _, err := b.Run(context.Background(), r); err == nil {
+				t.Fatal("unsafe input accepted")
+			}
+		})
+	}
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(source, link); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := openRestoreDirectory(link); err == nil {
+		r.Close()
+		t.Fatal("symlink directory accepted")
+	}
+	if f, err := openRestoreRegular(filepath.Join(link, "file")); err == nil {
+		f.Close()
+		t.Fatal("symlink ancestor accepted")
+	}
+}
+func TestRestoreRedirectPolicy(t *testing.T) {
+	b := &registryBroker{policy: registryPolicy{restoreFixtureHost: true, restoreFixtureCDN: true}}
+	base, _ := url.Parse("https://registry.example/a/b")
+	for _, s := range []string{"/c", "../c", "https://cdn.example/c", "https://registry.example:443/c"} {
+		if err := b.validateRedirect(base, s); err != nil {
+			t.Fatalf("allowed %q: %v", s, err)
+		}
+	}
+	for _, s := range []string{"", "http://registry.example/c", "https://evil.example/c", "https://registry.example./c", "https://registry.example:0443/c", "https://registry.example/c?token=x", "https://registry.example/c#x", "https://user:pass@registry.example/c", "https://registry.example/c%3fsecret=x"} {
+		if err := b.validateRedirect(base, s); err == nil {
+			t.Fatalf("unsafe redirect %q", s)
+		}
+	}
+}
+func TestRestoreProtocolMalformedChunkedAndTruncation(t *testing.T) {
+	for _, raw := range []string{"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n0\r\nSet-Cookie: forbidden\r\n\r\n", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\nx\r\n0\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort"} {
+		t.Run(raw, func(t *testing.T) {
+			f := newRestoreFixture(t, nil)
+			f.broker.dial = func(context.Context, string, string) (net.Conn, error) {
+				a, b := net.Pipe()
+				go func() {
+					defer a.Close()
+					cert := f.upstream.TLS
+					tc := tls.Server(a, cert)
+					reader := bufio.NewReader(tc)
+					if _, err := http.ReadRequest(reader); err != nil {
+						return
+					}
+					_, _ = io.WriteString(tc, raw)
+				}()
+				return b, nil
+			}
+			c := f.client()
+			defer c.CloseIdleConnections()
+			r, err := c.Get("https://registry.example/a")
+			if err == nil {
+				_, err = io.ReadAll(r.Body)
+				_ = r.Body.Close()
+			}
+			if err == nil {
+				t.Fatal("malformed upstream framing accepted")
+			}
+		})
+	}
+}
+
+func TestRestoreHelperBridgeProtocol(t *testing.T) {
+	f := newRestoreFixture(t, nil)
+	brokerListener := f.listener
+	helperListener := newRestoreTestListener()
+	bridge := startRestoreBridge(t.Context(), helperListener)
+	bridge.dial = brokerListener.dial
+	t.Cleanup(func() { _ = bridge.close() })
+	f.listener = helperListener
+	client := f.client()
+	defer client.CloseIdleConnections()
+	_, data := fixtureRead(t, client, "GET", "https://registry.example/artifact", nil)
+	if string(data) != "artifact" || f.dials.Load() != 1 {
+		t.Fatal("helper failed native proxy transport")
+	}
+	bridge.close()
+	if c, err := helperListener.dial(context.Background()); err == nil {
+		c.Close()
+		t.Fatal("helper listener survived cleanup")
+	}
+}
+func TestRestoreBrokerConnectionBounds(t *testing.T) {
+	f := newRestoreFixture(t, nil)
+	var clients []net.Conn
+	defer func() {
+		for _, c := range clients {
+			_ = c.Close()
+		}
+	}()
+	for i := 0; i < 17; i++ {
+		c, err := f.listener.dial(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients = append(clients, c)
+	}
+	select {
+	case <-f.broker.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("connection flood not cancelled")
+	}
+	if err := f.broker.close(); err == nil {
+		t.Fatal("flood reported success")
+	}
+}
+func TestRestoreBrokerSessionBounds(t *testing.T) {
+	f := newRestoreFixture(t, nil)
+	var clients []*tls.Conn
+	defer func() {
+		for _, c := range clients {
+			_ = c.Close()
+		}
+	}()
+	for i := 0; i < 9; i++ {
+		c := f.raw(t, restoreFixtureHost, restoreFixtureHost, tls.VersionTLS13, nil)
+		if err := c.Handshake(); err != nil {
+			t.Fatal(err)
+		}
+		clients = append(clients, c)
+	}
+	select {
+	case <-f.broker.ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("session flood not cancelled")
+	}
+}
+func TestRestoreClientHelloLimit(t *testing.T) {
+	left, right := net.Pipe()
+	defer left.Close()
+	defer right.Close()
+	conn := &restoreHandshakeConn{Conn: left, left: 4}
+	done := make(chan struct{})
+	go func() { _, _ = right.Write([]byte("oversize")); close(done) }()
+	data := make([]byte, 16)
+	n, err := conn.Read(data)
+	if n != 4 || err != nil {
+		t.Fatal(n, err)
+	}
+	if _, err = conn.Read(data); err == nil {
+		t.Fatal("handshake budget bypass")
+	}
+	_ = left.Close()
+	<-done
+}
+func TestRestoreCapabilityReasons(t *testing.T) {
+	for status, want := range map[string]string{"NETWORK\n": "direct-network canary", "FILESYSTEM\n": "filesystem canary", "BROKER\n": "CONNECT/TLS broker canary", "LISTENER\n": "loopback listener", "TRUST\n": "public trust artifacts", "SYNTHETIC_SECRET\n": "helper startup/control framing"} {
+		if got := safeRestoreStatus(status); got != want {
+			t.Fatalf("%q => %q", status, got)
+		}
+	}
+	for diagnostic, want := range map[string]string{"No permissions to create a new namespace": "namespaces", "Can't bind mount SYNTHETIC_SECRET": "mounts", "unknown SYNTHETIC_SECRET": "helper startup/control framing"} {
+		got := classifyRestoreLauncher(diagnostic)
+		if !strings.HasSuffix(got, want) || strings.Contains(got, "SYNTHETIC_SECRET") {
+			t.Fatalf("unsafe/unhelpful diagnostic %q", got)
+		}
+	}
+}
+func TestRestoreOutputRootPinned(t *testing.T) {
+	parent := t.TempDir()
+	path := filepath.Join(parent, "cache")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := openRestoreDirectory(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.Close()
+	root, name, err := createRestoreOutput(pinned, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	moved := filepath.Join(parent, "moved")
+	if err = os.Rename(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = createRestoreOutput(pinned, path); err == nil {
+		t.Fatal("replaced cache accepted")
+	}
+	if err = root.RemoveAll(name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(filepath.Join(moved, name)); !os.IsNotExist(err) {
+		t.Fatal("cleanup did not use pinned output root", err)
+	}
+}
+
+func TestRestoreBrokerStallCancellation(t *testing.T) {
+	f := newRestoreFixture(t, nil)
+	started := make(chan struct{})
+	f.broker.dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	client := f.client()
+	defer client.CloseIdleConnections()
+	done := make(chan error, 1)
+	go func() {
+		r, err := client.Get("https://registry.example/a")
+		if err == nil {
+			r.Body.Close()
+		}
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not start")
+	}
+	_ = f.broker.close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("stalled upstream succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt stalled upstream")
+	}
+}
+
+type restoreCloseFailure struct{ net.Listener }
+
+func (l restoreCloseFailure) Close() error { _ = l.Listener.Close(); return io.ErrUnexpectedEOF }
+func TestRestoreCleanupErrors(t *testing.T) {
+	l := newRestoreTestListener()
+	trust, err := newRestoreTrust([]string{restoreFixtureHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newRegistryBroker(t.Context(), restoreCloseFailure{l}, registryPolicy{restoreFixtureHost: true}, trust)
+	b.serve()
+	if err = b.close(); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatal("broker cleanup failure suppressed", err)
+	}
+	bridge := startRestoreBridge(t.Context(), restoreCloseFailure{newRestoreTestListener()})
+	if err = bridge.close(); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatal("helper cleanup failure suppressed", err)
+	}
+}

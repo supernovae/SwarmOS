@@ -9,6 +9,7 @@ import (
 )
 
 func TestRevisionTaskPromptScope(t *testing.T) {
+	t.Parallel()
 	st := &lease.IssueState{RevisionPlan: &workspace.RevisionPlanContext{}}
 	for _, tc := range []struct {
 		name     string

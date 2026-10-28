@@ -118,8 +118,10 @@ func (f discardFixture) abandon(t *testing.T) (c, branch, base string) {
 }
 
 func TestDiscardCheckpointRegression(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		t.Run(backend, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			f := newDiscardFixture(t, backend == "github", coordination.BranchLayout)
 			n := f.issue.Number
@@ -231,6 +233,7 @@ func TestDiscardCheckpointRegression(t *testing.T) {
 // TestDiscardCheckpointHiddenNamespace pins the audit and retention of a
 // discard to refs/swarm/ and proves it writes nothing under refs/heads/.
 func TestDiscardCheckpointHiddenNamespace(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newDiscardFixture(t, true, coordination.HiddenLayout)
 	n := f.issue.Number
@@ -267,8 +270,10 @@ func TestDiscardCheckpointHiddenNamespace(t *testing.T) {
 }
 
 func TestDiscardCheckpointRefusals(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"active claim", "open PR", "pending PR revision", "submitted", "fork repo", "fork gateway", "unauthorized", "owner mismatch", "wrong expected head", "short expected head", "no checkpoint", "missing commit", "corrupt retention ref"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			f := newDiscardFixture(t, false, coordination.BranchLayout)
 			n := f.issue.Number
@@ -343,6 +348,7 @@ func TestDiscardCheckpointRefusals(t *testing.T) {
 }
 
 func TestDiscardCheckpointExpiredClaimIsEligible(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	f := newDiscardFixture(t, false, coordination.BranchLayout)
 	c, _, _ := f.abandon(t)
@@ -357,8 +363,10 @@ func TestDiscardCheckpointExpiredClaimIsEligible(t *testing.T) {
 }
 
 func TestDiscardCheckpointConflictIsOneWrite(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		t.Run(backend, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			f := newDiscardFixture(t, backend == "github", coordination.BranchLayout)
 			n := f.issue.Number

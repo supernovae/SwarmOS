@@ -367,6 +367,7 @@ func TestLinkedUsesVerifiedHintsBeforeScanning(t *testing.T) {
 }
 
 func TestRecordedValidationChecksMatchPublishedHead(t *testing.T) {
+	t.Parallel()
 	head, other := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	st := &lease.IssueState{Artifacts: []contract.Artifact{
 		{Type: contract.ArtifactValidation, Verdict: "FAIL", Metadata: map[string]string{"head_sha": head}},
@@ -1092,6 +1093,7 @@ func TestServiceCarriesLookupIntoEnginesAndRunners(t *testing.T) {
 }
 
 func TestInspectionServiceUsesCommandSession(t *testing.T) {
+	t.Parallel()
 	s := &Service{}
 	if got := s.runnerOptions(context.Background()).Inspections; got != nil {
 		t.Fatal("service invented an inspection session outside a command")

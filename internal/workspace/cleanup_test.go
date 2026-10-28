@@ -15,6 +15,7 @@ import (
 // cannot prevent ignored artifacts appearing before Git recursively removes
 // the worktree, even without --force.
 func TestCleanupArtifactNonForcedGitRemovalProbe(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
@@ -68,8 +69,10 @@ func cleanupWorkspaceFixture(t *testing.T) (string, string, string, func(...stri
 }
 
 func TestCleanupWorktreeBoundaries(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"symlink-path", "symlink-parent", "artifact-symlink", "artifact-special", "unregistered", "foreign-common", "locked", "nested", "submodule", "checked-out-elsewhere"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			root, path, head, git := cleanupWorkspaceFixture(t)
 			ctx := context.Background()
 			branch := "swarm/issue-1-test"
@@ -150,8 +153,10 @@ func TestCleanupWorktreeBoundaries(t *testing.T) {
 }
 
 func TestCleanupLateFileRetention(t *testing.T) {
+	t.Parallel()
 	for _, ignored := range []bool{false, true} {
 		t.Run(fmt.Sprint(ignored), func(t *testing.T) {
+			t.Parallel()
 			root, path, head, git := cleanupWorkspaceFixture(t)
 			ctx := context.Background()
 			branch := "swarm/issue-1-test"
@@ -180,6 +185,7 @@ func TestCleanupLateFileRetention(t *testing.T) {
 }
 
 func TestCleanupTrackedManagedArtifact(t *testing.T) {
+	t.Parallel()
 	root, path, _, git := cleanupWorkspaceFixture(t)
 	target := filepath.Join(path, ".swarm/active/tracked")
 	if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
@@ -197,8 +203,10 @@ func TestCleanupTrackedManagedArtifact(t *testing.T) {
 }
 
 func TestCleanupWorktreeRelativePaths(t *testing.T) {
+	t.Parallel()
 	for _, alias := range []bool{false, true} {
 		t.Run(fmt.Sprint(alias), func(t *testing.T) {
+			t.Parallel()
 			root, path, head, _ := cleanupWorkspaceFixture(t)
 			if alias {
 				link := filepath.Join(t.TempDir(), "repo")

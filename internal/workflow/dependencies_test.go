@@ -60,6 +60,7 @@ func approvedDependencyTask(t *testing.T) (*Engine, string, int) {
 	return eng, tmp, iss.Number
 }
 
+// stubAgentDependencies changes a package-global hook; callers must remain serial.
 func stubAgentDependencies(t *testing.T, stub func(context.Context, contract.ExecutionConfig, string, string, sandbox.DependencyPolicy) (sandbox.Dependencies, error)) {
 	t.Helper()
 	previous := prepareAgentDependencies

@@ -126,6 +126,7 @@ func activeText(t *testing.T, wt string) string {
 }
 
 func TestBundleGuidanceAllRoles(t *testing.T) {
+	t.Parallel()
 	skills := map[string]string{
 		".swarm/skills/dev.md":              "---\nroles: [developer]\ndescription: Developer helper\n---\n# Dev skill\n\ndev-body-marker\n",
 		".swarm/skills/testing.md":          "---\nroles: [tester]\nworkflows: [feature]\n---\n# Testing skill\n\ntesting-body-marker\n",
@@ -178,6 +179,7 @@ func TestBundleGuidanceAllRoles(t *testing.T) {
 }
 
 func TestBundleTwentySkillsSize(t *testing.T) {
+	t.Parallel()
 	skills := map[string]string{}
 	var legacySkills int
 	for i := 0; i < 20; i++ {
@@ -211,6 +213,7 @@ func TestBundleTwentySkillsSize(t *testing.T) {
 }
 
 func TestBundleGuidanceApprovedBase(t *testing.T) {
+	t.Parallel()
 	approved := "---\nroles: [developer]\n---\n# Shared\n\napproved-skill-marker\n"
 	repo, base := guidanceRepo(t, map[string]string{".swarm/skills/shared.md": approved})
 	wt, _, err := ProvisionAt(repo, 9, "Guidance", base, "", "")
@@ -260,6 +263,7 @@ func TestBundleGuidanceApprovedBase(t *testing.T) {
 }
 
 func TestBundleGuidanceBaseTransition(t *testing.T) {
+	t.Parallel()
 	large := "# Architecture A\n\n## Coordination A\n\narchitecture-a-marker\n" + strings.Repeat("a", 2*architectureInlineLimit)
 	repo, baseA := guidanceRepo(t, map[string]string{
 		".swarm/architecture.md":       large,
@@ -319,8 +323,10 @@ func TestBundleGuidanceBaseTransition(t *testing.T) {
 }
 
 func TestBundleGuidanceCleanupFailsClosed(t *testing.T) {
+	t.Parallel()
 	for _, link := range []string{"guidance", "guidance/skills/x.md"} {
 		t.Run(link, func(t *testing.T) {
+			t.Parallel()
 			repo, base := guidanceRepo(t, map[string]string{".swarm/skills/x.md": "# X\n"})
 			compileGuidance(t, repo, base, "developer", guidanceWorkUnit("first"), nil)
 			before := readActive(t, repo, "SYSTEM_PROMPT.md")
@@ -355,6 +361,7 @@ func TestBundleGuidanceCleanupFailsClosed(t *testing.T) {
 }
 
 func TestBundleWorkUnitAndOrdering(t *testing.T) {
+	t.Parallel()
 	repo, base := guidanceRepo(t, map[string]string{".swarm/skills/all.md": "---\nroles: [\"*\"]\n---\n# Everyone\n\nall-body-marker\n"})
 	taskMarkers := []string{"order-title", "order-objective", "order-constraint", "order-acceptance"}
 	review := []contract.Artifact{{Type: contract.ArtifactReview, Verdict: "CHANGES_REQUESTED", Producer: "mock", Body: "review-artifact-marker"}}

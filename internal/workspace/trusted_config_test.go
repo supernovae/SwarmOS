@@ -11,8 +11,10 @@ import (
 )
 
 func TestTrustedLedgerNamespaceIgnoresLocalAndForkConfig(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ upstream, other string }{{"branch", "hidden"}, {"hidden", "branch"}} {
 		t.Run(tc.upstream, func(t *testing.T) {
+			t.Parallel()
 			tmp := t.TempDir()
 			git := func(dir string, args ...string) string {
 				t.Helper()

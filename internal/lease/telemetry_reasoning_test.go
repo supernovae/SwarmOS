@@ -9,6 +9,7 @@ import (
 )
 
 func TestRoleRunTableShowsReasoning(t *testing.T) {
+	t.Parallel()
 	reported := contract.NewRoleRunTelemetry("developer", "omp", time.Now())
 	reported.InputTokens, reported.OutputTokens, reported.CachedInputTokens, reported.ReasoningTokens = contract.Count(1806), contract.Count(66), contract.Count(1200), contract.Count(21)
 	reported.ActualModel = contract.Label("fake-model")

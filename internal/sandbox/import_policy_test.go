@@ -14,9 +14,11 @@ import (
 )
 
 func TestWritableImportPreflight(t *testing.T) {
+	t.Parallel()
 	for _, role := range []string{"developer", "tester"} {
 		for _, paused := range []bool{false, true} {
 			t.Run(role+map[bool]string{false: "/normal", true: "/pause"}[paused], func(t *testing.T) {
+				t.Parallel()
 				dir := t.TempDir()
 				for _, name := range []string{"source", "deleted", "mode"} {
 					writeWorkerFixture(t, dir, name, "before")
@@ -80,6 +82,7 @@ func TestWritableImportPreflight(t *testing.T) {
 }
 
 func TestWritableImportRejectsSymlink(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeWorkerFixture(t, dir, ".swarm/active/PLAN.md", "approved")
 	writeWorkerFixture(t, dir, "source", "before")

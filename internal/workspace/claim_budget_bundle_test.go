@@ -72,6 +72,7 @@ func budgetBundle(t *testing.T, wt, base, role string, prNumber int) (string, er
 }
 
 func TestPlannerBundleStatesApprovedClaimBudget(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, lease, want string
 		pr                int
@@ -81,6 +82,7 @@ func TestPlannerBundleStatesApprovedClaimBudget(t *testing.T) {
 		{"pr planner", "lease:\n  duration: 30m\n  renewable: true\n  max_renewals: 2\n", "total claim budget is 1h30m0s", 41},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			wt, base := budgetRepo(t, tc.lease)
 			sys, err := budgetBundle(t, wt, base, "planner", tc.pr)
 			if err != nil {
@@ -104,11 +106,13 @@ func TestPlannerBundleStatesApprovedClaimBudget(t *testing.T) {
 }
 
 func TestPlannerBundleRejectsInvalidApprovedBudget(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, lease string }{
 		{"malformed duration", "lease:\n  duration: soon\n  renewable: true\n  max_renewals: 2\n"},
 		{"overflow", "lease:\n  duration: 2562047h\n  renewable: true\n  max_renewals: 2\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			wt, base := budgetRepo(t, tc.lease)
 			if sys, err := budgetBundle(t, wt, base, "planner", 0); err == nil {
 				t.Fatalf("invalid approved lease policy produced a planner bundle:\n%s", sys)
@@ -118,6 +122,7 @@ func TestPlannerBundleRejectsInvalidApprovedBudget(t *testing.T) {
 }
 
 func TestClaimBudgetOverflowIsRejected(t *testing.T) {
+	t.Parallel()
 	if _, err := claimBudgetDoc(contract.LeaseConfig{Duration: "2562047h", MaxRenewals: 1}); err == nil {
 		t.Fatal("overflowing total budget was accepted")
 	}

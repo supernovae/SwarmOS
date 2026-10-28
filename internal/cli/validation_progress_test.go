@@ -39,24 +39,26 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 	t.Parallel()
 	for _, family := range []string{"issue", "pr"} {
 		for _, operation := range []string{"validate", "submit"} {
+			var f *cliFixture
+			var number int
+			if family == "issue" {
+				f = newCLIFixture(t)
+				number = f.create(t, "agent")
+				n := strconv.Itoa(number)
+				f.must(t, "issue", "approve", n)
+				f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+			} else {
+				var prNumber int
+				f, _, prNumber = submittedPRFixture(t, "agent")
+				number = prNumber
+				f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'revision\\n' > revision.txt")
+				f.must(t, "pr", "work", strconv.Itoa(number), "--agent", "mock", "--progress=false")
+			}
+			restore := snapshotCLIFixture(t, f)
 			for _, mode := range []string{"default", "true", "false"} {
 				for _, asJSON := range []bool{false, true} {
 					t.Run(family+"/"+operation+"/"+mode+"/"+strconv.FormatBool(asJSON), func(t *testing.T) {
-						var f *cliFixture
-						var number int
-						if family == "issue" {
-							f = newCLIFixture(t)
-							number = f.create(t, "agent")
-							n := strconv.Itoa(number)
-							f.must(t, "issue", "approve", n)
-							f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
-						} else {
-							var prNumber int
-							f, _, prNumber = submittedPRFixture(t, "agent")
-							number = prNumber
-							f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'revision\\n' > revision.txt")
-							f.must(t, "pr", "work", strconv.Itoa(number), "--agent", "mock", "--progress=false")
-						}
+						restore(t)
 						args := []string{family, operation, strconv.Itoa(number)}
 						if mode != "default" {
 							args = append(args, "--progress="+mode)

@@ -13,6 +13,7 @@ import (
 )
 
 func TestNativeTimeoutPreservesPatchWithoutImport(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeWorkerFixture(t, dir, "changed", "dirty input\n")
 	writeWorkerFixture(t, dir, "deleted", "gone\n")
@@ -54,8 +55,10 @@ func TestNativeTimeoutPreservesPatchWithoutImport(t *testing.T) {
 	}
 }
 func TestTimeoutPatchRejectsSymlinks(t *testing.T) {
+	t.Parallel()
 	for _, attack := range []string{"source-file", "source-directory", "destination-file", "destination-directory"} {
 		t.Run(attack, func(t *testing.T) {
+			t.Parallel()
 			source, work, dest := t.TempDir(), t.TempDir(), t.TempDir()
 			writeWorkerFixture(t, source, "file", "old\n")
 			archive := filepath.Join(t.TempDir(), "input.tar")
@@ -95,6 +98,7 @@ func TestTimeoutPatchRejectsSymlinks(t *testing.T) {
 	}
 }
 func TestTimeoutPatchBoundsAndBinaryOmissions(t *testing.T) {
+	t.Parallel()
 	source, work, dest := t.TempDir(), t.TempDir(), t.TempDir()
 	archive := filepath.Join(t.TempDir(), "input.tar")
 	if _, err := packWorker(context.Background(), source, archive, nil, false); err != nil {
@@ -113,6 +117,7 @@ func TestTimeoutPatchBoundsAndBinaryOmissions(t *testing.T) {
 	}
 }
 func TestFailureAndValidationDoNotExport(t *testing.T) {
+	t.Parallel()
 	for _, discard := range []bool{false, true} {
 		dir := t.TempDir()
 		failure := errors.New("failed")
@@ -135,6 +140,7 @@ func TestFailureAndValidationDoNotExport(t *testing.T) {
 }
 
 func TestTimeoutPatchContextEmptyFilesAndExecutable(t *testing.T) {
+	t.Parallel()
 	source, work, dest := t.TempDir(), t.TempDir(), t.TempDir()
 	original := "first\nsecond\nthird\nfourth\nfifth\nsixth\nseventh\neighth\nninth\n"
 	changed := strings.Replace(original, "fifth\n", "replacement\n", 1)

@@ -9,8 +9,10 @@ import (
 )
 
 func TestRepairRejectsEntireOutputOutsideFixedScope(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"valid", "outside edit", "outside addition", "outside deletion", "outside mode", "control", "protected", "symlink", "noop"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			put := func(p, body string) {
 				t.Helper()

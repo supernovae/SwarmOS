@@ -13,6 +13,7 @@ import (
 )
 
 func TestAcquireRecordedBranchSurvivesTitleEdit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, lt, issue := testManager(t)
 	first, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
@@ -49,6 +50,7 @@ func TestAcquireRecordedBranchSurvivesTitleEdit(t *testing.T) {
 }
 
 func TestAcquireRecordedBranchNotSavedOnCASFailure(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, _, issue := testManager(t)
 	m.store = &claimRaceStore{Store: m.store}
@@ -65,6 +67,7 @@ func TestAcquireRecordedBranchNotSavedOnCASFailure(t *testing.T) {
 }
 
 func TestForkAcquireAfterRecordedBranchUsesForkBranchName(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, _, issue := testManager(t)
 	same, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
@@ -93,6 +96,7 @@ func TestForkAcquireAfterRecordedBranchUsesForkBranchName(t *testing.T) {
 // A checkpoint contained in a reapproved base keeps its recovery branch even
 // when the title changed in between; a title-derived name would fail publication.
 func TestAcquireRecordedBranchUsesDroppedCheckpoint(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, lt, issue := testManager(t)
 	git := func(args ...string) string {

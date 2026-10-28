@@ -11,6 +11,7 @@ import (
 )
 
 func TestRebaseProjectionPreservesHumanTextAndRetries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tr := tracker.NewLocalTracker(t.TempDir())
 	pr, err := tr.CreateDraftPR(ctx, tracker.DraftPRRequest{Title: "title", Body: "human introduction\n\nhuman footer", Head: "feature", Base: "main"})
@@ -41,6 +42,7 @@ func TestRebaseProjectionPreservesHumanTextAndRetries(t *testing.T) {
 }
 
 func TestRebaseSummaryDroppedPaths(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		state     string // JSON keeps legacy states honest about missing fields
@@ -59,6 +61,7 @@ func TestRebaseSummaryDroppedPaths(t *testing.T) {
 			nil, []string{"no longer changed", "Changed-path comparison"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var st lease.IssueState
 			if err := json.Unmarshal([]byte(tc.state), &st); err != nil {
 				t.Fatal(err)

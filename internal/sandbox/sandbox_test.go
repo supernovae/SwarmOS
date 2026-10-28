@@ -10,6 +10,7 @@ import (
 )
 
 func TestResolveReadOnlyRuntime(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ os, runtime, cli, image, want, failure string }{
 		{"darwin", "", "", "", "sandbox-exec", ""}, {"darwin", "sandbox-exec", "", "", "sandbox-exec", ""},
 		{"darwin", "bwrap", "", "", "", "macOS"}, {"darwin", "", "", "", "sandbox-exec", "missing"},
@@ -21,6 +22,7 @@ func TestResolveReadOnlyRuntime(t *testing.T) {
 		{"linux", "container", "podman", "image", "podman", "missing"},
 	} {
 		t.Run(fmt.Sprint(tc), func(t *testing.T) {
+			t.Parallel()
 			called := ""
 			path, err := resolveReadOnlyRuntime(tc.runtime, tc.cli, tc.image, tc.os, func(name string) (string, error) {
 				called = name

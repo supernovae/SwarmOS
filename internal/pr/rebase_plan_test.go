@@ -13,8 +13,10 @@ import (
 )
 
 func TestRebasePlanningOutputIsBoundedAndReadOnly(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"valid", "omitted path", "missing side", "source edit", "context edit", "source deletion", "symlink", "oversize"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			put := func(p, body string) {
 				t.Helper()
@@ -62,6 +64,7 @@ func TestRebasePlanningOutputIsBoundedAndReadOnly(t *testing.T) {
 }
 
 func TestRebasePlanLabelForms(t *testing.T) {
+	t.Parallel()
 	// PR #241 was rejected for the bold and next-line forms (assumed from the
 	// issue report; its REBASE_PLAN.md is not available to confirm).
 	accepted := map[string]func(label, text string) string{
@@ -102,6 +105,7 @@ func TestRebasePlanLabelForms(t *testing.T) {
 		"empty before next path":   "## file.txt\n" + rest + "Ours:\n## other.txt\nnot this path\n",
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			err := checkPlanBody(t, body)
 			if err == nil || !strings.Contains(err.Error(), "rebase plan lacks Ours: for file.txt") {
 				t.Fatalf("%q: err = %v", body, err)
@@ -134,6 +138,7 @@ func checkPlanBody(t *testing.T, body string) error {
 }
 
 func TestMicroPlanErrorClassification(t *testing.T) {
+	t.Parallel()
 	valid := "## file.txt\nOurs: upstream\nTheirs: PR\nResolution: combine\nApproved behavior: retained\n"
 	for _, tc := range []struct {
 		name      string
@@ -150,6 +155,7 @@ func TestMicroPlanErrorClassification(t *testing.T) {
 		{name: "oversized plan", body: strings.Repeat("x", (64<<10)+1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("conflicted\n"), 0644); err != nil {
 				t.Fatal(err)
@@ -203,6 +209,7 @@ func (p *planScript) Run(_ context.Context, req agent.RunRequest) (*agent.RunRes
 }
 
 func TestPlanRebaseStopRetriesMalformedPlanOnce(t *testing.T) {
+	t.Parallel()
 	valid := "## file.txt\nOurs: upstream\nTheirs: PR\nResolution: combine\nApproved behavior: retained\n"
 	malformed := strings.Replace(valid, "Ours: upstream", "Ours:", 1)
 	for _, tc := range []struct {

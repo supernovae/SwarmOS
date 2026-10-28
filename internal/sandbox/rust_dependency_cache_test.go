@@ -231,6 +231,7 @@ func TestCargoPrefetchFailureNamesDependency(t *testing.T) {
 }
 
 func TestCargoFetchFailure(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, stderr, want string }{
 		{"git source", "error: failed to get `dep` as a dependency of package `app v0.1.0 (/w)`\n\nCaused by:\n  failed to load source for dependency `dep`\n\nCaused by:\n  unable to update file:///gone\n", "dependency dep: unable to update file:///gone"},
 		{"registry download", "error: failed to download from `https://x/serde/1.0.0/download`\n\nCaused by:\n  failed to download `serde v1.0.0`\n\nCaused by:\n  HTTP 404\n", "dependency serde: HTTP 404"},
@@ -239,6 +240,7 @@ func TestCargoFetchFailure(t *testing.T) {
 		{"no output", "", "exit status 101"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := cargoFetchFailure([]byte(tc.stderr), errors.New("exit status 101")); got != tc.want {
 				t.Fatalf("cargoFetchFailure = %q, want %q", got, tc.want)
 			}
@@ -247,6 +249,7 @@ func TestCargoFetchFailure(t *testing.T) {
 }
 
 func TestCargoPrefetchEnvHardened(t *testing.T) {
+	t.Parallel()
 	host := map[string]string{
 		"PATH": "/usr/bin", "HOME": "/home/user", "RUSTUP_TOOLCHAIN": "stable",
 		"SWARM_GITHUB_TOKEN": "t", "SWARM_GITHUB_TOKEN_COMMAND": "t", "GH_TOKEN": "t", "GITHUB_TOKEN": "t",

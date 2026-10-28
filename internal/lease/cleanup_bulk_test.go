@@ -56,6 +56,7 @@ func countingCleanupFixture(t *testing.T) (*Manager, *countingCleanupTracker, in
 }
 
 func TestCleanupBulkSnapshotMatchesFreshInspection(t *testing.T) {
+	t.Parallel()
 	m, c, n := countingCleanupFixture(t)
 	ctx := context.Background()
 	if _, ok := m.tracker.(interface{ UpstreamRepo() string }); !ok || m.cleanupLocal() {
@@ -89,6 +90,7 @@ func TestCleanupBulkSnapshotMatchesFreshInspection(t *testing.T) {
 }
 
 func TestCleanupBulkSnapshotFailsClosed(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		mutate  func(*countingCleanupTracker)
@@ -109,6 +111,7 @@ func TestCleanupBulkSnapshotFailsClosed(t *testing.T) {
 		}, blocked: "open PR repository identity is incomplete"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			m, c, n := countingCleanupFixture(t)
 			ctx := context.Background()
 			tc.mutate(c)
@@ -135,6 +138,7 @@ func TestCleanupBulkSnapshotFailsClosed(t *testing.T) {
 }
 
 func TestCleanupBulkAuthoritativeLinks(t *testing.T) {
+	t.Parallel()
 	m, c, n := countingCleanupFixture(t)
 	ctx := context.Background()
 	// PR 25 is the issue's recorded PR; its closing reference is a valid hint.

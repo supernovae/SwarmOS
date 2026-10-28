@@ -24,9 +24,11 @@ func guidanceFixture(t *testing.T, body string) string {
 	return path
 }
 func TestNativeAndClaudeFollowupGuidance(t *testing.T) {
+	t.Parallel()
 	for _, trim := range []bool{true, false} {
 		for _, input := range []string{"follow-up\nsecond message\n\n", "\n", "", strings.Repeat("x", (64<<10)+1)} {
 			t.Run(fmt.Sprint(trim, len(input)), func(t *testing.T) {
+				t.Parallel()
 				var messages, turns []string
 				err := runFollowupTurns(t.Context(), "initial task", "continue: ", true, trim, strings.NewReader(input), io.Discard, func(prompt string) error { turns = append(turns, prompt); return nil }, func(message string) { messages = append(messages, message) })
 				if len(input) > 64<<10 {
@@ -58,18 +60,20 @@ func TestNativeAndClaudeFollowupGuidance(t *testing.T) {
 	}
 }
 func TestProtocolFollowupGuidance(t *testing.T) {
+	t.Parallel()
 	testBinary, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	scripts := map[string]string{}
 	for _, driver := range []string{"omp", "opencode"} {
-		scripts[driver] = "#!/bin/sh\nexec '" + strings.ReplaceAll(testBinary, "'", "'\"'\"'") + "' -test.run=TestGuidanceProtocolHelper -- --swarm-guidance-fixture " + driver + " \"$@\"\n"
+		scripts[driver] = "#!/bin/sh\n# Protocol helpers have no background work at exit.\nexport GORACE=\"${GORACE:+$GORACE }atexit_sleep_ms=0\"\nexec '" + strings.ReplaceAll(testBinary, "'", "'\"'\"'") + "' -test.run=TestGuidanceProtocolHelper -- --swarm-guidance-fixture " + driver + " \"$@\"\n"
 	}
 
 	for driver, script := range scripts {
 		for _, input := range []string{"follow-up\nsecond message\n\n", "\n", ""} {
 			t.Run(driver+input, func(t *testing.T) {
+				t.Parallel()
 				binary := guidanceFixture(t, script)
 				control := t.TempDir()
 				var messages []string
@@ -108,6 +112,7 @@ func TestProtocolFollowupGuidance(t *testing.T) {
 
 // A subprocess of this test binary emulates only the harness wire protocol.
 func TestGuidanceProtocolHelper(t *testing.T) {
+	t.Parallel()
 	index := -1
 	for i, arg := range os.Args {
 		if arg == "--swarm-guidance-fixture" {

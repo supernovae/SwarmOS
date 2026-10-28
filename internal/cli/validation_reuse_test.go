@@ -58,23 +58,33 @@ func submitWithDiagnostics(t *testing.T, f *cliFixture, args ...string) (string,
 }
 
 func TestIssueSubmitValidationReuse(t *testing.T) {
+	old := Version
+	Version = "v1.2.3"
+	t.Cleanup(func() { Version = old })
+	f, counter := countedValidationFixture(t)
+	n := f.create(t, "agent")
+	number := strconv.Itoa(n)
+	f.must(t, "issue", "approve", number)
+	f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
+	workEvidence := latestValidation(t, f, n)
+	if workEvidence.Metadata["validation_version"] != Version || workEvidence.Metadata["validation_trusted_origin"] != "coordinator" {
+		t.Fatal("work did not record reusable coordinator evidence")
+	}
+	wt := workspace.WorktreePath(f.root, n)
+	if e := os.WriteFile(filepath.Join(wt, "uncommitted.txt"), []byte("checked\n"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	baselineCounter, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := snapshotCLIFixture(t, f)
 	for _, kind := range []string{"same", "edited", "version", "dev", "dirty", "empty", "FAIL", "import", "base", "policy", "claim", "tree", "missing"} {
 		t.Run(kind, func(t *testing.T) {
-			old := Version
+			restore(t)
 			Version = "v1.2.3"
-			t.Cleanup(func() { Version = old })
-			f, counter := countedValidationFixture(t)
-			n := f.create(t, "agent")
-			number := strconv.Itoa(n)
-			f.must(t, "issue", "approve", number)
-			f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
-			workEvidence := latestValidation(t, f, n)
-			if workEvidence.Metadata["validation_version"] != Version || workEvidence.Metadata["validation_trusted_origin"] != "coordinator" {
-				t.Fatal("work did not record reusable coordinator evidence")
-			}
-			wt := workspace.WorktreePath(f.root, n)
-			if e := os.WriteFile(filepath.Join(wt, "uncommitted.txt"), []byte("checked\n"), 0644); e != nil {
-				t.Fatal(e)
+			if err := os.WriteFile(counter, baselineCounter, 0600); err != nil {
+				t.Fatal(err)
 			}
 			explicitBefore := checkCount(t, counter)
 			f.must(t, "issue", "validate", number, "--json", "--progress=false")
@@ -150,20 +160,30 @@ func TestIssueSubmitValidationReuse(t *testing.T) {
 }
 
 func TestPRSubmitValidationReuse(t *testing.T) {
+	old := Version
+	Version = "v1.2.3"
+	t.Cleanup(func() { Version = old })
+	f, counter := countedValidationFixture(t)
+	n := f.create(t, "agent")
+	number := strconv.Itoa(n)
+	f.must(t, "issue", "approve", number)
+	f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
+	f.must(t, "issue", "submit", number)
+	prNumber := strconv.Itoa(f.state(t, n).PRNumber)
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf revision > revision.txt")
+	f.must(t, "pr", "work", prNumber, "--agent", "mock", "--progress=false")
+	baselineCounter, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := snapshotCLIFixture(t, f)
 	for _, kind := range []string{"same", "version", "dev", "dirty", "empty", "import", "FAIL", "base", "policy", "claim", "tree", "missing"} {
 		t.Run(kind, func(t *testing.T) {
-			old := Version
+			restore(t)
 			Version = "v1.2.3"
-			t.Cleanup(func() { Version = old })
-			f, counter := countedValidationFixture(t)
-			n := f.create(t, "agent")
-			number := strconv.Itoa(n)
-			f.must(t, "issue", "approve", number)
-			f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
-			f.must(t, "issue", "submit", number)
-			prNumber := strconv.Itoa(f.state(t, n).PRNumber)
-			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf revision > revision.txt")
-			f.must(t, "pr", "work", prNumber, "--agent", "mock", "--progress=false")
+			if err := os.WriteFile(counter, baselineCounter, 0600); err != nil {
+				t.Fatal(err)
+			}
 			explicitBefore := checkCount(t, counter)
 			f.must(t, "pr", "validate", prNumber, "--json", "--progress=false")
 			if checkCount(t, counter) != explicitBefore+1 {

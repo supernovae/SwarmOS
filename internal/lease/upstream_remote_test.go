@@ -15,8 +15,10 @@ import (
 // Cleanup on a named upstream keeps its fetch/push and identity checks there,
 // and never consults or changes a decoy origin.
 func TestCleanupUsesNamedUpstreamRemote(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"valid", "upstream-mismatch"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			m, tr, n, remote := mergedCleanupFixture(t)
 			ctx := context.Background()
 			git := func(args ...string) string {
@@ -61,6 +63,7 @@ func TestCleanupUsesNamedUpstreamRemote(t *testing.T) {
 }
 
 func TestManagerUpstreamRemoteDefault(t *testing.T) {
+	t.Parallel()
 	m := NewManager(nil, contract.SecurityConfig{})
 	if m.UpstreamRemote() != "origin" {
 		t.Fatal(m.UpstreamRemote())

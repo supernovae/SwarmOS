@@ -15,6 +15,7 @@ func revisionState() *IssueState {
 	return &IssueState{TaskDigest: "task", PolicyDigest: "policy", BaseSHA: "base", EffectiveGate: contract.GateNone, Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "original"}, {Type: contract.ArtifactTestPlan, Body: "original tests"}}}
 }
 func TestRevisionContextLifecycle(t *testing.T) {
+	t.Parallel()
 	st := revisionState()
 	if err := captureRevisionPlan(st); err != nil {
 		t.Fatal(err)
@@ -58,8 +59,10 @@ func TestRevisionContextLifecycle(t *testing.T) {
 	}
 }
 func TestRevisionContextEligibility(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"missing plan", "missing tests", "missing identity", "agent unapproved", "human unapproved", "stale review"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			st := revisionState()
 			switch name {
 			case "missing plan":
@@ -94,6 +97,7 @@ func TestRevisionContextEligibility(t *testing.T) {
 	}
 }
 func TestRevisionBindingsUseActivePair(t *testing.T) {
+	t.Parallel()
 	st := revisionState()
 	_ = captureRevisionPlan(st)
 	st.Artifacts[0].Body = "delta"
@@ -107,6 +111,7 @@ func TestRevisionBindingsUseActivePair(t *testing.T) {
 	}
 }
 func TestRevisionHistoryBound(t *testing.T) {
+	t.Parallel()
 	st := revisionState()
 	_ = captureRevisionPlan(st)
 	for i := 0; i < 16; i++ {
@@ -122,6 +127,7 @@ func TestRevisionHistoryBound(t *testing.T) {
 }
 
 func TestRebaseToWorkCapturesOriginal(t *testing.T) {
+	t.Parallel()
 	m, n, st := freshPlanRebaseFixture(t)
 	current, rev, err := m.load(t.Context(), n)
 	if err != nil {
@@ -145,6 +151,7 @@ func TestRebaseToWorkCapturesOriginal(t *testing.T) {
 }
 
 func TestOriginalReviewCannotApproveRevision(t *testing.T) {
+	t.Parallel()
 	m, _, issue := testManager(t)
 	ctx := t.Context()
 	if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
@@ -183,6 +190,7 @@ func TestOriginalReviewCannotApproveRevision(t *testing.T) {
 }
 
 func TestHumanReviewAfterSubmissionWithLinkedPR(t *testing.T) {
+	t.Parallel()
 	m, _, issue := testManager(t)
 	ctx := t.Context()
 	if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {

@@ -75,6 +75,7 @@ func legacyForkManager(t *testing.T, now func() time.Time) (worker, coord *Manag
 }
 
 func TestWorkBudgetWithoutUpstreamBudgetUsesLeaseExpiry(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	now := base
 	worker, coord, n, claimed := legacyForkManager(t, func() time.Time { return now })
@@ -136,6 +137,7 @@ func TestWorkBudgetWithoutUpstreamBudgetUsesLeaseExpiry(t *testing.T) {
 }
 
 func TestHeartbeatWithoutUpstreamBudgetRenewsUntilLeaseExpiryReserve(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var elapsed atomic.Int64
 	now := func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
@@ -183,6 +185,7 @@ func TestHeartbeatWithoutUpstreamBudgetRenewsUntilLeaseExpiryReserve(t *testing.
 }
 
 func TestHeartbeatWithoutUpstreamBudgetKeepsClaimFence(t *testing.T) {
+	t.Parallel()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	worker, _, n, _ := legacyForkManager(t, func() time.Time { return base })
 	worker.BindClaim(n, "replaced")

@@ -15,11 +15,13 @@ import (
 )
 
 func TestCheckCaptureDiagnostics(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, input, want string }{
 		{"empty", "", ""}, {"non-Go", "compiler error\n", "compiler error"},
 		{"controls", "\x1b[31m\r\t\b\x00\x7f\u0085", "\\x1b[31m\\r\\t\\b\\x00\\x7f\\u0085"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var c checkCapture
 			_, _ = c.Write([]byte(tc.input))
 			tail, names := c.diagnostics()
@@ -42,6 +44,7 @@ func TestCheckCaptureDiagnostics(t *testing.T) {
 }
 
 func TestDiagnosticBounds(t *testing.T) {
+	t.Parallel()
 	for _, input := range []string{strings.Repeat("x\n", 59), strings.Repeat("x\n", 60), strings.Repeat("x\n", 61), strings.Repeat("x", diagnosticBytes), strings.Repeat("x", diagnosticBytes+1), strings.Repeat("\x1b", diagnosticBytes), strings.Repeat("世", diagnosticBytes), strings.Repeat("x", 2<<20)} {
 		var c checkCapture
 		_, _ = c.Write([]byte(input))
@@ -64,6 +67,7 @@ func TestDiagnosticBounds(t *testing.T) {
 }
 
 func TestDiagnosticFailBlocksSurviveTrailingNoise(t *testing.T) {
+	t.Parallel()
 	input := "--- FAIL: TestAlpha (0.00s)\n" +
 		"    --- FAIL: TestAlpha/sub (0.00s)\n" +
 		"        alpha_test.go:10: want 1\n" +
@@ -105,6 +109,7 @@ func TestDiagnosticFailBlocksSurviveTrailingNoise(t *testing.T) {
 }
 
 func TestDiagnosticFailBlockBounds(t *testing.T) {
+	t.Parallel()
 	assertBounds := func(t *testing.T, tail string) {
 		t.Helper()
 		if len(tail) > diagnosticBytes || strings.Count(tail, "\n")+1 > diagnosticLines || !utf8.ValidString(tail) {
@@ -159,6 +164,7 @@ func TestDiagnosticFailBlockBounds(t *testing.T) {
 }
 
 func TestDiagnosticNoFailUnchanged(t *testing.T) {
+	t.Parallel()
 	lines := func(n int) string {
 		var b strings.Builder
 		for i := range n {
@@ -177,6 +183,7 @@ func TestDiagnosticNoFailUnchanged(t *testing.T) {
 		{"short failure", "--- FAIL: TestShort (0.00s)\n    short_test.go:1: boom\nFAIL\n", "--- FAIL: TestShort (0.00s)\n    short_test.go:1: boom\nFAIL"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			for _, size := range []int{len(tc.input) + 1, 3} {
 				var c checkCapture
 				for i := 0; i < len(tc.input); i += size {
@@ -191,6 +198,7 @@ func TestDiagnosticNoFailUnchanged(t *testing.T) {
 }
 
 func TestDiagnosticConcurrentCaptureAndNameLimit(t *testing.T) {
+	t.Parallel()
 	var c checkCapture
 	var wg sync.WaitGroup
 	for range 8 {
@@ -217,6 +225,7 @@ func TestDiagnosticConcurrentCaptureAndNameLimit(t *testing.T) {
 }
 
 func TestCheckOutcomeJSON(t *testing.T) {
+	t.Parallel()
 	for _, passed := range []bool{true, false} {
 		for _, names := range [][]string{nil, {"TestAlpha"}} {
 			original := CheckRunOutcome{Name: "test", Output: "raw", Passed: passed, OutputTail: "tail", FailingTests: names}
@@ -247,6 +256,7 @@ func TestCheckOutcomeJSON(t *testing.T) {
 }
 
 func TestCheckOutcomeJSONFailBlocks(t *testing.T) {
+	t.Parallel()
 	var c checkCapture
 	_, _ = c.Write([]byte("--- FAIL: TestJSON (0.00s)\n    json_test.go:1: \x1bboom\n" + strings.Repeat("noise\n", 100)))
 	tail, names := c.diagnostics()
@@ -261,6 +271,7 @@ func TestCheckOutcomeJSONFailBlocks(t *testing.T) {
 }
 
 func TestHostFailureDiagnostics(t *testing.T) {
+	t.Parallel()
 	repo := setupGitRepoForValidation(t)
 	policy := "required_checks:\n  - name: failing-go\n    command: |\n      printf '%s\\n' '--- FAIL: TestHost (0.00s)' '    host_test.go:1: host message'; seq 100; exit 7\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n"
 	if err := os.WriteFile(filepath.Join(repo, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
@@ -282,6 +293,7 @@ func TestHostFailureDiagnostics(t *testing.T) {
 }
 
 func TestJSONSkipCapture(t *testing.T) {
+	t.Parallel()
 	for _, preserve := range []bool{false, true} {
 		c := &checkCapture{jsonMode: true, preserveJSON: preserve}
 		event := func(action, pkg, test, output string) {
@@ -313,6 +325,7 @@ func TestJSONSkipCapture(t *testing.T) {
 }
 
 func TestJSONBuildFailure(t *testing.T) {
+	t.Parallel()
 	c := &checkCapture{jsonMode: true}
 	for _, e := range []map[string]string{
 		{"Action": "build-output", "ImportPath": "p", "Output": "# p\nx.go:3: undefined: missing\n"},
@@ -333,6 +346,7 @@ func TestJSONBuildFailure(t *testing.T) {
 }
 
 func TestJSONLateSkipAndFailureRetention(t *testing.T) {
+	t.Parallel()
 	c := &checkCapture{jsonMode: true}
 	event := func(e map[string]string) { t.Helper(); b, _ := json.Marshal(e); _, _ = c.Write(append(b, '\n')) }
 	event(map[string]string{"Action": "build-output", "ImportPath": "broken", "Output": "broken.go:3: undefined: missing\n"})
@@ -360,6 +374,7 @@ func TestJSONLateSkipAndFailureRetention(t *testing.T) {
 }
 
 func TestJSONMalformedAndOversized(t *testing.T) {
+	t.Parallel()
 	c := &checkCapture{jsonMode: true}
 	_, _ = c.Write([]byte("not an event\n"))
 	_, _ = c.Write([]byte(strings.Repeat("x", (1<<20)+1) + "\n"))
@@ -374,6 +389,7 @@ func TestJSONMalformedAndOversized(t *testing.T) {
 }
 
 func TestJSONCapturePlainFallbackAttribution(t *testing.T) {
+	t.Parallel()
 	c := &checkCapture{jsonMode: true}
 	_, _ = c.Write([]byte("--- FAIL: TestBroken (0.00s)\n    x_test.go:1: broken\nFAIL\nFAIL\texample.com/m/broken\t0.01s\n"))
 	c.finish()
@@ -384,6 +400,7 @@ func TestJSONCapturePlainFallbackAttribution(t *testing.T) {
 }
 
 func TestJSONFailureMessagePrefix(t *testing.T) {
+	t.Parallel()
 	for _, preserve := range []bool{false, true} {
 		for _, fragmented := range []bool{false, true} {
 			for _, rows := range []int{5, 20} {
@@ -442,6 +459,7 @@ func TestJSONFailureMessagePrefix(t *testing.T) {
 }
 
 func TestJSONSubtestFailureMessages(t *testing.T) {
+	t.Parallel()
 	for _, preserve := range []bool{false, true} {
 		for _, fragmented := range []bool{false, true} {
 			c := &checkCapture{jsonMode: true, preserveJSON: preserve}

@@ -17,6 +17,7 @@ import (
 )
 
 func TestSanitizeLessons(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("é", 200)
 	raw := "# Lessons\n\nSome prose that is not a bullet.\n- Run `make db-up` before   integration tests\n" +
 		"* The `cfg` package caches   on first load\n- run `make db-up` before integration tests\n" +
@@ -57,6 +58,7 @@ func TestImplementationSummaryCarriesLessonsFirst(t *testing.T) {
 }
 
 func TestReadActiveLessonsRejectsSymlink(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.md")
 	if err := os.WriteFile(outside, []byte("- host secret\n"), 0o644); err != nil {

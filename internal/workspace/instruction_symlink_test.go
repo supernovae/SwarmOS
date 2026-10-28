@@ -44,6 +44,7 @@ func instructionLinkRepo(t *testing.T, issue int, entries map[string]string) (re
 }
 
 func TestInstructionSymlinkLifecycle(t *testing.T) {
+	t.Parallel()
 	guide := "# Team guide\n\nRun make check.\n"
 	for _, tc := range []struct {
 		name    string
@@ -56,6 +57,7 @@ func TestInstructionSymlinkLifecycle(t *testing.T) {
 		{"tracked empty target", map[string]string{"CLAUDE.md": "", "AGENTS.md": "->CLAUDE.md"}, "CLAUDE.md"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			repo, wt, branch, base := instructionLinkRepo(t, 61, tc.entries)
 			ctx := context.Background()
 			read := func(rel string) string {
@@ -137,6 +139,7 @@ func TestInstructionSymlinkLifecycle(t *testing.T) {
 }
 
 func TestInstructionSymlinkRetargetCannotEscapeWorktree(t *testing.T) {
+	t.Parallel()
 	outside := filepath.Join(t.TempDir(), "AI.md")
 	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
 		t.Fatal(err)
@@ -180,6 +183,7 @@ func TestInstructionSymlinkRetargetCannotEscapeWorktree(t *testing.T) {
 }
 
 func TestPRWorktreeInstructionSymlinkPair(t *testing.T) {
+	t.Parallel()
 	repo := t.TempDir()
 	runWorkspaceGit(t, repo, "init", "-b", "main")
 	runWorkspaceGit(t, repo, "config", "user.name", "Test")
@@ -241,6 +245,7 @@ func TestPRWorktreeInstructionSymlinkPair(t *testing.T) {
 }
 
 func TestRecoveryIndexAcceptsOnlyPointerOnLinkedTarget(t *testing.T) {
+	t.Parallel()
 	_, wt, _, base := instructionLinkRepo(t, 63, map[string]string{"docs/AI.md": "Guide.\n", "AGENTS.md": "->docs/AI.md"})
 	block := ActiveMarkerStart + "\nGenerated pointer.\n" + ActiveMarkerEnd
 	if err := injectActivePointer(wt, block); err != nil {

@@ -11,8 +11,10 @@ import (
 )
 
 func TestActiveBundleRejectsSymlinkDirectory(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{".swarm", ".swarm/active"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			root, outside := t.TempDir(), t.TempDir()
 			if err := os.MkdirAll(filepath.Dir(filepath.Join(root, name)), 0700); err != nil {
 				t.Fatal(err)
@@ -33,8 +35,10 @@ func TestActiveBundleRejectsSymlinkDirectory(t *testing.T) {
 }
 
 func TestReacquireRejectsUnpinnedWorktreeWithoutDiscardingChanges(t *testing.T) {
+	t.Parallel()
 	for _, committed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "dirty", true: "unpublished-commit"}[committed], func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			runWorkspaceGit(t, root, "init", "-b", "main")
 			runWorkspaceGit(t, root, "config", "user.name", "Test")
@@ -65,6 +69,7 @@ func TestReacquireRejectsUnpinnedWorktreeWithoutDiscardingChanges(t *testing.T) 
 }
 
 func TestPinnedResumePreservesUncommittedWork(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	runWorkspaceGit(t, root, "init", "-b", "main")
 	runWorkspaceGit(t, root, "config", "user.name", "Test")
@@ -84,6 +89,7 @@ func TestPinnedResumePreservesUncommittedWork(t *testing.T) {
 }
 
 func TestWorktreeExcludeRejectsSymlink(t *testing.T) {
+	t.Parallel()
 	root, outside := t.TempDir(), t.TempDir()
 	runWorkspaceGit(t, root, "init", "-b", "main")
 	canary := filepath.Join(outside, "exclude")
@@ -107,8 +113,10 @@ func TestWorktreeExcludeRejectsSymlink(t *testing.T) {
 }
 
 func TestUncheckpointedResumeAllowsOnlyGeneratedInstructionPointers(t *testing.T) {
+	t.Parallel()
 	for _, autocrlf := range []string{"false", "true"} {
 		t.Run("autocrlf="+autocrlf, func(t *testing.T) {
+			t.Parallel()
 			testUncheckpointedInstructionPointers(t, autocrlf)
 		})
 	}

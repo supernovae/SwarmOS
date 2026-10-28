@@ -40,6 +40,7 @@ func canonicalTemp(t *testing.T) string {
 }
 
 func TestResolveCoordinatorRoot(t *testing.T) {
+	t.Parallel()
 	base := canonicalTemp(t)
 	main := rootRepo(t, filepath.Join(base, "main checkout"))
 	issue := filepath.Join(main, ".swarm", "worktrees", "issue-78")
@@ -90,6 +91,7 @@ func TestResolveCoordinatorRoot(t *testing.T) {
 }
 
 func TestResolveCoordinatorRootPreservesOtherPaths(t *testing.T) {
+	t.Parallel()
 	base := canonicalTemp(t)
 	main := rootRepo(t, filepath.Join(base, "main"))
 	unrelated := filepath.Join(base, "elsewhere", "issue-78")
@@ -119,6 +121,7 @@ func TestResolveCoordinatorRootPreservesOtherPaths(t *testing.T) {
 		"missing directory":               filepath.Join(base, "missing"),
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			got, redirected, err := ResolveCoordinatorRoot(context.Background(), dir)
 			if err != nil || redirected || got != dir {
 				t.Fatalf("ResolveCoordinatorRoot(%q) = %q, %t, %v; want unchanged", dir, got, redirected, err)
@@ -128,6 +131,7 @@ func TestResolveCoordinatorRootPreservesOtherPaths(t *testing.T) {
 }
 
 func TestResolveCoordinatorRootFailsClosed(t *testing.T) {
+	t.Parallel()
 	base := canonicalTemp(t)
 	assertRefused := func(t *testing.T, dir string) {
 		t.Helper()

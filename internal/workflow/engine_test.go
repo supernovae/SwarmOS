@@ -432,6 +432,7 @@ func TestReviewPhaseHandoff(t *testing.T) {
 }
 
 func TestParseReviewVerdictFailsClosed(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		content string
@@ -446,6 +447,7 @@ func TestParseReviewVerdictFailsClosed(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got, err := ParseReviewVerdict(tc.content)
 			if tc.ok {
 				if err != nil || got != tc.want {
@@ -703,6 +705,7 @@ func (e *providerFixtureError) Error() string        { return "safe failure" }
 func (e *providerFixtureError) FailureClass() string { return e.class }
 
 func TestProviderFailureResume(t *testing.T) {
+	t.Parallel()
 	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
 		phase := "implement"
 		if role == "planner" {

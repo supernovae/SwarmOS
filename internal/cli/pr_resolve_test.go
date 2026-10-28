@@ -393,9 +393,11 @@ func TestCLIPRRebaseResolveFailsClosedWithoutIsolation(t *testing.T) {
 
 func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
 	t.Parallel()
+	f, issue, number := submittedPRFixture(t, "agent")
+	restore := snapshotCLIFixture(t, f)
 	for _, kind := range []string{"pass", "repair", "exhausted", "outside", "zero", "custom"} {
 		t.Run(kind, func(t *testing.T) {
-			f, issue, number := submittedPRFixture(t, "agent")
+			restore(t)
 			p := strconv.Itoa(number)
 			before := f.state(t, issue)
 			original, err := f.tracker.GetPullRequest(context.Background(), number)

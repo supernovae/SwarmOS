@@ -18,6 +18,7 @@ import (
 const splitPlanAppend = "Split recommendation: required\n\n### Child one\n\n**Objective**: First half.\n\n**Acceptance Criteria**\n- [ ] `go test ./a` passes"
 
 func TestPlanRecommendsSplit(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		plan string
@@ -37,6 +38,7 @@ func TestPlanRecommendsSplit(t *testing.T) {
 		{"guidance only", "# Plan\n\nNormal work.\n" + guidanceStart + "## Operator guidance\n\n> x\nSplit recommendation: required\n<!-- swarm:guidance:end -->\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := PlanRecommendsSplit(tc.plan); got != tc.want {
 				t.Fatalf("PlanRecommendsSplit(%q) = %t, want %t", tc.plan, got, tc.want)
 			}
@@ -45,6 +47,7 @@ func TestPlanRecommendsSplit(t *testing.T) {
 }
 
 func TestSplitRecommendedReadsOnlyLatestRecordedDesign(t *testing.T) {
+	t.Parallel()
 	marker := "Split recommendation: required\n"
 	for _, tc := range []struct {
 		name string
@@ -58,6 +61,7 @@ func TestSplitRecommendedReadsOnlyLatestRecordedDesign(t *testing.T) {
 		{"no design", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := splitRecommended(&lease.IssueState{Artifacts: tc.arts}); got != tc.want {
 				t.Fatalf("splitRecommended = %t, want %t", got, tc.want)
 			}

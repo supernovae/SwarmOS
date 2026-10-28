@@ -16,8 +16,10 @@ import (
 // Exercise the approval/acquire/provision/publication boundary with the real
 // atomic Git store and a local bare remote, including a publication-time race.
 func TestDroppedCheckpointPublicationFence(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"publish", "remote moved", "stale claim", "state conflict"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			m, _, issue := testManager(t)
 			git := func(args ...string) string {

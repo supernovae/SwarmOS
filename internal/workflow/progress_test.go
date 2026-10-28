@@ -23,6 +23,7 @@ func receiveProgress(t *testing.T, events <-chan ProgressEvent, stage, status st
 }
 
 func TestWorkProgressQuietStageHeartbeatAndShutdown(t *testing.T) {
+	t.Parallel()
 	ticks := make(chan time.Time, 1)
 	events := make(chan ProgressEvent, 20)
 	p := newWorkProgress(t.Context(), 42, func(e ProgressEvent) { events <- e }, ticks)
@@ -49,6 +50,7 @@ func TestWorkProgressQuietStageHeartbeatAndShutdown(t *testing.T) {
 }
 
 func TestWorkProgressTerminalStates(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		result *WorkResult
@@ -61,6 +63,7 @@ func TestWorkProgressTerminalStates(t *testing.T) {
 		{"handoff", &WorkResult{HandedOffToPhase: "review"}, nil, "handed-off"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			events := make(chan ProgressEvent, 10)
@@ -81,6 +84,7 @@ func TestWorkProgressTerminalStates(t *testing.T) {
 }
 
 func TestWorkProgressSerializesCallbacks(t *testing.T) {
+	t.Parallel()
 	ticks := make(chan time.Time, 100)
 	// Deliberately no lock: the race detector verifies the callback contract.
 	var events []ProgressEvent
@@ -109,6 +113,7 @@ func TestWorkProgressSerializesCallbacks(t *testing.T) {
 }
 
 func TestWorkProgressWithoutObserver(t *testing.T) {
+	t.Parallel()
 	p := startWorkProgress(t.Context(), 42, nil)
 	p.next("plan")
 	p.finish(nil, nil)
@@ -157,8 +162,10 @@ func setupProgressFixture(t *testing.T) (*workProgress, chan ProgressEvent, func
 }
 
 func TestSetupProgressOwnsHeartbeatAndRestoresStage(t *testing.T) {
+	t.Parallel()
 	for _, stage := range []string{"plan", "implement", "review", "test"} {
 		t.Run(stage, func(t *testing.T) {
+			t.Parallel()
 			p, events, tick := setupProgressFixture(t)
 			p.mu.Lock()
 			p.issue = 42
@@ -193,8 +200,10 @@ func TestSetupProgressOwnsHeartbeatAndRestoresStage(t *testing.T) {
 }
 
 func TestSetupProgressFreshDeadline(t *testing.T) {
+	t.Parallel()
 	for _, phase := range []string{"claim", "workspace", "bundle"} {
 		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
 			p, events, tick := setupProgressFixture(t)
 			p.mu.Lock()
 			p.issue = 42
@@ -245,6 +254,7 @@ func TestSetupProgressFreshDeadline(t *testing.T) {
 }
 
 func TestSetupProgressCanceledSessionStillRunsOperation(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	var events []ProgressEvent
 	p := NewProgressReporter(ctx, func(e ProgressEvent) { events = append(events, e) })
@@ -259,6 +269,7 @@ func TestSetupProgressCanceledSessionStillRunsOperation(t *testing.T) {
 }
 
 func TestSetupProgressChildCancellationSuppressesHeartbeat(t *testing.T) {
+	t.Parallel()
 	events := make(chan ProgressEvent, 10)
 	p := NewProgressReporter(t.Context(), func(event ProgressEvent) { events <- event })
 	defer p.Close()
@@ -281,6 +292,7 @@ func TestSetupProgressChildCancellationSuppressesHeartbeat(t *testing.T) {
 }
 
 func TestWorkProgressObservesChecks(t *testing.T) {
+	t.Parallel()
 	expectCheck := func(t *testing.T, events <-chan ProgressEvent, check, status string) {
 		t.Helper()
 		if event := receiveProgress(t, events, "required-checks", status); event.Check != check {
@@ -327,12 +339,14 @@ func TestWorkProgressObservesChecks(t *testing.T) {
 		}
 	})
 	t.Run("no observer", func(t *testing.T) {
+		t.Parallel()
 		startWorkProgress(t.Context(), 42, nil).observeCheck(ProgressEvent{Check: "test", Status: "started"})
 		(&workProgress{}).observeCheck(ProgressEvent{Check: "test", Status: "started"})
 	})
 }
 
 func TestWorkProgressRepairRound(t *testing.T) {
+	t.Parallel()
 	ticks := make(chan time.Time, 1)
 	events := make(chan ProgressEvent, 20)
 	p := newWorkProgress(t.Context(), 42, func(e ProgressEvent) { events <- e }, ticks)

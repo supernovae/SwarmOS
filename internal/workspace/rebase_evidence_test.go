@@ -9,6 +9,7 @@ import (
 )
 
 func TestAggregateRebasePatchIdentity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root, _, base, head := prFixture(t)
 	for _, tc := range []struct{ name, a, b, c, d, want string }{
@@ -27,6 +28,7 @@ func TestAggregateRebasePatchIdentity(t *testing.T) {
 }
 
 func TestNormalizeGitOutput(t *testing.T) {
+	t.Parallel()
 	for _, input := range []string{"one\r\ntwo\rthree", "one\ntwo\nthree"} {
 		if got := normalizeGitOutput(input); got != "one\ntwo\nthree" {
 			t.Fatalf("output=%q", got)
@@ -57,6 +59,7 @@ func droppedFixtureCommit(t *testing.T, repo, parent string, files map[string]st
 }
 
 func TestRebaseDroppedPaths(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo, _, base, _ := prFixture(t)
 	odd := "tab\tand\nnewline name.txt"

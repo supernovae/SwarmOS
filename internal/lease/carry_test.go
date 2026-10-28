@@ -16,8 +16,10 @@ import (
 )
 
 func TestApprovalCarryForward(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []string{"descendant", "policy edit", "WorkUnit edit", "nonancestor", "legacy review", "invalid review", "repeated carry", "same base", "same-base WorkUnit edit", "missing base", "policy paths unavailable"} {
 		t.Run(tc, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			m, lt, issue := testManager(t)
 			git := func(args ...string) string {

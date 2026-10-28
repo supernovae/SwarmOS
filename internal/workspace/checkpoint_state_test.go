@@ -11,8 +11,10 @@ import (
 )
 
 func TestInspectCheckpointFourHeadsAndPreservesWork(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"equal", "local rewrite", "remote rewrite", "divergent remote", "missing branch", "missing worktree", "detached", "transport error"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			git := func(dir string, args ...string) string {
 				t.Helper()

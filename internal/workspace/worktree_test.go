@@ -13,6 +13,7 @@ import (
 )
 
 func TestHarnessCleanupPreservesUserInstructions(t *testing.T) {
+	t.Parallel()
 	tmp := t.TempDir()
 	if out, err := gitfixture.Command(t, "", "init", "-b", "main", tmp).CombinedOutput(); err != nil {
 		t.Fatalf("git init failed: %v (%s)", err, string(out))
@@ -93,6 +94,7 @@ func TestHarnessCleanupPreservesUserInstructions(t *testing.T) {
 }
 
 func TestProvisionAtPinsNonMainRemoteDefault(t *testing.T) {
+	t.Parallel()
 	remote := t.TempDir()
 	runWorkspaceGit(t, remote, "init", "--bare")
 	repo := t.TempDir()
@@ -125,6 +127,7 @@ func TestProvisionAtPinsNonMainRemoteDefault(t *testing.T) {
 }
 
 func TestCheckpointPreservesPrimaryDirtyCheckout(t *testing.T) {
+	t.Parallel()
 	repo := t.TempDir()
 	runWorkspaceGit(t, repo, "init", "-b", "main")
 	runWorkspaceGit(t, repo, "config", "user.name", "Test")
@@ -162,6 +165,7 @@ func runWorkspaceGit(t *testing.T, dir string, args ...string) {
 }
 
 func TestProvisionAtRestoresExactCheckpointInFreshClone(t *testing.T) {
+	t.Parallel()
 	remote := t.TempDir()
 	runWorkspaceGit(t, remote, "init", "--bare")
 	first := t.TempDir()
@@ -220,6 +224,7 @@ func workspaceGitOutput(t *testing.T, dir string, args ...string) string {
 }
 
 func TestManagedInstructionsRejectSymlink(t *testing.T) {
+	t.Parallel()
 	outside := filepath.Join(t.TempDir(), "outside.md")
 	if err := os.WriteFile(outside, []byte("private instructions"), 0o600); err != nil {
 		t.Fatal(err)

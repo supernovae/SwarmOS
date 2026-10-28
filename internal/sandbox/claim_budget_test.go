@@ -13,9 +13,11 @@ import (
 )
 
 func TestNativeClaimBudgetPreservesOnlyCoordinatorPause(t *testing.T) {
+	t.Parallel()
 	for _, role := range []string{"developer", "tester", "planner", "reviewer"} {
 		for _, cause := range []error{claimpause.ErrBudget, context.Canceled, fmt.Errorf("paused for claim budget")} {
 			t.Run(role+cause.Error(), func(t *testing.T) {
+				t.Parallel()
 				dir := t.TempDir()
 				writeWorkerFixture(t, dir, "source", "before")
 				writeWorkerFixture(t, dir, "deleted", "before")
@@ -62,8 +64,10 @@ func TestNativeClaimBudgetPreservesOnlyCoordinatorPause(t *testing.T) {
 }
 
 func TestNativeClaimBudgetRejectsUnsafeOutput(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"symlink", "control", "oversized", "protected", "fence", "harness failure"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			writeWorkerFixture(t, dir, "source", "before")
 			ctx, cancel := context.WithCancelCause(context.Background())

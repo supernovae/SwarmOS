@@ -12,6 +12,7 @@ import (
 )
 
 func TestPreserveOriginalReportCannotChangeParsedWorkUnit(t *testing.T) {
+	t.Parallel()
 	wu := &contract.WorkUnit{
 		Title: "Fix crash", Objective: "Stop the crash on empty input", Constraints: []string{"Keep the API"},
 		Acceptance: []string{"`go test ./...` passes"}, Workflow: "bugfix", Gate: contract.GateAgent,
@@ -48,6 +49,7 @@ func TestPreserveOriginalReportCannotChangeParsedWorkUnit(t *testing.T) {
 }
 
 func TestMarkDuplicates(t *testing.T) {
+	t.Parallel()
 	cands := []dupCandidate{
 		newDupCandidate(3, "[Bugfix] Scan crashes on empty issue body", ""),
 		newDupCandidate(9, "Scan crashes on an empty issue body", ""),
@@ -71,6 +73,7 @@ func TestMarkDuplicates(t *testing.T) {
 }
 
 func TestAssignLanesUsesFirstMatchingLane(t *testing.T) {
+	t.Parallel()
 	items := []IssueSenseItem{
 		{IssueNumber: 1, Shape: ShapeUrgent, QuietDays: 400, RecommendedLabel: "swarm:needs-scope"},
 		{IssueNumber: 2, DuplicateOf: 1, RecommendedLabel: "swarm:draft"},
@@ -97,6 +100,7 @@ func TestAssignLanesUsesFirstMatchingLane(t *testing.T) {
 }
 
 func TestBoundPublishedReportFitsOneComment(t *testing.T) {
+	t.Parallel()
 	var sb strings.Builder
 	sb.WriteString("### Report\n\n<details>\n<summary>Lane</summary>\n\n")
 	for sb.Len() < 3*maxPublishedReportBytes {

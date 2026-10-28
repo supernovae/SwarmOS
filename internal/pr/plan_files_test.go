@@ -10,8 +10,10 @@ import (
 )
 
 func TestRestoreApprovedPlan(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"fresh", "matching", "edited", "symlink file", "symlink directory"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			active := filepath.Join(root, ".swarm", "active")
 			if err := os.MkdirAll(active, 0700); err != nil {

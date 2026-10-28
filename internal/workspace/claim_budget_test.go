@@ -6,6 +6,7 @@ import (
 )
 
 func TestRebindBudgetCheckpointPreservesOldBranchAndRefusesDirtyWork(t *testing.T) {
+	t.Parallel()
 	wt, oldBranch, head := checkpointFixture(t)
 	common := workspaceGitOutput(t, wt, "rev-parse", "--git-common-dir")
 	root := filepath.Dir(common)

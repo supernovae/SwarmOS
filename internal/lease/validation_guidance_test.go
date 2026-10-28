@@ -7,6 +7,7 @@ import (
 )
 
 func TestRepeatedChecksRetainTesterGuidance(t *testing.T) {
+	t.Parallel()
 	appendix := "\n<!-- swarm:guidance:start -->\n## Operator guidance\n\n> Use local fixtures\n\n<!-- swarm:guidance:end -->\n"
 	st := &IssueState{Artifacts: []contract.Artifact{{Type: contract.ArtifactValidation, Body: "Previous check evidence" + appendix, Metadata: map[string]string{"operator_steered": "true", "guidance_count": "1", "guidance_sha256": "digest"}}}}
 	next := contract.Artifact{Type: contract.ArtifactValidation, Body: "New check evidence"}

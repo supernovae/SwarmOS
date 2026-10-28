@@ -53,8 +53,10 @@ func (f discardFixture) archive(suffix string) string {
 }
 
 func TestDiscardCheckpointProvisionsFreshBranch(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"clean", "dirty", "absent", "archive collision", "retry"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			f := newDiscardFixture(t)
 			archive := f.archive("")
 			switch scenario {
@@ -124,8 +126,10 @@ func TestDiscardCheckpointProvisionsFreshBranch(t *testing.T) {
 }
 
 func TestDiscardCheckpointSetAsideRefusals(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"other branch", "rebase in progress", "symlink", "foreign repository", "unrelated head"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			f := newDiscardFixture(t)
 			switch scenario {
 			case "other branch":
@@ -164,6 +168,7 @@ func TestDiscardCheckpointSetAsideRefusals(t *testing.T) {
 }
 
 func TestDiscardCheckpointProvisionErrorNamesCommand(t *testing.T) {
+	t.Parallel()
 	f := newDiscardFixture(t)
 	_, _, err := ProvisionWithContext(f.root, "", 7, "task", f.base, f.fresh.AbandonedBranch, f.head, ProvisionContext{})
 	if err == nil {

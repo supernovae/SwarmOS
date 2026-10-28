@@ -6,6 +6,7 @@ import (
 )
 
 func TestValidateRebaseResolution(t *testing.T) {
+	t.Parallel()
 	valid := func() RebaseResolutionReport {
 		return RebaseResolutionReport{Commit: strings.Repeat("a", 40), Paths: []string{"internal/x.go"}, Agent: "codex", Harness: "codex", Sandbox: "codex-native"}
 	}
@@ -44,6 +45,7 @@ func TestValidateRebaseResolution(t *testing.T) {
 }
 
 func TestTrimRebaseGuidance(t *testing.T) {
+	t.Parallel()
 	many := make([]string, maxRebaseGuidance+3)
 	for i := range many {
 		many[i] = strings.Repeat("é", maxRebaseGuidanceBytes)

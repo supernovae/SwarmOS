@@ -8,8 +8,10 @@ import (
 )
 
 func TestLocalCheckpointEvidence(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"clean", "pointer", "pointer-real", "tracked", "untracked", "ignored", "recovery"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			wt, _, base := checkpointFixture(t)
 			switch kind {
 			case "pointer", "pointer-real":

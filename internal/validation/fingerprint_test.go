@@ -14,6 +14,7 @@ import (
 )
 
 func TestFingerprintReuseBindings(t *testing.T) {
+	t.Parallel()
 	root := setupGitRepoForValidation(t)
 	// Active artifacts are coordinator scratch, never checkpoint input.
 	if err := os.WriteFile(filepath.Join(root, ".git", "info", "exclude"), []byte(".swarm/active/\n"), 0600); err != nil {
@@ -95,6 +96,7 @@ func TestFingerprintReuseBindings(t *testing.T) {
 }
 
 func TestFingerprintContentChangingCheckIsIneligible(t *testing.T) {
+	t.Parallel()
 	root := setupGitRepoForValidation(t)
 	policy := "required_checks:\n - name: change\n   command: printf changed > main.go\n   timeout: 1m\nprotected_paths: ['.github/**']\n"
 	if err := os.WriteFile(filepath.Join(root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0644); err != nil {
@@ -120,6 +122,7 @@ func TestFingerprintContentChangingCheckIsIneligible(t *testing.T) {
 }
 
 func TestFingerprintUsesTrustedPolicyBytes(t *testing.T) {
+	t.Parallel()
 	root := setupGitRepoForValidation(t)
 	base := gitRevision(t, root, "HEAD")
 	trusted, err := gitOutput(root, "show", base+":.swarm/validation/required-checks.yaml")

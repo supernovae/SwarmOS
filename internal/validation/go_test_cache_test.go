@@ -26,6 +26,7 @@ func cachedPackages(output string) map[string]bool {
 }
 
 func TestGoFastPassReusesTestCache(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, cacheableTestCheck, nil)
 	commitRepoFile(t, repo, "leaf/leaf.go", passingLeaf)
 	report, err := Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base, GoFastPass: true})
@@ -54,6 +55,7 @@ func TestGoFastPassReusesTestCache(t *testing.T) {
 }
 
 func TestGoFastPassCachedFullStillFails(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, cacheableTestCheck, map[string]string{"unrelated/unrelated_test.go": "package unrelated\n\nimport \"testing\"\n\nfunc TestUnrelated(t *testing.T) { t.Fatal(\"broken\") }\n"})
 	commitRepoFile(t, repo, "leaf/leaf.go", passingLeaf)
 	report, err := Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base, GoFastPass: true})
@@ -70,6 +72,7 @@ func TestGoFastPassCachedFullStillFails(t *testing.T) {
 }
 
 func TestSkippedTestsCachedEvidence(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, cacheableTestCheck, nil)
 	if err := os.WriteFile(filepath.Join(repo, ".git", "info", "exclude"), []byte(".swarm/active/\n"), 0600); err != nil {
 		t.Fatal(err)

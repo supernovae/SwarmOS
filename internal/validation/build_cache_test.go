@@ -28,6 +28,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// useCacheRoot changes a package-global hook; callers must remain serial.
 func useCacheRoot(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())

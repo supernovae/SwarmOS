@@ -13,6 +13,7 @@ import (
 )
 
 func TestRequiredChecksIgnoreAgentTimeoutPolicy(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("fixture uses POSIX sleep")
 	}
@@ -21,6 +22,7 @@ func TestRequiredChecksIgnoreAgentTimeoutPolicy(t *testing.T) {
 		pass         bool
 	}{{"1ns", "1m", true}, {"24h", "1ns", false}} {
 		t.Run(test.agent, func(t *testing.T) {
+			t.Parallel()
 			repo := setupGitRepoForValidation(t)
 			config := filepath.Join(repo, ".swarm", "config.yaml")
 			data, err := os.ReadFile(config)

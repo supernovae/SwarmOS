@@ -21,6 +21,7 @@ func roleRunValue(t *testing.T, tel *contract.RoleRunTelemetry) string {
 }
 
 func TestRoleRunHistoryThroughUpdateArtifact(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, _, iss := testManager(t)
 	first, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1)
@@ -89,6 +90,7 @@ func TestRoleRunHistoryThroughUpdateArtifact(t *testing.T) {
 }
 
 func TestRoleRunRecordDedupsAndBoundsHistory(t *testing.T) {
+	t.Parallel()
 	st := &IssueState{}
 	reused := contract.NewRoleRunTelemetry("tester", "mock", time.Now())
 	value := roleRunValue(t, reused)
@@ -110,6 +112,7 @@ func TestRoleRunRecordDedupsAndBoundsHistory(t *testing.T) {
 }
 
 func TestRoleRunRepairAttempts(t *testing.T) {
+	t.Parallel()
 	st := &IssueState{}
 	if got := NextRepairAttempt(st, "developer", false); got != 0 {
 		t.Fatalf("initial attempt = %d", got)
@@ -129,6 +132,7 @@ func TestRoleRunRepairAttempts(t *testing.T) {
 }
 
 func TestRoleRunTableShowsUnavailableAndZero(t *testing.T) {
+	t.Parallel()
 	run := contract.NewRoleRunTelemetry("developer", "claude", time.Now())
 	run.ElapsedMS, run.SetupMS, run.InputTokens, run.ToolCalls, run.RepeatedCommands = contract.Count(61500), contract.Count(0), contract.Count(12), contract.Count(0), contract.Count(0)
 	run.ActualModel = contract.Label("claude-opus-4-5")
@@ -154,8 +158,10 @@ func TestRoleRunTableShowsUnavailableAndZero(t *testing.T) {
 }
 
 func TestFailedRoleRunPersistence(t *testing.T) {
+	t.Parallel()
 	for _, class := range []string{"capacity", "usage_limit", "rate_limit", "network", "unknown"} {
 		t.Run(class, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			m, _, iss := testManager(t)
 			_, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1)

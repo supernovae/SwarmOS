@@ -17,10 +17,12 @@ import (
 )
 
 func TestWritableImportPolicy(t *testing.T) {
+	t.Parallel()
 	for _, role := range []string{"developer", "tester"} {
 		for _, harness := range []bool{false, true} {
 			for _, fork := range []bool{false, true} {
 				t.Run(role+string(rune('0'+boolInt(harness)*2+boolInt(fork))), func(t *testing.T) {
+					t.Parallel()
 					output, other := "IMPLEMENTATION.md", "VALIDATION.md"
 					if role == "tester" {
 						output, other = other, output
@@ -54,6 +56,7 @@ func TestWritableImportPolicy(t *testing.T) {
 	}
 }
 func TestImportPolicyRecoverable(t *testing.T) {
+	t.Parallel()
 	const (
 		implementation = ".swarm/active/IMPLEMENTATION.md"
 		validation     = ".swarm/active/VALIDATION.md"
@@ -243,8 +246,10 @@ func TestTesterReadsApprovedInputs(t *testing.T) {
 }
 
 func TestApprovedInputsRefuseMissingStateAndSymlinks(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"missing", "symlink"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			active := filepath.Join(dir, ".swarm/active")
 			if err := os.MkdirAll(active, 0755); err != nil {
@@ -276,6 +281,7 @@ func TestApprovedInputsRefuseMissingStateAndSymlinks(t *testing.T) {
 }
 
 func TestWritableImportPolicyUsesTrustedPatterns(t *testing.T) {
+	t.Parallel()
 	// A returned policy cannot remove the patterns captured from the approved base.
 	paths := []string{".swarm/validation/required-checks.yaml", "AGENTS.md", ".swarm/active/IMPLEMENTATION.md"}
 	err := writableImportPolicy("developer", paths, []string{".swarm/validation/**", "AGENTS.md"}, false, false)
@@ -292,6 +298,7 @@ func TestWritableImportPolicyUsesTrustedPatterns(t *testing.T) {
 }
 
 func TestDeletionDirectivePlanLines(t *testing.T) {
+	t.Parallel()
 	const path = "internal/workspace/recovery.go"
 	for _, tc := range []struct {
 		line string
@@ -327,6 +334,7 @@ func TestDeletionDirectivePlanLines(t *testing.T) {
 }
 
 func TestDeletionImportPolicy(t *testing.T) {
+	t.Parallel()
 	const recovery = "internal/workspace/recovery.go"
 	base := map[string]bool{recovery: true, "internal/api/handler.go": true}
 	for _, tc := range []struct {
@@ -403,6 +411,7 @@ func deletionBase(t *testing.T, files map[string]string) (string, string) {
 }
 
 func TestDeletionCheckUsesTrustedState(t *testing.T) {
+	t.Parallel()
 	const recovery = "internal/workspace/recovery.go"
 	root, base := deletionBase(t, map[string]string{recovery: "package workspace\n"})
 	plan := func(body string) *lease.IssueState {
@@ -443,6 +452,7 @@ func TestDeletionCheckUsesTrustedState(t *testing.T) {
 }
 
 func TestActiveDirectoryImportDiagnostic(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		paths  []string
 		active bool

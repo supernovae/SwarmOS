@@ -173,9 +173,11 @@ func TestCleanupLocalCleanRetire(t *testing.T) {
 
 func TestCleanupLocalDirtyRetention(t *testing.T) {
 	t.Parallel()
+	f, n, _ := cleanupLocalFixture(t)
+	restore := snapshotCLIFixture(t, f)
 	for _, kind := range []string{"untracked", "tracked", "staged", "different-head", "newline", "staged-cancelled", "hidden", "managed-staged", "deleted", "renamed"} {
 		t.Run(kind, func(t *testing.T) {
-			f, n, _ := cleanupLocalFixture(t)
+			restore(t)
 			path := workspace.WorktreePath(f.root, n)
 			name := "user file"
 			if kind == "newline" {
@@ -247,9 +249,11 @@ func TestCleanupLocalDirtyRetention(t *testing.T) {
 
 func TestCleanupLocalIgnoredRetention(t *testing.T) {
 	t.Parallel()
+	f, n, _ := cleanupLocalFixture(t)
+	restore := snapshotCLIFixture(t, f)
 	for _, name := range []string{"ignored", ".swarm/unexpected", "hidden dir/ignored"} {
 		t.Run(name, func(t *testing.T) {
-			f, n, _ := cleanupLocalFixture(t)
+			restore(t)
 			path := workspace.WorktreePath(f.root, n)
 			exclude := prGit(t, f.root, "rev-parse", "--git-path", "info/exclude")
 			if !filepath.IsAbs(exclude) {
@@ -779,9 +783,11 @@ func TestCleanupLocalRevisedPRRetire(t *testing.T) {
 
 func TestCleanupLocalDirtyLineageAncestor(t *testing.T) {
 	t.Parallel()
+	f, n, _, _ := revisedCleanupFixture(t)
+	restore := snapshotCLIFixture(t, f)
 	for _, kind := range []string{"tracked", "staged", "untracked", "ignored"} {
 		t.Run(kind, func(t *testing.T) {
-			f, n, _, _ := revisedCleanupFixture(t)
+			restore(t)
 			path := workspace.WorktreePath(f.root, n)
 			name := "user-file"
 			if kind == "tracked" || kind == "staged" {
@@ -900,6 +906,12 @@ func TestCleanupLocalLineageMovedTip(t *testing.T) {
 func rebasedCleanupFixture(t *testing.T, identities ...string) (*cliFixture, int, int, string) {
 	t.Helper()
 	f, n, pr := submittedPRFixture(t, "agent")
+	old := finishRebasedCleanupFixture(t, f, n, pr, identities...)
+	return f, n, pr, old
+}
+
+func finishRebasedCleanupFixture(t *testing.T, f *cliFixture, n, pr int, identities ...string) string {
+	t.Helper()
 	p := strconv.Itoa(pr)
 	initial := f.state(t, n)
 	old := initial.HeadSHA
@@ -945,7 +957,7 @@ func rebasedCleanupFixture(t *testing.T, identities ...string) (*cliFixture, int
 	if got := prGit(t, workspace.WorktreePath(f.root, n), "rev-parse", "HEAD"); got != old {
 		t.Fatalf("issue worktree moved: %s", got)
 	}
-	return f, n, pr, old
+	return old
 }
 
 func assertCleanupIssueResources(t *testing.T, f *cliFixture, n int, p lease.CleanupPreview, eligible bool, head string) {
@@ -997,9 +1009,12 @@ func TestCleanupLocalVerifiedRebaseRetire(t *testing.T) {
 
 func TestCleanupLocalChainedVerifiedRebasesRetire(t *testing.T) {
 	t.Parallel()
+	f, n, pr := submittedPRFixture(t, "agent")
+	restore := snapshotCLIFixture(t, f)
 	for _, identities := range [][]string{{"unchanged", "unchanged"}, {"changed", "changed"}, {"changed", "unchanged"}} {
 		t.Run(strings.Join(identities, "-"), func(t *testing.T) {
-			f, n, pr, old := rebasedCleanupFixture(t, identities...)
+			restore(t)
+			old := finishRebasedCleanupFixture(t, f, n, pr, identities...)
 			before := f.state(t, n)
 			if before.LastRebase == nil || before.LastRebase.OldHead == old {
 				t.Fatalf("second rebase did not replace LastRebase: %+v", before.LastRebase)
@@ -1068,6 +1083,8 @@ func TestCleanupLocalRebaseNonMatchingHead(t *testing.T) {
 
 func TestCleanupRebaseIdentityRetention(t *testing.T) {
 	t.Parallel()
+	f, n, _, old := rebasedCleanupFixture(t, "unchanged")
+	restore := snapshotCLIFixture(t, f)
 	for _, tc := range []struct {
 		name   string
 		mutate func(r *coordination.CheckpointRebase, old, final string)
@@ -1083,7 +1100,7 @@ func TestCleanupRebaseIdentityRetention(t *testing.T) {
 		{"disconnected", func(r *coordination.CheckpointRebase, _, _ string) { r.OldHead = strings.Repeat("c", 40) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, n, _, old := rebasedCleanupFixture(t, "unchanged")
+			restore(t)
 			store := coordination.NewFileStore(f.root)
 			st := f.state(t, n)
 			tc.mutate(&st.RebaseTransitions[0], old, st.SubmittedHeadSHA)
@@ -1114,13 +1131,26 @@ func TestCleanupRebaseIdentityRetention(t *testing.T) {
 
 func TestCleanupLocalDirtyVerifiedRebase(t *testing.T) {
 	t.Parallel()
+	type prepared struct {
+		f       *cliFixture
+		n       int
+		old     string
+		restore func(*testing.T)
+	}
+	fixtures := map[string]prepared{}
+	for _, identity := range []string{"unchanged", "changed"} {
+		f, n, _, old := rebasedCleanupFixture(t, identity)
+		fixtures[identity] = prepared{f, n, old, snapshotCLIFixture(t, f)}
+	}
 	for _, tc := range []struct{ identity, kind string }{
 		{"unchanged", "tracked"}, {"unchanged", "staged"}, {"unchanged", "untracked"}, {"unchanged", "ignored"}, {"unchanged", "after-preview"},
 		{"changed", "tracked"}, {"changed", "untracked"}, {"changed", "ignored"}, {"changed", "after-preview"},
 	} {
 		kind := tc.kind
 		t.Run(tc.identity+"-"+kind, func(t *testing.T) {
-			f, n, _, old := rebasedCleanupFixture(t, tc.identity)
+			baseline := fixtures[tc.identity]
+			baseline.restore(t)
+			f, n, old := baseline.f, baseline.n, baseline.old
 			path := workspace.WorktreePath(f.root, n)
 			branch := f.state(t, n).Branch
 			name := "user-file"

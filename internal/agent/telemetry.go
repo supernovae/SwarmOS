@@ -35,6 +35,19 @@ type sessionUsage struct {
 	model, effort                              *string
 }
 
+// harnessUsage adds the reasoning-token count that some harnesses report.
+type harnessUsage struct {
+	sessionUsage
+	reasoning *int64
+}
+
+func (u harnessUsage) apply(t *contract.RoleRunTelemetry) {
+	u.sessionUsage.apply(t)
+	if t.ReasoningTokens = u.reasoning; u.reasoning != nil {
+		t.UsageSource = contract.UsageSourceSessionLog
+	}
+}
+
 func (u sessionUsage) apply(t *contract.RoleRunTelemetry) {
 	t.InputTokens, t.OutputTokens, t.CachedInputTokens = u.input, u.output, u.cached
 	t.ToolCalls, t.RepeatedCommands = u.toolCalls, u.repeated
@@ -86,7 +99,9 @@ func collectSessionUsage(driver, home string) sessionUsage {
 	case "claude":
 		usage, err = parseClaudeSession(lines)
 	case "codex":
-		usage, err = parseCodexSession(lines)
+		var codex harnessUsage
+		codex, err = parseCodexSession(lines)
+		usage = codex.sessionUsage
 	}
 	if err != nil {
 		return sessionUsage{}
@@ -338,13 +353,14 @@ func parseClaudeSession(files [][]string) (sessionUsage, error) {
 // session's cumulative total_token_usage, so each file contributes its last
 // snapshot and snapshots are never summed within a file. Each ephemeral
 // follow-up turn writes its own session file, so files are summed. Codex
-// input_tokens includes cached_input_tokens. turn_context names the model and
-// reasoning effort.
-func parseCodexSession(files [][]string) (sessionUsage, error) {
+// input_tokens includes cached_input_tokens; output_tokens includes
+// reasoning_output_tokens. turn_context names the model and reasoning effort.
+func parseCodexSession(files [][]string) (harnessUsage, error) {
 	type tokens struct {
-		Input  *int64 `json:"input_tokens"`
-		Cached *int64 `json:"cached_input_tokens"`
-		Output *int64 `json:"output_tokens"`
+		Input     *int64 `json:"input_tokens"`
+		Cached    *int64 `json:"cached_input_tokens"`
+		Output    *int64 `json:"output_tokens"`
+		Reasoning *int64 `json:"reasoning_output_tokens"`
 	}
 	type record struct {
 		Type    string          `json:"type"`
@@ -364,14 +380,14 @@ func parseCodexSession(files [][]string) (sessionUsage, error) {
 	}
 	models, efforts := map[string]bool{}, map[string]bool{}
 	calls := newCallCounter()
-	var input, output, cached int64
-	tokensKnown, cachedKnown, events := true, true, false
+	var input, output, cached, reasoning int64
+	tokensKnown, cachedKnown, reasoningKnown, events := true, true, true, false
 	for _, lines := range files {
 		var last *tokens
 		for _, line := range lines {
 			var rec record
 			if err := json.Unmarshal([]byte(line), &rec); err != nil {
-				return sessionUsage{}, errTelemetryUnavailable
+				return harnessUsage{}, errTelemetryUnavailable
 			}
 			var p payload
 			if len(rec.Payload) != 0 && json.Unmarshal(rec.Payload, &p) != nil {
@@ -393,11 +409,11 @@ func parseCodexSession(files [][]string) (sessionUsage, error) {
 				events = true
 				t := p.Info.Total
 				if t.Input == nil || t.Output == nil {
-					return sessionUsage{}, errTelemetryUnavailable
+					return harnessUsage{}, errTelemetryUnavailable
 				}
 				// Cumulative snapshots never decrease; anything else is ambiguous.
 				if last != nil && (*t.Input < *last.Input || *t.Output < *last.Output) {
-					return sessionUsage{}, errTelemetryUnavailable
+					return harnessUsage{}, errTelemetryUnavailable
 				}
 				last = t
 			case "response_item":
@@ -413,7 +429,7 @@ func parseCodexSession(files [][]string) (sessionUsage, error) {
 						args = p.Input
 					}
 					if err := calls.start(p.CallID, p.Name, args); err != nil {
-						return sessionUsage{}, err
+						return harnessUsage{}, err
 					}
 				}
 			}
@@ -428,15 +444,21 @@ func parseCodexSession(files [][]string) (sessionUsage, error) {
 		if last.Cached == nil || addCount(&cached, *last.Cached) != nil {
 			cachedKnown = false
 		}
+		if last.Reasoning == nil || addCount(&reasoning, *last.Reasoning) != nil {
+			reasoningKnown = false
+		}
 	}
 	if !events {
-		return sessionUsage{}, nil
+		return harnessUsage{}, nil
 	}
-	out := sessionUsage{toolCalls: contract.Count(calls.calls), repeated: contract.Count(calls.repeated), model: soleLabel(models), effort: soleLabel(efforts)}
+	out := harnessUsage{sessionUsage: sessionUsage{toolCalls: contract.Count(calls.calls), repeated: contract.Count(calls.repeated), model: soleLabel(models), effort: soleLabel(efforts)}}
 	if tokensKnown && len(files) > 0 {
 		out.input, out.output = &input, &output
 		if cachedKnown {
 			out.cached = &cached
+		}
+		if reasoningKnown {
+			out.reasoning = &reasoning
 		}
 	}
 	return out, nil
@@ -449,11 +471,21 @@ type runObservation struct {
 	driver    string
 	lifecycle sandbox.Lifecycle
 	usage     sessionUsage
+	// session, when observed, comes from a host-HOME harness's own records
+	// and takes precedence over the (then empty) scratch HOME.
+	session *harnessUsage
 }
 
 func newRunObservation(driver string) *runObservation {
 	o := &runObservation{started: time.Now(), driver: driver}
 	o.lifecycle.ObserveScratch = func(home string) { o.usage = collectSessionUsage(o.driver, home) }
+	o.lifecycle.ObserveSession = func(s sandbox.HarnessSession) {
+		if s.Driver != o.driver {
+			return
+		}
+		usage := collectHarnessSession(s, o.started, time.Now())
+		o.session = &usage
+	}
 	return o
 }
 
@@ -465,6 +497,10 @@ func (o *runObservation) telemetry(role, harness string) *contract.RoleRunTeleme
 			*dst = contract.Millis(*src)
 		}
 	}
-	o.usage.apply(t)
+	if o.session != nil {
+		o.session.apply(t)
+	} else {
+		o.usage.apply(t)
+	}
 	return t
 }

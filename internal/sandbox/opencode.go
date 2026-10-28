@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -21,6 +22,15 @@ import (
 // this task separate from the operator's shared service. Its temporary local
 // password authenticates SwarmOS to that server, never a model provider.
 func runOpenCode(ctx context.Context, binary, model, prompt, control string, env []string, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) error {
+	return runOpenCodeSession(ctx, binary, model, prompt, control, env, false, nil, interactive, input, stdout, stderr, guidance...)
+}
+
+// runOpenCodeSession also records telemetry when session is non-nil and the
+// inspected `run --help` lists --session. It creates the run's own session up
+// front and later fetches only that session's messages, so SwarmOS never lists
+// or reads the user's other OpenCode sessions. Any telemetry failure falls back
+// to the untracked --continue flow.
+func runOpenCodeSession(ctx context.Context, binary, model, prompt, control string, env []string, sessionFlag bool, session *HarnessSession, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) error {
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return err
@@ -73,6 +83,17 @@ func runOpenCode(ctx context.Context, binary, model, prompt, control string, env
 		}
 		return []byte(output.String()), nil
 	}
+	// Telemetry calls read through a strict cap so a truncated export is never
+	// mistaken for a complete one.
+	apiTo := func(ctx context.Context, operation string, args ...string) ([]byte, bool) {
+		output := &cappedBuffer{limit: telemetryRecordsMax}
+		var diagnostics process.Output
+		command := append([]string{"api", "--server", started.URL, operation}, args...)
+		if runNativeCommand(ctx, binary, control, env, command, nil, output, &diagnostics) != nil || output.overflow {
+			return nil, false
+		}
+		return output.buf, true
+	}
 	readyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	for {
@@ -119,6 +140,23 @@ func runOpenCode(ctx context.Context, binary, model, prompt, control string, env
 	if model != "" {
 		args = append(args, "--model", model)
 	}
+	var sessionID string
+	if session != nil && sessionFlag {
+		sessionID = createOpenCodeSession(ctx, apiTo, control)
+	}
+	if sessionID != "" {
+		session.SessionIDs = []string{sessionID}
+		args = append(args, "--session", sessionID)
+		// Deferred after the server stop, so this runs first, while the server
+		// is still up. Its own timeout keeps a hung server from stalling cleanup.
+		defer func() {
+			fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), openCodeTelemetryTimeout)
+			defer cancel()
+			if raw, ok := apiTo(fetchCtx, "session.messages", "--param", "sessionID="+sessionID); ok {
+				session.Records = raw
+			}
+		}()
+	}
 	for {
 		turn := append(append([]string(nil), args...), "--", prompt)
 		if err := runNativeCommand(ctx, binary, control, env, turn, nil, stdout, stderr); err != nil {
@@ -135,7 +173,7 @@ func runOpenCode(ctx context.Context, binary, model, prompt, control string, env
 		if strings.TrimSpace(line) == "" {
 			return nil
 		}
-		if !slices.Contains(args, "--continue") {
+		if sessionID == "" && !slices.Contains(args, "--continue") {
 			args = append(args, "--continue")
 		}
 		if len(guidance) > 0 && guidance[0] != nil {
@@ -143,6 +181,53 @@ func runOpenCode(ctx context.Context, binary, model, prompt, control string, env
 		}
 		prompt = "Continue the SwarmOS task.\n" + line
 	}
+}
+
+const telemetryRecordsMax = 4 << 20
+
+// openCodeTelemetryTimeout bounds each telemetry api call; tests shorten it.
+var openCodeTelemetryTimeout = 10 * time.Second
+
+var openCodeSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// createOpenCodeSession returns the id of a new session bound to control, or
+// "" when OpenCode cannot create one there.
+func createOpenCodeSession(ctx context.Context, api func(context.Context, string, ...string) ([]byte, bool), control string) string {
+	ctx, cancel := context.WithTimeout(ctx, openCodeTelemetryTimeout)
+	defer cancel()
+	raw, ok := api(ctx, "session.create")
+	if !ok {
+		return ""
+	}
+	var created struct {
+		Data struct {
+			ID        string `json:"id"`
+			Directory string `json:"directory"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &created) != nil || !openCodeSessionID.MatchString(created.Data.ID) || created.Data.Directory != control {
+		return ""
+	}
+	return created.Data.ID
+}
+
+// cappedBuffer keeps at most limit bytes and records whether more arrived. It
+// keeps accepting writes so the producer is never blocked.
+type cappedBuffer struct {
+	limit    int
+	buf      []byte
+	overflow bool
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	room := b.limit - len(b.buf)
+	if len(p) > room {
+		b.buf = append(b.buf, p[:max(room, 0)]...)
+		b.overflow = true
+		return len(p), nil
+	}
+	b.buf = append(b.buf, p...)
+	return len(p), nil
 }
 
 // Inspect effective permissions after user/managed settings have been merged.

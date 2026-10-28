@@ -20,7 +20,7 @@ agents:
 
 | Mode | Invocation |
 | --- | --- |
-| Isolated | `opencode serve --stdio --hostname 127.0.0.1 --port 0`, then `opencode run --server <private url> --agent swarm` for each turn |
+| Isolated | `opencode serve --stdio --hostname 127.0.0.1 --port 0`, then `opencode api --server <private url> session.create` and `opencode run --server <private url> --agent swarm --session <id>` for each turn. If the session cannot be created in the run's control directory, or `run --help` does not list `--session`, follow-up turns use `--continue` instead |
 | `trusted-local` | `opencode run --standalone "<prompt>"` unattended, or `opencode mini --standalone --prompt "<task>"` interactively |
 
 The private server listens only on loopback and is protected by a temporary password. That password is between SwarmOS and OpenCode only. It is not a provider credential and never reaches the tool environment. Your shared OpenCode server, if you run one, is not used.
@@ -32,6 +32,17 @@ The private server listens only on loopback and is protected by a temporary pass
 - **Configuration discovery.** OpenCode's customization lookup points at a SwarmOS control directory. Provider data stays in its normal location.
 - **Files and shell.** Same Bubblewrap executor as Claude Code: detached snapshot at `/workspace`, read-only `/usr`, private temporary storage, clean environment, no network, and read-only source for planners and reviewers.
 - **Limits.** Two-minute tool deadlines, per-process resource limits, and 256 MiB of temporary storage per call. Cancelling a run stops detached tool children.
+
+## Telemetry
+
+SwarmOS does not open OpenCode's session database, which holds all of your sessions. Instead it creates the run's own session on the private server before the first turn, then asks that server for that session's messages after the last turn with `opencode api --server <private url> session.messages --param sessionID=<id>`. It never lists sessions, and it sends nothing anywhere. The request has its own 10-second limit, so it can add up to 10 seconds to the end of a run, and an export over 4 MiB is discarded.
+
+- **Reported:** input tokens, output tokens, cache-read tokens as cached, reasoning tokens, tool calls and repeated identical shell commands, and the model id.
+- **Unavailable:** effort.
+
+A message that belongs to any other session makes the whole export `unavailable`. The session stays in your OpenCode history in its normal data store, as an interactive session would. SwarmOS never copies, moves or deletes it. The `session.create` and `session.messages` operation names and the message format still need a check against a real 2.1.2 run.
+
+A value the harness does not report stays `unavailable` in `swarm issue status`, `swarm pr status` and the Draft PR evidence. A missing, ambiguous, linked, oversized or malformed record makes every value from it `unavailable` and never fails the run. These figures never affect approval, review, validation or import.
 
 ## Troubleshooting
 

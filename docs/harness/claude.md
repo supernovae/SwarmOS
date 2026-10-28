@@ -23,7 +23,7 @@ agents:
 
 | Mode | Invocation |
 | --- | --- |
-| Isolated | `claude --restricted --strict-mcp-config --mcp-config <swarm tools> --tools "" --disable-slash-commands --no-chrome --settings <swarm settings> --permission-mode dontAsk --permission-prompts none --no-session-persistence --print`, plus `--model <model>` and `--effort <effort>` when configured |
+| Isolated | `claude --restricted --strict-mcp-config --mcp-config <swarm tools> --tools "" --disable-slash-commands --no-chrome --settings <swarm settings> --permission-mode dontAsk --permission-prompts none --print`, plus `--session-id <new id>` for each turn when the installed release lists it, and `--model <model>` and `--effort <effort>` when configured |
 | Isolated, interactive | The same settings, one turn at a time. After each turn, SwarmOS asks for a follow-up instruction; press Enter to finish the phase. |
 | `trusted-local` | `claude -p --append-system-prompt-file <system prompt> "<task>"` unattended, or the same without `-p` interactively; `--model` and `--effort` come first when configured |
 
@@ -36,6 +36,17 @@ Claude starts in a coordinator-owned control directory, never inside candidate c
 - **Limits.** Each tool call has a two-minute deadline, per-process CPU, address-space, file-size, and descriptor limits, and 256 MiB of private temporary storage. There are no aggregate memory or workspace-disk quotas.
 
 SwarmOS trusts the installed Claude Code to honor its restricted tool selection. Bubblewrap independently confines every tool call it receives.
+
+## Telemetry
+
+After the run, SwarmOS reads the run's own Claude Code session files: `~/.claude/projects/<project>/<session id>.jsonl`, where `<project>` is Claude Code's name for the run's private control directory and each turn's session id is the one SwarmOS passed with `--session-id`. It opens no other file and sends nothing anywhere.
+
+- **Reported:** input tokens (without cache reads), output tokens, cache-read tokens as cached, tool calls and repeated identical shell commands, and the model named in the log.
+- **Unavailable:** reasoning tokens and effort, which the log does not carry.
+
+The transcripts stay in your Claude Code history under `~/.claude/projects`, as an interactive session would. SwarmOS never copies, moves or deletes them. If the run's control directory sits behind a symlinked temporary directory and Claude Code names the project differently, the values show as `unavailable`. The session layout was written from Claude Code's documented format and still needs a check against a real 2.1.311 log.
+
+A value the harness does not report stays `unavailable` in `swarm issue status`, `swarm pr status` and the Draft PR evidence. A missing, ambiguous, linked, oversized or malformed record makes every value from it `unavailable` and never fails the run. These figures never affect approval, review, validation or import.
 
 ## Troubleshooting
 

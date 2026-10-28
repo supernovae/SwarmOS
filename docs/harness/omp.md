@@ -20,7 +20,7 @@ agents:
 
 | Mode | Invocation |
 | --- | --- |
-| Isolated | `omp --mode rpc --no-ui --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-pty --no-session --config <swarm config>` |
+| Isolated | `omp --mode rpc --no-ui --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-pty --config <swarm config>` |
 | `trusted-local` | `omp -p --no-pty --append-system-prompt <system prompt> "<task>"` unattended, or the same without `-p --no-pty` interactively |
 
 In RPC mode, SwarmOS answers OhMyPi's host tool calls itself, routing each one through the Bubblewrap executor. It handles tool cancellation too.
@@ -30,6 +30,18 @@ In RPC mode, SwarmOS answers OhMyPi's host tool calls itself, routing each one t
 - **Tool catalog.** Before each turn, SwarmOS checks that OhMyPi's effective tool list contains exactly the approved task tools.
 - **Files and shell.** Same Bubblewrap executor as Claude Code: detached snapshot at `/workspace`, read-only `/usr`, private temporary storage, clean environment, no network, and read-only source for planners and reviewers.
 - **Limits.** Two-minute tool deadlines, per-process resource limits, and 256 MiB of temporary storage per call.
+
+## Telemetry
+
+OhMyPi saves the run's session as `~/.omp/agent/sessions/<cwd>/<timestamp>_<session id>.jsonl`, where `<cwd>` is the run's private control directory with each `/` replaced by `-`. After the run, SwarmOS lists only that directory and reads its one session file, and only if the file's `session` header names that control directory and the id in the file name. It sends nothing anywhere.
+
+- **Reported:** input tokens (without cache reads), output tokens, `cacheRead` tokens as cached, reasoning tokens, tool calls and repeated identical shell commands, and the model.
+- **The model is OhMyPi's configured model id**, the one OhMyPi resolved from its settings or `--model`, not the model name the provider returned in its response.
+- **Unavailable:** effort.
+
+The session stays in your OhMyPi history under `~/.omp/agent/sessions`, as an interactive session would. SwarmOS never copies, moves or deletes it. This layout was checked against OhMyPi 18.12.6 in both `--mode json` and `--mode rpc`.
+
+A value the harness does not report stays `unavailable` in `swarm issue status`, `swarm pr status` and the Draft PR evidence. A missing, ambiguous, linked, oversized or malformed record makes every value from it `unavailable` and never fails the run. These figures never affect approval, review, validation or import.
 
 ## Troubleshooting
 

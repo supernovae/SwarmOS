@@ -24,12 +24,12 @@ agents:
 
 | Mode | Invocation |
 | --- | --- |
-| Isolated, unattended | `codex exec --ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check -C <snapshot>` with a SwarmOS permission profile, plus `--model <model>` and `-c model_reasoning_effort="<effort>"` when configured |
+| Isolated, unattended | `codex exec --ignore-user-config --ignore-rules --skip-git-repo-check -C <snapshot>` with a SwarmOS permission profile, plus `--model <model>` and `-c model_reasoning_effort="<effort>"` when configured |
 | Isolated, interactive | The same `codex exec` settings. After each turn, SwarmOS asks for a follow-up instruction; press Enter to finish the phase. |
 | Isolated validation | `codex sandbox -P swarm` runs approved-base commands in a disposable snapshot without provider credentials |
 | `trusted-local` | `codex exec "<prompt>"` unattended, or `codex "<task>"` interactively |
 
-Each turn is ephemeral. Task files carry progress between turns and phases, so an interrupted turn restarts cleanly from the checkpoint.
+Each turn is a fresh `codex exec` session. Task files carry progress between turns and phases, so an interrupted turn restarts cleanly from the checkpoint.
 
 ## Boundary
 
@@ -40,6 +40,16 @@ Each turn is ephemeral. Task files carry progress between turns and phases, so a
 - **Checks before work.** SwarmOS tests outside-file, symlink, write, and loopback canaries, and confirms the required `codex exec` flags exist.
 
 The Codex process and its internal tool dispatcher run on the host and are trusted. The boundary protects against agent-directed tools, not a compromised Codex binary. Each unattended phase defaults to a 60-minute agent budget with bounded imports, but no CPU, memory, or disk quotas. Use the OCI backend if you need those.
+
+## Telemetry
+
+Codex prints each turn's `session id:` on stderr. After the run, SwarmOS opens only the rollout file named for each of those ids, `rollout-*-<session id>.jsonl`, in the day directories the run spans under `$CODEX_HOME/sessions` (or `~/.codex/sessions`). It compares file names without opening any other file, and sends nothing anywhere.
+
+- **Reported:** input tokens (including cached tokens), output tokens (including reasoning), cached input tokens, reasoning output tokens, tool calls and repeated identical shell commands, and the model and reasoning effort from `turn_context`. Each turn's last cumulative total is used, and turns are added together.
+
+The rollout files stay in your Codex history under `$CODEX_HOME/sessions` or `~/.codex/sessions`, as an interactive session would. SwarmOS never copies, moves or deletes them. The `session id:` line and rollout layout still need a check against a real 0.164.0 run.
+
+A value the harness does not report stays `unavailable` in `swarm issue status`, `swarm pr status` and the Draft PR evidence. A missing, ambiguous, linked, oversized or malformed record makes every value from it `unavailable` and never fails the run. These figures never affect approval, review, validation or import.
 
 ## Troubleshooting
 

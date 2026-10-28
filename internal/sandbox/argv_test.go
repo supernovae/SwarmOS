@@ -6,7 +6,7 @@ import (
 )
 
 func TestIsolatedClaudeArgvAdmitsOnlyModelAndEffort(t *testing.T) {
-	base := []string{"--restricted", "--strict-mcp-config", "--mcp-config", "/c/mcp.json", "--tools", "", "--disable-slash-commands", "--no-chrome", "--settings", "/c/settings.json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--no-session-persistence", "--print"}
+	base := []string{"--restricted", "--strict-mcp-config", "--mcp-config", "/c/mcp.json", "--tools", "", "--disable-slash-commands", "--no-chrome", "--settings", "/c/settings.json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--print"}
 	for _, tc := range []struct {
 		model, effort string
 		extra         []string
@@ -24,7 +24,7 @@ func TestIsolatedClaudeArgvAdmitsOnlyModelAndEffort(t *testing.T) {
 }
 
 func TestNativeCodexArgvAdmitsOnlyModelAndEffort(t *testing.T) {
-	base := []string{"exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--skip-git-repo-check", "-C", "/w"}
+	base := []string{"exec", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check", "-C", "/w"}
 	for _, tc := range []struct {
 		model, effort string
 		extra         []string

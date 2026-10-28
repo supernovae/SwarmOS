@@ -97,7 +97,7 @@ func RoleRuns(st *IssueState) []contract.RoleRunTelemetry {
 
 // RoleRunTableHeader is the compact text table header shared by issue status,
 // pr status and PR evidence.
-const RoleRunTableHeader = "| Role | Run | Elapsed | Setup | Preflight | Snapshot | Model time | Tool time | Tokens in/out/cached | Tool calls/repeats | Repair/replan | Model/effort |"
+const RoleRunTableHeader = "| Role | Run | Elapsed | Setup | Preflight | Snapshot | Model time | Tool time | Tokens in/out/cached | Tool calls/repeats | Repair/replan | Model/effort | Reasoning tokens |"
 
 // RoleRunTable renders runs as a Markdown table. Unobserved values read
 // "unavailable"; measured zero stays 0.
@@ -107,12 +107,12 @@ func RoleRunTable(runs []contract.RoleRunTelemetry) string {
 	}
 	var b strings.Builder
 	b.WriteString(RoleRunTableHeader + "\n")
-	b.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
+	b.WriteString("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n")
 	for _, r := range runs {
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s/%s/%s | %s/%s | %s/%s | %s/%s |\n",
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s | %s/%s/%s | %s/%s | %s/%s | %s/%s | %s |\n",
 			r.Role, r.RunID[:8], ms(r.ElapsedMS), ms(r.SetupMS), ms(r.PreflightMS), ms(r.SnapshotMS), ms(r.ModelMS), ms(r.ToolMS),
 			count(r.InputTokens), count(r.OutputTokens), count(r.CachedInputTokens), count(r.ToolCalls), count(r.RepeatedCommands),
-			count(r.RepairAttempt), count(r.ReplanCount), label(r.ActualModel), label(r.Effort))
+			count(r.RepairAttempt), count(r.ReplanCount), label(r.ActualModel), label(r.Effort), count(r.ReasoningTokens))
 	}
 	return b.String()
 }

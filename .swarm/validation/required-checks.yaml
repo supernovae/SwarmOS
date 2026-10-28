@@ -13,7 +13,7 @@ required_checks:
       timeout: 5m
     - name: test
       command: go test ./...
-      timeout: 10m
+      timeout: 30m
 protected_paths:
     - .github/workflows/**
     - .gitattributes

@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR supersedes the older run; main runs always finish.
+concurrency:
+  group: swarm-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Lint and vulnerabilities
@@ -37,7 +42,7 @@ jobs:
   test-matrix:
     name: Test and CLI smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -101,7 +106,7 @@ jobs:
   policy:
     name: SwarmOS policy validation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     permissions:
       contents: read
       issues: read

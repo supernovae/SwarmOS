@@ -5,11 +5,17 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+    # Docs and changelog fragments have no code to scan; main pushes and the weekly scan still cover everything.
+    paths-ignore: ['**/*.md', 'docs/**', 'changes/**']
   schedule:
     - cron: '0 6 * * 1'
 
 permissions:
   contents: read
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   codeql:

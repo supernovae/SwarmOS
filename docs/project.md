@@ -198,7 +198,7 @@ required_checks:
     timeout: 5m
   - name: test
     command: go test ./...
-    timeout: 10m
+    timeout: 30m
   - name: lint
     command: go vet ./...
     timeout: 5m

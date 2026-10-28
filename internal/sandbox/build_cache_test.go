@@ -258,7 +258,9 @@ func TestRepositoryCacheKeyPerRepository(t *testing.T) {
 	if main != shared || main == separate {
 		t.Fatalf("keys main=%s linked=%s other=%s", main, shared, separate)
 	}
-	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(main) || strings.Contains(main, filepath.Base(repo)) {
+	// The key must not embed the repository path. Matching only the temp
+	// directory's short base name (for example "001") collided with random hex.
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(main) || strings.Contains(main, repo) {
 		t.Fatalf("key %q is not an opaque hash", main)
 	}
 	var wg sync.WaitGroup

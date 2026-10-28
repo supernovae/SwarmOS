@@ -1,0 +1,1 @@
+- Disable automatic Git maintenance in lease test fixtures and run independent checkpoint rejection scenarios in parallel to avoid cleanup races and keep stress tests within the default timeout.

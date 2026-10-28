@@ -29,7 +29,7 @@ type reconciliationFixture struct {
 
 func (f *reconciliationFixture) git(dir string, args ...string) string {
 	f.t.Helper()
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
+	out, err := fixtureGitCommand(append([]string{"-C", dir}, args...)...).CombinedOutput()
 	if err != nil {
 		f.t.Fatalf("git %v: %v %s", args, err, out)
 	}
@@ -185,6 +185,7 @@ func TestCheckpointReconciliationRejectsInvalidInputs(t *testing.T) {
 	scenarios := []string{"wrong owner", "stale token", "missing token", "expired", "wrong expected", "missing candidate", "wrong branch", "detached", "untracked", "tracked", "staged", "conflicts", "rebasing", "remote moved", "PR pending", "PR submitted", "local store", "fork", "failed validation", "candidate policy", "snapshot modified", "no base ancestry", "changed patch", "stale validation", "stale review", "stale task", "stale policy", "stale plan", "stale test plan", "untrusted review"}
 	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			command := "true"
 			if scenario == "failed validation" {
 				command = "false"
@@ -234,7 +235,7 @@ func TestCheckpointReconciliationRejectsInvalidInputs(t *testing.T) {
 			case "conflicts":
 				// Seed real unmerged index entries.
 				blob := f.git(f.path, "rev-parse", "HEAD:feature.txt")
-				cmd := exec.Command("git", "-C", f.path, "update-index", "--index-info")
+				cmd := fixtureGitCommand("-C", f.path, "update-index", "--index-info")
 				cmd.Stdin = strings.NewReader(fmt.Sprintf("0 %040d\tfeature.txt\n100644 %s 1\tfeature.txt\n100644 %s 2\tfeature.txt\n", 0, blob, blob))
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("conflict: %v %s", err, out)

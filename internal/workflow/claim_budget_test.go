@@ -488,6 +488,7 @@ func TestForkBudgetPauseWithoutUpstreamBudgetKeepsFence(t *testing.T) {
 }
 
 func TestSuppliedBudgetReasonUnchanged(t *testing.T) {
+	t.Parallel()
 	b := &lease.ClaimBudget{Available: time.Hour, Threshold: 20 * time.Minute, RenewalsUsed: 2, RenewalsRemaining: 1}
 	if got, want := (&budgetAdmissionError{budget: b}).budgetReason(), "paused for claim budget: 1h0m0s available (reserve 20m0s), 2 renewals used, 1 remaining"; got != want {
 		t.Fatalf("reason %q, want %q", got, want)

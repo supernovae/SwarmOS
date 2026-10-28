@@ -17,6 +17,7 @@ import (
 )
 
 func TestDelegatedValidationWithoutCodex(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
 		t.Skip("set SWARM_TEST_EXECUTOR=1 for actual delegated validation")
 	}
@@ -42,6 +43,7 @@ func TestDelegatedValidationWithoutCodex(t *testing.T) {
 }
 
 func TestMCPToolCancellation(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
 		t.Skip("set SWARM_TEST_EXECUTOR=1 for actual tool cancellation")
 	}
@@ -182,6 +184,7 @@ func TestToolExecutorBoundary(t *testing.T) {
 }
 
 func TestOMPRealToolRegistration(t *testing.T) {
+	t.Parallel()
 	binary := os.Getenv("SWARM_TEST_OMP_BINARY")
 	if binary == "" {
 		t.Skip("set SWARM_TEST_OMP_BINARY for real RPC interface qualification")
@@ -203,6 +206,7 @@ func TestOMPRealToolRegistration(t *testing.T) {
 }
 
 func TestMCPDoesNotExposeCoordinatorOperations(t *testing.T) {
+	t.Parallel()
 	input := strings.NewReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"approve\"}\n")
 	var output strings.Builder
 	if err := ServeTools(context.Background(), ToolExecutor{}, input, &output); err != nil {
@@ -218,6 +222,7 @@ func TestMCPDoesNotExposeCoordinatorOperations(t *testing.T) {
 }
 
 func TestToolServerFollowsCoordinatorCancellation(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	requests, input := io.Pipe()
 	defer input.Close()

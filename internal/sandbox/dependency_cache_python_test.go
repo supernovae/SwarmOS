@@ -26,6 +26,7 @@ type pythonCall struct {
 
 // stubPythonPrefetch replaces the host prefetch runner. uv export writes
 // exported to its -o file; pip download calls run, if set, which may fail.
+// Callers must remain serial because the runner hook is package-global.
 func stubPythonPrefetch(t *testing.T, exported string, run func(argv []string) ([]byte, error)) *[]pythonCall {
 	t.Helper()
 	var calls []pythonCall
@@ -298,6 +299,7 @@ func TestPythonPrefetchCommandIsFetchOnly(t *testing.T) {
 }
 
 func TestPythonPrefetchEnvHardened(t *testing.T) {
+	t.Parallel()
 	host := map[string]string{
 		"PATH": "/usr/bin", "HOME": "/home/user", "PIP_INDEX_URL": "https://pypi.example/simple",
 		"SWARM_GITHUB_TOKEN": "t", "SWARM_GITHUB_TOKEN_COMMAND": "t", "GH_TOKEN": "t", "GITHUB_TOKEN": "t",
@@ -367,6 +369,7 @@ func TestPythonRequirementsRejected(t *testing.T) {
 }
 
 func TestPythonRequirementsAccepted(t *testing.T) {
+	t.Parallel()
 	files := map[string][]byte{"requirements-base.txt": nil}
 	for _, content := range []string{
 		testUVExport,

@@ -10,6 +10,7 @@ import (
 )
 
 func TestTelemetryNativeWorkspaceObservesScratchBeforeCleanup(t *testing.T) {
+	t.Parallel()
 	for _, runErr := range []error{nil, errors.New("harness failed")} {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("original"), 0o600); err != nil {
@@ -58,6 +59,7 @@ func TestTelemetryNativeWorkspaceObservesScratchBeforeCleanup(t *testing.T) {
 }
 
 func TestTelemetryNilLifecycleIsInert(t *testing.T) {
+	t.Parallel()
 	var l *Lifecycle
 	l.addSetup(time.Now())
 	l.observe(t.TempDir())

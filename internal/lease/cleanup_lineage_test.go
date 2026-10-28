@@ -15,6 +15,7 @@ import (
 )
 
 func TestCleanupRevisedLegacyLineage(t *testing.T) {
+	t.Parallel()
 	m, tr, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	git := func(args ...string) string {
@@ -66,6 +67,7 @@ func TestCleanupRevisedLegacyLineage(t *testing.T) {
 }
 
 func TestCleanupHeadLineage(t *testing.T) {
+	t.Parallel()
 	m, _, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	st, rev, err := m.load(ctx, n)
@@ -123,8 +125,10 @@ func TestCleanupHeadLineage(t *testing.T) {
 }
 
 func TestCleanupRebasedLegacyLineage(t *testing.T) {
+	t.Parallel()
 	for _, identity := range []string{"unchanged", "changed"} {
 		t.Run(identity, func(t *testing.T) {
+			t.Parallel()
 			m, tr, n, remote := mergedCleanupFixture(t)
 			ctx := context.Background()
 			git := func(args ...string) string {
@@ -191,6 +195,7 @@ func TestCleanupRebasedLegacyLineage(t *testing.T) {
 }
 
 func TestCleanupRebasePaths(t *testing.T) {
+	t.Parallel()
 	m, _, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	git := func(args ...string) string {
@@ -274,6 +279,7 @@ func TestCleanupRebasePaths(t *testing.T) {
 }
 
 func TestRecordRebaseTransition(t *testing.T) {
+	t.Parallel()
 	old, head := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	evidence := RebaseEvidence{OldHead: old, NewHead: head, Status: "completed", PatchIdentity: "unchanged", Verified: true}
 	st := &IssueState{}
@@ -307,8 +313,10 @@ func TestRecordRebaseTransition(t *testing.T) {
 }
 
 func TestCompletePRRevisionRecordsVerifiedRebase(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"same-repo", "fork", "failed-publication"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
 			m, _, issue := testManager(t)
 			ctx := context.Background()
 			git := func(args ...string) string {

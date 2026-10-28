@@ -11,6 +11,7 @@ import (
 )
 
 func TestResolveHostToolchainsDiscoversMultiLanguageCachesWithoutCredentials(t *testing.T) {
+	t.Parallel()
 	home := t.TempDir()
 	mustDir := func(rel string) string {
 		t.Helper()
@@ -166,6 +167,7 @@ func TestResolveHostToolchainsDiscoversMultiLanguageCachesWithoutCredentials(t *
 }
 
 func TestPackWorkerExcludesEphemeralLanguageDirectories(t *testing.T) {
+	t.Parallel()
 	source, scratch, dest := t.TempDir(), t.TempDir(), t.TempDir()
 	writeWorkerFixture(t, source, "src/index.ts", "export const ok = true;\n")
 	writeWorkerFixture(t, source, "node_modules/pkg/index.js", "module.exports = {};\n")
@@ -194,6 +196,7 @@ func TestPackWorkerExcludesEphemeralLanguageDirectories(t *testing.T) {
 }
 
 func TestNativeAndBubblewrapOfflineLanguageBuildAndTest(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
 		t.Skip("set SWARM_TEST_EXECUTOR=1 for real sandbox language build tests")
 	}
@@ -221,6 +224,7 @@ func TestNativeAndBubblewrapOfflineLanguageBuildAndTest(t *testing.T) {
 }
 
 func TestIsSafeHomeToolchainPathComponents(t *testing.T) {
+	t.Parallel()
 	home := "/home/user"
 	for _, tc := range []struct {
 		rel  string
@@ -248,6 +252,7 @@ func TestIsSafeHomeToolchainPathComponents(t *testing.T) {
 }
 
 func TestToolchainMountForBinKnownLayouts(t *testing.T) {
+	t.Parallel()
 	home := "/home/user"
 	for _, tc := range []struct {
 		bin, goos, want string

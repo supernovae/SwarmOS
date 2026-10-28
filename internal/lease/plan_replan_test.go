@@ -37,6 +37,7 @@ func rejectedReplanFixture(t *testing.T) (*Manager, int, *IssueState) {
 }
 
 func TestPlanReplanBudgetSurvivesArtifactsAndClaims(t *testing.T) {
+	t.Parallel()
 	m, n, st := rejectedReplanFixture(t)
 	ctx := context.Background()
 	if st.Lease.NextPhase != "plan" || st.NextPhaseReason == "" || st.PendingPlanReview == nil || st.PlanReplanCount != 0 {
@@ -81,8 +82,10 @@ func TestPlanReplanBudgetSurvivesArtifactsAndClaims(t *testing.T) {
 }
 
 func TestPlanReplanManualAndHumanReset(t *testing.T) {
+	t.Parallel()
 	for _, verdict := range []string{"APPROVED", "CHANGES_REQUESTED"} {
 		t.Run(verdict, func(t *testing.T) {
+			t.Parallel()
 			m, n, _ := rejectedReplanFixture(t)
 			ctx := context.Background()
 			_, err := m.UpdatePhase(ctx, n, "local-dev", "plan", "active")
@@ -114,6 +117,7 @@ func TestPlanReplanManualAndHumanReset(t *testing.T) {
 }
 
 func TestAdvisoryRejectionCannotSetNextPhase(t *testing.T) {
+	t.Parallel()
 	m, n, _ := rejectedReplanFixture(t)
 	// Remove trusted rejection by authenticated human decision.
 	var err error
@@ -131,6 +135,7 @@ func TestAdvisoryRejectionCannotSetNextPhase(t *testing.T) {
 }
 
 func TestPlanReplanConcurrentReservation(t *testing.T) {
+	t.Parallel()
 	m, n, _ := rejectedReplanFixture(t)
 	ctx := context.Background()
 	if _, err := m.UpdatePhase(ctx, n, "local-dev", "plan", "active"); err != nil {
@@ -157,6 +162,7 @@ func TestPlanReplanConcurrentReservation(t *testing.T) {
 }
 
 func TestPlanReplanRevisionApprovalReset(t *testing.T) {
+	t.Parallel()
 	m, n, _ := rejectedReplanFixture(t)
 	ctx := context.Background()
 	if _, err := m.UpdatePhase(ctx, n, "local-dev", "plan", "active"); err != nil {
@@ -188,8 +194,10 @@ func TestPlanReplanRevisionApprovalReset(t *testing.T) {
 }
 
 func TestPlanReplanTrustedPolicyModes(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"auto", "agent", "interactive"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
 			m, n, _ := rejectedReplanFixture(t)
 			ctx := context.Background()
 			// Install an explicitly approved policy revision with zero retries.
@@ -257,6 +265,7 @@ func TestPlanReplanTrustedPolicyModes(t *testing.T) {
 }
 
 func TestForkStageCannotResetBudget(t *testing.T) {
+	t.Parallel()
 	m, n, _ := rejectedReplanFixture(t)
 	ctx := context.Background()
 	_, err := m.UpdatePhase(ctx, n, "local-dev", "plan", "active")
@@ -277,6 +286,7 @@ func TestForkStageCannotResetBudget(t *testing.T) {
 }
 
 func TestAgentApprovalPreservesConsumedBudget(t *testing.T) {
+	t.Parallel()
 	m, n, _ := rejectedReplanFixture(t)
 	ctx := context.Background()
 	st, err := m.UpdatePhase(ctx, n, "local-dev", "plan", "active")
@@ -295,6 +305,7 @@ func TestAgentApprovalPreservesConsumedBudget(t *testing.T) {
 }
 
 func TestPlanReplanPendingPRGuidance(t *testing.T) {
+	t.Parallel()
 	m, _, st := rejectedReplanFixture(t)
 	st.PlanReplanCount = 100
 	st.PRRevision = &PRRevision{Number: 37}

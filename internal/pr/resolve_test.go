@@ -79,6 +79,7 @@ func TestResolveStopRejectsProtectedPathsBeforeTheAgent(t *testing.T) {
 }
 
 func TestImportResolvedRollsBackOnFailure(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("conflicted a\n"), 0o640); err != nil {
 		t.Fatal(err)

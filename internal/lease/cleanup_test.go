@@ -59,6 +59,7 @@ func mergedCleanupFixture(t *testing.T) (*Manager, *lifecycleTracker, int, strin
 }
 
 func TestCleanupApplyMergedSubmissionRetainsLocalArtifacts(t *testing.T) {
+	t.Parallel()
 	m, _, n, remote := mergedCleanupFixture(t)
 	ctx := context.Background()
 	// Preserve both untracked and ignored active artifacts byte for byte.
@@ -131,8 +132,10 @@ func TestCleanupApplyMergedSubmissionRetainsLocalArtifacts(t *testing.T) {
 }
 
 func TestCleanupEligibilityAdvancedBranchAndChangedPRHead(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"branch", "pr"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			m, tr, n, _ := mergedCleanupFixture(t)
 			ctx := context.Background()
 			if kind == "pr" {
@@ -165,8 +168,10 @@ type cleanupIdentityTracker struct {
 func (t *cleanupIdentityTracker) UpstreamRepo() string { return t.upstream }
 
 func TestCleanupGitHubIdentityRefusal(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"head-empty", "base-empty", "both-empty", "upstream-empty", "origin-mismatch", "valid"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			for _, entry := range []string{"preview", "apply"} {
 				t.Run(entry, func(t *testing.T) {
 					m, tr, n, _ := mergedCleanupFixture(t)
@@ -245,6 +250,7 @@ func (t *cleanupLocalTracker) ListPullRequests(context.Context, tracker.PullRequ
 }
 
 func TestCleanupLocalActionRecoverySerialization(t *testing.T) {
+	t.Parallel()
 	m, tr, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	local := &cleanupLocalTracker{Tracker: tr.Tracker, pr: tr.pr}
@@ -306,6 +312,7 @@ func (s cleanupFinishFailStore) CompareAndSwap(ctx context.Context, n int, rev s
 	return s.Store.CompareAndSwap(ctx, n, rev, raw)
 }
 func TestCleanupFinishFailurePreservesReservation(t *testing.T) {
+	t.Parallel()
 	m, _, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	p, err := InspectCleanup(ctx, m.repoRoot, m.tracker, m, n)

@@ -9,8 +9,10 @@ import (
 )
 
 func TestProvisionDroppedCheckpoint(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"clean", "markers", "staged markers", "hidden staged edit", "dirty", "staged", "untracked", "instruction edit", "mode", "local diverged", "remote diverged", "remote ancestor", "branch only", "fresh", "fresh clone", "wrong branch"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			git := func(dir string, args ...string) string {
 				t.Helper()

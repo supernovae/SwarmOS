@@ -21,6 +21,7 @@ import (
 )
 
 func TestNativeWorkspaceExcludesControlAndImportsChanges(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for _, name := range []string{".git/token", ".codex/config.toml", ".agents/plugin", "keep.txt"} {
 		p := filepath.Join(dir, name)
@@ -55,6 +56,7 @@ func TestNativeWorkspaceExcludesControlAndImportsChanges(t *testing.T) {
 }
 
 func TestNativeRejectsUnsafeOutputAndDiscardsValidationChanges(t *testing.T) {
+	t.Parallel()
 	for _, discard := range []bool{false, true} {
 		dir := t.TempDir()
 		outside := filepath.Join(t.TempDir(), "outside")
@@ -75,6 +77,7 @@ func TestNativeRejectsUnsafeOutputAndDiscardsValidationChanges(t *testing.T) {
 }
 
 func TestNativeRoleOnlyImportsExpectedArtifacts(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "source"), []byte("original"), 0600)
 	err := withNativeWorkspace(context.Background(), dir, WorkerOptions{ReadOnly: true, Role: "planner"}, func(_ context.Context, work, _ string) error {
@@ -100,8 +103,10 @@ func TestNativeRoleOnlyImportsExpectedArtifacts(t *testing.T) {
 }
 
 func TestNativeDeadlineAndFailedRunDiscardChanges(t *testing.T) {
+	t.Parallel()
 	for _, deadline := range []bool{true, false} {
 		t.Run(fmt.Sprint(deadline), func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			writeWorkerFixture(t, dir, "source", "original")
 			var snapshot string
@@ -146,6 +151,7 @@ func TestNativeDeadlineAndFailedRunDiscardChanges(t *testing.T) {
 }
 
 func TestNativeInvalidRoleOutputPreservesExistingArtifacts(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeWorkerFixture(t, dir, ".swarm/active/PLAN.md", "previous plan")
 	err := withNativeWorkspace(context.Background(), dir, WorkerOptions{ReadOnly: true, Role: "planner"}, func(_ context.Context, work, _ string) error {
@@ -162,6 +168,7 @@ func TestNativeInvalidRoleOutputPreservesExistingArtifacts(t *testing.T) {
 }
 
 func TestNativeVersionQualification(t *testing.T) {
+	t.Parallel()
 	for _, version := range []string{"0.163.0", "0.163.1", "0.164.0", "1.0.0"} {
 		got, err := qualifiedNativeCodexVersion("codex-cli " + version + "\n")
 		if err != nil || got != version {
@@ -176,6 +183,7 @@ func TestNativeVersionQualification(t *testing.T) {
 }
 
 func TestInteractiveCancellation(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("native input is qualified on Linux")
 	}
@@ -296,6 +304,7 @@ printf 'VERDICT: APPROVED\n' > .swarm/active/REVIEW.md`
 }
 
 func TestNativeCodexAuthenticatedFileTools(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("SWARM_TEST_CODEX_AUTHENTICATED") != "1" {
 		t.Skip("set SWARM_TEST_CODEX_AUTHENTICATED=1 to use your Codex login")
 	}
@@ -427,6 +436,7 @@ func requireLoopbackCanary(t *testing.T) {
 }
 
 func TestInspectionReusesInterfaceAndRerunsCanaries(t *testing.T) {
+	t.Parallel()
 	requireLinuxInspection(t)
 	dir := t.TempDir()
 	binary := countingCodex(t, dir, "codex", "0.163.0")
@@ -460,6 +470,7 @@ func TestInspectionReusesInterfaceAndRerunsCanaries(t *testing.T) {
 }
 
 func TestInspectionNilAndIndependentSessionsDoNotShare(t *testing.T) {
+	t.Parallel()
 	requireLinuxInspection(t)
 	dir := t.TempDir()
 	binary := countingCodex(t, dir, "codex", "0.163.0")
@@ -481,6 +492,7 @@ func TestInspectionNilAndIndependentSessionsDoNotShare(t *testing.T) {
 }
 
 func TestInspectionInvalidatesOnExecutableIdentity(t *testing.T) {
+	t.Parallel()
 	requireLinuxInspection(t)
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -536,6 +548,7 @@ func TestInspectionInvalidatesOnExecutableIdentity(t *testing.T) {
 }
 
 func TestInspectionSameSizeSameMtimeReplacement(t *testing.T) {
+	t.Parallel()
 	requireLinuxInspection(t)
 	dir := t.TempDir()
 	binary := countingCodex(t, dir, "codex", "0.163.0")
@@ -565,6 +578,7 @@ func TestInspectionSameSizeSameMtimeReplacement(t *testing.T) {
 }
 
 func TestInspectionSymlinkRetargeting(t *testing.T) {
+	t.Parallel()
 	requireLinuxInspection(t)
 	dir := t.TempDir()
 	first := countingCodex(t, dir, "codex-a", "0.163.0")
@@ -593,6 +607,7 @@ func TestInspectionSymlinkRetargeting(t *testing.T) {
 }
 
 func TestInspectionPartitionsByDriverAndPolicy(t *testing.T) {
+	t.Parallel()
 	binary := filepath.Join(t.TempDir(), "harness")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
@@ -632,6 +647,7 @@ func TestInspectionPartitionsByDriverAndPolicy(t *testing.T) {
 }
 
 func TestInspectionFailuresAreNotCached(t *testing.T) {
+	t.Parallel()
 	binary := filepath.Join(t.TempDir(), "harness")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
@@ -662,6 +678,7 @@ func TestInspectionFailuresAreNotCached(t *testing.T) {
 }
 
 func TestInspectionRejectsMissingAndMutatedExecutables(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	session := NewInspectionSession()
 	calls := 0
@@ -696,6 +713,7 @@ func TestInspectionRejectsMissingAndMutatedExecutables(t *testing.T) {
 }
 
 func TestInspectionConcurrentRequestsShareOneInspection(t *testing.T) {
+	t.Parallel()
 	binary := filepath.Join(t.TempDir(), "harness")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\n"), 0700); err != nil {
 		t.Fatal(err)
@@ -733,6 +751,7 @@ func TestInspectionConcurrentRequestsShareOneInspection(t *testing.T) {
 }
 
 func TestInspectionDelegatedHarnessReuse(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "omp")
 	script := `#!/bin/sh
@@ -762,6 +781,7 @@ esac
 // A run reusing a doctor or preflight inspection must still see the optional
 // session flags the harness lists, and only those listed exactly.
 func TestInspectionDelegatedHarnessKeepsOptionalFlags(t *testing.T) {
+	t.Parallel()
 	claudeBase := "--restricted --strict-mcp-config --tools --settings --permission-mode"
 	openCodeBase := "--standalone --server --continue --model --agent --format --title"
 	for _, tc := range []struct {
@@ -776,6 +796,7 @@ func TestInspectionDelegatedHarnessKeepsOptionalFlags(t *testing.T) {
 		{"opencode prefix only", "opencode", "opencode v2.1.2", openCodeBase + " --sessions", "--session", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			binary := filepath.Join(dir, tc.driver)
 			script := `#!/bin/sh
@@ -820,6 +841,7 @@ esac
 // Optional flags never relax the base interface: a harness missing a required
 // flag fails and is not retained, and extra run flags are still required.
 func TestInspectionDelegatedHarnessRequiresBaseInterface(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "claude")
 	help := filepath.Join(dir, "help")
@@ -858,6 +880,7 @@ esac
 }
 
 func TestInspectionValidationPathsStayUncached(t *testing.T) {
+	t.Parallel()
 	requireLinuxInspection(t)
 	dir := t.TempDir()
 	binary := countingCodex(t, dir, "codex", "0.163.0")

@@ -141,6 +141,7 @@ func requireGo(t *testing.T) {
 
 // stubPrefetch replaces the host prefetch runner. GOVERSION reports version;
 // every other command succeeds.
+// Callers must remain serial because the runner hook is package-global.
 func stubPrefetch(t *testing.T, version string, record func(dir string, env, argv []string)) {
 	t.Helper()
 	previous := runPrefetchCommand
@@ -406,6 +407,7 @@ func TestGoPrefetchRunsEachModuleAndWorkspace(t *testing.T) {
 }
 
 func TestSelectGoLockfiles(t *testing.T) {
+	t.Parallel()
 	eco, _ := dependencyEcosystemNamed("go")
 	blob := func(p string) treeEntry { return treeEntry{Mode: "100644", Type: "blob", Object: "x", Path: p} }
 	for _, tc := range []struct {
@@ -544,6 +546,7 @@ func TestGoPrefetchFailureNamesModule(t *testing.T) {
 }
 
 func TestGoPrefetchEnvHardened(t *testing.T) {
+	t.Parallel()
 	host := map[string]string{
 		"PATH": "/usr/bin", "HOME": "/home/user", "GOPROXY": "https://proxy.example",
 		"SWARM_GITHUB_TOKEN": "t", "SWARM_GITHUB_TOKEN_COMMAND": "t", "GH_TOKEN": "t", "GITHUB_TOKEN": "t",
@@ -675,6 +678,7 @@ func TestGoPrefetchCommandIsFetchOnly(t *testing.T) {
 }
 
 func TestGoVersionOrdering(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		a, b string
 		want int
@@ -708,6 +712,7 @@ func TestGoVersionOrdering(t *testing.T) {
 // TestEveryMountedEcosystemIsClassified reads toolchain.go, so a new
 // addCache call fails here until its ecosystem is in dependencyEcosystems.
 func TestEveryMountedEcosystemIsClassified(t *testing.T) {
+	t.Parallel()
 	file, err := parser.ParseFile(token.NewFileSet(), "toolchain.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -762,6 +767,7 @@ func TestEveryMountedEcosystemIsClassified(t *testing.T) {
 }
 
 func TestDependencyTableSafety(t *testing.T) {
+	t.Parallel()
 	denied := []string{"HOME", "CARGO_HOME", "GRADLE_USER_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "GOPATH", "PATH"}
 	seen, keys := map[string]bool{}, map[string]bool{}
 	for _, eco := range dependencyEcosystems {
@@ -800,6 +806,7 @@ func TestDependencyTableSafety(t *testing.T) {
 }
 
 func TestNoPrefetchEcosystemsKeepHostMounts(t *testing.T) {
+	t.Parallel()
 	home := resolvedTempDir(t)
 	paths := map[string]string{}
 	adapters := []string{"go/pkg/mod", ".cargo/registry", ".cargo/git", ".npm"}
@@ -846,6 +853,7 @@ func TestSharedHostCachesMountsHostGoModCache(t *testing.T) {
 }
 
 func TestDependencyCacheFlagsRoundTrip(t *testing.T) {
+	t.Parallel()
 	work := resolvedTempDir(t)
 	dir := resolvedTempDir(t)
 	for _, deps := range []Dependencies{
@@ -881,6 +889,7 @@ func TestDependencyCacheFlagsRoundTrip(t *testing.T) {
 }
 
 func TestDependencyCacheModes(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		mode DependencyCacheMode
 		want string

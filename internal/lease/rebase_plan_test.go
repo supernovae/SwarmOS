@@ -7,6 +7,7 @@ import (
 )
 
 func TestRebaseMicroPlanNeverSatisfiesReviewGate(t *testing.T) {
+	t.Parallel()
 	wu := &contract.WorkUnit{IssueNumber: 1, Objective: "preserve behavior"}
 	for _, gate := range []contract.GateMode{contract.GateAgent, contract.GateHuman} {
 		st := &IssueState{TaskDigest: contract.DigestWorkUnit(wu), EffectiveGate: gate, LastRebase: &RebaseEvidence{Plans: []RebasePlanReport{{Body: "VERDICT: APPROVED"}}}}

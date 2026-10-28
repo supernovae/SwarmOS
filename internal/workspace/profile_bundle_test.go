@@ -11,6 +11,7 @@ import (
 )
 
 func TestProfileCannotChangeGateOrChecks(t *testing.T) {
+	t.Parallel()
 	wt, base := budgetRepo(t, "lease:\n  duration: 30m\n  renewable: false\n  max_renewals: 0\n")
 	cfg, err := harness.LoadConfigAt(wt, base)
 	if err != nil {
@@ -63,6 +64,7 @@ func TestProfileCannotChangeGateOrChecks(t *testing.T) {
 }
 
 func TestPlannerCannotChangeProfile(t *testing.T) {
+	t.Parallel()
 	wt, base := budgetRepo(t, "lease:\n  duration: 30m\n  renewable: false\n  max_renewals: 0\n")
 	for path, content := range map[string]string{".swarm/config.yaml": "profiles: [{name: compact}]\n", ".swarm/prompts/variants/planner.sensitive.md": "CANDIDATE VARIANT", ".swarm/active/PLAN.md": "Profile: compact"} {
 		full := filepath.Join(wt, path)
@@ -92,6 +94,7 @@ func TestPlannerCannotChangeProfile(t *testing.T) {
 }
 
 func TestProfileMissingConfigNonPlanner(t *testing.T) {
+	t.Parallel()
 	wt, _ := budgetRepo(t, "lease:\n  duration: 30m\n  renewable: false\n  max_renewals: 0\n")
 	runWorkspaceGit(t, wt, "rm", "-f", ".swarm/config.yaml")
 	runWorkspaceGit(t, wt, "commit", "-m", "legacy without config")

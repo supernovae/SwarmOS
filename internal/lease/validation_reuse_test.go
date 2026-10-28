@@ -9,6 +9,7 @@ import (
 )
 
 func TestTrustedValidationCannotBeImported(t *testing.T) {
+	t.Parallel()
 	m, _, issue := testManager(t)
 	ctx := context.Background()
 	st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "implement", time.Hour, 1)
@@ -48,6 +49,7 @@ func (g *validationGateway) Apply(_ context.Context, r ForkRequest) (*IssueState
 }
 
 func TestGatewayValidationCannotGainReuseAuthority(t *testing.T) {
+	t.Parallel()
 	m, _, issue := testManager(t)
 	gateway := &validationGateway{}
 	m.SetWorkerGateway(gateway)

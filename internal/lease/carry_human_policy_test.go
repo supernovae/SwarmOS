@@ -16,6 +16,7 @@ import (
 )
 
 func TestHumanPlanKeptOnPolicyChange(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		keep   bool
@@ -29,6 +30,7 @@ func TestHumanPlanKeptOnPolicyChange(t *testing.T) {
 		{"linked PR", false, "policy files changed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			m, lt, issue := testManager(t)
 			git := func(args ...string) {

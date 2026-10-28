@@ -11,6 +11,7 @@ import (
 )
 
 func TestCompilePRHarnessBundlePreservesUnmanagedInstructions(t *testing.T) {
+	t.Parallel()
 	repo := t.TempDir()
 	runWorkspaceGit(t, repo, "init", "-b", "main")
 	runWorkspaceGit(t, repo, "config", "user.name", "Test")
@@ -99,6 +100,7 @@ func prFixture(t *testing.T) (string, string, string, string) {
 }
 
 func TestPRPublishExactHeadLeaseAndPreservesPrimaryCheckout(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo, remote, base, old := prFixture(t)
 	if err := os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("keep"), 0600); err != nil {
@@ -158,6 +160,7 @@ func TestPRPublishExactHeadLeaseAndPreservesPrimaryCheckout(t *testing.T) {
 }
 
 func TestPRRebaseConflictPreservesFilesContinueAndAbort(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo, _, base, old := prFixture(t)
 	path, _, err := PreparePR(ctx, repo, PRWorkspaceOptions{Number: 43, HeadBranch: "feature", HeadSHA: old, BaseSHA: base})
@@ -228,6 +231,7 @@ func TestPRRebaseConflictPreservesFilesContinueAndAbort(t *testing.T) {
 }
 
 func TestPRManualWorktreeVerificationPreservesDirtyFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo, _, base, head := prFixture(t)
 	path, _, err := PreparePR(ctx, repo, PRWorkspaceOptions{Number: 45, HeadBranch: "feature", HeadSHA: head, BaseSHA: base})
@@ -265,6 +269,7 @@ func TestPRManualWorktreeVerificationPreservesDirtyFiles(t *testing.T) {
 }
 
 func TestPreparePRRecreatesHandRemovedWorktree(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo, _, base, head := prFixture(t)
 	opts := PRWorkspaceOptions{Number: 7, Remote: "origin", HeadBranch: "feature", HeadSHA: head, BaseSHA: base}
@@ -285,6 +290,7 @@ func TestPreparePRRecreatesHandRemovedWorktree(t *testing.T) {
 }
 
 func TestPreparePRCatchesUpToNewerPublishedHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo, remote, base, head := prFixture(t)
 	opts := PRWorkspaceOptions{Number: 9, Remote: "origin", HeadBranch: "feature", HeadSHA: head, BaseSHA: base}

@@ -111,6 +111,7 @@ func (f *reconciliationFixture) state() *IssueState {
 	return st
 }
 func TestReconcileCheckpointThenResume(t *testing.T) {
+	t.Parallel()
 	f := newReconciliationFixture(t, "true")
 	ctx := context.Background()
 	if _, err := f.m.UpdateArtifact(ctx, f.n, "local-dev", contract.Artifact{Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: "PASS", Summary: "old validation", Body: "validated A only", Metadata: map[string]string{"head_sha": f.a, "base_sha": f.base, "harness": "mock", "role": "tester"}}); err != nil {
@@ -169,6 +170,7 @@ func TestReconcileCheckpointThenResume(t *testing.T) {
 	}
 }
 func TestCheckpointRecordingAdditiveAndRewrite(t *testing.T) {
+	t.Parallel()
 	f := newReconciliationFixture(t, "true")
 	ctx := context.Background()
 	if _, err := f.m.RecordCheckpoint(ctx, f.n, "local-dev", f.branch, f.b); err == nil {
@@ -182,6 +184,7 @@ func TestCheckpointRecordingAdditiveAndRewrite(t *testing.T) {
 	}
 }
 func TestCheckpointReconciliationRejectsInvalidInputs(t *testing.T) {
+	t.Parallel()
 	scenarios := []string{"wrong owner", "stale token", "missing token", "expired", "wrong expected", "missing candidate", "wrong branch", "detached", "untracked", "tracked", "staged", "conflicts", "rebasing", "remote moved", "PR pending", "PR submitted", "local store", "fork", "failed validation", "candidate policy", "snapshot modified", "no base ancestry", "changed patch", "stale validation", "stale review", "stale task", "stale policy", "stale plan", "stale test plan", "untrusted review"}
 	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
@@ -312,6 +315,7 @@ func TestCheckpointReconciliationRejectsInvalidInputs(t *testing.T) {
 }
 
 func TestChangedCheckpointRequiresFreshCandidatePlan(t *testing.T) {
+	t.Parallel()
 	f := newReconciliationFixture(t, "true")
 	ctx := context.Background()
 	f.write(f.path, "feature.txt", "replacement patch\n")
@@ -332,11 +336,13 @@ func TestChangedCheckpointRequiresFreshCandidatePlan(t *testing.T) {
 }
 
 func TestReconcileCheckpointValidationRaces(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("mkfifo"); err != nil {
 		t.Skip("requires named-pipe check barrier")
 	}
 	for _, scenario := range []string{"publication from another clone", "remote changed", "claim changed", "plan changed", "candidate changed", "candidate dirtied"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			pipes := t.TempDir()
 			ready := filepath.Join(pipes, "ready")
 			release := filepath.Join(pipes, "release")
@@ -434,8 +440,10 @@ func (s *initialCheckpointRaceStore) CompareAndSwapAndPublishExpected(ctx contex
 	return s.GitStore.CompareAndSwapAndPublishExpected(ctx, n, old, next, branch, head, expected)
 }
 func TestFirstCheckpointDoesNotAdoptRemoteHead(t *testing.T) {
+	t.Parallel()
 	for _, race := range []bool{false, true} {
 		t.Run(fmt.Sprint(race), func(t *testing.T) {
+			t.Parallel()
 			f := newReconciliationFixture(t, "true")
 			ctx := context.Background()
 			st, rev, err := f.m.load(ctx, f.n)
@@ -470,6 +478,7 @@ func (failingCheckpointProjection) UpdateComment(context.Context, int64, string)
 	return nil, fmt.Errorf("projection unavailable")
 }
 func TestCheckpointProjectionFailureDoesNotRepeatLineage(t *testing.T) {
+	t.Parallel()
 	f := newReconciliationFixture(t, "true")
 	ctx := context.Background()
 	f.m.tracker = failingCheckpointProjection{f.tr}

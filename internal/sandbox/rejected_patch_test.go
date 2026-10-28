@@ -18,6 +18,7 @@ func (e *testRejection) RecoverableImport() bool { return e.recoverable }
 func (e *testRejection) RoleOutputImport() bool  { return e.recoverable }
 
 func TestPreserveRejectedOnlyWhenRecoverable(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		err    error
@@ -32,6 +33,7 @@ func TestPreserveRejectedOnlyWhenRecoverable(t *testing.T) {
 		{"binary change", &testRejection{recoverable: true}, true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			writeWorkerFixture(t, dir, "src/main.go", "package main\n")
 			called := false
@@ -79,8 +81,10 @@ func TestPreserveRejectedOnlyWhenRecoverable(t *testing.T) {
 }
 
 func TestCompletedTesterImportRejected(t *testing.T) {
+	t.Parallel()
 	for _, exit := range []error{nil, errors.New("nonzero exit"), context.Canceled, context.DeadlineExceeded} {
 		t.Run(fmt.Sprint(exit), func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			writeWorkerFixture(t, dir, "source", "before")
 			policy := &testRejection{recoverable: true}
@@ -117,8 +121,10 @@ type scratchRejection struct{}
 func (*scratchRejection) Error() string               { return "forbidden active file" }
 func (*scratchRejection) ActiveDirectoryImport() bool { return true }
 func TestCompletedTesterScratchImportRejected(t *testing.T) {
+	t.Parallel()
 	for _, exit := range []error{nil, errors.New("nonzero exit"), context.Canceled, context.DeadlineExceeded} {
 		t.Run(fmt.Sprint(exit), func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			writeWorkerFixture(t, dir, "source", "before")
 			policy := &scratchRejection{}
@@ -154,6 +160,7 @@ func TestCompletedTesterScratchImportRejected(t *testing.T) {
 }
 
 func TestCompletedImportDiagnosticOnly(t *testing.T) {
+	t.Parallel()
 	for _, err := range []error{&scratchRejection{}, fmt.Errorf("wrapped: %w", &scratchRejection{}), errors.New("outside policy"), &testRejection{}} {
 		for _, success := range []bool{false, true} {
 			got := completedImport(err, success)

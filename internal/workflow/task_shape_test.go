@@ -9,6 +9,7 @@ import (
 )
 
 func TestAssessTaskShape(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		in   ShapeInput
@@ -28,6 +29,7 @@ func TestAssessTaskShape(t *testing.T) {
 		{"urgent beats exploratory", ShapeInput{Title: "Investigate data loss", Objective: "Investigate data loss on resume", Workflow: "bugfix"}, ShapeUrgent},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := AssessTaskShape(tc.in)
 			if got.Shape != tc.want {
 				t.Fatalf("shape = %s (signals %v), want %s", got.Shape, got.Signals, tc.want)
@@ -40,6 +42,7 @@ func TestAssessTaskShape(t *testing.T) {
 }
 
 func TestAssessTaskShapeHints(t *testing.T) {
+	t.Parallel()
 	hasHint := func(a ShapeAssessment, sub string) bool {
 		return slices.ContainsFunc(a.Hints, func(h string) bool { return strings.Contains(h, sub) })
 	}
@@ -99,6 +102,7 @@ func TestBacklogScanReportsShapeAndGatesExploratorySuggestions(t *testing.T) {
 }
 
 func TestWorkUnitTouchpoints(t *testing.T) {
+	t.Parallel()
 	wu := &contract.WorkUnit{
 		Title:      "Tune internal/lease/manager.go",
 		Objective:  "Adjust internal/cli/selection.go and ignore /etc/passwd and ../outside/x.go",
@@ -124,6 +128,7 @@ func TestWorkUnitTouchpoints(t *testing.T) {
 }
 
 func TestTouchpointOverlap(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		candidate []string
@@ -148,6 +153,7 @@ func TestTouchpointOverlap(t *testing.T) {
 		{"absolute and traversal rejected", []string{"/internal/lease/a.go", "../internal/lease/a.go", "."}, map[int][]string{7: {"internal/lease/a.go", "/internal/lease/b.go", ".."}}, 0, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := AssessTouchpointOverlap(tc.candidate, tc.inFlight)
 			if got.Score != tc.score || !slices.Equal(got.Issues, tc.issues) || !slices.Equal(got.Paths, tc.paths) {
 				t.Fatalf("got %+v, want score %d issues %v paths %v", got, tc.score, tc.issues, tc.paths)
@@ -157,6 +163,7 @@ func TestTouchpointOverlap(t *testing.T) {
 }
 
 func TestSuggestDimensions(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		shape                   TaskShape
 		in                      ShapeInput

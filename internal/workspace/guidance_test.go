@@ -11,6 +11,7 @@ import (
 )
 
 func TestSkillSelection(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, content, role, workflow string
 		want                          bool
@@ -31,6 +32,7 @@ func TestSkillSelection(t *testing.T) {
 		{"CRLF front matter", "---\r\nroles: [developer]\r\n---\r\nbody", "developer", "feature", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			skill, err := parseGuidanceSkill(".swarm/skills/x.md", tc.content)
 			if err != nil {
 				t.Fatal(err)
@@ -49,6 +51,7 @@ func TestSkillSelection(t *testing.T) {
 }
 
 func TestSkillSelectionRejectsMalformedMetadata(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ name, content, field string }{
 		{"roles scalar", "---\nroles: developer\n---\n", "roles"},
 		{"roles empty", "---\nroles: []\n---\n", "roles"},
@@ -63,6 +66,7 @@ func TestSkillSelectionRejectsMalformedMetadata(t *testing.T) {
 		{"not a mapping", "---\n- developer\n---\n", "front matter"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := parseGuidanceSkill(".swarm/skills/nested/bad.md", tc.content)
 			if err == nil {
 				t.Fatal("malformed metadata accepted")
@@ -75,6 +79,7 @@ func TestSkillSelectionRejectsMalformedMetadata(t *testing.T) {
 }
 
 func TestSkillTitlesAndIndex(t *testing.T) {
+	t.Parallel()
 	long := strings.Repeat("word ", 100)
 	var skills []guidanceSkill
 	for _, tc := range []struct{ path, content string }{
@@ -121,6 +126,7 @@ func TestSkillTitlesAndIndex(t *testing.T) {
 }
 
 func TestArchitectureGuidanceThreshold(t *testing.T) {
+	t.Parallel()
 	body := func(n int) string {
 		doc := "# Architecture\n\n## Coordination\n"
 		return doc + strings.Repeat("x", n-len(doc))
@@ -136,6 +142,7 @@ func TestArchitectureGuidanceThreshold(t *testing.T) {
 		{"above", body(architectureInlineLimit + 1), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			text, snapshot := renderArchitecture(tc.doc)
 			if snapshot != tc.snapshot {
 				t.Fatalf("snapshot = %v, want %v", snapshot, tc.snapshot)
@@ -173,6 +180,7 @@ func TestArchitectureGuidanceThreshold(t *testing.T) {
 }
 
 func TestRemoveManagedTree(t *testing.T) {
+	t.Parallel()
 	open := func(t *testing.T, dir string) *safefs.Root {
 		t.Helper()
 		root, err := safefs.Open(dir)

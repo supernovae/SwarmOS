@@ -10,6 +10,7 @@ import (
 )
 
 func TestRoleContextAndReviewOnlyLessons(t *testing.T) {
+	t.Parallel()
 	artifacts := []contract.Artifact{}
 	for _, kind := range []contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan, contract.ArtifactReview, contract.ArtifactImplementation, contract.ArtifactValidation} {
 		artifacts = append(artifacts, contract.Artifact{Type: kind, Verdict: "FAIL", Producer: "mock", Body: "Useful content\n### What we learned\nprivate-lesson-marker\n#### Detail\nprivate-detail\n### Following section\nkeep-this-section\n## HANDOFF\nhandoff-marker\n<!-- swarm:guidance:start -->\n## Operator guidance\n\ndeveloper-private-marker\n<!-- swarm:guidance:end -->\n"})
@@ -66,6 +67,7 @@ func TestRoleContextAndReviewOnlyLessons(t *testing.T) {
 }
 
 func TestReviewEvidenceStripsOperatorAppendix(t *testing.T) {
+	t.Parallel()
 	body := "Keep review finding\n<!-- swarm:guidance:start -->\n## Operator guidance\n\ndeveloper-private-marker\n<!-- swarm:guidance:end -->\n"
 	evidence := tracker.ReviewEvidence{Records: []tracker.ReviewEvidenceRecord{{Body: body}}}
 	rendered := string(RenderReviewEvidence(evidence))
@@ -78,6 +80,7 @@ func TestReviewEvidenceStripsOperatorAppendix(t *testing.T) {
 }
 
 func TestRevisionContextStripsOperatorAppendices(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".swarm/active"), 0755); err != nil {
 		t.Fatal(err)

@@ -120,6 +120,7 @@ func (f advanceFixture) snapshot(t *testing.T) string {
 var advanceContexts = []string{"previous", "stale", "same base", "missing"}
 
 func TestProvisionUntouchedBase(t *testing.T) {
+	t.Parallel()
 	pointer := "<!-- swarm:active:start -->\npointer\n<!-- swarm:active:end -->\n\n"
 	for _, scenario := range []string{"clean", "markers", "staged markers", "branch only", "repeat"} {
 		for _, context := range advanceContexts {
@@ -180,9 +181,13 @@ func testProvisionUntouchedBase(t *testing.T, pointer, scenario, context string)
 }
 
 func TestProvisionUntouchedBaseRefusals(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"commit", "dirty", "staged", "untracked", "instruction edit", "mode", "symlink", "ignored collision", "divergent base", "wrong branch"} {
 		for _, context := range []string{"previous", "stale"} {
-			t.Run(scenario+"/"+context, func(t *testing.T) { testProvisionUntouchedBaseRefusal(t, scenario, context) })
+			t.Run(scenario+"/"+context, func(t *testing.T) {
+				t.Parallel()
+				testProvisionUntouchedBaseRefusal(t, scenario, context)
+			})
 		}
 	}
 }
@@ -244,6 +249,7 @@ func testProvisionUntouchedBaseRefusal(t *testing.T, scenario, context string) {
 }
 
 func TestProvisionContextIgnoredOutsideSameRepositoryTasks(t *testing.T) {
+	t.Parallel()
 	f := newAdvanceFixture(t)
 	// A fork checkpoint remote never advances, so the ordinary refusal stays.
 	if err := advanceUntouchedBase(f.root, 7, f.branch, "", f.base, nil); err != nil {
@@ -258,8 +264,12 @@ func TestProvisionContextIgnoredOutsideSameRepositoryTasks(t *testing.T) {
 }
 
 func TestAdvanceUntouchedBaseCASRace(t *testing.T) {
+	t.Parallel()
 	for _, context := range []string{"previous", "stale"} {
-		t.Run(context, func(t *testing.T) { testAdvanceUntouchedBaseCASRace(t, context) })
+		t.Run(context, func(t *testing.T) {
+			t.Parallel()
+			testAdvanceUntouchedBaseCASRace(t, context)
+		})
 	}
 }
 
@@ -288,9 +298,13 @@ func testAdvanceUntouchedBaseCASRace(t *testing.T, context string) {
 }
 
 func TestAdvanceUntouchedBaseRollsBackFailedCheckout(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"added.txt", "added.log"} {
 		for _, context := range []string{"previous", "stale"} {
-			t.Run(name+"/"+context, func(t *testing.T) { testAdvanceUntouchedBaseRollback(t, name, context) })
+			t.Run(name+"/"+context, func(t *testing.T) {
+				t.Parallel()
+				testAdvanceUntouchedBaseRollback(t, name, context)
+			})
 		}
 	}
 }

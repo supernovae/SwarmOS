@@ -103,6 +103,7 @@ func validateFastPass(t *testing.T, ctx context.Context, repo, base string, even
 }
 
 func TestGoFastPassFailingChangedPackage(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, "  - name: test\n    command: go test -count=1 ./...\n    timeout: 5m\n  - name: after\n    command: \"touch after-ran\"\n    timeout: 1m\n", nil)
 	commitRepoFile(t, repo, "leaf/leaf.go", failingLeaf)
 	var events []string
@@ -136,6 +137,7 @@ func TestGoFastPassFailingChangedPackage(t *testing.T) {
 }
 
 func TestGoFastPassThenFull(t *testing.T) {
+	t.Parallel()
 	const command = "go test -count=1 ./..."
 	checks := "  - name: test\n    command: " + command + "\n    timeout: 5m\n  - name: ok\n    command: \"true\"\n    timeout: 1m\n"
 	for _, tc := range []struct {
@@ -185,6 +187,7 @@ func TestGoFastPassThenFull(t *testing.T) {
 }
 
 func TestGoFastPassNoGoChanges(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, "  - name: test\n    command: go test -count=1 ./...\n    timeout: 5m\n", nil)
 	commitRepoFile(t, repo, "docs/notes.md", "changed notes\n")
 	var events []string
@@ -201,6 +204,7 @@ func TestGoFastPassNoGoChanges(t *testing.T) {
 }
 
 func TestGoFastPassNonGoCheck(t *testing.T) {
+	t.Parallel()
 	checks := "  - name: vet\n    command: go vet ./...\n    timeout: 5m\n  - name: pattern\n    command: go test -count=1 ./leaf/...\n    timeout: 5m\n  - name: shell\n    command: \"true\"\n    timeout: 1m\n"
 	repo, base := setupGoFastPassRepo(t, checks, nil)
 	commitRepoFile(t, repo, "leaf/leaf.go", failingLeaf)
@@ -219,11 +223,13 @@ func TestGoFastPassNonGoCheck(t *testing.T) {
 }
 
 func TestGoFastPassOptOutAndCIMode(t *testing.T) {
+	t.Parallel()
 	for name, opts := range map[string]ValidateOptions{
 		"opt-out": {},
 		"CI":      {CIMode: true, GoFastPass: true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			repo, base := setupGoFastPassRepo(t, "  - name: test\n    command: go test -count=1 ./...\n    timeout: 5m\n", nil)
 			commitRepoFile(t, repo, "leaf/leaf.go", failingLeaf)
 			opts.BaseSHA = base
@@ -236,6 +242,7 @@ func TestGoFastPassOptOutAndCIMode(t *testing.T) {
 }
 
 func TestGoFastPassDirtyIssueValidate(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, "  - name: test\n    command: go test -count=1 ./...\n    timeout: 5m\n", nil)
 	// HEAD stays at the base: the failure is an unstaged edit, alongside a
 	// new untracked package.
@@ -260,6 +267,7 @@ func TestGoFastPassDirtyIssueValidate(t *testing.T) {
 }
 
 func TestGoFastPassModuleChangesUseFullRun(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, "  - name: test\n    command: go test -count=1 ./...\n    timeout: 5m\n", nil)
 	writeRepoFile(t, repo, "leaf/leaf.go", passingLeaf)
 	writeRepoFile(t, repo, "go.mod", "module example.com/m\n\ngo 1.22\n")
@@ -396,6 +404,7 @@ func TestGoFastPassCancellationStartsNoFullRun(t *testing.T) {
 }
 
 func TestGoFastPassReverseDependencies(t *testing.T) {
+	t.Parallel()
 	module := func(path, dir string, imports, testImports, xtestImports []string) goPackage {
 		pkg := goPackage{ImportPath: path, Dir: dir, Imports: imports, TestImports: testImports, XTestImports: xtestImports}
 		return pkg
@@ -443,6 +452,7 @@ func TestGoFastPassReverseDependencies(t *testing.T) {
 }
 
 func TestParseGoTestAll(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		command string
 		ok      bool
@@ -479,6 +489,7 @@ func TestParseGoTestAll(t *testing.T) {
 }
 
 func TestFastPassFits(t *testing.T) {
+	t.Parallel()
 	many := func(n, size int) []string {
 		packages := make([]string, n)
 		for i := range packages {
@@ -502,6 +513,7 @@ func TestFastPassFits(t *testing.T) {
 }
 
 func TestParseGoListRejectsUnsafeMetadata(t *testing.T) {
+	t.Parallel()
 	const mod = `"Module":{"Path":"example.com/m","Dir":"/m","Main":true}`
 	for name, data := range map[string]string{
 		"option-like":   `{"ImportPath":"-exec=x","Dir":"/m/x",` + mod + `}`,
@@ -521,6 +533,7 @@ func TestParseGoListRejectsUnsafeMetadata(t *testing.T) {
 }
 
 func TestGoJSONCaptureBoundary(t *testing.T) {
+	t.Parallel()
 	runner := &checkRunner{}
 	for _, tc := range []struct {
 		command, actual string

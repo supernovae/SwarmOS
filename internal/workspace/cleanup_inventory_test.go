@@ -9,6 +9,7 @@ import (
 )
 
 func TestParseCleanupWorktreeName(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		kind string
@@ -33,6 +34,7 @@ func TestParseCleanupWorktreeName(t *testing.T) {
 }
 
 func TestDiscoverCleanupWorktreesInventory(t *testing.T) {
+	t.Parallel()
 	root, issue1, _, git := cleanupWorkspaceFixture(t)
 	ctx := context.Background()
 	managed := filepath.Dir(issue1)
@@ -88,6 +90,7 @@ func TestDiscoverCleanupWorktreesInventory(t *testing.T) {
 }
 
 func TestDiscoverCleanupWorktreesEmptyAndUnsafe(t *testing.T) {
+	t.Parallel()
 	root, path, _, git := cleanupWorkspaceFixture(t)
 	git("worktree", "remove", path)
 	if err := os.Remove(filepath.Dir(path)); err != nil {

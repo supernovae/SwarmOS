@@ -22,6 +22,7 @@ func writeWorkerFixture(t *testing.T, root, name, content string) {
 }
 
 func TestWorkerArchiveRoundTripAndImport(t *testing.T) {
+	t.Parallel()
 	original, scratch, result := t.TempDir(), t.TempDir(), t.TempDir()
 	writeWorkerFixture(t, original, "kept.txt", "same")
 	writeWorkerFixture(t, original, "changed.txt", "old")
@@ -76,8 +77,10 @@ func TestWorkerArchiveRoundTripAndImport(t *testing.T) {
 }
 
 func TestWorkerImportRejectsConcurrentChanges(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"changed-original", "new-conflict"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			source, result, scratch := t.TempDir(), t.TempDir(), t.TempDir()
 			writeWorkerFixture(t, source, "original", "before")
 			initial, err := packWorker(context.Background(), source, filepath.Join(scratch, "input.tar"), nil, false)
@@ -112,6 +115,7 @@ func TestWorkerImportRejectsConcurrentChanges(t *testing.T) {
 }
 
 func TestWorkerRejectsHostileArchives(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		headers []*tar.Header
@@ -136,6 +140,7 @@ func TestWorkerRejectsHostileArchives(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			archive := filepath.Join(t.TempDir(), "archive.tar")
 			f, err := os.Create(archive)
 			if err != nil {
@@ -158,6 +163,7 @@ func TestWorkerRejectsHostileArchives(t *testing.T) {
 }
 
 func TestWorkerInputRejectsLinksAndCancellation(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	writeWorkerFixture(t, root, "real", "data")
 	if err := os.Symlink("real", filepath.Join(root, "link")); err != nil {
@@ -192,6 +198,7 @@ func TestWorkerRejectsUnpinnedImageAndDoesNotForwardCredentials(t *testing.T) {
 }
 
 func TestWorkerExportBudget(t *testing.T) {
+	t.Parallel()
 	w := workerBudgetWriter{writer: io.Discard, remaining: 3}
 	if _, err := w.Write([]byte("four")); err == nil {
 		t.Fatal("export exceeded budget")
@@ -199,6 +206,7 @@ func TestWorkerExportBudget(t *testing.T) {
 }
 
 func TestWorkerProjectPlanHasDedicatedArtifactChannel(t *testing.T) {
+	t.Parallel()
 	outputs := workerOutputs(WorkerOptions{Role: "planner", ReadOnly: true, ProjectPlan: true})
 	if len(outputs) != 1 || outputs[0] != "PROJECT_PLAN.yaml" {
 		t.Fatalf("wrong project planning output channel: %v", outputs)
@@ -209,11 +217,13 @@ func TestWorkerProjectPlanHasDedicatedArtifactChannel(t *testing.T) {
 }
 
 func TestWorkerPreflightChecksDaemonAndCleansUp(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake runtime uses a Unix shell; archive tests cover portable importer")
 	}
 	for _, kind := range []string{"safe", "volume", "windows-image", "privileged", "cleanup-failure", "execution-cleanup-failure", "tmpfs-size", "tmpfs-owner", "tmpfs-mode", "tmpfs-missing", "tmpfs-extra", "tmpfs-duplicate", "duplicate-mount"} {
 		t.Run(kind, func(t *testing.T) {
+			// Keep the multi-process daemon probe rows sequential to bound process fan-out.
 			root := t.TempDir()
 			image := map[string]any{"Os": "linux", "Config": map[string]any{"Volumes": nil}}
 			if kind == "volume" {
@@ -287,7 +297,7 @@ func TestWorkerPreflightChecksDaemonAndCleansUp(t *testing.T) {
 			}
 			calls, readErr := os.ReadFile(filepath.Join(root, "calls"))
 			if readErr != nil {
-				t.Fatal(readErr)
+				t.Fatalf("read runtime calls: %v (preflight: %v)", readErr, err)
 			}
 			if kind == "volume" || kind == "windows-image" {
 				if strings.Contains(string(calls), "create ") {
@@ -305,6 +315,7 @@ func TestWorkerPreflightChecksDaemonAndCleansUp(t *testing.T) {
 }
 
 func TestWorkerInputRejectsPortableAliases(t *testing.T) {
+	t.Parallel()
 	for _, names := range [][]string{{"File", "file"}, {"GIT~1/config"}, {".swarm/LOCAL-~1/state"}} {
 		root := t.TempDir()
 		for _, name := range names {
@@ -326,6 +337,7 @@ func TestWorkerInputRejectsPortableAliases(t *testing.T) {
 }
 
 func TestWorkerTmpfsNormalizedOptions(t *testing.T) {
+	t.Parallel()
 	for _, options := range []string{"nodev,rw,nosuid,gid=65534,uid=65534,size=64M,mode=0700", "rw,nosuid,nodev,size=67108864,mode=700,uid=065534,gid=65534"} {
 		if err := verifyWorkerTmpfs(options, 65534, 0700, 64<<20); err != nil {
 			t.Fatal(err)

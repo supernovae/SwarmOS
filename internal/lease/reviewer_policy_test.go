@@ -77,6 +77,7 @@ func agentReview(t *testing.T, m *Manager, n int, agent, model string) contract.
 }
 
 func TestReviewerAgentsPinWhichAgentSatisfiesAgentGate(t *testing.T) {
+	t.Parallel()
 	m, _, iss, root := reviewerPolicyManager(t, "  reviewer_agents: [codex]\n")
 	ctx := context.Background()
 
@@ -107,6 +108,7 @@ func TestReviewerAgentsPinWhichAgentSatisfiesAgentGate(t *testing.T) {
 }
 
 func TestReviewerAgentsUnsetKeepsAnyConfiguredReviewer(t *testing.T) {
+	t.Parallel()
 	m, _, iss, _ := reviewerPolicyManager(t, "")
 	if _, err := m.UpdateArtifact(context.Background(), iss.Number, "local-dev", agentReview(t, m, iss.Number, "claude", "default")); err != nil {
 		t.Fatalf("default policy rejected same-agent review: %v", err)
@@ -114,6 +116,7 @@ func TestReviewerAgentsUnsetKeepsAnyConfiguredReviewer(t *testing.T) {
 }
 
 func TestIndependentReviewRejectsPlannerAsAgentReviewer(t *testing.T) {
+	t.Parallel()
 	m, _, iss, _ := reviewerPolicyManager(t, "  independent_review: true\n")
 	ctx := context.Background()
 	if _, err := m.UpdateArtifact(ctx, iss.Number, "local-dev", agentReview(t, m, iss.Number, "claude", "default")); !errors.Is(err, ErrApprovalRequired) {
@@ -128,6 +131,7 @@ func TestIndependentReviewRejectsPlannerAsAgentReviewer(t *testing.T) {
 }
 
 func TestIndependentReviewRejectsClaimOwnerHumanApproval(t *testing.T) {
+	t.Parallel()
 	m, lt, iss, _ := reviewerPolicyManager(t, "  independent_review: true\n")
 	ctx := context.Background()
 	if _, err := m.RecordHumanReview(ctx, iss.Number, "APPROVED", "self review"); !errors.Is(err, ErrApprovalRequired) {
@@ -140,6 +144,7 @@ func TestIndependentReviewRejectsClaimOwnerHumanApproval(t *testing.T) {
 }
 
 func TestClaimOwnerMayApproveWithoutIndependentReview(t *testing.T) {
+	t.Parallel()
 	m, _, iss, _ := reviewerPolicyManager(t, "")
 	if _, err := m.RecordHumanReview(context.Background(), iss.Number, "APPROVED", "solo maintainer"); err != nil {
 		t.Fatalf("default policy blocked single-maintainer approval: %v", err)
@@ -147,6 +152,7 @@ func TestClaimOwnerMayApproveWithoutIndependentReview(t *testing.T) {
 }
 
 func TestNotifyPlanReviewersAssignsAndMentionsOncePerPlan(t *testing.T) {
+	t.Parallel()
 	m, lt, iss, _ := reviewerPolicyManager(t, "  reviewer_collaborators: [alice, local-dev]\n  independent_review: true\n")
 	ctx := context.Background()
 	marker := "<!-- swarm:plan-review-request:v1"
@@ -199,6 +205,7 @@ func TestNotifyPlanReviewersAssignsAndMentionsOncePerPlan(t *testing.T) {
 }
 
 func TestNotifyPlanReviewersIsQuietWithoutNamedReviewers(t *testing.T) {
+	t.Parallel()
 	m, lt, iss, _ := reviewerPolicyManager(t, "")
 	reviewers, err := m.NotifyPlanReviewers(context.Background(), iss.Number)
 	if err != nil || len(reviewers) != 0 {

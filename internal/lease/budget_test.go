@@ -16,6 +16,7 @@ import (
 )
 
 func TestClaimBudgetProjection(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	cfg := contract.LeaseConfig{Duration: "3h", Renewable: true, MaxRenewals: 2}
 	l := contract.Lease{ClaimedAt: now, ExpiresAt: now.Add(3 * time.Hour), MaxRenewals: 2, Status: "active"}
@@ -61,8 +62,10 @@ func TestClaimBudgetProjection(t *testing.T) {
 }
 
 func TestTrustedClaimBudgetCeiling(t *testing.T) {
+	t.Parallel()
 	for _, requested := range []time.Duration{time.Minute, 100 * time.Hour} {
 		t.Run(requested.String(), func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			m, _, iss := testManager(t)
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -115,8 +118,10 @@ func (t *controlledHeartbeatTimer) C() <-chan time.Time { return t.ch }
 func (t *controlledHeartbeatTimer) Stop() bool          { return true }
 
 func TestHeartbeatFinalRenewalPausesWithoutExtraRenewal(t *testing.T) {
+	t.Parallel()
 	for _, manual := range []bool{false, true} {
 		t.Run(map[bool]string{false: "heartbeat", true: "manual"}[manual], func(t *testing.T) {
+			t.Parallel()
 			m, _, iss := testManager(t)
 			ctx := context.Background()
 			base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -162,6 +167,7 @@ func TestHeartbeatFinalRenewalPausesWithoutExtraRenewal(t *testing.T) {
 }
 
 func TestForkBudgetHandoffKeepsOnlySameContributorsCheckpoint(t *testing.T) {
+	t.Parallel()
 	m, lt, iss := testManager(t)
 	ctx := t.Context()
 	st, err := m.AcquireFork(ctx, iss.Number, "local-dev", "mock", "implement", "local-dev/repo", time.Hour, 1)
@@ -203,6 +209,7 @@ func TestForkBudgetHandoffKeepsOnlySameContributorsCheckpoint(t *testing.T) {
 }
 
 func TestHeartbeatZeroRenewalsWatchesExpiry(t *testing.T) {
+	t.Parallel()
 	m, _, iss := testManager(t)
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var elapsed atomic.Int64

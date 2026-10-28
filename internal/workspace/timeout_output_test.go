@@ -9,8 +9,10 @@ import (
 )
 
 func TestCheckpointExcludesTimeoutOutput(t *testing.T) {
+	t.Parallel()
 	for _, state := range []string{"untracked", "staged", "tracked"} {
 		t.Run(state, func(t *testing.T) {
+			t.Parallel()
 			wt, branch, _ := checkpointFixture(t)
 			dir := filepath.Join(wt, ".swarm", "active-output")
 			if err := os.MkdirAll(dir, 0700); err != nil {

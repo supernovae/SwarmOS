@@ -9,6 +9,7 @@ import (
 )
 
 func TestWorkPreflightStopErrorPrecedence(t *testing.T) {
+	t.Parallel()
 	r := &Result{IssueNumber: 4, PR: &tracker.PullRequest{Number: 9}}
 	for _, tc := range []struct {
 		name     string

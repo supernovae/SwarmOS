@@ -43,6 +43,7 @@ func (t *workTracker) GetPullRequest(ctx context.Context, n int) (*tracker.PullR
 func boolValue(b bool) *bool { return &b }
 
 func TestWorkPreflightClassification(t *testing.T) {
+	t.Parallel()
 	for _, state := range []string{"blocked", "behind", "unstable", "dirty", "unknown", "clean"} {
 		for _, value := range []*bool{nil, boolValue(false), boolValue(true)} {
 			p := tracker.PullRequest{Mergeable: value, MergeableState: state}
@@ -61,6 +62,7 @@ func TestWorkPreflightClassification(t *testing.T) {
 }
 
 func TestWorkPreflightPolling(t *testing.T) {
+	t.Parallel()
 	initial := tracker.PullRequest{Number: 33, State: "open", HeadSHA: "head", Head: "topic", Base: "main", BaseSHA: "base"}
 	for _, tc := range []struct {
 		name    string
@@ -101,6 +103,7 @@ func TestWorkPreflightPolling(t *testing.T) {
 }
 
 func TestWorkPreflightCancellationAndDeadline(t *testing.T) {
+	t.Parallel()
 	for _, callerCanceled := range []bool{false, true} {
 		ctx, cancel := context.WithCancel(context.Background())
 		s := &Service{Tracker: &workTracker{}, workWait: func(context.Context) error {

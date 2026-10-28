@@ -70,6 +70,7 @@ func (f *fakeBudgetClock) advance(d time.Duration) {
 	}
 }
 func TestAgentBudgetIdleAndWarning(t *testing.T) {
+	t.Parallel()
 	f := &fakeBudgetClock{now: time.Now()}
 	var out bytes.Buffer
 	ctx, b := newAgentBudget(context.Background(), WorkerOptions{Role: "developer", Warning: &out, Limits: contract.AgentLimits{Active: time.Minute, Wall: 4 * time.Hour, ExcludeIdle: true}}, f.clock())
@@ -100,6 +101,7 @@ func TestAgentBudgetIdleAndWarning(t *testing.T) {
 	}
 }
 func TestAgentWallBudgetWhileIdle(t *testing.T) {
+	t.Parallel()
 	f := &fakeBudgetClock{now: time.Now()}
 	var out bytes.Buffer
 	ctx, b := newAgentBudget(context.Background(), WorkerOptions{Role: "reviewer", Warning: &out, Limits: contract.AgentLimits{Active: time.Hour, Wall: time.Minute, ExcludeIdle: true}}, f.clock())
@@ -111,6 +113,7 @@ func TestAgentWallBudgetWhileIdle(t *testing.T) {
 	}
 }
 func TestAgentBudgetCompletionAndValidation(t *testing.T) {
+	t.Parallel()
 	for _, validation := range []bool{false, true} {
 		f := &fakeBudgetClock{now: time.Now()}
 		var out bytes.Buffer
@@ -129,6 +132,7 @@ func TestAgentBudgetCompletionAndValidation(t *testing.T) {
 }
 
 func TestBudgetFinishPreventsTimeoutDuringImport(t *testing.T) {
+	t.Parallel()
 	f := &fakeBudgetClock{now: time.Now()}
 	ctx, b := newAgentBudget(context.Background(), WorkerOptions{Timeout: time.Second}, f.clock())
 	defer b.close()
@@ -139,6 +143,7 @@ func TestBudgetFinishPreventsTimeoutDuringImport(t *testing.T) {
 	}
 }
 func TestBudgetStaleActiveCallbacksCannotExpirePausedRun(t *testing.T) {
+	t.Parallel()
 	f := &fakeBudgetClock{now: time.Now()}
 	ctx, b := newAgentBudget(context.Background(), WorkerOptions{Limits: contract.AgentLimits{Active: time.Minute, Wall: time.Hour, ExcludeIdle: true}}, f.clock())
 	defer b.close()
@@ -154,6 +159,7 @@ func TestBudgetStaleActiveCallbacksCannotExpirePausedRun(t *testing.T) {
 }
 
 func TestLongAgentBudgetWarnsTwoMinutesBeforeDeadline(t *testing.T) {
+	t.Parallel()
 	f := &fakeBudgetClock{now: time.Now()}
 	var out bytes.Buffer
 	_, b := newAgentBudget(context.Background(), WorkerOptions{Role: "planner", Warning: &out, Limits: contract.AgentLimits{Wall: time.Hour}}, f.clock())
@@ -175,6 +181,7 @@ func TestLongAgentBudgetWarnsTwoMinutesBeforeDeadline(t *testing.T) {
 // All four native turn loops use nativeInstruction; only this coordinator-owned
 // input boundary may pause the working budget.
 func TestNativeInstructionPausesBudget(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" {
 		t.Skip("native input is qualified on Linux")
 	}
@@ -227,6 +234,7 @@ func TestNativeInstructionPausesBudget(t *testing.T) {
 }
 
 func TestBudgetCannotPauseAfterExhaustingWorkingTime(t *testing.T) {
+	t.Parallel()
 	f := &fakeBudgetClock{now: time.Now()}
 	ctx, b := newAgentBudget(context.Background(), WorkerOptions{Limits: contract.AgentLimits{Active: time.Minute, Wall: time.Hour, ExcludeIdle: true}}, f.clock())
 	defer b.close()

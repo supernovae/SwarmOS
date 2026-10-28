@@ -11,6 +11,7 @@ import (
 // duration (4h in testManager), matching fork mode. A longer checkout policy
 // cannot raise the cap.
 func TestSameRepoClaimAndRenewDurationCappedAtApprovedPolicy(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name      string
 		requested time.Duration
@@ -22,6 +23,7 @@ func TestSameRepoClaimAndRenewDurationCappedAtApprovedPolicy(t *testing.T) {
 		{"much longer", 1000 * time.Hour, 4 * time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			m, _, iss := testManager(t)
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -57,6 +59,7 @@ func TestSameRepoClaimAndRenewDurationCappedAtApprovedPolicy(t *testing.T) {
 }
 
 func TestSameRepoRenewDurationCappedAfterShortClaim(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	m, _, iss := testManager(t)
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -75,6 +78,7 @@ func TestSameRepoRenewDurationCappedAfterShortClaim(t *testing.T) {
 }
 
 func TestDurationRejectsNonPositiveRequests(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	m, _, iss := testManager(t)
 	for _, d := range []time.Duration{0, -time.Hour} {
@@ -93,6 +97,7 @@ func TestDurationRejectsNonPositiveRequests(t *testing.T) {
 }
 
 func TestApprovedLeaseDuration(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		policy    string
 		requested time.Duration

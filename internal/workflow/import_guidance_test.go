@@ -18,6 +18,7 @@ import (
 const developerOutputRerun = " --phase implement --developer-instructions 'Record notes, test results, and blocked checks in .swarm/active/IMPLEMENTATION.md. Do not change other .swarm/active/ files except LESSONS.md.'"
 
 func TestDeveloperOutputRejectionGuidance(t *testing.T) {
+	t.Parallel()
 	const validation = ".swarm/active/VALIDATION.md"
 	for _, tc := range []struct {
 		name  string
@@ -65,6 +66,7 @@ func TestDeveloperOutputRejectionGuidance(t *testing.T) {
 }
 
 func TestImportRejectionReasonRouting(t *testing.T) {
+	t.Parallel()
 	hinted := &importRejection{Paths: []string{".swarm/active/VALIDATION.md"}, Role: "developer"}
 	generic := &importRejection{Paths: []string{".swarm/active/PLAN.md"}, Role: "developer"}
 	for _, tc := range []struct {
@@ -197,6 +199,7 @@ func TestRejectedImportNonRecoverableSavesNothing(t *testing.T) {
 }
 
 func TestImportRejectionReasonWithPatch(t *testing.T) {
+	t.Parallel()
 	const name = "rejected-0123456789abcdef0123456789abcdef.patch"
 	saved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, Patch: "/home/someone/.local/state/swarm/recovery/" + name}
 	unsaved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, PatchNote: "a complete recovery patch was unavailable"}

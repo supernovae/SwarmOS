@@ -15,6 +15,7 @@ import (
 	"testing"
 )
 
+// useUserCache changes a package-global hook; callers must remain serial.
 func useUserCache(t *testing.T) string {
 	t.Helper()
 	root := resolvedTempDir(t)
@@ -65,6 +66,7 @@ func mustPrepare(t *testing.T, owner BuildCacheOwner, repo, userCache, scratch s
 }
 
 func TestBuildCacheTableSafety(t *testing.T) {
+	t.Parallel()
 	// Credential homes and dependency caches must never become a build cache.
 	denied := []string{"HOME", "CARGO_HOME", "RUSTUP_HOME", "GRADLE_USER_HOME", "NUGET_PACKAGES", "NUGET_HTTP_CACHE_PATH", "NUGET_PLUGINS_CACHE_PATH", "DOTNET_CLI_HOME", "MAVEN_OPTS", "M2_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "GOPATH", "GOMODCACHE"}
 	names, keys := map[string]bool{}, map[string]bool{}
@@ -106,6 +108,7 @@ func TestBuildCacheTableSafety(t *testing.T) {
 }
 
 func TestPrepareBuildCachesLayout(t *testing.T) {
+	t.Parallel()
 	repo := cacheTestRepo(t)
 	key, err := repositoryCacheKey(context.Background(), repo)
 	if err != nil {
@@ -131,6 +134,7 @@ func TestPrepareBuildCachesLayout(t *testing.T) {
 }
 
 func TestPrepareBuildCachesReuseAcrossRuns(t *testing.T) {
+	t.Parallel()
 	repo := cacheTestRepo(t)
 	for _, owner := range []BuildCacheOwner{AgentBuildCache, ValidatorBuildCache} {
 		t.Run(string(owner), func(t *testing.T) {
@@ -155,6 +159,7 @@ func TestPrepareBuildCachesReuseAcrossRuns(t *testing.T) {
 }
 
 func TestAgentAndValidatorCachesNeverShareADirectory(t *testing.T) {
+	t.Parallel()
 	repo := cacheTestRepo(t)
 	root := resolvedTempDir(t)
 	agent := mustPrepare(t, AgentBuildCache, repo, root, resolvedTempDir(t))
@@ -169,6 +174,7 @@ func TestAgentAndValidatorCachesNeverShareADirectory(t *testing.T) {
 }
 
 func TestValidatorMigratesLegacyGoCache(t *testing.T) {
+	t.Parallel()
 	repo := cacheTestRepo(t)
 	key, err := repositoryCacheKey(context.Background(), repo)
 	if err != nil {
@@ -233,6 +239,7 @@ func TestValidatorMigratesLegacyGoCache(t *testing.T) {
 }
 
 func TestRepositoryCacheKeyPerRepository(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo := cacheTestRepo(t)
 	gitCommit := gitfixture.Command(t, "", "-C", repo, "-c", "user.name=T", "-c", "user.email=t@localhost", "commit", "-q", "--allow-empty", "-m", "init")
@@ -387,6 +394,7 @@ func TestPrepareBuildCachesNeverCredentialHome(t *testing.T) {
 }
 
 func TestValidatorCacheMountsPolicy(t *testing.T) {
+	t.Parallel()
 	repo := cacheTestRepo(t)
 	root := resolvedTempDir(t)
 	persistent := mustPrepare(t, ValidatorBuildCache, repo, root, resolvedTempDir(t))
@@ -634,6 +642,7 @@ func TestDelegatedToolArgsCarryOnlyAgentCaches(t *testing.T) {
 }
 
 func TestParseBuildCache(t *testing.T) {
+	t.Parallel()
 	work := resolvedTempDir(t)
 	if c, err := ParseBuildCache("go=/abs/cache", work); err != nil || c.EnvKey != "GOCACHE" || c.Dir != "/abs/cache" || c.Overlay {
 		t.Fatalf("ParseBuildCache = %+v, %v", c, err)

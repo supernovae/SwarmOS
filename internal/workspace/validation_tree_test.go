@@ -253,6 +253,7 @@ func TestValidationTreeCheckpointParity(t *testing.T) {
 }
 
 func TestValidationTreeRejectsInstructionSymlink(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	for _, args := range [][]string{{"init"}, {"-c", "user.name=Test", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "base"}} {
 		if out, e := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); e != nil {
@@ -268,6 +269,7 @@ func TestValidationTreeRejectsInstructionSymlink(t *testing.T) {
 }
 
 func TestValidationTreeRecoveryOutputAndFailurePreserveIndex(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	git := func(args ...string) string {
 		t.Helper()

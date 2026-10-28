@@ -18,8 +18,10 @@ import (
 )
 
 func TestFreshClaimBase(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []string{"none", "agent", "human", "unchanged", "policy", "task", "old digest", "missing tree", "nonancestor", "checkpoint", "branch", "fresh start", "partial none", "partial agent", "test only", "review only", "plan and test", "task unchanged", "old digest unchanged", "reviewed", "reviewed none"} {
 		t.Run(tc, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			m, lt, issue := testManager(t)
 			git := func(args ...string) string {
@@ -197,6 +199,7 @@ func (s *claimRaceStore) CompareAndSwap(ctx context.Context, n int, rev string, 
 }
 
 func TestFreshClaimBaseCASConflict(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, lt, issue := testManager(t)
 	issue.Body = strings.Replace(issue.Body, "gate: human", "gate: agent", 1)
@@ -228,6 +231,7 @@ func TestFreshClaimBaseCASConflict(t *testing.T) {
 }
 
 func TestFreshClaimBaseRemoteDefault(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	m, lt, issue := testManager(t)
 	issue.Body = strings.Replace(issue.Body, "gate: human", "gate: agent", 1)
@@ -269,8 +273,10 @@ func TestFreshClaimBaseRemoteDefault(t *testing.T) {
 }
 
 func TestFreshClaimBaseEarlyErrors(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []string{"load", "config", "allowlist", "trust", "authentication", "active", "resumed stale"} {
 		t.Run(tc, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			m, lt, issue := testManager(t)
 			st, rev, err := m.load(ctx, issue.Number)

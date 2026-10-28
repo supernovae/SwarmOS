@@ -8,6 +8,7 @@ import (
 )
 
 func TestStatusChangesIgnorePointerOnly(t *testing.T) {
+	t.Parallel()
 	guide := "# Team guide\n\nRun make check.\n"
 	layouts := []struct {
 		name    string
@@ -91,6 +92,7 @@ func TestStatusChangesIgnorePointerOnly(t *testing.T) {
 	for _, layout := range layouts {
 		for _, m := range mutations {
 			t.Run(layout.name+"/"+m.name, func(t *testing.T) {
+				t.Parallel()
 				repo, wt, branch, base := instructionLinkRepo(t, 159, layout.entries)
 				ctx := context.Background()
 				if err := injectActivePointer(wt, ActiveMarkerStart+"\nGenerated pointer.\n"+ActiveMarkerEnd); err != nil {
@@ -131,6 +133,7 @@ func TestStatusChangesIgnorePointerOnly(t *testing.T) {
 }
 
 func TestStatusChangesReportsGitFailure(t *testing.T) {
+	t.Parallel()
 	if _, err := hasStatusChanges(context.Background(), t.TempDir()); err == nil {
 		t.Fatal("non-repository reported as clean")
 	}

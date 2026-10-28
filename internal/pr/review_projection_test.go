@@ -10,6 +10,7 @@ import (
 )
 
 func TestReviewProjectionPreservesTextAndUpdatesWithoutRebase(t *testing.T) {
+	t.Parallel()
 	tr := tracker.NewLocalTracker(t.TempDir())
 	original := "human introduction\n\nhuman footer"
 	pr, err := tr.CreateDraftPR(t.Context(), tracker.DraftPRRequest{Title: "title", Body: original, Head: "feature", Base: "main"})

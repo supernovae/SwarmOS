@@ -63,8 +63,10 @@ func lifecycleFixture(t *testing.T) (*Manager, *lifecycleTracker, int) {
 	return m, tr, iss.Number
 }
 func TestReconcilePROutcomeLegacyAndIdempotence(t *testing.T) {
+	t.Parallel()
 	for _, outcome := range []string{"open", "merged", "closed-unmerged"} {
 		t.Run(outcome, func(t *testing.T) {
+			t.Parallel()
 			m, tr, n := lifecycleFixture(t)
 			ctx := context.Background()
 			if outcome != "open" {
@@ -111,6 +113,7 @@ func TestReconcilePROutcomeLegacyAndIdempotence(t *testing.T) {
 	}
 }
 func TestReconcileProjectionRetry(t *testing.T) {
+	t.Parallel()
 	m, tr, n := lifecycleFixture(t)
 	tr.failComment = true
 	st, e := m.ReconcileSubmission(context.Background(), n)
@@ -128,8 +131,10 @@ func TestReconcileProjectionRetry(t *testing.T) {
 	}
 }
 func TestReconcileRejectsIdentityAndActiveAttempts(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"repo", "branch", "number", "url", "active", "pending"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			m, tr, n := lifecycleFixture(t)
 			switch kind {
 			case "repo":
@@ -164,6 +169,7 @@ func TestReconcileRejectsIdentityAndActiveAttempts(t *testing.T) {
 	}
 }
 func TestCleanupReservationFencesAcquireAndStaleToken(t *testing.T) {
+	t.Parallel()
 	m, tr, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	stamp := time.Now()
@@ -200,6 +206,7 @@ func TestCleanupReservationFencesAcquireAndStaleToken(t *testing.T) {
 }
 
 func TestCleanupRecoveryFencesOldOperation(t *testing.T) {
+	t.Parallel()
 	m, tr, n, _ := mergedCleanupFixture(t)
 	ctx := context.Background()
 	stamp := time.Now()
@@ -228,6 +235,7 @@ func TestCleanupRecoveryFencesOldOperation(t *testing.T) {
 }
 
 func TestCleanupPreviewRetainsArtifactsAndLedgers(t *testing.T) {
+	t.Parallel()
 	m, _, n := lifecycleFixture(t)
 	ctx := context.Background()
 	before, rev, e := m.store.Load(ctx, n)
@@ -256,6 +264,7 @@ func TestCleanupPreviewRetainsArtifactsAndLedgers(t *testing.T) {
 }
 
 func TestReconcileOperatorAuthorization(t *testing.T) {
+	t.Parallel()
 	m, tr, n := lifecycleFixture(t)
 	tr.Tracker = tr.Tracker.(*tracker.LocalTracker).WithUser("outsider", "NONE")
 	_, before, _ := m.store.Load(context.Background(), n)

@@ -27,11 +27,13 @@ func (w *pauseWorkerWriter) Write(p []byte) (int, error) {
 }
 
 func TestOCIClaimBudgetStopsExportsAndImportsInOrder(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake OCI runtime uses a Unix shell")
 	}
 	for _, failure := range []string{"", "freeze", "export", "termination", "import"} {
 		t.Run("failure="+failure, func(t *testing.T) {
+			t.Parallel()
 			root, dir, result := t.TempDir(), t.TempDir(), t.TempDir()
 			writeWorkerFixture(t, dir, "source", "before")
 			writeWorkerFixture(t, result, "source", "saved")
@@ -116,12 +118,14 @@ case "$1" in
 }
 
 func TestOCIWritableImportPreflight(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake OCI runtime uses a Unix shell")
 	}
 	for _, role := range []string{"developer", "tester"} {
 		for _, failure := range []string{"", "import"} {
 			t.Run(role+"/failure="+failure, func(t *testing.T) {
+				t.Parallel()
 				root, dir, result := t.TempDir(), t.TempDir(), t.TempDir()
 				writeWorkerFixture(t, dir, "source", "before")
 				writeWorkerFixture(t, dir, "deleted", "before")

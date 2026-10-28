@@ -14,8 +14,10 @@ import (
 )
 
 func TestApprovalDropsContainedCheckpoint(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"contained", "intermediate", "unique", "missing", "policy changed", "linked PR", "fork", "pending divergent base"} {
 		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			m, _, issue := testManager(t)
 			git := func(args ...string) string {

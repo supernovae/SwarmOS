@@ -263,6 +263,7 @@ func TestWithdrawnOptInFailsWithWarmCache(t *testing.T) {
 }
 
 func TestPrefetchMarkerUnchangedWithoutAllowance(t *testing.T) {
+	t.Parallel()
 	files := map[string][]byte{"go.mod": []byte(goModRequiring())}
 	if prefetchDigest(files, nil) != lockfileDigest(files) {
 		t.Fatal("caches without an allowance must keep their markers")

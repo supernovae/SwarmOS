@@ -45,8 +45,12 @@ func (t firedTimer) Stop() bool          { return true }
 // renewal) was recorded as a failure ("context canceled"), so a deliberate stop
 // looked like a lost claim and made CI flaky.
 func TestHeartbeatStopDuringLoadIsNotAFailure(t *testing.T) {
+	t.Parallel()
 	for name, skip := range map[string]int{"initial load": 0, "pre-renewal reload": 1} {
-		t.Run(name, func(t *testing.T) { testHeartbeatStopDuringLoad(t, skip) })
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			testHeartbeatStopDuringLoad(t, skip)
+		})
 	}
 }
 

@@ -82,6 +82,7 @@ func testWorkerOCIWritableBoundaries(t *testing.T, role string) {
 }
 
 func TestWorkerOCIReadonlyPlanner(t *testing.T) {
+	t.Parallel()
 	opts := workerOCIOptions(t)
 	opts.Role = "planner"
 	opts.ReadOnly = true
@@ -104,6 +105,7 @@ func TestWorkerOCIReadonlyPlanner(t *testing.T) {
 }
 
 func TestWorkerOCIRejectsUnsafeOutput(t *testing.T) {
+	t.Parallel()
 	opts := workerOCIOptions(t)
 	for name, script := range map[string]string{
 		"git":      "mkdir .git; printf unauthorized > .git/config",
@@ -144,6 +146,7 @@ func (w *workerStartSignal) Write(data []byte) (int, error) {
 }
 
 func TestWorkerOCICancellationTerminatesDescendants(t *testing.T) {
+	t.Parallel()
 	opts := workerOCIOptions(t)
 	runtime, err := workerRuntime(opts.Runtime, opts.Image)
 	if err != nil {
@@ -198,6 +201,7 @@ func TestWorkerOCICancellationTerminatesDescendants(t *testing.T) {
 }
 
 func TestWorkerOCIMissingCapabilitiesFailClosed(t *testing.T) {
+	t.Parallel()
 	opts := workerOCIOptions(t)
 	root := t.TempDir()
 	writeWorkerFixture(t, root, "source.txt", "original")
@@ -220,6 +224,7 @@ func TestWorkerOCIDeveloperBoundaries(t *testing.T) { testWorkerOCIWritableBound
 func TestWorkerOCITesterBoundaries(t *testing.T)    { testWorkerOCIWritableBoundaries(t, "tester") }
 
 func TestWorkerOCIReviewerOutputChannel(t *testing.T) {
+	t.Parallel()
 	opts := workerOCIOptions(t)
 	opts.Role = "reviewer"
 	opts.ReadOnly = true
@@ -247,6 +252,7 @@ func TestWorkerOCIReviewerOutputChannel(t *testing.T) {
 }
 
 func TestWorkerOCIInteractiveInputAndStorageLimit(t *testing.T) {
+	t.Parallel()
 	opts := workerOCIOptions(t)
 	root := t.TempDir()
 	script := `command -v dd >/dev/null
@@ -265,6 +271,7 @@ func TestWorkerOCIInteractiveInputAndStorageLimit(t *testing.T) {
 }
 
 func TestWorkerOCIDeadline(t *testing.T) {
+	t.Parallel()
 	opts := workerOCIOptions(t)
 	opts.Timeout = 20 * time.Second
 	root := t.TempDir()

@@ -492,6 +492,7 @@ Complete the first closed task.
 }
 
 func TestProjectPlanExportFormat(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ path, want string }{
 		{"snapshot.yaml", "yaml"}, {"snapshot.yml", "yaml"}, {"snapshot.JSON", "json"},
 		{"snapshot.YaMl", "yaml"}, {"snapshot.YML", "yaml"}, {"snapshot", ""}, {"snapshot.txt", ""}, {"", ""},
@@ -504,6 +505,7 @@ func TestProjectPlanExportFormat(t *testing.T) {
 }
 
 func TestMarshalProjectPlanReport(t *testing.T) {
+	t.Parallel()
 	report := &ProjectPlanReport{
 		Mode: "from-plan", BaseSHA: "abc", PolicyDigest: "policy", GoalsDigest: "goals",
 		EpicIssue:      &tracker.Issue{Number: 42, Title: "Release", Labels: []string{}},

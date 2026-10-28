@@ -42,6 +42,7 @@ func checkpointWrite(t *testing.T, dir, name, text string) {
 }
 
 func TestCheckpointMessagesFromStagedChanges(t *testing.T) {
+	t.Parallel()
 	wt, branch, base := checkpointFixture(t)
 	wu := &contract.WorkUnit{IssueNumber: 47, Title: "Improve multilingual checkpointing", Objective: "Make commits explain actual changes"}
 	ctx := context.Background()
@@ -108,6 +109,7 @@ func TestCheckpointMessagesFromStagedChanges(t *testing.T) {
 }
 
 func TestCheckpointSubjectBoundariesAndInvalidOptions(t *testing.T) {
+	t.Parallel()
 	wt, branch, base := checkpointFixture(t)
 	checkpointWrite(t, wt, "AGENTS.md", "User instructions\n"+ActiveMarkerStart+"\ntransient\n"+ActiveMarkerEnd+"\n")
 	for _, opts := range []CheckpointOptions{
@@ -138,6 +140,7 @@ func TestCheckpointSubjectBoundariesAndInvalidOptions(t *testing.T) {
 }
 
 func TestCheckpointDoesNotCommitCancelledIndexChanges(t *testing.T) {
+	t.Parallel()
 	wt, branch, base := checkpointFixture(t)
 	checkpointWrite(t, wt, "staged.txt", "temporary\n")
 	runWorkspaceGit(t, wt, "add", "staged.txt")

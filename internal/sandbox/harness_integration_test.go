@@ -51,6 +51,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestAuthenticatedDelegatedTools(t *testing.T) {
+	t.Parallel()
 	driver := os.Getenv("SWARM_TEST_AUTHENTICATED_HARNESS")
 	if driver == "" {
 		t.Skip("set SWARM_TEST_AUTHENTICATED_HARNESS=claude, opencode or omp to use its existing login")
@@ -95,8 +96,12 @@ func TestAuthenticatedDelegatedTools(t *testing.T) {
 // A deterministic, local provider response drives actual installed OpenCode
 // tool dispatch. This qualifies enforcement, not provider login compatibility.
 func TestOpenCodeRealTools(t *testing.T) {
+	t.Parallel()
 	for _, behavior := range []string{"allowed", "forged-host-tool", "cancellation"} {
-		t.Run(behavior, func(t *testing.T) { openCodeToolFixture(t, behavior) })
+		t.Run(behavior, func(t *testing.T) {
+			t.Parallel()
+			openCodeToolFixture(t, behavior)
+		})
 	}
 }
 
@@ -232,6 +237,7 @@ func openCodeToolFixture(t *testing.T, behavior string) {
 }
 
 func TestOpenCodeEffectivePolicyCannotBroadenTools(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, rules string
 		allowed     bool
@@ -243,6 +249,7 @@ func TestOpenCodeEffectivePolicyCannotBroadenTools(t *testing.T) {
 		{"no task tools", `[{"action":"*","resource":"*","effect":"deny"}]`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			err := verifyOpenCodeAgent([]byte(`{"data":{"id":"swarm","permissions":` + tc.rules + `}}`))
 			if (err == nil) != tc.allowed {
 				t.Fatal(err)

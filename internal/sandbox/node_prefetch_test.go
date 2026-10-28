@@ -373,6 +373,7 @@ func TestNodePrefetchScratchExcludesRepoConfig(t *testing.T) {
 }
 
 func TestNodeAdapterDeclaresFetchOnly(t *testing.T) {
+	t.Parallel()
 	eco, ok := dependencyEcosystemNamed("node")
 	if !ok || eco.Prefetch == nil || eco.NoPrefetch != "" || eco.envKey() != "npm_config_cache" || !eco.NeedsManifests {
 		t.Fatalf("node table entry = %+v, want a fetch-only adapter", eco)
@@ -401,6 +402,7 @@ func TestNodeAdapterDeclaresFetchOnly(t *testing.T) {
 }
 
 func TestNodePrefetchEnvHardened(t *testing.T) {
+	t.Parallel()
 	host := map[string]string{
 		"PATH": "/usr/bin", "HOME": "/home/user", "npm_config_registry": "https://registry.example/",
 		"GH_TOKEN": "t", "GITHUB_TOKEN": "t", "SWARM_GITHUB_TOKEN": "t", "SWARM_GITHUB_TOKEN_COMMAND": "t",
@@ -610,6 +612,7 @@ func TestNodePrefetchFailureNamesDependency(t *testing.T) {
 }
 
 func TestNodePrefetchFailureParsesManagers(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, stderr, want string
 	}{
@@ -622,6 +625,7 @@ func TestNodePrefetchFailureParsesManagers(t *testing.T) {
 		{"other", "npm ERR! code EACCES\n", "npm ERR! code EACCES"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if got := nodePrefetchFailure(nil, []byte(tc.stderr), errors.New("exit status 1")); !strings.HasPrefix(got, tc.want) {
 				t.Fatalf("nodePrefetchFailure = %q, want %q first", got, tc.want)
 			}

@@ -10,6 +10,7 @@ import (
 )
 
 func TestCommittedPolicyTreeAndAncestry(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := t.TempDir()
 	runWorkspaceGit(t, root, "init", "-b", "main")

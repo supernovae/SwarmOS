@@ -11,6 +11,7 @@ import (
 )
 
 func TestHasConflictMarkers(t *testing.T) {
+	t.Parallel()
 	for text, want := range map[string]bool{
 		"<<<<<<< HEAD\na\n=======\nb\n>>>>>>> pr\n": true,
 		"a\n>>>>>>> pr\n":               true,
@@ -73,6 +74,7 @@ func write(t *testing.T, root, name, body string) {
 }
 
 func TestConflictInputsContentAndAddAdd(t *testing.T) {
+	t.Parallel()
 	root := pausedRebase(t,
 		func(r string) { write(t, r, "shared.txt", "base\n") },
 		func(r string) { write(t, r, "shared.txt", "main\n"); write(t, r, "new.txt", "main new\n") },
@@ -101,6 +103,7 @@ func TestConflictInputsContentAndAddAdd(t *testing.T) {
 }
 
 func TestConflictInputsRejectsIneligibleConflicts(t *testing.T) {
+	t.Parallel()
 	cases := map[string]func() string{
 		"symlink stage": func() string {
 			return pausedRebase(t,

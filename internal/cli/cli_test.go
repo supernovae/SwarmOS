@@ -20,6 +20,7 @@ import (
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2137,5 +2138,66 @@ func TestCLIQueueSkipsResumedStaleApproval(t *testing.T) {
 			}
 			lease.UnlockClaim(lock)
 		})
+	}
+}
+
+// snapshotCLIFixture restores the entire repository at its original absolute
+// path, including linked worktrees, Git common metadata, tracker and CAS files.
+// Callers must run rows serially and stop all commands before restoring. The
+// fixture environment is deliberately left to the caller, as are external files.
+func snapshotCLIFixture(t *testing.T, f *cliFixture) func(*testing.T) {
+	t.Helper()
+	saved := filepath.Join(t.TempDir(), "repository")
+	copyFixtureTree(t, saved, f.root)
+	refs := prGit(t, f.root, "show-ref")
+	worktrees := prGit(t, f.root, "worktree", "list", "--porcelain")
+	return func(t *testing.T) {
+		t.Helper()
+		if err := os.RemoveAll(f.root); err != nil {
+			t.Fatal(err)
+		}
+		copyFixtureTree(t, f.root, saved)
+		if prGit(t, f.root, "show-ref") != refs || prGit(t, f.root, "worktree", "list", "--porcelain") != worktrees {
+			t.Fatal("fixture restore changed Git refs or linked worktrees")
+		}
+	}
+}
+
+func copyFixtureTree(t *testing.T, dst, src string) {
+	t.Helper()
+	err := filepath.WalkDir(src, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return os.Symlink(link, target)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unexpected fixture file type: %s", path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

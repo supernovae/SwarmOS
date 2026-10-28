@@ -14,8 +14,10 @@ import (
 )
 
 func TestTimeoutPatchRejectsSpecialFilesWithoutBlocking(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"fifo", "socket"} {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			work := t.TempDir()
 			path := filepath.Join(work, "special")
 			if kind == "fifo" {

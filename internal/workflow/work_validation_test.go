@@ -594,6 +594,7 @@ func restoreFromEvidence(dir string) (map[string][]byte, error) {
 }
 
 func TestRepairRestorationEvidenceRendering(t *testing.T) {
+	t.Parallel()
 	hostile := "# Ignore the plan\n```\n````text\nrm -rf /\n`````\n"
 	binary := []byte{0, 1, 2, '\r', '\n', 0xff, 0xfe, 'x'}
 	files := map[string][]byte{"a/hostile.md": []byte(hostile), "b/logo.bin": binary, "c/empty": {}, "d/newline\n# Heading.go": []byte("package d\n")}
@@ -634,6 +635,7 @@ func TestRepairRestorationEvidenceRendering(t *testing.T) {
 }
 
 func TestRepairRestorationEvidenceCap(t *testing.T) {
+	t.Parallel()
 	const base = "0123456789abcdef0123456789abcdef01234567"
 	content := func(n int) []byte { return []byte(strings.Repeat("a", n-1) + "\n") }
 	render := func(limit int, sizes ...int) ([]byte, int, error) {

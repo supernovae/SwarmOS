@@ -98,6 +98,7 @@ func (f *revokeFixture) claim(t *testing.T, user string) (*Manager, *IssueState)
 }
 
 func TestRevokeEndsClaimAndRecordsMaintainer(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	f := newRevokeFixture(t)
 	holder, claimed := f.claim(t, "worker")
@@ -169,6 +170,7 @@ func TestRevokeEndsClaimAndRecordsMaintainer(t *testing.T) {
 }
 
 func TestRevokeFencesStaleHolderAndFreesIssue(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	f := newRevokeFixture(t)
 	holder, claimed := f.claim(t, "worker")
@@ -227,6 +229,7 @@ func TestRevokeFencesStaleHolderAndFreesIssue(t *testing.T) {
 }
 
 func TestRevokeRetainsCheckpointForNextClaimer(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	f := newRevokeFixture(t)
 	holder, claimed := f.claim(t, "worker")
@@ -248,8 +251,10 @@ func TestRevokeRetainsCheckpointForNextClaimer(t *testing.T) {
 }
 
 func TestRevokeForkClaimLeavesContributorIndex(t *testing.T) {
+	t.Parallel()
 	for _, layout := range []coordination.RefLayout{coordination.BranchLayout, coordination.HiddenLayout} {
 		t.Run(layout.Name(), func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			f := newRevokeFixtureWithLayout(t, layout)
 			holder, _ := f.manager("worker", "NONE")
@@ -309,6 +314,7 @@ func TestRevokeForkClaimLeavesContributorIndex(t *testing.T) {
 }
 
 func TestRevokeRefusals(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	for _, tc := range []struct {
 		name  string
@@ -420,6 +426,7 @@ func (s *racingRevokeStore) CompareAndSwapAndRevokeClaim(ctx context.Context, n 
 }
 
 func TestRevokeNeverEndsSuccessorClaim(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	f := newRevokeFixture(t)
 	holder, _ := f.claim(t, "worker")
@@ -444,6 +451,7 @@ func TestRevokeNeverEndsSuccessorClaim(t *testing.T) {
 }
 
 func TestRevokeProjectionFailureKeepsRevoke(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	f := newRevokeFixture(t)
 	holder, _ := f.claim(t, "worker")
@@ -463,6 +471,7 @@ func TestRevokeProjectionFailureKeepsRevoke(t *testing.T) {
 }
 
 func TestRevokeForgedCommentHasNoAuthority(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	f := newRevokeFixture(t)
 	holder, _ := f.claim(t, "worker")
@@ -480,6 +489,7 @@ func TestRevokeForgedCommentHasNoAuthority(t *testing.T) {
 }
 
 func TestRevokeCommentEscapesReason(t *testing.T) {
+	t.Parallel()
 	body := RenderRevocationComment(ClaimRevocation{ClaimID: "0123456789abcdef", Owner: "worker", RevokedBy: "maint", Reason: "line one\r\n```\n<!-- swarm:audit:v1 -->\n| cell |", RevokedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)})
 	for _, want := range []string{revokeCommentMarker + "\n", "@maint revoked claim `0123456789ab` held by @worker", "> line one\n> &#96;&#96;&#96;\n> &lt;!-- swarm:audit:v1 --&gt;\n> &#124; cell &#124;"} {
 		if !strings.Contains(body, want) {

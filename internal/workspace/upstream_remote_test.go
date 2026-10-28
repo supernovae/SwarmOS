@@ -40,6 +40,7 @@ func newUpstreamRemoteFixture(t *testing.T) upstreamRemoteFixture {
 }
 
 func TestResolveBaseFromNamedUpstream(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	if got, err := ResolveBaseFrom(f.root, "upstream"); err != nil || got != f.base {
 		t.Fatalf("ResolveBaseFrom(upstream) = %s, %v; want project base %s", got, err, f.base)
@@ -57,6 +58,7 @@ func TestResolveBaseFromNamedUpstream(t *testing.T) {
 }
 
 func TestValidateRemoteName(t *testing.T) {
+	t.Parallel()
 	for name, ok := range map[string]bool{"origin": true, "upstream": true, "my-fork.2": true, "Fork_1": true,
 		"": false, "-x": false, ".hidden": false, "a/b": false, "a b": false, "a..b": false, "x.lock": false, "a:b": false, "trailing.": false} {
 		if err := ValidateRemoteName(name); (err == nil) != ok {
@@ -66,6 +68,7 @@ func TestValidateRemoteName(t *testing.T) {
 }
 
 func TestResolveForkRemoteSlugRelativeToUpstream(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	if slug, err := ResolveForkRemoteSlug(f.root, "upstream", "origin"); err != nil || slug != "alice/swarm" {
 		t.Fatalf("origin as fork = %s, %v", slug, err)
@@ -89,6 +92,7 @@ func TestResolveForkRemoteSlugRelativeToUpstream(t *testing.T) {
 }
 
 func TestClaimCheckpointFrom(t *testing.T) {
+	t.Parallel()
 	if remote, branch := ClaimCheckpointFrom("upstream", false, "origin", 3, "Task", "c1", ""); remote != "upstream" || branch != BranchName(3, "Task") {
 		t.Fatalf("same repository = %s %s", remote, branch)
 	}
@@ -101,6 +105,7 @@ func TestClaimCheckpointFrom(t *testing.T) {
 }
 
 func TestPushForkCheckpointFromAllowsOriginOnlyWhenNotUpstream(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	ctx := context.Background()
 	branch := ForkBranchName(4, "claim")
@@ -123,6 +128,7 @@ func TestPushForkCheckpointFromAllowsOriginOnlyWhenNotUpstream(t *testing.T) {
 }
 
 func TestProvisionWithContextNamedUpstream(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	// A newer project base exists only upstream; provisioning fetches it there.
 	maintainer := filepath.Join(t.TempDir(), "maintainer")

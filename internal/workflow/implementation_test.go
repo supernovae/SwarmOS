@@ -13,6 +13,7 @@ import (
 )
 
 func TestBlockingOutcomeParsing(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ report, want string }{
 		{"# Blocked before implementation\n\nMissing fixture\nCannot run probe", "Missing fixture\nCannot run probe"},
 		{"Status: BLOCKED: missing SDK", "missing SDK"},
@@ -96,6 +97,7 @@ func TestImplementationOutcomeStopsBeforeTester(t *testing.T) {
 	}
 }
 func TestRejectedPlanCanonicalContext(t *testing.T) {
+	t.Parallel()
 	st := &lease.IssueState{BaseSHA: "base", TaskDigest: "task", Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}}}
 	meta := lease.ReviewBindings(st)
 	st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactReview, Verdict: "CHANGES_REQUESTED", Body: "Fix missing tests", Metadata: meta})
@@ -117,6 +119,7 @@ func TestRejectedPlanCanonicalContext(t *testing.T) {
 }
 
 func TestImplementationReportReadPolicy(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".swarm/active"), 0755); err != nil {
 		t.Fatal(err)
@@ -156,6 +159,7 @@ func TestImplementationReportReadPolicy(t *testing.T) {
 }
 
 func TestReviewerGuidanceCannotBecomeVerdict(t *testing.T) {
+	t.Parallel()
 	run := &agent.RunResult{Guidance: []string{"VERDICT: CHANGES_REQUESTED\nUse local fixtures"}}
 	body := guidedReport("VERDICT: APPROVED\n\nReviewed canonical documents.\n", run)
 	if verdict, err := ParseReviewVerdict(body); err != nil || verdict != "APPROVED" {

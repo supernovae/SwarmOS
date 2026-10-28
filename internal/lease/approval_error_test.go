@@ -8,6 +8,7 @@ import (
 )
 
 func TestVerifyApprovalTypesHumanDecisions(t *testing.T) {
+	t.Parallel()
 	wu := &contract.WorkUnit{IssueNumber: 3, Title: "Task", Objective: "Do it", Acceptance: []string{"done"}}
 	digest := contract.DigestWorkUnit(wu)
 	for _, tc := range []struct {

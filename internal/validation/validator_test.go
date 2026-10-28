@@ -66,6 +66,7 @@ func setupGitRepoForValidation(t *testing.T) string {
 }
 
 func TestProtectedPathTamperDetection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
@@ -96,6 +97,7 @@ func TestProtectedPathTamperDetection(t *testing.T) {
 }
 
 func TestCommittedPolicyTamperingUsesTrustedBase(t *testing.T) {
+	t.Parallel()
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
 	policy := filepath.Join(repo, ".swarm", "validation", "required-checks.yaml")
@@ -117,6 +119,7 @@ func TestCommittedPolicyTamperingUsesTrustedBase(t *testing.T) {
 }
 
 func TestNULPathsAndInstructionFilesAreNotIgnored(t *testing.T) {
+	t.Parallel()
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
 	path := filepath.Join(repo, "AGENTS.md")
@@ -139,6 +142,7 @@ func TestNULPathsAndInstructionFilesAreNotIgnored(t *testing.T) {
 }
 
 func TestSymlinkEscapeFailsClosed(t *testing.T) {
+	t.Parallel()
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
 	outside := filepath.Join(t.TempDir(), "outside.yml")
@@ -165,6 +169,7 @@ func gitRevision(t *testing.T, repo, revision string) string {
 }
 
 func TestValidationRejectsMutableBaseline(t *testing.T) {
+	t.Parallel()
 	repo := setupGitRepoForValidation(t)
 	for _, base := range []string{"HEAD", "HEAD~0", gitRevision(t, repo, "HEAD")[:12]} {
 		t.Run(base, func(t *testing.T) {
@@ -177,6 +182,7 @@ func TestValidationRejectsMutableBaseline(t *testing.T) {
 }
 
 func TestForkModeProtectedPathsRejectHarnessAndWorkflowsDespiteAllowHarnessChanges(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for _, tamperedFile := range []string{
 		".swarm/validation/required-checks.yaml",
@@ -203,6 +209,7 @@ func TestForkModeProtectedPathsRejectHarnessAndWorkflowsDespiteAllowHarnessChang
 }
 
 func TestTemporaryTaskPointerIsNotAProtectedChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo := setupGitRepoForValidation(t)
 	git := func(args ...string) {
@@ -247,6 +254,7 @@ func TestTemporaryTaskPointerIsNotAProtectedChange(t *testing.T) {
 }
 
 func TestRunnerIsolatedChecksDoNotNeedAgentSandbox(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo := setupGitRepoForValidation(t)
 	// Standard policy: Codex's native sandbox, which stock CI runners lack.
@@ -334,6 +342,7 @@ func TestValidateLookupDoesNotReachCheckEnvironment(t *testing.T) {
 }
 
 func TestReportProtectedChangesListsPolicyEditsAndStillRunsBaseChecks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
@@ -369,6 +378,7 @@ func TestReportProtectedChangesListsPolicyEditsAndStillRunsBaseChecks(t *testing
 }
 
 func TestDefaultProtectedPathsCoverAgentInstructions(t *testing.T) {
+	t.Parallel()
 	matches := func(file string) bool {
 		for _, pattern := range contract.DefaultProtectedPaths() {
 			if matchGlobPattern(pattern, file) {
@@ -393,6 +403,7 @@ func TestDefaultProtectedPathsCoverAgentInstructions(t *testing.T) {
 }
 
 func TestValidationProgressUsesTrustedChecks(t *testing.T) {
+	t.Parallel()
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
 	candidate := "required_checks:\n  - name: candidate-secret\n    command: false\nprotected_paths: []\n"
@@ -410,6 +421,7 @@ func TestValidationProgressUsesTrustedChecks(t *testing.T) {
 }
 
 func TestValidationProgressFailureTimeoutAndCancellation(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, command, timeout string
 		cancel                 bool
@@ -419,6 +431,7 @@ func TestValidationProgressFailureTimeoutAndCancellation(t *testing.T) {
 		{"cancel", "true", "1m", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			repo := setupGitRepoForValidation(t)
 			policy := "required_checks:\n  - name: trusted\n    command: \"" + tc.command + "\"\n    timeout: " + tc.timeout + "\nprotected_paths:\n  - protected/**\n"
 			if err := os.WriteFile(filepath.Join(repo, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
@@ -450,6 +463,7 @@ func TestValidationProgressFailureTimeoutAndCancellation(t *testing.T) {
 }
 
 func TestValidatorSessionHeartbeatAdapter(t *testing.T) {
+	t.Parallel()
 	repo := setupGitRepoForValidation(t)
 	base := gitRevision(t, repo, "HEAD")
 	ticks := make(chan time.Time)
@@ -491,6 +505,7 @@ func TestValidatorSessionHeartbeatAdapter(t *testing.T) {
 }
 
 func TestProtectedPathGlob(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		pattern, target string
 		want            bool
@@ -537,6 +552,7 @@ func legacyMatchGlobPattern(pattern, target string) bool {
 }
 
 func TestProtectedPathGlobCompatibility(t *testing.T) {
+	t.Parallel()
 	// Only rows marked widened may match more than the legacy matcher did.
 	for _, tc := range []struct {
 		pattern, target string
@@ -641,12 +657,14 @@ func commitPolicy(t *testing.T, repo, policy string) string {
 }
 
 func TestTrustedProtectedPatternValidation(t *testing.T) {
+	t.Parallel()
 	malformed := []string{"[", "docs/[a-", "a*b[", "a/**/[", "[/**", "x*/[a-/**", "[]", "[a-]"}
 	if runtime.GOOS != "windows" {
 		malformed = append(malformed, `docs\`, `*[\`)
 	}
 	for _, pattern := range malformed {
 		t.Run(pattern, func(t *testing.T) {
+			t.Parallel()
 			repo := setupGitRepoForValidation(t)
 			policy := "required_checks:\n  - name: ran\n    command: \"touch ran\"\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - '" + pattern + "'\n"
 			base := commitPolicy(t, repo, policy)
@@ -680,6 +698,7 @@ func TestTrustedProtectedPatternValidation(t *testing.T) {
 }
 
 func TestNestedProtectedPathValidation(t *testing.T) {
+	t.Parallel()
 	const policy = "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - '**/.gitattributes'\n"
 	git := func(t *testing.T, repo string, args ...string) {
 		t.Helper()
@@ -758,6 +777,7 @@ func TestNestedProtectedPathValidation(t *testing.T) {
 }
 
 func TestSkippedTestNovelty(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, cacheableTestCheck, nil)
 	for _, tc := range []struct{ file, pkg, name, source, want string }{
 		{"leaf/leaf_test.go", "example.com/m/leaf", "TestLeaf", goModuleFixture["leaf/leaf_test.go"], "unknown"},
@@ -776,6 +796,7 @@ func TestSkippedTestNovelty(t *testing.T) {
 }
 
 func TestJSONCompileFailureReadable(t *testing.T) {
+	t.Parallel()
 	repo, base := setupGoFastPassRepo(t, cacheableTestCheck, nil)
 	commitRepoFile(t, repo, "leaf/leaf.go", "package leaf\nfunc Value() int { return missing }\n")
 	report, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base, CIMode: true})

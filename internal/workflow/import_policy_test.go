@@ -86,6 +86,9 @@ func TestImportPolicyRecoverable(t *testing.T) {
 		if !errors.As(err, &rejection) {
 			t.Fatalf("%s: expected rejection, got %v", tc.name, err)
 		}
+		if rejection.OutputOnly != (tc.recoverable || tc.name == "fork") {
+			t.Fatalf("%s: output-only classification=%v", tc.name, rejection.OutputOnly)
+		}
 		if rejection.Recoverable != tc.recoverable || rejection.RecoverableImport() != tc.recoverable {
 			t.Fatalf("%s: recoverable=%v want %v (%v)", tc.name, rejection.Recoverable, tc.recoverable, rejection.Paths)
 		}

@@ -3,8 +3,10 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -13,6 +15,7 @@ type testRejection struct{ recoverable bool }
 
 func (e *testRejection) Error() string           { return "rejected agent changes" }
 func (e *testRejection) RecoverableImport() bool { return e.recoverable }
+func (e *testRejection) RoleOutputImport() bool  { return e.recoverable }
 
 func TestPreserveRejectedOnlyWhenRecoverable(t *testing.T) {
 	for _, tc := range []struct {
@@ -50,8 +53,12 @@ func TestPreserveRejectedOnlyWhenRecoverable(t *testing.T) {
 				}
 				return nil
 			})
-			if err != tc.err {
-				t.Fatalf("returned %v, want the import error unchanged", err)
+			if !errors.Is(err, tc.err) {
+				t.Fatalf("lost policy cause: %v", err)
+			}
+			var completed *CompletedImportError
+			if errors.As(err, &completed) != tc.called {
+				t.Fatalf("completed classification: %v", err)
 			}
 			if called != tc.called || (got != nil) != tc.patch {
 				t.Fatalf("called=%v patch=%q", called, got)
@@ -66,6 +73,40 @@ func TestPreserveRejectedOnlyWhenRecoverable(t *testing.T) {
 			data, _ := os.ReadFile(filepath.Join(dir, "src/main.go"))
 			if string(data) != "package main\n" {
 				t.Fatal("rejected run was imported")
+			}
+		})
+	}
+}
+
+func TestCompletedTesterImportRejected(t *testing.T) {
+	for _, exit := range []error{nil, errors.New("nonzero exit"), context.Canceled, context.DeadlineExceeded} {
+		t.Run(fmt.Sprint(exit), func(t *testing.T) {
+			dir := t.TempDir()
+			writeWorkerFixture(t, dir, "source", "before")
+			policy := &testRejection{recoverable: true}
+			err := withNativeWorkspace(t.Context(), dir, WorkerOptions{Role: "tester", CheckImport: func(_ context.Context, paths, _ []string) error {
+				if !slices.Contains(paths, ".swarm/active/IMPLEMENTATION.md") {
+					t.Fatalf("paths: %v", paths)
+				}
+				return policy
+			}}, func(_ context.Context, work, _ string) error {
+				writeWorkerFixture(t, work, ".swarm/active/IMPLEMENTATION.md", "wrong output")
+				writeWorkerFixture(t, work, "source", "after")
+				return exit
+			})
+			var completed *CompletedImportError
+			if errors.As(err, &completed) != (exit == nil) {
+				t.Fatalf("classification: %v", err)
+			}
+			if exit == nil && !errors.Is(err, policy) {
+				t.Fatalf("lost cause: %v", err)
+			}
+			if exit != nil && !errors.Is(err, exit) {
+				t.Fatalf("lost exit: %v", err)
+			}
+			body, _ := os.ReadFile(filepath.Join(dir, "source"))
+			if string(body) != "before" {
+				t.Fatal("imported rejected change")
 			}
 		})
 	}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -147,7 +148,7 @@ func TestIssueInstructionsAndStatusEvidence(t *testing.T) {
 	n := f.create(t, "agent")
 	number := strconv.Itoa(n)
 	f.must(t, "issue", "approve", number)
-	f.must(t, "issue", "work", number, "--agent", "mock", "--instructions", "Use local fixtures", "--progress=false")
+	f.must(t, "issue", "work", number, "--agent", "mock", "--instructions", "Use local fixtures", "--developer-instructions", "dev-only-marker\nsecond", "--tester-instructions", "test-only-marker", "--planner-instructions", "plan-only-marker", "--reviewer-instructions", "review-only-marker", "--progress=false")
 	state := f.state(t, n)
 	attestationJSON, err := json.Marshal(state.Attestations)
 	if err != nil {
@@ -159,6 +160,14 @@ func TestIssueInstructionsAndStatusEvidence(t *testing.T) {
 	for _, a := range state.Artifacts {
 		if a.Metadata["operator_steered"] != "true" || !strings.Contains(a.Body, "Use local fixtures") {
 			t.Fatalf("missing role guidance: %+v", a)
+		}
+	}
+	for _, a := range state.Artifacts {
+		own := map[contract.ArtifactType]string{contract.ArtifactDesign: "plan", contract.ArtifactTestPlan: "plan", contract.ArtifactReview: "review", contract.ArtifactImplementation: "dev", contract.ArtifactValidation: "test"}[a.Type]
+		for _, marker := range []string{"plan", "review", "dev", "test"} {
+			if strings.Contains(a.Body, marker+"-only-marker") != (marker == own) {
+				t.Fatalf("%s guidance: %s", a.Type, a.Body)
+			}
 		}
 	}
 	status := f.must(t, "issue", "status", number)

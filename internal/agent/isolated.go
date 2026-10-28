@@ -78,7 +78,10 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 		if (req.Role == "developer" || req.Role == "tester") && context.Cause(ctx) == claimpause.ErrBudget && !errors.Is(err, claimpause.ErrBudget) {
 			err = &claimpause.PreservationError{Err: err}
 		}
-		result.ExitCode = 1
+		var completed *sandbox.CompletedImportError
+		if !errors.As(err, &completed) {
+			result.ExitCode = 1
+		}
 		result.transcript = transcript
 		return result, err
 	}

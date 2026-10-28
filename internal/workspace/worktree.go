@@ -891,10 +891,23 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 			return err
 		}
 	}
+	// Strip coordinator guidance from delivered report copies, preserving stored artifacts.
+	for _, name := range []string{"PLAN.md", "TEST_PLAN.md", "REVIEW.md", "IMPLEMENTATION.md", "VALIDATION.md"} {
+		body, readErr := active.ReadFile(name, 8<<20)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return readErr
+		}
+		if err := active.WriteFile(name, []byte(contract.CanonicalArtifactBody(string(body))), 0644); err != nil {
+			return err
+		}
+	}
 	// Complete evidence is a report attachment, never system-prompt guidance.
 	var evidence strings.Builder
 	for _, a := range artifacts {
-		fmt.Fprintf(&evidence, "## %s (%s)\n\n%s\n\n", a.Type, a.Verdict, a.Body)
+		fmt.Fprintf(&evidence, "## %s (%s)\n\n%s\n\n", a.Type, a.Verdict, contract.CanonicalArtifactBody(a.Body))
 	}
 	if lessons, readErr := active.ReadFile("LESSONS.md", 1<<20); readErr == nil {
 		evidence.WriteString("## Active lessons\n\n" + string(lessons))

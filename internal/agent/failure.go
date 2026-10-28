@@ -27,6 +27,10 @@ func (e *runFailure) Error() string {
 }
 
 func (e *runFailure) status() string {
+	var completed *sandbox.CompletedImportError
+	if errors.As(e.cause, &completed) && !errors.Is(e.cause, context.Canceled) && !errors.Is(e.cause, context.DeadlineExceeded) {
+		return fmt.Sprintf("%s run completed; returned changes were refused at import", e.role)
+	}
 	var timeout *sandbox.AgentTimeoutError
 	if errors.As(e.cause, &timeout) {
 		return timeout.Error()
@@ -52,6 +56,20 @@ func safeRunFailure(ctx context.Context, role, worktree string, result *RunResul
 	if err == nil {
 		return nil
 	}
+	switch role {
+	case "planner", "reviewer", "developer", "tester":
+	default:
+		role = "configured"
+	}
+	var completed *sandbox.CompletedImportError
+	if ctx.Err() == nil && errors.As(err, &completed) {
+		if result != nil {
+			result.Output = ""
+			result.Command = nil
+			result.transcript = nil
+		}
+		return &runFailure{role: role, cause: err}
+	}
 	class := ""
 	if len(eligible) > 0 && eligible[0] && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		var timeout *sandbox.AgentTimeoutError
@@ -75,11 +93,6 @@ func safeRunFailure(ctx context.Context, role, worktree string, result *RunResul
 		// A failed RunResult may itself be serialized by a caller.
 		result.Output = ""
 		result.Command = nil
-	}
-	switch role {
-	case "planner", "reviewer", "developer", "tester":
-	default:
-		role = "configured"
 	}
 	if ctx.Err() != nil {
 		err = errors.Join(ctx.Err(), err)

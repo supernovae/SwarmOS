@@ -336,7 +336,7 @@ When required checks fail in `swarm issue work`, `swarm pr work`, `swarm issue v
 
 For a required check of the form `go test [flags] ./...`, each failing test is rerun on its own, in the same sandbox as the check and without the test cache. The rerun keeps the check's build flags, such as `-race` and `-tags`. A test that passes on this candidate rerun is **flaky**. If it fails again, it is rerun once in a clean checkout of the approved base: it is a **regression** if it passes there and **pre-existing** if it fails there. A failing test that the approved base doesn't have, because its package has no such test or the package itself is new, is also a **regression** when a test file added or changed in this change defines it. Deciding this only parses that file; it runs no additional code. A test that can't be observed reliably stays **unclassified**, with the reason. That covers checks with any other command form, failures without a package name (for example from `-json` output), build failures, timeouts, and more than 20 failing tests. Classification never changes the validation result. Flaky failures still fail validation.
 
-The repair prompt points the developer at `REPAIR.md`. When every failure is a pre-existing Go test, a developer round can't fix it. The run then stops with the `pre_existing_failures` next action, which needs a person to act, and no developer starts. This applies both right after validation fails and when work resumes. To start the round anyway, pass `--instructions` to `swarm issue work` or `swarm pr work`. Mixed, flaky, unclassified, and non-Go failures always go to the developer.
+The repair prompt points the developer at `REPAIR.md`. When every failure is a pre-existing Go test, a developer round can't fix it. The run then stops with the `pre_existing_failures` next action, which needs a person to act, and no developer starts. This applies both right after validation fails and when work resumes. To start the round anyway, pass `--instructions` or `--developer-instructions` to `swarm issue work` or `swarm pr work`. Planner, reviewer, and tester instructions do not start a developer round. Mixed, flaky, unclassified, and non-Go failures always go to the developer.
 
 `swarm issue work` and `swarm pr work` repair a failed validation in the same run. After the trusted checks fail, the coordinator regenerates `REPAIR.md`, runs a developer repair round, records it as a fenced `Repair validation:` checkpoint, and runs the tester and every required check again on the new head. Only that coordinator validation decides whether the run passed, whatever the developer or tester reports. Progress names each round, for example `Issue #42: repair 1/1 implement started targeting "example.com/m/broken.TestBroken"`, and later stages of the round keep the `repair 1/1` label. With `--json`, `repair_rounds` counts the rounds that started, and the validation report always describes the latest round.
 
@@ -475,14 +475,16 @@ If an agent exits early, a lease expires, or a validation check fails:
 
 An implementation that produces no checkpoint beyond the approved base fails before testing. An explicit blocked outcome in `IMPLEMENTATION.md` also fails, and `swarm issue status <issue>` shows its reason. For PR revisions, the implementation must advance the revision's starting head. Issue reruns can reuse an existing checkpoint ahead of the approved base to repeat testing.
 
+Use `--instructions` on `issue work` or `pr work` for guidance that every role should receive. For advice intended for one role, use `--planner-instructions`, `--reviewer-instructions`, `--developer-instructions`, or `--tester-instructions`. Each takes one string, including multiline text. Each role receives the shared instructions followed by its own guidance, recorded in the existing operator guidance block. Role guidance stays within the approved scope, permissions, and approval gates.
+
 Steer a recovery with specific instructions:
 
 ```bash
-swarm issue work 56 --phase implement --instructions "Use temporary Git repositories for the Git-dependent tests"
-swarm pr work 123 --phase implement --instructions "Fix the failing acceptance test"
+swarm issue work 56 --phase implement --tester-instructions "Use temporary Git repositories for the Git-dependent tests"
+swarm pr work 123 --phase implement --developer-instructions "Fix the failing acceptance test"
 ```
 
-Flag instructions and supported interactive follow-ups appear in role reports and PR review evidence, with a message count and SHA-256 in status output. Earlier same-role reports are marked as superseded attempts. Lessons from the current task stay in review evidence until the PR merges and a maintainer applies them with `swarm repo lessons --apply`.
+Flag instructions and supported interactive follow-ups appear in the receiving role’s report and published PR evidence, with a message count and SHA-256 in status output. Earlier same-role reports are marked as superseded attempts. Lessons from the current task stay in review evidence until the PR merges and a maintainer applies them with `swarm repo lessons --apply`.
 
 After a plan review requests changes, the default `swarm issue work <issue>` or `swarm pr work <PR>` runs the planner again with the review findings. The planner must change `PLAN.md` or `TEST_PLAN.md` before another review; changing only operator guidance does not qualify.
 

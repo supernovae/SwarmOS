@@ -126,3 +126,15 @@ func failureResume(opts WorkOptions, role string) string {
 	}
 	return command
 }
+
+// instructionsFor keeps role guidance out of other roles' prompts and metadata.
+func (o WorkOptions) instructionsFor(role string) string {
+	scoped := map[string]string{"developer": o.DeveloperInstructions, "tester": o.TesterInstructions, "planner": o.PlannerInstructions, "reviewer": o.ReviewerInstructions}[role]
+	parts := []string{}
+	for _, text := range []string{o.Instructions, scoped} {
+		if strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}

@@ -2,6 +2,8 @@ package validation
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -64,5 +66,38 @@ func TestGoFastPassCachedFullStillFails(t *testing.T) {
 	}
 	if full.Passed || !strings.Contains(full.Output, "TestUnrelated") || !cachedPackages(full.Output)["example.com/m/leaf"] {
 		t.Fatalf("full run must reuse leaf and still fail on unrelated:\n%s", full.Output)
+	}
+}
+
+func TestSkippedTestsCachedEvidence(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, cacheableTestCheck, nil)
+	if err := os.WriteFile(filepath.Join(repo, ".git", "info", "exclude"), []byte(".swarm/active/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	commitRepoFile(t, repo, "leaf/leaf_test.go", goModuleFixture["leaf/leaf_test.go"]+"\nfunc TestSandbox(t *testing.T) { t.Skip(\"nested bwrap unavailable\") }\n")
+	report, err := Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base, GoFastPass: true, Version: "v1", ClaimID: "claim"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Passed || report.SkippedTotal != 1 || len(report.SkippedTests) != 1 {
+		t.Fatalf("%+v", report)
+	}
+	skip := report.SkippedTests[0]
+	if skip.Test != "TestSandbox" || skip.Status != "new" || !strings.Contains(skip.Message, "nested bwrap unavailable") {
+		t.Fatalf("%+v", skip)
+	}
+	full := report.CheckOutcomes[len(report.CheckOutcomes)-1]
+	if !cachedPackages(full.Output)["example.com/m/leaf"] || strings.Contains(full.Output, `"Action"`) {
+		t.Fatal(full.Output)
+	}
+	if !strings.Contains(report.Artifact.Body, "TestSandbox [new]") || !strings.Contains(report.Artifact.Body, "1 test skip events") {
+		t.Fatal(report.Artifact.Body)
+	}
+	report.Artifact.Metadata["validation_trusted_origin"] = "coordinator"
+	report.Artifact.Metadata["validation_trusted_owner"] = "owner"
+	report.Artifact.Metadata["validation_trusted_claim"] = "claim"
+	reused, err := Reuse(t.Context(), repo, ValidateOptions{BaseSHA: base, Version: "v1", ClaimID: "claim"}, "owner", []contract.Artifact{report.Artifact})
+	if err != nil || reused == nil || reused.SkippedTotal != 1 || reused.SkippedTests[0] != skip || strings.Contains(reused.CheckOutcomes[len(reused.CheckOutcomes)-1].Output, `"Action"`) {
+		t.Fatalf("reuse: %+v %v", reused, err)
 	}
 }

@@ -172,3 +172,76 @@ func TestIssueStatusShowsPreExistingRepair(t *testing.T) {
 		}
 	}
 }
+
+func TestValidationSkipNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		report *validation.ValidationReport
+		notice bool
+	}{
+		{"none", nil, false},
+		{"no skips", &validation.ValidationReport{Passed: true}, false},
+		{"failed", &validation.ValidationReport{SkippedTotal: 1}, false},
+		{"passing", &validation.ValidationReport{Passed: true, SkippedTotal: 1, SkippedTests: []validation.SkippedTest{{Package: "example.com/m", Test: "TestSandbox\x1b"}}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			var out, diag bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&diag)
+			writeValidationSkipNotice(cmd, tc.report)
+			if out.Len() != 0 || (diag.Len() > 0) != tc.notice {
+				t.Fatalf("stdout=%q stderr=%q", out.String(), diag.String())
+			}
+			if tc.notice && (!strings.Contains(diag.String(), "TestSandbox\\x1b") || !strings.Contains(diag.String(), "VALIDATION.md") || strings.Count(diag.String(), "\n") != 1) {
+				t.Fatal(diag.String())
+			}
+		})
+	}
+}
+
+func TestSkipNoticesAcrossCommands(t *testing.T) {
+	f := newCLIFixture(t)
+	policy := "required_checks:\n  - name: test\n    command: go test ./...\n    timeout: 2m\nprotected_paths: ['.swarm/**', '.github/**']\n"
+	for name, data := range map[string]string{
+		".swarm/validation/required-checks.yaml": policy,
+		"go.mod":                                 "module example.com/skips\n\ngo 1.21\n",
+		"skip_test.go":                           "package skips\nimport \"testing\"\nfunc TestPass(t *testing.T) {}\nfunc TestSandbox(t *testing.T) { t.Skip(\"loopback unavailable\") }\n",
+	} {
+		if err := os.WriteFile(filepath.Join(f.root, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prGit(t, f.root, "add", ".")
+	prGit(t, f.root, "commit", "-m", "skip fixture")
+	number := strconv.Itoa(f.create(t, "none"))
+	f.must(t, "issue", "approve", number)
+	check := func(args ...string) string {
+		t.Helper()
+		args = append(args, "--progress=false", "--json")
+		out, diag, err := runProgressCommand(t, f, args...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s\n%s", args, err, out, diag)
+		}
+		if !json.Valid([]byte(out)) || strings.Count(diag, "Validation passed with 1 skipped test") != 1 || !strings.Contains(diag, "example.com/skips.TestSandbox") || !strings.Contains(diag, "VALIDATION.md") {
+			t.Fatalf("%v: stdout=%s stderr=%s", args, out, diag)
+		}
+		return out
+	}
+	check("issue", "work", number, "--agent", "mock")
+	check("issue", "submit", number)
+	n, _ := strconv.Atoi(number)
+	p := strconv.Itoa(f.state(t, n).PRNumber)
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo revision > revision.txt")
+	check("pr", "work", p, "--agent", "mock")
+	check("pr", "submit", p)
+	// Conflict on the revision file exercises the rebase path that validates.
+	if err := os.WriteFile(filepath.Join(f.root, "revision.txt"), []byte("upstream\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, f.root, "add", "revision.txt")
+	prGit(t, f.root, "commit", "-m", "conflict")
+	f.must(t, "issue", "approve", number)
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", resolverScript(t.TempDir()))
+	check("pr", "rebase", p, "--resolve", "--agent", "mock")
+}

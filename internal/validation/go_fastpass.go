@@ -130,6 +130,10 @@ func (f *goFastPass) run(ctx context.Context, check contract.CheckSpec, duration
 	for _, pkg := range selection.packages {
 		command += " '" + pkg + "'"
 	}
+	_, output := f.runner.goCapture(check.Command)
+	if output.jsonMode && !output.preserveJSON {
+		command = strings.Replace(command, "go test", "go test -json", 1)
+	}
 	name := check.Name + " (changed packages)"
 	fastCtx, cancelFast := context.WithTimeout(ctx, duration)
 	defer cancelFast()
@@ -137,8 +141,8 @@ func (f *goFastPass) run(ctx context.Context, check contract.CheckSpec, duration
 		onProgress(progress.Event{Check: name, Status: "started"})
 	}
 	start := time.Now()
-	var output checkCapture
-	runErr := f.runner.run(fastCtx, command, duration, &output, &output)
+	runErr := f.runner.run(fastCtx, command, duration, output, output)
+	output.finish()
 	outcome := &CheckRunOutcome{Name: name, Command: command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil, Preliminary: true, Packages: selection.packages}
 	status := "PASS"
 	var exitErr *exec.ExitError
@@ -414,4 +418,23 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	}
 	b.buf.Write(p)
 	return n, nil
+}
+
+// goCapture recognizes only approved direct all-package Go commands. OCI
+// retains its existing command and output behavior.
+func (r *checkRunner) goCapture(command string) (string, *checkCapture) {
+	c := &checkCapture{}
+	if !r.runnerIsolated && r.execution.Mode == contract.ExecutionIsolated && r.execution.Backend != contract.BackendNative {
+		return command, c
+	}
+	parsed, ok := parseGoTestAll(command)
+	if !ok {
+		return command, c
+	}
+	c.jsonMode = true
+	c.preserveJSON = slices.Contains(parsed.flags, "-json")
+	if !c.preserveJSON {
+		command = "go test -json " + strings.Join(strings.Fields(command)[2:], " ")
+	}
+	return command, c
 }

@@ -594,3 +594,39 @@ func RepairFromArtifact(artifacts []contract.Artifact, baseSHA string) *RepairSu
 	}
 	return nil
 }
+
+// skipStatus proves declaration absence using source only; inability to inspect
+// either tree never hides the skip or claims it is new.
+func skipStatus(ctx context.Context, root, base string, changed []string, skip SkippedTest) string {
+	if _, ok := candidateDefines(root, changed, skip.Package, skip.Test); !ok {
+		return "unknown"
+	}
+	dir, ok := packageDir(root, skip.Package)
+	if !ok {
+		return "unknown"
+	}
+	out, err := gitOutputContext(ctx, root, "ls-tree", "-r", "--name-only", "-z", base)
+	if err != nil {
+		return "unknown"
+	}
+	top, _, _ := strings.Cut(skip.Test, "/")
+	for _, file := range strings.Split(string(out), "\x00") {
+		if path.Dir(file) != dir || !strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		data, err := gitOutputContext(ctx, root, "show", base+":"+file)
+		if err != nil || len(data) > maxTestSource {
+			return "unknown"
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), file, data, parser.SkipObjectResolution)
+		if err != nil {
+			return "unknown"
+		}
+		for _, decl := range parsed.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == top {
+				return "unknown"
+			}
+		}
+	}
+	return "new"
+}

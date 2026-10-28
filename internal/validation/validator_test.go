@@ -756,3 +756,34 @@ func TestNestedProtectedPathValidation(t *testing.T) {
 		}
 	})
 }
+
+func TestSkippedTestNovelty(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, cacheableTestCheck, nil)
+	for _, tc := range []struct{ file, pkg, name, source, want string }{
+		{"leaf/leaf_test.go", "example.com/m/leaf", "TestLeaf", goModuleFixture["leaf/leaf_test.go"], "unknown"},
+		{"leaf/leaf_test.go", "example.com/m/leaf", "TestAdded/sub", goModuleFixture["leaf/leaf_test.go"] + "\nfunc TestAdded(t *testing.T) {}\n", "new"},
+		{"extra/extra_test.go", "example.com/m/extra", "TestNew", "package extra\nimport \"testing\"\nfunc TestNew(t *testing.T) {}\n", "new"},
+	} {
+		writeRepoFile(t, repo, tc.file, tc.source)
+		got := skipStatus(t.Context(), repo, base, []string{tc.file}, SkippedTest{Package: tc.pkg, Test: tc.name})
+		if got != tc.want {
+			t.Fatalf("%s: %s", tc.name, got)
+		}
+	}
+	if got := skipStatus(t.Context(), repo, "missing", []string{"extra/extra_test.go"}, SkippedTest{Package: "example.com/m/extra", Test: "TestNew"}); got != "unknown" {
+		t.Fatal(got)
+	}
+}
+
+func TestJSONCompileFailureReadable(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, cacheableTestCheck, nil)
+	commitRepoFile(t, repo, "leaf/leaf.go", "package leaf\nfunc Value() int { return missing }\n")
+	report, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base, CIMode: true})
+	if !errors.Is(err, ErrRequiredCheckFailed) || report.Passed {
+		t.Fatalf("%+v %v", report, err)
+	}
+	outcome := report.CheckOutcomes[0]
+	if !strings.Contains(outcome.Output, "undefined: missing") || strings.Contains(outcome.Output, `"Action"`) || !strings.Contains(report.Artifact.Body, "undefined: missing") || outcome.SkippedTotal != 0 {
+		t.Fatalf("%+v", outcome)
+	}
+}

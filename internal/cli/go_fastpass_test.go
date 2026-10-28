@@ -48,7 +48,7 @@ func TestGoFastPassEntryPoints(t *testing.T) {
 		}
 		return string(data)
 	}
-	const preliminary = "test example.com/m/leaf\n"
+	const preliminary = "test -json example.com/m/leaf\n"
 	for _, step := range []struct {
 		args []string
 		fast bool
@@ -59,7 +59,7 @@ func TestGoFastPassEntryPoints(t *testing.T) {
 	} {
 		f.must(t, step.args...)
 		got := invocations()
-		if strings.Contains(got, preliminary) != step.fast || !strings.HasSuffix(got, "test ./...\n") {
+		if strings.Contains(got, preliminary) != step.fast || !strings.HasSuffix(got, "test -json ./...\n") {
 			t.Fatalf("swarm %v ran go with:\n%s", step.args, got)
 		}
 	}

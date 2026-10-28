@@ -320,8 +320,8 @@ func TestGoFastPassProgress(t *testing.T) {
 	}
 	want := []string{
 		"list -e -json=ImportPath,Dir,Module,Imports,TestImports,XTestImports -race ./...",
-		"test -race example.com/m/consumer example.com/m/leaf",
-		"test -race ./...",
+		"test -json -race example.com/m/consumer example.com/m/leaf",
+		"test -json -race ./...",
 	}
 	if got := readLog(t, log); !slices.Equal(got, want) {
 		t.Fatalf("invocations: %q", got)
@@ -362,7 +362,7 @@ func TestGoFastPassInfrastructureFallback(t *testing.T) {
 			if events[1] != "test (changed packages) skipped" || events[2] != "test started" {
 				t.Fatalf("events: %v", events)
 			}
-			if got := readLog(t, log); len(got) != 3 || got[2] != "test ./..." {
+			if got := readLog(t, log); len(got) != 3 || got[2] != "test -json ./..." {
 				t.Fatalf("invocations: %q", got)
 			}
 		})
@@ -516,6 +516,26 @@ func TestParseGoListRejectsUnsafeMetadata(t *testing.T) {
 	} {
 		if _, err := parseGoList([]byte(data)); err == nil {
 			t.Errorf("%s: metadata accepted", name)
+		}
+	}
+}
+
+func TestGoJSONCaptureBoundary(t *testing.T) {
+	runner := &checkRunner{}
+	for _, tc := range []struct {
+		command, actual string
+		json, raw       bool
+	}{
+		{"go test ./...", "go test -json ./...", true, false},
+		{"  go test -race ./...  ", "go test -json -race ./...", true, false},
+		{"go test -json ./...", "go test -json ./...", true, true},
+		{"go test ./leaf", "go test ./leaf", false, false},
+		{"go test ./... | cat", "go test ./... | cat", false, false},
+		{"sh -c 'go test ./...'", "sh -c 'go test ./...'", false, false},
+	} {
+		actual, capture := runner.goCapture(tc.command)
+		if actual != tc.actual || capture.jsonMode != tc.json || capture.preserveJSON != tc.raw {
+			t.Fatalf("%q => %q %+v", tc.command, actual, capture)
 		}
 	}
 }

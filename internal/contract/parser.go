@@ -161,6 +161,18 @@ func parseMarkdownSections(cleanBody string) (*WorkUnit, bool) {
 		}
 	}
 
+	wu.Size = strings.ToLower(strings.TrimSpace(sections["size"]))
+	if wu.Size == "_no response_" {
+		wu.Size = ""
+	}
+	wu.Uncertainty = strings.ToLower(strings.TrimSpace(sections["uncertainty"]))
+	if wu.Uncertainty == "_no response_" {
+		wu.Uncertainty = ""
+	}
+	wu.Risk = strings.ToLower(strings.TrimSpace(sections["risk"]))
+	if wu.Risk == "_no response_" {
+		wu.Risk = ""
+	}
 	return wu, true
 }
 
@@ -261,6 +273,15 @@ func FormatIssueMarkdown(wu *WorkUnit) string {
 	// stay unchanged for WorkUnits that never opt in.
 	if wu.AllowHarnessChanges {
 		sb.WriteString("\n### Allow Harness Changes\n\n" + allowHarnessChangesChecked + "\n")
+	}
+	if wu.Size != "" {
+		sb.WriteString("\n### Size\n\n" + wu.Size + "\n")
+	}
+	if wu.Uncertainty != "" {
+		sb.WriteString("\n### Uncertainty\n\n" + wu.Uncertainty + "\n")
+	}
+	if wu.Risk != "" {
+		sb.WriteString("\n### Risk\n\n" + wu.Risk + "\n")
 	}
 	return sb.String()
 }

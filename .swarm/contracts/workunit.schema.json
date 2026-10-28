@@ -5,6 +5,9 @@
   "type": "object",
   "required": ["id", "objective", "constraints", "acceptance", "workflow"],
   "properties": {
+    "size": {"type": "string", "enum": ["", "small", "multi_area"]},
+    "uncertainty": {"type": "string", "enum": ["", "known", "unknown"]},
+    "risk": {"type": "string", "enum": ["", "standard", "sensitive", "urgent"]},
     "id": {
       "type": "string",
       "minLength": 1

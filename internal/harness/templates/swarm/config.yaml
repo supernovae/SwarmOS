@@ -21,6 +21,28 @@ lease:
 security:
   require_ready_label: true
   ready_label: "swarm:ready"
+# First matching execution profile supplies prompts and evidence expectations.
+profiles:
+  - name: urgent
+    match: {risk: urgent}
+    prompt_variant: urgent
+    evidence: ["Smallest mitigation first; file root cause as a follow-up."]
+  - name: investigation
+    match: {uncertainty: unknown}
+    prompt_variant: investigation
+    evidence: ["Run a bounded investigation with a reversible probe and record a decision artifact."]
+  - name: sensitive
+    match: {risk: sensitive}
+    prompt_variant: sensitive
+    evidence: ["Keep the plan compact; require strong independent review and adversarial test cases."]
+  - name: detailed
+    match: {size: multi_area}
+    prompt_variant: detailed
+    evidence: ["Write a detailed handoff covering area boundaries, dependencies and validation evidence."]
+  - name: compact
+    match: {size: small}
+    prompt_variant: compact
+    evidence: ["Keep planning and evidence concise, with focused verification of each acceptance criterion."]
 agents:
   # Route roles to installed harnesses. OpenCode requires V2 (2.1.2 or newer).
   # Claude/OpenCode/OhMyPi isolated tools require Bubblewrap and Python 3.

@@ -85,6 +85,16 @@ func (g *fakeGitHubIssues) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		if len(parts) == 3 && parts[2] == "comments" && r.Method == "POST" {
+			var payload struct {
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				g.t.Error(err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "body": payload.Body})
+			return
+		}
 		if len(parts) >= 3 && parts[2] == "labels" {
 			g.writes++
 			if r.Method == "DELETE" && len(parts) == 4 {

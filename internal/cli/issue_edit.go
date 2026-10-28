@@ -36,7 +36,7 @@ type issueEditPreview struct {
 }
 
 func newIssueEditCmd(opts *RootOptions) *cobra.Command {
-	var title, objective, workflowName, gate string
+	var title, objective, workflowName, gate, size, uncertainty, risk string
 	var constraints, acceptance []string
 	var depends []int
 	var dryRun, asJSON, allowHarnessChanges bool
@@ -97,6 +97,15 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 		}
 		if cmd.Flags().Changed("allow-harness-changes") {
 			edit.AllowHarnessChanges = &allowHarnessChanges
+		}
+		if cmd.Flags().Changed("size") {
+			edit.Size = &size
+		}
+		if cmd.Flags().Changed("uncertainty") {
+			edit.Uncertainty = &uncertainty
+		}
+		if cmd.Flags().Changed("risk") {
+			edit.Risk = &risk
 		}
 		st, err := readIssueEditState(cmd.Context(), mgr, number)
 		if err != nil {
@@ -225,6 +234,9 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 	f.StringVar(&workflowName, "workflow", "", "Replace workflow (feature, bugfix, refactor)")
 	f.StringVar(&gate, "gate", "", "Replace plan gate (none, agent, human)")
 	f.BoolVar(&allowHarnessChanges, "allow-harness-changes", false, "Replace permission to edit protected harness paths (true or false)")
+	f.StringVar(&size, "size", "", "Replace size; empty clears it")
+	f.StringVar(&uncertainty, "uncertainty", "", "Replace uncertainty; empty clears it")
+	f.StringVar(&risk, "risk", "", "Replace risk; empty clears it")
 	f.BoolVar(&dryRun, "dry-run", false, "Preview changes without writing")
 	f.BoolVar(&asJSON, "json", false, "Emit structured edit results")
 	return cmd

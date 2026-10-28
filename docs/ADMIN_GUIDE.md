@@ -217,3 +217,24 @@ Once you merge the PR for a Wave 1 issue, any Wave 2 issues that listed it under
 - **[GitHub Security, Branching & Agent Authorization (`docs/GITHUB.md`)](GITHUB.md)** — Configure branch rulesets, `SWARM_GITHUB_TOKEN`, and collaborator allowlists.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Detailed reference for `.swarm/config.yaml` and `required-checks.yaml`.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Interactive `swarm issue stage` workflows, handoffs, and worker pools.
+
+### Execution profiles
+
+Execution profiles help maintainers match planning and evidence to the work.
+Set size, uncertainty and risk on the WorkUnit, then configure `profiles` in
+`.swarm/config.yaml`. The first matching entry supplies a prompt variant and
+an evidence checklist:
+
+```yaml
+profiles:
+  - name: sensitive
+    match: {risk: sensitive}
+    prompt_variant: sensitive
+    evidence: ["Adversarial test cases", "Independent reviewer"]
+```
+
+Profiles and optional `.swarm/prompts/variants/<role>.<variant>.md` files load
+from the approved base commit. They affect prompt guidance and evidence
+expectations only. Plan gates, protected paths and required checks continue to
+come from their existing approved policies. Unassessed WorkUnits retain their
+existing prompts.

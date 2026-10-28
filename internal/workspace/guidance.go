@@ -29,8 +29,10 @@ const (
 // Policy documents are always inlined; skills are indexed and inlined only
 // when their front matter selects the active role and workflow.
 type bundleGuidance struct {
-	policy []string
-	skills []guidanceSkill
+	profileName string
+	profileDoc  string
+	policy      []string
+	skills      []guidanceSkill
 }
 
 type guidanceSkill struct {

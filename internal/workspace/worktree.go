@@ -830,11 +830,29 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 		guidance.skills = append(guidance.skills, skill)
 	}
 	var budgetDoc string
-	if role == "planner" {
-		cfg, err := harness.LoadConfigAt(worktreePath, baseSHA)
-		if err != nil {
-			return fmt.Errorf("load approved lease policy: %w", err)
+	cfg, cfgErr := harness.LoadConfigAt(worktreePath, baseSHA)
+	if cfgErr != nil {
+		// Only an absent config is compatible with legacy non-planner fixtures.
+		files, listErr := gitOutput(worktreePath, "ls-tree", "--name-only", baseSHA, "--", ".swarm/config.yaml")
+		if role == "planner" || listErr != nil || strings.TrimSpace(files) != "" {
+			return fmt.Errorf("load approved policy: %w", cfgErr)
 		}
+	}
+	if cfgErr == nil {
+		if profile := contract.SelectProfile(wu, cfg.Profiles); profile != nil {
+			variant, err := harness.LoadPromptVariantAt(worktreePath, role, profile.PromptVariant, baseSHA)
+			if err != nil {
+				return err
+			}
+			profileDoc := "## Execution profile: " + profile.Name + "\n\n" + strings.TrimSpace(variant) + "\n\n"
+			for _, evidence := range profile.Evidence {
+				profileDoc += "- " + evidence + "\n"
+			}
+			guidance.profileName = profile.Name
+			guidance.profileDoc = profileDoc
+		}
+	}
+	if role == "planner" {
 		if budgetDoc, err = claimBudgetDoc(cfg.Lease); err != nil {
 			return err
 		}
@@ -916,6 +934,10 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 		return err
 	}
 	workunitMD := renderWorkUnitMarkdown(wu, wf, artifacts, role)
+	if guidance.profileName != "" {
+		workunitMD = strings.Replace(workunitMD, "## Objective", "- **Execution profile**: `"+guidance.profileName+"`\n\n## Objective", 1)
+	}
+
 	if err := active.WriteFile("WORKUNIT.md", []byte(workunitMD), 0o644); err != nil {
 		return err
 	}
@@ -932,6 +954,9 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	sys.WriteString(strings.TrimSpace(validationDoc))
 	sys.WriteString("\n```\n\nRun these check commands directly. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
 	sys.WriteString(strings.TrimSpace(rolePrompt) + "\n\n")
+	if guidance.profileDoc != "" {
+		sys.WriteString(strings.TrimSpace(guidance.profileDoc) + "\n\n")
+	}
 	if budgetDoc != "" {
 		sys.WriteString(strings.TrimSpace(budgetDoc) + "\n\n")
 	}
@@ -1141,6 +1166,18 @@ func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, ar
 	sb.WriteString(fmt.Sprintf("- **Plan Review Gate**: `%s`\n", wu.Gate))
 	sb.WriteString(fmt.Sprintf("- **Allow Harness Changes**: `%v`\n\n", wu.AllowHarnessChanges))
 
+	if wu.Size != "" {
+		fmt.Fprintf(&sb, "- **Size**: `%s`\n", wu.Size)
+	}
+	if wu.Uncertainty != "" {
+		fmt.Fprintf(&sb, "- **Uncertainty**: `%s`\n", wu.Uncertainty)
+	}
+	if wu.Risk != "" {
+		fmt.Fprintf(&sb, "- **Risk**: `%s`\n", wu.Risk)
+	}
+	if wu.Size != "" || wu.Uncertainty != "" || wu.Risk != "" {
+		sb.WriteString("\n")
+	}
 	sb.WriteString("## Objective\n\n")
 	sb.WriteString(strings.TrimSpace(wu.Objective) + "\n\n")
 

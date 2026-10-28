@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 // These executables emulate harness protocols to test coordinator input
@@ -18,7 +20,7 @@ import (
 func guidanceFixture(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "harness")
-	if err := os.WriteFile(path, []byte(body), 0755); err != nil {
+	if err := testutil.WriteExecutable(path, []byte(body), 0755); err != nil {
 		t.Fatal(err)
 	}
 	return path

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
@@ -27,7 +28,7 @@ case "$1 ${2:-}" in
 "run --help") echo "--standalone --server --continue --model --agent --format --title" ;;
 esac
 `
-	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := harness.LoadConfig(root)

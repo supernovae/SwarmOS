@@ -14,6 +14,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/sandbox"
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 // Fixtures under testdata/telemetry/sessions are labelled by harness version.
@@ -510,7 +511,7 @@ func TestTelemetryDelegatedRunObservesSession(t *testing.T) {
 				t.Setenv("SWARM_TELEMETRY_FIXTURE", fixture)
 				binary := filepath.Join(t.TempDir(), driver)
 				script := "#!/bin/sh\nSWARM_TELEMETRY_FIXTURE='" + fixture + "' exec '" + strings.ReplaceAll(testBinary, "'", "'\"'\"'") + "' -test.run=TestTelemetryHarnessHelper -- --swarm-telemetry-fixture " + driver + " \"$@\"\n"
-				if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+				if err := testutil.WriteExecutable(binary, []byte(script), 0o755); err != nil {
 					t.Fatal(err)
 				}
 				o := newRunObservation(driver)

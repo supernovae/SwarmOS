@@ -14,6 +14,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/sandbox"
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 func TestAgentEnvironmentHelper(t *testing.T) {
@@ -379,7 +380,7 @@ case "$1 ${2:-}" in
 *) printf x >> '` + dir + `/run' ;;
 esac
 `
-	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}, Agents: map[string]contract.AgentConfig{"opencode": {Binary: binary}}}
@@ -449,7 +450,7 @@ case "$1 ${2:-}" in
    fi ;;
 esac
 `
-	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+	if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}, Agents: map[string]contract.AgentConfig{

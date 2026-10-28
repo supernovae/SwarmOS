@@ -3,6 +3,7 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"maps"
 	"os"
@@ -833,7 +834,7 @@ func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	stub := "#!/bin/sh\necho \"$@\" > \"$RUNNER_TEMP/args\"\n"
-	if err := os.WriteFile(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(stub), 0o755); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	merged := git("rev-parse", "HEAD")
@@ -877,7 +878,7 @@ func TestValidateWorkflowUsesMergeParentAsPullRequestBase(t *testing.T) {
 
 	// A failing validator fails the step, and the maintainer mode is passed through.
 	failing := "#!/bin/sh\necho \"$@\" > \"$RUNNER_TEMP/args\"\necho 'FAIL ok'\nexit 3\n"
-	if err := os.WriteFile(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(failing), 0o755); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(failing), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("bash", "-e", "-c", script)
@@ -922,7 +923,7 @@ func TestValidateWorkflowReportsProtectedChangesOnlyForMaintainerBranches(t *tes
 	bin := t.TempDir()
 	// The fake gh answers with the permission named in FAKE_PERMISSION, or fails.
 	gh := "#!/bin/sh\n[ -n \"$FAKE_PERMISSION\" ] || exit 1\necho \"$FAKE_PERMISSION\"\n"
-	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte(gh), 0o755); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(bin, "gh"), []byte(gh), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -1117,7 +1118,7 @@ func TestValidateWorkflowGrantStepRunsOnlyGrantVerification(t *testing.T) {
 	run := func(help string) string {
 		t.Helper()
 		stub := "#!/bin/sh\ncase \"$*\" in *--help*) echo '" + help + "'; exit 0 ;; esac\necho \"$@\" > \"$RUNNER_TEMP/args\"\n"
-		if err := os.WriteFile(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(stub), 0o755); err != nil {
+		if err := testutil.WriteExecutable(filepath.Join(runnerTemp, "swarm-bin", "swarm"), []byte(stub), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(stale, []byte("{}"), 0o600); err != nil {
@@ -1154,7 +1155,7 @@ func TestDoctorSandboxSelection(t *testing.T) {
 	}
 	marker := filepath.Join(dir, "executed")
 	for _, bin := range []string{"bwrap", "sandbox-exec", "docker", "podman"} {
-		if err := os.WriteFile(filepath.Join(dir, bin+suffix), []byte(fmt.Sprintf("#!/bin/sh\nprintf executed > %q\n", marker)), 0700); err != nil {
+		if err := testutil.WriteExecutable(filepath.Join(dir, bin+suffix), []byte(fmt.Sprintf("#!/bin/sh\nprintf executed > %q\n", marker)), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1237,7 +1238,7 @@ func TestRunDoctorSandboxReadiness(t *testing.T) {
 	}
 	for _, available := range []bool{false, true} {
 		if available {
-			if err := os.WriteFile(filepath.Join(dir, native), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+			if err := testutil.WriteExecutable(filepath.Join(dir, native), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -1425,7 +1426,7 @@ func TestInitGoScaffoldChecksFormatting(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" {
 		bin := t.TempDir()
-		if err := os.WriteFile(filepath.Join(bin, "gofmt"), []byte("#!/bin/sh\necho broken >&2\nexit 2\n"), 0o755); err != nil {
+		if err := testutil.WriteExecutable(filepath.Join(bin, "gofmt"), []byte("#!/bin/sh\necho broken >&2\nexit 2\n"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Remove(filepath.Join(root, "bad.go")); err != nil {

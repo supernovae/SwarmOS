@@ -1,6 +1,7 @@
 package changelog
 
 import (
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
@@ -232,7 +233,9 @@ func TestMakeChangelog(t *testing.T) {
 	put(t, r, "Makefile", string(mf))
 	put(t, r, "changes/unreleased/1.md", "- New")
 	wrapper := filepath.Join(t.TempDir(), "go-wrapper")
-	put(t, filepath.Dir(wrapper), filepath.Base(wrapper), "#!/bin/sh\nexec '"+strings.ReplaceAll(binary, "'", "'\\''")+"' \"$3\"\n")
+	if e := testutil.WriteExecutable(wrapper, []byte("#!/bin/sh\nexec '"+strings.ReplaceAll(binary, "'", "'\\''")+"' \"$3\"\n"), 0755); e != nil {
+		t.Fatal(e)
+	}
 	if e := os.Chmod(wrapper, 0755); e != nil {
 		t.Fatal(e)
 	}

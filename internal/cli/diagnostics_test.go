@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 var diagnosticsPointer = regexp.MustCompile(`diagnostics saved to (/\S+) \((\d+) bytes\)`)
@@ -25,7 +27,7 @@ func useFailingHarness(t *testing.T, f *cliFixture, patterns ...string) {
 	if len(patterns) > 0 {
 		body = strings.Replace(body, "exit 9", "printf '%s\\n' '"+patterns[0]+"' >&2\nexit 9", 1)
 	}
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+	if err := testutil.WriteExecutable(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(f.root, ".swarm", "config.yaml")

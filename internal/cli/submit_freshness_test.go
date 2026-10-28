@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -393,7 +394,7 @@ func TestSubmitFreshnessInspectionFailure(t *testing.T) {
 	}
 	shim := t.TempDir()
 	script := "#!/bin/sh\nif [ \"$1\" = merge-tree ]; then printf 'unsupported private diagnostic' >&2; exit 2; fi\nexec " + submissionShellWord(realGit) + " \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(shim, "git"), []byte(script), 0700); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(shim, "git"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", shim+string(os.PathListSeparator)+os.Getenv("PATH"))

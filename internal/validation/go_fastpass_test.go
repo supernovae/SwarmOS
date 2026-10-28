@@ -3,6 +3,7 @@ package validation
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
@@ -293,7 +294,9 @@ func installFakeGo(t *testing.T, testScript string) string {
 `
 	writeRepoFile(t, dir, "metadata.json", metadata)
 	script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\ncase \"$1\" in\nlist) echo 'go: noise on stderr' >&2; cat '" + filepath.Join(dir, "metadata.json") + "' ;;\ntest)\n" + testScript + "\n;;\nesac\n"
-	writeRepoFile(t, dir, "go", script)
+	if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Chmod(filepath.Join(dir, "go"), 0o755); err != nil {
 		t.Fatal(err)
 	}

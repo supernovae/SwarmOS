@@ -2,11 +2,12 @@ package sandbox
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 func TestResolveReadOnlyRuntime(t *testing.T) {
@@ -54,7 +55,7 @@ func TestCheckReadOnlyRuntime(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		bin += ".exe"
 	}
-	if err := os.WriteFile(filepath.Join(dir, bin), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(dir, bin), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	for _, image := range []string{"", "image"} {

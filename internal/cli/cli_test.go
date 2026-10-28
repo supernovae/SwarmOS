@@ -15,6 +15,7 @@ import (
 	"github.com/supernovae/swarmos/internal/fork"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -2194,6 +2195,9 @@ func copyFixtureTree(t *testing.T, dst, src string) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
+		}
+		if info.Mode().Perm()&0111 != 0 {
+			return testutil.WriteExecutable(target, data, info.Mode().Perm())
 		}
 		return os.WriteFile(target, data, info.Mode().Perm())
 	})

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
@@ -94,7 +95,7 @@ func installRepairGo(t *testing.T, basePasses bool) {
 	script := "#!/bin/sh\ncase \"$PWD\" in */swarm-repair-base-*) base=true;; *) base=false;; esac\n" +
 		"if $base && " + pass + "; then echo '--- PASS: TestBroken (0.00s)'; echo PASS; exit 0; fi\n" +
 		"echo '--- FAIL: TestBroken (0.00s)'; echo '    broken_test.go:1: broken'; echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
-	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -201,7 +202,7 @@ func installFixableGo(t *testing.T) string {
 		"if [ -f fixed.txt ]; then echo PASS; exit 0; fi\n" +
 		"name=TestBroken; if [ -f other.txt ]; then name=TestOther; fi\n" +
 		"echo \"--- FAIL: $name (0.00s)\"; echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
-	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+	if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/testutil"
 )
 
 func writeWorkerFixture(t *testing.T, root, name, content string) {
@@ -275,7 +276,7 @@ func TestWorkerPreflightChecksDaemonAndCleansUp(t *testing.T) {
 			}
 			script += " *) :;;\nesac\n"
 			executable := filepath.Join(root, "docker")
-			if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+			if err := testutil.WriteExecutable(executable, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			var err error

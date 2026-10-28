@@ -27,6 +27,18 @@ type DependencyPolicy struct {
 	PrivateGo PrivateGo
 }
 
+// DependencyPolicySource accepts a repository policy or a cache mode. A cache
+// mode alone never grants access to private modules.
+type DependencyPolicySource interface {
+	dependencyPolicy() DependencyPolicy
+}
+
+func (p DependencyPolicy) dependencyPolicy() DependencyPolicy { return p }
+
+func (m DependencyCacheMode) dependencyPolicy() DependencyPolicy {
+	return DependencyPolicy{Mode: m}
+}
+
 // privateGoProxy is the credentialed fetch's GOPROXY. Replaced in tests with
 // a file:// fixture proxy.
 var privateGoProxy = "direct"

@@ -251,7 +251,8 @@ func DependencyCacheModes(mode DependencyCacheMode) []EcosystemMode {
 // never falls back: any failure is an error, so callers stop before work
 // starts. SharedHostCaches prepares nothing. Private Go modules are fetched
 // only as policy.PrivateGo allows.
-func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktree, baseSHA, userCache string, policy DependencyPolicy) (Dependencies, error) {
+func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktree, baseSHA, userCache string, source DependencyPolicySource) (Dependencies, error) {
+	policy := source.dependencyPolicy()
 	deps := Dependencies{Mode: policy.Mode}
 	if policy.Mode == SharedHostCaches {
 		return deps, nil

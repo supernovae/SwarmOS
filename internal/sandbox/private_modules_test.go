@@ -27,7 +27,7 @@ func privateHostEnv(t *testing.T) (home string) {
 	return home
 }
 
-type prefetchCall struct {
+type privateGoPrefetchCall struct {
 	dir  string
 	env  map[string]string
 	argv []string
@@ -35,16 +35,16 @@ type prefetchCall struct {
 
 // recordPrefetch stubs the prefetch runner. A download of named modules
 // extracts them into GOMODCACHE, as the go command would.
-func recordPrefetch(t *testing.T) *[]prefetchCall {
+func recordPrefetch(t *testing.T) *[]privateGoPrefetchCall {
 	t.Helper()
-	var calls []prefetchCall
+	var calls []privateGoPrefetchCall
 	stubPrefetch(t, "go1.21.0", func(dir string, env, argv []string) {
 		values := map[string]string{}
 		for _, entry := range env {
 			k, v, _ := strings.Cut(entry, "=")
 			values[k] = v
 		}
-		calls = append(calls, prefetchCall{dir: dir, env: values, argv: argv})
+		calls = append(calls, privateGoPrefetchCall{dir: dir, env: values, argv: argv})
 		if len(argv) > len(goModDownloadArgv) && slices.Equal(argv[:len(goModDownloadArgv)], goModDownloadArgv) {
 			for _, mod := range argv[len(goModDownloadArgv):] {
 				dir := filepath.Join(values["GOMODCACHE"], filepath.FromSlash(mod))
@@ -58,8 +58,8 @@ func recordPrefetch(t *testing.T) *[]prefetchCall {
 	return &calls
 }
 
-func downloads(calls []prefetchCall) []prefetchCall {
-	var out []prefetchCall
+func downloads(calls []privateGoPrefetchCall) []privateGoPrefetchCall {
+	var out []privateGoPrefetchCall
 	for _, c := range calls {
 		if slices.Equal(c.argv[:min(len(c.argv), len(goModDownloadArgv))], goModDownloadArgv) {
 			out = append(out, c)

@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR supersedes the older run; main runs always finish.
+concurrency:
+  group: swarm-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   lint:
     name: Lint and vulnerabilities

@@ -1,1 +1,2 @@
 - Raise the default `test` check timeout that `swarm repo init` writes from 10 to 30 minutes, and the generated validation workflow job limit from 30 to 60 minutes, so slow shared CI runners do not fail a correct change.
+- CI cancels a pull request's superseded runs when a newer push arrives, and skips CodeQL on pull requests that only change docs or changelog fragments.

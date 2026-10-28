@@ -67,7 +67,7 @@ func TestRestoreLinuxFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(flags, "\n")
-	for _, s := range []string{"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop\nALL", "--clearenv", "--setenv\nGOMAXPROCS\n2", "--as=1073741824", "--nproc=128", "--cpu=300", "--nofile=128", "--fsize=268435456", "--core=0", "--remount-ro\n/", "--ro-bind\n/control/source\n/source", "--bind\n/private-cache\n/cache", "/restore-helper", "literal;$(no-shell)"} {
+	for _, s := range []string{"--unshare-all", "--unshare-all\n--unshare-user\n--disable-userns\n--assert-userns-disabled", "--die-with-parent", "--new-session", "--cap-drop\nALL", "--clearenv", "--setenv\nGOMAXPROCS\n2", "--as=1073741824", "--nproc=128", "--cpu=300", "--nofile=128", "--fsize=268435456", "--core=0", "--remount-ro\n/", "--ro-bind\n/control/source\n/source", "--bind\n/private-cache\n/cache", "/restore-helper", "literal;$(no-shell)"} {
 		if !strings.Contains(joined, s) {
 			t.Fatalf("missing isolation flag %q", s)
 		}

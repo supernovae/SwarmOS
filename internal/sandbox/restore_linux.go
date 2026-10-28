@@ -41,7 +41,9 @@ func restoreCommand(ctx context.Context, control, cache, positive string, argv [
 	return cmd, nil
 }
 func restoreFlags(control, cache, positive string, argv []string) ([]string, error) {
-	flags := []string{"--unshare-all", "--disable-userns", "--assert-userns-disabled", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv",
+	// --disable-userns requires a strict explicit user namespace request;
+	// --unshare-all alone only requests user namespaces opportunistically.
+	flags := []string{"--unshare-all", "--unshare-user", "--disable-userns", "--assert-userns-disabled", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv",
 		"--ro-bind", "/usr/bin", "/usr/bin", "--ro-bind", "/usr/lib", "/usr/lib", "--proc", "/proc", "--dev", "/dev"}
 	for _, path := range []string{"/bin", "/lib", "/lib64", "/usr/lib64"} {
 		info, err := os.Lstat(path)

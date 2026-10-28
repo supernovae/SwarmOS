@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,8 +195,8 @@ func TestReviewerSandboxAllowsScratchButDeniesSourceAndCredentials(t *testing.T)
 					"--unshare-user", "--unshare-ipc", "--unshare-pid", "--unshare-uts",
 					"--unshare-net", "--", "/bin/true")
 				output, probeErr := probe.CombinedOutput()
-				if probeErr != nil && strings.Contains(string(output), "bwrap:") && strings.Contains(string(output), "Operation not permitted") {
-					t.Skipf("host denies nested Bubblewrap namespaces: %s", strings.TrimSpace(string(output)))
+				if reason := reviewerNamespaceUnavailableReason(string(output), probeErr, ctx.Err()); reason != "" {
+					t.Skip(reason)
 				}
 			}
 			t.Fatal(reviewErr)
@@ -203,6 +204,77 @@ func TestReviewerSandboxAllowsScratchButDeniesSourceAndCredentials(t *testing.T)
 		if got, err := os.ReadFile(filepath.Join(root, ".swarm/active/REVIEW.md")); err != nil || string(got) != "VERDICT: APPROVED\n" {
 			t.Fatalf("isolated approval was not imported: %q, %v", got, err)
 		}
+	}
+}
+
+// reviewerNamespaceUnavailableReason consumes only the independent runtime probe,
+// never reviewer/helper diagnostics. Startup failures and interrupted probes do
+// not establish namespace availability.
+func reviewerNamespaceUnavailableReason(output string, probeErr, contextErr error) string {
+	var exitErr *exec.ExitError
+	if contextErr != nil || !errors.As(probeErr, &exitErr) || exitErr.ExitCode() <= 0 {
+		return ""
+	}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		for _, diagnostic := range []string{
+			"bwrap: Creating new namespace failed: Operation not permitted",
+			"bwrap: No permissions to create a new namespace",
+			"bwrap: No permissions to creating new namespace",
+		} {
+			if line == diagnostic || strings.HasPrefix(line, diagnostic+", ") || strings.HasPrefix(line, diagnostic+". ") {
+				return "host denies nested Bubblewrap user namespaces (" + diagnostic + ")"
+			}
+		}
+	}
+	return ""
+}
+
+func TestReviewerNamespaceUnavailableReason(t *testing.T) {
+	// Obtain a real completed nonzero process exit without depending on a shell
+	// or on namespace support. An unknown Go test flag exits before running tests.
+	_, failed := exec.Command(os.Args[0], "-issue280-invalid-test-flag").CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(failed, &exitErr) || exitErr.ExitCode() <= 0 {
+		t.Fatalf("expected completed failed fixture process: %v", failed)
+	}
+	const observed = "bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces."
+	tests := []struct {
+		name, output    string
+		err, contextErr error
+		want            string
+	}{
+		{"observed namespace denial", observed, failed, nil, "bwrap: No permissions to create a new namespace"},
+		{"older namespace denial", "bwrap: No permissions to creating new namespace, likely because the kernel does not allow non-privileged user namespaces.", failed, nil, "bwrap: No permissions to creating new namespace"},
+		{"namespace EPERM", "bwrap: Creating new namespace failed: Operation not permitted", failed, nil, "bwrap: Creating new namespace failed: Operation not permitted"},
+		{"successful probe despite denial text", observed, nil, nil, ""},
+		{"successful probe with helper failure", "reviewer changed readonly source", nil, nil, ""},
+		{"helper credentials", "model authentication or publishing credential boundary failed", failed, nil, ""},
+		{"helper home", "reviewer read coordinator home credentials", failed, nil, ""},
+		{"helper scratch", "reviewer cannot use its private scratch home", failed, nil, ""},
+		{"helper source", "reviewer changed readonly source", failed, nil, ""},
+		{"helper output", "review output channel unavailable", failed, nil, ""},
+		{"unrelated permission", "bwrap: open source: Permission denied", failed, nil, ""},
+		{"unrelated EPERM", "bwrap: bind mount: Operation not permitted", failed, nil, ""},
+		{"other namespace error", "bwrap: Creating new namespace failed: Invalid argument", failed, nil, ""},
+		{"separate diagnostic lines", "bwrap: unrelated failure\nOperation not permitted", failed, nil, ""},
+		{"missing prefix", "No permissions to create a new namespace", failed, nil, ""},
+		{"generic failure", "unexpected failure", failed, nil, ""},
+		{"arbitrary error", observed, errors.New("exit status 1"), nil, ""},
+		{"startup error", observed, &exec.Error{Name: "bwrap", Err: exec.ErrNotFound}, nil, ""},
+		{"timeout", observed, failed, context.DeadlineExceeded, ""},
+		{"cancelled", observed, failed, context.Canceled, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := ""
+			if tt.want != "" {
+				want = "host denies nested Bubblewrap user namespaces (" + tt.want + ")"
+			}
+			if got := reviewerNamespaceUnavailableReason(tt.output, tt.err, tt.contextErr); got != want {
+				t.Fatalf("reason = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

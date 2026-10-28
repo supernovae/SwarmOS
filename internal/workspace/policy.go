@@ -70,3 +70,33 @@ func ChangedPolicyPaths(ctx context.Context, root, oldBase, newBase string) ([]s
 	sort.Strings(paths)
 	return paths, nil
 }
+
+// HarnessPolicyWarning describes observed policy drift; it grants no authority.
+type HarnessPolicyWarning struct {
+	Reason               string   `json:"reason"`
+	IssueNumber          int      `json:"issue_number"`
+	PRNumber             int      `json:"pr_number,omitempty"`
+	ApprovedPolicyDigest string   `json:"approved_policy_digest"`
+	TargetPolicyDigest   string   `json:"target_policy_digest"`
+	TargetSHA            string   `json:"target_sha"`
+	RecoveryCommands     []string `json:"recovery_commands"`
+}
+
+// ObserveHarnessPolicy compares committed trees using the same identities as CI.
+func ObserveHarnessPolicy(ctx context.Context, root, base, recorded, target string) (*HarnessPolicyWarning, error) {
+	approved, err := PolicyTreeDigest(ctx, root, base)
+	if err != nil {
+		return nil, err
+	}
+	current, err := PolicyTreeDigest(ctx, root, target)
+	if err != nil {
+		return nil, err
+	}
+	if current == approved && (recorded == "" || current == recorded) {
+		return nil, nil
+	}
+	if recorded != "" && recorded != current {
+		approved = recorded
+	}
+	return &HarnessPolicyWarning{Reason: "target_policy_changed_since_approval", ApprovedPolicyDigest: approved, TargetPolicyDigest: current, TargetSHA: target}, nil
+}

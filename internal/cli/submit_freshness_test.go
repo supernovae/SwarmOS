@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,6 +192,7 @@ func TestSubmitFreshnessFetchFailure(t *testing.T) {
 			f := newCLIFixture(t)
 			n := f.create(t, "agent")
 			number := strconv.Itoa(n)
+			f.must(t, "issue", "edit", number, "--allow-harness-changes")
 			f.must(t, "issue", "approve", number)
 			f.must(t, "issue", "work", number, "--agent", "mock", "--headless")
 			base := f.state(t, n).BaseSHA
@@ -210,7 +213,7 @@ func TestSubmitFreshnessFetchFailure(t *testing.T) {
 			if got.Freshness.Status != "skipped" || got.Freshness.BaseDrift != nil || got.Freshness.BehindCount != nil {
 				t.Fatal(out)
 			}
-			if strings.Contains(out, f.root) || strings.Contains(out, "missing-secret-remote") {
+			if strings.Contains(out, "harness_policy_warning") || strings.Contains(out, f.root) || strings.Contains(out, "missing-secret-remote") {
 				t.Fatal("diagnostic leak", out)
 			}
 			if f.state(t, n).PRNumber == 0 {
@@ -370,11 +373,14 @@ func TestSubmitFreshnessInspectionFailure(t *testing.T) {
 	g("init", "-b", "main")
 	g("config", "user.name", "Fixture")
 	g("config", "user.email", "fixture@example.invalid")
-	freshnessWrite(t, root, "file", "base\n")
+	if err := os.MkdirAll(filepath.Join(root, ".swarm"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	freshnessWrite(t, root, ".swarm/config.yaml", "base\n")
 	g("add", ".")
 	g("commit", "-m", "base")
 	base := g("rev-parse", "HEAD")
-	freshnessWrite(t, root, "file", "tip\n")
+	freshnessWrite(t, root, ".swarm/config.yaml", "tip\n")
 	g("commit", "-am", "tip")
 	head := g("rev-parse", "HEAD")
 	if got := checkSubmissionFreshness(t.Context(), root, "main", strings.Repeat("0", 40), head); got.Status != "skipped" || got.BehindCount != nil {
@@ -395,7 +401,118 @@ func TestSubmitFreshnessInspectionFailure(t *testing.T) {
 	if got.Status != "skipped" || got.BaseDrift == nil || !*got.BaseDrift || got.BehindCount == nil || *got.BehindCount != 1 {
 		t.Fatal(got)
 	}
+	w, err := workspace.ObserveHarnessPolicy(t.Context(), root, base, "", got.TargetSHA)
+	if err != nil || w == nil {
+		t.Fatalf("merge failure lost policy observation: %+v %v", w, err)
+	}
 	if strings.Contains(got.advisory(), "private diagnostic") {
 		t.Fatal("diagnostic leak")
 	}
+}
+
+func TestSubmitHarnessPolicyWarning(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		for _, change := range []string{"none", "source", "config", "prompt"} {
+			for _, asJSON := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%t/%s/%t", allow, change, asJSON), func(t *testing.T) {
+					f := newCLIFixture(t)
+					number := f.create(t, "agent")
+					n := strconv.Itoa(number)
+					if allow {
+						iss, err := f.tracker.GetIssue(t.Context(), number)
+						if err != nil {
+							t.Fatal(err)
+						}
+						_, body, err := contract.EditWorkUnitIssue(number, iss.Title, iss.Body, contract.WorkUnitEdit{AllowHarnessChanges: &allow})
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err = f.tracker.UpdateIssueBody(t.Context(), number, body); err != nil {
+							t.Fatal(err)
+						}
+					}
+					f.must(t, "issue", "approve", n)
+					f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+					old := f.state(t, number)
+					path := map[string]string{"source": "ordinary.txt", "config": ".swarm/config.yaml", "prompt": ".swarm/prompts/developer.md"}[change]
+					if path != "" {
+						content, _ := os.ReadFile(filepath.Join(f.root, path))
+						freshnessWrite(t, f.root, path, string(content)+"\n# target change\n")
+						freshnessGit(t, f.root, "add", path)
+						freshnessGit(t, f.root, "commit", "-m", "target")
+					}
+					args := []string{"issue", "submit", n}
+					if asJSON {
+						args = append(args, "--json")
+					}
+					var stdoutBuffer, stderrBuffer policyWarningBuffer
+					observed := false
+					check := func() {
+						observed = true
+						if f.state(t, number).PRNumber != 0 {
+							t.Fatal("warning emitted after PR publication")
+						}
+					}
+					stdoutBuffer.onWarning, stderrBuffer.onWarning = check, check
+					cmd := f.command(nil)
+					cmd.SetOut(&stdoutBuffer)
+					cmd.SetErr(&stderrBuffer)
+					cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+					err := cmd.Execute()
+					out, stderr := stdoutBuffer.String(), stderrBuffer.String()
+					if err != nil {
+						t.Fatal(err, out, stderr)
+					}
+					want := allow && (change == "config" || change == "prompt")
+					if observed != want {
+						t.Fatal("warning callback presence", observed, want)
+					}
+					text := out
+					if asJSON {
+						text = stderr
+						var result map[string]json.RawMessage
+						if err := json.Unmarshal([]byte(out), &result); err != nil {
+							t.Fatal(err, out)
+						}
+						raw, exists := result["harness_policy_warning"]
+						if exists != want {
+							t.Fatalf("warning presence: %s", out)
+						}
+						if want {
+							var w workspace.HarnessPolicyWarning
+							if err := json.Unmarshal(raw, &w); err != nil {
+								t.Fatal(err)
+							}
+							if w.ApprovedPolicyDigest != old.PolicyTreeDigest || len(w.TargetPolicyDigest) < 40 || w.PRNumber == 0 || len(w.RecoveryCommands) != 2 {
+								t.Fatalf("%+v", w)
+							}
+						}
+					}
+					if strings.Contains(text, "Warning: target policy") != want {
+						t.Fatal(text)
+					}
+					if want && (!strings.Contains(text, "swarm issue approve "+n) || !strings.Contains(text, "pr rebase <PR> --resolve")) {
+						t.Fatal(text)
+					}
+					state := f.state(t, number)
+					if state.PRNumber == 0 || state.BaseSHA != old.BaseSHA || state.PolicyTreeDigest != old.PolicyTreeDigest {
+						t.Fatal("submission changed approval or failed")
+					}
+				})
+			}
+		}
+	}
+}
+
+// policyWarningBuffer observes output synchronously, before command completion.
+type policyWarningBuffer struct {
+	bytes.Buffer
+	onWarning func()
+}
+
+func (b *policyWarningBuffer) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "Warning: target policy changed") && b.onWarning != nil {
+		b.onWarning()
+	}
+	return b.Buffer.Write(p)
 }

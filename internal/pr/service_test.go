@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
@@ -25,6 +26,9 @@ import (
 // fixture submits a linked PR; a policy argument replaces the trusted
 // required checks committed at its base.
 func fixture(t *testing.T, policy ...string) (*Service, int, int, string) {
+	return fixtureHarness(t, false, policy...)
+}
+func fixtureHarness(t *testing.T, allow bool, policy ...string) (*Service, int, int, string) {
 	t.Helper()
 	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	controlHome := t.TempDir()
@@ -75,6 +79,9 @@ func fixture(t *testing.T, policy ...string) (*Service, int, int, string) {
 	ctx := context.Background()
 	tr := tracker.NewLocalTracker(root).WithUser("alice", "OWNER")
 	body := "```yaml swarm-workunit\nid: pr-test\nobjective: Revise linked PR\nconstraints: [Keep issue contract]\nacceptance: [Preserve PR identity]\nworkflow: feature\ngate: none\n```"
+	if allow {
+		body = strings.Replace(body, "workflow: feature", "allow_harness_changes: true\nworkflow: feature", 1)
+	}
 	if _, e := tr.CreateIssue(ctx, "unrelated", body, nil); e != nil {
 		t.Fatal(e)
 	}
@@ -1105,5 +1112,129 @@ func TestInspectionServiceUsesCommandSession(t *testing.T) {
 		if got := s.runnerOptions(sandbox.WithInspectionSession(context.Background(), session)).Inspections; got != session {
 			t.Fatal("service did not use the command's inspection session")
 		}
+	}
+}
+
+func TestPRSubmitHarnessPolicyWarning(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		for _, change := range []string{"none", "source", "config", "prompt"} {
+			t.Run(fmt.Sprintf("%t/%s", allow, change), func(t *testing.T) {
+				s, issue, number, _ := fixtureHarness(t, allow)
+				ctx := t.Context()
+				r, err := s.Work(ctx, Options{Number: number, Work: workflow.WorkOptions{AgentName: "mock"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(r.Worktree, "candidate.txt"), []byte("implementation"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := gitfixture.Command(t, "", "-C", r.Worktree, "add", "candidate.txt")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatal(err, string(out))
+				}
+				cmd = gitfixture.Command(t, "", "-C", r.Worktree, "commit", "-qm", "implementation")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatal(err, string(out))
+				}
+				cmd = gitfixture.Command(t, "", "-C", r.Worktree, "rev-parse", "HEAD")
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.Manager.RecordPRHead(ctx, issue, "alice", number, r.Branch, strings.TrimSpace(string(out))); err != nil {
+					t.Fatal(err)
+				}
+				// Validate the recorded candidate under the existing claim.
+				if _, err := s.Validate(ctx, number); err != nil {
+					t.Fatal(err)
+				}
+				old, err := s.Manager.GetCurrentState(ctx, issue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := map[string]string{"source": "ordinary.txt", "config": ".swarm/config.yaml", "prompt": ".swarm/prompts/developer.md"}[change]
+				if path != "" {
+					file := filepath.Join(s.Root, path)
+					body, _ := os.ReadFile(file)
+					if err := os.WriteFile(file, append(body, []byte("\n# target change\n")...), 0600); err != nil {
+						t.Fatal(err)
+					}
+					for _, args := range [][]string{{"add", path}, {"commit", "-qm", "target"}} {
+						cmd := gitfixture.Command(t, "", append([]string{"-C", s.Root}, args...)...)
+						if out, err := cmd.CombinedOutput(); err != nil {
+							t.Fatal(err, string(out))
+						}
+					}
+				}
+				calls := 0
+				s.OnHarnessPolicyWarning = func(w *workspace.HarnessPolicyWarning) {
+					calls++
+					pr, err := s.Tracker.GetPullRequest(ctx, number)
+					if err != nil || pr.HeadSHA != old.PRRevision.RemoteHeadSHA {
+						t.Fatal("warning after publication", err)
+					}
+				}
+				result, err := s.Submit(ctx, number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := allow && (change == "config" || change == "prompt")
+				if (result.HarnessPolicyWarning != nil) != want || (calls == 1) != want {
+					t.Fatalf("warning=%+v calls=%d", result.HarnessPolicyWarning, calls)
+				}
+				if result.State.BaseSHA != old.BaseSHA || result.State.PolicyTreeDigest != old.PolicyTreeDigest || result.Status != "submitted" {
+					t.Fatal("approval changed or not submitted")
+				}
+			})
+		}
+	}
+}
+
+func TestRebaseRoutineReapprovalSingleHint(t *testing.T) {
+	for _, policy := range []bool{false, true} {
+		t.Run(strconv.FormatBool(policy), func(t *testing.T) {
+			s, issue, number, _ := fixture(t)
+			before, err := s.Manager.GetCurrentState(t.Context(), issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(args ...string) string {
+				t.Helper()
+				cmd := gitfixture.Command(t, "", append([]string{"-C", s.Root}, args...)...)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatal(err, string(out))
+				}
+				return strings.TrimSpace(string(out))
+			}
+			reason := "requires a descendant target base"
+			if policy {
+				path := filepath.Join(s.Root, ".swarm/project.md")
+				if err := os.WriteFile(path, []byte("changed policy"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				run("add", ".swarm/project.md")
+				run("commit", "-qm", "policy")
+				reason = "policy tree changed"
+			} else {
+				tree := run("rev-parse", "HEAD^{tree}")
+				target := run("commit-tree", tree, "-m", "independent target")
+				run("update-ref", "HEAD", target)
+			}
+			_, err = s.Rebase(t.Context(), Options{Number: number, Resolve: true})
+			var approval *lease.TaskApprovalError
+			if !errors.As(err, &approval) || strings.Count(err.Error(), fmt.Sprintf("swarm issue approve %d", issue)) != 1 || !strings.Contains(err.Error(), reason) {
+				t.Fatalf("%v", err)
+			}
+			after, err := s.Manager.GetCurrentState(t.Context(), issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := json.Marshal(before)
+			a, _ := json.Marshal(after)
+			if string(a) != string(b) {
+				t.Fatal("refusal changed state")
+			}
+		})
 	}
 }

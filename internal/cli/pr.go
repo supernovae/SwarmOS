@@ -13,6 +13,7 @@ import (
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newPRCmd(rootOpts *RootOptions) *cobra.Command {
@@ -115,6 +116,15 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			}
 			service := rootOpts.prService(tr, manager)
 			service.Progress = session
+			if operation == "submit" {
+				service.OnHarnessPolicyWarning = func(w *workspace.HarnessPolicyWarning) {
+					out := cmd.OutOrStdout()
+					if asJSON {
+						out = cmd.ErrOrStderr()
+					}
+					fmt.Fprint(out, prepareHarnessPolicyWarning(w, w.IssueNumber, w.PRNumber, rootOpts))
+				}
+			}
 			if operation == "rebase" && opts.Resolve && progress {
 				service.ResolveLog = cmd.ErrOrStderr()
 			}

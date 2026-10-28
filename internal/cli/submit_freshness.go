@@ -14,6 +14,7 @@ import (
 )
 
 type submissionFreshness struct {
+	TargetSHA       string   `json:"-"`
 	Status          string   `json:"status"`
 	BaseDrift       *bool    `json:"base_drift"`
 	BehindCount     *int     `json:"behind_count"`
@@ -44,6 +45,7 @@ func checkSubmissionFreshnessFrom(ctx context.Context, root, upstreamRemote, bra
 		return f
 	}
 	tip := strings.TrimSpace(string(out))
+	f.TargetSHA = tip
 	drift := tip != base
 	f.BaseDrift = &drift
 	if !drift {
@@ -183,4 +185,28 @@ func submissionShellWord(s string) string {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// prepareHarnessPolicyWarning supplies CLI recovery commands and display text.
+func prepareHarnessPolicyWarning(w *workspace.HarnessPolicyWarning, issue, pr int, opts *RootOptions) string {
+	if w == nil {
+		return ""
+	}
+	w.IssueNumber, w.PRNumber = issue, pr
+	rebase := submissionRecoveryCommand(pr, opts)
+	if pr == 0 {
+		rebase = strings.Replace(rebase, "pr rebase 0 ", "pr rebase <PR> ", 1)
+	}
+	w.RecoveryCommands = []string{fmt.Sprintf("swarm issue approve %d", issue), rebase}
+	short := func(s string) string {
+		if len(s) > 12 {
+			return s[:12]
+		}
+		return s
+	}
+	text := fmt.Sprintf("Warning: target policy changed since approval (approved policy tree %s, target %s); CI may reject harness authorization.\nRun %s, then %s.\n", short(w.ApprovedPolicyDigest), short(w.TargetPolicyDigest), w.RecoveryCommands[0], rebase)
+	if pr == 0 {
+		text += "Replace <PR> with the submitted PR number.\n"
+	}
+	return text
 }

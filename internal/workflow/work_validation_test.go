@@ -105,11 +105,14 @@ func TestWorkRepairBriefAndPreExistingStop(t *testing.T) {
 		name         string
 		basePasses   bool
 		instructions string
+		role         string
 		want         validation.TestClassification
 		wantStop     bool
 	}{
 		{name: "pre-existing stops for a human", want: validation.TestPreExisting, wantStop: true},
 		{name: "operator instructions start the round", want: validation.TestPreExisting, instructions: "Work around the broken base test"},
+		{name: "developer instructions start the round", want: validation.TestPreExisting, instructions: "Fix base", role: "developer"},
+		{name: "tester instructions do not start the round", want: validation.TestPreExisting, wantStop: true, instructions: "Run tests", role: "tester"},
 		{name: "regression repairs", basePasses: true, want: validation.TestRegression},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -161,7 +164,15 @@ func TestWorkRepairBriefAndPreExistingStop(t *testing.T) {
 			if len(prompts) != 1 {
 				t.Fatalf("developer rounds before resumption: %d", len(prompts))
 			}
-			opts.Phase, opts.Instructions, opts.ClaimID = "implement", tc.instructions, res.State.Lease.ClaimID
+			opts.Phase, opts.ClaimID = "implement", res.State.Lease.ClaimID
+			switch tc.role {
+			case "developer":
+				opts.DeveloperInstructions = tc.instructions
+			case "tester":
+				opts.TesterInstructions = tc.instructions
+			default:
+				opts.Instructions = tc.instructions
+			}
 			_, err = e.ExecuteWork(t.Context(), opts)
 			if tc.wantStop {
 				if !errors.Is(err, ErrPreExistingFailures) || len(prompts) != 1 {

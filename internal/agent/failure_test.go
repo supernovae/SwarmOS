@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"os"
 	"os/exec"
 	"strings"
@@ -155,5 +156,29 @@ func TestProviderFailureExclusions(t *testing.T) {
 				t.Fatal("cause lost")
 			}
 		})
+	}
+}
+
+func TestCompletedImportFailureFormatting(t *testing.T) {
+	policy := errors.New("private policy details")
+	completed := &sandbox.CompletedImportError{Cause: policy}
+	t.Run("completed", func(t *testing.T) {
+		result := &RunResult{Output: "private output", Command: []string{"private command"}}
+		err := safeRunFailure(t.Context(), "tester", t.TempDir(), result, completed, true)
+		if !errors.Is(err, policy) || err.Error() != "tester run completed; returned changes were refused at import" {
+			t.Fatalf("error: %v", err)
+		}
+		if result.Output != "" || result.Command != nil || result.ExitCode != 0 {
+			t.Fatalf("result: %+v", result)
+		}
+		var classified interface{ FailureClass() string }
+		if !errors.As(err, &classified) || classified.FailureClass() != "" {
+			t.Fatal("import classified as provider failure")
+		}
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := safeRunFailure(ctx, "tester", "", nil, completed); !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "completed") {
+		t.Fatalf("cancellation: %v", err)
 	}
 }

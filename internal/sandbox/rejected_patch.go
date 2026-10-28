@@ -60,3 +60,20 @@ func rejectedPatch(ctx context.Context, input, result string) ([]byte, error) {
 	}
 	return patch, nil
 }
+
+// CompletedImportError records a successful harness execution followed by a
+// refusal to import another role's output. It preserves the policy cause.
+type CompletedImportError struct{ Cause error }
+
+func (e *CompletedImportError) Error() string {
+	return "run completed; returned changes were refused at import"
+}
+func (e *CompletedImportError) Unwrap() error { return e.Cause }
+
+func completedImport(err error, completed bool) error {
+	var policy interface{ RoleOutputImport() bool }
+	if completed && errors.As(err, &policy) && policy.RoleOutputImport() {
+		return &CompletedImportError{Cause: err}
+	}
+	return err
+}

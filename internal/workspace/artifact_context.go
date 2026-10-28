@@ -70,7 +70,7 @@ func renderArtifactContext(artifacts []contract.Artifact, role string) string {
 		} else {
 			fmt.Fprintf(&b, "### %s (by `%s`, verdict: `%s`)\n\n", a.Type, a.Producer, a.Verdict)
 		}
-		b.WriteString(strings.TrimSpace(WithoutUnmergedLessons(a.Body)) + "\n\n")
+		b.WriteString(strings.TrimSpace(WithoutUnmergedLessons(contract.CanonicalArtifactBody(a.Body))) + "\n\n")
 	}
 	return b.String()
 }

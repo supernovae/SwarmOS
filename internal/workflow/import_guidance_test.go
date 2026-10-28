@@ -15,7 +15,7 @@ import (
 	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
-const developerOutputRerun = " --phase implement --instructions 'Record notes, test results, and blocked checks in .swarm/active/IMPLEMENTATION.md. Do not change other .swarm/active/ files except LESSONS.md.'"
+const developerOutputRerun = " --phase implement --developer-instructions 'Record notes, test results, and blocked checks in .swarm/active/IMPLEMENTATION.md. Do not change other .swarm/active/ files except LESSONS.md.'"
 
 func TestDeveloperOutputRejectionGuidance(t *testing.T) {
 	const validation = ".swarm/active/VALIDATION.md"
@@ -53,7 +53,7 @@ func TestDeveloperOutputRejectionGuidance(t *testing.T) {
 					t.Fatalf("%s harness=%v fork=%v: developerOutputOnly=%v want %v (%v)", tc.name, harness, fork, got, hint, rejection.Paths)
 				}
 				reason := importRejectionReason(rejection, 7, 0)
-				if hint != strings.Contains(reason, "--instructions") || hint != strings.Contains(reason, "record results in .swarm/active/IMPLEMENTATION.md") {
+				if hint != strings.Contains(reason, "--developer-instructions") || hint != strings.Contains(reason, "record results in .swarm/active/IMPLEMENTATION.md") {
 					t.Fatalf("%s harness=%v fork=%v: reason %q", tc.name, harness, fork, reason)
 				}
 			}
@@ -199,7 +199,7 @@ func TestRejectedImportNonRecoverableSavesNothing(t *testing.T) {
 func TestImportRejectionReasonWithPatch(t *testing.T) {
 	const name = "rejected-0123456789abcdef0123456789abcdef.patch"
 	saved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, Patch: "/home/someone/.local/state/swarm/recovery/" + name}
-	unsaved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, PatchNote: "binary or oversized changes"}
+	unsaved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, PatchNote: "a complete recovery patch was unavailable"}
 	for _, tc := range []struct {
 		rejection *importRejection
 		issue, pr int
@@ -207,7 +207,7 @@ func TestImportRejectionReasonWithPatch(t *testing.T) {
 	}{
 		{saved, 7, 0, "rerun with swarm issue work 7 --phase implement; or keep the other changes: recovery patch " + name + " was saved to your state directory; recover with swarm issue recover-import 7 " + name},
 		{saved, 7, 42, "rerun with swarm pr work 42 --phase implement; or keep the other changes: recovery patch " + name + " was saved to your state directory; recover with swarm pr recover-import 42 " + name},
-		{unsaved, 7, 0, "rerun with swarm issue work 7 --phase implement; no recovery patch: binary or oversized changes"},
+		{unsaved, 7, 0, "rerun with swarm issue work 7 --phase implement; no recovery patch: a complete recovery patch was unavailable"},
 	} {
 		got := importRejectionReason(tc.rejection, tc.issue, tc.pr)
 		if !strings.HasSuffix(got, tc.want) || strings.Contains(got, "/home/") {
@@ -285,5 +285,47 @@ func TestDeletionImportRejection(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCompletedTesterRejectionReason(t *testing.T) {
+	for _, pr := range []int{0, 42} {
+		e, issue := budgetEngine(t)
+		mock := &agent.MockRunner{}
+		e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+			return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+				if req.Role != "tester" {
+					return mock.Run(ctx, req)
+				}
+				err := req.CheckImport(ctx, []string{".swarm/active/IMPLEMENTATION.md"}, nil)
+				return &agent.RunResult{Role: "tester"}, &sandbox.CompletedImportError{Cause: err}
+			}}, nil
+		}
+		// PR routing is tested directly: a PR ExecuteWork requires its revision state.
+		res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+		var rejection *importRejection
+		if !errors.As(err, &rejection) || !rejection.Completed {
+			t.Fatalf("classification: %v", err)
+		}
+		reason := importRejectionReason(rejection, issue.Number, pr)
+		rerun := "swarm issue work " + strconv.Itoa(issue.Number)
+		if pr != 0 {
+			rerun = "swarm pr work 42"
+		}
+		for _, text := range []string{reason, err.Error(), res.State.NextPhaseReason} {
+			for _, want := range []string{"tester run completed", ".swarm/active/IMPLEMENTATION.md", "--phase implement", "--tester-instructions"} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("missing %s: %s", want, text)
+				}
+			}
+			for _, forbidden := range []string{"agent failed", "binary or oversized changes"} {
+				if strings.Contains(text, forbidden) {
+					t.Fatal(text)
+				}
+			}
+		}
+		if !strings.Contains(reason, rerun) {
+			t.Fatal(reason)
+		}
 	}
 }

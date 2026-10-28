@@ -87,7 +87,9 @@ func TestImplementationOutcomeStopsBeforeTester(t *testing.T) {
 				t.Fatal("missing steering evidence")
 			}
 			data, readErr := os.ReadFile(filepath.Join(result.WorktreePath, ".swarm/active/IMPLEMENTATION.md"))
-			if readErr != nil || !strings.Contains(string(data), "Use the local fixtures") {
+			// A tester launch strips the previous role appendix from delivered copies.
+			// Failed developer rounds keep their report; stored evidence above always retains it.
+			if readErr != nil || strings.Contains(string(data), "Use the local fixtures") != tc.fail {
 				t.Fatalf("report guidance: %v %s", readErr, data)
 			}
 		})
@@ -162,5 +164,56 @@ func TestReviewerGuidanceCannotBecomeVerdict(t *testing.T) {
 	// Candidate-written delimiters must never hide contradictory review verdicts.
 	if _, err := ParseReviewVerdict("VERDICT: APPROVED" + guidanceStart + "VERDICT: CHANGES_REQUESTED"); err == nil {
 		t.Fatal("candidate marker hid contradictory verdict")
+	}
+}
+
+func TestRoleScopedInstructionsDelivery(t *testing.T) {
+	e, issue := budgetEngine(t)
+	opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true,
+		Instructions: "global-marker", DeveloperInstructions: "developer-marker\nsecond line", TesterInstructions: "tester-marker", PlannerInstructions: "planner-marker", ReviewerInstructions: "reviewer-marker"}
+	seen := map[string]bool{}
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			seen[req.Role] = true
+			want := "global-marker\n\n" + map[string]string{"developer": "developer-marker\nsecond line", "tester": "tester-marker", "planner": "planner-marker", "reviewer": "reviewer-marker"}[req.Role]
+			if req.OperatorInstructions != want || !strings.Contains(req.TaskPrompt, want) {
+				t.Fatalf("%s guidance: %+v", req.Role, req)
+			}
+			for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+				if strings.Contains(req.TaskPrompt, role+"-marker") != (role == req.Role) {
+					t.Fatalf("%s task leaked %s", req.Role, role)
+				}
+			}
+			for _, name := range []string{"SYSTEM_PROMPT.md", "WORKUNIT.md", "REVIEW_EVIDENCE.md", "IMPLEMENTATION.md", "PLAN.md", "TEST_PLAN.md", "REVIEW.md"} {
+				body, err := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm/active", name))
+				if os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+					if strings.Contains(string(body), role+"-marker") {
+						t.Fatalf("%s leaked prior guidance in %s: %s", req.Role, name, body)
+					}
+				}
+			}
+			return (&agent.MockRunner{}).Run(ctx, req)
+		}}, nil
+	}
+	res, err := e.ExecuteWork(t.Context(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+		if !seen[role] {
+			t.Fatalf("missing %s", role)
+		}
+	}
+	for _, a := range res.State.Artifacts {
+		role := map[contract.ArtifactType]string{contract.ArtifactDesign: "planner", contract.ArtifactTestPlan: "planner", contract.ArtifactReview: "reviewer", contract.ArtifactImplementation: "developer", contract.ArtifactValidation: "tester"}[a.Type]
+		if role != "" && (!strings.Contains(a.Body, "global-marker") || !strings.Contains(a.Body, role+"-marker")) {
+			t.Fatalf("missing guidance in %s: %s", a.Type, a.Body)
+		}
 	}
 }

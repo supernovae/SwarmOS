@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
@@ -27,7 +28,7 @@ func RenderReviewEvidence(e tracker.ReviewEvidence) []byte {
 	b.WriteString(unavailable + "\n")
 	quote := func(s string) string { q := quoteCI(s); return q[strings.Index(q, "> "):] }
 	for _, r := range e.Records {
-		body := normalizeCI(r.Body)
+		body := normalizeCI(contract.CanonicalArtifactBody(r.Body))
 		if len(body) > tracker.ReviewBodyLimit {
 			body = body[:tracker.ReviewBodyLimit]
 			for !utf8.ValidString(body) {

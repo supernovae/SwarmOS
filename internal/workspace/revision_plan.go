@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
 )
 
@@ -49,12 +50,12 @@ func WriteRevisionContext(root string, c *RevisionPlanContext) error {
 	defer active.Close()
 	files := map[string]string{"ORIGINAL_PLAN.md": "", "ORIGINAL_TEST_PLAN.md": "", "ACCEPTED_REVISIONS.md": "", "REVISION_CONTEXT.md": ""}
 	if c != nil {
-		files["ORIGINAL_PLAN.md"] = c.Original.Plan
-		files["ORIGINAL_TEST_PLAN.md"] = c.Original.TestPlan
+		files["ORIGINAL_PLAN.md"] = contract.CanonicalArtifactBody(c.Original.Plan)
+		files["ORIGINAL_TEST_PLAN.md"] = contract.CanonicalArtifactBody(c.Original.TestPlan)
 		var b strings.Builder
 		b.WriteString("# Previously accepted revisions\n\n")
 		for i, p := range c.Accepted {
-			fmt.Fprintf(&b, "## Accepted revision %d\n\n%s\n\n### Test plan\n\n%s\n", i+1, p.Plan, p.TestPlan)
+			fmt.Fprintf(&b, "## Accepted revision %d\n\n%s\n\n### Test plan\n\n%s\n", i+1, contract.CanonicalArtifactBody(p.Plan), contract.CanonicalArtifactBody(p.TestPlan))
 		}
 		files["ACCEPTED_REVISIONS.md"] = b.String()
 		files["REVISION_CONTEXT.md"] = RevisionGuidance

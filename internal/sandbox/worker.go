@@ -543,7 +543,7 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 		return nil
 	}
 	if err := checkImport(ctx, opts, initial, manifest); err != nil {
-		return preserveRejected(ctx, opts, input, extracted, err)
+		return completedImport(preserveRejected(ctx, opts, input, extracted, err), runErr == nil && !paused)
 	}
 	if err := importWorker(ctx, original, extracted, initial, manifest); err != nil {
 		return err

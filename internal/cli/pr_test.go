@@ -96,7 +96,24 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	issueTree := workspace.WorktreePath(f.root, issue)
 	issueHead := prGit(t, issueTree, "rev-parse", "HEAD")
 	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")
-	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--instructions", "Fix the implementation within the approved acceptance criteria", "--progress=false", "--json"))
+	worked := readPROutcome(t, f.must(t, "pr", "work", p, "--agent", "mock", "--instructions", "Fix the implementation within the approved acceptance criteria", "--developer-instructions", "dev-pr-marker", "--tester-instructions", "test-pr-marker", "--planner-instructions", "plan-pr-marker", "--reviewer-instructions", "review-pr-marker", "--progress=false", "--json"))
+	for _, a := range worked.State.Artifacts {
+		own := map[contract.ArtifactType]string{contract.ArtifactDesign: "plan", contract.ArtifactTestPlan: "plan", contract.ArtifactReview: "review", contract.ArtifactImplementation: "dev", contract.ArtifactValidation: "test"}[a.Type]
+		for _, marker := range []string{"plan", "review", "dev", "test"} {
+			if strings.Contains(a.Body, marker+"-pr-marker") && marker != own {
+				t.Fatalf("PR role guidance leaked: %s", a.Body)
+			}
+		}
+	}
+	found := false
+	for _, a := range worked.State.Artifacts {
+		if a.Type == contract.ArtifactImplementation && strings.Contains(a.Body, "dev-pr-marker") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("PR service dropped developer guidance")
+	}
 	if worked.State.RevisionPlan == nil {
 		t.Fatal("approved original missing from revision")
 	}

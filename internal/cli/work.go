@@ -17,6 +17,7 @@ import (
 
 func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, plannerAgent, reviewerAgent, developerAgent, testerAgent, phase, gate, instructions string
+	var roleInstructions workflow.WorkOptions
 	var headless, handoff, nextReady, allRepos, jsonOutput, dryRun bool
 	var progressOutput bool
 	cmd := &cobra.Command{
@@ -64,6 +65,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				OnBaseChange: baseChangePrinter(progressWriter(cmd)),
 				AgentName:    agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
 				DeveloperAgent: developerAgent, TesterAgent: testerAgent, Phase: phase,
+				DeveloperInstructions: roleInstructions.DeveloperInstructions, TesterInstructions: roleInstructions.TesterInstructions, PlannerInstructions: roleInstructions.PlannerInstructions, ReviewerInstructions: roleInstructions.ReviewerInstructions,
 				Instructions: instructions, Gate: contract.GateMode(gate), Headless: headless, Handoff: handoff,
 				ForkMode: rootOpts.Fork, ForkRemote: rootOpts.effectiveForkRemote(),
 			}
@@ -196,6 +198,10 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().StringVar(&reviewerAgent, "reviewer-agent", "", "Configured reviewer override")
 	cmd.Flags().StringVar(&developerAgent, "developer-agent", "", "Configured developer override")
 	cmd.Flags().StringVar(&testerAgent, "tester-agent", "", "Configured tester override")
+	cmd.Flags().StringVar(&roleInstructions.DeveloperInstructions, "developer-instructions", "", "Additional operator guidance for the developer role")
+	cmd.Flags().StringVar(&roleInstructions.TesterInstructions, "tester-instructions", "", "Additional operator guidance for the tester role")
+	cmd.Flags().StringVar(&roleInstructions.PlannerInstructions, "planner-instructions", "", "Additional operator guidance for the planner role")
+	cmd.Flags().StringVar(&roleInstructions.ReviewerInstructions, "reviewer-instructions", "", "Additional operator guidance for the reviewer role")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "Additional operator instructions for the run")
 	cmd.Flags().StringVar(&phase, "phase", "all", "Phase: all, plan, review, or implement")
 	cmd.Flags().StringVar(&gate, "gate", "", "Require gate none, agent, or human; cannot weaken policy")

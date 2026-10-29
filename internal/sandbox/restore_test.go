@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -647,4 +649,420 @@ func TestRestoreHomeContainedRepository(t *testing.T) {
 			t.Fatalf("overlap missed: %q", source)
 		}
 	}
+}
+
+// restoreAdmissionListener deliberately returns one successful Accept after Close.
+// Its release is owned by the test, never by cancellation or a timer.
+type restoreAdmissionListener struct {
+	net.Listener
+	conn                     net.Conn
+	entered, release, closed chan struct{}
+	once                     sync.Once
+	accepts                  atomic.Int64
+}
+
+func (l *restoreAdmissionListener) Accept() (net.Conn, error) {
+	if l.accepts.Add(1) == 1 {
+		close(l.entered)
+		<-l.release
+		return l.conn, nil
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+func (l *restoreAdmissionListener) Close() error { l.once.Do(func() { close(l.closed) }); return nil }
+
+type restoreObservedConn struct {
+	net.Conn
+	once             sync.Once
+	closed, reading  chan struct{}
+	readOnce         sync.Once
+	deadlines, reads atomic.Int64
+	closeErr         error
+}
+
+func (c *restoreObservedConn) Close() error {
+	c.once.Do(func() { _ = c.Conn.Close(); close(c.closed) })
+	return c.closeErr
+}
+func (c *restoreObservedConn) Read(p []byte) (int, error) {
+	c.reads.Add(1)
+	c.readOnce.Do(func() { close(c.reading) })
+	return c.Conn.Read(p)
+}
+func (c *restoreObservedConn) SetDeadline(d time.Time) error {
+	c.deadlines.Add(1)
+	return c.Conn.SetDeadline(d)
+}
+func restoreObservedPipe(t *testing.T) (*restoreObservedConn, net.Conn) {
+	t.Helper()
+	a, b, err := newRestoreTestPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &restoreObservedConn{Conn: a, closed: make(chan struct{}), reading: make(chan struct{})}
+	t.Cleanup(func() { _ = c.Close(); _ = b.Close() })
+	return c, b
+}
+func restoreAwait(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal(what)
+	}
+}
+
+type restoreLifecycleTest struct {
+	mu       *sync.Mutex
+	active   map[net.Conn]bool
+	accepted *atomic.Int64
+	cancel   context.CancelFunc
+	close    func() error
+	wait     func()
+	fail     func()
+}
+
+func restoreLifecycle(t *testing.T, kind string, l net.Listener, dial func(context.Context) (net.Conn, error)) restoreLifecycleTest {
+	t.Helper()
+	if kind == "broker" {
+		b := newRegistryBroker(t.Context(), l, nil, nil)
+		b.serve()
+		return restoreLifecycleTest{&b.mu, b.active, &b.accepted, b.cancel, b.close, b.wg.Wait, b.fail}
+	}
+	b := startRestoreBridge(t.Context(), l, dial)
+	return restoreLifecycleTest{&b.mu, b.active, &b.accepted, b.cancel, b.close, b.wg.Wait, nil}
+}
+func (h restoreLifecycleTest) assertEmpty(t *testing.T, sentinel net.Conn) {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.active, sentinel)
+	if len(h.active) != 0 || h.accepted.Load() != 0 {
+		t.Errorf("remaining connections=%d accepted=%d", len(h.active), h.accepted.Load())
+	}
+}
+
+// The sentinel signal followed by this mutex acquisition proves the old
+// locked drain has finished. The sentinel has no worker that could remove it.
+func (h restoreLifecycleTest) drainBarrier(t *testing.T, sentinel net.Conn) {
+	t.Helper()
+	h.mu.Lock()
+	present := h.active[sentinel]
+	h.mu.Unlock()
+	if !present {
+		t.Fatal("drain sentinel unexpectedly removed")
+	}
+}
+
+func TestRestoreShutdownAdmission(t *testing.T) {
+	for _, kind := range []string{"broker", "bridge"} {
+		t.Run(kind, func(t *testing.T) {
+			client, peer := restoreObservedPipe(t)
+			if kind == "broker" {
+				if _, err := io.WriteString(peer, "CONNECT registry.example:443 HTTP/1.1\r\nHost:"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			upstream, _ := restoreObservedPipe(t)
+			sentinel, _ := restoreObservedPipe(t)
+			l := &restoreAdmissionListener{conn: client, entered: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+			var release sync.Once
+			unblock := func() { release.Do(func() { close(l.release) }) }
+			var dials atomic.Int64
+			h := restoreLifecycle(t, kind, l, func(context.Context) (net.Conn, error) { dials.Add(1); return upstream, nil })
+			done := make(chan struct{})
+			started := false
+			// Cleanup rescues the old blocked header without using peer closure for success.
+			cleanup := func() {
+				unblock()
+				h.cancel()
+				_ = l.Close()
+				_ = client.Close()
+				_ = upstream.Close()
+				_ = sentinel.Close()
+				_ = h.close()
+				h.wait()
+				if started {
+					restoreAwait(t, done, "close worker survived cleanup")
+				}
+				h.assertEmpty(t, sentinel)
+			}
+			t.Cleanup(cleanup)
+			restoreAwait(t, l.entered, "Accept not entered")
+			h.mu.Lock()
+			h.active[sentinel] = true
+			h.mu.Unlock()
+			started = true
+			go func() { _ = h.close(); close(done) }()
+			restoreAwait(t, sentinel.closed, "sentinel not closed")
+			h.drainBarrier(t, sentinel)
+			unblock()
+			completed := false
+			select {
+			case <-done:
+				completed = true
+			case <-time.After(time.Second):
+				t.Error("partial handshake blocked teardown")
+			}
+			if !completed {
+				cleanup()
+			}
+			if dials.Load() != 0 {
+				t.Errorf("late client invoked dial: %d", dials.Load())
+			}
+			restoreAwait(t, client.closed, "late client not closed")
+			h.assertEmpty(t, sentinel)
+		})
+	}
+}
+func TestRestoreShutdownLateUpstream(t *testing.T) {
+	client, _ := restoreObservedPipe(t)
+	upstream, _ := restoreObservedPipe(t)
+	sentinel, _ := restoreObservedPipe(t)
+	l := newRestoreTestListener()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	h := restoreLifecycle(t, "bridge", l, func(context.Context) (net.Conn, error) { close(entered); <-release; return upstream, nil })
+	done := make(chan struct{})
+	started := false
+	t.Cleanup(func() {
+		unblock()
+		h.cancel()
+		_ = l.Close()
+		_ = client.Close()
+		_ = upstream.Close()
+		_ = sentinel.Close()
+		_ = h.close()
+		h.wait()
+		if started {
+			restoreAwait(t, done, "close worker survived cleanup")
+		}
+		h.assertEmpty(t, sentinel)
+	})
+	select {
+	case l.pending <- client:
+	case <-time.After(time.Second):
+		t.Fatal("client not accepted")
+	}
+	restoreAwait(t, entered, "dial not entered")
+	h.mu.Lock()
+	h.active[sentinel] = true
+	h.mu.Unlock()
+	started = true
+	go func() { _ = h.close(); close(done) }()
+	restoreAwait(t, sentinel.closed, "sentinel not closed")
+	h.drainBarrier(t, sentinel)
+	unblock()
+	restoreAwait(t, done, "late upstream blocked teardown")
+	restoreAwait(t, upstream.closed, "late upstream not closed")
+	if upstream.deadlines.Load() != 0 || upstream.reads.Load() != 0 {
+		t.Errorf("late upstream forwarding setup=%d reads=%d", upstream.deadlines.Load(), upstream.reads.Load())
+	}
+	h.assertEmpty(t, sentinel)
+}
+
+func TestRestoreShutdownConcurrentClose(t *testing.T) {
+	for _, kind := range []string{"broker", "bridge"} {
+		t.Run(kind, func(t *testing.T) {
+			// This socket has no worker, so its cleanup error must come from the snapshot.
+			sentinel, _ := restoreObservedPipe(t)
+			sentinel.closeErr = io.ErrShortWrite
+			l := restoreCloseFailure{newRestoreTestListener()}
+			h := restoreLifecycle(t, kind, l, nil)
+			t.Cleanup(func() { _ = h.close() })
+			h.mu.Lock()
+			h.active[sentinel] = true
+			h.mu.Unlock()
+			const callers = 8
+			results := make(chan error, callers)
+			for i := 0; i < callers; i++ {
+				go func() { results <- h.close() }()
+			}
+			for i := 0; i < callers; i++ {
+				select {
+				case err := <-results:
+					if !errors.Is(err, io.ErrShortWrite) || !errors.Is(err, io.ErrUnexpectedEOF) {
+						t.Errorf("lost cleanup error: %v", err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("concurrent close blocked")
+				}
+			}
+			if err := h.close(); !errors.Is(err, io.ErrShortWrite) || !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Error("repeated close lost error", err)
+			}
+			restoreAwait(t, sentinel.closed, "socket not closed")
+			h.assertEmpty(t, sentinel)
+		})
+	}
+}
+
+func TestRestoreShutdownCancellation(t *testing.T) {
+	for _, kind := range []string{"broker", "bridge"} {
+		t.Run(kind, func(t *testing.T) {
+			client, _ := restoreObservedPipe(t)
+			sentinel, _ := restoreObservedPipe(t)
+			l := &restoreAdmissionListener{conn: client, entered: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(l.release) }) }
+			var dials atomic.Int64
+			h := restoreLifecycle(t, kind, l, func(context.Context) (net.Conn, error) { dials.Add(1); return nil, io.EOF })
+			t.Cleanup(func() { unblock(); h.cancel(); _ = client.Close(); _ = h.close() })
+			restoreAwait(t, l.entered, "Accept not entered")
+			h.mu.Lock()
+			h.active[sentinel] = true
+			h.mu.Unlock()
+			h.cancel()
+			restoreAwait(t, sentinel.closed, "cancellation did not drain sockets")
+			h.drainBarrier(t, sentinel)
+			unblock()
+			done := make(chan struct{})
+			go func() { _ = h.close(); close(done) }()
+			restoreAwait(t, done, "canceled admission blocked close")
+			restoreAwait(t, client.closed, "canceled client not closed")
+			if dials.Load() != 0 {
+				t.Error("canceled client reached dial")
+			}
+			h.assertEmpty(t, sentinel)
+		})
+	}
+	t.Run("dial", func(t *testing.T) {
+		client, _ := restoreObservedPipe(t)
+		upstream, _ := restoreObservedPipe(t)
+		sentinel, _ := restoreObservedPipe(t)
+		l := newRestoreTestListener()
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		h := restoreLifecycle(t, "bridge", l, func(context.Context) (net.Conn, error) { close(entered); <-release; return upstream, nil })
+		t.Cleanup(func() { unblock(); h.cancel(); _ = client.Close(); _ = upstream.Close(); _ = h.close() })
+		select {
+		case l.pending <- client:
+		case <-time.After(time.Second):
+			t.Fatal("Accept blocked")
+		}
+		restoreAwait(t, entered, "dial not entered")
+		h.mu.Lock()
+		h.active[sentinel] = true
+		h.mu.Unlock()
+		h.cancel()
+		restoreAwait(t, sentinel.closed, "cancellation did not drain")
+		h.drainBarrier(t, sentinel)
+		unblock()
+		done := make(chan struct{})
+		go func() { _ = h.close(); close(done) }()
+		restoreAwait(t, done, "canceled dial blocked close")
+		restoreAwait(t, upstream.closed, "canceled dial socket not closed")
+		if upstream.deadlines.Load() != 0 || upstream.reads.Load() != 0 {
+			t.Error("canceled dial started forwarding")
+		}
+		h.assertEmpty(t, sentinel)
+	})
+}
+
+func TestRestoreShutdownPolicyFailure(t *testing.T) {
+	client, _ := restoreObservedPipe(t)
+	sentinel, _ := restoreObservedPipe(t)
+	l := &restoreAdmissionListener{conn: client, entered: make(chan struct{}), release: make(chan struct{}), closed: make(chan struct{})}
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(l.release) }) }
+	h := restoreLifecycle(t, "broker", l, nil)
+	t.Cleanup(func() { unblock(); h.cancel(); _ = client.Close(); _ = h.close() })
+	restoreAwait(t, l.entered, "Accept not entered")
+	h.mu.Lock()
+	h.active[sentinel] = true
+	h.mu.Unlock()
+	failed := make(chan struct{})
+	go func() { h.fail(); close(failed) }()
+	restoreAwait(t, sentinel.closed, "policy failure did not drain")
+	h.drainBarrier(t, sentinel)
+	unblock()
+	restoreAwait(t, failed, "failure waited on worker")
+	done := make(chan struct{})
+	var result error
+	go func() { result = h.close(); close(done) }()
+	restoreAwait(t, done, "policy failure blocked close")
+	if result == nil || !strings.Contains(result.Error(), "rejected transport") {
+		t.Error("lost policy error", result)
+	}
+	restoreAwait(t, client.closed, "late client survived policy failure")
+	h.assertEmpty(t, sentinel)
+}
+
+func TestRestoreShutdownIdleCopies(t *testing.T) {
+	client, _ := restoreObservedPipe(t)
+	upstream, _ := restoreObservedPipe(t)
+	l := newRestoreTestListener()
+	h := restoreLifecycle(t, "bridge", l, func(context.Context) (net.Conn, error) { return upstream, nil })
+	t.Cleanup(func() { _ = client.Close(); _ = upstream.Close(); _ = h.close() })
+	select {
+	case l.pending <- client:
+	case <-time.After(time.Second):
+		t.Fatal("Accept blocked")
+	}
+	restoreAwait(t, client.reading, "client copy not reading")
+	restoreAwait(t, upstream.reading, "upstream copy not reading")
+	done := make(chan struct{})
+	go func() { _ = h.close(); close(done) }()
+	restoreAwait(t, done, "idle copies survived close")
+	restoreAwait(t, client.closed, "client not closed")
+	restoreAwait(t, upstream.closed, "upstream not closed")
+	h.assertEmpty(t, nil)
+}
+
+func TestRestoreShutdownDialFailure(t *testing.T) {
+	client, _ := restoreObservedPipe(t)
+	l := newRestoreTestListener()
+	h := restoreLifecycle(t, "bridge", l, func(context.Context) (net.Conn, error) { return nil, io.ErrUnexpectedEOF })
+	t.Cleanup(func() { _ = client.Close(); _ = h.close() })
+	select {
+	case l.pending <- client:
+	case <-time.After(time.Second):
+		t.Fatal("Accept blocked")
+	}
+	restoreAwait(t, l.closed, "dial failure did not stop listener")
+	done := make(chan struct{})
+	go func() { _ = h.close(); close(done) }()
+	restoreAwait(t, done, "dial failure blocked close")
+	restoreAwait(t, client.closed, "dial failure leaked client")
+	h.assertEmpty(t, nil)
+}
+
+func TestRestoreShutdownBridgeConnectionBounds(t *testing.T) {
+	l := newRestoreTestListener()
+	entered := make(chan struct{}, 16)
+	h := restoreLifecycle(t, "bridge", l, func(ctx context.Context) (net.Conn, error) {
+		entered <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	var clients []*restoreObservedConn
+	t.Cleanup(func() {
+		for _, c := range clients {
+			_ = c.Close()
+		}
+		_ = h.close()
+	})
+	for i := 0; i < 17; i++ {
+		c, _ := restoreObservedPipe(t)
+		clients = append(clients, c)
+		select {
+		case l.pending <- c:
+		case <-time.After(time.Second):
+			t.Fatal("Accept blocked")
+		}
+		if i < 16 {
+			restoreAwait(t, entered, "admitted client did not dial")
+		}
+	}
+	restoreAwait(t, l.closed, "connection limit did not stop listener")
+	done := make(chan struct{})
+	go func() { _ = h.close(); close(done) }()
+	restoreAwait(t, done, "limit cleanup blocked")
+	for _, c := range clients {
+		restoreAwait(t, c.closed, "client survived limit cleanup")
+	}
+	h.assertEmpty(t, nil)
 }

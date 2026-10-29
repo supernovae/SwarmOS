@@ -13,21 +13,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve release commit
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
   checks:
-    uses: ./.github/workflows/swarm-validate.yml
-    # Grant everything the called jobs request; a missing scope fails the run at startup.
+    needs: resolve
+    uses: ./.github/workflows/full-validation.yml
+    with:
+      commit: ${{ needs.resolve.outputs.commit }}
+    # Full validation runs with read-only permissions and receives no release secrets.
     permissions:
       contents: read
       issues: read
 
   eligibility:
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.resolve.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify release commit
+        env:
+          RELEASE_SHA: ${{ needs.resolve.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
       - name: Require release commit on default branch
         if: startsWith(github.ref, 'refs/tags/v')
         env:
@@ -42,14 +65,19 @@ jobs:
 
   snapshot:
     if: github.event_name == 'workflow_dispatch'
-    needs: [checks, eligibility]
+    needs: [resolve, checks, eligibility]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.resolve.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify release commit
+        env:
+          RELEASE_SHA: ${{ needs.resolve.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
@@ -61,7 +89,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [checks, eligibility]
+    needs: [resolve, checks, eligibility]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: release
@@ -72,8 +100,13 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ needs.resolve.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify release commit
+        env:
+          RELEASE_SHA: ${{ needs.resolve.outputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod

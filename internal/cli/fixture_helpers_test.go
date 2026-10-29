@@ -6,16 +6,22 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/agent"
@@ -225,6 +231,7 @@ func initializeCLIFixture(t *testing.T, root string) error {
 // cliFixtureSeed publishes one complete tree. Initialization errors are sticky;
 // no caller's testing.T, cleanup, or initializer is retained after populate.
 type cliFixtureSeed struct {
+	observe  cliFixtureInputProvider // Immutable after construction; nil uses real observations.
 	mu       sync.Mutex
 	selected bool
 	key      string
@@ -234,47 +241,103 @@ type cliFixtureSeed struct {
 
 var pristineCLIFixture cliFixtureSeed
 
-func cliFixtureInputKey(root string) (string, bool, error) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return "", false, err
+// Stages preserve the original eligibility short circuit. Providers are owned by
+// one seed and installed before publication, rather than changing process state.
+type cliFixtureInputProvider struct {
+	root     func(string) (bool, error)
+	template func() string
+	config   func(int) error
+	identity func(string) (string, []string)
+}
+type cliFixtureInput struct {
+	empty    bool
+	err      error
+	template string
+	config   [4]error
+	basename string
+	env      []string
+}
+
+func realCLIFixtureInputProvider() cliFixtureInputProvider {
+	return cliFixtureInputProvider{
+		root:     func(root string) (bool, error) { e, err := os.ReadDir(root); return len(e) == 0, err },
+		template: func() string { return os.Getenv("GIT_TEMPLATE_DIR") },
+		config: func(i int) error {
+			paths := []string{filepath.Join(os.Getenv("HOME"), ".gitconfig"), filepath.Join(os.Getenv("HOME"), ".config", "git", "config"), filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "config"), "/etc/gitconfig"}
+			_, err := os.Lstat(paths[i])
+			return err
+		},
+		identity: func(root string) (string, []string) { return filepath.Base(root), os.Environ() },
 	}
-	if len(entries) != 0 {
+}
+func observeCLIFixtureInput(root string, p cliFixtureInputProvider) cliFixtureInput {
+	var o cliFixtureInput
+	o.empty, o.err = p.root(root)
+	if o.err != nil || !o.empty {
+		return o
+	}
+	o.template = p.template()
+	if o.template != "" {
+		return o
+	}
+	for i := range o.config {
+		o.config[i] = p.config(i)
+		if !os.IsNotExist(o.config[i]) {
+			return o
+		}
+	}
+	o.basename, o.env = p.identity(root)
+	o.env = append([]string(nil), o.env...)
+	return o
+}
+func decideCLIFixtureInput(o cliFixtureInput) (string, bool, error) {
+	if o.err != nil {
+		return "", false, o.err
+	}
+	if !o.empty || o.template != "" {
 		return "", false, nil
 	}
-	// Custom templates can inject hooks, links and path-bound configuration.
-	if os.Getenv("GIT_TEMPLATE_DIR") != "" {
-		return "", false, nil
-	}
-	// Scaffold repository-name discovery reads Git configuration. Includes and
-	// includeIf can depend on the absolute directory, so use original setup
-	// whenever external configuration could influence that discovery.
-	for _, path := range []string{
-		filepath.Join(os.Getenv("HOME"), ".gitconfig"),
-		filepath.Join(os.Getenv("HOME"), ".config", "git", "config"),
-		filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "config"),
-		"/etc/gitconfig",
-	} {
-		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+	for _, err := range o.config {
+		if !os.IsNotExist(err) {
 			return "", false, nil
 		}
 	}
-	// Mock controls affect agent execution, not the empty-root scaffold. In
-	// particular #303 sets SWARM_MOCK_PLAN_APPEND before constructing a fixture.
-	// Keep those process values visible to commands without partitioning seeds.
 	var env []string
-	for _, value := range os.Environ() {
+	for _, value := range o.env {
 		name, _, _ := strings.Cut(value, "=")
 		if !strings.HasPrefix(name, "SWARM_MOCK_") {
 			env = append(env, value)
 		}
 	}
 	sort.Strings(env)
-	return filepath.Base(root) + "\x00" + strings.Join(env, "\x00"), true, nil
+	return o.basename + "\x00" + strings.Join(env, "\x00"), true, nil
+}
+func cliFixtureInputKey(root string) (string, bool, error) {
+	return decideCLIFixtureInput(observeCLIFixtureInput(root, realCLIFixtureInputProvider()))
+}
+func pristineCLIInputProvider() cliFixtureInputProvider {
+	return cliFixtureInputProvider{
+		root:     func(root string) (bool, error) { e, err := os.ReadDir(root); return len(e) == 0, err },
+		template: func() string { return os.Getenv("GIT_TEMPLATE_DIR") },
+		config:   func(int) error { return os.ErrNotExist },
+		identity: func(root string) (string, []string) { return filepath.Base(root), os.Environ() },
+	}
+}
+
+// Seed invariants use fixed eligibility while retaining real roots and copies.
+func deterministicCLIInputProvider() cliFixtureInputProvider {
+	p := pristineCLIInputProvider()
+	p.template = func() string { return "" }
+	p.identity = func(root string) (string, []string) { return filepath.Base(root), []string{"FIXTURE=pristine"} }
+	return p
 }
 
 func (s *cliFixtureSeed) populate(root string, initialize func(string) error) error {
-	key, eligible, err := cliFixtureInputKey(root)
+	p := s.observe
+	if p.root == nil {
+		p = realCLIFixtureInputProvider()
+	}
+	key, eligible, err := decideCLIFixtureInput(observeCLIFixtureInput(root, p))
 	if err != nil {
 		return err
 	}
@@ -490,7 +553,7 @@ func TestCLIFixtureSeedEquivalenceAndFallback(t *testing.T) {
 }
 
 func TestCLIFixtureSeedErrors(t *testing.T) {
-	var seed cliFixtureSeed
+	seed := cliFixtureSeed{observe: deterministicCLIInputProvider()}
 	sentinel := fmt.Errorf("seed initialization failed")
 	calls := 0
 	for range 2 {
@@ -530,7 +593,7 @@ func TestCLIFixtureSeedErrors(t *testing.T) {
 }
 
 func TestCLIFixtureSeedLifetimeAndIsolation(t *testing.T) {
-	var seed cliFixtureSeed
+	seed := cliFixtureSeed{observe: deterministicCLIInputProvider()}
 	var first string
 	t.Run("first caller", func(t *testing.T) {
 		first = cliNamedRoot(t, "008")
@@ -645,7 +708,7 @@ func TestCLIFixtureAllocationOrder(t *testing.T) {
 func TestCLIFixtureConcurrentPublication(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		t.Run(fmt.Sprint(fail), func(t *testing.T) {
-			var seed cliFixtureSeed
+			seed := cliFixtureSeed{observe: deterministicCLIInputProvider()}
 			var calls atomic.Int32
 			sentinel := errors.New("initialization rejected")
 			t.Run("callers", func(t *testing.T) {
@@ -732,12 +795,14 @@ func TestCLIFixtureManagedDigests(t *testing.T) {
 
 func TestCLIFixtureMockControlsPreserveSeedEligibility(t *testing.T) {
 	root := cliNamedRoot(t, "008")
-	before, eligible, err := cliFixtureInputKey(root)
+	provider := pristineCLIInputProvider()
+	provider.template = func() string { return "" }
+	before, eligible, err := decideCLIFixtureInput(observeCLIFixtureInput(root, provider))
 	if err != nil || !eligible {
 		t.Fatalf("empty root ineligible: %v", err)
 	}
 	t.Setenv("SWARM_MOCK_PLAN_APPEND", "process value")
-	after, eligible, err := cliFixtureInputKey(root)
+	after, eligible, err := decideCLIFixtureInput(observeCLIFixtureInput(root, provider))
 	if err != nil || !eligible || before != after {
 		t.Fatalf("mock control changed generation key: %v", err)
 	}
@@ -745,7 +810,1300 @@ func TestCLIFixtureMockControlsPreserveSeedEligibility(t *testing.T) {
 		t.Fatal("process mock control hidden")
 	}
 	t.Setenv("GIT_TEMPLATE_DIR", root)
-	if _, eligible, err := cliFixtureInputKey(root); err != nil || eligible {
+	provider.template = func() string { return os.Getenv("GIT_TEMPLATE_DIR") }
+	if _, eligible, err := decideCLIFixtureInput(observeCLIFixtureInput(root, provider)); err != nil || eligible {
 		t.Fatalf("custom Git templates eligible: %v", err)
 	}
+}
+
+// These observations are scheduling hints, not reservations. A failed or
+// unsupported observation leaves testing's original parallelism unchanged.
+type cliTestParallelLimit struct {
+	max, current uint64
+	unlimited    bool
+}
+type cliTestParallelObservation struct {
+	valid          bool
+	memory, nproc  uint64
+	nprocUnlimited bool
+	ancestors      []struct{ memory, pids cliTestParallelLimit }
+}
+type cliTestParallelDecision struct {
+	Original int    `json:"original"`
+	Final    int    `json:"final"`
+	Reason   string `json:"reason"`
+}
+
+func decideCLITestParallel(d int, explicit bool, goos string, o cliTestParallelObservation) cliTestParallelDecision {
+	r := cliTestParallelDecision{d, d, "unchanged"}
+	if explicit {
+		r.Reason = "explicit"
+		return r
+	}
+	if goos != "linux" || d <= 1 || d == 16 {
+		return r
+	}
+	if d > 16 {
+		r.Final = 16
+		r.Reason = "capped"
+		return r
+	}
+	r.Reason = "fallback"
+	if !o.valid || o.memory < 4294967296 || (!o.nprocUnlimited && o.nproc < 4096) {
+		return r
+	}
+	for _, a := range o.ancestors {
+		for i, l := range []cliTestParallelLimit{a.memory, a.pids} {
+			if !l.unlimited && (l.current > l.max || (i == 0 && l.max-l.current < 4294967296) || (i == 1 && l.max-l.current < 1024)) {
+				return r
+			}
+		}
+	}
+	r.Final = 16
+	r.Reason = "admitted"
+	return r
+}
+func applyCLITestParallel(f *flag.FlagSet, goos string, provider func() cliTestParallelObservation) (cliTestParallelDecision, error) {
+	if !f.Parsed() {
+		return cliTestParallelDecision{}, errors.New("test flags not parsed")
+	}
+	v := f.Lookup("test.parallel")
+	if v == nil {
+		return cliTestParallelDecision{}, errors.New("missing test.parallel")
+	}
+	d, err := strconv.Atoi(v.Value.String())
+	if err != nil {
+		return cliTestParallelDecision{}, err
+	}
+	explicit := false
+	f.Visit(func(v *flag.Flag) {
+		if v.Name == "test.parallel" {
+			explicit = true
+		}
+	})
+	var o cliTestParallelObservation
+	if !explicit && goos == "linux" && d > 1 && d < 16 {
+		o = provider()
+	}
+	r := decideCLITestParallel(d, explicit, goos, o)
+	if r.Final != d {
+		err = v.Value.Set(strconv.Itoa(r.Final))
+	}
+	return r, err
+}
+
+// The provider interface bounds reads before allocating their contents. The
+// production reader uses limit+1 and requires EOF; fixtures obey the same cap.
+type cliParallelFiles struct {
+	read func(string, int) (string, error)
+	link func(string) (string, error)
+	stat func(string) (fs.FileInfo, error)
+}
+
+func realCLIParallelFiles() cliParallelFiles {
+	return cliParallelFiles{
+		read: func(path string, limit int) (string, error) {
+			f, err := os.Open(path)
+			if err != nil {
+				return "", err
+			}
+			defer f.Close()
+			b, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
+			if err != nil {
+				return "", err
+			}
+			if len(b) > limit {
+				return "", errors.New("text limit")
+			}
+			return string(b), nil
+		}, link: os.Readlink, stat: os.Lstat,
+	}
+}
+
+type cliParallelReader struct {
+	files                 cliParallelFiles
+	reads, bytes, scalars int
+}
+
+func cliParallelLines(s string, cap int) bool {
+	if strings.ContainsRune(s, 0) {
+		return false
+	}
+	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+	if len(lines) > cap {
+		return false
+	}
+	for _, line := range lines {
+		if len(line) > 4096 {
+			return false
+		}
+	}
+	return true
+}
+func (r *cliParallelReader) text(path string, cap, records int) (string, error) {
+	if len(path) > 4096 || r.reads >= 300 {
+		return "", errors.New("read budget")
+	}
+	r.reads++
+	s, err := r.files.read(path, cap)
+	if err != nil {
+		return "", err
+	}
+	r.bytes += len(s)
+	if len(s) > cap || r.bytes > 512*1024 || !cliParallelLines(s, records) {
+		return "", errors.New("text budget")
+	}
+	return s, nil
+}
+func (r *cliParallelReader) namespace() (string, error) {
+	s, err := r.files.link("/proc/self/ns/cgroup")
+	if err != nil {
+		return "", err
+	}
+	if len(s) > 128 || s != "cgroup:[4026531835]" {
+		return "", errors.New("unsupported namespace")
+	}
+	return s, nil
+}
+func cliParallelPath(p string) bool {
+	if len(p) == 0 || len(p) > 4096 || !path.IsAbs(p) || path.Clean(p) != p {
+		return false
+	}
+	for _, c := range p {
+		if unicode.IsControl(c) || c == '\\' {
+			return false
+		}
+	}
+	return len(strings.Split(strings.TrimPrefix(p, "/"), "/")) <= 64
+}
+func cliParallelUnescape(s string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			continue
+		}
+		if i+3 >= len(s) {
+			return "", errors.New("mount escape")
+		}
+		c, ok := map[string]byte{"040": ' ', "011": '\t', "012": '\n', "134": '\\'}[s[i+1:i+4]]
+		if !ok {
+			return "", errors.New("mount escape")
+		}
+		b.WriteByte(c)
+		i += 3
+	}
+	v := b.String()
+	if !cliParallelPath(v) {
+		return "", errors.New("mount path")
+	}
+	return v, nil
+}
+func cliParallelMembership(s string) (string, error) {
+	s = strings.TrimSuffix(s, "\n")
+	if !strings.HasPrefix(s, "0::") || strings.ContainsAny(s, "\n\r") {
+		return "", errors.New("membership")
+	}
+	p := strings.TrimPrefix(s, "0::")
+	if !cliParallelPath(p) || strings.Contains(p, ":") {
+		return "", errors.New("membership path")
+	}
+	return p, nil
+}
+func cliParallelMount(s string) (string, error) {
+	var mount string
+	var points []string
+	for _, line := range strings.Split(strings.TrimSuffix(s, "\n"), "\n") {
+		fields := strings.Fields(line)
+		sep := -1
+		for i, f := range fields {
+			if f == "-" {
+				if sep != -1 {
+					return "", errors.New("mount separator")
+				}
+				sep = i
+			}
+		}
+		if sep < 6 || len(fields) != sep+4 {
+			return "", errors.New("mount fields")
+		}
+		for _, idx := range []int{0, 1} {
+			if _, err := cliParallelUint(fields[idx]); err != nil {
+				return "", err
+			}
+		}
+		dev := strings.Split(fields[2], ":")
+		if len(dev) != 2 {
+			return "", errors.New("mount device")
+		}
+		for _, n := range dev {
+			if _, err := cliParallelUint(n); err != nil {
+				return "", err
+			}
+		}
+		root, err := cliParallelUnescape(fields[3])
+		if err != nil {
+			return "", err
+		}
+		point, err := cliParallelUnescape(fields[4])
+		if err != nil {
+			return "", err
+		}
+		points = append(points, point)
+		if fields[sep+1] == "cgroup" {
+			return "", errors.New("hybrid mount")
+		}
+		if fields[sep+1] == "cgroup2" {
+			if mount != "" || root != "/" {
+				return "", errors.New("ambiguous cgroup mount")
+			}
+			mount = point
+		}
+	}
+	if mount == "" {
+		return "", errors.New("missing cgroup mount")
+	}
+	count := 0
+	for _, p := range points {
+		if p == mount {
+			count++
+		} else if strings.HasPrefix(p, mount+"/") || mount == "/" {
+			return "", errors.New("nested mount")
+		}
+	}
+	if count != 1 {
+		return "", errors.New("overmount")
+	}
+	return mount, nil
+}
+func cliParallelUint(s string) (uint64, error) {
+	if s == "" {
+		return 0, errors.New("empty scalar")
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, errors.New("nondecimal scalar")
+		}
+	}
+	return strconv.ParseUint(s, 10, 64)
+}
+func cliParallelScalar(s string, allowMax bool) (uint64, bool, error) {
+	s = strings.TrimSuffix(s, "\n")
+	if allowMax && s == "max" {
+		return 0, true, nil
+	}
+	n, err := cliParallelUint(s)
+	return n, false, err
+}
+func cliParallelMemory(s string) (uint64, error) {
+	seen := false
+	var result uint64
+	for _, line := range strings.Split(strings.TrimSuffix(s, "\n"), "\n") {
+		key, rest, ok := strings.Cut(line, ":")
+		if !ok || key == "" || strings.IndexFunc(key, unicode.IsSpace) >= 0 {
+			return 0, errors.New("meminfo line")
+		}
+		f := strings.Fields(rest)
+		if len(f) < 1 || len(f) > 2 {
+			return 0, errors.New("meminfo fields")
+		}
+		n, err := cliParallelUint(f[0])
+		if err != nil {
+			return 0, err
+		}
+		if len(f) == 2 && f[1] != "kB" {
+			return 0, errors.New("meminfo units")
+		}
+		if key == "MemAvailable" {
+			if seen || len(f) != 2 || n > ^uint64(0)/1024 {
+				return 0, errors.New("MemAvailable")
+			}
+			seen = true
+			result = n * 1024
+		}
+	}
+	if !seen {
+		return 0, errors.New("missing MemAvailable")
+	}
+	return result, nil
+}
+func cliParallelNproc(s string) (uint64, bool, error) {
+	seen := false
+	var soft uint64
+	var unlimited bool
+	for i, line := range strings.Split(strings.TrimSuffix(s, "\n"), "\n") {
+		f := strings.Fields(line)
+		if i == 0 && strings.Join(f, " ") == "Limit Soft Limit Hard Limit Units" {
+			continue
+		}
+		if len(f) < 3 {
+			return 0, false, errors.New("limits line")
+		}
+		// Other Linux limit names and optional units vary; the two limit columns
+		// are always decimal or unlimited. Validate them before ignoring the row.
+		end := len(f)
+		if _, err := cliParallelUint(f[end-1]); err != nil && f[end-1] != "unlimited" {
+			end--
+		}
+		if end < 3 {
+			return 0, false, errors.New("limits columns")
+		}
+		for _, v := range f[end-2 : end] {
+			if v != "unlimited" {
+				if _, err := cliParallelUint(v); err != nil {
+					return 0, false, err
+				}
+			}
+		}
+		if len(f) >= 2 && f[0] == "Max" && f[1] == "processes" {
+			if seen || len(f) != 5 || f[0] != "Max" || f[1] != "processes" || f[4] != "processes" {
+				return 0, false, errors.New("NPROC row")
+			}
+			seen = true
+			unlimited = f[2] == "unlimited"
+			if !unlimited {
+				var err error
+				soft, err = cliParallelUint(f[2])
+				if err != nil {
+					return 0, false, err
+				}
+			}
+		}
+	}
+	if !seen {
+		return 0, false, errors.New("missing NPROC")
+	}
+	return soft, unlimited, nil
+}
+func (r *cliParallelReader) regular(path string) error {
+	if len(path) > 4096 {
+		return errors.New("resource path budget")
+	}
+	info, err := r.files.stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("nonregular resource")
+	}
+	return nil
+}
+func (r *cliParallelReader) limit(dir, name string) (cliTestParallelLimit, error) {
+	var l cliTestParallelLimit
+	for i, suffix := range []string{".max", ".current"} {
+		if r.scalars >= 256 {
+			return l, errors.New("scalar budget")
+		}
+		r.scalars++
+		p := path.Join(dir, name+suffix)
+		if err := r.regular(p); err != nil {
+			return l, err
+		}
+		text, err := r.text(p, 128, 1)
+		if err != nil {
+			return l, err
+		}
+		n, u, err := cliParallelScalar(text, i == 0)
+		if err != nil {
+			return l, err
+		}
+		if i == 0 {
+			l.max, l.unlimited = n, u
+		} else {
+			l.current = n
+		}
+	}
+	if !l.unlimited && l.current > l.max {
+		return l, errors.New("current exceeds max")
+	}
+	return l, nil
+}
+func observeCLITestParallel(files cliParallelFiles) cliTestParallelObservation {
+	o, err := readCLITestParallel(files)
+	if err != nil {
+		return cliTestParallelObservation{}
+	}
+	return o
+}
+func readCLITestParallel(files cliParallelFiles) (cliTestParallelObservation, error) {
+	var o cliTestParallelObservation
+	r := cliParallelReader{files: files}
+	ns, err := r.namespace()
+	if err != nil {
+		return o, err
+	}
+	membership, err := r.text("/proc/self/cgroup", 8192, 16)
+	if err != nil {
+		return o, err
+	}
+	member, err := cliParallelMembership(membership)
+	if err != nil {
+		return o, err
+	}
+	mounts, err := r.text("/proc/self/mountinfo", 256*1024, 2048)
+	if err != nil {
+		return o, err
+	}
+	mount, err := cliParallelMount(mounts)
+	if err != nil {
+		return o, err
+	}
+	leaf := path.Join(mount, strings.TrimPrefix(member, "/"))
+	rel, err := filepath.Rel(mount, leaf)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return o, errors.New("containment")
+	}
+	if !cliParallelPath(leaf) {
+		return o, errors.New("leaf path")
+	}
+	dirs := []string{mount}
+	if rel != "." {
+		p := mount
+		for _, c := range strings.Split(rel, string(filepath.Separator)) {
+			p = path.Join(p, c)
+			dirs = append(dirs, p)
+		}
+	}
+	if len(dirs) > 64 {
+		return o, errors.New("ancestor budget")
+	}
+	for _, p := range dirs {
+		info, err := files.stat(p)
+		if err != nil {
+			return o, err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return o, errors.New("non-directory ancestor")
+		}
+	}
+	controllersPath := path.Join(mount, "cgroup.controllers")
+	if err := r.regular(controllersPath); err != nil {
+		return o, err
+	}
+	controllers, err := r.text(controllersPath, 4096, 1)
+	if err != nil {
+		return o, err
+	}
+	mem, pids := 0, 0
+	for _, v := range strings.Fields(controllers) {
+		if v == "memory" {
+			mem++
+		}
+		if v == "pids" {
+			pids++
+		}
+	}
+	if mem != 1 || pids != 1 {
+		return o, errors.New("controllers")
+	}
+	text, err := r.text("/proc/meminfo", 64*1024, 512)
+	if err != nil {
+		return o, err
+	}
+	o.memory, err = cliParallelMemory(text)
+	if err != nil {
+		return o, err
+	}
+	text, err = r.text("/proc/self/limits", 16*1024, 128)
+	if err != nil {
+		return o, err
+	}
+	o.nproc, o.nprocUnlimited, err = cliParallelNproc(text)
+	if err != nil {
+		return o, err
+	}
+	for i := len(dirs) - 1; i > 0; i-- {
+		m, err := r.limit(dirs[i], "memory")
+		if err != nil {
+			return o, err
+		}
+		p, err := r.limit(dirs[i], "pids")
+		if err != nil {
+			return o, err
+		}
+		o.ancestors = append(o.ancestors, struct{ memory, pids cliTestParallelLimit }{m, p})
+	}
+	end, err := r.text("/proc/self/cgroup", 8192, 16)
+	if err != nil || end != membership {
+		return o, errors.New("membership changed")
+	}
+	end, err = r.namespace()
+	if err != nil || end != ns {
+		return o, errors.New("namespace changed")
+	}
+	end, err = r.text("/proc/self/mountinfo", 256*1024, 2048)
+	if err != nil || end != mounts {
+		return o, errors.New("mounts changed")
+	}
+	o.valid = true
+	return o, nil
+}
+
+func TestCLITestParallelDecision(t *testing.T) {
+	good := cliTestParallelObservation{valid: true, memory: 4294967296, nproc: 4096}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, d := range []int{-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 32, int(^uint(0) >> 1)} {
+			for _, explicit := range []bool{false, true} {
+				want := d
+				if !explicit && goos == "linux" && d > 1 {
+					want = 16
+				}
+				if got := decideCLITestParallel(d, explicit, goos, good); got.Final != want {
+					t.Fatalf("decision %s %d %v: %+v", goos, d, explicit, got)
+				}
+			}
+		}
+	}
+	for _, o := range []cliTestParallelObservation{{}, {valid: true, memory: 4294967295, nproc: 4096}, {valid: true, memory: 4294967296, nproc: 4095}} {
+		for d := 2; d < 16; d++ {
+			if decideCLITestParallel(d, false, "linux", o).Final != d {
+				t.Fatal("invalid observation admitted")
+			}
+		}
+	}
+	for _, memory := range []bool{false, true} {
+		for _, headroom := range []uint64{0, 1023, 1024, 4294967295, 4294967296} {
+			o := good
+			a := struct{ memory, pids cliTestParallelLimit }{cliTestParallelLimit{unlimited: true}, cliTestParallelLimit{unlimited: true}}
+			threshold := uint64(1024)
+			if memory {
+				a.memory = cliTestParallelLimit{max: headroom}
+				threshold = 4294967296
+			} else {
+				a.pids = cliTestParallelLimit{max: headroom}
+			}
+			o.ancestors = append(o.ancestors, a)
+			for d := 2; d < 16; d++ {
+				want := d
+				if headroom >= threshold {
+					want = 16
+				}
+				if decideCLITestParallel(d, false, "linux", o).Final != want {
+					t.Fatal("threshold decision")
+				}
+			}
+		}
+	}
+	good.nproc = 0
+	good.nprocUnlimited = true
+	if decideCLITestParallel(2, false, "linux", good).Final != 16 {
+		t.Fatal("unlimited NPROC rejected")
+	}
+}
+func TestCLITestParallelFlags(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, d := range []int{0, 1, 2, 4, 8, 15, 16, 17, 32} {
+			for _, args := range [][]string{nil, {"-test.parallel=1"}, {"-test.parallel", "2"}, {"--test.parallel=4"}, {"-test.parallel=8"}, {"-test.parallel=16"}, {"-test.parallel=32"}, {"-test.parallel=" + strconv.Itoa(d)}, {"-test.parallel=1", "-test.parallel=8"}, {"-test.parallel=8", "-test.parallel=1"}, {"-test.parallel=8", "-test.parallel=8"}, {"-test.parallel=8", "-test.parallel=" + strconv.Itoa(d)}, {"-test.parallel=0"}, {"-test.parallel=-1"}} {
+				f := flag.NewFlagSet("fixture", flag.ContinueOnError)
+				var help bytes.Buffer
+				f.SetOutput(&help)
+				value := f.Int("test.parallel", d, "parallel fixture")
+				other := f.String("other", "kept", "unrelated")
+				if err := f.Parse(append(append([]string(nil), args...), "arg")); err != nil {
+					t.Fatal(err)
+				}
+				f.PrintDefaults()
+				beforeHelp := help.String()
+				help.Reset()
+				old := *value
+				explicit := len(args) > 0
+				calls := 0
+				provider := func() cliTestParallelObservation {
+					calls++
+					if explicit || goos != "linux" || d <= 1 || d >= 16 {
+						t.Fatal("unexpected probe")
+					}
+					return cliTestParallelObservation{valid: true, memory: 4294967296, nproc: 4096}
+				}
+				r, err := applyCLITestParallel(f, goos, provider)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := old
+				if !explicit && goos == "linux" && old > 1 {
+					want = 16
+				}
+				if *value != want || r.Final != want || *other != "kept" || !reflect.DeepEqual(f.Args(), []string{"arg"}) {
+					t.Fatal("flag application changed unrelated state")
+				}
+				r2, err := applyCLITestParallel(f, goos, provider)
+				if err != nil || r2.Final != want || calls > 1 {
+					t.Fatal("application not idempotent")
+				}
+				visited := false
+				f.Visit(func(v *flag.Flag) {
+					if v.Name == "test.parallel" {
+						visited = true
+					}
+				})
+				if visited != explicit {
+					t.Fatal("implicit update marked explicit")
+				}
+				f.PrintDefaults()
+				if help.String() != beforeHelp || f.Lookup("test.parallel").DefValue != strconv.Itoa(d) {
+					t.Fatal("help/default changed")
+				}
+			}
+		}
+	}
+	for _, args := range [][]string{{"-test.parallel=bad"}, {"-test.parallel=18446744073709551616"}, {"-test.parallel=bad", "-test.parallel=1"}} {
+		f := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		f.SetOutput(io.Discard)
+		f.Int("test.parallel", 2, "")
+		if f.Parse(args) == nil {
+			t.Fatal("malformed flag accepted")
+		}
+	}
+	// Invalid observations remain at D on repeated application.
+	for d := 2; d < 16; d++ {
+		f := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		v := f.Int("test.parallel", d, "")
+		_ = f.Parse(nil)
+		for range 2 {
+			if _, err := applyCLITestParallel(f, "linux", func() cliTestParallelObservation { return cliTestParallelObservation{} }); err != nil || *v != d {
+				t.Fatal("fallback changed D")
+			}
+		}
+	}
+}
+
+type cliParallelFixtureInfo struct {
+	directory bool
+	mode      fs.FileMode
+}
+
+func (i cliParallelFixtureInfo) Name() string { return "fixture" }
+func (i cliParallelFixtureInfo) Size() int64  { return 0 }
+func (i cliParallelFixtureInfo) Mode() fs.FileMode {
+	if i.directory {
+		return fs.ModeDir | 0700
+	}
+	return i.mode | 0600
+}
+func (i cliParallelFixtureInfo) ModTime() time.Time { return time.Time{} }
+func (i cliParallelFixtureInfo) IsDir() bool        { return i.directory }
+func (i cliParallelFixtureInfo) Sys() any           { return nil }
+func cliParallelFixtureTexts() map[string]string {
+	m := map[string]string{
+		"/proc/self/cgroup":      "0::/parent/middle/leaf\n",
+		"/proc/self/mountinfo":   "29 1 0:26 / /cg rw,nosuid shared:1 - cgroup2 cgroup rw\n",
+		"/proc/meminfo":          "MemTotal: 9000000 kB\nMemAvailable: 4194304 kB\n",
+		"/proc/self/limits":      "Limit                     Soft Limit           Hard Limit           Units\nMax processes             4096                 unlimited            processes\n",
+		"/cg/cgroup.controllers": "memory pids\n",
+	}
+	for _, dir := range []string{"/cg/parent", "/cg/parent/middle", "/cg/parent/middle/leaf"} {
+		m[dir+"/memory.max"] = "4294967296\n"
+		m[dir+"/memory.current"] = "0\n"
+		m[dir+"/pids.max"] = "1024\n"
+		m[dir+"/pids.current"] = "0\n"
+	}
+	return m
+}
+func cliParallelFixtureFiles(texts map[string]string) cliParallelFiles {
+	frozen := make(map[string]string, len(texts))
+	for k, v := range texts {
+		frozen[k] = v
+	}
+	return cliParallelFiles{
+		read: func(p string, cap int) (string, error) {
+			s, ok := frozen[p]
+			if !ok {
+				return "", os.ErrNotExist
+			}
+			if len(s) > cap {
+				return "", errors.New("fixture read limit")
+			}
+			return s, nil
+		},
+		link: func(p string) (string, error) {
+			if p != "/proc/self/ns/cgroup" {
+				return "", os.ErrPermission
+			}
+			return "cgroup:[4026531835]", nil
+		},
+		stat: func(p string) (fs.FileInfo, error) {
+			if p == "/cg" || p == "/cg/parent" || p == "/cg/parent/middle" || p == "/cg/parent/middle/leaf" {
+				return cliParallelFixtureInfo{directory: true}, nil
+			}
+			if _, ok := frozen[p]; ok {
+				return cliParallelFixtureInfo{}, nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+}
+func TestCLITestParallelComposedReader(t *testing.T) {
+	for d := 2; d < 16; d++ {
+		f := cliParallelFixtureFiles(cliParallelFixtureTexts())
+		links := 0
+		pid1 := 0
+		f.link = func(p string) (string, error) {
+			if p == "/proc/1/ns/cgroup" {
+				pid1++
+				return "", os.ErrPermission
+			}
+			if p != "/proc/self/ns/cgroup" {
+				t.Fatal("unexpected link")
+			}
+			links++
+			return "cgroup:[4026531835]", nil
+		}
+		o, err := readCLITestParallel(f)
+		if err != nil || !o.valid || len(o.ancestors) != 3 {
+			t.Fatal("qualifying composition failed", err)
+		}
+		flags := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		v := flags.Int("test.parallel", d, "")
+		_ = flags.Parse(nil)
+		r, err := applyCLITestParallel(flags, "linux", func() cliTestParallelObservation { return observeCLITestParallel(f) })
+		if err != nil || r.Reason != "admitted" || *v != 16 || pid1 != 0 || links != 4 {
+			t.Fatal("reader/decision composition failed")
+		}
+	}
+	// All three finite ancestors independently constrain the decision.
+	for _, dir := range []string{"/cg/parent", "/cg/parent/middle", "/cg/parent/middle/leaf"} {
+		for _, tc := range []struct {
+			file, value string
+			valid       bool
+		}{
+			{"memory.max", "4294967295\n", true}, {"memory.current", "1\n", true},
+			{"pids.max", "1023\n", true}, {"pids.current", "1\n", true},
+			{"memory.current", "4294967297\n", false}, {"pids.current", "1025\n", false},
+			{"memory.current", "max\n", false}, {"pids.current", "max\n", false},
+		} {
+			m := cliParallelFixtureTexts()
+			m[dir+"/"+tc.file] = tc.value
+			o := observeCLITestParallel(cliParallelFixtureFiles(m))
+			if o.valid != tc.valid {
+				t.Fatal("observation validity", dir, tc.file)
+			}
+			for d := 2; d < 16; d++ {
+				if decideCLITestParallel(d, false, "linux", o).Final != d {
+					t.Fatal("tight ancestor admitted")
+				}
+			}
+		}
+	}
+	for _, tc := range []struct{ path, value string }{
+		{"/proc/self/cgroup", "0::/\n0::/other\n"}, {"/proc/self/cgroup", "1:memory:/x\n0::/x\n"},
+		{"/proc/self/cgroup", "0::relative\n"}, {"/proc/self/cgroup", "0::/a/../b\n"}, {"/proc/self/cgroup", "0::/a//b\n"},
+		{"/proc/self/cgroup", "0::/a/\n"}, {"/proc/self/cgroup", "0::/a:b\n"},
+		{"/proc/self/mountinfo", "29 1 0:26 /sub /cg rw - cgroup2 cgroup rw\n"},
+		{"/proc/self/mountinfo", "29 1 0:26 / /cg rw - cgroup cgroup rw\n"},
+		{"/proc/self/mountinfo", "29 1 0:26 / /cg rw cgroup2 cgroup rw\n"},
+		{"/proc/self/mountinfo", "29 1 0:26 / /cg rw - cgroup2 cgroup rw\n30 1 0:27 / /cg/nested rw - tmpfs tmpfs rw\n"},
+		{"/proc/self/mountinfo", "29 1 0:26 / /cg rw - cgroup2 cgroup rw\n30 1 0:27 / /other rw - cgroup2 cgroup rw\n"},
+		{"/cg/cgroup.controllers", "memory\n"}, {"/cg/cgroup.controllers", "pids\n"}, {"/cg/cgroup.controllers", "memory memory pids\n"},
+		{"/proc/meminfo", "MemAvailable: 4194303 kB\n"}, {"/proc/self/limits", "Max processes 4095 999999 processes\n"},
+	} {
+		m := cliParallelFixtureTexts()
+		m[tc.path] = tc.value
+		o := observeCLITestParallel(cliParallelFixtureFiles(m))
+		for d := 2; d < 16; d++ {
+			if decideCLITestParallel(d, false, "linux", o).Final != d {
+				t.Fatal("unsupported observation admitted", tc.path)
+			}
+		}
+	}
+	// Failure of any read, including every scalar, must fail closed.
+	for path := range cliParallelFixtureTexts() {
+		f := cliParallelFixtureFiles(cliParallelFixtureTexts())
+		read := f.read
+		f.read = func(p string, n int) (string, error) {
+			if p == path {
+				return "", os.ErrPermission
+			}
+			return read(p, n)
+		}
+		if observeCLITestParallel(f).valid {
+			t.Fatal("read error accepted", path)
+		}
+	}
+	for _, value := range []string{"", "cgroup:[123]", strings.Repeat("x", 129)} {
+		f := cliParallelFixtureFiles(cliParallelFixtureTexts())
+		f.link = func(string) (string, error) { return value, nil }
+		if observeCLITestParallel(f).valid {
+			t.Fatal("unsupported namespace accepted")
+		}
+	}
+	for _, completion := range []bool{false, true} {
+		f := cliParallelFixtureFiles(cliParallelFixtureTexts())
+		calls := 0
+		f.link = func(string) (string, error) {
+			calls++
+			if !completion || calls == 2 {
+				return "", os.ErrPermission
+			}
+			return "cgroup:[4026531835]", nil
+		}
+		if observeCLITestParallel(f).valid {
+			t.Fatal("namespace read error accepted")
+		}
+	}
+	for _, target := range []string{"/proc/self/cgroup", "/proc/self/mountinfo", "/proc/self/ns/cgroup"} {
+		f := cliParallelFixtureFiles(cliParallelFixtureTexts())
+		read, link := f.read, f.link
+		calls := 0
+		if target == "/proc/self/ns/cgroup" {
+			f.link = func(p string) (string, error) {
+				calls++
+				if calls == 2 {
+					return "cgroup:[123]", nil
+				}
+				return link(p)
+			}
+		} else {
+			f.read = func(p string, n int) (string, error) {
+				if p == target {
+					calls++
+					if calls == 2 {
+						return "changed", nil
+					}
+				}
+				return read(p, n)
+			}
+		}
+		if observeCLITestParallel(f).valid {
+			t.Fatal("mapping change accepted")
+		}
+	}
+	for _, path := range []string{"/cg", "/cg/parent", "/cg/parent/middle", "/cg/parent/middle/leaf", "/cg/parent/memory.max", "/cg/cgroup.controllers"} {
+		for _, mode := range []fs.FileMode{fs.ModeSymlink, fs.ModeNamedPipe} {
+			f := cliParallelFixtureFiles(cliParallelFixtureTexts())
+			stat := f.stat
+			f.stat = func(p string) (fs.FileInfo, error) {
+				if p == path {
+					return cliParallelFixtureInfo{mode: mode}, nil
+				}
+				return stat(p)
+			}
+			if observeCLITestParallel(f).valid {
+				t.Fatal("unsafe path accepted", path)
+			}
+		}
+	}
+	// The genuine root has no max interfaces, but still requires controllers.
+	m := cliParallelFixtureTexts()
+	m["/proc/self/cgroup"] = "0::/\n"
+	o := observeCLITestParallel(cliParallelFixtureFiles(m))
+	if !o.valid || len(o.ancestors) != 0 || decideCLITestParallel(2, false, "linux", o).Final != 16 {
+		t.Fatal("root membership rejected")
+	}
+	for _, name := range []string{"memory", "pids"} {
+		m := cliParallelFixtureTexts()
+		for p := range m {
+			if strings.HasSuffix(p, "/"+name+".max") {
+				m[p] = "max\n"
+			}
+		}
+		if !observeCLITestParallel(cliParallelFixtureFiles(m)).valid {
+			t.Fatal("unlimited ancestor rejected")
+		}
+		m["/cg/parent/"+name+".current"] = "max\n"
+		if observeCLITestParallel(cliParallelFixtureFiles(m)).valid {
+			t.Fatal("unlimited current accepted")
+		}
+	}
+}
+
+func TestCLITestParallelParsersAndBounds(t *testing.T) {
+	for _, s := range []string{"", " ", "-1", "+1", "0x10", "1.5", "18446744073709551616", "1 2", "1\n2", "1\n\n", "MAX", "max\nextra", "12\r\n"} {
+		if _, _, err := cliParallelScalar(s, true); err == nil {
+			t.Fatalf("bad scalar accepted %q", s)
+		}
+	}
+	for _, s := range []string{"0", "0\n", "18446744073709551615\n"} {
+		if _, _, err := cliParallelScalar(s, false); err != nil {
+			t.Fatal("valid scalar rejected", err)
+		}
+	}
+	if _, u, err := cliParallelScalar("max\n", true); err != nil || !u {
+		t.Fatal("max rejected")
+	}
+	if _, _, err := cliParallelScalar("max", false); err == nil {
+		t.Fatal("current=max accepted")
+	}
+	for _, s := range []string{"", "MemFree: 999999999 kB\n", "MemAvailable: 4194304 MB\n", "MemAvailable: 1 kB\nMemAvailable: 1 kB\n", "MemAvailable: 4194304 kB\n MemAvailable: 1 kB\n", "MemAvailable: 18014398509481984 kB\n", "MemAvailable: +1 kB\n", "MemAvailable: 1\n", "bad\n"} {
+		if _, err := cliParallelMemory(s); err == nil {
+			t.Fatal("bad meminfo accepted")
+		}
+	}
+	for _, s := range []string{"", "Max processes 4096 unlimited bytes\n", "Max processes bad unlimited processes\n", "Max processes 4096 bad processes\n", "Max processes 4096 unlimited processes\nMax processes 4096 unlimited processes\n", "Max processes 4096 unlimited processes\n Max   processes 4096 unlimited processes\n", "Max processes +1 unlimited processes\n", "bad\n"} {
+		if _, _, err := cliParallelNproc(s); err == nil {
+			t.Fatal("bad limits accepted", s)
+		}
+	}
+	for _, s := range []string{"Max processes 4096 unlimited processes\n", "Max processes unlimited unlimited processes\n", "Max processes 4096 8192 processes\n"} {
+		if _, _, err := cliParallelNproc(s); err != nil {
+			t.Fatal("valid limits rejected", err)
+		}
+	}
+	for _, s := range []string{"/cg\\040space", "/cg"} {
+		if _, err := cliParallelUnescape(s); err != nil {
+			t.Fatal("valid mount escape rejected")
+		}
+	}
+	for _, s := range []string{"relative", "/a\\011b", "/a\\012b", "/a\\134b", "/a\\041b", "/a\\0", "/a/../b", "/a//b", "/a/", "/a\x00b"} {
+		if _, err := cliParallelUnescape(s); err == nil {
+			t.Fatal("bad mount escape/path accepted")
+		}
+	}
+	// Exercise limit+1 reads against real files, including a valid prefix which
+	// would parse if truncation were silently accepted.
+	for _, cap := range []int{128, 4096, 8192, 16384, 65536, 262144} {
+		p := filepath.Join(t.TempDir(), "bounded")
+		for _, n := range []int{cap, cap + 1} {
+			if err := os.WriteFile(p, bytes.Repeat([]byte{'1'}, n), 0600); err != nil {
+				t.Fatal(err)
+			}
+			text, err := realCLIParallelFiles().read(p, cap)
+			if n == cap && (err != nil || len(text) != cap) {
+				t.Fatal("exact read bound failed")
+			}
+			if n > cap && err == nil {
+				t.Fatal("oversized read accepted")
+			}
+		}
+	}
+	for _, tc := range []struct{ cap, records int }{{128, 1}, {4096, 1}, {8192, 16}, {16384, 128}, {65536, 512}, {262144, 2048}} {
+		r := cliParallelReader{files: cliParallelFiles{read: func(string, int) (string, error) { return strings.Repeat("x\n", tc.records), nil }}}
+		if _, err := r.text("/fixture", tc.cap, tc.records); err != nil {
+			t.Fatal("exact record bound rejected", err)
+		}
+		r.files.read = func(string, int) (string, error) { return strings.Repeat("x\n", tc.records+1), nil }
+		if _, err := r.text("/fixture", tc.cap, tc.records); err == nil {
+			t.Fatal("record exhaustion accepted")
+		}
+	}
+	r := cliParallelReader{files: cliParallelFiles{read: func(string, int) (string, error) { return strings.Repeat("x", 4096), nil }}}
+	if _, err := r.text("/fixture", 4096, 1); err != nil {
+		t.Fatal(err)
+	}
+	r.files.read = func(string, int) (string, error) { return strings.Repeat("x", 4097), nil }
+	if _, err := r.text("/fixture", 8192, 1); err == nil {
+		t.Fatal("long line accepted")
+	}
+	r.files.read = func(string, int) (string, error) { return "", nil }
+	r.reads = 299
+	if _, err := r.text("/fixture", 128, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.text("/fixture", 128, 1); err == nil {
+		t.Fatal("read budget exceeded")
+	}
+	r.reads = 0
+	r.bytes = 512*1024 - 1
+	r.files.read = func(string, int) (string, error) { return "x", nil }
+	if _, err := r.text("/fixture", 128, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.text("/fixture", 128, 1); err == nil {
+		t.Fatal("aggregate byte budget exceeded")
+	}
+	if cliParallelPath("/"+strings.Repeat("a/", 64)+"a") || cliParallelPath("/"+strings.Repeat("a", 4096)) {
+		t.Fatal("path bounds exceeded")
+	}
+	// Traversal includes the root; 64 non-root components exceed 64 dirs.
+	m := cliParallelFixtureTexts()
+	m["/proc/self/cgroup"] = "0::/" + strings.TrimSuffix(strings.Repeat("a/", 64), "/") + "\n"
+	if observeCLITestParallel(cliParallelFixtureFiles(m)).valid {
+		t.Fatal("ancestor budget exceeded")
+	}
+	// Missing resource files at a non-root directory never mean unlimited.
+	m = cliParallelFixtureTexts()
+	delete(m, "/cg/parent/memory.max")
+	if observeCLITestParallel(cliParallelFixtureFiles(m)).valid {
+		t.Fatal("missing nonroot limit accepted")
+	}
+}
+func TestCLIFixtureInputGuards(t *testing.T) {
+	sentinel := errors.New("root read failed")
+	for _, tc := range []struct {
+		name       string
+		empty      bool
+		rootErr    error
+		template   string
+		probe      int
+		probeErr   error
+		wantStages int
+		eligible   bool
+	}{
+		{"eligible", true, nil, "", -1, nil, 7, true},
+		{"nonempty", false, nil, "", -1, nil, 1, false},
+		{"root error", true, sentinel, "", -1, nil, 1, false},
+		{"template", true, nil, "custom", -1, nil, 2, false},
+		{"config0", true, nil, "", 0, nil, 3, false}, {"config1", true, nil, "", 1, nil, 4, false}, {"config2", true, nil, "", 2, nil, 5, false}, {"config3", true, nil, "", 3, nil, 6, false},
+		{"config0 error", true, nil, "", 0, os.ErrPermission, 3, false}, {"config1 error", true, nil, "", 1, os.ErrPermission, 4, false}, {"config2 error", true, nil, "", 2, os.ErrPermission, 5, false}, {"config3 error", true, nil, "", 3, os.ErrPermission, 6, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stages := []string{}
+			p := cliFixtureInputProvider{
+				root:     func(string) (bool, error) { stages = append(stages, "root"); return tc.empty, tc.rootErr },
+				template: func() string { stages = append(stages, "template"); return tc.template },
+				config: func(i int) error {
+					stages = append(stages, strconv.Itoa(i))
+					if i == tc.probe {
+						return tc.probeErr
+					}
+					return os.ErrNotExist
+				},
+				identity: func(string) (string, []string) {
+					stages = append(stages, "identity")
+					return "008", []string{"Z=2", "SWARM_MOCK_PLAN_APPEND=ignored", "A=1"}
+				},
+			}
+			key, eligible, err := decideCLIFixtureInput(observeCLIFixtureInput("root", p))
+			if eligible != tc.eligible || !errors.Is(err, tc.rootErr) || len(stages) != tc.wantStages {
+				t.Fatal("guard semantics/order changed", stages)
+			}
+			wantOrder := []string{"root", "template", "0", "1", "2", "3", "identity"}
+			if !reflect.DeepEqual(stages, wantOrder[:tc.wantStages]) {
+				t.Fatal("stage ordering changed")
+			}
+			if eligible && key != "008\x00A=1\x00Z=2" {
+				t.Fatal("key bytes changed")
+			}
+			if !eligible {
+				stages = nil
+				seed := cliFixtureSeed{observe: p}
+				calls := 0
+				err := seed.populate("requested", func(root string) error {
+					calls++
+					if root != "requested" {
+						t.Fatal("fallback initialized another root")
+					}
+					return nil
+				})
+				if !errors.Is(err, tc.rootErr) || seed.selected || seed.root != "" {
+					t.Fatal("ineligible seed published")
+				}
+				want := 1
+				if tc.rootErr != nil {
+					want = 0
+				}
+				if calls != want {
+					t.Fatal("fallback initializer count")
+				}
+			}
+		})
+	}
+	base := cliFixtureInput{empty: true, basename: "008", env: []string{"A=1"}, config: [4]error{os.ErrNotExist, os.ErrNotExist, os.ErrNotExist, os.ErrNotExist}}
+	key, _, _ := decideCLIFixtureInput(base)
+	for _, tc := range []struct {
+		name  string
+		env   []string
+		equal bool
+	}{{"008", []string{"A=1", "SWARM_MOCK_X=changed"}, true}, {"other", []string{"A=1"}, false}, {"008", []string{"A=2"}, false}} {
+		o := base
+		o.basename = tc.name
+		o.env = tc.env
+		k, eligible, err := decideCLIFixtureInput(o)
+		if err != nil || !eligible || (k == key) != tc.equal {
+			t.Fatal("key partition changed")
+		}
+	}
+	// The observation owns its environment snapshot.
+	env := []string{"A=1"}
+	p := deterministicCLIInputProvider()
+	p.root = func(string) (bool, error) { return true, nil }
+	p.identity = func(string) (string, []string) { return "008", env }
+	o := observeCLIFixtureInput("unused", p)
+	env[0] = "A=changed"
+	k, _, _ := decideCLIFixtureInput(o)
+	if k != key {
+		t.Fatal("input retained mutable environment")
+	}
+}
+func TestCLIFixtureDefaultObservation(t *testing.T) {
+	seed := cliFixtureSeed{}
+	for range 2 {
+		root := cliNamedRoot(t, "008")
+		_, eligible, err := cliFixtureInputKey(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		builtAt := ""
+		if err := seed.populate(root, func(p string) error { builtAt = p; return initializeCLIFixture(t, p) }); err != nil {
+			t.Fatal(err)
+		}
+		if eligible {
+			if !seed.selected || seed.root == "" || (builtAt != "" && builtAt != seed.root) {
+				t.Fatal("default eligible branch not used")
+			}
+		} else if builtAt != root || seed.selected || seed.root != "" {
+			t.Fatal("default fallback branch not used")
+		}
+		original := cliNamedRoot(t, "008")
+		if err := initializeCLIFixture(t, original); err != nil {
+			t.Fatal(err)
+		}
+		assertCLIEquivalent(t, root, original)
+	}
+}
+
+func TestCLITestParallelReaderEdges(t *testing.T) {
+	// A legal escaped mountpoint maps membership beneath it component by
+	// component; use a translated immutable fixture filesystem.
+	for _, point := range []string{"/cg space", "/" + strings.Repeat("m", 80)} {
+		m := cliParallelFixtureTexts()
+		escaped := strings.ReplaceAll(point, " ", `\040`)
+		m["/proc/self/mountinfo"] = "29 1 0:26 / " + escaped + " rw - cgroup2 cgroup rw\n"
+		base := cliParallelFixtureFiles(m)
+		read, stat := base.read, base.stat
+		translate := func(p string) string {
+			if p == point {
+				return "/cg"
+			}
+			if strings.HasPrefix(p, point+"/") {
+				return "/cg" + strings.TrimPrefix(p, point)
+			}
+			return p
+		}
+		base.read = func(p string, n int) (string, error) { return read(translate(p), n) }
+		base.stat = func(p string) (fs.FileInfo, error) { return stat(translate(p)) }
+		if !observeCLITestParallel(base).valid {
+			t.Fatal("escaped/translated mountpoint rejected")
+		}
+	}
+	for _, caseName := range []string{"read error", "changed", "oversized"} {
+		f := cliParallelFixtureFiles(cliParallelFixtureTexts())
+		calls := 0
+		f.link = func(string) (string, error) {
+			calls++
+			if calls == 1 {
+				return "cgroup:[4026531835]", nil
+			}
+			switch caseName {
+			case "read error":
+				return "", os.ErrPermission
+			case "changed":
+				return "cgroup:[123]", nil
+			default:
+				return strings.Repeat("x", 129), nil
+			}
+		}
+		o := observeCLITestParallel(f)
+		for d := 2; d < 16; d++ {
+			if decideCLITestParallel(d, false, "linux", o).Final != d {
+				t.Fatal("bad completion namespace admitted")
+			}
+		}
+	}
+	// Every supported text source rejects oversized and truncated-valid-prefix
+	// content through the composed reader, rather than accepting a prefix.
+	for path := range cliParallelFixtureTexts() {
+		for _, extra := range []string{"\nextra", strings.Repeat("x", 262145)} {
+			m := cliParallelFixtureTexts()
+			m[path] += extra
+			if observeCLITestParallel(cliParallelFixtureFiles(m)).valid {
+				t.Fatal("malformed/oversized input accepted", path)
+			}
+		}
+	}
+	// Equality yields zero headroom, whereas excess current invalidates the
+	// entire observation, independently for memory and PIDs.
+	for _, name := range []string{"memory", "pids"} {
+		m := cliParallelFixtureTexts()
+		m["/cg/parent/"+name+".current"] = m["/cg/parent/"+name+".max"]
+		o := observeCLITestParallel(cliParallelFixtureFiles(m))
+		if !o.valid {
+			t.Fatal("max=current should be a valid exhausted observation")
+		}
+		for d := 2; d < 16; d++ {
+			if decideCLITestParallel(d, false, "linux", o).Final != d {
+				t.Fatal("exhausted resource admitted")
+			}
+		}
+	}
+	// Exactly 64 directories, including the genuine root, are supported.
+	member := "/" + strings.TrimSuffix(strings.Repeat("a/", 63), "/")
+	m := cliParallelFixtureTexts()
+	m["/proc/self/cgroup"] = "0::" + member + "\n"
+	dirs := map[string]bool{"/cg": true}
+	dir := "/cg"
+	for range 63 {
+		dir += "/a"
+		dirs[dir] = true
+		for _, name := range []string{"memory", "pids"} {
+			m[dir+"/"+name+".max"] = "max\n"
+			m[dir+"/"+name+".current"] = "0\n"
+		}
+	}
+	f := cliParallelFixtureFiles(m)
+	stat := f.stat
+	f.stat = func(p string) (fs.FileInfo, error) {
+		if dirs[p] {
+			return cliParallelFixtureInfo{directory: true}, nil
+		}
+		return stat(p)
+	}
+	o, err := readCLITestParallel(f)
+	if err != nil || !o.valid || len(o.ancestors) != 63 {
+		t.Fatal("exact ancestor bound rejected", err)
+	}
+	// All records are owned: concurrent decision consumers do not mutate them.
+	original := append([]struct{ memory, pids cliTestParallelLimit }(nil), o.ancestors...)
+	var wg sync.WaitGroup
+	for d := 2; d < 16; d++ {
+		wg.Add(1)
+		go func(d int) {
+			defer wg.Done()
+			if decideCLITestParallel(d, false, "linux", o).Final != 16 {
+				t.Error("frozen observation rejected")
+			}
+		}(d)
+	}
+	wg.Wait()
+	if !reflect.DeepEqual(original, o.ancestors) {
+		t.Fatal("decision mutated observation")
+	}
+	r := cliParallelReader{files: cliParallelFixtureFiles(cliParallelFixtureTexts()), scalars: 256}
+	if _, err := r.limit("/cg/parent", "memory"); err == nil {
+		t.Fatal("scalar budget exceeded")
+	}
+	for _, target := range []string{"/proc/self/cgroup", "/proc/self/mountinfo"} {
+		f := cliParallelFixtureFiles(cliParallelFixtureTexts())
+		read := f.read
+		calls := 0
+		f.read = func(p string, n int) (string, error) {
+			if p == target {
+				calls++
+				if calls == 2 {
+					return "", os.ErrPermission
+				}
+			}
+			return read(p, n)
+		}
+		if observeCLITestParallel(f).valid {
+			t.Fatal("completion read failure accepted")
+		}
+	}
+}
+
+func TestCLIFixtureDifferentKeyFallback(t *testing.T) {
+	seed := cliFixtureSeed{observe: deterministicCLIInputProvider()}
+	first := cliNamedRoot(t, "008")
+	if err := seed.populate(first, func(root string) error { return initializeCLIFixture(t, root) }); err != nil {
+		t.Fatal(err)
+	}
+	selected, source := seed.key, seed.root
+	other := cliNamedRoot(t, "other")
+	calls := 0
+	if err := seed.populate(other, func(root string) error {
+		calls++
+		if root != other {
+			t.Fatal("different key initialized seed instead of requested root")
+		}
+		return initializeCLIFixture(t, root)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || seed.key != selected || seed.root != source {
+		t.Fatal("different key changed seed publication")
+	}
+	original := cliNamedRoot(t, "other")
+	if err := initializeCLIFixture(t, original); err != nil {
+		t.Fatal(err)
+	}
+	assertCLIEquivalent(t, other, original)
 }

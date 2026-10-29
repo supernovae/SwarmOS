@@ -3,7 +3,6 @@ package lease
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -72,6 +71,9 @@ func (m *Manager) DiscardCheckpoint(ctx context.Context, n int, owner, expectedH
 	case !strings.HasPrefix(st.Branch, fmt.Sprintf("swarm/issue-%d-", n)):
 		return nil, fmt.Errorf("issue #%d records an invalid checkpoint branch %q", n, st.Branch)
 	}
+	if err := m.denyResume(n); err != nil {
+		return nil, err
+	}
 	head := st.HeadSHA
 	st.DiscardedCheckpoints = append(st.DiscardedCheckpoints, DiscardedCheckpoint{
 		Branch:       st.Branch,
@@ -95,7 +97,7 @@ func (m *Manager) DiscardCheckpoint(ctx context.Context, n int, owner, expectedH
 	st.RevisionPlan, st.LastRebase = nil, nil
 	st.Lease.NextPhase = ""
 	m.stampForSave(ctx, n, st)
-	raw, err := json.Marshal(st)
+	raw, err := marshalCoordinatorState(st)
 	if err != nil {
 		return nil, err
 	}

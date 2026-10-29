@@ -14,7 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Bound runtime parallelism before Go/cgo startup: the runtime sizes per-P
+// Bound runtime parallelism before verified pure-Go startup: the runtime sizes per-P
 // allocations from GOMAXPROCS before main, and host CPU counts can exhaust the
 // address-space limit even before the helper validates its arguments. This is
 // helper-only; the payload receives its own explicit environment.

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/progress"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
@@ -43,7 +45,17 @@ func validatorDependencyCaches(ctx context.Context, worktree, baseSHA string, po
 // persistent validator caches; candidate runs reuse them read-only or not at
 // all (sandbox.ValidatorCacheMounts). Warm-up is best-effort: it never changes
 // the candidate's verdict. The returned note is added to the report.
-func warmBuildCaches(ctx context.Context, r *checkRunner, checks []contract.CheckSpec, baseSHA string) string {
+func warmBuildCaches(ctx context.Context, r *checkRunner, checks []contract.CheckSpec, baseSHA string, timing *PhaseTiming, observe func(progress.Event)) string {
+	start := time.Now()
+	timing.Status = "ran"
+	phaseEvent(observe, "warm-up", "started", 0)
+	defer func() {
+		if ctx.Err() != nil {
+			timing.Status = "cancelled"
+		}
+		timing.Duration = time.Since(start)
+		phaseEvent(observe, "warm-up", timing.Status, timing.Duration)
+	}()
 	keyDir := ""
 	for _, c := range r.buildCaches {
 		if c.Persistent {
@@ -52,19 +64,29 @@ func warmBuildCaches(ctx context.Context, r *checkRunner, checks []contract.Chec
 		}
 	}
 	if keyDir == "" || len(checks) == 0 {
+		timing.Status = "no-applicable-cache"
+		if keyDir != "" {
+			timing.Status = "no-applicable-checks"
+		}
 		return ""
 	}
 	marker := ".warm-" + baseSHA
 	if _, err := os.Lstat(filepath.Join(keyDir, marker)); !errors.Is(err, os.ErrNotExist) {
+		timing.Status = "skipped-marker"
+		if err != nil {
+			timing.Status = "skipped-error"
+		}
 		return ""
 	}
 	tmp, err := os.MkdirTemp("", "swarm-warmup-*")
 	if err != nil {
+		timing.Status = "skipped-error"
 		return fmt.Sprintf("\nBuild cache warm-up skipped: %v\n", err)
 	}
 	defer os.RemoveAll(tmp)
 	checkout := filepath.Join(tmp, "base")
 	if _, err := gitOutputContext(ctx, r.worktree, "worktree", "add", "--detach", "--", checkout, baseSHA); err != nil {
+		timing.Status = "skipped-error"
 		return fmt.Sprintf("\nBuild cache warm-up skipped: %v\n", err)
 	}
 	defer gitOutput(r.worktree, "worktree", "remove", "--force", "--", checkout)
@@ -77,15 +99,18 @@ func warmBuildCaches(ctx context.Context, r *checkRunner, checks []contract.Chec
 		}
 	}
 	if ctx.Err() != nil {
+		timing.Status = "cancelled"
 		return ""
 	}
 	// Record completion even when a base check failed, so a broken base is
 	// not rebuilt by every later validation.
 	if err := safefs.WriteFile(keyDir, marker, nil, 0o600); err != nil {
+		timing.Status = "skipped-error"
 		return fmt.Sprintf("\nBuild cache warm-up marker not written: %v\n", err)
 	}
 	note := fmt.Sprintf("\nWarmed the validator build cache from trusted base `%s`.\n", baseSHA)
 	if len(failed) > 0 {
+		timing.Status = "failed-checks"
 		note += fmt.Sprintf("Warm-up check(s) %s failed on the base; this does not affect the validation result.\n", strings.Join(failed, ", "))
 	}
 	return note

@@ -144,6 +144,19 @@ func TestBundleGuidanceAllRoles(t *testing.T) {
 	for _, role := range guidanceRoles {
 		t.Run(role, func(t *testing.T) {
 			sys, _ := compileGuidance(t, repo, base, role, guidanceWorkUnit("roles"), nil)
+			policy, err := os.ReadFile(filepath.Join(repo, ".swarm/validation/required-checks.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{strings.TrimSpace(string(policy)), "coordinator-owned reference, not a per-role execution list", "coordinator runs the complete trusted-base required policy once", "Agent observations remain advisory", "agent subprocesses must not request coordinator credentials"} {
+				if !strings.Contains(sys, want) {
+					t.Errorf("%s lacks %q", role, want)
+				}
+			}
+			if strings.Contains(sys, "Run these check commands directly") {
+				t.Fatal("agent policy checklist retained")
+			}
+
 			for _, marker := range []string{"project-policy-marker", "conventions-policy-marker", "goals-policy-marker", "manual-policy-marker", "rules-policy-marker", "safety-rule-marker", "validation-policy-marker", "architecture-small-marker"} {
 				if strings.Count(sys, marker) != 1 {
 					t.Fatalf("%s must be inline once for %s", marker, role)
@@ -243,6 +256,11 @@ func TestBundleGuidanceApprovedBase(t *testing.T) {
 			for _, role := range guidanceRoles {
 				sys, _ := compileGuidance(t, wt, base, role, guidanceWorkUnit("base"), nil)
 				all := activeText(t, wt)
+				policy := workspaceGitOutput(t, repo, "show", base+":.swarm/validation/required-checks.yaml")
+				if !strings.Contains(sys, strings.TrimSpace(policy)) {
+					t.Fatal("trusted policy reference lost")
+				}
+
 				for _, marker := range []string{"candidate-description-marker", "Candidate title marker", "candidate-skill-marker", "candidate-only-marker", "candidate-rule-marker", "candidate-architecture-marker", "candidate-nested-marker", "candidate-extra-rule-marker"} {
 					if strings.Contains(all, marker) {
 						t.Fatalf("%s: candidate guidance %q reached .swarm/active", role, marker)

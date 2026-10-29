@@ -69,5 +69,6 @@ func newForkCoordinatorCmd(rootOpts *RootOptions) *cobra.Command {
 
 	cmd.Flags().StringVar(&eventPath, "event", "", "Path to the GitHub issue_comment webhook event payload ($GITHUB_EVENT_PATH)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit coordinator execution result as JSON")
+	cmd.AddCommand(newForkRequestStatusCmd(rootOpts))
 	return cmd
 }

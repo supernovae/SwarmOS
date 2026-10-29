@@ -153,6 +153,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			modelName := strings.TrimSpace(firstNonEmptyStr(modelFlag, "interactive"))
 			metaForRole := func(role string) map[string]string {
 				return map[string]string{
+					"production_mode": "interactive",
 					"role":            role,
 					"agent":           harnessName,
 					"harness":         harnessName,

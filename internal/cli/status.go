@@ -173,6 +173,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				} else {
 					fmt.Fprintln(cmd.OutOrStdout(), "Provenance:")
 					for _, record := range entry.Provenance {
+						fmt.Fprintf(cmd.OutOrStdout(), "  %s production: %s\n", record.Role, lease.RoleProductionSummary(state, record.Role))
 						value := func(s string) string {
 							if s == "" {
 								return "-"

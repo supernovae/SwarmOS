@@ -339,6 +339,7 @@ func draftPRSection(unit *contract.WorkUnit, state *lease.IssueState, stateRef s
 	}
 	b.WriteString("\n## Review handoff\n\nUse the test plan and validation results to verify each criterion, then mark this PR ready for review in GitHub.\n")
 	if state != nil {
+		b.WriteString(lease.DescriptionProductionSummary(state))
 		raw, _ := json.MarshalIndent(lease.BuildProvenanceAttestation(unit, state), "", "  ")
 		b.WriteString("\n## 🔒 Harness & Model Provenance Attestation\n\nMachine-Readable Provenance Attestation (JSON)\n```json\n" + lease.DescriptionText(string(raw)) + "\n```\n")
 		if runs := lease.RoleRuns(state); len(runs) > 0 {

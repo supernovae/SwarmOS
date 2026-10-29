@@ -21,7 +21,7 @@ func ProjectReviewEvidence(ctx context.Context, tr tracker.Tracker, st *lease.Is
 	}
 	issue := st.Lease.IssueNumber
 	ref := lease.DescriptionStateReference(pr.Body, issue)
-	body, err := lease.ComposePRDescription(pr.Body, "review-evidence", "## SwarmOS review evidence\n"+lease.DescriptionArtifacts(st)+lease.DescriptionRetrieval(issue, ref), ref, issue)
+	body, err := lease.ComposePRDescription(pr.Body, "review-evidence", "## SwarmOS review evidence\n"+lease.DescriptionProductionSummary(st)+lease.DescriptionArtifacts(st)+lease.DescriptionRetrieval(issue, ref), ref, issue)
 	if err != nil {
 		return err
 	}

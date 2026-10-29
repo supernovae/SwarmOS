@@ -384,3 +384,61 @@ func validationInventory(body string) string {
 	}
 	return strings.Join(rows, "\n") + "\n"
 }
+
+// RoleProductionSummary describes current evidence without granting authority.
+func RoleProductionSummary(st *IssueState, role string) string {
+	if st == nil {
+		return "unknown"
+	}
+	clean := func(s string) string {
+		return DescriptionText(strings.Join(strings.Fields(strings.ReplaceAll(s, "|", "/")), " "))
+	}
+	for _, att := range st.Attestations {
+		if att.Role != role || att.ArtifactType == "" || att.ArtifactDigest == "" {
+			continue
+		}
+		for _, art := range st.Artifacts {
+			if string(art.Type) != att.ArtifactType || hash(art.Body) != att.ArtifactDigest {
+				continue
+			}
+			md := art.Metadata
+			if md["content_sha256"] != att.ArtifactDigest {
+				continue
+			}
+			if att.ProductionMode == "interactive" && att.StagedBy != "" && md["production_mode"] == "interactive" && md["staged_by"] == att.StagedBy && att.HarnessSource == "self-reported" && att.ModelSource == "self-reported" {
+				return "staged interactively by " + clean(att.StagedBy) + "; self-reported harness " + clean(att.Harness) + ", model " + clean(att.Model)
+			}
+			if role == "reviewer" && md["kind"] == "human" && md["review_source"] == "authenticated-human" && md["actor"] != "" {
+				return "human review by " + clean(md["actor"])
+			}
+			if att.ExecutionMode != "" && md["execution_mode"] == att.ExecutionMode && att.Agent != "" && att.Harness != "" && st.Lease.Owner != "" {
+				boundary := ""
+				if role == "reviewer" && (att.Sandbox == "bwrap" || att.Sandbox == "sandbox-exec" || att.Sandbox == "container") {
+					boundary = "; sandboxed reviewer (" + clean(att.Sandbox) + ")"
+				}
+				return "headless agent run by " + clean(st.Lease.Owner) + "; configured agent " + clean(att.Agent) + ", harness " + clean(att.Harness) + boundary
+			}
+			if role == "tester" && md["validation_trusted_origin"] == "coordinator" && md["validation_trusted_owner"] == st.Lease.Owner && st.Lease.Owner != "" && md["validation_trusted_claim"] == st.Lease.ClaimID && st.Lease.ClaimID != "" && md["validation_claim"] == st.Lease.ClaimID && md["validation_base"] == st.BaseSHA && st.BaseSHA != "" && md["base_sha"] == st.BaseSHA && md["validation_tree"] != "" && md["validation_policy"] != "" {
+				head, _ := implementationCheckpoint(st)
+				if head != "" && md["head_sha"] == head {
+					runner := "unknown prior runner"
+					if att.Harness != "" && att.Harness != "unknown" {
+						runner = "prior runner provenance reused: " + clean(att.Harness) + ", model " + clean(att.Model)
+					}
+					return "coordinator validation by " + clean(st.Lease.Owner) + "; " + runner
+				}
+			}
+		}
+	}
+	return "unknown"
+}
+
+// DescriptionProductionSummary stays inside the existing bounded managed section.
+func DescriptionProductionSummary(st *IssueState) string {
+	var b strings.Builder
+	b.WriteString("\n## How the work was produced\n\n")
+	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+		b.WriteString(DescriptionSlot("- " + role + ": " + RoleProductionSummary(st, role) + "\n"))
+	}
+	return b.String()
+}

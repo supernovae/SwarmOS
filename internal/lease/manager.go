@@ -1564,7 +1564,7 @@ func (m *Manager) RecordTrustedValidation(ctx context.Context, n int, owner stri
 func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art contract.Artifact, advisory, trusted, implementation bool, eligibility ...func(*IssueState) error) (*IssueState, error) {
 	metadata := make(map[string]string, len(art.Metadata))
 	for k, v := range art.Metadata {
-		if !strings.HasPrefix(k, "validation_trusted_") && !strings.HasPrefix(k, "implementation_trusted_") {
+		if k != "staged_by" && k != "harness_source" && k != "model_source" && !strings.HasPrefix(k, "validation_trusted_") && !strings.HasPrefix(k, "implementation_trusted_") {
 			metadata[k] = v
 		}
 	}
@@ -1584,6 +1584,18 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			if err := verify(st); err != nil {
 				return err
 			}
+		}
+		if art.Metadata["production_mode"] == "interactive" {
+			actor, err := m.tracker.CurrentUser(ctx)
+			if err != nil {
+				return fmt.Errorf("authenticate interactive stager: %w", err)
+			}
+			if strings.TrimSpace(actor) == "" {
+				return fmt.Errorf("interactive stager identity is empty")
+			}
+			art.Metadata["staged_by"] = actor
+			art.Metadata["harness_source"] = "self-reported"
+			art.Metadata["model_source"] = "self-reported"
 		}
 		if implementation {
 			head, branch := implementationCheckpoint(st)
@@ -1742,6 +1754,10 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 				agentName = harnessName
 			}
 			RecordRoleAttestation(st, contract.RoleAttestation{
+				ProductionMode: art.Metadata["production_mode"],
+				StagedBy:       art.Metadata["staged_by"],
+				HarnessSource:  art.Metadata["harness_source"],
+				ModelSource:    art.Metadata["model_source"],
 				ExecutionMode:  art.Metadata["execution_mode"],
 				Authentication: art.Metadata["authentication"],
 				Role:           role,
@@ -2117,14 +2133,22 @@ func (m *Manager) InvalidatePRRevisionEvidence(ctx context.Context, n int, owner
 // TesterMetadata adds the recorded tester attestation, if any, to a validation
 // artifact's metadata so every validation path reports the same provenance.
 func TesterMetadata(st *IssueState, base map[string]string) map[string]string {
+	metadata := make(map[string]string, len(base))
+	for k, v := range base {
+		metadata[k] = v
+	}
 	if st != nil {
 		for _, att := range st.Attestations {
 			if att.Role == "tester" {
-				return att.Metadata(base)
+				metadata = att.Metadata(metadata)
+				break
 			}
 		}
 	}
-	return base
+	for _, k := range []string{"production_mode", "staged_by", "harness_source", "model_source", "execution_mode", "authentication"} {
+		delete(metadata, k)
+	}
+	return metadata
 }
 
 // ReviewBindings identifies the exact coordinator snapshot a reviewer receives.

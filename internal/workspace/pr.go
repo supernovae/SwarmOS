@@ -46,11 +46,11 @@ func CompilePRHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *co
 - **Test Plan Artifact Path**: `+"`.swarm/active/TEST_PLAN.md`"+`
 - **Review Artifact Path**: `+"`.swarm/active/REVIEW.md`"+`
 - **PR lifecycle**: `+"`swarm pr status %d`"+` -> `+"`swarm pr work %d`"+` -> `+"`swarm pr validate %d`"+` -> `+"`swarm pr submit %d`"+`
-- **Interactive artifacts**: `+"`swarm pr stage %d --phase plan`"+` or `+"`swarm pr stage %d --phase implement`"+`
-- **Human plan gate**: an independent maintainer approves the linked plan with `+"`swarm issue review-plan %d --approve`"+`
+- **Interactive artifacts**: /swarm-plan -> `+"`swarm pr stage %d --phase plan`"+` -> `+"`swarm issue review-plan %[12]d`"+` (configured gate) -> /swarm-implement -> `+"`swarm pr validate %[6]d`"+` -> `+"`swarm pr stage %[11]d --phase implement`"+` -> `+"`swarm issue renew %[12]d`"+` -> `+"`swarm pr submit %[6]d`"+`
+- **Human plan gate**: an independent maintainer approves the linked plan with `+"`swarm issue review-plan %[12]d --approve`"+`
 
 Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMPT.md`"+` before making changes.
-%s`, ActiveMarkerStart, prNumber, wu.ID, wu.IssueNumber, role, prNumber, prNumber, prNumber, prNumber, prNumber, prNumber, wu.IssueNumber, ActiveMarkerEnd)
+%[13]s`, ActiveMarkerStart, prNumber, wu.ID, wu.IssueNumber, role, prNumber, prNumber, prNumber, prNumber, prNumber, prNumber, wu.IssueNumber, ActiveMarkerEnd)
 	return injectActivePointer(worktreePath, pointer)
 }
 

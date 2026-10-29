@@ -349,3 +349,81 @@ func TestBubblewrapCandidateWritesDiscarded(t *testing.T) {
 		}
 	}
 }
+
+func TestGoConcurrencyExecutor(t *testing.T) {
+	goConcurrencyHostileEnv(t)
+	for _, readOnly := range []bool{false, true} {
+		for _, warmup := range []bool{false, true} {
+			t.Run(fmt.Sprintf("readonly=%v/warmup=%v", readOnly, warmup), func(t *testing.T) {
+				cache := t.TempDir()
+				caches := []BuildCache{{Ecosystem: "go", EnvKey: "GOCACHE", Dir: cache, Overlay: !warmup}}
+				flags, err := executorFlags(t.TempDir(), readOnly, caches, Dependencies{}, "echo unchanged", []string{"argument"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var env []string
+				for i, flag := range flags {
+					if flag == "--setenv" {
+						env = append(env, flags[i+1]+"="+flags[i+2])
+					}
+				}
+				goConcurrencyAssertEnv(t, env, cache)
+				joined := strings.Join(flags, "\n")
+				for _, exact := range []string{"--clearenv", "--size\n1073741824\n--tmpfs\n/tmp", "--as=8589934592", "--cpu=300", "--nproc=1024", "--nofile=4096", "--fsize=268435456", "--core=0"} {
+					if !strings.Contains("\n"+joined+"\n", "\n"+exact+"\n") {
+						t.Fatalf("missing resource/isolation setting %q", exact)
+					}
+				}
+				if !strings.HasSuffix(joined, "/bin/sh\n-c\necho unchanged\nswarm-tool\nargument") {
+					t.Fatal("command arguments changed")
+				}
+				goConcurrencyReplay(t, env)
+			})
+		}
+	}
+}
+
+func TestGoConcurrencyBoundaries(t *testing.T) {
+	for _, harness := range []string{"omp", "codex"} {
+		t.Run(harness, func(t *testing.T) {
+			binary := os.Getenv("SWARM_TEST_CODEX_BINARY")
+			if harness == "codex" && binary == "" {
+				t.Skip("set SWARM_TEST_CODEX_BINARY for real Codex boundary")
+			}
+			if harness == "omp" && os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
+				t.Skip("set SWARM_TEST_EXECUTOR=1 for real Bubblewrap boundary")
+			}
+			goConcurrencyHostileEnv(t)
+			work := goConcurrencyFixture(t)
+			cfg := &contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: harness, Binary: binary}}}
+			cache := t.TempDir()
+			caches := []BuildCache{{Ecosystem: "go", EnvKey: "GOCACHE", Dir: cache, Persistent: true}}
+			for _, warmup := range []bool{true, false} {
+				var out strings.Builder
+				err := RunConfiguredNativeValidation(t.Context(), work, cfg, goConcurrencyScript+"\nprintf changed > source\n", caches, Dependencies{}, warmup, &out, &out)
+				if err != nil {
+					t.Fatal(err, out.String())
+				}
+				goConcurrencyOutput(t, out.String())
+				data, err := os.ReadFile(filepath.Join(work, "source"))
+				if err != nil || string(data) != "original" {
+					t.Fatal("validation modified candidate", err)
+				}
+			}
+			var out strings.Builder
+			if harness == "omp" {
+				if err := (ToolExecutor{Work: work, BuildCaches: caches}).Run(t.Context(), goConcurrencyScript, &out, &out); err != nil {
+					t.Fatal(err, out.String())
+				}
+			} else {
+				scratch := t.TempDir()
+				args := codexPolicy(binary, work, scratch, false, caches, Dependencies{})
+				args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", goConcurrencyScript)
+				if err := runNativeCommand(t.Context(), binary, scratch, nativeEnv(codexHostHome(scratch), false, Dependencies{}), args, nil, &out, &out); err != nil {
+					t.Fatal(err, out.String())
+				}
+			}
+			goConcurrencyOutput(t, out.String())
+		})
+	}
+}

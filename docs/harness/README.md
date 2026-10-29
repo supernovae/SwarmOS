@@ -98,3 +98,8 @@ The [qualification guide](../native-qualification.md) has the boundary and authe
 3. Add boundary tests for any new capability (MCP, subagents, hooks) before enabling it. A permission prompt alone does not count as isolation.
 
 There is no flag to skip verification. If a harness release drops a required interface, SwarmOS refuses to run it until the adapter is updated.
+
+## Go concurrency
+
+Linux native isolated agent commands and worker checks default to `GOMAXPROCS=2` and `GOFLAGS=-buildvcs=false -p=2`. Bounding Go runtime and package-build concurrency helps checks run reliably on high-core machines within the existing process budget.
+

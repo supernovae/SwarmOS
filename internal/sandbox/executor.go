@@ -132,7 +132,7 @@ func executorFlags(work string, readOnly bool, caches []BuildCache, deps Depende
 	}
 	flags = append(flags, "--dir", "/home/worker", "--setenv", "HOME", "/home/worker", "--setenv", "TMPDIR", "/tmp",
 		"--setenv", "XDG_CACHE_HOME", "/home/worker/.cache", "--setenv", "XDG_CONFIG_HOME", "/home/worker/.config", "--setenv", "XDG_DATA_HOME", "/home/worker/.local/share",
-		"--setenv", "GOFLAGS", "-buildvcs=false", "--setenv", "PATH", SandboxPath(toolchains))
+		"--setenv", "GOFLAGS", linuxGoFlags, "--setenv", "GOMAXPROCS", linuxGoMaxProcs, "--setenv", "PATH", SandboxPath(toolchains))
 	for _, b := range toolchains {
 		if b.EnvKey != "" && b.EnvVal != "" && !IsBuildCacheKey(b.EnvKey) {
 			flags = append(flags, "--setenv", b.EnvKey, b.EnvVal)

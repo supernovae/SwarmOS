@@ -86,7 +86,7 @@ make build BIN_DIR="./build output"
 make install GOBIN="$HOME/.local/bin"
 ```
 
-`make install` defaults to `$HOME/go/bin`; keep your selected installation directory on `PATH`. `make check` runs the same formatting, vet, staticcheck, and race-enabled tests as CI.
+`make install` defaults to `$HOME/go/bin`; keep your selected installation directory on `PATH`. `make check` runs formatting, vet, staticcheck, race-enabled tests, and changelog checks locally. PR CI uses a fixed regression profile; nightly and release validation run the full suites.
 
 For CLI-only installation, these Go commands remain supported:
 

@@ -82,8 +82,65 @@ type ValidationReport struct {
 	CheckOutcomes    []CheckRunOutcome `json:"check_outcomes"`
 	// Repair is the trusted repair summary of a failed interactive
 	// validation, including base-rerun classification of failing Go tests.
-	Repair   *RepairSummary    `json:"repair,omitempty"`
-	Artifact contract.Artifact `json:"artifact"`
+	Repair        *RepairSummary     `json:"repair,omitempty"`
+	Timings       *ValidationTimings `json:"timings,omitempty"`
+	SourceHead    string             `json:"source_head,omitempty"`
+	SourceTime    string             `json:"source_time,omitempty"`
+	ReuseDuration *time.Duration     `json:"reuse_duration,omitempty"`
+	Artifact      contract.Artifact  `json:"artifact"`
+}
+
+// PhaseTiming is additive execution evidence, never a reuse eligibility key.
+type PhaseTiming struct {
+	Duration time.Duration `json:"duration"`
+	Status   string        `json:"status"`
+}
+type ValidationTimings struct {
+	Preflight PhaseTiming   `json:"preflight"`
+	Warmup    PhaseTiming   `json:"warmup"`
+	Checks    PhaseTiming   `json:"checks"`
+	Repair    PhaseTiming   `json:"repair"`
+	Total     time.Duration `json:"total"`
+}
+
+func phaseEvent(observe func(progress.Event), name, status string, elapsed time.Duration) {
+	if observe != nil {
+		observe(progress.Event{Check: "preparation: " + name, Status: status, StageElapsed: elapsed})
+	}
+}
+
+// TimingSummary keeps source execution and the current reuse operation distinct.
+func (r *ValidationReport) TimingSummary() string {
+	var b strings.Builder
+	if r.Timings == nil {
+		b.WriteString("\nPhase/total timings: unavailable\n")
+	} else {
+		b.WriteString("\n| Phase | Status | Duration |\n| :--- | :--- | :--- |\n")
+		for _, phase := range []struct {
+			name   string
+			timing PhaseTiming
+		}{
+			{"preflight", r.Timings.Preflight}, {"warm-up", r.Timings.Warmup}, {"checks", r.Timings.Checks}, {"repair", r.Timings.Repair},
+		} {
+			fmt.Fprintf(&b, "| %s | %s | %s |\n", phase.name, EscapeDiagnostic(phase.timing.Status), phase.timing.Duration.Round(time.Millisecond))
+		}
+		fmt.Fprintf(&b, "Total wall time: %s\n", r.Timings.Total.Round(time.Millisecond))
+	}
+	if r.Reused {
+		fmt.Fprintf(&b, "Reused source head: %s; source time: %s; current reuse: %s\n", EscapeDiagnostic(r.SourceHead), EscapeDiagnostic(r.SourceTime), DurationText(r.ReuseDuration))
+	}
+	return b.String()
+}
+
+func reportCell(s string) string {
+	return strings.NewReplacer("|", "/", "`", "'", "<", "&lt;", ">", "&gt;").Replace(EscapeDiagnostic(s))
+}
+
+func DurationText(d *time.Duration) string {
+	if d == nil || *d < 0 {
+		return "unavailable"
+	}
+	return d.Round(time.Millisecond).String()
 }
 
 type ValidateOptions struct {
@@ -107,11 +164,6 @@ type ValidateOptions struct {
 	// only in CIMode, where `swarm repo validate` checks a maintainer-authored
 	// pull request at merge time; agent work and fork mode always reject.
 	ReportProtectedChanges bool
-	// GoFastPass first runs go test on the Go packages changed since BaseSHA,
-	// and their in-module reverse dependencies, before each required
-	// `go test ./...` check. A failure there stops validation early; a pass
-	// always continues to the unchanged full check. Ignored in CIMode.
-	GoFastPass bool
 	// LookupEnv resolves SWARM_EXECUTION_MODE for this validation; nil reads
 	// the process environment. Check subprocesses still receive cleanCheckEnv.
 	LookupEnv func(string) (string, bool)
@@ -121,8 +173,53 @@ type ValidateOptions struct {
 	DependencyPolicy sandbox.DependencyPolicy
 }
 
+// CheckCheckpointBoundary uses the validator's approved execution selection.
+// Preview resolves availability only; actual admission also probes isolation.
+func CheckCheckpointBoundary(ctx context.Context, root, base string, probe bool) (bool, error) {
+	if _, err := loadTrustedValidationSpec(root, base); err != nil {
+		return false, err
+	}
+	cfg, err := harness.LoadConfigAt(root, base)
+	if err != nil {
+		return false, err
+	}
+	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+	if err != nil {
+		return false, err
+	}
+	if execution.Mode != contract.ExecutionIsolated {
+		return false, nil
+	}
+	if execution.Backend == contract.BackendNative {
+		if err = sandbox.CheckNativeValidationAvailable(cfg); err != nil {
+			return true, err
+		}
+		if probe {
+			err = sandbox.CheckNativeValidation(ctx, cfg)
+		}
+	} else {
+		err = sandbox.CheckReadOnlyRuntime("container", execution.ContainerRuntime, execution.ContainerImage)
+		if err == nil && probe {
+			err = sandbox.CheckWorkerRuntime(ctx, execution.ContainerRuntime, execution.ContainerImage)
+		}
+	}
+	return !probe, err
+}
+
 // Validate loads checks and protected paths exclusively from the immutable base.
 func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, opts ValidateOptions) (*ValidationReport, error) {
+	started := time.Now()
+	preflightComplete := false
+	defer func() {
+		if !preflightComplete {
+			status := "FAIL"
+			if ctx.Err() != nil {
+				status = "cancelled"
+			}
+			phaseEvent(opts.OnProgress, "preflight", status, time.Since(started))
+		}
+	}()
+	phaseEvent(opts.OnProgress, "preflight", "started", 0)
 	if opts.BaseSHA == "" {
 		return nil, ErrMissingBaseSHA
 	}
@@ -197,14 +294,13 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err != nil {
 		return nil, err
 	}
-	report := &ValidationReport{Passed: true, BaseSHA: baseSHA, HeadSHA: headSHA, ModifiedFiles: modified, ProtectedChanges: protected}
+	report := &ValidationReport{Timings: &ValidationTimings{}, Passed: true, BaseSHA: baseSHA, HeadSHA: headSHA, ModifiedFiles: modified, ProtectedChanges: protected}
 	var markdown strings.Builder
 	markdown.WriteString("# Validation Report\n\n")
 	markdown.WriteString(fmt.Sprintf("Trusted base: `%s`  \nCandidate head: `%s`\n\n", baseSHA, headSHA))
 	markdown.WriteString("| Check | Command | Status | Duration |\n| :--- | :--- | :--- | :--- |\n")
 	var details strings.Builder
 	var firstErr error
-	stoppedEarly := false
 	checkHome, err := os.MkdirTemp("", "swarm-check-home-*")
 	if err != nil {
 		return nil, err
@@ -226,9 +322,13 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	runner := &checkRunner{worktree: worktreePath, home: checkHome, buildCaches: caches, deps: deps, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated}
 	// Only the trusted base writes the persistent caches, and only where a
 	// candidate can read them back (sandbox.ValidatorCacheReusable).
+	report.Timings.Preflight = PhaseTiming{Duration: time.Since(started), Status: "ran"}
+	preflightComplete = true
+	phaseEvent(opts.OnProgress, "preflight", "PASS", report.Timings.Preflight.Duration)
 	warmNote := ""
+	report.Timings.Warmup.Status = "not-applicable"
 	if !opts.RunnerIsolated && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative && sandbox.NativeValidationReusesCache(cfg) {
-		warmNote = warmBuildCaches(ctx, runner, spec.RequiredChecks, baseSHA)
+		warmNote = warmBuildCaches(ctx, runner, spec.RequiredChecks, baseSHA, &report.Timings.Warmup, opts.OnProgress)
 	}
 	record := func(outcome CheckRunOutcome) {
 		if outcome.Passed && !outcome.Preliminary {
@@ -247,7 +347,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		} else if !outcome.Passed {
 			status = fmt.Sprintf("FAIL (exit %d)", outcome.ExitCode)
 		}
-		markdown.WriteString(fmt.Sprintf("| `%s` | `%s` | **%s** | `%s` |\n", outcome.Name, outcome.Command, status, outcome.Duration.Round(time.Millisecond)))
+		markdown.WriteString(fmt.Sprintf("| `%s` | `%s` | **%s** | `%s` |\n", reportCell(outcome.Name), reportCell(outcome.Command), status, outcome.Duration.Round(time.Millisecond)))
 		if strings.TrimSpace(outcome.Output) != "" {
 			details.WriteString(fmt.Sprintf("\n### Output: `%s`\n```text\n%s\n```\n", outcome.Name, strings.TrimSpace(outcome.Output)))
 		}
@@ -258,33 +358,10 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			firstErr = fmt.Errorf("%w: check %q (%s) exited with %d: %v", ErrRequiredCheckFailed, outcome.Name, outcome.Command, outcome.ExitCode, runErr)
 		}
 	}
-	// The changed-package pass only runs for the explicitly requested
-	// interactive operations, never for CI or repository validation.
-	var fastPass *goFastPass
-	if opts.GoFastPass && !opts.CIMode {
-		fastPass = &goFastPass{runner: runner, worktree: worktreePath, baseSHA: baseSHA}
-	}
 	required := 0
-	for i, check := range spec.RequiredChecks {
+	checksStart := time.Now()
+	for _, check := range spec.RequiredChecks {
 		duration := checkTimeout(check.Timeout)
-		if fastPass != nil {
-			outcome, stop, runErr := fastPass.run(ctx, check, duration, opts.OnProgress)
-			if outcome != nil {
-				record(*outcome)
-			}
-			if fastPass.note != "" {
-				details.WriteString(fmt.Sprintf("\nChanged-package pass for `%s` skipped: %s\n", check.Name, fastPass.note))
-				fastPass.note = ""
-			}
-			if stop {
-				fail(outcome, runErr)
-				if remaining := len(spec.RequiredChecks) - i; remaining > 0 {
-					details.WriteString(fmt.Sprintf("\nValidation stopped after the changed-package pass failed; %d required check(s) did not run, including the full `%s`.\n", remaining, check.Name))
-				}
-				stoppedEarly = true
-				break
-			}
-		}
 		required++
 		outcome, runErr := runner.runCheck(ctx, check.Name, check.Command, duration, opts.OnProgress)
 		if runErr != nil {
@@ -292,10 +369,19 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		}
 		record(outcome)
 	}
+	report.Timings.Checks = PhaseTiming{Duration: time.Since(checksStart), Status: "PASS"}
+	if !report.Passed {
+		report.Timings.Checks.Status = "FAIL"
+	}
+	report.Timings.Repair.Status = "not-applicable"
 	details.WriteString(warmNote)
 	// Diagnosis is coordinator work after the verdict; it never changes it.
 	if !report.Passed && !opts.CIMode && ctx.Err() == nil {
+		repairStart := time.Now()
+		phaseEvent(opts.OnProgress, "repair", "started", 0)
 		report.Repair = diagnoseRepair(ctx, runner, report)
+		report.Timings.Repair = PhaseTiming{Duration: time.Since(repairStart), Status: "ran"}
+		phaseEvent(opts.OnProgress, "repair", "PASS", report.Timings.Repair.Duration)
 		if len(report.Repair.Tests) > 0 {
 			details.WriteString("\n### Failing tests compared with the approved base\n")
 			for _, test := range report.Repair.Tests {
@@ -304,14 +390,23 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			details.WriteString("\nSee `.swarm/active/REPAIR.md` for the repair brief.\n")
 		}
 	}
+	stable := false
+	if report.Passed && before != nil {
+		after, e := fingerprint(ctx, worktreePath, opts)
+		stable = e == nil
+		for k, v := range before {
+			if after[k] != v {
+				stable = false
+			}
+		}
+	}
+	report.Timings.Total = time.Since(started)
+	markdown.WriteString(report.TimingSummary())
 	renderSkips(&details, report)
 	markdown.WriteString(details.String())
 	verdict, summary := "PASS", fmt.Sprintf("All %d required checks passed", required)
 	if !report.Passed {
 		verdict, summary = "FAIL", "One or more required checks failed"
-		if stoppedEarly {
-			summary = "Tests for changed packages failed; the full required checks did not run"
-		}
 	}
 	issue := wu.IssueNumber
 	if issue <= 0 {
@@ -322,22 +417,22 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		evidence, _ := json.Marshal(report.Repair)
 		report.Artifact.Metadata[RepairMetadataKey] = string(evidence)
 	}
-	if report.Passed && before != nil {
-		after, e := fingerprint(ctx, worktreePath, opts)
-		stable := e == nil
+	timingReport := *report
+	timingReport.Artifact = contract.Artifact{CreatedAt: report.Artifact.CreatedAt}
+	timingReport.Repair = nil
+	timingReport.SkippedTests = nil
+	timingReport.CheckOutcomes = make([]CheckRunOutcome, len(report.CheckOutcomes))
+	for i, c := range report.CheckOutcomes {
+		timingReport.CheckOutcomes[i] = CheckRunOutcome{Name: c.Name, Command: c.Command, Passed: c.Passed, ExitCode: c.ExitCode, Duration: c.Duration, Preliminary: c.Preliminary}
+	}
+	timingEvidence, _ := json.Marshal(timingReport)
+	report.Artifact.Metadata["validation_timing_report"] = string(timingEvidence)
+	if stable {
 		for k, v := range before {
-			if after[k] != v {
-				stable = false
-			}
+			report.Artifact.Metadata[k] = v
 		}
-		if stable {
-			for k, v := range before {
-				report.Artifact.Metadata[k] = v
-			}
-			// Serialize before embedding so evidence does not recursively contain itself.
-			evidence, _ := json.Marshal(report)
-			report.Artifact.Metadata["validation_report"] = string(evidence)
-		}
+		evidence, _ := json.Marshal(report)
+		report.Artifact.Metadata["validation_report"] = string(evidence)
 	}
 	if !opts.CIMode {
 		if err := safefs.WriteFile(worktreePath, filepath.Join(".swarm", "active", "VALIDATION.md"), []byte(markdown.String()), 0o644); err != nil {

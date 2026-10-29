@@ -17,41 +17,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  lint:
-    name: Lint and vulnerabilities
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version-file: go.mod
-      - name: Check formatting
-        run: |
-          unformatted=$(gofmt -s -l .)
-          if [ -n "$unformatted" ]; then
-            printf '%s\n' "$unformatted"
-            exit 1
-          fi
-      - run: go vet ./...
-      - run: go tool staticcheck ./...
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
-
-  test-matrix:
-    name: Test and CLI smoke (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  smoke:
+    name: CLI smoke
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        # Ubuntu 26.04 ships the AppArmor policy needed for bwrap user/network namespaces.
-        # Windows and macOS tests are paused while the suite is too slow there
-        # (#105); their binaries are still cross-compiled below. Re-add
-        # macos-latest, or windows-latest with a non-race test step, to bring
-        # them back.
-        os: [ubuntu-26.04]
+    env:
+      GOMAXPROCS: '4'
+      GOFLAGS: '-p=2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -60,17 +32,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - name: Configure test identity
-        run: |
-          git config --global user.name "SwarmOS CI"
-          git config --global user.email "ci@swarmos.local"
-      - name: Install reviewer sandbox (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
-      - name: Regression tests
-        # internal/cli runs serially (its fixtures use t.Setenv) and takes up to
-        # ~10m on macOS runners, so the default per-package limit is too tight.
-        run: go test -race -timeout 15m ./...
       - name: Build CLI
         run: go build -o swarm-ci.exe ./cmd/swarm
       - name: Exercise CLI surface
@@ -96,17 +57,16 @@ jobs:
           ./swarm-ci.exe pr rebase --help
           ./swarm-ci.exe pr validate --help
           ./swarm-ci.exe pr submit --help
-      - name: Cross-compile all distributions
-        if: runner.os == 'Linux'
-        run: |
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
-            GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
-          done
+      - name: Check changelog fragments
+        run: go run ./cmd/changelog --check
 
   policy:
     name: SwarmOS policy validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
+    env:
+      GOMAXPROCS: '4'
+      GOFLAGS: '-p=2'
     permissions:
       contents: read
       issues: read
@@ -118,6 +78,13 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
+      - name: Configure test identity
+        run: |
+          git config --global user.name "SwarmOS CI"
+          git config --global user.email "ci@swarmos.local"
+      - name: Install reviewer sandbox (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
       # Same rule as the shipped template: maintainers' own branches list
       # protected changes; agent branches, forks, and other authors are enforced.
       - name: Decide protected-path handling

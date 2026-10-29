@@ -11,9 +11,27 @@ required_checks:
     - name: staticcheck
       command: go tool staticcheck ./...
       timeout: 5m
-    - name: test
-      command: go test ./...
-      timeout: 30m
+    - name: cli-smoke-security
+      command: 'go test -timeout=5m ./internal/cli -run ''^Test(CLIRepoValidateHarnessGrantNeedsAuthoritativeState|RepoValidateGrantOnlyRunsNoChecks|RepoValidateGrantFileRechecked|RootDefaultEnvironment|RootInjectedEnvironment|ResolveBuildVersion|ResolveBuildVersionWithoutVCS)$'' -count=1'
+      timeout: 10m
+    - name: filesystem-security
+      command: 'go test -timeout=5m ./internal/gitcredential/... ./internal/safefs/... -count=1'
+      timeout: 10m
+    - name: agent-security
+      command: 'go test -timeout=5m ./internal/agent -run ''^Test(DefaultModeNeverRunsHostAgent|OperatorCannotWeakenApprovedIsolation|MockCannotBypassIsolation|IsolatedRunnerRejectsHostCredentialsAndUnrestrictedNetwork|NativeCodexRejectsPolicyOverrides|NativeIsolatedEffortAdmitsNoOtherArguments|IsolatedBackendIsExplicit|ConfiguredRunnerRejectsPublishingCredentialForwarding|RestrictedEnvRemovesPublishingCredentials|ConfiguredRunnerWithLookupRejectsCredentialNames|AdapterProcessHidesPublishingCredentials)$'' -count=1'
+      timeout: 10m
+    - name: sandbox-security
+      command: 'go test -timeout=5m ./internal/sandbox -run ''^Test(WorkerArchiveRoundTripAndImport|WorkerImportRejectsConcurrentChanges|WorkerRejectsHostileArchives|WorkerInputRejectsLinksAndCancellation|WorkerRejectsUnpinnedImageAndDoesNotForwardCredentials|WorkerInputRejectsPortableAliases|WorkerEmptyEnvironmentNeverInherits|WorkerOCIMissingCapabilitiesFailClosed|DependencyCacheNoFallback|NativeCodexBoundary|ToolExecutorBoundary)$'' -count=1'
+      timeout: 10m
+    - name: fork-security
+      command: 'go test -timeout=5m ./internal/fork -run ''^Test(GatewayDeadlineCancelsInFlightScan|GatewayIgnoresMismatchedOrEditedResults|ForkJSONRejectsTrailingMalformedData|ForkCoordinatorSecurityAndLifecycle|OperationListsStayInSync|ForkRequestRejectsCarryAuthority)$'' -count=1'
+      timeout: 10m
+    - name: core-regressions
+      command: 'go test -timeout=10m ./internal/validation/... ./internal/harness/... ./internal/coordination/... ./internal/lease/... ./internal/contract/...'
+      timeout: 15m
+    - name: changelog-regressions
+      command: 'go test -timeout=5m ./cmd/changelog ./internal/changelog'
+      timeout: 10m
 protected_paths:
     - .github/workflows/**
     - .gitattributes

@@ -20,6 +20,16 @@ func nativeValidationUsesCodex(cfg *contract.SwarmConfig) bool {
 	return ok && (ac.Harness == "codex" || ac.Harness == "" && name == "codex")
 }
 
+// CheckNativeValidationAvailable resolves the configured boundary without
+// executing a canary or creating any files.
+func CheckNativeValidationAvailable(cfg *contract.SwarmConfig) error {
+	if nativeValidationUsesCodex(cfg) {
+		_, err := NativeValidationBinary(cfg)
+		return err
+	}
+	return CheckReadOnlyRuntime("", "", "")
+}
+
 func CheckNativeValidation(ctx context.Context, cfg *contract.SwarmConfig) error {
 	if nativeValidationUsesCodex(cfg) {
 		binary, err := NativeValidationBinary(cfg)

@@ -25,7 +25,7 @@ When working interactively on a single approved `WorkUnit` issue (using `/swarm-
    - For agent-gated tasks: `swarm issue review-plan <issue-number>`
    - For human-gated tasks: an independent maintainer runs `swarm issue review-plan <issue-number> --approve --notes "LGTM"`; `swarm issue approve` authorizes the WorkUnit but does not approve its implementation plan.
 5. **Implement, validate, and stage the checkpoint (`implement` phase)**:
-   - Implement the approved plan and run the checks in `.swarm/validation/required-checks.yaml`.
+   - Implement the approved plan using developer-owned focused checks in TEST_PLAN.md. The tester independently reviews source and acceptance criteria and reuses applicable passing results; repeats need relevant source changes, observed failures or an unresolved coverage concern. The coordinator runs the complete trusted-base required policy once after roles finish. `.swarm/validation/required-checks.yaml` is a coordinator-owned reference, not a per-role execution list; agent results remain advisory and cannot satisfy claim-bound validation or publication.
    - Stage the implementation checkpoint and validation attestation:
      ```bash
      swarm issue stage '<issue-number>' --phase implement --harness '<harness-name>' --model '<model-name>'

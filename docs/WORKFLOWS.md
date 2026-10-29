@@ -113,9 +113,21 @@ swarm issue reconcile "$issue" --checkpoint --expected-head "$expected" --candid
 swarm issue reconcile "$issue" --checkpoint --expected-head "$expected" --candidate-head "$candidate"
 ```
 
-The preview reports whether validation or fresh plan review is needed. An unchanged patch can retain its current authenticated plan approval. For a changed patch, update `PLAN.md` to describe the replacement and include its full candidate SHA, stage the revised plan with `swarm issue stage 29 --phase plan`, and obtain a new `swarm issue review-plan 29` decision before reconciling. The existing human gate still requires an authorized maintainer's approval.
+The preview reports whether validation or fresh plan review is needed. An unchanged patch can retain its current authenticated plan approval. When a preserved checkpoint needs a replacement plan, select it explicitly for isolated planning:
 
-Reconciliation validates a pinned candidate snapshot using the approved base's checks and protected paths. It then atomically updates the remote task branch and authoritative checkpoint, recording predecessor and replacement heads in the existing rebase evidence. A changed remote head, claim, task, plan, or local candidate stops publication; preserve your work and inspect status again. This mode supports upstream Git-backed issue work before PR submission. For a linked PR, use the [PR revision workflow](developer.md#continuing-an-existing-pr). Local file-backed stores and fork checkpoint reconciliation are unsupported. Running `issue reconcile` without `--checkpoint` retains its existing PR-outcome repair behavior.
+```bash
+swarm issue work "$issue" --phase plan --plan-checkpoint --expected-head "$expected" --candidate-head "$candidate" --dry-run
+swarm issue work "$issue" --phase plan --plan-checkpoint --expected-head "$expected" --candidate-head "$candidate"
+swarm issue review-plan "$issue"
+swarm issue reconcile "$issue" --checkpoint --expected-head "$expected" --candidate-head "$candidate"
+swarm issue work "$issue"
+```
+
+Recovery planning reads the exact candidate in a temporary snapshot and stages only `PLAN.md` and `TEST_PLAN.md`. Repository policy and role prompts come from the approved base. The plan and independent review bind to that candidate and its recorded predecessor; changing either report or the candidate requires fresh review. Human gates still require an authorized independent maintainer's `issue review-plan --approve` decision.
+
+This route supports direct local and GitHub issue work with native isolated Codex or harness-tools Bubblewrap planners in agent plan mode. Use an explicit issue number and both full SHAs. Recovery planning retains an authorized claim when a run fails so you can retry or explicitly release it. Review the plan, then reconcile explicitly before resuming ordinary work. Planning and review leave the preserved checkout and recorded checkpoint in place.
+
+Reconciliation validates a pinned candidate snapshot using the approved base's checks and protected paths. It then atomically updates the remote task branch and authoritative checkpoint, recording predecessor and replacement heads in the existing rebase evidence. A changed remote head, claim, task, plan, or local candidate stops publication; preserve your work and inspect status again. This mode supports upstream Git-backed and local file-backed issue work before PR submission. For a linked PR, use the [PR revision workflow](developer.md#continuing-an-existing-pr). Fork checkpoint reconciliation is unsupported. Running `issue reconcile` without `--checkpoint` retains its existing PR-outcome repair behavior.
 
 ## Discarding an abandoned checkpoint
 
@@ -189,7 +201,7 @@ When a reviewer returns `CHANGES_REQUESTED`, SwarmOS records planning as the nex
 
 Automatic retries are limited per approved task revision. The default allows two extra planner attempts: initial plan → reject → retry 1 → reject → retry 2 → reject → refused. Failed planner runs and unchanged reports also consume attempts; review-only runs do not. `swarm issue status <N>` shows the used count, approved limit, and next-phase reason. `swarm node run` skips capped tasks and continues with other ready issues.
 
-To recover when the budget is exhausted, revise both reports in the managed worktree and use `swarm issue stage <N> --phase plan` or `swarm pr stage <PR> --phase plan`. Successful non-fork staging resets the count. An authenticated human review of either verdict, or maintainer approval of a changed WorkUnit revision, also resets it. Automatic plans, new claims, and approval of identical content preserve the count.
+To recover when the budget is exhausted, revise both reports in the managed worktree and use `swarm issue stage <N> --phase plan` or `swarm pr stage <PR> --phase plan`. Successful non-fork staging resets the count. An authorized independent upstream maintainer can instead review the current reports and run `swarm issue review-plan <N> --reject` to request a revised plan, or `swarm issue review-plan <N> --approve` to approve those reports. Rejection resets the budget but does not approve implementation; the revised reports still need their configured review gate. Run human decisions upstream, outside `--fork`. Maintainer approval of a changed WorkUnit revision also resets the count. Automatic plans, agent approval of existing reports, new claims, and approval of identical WorkUnit content preserve the count.
 
 With `plan_mode: agent`, manual staging is disabled: use `swarm issue review-plan <N>` to review existing reports, or edit the WorkUnit and have a maintainer approve the changed revision. With `plan_mode: interactive`, work pauses for manual staging even when the stored budget is exhausted, without spending an attempt. Fork staging preserves the count; fork tasks need maintainer human review or a changed approved revision to reset it. Exhaustion never approves a plan or bypasses its review gate.
 

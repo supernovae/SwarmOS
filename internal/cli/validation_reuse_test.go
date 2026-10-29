@@ -149,7 +149,7 @@ func TestIssueSubmitValidationReuse(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				if !strings.Contains(pr.Body, "Reusing validation") {
+				if !strings.Contains(pr.Body, "Reusing validation") || !strings.Contains(pr.Body, "Submitted head:") || !strings.Contains(pr.Body, "Source head:") || !strings.Contains(pr.Body, "Total wall time:") || !strings.Contains(pr.Body, "Current reuse wall time:") {
 					t.Fatal("PR lacks disclosure")
 				}
 			} else if artifact.Metadata["validation_reused"] == "true" {
@@ -237,7 +237,7 @@ func TestPRSubmitValidationReuse(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				if !strings.Contains(pr.Body, "Reusing validation") {
+				if !strings.Contains(pr.Body, "Reusing validation") || !strings.Contains(pr.Body, "Submitted head:") || !strings.Contains(pr.Body, "Source head:") || !strings.Contains(pr.Body, "Total wall time:") || !strings.Contains(pr.Body, "Current reuse wall time:") {
 					t.Fatal("PR lacks disclosure")
 				}
 			}

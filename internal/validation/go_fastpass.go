@@ -2,21 +2,15 @@ package validation
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
-	"github.com/supernovae/swarmos/internal/progress"
-	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 const (
@@ -24,7 +18,6 @@ const (
 	// command must stay well within shell argument limits.
 	maxFastPassPackages = 200
 	maxFastPassCommand  = 32 << 10
-	maxDiscoveryOutput  = 16 << 20
 )
 
 // goTestFlags are accepted in a recognized `go test ./...` command. Build
@@ -80,190 +73,6 @@ func parseGoTestAll(command string) (goTestCommand, bool) {
 // safeShellRune reports whether r needs no quoting in a POSIX shell word.
 func safeShellRune(r rune) bool {
 	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_-.,:/+=", r)
-}
-
-// goSelection is the affected package list for one set of build flags.
-type goSelection struct {
-	packages []string
-	reason   string // why no preliminary run happens, when packages is empty
-	quiet    bool   // the reason is ordinary (no Go changes) and not reported
-}
-
-// goFastPass prepares and runs changed-package tests for one validation.
-type goFastPass struct {
-	runner   *checkRunner
-	worktree string
-	baseSHA  string
-	// changed is computed once from the coordinator's own checkpoint diff.
-	changed    []string
-	tree       string
-	changedErr error
-	diffed     bool
-	selections map[string]goSelection
-	// note is a non-gating reason recorded in the report for the current check.
-	note string
-}
-
-// run executes the changed-package pass before an eligible check. A non-nil
-// outcome is recorded in the report. stop reports a genuine test failure (or
-// cancellation of validation), after which the full check must not run.
-func (f *goFastPass) run(ctx context.Context, check contract.CheckSpec, duration time.Duration, onProgress func(progress.Event)) (*CheckRunOutcome, bool, error) {
-	cmd, ok := parseGoTestAll(check.Command)
-	if !ok {
-		return nil, false, nil
-	}
-	// Preparation has its own bound, so it can never use up the full check's time.
-	prepCtx, cancel := context.WithTimeout(ctx, duration)
-	selection := f.selection(prepCtx, cmd, duration)
-	cancel()
-	if len(selection.packages) == 0 {
-		if !selection.quiet && ctx.Err() == nil {
-			f.note = selection.reason
-		}
-		// After cancellation the full check fails at once without starting.
-		return nil, false, nil
-	}
-	command := "go test"
-	for _, flag := range cmd.flags {
-		command += " " + flag
-	}
-	for _, pkg := range selection.packages {
-		command += " '" + pkg + "'"
-	}
-	_, output := f.runner.goCapture(check.Command)
-	if output.jsonMode && !output.preserveJSON {
-		command = strings.Replace(command, "go test", "go test -json", 1)
-	}
-	name := check.Name + " (changed packages)"
-	fastCtx, cancelFast := context.WithTimeout(ctx, duration)
-	defer cancelFast()
-	if onProgress != nil {
-		onProgress(progress.Event{Check: name, Status: "started"})
-	}
-	start := time.Now()
-	runErr := f.runner.run(fastCtx, command, duration, output, output)
-	output.finish()
-	outcome := &CheckRunOutcome{Name: name, Command: command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil, Preliminary: true, Packages: selection.packages}
-	status := "PASS"
-	var exitErr *exec.ExitError
-	switch {
-	case runErr == nil:
-	case ctx.Err() != nil:
-		// Validation itself was cancelled or ran out of time: stop without
-		// starting the full run.
-		outcome.OutputTail, outcome.FailingTests = output.diagnostics()
-		outcome.InfrastructureError, outcome.ExitCode, status = true, 1, "FAIL"
-		runErr = fmt.Errorf("%w (validation cancelled)", runErr)
-	case fastCtx.Err() != nil:
-		// A killed process also returns *exec.ExitError, so check the
-		// local deadline first.
-		outcome.FallbackReason, status = "timed out; the full check decides", "skipped"
-	case errors.As(runErr, &exitErr):
-		outcome.OutputTail, outcome.FailingTests = output.diagnostics()
-		outcome.goFailures = output.evidence(check.Command)
-		outcome.ExitCode, status = exitErr.ExitCode(), "FAIL"
-	default:
-		outcome.FallbackReason, status = "did not run: "+EscapeDiagnostic(runErr.Error())+"; the full check decides", "skipped"
-	}
-	if onProgress != nil {
-		onProgress(progress.Event{Check: name, Status: status, StageElapsed: outcome.Duration})
-	}
-	return outcome, status == "FAIL", runErr
-}
-
-// selection returns the packages to test first for these build flags.
-func (f *goFastPass) selection(ctx context.Context, cmd goTestCommand, duration time.Duration) goSelection {
-	if !f.diffed {
-		f.tree, f.changed, f.changedErr = f.changedFiles(ctx)
-		// Retry on a later check only if preparation was cut short.
-		f.diffed = ctx.Err() == nil
-	}
-	if f.changedErr != nil {
-		return goSelection{reason: "could not compute changed files: " + EscapeDiagnostic(f.changedErr.Error())}
-	}
-	key := strings.Join(cmd.buildFlags, " ")
-	if selection, ok := f.selections[key]; ok {
-		return selection
-	}
-	selection := f.select1(ctx, cmd, duration)
-	if ctx.Err() == nil {
-		if f.selections == nil {
-			f.selections = map[string]goSelection{}
-		}
-		f.selections[key] = selection
-	}
-	return selection
-}
-
-// changedFiles diffs the trusted base against a coordinator-built checkpoint
-// tree, including uncommitted edits, without consulting agent output.
-func (f *goFastPass) changedFiles(ctx context.Context) (string, []string, error) {
-	tree, err := workspace.CheckpointTree(ctx, f.worktree)
-	if err != nil {
-		return "", nil, err
-	}
-	out, err := gitOutputContext(ctx, f.worktree, "diff", "--name-only", "-z", "--no-renames", f.baseSHA, tree, "--")
-	if err != nil {
-		return "", nil, err
-	}
-	var files []string
-	for _, raw := range bytes.Split(out, []byte{0}) {
-		if len(raw) > 0 {
-			files = append(files, string(raw))
-		}
-	}
-	return tree, files, nil
-}
-
-func (f *goFastPass) select1(ctx context.Context, cmd goTestCommand, duration time.Duration) goSelection {
-	var dirs []string
-	for _, file := range f.changed {
-		switch path.Base(file) {
-		case "go.mod", "go.sum", "go.work", "go.work.sum":
-			return goSelection{reason: "module configuration changed"}
-		}
-		if strings.HasSuffix(file, ".go") && !goIgnoredDir(path.Dir(file)) {
-			dirs = append(dirs, path.Dir(file))
-		}
-	}
-	if len(dirs) == 0 {
-		return goSelection{reason: "no Go packages changed", quiet: true}
-	}
-	// A single module at the repository root is the only supported layout.
-	if _, err := gitOutputContext(ctx, f.worktree, "cat-file", "-e", f.tree+":go.mod"); err != nil {
-		return goSelection{reason: "no go.mod at the repository root"}
-	}
-	if _, err := gitOutputContext(ctx, f.worktree, "cat-file", "-e", f.tree+":go.work"); err == nil {
-		return goSelection{reason: "go.work workspaces are not supported"}
-	}
-	discovery := "go list -e -json=ImportPath,Dir,Module,Imports,TestImports,XTestImports"
-	for _, flag := range cmd.buildFlags {
-		discovery += " " + flag
-	}
-	discovery += " ./..."
-	// Keep stderr separate so diagnostics cannot corrupt the JSON stream.
-	out, stderr := boundedBuffer{limit: maxDiscoveryOutput}, boundedBuffer{limit: diagnosticBytes}
-	if err := f.runner.run(ctx, discovery, duration, &out, &stderr); err != nil {
-		return goSelection{reason: "package discovery failed: " + EscapeDiagnostic(err.Error())}
-	}
-	if out.overflow {
-		return goSelection{reason: "package discovery output too large"}
-	}
-	packages, err := parseGoList(out.buf.Bytes())
-	if err != nil {
-		return goSelection{reason: "package discovery: " + EscapeDiagnostic(err.Error())}
-	}
-	selected, err := affectedPackages(packages, dirs)
-	if err != nil {
-		return goSelection{reason: EscapeDiagnostic(err.Error())}
-	}
-	if len(selected) == len(packages) {
-		return goSelection{reason: "every package is affected", quiet: true}
-	}
-	if !fastPassFits(cmd.flags, selected) {
-		return goSelection{reason: fmt.Sprintf("%d affected packages exceed the preliminary limit", len(selected))}
-	}
-	return goSelection{packages: selected}
 }
 
 // fastPassFits bounds the generated command's package count and length.

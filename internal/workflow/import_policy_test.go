@@ -476,3 +476,17 @@ func TestActiveDirectoryImportDiagnostic(t *testing.T) {
 		t.Fatal("deletion classified as active-only")
 	}
 }
+
+func TestCheckpointRecoveryPlanImportScope(t *testing.T) {
+	for _, path := range []string{"source.go", ".swarm/active/REVIEW.md", ".swarm/active/WORKUNIT.md", ".swarm/active/SYSTEM_PROMPT.md", "../PLAN.md", ".swarm/active/PLAN.md/extra"} {
+		if err := checkpointPlanImportPolicy([]string{path}, nil); err == nil {
+			t.Fatalf("accepted %s", path)
+		}
+	}
+	if err := checkpointPlanImportPolicy([]string{".swarm/active/PLAN.md", ".swarm/active/TEST_PLAN.md"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkpointPlanImportPolicy(nil, []string{".swarm/active/PLAN.md"}); err == nil {
+		t.Fatal("accepted deletion")
+	}
+}

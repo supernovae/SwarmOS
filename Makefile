@@ -28,7 +28,7 @@ install:
 test:
 	$(GO) test ./...
 
-## race: run the test suite with the race detector, as CI does
+## race: run the test suite with the race detector, as nightly and release validation do
 race:
 	$(GO) test -race ./...
 
@@ -42,7 +42,7 @@ lint:
 	$(GO) vet ./...
 	$(GO) tool staticcheck ./...
 
-## check: everything CI checks before a PR (lint, race tests, and changelog fragments)
+## check: full local checks (lint, race tests, and changelog fragments); nightly/release also build distributions
 check: lint race changelog-check
 
 ## version: show the installed swarm version

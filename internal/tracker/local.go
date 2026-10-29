@@ -2,6 +2,8 @@ package tracker
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,16 +20,28 @@ import (
 	"strings"
 )
 
+// ResumeReceipt is private coordinator evidence, never an issue or gateway field.
+// Its scope is immutable after consumption. Mixed-version coordinators are unsupported.
+type ResumeReceipt struct {
+	Version   int    `json:"version"`
+	Issue     int    `json:"issue"`
+	Lifecycle string `json:"lifecycle"`
+	Authority string `json:"authority"`
+	Scope     string `json:"scope,omitempty"`
+	Status    string `json:"status"`
+}
+
 type localState struct {
-	ChildOrder    map[int][]int        `json:"child_order,omitempty"`
-	NextIssueNum  int                  `json:"next_issue_num"`
-	NextCommentID int64                `json:"next_comment_id"`
-	NextPRNum     int                  `json:"next_pr_num"`
-	Issues        map[int]*Issue       `json:"issues"`
-	Parents       map[int]int          `json:"parents"`
-	Comments      map[int][]*Comment   `json:"comments"`
-	PullRequests  map[int]*PullRequest `json:"pull_requests"`
-	DefinedLabels map[string]LabelSpec `json:"defined_labels"`
+	ResumeReceipts map[int]*ResumeReceipt `json:"resume_receipts,omitempty"`
+	ChildOrder     map[int][]int          `json:"child_order,omitempty"`
+	NextIssueNum   int                    `json:"next_issue_num"`
+	NextCommentID  int64                  `json:"next_comment_id"`
+	NextPRNum      int                    `json:"next_pr_num"`
+	Issues         map[int]*Issue         `json:"issues"`
+	Parents        map[int]int            `json:"parents"`
+	Comments       map[int][]*Comment     `json:"comments"`
+	PullRequests   map[int]*PullRequest   `json:"pull_requests"`
+	DefinedLabels  map[string]LabelSpec   `json:"defined_labels"`
 }
 
 type LocalTracker struct {
@@ -106,6 +120,12 @@ func (l *LocalTracker) CheckIssueType(ctx context.Context, issueType string) err
 }
 
 func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) error {
+	return l.withDurableLock(mutate, false, fn)
+}
+func (l *LocalTracker) withDurableLock(mutate, durable bool, fn func(st *localState) error) error {
+	return l.withStateLock(mutate, durable, func(st *localState, _ func() error) error { return fn(st) })
+}
+func (l *LocalTracker) withStateLock(mutate, durable bool, fn func(st *localState, commit func() error) error) error {
 	base, err := safefs.Open(l.repoRoot)
 	if err != nil {
 		return err
@@ -145,6 +165,9 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 		return readErr
 	}
 	if len(data) > 0 {
+		// Existing storage must supply its allocator counter; a missing counter
+		// cannot be interpreted as a new tracker or reuse a removed issue number.
+		st.NextIssueNum = 0
 		if err := json.Unmarshal(data, st); err != nil {
 			return fmt.Errorf("corrupt local tracker state: %w", err)
 		}
@@ -167,14 +190,23 @@ func (l *LocalTracker) withLock(mutate bool, fn func(st *localState) error) erro
 	if st.ChildOrder == nil {
 		st.ChildOrder = make(map[int][]int)
 	}
-	if err := fn(st); err != nil {
+	commit := func() error {
+		out, err := json.MarshalIndent(st, "", "  ")
+		if err != nil {
+			return err
+		}
+		return state.WriteFileDurable("state.json", out, 0600)
+	}
+	if err := fn(st, commit); err != nil {
 		return err
 	}
-
 	if mutate {
 		out, err := json.MarshalIndent(st, "", "  ")
 		if err != nil {
 			return err
+		}
+		if durable {
+			return state.WriteFileDurable("state.json", out, 0o600)
 		}
 		return state.WriteFile("state.json", out, 0o600)
 	}
@@ -198,8 +230,23 @@ func (l *LocalTracker) GetIssue(_ context.Context, number int) (*Issue, error) {
 
 func (l *LocalTracker) CreateIssue(_ context.Context, title, body string, labels []string) (*Issue, error) {
 	var created *Issue
-	err := l.withLock(true, func(st *localState) error {
+	err := l.withDurableLock(true, true, func(st *localState) error {
 		num := st.NextIssueNum
+		if num < 1 || st.Issues[num] != nil || st.ResumeReceipts[num] != nil {
+			return fmt.Errorf("local issue allocation collision")
+		}
+		authority, err := l.resumeAuthority()
+		if err != nil {
+			return err
+		}
+		var nonce [32]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return err
+		}
+		if st.ResumeReceipts == nil {
+			st.ResumeReceipts = make(map[int]*ResumeReceipt)
+		}
+		st.ResumeReceipts[num] = &ResumeReceipt{Version: 1, Issue: num, Lifecycle: hex.EncodeToString(nonce[:]), Authority: authority, Status: "created"}
 		st.NextIssueNum++
 		now := time.Now().UTC()
 		iss := &Issue{
@@ -235,6 +282,9 @@ func (l *LocalTracker) CreateTypedIssue(ctx context.Context, title, body string,
 	var created *Issue
 	err := l.withLock(true, func(st *localState) error {
 		num := st.NextIssueNum
+		if num < 1 || st.Issues[num] != nil || st.ResumeReceipts[num] != nil {
+			return fmt.Errorf("local issue allocation collision")
+		}
 		st.NextIssueNum++
 		now := time.Now().UTC()
 		iss := &Issue{
@@ -778,4 +828,70 @@ func uniqueStrings(in []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+func (l *LocalTracker) resumeAuthority() (string, error) {
+	root, err := filepath.EvalSymlinks(l.repoRoot)
+	if err != nil {
+		return "", err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	cmd, _, err := gitcredential.Command(context.Background(), root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	common, err := cmd.Output()
+	if err != nil {
+		common = nil
+	}
+	h := sha256.Sum256([]byte(root + "\x00" + strings.TrimSpace(string(common)) + "\x00" + filepath.Join(root, ".swarm", "local-tracker", "state.json")))
+	return hex.EncodeToString(h[:]), nil
+}
+
+// WithResumeReceipt holds the tracker lock through inspection. commit durably
+// writes before returning; callbacks must not call tracker methods or take an issue lock.
+func (l *LocalTracker) WithResumeReceipt(n int, fn func(*ResumeReceipt, *Issue, func() error) error) error {
+	return l.withStateLock(false, false, func(st *localState, commit func() error) error {
+		authority, err := l.resumeAuthority()
+		if err != nil {
+			return err
+		}
+		r := st.ResumeReceipts[n]
+		validDigest := func(s string) bool { b, err := hex.DecodeString(s); return err == nil && len(b) == 32 }
+		if r != nil && (r.Version != 1 || r.Issue != n || !validDigest(r.Lifecycle) || r.Authority != authority ||
+			(r.Status != "created" && r.Status != "consumed" && r.Status != "active" && r.Status != "denied") ||
+			(r.Status == "created" && r.Scope != "") || ((r.Status == "consumed" || r.Status == "active") && !validDigest(r.Scope))) {
+			r = nil
+		}
+		return fn(r, st.Issues[n], commit)
+	})
+}
+
+// DenyResume permanently revokes a lifecycle, including receipts not loaded as claims.
+func (l *LocalTracker) DenyResume(n int) error {
+	return l.withStateLock(false, false, func(st *localState, commit func() error) error {
+		changed := false
+		for issue, r := range st.ResumeReceipts {
+			if (n == 0 || issue == n) && r != nil && r.Status != "denied" {
+				r.Status = "denied"
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		return commit()
+	})
+}
+
+// CoordinatorRoot is the canonical authority root; it is never projected.
+func (l *LocalTracker) CoordinatorRoot() (string, error) {
+	root, err := filepath.Abs(l.repoRoot)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(root)
 }

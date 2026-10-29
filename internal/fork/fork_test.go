@@ -915,8 +915,12 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	ghState.mu.Lock()
 	composed := ghState.prs[55].Body
 	ghState.mu.Unlock()
-	if !strings.HasPrefix(composed, "Human prefix é\n") || !strings.Contains(composed, "\nHuman footer 🙂\n\n") || !strings.Contains(composed, "regression: PASS") || len(composed) >= 60000 {
+	if !strings.HasPrefix(composed, "Human prefix é\n") || !strings.Contains(composed, "\nHuman footer 🙂\n\n") || !strings.Contains(composed, "| regression | go test | PASS | 1s |") || !strings.Contains(composed, "Contributor-reported validation (advisory); coordinator timing unavailable.") || len(composed) >= 60000 {
 		t.Fatal("composed fork body lost evidence or outside prose")
+	}
+	// Contributor rows remain advisory; raw output stays in the retained artifact.
+	if strings.Contains(composed, "日志") {
+		t.Fatal("composed fork body published raw validation output")
 	}
 	for _, name := range []string{"issue-description", "review-evidence", "rebase"} {
 		if strings.Count(composed, "<!-- swarm:"+name+":start -->") != 1 || strings.Count(composed, "<!-- swarm:"+name+":end -->") != 1 {

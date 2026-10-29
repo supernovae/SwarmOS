@@ -71,7 +71,8 @@ func newSetupProgress(ctx context.Context, issue int, emit func(ProgressEvent), 
 	return p
 }
 
-func (p *workProgress) send(status string) {
+func (p *workProgress) send(status string) { p.sendDuration(status, 0) }
+func (p *workProgress) sendDuration(status string, duration time.Duration) {
 	now := p.now()
 	origin := p.stageStarted
 	if p.check != "" {
@@ -80,6 +81,9 @@ func (p *workProgress) send(status string) {
 	e := ProgressEvent{IssueNumber: p.issue, Stage: p.stage, Check: p.check, Status: status,
 		Elapsed: now.Sub(p.started), StageElapsed: now.Sub(origin),
 		Repair: p.repairRound, RepairLimit: p.repairLimit, Targets: p.repairTargets}
+	if duration > 0 {
+		e.StageElapsed = duration
+	}
 	p.activity.Enrich(&e, now)
 	p.emit(e)
 }
@@ -105,7 +109,7 @@ func (p *workProgress) observeCheck(e ProgressEvent) {
 		p.check, p.checkStarted = e.Check, p.now()
 		p.send("started")
 	} else {
-		p.send(e.Status)
+		p.sendDuration(e.Status, e.StageElapsed)
 		p.check = ""
 	}
 	p.resetDeadline()

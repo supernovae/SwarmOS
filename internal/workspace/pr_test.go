@@ -40,10 +40,22 @@ func TestCompilePRHarnessBundlePreservesUnmanagedInstructions(t *testing.T) {
 	if err := CompilePRHarnessBundleAt(path, wu, wf, nil, "developer", base, 31); err != nil {
 		t.Fatal(err)
 	}
-	for _, role := range []string{"planner", "reviewer", "developer"} {
+	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
 		c := &RevisionPlanContext{Original: PlanPair{Plan: "full approved plan", TestPlan: "full approved tests"}}
 		if err := CompilePRHarnessBundleAt(path, wu, wf, nil, role, base, 31, c); err != nil {
 			t.Fatal(err)
+		}
+
+		sys := readActive(t, path, "SYSTEM_PROMPT.md")
+		for _, want := range []string{"coordinator-owned reference, not a per-role execution list", "developer-owned focused checks", "reuse applicable passing developer results"} {
+			if !strings.Contains(sys, want) {
+				t.Errorf("%s lacks %q", role, want)
+			}
+		}
+		for _, old := range []string{"Run these check commands directly", "and run required checks"} {
+			if strings.Contains(sys, old) {
+				t.Errorf("%s retains %q", role, old)
+			}
 		}
 		for file, want := range map[string]string{"ORIGINAL_PLAN.md": "full approved plan", "ORIGINAL_TEST_PLAN.md": "full approved tests", "SYSTEM_PROMPT.md": "## PR revision"} {
 			data, err := os.ReadFile(filepath.Join(path, ".swarm", "active", file))

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/progress"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -312,6 +313,7 @@ func (m *Manager) load(ctx context.Context, n int) (*IssueState, string, error) 
 }
 
 func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string, error) {
+	defer progress.Begin(ctx, progress.OpStateRead, time.Now())()
 	if m.store == nil {
 		return nil, "", ErrStoreUnconfigured
 	}
@@ -351,7 +353,10 @@ func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (
 	if err != nil {
 		return nil, err
 	}
-	if _, err = m.store.CompareAndSwap(ctx, n, rev, b); err != nil {
+	endWrite := progress.Begin(ctx, progress.OpStateWrite, time.Now())
+	_, err = m.store.CompareAndSwap(ctx, n, rev, b)
+	endWrite()
+	if err != nil {
 		return nil, err
 	}
 	m.project(ctx, n, st)
@@ -389,6 +394,7 @@ func (m *Manager) findProjectionCommentID(ctx context.Context, n int) int64 {
 }
 
 func (m *Manager) project(ctx context.Context, n int, st *IssueState) {
+	defer progress.Begin(ctx, progress.OpTrackerUpdate, time.Now())()
 	if m.tracker == nil || st == nil {
 		return
 	}
@@ -1818,6 +1824,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	// The fresh attempt now has its own checkpoint; discard history stays.
 	st.FreshStart = nil
 	if _, ok := m.store.(coordination.PublishingStore); ok {
+		defer progress.Begin(ctx, progress.OpCheckpoint, time.Now())()
 		raw, err := json.Marshal(st)
 		if err != nil {
 			return nil, err

@@ -10,13 +10,16 @@ import (
 // Event contains coordinator-owned status only, never harness output,
 // prompts, command arguments, claim tokens, or artifact contents.
 type Event struct {
-	IssueNumber  int
-	PRNumber     int
-	Check        string
-	Stage        string
-	Status       string // started, completed, running, paused, handed-off, failed, canceled, PASS, FAIL, skipped
-	Elapsed      time.Duration
-	StageElapsed time.Duration
+	Role, Tool, Operation         string
+	ActivityKnown                 bool
+	ActivityAge, OperationElapsed time.Duration
+	IssueNumber                   int
+	PRNumber                      int
+	Check                         string
+	Stage                         string
+	Status                        string // started, completed, running, paused, handed-off, failed, canceled, PASS, FAIL, skipped
+	Elapsed                       time.Duration
+	StageElapsed                  time.Duration
 	// Repair and RepairLimit name the automatic validation repair round
 	// (repair Repair/RepairLimit) for every event after it starts. Targets are
 	// the escaped, bounded failing tests or checks the round addresses.
@@ -28,6 +31,7 @@ type Event struct {
 // Session serializes observers independently of claim renewal. Observers must
 // return promptly and must not perform coordinator operations.
 type Session struct {
+	activity        *Activity
 	stopTicker      func()
 	delivery        sync.Mutex
 	mu              sync.Mutex
@@ -58,7 +62,7 @@ func New(ctx context.Context, issue, pr int, emit func(Event), ticks <-chan time
 	if emit == nil {
 		return &Session{}
 	}
-	p := &Session{emit: emit, event: Event{IssueNumber: issue, PRNumber: pr}, now: now, reset: reset, started: now(), stop: make(chan struct{}), done: make(chan struct{})}
+	p := &Session{activity: NewActivity(), emit: emit, event: Event{IssueNumber: issue, PRNumber: pr}, now: now, reset: reset, started: now(), stop: make(chan struct{}), done: make(chan struct{})}
 	p.Next("preflight")
 	go func() {
 		defer close(p.done)
@@ -97,6 +101,7 @@ func (p *Session) send(status string) {
 	e.StageElapsed = p.now().Sub(p.active)
 	closed := p.closed
 	p.mu.Unlock()
+	p.activity.Enrich(&e, p.now())
 	if !closed {
 		p.emit(e)
 	}
@@ -265,4 +270,11 @@ func (p *Reporter) Stop() {
 			p.stopTicker()
 		}
 	})
+}
+
+func (p *Session) Activity() *Activity {
+	if p == nil {
+		return nil
+	}
+	return p.activity
 }

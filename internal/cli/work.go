@@ -71,7 +71,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			if progressOutput && !dryRun {
 				printer := workProgressPrinter(progressWriter(cmd))
-				opts.SetupProgress = workflow.NewProgressReporter(cmd.Context(), printer)
+				opts.SetupProgress = rootOpts.newProgressReporter(cmd.Context(), printer)
 				defer opts.SetupProgress.Close()
 				if headless {
 					opts.OnProgress = printer

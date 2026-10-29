@@ -9,6 +9,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -33,7 +34,8 @@ records the decision in the PR, and uses GitHub to mark it ready for review.
 swarm issue review-plan approves the implementation plan, not the finished PR.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
-			p := operationProgress(cmd.Context(), cmd.ErrOrStderr(), showProgress)
+			p := rootOpts.operationProgress(cmd.Context(), cmd.ErrOrStderr(), showProgress)
+			cmd.SetContext(progress.WithActivity(cmd.Context(), p.Activity()))
 			defer func() {
 				status := "completed"
 				if runErr != nil {

@@ -130,7 +130,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			}
 			if operation == "work" && progress && !opts.Work.InspectOnly {
 				printer := workProgressPrinter(progressWriter(cmd))
-				opts.Work.SetupProgress = workflow.NewProgressReporter(cmd.Context(), printer)
+				opts.Work.SetupProgress = rootOpts.newProgressReporter(cmd.Context(), printer)
 				defer opts.Work.SetupProgress.Close()
 				if opts.Work.Headless {
 					opts.Work.OnProgress = printer

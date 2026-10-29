@@ -27,9 +27,9 @@ func workProgressPrinter(out io.Writer) func(workflow.ProgressEvent) {
 			stage = fmt.Sprintf("repair %d/%d %s", event.Repair, event.RepairLimit, stage)
 		}
 		if event.Check != "" {
-			fmt.Fprintf(out, "Issue #%d: %s check %+q %s (check %s, elapsed %s)\n",
+			fmt.Fprintf(out, "Issue #%d: %s check %+q %s (check %s, elapsed %s)%s\n",
 				event.IssueNumber, stage, event.Check, event.Status,
-				event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second))
+				event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second), activitySuffix(event))
 			return
 		}
 		targets := ""
@@ -41,9 +41,9 @@ func workProgressPrinter(out io.Writer) func(workflow.ProgressEvent) {
 			}
 			targets = " targeting " + strings.Join(quoted, ", ")
 		}
-		fmt.Fprintf(out, "Issue #%d: %s %s%s (stage %s, elapsed %s)\n",
+		fmt.Fprintf(out, "Issue #%d: %s %s%s (stage %s, elapsed %s)%s\n",
 			event.IssueNumber, stage, event.Status, targets,
-			event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second))
+			event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second), activitySuffix(event))
 	}
 }
 
@@ -57,9 +57,9 @@ func operationProgress(ctx context.Context, out io.Writer, enabled bool) *progre
 func operationProgressPrinter(out io.Writer) func(progress.Event) {
 	return func(e progress.Event) {
 		if e.Check != "" {
-			fmt.Fprintf(out, "Check %s %s (elapsed %s)\n", fmt.Sprintf("%+q", e.Check), e.Status, e.StageElapsed.Truncate(time.Second))
+			fmt.Fprintf(out, "Check %s %s (elapsed %s)%s\n", fmt.Sprintf("%+q", e.Check), e.Status, e.StageElapsed.Truncate(time.Second), activitySuffix(e))
 		} else {
-			fmt.Fprintf(out, "%s %s (elapsed %s)\n", e.Stage, e.Status, e.StageElapsed.Truncate(time.Second))
+			fmt.Fprintf(out, "%s %s (elapsed %s)%s\n", e.Stage, e.Status, e.StageElapsed.Truncate(time.Second), activitySuffix(e))
 		}
 	}
 }
@@ -109,4 +109,34 @@ func baseChangePrinter(out io.Writer) func(int, string, string) {
 	return func(n int, old, base string) {
 		fmt.Fprintf(out, "Issue #%d: base %s -> %s\n", n, old, base)
 	}
+}
+
+func activitySuffix(e progress.Event) string {
+	if e.Status != "running" {
+		return ""
+	}
+	if progress.ValidOperation(e.Operation) {
+		return fmt.Sprintf("; coordinator %s for %s", e.Operation, max(e.OperationElapsed, 0).Truncate(time.Second))
+	}
+	if progress.ValidRole(e.Role) && progress.ValidTool(e.Tool) {
+		age := "unknown"
+		if e.ActivityKnown {
+			age = fmt.Sprintf("%s ago", max(e.ActivityAge, 0).Truncate(time.Second))
+		}
+		return fmt.Sprintf("; %s via %s, last activity %s", e.Role, e.Tool, age)
+	}
+	return ""
+}
+
+func (o *RootOptions) newProgressReporter(ctx context.Context, emit func(workflow.ProgressEvent)) *workflow.ProgressReporter {
+	if o.progressReporter != nil {
+		return o.progressReporter(ctx, emit)
+	}
+	return workflow.NewProgressReporter(ctx, emit)
+}
+func (o *RootOptions) operationProgress(ctx context.Context, out io.Writer, enabled bool) *progress.Session {
+	if enabled && o.progressSession != nil {
+		return o.progressSession(ctx, operationProgressPrinter(out))
+	}
+	return operationProgress(ctx, out, enabled)
 }

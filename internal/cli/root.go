@@ -19,18 +19,22 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/node"
+	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"time"
 )
 
 type RootOptions struct {
-	Backend         string
-	Repo            string
-	RepoRoot        string
-	trackerOverride tracker.Tracker
+	progressReporter func(context.Context, func(workflow.ProgressEvent)) *workflow.ProgressReporter
+	progressSession  func(context.Context, func(progress.Event)) *progress.Session
+	Backend          string
+	Repo             string
+	RepoRoot         string
+	trackerOverride  tracker.Tracker
 	// githubTrackerFunc and remoteSlugFunc stand in for the GitHub API and
 	// github.com URL parsing in tests; repository identity checks still run.
 	githubTrackerFunc func(slug string) (tracker.Tracker, error)

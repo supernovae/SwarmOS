@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/progress"
 	"os"
 	"path/filepath"
 	"slices"
@@ -163,13 +164,15 @@ type PreflightResult struct {
 }
 
 type Engine struct {
-	NewRunner    func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
-	Tracker      tracker.Tracker
-	LeaseManager *lease.Manager
-	Config       *contract.SwarmConfig
-	repoRoot     string
-	ForkMode     bool
-	ForkRemote   string
+	progressTicks <-chan time.Time
+	progressNow   func() time.Time
+	NewRunner     func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
+	Tracker       tracker.Tracker
+	LeaseManager  *lease.Manager
+	Config        *contract.SwarmConfig
+	repoRoot      string
+	ForkMode      bool
+	ForkRemote    string
 	// LookupEnv resolves execution mode and agent environment for this engine;
 	// nil reads the process environment.
 	LookupEnv func(string) (string, bool)
@@ -181,6 +184,7 @@ type Engine struct {
 // construction. Zero values keep the process environment and the default node
 // profile path.
 type EngineOptions struct {
+	NewRunner       func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
 	LookupEnv       func(string) (string, bool)
 	NodeProfilePath string
 	// RegistryPath locates the repository registry that keys the node
@@ -229,7 +233,7 @@ func NewEngineWithOptions(repoRoot string, tr tracker.Tracker, opts EngineOption
 	// A malformed profile keeps the default per-repository caches and
 	// allows no private modules.
 	policy := node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot)
-	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv, DependencyPolicy: policy}, nil
+	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv, NewRunner: opts.NewRunner, DependencyPolicy: policy}, nil
 }
 
 func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string) *Engine {
@@ -249,6 +253,7 @@ func NewEngineWithManagerOptions(repoRoot string, tr tracker.Tracker, mgr *lease
 		ForkMode:         forkMode,
 		ForkRemote:       forkRemote,
 		LookupEnv:        opts.LookupEnv,
+		NewRunner:        opts.NewRunner,
 	}
 }
 
@@ -501,9 +506,19 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		r.progress.mu.Unlock()
 		r.progress.next("preflight")
 	} else {
-		r.progress = startWorkProgress(r.ctx, r.opts.IssueNumber, r.opts.OnProgress)
+		if e.progressTicks != nil {
+			now := e.progressNow
+			if now == nil {
+				now = time.Now
+			}
+			p := progress.New(ctx, r.opts.IssueNumber, 0, r.opts.OnProgress, e.progressTicks, now, nil)
+			r.progress = &workProgress{session: p, activity: p.Activity(), done: p.Done()}
+		} else {
+			r.progress = startWorkProgress(r.ctx, r.opts.IssueNumber, r.opts.OnProgress)
+		}
 	}
 
+	r.ctx = progress.WithActivity(ctx, r.progress.activityTracker())
 	defer func() { r.progress.finish(result, workErr) }()
 	if err := r.preflightRun(); err != nil {
 		return nil, err

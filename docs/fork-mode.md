@@ -200,3 +200,33 @@ Fork submissions always run the required checks; contributor-supplied validation
 
 Optional for organization repositories: use `swarm issue parent create --epic --title "Roadmap" --body-file ROADMAP.md` or `swarm repo plan --from ROADMAP.md --apply --epic` to request the Epic issue type. `swarm issue epic create` remains a compatibility alias for typed creation.
 
+### Read access to contributor forks
+
+The coordinator uses the default Actions token to admit requests, update upstream
+state, and post results as `github-actions[bot]`. To verify forks that this token
+cannot read, add an upstream Actions secret named `SWARM_GITHUB_FORK_READ_TOKEN`.
+The coordinator workflow supplies it only to the execution step after admission.
+It is used only for fork metadata verification and exact branch/commit Git reads;
+workers and upstream writers do not receive it. An empty secret preserves the
+existing default-token behavior. A selected invalid, expired, or insufficient
+credential stops verification without trying another identity.
+
+This read credential coverage is separate from the public-personal-only upstream
+agent review path described above; it does not expand that review path.
+
+Choose a credential whose holder can access each intended fork:
+
+- Fine-grained personal tokens need **Metadata: read** for repository metadata and
+  **Contents: read** for private Git reads. Select the resource owner and repositories
+  explicitly. A token scoped to one owner does not cover unrelated owners.
+- Classic personal tokens need access to the fork; private repositories generally
+  require the broad `repo` scope. Prefer a narrower credential where possible.
+- GitHub App installation tokens need installation coverage for the fork and
+  **Contents: read**, with repository metadata access.
+
+Organization approval, SSO authorization, and token restrictions still apply.
+Public visibility does not grant access to private repositories. The read
+credential does not grant the requesting actor permission to operate a fork;
+the coordinator's actor and source checks still apply. To cover multiple owners,
+choose an authorized credential covering the intended repositories or operate
+within the credential's repository coverage.

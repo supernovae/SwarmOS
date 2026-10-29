@@ -378,3 +378,13 @@ swarm repo archive restore 29 --apply --json
 PR review checklist for maintainers: configure the real secret and ruleset rights,
 then inspect the first manual or scheduled run for the expected archive or keep
 result and credential-free JSON in the log and step summary.
+
+### Optional fork verification credential
+
+The fork coordinator can use the Actions secret `SWARM_GITHUB_FORK_READ_TOKEN`
+for contributor-fork metadata and Git reads after default-token admission. It
+has no role in the global token precedence above: upstream writes and result
+comments retain the default Actions identity. Leave it unset to retain default
+read behavior; a selected credential that fails verification has no fallback.
+See [fork read access](fork-mode.md#read-access-to-contributor-forks) for Metadata
+and Contents permissions, resource-owner coverage, and organization authorization.

@@ -527,3 +527,14 @@ func TestInspectionTrustedLocalLaunchSwap(t *testing.T) {
 		})
 	}
 }
+
+func TestForkReadCredentialNeverAllowedInAgentEnvironment(t *testing.T) {
+	for _, name := range []string{"SWARM_GITHUB_FORK_READ_TOKEN", "swarm_github_fork_read_token"} {
+		t.Setenv(name, "fork-secret")
+		for _, entry := range restrictedEnv([]string{name}, t.TempDir()) {
+			if strings.Contains(entry, "fork-secret") {
+				t.Fatal("fork credential inherited")
+			}
+		}
+	}
+}

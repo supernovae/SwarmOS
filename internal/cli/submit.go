@@ -94,12 +94,29 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
+			approvalCfg, _, err := approvedLeasePolicy(root, manager.UpstreamRemote(), state.BaseSHA)
+			if err != nil {
+				return err
+			}
+			if !lease.TaskApprovalCurrent(state, unit, approvalCfg) {
+				return &lease.TaskApprovalError{IssueNumber: issue}
+			}
 			if err := lease.VerifyApproval(state, unit); err != nil {
 				return fmt.Errorf("submission gate: %w", err)
 			}
-			if baseBranch == "" {
-				baseBranch, err = defaultBaseBranch(root, manager.UpstreamRemote())
-				if err != nil {
+			expectedBase := state.BaseBranch
+			if expectedBase == "" {
+				expectedBase, err = defaultBaseBranch(root, manager.UpstreamRemote())
+			}
+			if err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("base") && baseBranch != expectedBase {
+				return fmt.Errorf("explicit --base %q differs from approved branch %q", baseBranch, expectedBase)
+			}
+			baseBranch = expectedBase
+			if state.BaseBranch != "" {
+				if _, err := workspace.ResolveBranchFrom(root, manager.UpstreamRemote(), state.BaseBranch); err != nil {
 					return err
 				}
 			}
@@ -191,6 +208,11 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if unit.AllowHarnessChanges && freshness.TargetSHA != "" {
 				policyWarning, _ = workspace.ObserveHarnessPolicy(ctx, root, state.BaseSHA, state.PolicyTreeDigest, freshness.TargetSHA)
 				fmt.Fprint(advisoryOut, prepareHarnessPolicyWarning(policyWarning, issue, state.PRNumber, rootOpts))
+			}
+			if state.BaseBranch != "" {
+				if _, err := workspace.ResolveBranchFrom(root, manager.UpstreamRemote(), baseBranch); err != nil {
+					return err
+				}
 			}
 			if err := manager.BeginPublicationAttempt(ctx, issue, owner); err != nil {
 				return err
@@ -293,7 +315,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&baseBranch, "base", "", "Target branch name for the draft PR (defaults to the repository default branch)")
+	cmd.Flags().StringVar(&baseBranch, "base", "", "Target branch name for the draft PR (must match the approved target)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the durable submission identity")
 	cmd.Flags().BoolVar(&showProgress, "progress", true, "Report progress on stderr")
 	return cmd
@@ -326,26 +348,18 @@ func projectSubmitted(ctx context.Context, tr tracker.Tracker, issue int) error 
 	return tr.AddLabels(ctx, issue, []string{"swarm:pr-open"})
 }
 
+// defaultBaseBranch retains legacy default-only submission during a failed refresh.
+// Explicit recorded targets use ResolveBranchFrom and never enter this fallback.
 func defaultBaseBranch(root, upstreamRemote string) (string, error) {
 	if hasSubmissionRemote(context.Background(), root, upstreamRemote) {
-		// Retain advertised-default discovery, but a failed refresh must not prevent
-		// submission when the cached name still identifies its target branch.
 		_, _ = workspace.ResolveBaseFrom(root, upstreamRemote)
 		out, err := gitcredential.Output(context.Background(), root, "symbolic-ref", "--quiet", "--short", "refs/remotes/"+upstreamRemote+"/HEAD")
 		if err != nil {
-			return "", fmt.Errorf("cannot discover remote default branch; specify --base")
+			return "", fmt.Errorf("cannot discover remote default branch")
 		}
 		return strings.TrimPrefix(strings.TrimSpace(string(out)), upstreamRemote+"/"), nil
 	}
-	out, err := gitcredential.Output(context.Background(), root, "branch", "--show-current")
-	if err != nil {
-		return "", err
-	}
-	branch := strings.TrimSpace(string(out))
-	if branch == "" {
-		return "", fmt.Errorf("local repository needs an explicit --base on detached HEAD")
-	}
-	return branch, nil
+	return workspace.BaseBranchName(root, upstreamRemote, "")
 }
 
 func draftPRSection(unit *contract.WorkUnit, state *lease.IssueState, stateRef string, remote ...string) string {

@@ -585,6 +585,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 	if err := decodeStrictYAML(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse .swarm/config.yaml: %w", err)
 	}
+	if err := contract.ValidateBaseBranch(cfg.BaseBranch); err != nil {
+		return nil, err
+	}
 	if cfg.Version != 1 || cfg.DefaultAgent == "" || len(cfg.Agents) == 0 {
 		return nil, fmt.Errorf("config requires version: 1, default_agent, and an agents allowlist")
 	}

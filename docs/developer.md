@@ -378,9 +378,19 @@ Validation runs only the full check when no `.go` files changed, the check has a
 
 If the implementation step fails before it commits anything, the revision keeps its approved plan and review. `pr submit` then refuses with nothing new to publish, without claiming the issue or changing coordination state. Resume implementation with `swarm pr work <PR> --phase implement` (contributors use `swarm --fork pr work <PR> --phase implement`), then submit again.
 
+#### Targeting a release branch
+
+Set optional `base_branch: release/1.x` in `.swarm/config.yaml` on the upstream default branch to direct new approvals to a release branch. A WorkUnit can override it with `base_branch: lts/1.x` in its structured YAML or the **Base Branch** issue form field. Leave both unset to use the repository's default branch. Targets must be branch names; create the branch upstream before approving the issue.
+
+`swarm issue approve` fetches the selected branch and records its name and commit. Worktrees, role prompts, validation checks, and protected paths use that approved commit. The repository setting is read from the trusted default branch; configuration on the target branch or in a contributor's checkout cannot redirect approval. Changing the repository setting affects subsequent approvals, while existing claims keep their recorded target.
+
+`swarm issue submit` opens the PR against that recorded branch. If you pass `--base`, it must match the approved target. `swarm pr status` and `swarm pr rebase` check the PR's branch name as well as its commit. If someone retargets a PR, restore its approved target, or have a maintainer change the WorkUnit override or repository setting and approve the issue again after releasing any active claim. A target change requires fresh plan and validation evidence.
+
+Upgrade coordinators and workers before introducing `base_branch`: older releases with strict config or WorkUnit decoding reject the new field. Repositories that leave it unset keep their existing behavior; fork requests use the existing protocol and coordinator-authored issue state.
+
 #### Rebasing onto an Updated Base
 
-The target is the existing PR's base branch, pinned to a full commit. When that branch moves ahead of the WorkUnit's approved baseline, `--resolve` can re-pin approval automatically for an actor with task-approval permission when the WorkUnit and committed `.swarm/` policy tree are unchanged. It records the actor and both bases in an issue audit comment. Changed tasks or policy require explicit `swarm issue approve`; fork workers also use that explicit approval step. Approval can't change while a claim is active, including your own claim from earlier `issue work`, so release it first. The next PR command claims the issue again automatically.
+The target is the linked issue's approved branch, pinned to a full commit. When that branch moves ahead of the WorkUnit's approved baseline, `--resolve` can re-pin approval automatically for an actor with task-approval permission when the WorkUnit and committed `.swarm/` policy tree are unchanged. It records the actor and both bases in an issue audit comment. Changed tasks or policy require explicit `swarm issue approve`; fork workers also use that explicit approval step. Approval can't change while a claim is active, including your own claim from earlier `issue work`, so release it first. The next PR command claims the issue again automatically.
 
 ```bash
 # 33 is the PR number, 16 its linked issue.

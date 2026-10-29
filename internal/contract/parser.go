@@ -135,6 +135,7 @@ func parseMarkdownSections(cleanBody string) (*WorkUnit, bool) {
 	}
 
 	wu := &WorkUnit{
+		BaseBranch:           strings.TrimSpace(sections["base branch"]),
 		Objective:            sections["objective"],
 		Constraints:          parseListItems(sections["constraints"]),
 		Acceptance:           parseListItems(firstNonEmpty(sections["acceptance criteria"], sections["acceptance"])),
@@ -151,6 +152,10 @@ func parseMarkdownSections(cleanBody string) (*WorkUnit, bool) {
 		if nums := parseIssueNumbers(parentRaw); len(nums) > 0 {
 			wu.ParentIssue = nums[0]
 		}
+	}
+
+	if strings.EqualFold(wu.BaseBranch, "_no response_") {
+		wu.BaseBranch = ""
 	}
 
 	gateRaw := strings.ToLower(strings.TrimSpace(firstNonEmpty(sections["plan gate"], sections["plan review gate"], sections["gate"])))
@@ -233,6 +238,9 @@ func parseListItems(section string) []string {
 
 func FormatIssueMarkdown(wu *WorkUnit) string {
 	var sb strings.Builder
+	if wu.BaseBranch != "" {
+		sb.WriteString("### Base Branch\n\n" + wu.BaseBranch + "\n\n")
+	}
 	sb.WriteString("### Objective\n\n")
 	sb.WriteString(strings.TrimSpace(wu.Objective) + "\n\n")
 

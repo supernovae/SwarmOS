@@ -3,6 +3,13 @@ description: Define a contract-driven work unit for SwarmOS agents and contribut
 title: "[Swarm] "
 labels: ["swarm:draft"]
 body:
+  - type: input
+    id: base_branch
+    attributes:
+      label: Base Branch
+      description: Optional target branch. Inherits the repository setting, or its default branch.
+    validations:
+      required: false
   - type: textarea
     id: objective
     attributes:

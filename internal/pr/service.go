@@ -276,6 +276,16 @@ func (s *Service) linkedState(ctx context.Context, issueNumber, prNumber int) (*
 // verifyLink checks a PR against the approved state of the issue that records it.
 func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *lease.IssueState) (*Result, error) {
 	number := pr.Number
+	if err := workspace.VerifyBaseBranch(s.Root, s.upstreamRemote(), st.BaseBranch, pr.Base); err != nil {
+		return nil, err
+	}
+	tip, err := workspace.ResolveBranchFrom(s.Root, s.upstreamRemote(), st.BaseBranch)
+	if err != nil {
+		return nil, err
+	}
+	if st.BaseBranch != "" {
+		pr.BaseSHA = tip
+	}
 	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
 	if err != nil {
 		return nil, err
@@ -1323,7 +1333,7 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 				if observeErr != nil {
 					return nil, observeErr
 				}
-				if observed == nil || observed.HeadSHA != head || !strings.EqualFold(observed.State, "open") || observed.Merged {
+				if observed == nil || observed.Base != r.PR.Base || observed.HeadSHA != head || !strings.EqualFold(observed.State, "open") || observed.Merged {
 					return nil, fmt.Errorf("PR head or state changed after publication; coordination remains pending (rerun swarm pr submit %d to reconcile)", number)
 				}
 				p.Next("submission record")

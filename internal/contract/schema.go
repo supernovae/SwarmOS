@@ -28,6 +28,14 @@ func ValidateWorkUnit(wu *WorkUnit) error {
 	if wu == nil {
 		return fmt.Errorf("work unit is nil")
 	}
+	if err := ValidateBaseBranch(wu.BaseBranch); err != nil {
+		return err
+	}
+	for i := range wu.Subtasks {
+		if err := ValidateWorkUnit(&wu.Subtasks[i]); err != nil {
+			return err
+		}
+	}
 	compiler := jsonschema.NewCompiler()
 	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(workUnitSchemaBytes))
 	if err != nil {

@@ -73,6 +73,7 @@ type ApprovalTransition struct {
 type IssueState struct {
 	resumeMarker *resumeMarker
 
+	BaseBranch             string                          `json:"base_branch,omitempty"`
 	CheckpointHeads        []string                        `json:"checkpoint_heads,omitempty"`
 	ResumeCheckpointBranch string                          `json:"resume_checkpoint_branch,omitempty"`
 	ClaimBudget            *ClaimBudget                    `json:"claim_budget,omitempty"`
@@ -738,6 +739,20 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	if err != nil {
 		return nil, err
 	}
+	trustedCfg, err := harness.LoadConfigAt(m.repoRoot, base)
+	if err != nil {
+		return nil, fmt.Errorf("load trusted default config: %w", err)
+	}
+	branch := trustedCfg.BaseBranch
+	if wu.BaseBranch != "" {
+		branch = wu.BaseBranch
+	}
+	if branch != "" {
+		base, err = workspace.ResolveBranchFrom(m.repoRoot, m.UpstreamRemote(), branch)
+		if err != nil {
+			return nil, err
+		}
+	}
 	cfg, err := harness.LoadConfigAt(m.repoRoot, base)
 	if err != nil {
 		return nil, fmt.Errorf("load approved policy: %w", err)
@@ -751,7 +766,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		return nil, err
 	}
 	sec := cfg.Security
-	digest := contract.DigestApprovedPolicy(base, cfg)
+	digest := contract.DigestApprovedBranchPolicy(base, cfg, branch)
 	tree, err := workspace.PolicyTreeDigest(ctx, m.repoRoot, base)
 	if err != nil {
 		return nil, err
@@ -769,7 +784,12 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 			old.NextPhaseReason = ""
 			old.Lease.NextPhase = ""
 			old.PreviousBaseSHA = old.BaseSHA
-			m.carryApproval(ctx, old, wu, base, digest, tree)
+			if old.BaseBranch != branch {
+				invalidatePRRevisionEvidence(old)
+				old.CarryReason = "base branch changed"
+			} else {
+				m.carryApproval(ctx, old, wu, base, digest, tree)
+			}
 		}
 		if old.BaseSHA != base && old.ForkRepo == "" && old.PRNumber == 0 && old.PRRevision == nil {
 			if pending := old.DroppedCheckpoint; pending != nil {
@@ -791,6 +811,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		old.TaskDigest = contract.DigestWorkUnit(wu)
 		old.PolicyDigest = digest
 		old.BaseSHA = base
+		old.BaseBranch = branch
 		old.EffectiveGate = gate
 		if _, superseded := SupersededReview(old); superseded && gate != contract.GateHuman {
 			invalidatePRRevisionEvidence(old)
@@ -810,7 +831,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	} else if !errors.Is(err, coordination.ErrNotFound) {
 		return nil, err
 	}
-	st := &IssueState{Lease: contract.Lease{Version: 1, IssueNumber: n, Status: "draft"}, TaskDigest: contract.DigestWorkUnit(wu), PolicyDigest: digest, PolicyTreeDigest: tree, BaseSHA: base, EffectiveGate: gate, ApprovedBy: owner, ApprovedAt: m.nowFn()}
+	st := &IssueState{Lease: contract.Lease{Version: 1, IssueNumber: n, Status: "draft"}, TaskDigest: contract.DigestWorkUnit(wu), PolicyDigest: digest, PolicyTreeDigest: tree, BaseSHA: base, BaseBranch: branch, EffectiveGate: gate, ApprovedBy: owner, ApprovedAt: m.nowFn()}
 	if err = m.saveInitialApproval(ctx, n, issue.Title, st); err != nil {
 		return nil, err
 	}
@@ -2359,7 +2380,7 @@ func ReviewBindings(st *IssueState) map[string]string {
 // TaskApprovalCurrent reports whether state still approves exactly this
 // WorkUnit revision under the policy approved at its base commit.
 func TaskApprovalCurrent(st *IssueState, wu *contract.WorkUnit, cfg *contract.SwarmConfig) bool {
-	return st != nil && st.TaskDigest == contract.DigestWorkUnit(wu) && st.PolicyDigest == contract.DigestApprovedPolicy(st.BaseSHA, cfg)
+	return st != nil && st.TaskDigest == contract.DigestWorkUnit(wu) && st.PolicyDigest == contract.DigestApprovedBranchPolicy(st.BaseSHA, cfg, st.BaseBranch)
 }
 
 func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {

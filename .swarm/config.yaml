@@ -1,3 +1,5 @@
+# Optional target branch; inherited by WorkUnits without an override.
+# base_branch: release/1.x
 version: 1
 # Native isolation: qualified Codex releases on Linux. Run swarm repo doctor before work.
 default_agent: codex

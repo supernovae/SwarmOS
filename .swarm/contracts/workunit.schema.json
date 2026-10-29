@@ -5,6 +5,7 @@
   "type": "object",
   "required": ["id", "objective", "constraints", "acceptance", "workflow"],
   "properties": {
+    "base_branch": {"type": "string"},
     "size": {"type": "string", "enum": ["", "small", "multi_area"]},
     "uncertainty": {"type": "string", "enum": ["", "known", "unknown"]},
     "risk": {"type": "string", "enum": ["", "standard", "sensitive", "urgent"]},

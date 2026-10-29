@@ -25,6 +25,7 @@ const (
 )
 
 type WorkUnit struct {
+	BaseBranch           string     `yaml:"base_branch,omitempty" json:"base_branch,omitempty"`
 	ID                   string     `yaml:"id" json:"id"`
 	IssueNumber          int        `yaml:"issue_number,omitempty" json:"issue_number,omitempty"`
 	ParentIssue          int        `yaml:"parent_issue,omitempty" json:"parent_issue,omitempty"`
@@ -126,6 +127,7 @@ type CheckSpec struct {
 }
 
 type SwarmConfig struct {
+	BaseBranch    string               `yaml:"base_branch,omitempty" json:"base_branch,omitempty"`
 	Profiles      []ProfileSpec        `yaml:"profiles,omitempty" json:"profiles,omitempty"`
 	Execution     ExecutionConfig      `yaml:"execution,omitempty" json:"execution,omitempty"`
 	Version       int                  `yaml:"version" json:"version"`

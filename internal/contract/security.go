@@ -126,3 +126,14 @@ func PersistedWorkPhase(phase string) string {
 	}
 	return phase
 }
+
+// DigestApprovedBranchPolicy binds explicit targets while retaining legacy bytes.
+func DigestApprovedBranchPolicy(baseSHA string, cfg *SwarmConfig, branch string) string {
+	legacy := DigestApprovedPolicy(baseSHA, cfg)
+	if branch == "" {
+		return legacy
+	}
+	h := sha256.New()
+	_, _ = h.Write([]byte("swarmos:approved-base-branch:v1\x00" + legacy + "\x00" + branch))
+	return hex.EncodeToString(h.Sum(nil))
+}

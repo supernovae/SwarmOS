@@ -63,6 +63,11 @@ func restoreFlags(control, cache, positive string, argv []string) ([]string, err
 			flags = append(flags, "--ro-bind", path, path)
 		}
 	}
+	runtimeFlags, err := restoreRuntimeFlags(control, argv)
+	if err != nil {
+		return nil, err
+	}
+	flags = append(flags, runtimeFlags...)
 	flags = append(flags, "--ro-bind", filepath.Join(control, "source"), "/source", "--bind", cache, "/cache",
 		"--ro-bind", filepath.Join(control, "trust"), "/restore-trust", "--ro-bind", filepath.Join(control, "socket"), "/restore-broker",
 		"--ro-bind", filepath.Join(control, "helper"), "/restore-helper", "--remount-ro", "/proc", "--remount-ro", "/dev", "--remount-ro", "/",

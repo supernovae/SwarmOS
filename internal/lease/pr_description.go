@@ -485,11 +485,18 @@ func DescriptionArtifacts(st *IssueState, contexts ...ProjectionContext) string 
 	return b.String()
 }
 
-// Public timing rows use only current coordinator evidence. Logs never supply rows.
+// Structured timing rows use only current coordinator evidence. Imported evidence
+// can supply a bounded advisory inventory, never coordinator timing or authority.
 func validationTimingInventory(st *IssueState, a contract.Artifact) string {
 	unavailable := "check table unavailable; full validation artifact retained\n"
 	head, _ := implementationCheckpoint(st)
 	md := a.Metadata
+	if md["validation_trusted_origin"] != "coordinator" {
+		if head == "" || md["head_sha"] != head || md["content_sha256"] != hash(a.Body) {
+			return unavailable
+		}
+		return "Contributor-reported validation (advisory); coordinator timing unavailable.\n" + validationInventory(a.Body)
+	}
 	if head == "" || st.BaseSHA == "" || md["head_sha"] != head || md["base_sha"] != st.BaseSHA || md["content_sha256"] != hash(a.Body) || md["validation_trusted_origin"] != "coordinator" || st.Lease.Owner == "" || md["validation_trusted_owner"] != st.Lease.Owner || st.Lease.ClaimID == "" || md["validation_trusted_claim"] != st.Lease.ClaimID {
 		return unavailable
 	}

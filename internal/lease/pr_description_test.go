@@ -124,6 +124,19 @@ func TestValidationDescriptionInventory(t *testing.T) {
 	if strings.Contains(DescriptionArtifacts(st), "HOST_SECRET") {
 		t.Fatal("raw output leaked")
 	}
+	imported := a
+	imported.Metadata = map[string]string{"head_sha": "candidate", "content_sha256": hash(a.Body), "validation_timing_report": string(raw)}
+	inventory = validationTimingInventory(st, imported)
+	for _, want := range []string{"Contributor-reported", "advisory", "coordinator timing unavailable", "fmt | gofmt | pass | 1s"} {
+		if !strings.Contains(inventory, want) {
+			t.Fatal(inventory)
+		}
+	}
+	for _, bad := range []string{"HOST_SECRET", "Source head:", "preflight", "test/ control"} {
+		if strings.Contains(inventory, bad) {
+			t.Fatal(inventory)
+		}
+	}
 	st.HeadSHA = "other"
 	if !strings.Contains(validationTimingInventory(st, a), "unavailable") {
 		t.Fatal("stale evidence accepted")

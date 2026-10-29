@@ -170,6 +170,9 @@ func TestActivityReporterCancellationCleanup(t *testing.T) {
 				cancel()
 				activityWait(t, p.Done())
 			}
+			if !cancelFirst && ctx.Err() != nil {
+				t.Fatal("explicit shutdown must start with a live context")
+			}
 			finished := make(chan struct{})
 			go func() { p.Finish("completed"); close(finished) }()
 			activityWait(t, finished)

@@ -61,6 +61,9 @@ func TestActivityDoesNotIncreaseEventRate(t *testing.T) {
 				cancel()
 				activityWait(t, p.done)
 			}
+			if !cancelFirst && ctx.Err() != nil {
+				t.Fatal("explicit shutdown must start with a live context")
+			}
 			finished := make(chan struct{})
 			go func() { p.Close(); close(finished) }()
 			activityWait(t, finished)

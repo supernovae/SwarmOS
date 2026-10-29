@@ -179,7 +179,7 @@ func (s renewalTracker) GetIssue(ctx context.Context, n int) (*tracker.Issue, er
 	return s.Tracker.GetIssue(ctx, n)
 }
 func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
-	for _, stopAt := range []string{"initial-read", "initial-check", "reload", "recheck", "renew-read", "renew-check", "cas", "projection", "normal"} {
+	for _, stopAt := range []string{"initial-read", "initial-check", "initial-check-tracker", "reload", "recheck", "recheck-tracker", "renew-read", "renew-check", "cas", "projection", "next-check", "next-check-tracker", "normal"} {
 		t.Run(stopAt, func(t *testing.T) {
 			m, _, iss := testManager(t)
 			if _, err := m.Acquire(t.Context(), iss.Number, "local-dev", "mock", "implement", time.Hour, 3); err != nil {
@@ -188,14 +188,17 @@ func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
 			gates := &renewalGates{calls: make(chan renewalCall)}
 			m.store = renewalStore{m.store, gates}
 			m.tracker = renewalTracker{m.tracker, gates}
+			a := progress.NewActivity()
+			ctx, cancel := context.WithCancel(progress.WithActivity(t.Context(), a))
 			ready := make(chan *activityTimer, 1)
 			m.SetHeartbeatTimerFunc(func(time.Duration) HeartbeatTimer {
 				timer := &activityTimer{make(chan time.Time, 1)}
-				ready <- timer
+				select {
+				case ready <- timer:
+				case <-ctx.Done():
+				}
 				return timer
 			})
-			a := progress.NewActivity()
-			ctx, cancel := context.WithCancel(progress.WithActivity(t.Context(), a))
 			h := m.StartHeartbeat(ctx, iss.Number, "local-dev", time.Hour)
 			t.Cleanup(func() { cancel(); activityWait(t, h.done) })
 			check := func(label, kind string) bool {
@@ -270,14 +273,17 @@ func TestRenewalMaxRenewalsReloadMasking(t *testing.T) {
 	stripClaimBudget(t, coord, n)
 	gates := &renewalGates{calls: make(chan renewalCall)}
 	worker.store = renewalStore{worker.store, gates}
+	a := progress.NewActivity()
+	ctx, cancel := context.WithCancel(progress.WithActivity(t.Context(), a))
 	ready := make(chan *activityTimer, 1)
 	worker.SetHeartbeatTimerFunc(func(time.Duration) HeartbeatTimer {
 		timer := &activityTimer{make(chan time.Time, 1)}
-		ready <- timer
+		select {
+		case ready <- timer:
+		case <-ctx.Done():
+		}
 		return timer
 	})
-	a := progress.NewActivity()
-	ctx, cancel := context.WithCancel(progress.WithActivity(t.Context(), a))
 	h := worker.StartHeartbeat(ctx, n, "local-dev", 4*time.Hour)
 	t.Cleanup(func() { cancel(); activityWait(t, h.done) })
 	read := func(release bool) {

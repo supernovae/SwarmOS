@@ -114,6 +114,8 @@ func TestCommandProgressShowsOperation(t *testing.T) {
 			for _, sec := range []int64{30, 45} {
 				seconds.Store(sec)
 				ticks <- clock()
+				deadline := time.NewTimer(5 * time.Second)
+				t.Cleanup(func() { deadline.Stop() })
 				waiting := true
 				for waiting {
 					select {
@@ -125,10 +127,11 @@ func TestCommandProgressShowsOperation(t *testing.T) {
 							previous = e.OperationElapsed
 							waiting = false
 						}
-					case <-time.After(5 * time.Second):
+					case <-deadline.C:
 						t.Fatal("missing enriched command heartbeat")
 					}
 				}
+				deadline.Stop()
 			}
 			release.Do(func() { close(b.release) })
 			commandActivityWait(t, done)

@@ -46,6 +46,9 @@ func TestDeveloperOutputInstructionsAndPromptSync(t *testing.T) {
 }
 
 func TestWorkerTestScopeInstructionsAndPromptSync(t *testing.T) {
+	// Keep shipped/scaffolded ownership assertions covered by the focused test plan.
+	t.Run("shipped revision ownership", TestShippedPRRevisionPrompts)
+	t.Run("scaffolded developer ownership", TestDeveloperRequiredCheckInstructions)
 	root := t.TempDir()
 	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
 		t.Fatal(err)

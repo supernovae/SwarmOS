@@ -1350,7 +1350,7 @@ func TestShippedPRRevisionPrompts(t *testing.T) {
 	for role, terms := range map[string][]string{
 		"planner":   {"revision plan", "acceptance criterion", "finding/comment/check", "Do not restate"},
 		"reviewer":  {"original approved plan", "configured gate", "untrusted"},
-		"developer": {"already holds", "Change only", "required checks"},
+		"developer": {"already holds", "Change only", "Run developer-owned focused test plan commands", "coordinator owns the required policy run"},
 	} {
 		data, err := embeddedTemplates.ReadFile("templates/swarm/prompts/" + role + ".md")
 		if err != nil {
@@ -1488,10 +1488,12 @@ func TestDeveloperRequiredCheckInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, text := range []string{
-		"coordinator independently reruns every required check",
-		"`.swarm/active/TEST_PLAN.md` commands",
-		"targeted tests for changed packages first",
-		"full test suite at most once, at the end, and only when `.swarm/active/TEST_PLAN.md` requires it",
+		"Run only developer-owned focused checks in `.swarm/active/TEST_PLAN.md`",
+		"necessary targeted diagnostics for changed packages",
+		"coordinator runs the complete trusted-base required policy once after agent roles finish",
+		"coordinator-owned reference, not a per-role execution list",
+		"Agent observations remain advisory and cannot satisfy claim-bound validation or publication",
+		"Repeat commands only for relevant source changes, observed failures or an unresolved coverage concern",
 		"on changed files and packages (for Go: `gofmt`, `go vet`, and `go tool staticcheck`)",
 		"Fix lint and format findings",
 		"rather than leaving them for CI",

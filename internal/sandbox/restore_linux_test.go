@@ -72,7 +72,7 @@ func TestRestoreLinuxFlags(t *testing.T) {
 			t.Fatalf("missing isolation flag %q", s)
 		}
 	}
-	for _, s := range []string{"--share-net", "--unshare-user-try", "--preserve-fds", "/bin/sh\n-c", "--bind\n/source", "--ro-bind\n/home", "--ro-bind\n/etc", "--ro-bind\n/control\n"} {
+	for _, s := range []string{"--share-net", "--unshare-user-try", "--preserve-fds", "/bin/sh\n-c", "--bind\n/source", "--ro-bind\n/home", "--ro-bind\n/etc", "--ro-bind\n/control\n", "/usr/share/maven", "/usr/share/gradle", "/etc/alternatives"} {
 		if strings.Contains(joined, s) {
 			t.Fatalf("unsafe flag %q", s)
 		}

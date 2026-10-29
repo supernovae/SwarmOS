@@ -63,6 +63,7 @@ type Service struct {
 	ResolveLog io.Writer
 }
 type Options struct {
+	RepairFiles  []string
 	Number       int
 	Work         workflow.WorkOptions
 	Instructions string
@@ -862,6 +863,9 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 }
 
 func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
+	if len(opts.RepairFiles) > 0 && (!opts.Resolve || opts.Abort || s.Fork || s.Manager.HasWorkerGateway()) {
+		return nil, fmt.Errorf("--repair-file requires same-repository --resolve without --abort or gateway")
+	}
 	if opts.Continue && opts.Abort {
 		return nil, fmt.Errorf("--continue and --abort are mutually exclusive")
 	}
@@ -871,6 +875,9 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 	r, remote, err := s.openForMutation(ctx, opts.Number, false)
 	if err != nil {
 		return nil, err
+	}
+	if len(opts.RepairFiles) > 0 && r.State.ForkRepo != "" {
+		return nil, fmt.Errorf("fork repair selection is forbidden")
 	}
 	if opts.Resolve && !s.Fork && r.State.RebaseApprovalAudit != "" {
 		if _, err = s.Manager.ProjectRebaseApprovalAudit(ctx, r.IssueNumber); err != nil {
@@ -962,7 +969,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			if opts.Resolve && !rebasing && st.PRRevision != nil && st.PRRevision.Intent == "rebase" && st.LastRebase != nil && st.LastRebase.Status == "completed" && st.LastRebase.NewBase == st.BaseSHA && st.LastRebase.NewHead == head {
 				r.State = st
 				r.HeadSHA = head
-				return s.finishResolvedRebase(ctx, r, owner, rv)
+				return s.finishResolvedRebase(ctx, r, owner, rv, opts.RepairFiles)
 			}
 			if !rebasing {
 				st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch, "rebase")
@@ -1049,7 +1056,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			r.Status = "pending"
 			r.Worktree, r.Branch = path, branch
 			if opts.Resolve {
-				return s.finishResolvedRebase(ctx, r, owner, rv)
+				return s.finishResolvedRebase(ctx, r, owner, rv, opts.RepairFiles)
 			}
 			return r, nil
 		})

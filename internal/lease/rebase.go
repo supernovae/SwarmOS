@@ -16,18 +16,19 @@ import (
 // Cleanup may treat coordinator-verified unchanged patch identity as lineage;
 // it never grants plan approval or publication authority.
 type RebaseEvidence struct {
-	RepairScopeSet        bool     `json:"repair_scope_set,omitempty"`
-	RepairPaths           []string `json:"repair_paths,omitempty"`
-	RepairAttempts        int      `json:"repair_attempts,omitempty"`
-	ConflictPathsReported bool     `json:"conflict_paths_reported,omitempty"`
-	OldHead               string   `json:"old_head"`
-	NewHead               string   `json:"new_head,omitempty"`
-	OldBase               string   `json:"old_base"`
-	NewBase               string   `json:"new_base"`
-	ConflictedPaths       []string `json:"conflicted_paths,omitempty"`
-	Status                string   `json:"status"`
-	PatchIdentity         string   `json:"patch_identity"`
-	Verified              bool     `json:"verified"`
+	RepairSelections      []RepairSelection `json:"repair_selections,omitempty"`
+	RepairScopeSet        bool              `json:"repair_scope_set,omitempty"`
+	RepairPaths           []string          `json:"repair_paths,omitempty"`
+	RepairAttempts        int               `json:"repair_attempts,omitempty"`
+	ConflictPathsReported bool              `json:"conflict_paths_reported,omitempty"`
+	OldHead               string            `json:"old_head"`
+	NewHead               string            `json:"new_head,omitempty"`
+	OldBase               string            `json:"old_base"`
+	NewBase               string            `json:"new_base"`
+	ConflictedPaths       []string          `json:"conflicted_paths,omitempty"`
+	Status                string            `json:"status"`
+	PatchIdentity         string            `json:"patch_identity"`
+	Verified              bool              `json:"verified"`
 	// DroppedPaths lists paths the PR changed against OldBase but no longer
 	// changes against NewBase. Absent DroppedPathsVerified means unknown.
 	DroppedPaths         []string `json:"dropped_paths,omitempty"`
@@ -283,6 +284,54 @@ func (m *Manager) UpdateRebaseContext(ctx context.Context, n int, owner string, 
 				verifyRebaseEvidence(ctx, m.repoRoot, st, r.NewHead)
 			}
 		}
+		return nil
+	})
+}
+
+// RepairSelection is audit context only; it never grants replay permission.
+type RepairSelection struct {
+	Paths      []string `json:"paths"`
+	Actor      string   `json:"actor"`
+	Source     string   `json:"source"`
+	Base       string   `json:"base"`
+	Head       string   `json:"head"`
+	Claim      string   `json:"claim"`
+	Invocation string   `json:"invocation"`
+}
+
+func (m *Manager) RecordRebaseRepairSelection(ctx context.Context, n int, owner string, number int, base, head string, paths []string) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("repair selection requires the upstream maintainer")
+	}
+	actor, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(actor) == "" || len(actor) > maxRebaseResolutionField || strings.IndexFunc(actor, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return nil, fmt.Errorf("authenticated actor required")
+	}
+	if err = m.tracker.Authorize(ctx, "approve-task"); err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 || len(paths) > 256 {
+		return nil, fmt.Errorf("invalid repair selection count")
+	}
+	for _, p := range paths {
+		if !validRebasePath(p) || len(p) > 4096 || strings.ContainsAny(p, "\\:*?[]") {
+			return nil, fmt.Errorf("invalid repair selection")
+		}
+	}
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if st.ForkRepo != "" || st.PRNumber != number || st.PRRevision == nil || st.PRRevision.Number != number || st.PRRevision.Intent != "rebase" || st.LastRebase == nil || st.LastRebase.Status != "completed" || st.BaseSHA != base || st.PRRevision.LocalHeadSHA != head || st.LastRebase.NewBase != base {
+			return fmt.Errorf("repair selection rebase identity changed or fork is forbidden")
+		}
+		if len(st.LastRebase.RepairSelections) >= 64 {
+			return fmt.Errorf("too many repair selections")
+		}
+		selected := append([]string(nil), paths...)
+		slices.Sort(selected)
+		selected = slices.Compact(selected)
+		st.LastRebase.RepairSelections = append(st.LastRebase.RepairSelections, RepairSelection{Paths: selected, Actor: actor, Source: m.tracker.BackendName() + ":approve-task", Base: base, Head: head, Claim: m.token(n), Invocation: m.nowFn().UTC().Format("2006-01-02T15:04:05.000000000Z")})
 		return nil
 	})
 }

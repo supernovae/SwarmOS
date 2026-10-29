@@ -122,7 +122,7 @@ func TestWorkflowAdmissionParsesForkComments(t *testing.T) {
 }
 
 func TestForkRequestRejectsCarryAuthority(t *testing.T) {
-	for _, field := range []string{`"policy_tree_digest":"forged"`, `"carry_forward":true`, `"approval_transition":{}`, `"base_sha":"forged"`, `"rebase_context":{"status":"completed","patch_identity":"unchanged","verified":true}`, `"rebase_context":{"status":"completed","resolution":{"commit":"` + strings.Repeat("a", 40) + `","paths":["x.go"],"agent":"codex","reported":false}}`} {
+	for _, field := range []string{`"repair_files":["x.go"]`, `"rebase_context":{"status":"completed","repair_selections":[{"paths":["x.go"],"actor":"maintainer","source":"github:approve-task"}]}`, `"policy_tree_digest":"forged"`, `"carry_forward":true`, `"approval_transition":{}`, `"base_sha":"forged"`, `"rebase_context":{"status":"completed","patch_identity":"unchanged","verified":true}`, `"rebase_context":{"status":"completed","resolution":{"commit":"` + strings.Repeat("a", 40) + `","paths":["x.go"],"agent":"codex","reported":false}}`} {
 		body := RequestMarker + "\n" + `{"version":1,"operation":"begin-pr-revision","issue_number":7,"revision_intent":"rebase",` + field + "}"
 		if _, err := ParseRequestComment(body); err == nil || !strings.Contains(err.Error(), "unknown field") {
 			t.Fatalf("authority field %s: expected unknown field rejection, got %v", field, err)

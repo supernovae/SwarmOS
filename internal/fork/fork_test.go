@@ -915,8 +915,13 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	ghState.mu.Lock()
 	composed := ghState.prs[55].Body
 	ghState.mu.Unlock()
-	if !strings.HasPrefix(composed, "Human prefix é\n") || !strings.Contains(composed, "\nHuman footer 🙂\n\n") || !strings.Contains(composed, "regression: PASS") || len(composed) >= 60000 {
-		t.Fatal("composed fork body lost evidence or outside prose")
+	if !strings.HasPrefix(composed, "Human prefix é\n") || !strings.Contains(composed, "\nHuman footer 🙂\n\n") || !strings.Contains(composed, "check table unavailable; full validation artifact retained") || len(composed) >= 60000 {
+		t.Fatal("composed fork body lost evidence availability or outside prose")
+	}
+	// Contributor-imported validation has no coordinator timing authority.
+	// Retain its artifact reference without projecting its table or raw output.
+	if strings.Contains(composed, "regression") || strings.Contains(composed, "日志") {
+		t.Fatal("composed fork body published untrusted validation rows or output")
 	}
 	for _, name := range []string{"issue-description", "review-evidence", "rebase"} {
 		if strings.Count(composed, "<!-- swarm:"+name+":start -->") != 1 || strings.Count(composed, "<!-- swarm:"+name+":end -->") != 1 {

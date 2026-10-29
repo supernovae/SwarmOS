@@ -66,8 +66,15 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	if err := r.check(); err != nil {
 		return false, err
 	}
-	r.progress.next("required-checks")
 	testerBody, _ := readRequiredArtifact(r.wtPath, "VALIDATION.md")
+	if outcome := parseTesterOutcome(testerBody); outcome == testerFail || outcome == testerBlocked {
+		command := fmt.Sprintf("swarm issue work %d --phase implement", r.opts.IssueNumber)
+		if r.opts.PRNumber != 0 {
+			command = fmt.Sprintf("swarm pr work %d --phase implement", r.opts.PRNumber)
+		}
+		return false, fmt.Errorf("tester declared %s in .swarm/active/VALIDATION.md; complete implementation and rerun with %s", outcome, command)
+	}
+	r.progress.next("required-checks")
 	version := r.opts.Version
 	if r.opts.Phase == "test" && version == "" {
 		version = "dev"

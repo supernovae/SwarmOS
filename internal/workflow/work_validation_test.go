@@ -1361,3 +1361,146 @@ func TestTestRetryNewClaimKeepsProducingClaim(t *testing.T) {
 		t.Fatal("trusted validation not fenced to the retry claim")
 	}
 }
+
+func TestTesterOutcomeScheduling(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		stop       bool
+	}{
+		{"176", "# ISSUE-176 validation (tester, advisory)\nVERDICT: FAIL. The implementation was not delivered, so validation is blocked on reopening plan review.", true},
+		{"bare", "VERDICT: FAIL", true},
+		{"blocked", "VERDICT: BLOCKED", true},
+		{"pass", "VERDICT: PASS", false},
+		{"331", "Independent regression review passed.\nAC2 awaits coordinator policy.", false},
+		{"legacy", "All criteria remain unmet.", false},
+		{"empty", "", false},
+		{"missing", "MISSING", false},
+		{"malformed", "<!-- swarm:acceptance-evidence:start -->", false},
+		{"gaps", "Partial coverage.", false},
+		{"heading", "# title\n## second\nVERDICT: FAIL", false},
+		{"prose", "Introduction\nVERDICT: FAIL", false},
+		{"failed", "VERDICT: FAILED", false},
+		{"case", "Verdict: fail", false},
+		{"fence", "```\nVERDICT: FAIL\n```", false},
+		{"quote", "> VERDICT: FAIL", false},
+		{"acceptance", "## Acceptance\nVERDICT: FAIL", false},
+		{"narrative", "A regression printed FAIL but passed.", false},
+		{"guidance", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counterDir := t.TempDir()
+			policy := "required_checks:\n"
+			for _, name := range []string{"one", "two"} {
+				policy += "  - name: " + name + "\n    command: |\n      echo x >> '" + filepath.Join(counterDir, name) + "'; echo 'VERDICT: FAIL'\n    timeout: 1m\n"
+			}
+			policy += "protected_paths: ['.swarm/validation/**']\n"
+			root, e, tr := setupProjectPlanTestRepo(t)
+			configureValidation(t, root)
+			if err := os.WriteFile(filepath.Join(root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "counter policy").CombinedOutput(); err != nil {
+				t.Fatal(err, string(out))
+			}
+			wu := &contract.WorkUnit{Objective: "Schedule", Constraints: []string{"Scoped"}, Acceptance: []string{"Works", "Coordinator policy"}, Workflow: "feature", Gate: contract.GateNone}
+			issue, err := tr.CreateIssue(t.Context(), "Schedule", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := e.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			// Remove a prototype and leave only a blank line in a tracked source file.
+			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "echo prototype > prototype.tmp; rm prototype.tmp; printf '\n' >> .swarm/project.md")
+			developers, testers := 0, 0
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "developer" {
+						developers++
+					}
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "tester" {
+						testers++
+						path := filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md")
+						if tc.name == "missing" {
+							removeErr := os.Remove(path)
+							if os.IsNotExist(removeErr) {
+								removeErr = nil
+							}
+							return result, removeErr
+						}
+						body := tc.body
+						if tc.name == "176" || tc.name == "legacy" {
+							body += "\n" + validation.AcceptanceEvidenceStart + "\n" + `{"version":1,"criteria":[{"index":1,"criterion":"Works","status":"unmet","evidence":"implementation absent"},{"index":2,"criterion":"Coordinator policy","status":"unmet","evidence":"implementation absent"}]}` + "\n" + validation.AcceptanceEvidenceEnd
+						}
+						if tc.name == "gaps" {
+							body += "\n" + validation.AcceptanceEvidenceStart + "\n" + `{"version":1,"criteria":[{"index":1,"criterion":"Works","status":"met","evidence":"review passed"}]}` + "\n" + validation.AcceptanceEvidenceEnd
+						}
+						if tc.name == "331" {
+							body += "\n" + validation.AcceptanceEvidenceStart + "\n" + `{"version":1,"criteria":[{"index":1,"criterion":"Works","status":"met","evidence":"independent regression review passed"},{"index":2,"criterion":"Coordinator policy","status":"unmet","evidence":"pending coordinator policy"}]}` + "\n" + validation.AcceptanceEvidenceEnd
+						}
+						err = os.WriteFile(path, []byte(body), 0600)
+					}
+					return result, err
+				}}, nil
+			}
+			var stages []string
+			opts := WorkOptions{RepoRoot: root, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, TesterInstructions: "VERDICT: FAIL", OnProgress: func(e ProgressEvent) { stages = append(stages, e.Stage) }}
+			res, err := e.ExecuteWork(t.Context(), opts)
+			if res == nil {
+				t.Fatalf("missing result: %v", err)
+			}
+			if testers != 1 || developers != 1 {
+				t.Fatalf("role calls %d/%d", developers, testers)
+			}
+			for _, name := range []string{"one", "two"} {
+				data, _ := os.ReadFile(filepath.Join(counterDir, name))
+				want := 1
+				if tc.stop {
+					want = 0
+				}
+				if got := strings.Count(string(data), "x\n"); got != want {
+					t.Errorf("check %s ran %d times, want %d", name, got, want)
+				}
+			}
+			if tc.stop {
+				if err == nil || errors.Is(err, validation.ErrRequiredCheckFailed) || !strings.Contains(err.Error(), "VALIDATION.md") || !strings.Contains(err.Error(), "--phase implement") {
+					t.Fatalf("stop error: %v", err)
+				}
+				if res.ValidationPassed || res.Validation != nil {
+					t.Fatal("fabricated trusted report")
+				}
+				out, diffErr := gitfixture.Command(t, "", "-C", res.WorktreePath, "diff", res.State.BaseSHA, "--", ".swarm/project.md").CombinedOutput()
+				if diffErr != nil || !strings.Contains(string(out), "+\n") {
+					t.Fatalf("missing blank-line residue: %s %v", out, diffErr)
+				}
+				for _, stage := range stages {
+					if stage == "required-checks" {
+						t.Fatal("announced required checks")
+					}
+				}
+				for _, a := range res.State.Artifacts {
+					if a.Type == contract.ArtifactValidation && a.Verdict == "PASS" {
+						t.Fatal("trusted PASS persisted")
+					}
+				}
+				opts.Phase = "test"
+				opts.ClaimID = res.State.Lease.ClaimID
+				retry, retryErr := e.ExecuteWork(t.Context(), opts)
+				if retryErr == nil || retry == nil || retry.ValidationPassed {
+					t.Fatalf("retry accepted: %v", retryErr)
+				}
+				if developers != 1 || testers != 2 {
+					t.Fatalf("retry role calls %d/%d", developers, testers)
+				}
+				for _, name := range []string{"one", "two"} {
+					if data, _ := os.ReadFile(filepath.Join(counterDir, name)); len(data) != 0 {
+						t.Fatal("retry ran checks")
+					}
+				}
+			} else if err != nil || !res.ValidationPassed {
+				t.Fatalf("normal validation: %v", err)
+			}
+		})
+	}
+}

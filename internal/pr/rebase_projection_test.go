@@ -36,7 +36,7 @@ func TestRebaseProjectionPreservesHumanTextAndRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Body != second.Body || strings.Count(second.Body, rebaseStart) != 1 {
+	if first.Body != second.Body || strings.Count(second.Body, rebaseStart) != 1 || strings.Count(second.Body, rebaseEnd) != 1 {
 		t.Fatal("retry changed projection")
 	}
 }

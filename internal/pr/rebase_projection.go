@@ -102,20 +102,50 @@ func ProjectRebase(ctx context.Context, tr tracker.Tracker, st *lease.IssueState
 	if err != nil {
 		return err
 	}
-	body := pr.Body
-	start := strings.Index(body, rebaseStart)
-	if start >= 0 {
-		end := strings.Index(body[start:], rebaseEnd)
-		if end < 0 {
-			return fmt.Errorf("managed rebase section is incomplete")
+	r := st.LastRebase
+	section := fmt.Sprintf("### Rebase context\n\nRebase: %s\nHeads: %s -> %s\nBases: %s -> %s\nPatch identity: %s (verified: %t)\nConflicts resolved: %d\nRepair attempts: %d\n",
+		lease.DescriptionText(r.Status), lease.DescriptionText(r.OldHead), lease.DescriptionText(r.NewHead), lease.DescriptionText(r.OldBase), lease.DescriptionText(r.NewBase), lease.DescriptionText(r.PatchIdentity), r.Verified, len(r.Resolutions), r.RepairAttempts)
+	if r.Status == "completed" {
+		if r.DroppedPathsVerified {
+			section += lease.DescriptionText(DroppedPathsWarning(r.DroppedPaths, "", r.OldHead, r.NewHead, number, st.ForkRepo != ""))
+		} else {
+			section += "Changed-path comparison: unavailable\n"
 		}
-		body = body[:start] + body[start+end+len(rebaseEnd):]
 	}
-	section := rebaseStart + "\n### Rebase context\n\n```text\n" + strings.ReplaceAll(RebaseSummary(st, number), "```", "` ` `") + "```\n" + rebaseEnd
-	if start >= 0 {
-		body = body[:start] + section + body[start:]
-	} else {
-		body = strings.TrimRight(body, "\n") + "\n\n" + section + "\n"
+	if len(r.ConflictedPaths) > 0 {
+		label := "Conflicted paths"
+		if r.ConflictPathsReported {
+			label = "Reported conflicted paths"
+		}
+		section += label + ": " + lease.DescriptionText(strings.Join(r.ConflictedPaths, ", ")) + "\n"
+	}
+	if st.CarryReason != "" {
+		section += "Plan: " + lease.DescriptionSlot(st.CarryReason)
+		if len(st.ChangedPolicyPaths) > 0 {
+			section += "Policy paths: " + lease.DescriptionText(strings.Join(st.ChangedPolicyPaths, ", ")) + "\n"
+		}
+		if st.CarryReason != "approved plan carried forward" && st.CarryReason != "approved plan re-reviewed" {
+			section += fmt.Sprintf("Next: swarm pr work %d\n", number)
+		}
+	}
+	section += fmt.Sprintf("Resolution inventory: %d\n", len(st.LastRebase.Resolutions))
+	for _, res := range st.LastRebase.Resolutions {
+		label := "Resolved by"
+		if res.Reported {
+			label = "Reported resolved by"
+		}
+		section += fmt.Sprintf("%s at %s: %s\n", label, lease.DescriptionText(res.Commit), lease.DescriptionText(strings.Join(res.Paths, ", ")))
+		section += lease.DescriptionSlot(label + " " + strings.Join([]string{res.Agent, res.Harness, res.HarnessVersion, res.Sandbox}, " "))
+	}
+	for _, plan := range st.LastRebase.Plans {
+		section += fmt.Sprintf("\nRebase micro-plan at %s (digest %s):\n", lease.DescriptionText(plan.Commit), lease.DescriptionText(plan.Digest))
+		section += lease.DescriptionSlot(plan.Body)
+	}
+	issue := st.Lease.IssueNumber
+	ref := lease.DescriptionStateReference(pr.Body, issue)
+	body, err := lease.ComposePRDescription(pr.Body, "rebase", section+lease.DescriptionRetrieval(issue, ref), ref, issue)
+	if err != nil {
+		return err
 	}
 	if body == pr.Body {
 		return nil

@@ -106,6 +106,10 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", baseBranch).Run(); err != nil {
 				return fmt.Errorf("invalid PR base branch %q", baseBranch)
 			}
+			advisoryOut := cmd.OutOrStdout()
+			if asJSON {
+				advisoryOut = cmd.ErrOrStderr()
+			}
 			if state.Lease.Status == "completed" {
 				if state.Lease.Owner != owner || state.Lease.ClaimID != claim || state.PRNumber == 0 {
 					return fmt.Errorf("completed task has no submission for this claim")
@@ -118,8 +122,14 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 						return err
 					}
 				}
+				warnings := lease.RecordedAcceptanceWarnings(state, unit.Acceptance)
+				fmt.Fprint(advisoryOut, validation.AcceptanceEvidenceNotice(warnings))
 				if asJSON {
-					return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": state.PRNumber, "pr_url": state.PRURL, "head_sha": state.HeadSHA})
+					outcome := map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": state.PRNumber, "pr_url": state.PRURL, "head_sha": state.HeadSHA}
+					if len(warnings) > 0 {
+						outcome["acceptance_evidence_warnings"] = warnings
+					}
+					return writeJSON(cmd, outcome)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Draft PR #%d already submitted for issue #%d (%s)\n", state.PRNumber, issue, state.PRURL)
 				return nil
@@ -159,6 +169,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				failedReport = report
 				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 				lease.PreserveTesterGuidance(state, &report.Artifact)
+				lease.PreserveAcceptanceEvidence(state, &report.Artifact)
 				if _, err := manager.RecordTrustedValidation(ctx, issue, owner, report.Artifact); err != nil {
 					return errors.Join(valErr, err)
 				}
@@ -170,10 +181,8 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
 			}
 			freshness := checkSubmissionFreshnessFrom(ctx, root, manager.UpstreamRemote(), baseBranch, state.BaseSHA, head)
-			advisoryOut := cmd.OutOrStdout()
-			if asJSON {
-				advisoryOut = cmd.ErrOrStderr()
-			}
+			warnings := validation.AcceptanceEvidenceWarnings(unit.Acceptance, validation.AcceptanceSnapshotFromMetadata(report.Artifact.Metadata))
+			fmt.Fprint(advisoryOut, validation.AcceptanceEvidenceNotice(warnings))
 			fmt.Fprint(advisoryOut, freshness.advisory())
 			var policyWarning *workspace.HarnessPolicyWarning
 			if unit.AllowHarnessChanges && freshness.TargetSHA != "" {
@@ -268,6 +277,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			}
 			if asJSON {
 				outcome := map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head, "base_freshness": freshness, "report": report}
+				if len(warnings) > 0 {
+					outcome["acceptance_evidence_warnings"] = warnings
+				}
 				if policyWarning != nil {
 					prepareHarnessPolicyWarning(policyWarning, issue, pr.Number, rootOpts)
 					outcome["harness_policy_warning"] = policyWarning

@@ -95,17 +95,30 @@ func (g *GitHubTracker) RESTClient() *api.RESTClient {
 	return g.client
 }
 
-func (g *GitHubTracker) VerifyForkRepository(ctx context.Context, forkSlug, expectedOwner string, requirePush bool) (string, error) {
+// validForkComponent keeps repository slugs unambiguous before building API paths.
+func validForkComponent(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for _, c := range value {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *GitHubTracker) VerifyForkRepository(ctx context.Context, forkSlug, actor string, requirePush bool) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	forkSlug = strings.TrimSpace(forkSlug)
 	parts := strings.Split(forkSlug, "/")
-	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+	if len(parts) != 2 || !validForkComponent(parts[0]) || !validForkComponent(parts[1]) {
 		return "", fmt.Errorf("invalid fork repository %q: expected owner/repo", forkSlug)
 	}
-	if expectedOwner != "" && !strings.EqualFold(parts[0], expectedOwner) {
-		return "", fmt.Errorf("fork repository %q owner %q does not match authenticated user %q", forkSlug, parts[0], expectedOwner)
+	if strings.TrimSpace(actor) == "" {
+		return "", fmt.Errorf("fork verification requires an authenticated actor")
 	}
 	path := fmt.Sprintf("repos/%s/%s", url.PathEscape(parts[0]), url.PathEscape(parts[1]))
 	var resp struct {
@@ -114,6 +127,7 @@ func (g *GitHubTracker) VerifyForkRepository(ctx context.Context, forkSlug, expe
 		Fork     bool   `json:"fork"`
 		Owner    struct {
 			Login string `json:"login"`
+			Type  string `json:"type"`
 		} `json:"owner"`
 		Source struct {
 			FullName string `json:"full_name"`
@@ -133,13 +147,48 @@ func (g *GitHubTracker) VerifyForkRepository(ctx context.Context, forkSlug, expe
 	if !strings.EqualFold(resp.Source.FullName, upstream) {
 		return "", fmt.Errorf("fork repository %q source %q does not match upstream %q", forkSlug, resp.Source.FullName, upstream)
 	}
-	if expectedOwner != "" && !strings.EqualFold(resp.Owner.Login, expectedOwner) {
-		return "", fmt.Errorf("fork repository %q owner %q does not match %q", forkSlug, resp.Owner.Login, expectedOwner)
+	if strings.EqualFold(forkSlug, upstream) {
+		return "", fmt.Errorf("upstream repository cannot be a contributor fork")
 	}
-	if requirePush {
-		if resp.Permissions == nil || (!resp.Permissions.Push && !resp.Permissions.Admin) {
-			return "", fmt.Errorf("authenticated user lacks push permission on fork repository %q", forkSlug)
+	switch resp.Owner.Type {
+	case "Organization":
+		canonical := resp.Owner.Login + "/" + resp.Name
+		fullNameParts := strings.Split(resp.FullName, "/")
+		if len(fullNameParts) != 2 || !validForkComponent(fullNameParts[0]) || !validForkComponent(fullNameParts[1]) ||
+			!validForkComponent(resp.Owner.Login) || !validForkComponent(resp.Name) ||
+			!strings.EqualFold(resp.FullName, canonical) ||
+			!strings.EqualFold(forkSlug, canonical) {
+			return "", fmt.Errorf("fork repository %q has inconsistent canonical organization metadata", forkSlug)
 		}
+		var permission struct {
+			Permission string `json:"permission"`
+			User       *struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		}
+		path := fmt.Sprintf("repos/%s/%s/collaborators/%s/permission",
+			url.PathEscape(resp.Owner.Login), url.PathEscape(resp.Name), url.PathEscape(actor))
+		if err := g.client.DoWithContext(ctx, "GET", path, nil, &permission); err != nil {
+			return "", fmt.Errorf("verify actor permission on fork %q: %w", canonical, err)
+		}
+		if permission.User == nil || permission.User.Login == "" || !strings.EqualFold(permission.User.Login, actor) {
+			return "", fmt.Errorf("fork permission evidence does not identify actor %q", actor)
+		}
+		switch permission.Permission {
+		case "write", "maintain", "admin":
+			return resp.FullName, nil
+		default:
+			return "", fmt.Errorf("actor %q lacks write permission on fork %q", actor, canonical)
+		}
+	case "", "User":
+		if !strings.EqualFold(parts[0], actor) || !strings.EqualFold(resp.Owner.Login, actor) {
+			return "", fmt.Errorf("fork repository %q owner %q does not match authenticated user %q", forkSlug, resp.Owner.Login, actor)
+		}
+	default:
+		return "", fmt.Errorf("fork repository %q has unsupported owner type %q", forkSlug, resp.Owner.Type)
+	}
+	if requirePush && (resp.Permissions == nil || (!resp.Permissions.Push && !resp.Permissions.Admin)) {
+		return "", fmt.Errorf("authenticated user lacks push permission on fork repository %q", forkSlug)
 	}
 	canonical := strings.TrimSpace(resp.FullName)
 	if canonical == "" && resp.Owner.Login != "" && resp.Name != "" {

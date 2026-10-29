@@ -117,7 +117,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", firstNonEmptyStr(opts.Backend, opts.getenv("SWARM_BACKEND")), "Tracker backend: github or local")
 	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", firstNonEmptyStr(opts.Repo, opts.getenv("SWARM_REPO")), "GitHub repository (owner/repo)")
 	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", opts.RepoRoot, "Repository root path")
-	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
+	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a writable personal or organization GitHub fork and the upstream fork coordinator Action")
 	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", opts.ForkRemote, `Writable fork remote for --fork coordination or upstream-authorized PR updates (default "fork", or "origin" when the upstream remote is not origin)`)
 	rootCmd.PersistentFlags().StringVar(&opts.UpstreamRemote, "upstream-remote", opts.UpstreamRemote, `Git remote for the project repository on the github backend (default: the node profile's upstream_remote, then "origin")`)
 	rootCmd.AddCommand(newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPRCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
@@ -198,9 +198,9 @@ func (o *RootOptions) checkForkRemoteName() error {
 		return nil
 	}
 	if upstream == workspace.DefaultUpstreamRemote {
-		return fmt.Errorf("--fork-remote cannot be origin; configure a separate personal fork remote, or pass --upstream-remote <project-remote> when origin is your fork")
+		return fmt.Errorf("--fork-remote cannot be origin; configure a separate writable personal or organization fork remote, or pass --upstream-remote <project-remote> when origin is your fork")
 	}
-	return fmt.Errorf("--fork-remote %s is also the upstream remote; pass --fork-remote <verified-personal-fork-remote>, or --upstream-remote <project-remote>", forkRemote)
+	return fmt.Errorf("--fork-remote %s is also the upstream remote; pass --fork-remote <verified-fork-remote>, or --upstream-remote <project-remote>", forkRemote)
 }
 
 // forkRemoteRemedy explains how to correct a rejected fork remote when the
@@ -215,7 +215,7 @@ func (o *RootOptions) forkRemoteRemedy(err error) error {
 	if o.forkRemoteDefaulted() {
 		which = fmt.Sprintf("default fork remote %q (used because the upstream remote is %q)", o.effectiveForkRemote(), upstream)
 	}
-	return fmt.Errorf("%s failed verification: %w; pass --fork-remote <verified-personal-fork-remote> naming your writable fork, or --upstream-remote <project-remote> if %s is not the project", which, err, upstream)
+	return fmt.Errorf("%s failed verification: %w; pass --fork-remote <verified-fork-remote> naming your writable personal or organization fork, or --upstream-remote <project-remote> if %s is not the project", which, err, upstream)
 }
 
 func (o *RootOptions) verifyForkRemote(ctx context.Context, root string, tr tracker.Tracker) (string, string, error) {

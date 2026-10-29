@@ -40,6 +40,8 @@ type upstreamRemoteFixture struct {
 	env          *fixtureEnv
 	baseSHA      string
 	forkMainSHA  string
+	organization bool
+	privateFork  bool
 
 	mu       sync.Mutex
 	now      time.Time
@@ -47,6 +49,10 @@ type upstreamRemoteFixture struct {
 	prs      map[int]*tracker.PullRequest
 	issues   map[int]*tracker.Issue
 	posted   int
+
+	organizationPermission string
+	organizationActor      string
+	organizationQueries    int
 
 	maintainer tracker.Tracker
 	coord      *fork.Coordinator
@@ -61,18 +67,29 @@ func (f *upstreamRemoteFixture) git(dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func newUpstreamRemoteFixture(t *testing.T) *upstreamRemoteFixture {
+func newUpstreamRemoteFixture(t *testing.T, organization ...bool) *upstreamRemoteFixture {
 	t.Helper()
 	f := &upstreamRemoteFixture{
 		t: t, tmp: t.TempDir(), env: newFixtureEnv(t),
-		now:      time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC),
-		comments: map[int64]*tracker.Comment{},
-		prs:      map[int]*tracker.PullRequest{},
+		now:                    time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC),
+		comments:               map[int64]*tracker.Comment{},
+		organizationPermission: "write", organizationActor: "alice",
+		prs: map[int]*tracker.PullRequest{},
+	}
+	if len(organization) > 0 {
+		f.organization = organization[0]
+	}
+	if len(organization) > 1 {
+		f.privateFork = organization[1]
 	}
 	f.nodeConfig = filepath.Join(t.TempDir(), "node.yaml")
 	f.env.set("SWARM_NODE_CONFIG", f.nodeConfig)
 	f.projectBare = filepath.Join(f.tmp, "octo", "swarm.git")
-	f.aliceBare = filepath.Join(f.tmp, "alice", "swarm.git")
+	forkOwner := "alice"
+	if f.organization {
+		forkOwner = "builders"
+	}
+	f.aliceBare = filepath.Join(f.tmp, forkOwner, "swarm.git")
 	for _, dir := range []string{f.projectBare, f.aliceBare} {
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			t.Fatal(err)
@@ -127,7 +144,7 @@ func newUpstreamRemoteFixture(t *testing.T) *upstreamRemoteFixture {
 		RepoRoot: f.upstreamRoot, UpstreamRepo: "octo/swarm", Tracker: bot,
 		NowFn: func() time.Time { f.mu.Lock(); defer f.mu.Unlock(); return f.now },
 		ForkGitURLFunc: func(forkRepo string) string {
-			if forkRepo == "alice/swarm" {
+			if forkRepo == forkOwner+"/swarm" {
 				return f.aliceBare
 			}
 			return filepath.Join(f.tmp, "missing.git")
@@ -243,6 +260,11 @@ func (f *upstreamRemoteFixture) githubTracker(slug, login, userType string) trac
 		switch {
 		case r.Method == http.MethodGet && path == "/user":
 			reply(map[string]any{"login": login, "type": userType})
+		case r.Method == http.MethodGet && path == "/repos/builders/swarm/collaborators/alice/permission":
+			f.organizationQueries++
+			reply(map[string]any{"permission": f.organizationPermission, "role_name": "maintain", "user": map[string]any{"login": f.organizationActor}})
+		case r.Method == http.MethodGet && strings.HasPrefix(path, "/repos/builders/swarm/collaborators/"):
+			http.Error(w, "actor has no permission", http.StatusForbidden)
 		case r.Method == http.MethodGet && strings.HasPrefix(path, prefix+"collaborators/"):
 			perm := "read"
 			if login == "maintainer" {
@@ -251,8 +273,12 @@ func (f *upstreamRemoteFixture) githubTracker(slug, login, userType string) trac
 			reply(map[string]any{"permission": perm})
 		case r.Method == http.MethodGet && strings.Count(path, "/") == 3 && strings.HasSuffix(path, "/swarm") && path != "/repos/octo/swarm":
 			owner := strings.Split(strings.TrimPrefix(path, "/repos/"), "/")[0]
-			reply(map[string]any{"full_name": owner + "/swarm", "name": "swarm", "fork": true,
-				"owner": map[string]any{"login": owner}, "source": map[string]any{"full_name": "octo/swarm"},
+			ownerType := "User"
+			if owner == "builders" {
+				ownerType = "Organization"
+			}
+			reply(map[string]any{"full_name": owner + "/swarm", "name": "swarm", "fork": true, "private": f.privateFork,
+				"owner": map[string]any{"login": owner, "type": ownerType}, "source": map[string]any{"full_name": "octo/swarm"},
 				"permissions": map[string]any{"push": login == owner && owner != "carol"}})
 		case !strings.HasPrefix(path, prefix):
 			http.Error(w, "unexpected "+r.Method+" "+path, http.StatusNotFound)
@@ -271,6 +297,8 @@ func (f *upstreamRemoteFixture) githubTracker(slug, login, userType string) trac
 				c.Body = payload.Body
 			}
 			reply(comment(c))
+		case r.Method == http.MethodGet && path == prefix+"issues/1/comments":
+			reply([]any{})
 		case strings.HasPrefix(path, prefix+"issues/"):
 			parts := strings.Split(strings.TrimPrefix(path, prefix+"issues/"), "/")
 			n, _ := strconv.Atoi(parts[0])
@@ -326,6 +354,8 @@ func (f *upstreamRemoteFixture) githubTracker(slug, login, userType string) trac
 			default:
 				http.Error(w, "unexpected "+r.Method+" "+path, http.StatusNotFound)
 			}
+		case r.Method == http.MethodGet && strings.HasPrefix(path, prefix+"commits/") && strings.HasSuffix(path, "/check-runs"):
+			reply(map[string]any{"check_runs": []any{}})
 		case path == prefix+"git/ref/heads/main":
 			reply(map[string]any{"object": map[string]string{"sha": f.headSHA("main")}})
 		case path == prefix+"pulls" && r.Method == http.MethodGet:
@@ -350,6 +380,8 @@ func (f *upstreamRemoteFixture) githubTracker(slug, login, userType string) trac
 			pr := &tracker.PullRequest{Number: n, Title: payload.Title, Body: payload.Body, Head: headBranch, HeadRepo: headRepo, HeadSHA: f.headSHA(payload.Head), Base: payload.Base, BaseRepo: "octo/swarm", Draft: payload.Draft, HTMLURL: fmt.Sprintf("https://github.com/octo/swarm/pull/%d", n)}
 			f.prs[n] = pr
 			reply(map[string]any{"number": n, "title": pr.Title, "body": pr.Body, "draft": pr.Draft, "html_url": pr.HTMLURL})
+		case r.Method == http.MethodGet && strings.HasPrefix(path, prefix+"pulls/") && (strings.HasSuffix(path, "/reviews") || strings.HasSuffix(path, "/comments")):
+			reply([]any{})
 		case strings.HasPrefix(path, prefix+"pulls/"):
 			n, _ := strconv.Atoi(strings.TrimPrefix(path, prefix+"pulls/"))
 			pr, ok := f.prs[n]
@@ -362,6 +394,7 @@ func (f *upstreamRemoteFixture) githubTracker(slug, login, userType string) trac
 				_ = json.NewDecoder(r.Body).Decode(&payload)
 				pr.Title, pr.Body = payload.Title, payload.Body
 			}
+			pr.HeadSHA = f.headSHA(strings.Split(pr.HeadRepo, "/")[0] + ":" + pr.Head)
 			reply(map[string]any{"number": pr.Number, "title": pr.Title, "body": pr.Body, "state": "open", "draft": pr.Draft, "html_url": pr.HTMLURL,
 				"head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]any{"full_name": pr.HeadRepo}},
 				"base": map[string]any{"ref": pr.Base, "repo": map[string]any{"full_name": pr.BaseRepo}}})
@@ -404,7 +437,22 @@ func (f *upstreamRemoteFixture) headSHA(head string) string {
 // without --fork-remote.
 func TestUpstreamRemoteForkFlow(t *testing.T) {
 	t.Parallel()
-	f := newUpstreamRemoteFixture(t)
+	for _, tc := range []struct {
+		name                  string
+		organization, private bool
+	}{
+		{"personal", false, false}, {"organization-public", true, false}, {"organization-private", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testUpstreamRemoteForkFlow(t, tc.organization, tc.private) })
+	}
+}
+
+func testUpstreamRemoteForkFlow(t *testing.T, organization, private bool) {
+	f := newUpstreamRemoteFixture(t, organization, private)
+	forkSlug := "alice/swarm"
+	if organization {
+		forkSlug = "builders/swarm"
+	}
 	alice := f.aliceClone("alice")
 	opts := f.as("alice", alice)
 
@@ -415,7 +463,7 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 	}
 	claimed := f.state()
 	branch := "swarm/issue-42-" + claimed.Lease.ClaimID
-	if claimed.BaseSHA != f.baseSHA || claimed.Lease.Owner != "alice" || claimed.ForkRepo != "alice/swarm" || claimed.Lease.ClaimID == "" {
+	if claimed.BaseSHA != f.baseSHA || claimed.Lease.Owner != "alice" || claimed.ForkRepo != forkSlug || claimed.Lease.ClaimID == "" {
 		t.Fatalf("claim state = %+v, want base %s from upstream (fork default is %s)", claimed, f.baseSHA, f.forkMainSHA)
 	}
 	if head := f.git(workspace.WorktreePath(alice, 42), "merge-base", "HEAD", f.baseSHA); head != f.baseSHA {
@@ -457,7 +505,7 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 	pr := f.prs[1]
 	prCount := len(f.prs)
 	f.mu.Unlock()
-	if prCount != 1 || pr.Head != branch || pr.HeadRepo != "alice/swarm" || pr.HeadSHA != head || pr.Base != "main" || pr.BaseRepo != "octo/swarm" {
+	if prCount != 1 || pr.Head != branch || pr.HeadRepo != forkSlug || pr.HeadSHA != head || pr.Base != "main" || pr.BaseRepo != "octo/swarm" {
 		t.Fatalf("PR = %+v (count %d)", pr, prCount)
 	}
 	if got := f.git(f.aliceBare, "rev-parse", "refs/heads/"+branch); got != head {
@@ -477,6 +525,36 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 	}
 	if f.git(f.projectBare, "rev-parse", "refs/heads/main") != f.baseSHA {
 		t.Fatal("project main moved")
+	}
+
+	if organization {
+		// Organization writers use the same PR revision plan and publication gates.
+		out, err = f.run(opts, "--fork", "pr", "work", "1", "--agent", "mock", "--progress=false")
+		if !errors.Is(err, workflow.ErrPlanApprovalNeeded) {
+			t.Fatalf("PR plan gate: %v\n%s", err, out)
+		}
+		out, err = f.run(opts, "--fork", "pr", "stage", "1", "--phase", "plan")
+		if err != nil {
+			t.Fatalf("PR stage: %v\n%s", err, out)
+		}
+		out, err = f.run(RootOptions{RepoRoot: f.upstreamRoot, Backend: "github", trackerOverride: f.maintainer}, "--upstream-remote", "origin", "issue", "review-plan", "42", "--approve", "--notes", "Revision reviewed")
+		if err != nil {
+			t.Fatalf("revision review: %v\n%s", err, out)
+		}
+		f.env.set("SWARM_MOCK_DEVELOPER_CMD", "printf 'organization PR update\\n' > organization-pr.txt")
+		for _, args := range [][]string{
+			{"--fork", "pr", "work", "1", "--agent", "mock", "--phase", "implement", "--progress=false"},
+			{"--fork", "pr", "validate", "1"},
+			{"--fork", "pr", "submit", "1"},
+		} {
+			out, err = f.run(opts, args...)
+			if err != nil {
+				t.Fatalf("%v: %v\n%s", args, err, out)
+			}
+		}
+		if st := f.state(); st.PRRevision != nil || st.Lease.Status != "completed" || st.Lease.Owner != "alice" || st.ForkRepo != forkSlug {
+			t.Fatalf("organization PR revision state: %+v", st)
+		}
 	}
 	// Remotes are used as configured, never renamed or rewritten.
 	if f.git(alice, "remote", "get-url", "origin") != f.aliceBare || f.git(alice, "remote", "get-url", "upstream") != f.projectBare || f.git(alice, "remote") != "origin\nupstream" {
@@ -501,22 +579,22 @@ func TestUpstreamRemoteValidation(t *testing.T) {
 		{"upstream points at the fork with --repo", func(root string) { f.git(root, "remote", "set-url", "upstream", f.aliceBare) }, "alice",
 			[]string{"--upstream-remote", "upstream", "--repo", "octo/swarm"}, []string{"--repo octo/swarm does not match upstream remote upstream (alice/swarm)", "--upstream-remote <project-remote>"}},
 		{"upstream points at the fork", func(root string) { f.git(root, "remote", "set-url", "upstream", f.aliceBare) }, "alice",
-			[]string{"--upstream-remote", "upstream"}, []string{`fork remote "origin"`, "same URL as upstream upstream", "--fork-remote <verified-personal-fork-remote>", "--upstream-remote <project-remote>"}},
+			[]string{"--upstream-remote", "upstream"}, []string{`fork remote "origin"`, "same URL as upstream upstream", "--fork-remote <verified-fork-remote>", "--upstream-remote <project-remote>"}},
 		{"upstream is the fork under another URL spelling", func(root string) { f.git(root, "remote", "set-url", "upstream", f.aliceBare+"/") }, "alice",
-			[]string{"--upstream-remote", "upstream"}, []string{`fork remote "origin" resolves to alice/swarm, the same repository as upstream remote "upstream"`, "--fork-remote <verified-personal-fork-remote>"}},
+			[]string{"--upstream-remote", "upstream"}, []string{`fork remote "origin" resolves to alice/swarm, the same repository as upstream remote "upstream"`, "--fork-remote <verified-fork-remote>"}},
 		{"upstream does not match --repo", func(string) {}, "alice",
 			[]string{"--upstream-remote", "upstream", "--repo", "octo/other"}, []string{"--repo octo/other does not match upstream remote upstream (octo/swarm)", "point upstream at octo/other"}},
 		{"origin missing with a fork remote present", func(root string) {
 			f.git(root, "remote", "rename", "origin", "fork")
-		}, "alice", []string{"--upstream-remote", "upstream"}, []string{`fork remote "origin" (used because the upstream remote is "upstream") failed verification`, `git remote "origin" is not configured`, "--fork-remote <verified-personal-fork-remote>"}},
+		}, "alice", []string{"--upstream-remote", "upstream"}, []string{`fork remote "origin" (used because the upstream remote is "upstream") failed verification`, `git remote "origin" is not configured`, "--fork-remote <verified-fork-remote>"}},
 		{"origin owned by someone else", func(string) {}, "bob",
-			[]string{"--upstream-remote", "upstream"}, []string{`default fork remote "origin" (used because the upstream remote is "upstream") failed verification`, "--fork-remote <verified-personal-fork-remote>"}},
+			[]string{"--upstream-remote", "upstream"}, []string{`default fork remote "origin" (used because the upstream remote is "upstream") failed verification`, "--fork-remote <verified-fork-remote>"}},
 		{"origin without push permission", func(root string) {
 			f.git(root, "remote", "set-url", "origin", filepath.Join(f.tmp, "carol", "swarm.git"))
 		}, "carol",
-			[]string{"--upstream-remote", "upstream"}, []string{`fork remote "origin" (used because the upstream remote is "upstream") failed verification`, "--fork-remote <verified-personal-fork-remote>"}},
+			[]string{"--upstream-remote", "upstream"}, []string{`fork remote "origin" (used because the upstream remote is "upstream") failed verification`, "--fork-remote <verified-fork-remote>"}},
 		{"explicit fork remote is the upstream", func(string) {}, "alice",
-			[]string{"--upstream-remote", "upstream", "--fork-remote", "upstream"}, []string{"--fork-remote upstream is also the upstream remote", "--fork-remote <verified-personal-fork-remote>"}},
+			[]string{"--upstream-remote", "upstream", "--fork-remote", "upstream"}, []string{"--fork-remote upstream is also the upstream remote", "--fork-remote <verified-fork-remote>"}},
 		{"explicit origin fork remote while origin is upstream", func(string) {}, "alice",
 			[]string{"--fork-remote", "origin"}, []string{"--fork-remote cannot be origin", "--upstream-remote <project-remote>"}},
 		{"invalid upstream remote name", func(string) {}, "alice",
@@ -727,5 +805,40 @@ func TestUpstreamRemoteGeneratedCommands(t *testing.T) {
 	o.ForkRemote = "origin"
 	if got := submissionRecoveryCommand(3, o); got != "swarm --upstream-remote upstream --fork pr rebase 3 --resolve" {
 		t.Fatalf("default fork remote repeated: %s", got)
+	}
+}
+
+// Discovery must recheck the logged-in actor even when the same tracker and
+// organization remote were successfully verified earlier.
+func TestUpstreamRemoteOrganizationRevocation(t *testing.T) {
+	t.Parallel()
+	f := newUpstreamRemoteFixture(t, true, true)
+	root := f.aliceClone("organization-revocation")
+	opts := f.as("alice", root)
+	opts.UpstreamRemote = "upstream"
+	tr := f.githubTracker("octo/swarm", "alice", "User")
+	for _, tc := range []struct {
+		permission, actor string
+		allowed           bool
+	}{
+		{"write", "alice", true}, {"read", "alice", false}, {"admin", "coordinator", false}, {"write", "", false}, {"write", "ALICE", true},
+	} {
+		f.mu.Lock()
+		f.organizationPermission, f.organizationActor = tc.permission, tc.actor
+		before := f.organizationQueries
+		f.mu.Unlock()
+		remote, slug, err := opts.verifyForkRemote(context.Background(), root, tr)
+		if (err == nil) != tc.allowed {
+			t.Fatalf("permission=%q actor=%q: %s %s %v", tc.permission, tc.actor, remote, slug, err)
+		}
+		if tc.allowed && (remote != "origin" || slug != "builders/swarm") {
+			t.Fatalf("discovered %s %s", remote, slug)
+		}
+		f.mu.Lock()
+		queries := f.organizationQueries
+		f.mu.Unlock()
+		if queries != before+1 {
+			t.Fatalf("permission query count %d, want %d", queries, before+1)
+		}
 	}
 }

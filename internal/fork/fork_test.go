@@ -27,6 +27,7 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 	prprojection "github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"gopkg.in/yaml.v3"
 )
 
 type fakeGitHubState struct {
@@ -41,17 +42,20 @@ type fakeGitHubState struct {
 	prs               map[int]*tracker.PullRequest
 	descriptionBodies []string
 	forks             map[string]map[string]any
+	forkPermissions   map[string]map[string]any
+	permissionQueries []string
 }
 
 func newFakeGitHubState() *fakeGitHubState {
 	return &fakeGitHubState{
-		currentUser: "maintainer",
-		nextID:      500,
-		nextPR:      10,
-		issues:      make(map[int]*tracker.Issue),
-		comments:    make(map[int64]*tracker.Comment),
-		issueComm:   make(map[int][]int64),
-		prs:         make(map[int]*tracker.PullRequest),
+		currentUser:     "maintainer",
+		forkPermissions: make(map[string]map[string]any),
+		nextID:          500,
+		nextPR:          10,
+		issues:          make(map[int]*tracker.Issue),
+		comments:        make(map[int64]*tracker.Comment),
+		issueComm:       make(map[int][]int64),
+		prs:             make(map[int]*tracker.PullRequest),
 		forks: map[string]map[string]any{
 			"alice/swarm": {
 				"full_name":   "alice/swarm",
@@ -95,7 +99,16 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 			}
 			writeJSON(map[string]any{"permission": perm})
 
-		case r.Method == http.MethodGet && (r.URL.Path == "/repos/alice/swarm" || r.URL.Path == "/repos/bob/swarm"):
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/builders/swarm/collaborators/"):
+			s.permissionQueries = append(s.permissionQueries, r.URL.Path)
+			payload, ok := s.forkPermissions[r.URL.Path]
+			if !ok {
+				http.Error(w, "permission unavailable", http.StatusForbidden)
+				return
+			}
+			writeJSON(payload)
+
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/alice/swarm" || r.URL.Path == "/repos/bob/swarm" || r.URL.Path == "/repos/builders/swarm"):
 			slug := strings.TrimPrefix(r.URL.Path, "/repos/")
 			info, ok := s.forks[slug]
 			if !ok {
@@ -180,7 +193,16 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 							"user":       map[string]any{"login": c.Author, "type": c.AuthorType},
 						})
 					}
-					writeJSON(list)
+					page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+					if page < 1 {
+						page = 1
+					}
+					start := min((page-1)*100, len(list))
+					end := min(start+100, len(list))
+					if end < len(list) {
+						w.Header().Set("Link", fmt.Sprintf(`<https://api.github.com%s?per_page=100&page=%d>; rel="next"`, r.URL.Path, page+1))
+					}
+					writeJSON(list[start:end])
 					return
 				}
 				if r.Method == http.MethodPost {
@@ -338,7 +360,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	for _, ns := range []string{contract.LedgerNamespaceBranch, contract.LedgerNamespaceHidden} {
-		t.Run(ns, func(t *testing.T) { testForkCoordinatorSecurityAndLifecycle(t, ns) })
+		t.Run(ns, func(t *testing.T) { testForkCoordinatorSecurityAndLifecycle(t, ns, false) })
 	}
 }
 
@@ -359,7 +381,17 @@ func setLedgerNamespace(t *testing.T, root, ns string) {
 	}
 }
 
-func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
+func TestForkCoordinatorOrganizationLifecycle(t *testing.T) {
+	for _, ns := range []string{contract.LedgerNamespaceBranch, contract.LedgerNamespaceHidden} {
+		t.Run(ns, func(t *testing.T) { testForkCoordinatorSecurityAndLifecycle(t, ns, true) })
+	}
+}
+
+func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string, organization bool) {
+	bobForkSlug := "bob/swarm"
+	if organization {
+		bobForkSlug = "builders/swarm"
+	}
 	ctx := context.Background()
 	tmp := t.TempDir()
 	git := func(dir string, args ...string) string {
@@ -382,6 +414,20 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	git(upstreamCheckout, "config", "user.email", "maintainer@example.invalid")
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: upstreamCheckout}); err != nil {
 		t.Fatal(err)
+	}
+	if organization {
+		config, err := harness.LoadConfig(upstreamCheckout)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config.Security.ApprovedCollaborators = []string{"maintainer", "alice", "bob", "charlie"}
+		data, err := yaml.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(upstreamCheckout, ".swarm", "config.yaml"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	setLedgerNamespace(t, upstreamCheckout, ns)
 	layout, err := coordination.LayoutFor(ns)
@@ -414,9 +460,16 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 
 	ghState := newFakeGitHubState()
 	ghState.baseSHA = baseSHA
+	if organization {
+		ghState.forks[bobForkSlug] = map[string]any{"full_name": bobForkSlug, "name": "swarm", "fork": true, "private": ns == contract.LedgerNamespaceHidden, "owner": map[string]any{"login": "builders", "type": "Organization"}, "source": map[string]any{"full_name": "octo/swarm"}}
+		ghState.forkPermissions["/repos/builders/swarm/collaborators/bob/permission"] = map[string]any{"permission": "write", "role_name": "maintain", "user": map[string]any{"login": "bob"}}
+		ghState.forkPermissions["/repos/builders/swarm/collaborators/alice/permission"] = map[string]any{"permission": "read", "role_name": "triage", "user": map[string]any{"login": "alice"}}
+	}
 	wuBody := "```yaml swarm-workunit\nid: ISSUE-42\nobjective: Implement fork feature\nconstraints: [Follow policy]\nacceptance: [Tests pass]\nworkflow: feature\ngate: agent\n```"
 	ghState.issues[42] = &tracker.Issue{Number: 42, Title: "Fork feature 42", Body: wuBody, State: "open", Author: "maintainer"}
 	ghState.issues[43] = &tracker.Issue{Number: 43, Title: "Fork feature 43", Body: strings.ReplaceAll(wuBody, "ISSUE-42", "ISSUE-43"), State: "open", Author: "maintainer"}
+
+	ghState.issues[44] = &tracker.Issue{Number: 44, Title: "Fork feature 44", Body: strings.ReplaceAll(wuBody, "ISSUE-42", "ISSUE-44"), State: "open", Author: "maintainer"}
 
 	maintTracker := ghState.trackerForUser(t, "maintainer", "User")
 	cfg, err := harness.LoadConfigAt(upstreamCheckout, baseSHA)
@@ -436,6 +489,10 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		t.Fatalf("ApproveTask(43): %v", err)
 	}
 
+	if _, err := maintMgr.ApproveTask(ctx, 44, "maintainer"); err != nil {
+		t.Fatal(err)
+	}
+
 	botTracker := ghState.trackerForUser(t, ActionsBotLogin, "Bot")
 	coord := &Coordinator{
 		RepoRoot:     upstreamCheckout,
@@ -446,7 +503,7 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 			switch forkRepo {
 			case "alice/swarm":
 				return aliceForkBare
-			case "bob/swarm":
+			case bobForkSlug:
 				return bobForkBare
 			default:
 				return filepath.Join(tmp, "missing.git")
@@ -660,7 +717,7 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	bobGateway := &Gateway{
 		Tracker:      bobTracker,
 		Store:        aliceStore,
-		ForkRepo:     "bob/swarm",
+		ForkRepo:     bobForkSlug,
 		PollInterval: 5 * time.Millisecond,
 		PollTimeout:  30 * time.Second,
 		Dispatcher: func(ctx context.Context, issueNumber int, c *tracker.Comment) error {
@@ -672,14 +729,14 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		Version:     1,
 		Operation:   "acquire",
 		IssueNumber: 42,
-		ForkRepo:    "bob/swarm",
+		ForkRepo:    bobForkSlug,
 		Agent:       "claude",
 		Phase:       "implement",
 	})
 	if err != nil {
 		t.Fatalf("bob takeover acquire #42 failed: %v", err)
 	}
-	if stBob.Lease.Owner != "bob" || stBob.Lease.ClaimID == aliceClaimID || stBob.ForkRepo != "bob/swarm" {
+	if stBob.Lease.Owner != "bob" || stBob.Lease.ClaimID == aliceClaimID || stBob.ForkRepo != bobForkSlug {
 		t.Fatalf("bob takeover state invalid: %+v", stBob)
 	}
 	if stBob.Branch != "" || stBob.HeadSHA != "" {
@@ -756,16 +813,20 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	ghState.mu.Lock()
 	ghState.nextPR = 55
 	ghState.mu.Unlock()
-	_, negativeErr := bobTracker.CreateDraftPR(ctx, tracker.DraftPRRequest{Body: strings.Repeat("x", 60000), Head: "bob:" + bobBranch, Base: "main"})
+	bobHeadOwner, _, _ := strings.Cut(bobForkSlug, "/")
+	_, negativeErr := bobTracker.CreateDraftPR(ctx, tracker.DraftPRRequest{Body: strings.Repeat("x", 60000), Head: bobHeadOwner + ":" + bobBranch, Base: "main"})
 	var apiErr *api.HTTPError
 	if !errors.As(negativeErr, &apiErr) || apiErr.StatusCode != 422 {
 		t.Fatalf("strict fork negative control: %v", negativeErr)
 	}
-	initialPR, err := bobTracker.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: 42, Title: "Fork feature 42 (#42)", Body: issueBody, Head: "bob:" + bobBranch, Base: "main"})
+	initialPR, err := bobTracker.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: 42, Title: "Fork feature 42 (#42)", Body: issueBody, Head: bobHeadOwner + ":" + bobBranch, Base: "main"})
 	if err != nil || initialPR.Number != 55 {
 		t.Fatalf("initial fork publication: %+v %v", initialPR, err)
 	}
 	ghState.mu.Lock()
+	if ghState.prs[55].HeadRepo != bobForkSlug {
+		t.Fatalf("published head repository = %q, want %q", ghState.prs[55].HeadRepo, bobForkSlug)
+	}
 	ghState.prs[55].HeadSHA = aliceHead
 	ghState.mu.Unlock()
 
@@ -796,7 +857,7 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		req.Version, req.IssueNumber = 1, 42
 		return bobGateway.Apply(ctx, req)
 	}
-	if _, err := aliceGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: 42, PRNumber: 55}); err == nil || !strings.Contains(err.Error(), "does not match authenticated user") {
+	if _, err := aliceGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: 42, PRNumber: 55}); err == nil || (!organization && !strings.Contains(err.Error(), "does not match authenticated user")) {
 		t.Fatalf("a contributor claimed a PR whose head is in another contributor's fork: %v", err)
 	}
 	if _, err := applyBob(lease.ForkRequest{Operation: "acquire-pr", PRNumber: 56}); err == nil || !strings.Contains(err.Error(), "not a fork contribution linked") {
@@ -806,8 +867,65 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	if err != nil {
 		t.Fatalf("bob acquire-pr: %v", err)
 	}
-	if stRev.Lease.Owner != "bob" || stRev.Lease.Status != "active" || stRev.PRNumber != 55 || stRev.ForkRepo != "bob/swarm" || stRev.Lease.ExpiresAt.Sub(now) != 4*time.Hour {
+	if stRev.Lease.Owner != "bob" || stRev.Lease.Status != "active" || stRev.PRNumber != 55 || stRev.ForkRepo != bobForkSlug || stRev.Lease.ExpiresAt.Sub(now) != 4*time.Hour {
 		t.Fatalf("unexpected PR revision claim: %+v (fork=%q pr=%d)", stRev.Lease, stRev.ForkRepo, stRev.PRNumber)
+	}
+
+	if organization {
+		// Each operation must recheck the event actor's permission against the
+		// authoritative fork, even when the request offers a personal fork.
+		denials := []struct {
+			name    string
+			payload map[string]any
+		}{
+			{"revoked", map[string]any{"permission": "read", "role_name": "admin", "user": map[string]any{"login": "bob"}}},
+			{"wrong-identity", map[string]any{"permission": "admin", "user": map[string]any{"login": ActionsBotLogin}}},
+			{"missing-identity", map[string]any{"permission": "write"}},
+			{"unavailable", nil},
+		}
+		permissionOperations := []string{
+			"acquire", "renew", "release", "handoff", "require-gate", "update-phase", "update-artifact", "record-checkpoint", "record-submission",
+			"acquire-pr", "begin-pr-revision", "record-pr-head", "invalidate-pr-evidence", "complete-pr-revision",
+		}
+		if !slices.Equal(permissionOperations, Operations) {
+			t.Fatal("organization permission matrix must cover every operation")
+		}
+		for _, operation := range permissionOperations {
+			for _, denial := range denials {
+				t.Run(operation+"/"+denial.name, func(t *testing.T) {
+					before := git(upstreamCheckout, "show-ref")
+					ghState.mu.Lock()
+					key := "/repos/builders/swarm/collaborators/bob/permission"
+					if denial.payload == nil {
+						delete(ghState.forkPermissions, key)
+					} else {
+						ghState.forkPermissions[key] = denial.payload
+					}
+					queriesBefore := len(ghState.permissionQueries)
+					ghState.mu.Unlock()
+					requestedFork := "alice/swarm"
+					if operation == "acquire" {
+						requestedFork = bobForkSlug
+					}
+					_, _, err := coord.executeRequest(ctx, stRev.LastForkRequestID+10000, "bob", lease.ForkRequest{Version: 1, Operation: operation, IssueNumber: 42, ClaimID: stRev.Lease.ClaimID, ForkRepo: requestedFork, PRNumber: 55, Agent: "claude"})
+					if err == nil {
+						t.Fatal("denied actor mutated state")
+					}
+					ghState.mu.Lock()
+					queriesAfter := len(ghState.permissionQueries)
+					ghState.mu.Unlock()
+					if queriesAfter != queriesBefore+1 {
+						t.Fatalf("permission checks = %d, want one", queriesAfter-queriesBefore)
+					}
+					if after := git(upstreamCheckout, "show-ref"); after != before {
+						t.Fatal("denial changed issue/index/Git refs")
+					}
+				})
+			}
+		}
+		ghState.mu.Lock()
+		ghState.forkPermissions["/repos/builders/swarm/collaborators/bob/permission"] = map[string]any{"permission": "write", "role_name": "custom builder", "user": map[string]any{"login": "bob"}}
+		ghState.mu.Unlock()
 	}
 	revClaim := stRev.Lease.ClaimID
 	if _, err := applyBob(lease.ForkRequest{Operation: "begin-pr-revision", ClaimID: revClaim, PRNumber: 55, ExpectedHeadSHA: baseSHA, HeadSHA: baseSHA, Branch: "swarm/pr-55"}); err == nil || !strings.Contains(err.Error(), "pull request #55 head is") {
@@ -1049,6 +1167,147 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 			t.Fatal("contributor staging bypassed trusted gate")
 		}
 	})
+
+	if organization {
+		ghState.mu.Lock()
+		ghState.forkPermissions["/repos/builders/swarm/collaborators/charlie/permission"] = map[string]any{"permission": "write", "user": map[string]any{"login": "charlie"}}
+		ghState.mu.Unlock()
+		charlieGateway := &Gateway{Tracker: ghState.trackerForUser(t, "charlie", "User"), Store: aliceStore, ForkRepo: bobForkSlug, PollInterval: 5 * time.Millisecond, PollTimeout: 30 * time.Second, Dispatcher: func(ctx context.Context, issueNumber int, comment *tracker.Comment) error {
+			_, err := coord.HandleEvent(ctx, makeEvent(issueNumber, comment))
+			return err
+		}}
+		ghState.mu.Lock()
+		ghState.forkPermissions["/repos/builders/swarm/collaborators/dave/permission"] = map[string]any{"permission": "write", "user": map[string]any{"login": "dave"}}
+		ghState.mu.Unlock()
+		daveGateway := *charlieGateway
+		daveGateway.Tracker = ghState.trackerForUser(t, "dave", "User")
+		for _, operation := range []string{"acquire", "acquire-pr"} {
+			issue := 43
+			if operation == "acquire-pr" {
+				issue = 42
+			}
+			request := lease.ForkRequest{Version: 1, Operation: operation, IssueNumber: issue, PRNumber: 55, Agent: "claude"}
+			assertNoMutation := func(name, want string) {
+				t.Helper()
+				before := git(upstreamCheckout, "show-ref")
+				if _, err := charlieGateway.Apply(ctx, request); err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("%s %s: got %v, want %q", operation, name, err, want)
+				}
+				if git(upstreamCheckout, "show-ref") != before {
+					t.Fatalf("%s denial changed refs", name)
+				}
+			}
+			ghState.mu.Lock()
+			labels := ghState.issues[issue].Labels
+			ghState.issues[issue].Labels = nil
+			ghState.mu.Unlock()
+			assertNoMutation("untrusted issue", "requires label")
+			ghState.mu.Lock()
+			ghState.issues[issue].Labels = labels
+			body := ghState.issues[issue].Body
+			ghState.issues[issue].Body = strings.Replace(body, "Implement fork feature", "Changed work", 1)
+			ghState.mu.Unlock()
+			assertNoMutation("stale task approval", "approval")
+			ghState.mu.Lock()
+			ghState.issues[issue].Body = body
+			ghState.mu.Unlock()
+			before := git(upstreamCheckout, "show-ref")
+			if _, err := daveGateway.Apply(ctx, request); err == nil || !strings.Contains(err.Error(), "approved_collaborators") {
+				t.Fatalf("excluded shared writer %s: %v", operation, err)
+			}
+			if git(upstreamCheckout, "show-ref") != before {
+				t.Fatal("allowlist denial changed refs")
+			}
+			stateStore := coordination.NewGitStoreWithLayout(upstreamCheckout, "origin", layout)
+			raw, revision, err := stateStore.Load(ctx, issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var altered lease.IssueState
+			if err := json.Unmarshal(raw, &altered); err != nil {
+				t.Fatal(err)
+			}
+			altered.PolicyDigest = "stale-policy-digest"
+			invalid, err := json.Marshal(altered)
+			if err != nil {
+				t.Fatal(err)
+			}
+			badRevision, err := stateStore.CompareAndSwap(ctx, issue, revision, invalid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNoMutation("stale policy approval", "approval")
+			if _, err := stateStore.CompareAndSwap(ctx, issue, badRevision, raw); err != nil {
+				t.Fatal(err)
+			}
+			request.Duration = "invalid-duration"
+			assertNoMutation("invalid lease terms", "duration")
+		}
+		// Shared-fork write authority cannot displace a live claim, but a new
+		// writer absent from prior contributors may acquire the linked PR
+		// once the former owner releases it.
+		if _, err := charlieGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: 42, PRNumber: 55, Agent: "claude"}); err == nil {
+			t.Fatal("shared fork writer stole active claim")
+		}
+		if _, err := applyBob(lease.ForkRequest{Operation: "release", ClaimID: stRev.Lease.ClaimID}); err != nil {
+			t.Fatal(err)
+		}
+		shared, err := charlieGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: 42, PRNumber: 55, Agent: "claude"})
+		if err != nil {
+			t.Fatalf("new organization writer acquire-pr: %v", err)
+		}
+		if shared.Lease.Owner != "charlie" || shared.Lease.ClaimID == stRev.Lease.ClaimID || shared.ForkRepo != bobForkSlug || shared.PRNumber != 55 {
+			t.Fatalf("unexpected shared PR claim: %+v", shared)
+		}
+		if _, err := applyBob(lease.ForkRequest{Operation: "renew", ClaimID: stRev.Lease.ClaimID}); !errors.Is(err, lease.ErrClaimFence) {
+			t.Fatalf("former writer not fenced: %v", err)
+		}
+		if _, err := charlieGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "release", IssueNumber: 42, ClaimID: shared.Lease.ClaimID}); err != nil {
+			t.Fatal(err)
+		}
+		old, err := bobGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire", IssueNumber: 43, Agent: "claude"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := charlieGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire", IssueNumber: 43, Agent: "claude"}); err == nil {
+			t.Fatal("shared writer stole fresh issue claim")
+		}
+		if _, err := bobGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "release", IssueNumber: 43, ClaimID: old.Lease.ClaimID}); err != nil {
+			t.Fatal(err)
+		}
+		fresh, err := charlieGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire", IssueNumber: 43, Agent: "claude"})
+		if err != nil {
+			t.Fatalf("new organization writer acquire: %v", err)
+		}
+		if fresh.Lease.Owner != "charlie" || fresh.Lease.ClaimID == old.Lease.ClaimID || fresh.ForkRepo != bobForkSlug || fresh.HeadSHA != "" || fresh.Branch != "" {
+			t.Fatalf("unexpected fresh shared claim: %+v", fresh)
+		}
+		for _, req := range []lease.ForkRequest{
+			{Version: 1, Operation: "acquire", IssueNumber: 44, Agent: "claude"},
+			{Version: 1, Operation: "acquire-pr", IssueNumber: 42, PRNumber: 55, Agent: "claude"},
+		} {
+			before := git(upstreamCheckout, "show-ref")
+			if _, err := charlieGateway.Apply(ctx, req); !errors.Is(err, coordination.ErrForkClaimLimit) {
+				t.Fatalf("%s bypassed actor claim cap: %v", req.Operation, err)
+			}
+			if git(upstreamCheckout, "show-ref") != before {
+				t.Fatal("claim cap denial changed refs")
+			}
+		}
+
+		for _, req := range []lease.ForkRequest{
+			{Operation: "renew"},
+			{Operation: "require-gate", Gate: contract.GateAgent},
+			{Operation: "update-phase", Phase: "implement", Status: "active"},
+			{Operation: "handoff", Phase: "implement", NextPhase: "review"},
+		} {
+			req.Version, req.IssueNumber, req.ClaimID = 1, 43, fresh.Lease.ClaimID
+			if _, err := charlieGateway.Apply(ctx, req); err != nil {
+				t.Fatalf("allowed organization %s: %v", req.Operation, err)
+			}
+		}
+
+	}
 
 	// Every ledger write landed in the selected namespace; only task branches
 	// and the default branch live under refs/heads/ in hidden mode.

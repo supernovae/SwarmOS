@@ -16,6 +16,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -2033,6 +2034,13 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 			return nil, err
 		}
 		if _, err = ps.CompareAndSwapAndPublishPR(ctx, n, rev, raw, st.Branch, expected, published); err != nil {
+			if errors.Is(err, coordination.ErrPublicationUnknown) {
+				return nil, fmt.Errorf("atomic PR publication outcome unknown; rerun swarm pr submit %d, which reloads issue state and the PR head before publishing: %w", number, err)
+			}
+			var known *gitcredential.KnownResultCleanupError
+			if errors.As(err, &known) {
+				return nil, fmt.Errorf("atomic PR publication: %w", err)
+			}
 			return nil, fmt.Errorf("atomic PR publication failed without changing either remote ref: %w", err)
 		}
 		m.project(ctx, n, st)

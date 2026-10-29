@@ -167,10 +167,19 @@ func (s *GitStore) run(ctx context.Context, input string, args ...string) (strin
 	if err != nil {
 		return "", err
 	}
-	c.Stdin = strings.NewReader(input)
-	b, e := c.CombinedOutput()
+	var b []byte
+	var e error
+	if gitcredential.IsNetwork(args) {
+		if input != "" {
+			return "", fmt.Errorf("network Git command does not accept input")
+		}
+		b, e = gitcredential.Network(ctx, s.root, true, args...)
+	} else {
+		c.Stdin = strings.NewReader(input)
+		b, e = c.CombinedOutput()
+	}
 	if e != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), e, redact(strings.TrimSpace(string(b))))
+		return "", fmt.Errorf("git %s: %w: %s", redact(strings.Join(args, " ")), e, redact(strings.TrimSpace(string(b))))
 	}
 	return redact(strings.TrimSpace(string(b))), nil
 }
@@ -236,7 +245,10 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 	if old == "" {
 		leaseArg = ref + ":"
 	}
-	if _, err = s.run(ctx, "", "push", s.Remote(), "--force-with-lease="+leaseArg, commit+":"+ref); err != nil {
+	if err = s.push(ctx, "push", s.Remote(), "--force-with-lease="+leaseArg, commit+":"+ref); err != nil {
+		if publicationStatus(err) {
+			return "", err
+		}
 		actual, readErr := s.remoteSHA(ctx, ref)
 		if readErr == nil && actual != old {
 			return "", ErrConflict
@@ -330,7 +342,10 @@ func (s *GitStore) publishCheckpoint(ctx context.Context, n int, old string, nex
 		return "", err
 	}
 	push := append([]string{"push", "--atomic", s.Remote(), "--force-with-lease=" + stateLease, "--force-with-lease=" + branchLease, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
-	if _, err = s.run(ctx, "", push...); err != nil {
+	if err = s.push(ctx, push...); err != nil {
+		if publicationStatus(err) {
+			return "", err
+		}
 		if expected != nil {
 			return "", fmt.Errorf("%w: atomic checkpoint push: %w", ErrConflict, err)
 		}
@@ -377,7 +392,10 @@ func (s *GitStore) CompareAndSwapAndPublishPR(ctx context.Context, n int, oldSta
 		return "", err
 	}
 	push := append([]string{"push", "--atomic", s.Remote(), "--force-with-lease=" + stateRef + ":" + oldState, "--force-with-lease=" + branchRef + ":" + expectedHead, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
-	if _, err = s.run(ctx, "", push...); err != nil {
+	if err = s.push(ctx, push...); err != nil {
+		if publicationStatus(err) {
+			return "", err
+		}
 		return "", fmt.Errorf("atomic PR publication rejected (issue state or remote head changed): %w", err)
 	}
 	return commit, nil
@@ -629,7 +647,10 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 			return "", err
 		}
 		push := append([]string{"push", "--atomic", s.git.Remote(), "--force-with-lease=" + stateLease, stateCommit + ":" + stateRef}, retention...)
-		if _, err := s.git.run(ctx, "", push...); err != nil {
+		if err := s.git.push(ctx, push...); err != nil {
+			if publicationStatus(err) {
+				return "", err
+			}
 			actual, readErr := s.git.remoteSHA(ctx, stateRef)
 			if readErr == nil && actual != old {
 				return "", ErrConflict
@@ -672,7 +693,10 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 			return "", err
 		}
 		contribLease := contribRef + ":" + oldIndexSHA
-		if _, err := s.git.run(ctx, "", "push", "--atomic", s.git.Remote(), "--force-with-lease="+stateLease, "--force-with-lease="+contribLease, stateCommit+":"+stateRef, indexCommit+":"+contribRef); err != nil {
+		if err := s.git.push(ctx, "push", "--atomic", s.git.Remote(), "--force-with-lease="+stateLease, "--force-with-lease="+contribLease, stateCommit+":"+stateRef, indexCommit+":"+contribRef); err != nil {
+			if publicationStatus(err) {
+				return "", err
+			}
 			actualState, stateReadErr := s.git.remoteSHA(ctx, stateRef)
 			if (stateReadErr == nil && actualState != old) || (errors.Is(stateReadErr, ErrNotFound) && old != "") {
 				return "", ErrConflict
@@ -690,4 +714,19 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 
 func (s *ForkIndexedStore) RequestID() int64 {
 	return s.requestID
+}
+
+// ErrPublicationUnknown requires authoritative reinspection before retrying.
+var ErrPublicationUnknown = errors.New("coordination publication outcome unknown; reload authoritative state before any retry")
+
+func publicationStatus(err error) bool {
+	var known *gitcredential.KnownResultCleanupError
+	return errors.Is(err, ErrPublicationUnknown) || errors.As(err, &known)
+}
+func (s *GitStore) push(ctx context.Context, args ...string) error {
+	_, err := s.run(ctx, "", args...)
+	if errors.Is(err, gitcredential.ErrInterrupted) {
+		return fmt.Errorf("%w: %w", ErrPublicationUnknown, err)
+	}
+	return err
 }

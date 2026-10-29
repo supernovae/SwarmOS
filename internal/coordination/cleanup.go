@@ -45,7 +45,10 @@ func (s *GitStore) CompareAndSwapAndDeleteBranch(ctx context.Context, n int, old
 		return "", err
 	}
 	push := append([]string{"push", "--atomic", pushURL, "--force-with-lease=" + s.ref(n) + ":" + old, "--force-with-lease=" + ref + ":" + expected, commit + ":" + s.ref(n), ":" + ref}, retention...)
-	if _, err = s.run(ctx, "", push...); err != nil {
+	if err = s.push(ctx, push...); err != nil {
+		if publicationStatus(err) {
+			return "", err
+		}
 		return "", fmt.Errorf("%w: atomic cleanup rejected: %v", ErrConflict, err)
 	}
 	return commit, nil

@@ -61,7 +61,10 @@ func (s *GitStore) CompareAndSwapAndRevokeClaim(ctx context.Context, n int, old,
 		return (readErr == nil && actual != old) || errors.Is(readErr, ErrNotFound)
 	}
 	if prior.ForkRepo == "" {
-		if _, err := s.run(ctx, "", "push", "--atomic", s.Remote(), stateLease, stateCommit+":"+stateRef); err != nil {
+		if err := s.push(ctx, "push", "--atomic", s.Remote(), stateLease, stateCommit+":"+stateRef); err != nil {
+			if publicationStatus(err) {
+				return "", err
+			}
 			if stateMoved() {
 				return "", ErrConflict
 			}
@@ -99,7 +102,10 @@ func (s *GitStore) CompareAndSwapAndRevokeClaim(ctx context.Context, n int, old,
 			push = append(push, "--force-with-lease="+contribRef+":"+oldIndexSHA)
 			refspecs = append(refspecs, indexCommit+":"+contribRef)
 		}
-		if _, err := s.run(ctx, "", append(push, refspecs...)...); err != nil {
+		if err := s.push(ctx, append(push, refspecs...)...); err != nil {
+			if publicationStatus(err) {
+				return "", err
+			}
 			if stateMoved() {
 				return "", ErrConflict
 			}

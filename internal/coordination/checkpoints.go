@@ -62,7 +62,10 @@ func (s *GitStore) CompareAndSwapRetaining(ctx context.Context, n int, old strin
 		stateLease = stateRef + ":"
 	}
 	push := append([]string{"push", "--atomic", s.Remote(), "--force-with-lease=" + stateLease, commit + ":" + stateRef}, retention...)
-	if _, err = s.run(ctx, "", push...); err != nil {
+	if err = s.push(ctx, push...); err != nil {
+		if publicationStatus(err) {
+			return "", err
+		}
 		actual, readErr := s.remoteSHA(ctx, stateRef)
 		if (readErr == nil && actual != old) || (errors.Is(readErr, ErrNotFound) && old != "") {
 			return "", fmt.Errorf("%w: %w", ErrConflict, err)

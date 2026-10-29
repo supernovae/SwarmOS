@@ -36,6 +36,7 @@ func TestPreserveRejectedOnlyWhenRecoverable(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
 			writeWorkerFixture(t, dir, "src/main.go", "package main\n")
+			writeWorkerFixture(t, dir, "unchanged.bin", "\x00asset")
 			called := false
 			var got []byte
 			opts := WorkerOptions{Role: "developer",

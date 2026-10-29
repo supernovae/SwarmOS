@@ -68,10 +68,11 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		_, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), baseSHA)
+		cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), baseSHA)
 		if err != nil {
 			return err
 		}
+		defer writeLeaseReminder(ctx, manager.GetCurrentState, duration, cfg.Lease.Renewable, issue, options, tr.BackendName(), cmd.ErrOrStderr())
 		heartbeat := manager.StartHeartbeat(ctx, issue, owner, duration)
 		defer heartbeat.Stop()
 		ctx = heartbeat.Context()

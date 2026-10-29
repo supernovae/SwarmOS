@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -67,7 +68,34 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 						if asJSON {
 							args = append(args, "--json")
 						}
-						out, diag, err := runProgressCommand(t, f, args...)
+						var out, diag string
+						var err error
+						if family == "issue" && operation == "validate" {
+							state := f.state(t, number)
+							cfg, duration, policyErr := approvedLeasePolicy(f.root, "origin", state.BaseSHA)
+							if policyErr != nil {
+								t.Fatal(policyErr)
+							}
+							if !cfg.Lease.Renewable || duration <= 0 {
+								t.Fatal("fixture requires approved renewable lease")
+							}
+							remaining := duration / 6
+							now := state.Lease.ExpiresAt.Add(-remaining)
+							cmd := f.command(&RootOptions{nowFn: func() time.Time { return now }})
+							var stdout, stderr bytes.Buffer
+							cmd.SetOut(&stdout)
+							cmd.SetErr(&stderr)
+							cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+							err = cmd.Execute()
+							out, diag = stdout.String(), stderr.String()
+							want := fmt.Sprintf("Claim time remaining for issue #%d: %s\nRenew: swarm --backend 'local' --root '%s' issue renew %d\n", number, state.Lease.ExpiresAt.Sub(now).Round(time.Second), f.root, number)
+							if strings.Count(diag, want) != 1 {
+								t.Fatalf("expected exact advisory once: %q", diag)
+							}
+							diag = strings.Replace(diag, want, "", 1)
+						} else {
+							out, diag, err = runProgressCommand(t, f, args...)
+						}
 						if err != nil {
 							t.Fatalf("%v\n%s", err, diag)
 						}

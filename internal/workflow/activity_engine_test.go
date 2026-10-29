@@ -120,7 +120,7 @@ func TestSlowReviewThenStalledStateFetchHeartbeats(t *testing.T) {
 					seconds.Store(12)
 					ticks <- clock()
 					ev := running()
-					if ev.Role != "reviewer" || ev.ActivityKnown != observe || (observe && ev.ActivityAge != 12*time.Second) {
+					if ev.Stage != "review" || ev.Elapsed != 12*time.Second || ev.Role != "reviewer" || ev.ActivityKnown != observe || (observe && ev.ActivityAge != 12*time.Second) {
 						t.Fatal(ev)
 					}
 					roleOnce.Do(func() { close(release) })
@@ -130,7 +130,7 @@ func TestSlowReviewThenStalledStateFetchHeartbeats(t *testing.T) {
 						seconds.Store(sec)
 						ticks <- clock()
 						ev = running()
-						if ev.Operation != "state read" || ev.Role != "" || ev.OperationElapsed <= previous {
+						if ev.Stage != "review" || ev.Elapsed != time.Duration(sec)*time.Second || ev.Operation != "state read" || ev.Role != "" || ev.OperationElapsed <= previous {
 							t.Fatal(ev)
 						}
 						previous = ev.OperationElapsed

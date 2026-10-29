@@ -217,6 +217,21 @@ func NewProgressReporter(ctx context.Context, emit func(ProgressEvent)) *Progres
 	return p
 }
 
+// NewProgressReporterWithTicks accepts a command-owned tick source and clock.
+// The caller must Close the reporter before releasing its output writer.
+func NewProgressReporterWithTicks(ctx context.Context, emit func(ProgressEvent), ticks <-chan time.Time, now func() time.Time) *ProgressReporter {
+	if emit == nil {
+		return &workProgress{}
+	}
+	p := newSetupProgress(ctx, 0, emit, ticks)
+	p.mu.Lock()
+	p.shared = true
+	p.now = now
+	p.started = now()
+	p.mu.Unlock()
+	return p
+}
+
 func (p *workProgress) resetDeadline() {
 	if p.timer != nil && !p.closed {
 		p.deadline = p.now().Add(15 * time.Second)

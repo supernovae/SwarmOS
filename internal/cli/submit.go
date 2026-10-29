@@ -34,7 +34,7 @@ records the decision in the PR, and uses GitHub to mark it ready for review.
 swarm issue review-plan approves the implementation plan, not the finished PR.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
-			p := operationProgress(cmd.Context(), cmd.ErrOrStderr(), showProgress)
+			p := rootOpts.operationProgress(cmd.Context(), cmd.ErrOrStderr(), showProgress)
 			cmd.SetContext(progress.WithActivity(cmd.Context(), p.Activity()))
 			defer func() {
 				status := "completed"

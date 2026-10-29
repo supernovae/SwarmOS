@@ -139,26 +139,32 @@ func TestActivityReporterCancellationCleanup(t *testing.T) {
 			now := time.Unix(100, 0)
 			p := New(ctx, 1, 0, func(e Event) { events <- e }, ticks, func() time.Time { return now }, nil)
 			t.Cleanup(func() { cancel(); activityWait(t, p.Done()); p.Finish("canceled") })
-			<-events
+			select {
+			case <-events:
+			case <-time.After(5 * time.Second):
+				t.Fatal("missing start")
+			}
 			end := p.Activity().Role("reviewer", "mock", now)
 			defer end()
-			for range 10000 {
-				p.Activity().Observe(now)
-			}
-			for range 1000 {
-				Begin(WithActivity(ctx, p.Activity()), OpStateRead, now)()
-			}
-			ticks <- now
-			select {
-			case e := <-events:
-				if e.Status != "running" || e.Role != "reviewer" {
-					t.Fatal(e)
+			for range 2 {
+				for range 10000 {
+					p.Activity().Observe(now)
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("missing tick")
-			}
-			if len(events) != 0 {
-				t.Fatal("mutations emitted events")
+				for range 1000 {
+					Begin(WithActivity(ctx, p.Activity()), OpStateRead, now)()
+				}
+				ticks <- now
+				select {
+				case e := <-events:
+					if e.Status != "running" || e.Role != "reviewer" {
+						t.Fatal(e)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("missing tick")
+				}
+				if len(events) != 0 {
+					t.Fatal("mutations emitted events")
+				}
 			}
 			if cancelFirst {
 				cancel()
@@ -168,9 +174,18 @@ func TestActivityReporterCancellationCleanup(t *testing.T) {
 			go func() { p.Finish("completed"); close(finished) }()
 			activityWait(t, finished)
 			activityWait(t, p.Done())
-			<-events
+			select {
+			case e := <-events:
+				if e.Role != "" || e.Tool != "" || e.Operation != "" || e.ActivityKnown || e.ActivityAge != 0 || e.OperationElapsed != 0 {
+					t.Fatal("activity on terminal event", e)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("missing terminal event")
+			}
 			p.Activity().Observe(now)
 			Begin(WithActivity(ctx, p.Activity()), OpStateRead, now)()
+			e := Event{Status: "running"}
+			p.Activity().Enrich(&e, now)
 			ticks <- now
 			if len(ticks) != 1 || len(events) != 0 {
 				t.Fatal("events after completion")

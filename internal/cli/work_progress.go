@@ -127,3 +127,16 @@ func activitySuffix(e progress.Event) string {
 	}
 	return ""
 }
+
+func (o *RootOptions) newProgressReporter(ctx context.Context, emit func(workflow.ProgressEvent)) *workflow.ProgressReporter {
+	if o.progressReporter != nil {
+		return o.progressReporter(ctx, emit)
+	}
+	return workflow.NewProgressReporter(ctx, emit)
+}
+func (o *RootOptions) operationProgress(ctx context.Context, out io.Writer, enabled bool) *progress.Session {
+	if enabled && o.progressSession != nil {
+		return o.progressSession(ctx, operationProgressPrinter(out))
+	}
+	return operationProgress(ctx, out, enabled)
+}

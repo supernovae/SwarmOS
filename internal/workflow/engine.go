@@ -184,6 +184,7 @@ type Engine struct {
 // construction. Zero values keep the process environment and the default node
 // profile path.
 type EngineOptions struct {
+	NewRunner       func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
 	LookupEnv       func(string) (string, bool)
 	NodeProfilePath string
 	// RegistryPath locates the repository registry that keys the node
@@ -232,7 +233,7 @@ func NewEngineWithOptions(repoRoot string, tr tracker.Tracker, opts EngineOption
 	// A malformed profile keeps the default per-repository caches and
 	// allows no private modules.
 	policy := node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot)
-	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv, DependencyPolicy: policy}, nil
+	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv, NewRunner: opts.NewRunner, DependencyPolicy: policy}, nil
 }
 
 func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string) *Engine {
@@ -252,6 +253,7 @@ func NewEngineWithManagerOptions(repoRoot string, tr tracker.Tracker, mgr *lease
 		ForkMode:         forkMode,
 		ForkRemote:       forkRemote,
 		LookupEnv:        opts.LookupEnv,
+		NewRunner:        opts.NewRunner,
 	}
 }
 

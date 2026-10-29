@@ -301,7 +301,7 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 	for {
 		st, done, checkErr := g.checkRequestOutcomeReporting(ctx, req, reqID, &since, func() { reporting.finish("rejected") })
 		if checkErr != nil {
-			return nil, checkErr
+			return nil, requestContextError(req.IssueNumber, reqID, checkErr)
 		}
 		if done {
 			reporting.finish("accepted")
@@ -311,7 +311,7 @@ func (g *Gateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.Issu
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, fmt.Errorf("no response from the upstream fork coordinator to request %d (%s) within %s; check the upstream repository's SwarmOS Fork Coordinator Actions run for that request: %w", reqID, req.Operation, timeout, ctx.Err())
+			return nil, unresolvedRequest(req.IssueNumber, reqID, ctx.Err())
 		case <-timer.C:
 		}
 		if interval < 5*time.Second {

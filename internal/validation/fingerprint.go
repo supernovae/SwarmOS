@@ -89,6 +89,11 @@ func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string,
 			metadata[k] = v
 		}
 		art.Metadata = metadata
+		// Reuse may accept the same tree at another commit. Advisory tester
+		// evidence is narrower: carry it only for the same head and base.
+		if art.Metadata["head_sha"] != head || art.Metadata["base_sha"] != opts.BaseSHA || head == "" || opts.BaseSHA == "" {
+			delete(art.Metadata, AcceptanceEvidenceKey)
+		}
 		art.Metadata["validation_source_time"] = source
 		art.Metadata["validation_reused"] = "true"
 		if art.Metadata["validation_source_digest"] == "" {
@@ -106,7 +111,7 @@ func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string,
 		art.Summary = message
 		// The original report body is stored in validation_report; repeated reuse
 		// therefore retains evidence without accumulating reuse notices.
-		art.Body = message + "\n\n" + report.Artifact.Body
+		art.Body = RestoreAcceptanceEvidence(message+"\n\n"+report.Artifact.Body, art.Metadata)
 		digest := sha256.Sum256([]byte(art.Body))
 		art.Metadata["content_sha256"] = hex.EncodeToString(digest[:])
 		art.CreatedAt = time.Now().UTC()

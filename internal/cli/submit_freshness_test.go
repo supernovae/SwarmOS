@@ -171,6 +171,7 @@ func TestSubmitFreshnessJSON(t *testing.T) {
 					}
 				} else if !drift {
 					want := fmt.Sprintf("Submitted draft PR #%d for issue #%d on %s (%s)\n", state.PRNumber, number, state.Branch, state.PRURL)
+					want = "Warning: acceptance evidence gaps (advisory; submission proceeds):\n  1. Produce a checked checkpoint (unmentioned)\n" + want
 					if out != want {
 						t.Fatalf("%q != %q", out, want)
 					}

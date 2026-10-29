@@ -80,6 +80,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if report != nil {
 			report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 			lease.PreserveTesterGuidance(state, &report.Artifact)
+			lease.PreserveAcceptanceEvidence(state, &report.Artifact)
 			_, err := manager.RecordTrustedValidation(ctx, issue, owner, report.Artifact)
 			validationErr = errors.Join(validationErr, err)
 		}

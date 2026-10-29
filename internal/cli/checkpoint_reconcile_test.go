@@ -5,10 +5,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -179,6 +180,19 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg.Agents["mock"] = contract.AgentConfig{Binary: "true"}
+			// The approved policy names only alice and an isolated boundary that is
+			// unavailable when selected: native Codex locally, a container on GitHub.
+			cfg.Security.ApprovedCollaborators = []string{"alice"}
+			codex := cfg.Agents["codex"]
+			codex.Binary = "swarm-checkpoint-missing-codex-309"
+			cfg.Agents["codex"] = codex
+			boundaryErr := "swarm-checkpoint-missing-codex-309"
+			if backend == "github" {
+				cfg.Execution.Backend = contract.BackendOCI
+				cfg.Execution.ContainerRuntime = "podman"
+				cfg.Execution.ContainerImage = "registry.invalid/swarm-checkpoint-309:missing"
+				boundaryErr = `"podman"`
+			}
 			rawCfg, err := yaml.Marshal(cfg)
 			if err != nil {
 				t.Fatal(err)
@@ -186,7 +200,26 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 			if err = os.WriteFile(cfgPath, rawCfg, 0644); err != nil {
 				t.Fatal(err)
 			}
-			prGit(t, f.root, "add", ".swarm/config.yaml")
+			// Every approved check run is counted. An armed hook pauses one run
+			// inside candidate validation so normal operations can race it.
+			hookDir := t.TempDir()
+			hook := filepath.Join(hookDir, "check-hook")
+			script := "#!/bin/sh\nd=" + strconv.Quote(hookDir) + "\nprintf x >> \"$d/check-calls\"\nif mv \"$d/armed\" \"$d/started\" 2>/dev/null; then\n\ti=0\n\twhile [ ! -e \"$d/proceed\" ]; do\n\t\ti=$((i+1))\n\t\tif [ \"$i\" -gt 1200 ]; then exit 1; fi\n\t\tsleep 0.05\n\tdone\n\trm -f \"$d/proceed\"\nfi\n"
+			if err = testutil.WriteExecutable(hook, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			policy := "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\n  - name: checkpoint-hook\n    command: " + strconv.Quote(hook) + "\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
+			if err = os.WriteFile(filepath.Join(f.root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0644); err != nil {
+				t.Fatal(err)
+			}
+			checkCalls := func() string {
+				raw, err := os.ReadFile(filepath.Join(hookDir, "check-calls"))
+				if err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				return string(raw)
+			}
+			prGit(t, f.root, "add", ".swarm/config.yaml", ".swarm/validation/required-checks.yaml")
 			prGit(t, f.root, "commit", "-m", "allow fixture mock")
 			developerCalls := filepath.Join(t.TempDir(), "developer-calls")
 			developer := filepath.Join(t.TempDir(), "developer")
@@ -218,8 +251,8 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 			}
 			controlled := &checkpointTokenFailureTracker{Tracker: tr}
 			tr = controlled
-			run := func(args ...string) (string, error) {
-				opts := &RootOptions{RepoRoot: f.root, Repo: "octo/swarm", Backend: backend, trackerOverride: tr}
+			runAs := func(actor tracker.Tracker, args ...string) (string, error) {
+				opts := &RootOptions{RepoRoot: f.root, Repo: "octo/swarm", Backend: backend, trackerOverride: actor}
 				cmd := f.command(opts)
 				var out bytes.Buffer
 				cmd.SetOut(&out)
@@ -228,7 +261,8 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 				err := cmd.ExecuteContext(ctx)
 				return out.String(), err
 			}
-			must := func(args ...string) string {
+			run := func(args ...string) (string, error) { return runAs(tr, args...) }
+			mustIn := func(t *testing.T, args ...string) string {
 				t.Helper()
 				out, err := run(args...)
 				if err != nil {
@@ -236,13 +270,52 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 				}
 				return out
 			}
-			state := func() *lease.IssueState {
+			must := func(args ...string) string {
+				t.Helper()
+				return mustIn(t, args...)
+			}
+			stateIn := func(t *testing.T) *lease.IssueState {
 				t.Helper()
 				st, err := f.manager.GetCurrentState(ctx, n)
 				if err != nil {
 					t.Fatal(err)
 				}
 				return st
+			}
+			state := func() *lease.IssueState {
+				t.Helper()
+				return stateIn(t)
+			}
+			// persisted serializes authority as stored; ordinary reads may refresh
+			// local Git refs, so callers snapshot repository bytes afterwards.
+			persisted := func(t *testing.T) string {
+				t.Helper()
+				raw, err := json.Marshal(stateIn(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(raw)
+			}
+			apiRequests := func() int {
+				if fake == nil {
+					return 0
+				}
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				return len(fake.requests)
+			}
+			requireReadOnlyAPI := func(t *testing.T, since int) {
+				t.Helper()
+				if fake == nil {
+					return
+				}
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				for _, req := range fake.requests[since:] {
+					if !strings.HasPrefix(req, "GET ") {
+						t.Fatalf("refusal or preview mutated API: %s", req)
+					}
+				}
 			}
 			must("issue", "approve", number)
 			must("issue", "claim", number, "--agent", "mock")
@@ -268,7 +341,8 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = tr.UpdateIssueBody(ctx, n, strings.Replace(issue.Body, "Exercise the lifecycle", "Exercise the amended lifecycle", 1)); err != nil {
+			amended := strings.Replace(issue.Body, "Exercise the lifecycle", "Exercise the amended lifecycle", 1)
+			if _, err = tr.UpdateIssueBody(ctx, n, amended); err != nil {
 				t.Fatal(err)
 			}
 			must("issue", "approve", number)
@@ -287,10 +361,98 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 			args := []string{"issue", "reconcile", number, "--checkpoint", "--expected-head", predecessor, "--candidate-head", candidate}
 			// Invalid observations must not acquire, replace tokens, or mutate either
 			// backend, even when no current claim exists.
-			for _, scenario := range []string{"stale expected", "short SHA", "wrong candidate", "untracked", "tracked", "staged", "detached", "wrong branch", "successor"} {
+			scenarios := []string{"stale expected", "short SHA", "non-hex SHA", "uppercase SHA", "unknown candidate", "wrong candidate", "untracked", "tracked", "staged", "detached", "wrong branch",
+				"unregistered worktree", "foreign worktree", "symlink worktree", "successor", "unapproved collaborator", "unavailable boundary", "unmet dependency"}
+			for _, scenario := range scenarios {
 				t.Run(scenario, func(t *testing.T) {
 					invalid := append([]string{}, args...)
+					actor := tr
+					wantErr := ""
 					switch scenario {
+					case "non-hex SHA":
+						invalid[5] = strings.Repeat("g", 40)
+						wantErr = "invalid commit SHA"
+					case "uppercase SHA":
+						if strings.ToUpper(candidate) == candidate {
+							t.Skip("candidate has no hexadecimal letters")
+						}
+						invalid[7] = strings.ToUpper(candidate)
+						wantErr = lease.ErrClaimFence.Error()
+					case "unknown candidate":
+						invalid[7] = "0123456789abcdef0123456789abcdef01234567"
+						wantErr = lease.ErrClaimFence.Error()
+					case "unregistered worktree", "foreign worktree", "symlink worktree":
+						// The registered checkout moves aside; its path then holds an empty
+						// directory, an independent clone at the exact candidate, or a link.
+						moved := filepath.Join(t.TempDir(), "registered")
+						if err := os.Rename(path, moved); err != nil {
+							t.Fatal(err)
+						}
+						defer func() {
+							if err := os.RemoveAll(path); err != nil {
+								t.Fatal(err)
+							}
+							if err := os.Rename(moved, path); err != nil {
+								t.Fatal(err)
+							}
+						}()
+						switch scenario {
+						case "unregistered worktree":
+							if err := os.Mkdir(path, 0755); err != nil {
+								t.Fatal(err)
+							}
+						case "foreign worktree":
+							prGit(t, f.root, "clone", "--quiet", "--no-local", f.root, path)
+							prGit(t, path, "checkout", "--quiet", "-B", st.Branch, candidate)
+							if prGit(t, path, "rev-parse", "HEAD") != candidate {
+								t.Fatal("foreign clone does not match candidate")
+							}
+						case "symlink worktree":
+							if err := os.Symlink(moved, path); err != nil {
+								t.Fatal(err)
+							}
+						}
+						wantErr = "worktree"
+					case "unapproved collaborator":
+						// Only the approved base allowlist decides; the actor is otherwise
+						// authenticated by its tracker.
+						if backend == "github" {
+							actor = checkpointActorTracker{Tracker: tr, actor: "mallory"}
+						} else {
+							actor = tracker.NewLocalTracker(f.root).WithUser("mallory", "")
+						}
+						wantErr = "approved_collaborators"
+					case "unavailable boundary":
+						// Select the approved isolated boundary on a host without its
+						// executables. Git stays available for read-only inspection.
+						git, err := exec.LookPath("git")
+						if err != nil {
+							t.Fatal(err)
+						}
+						bin := t.TempDir()
+						if err = os.Symlink(git, filepath.Join(bin, "git")); err != nil {
+							t.Fatal(err)
+						}
+						t.Setenv("PATH", bin)
+						t.Setenv("SWARM_EXECUTION_MODE", "isolated")
+						wantErr = boundaryErr
+					case "unmet dependency":
+						// A normally reapproved WorkUnit depending on an open issue.
+						prerequisite, err := tr.CreateIssue(ctx, "Prerequisite", "Unfinished prerequisite.", []string{"prerequisite"})
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err = tr.UpdateIssueBody(ctx, n, amended+fmt.Sprintf("\n### Depends On\n\n- #%d\n", prerequisite.Number)); err != nil {
+							t.Fatal(err)
+						}
+						mustIn(t, "issue", "approve", number)
+						defer func() {
+							if _, err := tr.UpdateIssueBody(ctx, n, amended); err != nil {
+								t.Fatal(err)
+							}
+							mustIn(t, "issue", "approve", number)
+						}()
+						wantErr = "depends_on"
 					case "stale expected":
 						invalid[5] = base
 					case "short SHA":
@@ -333,6 +495,9 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 							}
 						}()
 					}
+					authority := persisted(t)
+					requests := apiRequests()
+					calls := checkCalls()
 					before := checkpointSnapshot(t, f.root)
 					token, tokenErr := lease.LoadClaimToken(f.root, n)
 					for _, dry := range []bool{true, false} {
@@ -340,45 +505,48 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 						if dry {
 							invocation = append(invocation, "--dry-run")
 						}
-						if out, err := run(invocation...); err == nil {
+						out, err := runAs(actor, invocation...)
+						if err == nil {
 							t.Fatalf("accepted invalid precondition: %s", out)
+						}
+						if !strings.Contains(err.Error(), wantErr) {
+							t.Fatalf("dry-run=%t refused for the wrong reason: %v", dry, err)
 						}
 					}
 					// Actual mode may create its machine claim lock; those bytes are covered
 					// separately by the repeated preview snapshot below.
-					if !reflect.DeepEqual(before, checkpointSnapshot(t, f.root)) {
-						t.Fatal("refusal wrote repository bytes")
+					if diff := snapshotDiff(before, checkpointSnapshot(t, f.root)); diff != "" {
+						t.Fatalf("refusal wrote repository bytes or metadata: %s", diff)
 					}
 					afterToken, err := lease.LoadClaimToken(f.root, n)
 					if afterToken != token || (err == nil) != (tokenErr == nil) {
 						t.Fatal("refusal replaced token")
+					}
+					requireReadOnlyAPI(t, requests)
+					if checkCalls() != calls {
+						t.Fatal("refusal executed a required check")
+					}
+					if persisted(t) != authority {
+						t.Fatal("refusal changed authoritative state")
 					}
 				})
 			}
 			// Read the latest released state after exercising a successor, without
 			// changing the original exact predecessor/candidate expectation.
 			current = state()
+			authority := persisted(t)
+			requests := apiRequests()
 			before := checkpointSnapshot(t, f.root)
-			requests := 0
-			if fake != nil {
-				requests = len(fake.requests)
-			}
 			for range 2 {
 				raw := must(append(append([]string{}, args...), "--dry-run", "--json")...)
 				if !strings.Contains(raw, `"claim_required":true`) || !strings.Contains(raw, `"validation_required":true`) {
 					t.Fatalf("missing admission report: %s", raw)
 				}
 			}
-			if !reflect.DeepEqual(before, checkpointSnapshot(t, f.root)) {
-				t.Fatal("preview wrote repository bytes")
+			if diff := snapshotDiff(before, checkpointSnapshot(t, f.root)); diff != "" {
+				t.Fatalf("preview wrote repository bytes or metadata: %s", diff)
 			}
-			if fake != nil {
-				for _, req := range fake.requests[requests:] {
-					if !strings.HasPrefix(req, "GET ") {
-						t.Fatalf("preview mutated API: %s", req)
-					}
-				}
-			}
+			requireReadOnlyAPI(t, requests)
 			// Preview also works without a persisted token and leaves its control
 			// directory byte-identical, including the absence of that file.
 			historicalToken, err := lease.LoadClaimToken(f.root, n)
@@ -403,9 +571,19 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			absent := checkpointSnapshot(t, f.root)
-			must(append(append([]string{}, args...), "--dry-run")...)
-			if !reflect.DeepEqual(absent, checkpointSnapshot(t, f.root)) {
-				t.Fatal("absent-token preview wrote control files")
+			// Repeat so a deferred write by the first preview is also detected.
+			for range 2 {
+				must(append(append([]string{}, args...), "--dry-run")...)
+				if diff := snapshotDiff(absent, checkpointSnapshot(t, f.root)); diff != "" {
+					t.Fatalf("absent-token preview wrote control files: %s", diff)
+				}
+			}
+			requireReadOnlyAPI(t, requests)
+			if _, err = os.Lstat(tokenPath); !os.IsNotExist(err) {
+				t.Fatalf("absent-token preview created a token: %v", err)
+			}
+			if persisted(t) != authority {
+				t.Fatal("preview changed authoritative state")
 			}
 			if err = lease.SaveClaimToken(f.root, n, historicalToken, historicalBase); err != nil {
 				t.Fatal(err)
@@ -445,17 +623,186 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			f.manager.BindClaim(n, heldToken)
-			for _, art := range []contract.Artifact{{Type: contract.ArtifactDesign, Body: "recovery plan", Summary: "plan", Producer: "mock"}, {Type: contract.ArtifactTestPlan, Body: "recovery tests", Summary: "tests", Producer: "mock"}} {
-				if _, err = f.manager.UpdateArtifact(ctx, n, "alice", art); err != nil {
+			recordReview := func(claim string) {
+				t.Helper()
+				f.manager.BindClaim(n, claim)
+				for _, art := range []contract.Artifact{{Type: contract.ArtifactDesign, Body: "recovery plan", Summary: "plan", Producer: "mock"}, {Type: contract.ArtifactTestPlan, Body: "recovery tests", Summary: "tests", Producer: "mock"}} {
+					if _, err := f.manager.UpdateArtifact(ctx, n, "alice", art); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := f.manager.RecordHumanReview(ctx, n, "APPROVED", "reviewed recovery"); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if _, err = f.manager.RecordHumanReview(ctx, n, "APPROVED", "reviewed recovery"); err != nil {
+			recordReview(heldToken)
+			leaseJSON := func(st *lease.IssueState) string {
+				t.Helper()
+				raw, err := json.Marshal(st.Lease)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(raw)
+			}
+			remoteHeads := func() string {
+				if backend != "github" {
+					return ""
+				}
+				return prGit(t, f.root, "ls-remote", "origin", "refs/heads/"+st.Branch, f.manager.LedgerLayout().CheckpointRef(n, candidate))
+			}
+			// raceDuringValidation pauses actual reconciliation inside its approved
+			// check run, applies a normal competing operation, then resumes it.
+			raceDuringValidation := func(race func()) error {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(hookDir, "armed"), nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+				done := make(chan error, 1)
+				go func() {
+					_, err := run(append(append([]string{}, args...), "--json")...)
+					done <- err
+				}()
+				resumed := false
+				resume := func() {
+					resumed = true
+					if err := os.WriteFile(filepath.Join(hookDir, "proceed"), nil, 0600); err != nil {
+						t.Error(err)
+					}
+				}
+				defer func() {
+					if !resumed {
+						resume()
+						<-done
+					}
+				}()
+				deadline := time.After(time.Minute)
+				for {
+					if _, err := os.Stat(filepath.Join(hookDir, "started")); err == nil {
+						break
+					}
+					select {
+					case err := <-done:
+						resumed = true
+						t.Fatalf("reconciliation finished before validation: %v", err)
+					case <-deadline:
+						t.Fatal("validation did not reach the approved check")
+					case <-time.After(20 * time.Millisecond):
+					}
+				}
+				if err := os.Remove(filepath.Join(hookDir, "started")); err != nil {
+					t.Fatal(err)
+				}
+				race()
+				resume()
+				return <-done
+			}
+			heads := remoteHeads()
+
+			// A matching live token is reused without renewal; the operator releases
+			// it while checks run and a successor claims and persists its token.
+			heldLease := leaseJSON(state())
+			var successor *lease.IssueState
+			var successorAuthority string
+			err = raceDuringValidation(func() {
+				during := state()
+				if during.Lease.ClaimID != heldToken || leaseJSON(during) != heldLease {
+					t.Fatalf("reused claim was renewed or replaced: %s != %s", leaseJSON(during), heldLease)
+				}
+				f.manager.BindClaim(n, heldToken)
+				if _, err := f.manager.Release(ctx, n, "alice", "operator released during validation"); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				if successor, err = f.manager.Acquire(ctx, n, "alice", "mock", "plan", time.Hour, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err = lease.SaveClaimToken(f.root, n, successor.Lease.ClaimID, successor.BaseSHA); err != nil {
+					t.Fatal(err)
+				}
+				successorAuthority = persisted(t)
+			})
+			if !errors.Is(err, lease.ErrClaimFence) || !strings.Contains(err.Error(), "changed during validation") {
+				t.Fatalf("successor race not fenced at the validation boundary: %v", err)
+			}
+			if token, err := lease.LoadClaimToken(f.root, n); err != nil || token != successor.Lease.ClaimID {
+				t.Fatalf("successor token overwritten: %s %v", token, err)
+			}
+			if persisted(t) != successorAuthority || remoteHeads() != heads || prGit(t, path, "rev-parse", "HEAD") != candidate {
+				t.Fatal("successor race published, released the successor, or changed work")
+			}
+			f.manager.BindClaim(n, successor.Lease.ClaimID)
+			if _, err = f.manager.Release(ctx, n, "alice", "fixture successor done"); err != nil {
 				t.Fatal(err)
 			}
+
+			// A released historical token is not authority: reconciliation acquires
+			// normally, then the WorkUnit is reapproved while checks run.
+			var admitted, reapprovedAuthority string
+			err = raceDuringValidation(func() {
+				during := state()
+				token, err := lease.LoadClaimToken(f.root, n)
+				if err != nil || during.Lease.Status != "active" || during.Lease.ClaimID == successor.Lease.ClaimID || token != during.Lease.ClaimID {
+					t.Fatalf("validation began without a fresh persisted claim: %+v token=%s %v", during.Lease, token, err)
+				}
+				admitted = token
+				f.manager.BindClaim(n, admitted)
+				if _, err = f.manager.Release(ctx, n, "alice", "reapproval during validation"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = tr.UpdateIssueBody(ctx, n, strings.Replace(amended, "amended lifecycle", "reapproved lifecycle", 1)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = f.manager.ApproveTask(ctx, n, "alice"); err != nil {
+					t.Fatal(err)
+				}
+				reapprovedAuthority = persisted(t)
+			})
+			if !errors.Is(err, lease.ErrClaimFence) || !strings.Contains(err.Error(), "changed during validation") {
+				t.Fatalf("reapproval race not fenced at the validation boundary: %v", err)
+			}
+			if token, err := lease.LoadClaimToken(f.root, n); err != nil || token != admitted {
+				t.Fatalf("reapproval race replaced token: %s %v", token, err)
+			}
+			if persisted(t) != reapprovedAuthority || remoteHeads() != heads || prGit(t, path, "rev-parse", "HEAD") != candidate {
+				t.Fatal("reapproval race published, reclaimed, or changed work")
+			}
+			if _, err = tr.UpdateIssueBody(ctx, n, amended); err != nil {
+				t.Fatal(err)
+			}
+			must("issue", "approve", number)
+
+			// An expired claim with its persisted token yields ordinary fresh
+			// admission; the changed WorkUnit requires review again first.
+			f.manager.SetNowFunc(func() time.Time { return time.Now().Add(-5 * time.Hour) })
+			expired, err := f.manager.Acquire(ctx, n, "alice", "mock", "plan", time.Hour, 1)
+			f.manager.SetNowFunc(time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = lease.SaveClaimToken(f.root, n, expired.Lease.ClaimID, expired.BaseSHA); err != nil {
+				t.Fatal(err)
+			}
+			if raw := must(append(append([]string{}, args...), "--dry-run", "--json")...); !strings.Contains(raw, `"claim_required":true`) {
+				t.Fatalf("expired token treated as live: %s", raw)
+			}
+			calls := checkCalls()
+			if _, err = run(append(append([]string{}, args...), "--json")...); !errors.Is(err, lease.ErrApprovalRequired) {
+				t.Fatalf("stale review after reapproval not required: %v", err)
+			}
+			fresh := state()
+			freshToken, err := lease.LoadClaimToken(f.root, n)
+			if err != nil || fresh.Lease.Status != "active" || fresh.Lease.ClaimID == expired.Lease.ClaimID || freshToken != fresh.Lease.ClaimID || !fresh.Lease.ExpiresAt.After(time.Now()) || checkCalls() != calls {
+				t.Fatalf("expired token did not yield fresh admission: %+v token=%s %v", fresh.Lease, freshToken, err)
+			}
+			recordReview(freshToken)
+
+			// The final reconciliation reuses the live claim byte-for-byte.
+			heldLease = leaseJSON(state())
 			must(append(append([]string{}, args...), "--json")...)
 			recovered := state()
+			if leaseJSON(recovered) != heldLease {
+				t.Fatalf("reused claim was renewed or replaced: %s != %s", leaseJSON(recovered), heldLease)
+			}
 			token, err := lease.LoadClaimToken(f.root, n)
 			if err != nil || recovered.HeadSHA != candidate || recovered.Lease.Status != "active" || recovered.Lease.ClaimID == current.Lease.ClaimID || token != recovered.Lease.ClaimID || recovered.BaseSHA != base || recovered.Lease.Owner != "alice" {
 				t.Fatalf("incorrect recovered claim: %+v token=%s err=%v", recovered, token, err)
@@ -526,6 +873,17 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 	}
 }
 
+// checkpointActorTracker authenticates the same GitHub API session as another
+// login, so only approved policy can refuse that actor.
+type checkpointActorTracker struct {
+	tracker.Tracker
+	actor string
+}
+
+func (t checkpointActorTracker) CurrentUser(context.Context) (string, error) { return t.actor, nil }
+
+// checkpointSnapshot records regular file bytes and modes, directories
+// (including empty ones) and symlink targets without following links.
 func checkpointSnapshot(t *testing.T, root string) map[string]string {
 	t.Helper()
 	files := map[string]string{}
@@ -537,12 +895,25 @@ func checkpointSnapshot(t *testing.T, root string) map[string]string {
 			if err != nil {
 				return err
 			}
-			if entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			switch {
+			case entry.Type().IsRegular():
 				raw, e := os.ReadFile(path)
 				if e != nil {
 					return e
 				}
-				files[path] = string(raw)
+				files[path] = info.Mode().String() + " " + string(raw)
+			case entry.Type()&os.ModeSymlink != 0:
+				target, e := os.Readlink(path)
+				if e != nil {
+					return e
+				}
+				files[path] = "symlink -> " + target
+			default:
+				files[path] = info.Mode().String()
 			}
 			return nil
 		})
@@ -562,4 +933,26 @@ func checkpointSnapshot(t *testing.T, root string) map[string]string {
 	id := sha256.Sum256([]byte(common))
 	capture(filepath.Join(config, "swarm", "claims", fmt.Sprintf("%x", id)))
 	return files
+}
+
+// snapshotDiff names the first few changed, added or removed snapshot paths.
+func snapshotDiff(before, after map[string]string) string {
+	var changed []string
+	for path, value := range before {
+		if got, ok := after[path]; !ok {
+			changed = append(changed, "removed "+path)
+		} else if got != value {
+			changed = append(changed, "changed "+path)
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; !ok {
+			changed = append(changed, "added "+path)
+		}
+	}
+	slices.Sort(changed)
+	if len(changed) > 5 {
+		changed = append(changed[:5], "...")
+	}
+	return strings.Join(changed, ", ")
 }

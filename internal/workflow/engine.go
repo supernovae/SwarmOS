@@ -649,7 +649,11 @@ func readRequiredArtifact(wtPath, name string) (string, error) {
 }
 
 // DecomposeIssue partitions a parent issue into sequential or parallel child WorkUnit issues linked via ParentIssue and DependsOn.
-func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssueNum int, subtasks []contract.WorkUnit, sequential bool) ([]*tracker.Issue, error) {
+func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssueNum int, subtasks []contract.WorkUnit, sequential bool, warnings ...func(string)) ([]*tracker.Issue, error) {
+	var warn func(string)
+	if len(warnings) > 0 {
+		warn = warnings[0]
+	}
 	parentIss, err := e.Tracker.GetIssue(ctx, parentIssueNum)
 	if err != nil {
 		return nil, err
@@ -711,6 +715,7 @@ func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssu
 		if err := e.Tracker.LinkSubIssue(ctx, parentIssueNum, childIss.Number); err != nil {
 			return created, fmt.Errorf("link decomposed child issue #%d to parent #%d: %w", childIss.Number, parentIssueNum, err)
 		}
+		ProjectDependencies(ctx, e.Tracker, childIss.Number, sub.DependsOn, warn)
 		created = append(created, childIss)
 		prevIssueNum = childIss.Number
 		depStr := "-"
@@ -724,6 +729,11 @@ func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssu
 		summaryMD.WriteString(fmt.Sprintf("| `#%d` | %s | %s |\n", childIss.Number, childIss.Title, depStr))
 	}
 
+	var childNumbers []int
+	for _, child := range created {
+		childNumbers = append(childNumbers, child.Number)
+	}
+	projectChildOrder(ctx, e.Tracker, parentIssueNum, childNumbers, warn)
 	_, _ = e.Tracker.CreateComment(ctx, parentIssueNum, summaryMD.String())
 	return created, nil
 }

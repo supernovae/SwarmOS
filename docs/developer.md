@@ -126,6 +126,8 @@ For `swarm pr work`, the command names the linked issue, not the PR. With `--jso
 
 The recommendation can only stop work. It does not approve the plan, create issues, or change the WorkUnit, and the plan gate still applies to any later plan. Decomposing is a maintainer decision: `swarm issue decompose` turns the WorkUnit's acceptance criteria into draft child issues and does not read the proposed children in `PLAN.md`. To use the planner's proposals as written, create the children with `swarm issue create --parent 42`. Either way, each child needs its own `swarm issue approve` and passes through the usual plan gate.
 
+On GitHub, decomposition sets native sub-issue order and mirrors dependencies as blocked-by links. `swarm issue create --depends-on 7,8` creates the same dependency view. These links help maintainers browse work; the WorkUnit body alone controls dependency enforcement. Failed projections produce warnings alongside the created issues.
+
 If you disagree with the recommendation, re-plan with `swarm issue work 42 --phase plan` (or `swarm pr work <PR> --phase plan`). Until then, later runs reuse the recorded plan and stop again. A new plan without the line continues through the usual gates.
 
 ### Choose how you work
@@ -641,3 +643,5 @@ that dimension. Changing a dimension requires approval of the revised WorkUnit.
 for example `Suggested dimensions: size=small uncertainty=known risk=standard`,
 with signals explaining the advice. Only recorded dimensions on the approved
 WorkUnit select an execution profile.
+
+On GitHub, `swarm issue lint <issue-number>` also reports missing or extra native blocked-by links as advisory warnings, including repository-qualified issue references. JSON output includes `warnings` and keeps `status: valid`. If the native view is unavailable, lint reports that instead of guessing drift. Lint does not change the body or relationships, and later body edits are not synchronized automatically. Roadmap reapplication retries dependency projections and restores the requested child order without duplicating links.

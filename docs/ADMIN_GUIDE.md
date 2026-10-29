@@ -78,6 +78,8 @@ swarm repo plan --from ROADMAP.md --apply --backend github
 swarm issue approve 2 --backend github
 ```
 
+Publishing also mirrors child dependencies as native blocked-by links and sets sub-issue order to match the roadmap. Projection failures produce warnings while preserving created issues and their WorkUnits; hierarchy-link failures still stop publication. Reapplying retries these projections for reused children.
+
 Re-running `swarm repo plan --from ROADMAP.md --apply` is idempotent: it reuses the existing Epic and unchanged child issues, refreshes the Epic body if you added new tasks, creates and links only the new child tasks as `swarm:draft`, and reports any removed tasks as leftovers without closing them. You can also create a standalone Epic and attach child WorkUnits directly:
 
 ```bash
@@ -136,6 +138,8 @@ The recommendation never approves, creates issues, or edits the WorkUnit; decidi
 
 - run `swarm issue decompose 12 --backend github`, which creates one draft child per acceptance criterion (it does not read the proposals in `PLAN.md`), or
 - create the proposed children yourself with `swarm issue create --parent 12 ... --backend github`.
+
+On GitHub, decomposition mirrors dependencies as blocked-by links and sets the child order explicitly. The WorkUnit body continues to determine whether work is blocked.
 
 Children start as `swarm:draft` and need their own `swarm issue approve` and plan gate. To overrule the recommendation, re-plan the parent with `swarm issue work 12 --phase plan`; later runs reuse a recorded split plan until a new plan replaces it.
 

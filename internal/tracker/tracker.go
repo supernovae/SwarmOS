@@ -148,6 +148,10 @@ type Tracker interface {
 	// ListSubIssues returns native sibling order; it grants no eligibility.
 	ListSubIssues(ctx context.Context, parentNumber int) ([]*Issue, error)
 	LinkSubIssue(ctx context.Context, parentNumber, childNumber int) error
+	// Native projections are display only; WorkUnit bodies remain authoritative.
+	ListBlockedBy(ctx context.Context, issueNumber int) ([]BlockedByReference, error)
+	LinkBlockedBy(ctx context.Context, issueNumber, prerequisiteNumber int) error
+	OrderSubIssues(ctx context.Context, parentNumber int, childNumbers []int) error
 	ListIssues(ctx context.Context, filter IssueFilter) ([]*Issue, error)
 	ListComments(ctx context.Context, issueNumber int) ([]*Comment, error)
 	CreateComment(ctx context.Context, issueNumber int, body string) (*Comment, error)

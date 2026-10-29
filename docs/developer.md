@@ -137,7 +137,7 @@ Start interactively when you want to stay close to the changes. Move repeatable 
 | Working style | How to use it |
 | :--- | :--- |
 | **Pair with an agent** | Run `swarm issue work 42 --headless=false`. Native Codex streams its work, then accepts a follow-up instruction; press Enter to finish the phase. |
-| **Stay in your current agent session** | Use `swarm issue claim <issue>` or `swarm issue claim --next`, work in the assigned worktree, and record each phase with `swarm issue stage`. Your existing session keeps its own permissions. |
+| **Stay in your current agent session** | Follow the [human-led guide](human-led.md). Use `swarm issue claim <issue>` or `swarm issue claim --next`, work in the assigned worktree, and record each phase with `swarm issue stage`. Your existing session keeps its own permissions. |
 | **Let a worker pick up tasks** | Run `swarm issue work --next` for one task or `swarm node run --watch` for a continuing queue. Both use the same numeric and epic sibling ordering as `claim --next` and run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
 
 Native Codex uses the same bounded permissions for pairing and unattended work. Allowed commands run without approval prompts; requests for broader access are denied. Each turn uses an ephemeral session, with task files carrying progress forward. For an existing agent session or `trusted-local` setup, keep the harness's approval prompts enabled when pairing. Reserve full-access or “YOLO” settings for disposable workers with independently enforced isolation; CI alone does not provide that boundary.

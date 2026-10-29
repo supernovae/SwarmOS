@@ -233,6 +233,10 @@ type NodeProfile struct {
 }
 
 type RoleAttestation struct {
+	ProductionMode string `yaml:"production_mode,omitempty" json:"production_mode,omitempty"`
+	StagedBy       string `yaml:"staged_by,omitempty" json:"staged_by,omitempty"`
+	HarnessSource  string `yaml:"harness_source,omitempty" json:"harness_source,omitempty"`
+	ModelSource    string `yaml:"model_source,omitempty" json:"model_source,omitempty"`
 	ExecutionMode  string `yaml:"execution_mode,omitempty" json:"execution_mode,omitempty"`
 	Authentication string `yaml:"authentication,omitempty" json:"authentication,omitempty"`
 	Role           string `yaml:"role" json:"role"`                         // "planner", "reviewer", "developer", "tester"
@@ -254,6 +258,10 @@ func (a RoleAttestation) Metadata(base map[string]string) map[string]string {
 		m[k] = v
 	}
 	for key, value := range map[string]string{
+		"production_mode": a.ProductionMode,
+		"staged_by":       a.StagedBy,
+		"harness_source":  a.HarnessSource,
+		"model_source":    a.ModelSource,
 		"role":            a.Role,
 		"agent":           a.Agent,
 		"harness":         a.Harness,

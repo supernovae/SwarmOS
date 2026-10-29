@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 )
 
@@ -77,7 +78,11 @@ fi
 func quote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
 func (tr *Transport) write(p, s string, mode os.FileMode) {
 	tr.t.Helper()
-	if err := os.WriteFile(p, []byte(s), mode); err != nil {
+	write := os.WriteFile
+	if mode&0111 != 0 {
+		write = testutil.WriteExecutable
+	}
+	if err := write(p, []byte(s), mode); err != nil {
 		tr.t.Fatal(err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -50,7 +51,12 @@ func TestLegacyCompatibleNetworkBound(t *testing.T) {
 				}
 			})
 			body := fmt.Sprintf("#!/bin/sh\ntrap 'touch %s' EXIT\nwhile [ ! -f %s ]; do sleep .05 & wait $!; done\n", quote(exited), quote(release))
-			if e := os.WriteFile(script, []byte(body), 0700); e != nil {
+			// Keep this fixture standalone while preventing parallel forks from
+			// inheriting the executable's writable descriptor.
+			syscall.ForkLock.RLock()
+			e := os.WriteFile(script, []byte(body), 0700)
+			syscall.ForkLock.RUnlock()
+			if e != nil {
 				t.Fatal(e)
 			}
 			git := func(args ...string) {

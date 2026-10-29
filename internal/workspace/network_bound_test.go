@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gittransport"
 )
 
@@ -182,7 +183,7 @@ func TestGitOutputNetworkErrorsAndRedaction(t *testing.T) {
 				t.Fatal(err)
 			}
 			b = []byte(strings.ReplaceAll(string(b), "fixture rejected", "secret288 "+base64.StdEncoding.EncodeToString([]byte("x-access-token:secret288"))))
-			if err = os.WriteFile(script, b, 0700); err != nil {
+			if err = testutil.WriteExecutable(script, b, 0700); err != nil {
 				t.Fatal(err)
 			}
 			runWorkspaceGit(t, repo, "remote", "set-url", "origin", "ssh://secret288@fake.invalid"+remote)

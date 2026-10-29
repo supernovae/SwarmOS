@@ -1,3 +1,5 @@
+# Optional target branch; inherited by WorkUnits without an override.
+# base_branch: release/1.x
 version: 1
 # Linux isolation: Codex native sandbox; other harnesses use isolated tools.
 # Run swarm repo doctor before work. Models are optional; each harness chooses its default.

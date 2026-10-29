@@ -39,7 +39,7 @@ func freshClaimBase(st *IssueState, pr int) bool {
 }
 
 func (m *Manager) prepareClaimBase(ctx context.Context, n int, original *IssueState, wu *contract.WorkUnit, cfg *contract.SwarmConfig) (*IssueState, error) {
-	base, err := m.trustedBase()
+	base, err := workspace.ResolveBranchFrom(m.repoRoot, m.UpstreamRemote(), original.BaseBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func (m *Manager) prepareClaimBase(ctx context.Context, n int, original *IssueSt
 	if err != nil {
 		return nil, err
 	}
-	policy := contract.DigestApprovedPolicy(base, nextCfg)
+	policy := contract.DigestApprovedBranchPolicy(base, nextCfg, original.BaseBranch)
 	st := *original
 	st.Artifacts = append([]contract.Artifact(nil), original.Artifacts...)
 	st.Attestations = append([]contract.RoleAttestation(nil), original.Attestations...)

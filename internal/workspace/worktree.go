@@ -1345,3 +1345,73 @@ func RebindBudgetCheckpoint(ctx context.Context, root string, issue int, oldBran
 	}
 	return verifyWorktree(path, newBranch, head)
 }
+
+// ResolveBranchFrom fetches only the exact heads ref. A failed fetch never uses cached refs.
+func ResolveBranchFrom(root, remote, branch string) (string, error) {
+	if branch == "" {
+		return ResolveBaseFrom(root, remote)
+	}
+	if err := contract.ValidateBaseBranch(branch); err != nil {
+		return "", err
+	}
+	remote = UpstreamRemoteOrDefault(remote)
+	if err := ValidateRemoteName(remote); err != nil {
+		return "", err
+	}
+	if _, err := gitOutput(root, "remote", "get-url", remote); err != nil {
+		if !errors.Is(err, errGitFailed) {
+			return "", err
+		}
+		if remote != DefaultUpstreamRemote {
+			return "", MissingUpstreamRemoteError(remote)
+		}
+		sha, err := resolveCommit(root, "refs/heads/"+branch)
+		if err != nil {
+			return "", fmt.Errorf("resolve base branch %q: %w", branch, err)
+		}
+		return sha, nil
+	}
+	dest := "refs/remotes/" + remote + "/" + branch
+	if _, err := gitOutput(root, "fetch", "--no-tags", "--no-write-fetch-head", remote, "+refs/heads/"+branch+":"+dest); err != nil {
+		return "", fmt.Errorf("fetch base branch %q: %w", branch, err)
+	}
+	return resolveCommit(root, dest)
+}
+
+// BaseBranchName resolves the recorded target or the trusted default name.
+func BaseBranchName(root, remote, recorded string) (string, error) {
+	if recorded != "" {
+		if err := contract.ValidateBaseBranch(recorded); err != nil {
+			return "", err
+		}
+		return recorded, nil
+	}
+	remote = UpstreamRemoteOrDefault(remote)
+	if _, err := ResolveBaseFrom(root, remote); err != nil {
+		return "", err
+	}
+	if _, err := gitOutput(root, "remote", "get-url", remote); err == nil {
+		out, err := gitOutput(root, "symbolic-ref", "--quiet", "refs/remotes/"+remote+"/HEAD")
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimPrefix(strings.TrimSpace(out), "refs/remotes/"+remote+"/"), nil
+	}
+	out, err := gitOutput(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolve local default branch: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// VerifyBaseBranch rejects PR retargets even when commit identities coincide.
+func VerifyBaseBranch(root, remote, recorded, actual string) error {
+	expected, err := BaseBranchName(root, remote, recorded)
+	if err != nil {
+		return err
+	}
+	if actual != expected {
+		return fmt.Errorf("PR base branch %q differs from approved branch %q; restore the PR target or ask a maintainer to approve the new target", actual, expected)
+	}
+	return nil
+}

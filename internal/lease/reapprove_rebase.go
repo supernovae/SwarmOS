@@ -39,6 +39,16 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 	if err != nil {
 		return nil, err
 	}
+	if err := workspace.VerifyBaseBranch(m.repoRoot, m.UpstreamRemote(), st.BaseBranch, pr.Base); err != nil {
+		return nil, err
+	}
+	tip, err := workspace.ResolveBranchFrom(m.repoRoot, m.UpstreamRemote(), st.BaseBranch)
+	if err != nil {
+		return nil, err
+	}
+	if tip != target {
+		return nil, fmt.Errorf("approved target branch moved")
+	}
 	if pr.BaseSHA != target || pr.HeadSHA != expectedHead || pr.Merged || pr.State != "open" {
 		return nil, fmt.Errorf("PR target or head changed")
 	}
@@ -49,6 +59,13 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 	if err != nil {
 		return nil, err
+	}
+	oldCfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	if !TaskApprovalCurrent(st, wu, oldCfg) {
+		return nil, &TaskApprovalError{IssueNumber: n}
 	}
 	if st.TaskDigest != contract.DigestWorkUnit(wu) {
 		return nil, fmt.Errorf("WorkUnit changed")
@@ -80,7 +97,7 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 	if err != nil {
 		return nil, err
 	}
-	digest := contract.DigestApprovedPolicy(target, cfg)
+	digest := contract.DigestApprovedBranchPolicy(target, cfg, st.BaseBranch)
 	m.carryApproval(ctx, st, wu, target, digest, tree)
 	st.PreviousBaseSHA = st.BaseSHA
 	st.BaseSHA = target
@@ -99,6 +116,9 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 
 	latest, err := m.tracker.GetPullRequest(ctx, number)
 	if err != nil {
+		return nil, err
+	}
+	if err := workspace.VerifyBaseBranch(m.repoRoot, m.UpstreamRemote(), st.BaseBranch, latest.Base); err != nil {
 		return nil, err
 	}
 	latestIssue, err := m.tracker.GetIssue(ctx, n)

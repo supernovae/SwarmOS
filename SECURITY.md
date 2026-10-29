@@ -148,3 +148,11 @@ Release archives are built and attested in GitHub Actions after passing the lint
 ```bash
 gh attestation verify 'swarm_<version>_<os>_<arch>.tar.gz' --repo supernovae/SwarmOS
 ```
+
+### Approved target branches
+
+Maintainers can select a release or LTS branch with optional `base_branch` in the upstream default branch's `.swarm/config.yaml`, or override it in an approved WorkUnit. With neither setting, approval uses the default branch. Approval fetches the exact heads ref and binds explicit target names and commits to the approved policy digest, so two names at the same commit remain distinct approval targets. WorkUnit overrides also belong to the task digest.
+
+Policy, protected paths, workflows, and role prompts load from the approved target commit. Target-branch configuration cannot redirect selection, and contributor checkout configuration cannot select a target. Fresh claims may advance within the recorded branch only under the existing ancestry, policy, and review rules. For explicit targets, missing branches and failed fetches stop operations that require a live tip. Legacy default-only submission retains its cached default name if a freshness fetch fails.
+
+Submission requires the recorded target; an explicit `--base` must match it. PR status, rebase, and fork coordination reject a retarget before changing task state. Restore the PR's approved target or release the claim and have a maintainer reapprove the intended target. Changing target names invalidates earlier plan and implementation evidence. Upgrade coordinators and workers before using the optional fields; explicit-target approval digests cannot satisfy older binaries' approval checks. The fork request and result formats remain unchanged.

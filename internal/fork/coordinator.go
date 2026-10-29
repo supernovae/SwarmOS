@@ -464,7 +464,11 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			if c.UpstreamRepo != "" && !strings.EqualFold(strings.TrimSpace(pr.BaseRepo), strings.TrimSpace(c.UpstreamRepo)) {
 				return nil, "", fmt.Errorf("pull request #%d base repo %q does not match upstream %q", req.PRNumber, pr.BaseRepo, c.UpstreamRepo)
 			}
-			if expectedBase, baseErr := c.resolveDefaultBase(); baseErr == nil && expectedBase != "" && pr.Base != expectedBase {
+			expectedBase, baseErr := c.resolveStateBase(&currentState)
+			if baseErr != nil {
+				return nil, "", baseErr
+			}
+			if pr.Base != expectedBase {
 				return nil, "", fmt.Errorf("pull request #%d base branch %q does not match upstream base %q", req.PRNumber, pr.Base, expectedBase)
 			}
 			forkOwner := strings.Split(currentState.ForkRepo, "/")[0]
@@ -504,6 +508,9 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			}
 
 		case "record-pr-head":
+			if _, err := c.verifyForkPR(ctx, &currentState, req.PRNumber); err != nil {
+				return nil, "", err
+			}
 			// The local head cannot be inspected here; complete-pr-revision
 			// verifies the commit that is actually published.
 			if req.Branch != workspace.PRBranchName(req.PRNumber) || !isFullCommitSHA(req.HeadSHA) {
@@ -515,6 +522,9 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			}
 
 		case "invalidate-pr-evidence":
+			if _, err := c.verifyForkPR(ctx, &currentState, req.PRNumber); err != nil {
+				return nil, "", err
+			}
 			if req.RebaseContext != nil {
 				updated, err = mgr.UpdateRebaseContext(ctx, req.IssueNumber, actor, req.PRNumber, *req.RebaseContext)
 			} else {
@@ -559,6 +569,13 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			}
 			if err = prservice.ProjectRebase(ctx, c.Tracker, &currentState, req.PRNumber); err != nil {
 				return nil, "", fmt.Errorf("PR head published; retry pr submit to update rebase context: %w", err)
+			}
+			latest, err := c.verifyForkPR(ctx, &currentState, req.PRNumber)
+			if err != nil {
+				return nil, "", err
+			}
+			if latest.HeadSHA != req.HeadSHA {
+				return nil, "", fmt.Errorf("PR head changed before completion")
 			}
 			updated, err = mgr.CompletePRRevisionLocal(ctx, req.IssueNumber, actor, req.PRNumber, req.ExpectedHeadSHA, req.HeadSHA)
 			if err != nil {
@@ -633,6 +650,13 @@ func (c *Coordinator) verifyForkPR(ctx context.Context, st *lease.IssueState, nu
 	if c.UpstreamRepo != "" && !strings.EqualFold(strings.TrimSpace(pr.BaseRepo), strings.TrimSpace(c.UpstreamRepo)) {
 		return nil, fmt.Errorf("pull request #%d base repo %q does not match upstream %q", number, pr.BaseRepo, c.UpstreamRepo)
 	}
+	expected, err := c.resolveStateBase(st)
+	if err != nil {
+		return nil, err
+	}
+	if pr.Base != expected {
+		return nil, fmt.Errorf("PR base branch %q differs from approved branch %q", pr.Base, expected)
+	}
 	forkOwner := strings.Split(st.ForkRepo, "/")[0]
 	if strings.TrimPrefix(pr.Head, forkOwner+":") != st.Branch {
 		return nil, fmt.Errorf("pull request #%d head branch %q does not match recorded branch %q", number, pr.Head, st.Branch)
@@ -666,14 +690,7 @@ func (c *Coordinator) resolveDefaultBase() (string, error) {
 	if c.DefaultBaseFunc != nil {
 		return c.DefaultBaseFunc(c.RepoRoot)
 	}
-	remote := c.upstreamRemote()
-	out, err := runGitWithToken(context.Background(), c.RepoRoot, "symbolic-ref", "--quiet", "--short", "refs/remotes/"+remote+"/HEAD")
-	if err == nil {
-		if b := strings.TrimPrefix(strings.TrimSpace(string(out)), remote+"/"); b != "" {
-			return b, nil
-		}
-	}
-	return "", nil
+	return workspace.BaseBranchName(c.RepoRoot, c.upstreamRemote(), "")
 }
 
 func (c *Coordinator) verifyForkCheckpointCommit(ctx context.Context, forkRepo, branch, headSHA, baseSHA string) error {
@@ -727,4 +744,18 @@ func isFullCommitSHA(sha string) bool {
 		}
 	}
 	return true
+}
+
+func (c *Coordinator) resolveStateBase(st *lease.IssueState) (string, error) {
+	if st.BaseBranch == "" {
+		return c.resolveDefaultBase()
+	}
+	name, err := workspace.BaseBranchName(c.RepoRoot, c.upstreamRemote(), st.BaseBranch)
+	if err != nil {
+		return "", err
+	}
+	if _, err := workspace.ResolveBranchFrom(c.RepoRoot, c.upstreamRemote(), name); err != nil {
+		return "", err
+	}
+	return name, nil
 }

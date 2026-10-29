@@ -1,8 +1,10 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"debug/buildinfo"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -27,7 +30,8 @@ type RestoreRequest struct {
 }
 
 // RestoreBoundary requires an explicitly supplied trusted helper executable.
-// The caller verifies its provenance; this package checks its filesystem shape.
+// The caller verifies its provenance; this package checks its filesystem shape and pure-Go build metadata.
+// Build metadata does not authenticate the executable.
 type RestoreBoundary struct {
 	Helper string
 	// Unexported fixture seam; external callers always use verified public upstreams.
@@ -149,6 +153,9 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 	}
 	if err != nil || len(data) > 64<<20 {
 		return "", errors.New("restore helper size/read failure")
+	}
+	if err = verifyRestoreHelperBuild(data); err != nil {
+		return "", err
 	}
 	if err = pinned.WriteFile("helper", data, 0500); err != nil {
 		return "", err
@@ -274,15 +281,12 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 		if status != "READY\n" {
 			_ = process.StopVerified(cmd)
 			<-done
-			return "", fmt.Errorf("restore capability unavailable: %s", safeRestoreStatus(status))
+			return "", restoreStartupError(status, diagnostics.String())
 		}
 	case <-done:
 		_ = readyRead.Close()
 		status := <-ready
-		if status != "" && status != "READY\n" {
-			return "", fmt.Errorf("restore capability unavailable: %s", safeRestoreStatus(status))
-		}
-		return "", errors.New(classifyRestoreLauncher(diagnostics.String()))
+		return "", restoreStartupError(status, diagnostics.String())
 	case <-broker.ctx.Done():
 		_ = process.StopVerified(cmd)
 		<-done
@@ -334,13 +338,13 @@ func readRestoreReadyFrame(r io.Reader) string {
 	var frame [256]byte
 	for i := range frame {
 		if _, err := io.ReadFull(r, frame[i:i+1]); err != nil {
-			return ""
+			return string(frame[:i])
 		}
 		if frame[i] == '\n' {
 			return string(frame[:i+1])
 		}
 	}
-	return ""
+	return string(frame[:])
 }
 
 func safeRestoreStatus(s string) string {
@@ -447,8 +451,57 @@ func copyRestoreSource(src, dst *safefs.Root, prefix string, total *int64) error
 	}
 }
 
+const restoreBuildInvalid = "restore helper requires valid Go build information and CGO_ENABLED=0"
+const restoreBuildMode = "restore helper requires a trusted pure-Go build with CGO_ENABLED=0"
+
+func verifyRestoreHelperBuild(data []byte) error {
+	info, err := buildinfo.Read(bytes.NewReader(data))
+	if err != nil {
+		return errors.New(restoreBuildInvalid)
+	}
+	return verifyRestoreHelperSettings(info)
+}
+
+func verifyRestoreHelperSettings(info *debug.BuildInfo) error {
+	if info == nil || info.GoVersion == "" {
+		return errors.New(restoreBuildInvalid)
+	}
+	count, value := 0, ""
+	for _, setting := range info.Settings {
+		if setting.Key == "CGO_ENABLED" {
+			count++
+			value = setting.Value
+		}
+	}
+	if count != 1 {
+		return errors.New(restoreBuildInvalid)
+	}
+	if value != "0" {
+		return errors.New(restoreBuildMode)
+	}
+	return nil
+}
+
+func restoreStartupError(status, diagnostics string) error {
+	if status == "" || status == "READY\n" {
+		return errors.New(classifyRestoreLauncher(diagnostics))
+	}
+	return fmt.Errorf("restore capability unavailable: %s", safeRestoreStatus(status))
+}
+
 func classifyRestoreLauncher(s string) string {
+	// Runtime signatures take precedence over incidental namespace/mount words.
+	// Truncated capture cannot establish a complete diagnostic.
+	if strings.Contains(s, "[swarm: output truncated") {
+		return "restore capability unavailable: helper startup/control framing"
+	}
 	switch {
+	case strings.Contains(s, "fatal error: runtime: cannot allocate memory") || strings.Contains(s, "fatal error: failed to reserve page summary memory") || strings.Contains(s, "runtime: out of memory"):
+		return "restore capability unavailable: helper startup memory allocation/reservation"
+	case strings.Contains(s, "runtime: failed to create new OS thread") && strings.Contains(s, "errno=11") || strings.Contains(s, "runtime/cgo: pthread_create failed: Resource temporarily unavailable"):
+		return "restore capability unavailable: helper startup thread resources"
+	case strings.Contains(s, "runtime:") || strings.Contains(s, "fatal error:"):
+		return "restore capability unavailable: helper startup/control framing"
 	case strings.Contains(s, "namespace"):
 		return "restore capability unavailable: Bubblewrap namespaces"
 	case strings.Contains(s, "mount") || strings.Contains(s, "bind"):

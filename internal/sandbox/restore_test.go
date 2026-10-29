@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"testing"
@@ -291,8 +292,9 @@ func TestRestoreInputSafety(t *testing.T) {
 			r := request
 			b := RestoreBoundary{Helper: helper}
 			test.change(&r, &b)
-			if _, err := b.Run(context.Background(), r); err == nil {
-				t.Fatal("unsafe input accepted")
+			want := map[string]string{"outside cache": "restore cache must be disjoint and repository-owned", "overlap": "restore cache must be disjoint and repository-owned", "relative": "restore source: restore requires canonical absolute directory", "traversal": "restore source: restore requires canonical absolute directory", "helper missing": "restore helper unavailable:", "argv": "restore payload requires absolute argv"}[test.name]
+			if _, err := b.Run(context.Background(), r); err == nil || !strings.HasPrefix(err.Error(), want) {
+				t.Fatal("intended input rejection masked", err)
 			}
 		})
 	}
@@ -546,10 +548,10 @@ func TestRestoreReadyFrame(t *testing.T) {
 		{"failure", "NETWORK\n", "NETWORK\n"},
 		{"crlf", "READY\r\n", "READY\r\n"},
 		{"prefix", "xREADY\n", "xREADY\n"},
-		{"partial", "READY", ""},
+		{"partial", "READY", "READY"},
 		{"empty", "", ""},
-		{"oversized", strings.Repeat("x", 256) + "\n", ""},
-		{"unterminated", strings.Repeat("x", 512), ""},
+		{"oversized", strings.Repeat("x", 256) + "\n", strings.Repeat("x", 256)},
+		{"unterminated", strings.Repeat("x", 512), strings.Repeat("x", 256)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := readRestoreReadyFrame(strings.NewReader(tc.frame)); got != tc.want {
@@ -645,6 +647,60 @@ func TestRestoreHomeContainedRepository(t *testing.T) {
 	for _, source := range []string{repo, cache, filepath.Join(cache, "source")} {
 		if !restoreOverlap(source, cache) {
 			t.Fatalf("overlap missed: %q", source)
+		}
+	}
+}
+
+func TestRestoreHelperBuildVerification(t *testing.T) {
+	for _, tc := range []struct {
+		name, version string
+		settings      []debug.BuildSetting
+		want          string
+	}{
+		{"pure", "go1.26", []debug.BuildSetting{{Key: "CGO_ENABLED", Value: "0"}}, ""},
+		{"missing", "go1.26", nil, restoreBuildInvalid},
+		{"version", "", []debug.BuildSetting{{Key: "CGO_ENABLED", Value: "0"}}, restoreBuildInvalid},
+		{"duplicate", "go1.26", []debug.BuildSetting{{Key: "CGO_ENABLED", Value: "0"}, {Key: "CGO_ENABLED", Value: "1"}}, restoreBuildInvalid},
+		{"cgo", "go1.26", []debug.BuildSetting{{Key: "CGO_ENABLED", Value: "1"}}, restoreBuildMode},
+		{"empty", "go1.26", []debug.BuildSetting{{Key: "CGO_ENABLED"}}, restoreBuildMode},
+		{"secret", "go1.26", []debug.BuildSetting{{Key: "CGO_ENABLED", Value: "https://secret:credential@example/path\n"}}, restoreBuildMode},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := verifyRestoreHelperSettings(&debug.BuildInfo{GoVersion: tc.version, Settings: tc.settings})
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || err.Error() != tc.want {
+				t.Fatal("unexpected build category", err)
+			}
+		})
+	}
+	for _, data := range [][]byte{nil, []byte("#!/bin/sh\nsecret\n"), []byte("\xff Go buildinf: secret")} {
+		if err := verifyRestoreHelperBuild(data); err == nil || err.Error() != restoreBuildInvalid {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRestoreReadyFrameDiagnostics(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"fatal error: runtime: cannot allocate memory namespace mount secret", "helper startup memory allocation/reservation"},
+		{"fatal error: failed to reserve page summary memory secret", "helper startup memory allocation/reservation"},
+		{"runtime: out of memory secret", "helper startup memory allocation/reservation"},
+		{"runtime/cgo: pthread_create failed: Resource temporarily unavailable secret", "helper startup thread resources"},
+		{"runtime: failed to create new OS thread errno=11 mount secret", "helper startup thread resources"},
+		{"runtime: failed to create new OS thr mount secret", "helper startup/control framing"},
+		{"fatal error: runtime: cannot allocate memory\n[swarm: output truncated at 1 MiB]", "helper startup/control framing"},
+	} {
+		want := "restore capability unavailable: " + tc.want
+		for _, status := range []string{"", "READY\n"} {
+			if got := restoreStartupError(status, tc.input).Error(); got != want {
+				t.Fatal(got)
+			}
+		}
+		if got := restoreStartupError("secret", tc.input).Error(); got != "restore capability unavailable: helper startup/control framing" {
+			t.Fatal(got)
 		}
 	}
 }

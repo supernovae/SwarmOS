@@ -27,6 +27,13 @@ func buildRestoreHelper(t *testing.T) string {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build helper: %v: %s", err, output)
 	}
+	data, err := os.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRestoreHelperBuild(data); err != nil {
+		t.Fatal(err)
+	}
 	return binary
 }
 func restoreLinuxRequest(t *testing.T) RestoreRequest {
@@ -94,61 +101,52 @@ func TestRestoreLinuxFlags(t *testing.T) {
 // independently verified NPROC exhaustion outcome when sharing a busy host UID.
 // A nonzero exit alone also accepts unrelated Go/cgo startup crashes.
 func TestRestoreLinuxHelperStartup(t *testing.T) {
-	for _, mode := range []string{"default", "pure-go"} {
-		t.Run(mode, func(t *testing.T) {
-			var helper string
-			if mode == "pure-go" {
-				helper = buildRestoreHelper(t)
-			} else {
-				helper = filepath.Join(t.TempDir(), "restore-helper")
-				build := exec.Command("go", "build", "-o", helper, "../../cmd/swarm-restore-helper")
-				if output, err := build.CombinedOutput(); err != nil {
-					t.Fatalf("build default helper: %v: %s", err, output)
+	t.Run("pure-go", func(t *testing.T) {
+		helper := buildRestoreHelper(t)
+		processLimitRejected := false
+		for _, limit := range []string{"none", "address-space", "processes", "combined"} {
+			t.Run(limit, func(t *testing.T) {
+				var flags []string
+				switch limit {
+				case "address-space":
+					flags = []string{"--as=1073741824", "--core=0"}
+				case "processes":
+					flags = []string{"--nproc=128", "--core=0"}
+				case "combined":
+					flags = restoreResourceFlags()
 				}
-			}
-			processLimitRejected := false
-			for _, limit := range []string{"none", "address-space", "processes", "combined"} {
-				t.Run(limit, func(t *testing.T) {
-					var flags []string
-					switch limit {
-					case "address-space":
-						flags = []string{"--as=1073741824", "--core=0"}
-					case "processes":
-						flags = []string{"--nproc=128", "--core=0"}
-					case "combined":
-						flags = restoreResourceFlags()
+				// Baseline uses an empty environment. Limited cases use only
+				// the trusted pre-runtime setting from the real launcher.
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "/usr/bin/prlimit", append(flags, "--", helper)...)
+				cmd.Env = []string{}
+				if limit != "none" {
+					cmd.Env = []string{"GOMAXPROCS=" + restoreHelperMaxProcs}
+				}
+				stdout, stderr := restoreTestCapture{limit: 4 << 10}, restoreTestCapture{limit: 64 << 10}
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				err := cmd.Run()
+				var exit *exec.ExitError
+				// Outside a user namespace NPROC accounts for the entire host
+				// UID, including concurrent packages in make check. Validate
+				// that specific fail-closed outcome separately; it must never
+				// excuse an AS-only failure or a real boundary failure.
+				if limit == "processes" || limit == "combined" && processLimitRejected {
+					if restoreStartupTaskExhausted(err, stdout.Bytes(), stderr.Bytes()) {
+						processLimitRejected = true
+						t.Log("host UID task exhaustion under NPROC128: fail-closed runtime rejection verified")
+						return
 					}
-					// Baseline uses an empty environment. Limited cases use only
-					// the trusted pre-runtime setting from the real launcher.
-					cmd := exec.CommandContext(t.Context(), "/usr/bin/prlimit", append(flags, "--", helper)...)
-					cmd.Env = []string{}
-					if limit != "none" {
-						cmd.Env = []string{"GOMAXPROCS=" + restoreHelperMaxProcs}
-					}
-					var stdout, stderr bytes.Buffer
-					cmd.Stdout, cmd.Stderr = &stdout, &stderr
-					err := cmd.Run()
-					var exit *exec.ExitError
-					// Outside a user namespace NPROC accounts for the entire host
-					// UID, including concurrent packages in make check. Validate
-					// that specific fail-closed outcome separately; it must never
-					// excuse an AS-only failure or a real boundary failure.
-					if limit == "processes" || limit == "combined" && processLimitRejected {
-						if restoreStartupTaskExhausted(err, stdout.Bytes(), stderr.Bytes()) {
-							processLimitRejected = true
-							t.Log("host UID task exhaustion under NPROC128: fail-closed runtime rejection verified")
-							return
-						}
-					}
-					if !errors.As(err, &exit) || exit.ExitCode() != 1 || stdout.String() != "ARGUMENTS\n" || stderr.Len() != 0 {
-						// Runtime diagnostics can contain host paths; keep them out
-						// of coordinator-facing test output.
-						t.Fatalf("helper did not reach argument validation: exit=%v stdout-bytes=%d stderr-bytes=%d", err, stdout.Len(), stderr.Len())
-					}
-				})
-			}
-		})
-	}
+				}
+				if !errors.As(err, &exit) || exit.ExitCode() != 1 || stdout.String() != "ARGUMENTS\n" || stderr.Len() != 0 {
+					// Runtime diagnostics can contain host paths; keep them out
+					// of coordinator-facing test output.
+					t.Fatalf("helper did not reach argument validation: exit=%v stdout-bytes=%d stderr-bytes=%d", err, stdout.Len(), stderr.Len())
+				}
+			})
+		}
+	})
 }
 
 // Match only runtime thread-creation EAGAIN, never arbitrary startup errors,
@@ -393,5 +391,93 @@ func TestRestoreReadyFrameOpenWriter(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("readiness waited for pipe EOF")
+	}
+}
+
+// Retain a bounded prefix while draining every write from the child.
+type restoreTestCapture struct {
+	bytes.Buffer
+	limit int
+}
+
+func (b *restoreTestCapture) Write(p []byte) (int, error) {
+	n := len(p)
+	remaining := b.limit - b.Len()
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	_, _ = b.Buffer.Write(p)
+	return n, nil
+}
+
+func TestRestoreHelperBuildRejected(t *testing.T) {
+	helper := buildRestoreHelper(t)
+	original, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"script", []byte("#!/bin/sh\nsecret\n"), restoreBuildInvalid},
+		{"truncated", original[:len(original)/8], restoreBuildInvalid},
+		{"cgo", bytes.ReplaceAll(original, []byte("CGO_ENABLED=0"), []byte("CGO_ENABLED=1")), restoreBuildMode},
+		{"missing", bytes.ReplaceAll(original, []byte("CGO_ENABLED=0"), []byte("XXX_ENABLED=0")), restoreBuildInvalid},
+		{"unknown", bytes.ReplaceAll(original, []byte("CGO_ENABLED=0"), []byte("CGO_ENABLED=x")), restoreBuildMode},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "helper")
+			if err := os.WriteFile(path, tc.data, 0700); err != nil {
+				t.Fatal(err)
+			}
+			r := restoreLinuxRequest(t)
+			b := RestoreBoundary{Helper: path, configureBroker: func(*registryBroker) { t.Fatal("broker started before rejection") }}
+			for _, check := range []bool{false, true} {
+				var err error
+				if check {
+					err = CheckRestoreBoundary(t.Context(), b, r)
+				} else {
+					_, err = b.Run(t.Context(), r)
+				}
+				if err == nil || err.Error() != tc.want {
+					t.Fatalf("expected build rejection %q, got %v", tc.want, err)
+				}
+			}
+		})
+	}
+}
+func TestRestoreHelperBuildSnapshot(t *testing.T) {
+	path := buildRestoreHelper(t)
+	f, err := openRestoreRegular(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("secret"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRestoreHelperBuild(data); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestRestoreHelperBuildCapture(t *testing.T) {
+	b := restoreTestCapture{limit: 4096}
+	for i := 0; i < 100; i++ {
+		p := bytes.Repeat([]byte("x"), 1024)
+		if n, e := b.Write(p); n != len(p) || e != nil {
+			t.Fatal(n, e)
+		}
+	}
+	if b.Len() != 4096 {
+		t.Fatal(b.Len())
 	}
 }

@@ -19,12 +19,18 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	var agentName, plannerAgent, reviewerAgent, developerAgent, testerAgent, phase, gate, instructions string
 	var roleInstructions workflow.WorkOptions
 	var headless, handoff, nextReady, allRepos, jsonOutput, dryRun bool
-	var progressOutput bool
+	var progressOutput, planCheckpoint bool
+	var expectedHead, candidateHead string
 	cmd := &cobra.Command{
 		Use:   "work [<issue-number>]",
 		Short: "Run an approved task through planning, review, and implementation",
 		Args:  cobra.MaximumNArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if planCheckpoint || expectedHead != "" || candidateHead != "" {
+				if !planCheckpoint || phase != "plan" || len(args) != 1 || nextReady || allRepos || handoff || rootOpts.Fork || expectedHead == "" || candidateHead == "" {
+					return fmt.Errorf("--plan-checkpoint requires an explicit issue, --phase plan, --expected-head and --candidate-head; fork, next, all and handoff are unavailable")
+				}
+			}
 			if len(args) > 0 && nextReady {
 				return fmt.Errorf("<issue-number> and --next are mutually exclusive")
 			}
@@ -58,6 +64,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			if planCheckpoint {
+				return runCheckpointPlan(cmd, rootOpts, args[0], workflow.WorkOptions{PlanCheckpoint: true, ExpectedHead: expectedHead, CandidateHead: candidateHead, Phase: phase, PlannerAgent: plannerAgent, AgentName: agentName, Instructions: instructions, PlannerInstructions: roleInstructions.PlannerInstructions, Gate: contract.GateMode(gate)}, dryRun, jsonOutput)
+			}
 			var failedReport *validation.ValidationReport
 			defer func() { reportJSONFailureWithReport(cmd, jsonOutput, "work", runErr, failedReport) }()
 			guidanceOpts := *rootOpts
@@ -199,6 +208,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&planCheckpoint, "plan-checkpoint", false, "Plan an explicitly selected preserved checkpoint without reconciling it")
+	cmd.Flags().StringVar(&expectedHead, "expected-head", "", "Full authoritative predecessor checkpoint SHA (requires --plan-checkpoint)")
+	cmd.Flags().StringVar(&candidateHead, "candidate-head", "", "Full clean candidate SHA (requires --plan-checkpoint)")
 	cmd.Flags().StringVar(&agentName, "agent", "", "Configured agent for all roles")
 	cmd.Flags().StringVar(&plannerAgent, "planner-agent", "", "Configured planner override")
 	cmd.Flags().StringVar(&reviewerAgent, "reviewer-agent", "", "Configured reviewer override")

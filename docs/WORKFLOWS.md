@@ -113,9 +113,21 @@ swarm issue reconcile "$issue" --checkpoint --expected-head "$expected" --candid
 swarm issue reconcile "$issue" --checkpoint --expected-head "$expected" --candidate-head "$candidate"
 ```
 
-The preview reports whether validation or fresh plan review is needed. An unchanged patch can retain its current authenticated plan approval. For a changed patch, update `PLAN.md` to describe the replacement and include its full candidate SHA, stage the revised plan with `swarm issue stage 29 --phase plan`, and obtain a new `swarm issue review-plan 29` decision before reconciling. The existing human gate still requires an authorized maintainer's approval.
+The preview reports whether validation or fresh plan review is needed. An unchanged patch can retain its current authenticated plan approval. When a preserved checkpoint needs a replacement plan, select it explicitly for isolated planning:
 
-Reconciliation validates a pinned candidate snapshot using the approved base's checks and protected paths. It then atomically updates the remote task branch and authoritative checkpoint, recording predecessor and replacement heads in the existing rebase evidence. A changed remote head, claim, task, plan, or local candidate stops publication; preserve your work and inspect status again. This mode supports upstream Git-backed issue work before PR submission. For a linked PR, use the [PR revision workflow](developer.md#continuing-an-existing-pr). Local file-backed stores and fork checkpoint reconciliation are unsupported. Running `issue reconcile` without `--checkpoint` retains its existing PR-outcome repair behavior.
+```bash
+swarm issue work "$issue" --phase plan --plan-checkpoint --expected-head "$expected" --candidate-head "$candidate" --dry-run
+swarm issue work "$issue" --phase plan --plan-checkpoint --expected-head "$expected" --candidate-head "$candidate"
+swarm issue review-plan "$issue"
+swarm issue reconcile "$issue" --checkpoint --expected-head "$expected" --candidate-head "$candidate"
+swarm issue work "$issue"
+```
+
+Recovery planning reads the exact candidate in a temporary snapshot and stages only `PLAN.md` and `TEST_PLAN.md`. Repository policy and role prompts come from the approved base. The plan and independent review bind to that candidate and its recorded predecessor; changing either report or the candidate requires fresh review. Human gates still require an authorized independent maintainer's `issue review-plan --approve` decision.
+
+This route supports direct local and GitHub issue work with native isolated Codex or harness-tools Bubblewrap planners in agent plan mode. Use an explicit issue number and both full SHAs. Recovery planning retains an authorized claim when a run fails so you can retry or explicitly release it. Review the plan, then reconcile explicitly before resuming ordinary work. Planning and review leave the preserved checkout and recorded checkpoint in place.
+
+Reconciliation validates a pinned candidate snapshot using the approved base's checks and protected paths. It then atomically updates the remote task branch and authoritative checkpoint, recording predecessor and replacement heads in the existing rebase evidence. A changed remote head, claim, task, plan, or local candidate stops publication; preserve your work and inspect status again. This mode supports upstream Git-backed and local file-backed issue work before PR submission. For a linked PR, use the [PR revision workflow](developer.md#continuing-an-existing-pr). Fork checkpoint reconciliation is unsupported. Running `issue reconcile` without `--checkpoint` retains its existing PR-outcome repair behavior.
 
 ## Discarding an abandoned checkpoint
 

@@ -1503,6 +1503,9 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	if err := m.checkApprovedState(ctx, n, st); err != nil {
 		return nil, err
 	}
+	if err := m.checkCheckpointPlanObservation(ctx, st); err != nil {
+		return nil, err
+	}
 	cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
 	if cfgErr != nil {
 		return nil, fmt.Errorf("load approved reviewer policy: %w", cfgErr)
@@ -1537,6 +1540,12 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	st.CarryReason = ""
 	digest := hash(body)
 	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", n), IssueNumber: n, Type: contract.ArtifactReview, Producer: "human:" + actor, Verdict: verdict, Summary: "human plan review", Body: body, CreatedAt: m.nowFn(), Metadata: map[string]string{"kind": "human", "actor": actor, "task_digest": st.TaskDigest, "policy_digest": st.PolicyDigest, "policy_tree_digest": st.PolicyTreeDigest, "plan_digest": hash(plan.Body), "test_plan_digest": hash(test.Body), "content_sha256": digest, "review_source": "authenticated-human", "base_sha": st.BaseSHA}}
+	if _, _, present, bindingErr := CheckpointPlanHeads(st); present && bindingErr != nil {
+		return nil, bindingErr
+	}
+	for k, v := range ReviewBindings(st) {
+		art.Metadata[k] = v
+	}
 	if err := contract.ValidateArtifact(&art); err != nil {
 		return nil, err
 	}
@@ -1647,7 +1656,7 @@ func (m *Manager) RecordTrustedValidation(ctx context.Context, n int, owner stri
 func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art contract.Artifact, advisory, trusted, implementation bool, eligibility ...func(*IssueState) error) (*IssueState, error) {
 	metadata := make(map[string]string, len(art.Metadata))
 	for k, v := range art.Metadata {
-		if k != "staged_by" && k != "harness_source" && k != "model_source" && !strings.HasPrefix(k, "validation_trusted_") && !strings.HasPrefix(k, "implementation_trusted_") {
+		if !((art.Type == contract.ArtifactDesign || art.Type == contract.ArtifactTestPlan) && strings.HasPrefix(k, "checkpoint_plan_")) && k != "staged_by" && k != "harness_source" && k != "model_source" && !strings.HasPrefix(k, "validation_trusted_") && !strings.HasPrefix(k, "implementation_trusted_") {
 			metadata[k] = v
 		}
 	}
@@ -1736,6 +1745,9 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			art.CreatedAt = m.nowFn()
 		}
 		if art.Type == contract.ArtifactReview {
+			if err := m.checkCheckpointPlanObservation(ctx, st); err != nil {
+				return err
+			}
 			if art.Metadata == nil {
 				return fmt.Errorf("review approval metadata is required")
 			}
@@ -1922,6 +1934,9 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	}
 	if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
 		return nil, err
+	}
+	if _, candidate, present, bindingErr := CheckpointPlanHeads(st); present && (bindingErr != nil || st.HeadSHA != candidate) {
+		return nil, fmt.Errorf("%w: explicit checkpoint reconciliation required", ErrApprovalRequired)
 	}
 	if st.PRRevision != nil {
 		return nil, fmt.Errorf("issue #%d has a pending PR revision; issue checkpoint publication is blocked", n)
@@ -2276,6 +2291,13 @@ func ReviewBindings(st *IssueState) map[string]string {
 	if st.PolicyTreeDigest != "" {
 		bindings["policy_tree_digest"] = st.PolicyTreeDigest
 	}
+	if expected, candidate, present, err := CheckpointPlanHeads(st); present {
+		bindings["checkpoint_candidate"] = candidate
+		bindings["checkpoint_predecessor"] = expected
+		if err != nil {
+			bindings["checkpoint_invalid"] = ""
+		}
+	}
 	bindings["base_sha"] = st.BaseSHA
 	bindings["review_claim_id"] = st.Lease.ClaimID
 	for _, art := range st.Artifacts {
@@ -2308,6 +2330,14 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 		gate, err = contract.ResolveGate(wu.Gate, "", "")
 		if err != nil {
 			return err
+		}
+	}
+	if _, _, present, err := CheckpointPlanHeads(st); present {
+		if err != nil {
+			return err
+		}
+		if gate == contract.GateNone {
+			gate = contract.GateAgent
 		}
 	}
 	if gate == contract.GateNone {
@@ -2348,6 +2378,16 @@ func verifyReviewBinding(st *IssueState, gate contract.GateMode) error {
 	}
 	if tree := review.Metadata["policy_tree_digest"]; tree != "" && tree != st.PolicyTreeDigest {
 		return ErrApprovalRequired
+	}
+	if _, _, present, err := CheckpointPlanHeads(st); present {
+		if err != nil {
+			return err
+		}
+		for k, v := range ReviewBindings(st) {
+			if v == "" || review.Metadata[k] != v {
+				return ErrApprovalRequired
+			}
+		}
 	}
 	kind := review.Metadata["kind"]
 	if gate == contract.GateAgent && kind != "agent" && !(kind == "human" && review.Metadata["actor"] != "") {

@@ -726,3 +726,159 @@ func TestCheckpointPreparationWithoutClaimRejectsInvalidInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckpointRecoveryPlanReviewBindings(t *testing.T) {
+	for _, local := range []bool{true, false} {
+		t.Run(fmt.Sprint(local), func(t *testing.T) {
+			f := newReconciliationFixture(t, "true", local)
+			ctx := t.Context()
+			// Make the preserved candidate additive for both direct stores.
+			f.git(f.path, "reset", "--hard", f.a)
+			f.write(f.path, "candidate.txt", "preserved recovery content\n")
+			f.git(f.path, "add", "candidate.txt")
+			f.git(f.path, "commit", "-m", "candidate")
+			f.b = f.git(f.path, "rev-parse", "HEAD")
+			if _, err := f.m.Release(ctx, f.n, "local-dev", "preserve candidate"); err != nil {
+				t.Fatal(err)
+			}
+			issue, err := f.tr.GetIssue(ctx, f.n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.tr.UpdateIssueBody(ctx, f.n, strings.Replace(issue.Body, "objective:", "objective: amended ", 1)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.m.ApproveTask(ctx, f.n, "local-dev"); err != nil {
+				t.Fatal(err)
+			}
+			p, err := f.m.PrepareCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !p.ClaimRequired {
+				t.Fatal("expected fresh claim")
+			}
+			if _, err = f.m.AcquirePreparedCheckpoint(ctx, f.n, p); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.m.ReconcilePreparedCheckpoint(ctx, f.n, p); !errors.Is(err, ErrApprovalRequired) {
+				t.Fatalf("fresh reconcile: %v", err)
+			}
+			if current := f.state(); current.Lease.Status != "active" || current.HeadSHA != f.a {
+				t.Fatal("fresh reconciliation did not retain claim/checkpoint")
+			}
+			plan := contract.Artifact{Type: contract.ArtifactDesign, Producer: "test:planner", Summary: "replacement", Body: "candidate " + f.b}
+			tests := contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "test:planner", Summary: "tests", Body: "test preserved content"}
+			_, err = f.m.RecordCheckpointPlan(ctx, f.n, p, plan, tests)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.m.RecordCheckpoint(ctx, f.n, "local-dev", f.branch, f.b); !errors.Is(err, ErrApprovalRequired) {
+				t.Fatalf("ordinary checkpoint: %v", err)
+			}
+			if _, err = f.m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false); !errors.Is(err, ErrApprovalRequired) {
+				t.Fatalf("unreviewed reconcile: %v", err)
+			}
+			st, err := f.m.RecordHumanReview(ctx, f.n, "APPROVED", "reviewed exact candidate")
+			if err != nil {
+				t.Fatal(err)
+			}
+			issue, err = f.tr.GetIssue(ctx, f.n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wu, err := contract.ParseWorkUnitFromIssue(f.n, issue.Title, issue.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = VerifyApproval(st, wu); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"checkpoint_plan_candidate", "checkpoint_plan_predecessor", "checkpoint_plan_claim", "checkpoint_plan_task", "checkpoint_plan_policy", "checkpoint_plan_policy_tree", "checkpoint_plan_base"} {
+				raw, _ := json.Marshal(st)
+				var altered IssueState
+				if err = json.Unmarshal(raw, &altered); err != nil {
+					t.Fatal(err)
+				}
+				for i := range altered.Artifacts {
+					if altered.Artifacts[i].Type == contract.ArtifactDesign {
+						altered.Artifacts[i].Metadata[key] = strings.Repeat("f", 40)
+					}
+				}
+				if err = VerifyApproval(&altered, wu); err == nil {
+					t.Fatalf("accepted changed %s", key)
+				}
+				// Even a matching changed pair cannot inherit the old review.
+				for i := range altered.Artifacts {
+					if altered.Artifacts[i].Type == contract.ArtifactTestPlan {
+						altered.Artifacts[i].Metadata[key] = strings.Repeat("f", 40)
+					}
+				}
+				if err = VerifyApproval(&altered, wu); err == nil {
+					t.Fatalf("replayed review accepted changed pair %s", key)
+				}
+
+			}
+			if _, err = f.m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false); err != nil {
+				t.Fatal(err)
+			}
+			if f.state().HeadSHA != f.b || f.git(f.path, "show", "HEAD:candidate.txt") != "preserved recovery content" {
+				t.Fatal("lost candidate")
+			}
+			// Ordinary artifact input cannot manufacture an authenticated recovery pair.
+			plan.Metadata = map[string]string{"checkpoint_plan_origin": "coordinator", "checkpoint_plan_candidate": f.b, "checkpoint_plan_predecessor": f.a}
+			st, err = f.m.UpdateArtifact(ctx, f.n, "local-dev", plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactDesign && a.Metadata["checkpoint_plan_origin"] != "" {
+					t.Fatal("forged coordinator identity")
+				}
+			}
+			if err = VerifyApproval(st, wu); err == nil {
+				t.Fatal("replacement inherited approval")
+			}
+		})
+	}
+}
+
+func TestCheckpointRecoveryPlanFences(t *testing.T) {
+	for _, race := range []string{"token", "owner", "state", "expiry", "successor"} {
+		t.Run(race, func(t *testing.T) {
+			f := newReconciliationFixture(t, "true")
+			p, err := f.m.PrepareCheckpoint(t.Context(), f.n, "local-dev", f.a, f.b, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch race {
+			case "token":
+				f.m.BindClaim(f.n, "stale-token")
+			case "owner":
+				p.owner = "different-owner"
+			case "state":
+				_, err = f.m.UpdatePhase(t.Context(), f.n, "local-dev", "review", "active")
+			case "expiry":
+				f.m.SetNowFunc(func() time.Time { return p.State.Lease.ExpiresAt.Add(time.Second) })
+			case "successor":
+				_, err = f.m.Release(t.Context(), f.n, "local-dev", "successor")
+				if err == nil {
+					_, err = f.m.Acquire(t.Context(), f.n, "local-dev", "mock", "plan", 4*time.Hour, 1)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := f.state()
+			raw, _ := json.Marshal(before)
+			_, err = f.m.RecordCheckpointPlan(t.Context(), f.n, p, contract.Artifact{Type: contract.ArtifactDesign, Producer: "test", Summary: "plan", Body: "plan"}, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "test", Summary: "test", Body: "tests"})
+			if err == nil {
+				t.Fatal("accepted " + race)
+			}
+			after, _ := json.Marshal(f.state())
+			if string(raw) != string(after) {
+				t.Fatal("rejected plan changed state")
+			}
+		})
+	}
+}

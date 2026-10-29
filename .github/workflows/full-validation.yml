@@ -1,0 +1,122 @@
+name: Full validation
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: Immutable commit to validate
+        required: true
+        type: string
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full:
+    name: Full tests and distribution builds
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      GOMAXPROCS: '4'
+      GOFLAGS: '-p=2'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record exact commit
+        env:
+          EXPECTED_SHA: ${{ inputs.commit || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          mkdir -p "$RUNNER_TEMP/full-validation"
+          git rev-parse HEAD > "$RUNNER_TEMP/full-validation/commit.txt"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Configure test identity
+        run: |
+          git config --global user.name "SwarmOS CI"
+          git config --global user.email "ci@swarmos.local"
+      - name: Install reviewer sandbox (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - name: Formatting and static checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            unformatted=$(gofmt -s -l .)
+            if [ -n "$unformatted" ]; then printf '%s\n' "$unformatted"; exit 1; fi
+            go build ./...
+            go vet ./...
+            go tool staticcheck ./...
+            go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+            go run ./cmd/changelog --check
+          } 2>&1 | tee "$RUNNER_TEMP/full-validation/static.log"
+      - name: Full tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -timeout=15m ./... 2>&1 | tee "$RUNNER_TEMP/full-validation/test.log"
+      - name: Full race tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -timeout=15m ./... 2>&1 | tee "$RUNNER_TEMP/full-validation/race.log"
+      - name: Build CLI
+        run: go build -o swarm-ci.exe ./cmd/swarm
+      - name: Exercise CLI surface
+        run: |
+          ./swarm-ci.exe version
+          ./swarm-ci.exe --help
+          ./swarm-ci.exe repo --help
+          ./swarm-ci.exe repo init --help
+          ./swarm-ci.exe repo doctor --help
+          ./swarm-ci.exe repo plan --help
+          ./swarm-ci.exe repo validate --help
+          ./swarm-ci.exe issue --help
+          ./swarm-ci.exe issue claim --help
+          ./swarm-ci.exe issue work --help
+          ./swarm-ci.exe issue stage --help
+          ./swarm-ci.exe issue review-plan --help
+          ./swarm-ci.exe issue validate --help
+          ./swarm-ci.exe issue submit --help
+          ./swarm-ci.exe pr --help
+          ./swarm-ci.exe pr status --help
+          ./swarm-ci.exe pr work --help
+          ./swarm-ci.exe pr stage --help
+          ./swarm-ci.exe pr rebase --help
+          ./swarm-ci.exe pr validate --help
+          ./swarm-ci.exe pr submit --help
+      - name: Cross-compile all distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+              echo "Building $target"
+              GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
+            done
+          } 2>&1 | tee "$RUNNER_TEMP/full-validation/build.log"
+      - name: Summarize validation
+        if: always()
+        run: |
+          {
+            echo '### Full validation'
+            echo 'Commit: ${{ inputs.commit || github.sha }}'
+            echo 'Result: ${{ job.status }}; see retained logs for failing commands.'
+            echo 'No existing Go benchmarks or performance target are available in this repository.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain validation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: full-validation-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/full-validation/
+          retention-days: 14
+          if-no-files-found: warn

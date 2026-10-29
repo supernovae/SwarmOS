@@ -663,3 +663,25 @@ with signals explaining the advice. Only recorded dimensions on the approved
 WorkUnit select an execution profile.
 
 On GitHub, `swarm issue lint <issue-number>` also reports missing or extra native blocked-by links as advisory warnings, including repository-qualified issue references. JSON output includes `warnings` and keeps `status: valid`. If the native view is unavailable, lint reports that instead of guessing drift. Lint does not change the body or relationships, and later body edits are not synchronized automatically. Roadmap reapplication retries dependency projections and restores the requested child order without duplicating links.
+
+## Repository validation lanes
+
+Every PR runs the same fixed regression profile, including documentation-only, broad and unknown changes. Trusted-base policy owns all-source formatting, build, vet and staticcheck plus the commands below. Mandatory security checks cover authoritative grants, credentials, filesystem confinement, isolation and fork admission; the full core packages cover approval, fencing and protected policy. CLI smoke and changelog validation also run in CI. Existing security scanning remains enabled.
+
+```bash
+go test -timeout=5m ./internal/cli -run '^Test(CLIRepoValidateHarnessGrantNeedsAuthoritativeState|RepoValidateGrantOnlyRunsNoChecks|RepoValidateGrantFileRechecked|RootDefaultEnvironment|RootInjectedEnvironment|ResolveBuildVersion|ResolveBuildVersionWithoutVCS)$' -count=1
+go test -timeout=5m ./internal/gitcredential/... ./internal/safefs/... -count=1
+go test -timeout=5m ./internal/agent -run '^Test(DefaultModeNeverRunsHostAgent|OperatorCannotWeakenApprovedIsolation|MockCannotBypassIsolation|IsolatedRunnerRejectsHostCredentialsAndUnrestrictedNetwork|NativeCodexRejectsPolicyOverrides|NativeIsolatedEffortAdmitsNoOtherArguments|IsolatedBackendIsExplicit|ConfiguredRunnerRejectsPublishingCredentialForwarding|RestrictedEnvRemovesPublishingCredentials|ConfiguredRunnerWithLookupRejectsCredentialNames|AdapterProcessHidesPublishingCredentials)$' -count=1
+go test -timeout=5m ./internal/sandbox -run '^Test(WorkerArchiveRoundTripAndImport|WorkerImportRejectsConcurrentChanges|WorkerRejectsHostileArchives|WorkerInputRejectsLinksAndCancellation|WorkerRejectsUnpinnedImageAndDoesNotForwardCredentials|WorkerInputRejectsPortableAliases|WorkerEmptyEnvironmentNeverInherits|WorkerOCIMissingCapabilitiesFailClosed|DependencyCacheNoFallback|NativeCodexBoundary|ToolExecutorBoundary)$' -count=1
+go test -timeout=5m ./internal/fork -run '^Test(GatewayDeadlineCancelsInFlightScan|GatewayIgnoresMismatchedOrEditedResults|ForkJSONRejectsTrailingMalformedData|ForkCoordinatorSecurityAndLifecycle|OperationListsStayInSync|ForkRequestRejectsCarryAuthority)$' -count=1
+go test -timeout=10m ./internal/validation/... ./internal/harness/... ./internal/coordination/... ./internal/lease/... ./internal/contract/...
+go test -timeout=5m ./cmd/changelog ./internal/changelog
+```
+
+There is no changed-file selector or conditional broad-change fallback: broad changes retain this fixed profile and receive full behavior coverage in nightly/release validation, including the entire CLI package. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
+
+The [full validation workflow](../.github/workflows/full-validation.yml) runs nightly at 04:23 UTC and can be started from Actions with **Run workflow**. It runs full normal and race suites, static and vulnerability checks, CLI smoke, changelog validation and Linux/macOS/Windows builds on amd64 and arm64. No existing benchmark or performance target is available. Each run records its commit and retains test/build logs for 14 days, including failures, with an Actions summary linking the outcome to the commit.
+
+Release snapshot and publishing jobs require the shared full gate and existing release eligibility checks for the same resolved immutable commit. A failed or skipped gate blocks packaging; a successful nightly run for another commit cannot satisfy release validation. Publishing retains the release environment approval and provenance attestation.
+
+The bootstrap PR still validates against its old trusted base, including that base's full test policy. The fixed profile takes effect once merged into a trusted base. Contributors and agents cannot override that policy. Before merging, maintainers should update any branch protection requiring the removed `Lint and vulnerabilities` or `Test and CLI smoke` jobs to the retained policy and CLI smoke jobs, and confirm the nightly schedule in Actions.

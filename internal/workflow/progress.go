@@ -14,6 +14,7 @@ type ProgressEvent = progress.Event
 // workProgress serializes callbacks from execution and the local status timer.
 // It is independent of the authoritative lease-renewal heartbeat.
 type workProgress struct {
+	activity              *progress.Activity
 	session               *progress.Session
 	closed                bool
 	shared                bool
@@ -38,15 +39,16 @@ type workProgress struct {
 }
 
 func startWorkProgress(ctx context.Context, issue int, emit func(ProgressEvent)) *workProgress {
-	return &workProgress{session: progress.Start(ctx, issue, 0, emit)}
+	p := progress.Start(ctx, issue, 0, emit)
+	return &workProgress{session: p, activity: p.Activity(), done: p.Done()}
 }
 func newWorkProgress(ctx context.Context, issue int, emit func(ProgressEvent), ticks <-chan time.Time) *workProgress {
 	p := progress.New(ctx, issue, 0, emit, ticks, time.Now, nil)
-	return &workProgress{session: p, done: p.Done()}
+	return &workProgress{session: p, activity: p.Activity(), done: p.Done()}
 }
 func newSetupProgress(ctx context.Context, issue int, emit func(ProgressEvent), ticks <-chan time.Time) *workProgress {
 	done := make(chan struct{})
-	p := &workProgress{ctx: ctx, now: time.Now, emit: emit, issue: issue, started: time.Now(), stop: make(chan struct{}), done: done}
+	p := &workProgress{activity: progress.NewActivity(), ctx: ctx, now: time.Now, emit: emit, issue: issue, started: time.Now(), stop: make(chan struct{}), done: done}
 	if issue != 0 {
 		p.next("preflight")
 	}
@@ -75,9 +77,11 @@ func (p *workProgress) send(status string) {
 	if p.check != "" {
 		origin = p.checkStarted
 	}
-	p.emit(ProgressEvent{IssueNumber: p.issue, Stage: p.stage, Check: p.check, Status: status,
+	e := ProgressEvent{IssueNumber: p.issue, Stage: p.stage, Check: p.check, Status: status,
 		Elapsed: now.Sub(p.started), StageElapsed: now.Sub(origin),
-		Repair: p.repairRound, RepairLimit: p.repairLimit, Targets: p.repairTargets})
+		Repair: p.repairRound, RepairLimit: p.repairLimit, Targets: p.repairTargets}
+	p.activity.Enrich(&e, now)
+	p.emit(e)
 }
 
 // observeCheck reports validator check lifecycle events within the current stage.
@@ -276,4 +280,11 @@ func (p *workProgress) heartbeat(ctx context.Context) {
 			p.timer.Reset(15 * time.Second)
 		}
 	}
+}
+
+func (p *workProgress) activityTracker() *progress.Activity {
+	if p == nil {
+		return nil
+	}
+	return p.activity
 }

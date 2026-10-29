@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/progress"
 	"io"
 	"os"
 	"os/exec"
@@ -163,6 +164,7 @@ func (a *CLIAdapter) BuildCommand(req RunRequest) (string, []string) {
 }
 
 func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult, runErr error) {
+	defer progress.ActivityFrom(ctx).Role(req.Role, a.driver, time.Now())()
 	collector := &GuidanceCollector{}
 	collector.Delivered(req.OperatorInstructions)
 	defer func() {
@@ -244,10 +246,10 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 	transcript := newDiagnosticsTail()
 	if strings.EqualFold(req.Mode, "interactive") && !req.ReadOnly {
 		cmd.Stdin = os.Stdin
-		cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf, transcript)
-		cmd.Stderr = io.MultiWriter(os.Stderr, &outBuf, transcript)
+		cmd.Stdout = io.MultiWriter(os.Stdout, &outBuf, transcript, progress.ActivityFrom(ctx).Writer(time.Now))
+		cmd.Stderr = io.MultiWriter(os.Stderr, &outBuf, transcript, progress.ActivityFrom(ctx).Writer(time.Now))
 	} else {
-		capture := io.MultiWriter(&outBuf, transcript)
+		capture := io.MultiWriter(&outBuf, transcript, progress.ActivityFrom(ctx).Writer(time.Now))
 		cmd.Stdout, cmd.Stderr = capture, capture
 	}
 	observation.lifecycle.Setup = durationSince(setup)
@@ -322,6 +324,7 @@ func (m *MockRunner) Provenance(role string, readOnly bool) contract.RoleAttesta
 }
 
 func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error) {
+	defer progress.ActivityFrom(ctx).Role(req.Role, "mock", time.Now())()
 	started := time.Now()
 	safe, err := safefs.Open(req.WorktreePath)
 	if err != nil {

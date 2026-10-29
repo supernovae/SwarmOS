@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/claimpause"
+	"github.com/supernovae/swarmos/internal/progress"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
@@ -34,11 +36,11 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 	var out process.Output
 	transcript := newDiagnosticsTail()
 	var in io.Reader
-	capture := io.MultiWriter(&out, transcript)
+	capture := io.MultiWriter(&out, transcript, progress.ActivityFrom(ctx).Writer(time.Now))
 	var stdout, stderr io.Writer = capture, capture
 	if strings.EqualFold(req.Mode, "interactive") {
 		in = os.Stdin
-		stdout, stderr = io.MultiWriter(os.Stdout, &out, transcript), io.MultiWriter(os.Stderr, &out, transcript)
+		stdout, stderr = io.MultiWriter(os.Stdout, &out, transcript, progress.ActivityFrom(ctx).Writer(time.Now)), io.MultiWriter(os.Stderr, &out, transcript, progress.ActivityFrom(ctx).Writer(time.Now))
 	}
 	limits, limitErr := contract.ResolveAgentLimits(a.executionPolicy, req.Role, strings.EqualFold(req.Mode, "interactive"), 0)
 	if limitErr != nil {

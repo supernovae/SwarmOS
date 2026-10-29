@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/progress"
 	"os"
 	"path/filepath"
 	"slices"
@@ -163,13 +164,15 @@ type PreflightResult struct {
 }
 
 type Engine struct {
-	NewRunner    func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
-	Tracker      tracker.Tracker
-	LeaseManager *lease.Manager
-	Config       *contract.SwarmConfig
-	repoRoot     string
-	ForkMode     bool
-	ForkRemote   string
+	progressTicks <-chan time.Time
+	progressNow   func() time.Time
+	NewRunner     func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
+	Tracker       tracker.Tracker
+	LeaseManager  *lease.Manager
+	Config        *contract.SwarmConfig
+	repoRoot      string
+	ForkMode      bool
+	ForkRemote    string
 	// LookupEnv resolves execution mode and agent environment for this engine;
 	// nil reads the process environment.
 	LookupEnv func(string) (string, bool)
@@ -501,9 +504,19 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		r.progress.mu.Unlock()
 		r.progress.next("preflight")
 	} else {
-		r.progress = startWorkProgress(r.ctx, r.opts.IssueNumber, r.opts.OnProgress)
+		if e.progressTicks != nil {
+			now := e.progressNow
+			if now == nil {
+				now = time.Now
+			}
+			p := progress.New(ctx, r.opts.IssueNumber, 0, r.opts.OnProgress, e.progressTicks, now, nil)
+			r.progress = &workProgress{session: p, activity: p.Activity(), done: p.Done()}
+		} else {
+			r.progress = startWorkProgress(r.ctx, r.opts.IssueNumber, r.opts.OnProgress)
+		}
 	}
 
+	r.ctx = progress.WithActivity(ctx, r.progress.activityTracker())
 	defer func() { r.progress.finish(result, workErr) }()
 	if err := r.preflightRun(); err != nil {
 		return nil, err

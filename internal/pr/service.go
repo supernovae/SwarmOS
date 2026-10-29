@@ -1075,6 +1075,7 @@ func (s *Service) Validate(ctx context.Context, number int) (result *Result, run
 		}()
 	}
 
+	ctx = progress.WithActivity(ctx, p.Activity())
 	r, remote, err := s.openForMutation(ctx, number, true)
 	if err != nil {
 		return nil, err
@@ -1180,6 +1181,7 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 		}()
 	}
 
+	ctx = progress.WithActivity(ctx, p.Activity())
 	r, remote, err := s.openForMutation(ctx, number, true)
 	if err != nil {
 		return nil, err

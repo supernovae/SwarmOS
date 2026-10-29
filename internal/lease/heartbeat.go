@@ -3,6 +3,7 @@ package lease
 import (
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/progress"
 	"sync"
 	"time"
 
@@ -28,10 +29,11 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 	interval := max(duration/3, time.Second)
 	go func() {
 		defer close(h.done)
-		st, err := m.GetCurrentState(ctx, issue)
+		rctx := progress.WithActivity(ctx, nil)
+		st, err := m.GetCurrentState(rctx, issue)
 		for {
 			if err == nil {
-				err = m.CheckClaim(ctx, issue, owner)
+				err = m.CheckClaim(rctx, issue, owner)
 			}
 			var b *ClaimBudget
 			if err == nil {
@@ -60,9 +62,9 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 			case <-timer.C():
 			}
 			// Reload before renewing so a manual final renewal is observed.
-			st, err = m.GetCurrentState(ctx, issue)
+			st, err = m.GetCurrentState(rctx, issue)
 			if err == nil {
-				err = m.CheckClaim(ctx, issue, owner)
+				err = m.CheckClaim(rctx, issue, owner)
 			}
 			if err == nil {
 				b, err = m.WorkBudget(st, duration)
@@ -83,11 +85,11 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 			if b != nil && b.RenewalsRemaining == 0 && !b.LeaseExpiryOnly() {
 				continue
 			}
-			renewed, renewErr := m.Renew(ctx, issue, owner, duration)
+			renewed, renewErr := m.Renew(rctx, issue, owner, duration)
 			if renewErr == nil {
 				st = renewed
 			} else if errors.Is(renewErr, ErrMaxRenewals) {
-				st, err = m.GetCurrentState(ctx, issue)
+				st, err = m.GetCurrentState(rctx, issue)
 			} else {
 				err = renewErr
 			}

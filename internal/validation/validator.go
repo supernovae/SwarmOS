@@ -144,6 +144,7 @@ func DurationText(d *time.Duration) string {
 }
 
 type ValidateOptions struct {
+
 	// Version and ClaimID identify the coordinator validation context. Empty
 	// context preserves ordinary validation without reusable evidence.
 	Version string

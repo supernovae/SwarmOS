@@ -632,7 +632,12 @@ func RunNativeValidation(ctx context.Context, dir, binary, command string, cache
 // Reuse the OCI filesystem acceptance rules. Native workers also operate on a
 // detached snapshot, so tools cannot access live Git or coordinator state.
 func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, run func(context.Context, string, string) error) (resultErr error) {
-	ctx, budget := startAgentBudget(ctx, opts)
+	return withNativeWorkspaceClock(ctx, dir, opts, realBudgetClock, run)
+}
+
+// withNativeWorkspaceClock owns the budget clock for this workspace invocation.
+func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOptions, clock budgetClock, run func(context.Context, string, string) error) (resultErr error) {
+	ctx, budget := newAgentBudget(ctx, opts, clock)
 	defer budget.close()
 	defer func() {
 		if budget.timedOut() {

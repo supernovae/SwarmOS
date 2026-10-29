@@ -13,7 +13,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1212,5 +1214,74 @@ func TestSandboxRestorePreflightClassification(t *testing.T) {
 	request.Registries = []string{"*.example"}
 	if err := CheckRestoreBoundary(t.Context(), b, request); err == nil || RestorePreflightUnavailable(err) {
 		t.Fatalf("invalid policy: %v", err)
+	}
+}
+
+func TestRestorePayloadEnvironment(t *testing.T) {
+	for _, key := range []string{"JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "MAVEN_OPTS", "GRADLE_OPTS", "DOTNET_GCHeapHardLimit", "DOTNET_gcServer", "DOTNET_GCHeapCount", "DOTNET_GCConserveMemory", "DOTNET_PROCESSOR_COUNT", "DOTNET_STARTUP_HOOKS", "GITHUB_TOKEN"} {
+		t.Setenv(key, "host-poison-secret")
+	}
+	const transport = "-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=43210 -Dhttp.nonProxyHosts= -Djavax.net.ssl.trustStore=/restore-trust/ca.jks -Djavax.net.ssl.trustStoreType=JKS -Djavax.net.ssl.trustStorePassword=" + restoreTrustPassword
+	const startup = " -Xms16m -Xmx128m -Xss512k -XX:MaxMetaspaceSize=128m -XX:CompressedClassSpaceSize=32m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:+UseSerialGC"
+	cases := []struct {
+		launcher    string
+		jvm, dotnet bool
+	}{
+		{"/usr/bin/mvn", true, false},
+		{"/usr/share/maven/bin/mvn", true, false},
+		{"/usr/bin/gradle", true, false},
+		{"/usr/share/gradle/bin/gradle", true, false},
+		{"/usr/bin/dotnet", false, true},
+		{"", false, false},
+		{"/usr/bin/unknown", false, false},
+		{"mvn", false, false}, {"gradle", false, false}, {"dotnet", false, false},
+		{"/tmp/mvn", false, false}, {"/tmp/gradle", false, false}, {"/tmp/dotnet", false, false},
+		{"/usr/bin/mvn-extra", false, false}, {"/usr/bin/gradle-extra", false, false}, {"/usr/bin/dotnet-extra", false, false},
+		{"/usr/share/maven/bin/mvn-extra", false, false}, {"/usr/share/gradle/bin/gradle-extra", false, false},
+		{"/usr/bin/java", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.launcher, func(t *testing.T) {
+			want := map[string]string{
+				"PATH": "/usr/bin:/bin", "HOME": "/cache/home", "TMPDIR": "/cache/tmp",
+				"XDG_CACHE_HOME": "/cache/home/.cache", "XDG_CONFIG_HOME": "/cache/home/.config", "XDG_DATA_HOME": "/cache/home/.local/share",
+				"HTTPS_PROXY": "http://127.0.0.1:43210", "https_proxy": "http://127.0.0.1:43210", "NO_PROXY": "", "no_proxy": "",
+				"SSL_CERT_FILE": "/restore-trust/ca.pem", "SSL_CERT_DIR": "/restore-trust/empty", "JAVA_TOOL_OPTIONS": transport,
+			}
+			if tc.jvm {
+				want["JAVA_TOOL_OPTIONS"] += startup
+			}
+			if tc.dotnet {
+				want["DOTNET_GCHeapHardLimit"] = "8000000"
+				want["DOTNET_gcServer"] = "0"
+				want["DOTNET_GCHeapCount"] = "1"
+				want["DOTNET_GCConserveMemory"] = "9"
+				want["DOTNET_PROCESSOR_COUNT"] = "1"
+			}
+			env := restorePayloadEnv(tc.launcher, "http://127.0.0.1:43210", "43210")
+			if !reflect.DeepEqual(env, restorePayloadEnv(tc.launcher, "http://127.0.0.1:43210", "43210")) {
+				t.Fatal("nondeterministic environment")
+			}
+			got := map[string]string{}
+			for _, entry := range env {
+				key, value, ok := strings.Cut(entry, "=")
+				if !ok {
+					t.Fatalf("invalid environment entry %q", entry)
+				}
+				if _, exists := got[key]; exists {
+					t.Fatalf("duplicate key %s", key)
+				}
+				got[key] = value
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("environment = %#v; want %#v", got, want)
+			}
+			if tc.dotnet {
+				bytes, err := strconv.ParseUint(got["DOTNET_GCHeapHardLimit"], 16, 64)
+				if err != nil || bytes != 128*1024*1024 {
+					t.Fatalf("GC hex bound = %d, %v", bytes, err)
+				}
+			}
+		})
 	}
 }

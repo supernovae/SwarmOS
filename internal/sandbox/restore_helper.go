@@ -105,10 +105,7 @@ func RunRestoreHelper(args []string) (retErr error) {
 	}
 	port := strconv.Itoa(bridge.listener.Addr().(*net.TCPAddr).Port)
 	command := exec.CommandContext(ctx, args[2], args[3:]...)
-	command.Env = []string{"PATH=/usr/bin:/bin", "HOME=/cache/home", "TMPDIR=/cache/tmp", "XDG_CACHE_HOME=/cache/home/.cache", "XDG_CONFIG_HOME=/cache/home/.config", "XDG_DATA_HOME=/cache/home/.local/share",
-		"HTTPS_PROXY=" + proxyURL.String(), "https_proxy=" + proxyURL.String(), "NO_PROXY=", "no_proxy=", "SSL_CERT_FILE=/restore-trust/ca.pem", "SSL_CERT_DIR=/restore-trust/empty",
-		// Native JVM settings are part of the transport contract, not host options.
-		"JAVA_TOOL_OPTIONS=-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=" + port + " -Dhttp.nonProxyHosts= -Djavax.net.ssl.trustStore=/restore-trust/ca.jks -Djavax.net.ssl.trustStoreType=JKS -Djavax.net.ssl.trustStorePassword=" + restoreTrustPassword}
+	command.Env = restorePayloadEnv(args[2], proxyURL.String(), port)
 	command.Stdin = nil
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
@@ -130,6 +127,22 @@ func RunRestoreHelper(args []string) (retErr error) {
 	}
 	return nil
 }
+
+// restorePayloadEnv supplies only fixed client startup and transport settings.
+func restorePayloadEnv(launcher, proxyURL, port string) []string {
+	env := []string{"PATH=/usr/bin:/bin", "HOME=/cache/home", "TMPDIR=/cache/tmp", "XDG_CACHE_HOME=/cache/home/.cache", "XDG_CONFIG_HOME=/cache/home/.config", "XDG_DATA_HOME=/cache/home/.local/share",
+		"HTTPS_PROXY=" + proxyURL, "https_proxy=" + proxyURL, "NO_PROXY=", "no_proxy=", "SSL_CERT_FILE=/restore-trust/ca.pem", "SSL_CERT_DIR=/restore-trust/empty",
+		// Native JVM settings are part of the transport contract, not host options.
+		"JAVA_TOOL_OPTIONS=-Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=" + port + " -Dhttp.nonProxyHosts= -Djavax.net.ssl.trustStore=/restore-trust/ca.jks -Djavax.net.ssl.trustStoreType=JKS -Djavax.net.ssl.trustStorePassword=" + restoreTrustPassword}
+	switch launcher {
+	case "/usr/bin/mvn", "/usr/share/maven/bin/mvn", "/usr/bin/gradle", "/usr/share/gradle/bin/gradle":
+		env[len(env)-1] += " -Xms16m -Xmx128m -Xss512k -XX:MaxMetaspaceSize=128m -XX:CompressedClassSpaceSize=32m -XX:ReservedCodeCacheSize=48m -XX:ActiveProcessorCount=1 -XX:+UseSerialGC"
+	case "/usr/bin/dotnet":
+		env = append(env, "DOTNET_GCHeapHardLimit=8000000", "DOTNET_gcServer=0", "DOTNET_GCHeapCount=1", "DOTNET_GCConserveMemory=9", "DOTNET_PROCESSOR_COUNT=1")
+	}
+	return env
+}
+
 func restoreHelperFilesystemCanary() error {
 	f, err := os.OpenFile("/cache/tmp/.canary", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {

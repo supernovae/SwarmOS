@@ -570,6 +570,14 @@ func TestRestoreRuntimeBoundary(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
+			before := make(map[string][]byte)
+			for _, m := range mounts {
+				data, err := os.ReadFile(m.source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before[m.source] = data
+			}
 			// Give the fixture a synthetic JDK while preserving the launcher's original
 			// system library bytes for the shell and helper. No extra host input is added.
 			systemEntries, e := os.ReadDir("/usr/lib")
@@ -702,15 +710,60 @@ func TestRestoreRuntimeBoundary(t *testing.T) {
 			if e != nil || string(result) != "complete" {
 				t.Fatal("runtime completion", e)
 			}
-			for _, m := range mounts {
-				data, e := os.ReadFile(m.source)
-				if e != nil || bytes.Contains(data, []byte("forbidden")) {
-					t.Fatal("runtime modified", e)
-				}
+			if err := checkRestoreRuntimeBytes(before); err != nil {
+				t.Fatal(err)
 			}
 			data, e = os.ReadFile(filepath.Join(control, "source/fixture"))
 			if e != nil || string(data) != "approved" {
 				t.Fatal("source modified", e)
+			}
+		})
+	}
+}
+
+// Compare every staged source with bytes captured before the boundary executes.
+// Payload text may itself contain the markers used by negative write probes.
+func checkRestoreRuntimeBytes(before map[string][]byte) error {
+	for source, want := range before {
+		got, err := os.ReadFile(source)
+		if err != nil {
+			return fmt.Errorf("read staged runtime %s: %w", source, err)
+		}
+		if !bytes.Equal(got, want) {
+			return fmt.Errorf("runtime modified: %s", source)
+		}
+	}
+	return nil
+}
+
+func TestRestoreRuntimeBoundaryIntegrity(t *testing.T) {
+	original := []byte("#!/bin/sh\nif (echo forbidden > /readonly); then exit 1; fi\n")
+	for _, tc := range []struct {
+		name     string
+		after    []byte
+		modified bool
+	}{
+		{"unchanged probe script", original, false},
+		{"same length modification", bytes.Replace(original, []byte("readonly"), []byte("modified"), 1), true},
+		{"truncated", original[:len(original)-1], true},
+		{"appended", append(append([]byte(nil), original...), 'x'), true},
+		{"empty", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := filepath.Join(t.TempDir(), "staged")
+			if err := os.WriteFile(source, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := map[string][]byte{source: data}
+			if err := os.WriteFile(source, tc.after, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkRestoreRuntimeBytes(before); (err != nil) != tc.modified {
+				t.Fatalf("integrity error = %v, want modified = %v", err, tc.modified)
 			}
 		})
 	}

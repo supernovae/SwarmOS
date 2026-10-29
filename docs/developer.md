@@ -695,3 +695,88 @@ The [full validation workflow](../.github/workflows/full-validation.yml) runs ni
 Release snapshot and publishing jobs require the shared full gate and existing release eligibility checks for the same resolved immutable commit. A failed or skipped gate blocks packaging; a successful nightly run for another commit cannot satisfy release validation. Publishing retains the release environment approval and provenance attestation.
 
 The bootstrap PR still validates against its old trusted base, including that base's full test policy. The fixed profile takes effect once merged into a trusted base. Contributors and agents cannot override that policy. Before merging, maintainers should update any branch protection requiring the removed `Lint and vulnerabilities` or `Test and CLI smoke` jobs to the retained policy and CLI smoke jobs, and confirm the nightly schedule in Actions.
+
+## Public personal-fork lifecycle regression driver
+
+Use the opt-in [public fork driver](../cmd/public-fork-regression/main.go) to
+exercise issue creation through draft publication and a revision of the same PR
+in disposable public fixtures. It uses your existing `gh` login and installed
+`swarm`, with the fixtures' configured coordinator, harnesses and isolation.
+Prepare a public upstream where your account has push permission and a distinct
+public personal fork owned by that account. The same account can act as
+maintainer and contributor; human plan decisions still require independent
+manual review.
+
+Prepare two separate checkouts. The upstream checkout's `origin` must point to
+the public upstream. The fork checkout's `origin` must point to your personal
+fork and its `upstream` remote to the public upstream. The driver checks existing
+API identity, public visibility, ownership, parent relationship, permissions,
+checkout roots and fetch/push remote URLs before creating a task. It refuses
+`supernovae/swarmos`, private repositories and organization-owned forks. Private
+and organization fork policy testing is deferred.
+
+Start with a preview, replacing the repository and path placeholders:
+
+```bash
+go run ./cmd/public-fork-regression \
+  --upstream UPSTREAM_OWNER/PUBLIC_FIXTURE \
+  --fork YOUR_LOGIN/PERSONAL_FORK \
+  --upstream-root /path/to/upstream-checkout \
+  --fork-root /path/to/fork-checkout \
+  --gate human --dry-run
+```
+
+These flags belong to the driver. Dry-run renders the full lifecycle with
+symbolic issue, PR and head values, without subprocesses, network requests or
+filesystem writes. Public relationship verification happens during live
+preflight. Remove `--dry-run` deliberately to start a live run. Each run uses a
+unique title and a unique file under `public-fork-regression/`.
+
+The driver creates and approves the upstream task, claims it in fork mode, and
+plans isolated work. With `--gate agent`, it runs trusted upstream
+`swarm issue review-plan` and checks current approval before implementation.
+With `--gate human` (the default), it pauses and prints a maintainer command.
+Review the exact plan and test plan, then decide independently. For example,
+an approving maintainer runs this command manually with the actual issue number:
+
+```bash
+swarm --backend github --repo UPSTREAM_OWNER/PUBLIC_FIXTURE \
+  --root /path/to/upstream-checkout --upstream-remote origin \
+  issue review-plan 123 --approve --notes 'Reviewed the current plan and test plan'
+```
+
+The driver never records a human decision itself. A pause exits with code 2 and
+prints a relative private record path in the fork checkout. Resume with the same
+explicit driver options and `--resume /path/to/fork-checkout/RECORD/resume.json`.
+Resume repeats preflight and checks fresh upstream approval of the current
+WorkUnit, plan and test plan. A rejected, missing or stale decision keeps the run
+stopped. Agent reviews that still need a maintainer decision also pause.
+
+Implementation runs the existing pipeline checks. A completed, validated work
+result and unchanged candidate head precede the separate `issue submit` command.
+The driver confirms the resulting PR is a draft from the personal fork, plans a
+revision in its separate PR worktree, repeats the plan gate, implements, checks
+`pr status`, and explicitly runs `pr submit` on the same PR. Swarm's existing
+expected-head fencing controls publication, and fork submission retains its
+built-in revalidation. The driver adds no separate validation command.
+
+Summaries retain fixture links and command outcomes without raw reports,
+authentication output or local checkout paths. Private records under
+`.swarm-public-fork-*` in the fork checkout retain run parameters; they cannot
+authorize approval. Keep the records, issue, branches and draft PR for inspection.
+Unexpected failures stop the sequence for manual investigation; resume supports
+plan gates rather than general crash recovery. Cleanup is an explicit operator
+decision: the driver never closes issues, deletes branches or removes fixtures.
+
+For live PR review, retain:
+
+- The current driver's commit or source hashes and a sanitized invocation.
+- Preflight observations, issue/PR links and the isolated worktree relationship.
+- Manual pause/resume decisions or trusted upstream agent review results.
+- The initial draft and published head, then the revision's same PR identity and
+  published head, including expected-head refusal observations when applicable.
+- The retained records and your later manual cleanup decision.
+
+Offline command-sequence and refusal tests run with
+`go test -timeout=2m ./cmd/public-fork-regression -count=1`. Live fixture execution
+is an operator review step using the current driver.

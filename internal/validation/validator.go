@@ -121,6 +121,39 @@ type ValidateOptions struct {
 	DependencyPolicy sandbox.DependencyPolicy
 }
 
+// CheckCheckpointBoundary uses the validator's approved execution selection.
+// Preview resolves availability only; actual admission also probes isolation.
+func CheckCheckpointBoundary(ctx context.Context, root, base string, probe bool) (bool, error) {
+	if _, err := loadTrustedValidationSpec(root, base); err != nil {
+		return false, err
+	}
+	cfg, err := harness.LoadConfigAt(root, base)
+	if err != nil {
+		return false, err
+	}
+	execution, err := contract.ResolveExecution(cfg, os.Getenv("SWARM_EXECUTION_MODE"))
+	if err != nil {
+		return false, err
+	}
+	if execution.Mode != contract.ExecutionIsolated {
+		return false, nil
+	}
+	if execution.Backend == contract.BackendNative {
+		if err = sandbox.CheckNativeValidationAvailable(cfg); err != nil {
+			return true, err
+		}
+		if probe {
+			err = sandbox.CheckNativeValidation(ctx, cfg)
+		}
+	} else {
+		err = sandbox.CheckReadOnlyRuntime("container", execution.ContainerRuntime, execution.ContainerImage)
+		if err == nil && probe {
+			err = sandbox.CheckWorkerRuntime(ctx, execution.ContainerRuntime, execution.ContainerImage)
+		}
+	}
+	return !probe, err
+}
+
 // Validate loads checks and protected paths exclusively from the immutable base.
 func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, opts ValidateOptions) (*ValidationReport, error) {
 	if opts.BaseSHA == "" {

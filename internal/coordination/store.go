@@ -95,6 +95,23 @@ func (s *FileStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	}
 	return b, digest(b), nil
 }
+
+// LoadCheckpointPreview observes the atomically replaced state without creating
+// a lock file. Publication still uses the normal locked CAS.
+func (s *FileStore) LoadCheckpointPreview(ctx context.Context, n int) ([]byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	b, err := safefs.ReadFile(s.repoRoot, filepath.Join(".swarm", "coordination", fmt.Sprintf("issue-%d.json", n)), 64<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", ErrNotFound
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return b, digest(b), nil
+}
+
 func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next []byte) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -211,6 +228,21 @@ func (s *GitStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	}
 	return []byte(body), sha, nil
 }
+
+// LoadCheckpointPreview never fetches. An unavailable pinned state must be
+// fetched explicitly by the operator before a read-only preview can inspect it.
+func (s *GitStore) LoadCheckpointPreview(ctx context.Context, n int) ([]byte, string, error) {
+	sha, err := s.remoteSHA(ctx, s.ref(n))
+	if err != nil {
+		return nil, "", err
+	}
+	body, err := s.run(ctx, "", "show", sha+":state.json")
+	if err != nil {
+		return nil, "", fmt.Errorf("pinned checkpoint state %s unavailable locally; fetch the state ref before retrying: %w", sha, err)
+	}
+	return []byte(body), sha, nil
+}
+
 func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next []byte) (string, error) {
 	blob, err := s.run(ctx, string(next), "hash-object", "-w", "--stdin")
 	if err != nil {

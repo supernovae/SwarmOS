@@ -1,16 +1,21 @@
 package lease
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -20,23 +25,44 @@ type checkpointReconciler interface {
 }
 
 type CheckpointReconciliation struct {
-	State              *IssueState               `json:"state"`
-	Observation        workspace.CheckpointState `json:"checkpoint"`
-	DryRun             bool                      `json:"dry_run"`
-	ValidationRequired bool                      `json:"validation_required"`
-	ReviewRequired     bool                      `json:"review_required"`
-	PatchIdentity      string                    `json:"patch_identity"`
+	ClaimRequired         bool `json:"claim_required"`
+	BoundaryProbeRequired bool `json:"boundary_probe_required"`
+	revision              string
+	owner                 string
+	expected              string
+	candidate             string
+	prepared              bool
+	State                 *IssueState               `json:"state"`
+	Observation           workspace.CheckpointState `json:"checkpoint"`
+	DryRun                bool                      `json:"dry_run"`
+	ValidationRequired    bool                      `json:"validation_required"`
+	ReviewRequired        bool                      `json:"review_required"`
+	PatchIdentity         string                    `json:"patch_identity"`
 }
 
 // ReconcileCheckpoint accepts only an explicit, clean local task candidate. It
 // never retries publication against a newer state or remote branch.
 func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expected, candidate string, dryRun bool) (*CheckpointReconciliation, error) {
+	if dryRun {
+		return m.PrepareCheckpoint(ctx, n, owner, expected, candidate, false)
+	}
+	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, false, false, false, "")
+}
+
+// PrepareCheckpoint authenticates and observes recovery without acquiring a
+// claim, fetching objects, opening locks, or running candidate checks.
+func (m *Manager) PrepareCheckpoint(ctx context.Context, n int, owner, expected, candidate string, probe bool) (*CheckpointReconciliation, error) {
+	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, true, true, probe, "")
+}
+
+func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expected, candidate string, dryRun, prepare, probe bool, pinned string) (*CheckpointReconciliation, error) {
 	if m.gateway != nil {
 		return nil, fmt.Errorf("checkpoint reconciliation is upstream-only; use the fork PR revision workflow")
 	}
-	publisher, ok := m.store.(checkpointReconciler)
-	if !ok {
-		return nil, fmt.Errorf("checkpoint reconciliation requires a Git-backed upstream store; local stores are unsupported")
+	publisher, gitStore := m.store.(checkpointReconciler)
+	_, localStore := m.store.(*coordination.FileStore)
+	if !gitStore && !localStore {
+		return nil, fmt.Errorf("checkpoint reconciliation requires an upstream Git store or local FileStore")
 	}
 	for _, sha := range []string{expected, candidate} {
 		if len(sha) != 40 {
@@ -49,11 +75,46 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if expected == candidate {
 		return nil, fmt.Errorf("candidate must differ from expected predecessor")
 	}
-	st, rev, err := m.load(ctx, n)
+	var st *IssueState
+	var rev string
+	var err error
+	if prepare {
+		st, rev, err = m.loadCheckpointPreview(ctx, n)
+	} else {
+		st, rev, err = m.load(ctx, n)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
+	if pinned != "" && rev != pinned {
+		return nil, ErrClaimFence
+	}
+	claimRequired := false
+	if prepare {
+		actor, e := m.tracker.CurrentUser(ctx)
+		if e != nil {
+			return nil, e
+		}
+		if owner == "" || actor != owner {
+			return nil, ErrClaimFence
+		}
+		if err = m.checkApprovedState(ctx, n, st); err != nil {
+			return nil, err
+		}
+		cfg, e := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		if e != nil {
+			return nil, e
+		}
+		if !matchesCollaboratorAllowlist(owner, cfg.Security.ApprovedCollaborators) {
+			return nil, fmt.Errorf("actor %q is not in security.approved_collaborators", owner)
+		}
+		claimRequired = st.Lease.Status != "active" || !st.Lease.ExpiresAt.After(m.nowFn())
+		if !claimRequired {
+			if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
+				return nil, err
+			}
+		}
+	} else if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
 		return nil, err
 	}
 	if st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil || st.DroppedCheckpoint != nil {
@@ -63,9 +124,16 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		return nil, fmt.Errorf("%w: authoritative checkpoint %s differs from expected %s", ErrClaimFence, st.HeadSHA, expected)
 	}
 	inspect := func() (workspace.CheckpointState, error) {
-		o := workspace.InspectCheckpoint(ctx, m.repoRoot, m.UpstreamRemote(), n, st.Branch, expected)
+		remote := m.UpstreamRemote()
+		if localStore {
+			remote = "."
+		}
+		o := workspace.InspectCheckpoint(ctx, m.repoRoot, remote, n, st.Branch, expected)
+		if localStore {
+			o.RemoteBranch = workspace.HeadObservation{}
+		}
 		if o.Error != "" || o.Worktree.Error != "" || o.LocalBranch.Error != "" || o.RemoteBranch.Error != "" ||
-			o.Dirty || o.Rebasing || o.AttachedBranch != st.Branch || o.Worktree.SHA != candidate || o.LocalBranch.SHA != candidate || o.RemoteBranch.SHA != expected {
+			o.Dirty || o.Rebasing || o.AttachedBranch != st.Branch || o.Worktree.SHA != candidate || o.LocalBranch.SHA != candidate || gitStore && o.RemoteBranch.SHA != expected {
 			return o, fmt.Errorf("%w: reconciliation preconditions failed: %s", ErrClaimFence, o.String())
 		}
 		return o, nil
@@ -76,7 +144,7 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	}
 	// Fetch only immutable object retention, never reset or fetch into task refs.
 	if _, err = checkpointGit(ctx, m.repoRoot, "cat-file", "-e", expected+"^{commit}"); err != nil {
-		if dryRun {
+		if dryRun || localStore {
 			return nil, fmt.Errorf("predecessor %s unavailable locally; fetch %s before inspecting lineage", expected, m.LedgerLayout().CheckpointRef(n, expected))
 		}
 		if _, err = checkpointGit(ctx, m.repoRoot, "fetch", "--no-write-fetch-head", m.UpstreamRemote(), m.LedgerLayout().CheckpointRef(n, expected)); err != nil {
@@ -91,6 +159,9 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if err != nil {
 		return nil, err
 	}
+	if (claimRequired || localStore) && !additive {
+		return nil, fmt.Errorf("candidate must descend from predecessor %s for fresh or local reconciliation", expected)
+	}
 	identity, identityErr := workspace.RebasePatchIdentity(ctx, m.repoRoot, st.BaseSHA, expected, st.BaseSHA, candidate)
 	if identityErr != nil {
 		identity = "unavailable"
@@ -102,6 +173,11 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 	if err != nil {
 		return nil, err
+	}
+	if prepare {
+		if err = m.VerifyDependencies(ctx, wu); err != nil {
+			return nil, err
+		}
 	}
 	approvalErr := VerifyApproval(st, wu)
 	reviewRequired := approvalErr != nil
@@ -130,7 +206,14 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		}
 		reviewRequired = !named || VerifyApproval(&copyState, wu) != nil
 	}
-	result := &CheckpointReconciliation{State: st, Observation: observation, DryRun: dryRun, ValidationRequired: true, ReviewRequired: reviewRequired, PatchIdentity: identity}
+	var boundaryProbeRequired bool
+	if prepare {
+		boundaryProbeRequired, err = validation.CheckCheckpointBoundary(ctx, m.repoRoot, st.BaseSHA, probe)
+		if err != nil {
+			return nil, err
+		}
+	}
+	result := &CheckpointReconciliation{ClaimRequired: claimRequired, BoundaryProbeRequired: boundaryProbeRequired, revision: rev, owner: owner, expected: expected, candidate: candidate, prepared: prepare, State: st, Observation: observation, DryRun: dryRun, ValidationRequired: true, ReviewRequired: reviewRequired, PatchIdentity: identity}
 	if dryRun {
 		return result, nil
 	}
@@ -147,6 +230,18 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		return nil, err
 	}
 	if _, err = checkpointGit(ctx, snapshot, "checkout", "--detach", candidate); err != nil {
+		return nil, err
+	}
+	// Snapshot preparation can race reapproval or another fenced state write.
+	// Check again before executing any required check under the pinned policy.
+	beforeValidation, beforeRevision, err := m.load(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if beforeRevision != rev {
+		return nil, fmt.Errorf("%w: issue state changed before validation", ErrClaimFence)
+	}
+	if err = m.checkStateClaim(ctx, n, owner, beforeValidation); err != nil {
 		return nil, err
 	}
 	report, err := validation.Validate(ctx, snapshot, wu, validation.ValidateOptions{BaseSHA: st.BaseSHA, CIMode: true})
@@ -196,13 +291,112 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if err != nil {
 		return nil, err
 	}
-	if _, err = publisher.CompareAndSwapAndReconcileCheckpoint(ctx, n, rev, raw, st.Branch, candidate, expected); err != nil {
+	if gitStore {
+		_, err = publisher.CompareAndSwapAndReconcileCheckpoint(ctx, n, rev, raw, st.Branch, candidate, expected)
+	} else {
+		_, err = m.store.CompareAndSwap(ctx, n, rev, raw)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("%w: checkpoint publication rejected: %w", ErrClaimFence, err)
 	}
 	m.project(ctx, n, st)
 	result.State = st
 	result.ValidationRequired = false
 	return result, nil
+}
+
+// AcquirePreparedCheckpoint uses ordinary admission and never retries a newer
+// observation. The returned claim is still subject to all reconciliation fences.
+func (m *Manager) AcquirePreparedCheckpoint(ctx context.Context, n int, p *CheckpointReconciliation) (*IssueState, error) {
+	if p == nil || !p.prepared || !p.ClaimRequired {
+		return nil, ErrClaimFence
+	}
+	fresh, err := m.PrepareCheckpoint(ctx, n, p.owner, p.expected, p.candidate, true)
+	if err != nil {
+		return nil, err
+	}
+	if fresh.revision != p.revision || !sameCheckpointState(fresh.State, p.State) {
+		return nil, fmt.Errorf("%w: prepared observation changed", ErrClaimFence)
+	}
+	cfg, err := harness.LoadConfigAt(m.repoRoot, p.State.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	duration, err := time.ParseDuration(cfg.Lease.Duration)
+	if err != nil {
+		return nil, err
+	}
+	agent := cfg.Roles["planner"]
+	if agent == "" {
+		agent = cfg.DefaultAgent
+	}
+	st, err := m.Acquire(ctx, n, p.owner, agent, "plan", duration, cfg.Lease.MaxRenewals)
+	if err != nil {
+		return nil, err
+	}
+	before, after := *p.State, *st
+	before.Lease, after.Lease = contract.Lease{}, contract.Lease{}
+	before.ClaimBudget, after.ClaimBudget = nil, nil
+	before.ProjectionCommentID, after.ProjectionCommentID = 0, 0
+	if !sameCheckpointState(&before, &after) {
+		_, releaseErr := m.Release(ctx, n, p.owner, "checkpoint admission observation changed")
+		return nil, errors.Join(fmt.Errorf("%w: acquisition changed checkpoint identity", ErrClaimFence), releaseErr)
+	}
+	// Recheck approved policy after acquisition; reconciliation must never validate
+	// with a policy that changed between preparation and normal Acquire.
+	if err = m.checkStateClaim(ctx, n, p.owner, st); err != nil {
+		_, releaseErr := m.Release(ctx, n, p.owner, "checkpoint admission approval changed")
+		return nil, errors.Join(err, releaseErr)
+	}
+	current, revision, err := m.load(ctx, n)
+	// The response may contain an unpersisted comment projection ID. Comments
+	// are projections, so compare all persisted authority against the response.
+	response := *st
+	if current != nil {
+		response.ProjectionCommentID = current.ProjectionCommentID
+	}
+	if err != nil || !sameCheckpointState(current, &response) {
+		_, releaseErr := m.Release(ctx, n, p.owner, "checkpoint admission state changed")
+		return nil, errors.Join(fmt.Errorf("%w: acquired state changed", ErrClaimFence), err, releaseErr)
+	}
+	p.State, p.revision, p.ClaimRequired = current, revision, false
+	return st, nil
+}
+
+// ReconcilePreparedCheckpoint pins the post-admission revision through the
+// existing validation and atomic publication path.
+func (m *Manager) ReconcilePreparedCheckpoint(ctx context.Context, n int, p *CheckpointReconciliation) (*CheckpointReconciliation, error) {
+	if p == nil || !p.prepared || p.ClaimRequired {
+		return nil, ErrClaimFence
+	}
+	return m.reconcileCheckpoint(ctx, n, p.owner, p.expected, p.candidate, false, false, false, p.revision)
+}
+
+func (m *Manager) loadCheckpointPreview(ctx context.Context, n int) (*IssueState, string, error) {
+	reader, ok := m.store.(interface {
+		LoadCheckpointPreview(context.Context, int) ([]byte, string, error)
+	})
+	if !ok {
+		return nil, "", fmt.Errorf("store does not support read-only checkpoint inspection")
+	}
+	raw, rev, err := reader.LoadCheckpointPreview(ctx, n)
+	if err != nil {
+		return nil, "", err
+	}
+	var st IssueState
+	if err = json.Unmarshal(raw, &st); err != nil {
+		return nil, "", err
+	}
+	if (st.Lease.IssueNumber != 0 && st.Lease.IssueNumber != n) || st.Cleanup != nil {
+		return nil, "", ErrClaimFence
+	}
+	return &st, rev, nil
+}
+
+func sameCheckpointState(a, b *IssueState) bool {
+	left, le := json.Marshal(a)
+	right, re := json.Marshal(b)
+	return le == nil && re == nil && bytes.Equal(left, right)
 }
 
 func checkpointGit(ctx context.Context, root string, args ...string) (string, error) {

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 )
 
 type retentionFixture struct {
@@ -221,4 +223,50 @@ func TestCheckpointRetentionWithStateWrite(t *testing.T) {
 			t.Fatal("rewrote a retention ref")
 		}
 	})
+}
+
+func TestCheckpointPreviewDoesNotCreateLocksOrFetchMissingObjects(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	root := t.TempDir()
+	local := NewFileStore(root)
+	if _, err := local.CompareAndSwap(ctx, 1, "", []byte(`{"head_sha":"recorded"}`)); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(root, ".swarm", "coordination", "issue-1.json.lock")
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		raw, _, err := local.LoadCheckpointPreview(ctx, 1)
+		if err != nil || string(raw) != `{"head_sha":"recorded"}` {
+			t.Fatalf("preview: %s %v", raw, err)
+		}
+		if _, err = os.Stat(lock); !os.IsNotExist(err) {
+			t.Fatalf("preview created lock: %v", err)
+		}
+	}
+	f := newRetentionFixture(t)
+	revision, err := f.store.CompareAndSwap(ctx, 1, "", []byte(`{"head_sha":"recorded"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(f.root, "preview-clone")
+	f.git(f.root, "clone", "--no-local", "--single-branch", "--branch", "main", f.remote, fresh)
+	preview := NewGitStore(fresh)
+	before := f.git(fresh, "show-ref")
+	for range 2 {
+		if _, _, err = preview.LoadCheckpointPreview(ctx, 1); err == nil || !strings.Contains(err.Error(), "unavailable locally") {
+			t.Fatalf("preview fetched state: %v", err)
+		}
+	}
+	if before != f.git(fresh, "show-ref") {
+		t.Fatal("preview changed refs")
+	}
+	if _, err = os.Stat(filepath.Join(fresh, ".git", "FETCH_HEAD")); !os.IsNotExist(err) {
+		t.Fatalf("preview wrote FETCH_HEAD: %v", err)
+	}
+	if _, err = gitfixture.Command(t, fresh, "cat-file", "-e", revision+"^{commit}").Output(); err == nil {
+		t.Fatal("preview imported missing state object")
+	}
 }

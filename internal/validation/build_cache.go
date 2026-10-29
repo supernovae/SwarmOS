@@ -115,3 +115,7 @@ func warmBuildCaches(ctx context.Context, r *checkRunner, checks []contract.Chec
 	}
 	return note
 }
+
+func validatorRestoreSelected(cfg *contract.SwarmConfig, execution contract.ExecutionConfig, runnerIsolated bool) bool {
+	return !runnerIsolated && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative && sandbox.ValidationUsesSandboxRestore(cfg)
+}

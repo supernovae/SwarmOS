@@ -659,3 +659,6 @@ func restoreCloseError(err error) error {
 	}
 	return err
 }
+
+// ValidateRestoreRegistries applies the transport boundary's exact-host rules.
+func ValidateRestoreRegistries(hosts []string) error { _, err := newRegistryPolicy(hosts); return err }

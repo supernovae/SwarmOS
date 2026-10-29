@@ -84,10 +84,7 @@ func NewConfiguredRunnerWithOptions(name string, cfg *contract.SwarmConfig, loca
 		if len(ac.Args) != 0 || len(ac.Env) != 0 || ac.ReviewNetwork || ac.Sandbox != "" || ac.ContainerRuntime != "" || ac.ContainerImage != "" || (ac.Authentication != "" && ac.Authentication != "auto") {
 			return nil, fmt.Errorf("isolated harnesses use harness-owned login and coordinator-selected permissions; remove args, env, sandbox, container and authentication overrides from agent %q", name)
 		}
-		a.sandboxRuntime = "codex-native"
-		if driver != "codex" {
-			a.sandboxRuntime = "harness-tools-bwrap"
-		}
+		a.sandboxRuntime = nativeHarnessRuntime(driver)
 		a.authentication = "harness"
 	}
 	if execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendOCI {

@@ -59,7 +59,7 @@ func RunConfiguredNativeValidation(ctx context.Context, dir string, cfg *contrac
 		if err != nil {
 			return err
 		}
-		return RunNativeValidation(ctx, dir, binary, command, caches, deps, warmup, stdout, stderr)
+		return RunNativeValidation(ctx, dir, binary, command, caches, deps.WithoutSandboxRestores(), warmup, stdout, stderr)
 	}
 	if err := CheckToolExecutor(ctx); err != nil {
 		return err
@@ -103,4 +103,21 @@ func probeBubblewrapOverlay(ctx context.Context) bool {
 	}
 	_, err = os.Lstat(filepath.Join(lower, "written"))
 	return os.IsNotExist(err)
+}
+
+// ValidationUsesSandboxRestore selects only the configured Bubblewrap validator.
+func ValidationUsesSandboxRestore(cfg *contract.SwarmConfig) bool {
+	return !nativeValidationUsesCodex(cfg)
+}
+
+// WithoutSandboxRestores preserves native Codex's existing cache behavior.
+func (d Dependencies) WithoutSandboxRestores() Dependencies {
+	out := Dependencies{Mode: d.Mode}
+	for _, c := range d.Caches {
+		eco, ok := dependencyEcosystemNamed(c.Ecosystem)
+		if ok && !eco.SandboxRestore {
+			out.Caches = append(out.Caches, c)
+		}
+	}
+	return out
 }

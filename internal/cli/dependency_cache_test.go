@@ -7,7 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/registry"
+	"gopkg.in/yaml.v3"
 )
 
 func writeNodeProfile(t *testing.T, f *cliFixture, body string) {
@@ -52,7 +55,7 @@ func TestDoctorReportsDependencyCacheModes(t *testing.T) {
 	if !ok {
 		t.Fatalf("doctor does not name ecosystems sharing host caches: %q", detail)
 	}
-	for _, name := range []string{"node-browsers", "dotnet", "maven", "gradle", "c-cpp"} {
+	for _, name := range []string{"node-browsers", "c-cpp"} {
 		if !strings.Contains(shared, name) {
 			t.Errorf("doctor does not name %s as sharing host caches: %q", name, detail)
 		}
@@ -96,7 +99,7 @@ func TestNodeStatusReportsDependencyCacheMode(t *testing.T) {
 			for _, eco := range status.DependencyCaches {
 				modes[eco.Name] = eco.Mode
 			}
-			if modes["go"] != tc.goMode || !strings.HasPrefix(modes["maven"], "host-shared (no fetch-only prefetch") {
+			if modes["go"] != tc.goMode || !(strings.Contains(modes["maven"], "sandbox restore") || modes["maven"] == "host-shared (opt-in)") {
 				t.Fatalf("node status --json dependency_caches = %v", modes)
 			}
 			check := doctorDependencyCheck(t, f)
@@ -185,5 +188,58 @@ func TestDoctorReportsPrivateGoModules(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSandboxRestoreDoctorConfiguration(t *testing.T) {
+	f := newCLIFixture(t)
+	registryPath := filepath.Join(t.TempDir(), "repos.yaml")
+	if _, err := registry.New(registryPath).Add("acme/a", f.root, "local"); err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(t.TempDir(), "node.yaml")
+	if err := os.WriteFile(profile, []byte("node_id: n\nrestore_registries:\n  acme/a:\n    maven: ['*.example']\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check := doctorDependencyCacheCheck(profile, registryPath, f.root)
+	if check.Status != "FAIL" || !strings.Contains(check.Detail, "restore_registries") {
+		t.Fatalf("invalid policy hidden: %+v", check)
+	}
+	if err := os.WriteFile(profile, []byte("node_id: n\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check = doctorDependencyCacheCheck(profile, registryPath, f.root, "trusted-local")
+	if check.Status != "OK" || !strings.Contains(check.Detail, "unsupported by selected runtime") {
+		t.Fatalf("host selection: %+v", check)
+	}
+}
+
+func TestSandboxRestoreDoctorMissingHelper(t *testing.T) {
+	f := newCLIFixture(t)
+	cfg, err := harness.LoadConfig(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Execution = contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}
+	cfg.DefaultAgent = "claude"
+	cfg.Agents["claude"] = contract.AgentConfig{Harness: "claude", Binary: "claude"}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, ".swarm", "config.yaml"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	reg := filepath.Join(t.TempDir(), "repos.yaml")
+	if _, err := registry.New(reg).Add("acme/a", f.root, "local"); err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(t.TempDir(), "node.yaml")
+	if err := os.WriteFile(profile, []byte("restore_registries:\n  acme/a:\n    maven: [registry.example]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check := doctorDependencyCacheCheck(profile, reg, f.root)
+	if check.Status != "OK" || !strings.Contains(check.Detail, "sandbox restore unavailable") || !strings.Contains(check.Detail, "helper unavailable") {
+		t.Fatalf("helper diagnostic: %+v", check)
 	}
 }

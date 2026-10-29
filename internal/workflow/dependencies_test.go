@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
@@ -192,6 +193,63 @@ func TestAgentDependenciesUseRepositoryPolicy(t *testing.T) {
 		}
 		if got.Mode != want.Mode || got.PrivateGo.Repository != want.PrivateGo.Repository || strings.Join(got.PrivateGo.Patterns, ",") != "example.com/priv" {
 			t.Fatalf("%s: agent prefetch policy = %+v, want %+v", name, got, want)
+		}
+	}
+}
+
+func TestSandboxRestoreAgentSelection(t *testing.T) {
+	old := prepareAgentDependencies
+	t.Cleanup(func() { prepareAgentDependencies = old })
+	for _, tc := range []struct {
+		harness, mode, backend string
+		custom, want           bool
+	}{
+		{"claude", contract.ExecutionIsolated, contract.BackendNative, false, true},
+		{"opencode", contract.ExecutionIsolated, contract.BackendNative, false, true},
+		{"omp", contract.ExecutionIsolated, contract.BackendNative, false, true},
+		{"codex", contract.ExecutionIsolated, contract.BackendNative, false, false},
+		{"claude", contract.ExecutionTrustedLocal, contract.BackendNative, false, false},
+		{"claude", contract.ExecutionIsolated, contract.BackendOCI, false, false},
+		{"claude", contract.ExecutionIsolated, contract.BackendNative, true, false},
+	} {
+		t.Run(tc.harness+tc.mode+tc.backend+fmt.Sprint(tc.custom), func(t *testing.T) {
+			cfg := &contract.SwarmConfig{DefaultAgent: tc.harness, Agents: map[string]contract.AgentConfig{tc.harness: {Harness: tc.harness, Binary: tc.harness}}, Execution: contract.ExecutionConfig{Mode: tc.mode, Backend: tc.backend}}
+			e := &Engine{LookupEnv: func(string) (string, bool) { return "", false }}
+			if tc.custom {
+				e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+					t.Fatal("custom runner must not grant restore")
+					return nil, nil
+				}
+			}
+			called := false
+			prepareAgentDependencies = func(_ context.Context, _ contract.ExecutionConfig, _, _ string, p sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
+				called = true
+				if p.RestoreSelected != tc.want {
+					t.Fatalf("selected=%v want %v", p.RestoreSelected, tc.want)
+				}
+				return sandbox.Dependencies{}, errors.New("preparation failure")
+			}
+			if _, err := e.AgentDependencies(t.Context(), cfg, t.TempDir(), "base"); err == nil || !called {
+				t.Fatalf("failure propagation: %v called=%v", err, called)
+			}
+		})
+	}
+}
+
+func TestSandboxRestoreAgentSelectionMixed(t *testing.T) {
+	cfg := &contract.SwarmConfig{DefaultAgent: "codex", Roles: map[string]string{"developer": "codex", "reviewer": "claude"}, Agents: map[string]contract.AgentConfig{"codex": {Harness: "codex"}, "claude": {Harness: "claude"}}, Execution: contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}}
+	e := &Engine{LookupEnv: func(string) (string, bool) { return "", false }}
+	old := prepareAgentDependencies
+	t.Cleanup(func() { prepareAgentDependencies = old })
+	for _, role := range []string{"developer", "reviewer"} {
+		prepareAgentDependencies = func(_ context.Context, _ contract.ExecutionConfig, _, _ string, p sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
+			if p.RestoreSelected != (role == "reviewer") {
+				t.Fatalf("%s selected=%v", role, p.RestoreSelected)
+			}
+			return sandbox.Dependencies{}, nil
+		}
+		if _, err := e.AgentDependencies(t.Context(), cfg, t.TempDir(), "base", role); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

@@ -315,7 +315,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		if caches, err = validatorBuildCaches(ctx, worktreePath, checkHome); err != nil {
 			return nil, err
 		}
-		if deps, err = validatorDependencyCaches(ctx, worktreePath, baseSHA, opts.DependencyPolicy); err != nil {
+		dependencyPolicy := opts.DependencyPolicy
+		dependencyPolicy.RestoreSelected = validatorRestoreSelected(cfg, execution, opts.RunnerIsolated)
+		if deps, err = validatorDependencyCaches(ctx, worktreePath, baseSHA, dependencyPolicy); err != nil {
 			return nil, fmt.Errorf("validation preflight: %w", err)
 		}
 	}

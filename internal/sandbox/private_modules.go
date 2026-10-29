@@ -23,8 +23,12 @@ type PrivateGo struct {
 // DependencyPolicy is the node profile's dependency cache policy for one
 // repository. It never comes from the repository itself.
 type DependencyPolicy struct {
-	Mode      DependencyCacheMode
-	PrivateGo PrivateGo
+	RestoreRegistries map[string][]string
+	RestoreError      error
+	// RestoreSelected is set by trusted preparation after resolving the actual runtime.
+	RestoreSelected bool
+	Mode            DependencyCacheMode
+	PrivateGo       PrivateGo
 }
 
 // DependencyPolicySource accepts a repository policy or a cache mode. A cache

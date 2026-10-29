@@ -129,3 +129,34 @@ func TestValidatePrivateGoPattern(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxRestoreRegistryPolicy(t *testing.T) {
+	repo := gitRepo(t)
+	regpath := filepath.Join(t.TempDir(), "repos.yaml")
+	if _, err := registry.New(regpath).Add("acme/a", repo, "local"); err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(t.TempDir(), "node.yaml")
+	hosts := []string{"registry.example", "*.example", "https://registry.example", "u:p@registry.example", "registry.example:443", "127.0.0.1", "registry.example/path", "UPPER.example"}
+	for i, host := range hosts {
+		prof := &contract.NodeProfile{RestoreRegistries: map[string]map[string][]string{"acme/a": {"maven": {host}}}}
+		if err := SaveProfile(profile, prof); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := LoadOrDetectProfile(profile)
+		if err != nil || loaded.RestoreRegistries["acme/a"]["maven"][0] != host {
+			t.Fatal("profile roundtrip", err)
+		}
+		policy, _, err := LoadDependencyPolicy(profile, regpath, repo)
+		if (err == nil) != (i == 0) {
+			t.Fatalf("%s: %v", host, err)
+		}
+		if i > 0 && policy.RestoreError == nil {
+			t.Fatal("selected invalid policy not retained")
+		}
+		unregistered, _, err := LoadDependencyPolicy(profile, regpath, gitRepo(t))
+		if err != nil || len(unregistered.RestoreRegistries) > 0 {
+			t.Fatal("unregistered repository granted hosts")
+		}
+	}
+}

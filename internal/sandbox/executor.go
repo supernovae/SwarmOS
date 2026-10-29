@@ -117,6 +117,16 @@ func executorFlags(work string, readOnly bool, caches []BuildCache, deps Depende
 		}
 		flags = append(flags, "--ro-bind", dir, dir)
 		c.Dir = dir
+		switch c.Ecosystem {
+		case "maven":
+			localRepo := "/home/worker/.m2/repository"
+			flags = append(flags, "--overlay-src", dir, "--tmp-overlay", localRepo)
+			cacheEnv = append(cacheEnv, "--setenv", "MAVEN_OPTS", "-Dmaven.repo.local="+localRepo+" -Duser.home=/home/worker")
+			c.Dir = localRepo
+		case "gradle":
+			flags = append(flags, "--overlay-src", dir, "--tmp-overlay", "/home/worker/.gradle/caches")
+			cacheEnv = append(cacheEnv, "--setenv", "GRADLE_USER_HOME", "/home/worker/.gradle")
+		}
 		for _, entry := range c.env() {
 			key, value, _ := strings.Cut(entry, "=")
 			cacheEnv = append(cacheEnv, "--setenv", key, value)

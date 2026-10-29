@@ -209,7 +209,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 	if err != nil {
 		return nil, err
 	}
-	deps, err := e.AgentDependencies(ctx, cfg, e.repoRoot, p.State.BaseSHA)
+	deps, err := e.AgentDependencies(ctx, cfg, e.repoRoot, p.State.BaseSHA, role)
 	if err != nil {
 		return nil, err
 	}

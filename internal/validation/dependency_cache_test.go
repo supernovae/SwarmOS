@@ -2,6 +2,8 @@ package validation
 
 import (
 	"context"
+	"errors"
+	"github.com/supernovae/swarmos/internal/contract"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -123,5 +125,24 @@ func TestCleanCheckEnvHasNoPrefetchCredentials(t *testing.T) {
 		if key == "SSH_AUTH_SOCK" || key == "NETRC" || key == "GOAUTH" {
 			t.Errorf("check environment passes %s", entry)
 		}
+	}
+}
+
+func TestSandboxRestoreValidatorSelection(t *testing.T) {
+	for _, harness := range []string{"codex", "claude", "opencode", "omp"} {
+		cfg := &contract.SwarmConfig{DefaultAgent: harness, Agents: map[string]contract.AgentConfig{harness: {Harness: harness}}}
+		for _, execution := range []contract.ExecutionConfig{{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}, {Mode: contract.ExecutionIsolated, Backend: contract.BackendOCI}, {Mode: contract.ExecutionTrustedLocal}} {
+			for _, custom := range []bool{false, true} {
+				want := !custom && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative && harness != "codex"
+				if got := validatorRestoreSelected(cfg, execution, custom); got != want {
+					t.Fatalf("%s %+v custom=%v: selected=%v", harness, execution, custom, got)
+				}
+			}
+		}
+	}
+	failure := errors.New("selected restore policy failure")
+	_, err := validatorDependencyCaches(t.Context(), t.TempDir(), "base", sandbox.DependencyPolicy{RestoreSelected: true, RestoreError: failure})
+	if !errors.Is(err, failure) {
+		t.Fatalf("selected failure propagation: %v", err)
 	}
 }

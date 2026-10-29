@@ -3,6 +3,9 @@ package sandbox
 import (
 	"archive/zip"
 	"context"
+	"errors"
+	"fmt"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"go/ast"
 	"go/parser"
@@ -15,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -778,7 +782,7 @@ func TestDependencyTableSafety(t *testing.T) {
 		if (eco.Prefetch == nil) == (eco.NoPrefetch == "") {
 			t.Errorf("%s must have exactly one of Prefetch and NoPrefetch", eco.Name)
 		}
-		if (eco.Prefetch != nil) != (eco.envKey() != "") || (eco.Prefetch != nil) != (len(eco.Detect) > 0 && len(eco.Lockfiles) > 0) {
+		if (eco.Prefetch != nil || eco.SandboxRestore) != (eco.envKey() != "") || eco.Prefetch != nil && (len(eco.Detect) == 0 || len(eco.Lockfiles) == 0) {
 			t.Errorf("%s: adapters need an env key, detection files and lockfiles", eco.Name)
 		}
 		for _, k := range eco.Env {
@@ -876,7 +880,7 @@ func TestDependencyCacheFlagsRoundTrip(t *testing.T) {
 			}
 		}
 	}
-	for _, value := range []string{"go", "go=relative", "go=/", "python=" + work, "rust=" + work, "maven=" + dir, "node-browsers=" + dir, "unknown=" + dir, "go=" + work, "go=" + filepath.Join(work, "sub")} {
+	for _, value := range []string{"go", "go=relative", "go=/", "python=" + work, "rust=" + work, "node-browsers=" + dir, "unknown=" + dir, "go=" + work, "go=" + filepath.Join(work, "sub")} {
 		if c, err := ParseDependencyCache(value, work); err == nil {
 			t.Errorf("ParseDependencyCache(%q) = %+v", value, c)
 		}
@@ -902,8 +906,390 @@ func TestDependencyCacheModes(t *testing.T) {
 			if (m.Name == "go" || m.Name == "node") && m.Mode != tc.want {
 				t.Errorf("%s mode = %q, want %q", m.Name, m.Mode, tc.want)
 			}
-			if (m.Name == "maven" || m.Name == "node-browsers") && !strings.HasPrefix(m.Mode, "host-shared (no fetch-only prefetch") {
+			if (m.Name == "node-browsers") && !strings.HasPrefix(m.Mode, "host-shared (no fetch-only prefetch") {
 				t.Errorf("%s mode = %q", m.Name, m.Mode)
+			}
+		}
+	}
+}
+
+func TestSandboxRestorePreparation(t *testing.T) {
+	oldCheck, oldRun, oldIdentity := restorePreflightCheck, restorePayloadRun, restoreToolIdentity
+	t.Cleanup(func() { restorePreflightCheck, restorePayloadRun, restoreToolIdentity = oldCheck, oldRun, oldIdentity })
+	restoreToolIdentity = func(string) ([]byte, error) { return []byte("trusted installed tool"), nil }
+	for _, ecoName := range []string{"dotnet", "maven", "gradle"} {
+		t.Run(ecoName, func(t *testing.T) {
+			repo := resolvedTempDir(t)
+			filename := map[string]string{"dotnet": "nested/app.csproj", "maven": "nested/pom.xml", "gradle": "nested/settings.gradle"}[ecoName]
+			if err := os.MkdirAll(filepath.Join(repo, "nested"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repo, filename), []byte("approved"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "base"}} {
+				if out, err := gitfixture.Command(t, repo, args...).CombinedOutput(); err != nil {
+					t.Fatalf("git: %s %v", out, err)
+				}
+			}
+			baseBytes, err := gitfixture.Command(t, repo, "rev-parse", "HEAD").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := strings.TrimSpace(string(baseBytes))
+			if err := os.WriteFile(filepath.Join(repo, filename), []byte("candidate attack"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cacheRoot := resolvedTempDir(t)
+			policy := DependencyPolicy{RestoreSelected: true, RestoreRegistries: map[string][]string{ecoName: {"registry.example"}}}
+			checks, runs := 0, 0
+			restorePreflightCheck = func(ctx context.Context, b RestoreBoundary, r RestoreRequest) error { checks++; return nil }
+			restorePayloadRun = func(ctx context.Context, b RestoreBoundary, r RestoreRequest) (string, error) {
+				runs++
+				data, err := os.ReadFile(filepath.Join(r.Source, filename))
+				if err != nil || string(data) != "approved" {
+					t.Fatalf("candidate input: %s %v", data, err)
+				}
+				wantTool := map[string]string{"dotnet": "/usr/bin/dotnet", "maven": "/usr/bin/mvn", "gradle": "/usr/bin/gradle"}[ecoName]
+				wantVerb := map[string]string{"dotnet": "restore", "maven": "dependency:go-offline", "gradle": "dependencies"}[ecoName]
+				if r.Argv[0] != wantTool || !slices.Contains(r.Argv, wantVerb) {
+					t.Fatalf("argv: %v", r.Argv)
+				}
+				output, err := os.MkdirTemp(r.CacheRoot, "restore-")
+				if err != nil {
+					return "", err
+				}
+				_, _, payload, _ := restoreAdapter(ecoName, "nested", r.Registries)
+				dir := filepath.Join(output, payload)
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(filepath.Join(dir, "package"), []byte("dependency"), 0600); err != nil {
+					return "", err
+				}
+				if err := os.WriteFile(filepath.Join(output, "secret-settings"), []byte("must not publish"), 0600); err != nil {
+					return "", err
+				}
+				return output, nil
+			}
+			deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cacheRoot, policy)
+			if err != nil || len(deps.Caches) != 1 || runs != 1 {
+				t.Fatalf("prepare: %+v %v (%d runs)", deps, err, runs)
+			}
+			first := deps.Caches[0].Dir
+			payloadFile := "package"
+			if ecoName == "gradle" {
+				payloadFile = "modules-2/package"
+			}
+			if data, err := os.ReadFile(filepath.Join(first, payloadFile)); err != nil || string(data) != "dependency" {
+				t.Fatalf("payload: %s %v", data, err)
+			}
+			if _, err := os.Stat(filepath.Join(first, "secret-settings")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("published settings")
+			}
+			warm, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cacheRoot, policy)
+			if err != nil || warm.Caches[0].Dir != first || runs != 1 || checks != 2 {
+				t.Fatalf("warm: %+v %v checks=%d runs=%d", warm, err, checks, runs)
+			}
+			other, err := PrepareDependencyCaches(t.Context(), ValidatorDependencyCache, repo, base, cacheRoot, policy)
+			if err != nil || other.Caches[0].Dir == first {
+				t.Fatalf("owner isolation: %+v %v", other, err)
+			}
+			restorePreflightCheck = func(context.Context, RestoreBoundary, RestoreRequest) error {
+				return finalizeRestorePreflight(restoreCapability{os.ErrNotExist})
+			}
+			unavailable, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cacheRoot, policy)
+			if err != nil || len(unavailable.Caches) != 0 {
+				t.Fatalf("unavailable reused stale generation: %+v %v", unavailable, err)
+			}
+			restorePreflightCheck = func(context.Context, RestoreBoundary, RestoreRequest) error {
+				return errors.Join(finalizeRestorePreflight(restoreCapability{os.ErrNotExist}), errors.New("cleanup"))
+			}
+			if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cacheRoot, policy); err == nil {
+				t.Fatal("fatal cleanup fallback")
+			}
+			restorePreflightCheck = func(context.Context, RestoreBoundary, RestoreRequest) error { return nil }
+			// Different policy invalidates warm reuse; even a preflight-shaped Run error is fatal.
+			policy.RestoreRegistries[ecoName] = []string{"other.example"}
+			restorePayloadRun = func(context.Context, RestoreBoundary, RestoreRequest) (string, error) {
+				return "", finalizeRestorePreflight(restoreCapability{os.ErrNotExist})
+			}
+			if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cacheRoot, policy); err == nil {
+				t.Fatal("Run fallback")
+			}
+			if data, err := os.ReadFile(filepath.Join(first, payloadFile)); err != nil || string(data) != "dependency" {
+				t.Fatal("old generation changed")
+			}
+			policy.RestoreRegistries = nil
+			withdrawn, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cacheRoot, policy)
+			if err != nil || len(withdrawn.Caches) != 0 {
+				t.Fatal("withdrawn policy reused generation")
+			}
+		})
+	}
+}
+
+func TestSandboxRestorePayloadSafety(t *testing.T) {
+	for _, mode := range []string{"symlink", "fifo", "writable", "oversize"} {
+		t.Run(mode, func(t *testing.T) {
+			source, dest := t.TempDir(), t.TempDir()
+			file := filepath.Join(source, "package")
+			switch mode {
+			case "symlink":
+				if err := os.Symlink("/etc/passwd", file); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if runtime.GOOS == "windows" {
+					t.Skip("FIFO unavailable")
+				}
+				cmd := exec.Command("mkfifo", file)
+				if err := cmd.Run(); err != nil {
+					t.Fatal(err)
+				}
+			case "writable":
+				if err := os.WriteFile(file, []byte("bad"), 0666); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(file, 0666); err != nil {
+					t.Fatal(err)
+				}
+			case "oversize":
+				if err := os.WriteFile(file, []byte("bad"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			src, err := safefs.Open(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer src.Close()
+			dst, err := safefs.Open(dest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dst.Close()
+			var total int64
+			if mode == "oversize" {
+				total = 1 << 30
+			}
+			if err := copyRestorePayload(src, dst, "", &total); err == nil {
+				t.Fatal("unsafe payload accepted")
+			}
+		})
+	}
+}
+
+func TestSandboxRestoreMounts(t *testing.T) {
+	for _, name := range []string{"dotnet", "maven", "gradle"} {
+		c, err := ParseDependencyCache(name+"="+t.TempDir(), t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		binds := []ToolchainBind{{Ecosystem: name, Mount: "/host/cache"}, {Ecosystem: name, Mount: "/host/wrapper"}, {Mount: "/toolchain"}, {Ecosystem: "c-cpp", Mount: "/other/cache"}}
+		prepared := filterDependencyBinds(binds, Dependencies{Caches: []DependencyCache{c}})
+		if len(prepared) != 2 {
+			t.Fatalf("%s replacement: %v", name, prepared)
+		}
+		if got := filterDependencyBinds(binds, Dependencies{}); len(got) != 4 {
+			t.Fatal("unavailable removed host mounts")
+		}
+		if got := (Dependencies{Caches: []DependencyCache{c}}).WithoutSandboxRestores(); len(got.Caches) != 0 {
+			t.Fatal("native restore enabled")
+		}
+	}
+}
+
+func TestSandboxRestoreDoctorDecision(t *testing.T) {
+	oldCheck := restorePreflightCheck
+	t.Cleanup(func() { restorePreflightCheck = oldCheck })
+	policy := DependencyPolicy{RestoreSelected: true, RestoreRegistries: map[string][]string{"maven": {"registry.example"}}}
+	capability := finalizeRestorePreflight(restoreCapability{os.ErrNotExist})
+	for _, tc := range []struct {
+		err     error
+		wantErr bool
+		text    string
+	}{
+		{nil, false, "eligible"}, {capability, false, "unavailable"}, {errors.Join(capability, errors.New("cleanup")), true, ""}, {errors.New("restore capability unavailable"), true, ""},
+	} {
+		restorePreflightCheck = func(context.Context, RestoreBoundary, RestoreRequest) error { return tc.err }
+		detail, err := CheckDependencyRestoreCapability(t.Context(), policy)
+		if (err != nil) != tc.wantErr || !strings.Contains(detail, tc.text) {
+			t.Fatalf("doctor decision: %s %v", detail, err)
+		}
+	}
+	restorePreflightCheck = func(context.Context, RestoreBoundary, RestoreRequest) error {
+		t.Fatal("unselected preflight")
+		return nil
+	}
+	policy.RestoreSelected = false
+	if _, err := CheckDependencyRestoreCapability(t.Context(), policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.RestoreSelected = true
+	policy.RestoreRegistries = nil
+	if detail, err := CheckDependencyRestoreCapability(t.Context(), policy); err != nil || !strings.Contains(detail, "unconfigured") {
+		t.Fatal(detail, err)
+	}
+}
+
+func TestSandboxRestorePublication(t *testing.T) {
+	oldCheck, oldRun, oldTool := restorePreflightCheck, restorePayloadRun, restoreToolIdentity
+	t.Cleanup(func() { restorePreflightCheck, restorePayloadRun, restoreToolIdentity = oldCheck, oldRun, oldTool })
+	restorePreflightCheck = func(context.Context, RestoreBoundary, RestoreRequest) error { return nil }
+	restoreToolIdentity = func(string) ([]byte, error) { return []byte("installed fixture v1"), nil }
+	repo := gitfixture.Init(t, "", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "pom.xml"), []byte("approved reactor"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitfixture.Run(t, repo, "add", ".")
+	base := gitfixture.Commit(t, repo, "base", "-q")
+	policy := DependencyPolicy{RestoreSelected: true, RestoreRegistries: map[string][]string{"maven": {"registry.example"}}}
+	for _, fault := range []string{"symlink", "permissions", "rename", "exit", "cancel", "timeout", "broker", "concurrent"} {
+		t.Run(fault, func(t *testing.T) {
+			cache := t.TempDir()
+			var calls atomic.Int32
+			restorePayloadRun = func(_ context.Context, _ RestoreBoundary, r RestoreRequest) (string, error) {
+				calls.Add(1)
+				switch fault {
+				case "exit":
+					return "", errors.New("payload exit")
+				case "cancel":
+					return "", context.Canceled
+				case "timeout":
+					return "", context.DeadlineExceeded
+				case "broker":
+					return "", errors.New("broker denied registry")
+				}
+				output, err := os.MkdirTemp(r.CacheRoot, "restore-")
+				if err != nil {
+					return "", err
+				}
+				dir := filepath.Join(output, "repository")
+				if err := os.Mkdir(dir, 0700); err != nil {
+					return "", err
+				}
+				target := filepath.Join(dir, "dependency")
+				if fault == "symlink" {
+					if err := os.Symlink("/etc/passwd", target); err != nil {
+						return "", err
+					}
+				} else {
+					if err := os.WriteFile(target, []byte("complete"), 0600); err != nil {
+						return "", err
+					}
+				}
+				if fault == "permissions" {
+					if err := os.Chmod(target, 0666); err != nil {
+						return "", err
+					}
+				}
+				if fault == "rename" {
+					if err := os.Rename(r.CacheRoot, r.CacheRoot+".moved"); err != nil {
+						return "", err
+					}
+					if err := os.Mkdir(r.CacheRoot, 0700); err != nil {
+						return "", err
+					}
+				}
+				return output, nil
+			}
+			if fault == "concurrent" {
+				type result struct {
+					deps Dependencies
+					err  error
+				}
+				results := make(chan result, 2)
+				for range 2 {
+					go func() {
+						d, e := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cache, policy)
+						results <- result{d, e}
+					}()
+				}
+				a, b := <-results, <-results
+				if a.err != nil || b.err != nil || len(a.deps.Caches) != 1 || len(b.deps.Caches) != 1 || a.deps.Caches[0].Dir != b.deps.Caches[0].Dir || calls.Load() != 1 {
+					t.Fatalf("publication: %+v %+v calls=%d", a, b, calls.Load())
+				}
+				first := a.deps.Caches[0].Dir
+				restoreToolIdentity = func(string) ([]byte, error) { return []byte("installed fixture v2"), nil }
+				changed, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cache, policy)
+				if err != nil || changed.Caches[0].Dir == first || calls.Load() != 2 {
+					t.Fatalf("tool identity reuse: %+v %v", changed, err)
+				}
+				restoreToolIdentity = func(string) ([]byte, error) { return []byte("installed fixture v1"), nil }
+				return
+			}
+			d, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, cache, policy)
+			if err == nil || len(d.Caches) > 0 {
+				t.Fatalf("failed publication became success: %+v %v", d, err)
+			}
+			if err := filepath.WalkDir(cache, func(p string, e fs.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if strings.HasPrefix(e.Name(), ".complete-") || strings.HasPrefix(e.Name(), "restore-") && p != cache && e.Name() != "restore-maven" && !strings.HasSuffix(e.Name(), ".moved") {
+					return fmt.Errorf("failed restore left payload or selector: %s", p)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestSandboxRestoreApprovedRoots(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		paths, want []string
+	}{
+		{"dotnet", []string{"a/app.csproj", "nested/library.fsproj", "all.sln"}, []string{"a/app.csproj", "all.sln", "nested/library.fsproj"}},
+		{"maven", []string{"pom.xml", "module/pom.xml", "independent/pom.xml"}, []string{".", "independent", "module"}},
+		{"gradle", []string{"settings.gradle.kts", "build.gradle.kts", "independent/build.gradle", "module/build.gradle.kts"}, []string{".", "independent", "module"}},
+	} {
+		var entries []treeEntry
+		for _, name := range tc.paths {
+			entries = append(entries, treeEntry{Path: name})
+		}
+		eco, _ := dependencyEcosystemNamed(tc.name)
+		if got := restoreRoots(entries, eco); !slices.Equal(got, tc.want) {
+			t.Fatalf("%s roots: %v", tc.name, got)
+		}
+	}
+	for _, e := range []treeEntry{{Mode: "120000", Type: "blob", Path: "link"}, {Mode: "160000", Type: "commit", Path: "submodule"}, {Mode: "100644", Type: "blob", Path: "../escape"}, {Mode: "100644", Type: "blob", Path: ".GIT/config"}} {
+		dst, err := safefs.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = restoreBaseSnapshot(t.Context(), t.TempDir(), []treeEntry{e}, dst)
+		dst.Close()
+		if err == nil {
+			t.Fatalf("unsafe approved entry accepted: %+v", e)
+		}
+	}
+	for _, name := range []string{"dotnet", "maven", "gradle"} {
+		cache := t.TempDir()
+		c, err := ParseDependencyCache(name+"="+cache, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		flags, err := executorFlags(resolvedTempDir(t), false, nil, Dependencies{Caches: []DependencyCache{c}}, "true", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !containsRun(flags, []string{"--ro-bind", cache, cache}) || containsRun(flags, []string{"--bind", cache, cache}) {
+			t.Fatalf("writable generation: %v", flags)
+		}
+		if name == "maven" && !containsRun(flags, []string{"--overlay-src", cache, "--tmp-overlay", "/home/worker/.m2/repository"}) {
+			t.Fatal("Maven metadata has no discarded layer")
+		}
+		if name == "gradle" && !containsRun(flags, []string{"--overlay-src", cache, "--tmp-overlay", "/home/worker/.gradle/caches"}) {
+			t.Fatal("Gradle metadata has no discarded layer")
+		}
+		joined := strings.Join(flags, "\n")
+		for _, forbidden := range []string{"HTTPS_PROXY", "JAVA_TOOL_OPTIONS", "restore-trust", "restore-broker", "--share-net"} {
+			if strings.Contains(joined, forbidden) {
+				t.Fatalf("restore capability in ordinary executor: %s", forbidden)
 			}
 		}
 	}

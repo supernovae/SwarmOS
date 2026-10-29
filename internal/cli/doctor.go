@@ -49,7 +49,7 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 				}
 			}))
 			checks = append(checks, run.Run("execution", "dependency-caches", func() harness.DoctorCheck {
-				return doctorDependencyCacheCheck(rootOpts.nodeConfigPath(), rootOpts.registryPath(), repoRoot)
+				return doctorDependencyCacheCheck(rootOpts.nodeConfigPath(), rootOpts.registryPath(), repoRoot, rootOpts.getenv("SWARM_EXECUTION_MODE"))
 			}))
 			if cfg, err := harness.LoadConfig(repoRoot); err == nil {
 				checks = append(checks, run.Run("execution", "mode", func() harness.DoctorCheck {
@@ -199,7 +199,7 @@ func doctorAgentChecksWithRunner(cfg *contract.SwarmConfig, local bool, prefligh
 // a warning because it exposes every package the host has fetched. So is a
 // private_go_modules entry that allows nothing or names an unregistered
 // repository.
-func doctorDependencyCacheCheck(profilePath, registryPath, repoRoot string) harness.DoctorCheck {
+func doctorDependencyCacheCheck(profilePath, registryPath, repoRoot string, executionMode ...string) harness.DoctorCheck {
 	mode, err := node.DependencyCacheMode(profilePath)
 	status, detail := "OK", dependencyCacheSummary(mode)+"; Go detects the root go.mod only; Python detects root uv.lock and requirements*.txt only"
 	if err != nil {
@@ -207,7 +207,41 @@ func doctorDependencyCacheCheck(profilePath, registryPath, repoRoot string) harn
 	} else if mode == sandbox.SharedHostCaches {
 		status = "WARN"
 	}
-	policy, warnings, _ := node.LoadDependencyPolicy(profilePath, registryPath, repoRoot)
+	policy, warnings, policyErr := node.LoadDependencyPolicy(profilePath, registryPath, repoRoot)
+	if policyErr != nil {
+		status = "FAIL"
+		detail += "; " + policyErr.Error()
+	}
+	if cfg, err := harness.LoadConfig(repoRoot); err == nil {
+		modeOverride := ""
+		if len(executionMode) > 0 {
+			modeOverride = executionMode[0]
+		}
+		execution, err := contract.ResolveExecution(cfg, modeOverride)
+		if err == nil && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
+			names := map[string]bool{cfg.DefaultAgent: true}
+			for _, name := range cfg.Roles {
+				names[name] = true
+			}
+			for name := range names {
+				if name == "" {
+					continue
+				}
+				if agent.ConfiguredUsesSandboxRestore(cfg, name) {
+					policy.RestoreSelected = true
+				}
+			}
+		}
+	}
+	if policy.Mode != sandbox.SharedHostCaches {
+		restoreDetail, err := sandbox.CheckDependencyRestoreCapability(context.Background(), policy)
+		if err != nil {
+			status = "FAIL"
+			detail += "; " + err.Error()
+		} else {
+			detail += "; " + restoreDetail
+		}
+	}
 	if repo := policy.PrivateGo.Repository; repo != "" {
 		allowed := "none"
 		if len(policy.PrivateGo.Patterns) > 0 {
@@ -225,7 +259,10 @@ func doctorDependencyCacheCheck(profilePath, registryPath, repoRoot string) harn
 		}
 	}
 	if len(warnings) > 0 {
-		status, detail = "WARN", detail+"; "+strings.Join(warnings, "; ")
+		if status != "FAIL" {
+			status = "WARN"
+		}
+		detail += "; " + strings.Join(warnings, "; ")
 	}
 	if len(policy.PrivateGo.Patterns) > 0 {
 		detail += "; withdrawing an allowance stops prefetch but keeps modules already in that repository's cache"

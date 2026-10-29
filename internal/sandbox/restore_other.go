@@ -9,7 +9,7 @@ import (
 )
 
 func restoreCommand(context.Context, string, string, string, []string) (*exec.Cmd, error) {
-	return nil, errors.New("restore boundary unavailable: Linux Bubblewrap required")
+	return nil, restoreCapability{errors.New("restore boundary unavailable: Linux Bubblewrap required")}
 }
 
 func restoreCloseDescriptors() error { return errors.New("restore helper requires Linux") }

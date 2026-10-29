@@ -59,3 +59,9 @@ A value the harness does not report stays `unavailable` in `swarm issue status`,
 The installed CLI passes an offline model and tool cycle, rejects a forged host-shell call, and stops detached tool children on cancellation. A live authenticated provider run is still pending. The test commands are in the [qualification guide](../native-qualification.md#claude-code-opencode-2-and-ohmypi).
 
 Agent budgets default to 60 minutes and can be configured globally or per role in [approved execution policy](../project.md#agent-run-budgets). Interactive native sessions count working time across turns, exclude waits for coordinator input, and have a four-hour wall cap. A warning appears before the deadline. On timeout, native Codex and harness-tools Bubblewrap preserve a bounded recovery patch for [manual inspection](../developer.md#recovering-from-an-interrupted-run). Interactive OCI counts wall time without idle exclusion, and OCI has no timeout patch export. Individual tool-call limits remain separate.
+
+## Sandboxed dependency preparation
+
+For .NET, Maven and Gradle projects, the coordinator can prepare repository-specific dependency caches before harness-tools Bubblewrap starts. Install the packaged `swarm-restore-helper` beside `swarm`, then add exact public hosts under the node-only `restore_registries` setting for your registered repository. See [sandboxed restore setup](../project.md#sandboxed-net-maven-and-gradle-restore) for client paths and feed layouts.
+
+Preparation uses the approved base and a clean home. Agent and validator generations stay separate and mount read-only for offline commands. Successful preparation replaces the ecosystem's host caches. Missing capability keeps the existing read-only host mounts; failures after restore starts stop preparation. Gradle daemon/socket attempts and runtimes exceeding the fixed limits fail closed. Ordinary harness tools remain offline.

@@ -62,6 +62,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 	var nativeVersion string
 	command := append([]string{bin}, args...)
 	if a.sandboxRuntime == "codex-native" {
+		options.Dependencies = options.Dependencies.WithoutSandboxRestores()
 		prompt := fmt.Sprintf("Read %s and .swarm/active/WORKUNIT.md first.\n\n%s", req.SystemPrompt, req.TaskPrompt)
 		command, nativeVersion, err = sandbox.RunNativeCodex(ctx, req.WorktreePath, a.binary, req.Model, prompt, options, strings.EqualFold(req.Mode, "interactive"), in, stdout, stderr)
 	} else if a.sandboxRuntime == "harness-tools-bwrap" {
@@ -88,4 +89,25 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 		return result, err
 	}
 	return result, nil
+}
+
+// ConfiguredUsesSandboxRestore shares the native runtime decision with adapters,
+// without looking up or executing a client during dependency diagnostics.
+func ConfiguredUsesSandboxRestore(cfg *contract.SwarmConfig, name string) bool {
+	ac, ok := cfg.Agents[name]
+	if !ok {
+		return false
+	}
+	driver, err := resolveHarness(name, ac.Harness)
+	return err == nil && nativeHarnessRuntime(driver) == "harness-tools-bwrap"
+}
+func nativeHarnessRuntime(driver string) string {
+	switch driver {
+	case "codex":
+		return "codex-native"
+	case "claude", "opencode", "omp":
+		return "harness-tools-bwrap"
+	default:
+		return ""
+	}
 }

@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,6 +28,9 @@ func restoreResourceFlags() []string {
 func restoreCommand(ctx context.Context, control, cache, positive string, argv []string) (*exec.Cmd, error) {
 	binary, err := exec.LookPath("bwrap")
 	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			err = restoreCapability{err}
+		}
 		return nil, fmt.Errorf("restore Bubblewrap unavailable: %w", err)
 	}
 	flags, err := restoreFlags(control, cache, positive, argv)

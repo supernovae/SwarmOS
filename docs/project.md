@@ -311,7 +311,7 @@ Node has these limits:
 - pnpm and Yarn must already be installed on the host; the prefetch never downloads them. Only npm installs from the read-only cache are covered by tests so far, so pnpm and Yarn installs from a read-only store or cache are not yet verified.
 - Playwright and Cypress browser downloads are not lockfile packages, so their host caches stay mounted read-only (`node-browsers` below).
 
-Other ecosystems have no fetch-only download command yet, so they keep read-only access to your host caches, as before:
+Ecosystems without a host fetch-only adapter keep these read-only host caches. For .NET, Maven and Gradle, selected Bubblewrap preparation can replace them with repository caches as described below:
 
 | Ecosystem | Host caches still mounted read-only | Why |
 | --- | --- | --- |
@@ -320,6 +320,26 @@ Other ecosystems have no fetch-only download command yet, so they keep read-only
 | Maven | `~/.m2/repository` | Plugins run during resolve |
 | Gradle | `~/.gradle/caches`, `~/.gradle/wrapper` | Build scripts run during resolve |
 | C/C++ | vcpkg binary cache | vcpkg ports run build scripts |
+
+#### Sandboxed .NET, Maven and Gradle restore
+
+To prepare dependencies without exposing host credentials or running project code on the host, enable sandbox restore for a registered repository in your node profile (`~/.config/swarm/node.yaml`, or `SWARM_NODE_CONFIG`):
+
+```yaml
+restore_registries:
+  acme/payments:
+    dotnet: [api.nuget.org, globalcdn.nuget.org]
+    maven: [repo.maven.apache.org]
+    gradle: [repo.maven.apache.org, plugins.gradle.org, plugins-artifacts.gradle.org]
+```
+
+Register the repository with `swarm repo add`. Each list contains 1–64 exact, lowercase public DNS host names. The first host supplies the adapter's public feed: `/v3/index.json` for NuGet, `/maven2` for Maven and Gradle. Additional hosts allow artifact downloads and redirects; add each required CDN host explicitly. Wildcards, suffix grants, URLs, IP addresses, ports and authenticated registries are unsupported. Repository configuration cannot grant hosts.
+
+Install `swarm-restore-helper` beside the coordinator's `swarm` executable using the normal Linux build/install package. Install the clients at `/usr/bin/dotnet`, `/usr/bin/mvn` and `/usr/bin/gradle`. Maven and Gradle use the packaged runtime layout supported by the restore boundary. Restore preparation applies only to native isolated Claude, OpenCode and omp tools and their Bubblewrap validator. Native Codex, OCI, host checks and ordinary tool execution retain their existing network boundary. `share_host_dependency_caches: true` keeps the host caches and disables preparation.
+
+Preparation reads a detached snapshot of the approved base, including nested projects and build inputs. It runs `dotnet restore`, `mvn dependency:go-offline` or `gradle dependencies` with a clean home and adapter-owned settings. Only dependency payloads are published; settings, trust material and project outputs stay temporary. Complete generations belong to one repository and either agents or validation. Commands mount them read-only. Maven and Gradle use Bubblewrap's discarded overlay layers for writable client metadata in the command's temporary home; this requires Bubblewrap overlay support. Maven reads `MAVEN_REPO_LOCAL`; Gradle uses its run-local user home and also receives `GRADLE_RO_DEP_CACHE` for clients that support it; NuGet reads `NUGET_PACKAGES`. Use installed clients with offline options, such as `mvn -o dependency:resolve` and `gradle --offline --no-daemon dependencies`.
+
+Successful preparation removes all corresponding host dependency mounts, including Gradle wrapper caches. Without a node allowance, or when the packaged helper, Bubblewrap or a required restriction is unavailable during preflight, existing read-only host caches remain available. Doctor reports eligibility or the reason preparation is unavailable without restoring packages. An invalid allowance, unsafe source, failed restore, denied host, timeout or failed cleanup stops preparation. Failed restores never reuse an older generation. Gradle must run in-process: daemon or socket attempts fail within the existing restrictions, and runtimes must start within the fixed resource limits.
 
 `swarm repo doctor` shows a `dependency-caches` check that lists each ecosystem's mode and names those sharing host caches. `swarm node status` shows the same, and `swarm node status --json` reports it as `dependency_caches`.
 

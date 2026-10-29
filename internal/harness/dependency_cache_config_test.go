@@ -18,6 +18,7 @@ func TestConfigCannotEnableSharedHostCaches(t *testing.T) {
 	}
 	for _, setting := range []struct{ key, value string }{
 		{"share_host_dependency_caches", " true"},
+		{"restore_registries", "\n    acme/a: {maven: [registry.example]}"},
 		{"private_go_modules", "\n    acme/a: ['*']"},
 	} {
 		line := setting.key + ":" + setting.value + "\n"

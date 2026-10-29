@@ -117,13 +117,39 @@ func LoadDependencyPolicy(profilePath, registryPath, worktree string) (sandbox.D
 		return sandbox.DependencyPolicy{Mode: sandbox.PerRepository}, nil, err
 	}
 	allow, warnings := ProfilePrivateGo(prof, registryPath, worktree)
-	return sandbox.DependencyPolicy{Mode: ProfileDependencyCacheMode(prof), PrivateGo: allow}, warnings, nil
+	policy := sandbox.DependencyPolicy{Mode: ProfileDependencyCacheMode(prof), PrivateGo: allow}
+	repo := registeredRepoFor(registryPath, worktree)
+	for name, ecosystems := range prof.RestoreRegistries {
+		if repo == "" || !strings.EqualFold(name, repo) {
+			continue
+		}
+		if policy.RestoreRegistries != nil {
+			policy.RestoreError = errors.New("duplicate restore_registries repository")
+			break
+		}
+		policy.RestoreRegistries = map[string][]string{}
+		for eco, hosts := range ecosystems {
+			if eco != "dotnet" && eco != "maven" && eco != "gradle" {
+				policy.RestoreError = fmt.Errorf("unknown restore ecosystem %q", eco)
+				break
+			}
+			if err := sandbox.ValidateRestoreRegistries(hosts); err != nil {
+				policy.RestoreError = fmt.Errorf("restore_registries[%q][%q]: %w", name, eco, err)
+				break
+			}
+			policy.RestoreRegistries[eco] = append([]string{}, hosts...)
+		}
+	}
+	return policy, warnings, policy.RestoreError
 }
 
 // DependencyPolicy is LoadDependencyPolicy without its diagnostics, which
 // doctor reports. Every failure allows no private modules.
 func DependencyPolicy(profilePath, registryPath, worktree string) sandbox.DependencyPolicy {
-	policy, _, _ := LoadDependencyPolicy(profilePath, registryPath, worktree)
+	policy, _, err := LoadDependencyPolicy(profilePath, registryPath, worktree)
+	if err != nil {
+		policy.RestoreError = err
+	}
 	return policy
 }
 

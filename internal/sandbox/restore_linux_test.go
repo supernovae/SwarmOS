@@ -525,3 +525,26 @@ func TestRestoreStartupResourceRejectionProfiles(t *testing.T) {
 		t.Fatal("combined rejection depends on preceding successful process case")
 	}
 }
+
+func TestSandboxRestorePreflightClassificationLinux(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	_, err := restoreCommand(t.Context(), "/control", "/cache", "127.0.0.1:1", nil)
+	if err == nil || RestorePreflightUnavailable(err) || !RestorePreflightUnavailable(finalizeRestorePreflight(err)) || !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("missing Bubblewrap provenance: %v", err)
+	}
+}
+
+func TestSandboxRestoreBoundaryTraversal(t *testing.T) {
+	boundary := RestoreBoundary{Helper: buildRestoreHelper(t)}
+	request := restoreLinuxRequest(t)
+	requireRestoreCapability(t, boundary, request)
+	request.Argv = []string{"/bin/sh", "-c", "mkdir -p /cache/packages; printf dependency > /cache/packages/package"}
+	output, err := boundary.Run(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(output)
+	if data, err := os.ReadFile(filepath.Join(output, "packages", "package")); err != nil || string(data) != "dependency" {
+		t.Fatal("boundary payload", err)
+	}
+}

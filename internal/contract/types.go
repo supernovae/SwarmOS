@@ -215,10 +215,12 @@ type NodeResources struct {
 }
 
 type NodeProfile struct {
-	NodeID       string        `yaml:"node_id" json:"node_id"`
-	Capabilities []string      `yaml:"capabilities" json:"capabilities"` // "coding", "testing", "review", "docs"
-	Models       []string      `yaml:"models" json:"models"`             // "claude", "codex", "opencode", "omp"
-	Resources    NodeResources `yaml:"resources" json:"resources"`
+	// RestoreRegistries grants exact public registry hosts to registered repositories.
+	RestoreRegistries map[string]map[string][]string `yaml:"restore_registries,omitempty" json:"restore_registries,omitempty"`
+	NodeID            string                         `yaml:"node_id" json:"node_id"`
+	Capabilities      []string                       `yaml:"capabilities" json:"capabilities"` // "coding", "testing", "review", "docs"
+	Models            []string                       `yaml:"models" json:"models"`             // "claude", "codex", "opencode", "omp"
+	Resources         NodeResources                  `yaml:"resources" json:"resources"`
 	// UpstreamRemote names the project Git remote when it is not origin.
 	UpstreamRemote string `yaml:"upstream_remote,omitempty" json:"upstream_remote,omitempty"`
 	// ShareHostDependencyCaches mounts host-wide caches of adapter-backed

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/process"
@@ -23,7 +24,6 @@ import (
 // RestoreRequest is a trusted coordinator input, not candidate configuration.
 // Source is detached before launch. CacheRoot must belong to RepositoryRoot;
 // neither directory is mounted. Only a fresh private result directory is writable.
-// No production agent or validator calls this dormant prerequisite.
 type RestoreRequest struct {
 	Source, RepositoryRoot, CacheRoot string
 	Registries, Argv                  []string
@@ -36,6 +36,8 @@ type RestoreBoundary struct {
 	Helper string
 	// Unexported fixture seam; external callers always use verified public upstreams.
 	configureBroker func(*registryBroker)
+	// Tests inject a final teardown failure; production always leaves this nil.
+	afterCleanup func() error
 }
 
 // Run returns a private cache only after every transport and payload check succeeds.
@@ -48,6 +50,88 @@ func (boundary RestoreBoundary) Run(ctx context.Context, request RestoreRequest)
 // without executing caller code or contacting a public registry.
 func CheckRestoreBoundary(ctx context.Context, boundary RestoreBoundary, request RestoreRequest) error {
 	_, err := boundary.run(ctx, request, true)
+	if err != nil && ctx.Err() != nil {
+		err = errors.Join(err, ctx.Err())
+	}
+	return finalizeRestorePreflight(err)
+}
+
+// restoreCapability marks only a specific capability failure at its origin.
+type restoreCapability struct{ error }
+
+func (e restoreCapability) Unwrap() error { return e.error }
+
+type restorePreflight struct{ error }
+
+func (e restorePreflight) Unwrap() error { return e.error }
+
+// restoreAllBranches rejects an aggregate if even one leaf is unrecognized.
+func restoreAllBranches(err error, preflight bool) bool {
+	if err == nil {
+		return false
+	}
+	switch e := err.(type) {
+	case restorePreflight:
+		return restoreAllBranches(e.error, false)
+	case restoreCapability:
+		return !preflight && restoreSingleCause(e.error)
+	case interface{ Unwrap() []error }:
+		seen := false
+		for _, child := range e.Unwrap() {
+			if child == nil {
+				continue
+			}
+			seen = true
+			if !restoreAllBranches(child, preflight) {
+				return false
+			}
+		}
+		return seen
+	case interface{ Unwrap() error }:
+		return restoreAllBranches(e.Unwrap(), preflight)
+	default:
+		return false
+	}
+}
+func finalizeRestorePreflight(err error) error {
+	if restoreAllBranches(err, false) {
+		return restorePreflight{err}
+	}
+	return err
+}
+
+// RestorePreflightUnavailable permits fallback only for a completed, fully
+// cleaned preflight containing exclusively recognized capability failures.
+func RestorePreflightUnavailable(err error) bool { return restoreAllBranches(err, true) }
+
+// Capability markers may contain a single originating cause, never an aggregate.
+func restoreSingleCause(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := err.(interface{ Unwrap() []error }); ok {
+		return false
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return restoreSingleCause(wrapped.Unwrap())
+	}
+	return true
+}
+func restorePlatformCapability(err error) error {
+	cause := err
+	for cause != nil {
+		if _, ok := cause.(interface{ Unwrap() []error }); ok {
+			return err
+		}
+		if wrapped, ok := cause.(interface{ Unwrap() error }); ok {
+			cause = wrapped.Unwrap()
+			continue
+		}
+		if cause == syscall.EPERM || cause == syscall.EACCES || cause == syscall.EOPNOTSUPP || cause == syscall.EAFNOSUPPORT {
+			return restoreCapability{err}
+		}
+		break
+	}
 	return err
 }
 
@@ -68,9 +152,21 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 				result = ""
 			}
 		}
+		if boundary.afterCleanup != nil {
+			retErr = errors.Join(retErr, boundary.afterCleanup())
+			if retErr != nil {
+				result = ""
+			}
+		}
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	// Observe the run deadline after teardown, before our own cancellation.
+	defer func() {
+		if err := ctx.Err(); err != nil && !errors.Is(retErr, err) {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
 	policy, err := newRegistryPolicy(request.Registries)
 	if err != nil {
 		return "", err
@@ -105,6 +201,9 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 
 	helper, err := openRestoreRegular(boundary.Helper)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			err = restoreCapability{err}
+		}
 		return "", fmt.Errorf("restore helper unavailable: %w", err)
 	}
 	defer helper.Close()
@@ -205,7 +304,7 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 	socket := filepath.Join(control, "socket", "broker.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
-		return "", fmt.Errorf("restore broker unavailable: %w", err)
+		return "", fmt.Errorf("restore broker unavailable: %w", restorePlatformCapability(err))
 	}
 	broker := newRegistryBroker(ctx, listener, policy, trust)
 	if boundary.configureBroker != nil {
@@ -223,7 +322,7 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 	// A reachable host-side positive control makes direct-network denial meaningful.
 	positive, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return "", fmt.Errorf("restore network control unavailable: %w", err)
+		return "", fmt.Errorf("restore network control unavailable: %w", restorePlatformCapability(err))
 	}
 	defer positive.Close()
 	c, err := net.DialTimeout("tcp4", positive.Addr().String(), time.Second)
@@ -257,7 +356,10 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 	var diagnostics process.Output
 	cmd.Stderr = &diagnostics
 	if err = cmd.Start(); err != nil {
-		return "", fmt.Errorf("restore launcher unavailable: %w", err)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("restore launcher unavailable: %w", restoreCapability{err})
 	}
 	_ = readyWrite.Close()
 	_ = ackRead.Close()
@@ -487,9 +589,9 @@ func verifyRestoreHelperSettings(info *debug.BuildInfo) error {
 
 func restoreStartupError(status, diagnostics string) error {
 	if status == "" || status == "READY\n" {
-		return errors.New(classifyRestoreLauncher(diagnostics))
+		return restoreCapability{errors.New(classifyRestoreLauncher(diagnostics))}
 	}
-	return fmt.Errorf("restore capability unavailable: %s", safeRestoreStatus(status))
+	return restoreCapability{fmt.Errorf("restore capability unavailable: %s", safeRestoreStatus(status))}
 }
 
 func classifyRestoreLauncher(s string) string {

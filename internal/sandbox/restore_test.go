@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1120,5 +1121,96 @@ func TestRestoreReadyFrameDiagnostics(t *testing.T) {
 		if got := restoreStartupError("secret", tc.input).Error(); got != "restore capability unavailable: helper startup/control framing" {
 			t.Fatal(got)
 		}
+	}
+}
+
+func TestSandboxRestorePreflightClassification(t *testing.T) {
+	cause := errors.New("missing capability")
+	capability := restoreCapability{cause}
+	completed := finalizeRestorePreflight(capability)
+	if !errors.Is(completed, cause) {
+		t.Fatal("lost underlying cause")
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false}, {"text", errors.New("restore capability unavailable: filesystem canary"), false},
+		{"raw Run origin", capability, false}, {"completed", completed, true},
+		{"wrapped", fmt.Errorf("preparation: %w", completed), true},
+		{"capability join", finalizeRestorePreflight(errors.Join(capability, capability)), true},
+		{"nil children", finalizeRestorePreflight(errors.Join(nil, capability, nil)), true},
+		{"raw outside", errors.Join(completed, capability), false},
+		{"marker cannot hide join", finalizeRestorePreflight(restoreCapability{errors.Join(cause, errors.New("close"))}), false},
+		{"platform join", finalizeRestorePreflight(restorePlatformCapability(errors.Join(syscall.EPERM, syscall.EIO))), false},
+		{"unknown", finalizeRestorePreflight(errors.Join(capability, errors.New("unknown"))), false},
+		{"cancel", finalizeRestorePreflight(errors.Join(capability, context.Canceled)), false},
+		{"deadline", finalizeRestorePreflight(errors.Join(capability, context.DeadlineExceeded)), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RestorePreflightUnavailable(tc.err); got != tc.want {
+				t.Fatalf("unavailable = %v, want %v: %v", got, tc.want, tc.err)
+			}
+		})
+	}
+	for _, name := range []string{"discard", "output close", "control close", "broker teardown", "process stop", "capability unavailable"} {
+		fatal := errors.New(name)
+		for _, err := range []error{
+			errors.Join(capability, fatal), errors.Join(fatal, capability),
+			errors.Join(capability, errors.Join(capability, fmt.Errorf("cleanup: %w", fatal))),
+			errors.Join(completed, fatal), errors.Join(fatal, completed),
+		} {
+			if got := finalizeRestorePreflight(err); RestorePreflightUnavailable(got) || !errors.Is(got, fatal) || !errors.Is(got, cause) {
+				t.Fatalf("fatal branch lost: %v", got)
+			}
+		}
+	}
+	for _, status := range []string{"NETWORK\n", "FILESYSTEM\n", "BROKER\n", "LISTENER\n", "TRUST\n", "", "broken frame"} {
+		err := restoreStartupError(status, "")
+		if RestorePreflightUnavailable(err) || !RestorePreflightUnavailable(finalizeRestorePreflight(err)) {
+			t.Fatalf("incorrect startup provenance: %q", status)
+		}
+	}
+	for _, err := range []error{syscall.EPERM, syscall.EACCES, syscall.EOPNOTSUPP} {
+		if !RestorePreflightUnavailable(finalizeRestorePreflight(restorePlatformCapability(&net.OpError{Op: "listen", Net: "unix", Err: err}))) {
+			t.Fatal("typed platform denial not recognized")
+		}
+	}
+	for _, err := range []error{io.ErrUnexpectedEOF, syscall.EIO, context.Canceled} {
+		if RestorePreflightUnavailable(finalizeRestorePreflight(restorePlatformCapability(err))) {
+			t.Fatal("generic setup error classified unavailable")
+		}
+	}
+	// Exercise the real Check return, before a launcher is needed in this sandbox.
+	repo, source := t.TempDir(), t.TempDir()
+	cache := filepath.Join(repo, "cache")
+	if err := os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	request := RestoreRequest{Source: source, RepositoryRoot: repo, CacheRoot: cache, Registries: []string{"registry.example"}}
+	b := RestoreBoundary{Helper: filepath.Join(repo, "missing-helper")}
+	err := CheckRestoreBoundary(t.Context(), b, request)
+	if !RestorePreflightUnavailable(err) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing helper preflight: %v", err)
+	}
+	if _, err := b.Run(t.Context(), RestoreRequest{Source: source, RepositoryRoot: repo, CacheRoot: cache, Registries: request.Registries, Argv: []string{"/usr/bin/true"}}); RestorePreflightUnavailable(err) {
+		t.Fatal("Run authorized fallback")
+	}
+	cleanupErr := errors.New("final close failed")
+	b.afterCleanup = func() error { return cleanupErr }
+	err = CheckRestoreBoundary(t.Context(), b, request)
+	if RestorePreflightUnavailable(err) || !errors.Is(err, cleanupErr) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final teardown lost: %v", err)
+	}
+	b.afterCleanup = nil
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := CheckRestoreBoundary(cancelled, b, request); RestorePreflightUnavailable(err) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled preflight: %v", err)
+	}
+	request.Registries = []string{"*.example"}
+	if err := CheckRestoreBoundary(t.Context(), b, request); err == nil || RestorePreflightUnavailable(err) {
+		t.Fatalf("invalid policy: %v", err)
 	}
 }

@@ -470,7 +470,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	// stops here rather than inside a sandbox.
 	var deps sandbox.Dependencies
 	if !opts.InspectOnly {
-		if deps, err = e.AgentDependencies(ctx, cfg, opts.RepoRoot, state.BaseSHA); err != nil {
+		if deps, err = e.AgentDependencies(ctx, cfg, opts.RepoRoot, state.BaseSHA, roles...); err != nil {
 			return nil, err
 		}
 	}
@@ -820,7 +820,7 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 	if err != nil {
 		return "", st, err
 	}
-	deps, err := e.AgentDependencies(ctx, e.Config, wtPath, st.BaseSHA)
+	deps, err := e.AgentDependencies(ctx, e.Config, wtPath, st.BaseSHA, "reviewer")
 	if err != nil {
 		return "", st, err
 	}

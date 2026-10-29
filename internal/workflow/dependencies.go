@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/sandbox"
 )
@@ -30,12 +31,35 @@ var prepareAgentDependencies = func(ctx context.Context, execution contract.Exec
 // AgentDependencies prepares the agent dependency caches for baseSHA. It
 // never falls back to host caches: an error stops the run before an agent
 // starts, and before a claim when called from preflight.
-func (e *Engine) AgentDependencies(ctx context.Context, cfg *contract.SwarmConfig, repo, baseSHA string) (sandbox.Dependencies, error) {
+func (e *Engine) AgentDependencies(ctx context.Context, cfg *contract.SwarmConfig, repo, baseSHA string, roles ...string) (sandbox.Dependencies, error) {
 	execution, err := contract.ResolveExecution(cfg, e.getenv("SWARM_EXECUTION_MODE"))
 	if err != nil {
 		return sandbox.Dependencies{}, err
 	}
-	deps, err := prepareAgentDependencies(ctx, execution, repo, baseSHA, e.DependencyPolicy)
+	policy := e.DependencyPolicy
+	policy.RestoreSelected = false
+	if e.NewRunner == nil && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative {
+		names := map[string]bool{}
+		if len(roles) == 0 {
+			names[cfg.DefaultAgent] = true
+		}
+		for _, role := range roles {
+			name := cfg.Roles[role]
+			if name == "" {
+				name = cfg.DefaultAgent
+			}
+			names[name] = true
+		}
+		for name := range names {
+			if name == "" {
+				continue
+			}
+			if agent.ConfiguredUsesSandboxRestore(cfg, name) {
+				policy.RestoreSelected = true
+			}
+		}
+	}
+	deps, err := prepareAgentDependencies(ctx, execution, repo, baseSHA, policy)
 	if err != nil {
 		return sandbox.Dependencies{}, fmt.Errorf("dependency cache preflight: %w", err)
 	}

@@ -42,3 +42,14 @@ func TestInternalToolsBuildCacheFlag(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxRestoreInternalCacheFlags(t *testing.T) {
+	work := t.TempDir()
+	for _, eco := range []string{"dotnet", "maven", "gradle"} {
+		dir := t.TempDir()
+		deps, err := parseDependencyCaches([]string{eco + "=" + dir}, false, work)
+		if err != nil || len(deps.Caches) != 1 || deps.Caches[0].Ecosystem != eco || deps.Caches[0].Dir != dir {
+			t.Fatalf("cache flags: %+v %v", deps, err)
+		}
+	}
+}

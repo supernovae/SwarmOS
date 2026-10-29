@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -22,9 +23,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/filelock"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"syscall"
 )
 
 // dependencyEcosystem classifies one ecosystem's downloaded dependencies.
@@ -32,6 +35,8 @@ import (
 // never mounted, and each repository gets its own cache filled on the host
 // from the approved base. A NoPrefetch entry keeps today's read-only host
 // cache mounts, because resolving its dependencies can run package code.
+// Selected SandboxRestore entries replace host mounts only after successful
+// restricted preparation; ordinary callers retain host caches.
 // HostWithoutLockfile keeps an adapter's read-only host caches in
 // repositories whose base has none of its Detect files, so they still build.
 type dependencyEcosystem struct {
@@ -43,6 +48,7 @@ type dependencyEcosystem struct {
 	Prefetch  prefetchFunc
 	// Preflight runs even for warm caches so withdrawn allowances stop the run.
 	Preflight           prefetchFunc
+	SandboxRestore      bool
 	NoPrefetch          string // why there is no fetch-only prefetch
 	HostWithoutLockfile bool
 	// NeedsManifests also reads every package manifest in the base tree.
@@ -79,9 +85,9 @@ var dependencyEcosystems = []dependencyEcosystem{
 	{Name: "python", Detect: []string{"uv.lock", "requirements*.txt"}, Lockfiles: []string{"uv.lock", "pyproject.toml", "requirements*.txt"}, Env: []cacheEnvKey{{Key: "PIP_FIND_LINKS"}}, Prefetch: pythonWheelDownload, HostWithoutLockfile: true},
 	{Name: "node", Detect: nodeLockfiles, Lockfiles: append(slices.Clone(nodeLockfiles), "package.json", "pnpm-workspace.yaml"), Env: nodeCacheEnv, Prefetch: nodePrefetch, NeedsManifests: true},
 	{Name: "node-browsers", NoPrefetch: "browser binaries, not lockfile packages"},
-	{Name: "dotnet", NoPrefetch: "restore runs MSBuild"},
-	{Name: "maven", NoPrefetch: "plugins run during resolve"},
-	{Name: "gradle", NoPrefetch: "build scripts run during resolve"},
+	{Name: "dotnet", SandboxRestore: true, Detect: []string{"*.sln", "*.slnx", "*.csproj", "*.fsproj", "*.vbproj"}, Env: []cacheEnvKey{{Key: "NUGET_PACKAGES"}}, NoPrefetch: "restore runs MSBuild"},
+	{Name: "maven", SandboxRestore: true, Detect: []string{"pom.xml"}, Env: []cacheEnvKey{{Key: "MAVEN_REPO_LOCAL"}}, NoPrefetch: "plugins run during resolve"},
+	{Name: "gradle", SandboxRestore: true, Detect: []string{"settings.gradle", "settings.gradle.kts", "build.gradle", "build.gradle.kts"}, Env: []cacheEnvKey{{Key: "GRADLE_RO_DEP_CACHE"}}, NoPrefetch: "build scripts run during resolve"},
 	{Name: "c-cpp", NoPrefetch: "vcpkg ports run build scripts"},
 }
 
@@ -134,7 +140,7 @@ func filterDependencyBinds(binds []ToolchainBind, deps Dependencies) []Toolchain
 	}
 	filtered := make([]ToolchainBind, 0, len(binds))
 	for _, b := range binds {
-		if eco, ok := dependencyEcosystemNamed(b.Ecosystem); ok && eco.Prefetch != nil && (!eco.HostWithoutLockfile || prepared[eco.Name]) {
+		if eco, ok := dependencyEcosystemNamed(b.Ecosystem); ok && (eco.Prefetch != nil && (!eco.HostWithoutLockfile || prepared[eco.Name]) || eco.SandboxRestore && prepared[eco.Name]) {
 			continue
 		}
 		filtered = append(filtered, b)
@@ -185,7 +191,7 @@ func DependencyCacheEnv(caches []DependencyCache) []string {
 // absolute directory outside the workspace.
 func checkDependencyCache(c DependencyCache, work string) error {
 	eco, ok := dependencyEcosystemNamed(c.Ecosystem)
-	if !ok || eco.Prefetch == nil || eco.envKey() != c.EnvKey {
+	if !ok || (eco.Prefetch == nil && !eco.SandboxRestore) || eco.envKey() != c.EnvKey {
 		return fmt.Errorf("dependency cache %q has no table entry", c.EnvKey)
 	}
 	if !filepath.IsAbs(c.Dir) || filepath.Clean(c.Dir) == "/" {
@@ -205,7 +211,7 @@ func ParseDependencyCache(value, workspace string) (DependencyCache, error) {
 		return DependencyCache{}, fmt.Errorf("dependency cache %q: want ecosystem=dir", value)
 	}
 	eco, found := dependencyEcosystemNamed(name)
-	if !found || eco.Prefetch == nil {
+	if !found || (eco.Prefetch == nil && !eco.SandboxRestore) {
 		return DependencyCache{}, fmt.Errorf("unknown dependency cache ecosystem %q", name)
 	}
 	c := DependencyCache{Ecosystem: name, EnvKey: eco.envKey(), Dir: filepath.Clean(dir)}
@@ -232,6 +238,12 @@ func DependencyCacheModes(mode DependencyCacheMode) []EcosystemMode {
 	modes := make([]EcosystemMode, 0, len(dependencyEcosystems))
 	for _, eco := range dependencyEcosystems {
 		m := "host-shared (no fetch-only prefetch: " + eco.NoPrefetch + ")"
+		if eco.SandboxRestore {
+			m = "sandbox restore with node restore_registries and harness-tools Bubblewrap; otherwise read-only host caches"
+			if mode == SharedHostCaches {
+				m = "host-shared (opt-in)"
+			}
+		}
 		if eco.Prefetch != nil {
 			m = "per-repository"
 			if mode == SharedHostCaches {
@@ -254,6 +266,9 @@ func DependencyCacheModes(mode DependencyCacheMode) []EcosystemMode {
 func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktree, baseSHA, userCache string, source DependencyPolicySource) (Dependencies, error) {
 	policy := source.dependencyPolicy()
 	deps := Dependencies{Mode: policy.Mode}
+	if policy.RestoreSelected && policy.RestoreError != nil {
+		return deps, policy.RestoreError
+	}
 	if policy.Mode == SharedHostCaches {
 		return deps, nil
 	}
@@ -291,6 +306,13 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 		if eco.Prefetch != nil && len(matchBaseFiles(tree, eco.Detect)) > 0 {
 			detected = append(detected, eco)
 		}
+	}
+	if policy.RestoreSelected {
+		restored, err := prepareSandboxRestores(ctx, owner, worktree, baseSHA, userCache, policy, goTree)
+		if err != nil {
+			return deps, err
+		}
+		deps.Caches = append(deps.Caches, restored...)
 	}
 	if len(detected) == 0 {
 		return deps, nil
@@ -1145,4 +1167,499 @@ func cargoFetchFailure(stderr []byte, runErr error) string {
 	default:
 		return runErr.Error()
 	}
+}
+
+// These seams exercise coordinator preparation without executing a host-side
+// project probe. Production always resolves the packaged helper and boundary.
+var restoreExecutable = os.Executable
+var restoreToolIdentity = os.ReadFile
+var restorePreflightCheck = CheckRestoreBoundary
+var restorePayloadRun = func(ctx context.Context, b RestoreBoundary, r RestoreRequest) (string, error) { return b.Run(ctx, r) }
+
+func packagedRestoreBoundary() (RestoreBoundary, error) {
+	exe, err := restoreExecutable()
+	if err != nil {
+		return RestoreBoundary{}, err
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return RestoreBoundary{}, err
+	}
+	return RestoreBoundary{Helper: filepath.Join(filepath.Dir(exe), "swarm-restore-helper")}, nil
+}
+
+func restoreRoots(entries []treeEntry, eco dependencyEcosystem) []string {
+	var roots []string
+	for _, e := range entries {
+		for _, pattern := range eco.Detect {
+			if ok, _ := path.Match(pattern, path.Base(e.Path)); ok {
+				root := path.Dir(e.Path)
+				if eco.Name == "dotnet" {
+					root = e.Path
+				}
+				roots = append(roots, root)
+				break
+			}
+		}
+	}
+	sort.Strings(roots)
+	roots = slices.Compact(roots)
+	return roots
+}
+
+func restoreAdapter(eco, dir string, hosts []string) ([]string, map[string][]byte, string, error) {
+	// Generated names cannot overwrite approved files; staging checks collisions.
+	const config = ".swarm-restore-settings"
+	project := path.Join("/source", dir)
+	switch eco {
+	case "dotnet":
+		var settings strings.Builder
+		settings.WriteString("<configuration><packageSources><clear/>")
+		fmt.Fprintf(&settings, `<add key="approved" value="https://%s/v3/index.json"/>`, hosts[0])
+		settings.WriteString("</packageSources></configuration>")
+		return []string{"/usr/bin/dotnet", "restore", project, "--configfile", "/source/" + config, "--packages", "/cache/packages", "--disable-parallel", "-p:BaseIntermediateOutputPath=/cache/intermediate/", "-p:MSBuildProjectExtensionsPath=/cache/intermediate/"}, map[string][]byte{config: []byte(settings.String())}, "packages", nil
+	case "maven":
+		settings := `<settings><localRepository>/cache/repository</localRepository><mirrors><mirror><id>approved</id><mirrorOf>*</mirrorOf><url>https://` + hosts[0] + `/maven2</url></mirror></mirrors></settings>`
+		return []string{"/usr/bin/mvn", "--batch-mode", "--no-transfer-progress", "--settings", "/source/" + config, "--global-settings", "/source/" + config, "-Dmaven.repo.local=/cache/repository", "-Duser.home=/cache/home", "-f", path.Join(project, "pom.xml"), "dependency:go-offline"}, map[string][]byte{config: []byte(settings)}, "repository", nil
+	case "gradle":
+		init := `allprojects { repositories { clear(); maven { url 'https://` + hosts[0] + `/maven2' } }; buildDir = new File('/cache/build', project.path.replace(':','_')) }`
+		return []string{"/usr/bin/gradle", "--no-daemon", "-Dorg.gradle.daemon=false", "-Dorg.gradle.jvmargs=", "--gradle-user-home", "/cache/gradle", "--project-cache-dir", "/cache/project", "--project-dir", project, "--init-script", "/source/" + config, "dependencies"}, map[string][]byte{config: []byte(init)}, "gradle/caches/modules-2", nil
+	}
+	return nil, nil, "", errors.New("unsupported restore adapter")
+}
+
+// restoreBaseSnapshot materializes only regular approved Git objects. The
+// transport makes a second bounded detached copy before executing any code.
+func restoreBaseSnapshot(ctx context.Context, work string, entries []treeEntry, dst *safefs.Root) (map[string][]byte, error) {
+	files := map[string][]byte{}
+	var size int64
+	for _, e := range entries {
+		if e.Type != "blob" || (e.Mode != "100644" && e.Mode != "100755") || !filepath.IsLocal(e.Path) || strings.Contains(e.Path, "\\") {
+			return nil, errors.New("restore approved base contains unsafe entry")
+		}
+		for _, part := range strings.Split(e.Path, "/") {
+			if strings.EqualFold(part, ".git") {
+				return nil, errors.New("restore approved base contains Git metadata")
+			}
+		}
+		size += 4096
+		if size > 256<<20 {
+			return nil, errors.New("restore snapshot entry budget")
+		}
+		sizeBytes, err := gitcredential.Output(ctx, work, "cat-file", "-s", e.Object)
+		if err != nil {
+			return nil, err
+		}
+		blobSize, err := strconv.ParseInt(strings.TrimSpace(string(sizeBytes)), 10, 64)
+		if err != nil || blobSize < 0 || blobSize > 64<<20 || size+blobSize > 256<<20 {
+			return nil, errors.New("restore snapshot byte budget")
+		}
+		data, err := gitcredential.Output(ctx, work, "cat-file", "blob", e.Object)
+		if err != nil {
+			return nil, err
+		}
+		size += int64(len(data))
+		if len(data) > 64<<20 || size > 256<<20 {
+			return nil, errors.New("restore snapshot byte budget")
+		}
+		if err := dst.MkdirAll(path.Dir(e.Path), 0700); err != nil {
+			return nil, err
+		}
+		mode := os.FileMode(0600)
+		if e.Mode == "100755" {
+			mode = 0700
+		}
+		if err := dst.WriteFile(e.Path, data, mode); err != nil {
+			return nil, err
+		}
+		files[e.Path] = data
+	}
+	return files, nil
+}
+
+// copyRestorePayload rejects unsafe entries rather than following or importing
+// them. It deliberately visits only the adapter's dependency payload subtree.
+func copyRestorePayload(src, dst *safefs.Root, prefix string, total *int64) error {
+	dir := prefix
+	if dir == "" {
+		dir = "."
+	}
+	if strings.Count(prefix, "/") > 128 {
+		return errors.New("restore payload nesting limit")
+	}
+	f, err := src.OpenDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for {
+		entries, readErr := f.ReadDir(128)
+		if readErr != nil && readErr != io.EOF {
+			return readErr
+		}
+		for _, entry := range entries {
+			name := filepath.Join(prefix, entry.Name())
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			if info.Mode()&(os.ModeSymlink|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || info.Mode().Perm()&0022 != 0 {
+				return errors.New("unsafe restore payload permissions")
+			}
+			*total += 4096
+			if *total > 1<<30 {
+				return errors.New("restore payload budget")
+			}
+			if info.IsDir() {
+				if err = dst.MkdirAll(name, 0700); err != nil {
+					return err
+				}
+				if err = copyRestorePayload(src, dst, name, total); err != nil {
+					return err
+				}
+			} else {
+				if !info.Mode().IsRegular() {
+					return errors.New("non-regular restore payload")
+				}
+				data, err := src.ReadFile(name, 256<<20)
+				if err != nil {
+					return err
+				}
+				*total += int64(len(data))
+				if *total > 1<<30 {
+					return errors.New("restore payload budget")
+				}
+				if err = dst.WriteFile(name, data, 0400); err != nil {
+					return err
+				}
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+	}
+}
+
+func prepareSandboxRestores(ctx context.Context, owner BuildCacheOwner, work, baseSHA, userCache string, policy DependencyPolicy, entries []treeEntry) (caches []DependencyCache, retErr error) {
+	if policy.RestoreError != nil {
+		return nil, policy.RestoreError
+	}
+	boundary, err := packagedRestoreBoundary()
+	if err != nil {
+		return nil, err
+	}
+	for _, eco := range dependencyEcosystems {
+		if !eco.SandboxRestore {
+			continue
+		}
+		roots := restoreRoots(entries, eco)
+		hosts := slices.Clone(policy.RestoreRegistries[eco.Name])
+		if len(roots) == 0 || len(hosts) == 0 {
+			continue
+		}
+		if err := ValidateRestoreRegistries(hosts); err != nil {
+			return nil, err
+		}
+		if !filepath.IsAbs(userCache) {
+			return nil, errors.New("restore needs absolute user cache")
+		}
+		key, err := repositoryCacheKey(ctx, work)
+		if err != nil {
+			return nil, err
+		}
+		rel := filepath.Join("swarm", string(owner), key, "restore-"+eco.Name)
+		if insideDir(work, filepath.Join(userCache, rel)) {
+			return nil, errors.New("restore cache overlaps worktree")
+		}
+		if err := os.MkdirAll(userCache, 0700); err != nil {
+			return nil, err
+		}
+		root, err := safefs.Open(userCache)
+		if err != nil {
+			return nil, err
+		}
+		err = privateCacheDir(root, rel)
+		root.Close()
+		if err != nil {
+			return nil, err
+		}
+		repo := filepath.Join(userCache, "swarm", string(owner), key)
+		cache := filepath.Join(userCache, rel)
+		prepared, err := prepareSandboxRestore(ctx, boundary, eco, work, baseSHA, repo, cache, hosts, roots, entries)
+		if err != nil {
+			return nil, fmt.Errorf("restore %s: %w", eco.Name, err)
+		}
+		if prepared != "" {
+			caches = append(caches, DependencyCache{Ecosystem: eco.Name, EnvKey: eco.envKey(), Dir: prepared})
+		}
+	}
+	return caches, nil
+}
+
+func prepareSandboxRestore(ctx context.Context, boundary RestoreBoundary, eco dependencyEcosystem, work, baseSHA, repo, cache string, hosts, roots []string, entries []treeEntry) (prepared string, retErr error) {
+	staging, err := os.MkdirTemp("", "swarm-restore-base-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, os.RemoveAll(staging))
+		if retErr != nil {
+			prepared = ""
+		}
+	}()
+	src, err := safefs.Open(staging)
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	files, err := restoreBaseSnapshot(ctx, work, entries, src)
+	if err != nil {
+		return "", err
+	}
+	_, generated, payload, err := restoreAdapter(eco.Name, roots[0], hosts)
+	if err != nil {
+		return "", err
+	}
+	for name, data := range generated {
+		if _, exists := files[name]; exists {
+			return "", errors.New("approved base collides with restore settings")
+		}
+		if err = src.WriteFile(name, data, 0600); err != nil {
+			return "", err
+		}
+		files[name] = data
+	}
+	request := RestoreRequest{Source: staging, RepositoryRoot: repo, CacheRoot: cache, Registries: hosts}
+	if err = restorePreflightCheck(ctx, boundary, request); err != nil {
+		if RestorePreflightUnavailable(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	// Capability and current allowance are checked before even a warm read.
+	identity := lockfileDigest(files)
+	tools := map[string]string{"dotnet": "/usr/bin/dotnet", "maven": "/usr/bin/mvn", "gradle": "/usr/bin/gradle"}
+	tool, err := restoreToolIdentity(tools[eco.Name])
+	if err != nil {
+		return "", err
+	}
+	toolSum := sha256.Sum256(tool)
+	normalized := slices.Clone(hosts)
+	sort.Strings(normalized)
+	sum := sha256.Sum256([]byte("restore-v1\x00" + baseSHA + identity + hex.EncodeToString(toolSum[:]) + strings.Join(normalized, "\x00")))
+	selector := ".complete-" + hex.EncodeToString(sum[:])
+	pinned, err := openRestoreDirectory(cache)
+	if err != nil {
+		return "", err
+	}
+	defer pinned.Close()
+	lock, err := pinned.OpenLock(".publish.lock")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		retErr = errors.Join(retErr, lock.Close())
+		if retErr != nil {
+			prepared = ""
+		}
+	}()
+	for {
+		err = filelock.TryLockExclusive(lock)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return "", err
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	defer func() {
+		retErr = errors.Join(retErr, filelock.Unlock(lock))
+		if retErr != nil {
+			prepared = ""
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if data, err := pinned.ReadFile(selector, 128); err == nil {
+		generation := string(data)
+		if !strings.HasPrefix(generation, "restore-") || filepath.Base(generation) != generation {
+			return "", errors.New("invalid restore selector")
+		}
+		d, err := pinned.Sub(generation, false, 0)
+		if err != nil {
+			return "", err
+		}
+		d.Close()
+		if err := restoreCachePinned(pinned, cache); err != nil {
+			return "", err
+		}
+		return filepath.Join(cache, generation), nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	handle, generation, err := createRestoreOutput(pinned, cache)
+	if err != nil {
+		return "", err
+	}
+	published := false
+	defer func() {
+		if !published || retErr != nil {
+			if published {
+				retErr = errors.Join(retErr, pinned.Remove(selector))
+			}
+			retErr = errors.Join(retErr, handle.RemoveAll(generation))
+		}
+		retErr = errors.Join(retErr, handle.Close())
+		if retErr != nil {
+			prepared = ""
+		}
+	}()
+	dst, err := pinned.Sub(generation, false, 0)
+	if err != nil {
+		return "", err
+	}
+	defer dst.Close()
+	var total int64
+	for _, dir := range roots {
+		request.Argv, _, _, err = restoreAdapter(eco.Name, dir, hosts)
+		if err != nil {
+			return "", err
+		}
+		// Run errors are always fatal, regardless of their shape or startup phase.
+		output, err := restorePayloadRun(ctx, boundary, request)
+		if err != nil {
+			return "", err
+		}
+		err = func() (retErr error) {
+
+			name, err := filepath.Rel(cache, output)
+			if err != nil || filepath.Dir(name) != "." || !strings.HasPrefix(name, "restore-") {
+				return errors.New("invalid restore result")
+			}
+			if name == generation {
+				return errors.New("restore result aliases publication")
+			}
+			defer func() { retErr = errors.Join(retErr, handle.RemoveAll(name)) }()
+			out, err := pinned.Sub(name, false, 0)
+			if err != nil {
+				return err
+			}
+			defer out.Close()
+			packages, err := out.Sub(filepath.FromSlash(payload), false, 0)
+			if err != nil {
+				return err
+			}
+			defer packages.Close()
+			target := dst
+			if eco.Name == "gradle" {
+				if err := dst.MkdirAll("modules-2", 0700); err != nil {
+					return err
+				}
+				target, err = dst.Sub("modules-2", false, 0)
+				if err != nil {
+					return err
+				}
+				defer target.Close()
+			}
+			return copyRestorePayload(packages, target, "", &total)
+		}()
+		if err != nil {
+			return "", err
+		}
+	}
+	if err := restoreCachePinned(pinned, cache); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := pinned.WriteFile(selector, []byte(generation), 0400); err != nil {
+		return "", err
+	}
+	published = true
+	if err := restoreCachePinned(pinned, cache); err != nil {
+		published = false
+		return "", errors.Join(err, pinned.Remove(selector))
+	}
+	return filepath.Join(cache, generation), nil
+}
+
+func restoreCachePinned(root *safefs.Root, cache string) error {
+	expected, err := root.OpenDirectory(".")
+	if err != nil {
+		return err
+	}
+	defer expected.Close()
+	current, err := openRestoreDirectory(cache)
+	if err != nil {
+		return err
+	}
+	defer current.Close()
+	actual, err := current.OpenDirectory(".")
+	if err != nil {
+		return err
+	}
+	defer actual.Close()
+	before, err := expected.Stat()
+	if err != nil {
+		return err
+	}
+	after, err := actual.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(before, after) {
+		return errors.New("restore publication root changed")
+	}
+	return nil
+}
+
+// CheckDependencyRestoreCapability performs payload-free preparation diagnostics.
+// It does not populate caches or contact public registries.
+func CheckDependencyRestoreCapability(ctx context.Context, policy DependencyPolicy) (detail string, retErr error) {
+	if !policy.RestoreSelected {
+		return "sandbox restore unsupported by selected runtime; keeping read-only host caches", nil
+	}
+	if policy.RestoreError != nil {
+		return "", policy.RestoreError
+	}
+	if len(policy.RestoreRegistries) == 0 {
+		return "sandbox restore unconfigured: set node restore_registries for this registered repository", nil
+	}
+	boundary, err := packagedRestoreBoundary()
+	if err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp("", "swarm-restore-doctor-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() { retErr = errors.Join(retErr, os.RemoveAll(tmp)) }()
+	source, repo := filepath.Join(tmp, "source"), filepath.Join(tmp, "repo")
+	cache := filepath.Join(repo, "cache")
+	for _, dir := range []string{source, cache} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return "", err
+		}
+	}
+	for _, eco := range []string{"dotnet", "maven", "gradle"} {
+		hosts := policy.RestoreRegistries[eco]
+		if len(hosts) == 0 {
+			continue
+		}
+		err := restorePreflightCheck(ctx, boundary, RestoreRequest{Source: source, RepositoryRoot: repo, CacheRoot: cache, Registries: hosts})
+		if err != nil {
+			if RestorePreflightUnavailable(err) {
+				return "sandbox restore unavailable: " + err.Error() + "; keeping read-only host caches", nil
+			}
+			return "", err
+		}
+	}
+	return "sandbox restore eligible; approved-base preparation has not run", nil
 }

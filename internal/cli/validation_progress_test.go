@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/validation"
 )
 
 func runProgressCommand(t *testing.T, f *cliFixture, args ...string) (string, string, error) {
@@ -71,7 +72,11 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 							t.Fatalf("%v\n%s", err, diag)
 						}
 						if mode == "false" {
-							if diag != "" {
+							expected := ""
+							if operation == "submit" && asJSON {
+								expected = validation.AcceptanceEvidenceNotice([]validation.AcceptanceWarning{{Index: 1, Criterion: "Produce a checked checkpoint", Reason: "unmentioned"}})
+							}
+							if diag != expected {
 								t.Fatalf("quiet progress: %s", diag)
 							}
 						} else {

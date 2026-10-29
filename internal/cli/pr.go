@@ -175,6 +175,13 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			if result != nil && result.Validation != nil && result.Validation.Reused {
 				fmt.Fprintln(cmd.ErrOrStderr(), result.Validation.Artifact.Summary)
 			}
+			if operation == "submit" && result != nil {
+				notes := cmd.OutOrStdout()
+				if asJSON || opts.Work.InspectOnly {
+					notes = cmd.ErrOrStderr()
+				}
+				fmt.Fprint(notes, validation.AcceptanceEvidenceNotice(result.AcceptanceEvidenceWarnings))
+			}
 			if asJSON || opts.Work.InspectOnly {
 				status := "completed"
 				if result != nil && result.Status != "" {

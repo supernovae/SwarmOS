@@ -395,7 +395,7 @@ func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
 	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	restore := snapshotCLIFixture(t, f)
-	for _, kind := range []string{"pass", "repair", "exhausted", "outside", "zero", "custom"} {
+	for _, kind := range []string{"pass", "repair", "exhausted", "outside", "zero", "custom", "diagnostic", "test-diagnostic", "selected", "selected-test", "selected-native", "selected-comma"} {
 		t.Run(kind, func(t *testing.T) {
 			restore(t)
 			p := strconv.Itoa(number)
@@ -408,6 +408,24 @@ func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
 			// Change trusted policy at the target base, requiring explicit task
 			// reapproval and a fresh review of the unchanged plans on the retry.
 			command := "test \"$(cat " + name + ")\" = fixed"
+			extra := "repair_extra.go"
+			if kind == "test-diagnostic" || kind == "selected-test" {
+				extra = "repair_extra_test.go"
+			}
+			if kind == "selected-comma" {
+				extra = "repair,extra.h"
+			}
+			if kind == "selected-native" {
+				extra = "repair_extra.s"
+			}
+			selected := strings.HasPrefix(kind, "selected")
+			diagnostic := kind == "diagnostic" || kind == "test-diagnostic"
+			if selected || diagnostic {
+				if err = os.WriteFile(filepath.Join(f.root, extra), []byte("original"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				command = "test \"$(cat " + extra + ")\" = fixed || { echo " + extra + ":3:4: reported-failure; exit 1; }"
+			}
 			if kind == "pass" {
 				command = "git --version"
 			}
@@ -445,13 +463,23 @@ func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
 			case "outside":
 				script = "if [ -f .swarm/active/REPAIR_PATHS.md ]; then printf fixed > " + name + "; printf unsafe > outside.txt; else printf resolved > " + name + "; fi"
 			}
+			if selected {
+				script = "if [ -f .swarm/active/REPAIR_PATHS.md ]; then printf fixed > " + extra + "; else printf resolved > " + name + "; fi"
+			}
 			f.setenv("SWARM_MOCK_DEVELOPER_CMD", script)
-			output, runErr := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--json")
-			if (runErr == nil) != (kind == "pass" || kind == "repair") {
+			args := []string{"pr", "rebase", p, "--resolve", "--agent", "mock", "--json"}
+			if selected {
+				args = append(args, "--repair-file", extra, "--repair-file", extra)
+				if kind == "selected-comma" {
+					args = append(args, "--repair-file", name)
+				}
+			}
+			output, runErr := f.run(args...)
+			if (runErr == nil) != (kind == "pass" || kind == "repair" || selected) {
 				t.Fatalf("rebase: %v\n%s", runErr, output)
 			}
 			st := f.state(t, issue)
-			want := map[string]int{"pass": 0, "repair": 1, "exhausted": 2, "outside": 1, "zero": 0, "custom": 1}[kind]
+			want := map[string]int{"pass": 0, "repair": 1, "exhausted": 2, "outside": 1, "zero": 0, "custom": 1, "diagnostic": 0, "test-diagnostic": 0, "selected": 1, "selected-test": 1, "selected-native": 1, "selected-comma": 1}[kind]
 			if st.LastRebase == nil || st.LastRebase.RepairAttempts != want {
 				t.Fatalf("repair evidence: %+v", st.LastRebase)
 			}
@@ -459,7 +487,24 @@ func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
 			if _, err = os.Lstat(filepath.Join(worktree, "outside.txt")); !os.IsNotExist(err) {
 				t.Fatalf("rejected addition imported: %v", err)
 			}
-			if kind == "pass" || kind == "repair" {
+			if diagnostic && (runErr == nil || !strings.Contains(runErr.Error(), extra) || !strings.Contains(runErr.Error(), "swarm pr work "+p) || strings.Contains(runErr.Error(), "repair produced no changes")) {
+				t.Fatalf("diagnostic: %v", runErr)
+			}
+			if selected {
+				wantSelections := 1
+				if kind == "selected-comma" {
+					wantSelections = 2
+				}
+				if len(st.LastRebase.RepairSelections) != 1 || len(st.LastRebase.RepairSelections[0].Paths) != wantSelections || st.LastRebase.RepairSelections[0].Source != "local:approve-task" {
+					t.Fatalf("selection: %+v", st.LastRebase)
+				}
+				for _, path := range st.LastRebase.RepairPaths {
+					if path == extra {
+						t.Fatal("selection persisted in baseline")
+					}
+				}
+			}
+			if kind == "pass" || kind == "repair" || selected {
 				result := readPROutcome(t, output)
 				if result.Validation == nil || !result.Validation.Passed || result.SubmitCommand != "swarm pr submit "+p || result.Validation.HeadSHA != result.HeadSHA {
 					t.Fatalf("not submit ready: %+v", result)
@@ -477,6 +522,38 @@ func TestCLIPRResolvedRebaseBoundedRepairAndNoPublication(t *testing.T) {
 					if retryErr == nil || f.state(t, issue).LastRebase.RepairAttempts != 2 || f.state(t, issue).PRRevision.LocalHeadSHA != checkpoint {
 						t.Fatalf("retry reset repair budget: %v", retryErr)
 					}
+				}
+			}
+			if selected {
+				for _, bad := range []string{"../outside.go", "/outside.go", "*.go", ".swarm/config.yaml", "AGENTS.md", "missing.go", "."} {
+					_, e := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--repair-file", bad, "--progress=false")
+					if e == nil || f.state(t, issue).LastRebase.RepairAttempts != 1 {
+						t.Fatalf("invalid selection %q: %v", bad, e)
+					}
+				}
+				for _, flags := range [][]string{{"--repair-file", extra}, {"--resolve", "--abort", "--repair-file", extra}} {
+					_, e := f.run(append([]string{"pr", "rebase", p}, flags...)...)
+					if e == nil {
+						t.Fatalf("unsafe flags: %v", flags)
+					}
+				}
+			}
+			if selected {
+				// A later invocation must not recover permission from either audit
+				// or the diff of the earlier selected checkpoint.
+				if err = os.WriteFile(filepath.Join(worktree, extra), []byte("broken again"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				prGit(t, worktree, "add", extra)
+				prGit(t, worktree, "commit", "-m", "Fail validation again")
+				checkpoint := prGit(t, worktree, "rev-parse", "HEAD")
+				f.manager.BindClaim(issue, st.Lease.ClaimID)
+				if _, err = f.manager.RecordPRHead(context.Background(), issue, st.Lease.Owner, number, st.PRRevision.Branch, checkpoint); err != nil {
+					t.Fatal(err)
+				}
+				_, retryErr := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false")
+				if retryErr == nil || !strings.Contains(retryErr.Error(), "outside permitted repair scope") || f.state(t, issue).LastRebase.RepairAttempts != 1 {
+					t.Fatalf("replayed selection: %v", retryErr)
 				}
 			}
 			current, err := f.tracker.GetPullRequest(context.Background(), number)

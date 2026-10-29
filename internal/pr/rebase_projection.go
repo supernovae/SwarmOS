@@ -31,6 +31,7 @@ func RebaseSummary(st *lease.IssueState, number int) string {
 	if r := st.LastRebase; r != nil {
 		fmt.Fprintf(&b, "Rebase: %s\nHeads: %s -> %s\nBases: %s -> %s\nPatch identity: %s (verified: %t)\n", r.Status, r.OldHead, r.NewHead, r.OldBase, r.NewBase, r.PatchIdentity, r.Verified)
 		fmt.Fprintf(&b, "Conflicts resolved: %d\nRepair attempts: %d\n", len(r.Resolutions), r.RepairAttempts)
+		b.WriteString(repairSelectionSummary(r))
 		if r.Status == "completed" {
 			if r.DroppedPathsVerified {
 				b.WriteString(DroppedPathsWarning(r.DroppedPaths, "", r.OldHead, r.NewHead, number, st.ForkRepo != ""))
@@ -105,6 +106,7 @@ func ProjectRebase(ctx context.Context, tr tracker.Tracker, st *lease.IssueState
 	r := st.LastRebase
 	section := fmt.Sprintf("### Rebase context\n\nRebase: %s\nHeads: %s -> %s\nBases: %s -> %s\nPatch identity: %s (verified: %t)\nConflicts resolved: %d\nRepair attempts: %d\n",
 		lease.DescriptionText(r.Status), lease.DescriptionText(r.OldHead), lease.DescriptionText(r.NewHead), lease.DescriptionText(r.OldBase), lease.DescriptionText(r.NewBase), lease.DescriptionText(r.PatchIdentity), r.Verified, len(r.Resolutions), r.RepairAttempts)
+	section += lease.DescriptionText(repairSelectionSummary(r))
 	if r.Status == "completed" {
 		if r.DroppedPathsVerified {
 			section += lease.DescriptionText(DroppedPathsWarning(r.DroppedPaths, "", r.OldHead, r.NewHead, number, st.ForkRepo != ""))
@@ -152,4 +154,19 @@ func ProjectRebase(ctx context.Context, tr tracker.Tracker, st *lease.IssueState
 	}
 	_, err = tr.UpdateDraftPR(ctx, number, pr.Title, body)
 	return err
+}
+
+func repairSelectionSummary(r *lease.RebaseEvidence) string {
+	var b strings.Builder
+	for _, a := range r.RepairSelections {
+		fmt.Fprintf(&b, "Repair selection audit (%s, %s) at %s: ", displayPath(a.Actor), displayPath(a.Source), displayPath(a.Head))
+		for i, p := range a.Paths {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(displayPath(p))
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
 }

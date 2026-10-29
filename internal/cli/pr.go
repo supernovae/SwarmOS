@@ -68,6 +68,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				return err
 			}
 			opts.Number = number
+			if len(opts.RepairFiles) > 0 && (!opts.Resolve || opts.Abort || rootOpts.Fork) {
+				return fmt.Errorf("--repair-file requires same-repository --resolve without --abort")
+			}
 			if opts.Continue && opts.Abort {
 				return fmt.Errorf("--continue and --abort are mutually exclusive")
 			}
@@ -311,6 +314,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 	if operation == "rebase" {
 		cmd.Flags().BoolVar(&opts.Continue, "continue", false, "Continue after resolving and staging conflicts in the PR worktree")
 		cmd.Flags().BoolVar(&opts.Abort, "abort", false, "Abort the managed rebase and restore its starting local commit")
+		cmd.Flags().StringArrayVar(&opts.RepairFiles, "repair-file", nil, "Exact tracked file selected by an authenticated maintainer for this invocation (with --resolve)")
 		cmd.Flags().BoolVar(&opts.Resolve, "resolve", false, "Plan and resolve conflicts, validate, and repair within the trusted limit; stop ready for explicit submit")
 		cmd.Flags().StringVar(&opts.Work.AgentName, "agent", "", "Configured agent for conflict resolution (with --resolve)")
 		cmd.Flags().StringVar(&opts.Work.DeveloperAgent, "developer-agent", "", "Configured developer override for conflict resolution (with --resolve)")

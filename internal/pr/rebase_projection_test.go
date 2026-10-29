@@ -19,8 +19,12 @@ func TestRebaseProjectionPreservesHumanTextAndRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := &lease.IssueState{CarryReason: "approved plan carried forward", LastRebase: &lease.RebaseEvidence{OldHead: "old", NewHead: "new", OldBase: "base", NewBase: "next", Status: "completed", PatchIdentity: "unchanged", Verified: true}}
+	st.LastRebase.RepairSelections = []lease.RepairSelection{{Paths: []string{"tab\tfile.go"}, Actor: "maintainer", Source: "local:approve-task", Head: "new"}}
 	if err := ProjectRebase(ctx, tr, st, pr.Number); err != nil {
 		t.Fatal(err)
+	}
+	if summary := RebaseSummary(st, pr.Number); !strings.Contains(summary, `tab\tfile.go`) || !strings.Contains(summary, "local:approve-task") {
+		t.Fatal(summary)
 	}
 	first, err := tr.GetPullRequest(ctx, pr.Number)
 	if err != nil {

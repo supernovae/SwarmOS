@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -20,14 +22,12 @@ import (
 const repairTask = `Repair only the allowed paths listed in .swarm/active/REPAIR_PATHS.md so the trusted checks in VALIDATION.md pass. Read PLAN.md, TEST_PLAN.md and REBASE_PLAN.md. Preserve the approved behavior. Do not edit any control or instruction file. This snapshot has no Git metadata; the coordinator commits accepted edits and reruns validation.`
 
 func repairAllowed(p string, paths []string, rv *resolver) bool {
-	if isControlPath(p) || p == ".git" || strings.HasPrefix(p, ".git/") || p == "AGENTS.md" || p == "CLAUDE.md" || !slices.Contains(paths, p) {
+	if path.Clean(p) != p || path.IsAbs(p) || p == ".." || strings.HasPrefix(p, "../") || strings.ContainsAny(p, "\\:\x00") || isControlPath(p) || p == ".git" || strings.HasPrefix(p, ".git/") || p == "AGENTS.md" || p == "CLAUDE.md" || !slices.Contains(paths, p) {
 		return false
 	}
-	if !rv.unit.AllowHarnessChanges {
-		for _, pattern := range rv.protected {
-			if validation.MatchProtectedPath(pattern, p) {
-				return false
-			}
+	for _, pattern := range rv.protected {
+		if validation.MatchProtectedPath(pattern, p) {
+			return false
 		}
 	}
 	return true
@@ -148,7 +148,7 @@ func importRepair(worktree string, before, after map[string]planFile, paths []st
 	return nil
 }
 
-func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner string, rv *resolver) (*Result, error) {
+func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner string, rv *resolver, selections []string) (*Result, error) {
 	cfg, err := harness.LoadConfigAt(s.Root, r.State.BaseSHA)
 	if err != nil {
 		return r, err
@@ -171,6 +171,32 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 		}
 		r.State = st
 	}
+
+	selected, err := workspace.ExactRepairFiles(ctx, r.Worktree, selections)
+	if err != nil {
+		return r, err
+	}
+	for _, p := range selected {
+		if !repairAllowed(p, selected, rv) {
+			return r, fmt.Errorf("forbidden repair selection %s", displayPath(p))
+		}
+	}
+	if len(selected) > 0 {
+		st, e := s.Manager.RecordRebaseRepairSelection(ctx, r.IssueNumber, owner, r.PR.Number, r.State.BaseSHA, r.HeadSHA, selected)
+		if e != nil {
+			return r, e
+		}
+		r.State = st
+	}
+	eligible := make([]string, 0, len(paths)+len(selected))
+	for _, p := range paths {
+		if repairAllowed(p, paths, rv) {
+			eligible = append(eligible, p)
+		}
+	}
+	paths = append(eligible, selected...)
+	slices.Sort(paths)
+	paths = slices.Compact(paths)
 	stop := func(cause error) (*Result, error) {
 		evidence := ""
 		if r.Validation != nil {
@@ -198,6 +224,18 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 		for _, check := range r.Validation.CheckOutcomes {
 			if check.InfrastructureError {
 				return stop(fmt.Errorf("validation infrastructure failed: %s", check.Name))
+			}
+		}
+
+		tracked, e := workspace.TrackedRepairFiles(ctx, r.Worktree)
+		if e != nil {
+			return stop(e)
+		}
+		for _, check := range r.Validation.CheckOutcomes {
+			for _, p := range reportedRepairFiles(check.OutputTail, tracked) {
+				if !repairAllowed(p, paths, rv) {
+					return stop(fmt.Errorf("validation reported file outside permitted repair scope: %s", displayPath(p)))
+				}
 			}
 		}
 		st := r.State
@@ -251,6 +289,9 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 			if dirty || rebasing || head != r.HeadSHA {
 				return fmt.Errorf("candidate changed during repair")
 			}
+			if _, err = workspace.ExactRepairFiles(ctx, r.Worktree, selected); err != nil {
+				return err
+			}
 			if err = importRepair(r.Worktree, before, after, paths, rv); err != nil {
 				return err
 			}
@@ -277,4 +318,35 @@ func forkFlag(fork bool) string {
 		return "--fork "
 	}
 	return ""
+}
+
+// Locations are advisory: even forged output can only stop a repair.
+func reportedRepairFiles(output string, tracked []string) []string {
+	if len(output) > 16384 {
+		output = output[len(output)-16384:]
+	}
+	locations := regexp.MustCompile(`(?:^|[\s])([^\s:]+):[0-9]+(?::[0-9]+)?:`).FindAllStringSubmatch(output, 256)
+	var result []string
+	for _, m := range locations {
+		p := strings.TrimPrefix(m[1], "./")
+		if slices.Contains(tracked, p) || strings.Contains(p, "/") {
+			result = append(result, p)
+			continue
+		}
+		if path.Base(p) != p {
+			continue
+		}
+		match := ""
+		count := 0
+		for _, candidate := range tracked {
+			if path.Base(candidate) == p {
+				match = candidate
+				count++
+			}
+		}
+		if count == 1 {
+			result = append(result, match)
+		}
+	}
+	return result
 }

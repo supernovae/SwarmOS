@@ -333,33 +333,27 @@ func TestSubmitFreshnessFailedDescriptionUpdate(t *testing.T) {
 			freshnessGit(t, f.root, "add", "conflict.txt")
 			freshnessGit(t, f.root, "commit", "-m", "target")
 			tr := &freshnessUpdateFailure{Tracker: f.tracker}
-			run := func() (string, string) {
-				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
-				var out, diagnostics bytes.Buffer
-				cmd.SetOut(&out)
-				cmd.SetErr(&diagnostics)
-				cmd.SetArgs([]string{"issue", "submit", n, "--json"})
-				if err := cmd.ExecuteContext(t.Context()); err != nil {
-					t.Fatal(err, out.String(), diagnostics.String())
-				}
-				return out.String(), diagnostics.String()
-			}
-			out, diagnostics := run()
-			var parsed map[string]json.RawMessage
-			if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-				t.Fatal(err, out)
+			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+			var out, diagnostics bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&diagnostics)
+			cmd.SetArgs([]string{"issue", "submit", n, "--json"})
+			err := cmd.ExecuteContext(t.Context())
+			if err == nil || !strings.Contains(err.Error(), "retry the same") {
+				t.Fatal("required description failure must stop submission", err)
 			}
 			submitted := f.state(t, issue)
-			if submitted.PRNumber == 0 || submitted.Lease.Status != "completed" || tr.updates != 1 {
-				t.Fatal("submission failed", submitted, tr.updates)
+			if submitted.PRNumber != 0 || submitted.Lease.Status == "completed" || tr.updates != 1 {
+				t.Fatal("recorded unsuccessful description update", submitted, tr.updates)
 			}
-			command := fmt.Sprintf("swarm pr rebase %d --resolve", submitted.PRNumber)
-			if !strings.Contains(diagnostics, "PR description lacks the freshness note; run `"+command+"`") || strings.Contains(diagnostics, "sensitive diagnostic") {
-				t.Fatal(diagnostics)
+			if strings.Contains(out.String(), `"status":"submitted"`) {
+				t.Fatal(out.String())
 			}
-			retry, _ := run()
-			if strings.Contains(retry, "base_freshness") || tr.updates != 1 {
-				t.Fatal("retry repaired description", retry, tr.updates)
+			// Retry through the command, using the published PR discovered by FindDraftPR.
+			f.must(t, "issue", "submit", n, "--json")
+			retried := f.state(t, issue)
+			if retried.PRNumber == 0 || retried.Lease.Status != "completed" {
+				t.Fatal("retry did not complete", retried)
 			}
 		})
 	}

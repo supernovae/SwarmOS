@@ -2,6 +2,7 @@ package fork
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -243,6 +245,20 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 			if !ok {
 				http.Error(w, "pr not found", http.StatusNotFound)
 				return
+			}
+			if r.Method == http.MethodPatch {
+				var payload struct {
+					Title string
+					Body  string
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if len(payload.Body) >= 60000 || !utf8.ValidString(payload.Body) {
+					http.Error(w, "decoded PR body exceeds limit", http.StatusUnprocessableEntity)
+					return
+				}
+				pr.Title, pr.Body = payload.Title, payload.Body
 			}
 			writeJSON(map[string]any{
 				"number":   pr.Number,
@@ -796,9 +812,53 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	if _, err := applyBob(lease.ForkRequest{Operation: "update-artifact", ClaimID: revClaim, Artifact: &validation}); err != nil {
 		t.Fatal(err)
 	}
+	// Oversized durable projection evidence does not travel through the
+	// serialized fork request. Keep the transport's existing limit intact.
+	validation.Body = "| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n| regression | go test | PASS | 1s |\n\n### Output: regression\n" + strings.Repeat("日志🙂<!-- swarm:review-evidence:end -->\n", 10000)
+	store := coordination.NewGitStoreWithLayout(upstreamCheckout, "origin", layout)
+	raw, version, err := store.Load(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projected lease.IssueState
+	if err := json.Unmarshal(raw, &projected); err != nil {
+		t.Fatal(err)
+	}
+	for i := range projected.Artifacts {
+		if projected.Artifacts[i].Type == contract.ArtifactValidation {
+			projected.Artifacts[i].Body = validation.Body
+			projected.Artifacts[i].Metadata["content_sha256"] = fmt.Sprintf("%x", sha256.Sum256([]byte(validation.Body)))
+		}
+	}
+	projected.LastRebase = &lease.RebaseEvidence{Status: "completed", OldHead: aliceHead, NewHead: revHead, OldBase: baseSHA, NewBase: baseSHA, Plans: []lease.RebasePlanReport{{Commit: revHead, Digest: "micro-digest", Body: strings.Repeat("micro-plan 计划\n", 10000)}}}
+	raw, err = json.Marshal(&projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompareAndSwap(ctx, 42, version, raw); err != nil {
+		t.Fatal(err)
+	}
+	issueBody, err := lease.ComposePRDescription("Human prefix é\n", "issue-description", "Closes #42\n"+lease.DescriptionSlot(strings.Repeat("issue plan 计划\n", 10000))+lease.DescriptionRetrieval(42, layout.StateRef(42)), layout.StateRef(42), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghState.mu.Lock()
+	ghState.prs[55].Body = issueBody + "\nHuman footer 🙂\n\n"
+	ghState.mu.Unlock()
 	stDone, err := applyBob(complete)
 	if err != nil {
 		t.Fatalf("complete-pr-revision: %v", err)
+	}
+	ghState.mu.Lock()
+	composed := ghState.prs[55].Body
+	ghState.mu.Unlock()
+	if !strings.HasPrefix(composed, "Human prefix é\n") || !strings.Contains(composed, "\nHuman footer 🙂\n\n") || !strings.Contains(composed, "regression: PASS") || len(composed) >= 60000 {
+		t.Fatal("composed fork body lost evidence or outside prose")
+	}
+	for _, name := range []string{"issue-description", "review-evidence", "rebase"} {
+		if strings.Count(composed, "<!-- swarm:"+name+":start -->") != 1 {
+			t.Fatal("missing fork projection", name)
+		}
 	}
 	if stDone.PRRevision != nil || stDone.HeadSHA != revHead || stDone.Lease.Status != "completed" || stDone.PRNumber != 55 {
 		t.Fatalf("unexpected completed revision state: %+v", stDone)

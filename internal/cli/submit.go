@@ -196,7 +196,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return err
 			}
 			prTitle := fmt.Sprintf("%s (#%d)", iss.Title, issue)
-			prBody := formatDraftPRBody(unit, state, manager.LedgerLayout().StateRef(issue))
+			stateRef := manager.LedgerLayout().StateRef(issue)
+			prSection := draftPRSection(unit, state, stateRef, manager.UpstreamRemote())
+			retryCommand := strings.Split(submissionRecoveryCommand(0, rootOpts), " pr rebase ")[0] + fmt.Sprintf(" issue submit %d", issue)
 			prHead := branch
 			if rootOpts.Fork {
 				forkOwner := owner
@@ -210,25 +212,43 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
+			outside := ""
+			if pr != nil {
+				outside = pr.Body
+			}
+			number := 0
+			if pr != nil {
+				number = pr.Number
+			}
+			prBody, err := lease.ComposePRDescription(outside, "issue-description", prSection+lease.DescriptionText(freshness.conflictNote(number, issue, rootOpts)), stateRef, issue)
+			if err != nil {
+				return err
+			}
 			if pr == nil {
 				pr, err = tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue, Title: prTitle, Body: prBody, Head: prHead, Base: baseBranch})
-				if err != nil {
-					return err
-				}
 			} else {
-				if freshness.Status != "conflicts" {
-					if updatedPR, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody); updateErr == nil && updatedPR != nil {
-						pr = updatedPR
-					}
+				pr, err = tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody)
+			}
+			if err != nil || pr == nil {
+				if err == nil {
+					err = fmt.Errorf("tracker returned no PR")
 				}
+				return fmt.Errorf("PR publication/description update failed; a PR may already exist; retry the same command: %s: %w", retryCommand, err)
 			}
 			if note := freshness.conflictNote(pr.Number, issue, rootOpts); note != "" {
 				fmt.Fprint(advisoryOut, note)
-				if updated, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody+note); updateErr != nil || updated == nil {
-					fmt.Fprintf(advisoryOut, "PR description lacks the freshness note; run `%s`.\n", submissionRecoveryCommand(pr.Number, rootOpts))
-				} else {
-					pr = updated
+				prBody, err = lease.ComposePRDescription(prBody, "issue-description", prSection+lease.DescriptionText(note), stateRef, issue)
+				if err != nil {
+					return err
 				}
+				updated, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody)
+				if updateErr != nil || updated == nil {
+					if updateErr == nil {
+						updateErr = fmt.Errorf("tracker returned no PR")
+					}
+					return fmt.Errorf("PR #%d was published but description update failed; retry the same command: %s: %w", pr.Number, retryCommand, updateErr)
+				}
+				pr = updated
 			}
 			p.Next("submission record")
 			submittedState, err := manager.RecordSubmission(ctx, issue, owner, pr.Number, pr.HTMLURL)
@@ -305,93 +325,35 @@ func defaultBaseBranch(root, upstreamRemote string) (string, error) {
 	return branch, nil
 }
 
-func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState, stateRef string) string {
-	var body strings.Builder
-	fmt.Fprintf(&body, "Closes #%d\n\n## Objective\n\n%s\n", unit.IssueNumber, strings.TrimSpace(unit.Objective))
-	if len(unit.Constraints) > 0 {
-		body.WriteString("\n## Constraints\n\n")
-		for _, c := range unit.Constraints {
-			fmt.Fprintf(&body, "- %s\n", c)
-		}
+func draftPRSection(unit *contract.WorkUnit, state *lease.IssueState, stateRef string, remote ...string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Closes #%d\n\n## Objective\n\n", unit.IssueNumber)
+	b.WriteString(lease.DescriptionSlot(unit.Objective))
+	b.WriteString("\n## Constraints\n\n")
+	for _, c := range unit.Constraints {
+		b.WriteString(lease.DescriptionSlot("- " + c + "\n"))
 	}
-	body.WriteString("\n## Acceptance criteria\n\n")
-	body.WriteString("These checkboxes track final acceptance review by a maintainer, not automated check results. SwarmOS leaves them unchecked at submission; this does not mean the checks failed.\n\n")
-	for _, criterion := range unit.Acceptance {
-		fmt.Fprintf(&body, "- [ ] %s\n", criterion)
+	b.WriteString("\n## Acceptance criteria\n\nThese checkboxes track final acceptance review by a maintainer. SwarmOS leaves them unchecked at submission.\n")
+	for _, c := range unit.Acceptance {
+		b.WriteString("- [ ] " + lease.DescriptionSlot(c+"\n"))
 	}
-	body.WriteString("\n## Review handoff\n\n")
-	body.WriteString("1. Use the attached test plan to map each criterion to its verification, then inspect the implementation and validation results. Record supporting test results or manual observations in the PR and check off each verified criterion above; leave unverified criteria open.\n")
-	body.WriteString("2. Mark this PR ready for review in GitHub when the evidence is ready, and request a code review. `swarm issue review-plan` reviews the plan before implementation; it does not approve this PR.\n")
-	body.WriteString("3. Merge through the repository's normal review and CI requirements. The closing reference above closes the linked issue when this PR merges into the default branch; issue and PR checkboxes are not synchronized.\n")
+	b.WriteString("\n## Review handoff\n\nUse the test plan and validation results to verify each criterion, then mark this PR ready for review in GitHub.\n")
 	if state != nil {
-		prov := lease.BuildProvenanceAttestation(unit, state)
-		body.WriteString("\n## 🔒 Harness & Model Provenance Attestation\n\n")
-		if len(prov.Roles) > 0 {
-			body.WriteString("| Role | Configured Agent | Harness | Version | Model | Boundary | Artifact SHA-256 |\n")
-			body.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
-			for _, r := range prov.Roles {
-				digest := "-"
-				if len(r.ArtifactDigest) > 12 {
-					digest = "`" + r.ArtifactDigest[:12] + "`"
-				} else if r.ArtifactDigest != "" {
-					digest = "`" + r.ArtifactDigest + "`"
-				}
-				fmt.Fprintf(&body, "| `%s` | `%s` | `%s` | `%s` | `%s` | `%s` | %s |\n",
-					r.Role, r.Agent, r.Harness, r.HarnessVersion, r.Model, r.Sandbox, digest)
-			}
-			body.WriteString("\n")
-		}
-		if rawJSON, err := json.MarshalIndent(prov, "", "  "); err == nil {
-			body.WriteString("<details>\n<summary>Machine-Readable Provenance Attestation (JSON)</summary>\n\n```json\n")
-			body.Write(rawJSON)
-			body.WriteString("\n```\n\n</details>\n")
-		}
+		raw, _ := json.MarshalIndent(lease.BuildProvenanceAttestation(unit, state), "", "  ")
+		b.WriteString("\n## 🔒 Harness & Model Provenance Attestation\n\nMachine-Readable Provenance Attestation (JSON)\n```json\n" + lease.DescriptionText(string(raw)) + "\n```\n")
 		if runs := lease.RoleRuns(state); len(runs) > 0 {
-			body.WriteString("\n## ⏱️ Role Run Telemetry\n\n")
-			body.WriteString("Observed per-run timing and the usage each harness reported; `unavailable` means it was not observed. Descriptive only, never a gate input.\n\n")
-			body.WriteString(lease.RoleRunTable(runs))
-			if rawJSON, err := json.MarshalIndent(runs, "", "  "); err == nil {
-				body.WriteString("\n<details>\n<summary>Machine-Readable Role Run Telemetry (JSON)</summary>\n\n```json\n")
-				body.Write(rawJSON)
-				body.WriteString("\n```\n\n</details>\n")
-			}
-		}
-		if len(state.Artifacts) > 0 {
-			body.WriteString("\n## 📦 Attached SwarmOS Artifacts\n\n")
-			body.WriteString("| Type | Producer | Verdict | Summary |\n| --- | --- | --- | --- |\n")
-			escape := strings.NewReplacer("|", "\\|", "\n", " ", "\r", " ", "`", "'")
-			for _, artifact := range state.Artifacts {
-				fmt.Fprintf(&body, "| %s | %s | %s | %s |\n", escape.Replace(string(artifact.Type)), escape.Replace(artifact.Producer), escape.Replace(artifact.Verdict), escape.Replace(artifact.Summary))
-			}
-			body.WriteString("\n")
-			for _, a := range state.Artifacts {
-				if a.Metadata["operator_steered"] == "true" {
-					fmt.Fprintf(&body, "Operator-steered %s: %s messages; SHA-256 `%s`.\n\n", a.Type, a.Metadata["guidance_count"], a.Metadata["guidance_sha256"])
-				}
-				digest := a.Metadata["content_sha256"]
-				if len(digest) > 12 {
-					digest = digest[:12]
-				}
-				var title string
-				switch a.Type {
-				case contract.ArtifactDesign:
-					title = fmt.Sprintf("📋 Implementation Plan (PLAN.md — sha256:%s)", digest)
-				case contract.ArtifactTestPlan:
-					title = fmt.Sprintf("🧪 Test Plan (TEST_PLAN.md — sha256:%s)", digest)
-				case contract.ArtifactReview:
-					title = fmt.Sprintf("🔍 Plan Review (REVIEW.md — Verdict: %s — sha256:%s)", a.Verdict, digest)
-				case contract.ArtifactImplementation:
-					title = fmt.Sprintf("🛠️ Implementation Summary (sha256:%s)", digest)
-				case contract.ArtifactValidation:
-					title = fmt.Sprintf("✅ Validation Checks (%s — sha256:%s)", a.Verdict, digest)
-				default:
-					title = fmt.Sprintf("📄 Artifact (%s — sha256:%s)", a.Type, digest)
-				}
-				fmt.Fprintf(&body, "<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, lease.TruncateArtifactBody(a.Body, stateRef))
-			}
+			raw, _ := json.MarshalIndent(runs, "", "  ")
+			b.WriteString(lease.DescriptionAtomicSlot("\n## ⏱️ Role Run Telemetry\n\n" + lease.RoleRunTable(runs) + "\n```json\n" + string(raw) + "\n```\n"))
 		}
 	}
-	return body.String()
+	b.WriteString("\n## 📦 Attached SwarmOS Artifacts\n\n")
+	b.WriteString(lease.DescriptionArtifacts(state))
+	b.WriteString(lease.DescriptionRetrieval(unit.IssueNumber, stateRef, remote...))
+	return b.String()
+}
+func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState, stateRef string) string {
+	body, _ := lease.ComposePRDescription("", "issue-description", draftPRSection(unit, state, stateRef), stateRef, unit.IssueNumber)
+	return body
 }
 
 func emptySubmitError(issue int, base string) error {

@@ -41,7 +41,7 @@ func TestReviewProjectionPreservesTextAndUpdatesWithoutRebase(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated, _ := tr.GetPullRequest(t.Context(), pr.Number)
-	if strings.Count(updated.Body, reviewStart) != 1 || !strings.Contains(updated.Body, "new evidence") || strings.Contains(updated.Body, "reviewer-lesson") || !strings.Contains(updated.Body, original) {
+	if strings.Count(updated.Body, reviewStart) != 1 || strings.Count(updated.Body, reviewEnd) != 1 || !strings.Contains(updated.Body, "new evidence") || strings.Contains(updated.Body, "reviewer-lesson") || !strings.Contains(updated.Body, original) {
 		t.Fatal(updated.Body)
 	}
 }

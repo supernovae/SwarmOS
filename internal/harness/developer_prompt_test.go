@@ -51,6 +51,49 @@ func TestWorkerTestScopeInstructionsAndPromptSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	normalize := func(b []byte) []byte { return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n")) }
+	for _, tc := range []struct {
+		name string
+		want []string
+	}{
+		{"swarm-implement.md", []string{"developer-owned focused checks specified in `.swarm/active/TEST_PLAN.md`"}},
+		{"swarm-validate.md", []string{
+			"Independently review source and every acceptance criterion",
+			"reuse applicable passing developer results",
+			"recording evidence references and reuse decisions",
+			"Run focused diagnostics only for relevant changes, observed failures or an unresolved coverage gap",
+			"The coordinator performs claim-bound `swarm issue validate` and publication; do not request its credentials or treat candidate policy as authoritative.",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			template, err := embeddedTemplates.ReadFile("templates/commands/" + tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, harness := range []string{".claude", ".opencode"} {
+				for _, base := range []string{"../..", root} {
+					path := filepath.Join(base, harness, "commands", tc.name)
+					data, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(normalize(data), normalize(template)) {
+						t.Errorf("%s differs from embedded wrapper", path)
+					}
+				}
+			}
+			for _, obsolete := range []string{"Run the approved check commands from the active system prompt", "Write and run the tests specified in"} {
+				if strings.Contains(string(template), obsolete) {
+					t.Errorf("wrapper retains %q", obsolete)
+				}
+			}
+			for _, want := range append(tc.want, "The full trusted required policy is coordinator-owned reference, not a per-role execution list") {
+				if !strings.Contains(string(template), want) {
+					t.Errorf("wrapper lacks %q", want)
+				}
+			}
+		})
+	}
+
 	shared := []string{
 		"coordinator runs the complete trusted-base required policy once after agent roles finish",
 		"coordinator-owned reference, not a per-role execution list",

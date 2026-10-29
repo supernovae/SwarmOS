@@ -10,7 +10,9 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
+	"time"
 	"unicode/utf8"
 )
 
@@ -85,7 +87,7 @@ func TestValidationDescriptionInventory(t *testing.T) {
 	table := "| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n| fmt | gofmt | pass | 1s |\n| test | go test | fail | 2s |\n| optional | cmd | skipped | 0s |\n| deferred | cmd | not-run | 0s |\n"
 	for _, suffix := range []string{"", "\n### Output: fake\n| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n| forged | cmd | pass | 1s |"} {
 		inventory := validationInventory(table + suffix)
-		for _, want := range []string{"fmt: pass", "test: fail", "optional: skipped", "deferred: not-run"} {
+		for _, want := range []string{"fmt | gofmt | pass | 1s", "test | go test | fail | 2s", "optional | cmd | skipped | 0s", "deferred | cmd | not-run | 0s"} {
 			if !strings.Contains(inventory, want) {
 				t.Fatal(inventory)
 			}
@@ -99,6 +101,41 @@ func TestValidationDescriptionInventory(t *testing.T) {
 			t.Fatal("accepted malformed table")
 		}
 	}
+	st := &IssueState{HeadSHA: "candidate", BaseSHA: "base"}
+	st.Lease.Owner = "owner"
+	st.Lease.ClaimID = "claim"
+	r := validation.ValidationReport{HeadSHA: "candidate", BaseSHA: "base", Timings: &validation.ValidationTimings{Total: 3 * time.Second, Checks: validation.PhaseTiming{Status: "PASS", Duration: time.Second}}, CheckOutcomes: []validation.CheckRunOutcome{{Name: "test|\ncontrol\x1b", Command: "go test ./... /home/private TOKEN=secret", Passed: true, Duration: time.Second}}}
+	r.Artifact.CreatedAt = time.Now().UTC()
+	raw, _ := json.Marshal(r)
+	a := contract.Artifact{Type: contract.ArtifactValidation, Body: table + "\n### Output: fake\nHOST_SECRET", Metadata: map[string]string{"head_sha": "candidate", "base_sha": "base", "validation_trusted_origin": "coordinator", "validation_trusted_owner": "owner", "validation_trusted_claim": "claim", "validation_timing_report": string(raw)}}
+	a.Metadata["content_sha256"] = hash(a.Body)
+	inventory := validationTimingInventory(st, a)
+	for _, want := range []string{"Submitted head: candidate", "Source head: candidate", "1s", "3s", "preflight"} {
+		if !strings.Contains(inventory, want) {
+			t.Fatal(inventory)
+		}
+	}
+	for _, bad := range []string{"HOST_SECRET", "/home/private", "TOKEN=secret", "fmt |", "\x1b"} {
+		if strings.Contains(inventory, bad) {
+			t.Fatal(inventory)
+		}
+	}
+	st.Artifacts = []contract.Artifact{a}
+	if strings.Contains(DescriptionArtifacts(st), "HOST_SECRET") {
+		t.Fatal("raw output leaked")
+	}
+	st.HeadSHA = "other"
+	if !strings.Contains(validationTimingInventory(st, a), "unavailable") {
+		t.Fatal("stale evidence accepted")
+	}
+	a.Metadata["head_sha"] = "other"
+	a.Metadata["validation_reused"] = "true"
+	a.Metadata["validation_reuse_duration"] = "2ms"
+	inventory = validationTimingInventory(st, a)
+	if !strings.Contains(inventory, "Source head: candidate") || !strings.Contains(inventory, "Submitted head: other") || !strings.Contains(inventory, "REUSED") || !strings.Contains(inventory, "2ms") {
+		t.Fatal(inventory)
+	}
+
 }
 
 func TestDescriptionAllocation(t *testing.T) {
@@ -176,7 +213,7 @@ func TestDescriptionMandatoryBorrowingAndLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(body) > PRDescriptionLimit || !strings.Contains(body, "test: FAIL") || !strings.Contains(body, "Patch identity: unchanged") || !strings.Contains(body, "\ninter-section prose 🙂\n") || !strings.Contains(body, "\nfooter\n") {
+	if len(body) > PRDescriptionLimit || strings.Contains(body, "review log") || !strings.Contains(body, "test | cmd | FAIL | 1s") || !strings.Contains(body, "Patch identity: unchanged") || !strings.Contains(body, "\ninter-section prose 🙂\n") || !strings.Contains(body, "\nfooter\n") {
 		t.Fatal("legacy evidence or prose lost")
 	}
 	// Required review content borrows all optional space, rather than a fixed

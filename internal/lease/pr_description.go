@@ -3,9 +3,11 @@ package lease
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/validation"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -142,8 +144,10 @@ func migrateDescription(name, text, ref string, issue int) (string, error) {
 			}
 			if typ == "validation" {
 				b.WriteString(validationInventory(part))
+				b.WriteString(DescriptionSlot("Full validation artifact retained; see retrieval instructions below."))
+			} else {
+				b.WriteString(DescriptionSlot(part))
 			}
-			b.WriteString(DescriptionSlot(part))
 		}
 	case "rebase":
 		if !strings.HasPrefix(content, "\n### Rebase context\n\n```text\n") || !strings.HasSuffix(content, "```\n") {
@@ -435,7 +439,7 @@ func currentHumanReview(st *IssueState, art contract.Artifact) bool {
 	return true
 }
 
-// DescriptionArtifacts extracts outcomes only from the validator's pre-log table.
+// DescriptionArtifacts projects current structured validation evidence and retained artifact references.
 func DescriptionArtifacts(st *IssueState, contexts ...ProjectionContext) string {
 	context := ProjectionContext{}
 	if len(contexts) > 0 {
@@ -447,16 +451,28 @@ func DescriptionArtifacts(st *IssueState, contexts ...ProjectionContext) string 
 	var b strings.Builder
 	b.WriteString(DescriptionText(PlanSummary(st, false)))
 	b.WriteString(DescriptionSlot(PlanSummary(st, true)))
-	for _, a := range st.Artifacts {
+	latestValidation := -1
+	for i, a := range st.Artifacts {
+		if a.Type == contract.ArtifactValidation {
+			latestValidation = i
+		}
+	}
+	for i, a := range st.Artifacts {
 		fmt.Fprintf(&b, "\n### %s: %s\nSHA-256: %s\n", DescriptionText(string(a.Type)), DescriptionText(a.Verdict), DescriptionText(a.Metadata["content_sha256"]))
 		if a.Metadata["operator_steered"] == "true" {
 			fmt.Fprintf(&b, "Operator-steered: %s messages; SHA-256 `%s`.\n", DescriptionText(a.Metadata["guidance_count"]), DescriptionText(a.Metadata["guidance_sha256"]))
 		}
 		if a.Type == contract.ArtifactValidation {
-			b.WriteString(validationInventory(a.Body))
+			if i == latestValidation {
+				b.WriteString(validationTimingInventory(st, a))
+			}
 		}
 		producer := ""
 		body, summary := a.Body, a.Summary
+		if a.Type == contract.ArtifactValidation {
+			body = "Full validation artifact retained; see retrieval instructions below."
+			summary = "Validation " + a.Verdict
+		}
 		if context.publishActors && currentHumanReview(st, a) {
 			producer = "Human review by " + productionLabel(a.Metadata["actor"]) + "\n"
 		}
@@ -468,8 +484,93 @@ func DescriptionArtifacts(st *IssueState, contexts ...ProjectionContext) string 
 	}
 	return b.String()
 }
+
+// Public timing rows use only current coordinator evidence. Logs never supply rows.
+func validationTimingInventory(st *IssueState, a contract.Artifact) string {
+	unavailable := "check table unavailable; full validation artifact retained\n"
+	head, _ := implementationCheckpoint(st)
+	md := a.Metadata
+	if head == "" || st.BaseSHA == "" || md["head_sha"] != head || md["base_sha"] != st.BaseSHA || md["content_sha256"] != hash(a.Body) || md["validation_trusted_origin"] != "coordinator" || st.Lease.Owner == "" || md["validation_trusted_owner"] != st.Lease.Owner || st.Lease.ClaimID == "" || md["validation_trusted_claim"] != st.Lease.ClaimID {
+		return unavailable
+	}
+	raw := md["validation_timing_report"]
+	if raw == "" {
+		raw = md["validation_report"]
+	}
+	if raw == "" {
+		return fmt.Sprintf("Submitted head: %s; base: %s\nSource head/time: unavailable\n", timingCell(head), timingCell(st.BaseSHA)) + validationInventory(a.Body)
+	}
+	if len(raw) > 8<<20 {
+		return unavailable
+	}
+	var r validation.ValidationReport
+	if json.Unmarshal([]byte(raw), &r) != nil || r.BaseSHA != st.BaseSHA || len(r.CheckOutcomes) > 100 {
+		return unavailable
+	}
+	reused := md["validation_reused"] == "true"
+	if !reused && r.HeadSHA != head {
+		return unavailable
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Submitted head: %s; base: %s\n", timingCell(head), timingCell(st.BaseSHA))
+	fmt.Fprintf(&b, "Source head: %s; source time: %s; reused: %t\n", timingCell(r.HeadSHA), timingCell(r.Artifact.CreatedAt.Format(time.RFC3339)), reused)
+	b.WriteString("| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n")
+	for _, c := range r.CheckOutcomes {
+		status := "FAIL"
+		if c.Passed {
+			status = "PASS"
+			if reused {
+				status = "REUSED"
+			}
+		}
+		duration := "unavailable"
+		if c.Duration > 0 {
+			duration = validation.DurationText(&c.Duration)
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", timingCell(c.Name), timingCell(c.Command), status, duration)
+	}
+	if r.Timings != nil {
+		r.Timings.Preflight.Status = timingCell(r.Timings.Preflight.Status)
+		r.Timings.Warmup.Status = timingCell(r.Timings.Warmup.Status)
+		r.Timings.Checks.Status = timingCell(r.Timings.Checks.Status)
+		r.Timings.Repair.Status = timingCell(r.Timings.Repair.Status)
+	}
+	r.Reused = false
+	b.WriteString(r.TimingSummary())
+	if reused {
+		b.WriteString("Reusing validation; durations above are from the source execution.\n")
+		d, err := time.ParseDuration(md["validation_reuse_duration"])
+		elapsed := "unavailable"
+		if err == nil && d >= 0 {
+			elapsed = validation.DurationText(&d)
+		}
+		fmt.Fprintf(&b, "Current reuse wall time: %s\n", elapsed)
+	}
+	return b.String()
+}
+
+// Bound table cells and suppress local paths and credential-like shell values.
+func timingCell(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		if (strings.Contains(w, "=") && !strings.HasPrefix(w, "-")) || strings.Contains(w, "://") || strings.HasPrefix(strings.Trim(w, "`'\""), "/") || strings.Contains(w, "\\") || strings.Contains(w, "@") || strings.Contains(w, "ghp_") || strings.Contains(w, "github_pat_") {
+			words[i] = "[redacted]"
+		}
+	}
+	s = strings.Join(words, " ")
+	if len(s) > 256 {
+		s = string([]rune(s)[:min(128, len([]rune(s)))]) + "…"
+	}
+	s = validation.EscapeDiagnostic(s)
+	s = strings.NewReplacer("|", "/", "`", "'", "<", "&lt;", ">", "&gt;").Replace(s)
+	return DescriptionText(s)
+}
+
 func validationInventory(body string) string {
 	prefix, _, _ := strings.Cut(body, "\n### Output:")
+	if len(prefix) > 64<<10 {
+		return "check table unavailable; full validation artifact retained\n"
+	}
 	lines := strings.Split(prefix, "\n")
 	var rows []string
 	for i, line := range lines {
@@ -501,14 +602,21 @@ func validationInventory(body string) string {
 			if len(cells) != 6 || strings.TrimSpace(cells[1]) == "" || strings.TrimSpace(cells[3]) == "" {
 				return "check table unavailable; full validation artifact retained\n"
 			}
-			rows = append(rows, DescriptionText(strings.TrimSpace(cells[1]))+": "+DescriptionText(strings.TrimSpace(cells[3])))
+			duration := "unavailable"
+			if d, err := time.ParseDuration(strings.Trim(strings.TrimSpace(cells[4]), "`")); err == nil && d >= 0 {
+				duration = d.Round(time.Millisecond).String()
+			}
+			rows = append(rows, "| "+timingCell(cells[1])+" | "+timingCell(cells[2])+" | "+timingCell(cells[3])+" | "+duration+" |")
+			if len(rows) > 100 {
+				return "check table unavailable; full validation artifact retained\n"
+			}
 		}
 		break
 	}
 	if len(rows) == 0 {
 		return "check table unavailable; full validation artifact retained\n"
 	}
-	return strings.Join(rows, "\n") + "\n"
+	return "| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n" + strings.Join(rows, "\n") + "\nPhase/total timings: unavailable\n"
 }
 
 func productionLabel(s string) string {

@@ -33,7 +33,7 @@ func TestFingerprintReuseBindings(t *testing.T) {
 	original.Metadata["validation_trusted_origin"] = "coordinator"
 	original.Metadata["validation_trusted_owner"] = "owner"
 	original.Metadata["validation_trusted_claim"] = "claim"
-	for _, kind := range []string{"match", "tree", "base", "policy", "claim", "version", "origin", "owner", "trusted-claim", "FAIL", "missing", "malformed", "dev", "dirty", "empty", "fork"} {
+	for _, kind := range []string{"match", "timing", "tree", "base", "policy", "claim", "version", "origin", "owner", "trusted-claim", "FAIL", "missing", "malformed", "dev", "dirty", "empty", "fork"} {
 		t.Run(kind, func(t *testing.T) {
 			art := original
 			art.Metadata = map[string]string{}
@@ -42,6 +42,14 @@ func TestFingerprintReuseBindings(t *testing.T) {
 			}
 			o := opts
 			switch kind {
+			case "timing":
+				var r ValidationReport
+				if err := json.Unmarshal([]byte(art.Metadata["validation_report"]), &r); err != nil {
+					t.Fatal(err)
+				}
+				r.Timings = nil
+				raw, _ := json.Marshal(r)
+				art.Metadata["validation_report"] = string(raw)
 			case "tree", "base", "policy", "claim", "version":
 				art.Metadata["validation_"+kind] = "other"
 			case "origin", "owner":
@@ -70,7 +78,7 @@ func TestFingerprintReuseBindings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if (reused != nil) != (kind == "match") {
+			if (reused != nil) != (kind == "match" || kind == "timing") {
 				t.Fatalf("reuse=%v", reused != nil)
 			}
 			if reused != nil {

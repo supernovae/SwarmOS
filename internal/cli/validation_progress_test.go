@@ -180,7 +180,7 @@ func TestValidationFailureDoesNotAnnouncePublication(t *testing.T) {
 	}
 	for _, operation := range []string{"validate", "submit"} {
 		text, _, textErr := runProgressCommand(t, f, "issue", operation, n, "--progress=false")
-		if textErr == nil || !strings.Contains(text, "FAIL trusted-failure (exit 7)\nPRIVATE_CHECK_OUTPUT") {
+		if textErr == nil || !strings.Contains(text, "FAIL trusted-failure (exit 7;") || !strings.Contains(text, "PRIVATE_CHECK_OUTPUT") {
 			t.Fatalf("missing text failure: %v %s", textErr, text)
 		}
 		out, diag, err := runProgressCommand(t, f, "issue", operation, n, "--json")

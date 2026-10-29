@@ -1114,13 +1114,12 @@ func (s *Service) Validate(ctx context.Context, number int) (result *Result, run
 	if err != nil {
 		return nil, err
 	}
-	return s.validate(ctx, r, remote, p, false, true)
+	return s.validate(ctx, r, remote, p, false)
 }
 
 // validate runs required checks on the pending revision under the renewed claim
-// and records the report as that revision's validation evidence. fastPass runs
-// changed-package tests first; only explicit pr validate requests it.
-func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session, reuse, fastPass bool) (*Result, error) {
+// and records the report as that revision's validation evidence.
+func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session, reuse bool) (*Result, error) {
 	number := r.PR.Number
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
@@ -1141,14 +1140,14 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string, p *pro
 			return nil, fmt.Errorf("PR worktree identity differs from recorded revision")
 		}
 		return withCleanPRMarkers(path, func() (*Result, error) {
-			return s.validateClaim(ctx, r, owner, st, p, reuse, fastPass)
+			return s.validateClaim(ctx, r, owner, st, p, reuse)
 
 		})
 	})
 }
 
 // validateClaim shares the existing fenced claim with rebase and repair.
-func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st *lease.IssueState, p *progress.Session, reuse, fastPass bool) (*Result, error) {
+func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st *lease.IssueState, p *progress.Session, reuse bool) (*Result, error) {
 	head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
 	if e != nil {
 		return nil, e
@@ -1171,7 +1170,7 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 		p.Next("validation")
 		observe = p.Observe
 	}
-	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass, LookupEnv: s.LookupEnv, DependencyPolicy: s.dependencyPolicy(r.Worktree)}
+	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), LookupEnv: s.LookupEnv, DependencyPolicy: s.dependencyPolicy(r.Worktree)}
 	var report *validation.ValidationReport
 	var valErr error
 	if reuse {
@@ -1242,7 +1241,7 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 	if err = s.refuseUnimplementedRevision(ctx, r); err != nil {
 		return r, err
 	}
-	r, err = s.validate(ctx, r, remote, p, true, false)
+	r, err = s.validate(ctx, r, remote, p, true)
 	if err != nil {
 		return r, err
 	}

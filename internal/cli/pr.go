@@ -172,6 +172,9 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				err = stopContext{opts: rootOpts, resource: "pr", number: opts.Number}.stop(err)
 			}
 			opts.Work.SetupProgress.Close()
+			if operation == "submit" && result != nil && result.Validation != nil && result.Validation.Passed && !asJSON {
+				writeValidationChecks(cmd, result.Validation)
+			}
 			if result != nil && result.Validation != nil && result.Validation.Reused {
 				fmt.Fprintln(cmd.ErrOrStderr(), result.Validation.Artifact.Summary)
 			}

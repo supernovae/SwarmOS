@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -523,5 +524,87 @@ func TestIssue102ExplicitReleaseReapprovalAndRebase(t *testing.T) {
 				t.Fatalf("wrong status: %+v", result.PR)
 			}
 		})
+	}
+}
+
+func TestIssue102DistinctTargetPolicyAndBundle(t *testing.T) {
+	f := newCLIFixture(t)
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(f.root, path), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy := func(marker, command, pattern string) string {
+		return "required_checks:\n  - name: " + marker + "\n    command: " + command + "\n    timeout: 1m\nprotected_paths: ['.swarm/**', '" + pattern + "']\n"
+	}
+	gitRun(t, f.root, "checkout", "-b", "release")
+	write(".swarm/validation/required-checks.yaml", policy("release-check-102", "test -f release-proof-102", "release-locked-102/**"))
+	for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
+		write(".swarm/prompts/"+role+".md", "# Release role\nRELEASE_ROLE_102\n")
+	}
+	write("release-proof-102", "release\n")
+	gitRun(t, f.root, "add", ".")
+	gitRun(t, f.root, "commit", "-m", "distinct release policy")
+	target := gitRun(t, f.root, "rev-parse", "HEAD")
+	gitRun(t, f.root, "checkout", "main")
+	configPath := filepath.Join(f.root, ".swarm/config.yaml")
+	original, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(".swarm/config.yaml", "base_branch: release\n"+string(original))
+	write(".swarm/validation/required-checks.yaml", policy("default-check-102", "false", "default-locked-102/**"))
+	for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
+		write(".swarm/prompts/"+role+".md", "DEFAULT_ROLE_102\n")
+	}
+	gitRun(t, f.root, "add", ".")
+	gitRun(t, f.root, "commit", "-m", "contradictory default policy")
+	issue := f.create(t, "none")
+	n := strconv.Itoa(issue)
+	f.must(t, "issue", "approve", n)
+	// Dirty candidate bytes disagree with both committed policies.
+	write(".swarm/config.yaml", "base_branch: main\n"+string(original))
+	write(".swarm/validation/required-checks.yaml", policy("candidate-check-102", "false", "candidate-locked-102/**"))
+	write(".swarm/prompts/developer.md", "CANDIDATE_ROLE_102\n")
+	f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+	st := f.state(t, issue)
+	if st.BaseSHA != target || st.BaseBranch != "release" {
+		t.Fatalf("wrong pin: %+v", st)
+	}
+	wt := workspace.WorktreePath(f.root, issue)
+	if gitRun(t, wt, "merge-base", "HEAD", target) != target {
+		t.Fatal("checkout did not use release")
+	}
+	bundle, err := os.ReadFile(filepath.Join(wt, ".swarm/active/SYSTEM_PROMPT.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"RELEASE_ROLE_102", "release-check-102", "release-locked-102/**"} {
+		if !strings.Contains(string(bundle), want) {
+			t.Fatalf("bundle missing %s: %s", want, bundle)
+		}
+	}
+	for _, bad := range []string{"DEFAULT_ROLE_102", "CANDIDATE_ROLE_102", "default-check-102", "candidate-check-102", "default-locked-102", "candidate-locked-102"} {
+		if strings.Contains(string(bundle), bad) {
+			t.Fatalf("bundle trusted %s", bad)
+		}
+	}
+	// Execute the selected check, then demonstrate its protected pattern is enforced.
+	gitRun(t, f.root, "restore", ".swarm/config.yaml", ".swarm/prompts/developer.md", ".swarm/validation/required-checks.yaml")
+	gitRun(t, f.root, "checkout", "--detach", st.HeadSHA)
+	out := f.must(t, "repo", "validate", "--base", target)
+	if !strings.Contains(out, "PASS release-check-102") || strings.Contains(out, "default-check-102") || strings.Contains(out, "candidate-check-102") {
+		t.Fatalf("wrong checks executed: %s", out)
+	}
+	if err := os.MkdirAll(filepath.Join(f.root, "release-locked-102"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write("release-locked-102/change", "protected\n")
+	gitRun(t, f.root, "add", "release-locked-102/change")
+	gitRun(t, f.root, "commit", "-m", "target protected edit")
+	out, err = f.run("repo", "validate", "--base", target)
+	if err == nil || !strings.Contains(out+fmt.Sprint(err), "release-locked-102/change") {
+		t.Fatalf("target pattern not enforced: %v %s", err, out)
 	}
 }

@@ -2,6 +2,7 @@ package coordination
 
 import (
 	"context"
+	"crypto/sha1"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil"
@@ -287,7 +288,7 @@ func TestGitCASRetryClassifier(t *testing.T) {
 func TestGitCASRetryTransport(t *testing.T) {
 	for _, layout := range []RefLayout{BranchLayout, HiddenLayout} {
 		for _, existing := range []bool{false, true} {
-			for _, mode := range []string{"retry", "lost", "retry-lost", "exhaust", "deny", "ok-old", "successor", "ack-successor", "malformed", "malformed-sha", "read-error", "namespace", "pre-malformed", "pre-desired", "pre-successor", "disappear", "cancel", "deadline", "final-lost", "deny-lost", "backoff", "rejected", "race-successor", "failed-delete", "pre-delete"} {
+			for _, mode := range []string{"retry", "lost", "retry-lost", "exhaust", "deny", "ok-old", "successor", "ack-successor", "malformed", "malformed-sha", "read-error", "namespace", "pre-malformed", "pre-read-error", "pre-namespace", "pre-cancel", "pre-desired", "pre-successor", "disappear", "cancel", "deadline", "final-lost", "deny-lost", "backoff", "rejected", "race-successor", "failed-delete", "pre-delete"} {
 				t.Run(fmt.Sprintf("%s/%t/%s", layout.Name(), existing, mode), func(t *testing.T) {
 					f := newRetentionFixture(t)
 					f.git(f.clone, "remote", "rename", "origin", "upstream")
@@ -312,6 +313,7 @@ case "$*" in
 esac
 if [ "$1" = push ]; then
  echo "$*" >> "$CAS_LOG"
+ date +%s%N >> "$CAS_LOG.times"
  count=$(wc -l < "$CAS_LOG")
  case "$CAS_MODE" in
  rejected) if [ "$count" = 1 ]; then ref=${4#*:}; echo " ! [remote rejected] $ref -> $ref (fatal error in commit_refs)" >&2; exit 1; fi;;
@@ -329,7 +331,7 @@ if [ "$1" = push ]; then
  exhaust) echo 'remote: fatal error in commit_refs' >&2; exit 1;;
  deny) echo 'remote: fatal error in commit_refs' >&2; echo 'remote: policy rejected' >&2; exit 1;;
  ok-old) exit 0;;
- read-error|namespace|pre-malformed|pre-desired|pre-successor) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ read-error|namespace|pre-malformed|pre-read-error|pre-namespace|pre-cancel|pre-desired|pre-successor) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
  malformed-sha) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
  malformed) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
  esac
@@ -355,7 +357,7 @@ fi
 if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.bad" ]; then
  case "$CAS_MODE" in
  malformed-sha) spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; ref=${spec#*:}; echo "not-a-sha $ref"; exit 0;;
- read-error) echo inspection-failed >&2; exit 1;;
+ read-error) echo inspection-failed >&2; exit 17;;
  namespace) "$CAS_REAL" "$@"; echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/swarm-state/issue-306"; echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/swarm/state/issue-306"; exit 0;;
  pre-*)
  if [ ! -f "$CAS_LOG.read" ]; then touch "$CAS_LOG.read"; exec "$CAS_REAL" "$@"; fi
@@ -365,6 +367,9 @@ if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.bad" ]; then
  "$CAS_REAL" push upstream ":$ref" >/dev/null 2>&1
  rm "$CAS_LOG.bad"
  exec "$CAS_REAL" "$@";;
+ pre-read-error) echo pre-inspection-failed >&2; exit 17;;
+ pre-namespace) echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/swarm-state/issue-306"; echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/swarm/state/issue-306"; exit 0;;
+ pre-cancel) touch "$CAS_LOG.landed"; while :; do :; done;;
  pre-malformed) echo malformed; exit 0;;
  pre-desired|pre-successor)
  spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; desired=${spec%%:*}; ref=${spec#*:}
@@ -390,14 +395,14 @@ exec "$CAS_REAL" "$@"
 					t.Setenv("CAS_LOG", log)
 					t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 					var stop context.CancelFunc
-					if mode == "cancel" || mode == "deadline" || mode == "backoff" {
+					if mode == "cancel" || mode == "pre-cancel" || mode == "deadline" || mode == "backoff" {
 						if mode == "deadline" {
 							ctx, stop = context.WithTimeout(ctx, 500*time.Millisecond)
 						} else {
 							ctx, stop = context.WithCancel(ctx)
 						}
 						defer stop()
-						if mode == "cancel" || mode == "backoff" {
+						if mode == "cancel" || mode == "pre-cancel" || mode == "backoff" {
 							done := make(chan struct{})
 							go func() {
 								defer close(done)
@@ -488,7 +493,7 @@ exec "$CAS_REAL" "$@"
 							t.Fatal(err)
 						}
 					}
-					if mode == "cancel" || mode == "deadline" || mode == "backoff" {
+					if mode == "cancel" || mode == "pre-cancel" || mode == "deadline" || mode == "backoff" {
 						cause := context.Canceled
 						if mode == "deadline" {
 							cause = context.DeadlineExceeded
@@ -497,6 +502,52 @@ exec "$CAS_REAL" "$@"
 						if !errors.Is(err, cause) || (mode != "backoff" && !errors.As(err, &exit)) {
 							t.Fatalf("context/exit cause lost: %v", err)
 						}
+					}
+					if mode == "exhaust" {
+						var exit *exec.ExitError
+						if !errors.As(err, &exit) || !strings.Contains(err.Error(), "attempt 3") || !strings.Contains(err.Error(), "retry budget exhausted") {
+							t.Fatalf("exhaustion cause/stage lost: %v", err)
+						}
+					}
+					if mode == "read-error" || mode == "pre-read-error" {
+						codes := map[int]bool{}
+						var visit func(error)
+						visit = func(e error) {
+							if e == nil {
+								return
+							}
+							if x, ok := e.(*exec.ExitError); ok {
+								codes[x.ExitCode()] = true
+							}
+							if x, ok := e.(interface{ Unwrap() []error }); ok {
+								for _, c := range x.Unwrap() {
+									visit(c)
+								}
+							} else if x, ok := e.(interface{ Unwrap() error }); ok {
+								visit(x.Unwrap())
+							}
+						}
+						visit(err)
+						if !codes[1] || !codes[17] || !strings.Contains(err.Error(), "inspection-failed") {
+							t.Fatalf("push/read causes lost: %v (%v)", err, codes)
+						}
+					}
+
+					if mode == "exhaust" {
+						b, e := os.ReadFile(log + ".times")
+						if e != nil {
+							t.Fatal(e)
+						}
+						var a, btime, c int64
+						if _, e := fmt.Sscan(string(b), &a, &btime, &c); e != nil {
+							t.Fatal(e)
+						}
+						if btime-a < int64(100*time.Millisecond) || c-btime < int64(200*time.Millisecond) {
+							t.Fatalf("separate backoffs missing: %s", b)
+						}
+					}
+					if mode == "backoff" && time.Since(start) > 2*time.Second {
+						t.Fatalf("cancellation was not prompt: %v", time.Since(start))
 					}
 					if mode == "exhaust" && time.Since(start) < 300*time.Millisecond {
 						t.Fatal("missing backoff")
@@ -559,5 +610,164 @@ func TestGitCASRetryRedaction(t *testing.T) {
 	calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
 	if strings.Count(string(calls), "push") != want {
 		t.Fatalf("classification used raw diagnostic: %s", calls)
+	}
+}
+
+func TestGitCASRetryDenialTransport(t *testing.T) {
+	for _, denial := range []string{"fatal: Authentication failed", "fatal: could not read Username", "remote: Permission denied", "remote: access denied", "remote: authorization failed", "remote: not authorized", "fatal: HTTP 403", "fatal: HTTP 401", "remote: policy rejected", "remote: protected branch update failed", "remote: GH006", "remote: GH013", "remote: pre-receive hook declined", "! [rejected] refs/heads/swarm-state/issue-306 -> refs/heads/swarm-state/issue-306 (stale info)", "remote: non-fast-forward"} {
+		t.Run(denial, func(t *testing.T) {
+			f := newRetentionFixture(t)
+			real, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			log := filepath.Join(dir, "calls")
+			script := `#!/bin/sh
+if [ "$1" = push ]; then
+ echo push >> "$DENY_LOG"
+ echo 'remote: fatal error in commit_refs' >&2
+ printf '%s\n' "$DENY_TEXT" >&2
+ exit 19
+fi
+exec "$DENY_REAL" "$@"
+`
+			if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("DENY_REAL", real)
+			t.Setenv("DENY_LOG", log)
+			t.Setenv("DENY_TEXT", strings.ToUpper(denial))
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			_, err = f.store.CompareAndSwap(context.Background(), 306, "", []byte("next"))
+			var exit *exec.ExitError
+			if err == nil || errors.Is(err, ErrConflict) || errors.Is(err, ErrPublicationUnknown) || !errors.As(err, &exit) || exit.ExitCode() != 19 || !strings.Contains(err.Error(), strings.ToUpper(denial)) {
+				t.Fatalf("denial lost: %v", err)
+			}
+			calls, _ := os.ReadFile(log)
+			if string(calls) != "push\n" {
+				t.Fatalf("denial retried: %s", calls)
+			}
+		})
+	}
+}
+
+func TestGitCASRetryArgvDigits(t *testing.T) {
+	for _, digits := range []string{"401", "403"} {
+		t.Run(digits, func(t *testing.T) {
+			f := newRetentionFixture(t)
+			tree := f.git(f.clone, "rev-parse", "HEAD^{tree}")
+			var body, desired string
+			for n := 0; ; n++ {
+				body = fmt.Sprintf("tree %s\nauthor Test <test@example.invalid> 0 +0000\ncommitter Test <test@example.invalid> 0 +0000\n\n%d\n", tree, n)
+				sum := sha1.Sum([]byte(fmt.Sprintf("commit %d%c%s", len(body), 0, body)))
+				desired = fmt.Sprintf("%x", sum)
+				if strings.Contains(desired, digits) {
+					break
+				}
+			}
+			cmd := exec.Command("git", "hash-object", "-t", "commit", "-w", "--stdin")
+			cmd.Dir = f.clone
+			cmd.Stdin = strings.NewReader(body)
+			if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != desired {
+				t.Fatalf("prepare: %s %v", out, err)
+			}
+			real, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			log := filepath.Join(dir, "calls")
+			script := `#!/bin/sh
+if [ "$1" = push ]; then
+ echo "$*" >> "$DIGIT_LOG"
+ if [ "$(wc -l < "$DIGIT_LOG")" = 1 ]; then echo 'remote: fatal error in commit_refs' >&2; exit 1; fi
+fi
+exec "$DIGIT_REAL" "$@"
+`
+			if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("DIGIT_REAL", real)
+			t.Setenv("DIGIT_LOG", log)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			ref := BranchLayout.StateRef(306)
+			got, err := f.store.publishState(context.Background(), ref, "", desired, []string{"push", "origin", "--force-with-lease=" + ref + ":", desired + ":" + ref})
+			if err != nil || got != desired {
+				t.Fatalf("argv digits vetoed retry: %s %v", got, err)
+			}
+			calls, _ := os.ReadFile(log)
+			lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+			if len(lines) != 2 || lines[0] != lines[1] {
+				t.Fatalf("identity: %s", calls)
+			}
+			if actual := f.git(f.remote, "rev-parse", ref); actual != desired {
+				t.Fatal(actual)
+			}
+		})
+	}
+}
+
+func TestGitCASRetrySynchronizedCancellation(t *testing.T) {
+	for _, stage := range []string{"preparation", "acknowledged"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newRetentionFixture(t)
+			real, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "ready")
+			log := filepath.Join(dir, "pushes")
+			script := `#!/bin/sh
+if [ "$CANCEL_STAGE" = preparation ] && [ "$1" = hash-object ]; then touch "$CANCEL_MARKER"; while :; do :; done; fi
+if [ "$1" = push ]; then echo push >> "$CANCEL_LOG"; exit 0; fi
+if [ "$1" = ls-remote ] && [ -f "$CANCEL_LOG" ]; then touch "$CANCEL_MARKER"; while :; do :; done; fi
+exec "$CANCEL_REAL" "$@"
+`
+			if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CANCEL_REAL", real)
+			t.Setenv("CANCEL_STAGE", stage)
+			t.Setenv("CANCEL_MARKER", marker)
+			t.Setenv("CANCEL_LOG", log)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ticker := time.NewTicker(time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if _, err := os.Stat(marker); err == nil {
+							cancel()
+							return
+						}
+					}
+				}
+			}()
+			_, err = f.store.CompareAndSwap(ctx, 306, "", []byte("next"))
+			cancel()
+			<-done
+			if !errors.Is(err, context.Canceled) || errors.Is(err, ErrConflict) {
+				t.Fatalf("context lost: %v", err)
+			}
+			calls, _ := os.ReadFile(log)
+			if stage == "preparation" {
+				if len(calls) != 0 || errors.Is(err, ErrPublicationUnknown) {
+					t.Fatalf("preparation published: %s %v", calls, err)
+				}
+			} else {
+				if string(calls) != "push\n" || !errors.Is(err, ErrPublicationUnknown) {
+					t.Fatalf("acknowledgement retried: %s %v", calls, err)
+				}
+			}
+		})
 	}
 }

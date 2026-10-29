@@ -1056,7 +1056,7 @@ func TestArtifactProvenanceRecordsEffort(t *testing.T) {
 }
 
 func TestGitCASRetryMutationOnce(t *testing.T) {
-	for _, mode := range []string{"retry", "lost", "retry-lost", "exhaust", "ok-old", "ack-successor", "malformed", "malformed-sha", "read-error", "namespace", "pre-malformed", "pre-desired", "disappear", "cancel", "deadline", "final-lost", "deny-lost", "backoff", "held-reject", "held"} {
+	for _, mode := range []string{"retry", "lost", "retry-lost", "exhaust", "ok-old", "ack-successor", "malformed", "malformed-sha", "read-error", "namespace", "pre-malformed", "pre-read-error", "pre-namespace", "pre-cancel", "pre-desired", "disappear", "cancel", "deadline", "final-lost", "deny-lost", "backoff", "held-reject", "held", "held-old", "held-successor", "held-missing", "held-read", "held-parse", "held-namespace", "held-cancel", "hang", "land-hang"} {
 		t.Run(mode, func(t *testing.T) {
 			m, _, iss := testManager(t)
 			ctx := context.Background()
@@ -1076,17 +1076,21 @@ func TestGitCASRetryMutationOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = store.CompareAndSwap(ctx, iss.Number, "", body); err != nil {
+			seeded, err := store.CompareAndSwap(ctx, iss.Number, "", body)
+			if err != nil {
 				t.Fatal(err)
 			}
 			m.store = store
 			var tr *gittransport.Transport
-			if mode == "held" || mode == "held-reject" {
+			if strings.HasPrefix(mode, "held") || mode == "hang" || mode == "land-hang" {
 				tr = gittransport.New(t, remote)
 				tr.Configure(t, root, "upstream")
 				transportMode := "holder"
 				if mode == "held-reject" {
 					transportMode = "holder-reject"
+				}
+				if mode == "hang" || mode == "land-hang" {
+					transportMode = mode
 				}
 				tr.Set("receive", transportMode)
 			}
@@ -1104,6 +1108,7 @@ if [ "$1" = push ]; then
  echo "$*" >> "$CAS_LOG"
  count=$(wc -l < "$CAS_LOG")
  case "$CAS_MODE" in
+ hang|land-hang) echo 'remote: fatal error in commit_refs' >&2; exec "$CAS_REAL" "$@";;
  held-reject) echo 'remote: fatal error in commit_refs' >&2; exec "$CAS_REAL" "$@";;
  final-lost) if [ "$count" != 3 ]; then echo 'remote: fatal error in commit_refs' >&2; exit 1; fi;;
  backoff) touch "$CAS_LOG.backoff"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
@@ -1111,12 +1116,20 @@ if [ "$1" = push ]; then
  exhaust) echo 'remote: fatal error in commit_refs' >&2; exit 1;;
  deny) echo 'remote: fatal error in commit_refs' >&2; echo 'remote: policy rejected' >&2; exit 1;;
  ok-old) exit 0;;
- read-error|namespace|pre-malformed|pre-desired|pre-successor) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ read-error|namespace|pre-malformed|pre-read-error|pre-namespace|pre-cancel|pre-desired|pre-successor) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
  malformed-sha) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
  malformed) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
  esac
  "$CAS_REAL" "$@" || exit $?
  case "$CAS_MODE" in
+ held-old|held-missing|held-successor)
+ desired=${4%%:*}; ref=${4#*:}
+ case "$CAS_MODE" in
+ held-old) old=${3##*:}; "$CAS_REAL" push --force "$CAS_REMOTE" "$old:$ref" >/dev/null 2>&1;;
+ held-missing) "$CAS_REAL" push "$CAS_REMOTE" ":$ref" >/dev/null 2>&1;;
+ held-successor) tree=$("$CAS_REAL" rev-parse "$desired^{tree}"); successor=$(echo successor | "$CAS_REAL" -c user.name=Test -c user.email=test@example.invalid commit-tree "$tree" -p "$desired"); "$CAS_REAL" push "$CAS_REMOTE" "$successor:$ref" >/dev/null 2>&1;;
+ esac; exit 0;;
+ held-read|held-parse|held-namespace|held-cancel) touch "$CAS_LOG.bad"; exit 0;;
  successor|ack-successor|disappear)
  spec="$4"; desired=${spec%%:*}; ref=${spec#*:}
  if [ "$CAS_MODE" = disappear ]; then "$CAS_REAL" push upstream ":$ref" >/dev/null 2>&1; exit 0; fi
@@ -1136,12 +1149,19 @@ if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.backoff" ]; then
 fi
 if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.bad" ]; then
  case "$CAS_MODE" in
+ held-read) echo inspection-failed >&2; exit 17;;
+ held-parse) echo malformed; exit 0;;
+ held-namespace) echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/swarm-state/issue-1"; echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/swarm/state/issue-1"; exit 0;;
+ held-cancel) touch "$CAS_LOG.landed"; while :; do :; done;;
  malformed-sha) spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; ref=${spec#*:}; echo "not-a-sha $ref"; exit 0;;
- read-error) echo inspection-failed >&2; exit 1;;
+ read-error) echo inspection-failed >&2; exit 17;;
  namespace) "$CAS_REAL" "$@"; echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/swarm-state/issue-1"; echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/swarm/state/issue-1"; exit 0;;
  pre-*)
  if [ ! -f "$CAS_LOG.read" ]; then touch "$CAS_LOG.read"; exec "$CAS_REAL" "$@"; fi
  case "$CAS_MODE" in
+ pre-read-error) echo pre-inspection-failed >&2; exit 17;;
+ pre-namespace) echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/swarm-state/issue-1"; echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/swarm/state/issue-1"; exit 0;;
+ pre-cancel) touch "$CAS_LOG.landed"; while :; do :; done;;
  pre-malformed) echo malformed; exit 0;;
  pre-desired|pre-successor)
  spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; desired=${spec%%:*}; ref=${spec#*:}
@@ -1163,18 +1183,19 @@ exec "$CAS_REAL" "$@"
 			}
 			log := filepath.Join(dir, "calls")
 			t.Setenv("CAS_REAL", real)
+			t.Setenv("CAS_REMOTE", remote)
 			t.Setenv("CAS_MODE", mode)
 			t.Setenv("CAS_LOG", log)
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			var stop context.CancelFunc
-			if mode == "cancel" || mode == "deadline" || mode == "backoff" {
+			if mode == "held-cancel" || mode == "hang" || mode == "land-hang" || mode == "cancel" || mode == "pre-cancel" || mode == "deadline" || mode == "backoff" {
 				if mode == "deadline" {
 					ctx, stop = context.WithTimeout(ctx, 500*time.Millisecond)
 				} else {
 					ctx, stop = context.WithCancel(ctx)
 				}
 				defer stop()
-				if mode == "cancel" || mode == "backoff" {
+				if mode == "held-cancel" || mode == "hang" || mode == "land-hang" || mode == "cancel" || mode == "pre-cancel" || mode == "backoff" {
 					done := make(chan struct{})
 					go func() {
 						defer close(done)
@@ -1189,7 +1210,7 @@ exec "$CAS_REAL" "$@"
 								if mode == "backoff" {
 									marker = log + ".waiting"
 								}
-								if _, e := os.Stat(marker); e == nil {
+								if _, e := os.Stat(marker); e == nil || (mode == "hang" && tr.Receives() > 0) || (mode == "land-hang" && tr.Landed()) {
 									if mode == "backoff" {
 										time.Sleep(20 * time.Millisecond)
 									}
@@ -1224,6 +1245,78 @@ exec "$CAS_REAL" "$@"
 					t.Fatalf("non-conflict unknown required: %v", err)
 				}
 			}
+			if mode == "exhaust" {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || !strings.Contains(err.Error(), "attempt 3") || !strings.Contains(err.Error(), "retry budget exhausted") {
+					t.Fatalf("exhaustion cause/stage lost: %v", err)
+				}
+			}
+			if mode == "read-error" || mode == "pre-read-error" {
+				codes := map[int]bool{}
+				var visit func(error)
+				visit = func(e error) {
+					if e == nil {
+						return
+					}
+					if x, ok := e.(*exec.ExitError); ok {
+						codes[x.ExitCode()] = true
+					}
+					if x, ok := e.(interface{ Unwrap() []error }); ok {
+						for _, c := range x.Unwrap() {
+							visit(c)
+						}
+					} else if x, ok := e.(interface{ Unwrap() error }); ok {
+						visit(x.Unwrap())
+					}
+				}
+				visit(err)
+				if !codes[1] || !codes[17] || !strings.Contains(err.Error(), "inspection-failed") {
+					t.Fatalf("push/read causes lost: %v (%v)", err, codes)
+				}
+			}
+
+			if mode == "held-old" || mode == "held-missing" {
+				ref := coordination.BranchLayout.StateRef(iss.Number)
+				actual := strings.TrimSpace(gitfixture.Run(t, remote, "for-each-ref", "--format=%(objectname)", ref))
+				expected := seeded
+				if mode == "held-missing" {
+					expected = ""
+				}
+				if actual != expected {
+					t.Fatalf("acknowledged remote outcome: %s want %s", actual, expected)
+				}
+			}
+
+			if mode == "held-successor" {
+				calls, e := os.ReadFile(log)
+				if e != nil {
+					t.Fatal(e)
+				}
+				fields := strings.Fields(string(calls))
+				prepared, _, _ := strings.Cut(fields[3], ":")
+				ref := coordination.BranchLayout.StateRef(iss.Number)
+				parent := strings.TrimSpace(gitfixture.Run(t, remote, "rev-parse", ref+"^"))
+				if parent != prepared {
+					t.Fatalf("successor overwritten: %s != %s", parent, prepared)
+				}
+				loaded := gitfixture.Run(t, remote, "show", ref+":state.json")
+				var st IssueState
+				if e := json.Unmarshal([]byte(loaded), &st); e != nil || st.Lease.Phase != "once" {
+					t.Fatalf("successor mutation lost: %s %v", loaded, e)
+				}
+			}
+
+			if strings.HasPrefix(mode, "held-") && mode != "held-reject" {
+				var cleanup *gitcredential.KnownResultCleanupError
+				if !errors.As(err, &cleanup) || cleanup.ExitCode != 0 || !errors.Is(err, gitcredential.ErrCleanupIncomplete) {
+					t.Fatalf("acknowledged cleanup lost: %v", err)
+				}
+			}
+			if mode == "hang" || mode == "land-hang" {
+				if !errors.Is(err, gitcredential.ErrInterrupted) || !strings.Contains(err.Error(), "fatal error in commit_refs") {
+					t.Fatalf("partial interrupted cause lost: %v", err)
+				}
+			}
 			if tr != nil {
 				if tr.Receives() != 1 {
 					t.Fatalf("receives %d", tr.Receives())
@@ -1232,7 +1325,7 @@ exec "$CAS_REAL" "$@"
 				tr.Join()
 			}
 
-			if mode == "cancel" || mode == "deadline" || mode == "backoff" {
+			if mode == "held-cancel" || mode == "hang" || mode == "land-hang" || mode == "cancel" || mode == "pre-cancel" || mode == "deadline" || mode == "backoff" {
 				cause := context.Canceled
 				if mode == "deadline" {
 					cause = context.DeadlineExceeded

@@ -223,11 +223,11 @@ func (s *GitStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next []byte) (string, error) {
 	blob, err := s.run(ctx, string(next), "hash-object", "-w", "--stdin")
 	if err != nil {
-		return "", err
+		return "", errors.Join(err, ctx.Err())
 	}
 	tree, err := s.run(ctx, fmt.Sprintf("100644 blob %s\tstate.json\n", blob), "mktree")
 	if err != nil {
-		return "", err
+		return "", errors.Join(err, ctx.Err())
 	}
 	args := []string{"-c", "user.name=SwarmOS", "-c", "user.email=swarmos@localhost", "commit-tree", tree}
 	if old != "" {
@@ -235,7 +235,7 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 	}
 	commit, err := s.run(ctx, "swarm coordination state\n", args...)
 	if err != nil {
-		return "", err
+		return "", errors.Join(err, ctx.Err())
 	}
 	ref := s.ref(n)
 	if err := s.checkLedger(ctx, ref); err != nil {

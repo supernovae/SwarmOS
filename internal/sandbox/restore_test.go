@@ -82,13 +82,24 @@ func TestRestoreAddressRebinding(t *testing.T) {
 	}
 }
 func TestRestoreConnectRejectedBeforeDial(t *testing.T) {
-	for _, request := range []string{
+	requests := []string{
 		"CONNECT registry.example:443 HTTP/1.1\r\nHost: cdn.example:443\r\n\r\n",
 		"CONNECT evil.example:443 HTTP/1.1\r\nHost: evil.example:443\r\n\r\n",
 		"GET http://registry.example/ HTTP/1.1\r\nHost: registry.example\r\n\r\n",
 		"CONNECT registry.example:443 HTTP/1.1\r\nHost: registry.example:443\r\nProxy-Authorization: Basic SYNTHETIC\r\n\r\n",
 		"\x16\x03\x03not CONNECT\r\n\r\n",
-	} {
+	}
+	for _, host := range []string{"cdn.example", "cdn.example:443", "evil.example", "registry.example.evil", "evilregistry.example", "registry.example:80", "registry.example:444", "registry.example:0443", "registry.example:+443", "registry.example:", "registry.example::443", "registry.example,cdn.example", "", "user@registry.example", "registry%2eexample", "registry.example.", "Registry.example", "127.0.0.1", "[::1]", "registry. example", "registry.example\r\n folded"} {
+		requests = append(requests, "CONNECT registry.example:443 HTTP/1.1\r\nHost: "+host+"\r\n\r\n")
+	}
+	for _, target := range []string{"registry.example", "registry.example:80", "registry.example:0443", "registry.example:+443", "user@registry.example:443", "cdn.example:443", "evil.example:443"} {
+		requests = append(requests, "CONNECT "+target+" HTTP/1.1\r\nHost: registry.example\r\n\r\n")
+	}
+	for _, header := range []string{"Authorization: Basic SYNTHETIC", "Proxy-Authorization: Basic SYNTHETIC", "Cookie: SYNTHETIC", "User-Agent: one\r\nUser-Agent: two", "Accept: */*\r\nAccept: */*", "Connection: upgrade", "Upgrade: websocket", "Host: registry.example", "hOsT: cdn.example", "Host: registry.example:443", "Content-Length: 0", "Transfer-Encoding: chunked", "Bad Header: value"} {
+		requests = append(requests, "CONNECT registry.example:443 HTTP/1.1\r\nHost: registry.example\r\n"+header+"\r\n\r\n")
+	}
+	requests = append(requests, "CONNECT registry.example:443 HTTP/1.1\r\n\r\n")
+	for _, request := range requests {
 		t.Run(request, func(t *testing.T) {
 			f := newRestoreFixture(t, nil)
 			c, err := f.listener.dial(context.Background())
@@ -97,9 +108,22 @@ func TestRestoreConnectRejectedBeforeDial(t *testing.T) {
 			}
 			defer c.Close()
 			_ = c.SetDeadline(time.Now().Add(time.Second))
-			_, _ = io.WriteString(c, request)
+			if _, err := io.WriteString(c, request); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := http.ReadResponse(bufio.NewReader(c), nil); err == nil {
 				t.Fatal("invalid CONNECT accepted")
+			}
+			select {
+			case <-f.broker.ctx.Done():
+			case <-time.After(time.Second):
+				t.Fatal("broker did not cancel")
+			}
+			f.mu.Lock()
+			seen := len(f.seen)
+			f.mu.Unlock()
+			if seen != 0 {
+				t.Fatal("rejected request reached upstream")
 			}
 			if f.dials.Load() != 0 {
 				t.Fatal("CONNECT caused upstream dial")

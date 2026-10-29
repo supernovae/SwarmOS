@@ -145,6 +145,67 @@ func (f *restoreFixture) raw(t *testing.T, connect, sni string, version uint16, 
 	}
 	return tls.Client(c, &tls.Config{RootCAs: f.roots, ServerName: sni, MinVersion: version, MaxVersion: version, NextProtos: alpn})
 }
+
+// javaConnect replays the captured native client's bytes without proxy normalization.
+func (f *restoreFixture) javaConnect(t *testing.T, host string) net.Conn {
+	t.Helper()
+	c, err := f.listener.dial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(c, "CONNECT registry.example:443 HTTP/1.1\r\nHost: %s\r\nUser-Agent: Java/25.0.4.1\r\nAccept: */*\r\nProxy-Connection: keep-alive\r\n\r\n", host); err != nil {
+		t.Fatal(err)
+	}
+	r, err := http.ReadResponse(bufio.NewReader(c), &http.Request{Method: "CONNECT"})
+	if err != nil || r.StatusCode != 200 {
+		t.Fatalf("CONNECT: %v %v", r, err)
+	}
+	if f.dials.Load() != 0 {
+		t.Fatal("CONNECT dialed upstream")
+	}
+	return c
+}
+func TestRestoreProtocolConnectHostCompatibility(t *testing.T) {
+	for _, host := range []string{restoreFixtureHost, restoreFixtureHost + ":443"} {
+		for _, version := range []uint16{tls.VersionTLS12, tls.VersionTLS13} {
+			for _, alpn := range [][]string{nil, {"http/1.1"}} {
+				for _, inner := range []string{restoreFixtureHost, restoreFixtureHost + ":443"} {
+					t.Run(fmt.Sprint(host, version, alpn, inner), func(t *testing.T) {
+						f := newRestoreFixture(t, nil)
+						c := tls.Client(f.javaConnect(t, host), &tls.Config{RootCAs: f.roots, ServerName: restoreFixtureHost, MinVersion: version, MaxVersion: version, NextProtos: alpn})
+						if err := c.Handshake(); err != nil {
+							t.Fatal(err)
+						}
+						if len(c.ConnectionState().VerifiedChains) == 0 || f.dials.Load() != 0 {
+							t.Fatal("unverified TLS or premature upstream dial")
+						}
+						if _, err := fmt.Fprintf(c, "GET /pkg.jar HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", inner); err != nil {
+							t.Fatal(err)
+						}
+						r, err := http.ReadResponse(bufio.NewReader(c), nil)
+						if err != nil {
+							t.Fatal(err)
+						}
+						data, err := io.ReadAll(io.LimitReader(r.Body, 1024))
+						_ = r.Body.Close()
+						if err != nil || r.StatusCode != 200 || string(data) != "artifact" || r.Header.Get("ETag") != "\"fixture\"" {
+							t.Fatalf("response: %q %v %v", data, r, err)
+						}
+						f.mu.Lock()
+						defer f.mu.Unlock()
+						if f.dials.Load() != 1 || len(f.seen) != 1 || f.seen[0].Host != restoreFixtureHost || f.seen[0].TLS.ServerName != restoreFixtureHost || f.seen[0].URL.Path != "/pkg.jar" {
+							t.Fatal("unexpected reconstructed request")
+						}
+					})
+				}
+			}
+		}
+	}
+}
 func TestRestoreProtocolNativeBootstrap(t *testing.T) {
 	for _, v := range []uint16{tls.VersionTLS12, tls.VersionTLS13} {
 		for _, alpn := range [][]string{nil, {"http/1.1"}} {
@@ -350,7 +411,21 @@ func TestRestoreProtocolVirtualHosts(t *testing.T) {
 	for _, sni := range []string{"", restoreFixtureCDN, "other.example"} {
 		t.Run("SNI/"+sni, func(t *testing.T) {
 			f := newRestoreFixture(t, nil)
-			c := f.raw(t, restoreFixtureHost, sni, tls.VersionTLS13, nil)
+			t.Cleanup(func() {
+				select {
+				case <-f.broker.ctx.Done():
+				case <-time.After(time.Second):
+					t.Error("broker did not cancel after protocol violation")
+				}
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				for _, r := range f.seen {
+					if r.Host != restoreFixtureHost || r.TLS.ServerName != restoreFixtureHost {
+						t.Error("forbidden upstream authority")
+					}
+				}
+			})
+			c := tls.Client(f.javaConnect(t, restoreFixtureHost), &tls.Config{RootCAs: f.roots, ServerName: sni, MinVersion: tls.VersionTLS13})
 			if err := c.Handshake(); err == nil {
 				t.Fatal("SNI accepted")
 			}
@@ -359,14 +434,62 @@ func TestRestoreProtocolVirtualHosts(t *testing.T) {
 			}
 		})
 	}
+	t.Run("non-TLS", func(t *testing.T) {
+		f := newRestoreFixture(t, nil)
+		t.Cleanup(func() {
+			select {
+			case <-f.broker.ctx.Done():
+			case <-time.After(time.Second):
+				t.Error("broker did not cancel after protocol violation")
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for _, r := range f.seen {
+				if r.Host != restoreFixtureHost || r.TLS.ServerName != restoreFixtureHost {
+					t.Error("forbidden upstream authority")
+				}
+			}
+		})
+		c := f.javaConnect(t, restoreFixtureHost)
+		if _, err := io.WriteString(c, "GET / HTTP/1.1\r\nHost: registry.example\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := http.ReadResponse(bufio.NewReader(c), nil); err == nil {
+			t.Fatal("generic tunnel accepted")
+		}
+		select {
+		case <-f.broker.ctx.Done():
+		case <-time.After(time.Second):
+			t.Fatal("broker did not cancel")
+		}
+		if f.dials.Load() != 0 {
+			t.Fatal("non-TLS dialed upstream")
+		}
+	})
 	t.Run("h2-only", func(t *testing.T) {
 		f := newRestoreFixture(t, nil)
+		t.Cleanup(func() {
+			select {
+			case <-f.broker.ctx.Done():
+			case <-time.After(time.Second):
+				t.Error("broker did not cancel after protocol violation")
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for _, r := range f.seen {
+				if r.Host != restoreFixtureHost || r.TLS.ServerName != restoreFixtureHost {
+					t.Error("forbidden upstream authority")
+				}
+			}
+		})
 		c := f.raw(t, restoreFixtureHost, restoreFixtureHost, tls.VersionTLS13, []string{"h2"})
 		if err := c.Handshake(); err == nil {
 			t.Fatal("h2 accepted")
 		}
 	})
 	for _, request := range []string{
+		"GET / HTTP/1.1\r\nHost: registry.example:444\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: registry.example\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n",
 		"GET / HTTP/1.1\r\nHost: cdn.example\r\n\r\n",
 		"GET https://cdn.example/ HTTP/1.1\r\nHost: registry.example\r\n\r\n",
 		"GET / HTTP/1.1\r\nHost: registry.example\r\nHost: registry.example\r\n\r\n",
@@ -374,7 +497,21 @@ func TestRestoreProtocolVirtualHosts(t *testing.T) {
 	} {
 		t.Run(request, func(t *testing.T) {
 			f := newRestoreFixture(t, nil)
-			c := f.raw(t, restoreFixtureHost, restoreFixtureHost, tls.VersionTLS13, nil)
+			t.Cleanup(func() {
+				select {
+				case <-f.broker.ctx.Done():
+				case <-time.After(time.Second):
+					t.Error("broker did not cancel after protocol violation")
+				}
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				for _, r := range f.seen {
+					if r.Host != restoreFixtureHost || r.TLS.ServerName != restoreFixtureHost {
+						t.Error("forbidden upstream authority")
+					}
+				}
+			})
+			c := tls.Client(f.javaConnect(t, restoreFixtureHost), &tls.Config{RootCAs: f.roots, ServerName: restoreFixtureHost, MinVersion: tls.VersionTLS13})
 			if err := c.Handshake(); err != nil {
 				t.Fatal(err)
 			}
@@ -390,7 +527,21 @@ func TestRestoreProtocolVirtualHosts(t *testing.T) {
 	}
 	t.Run("keepalive authority change", func(t *testing.T) {
 		f := newRestoreFixture(t, nil)
-		c := f.raw(t, restoreFixtureHost, restoreFixtureHost, tls.VersionTLS13, nil)
+		t.Cleanup(func() {
+			select {
+			case <-f.broker.ctx.Done():
+			case <-time.After(time.Second):
+				t.Error("broker did not cancel after protocol violation")
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			for _, r := range f.seen {
+				if r.Host != restoreFixtureHost || r.TLS.ServerName != restoreFixtureHost {
+					t.Error("forbidden upstream authority")
+				}
+			}
+		})
+		c := tls.Client(f.javaConnect(t, restoreFixtureHost), &tls.Config{RootCAs: f.roots, ServerName: restoreFixtureHost, MinVersion: tls.VersionTLS13})
 		if err := c.Handshake(); err != nil {
 			t.Fatal(err)
 		}

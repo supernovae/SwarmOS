@@ -274,7 +274,7 @@ func (b *registryBroker) serveRestoreConnect(c net.Conn) error {
 		p[restoreCanaryHost] = true
 	}
 	host, err := parseRegistryTarget(req.RequestURI, p)
-	if err != nil || req.Method != "CONNECT" || req.Proto != "HTTP/1.1" || req.Host != req.RequestURI || req.ContentLength != 0 || len(req.TransferEncoding) > 0 || reader.Buffered() != 0 {
+	if err != nil || req.Method != "CONNECT" || req.Proto != "HTTP/1.1" || (req.Host != host && req.Host != host+":443") || req.ContentLength != 0 || len(req.TransferEncoding) > 0 || reader.Buffered() != 0 {
 		return errors.New("restore CONNECT denied")
 	}
 	for k, vs := range req.Header {

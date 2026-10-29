@@ -2,7 +2,9 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
@@ -44,11 +46,12 @@ type NextAction struct {
 
 // stopError carries a classified stop to the process exit code.
 type stopError struct {
-	err    error
-	action *NextAction
+	err      error
+	action   *NextAction
+	guidance string
 }
 
-func (e *stopError) Error() string { return e.err.Error() }
+func (e *stopError) Error() string { return e.err.Error() + e.guidance }
 func (e *stopError) Unwrap() error { return e.err }
 
 // ExitCode maps a command error to the process exit status.
@@ -123,6 +126,10 @@ func (c stopContext) classify(err error) *NextAction {
 	if errors.As(err, &plan) {
 		return c.planApproval(plan.IssueNumber)
 	}
+	var trusted *lease.PlanApprovalError
+	if c.opts != nil && c.opts.Fork && errors.As(err, &trusted) {
+		return c.planApproval(trusted.IssueNumber)
+	}
 	var conflict *pr.ConflictError
 	if errors.As(err, &conflict) {
 		number := strconv.Itoa(conflict.PRNumber)
@@ -186,7 +193,19 @@ func (c stopContext) argv(maintainer bool, resource string, args ...string) []st
 // errors are returned unchanged.
 func (c stopContext) stop(err error) error {
 	if action := c.classify(err); action != nil {
-		return &stopError{err: err, action: action}
+		stop := &stopError{err: err, action: action}
+		var plan *lease.PlanApprovalError
+		var human *lease.HumanPlanApprovalError
+		var task *lease.TaskApprovalError
+		var base *lease.ClaimBaseApprovalError
+		if c.opts != nil && c.opts.Fork && errors.As(err, &plan) && !errors.As(err, &human) &&
+			action.Reason == ReasonNeedsApproval && !errors.As(err, &task) && !errors.As(err, &base) {
+			stop.guidance = fmt.Sprintf("\nAsk an upstream maintainer to review the current plan for linked upstream issue #%d: %s", plan.IssueNumber, strings.Join(action.Argv, " "))
+			if c.opts.Repo == "" {
+				stop.guidance += "\nRun this command from the upstream repository checkout."
+			}
+		}
+		return stop
 	}
 	return err
 }

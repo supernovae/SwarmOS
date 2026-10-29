@@ -2413,6 +2413,19 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 		if gate == contract.GateHuman {
 			return &HumanPlanApprovalError{IssueNumber: wu.IssueNumber, Err: err}
 		}
+		var plan, test *contract.Artifact
+		for i := range st.Artifacts {
+			a := &st.Artifacts[i]
+			switch a.Type {
+			case contract.ArtifactDesign:
+				plan = a
+			case contract.ArtifactTestPlan:
+				test = a
+			}
+		}
+		if plan != nil && test != nil {
+			return &PlanApprovalError{IssueNumber: wu.IssueNumber, Err: err}
+		}
 		return err
 	}
 	return nil

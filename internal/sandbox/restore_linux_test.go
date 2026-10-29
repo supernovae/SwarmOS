@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -142,7 +144,7 @@ func TestRestoreLinuxHelperStartup(t *testing.T) {
 				if !errors.As(err, &exit) || exit.ExitCode() != 1 || stdout.String() != "ARGUMENTS\n" || stderr.Len() != 0 {
 					// Runtime diagnostics can contain host paths; keep them out
 					// of coordinator-facing test output.
-					t.Fatalf("helper did not reach argument validation: exit=%v stdout-bytes=%d stderr-bytes=%d", err, stdout.Len(), stderr.Len())
+					t.Fatalf("helper did not reach argument validation: %s", restoreStartupObservation(err, ctx.Err(), &stdout, &stderr, 0))
 				}
 			})
 		}
@@ -397,11 +399,25 @@ func TestRestoreReadyFrameOpenWriter(t *testing.T) {
 // Retain a bounded prefix while draining every write from the child.
 type restoreTestCapture struct {
 	bytes.Buffer
-	limit int
+	limit     int
+	total     uint64
+	saturated bool
+}
+
+// Prevent io.Copy from using the embedded Buffer's accounting-free ReadFrom.
+func (b *restoreTestCapture) ReadFrom(r io.Reader) (int64, error) {
+	return io.Copy(struct{ io.Writer }{b}, r)
 }
 
 func (b *restoreTestCapture) Write(p []byte) (int, error) {
 	n := len(p)
+	const ceiling = uint64(1 << 30)
+	if uint64(n) > ceiling-b.total {
+		b.total = ceiling
+		b.saturated = true
+	} else {
+		b.total += uint64(n)
+	}
 	remaining := b.limit - b.Len()
 	if len(p) > remaining {
 		p = p[:remaining]
@@ -477,7 +493,126 @@ func TestRestoreHelperBuildCapture(t *testing.T) {
 			t.Fatal(n, e)
 		}
 	}
+	if n, err := io.Copy(&b, io.LimitReader(strings.NewReader("extra"), 5)); n != 5 || err != nil {
+		t.Fatal("copy accounting fixture")
+	}
+	if b.total != 102405 || !b.truncated() || b.saturated {
+		t.Fatal("capture accounting")
+	}
 	if b.Len() != 4096 {
 		t.Fatal(b.Len())
 	}
+}
+
+func (b *restoreTestCapture) truncated() bool { return b.saturated || b.total > uint64(b.Len()) }
+
+func restoreStartupCategory(stderr *restoreTestCapture) string {
+	if stderr.truncated() {
+		return classifyRestoreLauncher("[swarm: output truncated")
+	}
+	return classifyRestoreLauncher(stderr.String())
+}
+
+func restoreStartupObservation(err, contextErr error, stdout, stderr *restoreTestCapture, active int32) string {
+	status := "unknown"
+	var exit *exec.ExitError
+	switch {
+	case contextErr != nil:
+		status = "timeout"
+	case err == nil:
+		status = "exit=0"
+	case errors.As(err, &exit):
+		if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			status = fmt.Sprintf("signal=%d", ws.Signal())
+		} else {
+			status = fmt.Sprintf("exit=%d", exit.ExitCode())
+		}
+	default:
+		status = "start"
+	}
+	return fmt.Sprintf("category=%s status=%s stdout-retained=%d stdout-total=%d stdout-truncated=%t stdout-saturated=%t stderr-retained=%d stderr-total=%d stderr-truncated=%t stderr-saturated=%t active-helpers=%d", restoreStartupCategory(stderr), status, stdout.Len(), stdout.total, stdout.truncated(), stdout.saturated, stderr.Len(), stderr.total, stderr.truncated(), stderr.saturated, active)
+}
+
+func TestRestoreStartupObservation(t *testing.T) {
+	const secret = "https://user:credential@example.invalid/private\x1b\n"
+	for _, tc := range []struct{ input, category string }{
+		{secret + "runtime: out of memory namespace", "helper startup memory allocation/reservation"},
+		{secret + "runtime: failed to create new OS thread errno=11 mount", "helper startup thread resources"},
+		{secret + "runtime: failed to create new OS thread", "helper startup/control framing"},
+		{secret, "helper startup/control framing"},
+	} {
+		out, diagnostic := restoreTestCapture{limit: 4096}, restoreTestCapture{limit: 4096}
+		diagnostic.Write([]byte(tc.input))
+		want := fmt.Sprintf("category=restore capability unavailable: %s status=start stdout-retained=0 stdout-total=0 stdout-truncated=false stdout-saturated=false stderr-retained=%d stderr-total=%d stderr-truncated=false stderr-saturated=false active-helpers=3", tc.category, len(tc.input), len(tc.input))
+		if got := restoreStartupObservation(errors.New(secret), nil, &out, &diagnostic, 3); got != want {
+			t.Fatal("unsafe or incorrect observation")
+		}
+	}
+	out, diagnostic := restoreTestCapture{limit: 0}, restoreTestCapture{limit: 4}
+	diagnostic.Write([]byte("runtime: out of memory"))
+	if restoreStartupCategory(&diagnostic) != classifyRestoreLauncher("") {
+		t.Fatal("truncated category")
+	}
+	diagnostic.total = 1<<30 - 1
+	diagnostic.Write([]byte("xx"))
+	want := "category=restore capability unavailable: helper startup/control framing status=timeout stdout-retained=0 stdout-total=0 stdout-truncated=false stdout-saturated=false stderr-retained=4 stderr-total=1073741824 stderr-truncated=true stderr-saturated=true active-helpers=0"
+	if got := restoreStartupObservation(nil, context.DeadlineExceeded, &out, &diagnostic, 0); got != want {
+		t.Fatal("incorrect saturated observation")
+	}
+}
+
+func TestRestoreLinuxHelperStartupConcurrentProbe(t *testing.T) {
+	if os.Getenv("SWARM_TEST_RESTORE_PROBE") != "1" {
+		t.Log("probe: not run: opt-in unset")
+		t.Skip("set SWARM_TEST_RESTORE_PROBE=1 for the controlled restore probe")
+	}
+	if _, err := os.Stat("/usr/bin/prlimit"); err != nil {
+		t.Log("probe: not run: prlimit unavailable")
+		return
+	}
+	helper := buildRestoreHelper(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type result struct {
+		ok                    bool
+		category, observation string
+	}
+	results := make(chan result, 4)
+	barrier := make(chan struct{})
+	var active atomic.Int32
+	for range 4 {
+		go func() {
+			<-barrier
+			childCtx, childCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer childCancel()
+			cmd := exec.CommandContext(childCtx, "/usr/bin/prlimit", append(restoreResourceFlags(), "--", helper)...)
+			cmd.Env = []string{"GOMAXPROCS=" + restoreHelperMaxProcs}
+			stdout, stderr := restoreTestCapture{limit: 4 << 10}, restoreTestCapture{limit: 64 << 10}
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			active.Add(1)
+			err := cmd.Run()
+			overlap := active.Load()
+			active.Add(-1)
+			var exit *exec.ExitError
+			ok := childCtx.Err() == nil && errors.As(err, &exit) && exit.ExitCode() == 1 && stdout.String() == "ARGUMENTS\n" && stderr.total == 0
+			results <- result{ok, restoreStartupCategory(&stderr), restoreStartupObservation(err, childCtx.Err(), &stdout, &stderr, overlap)}
+		}()
+	}
+	close(barrier)
+	var first *result
+	for range 4 {
+		r := <-results
+		if !r.ok && first == nil {
+			first = &r
+			cancel()
+		}
+		t.Log(r.observation)
+	}
+	t.Logf("probe cleanup: active-helpers=%d", active.Load())
+	if first != nil {
+		t.Log("probe: failure category=" + first.category)
+		t.Fail()
+		return
+	}
+	t.Log("probe: completed wave children=4")
 }

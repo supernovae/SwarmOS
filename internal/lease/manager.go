@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/progress"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -70,6 +71,8 @@ type ApprovalTransition struct {
 }
 
 type IssueState struct {
+	resumeMarker *resumeMarker
+
 	CheckpointHeads        []string                        `json:"checkpoint_heads,omitempty"`
 	ResumeCheckpointBranch string                          `json:"resume_checkpoint_branch,omitempty"`
 	ClaimBudget            *ClaimBudget                    `json:"claim_budget,omitempty"`
@@ -134,17 +137,21 @@ func (st *IssueState) ProvisionContext(forkMode bool) workspace.ProvisionContext
 }
 
 type Manager struct {
-	heartbeatTimerFn func(time.Duration) HeartbeatTimer
-	tracker          tracker.Tracker
-	security         contract.SecurityConfig
-	store            coordination.Store
-	repoRoot         string
-	upstreamRemote   string
-	nodeProfile      *contract.NodeProfile
-	nowFn            func() time.Time
-	gateway          WorkerGateway
-	mu               sync.Mutex
-	tokens           map[int]string
+	heartbeatTimerFn     func(time.Duration) HeartbeatTimer
+	tracker              tracker.Tracker
+	security             contract.SecurityConfig
+	store                coordination.Store
+	repoRoot             string
+	upstreamRemote       string
+	nodeProfile          *contract.NodeProfile
+	nowFn                func() time.Time
+	gateway              WorkerGateway
+	mu                   sync.Mutex
+	resumeApprovalHook   func(string) error
+	resumeAdmissionHook  func(string)
+	localStoreConfigured bool // Sticky: initial nonlocal assembly has no local authority to revoke.
+	configErr            error
+	tokens               map[int]string
 }
 
 func NewManager(tr tracker.Tracker, security contract.SecurityConfig) *Manager {
@@ -155,7 +162,15 @@ func (m *Manager) SetNodeProfile(profile *contract.NodeProfile) { m.nodeProfile 
 
 // SetUpstreamRemote names the project remote holding authoritative state and
 // approved bases. Call it before ConfigureStore; empty means origin.
-func (m *Manager) SetUpstreamRemote(name string) { m.upstreamRemote = strings.TrimSpace(name) }
+func (m *Manager) SetUpstreamRemote(name string) {
+	if m.repoRoot != "" && workspace.UpstreamRemoteOrDefault(name) != m.UpstreamRemote() {
+		if err := m.denyResume(0); err != nil {
+			m.configErr = err
+			return
+		}
+	}
+	m.upstreamRemote = strings.TrimSpace(name)
+}
 
 // UpstreamRemote names the project remote, origin unless configured.
 func (m *Manager) UpstreamRemote() string {
@@ -185,6 +200,22 @@ func (m *Manager) ConfigureStore(root string) error {
 		return fmt.Errorf("resolve repository root: %w", err)
 	}
 	root = filepath.Clean(canonical)
+	sameStore := false
+	if _, ok := m.store.(*coordination.FileStore); ok {
+		_, sameStore = m.tracker.(*tracker.LocalTracker)
+	}
+	if gs, ok := m.store.(*coordination.GitStore); ok {
+		sameStore = strings.HasPrefix(m.tracker.BackendName(), "github") && gs.Remote() == m.UpstreamRemote()
+	}
+	if m.repoRoot != "" && (m.repoRoot != root || !sameStore) {
+		if err := m.denyResume(0); err != nil {
+			m.configErr = err
+			return err
+		}
+	}
+	if m.configErr != nil {
+		return m.configErr
+	}
 	m.repoRoot = root
 	if strings.HasPrefix(m.tracker.BackendName(), "github") {
 		// Only the upstream default branch selects the ledger namespace.
@@ -199,19 +230,41 @@ func (m *Manager) ConfigureStore(root string) error {
 		m.store = coordination.NewGitStoreWithLayout(root, m.upstreamRemote, layout)
 	} else {
 		m.store = coordination.NewFileStore(root)
+		m.localStoreConfigured = true
 	}
 	return nil
 }
 func (m *Manager) Store() coordination.Store      { return m.store }
 func (m *Manager) SetNowFunc(fn func() time.Time) { m.nowFn = fn }
 func (m *Manager) SetStore(root string, s coordination.Store) {
+	if m.store != nil && (m.store != s || root != "" && m.repoRoot != root) {
+		if err := m.denyResume(0); err != nil {
+			m.configErr = err
+			return
+		}
+	}
 	if strings.TrimSpace(root) != "" {
 		m.repoRoot = root
 	}
 	m.store = s
+	if _, ok := s.(*coordination.FileStore); ok {
+		m.localStoreConfigured = true
+	}
 }
-func (m *Manager) SetWorkerGateway(g WorkerGateway) { m.gateway = g }
-func (m *Manager) HasWorkerGateway() bool           { return m.gateway != nil }
+func (m *Manager) SetWorkerGateway(g WorkerGateway) {
+	if g != nil && m.repoRoot != "" && m.localStoreConfigured {
+		if err := m.denyResume(0); err != nil {
+			m.configErr = err
+			return
+		}
+	}
+	if g == nil {
+		m.gateway = nil
+	} else {
+		m.gateway = resumeDenyingGateway{manager: m, next: g}
+	}
+}
+func (m *Manager) HasWorkerGateway() bool { return m.gateway != nil }
 func (m *Manager) BindClaim(issue int, claimID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -315,6 +368,9 @@ func (m *Manager) load(ctx context.Context, n int) (*IssueState, string, error) 
 
 func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string, error) {
 	defer progress.Begin(ctx, progress.OpStateRead, time.Now())()
+	if m.configErr != nil {
+		return nil, "", m.configErr
+	}
 	if m.store == nil {
 		return nil, "", ErrStoreUnconfigured
 	}
@@ -323,7 +379,7 @@ func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string,
 		return nil, "", err
 	}
 	var st IssueState
-	if err = json.Unmarshal(b, &st); err != nil {
+	if err = unmarshalCoordinatorState(b, &st); err != nil {
 		return nil, "", fmt.Errorf("invalid authoritative state: %w", err)
 	}
 	if st.Lease.IssueNumber != 0 && st.Lease.IssueNumber != n {
@@ -349,8 +405,15 @@ func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string,
 	return &st, rev, nil
 }
 func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (*IssueState, error) {
+	_, localStore := m.store.(*coordination.FileStore)
+	_, localTracker := m.tracker.(*tracker.LocalTracker)
+	if !localStore || !localTracker {
+		if err := m.denyResume(n); err != nil {
+			return nil, err
+		}
+	}
 	m.stampForSave(ctx, n, st)
-	b, err := json.Marshal(st)
+	b, err := marshalCoordinatorState(st)
 	if err != nil {
 		return nil, err
 	}
@@ -698,6 +761,9 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 			return nil, &AlreadyClaimedError{IssueNumber: n, Owner: old.Lease.Owner, ExpiresAt: old.Lease.ExpiresAt, CommentID: old.ProjectionCommentID}
 		}
 		if old.BaseSHA != base || old.TaskDigest != contract.DigestWorkUnit(wu) || old.PolicyDigest != digest {
+			if err := m.denyResume(n); err != nil {
+				return nil, err
+			}
 			old.PlanReplanCount = 0
 			old.PendingPlanReview = nil
 			old.NextPhaseReason = ""
@@ -745,7 +811,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		return nil, err
 	}
 	st := &IssueState{Lease: contract.Lease{Version: 1, IssueNumber: n, Status: "draft"}, TaskDigest: contract.DigestWorkUnit(wu), PolicyDigest: digest, PolicyTreeDigest: tree, BaseSHA: base, EffectiveGate: gate, ApprovedBy: owner, ApprovedAt: m.nowFn()}
-	if _, err = m.save(ctx, n, "", st); err != nil {
+	if err = m.saveInitialApproval(ctx, n, issue.Title, st); err != nil {
 		return nil, err
 	}
 	for _, staleLabel := range []string{"swarm:draft", "swarm:needs-scope", "swarm:blocked"} {
@@ -866,10 +932,21 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
 		return nil, &AlreadyClaimedError{IssueNumber: n, Owner: st.Lease.Owner, ExpiresAt: st.Lease.ExpiresAt}
 	}
+	if prNumber != 0 || st.ForkRepo != "" {
+		if err := m.denyResume(n); err != nil {
+			return nil, err
+		}
+	}
 	if fresh {
+		previousBase := st.BaseSHA
 		st, err = m.prepareClaimBase(ctx, n, st, wu, cfg)
 		if err != nil {
 			return nil, err
+		}
+		if st.BaseSHA != previousBase {
+			if err := m.denyResume(n); err != nil {
+				return nil, err
+			}
 		}
 	}
 	id := claimID()
@@ -1036,6 +1113,9 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 				return nil, ErrClaimRaceLost
 			}
 			return nil, &AlreadyClaimedError{IssueNumber: issue, Owner: st.Lease.Owner, ExpiresAt: st.Lease.ExpiresAt}
+		}
+		if err := m.denyResume(issue); err != nil {
+			return nil, err
 		}
 		id := claimID()
 		contributors := append([]string(nil), st.Lease.Contributors...)
@@ -1500,6 +1580,9 @@ func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, num
 		return nil, fmt.Errorf("submission requires PR number and URL")
 	}
 	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if err := m.denyResume(n); err != nil {
+			return err
+		}
 		if st.PRRevision != nil {
 			return fmt.Errorf("issue #%d has a pending PR revision; use swarm pr submit %d", n, st.PRRevision.Number)
 		}
@@ -1847,6 +1930,9 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 		return nil, fmt.Errorf("fork checkpoint branch %q does not match active claim %q", branch, st.Lease.ClaimID)
 	}
 	if st.Branch != "" && st.Branch != branch {
+		if err := m.denyResume(n); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("checkpoint branch differs from approved branch")
 	}
 	if st.ProjectionCommentID == 0 {
@@ -1854,10 +1940,24 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 			st.ProjectionCommentID = existingID
 		}
 	}
+	// A lifecycle receipt cannot survive a first checkpoint outside its approved
+	// base. Preserve legacy recording behavior when no private marker exists.
+	if st.resumeMarker != nil {
+		ancestor, ancestryErr := workspace.BaseIsAncestor(ctx, m.repoRoot, st.BaseSHA, head)
+		if ancestryErr != nil || !ancestor {
+			if err := m.denyResume(n); err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("checkpoint does not descend from approved activation base")
+		}
+	}
 	predecessor := st.HeadSHA
 	if predecessor != "" && predecessor != head {
 		ancestor, e := workspace.BaseIsAncestor(ctx, m.repoRoot, predecessor, head)
 		if e != nil || !ancestor {
+			if err := m.denyResume(n); err != nil {
+				return nil, err
+			}
 			return nil, fmt.Errorf("checkpoint rewrite requires explicit reconciliation: swarm issue reconcile %d --checkpoint --expected-head %s --candidate-head %s --dry-run", n, predecessor, head)
 		}
 	}
@@ -1881,8 +1981,11 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	// The fresh attempt now has its own checkpoint; discard history stays.
 	st.FreshStart = nil
 	if _, ok := m.store.(coordination.PublishingStore); ok {
+		if err := m.BeginPublicationAttempt(ctx, n, owner); err != nil {
+			return nil, err
+		}
 		defer progress.Begin(ctx, progress.OpCheckpoint, time.Now())()
-		raw, err := json.Marshal(st)
+		raw, err := marshalCoordinatorState(st)
 		if err != nil {
 			return nil, err
 		}
@@ -1946,6 +2049,9 @@ func (m *Manager) BeginPRRevision(ctx context.Context, n int, owner string, numb
 		return m.gateway.Apply(ctx, ForkRequest{Version: 1, Operation: "begin-pr-revision", IssueNumber: n, ClaimID: m.token(n), PRNumber: number, ExpectedHeadSHA: remoteHead, HeadSHA: localHead, Branch: branch, RevisionIntent: revisionIntent(intent)})
 	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if err := m.denyResume(n); err != nil {
+			return err
+		}
 		if st.PRNumber != number {
 			return fmt.Errorf("PR #%d is not linked to issue #%d", number, n)
 		}
@@ -2012,6 +2118,9 @@ func (m *Manager) RecordPRHead(ctx context.Context, n int, owner string, number 
 		if st.PRRevision == nil || st.PRRevision.Number != number || st.PRRevision.Branch != branch {
 			return fmt.Errorf("PR checkpoint does not match pending revision")
 		}
+		if err := m.denyResume(n); err != nil {
+			return err
+		}
 		if st.PRRevision.LocalHeadSHA != head {
 			kept := st.Artifacts[:0]
 			for _, art := range st.Artifacts {
@@ -2070,6 +2179,9 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 	if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
 		return nil, err
 	}
+	if err := m.BeginPublicationAttempt(ctx, n, owner); err != nil {
+		return nil, err
+	}
 	r := st.PRRevision
 	if r == nil || st.PRNumber != number || r.Number != number || r.RemoteHeadSHA != expected || r.LocalHeadSHA != published {
 		return nil, fmt.Errorf("PR publication snapshot changed")
@@ -2092,7 +2204,7 @@ func (m *Manager) completePRRevision(ctx context.Context, n int, owner string, n
 			return nil, fmt.Errorf("origin PR publication requires a coordination store that publishes the PR head atomically")
 		}
 		m.stampForSave(ctx, n, st)
-		raw, err := json.Marshal(st)
+		raw, err := marshalCoordinatorState(st)
 		if err != nil {
 			return nil, err
 		}
@@ -2386,4 +2498,387 @@ func (m *Manager) RecordRetryValidation(ctx context.Context, n int, owner string
 		}
 		return nil
 	})
+}
+
+// resumeMarker is persisted only by coordinator serialization, never status or
+// issue projections, gateway requests, or role artifact import.
+type resumeMarker struct {
+	Version   int    `json:"version"`
+	Lifecycle string `json:"lifecycle"`
+	Scope     string `json:"scope"`
+}
+
+func marshalCoordinatorState(st *IssueState) ([]byte, error) {
+	return json.Marshal(struct {
+		*IssueState
+		Resume *resumeMarker `json:"_local_resume,omitempty"`
+	}{st, st.resumeMarker})
+}
+func unmarshalCoordinatorState(b []byte, st *IssueState) error {
+	aux := struct {
+		*IssueState
+		Resume *resumeMarker `json:"_local_resume,omitempty"`
+	}{IssueState: st}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	st.resumeMarker = aux.Resume
+	return nil
+}
+func (m *Manager) denyResume(n int) error {
+	if m.configErr != nil {
+		return m.configErr
+	}
+	actual := ""
+	if tr, ok := m.tracker.(*tracker.LocalTracker); ok {
+		var err error
+		actual, err = tr.CoordinatorRoot()
+		if err != nil {
+			return err
+		}
+		if err := tr.DenyResume(n); err != nil {
+			return err
+		}
+	}
+	if m.repoRoot == "" || m.repoRoot == actual {
+		return nil
+	}
+	// Nonlocal tracker transitions must revoke old local receipts as well.
+	if _, err := os.Lstat(filepath.Join(m.repoRoot, ".swarm", "local-tracker", "state.json")); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return tracker.NewLocalTracker(m.repoRoot).DenyResume(n)
+}
+
+func (m *Manager) checkResumeRoots(fs *coordination.FileStore, tr *tracker.LocalTracker) error {
+	actual, err := tr.CoordinatorRoot()
+	if err != nil {
+		return err
+	}
+	canonical := func(path string) (string, error) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+		return filepath.EvalSymlinks(abs)
+	}
+	manager, err := canonical(m.repoRoot)
+	if err != nil {
+		return err
+	}
+	store, err := canonical(fs.Root())
+	if err != nil {
+		return err
+	}
+	if actual != manager || store != manager {
+		return fmt.Errorf("local resume authority roots differ")
+	}
+	return nil
+}
+
+// BeginPublicationAttempt rechecks the current normal claim before revoking
+// unpublished admission. Revocation survives failed or unknown publication.
+func (m *Manager) BeginPublicationAttempt(ctx context.Context, n int, owner string) error {
+	if m.gateway != nil {
+		if err := m.CheckClaim(ctx, n, owner); err != nil {
+			return err
+		}
+		return m.denyResume(n)
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return err
+	}
+	if err := m.checkStateClaim(ctx, n, owner, st); err != nil {
+		return err
+	}
+	if fs, ok := m.store.(*coordination.FileStore); ok {
+		return fs.WithLockedState(ctx, n, func(b []byte, current string, _ func([]byte) error) error {
+			if current != rev {
+				return fmt.Errorf("publication revision changed: %w", ErrClaimFence)
+			}
+			var locked IssueState
+			if err := unmarshalCoordinatorState(b, &locked); err != nil {
+				return err
+			}
+			if err := m.checkStateClaim(ctx, n, owner, &locked); err != nil {
+				return err
+			}
+			return m.denyResume(n)
+		})
+	}
+	return m.denyResume(n)
+}
+
+// resumeScope captures configured authority and immutable approval identity.
+func (m *Manager) resumeScope(ctx context.Context, fs *coordination.FileStore, st *IssueState, branch string) (string, error) {
+	fetch, err := checkpointGit(ctx, m.repoRoot, "remote", "get-url", "--all", m.UpstreamRemote())
+	if err != nil {
+		return "", err
+	}
+	push, err := checkpointGit(ctx, m.repoRoot, "remote", "get-url", "--push", "--all", m.UpstreamRemote())
+	if err != nil {
+		return "", err
+	}
+	if len(strings.Split(fetch, "\n")) != 1 || len(strings.Split(push, "\n")) != 1 || fetch == "" || push == "" || fetch != push {
+		return "", fmt.Errorf("ambiguous checkpoint destination")
+	}
+	common, err := checkpointGit(ctx, m.repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal([]string{fs.Root(), m.repoRoot, common, fmt.Sprint(st.Lease.IssueNumber), branch, st.BaseSHA, st.TaskDigest, st.PolicyDigest, st.PolicyTreeDigest, m.UpstreamRemote(), fetch, push})
+	if err != nil {
+		return "", err
+	}
+	return hash(string(raw)), nil
+}
+func (m *Manager) resumeRemote(ctx context.Context, branch string) (bool, error) {
+	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	result, err := checkpointGit(bounded, m.repoRoot, "ls-remote", "--refs", m.UpstreamRemote(), "refs/heads/"+branch)
+	return result != "", err
+}
+
+func (m *Manager) saveInitialApproval(ctx context.Context, n int, title string, st *IssueState) error {
+	fs, local := m.store.(*coordination.FileStore)
+	tr, concrete := m.tracker.(*tracker.LocalTracker)
+	if !local || !concrete || m.gateway != nil {
+		_, err := m.save(ctx, n, "", st)
+		return err
+	}
+	if m.configErr != nil {
+		return m.configErr
+	}
+	if err := m.checkResumeRoots(fs, tr); err != nil {
+		return err
+	}
+	err := fs.WithLockedState(ctx, n, func(_ []byte, rev string, write func([]byte) error) error {
+		if rev != "" {
+			return coordination.ErrConflict
+		}
+		return tr.WithResumeReceipt(n, func(r *tracker.ResumeReceipt, issue *tracker.Issue, commit func() error) error {
+			branch := workspace.BranchName(n, title)
+			scope, scopeErr := m.resumeScope(ctx, fs, st, branch)
+			eligible := r != nil && r.Status == "created" && issue != nil && scopeErr == nil
+			if eligible {
+				wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+				if err != nil {
+					return err
+				}
+				if contract.DigestWorkUnit(wu) != st.TaskDigest {
+					return ErrApprovalRequired
+				}
+			}
+			if eligible {
+				if _, err := os.Lstat(workspace.WorktreePath(m.repoRoot, n)); !errors.Is(err, os.ErrNotExist) {
+					eligible = false
+				}
+				refs, err := checkpointGit(ctx, m.repoRoot, "for-each-ref", "--format=%(refname)", "refs/heads/"+branch)
+				if err != nil {
+					return err
+				}
+				if refs != "" {
+					eligible = false
+				}
+				exists, err := m.resumeRemote(ctx, branch)
+				if err != nil {
+					return err
+				}
+				if exists {
+					eligible = false
+				}
+			}
+			if eligible {
+				r.Scope, r.Status = scope, "consumed"
+				if err := commit(); err != nil {
+					return err
+				}
+				if m.resumeApprovalHook != nil {
+					if err := m.resumeApprovalHook("consumed"); err != nil {
+						return err
+					}
+				}
+				st.resumeMarker = &resumeMarker{Version: 1, Lifecycle: r.Lifecycle, Scope: scope}
+			} else if r != nil && r.Status == "created" {
+				r.Status = "denied"
+				if err := commit(); err != nil {
+					return err
+				}
+			}
+			b, err := marshalCoordinatorState(st)
+			if err != nil {
+				return err
+			}
+			if err := write(b); err != nil {
+				return err
+			}
+			if eligible {
+				if m.resumeApprovalHook != nil {
+					if err := m.resumeApprovalHook("marked"); err != nil {
+						return err
+					}
+				}
+				r.Status = "active"
+				if err := commit(); err != nil {
+					r.Status = "denied"
+					if denyErr := commit(); denyErr != nil {
+						return errors.Join(err, denyErr)
+					}
+					return err
+				}
+			}
+			return nil
+		})
+	})
+	if err == nil {
+		m.project(ctx, n, st)
+	}
+	return err
+}
+
+// ProvisionIssueWorkspace is the sole ordinary coordinator admission route.
+// Existing strict workspace APIs never accept receipt permission.
+func (m *Manager) ProvisionIssueWorkspace(ctx context.Context, captured *IssueState, owner, title, checkpointRemote, branch string, fork bool) (string, string, error) {
+	n := captured.Lease.IssueNumber
+	pc := captured.ProvisionContext(fork)
+	pc.UpstreamRemote = m.UpstreamRemote()
+	strict := func() (string, string, error) {
+		return workspace.ProvisionWithContext(m.repoRoot, checkpointRemote, n, title, captured.BaseSHA, branch, captured.HeadSHA, pc)
+	}
+	fs, local := m.store.(*coordination.FileStore)
+	tr, concrete := m.tracker.(*tracker.LocalTracker)
+	if !local || !concrete || m.gateway != nil || fork || (checkpointRemote != "" && checkpointRemote != m.UpstreamRemote()) || captured.ForkRepo != "" || captured.PRNumber != 0 || captured.PRRevision != nil {
+		return strict()
+	}
+	if err := m.checkResumeRoots(fs, tr); err != nil {
+		return "", "", err
+	}
+	// Capture a revision independently of the supplied object; equal identity is
+	// necessary and any change after this capture invalidates the operation.
+	current, rev, err := m.load(ctx, n)
+	if err != nil {
+		return "", "", err
+	}
+	a, _ := marshalCoordinatorState(captured)
+	b, _ := marshalCoordinatorState(current)
+	if string(a) != string(b) {
+		return "", "", fmt.Errorf("workspace capture changed: %w", ErrClaimFence)
+	}
+	if err := m.checkStateClaim(ctx, n, owner, current); err != nil {
+		if !errors.Is(err, ErrClaimFence) {
+			if denyErr := m.denyResume(n); denyErr != nil {
+				return "", "", denyErr
+			}
+		}
+		return "", "", err
+	}
+	if m.resumeAdmissionHook != nil {
+		m.resumeAdmissionHook("captured")
+	}
+	admitted := ""
+	err = fs.WithLockedState(ctx, n, func(raw []byte, lockedRev string, _ func([]byte) error) error {
+		if lockedRev != rev {
+			return fmt.Errorf("workspace revision changed: %w", ErrClaimFence)
+		}
+		var st IssueState
+		if err := unmarshalCoordinatorState(raw, &st); err != nil {
+			return err
+		}
+		if err := m.checkStateClaim(ctx, n, owner, &st); err != nil {
+			return err
+		}
+		return tr.WithResumeReceipt(n, func(r *tracker.ResumeReceipt, issue *tracker.Issue, commit func() error) error {
+			marker := st.resumeMarker
+			if r == nil || marker == nil || r.Status != "active" || marker.Version != 1 || r.Lifecycle != marker.Lifecycle || r.Scope != marker.Scope {
+				return nil
+			}
+			deny := func() error { r.Status = "denied"; return commit() }
+			scope, err := m.resumeScope(ctx, fs, &st, branch)
+			if err != nil {
+				if denyErr := deny(); denyErr != nil {
+					return denyErr
+				}
+				return err
+			}
+			if scope != r.Scope || st.Branch != branch || st.SubmittedHeadSHA != "" || st.FreshStart != nil || st.DroppedCheckpoint != nil {
+				return deny()
+			}
+			exists, err := m.resumeRemote(ctx, branch)
+			if err != nil {
+				return err
+			}
+			if exists {
+				return deny()
+			}
+			if st.HeadSHA == "" {
+				return nil
+			}
+			if m.resumeAdmissionHook != nil {
+				m.resumeAdmissionHook("inspecting")
+			}
+			path, err := workspace.ValidateUnpublishedCheckpoint(m.repoRoot, n, branch, st.BaseSHA, st.HeadSHA)
+			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if st.Lease.Status != "active" || !st.Lease.ExpiresAt.After(m.nowFn()) || st.Lease.Owner != owner || st.Lease.ClaimID != m.token(n) {
+				return ErrClaimFence
+			}
+			// Tracker lock still protects the actual issue; do not recursively GetIssue.
+			if issue == nil {
+				return ErrApprovalRequired
+			}
+			wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+			if err != nil {
+				return err
+			}
+			cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+			if err != nil {
+				return err
+			}
+			if !TaskApprovalCurrent(&st, wu, cfg) {
+				if err := deny(); err != nil {
+					return err
+				}
+				return ErrApprovalRequired
+			}
+			if err := verifyTrust(cfg.Security, issue); err != nil {
+				return err
+			}
+			if _, err := workspace.ValidateUnpublishedCheckpoint(m.repoRoot, n, branch, st.BaseSHA, st.HeadSHA); err != nil {
+				return err
+			}
+			if !st.Lease.ExpiresAt.After(m.nowFn()) {
+				return ErrClaimFence
+			}
+			admitted = path
+			return nil
+		})
+	})
+	if err != nil {
+		return "", "", err
+	}
+	if admitted != "" {
+		return admitted, branch, nil
+	}
+	return strict()
+}
+
+// Initial gateway configuration stays read-only. Its first mutating request
+// revokes local admission before crossing into another coordination authority.
+type resumeDenyingGateway struct {
+	manager *Manager
+	next    WorkerGateway
+}
+
+func (g resumeDenyingGateway) Apply(ctx context.Context, req ForkRequest) (*IssueState, error) {
+	if err := g.manager.denyResume(req.IssueNumber); err != nil {
+		return nil, err
+	}
+	return g.next.Apply(ctx, req)
 }

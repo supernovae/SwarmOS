@@ -306,17 +306,30 @@ func TestSubmitFreshnessOriginSelection(t *testing.T) {
 
 type freshnessUpdateFailure struct {
 	tracker.Tracker
-	updates int
+	updates   int
+	failAt    int
+	nilResult bool
+	onUpdate  func(int, string)
 }
 
-func (t *freshnessUpdateFailure) UpdateDraftPR(context.Context, int, string, string) (*tracker.PullRequest, error) {
+func (t *freshnessUpdateFailure) UpdateDraftPR(ctx context.Context, n int, title, body string) (*tracker.PullRequest, error) {
 	t.updates++
+	if t.onUpdate != nil {
+		t.onUpdate(t.updates, body)
+	}
+	if t.updates != t.failAt {
+		return t.Tracker.UpdateDraftPR(ctx, n, title, body)
+	}
+	if t.nilResult {
+		return nil, nil
+	}
 	return nil, fmt.Errorf("sensitive diagnostic must not escape")
 }
 func TestSubmitFreshnessFailedDescriptionUpdate(t *testing.T) {
 	t.Parallel()
-	for _, existing := range []bool{false, true} {
-		t.Run(strconv.FormatBool(existing), func(t *testing.T) {
+	for _, mode := range []string{"create-error", "existing-error", "existing-second-error", "existing-second-nil", "create-nil"} {
+		existing := strings.HasPrefix(mode, "existing")
+		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
 			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'candidate\\n' > conflict.txt")
 			issue := f.create(t, "agent")
@@ -332,7 +345,19 @@ func TestSubmitFreshnessFailedDescriptionUpdate(t *testing.T) {
 			freshnessWrite(t, f.root, "conflict.txt", "target\n")
 			freshnessGit(t, f.root, "add", "conflict.txt")
 			freshnessGit(t, f.root, "commit", "-m", "target")
-			tr := &freshnessUpdateFailure{Tracker: f.tracker}
+			tr := &freshnessUpdateFailure{Tracker: f.tracker, failAt: 1, nilResult: strings.HasSuffix(mode, "nil")}
+			if strings.Contains(mode, "second") {
+				tr.failAt = 2
+			}
+			tr.onUpdate = func(call int, body string) {
+				before := f.state(t, issue)
+				if before.PRNumber != 0 || before.Lease.Status != "active" || before.Lease.ClaimID != state.Lease.ClaimID || before.HeadSHA != state.HeadSHA {
+					t.Fatal("PATCH escaped checkpoint/claim or ran after RecordSubmission")
+				}
+				if call == 2 && !strings.Contains(body, "pr rebase 1") {
+					t.Fatal("second PATCH lacks numbered conflict recovery")
+				}
+			}
 			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
 			var out, diagnostics bytes.Buffer
 			cmd.SetOut(&out)
@@ -343,16 +368,26 @@ func TestSubmitFreshnessFailedDescriptionUpdate(t *testing.T) {
 				t.Fatal("required description failure must stop submission", err)
 			}
 			submitted := f.state(t, issue)
-			if submitted.PRNumber != 0 || submitted.Lease.Status == "completed" || tr.updates != 1 {
+			if submitted.PRNumber != 0 || submitted.Lease.Status == "completed" || tr.updates != tr.failAt {
 				t.Fatal("recorded unsuccessful description update", submitted, tr.updates)
 			}
 			if strings.Contains(out.String(), `"status":"submitted"`) {
 				t.Fatal(out.String())
 			}
+			published, findErr := f.tracker.FindDraftPR(t.Context(), state.Branch, "main")
+			if findErr != nil || published == nil {
+				t.Fatalf("published PR missing: %+v %v", published, findErr)
+			}
+			if !strings.Contains(err.Error(), "issue submit "+n) {
+				t.Fatal("recovery lacks same issue command", err)
+			}
+			if tr.nilResult && !strings.Contains(err.Error(), "tracker returned no PR") {
+				t.Fatal("nil followup was not diagnosed", err)
+			}
 			// Retry through the command, using the published PR discovered by FindDraftPR.
 			f.must(t, "issue", "submit", n, "--json")
 			retried := f.state(t, issue)
-			if retried.PRNumber == 0 || retried.Lease.Status != "completed" {
+			if retried.PRNumber != published.Number || retried.Lease.Status != "completed" {
 				t.Fatal("retry did not complete", retried)
 			}
 		})

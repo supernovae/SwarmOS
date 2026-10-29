@@ -25,20 +25,22 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	prprojection "github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 type fakeGitHubState struct {
-	mu          sync.Mutex
-	currentUser string
-	nextID      int64
-	nextPR      int
-	baseSHA     string
-	issues      map[int]*tracker.Issue
-	comments    map[int64]*tracker.Comment
-	issueComm   map[int][]int64
-	prs         map[int]*tracker.PullRequest
-	forks       map[string]map[string]any
+	mu                sync.Mutex
+	currentUser       string
+	nextID            int64
+	nextPR            int
+	baseSHA           string
+	issues            map[int]*tracker.Issue
+	comments          map[int64]*tracker.Comment
+	issueComm         map[int][]int64
+	prs               map[int]*tracker.PullRequest
+	descriptionBodies []string
+	forks             map[string]map[string]any
 }
 
 func newFakeGitHubState() *fakeGitHubState {
@@ -239,6 +241,29 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 		case r.URL.Path == "/repos/octo/swarm/git/ref/heads/main" && r.Method == http.MethodGet:
 			writeJSON(map[string]any{"object": map[string]string{"sha": s.baseSHA}})
 
+		case r.URL.Path == "/repos/octo/swarm/pulls" && r.Method == http.MethodPost:
+			var payload struct {
+				Title, Body, Head, Base string
+				Draft                   bool
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if len(payload.Body) >= 60000 || !utf8.ValidString(payload.Body) {
+				http.Error(w, "decoded PR body exceeds limit", http.StatusUnprocessableEntity)
+				return
+			}
+			s.descriptionBodies = append(s.descriptionBodies, payload.Body)
+			parts := strings.SplitN(payload.Head, ":", 2)
+			if len(parts) != 2 {
+				t.Fatal("expected fork head")
+			}
+			number := s.nextPR
+			s.nextPR++
+			pr := &tracker.PullRequest{Number: number, Title: payload.Title, Body: payload.Body, Head: parts[1], HeadRepo: parts[0] + "/swarm", Base: payload.Base, BaseRepo: "octo/swarm", Draft: payload.Draft, HTMLURL: fmt.Sprintf("https://github.com/octo/swarm/pull/%d", number)}
+			s.prs[number] = pr
+			writeJSON(map[string]any{"number": number, "title": pr.Title, "body": pr.Body, "draft": pr.Draft, "html_url": pr.HTMLURL})
+
 		case strings.HasPrefix(r.URL.Path, "/repos/octo/swarm/pulls/"):
 			prNum, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/repos/octo/swarm/pulls/"))
 			pr, ok := s.prs[prNum]
@@ -258,6 +283,13 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 					http.Error(w, "decoded PR body exceeds limit", http.StatusUnprocessableEntity)
 					return
 				}
+				for _, name := range []string{"issue-description", "review-evidence", "rebase"} {
+					start, end := strings.Count(payload.Body, "<!-- swarm:"+name+":start -->"), strings.Count(payload.Body, "<!-- swarm:"+name+":end -->")
+					if start != end || start > 1 {
+						t.Fatalf("invalid %s envelope: %d/%d", name, start, end)
+					}
+				}
+				s.descriptionBodies = append(s.descriptionBodies, payload.Body)
 				pr.Title, pr.Body = payload.Title, payload.Body
 			}
 			writeJSON(map[string]any{
@@ -688,18 +720,53 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		t.Fatalf("bob record-checkpoint failed: %v", err)
 	}
 
-	ghState.mu.Lock()
-	ghState.prs[55] = &tracker.PullRequest{
-		Number:   55,
-		Title:    "Fork feature 42 (#42)",
-		Head:     bobBranch,
-		HeadRepo: "bob/swarm",
-		HeadSHA:  aliceHead,
-		Base:     "main",
-		BaseRepo: "octo/swarm",
-		Draft:    true,
-		HTMLURL:  "https://github.com/octo/swarm/pull/55",
+	// Publish the initial bounded issue envelope through the real GitHub
+	// tracker. The coordinator fixture cannot import cli (cli imports fork).
+	// This exercises the shared Swarm composer and API, not issue-submit CLI.
+	initialStore := coordination.NewGitStoreWithLayout(upstreamCheckout, "origin", layout)
+	initialRaw, initialVersion, err := initialStore.Load(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
 	}
+	var initialState lease.IssueState
+	if err := json.Unmarshal(initialRaw, &initialState); err != nil {
+		t.Fatal(err)
+	}
+	for i := range initialState.Artifacts {
+		if initialState.Artifacts[i].Type == contract.ArtifactDesign {
+			initialState.Artifacts[i].Body += strings.Repeat("issue plan 计划🙂\n", 10000)
+			initialState.Artifacts[i].Metadata["content_sha256"] = fmt.Sprintf("%x", sha256.Sum256([]byte(initialState.Artifacts[i].Body)))
+		}
+	}
+	initialRaw, err = json.Marshal(&initialState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initialStore.CompareAndSwap(ctx, 42, initialVersion, initialRaw); err != nil {
+		t.Fatal(err)
+	}
+	initialSource := "Closes #42\n" + lease.DescriptionArtifacts(&initialState) + lease.DescriptionRetrieval(42, layout.StateRef(42))
+	if len(initialSource) < 60000 {
+		t.Fatal("initial projection source is not oversized")
+	}
+	issueBody, err := lease.ComposePRDescription("", "issue-description", initialSource, layout.StateRef(42), 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ghState.mu.Lock()
+	ghState.nextPR = 55
+	ghState.mu.Unlock()
+	_, negativeErr := bobTracker.CreateDraftPR(ctx, tracker.DraftPRRequest{Body: strings.Repeat("x", 60000), Head: "bob:" + bobBranch, Base: "main"})
+	var apiErr *api.HTTPError
+	if !errors.As(negativeErr, &apiErr) || apiErr.StatusCode != 422 {
+		t.Fatalf("strict fork negative control: %v", negativeErr)
+	}
+	initialPR, err := bobTracker.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: 42, Title: "Fork feature 42 (#42)", Body: issueBody, Head: "bob:" + bobBranch, Base: "main"})
+	if err != nil || initialPR.Number != 55 {
+		t.Fatalf("initial fork publication: %+v %v", initialPR, err)
+	}
+	ghState.mu.Lock()
+	ghState.prs[55].HeadSHA = aliceHead
 	ghState.mu.Unlock()
 
 	if _, err := bobGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "record-submission", IssueNumber: 42, ClaimID: stBob.Lease.ClaimID, PRNumber: 55}); !errors.Is(err, lease.ErrApprovalRequired) {
@@ -838,12 +905,8 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	if _, err := store.CompareAndSwap(ctx, 42, version, raw); err != nil {
 		t.Fatal(err)
 	}
-	issueBody, err := lease.ComposePRDescription("Human prefix é\n", "issue-description", "Closes #42\n"+lease.DescriptionSlot(strings.Repeat("issue plan 计划\n", 10000))+lease.DescriptionRetrieval(42, layout.StateRef(42)), layout.StateRef(42), 42)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ghState.mu.Lock()
-	ghState.prs[55].Body = issueBody + "\nHuman footer 🙂\n\n"
+	ghState.prs[55].Body = "Human prefix é\n" + ghState.prs[55].Body + "\nHuman footer 🙂\n\n"
 	ghState.mu.Unlock()
 	stDone, err := applyBob(complete)
 	if err != nil {
@@ -856,8 +919,50 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		t.Fatal("composed fork body lost evidence or outside prose")
 	}
 	for _, name := range []string{"issue-description", "review-evidence", "rebase"} {
-		if strings.Count(composed, "<!-- swarm:"+name+":start -->") != 1 {
+		if strings.Count(composed, "<!-- swarm:"+name+":start -->") != 1 || strings.Count(composed, "<!-- swarm:"+name+":end -->") != 1 {
 			t.Fatal("missing fork projection", name)
+		}
+	}
+	// Insert bytes between both neighboring envelopes and project again.
+	betweenReview := "\nHuman issue/review 中文\n\n"
+	betweenRebase := "\nHuman review/rebase é🙂\n\n"
+	composed = strings.Replace(composed, "<!-- swarm:review-evidence:start -->", betweenReview+"<!-- swarm:review-evidence:start -->", 1)
+	composed = strings.Replace(composed, "<!-- swarm:rebase:start -->", betweenRebase+"<!-- swarm:rebase:start -->", 1)
+	if _, err := bobTracker.UpdateDraftPR(ctx, 55, initialPR.Title, composed); err != nil {
+		t.Fatal(err)
+	}
+	// Completed claims cannot replay the protocol operation. Rendering itself
+	// must still be stable for the exact authoritative completed state.
+	for i := 0; i < 2; i++ {
+		if err := prprojection.ProjectReviewEvidence(ctx, bobTracker, stDone, 55); err != nil {
+			t.Fatal(err)
+		}
+		if err := prprojection.ProjectRebase(ctx, bobTracker, stDone, 55); err != nil {
+			t.Fatal(err)
+		}
+		ghState.mu.Lock()
+		repeated := ghState.prs[55].Body
+		ghState.mu.Unlock()
+		if !strings.Contains(repeated, betweenReview) || !strings.Contains(repeated, betweenRebase) {
+			t.Fatal("fork inter-section bytes changed")
+		}
+		if i > 0 && repeated != composed {
+			t.Fatal("fork repeated projection changed bytes")
+		}
+		composed = repeated
+	}
+	ghState.mu.Lock()
+	snapshots := append([]string(nil), ghState.descriptionBodies...)
+	ghState.mu.Unlock()
+	if len(snapshots) < 4 || snapshots[0] != issueBody {
+		t.Fatal("initial published issue body or lifecycle requests missing", len(snapshots))
+	}
+	for i, body := range snapshots {
+		if !utf8.ValidString(body) || len(body) >= 60000 {
+			t.Fatal("invalid fork request", i)
+		}
+		if i > 0 && (!strings.HasPrefix(body, "Human prefix é\n") || !strings.Contains(body, "\nHuman footer 🙂\n\n")) {
+			t.Fatal("human spans changed in fork request", i)
 		}
 	}
 	if stDone.PRRevision != nil || stDone.HeadSHA != revHead || stDone.Lease.Status != "completed" || stDone.PRNumber != 55 {

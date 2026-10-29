@@ -146,6 +146,13 @@ func (w *limitedWriter) Write(p []byte) (int, error) {
 // Output runs a coordinator command and sanitizes failure diagnostics. Successful
 // object contents are returned byte-for-byte so policy digests remain stable.
 func Output(ctx context.Context, root string, args ...string) ([]byte, error) {
+	if IsNetwork(args) {
+		out, err := Network(ctx, root, false, args...)
+		if err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
 	cmd, redact, err := Command(ctx, root, args...)
 	if err != nil {
 		return nil, err

@@ -705,9 +705,14 @@ func runGitWithToken(ctx context.Context, dir string, args ...string) (string, e
 	if err != nil {
 		return "", err
 	}
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	if gitcredential.IsNetwork(args) {
+		out, err = gitcredential.Network(ctx, dir, true, args...)
+	} else {
+		out, err = cmd.CombinedOutput()
+	}
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, redact(strings.TrimSpace(string(out))))
+		return "", fmt.Errorf("git %s: %w: %s", redact(strings.Join(args, " ")), err, redact(strings.TrimSpace(string(out))))
 	}
 	return redact(strings.TrimSpace(string(out))), nil
 }

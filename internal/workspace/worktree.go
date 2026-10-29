@@ -636,14 +636,29 @@ func gitOutput(repoRoot string, args ...string) (string, error) {
 	return gitOutputContext(context.Background(), repoRoot, args...)
 }
 
+// gitOutputError preserves both the workspace sentinel and typed Git cause while
+// displaying only sanitized diagnostics.
+type gitOutputError struct {
+	message string
+	cause   error
+}
+
+func (e *gitOutputError) Error() string   { return e.message }
+func (e *gitOutputError) Unwrap() []error { return []error{errGitFailed, e.cause} }
+
 func gitOutputContext(ctx context.Context, repoRoot string, args ...string) (string, error) {
 	cmd, redact, err := gitcredential.Command(ctx, repoRoot, args...)
 	if err != nil {
-		return "", err
+		return "", &gitOutputError{message: "git command failed: command setup failed", cause: err}
 	}
-	out, err := cmd.CombinedOutput()
+	var out []byte
+	if gitcredential.IsNetwork(args) {
+		out, err = gitcredential.Network(ctx, repoRoot, true, args...)
+	} else {
+		out, err = cmd.CombinedOutput()
+	}
 	if err != nil {
-		return "", fmt.Errorf("%w: git %s: %s", errGitFailed, strings.Join(args, " "), redact(strings.TrimSpace(normalizeGitOutput(string(out)))))
+		return "", &gitOutputError{message: fmt.Sprintf("%s: git %s: %s: %s", errGitFailed, redact(strings.Join(args, " ")), redact(strings.TrimSpace(normalizeGitOutput(string(out)))), redact(err.Error())), cause: err}
 	}
 	return redact(string(out)), nil
 }

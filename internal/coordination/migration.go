@@ -99,7 +99,10 @@ func (s *GitStore) MigrateLedgerRefs(ctx context.Context, now time.Time, dryRun 
 	if beforeMigrationPush != nil {
 		beforeMigrationPush()
 	}
-	if _, err := s.run(ctx, "", push...); err != nil {
+	if err := s.push(ctx, push...); err != nil {
+		if publicationStatus(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("%w: atomic ledger migration rejected; no refs changed: %v", ErrConflict, err)
 	}
 	return report, nil

@@ -74,13 +74,16 @@ func Network(ctx context.Context, root string, combined bool, args ...string) ([
 	if !IsNetwork(args) {
 		return nil, errors.New("not a Git network operation")
 	}
-	op := args[0]
+	return network(ctx, root, combined, func(ctx context.Context) (*exec.Cmd, func(string) string, error) { return Command(ctx, root, args...) }, args[0])
+}
+
+func network(ctx context.Context, root string, combined bool, command func(context.Context) (*exec.Cmd, func(string) string, error), op string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("git %s not started: %w", op, err)
 	}
 	bounded, cancel := context.WithTimeout(ctx, networkTimeout)
 	defer cancel()
-	cmd, redact, err := Command(bounded, root, args...)
+	cmd, redact, err := command(bounded)
 	if err != nil {
 		return nil, err
 	}

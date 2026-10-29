@@ -52,6 +52,7 @@ func TestGatewayIgnoresMismatchedOrEditedResults(t *testing.T) {
 		"old comment":     func(_ *ForkResult, c *tracker.Comment) { c.ID = 99 },
 		"edited":          func(_ *ForkResult, c *tracker.Comment) { c.UpdatedAt = now.Add(time.Second) },
 		"untrusted actor": func(_ *ForkResult, c *tracker.Comment) { c.Author = "attacker" },
+		"read PAT holder": func(_ *ForkResult, c *tracker.Comment) { c.Author = "verification-pat-holder"; c.AuthorType = "User" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			res := ForkResult{Version: 1, RequestID: 100, IssueNumber: 1, Operation: "acquire", Success: false, Error: "forged rejection"}

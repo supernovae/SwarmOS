@@ -313,3 +313,13 @@ Contributors can come into a SwarmOS task, finish it, and leave, and the rest of
 - **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — End-to-end maintainer playbook for roadmap decomposition, backlog scanning, and PR auditing.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure validation checks, and manage Issue Forms.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Interactive `swarm issue stage` workflows, handoffs, and multi-repo worker pools.
+
+### Optional fork verification credential
+
+The fork coordinator can use the Actions secret `SWARM_GITHUB_FORK_READ_TOKEN`
+for contributor-fork metadata and Git reads after default-token admission. It
+has no role in the global token precedence above: upstream writes and result
+comments retain the default Actions identity. Leave it unset to retain default
+read behavior; a selected credential that fails verification has no fallback.
+See [fork read access](fork-mode.md#read-access-to-contributor-forks) for Metadata
+and Contents permissions, resource-owner coverage, and organization authorization.

@@ -79,6 +79,9 @@ type Coordinator struct {
 	UpstreamRemote  string
 	Tracker         tracker.Tracker
 	NowFn           func() time.Time
+	InitForkReader  func() (func(context.Context, string, string) (string, error), func(context.Context, string, string, string) (string, error), error)
+	forkRead        func(context.Context, string, string, string) (string, error)
+	verifyRead      func(context.Context, string, string) (string, error)
 	ForkGitURLFunc  func(forkRepo string) string
 	VerifyForkFunc  func(ctx context.Context, forkSlug, expectedOwner string) (string, error)
 	DefaultBaseFunc func(repoRoot string) (string, error)
@@ -107,6 +110,9 @@ func (c *Coordinator) forkGitURL(forkRepo string) string {
 }
 
 func (c *Coordinator) verifyForkRepo(ctx context.Context, forkSlug, expectedOwner string) (string, error) {
+	if c.verifyRead != nil {
+		return c.verifyRead(ctx, forkSlug, expectedOwner)
+	}
 	if c.VerifyForkFunc != nil {
 		return c.VerifyForkFunc(ctx, forkSlug, expectedOwner)
 	}
@@ -228,6 +234,13 @@ func (c *Coordinator) HandleEvent(ctx context.Context, ev IssueCommentEvent) (*F
 		return &res, mismatchErr
 	}
 
+	if c.InitForkReader != nil {
+		verify, read, err := c.InitForkReader()
+		if err != nil {
+			return nil, err
+		}
+		c.verifyRead, c.forkRead = verify, read
+	}
 	updatedState, rev, opErr := c.executeRequest(ctx, apiComment.ID, actor, *req)
 	res := ForkResult{
 		Version:     1,
@@ -679,7 +692,16 @@ func (c *Coordinator) resolveDefaultBase() (string, error) {
 func (c *Coordinator) verifyForkCheckpointCommit(ctx context.Context, forkRepo, branch, headSHA, baseSHA string) error {
 	forkURL := c.forkGitURL(forkRepo)
 	ref := "refs/heads/" + branch
-	lsOut, err := runGitWithToken(ctx, c.RepoRoot, "ls-remote", "--refs", forkURL, ref)
+	read := func(op, value string) (string, error) {
+		if c.forkRead != nil {
+			return c.forkRead(ctx, forkRepo, op, value)
+		}
+		if op == "ls-remote" {
+			return runGitWithToken(ctx, c.RepoRoot, op, "--refs", forkURL, ref)
+		}
+		return runGitWithToken(ctx, c.RepoRoot, op, "--no-write-fetch-head", forkURL, value)
+	}
+	lsOut, err := read("ls-remote", branch)
 	if err != nil {
 		return fmt.Errorf("query fork branch %s on %s: %w", branch, forkRepo, err)
 	}
@@ -691,7 +713,7 @@ func (c *Coordinator) verifyForkCheckpointCommit(ctx context.Context, forkRepo, 
 		}
 		return fmt.Errorf("fork branch %s on %s resolves to %q, want %q", branch, forkRepo, got, headSHA)
 	}
-	if _, err := runGitWithToken(ctx, c.RepoRoot, "fetch", "--no-write-fetch-head", forkURL, headSHA); err != nil {
+	if _, err := read("fetch", headSHA); err != nil {
 		return fmt.Errorf("fetch fork commit %s from %s: %w", headSHA, forkRepo, err)
 	}
 	if _, err := runGitWithToken(ctx, c.RepoRoot, "merge-base", "--is-ancestor", baseSHA, headSHA); err != nil {

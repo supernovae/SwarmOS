@@ -507,6 +507,19 @@ func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
 	if job.Steps[1].With["persist-credentials"] != false {
 		t.Fatalf("checkout step must set persist-credentials: false, got %+v", job.Steps[1].With)
 	}
+	for i, step := range job.Steps {
+		value := step.Env["SWARM_GITHUB_FORK_READ_TOKEN"]
+		if i == 4 {
+			if value != "${{ secrets.SWARM_GITHUB_FORK_READ_TOKEN }}" {
+				t.Fatal("missing execute-only read credential")
+			}
+		} else if value != "" {
+			t.Fatal("read credential exposed before admission")
+		}
+	}
+	if job.Steps[4].Env["SWARM_GITHUB_TOKEN"] != "${{ secrets.GITHUB_TOKEN }}" {
+		t.Fatal("writer credential changed")
+	}
 	if job.Steps[3].Env["SWARM_VERSION"] != pin {
 		t.Fatalf("install step SWARM_VERSION = %q, want %q", job.Steps[3].Env["SWARM_VERSION"], pin)
 	}

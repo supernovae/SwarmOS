@@ -4,14 +4,21 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
+	"net/http"
+	"net/http/cgi"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/testutil/gittransport"
 )
@@ -518,5 +525,116 @@ func TestNetworkReadErrorsOnEachPipe(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// The unexported destination seam runs real Git against an authenticated local
+// smart-HTTP server; production ForkRead constructs HTTPS destinations only.
+func TestForkReadRealAuthenticatedGit(t *testing.T) {
+	root := gitfixture.Init(t, "")
+	gitfixture.Run(t, root, "commit", "--allow-empty", "-m", "fixture")
+	sha := strings.TrimSpace(gitfixture.Run(t, root, "rev-parse", "HEAD"))
+	gitfixture.Run(t, root, "branch", "-M", "main")
+	gitfixture.Run(t, root, "config", "http.receivepack", "false")
+	parent := filepath.Dir(root)
+	name := filepath.Base(root)
+	const token = "selected-read-sentinel"
+	var requests atomic.Int32
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("local HTTP transport unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Header.Get("Authorization") != "basic "+basicAuth(token) {
+			t.Error("unexpected authentication")
+			w.WriteHeader(401)
+			return
+		}
+		handler := &cgi.Handler{Path: "/usr/bin/git", Args: []string{"http-backend"}, Env: []string{"GIT_PROJECT_ROOT=" + parent, "GIT_HTTP_EXPORT_ALL=1"}}
+		handler.ServeHTTP(w, r)
+	})}}
+	server.Start()
+	defer server.Close()
+	destination := server.URL + "/" + name
+	target := gitfixture.Init(t, "")
+	out, err := forkRead(context.Background(), target, destination, token, "ls-remote", "main")
+	if err != nil || !strings.Contains(string(out), sha) {
+		t.Fatalf("lookup: %s %v", out, err)
+	}
+	if _, err := forkRead(context.Background(), target, destination, token, "fetch", sha); err != nil {
+		t.Fatal(err)
+	}
+	gitfixture.Run(t, target, "cat-file", "-e", sha)
+	if requests.Load() < 2 {
+		t.Fatal("missing authenticated requests")
+	}
+	if _, err := os.Stat(filepath.Join(target, ".git", "FETCH_HEAD")); !os.IsNotExist(err) {
+		t.Fatal("fetch persisted FETCH_HEAD")
+	}
+}
+
+func TestSelectedForkReadUsesBoundedEngine(t *testing.T) {
+	networkBudgets(t)
+	root := t.TempDir()
+	helper := filepath.Join(root, "git")
+	if err := testutil.WriteExecutable(helper, []byte("#!/bin/sh\nif [ \"$1\" = config ]; then exit 1; fi\nexec sleep 30\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SWARM_GITHUB_TOKEN", "writer-sentinel")
+	t.Setenv(TokenCommandEnv, "/nonexistent/no-writer-credential-command")
+	t.Setenv("SWARM_GITHUB_FORK_READ_TOKEN", "read-sentinel")
+	var run *networkRun
+	lastRun = func(r *networkRun) { run = r }
+	t.Cleanup(func() { assertSettled(t, run); lastRun = nil })
+	start := time.Now()
+	_, err := ForkRead(context.Background(), root, "github.com", "alice/repo", "read-sentinel", "ls-remote", "main")
+	if !errors.Is(err, ErrInterrupted) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("classification: %v", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatal("unbounded selected read")
+	}
+	if run == nil {
+		t.Fatal("shared runner not used")
+	}
+	for _, entry := range run.cmd.Env {
+		if strings.Contains(entry, "writer-sentinel") || strings.HasPrefix(entry, "SWARM_GITHUB_FORK_READ_TOKEN=") {
+			t.Fatal("raw credential in read child")
+		}
+	}
+	if strings.Contains(strings.Join(run.cmd.Args, " "), "sentinel") {
+		t.Fatal("credential in argv")
+	}
+}
+
+func TestSelectedForkReadRetainsKnownResultWithHeldPipe(t *testing.T) {
+	networkBudgets(t)
+	root := t.TempDir()
+	done := filepath.Join(root, "holder-done")
+	helper := filepath.Join(root, "git")
+	if err := testutil.WriteExecutable(helper, []byte("#!/bin/sh\nif [ \"$1\" = config ]; then exit 1; fi\n(sleep 1; touch \"$FORK_READ_HOLDER_DONE\") &\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FORK_READ_HOLDER_DONE", done)
+	t.Cleanup(func() {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(done); err == nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Error("held-pipe fixture did not finish")
+	})
+	_, err := ForkRead(context.Background(), root, "github.com", "alice/repo", "read-sentinel", "ls-remote", "main")
+	var known *KnownResultCleanupError
+	if !errors.As(err, &known) || known.ExitCode != 0 || !errors.Is(err, ErrCleanupIncomplete) || errors.Is(err, ErrInterrupted) {
+		t.Fatalf("lost known outcome: %v", err)
 	}
 }

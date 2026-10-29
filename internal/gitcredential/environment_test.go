@@ -196,3 +196,47 @@ func TestMergeTreeConfigurationBudgetFailsClosed(t *testing.T) {
 		t.Fatal("oversized driver configuration allowed inspection")
 	}
 }
+
+func TestForkReadRejectsUnsafeRequests(t *testing.T) {
+	for _, tc := range []struct{ host, slug, op, value string }{
+		{"github.com", "alice/repo", "push", "main"}, {"github.com", "alice/repo", "fetch", "HEAD"}, {"github.com", "alice/repo", "ls-remote", "-x"}, {"github.com", "alice/repo", "ls-remote", "main:other"}, {"github.com", "alice/../repo", "fetch", strings.Repeat("a", 40)}, {"evil:443", "alice/repo", "fetch", strings.Repeat("a", 40)}, {"github.com", "alice/repo?x", "ls-remote", "main"},
+	} {
+		if _, err := ForkRead(context.Background(), t.TempDir(), tc.host, tc.slug, "sentinel", tc.op, tc.value); err == nil {
+			t.Errorf("accepted %+v", tc)
+		}
+	}
+}
+func TestForkReadRejectsRepositoryTransportOverrides(t *testing.T) {
+	for _, key := range []string{"url.https://evil/.insteadOf", "http.extraHeader", "credential.helper", "http.followRedirects", "include.path", "fetch.recurseSubmodules", "core.alternateRefsCommand", "remote.https://github.com/alice/repo.git.url"} {
+		t.Run(key, func(t *testing.T) {
+			root := t.TempDir()
+			cmd := exec.Command("git", "init", root)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("init: %s %v", out, err)
+			}
+			cmd = exec.Command("git", "-C", root, "config", key, "hostile")
+			if err := cmd.Run(); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ForkRead(context.Background(), root, "github.com", "alice/repo", "sentinel", "ls-remote", "main")
+			if err == nil || !strings.Contains(err.Error(), "configuration") {
+				t.Fatalf("override not rejected: %v", err)
+			}
+		})
+	}
+}
+func TestNormalGitScrubsForkReadTokenWithoutWriter(t *testing.T) {
+	for _, name := range []string{"SWARM_GITHUB_TOKEN", "SWARM_GITHUB_TOKEN_COMMAND", "GH_TOKEN", "GITHUB_TOKEN"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("SWARM_GITHUB_FORK_READ_TOKEN", "read-only-sentinel")
+	cmd := exec.Command("git", "version")
+	if _, err := Configure(cmd); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range cmd.Env {
+		if strings.Contains(entry, "read-only-sentinel") || strings.HasPrefix(entry, "SWARM_GITHUB_FORK_READ_TOKEN=") {
+			t.Fatal("read credential inherited")
+		}
+	}
+}

@@ -978,3 +978,72 @@ func escapeRefPath(ref string) string {
 	}
 	return strings.Join(segments, "/")
 }
+
+// ForkReader exposes only the existing fork verification GET, independently of
+// the tracker used for admission and all upstream mutations.
+type ForkReader struct{ tracker *GitHubTracker }
+
+func NewForkReader(upstream, host, token string) (*ForkReader, error) {
+	return newForkReader(upstream, host, token, http.DefaultTransport)
+}
+func newForkReader(upstream, host, token string, transport http.RoundTripper) (*ForkReader, error) {
+	if token == "" {
+		return nil, errors.New("empty fork read credential")
+	}
+	parts := strings.Split(upstream, "/")
+	if len(parts) != 2 {
+		return nil, errors.New("invalid upstream repository")
+	}
+	client, err := api.NewRESTClient(api.ClientOptions{Host: host, APIHost: forkAPIHost(host), AuthToken: token, Transport: transport, LogIgnoreEnv: true, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+	if err != nil {
+		return nil, errors.New("cannot initialize fork verification reader")
+	}
+	return &ForkReader{tracker: NewGitHubTrackerWithClient(parts[0], parts[1], client)}, nil
+}
+func forkAPIHost(host string) string {
+	if host == "github.com" {
+		return "api.github.com"
+	}
+	return host
+}
+func (r *ForkReader) VerifyForkRepository(ctx context.Context, slug, owner string, push bool) (string, error) {
+	if push || !validForkSlug(slug) {
+		return "", errors.New("invalid fork read request")
+	}
+	canonical, err := r.tracker.VerifyForkRepository(ctx, slug, owner, false)
+	if err != nil {
+		var status *api.HTTPError
+		if errors.As(err, &status) {
+			switch status.StatusCode {
+			case 401:
+				return "", errors.New("fork verification credential is invalid or expired")
+			case 403:
+				return "", errors.New("fork verification access restricted by permissions, policy, SSO or rate limits")
+			case 404:
+				return "", errors.New("fork repository unavailable or inaccessible")
+			}
+		}
+		return "", errors.New("fork repository verification failed")
+	}
+	if !validForkSlug(canonical) || !strings.EqualFold(canonical, slug) {
+		return "", errors.New("fork canonical repository mismatch")
+	}
+	return canonical, nil
+}
+func validForkSlug(slug string) bool {
+	parts := strings.Split(slug, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || strings.Contains(part, "..") {
+			return false
+		}
+		for _, r := range part {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+				return false
+			}
+		}
+	}
+	return true
+}

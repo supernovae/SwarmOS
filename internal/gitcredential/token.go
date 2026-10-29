@@ -41,6 +41,7 @@ var runTokenCommand = func(ctx context.Context, command string) ([]byte, error) 
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", command)
 	}
+	cmd.Env = withoutForkReadToken(os.Environ())
 	var out bytes.Buffer
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, &limitedWriter{dst: &out, remaining: tokenCommandMaxBytes}, os.Stderr
 	cmd.WaitDelay = time.Second
@@ -109,4 +110,16 @@ func resetTokenCache() {
 	tokenMu.Lock()
 	defer tokenMu.Unlock()
 	tokenCached, tokenValue, tokenSource, tokenErr = false, "", "", nil
+}
+
+// The verification secret is never input to the upstream credential provider.
+func withoutForkReadToken(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(key, "SWARM_GITHUB_FORK_READ_TOKEN") {
+			out = append(out, entry)
+		}
+	}
+	return out
 }

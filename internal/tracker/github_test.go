@@ -655,3 +655,47 @@ func TestLocalListSubIssues(t *testing.T) {
 	}
 	assertOrder(a.Number, b.Number, c.Number)
 }
+
+func TestSelectedForkReaderAuthAndDenials(t *testing.T) {
+	for _, status := range []int{200, 401, 403, 404} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			calls := 0
+			reader, err := newForkReader("octo/swarm", "github.com", "read-sentinel", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.Method != "GET" || req.URL.Host != "api.github.com" || req.URL.Path != "/repos/alice/fork" || req.Header.Get("Authorization") != "token read-sentinel" {
+					t.Fatalf("incorrect scoped request: %s %s", req.Method, req.URL)
+				}
+				rec := httptest.NewRecorder()
+				if status == 200 {
+					writeJSON(t, rec, map[string]any{"full_name": "alice/fork", "fork": true, "owner": map[string]string{"login": "alice"}, "source": map[string]string{"full_name": "octo/swarm"}})
+				} else {
+					rec.WriteHeader(status)
+					fmt.Fprint(rec, "read-sentinel unsafe response")
+				}
+				response := rec.Result()
+				response.Request = req
+				return response, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			slug, err := reader.VerifyForkRepository(context.Background(), "alice/fork", "alice", false)
+			if status == 200 {
+				if err != nil || slug != "alice/fork" {
+					t.Fatalf("%s %v", slug, err)
+				}
+			} else if err == nil || strings.Contains(err.Error(), "sentinel") || strings.Contains(err.Error(), "unsafe") {
+				t.Fatalf("unsafe denial %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("fallback requests: %d", calls)
+			}
+			if _, err := reader.VerifyForkRepository(context.Background(), "alice/fork", "alice", true); err == nil {
+				t.Fatal("push admitted")
+			}
+			if calls != 1 {
+				t.Fatal("invalid operation made request")
+			}
+		})
+	}
+}

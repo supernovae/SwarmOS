@@ -469,6 +469,11 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		return ev
 	}
 
+	readerInitializations := 0
+	coord.InitForkReader = func() (func(context.Context, string, string) (string, error), func(context.Context, string, string, string) (string, error), error) {
+		readerInitializations++
+		return nil, nil, nil
+	}
 	aliceTracker := ghState.trackerForUser(t, "alice", "User")
 	bobTracker := ghState.trackerForUser(t, "bob", "User")
 
@@ -501,6 +506,22 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		t.Fatal("expected edited request comment to be rejected")
 	}
 
+	if readerInitializations != 0 {
+		t.Fatal("reader initialized for rejected requests")
+	}
+	// Selected reader initialization failure must abort before execution.
+	admitted, err := aliceTracker.CreateComment(ctx, 42, RequestMarker+"\n"+`{"version":1,"operation":"acquire","issue_number":42,"fork_repo":"alice/swarm"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldInit := coord.InitForkReader
+	coord.InitForkReader = func() (func(context.Context, string, string) (string, error), func(context.Context, string, string, string) (string, error), error) {
+		return nil, nil, fmt.Errorf("invalid selected credential")
+	}
+	if _, err := coord.HandleEvent(ctx, makeEvent(42, admitted)); err == nil || !strings.Contains(err.Error(), "invalid selected credential") {
+		t.Fatalf("reader denial ignored: %v", err)
+	}
+	coord.InitForkReader = oldInit
 	// 3. Alice acquires #42 via Gateway + Coordinator
 	aliceClone := filepath.Join(tmp, "alice-clone")
 	git(tmp, "clone", originBare, aliceClone)

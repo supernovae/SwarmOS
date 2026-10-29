@@ -318,6 +318,15 @@ The original pair is available as `.swarm/active/ORIGINAL_PLAN.md` and `ORIGINAL
 
 Changes are prepared in `.swarm/worktrees/pr-33`, separate from the original issue worktree. A new revision goes through planning and the configured review gate again. For a human gate, an independent maintainer approves the linked **issue's** plan with `swarm issue review-plan <issue> --approve`, then the worker resumes `swarm pr work <PR>`. Use the existing `--agent`, role-agent overrides, `--phase`, `--headless`, `--progress`, and `--json` flags as appropriate.
 
+If automatic plan retries are exhausted, an authorized independent upstream maintainer can request a revised plan on the linked issue. For example, for issue 42 linked to PR 99:
+
+```bash
+swarm issue review-plan 42 --reject --notes "Revise the plan"
+swarm pr work 99 --phase plan
+```
+
+The maintainer runs the first command upstream, outside `--fork`; the worker runs the second. Rejection resets the retry budget and requests revision; it does not approve implementation. Review the new reports through the configured gate. When human approval is required, an independent maintainer runs `swarm issue review-plan 42 --approve --notes "Reviewed revised reports"`. Approving the current reports is also an explicit maintainer recovery option. Agent approval of existing reports alone does not reset a consumed budget. In auto mode, workers can alternatively revise both reports and stage them in the managed PR worktree with `swarm pr stage 99 --phase plan`; agent mode disables manual staging. Fork staging preserves the count; maintainer human review or a changed approved WorkUnit revision resets it.
+
 For `plan_mode: interactive`, `swarm pr work <PR>` pauses at `awaiting-plan` after preparing `.swarm/worktrees/pr-<PR>`. Write `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` **in that PR worktree**, then run `swarm pr stage <PR> --phase plan --harness <name> --model <name>` (optionally `--handoff` or `--json`). Under an agent gate, resume with `swarm pr work <PR>` to review and implement; under a human gate, an independent maintainer uses `swarm issue review-plan <issue> --approve` before `swarm pr work <PR>` resumes implementation. Do not stage through `swarm issue stage` against the old issue worktree while the PR revision is pending.
 
 Alternatively, after the plan gate, make implementation changes in the managed PR worktree and run `swarm pr stage <PR> --phase implement --harness <name> --model <name>`. This records a local checkpoint and validates against the approved baseline; it does **not** publish the branch or change the submitted issue checkpoint. Inspect with `swarm pr status <PR>` and publish only with `swarm pr submit <PR>`. Staging requires the existing pending revision, a valid active issue claim, and upstream mutation authorization (or, with `--fork`, a claim on your own fork PR); it rejects rebases, diverged heads, and unrelated worktrees.

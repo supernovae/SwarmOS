@@ -3,9 +3,11 @@ package lease
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +258,11 @@ func TestPlanReplanTrustedPolicyModes(t *testing.T) {
 				if !errors.Is(err, ErrPlanReplanLimit) {
 					t.Fatal("approved zero limit ignored", err)
 				}
+				for _, decision := range []string{"--reject", "--approve"} {
+					if !strings.Contains(err.Error(), fmt.Sprintf("swarm issue review-plan %d %s", n, decision)) {
+						t.Fatal(err)
+					}
+				}
 				if mode == "agent" && strings.Contains(err.Error(), " stage ") {
 					t.Fatal("agent-only policy offered staging", err)
 				}
@@ -310,10 +317,78 @@ func TestPlanReplanPendingPRGuidance(t *testing.T) {
 	st.PlanReplanCount = 100
 	st.PRRevision = &PRRevision{Number: 37}
 	err := m.CheckPlanReplan(st)
-	if !errors.Is(err, ErrPlanReplanLimit) || !strings.Contains(err.Error(), "swarm pr work 37 --phase review") || strings.Contains(err.Error(), "issue review-plan") {
+	if !errors.Is(err, ErrPlanReplanLimit) || !strings.Contains(err.Error(), "swarm pr work 37 --phase review") {
 		t.Fatal(err)
 	}
 	if !strings.Contains(err.Error(), "swarm pr stage 37 --phase plan") {
 		t.Fatal(err)
+	}
+}
+
+func TestPlanReplanHumanGuidance(t *testing.T) {
+	t.Parallel()
+	m, issue, st := rejectedReplanFixture(t)
+	for _, fork := range []string{"", "contributor/repo"} {
+		for _, pr := range []bool{false, true} {
+			st.PlanReplanCount = 2
+			st.ForkRepo = fork
+			st.PRRevision = nil
+			if pr {
+				st.PRRevision = &PRRevision{Number: 37}
+			}
+			before := *st
+			err := m.CheckPlanReplan(st)
+			if !errors.Is(err, ErrPlanReplanLimit) {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				fmt.Sprintf("swarm issue review-plan %d --reject", issue),
+				fmt.Sprintf("swarm issue review-plan %d --approve", issue),
+				"request a revised plan", "does not approve implementation", "authorized independent upstream maintainer, outside --fork",
+				"edit and reapprove the WorkUnit", "manually revise both reports", "managed worktree",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("missing %q: %v", want, err)
+				}
+			}
+			if strings.Contains(err.Error(), "review-plan 37") || strings.Contains(err.Error(), "swarm --fork") {
+				t.Fatal(err)
+			}
+			if fork != "" && !strings.Contains(err.Error(), "fork staging preserves the count") {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, *st) {
+				t.Fatal("guidance changed state")
+			}
+		}
+	}
+}
+
+func TestPlanReplanIndependentHumanRefusal326(t *testing.T) {
+	t.Parallel()
+	m, _, issue, _ := reviewerPolicyManager(t, "  independent_review: true\n")
+	ctx := context.Background()
+	st, err := m.GetCurrentState(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := ReviewBindings(st)
+	meta["kind"] = "agent"
+	_, err = m.UpdateArtifact(ctx, issue.Number, "local-dev", contract.Artifact{Type: contract.ArtifactReview, Producer: "codex:reviewer", Summary: "review", Body: "VERDICT: CHANGES_REQUESTED", Verdict: "CHANGES_REQUESTED", Metadata: meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := m.UpdatePhase(ctx, issue.Number, "local-dev", "plan", "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, verdict := range []string{"CHANGES_REQUESTED", "APPROVED"} {
+		if _, err := m.RecordHumanReview(ctx, issue.Number, verdict, "self decision"); !errors.Is(err, ErrApprovalRequired) {
+			t.Fatal(err)
+		}
+		after, err := m.GetCurrentState(ctx, issue.Number)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatal("self decision changed state", err)
+		}
 	}
 }

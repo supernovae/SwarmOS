@@ -3,6 +3,11 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -101,12 +106,35 @@ func TestIssue102LocalApprovalMatrix(t *testing.T) {
 			}
 			f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
 			before := f.state(t, number)
+			stateBefore, err := json.Marshal(before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refsBefore := prGit(t, f.root, "show-ref")
+			wt := workspace.WorktreePath(f.root, number)
+			headBefore := prGit(t, wt, "rev-parse", "HEAD")
+			trackerPath := filepath.Join(f.root, ".swarm/local-tracker/state.json")
+			trackerBefore, err := os.ReadFile(trackerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
 			for _, base := range []string{"", "different-102"} {
 				if out, err := f.run("issue", "submit", n, "--base", base); err == nil || !strings.Contains(err.Error(), "approved branch") {
 					t.Fatalf("mismatch accepted: %v %s", err, out)
 				}
 			}
 			after := f.state(t, number)
+			stateAfter, err := json.Marshal(after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			trackerAfter, err := os.ReadFile(trackerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(stateBefore) != string(stateAfter) || string(trackerBefore) != string(trackerAfter) || refsBefore != prGit(t, f.root, "show-ref") || headBefore != prGit(t, wt, "rev-parse", "HEAD") {
+				t.Fatal("base mismatch changed state, projections, refs or checkpoint")
+			}
 			if after.PRNumber != 0 || after.HeadSHA != before.HeadSHA {
 				t.Fatal("mismatch published")
 			}
@@ -204,5 +232,296 @@ func TestIssue102PRTracksReleaseNotDefault(t *testing.T) {
 	}
 	if out, err := f.run("pr", "rebase", strconv.Itoa(number)); err == nil || !strings.Contains(err.Error(), "approve") {
 		t.Fatalf("rebase ignored moved release: %v %s", err, out)
+	}
+}
+
+func TestTester102ExplicitTargetGrantRoundTrip(t *testing.T) {
+	for _, scenario := range []string{"main", "release", "override", "unset"} {
+		t.Run(scenario, func(t *testing.T) {
+			setup := func(f *cliFixture) {
+				if scenario == "unset" {
+					return
+				}
+				path := filepath.Join(f.root, ".swarm/config.yaml")
+				original, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				target := scenario
+				if scenario == "override" {
+					target = "release"
+				}
+				if target == "release" {
+					gitRun(t, f.root, "checkout", "-b", "release")
+					gitRun(t, f.root, "commit", "--allow-empty", "-m", "distinct release tip")
+					gitRun(t, f.root, "checkout", "main")
+				}
+				if err := os.WriteFile(path, append([]byte("base_branch: "+target+"\n"), original...), 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitRun(t, f.root, "add", ".swarm/config.yaml")
+				gitRun(t, f.root, "commit", "-m", "trusted target selection")
+			}
+			var f *cliFixture
+			var issue, pr int
+			var base string
+			if scenario != "override" {
+				f, issue, pr, base, _ = harnessGrantFixture(t, setup)
+			} else {
+				f = newCLIFixture(t)
+				setup(f)
+				issue = f.create(t, "agent")
+				iss, err := f.tracker.GetIssue(context.Background(), issue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.tracker.UpdateIssueBody(context.Background(), issue, iss.Body+"\n### Base Branch\n\nrelease\n\n### Allow Harness Changes\n\ntrue\n"); err != nil {
+					t.Fatal(err)
+				}
+				// Make the default selection conflict with the explicit WorkUnit target.
+				path := filepath.Join(f.root, ".swarm/config.yaml")
+				b, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(strings.Replace(string(b), "base_branch: release", "base_branch: main", 1)), 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitRun(t, f.root, "add", ".swarm/config.yaml")
+				gitRun(t, f.root, "commit", "-m", "conflicting default selection")
+				n := strconv.Itoa(issue)
+				f.must(t, "issue", "approve", n)
+				f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf '# approved harness edit\\n' >> .swarm/validation/required-checks.yaml")
+				f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+				f.must(t, "issue", "submit", n, "--base", "release")
+				st := f.state(t, issue)
+				pr, base = st.PRNumber, st.BaseSHA
+				gitRun(t, f.root, "checkout", "--detach", st.SubmittedHeadSHA)
+			}
+			expected := scenario
+			if scenario == "unset" {
+				expected = ""
+			}
+			if scenario == "override" {
+				expected = "release"
+			}
+			if st := f.state(t, issue); st.BaseBranch != expected || st.BaseSHA != base {
+				t.Fatalf("wrong authoritative target: %+v", st)
+			}
+			state := f.state(t, issue)
+			if scenario != "override" && state.BaseBranch != "" {
+				iss, err := f.tracker.GetIssue(context.Background(), issue)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wu, err := contract.ParseWorkUnitFromIssue(issue, iss.Title, iss.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if wu.BaseBranch != "" {
+					t.Fatal("repository target was not inherited")
+				}
+			}
+			if scenario == "release" || scenario == "override" {
+				if base == gitRun(t, f.root, "rev-parse", "refs/heads/main") || base != gitRun(t, f.root, "rev-parse", "refs/heads/release") {
+					t.Fatal("release did not pin distinct tip")
+				}
+				wt := workspace.WorktreePath(f.root, issue)
+				if got := gitRun(t, wt, "merge-base", "HEAD", base); got != base {
+					t.Fatal("worktree not based on approved release")
+				}
+				cfg, err := harness.LoadConfigAt(f.root, base)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cfg.BaseBranch != "" {
+					t.Fatal("target policy was redirected by default config")
+				}
+			}
+			createdPR, err := f.tracker.GetPullRequest(context.Background(), pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := expected
+			if target == "" {
+				target = "main"
+			}
+			if createdPR.Base != target {
+				t.Fatalf("published target %q want %q", createdPR.Base, target)
+			}
+			gitRun(t, f.root, "branch", "same-tip", base)
+			grant := filepath.Join(t.TempDir(), "grant.json")
+			f.must(t, "repo", "validate", "--base", base, "--issue", strconv.Itoa(issue), "--pr", strconv.Itoa(pr), "--grant-only", "--grant-file", grant)
+			data, err := os.ReadFile(grant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(data, &fields); err != nil {
+				t.Fatal(err)
+			}
+			var recorded string
+			if raw := fields["base_branch"]; raw != nil {
+				if err := json.Unmarshal(raw, &recorded); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Check consumption first so the old reader reproduces the policy mismatch.
+			if err := os.RemoveAll(filepath.Join(f.root, ".swarm/coordination")); err != nil {
+				t.Fatal(err)
+			}
+			out := f.must(t, "repo", "validate", "--base", base, "--grant-file", grant)
+			if !strings.Contains(out, "NOTE protected changes authorized") || !strings.Contains(out, "PASS git-available") {
+				t.Fatalf("grant not accepted: %s", out)
+			}
+			if recorded != expected {
+				t.Fatalf("recorded branch %q want %q", recorded, expected)
+			}
+			for _, mutation := range []string{"drop", "clear", "swap", "invalid"} {
+				t.Run(mutation, func(t *testing.T) {
+					var copy map[string]json.RawMessage
+					if err := json.Unmarshal(data, &copy); err != nil {
+						t.Fatal(err)
+					}
+					switch mutation {
+					case "drop":
+						delete(copy, "base_branch")
+					case "clear":
+						copy["base_branch"] = json.RawMessage(`""`)
+					case "swap":
+						copy["base_branch"] = json.RawMessage(`"same-tip"`)
+					case "invalid":
+						copy["base_branch"] = json.RawMessage(`"refs/tags/v1"`)
+					}
+					if scenario == "unset" && (mutation == "drop" || mutation == "clear") {
+						return
+					}
+					raw, err := json.Marshal(copy)
+					if err != nil {
+						t.Fatal(err)
+					}
+					path := filepath.Join(t.TempDir(), "tampered.json")
+					if err := os.WriteFile(path, raw, 0600); err != nil {
+						t.Fatal(err)
+					}
+					out, err := f.run("repo", "validate", "--base", base, "--grant-file", path)
+					if err == nil || !strings.Contains(out, "NOTE harness grant ignored") {
+						t.Fatalf("tamper accepted: %v %s", err, out)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestIssue102LegacyGrantGolden(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "grant.json")
+	record := &harnessGrantRecord{Verdict: "granted", Issue: 102, PR: 7, Base: "base", CandidateHead: "head", ApprovedBase: "approved", TaskDigest: "task", PolicyDigest: "policy", PolicyTreeDigest: "tree"}
+	if err := writeHarnessGrantFile(path, record); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{
+  "verdict": "granted",
+  "issue": 102,
+  "pr": 7,
+  "base": "base",
+  "candidate_head": "head",
+  "approved_base": "approved",
+  "task_digest": "task",
+  "policy_digest": "policy",
+  "policy_tree_digest": "tree",
+  "work_unit": null
+}
+`
+	if string(b) != want {
+		t.Fatalf("legacy grant bytes changed: %s", b)
+	}
+}
+
+type issue102LateRetargetTracker struct {
+	tracker.Tracker
+	reads int
+}
+
+func (tr *issue102LateRetargetTracker) GetPullRequest(ctx context.Context, n int) (*tracker.PullRequest, error) {
+	pr, err := tr.Tracker.GetPullRequest(ctx, n)
+	tr.reads++
+	if err == nil && tr.reads == 2 {
+		copy := *pr
+		copy.Base = "main"
+		return &copy, nil
+	}
+	return pr, err
+}
+
+func TestIssue102ExplicitReleaseReapprovalAndRebase(t *testing.T) {
+	for _, lateRetarget := range []bool{false, true} {
+		t.Run(strconv.FormatBool(lateRetarget), func(t *testing.T) {
+			f, issue, number := submittedPRFixture(t, "none", func(f *cliFixture) {
+				path := filepath.Join(f.root, ".swarm/config.yaml")
+				b, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, append([]byte("base_branch: release\n"), b...), 0600); err != nil {
+					t.Fatal(err)
+				}
+				prGit(t, f.root, "add", ".swarm/config.yaml")
+				prGit(t, f.root, "commit", "-m", "release policy")
+				prGit(t, f.root, "branch", "release")
+			})
+			before := f.state(t, issue)
+			prGit(t, f.root, "checkout", "release")
+			prGit(t, f.root, "commit", "--allow-empty", "-m", "release advanced")
+			target := prGit(t, f.root, "rev-parse", "HEAD")
+			prGit(t, f.root, "checkout", "main")
+			pr, err := f.tracker.GetPullRequest(context.Background(), number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager := f.manager
+			if lateRetarget {
+				manager = lease.NewManager(&issue102LateRetargetTracker{Tracker: f.tracker}, contract.SecurityConfig{})
+				manager.SetStore(f.root, f.manager.Store())
+			}
+			st, err := manager.ReapproveRebase(context.Background(), issue, number, before.BaseSHA, target, pr.HeadSHA)
+			if lateRetarget {
+				if err == nil || !strings.Contains(err.Error(), "approved branch") {
+					t.Fatalf("late retarget accepted: %v", err)
+				}
+				after := f.state(t, issue)
+				b, e := json.Marshal(before)
+				if e != nil {
+					t.Fatal(e)
+				}
+				a, e := json.Marshal(after)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if string(a) != string(b) {
+					t.Fatal("late retarget changed authoritative state")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := harness.LoadConfigAt(f.root, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.BaseBranch != "release" || st.BaseSHA != target || st.PolicyDigest != contract.DigestApprovedBranchPolicy(target, cfg, "release") {
+				t.Fatalf("wrong reapproval: %+v", st)
+			}
+			f.must(t, "pr", "rebase", strconv.Itoa(number))
+			result := readPROutcome(t, f.must(t, "pr", "status", strconv.Itoa(number), "--json"))
+			if result.PR.Base != "release" || result.PR.BaseSHA != target {
+				t.Fatalf("wrong status: %+v", result.PR)
+			}
+		})
 	}
 }

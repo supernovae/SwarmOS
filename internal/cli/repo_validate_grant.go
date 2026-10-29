@@ -34,6 +34,7 @@ type harnessGrantRecord struct {
 	PolicyDigest     string             `json:"policy_digest"`
 	PolicyTreeDigest string             `json:"policy_tree_digest"`
 	WorkUnit         *contract.WorkUnit `json:"work_unit"`
+	BaseBranch       string             `json:"base_branch,omitempty"`
 }
 
 // harnessGrantCandidate resolves the trusted base and the pull request head.
@@ -111,7 +112,7 @@ func resolveHarnessGrant(ctx context.Context, options *RootOptions, cmd *cobra.C
 		return nil, err
 	}
 	return &harnessGrantRecord{Verdict: harnessGrantVerdict, Issue: issue, PR: pr, Base: base, CandidateHead: head, ApprovedBase: st.BaseSHA,
-		TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, PolicyTreeDigest: tree, WorkUnit: unit}, nil
+		TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, PolicyTreeDigest: tree, WorkUnit: unit, BaseBranch: st.BaseBranch}, nil
 }
 
 // readHarnessGrantFile returns the WorkUnit of a grant recorded by the CI
@@ -161,8 +162,11 @@ func readHarnessGrantFile(ctx context.Context, root, path, base string) (*contra
 	if err != nil || !contained {
 		return refuse("approved base is not an ancestor of the CI base")
 	}
+	if err := contract.ValidateBaseBranch(record.BaseBranch); err != nil {
+		return refuse("grant file has an invalid base branch")
+	}
 	cfg, err := harness.LoadConfigAt(root, base)
-	if err != nil || contract.DigestApprovedPolicy(record.ApprovedBase, cfg) != record.PolicyDigest {
+	if err != nil || contract.DigestApprovedBranchPolicy(record.ApprovedBase, cfg, record.BaseBranch) != record.PolicyDigest {
 		return refuse("policy digest differs from the verified grant")
 	}
 	return wu, nil

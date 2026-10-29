@@ -115,3 +115,37 @@ func TestIssue102ExternalWorkUnit(t *testing.T) {
 		t.Fatalf("external field lost: %v", err)
 	}
 }
+
+// Constants follow the pre-target field layout and SHA-256(base + NUL +
+// SHA-256(config JSON)); they do not call branch-aware helpers to derive wants.
+func TestIssue102LegacyFixedGoldens(t *testing.T) {
+	cfg := &SwarmConfig{Version: 1, DefaultAgent: "mock", DefaultGate: GateNone, Lease: LeaseConfig{Duration: "1h"}}
+	const configJSON = `{"execution":{},"version":1,"default_agent":"mock","default_gate":"none","lease":{"duration":"1h","renewable":false,"max_renewals":0},"security":{"require_ready_label":false,"ready_label":""},"agents":null}`
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != configJSON {
+		t.Fatalf("config bytes changed: %s", b)
+	}
+	if got := DigestConfig(cfg); got != "f1b5861838491a76788485964150f409c347aa739928326e700b9965b514af04" {
+		t.Fatalf("config digest %s", got)
+	}
+	if got := DigestApprovedBranchPolicy("base", cfg, ""); got != "98f0a91e6c51d224e6e61b0fcd3c95d5c337d22c6fba54970201c52ad372f9c4" {
+		t.Fatalf("legacy policy digest %s", got)
+	}
+	wu := &WorkUnit{ID: "ISSUE-102", Objective: "target release", Constraints: []string{"keep fences"}, Acceptance: []string{"correct target"}, Workflow: "feature"}
+	b, err = json.Marshal(wu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `{"id":"ISSUE-102","objective":"target release","constraints":["keep fences"],"acceptance":["correct target"],"workflow":"feature"}` {
+		t.Fatalf("task bytes changed: %s", b)
+	}
+	if got := DigestWorkUnit(wu); got != "421ab5e9fe8c00e2eb2339f0794cb5cdf9d59d17f81de2387484bea74eac6c8b" {
+		t.Fatalf("task digest %s", got)
+	}
+	if DigestApprovedBranchPolicy("base", cfg, "main") == "98f0a91e6c51d224e6e61b0fcd3c95d5c337d22c6fba54970201c52ad372f9c4" {
+		t.Fatal("explicit default lost binding")
+	}
+}

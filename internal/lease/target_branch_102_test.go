@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIssue102ApprovalSelectionAndBinding(t *testing.T) {
@@ -97,6 +98,55 @@ func TestIssue102ApprovalSelectionAndBinding(t *testing.T) {
 				if st.PolicyDigest == contract.DigestApprovedPolicy(st.BaseSHA, cfg) {
 					t.Fatal("old binary accepts explicit target")
 				}
+				raw, err := json.Marshal(st)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var legacy map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &legacy); err != nil {
+					t.Fatal(err)
+				}
+				delete(legacy, "base_branch")
+				raw, err = json.Marshal(legacy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var downgraded IssueState
+				if err := json.Unmarshal(raw, &downgraded); err != nil {
+					t.Fatal(err)
+				}
+				if TaskApprovalCurrent(&downgraded, wu, cfg) {
+					t.Fatal("old decoder preserved explicit approval authority")
+				}
+				_, rev, err := m.load(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := m.save(ctx, issue.Number, rev, &downgraded); err != nil {
+					t.Fatal(err)
+				}
+				before, _, err := m.load(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeBytes, err := json.Marshal(before)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "all", time.Hour, 3); err == nil {
+					t.Fatal("downgraded approval authorized mutation")
+				}
+				after, _, err := m.load(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				afterBytes, err := json.Marshal(after)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(beforeBytes) != string(afterBytes) {
+					t.Fatal("downgrade refusal changed state")
+				}
 				st.BaseBranch = ""
 				if TaskApprovalCurrent(st, wu, cfg) {
 					t.Fatal("clearing target accepted")
@@ -168,6 +218,9 @@ func TestIssue102SameSHATargetChangeClearsEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if st.BaseBranch != "release" || st.BaseSHA != git("rev-parse", "refs/heads/release") {
+		t.Fatalf("initial approval has wrong target: %+v", st)
+	}
 	st, rev, err := m.load(ctx, issue.Number)
 	if err != nil {
 		t.Fatal(err)
@@ -234,5 +287,85 @@ func TestIssue102PolicyFromTargetNotSelectionConfig(t *testing.T) {
 	}
 	if cfg.DefaultGate != contract.GateNone || st.PolicyDigest != contract.DigestApprovedBranchPolicy(release, cfg, "release") {
 		t.Fatal("policy did not come from selected SHA")
+	}
+}
+
+func TestIssue102LegacyStateGolden(t *testing.T) {
+	st := &IssueState{TaskDigest: "task", PolicyDigest: "policy", BaseSHA: "base"}
+	b, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"plan_replan_count":0,"lease":{"version":0,"issue_number":0,"claim_id":"","owner":"","phase":"","status":"","claimed_at":"0001-01-01T00:00:00Z","expires_at":"0001-01-01T00:00:00Z","renewals":0,"max_renewals":0},"task_digest":"task","policy_digest":"policy","base_sha":"base","approved_at":"0001-01-01T00:00:00Z"}`
+	if string(b) != want {
+		t.Fatalf("legacy state bytes changed: %s", b)
+	}
+}
+
+func TestIssue102MissingTrustedConfigRefusesCandidateSelection(t *testing.T) {
+	ctx := context.Background()
+	m, tr, issue := testManager(t)
+	git := func(args ...string) {
+		t.Helper()
+		if out, err := gitfixture.Command(t, "", append([]string{"-C", m.repoRoot}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git: %v %s", err, out)
+		}
+	}
+	path := filepath.Join(m.repoRoot, ".swarm/config.yaml")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	git("rm", ".swarm/config.yaml")
+	git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-m", "missing trusted config")
+	// The uncommitted candidate config is valid but cannot replace trusted bytes.
+	if err := os.WriteFile(path, append([]byte("base_branch: attacker-target\n"), original...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := m.load(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateBefore, err := json.Marshal(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectionBefore, err := tr.ListComments(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueBefore, err := tr.GetIssue(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ApproveTask(ctx, issue.Number, "local-dev"); err == nil || !strings.Contains(err.Error(), "trusted default config") {
+		t.Fatalf("candidate config accepted: %v", err)
+	}
+	after, _, err := m.load(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateAfter, err := json.Marshal(after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectionAfter, err := tr.ListComments(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issueAfter, err := tr.GetIssue(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeProjection, err := json.Marshal([]any{projectionBefore, issueBefore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterProjection, err := json.Marshal([]any{projectionAfter, issueAfter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stateBefore) != string(stateAfter) || string(beforeProjection) != string(afterProjection) {
+		t.Fatal("refused approval changed state or projections")
 	}
 }

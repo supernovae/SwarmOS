@@ -137,20 +137,21 @@ func (st *IssueState) ProvisionContext(forkMode bool) workspace.ProvisionContext
 }
 
 type Manager struct {
-	heartbeatTimerFn    func(time.Duration) HeartbeatTimer
-	tracker             tracker.Tracker
-	security            contract.SecurityConfig
-	store               coordination.Store
-	repoRoot            string
-	upstreamRemote      string
-	nodeProfile         *contract.NodeProfile
-	nowFn               func() time.Time
-	gateway             WorkerGateway
-	mu                  sync.Mutex
-	resumeApprovalHook  func(string) error
-	resumeAdmissionHook func(string)
-	configErr           error
-	tokens              map[int]string
+	heartbeatTimerFn     func(time.Duration) HeartbeatTimer
+	tracker              tracker.Tracker
+	security             contract.SecurityConfig
+	store                coordination.Store
+	repoRoot             string
+	upstreamRemote       string
+	nodeProfile          *contract.NodeProfile
+	nowFn                func() time.Time
+	gateway              WorkerGateway
+	mu                   sync.Mutex
+	resumeApprovalHook   func(string) error
+	resumeAdmissionHook  func(string)
+	localStoreConfigured bool // Sticky: initial nonlocal assembly has no local authority to revoke.
+	configErr            error
+	tokens               map[int]string
 }
 
 func NewManager(tr tracker.Tracker, security contract.SecurityConfig) *Manager {
@@ -229,6 +230,7 @@ func (m *Manager) ConfigureStore(root string) error {
 		m.store = coordination.NewGitStoreWithLayout(root, m.upstreamRemote, layout)
 	} else {
 		m.store = coordination.NewFileStore(root)
+		m.localStoreConfigured = true
 	}
 	return nil
 }
@@ -245,9 +247,12 @@ func (m *Manager) SetStore(root string, s coordination.Store) {
 		m.repoRoot = root
 	}
 	m.store = s
+	if _, ok := s.(*coordination.FileStore); ok {
+		m.localStoreConfigured = true
+	}
 }
 func (m *Manager) SetWorkerGateway(g WorkerGateway) {
-	if g != nil && m.repoRoot != "" {
+	if g != nil && m.repoRoot != "" && m.localStoreConfigured {
 		if err := m.denyResume(0); err != nil {
 			m.configErr = err
 			return

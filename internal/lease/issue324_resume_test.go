@@ -151,7 +151,7 @@ func TestIssue324PublicationAttempt(t *testing.T) {
 }
 
 func TestIssue324MonotonicDenial(t *testing.T) {
-	for _, action := range []string{"remote", "store", "upstream", "gateway", "discard"} {
+	for _, action := range []string{"remote", "store", "git-store-gateway", "upstream", "gateway", "discard"} {
 		t.Run(action, func(t *testing.T) {
 			m, _, st, _ := issue324Fixture(t)
 			n := st.Lease.IssueNumber
@@ -168,6 +168,12 @@ func TestIssue324MonotonicDenial(t *testing.T) {
 				}
 			case "store":
 				m.SetStore(m.repoRoot, coordination.NewFileStore(m.repoRoot))
+			case "git-store-gateway":
+				original := m.Store()
+				m.SetStore(m.repoRoot, coordination.NewGitStore(m.repoRoot))
+				m.SetWorkerGateway(issue324Gateway{})
+				m.SetWorkerGateway(nil)
+				m.SetStore(m.repoRoot, original)
 			case "upstream":
 				m.SetUpstreamRemote("other")
 				m.SetUpstreamRemote("origin")
@@ -518,7 +524,11 @@ func TestIssue324InitialConfigurationIsReadOnly(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return string(b)
+		coord, err := os.ReadFile(filepath.Join(source.repoRoot, ".swarm/coordination", "issue-"+strconv.Itoa(st.Lease.IssueNumber)+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b) + string(coord)
 	}
 	before := receiptBytes()
 	github := NewManager(issue324GitHubTracker{tr}, source.security)
@@ -533,6 +543,10 @@ func TestIssue324InitialConfigurationIsReadOnly(t *testing.T) {
 	if err := gateway.ConfigureStore(source.repoRoot); err != nil {
 		t.Fatal(err)
 	}
+	production := NewManager(issue324GitHubTracker{tr}, source.security)
+	production.SetUpstreamRemote("origin")
+	production.SetStore(source.repoRoot, coordination.NewGitStore(source.repoRoot))
+	production.SetWorkerGateway(issue324Gateway{})
 	if receiptBytes() != before {
 		t.Fatal("initial read-only authority configuration revoked receipt")
 	}
@@ -587,5 +601,122 @@ func TestIssue324InitialGatewayPublicationBarrier(t *testing.T) {
 	}
 	if _, _, err := source.ProvisionIssueWorkspace(t.Context(), st, "local-dev", "fresh", "origin", st.Branch, false); err == nil {
 		t.Fatal("gateway publication attempt retained admission")
+	}
+}
+
+type issue324GatewayFunc func(context.Context, ForkRequest) (*IssueState, error)
+
+func (f issue324GatewayFunc) Apply(ctx context.Context, req ForkRequest) (*IssueState, error) {
+	return f(ctx, req)
+}
+
+func TestIssue324GatewayFailureOrdering(t *testing.T) {
+	for _, failure := range []string{"dispatch", "dispatch-cas", "denial-write"} {
+		t.Run(failure, func(t *testing.T) {
+			m, tr, st, _ := issue324Fixture(t)
+			g := NewManager(issue324GitHubTracker{tr}, m.security)
+			g.SetStore(m.repoRoot, coordination.NewGitStore(m.repoRoot))
+			calls := 0
+			g.SetWorkerGateway(issue324GatewayFunc(func(context.Context, ForkRequest) (*IssueState, error) {
+				calls++
+				if err := tr.WithResumeReceipt(st.Lease.IssueNumber, func(r *tracker.ResumeReceipt, _ *tracker.Issue, _ func() error) error {
+					if r == nil || r.Status != "denied" {
+						t.Fatalf("request preceded durable denial: %+v", r)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if failure == "dispatch-cas" {
+					_, err := m.Store().CompareAndSwap(t.Context(), st.Lease.IssueNumber, "stale-revision", []byte("{}"))
+					if err == nil {
+						t.Fatal("stale CAS succeeded")
+					}
+					return nil, err
+				}
+				return nil, errors.New("dispatch failed after denial")
+			}))
+			state := filepath.Join(m.repoRoot, ".swarm/local-tracker/state.json")
+			if failure == "denial-write" {
+				if err := os.Rename(state, state+".backup"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(state+".backup", state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := g.Acquire(t.Context(), st.Lease.IssueNumber, "local-dev", "mock", "plan", time.Hour, 1); err == nil {
+				t.Fatal("failed request succeeded")
+			}
+			if failure == "denial-write" {
+				if calls != 0 {
+					t.Fatal("forwarded after failed denial")
+				}
+				old := m.Store()
+				m.SetStore(m.repoRoot, coordination.NewGitStore(m.repoRoot))
+				m.SetWorkerGateway(issue324Gateway{})
+				if m.Store() != old || m.HasWorkerGateway() || m.configErr == nil {
+					t.Fatal("failed denial changed configuration")
+				}
+				return
+			}
+			if calls != 1 {
+				t.Fatalf("dispatch calls: %d", calls)
+			}
+			g.SetWorkerGateway(nil)
+			restarted := NewManager(tr, m.security)
+			if err := restarted.ConfigureStore(m.repoRoot); err != nil {
+				t.Fatal(err)
+			}
+			restarted.BindClaim(st.Lease.IssueNumber, st.Lease.ClaimID)
+			if _, _, err := restarted.ProvisionIssueWorkspace(t.Context(), st, "local-dev", "fresh", "origin", st.Branch, false); err == nil {
+				t.Fatal("failed dispatch restored receipt after restart")
+			}
+		})
+	}
+}
+
+func TestIssue324CanonicalAdmissionFence(t *testing.T) {
+	for _, change := range []string{"owner", "successor", "task", "policy"} {
+		t.Run(change, func(t *testing.T) {
+			m, _, captured, _ := issue324Fixture(t)
+			n := captured.Lease.IssueNumber
+			current, rev, err := m.load(t.Context(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "owner":
+				current.Lease.Owner = "other"
+			case "successor":
+				current.Lease.ClaimID = "successor"
+			case "task":
+				current.TaskDigest = "changed"
+			case "policy":
+				current.PolicyDigest = "changed"
+			}
+			b, err := json.Marshal(current)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.store.CompareAndSwap(t.Context(), n, rev, b); err != nil {
+				t.Fatal(err)
+			}
+			state := filepath.Join(m.repoRoot, ".swarm/local-tracker/state.json")
+			before, err := os.ReadFile(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := m.ProvisionIssueWorkspace(t.Context(), captured, "local-dev", "fresh", "origin", captured.Branch, false); err == nil {
+				t.Fatal("changed canonical authority admitted")
+			}
+			after, err := os.ReadFile(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatal("failed admission revoked successor authority")
+			}
+		})
 	}
 }

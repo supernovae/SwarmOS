@@ -62,6 +62,10 @@ func TestIssue324NoopRetry(t *testing.T) {
 	if after := snapshot(); after != before {
 		t.Fatal("read-only commands changed state or source")
 	}
+	f.must(t, "issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false")
+	// Reacquire through the normal CLI as well as preserving the existing-claim inspection.
+	f.must(t, "issue", "release", n)
+	f.must(t, "issue", "claim", n, "--agent", "mock")
 	out, err = f.run("issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false")
 	if err != nil {
 		t.Fatalf("normal plan retry after real no-op: %v\n%s", err, out)
@@ -210,4 +214,60 @@ func TestIssue324SubmitFailureDeniesResume(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIssue324ForkReadOnlyConfiguration(t *testing.T) {
+	up := newUpstreamRemoteFixture(t)
+	f := newCLIFixture(t)
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
+	prGit(t, f.root, "remote", "add", "origin", remote)
+	prGit(t, f.root, "push", "origin", "main")
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	f.must(t, "issue", "approve", n)
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", ":")
+	if out, err := f.run("issue", "work", n, "--agent", "mock", "--progress=false"); err == nil || !strings.Contains(err.Error(), "developer produced no implementation") {
+		t.Fatalf("no-op setup: %v %s", err, out)
+	}
+	prGit(t, f.root, "remote", "add", "upstream", up.projectBare)
+	prGit(t, f.root, "remote", "set-url", "origin", up.aliceBare)
+	prGit(t, f.root, "fetch", "upstream")
+	prGit(t, f.root, "remote", "set-head", "upstream", "main")
+	snapshot := func() string {
+		t.Helper()
+		var b strings.Builder
+		for _, p := range []string{".swarm/local-tracker/state.json", ".swarm/coordination/issue-" + n + ".json"} {
+			data, err := os.ReadFile(filepath.Join(f.root, p))
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Write(data)
+		}
+		wt := workspace.WorktreePath(f.root, number)
+		b.WriteString(prGit(t, f.root, "show-ref"))
+		b.WriteString(prGit(t, wt, "rev-parse", "HEAD"))
+		b.WriteString(prGit(t, wt, "diff", "--binary", "HEAD"))
+		b.WriteString(prGit(t, wt, "ls-files", "--stage"))
+		b.WriteString(up.refs())
+		return b.String()
+	}
+	before, posted := snapshot(), up.postedComments()
+	for range 2 {
+		for _, args := range [][]string{{"issue", "status", "42", "--json"}, {"issue", "work", "42", "--phase", "plan", "--agent", "mock", "--dry-run"}} {
+			opts := up.as("alice", f.root)
+			out, err := up.run(opts, append([]string{"--upstream-remote", "upstream", "--fork"}, args...)...)
+			if err != nil {
+				t.Fatalf("fork inspection %v: %v\n%s", args, err, out)
+			}
+			if snapshot() != before {
+				t.Errorf("fork read-only %v changed receipt or authority/source/refs", args)
+			}
+		}
+	}
+	if up.postedComments() != posted {
+		t.Fatal("read-only commands dispatched mutation")
+	}
+	prGit(t, f.root, "remote", "set-url", "origin", remote)
+	f.must(t, "issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false")
 }

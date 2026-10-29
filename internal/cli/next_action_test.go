@@ -98,6 +98,55 @@ func TestNextActionMatrix(t *testing.T) {
 			}
 		})
 	}
+	for _, resource := range []string{"issue", "pr"} {
+		for _, repo := range []string{"", "acme/widgets"} {
+			o := &RootOptions{Backend: "github", Repo: repo, Fork: true, RepoRoot: "/contributor", UpstreamRemote: "upstream", ForkRemote: "personal"}
+			c := stopContext{opts: o, resource: resource, number: 9}
+			plan := &lease.PlanApprovalError{IssueNumber: 7}
+			original := fmt.Errorf("%w: %w", workflow.ErrPlanApprovalNeeded, plan)
+			stopped := c.stop(original)
+			a := nextActionOf(stopped)
+			expected := []string{"swarm", "--backend", "github"}
+			if repo != "" {
+				expected = append(expected, "--repo", repo)
+			}
+			expected = append(expected, "issue", "review-plan", "7", "--approve")
+			var typed *lease.PlanApprovalError
+			if a == nil || !reflect.DeepEqual(a.Argv, expected) || a.Reason != ReasonNeedsApproval || !a.HumanRequired || ExitCode(stopped) != 4 || !errors.As(stopped, &typed) || !errors.Is(stopped, lease.ErrApprovalRequired) || !errors.Is(stopped, workflow.ErrPlanApprovalNeeded) {
+				t.Fatalf("fork action: %v %+v", stopped, a)
+			}
+			if !strings.HasPrefix(stopped.Error(), original.Error()+"\n") || !strings.Contains(stopped.Error(), "linked upstream issue #7") || !strings.Contains(stopped.Error(), strings.Join(expected, " ")) || (repo == "" && !strings.Contains(stopped.Error(), "Run this command from the upstream repository checkout.")) {
+				t.Fatal(stopped)
+			}
+			root := newRootCmdWithOptions(&RootOptions{})
+			cmd, flags, err := root.Find(expected[1:])
+			if err != nil || cmd.Name() != "review-plan" {
+				t.Fatalf("command: %v %v", cmd, err)
+			}
+			if err := cmd.ParseFlags(flags); err != nil {
+				t.Fatal(err)
+			}
+			if !cmd.Flags().Changed("approve") || !reflect.DeepEqual(cmd.Flags().Args(), []string{"7"}) {
+				t.Fatalf("parsed args: %v", cmd.Flags().Args())
+			}
+			for _, higher := range []error{workflow.ErrPlanReviewRejected, &lease.TaskApprovalError{IssueNumber: 7}, &lease.ClaimBaseApprovalError{IssueNumber: 7}} {
+				nested := errors.Join(higher, plan)
+				if got := c.stop(nested); got.Error() != nested.Error() {
+					t.Fatalf("precedence changed text: %v", got)
+				}
+			}
+			for _, issue := range []int{0, -1} {
+				if a := c.classify(&lease.PlanApprovalError{IssueNumber: issue}); a != nil {
+					t.Fatalf("invented issue: %+v", a)
+				}
+			}
+			o.Fork = false
+			if got := c.stop(original); got != original {
+				t.Fatalf("non-fork changed: %v", got)
+			}
+		}
+	}
+
 }
 
 func TestNextActionLeavesOtherErrorsUnclassified(t *testing.T) {

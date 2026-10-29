@@ -326,6 +326,8 @@ func (f *upstreamRemoteFixture) githubTracker(slug, login, userType string) trac
 			default:
 				http.Error(w, "unexpected "+r.Method+" "+path, http.StatusNotFound)
 			}
+		case strings.HasPrefix(path, prefix+"commits/") && strings.HasSuffix(path, "/check-runs"):
+			reply(map[string]any{"check_runs": []any{}})
 		case path == prefix+"git/ref/heads/main":
 			reply(map[string]any{"object": map[string]string{"sha": f.headSHA("main")}})
 		case path == prefix+"pulls" && r.Method == http.MethodGet:
@@ -350,6 +352,8 @@ func (f *upstreamRemoteFixture) githubTracker(slug, login, userType string) trac
 			pr := &tracker.PullRequest{Number: n, Title: payload.Title, Body: payload.Body, Head: headBranch, HeadRepo: headRepo, HeadSHA: f.headSHA(payload.Head), Base: payload.Base, BaseRepo: "octo/swarm", Draft: payload.Draft, HTMLURL: fmt.Sprintf("https://github.com/octo/swarm/pull/%d", n)}
 			f.prs[n] = pr
 			reply(map[string]any{"number": n, "title": pr.Title, "body": pr.Body, "draft": pr.Draft, "html_url": pr.HTMLURL})
+		case strings.HasPrefix(path, prefix+"pulls/") && (strings.HasSuffix(path, "/reviews") || strings.HasSuffix(path, "/comments")):
+			reply([]any{})
 		case strings.HasPrefix(path, prefix+"pulls/"):
 			n, _ := strconv.Atoi(strings.TrimPrefix(path, prefix+"pulls/"))
 			pr, ok := f.prs[n]
@@ -413,6 +417,28 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 	if !errors.Is(err, workflow.ErrPlanApprovalNeeded) {
 		t.Fatalf("work should stop at the trusted plan gate, got %v\n%s", err, out)
 	}
+
+	checkStop := func(out string, err error, jsonMode bool) {
+		t.Helper()
+		var plan *lease.PlanApprovalError
+		if !errors.Is(err, workflow.ErrPlanApprovalNeeded) || !errors.Is(err, lease.ErrApprovalRequired) || !errors.As(err, &plan) || plan.IssueNumber != 42 || ExitCode(err) != ExitNeedsApproval {
+			t.Fatalf("fork stop: %v\n%s", err, out)
+		}
+		var stop *stopError
+		if !errors.As(err, &stop) || !strings.HasPrefix(err.Error(), stop.err.Error()+"\n") || !strings.Contains(err.Error(), "linked upstream issue #42") || !strings.Contains(err.Error(), "swarm --backend github issue review-plan 42 --approve") || !strings.Contains(err.Error(), "Run this command from the upstream repository checkout.") {
+			t.Fatalf("guidance: %v", err)
+		}
+		if jsonMode {
+			var doc map[string]any
+			if e := json.NewDecoder(strings.NewReader(out)).Decode(&doc); e != nil {
+				t.Fatalf("JSON: %v\n%s", e, out)
+			}
+			assertNextAction(t, doc, err, ReasonNeedsApproval, true, ExitNeedsApproval, "swarm", "--backend", "github", "issue", "review-plan", "42", "--approve")
+		}
+	}
+	checkStop(out, err, false)
+	out, err = f.run(opts, "--upstream-remote", "upstream", "--fork", "issue", "work", "42", "--agent", "mock", "--headless", "--phase", "implement", "--json")
+	checkStop(out, err, true)
 	claimed := f.state()
 	branch := "swarm/issue-42-" + claimed.Lease.ClaimID
 	if claimed.BaseSHA != f.baseSHA || claimed.Lease.Owner != "alice" || claimed.ForkRepo != "alice/swarm" || claimed.Lease.ClaimID == "" {
@@ -453,6 +479,11 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 	if submitted.HeadSHA != head || submitted.Branch != branch || submitted.PRNumber != 1 || submitted.Lease.Status != "completed" || submitted.BaseSHA != f.baseSHA {
 		t.Fatalf("submitted state = %+v, want head %s", submitted, head)
 	}
+	out, err = f.run(opts, "--fork", "pr", "work", "1", "--agent", "mock", "--headless")
+	checkStop(out, err, false)
+	out, err = f.run(opts, "--fork", "pr", "work", "1", "--agent", "mock", "--headless", "--phase", "implement", "--json")
+	checkStop(out, err, true)
+
 	f.mu.Lock()
 	pr := f.prs[1]
 	prCount := len(f.prs)

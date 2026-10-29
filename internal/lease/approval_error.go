@@ -30,3 +30,18 @@ func (e *HumanPlanApprovalError) Unwrap() error {
 	}
 	return e.Err
 }
+
+// PlanApprovalError marks a plan lacking a current trusted review.
+// Contributor reviews remain advisory and cannot clear this stop.
+type PlanApprovalError struct {
+	IssueNumber int
+	Err         error
+}
+
+func (e *PlanApprovalError) Error() string { return e.Unwrap().Error() }
+func (e *PlanApprovalError) Unwrap() error {
+	if e.Err == nil {
+		return ErrApprovalRequired
+	}
+	return e.Err
+}

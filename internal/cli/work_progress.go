@@ -29,7 +29,7 @@ func workProgressPrinter(out io.Writer) func(workflow.ProgressEvent) {
 		if event.Check != "" {
 			fmt.Fprintf(out, "Issue #%d: %s check %+q %s (check %s, elapsed %s)%s\n",
 				event.IssueNumber, stage, event.Check, event.Status,
-				event.StageElapsed.Truncate(time.Second), event.Elapsed.Truncate(time.Second), activitySuffix(event))
+				progressDuration(event), event.Elapsed.Truncate(time.Second), activitySuffix(event))
 			return
 		}
 		targets := ""
@@ -47,6 +47,13 @@ func workProgressPrinter(out io.Writer) func(workflow.ProgressEvent) {
 	}
 }
 
+func progressDuration(e progress.Event) time.Duration {
+	if e.Status == "started" || e.Status == "running" {
+		return e.StageElapsed.Truncate(time.Second)
+	}
+	return e.StageElapsed.Round(time.Millisecond)
+}
+
 func operationProgress(ctx context.Context, out io.Writer, enabled bool) *progress.Session {
 	var observer func(progress.Event)
 	if enabled {
@@ -57,7 +64,7 @@ func operationProgress(ctx context.Context, out io.Writer, enabled bool) *progre
 func operationProgressPrinter(out io.Writer) func(progress.Event) {
 	return func(e progress.Event) {
 		if e.Check != "" {
-			fmt.Fprintf(out, "Check %s %s (elapsed %s)%s\n", fmt.Sprintf("%+q", e.Check), e.Status, e.StageElapsed.Truncate(time.Second), activitySuffix(e))
+			fmt.Fprintf(out, "Check %s %s (elapsed %s)%s\n", fmt.Sprintf("%+q", e.Check), e.Status, progressDuration(e), activitySuffix(e))
 		} else {
 			fmt.Fprintf(out, "%s %s (elapsed %s)%s\n", e.Stage, e.Status, e.StageElapsed.Truncate(time.Second), activitySuffix(e))
 		}

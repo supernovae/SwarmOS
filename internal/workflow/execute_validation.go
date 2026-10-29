@@ -72,7 +72,7 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	if r.opts.Phase == "test" && version == "" {
 		version = "dev"
 	}
-	report, err := validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, GoFastPass: round == 0 && r.opts.Phase != "test", LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
+	report, err := validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
 	if context.Cause(r.ctx) == claimpause.ErrBudget {
 		return true, r.e.pauseWork(r.coordinatorCtx, r.res, r.opts, r.pre.WorkUnit, "implement", true, r.forkMode, r.forkRemote)
 	}
@@ -80,6 +80,7 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 		r.res.Validation = report
 		observeRun(testerRun, r.st, false)
 		report.Artifact.Metadata = runMetadata(testerRun, report.Artifact.Metadata)
+		validation.StoreAcceptanceSnapshot(report.Artifact.Metadata, validation.CaptureAcceptanceEvidence(testerBody))
 		report.Artifact.Body += "\n" + testerBody
 		report.Artifact.Body = guidedReport(report.Artifact.Body, testerRun)
 		if _, writeErr := recordGuidance(r.wtPath, "VALIDATION.md", canonicalReport(report.Artifact.Body), testerRun); writeErr != nil {

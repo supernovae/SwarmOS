@@ -69,6 +69,7 @@ func (m *Manager) CheckPlanReplan(st *IssueState) error {
 	if st.PRRevision != nil {
 		guidance = fmt.Sprintf("run swarm pr work %d --phase review, or edit and reapprove the WorkUnit", st.PRRevision.Number)
 	}
+	guidance += fmt.Sprintf("; an authorized independent upstream maintainer, outside --fork, can run swarm issue review-plan %d --reject to request a revised plan (this does not approve implementation), or swarm issue review-plan %d --approve after reviewing the current reports", st.Lease.IssueNumber, st.Lease.IssueNumber)
 	if !strings.EqualFold(cfg.PlanMode, "agent") {
 		resource, number := "issue", st.Lease.IssueNumber
 		if st.PRRevision != nil {

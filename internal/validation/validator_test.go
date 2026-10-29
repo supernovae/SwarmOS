@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +15,8 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/testutil"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 )
 
 func setupGitRepoForValidation(t *testing.T) string {
@@ -415,6 +416,10 @@ func TestValidationProgressUsesTrustedChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(events) != 4 || events[0].Check != "preparation: preflight" || events[1].Status != "PASS" {
+		t.Fatalf("preflight events: %+v", events)
+	}
+	events = events[2:]
 	if len(events) != 2 || events[0].Check != "ok" || events[0].Status != "started" || events[1].Check != "ok" || events[1].Status != "PASS" || events[1].StageElapsed != report.CheckOutcomes[0].Duration {
 		t.Fatalf("unexpected lifecycle %+v", events)
 	}
@@ -447,6 +452,9 @@ func TestValidationProgressFailureTimeoutAndCancellation(t *testing.T) {
 			defer cancel()
 			var events []progress.Event
 			report, err := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+				if strings.HasPrefix(e.Check, "preparation:") {
+					return
+				}
 				events = append(events, e)
 				if tc.cancel && e.Status == "started" {
 					cancel()
@@ -476,6 +484,9 @@ func TestValidatorSessionHeartbeatAdapter(t *testing.T) {
 	<-events
 	<-events
 	_, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+		if strings.HasPrefix(e.Check, "preparation:") {
+			return
+		}
 		session.Observe(e)
 		if e.Status == "started" {
 			started := <-events
@@ -806,5 +817,66 @@ func TestJSONCompileFailureReadable(t *testing.T) {
 	outcome := report.CheckOutcomes[0]
 	if !strings.Contains(outcome.Output, "undefined: missing") || strings.Contains(outcome.Output, `"Action"`) || !strings.Contains(report.Artifact.Body, "undefined: missing") || outcome.SkippedTotal != 0 {
 		t.Fatalf("%+v", outcome)
+	}
+}
+
+func TestCheckpointBoundaryUsesTrustedPolicyWithoutExecutingPreview(t *testing.T) {
+	// Selection reads the operator mode, so this test is serial.
+	t.Setenv("SWARM_EXECUTION_MODE", "isolated")
+	root := setupGitRepoForValidation(t)
+	cfg := "version: 1\ndefault_agent: codex\ndefault_gate: none\nexecution:\n  mode: isolated\nlease:\n  duration: 1h\n  max_renewals: 1\nsecurity:\n  require_isolation: true\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  codex:\n    binary: swarm-checkpoint-missing-codex-309\n    harness: codex\n"
+	configPath := filepath.Join(root, ".swarm/config.yaml")
+	if err := os.WriteFile(configPath, []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", ".swarm/config.yaml"}, {"commit", "-m", "approved isolated policy"}} {
+		if out, err := gitfixture.Command(t, root, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git: %v %s", err, out)
+		}
+	}
+	raw, err := gitfixture.Command(t, root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := strings.TrimSpace(string(raw))
+	// A candidate policy cannot select host checks or substitute the boundary.
+	if err := os.WriteFile(configPath, []byte("candidate policy is invalid"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, probe := range []bool{false, true} {
+		if _, err = CheckCheckpointBoundary(context.Background(), root, base, probe); err == nil || !strings.Contains(err.Error(), "swarm-checkpoint-missing-codex-309") {
+			t.Fatalf("unavailable approved boundary accepted: %v", err)
+		}
+	}
+	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
+	if _, err = CheckCheckpointBoundary(context.Background(), root, base, false); err == nil || !strings.Contains(err.Error(), "requires isolated") {
+		t.Fatalf("trusted isolation floor ignored: %v", err)
+	}
+	t.Setenv("SWARM_EXECUTION_MODE", "isolated")
+	marker := filepath.Join(t.TempDir(), "boundary-ran")
+	binary := filepath.Join(t.TempDir(), "codex")
+	if err = testutil.WriteExecutable(binary, []byte("#!/bin/sh\nprintf invoked > '"+marker+"'\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg = strings.Replace(cfg, "swarm-checkpoint-missing-codex-309", binary, 1)
+	if err = os.WriteFile(configPath, []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", ".swarm/config.yaml"}, {"commit", "-m", "available boundary fixture"}} {
+		if out, err := gitfixture.Command(t, root, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git: %v %s", err, out)
+		}
+	}
+	raw, err = gitfixture.Command(t, root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base = strings.TrimSpace(string(raw))
+	pending, err := CheckCheckpointBoundary(context.Background(), root, base, false)
+	if err != nil || !pending {
+		t.Fatalf("preview: pending=%t err=%v", pending, err)
+	}
+	if _, err = os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("preview executed boundary canary: %v", err)
 	}
 }

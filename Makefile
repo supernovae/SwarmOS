@@ -6,27 +6,29 @@
 # so do not stamp a version here.
 
 GO        ?= go
-GOBIN     ?= $(shell $(GO) env GOPATH)/bin
+GOBIN     ?= $(shell "$(GO)" env GOPATH)/bin
 BIN_DIR   ?= bin
 
 .PHONY: all build install test race fmt lint check clean version
 
 all: check build
 
-## build: compile ./bin/swarm from this checkout
+## build: compile swarm and the Linux restore helper from this checkout
 build:
-	$(GO) build -o $(BIN_DIR)/swarm ./cmd/swarm
+	"$(GO)" build -o "$(BIN_DIR)/swarm" ./cmd/swarm
+	@if [ "$$("$(GO)" env GOOS)" = linux ]; then CGO_ENABLED=0 "$(GO)" build -o "$(BIN_DIR)/swarm-restore-helper" ./cmd/swarm-restore-helper; fi
 
-## install: install swarm into $(GOBIN) (default $$HOME/go/bin) from this checkout
+## install: install swarm and the Linux restore helper into $(GOBIN) (default $$HOME/go/bin) from this checkout
 install:
-	GOBIN=$(GOBIN) $(GO) install ./cmd/swarm
-	@$(GOBIN)/swarm version
+	GOBIN="$(GOBIN)" "$(GO)" install ./cmd/swarm
+	@if [ "$$("$(GO)" env GOOS)" = linux ]; then CGO_ENABLED=0 GOBIN="$(GOBIN)" "$(GO)" install ./cmd/swarm-restore-helper; fi
+	@"$(GOBIN)/swarm" version
 
 ## test: run the test suite
 test:
 	$(GO) test ./...
 
-## race: run the test suite with the race detector, as CI does
+## race: run the test suite with the race detector, as nightly and release validation do
 race:
 	$(GO) test -race ./...
 
@@ -40,7 +42,7 @@ lint:
 	$(GO) vet ./...
 	$(GO) tool staticcheck ./...
 
-## check: everything CI checks before a PR (lint, race tests, and changelog fragments)
+## check: full local checks (lint, race tests, and changelog fragments); nightly/release also build distributions
 check: lint race changelog-check
 
 ## version: show the installed swarm version

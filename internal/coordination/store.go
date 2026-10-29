@@ -95,6 +95,23 @@ func (s *FileStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	}
 	return b, digest(b), nil
 }
+
+// LoadCheckpointPreview observes the atomically replaced state without creating
+// a lock file. Publication still uses the normal locked CAS.
+func (s *FileStore) LoadCheckpointPreview(ctx context.Context, n int) ([]byte, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	b, err := safefs.ReadFile(s.repoRoot, filepath.Join(".swarm", "coordination", fmt.Sprintf("issue-%d.json", n)), 64<<20)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", ErrNotFound
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return b, digest(b), nil
+}
+
 func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next []byte) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -133,6 +150,54 @@ func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next 
 	}
 	return digest(next), nil
 }
+
+// WithLockedState provides one non-recursive issue-lock scope. write performs
+// a durable replacement without reacquiring the issue lock.
+func (s *FileStore) WithLockedState(ctx context.Context, n int, fn func([]byte, string, func([]byte) error) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	base, err := safefs.Open(s.repoRoot)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	dir, err := base.Sub(filepath.Join(".swarm", "coordination"), true, 0700)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	name := fmt.Sprintf("issue-%d.json", n)
+	lock, err := dir.OpenLock(name + ".lock")
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := filelock.LockExclusive(lock); err != nil {
+		return err
+	}
+	defer filelock.Unlock(lock)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b, err := dir.ReadFile(name, 64<<20)
+	rev := ""
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil {
+		rev = digest(b)
+	}
+	return fn(b, rev, func(next []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return dir.WriteFileDurable(name, next, 0600)
+	})
+}
+
+// Root identifies this concrete local authority for receipt scope binding.
+func (s *FileStore) Root() string { return s.repoRoot }
 
 type GitStore struct {
 	root, remote string
@@ -220,14 +285,29 @@ func (s *GitStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	}
 	return []byte(body), sha, nil
 }
+
+// LoadCheckpointPreview never fetches. An unavailable pinned state must be
+// fetched explicitly by the operator before a read-only preview can inspect it.
+func (s *GitStore) LoadCheckpointPreview(ctx context.Context, n int) ([]byte, string, error) {
+	sha, err := s.remoteSHA(ctx, s.ref(n))
+	if err != nil {
+		return nil, "", err
+	}
+	body, err := s.run(ctx, "", "show", sha+":state.json")
+	if err != nil {
+		return nil, "", fmt.Errorf("pinned checkpoint state %s unavailable locally; fetch the state ref before retrying: %w", sha, err)
+	}
+	return []byte(body), sha, nil
+}
+
 func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next []byte) (string, error) {
 	blob, err := s.run(ctx, string(next), "hash-object", "-w", "--stdin")
 	if err != nil {
-		return "", err
+		return "", errors.Join(err, ctx.Err())
 	}
 	tree, err := s.run(ctx, fmt.Sprintf("100644 blob %s\tstate.json\n", blob), "mktree")
 	if err != nil {
-		return "", err
+		return "", errors.Join(err, ctx.Err())
 	}
 	args := []string{"-c", "user.name=SwarmOS", "-c", "user.email=swarmos@localhost", "commit-tree", tree}
 	if old != "" {
@@ -235,7 +315,7 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 	}
 	commit, err := s.run(ctx, "swarm coordination state\n", args...)
 	if err != nil {
-		return "", err
+		return "", errors.Join(err, ctx.Err())
 	}
 	ref := s.ref(n)
 	if err := s.checkLedger(ctx, ref); err != nil {
@@ -245,21 +325,124 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 	if old == "" {
 		leaseArg = ref + ":"
 	}
-	if err = s.push(ctx, "push", s.Remote(), "--force-with-lease="+leaseArg, commit+":"+ref); err != nil {
-		if publicationStatus(err) {
-			return "", err
-		}
-		actual, readErr := s.remoteSHA(ctx, ref)
-		if readErr == nil && actual != old {
-			return "", ErrConflict
-		}
-		if errors.Is(readErr, ErrNotFound) && old != "" {
-			return "", ErrConflict
-		}
-		return "", fmt.Errorf("push coordination state: %w", err)
-	}
-	return commit, nil
+	return s.publishState(ctx, ref, old, commit, []string{"push", s.Remote(), "--force-with-lease=" + leaseArg, commit + ":" + ref})
 }
+
+// commitRefsTransient deliberately recognizes only the observed complete Git
+// diagnostic lines. Its input must already be redacted and must exclude argv.
+func commitRefsTransient(diagnostic, ref string) bool {
+	lower := strings.ToLower(diagnostic)
+	for _, denial := range []string{"authentication", "could not read username", "permission", "access denied", "authorization", "not authorized", "403", "401", "policy", "protected branch", "gh006", "gh013", "hook", "stale info", "non-fast-forward", "[rejected]"} {
+		if strings.Contains(lower, denial) {
+			return false
+		}
+	}
+	for _, line := range strings.Split(diagnostic, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "remote: fatal error in commit_refs" || line == "! [remote rejected] "+ref+" -> "+ref+" (fatal error in commit_refs)" {
+			return true
+		}
+	}
+	return false
+}
+
+// observeStatePush uses the existing bounded runner exactly once. Command is
+// constructed only to obtain the same credential redactor used by run.
+func (s *GitStore) observeStatePush(ctx context.Context, args []string) (string, error) {
+	_, redact, err := gitcredential.Command(ctx, s.root, args...)
+	if err != nil {
+		return "", err
+	}
+	out, err := gitcredential.Network(ctx, s.root, true, args...)
+	diagnostic := redact(strings.TrimSpace(string(out)))
+	if err != nil {
+		err = fmt.Errorf("git state push: %w: %s", err, diagnostic)
+	}
+	return diagnostic, err
+}
+
+func (s *GitStore) publishState(ctx context.Context, ref, old, desired string, args []string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		diagnostic, pushErr := s.observeStatePush(ctx, args)
+		unknown := func(stage string, cause error) (string, error) {
+			return "", fmt.Errorf("state push attempt %d %s: %w", attempt, stage,
+				errors.Join(ErrPublicationUnknown, pushErr, cause, ctx.Err()))
+		}
+		var cleanup *gitcredential.KnownResultCleanupError
+		knownCleanup := errors.As(pushErr, &cleanup)
+		acknowledged := pushErr == nil || (knownCleanup && cleanup.ExitCode == 0)
+		if errors.Is(pushErr, gitcredential.ErrInterrupted) {
+			return unknown("interrupted", nil)
+		}
+		if knownCleanup && !acknowledged {
+			return "", fmt.Errorf("state push attempt %d failed: %w", attempt, pushErr)
+		}
+		// The same ordered partition is used after failure and immediately
+		// before a retry. Missing is expected only for absent-ref creation.
+		inspect := func() (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			actual, err := s.remoteSHA(ctx, ref)
+			if errors.Is(err, ErrNotFound) {
+				return "", nil
+			}
+			if err == nil {
+				if _, parseErr := hex.DecodeString(actual); parseErr != nil || len(actual) != len(desired) {
+					return "", fmt.Errorf("invalid state head in remote inspection")
+				}
+			}
+			return actual, err
+		}
+		actual, readErr := inspect()
+		if readErr != nil {
+			return unknown("inspection failed", readErr)
+		}
+		if actual == desired {
+			return desired, nil
+		}
+		if acknowledged {
+			return unknown("acknowledged but desired head no longer observed", nil)
+		}
+		if err := ctx.Err(); err != nil {
+			return unknown("cancelled", err)
+		}
+		if actual != old {
+			return "", fmt.Errorf("state push attempt %d remote head changed: %w: %w", attempt, ErrConflict, pushErr)
+		}
+		if !commitRefsTransient(diagnostic, ref) {
+			return "", fmt.Errorf("state push attempt %d failed: %w", attempt, pushErr)
+		}
+		if attempt == 3 {
+			return unknown("retry budget exhausted", nil)
+		}
+		timer := time.NewTimer(time.Duration(attempt) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return unknown("backoff cancelled", ctx.Err())
+		case <-timer.C:
+		}
+		actual, readErr = inspect()
+		if readErr != nil {
+			return unknown("pre-retry inspection failed", readErr)
+		}
+		if actual == desired {
+			return desired, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return unknown("pre-retry inspection cancelled", err)
+		}
+		if actual != old {
+			return "", fmt.Errorf("state push attempt %d pre-retry head changed: %w: %w", attempt, ErrConflict, pushErr)
+		}
+	}
+	panic("unreachable state push budget")
+}
+
 func (s *GitStore) CompareAndSwapAndPublish(ctx context.Context, n int, old string, next []byte, branch, head string) (string, error) {
 	return s.publishCheckpoint(ctx, n, old, next, branch, head, nil)
 }

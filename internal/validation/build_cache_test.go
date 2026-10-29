@@ -164,8 +164,12 @@ func TestWarmupRunsOncePerBase(t *testing.T) {
 		data, _ := os.ReadFile(filepath.Join(goCache, "warm-log"))
 		return string(data)
 	}
-	if note := warmBuildCaches(context.Background(), runner, checks, base); !strings.Contains(note, "Warmed the validator build cache") {
+	timing := &PhaseTiming{}
+	if note := warmBuildCaches(context.Background(), runner, checks, base, timing, nil); !strings.Contains(note, "Warmed the validator build cache") {
 		t.Fatalf("first warm-up note = %q", note)
+	}
+	if timing.Status != "ran" || timing.Duration < 0 {
+		t.Fatalf("timing: %+v", timing)
 	}
 	if log() != "base\n" {
 		t.Fatalf("warm-up log = %q, want the base only", log())
@@ -173,14 +177,14 @@ func TestWarmupRunsOncePerBase(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(filepath.Dir(goCache), ".warm-"+base)); err != nil {
 		t.Fatalf("warm marker missing: %v", err)
 	}
-	if note := warmBuildCaches(context.Background(), runner, checks, base); note != "" || log() != "base\n" {
+	if note := warmBuildCaches(context.Background(), runner, checks, base, timing, nil); timing.Status != "skipped-marker" || note != "" || log() != "base\n" {
 		t.Fatalf("second warm-up at the same base ran: %q, log %q", note, log())
 	}
 	if out, err := gitfixture.Command(t, "", "-C", repo, "stash", "-q").CombinedOutput(); err != nil {
 		t.Fatalf("git stash: %v (%s)", err, out)
 	}
 	next := commitRepoChange(t, repo, "version", "next\n")
-	if note := warmBuildCaches(context.Background(), runner, checks, next); note == "" || log() != "base\nnext\n" {
+	if note := warmBuildCaches(context.Background(), runner, checks, next, &PhaseTiming{}, nil); note == "" || log() != "base\nnext\n" {
 		t.Fatalf("new base did not warm: %q, log %q", note, log())
 	}
 	out, err := gitfixture.Command(t, "", "-C", repo, "worktree", "list", "--porcelain").Output()
@@ -198,8 +202,9 @@ func TestWarmupFailureDoesNotAffectCandidate(t *testing.T) {
 	}
 	checks := []contract.CheckSpec{{Name: "candidate-only", Command: `test "$(cat version)" = candidate`, Timeout: "1m"}}
 	runner := warmupRunner(t, repo)
-	note := warmBuildCaches(context.Background(), runner, checks, base)
-	if !strings.Contains(note, "`candidate-only` failed on the base") {
+	timing := &PhaseTiming{}
+	note := warmBuildCaches(context.Background(), runner, checks, base, timing, nil)
+	if timing.Status != "failed-checks" || timing.Duration < 0 || !strings.Contains(note, "`candidate-only` failed on the base") {
 		t.Fatalf("warm-up failure not reported: %q", note)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(runner.buildCaches[0].Dir), ".warm-"+base)); err != nil {
@@ -208,6 +213,19 @@ func TestWarmupFailureDoesNotAffectCandidate(t *testing.T) {
 	if outcome, err := runner.runCheck(context.Background(), checks[0].Name, checks[0].Command, checkTimeout(checks[0].Timeout), nil); err != nil || !outcome.Passed {
 		t.Fatalf("candidate check after a failed warm-up = %+v, %v", outcome, err)
 	}
+	if note := warmBuildCaches(context.Background(), runner, nil, base, timing, nil); note != "" || timing.Status != "no-applicable-checks" {
+		t.Fatalf("empty warm-up: %s %+v", note, timing)
+	}
+	if note := warmBuildCaches(context.Background(), runner, checks, "missing-base", timing, nil); note == "" || timing.Status != "skipped-error" {
+		t.Fatalf("unavailable base: %s %+v", note, timing)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	warmBuildCaches(cancelled, runner, checks, "missing-base", timing, nil)
+	if timing.Status != "cancelled" {
+		t.Fatalf("cancelled warm-up: %+v", timing)
+	}
+
 }
 
 func TestValidateFallsBackToScratchBuildCache(t *testing.T) {

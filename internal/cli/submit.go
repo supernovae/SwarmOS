@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/spf13/cobra"
@@ -13,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
+	"os/exec"
 	"strings"
 )
 
@@ -120,6 +120,13 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 					return err
 				}
 			}
+			if err := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", baseBranch).Run(); err != nil {
+				return fmt.Errorf("invalid PR base branch %q", baseBranch)
+			}
+			advisoryOut := cmd.OutOrStdout()
+			if asJSON {
+				advisoryOut = cmd.ErrOrStderr()
+			}
 			if state.Lease.Status == "completed" {
 				if state.Lease.Owner != owner || state.Lease.ClaimID != claim || state.PRNumber == 0 {
 					return fmt.Errorf("completed task has no submission for this claim")
@@ -132,8 +139,14 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 						return err
 					}
 				}
+				warnings := lease.RecordedAcceptanceWarnings(state, unit.Acceptance)
+				fmt.Fprint(advisoryOut, validation.AcceptanceEvidenceNotice(warnings))
 				if asJSON {
-					return writeJSON(cmd, map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": state.PRNumber, "pr_url": state.PRURL, "head_sha": state.HeadSHA})
+					outcome := map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": state.PRNumber, "pr_url": state.PRURL, "head_sha": state.HeadSHA}
+					if len(warnings) > 0 {
+						outcome["acceptance_evidence_warnings"] = warnings
+					}
+					return writeJSON(cmd, outcome)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Draft PR #%d already submitted for issue #%d (%s)\n", state.PRNumber, issue, state.PRURL)
 				return nil
@@ -166,6 +179,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				report, valErr = validation.Validate(ctx, worktree, unit, validationOpts)
 			}
 			writeValidationSkipNotice(cmd, report)
+			if report != nil && report.Passed && !asJSON {
+				writeValidationChecks(cmd, report)
+			}
 			if report != nil && report.Reused {
 				fmt.Fprintln(cmd.ErrOrStderr(), report.Artifact.Summary)
 			}
@@ -173,6 +189,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				failedReport = report
 				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 				lease.PreserveTesterGuidance(state, &report.Artifact)
+				lease.PreserveAcceptanceEvidence(state, &report.Artifact)
 				if _, err := manager.RecordTrustedValidation(ctx, issue, owner, report.Artifact); err != nil {
 					return errors.Join(valErr, err)
 				}
@@ -184,10 +201,8 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
 			}
 			freshness := checkSubmissionFreshnessFrom(ctx, root, manager.UpstreamRemote(), baseBranch, state.BaseSHA, head)
-			advisoryOut := cmd.OutOrStdout()
-			if asJSON {
-				advisoryOut = cmd.ErrOrStderr()
-			}
+			warnings := validation.AcceptanceEvidenceWarnings(unit.Acceptance, validation.AcceptanceSnapshotFromMetadata(report.Artifact.Metadata))
+			fmt.Fprint(advisoryOut, validation.AcceptanceEvidenceNotice(warnings))
 			fmt.Fprint(advisoryOut, freshness.advisory())
 			var policyWarning *workspace.HarnessPolicyWarning
 			if unit.AllowHarnessChanges && freshness.TargetSHA != "" {
@@ -198,6 +213,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				if _, err := workspace.ResolveBranchFrom(root, manager.UpstreamRemote(), baseBranch); err != nil {
 					return err
 				}
+			}
+			if err := manager.BeginPublicationAttempt(ctx, issue, owner); err != nil {
+				return err
 			}
 			p.Next("checkpoint push/record")
 			// GitHub publishes this head and the fenced state in one atomic Git push.
@@ -215,7 +233,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			}
 			prTitle := fmt.Sprintf("%s (#%d)", iss.Title, issue)
 			stateRef := manager.LedgerLayout().StateRef(issue)
-			prSection := draftPRSection(unit, state, stateRef, manager.UpstreamRemote())
+			prSection := draftPRSectionWithContext(unit, state, stateRef, lease.PublicProjectionContext(tr), manager.UpstreamRemote())
 			retryCommand := strings.Split(submissionRecoveryCommand(0, rootOpts), " pr rebase ")[0] + fmt.Sprintf(" issue submit %d", issue)
 			prHead := branch
 			if rootOpts.Fork {
@@ -242,6 +260,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
+			if err := manager.BeginPublicationAttempt(ctx, issue, owner); err != nil {
+				return err
+			}
 			if pr == nil {
 				pr, err = tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue, Title: prTitle, Body: prBody, Head: prHead, Base: baseBranch})
 			} else {
@@ -257,6 +278,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				fmt.Fprint(advisoryOut, note)
 				prBody, err = lease.ComposePRDescription(prBody, "issue-description", prSection+lease.DescriptionText(note), stateRef, issue)
 				if err != nil {
+					return err
+				}
+				if err := manager.BeginPublicationAttempt(ctx, issue, owner); err != nil {
 					return err
 				}
 				updated, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody)
@@ -278,6 +302,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			}
 			if asJSON {
 				outcome := map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head, "base_freshness": freshness, "report": report}
+				if len(warnings) > 0 {
+					outcome["acceptance_evidence_warnings"] = warnings
+				}
 				if policyWarning != nil {
 					prepareHarnessPolicyWarning(policyWarning, issue, pr.Number, rootOpts)
 					outcome["harness_policy_warning"] = policyWarning
@@ -336,31 +363,13 @@ func defaultBaseBranch(root, upstreamRemote string) (string, error) {
 }
 
 func draftPRSection(unit *contract.WorkUnit, state *lease.IssueState, stateRef string, remote ...string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Closes #%d\n\n## Objective\n\n", unit.IssueNumber)
-	b.WriteString(lease.DescriptionSlot(unit.Objective))
-	b.WriteString("\n## Constraints\n\n")
-	for _, c := range unit.Constraints {
-		b.WriteString(lease.DescriptionSlot("- " + c + "\n"))
-	}
-	b.WriteString("\n## Acceptance criteria\n\nThese checkboxes track final acceptance review by a maintainer. SwarmOS leaves them unchecked at submission.\n")
-	for _, c := range unit.Acceptance {
-		b.WriteString("- [ ] " + lease.DescriptionSlot(c+"\n"))
-	}
-	b.WriteString("\n## Review handoff\n\nUse the test plan and validation results to verify each criterion, then mark this PR ready for review in GitHub.\n")
-	if state != nil {
-		raw, _ := json.MarshalIndent(lease.BuildProvenanceAttestation(unit, state), "", "  ")
-		b.WriteString("\n## 🔒 Harness & Model Provenance Attestation\n\nMachine-Readable Provenance Attestation (JSON)\n```json\n" + lease.DescriptionText(string(raw)) + "\n```\n")
-		if runs := lease.RoleRuns(state); len(runs) > 0 {
-			raw, _ := json.MarshalIndent(runs, "", "  ")
-			b.WriteString(lease.DescriptionAtomicSlot("\n## ⏱️ Role Run Telemetry\n\n" + lease.RoleRunTable(runs) + "\n```json\n" + string(raw) + "\n```\n"))
-		}
-	}
-	b.WriteString("\n## 📦 Attached SwarmOS Artifacts\n\n")
-	b.WriteString(lease.DescriptionArtifacts(state))
-	b.WriteString(lease.DescriptionRetrieval(unit.IssueNumber, stateRef, remote...))
-	return b.String()
+	return draftPRSectionWithContext(unit, state, stateRef, lease.ProjectionContext{}, remote...)
 }
+
+func draftPRSectionWithContext(unit *contract.WorkUnit, state *lease.IssueState, stateRef string, context lease.ProjectionContext, remote ...string) string {
+	return lease.DescriptionIssueSection(unit, state, stateRef, context, remote...)
+}
+
 func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState, stateRef string) string {
 	body, _ := lease.ComposePRDescription("", "issue-description", draftPRSection(unit, state, stateRef), stateRef, unit.IssueNumber)
 	return body

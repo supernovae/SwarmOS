@@ -1,13 +1,17 @@
 package lease
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/validation"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 const PRDescriptionLimit = 59999
@@ -140,8 +144,10 @@ func migrateDescription(name, text, ref string, issue int) (string, error) {
 			}
 			if typ == "validation" {
 				b.WriteString(validationInventory(part))
+				b.WriteString(DescriptionSlot("Full validation artifact retained; see retrieval instructions below."))
+			} else {
+				b.WriteString(DescriptionSlot(part))
 			}
-			b.WriteString(DescriptionSlot(part))
 		}
 	case "rebase":
 		if !strings.HasPrefix(content, "\n### Rebase context\n\n```text\n") || !strings.HasSuffix(content, "```\n") {
@@ -185,7 +191,13 @@ func migrateDescription(name, text, ref string, issue int) (string, error) {
 
 // ComposePRDescription preserves every outside byte and budgets all owned sections.
 func ComposePRDescription(body, name, section, stateRef string, issue int) (string, error) {
-	if !utf8.ValidString(body) || !utf8.ValidString(section) {
+	return ComposePRDescriptionSections(body, map[string]string{name: section}, stateRef, issue)
+}
+
+// ComposePRDescriptionSections replaces related sections in one budgeting pass,
+// so changing their slot inventories cannot progressively truncate neighbors.
+func ComposePRDescriptionSections(body string, sections map[string]string, stateRef string, issue int) (string, error) {
+	if !utf8.ValidString(body) {
 		return "", fmt.Errorf("PR description contains invalid UTF-8; a maintainer must repair the body before retrying")
 	}
 	type span struct {
@@ -226,20 +238,26 @@ func ComposePRDescription(body, name, section, stateRef string, issue int) (stri
 			}
 		}
 	}
-	target := -1
-	for i, n := range descriptionNames {
-		if n == name {
-			target = i
+	replacements := make(map[int]string, len(sections))
+	for name, section := range sections {
+		target := -1
+		for id, n := range descriptionNames {
+			if n == name {
+				target = id
+			}
 		}
+		if target < 0 {
+			return "", fmt.Errorf("unknown description section")
+		}
+		if !utf8.ValidString(section) {
+			return "", fmt.Errorf("PR description contains invalid UTF-8; a maintainer must repair the body before retrying")
+		}
+		if !validDescriptionSlots(section) {
+			return "", fmt.Errorf("malformed generated Swarm excerpt markers")
+		}
+		replacements[target] = descriptionMarker(name, "start") + "\n<!-- swarm:description:v1 -->\n" + section + descriptionMarker(name, "end")
 	}
-	if target < 0 {
-		return "", fmt.Errorf("unknown description section")
-	}
-	if !validDescriptionSlots(section) {
-		return "", fmt.Errorf("malformed generated Swarm excerpt markers")
-	}
-	section = descriptionMarker(name, "start") + "\n<!-- swarm:description:v1 -->\n" + section + descriptionMarker(name, "end")
-	found := false
+	found := make(map[int]bool, len(replacements))
 	last := 0
 	mandatory := 0
 	for i := range spans {
@@ -249,23 +267,27 @@ func ComposePRDescription(body, name, section, stateRef string, issue int) (stri
 		}
 		mandatory += s.start - last
 		last = s.end
-		if s.id == target {
+		if section, ok := replacements[s.id]; ok {
 			s.text = section
-			found = true
+			found[s.id] = true
 		}
 		mandatory += len(compactDescription(s.text, 0))
 	}
 	mandatory += len(body) - last
-	if !found {
-		mandatory += 2 + len(compactDescription(section, 0))
+	for id, section := range replacements {
+		if !found[id] {
+			mandatory += 2 + len(compactDescription(section, 0))
+		}
 	}
 	if mandatory > PRDescriptionLimit {
 		outsideBytes := len(body)
 		for _, s := range spans {
 			outsideBytes -= s.end - s.start
 		}
-		if !found {
-			outsideBytes += 2
+		for id := range replacements {
+			if !found[id] {
+				outsideBytes += 2
+			}
 		}
 		if mandatory-outsideBytes > PRDescriptionLimit {
 			return "", fmt.Errorf("required Swarm outcome/provenance/rebase inventory alone exceeds 59999 bytes. A maintainer must review the mandatory inventory and WorkUnit scope before retrying the same submit command; trim outside PR prose on GitHub where possible. Complete stored evidence must remain in %s (swarm issue status %d --json)", stateRef, issue)
@@ -288,8 +310,10 @@ func ComposePRDescription(body, name, section, stateRef string, issue int) (stri
 		last = s.end
 	}
 	out.WriteString(body[last:])
-	if !found {
-		out.WriteString("\n\n" + compactDescription(section, share(target)))
+	for id := range descriptionNames {
+		if section, ok := replacements[id]; ok && !found[id] {
+			out.WriteString("\n\n" + compactDescription(section, share(id)))
+		}
 	}
 	return out.String(), nil
 }
@@ -322,28 +346,238 @@ func DescriptionRetrieval(issue int, ref string, remote ...string) string {
 	return fmt.Sprintf("\nComplete artifacts: `%s`; `swarm issue status %d --json`. %s:\n```sh\ngit fetch %s %s\ngit show FETCH_HEAD:state.json\n```\nFull bodies and digests are in artifacts[]; revision plans are in revision_plan.\n", ref, issue, instruction, upstream, ref)
 }
 
-// DescriptionArtifacts extracts outcomes only from the validator's pre-log table.
-func DescriptionArtifacts(st *IssueState) string {
+// ProjectionContext is coordinator-owned presentation policy, never artifact metadata.
+// Its zero value suppresses public actor names.
+type ProjectionContext struct{ publishActors bool }
+
+func PublicProjectionContext(tr tracker.Tracker) ProjectionContext {
+	return ProjectionContext{publishActors: tr != nil && strings.HasPrefix(tr.BackendName(), "github (") && strings.HasSuffix(tr.BackendName(), ")")}
+}
+
+// DescriptionIssueNeedsProjection keeps an already anonymous initial handoff
+// intact during continued work. Older or named evidence is rebuilt from state;
+// a GitHub backend alone cannot authenticate actors copied from a PR body.
+func DescriptionIssueNeedsProjection(body string) bool {
+	start := strings.Index(body, descriptionMarker("issue-description", "start"))
+	end := strings.Index(body, descriptionMarker("issue-description", "end"))
+	if start < 0 || end <= start {
+		return true
+	}
+	section := body[start:end]
+	summaryStart := strings.Index(section, "\n## How the work was produced\n\n")
+	summaryEnd := strings.Index(section, "\n## 🔒 Harness & Model Provenance Attestation\n")
+	if summaryStart < 0 || summaryEnd <= summaryStart {
+		return true
+	}
+	// Inspect generated fields, never search for or transform a local alias.
+	// Unknown layouts take the conservative reconstruction path.
+	summary := section[summaryStart:summaryEnd]
+	if strings.Contains(summary, " by ") || strings.Contains(section, "Human review by ") || strings.Contains(section, "Producer:") {
+		return true
+	}
+	jsonStart := strings.Index(section[summaryEnd:], "```json\n")
+	if jsonStart < 0 {
+		return true
+	}
+	raw := section[summaryEnd+jsonStart+len("```json\n"):]
+	raw, _, ok := strings.Cut(raw, "\n```")
+	var att contract.ProvenanceAttestation
+	if !ok || json.Unmarshal([]byte(raw), &att) != nil {
+		return true
+	}
+	for _, role := range att.Roles {
+		if role.StagedBy != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// PublicProvenanceAttestation copies wire evidence before removing private actors.
+func PublicProvenanceAttestation(wu *contract.WorkUnit, st *IssueState, context ProjectionContext) *contract.ProvenanceAttestation {
+	att := BuildProvenanceAttestation(wu, st)
+	for i := range att.Roles {
+		role := &att.Roles[i]
+		if !context.publishActors || !currentInteractiveAttestation(st, *role) {
+			role.StagedBy = ""
+		}
+	}
+	return att
+}
+
+func currentInteractiveAttestation(st *IssueState, att contract.RoleAttestation) bool {
+	if st == nil || att.ProductionMode != "interactive" || att.StagedBy == "" || att.ArtifactDigest == "" {
+		return false
+	}
+	for _, art := range st.Artifacts {
+		if artifactRole(art.Type) == att.Role && string(art.Type) == att.ArtifactType && hash(art.Body) == att.ArtifactDigest && art.Metadata["content_sha256"] == att.ArtifactDigest && art.Metadata["production_mode"] == "interactive" && art.Metadata["staged_by"] == att.StagedBy && art.Metadata["harness_source"] == "self-reported" && art.Metadata["model_source"] == "self-reported" {
+			return true
+		}
+	}
+	return false
+}
+
+func currentHumanReview(st *IssueState, art contract.Artifact) bool {
+	if st == nil || art.Type != contract.ArtifactReview || art.Metadata["kind"] != "human" || art.Metadata["review_source"] != "authenticated-human" || art.Metadata["actor"] == "" || art.Metadata["content_sha256"] != hash(art.Body) || art.Metadata["superseded_by"] != "" {
+		return false
+	}
+	bindings := ReviewBindings(st)
+	for _, key := range []string{"task_digest", "policy_digest", "base_sha", "plan_digest", "test_plan_digest"} {
+		if bindings[key] == "" {
+			return false
+		}
+	}
+	for key, value := range bindings {
+		// Human approvals bind to the plan across claim renewal/reacquisition.
+		if key == "review_claim_id" {
+			continue
+		}
+		if value != "" && art.Metadata[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+// DescriptionArtifacts projects current structured validation evidence and retained artifact references.
+func DescriptionArtifacts(st *IssueState, contexts ...ProjectionContext) string {
+	context := ProjectionContext{}
+	if len(contexts) > 0 {
+		context = contexts[0]
+	}
 	if st == nil {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString(DescriptionText(PlanSummary(st, false)))
 	b.WriteString(DescriptionSlot(PlanSummary(st, true)))
-	for _, a := range st.Artifacts {
+	latestValidation := -1
+	for i, a := range st.Artifacts {
+		if a.Type == contract.ArtifactValidation {
+			latestValidation = i
+		}
+	}
+	for i, a := range st.Artifacts {
 		fmt.Fprintf(&b, "\n### %s: %s\nSHA-256: %s\n", DescriptionText(string(a.Type)), DescriptionText(a.Verdict), DescriptionText(a.Metadata["content_sha256"]))
 		if a.Metadata["operator_steered"] == "true" {
 			fmt.Fprintf(&b, "Operator-steered: %s messages; SHA-256 `%s`.\n", DescriptionText(a.Metadata["guidance_count"]), DescriptionText(a.Metadata["guidance_sha256"]))
 		}
 		if a.Type == contract.ArtifactValidation {
-			b.WriteString(validationInventory(a.Body))
+			if i == latestValidation {
+				b.WriteString(validationTimingInventory(st, a))
+			}
 		}
-		b.WriteString(DescriptionSlot("Producer: " + a.Producer + "\n" + a.Summary + "\n" + a.Body))
+		producer := ""
+		body, summary := a.Body, a.Summary
+		if a.Type == contract.ArtifactValidation {
+			body = "Full validation artifact retained; see retrieval instructions below."
+			summary = "Validation " + a.Verdict
+		}
+		if context.publishActors && currentHumanReview(st, a) {
+			producer = "Human review by " + productionLabel(a.Metadata["actor"]) + "\n"
+		}
+		if (!context.publishActors || !currentHumanReview(st, a)) && a.Type == contract.ArtifactReview && a.Metadata["kind"] == "human" {
+			summary = "Human plan review"
+			body = "VERDICT: " + a.Verdict + "\nFull review notes retained in the review artifact."
+		}
+		b.WriteString(DescriptionSlot(producer + summary + "\n" + body))
 	}
 	return b.String()
 }
+
+// Structured timing rows use only current coordinator evidence. Imported evidence
+// can supply a bounded advisory inventory, never coordinator timing or authority.
+func validationTimingInventory(st *IssueState, a contract.Artifact) string {
+	unavailable := "check table unavailable; full validation artifact retained\n"
+	head, _ := implementationCheckpoint(st)
+	md := a.Metadata
+	if md["validation_trusted_origin"] != "coordinator" {
+		if head == "" || md["head_sha"] != head || md["content_sha256"] != hash(a.Body) {
+			return unavailable
+		}
+		return "Contributor-reported validation (advisory); coordinator timing unavailable.\n" + validationInventory(a.Body)
+	}
+	if head == "" || st.BaseSHA == "" || md["head_sha"] != head || md["base_sha"] != st.BaseSHA || md["content_sha256"] != hash(a.Body) || md["validation_trusted_origin"] != "coordinator" || st.Lease.Owner == "" || md["validation_trusted_owner"] != st.Lease.Owner || st.Lease.ClaimID == "" || md["validation_trusted_claim"] != st.Lease.ClaimID {
+		return unavailable
+	}
+	raw := md["validation_timing_report"]
+	if raw == "" {
+		raw = md["validation_report"]
+	}
+	if raw == "" {
+		return fmt.Sprintf("Submitted head: %s; base: %s\nSource head/time: unavailable\n", timingCell(head), timingCell(st.BaseSHA)) + validationInventory(a.Body)
+	}
+	if len(raw) > 8<<20 {
+		return unavailable
+	}
+	var r validation.ValidationReport
+	if json.Unmarshal([]byte(raw), &r) != nil || r.BaseSHA != st.BaseSHA || len(r.CheckOutcomes) > 100 {
+		return unavailable
+	}
+	reused := md["validation_reused"] == "true"
+	if !reused && r.HeadSHA != head {
+		return unavailable
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Submitted head: %s; base: %s\n", timingCell(head), timingCell(st.BaseSHA))
+	fmt.Fprintf(&b, "Source head: %s; source time: %s; reused: %t\n", timingCell(r.HeadSHA), timingCell(r.Artifact.CreatedAt.Format(time.RFC3339)), reused)
+	b.WriteString("| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n")
+	for _, c := range r.CheckOutcomes {
+		status := "FAIL"
+		if c.Passed {
+			status = "PASS"
+			if reused {
+				status = "REUSED"
+			}
+		}
+		duration := "unavailable"
+		if c.Duration > 0 {
+			duration = validation.DurationText(&c.Duration)
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", timingCell(c.Name), timingCell(c.Command), status, duration)
+	}
+	if r.Timings != nil {
+		r.Timings.Preflight.Status = timingCell(r.Timings.Preflight.Status)
+		r.Timings.Warmup.Status = timingCell(r.Timings.Warmup.Status)
+		r.Timings.Checks.Status = timingCell(r.Timings.Checks.Status)
+		r.Timings.Repair.Status = timingCell(r.Timings.Repair.Status)
+	}
+	r.Reused = false
+	b.WriteString(r.TimingSummary())
+	if reused {
+		b.WriteString("Reusing validation; durations above are from the source execution.\n")
+		d, err := time.ParseDuration(md["validation_reuse_duration"])
+		elapsed := "unavailable"
+		if err == nil && d >= 0 {
+			elapsed = validation.DurationText(&d)
+		}
+		fmt.Fprintf(&b, "Current reuse wall time: %s\n", elapsed)
+	}
+	return b.String()
+}
+
+// Bound table cells and suppress local paths and credential-like shell values.
+func timingCell(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		if (strings.Contains(w, "=") && !strings.HasPrefix(w, "-")) || strings.Contains(w, "://") || strings.HasPrefix(strings.Trim(w, "`'\""), "/") || strings.Contains(w, "\\") || strings.Contains(w, "@") || strings.Contains(w, "ghp_") || strings.Contains(w, "github_pat_") {
+			words[i] = "[redacted]"
+		}
+	}
+	s = strings.Join(words, " ")
+	if len(s) > 256 {
+		s = string([]rune(s)[:min(128, len([]rune(s)))]) + "…"
+	}
+	s = validation.EscapeDiagnostic(s)
+	s = strings.NewReplacer("|", "/", "`", "'", "<", "&lt;", ">", "&gt;").Replace(s)
+	return DescriptionText(s)
+}
+
 func validationInventory(body string) string {
 	prefix, _, _ := strings.Cut(body, "\n### Output:")
+	if len(prefix) > 64<<10 {
+		return "check table unavailable; full validation artifact retained\n"
+	}
 	lines := strings.Split(prefix, "\n")
 	var rows []string
 	for i, line := range lines {
@@ -375,12 +609,134 @@ func validationInventory(body string) string {
 			if len(cells) != 6 || strings.TrimSpace(cells[1]) == "" || strings.TrimSpace(cells[3]) == "" {
 				return "check table unavailable; full validation artifact retained\n"
 			}
-			rows = append(rows, DescriptionText(strings.TrimSpace(cells[1]))+": "+DescriptionText(strings.TrimSpace(cells[3])))
+			duration := "unavailable"
+			if d, err := time.ParseDuration(strings.Trim(strings.TrimSpace(cells[4]), "`")); err == nil && d >= 0 {
+				duration = d.Round(time.Millisecond).String()
+			}
+			rows = append(rows, "| "+timingCell(cells[1])+" | "+timingCell(cells[2])+" | "+timingCell(cells[3])+" | "+duration+" |")
+			if len(rows) > 100 {
+				return "check table unavailable; full validation artifact retained\n"
+			}
 		}
 		break
 	}
 	if len(rows) == 0 {
 		return "check table unavailable; full validation artifact retained\n"
 	}
-	return strings.Join(rows, "\n") + "\n"
+	return "| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n" + strings.Join(rows, "\n") + "\nPhase/total timings: unavailable\n"
+}
+
+func productionLabel(s string) string {
+	return DescriptionText(strings.Join(strings.Fields(strings.ReplaceAll(s, "|", "/")), " "))
+}
+
+// RoleProductionSummary describes current evidence without granting authority.
+func RoleProductionSummary(st *IssueState, role string) string {
+	return roleProductionSummary(st, role, true)
+}
+func roleProductionSummary(st *IssueState, role string, actors bool) string {
+	if st == nil {
+		return "unknown"
+	}
+	clean := productionLabel
+	name := func(actor string) string {
+		if actors && actor != "" {
+			return " by " + clean(actor)
+		}
+		return ""
+	}
+	if role == "reviewer" {
+		for _, art := range st.Artifacts {
+			if currentHumanReview(st, art) {
+				return "human review" + name(art.Metadata["actor"])
+			}
+		}
+	}
+
+	for _, att := range st.Attestations {
+		if att.Role != role || att.ArtifactType == "" || att.ArtifactDigest == "" {
+			continue
+		}
+		for _, art := range st.Artifacts {
+			if artifactRole(art.Type) != role || string(art.Type) != att.ArtifactType || hash(art.Body) != att.ArtifactDigest {
+				continue
+			}
+			md := art.Metadata
+			if md["content_sha256"] != att.ArtifactDigest {
+				continue
+			}
+			if currentInteractiveAttestation(st, att) && att.HarnessSource == "self-reported" && att.ModelSource == "self-reported" {
+				return "staged interactively" + name(att.StagedBy) + "; self-reported harness " + clean(att.Harness) + ", model " + clean(att.Model)
+			}
+			if (att.ExecutionMode == contract.ExecutionIsolated || att.ExecutionMode == contract.ExecutionTrustedLocal) && md["validation_reused"] != "true" && md["execution_mode"] == att.ExecutionMode && att.Agent != "" && md["agent"] == att.Agent && att.Harness != "" && md["harness"] == att.Harness && st.Lease.Owner != "" {
+				boundary := ""
+				if role == "reviewer" && md["sandbox"] == att.Sandbox && md["review_source"] == "authenticated-agent" && verifyReviewBinding(st, contract.GateAgent) == nil && (att.Sandbox == "bwrap" || att.Sandbox == "sandbox-exec" || att.Sandbox == "container") {
+					boundary = "; sandboxed reviewer (" + clean(att.Sandbox) + ")"
+				}
+				return "headless agent run" + name(st.Lease.Owner) + "; configured agent " + clean(att.Agent) + ", harness " + clean(att.Harness) + boundary
+			}
+
+		}
+	}
+	if role == "tester" && st.ForkRepo == "" {
+		head, _ := implementationCheckpoint(st)
+		for _, art := range st.Artifacts {
+			md := art.Metadata
+			if art.Type != contract.ArtifactValidation || head == "" || st.BaseSHA == "" || st.Lease.Owner == "" || st.Lease.ClaimID == "" || md["content_sha256"] != hash(art.Body) || md["validation_trusted_origin"] != "coordinator" || md["validation_trusted_owner"] != st.Lease.Owner || md["validation_trusted_claim"] != st.Lease.ClaimID || md["validation_claim"] != st.Lease.ClaimID || md["validation_base"] != st.BaseSHA || md["base_sha"] != st.BaseSHA || md["head_sha"] != head || md["validation_tree"] == "" || md["validation_policy"] == "" {
+				continue
+			}
+			runner := "unknown prior runner"
+			for _, att := range st.Attestations {
+				if att.Role == "tester" && att.ArtifactType == string(art.Type) && att.ArtifactDigest == md["content_sha256"] && att.Harness != "" && att.Harness != "unknown" {
+					runner = "prior runner provenance reused: " + clean(att.Harness) + ", model " + clean(att.Model)
+					break
+				}
+			}
+			return "coordinator validation" + name(st.Lease.Owner) + "; " + runner
+		}
+	}
+	return "unknown"
+}
+
+// DescriptionProductionSummary stays inside the existing bounded managed section.
+func DescriptionProductionSummary(st *IssueState, contexts ...ProjectionContext) string {
+	context := ProjectionContext{}
+	if len(contexts) > 0 {
+		context = contexts[0]
+	}
+	var b strings.Builder
+	b.WriteString("\n## How the work was produced\n\n")
+	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+		b.WriteString(DescriptionSlot("- " + role + ": " + roleProductionSummary(st, role, context.publishActors) + "\n"))
+	}
+	return b.String()
+}
+
+// DescriptionIssueSection renders coordinator-owned issue evidence using public projection policy.
+func DescriptionIssueSection(unit *contract.WorkUnit, state *IssueState, stateRef string, context ProjectionContext, remote ...string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Closes #%d\n\n## Objective\n\n", unit.IssueNumber)
+	b.WriteString(DescriptionSlot(unit.Objective))
+	b.WriteString("\n## Constraints\n\n")
+	for _, c := range unit.Constraints {
+		b.WriteString(DescriptionSlot("- " + c + "\n"))
+	}
+	b.WriteString("\n## Acceptance criteria\n\nThese checkboxes track final acceptance review by a maintainer. SwarmOS leaves them unchecked at submission.\n")
+	for _, c := range unit.Acceptance {
+		b.WriteString("- [ ] " + DescriptionSlot(c+"\n"))
+	}
+	b.WriteString("\n## Review handoff\n\nUse the test plan and validation results to verify each criterion, then mark this PR ready for review in GitHub.\n")
+	if state != nil {
+		b.WriteString(DescriptionProductionSummary(state, context))
+		raw, _ := json.MarshalIndent(PublicProvenanceAttestation(unit, state, context), "", "  ")
+		b.WriteString("\n## 🔒 Harness & Model Provenance Attestation\n\nMachine-Readable Provenance Attestation (JSON)\n```json\n" + DescriptionText(string(raw)) + "\n```\n")
+		if runs := RoleRuns(state); len(runs) > 0 {
+			raw, _ := json.MarshalIndent(runs, "", "  ")
+			b.WriteString(DescriptionAtomicSlot("\n## ⏱️ Role Run Telemetry\n\n" + RoleRunTable(runs) + "\n```json\n" + string(raw) + "\n```\n"))
+		}
+	}
+	b.WriteString("\n## 📦 Attached SwarmOS Artifacts\n\n")
+	b.WriteString(DescriptionArtifacts(state, context))
+	b.WriteString(DescriptionRetrieval(unit.IssueNumber, stateRef, remote...))
+	return b.String()
 }

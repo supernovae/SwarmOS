@@ -3,6 +3,7 @@ package coordination
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gittransport"
 )
 
@@ -86,7 +88,11 @@ func TestNetworkAllCoordinationPushSites(t *testing.T) {
 				if time.Since(start) > 15*time.Second {
 					t.Error("publication exceeded bound")
 				}
-				if mode == "holder" || mode == "holder-reject" {
+				if mode == "holder" && site == "CAS" {
+					if err != nil {
+						t.Errorf("verified CAS: %v", err)
+					}
+				} else if mode == "holder" || mode == "holder-reject" {
 					var known *gitcredential.KnownResultCleanupError
 					if !errors.As(err, &known) || (mode == "holder" && known.ExitCode != 0 || mode == "holder-reject" && known.ExitCode == 0) || errors.Is(err, ErrPublicationUnknown) || errors.Is(err, ErrConflict) {
 						t.Errorf("known landed result lost: %v", err)
@@ -202,5 +208,106 @@ func TestNetworkRejectsInput(t *testing.T) {
 	_, err := f.store.run(context.Background(), "not allowed", "fetch", "origin")
 	if err == nil {
 		t.Fatal("network input accepted")
+	}
+}
+
+func TestGitCASRetryAcknowledgedInspection(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		for _, mode := range []string{"desired", "old", "successor", "missing", "read-error", "malformed", "namespace", "cancel"} {
+			t.Run(fmt.Sprintf("held=%t/%s", held, mode), func(t *testing.T) {
+				f := newRetentionFixture(t)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				old, err := f.store.CompareAndSwap(ctx, 306, "", []byte("old"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				tr := gittransport.New(t, f.remote)
+				tr.Configure(t, f.clone, "origin")
+				if held {
+					tr.Set("receive", "holder")
+				}
+				real, err := exec.LookPath("git")
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir := t.TempDir()
+				script := `#!/bin/sh
+if [ "$1" = push ]; then
+ echo "$4" > "$ACK_DIR/spec"
+ exec "$ACK_REAL" "$@"
+fi
+if [ "$1" = ls-remote ] && [ -f "$ACK_DIR/spec" ]; then
+ spec=$(cat "$ACK_DIR/spec"); desired=${spec%%:*}; ref=${spec#*:}
+ case "$ACK_MODE" in
+ old) "$ACK_REAL" --git-dir="$ACK_BARE" update-ref "$ref" "$ACK_OLD";;
+ missing) "$ACK_REAL" --git-dir="$ACK_BARE" update-ref -d "$ref";;
+ successor)
+ tree=$("$ACK_REAL" --git-dir="$ACK_BARE" rev-parse "$desired^{tree}")
+ successor=$(echo successor | "$ACK_REAL" --git-dir="$ACK_BARE" -c user.name=Test -c user.email=test@example.invalid commit-tree "$tree" -p "$desired")
+ "$ACK_REAL" --git-dir="$ACK_BARE" update-ref "$ref" "$successor";;
+ read-error) echo read-failed >&2; exit 1;;
+ malformed) echo malformed; exit 0;;
+ namespace) echo 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/swarm/state/issue-306'; exit 0;;
+ cancel) touch "$ACK_DIR/inspection"; while :; do :; done;;
+ esac
+fi
+exec "$ACK_REAL" "$@"
+`
+				if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0755); err != nil {
+					t.Fatal(err)
+				}
+				for key, value := range map[string]string{"ACK_DIR": dir, "ACK_REAL": real, "ACK_BARE": f.remote, "ACK_MODE": mode, "ACK_OLD": old, "PATH": dir + string(os.PathListSeparator) + os.Getenv("PATH")} {
+					t.Setenv(key, value)
+				}
+				done := make(chan struct{})
+				if mode == "cancel" {
+					go func() {
+						defer close(done)
+						ticker := time.NewTicker(time.Millisecond)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+								if _, e := os.Stat(filepath.Join(dir, "inspection")); e == nil {
+									cancel()
+									return
+								}
+							}
+						}
+					}()
+				}
+				tr.Watch(15*time.Second, func() { _, err = f.store.CompareAndSwap(ctx, 306, old, []byte("next")) })
+				if mode == "cancel" {
+					cancel()
+					<-done
+				}
+				if mode == "desired" {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if !errors.Is(err, ErrPublicationUnknown) || errors.Is(err, ErrConflict) {
+						t.Fatalf("unverified acknowledgement: %v", err)
+					}
+					if held {
+						var cleanup *gitcredential.KnownResultCleanupError
+						if !errors.As(err, &cleanup) || cleanup.ExitCode != 0 || !errors.Is(err, gitcredential.ErrCleanupIncomplete) {
+							t.Fatalf("cleanup cause lost: %v", err)
+						}
+					}
+					if mode == "cancel" && !errors.Is(err, context.Canceled) {
+						t.Fatalf("context lost: %v", err)
+					}
+				}
+				if tr.Receives() != 1 {
+					t.Fatalf("receives %d", tr.Receives())
+				}
+				tr.Release()
+				tr.Join()
+			})
+		}
 	}
 }

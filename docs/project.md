@@ -6,7 +6,21 @@ This guide walks repository maintainers through initializing SwarmOS, configurin
 
 ## 1. Initialize and Commit the Harness
 
-Install a resource-CLI-compatible `swarm` release from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or `go install github.com/supernovae/swarmos/cmd/swarm@<compatible-release>`). Until one is published, build this source checkout with `go build -o swarm ./cmd/swarm` and use that binary. Then run `swarm repo init` inside your repository checkout:
+Install a resource-CLI-compatible `swarm` release from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest). For Linux restore, install the archive's pure-Go `swarm-restore-helper` next to `swarm`:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+install -m 755 swarm swarm-restore-helper "$HOME/.local/bin/"
+```
+
+Until a compatible release is published, use `make install` from this source checkout. On Linux it installs both executables from the same checkout; the default destination is `$HOME/go/bin`. Custom build and installation directories are supported:
+
+```bash
+make build BIN_DIR="./build output"
+make install GOBIN="$HOME/.local/bin"
+```
+
+Keep the installation directory on `PATH`. For CLI-only use, `go install github.com/supernovae/swarmos/cmd/swarm@<compatible-release>`, `go install ./cmd/swarm`, or `go build -o swarm ./cmd/swarm` remain supported; these commands do not supply the Linux restore helper. Then run `swarm repo init` inside your repository checkout:
 
 ```bash
 swarm repo init --sync-labels --backend github

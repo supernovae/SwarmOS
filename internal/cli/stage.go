@@ -153,6 +153,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			modelName := strings.TrimSpace(firstNonEmptyStr(modelFlag, "interactive"))
 			metaForRole := func(role string) map[string]string {
 				return map[string]string{
+					"production_mode": "interactive",
 					"role":            role,
 					"agent":           harnessName,
 					"harness":         harnessName,
@@ -286,6 +287,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				for k, v := range metaForRole("tester") {
 					report.Artifact.Metadata[k] = v
 				}
+				lease.PreserveAcceptanceEvidence(state, &report.Artifact)
 				if _, err := manager.RecordTrustedValidation(ctx, issue, owner, report.Artifact); err != nil {
 					return err
 				}

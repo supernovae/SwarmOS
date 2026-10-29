@@ -71,26 +71,28 @@ type Options struct {
 	Resolve      bool
 }
 type Result struct {
-	HarnessPolicyWarning *workspace.HarnessPolicyWarning `json:"harness_policy_warning,omitempty"`
-	WorkPreflight        *WorkPreflightResult            `json:"work_preflight,omitempty"`
-	SubmitCommand        string                          `json:"submit_command,omitempty"`
-	CIFailures           bool                            `json:"ci_failures,omitempty"`
-	PR                   *tracker.PullRequest            `json:"pr"`
-	IssueNumber          int                             `json:"issue_number"`
-	State                *lease.IssueState               `json:"state,omitempty"`
-	Worktree             string                          `json:"worktree,omitempty"`
-	Branch               string                          `json:"branch,omitempty"`
-	HeadSHA              string                          `json:"head_sha,omitempty"`
-	BaseSHA              string                          `json:"base_sha,omitempty"`
-	Checks               []tracker.CheckRunResult        `json:"checks,omitempty"`
-	CodeScanning         *tracker.CodeScanningEvidence   `json:"code_scanning,omitempty"`
-	Reviews              []tracker.PullRequestReview     `json:"reviews,omitempty"`
-	Status               string                          `json:"status"`
-	Dirty                bool                            `json:"dirty"`
-	Rebasing             bool                            `json:"rebasing"`
-	Validation           *validation.ValidationReport    `json:"validation,omitempty"`
-	Preflight            *workflow.PreflightResult       `json:"preflight,omitempty"`
-	Work                 *workflow.WorkResult            `json:"work,omitempty"`
+	approvedAcceptance         []string
+	AcceptanceEvidenceWarnings []validation.AcceptanceWarning  `json:"acceptance_evidence_warnings,omitempty"`
+	HarnessPolicyWarning       *workspace.HarnessPolicyWarning `json:"harness_policy_warning,omitempty"`
+	WorkPreflight              *WorkPreflightResult            `json:"work_preflight,omitempty"`
+	SubmitCommand              string                          `json:"submit_command,omitempty"`
+	CIFailures                 bool                            `json:"ci_failures,omitempty"`
+	PR                         *tracker.PullRequest            `json:"pr"`
+	IssueNumber                int                             `json:"issue_number"`
+	State                      *lease.IssueState               `json:"state,omitempty"`
+	Worktree                   string                          `json:"worktree,omitempty"`
+	Branch                     string                          `json:"branch,omitempty"`
+	HeadSHA                    string                          `json:"head_sha,omitempty"`
+	BaseSHA                    string                          `json:"base_sha,omitempty"`
+	Checks                     []tracker.CheckRunResult        `json:"checks,omitempty"`
+	CodeScanning               *tracker.CodeScanningEvidence   `json:"code_scanning,omitempty"`
+	Reviews                    []tracker.PullRequestReview     `json:"reviews,omitempty"`
+	Status                     string                          `json:"status"`
+	Dirty                      bool                            `json:"dirty"`
+	Rebasing                   bool                            `json:"rebasing"`
+	Validation                 *validation.ValidationReport    `json:"validation,omitempty"`
+	Preflight                  *workflow.PreflightResult       `json:"preflight,omitempty"`
+	Work                       *workflow.WorkResult            `json:"work,omitempty"`
 	// RoleRuns is the issue's validated per-run telemetry, set by Status.
 	RoleRuns []contract.RoleRunTelemetry `json:"role_runs,omitempty"`
 	// Repair is the trusted summary of the issue's failed validation, set by
@@ -321,7 +323,7 @@ func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *
 	if err != nil {
 		return nil, fmt.Errorf("resolve PR workspace root: %w", err)
 	}
-	return &Result{PR: pr, IssueNumber: issue.Number, State: st, Worktree: workspace.PRWorktreePath(root, number), Branch: workspace.PRBranchName(number), HeadSHA: pr.HeadSHA, BaseSHA: st.BaseSHA, Status: "open"}, nil
+	return &Result{approvedAcceptance: wu.Acceptance, PR: pr, IssueNumber: issue.Number, State: st, Worktree: workspace.PRWorktreePath(root, number), Branch: workspace.PRBranchName(number), HeadSHA: pr.HeadSHA, BaseSHA: st.BaseSHA, Status: "open"}, nil
 }
 
 // codeScanning reads open alerts for the PR merge ref. Backends without the
@@ -1122,13 +1124,12 @@ func (s *Service) Validate(ctx context.Context, number int) (result *Result, run
 	if err != nil {
 		return nil, err
 	}
-	return s.validate(ctx, r, remote, p, false, true)
+	return s.validate(ctx, r, remote, p, false)
 }
 
 // validate runs required checks on the pending revision under the renewed claim
-// and records the report as that revision's validation evidence. fastPass runs
-// changed-package tests first; only explicit pr validate requests it.
-func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session, reuse, fastPass bool) (*Result, error) {
+// and records the report as that revision's validation evidence.
+func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session, reuse bool) (*Result, error) {
 	number := r.PR.Number
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
@@ -1149,14 +1150,14 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string, p *pro
 			return nil, fmt.Errorf("PR worktree identity differs from recorded revision")
 		}
 		return withCleanPRMarkers(path, func() (*Result, error) {
-			return s.validateClaim(ctx, r, owner, st, p, reuse, fastPass)
+			return s.validateClaim(ctx, r, owner, st, p, reuse)
 
 		})
 	})
 }
 
 // validateClaim shares the existing fenced claim with rebase and repair.
-func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st *lease.IssueState, p *progress.Session, reuse, fastPass bool) (*Result, error) {
+func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st *lease.IssueState, p *progress.Session, reuse bool) (*Result, error) {
 	head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
 	if e != nil {
 		return nil, e
@@ -1179,7 +1180,7 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 		p.Next("validation")
 		observe = p.Observe
 	}
-	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass, LookupEnv: s.LookupEnv, DependencyPolicy: s.dependencyPolicy(r.Worktree)}
+	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), LookupEnv: s.LookupEnv, DependencyPolicy: s.dependencyPolicy(r.Worktree)}
 	var report *validation.ValidationReport
 	var valErr error
 	if reuse {
@@ -1198,6 +1199,7 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 	if report != nil {
 		report.Artifact.Metadata = lease.TesterMetadata(st, report.Artifact.Metadata)
 		lease.PreserveTesterGuidance(st, &report.Artifact)
+		lease.PreserveAcceptanceEvidence(st, &report.Artifact)
 		r.Validation = report
 		st, e = s.Manager.RecordTrustedValidation(ctx, r.IssueNumber, owner, report.Artifact)
 		if e != nil {
@@ -1233,6 +1235,7 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 			return nil, fmt.Errorf("PR head changed since the last verified submission; run swarm pr work %d before submitting", number)
 		}
 		r.Status = "submitted"
+		r.AcceptanceEvidenceWarnings = lease.RecordedAcceptanceWarnings(r.State, r.approvedAcceptance)
 		if !s.Fork {
 			p.Next("review evidence update")
 			if e := ProjectReviewEvidence(ctx, s.Tracker, r.State, number); e != nil {
@@ -1248,7 +1251,7 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 	if err = s.refuseUnimplementedRevision(ctx, r); err != nil {
 		return r, err
 	}
-	r, err = s.validate(ctx, r, remote, p, true, false)
+	r, err = s.validate(ctx, r, remote, p, true)
 	if err != nil {
 		return r, err
 	}
@@ -1270,6 +1273,7 @@ func (s *Service) Submit(ctx context.Context, number int) (result *Result, runEr
 		if e != nil {
 			return nil, e
 		}
+		r.AcceptanceEvidenceWarnings = validation.AcceptanceEvidenceWarnings(unit.Acceptance, validation.AcceptanceSnapshotFromMetadata(r.Validation.Artifact.Metadata))
 		fresh, e := s.Tracker.GetPullRequest(ctx, number)
 		if e != nil {
 			return nil, e

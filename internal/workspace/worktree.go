@@ -967,7 +967,7 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	}
 	sys.WriteString("## Approved validation policy\n\n```yaml\n")
 	sys.WriteString(strings.TrimSpace(validationDoc))
-	sys.WriteString("\n```\n\nRun these check commands directly. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
+	sys.WriteString("\n```\n\nThe approved validation policy is a coordinator-owned reference, not a per-role execution list. After agent roles finish, the coordinator runs the complete trusted-base required policy once on the final candidate. Agent observations remain advisory and cannot satisfy claim-bound validation or publication. Roles follow their focused responsibilities in TEST_PLAN.md. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
 	sys.WriteString(strings.TrimSpace(rolePrompt) + "\n\n")
 	if guidance.profileDoc != "" {
 		sys.WriteString(strings.TrimSpace(guidance.profileDoc) + "\n\n")
@@ -1009,10 +1009,12 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 - **Test Plan Artifact Path**: `+"`.swarm/active/TEST_PLAN.md`"+`
 - **Review Artifact Path**: `+"`.swarm/active/REVIEW.md`"+`
 - **Slash Commands**: `+"`/swarm-plan`"+`, `+"`/swarm-review`"+`, `+"`/swarm-implement`"+`, `+"`/swarm-validate`"+`, `+"`/swarm-project-plan`"+`
-- **Interactive Staging CLI**: `+"`swarm issue stage %d --phase plan`"+` -> `+"`swarm issue review-plan %d`"+` -> `+"`swarm issue stage %d --phase implement`"+` -> `+"`swarm issue submit %d`"+`
+- **Interactive Staging CLI**: /swarm-plan -> `+"`swarm issue stage %d --phase plan`"+` -> `+"`swarm issue review-plan %d`"+` -> /swarm-implement -> `+"`swarm issue validate %[5]d`"+` -> `+"`swarm issue stage %[7]d --phase implement`"+` -> `+"`swarm issue renew %[5]d`"+` -> `+"`swarm issue submit %[8]d`"+`
+
+Use review-plan only for the configured gate; a human gate requires an independent maintainer with --approve. Renew explicitly within the approved claim budget.
 
 Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMPT.md`"+` before making changes.
-%s`, ActiveMarkerStart, wu.ID, wu.IssueNumber, role, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, ActiveMarkerEnd)
+%[9]s`, ActiveMarkerStart, wu.ID, wu.IssueNumber, role, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, ActiveMarkerEnd)
 
 	if err := injectActivePointer(worktreePath, pointerBlock); err != nil {
 		return err

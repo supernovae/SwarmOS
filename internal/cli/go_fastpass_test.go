@@ -54,8 +54,8 @@ func TestGoFastPassEntryPoints(t *testing.T) {
 		args []string
 		fast bool
 	}{
-		{[]string{"issue", "work", n, "--agent", "mock", "--progress=false"}, true},
-		{[]string{"issue", "validate", n, "--progress=false"}, true},
+		{[]string{"issue", "work", n, "--agent", "mock", "--progress=false"}, false},
+		{[]string{"issue", "validate", n, "--progress=false"}, false},
 		{[]string{"issue", "submit", n, "--progress=false"}, false},
 	} {
 		f.must(t, step.args...)

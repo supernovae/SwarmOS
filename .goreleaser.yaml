@@ -21,8 +21,23 @@ builds:
       - -X github.com/supernovae/swarmos/internal/cli.Commit={{.Commit}}
       - -X github.com/supernovae/swarmos/internal/cli.Date={{.Date}}
 
+  - id: swarm-restore-helper
+    main: ./cmd/swarm-restore-helper
+    binary: swarm-restore-helper
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
 archives:
   - id: default
+    ids:
+      - swarm
+      - swarm-restore-helper
+    allow_different_binary_count: true
     formats:
       - tar.gz
     format_overrides:

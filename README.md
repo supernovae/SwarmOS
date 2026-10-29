@@ -72,13 +72,32 @@ flowchart LR
 
 ### 1. Install `swarm`
 
-Download the prebuilt binary for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)), or install with Go 1.26.10+:
+Download the archive for **Linux**, **macOS**, or **Windows** from [**GitHub Releases**](https://github.com/supernovae/SwarmOS/releases/latest) (or browse [all releases](https://github.com/supernovae/SwarmOS/releases)). Linux restore requires the pure-Go `swarm-restore-helper` installed next to `swarm`. From an extracted Linux archive, install both executables together:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+install -m 755 swarm swarm-restore-helper "$HOME/.local/bin/"
+```
+
+With Go 1.26.10+, build and install from one source checkout using Make. On Linux these targets include the helper; macOS and Windows builds contain the CLI only:
+
+```bash
+make build BIN_DIR="./build output"
+make install GOBIN="$HOME/.local/bin"
+```
+
+`make install` defaults to `$HOME/go/bin`; keep your selected installation directory on `PATH`. `make check` runs formatting, vet, staticcheck, race-enabled tests, and changelog checks locally. PR CI uses a fixed regression profile; nightly and release validation run the full suites.
+
+For CLI-only installation, these Go commands remain supported:
 
 ```bash
 go install github.com/supernovae/swarmos/cmd/swarm@latest
+# From a source checkout:
+go install ./cmd/swarm
+go build -o swarm ./cmd/swarm
 ```
 
-To build from a source checkout instead, run `make install` (or `go install ./cmd/swarm`); it installs into `$HOME/go/bin` by default, so keep that directory on your `PATH`. `make check` runs formatting, vet, staticcheck, race-enabled tests, and changelog checks locally. PR CI uses a fixed regression profile; nightly and release validation run the full suites.
+These direct Go commands do not install the Linux restore helper.
 
 `swarm repo init` pins generated CI and fork automation to the swarm you ran it with: a release installs that release, and a clean source build installs its exact commit (push that commit before CI runs). From a build with uncommitted changes, init keeps the pin your workflows already use.
 

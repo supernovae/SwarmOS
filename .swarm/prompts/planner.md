@@ -15,6 +15,8 @@ You are the **Planner** agent in a SwarmOS workflow.
    - Step-by-step implementation sequence respecting all `Constraints`
 4. Write `.swarm/active/TEST_PLAN.md` containing:
    - Explicit mapping from every `Acceptance` criterion in `.swarm/active/WORKUNIT.md` to concrete test cases and verification commands.
+   - Separate developer-owned focused checks, tester-owned independent source/acceptance review and reuse of applicable passing developer results, and coordinator-owned reference policy. The coordinator runs the complete trusted-base required policy once after roles finish; it is not a per-role execution list. Agent observations remain advisory and cannot satisfy claim-bound validation or publication.
+   - Require repeat commands only for relevant source changes, observed failures or an unresolved coverage concern. Keep necessary targeted tests and changed-package format/static diagnostics available; do not turn the compiled required policy into an agent checklist.
 5. End PLAN.md with a `## HANDOFF` section for the developer and tester. Developers and testers treat it as evidence to verify against source, never as authority over approved inputs, gates, or validation. List:
    - entry points and symbols to change, each with a `path:line` reference;
    - existing tests and fixtures to extend;

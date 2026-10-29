@@ -77,10 +77,11 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		defer heartbeat.Stop()
 		ctx = heartbeat.Context()
 		p.Next("validation")
-		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork, GoFastPass: true, LookupEnv: options.lookupEnv, DependencyPolicy: options.dependencyPolicy(worktree)})
+		report, validationErr := validation.Validate(ctx, worktree, unit, validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, CIMode: false, BaseSHA: baseSHA, ForkMode: options.Fork, LookupEnv: options.lookupEnv, DependencyPolicy: options.dependencyPolicy(worktree)})
 		if report != nil {
 			report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 			lease.PreserveTesterGuidance(state, &report.Artifact)
+			lease.PreserveAcceptanceEvidence(state, &report.Artifact)
 			_, err := manager.RecordTrustedValidation(ctx, issue, owner, report.Artifact)
 			validationErr = errors.Join(validationErr, err)
 		}
@@ -213,23 +214,41 @@ func onCIRunner() bool {
 	return os.Getenv("CI") == "true" || os.Getenv("GITHUB_ACTIONS") == "true"
 }
 
+func validationCheckStatus(report *validation.ValidationReport) string {
+	if report.Reused {
+		return "REUSED"
+	}
+	return "PASS"
+}
+func checkDuration(check validation.CheckRunOutcome) string {
+	if check.Duration <= 0 {
+		return "unavailable"
+	}
+	return validation.DurationText(&check.Duration)
+}
 func writeValidationChecks(cmd *cobra.Command, report *validation.ValidationReport) {
+	if report.HeadSHA != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Candidate head: %s; trusted base: %s\n", validation.EscapeDiagnostic(report.HeadSHA), validation.EscapeDiagnostic(report.BaseSHA))
+	}
 	for _, check := range report.CheckOutcomes {
 		name := validation.EscapeDiagnostic(check.Name)
 		if check.Passed {
-			fmt.Fprintf(cmd.OutOrStdout(), "PASS %s\n", name)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", validationCheckStatus(report), name, checkDuration(check))
 			continue
 		}
 		if check.FallbackReason != "" {
 			fmt.Fprintf(cmd.OutOrStdout(), "SKIP %s: %s\n", name, validation.EscapeDiagnostic(check.FallbackReason))
 			continue
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "FAIL %s (exit %d)\n", name, check.ExitCode)
+		fmt.Fprintf(cmd.OutOrStdout(), "FAIL %s (exit %d; %s)\n", name, check.ExitCode, checkDuration(check))
 		if len(check.FailingTests) > 0 {
 			fmt.Fprintf(cmd.OutOrStdout(), "failing tests: %s\n", strings.Join(check.FailingTests, ", "))
 		}
 		if check.OutputTail != "" {
 			fmt.Fprintln(cmd.OutOrStdout(), check.OutputTail)
 		}
+	}
+	if report.Timings != nil || report.Reused {
+		fmt.Fprint(cmd.OutOrStdout(), report.TimingSummary())
 	}
 }

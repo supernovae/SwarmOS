@@ -167,18 +167,18 @@ func TestLocalReusableWorkflowPermissionsRegression(t *testing.T) {
 	}
 	removed := false
 	for i := 0; i < len(job.Permissions.Content); i += 2 {
-		if job.Permissions.Content[i].Value == "issues" {
+		if job.Permissions.Content[i].Value == "contents" {
 			job.Permissions.Content = append(job.Permissions.Content[:i], job.Permissions.Content[i+2:]...)
 			removed = true
 			break
 		}
 	}
 	if !removed {
-		t.Fatal("release checks issues permission missing")
+		t.Fatal("release checks contents permission missing")
 	}
 	release.Jobs["checks"] = job
 	_, diagnostics := checkWorkflowPermissions(workflows)
-	want := "release.yml/checks -> swarm-validate.yml/policy: issues requires read, available none"
+	want := "release.yml/checks -> full-validation.yml/full: contents requires read, available none"
 	if len(diagnostics) != 1 || diagnostics[0] != want {
 		t.Fatalf("got %v; want %s", diagnostics, want)
 	}

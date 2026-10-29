@@ -47,6 +47,18 @@ func TestRevisionMaterialization(t *testing.T) {
 						t.Fatalf("%s: %s %v", file, data, err)
 					}
 				}
+
+				for _, file := range []string{"SYSTEM_PROMPT.md", "REVISION_CONTEXT.md"} {
+					text := readActive(t, root, file)
+					for _, want := range []string{"developer-owned focused checks", "independently review source and acceptance criteria", "reuse applicable passing developer results", "coordinator-owned reference, not a per-role execution list", "coordinator runs the complete trusted-base required policy once"} {
+						if !strings.Contains(text, want) {
+							t.Errorf("%s lacks %q", file, want)
+						}
+					}
+					if strings.Contains(text, "and run required checks") {
+						t.Fatal("revision duplicates policy")
+					}
+				}
 				if err := WriteRevisionContext(root, nil); err != nil {
 					t.Fatal(err)
 				}

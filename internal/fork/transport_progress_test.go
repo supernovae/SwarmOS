@@ -129,7 +129,7 @@ func TestGatewayProgressOutcomes(t *testing.T) {
 						t.Fatalf("timeout reported an outcome: %+v", events)
 					}
 				}
-				expected := "no response from the upstream fork coordinator to request 100 (release) within 10ms; check the upstream repository's SwarmOS Fork Coordinator Actions run for that request: context deadline exceeded"
+				expected := "outcome of fork request 100 on issue #1 remains unresolved; query the original request with `swarm --fork fork-coordinator request-status 1 100`: context deadline exceeded"
 				if err == nil || err.Error() != expected || !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatal(err)
 				}

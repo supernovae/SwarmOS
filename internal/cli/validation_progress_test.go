@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/validation"
 )
 
 func runProgressCommand(t *testing.T, f *cliFixture, args ...string) (string, string, error) {
@@ -99,7 +100,11 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 							t.Fatalf("%v\n%s", err, diag)
 						}
 						if mode == "false" {
-							if diag != "" {
+							expected := ""
+							if operation == "submit" && asJSON {
+								expected = validation.AcceptanceEvidenceNotice([]validation.AcceptanceWarning{{Index: 1, Criterion: "Produce a checked checkpoint", Reason: "unmentioned"}})
+							}
+							if diag != expected {
 								t.Fatalf("quiet progress: %s", diag)
 							}
 						} else {
@@ -203,7 +208,7 @@ func TestValidationFailureDoesNotAnnouncePublication(t *testing.T) {
 	}
 	for _, operation := range []string{"validate", "submit"} {
 		text, _, textErr := runProgressCommand(t, f, "issue", operation, n, "--progress=false")
-		if textErr == nil || !strings.Contains(text, "FAIL trusted-failure (exit 7)\nPRIVATE_CHECK_OUTPUT") {
+		if textErr == nil || !strings.Contains(text, "FAIL trusted-failure (exit 7;") || !strings.Contains(text, "PRIVATE_CHECK_OUTPUT") {
 			t.Fatalf("missing text failure: %v %s", textErr, text)
 		}
 		out, diag, err := runProgressCommand(t, f, "issue", operation, n, "--json")

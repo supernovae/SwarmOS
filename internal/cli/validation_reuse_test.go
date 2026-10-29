@@ -149,7 +149,7 @@ func TestIssueSubmitValidationReuse(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				if !strings.Contains(pr.Body, "Reusing validation") {
+				if !strings.Contains(pr.Body, "Reusing validation") || !strings.Contains(pr.Body, "Submitted head:") || !strings.Contains(pr.Body, "Source head:") || !strings.Contains(pr.Body, "Total wall time:") || !strings.Contains(pr.Body, "Current reuse wall time:") {
 					t.Fatal("PR lacks disclosure")
 				}
 			} else if artifact.Metadata["validation_reused"] == "true" {
@@ -237,7 +237,7 @@ func TestPRSubmitValidationReuse(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				if !strings.Contains(pr.Body, "Reusing validation") {
+				if !strings.Contains(pr.Body, "Reusing validation") || !strings.Contains(pr.Body, "Submitted head:") || !strings.Contains(pr.Body, "Source head:") || !strings.Contains(pr.Body, "Total wall time:") || !strings.Contains(pr.Body, "Current reuse wall time:") {
 					t.Fatal("PR lacks disclosure")
 				}
 			}
@@ -280,6 +280,89 @@ func TestSubmitValidationReuseFallbackFailureBlocksPublication(t *testing.T) {
 			after := f.state(t, n)
 			if after.Lease.Status == "completed" || after.HeadSHA != published {
 				t.Fatal("failed fallback changed published state")
+			}
+		})
+	}
+}
+
+func TestCheckpointSubmitValidationReuse(t *testing.T) {
+	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
+	old := Version
+	t.Cleanup(func() { Version = old })
+	for _, version := range []string{"v1.2.3", "", "dev", "v1.2.3+dirty"} {
+		t.Run(version, func(t *testing.T) {
+			Version = version
+			f, counter := countedValidationFixture(t)
+			n := f.create(t, "agent")
+			number := strconv.Itoa(n)
+			f.must(t, "issue", "approve", number)
+			f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
+			wt := workspace.WorktreePath(f.root, n)
+			before := checkCount(t, counter)
+			predecessor := prGit(t, wt, "rev-parse", "HEAD")
+			prGit(t, wt, "commit", "--allow-empty", "-m", "recovered candidate")
+			candidate := prGit(t, wt, "rev-parse", "HEAD")
+			args := []string{"issue", "reconcile", number, "--checkpoint", "--expected-head", predecessor, "--candidate-head", candidate, "--json"}
+			stateBefore, _ := json.Marshal(f.state(t, n))
+			dryOut, dryDiag, dryErr := runProgressCommand(t, f, append(append([]string{}, args...), "--dry-run")...)
+			stateAfter, _ := json.Marshal(f.state(t, n))
+			if dryErr != nil || !json.Valid([]byte(dryOut)) || dryDiag != "" || !bytes.Equal(stateBefore, stateAfter) || checkCount(t, counter) != before {
+				t.Fatalf("dry run changed state/output/checks: %v %s", dryErr, dryDiag)
+			}
+			opts := f.options(nil)
+			lookup := opts.lookupEnv
+			lookupCalls := 0
+			opts.lookupEnv = func(key string) (string, bool) {
+				if key == "SWARM_EXECUTION_MODE" {
+					lookupCalls++
+				}
+				return lookup(key)
+			}
+			cmd := newRootCmdWithOptions(opts)
+			var out, diag bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&diag)
+			if version == "dev" {
+				args = append(args, "--progress=false")
+			}
+			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("reconcile: %v %s", err, diag.String())
+			}
+			if !json.Valid(out.Bytes()) {
+				t.Fatalf("invalid JSON: %s", out.String())
+			}
+			if lookupCalls == 0 {
+				t.Fatal("validator did not use CLI environment")
+			}
+			if version == "dev" && diag.Len() != 0 {
+				t.Fatal("disabled progress emitted stderr")
+			}
+			if version != "dev" && (!strings.Contains(diag.String(), "validation") || !strings.Contains(diag.String(), `"counted"`) || !strings.Contains(diag.String(), `"snapshot preparation" PASS`) || !strings.Contains(diag.String(), `"checkpoint publication" PASS`)) {
+				t.Fatalf("missing progress: %s", diag.String())
+			}
+			if got := checkCount(t, counter); got != before+1 {
+				t.Fatalf("reconcile count %d want %d", got, before+1)
+			}
+			source := latestValidation(t, f, n)
+			if source.Metadata["validation_trusted_claim"] != f.state(t, n).Lease.ClaimID {
+				t.Fatal("unbound reconciliation")
+			}
+			_, submitDiag := submitWithDiagnostics(t, f, "issue", "submit", number, "--json", "--progress=false")
+			want := before + 2
+			if version == "v1.2.3" {
+				want = before + 1
+			}
+			if got := checkCount(t, counter); got != want {
+				t.Fatalf("submit count %d want %d; %s", got, want, submitDiag)
+			}
+			if version == "v1.2.3" {
+				a := latestValidation(t, f, n)
+				if a.Metadata["validation_reused"] != "true" || a.Metadata["head_sha"] != candidate || a.Metadata["validation_source_time"] != source.CreatedAt.Format("2006-01-02T15:04:05.999999999Z07:00") {
+					t.Fatalf("missing source provenance: %v", a.Metadata)
+				}
+			} else if source.Metadata["validation_version"] != "" {
+				t.Fatal("legacy version gained fingerprint")
 			}
 		})
 	}

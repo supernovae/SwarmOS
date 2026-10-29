@@ -8,6 +8,7 @@ import (
 	"github.com/supernovae/swarmos/internal/progress"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -46,6 +47,9 @@ var (
 )
 
 type WorkOptions struct {
+	PlanCheckpoint bool
+	ExpectedHead   string
+	CandidateHead  string
 	Version        string
 	ReviewEvidence tracker.ReviewEvidence
 	CIEvidence     []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
@@ -505,6 +509,27 @@ func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool)
 }
 
 func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *WorkResult, workErr error) {
+	if opts.PlanCheckpoint {
+		return e.executeCheckpointPlan(ctx, opts)
+	}
+	if !e.ForkMode && !opts.ForkMode && opts.PRNumber == 0 {
+		st, err := e.LeaseManager.GetCurrentState(ctx, opts.IssueNumber)
+		// Let ordinary preflight retain its approval/error semantics when no
+		// authenticated recovery state can be read.
+		if err == nil && st != nil {
+			expected, candidate, present, bindingErr := lease.CheckpointPlanHeads(st)
+			if present && st.HeadSHA != candidate {
+				if bindingErr != nil {
+					return nil, bindingErr
+				}
+				if opts.Phase != "review" || opts.Handoff {
+					return nil, fmt.Errorf("%w: explicitly reconcile the reviewed checkpoint before ordinary work", lease.ErrApprovalRequired)
+				}
+				opts.ExpectedHead, opts.CandidateHead = expected, candidate
+				return e.executeCheckpointPlan(ctx, opts)
+			}
+		}
+	}
 	r := &workRun{e: e, ctx: ctx, opts: opts}
 	if r.opts.SetupProgress != nil && r.opts.OnProgress != nil {
 		r.progress = r.opts.SetupProgress
@@ -851,6 +876,18 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 	}
 	for key, value := range lease.ReviewBindings(st) {
 		revMeta[key] = value
+	}
+	if expected, candidate, present, bindingErr := lease.CheckpointPlanHeads(st); present && st.HeadSHA != candidate {
+		if bindingErr != nil {
+			return verdict, st, bindingErr
+		}
+		current, checkErr := e.LeaseManager.PrepareCheckpoint(ctx, wu.IssueNumber, owner, expected, candidate, false)
+		if checkErr != nil {
+			return verdict, st, checkErr
+		}
+		if !reflect.DeepEqual(lease.ReviewBindings(st), lease.ReviewBindings(current.State)) {
+			return verdict, st, lease.ErrApprovalRequired
+		}
 	}
 	updated, err := e.LeaseManager.UpdateArtifact(ctx, wu.IssueNumber, owner, contract.Artifact{
 		Type: contract.ArtifactReview, Producer: reviewerAgent + ":reviewer", Verdict: verdict,

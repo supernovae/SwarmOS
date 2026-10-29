@@ -9,9 +9,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/validation"
@@ -30,10 +32,26 @@ func TestValidationOutput(t *testing.T) {
 	if err := writeValidationOutcome(cmd, report, sentinel, false); err != sentinel {
 		t.Fatal("error identity changed")
 	}
-	want := "PASS ok\nFAIL test\\x1b (exit 7)\nfailing tests: TestAlpha, TestAlpha/sub\nfailure detail\nFAIL empty (exit 1)\n"
+	want := "PASS ok (unavailable)\nFAIL test\\x1b (exit 7; unavailable)\nfailing tests: TestAlpha, TestAlpha/sub\nfailure detail\nFAIL empty (exit 1; unavailable)\n"
 	if out.String() != want || strings.Contains(out.String(), "passing output") {
 		t.Fatalf("%q", out.String())
 	}
+	out.Reset()
+	report.Reused = true
+	report.SourceHead = "original"
+	report.SourceTime = "2026-10-29T00:00:00Z"
+	d := 2 * time.Millisecond
+	report.ReuseDuration = &d
+	report.Timings = &validation.ValidationTimings{Total: 3 * time.Second}
+	report.CheckOutcomes = report.CheckOutcomes[:1]
+	report.CheckOutcomes[0].Duration = time.Second
+	writeValidationChecks(cmd, report)
+	for _, want := range []string{"REUSED ok (1s)", "Total wall time: 3s", "source head: original", "current reuse: 2ms"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatal(out.String())
+		}
+	}
+
 }
 
 func TestFailedDiagnosticsAcrossCommands(t *testing.T) {
@@ -100,6 +118,7 @@ const commandFailureTail = "--- FAIL: TestCommand (0.00s)\n    command_test.go:1
 
 func assertCommandFailureDiagnostics(t *testing.T, out string, err error, asJSON bool) {
 	t.Helper()
+	out = regexp.MustCompile(`(\(exit [0-9]+); [^)]+\)`).ReplaceAllString(out, "$1)")
 	if err == nil {
 		t.Fatalf("failure accepted: %s", out)
 	}

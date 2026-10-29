@@ -93,12 +93,16 @@ func New(ctx context.Context, issue, pr int, emit func(Event), ticks <-chan time
 }
 
 // send is called with delivery held; state is released before observer delivery.
-func (p *Session) send(status string) {
+func (p *Session) send(status string) { p.sendDuration(status, 0) }
+func (p *Session) sendDuration(status string, duration time.Duration) {
 	p.mu.Lock()
 	e := p.event
 	e.Status = status
 	e.Elapsed = p.now().Sub(p.started)
 	e.StageElapsed = p.now().Sub(p.active)
+	if duration > 0 {
+		e.StageElapsed = duration
+	}
 	closed := p.closed
 	p.mu.Unlock()
 	p.activity.Enrich(&e, p.now())
@@ -163,7 +167,7 @@ func (p *Session) Observe(e Event) {
 		}
 		p.send("started")
 	} else {
-		p.send(e.Status)
+		p.sendDuration(e.Status, e.StageElapsed)
 		p.mu.Lock()
 		p.event.Check = ""
 		p.active = p.phaseStarted

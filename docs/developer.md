@@ -318,6 +318,15 @@ The original pair is available as `.swarm/active/ORIGINAL_PLAN.md` and `ORIGINAL
 
 Changes are prepared in `.swarm/worktrees/pr-33`, separate from the original issue worktree. A new revision goes through planning and the configured review gate again. For a human gate, an independent maintainer approves the linked **issue's** plan with `swarm issue review-plan <issue> --approve`, then the worker resumes `swarm pr work <PR>`. Use the existing `--agent`, role-agent overrides, `--phase`, `--headless`, `--progress`, and `--json` flags as appropriate.
 
+If automatic plan retries are exhausted, an authorized independent upstream maintainer can request a revised plan on the linked issue. For example, for issue 42 linked to PR 99:
+
+```bash
+swarm issue review-plan 42 --reject --notes "Revise the plan"
+swarm pr work 99 --phase plan
+```
+
+The maintainer runs the first command upstream, outside `--fork`; the worker runs the second. Rejection resets the retry budget and requests revision; it does not approve implementation. Review the new reports through the configured gate. When human approval is required, an independent maintainer runs `swarm issue review-plan 42 --approve --notes "Reviewed revised reports"`. Approving the current reports is also an explicit maintainer recovery option. Agent approval of existing reports alone does not reset a consumed budget. In auto mode, workers can alternatively revise both reports and stage them in the managed PR worktree with `swarm pr stage 99 --phase plan`; agent mode disables manual staging. Fork staging preserves the count; maintainer human review or a changed approved WorkUnit revision resets it.
+
 For `plan_mode: interactive`, `swarm pr work <PR>` pauses at `awaiting-plan` after preparing `.swarm/worktrees/pr-<PR>`. Write `.swarm/active/PLAN.md` and `.swarm/active/TEST_PLAN.md` **in that PR worktree**, then run `swarm pr stage <PR> --phase plan --harness <name> --model <name>` (optionally `--handoff` or `--json`). Under an agent gate, resume with `swarm pr work <PR>` to review and implement; under a human gate, an independent maintainer uses `swarm issue review-plan <issue> --approve` before `swarm pr work <PR>` resumes implementation. Do not stage through `swarm issue stage` against the old issue worktree while the PR revision is pending.
 
 Alternatively, after the plan gate, make implementation changes in the managed PR worktree and run `swarm pr stage <PR> --phase implement --harness <name> --model <name>`. This records a local checkpoint and validates against the approved baseline; it does **not** publish the branch or change the submitted issue checkpoint. Inspect with `swarm pr status <PR>` and publish only with `swarm pr submit <PR>`. Staging requires the existing pending revision, a valid active issue claim, and upstream mutation authorization (or, with `--fork`, a claim on your own fork PR); it rejects rebases, diverged heads, and unrelated worktrees.
@@ -654,3 +663,25 @@ with signals explaining the advice. Only recorded dimensions on the approved
 WorkUnit select an execution profile.
 
 On GitHub, `swarm issue lint <issue-number>` also reports missing or extra native blocked-by links as advisory warnings, including repository-qualified issue references. JSON output includes `warnings` and keeps `status: valid`. If the native view is unavailable, lint reports that instead of guessing drift. Lint does not change the body or relationships, and later body edits are not synchronized automatically. Roadmap reapplication retries dependency projections and restores the requested child order without duplicating links.
+
+## Repository validation lanes
+
+Every PR runs the same fixed regression profile, including documentation-only, broad and unknown changes. Trusted-base policy owns all-source formatting, build, vet and staticcheck plus the commands below. Mandatory security checks cover authoritative grants, credentials, filesystem confinement, isolation and fork admission; the full core packages cover approval, fencing and protected policy. CLI smoke and changelog validation also run in CI. Existing security scanning remains enabled.
+
+```bash
+go test -timeout=5m ./internal/cli -run '^Test(CLIRepoValidateHarnessGrantNeedsAuthoritativeState|RepoValidateGrantOnlyRunsNoChecks|RepoValidateGrantFileRechecked|RootDefaultEnvironment|RootInjectedEnvironment|ResolveBuildVersion|ResolveBuildVersionWithoutVCS)$' -count=1
+go test -timeout=5m ./internal/gitcredential/... ./internal/safefs/... -count=1
+go test -timeout=5m ./internal/agent -run '^Test(DefaultModeNeverRunsHostAgent|OperatorCannotWeakenApprovedIsolation|MockCannotBypassIsolation|IsolatedRunnerRejectsHostCredentialsAndUnrestrictedNetwork|NativeCodexRejectsPolicyOverrides|NativeIsolatedEffortAdmitsNoOtherArguments|IsolatedBackendIsExplicit|ConfiguredRunnerRejectsPublishingCredentialForwarding|RestrictedEnvRemovesPublishingCredentials|ConfiguredRunnerWithLookupRejectsCredentialNames|AdapterProcessHidesPublishingCredentials)$' -count=1
+go test -timeout=5m ./internal/sandbox -run '^Test(WorkerArchiveRoundTripAndImport|WorkerImportRejectsConcurrentChanges|WorkerRejectsHostileArchives|WorkerInputRejectsLinksAndCancellation|WorkerRejectsUnpinnedImageAndDoesNotForwardCredentials|WorkerInputRejectsPortableAliases|WorkerEmptyEnvironmentNeverInherits|WorkerOCIMissingCapabilitiesFailClosed|DependencyCacheNoFallback|NativeCodexBoundary|ToolExecutorBoundary)$' -count=1
+go test -timeout=5m ./internal/fork -run '^Test(GatewayDeadlineCancelsInFlightScan|GatewayIgnoresMismatchedOrEditedResults|ForkJSONRejectsTrailingMalformedData|ForkCoordinatorSecurityAndLifecycle|OperationListsStayInSync|ForkRequestRejectsCarryAuthority)$' -count=1
+go test -timeout=10m ./internal/validation/... ./internal/harness/... ./internal/coordination/... ./internal/lease/... ./internal/contract/...
+go test -timeout=5m ./cmd/changelog ./internal/changelog
+```
+
+There is no changed-file selector or conditional broad-change fallback: broad changes retain this fixed profile and receive full behavior coverage in nightly/release validation, including the entire CLI package. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
+
+The [full validation workflow](../.github/workflows/full-validation.yml) runs nightly at 04:23 UTC and can be started from Actions with **Run workflow**. It runs full normal and race suites, static and vulnerability checks, CLI smoke, changelog validation and Linux/macOS/Windows builds on amd64 and arm64. No existing benchmark or performance target is available. Each run records its commit and retains test/build logs for 14 days, including failures, with an Actions summary linking the outcome to the commit.
+
+Release snapshot and publishing jobs require the shared full gate and existing release eligibility checks for the same resolved immutable commit. A failed or skipped gate blocks packaging; a successful nightly run for another commit cannot satisfy release validation. Publishing retains the release environment approval and provenance attestation.
+
+The bootstrap PR still validates against its old trusted base, including that base's full test policy. The fixed profile takes effect once merged into a trusted base. Contributors and agents cannot override that policy. Before merging, maintainers should update any branch protection requiring the removed `Lint and vulnerabilities` or `Test and CLI smoke` jobs to the retained policy and CLI smoke jobs, and confirm the nightly schedule in Actions.

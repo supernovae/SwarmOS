@@ -967,7 +967,7 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	}
 	sys.WriteString("## Approved validation policy\n\n```yaml\n")
 	sys.WriteString(strings.TrimSpace(validationDoc))
-	sys.WriteString("\n```\n\nRun these check commands directly. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
+	sys.WriteString("\n```\n\nThe approved validation policy is a coordinator-owned reference, not a per-role execution list. After agent roles finish, the coordinator runs the complete trusted-base required policy once on the final candidate. Agent observations remain advisory and cannot satisfy claim-bound validation or publication. Roles follow their focused responsibilities in TEST_PLAN.md. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
 	sys.WriteString(strings.TrimSpace(rolePrompt) + "\n\n")
 	if guidance.profileDoc != "" {
 		sys.WriteString(strings.TrimSpace(guidance.profileDoc) + "\n\n")

@@ -2,6 +2,7 @@ package validation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
@@ -36,8 +37,6 @@ var goModuleFixture = map[string]string{
 	".swarm/config.yaml":             "version: 1\ndefault_agent: mock\ndefault_gate: none\nexecution:\n  mode: trusted-local\nlease:\n  duration: 1h\n  max_renewals: 1\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  mock:\n    binary: git\n    harness: mock\n",
 	".github/workflows/validate.yml": "on: push\n",
 }
-
-var affectedByLeaf = []string{"example.com/m/consumer", "example.com/m/leaf", "example.com/m/testonly", "example.com/m/transitive", "example.com/m/xtest"}
 
 // setupGoFastPassRepo commits the module fixture with the given trusted
 // checks and returns the repository and its approved base.
@@ -95,12 +94,16 @@ const failingLeaf = "package leaf\n\nfunc Value() int { return 2 }\n"
 const passingLeaf = "package leaf\n\nfunc Value() int { return 1 + 0 }\n"
 
 func recordEvents(events *[]string) func(progress.Event) {
-	return func(e progress.Event) { *events = append(*events, e.Check+" "+e.Status) }
+	return func(e progress.Event) {
+		if !strings.HasPrefix(e.Check, "preparation:") {
+			*events = append(*events, e.Check+" "+e.Status)
+		}
+	}
 }
 
 func validateFastPass(t *testing.T, ctx context.Context, repo, base string, events *[]string) (*ValidationReport, error) {
 	t.Helper()
-	return Validate(ctx, repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base, GoFastPass: true, OnProgress: recordEvents(events)})
+	return Validate(ctx, repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base, OnProgress: recordEvents(events)})
 }
 
 func TestGoFastPassFailingChangedPackage(t *testing.T) {
@@ -112,29 +115,20 @@ func TestGoFastPassFailingChangedPackage(t *testing.T) {
 	if !errors.Is(err, ErrRequiredCheckFailed) || report == nil || report.Passed {
 		t.Fatalf("changed-package failure must fail validation: %+v %v", report, err)
 	}
-	if len(report.CheckOutcomes) != 1 {
-		t.Fatalf("full suite or later checks ran: %+v", report.CheckOutcomes)
+	if len(report.CheckOutcomes) != 2 {
+		t.Fatalf("required checks missing: %+v", report.CheckOutcomes)
 	}
 	pre := report.CheckOutcomes[0]
-	if pre.Name != "test (changed packages)" || !pre.Preliminary || pre.Passed || pre.InfrastructureError || !slices.Equal(pre.Packages, affectedByLeaf) {
-		t.Fatalf("preliminary outcome: %+v", pre)
+	if pre.Name != "test" || pre.Preliminary || pre.Passed || pre.InfrastructureError || pre.Command != "go test -count=1 ./..." {
+		t.Fatalf("authoritative outcome: %+v", pre)
 	}
-	if !slices.Contains(pre.FailingTests, "TestLeaf") || !strings.Contains(pre.Output, "example.com/m/leaf") || strings.Contains(pre.Command, "./...") || strings.Contains(pre.Output, "unrelated") {
-		t.Fatalf("failure must name the changed package without running others: %+v", pre)
+	if !slices.Contains(pre.FailingTests, "TestLeaf") || report.Artifact.Verdict != "FAIL" || report.Artifact.Metadata["validation_report"] != "" {
+		t.Fatal("failure lost")
 	}
-	if !slices.Equal(events, []string{"test (changed packages) started", "test (changed packages) FAIL"}) {
-		t.Fatalf("events: %v", events)
+	if _, err := os.Stat(filepath.Join(repo, "after-ran")); err != nil {
+		t.Fatal("later required check did not run", err)
 	}
-	if _, err := os.Stat(filepath.Join(repo, "after-ran")); !os.IsNotExist(err) {
-		t.Fatalf("later required check ran after the early failure: %v", err)
-	}
-	if report.Artifact.Verdict != "FAIL" || report.Artifact.Metadata["validation_report"] != "" || !strings.Contains(report.Artifact.Summary, "changed packages failed") {
-		t.Fatalf("artifact: %+v", report.Artifact)
-	}
-	body, err := os.ReadFile(filepath.Join(repo, ".swarm", "active", "VALIDATION.md"))
-	if err != nil || !strings.Contains(string(body), "test (changed packages)") || !strings.Contains(string(body), "2 required check(s) did not run") {
-		t.Fatalf("validation report: %s %v", body, err)
-	}
+
 }
 
 func TestGoFastPassThenFull(t *testing.T) {
@@ -155,23 +149,28 @@ func TestGoFastPassThenFull(t *testing.T) {
 			repo, base := setupGoFastPassRepo(t, checks, tc.overrides)
 			commitRepoFile(t, repo, "leaf/leaf.go", passingLeaf)
 			var events []string
-			report, err := Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base, GoFastPass: true, Version: "v1.0.0", ClaimID: "claim", OnProgress: recordEvents(&events)})
+			report, err := Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base, Version: "v1.0.0", ClaimID: "claim", OnProgress: recordEvents(&events)})
 			if (err == nil) != tc.pass || report == nil || report.Passed != tc.pass {
 				t.Fatalf("full run must decide: %+v %v", report, err)
 			}
-			if len(report.CheckOutcomes) != 3 {
+			if len(report.CheckOutcomes) != 2 {
 				t.Fatalf("outcomes: %+v", report.CheckOutcomes)
 			}
-			pre, full := report.CheckOutcomes[0], report.CheckOutcomes[1]
-			if !pre.Preliminary || !pre.Passed || !slices.Equal(pre.Packages, affectedByLeaf) {
-				t.Fatalf("preliminary: %+v", pre)
+			if report.Timings == nil || report.Timings.Total < report.Timings.Preflight.Duration+report.Timings.Warmup.Duration+report.Timings.Checks.Duration+report.Timings.Repair.Duration {
+				t.Fatalf("phase wall times: %+v", report.Timings)
 			}
+			var decoded ValidationReport
+			raw, _ := json.Marshal(report)
+			if json.Unmarshal(raw, &decoded) != nil || decoded.Timings == nil || decoded.Timings.Total != report.Timings.Total {
+				t.Fatal("timings did not round-trip")
+			}
+			full := report.CheckOutcomes[0]
 			if full.Name != "test" || full.Command != command || full.Preliminary || full.Passed != tc.pass {
 				t.Fatalf("full check must run unchanged: %+v", full)
 			}
-			want := []string{"test (changed packages) started", "test (changed packages) PASS", "test started", "test PASS", "ok started", "ok PASS"}
+			want := []string{"test started", "test PASS", "ok started", "ok PASS"}
 			if !tc.pass {
-				want[3] = "test FAIL"
+				want[1] = "test FAIL"
 			}
 			if !slices.Equal(events, want) {
 				t.Fatalf("events: %v", events)
@@ -227,7 +226,7 @@ func TestGoFastPassOptOutAndCIMode(t *testing.T) {
 	t.Parallel()
 	for name, opts := range map[string]ValidateOptions{
 		"opt-out": {},
-		"CI":      {CIMode: true, GoFastPass: true},
+		"CI":      {CIMode: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -254,10 +253,8 @@ func TestGoFastPassDirtyIssueValidate(t *testing.T) {
 	if !errors.Is(err, ErrRequiredCheckFailed) || len(report.CheckOutcomes) != 1 {
 		t.Fatalf("dirty edit must fail early: %+v %v", report, err)
 	}
-	want := append(slices.Clone(affectedByLeaf), "example.com/m/extra")
-	slices.Sort(want)
-	if pre := report.CheckOutcomes[0]; !pre.Preliminary || !slices.Equal(pre.Packages, want) {
-		t.Fatalf("checkpoint selection: %v", pre.Packages)
+	if full := report.CheckOutcomes[0]; full.Preliminary || full.Command != "go test -count=1 ./..." {
+		t.Fatalf("full check: %+v", full)
 	}
 	if staged := runRepoGit(t, repo, "diff", "--cached", "--name-only"); staged != "" {
 		t.Fatalf("checkpoint capture changed the index: %q", staged)
@@ -277,7 +274,7 @@ func TestGoFastPassModuleChangesUseFullRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.CheckOutcomes) != 1 || !strings.Contains(report.Artifact.Body, "skipped: module configuration changed") {
+	if len(report.CheckOutcomes) != 1 || report.CheckOutcomes[0].Preliminary {
 		t.Fatalf("module change must fall back to the full run: %+v %s", report.CheckOutcomes, report.Artifact.Body)
 	}
 }
@@ -326,12 +323,14 @@ func TestGoFastPassProgress(t *testing.T) {
 	if _, err := validateFastPass(t, t.Context(), repo, base, &events); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(events, []string{"test (changed packages) started", "test (changed packages) PASS", "test started", "test PASS"}) {
+	r, err := os.ReadFile(filepath.Join(repo, ".swarm/active/VALIDATION.md"))
+	if err != nil || !strings.Contains(string(r), "Total wall time:") {
+		t.Fatalf("timing report: %s %v", r, err)
+	}
+	if !slices.Equal(events, []string{"test started", "test PASS"}) {
 		t.Fatalf("events: %v", events)
 	}
 	want := []string{
-		"list -e -json=ImportPath,Dir,Module,Imports,TestImports,XTestImports -race ./...",
-		"test -json -race example.com/m/consumer example.com/m/leaf",
 		"test -json -race ./...",
 	}
 	if got := readLog(t, log); !slices.Equal(got, want) {
@@ -360,22 +359,16 @@ func TestGoFastPassInfrastructureFallback(t *testing.T) {
 			if (err == nil) != tc.pass || report.Passed != tc.pass {
 				t.Fatalf("full run must decide: %+v %v", report, err)
 			}
-			pre, full := report.CheckOutcomes[0], report.CheckOutcomes[1]
-			if !pre.Preliminary || !strings.Contains(pre.FallbackReason, tc.fallback) || pre.InfrastructureError {
-				t.Fatalf("fallback must be a non-gating diagnostic: %+v", pre)
-			}
-			if full.Passed != tc.pass || full.Command != "go test ./..." {
-				t.Fatalf("full: %+v", full)
+			if len(report.CheckOutcomes) != 1 || report.CheckOutcomes[0].Preliminary || report.CheckOutcomes[0].Passed != tc.pass {
+				t.Fatalf("authoritative: %+v", report)
 			}
 			if tc.pass && report.Artifact.Metadata["validation_report"] != "" {
 				t.Fatalf("no reuse context was supplied: %+v", report.Artifact.Metadata)
 			}
-			if events[1] != "test (changed packages) skipped" || events[2] != "test started" {
-				t.Fatalf("events: %v", events)
-			}
-			if got := readLog(t, log); len(got) != 3 || got[2] != "test -json ./..." {
+			if got := readLog(t, log); len(got) != 1 || got[0] != "test -json ./..." {
 				t.Fatalf("invocations: %q", got)
 			}
+
 		})
 	}
 }
@@ -387,7 +380,10 @@ func TestGoFastPassCancellationStartsNoFullRun(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var events []string
-	report, err := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, GoFastPass: true, OnProgress: func(e progress.Event) {
+	report, err := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+		if strings.HasPrefix(e.Check, "preparation:") {
+			return
+		}
 		events = append(events, e.Check+" "+e.Status)
 		if e.Status == "started" {
 			cancel()
@@ -396,7 +392,7 @@ func TestGoFastPassCancellationStartsNoFullRun(t *testing.T) {
 	if err == nil || report == nil || report.Passed || len(report.CheckOutcomes) != 1 {
 		t.Fatalf("cancellation: %+v %v", report, err)
 	}
-	if !slices.Equal(events, []string{"test (changed packages) started", "test (changed packages) FAIL"}) {
+	if !slices.Equal(events, []string{"test started", "test FAIL"}) {
 		t.Fatalf("events: %v", events)
 	}
 	for _, line := range readLog(t, log) {
@@ -441,17 +437,6 @@ func TestGoFastPassReverseDependencies(t *testing.T) {
 		t.Fatal("a changed directory that is not a package must not be guessed")
 	}
 
-	// The same closure comes from real `go list` metadata of the fixture.
-	repo, base := setupGoFastPassRepo(t, "  - name: test\n    command: go test -count=1 ./...\n    timeout: 5m\n", nil)
-	commitRepoFile(t, repo, "leaf/leaf.go", passingLeaf)
-	var events []string
-	report, err := validateFastPass(t, t.Context(), repo, base, &events)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pre := report.CheckOutcomes[0]; !slices.Equal(pre.Packages, affectedByLeaf) {
-		t.Fatalf("selection: %v", pre.Packages)
-	}
 }
 
 func TestParseGoTestAll(t *testing.T) {

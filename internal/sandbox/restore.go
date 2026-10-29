@@ -93,20 +93,12 @@ func (boundary RestoreBoundary) run(ctx context.Context, request RestoreRequest,
 		return "", fmt.Errorf("restore cache root: %w", err)
 	}
 	defer cache.Close()
-	// Never accept home or a system directory as the repository/cache boundary.
 	for _, root := range []string{request.RepositoryRoot, request.CacheRoot} {
-		for _, system := range []string{"/usr", "/etc", "/proc", "/sys", "/dev", "/run", "/boot", "/home", "/root"} {
-			if root == system || isSubpath(root, system) {
-				return "", errors.New("restore system/home root denied")
-			}
-		}
-		if root == "/" || root == "/tmp" || root == "/var" || root == "/home" || root == "/usr" || root == "/etc" || root == "/run" {
-			return "", errors.New("restore unsafe repository/cache root")
-		}
-		if home := os.Getenv("HOME"); home != "" && (root == home || isSubpath(root, home)) {
-			return "", errors.New("restore host home denied")
+		if err := validateRestoreRoot(root, os.Getenv("HOME")); err != nil {
+			return "", err
 		}
 	}
+
 	helper, err := openRestoreRegular(boundary.Helper)
 	if err != nil {
 		return "", fmt.Errorf("restore helper unavailable: %w", err)
@@ -495,4 +487,20 @@ func createRestoreOutput(pinned *safefs.Root, path string) (*os.Root, string, er
 		return nil, "", err
 	}
 	return root, name, nil
+}
+
+// validateRestoreRoot permits private repository children of home directories,
+// while denying home roots themselves and system trees.
+func validateRestoreRoot(root, home string) error {
+	for _, system := range []string{"/usr", "/etc", "/proc", "/sys", "/dev", "/run", "/boot"} {
+		if root == system || isSubpath(root, system) {
+			return errors.New("restore system root denied")
+		}
+	}
+	for _, denied := range []string{"/", "/tmp", "/var", "/home", "/root", home} {
+		if denied != "" && root == denied {
+			return errors.New("restore home/system root denied")
+		}
+	}
+	return nil
 }

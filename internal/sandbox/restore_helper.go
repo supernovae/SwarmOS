@@ -171,14 +171,14 @@ func newRestoreBridge(ctx context.Context) (*restoreBridge, error) {
 	if err != nil {
 		return nil, err
 	}
-	return startRestoreBridge(ctx, l), nil
+	return startRestoreBridge(ctx, l, func(ctx context.Context) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", "/restore-broker/broker.sock")
+	}), nil
 }
 
-func startRestoreBridge(ctx context.Context, l net.Listener) *restoreBridge {
+func startRestoreBridge(ctx context.Context, l net.Listener, dial func(context.Context) (net.Conn, error)) *restoreBridge {
 	ctx, cancel := context.WithCancel(ctx)
-	b := &restoreBridge{ctx: ctx, cancel: cancel, listener: l, active: map[net.Conn]bool{}, dial: func(ctx context.Context) (net.Conn, error) {
-		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", "/restore-broker/broker.sock")
-	}}
+	b := &restoreBridge{ctx: ctx, cancel: cancel, listener: l, active: map[net.Conn]bool{}, dial: dial}
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -243,7 +244,10 @@ func TestRestoreInputSafety(t *testing.T) {
 		}
 	}
 	helper := filepath.Join(root, "helper")
-	if err := os.WriteFile(helper, []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
+	syscall.ForkLock.RLock()
+	err := os.WriteFile(helper, []byte("#!/bin/sh\nexit 99\n"), 0700)
+	syscall.ForkLock.RUnlock()
+	if err != nil {
 		t.Fatal(err)
 	}
 	request := RestoreRequest{Source: source, RepositoryRoot: repo, CacheRoot: cache, Registries: []string{restoreFixtureHost}, Argv: []string{"/usr/bin/true"}}
@@ -331,8 +335,7 @@ func TestRestoreHelperBridgeProtocol(t *testing.T) {
 	f := newRestoreFixture(t, nil)
 	brokerListener := f.listener
 	helperListener := newRestoreTestListener()
-	bridge := startRestoreBridge(t.Context(), helperListener)
-	bridge.dial = brokerListener.dial
+	bridge := startRestoreBridge(t.Context(), helperListener, brokerListener.dial)
 	t.Cleanup(func() { _ = bridge.close() })
 	f.listener = helperListener
 	client := f.client()
@@ -505,7 +508,7 @@ func TestRestoreCleanupErrors(t *testing.T) {
 	if err = b.close(); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatal("broker cleanup failure suppressed", err)
 	}
-	bridge := startRestoreBridge(t.Context(), restoreCloseFailure{newRestoreTestListener()})
+	bridge := startRestoreBridge(t.Context(), restoreCloseFailure{newRestoreTestListener()}, nil)
 	if err = bridge.close(); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatal("helper cleanup failure suppressed", err)
 	}
@@ -563,5 +566,61 @@ func TestRestoreReadyFrameCancellation(t *testing.T) {
 				t.Fatal("cancelled reader did not stop")
 			}
 		})
+	}
+}
+
+func TestRestoreHomeContainedRepository(t *testing.T) {
+	// Model a normal home checkout without requiring writes to the host's home.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, "src", "SwarmOS")
+	cache := filepath.Join(repo, ".swarm", "private-cache")
+	for _, path := range []string{repo, cache} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := validateRestoreRoot(path, home); err != nil {
+			t.Fatalf("home-contained repository rejected: %v", err)
+		}
+		pinned, err := openRestoreDirectory(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pinned.Close()
+	}
+	source := filepath.Join(home, "approved-source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (RestoreBoundary{Helper: filepath.Join(home, "missing-helper")}).Run(t.Context(), RestoreRequest{
+		Source: source, RepositoryRoot: repo, CacheRoot: cache,
+		Registries: []string{restoreFixtureHost}, Argv: []string{"/bin/true"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "restore helper unavailable") {
+		t.Fatalf("home-contained paths did not reach helper validation: %v", err)
+	}
+	for _, path := range []string{"/home/byron/src/SwarmOS", "/home/byron/src/SwarmOS/.cache", "/root/src/repo"} {
+		if err := validateRestoreRoot(path, "/home/byron"); err != nil {
+			t.Fatalf("private child %q rejected: %v", path, err)
+		}
+	}
+	for _, path := range []string{home, "/", "/home", "/root", "/tmp", "/var", "/usr", "/usr/local", "/etc/private", "/proc/self"} {
+		if err := validateRestoreRoot(path, home); err == nil {
+			t.Fatalf("unsafe root %q accepted", path)
+		}
+	}
+	// A repository-owned spelling cannot hide a symlink to another home path.
+	link := filepath.Join(repo, "linked-cache")
+	if err := os.Symlink(home, link); err != nil {
+		t.Fatal(err)
+	}
+	if pinned, err := openRestoreDirectory(link); err == nil {
+		pinned.Close()
+		t.Fatal("linked cache accepted")
+	}
+	for _, source := range []string{repo, cache, filepath.Join(cache, "source")} {
+		if !restoreOverlap(source, cache) {
+			t.Fatalf("overlap missed: %q", source)
+		}
 	}
 }

@@ -704,9 +704,7 @@ func TestRestoreProtocolOpenSSLBridge(t *testing.T) {
 			t.Run(mode+"/"+version, func(t *testing.T) {
 				f := newRestoreFixture(t, nil)
 				listener := newRestoreTestListener()
-				bridge := startRestoreBridge(t.Context(), listener)
-				defer bridge.close()
-				bridge.dial = f.listener.dial
+				dial := f.listener.dial
 				proxyAddress := ""
 				if mode == "tcp-unix" {
 					unixListener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
@@ -725,15 +723,16 @@ func TestRestoreProtocolOpenSSLBridge(t *testing.T) {
 						t.Fatal(err)
 					}
 					proxyAddress = tcpListener.Addr().String()
-					socketBridge := startRestoreBridge(t.Context(), tcpListener)
-					socketBridge.dial = func(ctx context.Context) (net.Conn, error) {
+					socketBridge := startRestoreBridge(t.Context(), tcpListener, func(ctx context.Context) (net.Conn, error) {
 						return (&net.Dialer{}).DialContext(ctx, "unix", unixListener.Addr().String())
-					}
+					})
 					defer socketBridge.close()
-					bridge.dial = func(ctx context.Context) (net.Conn, error) {
+					dial = func(ctx context.Context) (net.Conn, error) {
 						return (&net.Dialer{}).DialContext(ctx, "tcp4", tcpListener.Addr().String())
 					}
 				}
+				bridge := startRestoreBridge(t.Context(), listener, dial)
+				defer bridge.close()
 				c, err := listener.dial(t.Context())
 				if err != nil {
 					t.Fatal(err)
@@ -745,6 +744,7 @@ func TestRestoreProtocolOpenSSLBridge(t *testing.T) {
 import ssl,sys,os
 ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 ctx.load_verify_locations(cadata=sys.argv[1])
+ctx.verify_flags |= ssl.VERIFY_X509_STRICT
 ctx.minimum_version=ctx.maximum_version=getattr(ssl.TLSVersion,sys.argv[2])
 incoming,outgoing=ssl.MemoryBIO(),ssl.MemoryBIO()
 s=ctx.wrap_bio(incoming,outgoing,server_hostname='registry.example')
@@ -799,5 +799,27 @@ s.close()
 				}
 			})
 		}
+	}
+}
+
+func TestRestoreProtocolStrictCertificateIdentifiers(t *testing.T) {
+	trust, err := newRestoreTrust([]string{restoreFixtureHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain := trust.certificates[restoreFixtureHost].Certificate
+	leaf, err := x509.ParseCertificate(chain[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := x509.ParseCertificate(chain[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ca.SubjectKeyId) == 0 || len(leaf.AuthorityKeyId) == 0 || !bytes.Equal(leaf.AuthorityKeyId, ca.SubjectKeyId) {
+		t.Fatal("strict certificate chain requires matching authority/subject key identifiers")
+	}
+	if err := leaf.CheckSignatureFrom(ca); err != nil {
+		t.Fatal(err)
 	}
 }

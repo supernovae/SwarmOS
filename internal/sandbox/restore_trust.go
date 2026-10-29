@@ -45,6 +45,12 @@ func newRestoreTrust(hosts []string) (*restoreTrust, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Parse the issued CA so generated extensions (including its subject key
+	// identifier) are available when signing leaves.
+	ca, err = x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
+	}
 	t := &restoreTrust{pem: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), jks: encodeTrustJKS(der, now), certificates: make(map[string]tls.Certificate)}
 	for _, host := range hosts {
 		leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

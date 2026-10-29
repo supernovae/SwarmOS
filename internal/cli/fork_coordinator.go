@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
+	"os"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/fork"
@@ -50,6 +54,29 @@ func newForkCoordinatorCmd(rootOpts *RootOptions) *cobra.Command {
 				UpstreamRemote: rootOpts.effectiveUpstreamRemote(),
 				Tracker:        tr,
 			}
+			coord.InitForkReader = func() (func(context.Context, string, string) (string, error), func(context.Context, string, string, string) (string, error), error) {
+				token := os.Getenv("SWARM_GITHUB_FORK_READ_TOKEN")
+				if token == "" {
+					return nil, nil, nil
+				}
+				if err := validateForkReadToken(token); err != nil {
+					return nil, nil, err
+				}
+				host := os.Getenv("GH_HOST")
+				if host == "" {
+					host = "github.com"
+				}
+				reader, err := tracker.NewForkReader(upstreamRepo, host, token)
+				if err != nil {
+					return nil, nil, err
+				}
+				return func(ctx context.Context, slug, owner string) (string, error) {
+						return reader.VerifyForkRepository(ctx, slug, owner, false)
+					}, func(ctx context.Context, slug, op, value string) (string, error) {
+						out, err := gitcredential.ForkRead(ctx, repoRoot, host, slug, token, op, value)
+						return strings.TrimSpace(string(out)), err
+					}, nil
+			}
 			res, err := coord.HandleEvent(cmd.Context(), *ev)
 			if err != nil {
 				return err
@@ -70,4 +97,13 @@ func newForkCoordinatorCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().StringVar(&eventPath, "event", "", "Path to the GitHub issue_comment webhook event payload ($GITHUB_EVENT_PATH)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit coordinator execution result as JSON")
 	return cmd
+}
+
+func validateForkReadToken(token string) error {
+	for _, r := range token {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || r > 126 {
+			return fmt.Errorf("invalid fork read credential")
+		}
+	}
+	return nil
 }

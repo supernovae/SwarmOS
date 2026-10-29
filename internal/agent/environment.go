@@ -34,6 +34,9 @@ func restrictedEnvWithLookup(allowed []string, home string, lookup func(string) 
 	}
 	out = append(out, "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"), "XDG_CACHE_HOME="+filepath.Join(home, ".cache"), "XDG_DATA_HOME="+filepath.Join(home, ".local", "share"), "TMPDIR="+filepath.Join(home, "tmp"), "TMP="+filepath.Join(home, "tmp"), "TEMP="+filepath.Join(home, "tmp"))
 	for name := range allow {
+		if strings.HasPrefix(strings.ToUpper(name), "SWARM_GITHUB_") {
+			continue
+		}
 		if value, ok := lookup(name); ok {
 			out = append(out, name+"="+value)
 		}

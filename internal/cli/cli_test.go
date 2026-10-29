@@ -1862,6 +1862,9 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 		t.Fatalf("dev build init: %v\n%s", err, out)
 	}
 	coordinator := ".github/workflows/swarm-fork-coordinator.yml"
+	if strings.Count(read(root, coordinator), "secrets.SWARM_GITHUB_FORK_READ_TOKEN") != 1 {
+		t.Fatal("generated coordinator missing execute-only fork credential")
+	}
 	if !strings.Contains(read(root, coordinator), "SWARM_VERSION: "+buildCommit) {
 		t.Fatal("coordinator did not pin the build commit")
 	}
@@ -2233,5 +2236,18 @@ func TestCLIEmptyConstraintsWork(t *testing.T) {
 	}
 	if outcome.Status != "completed" || !outcome.Result.ValidationPassed {
 		t.Fatalf("unexpected workflow outcome: %+v", outcome)
+	}
+}
+
+func TestForkReadTokenValidation(t *testing.T) {
+	for _, token := range []string{" ", "\t", "x\n", "x\r", " x", "x ", "x\x00", "x\x7f"} {
+		if validateForkReadToken(token) == nil {
+			t.Fatal("invalid credential accepted")
+		}
+	}
+	for _, token := range []string{"", "github_pat_synthetic123"} {
+		if err := validateForkReadToken(token); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

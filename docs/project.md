@@ -175,6 +175,8 @@ swarm issue lint 42 --backend github
 swarm issue approve 42 --backend github
 ```
 
+On GitHub, `swarm issue create --depends-on 7,8` also adds native blocked-by links so prerequisites appear on the issue. The WorkUnit body remains the source of dependency truth; later body edits are not synchronized automatically.
+
 Approving a child WorkUnit records its canonical WorkUnit digest, `.swarm/` policy digest, and trusted base SHA in Git state and applies the `swarm:ready` label. Epics (`type: Epic`) are non-executable planning containers: they carry no readiness label and cannot be approved or claimed directly.
 
 To split an existing multi-item WorkUnit issue into linked `swarm:draft` child sub-issues, run:
@@ -182,6 +184,8 @@ To split an existing multi-item WorkUnit issue into linked `swarm:draft` child s
 ```bash
 swarm issue decompose 42 --sequential --backend github
 ```
+
+Decomposition mirrors dependencies as native blocked-by links and orders sub-issues in decomposition order. If either projection fails, the command warns and still reports the created issues. Hierarchy-link failures still stop the command.
 ---
 
 ## Validation policy and protected paths

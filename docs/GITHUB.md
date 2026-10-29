@@ -249,6 +249,8 @@ SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue work 42 --phase implement --backe
 SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue submit 42 --backend github
 ```
 
+Native blocked-by links and sub-issue priority use the existing GitHub credentials. If GitHub denies a projection request, the command warns and keeps the created issue. Check GitHub’s [dependency endpoint permissions](https://docs.github.com/en/rest/issues/issue-dependencies) and [sub-issue endpoint permissions](https://docs.github.com/en/rest/issues/sub-issues) for your token type before enabling these views in your workflow.
+
 ### How Each Boundary Is Enforced
 
 | Action | Required GitHub Permission | `.swarm/config.yaml` / Tracker Policy Check |

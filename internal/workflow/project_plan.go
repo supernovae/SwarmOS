@@ -64,6 +64,7 @@ type IssueSenseItem struct {
 }
 
 type ProjectPlanReport struct {
+	Warnings        []string            `yaml:"warnings,omitempty" json:"warnings,omitempty"`
 	Mode            string              `yaml:"mode" json:"mode"` // "from-plan" or "backlog-scan"
 	BaseSHA         string              `yaml:"base_sha" json:"base_sha"`
 	PolicyDigest    string              `yaml:"policy_digest" json:"policy_digest"`
@@ -1295,6 +1296,8 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 		report.EpicCreated = true
 	}
 
+	warn := func(message string) { report.Warnings = append(report.Warnings, message) }
+	var orderedChildren []int
 	// Create or reuse child issues in file order and link to Epic.
 	stepToIssueNum := make(map[int]int, len(units))
 	var createdNums []int
@@ -1321,6 +1324,8 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 			if err := e.Tracker.LinkSubIssue(ctx, existingEpic.Number, childIss.Number); err != nil {
 				return fmt.Errorf("link existing child issue #%d to Epic #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
 			}
+			projectIssueDependencies(ctx, e.Tracker, childIss, warn)
+			orderedChildren = append(orderedChildren, childIss.Number)
 			report.ExistingIssues = append(report.ExistingIssues, childIss)
 			continue
 		}
@@ -1341,6 +1346,8 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 		if err := e.Tracker.LinkSubIssue(ctx, existingEpic.Number, childIss.Number); err != nil {
 			return fmt.Errorf("link created child issue #%d to Epic #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
 		}
+		projectIssueDependencies(ctx, e.Tracker, childIss, warn)
+		orderedChildren = append(orderedChildren, childIss.Number)
 		if opts.Ready {
 			if _, err := e.LeaseManager.ApproveTask(ctx, childIss.Number, owner); err != nil {
 				return fmt.Errorf("approve created child issue #%d under Epic #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
@@ -1351,6 +1358,7 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 		}
 		report.CreatedIssues = append(report.CreatedIssues, childIss)
 	}
+	projectChildOrder(ctx, e.Tracker, existingEpic.Number, orderedChildren, warn)
 	return nil
 }
 

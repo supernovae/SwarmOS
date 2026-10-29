@@ -85,6 +85,9 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			// A report with an error means the plan was applied but its summary
 			// could not be published; still show and export what was applied.
+			for _, warning := range report.Warnings {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", warning)
+			}
 			publishErr := err
 			if exportFormat != "" {
 				data, err := workflow.MarshalProjectPlanReport(report, exportFormat)

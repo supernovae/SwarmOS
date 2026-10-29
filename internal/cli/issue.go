@@ -69,6 +69,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 				return fmt.Errorf("created child issue #%d (%s), but failed to link as sub-issue of parent #%d (maintainer can retry linking #%d -> #%d): %w", iss.Number, iss.HTMLURL, parentIssue, parentIssue, iss.Number, err)
 			}
 		}
+		workflow.ProjectDependencies(cmd.Context(), tr, iss.Number, wu.DependsOn, func(message string) { fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", message) })
 		kind := "draft"
 		if ready {
 			_, mgr, _, err := rootOpts.resolveLeaseManager(cmd)
@@ -177,13 +178,17 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 			return err
 		}
 		assessment := assessDimensions(rootOpts.resolveRepoRoot(), wu)
+		warnings := dependencyDriftWarnings(cmd.Context(), tr, iss, wu.DependsOn)
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "signals": assessment.Signals, "hints": assessment.Hints, "dimensions": workflow.Dimensions{Size: wu.Size, Uncertainty: wu.Uncertainty, Risk: wu.Risk}, "suggested_dimensions": assessment.SuggestedDimensions})
+			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "warnings": warnings, "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "signals": assessment.Signals, "hints": assessment.Hints, "dimensions": workflow.Dimensions{Size: wu.Size, Uncertainty: wu.Uncertainty, Risk: wu.Risk}, "suggested_dimensions": assessment.SuggestedDimensions})
 		}
 		out := cmd.OutOrStdout()
 		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v, allow_harness_changes=%t]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities, wu.AllowHarnessChanges)
 		fmt.Fprintf(out, "Dimensions: size=%s uncertainty=%s risk=%s\n", wu.Size, wu.Uncertainty, wu.Risk)
 		writeDimensionAdvice(out, assessment)
+		for _, warning := range warnings {
+			fmt.Fprintf(out, "warning: %s\n", warning)
+		}
 		return nil
 	}}
 	lintCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured lint results")
@@ -295,7 +300,7 @@ func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		children, err := eng.DecomposeIssue(cmd.Context(), repoRoot, parentNum, nil, sequential)
+		children, err := eng.DecomposeIssue(cmd.Context(), repoRoot, parentNum, nil, sequential, func(message string) { fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", message) })
 		if err != nil {
 			return err
 		}

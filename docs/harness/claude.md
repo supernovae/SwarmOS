@@ -31,6 +31,8 @@ Claude starts in a coordinator-owned control directory, never inside candidate c
 
 ## Boundary
 
+Linux native isolated Go commands and worker checks use `GOMAXPROCS=2` and `GOFLAGS=-buildvcs=false -p=2`; see the [shared concurrency defaults](README.md#go-concurrency).
+
 - **Files and shell.** Each tool call runs in Bubblewrap with the detached task snapshot at `/workspace`, read-only system tools under `/usr`, private temporary storage, a clean environment, and separate PID and network namespaces. Planner and reviewer calls get a read-only workspace.
 - **Settings.** The generated settings disable all hooks and plugins and allow only `mcp__swarm__*` tools. `--strict-mcp-config` keeps other MCP servers out.
 - **Limits.** Each tool call has a two-minute deadline, per-process CPU, address-space, file-size, and descriptor limits, and 256 MiB of private temporary storage. There are no aggregate memory or workspace-disk quotas.

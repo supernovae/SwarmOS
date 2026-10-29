@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/testutil"
@@ -929,5 +931,158 @@ func TestInspectionValidationPathsStayUncached(t *testing.T) {
 		if err := check.run(); err == nil || !strings.Contains(err.Error(), "0.162.0") && !strings.Contains(err.Error(), "version") {
 			t.Fatalf("%s accepted an unqualified interface: %v", check.name, err)
 		}
+	}
+}
+
+// goConcurrencyPolicyEnv decodes the actual inline TOML, including duplicate-key
+// validation, rather than rebuilding the environment expected by the test.
+func goConcurrencyPolicyEnv(t *testing.T, args []string) []string {
+	t.Helper()
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "shell_environment_policy=") {
+			continue
+		}
+		var policy struct {
+			Shell struct {
+				Inherit string
+				Set     map[string]string
+			} `toml:"shell_environment_policy"`
+		}
+		if _, err := toml.Decode(arg, &policy); err != nil {
+			t.Fatal(err)
+		}
+		if policy.Shell.Inherit != "none" {
+			t.Fatal("child inherited host environment")
+		}
+		var env []string
+		for k, v := range policy.Shell.Set {
+			env = append(env, k+"="+v)
+		}
+		return env
+	}
+	t.Fatal("missing shell policy")
+	return nil
+}
+
+func goConcurrencyHostileEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("GOMAXPROCS", "256")
+	t.Setenv("GOFLAGS", "-p=256 -buildvcs=true -toolexec=/hostile-tool")
+	for _, key := range []string{"GH_TOKEN", "GITHUB_TOKEN", "SWARM_GITHUB_TOKEN_COMMAND", "SSH_AUTH_SOCK", "GIT_ASKPASS", "OPENAI_API_KEY"} {
+		t.Setenv(key, "hostile-secret")
+	}
+}
+
+func goConcurrencyAssertEnv(t *testing.T, env []string, cache string) {
+	t.Helper()
+	for key, want := range map[string]string{"GOMAXPROCS": "2", "GOFLAGS": "-buildvcs=false -p=2", "GOCACHE": cache} {
+		count := 0
+		for _, entry := range env {
+			if strings.HasPrefix(entry, key+"=") {
+				count++
+				if entry != key+"="+want {
+					t.Fatalf("%s: %q", key, entry)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("%s entries: %d", key, count)
+		}
+	}
+	if strings.Contains(strings.Join(env, "\n"), "hostile") {
+		t.Fatal("host tool flags or credentials leaked")
+	}
+	foundPath := false
+	for _, entry := range env {
+		foundPath = foundPath || strings.HasPrefix(entry, "PATH=") && strings.Contains(entry, "/usr/bin")
+	}
+	if !foundPath {
+		t.Fatal("missing sandbox PATH")
+	}
+}
+
+func goConcurrencyFixture(t *testing.T) string {
+	t.Helper()
+	work := t.TempDir()
+	for name, content := range map[string]string{
+		"go.mod":            "module example.com/concurrency\n\ngo 1.21\n",
+		"lib/value.go":      "package lib\nconst Value = 42\n",
+		"lib/value_test.go": "package lib\nimport \"testing\"\nfunc TestValue(t *testing.T) { if Value != 42 { t.Fatal(Value) } }\n",
+		"main.go":           "package main\nimport (\"fmt\"; \"os\"; \"runtime\"; \"example.com/concurrency/lib\")\nfunc main() { if lib.Value != 42 { panic(\"value\") }; fmt.Printf(\"runtime=%d flags=%s\\n\", runtime.GOMAXPROCS(0), os.Getenv(\"GOFLAGS\")) }\n",
+		"source":            "original",
+	} {
+		writeWorkerFixture(t, work, name, content)
+	}
+	return work
+}
+
+const goConcurrencyScript = `set -eu
+go env GOFLAGS
+go build ./...
+go test ./...
+go run .
+`
+
+func goConcurrencyOutput(t *testing.T, output string) {
+	t.Helper()
+	if !strings.Contains(output, "runtime=2 flags=-buildvcs=false -p=2") || !strings.Contains(output, "-buildvcs=false -p=2\n") || !strings.Contains(output, "example.com/concurrency/lib") {
+		t.Fatalf("missing child runtime/build/test evidence:\n%s", output)
+	}
+}
+
+func goConcurrencyReplay(t *testing.T, env []string) {
+	t.Helper()
+	// Replay the complete production environment. Only namespace-local paths
+	// are mapped to writable temporary locations for this offline execution.
+	for i, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
+		if key == "HOME" || key == "TMPDIR" || strings.HasPrefix(key, "XDG_") {
+			if strings.HasPrefix(value, "/home/worker") || value == "/tmp" {
+				env[i] = key + "=" + t.TempDir()
+			}
+		}
+	}
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", goConcurrencyScript)
+	cmd.Dir = goConcurrencyFixture(t)
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child: %v\n%s", err, out)
+	}
+	goConcurrencyOutput(t, string(out))
+}
+
+func TestGoConcurrencyNativePolicy(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux child defaults")
+	}
+	goConcurrencyHostileEnv(t)
+	for _, readOnly := range []bool{false, true} {
+		for _, warmup := range []bool{false, true} {
+			t.Run(fmt.Sprintf("readonly=%v/warmup=%v", readOnly, warmup), func(t *testing.T) {
+				scratch := t.TempDir()
+				cache := t.TempDir()
+				caches, err := ValidatorCacheMounts([]BuildCache{{Ecosystem: "go", EnvKey: "GOCACHE", Dir: cache, Persistent: true}}, ValidationCodex, warmup, false, scratch)
+				if err != nil {
+					t.Fatal(err)
+				}
+				env := goConcurrencyPolicyEnv(t, codexPolicy("/usr/bin/codex", t.TempDir(), scratch, readOnly, caches, Dependencies{}))
+				goConcurrencyAssertEnv(t, env, caches[0].Dir)
+				goConcurrencyReplay(t, env)
+			})
+		}
+	}
+	outer := nativeEnv(t.TempDir(), false, Dependencies{})
+	flagCount := 0
+	for _, entry := range outer {
+		if entry == "GOFLAGS=-buildvcs=false" {
+			flagCount++
+		}
+		if strings.HasPrefix(entry, "GOMAXPROCS=") || strings.HasPrefix(entry, "GOFLAGS=") && entry != "GOFLAGS=-buildvcs=false" {
+			t.Fatalf("outer host defaults changed: %q", entry)
+		}
+	}
+	if flagCount != 1 {
+		t.Fatalf("outer host GOFLAGS entries: %d", flagCount)
 	}
 }

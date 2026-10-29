@@ -81,6 +81,10 @@ func codexHostHome(fallback string) string {
 	return fallback
 }
 
+// Linux child scheduling defaults bound runtime and package-build concurrency.
+const linuxGoMaxProcs = "2"
+const linuxGoFlags = "-buildvcs=false -p=2"
+
 // codexPolicy uses a named native profile rather than workspace-write's broad
 // default read access. :minimal supplies Codex's platform runtime files. Each
 // build cache is writable; Codex cannot layer a read-only cache, so callers
@@ -111,6 +115,10 @@ func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCach
 	if readOnly {
 		fs = append(fs, strconv.Quote(filepath.Join(work, ".swarm", "active"))+`="write"`)
 	}
+	goFlags := "-buildvcs=false"
+	if runtime.GOOS == "linux" {
+		goFlags = linuxGoFlags
+	}
 	envPairs := []string{
 		`PATH=` + strconv.Quote(SandboxPath(toolchains)),
 		`HOME=` + strconv.Quote(scratch),
@@ -118,7 +126,10 @@ func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCach
 		`XDG_CACHE_HOME=` + strconv.Quote(filepath.Join(scratch, ".cache")),
 		`XDG_CONFIG_HOME=` + strconv.Quote(filepath.Join(scratch, ".config")),
 		`XDG_DATA_HOME=` + strconv.Quote(filepath.Join(scratch, ".local", "share")),
-		`GOFLAGS="-buildvcs=false"`,
+		"GOFLAGS=" + strconv.Quote(goFlags),
+	}
+	if runtime.GOOS == "linux" {
+		envPairs = append(envPairs, "GOMAXPROCS="+strconv.Quote(linuxGoMaxProcs))
 	}
 	for _, b := range toolchains {
 		if b.EnvKey != "" && b.EnvVal != "" && !IsBuildCacheKey(b.EnvKey) {

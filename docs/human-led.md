@@ -20,7 +20,7 @@ Open your interactive harness in that worktree. Read `.swarm/active/WORKUNIT.md`
 swarm issue stage 83 --phase plan --harness codex --model default
 ```
 
-Staging records the authenticated stager and marks your harness and model as self-reported. Reviewers see this per role in status and PR evidence alongside the provenance attestation.
+Staging records the stager and marks your harness and model as self-reported. GitHub-backed PR evidence names the authenticated GitHub stager; local aliases stay in private artifacts and status. Reviewers see how each role produced its work alongside the provenance attestation.
 
 ## Review the plan
 
@@ -66,7 +66,7 @@ Read the active contract and revision context, then use `/swarm-plan` or the equ
 swarm pr stage 321 --phase plan --harness codex --model default
 ```
 
-Complete the linked issue's configured review as described above, using `swarm issue review-plan 83` for an agent review or the independent maintainer approval command for a human gate. Then use `/swarm-implement` or an equivalent prompt to implement the approved revision.
+For an agent gate, run `swarm pr work 321 --phase review` to review the staged revision plan. For a human gate, an independent maintainer approves with `swarm issue review-plan 83 --approve --notes 'Reviewed plan and test plan'`. A gate of none needs no review. Then use `/swarm-implement` or an equivalent prompt to implement the approved revision.
 
 ```bash
 swarm pr validate 321
@@ -75,7 +75,7 @@ swarm issue renew 83
 swarm pr submit 321
 ```
 
-Renewal and plan review belong to the linked issue. PR staging, validation, and submission use the PR number. Submission checks the expected remote head before publishing.
+Renewal and human plan approval belong to the linked issue. PR agent review, staging, validation, and submission use the PR number. Submission checks the expected remote head before publishing.
 
 ## Work from your own fork
 

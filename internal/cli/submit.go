@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/spf13/cobra"
@@ -197,7 +196,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			}
 			prTitle := fmt.Sprintf("%s (#%d)", iss.Title, issue)
 			stateRef := manager.LedgerLayout().StateRef(issue)
-			prSection := draftPRSection(unit, state, stateRef, manager.UpstreamRemote())
+			prSection := draftPRSectionWithContext(unit, state, stateRef, lease.PublicProjectionContext(tr), manager.UpstreamRemote())
 			retryCommand := strings.Split(submissionRecoveryCommand(0, rootOpts), " pr rebase ")[0] + fmt.Sprintf(" issue submit %d", issue)
 			prHead := branch
 			if rootOpts.Fork {
@@ -326,32 +325,13 @@ func defaultBaseBranch(root, upstreamRemote string) (string, error) {
 }
 
 func draftPRSection(unit *contract.WorkUnit, state *lease.IssueState, stateRef string, remote ...string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Closes #%d\n\n## Objective\n\n", unit.IssueNumber)
-	b.WriteString(lease.DescriptionSlot(unit.Objective))
-	b.WriteString("\n## Constraints\n\n")
-	for _, c := range unit.Constraints {
-		b.WriteString(lease.DescriptionSlot("- " + c + "\n"))
-	}
-	b.WriteString("\n## Acceptance criteria\n\nThese checkboxes track final acceptance review by a maintainer. SwarmOS leaves them unchecked at submission.\n")
-	for _, c := range unit.Acceptance {
-		b.WriteString("- [ ] " + lease.DescriptionSlot(c+"\n"))
-	}
-	b.WriteString("\n## Review handoff\n\nUse the test plan and validation results to verify each criterion, then mark this PR ready for review in GitHub.\n")
-	if state != nil {
-		b.WriteString(lease.DescriptionProductionSummary(state))
-		raw, _ := json.MarshalIndent(lease.BuildProvenanceAttestation(unit, state), "", "  ")
-		b.WriteString("\n## 🔒 Harness & Model Provenance Attestation\n\nMachine-Readable Provenance Attestation (JSON)\n```json\n" + lease.DescriptionText(string(raw)) + "\n```\n")
-		if runs := lease.RoleRuns(state); len(runs) > 0 {
-			raw, _ := json.MarshalIndent(runs, "", "  ")
-			b.WriteString(lease.DescriptionAtomicSlot("\n## ⏱️ Role Run Telemetry\n\n" + lease.RoleRunTable(runs) + "\n```json\n" + string(raw) + "\n```\n"))
-		}
-	}
-	b.WriteString("\n## 📦 Attached SwarmOS Artifacts\n\n")
-	b.WriteString(lease.DescriptionArtifacts(state))
-	b.WriteString(lease.DescriptionRetrieval(unit.IssueNumber, stateRef, remote...))
-	return b.String()
+	return draftPRSectionWithContext(unit, state, stateRef, lease.ProjectionContext{}, remote...)
 }
+
+func draftPRSectionWithContext(unit *contract.WorkUnit, state *lease.IssueState, stateRef string, context lease.ProjectionContext, remote ...string) string {
+	return lease.DescriptionIssueSection(unit, state, stateRef, context, remote...)
+}
+
 func formatDraftPRBody(unit *contract.WorkUnit, state *lease.IssueState, stateRef string) string {
 	body, _ := lease.ComposePRDescription("", "issue-description", draftPRSection(unit, state, stateRef), stateRef, unit.IssueNumber)
 	return body

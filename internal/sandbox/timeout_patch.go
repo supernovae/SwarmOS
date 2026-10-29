@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,9 @@ type timeoutFile struct {
 	data       []byte
 	executable bool
 	omitted    bool
+	identity   bool
+	size       int64
+	digest     [sha256.Size]byte
 }
 
 func (f timeoutFile) gitMode() string {
@@ -79,21 +83,17 @@ func timeoutFiles(ctx context.Context, dir string) (map[string]timeoutFile, erro
 				if !info.Mode().IsRegular() {
 					return fmt.Errorf("timeout snapshot rejects non-regular file %q", name)
 				}
-				total += info.Size()
-				if total > workerMaxBytes {
-					return fmt.Errorf("timeout snapshot exceeds aggregate limit")
-				}
-				// Oversized entries are recorded as binary omissions without reading them.
-				if info.Size() > timeoutPatchBytes || retained+info.Size() > 32<<20 {
-					files[name] = timeoutFile{omitted: true}
-					continue
-				}
-				data, err := root.ReadFile(name, timeoutPatchBytes)
+				// Charge descriptor-derived sizes and bound all reads, including omitted data.
+				file, err := timeoutRead(ctx, root, name, retained, workerMaxBytes-total, func(f *os.File, b []byte) (int, error) { return f.Read(b) })
 				if err != nil {
 					return err
 				}
-				retained += int64(len(data))
-				files[name] = timeoutFile{data: data, executable: info.Mode().Perm()&0111 != 0}
+				total += file.size
+				if total > workerMaxBytes {
+					return fmt.Errorf("timeout snapshot exceeds aggregate limit")
+				}
+				retained += int64(len(file.data))
+				files[name] = file
 			}
 			if err == io.EOF {
 				return nil
@@ -104,6 +104,98 @@ func timeoutFiles(ctx context.Context, dir string) (map[string]timeoutFile, erro
 		return nil, err
 	}
 	return files, nil
+}
+
+// timeoutRead retains at most the text budget and hashes other entries with a
+// fixed buffer. The injected read operation permits deterministic mutation tests.
+func timeoutRead(ctx context.Context, root *safefs.Root, name string, retained, remaining int64, read func(*os.File, []byte) (int, error)) (timeoutFile, error) {
+	var result timeoutFile
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	f, err := root.OpenRegular(name)
+	if err != nil {
+		return result, err
+	}
+	defer f.Close()
+	before, err := f.Stat()
+	if err != nil {
+		return result, err
+	}
+	size := before.Size()
+	if size < 0 || size > workerFileBytes || size > remaining {
+		return result, fmt.Errorf("timeout snapshot size limit exceeded")
+	}
+	result.size = size
+	result.executable = before.Mode().Perm()&0111 != 0
+	result.omitted = size > timeoutPatchBytes || retained+size > 32<<20
+	if !result.omitted {
+		result.data = make([]byte, 0, int(size))
+	}
+	hash := sha256.New()
+	var buf [32 << 10]byte
+	var count int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return timeoutFile{}, err
+		}
+		// One extra byte detects growth without an unbounded EOF search.
+		n, readErr := read(f, buf[:min(int64(len(buf)), size-count+1)])
+		count += int64(n)
+		if count > size {
+			return timeoutFile{}, fmt.Errorf("file %q grew while reading", name)
+		}
+		if n > 0 {
+			hash.Write(buf[:n])
+			if !result.omitted {
+				result.data = append(result.data, buf[:n]...)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return timeoutFile{}, readErr
+		}
+		if n == 0 {
+			return timeoutFile{}, io.ErrNoProgress
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return timeoutFile{}, err
+	}
+	after, err := f.Stat()
+	if err != nil {
+		return timeoutFile{}, err
+	}
+	current, err := root.OpenRegular(name)
+	if err != nil {
+		return timeoutFile{}, err
+	}
+	defer current.Close()
+	pathInfo, err := current.Stat()
+	if err != nil {
+		return timeoutFile{}, err
+	}
+	stable := func(info os.FileInfo) bool {
+		return info.Mode().IsRegular() && os.SameFile(before, info) && info.Size() == size && info.Mode() == before.Mode() && info.ModTime().Equal(before.ModTime())
+	}
+	if count != size || !stable(after) || !stable(pathInfo) {
+		return timeoutFile{}, fmt.Errorf("file %q changed while reading", name)
+	}
+	copy(result.digest[:], hash.Sum(nil))
+	result.identity = true
+	return result, nil
+}
+
+func sameTimeoutContent(a, b timeoutFile) bool {
+	if !a.identity || !b.identity {
+		return false
+	}
+	if !a.omitted && !b.omitted {
+		return a.size == int64(len(a.data)) && b.size == int64(len(b.data)) && bytes.Equal(a.data, b.data)
+	}
+	return a.size == b.size && a.digest == b.digest
 }
 
 func patchLines(data []byte) []string {
@@ -254,11 +346,11 @@ func buildPatch(ctx context.Context, before, after map[string]timeoutFile) ([]by
 		}
 		a, existed := before[name]
 		b, exists := after[name]
-		if a.omitted || b.omitted || bytes.IndexByte(a.data, 0) >= 0 || bytes.IndexByte(b.data, 0) >= 0 {
-			omitted++
+		if existed && exists && a.executable == b.executable && sameTimeoutContent(a, b) {
 			continue
 		}
-		if bytes.Equal(a.data, b.data) && a.executable == b.executable && existed == exists {
+		if a.omitted || b.omitted || bytes.IndexByte(a.data, 0) >= 0 || bytes.IndexByte(b.data, 0) >= 0 {
+			omitted++
 			continue
 		}
 		hunk := textPatch(name, a.data, b.data, existed, exists)

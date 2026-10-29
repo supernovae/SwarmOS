@@ -13,7 +13,7 @@ import (
 const reviewStart = "<!-- swarm:review-evidence:start -->"
 const reviewEnd = "<!-- swarm:review-evidence:end -->"
 
-// ProjectReviewEvidence updates only the coordinator-owned review attachment.
+// ProjectReviewEvidence refreshes coordinator-owned issue and review evidence.
 func ProjectReviewEvidence(ctx context.Context, tr tracker.Tracker, st *lease.IssueState, number int) error {
 	if st == nil || len(st.Artifacts) == 0 {
 		return nil
@@ -22,29 +22,30 @@ func ProjectReviewEvidence(ctx context.Context, tr tracker.Tracker, st *lease.Is
 	if err != nil {
 		return err
 	}
-	var b strings.Builder
-	b.WriteString(reviewStart + "\n## SwarmOS review evidence\n\n")
-	b.WriteString(lease.PlanSummary(st, true))
-	for _, a := range st.Artifacts {
-		if st.RevisionPlan != nil && (a.Type == contract.ArtifactDesign || a.Type == contract.ArtifactTestPlan) {
-			continue
+	issue := st.Lease.IssueNumber
+	projection := lease.PublicProjectionContext(tr)
+	ref := lease.DescriptionStateReference(pr.Body, issue)
+	outside := pr.Body
+	sections := map[string]string{"review-evidence": "## SwarmOS review evidence\n" + lease.DescriptionProductionSummary(st, projection) + lease.DescriptionArtifacts(st, projection) + lease.DescriptionRetrieval(issue, ref)}
+	// Refresh previously generated issue evidence from structured state as well:
+	// copying an old managed section could republish private local actors.
+	if strings.Contains(outside, "<!-- swarm:issue-description:start -->") && lease.DescriptionIssueNeedsProjection(outside) {
+		issueRecord, err := tr.GetIssue(ctx, issue)
+		if err != nil {
+			return err
 		}
-		fmt.Fprintf(&b, "### %s: %s\n\n%s\n\n", a.Type, a.Verdict, a.Summary)
-		if a.Metadata["operator_steered"] == "true" {
-			fmt.Fprintf(&b, "Operator-steered: %s messages; SHA-256 `%s`.\n\n", a.Metadata["guidance_count"], a.Metadata["guidance_sha256"])
+		unit, err := contract.ParseWorkUnitFromIssue(issueRecord.Number, issueRecord.Title, issueRecord.Body)
+		if err != nil {
+			return err
 		}
-		b.WriteString(a.Body + "\n\n")
+		if st.TaskDigest != "" && contract.DigestWorkUnit(unit) != st.TaskDigest {
+			return fmt.Errorf("cannot project evidence for a changed WorkUnit")
+		}
+		sections["issue-description"] = lease.DescriptionIssueSection(unit, st, ref, projection)
 	}
-	b.WriteString(reviewEnd)
-	body := pr.Body
-	if start := strings.Index(body, reviewStart); start >= 0 {
-		end := strings.Index(body[start:], reviewEnd)
-		if end < 0 {
-			return fmt.Errorf("managed review evidence section is incomplete")
-		}
-		body = body[:start] + b.String() + body[start+end+len(reviewEnd):]
-	} else {
-		body = strings.TrimRight(body, "\n") + "\n\n" + b.String() + "\n"
+	body, err := lease.ComposePRDescriptionSections(outside, sections, ref, issue)
+	if err != nil {
+		return err
 	}
 	if body == pr.Body {
 		return nil

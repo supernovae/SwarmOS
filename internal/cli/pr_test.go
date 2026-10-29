@@ -86,8 +86,9 @@ func TestCLIPRWorkValidateSubmitPreservesIdentity(t *testing.T) {
 	if len(status.RoleRuns) != 4 || !reflect.DeepEqual(status.RoleRuns, lease.RoleRuns(before)) {
 		t.Fatalf("PR status role runs = %+v", status.RoleRuns)
 	}
-	if !strings.Contains(original.Body, "## ⏱️ Role Run Telemetry") || !strings.Contains(original.Body, lease.RoleRunTable(status.RoleRuns)) || !strings.Contains(original.Body, `"run_id": "`+before.RoleRuns[0].RunID+`"`) {
-		t.Fatalf("PR evidence lacks role run telemetry: %s", original.Body)
+	inlineTelemetry := strings.Contains(original.Body, "## ⏱️ Role Run Telemetry") && strings.Contains(original.Body, lease.RoleRunTable(status.RoleRuns)) && strings.Contains(original.Body, `"run_id": "`+before.RoleRuns[0].RunID+`"`)
+	if !inlineTelemetry && !strings.Contains(original.Body, "Inline telemetry omitted; complete runs remain in durable state.") {
+		t.Fatalf("PR evidence lacks telemetry or its explicit durable-state omission notice: %s", original.Body)
 	}
 	f.must(t, "pr", "work", p, "--agent", "mock", "--dry-run", "--json")
 	if after := f.state(t, issue); !reflect.DeepEqual(before, after) {

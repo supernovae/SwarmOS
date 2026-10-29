@@ -3,10 +3,13 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -222,5 +225,237 @@ func TestTimeoutPatchContextEmptyFilesAndExecutable(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fixture, "empty-deleted")); !os.IsNotExist(err) {
 		t.Fatal("empty deletion lost")
+	}
+}
+
+func TestTimeoutIdentityControlledReads(t *testing.T) {
+	for _, attack := range []string{"stable", "growth", "shrink", "replace", "mode", "cancel", "error", "pre-cancel"} {
+		t.Run(attack, func(t *testing.T) {
+			dir := t.TempDir()
+			writeWorkerFixture(t, dir, "asset", strings.Repeat("a", 65536))
+			root, err := safefs.Open(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if attack == "pre-cancel" {
+				cancel()
+			}
+			calls, consumed := 0, 0
+			got, err := timeoutRead(ctx, root, "asset", 32<<20, workerMaxBytes, func(f *os.File, b []byte) (int, error) {
+				if len(b) > 32<<10 {
+					t.Fatal("unbounded buffer")
+				}
+				n, err := f.Read(b)
+				consumed += n
+				calls++
+				if calls == 1 {
+					switch attack {
+					case "growth":
+						out, e := os.OpenFile(filepath.Join(dir, "asset"), os.O_APPEND|os.O_WRONLY, 0600)
+						if e != nil {
+							t.Fatal(e)
+						}
+						_, e = out.Write([]byte("x"))
+						out.Close()
+						if e != nil {
+							t.Fatal(e)
+						}
+					case "shrink":
+						if e := os.Truncate(filepath.Join(dir, "asset"), 1); e != nil {
+							t.Fatal(e)
+						}
+					case "replace":
+						writeWorkerFixture(t, dir, "replacement", strings.Repeat("a", 65536))
+						if e := os.Rename(filepath.Join(dir, "replacement"), filepath.Join(dir, "asset")); e != nil {
+							t.Fatal(e)
+						}
+					case "mode":
+						if e := os.Chmod(filepath.Join(dir, "asset"), 0755); e != nil {
+							t.Fatal(e)
+						}
+					case "cancel":
+						cancel()
+					case "error":
+						return n, errors.New("controlled read failure")
+					}
+				}
+				return n, err
+			})
+			if consumed > 65537 {
+				t.Fatalf("read %d bytes", consumed)
+			}
+			if attack == "stable" {
+				if err != nil || !got.identity || !got.omitted || len(got.data) != 0 {
+					t.Fatalf("%+v %v", got, err)
+				}
+			} else if err == nil || got.identity {
+				t.Fatalf("accepted %s", attack)
+			}
+		})
+	}
+}
+
+func TestTimeoutUnsupportedIdentity(t *testing.T) {
+	dir := t.TempDir()
+	writeWorkerFixture(t, dir, "asset", strings.Repeat("x", timeoutPatchBytes+1))
+	root, err := safefs.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	read := func(f *os.File, b []byte) (int, error) { return f.Read(b) }
+	a, err := timeoutRead(t.Context(), root, "asset", 0, workerMaxBytes, read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []string{"equal", "bytes", "length", "mode", "unknown", "added", "deleted"} {
+		t.Run(change, func(t *testing.T) {
+			b := a
+			before := map[string]timeoutFile{"asset": a, "text": {data: []byte("old\n")}}
+			after := map[string]timeoutFile{"asset": b, "text": {data: []byte("new\n")}}
+			switch change {
+			case "bytes":
+				b.digest[0] ^= 1
+			case "length":
+				b.size++
+			case "mode":
+				b.executable = !b.executable
+			case "unknown":
+				b.identity = false
+			case "added":
+				delete(before, "asset")
+			case "deleted":
+				delete(after, "asset")
+			}
+			if change != "deleted" {
+				after["asset"] = b
+			}
+			patch, omitted, err := buildPatch(t.Context(), before, after)
+			want := 1
+			if change == "equal" {
+				want = 0
+			}
+			if err != nil || omitted != want || !strings.Contains(string(patch), "+new") {
+				t.Fatalf("omitted=%d err=%v", omitted, err)
+			}
+		})
+	}
+	// A retained copy and a retention-budget omission must compare by valid proof.
+	writeWorkerFixture(t, dir, "small", "a\x00b")
+	loaded, err := timeoutRead(t.Context(), root, "small", 0, workerMaxBytes, read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	omitted, err := timeoutRead(t.Context(), root, "small", 32<<20, workerMaxBytes, read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameTimeoutContent(loaded, omitted) {
+		t.Fatal("mixed representation lost identity")
+	}
+	if sameTimeoutContent(timeoutFile{data: []byte{0}}, timeoutFile{data: []byte{0}}) {
+		t.Fatal("unverified retained content proved identity")
+	}
+	if sameTimeoutContent(timeoutFile{omitted: true}, timeoutFile{omitted: true}) {
+		t.Fatal("nil buffers proved identity")
+	}
+	if _, err := timeoutRead(t.Context(), root, "asset", 0, 1, read); err == nil {
+		t.Fatal("aggregate budget ignored")
+	}
+}
+
+func TestTimeoutSnapshotContentProof(t *testing.T) {
+	for _, size := range []int{3, timeoutPatchBytes + 1} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			dir := t.TempDir()
+			data := make([]byte, size)
+			data[size-1] = 'a'
+			writeWorkerFixture(t, dir, "asset", string(data))
+			before, err := timeoutFiles(t.Context(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(filepath.Join(dir, "asset"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Identical size and timestamp are insufficient: the digest must differ.
+			data[size-1] = 'b'
+			if err := os.WriteFile(filepath.Join(dir, "asset"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(filepath.Join(dir, "asset"), info.ModTime(), info.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			after, err := timeoutFiles(t.Context(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, omitted, err := buildPatch(t.Context(), before, after)
+			if err != nil || omitted != 1 {
+				t.Fatalf("changed unsupported content accepted: %d %v", omitted, err)
+			}
+			after = before
+			b := after["asset"]
+			b.executable = !b.executable
+			after = map[string]timeoutFile{"asset": b}
+			_, omitted, err = buildPatch(t.Context(), before, after)
+			if err != nil || omitted != 1 {
+				t.Fatal("unsupported mode edit accepted")
+			}
+		})
+	}
+}
+
+func TestTimeoutSnapshotRetentionPressure(t *testing.T) {
+	dir := t.TempDir()
+	for i := range 9 {
+		writeWorkerFixture(t, dir, fmt.Sprintf("asset-%d", i), strings.Repeat("x", timeoutPatchBytes))
+	}
+	files, err := timeoutFiles(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retained int
+	omitted := 0
+	for _, file := range files {
+		retained += len(file.data)
+		if file.omitted {
+			omitted++
+			if !file.identity {
+				t.Fatal("missing omitted identity")
+			}
+		}
+	}
+	if retained != 32<<20 || omitted != 1 {
+		t.Fatalf("retained=%d omitted=%d", retained, omitted)
+	}
+	patch, count, err := buildPatch(t.Context(), files, files)
+	if err != nil || count != 0 || len(patch) != 0 {
+		t.Fatalf("unchanged pressured snapshot: %d %v", count, err)
+	}
+}
+
+func TestTimeoutSnapshotRejectsHardLinksAndFileLimit(t *testing.T) {
+	for _, kind := range []string{"hardlink", "file-limit"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			writeWorkerFixture(t, dir, "asset", "content")
+			if kind == "hardlink" {
+				if err := os.Link(filepath.Join(dir, "asset"), filepath.Join(dir, "alias")); err != nil {
+					t.Skip(err)
+				}
+			} else {
+				if err := os.Truncate(filepath.Join(dir, "asset"), workerFileBytes+1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := timeoutFiles(t.Context(), dir); err == nil {
+				t.Fatalf("accepted %s", kind)
+			}
+		})
 	}
 }

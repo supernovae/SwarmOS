@@ -1,20 +1,29 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"gopkg.in/yaml.v3"
 )
+
+var cliParallelStartup cliTestParallelDecision
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "internal-tools" {
@@ -52,6 +61,22 @@ func TestMain(m *testing.M) {
 			os.RemoveAll(root)
 			os.Exit(1)
 		}
+	}
+	if !flag.Parsed() {
+		flag.Parse()
+	}
+	cliParallelStartup, err = applyCLITestParallel(flag.CommandLine, runtime.GOOS, func() cliTestParallelObservation { return observeCLITestParallel(realCLIParallelFiles()) })
+	if err == nil {
+		var data []byte
+		data, err = json.Marshal(cliParallelStartup)
+		if err == nil && len(data) <= 1024 {
+			err = os.WriteFile(filepath.Join(root, "parallel-policy.json"), data, 0600)
+		}
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: parallel policy:", err)
+		os.RemoveAll(root)
+		os.Exit(1)
 	}
 	code := m.Run()
 	os.RemoveAll(root)
@@ -206,4 +231,169 @@ func authenticatedWorkUnit(t *testing.T, routing string) {
 		}
 	}
 	t.Log("Authenticated planner (interactive), reviewer, human gate, developer, tester, isolated validation and local Draft PR completed; routing:", routing)
+}
+
+// Child-only work is selected exactly; marker-free execution is a no-op.
+func TestCLITestParallelChild(t *testing.T) {
+	marker := os.Getenv("SWARM_CLI_PARALLEL_CHILD")
+	if marker == "" {
+		return
+	}
+	value, err := strconv.Atoi(flag.Lookup("test.parallel").Value.String())
+	if err != nil || value != cliParallelStartup.Final {
+		t.Fatal("startup value mismatch")
+	}
+	root := filepath.Dir(os.Getenv("HOME"))
+	for _, name := range []string{"HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "APPDATA"} {
+		p := os.Getenv(name)
+		info, err := os.Stat(p)
+		if err != nil || !info.IsDir() || filepath.Dir(p) != root {
+			t.Fatal("isolated directory unavailable")
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(root, "parallel-policy.json"))
+	if err != nil || len(data) > 1024 {
+		t.Fatal("startup telemetry unavailable")
+	}
+	var decision cliTestParallelDecision
+	if json.Unmarshal(data, &decision) != nil || decision != cliParallelStartup {
+		t.Fatal("startup telemetry mismatch")
+	}
+	report := struct {
+		Root     string
+		Decision cliTestParallelDecision
+	}{root, decision}
+	data, err = json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(os.Getenv("SWARM_CLI_PARALLEL_REPORT"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if marker == "fail" {
+		t.Fatal("requested child failure")
+	}
+}
+
+type cliParallelOutput struct {
+	bytes.Buffer
+	overflow bool
+}
+
+func (b *cliParallelOutput) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > 64*1024 {
+		b.overflow = true
+		return 0, errors.New("child output budget")
+	}
+	return b.Buffer.Write(p)
+}
+func TestCLITestParallelTestMain(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, _ := strconv.Atoi(flag.Lookup("test.parallel").DefValue)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want int
+		fail bool
+	}{
+		{"implicit", nil, 0, false},
+		{"one", []string{"-test.parallel", "1"}, 1, false},
+		{"sixteen", []string{"-test.parallel=16"}, 16, false},
+		{"double dash", []string{"--test.parallel=4"}, 4, false},
+		{"duplicate", []string{"-test.parallel=8", "-test.parallel=2"}, 2, false},
+		{"equal default", []string{"-test.parallel=8", "-test.parallel=" + strconv.Itoa(original)}, original, false},
+		{"failure", []string{"-test.parallel=16"}, 16, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := filepath.Join(t.TempDir(), "report.json")
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			args := append([]string{"-test.run=^TestCLITestParallelChild$"}, tc.args...)
+			cmd := exec.CommandContext(ctx, exe, args...)
+			marker := "ok"
+			if tc.fail {
+				marker = "fail"
+			}
+			cmd.Env = append(os.Environ(), "SWARM_CLI_PARALLEL_CHILD="+marker, "SWARM_CLI_PARALLEL_REPORT="+report)
+			var out cliParallelOutput
+			cmd.Stdout = &out
+			cmd.Stderr = &out
+			err := cmd.Run()
+			if (err != nil) != tc.fail || out.overflow || ctx.Err() != nil {
+				t.Fatal("child exit/output failure", err)
+			}
+			data, err := os.ReadFile(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var r struct {
+				Root     string
+				Decision cliTestParallelDecision
+			}
+			if json.Unmarshal(data, &r) != nil {
+				t.Fatal("invalid child report")
+			}
+			if tc.want != 0 && (r.Decision.Final != tc.want || r.Decision.Reason != "explicit") {
+				t.Fatal("explicit value changed")
+			}
+			if tc.want == 0 {
+				t.Logf("implicit parallel policy: original=%d final=%d reason=%s", r.Decision.Original, r.Decision.Final, r.Decision.Reason)
+				switch r.Decision.Reason {
+				case "unchanged", "capped", "admitted", "fallback":
+				default:
+					t.Fatal("invalid implicit reason")
+				}
+			}
+			if _, err := os.Stat(r.Root); !os.IsNotExist(err) {
+				t.Fatal("TestMain root survived child exit")
+			}
+		})
+	}
+	for _, args := range [][]string{
+		{"-test.parallel=0"}, {"-test.parallel=-1"}, {"-test.parallel=bad"}, {"-test.parallel=999999999999999999999999999999999"},
+		{"-test.parallel=bad", "-test.parallel=1"},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		cmd := exec.CommandContext(ctx, exe, append([]string{"-test.run=^TestCLITestParallelChild$"}, args...)...)
+		var out cliParallelOutput
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		err := cmd.Run()
+		cancel()
+		if err == nil || out.overflow {
+			t.Fatal("invalid flag accepted or output unbounded")
+		}
+	}
+	for _, args := range [][]string{{"-help"}, {"internal-tools", "--help"}} {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		cmd := exec.CommandContext(ctx, exe, args...)
+		var out cliParallelOutput
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		err := cmd.Run()
+		cancel()
+		if err != nil || out.overflow || out.Len() == 0 {
+			t.Fatal("help/early dispatch failed", err)
+		}
+	}
+	// Drive both existing isolation tests with the admitted decision and one slot.
+	admitted := decideCLITestParallel(2, false, "linux", cliTestParallelObservation{valid: true, memory: 4294967296, nproc: 4096})
+	if admitted.Final != 16 {
+		t.Fatal("deterministic admission failed")
+	}
+	for _, n := range []int{1, admitted.Final} {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		cmd := exec.CommandContext(ctx, exe, "-test.run=^(TestCLIParallelFixtureIsolation|TestCLIResolverRunnerIsolation)$", "-test.parallel="+strconv.Itoa(n))
+		var out cliParallelOutput
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		err := cmd.Run()
+		cancel()
+		if err != nil || out.overflow {
+			t.Fatal("isolation child failed", err)
+		}
+	}
 }

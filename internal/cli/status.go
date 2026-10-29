@@ -168,11 +168,15 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 						fmt.Fprintf(cmd.OutOrStdout(), "    Operator-steered: %s messages; SHA-256 %s\n", artifact.Metadata["guidance_count"], artifact.Metadata["guidance_sha256"])
 					}
 				}
+				for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s production: %s\n", role, lease.RoleProductionSummary(state, role))
+				}
 				if len(entry.Provenance) == 0 {
 					fmt.Fprintln(cmd.OutOrStdout(), "Provenance: none recorded")
 				} else {
 					fmt.Fprintln(cmd.OutOrStdout(), "Provenance:")
 					for _, record := range entry.Provenance {
+
 						value := func(s string) string {
 							if s == "" {
 								return "-"

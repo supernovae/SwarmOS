@@ -165,3 +165,39 @@ func TestSlowReviewThenStalledStateFetchHeartbeats(t *testing.T) {
 		}
 	}
 }
+
+func TestTesterRetryProgressUsesExistingSession(t *testing.T) {
+	e, issue := budgetEngine(t)
+	first, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var events []ProgressEvent
+	ticks := make(chan time.Time)
+	e.progressTicks = ticks
+	retry, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", ClaimID: first.State.Lease.ClaimID, AgentName: "mock", Phase: "test", Headless: true, OnProgress: func(ev ProgressEvent) { mu.Lock(); events = append(events, ev); mu.Unlock() }})
+	if err != nil || !retry.ValidationPassed {
+		t.Fatalf("retry: %+v %v", retry, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	testIndex, checkIndex, finishes := -1, -1, 0
+	for i, ev := range events {
+		if ev.Stage == "implement" || ev.Role == "developer" {
+			t.Fatalf("developer progress: %+v", ev)
+		}
+		if ev.Stage == "test" && testIndex < 0 {
+			testIndex = i
+		}
+		if ev.Stage == "required-checks" && checkIndex < 0 {
+			checkIndex = i
+		}
+		if ev.Status == "completed" && ev.Stage == "required-checks" && ev.Check == "" {
+			finishes++
+		}
+	}
+	if len(events) == 0 || events[0].Stage != "preflight" || testIndex <= 0 || checkIndex <= testIndex || finishes != 1 {
+		t.Fatalf("events: %+v", events)
+	}
+}

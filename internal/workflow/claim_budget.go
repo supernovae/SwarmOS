@@ -103,6 +103,11 @@ func budgetInterrupted(ctx context.Context, err error) bool {
 }
 
 func (e *Engine) pauseWork(parent context.Context, res *WorkResult, opts WorkOptions, wu *contract.WorkUnit, phase string, checkpoint, forkMode bool, forkRemote string) error {
+	// Tester retries preserve the implementation checkpoint even when interrupted.
+	if opts.Phase == "test" {
+		checkpoint = false
+		phase = "implement"
+	}
 	cleanup, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	if err := e.LeaseManager.CheckClaim(cleanup, opts.IssueNumber, opts.Owner); err != nil {

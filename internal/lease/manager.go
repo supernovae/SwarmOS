@@ -17,6 +17,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -1545,11 +1546,11 @@ func (m *Manager) UpdateAdvisoryReview(ctx context.Context, n int, owner string,
 	if art.Type != contract.ArtifactReview || art.Metadata["kind"] == "human" {
 		return nil, fmt.Errorf("advisory review requires an agent review artifact")
 	}
-	return m.updateArtifact(ctx, n, owner, art, true, false)
+	return m.updateArtifact(ctx, n, owner, art, true, false, false)
 }
 
 func (m *Manager) UpdateArtifact(ctx context.Context, n int, owner string, art contract.Artifact) (*IssueState, error) {
-	return m.updateArtifact(ctx, n, owner, art, false, false)
+	return m.updateArtifact(ctx, n, owner, art, false, false, false)
 }
 
 // RecordTrustedValidation records coordinator-produced evidence under the claim fence.
@@ -1557,13 +1558,13 @@ func (m *Manager) RecordTrustedValidation(ctx context.Context, n int, owner stri
 	if art.Type != contract.ArtifactValidation {
 		return nil, fmt.Errorf("expected validation artifact")
 	}
-	return m.updateArtifact(ctx, n, owner, art, false, m.gateway == nil)
+	return m.updateArtifact(ctx, n, owner, art, false, m.gateway == nil, false)
 }
 
-func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art contract.Artifact, advisory, trusted bool) (*IssueState, error) {
+func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art contract.Artifact, advisory, trusted, implementation bool, eligibility ...func(*IssueState) error) (*IssueState, error) {
 	metadata := make(map[string]string, len(art.Metadata))
 	for k, v := range art.Metadata {
-		if !strings.HasPrefix(k, "validation_trusted_") {
+		if !strings.HasPrefix(k, "validation_trusted_") && !strings.HasPrefix(k, "implementation_trusted_") {
 			metadata[k] = v
 		}
 	}
@@ -1579,6 +1580,46 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		})
 	}
 	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+		for _, verify := range eligibility {
+			if err := verify(st); err != nil {
+				return err
+			}
+		}
+		if implementation {
+			head, branch := implementationCheckpoint(st)
+			if art.Type != contract.ArtifactImplementation || art.Verdict != "PASS" || head == "" || art.Metadata["head_sha"] != head {
+				return fmt.Errorf("successful recorded implementation checkpoint required")
+			}
+			bindings := ReviewBindings(st)
+			if bindings["plan_digest"] == "" || bindings["test_plan_digest"] == "" {
+				return ErrApprovalRequired
+			}
+			for k, v := range bindings {
+				if v == "" || art.Metadata[k] != v {
+					return fmt.Errorf("implementation binding mismatch: %s", k)
+				}
+			}
+			if st.EffectiveGate != contract.GateNone {
+				if err := verifyReviewBinding(st, st.EffectiveGate); err != nil {
+					return err
+				}
+			}
+			tree, err := m.implementationTree(ctx, head)
+			if err != nil {
+				return err
+			}
+			for k, v := range bindings {
+				art.Metadata["implementation_trusted_"+k] = v
+			}
+			art.Metadata["implementation_trusted_origin"] = "coordinator"
+			art.Metadata["implementation_trusted_issue"] = fmt.Sprint(n)
+			art.Metadata["implementation_trusted_owner"] = st.Lease.Owner
+			art.Metadata["implementation_trusted_claim"] = st.Lease.ClaimID
+			art.Metadata["implementation_trusted_head"] = head
+			art.Metadata["implementation_trusted_tree"] = tree
+			art.Metadata["implementation_trusted_branch"] = branch
+			art.Metadata["implementation_trusted_revision"] = implementationRevision(st)
+		}
 		if trusted {
 			art.Metadata["validation_trusted_origin"] = "coordinator"
 			art.Metadata["validation_trusted_owner"] = st.Lease.Owner
@@ -2201,4 +2242,117 @@ func reviewBodyMatchesVerdict(body, verdict string) bool {
 		}
 	}
 	return seen
+}
+
+// RecordTrustedImplementation admits only coordinator-observed successful completion.
+func (m *Manager) RecordTrustedImplementation(ctx context.Context, n int, owner string, art contract.Artifact) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("trusted implementation requires direct coordinator")
+	}
+	return m.updateArtifact(ctx, n, owner, art, false, false, true)
+}
+
+func implementationCheckpoint(st *IssueState) (string, string) {
+	if st.PRRevision != nil {
+		return st.PRRevision.LocalHeadSHA, st.PRRevision.Branch
+	}
+	return st.HeadSHA, st.Branch
+}
+func implementationRevision(st *IssueState) string {
+	if st.PRRevision == nil {
+		return "issue"
+	}
+	return fmt.Sprintf("%d:%s:%s", st.PRRevision.Number, st.PRRevision.RemoteHeadSHA, st.PRRevision.Intent)
+}
+func (m *Manager) implementationTree(ctx context.Context, head string) (string, error) {
+	cmd, _, err := gitcredential.Command(ctx, m.repoRoot, "rev-parse", "--verify", head+"^{tree}")
+	if err != nil {
+		return "", err
+	}
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// VerifyTrustedImplementation checks stable producing evidence independently of the retry claim.
+func VerifyTrustedImplementation(st *IssueState, head, tree, branch string) error {
+	if st == nil {
+		return fmt.Errorf("missing implementation")
+	}
+	expectedHead, expectedBranch := implementationCheckpoint(st)
+	if head == "" || tree == "" || head != expectedHead || branch != expectedBranch {
+		return fmt.Errorf("implementation checkpoint moved")
+	}
+	for _, art := range st.Artifacts {
+		if art.Type != contract.ArtifactImplementation {
+			continue
+		}
+		md := art.Metadata
+		if art.IssueNumber != 0 && art.IssueNumber != st.Lease.IssueNumber {
+			return fmt.Errorf("implementation issue mismatch")
+		}
+		if art.Verdict != "PASS" || md["implementation_trusted_origin"] != "coordinator" || md["implementation_trusted_issue"] != fmt.Sprint(st.Lease.IssueNumber) ||
+			md["implementation_trusted_owner"] == "" || md["implementation_trusted_claim"] == "" ||
+			md["implementation_trusted_claim"] != md["implementation_trusted_review_claim_id"] ||
+			md["implementation_trusted_head"] != head || md["implementation_trusted_tree"] != tree ||
+			md["implementation_trusted_branch"] != branch || md["implementation_trusted_revision"] != implementationRevision(st) ||
+			md["content_sha256"] != hash(art.Body) {
+			return fmt.Errorf("implementation lacks trusted completion")
+		}
+		bindings := ReviewBindings(st)
+		if bindings["plan_digest"] == "" || bindings["test_plan_digest"] == "" {
+			return ErrApprovalRequired
+		}
+		for k, v := range bindings {
+			if k != "review_claim_id" && (v == "" || md["implementation_trusted_"+k] != v) {
+				return fmt.Errorf("implementation inputs changed: %s", k)
+			}
+		}
+		if st.EffectiveGate != contract.GateNone {
+			return verifyReviewBinding(st, st.EffectiveGate)
+		}
+		return nil
+	}
+	return fmt.Errorf("missing trusted implementation")
+}
+
+// CheckImplementationRetry fences the read against the current retry owner and token.
+func (m *Manager) CheckImplementationRetry(ctx context.Context, n int, owner, head, tree, branch string) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("test retry requires direct coordinator")
+	}
+	st, _, err := m.load(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.checkStateClaim(ctx, n, owner, st); err != nil {
+		return nil, err
+	}
+	if err := VerifyTrustedImplementation(st, head, tree, branch); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// RecordRetryValidation rechecks implementation bindings inside every fenced CAS attempt.
+func (m *Manager) RecordRetryValidation(ctx context.Context, n int, owner string, art contract.Artifact, head, tree, branch string) (*IssueState, error) {
+	if m.gateway != nil || art.Type != contract.ArtifactValidation {
+		return nil, fmt.Errorf("direct coordinator validation required")
+	}
+	return m.updateArtifact(ctx, n, owner, art, false, true, false, func(st *IssueState) error {
+		if err := VerifyTrustedImplementation(st, head, tree, branch); err != nil {
+			return err
+		}
+		bindings := map[string]string{"head_sha": head, "base_sha": st.BaseSHA}
+		if art.Verdict == "PASS" {
+			bindings["validation_tree"] = tree
+			bindings["validation_claim"] = st.Lease.ClaimID
+			bindings["validation_base"] = st.BaseSHA
+		}
+		for key, want := range bindings {
+			if want == "" || art.Metadata[key] != want {
+				return fmt.Errorf("retry validation binding mismatch: %s", key)
+			}
+		}
+		return nil
+	})
 }

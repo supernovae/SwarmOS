@@ -86,6 +86,11 @@ func (r *workRun) checkRoleImport(importCtx context.Context, role string, paths,
 	if err := r.e.LeaseManager.CheckClaim(importCtx, r.opts.IssueNumber, r.opts.Owner); err != nil {
 		return err
 	}
+	if r.opts.Phase == "test" {
+		if err := r.checkTestRetry(); err != nil {
+			return err
+		}
+	}
 	if err := writableImportPolicy(role, paths, r.pre.Validation.ProtectedPaths, r.pre.WorkUnit.AllowHarnessChanges, r.forkMode); err != nil {
 		return err
 	}
@@ -132,7 +137,8 @@ func (r *workRun) rejectImport(runErr error) error {
 	}
 	var completed *sandbox.CompletedImportError
 	rejection.Completed = errors.As(runErr, &completed)
-	reason := importRejectionReason(rejection, r.opts.IssueNumber, r.opts.PRNumber)
+	retryEligible := rejection.Role == "tester" && !r.forkMode && r.checkTestRetry() == nil
+	reason := importRejectionReason(rejection, r.opts.IssueNumber, r.opts.PRNumber, retryEligible)
 	updated, err := r.e.LeaseManager.Handoff(r.coordinatorCtx, r.opts.IssueNumber, r.opts.Owner, "implement", "implement", reason)
 	if err != nil {
 		return fmt.Errorf("%w: record import rejection: %w", runErr, err)
@@ -140,9 +146,17 @@ func (r *workRun) rejectImport(runErr error) error {
 	r.res.State = updated
 	if rejection.Patch != "" {
 		// Only the local error names the private path; the projected reason does not.
-		return fmt.Errorf("%s (saved at %s): %w", reason, rejection.Patch, runErr)
+		err := fmt.Errorf("%s (saved at %s): %w", reason, rejection.Patch, runErr)
+		if retryEligible {
+			return &TestRetryAvailableError{Err: err}
+		}
+		return err
 	}
-	return fmt.Errorf("%s: %w", reason, runErr)
+	err = fmt.Errorf("%s: %w", reason, runErr)
+	if retryEligible {
+		return &TestRetryAvailableError{Err: err}
+	}
+	return err
 }
 
 func (r *workRun) pauseInterrupted(runErr error, phase string, checkpoint bool) (bool, error) {
@@ -168,3 +182,9 @@ func (r *workRun) stopForSplit() bool {
 }
 
 func (r *workRun) stopHeartbeat() { r.heartbeat.Stop() }
+
+// TestRetryAvailableError carries coordinator-verified recovery eligibility.
+type TestRetryAvailableError struct{ Err error }
+
+func (e *TestRetryAvailableError) Error() string { return e.Err.Error() }
+func (e *TestRetryAvailableError) Unwrap() error { return e.Err }

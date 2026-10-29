@@ -82,7 +82,10 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				return fmt.Errorf("--resolve cannot be combined with --abort")
 			}
 			if operation == "work" {
-				if err := contract.ValidatePhase(opts.Work.Phase); err != nil {
+				if opts.Work.Phase == "test" && rootOpts.Fork {
+					return fmt.Errorf("--phase test is unavailable in fork mode")
+				}
+				if err := contract.ValidateWorkPhase(opts.Work.Phase); err != nil {
 					return fmt.Errorf("invalid --phase: %w", err)
 				}
 				opts.Work.Gate = contract.GateMode(gate)
@@ -281,7 +284,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 		cmd.Flags().StringVar(&opts.Work.ReviewerAgent, "reviewer-agent", "", "Configured reviewer override")
 		cmd.Flags().StringVar(&opts.Work.DeveloperAgent, "developer-agent", "", "Configured developer override")
 		cmd.Flags().StringVar(&opts.Work.TesterAgent, "tester-agent", "", "Configured tester override")
-		cmd.Flags().StringVar(&opts.Work.Phase, "phase", "all", "Phase: all, plan, review, or implement")
+		cmd.Flags().StringVar(&opts.Work.Phase, "phase", "all", "Phase: all, plan, review, implement, or test (test requires an explicit number)")
 		cmd.Flags().StringVar(&gate, "gate", "", "Require gate none, agent, or human; cannot weaken policy")
 		cmd.Flags().StringVar(&opts.Work.DeveloperInstructions, "developer-instructions", "", "Additional operator guidance for the developer role")
 		cmd.Flags().StringVar(&opts.Work.TesterInstructions, "tester-instructions", "", "Additional operator guidance for the tester role")

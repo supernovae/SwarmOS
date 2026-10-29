@@ -1,10 +1,21 @@
 package cli
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"github.com/supernovae/swarmos/internal/agent"
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"gopkg.in/yaml.v3"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -236,6 +247,296 @@ func TestWorkValidationRepairNextAction(t *testing.T) {
 					t.Fatalf("stop lost the validation failure: %v", err)
 				}
 			})
+		}
+	}
+}
+
+func TestTestPhaseRequiresExplicitIssueBeforeSelection(t *testing.T) {
+	for _, flags := range [][]string{{"--next"}, {"--next", "--all"}} {
+		// No backend, repository, tracker, manager, or runner is available: any
+		// selection or setup call would fail instead of producing this usage error.
+		opts := &RootOptions{RepoRoot: t.TempDir(), Backend: "invalid"}
+		cmd := newWorkCmd(opts)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs(append([]string{"--phase", "test"}, flags...))
+		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "requires an explicit issue number") {
+			t.Fatalf("flags %v: %v", flags, err)
+		}
+		entries, err := os.ReadDir(opts.RepoRoot)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("selection mutated root: %v %v", entries, err)
+		}
+	}
+}
+
+func TestExplicitTestWorkCommandRunsTesterOnly(t *testing.T) {
+	for _, resource := range []string{"issue", "pr"} {
+		t.Run(resource, func(t *testing.T) {
+			var f *cliFixture
+			var number int
+			if resource == "issue" {
+				f = newCLIFixture(t)
+				number = f.create(t, "none")
+				f.must(t, "issue", "approve", strconv.Itoa(number))
+			} else {
+				f, _, number = submittedPRFixture(t, "none")
+			}
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo implemented > implementation.txt")
+			f.must(t, resource, "work", strconv.Itoa(number), "--agent", "mock")
+			// A developer invocation in the retry would fail the command.
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 77")
+			f.setenv("SWARM_MOCK_TESTER_CMD", "echo tester-ran > \"$TMPDIR/tester-retry\"")
+			out, err := f.run(resource, "work", strconv.Itoa(number), "--phase", "test", "--agent", "mock", "--json")
+			if err != nil {
+				t.Fatalf("retry: %v %s", err, out)
+			}
+			var payload struct {
+				Result struct {
+					PhaseCompleted   string
+					ValidationPassed bool
+					RoleAgentsUsed   map[string]string
+				}
+			}
+			if resource == "issue" {
+				if err := json.Unmarshal([]byte(out), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.Result.PhaseCompleted != "test" || !payload.Result.ValidationPassed || payload.Result.RoleAgentsUsed["developer"] != "" {
+					t.Fatalf("result: %s", out)
+				}
+			} else if !strings.Contains(out, "\"PhaseCompleted\":\"test\"") {
+				t.Fatalf("PR result: %s", out)
+			}
+		})
+	}
+}
+
+func TestExplicitTestWorkFakeGitHub(t *testing.T) {
+	for _, resource := range []string{"issue", "pr"} {
+		t.Run(resource, func(t *testing.T) {
+			setup := func(f *cliFixture) {
+				path := filepath.Join(f.root, ".swarm/config.yaml")
+				cfg, err := harness.LoadConfig(f.root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.Agents["mock"] = contract.AgentConfig{Binary: "mock"}
+				data, err := yaml.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0644); err != nil {
+					t.Fatal(err)
+				}
+				prGit(t, f.root, "add", ".")
+				prGit(t, f.root, "commit", "-m", "allow fixture mock")
+			}
+			var f *cliFixture
+			var issue, number int
+			if resource == "issue" {
+				f = newCLIFixture(t)
+				setup(f)
+				issue = f.create(t, "none")
+				number = issue
+				f.must(t, "issue", "approve", strconv.Itoa(issue))
+				f.must(t, "issue", "work", strconv.Itoa(issue), "--agent", "mock")
+			} else {
+				f, issue, number = submittedPRFixture(t, "none", setup)
+				f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo revision > revision.txt")
+				f.must(t, "pr", "work", strconv.Itoa(number), "--agent", "mock")
+			}
+			remote := filepath.Join(t.TempDir(), "remote.git")
+			prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
+			prGit(t, f.root, "remote", "add", "origin", remote)
+			prGit(t, f.root, "push", "origin", "main")
+			prGit(t, f.root, "push", "origin", f.state(t, issue).Branch)
+			raw, _, err := f.manager.Store().Load(t.Context(), issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := trustedLedgerStore(t, f.root, "").CompareAndSwap(t.Context(), issue, "", raw); err != nil {
+				t.Fatal(err)
+			}
+			pull := tracker.PullRequest{}
+			if resource == "pr" {
+				original, err := f.tracker.GetPullRequest(t.Context(), number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pull = *original
+				mergeable := true
+				pull.Mergeable = &mergeable
+				pull.MergeableState = "clean"
+			}
+			opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: workCLITracker{Tracker: f.tracker, pr: pull}}
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 77")
+			doc, err := runJSON(t, f.options(opts), resource, "work", strconv.Itoa(number), "--phase", "test", "--agent", "mock", "--json", "--progress=false")
+			if err != nil {
+				t.Fatalf("fake github retry: %v %+v", err, doc)
+			}
+			result := doc["result"].(map[string]any)
+			if resource == "pr" {
+				result = result["work"].(map[string]any)
+			}
+			if result["PhaseCompleted"] != "test" || result["ValidationPassed"] != true {
+				t.Fatalf("retry result: %+v", result)
+			}
+		})
+	}
+}
+
+// untouchedSelectionTracker counts tracker activity and refuses it; any other
+// method panics through the nil interface.
+type untouchedSelectionTracker struct {
+	tracker.Tracker
+	calls int
+}
+
+func (t *untouchedSelectionTracker) refuse() error {
+	t.calls++
+	return errors.New("unexpected tracker call")
+}
+func (t *untouchedSelectionTracker) BackendName() string {
+	t.calls++
+	return "github"
+}
+func (t *untouchedSelectionTracker) CurrentUser(context.Context) (string, error) {
+	return "", t.refuse()
+}
+func (t *untouchedSelectionTracker) Authorize(context.Context, string) error { return t.refuse() }
+func (t *untouchedSelectionTracker) GetIssue(context.Context, int) (*tracker.Issue, error) {
+	return nil, t.refuse()
+}
+func (t *untouchedSelectionTracker) ListIssues(context.Context, tracker.IssueFilter) ([]*tracker.Issue, error) {
+	return nil, t.refuse()
+}
+
+// countingRunner records every agent launch and refuses it.
+type countingRunner struct {
+	agent.MockRunner
+	runs *int
+}
+
+func (r *countingRunner) Run(context.Context, agent.RunRequest) (*agent.RunResult, error) {
+	*r.runs++
+	return nil, errors.New("unexpected agent run")
+}
+
+// rootSnapshot digests every file under root, including Git refs, coordination
+// state, claim tokens and worktrees.
+func rootSnapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			if d != nil && d.IsDir() {
+				files[path] = "dir"
+			}
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		files[path] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestTestPhaseNextRefusesBeforeAnyCoordinatorActivity(t *testing.T) {
+	for _, flags := range [][]string{{"--next"}, {"--next", "--all"}} {
+		t.Run(strings.Join(flags, " "), func(t *testing.T) {
+			f := newCLIFixture(t)
+			// A ready approved task that --next would otherwise select and claim.
+			f.must(t, "issue", "approve", strconv.Itoa(f.create(t, "none")))
+			runs := 0
+			f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &countingRunner{runs: &runs}, nil
+			}
+			run := func(phase string) (*untouchedSelectionTracker, error) {
+				tr := &untouchedSelectionTracker{}
+				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "github", Repo: "owner/repo", trackerOverride: tr})
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				cmd.SetArgs(append([]string{"issue", "work", "--phase", phase, "--agent", "mock", "--progress=false"}, flags...))
+				return tr, cmd.ExecuteContext(t.Context())
+			}
+			before := rootSnapshot(t, f.root)
+			tr, err := run("test")
+			if err == nil || !strings.Contains(err.Error(), "requires an explicit issue number") {
+				t.Fatalf("refusal: %v", err)
+			}
+			if tr.calls != 0 || runs != 0 {
+				t.Fatalf("activity before refusal: tracker=%d agents=%d", tr.calls, runs)
+			}
+			if after := rootSnapshot(t, f.root); !reflect.DeepEqual(before, after) {
+				t.Fatal("refusal mutated state, tokens or worktrees")
+			}
+			if len(flags) == 1 {
+				// Control: the same seams observe selection for a permitted phase.
+				if tr, _ = run("implement"); tr.calls == 0 {
+					t.Fatal("tracker seam did not observe selection")
+				}
+			}
+		})
+	}
+}
+
+func TestStagedImplementationIsNotTestRetryEligible(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "claim", n, "--agent", "mock")
+	wt := filepath.Join(f.root, ".swarm", "worktrees", "issue-"+n)
+	for name, body := range map[string]string{".swarm/active/PLAN.md": "# Plan\n\n1. Add feature.txt\n", ".swarm/active/TEST_PLAN.md": "# Test Plan\n\n- Run git --version\n"} {
+		if err := os.WriteFile(filepath.Join(wt, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.must(t, "issue", "stage", n, "--phase", "plan", "--harness", "claude", "--model", "test")
+	f.must(t, "issue", "review-plan", n, "--agent", "mock")
+	if err := os.WriteFile(filepath.Join(wt, "feature.txt"), []byte("shipped\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.must(t, "issue", "stage", n, "--phase", "implement", "--harness", "codex", "--model", "test")
+	before := f.state(t, number)
+	staged := false
+	for _, a := range before.Artifacts {
+		staged = staged || (a.Type == contract.ArtifactImplementation && a.Verdict == "PASS" && a.Metadata["implementation_trusted_origin"] == "")
+	}
+	if !staged {
+		t.Fatalf("no manual stage PASS: %+v", before.Artifacts)
+	}
+	runs := 0
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &countingRunner{runs: &runs}, nil
+	}
+	out, err := f.run("issue", "work", n, "--phase", "test", "--agent", "mock", "--progress=false")
+	if err == nil || !strings.Contains(err.Error(), "tester retry unavailable") || runs != 0 {
+		t.Fatalf("staged retry: %v runs=%d\n%s", err, runs, out)
+	}
+	after := f.state(t, number)
+	for _, typ := range []contract.ArtifactType{contract.ArtifactImplementation, contract.ArtifactValidation} {
+		var was, now []contract.Artifact
+		for _, a := range before.Artifacts {
+			if a.Type == typ {
+				was = append(was, a)
+			}
+		}
+		for _, a := range after.Artifacts {
+			if a.Type == typ {
+				now = append(now, a)
+			}
+		}
+		if !reflect.DeepEqual(was, now) {
+			t.Fatalf("%s evidence changed", typ)
 		}
 	}
 }

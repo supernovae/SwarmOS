@@ -499,3 +499,27 @@ func TestCheckpointProjectionFailureDoesNotRepeatLineage(t *testing.T) {
 		t.Fatal("projection retry changed ledger lineage")
 	}
 }
+
+func TestReconciledCheckpointIsNotRetryEligible(t *testing.T) {
+	t.Parallel()
+	f := newReconciliationFixture(t, "true")
+	ctx := context.Background()
+	got, err := f.m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled := false
+	for _, a := range got.State.Artifacts {
+		reconciled = reconciled || (a.Type == contract.ArtifactImplementation && a.Producer == "swarm:checkpoint-reconciler" && a.Verdict == "PASS" && a.Metadata["head_sha"] == f.b)
+	}
+	if !reconciled {
+		t.Fatalf("no reconciler PASS: %+v", got.State.Artifacts)
+	}
+	tree := f.git(f.path, "rev-parse", f.b+"^{tree}")
+	if err := VerifyTrustedImplementation(got.State, f.b, tree, f.branch); err == nil || !strings.Contains(err.Error(), "lacks trusted completion") {
+		t.Fatalf("reconciler PASS eligibility: %v", err)
+	}
+	if _, err := f.m.CheckImplementationRetry(ctx, f.n, "local-dev", f.b, tree, f.branch); err == nil || !strings.Contains(err.Error(), "lacks trusted completion") {
+		t.Fatalf("reconciler PASS retry: %v", err)
+	}
+}

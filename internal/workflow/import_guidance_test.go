@@ -310,13 +310,13 @@ func TestCompletedTesterRejectionReason(t *testing.T) {
 		if !errors.As(err, &rejection) || !rejection.Completed {
 			t.Fatalf("classification: %v", err)
 		}
-		reason := importRejectionReason(rejection, issue.Number, pr)
+		reason := importRejectionReason(rejection, issue.Number, pr, true)
 		rerun := "swarm issue work " + strconv.Itoa(issue.Number)
 		if pr != 0 {
 			rerun = "swarm pr work 42"
 		}
 		for _, text := range []string{reason, err.Error(), res.State.NextPhaseReason} {
-			for _, want := range []string{"tester run completed", ".swarm/active/IMPLEMENTATION.md", "--phase implement", "--tester-instructions"} {
+			for _, want := range []string{"tester run completed", ".swarm/active/IMPLEMENTATION.md", "--phase test", "--tester-instructions"} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("missing %s: %s", want, text)
 				}
@@ -355,13 +355,13 @@ func TestCompletedTesterScratchRejectionReason(t *testing.T) {
 		if rejection.OutputOnly || rejection.Recoverable || !rejection.ActiveDirectoryImport() {
 			t.Fatalf("recovery broadened: %+v", rejection)
 		}
-		reason := importRejectionReason(rejection, issue.Number, pr)
+		reason := importRejectionReason(rejection, issue.Number, pr, true)
 		rerun := "swarm issue work " + strconv.Itoa(issue.Number)
 		if pr != 0 {
 			rerun = "swarm pr work 42"
 		}
 		for _, text := range []string{reason, err.Error(), res.State.NextPhaseReason} {
-			for _, want := range []string{"tester run completed", ".swarm/active/VALIDATION_CHECK.log", "--phase implement", "--tester-instructions", "TMPDIR", "worktree was left unchanged"} {
+			for _, want := range []string{"tester run completed", ".swarm/active/VALIDATION_CHECK.log", "--phase test", "--tester-instructions", "TMPDIR", "worktree was left unchanged"} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("missing %s: %s", want, text)
 				}

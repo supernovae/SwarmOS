@@ -40,8 +40,8 @@ lint:
 	$(GO) vet ./...
 	$(GO) tool staticcheck ./...
 
-## check: everything CI checks before a PR (lint and race tests)
-check: lint race
+## check: everything CI checks before a PR (lint, race tests, and changelog fragments)
+check: lint race changelog-check
 
 ## version: show the installed swarm version
 version:
@@ -51,8 +51,12 @@ version:
 clean:
 	rm -rf $(BIN_DIR)
 
-.PHONY: changelog
+.PHONY: changelog changelog-check
 
 ## changelog: fold unreleased fragments into VERSION (maintainers)
 changelog:
 	$(GO) run ./cmd/changelog "$(VERSION)"
+
+## changelog-check: validate unreleased fragments without writing
+changelog-check:
+	$(GO) run ./cmd/changelog --check

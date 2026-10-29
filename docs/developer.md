@@ -610,7 +610,7 @@ esac
 
 Independent fragments let parallel contributions merge without sharing a changelog edit. Add a file under `changes/unreleased/` for each change and leave `CHANGELOG.md` for maintainer releases. Use a unique issue-based name such as `126.md`; add a descriptive suffix such as `126-fix.md` if another fragment uses that number.
 
-Each file contains one `- ` Markdown bullet. Indented prose continuation lines are allowed; additional list items, nested lists, headings, and unrelated paragraphs are rejected. For example:
+Each file contains one `- ` Markdown bullet. Indented prose continuation lines are allowed; additional list items, nested lists, headings, and unrelated paragraphs are rejected. `make check` (or `go run ./cmd/changelog --check`) validates every fragment without writing and names each malformed file. For example:
 
 ```markdown
 - Add a release helper that combines changelog fragments.

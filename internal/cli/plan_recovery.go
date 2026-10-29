@@ -53,7 +53,7 @@ func planReviewRecovery(opts *RootOptions, st *lease.IssueState, resource string
 	return fmt.Sprintf("%s. Revise the plan: %s %s work %d --phase plan; then run %s. Automatic retries remain subject to the per-revision cap.", st.NextPhaseReason, command, resource, number, review)
 }
 
-func runCheckpointPlan(cmd *cobra.Command, root *RootOptions, arg string, opts workflow.WorkOptions, dryRun, asJSON bool) error {
+func runCheckpointPlan(cmd *cobra.Command, root *RootOptions, arg string, opts workflow.WorkOptions, dryRun, asJSON, showProgress bool) error {
 	n, err := parseNumberArg(arg, "issue")
 	if err != nil {
 		return err
@@ -99,6 +99,12 @@ func runCheckpointPlan(cmd *cobra.Command, root *RootOptions, arg string, opts w
 	}
 	if dryRun {
 		return writeJSON(cmd, map[string]any{"kind": "checkpoint-plan-dry-run", "checkpoint": p})
+	}
+	if showProgress {
+		printer := workProgressPrinter(progressWriter(cmd))
+		opts.SetupProgress = root.newProgressReporter(cmd.Context(), printer)
+		opts.OnProgress = printer
+		defer opts.SetupProgress.Close()
 	}
 	lock, err := lease.LockClaim(repo, n)
 	if err != nil {

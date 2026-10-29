@@ -65,7 +65,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			if planCheckpoint {
-				return runCheckpointPlan(cmd, rootOpts, args[0], workflow.WorkOptions{PlanCheckpoint: true, ExpectedHead: expectedHead, CandidateHead: candidateHead, Phase: phase, PlannerAgent: plannerAgent, AgentName: agentName, Instructions: instructions, PlannerInstructions: roleInstructions.PlannerInstructions, Gate: contract.GateMode(gate)}, dryRun, jsonOutput)
+				return runCheckpointPlan(cmd, rootOpts, args[0], workflow.WorkOptions{Version: Version, PlanCheckpoint: true, ExpectedHead: expectedHead, CandidateHead: candidateHead, Phase: phase, PlannerAgent: plannerAgent, AgentName: agentName, Instructions: instructions, PlannerInstructions: roleInstructions.PlannerInstructions, Gate: contract.GateMode(gate)}, dryRun, jsonOutput, progressOutput)
 			}
 			var failedReport *validation.ValidationReport
 			defer func() { reportJSONFailureWithReport(cmd, jsonOutput, "work", runErr, failedReport) }()

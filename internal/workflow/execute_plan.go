@@ -8,6 +8,7 @@ import (
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"io/fs"
 	"os"
@@ -140,7 +141,7 @@ func (r *workRun) finishPlanHandoff() (bool, error) {
 }
 
 // executeCheckpointPlan never enters the implementation/checkpoint pipeline.
-func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (*WorkResult, error) {
+func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (out *WorkResult, runErr error) {
 	if e.ForkMode || opts.ForkMode || opts.PRNumber != 0 || opts.Handoff || (opts.Phase != "plan" && opts.Phase != "review") || (opts.PlanCheckpoint && opts.Phase != "plan") {
 		return nil, fmt.Errorf("checkpoint planning requires direct issue plan or authenticated recovery review")
 	}
@@ -169,6 +170,17 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (*
 	if execution.Mode != contract.ExecutionIsolated || execution.Backend != contract.BackendNative || strings.EqualFold(cfg.PlanMode, "interactive") {
 		return nil, fmt.Errorf("checkpoint planning requires native isolated Codex or harness-tools Bubblewrap and agent plan mode")
 	}
+	reporter := opts.SetupProgress
+	if reporter == nil {
+		reporter = startWorkProgress(ctx, opts.IssueNumber, opts.OnProgress)
+		defer reporter.Close()
+	}
+	reporter.mu.Lock()
+	reporter.issue = opts.IssueNumber
+	reporter.mu.Unlock()
+	ctx = progress.WithActivity(ctx, reporter.activityTracker())
+	reporter.next("preflight")
+	defer func() { reporter.finish(out, runErr) }()
 	base, taskDigest, policyDigest := p.State.BaseSHA, p.State.TaskDigest, p.State.PolicyDigest
 	requestedGate, err := contract.ResolveGate(opts.Gate, p.State.EffectiveGate, p.State.EffectiveGate)
 	if err != nil {
@@ -252,6 +264,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (*
 	if err != nil {
 		return nil, err
 	}
+	reporter.next("workspace")
 	snapshot, err := os.MkdirTemp("", "swarm-checkpoint-plan-*")
 	if err != nil {
 		return nil, err
@@ -274,6 +287,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (*
 	}
 	result := &WorkResult{IssueNumber: opts.IssueNumber, BaseSHA: p.State.BaseSHA, HeadSHA: p.State.HeadSHA, BranchName: p.State.Branch, State: p.State, RoleAgentsUsed: map[string]string{role: name}}
 	e.Config = cfg
+	reporter.next(opts.Phase)
 	if role == "reviewer" {
 		_, candidate, present, bindingErr := lease.CheckpointPlanHeads(p.State)
 		if !present || bindingErr != nil || candidate != opts.CandidateHead {

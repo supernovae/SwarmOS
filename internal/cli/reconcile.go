@@ -13,12 +13,14 @@ import (
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func newReconcileCmd(opts *RootOptions) *cobra.Command {
-	var asJSON, checkpoint, dryRun bool
+	var asJSON, checkpoint, dryRun, showProgress bool
 	var expected, candidate string
 	var reconciliation *lease.CheckpointReconciliation
 	cmd := &cobra.Command{Use: "reconcile <issue-number>", Short: "Repair PR outcomes or explicitly reconcile a task checkpoint", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
@@ -64,6 +66,19 @@ func newReconcileCmd(opts *RootOptions) *cobra.Command {
 			return err
 		}
 		if checkpoint {
+			var p *progress.Session
+			if !dryRun {
+				p = opts.operationProgress(cmd.Context(), progressWriter(cmd), showProgress)
+				cmd.SetContext(progress.WithActivity(cmd.Context(), p.Activity()))
+				defer func() {
+					status := "completed"
+					if runErr != nil {
+						status = "failed"
+					}
+					p.Finish(status)
+				}()
+				p.Next("admission")
+			}
 			root := opts.resolveRepoRoot()
 			if !dryRun {
 				lock, e := lease.LockClaim(root, n)
@@ -105,7 +120,12 @@ func newReconcileCmd(opts *RootOptions) *cobra.Command {
 						return errors.Join(e, releaseErr)
 					}
 				}
-				reconciliation, err = m.ReconcilePreparedCheckpoint(cmd.Context(), n, reconciliation)
+				_, worktree, e := resolveIssueAndWorktree(root, []string{args[0]})
+				if e != nil {
+					return e
+				}
+				p.Next("validation")
+				reconciliation, err = m.ReconcilePreparedCheckpoint(cmd.Context(), n, reconciliation, validation.ValidateOptions{Version: Version, LookupEnv: opts.lookupEnv, DependencyPolicy: opts.dependencyPolicy(worktree), OnProgress: p.Observe})
 				if err != nil {
 					return fmt.Errorf("%w; checkpoint work preserved; the authorized claim remains held unless its fence changed; retry reconciliation or use swarm issue release %d", err, n)
 				}
@@ -138,6 +158,7 @@ func newReconcileCmd(opts *RootOptions) *cobra.Command {
 	cmd.Flags().StringVar(&expected, "expected-head", "", "Full authoritative predecessor checkpoint SHA")
 	cmd.Flags().StringVar(&candidate, "candidate-head", "", "Full clean local task candidate SHA")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Inspect checkpoint preconditions without executing checks or publishing")
+	cmd.Flags().BoolVar(&showProgress, "progress", true, "Report progress on stderr")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured reconciliation results")
 	return cmd
 }

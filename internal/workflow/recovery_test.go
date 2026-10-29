@@ -231,9 +231,25 @@ func TestCheckpointRecoveryPlanCycle(t *testing.T) {
 	if ordinaryErr == nil || !strings.Contains(ordinaryErr.Error(), opts.CandidateHead) || !strings.Contains(ordinaryErr.Error(), opts.ExpectedHead) {
 		t.Fatalf("ordinary plan did not reject exact checkpoint divergence: %v", ordinaryErr)
 	}
+	var events []ProgressEvent
+	reporter := NewProgressReporterWithTicks(t.Context(), func(event ProgressEvent) { events = append(events, event) }, nil, time.Now)
+	defer reporter.Close()
+	opts.SetupProgress = reporter
+	opts.OnProgress = func(ProgressEvent) { t.Fatal("used duplicate observer") }
 	result, err := e.ExecuteWork(t.Context(), opts)
 	if err != nil {
 		t.Fatal(err)
+	}
+	foundCompletion := func(stage string) bool {
+		for _, event := range events {
+			if event.IssueNumber == opts.IssueNumber && event.Stage == stage && event.Status == "completed" && event.StageElapsed > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	if !foundCompletion("plan") {
+		t.Fatalf("missing measured plan completion: %+v", events)
 	}
 	if result.State.HeadSHA != opts.ExpectedHead {
 		t.Fatal("planning recorded candidate")
@@ -249,9 +265,14 @@ func TestCheckpointRecoveryPlanCycle(t *testing.T) {
 		}
 	}
 	ordinary.Phase = "review"
+	ordinary.SetupProgress = reporter
+	ordinary.OnProgress = opts.OnProgress
 	result, err = e.ExecuteWork(t.Context(), ordinary)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !foundCompletion("review") {
+		t.Fatalf("missing measured review completion: %+v", events)
 	}
 	if result.PhaseCompleted != "review" || result.State.HeadSHA != opts.ExpectedHead {
 		t.Fatal("review advanced checkpoint")
@@ -279,6 +300,8 @@ func TestCheckpointRecoveryPlanCycle(t *testing.T) {
 	e.LookupEnv = nil
 	e.NewRunner = nil
 	ordinary.Phase = "implement"
+	ordinary.OnProgress = nil
+	ordinary.SetupProgress = nil
 	ordinary.DeveloperAgent = "mock"
 	ordinary.TesterAgent = "mock"
 	result, err = e.ExecuteWork(t.Context(), ordinary)
@@ -447,5 +470,65 @@ func TestCheckpointRecoveryPlanDelegatedPlanner(t *testing.T) {
 	opts.ReviewerAgent = "codex"
 	if _, err := e.ExecuteWork(t.Context(), opts); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCheckpointRecoveryProgressHeartbeat(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			e, opts, _ := checkpointPlanEngine(t)
+			ticks := make(chan time.Time)
+			events := make(chan ProgressEvent, 100)
+			reporter := NewProgressReporterWithTicks(t.Context(), func(event ProgressEvent) { events <- event }, ticks, time.Now)
+			defer reporter.Close()
+			opts.SetupProgress = reporter
+			original := e.NewRunner
+			sentinel := errors.New("fixture planner failed")
+			e.NewRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+				runner, err := original(name, cfg, local)
+				if err != nil {
+					return nil, err
+				}
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					select {
+					case ticks <- time.Now():
+					case <-time.After(5 * time.Second):
+						t.Fatal("heartbeat blocked")
+					}
+					for {
+						select {
+						case event := <-events:
+							if event.Stage == opts.Phase && event.Status == "running" {
+								if fail {
+									return nil, sentinel
+								}
+								return runner.Run(ctx, req)
+							}
+						case <-time.After(5 * time.Second):
+							t.Fatal("missing role heartbeat")
+						}
+					}
+				}}, nil
+			}
+			_, err := e.ExecuteWork(t.Context(), opts)
+			if fail && !errors.Is(err, sentinel) || !fail && err != nil {
+				t.Fatal(err)
+			}
+			reporter.Close()
+			want := "completed"
+			if fail {
+				want = "failed"
+			}
+			found := false
+			for len(events) > 0 {
+				event := <-events
+				if event.Stage == "plan" && event.Status == want && event.StageElapsed > 0 {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("missing measured terminal event")
+			}
+		})
 	}
 }

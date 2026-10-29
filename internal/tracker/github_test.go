@@ -133,6 +133,8 @@ func TestGitHubTrackerAuthorizePermissionsAndHumanReview(t *testing.T) {
 		reqPermission string
 		wantErr       bool
 	}{
+		{name: "write may run agent review", permission: "write", reqPermission: "review-agent"},
+		{name: "read cannot run agent review", permission: "read", reqPermission: "review-agent", wantErr: true},
 		{name: "write approves task", permission: "write", reqPermission: "approve-task"},
 		{name: "maintain approves task", permission: "maintain", reqPermission: "approve-task"},
 		{name: "admin approves task", permission: "admin", reqPermission: "approve-task"},
@@ -654,4 +656,85 @@ func TestLocalListSubIssues(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertOrder(a.Number, b.Number, c.Number)
+}
+
+func TestUpstreamPlanReviewForkMetadata(t *testing.T) {
+	for _, name := range []string{"public personal", "same upstream owner", "private", "missing private", "null private", "missing fork", "nonfork", "organization", "unknown type", "missing type", "missing owner", "wrong owner", "wrong source", "wrong canonical", "missing canonical", "api failure", "canceled"} {
+		t.Run(name, func(t *testing.T) {
+			slug, owner := "alice/swarm", "alice"
+			if name == "same upstream owner" {
+				slug, owner = "octo/personal", "octo"
+			}
+			metadata := map[string]any{"full_name": slug, "fork": true, "private": false, "owner": map[string]any{"login": owner, "type": "User"}, "source": map[string]any{"full_name": "octo/swarm"}}
+			switch name {
+			case "private":
+				metadata["private"] = true
+			case "missing private":
+				delete(metadata, "private")
+			case "null private":
+				metadata["private"] = nil
+			case "missing fork":
+				delete(metadata, "fork")
+			case "nonfork":
+				metadata["fork"] = false
+			case "organization":
+				metadata["owner"].(map[string]any)["type"] = "Organization"
+			case "unknown type":
+				metadata["owner"].(map[string]any)["type"] = "Other"
+			case "missing type":
+				delete(metadata["owner"].(map[string]any), "type")
+			case "missing owner":
+				delete(metadata, "owner")
+			case "wrong owner":
+				metadata["owner"].(map[string]any)["login"] = "mallory"
+			case "wrong source":
+				metadata["source"] = map[string]any{"full_name": "other/swarm"}
+			case "wrong canonical":
+				metadata["full_name"] = "other/swarm"
+			case "missing canonical":
+				delete(metadata, "full_name")
+			}
+			requests := 0
+			tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.Method != "GET" || r.URL.Path != "/repos/"+slug {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				if name == "api failure" {
+					http.Error(w, "unavailable", http.StatusServiceUnavailable)
+					return
+				}
+				writeJSON(t, w, metadata)
+			}))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if name == "canceled" {
+				cancel()
+			}
+			got, err := tr.VerifyPlanReviewFork(ctx, slug, owner)
+			positive := name == "public personal" || name == "same upstream owner"
+			if positive {
+				if err != nil || got != slug {
+					t.Fatalf("got %q, %v", got, err)
+				}
+			} else if err == nil {
+				t.Fatalf("accepted %s: %q", name, got)
+			}
+			if name == "canceled" && (requests != 0 || !errors.Is(err, context.Canceled)) {
+				t.Fatalf("cancellation: requests=%d err=%v", requests, err)
+			}
+		})
+	}
+}
+
+func TestUpstreamPlanReviewRequiresIdentity(t *testing.T) {
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user" {
+			t.Errorf("permission queried without identity: %s", r.URL.Path)
+		}
+		writeJSON(t, w, map[string]string{"login": "", "type": "User"})
+	}))
+	if err := tr.Authorize(context.Background(), "review-agent"); err == nil {
+		t.Fatal("accepted empty identity")
+	}
 }

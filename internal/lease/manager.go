@@ -70,8 +70,16 @@ type ApprovalTransition struct {
 	ReviewDigest     string `json:"review_digest"`
 }
 
+// UpstreamAdvisoryReview retains agent feedback without replacing the human
+// decision or its reviewer attestation.
+type UpstreamAdvisoryReview struct {
+	Artifact    contract.Artifact        `json:"artifact"`
+	Attestation contract.RoleAttestation `json:"attestation"`
+}
+
 type IssueState struct {
-	resumeMarker *resumeMarker
+	UpstreamAdvisoryReview *UpstreamAdvisoryReview `json:"upstream_advisory_review,omitempty"`
+	resumeMarker           *resumeMarker
 
 	BaseBranch             string                          `json:"base_branch,omitempty"`
 	CheckpointHeads        []string                        `json:"checkpoint_heads,omitempty"`
@@ -389,7 +397,7 @@ func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string,
 	// Upgrade legacy rejected reviews without trusting contributor artifacts.
 	if st.PendingPlanReview == nil {
 		for _, a := range st.Artifacts {
-			if a.Type != contract.ArtifactReview || a.Verdict != "CHANGES_REQUESTED" || a.Metadata["review_source"] != "authenticated-agent" || a.Metadata["content_sha256"] != hash(a.Body) || !reviewBodyMatchesVerdict(a.Body, a.Verdict) {
+			if a.Metadata["upstream_review_source"] != "" || a.Type != contract.ArtifactReview || a.Verdict != "CHANGES_REQUESTED" || a.Metadata["review_source"] != "authenticated-agent" || a.Metadata["content_sha256"] != hash(a.Body) || !reviewBodyMatchesVerdict(a.Body, a.Verdict) {
 				continue
 			}
 			applicable := true
@@ -1760,6 +1768,11 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		if art.CreatedAt.IsZero() {
 			art.CreatedAt = m.nowFn()
 		}
+		for key := range art.Metadata {
+			if strings.HasPrefix(key, "upstream_review_") {
+				delete(art.Metadata, key)
+			}
+		}
 		if art.Type == contract.ArtifactReview {
 			if err := m.checkCheckpointPlanObservation(ctx, st); err != nil {
 				return err
@@ -2468,6 +2481,9 @@ func verifyReviewBinding(st *IssueState, gate contract.GateMode) error {
 			}
 		}
 	}
+	if context := review.Metadata["upstream_review_context"]; context != "" && context != upstreamReviewContext(st) {
+		return ErrApprovalRequired
+	}
 	kind := review.Metadata["kind"]
 	if gate == contract.GateAgent && kind != "agent" && !(kind == "human" && review.Metadata["actor"] != "") {
 		return ErrApprovalRequired
@@ -3000,4 +3016,341 @@ func (g resumeDenyingGateway) Apply(ctx context.Context, req ForkRequest) (*Issu
 		return nil, err
 	}
 	return g.next.Apply(ctx, req)
+}
+
+// PlanReviewSource is an immutable source selection, never a worker checkout.
+type PlanReviewSource struct {
+	Kind        string `json:"kind"`
+	Repository  string `json:"repository"`
+	Commit      string `json:"commit"`
+	Branch      string `json:"branch,omitempty"`
+	Predecessor string `json:"predecessor,omitempty"`
+	Publication string `json:"publication,omitempty"`
+}
+
+// UpstreamPlanReviewObservation is prepared and consumed only by the coordinator.
+// Private fields prevent a caller from replacing the captured authority.
+type UpstreamPlanReviewObservation struct {
+	manager   *Manager
+	issue     int
+	actor     string
+	revision  string
+	stateJSON string
+	state     *IssueState
+	source    PlanReviewSource
+	gate      contract.GateMode
+}
+
+func (o *UpstreamPlanReviewObservation) Source() PlanReviewSource { return o.source }
+func (o *UpstreamPlanReviewObservation) State() *IssueState {
+	var st IssueState
+	_ = json.Unmarshal([]byte(o.stateJSON), &st)
+	return &st
+}
+
+// planReviewTracker is intentionally absent from the fork gateway and local
+// backend. Possessing a worker fence never grants this authority.
+type planReviewTracker interface {
+	UpstreamRepo() string
+	VerifyPlanReviewFork(context.Context, string, string) (string, error)
+}
+
+func (m *Manager) PrepareUpstreamPlanReview(ctx context.Context, n int) (*UpstreamPlanReviewObservation, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("upstream agent review is unavailable through the fork gateway")
+	}
+	tr, ok := m.tracker.(planReviewTracker)
+	if !ok || !strings.HasPrefix(m.tracker.BackendName(), "github (") {
+		return nil, fmt.Errorf("upstream agent review requires the GitHub upstream backend")
+	}
+	if err := m.tracker.Authorize(ctx, "review-agent"); err != nil {
+		return nil, err
+	}
+	actor, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(actor) == "" {
+		return nil, fmt.Errorf("upstream agent review requires an authenticated identity")
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if st.Lease.Status != "active" || st.Lease.Owner == "" || st.Lease.ClaimID == "" || !st.Lease.ExpiresAt.After(m.nowFn()) {
+		return nil, ErrClaimFence
+	}
+	if err := m.checkApprovedState(ctx, n, st); err != nil {
+		return nil, err
+	}
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	if !matchesCollaboratorAllowlist(actor, cfg.Security.ReviewerCollaborators) {
+		return nil, fmt.Errorf("actor %q is not in security.reviewer_collaborators", actor)
+	}
+	tree, err := workspace.PolicyTreeDigest(ctx, m.repoRoot, st.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	if st.PolicyTreeDigest != "" && tree != st.PolicyTreeDigest {
+		return nil, ErrApprovalRequired
+	}
+	parts := strings.Split(st.ForkRepo, "/")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("upstream review requires a public personal fork lease")
+	}
+	canonical, err := tr.VerifyPlanReviewFork(ctx, st.ForkRepo, parts[0])
+	if err != nil {
+		return nil, err
+	}
+	if canonical != st.ForkRepo {
+		return nil, fmt.Errorf("fork repository identity is not canonical")
+	}
+	var plans, tests int
+	for _, a := range st.Artifacts {
+		switch a.Type {
+		case contract.ArtifactDesign:
+			plans++
+		case contract.ArtifactTestPlan:
+			tests++
+		default:
+			continue
+		}
+		if a.ID == "" || a.Body == "" || a.Metadata["content_sha256"] != hash(a.Body) {
+			return nil, ErrApprovalRequired
+		}
+	}
+	if plans != 1 || tests != 1 {
+		return nil, ErrApprovalRequired
+	}
+	source, err := m.upstreamReviewSource(ctx, tr.UpstreamRepo(), st)
+	if err != nil {
+		return nil, err
+	}
+	gate := st.EffectiveGate
+	if gate == "" {
+		issue, err := m.tracker.GetIssue(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+		if err != nil {
+			return nil, err
+		}
+		wf, err := harness.LoadWorkflowAt(m.repoRoot, wu.Workflow, st.BaseSHA)
+		if err != nil {
+			return nil, err
+		}
+		gate, err = contract.ResolveGate(wu.Gate, wf.DefaultGate, cfg.DefaultGate)
+		if err != nil {
+			return nil, err
+		}
+	}
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return nil, err
+	}
+	return &UpstreamPlanReviewObservation{manager: m, issue: n, actor: actor, revision: rev, stateJSON: string(raw), state: st, source: source, gate: gate}, nil
+}
+
+func (m *Manager) upstreamReviewSource(ctx context.Context, upstream string, st *IssueState) (PlanReviewSource, error) {
+	source := PlanReviewSource{Kind: "FreshInitialApprovedBase", Repository: upstream, Commit: st.BaseSHA}
+	expected, candidate, checkpoint, err := CheckpointPlanHeads(st)
+	if err != nil {
+		return source, err
+	}
+	for _, a := range st.Artifacts {
+		if a.Type != contract.ArtifactDesign && a.Type != contract.ArtifactTestPlan {
+			continue
+		}
+		for key := range a.Metadata {
+			if strings.HasPrefix(key, "checkpoint_plan_") && !checkpoint {
+				return source, fmt.Errorf("incomplete checkpoint plan source metadata")
+			}
+		}
+	}
+	if st.PRNumber == 0 && st.PRRevision == nil && (st.PRURL != "" || st.SubmittedBaseSHA != "" || st.RevisionPlan != nil || st.PROutcome != nil) {
+		return source, fmt.Errorf("incomplete PR source context")
+	}
+	// Recovery/candidate history cannot be interpreted as initial planning.
+	if st.DroppedCheckpoint != nil || st.FreshStart != nil || st.ResumeCheckpointBranch != "" || len(st.DiscardedCheckpoints) != 0 || st.SubmittedHeadSHA != "" && st.PRRevision == nil {
+		return source, fmt.Errorf("unsupported recovery/publication context for upstream review")
+	}
+	if st.PRNumber != 0 || st.PRRevision != nil {
+		r := st.PRRevision
+		if r == nil || r.Number != st.PRNumber || r.Number <= 0 || r.Intent != "work" || r.Branch == "" || !reviewCommitID(r.LocalHeadSHA) || !reviewCommitID(r.RemoteHeadSHA) {
+			return source, fmt.Errorf("upstream review requires a complete published pending PR revision")
+		}
+		pr, err := m.tracker.GetPullRequest(ctx, r.Number)
+		if err != nil {
+			return source, err
+		}
+		if pr == nil || pr.Number != r.Number || pr.State != "open" || pr.Merged || pr.HeadRepo != st.ForkRepo || pr.Head != st.Branch || pr.HeadSHA != r.RemoteHeadSHA || pr.BaseRepo != upstream || pr.Base != st.BaseBranch || pr.BaseSHA == "" {
+			return source, fmt.Errorf("PR publication identity changed: %w", ErrClaimFence)
+		}
+		// State is the authoritative PR/issue link. A conflicting backend link rejects.
+		if pr.IssueNumber != 0 && pr.IssueNumber != st.Lease.IssueNumber {
+			return source, ErrClaimFence
+		}
+		if checkpoint && candidate != r.LocalHeadSHA {
+			return source, ErrClaimFence
+		}
+		publication, err := json.Marshal(pr)
+		if err != nil {
+			return source, err
+		}
+		source = PlanReviewSource{Kind: "PublishedPRRevision", Repository: st.ForkRepo, Commit: r.LocalHeadSHA, Branch: r.Branch, Predecessor: expected, Publication: hash(string(publication))}
+	} else if checkpoint || st.HeadSHA != "" || st.Branch != "" || len(st.CheckpointHeads) != 0 {
+		if !checkpoint || st.Branch == "" || !reviewCommitID(st.HeadSHA) || !slices.Contains([]string{expected, candidate}, st.HeadSHA) {
+			return source, fmt.Errorf("upstream review requires complete published checkpoint bindings")
+		}
+		source = PlanReviewSource{Kind: "PublishedCheckpoint", Repository: st.ForkRepo, Commit: candidate, Branch: st.Branch, Predecessor: expected}
+	}
+	if source.Kind == "FreshInitialApprovedBase" {
+		if st.LastRebase != nil || len(st.RebaseTransitions) != 0 {
+			return source, fmt.Errorf("initial source contains rebase context")
+		}
+		for _, a := range st.Artifacts {
+			if a.Type == contract.ArtifactImplementation || a.Type == contract.ArtifactValidation || a.Metadata["head_sha"] != "" || a.Metadata["candidate_head"] != "" {
+				return source, fmt.Errorf("initial source contains local candidate evidence")
+			}
+		}
+	}
+	if !reviewCommitID(source.Commit) {
+		return source, ErrApprovalRequired
+	}
+	if source.Branch != "" {
+		// Only the exact remotely published candidate is reviewable. No source
+		// lookup failure falls back to the approved base or an old PR head.
+		out, err := gitcredential.Output(ctx, m.repoRoot, "ls-remote", "--exit-code", "https://github.com/"+source.Repository+".git", "refs/heads/"+source.Branch)
+		if err != nil {
+			return source, fmt.Errorf("candidate publication unavailable: %w", err)
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) != 2 || fields[0] != source.Commit || fields[1] != "refs/heads/"+source.Branch {
+			return source, fmt.Errorf("publish the exact candidate before upstream review: %w", ErrClaimFence)
+		}
+	}
+	return source, nil
+}
+
+func reviewCommitID(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+// RecordUpstreamPlanReview repeats authentication and every captured state and
+// source observation, then makes one CAS attempt. It never acquires a claim.
+func (m *Manager) RecordUpstreamPlanReview(ctx context.Context, o *UpstreamPlanReviewObservation, body, verdict string, att contract.RoleAttestation) (*IssueState, error) {
+	if o == nil || o.manager != m {
+		return nil, ErrClaimFence
+	}
+	fresh, err := m.PrepareUpstreamPlanReview(ctx, o.issue)
+	if err != nil {
+		return nil, fmt.Errorf("refresh upstream review: %w: %w", ErrClaimFence, err)
+	}
+	if fresh.actor != o.actor || fresh.revision != o.revision || fresh.stateJSON != o.stateJSON || fresh.source != o.source {
+		return nil, fmt.Errorf("upstream review observation changed: %w", ErrClaimFence)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !reviewBodyMatchesVerdict(body, verdict) {
+		return nil, fmt.Errorf("review report has no consistent verdict")
+	}
+	if att.Role != "reviewer" || att.Agent == "" || att.HarnessVersion == "" || att.Model == "" ||
+		(att.Sandbox != "codex-native" && att.Sandbox != "harness-tools-bwrap") {
+		return nil, fmt.Errorf("upstream review requires qualified isolated reviewer provenance")
+	}
+	st := fresh.state
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkAgentReviewer(cfg.Security, st, att.Metadata(nil)); err != nil {
+		return nil, err
+	}
+	meta := att.Metadata(map[string]string{"kind": "agent", "actor": o.actor, "review_source": "authenticated-agent", "content_sha256": hash(body), "upstream_review_source": o.source.Kind, "upstream_review_repository": o.source.Repository, "upstream_review_commit": o.source.Commit, "upstream_review_branch": o.source.Branch, "upstream_review_predecessor": o.source.Predecessor})
+	for k, v := range ReviewBindings(st) {
+		meta[k] = v
+	}
+	meta["upstream_review_context"] = upstreamReviewContext(st)
+	meta["upstream_review_publication"] = o.source.Publication
+	art := contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-review", o.issue), IssueNumber: o.issue, Type: contract.ArtifactReview, Producer: att.Agent + ":reviewer", Verdict: verdict, Summary: "Upstream automated plan review", Body: body, CreatedAt: m.nowFn(), Metadata: meta}
+	if err := contract.ValidateArtifact(&art); err != nil {
+		return nil, err
+	}
+	att.ArtifactType, att.ArtifactDigest = string(contract.ArtifactReview), hash(body)
+	// Human gates retain feedback separately from the actual human decision
+	// and its attestation. This field never participates in VerifyApproval.
+	if fresh.gate == contract.GateHuman {
+		art.Metadata["advisory"] = "true"
+		st.UpstreamAdvisoryReview = &UpstreamAdvisoryReview{Artifact: art, Attestation: att}
+		updated, err := m.save(ctx, o.issue, fresh.revision, st)
+		if err != nil {
+			return nil, fmt.Errorf("upstream advisory recording conflict: %w: %w", ErrClaimFence, err)
+		}
+		return updated, nil
+	}
+	RecordRoleAttestation(st, att)
+	replaced := false
+	for i, a := range st.Artifacts {
+		if a.Type == contract.ArtifactReview {
+			art.Version = a.Version + 1
+			st.Artifacts[i] = art
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		st.Artifacts = append(st.Artifacts, art)
+	}
+	// Upstream review intentionally leaves lease, phase and claim budget intact.
+	// No worker transition helper is used, including for rejected reports.
+	updated, err := m.save(ctx, o.issue, fresh.revision, st)
+	if err != nil {
+		return nil, fmt.Errorf("upstream review recording conflict: %w: %w", ErrClaimFence, err)
+	}
+	return updated, nil
+}
+
+// upstreamReviewContext binds candidate-bearing fields including their absence.
+// Execution phase, expiry and budget are preparation/recording fences; ordinary
+// worker continuation does not itself change the reviewed source.
+func upstreamReviewContext(st *IssueState) string {
+	type context struct {
+		Task, Policy, Tree, Base, Owner, Claim, Fork, Head, Branch string
+		PR                                                         int
+		Revision                                                   *PRRevision
+		Checkpoints                                                []string
+		Plans                                                      []contract.Artifact
+	}
+	c := context{Task: st.TaskDigest, Policy: st.PolicyDigest, Tree: st.PolicyTreeDigest, Base: st.BaseSHA, Owner: st.Lease.Owner, Claim: st.Lease.ClaimID, Fork: st.ForkRepo, Head: st.HeadSHA, Branch: st.Branch, PR: st.PRNumber, Revision: st.PRRevision, Checkpoints: st.CheckpointHeads}
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactDesign || a.Type == contract.ArtifactTestPlan {
+			c.Plans = append(c.Plans, a)
+		}
+	}
+	b, _ := json.Marshal(c)
+	return hash(string(b))
+}
+
+func (o *UpstreamPlanReviewObservation) HumanGate() bool { return o.gate == contract.GateHuman }
+
+// CheckUpstreamReviewer rejects a disallowed or non-independent runner before
+// model execution as well as at recording. The observation is coordinator-owned.
+func (m *Manager) CheckUpstreamReviewer(o *UpstreamPlanReviewObservation, att contract.RoleAttestation) error {
+	if o == nil || o.manager != m {
+		return ErrClaimFence
+	}
+	cfg, err := harness.LoadConfigAt(m.repoRoot, o.state.BaseSHA)
+	if err != nil {
+		return err
+	}
+	return checkAgentReviewer(cfg.Security, o.state, att.Metadata(nil))
 }

@@ -2,12 +2,15 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -739,5 +742,185 @@ func TestProviderFailureResume(t *testing.T) {
 	_, err := (&Engine{}).failedRun(context.Background(), nil, WorkOptions{}, nil, original, "developer")
 	if err != original {
 		t.Fatal("unknown message changed")
+	}
+}
+
+type upstreamWorkflowTracker struct{ tracker.Tracker }
+
+func (t upstreamWorkflowTracker) BackendName() string                     { return "github (octo/swarm)" }
+func (t upstreamWorkflowTracker) UpstreamRepo() string                    { return "octo/swarm" }
+func (t upstreamWorkflowTracker) Authorize(context.Context, string) error { return nil }
+func (t upstreamWorkflowTracker) CurrentUser(context.Context) (string, error) {
+	return "maintainer", nil
+}
+func (t upstreamWorkflowTracker) VerifyPlanReviewFork(_ context.Context, slug, owner string) (string, error) {
+	if slug != "octo/personal" || owner != "octo" {
+		return "", errors.New("invalid fork")
+	}
+	return slug, nil
+}
+
+type upstreamWorkflowRunner struct {
+	att contract.RoleAttestation
+	run func(context.Context, agent.RunRequest) (*agent.RunResult, error)
+}
+
+func (r upstreamWorkflowRunner) Name() string              { return r.att.Agent }
+func (r upstreamWorkflowRunner) Available() (string, bool) { return "fixture", true }
+func (r upstreamWorkflowRunner) BuildCommand(agent.RunRequest) (string, []string) {
+	return "fixture", nil
+}
+func (r upstreamWorkflowRunner) Provenance(string, bool) contract.RoleAttestation { return r.att }
+func (r upstreamWorkflowRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	return r.run(ctx, req)
+}
+func TestUpstreamPlanReviewInitialCompletion(t *testing.T) {
+	for _, boundary := range []string{"codex-native", "harness-tools-bwrap"} {
+		for _, outcome := range []string{"approved", "rejected", "runner failure", "canceled", "invalid report", "invalid provenance"} {
+			t.Run(boundary+"/"+outcome, func(t *testing.T) {
+				ctx := context.Background()
+				root := t.TempDir()
+				git := func(args ...string) string {
+					t.Helper()
+					out, err := gitfixture.Command(t, root, args...).CombinedOutput()
+					if err != nil {
+						t.Fatalf("git %v: %v: %s", args, err, out)
+					}
+					return strings.TrimSpace(string(out))
+				}
+				git("init", "-b", "main")
+				if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: root}); err != nil {
+					t.Fatal(err)
+				}
+				git("add", ".")
+				git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "approved base")
+				lt := tracker.NewLocalTracker(root).WithUser("contributor", "OWNER")
+				wu := &contract.WorkUnit{Objective: "Review current plan", Constraints: []string{"Keep lease"}, Acceptance: []string{"Exact plan"}, Workflow: "feature", Gate: contract.GateAgent}
+				issue, err := lt.CreateIssue(ctx, "Review current plan", contract.FormatIssueMarkdown(wu), []string{"swarm:ready"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := harness.LoadConfig(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				worker := lease.NewManager(lt, cfg.Security)
+				worker.SetStore(root, coordination.NewFileStore(root))
+				if _, err := worker.ApproveTask(ctx, issue.Number, "contributor"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := worker.Acquire(ctx, issue.Number, "contributor", "claude", "plan", time.Hour, 3); err != nil {
+					t.Fatal(err)
+				}
+				for _, kind := range []contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan} {
+					if _, err := worker.UpdateArtifact(ctx, issue.Number, "contributor", contract.Artifact{Type: kind, Producer: "claude:planner", Summary: "fixture plan", Body: "exact " + string(kind) + "\n"}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				store := worker.Store()
+				raw, rev, err := store.Load(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var st lease.IssueState
+				if err := json.Unmarshal(raw, &st); err != nil {
+					t.Fatal(err)
+				}
+				st.ForkRepo = "octo/personal"
+				st.HeadSHA, st.Branch = "", ""
+				st.CheckpointHeads = nil
+				raw, _ = json.Marshal(st)
+				if _, err := store.CompareAndSwap(ctx, issue.Number, rev, raw); err != nil {
+					t.Fatal(err)
+				}
+				// An unrelated upstream checkout head must never become the initial source.
+				if err := os.WriteFile(filepath.Join(root, "unrelated.txt"), []byte("unrelated checkout"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				git("add", "unrelated.txt")
+				git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "unrelated upstream head")
+				tr := upstreamWorkflowTracker{lt}
+				manager := lease.NewManager(tr, cfg.Security)
+				manager.SetStore(root, store)
+				if _, err := manager.Acquire(ctx, issue.Number, "maintainer", "codex", "review", time.Hour, 3); !errors.Is(err, lease.ErrAlreadyClaimed) {
+					t.Fatalf("separate checkout acquisition: %v", err)
+				}
+				o, err := manager.PrepareUpstreamPlanReview(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if o.Source().Commit != st.BaseSHA || o.Source().Kind != "FreshInitialApprovedBase" {
+					t.Fatal(o.Source())
+				}
+				calls := 0
+				att := contract.RoleAttestation{Role: "reviewer", Agent: "codex", Harness: "codex", HarnessVersion: "fixture", Model: "review-fixture", Sandbox: boundary}
+				runner := upstreamWorkflowRunner{att: att}
+				runner.run = func(runCtx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					calls++
+					if !req.ReadOnly || req.WorktreePath == root || req.Role != "reviewer" {
+						t.Fatalf("invalid isolated request: %+v", req)
+					}
+					if _, err := os.Stat(filepath.Join(req.WorktreePath, "unrelated.txt")); !os.IsNotExist(err) {
+						t.Fatal("reviewed upstream checkout instead of approved base")
+					}
+					for name, body := range map[string]string{"PLAN.md": "exact design\n", "TEST_PLAN.md": "exact test-plan\n"} {
+						data, err := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm/active", name))
+						if err != nil || string(data) != body {
+							t.Fatalf("%s: %q %v", name, data, err)
+						}
+					}
+					if outcome == "runner failure" {
+						return nil, errors.New("fixture boundary failure")
+					}
+					if outcome == "canceled" {
+						return nil, context.Canceled
+					}
+					body := "VERDICT: APPROVED\n"
+					if outcome == "rejected" {
+						body = "VERDICT: CHANGES_REQUESTED\n"
+					}
+					if outcome == "invalid report" {
+						body = "APPROVED"
+					}
+					if err := os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(body), 0644); err != nil {
+						return nil, err
+					}
+					resultAtt := att
+					if outcome == "invalid provenance" {
+						resultAtt.Sandbox = "host"
+					}
+					return &agent.RunResult{Agent: "codex", Role: "reviewer", Attestation: resultAtt}, nil
+				}
+				engine := NewEngineWithManagerOptions(root, tr, manager, cfg, false, "", EngineOptions{NewRunner: func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return runner, nil }})
+				verdict, updated, runErr := engine.RunUpstreamPlanReview(ctx, o, "codex", true, nil)
+				if outcome == "approved" {
+					if runErr != nil || verdict != "APPROVED" {
+						t.Fatalf("completion: %s %v", verdict, runErr)
+					}
+					parsed, _ := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+					if err := lease.VerifyApproval(updated, parsed); err != nil {
+						t.Fatal(err)
+					}
+				} else if runErr == nil {
+					t.Fatal("unsafe outcome accepted")
+				}
+				if calls != 1 {
+					t.Fatalf("runner calls=%d", calls)
+				}
+				after, err := worker.GetCurrentState(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(st.Lease, after.Lease) || !reflect.DeepEqual(st.ClaimBudget, after.ClaimBudget) {
+					t.Fatal("review changed contributor lease/budget")
+				}
+				if err := worker.CheckClaim(ctx, issue.Number, "contributor"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(filepath.Join(root, ".swarm/active/REVIEW.md")); !os.IsNotExist(err) {
+					t.Fatal("review wrote upstream checkout")
+				}
+			})
+		}
 	}
 }

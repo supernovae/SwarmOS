@@ -94,7 +94,7 @@ func (l *LocalTracker) Authorize(ctx context.Context, permission string) error {
 		return err
 	}
 	switch permission {
-	case "approve-task", "review-human", "edit-task":
+	case "approve-task", "review-human", "review-agent", "edit-task":
 		if l.assoc == "OWNER" || l.assoc == "MEMBER" || l.assoc == "COLLABORATOR" {
 			return nil
 		}

@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -17,7 +21,13 @@ func newReviewCmd(rootOpts *RootOptions) *cobra.Command {
 agent or an authorized human decision. Approval is bound to the current task
 and plan digests. This command does not review a finished PR or check off its
 acceptance criteria; final code and acceptance review happens in GitHub after
-issue submit opens the linked draft PR.`,
+issue submit opens the linked draft PR.
+
+From an upstream GitHub checkout, maintainers can review an active public
+personal-fork plan while its contributor keeps the lease. Initial plans use
+the approved base; checkpoint and PR revision plans require their exact published
+candidate. Agent output remains advisory at a human gate; use --approve for the
+independent human decision.`,
 		Args: cobra.ExactArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() { reportJSONFailure(cmd, asJSON && (approve || reject), "review", runErr) }()
@@ -44,6 +54,21 @@ issue submit opens the linked draft PR.`,
 				return err
 			}
 			if !approve && !reject {
+				if !rootOpts.Fork && rootOpts.Backend != "local" {
+					tr, manager, cfg, err := rootOpts.resolveLeaseManager(cmd)
+					if err != nil {
+						return err
+					}
+					if strings.HasPrefix(tr.BackendName(), "github (") {
+						st, err := manager.GetCurrentState(cmd.Context(), issue)
+						if err != nil && !errors.Is(err, coordination.ErrNotFound) {
+							return err
+						}
+						if st != nil && st.ForkRepo != "" {
+							return runUpstreamReview(cmd, rootOpts, issue, agentName, headless, progress, asJSON, workflow.NewEngineWithManagerOptions(rootOpts.resolveRepoRoot(), tr, manager, cfg, false, "", rootOpts.engineOptions()))
+						}
+					}
+				}
 				work := newWorkCmd(rootOpts)
 				work.SetOut(cmd.OutOrStdout())
 				work.SetErr(cmd.ErrOrStderr())
@@ -99,4 +124,39 @@ issue submit opens the linked draft PR.`,
 	cmd.Flags().BoolVar(&progress, "progress", true, "Report headless agent review progress on stderr (false disables)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured review outcome")
 	return cmd
+}
+
+func runUpstreamReview(cmd *cobra.Command, opts *RootOptions, issue int, reviewer string, headless, progress, asJSON bool, engine *workflow.Engine) (runErr error) {
+	jsonWritten := false
+	defer func() { reportJSONFailure(cmd, asJSON && !jsonWritten, "review", runErr) }()
+	observation, err := engine.LeaseManager.PrepareUpstreamPlanReview(cmd.Context(), issue)
+	if err != nil {
+		return err
+	}
+	var reporter *workflow.ProgressReporter
+	if progress {
+		reporter = opts.newProgressReporter(cmd.Context(), workProgressPrinter(progressWriter(cmd)))
+		defer reporter.Close()
+		fmt.Fprintf(cmd.ErrOrStderr(), "Issue #%d review started\n", issue)
+	}
+	verdict, _, err := engine.RunUpstreamPlanReview(cmd.Context(), observation, reviewer, headless, reporter)
+	if errors.Is(err, workflow.ErrPlanReviewRejected) && asJSON {
+		jsonWritten = true
+		if outputErr := writeJSON(cmd, map[string]any{"kind": "review", "issue_number": issue, "reviewer_kind": "agent", "verdict": verdict, "advisory": observation.HumanGate(), "status": "changes-requested", "source": observation.Source()}); outputErr != nil {
+			return outputErr
+		}
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if progress {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Issue #%d review completed\n", issue)
+	}
+	advisory := observation.HumanGate()
+	if asJSON {
+		return writeJSON(cmd, map[string]any{"kind": "review", "issue_number": issue, "reviewer_kind": "agent", "verdict": verdict, "advisory": advisory, "status": "completed", "source": observation.Source()})
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Agent review recorded for issue #%d: %s (advisory: %t)\n", issue, verdict, advisory)
+	return nil
 }

@@ -48,6 +48,8 @@ Our documentation (`README.md`, `docs/*.md`, `SECURITY.md`) is the front door to
 
 ## 4. Verification Checklist Before Opening or Updating a PR
 
+This checklist is for manual maintainer and full verification. Swarm developer and tester roles follow their focused role-owned test plan, including independent tester review and reuse of applicable passing results. The coordinator runs the complete trusted-base required policy before publication.
+
 ```bash
 # Format, vet, static analysis, and race-enabled test suite
 make fmt

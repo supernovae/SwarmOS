@@ -45,7 +45,7 @@ func (f *reconciliationFixture) write(dir, name, body string) {
 		f.t.Fatal(err)
 	}
 }
-func newReconciliationFixture(t *testing.T, command string) *reconciliationFixture {
+func newReconciliationFixture(t *testing.T, command string, local ...bool) *reconciliationFixture {
 	t.Helper()
 	m, tr, issue := testManager(t)
 	f := &reconciliationFixture{t: t, m: m, tr: tr, n: issue.Number}
@@ -62,7 +62,11 @@ func newReconciliationFixture(t *testing.T, command string) *reconciliationFixtu
 	f.git(m.repoRoot, "init", "--bare", "--initial-branch=main", f.remote)
 	f.git(m.repoRoot, "remote", "add", "origin", f.remote)
 	f.git(m.repoRoot, "push", "origin", "HEAD:refs/heads/main")
-	m.SetStore(m.repoRoot, coordination.NewGitStore(m.repoRoot))
+	if len(local) != 0 && local[0] {
+		m.SetStore(m.repoRoot, coordination.NewFileStore(m.repoRoot))
+	} else {
+		m.SetStore(m.repoRoot, coordination.NewGitStore(m.repoRoot))
+	}
 	if _, err = m.ApproveTask(context.Background(), f.n, "local-dev"); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +189,7 @@ func TestCheckpointRecordingAdditiveAndRewrite(t *testing.T) {
 }
 func TestCheckpointReconciliationRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
-	scenarios := []string{"wrong owner", "stale token", "missing token", "expired", "wrong expected", "missing candidate", "wrong branch", "detached", "untracked", "tracked", "staged", "conflicts", "rebasing", "remote moved", "PR pending", "PR submitted", "local store", "fork", "failed validation", "candidate policy", "snapshot modified", "no base ancestry", "changed patch", "stale validation", "stale review", "stale task", "stale policy", "stale plan", "stale test plan", "untrusted review"}
+	scenarios := []string{"wrong owner", "stale token", "missing token", "expired", "wrong expected", "missing candidate", "wrong branch", "detached", "untracked", "tracked", "staged", "conflicts", "rebasing", "remote moved", "PR pending", "PR submitted", "unsupported store", "fork", "failed validation", "candidate policy", "snapshot modified", "no base ancestry", "changed patch", "stale validation", "stale review", "stale task", "stale policy", "stale plan", "stale test plan", "untrusted review"}
 	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
@@ -257,10 +261,10 @@ func TestCheckpointReconciliationRejectsInvalidInputs(t *testing.T) {
 				mutateState(func(st *IssueState) { st.PRRevision = &PRRevision{Number: 1} })
 			case "PR submitted":
 				mutateState(func(st *IssueState) { st.PRNumber = 1 })
-			case "local store":
-				f.m.SetStore(f.m.repoRoot, coordination.NewFileStore(f.m.repoRoot))
+			case "unsupported store":
+				f.m.SetStore(f.m.repoRoot, struct{ coordination.Store }{f.m.store})
 				_, err := f.m.ReconcileCheckpoint(ctx, f.n, owner, expected, candidate, false)
-				if err == nil || !strings.Contains(err.Error(), "local stores are unsupported") {
+				if err == nil || !strings.Contains(err.Error(), "requires an upstream Git store or local FileStore") {
 					t.Fatalf("unsupported store: %v", err)
 				}
 				return
@@ -521,5 +525,204 @@ func TestReconciledCheckpointIsNotRetryEligible(t *testing.T) {
 	}
 	if _, err := f.m.CheckImplementationRetry(ctx, f.n, "local-dev", f.b, tree, f.branch); err == nil || !strings.Contains(err.Error(), "lacks trusted completion") {
 		t.Fatalf("reconciler PASS retry: %v", err)
+	}
+}
+
+func TestCheckpointFreshClaimValidationFailurePreservesWork(t *testing.T) {
+	t.Parallel()
+	for _, local := range []bool{false, true} {
+		for _, command := range []string{"false", "printf modified > feature.txt"} {
+			t.Run(fmt.Sprintf("local=%t/%s", local, command), func(t *testing.T) {
+				t.Parallel()
+				f := newReconciliationFixture(t, command, local)
+				ctx := context.Background()
+				f.git(f.path, "merge", "--no-edit", f.a)
+				f.b = f.git(f.path, "rev-parse", "HEAD")
+				if _, err := f.m.Release(ctx, f.n, "local-dev", "fixture released"); err != nil {
+					t.Fatal(err)
+				}
+				p, err := f.m.PrepareCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false)
+				if err != nil || !p.ClaimRequired {
+					t.Fatalf("prepare: %+v %v", p, err)
+				}
+				acquired, err := f.m.AcquirePreparedCheckpoint(ctx, f.n, p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = SaveClaimToken(f.m.repoRoot, f.n, acquired.Lease.ClaimID, acquired.BaseSHA); err != nil {
+					t.Fatal(err)
+				}
+				refs := f.git(f.remote, "show-ref")
+				if _, err = f.m.ReconcilePreparedCheckpoint(ctx, f.n, p); err == nil {
+					t.Fatal("validation unexpectedly passed")
+				}
+				current := f.state()
+				token, err := LoadClaimToken(f.m.repoRoot, f.n)
+				if err != nil || token != acquired.Lease.ClaimID || current.Lease.ClaimID != token || current.Lease.Status != "active" || current.HeadSHA != f.a {
+					t.Fatalf("failure lost authorized retry fence: %+v %v", current, err)
+				}
+				if refs != f.git(f.remote, "show-ref") || f.git(f.path, "rev-parse", "HEAD") != f.b || f.git(f.path, "status", "--porcelain") != "" {
+					t.Fatal("failed validation published or modified local work")
+				}
+				for _, art := range current.Artifacts {
+					if art.Type == contract.ArtifactValidation || art.Type == contract.ArtifactImplementation {
+						t.Fatal("failed validation recorded PASS evidence")
+					}
+				}
+			})
+		}
+	}
+}
+
+type checkpointAdmissionRaceStore struct {
+	*coordination.GitStore
+	hook func()
+}
+
+func (s *checkpointAdmissionRaceStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	if s.hook != nil {
+		hook := s.hook
+		s.hook = nil
+		hook()
+	}
+	return s.GitStore.Load(ctx, n)
+}
+
+func TestCheckpointAdmissionRacesUseNormalFences(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"successor", "record then release", "reapproval", "base refresh"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			f := newReconciliationFixture(t, "true")
+			ctx := context.Background()
+			f.git(f.path, "merge", "--no-edit", f.a)
+			f.b = f.git(f.path, "rev-parse", "HEAD")
+			if _, err := f.m.Release(ctx, f.n, "local-dev", "fixture released"); err != nil {
+				t.Fatal(err)
+			}
+			p, err := f.m.PrepareCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			original := f.m.store.(*coordination.GitStore)
+			other := NewManager(f.tr, f.m.security)
+			other.SetStore(f.m.repoRoot, original)
+			var competing *IssueState
+			racing := &checkpointAdmissionRaceStore{GitStore: original}
+			racing.hook = func() {
+				switch scenario {
+				case "successor", "record then release":
+					var err error
+					competing, err = other.Acquire(ctx, f.n, "local-dev", "mock", "plan", time.Hour, 1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if scenario == "record then release" {
+						if _, err = other.RecordCheckpoint(ctx, f.n, "local-dev", f.branch, f.b); err != nil {
+							t.Fatal(err)
+						}
+						if _, err = other.Release(ctx, f.n, "local-dev", "fixture competing worker finished"); err != nil {
+							t.Fatal(err)
+						}
+					}
+				case "reapproval":
+					issue, err := f.tr.GetIssue(ctx, f.n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err = f.tr.UpdateIssueBody(ctx, f.n, strings.Replace(issue.Body, "objective:", "objective: amended ", 1)); err != nil {
+						t.Fatal(err)
+					}
+					// A new approval is itself a revision even when a fixture's objective
+					// differs from the replace string.
+					if _, err = other.ApproveTask(ctx, f.n, "local-dev"); err != nil {
+						t.Fatal(err)
+					}
+				case "base refresh":
+					f.git(f.m.repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "new approved base")
+					f.git(f.m.repoRoot, "push", "origin", "HEAD:refs/heads/main")
+					if _, err := other.ApproveTask(ctx, f.n, "local-dev"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			f.m.SetStore(f.m.repoRoot, racing)
+			if _, err = f.m.AcquirePreparedCheckpoint(ctx, f.n, p); err == nil {
+				t.Fatal("admission accepted changed observation")
+			}
+			current := f.state()
+			if scenario == "successor" && (current.Lease.ClaimID != competing.Lease.ClaimID || current.Lease.Status != "active") {
+				t.Fatal("admission released or replaced successor")
+			}
+			if scenario == "record then release" && current.HeadSHA != f.b {
+				t.Fatal("lost concurrent checkpoint")
+			}
+			if f.git(f.path, "rev-parse", "HEAD") != f.b || f.git(f.path, "status", "--porcelain") != "" {
+				t.Fatal("admission race modified candidate")
+			}
+		})
+	}
+}
+
+func TestCheckpointPreparationWithoutClaimRejectsInvalidInputs(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"other owner", "successor", "missing live token", "stale task", "dirty", "wrong branch", "no predecessor ancestry", "historical token", "absent token"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			f := newReconciliationFixture(t, "true")
+			ctx := context.Background()
+			historical := f.state().Lease.ClaimID
+			if _, err := f.m.Release(ctx, f.n, "local-dev", "fixture released"); err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "no predecessor ancestry" {
+				f.git(f.path, "merge", "--no-edit", f.a)
+				f.b = f.git(f.path, "rev-parse", "HEAD")
+			}
+			switch scenario {
+			case "other owner", "successor", "missing live token":
+				actor := "local-dev"
+				if scenario == "other owner" {
+					actor = "other"
+				}
+				other := NewManager(f.tr.WithUser(actor, "OWNER"), f.m.security)
+				other.SetStore(f.m.repoRoot, f.m.store)
+				if _, err := other.Acquire(ctx, f.n, actor, "mock", "plan", time.Hour, 1); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "missing live token" {
+					f.m.BindClaim(f.n, "")
+				}
+			case "stale task":
+				issue, err := f.tr.GetIssue(ctx, f.n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = f.tr.UpdateIssueBody(ctx, f.n, strings.Replace(issue.Body, "objective:", "objective: amended ", 1)); err != nil {
+					t.Fatal(err)
+				}
+			case "dirty":
+				f.write(f.path, "untracked", "preserve")
+			case "wrong branch":
+				f.git(f.path, "checkout", "-b", "foreign")
+			case "historical token":
+				f.m.BindClaim(f.n, historical)
+			case "absent token":
+				f.m.BindClaim(f.n, "")
+			}
+			before := f.state()
+			refs := f.git(f.remote, "show-ref")
+			prepared, err := f.m.PrepareCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false)
+			if scenario == "historical token" || scenario == "absent token" {
+				if err != nil || !prepared.ClaimRequired {
+					t.Fatalf("no-live-claim admission unavailable: %+v %v", prepared, err)
+				}
+			} else if err == nil {
+				t.Fatal("invalid precondition accepted")
+			}
+			if !reflect.DeepEqual(before, f.state()) || refs != f.git(f.remote, "show-ref") {
+				t.Fatal("preparation wrote authority")
+			}
+		})
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -413,39 +414,67 @@ type statusEntry struct {
 	Repair                 *validation.RepairSummary   `json:"repair,omitempty"`
 }
 
-func (d *driver) status(ctx context.Context, r record) (*lease.IssueState, error) {
+func (d *driver) observe(ctx context.Context, r record) (*lease.IssueState, *contract.WorkUnit, error) {
 	b, e := d.swarm(ctx, false, "fresh issue status", "issue", "status", strconv.Itoa(r.Issue))
 	if e != nil {
-		return nil, e
+		return nil, nil, e
 	}
 	var v struct {
 		Kind   string        `json:"kind"`
 		Issues []statusEntry `json:"issues"`
 	}
 	if exact(b, &v) != nil || v.Kind != "status" || len(v.Issues) != 1 {
-		return nil, errResponse
+		return nil, nil, errResponse
 	}
 	s := v.Issues[0]
 	if !strings.EqualFold(s.Repository, d.o.Upstream) || s.Issue == nil || s.Issue.Number != r.Issue || s.State == nil || s.Issue.Title != "Public fork regression "+r.ID || !link(s.Issue.HTMLURL, d.o.Upstream, "issues", r.Issue) {
-		return nil, errResponse
+		return nil, nil, errResponse
 	}
 	if strings.Contains(contract.StripHTMLComments(s.Issue.Body), "swarm-workunit-path:") {
-		return nil, errResponse
+		return nil, nil, errResponse
 	}
 	wu, e := contract.ParseWorkUnitFromIssue(r.Issue, s.Issue.Title, s.Issue.Body)
 	if e != nil {
-		return nil, errResponse
+		return nil, nil, errResponse
 	}
 	if r.Stage == "revision" && (s.State.PRNumber != r.PR || s.State.PRRevision == nil || s.State.PRRevision.Number != r.PR || s.State.PRRevision.RemoteHeadSHA != r.PublishedHead || !strings.EqualFold(s.State.ForkRepo, d.o.Fork)) {
-		return nil, errResponse
+		return nil, nil, errResponse
 	}
 	if r.Stage == "issue" && s.State.PRNumber != 0 {
-		return nil, errResponse
+		return nil, nil, errResponse
 	}
-	if string(s.State.EffectiveGate) != d.o.Gate || lease.VerifyApproval(s.State, wu) != nil {
+	return s.State, wu, nil
+}
+func (d *driver) status(ctx context.Context, r record) (*lease.IssueState, error) {
+	st, wu, err := d.observe(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	if string(st.EffectiveGate) != d.o.Gate || lease.VerifyApproval(st, wu) != nil {
 		return nil, errPaused
 	}
-	return s.State, nil
+	return st, nil
+}
+
+// The latest entries in authoritative state are the current artifacts. Checkpoint
+// artifacts requiring claim-bound currency cannot qualify for this pause.
+func currentPlans(st *lease.IssueState, issue int) bool {
+	var plan, test *contract.Artifact
+	for i := range st.Artifacts {
+		a := &st.Artifacts[i]
+		switch a.Type {
+		case contract.ArtifactDesign:
+			plan = a
+		case contract.ArtifactTestPlan:
+			test = a
+		}
+	}
+	for _, a := range []*contract.Artifact{plan, test} {
+		if a == nil || a.IssueNumber != issue || strings.TrimSpace(a.Body) == "" || a.Metadata["superseded_by"] != "" || a.Metadata["checkpoint_plan_origin"] != "" {
+			return false
+		}
+	}
+	return true
 }
 func (d *driver) approval(ctx context.Context, r record) error {
 	_, err := d.status(ctx, r)
@@ -643,28 +672,37 @@ func (d *driver) runLifecycle(ctx context.Context) error {
 }
 func (d *driver) continueGate(ctx context.Context, r record, resuming bool) error {
 	if !resuming && d.o.Gate == "agent" {
-		b, e := d.swarm(ctx, false, "trusted plan review", "issue", "review-plan", strconv.Itoa(r.Issue))
+		st, wu, e := d.observe(ctx, r)
 		if e != nil {
 			return e
 		}
-		var v workEnvelope
-		if exact(b, &v) != nil || v.Kind != "work" || v.Result == nil || v.Result.IssueNumber != r.Issue {
+		if string(st.EffectiveGate) != d.o.Gate || st.TaskDigest != contract.DigestWorkUnit(wu) {
 			return errResponse
 		}
-		if v.Status == "paused" && v.Result.Outcome() == "paused" && v.Result.PhaseCompleted == "plan" {
-			return d.pause(r)
-		}
-		if v.Status != "completed" || v.Result.Outcome() != "completed" || v.Result.PhaseCompleted != "review" {
-			return errResponse
+		if lease.VerifyApproval(st, wu) != nil {
+			if st.EffectiveGate == contract.GateAgent && st.Lease.Status == "active" && st.Lease.ExpiresAt.After(time.Now()) && st.Lease.Owner == d.actor && st.Lease.IssueNumber == r.Issue && strings.EqualFold(st.ForkRepo, d.o.Fork) && currentPlans(st, r.Issue) {
+				return d.pause(r)
+			}
+			b, e := d.swarm(ctx, false, "trusted plan review", "issue", "review-plan", strconv.Itoa(r.Issue))
+			if e != nil {
+				return e
+			}
+			var v workEnvelope
+			if exact(b, &v) != nil || v.Kind != "work" || v.Result == nil || v.Result.IssueNumber != r.Issue {
+				return errResponse
+			}
+			if v.Status == "paused" && v.Result.Outcome() == "paused" && v.Result.PhaseCompleted == "plan" {
+				return d.pause(r)
+			}
+			if v.Status != "completed" || v.Result.Outcome() != "completed" || v.Result.PhaseCompleted != "review" {
+				return errResponse
+			}
 		}
 	}
 	if !resuming && d.o.Gate == "human" {
 		return d.pause(r)
 	}
 	if e := d.approval(ctx, r); e != nil {
-		if errors.Is(e, errPaused) && !resuming {
-			return d.pause(r)
-		}
 		return e
 	}
 	revision := r.Stage == "revision"
@@ -800,8 +838,15 @@ func (d *driver) resumeLifecycle(ctx context.Context) error {
 func (d *driver) preview() {
 	fmt.Fprintln(d.out, "Dry run: public relationship verification pending live preflight. No subprocesses or writes.")
 	fmt.Fprintln(d.out, "gh api user; gh api repos/<upstream>; gh api repos/<fork>; git checkout/remote identity checks")
-	for _, s := range []string{"upstream issue create --title <unique-title> --objective <unique-file> --constraint <unique-file-only> --acceptance <file-result> --workflow feature --gate " + d.o.Gate + " --json", "upstream issue approve <issue> --json", "contributor issue claim <issue> --json", "contributor issue work <issue> --phase plan --json", "upstream issue review-plan <issue> --json (agent) OR manual independent approval pause (human)", "upstream issue status <issue> --json; verify exact approval and gate", "contributor issue work <issue> --phase implement --json", "upstream issue status <issue> --json; require <candidate-head>", "contributor issue submit <issue> --json; verify draft <PR> and <candidate-head>", "contributor pr work <PR> --phase plan --instructions <unique-file-revision> --json", "upstream review or manual pause; fresh issue status and approval verification", "contributor pr work <PR> --phase implement --instructions <unique-file-revision> --json", "contributor pr status <PR> --json; require <revision-head>", "contributor pr submit <PR> --json; require same PR and <revision-head>"} {
+	for _, s := range []string{"upstream issue create --title <unique-title> --objective <unique-file> --constraint <unique-file-only> --acceptance <file-result> --workflow feature --gate " + d.o.Gate + " --json", "upstream issue approve <issue> --json", "contributor issue claim <issue> --json", "contributor issue work <issue> --phase plan --json", d.previewGate("issue"), "upstream issue status <issue> --json; verify exact approval and gate", "contributor issue work <issue> --phase implement --json", "upstream issue status <issue> --json; require <candidate-head>", "contributor issue submit <issue> --json; verify draft <PR> and <candidate-head>", "contributor pr work <PR> --phase plan --instructions <unique-file-revision> --json", d.previewGate("revision") + "; fresh issue status and approval verification", "contributor pr work <PR> --phase implement --instructions <unique-file-revision> --json", "contributor pr status <PR> --json; require <revision-head>", "contributor pr submit <PR> --json; require same PR and <revision-head>"} {
 		fmt.Fprintln(d.out, s)
 	}
 	fmt.Fprintf(d.out, "Every swarm command: --backend github --repo %s --root <checkout> --upstream-remote origin (upstream) or upstream (contributor); contributor also --fork --fork-remote origin. Resume dry-run never reads or advances a record.\n", d.o.Upstream)
+}
+
+func (d *driver) previewGate(stage string) string {
+	if d.o.Gate == "human" {
+		return stage + ": manual independent approval pause (human)"
+	}
+	return stage + ": upstream issue status <issue> --json first; exact gate and valid approval continues; otherwise eligible contributor-held gate pauses for manual independent approval, or upstream issue review-plan <issue> --json; fresh approval required before implement"
 }

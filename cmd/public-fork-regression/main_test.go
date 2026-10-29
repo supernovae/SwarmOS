@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -39,20 +40,21 @@ var secondHead = strings.Repeat("b", 40)
 // Fake service responses marshal the production emitting types. No test invokes
 // a subprocess, including tests exercising the complete run entry point.
 type fixture struct {
-	t              *testing.T
-	o              options
-	id             string
-	calls          [][]string
-	revision       bool
-	submitted      bool
-	statusNumber   int
-	approvalChange func(*lease.IssueState)
-	intercept      func(int, string, []string, []byte) ([]byte, error)
+	t                 *testing.T
+	o                 options
+	id                string
+	calls             [][]string
+	pending, reviewed bool
+	revision          bool
+	submitted         bool
+	statusNumber      int
+	approvalChange    func(*lease.IssueState)
+	intercept         func(int, string, []string, []byte) ([]byte, error)
 }
 
 func newFixture(t *testing.T, gate string) *fixture {
 	t.Helper()
-	return &fixture{t: t, o: options{Upstream: "maintainer/fixture", Fork: "actor/fixture", UpstreamRoot: t.TempDir(), ForkRoot: t.TempDir(), Gate: gate}}
+	return &fixture{t: t, pending: gate == "agent", o: options{Upstream: "maintainer/fixture", Fork: "actor/fixture", UpstreamRoot: t.TempDir(), ForkRoot: t.TempDir(), Gate: gate}}
 }
 func (f *fixture) args() []string {
 	return []string{"--upstream", f.o.Upstream, "--fork", f.o.Fork, "--upstream-root", f.o.UpstreamRoot, "--fork-root", f.o.ForkRoot, "--gate", f.o.Gate}
@@ -76,9 +78,12 @@ func (f *fixture) state() *lease.IssueState {
 	}
 	plan, test, review := "plan", "tests", "VERDICT: APPROVED\n"
 	kind := f.o.Gate
-	st.Artifacts = []contract.Artifact{{Type: contract.ArtifactDesign, Body: plan}, {Type: contract.ArtifactTestPlan, Body: test}, {Type: contract.ArtifactReview, Body: review, Verdict: "APPROVED", Metadata: map[string]string{"actor": "maintainer", "kind": kind, "review_source": "authenticated-" + kind, "task_digest": st.TaskDigest, "base_sha": st.BaseSHA, "policy_digest": st.PolicyDigest, "content_sha256": digest(review), "plan_digest": digest(plan), "test_plan_digest": digest(test)}}}
+	st.Artifacts = []contract.Artifact{{Type: contract.ArtifactDesign, IssueNumber: 7, Body: plan}, {Type: contract.ArtifactTestPlan, IssueNumber: 7, Body: test}, {Type: contract.ArtifactReview, Body: review, Verdict: "APPROVED", Metadata: map[string]string{"actor": "maintainer", "kind": kind, "review_source": "authenticated-" + kind, "task_digest": st.TaskDigest, "base_sha": st.BaseSHA, "policy_digest": st.PolicyDigest, "content_sha256": digest(review), "plan_digest": digest(plan), "test_plan_digest": digest(test)}}}
 	if e := lease.VerifyApproval(st, wu); e != nil {
 		f.t.Fatalf("invalid approval fixture: %v", e)
+	}
+	if f.pending && !f.reviewed {
+		st.Artifacts = st.Artifacts[:2]
 	}
 	if f.approvalChange != nil {
 		f.approvalChange(st)
@@ -200,9 +205,13 @@ func (f *fixture) response(name string, args []string) []byte {
 		}
 		return encoded(prEnvelope{Kind: "pr-status", Status: "pending", Result: &prservice.Result{IssueNumber: 7, Status: "pending", HeadSHA: secondHead, PR: f.pull(firstHead)}})
 	case "review-plan":
+		f.reviewed = true
 		return encoded(workEnvelope{Kind: "work", Status: "completed", Result: &workflow.WorkResult{IssueNumber: 7, PhaseCompleted: "review"}})
 	case "work":
 		phase := a[slices.Index(a, "--phase")+1]
+		if phase == "plan" {
+			f.reviewed = false
+		}
 		head := firstHead
 		if a[0] == "pr" {
 			f.revision = true
@@ -255,7 +264,7 @@ func TestLifecycleSequence(t *testing.T) {
 	if e := run(context.Background(), f.args(), f.command, &out); e != nil {
 		t.Fatal(e)
 	}
-	want := []string{"issue create", "issue approve", "issue claim", "issue work plan", "issue review-plan", "issue status", "issue work implement", "issue status", "issue submit", "pr work plan", "issue review-plan", "issue status", "pr work implement", "pr status", "pr submit"}
+	want := []string{"issue create", "issue approve", "issue claim", "issue work plan", "issue status", "issue review-plan", "issue status", "issue work implement", "issue status", "issue submit", "pr work plan", "issue status", "issue review-plan", "issue status", "pr work implement", "pr status", "pr submit"}
 	if got := operations(f.calls); !reflect.DeepEqual(got, want) {
 		t.Fatalf("%v", got)
 	}
@@ -271,27 +280,41 @@ func TestSameAccountLifecycle(t *testing.T) {
 	}
 }
 func TestDryRunNoMutations(t *testing.T) {
-	f := newFixture(t, "human")
-	for _, resume := range []string{"", filepath.Join(f.o.ForkRoot, "missing")} {
-		args := append(f.args(), "--dry-run")
-		if resume != "" {
-			args = append(args, "--resume", resume)
-		}
-		var out bytes.Buffer
-		if e := run(context.Background(), args, func(context.Context, string, ...string) ([]byte, error) {
-			t.Fatal("dry run subprocess")
-			return nil, nil
-		}, &out); e != nil {
-			t.Fatal(e)
-		}
-		for _, s := range []string{"issue create", "issue claim", "issue work", "issue submit", "pr work", "pr status", "pr submit", "pending live preflight"} {
-			if !strings.Contains(out.String(), s) {
-				t.Fatal(s)
+	for _, gate := range []string{"human", "agent"} {
+		f := newFixture(t, gate)
+		for _, resume := range []string{"", filepath.Join(f.o.ForkRoot, "missing")} {
+			args := append(f.args(), "--dry-run")
+			if resume != "" {
+				args = append(args, "--resume", resume)
 			}
-		}
-		entries, _ := os.ReadDir(f.o.ForkRoot)
-		if len(entries) != 0 {
-			t.Fatal("dry run wrote files")
+			var out bytes.Buffer
+			if e := run(context.Background(), args, func(context.Context, string, ...string) ([]byte, error) {
+				t.Fatal("dry run subprocess")
+				return nil, nil
+			}, &out); e != nil {
+				t.Fatal(e)
+			}
+			for _, s := range []string{"issue create", "issue claim", "issue work", "issue submit", "pr work", "pr status", "pr submit", "pending live preflight"} {
+				if !strings.Contains(out.String(), s) {
+					t.Fatal(s)
+				}
+			}
+			for _, stage := range []string{"issue", "revision"} {
+				expected := stage + ": manual independent approval pause (human)"
+				if gate == "agent" {
+					expected = stage + ": upstream issue status <issue> --json first; exact gate and valid approval continues; otherwise eligible contributor-held gate pauses"
+				}
+				if !strings.Contains(out.String(), expected) {
+					t.Fatal(out.String())
+				}
+			}
+			if strings.Contains(out.String(), " validate ") || strings.Contains(out.String(), "--approve") {
+				t.Fatal("dry run executes approval or adds validation")
+			}
+			entries, _ := os.ReadDir(f.o.ForkRoot)
+			if len(entries) != 0 {
+				t.Fatal("dry run wrote files")
+			}
 		}
 	}
 }
@@ -436,6 +459,9 @@ func approvalMutation(kind string) func(*lease.IssueState) {
 			a.Metadata["review_source"] = "authenticated-agent"
 		case "gate":
 			st.EffectiveGate = contract.GateNone
+		case "wrong-kind":
+			a.Metadata["kind"] = "unknown"
+			a.Metadata["review_source"] = "authenticated-unknown"
 		case "advisory":
 			a.Metadata["review_source"] = "advisory"
 		}
@@ -445,6 +471,7 @@ func TestAgentGateUsesTrustedReview(t *testing.T) {
 	for _, approved := range []bool{true, false} {
 		t.Run(strconv.FormatBool(approved), func(t *testing.T) {
 			f := newFixture(t, "agent")
+			f.pending = false
 			if !approved {
 				f.approvalChange = approvalMutation("advisory")
 			}
@@ -456,7 +483,7 @@ func TestAgentGateUsesTrustedReview(t *testing.T) {
 				t.Fatal(e)
 			}
 			ops := operations(f.calls)
-			if !slices.Contains(ops, "issue review-plan") {
+			if slices.Contains(ops, "issue review-plan") == approved {
 				t.Fatal(ops)
 			}
 			if !approved && slices.Contains(ops, "issue work implement") {
@@ -624,7 +651,7 @@ func TestHeadAndApprovalChanges(t *testing.T) {
 				_ = json.Unmarshal(b, &m)
 				if slices.Contains(args, "status") && slices.Contains(args, "issue") {
 					statuses++
-					if statuses == 2 && (fault == "issue head" || fault == "approval changed") {
+					if statuses == 3 && (fault == "issue head" || fault == "approval changed") {
 						hit = true
 						e := m["issues"].([]any)[0].(map[string]any)
 						st := e["state"].(map[string]any)
@@ -785,7 +812,7 @@ func TestKnownReviewPause(t *testing.T) {
 	if e := run(context.Background(), append(f.args(), "--resume", p), f.command, &bytes.Buffer{}); !errors.Is(e, errPaused) {
 		t.Fatal(e)
 	} // revision review pauses again
-	if got := operations(f.calls); !reflect.DeepEqual(got, []string{"issue status", "issue work implement", "issue status", "issue submit", "pr work plan", "issue review-plan"}) {
+	if got := operations(f.calls); !reflect.DeepEqual(got, []string{"issue status", "issue work implement", "issue status", "issue submit", "pr work plan", "issue status", "issue review-plan"}) {
 		t.Fatal(got)
 	}
 }
@@ -859,6 +886,7 @@ func TestGateStatusDecodeAndIdentity(t *testing.T) {
 }
 func TestStructuredEmitterFixtures(t *testing.T) {
 	f := newFixture(t, "agent")
+	f.pending = false
 	f.id = strings.Repeat("c", 32)
 	// Cover fresh submission's additional fields with their real emitting types.
 	b := encoded(map[string]any{"kind": "submission", "status": "submitted", "issue_number": 7, "pr_number": 9, "pr_url": f.pull(firstHead).HTMLURL, "head_sha": firstHead, "base_freshness": submissionFreshness{Status: "current"}, "report": &validation.ValidationReport{Passed: true, HeadSHA: firstHead}})
@@ -873,5 +901,131 @@ func TestStructuredEmitterFixtures(t *testing.T) {
 	r := record{Options: f.o, Actor: "actor", ID: f.id, Issue: 7, Stage: "issue"}
 	if e := d.submit(context.Background(), &r, false, firstHead); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func heldState(st *lease.IssueState) {
+	st.Lease.Owner = "actor"
+	st.Lease.IssueNumber = 7
+	st.Lease.Status = "active"
+	st.Lease.ExpiresAt = time.Now().Add(time.Hour)
+}
+
+func TestHeldAgentGate(t *testing.T) {
+	for _, stage := range []string{"issue", "revision"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newFixture(t, "agent")
+			f.id = strings.Repeat("c", 32)
+			f.revision, f.submitted = stage == "revision", stage == "revision"
+			f.approvalChange = heldState
+			f.intercept = func(_ int, _ string, args []string, b []byte) ([]byte, error) {
+				if slices.Contains(args, "review-plan") {
+					return nil, errors.New("exit 1: AlreadyClaimed")
+				}
+				return bytes.ReplaceAll(b, []byte(`"claim_id":""`), []byte(`"claim_id":"private-sentinel"`)), nil
+			}
+			r := record{Options: f.o, Actor: "actor", ID: f.id, Issue: 7, Stage: stage}
+			if f.revision {
+				r.PR, r.PublishedHead = 9, firstHead
+			}
+			var out bytes.Buffer
+			d := driver{o: f.o, actor: "actor", call: f.command, out: &out}
+			if e := d.continueGate(context.Background(), r, false); !errors.Is(e, errPaused) {
+				t.Fatal(e)
+			}
+			if got := operations(f.calls); !reflect.DeepEqual(got, []string{"issue status"}) {
+				t.Fatal(got)
+			}
+			p := pauseRecord(t, f, stage)
+			before, e := os.ReadFile(p)
+			if e != nil {
+				t.Fatal(e)
+			}
+			var saved record
+			if exact(before, &saved) != nil || !reflect.DeepEqual(saved, r) {
+				t.Fatal("record shape/parameters")
+			}
+			info, _ := os.Stat(p)
+			dir, _ := os.Stat(filepath.Dir(p))
+			if info.Mode().Perm() != 0600 || dir.Mode().Perm() != 0700 {
+				t.Fatal("private record")
+			}
+			if !strings.Contains(out.String(), "issue review-plan 7 --approve --notes") || strings.Contains(out.String()+string(before), "private-sentinel") {
+				t.Fatal("manual command or secret leakage")
+			}
+			// Every denied approval is checked fresh, without modifying the saved record.
+			f.pending = false
+			for _, fault := range []string{"missing", "rejected", "superseded", "stale", "gate", "advisory", "wrong-kind"} {
+				f.approvalChange = approvalMutation(fault)
+				f.calls = nil
+				if e := run(context.Background(), append(f.args(), "--resume", p), f.command, &out); e == nil {
+					t.Fatal(fault)
+				}
+				if got := operations(f.calls); !reflect.DeepEqual(got, []string{"issue status"}) {
+					t.Fatal(got)
+				}
+				after, _ := os.ReadFile(p)
+				if !bytes.Equal(before, after) {
+					t.Fatal("denied resume rewrote record")
+				}
+			}
+			f.approvalChange = nil
+			f.calls = nil
+			if e := run(context.Background(), append(f.args(), "--resume", p), f.command, &out); e != nil {
+				t.Fatal(e)
+			}
+			ops := operations(f.calls)
+			if ops[0] != "issue status" || slices.Contains(ops, "issue create") || slices.Contains(ops, "issue claim") || slices.Contains(ops, "issue work plan") || slices.Contains(ops, "issue review-plan") {
+				t.Fatal(ops)
+			}
+		})
+	}
+}
+
+func TestHeldAgentGatePredicateNegatives(t *testing.T) {
+	cases := map[string]func(*lease.IssueState){
+		"owner":     func(s *lease.IssueState) { s.Lease.Owner = "other" },
+		"fork":      func(s *lease.IssueState) { s.ForkRepo = "other/fixture" },
+		"issue":     func(s *lease.IssueState) { s.Lease.IssueNumber++ },
+		"expired":   func(s *lease.IssueState) { s.Lease.ExpiresAt = time.Now().Add(-time.Hour) },
+		"boundary":  func(s *lease.IssueState) { s.Lease.ExpiresAt = time.Now() },
+		"inactive":  func(s *lease.IssueState) { s.Lease.Status = "completed" },
+		"digest":    func(s *lease.IssueState) { s.TaskDigest = "wrong" },
+		"design":    func(s *lease.IssueState) { s.Artifacts = s.Artifacts[1:] },
+		"test-plan": func(s *lease.IssueState) { s.Artifacts = s.Artifacts[:1] },
+		"gate":      func(s *lease.IssueState) { s.EffectiveGate = contract.GateHuman },
+		"historical": func(s *lease.IssueState) {
+			s.Artifacts = append(s.Artifacts, contract.Artifact{Type: contract.ArtifactDesign, IssueNumber: 8, Body: "old"})
+		},
+		"superseded": func(s *lease.IssueState) { s.Artifacts[0].Metadata = map[string]string{"superseded_by": "new"} },
+		"checkpoint": func(s *lease.IssueState) {
+			s.Artifacts[0].Metadata = map[string]string{"checkpoint_plan_origin": "coordinator"}
+		},
+	}
+	for name, change := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, "agent")
+			f.id = strings.Repeat("d", 32)
+			f.approvalChange = func(s *lease.IssueState) { heldState(s); change(s) }
+			f.intercept = func(_ int, _ string, args []string, b []byte) ([]byte, error) {
+				if slices.Contains(args, "review-plan") {
+					return nil, errors.New("exit 1: AlreadyClaimed")
+				}
+				return b, nil
+			}
+			d := driver{o: f.o, actor: "actor", call: f.command, out: &bytes.Buffer{}}
+			e := d.continueGate(context.Background(), record{Options: f.o, Actor: "actor", ID: f.id, Issue: 7, Stage: "issue"}, false)
+			if e == nil || errors.Is(e, errPaused) {
+				t.Fatalf("predicate gained pause: %v", e)
+			}
+			entries, _ := os.ReadDir(f.o.ForkRoot)
+			if len(entries) != 0 {
+				t.Fatal("pause record written")
+			}
+			ops := operations(f.calls)
+			if ops[0] != "issue status" || slices.Contains(ops, "issue work implement") {
+				t.Fatal(ops)
+			}
+		})
 	}
 }

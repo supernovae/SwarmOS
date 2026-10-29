@@ -763,7 +763,11 @@ built-in revalidation. The driver adds no separate validation command.
 Summaries retain fixture links and command outcomes without raw reports,
 authentication output or local checkout paths. Private records under
 `.swarm-public-fork-*` in the fork checkout retain run parameters; they cannot
-authorize approval. Keep the records, issue, branches and draft PR for inspection.
+authorize approval. An agent gate also pauses when fresh status shows the current
+plan held by this contributor’s active lease without valid approval. An independent
+maintainer runs the printed approval command; resume uses the retained parameters
+and checks fresh authoritative approval before continuing. Keep the records, issue,
+branches and draft PR for inspection.
 Unexpected failures stop the sequence for manual investigation; resume supports
 plan gates rather than general crash recovery. Cleanup is an explicit operator
 decision: the driver never closes issues, deletes branches or removes fixtures.

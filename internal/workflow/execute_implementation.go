@@ -3,8 +3,10 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -174,7 +176,11 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 		devMeta[key] = value
 	}
 	devMeta["head_sha"] = checkpointHead
-	if r.st, err = r.e.LeaseManager.UpdateArtifact(r.ctx, r.opts.IssueNumber, r.opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: verdict, Summary: summary, Body: body, Metadata: devMeta}); err != nil {
+	record := r.e.LeaseManager.UpdateArtifact
+	if verdict == "PASS" && !r.forkMode && !r.e.LeaseManager.HasWorkerGateway() {
+		record = r.e.LeaseManager.RecordTrustedImplementation
+	}
+	if r.st, err = record(r.ctx, r.opts.IssueNumber, r.opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: verdict, Summary: summary, Body: body, Metadata: devMeta}); err != nil {
 		return false, fmt.Errorf("record implementation outcome: %w", err)
 	}
 	r.res.State = r.st
@@ -227,4 +233,51 @@ func (r *workRun) prepareImplementation() (bool, error) {
 	// or blocked), as opposed to a fencing, budget, or runner error.
 	r.outcomeFailed = false
 	return false, nil
+}
+
+func (r *workRun) prepareTestRetry() error {
+	r.activePhase, r.preserveCheckpoint = "implement", true
+	if err := r.checkTestRetry(); err != nil {
+		return fmt.Errorf("tester retry unavailable; run implementation recovery: %w", err)
+	}
+	if err := lease.VerifyApproval(r.st, r.pre.WorkUnit); err != nil {
+		return err
+	}
+	var err error
+	r.st, err = r.e.LeaseManager.UpdatePhase(r.ctx, r.opts.IssueNumber, r.opts.Owner, "implement", "active")
+	if err != nil {
+		return err
+	}
+	r.res.State = r.st
+	return nil
+}
+
+func (r *workRun) checkTestRetry() error {
+	if err := r.check(); err != nil {
+		return err
+	}
+	head, dirty, rebasing, err := workspace.StatusPRHead(r.ctx, r.wtPath)
+	if err != nil {
+		return err
+	}
+	if dirty || rebasing {
+		return fmt.Errorf("tester retry requires a clean unchanged candidate")
+	}
+	tree, err := workspace.CheckpointTree(r.ctx, r.wtPath)
+	if err != nil {
+		return err
+	}
+	cmd, _, err := gitcredential.Command(r.ctx, r.wtPath, "symbolic-ref", "--short", "HEAD")
+	if err != nil {
+		return err
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return err
+	}
+	updated, err := r.e.LeaseManager.CheckImplementationRetry(r.ctx, r.opts.IssueNumber, r.opts.Owner, head, tree, strings.TrimSpace(string(out)))
+	if err == nil {
+		r.st, r.res.State = updated, updated
+	}
+	return err
 }

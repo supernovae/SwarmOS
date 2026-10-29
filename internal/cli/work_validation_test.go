@@ -2,6 +2,10 @@ package cli
 
 import (
 	"encoding/json"
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"gopkg.in/yaml.v3"
 	"io"
 	"os"
 	"path/filepath"
@@ -237,5 +241,140 @@ func TestWorkValidationRepairNextAction(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestTestPhaseRequiresExplicitIssueBeforeSelection(t *testing.T) {
+	for _, flags := range [][]string{{"--next"}, {"--next", "--all"}} {
+		// No backend, repository, tracker, manager, or runner is available: any
+		// selection or setup call would fail instead of producing this usage error.
+		opts := &RootOptions{RepoRoot: t.TempDir(), Backend: "invalid"}
+		cmd := newWorkCmd(opts)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		cmd.SetArgs(append([]string{"--phase", "test"}, flags...))
+		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "requires an explicit issue number") {
+			t.Fatalf("flags %v: %v", flags, err)
+		}
+		entries, err := os.ReadDir(opts.RepoRoot)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("selection mutated root: %v %v", entries, err)
+		}
+	}
+}
+
+func TestExplicitTestWorkCommandRunsTesterOnly(t *testing.T) {
+	for _, resource := range []string{"issue", "pr"} {
+		t.Run(resource, func(t *testing.T) {
+			var f *cliFixture
+			var number int
+			if resource == "issue" {
+				f = newCLIFixture(t)
+				number = f.create(t, "none")
+				f.must(t, "issue", "approve", strconv.Itoa(number))
+			} else {
+				f, _, number = submittedPRFixture(t, "none")
+			}
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo implemented > implementation.txt")
+			f.must(t, resource, "work", strconv.Itoa(number), "--agent", "mock")
+			// A developer invocation in the retry would fail the command.
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 77")
+			f.setenv("SWARM_MOCK_TESTER_CMD", "echo tester-ran > \"$TMPDIR/tester-retry\"")
+			out, err := f.run(resource, "work", strconv.Itoa(number), "--phase", "test", "--agent", "mock", "--json")
+			if err != nil {
+				t.Fatalf("retry: %v %s", err, out)
+			}
+			var payload struct {
+				Result struct {
+					PhaseCompleted   string
+					ValidationPassed bool
+					RoleAgentsUsed   map[string]string
+				}
+			}
+			if resource == "issue" {
+				if err := json.Unmarshal([]byte(out), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.Result.PhaseCompleted != "test" || !payload.Result.ValidationPassed || payload.Result.RoleAgentsUsed["developer"] != "" {
+					t.Fatalf("result: %s", out)
+				}
+			} else if !strings.Contains(out, "\"PhaseCompleted\":\"test\"") {
+				t.Fatalf("PR result: %s", out)
+			}
+		})
+	}
+}
+
+func TestExplicitTestWorkFakeGitHub(t *testing.T) {
+	for _, resource := range []string{"issue", "pr"} {
+		t.Run(resource, func(t *testing.T) {
+			setup := func(f *cliFixture) {
+				path := filepath.Join(f.root, ".swarm/config.yaml")
+				cfg, err := harness.LoadConfig(f.root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.Agents["mock"] = contract.AgentConfig{Binary: "mock"}
+				data, err := yaml.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0644); err != nil {
+					t.Fatal(err)
+				}
+				prGit(t, f.root, "add", ".")
+				prGit(t, f.root, "commit", "-m", "allow fixture mock")
+			}
+			var f *cliFixture
+			var issue, number int
+			if resource == "issue" {
+				f = newCLIFixture(t)
+				setup(f)
+				issue = f.create(t, "none")
+				number = issue
+				f.must(t, "issue", "approve", strconv.Itoa(issue))
+				f.must(t, "issue", "work", strconv.Itoa(issue), "--agent", "mock")
+			} else {
+				f, issue, number = submittedPRFixture(t, "none", setup)
+				f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo revision > revision.txt")
+				f.must(t, "pr", "work", strconv.Itoa(number), "--agent", "mock")
+			}
+			remote := filepath.Join(t.TempDir(), "remote.git")
+			prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
+			prGit(t, f.root, "remote", "add", "origin", remote)
+			prGit(t, f.root, "push", "origin", "main")
+			prGit(t, f.root, "push", "origin", f.state(t, issue).Branch)
+			raw, _, err := f.manager.Store().Load(t.Context(), issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := trustedLedgerStore(t, f.root, "").CompareAndSwap(t.Context(), issue, "", raw); err != nil {
+				t.Fatal(err)
+			}
+			pull := tracker.PullRequest{}
+			if resource == "pr" {
+				original, err := f.tracker.GetPullRequest(t.Context(), number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pull = *original
+				mergeable := true
+				pull.Mergeable = &mergeable
+				pull.MergeableState = "clean"
+			}
+			opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: workCLITracker{Tracker: f.tracker, pr: pull}}
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 77")
+			doc, err := runJSON(t, f.options(opts), resource, "work", strconv.Itoa(number), "--phase", "test", "--agent", "mock", "--json", "--progress=false")
+			if err != nil {
+				t.Fatalf("fake github retry: %v %+v", err, doc)
+			}
+			result := doc["result"].(map[string]any)
+			if resource == "pr" {
+				result = result["work"].(map[string]any)
+			}
+			if result["PhaseCompleted"] != "test" || result["ValidationPassed"] != true {
+				t.Fatalf("retry result: %+v", result)
+			}
+		})
 	}
 }

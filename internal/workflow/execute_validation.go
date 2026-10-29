@@ -8,7 +8,10 @@ import (
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/claimpause"
+	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/validation"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func (r *workRun) validationRound(round int) (paused bool, err error) {
@@ -35,6 +38,11 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	if err := r.admit("implement"); err != nil {
 		return false, err
 	}
+	if r.opts.Phase == "test" {
+		if err := r.checkTestRetry(); err != nil {
+			return false, err
+		}
+	}
 	testerRun, err := testerRunner.Run(r.ctx, agent.RunRequest{CheckImport: r.checkImport("tester"), PreserveRejected: r.preserveRejected("tester"), Agent: tester, Role: "tester", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: r.opts.instructionsFor("tester"), Dependencies: r.deps})
 	var rejection *importRejection
 	if errors.As(err, &rejection) {
@@ -46,6 +54,13 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	if err != nil {
 		r.st, err = r.e.failedRun(r.ctx, r.st, r.opts, testerRun, err, "tester")
 		r.res.State = r.st
+		if !r.forkMode && r.checkTestRetry() == nil {
+			command := fmt.Sprintf("swarm issue work %d --phase test", r.opts.IssueNumber)
+			if r.opts.PRNumber != 0 {
+				command = fmt.Sprintf("swarm pr work %d --phase test", r.opts.PRNumber)
+			}
+			return false, &TestRetryAvailableError{Err: fmt.Errorf("rerun with %s: %w", command, err)}
+		}
 		return false, err
 	}
 	if err := r.check(); err != nil {
@@ -53,7 +68,11 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	}
 	r.progress.next("required-checks")
 	testerBody, _ := readRequiredArtifact(r.wtPath, "VALIDATION.md")
-	report, err := validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: r.opts.Version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, GoFastPass: round == 0, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
+	version := r.opts.Version
+	if r.opts.Phase == "test" && version == "" {
+		version = "dev"
+	}
+	report, err := validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, GoFastPass: round == 0 && r.opts.Phase != "test", LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
 	if context.Cause(r.ctx) == claimpause.ErrBudget {
 		return true, r.e.pauseWork(r.coordinatorCtx, r.res, r.opts, r.pre.WorkUnit, "implement", true, r.forkMode, r.forkRemote)
 	}
@@ -66,7 +85,22 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 		if _, writeErr := recordGuidance(r.wtPath, "VALIDATION.md", canonicalReport(report.Artifact.Body), testerRun); writeErr != nil {
 			return false, writeErr
 		}
-		updated, updateErr := r.e.LeaseManager.RecordTrustedValidation(r.ctx, r.opts.IssueNumber, r.opts.Owner, report.Artifact)
+		if r.opts.Phase == "test" {
+			if err := r.checkTestRetry(); err != nil {
+				return false, err
+			}
+		}
+		record := r.e.LeaseManager.RecordTrustedValidation
+		if r.opts.Phase == "test" {
+			record = func(ctx context.Context, n int, owner string, art contract.Artifact) (*lease.IssueState, error) {
+				tree, err := workspace.CheckpointTree(ctx, r.wtPath)
+				if err != nil {
+					return nil, err
+				}
+				return r.e.LeaseManager.RecordRetryValidation(ctx, n, owner, art, r.res.HeadSHA, tree, r.branch)
+			}
+		}
+		updated, updateErr := record(r.ctx, r.opts.IssueNumber, r.opts.Owner, report.Artifact)
 		if updateErr != nil {
 			return false, updateErr
 		}

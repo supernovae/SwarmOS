@@ -520,6 +520,11 @@ func (s *Service) now() time.Time {
 // publication pass renew=true so the lease is kept alive until fn returns; the
 // workflow engine renews its own claim during pr work.
 func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, reporter *workflow.ProgressReporter, fn func(context.Context, string, *lease.IssueState) (*Result, error)) (*Result, error) {
+	return s.withClaimForPhase(ctx, r, renew, reporter, "all", fn)
+}
+
+func (s *Service) withClaimForPhase(ctx context.Context, r *Result, renew bool, reporter *workflow.ProgressReporter, phase string, fn func(context.Context, string, *lease.IssueState) (*Result, error)) (*Result, error) {
+
 	lock, err := lease.LockClaim(s.Root, r.IssueNumber)
 	if err != nil {
 		return nil, err
@@ -561,7 +566,7 @@ func (s *Service) withClaim(ctx context.Context, r *Result, renew bool, reporter
 		}
 	} else {
 		err = reporter.ReportSetupPhase(ctx, r.IssueNumber, "claim", func() error {
-			st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, cfg.DefaultAgent, "all", duration, cfg.Lease.MaxRenewals)
+			st, err = s.Manager.AcquirePR(ctx, r.IssueNumber, r.PR.Number, owner, cfg.DefaultAgent, phase, duration, cfg.Lease.MaxRenewals)
 			return err
 		})
 		if err != nil {
@@ -662,9 +667,23 @@ func (s *Service) requireApproval(ctx context.Context, r *Result, st *lease.Issu
 }
 
 func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
+	if err := contract.ValidateWorkPhase(func() string {
+		if opts.Work.Phase == "" {
+			return "all"
+		}
+		return opts.Work.Phase
+	}()); err != nil {
+		return nil, err
+	}
+	if opts.Work.Phase == "test" && (s.Fork || opts.Work.ForkMode || s.Manager.HasWorkerGateway()) {
+		return nil, fmt.Errorf("--phase test is unavailable with fork/gateway coordination")
+	}
 	r, remote, err := s.openForMutation(ctx, opts.Number, false)
 	if err != nil {
 		return nil, err
+	}
+	if opts.Work.Phase == "test" && (r.State.PRRevision == nil || r.State.PRRevision.Intent == "rebase" || r.State.PRRevision.LocalHeadSHA == "") {
+		return r, fmt.Errorf("test retry requires an implemented pending PR revision")
 	}
 	if err = s.checkWork(ctx, r); err != nil {
 		return r, err
@@ -691,6 +710,9 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 	for _, override := range []struct{ role, name string }{{"planner", opts.Work.PlannerAgent}, {"reviewer", opts.Work.ReviewerAgent}, {"developer", opts.Work.DeveloperAgent}, {"tester", opts.Work.TesterAgent}} {
+		if opts.Work.Phase == "test" && override.role != "tester" {
+			continue
+		}
 		if override.name != "" {
 			if _, e := agent.PreflightWithOptions(override.name, cfg, s.Tracker.BackendName() == "local", override.role, s.runnerOptions(ctx)); e != nil {
 				return nil, fmt.Errorf("%s agent preflight: %w", override.role, e)
@@ -712,7 +734,11 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		}
 		return r, nil
 	}
-	return s.withClaim(ctx, r, false, opts.Work.SetupProgress, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+	claimPhase := "all"
+	if opts.Work.Phase == "test" {
+		claimPhase = "implement"
+	}
+	return s.withClaimForPhase(ctx, r, false, opts.Work.SetupProgress, claimPhase, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
 		var path, branch string
 		e := opts.Work.SetupProgress.ReportSetupPhase(ctx, r.IssueNumber, "workspace", func() error {
 			var setupErr error
@@ -733,7 +759,13 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 			if dirty {
 				return nil, fmt.Errorf("PR worktree must be clean and not rebasing before work")
 			}
-			st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch)
+			if opts.Work.Phase == "test" {
+				if st.PRRevision == nil || st.PRRevision.Number != opts.Number || st.PRRevision.LocalHeadSHA != head || st.PRRevision.Branch != branch || st.PRRevision.RemoteHeadSHA != r.PR.HeadSHA {
+					return nil, fmt.Errorf("test retry PR checkpoint changed")
+				}
+			} else {
+				st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch)
+			}
 			if e != nil {
 				return nil, e
 			}

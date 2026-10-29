@@ -95,6 +95,10 @@ func (c stopContext) classify(err error) *NextAction {
 	if err == nil {
 		return nil
 	}
+	var retry *workflow.TestRetryAvailableError
+	if errors.As(err, &retry) && (c.opts == nil || !c.opts.Fork) {
+		return &NextAction{Reason: "tester_retry_available", Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "test")}
+	}
 	if errors.Is(err, workflow.ErrPreExistingFailures) {
 		return &NextAction{Reason: ReasonPreExistingFailures, Argv: c.argv(false, c.resource, "status", strconv.Itoa(c.number)), HumanRequired: true}
 	}

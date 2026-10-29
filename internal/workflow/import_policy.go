@@ -171,7 +171,7 @@ func (e *importRejection) developerOutputOnly() bool {
 const developerOutputInstructions = "Record notes, test results, and blocked checks in .swarm/active/IMPLEMENTATION.md. Do not change other .swarm/active/ files except LESSONS.md."
 
 // importRejectionReason explains a rejected import and how to rerun the implement phase.
-func importRejectionReason(rejection *importRejection, issue, pr int) string {
+func importRejectionReason(rejection *importRejection, issue, pr int, eligible ...bool) string {
 	rerun := fmt.Sprintf("swarm issue work %d --phase implement", issue)
 	if pr != 0 {
 		rerun = fmt.Sprintf("swarm pr work %d --phase implement", pr)
@@ -193,6 +193,9 @@ func importRejectionReason(rejection *importRejection, issue, pr int) string {
 		} else if rejection.Role == "tester" {
 			reason += " --tester-instructions 'Record validation results in .swarm/active/VALIDATION.md; leave other roles output files unchanged.'"
 		}
+	}
+	if rejection.Role == "tester" && len(eligible) > 0 && eligible[0] {
+		reason = strings.ReplaceAll(reason, "--phase implement", "--phase test")
 	}
 	return reason + recoveryReason(rejection, issue, pr)
 }

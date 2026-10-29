@@ -428,3 +428,23 @@ func TestPRWorkGitHubBlockersNextAction(t *testing.T) {
 		})
 	}
 }
+
+func TestTesterRetryNextActionPreservesSelections(t *testing.T) {
+	for _, resource := range []string{"issue", "pr"} {
+		opts := &RootOptions{Backend: "github", Repo: "org/repo", RepoRoot: "/checkout", UpstreamRemote: "upstream"}
+		c := stopContext{opts: opts, resource: resource, number: 42}
+		err := &workflow.TestRetryAvailableError{Err: errors.New("tester refused output")}
+		action := c.classify(err)
+		want := []string{"swarm", "--backend", "github", "--repo", "org/repo", "--root", "/checkout", "--upstream-remote", "upstream", resource, "work", "42", "--phase", "test"}
+		if action == nil || action.Reason != "tester_retry_available" || action.HumanRequired || !reflect.DeepEqual(action.Argv, want) {
+			t.Fatalf("action %+v", action)
+		}
+		if c.classify(errors.New(err.Error())) != nil {
+			t.Fatal("error prose conferred eligibility")
+		}
+		opts.Fork = true
+		if c.classify(err) != nil {
+			t.Fatal("fork advertised unsupported retry")
+		}
+	}
+}

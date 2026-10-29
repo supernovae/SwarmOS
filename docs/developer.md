@@ -21,7 +21,7 @@ swarm issue validate 42 --backend github
 swarm issue submit 42 --backend github
 ```
 
-Developer and tester results are checked before import. If a run changes protected files or approved inputs in `.swarm/active/`, the error and `swarm issue status 42` list every rejected path. The returned changes are discarded and the worktree stays as it was at launch. Retry with `swarm issue work 42 --phase implement` after addressing the cause. Developers may write `IMPLEMENTATION.md` and `LESSONS.md` in the active bundle, and never the coordinator's `REPAIR.md`; testers may write `VALIDATION.md` and `LESSONS.md`. The coordinator restores approved plan inputs before the tester starts.
+Developer and tester results are checked before import. If a run changes protected files or approved inputs in `.swarm/active/`, the error and `swarm issue status 42` list every rejected path. The returned changes are discarded and the worktree stays as it was at launch. When a tester stops after a successful coordinator-recorded implementation, retry the unchanged checkpoint with `swarm issue work 42 --phase test`. Use `--phase implement` when implementation recovery is needed. Developers may write `IMPLEMENTATION.md` and `LESSONS.md` in the active bundle, and never the coordinator's `REPAIR.md`; testers may write `VALIDATION.md` and `LESSONS.md`. The coordinator restores approved plan inputs before the tester starts.
 
 Helpful CLI conventions:
 
@@ -477,10 +477,19 @@ An implementation that produces no checkpoint beyond the approved base fails bef
 
 Use `--instructions` on `issue work` or `pr work` for guidance that every role should receive. For advice intended for one role, use `--planner-instructions`, `--reviewer-instructions`, `--developer-instructions`, or `--tester-instructions`. Each takes one string, including multiline text. Each role receives the shared instructions followed by its own guidance, recorded in the existing operator guidance block. Role guidance stays within the approved scope, permissions, and approval gates.
 
+Use `--phase test` to rerun one tester and every required check without invoking a developer or automatically repairing source. This requires a clean, unchanged successful implementation checkpoint recorded by the coordinator, the same task, base, policy, approved plan and test plan, and a valid current claim. A new claim can reuse the original completion evidence. Manual staging and legacy implementation artifacts do not qualify; use `--phase implement` when the checkpoint is ineligible. Test retry requires an explicit issue or PR number and direct GitHub or local coordination.
+
+```bash
+swarm issue work 42 --phase test --backend github
+swarm issue work 42 --phase test --backend local
+swarm pr work 123 --phase test --backend github
+swarm pr work 123 --phase test --backend local
+```
+
 Steer a recovery with specific instructions:
 
 ```bash
-swarm issue work 56 --phase implement --tester-instructions "Use temporary Git repositories for the Git-dependent tests"
+swarm issue work 56 --phase test --tester-instructions "Use temporary Git repositories for the Git-dependent tests"
 swarm pr work 123 --phase implement --developer-instructions "Fix the failing acceptance test"
 ```
 
@@ -553,7 +562,7 @@ Check `swarm issue status <issue>` for the count and limit. When automation reac
  "next_action": {"reason": "changes_requested", "argv": ["swarm", "--backend", "github", "issue", "work", "42", "--phase", "plan"], "human_required": false}}
 ```
 
-- `reason` is `changes_requested`, `needs_approval`, `conflict`, `pre_existing_failures`, `validation_repair_exhausted`, or `validation_repair_no_changes`.
+- `reason` is `changes_requested`, `needs_approval`, `conflict`, `pre_existing_failures`, `validation_repair_exhausted`, `validation_repair_no_changes`, or `tester_retry_available`. The latter suggests `issue work <issue> --phase test` or `pr work <PR> --phase test` only after coordinator eligibility checks.
 - `argv` is the suggested command as separate literal arguments, starting with `swarm`. Run it without a shell, or quote each element yourself. It repeats the `--backend`, `--repo`, `--root`, and `--upstream-remote` you used, and for worker commands `--fork` and `--fork-remote`. Maintainer commands (`issue approve`, `issue review-plan --approve`) are run upstream, so they leave out fork flags, and in fork mode they also leave out `--root`.
 - `human_required` is `true` when a person has to act, such as a maintainer approving or someone resolving files by hand.
 

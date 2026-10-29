@@ -78,3 +78,20 @@ func TestCommitMessageConfigPreservesLegacySerializationAndDigest(t *testing.T) 
 		t.Fatalf("nil config effective detail = %q", got)
 	}
 }
+
+func TestCommandOnlyTestPhase(t *testing.T) {
+	if err := ValidateWorkPhase("test"); err != nil {
+		t.Fatal(err)
+	}
+	if ValidatePhase("test") == nil {
+		t.Fatal("test admitted to coordination")
+	}
+	if PersistedWorkPhase("test") != "implement" {
+		t.Fatal("test not normalized")
+	}
+	for _, p := range []string{"all", "plan", "review", "implement"} {
+		if ValidateWorkPhase(p) != nil || ValidatePhase(p) != nil || PersistedWorkPhase(p) != p {
+			t.Fatal(p)
+		}
+	}
+}

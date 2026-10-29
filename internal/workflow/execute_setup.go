@@ -64,7 +64,7 @@ func (r *workRun) claimRun() error {
 			r.e.LeaseManager.BindClaim(r.opts.IssueNumber, r.opts.ClaimID)
 			r.st, err = r.e.LeaseManager.Resume(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.opts.ClaimID)
 		} else {
-			r.st, err = r.e.LeaseManager.Acquire(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.primaryAgent, r.opts.Phase, r.duration, r.pre.Config.Lease.MaxRenewals)
+			r.st, err = r.e.LeaseManager.Acquire(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.primaryAgent, contract.PersistedWorkPhase(r.opts.Phase), r.duration, r.pre.Config.Lease.MaxRenewals)
 		}
 		return err
 	})

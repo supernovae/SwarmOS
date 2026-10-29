@@ -110,3 +110,19 @@ func DigestApprovedPolicy(baseSHA string, cfg *SwarmConfig) string {
 	_, _ = h.Write([]byte(DigestConfig(cfg)))
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// ValidateWorkPhase accepts command-only test; coordination persists implement.
+func ValidateWorkPhase(phase string) error {
+	if phase == "test" {
+		return nil
+	}
+	return ValidatePhase(phase)
+}
+
+// PersistedWorkPhase maps a work command to its coordination phase.
+func PersistedWorkPhase(phase string) string {
+	if phase == "test" {
+		return "implement"
+	}
+	return phase
+}

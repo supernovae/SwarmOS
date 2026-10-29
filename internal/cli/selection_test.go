@@ -13,6 +13,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"gopkg.in/yaml.v3"
 )
 
@@ -503,5 +504,14 @@ func TestOverlapSelectionSnapshot(t *testing.T) {
 	cancel()
 	if _, _, err := orderByOverlap(canceled, f.tracker, f.manager, f.root, candidates(), time.Now(), &diagnostics); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
+	}
+}
+
+func TestSelectorRefusesCommandOnlyTestBeforeResolution(t *testing.T) {
+	// nil dependencies make any target resolution, tracker, lease, or agent
+	// activity fail immediately; phase validation must be the first operation.
+	_, err := pullNextReadyIssue(t.Context(), nil, nil, true, workflow.WorkOptions{Phase: "test"}, 0)
+	if err == nil || !strings.Contains(err.Error(), "invalid workflow phase") {
+		t.Fatalf("selector: %v", err)
 	}
 }

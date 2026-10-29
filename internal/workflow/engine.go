@@ -60,7 +60,7 @@ type WorkOptions struct {
 	ReviewerAgent         string
 	DeveloperAgent        string
 	TesterAgent           string
-	Phase                 string // "all", "plan", "review", "implement"
+	Phase                 string // all, plan, review, implement; command-only test persists implement
 	Gate                  contract.GateMode
 	Headless              bool
 	Handoff               bool
@@ -134,6 +134,8 @@ func (r *WorkResult) Outcome() string {
 // LeadRole is the role whose agent a claim for phase is recorded under.
 func LeadRole(phase string) string {
 	switch phase {
+	case "test":
+		return "tester"
 	case "review":
 		return "reviewer"
 	case "implement":
@@ -317,7 +319,10 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	if opts.Phase == "" {
 		opts.Phase = "all"
 	}
-	if err := contract.ValidatePhase(opts.Phase); err != nil {
+	if opts.Phase == "test" && (opts.ForkMode || e.ForkMode || e.LeaseManager.HasWorkerGateway()) {
+		return nil, fmt.Errorf("--phase test is unavailable with fork/gateway coordination")
+	}
+	if err := contract.ValidateWorkPhase(opts.Phase); err != nil {
 		return nil, err
 	}
 	if err := contract.ValidateGate(opts.Gate); err != nil {
@@ -443,7 +448,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			blockers = append(blockers, err.Error())
 		}
 	}
-	if execution.Mode == contract.ExecutionIsolated && slices.Contains(roles, "developer") && len(checks.RequiredChecks) > 0 {
+	if execution.Mode == contract.ExecutionIsolated && (slices.Contains(roles, "developer") || opts.Phase == "test") && len(checks.RequiredChecks) > 0 {
 		var runtimeErr error
 		if execution.Backend == contract.BackendNative {
 			runtimeErr = sandbox.CheckNativeValidation(ctx, cfg)
@@ -471,6 +476,8 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 
 func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool) []string {
 	switch phase {
+	case "test":
+		return []string{"tester"}
 	case "plan":
 		return []string{"planner"}
 	case "review":
@@ -546,6 +553,16 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	defer r.finishInterrupted(&result, &workErr)
 	if done, err := r.prepareRun(); done {
 		return r.res, err
+	}
+	if r.opts.Phase == "test" {
+		if err := r.prepareTestRetry(); err != nil {
+			return r.res, err
+		}
+		if paused, err := r.validationRound(0); paused || err != nil {
+			return r.res, err
+		}
+		r.res.PhaseCompleted = "test"
+		return r.res, nil
 	}
 	if done, err := r.plan(); done {
 		return r.res, err

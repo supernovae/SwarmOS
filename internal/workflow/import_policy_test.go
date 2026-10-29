@@ -149,7 +149,11 @@ func TestImportRejectionRecovery(t *testing.T) {
 			if loadErr != nil {
 				t.Fatal(loadErr)
 			}
-			for _, text := range []string{"PLAN.md", "TEST_PLAN.md", "worktree was left unchanged", "--phase implement"} {
+			phase := "--phase implement"
+			if role == "tester" {
+				phase = "--phase test"
+			}
+			for _, text := range []string{"PLAN.md", "TEST_PLAN.md", "worktree was left unchanged", phase} {
 				if !strings.Contains(err.Error(), text) || !strings.Contains(state.NextPhaseReason, text) {
 					t.Fatalf("missing %q: %v %+v", text, err, state)
 				}

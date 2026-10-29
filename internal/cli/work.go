@@ -34,7 +34,13 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			if allRepos && !nextReady {
 				return fmt.Errorf("--all requires --next")
 			}
-			if err := contract.ValidatePhase(phase); err != nil {
+			if phase == "test" && nextReady && !dryRun {
+				return fmt.Errorf("--phase test requires an explicit issue number")
+			}
+			if phase == "test" && rootOpts.Fork {
+				return fmt.Errorf("--phase test is unavailable in fork mode")
+			}
+			if err := contract.ValidateWorkPhase(phase); err != nil {
 				return fmt.Errorf("invalid --phase: %w", err)
 			}
 			if err := contract.ValidateGate(contract.GateMode(gate)); err != nil {
@@ -203,7 +209,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().StringVar(&roleInstructions.PlannerInstructions, "planner-instructions", "", "Additional operator guidance for the planner role")
 	cmd.Flags().StringVar(&roleInstructions.ReviewerInstructions, "reviewer-instructions", "", "Additional operator guidance for the reviewer role")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "Additional operator instructions for the run")
-	cmd.Flags().StringVar(&phase, "phase", "all", "Phase: all, plan, review, or implement")
+	cmd.Flags().StringVar(&phase, "phase", "all", "Phase: all, plan, review, implement, or test (test requires an explicit number)")
 	cmd.Flags().StringVar(&gate, "gate", "", "Require gate none, agent, or human; cannot weaken policy")
 	cmd.Flags().BoolVar(&headless, "headless", true, "Run agents non-interactively (false requires a terminal)")
 	cmd.Flags().BoolVar(&handoff, "handoff", false, "Checkpoint and release to the next phase")

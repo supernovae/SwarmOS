@@ -184,6 +184,11 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 			return nil, err
 		}
 	}
+	boundExpected, boundCandidate, recovery, bindingErr := CheckpointPlanHeads(st)
+	recoveryMismatch := recovery && (bindingErr != nil || boundExpected != expected || boundCandidate != candidate)
+	if !prepare && recoveryMismatch {
+		return nil, ErrApprovalRequired
+	}
 	approvalErr := VerifyApproval(st, wu)
 	reviewRequired := approvalErr != nil
 	if !additive && identity == "unchanged" && st.EffectiveGate != contract.GateNone {
@@ -195,7 +200,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		}
 		reviewRequired = reviewRequired || !eligible
 	}
-	if !additive && identity != "unchanged" {
+	if !recovery && !additive && identity != "unchanged" {
 		// Changed patches require an explicitly reviewed replacement plan. Naming
 		// the candidate in that plan binds the existing authenticated review format
 		// to this replacement without treating patch identity as authorization.
@@ -210,6 +215,13 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 			}
 		}
 		reviewRequired = !named || VerifyApproval(&copyState, wu) != nil
+	}
+	if recovery {
+		copyState := *st
+		if copyState.EffectiveGate == contract.GateNone {
+			copyState.EffectiveGate = contract.GateAgent
+		}
+		reviewRequired = recoveryMismatch || VerifyApproval(&copyState, wu) != nil
 	}
 	var boundaryProbeRequired bool
 	if prepare {
@@ -277,6 +289,20 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	preserveCheckpointHeads(st, st.HeadSHA, st.SubmittedHeadSHA, candidate)
 	clearHeadEvidence(st)
 	st.HeadSHA = candidate
+	if recovery {
+		// The explicit reconciler consumes the pending recovery restriction. Keep
+		// exact candidate/predecessor evidence on the authenticated review and rebase
+		// record while allowing subsequent ordinary implementation checkpoints.
+		for i := range st.Artifacts {
+			if st.Artifacts[i].Type == contract.ArtifactDesign || st.Artifacts[i].Type == contract.ArtifactTestPlan {
+				for key := range st.Artifacts[i].Metadata {
+					if strings.HasPrefix(key, "checkpoint_plan_") {
+						delete(st.Artifacts[i].Metadata, key)
+					}
+				}
+			}
+		}
+	}
 	st.LastRebase = &RebaseEvidence{OldHead: expected, NewHead: candidate, OldBase: st.BaseSHA, NewBase: st.BaseSHA, Status: "completed", PatchIdentity: identity, Verified: identityErr == nil}
 	art := report.Artifact
 	for k, v := range ReviewBindings(st) {
@@ -419,4 +445,157 @@ func checkpointGit(ctx context.Context, root string, args ...string) (string, er
 		return "", fmt.Errorf("git %s: %w: %s", redact(strings.Join(args, " ")), err, redact(strings.TrimSpace(string(out))))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// CheckpointPlanHeads reads only a coordinator-authored, matching report pair.
+// Presence with invalid identity fails closed rather than using legacy plan text.
+func CheckpointPlanHeads(st *IssueState) (expected, candidate string, present bool, err error) {
+	var plan, test *contract.Artifact
+	for i := range st.Artifacts {
+		a := &st.Artifacts[i]
+		if a.Type == contract.ArtifactDesign {
+			plan = a
+		}
+		if a.Type == contract.ArtifactTestPlan {
+			test = a
+		}
+		if (a.Type == contract.ArtifactDesign || a.Type == contract.ArtifactTestPlan) && a.Metadata["checkpoint_plan_origin"] != "" {
+			present = true
+		}
+	}
+	if !present {
+		return
+	}
+	if plan == nil || test == nil {
+		err = ErrApprovalRequired
+		return
+	}
+	expected, candidate = plan.Metadata["checkpoint_plan_predecessor"], plan.Metadata["checkpoint_plan_candidate"]
+	required := map[string]string{"checkpoint_plan_origin": "coordinator", "checkpoint_plan_claim": st.Lease.ClaimID, "checkpoint_plan_task": st.TaskDigest, "checkpoint_plan_policy": st.PolicyDigest, "checkpoint_plan_base": st.BaseSHA, "checkpoint_plan_predecessor": expected, "checkpoint_plan_candidate": candidate}
+	if st.PolicyTreeDigest != "" {
+		required["checkpoint_plan_policy_tree"] = st.PolicyTreeDigest
+	}
+	for k, v := range required {
+		if v == "" || plan.Metadata[k] != v || test.Metadata[k] != v {
+			err = ErrApprovalRequired
+			return
+		}
+	}
+	if len(expected) != 40 || len(candidate) != 40 || expected == candidate || (st.HeadSHA != expected && st.HeadSHA != candidate) || plan.Metadata["content_sha256"] != hash(plan.Body) || test.Metadata["content_sha256"] != hash(test.Body) {
+		err = ErrApprovalRequired
+	}
+	return
+}
+
+// CheckPreparedPlan rechecks the exact read-only admission before outputs import.
+func (m *Manager) CheckPreparedPlan(ctx context.Context, n int, p *CheckpointReconciliation) error {
+	if p == nil || !p.prepared || p.ClaimRequired {
+		return ErrClaimFence
+	}
+	fresh, err := m.PrepareCheckpoint(ctx, n, p.owner, p.expected, p.candidate, false)
+	if err != nil {
+		return err
+	}
+	if fresh.revision != p.revision || !sameCheckpointState(fresh.State, p.State) {
+		return ErrClaimFence
+	}
+	return nil
+}
+
+// RecordCheckpointPlan atomically installs both reports under the prepared fence.
+// Ordinary artifact writers cannot manufacture this coordinator-only identity.
+func (m *Manager) RecordCheckpointPlan(ctx context.Context, n int, p *CheckpointReconciliation, plan, test contract.Artifact) (*IssueState, error) {
+	if err := m.CheckPreparedPlan(ctx, n, p); err != nil {
+		return nil, err
+	}
+	if plan.Type != contract.ArtifactDesign || test.Type != contract.ArtifactTestPlan {
+		return nil, fmt.Errorf("expected design and test-plan pair")
+	}
+	return m.mutate(ctx, n, p.owner, func(st *IssueState) error {
+		if !sameCheckpointState(st, p.State) {
+			return ErrClaimFence
+		}
+		if err := m.CheckPlanReplan(st); err != nil {
+			return err
+		}
+		if st.PendingPlanReview != nil {
+			oldPlan, oldTest := "", ""
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactDesign {
+					oldPlan = contract.CanonicalArtifactBody(a.Body)
+				}
+				if a.Type == contract.ArtifactTestPlan {
+					oldTest = contract.CanonicalArtifactBody(a.Body)
+				}
+			}
+			if oldPlan == contract.CanonicalArtifactBody(plan.Body) && oldTest == contract.CanonicalArtifactBody(test.Body) {
+				return fmt.Errorf("checkpoint re-plan is unchanged after CHANGES_REQUESTED")
+			}
+		}
+		pair := []contract.Artifact{plan, test}
+		for i := range pair {
+			a := &pair[i]
+			if strings.TrimSpace(a.Body) == "" {
+				return fmt.Errorf("empty checkpoint plan report")
+			}
+			a.Version = 1
+			a.ID = fmt.Sprintf("art-%d-%s", n, a.Type)
+			a.IssueNumber = n
+			a.CreatedAt = m.nowFn()
+			meta := map[string]string{}
+			for k, v := range a.Metadata {
+				if !strings.HasPrefix(k, "checkpoint_plan_") {
+					meta[k] = v
+				}
+			}
+			for k, v := range map[string]string{"origin": "coordinator", "claim": st.Lease.ClaimID, "task": st.TaskDigest, "policy": st.PolicyDigest, "base": st.BaseSHA, "predecessor": p.expected, "candidate": p.candidate} {
+				meta["checkpoint_plan_"+k] = v
+			}
+			if st.PolicyTreeDigest != "" {
+				meta["checkpoint_plan_policy_tree"] = st.PolicyTreeDigest
+			}
+			a.Metadata = meta
+			RecordRoleAttestation(st, contract.RoleAttestation{Role: "planner", Agent: meta["agent"], Harness: meta["harness"], HarnessVersion: meta["harness_version"], Model: meta["model"], ExecutionMode: meta["execution_mode"], Authentication: meta["authentication"], Sandbox: meta["sandbox"], ArtifactType: string(a.Type), ArtifactDigest: hash(a.Body)})
+			recordRoleRun(st, a)
+			a.Metadata["content_sha256"] = hash(a.Body)
+			if err := contract.ValidateArtifact(a); err != nil {
+				return err
+			}
+		}
+		kept := st.Artifacts[:0]
+		for _, a := range st.Artifacts {
+			if a.Type != contract.ArtifactDesign && a.Type != contract.ArtifactTestPlan && a.Type != contract.ArtifactReview {
+				kept = append(kept, a)
+			}
+		}
+		st.Artifacts = append(kept, pair...)
+		recordPlanReviewTransition(st, pair[1], false)
+		return nil
+	})
+}
+
+func (m *Manager) checkCheckpointPlanObservation(ctx context.Context, st *IssueState) error {
+	expected, candidate, present, err := CheckpointPlanHeads(st)
+	if !present {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if st.HeadSHA == candidate {
+		return nil
+	}
+	if st.Lease.Status != "active" || !st.Lease.ExpiresAt.After(m.nowFn()) {
+		return ErrClaimFence
+	}
+	remote := m.UpstreamRemote()
+	_, local := m.store.(*coordination.FileStore)
+	if local {
+		remote = "."
+	}
+	o := workspace.InspectCheckpoint(ctx, m.repoRoot, remote, st.Lease.IssueNumber, st.Branch, expected)
+	if o.Error != "" || o.Worktree.Error != "" || o.LocalBranch.Error != "" || (!local && (o.RemoteBranch.Error != "" || o.RemoteBranch.SHA != expected)) || o.Dirty || o.Rebasing || o.AttachedBranch != st.Branch || o.Worktree.SHA != candidate || o.LocalBranch.SHA != candidate {
+		return ErrClaimFence
+	}
+	return nil
 }

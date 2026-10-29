@@ -172,6 +172,8 @@ func verifyUntouchedWorktree(root, path, branch, previous, base string) error {
 		}
 		if _, err := os.Lstat(strings.TrimSpace(gitPath)); err == nil {
 			return fmt.Errorf("a Git operation is in progress (%s)", marker)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
 		}
 	}
 	if err := verifyRecoveryIndex(path, previous); err != nil {
@@ -258,4 +260,59 @@ func RecoveryHint(issue int, path, branch string) string {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ValidateUnpublishedCheckpoint inspects an existing registered local task
+// without changing any source, refs, index, or worktree registration. Only the
+// lease manager may use its result to admit a proven unpublished lifecycle.
+func ValidateUnpublishedCheckpoint(root string, issue int, branch, base, head string) (string, error) {
+	if issue <= 0 || base == "" || head == "" || !strings.HasPrefix(branch, fmt.Sprintf("swarm/issue-%d-", issue)) {
+		return "", errors.New("invalid local checkpoint identity")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	path := WorktreePath(abs, issue)
+	pinned, err := safefs.Open(abs)
+	if err != nil {
+		return "", err
+	}
+	defer pinned.Close()
+	candidate, err := pinned.Sub(filepath.Join(".swarm", "worktrees", fmt.Sprintf("issue-%d", issue)), false, 0)
+	if err != nil {
+		return "", err
+	}
+	defer candidate.Close()
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("worktree must be a real directory")
+	}
+	registered, err := gitOutput(abs, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", err
+	}
+	found := false
+	for _, entry := range strings.Split(registered, "\n\n") {
+		if strings.HasPrefix(entry, "worktree "+path+"\n") && strings.Contains(entry, "\nbranch refs/heads/"+branch) {
+			found = true
+		}
+	}
+	if !found {
+		return "", errors.New("checkpoint worktree is not registered")
+	}
+	tip, err := resolveCommit(abs, "refs/heads/"+branch)
+	if err != nil || tip != head {
+		return "", errors.New("local branch differs from checkpoint")
+	}
+	if _, err := gitOutput(abs, "merge-base", "--is-ancestor", base, head); err != nil {
+		return "", errors.New("checkpoint does not descend from approved base")
+	}
+	if err := verifyUntouchedWorktree(abs, path, branch, head, head); err != nil {
+		return "", err
+	}
+	return path, nil
 }

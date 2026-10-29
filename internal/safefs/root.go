@@ -208,6 +208,15 @@ func (r *Root) OpenLock(name string) (*os.File, error) {
 }
 
 func (r *Root) WriteFile(name string, data []byte, mode os.FileMode) error {
+	return r.writeFile(name, data, mode, false)
+}
+
+// WriteFileDurable also syncs the pinned parent directory after replacement.
+func (r *Root) WriteFileDurable(name string, data []byte, mode os.FileMode) error {
+	return r.writeFile(name, data, mode, true)
+}
+
+func (r *Root) writeFile(name string, data []byte, mode os.FileMode, durable bool) error {
 	name, err := local(name)
 	if err != nil {
 		return err
@@ -248,7 +257,18 @@ func (r *Root) WriteFile(name string, data []byte, mode os.FileMode) error {
 	}
 	// Rename replaces the directory entry; it never writes through a substituted
 	// destination symlink or hard link. Both names use the same pinned directory.
-	return d.Rename(tmp, base)
+	if err := d.Rename(tmp, base); err != nil {
+		return err
+	}
+	if durable {
+		parent, err := d.Open(".")
+		if err != nil {
+			return err
+		}
+		defer parent.Close()
+		return parent.Sync()
+	}
+	return nil
 }
 
 func (r *Root) Remove(name string) error {

@@ -181,6 +181,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				policyWarning, _ = workspace.ObserveHarnessPolicy(ctx, root, state.BaseSHA, state.PolicyTreeDigest, freshness.TargetSHA)
 				fmt.Fprint(advisoryOut, prepareHarnessPolicyWarning(policyWarning, issue, state.PRNumber, rootOpts))
 			}
+			if err := manager.BeginPublicationAttempt(ctx, issue, owner); err != nil {
+				return err
+			}
 			p.Next("checkpoint push/record")
 			// GitHub publishes this head and the fenced state in one atomic Git push.
 			if rootOpts.Fork {
@@ -224,6 +227,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
+			if err := manager.BeginPublicationAttempt(ctx, issue, owner); err != nil {
+				return err
+			}
 			if pr == nil {
 				pr, err = tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue, Title: prTitle, Body: prBody, Head: prHead, Base: baseBranch})
 			} else {
@@ -239,6 +245,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				fmt.Fprint(advisoryOut, note)
 				prBody, err = lease.ComposePRDescription(prBody, "issue-description", prSection+lease.DescriptionText(note), stateRef, issue)
 				if err != nil {
+					return err
+				}
+				if err := manager.BeginPublicationAttempt(ctx, issue, owner); err != nil {
 					return err
 				}
 				updated, updateErr := tr.UpdateDraftPR(ctx, pr.Number, prTitle, prBody)

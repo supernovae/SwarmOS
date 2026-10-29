@@ -1,9 +1,16 @@
 package workflow
 
 import (
+	"archive/tar"
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/testutil"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"github.com/supernovae/swarmos/internal/workspace"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -378,5 +385,194 @@ func TestCompletedTesterScratchRejectionReason(t *testing.T) {
 		if !strings.Contains(reason, rerun) {
 			t.Fatal(reason)
 		}
+	}
+}
+
+// archiveRejectingRunner exercises real worker export/rejection/patch generation.
+// The runtime is a protocol fixture; it launches no container or model.
+func archiveRejectingRunner(t *testing.T, source string) func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+	t.Helper()
+	mock := &agent.MockRunner{}
+	return func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			if req.Role != "developer" {
+				return mock.Run(ctx, req)
+			}
+			dir := t.TempDir()
+			out, err := os.Create(filepath.Join(dir, "result.tar"))
+			if err != nil {
+				return nil, err
+			}
+			tw := tar.NewWriter(out)
+			err = filepath.WalkDir(req.WorktreePath, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				rel, err := filepath.Rel(req.WorktreePath, path)
+				if err != nil {
+					return err
+				}
+				rel = filepath.ToSlash(rel)
+				if rel == "." {
+					return nil
+				}
+				if d.Name() == ".git" || rel == ".swarm/coordination" || rel == ".swarm/local-tracker" || rel == ".swarm/worktrees" || rel == ".swarm/active-output" || (d.IsDir() && sandbox.IsEphemeralBuildDir(d.Name())) {
+					if d.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if d.IsDir() {
+					return nil
+				}
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				if rel == "src/main.go" || rel == ".swarm/active/VALIDATION.md" {
+					return nil
+				}
+				if err = tw.WriteHeader(&tar.Header{Name: rel, Mode: int64(info.Mode().Perm()), Size: int64(len(data))}); err != nil {
+					return err
+				}
+				_, err = tw.Write(data)
+				return err
+			})
+			for name, data := range map[string]string{"src/main.go": source, ".swarm/active/VALIDATION.md": "results\n"} {
+				if err != nil {
+					break
+				}
+				err = tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(data))})
+				if err == nil {
+					_, err = tw.Write([]byte(data))
+				}
+			}
+			closeErr := tw.Close()
+			fileErr := out.Close()
+			if err != nil {
+				return nil, err
+			}
+			if closeErr != nil {
+				return nil, closeErr
+			}
+			if fileErr != nil {
+				return nil, fileErr
+			}
+			host := map[string]any{"Privileged": false, "NetworkMode": "none", "PidMode": "private", "IpcMode": "private", "CgroupnsMode": "private", "ReadonlyRootfs": true, "CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges"}, "Memory": int64(2 << 30), "MemorySwap": int64(2 << 30), "NanoCpus": int64(2000000000), "PidsLimit": 128, "Tmpfs": map[string]string{"/workspace": "rw,nosuid,nodev,size=512m,mode=0755,uid=65534,gid=65534", "/output": "rw,nosuid,nodev,size=64m,mode=0700,uid=65534,gid=65534", "/home/worker": "rw,nosuid,nodev,size=64m,mode=0700,uid=65534,gid=65534", "/tmp": "rw,nosuid,nodev,size=64m,mode=1777,uid=0,gid=0"}}
+			data, _ := json.Marshal([]any{map[string]any{"HostConfig": host, "Mounts": []any{}}})
+			if err = os.WriteFile(filepath.Join(dir, "container.json"), data, 0600); err != nil {
+				return nil, err
+			}
+			quote := "'" + strings.ReplaceAll(dir, "'", "'\"'\"'") + "'"
+			script := "#!/bin/sh\nroot=" + quote + "\ncase \"$1\" in\nimage) printf '%s' '[{\"Os\":\"linux\",\"Config\":{\"Volumes\":null}}]' ;;\ninspect) cat \"$root/container.json\" ;;\ncreate) printf '%s' '" + strings.Repeat("a", 64) + "' ;;\ncp) if [ \"$2\" = --archive ]; then cat >/dev/null; else cat \"$root/result.tar\"; fi ;;\n*) : ;;\nesac\n"
+			exe := filepath.Join(dir, "docker")
+			if err = testutil.WriteExecutable(exe, []byte(script), 0700); err != nil {
+				return nil, err
+			}
+			err = sandbox.RunWorker(ctx, req.WorktreePath, "fixture", nil, sandbox.WorkerOptions{Role: req.Role, Runtime: exe, Image: "fixture@sha256:" + strings.Repeat("b", 64), CheckImport: req.CheckImport, PreserveRejected: req.PreserveRejected}, nil, io.Discard, io.Discard)
+			return nil, err
+		}}, nil
+	}
+}
+
+func TestRejectedUnsupportedAssetsSaveLoadRecovery(t *testing.T) {
+	credentials := []bool{false}
+	if os.Getenv("SWARM_IDENTITY_CREDENTIAL_TEST") == "1" {
+		credentials = []bool{true}
+	} else {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(exe, "-test.run=^TestRejectedUnsupportedAssetsSaveLoadRecovery$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "SWARM_IDENTITY_CREDENTIAL_TEST=1", "SWARM_GITHUB_TOKEN=ghp_test_recovery_identity_secret", "SWARM_GITHUB_TOKEN_COMMAND=")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("credential subprocess: %s %v", out, err)
+		}
+	}
+	for _, credential := range credentials {
+		t.Run(strconv.FormatBool(credential), func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			state := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", state)
+			assets := map[string]string{"unchanged.bin": "a\x00b", "unchanged.large": strings.Repeat("z", (4<<20)+1)}
+			for name, data := range assets {
+				if err := os.WriteFile(filepath.Join(e.repoRoot, name), []byte(data), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, args := range [][]string{{"add", "unchanged.bin", "unchanged.large"}, {"commit", "-m", "assets"}} {
+				if out, err := gitfixture.Command(t, "", append([]string{"-C", e.repoRoot}, args...)...).CombinedOutput(); err != nil {
+					t.Fatalf("%s: %v", out, err)
+				}
+			}
+			if _, err := e.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			source := "package main\n"
+			if credential {
+				t.Setenv("SWARM_GITHUB_TOKEN", "ghp_test_recovery_identity_secret")
+				source += "// ghp_test_recovery_identity_secret\n"
+			}
+			e.NewRunner = archiveRejectingRunner(t, source)
+			res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			var rejection *importRejection
+			if !errors.As(err, &rejection) {
+				t.Fatalf("expected rejection: %v", err)
+			}
+			patches := recoveryDirEntries(t, state)
+			if credential {
+				if len(patches) != 0 {
+					t.Fatal("saved credential patch")
+				}
+				return
+			}
+			if len(patches) != 1 {
+				t.Fatalf("saved %d patches: %v", len(patches), err)
+			}
+			header, body, err := agent.LoadRecoveryPatch(patches[0].Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if header.Issue != issue.Number || header.Role != "developer" || len(header.HeadSHA) != 40 || !strings.Contains(string(body), "+package main") || !strings.Contains(string(body), "+results") || strings.Contains(string(body), "unchanged.") {
+				t.Fatalf("unexpected recovery: %+v %s", header, body)
+			}
+			info, err := os.Stat(filepath.Join(state, "swarm/recovery", patches[0].Name()))
+			if err != nil || info.Mode().Perm() != 0600 {
+				t.Fatalf("private storage: %v", err)
+			}
+			for _, name := range []string{"src/main.go", ".swarm/active/VALIDATION.md"} {
+				if _, err := os.Stat(filepath.Join(res.WorktreePath, name)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("imported %s: %v", name, err)
+				}
+			}
+			filtered, _, err := workspace.FilterRecoveryPatch(body, header.Rejected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := workspace.ApplyRecoveryPatch(t.Context(), res.WorktreePath, strings.Repeat("0", 40), filtered); err == nil {
+				t.Fatal("accepted wrong head")
+			}
+			if err := workspace.ApplyRecoveryPatch(t.Context(), res.WorktreePath, header.HeadSHA, filtered); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(res.WorktreePath, "src/main.go"))
+			if err != nil || string(data) != source {
+				t.Fatalf("explicit recovery: %q %v", data, err)
+			}
+			if _, err := os.Stat(filepath.Join(res.WorktreePath, ".swarm/active/VALIDATION.md")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("recovered forbidden output")
+			}
+			for name, want := range assets {
+				data, err := os.ReadFile(filepath.Join(res.WorktreePath, name))
+				if err != nil || string(data) != want {
+					t.Fatalf("changed asset %s", name)
+				}
+			}
+		})
 	}
 }

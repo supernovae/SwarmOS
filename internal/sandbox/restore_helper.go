@@ -156,14 +156,17 @@ func restoreHelperFilesystemCanary() error {
 }
 
 type restoreBridge struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	listener net.Listener
-	mu       sync.Mutex
-	active   map[net.Conn]bool
-	wg       sync.WaitGroup
-	accepted atomic.Int64
-	dial     func(context.Context) (net.Conn, error)
+	ctx          context.Context
+	cancel       context.CancelFunc
+	listener     net.Listener
+	mu           sync.Mutex
+	active       map[net.Conn]bool
+	terminal     bool
+	shutdownOnce sync.Once
+	closeErr     error
+	wg           sync.WaitGroup
+	accepted     atomic.Int64
+	dial         func(context.Context) (net.Conn, error)
 }
 
 func newRestoreBridge(ctx context.Context) (*restoreBridge, error) {
@@ -179,24 +182,32 @@ func newRestoreBridge(ctx context.Context) (*restoreBridge, error) {
 func startRestoreBridge(ctx context.Context, l net.Listener, dial func(context.Context) (net.Conn, error)) *restoreBridge {
 	ctx, cancel := context.WithCancel(ctx)
 	b := &restoreBridge{ctx: ctx, cancel: cancel, listener: l, active: map[net.Conn]bool{}, dial: dial}
-	b.wg.Add(1)
+	b.wg.Add(2)
+	go func() { defer b.wg.Done(); <-b.ctx.Done(); b.shutdown() }()
 	go func() {
 		defer b.wg.Done()
 		for {
 			c, err := l.Accept()
 			if err != nil {
-				return
-			}
-			if b.accepted.Add(1) > 16 {
-				b.accepted.Add(-1)
-				_ = c.Close()
-				b.cancel()
+				b.shutdown()
 				return
 			}
 			b.mu.Lock()
+			if b.terminal || b.ctx.Err() != nil {
+				b.mu.Unlock()
+				b.closeConn(c)
+				return
+			}
+			if b.accepted.Load() >= 16 {
+				b.mu.Unlock()
+				b.closeConn(c)
+				b.shutdown()
+				return
+			}
+			b.accepted.Add(1)
 			b.active[c] = true
-			b.mu.Unlock()
 			b.wg.Add(1)
+			b.mu.Unlock()
 			go b.forward(c)
 		}
 	}()
@@ -205,15 +216,19 @@ func startRestoreBridge(ctx context.Context, l net.Listener, dial func(context.C
 func (b *restoreBridge) forward(client net.Conn) {
 	defer b.wg.Done()
 	defer b.accepted.Add(-1)
-	defer client.Close()
+	defer b.closeConn(client)
 	defer func() { b.mu.Lock(); delete(b.active, client); b.mu.Unlock() }()
 	upstream, err := b.dial(b.ctx)
 	if err != nil {
-		b.cancel()
+		b.shutdown()
 		return
 	}
-	defer upstream.Close()
+	defer b.closeConn(upstream)
 	b.mu.Lock()
+	if b.terminal || b.ctx.Err() != nil {
+		b.mu.Unlock()
+		return
+	}
 	b.active[upstream] = true
 	b.mu.Unlock()
 	defer func() { b.mu.Lock(); delete(b.active, upstream); b.mu.Unlock() }()
@@ -226,14 +241,35 @@ func (b *restoreBridge) forward(client net.Conn) {
 	_ = upstream.Close()
 	<-done
 }
-func (b *restoreBridge) close() error {
-	b.cancel()
-	err := restoreCloseError(b.listener.Close())
+func (b *restoreBridge) shutdown() {
+	b.shutdownOnce.Do(func() {
+		b.mu.Lock()
+		b.terminal = true
+		sockets := make([]net.Conn, 0, len(b.active))
+		for c := range b.active {
+			sockets = append(sockets, c)
+		}
+		b.mu.Unlock()
+		b.cancel()
+		err := restoreCloseError(b.listener.Close())
+		for _, c := range sockets {
+			err = errors.Join(err, restoreCloseError(c.Close()))
+		}
+		b.mu.Lock()
+		b.closeErr = errors.Join(b.closeErr, err)
+		b.mu.Unlock()
+	})
+}
+func (b *restoreBridge) closeConn(c net.Conn) {
+	err := restoreCloseError(c.Close())
 	b.mu.Lock()
-	for c := range b.active {
-		err = errors.Join(err, restoreCloseError(c.Close()))
-	}
+	b.closeErr = errors.Join(b.closeErr, err)
 	b.mu.Unlock()
+}
+func (b *restoreBridge) close() error {
+	b.shutdown()
 	b.wg.Wait()
-	return err
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.closeErr
 }

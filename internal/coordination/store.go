@@ -151,6 +151,54 @@ func (s *FileStore) CompareAndSwap(ctx context.Context, n int, old string, next 
 	return digest(next), nil
 }
 
+// WithLockedState provides one non-recursive issue-lock scope. write performs
+// a durable replacement without reacquiring the issue lock.
+func (s *FileStore) WithLockedState(ctx context.Context, n int, fn func([]byte, string, func([]byte) error) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	base, err := safefs.Open(s.repoRoot)
+	if err != nil {
+		return err
+	}
+	defer base.Close()
+	dir, err := base.Sub(filepath.Join(".swarm", "coordination"), true, 0700)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	name := fmt.Sprintf("issue-%d.json", n)
+	lock, err := dir.OpenLock(name + ".lock")
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := filelock.LockExclusive(lock); err != nil {
+		return err
+	}
+	defer filelock.Unlock(lock)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b, err := dir.ReadFile(name, 64<<20)
+	rev := ""
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil {
+		rev = digest(b)
+	}
+	return fn(b, rev, func(next []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return dir.WriteFileDurable(name, next, 0600)
+	})
+}
+
+// Root identifies this concrete local authority for receipt scope binding.
+func (s *FileStore) Root() string { return s.repoRoot }
+
 type GitStore struct {
 	root, remote string
 	layout       RefLayout

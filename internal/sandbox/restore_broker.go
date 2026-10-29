@@ -110,23 +110,26 @@ func resolveRegistryAddresses(ctx context.Context, host string, resolve func(con
 }
 
 type registryBroker struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	listener  net.Listener
-	policy    registryPolicy
-	trust     *restoreTrust
-	resolve   func(context.Context, string) ([]netip.Addr, error)
-	dial      func(context.Context, string, string) (net.Conn, error)
-	roots     *x509.CertPool // nil is system roots; tests supply independent fixture roots.
-	mu        sync.Mutex
-	active    map[net.Conn]bool
-	err       error
-	wg        sync.WaitGroup
-	requests  atomic.Int64
-	bytes     atomic.Int64
-	accepted  atomic.Int64
-	sessions  chan struct{}
-	preflight atomic.Bool
+	ctx          context.Context
+	cancel       context.CancelFunc
+	listener     net.Listener
+	policy       registryPolicy
+	trust        *restoreTrust
+	resolve      func(context.Context, string) ([]netip.Addr, error)
+	dial         func(context.Context, string, string) (net.Conn, error)
+	roots        *x509.CertPool // nil is system roots; tests supply independent fixture roots.
+	mu           sync.Mutex
+	active       map[net.Conn]bool
+	terminal     bool
+	shutdownOnce sync.Once
+	closeErr     error
+	err          error
+	wg           sync.WaitGroup
+	requests     atomic.Int64
+	bytes        atomic.Int64
+	accepted     atomic.Int64
+	sessions     chan struct{}
+	preflight    atomic.Bool
 }
 
 func newRegistryBroker(ctx context.Context, l net.Listener, p registryPolicy, t *restoreTrust) *registryBroker {
@@ -138,22 +141,45 @@ func newRegistryBroker(ctx context.Context, l net.Listener, p registryPolicy, t 
 	b.dial = (&net.Dialer{Timeout: 5 * time.Second}).DialContext
 	return b
 }
+
+// shutdown commits terminal admission before taking ownership of the socket snapshot.
+// It never waits for workers: a worker may itself discover a policy failure.
+func (b *registryBroker) shutdown() {
+	b.shutdownOnce.Do(func() {
+		b.mu.Lock()
+		b.terminal = true
+		sockets := make([]net.Conn, 0, len(b.active))
+		for c := range b.active {
+			sockets = append(sockets, c)
+		}
+		b.mu.Unlock()
+		b.cancel()
+		closeErr := restoreCloseError(b.listener.Close())
+		for _, c := range sockets {
+			closeErr = errors.Join(closeErr, restoreCloseError(c.Close()))
+		}
+		b.mu.Lock()
+		b.closeErr = errors.Join(b.closeErr, closeErr)
+		b.mu.Unlock()
+	})
+}
+func (b *registryBroker) closeConn(c net.Conn) {
+	err := restoreCloseError(c.Close())
+	b.mu.Lock()
+	b.closeErr = errors.Join(b.closeErr, err)
+	b.mu.Unlock()
+}
 func (b *registryBroker) fail() {
 	b.mu.Lock()
 	if b.err == nil {
 		b.err = errors.New("restore broker rejected transport")
 	}
 	b.mu.Unlock()
-	b.cancel()
-	_ = b.listener.Close()
-	b.mu.Lock()
-	for c := range b.active {
-		_ = c.Close()
-	}
-	b.mu.Unlock()
+	b.shutdown()
 }
 func (b *registryBroker) serve() {
-	b.wg.Add(1)
+	b.wg.Add(2)
+	go func() { defer b.wg.Done(); <-b.ctx.Done(); b.shutdown() }()
 	go func() {
 		defer b.wg.Done()
 		for {
@@ -164,19 +190,25 @@ func (b *registryBroker) serve() {
 				}
 				return
 			}
-			if b.accepted.Add(1) > 16 {
-				b.accepted.Add(-1)
-				_ = c.Close()
+			b.mu.Lock()
+			if b.terminal || b.ctx.Err() != nil {
+				b.mu.Unlock()
+				b.closeConn(c)
+				return
+			}
+			if b.accepted.Load() >= 16 {
+				b.mu.Unlock()
+				b.closeConn(c)
 				b.fail()
 				return
 			}
-			b.mu.Lock()
+			b.accepted.Add(1)
 			b.active[c] = true
-			b.mu.Unlock()
 			b.wg.Add(1)
+			b.mu.Unlock()
 			go func() {
 				defer b.wg.Done()
-				defer func() { b.accepted.Add(-1); _ = c.Close(); b.mu.Lock(); delete(b.active, c); b.mu.Unlock() }()
+				defer func() { b.closeConn(c); b.mu.Lock(); delete(b.active, c); b.accepted.Add(-1); b.mu.Unlock() }()
 				if err := b.serveRestoreConnect(c); err != nil && b.ctx.Err() == nil {
 					b.fail()
 				}
@@ -185,17 +217,11 @@ func (b *registryBroker) serve() {
 	}()
 }
 func (b *registryBroker) close() error {
-	b.cancel()
-	closeErr := restoreCloseError(b.listener.Close())
-	b.mu.Lock()
-	for c := range b.active {
-		closeErr = errors.Join(closeErr, restoreCloseError(c.Close()))
-	}
-	b.mu.Unlock()
+	b.shutdown()
 	b.wg.Wait()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return errors.Join(b.err, closeErr)
+	return errors.Join(b.err, b.closeErr)
 }
 
 // Read one header without reading past its boundary (TLS bytes may follow CONNECT).

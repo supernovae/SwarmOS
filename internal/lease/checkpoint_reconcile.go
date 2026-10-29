@@ -142,6 +142,11 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if err != nil {
 		return nil, err
 	}
+	if !dryRun {
+		if err := m.denyResume(n); err != nil {
+			return nil, err
+		}
+	}
 	// Fetch only immutable object retention, never reset or fetch into task refs.
 	if _, err = checkpointGit(ctx, m.repoRoot, "cat-file", "-e", expected+"^{commit}"); err != nil {
 		if dryRun || localStore {
@@ -287,7 +292,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	implementation.Metadata["head_sha"] = candidate
 	implementation.Metadata["content_sha256"] = hash(implementation.Body)
 	st.Artifacts = append(st.Artifacts, implementation)
-	raw, err := json.Marshal(st)
+	raw, err := marshalCoordinatorState(st)
 	if err != nil {
 		return nil, err
 	}

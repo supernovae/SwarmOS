@@ -43,6 +43,9 @@ jobs:
     name: Test and CLI smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      GOMAXPROCS: '4'
+      GOFLAGS: '-p=2'
     strategy:
       fail-fast: false
       matrix:
@@ -68,8 +71,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap
       - name: Regression tests
-        # internal/cli runs serially (its fixtures use t.Setenv) and takes up to
-        # ~10m on macOS runners, so the default per-package limit is too tight.
+        # Match the explicit package budget in required-checks.yaml. Bounded
+        # parallelism overlaps fixture Git I/O without unbounded Go builds.
         run: go test -race -timeout 15m ./...
       - name: Build CLI
         run: go build -o swarm-ci.exe ./cmd/swarm
@@ -107,6 +110,9 @@ jobs:
     name: SwarmOS policy validation
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      GOMAXPROCS: '4'
+      GOFLAGS: '-p=2'
     permissions:
       contents: read
       issues: read

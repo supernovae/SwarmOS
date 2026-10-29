@@ -1009,10 +1009,12 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 - **Test Plan Artifact Path**: `+"`.swarm/active/TEST_PLAN.md`"+`
 - **Review Artifact Path**: `+"`.swarm/active/REVIEW.md`"+`
 - **Slash Commands**: `+"`/swarm-plan`"+`, `+"`/swarm-review`"+`, `+"`/swarm-implement`"+`, `+"`/swarm-validate`"+`, `+"`/swarm-project-plan`"+`
-- **Interactive Staging CLI**: `+"`swarm issue stage %d --phase plan`"+` -> `+"`swarm issue review-plan %d`"+` -> `+"`swarm issue stage %d --phase implement`"+` -> `+"`swarm issue submit %d`"+`
+- **Interactive Staging CLI**: /swarm-plan -> `+"`swarm issue stage %d --phase plan`"+` -> `+"`swarm issue review-plan %d`"+` -> /swarm-implement -> `+"`swarm issue validate %[5]d`"+` -> `+"`swarm issue stage %[7]d --phase implement`"+` -> `+"`swarm issue renew %[5]d`"+` -> `+"`swarm issue submit %[8]d`"+`
+
+Use review-plan only for the configured gate; a human gate requires an independent maintainer with --approve. Renew explicitly within the approved claim budget.
 
 Always read `+"`.swarm/active/WORKUNIT.md`"+` and `+"`.swarm/active/SYSTEM_PROMPT.md`"+` before making changes.
-%s`, ActiveMarkerStart, wu.ID, wu.IssueNumber, role, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, ActiveMarkerEnd)
+%[9]s`, ActiveMarkerStart, wu.ID, wu.IssueNumber, role, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, wu.IssueNumber, ActiveMarkerEnd)
 
 	if err := injectActivePointer(worktreePath, pointerBlock); err != nil {
 		return err

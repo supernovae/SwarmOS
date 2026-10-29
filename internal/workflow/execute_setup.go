@@ -185,9 +185,7 @@ func (r *workRun) provisionWorkspace() error {
 		}
 	} else {
 		err = r.opts.SetupProgress.ReportSetupPhase(r.ctx, r.opts.IssueNumber, "workspace", func() error {
-			pc := r.st.ProvisionContext(r.forkMode)
-			pc.UpstreamRemote = r.e.upstreamRemote()
-			r.wtPath, r.branch, err = workspace.ProvisionWithContext(r.opts.RepoRoot, checkpointRemote, r.opts.IssueNumber, r.pre.Issue.Title, r.st.BaseSHA, targetBranch, r.st.HeadSHA, pc)
+			r.wtPath, r.branch, err = r.e.LeaseManager.ProvisionIssueWorkspace(r.ctx, r.st, r.opts.Owner, r.pre.Issue.Title, checkpointRemote, targetBranch, r.forkMode)
 			return err
 		})
 		if err != nil {

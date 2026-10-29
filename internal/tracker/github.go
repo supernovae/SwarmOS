@@ -151,6 +151,40 @@ func (g *GitHubTracker) VerifyForkRepository(ctx context.Context, forkSlug, expe
 	return canonical, nil
 }
 
+// VerifyPlanReviewFork admits only explicitly public personal forks for the
+// upstream review-only path. It deliberately does not change worker fork policy.
+func (g *GitHubTracker) VerifyPlanReviewFork(ctx context.Context, slug, expectedOwner string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	parts := strings.Split(slug, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || expectedOwner == "" {
+		return "", fmt.Errorf("plan review requires a canonical personal fork repository and owner")
+	}
+	var repo struct {
+		FullName string `json:"full_name"`
+		Fork     *bool  `json:"fork"`
+		Private  *bool  `json:"private"`
+		Owner    struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"owner"`
+		Source struct {
+			FullName string `json:"full_name"`
+		} `json:"source"`
+	}
+	path := "repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1])
+	if err := g.client.DoWithContext(ctx, "GET", path, nil, &repo); err != nil {
+		return "", fmt.Errorf("verify plan review fork: %w", err)
+	}
+	if repo.Fork == nil || !*repo.Fork || repo.Private == nil || *repo.Private || repo.Owner.Type != "User" ||
+		!strings.EqualFold(repo.FullName, slug) || !strings.EqualFold(repo.FullName, repo.Owner.Login+"/"+parts[1]) ||
+		!strings.EqualFold(repo.Owner.Login, expectedOwner) || !strings.EqualFold(repo.Source.FullName, g.UpstreamRepo()) {
+		return "", fmt.Errorf("plan review requires an explicitly public personal fork of %s with canonical owner/source metadata", g.UpstreamRepo())
+	}
+	return repo.FullName, nil
+}
+
 func (g *GitHubTracker) BackendName() string {
 	return fmt.Sprintf("github (%s/%s)", g.owner, g.repo)
 }
@@ -169,7 +203,7 @@ func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if permission != "approve-task" && permission != "review-human" && permission != "create-epic" && permission != "edit-task" {
+	if permission != "approve-task" && permission != "review-human" && permission != "review-agent" && permission != "create-epic" && permission != "edit-task" {
 		return fmt.Errorf("unknown permission %q", permission)
 	}
 	var me struct {
@@ -178,6 +212,9 @@ func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error 
 	}
 	if err := g.client.DoWithContext(ctx, "GET", "user", nil, &me); err != nil {
 		return fmt.Errorf("github authorization identity: %w", err)
+	}
+	if (permission == "review-human" || permission == "review-agent") && strings.TrimSpace(me.Login) == "" {
+		return fmt.Errorf("github authorization requires a nonempty authenticated identity")
 	}
 	if permission == "review-human" && strings.EqualFold(me.Type, "bot") {
 		return fmt.Errorf("bot account %q cannot provide human review", me.Login)

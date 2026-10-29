@@ -221,3 +221,48 @@ func TestNotifyPlanReviewersIsQuietWithoutNamedReviewers(t *testing.T) {
 		}
 	}
 }
+
+func TestUpstreamPlanReviewIndependentReviewerPolicy(t *testing.T) {
+	for _, name := range []string{"independent", "planner as reviewer", "disallowed agent", "disallowed collaborator"} {
+		t.Run(name, func(t *testing.T) {
+			security := "  independent_review: true\n  reviewer_agents: [codex]\n"
+			if name == "disallowed collaborator" {
+				security += "  reviewer_collaborators: [other-maintainer]\n"
+			}
+			worker, lt, issue, root := reviewerPolicyManager(t, security)
+			ctx := context.Background()
+			st, rev, _ := worker.load(ctx, issue.Number)
+			st.ForkRepo = "octo/personal"
+			st.HeadSHA, st.Branch = "", ""
+			st.CheckpointHeads = nil
+			if _, err := worker.save(ctx, issue.Number, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			upstream := NewManager(&upstreamReviewTracker{Tracker: lt, actor: "maintainer"}, worker.security)
+			upstream.SetStore(root, worker.store)
+			o, err := upstream.PrepareUpstreamPlanReview(ctx, issue.Number)
+			if name == "disallowed collaborator" {
+				if err == nil {
+					t.Fatal("unauthorized collaborator prepared review")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			att := reviewFixtureAttestation()
+			att.Agent = "codex"
+			if name == "planner as reviewer" {
+				att.Harness, att.Model = "claude", "default"
+			}
+			if name == "disallowed agent" {
+				att.Agent = "unlisted"
+			}
+			checkErr := upstream.CheckUpstreamReviewer(o, att)
+			_, err = upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: APPROVED", "APPROVED", att)
+			if (err == nil) != (name == "independent") || (checkErr == nil) != (name == "independent") {
+				t.Fatalf("policy check=%v record=%v", checkErr, err)
+			}
+		})
+	}
+}

@@ -1375,3 +1375,123 @@ func (e *Engine) configuredRunner(ctx context.Context, name string, cfg *contrac
 	}
 	return agent.NewConfiguredRunnerWithOptions(name, cfg, local, e.runnerOptions(ctx))
 }
+
+// RunUpstreamPlanReview runs outside the worker lifecycle. The manager owns
+// authentication and the single fenced write; this method owns execution.
+func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPlanReviewObservation, reviewer string, headless bool, reporter *ProgressReporter) (string, *lease.IssueState, error) {
+	if o == nil {
+		return "", nil, lease.ErrClaimFence
+	}
+	st, source := o.State(), o.Source()
+	cfg, err := harness.LoadConfigAt(e.repoRoot, st.BaseSHA)
+	if err != nil {
+		return "", nil, err
+	}
+	issue, err := e.Tracker.GetIssue(ctx, st.Lease.IssueNumber)
+	if err != nil {
+		return "", nil, err
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		return "", nil, err
+	}
+	wf, err := harness.LoadWorkflowAt(e.repoRoot, wu.Workflow, st.BaseSHA)
+	if err != nil {
+		return "", nil, err
+	}
+	reviewer = ResolveRoleAgent(cfg, "reviewer", WorkOptions{ReviewerAgent: reviewer})
+	runner, err := e.configuredRunner(ctx, reviewer, cfg, false)
+	if err != nil {
+		return "", nil, err
+	}
+	if _, available := runner.Available(); !available {
+		return "", nil, fmt.Errorf("reviewer %q isolation boundary is unavailable", reviewer)
+	}
+	provenance := runner.Provenance("reviewer", true)
+	if provenance.Sandbox != "codex-native" && provenance.Sandbox != "harness-tools-bwrap" {
+		return "", nil, fmt.Errorf("upstream review requires native Codex or harness-tools Bubblewrap")
+	}
+	if err := e.LeaseManager.CheckUpstreamReviewer(o, provenance); err != nil {
+		return "", nil, err
+	}
+	temporary, err := os.MkdirTemp("", "swarm-upstream-review-*")
+	if err != nil {
+		return "", nil, err
+	}
+	defer os.RemoveAll(temporary)
+	path := filepath.Join(temporary, "source")
+	// Clone only the coordinator repository's object store, never a contributor
+	// checkout. Git's hardened environment disables hooks and executable filters.
+	if _, err := gitcredential.Output(ctx, e.repoRoot, "clone", "--no-checkout", "--no-hardlinks", "--", e.repoRoot, path); err != nil {
+		return "", nil, fmt.Errorf("materialize review source: %w", err)
+	}
+	if _, err := gitcredential.Output(ctx, path, "cat-file", "-e", source.Commit+"^{commit}"); err != nil {
+		if source.Kind == "FreshInitialApprovedBase" {
+			return "", nil, fmt.Errorf("approved review base unavailable: %w", err)
+		}
+		if _, err := gitcredential.Output(ctx, path, "fetch", "--no-tags", "https://github.com/"+source.Repository+".git", source.Commit); err != nil {
+			return "", nil, fmt.Errorf("exact published review candidate unavailable: %w", err)
+		}
+	}
+	if _, err := gitcredential.Output(ctx, path, "checkout", "--detach", source.Commit); err != nil {
+		return "", nil, err
+	}
+	ancestor, err := workspace.BaseIsAncestor(ctx, path, st.BaseSHA, source.Commit)
+	if err != nil || !ancestor {
+		return "", nil, fmt.Errorf("review candidate must descend from the approved base")
+	}
+	if err := ensurePlanArtifactsInWorktree(path, st); err != nil {
+		return "", nil, err
+	}
+	if err := compileSetupBundle(ctx, reporter, path, wu, wf, st, "reviewer", st.PRNumber); err != nil {
+		return "", nil, err
+	}
+	for _, a := range st.Artifacts {
+		name := ""
+		if a.Type == contract.ArtifactDesign {
+			name = "PLAN.md"
+		}
+		if a.Type == contract.ArtifactTestPlan {
+			name = "TEST_PLAN.md"
+		}
+		if name != "" {
+			if err := safefs.WriteFile(path, filepath.Join(".swarm", "active", name), []byte(a.Body), 0644); err != nil {
+				return "", nil, err
+			}
+		}
+	}
+	deps, err := e.AgentDependencies(ctx, cfg, path, st.BaseSHA)
+	if err != nil {
+		return "", nil, err
+	}
+	mode := "interactive"
+	if headless {
+		mode = "headless"
+	}
+	run, err := agent.RunReview(ctx, runner, agent.RunRequest{Agent: reviewer, Role: "reviewer", Mode: mode, WorktreePath: path, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", Dependencies: deps, TaskPrompt: revisionTaskPrompt("Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.", st, st.PRNumber)})
+	if err != nil {
+		return "", nil, err
+	}
+	if run == nil || run.ExitCode != 0 {
+		return "", nil, fmt.Errorf("reviewer returned no successful execution evidence")
+	}
+	body, err := readRequiredArtifact(path, "REVIEW.md")
+	if err != nil {
+		return "", nil, err
+	}
+	verdict, err := ParseReviewVerdict(body)
+	if err != nil {
+		return "", nil, err
+	}
+	if run.Attestation.Agent != reviewer || run.Attestation.Harness != provenance.Harness || run.Attestation.Model != provenance.Model || run.Attestation.Sandbox != provenance.Sandbox {
+		return "", nil, fmt.Errorf("reviewer execution provenance contradicts configured runner")
+	}
+	updated, err := e.LeaseManager.RecordUpstreamPlanReview(ctx, o, body, verdict, run.Attestation)
+	if err != nil {
+		return verdict, nil, err
+	}
+	if verdict != "APPROVED" {
+		return verdict, updated, ErrPlanReviewRejected
+	}
+	return verdict, updated, nil
+}

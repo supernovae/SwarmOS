@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1347,6 +1348,441 @@ exec "$CAS_REAL" "$@"
 				if st.Lease.Phase != "once" {
 					t.Fatalf("mutation missing: %s", loaded)
 				}
+			}
+		})
+	}
+}
+
+// upstreamReviewTracker keeps all authority offline and separate from the
+// worker token. Metadata/permissions may change while a review executes.
+type upstreamReviewTracker struct {
+	tracker.Tracker
+	actor          string
+	denied         bool
+	metadataDenied bool
+	pr             *tracker.PullRequest
+}
+
+func (t *upstreamReviewTracker) BackendName() string                         { return "github (octo/swarm)" }
+func (t *upstreamReviewTracker) UpstreamRepo() string                        { return "octo/swarm" }
+func (t *upstreamReviewTracker) CurrentUser(context.Context) (string, error) { return t.actor, nil }
+func (t *upstreamReviewTracker) Authorize(_ context.Context, permission string) error {
+	if t.denied || permission != "review-agent" {
+		return errors.New("permission denied")
+	}
+	return nil
+}
+func (t *upstreamReviewTracker) VerifyPlanReviewFork(_ context.Context, slug, owner string) (string, error) {
+	if t.metadataDenied || slug != "octo/personal" || owner != "octo" {
+		return "", errors.New("fork metadata rejected")
+	}
+	return slug, nil
+}
+func upstreamReviewFixture(t *testing.T) (*Manager, *Manager, *upstreamReviewTracker, int) {
+	t.Helper()
+	worker, lt, issue := testManager(t)
+	lt = lt.WithUser("contributor", "OWNER")
+	worker.tracker = lt
+	ctx := context.Background()
+	if _, err := worker.Acquire(ctx, issue.Number, "contributor", "claude", "plan", time.Hour, 3); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan} {
+		if _, err := worker.UpdateArtifact(ctx, issue.Number, "contributor", contract.Artifact{Type: kind, Producer: "claude:planner", Summary: "fixture plan", Body: "authoritative " + string(kind)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, rev, err := worker.load(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.ForkRepo = "octo/personal"
+	st.HeadSHA, st.Branch = "", ""
+	st.CheckpointHeads = nil
+	if _, err := worker.save(ctx, issue.Number, rev, st); err != nil {
+		t.Fatal(err)
+	}
+	tr := &upstreamReviewTracker{Tracker: lt, actor: "maintainer"}
+	upstream := NewManager(tr, worker.security)
+	upstream.SetStore(worker.repoRoot, worker.store)
+	upstream.SetNowFunc(worker.nowFn)
+	return worker, upstream, tr, issue.Number
+}
+func reviewFixtureAttestation() contract.RoleAttestation {
+	return contract.RoleAttestation{Role: "reviewer", Agent: "reviewer", Harness: "codex", HarnessVersion: "fixture", Model: "review-model", Sandbox: "codex-native"}
+}
+func TestUpstreamPlanReviewPreservesLease(t *testing.T) {
+	for _, gate := range []contract.GateMode{contract.GateAgent, contract.GateHuman} {
+		for _, verdict := range []string{"APPROVED", "CHANGES_REQUESTED"} {
+			t.Run(string(gate)+verdict, func(t *testing.T) {
+				worker, upstream, tr, n := upstreamReviewFixture(t)
+				ctx := context.Background()
+				st, rev, _ := worker.load(ctx, n)
+				st.EffectiveGate = gate
+				if _, err := worker.save(ctx, n, rev, st); err != nil {
+					t.Fatal(err)
+				}
+				before, _, _ := worker.load(ctx, n)
+				if _, err := upstream.Acquire(ctx, n, "maintainer", "codex", "review", time.Hour, 3); !errors.Is(err, ErrAlreadyClaimed) {
+					t.Fatalf("ordinary acquisition: %v", err)
+				}
+				o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if o.source.Kind != "FreshInitialApprovedBase" || o.source.Commit != before.BaseSHA || o.source.Repository != "octo/swarm" {
+					t.Fatal(o.source)
+				}
+				if len(upstream.tokens) != 0 {
+					t.Fatal("imported worker token")
+				}
+				got, err := upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: "+verdict, verdict, reviewFixtureAttestation())
+				if err != nil {
+					t.Fatal(err)
+				}
+				reloaded, _, err := worker.load(ctx, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(before.Lease, reloaded.Lease) || !reflect.DeepEqual(before.ClaimBudget, reloaded.ClaimBudget) || before.HeadSHA != reloaded.HeadSHA || before.Branch != reloaded.Branch {
+					t.Fatal("review mutated worker lifecycle")
+				}
+				issue, _ := tr.GetIssue(ctx, n)
+				wu, _ := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+				approval := VerifyApproval(got, wu)
+				if (approval == nil) != (gate == contract.GateAgent && verdict == "APPROVED") {
+					t.Fatalf("approval: %v", approval)
+				}
+				if err := worker.CheckClaim(ctx, n, "contributor"); err != nil {
+					t.Fatalf("worker cannot continue: %v", err)
+				}
+			})
+		}
+	}
+}
+func TestUpstreamPlanReviewRecordingFences(t *testing.T) {
+	for _, change := range []string{"owner", "claim", "expiry", "renewals", "expired", "phase", "base", "policy", "tree", "task", "plan body", "plan identity", "test body", "fork", "head", "branch", "checkpoint", "PR", "revision", "approval", "permission", "identity", "metadata"} {
+		t.Run(change, func(t *testing.T) {
+			worker, upstream, tr, n := upstreamReviewFixture(t)
+			ctx := context.Background()
+			o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, rev, err := worker.load(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "owner":
+				st.Lease.Owner = "successor"
+			case "claim":
+				st.Lease.ClaimID = "successor-fence"
+			case "expiry":
+				st.Lease.ExpiresAt = st.Lease.ExpiresAt.Add(time.Minute)
+			case "renewals":
+				st.Lease.Renewals++
+			case "expired":
+				upstream.SetNowFunc(func() time.Time { return st.Lease.ExpiresAt.Add(time.Second) })
+			case "phase":
+				st.Lease.Phase = "implement"
+			case "base":
+				st.BaseSHA = strings.Repeat("1", 40)
+			case "policy":
+				st.PolicyDigest = "moved"
+			case "tree":
+				st.PolicyTreeDigest = "moved"
+			case "task":
+				st.TaskDigest = "moved"
+			case "plan body":
+				st.Artifacts[0].Body += "moved"
+			case "plan identity":
+				st.Artifacts[0].ID += "moved"
+			case "test body":
+				st.Artifacts[1].Body += "moved"
+			case "fork":
+				st.ForkRepo = "other/fork"
+			case "head":
+				st.HeadSHA = strings.Repeat("1", 40)
+			case "branch":
+				st.Branch = "first-checkpoint"
+			case "checkpoint":
+				st.CheckpointHeads = []string{strings.Repeat("1", 40)}
+			case "PR":
+				st.PRNumber = 42
+			case "revision":
+				st.PRRevision = &PRRevision{Number: 42}
+			case "approval":
+				st.ApprovedAt = st.ApprovedAt.Add(time.Second)
+			case "permission":
+				tr.denied = true
+			case "identity":
+				tr.actor = "other-maintainer"
+			case "metadata":
+				tr.metadataDenied = true
+			}
+			if _, err := worker.save(ctx, n, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: APPROVED", "APPROVED", reviewFixtureAttestation()); err == nil {
+				t.Fatal("recorded stale review")
+			}
+			got, _, err := worker.load(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.Lease, st.Lease) || len(got.Artifacts) != len(st.Artifacts) {
+				t.Fatal("failed review mutated state")
+			}
+		})
+	}
+}
+func TestUpstreamPlanReviewRejectsForgedProvenance(t *testing.T) {
+	for _, field := range []string{"role", "agent", "sandbox", "model", "version", "report", "verdict", "nil observation"} {
+		t.Run(field, func(t *testing.T) {
+			_, upstream, _, n := upstreamReviewFixture(t)
+			ctx := context.Background()
+			o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			att := reviewFixtureAttestation()
+			body, verdict := "VERDICT: APPROVED", "APPROVED"
+			switch field {
+			case "role":
+				att.Role = "planner"
+			case "agent":
+				att.Agent = ""
+			case "sandbox":
+				att.Sandbox = "host"
+			case "model":
+				att.Model = ""
+			case "version":
+				att.HarnessVersion = ""
+			case "report":
+				body = "VERDICT: APPROVED\nVERDICT: CHANGES_REQUESTED"
+			case "verdict":
+				verdict = "CHANGES_REQUESTED"
+			case "nil observation":
+				o = nil
+			}
+			if _, err := upstream.RecordUpstreamPlanReview(ctx, o, body, verdict, att); err == nil {
+				t.Fatal("accepted forged provenance")
+			}
+		})
+	}
+}
+
+func (t *upstreamReviewTracker) GetPullRequest(ctx context.Context, n int) (*tracker.PullRequest, error) {
+	if t.pr != nil {
+		copy := *t.pr
+		return &copy, nil
+	}
+	return t.Tracker.GetPullRequest(ctx, n)
+}
+func TestUpstreamPlanReviewPublishedSources(t *testing.T) {
+	for _, kind := range []string{"checkpoint", "revision"} {
+		for _, failure := range []string{"", "unpublished", "partial plan binding", "missing branch", "missing candidate", "PR without revision", "changed remote PR", "changed PR base during review", "changed publication during review"} {
+			t.Run(kind+"/"+failure, func(t *testing.T) {
+				worker, upstream, tr, n := upstreamReviewFixture(t)
+				ctx := context.Background()
+				git := func(args ...string) string {
+					t.Helper()
+					out, err := fixtureGitCommand(t, append([]string{"-C", worker.repoRoot}, args...)...).CombinedOutput()
+					if err != nil {
+						t.Fatalf("git %v: %v: %s", args, err, out)
+					}
+					return strings.TrimSpace(string(out))
+				}
+				st, rev, _ := worker.load(ctx, n)
+				base := st.BaseSHA
+				if err := os.WriteFile(filepath.Join(worker.repoRoot, "candidate.txt"), []byte("candidate"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				git("add", "candidate.txt")
+				candidate := git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "candidate")
+				_ = candidate
+				candidate = git("rev-parse", "HEAD")
+				branch := "review-candidate"
+				git("branch", branch, candidate)
+				// Repository-local coordinator transport fixture; no network or token.
+				git("config", "url."+worker.repoRoot+".insteadOf", "https://github.com/octo/personal.git")
+				st.HeadSHA, st.Branch = base, branch
+				for i := range st.Artifacts {
+					a := &st.Artifacts[i]
+					if a.Metadata == nil {
+						a.Metadata = map[string]string{}
+					}
+					for k, v := range map[string]string{"checkpoint_plan_origin": "coordinator", "checkpoint_plan_claim": st.Lease.ClaimID, "checkpoint_plan_task": st.TaskDigest, "checkpoint_plan_policy": st.PolicyDigest, "checkpoint_plan_base": base, "checkpoint_plan_predecessor": base, "checkpoint_plan_candidate": candidate} {
+						a.Metadata[k] = v
+					}
+					if st.PolicyTreeDigest != "" {
+						a.Metadata["checkpoint_plan_policy_tree"] = st.PolicyTreeDigest
+					}
+				}
+				if kind == "revision" {
+					st.PRNumber = 42
+					st.Branch = "old-pr-branch"
+					st.PRRevision = &PRRevision{Number: 42, RemoteHeadSHA: base, LocalHeadSHA: candidate, Branch: branch, Intent: "work"}
+					tr.pr = &tracker.PullRequest{Number: 42, State: "open", IssueNumber: n, HeadRepo: st.ForkRepo, Head: st.Branch, HeadSHA: base, BaseRepo: "octo/swarm", Base: st.BaseBranch, BaseSHA: base}
+				}
+				switch failure {
+				case "unpublished":
+					git("branch", "-f", branch, base)
+				case "partial plan binding":
+					delete(st.Artifacts[1].Metadata, "checkpoint_plan_candidate")
+				case "missing branch":
+					st.Branch = ""
+					if st.PRRevision != nil {
+						st.PRRevision.Branch = ""
+					}
+				case "missing candidate":
+					if st.PRRevision != nil {
+						st.PRRevision.LocalHeadSHA = ""
+					} else {
+						delete(st.Artifacts[0].Metadata, "checkpoint_plan_candidate")
+					}
+				case "PR without revision":
+					st.PRNumber = 42
+					st.PRRevision = nil
+				case "changed remote PR":
+					if tr.pr != nil {
+						tr.pr.HeadSHA = candidate
+					} else {
+						st.HeadSHA = ""
+					}
+				}
+				if _, err := worker.save(ctx, n, rev, st); err != nil {
+					t.Fatal(err)
+				}
+				o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+				positive := failure == "" || strings.Contains(failure, "during review")
+				if !positive {
+					if err == nil {
+						t.Fatal("accepted incomplete/unpublished source")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedKind := "PublishedCheckpoint"
+				if kind == "revision" {
+					expectedKind = "PublishedPRRevision"
+				}
+				if o.Source().Kind != expectedKind || o.Source().Commit != candidate {
+					t.Fatal(o.Source())
+				}
+				if failure == "changed PR base during review" {
+					if tr.pr == nil {
+						st2, rev2, _ := worker.load(ctx, n)
+						st2.BaseBranch = "other"
+						if _, err := worker.save(ctx, n, rev2, st2); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						tr.pr.BaseSHA = candidate
+					}
+				}
+				if failure == "changed publication during review" {
+					git("branch", "-f", branch, base)
+				}
+				_, err = upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: APPROVED", "APPROVED", reviewFixtureAttestation())
+				if (err == nil) != (failure == "") {
+					t.Fatalf("record result for %s: %v", failure, err)
+				}
+			})
+		}
+	}
+}
+
+func TestUpstreamPlanReviewPreservesHumanDecision(t *testing.T) {
+	worker, upstream, _, n := upstreamReviewFixture(t)
+	ctx := context.Background()
+	if _, err := worker.RecordHumanReview(ctx, n, "APPROVED", "independent maintainer decision"); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _ := worker.load(ctx, n)
+	o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: CHANGES_REQUESTED", "CHANGES_REQUESTED", reviewFixtureAttestation()); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _ := worker.load(ctx, n)
+	if after.UpstreamAdvisoryReview == nil {
+		t.Fatal("missing advisory feedback")
+	}
+	after.UpstreamAdvisoryReview = nil
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("advisory agent review replaced existing human authority")
+	}
+}
+
+type upstreamConflictStore struct {
+	coordination.Store
+	writes int
+}
+
+func (s *upstreamConflictStore) CompareAndSwap(context.Context, int, string, []byte) (string, error) {
+	s.writes++
+	return "", coordination.ErrConflict
+}
+func TestUpstreamPlanReviewCASDoesNotRebind(t *testing.T) {
+	worker, upstream, _, n := upstreamReviewFixture(t)
+	ctx := context.Background()
+	store := &upstreamConflictStore{Store: worker.store}
+	upstream.store = store
+	o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: APPROVED", "APPROVED", reviewFixtureAttestation())
+	if !errors.Is(err, ErrClaimFence) || !errors.Is(err, coordination.ErrConflict) || store.writes != 1 {
+		t.Fatalf("CAS result %v, writes=%d", err, store.writes)
+	}
+	st, _, _ := worker.load(ctx, n)
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactReview {
+			t.Fatal("conflicting review recorded")
+		}
+	}
+}
+
+func TestUpstreamPlanReviewFreshSourceRejectsPartialContext(t *testing.T) {
+	for _, field := range []string{"head", "branch", "checkpoint heads", "PR URL", "submitted base", "submitted head", "revision", "checkpoint metadata", "local candidate", "implementation"} {
+		t.Run(field, func(t *testing.T) {
+			worker, upstream, _, n := upstreamReviewFixture(t)
+			ctx := context.Background()
+			st, rev, _ := worker.load(ctx, n)
+			switch field {
+			case "head":
+				st.HeadSHA = st.BaseSHA
+			case "branch":
+				st.Branch = "unpublished"
+			case "checkpoint heads":
+				st.CheckpointHeads = []string{st.BaseSHA}
+			case "PR URL":
+				st.PRURL = "https://github.com/octo/swarm/pull/42"
+			case "submitted base":
+				st.SubmittedBaseSHA = st.BaseSHA
+			case "submitted head":
+				st.SubmittedHeadSHA = st.BaseSHA
+			case "revision":
+				st.PRRevision = &PRRevision{Number: 42}
+			case "checkpoint metadata":
+				st.Artifacts[0].Metadata["checkpoint_plan_candidate"] = st.BaseSHA
+			case "local candidate":
+				st.Artifacts[0].Metadata["head_sha"] = st.BaseSHA
+			case "implementation":
+				st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactImplementation, Body: "local implementation"})
+			}
+			if _, err := worker.save(ctx, n, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := upstream.PrepareUpstreamPlanReview(ctx, n); err == nil {
+				t.Fatal("partial context selected approved base")
 			}
 		})
 	}

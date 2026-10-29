@@ -266,3 +266,75 @@ func (s *retryCASStore) CompareAndSwap(ctx context.Context, n int, rev string, d
 	}
 	return s.Store.CompareAndSwap(ctx, n, rev, data)
 }
+
+func TestRetryFenceRefusesWithoutPersistingPass(t *testing.T) {
+	for _, tc := range []struct {
+		name, owner string
+		change      func(*Manager, int, *IssueState)
+	}{
+		{"missing token", "local-dev", func(m *Manager, n int, _ *IssueState) { m.BindClaim(n, "") }},
+		{"expired claim", "local-dev", func(m *Manager, _ int, st *IssueState) {
+			m.SetNowFunc(func() time.Time { return st.Lease.ExpiresAt.Add(time.Second) })
+		}},
+		{"wrong owner", "intruder", func(*Manager, int, *IssueState) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, issue := testManager(t)
+			ctx := t.Context()
+			if _, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "implement", time.Hour, 3); err != nil {
+				t.Fatal(err)
+			}
+			st, err := m.mutate(ctx, issue.Number, "local-dev", func(st *IssueState) error {
+				st.EffectiveGate = contract.GateNone
+				st.HeadSHA = st.BaseSHA
+				st.Branch = "retry"
+				st.Artifacts = []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "test plan"}}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			md := ReviewBindings(st)
+			md["head_sha"] = st.HeadSHA
+			if st, err = m.RecordTrustedImplementation(ctx, issue.Number, "local-dev", contract.Artifact{Type: contract.ArtifactImplementation, Producer: "mock:developer", Verdict: "PASS", Summary: "implemented", Body: "implementation", Metadata: md}); err != nil {
+				t.Fatal(err)
+			}
+			tree, err := m.implementationTree(ctx, st.HeadSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The fixture is eligible until the single retry-specific change below.
+			if _, err := m.CheckImplementationRetry(ctx, issue.Number, "local-dev", st.HeadSHA, tree, st.Branch); err != nil {
+				t.Fatal(err)
+			}
+			report := contract.Artifact{Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: "PASS", Summary: "checks passed", Body: "trusted checks", Metadata: map[string]string{"base_sha": st.BaseSHA, "head_sha": st.HeadSHA, "validation_tree": tree, "validation_claim": st.Lease.ClaimID, "validation_base": st.BaseSHA}}
+			before, _, err := m.store.Load(ctx, issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.change(m, issue.Number, st)
+			if _, err := m.CheckImplementationRetry(ctx, issue.Number, tc.owner, st.HeadSHA, tree, st.Branch); !errors.Is(err, ErrClaimFence) {
+				t.Fatalf("retry read: %v", err)
+			}
+			if _, err := m.RecordRetryValidation(ctx, issue.Number, tc.owner, report, st.HeadSHA, tree, st.Branch); !errors.Is(err, ErrClaimFence) {
+				t.Fatalf("retry validation: %v", err)
+			}
+			after, _, err := m.store.Load(ctx, issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatal("fenced retry mutated state")
+			}
+			var saved IssueState
+			if err := json.Unmarshal(after, &saved); err != nil {
+				t.Fatal(err)
+			}
+			for _, a := range saved.Artifacts {
+				if a.Type == contract.ArtifactValidation {
+					t.Fatalf("fenced retry persisted validation: %+v", a)
+				}
+			}
+		})
+	}
+}

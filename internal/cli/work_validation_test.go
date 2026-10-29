@@ -1,14 +1,21 @@
 package cli
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"gopkg.in/yaml.v3"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -376,5 +383,160 @@ func TestExplicitTestWorkFakeGitHub(t *testing.T) {
 				t.Fatalf("retry result: %+v", result)
 			}
 		})
+	}
+}
+
+// untouchedSelectionTracker counts tracker activity and refuses it; any other
+// method panics through the nil interface.
+type untouchedSelectionTracker struct {
+	tracker.Tracker
+	calls int
+}
+
+func (t *untouchedSelectionTracker) refuse() error {
+	t.calls++
+	return errors.New("unexpected tracker call")
+}
+func (t *untouchedSelectionTracker) BackendName() string {
+	t.calls++
+	return "github"
+}
+func (t *untouchedSelectionTracker) CurrentUser(context.Context) (string, error) {
+	return "", t.refuse()
+}
+func (t *untouchedSelectionTracker) Authorize(context.Context, string) error { return t.refuse() }
+func (t *untouchedSelectionTracker) GetIssue(context.Context, int) (*tracker.Issue, error) {
+	return nil, t.refuse()
+}
+func (t *untouchedSelectionTracker) ListIssues(context.Context, tracker.IssueFilter) ([]*tracker.Issue, error) {
+	return nil, t.refuse()
+}
+
+// countingRunner records every agent launch and refuses it.
+type countingRunner struct {
+	agent.MockRunner
+	runs *int
+}
+
+func (r *countingRunner) Run(context.Context, agent.RunRequest) (*agent.RunResult, error) {
+	*r.runs++
+	return nil, errors.New("unexpected agent run")
+}
+
+// rootSnapshot digests every file under root, including Git refs, coordination
+// state, claim tokens and worktrees.
+func rootSnapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			if d != nil && d.IsDir() {
+				files[path] = "dir"
+			}
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		files[path] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestTestPhaseNextRefusesBeforeAnyCoordinatorActivity(t *testing.T) {
+	for _, flags := range [][]string{{"--next"}, {"--next", "--all"}} {
+		t.Run(strings.Join(flags, " "), func(t *testing.T) {
+			f := newCLIFixture(t)
+			// A ready approved task that --next would otherwise select and claim.
+			f.must(t, "issue", "approve", strconv.Itoa(f.create(t, "none")))
+			runs := 0
+			f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &countingRunner{runs: &runs}, nil
+			}
+			run := func(phase string) (*untouchedSelectionTracker, error) {
+				tr := &untouchedSelectionTracker{}
+				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "github", Repo: "owner/repo", trackerOverride: tr})
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				cmd.SetArgs(append([]string{"issue", "work", "--phase", phase, "--agent", "mock", "--progress=false"}, flags...))
+				return tr, cmd.ExecuteContext(t.Context())
+			}
+			before := rootSnapshot(t, f.root)
+			tr, err := run("test")
+			if err == nil || !strings.Contains(err.Error(), "requires an explicit issue number") {
+				t.Fatalf("refusal: %v", err)
+			}
+			if tr.calls != 0 || runs != 0 {
+				t.Fatalf("activity before refusal: tracker=%d agents=%d", tr.calls, runs)
+			}
+			if after := rootSnapshot(t, f.root); !reflect.DeepEqual(before, after) {
+				t.Fatal("refusal mutated state, tokens or worktrees")
+			}
+			if len(flags) == 1 {
+				// Control: the same seams observe selection for a permitted phase.
+				if tr, _ = run("implement"); tr.calls == 0 {
+					t.Fatal("tracker seam did not observe selection")
+				}
+			}
+		})
+	}
+}
+
+func TestStagedImplementationIsNotTestRetryEligible(t *testing.T) {
+	f := newCLIFixture(t)
+	number := f.create(t, "agent")
+	n := strconv.Itoa(number)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "claim", n, "--agent", "mock")
+	wt := filepath.Join(f.root, ".swarm", "worktrees", "issue-"+n)
+	for name, body := range map[string]string{".swarm/active/PLAN.md": "# Plan\n\n1. Add feature.txt\n", ".swarm/active/TEST_PLAN.md": "# Test Plan\n\n- Run git --version\n"} {
+		if err := os.WriteFile(filepath.Join(wt, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.must(t, "issue", "stage", n, "--phase", "plan", "--harness", "claude", "--model", "test")
+	f.must(t, "issue", "review-plan", n, "--agent", "mock")
+	if err := os.WriteFile(filepath.Join(wt, "feature.txt"), []byte("shipped\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.must(t, "issue", "stage", n, "--phase", "implement", "--harness", "codex", "--model", "test")
+	before := f.state(t, number)
+	staged := false
+	for _, a := range before.Artifacts {
+		staged = staged || (a.Type == contract.ArtifactImplementation && a.Verdict == "PASS" && a.Metadata["implementation_trusted_origin"] == "")
+	}
+	if !staged {
+		t.Fatalf("no manual stage PASS: %+v", before.Artifacts)
+	}
+	runs := 0
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &countingRunner{runs: &runs}, nil
+	}
+	out, err := f.run("issue", "work", n, "--phase", "test", "--agent", "mock", "--progress=false")
+	if err == nil || !strings.Contains(err.Error(), "tester retry unavailable") || runs != 0 {
+		t.Fatalf("staged retry: %v runs=%d\n%s", err, runs, out)
+	}
+	after := f.state(t, number)
+	for _, typ := range []contract.ArtifactType{contract.ArtifactImplementation, contract.ArtifactValidation} {
+		var was, now []contract.Artifact
+		for _, a := range before.Artifacts {
+			if a.Type == typ {
+				was = append(was, a)
+			}
+		}
+		for _, a := range after.Artifacts {
+			if a.Type == typ {
+				now = append(now, a)
+			}
+		}
+		if !reflect.DeepEqual(was, now) {
+			t.Fatalf("%s evidence changed", typ)
+		}
 	}
 }

@@ -2,7 +2,9 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1015,6 +1017,11 @@ func TestTestPhaseRoles(t *testing.T) {
 
 func testerRetryEngine(t *testing.T) (*Engine, *tracker.Issue) {
 	t.Helper()
+	return gatedTesterRetryEngine(t, contract.GateNone)
+}
+
+func gatedTesterRetryEngine(t *testing.T, gate contract.GateMode) (*Engine, *tracker.Issue) {
+	t.Helper()
 	root, e, tr := setupProjectPlanTestRepo(t)
 	configureValidation(t, root)
 	policy := "required_checks:\n  - name: retry-sentinel\n    command: echo retry-check-executed; if test -f move-during-checks; then git commit --allow-empty -m moved-by-check; fi; if test -f fail-check; then exit 3; fi\n    timeout: 1m\nprotected_paths: ['.swarm/validation/**']\n"
@@ -1031,7 +1038,7 @@ func testerRetryEngine(t *testing.T) (*Engine, *tracker.Issue) {
 		t.Fatal(err)
 	}
 	retryGit(t, root, "commit", "-am", "retry policy")
-	wu := &contract.WorkUnit{Objective: "Retry tests", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Run checks"}, Workflow: "feature", Gate: contract.GateNone}
+	wu := &contract.WorkUnit{Objective: "Retry tests", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Run checks"}, Workflow: "feature", Gate: gate}
 	issue, err := tr.CreateIssue(t.Context(), "Retry", contract.FormatIssueMarkdown(wu), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1091,4 +1098,266 @@ type retryRefusingGateway struct{ t *testing.T }
 func (g *retryRefusingGateway) Apply(context.Context, lease.ForkRequest) (*lease.IssueState, error) {
 	g.t.Fatal("gateway called before refusal")
 	return nil, nil
+}
+
+// mutateRetryState models an out-of-band coordinator change with a raw CAS write.
+func mutateRetryState(t *testing.T, e *Engine, n int, change func(*lease.IssueState)) {
+	t.Helper()
+	store := e.LeaseManager.Store()
+	data, rev, err := store.Load(t.Context(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state lease.IssueState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatal(err)
+	}
+	change(&state)
+	if data, err = json.Marshal(state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CompareAndSwap(t.Context(), n, rev, data); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertRefusedTestRetry runs an explicit test retry that must fail closed:
+// no agent of any role, no passing validation and unchanged implementation evidence.
+func assertRefusedTestRetry(t *testing.T, e *Engine, issue int, prior *WorkResult, calls map[string]int) error {
+	t.Helper()
+	state, err := e.LeaseManager.GetCurrentState(t.Context(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := json.Marshal(implementationArtifact(state))
+	opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "test", Headless: true}
+	if state.Lease.Status == "active" {
+		opts.ClaimID = state.Lease.ClaimID
+	}
+	clear(calls)
+	retry, retryErr := e.ExecuteWork(t.Context(), opts)
+	if retryErr == nil || (retry != nil && (retry.ValidationPassed || retry.PhaseCompleted == "test")) {
+		t.Fatalf("ineligible retry accepted: %v %+v", retryErr, retry)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("ineligible retry launched agents %v: %v", calls, retryErr)
+	}
+	after, err := e.LeaseManager.GetCurrentState(t.Context(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := json.Marshal(implementationArtifact(after)); string(raw) != string(before) {
+		t.Fatalf("implementation evidence changed\nbefore %s\nafter %s", before, raw)
+	}
+	for _, a := range after.Artifacts {
+		if a.Type == contract.ArtifactValidation && a.Verdict == "PASS" {
+			t.Fatalf("refused retry persisted PASS: %+v", a)
+		}
+	}
+	if prior != nil && prior.WorktreePath != "" && prior.HeadSHA != "" {
+		if head := retryGit(t, prior.WorktreePath, "rev-parse", "HEAD"); head != prior.HeadSHA {
+			t.Fatalf("candidate moved %s -> %s", prior.HeadSHA, head)
+		}
+	}
+	return retryErr
+}
+
+func TestTestRetryRejectsUnsuccessfulDeveloperOutcomes(t *testing.T) {
+	for _, scenario := range []string{"blocked", "no change", "failed", "interrupted"} {
+		t.Run(scenario, func(t *testing.T) {
+			e, issue := testerRetryEngine(t)
+			base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			var elapsed atomic.Int64
+			timers := make(chan *workBudgetTimer, 100)
+			if scenario == "interrupted" {
+				// The claim budget interrupts the developer after a partial checkpoint.
+				e.LeaseManager.SetNowFunc(func() time.Time { return base.Add(time.Duration(elapsed.Load())) })
+				e.LeaseManager.SetHeartbeatTimerFunc(func(time.Duration) lease.HeartbeatTimer {
+					tt := &workBudgetTimer{make(chan time.Time, 1)}
+					timers <- tt
+					return tt
+				})
+			}
+			mock := &agent.MockRunner{}
+			calls := map[string]int{}
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					calls[req.Role]++
+					if req.Role != "developer" {
+						return mock.Run(ctx, req)
+					}
+					switch scenario {
+					case "blocked":
+						res, err := mock.Run(ctx, req)
+						if err != nil {
+							return res, err
+						}
+						return res, os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/IMPLEMENTATION.md"), []byte("Status: blocked - needs a maintainer\n"), 0644)
+					case "no change":
+						return &agent.RunResult{}, nil
+					case "failed":
+						return nil, errors.New("developer crashed before completion")
+					}
+					if err := os.WriteFile(filepath.Join(req.WorktreePath, "partial.go"), []byte("package partial\n"), 0600); err != nil {
+						return nil, err
+					}
+					timer := <-timers
+					for range 3 {
+						if _, err := e.LeaseManager.Renew(t.Context(), issue.Number, "maintainer", 4*time.Hour); err != nil {
+							return nil, err
+						}
+					}
+					elapsed.Store(int64(4*time.Hour - 4*time.Hour/3))
+					timer.ch <- base.Add(time.Duration(elapsed.Load()))
+					<-ctx.Done()
+					return nil, ctx.Err()
+				}}, nil
+			}
+			first, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			if scenario == "interrupted" {
+				if err != nil || first == nil || first.ClaimBudgetPause == nil {
+					t.Fatalf("interruption: %v %+v", err, first)
+				}
+			} else if err == nil {
+				t.Fatalf("unsuccessful developer passed: %+v", first)
+			}
+			if calls["developer"] != 1 || calls["tester"] != 0 {
+				t.Fatalf("initial calls %v", calls)
+			}
+			state, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if impl := implementationArtifact(state); impl.Metadata["implementation_trusted_origin"] != "" {
+				t.Fatalf("unsuccessful developer gained trusted completion: %+v", impl)
+			}
+			retryErr := assertRefusedTestRetry(t, e, issue.Number, first, calls)
+			if !strings.Contains(retryErr.Error(), "tester retry unavailable") {
+				t.Fatalf("refused for another reason: %v", retryErr)
+			}
+		})
+	}
+}
+
+func TestTestRetryRefusesUnsatisfiedGateBeforeTester(t *testing.T) {
+	for _, scenario := range []string{"approved control", "rejected", "stale", "agent verdict under human gate"} {
+		t.Run(scenario, func(t *testing.T) {
+			e, issue := gatedTesterRetryEngine(t, contract.GateAgent)
+			mock := &agent.MockRunner{}
+			calls := map[string]int{}
+			initial := true
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					calls[req.Role]++
+					if req.Role != "tester" || !initial {
+						return mock.Run(ctx, req)
+					}
+					// Change the gate while the producing claim is still active.
+					switch scenario {
+					case "rejected":
+						mutateRetryState(t, e, issue.Number, func(st *lease.IssueState) {
+							for i, a := range st.Artifacts {
+								if a.Type == contract.ArtifactReview {
+									body := "VERDICT: CHANGES_REQUESTED\n\nRework the plan.\n"
+									sum := sha256.Sum256([]byte(body))
+									st.Artifacts[i].Verdict, st.Artifacts[i].Body = "CHANGES_REQUESTED", body
+									st.Artifacts[i].Metadata["content_sha256"] = hex.EncodeToString(sum[:])
+								}
+							}
+						})
+					case "stale":
+						mutateRetryState(t, e, issue.Number, func(st *lease.IssueState) {
+							for i, a := range st.Artifacts {
+								if a.Type == contract.ArtifactReview {
+									st.Artifacts[i].Metadata["plan_digest"] = "superseded-plan"
+								}
+							}
+						})
+					case "agent verdict under human gate":
+						if _, err := e.LeaseManager.RequireGate(ctx, issue.Number, "maintainer", contract.GateHuman); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return nil, req.CheckImport(ctx, []string{".swarm/active/IMPLEMENTATION.md"}, nil)
+				}}, nil
+			}
+			first, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			if err == nil || calls["reviewer"] != 1 || calls["developer"] != 1 || calls["tester"] != 1 {
+				t.Fatalf("initial: %v calls %v", err, calls)
+			}
+			initial = false
+			if scenario == "approved control" {
+				clear(calls)
+				retry, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "test", Headless: true})
+				if err != nil || !retry.ValidationPassed || calls["tester"] != 1 || len(calls) != 1 {
+					t.Fatalf("approved agent gate retry: %v %+v calls %v", err, retry, calls)
+				}
+				return
+			}
+			retryErr := assertRefusedTestRetry(t, e, issue.Number, first, calls)
+			if !errors.Is(retryErr, lease.ErrApprovalRequired) {
+				t.Fatalf("gate refusal lost approval identity: %v", retryErr)
+			}
+		})
+	}
+}
+
+func TestTestRetryNewClaimKeepsProducingClaim(t *testing.T) {
+	e, issue := testerRetryEngine(t)
+	mock := &agent.MockRunner{}
+	calls := map[string]int{}
+	initial := true
+	producing := ""
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			calls[req.Role]++
+			if req.Role == "developer" {
+				st, err := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				producing = st.Lease.ClaimID
+			}
+			if req.Role == "tester" && initial {
+				return nil, req.CheckImport(ctx, []string{".swarm/active/IMPLEMENTATION.md"}, nil)
+			}
+			return mock.Run(ctx, req)
+		}}, nil
+	}
+	first, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+	if err == nil || producing == "" {
+		t.Fatalf("initial: %v producing %q", err, producing)
+	}
+	impl := implementationArtifact(first.State)
+	if impl.Metadata["implementation_trusted_claim"] != producing {
+		t.Fatalf("producing claim %q recorded as %q", producing, impl.Metadata["implementation_trusted_claim"])
+	}
+	before, _ := json.Marshal(impl)
+	if first.State.Lease.Status == "active" {
+		if _, err := e.LeaseManager.Release(t.Context(), issue.Number, "maintainer", "retry"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initial = false
+	clear(calls)
+	retry, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "test", Headless: true})
+	if err != nil || !retry.ValidationPassed || calls["developer"] != 0 || calls["tester"] != 1 {
+		t.Fatalf("retry: %v %+v calls %v", err, retry, calls)
+	}
+	retryClaim := retry.State.Lease.ClaimID
+	if retryClaim == "" || retryClaim == producing {
+		t.Fatalf("retry reused producing claim %q", retryClaim)
+	}
+	if after, _ := json.Marshal(implementationArtifact(retry.State)); string(after) != string(before) {
+		t.Fatalf("implementation evidence changed\nbefore %s\nafter %s", before, after)
+	}
+	var validated bool
+	for _, a := range retry.State.Artifacts {
+		if a.Type == contract.ArtifactValidation && a.Verdict == "PASS" {
+			validated = a.Metadata["validation_trusted_claim"] == retryClaim && a.Metadata["validation_claim"] == retryClaim
+		}
+	}
+	if !validated {
+		t.Fatal("trusted validation not fenced to the retry claim")
+	}
 }

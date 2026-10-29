@@ -103,7 +103,6 @@ func TestRestoreLinuxFlags(t *testing.T) {
 func TestRestoreLinuxHelperStartup(t *testing.T) {
 	t.Run("pure-go", func(t *testing.T) {
 		helper := buildRestoreHelper(t)
-		processLimitRejected := false
 		for _, limit := range []string{"none", "address-space", "processes", "combined"} {
 			t.Run(limit, func(t *testing.T) {
 				var flags []string
@@ -132,12 +131,9 @@ func TestRestoreLinuxHelperStartup(t *testing.T) {
 				// UID, including concurrent packages in make check. Validate
 				// that specific fail-closed outcome separately; it must never
 				// excuse an AS-only failure or a real boundary failure.
-				if limit == "processes" || limit == "combined" && processLimitRejected {
-					if restoreStartupTaskExhausted(err, stdout.Bytes(), stderr.Bytes()) {
-						processLimitRejected = true
-						t.Log("host UID task exhaustion under NPROC128: fail-closed runtime rejection verified")
-						return
-					}
+				if restoreStartupResourceRejected(limit, err, stdout.Bytes(), stderr.Bytes()) {
+					t.Log("host UID task exhaustion under NPROC128: fail-closed runtime rejection verified")
+					return
 				}
 				if !errors.As(err, &exit) || exit.ExitCode() != 1 || stdout.String() != "ARGUMENTS\n" || stderr.Len() != 0 {
 					// Runtime diagnostics can contain host paths; keep them out
@@ -147,6 +143,12 @@ func TestRestoreLinuxHelperStartup(t *testing.T) {
 			})
 		}
 	})
+}
+
+// Host UID pressure may change between matrix cells. Classify only this
+// invocation; the actual isolated boundary still requires successful startup.
+func restoreStartupResourceRejected(limit string, err error, stdout, stderr []byte) bool {
+	return (limit == "processes" || limit == "combined") && restoreStartupTaskExhausted(err, stdout, stderr)
 }
 
 // Match only runtime thread-creation EAGAIN, never arbitrary startup errors,
@@ -396,9 +398,13 @@ func TestRestoreReadyFrameOpenWriter(t *testing.T) {
 
 // Retain a bounded prefix while draining every write from the child.
 type restoreTestCapture struct {
-	bytes.Buffer
-	limit int
+	buffer bytes.Buffer
+	limit  int
 }
+
+func (b *restoreTestCapture) Len() int       { return b.buffer.Len() }
+func (b *restoreTestCapture) Bytes() []byte  { return b.buffer.Bytes() }
+func (b *restoreTestCapture) String() string { return b.buffer.String() }
 
 func (b *restoreTestCapture) Write(p []byte) (int, error) {
 	n := len(p)
@@ -406,7 +412,7 @@ func (b *restoreTestCapture) Write(p []byte) (int, error) {
 	if len(p) > remaining {
 		p = p[:remaining]
 	}
-	_, _ = b.Buffer.Write(p)
+	_, _ = b.buffer.Write(p)
 	return n, nil
 }
 
@@ -479,5 +485,43 @@ func TestRestoreHelperBuildCapture(t *testing.T) {
 	}
 	if b.Len() != 4096 {
 		t.Fatal(b.Len())
+	}
+	readerCapture := restoreTestCapture{limit: 4096}
+	if n, err := io.Copy(&readerCapture, io.LimitReader(strings.NewReader(strings.Repeat("x", 100000)), 100000)); n != 100000 || err != nil || readerCapture.Len() != 4096 {
+		t.Fatal("reader path did not drain with bounded retention")
+	}
+}
+
+func TestRestoreStartupResourceRejectionProfiles(t *testing.T) {
+	err := exec.Command("/bin/sh", "-c", "exit 2").Run()
+	if err == nil {
+		t.Fatal("missing exit fixture")
+	}
+	thread := []byte("runtime: failed to create new OS thread (errno=11)")
+	for _, profile := range []string{"none", "address-space", "processes", "combined"} {
+		t.Run(profile, func(t *testing.T) {
+			want := profile == "processes" || profile == "combined"
+			if restoreStartupResourceRejected(profile, err, nil, thread) != want {
+				t.Fatal("incorrect per-invocation NPROC classification")
+			}
+			for _, diagnostic := range []string{"fatal error: runtime: cannot allocate memory", "runtime: failed to create new OS thread (errno=12)", "arbitrary crash"} {
+				if restoreStartupResourceRejected(profile, err, nil, []byte(diagnostic)) {
+					t.Fatal("unrelated failure accepted")
+				}
+			}
+			if restoreStartupResourceRejected(profile, err, []byte("unexpected"), thread) {
+				t.Fatal("unexpected stdout accepted")
+			}
+		})
+	}
+	other := exec.Command("/bin/sh", "-c", "exit 1").Run()
+	if restoreStartupResourceRejected("combined", other, nil, thread) {
+		t.Fatal("wrong status accepted")
+	}
+	if restoreStartupResourceRejected("processes", other, []byte("ARGUMENTS\n"), nil) {
+		t.Fatal("argument validation mistaken for resource rejection")
+	}
+	if !restoreStartupResourceRejected("combined", err, nil, thread) {
+		t.Fatal("combined rejection depends on preceding successful process case")
 	}
 }

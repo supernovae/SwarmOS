@@ -338,6 +338,9 @@ func readRestoreReadyFrame(r io.Reader) string {
 	var frame [256]byte
 	for i := range frame {
 		if _, err := io.ReadFull(r, frame[i:i+1]); err != nil {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+				return ""
+			}
 			return string(frame[:i])
 		}
 		if frame[i] == '\n' {

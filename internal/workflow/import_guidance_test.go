@@ -145,10 +145,13 @@ func TestDeveloperOutputImportRecoveryGuidance(t *testing.T) {
 	name := patches[0].Name()
 	n := strconv.Itoa(issue.Number)
 	rerun := "swarm issue work " + n + developerOutputRerun
-	for _, text := range []string{"rejected agent changes to: .swarm/active/VALIDATION.md;", "worktree was left unchanged", "developers record results in .swarm/active/IMPLEMENTATION.md, not .swarm/active/VALIDATION.md", rerun, "recovery patch " + name, "recover with swarm issue recover-import " + n + " " + name} {
+	for _, text := range []string{"rejected agent changes to: .swarm/active/VALIDATION.md;", "worktree was left unchanged", "developers record results in .swarm/active/IMPLEMENTATION.md, not .swarm/active/VALIDATION.md", rerun, "recovery patch " + name, "saved privately to your state directory", "a maintainer may inspect the saved text and provide reviewed guidance"} {
 		if !strings.Contains(err.Error(), text) || !strings.Contains(st.NextPhaseReason, text) {
 			t.Fatalf("missing %q: %v %+v", text, err, st)
 		}
+	}
+	if strings.Contains(err.Error(), "recover-import") || strings.Contains(st.NextPhaseReason, "recover-import") {
+		t.Fatal("unsupported recovery command advertised")
 	}
 	// Only the local error names the private path; the projected reason does not.
 	path := filepath.Join(state, "swarm", "recovery", name)
@@ -203,20 +206,25 @@ func TestImportRejectionReasonWithPatch(t *testing.T) {
 	const name = "rejected-0123456789abcdef0123456789abcdef.patch"
 	saved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, Patch: "/home/someone/.local/state/swarm/recovery/" + name}
 	unsaved := &importRejection{Paths: []string{".swarm/active/REVIEW.md"}, Role: "tester", Recoverable: true, PatchNote: "a complete recovery patch was unavailable"}
-	for _, tc := range []struct {
-		rejection *importRejection
-		issue, pr int
-		want      string
-	}{
-		{saved, 7, 0, "rerun with swarm issue work 7 --phase implement; or keep the other changes: recovery patch " + name + " was saved to your state directory; recover with swarm issue recover-import 7 " + name},
-		{saved, 7, 42, "rerun with swarm pr work 42 --phase implement; or keep the other changes: recovery patch " + name + " was saved to your state directory; recover with swarm pr recover-import 42 " + name},
-		{unsaved, 7, 0, "rerun with swarm issue work 7 --phase implement; no recovery patch: a complete recovery patch was unavailable"},
-	} {
-		got := importRejectionReason(tc.rejection, tc.issue, tc.pr)
-		if !strings.HasSuffix(got, tc.want) || strings.Contains(got, "/home/") {
-			t.Fatalf("got %q want suffix %q", got, tc.want)
+	// This command/flag contract is matched by TestCLIImportRecoveryCommands.
+	for _, route := range []struct {
+		pr      int
+		command string
+	}{{0, "swarm issue work 7"}, {42, "swarm pr work 42"}} {
+		for _, rejection := range []*importRejection{saved, unsaved, {Paths: saved.Paths, Role: "tester", Recoverable: true}} {
+			got := importRejectionReason(rejection, 7, route.pr)
+			want := route.command + " --phase implement"
+			if rejection == saved {
+				want += "; recovery patch " + name + " was saved privately to your state directory; a maintainer may inspect the saved text and provide reviewed guidance through the existing work instruction flags"
+			} else if rejection == unsaved {
+				want += "; no recovery patch: a complete recovery patch was unavailable"
+			}
+			if !strings.HasSuffix(got, want) || !strings.Contains(got, "worktree was left unchanged") || strings.Contains(got, "/home/") || strings.Contains(got, "recover-import") || strings.Contains(got, "keep the other changes") {
+				t.Fatalf("got %q want suffix %q", got, want)
+			}
 		}
 	}
+
 }
 
 var errStopAfterImport = errors.New("stop after import check")

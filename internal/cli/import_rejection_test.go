@@ -37,3 +37,35 @@ func TestCLIStatusImportRejection(t *testing.T) {
 		}
 	}
 }
+
+// The command/flag cases match the actual emitted guidance assertions in
+// TestImportRejectionReasonWithPatch, TestDeveloperOutputImportRecoveryGuidance,
+// and the completed-role guidance tests in internal/workflow.
+func TestCLIImportRecoveryCommands(t *testing.T) {
+	for _, route := range []struct{ group, number string }{{"issue", "7"}, {"pr", "42"}} {
+		t.Run(route.group, func(t *testing.T) {
+			for _, flag := range []string{"instructions", "developer-instructions", "tester-instructions"} {
+				root := NewRootCmd()
+				cmd, remaining, err := root.Find([]string{route.group, "work", route.number})
+				if err != nil || cmd.CommandPath() != "swarm "+route.group+" work" || !cmd.Runnable() || cmd.HasSubCommands() || len(remaining) != 1 || remaining[0] != route.number {
+					t.Fatalf("work lookup: %v %v %v", cmd, remaining, err)
+				}
+				for _, name := range []string{"phase", flag} {
+					if cmd.Flags().Lookup(name) == nil {
+						t.Fatalf("unregistered flag %s", name)
+					}
+				}
+				if err := cmd.ParseFlags([]string{route.number, "--phase", "implement", "--" + flag, "Reviewed guidance"}); err != nil {
+					t.Fatal(err)
+				}
+				if args := cmd.Flags().Args(); len(args) != 1 || args[0] != route.number {
+					t.Fatalf("arguments: %v", args)
+				}
+			}
+			cmd, _, err := NewRootCmd().Find([]string{route.group, "recover-import", route.number, "rejected.patch"})
+			if err == nil && cmd.CommandPath() != "swarm "+route.group {
+				t.Fatalf("unexpected registered recovery leaf: %s", cmd.CommandPath())
+			}
+		})
+	}
+}

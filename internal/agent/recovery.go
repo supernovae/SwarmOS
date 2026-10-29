@@ -15,8 +15,8 @@ import (
 
 // Rejected-run recovery patches share the diagnostics storage rules: a private
 // state directory outside the worktree, fixed bounds, and pruning by age and
-// count. A patch is a maintainer's input to swarm issue/pr recover-import and
-// is never applied automatically.
+// count. Saved text is available for maintainer inspection and is never
+// applied automatically.
 const (
 	// RecoveryPatchMaxBytes bounds the diff body, matching timeout patches.
 	RecoveryPatchMaxBytes = 4 << 20

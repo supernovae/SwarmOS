@@ -22,7 +22,7 @@ type importRejection struct {
 	// does not delete. It is never recoverable.
 	Deleted bool
 	// Recoverable is set when every rejected path is another role's output, so
-	// a maintainer may re-apply the rest of the run with recover-import.
+	// its saved text may be inspected by a maintainer.
 	Recoverable bool
 	// Patch is the saved recovery patch path; PatchNote is the fixed reason
 	// none was saved. Both are set by the coordinator after rejection.
@@ -134,8 +134,7 @@ func writableImportPolicy(role string, paths, patterns []string, allowHarness, f
 }
 
 // RecoverableRejection reports whether the import policy refuses exactly
-// rejected, and only as other roles' outputs. recover-import re-checks a saved
-// patch's header with it before claiming anything.
+// rejected, and only as other roles' outputs.
 func RecoverableRejection(role string, rejected, patterns []string, allowHarness bool) bool {
 	var rejection *importRejection
 	if !errors.As(writableImportPolicy(role, rejected, patterns, allowHarness, false), &rejection) || !rejection.Recoverable {
@@ -206,11 +205,7 @@ func recoveryReason(rejection *importRejection, issue, pr int) string {
 	switch {
 	case rejection.Patch != "":
 		name := filepath.Base(rejection.Patch)
-		recover := fmt.Sprintf("swarm issue recover-import %d %s", issue, name)
-		if pr != 0 {
-			recover = fmt.Sprintf("swarm pr recover-import %d %s", pr, name)
-		}
-		return fmt.Sprintf("; or keep the other changes: recovery patch %s was saved to your state directory; recover with %s", name, recover)
+		return fmt.Sprintf("; recovery patch %s was saved privately to your state directory; a maintainer may inspect the saved text and provide reviewed guidance through the existing work instruction flags", name)
 	case rejection.PatchNote != "":
 		return "; no recovery patch: " + rejection.PatchNote
 	}

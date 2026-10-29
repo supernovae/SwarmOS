@@ -24,9 +24,12 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -690,5 +693,111 @@ func TestRestoreProtocolContentEncoding(t *testing.T) {
 	r, data := fixtureRead(t, c, "GET", "https://registry.example/artifact", nil)
 	if r.Header.Get("Content-Encoding") != "gzip" || !bytes.Equal(data, encoded) {
 		t.Fatal("encoded bytes/metadata changed")
+	}
+}
+
+// OpenSSL's TLS record layout differs from Go's (including compatibility CCS).
+// Drive it through the actual bridge and broker even without socket permissions.
+func TestRestoreProtocolOpenSSLBridge(t *testing.T) {
+	for _, mode := range []string{"pipes", "tcp-unix"} {
+		for _, version := range []string{"TLSv1_2", "TLSv1_3"} {
+			t.Run(mode+"/"+version, func(t *testing.T) {
+				f := newRestoreFixture(t, nil)
+				listener := newRestoreTestListener()
+				bridge := startRestoreBridge(t.Context(), listener)
+				defer bridge.close()
+				bridge.dial = f.listener.dial
+				proxyAddress := ""
+				if mode == "tcp-unix" {
+					unixListener, err := net.Listen("unix", filepath.Join(t.TempDir(), "broker.sock"))
+					if err != nil {
+						if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+							t.Skipf("real bridge socket infrastructure unavailable: %v", err)
+						}
+						t.Fatal(err)
+					}
+					broker := newRegistryBroker(t.Context(), unixListener, f.broker.policy, f.broker.trust)
+					broker.roots, broker.resolve, broker.dial = f.broker.roots, f.broker.resolve, f.broker.dial
+					broker.serve()
+					defer broker.close()
+					tcpListener, err := net.Listen("tcp4", "127.0.0.1:0")
+					if err != nil {
+						t.Fatal(err)
+					}
+					proxyAddress = tcpListener.Addr().String()
+					socketBridge := startRestoreBridge(t.Context(), tcpListener)
+					socketBridge.dial = func(ctx context.Context) (net.Conn, error) {
+						return (&net.Dialer{}).DialContext(ctx, "unix", unixListener.Addr().String())
+					}
+					defer socketBridge.close()
+					bridge.dial = func(ctx context.Context) (net.Conn, error) {
+						return (&net.Dialer{}).DialContext(ctx, "tcp4", tcpListener.Addr().String())
+					}
+				}
+				c, err := listener.dial(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer c.Close()
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "python3", "-c", `
+import ssl,sys,os
+ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+ctx.load_verify_locations(cadata=sys.argv[1])
+ctx.minimum_version=ctx.maximum_version=getattr(ssl.TLSVersion,sys.argv[2])
+incoming,outgoing=ssl.MemoryBIO(),ssl.MemoryBIO()
+s=ctx.wrap_bio(incoming,outgoing,server_hostname='registry.example')
+def flush():
+ while outgoing.pending: os.write(1,outgoing.read())
+def run(fn):
+ while True:
+  try:
+   result=fn();flush();return result
+  except ssl.SSLWantReadError:
+   flush(); data=os.read(0,16384)
+   if not data: raise RuntimeError('unexpected transport EOF')
+   incoming.write(data)
+os.write(1,b'CONNECT registry.example:443 HTTP/1.1\r\nHost: registry.example:443\r\n\r\n')
+h=b''
+while not h.endswith(b'\r\n\r\n'): h+=os.read(0,1)
+assert h.startswith(b'HTTP/1.1 200 ')
+run(s.do_handshake)
+run(lambda:s.write(b'GET /artifact HTTP/1.1\r\nHost: registry.example\r\nConnection: close\r\n\r\n'))
+data=b''
+while b'artifact' not in data: data+=run(lambda:s.read(16384))
+assert data.endswith(b'artifact'),data
+`, string(f.broker.trust.pem), version)
+				if mode == "tcp-unix" {
+					cmd = exec.CommandContext(ctx, "python3", "-c", `
+import socket,ssl,sys,http.client
+host,port=sys.argv[3].split(':')
+c=socket.create_connection((host,int(port)),timeout=3)
+c.sendall(b'CONNECT registry.example:443 HTTP/1.1\r\nHost: registry.example:443\r\n\r\n')
+h=b''
+while not h.endswith(b'\r\n\r\n'): h+=c.recv(1)
+assert h.startswith(b'HTTP/1.1 200 ')
+ctx=ssl.create_default_context(cadata=sys.argv[1])
+ctx.minimum_version=ctx.maximum_version=getattr(ssl.TLSVersion,sys.argv[2])
+s=ctx.wrap_socket(c,server_hostname='registry.example')
+s.sendall(b'GET /artifact HTTP/1.1\r\nHost: registry.example\r\nConnection: close\r\n\r\n')
+r=http.client.HTTPResponse(s);r.begin()
+assert r.read()==b'artifact'
+s.close()
+`, string(f.broker.trust.pem), version, proxyAddress)
+				}
+				var stderr bytes.Buffer
+				cmd.Stderr = &stderr
+				// Files let the subprocess consume the same byte stream without TCP.
+				pipe := c.(*restoreTestPipe)
+				cmd.Stdin, cmd.Stdout = pipe.r, pipe.w
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("OpenSSL bridge: %v: %s", err, stderr.String())
+				}
+				if f.dials.Load() != 1 {
+					t.Fatal("expected one inspected upstream request")
+				}
+			})
+		}
 	}
 }

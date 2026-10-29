@@ -145,6 +145,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			defer writeLeaseReminder(ctx, manager.GetCurrentState, duration, cfg.Lease.Renewable, issue, rootOpts, tr.BackendName(), cmd.ErrOrStderr())
 			heartbeat := manager.StartHeartbeat(ctx, issue, owner, duration)
 			defer heartbeat.Stop()
 			ctx = heartbeat.Context()

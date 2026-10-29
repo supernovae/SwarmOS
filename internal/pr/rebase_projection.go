@@ -45,6 +45,12 @@ func RebaseSummary(st *lease.IssueState, number int) string {
 			}
 			fmt.Fprintf(&b, "%s: %s\n", label, strings.Join(r.ConflictedPaths, ", "))
 		}
+		for _, e := range r.RepairExtensions {
+			fmt.Fprintf(&b, "Repair outside diff (maintainer opt-in: %t, attempt %d, base %s, head %s):\n", e.OptIn, e.Attempt, e.BaseSHA, e.HeadSHA)
+			for _, p := range e.Paths {
+				fmt.Fprintf(&b, "  %s\n", strconv.QuoteToASCII(p))
+			}
+		}
 		for _, plan := range r.Plans {
 			fmt.Fprintf(&b, "Rebase micro-plan at %s (digest %s):\n%s\n", plan.Commit, plan.Digest, plan.Body)
 		}

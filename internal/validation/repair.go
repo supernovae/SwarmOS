@@ -4,24 +4,35 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/version"
+	"golang.org/x/mod/modfile"
+	"io"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 // RepairFile is the coordinator-written repair brief in .swarm/active. Agents
@@ -80,14 +91,16 @@ type RepairCheck struct {
 // RepairSummary is the trusted account of a failed validation. Unavailable
 // explains a summary that could not be decoded or no longer matches.
 type RepairSummary struct {
-	BaseSHA         string        `json:"base_sha"`
-	HeadSHA         string        `json:"head_sha"`
-	FailedChecks    []RepairCheck `json:"failed_checks"`
-	Tests           []FailingTest `json:"tests"`
-	ChangedFiles    []string      `json:"changed_files"`
-	ChangedPackages []string      `json:"changed_packages"`
-	AllPreExisting  bool          `json:"all_pre_existing"`
-	Unavailable     string        `json:"unavailable,omitempty"`
+	rebaseProvenance   bool
+	rebaseDeclarations []string
+	BaseSHA            string        `json:"base_sha"`
+	HeadSHA            string        `json:"head_sha"`
+	FailedChecks       []RepairCheck `json:"failed_checks"`
+	Tests              []FailingTest `json:"tests"`
+	ChangedFiles       []string      `json:"changed_files"`
+	ChangedPackages    []string      `json:"changed_packages"`
+	AllPreExisting     bool          `json:"all_pre_existing"`
+	Unavailable        string        `json:"unavailable,omitempty"`
 }
 
 // allPreExisting reports whether every failure is a Go test that also fails
@@ -152,6 +165,8 @@ func diagnoseRepair(ctx context.Context, runner *checkRunner, report *Validation
 			attributed[EscapeDiagnostic(failure.name)] = true
 			test := FailingTest{Check: check.Name, Package: EscapeDiagnostic(failure.pkg), Name: EscapeDiagnostic(failure.name), Classification: TestUnclassified}
 			switch {
+			case evidence.truncated:
+				test.Reason = "test evidence is truncated"
 			case !recognized:
 				test.Reason = "the check is not a recognized go test ./... command"
 			case outcome.InfrastructureError:
@@ -160,7 +175,16 @@ func diagnoseRepair(ctx context.Context, runner *checkRunner, report *Validation
 				test.Reason = fmt.Sprintf("more than %d failing tests; not rerun", maxRepairReruns)
 			default:
 				reruns++
-				test.Classification, test.Reason = classify(ctx, runner, base, cmd, failure, report.ModifiedFiles, checkTimeout(""))
+				if runner.rebaseLocations {
+					var declaration string
+					test.Classification, test.Reason, declaration = classifyCommitted(ctx, runner, outcome.executionProof, cmd, failure, report)
+					summary.rebaseProvenance = true
+					if declaration != "" {
+						summary.rebaseDeclarations = append(summary.rebaseDeclarations, declaration)
+					}
+				} else {
+					test.Classification, test.Reason = classify(ctx, runner, base, cmd, failure, report.ModifiedFiles, checkTimeout(""))
+				}
 			}
 			summary.Tests = append(summary.Tests, test)
 		}
@@ -629,4 +653,743 @@ func skipStatus(ctx context.Context, root, base string, changed []string, skip S
 		}
 	}
 	return "new"
+}
+
+// RebaseRepairPaths returns only this validation's in-memory, independently
+// verified locations. Serialized reports cannot restore this authority.
+func (r *ValidationReport) RebaseRepairPaths() []string     { return slices.Clone(r.rebasePaths) }
+func (r *ValidationReport) RebaseRepairUnavailable() string { return r.rebaseUnavailable }
+
+type compilerLocation struct {
+	Package, File string
+	Line, Column  int
+	HasColumn     bool
+}
+type compilerHints struct {
+	Locations  []compilerLocation
+	Incomplete bool
+}
+
+var compilerPosition = regexp.MustCompile(`^([^\s:]+):([0-9]+)(?::([0-9]+))?:`)
+
+func compilerCommand(s string) string {
+	if strings.ContainsAny(s, "\r\n") {
+		return ""
+	}
+	f := strings.Fields(s)
+	if len(f) != 3 || f[0] != "go" || (f[1] != "build" && f[1] != "vet") || f[2] != "./..." {
+		return ""
+	}
+	return strings.Join(f, " ")
+}
+
+func parseCompilerHints(s string) *compilerHints {
+	h := &compilerHints{}
+	if len(s) > diagnosticBytes || !strings.HasSuffix(s, "\n") {
+		h.Incomplete = true
+		return h
+	}
+	current := ""
+	for _, line := range strings.Split(strings.TrimSuffix(s, "\n"), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if len(line) > 8192 {
+			h.Incomplete = true
+			return h
+		}
+		if strings.HasPrefix(line, "#") {
+			current = ""
+			if strings.HasPrefix(line, "# ") && validImportPath(strings.TrimPrefix(line, "# ")) {
+				current = strings.TrimPrefix(line, "# ")
+			}
+			continue
+		}
+		line = strings.TrimPrefix(line, "vet: ")
+		m := compilerPosition.FindStringSubmatch(line)
+		if m == nil || current == "" {
+			continue
+		}
+		n, e := strconv.Atoi(m[2])
+		if e != nil || n < 1 || len(m[1]) > 4096 {
+			h.Incomplete = true
+			return h
+		}
+		loc := compilerLocation{Package: current, File: m[1], Line: n, HasColumn: m[3] != ""}
+		if loc.HasColumn {
+			loc.Column, e = strconv.Atoi(m[3])
+			if e != nil || loc.Column < 1 {
+				h.Incomplete = true
+				return h
+			}
+		}
+		if !slices.Contains(h.Locations, loc) {
+			h.Locations = append(h.Locations, loc)
+		}
+		if len(h.Locations) > 60 {
+			h.Incomplete = true
+			return h
+		}
+	}
+	return h
+}
+
+// diagnosticPath accepts only paths rooted in the coordinator's selected root.
+func diagnosticPath(root, p string) (string, bool) {
+	if len(p) > 4096 || strings.ContainsAny(p, "\\:") || strings.IndexFunc(p, func(c rune) bool { return c < 32 || c == 127 }) >= 0 {
+		return "", false
+	}
+	if path.IsAbs(p) {
+		prefix := filepath.ToSlash(filepath.Clean(root)) + "/"
+		if !strings.HasPrefix(p, prefix) {
+			return "", false
+		}
+		p = strings.TrimPrefix(p, prefix)
+	}
+	p = strings.TrimPrefix(p, "./")
+	if p == "" || p == "." || path.Clean(p) != p || p == ".." || strings.HasPrefix(p, "../") || !strings.HasSuffix(p, ".go") {
+		return "", false
+	}
+	return p, true
+}
+
+type committedEntry struct {
+	Mode, ID string
+	Size     int64
+}
+type committedSnapshot struct {
+	Dir, Commit string
+	Entries     map[string]committedEntry
+}
+
+func limitedGit(ctx context.Context, root string, limit int, args ...string) ([]byte, error) {
+	cmd, _, err := gitcredential.Command(ctx, root, args...)
+	if err != nil {
+		return nil, err
+	}
+	b := boundedBuffer{limit: limit}
+	cmd.Stdout = &b
+	if err = cmd.Run(); err != nil {
+		return nil, err
+	}
+	if b.overflow {
+		return nil, fmt.Errorf("git object output exceeds limit")
+	}
+	return b.buf.Bytes(), nil
+}
+
+// exportCommitted uses neither the index nor worktree bytes. Object hashes are
+// checked again before writing, so even an incomplete/corrupt object fails shut.
+func exportCommitted(ctx context.Context, root, commit string) (*committedSnapshot, error) {
+	if len(commit) != 40 || strings.Trim(commit, "0123456789abcdef") != "" {
+		return nil, fmt.Errorf("invalid checkpoint object ID")
+	}
+	object, err := limitedGit(ctx, root, 128, "rev-parse", "--verify", commit+"^{commit}")
+	if err != nil || strings.TrimSpace(string(object)) != commit {
+		return nil, fmt.Errorf("checkpoint object unavailable")
+	}
+	tree, err := limitedGit(ctx, root, 8<<20, "ls-tree", "-r", "-z", "-l", "--full-tree", commit)
+	if err != nil {
+		return nil, err
+	}
+	entries := map[string]committedEntry{}
+	total := int64(0)
+	for _, record := range bytes.Split(tree, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		meta, name, ok := strings.Cut(string(record), "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 4 || f[1] != "blob" || (f[0] != "100644" && f[0] != "100755") || len(f[2]) != 40 || strings.Trim(f[2], "0123456789abcdef") != "" || !safeCommittedName(name) {
+			return nil, fmt.Errorf("unsafe checkpoint entry")
+		}
+		size, e := strconv.ParseInt(f[3], 10, 64)
+		if e != nil || size < 0 || size > 32<<20 {
+			return nil, fmt.Errorf("checkpoint blob limit")
+		}
+		total += size
+		if total > 256<<20 || len(entries) >= 20000 {
+			return nil, fmt.Errorf("checkpoint export limit")
+		}
+		if _, exists := entries[name]; exists {
+			return nil, fmt.Errorf("duplicate checkpoint entry")
+		}
+		entries[name] = committedEntry{f[0], f[2], size}
+	}
+	dir, err := os.MkdirTemp("", "swarm-committed-")
+	if err != nil {
+		return nil, err
+	}
+	good := false
+	defer func() {
+		if !good {
+			os.RemoveAll(dir)
+		}
+	}()
+	for name, e := range entries {
+		data, err := limitedGit(ctx, root, int(e.Size)+1, "cat-file", "blob", e.ID)
+		if err != nil || int64(len(data)) != e.Size || blobID(data) != e.ID {
+			return nil, fmt.Errorf("checkpoint blob verification failed")
+		}
+		mode := os.FileMode(0644)
+		if e.Mode == "100755" {
+			mode = 0755
+		}
+		if err = safefs.WriteFile(dir, filepath.FromSlash(name), data, mode); err != nil {
+			return nil, err
+		}
+	}
+	s := &committedSnapshot{dir, commit, entries}
+	if err = s.verify(); err != nil {
+		return nil, err
+	}
+	good = true
+	return s, nil
+}
+func safeCommittedName(p string) bool {
+	if p == "" || p == "." || path.IsAbs(p) || path.Clean(p) != p || p == ".." || strings.HasPrefix(p, "../") || strings.ContainsAny(p, "\\:") || strings.IndexFunc(p, func(c rune) bool { return c < 32 || c == 127 }) >= 0 {
+		return false
+	}
+	for _, part := range strings.Split(p, "/") {
+		if strings.EqualFold(part, ".git") {
+			return false
+		}
+	}
+	return !isEphemeral(p)
+}
+func blobID(b []byte) string {
+	h := sha1.New()
+	fmt.Fprintf(h, "blob %d%c", len(b), 0)
+	h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
+}
+func (s *committedSnapshot) close() { os.RemoveAll(s.Dir) }
+func (s *committedSnapshot) verify() error {
+	seen := 0
+	err := filepath.WalkDir(s.Dir, func(p string, d os.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		if p == s.Dir {
+			return nil
+		}
+		rel, e := filepath.Rel(s.Dir, p)
+		if e != nil {
+			return e
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			found := false
+			for name := range s.Entries {
+				if strings.HasPrefix(name, rel+"/") {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("unexpected checkpoint directory")
+			}
+			return nil
+		}
+		entry, ok := s.Entries[rel]
+		if !ok {
+			return fmt.Errorf("unexpected checkpoint file")
+		}
+		info, e := d.Info()
+		if e != nil {
+			return e
+		}
+		mode := os.FileMode(0644)
+		if entry.Mode == "100755" {
+			mode = 0755
+		}
+		if !info.Mode().IsRegular() || info.Mode().Perm() != mode || info.Size() != entry.Size {
+			return fmt.Errorf("checkpoint mode/size changed")
+		}
+		data, e := safefs.ReadFile(s.Dir, filepath.FromSlash(rel), entry.Size+1)
+		if e != nil {
+			return e
+		}
+		if blobID(data) != entry.ID {
+			return fmt.Errorf("checkpoint content changed")
+		}
+		seen++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if seen != len(s.Entries) {
+		return fmt.Errorf("checkpoint file removed")
+	}
+	return nil
+}
+
+// rebaseExecution is in-memory provenance, captured before the original check.
+// Adapters without a frozen equivalent descriptor are deliberately display-only.
+type rebaseExecution struct {
+	HeadSHA, BaseSHA string
+	Root, Go         string
+	GoHash           [32]byte
+	Env              []string
+	Supported        bool
+}
+
+func (r *checkRunner) freezeRebaseExecution() *rebaseExecution {
+	p := &rebaseExecution{Root: r.worktree, HeadSHA: r.rebaseHead, BaseSHA: r.rebaseBase}
+	if !r.runnerIsolated && r.execution.Mode == contract.ExecutionIsolated {
+		p.Root = "/workspace"
+		return p
+	}
+	// Host dependency caches cannot supply an immutable read-only mount proof.
+	for _, cache := range r.deps.Caches {
+		if cache.Ecosystem != "go" {
+			return p
+		}
+	}
+	// Go-only caches are irrelevant only when the immutable module check below
+	// proves there are no required dependencies. Other cases stay display-only.
+	caches, err := sandbox.ValidatorCacheMounts(r.buildCaches, sandbox.ValidationOnHost, false, false, r.home)
+	if err != nil {
+		return p
+	}
+	env := cleanCheckEnv(r.home, caches, r.deps)
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		return p
+	}
+	goPath, err = filepath.EvalSymlinks(goPath)
+	if err != nil || !filepath.IsAbs(goPath) {
+		return p
+	}
+	rel, err := filepath.Rel(r.worktree, goPath)
+	if err != nil || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return p
+	}
+	if rel, err := filepath.Rel(r.home, goPath); err != nil || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return p
+	}
+	hash, err := hashTool(goPath)
+	if err != nil {
+		return p
+	}
+	// A candidate-written Go configuration or inherited workspace cannot be
+	// reconstructed as an equivalent private replay. Keep the original check
+	// unchanged and withhold its execution proof instead.
+	if _, err := os.Lstat(filepath.Join(r.home, "config", "go", "env")); !errors.Is(err, os.ErrNotExist) {
+		return p
+	}
+	for dir := r.worktree; ; dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(filepath.Join(dir, "go.work")); !errors.Is(err, os.ErrNotExist) {
+			return p
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	p.Go, p.GoHash, p.Env, p.Supported = goPath, hash, env, true
+	r.frozenEnv = slices.Clone(env)
+	r.pinnedGo = goPath
+	return p
+}
+func hashTool(p string) ([32]byte, error) {
+	var result [32]byte
+	f, e := os.Open(p)
+	if e != nil {
+		return result, e
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, e := io.Copy(h, io.LimitReader(f, 128<<20+1))
+	if e != nil || n > 128<<20 {
+		return result, fmt.Errorf("toolchain hash unavailable")
+	}
+	copy(result[:], h.Sum(nil))
+	return result, nil
+}
+
+func freshReplayRunner(original *checkRunner, proof *rebaseExecution, snapshot *committedSnapshot) (*checkRunner, func(), error) {
+	if proof == nil || !proof.Supported {
+		return nil, nil, fmt.Errorf("execution descriptor unavailable for this boundary")
+	}
+	h, err := hashTool(proof.Go)
+	if err != nil || h != proof.GoHash {
+		return nil, nil, fmt.Errorf("trusted Go executable changed")
+	}
+	// External replacements or workspaces cannot be reconstructed from this commit.
+	data, err := safefs.ReadFile(snapshot.Dir, "go.mod", maxTestSource)
+	if err != nil {
+		return nil, nil, err
+	}
+	mod, err := modfile.Parse("go.mod", data, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(mod.Require) > 0 || mod.Toolchain != nil || (mod.Go != nil && version.Compare("go"+mod.Go.Version, runtime.Version()) > 0) {
+		return nil, nil, fmt.Errorf("immutable toolchain/dependency configuration unavailable")
+	}
+	for _, replace := range mod.Replace {
+		if replace.New.Version == "" {
+			p := replace.New.Path
+			if path.IsAbs(p) || strings.Contains(p, "\\") || path.Clean(p) != p || p == ".." || strings.HasPrefix(p, "../") {
+				return nil, nil, fmt.Errorf("external module replacement")
+			}
+		}
+	}
+	if _, ok := snapshot.Entries["go.work"]; ok {
+		return nil, nil, fmt.Errorf("workspace configuration unsupported")
+	}
+	home, err := os.MkdirTemp("", "swarm-replay-home-")
+	if err != nil {
+		return nil, nil, err
+	}
+	cleanup := func() { os.RemoveAll(home) }
+	copied := *original
+	copied.worktree = snapshot.Dir
+	copied.home = home
+	copied.warmup = false
+	copied.rebaseLocations = false
+	copied.rebaseOutput = &rebaseOutput{}
+	copied.pinnedGo = proof.Go
+	env := []string{}
+	for _, entry := range proof.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "APPDATA", "LOCALAPPDATA", "GOCACHE", "GOMODCACHE", "TMPDIR", "TMP", "TEMP":
+			continue
+		}
+		env = append(env, entry)
+	}
+	tmp := filepath.Join(home, "tmp")
+	if err = os.Mkdir(tmp, 0700); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	env = append(env, "HOME="+home, "USERPROFILE="+home, "XDG_CONFIG_HOME="+home, "XDG_CACHE_HOME="+home, "APPDATA="+home, "LOCALAPPDATA="+home, "GOCACHE="+filepath.Join(home, "go-build"), "GOMODCACHE="+filepath.Join(home, "go-mod"), "TMPDIR="+tmp, "TMP="+tmp, "TEMP="+tmp)
+	env = append(env, "GOENV=off", "GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off")
+	copied.frozenEnv = env
+	return &copied, cleanup, nil
+}
+
+var nativeCompileExtensions = map[string]bool{
+	".c": true, ".cc": true, ".cpp": true, ".cxx": true, ".h": true, ".hh": true, ".hpp": true, ".hxx": true, ".m": true, ".s": true, ".S": true, ".sx": true, ".f": true, ".F": true, ".for": true, ".f90": true, ".swig": true, ".swigcxx": true, ".syso": true,
+}
+
+func pureCommittedPackage(s *committedSnapshot, dir string, budget *int64) bool {
+	count := 0
+	goFiles := 0
+	for name, e := range s.Entries {
+		if path.Dir(name) != dir {
+			continue
+		}
+		count++
+		if count > 1000 || nativeCompileExtensions[path.Ext(name)] {
+			return false
+		}
+		ext := path.Ext(name)
+		// Only ordinary Go and inert package documentation/data have known roles.
+		if ext != ".go" {
+			switch path.Base(name) {
+			case "go.mod", "go.sum", ".gitignore", ".gitattributes", ".editorconfig":
+				continue
+			}
+			if ext != ".md" && ext != ".txt" && ext != ".json" && ext != ".yaml" && ext != ".yml" && ext != "" {
+				return false
+			}
+			continue
+		}
+		goFiles++
+		*budget += e.Size
+		if e.Size > maxTestSource || *budget > 16<<20 {
+			return false
+		}
+		data, err := safefs.ReadFile(s.Dir, filepath.FromSlash(name), maxTestSource)
+		if err != nil {
+			return false
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), name, data, parser.ParseComments|parser.SkipObjectResolution)
+		if err != nil {
+			return false
+		}
+		for _, imp := range parsed.Imports {
+			v, err := strconv.Unquote(imp.Path.Value)
+			if err != nil || v == "C" {
+				return false
+			}
+		}
+		for _, group := range parsed.Comments {
+			for _, comment := range group.List {
+				if strings.Contains(comment.Text, "//line") || strings.Contains(comment.Text, "/*line") || strings.Contains(comment.Text, "#line") {
+					return false
+				}
+			}
+		}
+	}
+	return goFiles > 0
+}
+func canonicalLocations(h *compilerHints, root string, s *committedSnapshot) []compilerLocation {
+	if h == nil || h.Incomplete {
+		return nil
+	}
+	result := []compilerLocation{}
+	for _, loc := range h.Locations {
+		p, ok := diagnosticPath(root, loc.File)
+		if !ok {
+			continue
+		}
+		dir, ok := packageDir(s.Dir, loc.Package)
+		if !ok || dir != path.Dir(p) {
+			continue
+		}
+		if _, ok = s.Entries[p]; !ok {
+			continue
+		}
+		// Reject nested modules instead of attributing them to the root module.
+		nested := false
+		for d := path.Dir(p); d != "."; d = path.Dir(d) {
+			if _, ok := s.Entries[d+"/go.mod"]; ok {
+				nested = true
+				break
+			}
+		}
+		if nested {
+			continue
+		}
+		loc.File = p
+		result = append(result, loc)
+	}
+	return result
+}
+
+func diagnoseRebaseLocations(ctx context.Context, runner *checkRunner, report *ValidationReport) {
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+	defer cancel()
+	seen := map[string]bool{}
+	for _, outcome := range report.CheckOutcomes {
+		command := compilerCommand(outcome.Command)
+		if command == "" || outcome.Passed || outcome.Preliminary || outcome.FallbackReason != "" || outcome.InfrastructureError {
+			continue
+		}
+		if seen[command] {
+			continue
+		}
+		seen[command] = true
+		deny := func(reason string) { report.rebaseUnavailable = reason }
+		hints := outcome.compilerHints
+		if hints == nil || hints.Incomplete {
+			deny("compiler diagnostics are incomplete; use manual pr work recovery")
+			continue
+		}
+		if len(hints.Locations) == 0 {
+			deny("compiler locations have no exact package attribution (including test-variant vet headers)")
+			continue
+		}
+		proof := outcome.executionProof
+		if proof == nil || proof.HeadSHA != report.HeadSHA || proof.BaseSHA != report.BaseSHA {
+			deny("compiler outcome belongs to a different checkpoint or baseline")
+			continue
+		}
+		snapshot, err := exportCommitted(ctx, runner.worktree, report.HeadSHA)
+		if err != nil {
+			deny("immutable checkpoint export unavailable")
+			continue
+		}
+		func() {
+			defer snapshot.close()
+			replay, cleanup, err := freshReplayRunner(runner, outcome.executionProof, snapshot)
+			if err != nil {
+				deny("equivalent isolated execution descriptor unavailable")
+				return
+			}
+			defer cleanup()
+			live := canonicalLocations(hints, outcome.executionProof.Root, snapshot)
+			if len(live) != len(hints.Locations) {
+				deny("compiler package/path attribution could not be verified")
+				return
+			}
+			duration := min(2*time.Minute, checkTimeoutForOutcome(outcome))
+			replayCtx, cancel := context.WithTimeout(ctx, duration)
+			defer cancel()
+			output := &checkCapture{}
+			err = replay.run(replayCtx, command, duration, output, output)
+			output.finish()
+			var exit *exec.ExitError
+			if replayCtx.Err() != nil || !errors.As(err, &exit) || snapshot.verify() != nil {
+				deny("independent compiler replay did not produce trustworthy matching failures")
+				return
+			}
+			reproduced := canonicalLocations(parseCompilerHints(output.raw.String()), snapshot.Dir, snapshot)
+			budget := int64(0)
+			scanned := map[string]bool{}
+			for _, loc := range live {
+				dir := path.Dir(loc.File)
+				if _, exists := scanned[dir]; !exists {
+					if len(scanned) >= 60 {
+						deny("compiler package scan limit")
+						return
+					}
+					scanned[dir] = pureCommittedPackage(snapshot, dir, &budget)
+				}
+				if !scanned[dir] || !slices.Contains(reproduced, loc) {
+					deny("compiler location lacks immutable pure-Go corroboration")
+					continue
+				}
+				report.rebasePaths = append(report.rebasePaths, loc.File)
+			}
+		}()
+	}
+	// Test locations are produced only by the fresh committed classification path.
+	if report.Repair != nil && report.Repair.rebaseProvenance && report.Repair.BaseSHA == report.BaseSHA && report.Repair.HeadSHA == report.HeadSHA {
+		report.rebasePaths = append(report.rebasePaths, report.Repair.rebaseDeclarations...)
+	}
+	slices.Sort(report.rebasePaths)
+	report.rebasePaths = slices.Compact(report.rebasePaths)
+}
+func checkTimeoutForOutcome(o CheckRunOutcome) time.Duration {
+	if o.rebaseTimeout > 0 {
+		return o.rebaseTimeout
+	}
+	return 2 * time.Minute
+}
+
+// committedDeclaration is strict over all committed test siblings. Ambiguity or
+// any unreadable/invalid source denies the entire lookup, not just that file.
+func committedDeclarationResult(s *committedSnapshot, pkg, name string) (string, bool, error) {
+	top, _, _ := strings.Cut(name, "/")
+	if !token.IsIdentifier(top) || !strings.HasPrefix(top, "Test") {
+		return "", false, fmt.Errorf("committed test declaration unavailable")
+	}
+	dir, ok := packageDir(s.Dir, pkg)
+	if !ok {
+		return "", false, fmt.Errorf("committed test declaration unavailable")
+	}
+	count, total := 0, int64(0)
+	found := ""
+	for file, e := range s.Entries {
+		if path.Dir(file) != dir || !strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		count++
+		total += e.Size
+		if count > 1000 || total > 16<<20 || e.Size > maxTestSource {
+			return "", false, fmt.Errorf("committed test declaration unavailable")
+		}
+		data, err := safefs.ReadFile(s.Dir, filepath.FromSlash(file), maxTestSource)
+		if err != nil {
+			return "", false, fmt.Errorf("committed test declaration unavailable")
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), file, data, parser.SkipObjectResolution)
+		if err != nil {
+			return "", false, fmt.Errorf("committed test declaration unavailable")
+		}
+		for _, decl := range parsed.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == top {
+				if found != "" {
+					return "", false, fmt.Errorf("committed test declaration unavailable")
+				}
+				found = file
+			}
+		}
+	}
+	return found, found != "", nil
+}
+
+func committedDeclaration(s *committedSnapshot, pkg, name string) (string, bool) {
+	file, found, err := committedDeclarationResult(s, pkg, name)
+	return file, found && err == nil
+}
+
+func classifyCommitted(ctx context.Context, runner *checkRunner, proof *rebaseExecution, cmd goTestCommand, failure goFailure, report *ValidationReport) (TestClassification, string, string) {
+	unknown := func(reason string) (TestClassification, string, string) { return TestUnclassified, reason, "" }
+	if proof == nil || proof.HeadSHA != report.HeadSHA || proof.BaseSHA != report.BaseSHA {
+		return unknown("test outcome belongs to a different checkpoint or baseline")
+	}
+	command, err := rerunCommand(cmd, failure)
+	if err != nil {
+		return unknown("test attribution unavailable")
+	}
+	candidate, err := exportCommitted(ctx, runner.worktree, report.HeadSHA)
+	if err != nil {
+		return unknown("immutable candidate unavailable")
+	}
+	defer candidate.close()
+	declaration, ok := committedDeclaration(candidate, failure.pkg, failure.name)
+	if !ok {
+		return unknown("unique committed test declaration unavailable")
+	}
+	candidateRunner, cleanup, err := freshReplayRunner(runner, proof, candidate)
+	if err != nil {
+		return unknown("equivalent candidate execution unavailable")
+	}
+	result, reason := rerun(ctx, candidateRunner, command, failure.name, maxRepairRerun)
+	cleanup()
+	if candidate.verify() != nil || candidateRunner.rebaseOutput.overflow {
+		return unknown("candidate test modified its immutable sources")
+	}
+	if result == rerunPassed {
+		return TestFlaky, "", ""
+	}
+	if result != rerunFailed {
+		return unknown("candidate rerun: " + reason)
+	}
+	base, err := exportCommitted(ctx, runner.worktree, report.BaseSHA)
+	if err != nil {
+		return unknown("immutable base unavailable")
+	}
+	defer base.close()
+	baseRunner, cleanup, err := freshReplayRunner(runner, proof, base)
+	if err != nil {
+		return unknown("equivalent base execution unavailable")
+	}
+	result, reason = rerun(ctx, baseRunner, command, failure.name, maxRepairRerun)
+	cleanup()
+	if base.verify() != nil || baseRunner.rebaseOutput.overflow {
+		return unknown("base test modified its immutable sources")
+	}
+	if result == rerunPassed {
+		return TestRegression, "", declaration
+	}
+	if result == rerunFailed {
+		return TestPreExisting, "", ""
+	}
+	if result == rerunAbsent || reason == packageFailedReason {
+		// A newly declared test can classify a missing base result only when its
+		// defining file actually differs between these exact commits.
+		ce := candidate.Entries[declaration]
+		be, exists := base.Entries[declaration]
+		_, baseDefines, lookupErr := committedDeclarationResult(base, failure.pkg, failure.name)
+		if lookupErr != nil {
+			return unknown("base declaration inspection incomplete")
+		}
+		if !baseDefines && (!exists || ce.ID != be.ID) && (result == rerunAbsent || baseHasNoPackage(base, failure.pkg)) {
+			return TestRegression, "defined only by the candidate checkpoint", declaration
+		}
+	}
+	return unknown("base rerun: " + reason)
+}
+func baseHasNoPackage(s *committedSnapshot, pkg string) bool {
+	dir, ok := packageDir(s.Dir, pkg)
+	if !ok {
+		return false
+	}
+	for file := range s.Entries {
+		if path.Dir(file) == dir && strings.HasSuffix(file, ".go") {
+			return false
+		}
+	}
+	return true
+}
+
+// rebaseOutput observes targeted-rerun truncation without changing the shared
+// test-retry implementation. It belongs to one fresh runner only.
+type rebaseOutput struct {
+	mu       sync.Mutex
+	bytes    int
+	overflow bool
+}
+
+func (o *rebaseOutput) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.bytes += len(p)
+	o.overflow = o.overflow || o.bytes > maxRerunOutput
+	return len(p), nil
 }

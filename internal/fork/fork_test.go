@@ -904,3 +904,12 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		t.Fatalf("fork coordination left no %s ledger: %v", ns, refs)
 	}
 }
+
+func TestForkRebaseRepairWideningFieldsRejected(t *testing.T) {
+	for _, field := range []string{`"allow_repair_outside_diff":true`, `"repair_extensions":[{"paths":["caller.go"]}]`, `"additional_paths":["caller.go"]`} {
+		body := RequestMarker + "\n" + `{"version":1,"operation":"invalidate-pr-evidence","issue_number":1,"pr_number":37,"rebase_context":{"status":"completed",` + field + `}}`
+		if _, err := ParseRequestComment(body); err == nil {
+			t.Errorf("contributor field accepted: %s", field)
+		}
+	}
+}

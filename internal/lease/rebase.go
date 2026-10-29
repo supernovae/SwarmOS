@@ -9,6 +9,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -16,18 +17,19 @@ import (
 // Cleanup may treat coordinator-verified unchanged patch identity as lineage;
 // it never grants plan approval or publication authority.
 type RebaseEvidence struct {
-	RepairScopeSet        bool     `json:"repair_scope_set,omitempty"`
-	RepairPaths           []string `json:"repair_paths,omitempty"`
-	RepairAttempts        int      `json:"repair_attempts,omitempty"`
-	ConflictPathsReported bool     `json:"conflict_paths_reported,omitempty"`
-	OldHead               string   `json:"old_head"`
-	NewHead               string   `json:"new_head,omitempty"`
-	OldBase               string   `json:"old_base"`
-	NewBase               string   `json:"new_base"`
-	ConflictedPaths       []string `json:"conflicted_paths,omitempty"`
-	Status                string   `json:"status"`
-	PatchIdentity         string   `json:"patch_identity"`
-	Verified              bool     `json:"verified"`
+	RepairExtensions      []RebaseRepairExtension `json:"repair_extensions,omitempty"`
+	RepairScopeSet        bool                    `json:"repair_scope_set,omitempty"`
+	RepairPaths           []string                `json:"repair_paths,omitempty"`
+	RepairAttempts        int                     `json:"repair_attempts,omitempty"`
+	ConflictPathsReported bool                    `json:"conflict_paths_reported,omitempty"`
+	OldHead               string                  `json:"old_head"`
+	NewHead               string                  `json:"new_head,omitempty"`
+	OldBase               string                  `json:"old_base"`
+	NewBase               string                  `json:"new_base"`
+	ConflictedPaths       []string                `json:"conflicted_paths,omitempty"`
+	Status                string                  `json:"status"`
+	PatchIdentity         string                  `json:"patch_identity"`
+	Verified              bool                    `json:"verified"`
 	// DroppedPaths lists paths the PR changed against OldBase but no longer
 	// changes against NewBase. Absent DroppedPathsVerified means unknown.
 	DroppedPaths         []string `json:"dropped_paths,omitempty"`
@@ -283,6 +285,65 @@ func (m *Manager) UpdateRebaseContext(ctx context.Context, n int, owner string, 
 				verifyRebaseEvidence(ctx, m.repoRoot, st, r.NewHead)
 			}
 		}
+		return nil
+	})
+}
+
+// RebaseRepairExtension records a single maintainer-authorized repair turn.
+// It is historical evidence and never changes the frozen RepairPaths.
+type RebaseRepairExtension struct {
+	OptIn   bool     `json:"opt_in"`
+	BaseSHA string   `json:"base_sha"`
+	HeadSHA string   `json:"head_sha"`
+	Attempt int      `json:"attempt"`
+	Paths   []string `json:"paths"`
+}
+
+// RecordRebaseRepairExtension has no worker-gateway operation.
+func (m *Manager) RecordRebaseRepairExtension(ctx context.Context, n int, owner string, number int, e RebaseRepairExtension) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("fork workers cannot extend repair scope")
+	}
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		r := st.LastRebase
+		if !e.OptIn || r == nil || !r.RepairScopeSet || r.Status != "completed" || st.PRRevision == nil || st.PRRevision.Number != number || e.BaseSHA != st.BaseSHA || e.HeadSHA != st.PRRevision.LocalHeadSHA || len(e.HeadSHA) != 40 || strings.Trim(e.HeadSHA, "0123456789abcdef") != "" || e.Attempt != r.RepairAttempts || e.Attempt < 1 {
+			return fmt.Errorf("repair extension context mismatch")
+		}
+		if len(r.RepairExtensions) >= 64 || len(e.Paths) == 0 || len(e.Paths) > 60 {
+			return fmt.Errorf("repair extension limit exceeded")
+		}
+		spec, err := harness.LoadValidationSpecAt(m.repoRoot, st.BaseSHA)
+		if err != nil {
+			return err
+		}
+		total := 0
+		for _, p := range e.Paths {
+			if p == ".git" || strings.HasPrefix(p, ".git/") || p == ".swarm/active" || strings.HasPrefix(p, ".swarm/active/") || path.Base(p) == "AGENTS.md" || path.Base(p) == "CLAUDE.md" || !strings.HasSuffix(p, ".go") {
+				return fmt.Errorf("invalid additional repair path")
+			}
+			for _, pattern := range spec.ProtectedPaths {
+				if validation.MatchProtectedPath(pattern, p) {
+					return fmt.Errorf("protected additional repair path")
+				}
+			}
+
+			total += len(p)
+			if !validRebasePath(p) || p == "." || len(p) > 4096 || strings.ContainsAny(p, "\\:") || strings.IndexFunc(p, func(c rune) bool { return c < 32 || c == 127 }) >= 0 || slices.Contains(r.RepairPaths, p) {
+				return fmt.Errorf("invalid additional repair path")
+			}
+		}
+		if total > 16<<10 {
+			return fmt.Errorf("repair extension too large")
+		}
+		for _, old := range r.RepairExtensions {
+			if old.Attempt == e.Attempt {
+				return fmt.Errorf("repair attempt already recorded")
+			}
+		}
+		e.Paths = append([]string(nil), e.Paths...)
+		slices.Sort(e.Paths)
+		e.Paths = slices.Compact(e.Paths)
+		r.RepairExtensions = append(r.RepairExtensions, e)
 		return nil
 	})
 }

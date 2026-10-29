@@ -403,6 +403,16 @@ At each conflicted commit, the agent first writes `.swarm/active/REBASE_PLAN.md`
 
 `--resolve` uses the same developer agent selection as `pr work`, so `--agent`, `--developer-agent`, `--headless=false`, and `--progress=false` work here too. `--instructions "..."` passes operator guidance to the planning, resolution, and repair turns and is recorded with each micro-plan and resolution in the rebase evidence. Deleted or renamed files, links, binary or very large files, SwarmOS control paths, and protected paths (unless the WorkUnit sets `allow_harness_changes`) always stay paused for you. So do files that legitimately contain conflict-marker lines, such as marker test fixtures. `pr status` and the PR's rebase context list each agent resolution with its commit and provenance. After the rebase, `--resolve` runs checks from the approved base. If checks fail, the developer receives the validation report and micro-plan in a Git-free repair snapshot. Repair edits are limited to the PR's diff against the new base and the conflicted paths, with protected paths still enforced. Each accepted attempt becomes a local checkpoint and is validated again. The trusted configuration's optional `lease.rebase_repair_limit` sets the attempt limit: omission gives two attempts, and zero disables repair. Retrying a completed rebase retains its repair count.
 
+When validation identifies a file outside that frozen repair scope, SwarmOS stops before using a repair attempt and names the file with the `swarm pr work <PR>` recovery command. A mixture of inside-scope and outside-scope failures also stops. Maintainers can opt in for one invocation:
+
+```bash
+swarm pr rebase 33 --resolve --allow-repair-outside-diff --backend github
+```
+
+This option requires maintainer authorization on both the GitHub and local backends and is unavailable in fork mode. It adds only independently verified diagnostic files for the current attempt; earlier extensions never grant permission on a retry. Each extension is recorded with its base, checkpoint, and repair attempt before the agent runs. Repair always excludes protected and control paths, even when the WorkUnit sets `allow_harness_changes` and even without the new option. Conflict resolution keeps its existing policy.
+
+Compiler locations require an exact Go package header, a complete committed pure-Go package scan, and the same position reproduced by a fresh checkpoint export. Packages with cgo, native inputs, or position directives require manual repair. Vet test-variant headers such as `[p.test]` are display-only compiler diagnostics; a test may instead qualify through a verified regression and its committed declaration. Test attribution uses fresh candidate and base snapshots, never filenames printed by a test. If SwarmOS cannot reproduce the selected execution boundary and environment with private scratch caches, it prints a manual recovery explanation. Native and OCI runners, and host runs using dependency caches without immutable mount proof, currently take this recovery path.
+
 On success, the command reports validation PASS and prints `swarm pr submit 33` (or `swarm --fork pr submit 33` for a fork). Submission remains a separate command. If repair fails, reaches its limit, or edits outside the allowed paths, SwarmOS keeps the last local checkpoint and prints the validation evidence and manual `pr work` / `pr validate` steps. Micro-plans and resolution reports appear in `pr status` and, after explicit submit, in the PR update; they never grant plan approval.
 
 Use `--continue` or `--abort` only when a rebase is in progress. An approved plan carries forward when the WorkUnit and the committed `.swarm/` policy tree are unchanged, the previous baseline is an ancestor of the new one, and the review recorded that policy tree. In that case, run `swarm pr validate 33` and `swarm pr submit 33` right after rebasing. Implementation and validation evidence always need renewal, and a human gate still requires an authenticated human review.
@@ -420,6 +430,8 @@ SwarmOS also compares the paths the PR changed against its old base with the pat
 >
 > | Message | What to do |
 > | --- | --- |
+> | `validation names files outside repair scope` | Run `swarm pr work <PR>`, or have a maintainer retry with `--resolve --allow-repair-outside-diff`. Mixed inside/outside failures stop together. |
+> | `automatic location verification unavailable` | Inspect the validation diagnostics and use `swarm pr work <PR>` for manual repair. |
 > | `rebase repair limit reached` | Keep the recorded local checkpoint, run `swarm pr work <PR>` for manual repair, then `swarm pr validate <PR>` and submit explicitly. |
 > | `human plan approval required` | Ask an independent maintainer to run `swarm issue review-plan <issue> --approve`, then retry. |
 > | `PR base tip differs from approved issue baseline` | Run `swarm issue release <issue>` if you hold a claim, then `swarm issue approve <issue>`, then retry the rebase. |

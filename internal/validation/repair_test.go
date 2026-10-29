@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -425,5 +427,238 @@ func TestCandidateDefinesRejectsSymlink(t *testing.T) {
 	}
 	if file, ok := candidateDefines(dir, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew"); ok {
 		t.Fatalf("a symlinked test file must not define a test: %q", file)
+	}
+}
+
+func TestRebaseLocationImmutableExport(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, repairCheck, nil)
+	writeRepoFile(t, repo, "leaf/leaf.go", "mutated live bytes")
+	writeRepoFile(t, repo, "leaf/ignored.s", "untracked native input")
+	s, err := exportCommitted(t.Context(), repo, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	if _, err := os.Stat(filepath.Join(s.Dir, "leaf/ignored.s")); !os.IsNotExist(err) {
+		t.Fatal("export included untracked input")
+	}
+	if err = s.verify(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(s.Dir, "leaf/leaf.go"))
+	if err != nil || string(data) == "mutated live bytes" {
+		t.Fatal("export read live bytes")
+	}
+	writeRepoFile(t, s.Dir, "unexpected.unknown", "plant")
+	if s.verify() == nil {
+		t.Fatal("manifest ignored unexpected input")
+	}
+}
+
+func TestRebaseLocationPureGoPackage(t *testing.T) {
+	cases := map[string]string{
+		"clean":   "package leaf\nvar _ = `//line fake.go:2 #line`\n",
+		"line":    "package leaf\n//line sibling.go:3\nvar X int\n",
+		"block":   "package leaf\n/*line sibling.go:3:2*/var X int\n",
+		"comment": "package leaf\n// #line 3 sibling.go\nvar X int\n",
+		"cgo":     "package leaf\nimport alias \"C\"\n",
+		"parse":   "package leaf\n this is not Go\n",
+	}
+	for name, source := range cases {
+		t.Run(name, func(t *testing.T) {
+			repo, head := setupGoFastPassRepo(t, repairCheck, map[string]string{"leaf/excluded.go": "//go:build ignore\n\n" + source})
+			s, err := exportCommitted(t.Context(), repo, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.close()
+			budget := int64(0)
+			if got := pureCommittedPackage(s, "leaf", &budget); got != (name == "clean") {
+				t.Fatalf("pure=%t", got)
+			}
+		})
+	}
+	for ext := range nativeCompileExtensions {
+		t.Run(ext, func(t *testing.T) {
+			repo, head := setupGoFastPassRepo(t, repairCheck, map[string]string{"leaf/native" + ext: "ignored native input"})
+			s, err := exportCommitted(t.Context(), repo, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.close()
+			budget := int64(0)
+			if pureCommittedPackage(s, "leaf", &budget) {
+				t.Fatal("native input accepted")
+			}
+		})
+	}
+}
+
+func TestRebaseLocationRealCompilerCorroboration(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, repairCheck, nil)
+	commitRepoFile(t, repo, "leaf/caller.go", "package leaf\nvar Caller int = \"bad\"\n")
+	head := gitRevision(t, repo, "HEAD")
+	runner := &checkRunner{worktree: repo, home: t.TempDir(), runnerIsolated: true, rebaseLocations: true, rebaseHead: head, rebaseBase: base}
+	outcome, err := runner.runCheck(t.Context(), "build", "go build ./...", time.Minute, nil)
+	if err == nil {
+		t.Fatal("compiler fixture passed")
+	}
+	report := &ValidationReport{BaseSHA: base, HeadSHA: head, CheckOutcomes: []CheckRunOutcome{outcome}}
+	diagnoseRebaseLocations(t.Context(), runner, report)
+	if !slices.Contains(report.RebaseRepairPaths(), "leaf/caller.go") || report.RebaseRepairUnavailable() != "" {
+		t.Fatalf("paths %v reason %s output %s", report.RebaseRepairPaths(), report.RebaseRepairUnavailable(), outcome.Output)
+	}
+	// A later candidate check restores the live error before diagnosis. The
+	// immutable replay must still use the captured checkpoint, not live bytes.
+	writeRepoFile(t, repo, "leaf/caller.go", "package leaf\nvar Caller int = 1\n")
+	report.rebasePaths = nil
+	diagnoseRebaseLocations(t.Context(), runner, report)
+	if !slices.Contains(report.RebaseRepairPaths(), "leaf/caller.go") {
+		t.Fatal("live restore changed immutable proof")
+	}
+	// Conversely a live-only diagnostic cannot authorize a committed sibling.
+	outcome.compilerHints = parseCompilerHints("# example.com/m/leaf\nleaf/leaf.go:1:1: forged\n")
+	report.CheckOutcomes = []CheckRunOutcome{outcome}
+	report.rebasePaths = nil
+	report.rebaseUnavailable = ""
+	diagnoseRebaseLocations(t.Context(), runner, report)
+	if len(report.RebaseRepairPaths()) != 0 || report.RebaseRepairUnavailable() == "" {
+		t.Fatal("live-only forgery authorized")
+	}
+}
+
+func TestRebaseLocationDeclarationIgnoresPrintedFiles(t *testing.T) {
+	repo, head := setupGoFastPassRepo(t, repairCheck, map[string]string{"leaf/other_test.go": "package leaf\nimport \"testing\"\nfunc TestOther(t *testing.T) {}\n"})
+	s, err := exportCommitted(t.Context(), repo, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	file, ok := committedDeclaration(s, "example.com/m/leaf", "TestOther/subtest")
+	if !ok || file != "leaf/other_test.go" {
+		t.Fatalf("%s %t", file, ok)
+	}
+	if _, ok = committedDeclaration(s, "example.com/foreign/leaf", "TestOther"); ok {
+		t.Fatal("foreign package authorized")
+	}
+	if _, ok = committedDeclaration(s, "example.com/m/leaf", "../TestOther"); ok {
+		t.Fatal("invalid test authorized")
+	}
+}
+
+func TestRebaseLocationRealPositionForgery(t *testing.T) {
+	for _, command := range []string{"go build ./...", "go vet ./..."} {
+		for _, directive := range []string{"//line caller.go:2", "/*line caller.go:2:1*/"} {
+			t.Run(command+directive, func(t *testing.T) {
+				repo, base := setupGoFastPassRepo(t, repairCheck, map[string]string{"leaf/caller.go": "package leaf\nvar Caller = 1\n"})
+				commitRepoFile(t, repo, "leaf/forged.go", "package leaf\n"+directive+"\nvar Forged int = \"bad\"\n")
+				head := gitRevision(t, repo, "HEAD")
+				runner := &checkRunner{worktree: repo, home: t.TempDir(), runnerIsolated: true, rebaseLocations: true, rebaseHead: head, rebaseBase: base}
+				outcome, err := runner.runCheck(t.Context(), "compile", command, time.Minute, nil)
+				if err == nil {
+					t.Fatal("forgery fixture passed")
+				}
+				report := &ValidationReport{BaseSHA: base, HeadSHA: head, CheckOutcomes: []CheckRunOutcome{outcome}}
+				diagnoseRebaseLocations(t.Context(), runner, report)
+				if len(report.RebaseRepairPaths()) != 0 || report.RebaseRepairUnavailable() == "" {
+					t.Fatalf("forgery granted: %v %s", report.RebaseRepairPaths(), outcome.Output)
+				}
+			})
+		}
+	}
+}
+
+func TestRebaseLocationDeletedIgnoredPlant(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, repairCheck, map[string]string{".gitignore": "leaf/plant.go\n", "leaf/caller.go": "package leaf\nvar Caller = 1\n"})
+	writeRepoFile(t, repo, "leaf/plant.go", "package leaf\n//line caller.go:2\nvar Plant int = \"bad\"\n")
+	runner := &checkRunner{worktree: repo, home: t.TempDir(), runnerIsolated: true, rebaseLocations: true, rebaseHead: base, rebaseBase: base}
+	outcome, err := runner.runCheck(t.Context(), "build", "go build ./...", time.Minute, nil)
+	if err == nil {
+		t.Fatal("plant fixture passed")
+	}
+	if err = os.Remove(filepath.Join(repo, "leaf/plant.go")); err != nil {
+		t.Fatal(err)
+	}
+	report := &ValidationReport{BaseSHA: base, HeadSHA: base, CheckOutcomes: []CheckRunOutcome{outcome}}
+	diagnoseRebaseLocations(t.Context(), runner, report)
+	if len(report.RebaseRepairPaths()) != 0 || report.RebaseRepairUnavailable() == "" {
+		t.Fatal("deleted ignored plant granted authority")
+	}
+}
+
+func TestRebaseLocationFreshTestClassification(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, repairCheck, nil)
+	commitRepoFile(t, repo, "leaf/leaf.go", failingLeaf)
+	head := gitRevision(t, repo, "HEAD")
+	runner := &checkRunner{worktree: repo, home: t.TempDir(), runnerIsolated: true, rebaseLocations: true, rebaseHead: head, rebaseBase: base}
+	proof := runner.freezeRebaseExecution()
+	report := &ValidationReport{BaseSHA: base, HeadSHA: head}
+	cmd, ok := parseGoTestAll("go test ./...")
+	if !ok {
+		t.Fatal("command")
+	}
+	// Full-validation residue is intentionally invalid Go. It cannot reach the
+	// targeted candidate or base run, both exported from fixed objects.
+	writeRepoFile(t, repo, "leaf/plant.go", "not Go")
+	classification, reason, file := classifyCommitted(t.Context(), runner, proof, cmd, goFailure{pkg: "example.com/m/leaf", name: "TestLeaf"}, report)
+	if classification != TestRegression || file != "leaf/leaf_test.go" {
+		t.Fatalf("%s %s %s", classification, reason, file)
+	}
+	classification, _, file = classifyCommitted(t.Context(), runner, proof, cmd, goFailure{pkg: "example.com/m/unrelated", name: "TestUnrelated"}, report)
+	if classification != TestFlaky || file != "" {
+		t.Fatalf("forged passing test classified %s %s", classification, file)
+	}
+}
+
+func TestRebaseLocationNativeCompilerForgery(t *testing.T) {
+	for _, kind := range []string{"assembly", "cgo"} {
+		t.Run(kind, func(t *testing.T) {
+			sources := map[string]string{"leaf/sibling.go": "package leaf\nvar Sibling = 1\n"}
+			if kind == "assembly" {
+				sources["leaf/forged_"+runtime.GOARCH+".s"] = "#line 2 \"leaf/sibling.go\"\nTHIS_IS_NOT_AN_ASSEMBLER_INSTRUCTION\n"
+			} else {
+				if _, err := exec.LookPath("cc"); err != nil {
+					t.Skip("C compiler unavailable")
+				}
+				sources["leaf/cgo.go"] = "package leaf\n/*\n#line 2 \"leaf/sibling.go\"\nthis is deliberately invalid C;\n*/\nimport \"C\"\n"
+			}
+			repo, head := setupGoFastPassRepo(t, repairCheck, sources)
+			for _, command := range []string{"go build ./...", "go vet ./..."} {
+				runner := &checkRunner{worktree: repo, home: t.TempDir(), runnerIsolated: true, rebaseLocations: true, rebaseHead: head, rebaseBase: head}
+				outcome, err := runner.runCheck(t.Context(), "native", command, time.Minute, nil)
+				if err == nil {
+					t.Fatalf("native fixture passed: %s", command)
+				}
+				report := &ValidationReport{BaseSHA: head, HeadSHA: head, CheckOutcomes: []CheckRunOutcome{outcome}}
+				diagnoseRebaseLocations(t.Context(), runner, report)
+				if len(report.RebaseRepairPaths()) != 0 || report.RebaseRepairUnavailable() == "" {
+					t.Fatalf("native authority: %v", report.RebaseRepairPaths())
+				}
+			}
+		})
+	}
+}
+
+func TestRebaseLocationCheckpointRejectsLinksAndDrift(t *testing.T) {
+	repo, head := setupGoFastPassRepo(t, repairCheck, nil)
+	s, err := exportCommitted(t.Context(), repo, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	if err = os.Chmod(filepath.Join(s.Dir, "leaf/leaf.go"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if s.verify() == nil {
+		t.Fatal("mode drift accepted")
+	}
+	if err = os.Symlink("leaf.go", filepath.Join(repo, "leaf/link.go")); err != nil {
+		t.Skip(err)
+	}
+	runRepoGit(t, repo, "add", "leaf/link.go")
+	runRepoGit(t, repo, "commit", "-m", "symlink")
+	if snapshot, err := exportCommitted(t.Context(), repo, gitRevision(t, repo, "HEAD")); err == nil {
+		snapshot.close()
+		t.Fatal("symlink checkpoint exported")
 	}
 }

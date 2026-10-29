@@ -56,7 +56,10 @@ type CheckRunOutcome struct {
 	FallbackReason string `json:"fallback_reason,omitempty"`
 	// goFailures is the raw, package-attributed Go test evidence of a failed
 	// check, kept in memory only for repair diagnosis.
-	goFailures *goEvidence
+	goFailures     *goEvidence
+	compilerHints  *compilerHints
+	executionProof *rebaseExecution
+	rebaseTimeout  time.Duration
 }
 
 // goEvidence is a failed check's attributed Go test failures. source is the
@@ -82,8 +85,10 @@ type ValidationReport struct {
 	CheckOutcomes    []CheckRunOutcome `json:"check_outcomes"`
 	// Repair is the trusted repair summary of a failed interactive
 	// validation, including base-rerun classification of failing Go tests.
-	Repair   *RepairSummary    `json:"repair,omitempty"`
-	Artifact contract.Artifact `json:"artifact"`
+	Repair            *RepairSummary    `json:"repair,omitempty"`
+	Artifact          contract.Artifact `json:"artifact"`
+	rebasePaths       []string
+	rebaseUnavailable string
 }
 
 type ValidateOptions struct {
@@ -91,6 +96,8 @@ type ValidateOptions struct {
 	// context preserves ordinary validation without reusable evidence.
 	Version string
 	ClaimID string
+	// RebaseLocations requests immutable, in-memory repair authority.
+	RebaseLocations bool
 	// OnProgress observes trusted check metadata only; callbacks must return promptly.
 	OnProgress func(progress.Event)
 	CIMode     bool
@@ -223,7 +230,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			return nil, fmt.Errorf("validation preflight: %w", err)
 		}
 	}
-	runner := &checkRunner{worktree: worktreePath, home: checkHome, buildCaches: caches, deps: deps, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated}
+	runner := &checkRunner{worktree: worktreePath, home: checkHome, buildCaches: caches, deps: deps, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated, rebaseLocations: opts.RebaseLocations, rebaseHead: headSHA, rebaseBase: baseSHA}
 	// Only the trusted base writes the persistent caches, and only where a
 	// candidate can read them back (sandbox.ValidatorCacheReusable).
 	warmNote := ""
@@ -296,6 +303,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	// Diagnosis is coordinator work after the verdict; it never changes it.
 	if !report.Passed && !opts.CIMode && ctx.Err() == nil {
 		report.Repair = diagnoseRepair(ctx, runner, report)
+		if opts.RebaseLocations {
+			diagnoseRebaseLocations(ctx, runner, report)
+		}
 		if len(report.Repair.Tests) > 0 {
 			details.WriteString("\n### Failing tests compared with the approved base\n")
 			for _, test := range report.Repair.Tests {
@@ -443,16 +453,26 @@ type checkRunner struct {
 	worktree, home string
 	// buildCaches are the validator's caches. warmup marks the trusted base
 	// run, the only one sandbox.ValidatorCacheMounts lets write them.
-	buildCaches    []sandbox.BuildCache
-	warmup         bool
-	deps           sandbox.Dependencies // read-only in every run
-	cfg            *contract.SwarmConfig
-	execution      contract.ExecutionConfig
-	runnerIsolated bool
+	buildCaches            []sandbox.BuildCache
+	warmup                 bool
+	deps                   sandbox.Dependencies // read-only in every run
+	cfg                    *contract.SwarmConfig
+	execution              contract.ExecutionConfig
+	runnerIsolated         bool
+	rebaseLocations        bool
+	rebaseHead, rebaseBase string
+	frozenEnv              []string
+	pinnedGo               string
+	rebaseOutput           *rebaseOutput
 }
 
 // run executes command under ctx, which the caller bounds by duration.
 func (r *checkRunner) run(ctx context.Context, command string, duration time.Duration, stdout, stderr io.Writer) error {
+	if r.rebaseOutput != nil {
+		stdout = io.MultiWriter(stdout, r.rebaseOutput)
+		stderr = io.MultiWriter(stderr, r.rebaseOutput)
+	}
+
 	if r.runnerIsolated {
 		return r.runOnHost(ctx, command, stdout, stderr)
 	} else if r.execution.Mode == contract.ExecutionIsolated && r.execution.Backend == contract.BackendNative {
@@ -474,10 +494,22 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 		onProgress(progress.Event{Check: name, Status: "started"})
 	}
 	start := time.Now()
+	var proof *rebaseExecution
+	if r.rebaseLocations {
+		proof = r.freezeRebaseExecution()
+	}
 	actual, output := r.goCapture(command)
 	runErr := r.run(checkCtx, actual, duration, output, output)
 	output.finish()
 	outcome := CheckRunOutcome{Name: name, Command: command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil}
+	outcome.executionProof = proof
+	if checkCtx.Err() != nil {
+		outcome.executionProof = nil
+	}
+	outcome.rebaseTimeout = duration
+	if compilerCommand(command) != "" {
+		outcome.compilerHints = parseCompilerHints(output.raw.String())
+	}
 	if runErr == nil {
 		outcome.SkippedTests = output.skips
 		outcome.SkippedTotal = output.skipTotal
@@ -508,9 +540,15 @@ func (r *checkRunner) runOnHost(ctx context.Context, command string, stdout, std
 	if err != nil {
 		return err
 	}
+	if r.pinnedGo != "" && (compilerCommand(command) != "" || strings.HasPrefix(command, "go test ")) {
+		command = "'" + strings.ReplaceAll(r.pinnedGo, "'", "'\\''") + "'" + strings.TrimPrefix(command, "go")
+	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = r.worktree
 	cmd.Env = cleanCheckEnv(r.home, caches, r.deps)
+	if r.frozenEnv != nil {
+		cmd.Env = append([]string(nil), r.frozenEnv...)
+	}
 	process.Configure(cmd)
 	cmd.Cancel = func() error { process.Stop(cmd); return nil }
 	cmd.WaitDelay = time.Second

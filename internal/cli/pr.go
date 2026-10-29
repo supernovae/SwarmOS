@@ -72,11 +72,14 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 				return fmt.Errorf("--continue and --abort are mutually exclusive")
 			}
 			if operation == "rebase" && !opts.Resolve {
-				for _, name := range []string{"agent", "developer-agent", "headless", "instructions"} {
+				for _, name := range []string{"agent", "developer-agent", "headless", "instructions", "allow-repair-outside-diff"} {
 					if cmd.Flags().Changed(name) {
 						return fmt.Errorf("--%s requires --resolve", name)
 					}
 				}
+			}
+			if opts.AllowRepairOutsideDiff && rootOpts.Fork {
+				return fmt.Errorf("--allow-repair-outside-diff is unavailable in fork mode")
 			}
 			if opts.Resolve && opts.Abort {
 				return fmt.Errorf("--resolve cannot be combined with --abort")
@@ -298,6 +301,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 	if operation == "rebase" {
 		cmd.Flags().BoolVar(&opts.Continue, "continue", false, "Continue after resolving and staging conflicts in the PR worktree")
 		cmd.Flags().BoolVar(&opts.Abort, "abort", false, "Abort the managed rebase and restore its starting local commit")
+		cmd.Flags().BoolVar(&opts.AllowRepairOutsideDiff, "allow-repair-outside-diff", false, "Allow maintainer-authorized repair of independently verified diagnostic files outside the PR diff for this run (requires --resolve)")
 		cmd.Flags().BoolVar(&opts.Resolve, "resolve", false, "Plan and resolve conflicts, validate, and repair within the trusted limit; stop ready for explicit submit")
 		cmd.Flags().StringVar(&opts.Work.AgentName, "agent", "", "Configured agent for conflict resolution (with --resolve)")
 		cmd.Flags().StringVar(&opts.Work.DeveloperAgent, "developer-agent", "", "Configured developer override for conflict resolution (with --resolve)")

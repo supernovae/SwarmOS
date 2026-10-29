@@ -80,3 +80,16 @@ func TestRebaseSummaryDroppedPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestRebaseRepairExtensionProjection(t *testing.T) {
+	st := &lease.IssueState{LastRebase: &lease.RebaseEvidence{RepairExtensions: []lease.RebaseRepairExtension{{OptIn: true, BaseSHA: "base", HeadSHA: "head", Attempt: 1, Paths: []string{"caller.go", "forged\nline.go"}}}}}
+	text := RebaseSummary(st, 37)
+	for _, want := range []string{"maintainer opt-in: true", "attempt 1", "caller.go", `forged\nline.go`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "forged\nline.go") {
+		t.Fatal("unescaped path")
+	}
+}

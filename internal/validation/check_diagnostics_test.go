@@ -514,3 +514,51 @@ func TestJSONSubtestFailureMessages(t *testing.T) {
 		}
 	}
 }
+
+func TestRebaseLocationCompilerGrammar(t *testing.T) {
+	for _, tc := range []struct {
+		line  string
+		count int
+	}{
+		{"internal/p/x.go:3:4: bad", 1}, {"vet: internal/p/x.go:3: bad", 1},
+		{"vet: vet: internal/p/x.go:3: bad", 0}, {" other: internal/p/x.go:3: bad", 0},
+		{" internal/p/x.go:3: bad", 0}, {"tool: internal/p/x.go:3: bad", 0},
+		{"internal/p/x.go:0: bad", 0},
+	} {
+		h := parseCompilerHints("# example.com/m/internal/p\n" + tc.line + "\n")
+		if len(h.Locations) != tc.count {
+			t.Errorf("%q: %+v", tc.line, h)
+		}
+	}
+	for _, command := range []string{"go test ./...", "env go build ./...", "go build -v ./...", "go build ./...; true", "go vet ./... | cat", "go build $(echo ./...)"} {
+		if compilerCommand(command) != "" {
+			t.Errorf("accepted %q", command)
+		}
+	}
+	for _, text := range []string{"# example.com/m/p\np/x.go:2: bad", strings.Repeat("x", diagnosticBytes+1)} {
+		if !parseCompilerHints(text).Incomplete {
+			t.Errorf("accepted incomplete output")
+		}
+	}
+	for _, header := range []string{"# example.com/m/p [example.com/m/p.test]", "# invalid package", "#", "# /outside"} {
+		h := parseCompilerHints("# example.com/m/p\n" + header + "\np/x.go:2: bad\n")
+		if len(h.Locations) != 0 {
+			t.Errorf("header did not reset: %s", header)
+		}
+	}
+}
+
+func TestRebaseLocationExecutionRoot(t *testing.T) {
+	for _, tc := range []struct{ root, p, want string }{
+		{"/host/repo", "internal/p.go", "internal/p.go"}, {"/workspace", "./p.go", "p.go"},
+		{"/workspace", "/workspace/internal/p.go", "internal/p.go"},
+		{"/host/repo", "/workspace/p.go", ""}, {"/workspace", "/host/repo/p.go", ""},
+		{"/workspace", "/workspace-other/p.go", ""}, {"/workspace", "/workspace/../p.go", ""},
+		{"/workspace", "C:/p.go", ""}, {"/workspace", "a\\p.go", ""}, {"/workspace", "./../p.go", ""},
+	} {
+		got, ok := diagnosticPath(tc.root, tc.p)
+		if got != tc.want || ok != (tc.want != "") {
+			t.Errorf("%+v: %q %t", tc, got, ok)
+		}
+	}
+}

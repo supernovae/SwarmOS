@@ -67,3 +67,23 @@ func TestRepairRejectsEntireOutputOutsideFixedScope(t *testing.T) {
 		})
 	}
 }
+
+func TestRepairProtectedPathsNeverReceiveHarnessException(t *testing.T) {
+	for _, allowHarness := range []bool{false, true} {
+		rv := &resolver{unit: &contract.WorkUnit{AllowHarnessChanges: allowHarness}, protected: []string{"protected/**"}}
+		for _, p := range []string{"protected/x.go", ".swarm/active/PLAN.md", "AGENTS.md", "CLAUDE.md", ".git/config"} {
+			if repairAllowed(p, []string{p}, rv) {
+				t.Fatalf("harness=%t path %s accepted", allowHarness, p)
+			}
+		}
+		dir := t.TempDir()
+		before := map[string]planFile{"allowed.go": {data: []byte("before"), mode: 0644}, "protected/x.go": {data: []byte("before"), mode: 0644}}
+		after := map[string]planFile{"allowed.go": {data: []byte("after"), mode: 0644}, "protected/x.go": {data: []byte("after"), mode: 0644}}
+		if importRepair(dir, before, after, []string{"allowed.go", "protected/x.go"}, rv) == nil {
+			t.Fatal("import accepted protected edit")
+		}
+		if _, err := os.Stat(filepath.Join(dir, "allowed.go")); !os.IsNotExist(err) {
+			t.Fatal("partial import")
+		}
+	}
+}

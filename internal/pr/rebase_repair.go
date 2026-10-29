@@ -20,14 +20,12 @@ import (
 const repairTask = `Repair only the allowed paths listed in .swarm/active/REPAIR_PATHS.md so the trusted checks in VALIDATION.md pass. Read PLAN.md, TEST_PLAN.md and REBASE_PLAN.md. Preserve the approved behavior. Do not edit any control or instruction file. This snapshot has no Git metadata; the coordinator commits accepted edits and reruns validation.`
 
 func repairAllowed(p string, paths []string, rv *resolver) bool {
-	if isControlPath(p) || p == ".git" || strings.HasPrefix(p, ".git/") || p == "AGENTS.md" || p == "CLAUDE.md" || !slices.Contains(paths, p) {
+	if p == "" || filepath.ToSlash(filepath.Clean(p)) != p || filepath.IsAbs(p) || p == ".." || strings.HasPrefix(p, "../") || strings.ContainsAny(p, "\\:") || strings.IndexFunc(p, func(c rune) bool { return c < 32 || c == 127 }) >= 0 || isControlPath(p) || p == ".git" || strings.HasPrefix(p, ".git/") || filepath.Base(p) == "AGENTS.md" || filepath.Base(p) == "CLAUDE.md" || !slices.Contains(paths, p) {
 		return false
 	}
-	if !rv.unit.AllowHarnessChanges {
-		for _, pattern := range rv.protected {
-			if validation.MatchProtectedPath(pattern, p) {
-				return false
-			}
+	for _, pattern := range rv.protected {
+		if validation.MatchProtectedPath(pattern, p) {
+			return false
 		}
 	}
 	return true
@@ -106,6 +104,19 @@ func exportRepair(ctx context.Context, worktree, dir string, st *lease.IssueStat
 // importRepair checks the entire output before importing any file. If a write
 // fails, every previously changed file is restored through the same safe root.
 func importRepair(worktree string, before, after map[string]planFile, paths []string, rv *resolver) (err error) {
+	// Recheck the complete diff before any write, including callers that do
+	// not arrive through verifyRepairTree.
+	for p, a := range after {
+		b, ok := before[p]
+		if (!ok || a.mode != b.mode || !bytes.Equal(a.data, b.data)) && !repairAllowed(p, paths, rv) {
+			return fmt.Errorf("repair changed disallowed path %s", p)
+		}
+	}
+	for p := range before {
+		if _, ok := after[p]; !ok && !repairAllowed(p, paths, rv) {
+			return fmt.Errorf("repair removed disallowed path %s", p)
+		}
+	}
 	root, err := safefs.Open(worktree)
 	if err != nil {
 		return err
@@ -148,7 +159,7 @@ func importRepair(worktree string, before, after map[string]planFile, paths []st
 	return nil
 }
 
-func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner string, rv *resolver) (*Result, error) {
+func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner string, rv *resolver, allowOutside bool) (*Result, error) {
 	cfg, err := harness.LoadConfigAt(s.Root, r.State.BaseSHA)
 	if err != nil {
 		return r, err
@@ -174,12 +185,25 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 	stop := func(cause error) (*Result, error) {
 		evidence := ""
 		if r.Validation != nil {
-			evidence = r.Validation.Artifact.Body
+			var display strings.Builder
+			for _, check := range r.Validation.CheckOutcomes {
+				if !check.Passed {
+					fmt.Fprintf(&display, "Failed check %s (%s):\n%s\n", validation.EscapeDiagnostic(check.Name), validation.EscapeDiagnostic(check.Command), check.OutputTail)
+				}
+			}
+			evidence = display.String()
+			if len(evidence) > 16<<10 {
+				evidence = evidence[:16<<10] + "\n[diagnostics truncated]"
+			}
+			lines := strings.Split(evidence, "\n")
+			if len(lines) > 60 {
+				evidence = strings.Join(lines[:60], "\n") + "\n[diagnostics truncated]"
+			}
 		}
 		return r, fmt.Errorf("%w\n%s\nLast local checkpoint: %s. Run swarm %spr work %d to repair manually, then swarm %spr validate %d; publication remains swarm %spr submit %d", cause, evidence, r.HeadSHA, forkFlag(s.Fork), r.PR.Number, forkFlag(s.Fork), r.PR.Number, forkFlag(s.Fork), r.PR.Number)
 	}
 	for {
-		checked, valErr := s.validateClaim(ctx, r, owner, r.State, s.Progress, false, false)
+		checked, valErr := s.validateClaim(ctx, r, owner, r.State, s.Progress, false, false, true)
 		if checked != nil {
 			r = checked
 		}
@@ -200,8 +224,33 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 				return stop(fmt.Errorf("validation infrastructure failed: %s", check.Name))
 			}
 		}
+		effective := []string{}
+		for _, p := range paths {
+			if repairAllowed(p, paths, rv) {
+				effective = append(effective, p)
+			}
+		}
+		var additional []string
+		for _, p := range r.Validation.RebaseRepairPaths() {
+			if !repairAllowed(p, []string{p}, rv) {
+				return stop(fmt.Errorf("diagnostic names a protected or control path: %s", validation.EscapeDiagnostic(p)))
+			}
+			if !slices.Contains(paths, p) {
+				additional = append(additional, p)
+			}
+		}
+		if reason := r.Validation.RebaseRepairUnavailable(); reason != "" {
+			return stop(fmt.Errorf("automatic location verification unavailable: %s", reason))
+		}
+		if len(additional) > 0 && !allowOutside {
+			return stop(fmt.Errorf("validation names files outside repair scope: %s", repairPathList(additional)))
+		}
+		effective = append(effective, additional...)
 		st := r.State
 		if st.LastRebase == nil || st.LastRebase.RepairAttempts >= cfg.Lease.RebaseRepairAttempts() {
+			if len(additional) > 0 {
+				return stop(fmt.Errorf("rebase repair limit reached; validation names files outside repair scope: %s", repairPathList(additional)))
+			}
 			return stop(fmt.Errorf("rebase repair limit reached"))
 		}
 		// Count before execution so cancelled/rejected turns cannot reset the budget.
@@ -211,6 +260,13 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 			return stop(err)
 		}
 		r.State = st
+		if len(additional) > 0 {
+			st, err = s.Manager.RecordRebaseRepairExtension(ctx, r.IssueNumber, owner, r.PR.Number, lease.RebaseRepairExtension{OptIn: true, BaseSHA: r.State.BaseSHA, HeadSHA: r.HeadSHA, Attempt: attempt, Paths: additional})
+			if err != nil {
+				return stop(err)
+			}
+			r.State = st
+		}
 		dir, err := os.MkdirTemp("", "swarm-repair-")
 		if err != nil {
 			return stop(err)
@@ -224,7 +280,7 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 			for _, p := range st.LastRebase.Plans {
 				fmt.Fprintf(&plan, "# Stop %s\n%s\n", p.Commit, p.Body)
 			}
-			for name, body := range map[string]string{"VALIDATION.md": r.Validation.Artifact.Body, "REBASE_PLAN.md": plan.String(), "REPAIR_PATHS.md": strings.Join(paths, "\n"), "SYSTEM_PROMPT.md": repairTask, "WORKUNIT.md": renderResolverWorkUnit(rv.unit)} {
+			for name, body := range map[string]string{"VALIDATION.md": r.Validation.Artifact.Body, "REBASE_PLAN.md": plan.String(), "REPAIR_PATHS.md": strings.Join(effective, "\n"), "SYSTEM_PROMPT.md": repairTask, "WORKUNIT.md": renderResolverWorkUnit(rv.unit)} {
 				if err := safefs.WriteFile(dir, filepath.Join(".swarm/active", name), []byte(body), 0644); err != nil {
 					return err
 				}
@@ -237,7 +293,7 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 			if err != nil {
 				return fmt.Errorf("repair agent failed: %s", strings.ReplaceAll(err.Error(), dir, "<repair workspace>"))
 			}
-			after, err := verifyRepairTree(dir, before, paths, rv)
+			after, err := verifyRepairTree(dir, before, effective, rv)
 			if err != nil {
 				return err
 			}
@@ -251,7 +307,7 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 			if dirty || rebasing || head != r.HeadSHA {
 				return fmt.Errorf("candidate changed during repair")
 			}
-			if err = importRepair(r.Worktree, before, after, paths, rv); err != nil {
+			if err = importRepair(r.Worktree, before, after, effective, rv); err != nil {
 				return err
 			}
 			head, err = workspace.Checkpoint(ctx, r.Worktree, r.Branch, workspace.CheckpointOptions{WorkUnit: rv.unit, Purpose: "repair", Detail: cfg.CommitMessageDetail()})
@@ -277,4 +333,12 @@ func forkFlag(fork bool) string {
 		return "--fork "
 	}
 	return ""
+}
+
+func repairPathList(paths []string) string {
+	escaped := make([]string, len(paths))
+	for i, p := range paths {
+		escaped[i] = validation.EscapeDiagnostic(p)
+	}
+	return strings.Join(escaped, ", ")
 }

@@ -63,12 +63,13 @@ type Service struct {
 	ResolveLog io.Writer
 }
 type Options struct {
-	Number       int
-	Work         workflow.WorkOptions
-	Instructions string
-	Continue     bool
-	Abort        bool
-	Resolve      bool
+	Number                 int
+	Work                   workflow.WorkOptions
+	Instructions           string
+	Continue               bool
+	Abort                  bool
+	Resolve                bool
+	AllowRepairOutsideDiff bool
 }
 type Result struct {
 	HarnessPolicyWarning *workspace.HarnessPolicyWarning `json:"harness_policy_warning,omitempty"`
@@ -818,6 +819,21 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 }
 
 func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
+	if opts.AllowRepairOutsideDiff {
+		if !opts.Resolve || opts.Abort {
+			return nil, fmt.Errorf("--allow-repair-outside-diff requires --resolve and cannot be combined with --abort")
+		}
+		if s.Fork || (s.Manager != nil && s.Manager.HasWorkerGateway()) {
+			return nil, fmt.Errorf("--allow-repair-outside-diff is unavailable in fork mode")
+		}
+		if s.Tracker == nil {
+			return nil, fmt.Errorf("maintainer authorization unavailable")
+		}
+		if err := s.Tracker.Authorize(ctx, "approve-task"); err != nil {
+			return nil, err
+		}
+	}
+
 	if opts.Continue && opts.Abort {
 		return nil, fmt.Errorf("--continue and --abort are mutually exclusive")
 	}
@@ -918,7 +934,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			if opts.Resolve && !rebasing && st.PRRevision != nil && st.PRRevision.Intent == "rebase" && st.LastRebase != nil && st.LastRebase.Status == "completed" && st.LastRebase.NewBase == st.BaseSHA && st.LastRebase.NewHead == head {
 				r.State = st
 				r.HeadSHA = head
-				return s.finishResolvedRebase(ctx, r, owner, rv)
+				return s.finishResolvedRebase(ctx, r, owner, rv, opts.AllowRepairOutsideDiff)
 			}
 			if !rebasing {
 				st, e = s.Manager.BeginPRRevision(ctx, r.IssueNumber, owner, opts.Number, r.PR.HeadSHA, head, branch, "rebase")
@@ -1005,7 +1021,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			r.Status = "pending"
 			r.Worktree, r.Branch = path, branch
 			if opts.Resolve {
-				return s.finishResolvedRebase(ctx, r, owner, rv)
+				return s.finishResolvedRebase(ctx, r, owner, rv, opts.AllowRepairOutsideDiff)
 			}
 			return r, nil
 		})
@@ -1085,7 +1101,7 @@ func (s *Service) Validate(ctx context.Context, number int) (result *Result, run
 // validate runs required checks on the pending revision under the renewed claim
 // and records the report as that revision's validation evidence. fastPass runs
 // changed-package tests first; only explicit pr validate requests it.
-func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session, reuse, fastPass bool) (*Result, error) {
+func (s *Service) validate(ctx context.Context, r *Result, remote string, p *progress.Session, reuse, fastPass bool, rebaseDiagnosis ...bool) (*Result, error) {
 	number := r.PR.Number
 	if r.State.PRRevision == nil {
 		return nil, fmt.Errorf("no pending PR revision to validate")
@@ -1113,7 +1129,7 @@ func (s *Service) validate(ctx context.Context, r *Result, remote string, p *pro
 }
 
 // validateClaim shares the existing fenced claim with rebase and repair.
-func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st *lease.IssueState, p *progress.Session, reuse, fastPass bool) (*Result, error) {
+func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st *lease.IssueState, p *progress.Session, reuse, fastPass bool, rebaseDiagnosis ...bool) (*Result, error) {
 	head, dirty, rebasing, e := workspace.PRHead(ctx, r.Worktree)
 	if e != nil {
 		return nil, e
@@ -1137,6 +1153,7 @@ func (s *Service) validateClaim(ctx context.Context, r *Result, owner string, st
 		observe = p.Observe
 	}
 	opts := validation.ValidateOptions{Version: s.Version, ClaimID: st.Lease.ClaimID, BaseSHA: st.BaseSHA, OnProgress: observe, ForkMode: s.Fork || s.Manager.HasWorkerGateway(), GoFastPass: fastPass, LookupEnv: s.LookupEnv, DependencyPolicy: s.dependencyPolicy(r.Worktree)}
+	opts.RebaseLocations = len(rebaseDiagnosis) == 1 && rebaseDiagnosis[0]
 	var report *validation.ValidationReport
 	var valErr error
 	if reuse {

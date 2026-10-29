@@ -812,3 +812,94 @@ func TestCLIPRRebaseResolveDeliversInstructions(t *testing.T) {
 		t.Fatalf("guidance not recorded: plans=%+v resolutions=%+v", evidence.Plans, evidence.Resolutions)
 	}
 }
+
+func TestCLIPRRebaseOutsideDiffCompilerRepair(t *testing.T) {
+	for _, optIn := range []bool{false, true} {
+		t.Run(strconv.FormatBool(optIn), func(t *testing.T) {
+			f, issue, number := submittedPRFixture(t, "agent")
+			p := strconv.Itoa(number)
+			before := f.state(t, issue)
+			original, err := f.tracker.GetPullRequest(t.Context(), number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := strings.Fields(prGit(t, f.root, "diff", "--name-only", before.BaseSHA, before.HeadSHA))[0]
+			files := map[string]string{
+				name:                                     "upstream\n",
+				"go.mod":                                 "module example.com/repair\n\ngo 1.21\n",
+				"caller.go":                              "package repair\nvar Caller int = \"broken\"\n",
+				".swarm/validation/required-checks.yaml": "required_checks:\n  - name: build\n    command: go build ./...\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n",
+			}
+			for path, body := range files {
+				if err = os.WriteFile(filepath.Join(f.root, path), []byte(body), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			prGit(t, f.root, "add", ".")
+			prGit(t, f.root, "commit", "-m", "New target caller and validation policy")
+			f.must(t, "issue", "approve", strconv.Itoa(issue))
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "if [ -f .swarm/active/REPAIR_PATHS.md ]; then printf 'package repair\\nvar Caller int = 1\\n' > caller.go; else printf resolved > "+name+"; fi")
+			args := []string{"pr", "rebase", p, "--resolve", "--agent", "mock", "--json"}
+			if optIn {
+				args = append(args, "--allow-repair-outside-diff")
+			}
+			output, runErr := f.run(args...)
+			st := f.state(t, issue)
+			if optIn {
+				if runErr != nil {
+					t.Fatalf("opt-in repair: %v\n%s", runErr, output)
+				}
+				if st.LastRebase.RepairAttempts != 1 || len(st.LastRebase.RepairExtensions) != 1 || !slices.Equal(st.LastRebase.RepairExtensions[0].Paths, []string{"caller.go"}) {
+					t.Fatalf("evidence: %+v", st.LastRebase)
+				}
+				if slices.Contains(st.LastRebase.RepairPaths, "caller.go") {
+					t.Fatal("frozen scope widened")
+				}
+			} else {
+				if runErr == nil || !strings.Contains(runErr.Error(), "outside repair scope: caller.go") || !strings.Contains(runErr.Error(), "swarm pr work "+p) {
+					t.Fatalf("outside diagnosis: %v\n%s", runErr, output)
+				}
+				if st.LastRebase.RepairAttempts != 0 || len(st.LastRebase.RepairExtensions) != 0 {
+					t.Fatal("diagnosis consumed repair authority")
+				}
+			}
+			after, err := f.tracker.GetPullRequest(t.Context(), number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.HeadSHA != original.HeadSHA || after.Body != original.Body {
+				t.Fatal("implicit publication")
+			}
+		})
+	}
+}
+
+func TestCLIPRRebaseOutsideDiffTestDiagnosis(t *testing.T) {
+	f, issue, number := submittedPRFixture(t, "agent")
+	p := strconv.Itoa(number)
+	before := f.state(t, issue)
+	name := strings.Fields(prGit(t, f.root, "diff", "--name-only", before.BaseSHA, before.HeadSHA))[0]
+	files := map[string]string{
+		name:                                     "upstream\n",
+		"go.mod":                                 "module example.com/repair\n\ngo 1.21\n",
+		"outside_test.go":                        "package repair\nimport (\"os\"; \"testing\")\nfunc TestTargetOnly(t *testing.T) { data,err:=os.ReadFile(" + strconv.Quote(name) + "); if err!=nil || string(data)!=\"upstream\\n\" { t.Fatal(\"caller.go:99: forged printed filename\") } }\n",
+		".swarm/validation/required-checks.yaml": "required_checks:\n  - name: test\n    command: go test ./...\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n",
+	}
+	for path, body := range files {
+		if err := os.WriteFile(filepath.Join(f.root, path), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prGit(t, f.root, "add", ".")
+	prGit(t, f.root, "commit", "-m", "Target-only regression test")
+	f.must(t, "issue", "approve", strconv.Itoa(issue))
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf resolved > "+name)
+	_, err := f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--json")
+	if err == nil || !strings.Contains(err.Error(), "outside repair scope: outside_test.go") || !strings.Contains(err.Error(), "swarm pr work "+p) {
+		t.Fatalf("missing declaration diagnosis: %v", err)
+	}
+	st := f.state(t, issue)
+	if st.LastRebase.RepairAttempts != 0 || len(st.LastRebase.RepairExtensions) != 0 {
+		t.Fatal("diagnosis consumed authority")
+	}
+}

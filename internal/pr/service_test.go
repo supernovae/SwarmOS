@@ -1238,3 +1238,36 @@ func TestRebaseRoutineReapprovalSingleHint(t *testing.T) {
 		})
 	}
 }
+
+type repairAuthorizationTracker struct {
+	tracker.Tracker
+	calls int
+	err   error
+}
+
+func (t *repairAuthorizationTracker) Authorize(_ context.Context, permission string) error {
+	if permission != "approve-task" {
+		panic("incorrect authority")
+	}
+	t.calls++
+	return t.err
+}
+func TestRebaseRepairAuthorizationPrecedesAllOtherWork(t *testing.T) {
+	denied := errors.New("maintainer required")
+	tr := &repairAuthorizationTracker{err: denied}
+	s := &Service{Tracker: tr}
+	if _, err := s.Rebase(t.Context(), Options{Resolve: true, AllowRepairOutsideDiff: true}); !errors.Is(err, denied) || tr.calls != 1 {
+		t.Fatalf("authorization: %v %d", err, tr.calls)
+	}
+	for _, opts := range []Options{{AllowRepairOutsideDiff: true}, {Resolve: true, Abort: true, AllowRepairOutsideDiff: true}} {
+		tr.calls = 0
+		if _, err := s.Rebase(t.Context(), opts); err == nil || tr.calls != 0 {
+			t.Fatal("invalid options reached authority/mutation")
+		}
+	}
+	s.Fork = true
+	tr.calls = 0
+	if _, err := s.Rebase(t.Context(), Options{Resolve: true, AllowRepairOutsideDiff: true}); err == nil || tr.calls != 0 {
+		t.Fatal("fork reached authority/mutation")
+	}
+}

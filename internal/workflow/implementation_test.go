@@ -221,3 +221,49 @@ func TestRoleScopedInstructionsDelivery(t *testing.T) {
 		}
 	}
 }
+
+func TestTesterOutcomeParsing(t *testing.T) {
+	guidance := &agent.RunResult{Guidance: []string{"VERDICT: FAIL"}}
+	if got := parseTesterOutcome(guidedReport("", guidance)); got != testerUnknown {
+		t.Fatalf("guidance supplied outcome: %q", got)
+	}
+	if got := parseTesterOutcome(guidedReport("VERDICT: PASS", guidance)); got != testerPass {
+		t.Fatalf("guidance overrode outcome: %q", got)
+	}
+
+	for _, tc := range []struct {
+		body string
+		want testerOutcome
+	}{
+		{"# ISSUE-176 validation (tester, advisory)\nVERDICT: FAIL. The implementation was not delivered, so validation is blocked on reopening plan review.", testerFail},
+		{"VERDICT: FAIL", testerFail},
+		{"VERDICT: BLOCKED", testerBlocked},
+		{"VERDICT: PASS", testerPass},
+		{"Independent regression review passed.\nAC2 awaits coordinator policy.", testerUnknown},
+		{"All criteria remain unmet.", testerUnknown},
+		{"", testerUnknown},
+		{"MISSING", testerUnknown},
+		{"<!-- swarm:acceptance-evidence:start -->", testerUnknown},
+		{"Partial coverage.", testerUnknown},
+		{"# title\n## second\nVERDICT: FAIL", testerUnknown},
+		{"Introduction\nVERDICT: FAIL", testerUnknown},
+		{"VERDICT: FAILED", testerUnknown},
+		{"Verdict: fail", testerUnknown},
+		{"```\nVERDICT: FAIL\n```", testerUnknown},
+		{"> VERDICT: FAIL", testerUnknown},
+		{"## Acceptance\nVERDICT: FAIL", testerUnknown},
+		{"A regression printed FAIL but passed.", testerUnknown},
+		{"", testerUnknown},
+		{"\r\n# Title\r\n\r\nVERDICT: PASS: Reviewed.\r\n", testerPass},
+		{"VERDICT: BLOCKED - Missing fixture.", testerBlocked},
+		{"VERDICT: PASS\nVERDICT: FAIL", testerPass},
+		{"VERDICT: FAIL\nVERDICT: PASS", testerFail},
+		{"VERDICT: FAIL trailing prose", testerUnknown},
+		{"VERDICT: FAIL.", testerUnknown},
+		{"# Title\n", testerUnknown},
+	} {
+		if got := parseTesterOutcome(tc.body); got != tc.want {
+			t.Errorf("%q: got %q want %q", tc.body, got, tc.want)
+		}
+	}
+}

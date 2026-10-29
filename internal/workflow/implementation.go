@@ -55,3 +55,35 @@ func blockingReason(report string) string {
 	}
 	return ""
 }
+
+// testerOutcome is a scheduling hint from the current tester, never validation authority.
+type testerOutcome string
+
+const (
+	testerUnknown testerOutcome = ""
+	testerPass    testerOutcome = "PASS"
+	testerFail    testerOutcome = "FAIL"
+	testerBlocked testerOutcome = "BLOCKED"
+)
+
+var testerDeclaration = regexp.MustCompile(`^VERDICT:[ \t]+(PASS|FAIL|BLOCKED)(?:$|(?:\.|:| -)[ \t]+\S.*$)`)
+
+func parseTesterOutcome(report string) testerOutcome {
+	lines := strings.Split(strings.TrimSpace(canonicalReport(report)), "\n")
+	line := strings.TrimSpace(lines[0])
+	if strings.HasPrefix(line, "# ") && strings.TrimSpace(strings.TrimPrefix(line, "# ")) != "" {
+		lines = lines[1:]
+		for len(lines) > 0 && strings.TrimSpace(lines[0]) == "" {
+			lines = lines[1:]
+		}
+		if len(lines) == 0 {
+			return testerUnknown
+		}
+		line = strings.TrimSpace(lines[0])
+	}
+	match := testerDeclaration.FindStringSubmatch(line)
+	if match == nil {
+		return testerUnknown
+	}
+	return testerOutcome(match[1])
+}

@@ -18,15 +18,60 @@ func TestNativeTimeoutPreservesPatchWithoutImport(t *testing.T) {
 	writeWorkerFixture(t, dir, "changed", "dirty input\n")
 	writeWorkerFixture(t, dir, "deleted", "gone\n")
 	writeWorkerFixture(t, dir, "untracked", "original untracked\n")
-	err := withNativeWorkspace(context.Background(), dir, WorkerOptions{Role: "developer", Limits: contract.AgentLimits{Wall: 100 * time.Millisecond}}, func(ctx context.Context, work, _ string) error {
-		writeWorkerFixture(t, work, "changed", "finished part\n")
-		writeWorkerFixture(t, work, "added", "new text without newline")
-		if err := os.Remove(filepath.Join(work, "deleted")); err != nil {
-			return err
+	clock := &fakeBudgetClock{now: time.Now()}
+	ctx, cancel := context.WithCancel(t.Context())
+	ready := make(chan struct{})
+	completion := make(chan error, 1)
+	done := false
+	t.Cleanup(func() {
+		cancel()
+		if done {
+			return
 		}
-		<-ctx.Done()
-		return ctx.Err()
+		select {
+		case <-completion:
+		case <-time.After(60 * time.Second):
+			t.Error("native workspace did not finish after cancellation")
+		}
 	})
+	go func() {
+		completion <- withNativeWorkspaceClock(ctx, dir, WorkerOptions{Role: "developer", Limits: contract.AgentLimits{Wall: 100 * time.Millisecond}}, clock.clock(), func(ctx context.Context, work, _ string) error {
+			if err := os.WriteFile(filepath.Join(work, "changed"), []byte("finished part\n"), 0600); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(work, "added"), []byte("new text without newline"), 0600); err != nil {
+				return err
+			}
+			if err := os.Remove(filepath.Join(work, "deleted")); err != nil {
+				return err
+			}
+			close(ready)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+	select {
+	case <-ready:
+	case err := <-completion:
+		done = true
+		t.Fatalf("native workspace completed before patch readiness: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("native workspace did not reach patch readiness")
+	}
+	select {
+	case err := <-completion:
+		done = true
+		t.Fatalf("native workspace completed before clock advancement: %v", err)
+	default:
+	}
+	clock.advance(100 * time.Millisecond)
+	var err error
+	select {
+	case err = <-completion:
+		done = true
+	case <-time.After(30 * time.Second):
+		t.Fatal("native workspace did not finish after budget expiration")
+	}
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "100ms") || !strings.Contains(err.Error(), "developer-timeout.patch") {
 		t.Fatal(err)
 	}

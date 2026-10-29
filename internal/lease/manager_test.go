@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"github.com/supernovae/swarmos/internal/testutil/gittransport"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1049,5 +1052,209 @@ func TestArtifactProvenanceRecordsEffort(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "effort") {
 		t.Fatalf("attestation without effort changed serialization: %s", raw)
+	}
+}
+
+func TestGitCASRetryMutationOnce(t *testing.T) {
+	for _, mode := range []string{"retry", "lost", "retry-lost", "exhaust", "ok-old", "ack-successor", "malformed", "malformed-sha", "read-error", "namespace", "pre-malformed", "pre-desired", "disappear", "cancel", "deadline", "final-lost", "deny-lost", "backoff", "held-reject", "held"} {
+		t.Run(mode, func(t *testing.T) {
+			m, _, iss := testManager(t)
+			ctx := context.Background()
+			if _, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
+				t.Fatal(err)
+			}
+			state, _, err := m.load(ctx, iss.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := m.repoRoot
+			remote := filepath.Join(t.TempDir(), "remote.git")
+			gitfixture.Run(t, root, "init", "--bare", remote)
+			gitfixture.Run(t, root, "remote", "add", "upstream", remote)
+			store := coordination.NewGitStoreWithLayout(root, "upstream", coordination.BranchLayout)
+			body, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = store.CompareAndSwap(ctx, iss.Number, "", body); err != nil {
+				t.Fatal(err)
+			}
+			m.store = store
+			var tr *gittransport.Transport
+			if mode == "held" || mode == "held-reject" {
+				tr = gittransport.New(t, remote)
+				tr.Configure(t, root, "upstream")
+				transportMode := "holder"
+				if mode == "held-reject" {
+					transportMode = "holder-reject"
+				}
+				tr.Set("receive", transportMode)
+			}
+
+			real, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			script := `#!/bin/sh
+case "$*" in
+ *hash-object*|*mktree*|*commit-tree*) echo "$*" >> "$CAS_LOG.prep";;
+esac
+if [ "$1" = push ]; then
+ echo "$*" >> "$CAS_LOG"
+ count=$(wc -l < "$CAS_LOG")
+ case "$CAS_MODE" in
+ held-reject) echo 'remote: fatal error in commit_refs' >&2; exec "$CAS_REAL" "$@";;
+ final-lost) if [ "$count" != 3 ]; then echo 'remote: fatal error in commit_refs' >&2; exit 1; fi;;
+ backoff) touch "$CAS_LOG.backoff"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ retry|retry-lost) if [ "$count" = 1 ]; then echo 'remote: fatal error in commit_refs' >&2; exit 1; fi;;
+ exhaust) echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ deny) echo 'remote: fatal error in commit_refs' >&2; echo 'remote: policy rejected' >&2; exit 1;;
+ ok-old) exit 0;;
+ read-error|namespace|pre-malformed|pre-desired|pre-successor) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ malformed-sha) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ malformed) touch "$CAS_LOG.bad"; echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ esac
+ "$CAS_REAL" "$@" || exit $?
+ case "$CAS_MODE" in
+ successor|ack-successor|disappear)
+ spec="$4"; desired=${spec%%:*}; ref=${spec#*:}
+ if [ "$CAS_MODE" = disappear ]; then "$CAS_REAL" push upstream ":$ref" >/dev/null 2>&1; exit 0; fi
+ tree=$("$CAS_REAL" rev-parse "$desired^{tree}")
+ successor=$(echo successor | "$CAS_REAL" -c user.name=Test -c user.email=test@example.invalid commit-tree "$tree" -p "$desired")
+ "$CAS_REAL" push upstream "$successor:$ref" >/dev/null 2>&1 || exit 2
+ [ "$CAS_MODE" = ack-successor ] && exit 0
+ echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ cancel|deadline) touch "$CAS_LOG.landed"; while :; do :; done;;
+ deny-lost) echo 'remote: policy rejected' >&2; exit 1;;
+ lost|retry-lost|final-lost) echo 'remote: fatal error in commit_refs' >&2; exit 1;;
+ esac
+ exit 0
+fi
+if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.backoff" ]; then
+ "$CAS_REAL" "$@"; touch "$CAS_LOG.waiting"; exit 0
+fi
+if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.bad" ]; then
+ case "$CAS_MODE" in
+ malformed-sha) spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; ref=${spec#*:}; echo "not-a-sha $ref"; exit 0;;
+ read-error) echo inspection-failed >&2; exit 1;;
+ namespace) "$CAS_REAL" "$@"; echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/swarm-state/issue-1"; echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/swarm/state/issue-1"; exit 0;;
+ pre-*)
+ if [ ! -f "$CAS_LOG.read" ]; then touch "$CAS_LOG.read"; exec "$CAS_REAL" "$@"; fi
+ case "$CAS_MODE" in
+ pre-malformed) echo malformed; exit 0;;
+ pre-desired|pre-successor)
+ spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; desired=${spec%%:*}; ref=${spec#*:}
+ "$CAS_REAL" push upstream "$desired:$ref" >/dev/null 2>&1 || exit 2
+ if [ "$CAS_MODE" = pre-successor ]; then
+ tree=$("$CAS_REAL" rev-parse "$desired^{tree}")
+ successor=$(echo successor | "$CAS_REAL" -c user.name=Test -c user.email=test@example.invalid commit-tree "$tree" -p "$desired")
+ "$CAS_REAL" push upstream "$successor:$ref" >/dev/null 2>&1 || exit 2
+ fi
+ exec "$CAS_REAL" "$@";;
+ esac;;
+ esac
+ echo malformed; exit 0
+fi
+exec "$CAS_REAL" "$@"
+`
+			if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			log := filepath.Join(dir, "calls")
+			t.Setenv("CAS_REAL", real)
+			t.Setenv("CAS_MODE", mode)
+			t.Setenv("CAS_LOG", log)
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			var stop context.CancelFunc
+			if mode == "cancel" || mode == "deadline" || mode == "backoff" {
+				if mode == "deadline" {
+					ctx, stop = context.WithTimeout(ctx, 500*time.Millisecond)
+				} else {
+					ctx, stop = context.WithCancel(ctx)
+				}
+				defer stop()
+				if mode == "cancel" || mode == "backoff" {
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						ticker := time.NewTicker(time.Millisecond)
+						defer ticker.Stop()
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+								marker := log + ".landed"
+								if mode == "backoff" {
+									marker = log + ".waiting"
+								}
+								if _, e := os.Stat(marker); e == nil {
+									if mode == "backoff" {
+										time.Sleep(20 * time.Millisecond)
+									}
+									stop()
+									return
+								}
+							}
+						}
+					}()
+					defer func() { stop(); <-done }()
+				}
+			}
+			count := 0
+			_, err = m.mutate(ctx, iss.Number, "local-dev", func(st *IssueState) error { count++; st.Lease.Phase = "once"; return nil })
+			if count != 1 {
+				t.Fatalf("callback count %d: %v", count, err)
+			}
+			switch mode {
+			case "retry", "lost", "retry-lost", "pre-desired", "final-lost", "deny-lost", "held":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "held-reject":
+				var cleanup *gitcredential.KnownResultCleanupError
+				var exit *exec.ExitError
+				if !errors.As(err, &cleanup) || cleanup.ExitCode == 0 || !errors.As(err, &exit) || !errors.Is(err, gitcredential.ErrCleanupIncomplete) || errors.Is(err, coordination.ErrPublicationUnknown) || errors.Is(err, coordination.ErrConflict) {
+					t.Fatalf("known failure lost: %v", err)
+				}
+
+			default:
+				if !errors.Is(err, coordination.ErrPublicationUnknown) || errors.Is(err, coordination.ErrConflict) {
+					t.Fatalf("non-conflict unknown required: %v", err)
+				}
+			}
+			if tr != nil {
+				if tr.Receives() != 1 {
+					t.Fatalf("receives %d", tr.Receives())
+				}
+				tr.Release()
+				tr.Join()
+			}
+
+			if mode == "cancel" || mode == "deadline" || mode == "backoff" {
+				cause := context.Canceled
+				if mode == "deadline" {
+					cause = context.DeadlineExceeded
+				}
+				var exit *exec.ExitError
+				if !errors.Is(err, cause) || (mode != "backoff" && !errors.As(err, &exit)) {
+					t.Fatalf("context/exit cause lost: %v", err)
+				}
+			}
+			if mode == "retry" || mode == "lost" || mode == "retry-lost" || mode == "ack-successor" || mode == "pre-desired" {
+				loaded, _, e := store.Load(ctx, iss.Number)
+				if e != nil {
+					t.Fatal(e)
+				}
+				var st IssueState
+				if e = json.Unmarshal(loaded, &st); e != nil {
+					t.Fatal(e)
+				}
+				if st.Lease.Phase != "once" {
+					t.Fatalf("mutation missing: %s", loaded)
+				}
+			}
+		})
 	}
 }

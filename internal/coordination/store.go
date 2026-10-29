@@ -245,21 +245,124 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 	if old == "" {
 		leaseArg = ref + ":"
 	}
-	if err = s.push(ctx, "push", s.Remote(), "--force-with-lease="+leaseArg, commit+":"+ref); err != nil {
-		if publicationStatus(err) {
-			return "", err
-		}
-		actual, readErr := s.remoteSHA(ctx, ref)
-		if readErr == nil && actual != old {
-			return "", ErrConflict
-		}
-		if errors.Is(readErr, ErrNotFound) && old != "" {
-			return "", ErrConflict
-		}
-		return "", fmt.Errorf("push coordination state: %w", err)
-	}
-	return commit, nil
+	return s.publishState(ctx, ref, old, commit, []string{"push", s.Remote(), "--force-with-lease=" + leaseArg, commit + ":" + ref})
 }
+
+// commitRefsTransient deliberately recognizes only the observed complete Git
+// diagnostic lines. Its input must already be redacted and must exclude argv.
+func commitRefsTransient(diagnostic, ref string) bool {
+	lower := strings.ToLower(diagnostic)
+	for _, denial := range []string{"authentication", "could not read username", "permission", "access denied", "authorization", "not authorized", "403", "401", "policy", "protected branch", "gh006", "gh013", "hook", "stale info", "non-fast-forward", "[rejected]"} {
+		if strings.Contains(lower, denial) {
+			return false
+		}
+	}
+	for _, line := range strings.Split(diagnostic, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "remote: fatal error in commit_refs" || line == "! [remote rejected] "+ref+" -> "+ref+" (fatal error in commit_refs)" {
+			return true
+		}
+	}
+	return false
+}
+
+// observeStatePush uses the existing bounded runner exactly once. Command is
+// constructed only to obtain the same credential redactor used by run.
+func (s *GitStore) observeStatePush(ctx context.Context, args []string) (string, error) {
+	_, redact, err := gitcredential.Command(ctx, s.root, args...)
+	if err != nil {
+		return "", err
+	}
+	out, err := gitcredential.Network(ctx, s.root, true, args...)
+	diagnostic := redact(strings.TrimSpace(string(out)))
+	if err != nil {
+		err = fmt.Errorf("git state push: %w: %s", err, diagnostic)
+	}
+	return diagnostic, err
+}
+
+func (s *GitStore) publishState(ctx context.Context, ref, old, desired string, args []string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		diagnostic, pushErr := s.observeStatePush(ctx, args)
+		unknown := func(stage string, cause error) (string, error) {
+			return "", fmt.Errorf("state push attempt %d %s: %w", attempt, stage,
+				errors.Join(ErrPublicationUnknown, pushErr, cause, ctx.Err()))
+		}
+		var cleanup *gitcredential.KnownResultCleanupError
+		knownCleanup := errors.As(pushErr, &cleanup)
+		acknowledged := pushErr == nil || (knownCleanup && cleanup.ExitCode == 0)
+		if errors.Is(pushErr, gitcredential.ErrInterrupted) {
+			return unknown("interrupted", nil)
+		}
+		if knownCleanup && !acknowledged {
+			return "", fmt.Errorf("state push attempt %d failed: %w", attempt, pushErr)
+		}
+		// The same ordered partition is used after failure and immediately
+		// before a retry. Missing is expected only for absent-ref creation.
+		inspect := func() (string, error) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			actual, err := s.remoteSHA(ctx, ref)
+			if errors.Is(err, ErrNotFound) {
+				return "", nil
+			}
+			if err == nil {
+				if _, parseErr := hex.DecodeString(actual); parseErr != nil || len(actual) != len(desired) {
+					return "", fmt.Errorf("invalid state head in remote inspection")
+				}
+			}
+			return actual, err
+		}
+		actual, readErr := inspect()
+		if readErr != nil {
+			return unknown("inspection failed", readErr)
+		}
+		if actual == desired {
+			return desired, nil
+		}
+		if acknowledged {
+			return unknown("acknowledged but desired head no longer observed", nil)
+		}
+		if err := ctx.Err(); err != nil {
+			return unknown("cancelled", err)
+		}
+		if actual != old {
+			return "", fmt.Errorf("state push attempt %d remote head changed: %w: %w", attempt, ErrConflict, pushErr)
+		}
+		if !commitRefsTransient(diagnostic, ref) {
+			return "", fmt.Errorf("state push attempt %d failed: %w", attempt, pushErr)
+		}
+		if attempt == 3 {
+			return unknown("retry budget exhausted", nil)
+		}
+		timer := time.NewTimer(time.Duration(attempt) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return unknown("backoff cancelled", ctx.Err())
+		case <-timer.C:
+		}
+		actual, readErr = inspect()
+		if readErr != nil {
+			return unknown("pre-retry inspection failed", readErr)
+		}
+		if actual == desired {
+			return desired, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return unknown("pre-retry inspection cancelled", err)
+		}
+		if actual != old {
+			return "", fmt.Errorf("state push attempt %d pre-retry head changed: %w: %w", attempt, ErrConflict, pushErr)
+		}
+	}
+	panic("unreachable state push budget")
+}
+
 func (s *GitStore) CompareAndSwapAndPublish(ctx context.Context, n int, old string, next []byte, branch, head string) (string, error) {
 	return s.publishCheckpoint(ctx, n, old, next, branch, head, nil)
 }

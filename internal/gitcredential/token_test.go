@@ -139,3 +139,14 @@ func TestCommandTokenStaysOutOfArgumentsAndAgentInputs(t *testing.T) {
 		t.Fatal("diagnostics leaked credentials")
 	}
 }
+
+func TestCredentialCommandDoesNotInheritForkReadSecret(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX credential command fixture")
+	}
+	t.Setenv("SWARM_GITHUB_FORK_READ_TOKEN", "read-secret")
+	out, err := runTokenCommand(context.Background(), `if [ -n "$SWARM_GITHUB_FORK_READ_TOKEN" ]; then exit 9; fi; printf writer-token`)
+	if err != nil || string(out) != "writer-token" {
+		t.Fatalf("credential provider inherited verification secret: %v", err)
+	}
+}

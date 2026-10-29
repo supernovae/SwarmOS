@@ -90,6 +90,7 @@ jobs:
       - name: Execute fork worker request against upstream state refs
         env:
           SWARM_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SWARM_GITHUB_FORK_READ_TOKEN: ${{ secrets.SWARM_GITHUB_FORK_READ_TOKEN }}
           SWARM_REPO: ${{ github.repository }}
         run: |
           "$RUNNER_TEMP/swarm-bin/swarm" fork-coordinator --event "$GITHUB_EVENT_PATH"

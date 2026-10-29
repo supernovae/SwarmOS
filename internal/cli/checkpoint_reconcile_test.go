@@ -140,7 +140,7 @@ func TestCheckpointReconcileFlags(t *testing.T) {
 	t.Parallel()
 	f := newCLIFixture(t)
 	help := f.must(t, "issue", "reconcile", "--help")
-	for _, flag := range []string{"--checkpoint", "--expected-head", "--candidate-head", "--dry-run"} {
+	for _, flag := range []string{"--checkpoint", "--expected-head", "--candidate-head", "--dry-run", "--progress"} {
 		if !strings.Contains(help, flag) {
 			t.Fatalf("missing flag %s", flag)
 		}

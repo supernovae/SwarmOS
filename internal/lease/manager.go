@@ -1724,11 +1724,6 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			art.Metadata["implementation_trusted_branch"] = branch
 			art.Metadata["implementation_trusted_revision"] = implementationRevision(st)
 		}
-		if trusted {
-			art.Metadata["validation_trusted_origin"] = "coordinator"
-			art.Metadata["validation_trusted_owner"] = st.Lease.Owner
-			art.Metadata["validation_trusted_claim"] = st.Lease.ClaimID
-		}
 		if art.IssueNumber == 0 {
 			art.IssueNumber = n
 		}
@@ -1875,6 +1870,9 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			}
 			st.Artifacts = kept
 		}
+		if art.Type == contract.ArtifactValidation {
+			return m.insertValidationArtifact(st, n, art, trusted)
+		}
 		for i, a := range st.Artifacts {
 			if a.Type == art.Type {
 				art.Version = a.Version + 1
@@ -1914,6 +1912,53 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 	}
 	return st, nil
 }
+
+// insertValidationArtifact changes only the pending state; its caller owns the
+// claim fence and atomic publication. Imported evidence never gains authority.
+func (m *Manager) insertValidationArtifact(st *IssueState, n int, art contract.Artifact, trusted bool) error {
+	metadata := make(map[string]string, len(art.Metadata))
+	for k, v := range art.Metadata {
+		if !strings.HasPrefix(k, "validation_trusted_") {
+			metadata[k] = v
+		}
+	}
+	art.Metadata = metadata
+	if trusted {
+		art.Metadata["validation_trusted_origin"] = "coordinator"
+		art.Metadata["validation_trusted_owner"] = st.Lease.Owner
+		art.Metadata["validation_trusted_claim"] = st.Lease.ClaimID
+	}
+	if art.IssueNumber == 0 {
+		art.IssueNumber = n
+	}
+	if art.IssueNumber != n {
+		return fmt.Errorf("artifact issue identity mismatch")
+	}
+	if art.Version == 0 {
+		art.Version = 1
+	}
+	if art.ID == "" {
+		art.ID = fmt.Sprintf("art-%d-%s", n, art.Type)
+	}
+	if art.CreatedAt.IsZero() {
+		art.CreatedAt = m.nowFn()
+	}
+
+	art.Metadata["content_sha256"] = hash(art.Body)
+	if err := contract.ValidateArtifact(&art); err != nil {
+		return err
+	}
+	for i, a := range st.Artifacts {
+		if a.Type == art.Type {
+			art.Version = a.Version + 1
+			st.Artifacts[i] = art
+			return nil
+		}
+	}
+	st.Artifacts = append(st.Artifacts, art)
+	return nil
+}
+
 func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, head string) (*IssueState, error) {
 	if m.gateway != nil {
 		return m.gateway.Apply(ctx, ForkRequest{

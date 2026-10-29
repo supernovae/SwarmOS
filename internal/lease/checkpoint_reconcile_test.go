@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -56,7 +58,8 @@ func newReconciliationFixture(t *testing.T, command string, local ...bool) *reco
 	}
 	f.write(m.repoRoot, ".swarm/config.yaml", string(cfg)+"\nexecution:\n  mode: trusted-local\n")
 	f.write(m.repoRoot, ".swarm/validation/required-checks.yaml", fmt.Sprintf("required_checks:\n  - name: check\n    command: %q\n    timeout: 1m\nprotected_paths:\n  - .swarm/validation/**\n  - .swarm/config.yaml\n", command))
-	f.git(m.repoRoot, "add", ".swarm")
+	f.write(m.repoRoot, ".gitignore", ".swarm/active/\n")
+	f.git(m.repoRoot, "add", ".swarm", ".gitignore")
 	f.git(m.repoRoot, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "validation baseline")
 	f.remote = filepath.Join(t.TempDir(), "remote.git")
 	f.git(m.repoRoot, "init", "--bare", "--initial-branch=main", f.remote)
@@ -344,7 +347,7 @@ func TestReconcileCheckpointValidationRaces(t *testing.T) {
 	if _, err := exec.LookPath("mkfifo"); err != nil {
 		t.Skip("requires named-pipe check barrier")
 	}
-	for _, scenario := range []string{"publication from another clone", "remote changed", "claim changed", "plan changed", "candidate changed", "candidate dirtied"} {
+	for _, scenario := range []string{"publication from another clone", "publication rejected", "expired", "remote changed", "claim changed", "plan changed", "candidate changed", "candidate dirtied"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			pipes := t.TempDir()
@@ -355,11 +358,22 @@ func TestReconcileCheckpointValidationRaces(t *testing.T) {
 			}
 			command := fmt.Sprintf("printf ready > '%s'; read signal < '%s'", ready, release)
 			f := newReconciliationFixture(t, command)
+			var now atomic.Int64
+			now.Store(time.Now().UnixNano())
+			if scenario == "expired" {
+				f.m.SetNowFunc(func() time.Time { return time.Unix(0, now.Load()) })
+			}
+			if scenario == "publication rejected" {
+				f.m.store = &rejectCheckpointPublicationStore{f.m.store.(*coordination.GitStore)}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			before := f.state()
 			done := make(chan error, 1)
-			go func() { _, err := f.m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false); done <- err }()
+			go func() {
+				_, err := f.m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false, validation.ValidateOptions{Version: "v1.2.3"})
+				done <- err
+			}()
 			input, err := os.Open(ready)
 			if err != nil {
 				t.Fatal(err)
@@ -370,6 +384,8 @@ func TestReconcileCheckpointValidationRaces(t *testing.T) {
 			}
 			input.Close()
 			switch scenario {
+			case "expired":
+				now.Store(before.Lease.ExpiresAt.Add(time.Second).UnixNano())
 			case "publication from another clone":
 				second := filepath.Join(t.TempDir(), "second")
 				f.git(f.m.repoRoot, "clone", f.remote, second)
@@ -881,4 +897,103 @@ func TestCheckpointRecoveryPlanFences(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckpointValidationContext(t *testing.T) {
+	for _, scenario := range []string{"base", "claim", "pinned modes", "state hash", "tracked plan", "unignored plan", "tracked tests", "unignored tests", "check failure", "snapshot modified"} {
+		t.Run(scenario, func(t *testing.T) {
+			counter := filepath.Join(t.TempDir(), "calls")
+			command := fmt.Sprintf("printf x >> %q; test \"$(cat .swarm/active/PLAN.md)\" = 'original approved plan'; test \"$(cat .swarm/active/TEST_PLAN.md)\" = tests", counter)
+			if scenario == "check failure" {
+				command += "; false"
+			}
+			if scenario == "snapshot modified" {
+				command += "; echo changed >> feature.txt"
+			}
+			f := newReconciliationFixture(t, command)
+			opts := validation.ValidateOptions{Version: "v1.2.3", CIMode: true, ForkMode: true, RunnerIsolated: true, ReportProtectedChanges: true}
+			if scenario == "base" {
+				opts.BaseSHA = strings.Repeat("a", 40)
+			}
+			if scenario == "claim" {
+				opts.ClaimID = "caller"
+			}
+			if scenario == "state hash" {
+				st, rev, err := f.m.load(t.Context(), f.n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				st.Artifacts[0].Metadata["content_sha256"] = "bad"
+				raw, _ := json.Marshal(st)
+				if _, err = f.m.store.CompareAndSwap(t.Context(), f.n, rev, raw); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.HasPrefix(scenario, "tracked") || strings.HasPrefix(scenario, "unignored") {
+				name := "PLAN.md"
+				if strings.HasSuffix(scenario, "tests") {
+					name = "TEST_PLAN.md"
+				}
+				f.write(f.path, ".swarm/active/"+name, "candidate input")
+				if strings.HasPrefix(scenario, "tracked") {
+					f.git(f.path, "add", "-f", ".swarm/active/"+name)
+				} else {
+					f.write(f.path, ".gitignore", "!.swarm/\n!.swarm/active/\n.swarm/active/*\n!.swarm/active/"+name+"\n")
+					f.git(f.path, "add", ".gitignore")
+					if err := os.Remove(filepath.Join(f.path, ".swarm/active/"+name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				f.git(f.path, "commit", "-m", "unsafe snapshot inputs")
+				f.b = f.git(f.path, "rev-parse", "HEAD")
+				f.review("replacement approved plan for " + f.b)
+			}
+			// Live active files cannot supply validation inputs.
+			f.write(f.path, ".swarm/active/PLAN.md", "operator text")
+			if strings.HasPrefix(scenario, "tracked") || strings.HasPrefix(scenario, "unignored") {
+				f.git(f.path, "reset", "--hard", "HEAD")
+				f.git(f.path, "clean", "-fd")
+			}
+			before := f.state()
+			got, err := f.m.ReconcileCheckpoint(t.Context(), f.n, "local-dev", f.a, f.b, false, opts)
+			if scenario == "pinned modes" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, a := range got.State.Artifacts {
+					if a.Type == contract.ArtifactValidation {
+						found = a.Metadata["validation_version"] == "v1.2.3" && a.Metadata["validation_trusted_origin"] == "coordinator"
+					}
+				}
+				if !found {
+					t.Fatal("missing genuine trusted fingerprint")
+				}
+			} else {
+				if err == nil {
+					t.Fatal("unsafe reconciliation accepted")
+				}
+				if !reflect.DeepEqual(before, f.state()) {
+					t.Fatal("failure persisted authority")
+				}
+				if scenario == "base" || scenario == "claim" {
+					if !errors.Is(err, ErrClaimFence) {
+						t.Fatal(err)
+					}
+				}
+				if scenario != "check failure" && scenario != "snapshot modified" {
+					if _, err := os.Stat(counter); !os.IsNotExist(err) {
+						t.Fatal("check executed before rejection")
+					}
+				}
+			}
+		})
+	}
+}
+
+// Reject after snapshot validation and final observation, at the atomic boundary.
+type rejectCheckpointPublicationStore struct{ *coordination.GitStore }
+
+func (s *rejectCheckpointPublicationStore) CompareAndSwapAndReconcileCheckpoint(context.Context, int, string, []byte, string, string, string) (string, error) {
+	return "", errors.New("fixture atomic publication rejected")
 }

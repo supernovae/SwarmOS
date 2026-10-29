@@ -16,6 +16,8 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -42,11 +44,11 @@ type CheckpointReconciliation struct {
 
 // ReconcileCheckpoint accepts only an explicit, clean local task candidate. It
 // never retries publication against a newer state or remote branch.
-func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expected, candidate string, dryRun bool) (*CheckpointReconciliation, error) {
+func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expected, candidate string, dryRun bool, options ...validation.ValidateOptions) (*CheckpointReconciliation, error) {
 	if dryRun {
 		return m.PrepareCheckpoint(ctx, n, owner, expected, candidate, false)
 	}
-	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, false, false, false, "")
+	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, false, false, false, "", options...)
 }
 
 // PrepareCheckpoint authenticates and observes recovery without acquiring a
@@ -55,7 +57,7 @@ func (m *Manager) PrepareCheckpoint(ctx context.Context, n int, owner, expected,
 	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, true, true, probe, "")
 }
 
-func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expected, candidate string, dryRun, prepare, probe bool, pinned string) (*CheckpointReconciliation, error) {
+func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expected, candidate string, dryRun, prepare, probe bool, pinned string, options ...validation.ValidateOptions) (*CheckpointReconciliation, error) {
 	if m.gateway != nil {
 		return nil, fmt.Errorf("checkpoint reconciliation is upstream-only; use the fork PR revision workflow")
 	}
@@ -237,16 +239,52 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if reviewRequired {
 		return result, fmt.Errorf("%w: stage a replacement plan naming candidate %s and obtain fresh plan review with swarm issue review-plan %d before reconciling", ErrApprovalRequired, candidate, n)
 	}
+	validationOpts := validation.ValidateOptions{BaseSHA: st.BaseSHA, ClaimID: st.Lease.ClaimID, CIMode: true}
+	if len(options) > 1 {
+		return nil, fmt.Errorf("one validation context required")
+	}
+	if len(options) == 1 {
+		o := options[0]
+		if (o.BaseSHA != "" && o.BaseSHA != st.BaseSHA) || (o.ClaimID != "" && o.ClaimID != st.Lease.ClaimID) {
+			return nil, fmt.Errorf("%w: validation context mismatch", ErrClaimFence)
+		}
+		validationOpts.Version, validationOpts.LookupEnv = o.Version, o.LookupEnv
+		validationOpts.DependencyPolicy, validationOpts.OnProgress = o.DependencyPolicy, o.OnProgress
+		v := strings.TrimSpace(o.Version)
+		validationOpts.CIMode = v == "" || v == "dev" || strings.HasSuffix(v, "+dirty")
+	}
 	// Clone a pinned candidate so checks cannot validate a moving live checkout.
 	snapshot, err := os.MkdirTemp("", "swarm-checkpoint-validation-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(snapshot)
-	if _, err = checkpointGit(ctx, m.repoRoot, "clone", "--shared", "--no-checkout", "--", m.repoRoot, snapshot); err != nil {
-		return nil, err
+	preparationStarted := time.Now()
+	if validationOpts.OnProgress != nil {
+		validationOpts.OnProgress(progress.Event{Check: "snapshot preparation", Status: "started"})
 	}
-	if _, err = checkpointGit(ctx, snapshot, "checkout", "--detach", candidate); err != nil {
+	err = func() error {
+		if _, err = checkpointGit(ctx, m.repoRoot, "clone", "--shared", "--no-checkout", "--", m.repoRoot, snapshot); err != nil {
+			return err
+		}
+		if _, err = checkpointGit(ctx, snapshot, "checkout", "--detach", candidate); err != nil {
+			return err
+		}
+		if !validationOpts.CIMode {
+			if err = prepareCheckpointValidation(ctx, snapshot, st); err != nil {
+				return err
+			}
+		}
+		return nil
+	}()
+	if validationOpts.OnProgress != nil {
+		status := "PASS"
+		if err != nil {
+			status = "FAIL"
+		}
+		validationOpts.OnProgress(progress.Event{Check: "snapshot preparation", Status: status, StageElapsed: time.Since(preparationStarted)})
+	}
+	if err != nil {
 		return nil, err
 	}
 	// Snapshot preparation can race reapproval or another fenced state write.
@@ -261,7 +299,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if err = m.checkStateClaim(ctx, n, owner, beforeValidation); err != nil {
 		return nil, err
 	}
-	report, err := validation.Validate(ctx, snapshot, wu, validation.ValidateOptions{BaseSHA: st.BaseSHA, CIMode: true})
+	report, err := validation.Validate(ctx, snapshot, wu, validationOpts)
 	if err != nil {
 		return result, err
 	}
@@ -308,8 +346,9 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	for k, v := range ReviewBindings(st) {
 		art.Metadata[k] = v
 	}
-	art.Metadata["content_sha256"] = hash(art.Body)
-	st.Artifacts = append(st.Artifacts, art)
+	if err = m.insertValidationArtifact(st, n, art, true); err != nil {
+		return nil, err
+	}
 	stat, err := checkpointGit(ctx, m.repoRoot, "diff", "--stat", st.BaseSHA, candidate, "--")
 	if err != nil {
 		return nil, err
@@ -318,17 +357,34 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	implementation.Metadata["head_sha"] = candidate
 	implementation.Metadata["content_sha256"] = hash(implementation.Body)
 	st.Artifacts = append(st.Artifacts, implementation)
-	raw, err := marshalCoordinatorState(st)
+	publicationStarted := time.Now()
+	if validationOpts.OnProgress != nil {
+		validationOpts.OnProgress(progress.Event{Check: "checkpoint publication", Status: "started"})
+	}
+	err = func() error {
+		raw, err := marshalCoordinatorState(st)
+		if err != nil {
+			return err
+		}
+		if gitStore {
+			_, err = publisher.CompareAndSwapAndReconcileCheckpoint(ctx, n, rev, raw, st.Branch, candidate, expected)
+		} else {
+			_, err = m.store.CompareAndSwap(ctx, n, rev, raw)
+		}
+		if err != nil {
+			return fmt.Errorf("%w: checkpoint publication rejected: %w", ErrClaimFence, err)
+		}
+		return nil
+	}()
+	if validationOpts.OnProgress != nil {
+		status := "PASS"
+		if err != nil {
+			status = "FAIL"
+		}
+		validationOpts.OnProgress(progress.Event{Check: "checkpoint publication", Status: status, StageElapsed: time.Since(publicationStarted)})
+	}
 	if err != nil {
 		return nil, err
-	}
-	if gitStore {
-		_, err = publisher.CompareAndSwapAndReconcileCheckpoint(ctx, n, rev, raw, st.Branch, candidate, expected)
-	} else {
-		_, err = m.store.CompareAndSwap(ctx, n, rev, raw)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("%w: checkpoint publication rejected: %w", ErrClaimFence, err)
 	}
 	m.project(ctx, n, st)
 	result.State = st
@@ -396,11 +452,11 @@ func (m *Manager) AcquirePreparedCheckpoint(ctx context.Context, n int, p *Check
 
 // ReconcilePreparedCheckpoint pins the post-admission revision through the
 // existing validation and atomic publication path.
-func (m *Manager) ReconcilePreparedCheckpoint(ctx context.Context, n int, p *CheckpointReconciliation) (*CheckpointReconciliation, error) {
+func (m *Manager) ReconcilePreparedCheckpoint(ctx context.Context, n int, p *CheckpointReconciliation, options ...validation.ValidateOptions) (*CheckpointReconciliation, error) {
 	if p == nil || !p.prepared || p.ClaimRequired {
 		return nil, ErrClaimFence
 	}
-	return m.reconcileCheckpoint(ctx, n, p.owner, p.expected, p.candidate, false, false, false, p.revision)
+	return m.reconcileCheckpoint(ctx, n, p.owner, p.expected, p.candidate, false, false, false, p.revision, options...)
 }
 
 func (m *Manager) loadCheckpointPreview(ctx context.Context, n int) (*IssueState, string, error) {
@@ -596,6 +652,46 @@ func (m *Manager) checkCheckpointPlanObservation(ctx context.Context, st *IssueS
 	o := workspace.InspectCheckpoint(ctx, m.repoRoot, remote, st.Lease.IssueNumber, st.Branch, expected)
 	if o.Error != "" || o.Worktree.Error != "" || o.LocalBranch.Error != "" || (!local && (o.RemoteBranch.Error != "" || o.RemoteBranch.SHA != expected)) || o.Dirty || o.Rebasing || o.AttachedBranch != st.Branch || o.Worktree.SHA != candidate || o.LocalBranch.SHA != candidate {
 		return ErrClaimFence
+	}
+	return nil
+}
+
+// Prepare ignored, untracked inputs from the exact state reviewed by the gate.
+func prepareCheckpointValidation(ctx context.Context, snapshot string, st *IssueState) error {
+	bindings := ReviewBindings(st)
+	inputs := []struct {
+		name, digest string
+		kind         contract.ArtifactType
+		body         string
+	}{
+		{name: ".swarm/active/PLAN.md", digest: "plan_digest", kind: contract.ArtifactDesign},
+		{name: ".swarm/active/TEST_PLAN.md", digest: "test_plan_digest", kind: contract.ArtifactTestPlan},
+	}
+	for i := range inputs {
+		in := &inputs[i]
+		for _, a := range st.Artifacts {
+			if a.Type == in.kind {
+				in.body = a.Body
+				if a.Metadata["content_sha256"] != hash(a.Body) {
+					return ErrApprovalRequired
+				}
+			}
+		}
+		if in.body == "" || bindings[in.digest] != hash(in.body) {
+			return ErrApprovalRequired
+		}
+		tracked, err := checkpointGit(ctx, snapshot, "ls-files", "--", in.name)
+		if err != nil || tracked != "" {
+			return fmt.Errorf("checkpoint validation input must be untracked: %s", in.name)
+		}
+		if _, err = checkpointGit(ctx, snapshot, "check-ignore", "--", in.name); err != nil {
+			return fmt.Errorf("checkpoint validation input must be ignored: %s", in.name)
+		}
+	}
+	for _, in := range inputs {
+		if err := safefs.WriteFile(snapshot, in.name, []byte(in.body), 0600); err != nil {
+			return err
+		}
 	}
 	return nil
 }

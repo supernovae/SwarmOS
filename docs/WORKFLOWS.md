@@ -184,6 +184,8 @@ The final result stays on stdout, including when using `--json`. Pass `--progres
 
 Progress messages contain stage metadata only. Failed harness runs report the role, exit status when available, and cancellation or timeout without printing captured transcripts, command arguments, or nested harness diagnostics.
 
+Explicit checkpoint planning and agent review use the same stage progress. `swarm issue reconcile --checkpoint` reports admission, snapshot preparation, required checks and checkpoint publication; `--progress=false` silences its progress. Dry runs perform inspection without progress or checks.
+
 `swarm issue validate`, `swarm issue submit`, `swarm pr validate`, and `swarm pr submit` also report progress to stderr by default. Each trusted required check gets a start line and a PASS/FAIL line with elapsed time; while it runs, a heartbeat names the check every 15 seconds. Phases between checks also receive running lines. Use `--progress=false` to silence progress while keeping the same stdout and `--json` results.
 
 Issue submission announces checkpoint creation, validation, checkpoint push/record, draft PR creation or update, and submission recording. PR submission validates the existing checkpoint or reuses an exact matching passing run from the same worker and claim, publishes and records the revision, then updates review evidence and rebase metadata. Retries announce only the phases they execute. Check output remains captured in the validation report.
@@ -207,7 +209,7 @@ With `plan_mode: agent`, manual staging is disabled: use `swarm issue review-pla
 
 When required checks fail during issue or PR work, the coordinator writes a trusted repair brief, `.swarm/active/REPAIR.md`. It names the failing checks and tests and marks each failing Go test as a regression, pre-existing at the approved base, or flaky. If every failure is pre-existing, the run stops for a maintainer instead of starting a developer round. Otherwise the same run starts up to `lease.validation_repair_limit` developer repair rounds (one by default, zero disables them). Each round is a fenced checkpoint followed by the full trusted checks, and only those checks decide whether the run passed. When the limit is used up, or a round changes nothing, the run stops with exit code `3` and suggests `--phase implement`. `swarm issue status` and `swarm pr status` show the same classification. See [Repair brief for failed validation](developer.md#repair-brief-for-failed-validation).
 
-Released builds can reuse coordinator-recorded validation during `swarm issue submit` and `swarm pr submit` when the checkpoint tree, approved base, trusted policy, claim, worker, and swarm version match. Reuse output and PR evidence show the original run's age and tree SHA. Explicit `issue validate` and `pr validate` always run checks, as do CI, development builds, and fork submissions.
+Released builds can reuse coordinator-recorded validation during `swarm issue submit` and `swarm pr submit` when the checkpoint tree, approved base, trusted policy, claim, worker, and swarm version match. Successful checkpoint reconciliation records validation atomically with the checkpoint, so an unchanged submit can reuse that run under the same rules. Reuse output and PR evidence show the original run's age and tree SHA. Explicit `issue validate` and `pr validate` always run checks, as do CI, development builds, and fork submissions.
 
 ### Policy-selected execution profiles
 

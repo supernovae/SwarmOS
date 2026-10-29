@@ -59,7 +59,7 @@ func ForkBranchName(issueNum int, claimID string) string {
 	return fmt.Sprintf("swarm/issue-%d-%s", issueNum, strings.TrimSpace(claimID))
 }
 
-// DefaultForkRemote names a contributor's personal fork remote.
+// DefaultForkRemote names a contributor's writable personal or organization fork remote.
 const DefaultForkRemote = "fork"
 
 // DefaultUpstreamRemote names the project remote when none is selected.

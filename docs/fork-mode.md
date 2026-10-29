@@ -2,7 +2,7 @@
 
 SwarmOS uses Git compare-and-swap (CAS) refs (`refs/heads/swarm-state/issue-<N>`, or `refs/swarm/state/issue-<N>` with `ledger_namespace: hidden`) to coordinate task leases, checkpoint bindings, and review gates without standing up an external database. In same-repository mode (the default), workers push state refs and task branches directly to `origin`.
 
-Open-source contributors typically do not have write access to the upstream repository. **Fork Mode (`--fork`)** lets external contributors claim approved `WorkUnit` issues, run coding agents in isolated worktrees, push checkpoints to their own personal GitHub fork, open validated cross-repository Draft PRs, and keep revising those PRs after review—while keeping issue approval, validation policy, and human review strictly under upstream maintainer control.
+Open-source contributors typically do not have write access to the upstream repository. **Fork Mode (`--fork`)** lets external contributors claim approved `WorkUnit` issues, run coding agents in isolated worktrees, push checkpoints to a writable personal or organization-owned GitHub fork, open validated cross-repository Draft PRs, and keep revising those PRs after review—while keeping issue approval, validation policy, and human review strictly under upstream maintainer control.
 
 ---
 
@@ -61,6 +61,8 @@ Every cross-trust-boundary step in fork mode is designed to fail closed:
   Every successful fork mutation records the GitHub comment ID in `IssueState.LastForkRequestID` inside the upstream CAS commit. Any request with `comment_id <= LastForkRequestID` is rejected as a replay. On client timeout, `swarm --fork` re-queries the original request comment ID and upstream `IssueState.LastForkRequestID` before returning an error; it never blindly posts a second mutation request.
 - **Forged Coordinator Responses:**
   The contributor CLI polls specifically for a `<!-- swarm:fork-result:v1 -->` comment referencing its exact `request_id` authored by the verified `github-actions[bot]` identity (`Bot` user type), and then re-reads `refs/heads/swarm-state/issue-<N>` from `origin` to confirm `LastForkRequestID == request_id`.
+- **Organization Fork Authorization:**
+  Discovery uses the logged-in contributor account. For an organization fork, every coordinator request rechecks that the API-verified comment author has write, maintain, or admin permission on that exact canonical fork. Organization membership, repository permissions belonging to the coordinator, and role titles alone do not authorize the contributor. Missing or revoked permission evidence rejects the request.
 - **Human Review Artifact Spoofing:**
   Contributors can record agent plan/test/review artifacts under their active `claim_id`, but the coordinator rejects any `update-artifact` request with `Metadata["kind"] == "human"`, as well as any maintainer-only approval or review operation.
 - **Per-Contributor Claim Exhaustion (Sybil / Hoarding Mitigation):**
@@ -71,6 +73,7 @@ Every cross-trust-boundary step in fork mode is designed to fail closed:
   When the same contributor resumes an issue budget pause from the same fork, SwarmOS verifies the previous checkpoint and carries it into the new claim's namespaced branch. A different contributor or fork receives a fresh branch as described below. `swarm --fork issue status <N>` shows the total allowance, current expiry, and used/remaining renewals. An agent execution timeout continues to use the separate recovery-patch workflow.
 
   Fork work branches are namespaced per claim: `swarm/issue-<N>-<claim_id>`. If a contributor's lease expires and another contributor acquires the issue, `AcquireFork` issues a fresh `claim_id`, updates `ForkRepo`, and clears the previous claim's `Branch`, `HeadSHA`, and head-bound implementation/validation artifacts inside the same atomic CAS while preserving the previous contributor's fork branch untouched on their own fork. Subsequent `renew`, `record-checkpoint`, or `record-submission` requests carrying the displaced `claim_id` fail with `ErrClaimFence`.
+  Once the previous lease is released or expired, another verified writer of the same organization fork may freshly acquire the issue or its linked PR, even if they were not a recorded contributor. The new actor must independently satisfy upstream trust, approved-collaborator, claim-budget and task/policy approval requirements. An active lease cannot be taken over; later revision and submission steps still require plan approval and exact-head checks. Fresh issue acquisition clears the previous head-bound evidence as above, while PR acquisition retains the linked PR.
 - **Malicious Fork `.swarm/` or `.github/workflows/` Changes:**
   Policy and prompts are loaded from `BaseSHA` via `git show <BaseSHA>:...`. Candidate changes touching `.swarm/**` or `.github/workflows/**` are rejected by `validation.Validate` when `ForkMode: true` regardless of `allow_harness_changes`.
 - **Mutable Fork Heads & Partial Publication:**
@@ -78,9 +81,9 @@ Every cross-trust-boundary step in fork mode is designed to fail closed:
 - **Cross-Repository Draft PR Verification & Retry:**
   `swarm issue submit --fork` opens (or reuses) a Draft PR from `<fork-owner>:swarm/issue-<N>-<claim_id>` into the upstream base branch, then sends `record-submission` with `pr_number`. The coordinator fetches the PR from the upstream GitHub API (`GET /repos/<upstream>/pulls/<number>`) and verifies that it is a Draft PR, targets the upstream repository and base branch, originates from `IssueState.ForkRepo` and `IssueState.Branch`, and matches `IssueState.HeadSHA` before recording the canonical API `HTMLURL` and updating labels. If verification fails, the PR stays an unrecorded draft for inspection or retry.
 - **Contributor PR Revisions:**
-  After review, the contributor whose fork holds the PR head can revise it with `swarm --fork pr work|stage|rebase|validate|submit`. The coordinator grants `acquire-pr` only when the issue's authoritative state already links that PR, the PR is open and targets upstream, its head is on the recorded fork and branch, and the requesting actor owns that fork. A new revision (`begin-pr-revision`) must start at the PR's current published head. Ordinary development clears previous plan, review, and validation evidence. For a rebase, the coordinator retains a plan only when its authenticated review, unchanged task and policy tree, and approved baseline ancestry permit it. Revision intent and local conflict reports cannot supply approval identities or grant carry-forward. Implementation and validation evidence always need renewal. Local checkpoints (`record-pr-head`) stay in the contributor's worktree. `complete-pr-revision` succeeds only after the coordinator confirms on GitHub that the PR head is exactly the revision's validated head, that the commit on the fork descends from the approved `BaseSHA`, that a passing validation report exists for that head, and that the revised plan is approved. Contributor reviews are advisory, so a maintainer's `swarm issue review-plan <N> --approve` is required for a new plan. An eligible carried human approval can be reused after a rebase; the coordinator verifies published commits and patch identity before completion.
+  After review, an authorized contributor whose personal or organization fork holds the PR head can revise it with `swarm --fork pr work|stage|rebase|validate|submit`. The coordinator grants `acquire-pr` only when the issue's authoritative state already links that PR, the PR is open and targets upstream, its head is on the recorded fork and branch, and the requesting actor owns the personal fork or has verified write, maintain, or admin permission on the organization fork. A new revision (`begin-pr-revision`) must start at the PR's current published head. Ordinary development clears previous plan, review, and validation evidence. For a rebase, the coordinator retains a plan only when its authenticated review, unchanged task and policy tree, and approved baseline ancestry permit it. Revision intent and local conflict reports cannot supply approval identities or grant carry-forward. Implementation and validation evidence always need renewal. Local checkpoints (`record-pr-head`) stay in the contributor's worktree. `complete-pr-revision` succeeds only after the coordinator confirms on GitHub that the PR head is exactly the revision's validated head, that the commit on the fork descends from the approved `BaseSHA`, that a passing validation report exists for that head, and that the revised plan is approved. Contributor reviews are advisory, so a maintainer's `swarm issue review-plan <N> --approve` is required for a new plan. An eligible carried human approval can be reused after a rebase; the coordinator verifies published commits and patch identity before completion.
 - **Pushes Outside SwarmOS:**
-  Contributors can always push to their own fork branch directly. SwarmOS does not block this, but it never mistakes those commits for verified work: `swarm pr status` reports `unverified-head` when the PR head differs from the last verified head, and the PR's recorded plan, validation, and provenance attestation keep describing that earlier head. Upstream CI (`swarm repo validate --base <PR base>`) still runs the trusted-base required checks and protected-path policy on every pushed head, and maintainers merge through GitHub review as usual.
+  Contributors with GitHub write access can push to their fork branch directly. SwarmOS does not block this, but it never mistakes those commits for verified work: `swarm pr status` reports `unverified-head` when the PR head differs from the last verified head, and the PR's recorded plan, validation, and provenance attestation keep describing that earlier head. Upstream CI (`swarm repo validate --base <PR base>`) still runs the trusted-base required checks and protected-path policy on every pushed head, and maintainers merge through GitHub review as usual.
 - **Disabled Actions, Oversized Payloads, or Denied Ref Pushes:**
   Payloads exceeding GitHub's comment size limit are rejected by the client before posting. If GitHub Actions is disabled or branch protection blocks the Action from pushing the state and contributor ledger refs (`refs/heads/swarm-state/*` and `refs/heads/swarm-contributors/*`, or `refs/swarm/state/*` and `refs/swarm/contributors/*` in hidden mode), the client times out with setup guidance and never falls back to treating comments as leases.
 
@@ -100,6 +103,12 @@ swarm repo init --fork-coordinator
 
 > [!TIP]
 > The coordinator reads pull requests to verify contributor submissions and PR revisions, so its workflow needs `pull-requests: read` alongside `contents: write` and `issues: write`. Rerunning `swarm repo init` adds it to an untouched coordinator workflow; if you customized the workflow, add the permission by hand.
+
+### Repository Access for Organization and Private Forks
+
+Use the same logged-in contributor account for discovery, issue requests, and PR revisions. For an organization fork, grant that account write access to the fork. For private upstream repositories, first enable private forking in the applicable organization or enterprise policy and confirm that the contributor can access the upstream and fork.
+
+Separately, confirm that the upstream coordinator can read the canonical fork metadata, query the contributor’s collaborator-permission endpoint on that fork, and fetch the required Git commits. The default upstream installation token’s access to foreign-fork permission endpoints is unverified, including public forks; it may also lack metadata or Git fetch access to private organization forks. Check these accesses with the default coordinator token before using this workflow. If an endpoint or fetch is inaccessible, the request fails closed; revisit the setup and support plan with the maintainer.
 
 ### Optional `.swarm/config.yaml` Settings
 
@@ -124,10 +133,10 @@ swarm issue approve 42 --backend github
 
 ## 4. Contributor Walkthrough (`swarm --fork`)
 
-Contributors never need write access to `origin`. Instead, they clone the upstream repository as `origin` and add their personal GitHub fork as the `fork` remote:
+Contributors never need write access to `origin`. Instead, they clone the upstream repository as `origin` and add a writable personal or organization GitHub fork as the `fork` remote:
 
 ```bash
-# 1. Clone the upstream repository as origin and add your personal GitHub fork as "fork"
+# 1. Clone the upstream repository as origin and add your GitHub fork as "fork"
 git clone https://github.com/OWNER/REPO.git
 cd REPO
 gh repo fork --remote=true --remote-name=fork
@@ -150,6 +159,8 @@ swarm --fork issue submit 42
 ```
 
 > [!TIP]
+> For an existing organization fork, add it with `git remote add fork https://github.com/ORG/REPO.git` instead of creating a personal fork. Your logged-in account needs write access to that fork.
+>
 > If your fork remote uses a custom name other than `fork`, pass `--fork --fork-remote <remote-name>`.
 
 ### Revising Your PR After Review
@@ -186,6 +197,6 @@ Fork submissions always run the required checks; contributor-supplied validation
 | `swarm --fork issue status [N]` | Yes | Reads authoritative state directly from upstream refs. |
 | `swarm --fork node run` | Yes | Polls upstream ready issues and executes fork claims using the `fork` remote. |
 | `swarm --fork pr status <PR>` | Yes | Reads the linked issue state and PR from upstream; reports `unverified-head` after pushes outside SwarmOS. |
-| `swarm --fork pr work\|stage\|rebase\|validate <PR>` | Yes (your own fork PRs) | Claims the PR revision via `acquire-pr`, develops in `.swarm/worktrees/pr-<PR>`, and records revision steps through the coordinator. |
-| `swarm --fork pr submit <PR>` | Yes (your own fork PRs) | Revalidates, pushes to your fork branch with an exact-head lease, and records the revision with `complete-pr-revision` after the coordinator verifies the published head. |
+| `swarm --fork pr work\|stage\|rebase\|validate <PR>` | Yes (authorized fork PRs) | Claims the PR revision via `acquire-pr`, develops in `.swarm/worktrees/pr-<PR>`, and records revision steps through the coordinator. |
+| `swarm --fork pr submit <PR>` | Yes (authorized fork PRs) | Revalidates, pushes to your fork branch with an exact-head lease, and records the revision with `complete-pr-revision` after the coordinator verifies the published head. |
 | `swarm issue create`, `swarm issue approve`, `swarm issue lint`, `swarm issue decompose`, `swarm issue epic create`; `swarm repo plan --apply` / `--ready`; `swarm issue review-plan <N> --approve` / `--reject` | **No (Maintainer only)** | These administrative actions and human plan-gate decisions fail in `--fork` mode; issue execution, status, and lease operations remain available to contributors. |

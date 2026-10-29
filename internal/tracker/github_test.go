@@ -655,3 +655,160 @@ func TestLocalListSubIssues(t *testing.T) {
 	}
 	assertOrder(a.Number, b.Number, c.Number)
 }
+
+func TestForkOrganizationActorEvidence(t *testing.T) {
+	for _, private := range []bool{false, true} {
+		for _, requirePush := range []bool{false, true} {
+			for _, tc := range []struct {
+				name, permission, role, login string
+				status                        int
+				want                          bool
+			}{
+				{"write", "write", "", "alice", 200, true},
+				{"maintain legacy", "maintain", "", "alice", 200, true},
+				{"admin", "admin", "", "alice", 200, true},
+				{"maintain role", "write", "maintain", "ALICE", 200, true},
+				{"custom write", "write", "custom", "alice", 200, true},
+				{"restrictive role", "write", "read", "alice", 200, true},
+				{"triage", "read", "triage", "alice", 200, false},
+				{"custom read", "read", "custom", "alice", 200, false},
+				{"role only", "", "admin", "alice", 200, false},
+				{"unknown", "unknown", "maintain", "alice", 200, false},
+				{"none", "none", "", "alice", 200, false},
+				{"missing identity", "write", "", "", 200, false},
+				{"coordinator identity", "admin", "", "coordinator", 200, false},
+				{"forbidden", "write", "", "alice", 403, false},
+				{"not found", "write", "", "alice", 404, false},
+				{"rate limit", "write", "", "alice", 429, false},
+				{"server failure", "write", "", "alice", 500, false},
+			} {
+				t.Run(fmt.Sprintf("%t/%t/%s", private, requirePush, tc.name), func(t *testing.T) {
+					calls := 0
+					tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Method != "GET" {
+							t.Fatalf("method %s", r.Method)
+						}
+						switch r.URL.Path {
+						case "/repos/team/swarm":
+							writeJSON(t, w, map[string]any{"full_name": "Team/Swarm", "name": "Swarm", "private": private, "fork": true, "owner": map[string]any{"login": "Team", "type": "Organization"}, "source": map[string]any{"full_name": "octo/swarm"}, "permissions": map[string]bool{"push": !tc.want, "admin": !tc.want}})
+						case "/repos/Team/Swarm/collaborators/alice/permission":
+							calls++
+							w.WriteHeader(tc.status)
+							writeJSON(t, w, map[string]any{"permission": tc.permission, "role_name": tc.role, "user": map[string]string{"login": tc.login}})
+						default:
+							t.Fatalf("unexpected endpoint %s", r.URL.Path)
+						}
+					}))
+					got, err := tr.VerifyForkRepository(context.Background(), "team/swarm", "alice", requirePush)
+					if (err == nil) != tc.want || calls != 1 {
+						t.Fatalf("got %q, %v; queries %d", got, err, calls)
+					}
+					if tc.want && got != "Team/Swarm" {
+						t.Fatalf("canonical %q", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestForkOrganizationMetadataAndRevocation(t *testing.T) {
+	valid := func() map[string]any {
+		return map[string]any{"full_name": "team/swarm", "name": "swarm", "fork": true, "owner": map[string]any{"login": "team", "type": "Organization"}, "source": map[string]any{"full_name": "octo/swarm"}}
+	}
+	for _, field := range []string{"full_name", "name", "owner", "source", "fork"} {
+		t.Run(field, func(t *testing.T) {
+			repo := valid()
+			delete(repo, field)
+			tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/repos/team/swarm" {
+					t.Fatalf("unexpected permission query %s", r.URL.Path)
+				}
+				writeJSON(t, w, repo)
+			}))
+			if _, err := tr.VerifyForkRepository(context.Background(), "team/swarm", "alice", false); err == nil {
+				t.Fatal("accepted incomplete metadata")
+			}
+		})
+	}
+	for _, payload := range []string{
+		"invalid", `{"permission":"write"}`, `{"permission":"write","user":null}`,
+		`{"permission":"write","user":{}}`, `{"permission":"write","user":{"login":""}}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/repos/team/swarm" {
+					writeJSON(t, w, valid())
+					return
+				}
+				_, _ = w.Write([]byte(payload))
+			}))
+			if _, err := tr.VerifyForkRepository(context.Background(), "team/swarm", "alice", false); err == nil {
+				t.Fatal("accepted ambiguous evidence")
+			}
+		})
+	}
+	permission := "write"
+	queries := 0
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/team/swarm" {
+			writeJSON(t, w, valid())
+			return
+		}
+		if r.URL.Path != "/repos/team/swarm/collaborators/alice/permission" {
+			t.Fatalf("unexpected %s", r.URL.Path)
+		}
+		queries++
+		writeJSON(t, w, map[string]any{"permission": permission, "user": map[string]string{"login": "alice"}})
+	}))
+	if _, err := tr.VerifyForkRepository(context.Background(), "team/swarm", "alice", false); err != nil {
+		t.Fatal(err)
+	}
+	permission = "read"
+	if _, err := tr.VerifyForkRepository(context.Background(), "team/swarm", "alice", false); err == nil {
+		t.Fatal("revocation ignored")
+	}
+	if queries != 2 {
+		t.Fatalf("permission queries %d", queries)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := tr.VerifyForkRepository(ctx, "team/swarm", "alice", false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation: %v", err)
+	}
+	if _, err := tr.VerifyForkRepository(context.Background(), "team/swarm", "", false); err == nil {
+		t.Fatal("empty actor accepted")
+	}
+}
+
+func TestForkOrganizationRejectsForgedMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, slug, ownerType, owner, repo, full, source string
+		fork                                             bool
+	}{
+		{"unicode canonical", "team/swarm", "Organization", "team", "swarm", "team/ſwarm", "octo/swarm", true},
+		{"conflicting canonical", "team/swarm", "Organization", "team", "swarm", "evil/swarm", "octo/swarm", true},
+		{"conflicting owner", "team/swarm", "Organization", "evil", "swarm", "team/swarm", "octo/swarm", true},
+		{"conflicting name", "team/swarm", "Organization", "team", "other", "team/swarm", "octo/swarm", true},
+		{"unknown type", "team/swarm", "Enterprise", "team", "swarm", "team/swarm", "octo/swarm", true},
+		{"missing type", "team/swarm", "", "team", "swarm", "team/swarm", "octo/swarm", true},
+		{"other personal", "team/swarm", "User", "team", "swarm", "team/swarm", "octo/swarm", true},
+		{"wrong source", "team/swarm", "Organization", "team", "swarm", "team/swarm", "other/swarm", true},
+		{"upstream", "octo/swarm", "Organization", "octo", "swarm", "octo/swarm", "octo/swarm", true},
+		{"not fork", "team/swarm", "Organization", "team", "swarm", "team/swarm", "octo/swarm", false},
+		{"malformed", "team/swarm/extra", "Organization", "team", "swarm", "team/swarm", "octo/swarm", true},
+		{"escaped", "team/swarm%2fother", "Organization", "team", "swarm", "team/swarm", "octo/swarm", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "collaborators") {
+					t.Fatal("queried permissions for invalid metadata")
+				}
+				writeJSON(t, w, map[string]any{"full_name": tc.full, "name": tc.repo, "fork": tc.fork, "owner": map[string]string{"login": tc.owner, "type": tc.ownerType}, "source": map[string]string{"full_name": tc.source}, "parent": map[string]string{"full_name": "octo/swarm"}, "permissions": map[string]bool{"admin": true}})
+			}))
+			if _, err := tr.VerifyForkRepository(context.Background(), tc.slug, "alice", false); err == nil {
+				t.Fatal("accepted forged metadata")
+			}
+		})
+	}
+}

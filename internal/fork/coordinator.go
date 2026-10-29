@@ -322,7 +322,7 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 		}
 
 	case "acquire-pr":
-		// Only the contributor whose fork holds the PR head may revise it, and
+		// Only a contributor authorized to write the fork holding the PR head may revise it, and
 		// only for the PR the issue's authoritative state already links.
 		if req.PRNumber <= 0 || currentState.PRNumber != req.PRNumber || strings.TrimSpace(currentState.ForkRepo) == "" {
 			return nil, "", fmt.Errorf("PR #%d is not a fork contribution linked to issue #%d", req.PRNumber, req.IssueNumber)

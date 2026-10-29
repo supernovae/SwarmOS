@@ -38,8 +38,8 @@ func TestCheckHeartbeatAndShutdown(t *testing.T) {
 		ticks <- clock()
 		receive("trusted", "running", time.Duration(sec)*time.Second)
 	}
-	p.Observe(Event{Check: "trusted", Status: "PASS"})
-	receive("trusted", "PASS", 45*time.Second)
+	p.Observe(Event{Check: "trusted", Status: "PASS", StageElapsed: 41 * time.Second})
+	receive("trusted", "PASS", 41*time.Second)
 	ticks <- clock()
 	receive("", "running", 48*time.Second)
 	p.Observe(Event{Check: "second", Status: "started"})

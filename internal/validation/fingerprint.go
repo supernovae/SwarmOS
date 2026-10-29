@@ -34,6 +34,7 @@ func fingerprint(ctx context.Context, root string, opts ValidateOptions) (map[st
 // Reuse returns nil on any mismatch. Only a coordinator-stamped PASS is eligible.
 // Explicit Validate and CI never consult this function.
 func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string, artifacts []contract.Artifact) (*ValidationReport, error) {
+	started := time.Now()
 	if opts.ForkMode || opts.CIMode || !reusableVersion(opts.Version) || opts.ClaimID == "" || owner == "" {
 		return nil, nil
 	}
@@ -107,14 +108,21 @@ func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string,
 		if len(tree) < 12 {
 			return nil, nil
 		}
-		message := fmt.Sprintf("Reusing validation from %s (%s ago, tree %s)", source, age, tree[:12])
+		message := fmt.Sprintf("Reusing validation from %s (%s ago, tree %s; source head %s, submitted head %s)", source, age, tree[:12], report.HeadSHA, head)
 		art.Summary = message
 		// The original report body is stored in validation_report; repeated reuse
 		// therefore retains evidence without accumulating reuse notices.
-		art.Body = RestoreAcceptanceEvidence(message+"\n\n"+report.Artifact.Body, art.Metadata)
+		elapsed := time.Since(started)
+		art.Metadata["validation_reuse_duration"] = elapsed.String()
+		art.Body = RestoreAcceptanceEvidence(message+"\nCurrent reuse wall time: "+DurationText(&elapsed)+"\n\n"+report.Artifact.Body, art.Metadata)
 		digest := sha256.Sum256([]byte(art.Body))
 		art.Metadata["content_sha256"] = hex.EncodeToString(digest[:])
 		art.CreatedAt = time.Now().UTC()
+		report.SourceHead = report.HeadSHA
+		report.SourceTime = source
+		reuseDuration := elapsed
+		report.ReuseDuration = &reuseDuration
+		art.Metadata["validation_reuse_duration"] = reuseDuration.String()
 		report.HeadSHA = head
 		art.Metadata["head_sha"] = head
 		report.Artifact = art

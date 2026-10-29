@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -121,6 +122,7 @@ const (
 
 func assertWorkValidationText(t *testing.T, check, out string) {
 	t.Helper()
+	out = regexp.MustCompile(`(\(exit [0-9]+); [^)]+\)`).ReplaceAllString(out, "$1)")
 	if strings.Contains(out, "PASS ") {
 		t.Fatalf("work diagnostics repeated passing checks: %s", out)
 	}

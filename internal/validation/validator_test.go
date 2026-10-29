@@ -416,6 +416,10 @@ func TestValidationProgressUsesTrustedChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(events) != 4 || events[0].Check != "preparation: preflight" || events[1].Status != "PASS" {
+		t.Fatalf("preflight events: %+v", events)
+	}
+	events = events[2:]
 	if len(events) != 2 || events[0].Check != "ok" || events[0].Status != "started" || events[1].Check != "ok" || events[1].Status != "PASS" || events[1].StageElapsed != report.CheckOutcomes[0].Duration {
 		t.Fatalf("unexpected lifecycle %+v", events)
 	}
@@ -448,6 +452,9 @@ func TestValidationProgressFailureTimeoutAndCancellation(t *testing.T) {
 			defer cancel()
 			var events []progress.Event
 			report, err := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+				if strings.HasPrefix(e.Check, "preparation:") {
+					return
+				}
 				events = append(events, e)
 				if tc.cancel && e.Status == "started" {
 					cancel()
@@ -477,6 +484,9 @@ func TestValidatorSessionHeartbeatAdapter(t *testing.T) {
 	<-events
 	<-events
 	_, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+		if strings.HasPrefix(e.Check, "preparation:") {
+			return
+		}
 		session.Observe(e)
 		if e.Status == "started" {
 			started := <-events

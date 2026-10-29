@@ -162,6 +162,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				report, valErr = validation.Validate(ctx, worktree, unit, validationOpts)
 			}
 			writeValidationSkipNotice(cmd, report)
+			if report != nil && report.Passed && !asJSON {
+				writeValidationChecks(cmd, report)
+			}
 			if report != nil && report.Reused {
 				fmt.Fprintln(cmd.ErrOrStderr(), report.Artifact.Summary)
 			}

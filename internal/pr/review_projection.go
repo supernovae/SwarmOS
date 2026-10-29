@@ -29,7 +29,7 @@ func ProjectReviewEvidence(ctx context.Context, tr tracker.Tracker, st *lease.Is
 	sections := map[string]string{"review-evidence": "## SwarmOS review evidence\n" + lease.DescriptionProductionSummary(st, projection) + lease.DescriptionArtifacts(st, projection) + lease.DescriptionRetrieval(issue, ref)}
 	// Refresh previously generated issue evidence from structured state as well:
 	// copying an old managed section could republish private local actors.
-	if strings.Contains(outside, "<!-- swarm:issue-description:start -->") {
+	if strings.Contains(outside, "<!-- swarm:issue-description:start -->") && lease.DescriptionIssueNeedsProjection(outside) {
 		issueRecord, err := tr.GetIssue(ctx, issue)
 		if err != nil {
 			return err

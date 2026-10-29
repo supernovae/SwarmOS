@@ -20,6 +20,35 @@ type issue83Tracker struct {
 	backend  string
 }
 
+func TestIssue83HistoricalProjectionFields(t *testing.T) {
+	unit := &contract.WorkUnit{IssueNumber: 83, Objective: "Human-authored local-alias remains unchanged"}
+	state := &IssueState{}
+	safe := descriptionMarker("issue-description", "start") + "\n<!-- swarm:description:v1 -->\n" + DescriptionIssueSection(unit, state, "ref", ProjectionContext{}) + descriptionMarker("issue-description", "end")
+	if DescriptionIssueNeedsProjection(safe) {
+		t.Fatal("anonymous historical evidence must survive revision")
+	}
+	for name, body := range map[string]string{
+		"legacy":          "<!-- swarm:issue-description:start -->old generated identity<!-- swarm:issue-description:end -->",
+		"named summary":   strings.Replace(safe, "- planner: unknown", "- planner: staged interactively by private-alias", 1),
+		"named inventory": strings.Replace(safe, "## 📦 Attached SwarmOS Artifacts", "Human review by private-alias\n## 📦 Attached SwarmOS Artifacts", 1),
+		"producer":        strings.Replace(safe, "## 📦 Attached SwarmOS Artifacts", "Producer: private-alias\n## 📦 Attached SwarmOS Artifacts", 1),
+		"invalid JSON":    strings.Replace(safe, "```json\n", "```json\ninvalid", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !DescriptionIssueNeedsProjection(body) {
+				t.Fatal("historical identity or unknown evidence was retained")
+			}
+		})
+	}
+	state.Attestations = []contract.RoleAttestation{{Role: "developer", StagedBy: "private-alias"}}
+	raw, _ := json.MarshalIndent(BuildProvenanceAttestation(unit, state), "", "  ")
+	start := strings.Index(safe, "```json\n") + len("```json\n")
+	end := start + strings.Index(safe[start:], "\n```")
+	if !DescriptionIssueNeedsProjection(safe[:start] + string(raw) + safe[end:]) {
+		t.Fatal("raw historical actor was retained")
+	}
+}
+
 func (tr issue83Tracker) CurrentUser(context.Context) (string, error) { return tr.actor, tr.actorErr }
 func (tr issue83Tracker) BackendName() string                         { return tr.backend }
 

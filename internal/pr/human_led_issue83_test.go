@@ -121,3 +121,36 @@ func TestIssue83OldManagedLocalIdentityIsReprojected(t *testing.T) {
 		t.Fatal("non-idempotent copied evidence")
 	}
 }
+
+func TestIssue83AnonymousInitialHandoffSurvivesRevision(t *testing.T) {
+	tr := tracker.NewLocalTracker(t.TempDir())
+	unit := &contract.WorkUnit{IssueNumber: 83, Objective: "Preserve the initial handoff"}
+	initial := &lease.IssueState{Lease: contract.Lease{IssueNumber: 83}, Artifacts: []contract.Artifact{{Type: contract.ArtifactImplementation, Body: "original report"}}}
+	section := lease.DescriptionIssueSection(unit, initial, "ref", lease.PublicProjectionContext(tr))
+	body, err := lease.ComposePRDescription("Human prose\n", "issue-description", section, "ref", 83)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := tr.CreateDraftPR(t.Context(), tracker.DraftPRRequest{Title: "Original title", Body: body, Head: "feature", Base: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revised := &lease.IssueState{Lease: contract.Lease{IssueNumber: 83}, Artifacts: []contract.Artifact{{Type: contract.ArtifactImplementation, Body: "revised report"}}}
+	if err := ProjectReviewEvidence(t.Context(), tr, revised, pr.Number); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := tr.GetPullRequest(t.Context(), pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(updated.Body, body) || !strings.Contains(updated.Body, "revised report") || updated.Title != pr.Title || updated.Draft != pr.Draft || updated.HTMLURL != pr.HTMLURL {
+		t.Fatal("revision replaced the initial handoff or PR identity")
+	}
+	if err := ProjectReviewEvidence(t.Context(), tr, revised, pr.Number); err != nil {
+		t.Fatal(err)
+	}
+	repeated, _ := tr.GetPullRequest(t.Context(), pr.Number)
+	if repeated.Body != updated.Body {
+		t.Fatal("revision projection is not idempotent")
+	}
+}

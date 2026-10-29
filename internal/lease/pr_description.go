@@ -350,6 +350,45 @@ func PublicProjectionContext(tr tracker.Tracker) ProjectionContext {
 	return ProjectionContext{publishActors: tr != nil && strings.HasPrefix(tr.BackendName(), "github (") && strings.HasSuffix(tr.BackendName(), ")")}
 }
 
+// DescriptionIssueNeedsProjection keeps an already anonymous initial handoff
+// intact during continued work. Older or named evidence is rebuilt from state;
+// a GitHub backend alone cannot authenticate actors copied from a PR body.
+func DescriptionIssueNeedsProjection(body string) bool {
+	start := strings.Index(body, descriptionMarker("issue-description", "start"))
+	end := strings.Index(body, descriptionMarker("issue-description", "end"))
+	if start < 0 || end <= start {
+		return true
+	}
+	section := body[start:end]
+	summaryStart := strings.Index(section, "\n## How the work was produced\n\n")
+	summaryEnd := strings.Index(section, "\n## 🔒 Harness & Model Provenance Attestation\n")
+	if summaryStart < 0 || summaryEnd <= summaryStart {
+		return true
+	}
+	// Inspect generated fields, never search for or transform a local alias.
+	// Unknown layouts take the conservative reconstruction path.
+	summary := section[summaryStart:summaryEnd]
+	if strings.Contains(summary, " by ") || strings.Contains(section, "Human review by ") || strings.Contains(section, "Producer:") {
+		return true
+	}
+	jsonStart := strings.Index(section[summaryEnd:], "```json\n")
+	if jsonStart < 0 {
+		return true
+	}
+	raw := section[summaryEnd+jsonStart+len("```json\n"):]
+	raw, _, ok := strings.Cut(raw, "\n```")
+	var att contract.ProvenanceAttestation
+	if !ok || json.Unmarshal([]byte(raw), &att) != nil {
+		return true
+	}
+	for _, role := range att.Roles {
+		if role.StagedBy != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // PublicProvenanceAttestation copies wire evidence before removing private actors.
 func PublicProvenanceAttestation(wu *contract.WorkUnit, st *IssueState, context ProjectionContext) *contract.ProvenanceAttestation {
 	att := BuildProvenanceAttestation(wu, st)

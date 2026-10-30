@@ -2067,6 +2067,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 			}
 		}
 	}
+	preserveReview := preserveUpstreamReviewCheckpoint(st, false)
 	st.Branch = branch
 	st.ResumeCheckpointBranch = ""
 	preserveCheckpointHeads(st, st.HeadSHA, st.SubmittedHeadSHA, head)
@@ -2074,6 +2075,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 	st.DroppedCheckpoint = nil
 	// The fresh attempt now has its own checkpoint; discard history stays.
 	st.FreshStart = nil
+	preserveReview(st)
 	if _, ok := m.store.(coordination.PublishingStore); ok {
 		if err := m.BeginPublicationAttempt(ctx, n, owner); err != nil {
 			return nil, err
@@ -2215,6 +2217,7 @@ func (m *Manager) RecordPRHead(ctx context.Context, n int, owner string, number 
 		if err := m.denyResume(n); err != nil {
 			return err
 		}
+		preserveReview := preserveUpstreamReviewCheckpoint(st, true)
 		if st.PRRevision.LocalHeadSHA != head {
 			kept := st.Artifacts[:0]
 			for _, art := range st.Artifacts {
@@ -2232,6 +2235,7 @@ func (m *Manager) RecordPRHead(ctx context.Context, n int, owner string, number 
 			st.Attestations = attestations
 		}
 		st.PRRevision.LocalHeadSHA = head
+		preserveReview(st)
 		if st.PRRevision.Intent == "rebase" && st.LastRebase != nil && st.LastRebase.Status == "completed" {
 			st.LastRebase.NewHead = head
 			st.LastRebase.Verified = false
@@ -3317,6 +3321,69 @@ func (m *Manager) RecordUpstreamPlanReview(ctx context.Context, o *UpstreamPlanR
 		return nil, fmt.Errorf("upstream review recording conflict: %w: %w", ErrClaimFence, err)
 	}
 	return updated, nil
+}
+
+// preserveUpstreamReviewCheckpoint permits only ordinary implementation progress.
+// Capture inside the fenced writer (and each CAS retry), before in-place artifact
+// filtering. Stale reviews are never repaired; reviewed source and provenance
+// remain immutable while the continuation fence advances atomically with progress.
+func preserveUpstreamReviewCheckpoint(st *IssueState, revision bool) func(*IssueState) {
+	noop := func(*IssueState) {}
+	if st.ForkRepo == "" || st.DroppedCheckpoint != nil || st.FreshStart != nil ||
+		verifyReviewBinding(st, st.EffectiveGate) != nil {
+		return noop
+	}
+	if revision {
+		if st.PRRevision == nil || st.PRRevision.Intent != "work" {
+			return noop
+		}
+	} else if st.PRRevision != nil || st.PRNumber != 0 {
+		return noop
+	}
+	var review *contract.Artifact
+	for i := range st.Artifacts {
+		if st.Artifacts[i].Type == contract.ArtifactReview {
+			review = &st.Artifacts[i]
+		}
+	}
+	if review == nil || review.Metadata["advisory"] != "" || review.Metadata["review_source"] != "authenticated-agent" ||
+		review.Metadata["upstream_review_source"] == "" || review.Metadata["upstream_review_context"] != upstreamReviewContext(st) {
+		return noop
+	}
+	source := review.Metadata["upstream_review_source"]
+	if revision && source != "PublishedPRRevision" || !revision && source != "FreshInitialApprovedBase" && source != "PublishedCheckpoint" {
+		return noop
+	}
+	// A serialized copy owns every nested revision, plan, slice and metadata map.
+	raw, err := json.Marshal(st)
+	if err != nil {
+		return noop
+	}
+	var expected IssueState
+	if json.Unmarshal(raw, &expected) != nil {
+		return noop
+	}
+	return func(after *IssueState) {
+		if revision {
+			if after.PRRevision == nil {
+				return
+			}
+			expected.PRRevision.LocalHeadSHA = after.PRRevision.LocalHeadSHA
+		} else {
+			expected.Branch, expected.HeadSHA = after.Branch, after.HeadSHA
+			expected.CheckpointHeads = append([]string(nil), after.CheckpointHeads...)
+		}
+		context := upstreamReviewContext(after)
+		if upstreamReviewContext(&expected) != context {
+			return
+		}
+		for i := range after.Artifacts {
+			a := &after.Artifacts[i]
+			if a.Type == contract.ArtifactReview {
+				a.Metadata["upstream_review_context"] = context
+			}
+		}
+	}
 }
 
 // upstreamReviewContext binds candidate-bearing fields including their absence.

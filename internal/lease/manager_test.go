@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1595,6 +1596,9 @@ func TestUpstreamPlanReviewPublishedSources(t *testing.T) {
 					return strings.TrimSpace(string(out))
 				}
 				st, rev, _ := worker.load(ctx, n)
+				if kind == "revision" && failure == "" {
+					st.EffectiveGate = contract.GateAgent
+				}
 				base := st.BaseSHA
 				if err := os.WriteFile(filepath.Join(worker.repoRoot, "candidate.txt"), []byte("candidate"), 0644); err != nil {
 					t.Fatal(err)
@@ -1691,8 +1695,152 @@ func TestUpstreamPlanReviewPublishedSources(t *testing.T) {
 				if (err == nil) != (failure == "") {
 					t.Fatalf("record result for %s: %v", failure, err)
 				}
+				if failure == "" && kind == "revision" {
+					issue, _ := tr.GetIssue(ctx, n)
+					wu, _ := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+					reviewed, _, _ := worker.load(ctx, n)
+					for i := 0; i < 3; i++ {
+						if i != 1 {
+							git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "implementation")
+						}
+						next := git("rev-parse", "HEAD")
+						got, err := worker.RecordPRHead(ctx, n, "contributor", 42, branch, next)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := VerifyApproval(got, wu); err != nil {
+							t.Fatalf("revision checkpoint %d: %v", i, err)
+						}
+					}
+					after, _, _ := worker.load(ctx, n)
+					for i, art := range reviewed.Artifacts {
+						if art.Type == contract.ArtifactReview {
+							after.Artifacts[i].Metadata["upstream_review_context"] = art.Metadata["upstream_review_context"]
+							want, _ := json.Marshal(art)
+							got, _ := json.Marshal(after.Artifacts[i])
+							if string(want) != string(got) {
+								t.Fatal("revision changed reviewed authority")
+							}
+						}
+					}
+					if !reflect.DeepEqual(reviewed.Attestations, after.Attestations) {
+						t.Fatal("reviewer attestations changed")
+					}
+					worker.store = &upstreamCheckpointRaceStore{Store: worker.store}
+					git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "racing implementation")
+					got, err := worker.RecordPRHead(ctx, n, "contributor", 42, branch, git("rev-parse", "HEAD"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if VerifyApproval(got, wu) == nil {
+						t.Fatal("CAS retry rebound review to changed plan metadata")
+					}
+
+				}
 			})
 		}
+	}
+}
+
+func TestUpstreamPlanReviewCheckpointContinuation(t *testing.T) {
+	for _, change := range []string{"", "owner", "claim", "task", "policy", "tree", "base", "fork", "plan", "test", "metadata", "head", "branch", "history", "PR"} {
+		t.Run(change, func(t *testing.T) {
+			worker, upstream, tr, n := upstreamReviewFixture(t)
+			ctx := context.Background()
+			initial, initialRev, _ := worker.load(ctx, n)
+			initial.EffectiveGate = contract.GateAgent
+			if _, err := worker.save(ctx, n, initialRev, initial); err != nil {
+				t.Fatal(err)
+			}
+			o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: APPROVED", "APPROVED", reviewFixtureAttestation())
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, rev, _ := worker.load(ctx, n)
+			branch := "swarm/issue-" + strconv.Itoa(n) + "-" + st.Lease.ClaimID
+			switch change {
+			case "owner":
+				st.Lease.Owner = "other"
+			case "claim":
+				st.Lease.ClaimID = "other"
+			case "task":
+				st.TaskDigest = "other"
+			case "policy":
+				st.PolicyDigest = "other"
+			case "tree":
+				st.PolicyTreeDigest = "other"
+			case "base":
+				st.BaseSHA = "other"
+			case "fork":
+				st.ForkRepo = "octo/other"
+			case "plan":
+				st.Artifacts[0].Body += "changed"
+			case "test":
+				st.Artifacts[1].Body += "changed"
+			case "metadata":
+				st.Artifacts[0].Metadata["extra"] = "changed"
+			case "head":
+				st.HeadSHA = st.BaseSHA
+			case "branch":
+				st.Branch = branch
+			case "history":
+				st.CheckpointHeads = []string{st.BaseSHA}
+			case "PR":
+				st.PRNumber = 42
+			}
+			if _, err := worker.save(ctx, n, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			issue, _ := tr.GetIssue(ctx, n)
+			wu, _ := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+			for i := 0; i < 3; i++ {
+				head := st.BaseSHA
+				if change == "" && i != 1 {
+					out, err := fixtureGitCommand(t, "-C", worker.repoRoot, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "implementation").CombinedOutput()
+					if err != nil {
+						t.Fatalf("commit: %v %s", err, out)
+					}
+					out, err = fixtureGitCommand(t, "-C", worker.repoRoot, "rev-parse", "HEAD").Output()
+					if err != nil {
+						t.Fatal(err)
+					}
+					head = strings.TrimSpace(string(out))
+				} else if change == "" {
+					head = st.HeadSHA
+				}
+				got, err := worker.RecordCheckpoint(ctx, n, "contributor", branch, head)
+				if change != "" {
+					if err == nil && VerifyApproval(got, wu) == nil {
+						t.Fatal("checkpoint laundered stale approval")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				st = got
+				reloaded, _, _ := worker.load(ctx, n)
+				if err := VerifyApproval(reloaded, wu); err != nil {
+					t.Fatalf("checkpoint %d approval: %v", i, err)
+				}
+				// Only the continuation fence may change in the review artifact.
+				for j, a := range before.Artifacts {
+					if a.Type == contract.ArtifactReview {
+						expected := a.Metadata["upstream_review_context"]
+						reloaded.Artifacts[j].Metadata["upstream_review_context"] = expected
+						want, _ := json.Marshal(a)
+						got, _ := json.Marshal(reloaded.Artifacts[j])
+						if string(want) != string(got) {
+							t.Fatalf("review authority changed: %s != %s", want, got)
+						}
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -1786,4 +1934,209 @@ func TestUpstreamPlanReviewFreshSourceRejectsPartialContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpstreamPlanReviewRevisionCheckpointInvalidation(t *testing.T) {
+	for _, change := range []string{"remote", "number", "branch", "intent", "local head", "PR", "owner", "claim", "expired", "task", "policy", "tree", "base", "fork", "plan body", "plan identity", "plan metadata", "test body", "test identity", "rejected", "advisory", "absent"} {
+		t.Run(change, func(t *testing.T) {
+			worker, upstream, tr, n := upstreamReviewFixture(t)
+			ctx := context.Background()
+			git := func(args ...string) string {
+				t.Helper()
+				out, err := fixtureGitCommand(t, append([]string{"-C", worker.repoRoot}, args...)...).CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v %s", args, err, out)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			st, rev, _ := worker.load(ctx, n)
+			base := st.BaseSHA
+			branch := "swarm/pr-42"
+			git("branch", branch, base)
+			git("config", "url."+worker.repoRoot+".insteadOf", "https://github.com/octo/personal.git")
+			st.EffectiveGate = contract.GateAgent
+			st.PRNumber, st.HeadSHA, st.Branch = 42, base, "published-pr"
+			st.PRRevision = &PRRevision{Number: 42, Branch: branch, Intent: "work", RemoteHeadSHA: base, LocalHeadSHA: base}
+			tr.pr = &tracker.PullRequest{Number: 42, State: "open", IssueNumber: n, HeadRepo: st.ForkRepo, Head: st.Branch, HeadSHA: base, BaseRepo: "octo/swarm", Base: st.BaseBranch, BaseSHA: base}
+			if _, err := worker.save(ctx, n, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: APPROVED", "APPROVED", reviewFixtureAttestation()); err != nil {
+				t.Fatal(err)
+			}
+			st, rev, _ = worker.load(ctx, n)
+			var originalContext string
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactReview {
+					originalContext = a.Metadata["upstream_review_context"]
+				}
+			}
+			switch change {
+			case "remote":
+				st.PRRevision.RemoteHeadSHA = "changed"
+			case "number":
+				st.PRRevision.Number++
+			case "branch":
+				st.PRRevision.Branch = "changed"
+			case "intent":
+				st.PRRevision.Intent = "rebase"
+			case "local head":
+				st.PRRevision.LocalHeadSHA = "changed"
+			case "PR":
+				st.PRNumber++
+			case "owner":
+				st.Lease.Owner = "changed"
+			case "claim":
+				st.Lease.ClaimID = "changed"
+			case "expired":
+				st.Lease.ExpiresAt = worker.nowFn().Add(-time.Second)
+			case "task":
+				st.TaskDigest = "changed"
+			case "policy":
+				st.PolicyDigest = "changed"
+			case "tree":
+				st.PolicyTreeDigest = "changed"
+			case "base":
+				st.BaseSHA = "changed"
+			case "fork":
+				st.ForkRepo = "octo/changed"
+			case "plan body":
+				st.Artifacts[0].Body += "changed"
+			case "plan identity":
+				st.Artifacts[0].Version++
+			case "plan metadata":
+				st.Artifacts[0].Metadata["extra"] = "changed"
+			case "test body":
+				st.Artifacts[1].Body += "changed"
+			case "test identity":
+				st.Artifacts[1].Producer = "changed"
+			case "rejected":
+				st.Artifacts[2].Verdict = "CHANGES_REQUESTED"
+			case "advisory":
+				st.Artifacts[2].Metadata["advisory"] = "true"
+			case "absent":
+				st.Artifacts = st.Artifacts[:2]
+			}
+			if _, err := worker.save(ctx, n, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "implementation")
+			next := git("rev-parse", "HEAD")
+			_, checkpointErr := worker.RecordPRHead(ctx, n, "contributor", 42, branch, next)
+			if change == "expired" && !errors.Is(checkpointErr, ErrClaimFence) {
+				t.Fatalf("expired claim: %v", checkpointErr)
+			}
+			after, _, err := worker.load(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, a := range after.Artifacts {
+				if a.Type == contract.ArtifactReview && a.Metadata["upstream_review_context"] != originalContext {
+					t.Fatal("stale review continuation fence advanced")
+				}
+			}
+			// Advisory is deliberately never promoted, even if its other bindings match.
+			if change != "advisory" && change != "expired" {
+				if err := verifyReviewBinding(after, contract.GateAgent); err == nil {
+					t.Fatal("stale review became valid")
+				}
+			}
+		})
+	}
+}
+
+type upstreamCheckpointFailureStore struct{ coordination.Store }
+
+func (s *upstreamCheckpointFailureStore) CompareAndSwapAndPublish(context.Context, int, string, []byte, string, string) (string, error) {
+	return "", errors.New("fixture publication failed")
+}
+func (s *upstreamCheckpointFailureStore) CompareAndSwapAndPublishExpected(context.Context, int, string, []byte, string, string, string) (string, error) {
+	return "", errors.New("fixture publication failed")
+}
+
+func TestUpstreamPlanReviewCheckpointWriteFailure(t *testing.T) {
+	for _, failure := range []string{"CAS", "publication"} {
+		t.Run(failure, func(t *testing.T) {
+			worker, upstream, _, n := upstreamReviewFixture(t)
+			ctx := context.Background()
+			st, rev, _ := worker.load(ctx, n)
+			st.EffectiveGate = contract.GateAgent
+			if _, err := worker.save(ctx, n, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := upstream.RecordUpstreamPlanReview(ctx, o, "VERDICT: APPROVED", "APPROVED", reviewFixtureAttestation()); err != nil {
+				t.Fatal(err)
+			}
+			branch := "swarm/issue-" + strconv.Itoa(n) + "-" + st.Lease.ClaimID
+			if _, err := worker.RecordCheckpoint(ctx, n, "contributor", branch, st.BaseSHA); err != nil {
+				t.Fatal(err)
+			}
+			original := worker.store
+			before, _, err := original.Load(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := fixtureGitCommand(t, "-C", worker.repoRoot, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "implementation").CombinedOutput()
+			if err != nil {
+				t.Fatalf("commit %v %s", err, out)
+			}
+			out, err = fixtureGitCommand(t, "-C", worker.repoRoot, "rev-parse", "HEAD").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failure == "CAS" {
+				worker.store = &upstreamConflictStore{Store: original}
+			} else {
+				worker.store = &upstreamCheckpointFailureStore{Store: original}
+			}
+			if _, err := worker.RecordCheckpoint(ctx, n, "contributor", branch, strings.TrimSpace(string(out))); err == nil {
+				t.Fatal("failed write accepted")
+			}
+			after, _, err := original.Load(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatal("failed write persisted checkpoint or advanced review")
+			}
+		})
+	}
+}
+
+// Change a context-only plan field on the first CAS, then allow the retry.
+type upstreamCheckpointRaceStore struct {
+	coordination.Store
+	changed bool
+}
+
+func (s *upstreamCheckpointRaceStore) CompareAndSwap(ctx context.Context, n int, rev string, raw []byte) (string, error) {
+	if !s.changed {
+		s.changed = true
+		current, currentRev, err := s.Store.Load(ctx, n)
+		if err != nil {
+			return "", err
+		}
+		var st IssueState
+		if err := json.Unmarshal(current, &st); err != nil {
+			return "", err
+		}
+		st.Artifacts[0].Metadata["concurrent_plan_change"] = "changed"
+		current, err = json.Marshal(st)
+		if err != nil {
+			return "", err
+		}
+		if _, err := s.Store.CompareAndSwap(ctx, n, currentRev, current); err != nil {
+			return "", err
+		}
+		return "", coordination.ErrConflict
+	}
+	return s.Store.CompareAndSwap(ctx, n, rev, raw)
 }

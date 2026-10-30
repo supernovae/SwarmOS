@@ -23,6 +23,9 @@ func workProgressPrinter(out io.Writer) func(workflow.ProgressEvent) {
 		// Stage and status come from coordinator-owned enums, never child
 		// output; check names come from the trusted policy and are quoted.
 		stage := event.Stage
+		if event.RetryReason != "" {
+			stage = fmt.Sprintf("%s retry %d/%d %s", event.RetryReason, event.RetryUsed, event.RetryLimit, stage)
+		}
 		if event.RepairLimit > 0 {
 			stage = fmt.Sprintf("repair %d/%d %s", event.Repair, event.RepairLimit, stage)
 		}

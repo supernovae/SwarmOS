@@ -117,8 +117,11 @@ func (r *workRun) loadClaimPolicy() error {
 		return err
 	}
 	r.gate = r.st.EffectiveGate
+	if err := r.e.CheckIssueContinuation(r.st, r.cfg, r.opts); err != nil {
+		return err
+	}
 	if !(strings.EqualFold(r.cfg.PlanMode, "interactive") && (r.opts.Phase == "plan" || (r.opts.Phase == "all" && !(hasDesignAndTestPlanArtifacts(r.st) && !hasRejectedReview(r.st))))) {
-		for _, role := range rolesForPhase(r.opts.Phase, r.gate, (hasDesignAndTestPlanArtifacts(r.st) && !hasRejectedReview(r.st)), lease.VerifyApproval(r.st, r.pre.WorkUnit) == nil) {
+		for _, role := range continuationRoles(rolesForPhase(r.opts.Phase, planningGate(r.st, r.gate), (hasDesignAndTestPlanArtifacts(r.st) && !hasRejectedReview(r.st)), lease.VerifyApproval(r.st, r.pre.WorkUnit) == nil), r.st, r.opts) {
 			if r.pre.Agents[role] == "" {
 				return fmt.Errorf("task phase changed during preflight; rerun swarm issue work (or swarm pr work) to validate the %s agent", role)
 			}
@@ -209,7 +212,7 @@ func (r *workRun) prepareRun() (bool, error) {
 		r.mode = "headless"
 	}
 	r.implementationBase = r.st.BaseSHA
-	if r.st.NextPhaseReason == "claim budget" && r.st.HeadSHA != "" {
+	if (r.st.NextPhaseReason == "claim budget" || r.continuation()) && r.st.HeadSHA != "" {
 		r.implementationBase = r.st.HeadSHA
 	}
 	if r.opts.PRNumber != 0 {

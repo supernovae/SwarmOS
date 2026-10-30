@@ -38,7 +38,7 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	if err := r.admit("implement"); err != nil {
 		return false, err
 	}
-	if r.opts.Phase == "test" {
+	if r.opts.Phase == "test" || r.testerResume {
 		if err := r.checkTestRetry(); err != nil {
 			return false, err
 		}
@@ -66,6 +66,9 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	if err := r.check(); err != nil {
 		return false, err
 	}
+	if err := r.checkWorkApproval(r.ctx); err != nil {
+		return false, err
+	}
 	testerBody, _ := readRequiredArtifact(r.wtPath, "VALIDATION.md")
 	if outcome := parseTesterOutcome(testerBody); outcome == testerFail || outcome == testerBlocked {
 		command := fmt.Sprintf("swarm issue work %d --phase implement", r.opts.IssueNumber)
@@ -76,7 +79,7 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	}
 	r.progress.next("required-checks")
 	version := r.opts.Version
-	if r.opts.Phase == "test" && version == "" {
+	if (r.opts.Phase == "test" || r.testerResume) && version == "" {
 		version = "dev"
 	}
 	report, err := validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
@@ -93,13 +96,13 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 		if _, writeErr := recordGuidance(r.wtPath, "VALIDATION.md", canonicalReport(report.Artifact.Body), testerRun); writeErr != nil {
 			return false, writeErr
 		}
-		if r.opts.Phase == "test" {
+		if r.opts.Phase == "test" || r.testerResume {
 			if err := r.checkTestRetry(); err != nil {
 				return false, err
 			}
 		}
 		record := r.e.LeaseManager.RecordTrustedValidation
-		if r.opts.Phase == "test" {
+		if r.opts.Phase == "test" || r.testerResume {
 			record = func(ctx context.Context, n int, owner string, art contract.Artifact) (*lease.IssueState, error) {
 				tree, err := workspace.CheckpointTree(ctx, r.wtPath)
 				if err != nil {
@@ -121,14 +124,39 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 }
 
 func (r *workRun) validateAndRepair() (*WorkResult, error) {
-	if !implementationProven(r.st, r.res.HeadSHA) {
-		if paused, err := r.developerRound(0, nil); paused || err != nil {
+	if r.continuation() && r.opts.instructionsFor("developer") == "" && !hasFailedValidationArtifact(r.st) && hasTrustedImplementation(r.st) {
+		if err := r.prepareTestRetry(); err == nil {
+			r.testerResume = true
+			report, reuseErr := validation.Reuse(r.ctx, r.wtPath, validation.ValidateOptions{Version: r.opts.Version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA}, r.opts.Owner, r.st.Artifacts)
+			if reuseErr != nil {
+				return r.res, reuseErr
+			}
+			if report != nil {
+				r.res.Validation, r.res.ValidationPassed = report, true
+				return r.finish()
+			}
+		} else {
 			return r.res, err
 		}
 	}
-	paused, err := r.validationRound(0)
+	initialRound := 0
+	if !r.testerResume && (!implementationProven(r.st, r.res.HeadSHA) || r.opts.instructionsFor("developer") != "") {
+		if r.continuation() && hasFailedValidationArtifact(r.st) && r.opts.instructionsFor("developer") == "" {
+			if repair := validation.RepairFromArtifact(r.st.Artifacts, r.st.BaseSHA); repair != nil && repair.AllPreExisting {
+				return r.res, ErrPreExistingFailures
+			}
+			if reserveErr := r.reserveRepair(); reserveErr != nil {
+				return r.res, reserveErr
+			}
+			initialRound = 1
+		}
+		if paused, err := r.developerRound(initialRound, nil); paused || err != nil {
+			return r.res, err
+		}
+	}
+	paused, err := r.validationRound(initialRound)
 	var previous []string
-	for round := 1; err != nil && !paused && repairableValidation(err, r.res.Validation); round++ {
+	for round := initialRound + 1; err != nil && !paused && repairableValidation(err, r.res.Validation); round++ {
 		failing := failingIdentities(r.res.Validation)
 		if round > r.repairLimit {
 			if r.repairLimit > 0 {
@@ -141,6 +169,12 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 			break
 		}
 		validationErr := err
+		if !r.forkMode && r.opts.PRNumber == 0 {
+			if reserveErr := r.reserveRepair(); reserveErr != nil {
+				return r.res, fmt.Errorf("%w: %w", reserveErr, validationErr)
+			}
+		}
+		r.testerResume = false
 		if paused, err = r.developerRound(round, boundedTargets(failing)); paused || err != nil {
 			if r.outcomeFailed {
 				// The latest trusted report still decides the outcome.
@@ -160,4 +194,26 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 func (r *workRun) finish() (*WorkResult, error) {
 	r.res.PhaseCompleted = "implement"
 	return r.res, nil
+}
+
+func (r *workRun) reserveRepair() error {
+	if err := r.admit("implement"); err != nil {
+		return err
+	}
+	st, err := r.e.LeaseManager.ReserveValidationRepair(r.ctx, r.opts.IssueNumber, r.opts.Owner)
+	if err != nil {
+		return fmt.Errorf("%w: %w; run %s", ErrValidationRepairExhausted, err, r.rerun)
+	}
+	r.st, r.res.State = st, st
+	r.progress.retry("validation-repair", st.ValidationRepairCount, r.repairLimit)
+	return nil
+}
+
+func hasTrustedImplementation(st *lease.IssueState) bool {
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactImplementation && a.Verdict == "PASS" && a.Metadata["implementation_trusted_origin"] == "coordinator" {
+			return true
+		}
+	}
+	return false
 }

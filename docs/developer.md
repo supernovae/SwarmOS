@@ -351,14 +351,14 @@ The repair prompt points the developer at `REPAIR.md`. When every failure is a p
 
 `swarm issue work` and `swarm pr work` repair a failed validation in the same run. After the trusted checks fail, the coordinator regenerates `REPAIR.md`, runs a developer repair round, records it as a fenced `Repair validation:` checkpoint, and runs the tester and every required check again on the new head. Only that coordinator validation decides whether the run passed, whatever the developer or tester reports. Progress names each round, for example `Issue #42: repair 1/1 implement started targeting "example.com/m/broken.TestBroken"`, and later stages of the round keep the `repair 1/1` label. With `--json`, `repair_rounds` counts the rounds that started, and the validation report always describes the latest round.
 
-The trusted configuration's optional `lease.validation_repair_limit` sets how many repair rounds one run may start: omission gives one round, and zero disables automatic repair. The limit comes from the approved base, so a candidate change can't raise it. The rounds stop early when:
+The trusted configuration's optional `lease.validation_repair_limit` sets the automatic repair allowance. Direct issues persist consumption across invocations; PR work retains its per-run budget: omission gives one round, and zero disables automatic repair. The limit comes from the approved base, so a candidate change can't raise it. The rounds stop early when:
 
 - every failure is pre-existing at the approved base (`pre_existing_failures`, exit `1`);
 - the limit is used up and checks still fail. The error lists the failing tests and says whether they are the same as in the previous round (`validation_repair_exhausted`, exit `3`);
 - a round changes nothing outside `.swarm/active/` (`validation_repair_no_changes`, exit `3`);
 - the claim is close to its budget. The run hands off with `validation=false`, like any claim-budget pause, and prints the continue command (exit `0`).
 
-A developer that reports itself blocked, an import rejection, or a claim fence (`ErrClaimFence`) also ends the run, and no further rounds start. Rerun `swarm issue work <issue> --phase implement` or `swarm pr work <PR> --phase implement` to continue with a fresh repair budget.
+A developer that reports itself blocked, an import rejection, or a claim fence (`ErrClaimFence`) also ends the run, and no further rounds start. For direct issues, `swarm issue work <issue> --phase implement` requests one initial round without resetting the automatic allowance. All-pre-existing failures require `--developer-instructions` (or general `--instructions`) even in that phase. Effective developer feedback also requests one initial round in default work; subsequent automatic rounds consume the remaining allowance. PR work retains its existing per-run budget. See [workflow recovery](WORKFLOWS.md#recovering-from-a-rejected-agent-plan) for bounded replanning, human approval and `--next` behavior.
 
 `swarm issue status <issue>` and `swarm pr status <PR>` show the failed checks and each test's classification, and `--json` includes the same summary under `repair` (`result.repair` for PR status). Status reads only the recorded validation and never reruns tests. Evidence recorded for another base or head, or by an older SwarmOS, shows as `unavailable`.
 

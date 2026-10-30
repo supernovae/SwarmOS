@@ -955,6 +955,31 @@ func TestUpstreamPlanReviewInitialCompletion(t *testing.T) {
 	}
 }
 
+func TestIssueWorkOutputExpiredRecoveryClaim(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprint(active), func(t *testing.T) {
+			st := &lease.IssueState{}
+			st.Lease.IssueNumber = 42
+			st.Lease.Status = "active"
+			st.Lease.ExpiresAt = time.Now().Add(-time.Hour)
+			if active {
+				st.Lease.ExpiresAt = time.Now().Add(time.Hour)
+			}
+			var recovery *IssueRecoveryError
+			if err := contractRevisionRecovery(st, lease.ErrPlanReplanLimit); !errors.As(err, &recovery) {
+				t.Fatal(err)
+			}
+			want := "edit"
+			if active {
+				want = "release"
+			}
+			if recovery.Operation != want {
+				t.Fatalf("operation=%s want %s", recovery.Operation, want)
+			}
+		})
+	}
+}
+
 func TestPlanReviewHistoryAndPlannerReplanTelemetry(t *testing.T) {
 	root, e, tr := setupProjectPlanTestRepo(t)
 	ctx := context.Background()

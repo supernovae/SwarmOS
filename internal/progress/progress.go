@@ -10,6 +10,8 @@ import (
 // Event contains coordinator-owned status only, never harness output,
 // prompts, command arguments, claim tokens, or artifact contents.
 type Event struct {
+	RetryReason                   string
+	RetryUsed, RetryLimit         int
 	Role, Tool, Operation         string
 	ActivityKnown                 bool
 	ActivityAge, OperationElapsed time.Duration
@@ -281,4 +283,14 @@ func (p *Session) Activity() *Activity {
 		return nil
 	}
 	return p.activity
+}
+
+// Retry records coordinator-selected retry metadata for subsequent events.
+func (p *Session) Retry(reason string, used, limit int) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.event.RetryReason, p.event.RetryUsed, p.event.RetryLimit = reason, used, limit
 }

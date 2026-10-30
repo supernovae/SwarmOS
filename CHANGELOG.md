@@ -4,6 +4,92 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+## v0.9.0
+
+v0.9.0 makes issue and PR workflows more reliable with checkpoint recovery, clearer progress and retry guidance, and less repeated validation. Public personal-fork contributors gain trusted upstream plan reviews and approval continuity through implementation and PR revisions.
+
+- Support repository and WorkUnit target branches, binding approval, worktrees, validation, and PR publication to the selected branch and rejecting PR retargets.
+
+- Test every fork operation against the frozen v0.8.0 coordinator protocol, including released results and optional request fields.
+
+- Explain validation failures outside bounded rebase repair scope and allow authenticated maintainers to select exact repair files per invocation.
+
+- Check changelog fragment format in make check and CI tests so malformed fragments fail on the PR that adds them.
+
+- Split workflow execution into named phases while preserving claim fencing, review gates, and validation repair behavior.
+
+- Issue and PR submission now show advisory warnings for missing or unmet acceptance evidence reported by the tester, including in JSON output.
+
+- Fix changelog folding into existing release sections and clarify the one-bullet fragment rule.
+
+- Add regression coverage for permissions granted to local reusable workflow jobs.
+
+- Allow creating and editing WorkUnits with an empty Constraints section while preserving required headings and acceptance criteria.
+
+- Add an opt-in public personal-fork lifecycle regression driver with offline safety tests, manual approval pauses and a developer guide.
+
+- Fix reviewer boundary tests to recognize independently confirmed Bubblewrap namespace unavailability in nested agent sandboxes.
+
+- Fix GitHub `swarm issue create --ready` to send a valid labels array and complete normal approval.
+
+- Add a dormant Bubblewrap dependency transport boundary with an inspecting HTTPS registry proxy and temporary public trust stores; ecosystem restore adapters remain disabled.
+
+- Retry an unchanged completed issue or PR implementation with `work --phase test`, running the tester and all required checks without rerunning the developer.
+
+- Bound coordinator Git fetch, push and ls-remote so stalled transports return with retry guidance; interrupted pushes are reported as an unknown outcome and never retried blindly.
+
+- Show safe role activity ages and coordinator operations in progress heartbeats during issue and PR work.
+
+- Bound Go runtime and build concurrency in Linux native agent commands and worker checks to improve reliability within existing process limits on high-core hosts.
+
+- Bound generated PR descriptions while preserving durable evidence and maintainer prose, and report required description update failures before recording submission.
+
+- Retry transient state-ref commit_refs failures with bounded backoff and authoritative remote-head verification while preserving the original CAS fence.
+
+- Recover preserved checkpoints after reapproval with explicit `swarm issue reconcile --checkpoint`, using read-only previews and normal fenced claim acquisition for GitHub and local coordination. Failed checks preserve the candidate and keep the authorized claim available for retry or `swarm issue release`; local recovery requires a candidate descending from the recorded predecessor.
+
+- Add narrow, read-only installed Maven and Gradle runtime snapshots to Linux harness-tools restore boundaries, with fixed public JDK metadata and fail-closed layout validation.
+
+- Close restore connections reliably when client acceptance or upstream dialing races shutdown.
+
+- Preserve complete rejected-run text recovery patches when binary or large files are verified unchanged.
+
+- Verify pure-Go restore helper builds before launch and classify host process-limit rejection per invocation without changing production limits.
+
+- Show remaining claim time after issue/PR staging and issue validation, with targeted renewal guidance when time is short.
+
+- Plan and independently review an explicitly selected preserved issue checkpoint before reconciling it, using trusted repository policy and existing isolated planners.
+
+- Resume clean unpublished local issue checkpoints when fresh coordinator creation and approval evidence proves eligibility, preserving claim, approval, and publication fences.
+
+- Show linked-issue maintainer review commands when automatic plan retries are exhausted, including during PR revisions.
+
+- Include the pure-Go Linux restore helper with local Make builds and installs and Linux amd64/arm64 release archives.
+
+- Guide fork contributors to upstream maintainer approval when their plan review is advisory.
+
+- Recover late public-fork coordinator responses with `swarm --fork fork-coordinator request-status <issue> <request-id>`; timed-out requests report an unresolved outcome and the concrete recovery command.
+
+- Reuse isolated CLI fixture seeds and align CI package timeouts and bounded test concurrency to unblock required validation.
+
+- Separate mandatory PR regressions from shared nightly and exact-commit release full validation.
+
+- Run candidate validation checks once and show check, preparation, and reuse timings in validation reports and pull requests.
+
+- Assign required verification to the coordinator while agents run focused checks and reuse applicable passing results after independent review.
+
+- Reuse exact passing checkpoint reconciliation checks at submit and show progress during checkpoint planning, review and reconciliation.
+
+- Stop issue and PR required checks when the independent tester explicitly reports failure or blocked implementation.
+
+- Let upstream maintainers run trusted agent plan reviews for public personal forks while contributors retain their leases.
+
+- Keep trusted upstream fork plan approval valid through fenced implementation checkpoints and PR revision progress.
+
+- Mirror WorkUnit dependencies to GitHub blocked-by links, order published sub-issues, and report native dependency drift in issue lint.
+
+- Document hands-on issue and PR work, record interactive staging provenance, and show role production summaries while keeping local aliases out of generated PR evidence.
+
 ## v0.8.0
 
 v0.8.0 is about getting work across the line without hand repairs. Rebases resolve and repair routine conflicts, approvals follow main forward when nothing that matters changed, abandoned claims and checkpoints have maintainer commands to clear them, and validation fails fast with the failing tests in view. Fork contributors can keep the `origin`/`upstream` layout `gh` creates, and projects that prefer a tidy branch list can move SwarmOS's ledger refs under `refs/swarm/`. Upgrade `swarm` and rerun `swarm repo init` to pick up the regenerated workflows and templates. Sandboxes now get per-repository, read-only dependency and build caches for Go, Rust, Node and Python, filled on the host from the approved base, and mount only the toolchain directories they need. Agents get a trusted repair brief when checks fail and can repair within the same run, WorkUnits carry size, uncertainty and risk dimensions that select leaner prompts for small tasks, and every role run records its time, tokens and model.

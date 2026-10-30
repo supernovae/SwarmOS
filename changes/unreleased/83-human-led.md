@@ -1,1 +1,0 @@
-- Document hands-on issue and PR work, record interactive staging provenance, and show role production summaries while keeping local aliases out of generated PR evidence.

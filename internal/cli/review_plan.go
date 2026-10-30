@@ -91,7 +91,8 @@ independent human decision.`,
 			if reject {
 				verdict = "CHANGES_REQUESTED"
 			}
-			if _, err := manager.RecordHumanReview(cmd.Context(), issue, verdict, notes); err != nil {
+			reviewed, err := manager.RecordHumanReview(cmd.Context(), issue, verdict, notes)
+			if err != nil {
 				return err
 			}
 			if approve {
@@ -110,7 +111,14 @@ independent human decision.`,
 				}
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "review", "issue_number": issue, "reviewer_kind": "human", "verdict": verdict})
+				outcome := map[string]any{"kind": "review", "issue_number": issue, "reviewer_kind": "human", "verdict": verdict}
+				if d := directPlanReviewDisplay(rootOpts, reviewed); d != nil {
+					outcome["plan_review"] = d
+				}
+				return writeJSON(cmd, outcome)
+			}
+			if d := directPlanReviewDisplay(rootOpts, reviewed); d != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Plan review round: %d; automatic plan retries: %d/%d; operator decision needed: %t\n", d.Round, d.RetriesUsed, d.RetriesAllowed, d.OperatorDecision)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Human review recorded for issue #%d: %s\n", issue, verdict)
 			return nil

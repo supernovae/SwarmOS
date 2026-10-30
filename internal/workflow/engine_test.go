@@ -22,6 +22,7 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func TestEnginePlanGateLifecycle(t *testing.T) {
@@ -951,5 +952,197 @@ func TestUpstreamPlanReviewInitialCompletion(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPlanReviewHistoryAndPlannerReplanTelemetry(t *testing.T) {
+	root, e, tr := setupProjectPlanTestRepo(t)
+	ctx := context.Background()
+	wu := &contract.WorkUnit{Objective: "Converge review", Constraints: []string{"Preserve approval"}, Acceptance: []string{"Review revised plan"}, Workflow: "feature", Gate: contract.GateAgent}
+	issue, err := tr.CreateIssue(ctx, "Converge", contract.FormatIssueMarkdown(wu), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = e.LeaseManager.ApproveTask(ctx, issue.Number, "maintainer"); err != nil {
+		t.Fatal(err)
+	}
+	wu, err = contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock := &agent.MockRunner{}
+	planners, reviews := 0, 0
+	var reservationCounts []int
+	var firstPlan, firstTest string
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			active := filepath.Join(req.WorktreePath, ".swarm/active")
+			if req.Role == "planner" {
+				st, err := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reservationCounts = append(reservationCounts, st.PlanReplanCount)
+			}
+			if req.Role == "reviewer" {
+				reviews++
+				b, err := os.ReadFile(filepath.Join(active, "REVIEW_EVIDENCE.md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				sys, err := os.ReadFile(filepath.Join(active, "SYSTEM_PROMPT.md"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reviews == 1 {
+					if strings.Contains(string(b), "Earlier-round") || strings.Contains(string(sys), "resolved or unresolved") {
+						t.Fatal("first review has history")
+					}
+				} else {
+					if !strings.Contains(string(b), "Earlier-round evidence: round 1") || !strings.Contains(string(b), "continuity-finding") || !strings.Contains(string(sys), "resolved or unresolved") || !strings.Contains(string(sys), "reversal of earlier guidance") {
+						t.Fatalf("second bundle missing context: %s", b)
+					}
+					st, err := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+					if err != nil {
+						t.Fatal(err)
+					}
+					bindings := lease.ReviewBindings(st)
+					if bindings["plan_digest"] == firstPlan || bindings["test_plan_digest"] == firstTest {
+						t.Fatal("reports unchanged")
+					}
+					if lease.VerifyApproval(st, wu) == nil {
+						t.Fatal("history approved new reports")
+					}
+				}
+			}
+			result, err := mock.Run(ctx, req)
+			if err != nil {
+				return result, err
+			}
+			if req.Role == "planner" {
+				planners++
+				if planners == 2 {
+					for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
+						path := filepath.Join(active, name)
+						b, err := os.ReadFile(path)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path, append(b, []byte("\nRevised with missing coverage.\n")...), 0644); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			if req.Role == "reviewer" && reviews == 1 {
+				text := "VERDICT: CHANGES_REQUESTED\n\ncontinuity-finding: add missing coverage"
+				if err := os.WriteFile(filepath.Join(active, "REVIEW.md"), []byte(text), 0644); err != nil {
+					t.Fatal(err)
+				}
+				result.Output = text
+			}
+			return result, nil
+		}}, nil
+	}
+	opts := WorkOptions{RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Phase: "all", Headless: true}
+	first, err := e.ExecuteWork(ctx, opts)
+	if !errors.Is(err, ErrPlanReviewRejected) {
+		t.Fatalf("first: %v", err)
+	}
+	bindings := lease.ReviewBindings(first.State)
+	firstPlan, firstTest = bindings["plan_digest"], bindings["test_plan_digest"]
+	opts.ClaimID = first.State.Lease.ClaimID
+	opts.Phase = "plan"
+	revised, err := e.ExecuteWork(ctx, opts)
+	if err != nil {
+		t.Fatalf("replan: %v", err)
+	}
+	if revised.State.PlanReplanCount != 1 || !reflect.DeepEqual(reservationCounts, []int{0, 1}) {
+		t.Fatalf("reservations: %v", reservationCounts)
+	}
+	var counts []int
+	for _, run := range revised.State.RoleRuns {
+		if run.Role == "planner" {
+			if run.ReplanCount == nil {
+				t.Fatal("missing count")
+			}
+			counts = append(counts, int(*run.ReplanCount))
+		}
+	}
+	if !reflect.DeepEqual(counts, reservationCounts) {
+		t.Fatalf("telemetry %v != persisted reservations %v", counts, reservationCounts)
+	}
+	opts.Phase = "review"
+	reviewed, err := e.ExecuteWork(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reviews != 2 || len(reviewed.State.PlanReviewHistory) != 2 {
+		t.Fatal("missing review rounds")
+	}
+	if err := lease.VerifyApproval(reviewed.State, wu); err != nil {
+		t.Fatal(err)
+	}
+	current := lease.ReviewBindings(reviewed.State)
+	for _, a := range reviewed.State.Artifacts {
+		if a.Type == contract.ArtifactReview && (a.Metadata["plan_digest"] != current["plan_digest"] || a.Metadata["test_plan_digest"] != current["test_plan_digest"]) {
+			t.Fatal("review binds stale reports")
+		}
+	}
+}
+
+func TestPlanReviewHistoryRoleAndRevisionScope(t *testing.T) {
+	root, _, _ := setupProjectPlanTestRepo(t)
+	out, err := gitfixture.Command(t, root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &lease.IssueState{BaseSHA: strings.TrimSpace(string(out)), TaskDigest: "task", PolicyDigest: "policy"}
+	wu := &contract.WorkUnit{ID: "ISSUE-375", IssueNumber: 375, Workflow: "feature"}
+	history := []workspace.PlanReviewEvidence{{Round: 1, Findings: "history-secret-marker", TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, BaseSHA: st.BaseSHA}}
+	for _, tc := range []struct {
+		role    string
+		pr      int
+		fork    bool
+		gateway bool
+	}{{"planner", 0, false, false}, {"developer", 0, false, false}, {"tester", 0, false, false}, {"reviewer", 0, true, false}, {"reviewer", 12, false, false}, {"reviewer", 0, false, true}, {"reviewer", 0, false, false}} {
+		t.Run(fmt.Sprintf("%s/%d/%t/%t", tc.role, tc.pr, tc.fork, tc.gateway), func(t *testing.T) {
+			st.ForkRepo = ""
+			if tc.fork {
+				st.ForkRepo = "owner/fork"
+			}
+			st.PlanReviewHistory = nil
+			if err := compileExecutionBundle(root, wu, nil, st, tc.role, tc.pr, tc.gateway); err != nil {
+				t.Fatal(err)
+			}
+			read := func(name string) string {
+				b, err := os.ReadFile(filepath.Join(root, ".swarm/active", name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(b)
+			}
+			beforeEvidence, beforePrompt := read("REVIEW_EVIDENCE.md"), read("SYSTEM_PROMPT.md")
+			st.PlanReviewHistory = history
+			if err := compileExecutionBundle(root, wu, nil, st, tc.role, tc.pr, tc.gateway); err != nil {
+				t.Fatal(err)
+			}
+			included := tc.role == "reviewer" && !tc.fork && tc.pr == 0 && !tc.gateway
+			if included {
+				if !strings.Contains(read("REVIEW_EVIDENCE.md"), "history-secret-marker") {
+					t.Fatal("missing history")
+				}
+				st.TaskDigest = "new task"
+				if err := compileExecutionBundle(root, wu, nil, st, tc.role, tc.pr, tc.gateway); err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(read("REVIEW_EVIDENCE.md"), "history-secret-marker") || strings.Contains(read("SYSTEM_PROMPT.md"), "resolved or unresolved") {
+					t.Fatal("stale revision context")
+				}
+				st.TaskDigest = "task"
+			} else if beforeEvidence != read("REVIEW_EVIDENCE.md") || beforePrompt != read("SYSTEM_PROMPT.md") {
+				t.Fatal("history leaked into excluded bundle")
+			}
+		})
 	}
 }

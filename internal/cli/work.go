@@ -162,7 +162,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
 				recovery := planReviewRecovery(&guidanceOpts, result.State, "issue", opts.IssueNumber)
 				if jsonOutput {
-					return &planRecoveryError{err: err, recovery: recovery}
+					return &planRecoveryError{err: err, recovery: recovery, display: directPlanReviewDisplay(&guidanceOpts, result.State)}
 				}
 				fmt.Fprintln(cmd.OutOrStdout(), recovery)
 			}

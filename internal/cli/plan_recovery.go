@@ -17,6 +17,7 @@ import (
 type planRecoveryError struct {
 	err      error
 	recovery string
+	display  *planReviewDisplay
 }
 
 func (e *planRecoveryError) Error() string { return e.err.Error() }
@@ -49,6 +50,9 @@ func planReviewRecovery(opts *RootOptions, st *lease.IssueState, resource string
 	review := fmt.Sprintf("%s issue review-plan %d", command, st.Lease.IssueNumber)
 	if resource == "pr" {
 		review = fmt.Sprintf("%s pr work %d --phase review", command, number)
+	}
+	if d := directPlanReviewDisplay(opts, st); d != nil {
+		return fmt.Sprintf("%s. Plan review round %d; automatic plan retries: %d/%d; operator decision needed: %t. %s", st.NextPhaseReason, d.Round, d.RetriesUsed, d.RetriesAllowed, d.OperatorDecision, strings.ReplaceAll(strings.Join(d.RecoveryCommands, "; "), "swarm ", command+" "))
 	}
 	return fmt.Sprintf("%s. Revise the plan: %s %s work %d --phase plan; then run %s. Automatic retries remain subject to the per-revision cap.", st.NextPhaseReason, command, resource, number, review)
 }
@@ -123,4 +127,47 @@ func runCheckpointPlan(cmd *cobra.Command, root *RootOptions, arg string, opts w
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d preserved-checkpoint plan staged; run swarm issue review-plan %d, then explicitly reconcile the checkpoint.\n", n, n)
 	return nil
+}
+
+// planReviewDisplay is a derived view; it never changes scheduling authority.
+type planReviewDisplay struct {
+	Round            int      `json:"review_round"`
+	RetriesUsed      int      `json:"retries_used"`
+	RetriesAllowed   int      `json:"retries_allowed"`
+	OperatorDecision bool     `json:"operator_decision_needed"`
+	NextPhase        string   `json:"effective_next_phase"`
+	RecoveryCommands []string `json:"recovery_commands"`
+}
+
+func directPlanReviewDisplay(opts *RootOptions, st *lease.IssueState) *planReviewDisplay {
+	if opts.Fork || !lease.DirectPlanReview(st) {
+		return nil
+	}
+	cfg, err := harness.LoadConfigAt(opts.resolveRepoRoot(), st.BaseSHA)
+	if err != nil {
+		return nil
+	}
+	return derivePlanReviewDisplay(st, cfg.PlanMode, cfg.Lease.PlanReplanAttempts())
+}
+
+func derivePlanReviewDisplay(st *lease.IssueState, mode string, limit int) *planReviewDisplay {
+	d := &planReviewDisplay{Round: lease.PlanReviewRound(st), RetriesUsed: st.PlanReplanCount, RetriesAllowed: limit, NextPhase: st.Lease.NextPhase}
+	d.OperatorDecision = !strings.EqualFold(mode, "interactive") && st.PlanReplanCount >= limit && lease.CurrentPlanRejection(st)
+	n := st.Lease.IssueNumber
+	if d.OperatorDecision {
+		d.NextPhase = ""
+		d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("An authorized independent maintainer can run swarm issue review-plan %d --reject --notes 'Revise the plan' to reset retries, or swarm issue review-plan %d --approve after reviewing the reports; narrow or decompose and reapprove the WorkUnit if needed", n, n))
+	} else if st.PendingPlanReview != nil {
+		if lease.CurrentPlanRejection(st) {
+			d.NextPhase = "plan"
+			d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("swarm issue work %d --phase plan", n))
+		} else {
+			d.NextPhase = "review"
+		}
+	}
+	d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("swarm issue review-plan %d", n))
+	if !strings.EqualFold(mode, "agent") {
+		d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("Revise both reports and run swarm issue stage %d --phase plan in its managed worktree", n))
+	}
+	return d
 }

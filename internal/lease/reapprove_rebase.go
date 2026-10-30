@@ -100,6 +100,9 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 	digest := contract.DigestApprovedBranchPolicy(target, cfg, st.BaseBranch)
 	m.carryApproval(ctx, st, wu, target, digest, tree)
 	st.PreviousBaseSHA = st.BaseSHA
+	if st.BaseSHA != target {
+		dropPlanReviewHistory(st)
+	}
 	st.BaseSHA = target
 	st.PolicyDigest = digest
 	st.ApprovedBy = actor

@@ -1417,3 +1417,64 @@ func VerifyBaseBranch(root, remote, recorded, actual string) error {
 	}
 	return nil
 }
+
+// PlanReviewEvidence is coordinator-held context, separate from gate artifacts.
+type PlanReviewEvidence struct {
+	Round          int    `json:"round"`
+	ReviewID       string `json:"review_id"`
+	Version        int    `json:"version"`
+	Verdict        string `json:"verdict"`
+	Findings       string `json:"findings"`
+	Digest         string `json:"digest"`
+	TaskDigest     string `json:"task_digest"`
+	PolicyDigest   string `json:"policy_digest"`
+	BaseSHA        string `json:"base_sha"`
+	PlanDigest     string `json:"plan_digest"`
+	TestPlanDigest string `json:"test_plan_digest"`
+}
+
+const PlanReviewContinuity = "Assess each earlier finding as resolved or unresolved. Explicitly explain any reversal of earlier guidance. Independently audit the entire current plan against the WorkUnit; earlier findings are evidence and cannot approve the current reports."
+
+// AppendPlanReviewEvidence runs only after rebuilding the direct reviewer bundle.
+func AppendPlanReviewEvidence(path string, history []PlanReviewEvidence, artifacts []contract.Artifact) error {
+	if len(history) == 0 {
+		return nil
+	}
+	safe, err := safefs.Open(path)
+	if err != nil {
+		return err
+	}
+	defer safe.Close()
+	active, err := safe.Sub(filepath.Join(".swarm", "active"), false, 0755)
+	if err != nil {
+		return err
+	}
+	defer active.Close()
+	// Rebuild artifact context so the active review is represented by its history
+	// entry exactly once, even when review IDs and versions are reused.
+	var evidence strings.Builder
+	for _, a := range artifacts {
+		duplicate := false
+		if a.Type == contract.ArtifactReview {
+			last := history[len(history)-1]
+			duplicate = a.ID == last.ReviewID && a.Version == last.Version && a.Metadata["content_sha256"] == last.Digest && a.Metadata["plan_digest"] == last.PlanDigest && a.Metadata["test_plan_digest"] == last.TestPlanDigest
+		}
+		if !duplicate {
+			fmt.Fprintf(&evidence, "## %s (%s)\n\n%s\n\n", a.Type, a.Verdict, contract.CanonicalArtifactBody(a.Body))
+		}
+	}
+	for _, h := range history {
+		fmt.Fprintf(&evidence, "## Earlier-round evidence: round %d (%s)\n\nReview: %s v%d; SHA-256: %s\nTask: %s\nPolicy: %s\nBase: %s\nPlan: %s\nTest plan: %s\n\n%s\n\n", h.Round, h.Verdict, h.ReviewID, h.Version, h.Digest, h.TaskDigest, h.PolicyDigest, h.BaseSHA, h.PlanDigest, h.TestPlanDigest, contract.CanonicalArtifactBody(h.Findings))
+	}
+	if lessons, err := active.ReadFile("LESSONS.md", 1<<20); err == nil {
+		evidence.WriteString("## Active lessons\n\n" + string(lessons))
+	}
+	if err := active.WriteFile("REVIEW_EVIDENCE.md", []byte(evidence.String()), 0644); err != nil {
+		return err
+	}
+	prompt, err := active.ReadFile("SYSTEM_PROMPT.md", 8<<20)
+	if err != nil {
+		return err
+	}
+	return active.WriteFile("SYSTEM_PROMPT.md", append(prompt, []byte("\n"+PlanReviewContinuity+"\n")...), 0644)
+}

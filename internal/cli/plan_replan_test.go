@@ -3,15 +3,21 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"github.com/supernovae/swarmos/internal/validation"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -55,6 +61,25 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 	if !strings.Contains(status, "Automatic plan retries: 2/2") || !strings.Contains(status, "CHANGES_REQUESTED") {
 		t.Fatal(status)
 	}
+	if !strings.Contains(status, "operator decision needed: true") || strings.Contains(status, "Next phase: plan") {
+		t.Fatal(status)
+	}
+	var statusJSON struct {
+		Issues []struct {
+			PlanReview *planReviewDisplay `json:"plan_review"`
+			State      *lease.IssueState  `json:"state"`
+		} `json:"issues"`
+	}
+	if err := json.Unmarshal([]byte(f.must(t, "issue", "status", n, "--json")), &statusJSON); err != nil {
+		t.Fatal(err)
+	}
+	if len(statusJSON.Issues) != 1 || statusJSON.Issues[0].PlanReview == nil || !statusJSON.Issues[0].PlanReview.OperatorDecision || statusJSON.Issues[0].State.Lease.NextPhase == "plan" {
+		t.Fatalf("exhausted JSON: %+v", statusJSON)
+	}
+	// Display suppression must not change authoritative scheduling state.
+	if f.state(t, issue).PlanReplanCount != 2 {
+		t.Fatal("status mutated retry count")
+	}
 	// The capped issue is released so the node must skip it and run another.
 	f.must(t, "issue", "release", n)
 	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1")
@@ -68,6 +93,33 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 	if f.state(t, issue).PlanReplanCount != 2 {
 		t.Fatal("node retried capped issue")
 	}
+	// Revised reports can still be reviewed after the final reservation, even
+	// when a reviewer subsequently fails and clears its scheduling hint.
+	st := f.state(t, issue)
+	// The node left this issue released: acquire only to write the revised report.
+	token, err := lease.LoadClaimToken(f.root, issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.manager.BindClaim(issue, token)
+	st, err = f.manager.Acquire(context.Background(), issue, st.Lease.Owner, "mock", "review", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.UpdateArtifact(context.Background(), issue, st.Lease.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock", Summary: "revised", Body: "revised plan after final retry"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.UpdatePhase(context.Background(), issue, st.Lease.Owner, "review", "failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(f.must(t, "issue", "status", n, "--json")), &statusJSON); err != nil {
+		t.Fatal(err)
+	}
+	d := statusJSON.Issues[0].PlanReview
+	if d.OperatorDecision || d.NextPhase != "review" || statusJSON.Issues[0].State.Lease.NextPhase != "review" {
+		t.Fatalf("unreviewed final reports: %+v", d)
+	}
+
 }
 
 func TestRejectedReviewJSONRecovery(t *testing.T) {
@@ -89,6 +141,9 @@ func TestRejectedReviewJSONRecovery(t *testing.T) {
 	var value map[string]any
 	if err := json.Unmarshal(out.Bytes(), &value); err != nil {
 		t.Fatalf("invalid JSON: %v: %s", err, out.String())
+	}
+	if value["plan_review"] == nil {
+		t.Fatalf("missing round fields: %s", out.String())
 	}
 	if recovery, ok := value["recovery"].(string); !ok || !strings.Contains(recovery, "issue work "+n+" --phase plan") {
 		t.Fatalf("missing recovery: %s", out.String())
@@ -324,5 +379,88 @@ func TestPlanReplanHumanRejectionRecovery326(t *testing.T) {
 	f.must(t, "issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false")
 	if _, err := f.run("issue", "work", n, "--phase", "implement", "--agent", "mock", "--progress=false"); err == nil {
 		t.Fatal("approval carried to replacement reports")
+	}
+}
+
+func TestPlanReviewRoundDisplay(t *testing.T) {
+	for _, mode := range []string{"", "auto", "agent", "interactive"} {
+		for _, limit := range []int{0, 2} {
+			t.Run(mode+strconv.Itoa(limit), func(t *testing.T) {
+				st := &lease.IssueState{TaskDigest: "task", PolicyDigest: "policy", BaseSHA: "base", PlanReplanCount: limit}
+				st.Lease.IssueNumber = 375
+				st.Lease.NextPhase = "plan"
+				art := contract.Artifact{ID: "review", Version: 1, Type: contract.ArtifactReview, Verdict: "CHANGES_REQUESTED", Body: "VERDICT: CHANGES_REQUESTED"}
+				art.Metadata = lease.ReviewBindings(st)
+				art.Metadata["review_source"] = "authenticated-agent"
+				sum := sha256.Sum256([]byte(art.Body))
+				st.PendingPlanReview = &lease.PlanRejection{ReviewID: art.ID, Version: 1, Digest: hex.EncodeToString(sum[:]), TaskDigest: "task", PolicyDigest: "policy", BaseSHA: "base"}
+				st.Artifacts = []contract.Artifact{art}
+				d := derivePlanReviewDisplay(st, mode, limit)
+				exhausted := mode != "interactive"
+				if d.OperatorDecision != exhausted || (exhausted && d.NextPhase == "plan") {
+					t.Fatalf("display: %+v", d)
+				}
+				if strings.Contains(strings.Join(d.RecoveryCommands, ";"), "issue stage") != (mode != "agent") {
+					t.Fatal("invalid staging advice")
+				}
+				// A failed final planner may clear NextPhase without resolving the rejection.
+				st.Lease.NextPhase = ""
+				if derivePlanReviewDisplay(st, mode, limit).OperatorDecision != exhausted {
+					t.Fatal("phase hid exhaustion")
+				}
+				for _, field := range []string{"id", "version", "digest", "task", "policy", "base", "binding", "reports"} {
+					copyState := *st
+					p := *st.PendingPlanReview
+					copyState.PendingPlanReview = &p
+					switch field {
+					case "id":
+						p.ReviewID = "other"
+					case "version":
+						p.Version++
+					case "digest":
+						p.Digest = "other"
+					case "task":
+						p.TaskDigest = "other"
+					case "policy":
+						p.PolicyDigest = "other"
+					case "base":
+						p.BaseSHA = "other"
+					case "binding":
+						a := art
+						a.Metadata = map[string]string{"review_source": "authenticated-agent"}
+						copyState.Artifacts = []contract.Artifact{a}
+					case "reports":
+						copyState.Artifacts = nil
+					}
+					d := derivePlanReviewDisplay(&copyState, mode, limit)
+					if d.OperatorDecision || d.NextPhase != "review" {
+						t.Fatalf("%s: %+v", field, d)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPlanReviewRoundFailureEnvelope(t *testing.T) {
+	for _, direct := range []bool{true, false} {
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		err := &planRecoveryError{err: workflow.ErrPlanReviewRejected, recovery: "review current reports"}
+		if direct {
+			err.display = &planReviewDisplay{Round: 3, RetriesUsed: 2, RetriesAllowed: 2, OperatorDecision: true, RecoveryCommands: []string{"review current reports"}}
+		}
+		reportJSONFailureWithReport(cmd, true, "work", err, &validation.ValidationReport{})
+		var value map[string]any
+		if e := json.Unmarshal(out.Bytes(), &value); e != nil {
+			t.Fatal(e)
+		}
+		if value["kind"] != "work" || value["status"] != "failed" || value["error"] != workflow.ErrPlanReviewRejected.Error() || value["recovery"] != err.recovery || value["report"] == nil {
+			t.Fatal(value)
+		}
+		if (value["plan_review"] != nil) != direct {
+			t.Fatal("changed excluded envelope", value)
+		}
 	}
 }

@@ -29,6 +29,9 @@ func reportJSONFailureWithReport(cmd *cobra.Command, asJSON bool, kind string, e
 		var recovery *planRecoveryError
 		if errors.As(err, &recovery) {
 			outcome["recovery"] = recovery.recovery
+			if recovery.display != nil {
+				outcome["plan_review"] = recovery.display
+			}
 		}
 		if action := nextActionOf(err); action != nil {
 			outcome["next_action"] = action

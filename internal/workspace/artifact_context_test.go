@@ -102,3 +102,39 @@ func TestRevisionContextStripsOperatorAppendices(t *testing.T) {
 		t.Fatal("modified authoritative context")
 	}
 }
+
+func TestPlanReviewHistoryEvidence(t *testing.T) {
+	root := t.TempDir()
+	wu := &contract.WorkUnit{ID: "ISSUE-375", IssueNumber: 375}
+	artifacts := []contract.Artifact{{ID: "review", Version: 1, Type: contract.ArtifactReview, Body: "old finding", Metadata: map[string]string{"content_sha256": "digest", "plan_digest": "plan", "test_plan_digest": "test"}}}
+	history := []PlanReviewEvidence{{Round: 1, ReviewID: "review", Version: 1, Verdict: "CHANGES_REQUESTED", Findings: "old finding", Digest: "digest", PlanDigest: "plan", TestPlanDigest: "test"}}
+	compile := func() {
+		t.Helper()
+		if err := compileHarnessBundle(root, wu, nil, artifacts, "reviewer", "review prompt", "", "", "", "checks", "", bundleGuidance{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compile()
+	if err := AppendPlanReviewEvidence(root, history, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	read := func(name string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, ".swarm/active", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	evidence := read("REVIEW_EVIDENCE.md")
+	if strings.Count(evidence, "old finding") != 1 || !strings.Contains(evidence, "Earlier-round evidence: round 1") || strings.Contains(evidence, PlanReviewContinuity) {
+		t.Fatal(evidence)
+	}
+	if !strings.Contains(read("SYSTEM_PROMPT.md"), PlanReviewContinuity) {
+		t.Fatal("missing continuity guidance")
+	}
+	compile()
+	if strings.Contains(read("REVIEW_EVIDENCE.md"), "Earlier-round") || strings.Contains(read("SYSTEM_PROMPT.md"), PlanReviewContinuity) {
+		t.Fatal("stale evidence survived recompilation")
+	}
+}

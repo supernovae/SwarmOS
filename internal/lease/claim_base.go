@@ -90,6 +90,7 @@ func (m *Manager) prepareClaimBase(ctx context.Context, n int, original *IssueSt
 	} else {
 		st.ApprovalTransition = nil
 	}
+	dropPlanReviewHistory(&st)
 	st.PreviousBaseSHA, st.ClaimPreviousBase, st.BaseSHA = original.BaseSHA, original.BaseSHA, base
 	st.PolicyDigest, st.PolicyTreeDigest = policy, tree
 	if !TaskApprovalCurrent(&st, wu, nextCfg) {

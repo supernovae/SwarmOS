@@ -39,6 +39,7 @@ func (r *workRun) plan() (bool, error) {
 		}
 		if strings.EqualFold(r.cfg.PlanMode, "interactive") {
 			r.res.RoleAgentsUsed["planner"] = "interactive"
+			r.res.State = r.st
 			if err := compileSetupBundle(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "planner", r.opts.PRNumber); err != nil {
 				return true, err
 			}
@@ -56,9 +57,12 @@ func (r *workRun) plan() (bool, error) {
 		if err != nil {
 			return true, err
 		}
-		if _, err := r.e.LeaseManager.UpdatePhase(r.ctx, r.opts.IssueNumber, r.opts.Owner, "plan", "active"); err != nil {
+		updated, err := r.e.LeaseManager.UpdatePhase(r.ctx, r.opts.IssueNumber, r.opts.Owner, "plan", "active")
+		if err != nil {
 			return true, err
 		}
+		r.st = updated
+		r.res.State = r.st
 		if err := compileSetupBundle(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "planner", r.opts.PRNumber); err != nil {
 			return true, err
 		}

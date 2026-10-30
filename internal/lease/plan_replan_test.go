@@ -2,15 +2,19 @@ package lease
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/supernovae/swarmos/internal/contract"
 )
@@ -131,6 +135,9 @@ func TestAdvisoryRejectionCannotSetNextPhase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if st.PlanReviewSequence != 2 || len(st.PlanReviewHistory) != 2 {
+		t.Fatal("advisory review entered history")
+	}
 	if st.PendingPlanReview != nil || st.NextPhaseReason != "" {
 		t.Fatal("advisory review created authoritative rejection")
 	}
@@ -174,8 +181,8 @@ func TestPlanReplanRevisionApprovalReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := m.ApproveTask(ctx, n, "local-dev")
-	if err != nil || st.PlanReplanCount != 1 {
-		t.Fatal("identical approval reset retries", err)
+	if err != nil || st.PlanReplanCount != 1 || st.PlanReviewSequence != 1 || len(st.PlanReviewHistory) != 1 {
+		t.Fatal("identical approval reset retries/history", err)
 	}
 	issue, err := m.tracker.GetIssue(ctx, n)
 	if err != nil {
@@ -190,7 +197,7 @@ func TestPlanReplanRevisionApprovalReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err = m.ApproveTask(ctx, n, "local-dev")
-	if err != nil || st.PlanReplanCount != 0 || st.PendingPlanReview != nil {
+	if err != nil || st.PlanReplanCount != 0 || st.PendingPlanReview != nil || st.PlanReviewSequence != 0 || len(st.PlanReviewHistory) != 0 {
 		t.Fatal("changed approval did not reset retries", err)
 	}
 }
@@ -390,5 +397,207 @@ func TestPlanReplanIndependentHumanRefusal326(t *testing.T) {
 		if err != nil || !reflect.DeepEqual(before, after) {
 			t.Fatal("self decision changed state", err)
 		}
+	}
+}
+
+func TestPlanReviewHistoryAuthenticatedAndBounded(t *testing.T) {
+	m, n, st := rejectedReplanFixture(t)
+	ctx := context.Background()
+	if len(st.PlanReviewHistory) != 1 || PlanReviewRound(st) != 1 {
+		t.Fatalf("first review: %+v", st.PlanReviewHistory)
+	}
+	for round := 2; round <= 10; round++ {
+		var err error
+		st, err = m.UpdateArtifact(ctx, n, "local-dev", contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock", Summary: "plan", Body: fmt.Sprintf("plan %d", round)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if PlanReviewRound(st) != round || len(ReviewHistory(st)) == 0 {
+			t.Fatal("lost round after report replacement")
+		}
+		if VerifyApproval(st, &contract.WorkUnit{Gate: contract.GateAgent}) == nil {
+			t.Fatal("history approved changed plan")
+		}
+		meta := ReviewBindings(st)
+		meta["kind"] = "agent"
+		st, err = m.UpdateArtifact(ctx, n, "local-dev", contract.Artifact{Type: contract.ArtifactReview, Producer: "mock:reviewer", Summary: "review", Verdict: "CHANGES_REQUESTED", Body: "VERDICT: CHANGES_REQUESTED\n\n" + strings.Repeat("界", 6000), Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(st.PlanReviewHistory) != 8 || st.PlanReviewHistory[0].Round != 3 || st.PlanReviewSequence != 10 {
+		t.Fatalf("bounds: %+v", st.PlanReviewHistory)
+	}
+	last := st.PlanReviewHistory[7]
+	if !utf8.ValidString(last.Findings) || len(last.Findings) > 16<<10 || !strings.HasSuffix(last.Findings, "[Earlier review findings truncated]") {
+		t.Fatal("unbounded findings")
+	}
+	oldSeq := st.PlanReviewSequence
+	meta := ReviewBindings(st)
+	meta["kind"] = "agent"
+	meta["task_digest"] = "forged"
+	if _, err := m.UpdateArtifact(ctx, n, "local-dev", contract.Artifact{Type: contract.ArtifactReview, Producer: "mock:reviewer", Summary: "bad", Verdict: "APPROVED", Body: "VERDICT: APPROVED", Metadata: meta}); err == nil {
+		t.Fatal("forged binding accepted")
+	}
+	got, err := m.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PlanReviewSequence != oldSeq {
+		t.Fatal("failed write appended history")
+	}
+	st.TaskDigest = "other"
+	if len(ReviewHistory(st)) != 0 {
+		t.Fatal("stale projection")
+	}
+	dropPlanReviewHistory(st)
+	if st.PlanReviewSequence != 0 || st.PlanReviewHistory != nil || PlanReviewRound(st) != 1 {
+		t.Fatal("revision reset")
+	}
+}
+
+func TestPlanReviewHistoryHumanReset(t *testing.T) {
+	m, n, _ := rejectedReplanFixture(t)
+	st, err := m.RecordHumanReview(context.Background(), n, "CHANGES_REQUESTED", "narrow the plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.PlanReviewHistory) != 2 || PlanReviewRound(st) != 2 || st.PlanReplanCount != 0 {
+		t.Fatalf("human history: %+v", st)
+	}
+}
+
+func TestPlanReviewHistoryRevisionInvalidation(t *testing.T) {
+	for _, change := range []string{"task", "policy", "base"} {
+		t.Run(change, func(t *testing.T) {
+			m, n, _ := rejectedReplanFixture(t)
+			ctx := context.Background()
+			if _, err := m.Release(ctx, n, "local-dev", "reapprove"); err != nil {
+				t.Fatal(err)
+			}
+			st, rev, err := m.load(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Independently exercise each approved identity comparison without changing
+			// the policy tree, which would conflate policy and base invalidation.
+			switch change {
+			case "task":
+				st.TaskDigest = "old-task"
+			case "policy":
+				st.PolicyDigest = "old-policy"
+			case "base":
+				st.BaseSHA = "old-base"
+			}
+			if _, err := m.save(ctx, n, rev, st); err != nil {
+				t.Fatal(err)
+			}
+			got, err := m.ApproveTask(ctx, n, "local-dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.PlanReviewHistory) != 0 || got.PlanReviewSequence != 0 || PlanReviewRound(got) != 1 {
+				t.Fatal("revision retained history")
+			}
+		})
+	}
+}
+
+func TestPlanReviewHistoryLegacyAndUntrustedWrites(t *testing.T) {
+	m, n, st := rejectedReplanFixture(t)
+	ctx := context.Background()
+	// An old active artifact is never promoted from metadata into history.
+	var legacy IssueState
+	if err := json.Unmarshal([]byte(`{"artifacts":[{"type":"review","metadata":{"review_source":"authenticated-agent"}}]}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if PlanReviewRound(&legacy) != 1 || len(ReviewHistory(&legacy)) != 0 {
+		t.Fatal("legacy artifact promoted")
+	}
+	meta := ReviewBindings(st)
+	meta["kind"] = "agent"
+	meta["review_source"] = "authenticated-agent"
+	art := contract.Artifact{Type: contract.ArtifactReview, Producer: "mock", Summary: "imported", Verdict: "CHANGES_REQUESTED", Body: "VERDICT: CHANGES_REQUESTED", Metadata: meta}
+	// Advisory/imported evidence cannot authenticate itself through metadata.
+	got, err := m.UpdateAdvisoryReview(ctx, n, "local-dev", art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PlanReviewSequence != 1 {
+		t.Fatal("advisory history")
+	}
+	token := m.token(n)
+	m.BindClaim(n, "stale")
+	if _, err := m.UpdateArtifact(ctx, n, "local-dev", art); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("stale write: %v", err)
+	}
+	m.BindClaim(n, token)
+	original := m.tracker
+	m.tracker = tracker.NewLocalTracker(m.repoRoot).WithUser("outsider", "NONE")
+	if _, err := m.RecordHumanReview(ctx, n, "CHANGES_REQUESTED", "forged"); err == nil {
+		t.Fatal("unauthorized human accepted")
+	}
+	m.tracker = original
+	got, err = m.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PlanReviewSequence != 1 {
+		t.Fatal("failed writes appended history")
+	}
+}
+
+func TestPlanReviewHistoryReapproveRebase(t *testing.T) {
+	m, tr, issue := testManager(t)
+	ctx := context.Background()
+	// A no-gate task lets this test isolate base identity and persistence from
+	// the independently tested carried-review protocol.
+	issue.Body = strings.Replace(issue.Body, "gate: human", "gate: none", 1)
+	if _, err := tr.UpdateIssueBody(ctx, issue.Number, issue.Body); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.ApproveTask(ctx, issue.Number, "local-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := gitfixture.Command(t, m.repoRoot, args...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("branch", "proposal")
+	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "advance base")
+	target := git("rev-parse", "HEAD")
+	pr, err := tr.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: issue.Number, Title: "review", Head: "proposal", Base: git("symbolic-ref", "--short", "HEAD")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, rev, err := m.load(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.PRNumber = pr.Number
+	st.EffectiveGate = contract.GateNone
+	st.PlanReviewSequence = 5
+	st.PlanReviewHistory = []workspace.PlanReviewEvidence{{Round: 5, Findings: "old findings"}}
+	if _, err := m.save(ctx, issue.Number, rev, st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.ReapproveRebase(ctx, issue.Number, pr.Number, st.BaseSHA, target, pr.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.PlanReviewHistory) != 0 || got.PlanReviewSequence != 0 {
+		t.Fatal("rebase retained history")
+	}
+	persisted, err := m.GetCurrentState(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.PlanReviewHistory) != 0 || persisted.PlanReviewSequence != 0 {
+		t.Fatal("reset not persisted")
 	}
 }

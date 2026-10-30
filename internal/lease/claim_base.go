@@ -91,6 +91,7 @@ func (m *Manager) prepareClaimBase(ctx context.Context, n int, original *IssueSt
 		st.ApprovalTransition = nil
 	}
 	st.PreviousBaseSHA, st.ClaimPreviousBase, st.BaseSHA = original.BaseSHA, original.BaseSHA, base
+	st.ValidationRepairKey, st.ValidationRepairCount = "", 0
 	st.PolicyDigest, st.PolicyTreeDigest = policy, tree
 	if !TaskApprovalCurrent(&st, wu, nextCfg) {
 		return refuse("task approval no longer matches")

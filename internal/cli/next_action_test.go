@@ -310,7 +310,7 @@ func TestIssueWorkNextAction(t *testing.T) {
 	f.must(t, "issue", "approve", n)
 	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 	doc, err = f.runJSON(t, "issue", "work", n, "--agent", "mock", "--progress=false", "--json")
-	assertNextAction(t, doc, err, ReasonChangesRequested, false, ExitChangesRequested, localArgv(f, "issue", "work", n, "--phase", "plan")...)
+	assertNextAction(t, doc, err, ReasonPlanNoProgress, false, ExitChangesRequested, localArgv(f, "issue", "work", n, "--phase", "plan")...)
 	if recovery, _ := doc["recovery"].(string); !strings.Contains(recovery, "issue work "+n+" --phase plan") || !errors.Is(err, workflow.ErrPlanReviewRejected) {
 		t.Fatalf("legacy recovery or cause lost: %v %v", err, doc)
 	}
@@ -319,8 +319,8 @@ func TestIssueWorkNextAction(t *testing.T) {
 			t.Fatal("rejected plan was implemented")
 		}
 	}
-	if _, err := f.run("issue", "work", n, "--agent", "mock", "--progress=false"); ExitCode(err) != ExitFailure {
-		t.Fatalf("unchanged re-plan must stay an ordinary failure: %v", err)
+	if _, err := f.run("issue", "work", n, "--agent", "mock", "--progress=false"); ExitCode(err) != ExitChangesRequested {
+		t.Fatalf("unchanged re-plan must stop with no-progress recovery: %v", err)
 	}
 
 	other := f.create(t, "agent")

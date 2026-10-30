@@ -10,6 +10,8 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 )
 
+var ErrPlanUnchanged = errors.New("re-plan is unchanged after CHANGES_REQUESTED")
+
 var ErrPlanReplanLimit = errors.New("automatic plan retry limit reached")
 
 // PlanRejection survives replacement of the rejected plan's artifacts.
@@ -20,10 +22,23 @@ type PlanRejection struct {
 	TaskDigest   string `json:"task_digest"`
 	PolicyDigest string `json:"policy_digest"`
 	BaseSHA      string `json:"base_sha"`
+	Source       string `json:"source,omitempty"`
+	Findings     string `json:"findings,omitempty"`
+	PlanDigest   string `json:"plan_digest,omitempty"`
+	TestDigest   string `json:"test_digest,omitempty"`
 }
 
 func recordPlanReviewTransition(st *IssueState, art contract.Artifact, advisory bool) {
 	if !advisory && art.Type == contract.ArtifactReview && art.Metadata["review_source"] == "authenticated-human" {
+		if directIssue(st) {
+			if art.Verdict == "CHANGES_REQUESTED" {
+				st.HumanPlanReview = rejectionFor(st, art)
+				st.HumanDraftCount = 0
+			} else if art.Verdict == "APPROVED" {
+				st.HumanPlanReview = nil
+				st.HumanDraftCount = 0
+			}
+		}
 		st.PlanReplanCount = 0
 		st.PendingPlanReview = nil
 		st.NextPhaseReason = ""
@@ -34,7 +49,7 @@ func recordPlanReviewTransition(st *IssueState, art contract.Artifact, advisory 
 		return
 	}
 	if art.Verdict == "CHANGES_REQUESTED" {
-		st.PendingPlanReview = &PlanRejection{ReviewID: art.ID, Version: art.Version, Digest: hash(art.Body), TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, BaseSHA: st.BaseSHA}
+		st.PendingPlanReview = rejectionFor(st, art)
 		st.Lease.NextPhase = "plan"
 		st.NextPhaseReason = fmt.Sprintf("review %s v%d sha256:%s returned CHANGES_REQUESTED", art.ID, art.Version, hash(art.Body))
 	} else if art.Verdict == "APPROVED" {
@@ -58,12 +73,30 @@ func (m *Manager) CheckPlanReplan(st *IssueState) error {
 	if err != nil {
 		return err
 	}
+	if directIssue(st) && st.HumanPlanReview != nil && !strings.EqualFold(cfg.PlanMode, "interactive") {
+		if !validRejection(st.HumanPlanReview) {
+			return ErrApprovalRequired
+		}
+		if st.HumanDraftCount >= cfg.Lease.PlanReplanAttempts() {
+			if CompletePlanPair(st) {
+				return fmt.Errorf("%w (%d/%d): fresh authenticated exact-report approval required; run swarm issue review-plan %d --approve", ErrPlanReplanLimit, st.HumanDraftCount, cfg.Lease.PlanReplanAttempts(), st.Lease.IssueNumber)
+			}
+			return fmt.Errorf("%w (%d/%d): %s", ErrPlanReplanLimit, st.HumanDraftCount, cfg.Lease.PlanReplanAttempts(), m.planRevisionGuidance(st))
+		}
+		return nil
+	}
 	if strings.EqualFold(cfg.PlanMode, "interactive") || st.PendingPlanReview == nil {
 		return nil
+	}
+	if directIssue(st) && !validRejection(st.PendingPlanReview) {
+		return ErrApprovalRequired
 	}
 	limit := cfg.Lease.PlanReplanAttempts()
 	if st.PlanReplanCount < limit {
 		return nil
+	}
+	if directIssue(st) && !CompletePlanPair(st) {
+		return fmt.Errorf("%w (%d/%d): %s", ErrPlanReplanLimit, st.PlanReplanCount, limit, m.planRevisionGuidance(st))
 	}
 	guidance := fmt.Sprintf("run swarm issue review-plan %d, or edit and reapprove the WorkUnit", st.Lease.IssueNumber)
 	if st.PRRevision != nil {
@@ -93,7 +126,24 @@ func (m *Manager) reservePlanReplan(st *IssueState) error {
 	if err != nil {
 		return err
 	}
-	if st.PendingPlanReview != nil && !strings.EqualFold(cfg.PlanMode, "interactive") {
+	if directIssue(st) && !strings.EqualFold(cfg.PlanMode, "interactive") {
+		p := st.PendingPlanReview
+		if st.HumanPlanReview != nil {
+			p = st.HumanPlanReview
+		}
+		identity := ""
+		if p != nil {
+			identity = p.Digest
+		}
+		st.PlanReservation = &PlanDraftReservation{Generation: st.PlanGeneration, Rejection: identity, ClaimID: st.Lease.ClaimID}
+		if p != nil {
+			st.PlanReservation.ReviewID = p.ReviewID
+			st.PlanReservation.ReviewVersion = p.Version
+		}
+	}
+	if directIssue(st) && st.HumanPlanReview != nil && !strings.EqualFold(cfg.PlanMode, "interactive") {
+		st.HumanDraftCount++
+	} else if st.PendingPlanReview != nil && !strings.EqualFold(cfg.PlanMode, "interactive") {
 		st.PlanReplanCount++
 	}
 	return nil
@@ -132,7 +182,195 @@ func (m *Manager) ResetPlanReplansAfterStage(ctx context.Context, issue int, own
 			return ErrApprovalRequired
 		}
 		st.PlanReplanCount = 0
+		if directIssue(st) {
+			markPlanPair(st)
+		}
 		st.Lease.Phase = "plan"
 		return nil
 	})
+}
+
+// PlanPair is coordinator-owned evidence of an atomic report generation. It
+// deliberately binds content, not approval policy; carry checks policy separately.
+type PlanPair struct {
+	Generation  int    `json:"generation"`
+	PlanVersion int    `json:"plan_version"`
+	TestVersion int    `json:"test_version"`
+	PlanDigest  string `json:"plan_digest"`
+	TestDigest  string `json:"test_digest"`
+}
+
+func directIssue(st *IssueState) bool {
+	return st != nil && st.ForkRepo == "" && st.PRNumber == 0 && st.PRRevision == nil
+}
+func planReports(st *IssueState) (plan, test *contract.Artifact) {
+	for i := range st.Artifacts {
+		a := &st.Artifacts[i]
+		switch a.Type {
+		case contract.ArtifactDesign:
+			plan = a
+		case contract.ArtifactTestPlan:
+			test = a
+		}
+	}
+	return
+}
+func rejectionFor(st *IssueState, art contract.Artifact) *PlanRejection {
+	plan, test := planReports(st)
+	p := &PlanRejection{ReviewID: art.ID, Version: art.Version, Digest: hash(art.Body), TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, BaseSHA: st.BaseSHA, Source: art.Metadata["review_source"], Findings: art.Body}
+	if plan != nil {
+		p.PlanDigest = hash(contract.CanonicalArtifactBody(plan.Body))
+	}
+	if test != nil {
+		p.TestDigest = hash(contract.CanonicalArtifactBody(test.Body))
+	}
+	return p
+}
+func validRejection(p *PlanRejection) bool {
+	return p != nil && p.ReviewID != "" && p.Version > 0 && p.Digest == hash(p.Findings) && p.PlanDigest != "" && p.TestDigest != "" && (p.Source == "authenticated-agent" || p.Source == "authenticated-human") && reviewBodyMatchesVerdict(p.Findings, "CHANGES_REQUESTED")
+}
+
+// CompletePlanPair cannot be supplied through artifact metadata or worker imports.
+func CompletePlanPair(st *IssueState) bool {
+	if st == nil || st.CompletePlan == nil {
+		return false
+	}
+	p, t := planReports(st)
+	c := st.CompletePlan
+	return p != nil && t != nil && c.Generation == st.PlanGeneration && c.Generation > 0 && p.Version == c.PlanVersion && t.Version == c.TestVersion && hash(p.Body) == c.PlanDigest && hash(t.Body) == c.TestDigest
+}
+func IncompletePlanPair(st *IssueState) bool {
+	if !directIssue(st) {
+		return false
+	}
+	p, t := planReports(st)
+	// Absent reports may be regenerated; they cannot be reviewed or approved.
+	return (p != nil || t != nil) && (st.PendingPlanReview != nil || st.HumanPlanReview != nil || st.PlanGeneration > 0) && !CompletePlanPair(st)
+}
+func markPlanPair(st *IssueState) {
+	p, t := planReports(st)
+	if p == nil || t == nil {
+		return
+	}
+	st.PlanGeneration++
+	st.CompletePlan = &PlanPair{Generation: st.PlanGeneration, PlanVersion: p.Version, TestVersion: t.Version, PlanDigest: hash(p.Body), TestDigest: hash(t.Body)}
+}
+
+// RecordPlanPair installs both reports and their completion evidence in one fenced
+// CAS. Failed validation or CAS leaves the previous generation untouched.
+func (m *Manager) RecordPlanPair(ctx context.Context, n int, owner string, plan, test contract.Artifact) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("plan pair requires direct coordinator")
+	}
+	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if !directIssue(st) {
+			return fmt.Errorf("plan pair requires direct issue")
+		}
+		if plan.Type != contract.ArtifactDesign || test.Type != contract.ArtifactTestPlan {
+			return fmt.Errorf("expected design and test-plan pair")
+		}
+		oldPlan, oldTest := planReports(st)
+		rejection := st.PendingPlanReview
+		if st.HumanPlanReview != nil {
+			rejection = st.HumanPlanReview
+		}
+		if rejection != nil {
+			if !validRejection(rejection) || rejection.TaskDigest != st.TaskDigest || !planReservationMatches(st, rejection) {
+				return ErrApprovalRequired
+			}
+			if oldPlan != nil && oldTest != nil && contract.CanonicalArtifactBody(oldPlan.Body) == contract.CanonicalArtifactBody(plan.Body) && contract.CanonicalArtifactBody(oldTest.Body) == contract.CanonicalArtifactBody(test.Body) {
+				return ErrPlanUnchanged
+			}
+			if hash(contract.CanonicalArtifactBody(plan.Body)) == rejection.PlanDigest && hash(contract.CanonicalArtifactBody(test.Body)) == rejection.TestDigest {
+				return ErrPlanUnchanged
+			}
+			if st.HumanPlanReview != nil && st.HumanDraftCount == 0 || st.HumanPlanReview == nil && st.PlanReplanCount == 0 {
+				return ErrApprovalRequired
+			}
+		}
+		pair := []contract.Artifact{plan, test}
+		for i := range pair {
+			a := &pair[i]
+			if strings.TrimSpace(a.Body) == "" {
+				return fmt.Errorf("empty plan report")
+			}
+			a.IssueNumber = n
+			a.ID = fmt.Sprintf("art-%d-%s", n, a.Type)
+			a.Version = 1
+			a.CreatedAt = m.nowFn()
+			if a.Type == contract.ArtifactDesign && oldPlan != nil {
+				a.Version = oldPlan.Version + 1
+			}
+			if a.Type == contract.ArtifactTestPlan && oldTest != nil {
+				a.Version = oldTest.Version + 1
+			}
+			meta := map[string]string{}
+			for k, v := range a.Metadata {
+				if !strings.HasPrefix(k, "checkpoint_plan_") {
+					meta[k] = v
+				}
+			}
+			a.Metadata = meta
+			recordRoleRun(st, a)
+			a.Metadata["content_sha256"] = hash(a.Body)
+			if err := contract.ValidateArtifact(a); err != nil {
+				return err
+			}
+			RecordRoleAttestation(st, contract.RoleAttestation{Role: "planner", Agent: meta["agent"], Harness: meta["harness"], HarnessVersion: meta["harness_version"], Model: meta["model"], ExecutionMode: meta["execution_mode"], Authentication: meta["authentication"], Sandbox: meta["sandbox"], ArtifactType: string(a.Type), ArtifactDigest: hash(a.Body)})
+		}
+		kept := make([]contract.Artifact, 0, len(st.Artifacts)+2)
+		for _, a := range st.Artifacts {
+			if a.Type != contract.ArtifactDesign && a.Type != contract.ArtifactTestPlan && a.Type != contract.ArtifactReview {
+				kept = append(kept, a)
+			}
+		}
+		st.Artifacts = append(kept, pair...)
+		markPlanPair(st)
+		st.PlanReservation = nil
+		return nil
+	})
+	if err == nil && m.tracker != nil && (st.EffectiveGate != contract.GateNone || st.HumanPlanReview != nil) {
+		_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+	}
+	return st, err
+}
+
+// HasRevisedPlan distinguishes completion from a replacement of rejected bytes.
+func HasRevisedPlan(st *IssueState) bool {
+	if !CompletePlanPair(st) {
+		return false
+	}
+	p := st.PendingPlanReview
+	if st.HumanPlanReview != nil {
+		p = st.HumanPlanReview
+	}
+	if p == nil {
+		return true
+	}
+	if !validRejection(p) {
+		return false
+	}
+	plan, test := planReports(st)
+	return hash(contract.CanonicalArtifactBody(plan.Body)) != p.PlanDigest || hash(contract.CanonicalArtifactBody(test.Body)) != p.TestDigest
+}
+func ValidPlanRejection(p *PlanRejection) bool { return validRejection(p) }
+
+type PlanDraftReservation struct {
+	ClaimID       string `json:"claim_id"`
+	ReviewID      string `json:"review_id"`
+	ReviewVersion int    `json:"review_version"`
+	Generation    int    `json:"generation"`
+	Rejection     string `json:"rejection"`
+}
+
+func planReservationMatches(st *IssueState, p *PlanRejection) bool {
+	return st.PlanReservation != nil && st.PlanReservation.ClaimID == st.Lease.ClaimID && st.PlanReservation.Generation == st.PlanGeneration && p != nil && st.PlanReservation.Rejection == p.Digest && st.PlanReservation.ReviewID == p.ReviewID && st.PlanReservation.ReviewVersion == p.Version
+}
+
+func (m *Manager) planRevisionGuidance(st *IssueState) string {
+	prefix := ""
+	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(m.nowFn()) {
+		prefix = fmt.Sprintf("the active claim owner must first run swarm issue release %d; ", st.Lease.IssueNumber)
+	}
+	return fmt.Sprintf("identical WorkUnit cannot recover here; %sa maintainer must run swarm issue edit %d --objective '<maintainer-chosen revised objective>', then separately swarm issue approve %d and swarm issue work %d", prefix, st.Lease.IssueNumber, st.Lease.IssueNumber, st.Lease.IssueNumber)
 }

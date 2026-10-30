@@ -73,6 +73,27 @@ func (g *fakeGitHubIssues) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			permission = "write"
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"permission": permission})
+	case r.URL.Path == "/repos/octo/swarm/issues" && r.Method == "GET":
+		rows := []map[string]any{}
+		for n := 1; n < g.next; n++ {
+			i := g.issues[n]
+			if i == nil {
+				continue
+			}
+			labels := []map[string]string{}
+			matches := r.URL.Query().Get("labels") == ""
+			for _, l := range i.Labels {
+				labels = append(labels, map[string]string{"name": l})
+				if l == r.URL.Query().Get("labels") {
+					matches = true
+				}
+			}
+			if !matches {
+				continue
+			}
+			rows = append(rows, map[string]any{"number": i.Number, "title": i.Title, "body": i.Body, "state": "open", "user": map[string]string{"login": "alice"}, "labels": labels})
+		}
+		_ = json.NewEncoder(w).Encode(rows)
 	case r.URL.Path == "/repos/octo/swarm/issues" && r.Method == "POST":
 		g.writes++
 		var p struct {
@@ -99,6 +120,10 @@ func (g *fakeGitHubIssues) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		issue := g.issues[n]
 		if issue == nil {
 			http.NotFound(w, r)
+			return
+		}
+		if len(parts) == 3 && parts[2] == "comments" && r.Method == "GET" {
+			_ = json.NewEncoder(w).Encode([]any{})
 			return
 		}
 		if len(parts) == 3 && parts[2] == "comments" && r.Method == "POST" {

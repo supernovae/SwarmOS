@@ -34,10 +34,10 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 			t.Fatalf("more than one round or implementation after rejection: %+v", a)
 		}
 	}
-	if initial.PlanReplanCount != 0 || initial.PendingPlanReview == nil {
-		t.Fatal("initial plan consumed budget or lost rejection")
+	if initial.PlanReplanCount != 1 || initial.PendingPlanReview == nil {
+		t.Fatal("unchanged automatic replan did not consume budget or lost rejection")
 	}
-	for i := 1; i <= 2; i++ {
+	for i := 2; i <= 2; i++ {
 		out, err = f.run("issue", "work", n, "--agent", "mock", "--progress=false")
 		if err == nil || !strings.Contains(err.Error(), "re-plan is unchanged") {
 			t.Fatalf("retry %d: %v %s", i, err, out)

@@ -77,6 +77,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}()
 			opts := workflow.WorkOptions{Version: Version,
+				IssueContinuation: phase == "all" && !rootOpts.Fork, RequestedPhase: phase,
 				OnBaseChange: baseChangePrinter(progressWriter(cmd)),
 				AgentName:    agentName, PlannerAgent: plannerAgent, ReviewerAgent: reviewerAgent,
 				DeveloperAgent: developerAgent, TesterAgent: testerAgent, Phase: phase,
@@ -104,6 +105,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 				selection = pulled.Overlap
 				opts.IssueNumber, opts.RepoRoot, opts.Phase, opts.ClaimID = pulled.Issue.Number, pulled.RepoRoot, pulled.TargetPhase, pulled.State.Lease.ClaimID
+				if opts.IssueContinuation {
+					opts.Phase = opts.RequestedPhase
+				}
 				guidanceOpts.Repo, guidanceOpts.RepoRoot, guidanceOpts.Backend = pulled.Repo, pulled.RepoRoot, pulled.Backend
 				tr, mgr, cfg, err = rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend})
 				if err != nil {

@@ -29,6 +29,8 @@ type workProgress struct {
 	stage                 string
 	check                 string // active validation check, if any
 	repairRound           int    // automatic validation repair round, if any
+	retryReason           string
+	retryUsed, retryLimit int
 	repairLimit           int
 	repairTargets         []string
 	started, stageStarted time.Time
@@ -80,7 +82,7 @@ func (p *workProgress) sendDuration(status string, duration time.Duration) {
 	}
 	e := ProgressEvent{IssueNumber: p.issue, Stage: p.stage, Check: p.check, Status: status,
 		Elapsed: now.Sub(p.started), StageElapsed: now.Sub(origin),
-		Repair: p.repairRound, RepairLimit: p.repairLimit, Targets: p.repairTargets}
+		Repair: p.repairRound, RepairLimit: p.repairLimit, Targets: p.repairTargets, RetryReason: p.retryReason, RetryUsed: p.retryUsed, RetryLimit: p.retryLimit}
 	if duration > 0 {
 		e.StageElapsed = duration
 	}
@@ -306,4 +308,17 @@ func (p *workProgress) activityTracker() *progress.Activity {
 		return nil
 	}
 	return p.activity
+}
+
+func (p *workProgress) retry(reason string, used, limit int) {
+	if p == nil {
+		return
+	}
+	if p.session != nil {
+		p.session.Retry(reason, used, limit)
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.retryReason, p.retryUsed, p.retryLimit = reason, used, limit
 }

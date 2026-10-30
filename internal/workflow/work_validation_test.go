@@ -1504,3 +1504,194 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 		})
 	}
 }
+
+func TestIssueWorkResumeTesterOnly(t *testing.T) {
+	for _, scenario := range []string{"success", "dirty", "move during tester", "human rejection during tester"} {
+		t.Run(scenario, func(t *testing.T) {
+			e, issue := testerRetryEngine(t)
+			firstRun := true
+			developers, testers := 0, 0
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "developer" {
+						developers++
+					}
+					if req.Role == "tester" {
+						testers++
+						if firstRun {
+							return nil, errors.New("tester process interrupted")
+						}
+						if scenario == "move during tester" {
+							if err := os.WriteFile(filepath.Join(req.WorktreePath, "unexpected"), []byte("moved"), 0644); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if scenario == "human rejection during tester" {
+							if _, err := e.LeaseManager.RecordHumanReview(ctx, issue.Number, "CHANGES_REQUESTED", "Review again"); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					return (&agent.MockRunner{}).Run(ctx, req)
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true}
+			first, err := e.ExecuteWork(t.Context(), opts)
+			if err == nil || first == nil || developers != 1 || testers != 1 {
+				t.Fatalf("initial %v counts %d/%d", err, developers, testers)
+			}
+			firstRun = false
+			developers, testers = 0, 0
+			opts.ClaimID = first.State.Lease.ClaimID
+			if scenario == "dirty" {
+				if err = os.WriteFile(filepath.Join(first.WorktreePath, "unexpected"), []byte("dirty"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			retry, err := e.ExecuteWork(t.Context(), opts)
+			if developers != 0 {
+				t.Fatalf("developer ran on tester retry: %d", developers)
+			}
+			if scenario == "success" {
+				if err != nil || retry == nil || !retry.ValidationPassed {
+					t.Fatalf("retry: %v %+v", err, retry)
+				}
+			} else if err == nil {
+				t.Fatal("changed candidate or human rejection accepted")
+			}
+			if scenario == "dirty" && testers != 0 {
+				t.Fatal("dirty candidate reached tester")
+			}
+		})
+	}
+}
+
+func TestIssueWorkRecoveryResumeRepairBudget(t *testing.T) {
+	e, issue := testerRetryEngine(t)
+	developer, tester := 0, 0
+	initial := true
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			if req.Role == "developer" {
+				developer++
+				if initial {
+					if err := os.WriteFile(filepath.Join(req.WorktreePath, "fail-check"), []byte("fail"), 0644); err != nil {
+						return nil, err
+					}
+				} else {
+					if err := os.Remove(filepath.Join(req.WorktreePath, "fail-check")); err != nil {
+						return nil, err
+					}
+				}
+			}
+			if req.Role == "tester" {
+				tester++
+				if initial {
+					return nil, errors.New("tester interrupted")
+				}
+			}
+			return (&agent.MockRunner{}).Run(ctx, req)
+		}}, nil
+	}
+	opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true}
+	first, err := e.ExecuteWork(t.Context(), opts)
+	if first == nil || err == nil {
+		t.Fatalf("initial: %v", err)
+	}
+	initial = false
+	opts.ClaimID = first.State.Lease.ClaimID
+	opts.Phase = "test"
+	failed, err := e.ExecuteWork(t.Context(), opts)
+	if failed == nil || !errors.Is(err, validation.ErrRequiredCheckFailed) || failed.State.ValidationRepairCount != 0 {
+		t.Fatalf("test failure: %v %+v", err, failed)
+	}
+	developer, tester = 0, 0
+	opts.Phase = "all"
+	repaired, err := e.ExecuteWork(t.Context(), opts)
+	if err != nil || repaired == nil || !repaired.ValidationPassed || developer != 1 || tester != 1 || repaired.State.ValidationRepairCount != 1 || repaired.RepairRounds != 1 {
+		t.Fatalf("resumed repair: %v %+v roles %d/%d", err, repaired, developer, tester)
+	}
+	if _, err = e.LeaseManager.Release(t.Context(), issue.Number, "maintainer", "restart"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "all", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ValidationRepairCount != 1 {
+		t.Fatal("reclaim replenished repair allowance")
+	}
+}
+
+func TestIssueWorkRecoveryConcurrentHumanRejection(t *testing.T) {
+	for _, role := range []string{"developer", "tester"} {
+		t.Run(role, func(t *testing.T) {
+			e, issue := testerRetryEngine(t)
+			counts := map[string]int{}
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					counts[req.Role]++
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if req.Role == role && err == nil {
+						if _, err = e.LeaseManager.RecordHumanReview(ctx, issue.Number, "CHANGES_REQUESTED", "Stop for an independent human decision"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return result, err
+				}}, nil
+			}
+			result, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true})
+			if !errors.Is(err, lease.ErrApprovalRequired) || result == nil || result.ValidationPassed {
+				t.Fatalf("rejection became success: %v %+v", err, result)
+			}
+			if counts["developer"] != 1 || role == "developer" && counts["tester"] != 0 || role == "tester" && counts["tester"] != 1 {
+				t.Fatal(counts)
+			}
+			st, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.HumanPlanReview == nil {
+				t.Fatal("lost human obligation")
+			}
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactValidation && a.Verdict == "PASS" {
+					t.Fatal("trusted pass recorded after rejection")
+				}
+			}
+		})
+	}
+}
+
+func TestIssueWorkRecoveryPlanChangesDuringTester(t *testing.T) {
+	e, issue := testerRetryEngine(t)
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			result, err := (&agent.MockRunner{}).Run(ctx, req)
+			if req.Role == "tester" && err == nil {
+				st, loadErr := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+				if loadErr != nil {
+					t.Fatal(loadErr)
+				}
+				var plan, test contract.Artifact
+				for _, a := range st.Artifacts {
+					if a.Type == contract.ArtifactDesign {
+						plan = a
+					}
+					if a.Type == contract.ArtifactTestPlan {
+						test = a
+					}
+				}
+				plan.Body += "\nA different approved implementation plan.\n"
+				if _, err = e.LeaseManager.RecordPlanPair(ctx, issue.Number, "maintainer", plan, test); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return result, err
+		}}, nil
+	}
+	result, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true})
+	if !errors.Is(err, lease.ErrApprovalRequired) || result == nil || result.ValidationPassed {
+		t.Fatalf("changed pair became success: %v %+v", err, result)
+	}
+}

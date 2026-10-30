@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,7 +10,9 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"gopkg.in/yaml.v3"
 	"io"
 	"io/fs"
@@ -539,6 +542,439 @@ func TestStagedImplementationIsNotTestRetryEligible(t *testing.T) {
 		}
 		if !reflect.DeepEqual(was, now) {
 			t.Fatalf("%s evidence changed", typ)
+		}
+	}
+}
+
+// continuationRunner exercises the command's actual engine and coordinator;
+// only role execution is scripted, including one actionable independent review.
+type continuationRunner struct {
+	agent.MockRunner
+	counts   map[string]int
+	feedback []string
+	reject   bool
+	bare     bool
+}
+
+func (r *continuationRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	r.counts[req.Role]++
+	if req.Role == "reviewer" {
+		verdict := "APPROVED"
+		if r.reject {
+			verdict = "CHANGES_REQUESTED"
+			r.reject = false
+		}
+		result, err := (&agent.MockRunner{ReviewVerdict: verdict}).Run(ctx, req)
+		if err == nil && verdict == "CHANGES_REQUESTED" {
+			name := ".swarm/active/REVIEW.md"
+			if req.ReadOnly {
+				name = ".swarm/active-output/REVIEW.md"
+			}
+			body := "VERDICT: CHANGES_REQUESTED\n\nInclude the missing recovery case."
+			if r.bare {
+				body = "VERDICT: CHANGES_REQUESTED"
+			}
+			err = os.WriteFile(filepath.Join(req.WorktreePath, name), []byte(body), 0644)
+		}
+		return result, err
+	}
+	result, err := r.MockRunner.Run(ctx, req)
+	if req.Role == "planner" {
+		r.feedback = append(r.feedback, req.TaskPrompt)
+		if (strings.Contains(req.TaskPrompt, "Include the missing recovery case.") || req.OperatorInstructions != "") && err == nil {
+			name := filepath.Join(req.WorktreePath, ".swarm/active/PLAN.md")
+			body, readErr := os.ReadFile(name)
+			if readErr != nil {
+				return nil, readErr
+			}
+			err = os.WriteFile(name, append(body, []byte("\nCover the missing recovery case.\n")...), 0644)
+		}
+	}
+	return result, err
+}
+func TestIssueWorkContinuationCommand(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		for _, resume := range []bool{false, true} {
+			t.Run(backend+"/resume="+strconv.FormatBool(resume), func(t *testing.T) {
+				f := newCLIFixture(t)
+				cfg, err := harness.LoadConfig(f.root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.Agents["mock"] = contract.AgentConfig{Binary: "mock"}
+				raw, err := yaml.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(filepath.Join(f.root, ".swarm/config.yaml"), raw, 0644); err != nil {
+					t.Fatal(err)
+				}
+				prGit(t, f.root, "add", ".")
+				prGit(t, f.root, "commit", "-m", "allow mock")
+				n := f.create(t, "agent")
+				number := strconv.Itoa(n)
+				var tr tracker.Tracker = f.tracker
+				if backend == "github" {
+					issue, err := f.tracker.GetIssue(t.Context(), n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, tr = newFakeGitHubTracker(t, issue)
+					addTestOrigin(t, f)
+					f.manager = lease.NewManager(tr, cfg.Security)
+					if err = f.manager.ConfigureStore(f.root); err != nil {
+						t.Fatal(err)
+					}
+				}
+				scripted := &continuationRunner{counts: map[string]int{}, reject: true}
+				f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return scripted, nil }
+				run := func(args ...string) (string, error) {
+					cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: backend, Repo: "octo/swarm", trackerOverride: tr})
+					var out bytes.Buffer
+					cmd.SetOut(&out)
+					cmd.SetErr(&out)
+					cmd.SetArgs(args)
+					err := cmd.ExecuteContext(t.Context())
+					return out.String(), err
+				}
+				if out, err := run("issue", "approve", number); err != nil {
+					t.Fatalf("approve: %v %s", err, out)
+				}
+				if resume {
+					if out, err := run("issue", "work", number, "--phase", "plan", "--agent", "mock", "--progress=false"); err != nil {
+						t.Fatalf("plan: %v %s", err, out)
+					}
+					if _, err := run("issue", "work", number, "--phase", "review", "--agent", "mock", "--progress=false"); err == nil {
+						t.Fatal("explicit review continued rejection")
+					}
+					if scripted.counts["planner"] != 1 || scripted.counts["reviewer"] != 1 || scripted.counts["developer"] != 0 {
+						t.Fatal(scripted.counts)
+					}
+					scripted.counts = map[string]int{}
+				}
+				out, err := run("issue", "work", number, "--agent", "mock", "--progress=false")
+				if err != nil {
+					t.Fatalf("work: %v %s", err, out)
+				}
+				want := map[string]int{"planner": 2, "reviewer": 2, "developer": 1, "tester": 1}
+				if resume {
+					want["planner"], want["reviewer"] = 1, 1
+				}
+				if !reflect.DeepEqual(scripted.counts, want) {
+					t.Fatalf("counts=%v want %v", scripted.counts, want)
+				}
+				if !strings.Contains(scripted.feedback[len(scripted.feedback)-1], "Include the missing recovery case.") {
+					t.Fatal("findings not delivered")
+				}
+				st, err := f.manager.GetCurrentState(t.Context(), n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if st.PlanReplanCount != 1 || !lease.CompletePlanPair(st) || st.PRNumber != 0 || st.HeadSHA == "" {
+					t.Fatalf("state: %+v", st)
+				}
+				var passed bool
+				for _, a := range st.Artifacts {
+					if a.Type == contract.ArtifactValidation {
+						passed = a.Verdict == "PASS" && a.Metadata["validation_trusted_origin"] == "coordinator"
+					}
+					if a.Type == contract.ArtifactReview {
+						for k, v := range lease.ReviewBindings(st) {
+							if k != "review_claim_id" && a.Metadata[k] != v {
+								t.Fatalf("stale review %s", k)
+							}
+						}
+					}
+				}
+				if !passed {
+					t.Fatal("no trusted validated checkpoint")
+				}
+			})
+		}
+	}
+}
+
+type continuationActor struct {
+	tracker.Tracker
+	actor *string
+}
+
+func (t continuationActor) CurrentUser(context.Context) (string, error) { return *t.actor, nil }
+
+func TestIssueWorkRecoveryMissingReports(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		for _, gate := range []string{"agent", "human"} {
+			for _, limit := range []int{0, 1, 2} {
+				t.Run(backend+"/"+gate+"/limit="+strconv.Itoa(limit), func(t *testing.T) {
+					f := newCLIFixture(t)
+					cfg, err := harness.LoadConfig(f.root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cfg.PlanMode = "agent"
+					cfg.Agents["mock"] = contract.AgentConfig{Binary: "mock"}
+					data, err := yaml.Marshal(cfg)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// Use the real optional policy field, including an explicit zero.
+					var policy map[string]any
+					if err = yaml.Unmarshal(data, &policy); err != nil {
+						t.Fatal(err)
+					}
+					policy["lease"].(map[string]any)["plan_replan_limit"] = limit
+					data, err = yaml.Marshal(policy)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err = os.WriteFile(filepath.Join(f.root, ".swarm/config.yaml"), data, 0644); err != nil {
+						t.Fatal(err)
+					}
+					prGit(t, f.root, "add", ".")
+					prGit(t, f.root, "commit", "-m", "agent planning budget")
+					n := f.create(t, gate)
+					number := strconv.Itoa(n)
+					var tr tracker.Tracker = f.tracker
+					if backend == "github" {
+						issue, err := tr.GetIssue(t.Context(), n)
+						if err != nil {
+							t.Fatal(err)
+						}
+						_, tr = newFakeGitHubTracker(t, issue)
+						addTestOrigin(t, f)
+					}
+					actor := "alice"
+					tr = continuationActor{Tracker: tr, actor: &actor}
+					f.manager = lease.NewManager(tr, cfg.Security)
+					if err = f.manager.ConfigureStore(f.root); err != nil {
+						t.Fatal(err)
+					}
+					scripted := &continuationRunner{counts: map[string]int{}}
+					f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return scripted, nil }
+					run := func(args ...string) (string, error) {
+						cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: backend, Repo: "octo/swarm", trackerOverride: tr})
+						var out bytes.Buffer
+						cmd.SetOut(&out)
+						cmd.SetErr(&out)
+						cmd.SetArgs(args)
+						err := cmd.ExecuteContext(t.Context())
+						return out.String(), err
+					}
+					must := func(args ...string) string {
+						t.Helper()
+						out, err := run(args...)
+						if err != nil {
+							t.Fatalf("%v: %v %s", args, err, out)
+						}
+						return out
+					}
+					state := func() *lease.IssueState {
+						t.Helper()
+						st, err := f.manager.GetCurrentState(t.Context(), n)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return st
+					}
+					must("issue", "approve", number)
+					must("issue", "work", number, "--phase", "plan", "--agent", "mock", "--progress=false")
+					actor = "independent-maintainer"
+					must("issue", "review-plan", number, "--reject", "--notes", "Include the missing recovery case.")
+					actor = "alice"
+					for i := 0; i < limit; i++ {
+						_, _ = run("issue", "work", number, "--phase", "plan", "--agent", "mock", "--progress=false")
+					}
+					rejected := state()
+					if rejected.HumanPlanReview == nil || rejected.HumanDraftCount != limit {
+						t.Fatalf("draft evidence: %+v", rejected)
+					}
+					identity := *rejected.HumanPlanReview
+					must("issue", "release", number)
+					prGit(t, f.root, "commit", "--allow-empty", "-m", "moved approved base")
+					if backend == "github" {
+						prGit(t, f.root, "push", "origin", "main")
+					}
+					must("issue", "approve", number)
+					moved := state()
+					if len(moved.Artifacts) != 0 || moved.HumanPlanReview == nil || *moved.HumanPlanReview != identity || moved.HumanDraftCount != limit {
+						t.Fatalf("carry removed obligation: %+v", moved)
+					}
+					scripted.counts = map[string]int{}
+					for attempt := 0; attempt < 2; attempt++ {
+						out, err := run("issue", "work", number, "--agent", "mock", "--progress=false")
+						if !errors.Is(err, lease.ErrPlanReplanLimit) || !strings.Contains(err.Error(), "identical WorkUnit cannot recover here") {
+							t.Fatalf("stop: %v %s", err, out)
+						}
+						action := nextActionOf(err)
+						if action == nil || !strings.Contains(strings.Join(action.Argv, " "), "issue edit "+number) {
+							t.Fatalf("recovery: %+v", action)
+						}
+						if len(scripted.counts) != 0 {
+							t.Fatal("roles after exhaustion", scripted.counts)
+						}
+					}
+					actor = "independent-maintainer"
+					before := state()
+					for _, verdict := range []string{"--approve", "--reject"} {
+						if out, err := run("issue", "review-plan", number, verdict, "--notes", "Revise the plan"); !errors.Is(err, lease.ErrApprovalRequired) {
+							t.Fatalf("reportless verdict: %v %s", err, out)
+						}
+					}
+					if !reflect.DeepEqual(before, state()) {
+						t.Fatal("reportless review changed authority")
+					}
+					actor = "alice"
+					if _, err := run("issue", "claim", number, "--agent", "mock"); !errors.Is(err, lease.ErrPlanReplanLimit) {
+						t.Fatalf("capped claim: %v", err)
+					}
+					if _, err := run("issue", "stage", number, "--phase", "plan"); err == nil {
+						t.Fatal("agent mode staging admitted")
+					}
+					if _, err := run("issue", "work", number, "--agent", "mock", "--progress=false"); !errors.Is(err, lease.ErrPlanReplanLimit) {
+						t.Fatal("reclaim replenished budget", err)
+					}
+					if state().Lease.Status == "active" {
+						must("issue", "release", number)
+					}
+					oldTask := state().TaskDigest
+					actor = "independent-maintainer"
+					must("issue", "edit", number, "--objective", "Implement the revised bounded recovery objective")
+					must("issue", "approve", number)
+					changed := state()
+					if changed.TaskDigest == oldTask || changed.HumanPlanReview != nil || changed.PlanGeneration != 0 || changed.HumanDraftCount != 0 {
+						t.Fatalf("changed task retained obsolete evidence: %+v", changed)
+					}
+					actor = "alice"
+					scripted.counts = map[string]int{}
+					must("issue", "work", number, "--agent", "mock", "--progress=false")
+					want := map[string]int{"planner": 1, "reviewer": 1, "developer": 1, "tester": 1}
+					if gate == "human" {
+						want = map[string]int{"planner": 1}
+					}
+					if !reflect.DeepEqual(scripted.counts, want) {
+						t.Fatalf("new task counts %v want %v", scripted.counts, want)
+					}
+					if gate == "human" {
+						actor = "independent-maintainer"
+						must("issue", "review-plan", number, "--approve")
+						actor = "alice"
+						scripted.counts = map[string]int{}
+						must("issue", "work", number, "--agent", "mock", "--progress=false")
+						if !reflect.DeepEqual(scripted.counts, map[string]int{"developer": 1, "tester": 1}) {
+							t.Fatal(scripted.counts)
+						}
+					}
+					if state().PRNumber != 0 {
+						t.Fatal("work published")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestIssueWorkRecoveryFeedbackSelection(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		for _, next := range []bool{false, true} {
+			for _, flag := range []string{"--planner-instructions", "--instructions", "--developer-instructions"} {
+				t.Run(backend+"/next="+strconv.FormatBool(next)+"/"+flag, func(t *testing.T) {
+					f := newCLIFixture(t)
+					cfg, err := harness.LoadConfig(f.root)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cfg.Agents["mock"] = contract.AgentConfig{Binary: "mock"}
+					data, err := yaml.Marshal(cfg)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err = os.WriteFile(filepath.Join(f.root, ".swarm/config.yaml"), data, 0644); err != nil {
+						t.Fatal(err)
+					}
+					prGit(t, f.root, "add", ".")
+					prGit(t, f.root, "commit", "-m", "allow mock")
+					n := f.create(t, "agent")
+					ready := f.create(t, "agent")
+					number := strconv.Itoa(n)
+					var tr tracker.Tracker = f.tracker
+					if backend == "github" {
+						a, _ := tr.GetIssue(t.Context(), n)
+						b, _ := tr.GetIssue(t.Context(), ready)
+						_, tr = newFakeGitHubTracker(t, a, b)
+						addTestOrigin(t, f)
+					}
+					f.manager = lease.NewManager(tr, cfg.Security)
+					if err = f.manager.ConfigureStore(f.root); err != nil {
+						t.Fatal(err)
+					}
+					script := &continuationRunner{counts: map[string]int{}, reject: true, bare: true}
+					f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return script, nil }
+					run := func(args ...string) (string, error) {
+						cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: backend, Repo: "octo/swarm", trackerOverride: tr})
+						var out bytes.Buffer
+						cmd.SetOut(&out)
+						cmd.SetErr(&out)
+						cmd.SetArgs(args)
+						err := cmd.ExecuteContext(t.Context())
+						return out.String(), err
+					}
+					must := func(args ...string) {
+						t.Helper()
+						if out, err := run(args...); err != nil {
+							t.Fatalf("%v %v %s", args, err, out)
+						}
+					}
+					must("issue", "approve", number)
+					must("issue", "approve", strconv.Itoa(ready))
+					must("issue", "work", number, "--phase", "plan", "--agent", "mock", "--progress=false")
+					if _, err := run("issue", "work", number, "--phase", "review", "--agent", "mock", "--progress=false"); err == nil {
+						t.Fatal("bare explicit rejection continued")
+					}
+					must("issue", "release", number)
+					before, err := f.manager.GetCurrentState(t.Context(), n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					script.counts = map[string]int{}
+					args := []string{"issue", "work", number, "--agent", "mock", "--progress=false", flag, "operator fix"}
+					if next {
+						args[2] = "--next"
+					}
+					out, err := run(args...)
+					eligible := flag != "--developer-instructions"
+					if !eligible && !next {
+						if !errors.Is(err, workflow.ErrPlanReviewRejected) || len(script.counts) != 0 {
+							t.Fatalf("blocked: %v %s %v", err, out, script.counts)
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("work: %v %s", err, out)
+						}
+						if !reflect.DeepEqual(script.counts, map[string]int{"planner": 1, "reviewer": 1, "developer": 1, "tester": 1}) {
+							t.Fatal(script.counts)
+						}
+					}
+					after, err := f.manager.GetCurrentState(t.Context(), n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if eligible {
+						if after.PlanReplanCount != 1 || !lease.CompletePlanPair(after) {
+							t.Fatal("instructed replan did not reserve/complete")
+						}
+						if !strings.Contains(script.feedback[len(script.feedback)-1], "Operator instructions: operator fix") {
+							t.Fatal("planner lost instructions")
+						}
+					} else {
+						if after.Lease.ClaimID != before.Lease.ClaimID || after.PlanReplanCount != 0 {
+							t.Fatal("blocked issue claimed or reserved")
+						}
+						if next && !strings.Contains(out, "planner feedback") {
+							t.Fatal("skip reason missing", out)
+						}
+					}
+				})
+			}
 		}
 	}
 }

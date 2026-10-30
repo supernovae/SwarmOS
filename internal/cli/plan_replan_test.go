@@ -382,7 +382,73 @@ func TestPlanReplanHumanRejectionRecovery326(t *testing.T) {
 	}
 }
 
+func TestCLIStatusNoPendingPlanReview(t *testing.T) {
+	t.Parallel()
+	f := newCLIFixture(t)
+	issue := f.create(t, "agent")
+	n := strconv.Itoa(issue)
+	f.must(t, "issue", "approve", n)
+	for _, reason := range []string{"", "implementation recovery guidance"} {
+		st := f.state(t, issue)
+		if !lease.DirectPlanReview(st) || st.PendingPlanReview != nil {
+			t.Fatal("fixture must be a direct issue without pending review")
+		}
+		if reason != "" {
+			st.Lease.NextPhase = "implement"
+			st.NextPhaseReason = reason
+		}
+		_, rev, err := f.manager.Store().Load(t.Context(), issue)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.manager.Store().CompareAndSwap(t.Context(), issue, rev, data); err != nil {
+			t.Fatal(err)
+		}
+		out := f.must(t, "issue", "status", n)
+		for _, command := range []string{"swarm issue review-plan", "swarm issue stage"} {
+			if strings.Contains(out, command) {
+				t.Fatalf("unsolicited recovery command %q: %s", command, out)
+			}
+		}
+		if reason != "" && strings.Count(out, "Next phase: implement ("+reason+")\n") != 1 {
+			t.Fatalf("missing reason-bearing next phase: %s", out)
+		}
+		var result struct {
+			Issues []issueStatus `json:"issues"`
+		}
+		if err := json.Unmarshal([]byte(f.must(t, "issue", "status", n, "--json")), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Issues) != 1 {
+			t.Fatalf("unexpected issues: %+v", result)
+		}
+		entry := result.Issues[0]
+		if entry.PlanReview == nil || entry.PlanReview.OperatorDecision || len(entry.PlanReview.RecoveryCommands) != 0 {
+			t.Fatalf("unexpected plan recovery: %+v", entry.PlanReview)
+		}
+		if entry.State.Lease.NextPhase != st.Lease.NextPhase || entry.PlanReview.NextPhase != st.Lease.NextPhase || entry.State.NextPhaseReason != reason {
+			t.Fatalf("scheduling guidance changed: %+v", entry)
+		}
+	}
+}
+
 func TestPlanReviewRoundDisplay(t *testing.T) {
+	for _, mode := range []string{"", "auto", "agent", "interactive"} {
+		for _, count := range []int{0, 2} {
+			t.Run("no-pending/"+mode+strconv.Itoa(count), func(t *testing.T) {
+				st := &lease.IssueState{PlanReplanCount: count}
+				st.Lease.NextPhase = "implement"
+				d := derivePlanReviewDisplay(st, mode, 2)
+				if d.OperatorDecision || len(d.RecoveryCommands) != 0 || d.NextPhase != "implement" {
+					t.Fatalf("unexpected recovery without pending review: %+v", d)
+				}
+			})
+		}
+	}
 	for _, mode := range []string{"", "auto", "agent", "interactive"} {
 		for _, limit := range []int{0, 2} {
 			t.Run(mode+strconv.Itoa(limit), func(t *testing.T) {

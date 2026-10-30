@@ -140,14 +140,17 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "PR outcome: %s (merge=%s)\n", o.Status, o.MergeCommitSHA)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Automatic plan retries: %d/%d\n", state.PlanReplanCount, entry.PlanReplanLimit)
-			if d := entry.PlanReview; d != nil {
+			d := entry.PlanReview
+			if d != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Plan review round: %d; operator decision needed: %t\n", d.Round, d.OperatorDecision)
-				if d.NextPhase != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s\n", d.NextPhase)
-				}
-				fmt.Fprintln(cmd.OutOrStdout(), strings.Join(d.RecoveryCommands, "; "))
-			} else if state.NextPhaseReason != "" {
+			}
+			if state.NextPhaseReason != "" && (d == nil || !d.OperatorDecision) {
 				fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s (%s)\n", state.Lease.NextPhase, state.NextPhaseReason)
+			} else if d != nil && d.NextPhase != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s\n", d.NextPhase)
+			}
+			if d != nil && len(d.RecoveryCommands) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), strings.Join(d.RecoveryCommands, "; "))
 			}
 			status := state.Lease.Status
 			if status == "" {

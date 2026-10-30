@@ -151,7 +151,7 @@ func directPlanReviewDisplay(opts *RootOptions, st *lease.IssueState) *planRevie
 }
 
 func derivePlanReviewDisplay(st *lease.IssueState, mode string, limit int) *planReviewDisplay {
-	d := &planReviewDisplay{Round: lease.PlanReviewRound(st), RetriesUsed: st.PlanReplanCount, RetriesAllowed: limit, NextPhase: st.Lease.NextPhase}
+	d := &planReviewDisplay{Round: lease.PlanReviewRound(st), RetriesUsed: st.PlanReplanCount, RetriesAllowed: limit, NextPhase: st.Lease.NextPhase, RecoveryCommands: []string{}}
 	d.OperatorDecision = !strings.EqualFold(mode, "interactive") && st.PlanReplanCount >= limit && lease.CurrentPlanRejection(st)
 	n := st.Lease.IssueNumber
 	if d.OperatorDecision {
@@ -165,9 +165,11 @@ func derivePlanReviewDisplay(st *lease.IssueState, mode string, limit int) *plan
 			d.NextPhase = "review"
 		}
 	}
-	d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("swarm issue review-plan %d", n))
-	if !strings.EqualFold(mode, "agent") {
-		d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("Revise both reports and run swarm issue stage %d --phase plan in its managed worktree", n))
+	if st.PendingPlanReview != nil || d.OperatorDecision {
+		d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("swarm issue review-plan %d", n))
+		if !strings.EqualFold(mode, "agent") {
+			d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("Revise both reports and run swarm issue stage %d --phase plan in its managed worktree", n))
+		}
 	}
 	return d
 }

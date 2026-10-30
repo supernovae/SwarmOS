@@ -310,6 +310,7 @@ func convertGHIssue(r ghIssueResponse) *Issue {
 		issueType = r.Type.Name
 	}
 	return &Issue{
+		IsPullRequest:     r.PullRequest != nil,
 		Number:            r.Number,
 		Title:             r.Title,
 		Body:              r.Body,

@@ -47,6 +47,8 @@ Only maintainer-set dimensions on approved WorkUnits select an execution profile
 
 ## 3. Apply what you agree with
 
+For one report with requirements you have already prepared, follow [individual issue conversion](WORKFLOWS.md#convert-one-intake-issue). `issue convert` takes explicit fields and previews a single change; the bulk normalization below drafts suggested fields across the backlog. Review the suggested requirements before approving each task.
+
 When the report looks right, sync the triage labels and turn raw issues into WorkUnit drafts:
 
 ```bash

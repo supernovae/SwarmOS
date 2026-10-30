@@ -95,3 +95,16 @@ func TestIssueEditAuthorization(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateIssueReadPreservesPRIdentity(t *testing.T) {
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/repos/octo/swarm/issues/51" {
+			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(t, w, map[string]any{"number": 51, "title": "PR", "state": "open", "pull_request": map[string]string{"url": "https://example.test/pulls/51"}})
+	}))
+	got, err := tr.GetIssue(context.Background(), 51)
+	if err != nil || !got.IsPullRequest {
+		t.Fatalf("%+v %v", got, err)
+	}
+}

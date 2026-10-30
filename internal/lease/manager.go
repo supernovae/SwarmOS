@@ -86,6 +86,8 @@ type IssueState struct {
 	ResumeCheckpointBranch string                          `json:"resume_checkpoint_branch,omitempty"`
 	ClaimBudget            *ClaimBudget                    `json:"claim_budget,omitempty"`
 	RevisionPlan           *workspace.RevisionPlanContext  `json:"revision_plan,omitempty"`
+	PlanReviewHistory      []workspace.PlanReviewEvidence  `json:"plan_review_history,omitempty"`
+	PlanReviewSequence     int                             `json:"plan_review_sequence,omitempty"`
 	PlanReplanCount        int                             `json:"plan_replan_count"`
 	PendingPlanReview      *PlanRejection                  `json:"pending_plan_review,omitempty"`
 	NextPhaseReason        string                          `json:"next_phase_reason,omitempty"`
@@ -787,6 +789,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 			if err := m.denyResume(n); err != nil {
 				return nil, err
 			}
+			dropPlanReviewHistory(old)
 			old.PlanReplanCount = 0
 			old.PendingPlanReview = nil
 			old.NextPhaseReason = ""
@@ -1592,10 +1595,12 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 		if st.Artifacts[i].Type == contract.ArtifactReview {
 			art.Version = st.Artifacts[i].Version + 1
 			st.Artifacts[i] = art
+			appendPlanReviewHistory(st, art, false)
 			return m.save(ctx, n, rev, st)
 		}
 	}
 	st.Artifacts = append(st.Artifacts, art)
+	appendPlanReviewHistory(st, art, false)
 	return m.save(ctx, n, rev, st)
 }
 

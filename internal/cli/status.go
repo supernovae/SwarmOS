@@ -17,6 +17,7 @@ import (
 )
 
 type issueStatus struct {
+	PlanReview  *planReviewDisplay `json:"plan_review,omitempty"`
 	ClaimBudget *lease.ClaimBudget `json:"claim_budget,omitempty"`
 	// Set for a fork-mode claim whose upstream coordinator predates budgets.
 	ClaimBudgetUnavailable bool                        `json:"claim_budget_unavailable,omitempty"`
@@ -97,6 +98,14 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 						return err
 					}
 					entry.ClaimBudgetUnavailable = entry.ClaimBudget == nil && manager.HasWorkerGateway() && !state.Lease.ClaimedAt.IsZero()
+					displayOpts := *options
+					displayOpts.RepoRoot = target.Path
+					entry.PlanReview = directPlanReviewDisplay(&displayOpts, state)
+					if entry.PlanReview != nil {
+						copyState := *state
+						copyState.Lease.NextPhase = entry.PlanReview.NextPhase
+						entry.State = &copyState
+					}
 					entry.PlanReplanLimit, err = manager.PlanReplanLimit(state)
 					if err != nil {
 						return err
@@ -131,7 +140,13 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "PR outcome: %s (merge=%s)\n", o.Status, o.MergeCommitSHA)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Automatic plan retries: %d/%d\n", state.PlanReplanCount, entry.PlanReplanLimit)
-			if state.NextPhaseReason != "" {
+			if d := entry.PlanReview; d != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Plan review round: %d; operator decision needed: %t\n", d.Round, d.OperatorDecision)
+				if d.NextPhase != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s\n", d.NextPhase)
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), strings.Join(d.RecoveryCommands, "; "))
+			} else if state.NextPhaseReason != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s (%s)\n", state.Lease.NextPhase, state.NextPhaseReason)
 			}
 			status := state.Lease.Status

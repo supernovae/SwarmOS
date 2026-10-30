@@ -780,11 +780,17 @@ func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssu
 	return created, nil
 }
 
-func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int) error {
+func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, excludeHistory ...bool) error {
 	if prNumber != 0 {
 		return workspace.CompilePRHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA, prNumber, prRevisionContext(st))
 	}
-	return workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA)
+	if err := workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA); err != nil {
+		return err
+	}
+	if role == "reviewer" && lease.DirectPlanReview(st) && (len(excludeHistory) == 0 || !excludeHistory[0]) {
+		return workspace.AppendPlanReviewEvidence(path, lease.ReviewHistory(st), st.Artifacts)
+	}
+	return nil
 }
 
 func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, reporters ...*ProgressReporter) (string, *lease.IssueState, error) {
@@ -813,7 +819,7 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 	if len(reporters) > 0 {
 		reporter = reporters[0]
 	}
-	if err := compileSetupBundle(ctx, reporter, wtPath, wu, wf, st, "reviewer", prNumber); err != nil {
+	if err := compileSetupBundle(ctx, reporter, wtPath, wu, wf, st, "reviewer", prNumber, e.ForkMode || e.LeaseManager.HasWorkerGateway()); err != nil {
 		return "", st, err
 	}
 	runner, err := e.configuredRunner(ctx, reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
@@ -1365,8 +1371,8 @@ func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 	return "", "", ""
 }
 
-func compileSetupBundle(ctx context.Context, reporter *ProgressReporter, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int) error {
-	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error { return compileExecutionBundle(path, wu, wf, st, role, prNumber) })
+func compileSetupBundle(ctx context.Context, reporter *ProgressReporter, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, excludeHistory ...bool) error {
+	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error { return compileExecutionBundle(path, wu, wf, st, role, prNumber, excludeHistory...) })
 }
 
 func (e *Engine) configuredRunner(ctx context.Context, name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
@@ -1443,7 +1449,7 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 	if err := ensurePlanArtifactsInWorktree(path, st); err != nil {
 		return "", nil, err
 	}
-	if err := compileSetupBundle(ctx, reporter, path, wu, wf, st, "reviewer", st.PRNumber); err != nil {
+	if err := compileSetupBundle(ctx, reporter, path, wu, wf, st, "reviewer", st.PRNumber, true); err != nil {
 		return "", nil, err
 	}
 	for _, a := range st.Artifacts {

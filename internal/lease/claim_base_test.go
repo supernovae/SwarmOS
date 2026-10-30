@@ -14,10 +14,11 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
-func TestFreshClaimBase(t *testing.T) {
+func TestFreshClaimBasePlanReviewHistory(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []string{"none", "agent", "human", "unchanged", "policy", "task", "old digest", "missing tree", "nonancestor", "checkpoint", "branch", "fresh start", "partial none", "partial agent", "test only", "review only", "plan and test", "task unchanged", "old digest unchanged", "reviewed", "reviewed none"} {
 		t.Run(tc, func(t *testing.T) {
@@ -69,6 +70,8 @@ func TestFreshClaimBase(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			st.PlanReviewSequence = 7
+			st.PlanReviewHistory = []workspace.PlanReviewEvidence{{Round: 7, Findings: "retained history", BaseSHA: st.BaseSHA, TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest}}
 			switch tc {
 			case "checkpoint":
 				st.HeadSHA = initial.BaseSHA
@@ -117,6 +120,20 @@ func TestFreshClaimBase(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			cfg, e := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+			if e != nil {
+				t.Fatal(e)
+			}
+			unit, e := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+			if e != nil {
+				t.Fatal(e)
+			}
+			// The helper shallow-copies IssueState. Neither successful nor failed
+			// preparation may clear the original history's backing storage.
+			_, _ = m.prepareClaimBase(ctx, issue.Number, st, unit, cfg)
+			if st.PlanReviewSequence != 7 || len(st.PlanReviewHistory) != 1 || st.PlanReviewHistory[0].Findings != "retained history" {
+				t.Fatal("preparation mutated original history")
+			}
 			got, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
 			refused := tc == "human" || tc == "policy" || tc == "task" || tc == "old digest" || tc == "missing tree" || tc == "nonancestor" || strings.HasPrefix(tc, "partial") || tc == "test only" || tc == "review only" || tc == "plan and test" || tc == "task unchanged" || tc == "old digest unchanged"
 			if refused {
@@ -127,6 +144,9 @@ func TestFreshClaimBase(t *testing.T) {
 				after, r, e := m.load(ctx, issue.Number)
 				if e != nil {
 					t.Fatal(e)
+				}
+				if after.PlanReviewSequence != 7 || len(after.PlanReviewHistory) != 1 || after.PlanReviewHistory[0].Findings != "retained history" {
+					t.Fatal("refusal mutated history")
 				}
 				if r != beforeRev || after.BaseSHA != initial.BaseSHA || after.Lease.Status == "active" {
 					t.Fatal("refusal mutated state")
@@ -139,6 +159,13 @@ func TestFreshClaimBase(t *testing.T) {
 			want := git("rev-parse", "HEAD")
 			if tc == "checkpoint" || tc == "fresh start" {
 				want = initial.BaseSHA
+			}
+			if want != initial.BaseSHA {
+				if got.PlanReviewSequence != 0 || len(got.PlanReviewHistory) != 0 {
+					t.Fatal("base advance retained history")
+				}
+			} else if got.PlanReviewSequence != 7 {
+				t.Fatal("unchanged base dropped history")
 			}
 			if got.BaseSHA != want {
 				t.Fatalf("base %s want %s", got.BaseSHA, want)

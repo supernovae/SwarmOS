@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/workspace"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
@@ -23,6 +25,7 @@ type PlanRejection struct {
 }
 
 func recordPlanReviewTransition(st *IssueState, art contract.Artifact, advisory bool) {
+	appendPlanReviewHistory(st, art, advisory)
 	if !advisory && art.Type == contract.ArtifactReview && art.Metadata["review_source"] == "authenticated-human" {
 		st.PlanReplanCount = 0
 		st.PendingPlanReview = nil
@@ -135,4 +138,90 @@ func (m *Manager) ResetPlanReplansAfterStage(ctx context.Context, issue int, own
 		st.Lease.Phase = "plan"
 		return nil
 	})
+}
+
+func dropPlanReviewHistory(st *IssueState) {
+	st.PlanReviewHistory = nil
+	st.PlanReviewSequence = 0
+}
+
+// DirectPlanReview excludes the independent PR and fork review protocols.
+func DirectPlanReview(st *IssueState) bool {
+	return st != nil && st.PRNumber == 0 && st.PRRevision == nil && st.ForkRepo == ""
+}
+
+func appendPlanReviewHistory(st *IssueState, art contract.Artifact, advisory bool) {
+	if !DirectPlanReview(st) || advisory || art.Type != contract.ArtifactReview {
+		return
+	}
+	source := art.Metadata["review_source"]
+	if source != "authenticated-agent" && source != "authenticated-human" {
+		return
+	}
+	findings := contract.CanonicalArtifactBody(art.Body)
+	const marker = "\n[Earlier review findings truncated]"
+	if len(findings) > 16<<10 {
+		findings = findings[:(16<<10)-len(marker)]
+		for !utf8.ValidString(findings) {
+			findings = findings[:len(findings)-1]
+		}
+		findings += marker
+	}
+	st.PlanReviewSequence++
+	entry := workspace.PlanReviewEvidence{Round: st.PlanReviewSequence, ReviewID: art.ID, Version: art.Version, Verdict: art.Verdict, Findings: findings, Digest: hash(art.Body), TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, BaseSHA: st.BaseSHA, PlanDigest: art.Metadata["plan_digest"], TestPlanDigest: art.Metadata["test_plan_digest"]}
+	// Allocate independently of previously loaded state and bounded slice storage.
+	history := append(append([]workspace.PlanReviewEvidence(nil), st.PlanReviewHistory...), entry)
+	if len(history) > 8 {
+		history = history[len(history)-8:]
+	}
+	st.PlanReviewHistory = history
+}
+
+// ReviewHistory projects only evidence from this approved revision.
+func ReviewHistory(st *IssueState) []workspace.PlanReviewEvidence {
+	if !DirectPlanReview(st) {
+		return nil
+	}
+	var result []workspace.PlanReviewEvidence
+	for _, h := range st.PlanReviewHistory {
+		if h.TaskDigest == st.TaskDigest && h.PolicyDigest == st.PolicyDigest && h.BaseSHA == st.BaseSHA {
+			result = append(result, h)
+		}
+	}
+	return result
+}
+
+// PlanReviewRound is independent of retry reservations and human budget resets.
+func PlanReviewRound(st *IssueState) int {
+	history := ReviewHistory(st)
+	if len(history) == 0 {
+		return 1
+	}
+	last := history[len(history)-1]
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactReview && a.ID == last.ReviewID && a.Version == last.Version && hash(a.Body) == last.Digest && a.Metadata["plan_digest"] == last.PlanDigest && a.Metadata["test_plan_digest"] == last.TestPlanDigest {
+			return last.Round
+		}
+	}
+	return st.PlanReviewSequence + 1
+}
+
+// CurrentPlanRejection requires the current authenticated rejection, not merely
+// a spent retry reservation surviving report replacement or a reviewer crash.
+func CurrentPlanRejection(st *IssueState) bool {
+	p := st.PendingPlanReview
+	if p == nil || p.TaskDigest != st.TaskDigest || p.PolicyDigest != st.PolicyDigest || p.BaseSHA != st.BaseSHA {
+		return false
+	}
+	for _, a := range st.Artifacts {
+		if a.Type == contract.ArtifactReview && a.Verdict == "CHANGES_REQUESTED" && a.Metadata["review_source"] == "authenticated-agent" && a.ID == p.ReviewID && a.Version == p.Version && hash(a.Body) == p.Digest {
+			for k, v := range ReviewBindings(st) {
+				if a.Metadata[k] != v {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
 }

@@ -4,6 +4,37 @@ SwarmOS uses a **Plan-First** lifecycle across all supported coding harnesses (`
 
 ---
 
+## Convert one intake issue
+
+Use `swarm issue convert` when you have one report ready to scope into a task. For a whole tracker, use [backlog scanning and normalization](backlog.md#3-apply-what-you-agree-with), which suggests fields for multiple issues.
+
+1. Read the report and prepare one objective, explicit constraints and observable acceptance criteria. Name what is in scope and out of scope. Choose dependencies, workflow and dimensions as needed; conversion never invents requirements from the report.
+2. As a maintainer, preview the proposed contract and validation result. For example, scope issue 123 to fixing an empty search result:
+
+```bash
+swarm issue convert 123 --objective 'Return an empty result for an empty query' \
+  --constraint 'Keep the existing search API' \
+  --acceptance 'An empty query returns an empty result without an error' --dry-run
+swarm issue convert 123 --objective 'Return an empty result for an empty query' \
+  --constraint 'Keep the existing search API' \
+  --acceptance 'An empty query returns an empty result without an error' --dry-run --json
+```
+
+3. Review the diff, then apply those same fields without `--dry-run`. Lint the draft, approve the contract separately, and start work:
+
+```bash
+swarm issue convert 123 --objective 'Return an empty result for an empty query' \
+  --constraint 'Keep the existing search API' \
+  --acceptance 'An empty query returns an empty result without an error'
+swarm issue lint 123
+swarm issue approve 123
+swarm issue work 123
+```
+
+Conversion keeps the original issue number, URL and report, plus unrelated labels and metadata. It removes readiness and needs-scope labels and adds `swarm:draft`; approval remains a separate maintainer decision. The task gate defaults to `none`, with stricter workflow or repository gates enforced at approval. The linked PR references the original issue and closes it automatically when merged into the default branch.
+
+Existing WorkUnits use `swarm issue edit`; external-file contracts are edited in their referenced file. Conversion refuses closed issues, pull requests, Epics and issues with recorded coordination state. Follow the reported status and recovery guidance before retrying. A failed write reports completed steps; after the contract body has been saved, use `issue edit` for further changes. Dependency projection warnings leave the converted contract intact and identify links to retry.
+
 ## 1. Built-In Workflow Recipes (`.swarm/workflows/`)
 
 SwarmOS scaffolds three workflow recipes in `.swarm/workflows/`:

@@ -7,6 +7,7 @@ import (
 )
 
 type Issue struct {
+	IsPullRequest     bool      `json:"is_pull_request,omitempty"`
 	Number            int       `json:"number"`
 	Title             string    `json:"title"`
 	Body              string    `json:"body"`

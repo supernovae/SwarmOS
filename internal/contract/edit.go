@@ -417,3 +417,55 @@ func checkEditableYAML(node *yaml.Node) error {
 	}
 	return nil
 }
+
+// ConvertWorkUnitIssue constructs a draft contract without deriving requirements
+// from the report. The report remains readable and byte-for-byte recoverable.
+func ConvertWorkUnitIssue(number int, title, report string, intended WorkUnit) (string, string, error) {
+	if _, err := ParseWorkUnitFromIssue(number, title, report); err == nil {
+		return title, report, fmt.Errorf("issue already contains a valid WorkUnit; use swarm issue edit %d (external-file contracts must be edited in the referenced file)", number)
+	}
+	intended.ID = fmt.Sprintf("ISSUE-%d", number)
+	intended.IssueNumber = number
+	if intended.Title == "" {
+		intended.Title = title
+	}
+	intended.Title = strings.TrimSpace(intended.Title)
+	intended.Objective = strings.TrimSpace(intended.Objective)
+	if intended.Workflow == "" {
+		intended.Workflow = "feature"
+	}
+	if intended.Gate == "" {
+		intended.Gate = GateNone
+	}
+	if intended.Constraints == nil {
+		intended.Constraints = []string{}
+	}
+	if err := ValidateWorkUnit(&intended); err != nil {
+		return intended.Title, report, err
+	}
+	// Markdown dependency parsing treats repeated references as one prerequisite.
+	seenDeps := map[int]bool{}
+	deps := make([]int, 0, len(intended.DependsOn))
+	for _, dep := range intended.DependsOn {
+		if !seenDeps[dep] {
+			deps = append(deps, dep)
+			seenDeps[dep] = true
+		}
+	}
+	if len(deps) > 0 {
+		intended.DependsOn = deps
+	}
+	escaped := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\r", "&#13;").Replace(report)
+	body := FormatIssueMarkdown(&intended) + "\n### Original report\n\n"
+	for _, line := range strings.Split(escaped, "\n") {
+		body += "> " + line + "\n"
+	}
+	parsed, err := ParseWorkUnitFromIssue(number, intended.Title, body)
+	if err != nil {
+		return intended.Title, body, err
+	}
+	if DigestWorkUnit(parsed) != DigestWorkUnit(&intended) {
+		return intended.Title, body, fmt.Errorf("conversion changed intended contract semantics; check structured fields for injected sections")
+	}
+	return intended.Title, body, nil
+}

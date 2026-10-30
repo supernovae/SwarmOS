@@ -14,9 +14,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func freshnessGit(t *testing.T, root string, args ...string) string {
@@ -172,8 +174,30 @@ func TestSubmitFreshnessJSON(t *testing.T) {
 				} else if !drift {
 					want := fmt.Sprintf("Submitted draft PR #%d for issue #%d on %s (%s)\n", state.PRNumber, number, state.Branch, state.PRURL)
 					want = "Warning: acceptance evidence gaps (advisory; submission proceeds):\n  1. Produce a checked checkpoint (unmentioned)\n" + want
-					if out != want {
+					if !strings.HasSuffix(out, want) {
 						t.Fatalf("%q != %q", out, want)
+					}
+					// Consume the whole report so unexpected text cannot hide before the suffix.
+					prefix := strings.TrimSuffix(out, want)
+					pattern := "^Candidate head: " + regexp.QuoteMeta(old.HeadSHA) + "; trusted base: " + regexp.QuoteMeta(old.BaseSHA) + "\n" +
+						"PASS git-available \\(([^\n]+)\\)\n\n" +
+						"\\| Phase \\| Status \\| Duration \\|\n\\| :--- \\| :--- \\| :--- \\|\n" +
+						"\\| preflight \\| ran \\| ([^\n]+) \\|\n" +
+						"\\| warm-up \\| not-applicable \\| ([^\n]+) \\|\n" +
+						"\\| checks \\| PASS \\| ([^\n]+) \\|\n" +
+						"\\| repair \\| not-applicable \\| ([^\n]+) \\|\n" +
+						"Total wall time: ([^\n]+)\n$"
+					matches := regexp.MustCompile(pattern).FindStringSubmatch(prefix)
+					if matches == nil {
+						t.Fatalf("unexpected validation report: %q", prefix)
+					}
+					for _, value := range matches[1:] {
+						if duration, err := time.ParseDuration(value); err != nil || duration < 0 {
+							t.Fatalf("invalid validation duration %q: %v", value, err)
+						}
+					}
+					if strings.Contains(out, "behind the target") || strings.Contains(out, "base_freshness") {
+						t.Fatal("freshness warning for unchanged base", out)
 					}
 				} else if !strings.Contains(out, "behind the target by 1 commits") {
 					t.Fatal(out)

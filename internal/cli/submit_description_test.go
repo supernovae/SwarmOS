@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -197,9 +198,17 @@ func TestSubmitDescriptionStrictComposedAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	st = f.state(t, issue)
+	if st.PRRevision != nil {
+		t.Fatal("active revision not completed before seeding advisory evidence")
+	}
 	st.Artifacts = []contract.Artifact{
 		{Type: contract.ArtifactDesign, Verdict: "PASS", Body: strings.Repeat("计划🙂<!-- swarm:rebase:end -->\n", 10000)},
 		{Type: contract.ArtifactValidation, Verdict: "FAIL", Body: "| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n| tests | go test | fail | 1s |\n\n### Output: tests\n" + strings.Repeat("huge log é\n", 10000)},
+	}
+	validation := &st.Artifacts[1]
+	validation.Metadata = map[string]string{
+		"head_sha":       st.HeadSHA,
+		"content_sha256": fmt.Sprintf("%x", sha256.Sum256([]byte(validation.Body))),
 	}
 	save(st)
 	current, err := tr.GetPullRequest(t.Context(), original.Number)
@@ -245,7 +254,12 @@ func TestSubmitDescriptionStrictComposedAPI(t *testing.T) {
 	if rejected != 1 {
 		t.Fatal("unexpected lifecycle API rejection", rejected)
 	}
-	if !strings.Contains(result.Body, "tests: fail") || requests < 8 || len(bodies) != requests {
+	for _, outcome := range []string{"### validation: FAIL", "Contributor-reported validation (advisory); coordinator timing unavailable.", "| tests | go test | fail | 1s |"} {
+		if !strings.Contains(result.Body, outcome) {
+			t.Fatalf("missing failure projection %q", outcome)
+		}
+	}
+	if requests < 8 || len(bodies) != requests {
 		t.Fatal("outcomes or requests missing", requests)
 	}
 }

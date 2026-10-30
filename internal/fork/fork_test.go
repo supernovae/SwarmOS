@@ -57,7 +57,8 @@ func newFakeGitHubState() *fakeGitHubState {
 				"full_name":   "alice/swarm",
 				"name":        "swarm",
 				"fork":        true,
-				"owner":       map[string]any{"login": "alice"},
+				"owner":       map[string]any{"login": "alice", "type": "User"},
+				"private":     false,
 				"source":      map[string]any{"full_name": "octo/swarm"},
 				"permissions": map[string]any{"push": true},
 			},
@@ -65,7 +66,8 @@ func newFakeGitHubState() *fakeGitHubState {
 				"full_name":   "bob/swarm",
 				"name":        "swarm",
 				"fork":        true,
-				"owner":       map[string]any{"login": "bob"},
+				"owner":       map[string]any{"login": "bob", "type": "User"},
+				"private":     false,
 				"source":      map[string]any{"full_name": "octo/swarm"},
 				"permissions": map[string]any{"push": true},
 			},
@@ -306,6 +308,7 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 				},
 				"base": map[string]any{
 					"ref":  pr.Base,
+					"sha":  s.baseSHA,
 					"repo": map[string]any{"full_name": pr.BaseRepo},
 				},
 			})
@@ -416,7 +419,7 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	ghState.baseSHA = baseSHA
 	wuBody := "```yaml swarm-workunit\nid: ISSUE-42\nobjective: Implement fork feature\nconstraints: [Follow policy]\nacceptance: [Tests pass]\nworkflow: feature\ngate: agent\n```"
 	ghState.issues[42] = &tracker.Issue{Number: 42, Title: "Fork feature 42", Body: wuBody, State: "open", Author: "maintainer"}
-	ghState.issues[43] = &tracker.Issue{Number: 43, Title: "Fork feature 43", Body: strings.ReplaceAll(wuBody, "ISSUE-42", "ISSUE-43"), State: "open", Author: "maintainer"}
+	ghState.issues[43] = &tracker.Issue{Number: 43, Title: "Fork feature 43", Body: strings.ReplaceAll(strings.ReplaceAll(wuBody, "ISSUE-42", "ISSUE-43"), "workflow: feature", "base_branch: main\nworkflow: feature"), State: "open", Author: "maintainer"}
 
 	maintTracker := ghState.trackerForUser(t, "maintainer", "User")
 	cfg, err := harness.LoadConfigAt(upstreamCheckout, baseSHA)
@@ -975,6 +978,112 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	if _, err := applyBob(complete); !errors.Is(err, lease.ErrClaimFence) {
 		t.Fatalf("completed revision accepted a second completion: %v", err)
 	}
+
+	t.Run("trusted review checkpoint submission", func(t *testing.T) {
+		apply := func(req lease.ForkRequest) *lease.IssueState {
+			t.Helper()
+			req.Version, req.IssueNumber = 1, 43
+			st, err := aliceGateway.Apply(ctx, req)
+			if err != nil {
+				t.Fatalf("%s: %v", req.Operation, err)
+			}
+			return st
+		}
+		recordReview := func() {
+			t.Helper()
+			observation, err := maintMgr.PrepareUpstreamPlanReview(ctx, 43)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = maintMgr.RecordUpstreamPlanReview(ctx, observation, "VERDICT: APPROVED", "APPROVED", contract.RoleAttestation{Role: "reviewer", Agent: "codex", Harness: "codex", HarnessVersion: "fixture", Model: "review-model", Sandbox: "codex-native"})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		plans := func(claim string) {
+			for _, typ := range []contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan} {
+				art := contract.Artifact{Type: typ, Producer: "claude:planner", Summary: "Plan", Body: "exact " + string(typ)}
+				apply(lease.ForkRequest{Operation: "update-artifact", ClaimID: claim, Artifact: &art})
+			}
+		}
+		validate := func(claim, head string) {
+			art := contract.Artifact{Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: "PASS", Summary: "pass", Body: "focused fixture validation", Metadata: map[string]string{"head_sha": head}}
+			apply(lease.ForkRequest{Operation: "update-artifact", ClaimID: claim, Artifact: &art})
+		}
+		checkApproval := func(st *lease.IssueState) {
+			t.Helper()
+			issue, err := maintTracker.GetIssue(ctx, 43)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wu, err := contract.ParseWorkUnitFromIssue(43, issue.Title, issue.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := lease.VerifyApproval(st, wu); err != nil {
+				t.Fatal(err)
+			}
+		}
+		st := apply(lease.ForkRequest{Operation: "acquire", Agent: "claude", Phase: "all"})
+		claim := st.Lease.ClaimID
+		plans(claim)
+		recordReview()
+		branch := fmt.Sprintf("swarm/issue-43-%s", claim)
+		git(aliceClone, "checkout", "-b", branch, baseSHA)
+		git(aliceClone, "commit", "--allow-empty", "-m", "initial implementation")
+		head := git(aliceClone, "rev-parse", "HEAD")
+		git(aliceClone, "push", "fork", head+":refs/heads/"+branch)
+		st = apply(lease.ForkRequest{Operation: "record-checkpoint", ClaimID: claim, Branch: branch, HeadSHA: head})
+		checkApproval(st)
+		validate(claim, head)
+		pr, err := aliceTracker.CreateDraftPR(ctx, tracker.DraftPRRequest{IssueNumber: 43, Title: "Trusted continuation (#43)", Body: "Closes #43", Head: "alice:" + branch, Base: "main"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ghState.mu.Lock()
+		ghState.prs[pr.Number].HeadSHA = head
+		ghState.mu.Unlock()
+		apply(lease.ForkRequest{Operation: "record-submission", ClaimID: claim, PRNumber: pr.Number})
+
+		st = apply(lease.ForkRequest{Operation: "acquire-pr", PRNumber: pr.Number, Agent: "claude"})
+		claim = st.Lease.ClaimID
+		revisionBranch := fmt.Sprintf("swarm/pr-%d", pr.Number)
+		apply(lease.ForkRequest{Operation: "begin-pr-revision", ClaimID: claim, PRNumber: pr.Number, Branch: revisionBranch, ExpectedHeadSHA: head, HeadSHA: head})
+		plans(claim)
+		git(aliceClone, "push", "fork", head+":refs/heads/"+revisionBranch)
+		git(upstreamCheckout, "config", "url."+aliceForkBare+".insteadOf", "https://github.com/alice/swarm.git")
+		recordReview()
+		validate(claim, head)
+		git(aliceClone, "commit", "--allow-empty", "-m", "revision implementation")
+		revised := git(aliceClone, "rev-parse", "HEAD")
+		st = apply(lease.ForkRequest{Operation: "record-pr-head", ClaimID: claim, PRNumber: pr.Number, Branch: revisionBranch, HeadSHA: revised})
+		checkApproval(st)
+		for _, a := range st.Artifacts {
+			if a.Type == contract.ArtifactValidation {
+				t.Fatal("stale validation survived")
+			}
+		}
+		complete := lease.ForkRequest{Version: 1, IssueNumber: 43, Operation: "complete-pr-revision", ClaimID: claim, PRNumber: pr.Number, ExpectedHeadSHA: head, HeadSHA: revised}
+		ghState.mu.Lock()
+		ghState.prs[pr.Number].HeadSHA = baseSHA
+		ghState.mu.Unlock()
+		if _, err := aliceGateway.Apply(ctx, complete); err == nil {
+			t.Fatal("changed remote publication accepted")
+		}
+		ghState.mu.Lock()
+		ghState.prs[pr.Number].HeadSHA = head
+		ghState.mu.Unlock()
+		checkApproval(apply(lease.ForkRequest{Operation: "record-pr-head", ClaimID: claim, PRNumber: pr.Number, Branch: revisionBranch, HeadSHA: revised}))
+		validate(claim, revised)
+		git(aliceClone, "push", "fork", revised+":refs/heads/"+branch)
+		ghState.mu.Lock()
+		ghState.prs[pr.Number].HeadSHA = revised
+		ghState.mu.Unlock()
+		done := apply(complete)
+		if done.PRRevision != nil || done.HeadSHA != revised || done.Lease.Status != "completed" {
+			t.Fatal("revision did not complete")
+		}
+	})
 
 	// A real trusted-base move is approved upstream before the contributor
 	// requests a rebase. Neither request supplies a digest or retention verdict.

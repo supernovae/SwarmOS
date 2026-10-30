@@ -901,6 +901,15 @@ func TestUpstreamPlanReviewInitialCompletion(t *testing.T) {
 					if err := lease.VerifyApproval(updated, parsed); err != nil {
 						t.Fatal(err)
 					}
+					branch := fmt.Sprintf("swarm/issue-%d-%s", issue.Number, updated.Lease.ClaimID)
+					checkpoint, err := worker.RecordCheckpoint(ctx, issue.Number, "contributor", branch, git("rev-parse", "HEAD"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := lease.VerifyApproval(checkpoint, parsed); err != nil {
+						t.Fatalf("worker checkpoint continuation: %v", err)
+					}
+
 				} else if runErr == nil {
 					t.Fatal("unsafe outcome accepted")
 				}
@@ -913,6 +922,26 @@ func TestUpstreamPlanReviewInitialCompletion(t *testing.T) {
 				}
 				if !reflect.DeepEqual(st.Lease, after.Lease) || !reflect.DeepEqual(st.ClaimBudget, after.ClaimBudget) {
 					t.Fatal("review changed contributor lease/budget")
+				}
+				if outcome == "approved" {
+					wu, _ := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+					// Exercise the worker's real resume and implementation admission,
+					// without a planner/reviewer rerun or model invocation.
+					workerEngine := NewEngineWithManagerOptions(root, lt, worker, cfg, false, "", EngineOptions{})
+					run := &workRun{e: workerEngine, ctx: ctx, coordinatorCtx: ctx,
+						opts: WorkOptions{IssueNumber: issue.Number, Owner: "contributor", ClaimID: after.Lease.ClaimID, Phase: "implement"},
+						pre:  &PreflightResult{WorkUnit: wu}, cfg: cfg, wtPath: t.TempDir(), res: &WorkResult{}}
+					run.progress = startWorkProgress(ctx, issue.Number, nil)
+					defer run.progress.finish(nil, nil)
+					if err := run.claimRun(); err != nil {
+						t.Fatal(err)
+					}
+					run.heartbeat = worker.StartHeartbeat(ctx, issue.Number, "contributor", time.Hour)
+					paused, err := run.prepareImplementation()
+					run.heartbeat.Stop()
+					if err != nil || paused {
+						t.Fatalf("resumed implementation admission: paused=%v err=%v", paused, err)
+					}
 				}
 				if err := worker.CheckClaim(ctx, issue.Number, "contributor"); err != nil {
 					t.Fatal(err)

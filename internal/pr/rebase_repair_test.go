@@ -143,3 +143,49 @@ func TestRepairExactFileSelection(t *testing.T) {
 		t.Fatal("accepted ancestor symlink")
 	}
 }
+
+func TestMergedRepairPaths(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                  string
+		paths, selected, want []string
+	}{
+		{name: "empty"},
+		{
+			name:  "original only",
+			paths: []string{"a.go", "sub/b.go"},
+			want:  []string{"a.go", "sub/b.go"},
+		},
+		{
+			name:     "rejected originals",
+			paths:    []string{"z.go", "protected.txt", "private/file.go", ".swarm/active/PLAN.md", "AGENTS.md", "CLAUDE.md", ".git", ".git/config", "../outside.go", "/absolute.go", "./a.go", "sub/../a.go", "sub\\file.go", "C:/file.go", "nul\x00.go", "a.go"},
+			selected: []string{"selected.go"},
+			want:     []string{"a.go", "selected.go", "z.go"},
+		},
+		{
+			name:     "selected only outside original scope",
+			selected: []string{"sub/selected.go"},
+			want:     []string{"sub/selected.go"},
+		},
+		{
+			name:     "duplicates and overlapping selections",
+			paths:    []string{"b.go", "a.go", "b.go"},
+			selected: []string{"c.go", "b.go", "c.go"},
+			want:     []string{"a.go", "b.go", "c.go"},
+		},
+		{
+			name:     "reverse order",
+			paths:    []string{"z.go", "m.go", "a.go"},
+			selected: []string{"y.go", "b.go"},
+			want:     []string{"a.go", "b.go", "m.go", "y.go", "z.go"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rv := &resolver{protected: []string{"protected.txt", "private/**"}}
+			if got := mergedRepairPaths(tc.paths, tc.selected, rv); !slices.Equal(got, tc.want) {
+				t.Fatalf("mergedRepairPaths() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -33,6 +33,18 @@ func repairAllowed(p string, paths []string, rv *resolver) bool {
 	return true
 }
 
+func mergedRepairPaths(paths, selected []string, rv *resolver) []string {
+	eligible := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if repairAllowed(p, paths, rv) {
+			eligible = append(eligible, p)
+		}
+	}
+	eligible = append(eligible, selected...)
+	slices.Sort(eligible)
+	return slices.Compact(eligible)
+}
+
 func verifyRepairTree(dir string, before map[string]planFile, paths []string, rv *resolver) (map[string]planFile, error) {
 	after, err := snapshotPlanTree(dir)
 	if err != nil {
@@ -188,15 +200,7 @@ func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner str
 		}
 		r.State = st
 	}
-	eligible := make([]string, 0, len(paths)+len(selected))
-	for _, p := range paths {
-		if repairAllowed(p, paths, rv) {
-			eligible = append(eligible, p)
-		}
-	}
-	paths = append(eligible, selected...)
-	slices.Sort(paths)
-	paths = slices.Compact(paths)
+	paths = mergedRepairPaths(paths, selected, rv)
 	stop := func(cause error) (*Result, error) {
 		evidence := ""
 		if r.Validation != nil {

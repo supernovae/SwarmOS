@@ -1,6 +1,8 @@
 # Optional target branch; inherited by WorkUnits without an override.
 # base_branch: release/1.x
 version: 1
+# Ledgers (issue state, checkpoint retention, contributor indexes) live under refs/swarm/, out of the branch list.
+ledger_namespace: hidden
 # Native isolation: qualified Codex releases on Linux. Run swarm repo doctor before work.
 default_agent: codex
 plan_mode: auto

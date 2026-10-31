@@ -35,6 +35,7 @@ func TestMain(m *testing.M) {
 	state := filepath.Join(os.TempDir(), fmt.Sprintf("swarm-agent-test-state-%d", os.Getpid()))
 	os.Setenv("XDG_STATE_HOME", state)
 	os.Setenv("XDG_CACHE_HOME", state+"-cache")
+	storageuse.UserCacheDir = os.UserCacheDir
 	preserveHome := telemetryHelperHome(os.Args[1:])
 	if !preserveHome {
 		os.Setenv("HOME", state+"-home")

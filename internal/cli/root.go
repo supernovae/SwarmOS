@@ -29,6 +29,7 @@ import (
 )
 
 type RootOptions struct {
+	maintenanceHook  func(*cobra.Command, bool)
 	progressReporter func(context.Context, func(workflow.ProgressEvent)) *workflow.ProgressReporter
 	progressSession  func(context.Context, func(progress.Event)) *progress.Session
 	Backend          string
@@ -139,6 +140,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 			command.GroupID = "tools"
 		}
 	}
+	installStorageMaintenance(rootCmd, opts)
 	rootCmd.SetHelpCommandGroupID("tools")
 	rootCmd.SetCompletionCommandGroupID("tools")
 	return rootCmd

@@ -217,6 +217,7 @@ type NodeResources struct {
 }
 
 type NodeProfile struct {
+	Storage      *NodeStorage  `yaml:"storage,omitempty" json:"storage,omitempty"`
 	NodeID       string        `yaml:"node_id" json:"node_id"`
 	Capabilities []string      `yaml:"capabilities" json:"capabilities"` // "coding", "testing", "review", "docs"
 	Models       []string      `yaml:"models" json:"models"`             // "claude", "codex", "opencode", "omp"
@@ -331,4 +332,14 @@ func (c LeaseConfig) PlanReplanAttempts() int {
 		return 2
 	}
 	return *c.PlanReplanLimit
+}
+
+// NodeStorage is operator-owned; repository policy cannot select these values.
+type NodeStorage struct {
+	CacheTargetBytes    *int64   `yaml:"cache_target_bytes,omitempty" json:"cache_target_bytes,omitempty"`
+	InactiveRetention   *string  `yaml:"inactive_retention,omitempty" json:"inactive_retention,omitempty"`
+	LowFreeBytes        *int64   `yaml:"low_free_bytes,omitempty" json:"low_free_bytes,omitempty"`
+	LowFreePercent      *float64 `yaml:"low_free_percent,omitempty" json:"low_free_percent,omitempty"`
+	MaintenanceInterval *string  `yaml:"maintenance_interval,omitempty" json:"maintenance_interval,omitempty"`
+	WarningInterval     *string  `yaml:"warning_interval,omitempty" json:"warning_interval,omitempty"`
 }

@@ -268,6 +268,7 @@ type RepositoryScope struct{ Root, CommonDirectory, Backend string }
 // through deletion. Remote claims cannot consume this host storage. Preview
 // evidence is advisory and must never be reused as apply authority.
 type RetentionEvidence struct {
+	FinishedTasks                int
 	Complete, Stable, Unfinished bool
 	Reason                       string
 }
@@ -1011,14 +1012,20 @@ func (r BackendRetention) WithRetention(ctx context.Context, scope RepositorySco
 			return fail(errors.New("ambiguous issue PR linkage"))
 		}
 		used[st.PR] = true
+		finished := true
 		if st.Active || st.Pending || !st.Completed || st.ForkRepo != "" || !strings.HasPrefix(st.Branch, fmt.Sprintf("swarm/issue-%d-", n)) || st.PR == 0 || pr == nil || pr.State != "closed" || !pr.Merged || pr.MergedAt == nil || pr.MergeCommitSHA == "" || st.SubmittedHead == "" || pr.HeadSHA != st.SubmittedHead || pr.Head != st.Branch {
 			ev.Unfinished = true
+			finished = false
 		}
 		if scope.Backend == "github" && pr != nil {
 			upstream, ok := tr.(interface{ UpstreamRepo() string })
 			if !ok || upstream.UpstreamRepo() == "" || !strings.EqualFold(pr.HeadRepo, upstream.UpstreamRepo()) || !strings.EqualFold(pr.BaseRepo, upstream.UpstreamRepo()) {
 				ev.Unfinished = true
+				finished = false
 			}
+		}
+		if finished {
+			ev.FinishedTasks++
 		}
 	}
 	for _, pr := range prs {

@@ -13,11 +13,25 @@ func (s *scanner) account(r *Resource) {
 	// consume ownership discovery's entries or retained-memory allowance.
 	accounting := *s
 	accounting.b = Budget{Limits: s.b.Limits}
+	if s.usageBudget != nil {
+		accounting.b = *s.usageBudget
+	}
 	accounting.out = Snapshot{Complete: true}
+	accounting.namespaceBytes = 0
+	// Local completeness is independent of the aggregate lower-bound flag.
+	accounting.physical = true
 	accounting.accountUsage(r)
-	s.physical = accounting.physical && r.LogicalBytes != nil
+	if s.usageBudget != nil {
+		*s.usageBudget = accounting.b
+	}
+	s.physical = s.physical && accounting.physical && r.LogicalBytes != nil
+	r.uniqueBytes = accounting.namespaceBytes
 	s.b.Counters.Identities = len(s.inodes)
-	s.out.ObservedAllocatedBytes += accounting.out.ObservedAllocatedBytes
+	if accounting.out.ObservedAllocatedBytes > math.MaxInt64-s.out.ObservedAllocatedBytes {
+		s.physical = false // retain the representable lower bound, never wrap totals
+	} else {
+		s.out.ObservedAllocatedBytes += accounting.out.ObservedAllocatedBytes
+	}
 }
 
 func (s *scanner) accountUsage(r *Resource) {
@@ -120,6 +134,12 @@ func (s *scanner) allocate(info os.FileInfo, local *int64) bool {
 		s.physical = false
 		return true
 	}
+	if s.opts.allocation != nil {
+		blocks = s.opts.allocation(info, blocks)
+	}
+	if blocks < 0 {
+		return false
+	}
 	if *local > math.MaxInt64-blocks {
 		return false
 	}
@@ -143,6 +163,9 @@ func (s *scanner) allocate(info os.FileInfo, local *int64) bool {
 	}
 	s.b.Counters.Identities++
 	s.inodes[key] = true
+	if info.IsDir() || singleLink(info) {
+		s.namespaceBytes += blocks
+	}
 	s.out.ObservedAllocatedBytes += blocks
 	return true
 }

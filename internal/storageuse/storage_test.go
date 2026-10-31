@@ -731,3 +731,37 @@ func TestCleanupMissingOwnershipRetainsEvidence(t *testing.T) {
 		t.Fatalf("missing ownership cleared evidence: %v", err)
 	}
 }
+
+func TestMaintenanceLockedObservation(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	u, e := m.AcquireUse(ctx, r)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = u.Finish(ctx); e != nil {
+		t.Fatal(e)
+	}
+	before, e := Observe(ctx, m.path, r, 16<<10, func(int64) error { return nil })
+	if e != nil {
+		t.Fatal(e)
+	}
+	g, e := m.AcquireMaintenance(ctx, r)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer g.Close()
+	got := g.Observation()
+	if !got.CompleteCoverage || got.Active == nil || *got.Active || !got.LastUse.Equal(before.LastUse) {
+		t.Fatal(got, before)
+	}
+	*got.Active = true
+	if *g.Observation().Active {
+		t.Fatal("observation changed locked evidence")
+	}
+	blocked, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	if _, e = m.AcquireUse(blocked, r); !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatal(e)
+	}
+}

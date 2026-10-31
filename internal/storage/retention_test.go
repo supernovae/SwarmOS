@@ -6,11 +6,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1029,4 +1033,207 @@ func TestReclamationBackendCacheUseWins(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The fixture writes each ledger through a file, never one dataset-sized buffer.
+func inventoryScaleObjects(t *testing.T, root string, count int, size func(int) int64) (map[int]string, []*tracker.PullRequest, int64, int64) {
+	t.Helper()
+	git := func(input string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Stdin = strings.NewReader(input)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	refs := map[int]string{}
+	prs := []*tracker.PullRequest{}
+	var total, largest int64
+	chunk := strings.Repeat("x", 8192)
+	for n := 1; n <= count; n++ {
+		path := filepath.Join(t.TempDir(), "state.json")
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prefix := fmt.Sprintf(`{"lease":{"version":1,"issue_number":%d,"status":"completed","phase":"submitted"},"branch":"swarm/issue-%d-test","submitted_head_sha":"abc","pr_number":%d,"pr_url":"https://example.test/pr/%d","artifacts":[{"body":"`, n, n, 1000+n, 1000+n)
+		suffix := `"}],"role_runs":[{"history":[true,null,{"ignored":"escaped\nvalue"}]}]}`
+		want := size(n)
+		padding := want - int64(len(prefix)+len(suffix))
+		if padding < 0 {
+			t.Fatal("invalid fixture size")
+		}
+		if _, err = io.WriteString(f, prefix); err != nil {
+			t.Fatal(err)
+		}
+		for padding > 0 {
+			part := int64(len(chunk))
+			if padding < part {
+				part = padding
+			}
+			if _, err = io.WriteString(f, chunk[:part]); err != nil {
+				t.Fatal(err)
+			}
+			padding -= part
+		}
+		if _, err = io.WriteString(f, suffix); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		blob := git("", "hash-object", "-w", path)
+		tree := git("100644 blob "+blob+"\tstate.json\n", "mktree")
+		sha := git("", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", tree, "-m", "inventory")
+		git("", "update-ref", fmt.Sprintf("refs/heads/swarm-state/issue-%d", n), sha)
+		refs[n] = sha
+		total += want
+		if want > largest {
+			largest = want
+		}
+		now := time.Now()
+		prs = append(prs, &tracker.PullRequest{Number: 1000 + n, HTMLURL: fmt.Sprintf("https://example.test/pr/%d", 1000+n), State: "closed", Merged: true, MergedAt: &now, MergeCommitSHA: "def", HeadSHA: "abc", Head: fmt.Sprintf("swarm/issue-%d-test", n), HeadRepo: "fixture/repo", BaseRepo: "fixture/repo"})
+	}
+	return refs, prs, total, largest
+}
+
+type inventoryScaleVisitor struct {
+	refs map[int]string
+	prs  []*tracker.PullRequest
+}
+
+func (v inventoryScaleVisitor) UpstreamRepo() string { return "fixture/repo" }
+func (v inventoryScaleVisitor) VisitStateRefs(ctx context.Context, b tracker.InventoryBudget, visit func(int, string) error) error {
+	for n, sha := range v.refs {
+		if err := visit(n, sha); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (v inventoryScaleVisitor) VisitPullRequests(ctx context.Context, b tracker.InventoryBudget, visit func(*tracker.PullRequest) error) error {
+	for _, pr := range v.prs {
+		if err := visit(pr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestReclamationInventoryRealLedgerScale(t *testing.T) {
+	o, _, resource := reclaimFixture(t, "agent-build")
+	o.Scopes[0].Backend = "github"
+	var baseline int64
+	for _, extra := range []int64{0, 10000} {
+		refs, prs, total, largest := inventoryScaleObjects(t, o.Scopes[0].Root, 166, func(n int) int64 {
+			if n == 1 {
+				return 4533441 + extra
+			}
+			if n == 166 {
+				return 648470 + extra
+			}
+			return 648464 + extra
+		})
+		if extra == 0 && (total < 110000000 || total > 115000000 || largest < 4533441) {
+			t.Fatal(total, largest)
+		}
+		beforeRefs := prunedInventoryRefs(t, o.Scopes[0].Root)
+		b := &Budget{Limits: DefaultLimits()}
+		source := BackendRetention{Budget: b, Tracker: func(RepositoryScope) (tracker.PullRequestVisitor, error) {
+			return inventoryScaleVisitor{refs, prs}, nil
+		}}
+		o.Retention = source
+		report, err := PreviewReclamation(context.Background(), o)
+		if err != nil || !report.Complete || len(report.Resources) != 1 || report.Resources[0].Outcome != ReclaimEligible {
+			t.Fatalf("%+v %v", report, err)
+		}
+		if b.Counters.Bytes >= DefaultLimits().Bytes {
+			t.Fatal(b.Counters)
+		}
+		if extra == 0 {
+			baseline = b.Counters.Bytes
+		} else if baseline != b.Counters.Bytes {
+			t.Fatalf("input-scaled charge %d %d", baseline, b.Counters.Bytes)
+		}
+		if _, err = os.Stat(resource.Location); err != nil {
+			t.Fatal(err)
+		}
+		if beforeRefs != prunedInventoryRefs(t, o.Scopes[0].Root) {
+			t.Fatal("preview mutated state refs")
+		}
+		if _, err := os.Stat(filepath.Join(o.Scopes[0].Root, ".git", "FETCH_HEAD")); !os.IsNotExist(err) {
+			t.Fatal("preview fetched", err)
+		}
+		t.Logf("refs=%d total=%d largest=%d budget=%d", len(refs), total, largest, b.Counters.Bytes)
+	}
+	// A bounded allocation observation catches whole-object buffering separately
+	// from retained-memory accounting. Dataset setup is outside measurement.
+	body := strings.NewReader(`{"lease":{"version":1,"issue_number":1},"ignored":"` + strings.Repeat("x", 4533441) + `"}`)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := lease.ProjectInventory(context.Background(), body, func(int64) error { return nil })
+	runtime.ReadMemStats(&after)
+	if err != nil || after.TotalAlloc-before.TotalAlloc > 1<<20 {
+		t.Fatalf("allocation=%d err=%v", after.TotalAlloc-before.TotalAlloc, err)
+	}
+	t.Logf("parser allocation bytes=%d", after.TotalAlloc-before.TotalAlloc)
+}
+
+func TestReclamationInventoryOverLimitRetains(t *testing.T) {
+	for _, backend := range []string{"github", "local"} {
+		t.Run(backend, func(t *testing.T) {
+			o, _, resource := reclaimFixture(t, "agent-build")
+			o.Scopes[0].Backend = backend
+			refs, prs, _, _ := inventoryScaleObjects(t, o.Scopes[0].Root, 1, func(int) int64 { return coordination.InventoryInputLimit + 1 })
+			if backend == "github" {
+				if out, err := exec.Command("git", "-C", o.Scopes[0].Root, "remote", "add", "origin", o.Scopes[0].Root).CombinedOutput(); err != nil {
+					t.Fatal(string(out), err)
+				}
+			}
+			if backend == "local" {
+				data, err := exec.Command("git", "-C", o.Scopes[0].Root, "show", refs[1]+":state.json").Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				put(t, filepath.Join(o.Scopes[0].Root, ".swarm", "coordination", "issue-1.json"), string(data))
+			}
+			for _, missing := range []bool{false, true} {
+				if missing {
+					if backend == "github" {
+						refs[1] = strings.Repeat("a", 40)
+					} else {
+						put(t, filepath.Join(o.Scopes[0].Root, ".swarm", "coordination", "issue-1.json"), "invalid")
+					}
+				}
+				failures := map[string]error{}
+				o.Retention = BackendRetention{Apply: backend == "github" && !missing, Failures: failures, Tracker: func(RepositoryScope) (tracker.PullRequestVisitor, error) {
+					return inventoryScaleVisitor{refs, prs}, nil
+				}}
+				report, err := ApplyReclamation(context.Background(), o)
+				if err != nil || report.Complete || len(report.Resources) != 1 || report.Resources[0].Outcome != ReclaimRetained || len(failures) != 1 {
+					t.Fatalf("%+v failures=%v err=%v", report, failures, err)
+				}
+				reason := report.Resources[0].Reason
+				if strings.Contains(reason, "signal: killed") || !strings.Contains(reason, "issue 1") {
+					t.Fatal(reason)
+				}
+				if _, err = os.Stat(resource.Location); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func prunedInventoryRefs(t *testing.T, root string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", root, "show-ref").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }

@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -403,5 +405,289 @@ func TestStorageCleanupAllReposContinuesAfterInvalidScope(t *testing.T) {
 	}
 	if len(report.Incomplete) == 0 || len(report.Errors) == 0 || len(report.Tasks) != 1 || report.Tasks[0].Status != "completed" {
 		t.Fatalf("%+v", report)
+	}
+}
+
+// The fixture writes each ledger through a file, never one dataset-sized buffer.
+func inventoryScaleObjects(t *testing.T, root string, count int, size func(int) int64) (map[int]string, []*tracker.PullRequest, int64, int64) {
+	t.Helper()
+	git := func(input string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Stdin = strings.NewReader(input)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	refs := map[int]string{}
+	prs := []*tracker.PullRequest{}
+	var total, largest int64
+	chunk := strings.Repeat("x", 8192)
+	for n := 1; n <= count; n++ {
+		path := filepath.Join(t.TempDir(), "state.json")
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prefix := fmt.Sprintf(`{"lease":{"version":1,"issue_number":%d,"status":"completed","phase":"submitted"},"branch":"swarm/issue-%d-test","submitted_head_sha":"abc","pr_number":%d,"pr_url":"https://example.test/pr/%d","artifacts":[{"body":"`, n, n, 1000+n, 1000+n)
+		suffix := `"}],"role_runs":[{"history":[true,null,{"ignored":"escaped\nvalue"}]}]}`
+		want := size(n)
+		padding := want - int64(len(prefix)+len(suffix))
+		if padding < 0 {
+			t.Fatal("invalid fixture size")
+		}
+		if _, err = io.WriteString(f, prefix); err != nil {
+			t.Fatal(err)
+		}
+		for padding > 0 {
+			part := int64(len(chunk))
+			if padding < part {
+				part = padding
+			}
+			if _, err = io.WriteString(f, chunk[:part]); err != nil {
+				t.Fatal(err)
+			}
+			padding -= part
+		}
+		if _, err = io.WriteString(f, suffix); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		blob := git("", "hash-object", "-w", path)
+		tree := git("100644 blob "+blob+"\tstate.json\n", "mktree")
+		sha := git("", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", tree, "-m", "inventory")
+		git("", "update-ref", fmt.Sprintf("refs/heads/swarm-state/issue-%d", n), sha)
+		refs[n] = sha
+		total += want
+		if want > largest {
+			largest = want
+		}
+		now := time.Now()
+		prs = append(prs, &tracker.PullRequest{Number: 1000 + n, HTMLURL: fmt.Sprintf("https://example.test/pr/%d", 1000+n), State: "closed", Merged: true, MergedAt: &now, MergeCommitSHA: "def", HeadSHA: "abc", Head: fmt.Sprintf("swarm/issue-%d-test", n), HeadRepo: "fixture/repo", BaseRepo: "fixture/repo"})
+	}
+	return refs, prs, total, largest
+}
+
+type inventoryScaleVisitor struct {
+	refs map[int]string
+	prs  []*tracker.PullRequest
+}
+
+func (v inventoryScaleVisitor) UpstreamRepo() string { return "fixture/repo" }
+func (v inventoryScaleVisitor) VisitStateRefs(ctx context.Context, b tracker.InventoryBudget, visit func(int, string) error) error {
+	for n, sha := range v.refs {
+		if err := visit(n, sha); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (v inventoryScaleVisitor) VisitPullRequests(ctx context.Context, b tracker.InventoryBudget, visit func(*tracker.PullRequest) error) error {
+	for _, pr := range v.prs {
+		if err := visit(pr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type storageScaleTracker struct {
+	*tracker.LocalTracker
+	inventoryScaleVisitor
+}
+
+func (t storageScaleTracker) UpstreamRepo() string { return "fixture/repo" }
+func (t storageScaleTracker) VisitStateRefs(ctx context.Context, b tracker.InventoryBudget, v func(int, string) error) error {
+	return t.inventoryScaleVisitor.VisitStateRefs(ctx, b, v)
+}
+func (t storageScaleTracker) VisitPullRequests(ctx context.Context, b tracker.InventoryBudget, v func(*tracker.PullRequest) error) error {
+	return t.inventoryScaleVisitor.VisitPullRequests(ctx, b, v)
+}
+
+func storageScaleHost(t *testing.T, root string) string {
+	t.Helper()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("TMPDIR", t.TempDir())
+	return storageScaleResource(t, root)
+}
+func storageScaleResource(t *testing.T, root string) string {
+	t.Helper()
+	common := filepath.Join(root, ".git")
+	hash := sha256.Sum256([]byte(common))
+	key := hex.EncodeToString(hash[:16])
+	cache := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "swarm")
+	control, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := storageuse.Open(control, cache, os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	path := filepath.Join(cache, "agent-build", key, "go")
+	use, err := manager.AcquireUse(context.Background(), storageuse.ResourceFor(key, "agent-build", path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(path, "data"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = use.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+func TestStorageCleanupRealLedgerScale(t *testing.T) {
+	f := newCLIFixture(t)
+	prGit(t, f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git")
+	path := storageScaleHost(t, f.root)
+	refs, prs, total, largest := inventoryScaleObjects(t, f.root, 166, func(n int) int64 {
+		if n == 1 {
+			return 4533441
+		}
+		if n == 166 {
+			return 648470
+		}
+		return 648464
+	})
+	tr := storageScaleTracker{f.tracker, inventoryScaleVisitor{refs, prs}}
+	cmd := f.command(&RootOptions{trackerOverride: tr})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--root", f.root, "--repo", "fixture/repo", "--backend", "github", "storage", "cleanup", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("%v: %s", err, stdout.String())
+	}
+	var report storageCleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err, stdout.String())
+	}
+	if !report.Host.Complete || len(report.Host.Resources) != 1 || report.Host.Resources[0].Outcome != storage.ReclaimEligible || len(report.Tasks) != 1 {
+		t.Fatalf("%+v", report)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("refs=%d total=%d largest=%d host resources=%d", len(refs), total, largest, len(report.Host.Resources))
+}
+func TestStorageCleanupInventoryFailureReport(t *testing.T) {
+	f := newCLIFixture(t)
+	path := storageScaleHost(t, f.root)
+	refs, prs, _, _ := inventoryScaleObjects(t, f.root, 1, func(int) int64 { return coordination.InventoryInputLimit + 1 })
+	if out, err := exec.Command("git", "-C", f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git").CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	tr := storageScaleTracker{f.tracker, inventoryScaleVisitor{refs, prs}}
+	for _, apply := range []bool{false, true} {
+		cmd := f.command(&RootOptions{trackerOverride: tr})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&bytes.Buffer{})
+		args := []string{"--root", f.root, "--repo", "fixture/repo", "--backend", "github", "storage", "cleanup", "--json"}
+		if apply {
+			// Local apply consumes the same oversized pinned ledger through safefs.
+			dir := filepath.Join(f.root, ".swarm", "coordination")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			out, err := os.Create(filepath.Join(dir, "issue-1.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			show := exec.Command("git", "-C", f.root, "show", refs[1]+":state.json")
+			show.Stdout = out
+			if err = show.Run(); err != nil {
+				t.Fatal(err)
+			}
+			if err = out.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for i := range args {
+				if args[i] == "github" {
+					args[i] = "local"
+				}
+			}
+			args = append(args, "--apply")
+		}
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Fatal("read failure returned success")
+		}
+		var report storageCleanupReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err, stdout.String())
+		}
+		if report.Host.Complete || len(report.Host.Resources) != 1 || report.Host.Resources[0].Outcome != storage.ReclaimRetained || len(report.Errors) == 0 || strings.Contains(stdout.String(), "signal: killed") || !strings.Contains(stdout.String(), "limit") {
+			t.Fatalf("%+v", report)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestStorageCleanupInventoryFailureContinuesHealthyApply(t *testing.T) {
+	f := newCLIFixture(t)
+	bad := storageScaleHost(t, f.root)
+	healthy := newCLIFixture(t)
+	good := storageScaleResource(t, healthy.root)
+	for _, root := range []string{f.root, healthy.root} {
+		if err := os.MkdirAll(filepath.Join(root, ".swarm", "coordination"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.root, ".swarm", "coordination", "issue-1.json"), []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"lease":{"version":1,"issue_number":1,"status":"completed"},"branch":"swarm/issue-1-test","submitted_head_sha":"abc","pr_number":1001}`
+	if err := os.WriteFile(filepath.Join(healthy.root, ".swarm", "coordination", "issue-1.json"), []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(f.root, ".swarm", "worktrees", "issue-1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	registry := filepath.Join(t.TempDir(), "repos.yaml")
+	f.setenv("SWARM_REGISTRY_PATH", registry)
+	raw := fmt.Sprintf("version: 1\nrepos:\n  a/bad:\n    repo: a/bad\n    path: %s\n    backend: local\n  b/good:\n    repo: b/good\n    path: %s\n    backend: local\n", f.root, healthy.root)
+	if err := os.WriteFile(registry, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	pr := &tracker.PullRequest{Number: 1001, State: "closed", Merged: true, MergedAt: &now, MergeCommitSHA: "def", HeadSHA: "abc", Head: "swarm/issue-1-test"}
+	tr := storageScaleTracker{f.tracker, inventoryScaleVisitor{prs: []*tracker.PullRequest{pr}}}
+	cmd := f.command(&RootOptions{trackerOverride: tr})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"storage", "cleanup", "--all-repos", "--apply", "--json"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("missing read failure")
+	}
+	var report storageCleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	outcomes := map[string]storage.ReclamationOutcome{}
+	for _, r := range report.Host.Resources {
+		outcomes[r.Resource.Location] = r.Outcome
+	}
+	if report.Host.Complete || outcomes[bad] != storage.ReclaimRetained || outcomes[good] != storage.ReclaimRemoved || len(report.Tasks) != 2 || len(report.Tasks[0].Unresolved) != 1 {
+		t.Fatalf("%+v", report)
+	}
+	if _, err := os.Stat(bad); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(good); !os.IsNotExist(err) {
+		t.Fatal(err)
 	}
 }

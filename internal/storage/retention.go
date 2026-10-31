@@ -90,7 +90,7 @@ func (s *scanner) retention(owner, root, backend string, start int) {
 			err := refs.VisitStateRefs(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 2, Bytes: 1 << 20, Reserve: s.b.Charge}, func(number int, sha string) error {
 				issuePath := filepath.Join(root, ".swarm", "worktrees", fmt.Sprintf("issue-%d", number))
 				s.add(Resource{Repository: owner, Owner: owner, Class: "issue-worktree", Path: issuePath, Identity: "worktree:" + issuePath})
-				data, err := store.LoadInventoryObject(s.ctx, sha, s.b.Charge)
+				data, err := store.LoadInventoryObject(s.ctx, sha, s.b.Charge, lease.ProjectInventory)
 				if err != nil {
 					retentionComplete = false
 					s.fail("authoritative retention", err)
@@ -802,21 +802,33 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 // BackendRetention reads bounded authoritative state and PR evidence. Apply is
 // selected by the coordinator, never by resource registration metadata.
 type BackendRetention struct {
-	Budget  *Budget
-	Apply   bool
-	Remote  string
-	Tracker func(RepositoryScope) (tracker.PullRequestVisitor, error)
+	Failures map[string]error
+	Budget   *Budget
+	Apply    bool
+	Remote   string
+	Tracker  func(RepositoryScope) (tracker.PullRequestVisitor, error)
 }
 
 // ReadRetentionSnapshot is shared by advisory task inspection and reclamation.
-func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote string, apply bool, budget *Budget, visitors ...tracker.PullRequestVisitor) (map[int][]byte, error) {
+func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote string, apply bool, budget *Budget, visitors ...tracker.PullRequestVisitor) (states map[int][]byte, resultErr error) {
+	defer func() {
+		if resultErr == nil {
+			for n, data := range states {
+				if _, err := lease.DecodeInventoryState(ctx, data, n); err != nil {
+					states = nil
+					resultErr = fmt.Errorf("issue %d: %w", n, err)
+					break
+				}
+			}
+		}
+	}()
 	if scope.Backend == "local" {
-		return coordination.NewFileStore(scope.Root).ReadInventorySnapshot(ctx, budget.Limits.Records, budget.Charge)
+		return coordination.NewFileStore(scope.Root).ReadInventorySnapshot(ctx, budget.Limits.Records, budget.Charge, lease.ProjectInventory)
 	}
 	if scope.Backend == "github" {
 		store := coordination.NewGitStoreWithRemote(scope.Root, remote)
 		if apply {
-			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, budget.Charge)
+			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, budget.Charge, lease.ProjectInventory)
 		}
 		if len(visitors) != 1 {
 			return nil, errors.New("bounded pinned state visitor unavailable")
@@ -841,9 +853,9 @@ func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote st
 		}
 		out := map[int][]byte{}
 		for n, sha := range pinned {
-			data, err := store.LoadInventoryObject(ctx, sha, budget.Charge)
+			data, err := store.LoadInventoryObject(ctx, sha, budget.Charge, lease.ProjectInventory)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("issue %d object %s: %w", n, sha, err)
 			}
 			out[n] = data
 		}
@@ -855,6 +867,9 @@ func (r BackendRetention) WithRetention(ctx context.Context, scope RepositorySco
 	ev := RetentionEvidence{}
 	fail := func(err error) error {
 		ev.Reason = err.Error()
+		if r.Failures != nil {
+			r.Failures[scope.CommonDirectory] = err
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

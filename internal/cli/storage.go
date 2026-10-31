@@ -9,6 +9,7 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/workspace"
 	"io"
 	"os"
 	"path/filepath"
@@ -124,7 +125,7 @@ type storageCleanupReport struct {
 func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 	var apply, asJSON, all bool
 	cmd := &cobra.Command{Use: "cleanup", Short: "Preview task retirement and managed host storage reclamation", RunE: func(cmd *cobra.Command, args []string) (runErr error) {
-		report := storageCleanupReport{Version: 1, Mode: "preview", Scopes: []storage.SelectedRepository{}, Tasks: []*bulkCleanupSummary{}, Incomplete: []string{}, Errors: []string{}}
+		report := storageCleanupReport{Host: storage.ReclamationReport{Resources: []storage.ReclamationResult{}}, Version: 1, Mode: "preview", Scopes: []storage.SelectedRepository{}, Tasks: []*bulkCleanupSummary{}, Incomplete: []string{}, Errors: []string{}}
 		if apply {
 			report.Mode = "apply"
 		}
@@ -181,6 +182,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 		}
 		authorized := []storage.RepositoryScope{}
 		providers := map[string]tracker.PullRequestVisitor{}
+		inventoryFailures := map[string]error{}
 		budget := storage.Budget{Limits: storage.DefaultLimits()}
 		for _, scope := range scopes {
 			if err := cmd.Context().Err(); err != nil {
@@ -215,13 +217,31 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 				continue
 			}
 			providers[scope.CommonDirectory] = visitor
-			if !apply {
-				b := &budget
-				states, e := storage.ReadRetentionSnapshot(cmd.Context(), scope.RepositoryScope, opts.effectiveUpstreamRemote(), false, b, visitor)
-				if e != nil {
-					failures = append(failures, e)
-					continue
+			authorized = append(authorized, scope.RepositoryScope)
+			b := &budget
+			states, snapshotErr := storage.ReadRetentionSnapshot(cmd.Context(), scope.RepositoryScope, opts.effectiveUpstreamRemote(), apply, b, visitor)
+			if snapshotErr != nil {
+				inventoryFailures[scope.CommonDirectory] = snapshotErr
+				failures = append(failures, snapshotErr)
+				report.Incomplete = append(report.Incomplete, snapshotErr.Error())
+				summary := &bulkCleanupSummary{Repository: scope.Repository, Root: scope.Root, Kind: "cleanup-bulk", Mode: report.Mode, Status: "failed", Error: snapshotErr.Error(), Issues: []bulkCleanupIssue{}, Unresolved: []lease.UnresolvedCleanupWorktree{}}
+				worktrees, discoveryErr := workspace.DiscoverCleanupWorktrees(cmd.Context(), scope.Root)
+				if discoveryErr != nil {
+					failures = append(failures, discoveryErr)
 				}
+				for _, w := range worktrees {
+					summary.Unresolved = append(summary.Unresolved, lease.UnresolvedCleanupWorktree{CleanupWorktree: w, Reason: snapshotErr.Error()})
+					summary.Totals.Retained++
+				}
+				if discoveryErr == nil && len(worktrees) == 0 && apply {
+					summary.Status = "completed"
+				}
+				report.Totals.Retained += summary.Totals.Retained
+				report.Tasks = append(report.Tasks, summary)
+				continue
+			}
+			if !apply {
+				var e error
 				pt := &storagePreviewTracker{Tracker: tr, states: states}
 				e = visitor.VisitPullRequests(cmd.Context(), tracker.InventoryBudget{Records: b.Limits.Records, Pages: 100, Bytes: 4 << 20, Reserve: b.Charge}, func(pr *tracker.PullRequest) error {
 					if pr == nil {
@@ -234,6 +254,8 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 					return nil
 				})
 				if e != nil {
+					inventoryFailures[scope.CommonDirectory] = e
+					report.Incomplete = append(report.Incomplete, e.Error())
 					failures = append(failures, e)
 					continue
 				}
@@ -259,7 +281,6 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 			if e != nil {
 				failures = append(failures, e)
 			}
-			authorized = append(authorized, scope.RepositoryScope)
 		}
 		cache, err := os.UserCacheDir()
 		if err != nil {
@@ -269,7 +290,10 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 		if err != nil {
 			return errors.Join(append(failures, err)...)
 		}
-		reclaim := storage.ReclaimOptions{Scopes: authorized, CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), ControlRoot: control, Retention: storage.BackendRetention{Budget: &budget, Apply: apply, Remote: opts.effectiveUpstreamRemote(), Tracker: func(s storage.RepositoryScope) (tracker.PullRequestVisitor, error) {
+		reclaim := storage.ReclaimOptions{Scopes: authorized, CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), ControlRoot: control, Retention: storage.BackendRetention{Failures: inventoryFailures, Budget: &budget, Apply: apply, Remote: opts.effectiveUpstreamRemote(), Tracker: func(s storage.RepositoryScope) (tracker.PullRequestVisitor, error) {
+			if err := inventoryFailures[s.CommonDirectory]; err != nil {
+				return nil, err
+			}
 			tr := providers[s.CommonDirectory]
 			if tr == nil {
 				return nil, errors.New("repository not authorized")
@@ -288,6 +312,9 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 			if !report.Host.Complete {
 				report.Incomplete = append(report.Incomplete, "host reclamation has incomplete evidence; see retained resource reasons")
 			}
+		}
+		for _, err := range inventoryFailures {
+			failures = append(failures, err)
 		}
 		return errors.Join(failures...)
 	}}

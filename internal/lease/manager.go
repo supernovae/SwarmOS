@@ -107,16 +107,41 @@ type Decomposition struct {
 
 // DecompositionAdmission refuses pending and retired parents from state alone.
 func DecompositionAdmission(st *IssueState) error {
+	return decompositionAdmission(context.Background(), nil, st)
+}
+
+// DecompositionAdmission enriches refusal with tracker state without making
+// retirement depend on tracker availability.
+func (m *Manager) DecompositionAdmission(ctx context.Context, st *IssueState) error {
+	return decompositionAdmission(ctx, m.tracker, st)
+}
+
+func decompositionAdmission(ctx context.Context, tr tracker.Tracker, st *IssueState) error {
 	if st == nil || st.Decomposition == nil {
 		return nil
 	}
-	var children []int
+	var recorded, open []int
+	unavailable := tr == nil
 	for _, c := range st.Decomposition.Children {
-		if c.Number > 0 {
-			children = append(children, c.Number)
+		if c.Number <= 0 {
+			continue
+		}
+		recorded = append(recorded, c.Number)
+		if tr != nil {
+			issue, err := tr.GetIssue(ctx, c.Number)
+			if err != nil || issue == nil {
+				unavailable = true
+				continue
+			}
+			if issue.State == "open" {
+				open = append(open, c.Number)
+			}
 		}
 	}
-	return fmt.Errorf("issue #%d is pending decomposition or decomposed; work on child issues %v", st.Lease.IssueNumber, children)
+	if unavailable {
+		return fmt.Errorf("issue #%d is pending decomposition or decomposed; tracker state unavailable; recorded child issues %v", st.Lease.IssueNumber, recorded)
+	}
+	return fmt.Errorf("issue #%d is pending decomposition or decomposed; open child issues %v", st.Lease.IssueNumber, open)
 }
 
 func decompositionDesignDigest(st *IssueState) string {
@@ -947,7 +972,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		return nil, err
 	}
 	if old, rev, err := m.load(ctx, n); err == nil {
-		if err := DecompositionAdmission(old); err != nil {
+		if err := m.DecompositionAdmission(ctx, old); err != nil {
 			return nil, err
 		}
 		if old.Lease.Status == "active" && old.Lease.ExpiresAt.After(m.nowFn()) {
@@ -1099,7 +1124,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	}
 	st, rev, stateErr := m.load(ctx, n)
 	if stateErr == nil {
-		if err := DecompositionAdmission(st); err != nil {
+		if err := m.DecompositionAdmission(ctx, st); err != nil {
 			return nil, err
 		}
 	}
@@ -1112,7 +1137,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 		}
 		return nil, &TaskApprovalError{IssueNumber: n, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
 	}
-	if err := DecompositionAdmission(st); err != nil {
+	if err := m.DecompositionAdmission(ctx, st); err != nil {
 		return nil, err
 	}
 	if st.PRRevision != nil && prNumber != st.PRRevision.Number {
@@ -1285,7 +1310,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		return nil, err
 	}
 	if current, _, readErr := m.loadReadOnly(ctx, issue); readErr == nil {
-		if err := DecompositionAdmission(current); err != nil {
+		if err := m.DecompositionAdmission(ctx, current); err != nil {
 			return nil, err
 		}
 	}
@@ -1300,7 +1325,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			}
 			return nil, &TaskApprovalError{IssueNumber: issue, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
 		}
-		if err := DecompositionAdmission(st); err != nil {
+		if err := m.DecompositionAdmission(ctx, st); err != nil {
 			return nil, err
 		}
 		if st.PRRevision != nil {

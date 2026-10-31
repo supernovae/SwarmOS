@@ -357,7 +357,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	if state == nil || state.BaseSHA == "" {
 		return nil, &lease.TaskApprovalError{IssueNumber: opts.IssueNumber, Err: errors.New("task has no approved immutable base")}
 	}
-	if err := lease.DecompositionAdmission(state); err != nil {
+	if err := e.LeaseManager.DecompositionAdmission(ctx, state); err != nil {
 		return nil, err
 	}
 	if state.PRRevision != nil && opts.PRNumber == 0 {
@@ -1744,7 +1744,7 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 // changing state. Selection and preflight share this decision; fenced writes
 // remain the final authority after acquisition.
 func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmConfig, opts WorkOptions) error {
-	if err := lease.DecompositionAdmission(st); err != nil {
+	if err := e.LeaseManager.DecompositionAdmission(context.Background(), st); err != nil {
 		return err
 	}
 	if st == nil || st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil || opts.ForkMode || opts.PRNumber != 0 {

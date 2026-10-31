@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -285,16 +286,28 @@ func TestReconcileOperatorAuthorization(t *testing.T) {
 
 type decompositionRollupTracker struct {
 	tracker.Tracker
-	prs       map[int]*tracker.PullRequest
-	offline   bool
-	closeFail bool
+	prs          map[int]*tracker.PullRequest
+	offline      bool
+	closeFail    bool
+	onPR         func(int)
+	issueOffline bool
+	parent       int
 }
 
 func (tr *decompositionRollupTracker) GetPullRequest(_ context.Context, n int) (*tracker.PullRequest, error) {
+	if tr.onPR != nil {
+		tr.onPR(n)
+	}
 	if tr.offline {
 		return nil, errors.New("API offline")
 	}
 	return tr.prs[n], nil
+}
+func (tr *decompositionRollupTracker) GetIssue(ctx context.Context, n int) (*tracker.Issue, error) {
+	if tr.issueOffline && n != tr.parent {
+		return nil, errors.New("tracker offline")
+	}
+	return tr.Tracker.GetIssue(ctx, n)
 }
 func (tr *decompositionRollupTracker) CloseIssueCompleted(ctx context.Context, n int) error {
 	if tr.closeFail {
@@ -308,7 +321,7 @@ func (tr *decompositionRollupTracker) UpstreamRepo() string { return "octo/swarm
 func decompositionRollupFixture(t *testing.T) (*Manager, *decompositionRollupTracker, int, []int) {
 	t.Helper()
 	m, lt, parent := testManager(t)
-	tr := &decompositionRollupTracker{Tracker: lt, prs: map[int]*tracker.PullRequest{}}
+	tr := &decompositionRollupTracker{Tracker: lt, prs: map[int]*tracker.PullRequest{}, parent: parent.Number}
 	m.tracker = tr
 	st, rev, err := m.load(t.Context(), parent.Number)
 	if err != nil {
@@ -510,5 +523,82 @@ func TestDecompositionGitHubReconcile(t *testing.T) {
 				t.Fatal(issue.State)
 			}
 		})
+	}
+}
+
+func TestDecompositionReconcileCrossChildRevisionChange(t *testing.T) {
+	m, tr, parent, children := decompositionRollupFixture(t)
+	original, beforeRev, err := m.store.Load(t.Context(), children[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.onPR = func(n int) {
+		if n != children[1] {
+			return
+		}
+		child, rev, err := m.load(t.Context(), children[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		child.Lease.Status = "active"
+		child.Lease.ClaimID = "successor"
+		raw, _ := json.Marshal(child)
+		if _, err = m.store.CompareAndSwap(t.Context(), children[0], rev, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = m.ReconcileDecomposition(t.Context(), parent)
+	if !errors.Is(err, coordination.ErrConflict) {
+		t.Fatalf("expected cross-child conflict, got %v", err)
+	}
+	st, _, _ := m.load(t.Context(), parent)
+	issue, _ := tr.GetIssue(t.Context(), parent)
+	if st.Decomposition.CompletionIntent || st.Decomposition.Closed || issue.State != "open" {
+		t.Fatal("stale snapshot completed parent")
+	}
+	after, afterRev, _ := m.store.Load(t.Context(), children[0])
+	if beforeRev == afterRev || string(original) == string(after) {
+		t.Fatal("injection did not change child")
+	}
+	child, _, _ := m.load(t.Context(), children[0])
+	if child.Lease.ClaimID != "successor" || child.Lease.Status != "active" {
+		t.Fatal("rollup changed successor claim")
+	}
+}
+
+func TestDecompositionAdmissionOpenChildrenAndFallback(t *testing.T) {
+	m, tr, parent, children := decompositionRollupFixture(t)
+	if err := tr.CloseIssueCompleted(t.Context(), children[0]); err != nil {
+		t.Fatal(err)
+	}
+	st, _, _ := m.load(t.Context(), parent)
+	before, rev, err := m.store.Load(t.Context(), parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, offline := range []bool{false, true} {
+		tr.issueOffline = offline
+		want := fmt.Sprintf("open child issues [%d]", children[1])
+		if offline {
+			want = fmt.Sprintf("tracker state unavailable; recorded child issues %v", children)
+		}
+		for _, entry := range []string{"preflight", "claim", "fork claim"} {
+			var err error
+			switch entry {
+			case "preflight":
+				err = m.DecompositionAdmission(t.Context(), st)
+			case "claim":
+				_, err = m.Acquire(t.Context(), parent, "local-dev", "mock", "plan", time.Hour, 1)
+			case "fork claim":
+				_, err = m.AcquireFork(t.Context(), parent, "local-dev", "mock", "plan", "contributor/repo", time.Hour, 1)
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("offline=%t entry=%s: %v", offline, entry, err)
+			}
+		}
+	}
+	after, afterRev, err := m.store.Load(t.Context(), parent)
+	if err != nil || rev != afterRev || string(before) != string(after) {
+		t.Fatal("refusal changed parent state", err)
 	}
 }

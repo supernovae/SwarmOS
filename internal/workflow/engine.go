@@ -357,6 +357,9 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	if state == nil || state.BaseSHA == "" {
 		return nil, &lease.TaskApprovalError{IssueNumber: opts.IssueNumber, Err: errors.New("task has no approved immutable base")}
 	}
+	if err := lease.DecompositionAdmission(state); err != nil {
+		return nil, err
+	}
 	if state.PRRevision != nil && opts.PRNumber == 0 {
 		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work/validate/submit", opts.IssueNumber)
 	}
@@ -716,93 +719,286 @@ func readRequiredArtifact(wtPath, name string) (string, error) {
 	return string(data), nil
 }
 
-// DecomposeIssue partitions a parent issue into sequential or parallel child WorkUnit issues linked via ParentIssue and DependsOn.
-func (e *Engine) DecomposeIssue(ctx context.Context, repoRoot string, parentIssueNum int, subtasks []contract.WorkUnit, sequential bool, warnings ...func(string)) ([]*tracker.Issue, error) {
+// DecompositionOptions controls explicit operator choices, never approval.
+type DecompositionOptions struct {
+	DryRun             bool
+	AcceptUncovered    bool
+	Sequential         bool
+	SequentialExplicit bool
+}
+type DecompositionPreview struct {
+	ParentIssue int                        `json:"parent_issue"`
+	Children    []lease.DecompositionChild `json:"children"`
+	Uncovered   []int                      `json:"uncovered"`
+	state       *lease.IssueState
+}
+
+// PrepareDecomposition reads only tracker and authoritative recorded artifacts.
+func (e *Engine) PrepareDecomposition(ctx context.Context, root string, n int, subs []contract.WorkUnit, opts DecompositionOptions) (*DecompositionPreview, error) {
+	parent, err := e.Tracker.GetIssue(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if parent.IsEpic() {
+		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be decomposed", n)
+	}
+	wu, err := contract.ParseWorkUnitFromIssueWithRoot(n, parent.Title, parent.Body, root)
+	if err != nil {
+		return nil, err
+	}
+	st, err := e.LeaseManager.GetCurrentState(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := harness.LoadConfigAt(root, st.BaseSHA)
+	if err != nil {
+		return nil, err
+	}
+	if !lease.TaskApprovalCurrent(st, wu, cfg) {
+		return nil, fmt.Errorf("%w: approve parent first", lease.ErrApprovalRequired)
+	}
+	if st.Decomposition != nil {
+		return &DecompositionPreview{ParentIssue: n, Children: st.Decomposition.Children, Uncovered: st.Decomposition.Uncovered, state: st}, nil
+	}
+	preview := &DecompositionPreview{ParentIssue: n, state: st}
+	var proposals []SplitChild
+	if splitRecommended(st) {
+		var body string
+		for i := len(st.Artifacts) - 1; i >= 0; i-- {
+			if st.Artifacts[i].Type == contract.ArtifactDesign {
+				body = st.Artifacts[i].Body
+				break
+			}
+		}
+		proposals, preview.Uncovered, err = parseSplitProposal(body, len(wu.Acceptance))
+		if err != nil {
+			return nil, err
+		}
+		if opts.SequentialExplicit && opts.Sequential {
+			return nil, fmt.Errorf("recorded proposal declares dependencies; omit --sequential")
+		}
+		subs = nil
+		for _, c := range proposals {
+			subs = append(subs, contract.WorkUnit{ID: c.ID, Title: c.Title, Objective: c.Objective, Acceptance: c.Acceptance, Size: c.Size, Uncertainty: c.Uncertainty, Risk: c.Risk})
+		}
+	} else {
+		if len(subs) == 0 {
+			subs = wu.Subtasks
+		}
+		if len(subs) == 0 {
+			for i, a := range wu.Acceptance {
+				subs = append(subs, contract.WorkUnit{ID: fmt.Sprintf("%s-SUB-%d", wu.ID, i+1), Title: fmt.Sprintf("[%s Part %d] %s", wu.ID, i+1, truncateStr(a, 50)), Objective: fmt.Sprintf("Sub-workunit of #%d (%s): %s", n, parent.Title, a), Acceptance: []string{a}})
+			}
+		}
+	}
+	if len(subs) == 0 {
+		return nil, fmt.Errorf("no children to decompose")
+	}
+	for i, sub := range subs {
+		sub.ParentIssue = n
+		sub.IssueNumber = 0
+		if sub.ID == "" {
+			sub.ID = fmt.Sprintf("ISSUE-%d-SUB-%d", n, i+1)
+		}
+		if sub.Title == "" {
+			sub.Title = fmt.Sprintf("[Subtask %d/%d] %s", i+1, len(subs), parent.Title)
+		}
+		sub.Constraints = append([]string{}, wu.Constraints...)
+		sub.Gate = wu.Gate
+		sub.Workflow = wu.Workflow
+		sub.RequiredCapabilities = append([]string(nil), wu.RequiredCapabilities...)
+		sub.AllowHarnessChanges = wu.AllowHarnessChanges
+		// A proposal cannot lower the parent's risk. Escalation is allowed.
+		rank := map[string]int{"": 0, "standard": 1, "sensitive": 2, "urgent": 3}
+		if rank[sub.Risk] < rank[wu.Risk] {
+			sub.Risk = wu.Risk
+		}
+		child := lease.DecompositionChild{WorkUnit: sub}
+		if proposals != nil {
+			child.Dependencies = proposals[i].DependsOn
+			child.Covers = proposals[i].Covers
+		} else if opts.Sequential && i > 0 {
+			child.Dependencies = []string{preview.Children[i-1].WorkUnit.ID}
+		}
+		if len(child.Dependencies) == 0 {
+			child.WorkUnit.DependsOn = append(child.WorkUnit.DependsOn, wu.DependsOn...)
+		}
+		if err := validateDecompositionChild(child.WorkUnit); err != nil {
+			return nil, fmt.Errorf("child %q: %w", sub.ID, err)
+		}
+		if p := contract.SelectProfile(&sub, cfg.Profiles); p != nil {
+			child.Profile = p.Name
+		}
+		preview.Children = append(preview.Children, child)
+	}
+	return preview, nil
+}
+
+// Round-trip the public issue format before any writes. Proposal text cannot
+// inject Markdown sections or fenced WorkUnits that replace inherited policy.
+func validateDecompositionChild(w contract.WorkUnit) error {
+	if err := contract.ValidateWorkUnit(&w); err != nil {
+		return err
+	}
+	parsed, err := contract.ParseWorkUnitFromIssue(0, w.Title, contract.FormatIssueMarkdown(&w))
+	if err != nil {
+		return err
+	}
+	if parsed.Objective != strings.TrimSpace(w.Objective) || !slices.Equal(parsed.Acceptance, w.Acceptance) || !slices.Equal(parsed.Constraints, w.Constraints) || parsed.ParentIssue != w.ParentIssue || parsed.Workflow != w.Workflow || parsed.Gate != w.Gate || !slices.Equal(parsed.RequiredCapabilities, w.RequiredCapabilities) || parsed.AllowHarnessChanges != w.AllowHarnessChanges || parsed.Risk != w.Risk || parsed.Size != w.Size || parsed.Uncertainty != w.Uncertainty || parsed.BaseBranch != w.BaseBranch {
+		return fmt.Errorf("proposal text changes the formatted WorkUnit contract")
+	}
+	return nil
+}
+
+// DecomposeIssue preserves the existing API for supplied-subtask callers.
+func (e *Engine) DecomposeIssue(ctx context.Context, root string, n int, subs []contract.WorkUnit, sequential bool, warnings ...func(string)) ([]*tracker.Issue, error) {
+	return e.ExecuteDecomposition(ctx, root, n, subs, DecompositionOptions{Sequential: sequential}, warnings...)
+}
+
+func (e *Engine) ExecuteDecomposition(ctx context.Context, root string, n int, subs []contract.WorkUnit, opts DecompositionOptions, warnings ...func(string)) ([]*tracker.Issue, error) {
+	p, err := e.PrepareDecomposition(ctx, root, n, subs, opts)
+	if err != nil {
+		return nil, err
+	}
+	if opts.DryRun {
+		return nil, nil
+	}
+	if len(p.Uncovered) > 0 && !opts.AcceptUncovered && !(p.state.Decomposition != nil && p.state.Decomposition.AcceptUncovered) {
+		return nil, fmt.Errorf("parent criteria %v are uncovered; review --dry-run or explicitly --accept-uncovered", p.Uncovered)
+	}
+	st := p.state
+	if st.Decomposition == nil {
+		st, err = e.LeaseManager.BeginDecomposition(ctx, n, st, lease.Decomposition{Children: p.Children, Uncovered: p.Uncovered, AcceptUncovered: opts.AcceptUncovered})
+		if err != nil {
+			return nil, err
+		}
+	}
+	id := st.Decomposition.ID
+	advance := func(fn func(*lease.IssueState, *lease.Decomposition) error) error {
+		var e2 error
+		st, e2 = e.LeaseManager.AdvanceDecomposition(ctx, n, id, fn)
+		return e2
+	}
+	var created []*tracker.Issue
+	numbers := map[string]int{}
 	var warn func(string)
 	if len(warnings) > 0 {
 		warn = warnings[0]
 	}
-	parentIss, err := e.Tracker.GetIssue(ctx, parentIssueNum)
-	if err != nil {
-		return nil, err
-	}
-	if parentIss.IsEpic() {
-		return nil, fmt.Errorf("issue #%d has type \"Epic\" and does not carry a WorkUnit contract for auto-decomposition", parentIssueNum)
-	}
-	parentWU, err := contract.ParseWorkUnitFromIssueWithRoot(parentIss.Number, parentIss.Title, parentIss.Body, repoRoot)
-	if err != nil {
-		return nil, err
-	}
-	if len(subtasks) == 0 {
-		subtasks = parentWU.Subtasks
-	}
-	if len(subtasks) == 0 {
-		// Automatically partition by acceptance criteria if no explicit subtasks array was supplied
-		for idx, acc := range parentWU.Acceptance {
-			subtasks = append(subtasks, contract.WorkUnit{
-				ID:          fmt.Sprintf("%s-SUB-%d", parentWU.ID, idx+1),
-				Title:       fmt.Sprintf("[%s Part %d] %s", parentWU.ID, idx+1, truncateStr(acc, 50)),
-				Objective:   fmt.Sprintf("Sub-workunit of #%d (%s): %s", parentIssueNum, parentIss.Title, acc),
-				Constraints: parentWU.Constraints,
-				Acceptance:  []string{acc},
-				Workflow:    parentWU.Workflow,
-				Gate:        parentWU.Gate,
+	for i := range st.Decomposition.Children {
+		child := st.Decomposition.Children[i]
+		if child.Creating && child.Number == 0 {
+			return created, fmt.Errorf("decomposition %s child %q has an ambiguous create outcome; operator recovery is required before retrying; no replacement was created", id, child.WorkUnit.ID)
+		}
+		if child.Number == 0 {
+			wu := child.WorkUnit
+			for _, dep := range child.Dependencies {
+				num := numbers[dep]
+				if num == 0 {
+					return created, fmt.Errorf("unresolved dependency %q", dep)
+				}
+				if !slices.Contains(wu.DependsOn, num) {
+					wu.DependsOn = append(wu.DependsOn, num)
+				}
+			}
+			if err = advance(func(_ *lease.IssueState, d *lease.Decomposition) error {
+				if d.Complete || d.Children[i].Creating || d.Children[i].Number != 0 {
+					return fmt.Errorf("%w: child creation already reserved", lease.ErrClaimFence)
+				}
+				d.Children[i].Creating = true
+				d.Children[i].WorkUnit = wu
+				return nil
+			}); err != nil {
+				return created, err
+			}
+			body := contract.FormatIssueMarkdown(&wu)
+			issue, createErr := e.Tracker.CreateIssue(ctx, wu.Title, body, []string{"swarm:draft"})
+			if createErr != nil {
+				if errors.Is(createErr, tracker.ErrIssueNotCreated) {
+					if err = advance(func(_ *lease.IssueState, d *lease.Decomposition) error { d.Children[i].Creating = false; return nil }); err != nil {
+						return created, errors.Join(createErr, err)
+					}
+					return created, createErr
+				}
+				return created, fmt.Errorf("create child %q (outcome may be ambiguous; reservation retained): %w", wu.ID, createErr)
+			}
+			if issue == nil || issue.Number <= 0 || issue.Title != wu.Title || issue.Body != body {
+				return created, fmt.Errorf("create returned unverified child; reservation retained")
+			}
+			if err = advance(func(_ *lease.IssueState, d *lease.Decomposition) error {
+				d.Children[i].Number = issue.Number
+				d.Children[i].Creating = false
+				return nil
+			}); err != nil {
+				return created, err
+			}
+			child = st.Decomposition.Children[i]
+		}
+		issue, readErr := e.Tracker.GetIssue(ctx, child.Number)
+		if readErr != nil {
+			return created, readErr
+		}
+		created = append(created, issue)
+		numbers[child.WorkUnit.ID] = child.Number
+		if !child.Linked {
+			if err = e.Tracker.LinkSubIssue(ctx, n, child.Number); err != nil {
+				return created, fmt.Errorf("link decomposed child issue #%d: %w", child.Number, err)
+			}
+			if err = advance(func(_ *lease.IssueState, d *lease.Decomposition) error { d.Children[i].Linked = true; return nil }); err != nil {
+				return created, err
+			}
+		}
+		if !child.DependenciesProjected {
+			projected := true
+			ProjectDependencies(ctx, e.Tracker, child.Number, child.WorkUnit.DependsOn, func(message string) {
+				projected = false
+				if warn != nil {
+					warn(message)
+				}
 			})
+			if err = advance(func(_ *lease.IssueState, d *lease.Decomposition) error {
+				d.Children[i].DependenciesProjected = projected
+				return nil
+			}); err != nil {
+				return created, err
+			}
 		}
 	}
-
-	var created []*tracker.Issue
-	var prevIssueNum int
-	var summaryMD strings.Builder
-	summaryMD.WriteString(fmt.Sprintf("### SwarmOS Work Partitioning (Parent `#%d`)\n\n", parentIssueNum))
-	summaryMD.WriteString("| Sub-Issue | Title | Depends On |\n| :--- | :--- | :--- |\n")
-
-	for idx, sub := range subtasks {
-		sub.ParentIssue = parentIssueNum
-		if sub.ID == "" {
-			sub.ID = fmt.Sprintf("ISSUE-%d-SUB-%d", parentIssueNum, idx+1)
-		}
-		if sub.Workflow == "" {
-			sub.Workflow = parentWU.Workflow
-		}
-		if len(sub.Constraints) == 0 {
-			sub.Constraints = parentWU.Constraints
-		}
-		if sequential && prevIssueNum > 0 {
-			sub.DependsOn = append(sub.DependsOn, prevIssueNum)
-		}
-		title := sub.Title
-		if title == "" {
-			title = fmt.Sprintf("[Subtask %d/%d] %s", idx+1, len(subtasks), parentIss.Title)
-		}
-		body := contract.FormatIssueMarkdown(&sub)
-		childIss, err := e.Tracker.CreateIssue(ctx, title, body, []string{"swarm:draft"})
-		if err != nil {
+	if !st.Decomposition.Complete {
+		if err = advance(func(st *lease.IssueState, d *lease.Decomposition) error {
+			d.Complete = true
+			st.Lease.Status = "decomposed"
+			st.Lease.Phase = "decomposed"
+			st.Lease.ClaimID = ""
+			return nil
+		}); err != nil {
 			return created, err
 		}
-		if err := e.Tracker.LinkSubIssue(ctx, parentIssueNum, childIss.Number); err != nil {
-			return created, fmt.Errorf("link decomposed child issue #%d to parent #%d: %w", childIss.Number, parentIssueNum, err)
-		}
-		ProjectDependencies(ctx, e.Tracker, childIss.Number, sub.DependsOn, warn)
-		created = append(created, childIss)
-		prevIssueNum = childIss.Number
-		depStr := "-"
-		if len(sub.DependsOn) > 0 {
-			var parts []string
-			for _, d := range sub.DependsOn {
-				parts = append(parts, fmt.Sprintf("#%d", d))
+	}
+	if !st.Decomposition.Projected {
+		for _, label := range []string{"swarm:ready", "swarm:claimed", "swarm:in-progress"} {
+			if err = e.Tracker.RemoveLabel(ctx, n, label); err != nil {
+				return created, err
 			}
-			depStr = strings.Join(parts, ", ")
 		}
-		summaryMD.WriteString(fmt.Sprintf("| `#%d` | %s | %s |\n", childIss.Number, childIss.Title, depStr))
+		if err = e.Tracker.AddLabels(ctx, n, []string{"swarm:decomposed"}); err != nil {
+			return created, err
+		}
+		var ordered []int
+		for _, c := range created {
+			ordered = append(ordered, c.Number)
+		}
+		projected := true
+		projectChildOrder(ctx, e.Tracker, n, ordered, func(message string) {
+			projected = false
+			if warn != nil {
+				warn(message)
+			}
+		})
+		if err = advance(func(_ *lease.IssueState, d *lease.Decomposition) error { d.Projected = projected; return nil }); err != nil {
+			return created, err
+		}
 	}
-
-	var childNumbers []int
-	for _, child := range created {
-		childNumbers = append(childNumbers, child.Number)
-	}
-	projectChildOrder(ctx, e.Tracker, parentIssueNum, childNumbers, warn)
-	_, _ = e.Tracker.CreateComment(ctx, parentIssueNum, summaryMD.String())
 	return created, nil
 }
 
@@ -1548,6 +1744,9 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 // changing state. Selection and preflight share this decision; fenced writes
 // remain the final authority after acquisition.
 func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmConfig, opts WorkOptions) error {
+	if err := lease.DecompositionAdmission(st); err != nil {
+		return err
+	}
 	if st == nil || st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil || opts.ForkMode || opts.PRNumber != 0 {
 		return nil
 	}

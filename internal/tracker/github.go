@@ -270,6 +270,7 @@ func (g *GitHubTracker) CheckIssueType(ctx context.Context, issueType string) er
 }
 
 type ghIssueResponse struct {
+	StateReason       string    `json:"state_reason"`
 	ID                int64     `json:"id"`
 	Number            int       `json:"number"`
 	Title             string    `json:"title"`
@@ -315,6 +316,7 @@ func convertGHIssue(r ghIssueResponse) *Issue {
 		Title:             r.Title,
 		Body:              r.Body,
 		State:             r.State,
+		StateReason:       r.StateReason,
 		Type:              issueType,
 		Labels:            labels,
 		Assignees:         assignees,
@@ -345,6 +347,9 @@ func (g *GitHubTracker) CreateIssue(ctx context.Context, title, body string, lab
 	var resp ghIssueResponse
 	path := fmt.Sprintf("repos/%s/%s/issues", g.owner, g.repo)
 	if err := g.client.DoWithContext(ctx, "POST", path, bytes.NewReader(raw), &resp); err != nil {
+		if status := httpErrorStatusCode(err); status >= 400 && status < 500 && status != 408 {
+			return nil, fmt.Errorf("%w: github CreateIssue: %w", ErrIssueNotCreated, err)
+		}
 		return nil, fmt.Errorf("github CreateIssue: %w", err)
 	}
 	return convertGHIssue(resp), nil
@@ -1015,4 +1020,11 @@ func escapeRefPath(ref string) string {
 		segments[i] = url.PathEscape(segment)
 	}
 	return strings.Join(segments, "/")
+}
+
+// CloseIssueCompleted uses GitHub's completed reason rather than cancellation.
+func (g *GitHubTracker) CloseIssueCompleted(ctx context.Context, n int) error {
+	raw, _ := json.Marshal(map[string]string{"state": "closed", "state_reason": "completed"})
+	var resp ghIssueResponse
+	return g.client.DoWithContext(ctx, "PATCH", fmt.Sprintf("repos/%s/%s/issues/%d", g.owner, g.repo, n), bytes.NewReader(raw), &resp)
 }

@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -249,5 +251,66 @@ func TestNormalPlansProceedWithoutSplit(t *testing.T) {
 	}
 	if f.state(t, number).TaskDigest == "" {
 		t.Fatal("approval lost")
+	}
+}
+
+func TestDecompositionPreviewAndStatusCLI(t *testing.T) {
+	f := newCLIFixture(t)
+	wu := &contract.WorkUnit{ID: "parent", Objective: "Deliver feature", Acceptance: []string{"Core works", "Integration works"}, Workflow: "feature", Risk: "sensitive", AllowHarnessChanges: true}
+	parent, err := f.tracker.CreateIssue(t.Context(), "parent", contract.FormatIssueMarkdown(wu), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := f.run("issue", "approve", strconv.Itoa(parent.Number)); err != nil {
+		t.Fatalf("approve: %v %s", err, out)
+	}
+	opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local"})
+	cmd := newIssueCmd(opts)
+	_, m, _, err := opts.resolveLeaseManager(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, rev, err := m.Store().Load(t.Context(), parent.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issues, _ := f.tracker.ListIssues(t.Context(), tracker.IssueFilter{State: "all"})
+	comments, _ := f.tracker.ListComments(t.Context(), parent.Number)
+	for _, jsonFlag := range []bool{false, true} {
+		args := []string{"issue", "decompose", strconv.Itoa(parent.Number), "--dry-run"}
+		if jsonFlag {
+			args = append(args, "--json")
+		}
+		out, _, err := f.runSplit(args...)
+		if err != nil {
+			t.Fatalf("preview: %v %s", err, out)
+		}
+		for _, field := range []string{"sensitive", "allow_harness_changes"} {
+			if !strings.Contains(out, field) {
+				t.Fatalf("missing %s: %s", field, out)
+			}
+		}
+	}
+	after, rev2, _ := m.Store().Load(t.Context(), parent.Number)
+	issues2, _ := f.tracker.ListIssues(t.Context(), tracker.IssueFilter{State: "all"})
+	comments2, _ := f.tracker.ListComments(t.Context(), parent.Number)
+	if string(before) != string(after) || rev != rev2 || !reflect.DeepEqual(issues, issues2) || !reflect.DeepEqual(comments, comments2) {
+		t.Fatal("CLI preview wrote state")
+	}
+	if out, err := f.run("issue", "decompose", strconv.Itoa(parent.Number)); err != nil {
+		t.Fatalf("decompose: %v %s", err, out)
+	}
+	for _, jsonFlag := range []bool{false, true} {
+		args := []string{"issue", "status", strconv.Itoa(parent.Number)}
+		if jsonFlag {
+			args = append(args, "--json")
+		}
+		out, err := f.run(args...)
+		if err != nil {
+			t.Fatalf("status: %v %s", err, out)
+		}
+		if !strings.Contains(out, "approval needed") || !strings.Contains(out, "waiting on prerequisite") {
+			t.Fatal(out)
+		}
 	}
 }

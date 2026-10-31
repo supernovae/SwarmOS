@@ -51,6 +51,9 @@ func TestNativeProjectionDecomposition(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if _, err := eng.LeaseManager.ApproveTask(t.Context(), parent.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
 			p := &projectionTracker{Tracker: local, failProjection: true}
 			eng.Tracker = p
 			subs := []contract.WorkUnit{{Title: "one", Objective: "Deliver first part", Acceptance: []string{"First works"}, DependsOn: []int{77, 77}}, {Title: "two", Objective: "Deliver second part", Acceptance: []string{"Second works"}, DependsOn: []int{78}}}
@@ -74,10 +77,25 @@ func TestNativeProjectionDecomposition(t *testing.T) {
 			if err != nil || !reflect.DeepEqual(parsed.DependsOn, []int{77}) || stored.Body != children[0].Body {
 				t.Fatalf("body changed: %v %v", parsed, err)
 			}
+			p.failProjection = false
+			retry, err := eng.DecomposeIssue(t.Context(), root, parent.Number, subs, sequential)
+			if err != nil || len(retry) != 2 || retry[0].Number != children[0].Number {
+				t.Fatalf("retry: %v %v", retry, err)
+			}
+			if len(p.links) != 2*len(want) || len(p.orders) != 2 {
+				t.Fatalf("failed projections not retried: links=%v orders=%v", p.links, p.orders)
+			}
+			another, err := local.CreateIssue(t.Context(), "another", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = eng.LeaseManager.ApproveTask(t.Context(), another.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
 			p.failHierarchy = true
 			before := len(p.orders)
 			count := len(p.links)
-			if _, err := eng.DecomposeIssue(t.Context(), root, parent.Number, subs, sequential); err == nil || !strings.Contains(err.Error(), "link decomposed child issue") {
+			if _, err := eng.DecomposeIssue(t.Context(), root, another.Number, subs, sequential); err == nil || !strings.Contains(err.Error(), "link decomposed child issue") {
 				t.Fatalf("hierarchy failure: %v", err)
 			}
 			if before != len(p.orders) || count != len(p.links) {

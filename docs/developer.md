@@ -114,7 +114,7 @@ Some WorkUnits are too large to plan, implement, and validate within one claim. 
 Split recommendation: required
 ```
 
-Right after it, the planner proposes child WorkUnits, each with a title, an objective, and checkable acceptance criteria. A normal plan leaves the line out.
+Right after it, the planner proposes child WorkUnits in a versioned YAML block (`split_proposal_version: 1`). Each child declares its objective, acceptance criteria, dependencies, dimensions, and the parent criteria it covers. A normal plan leaves the line out.
 
 When the recorded plan contains that line, `swarm issue work`, `swarm pr work`, and `swarm node run` stop after planning. They skip review and implementation, record no `FAIL` verdict, and report the outcome `split-recommended` together with the command to run next:
 
@@ -124,7 +124,13 @@ swarm issue decompose 42
 
 For `swarm pr work`, the command names the linked issue, not the PR. With `--json`, the result carries `split_recommended` and `decompose_command`, and `swarm node run --json` lists them under `split_recommendations`. Node workers never auto-submit a stopped run.
 
-The recommendation can only stop work. It does not approve the plan, create issues, or change the WorkUnit, and the plan gate still applies to any later plan. Decomposing is a maintainer decision: `swarm issue decompose` turns the WorkUnit's acceptance criteria into draft child issues and does not read the proposed children in `PLAN.md`. To use the planner's proposals as written, create the children with `swarm issue create --parent 42`. Either way, each child needs its own `swarm issue approve` and passes through the usual plan gate.
+Preview the latest recorded design artifact with `swarm issue decompose 42 --dry-run` (add `--json` for structured output). The preview shows child dependencies, dimensions, execution profiles, inherited harness permission, and uncovered parent criteria. Decomposition reads the recorded artifact, so editing a worktree's `PLAN.md` does not change the proposal. A malformed recommendation stops decomposition; without a recommendation, it keeps the per-criterion fallback.
+
+Run `swarm issue decompose 42` to create draft children in dependency order. Review coverage gaps before explicitly accepting them with `--accept-uncovered`; that decision and your identity are recorded. Proposals supply their own dependency graph, so omit `--sequential` when using them. Children inherit constraints, workflow, plan gate, required capabilities, harness permission and risk. Size and uncertainty describe each child and remain unset when omitted.
+
+A successful split retires the parent from work selection and releases its claim while preserving its plan, checkpoints and worktree files. Each child needs its own `swarm issue approve` and plan gate. Use `swarm issue status 42` to see children and their blockers, then approve and work them in dependency order. Rerunning decomposition reuses recorded children and repairs unfinished links or labels. An uncertain issue-create response retains a blocked reservation for operator recovery rather than creating a replacement.
+
+After children merge, run `swarm issue reconcile 42` or reconcile a child to close the parent as completed. Every recorded child needs verified merge evidence; closed-unmerged and superseded-unmerged children keep the parent open. API failures leave completion pending and print a warning.
 
 On GitHub, decomposition sets native sub-issue order and mirrors dependencies as blocked-by links. `swarm issue create --depends-on 7,8` creates the same dependency view. These links help maintainers browse work; the WorkUnit body alone controls dependency enforcement. Failed projections produce warnings alongside the created issues.
 

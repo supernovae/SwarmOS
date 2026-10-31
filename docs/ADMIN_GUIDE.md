@@ -134,14 +134,21 @@ Before approving, `swarm issue approve` prints the same suggested dimensions, si
 
 The planner sizes each WorkUnit against the approved total claim budget, `lease.duration × (1 + lease.max_renewals)`. If one plan, implement, and validate cycle cannot fit, the planner writes the line `Split recommendation: required` in `PLAN.md`, followed by proposed child WorkUnits, each with an objective and acceptance criteria. `swarm issue work`, `swarm pr work`, and `swarm node run` then stop after planning, skip review and implementation, and print `swarm issue decompose <issue>` for the linked issue.
 
-The recommendation never approves, creates issues, or edits the WorkUnit; deciding is up to you. Read the proposed children in the living issue comment's plan, then either:
+Preview the planner's versioned child graph from the latest recorded design artifact:
 
-- run `swarm issue decompose 12 --backend github`, which creates one draft child per acceptance criterion (it does not read the proposals in `PLAN.md`), or
-- create the proposed children yourself with `swarm issue create --parent 12 ... --backend github`.
+```bash
+swarm issue decompose 12 --dry-run --backend github
+swarm issue decompose 12 --backend github
+swarm issue status 12 --backend github
+```
 
-On GitHub, decomposition mirrors dependencies as blocked-by links and sets the child order explicitly. The WorkUnit body continues to determine whether work is blocked.
+The preview includes symbolic dependencies, dimensions, execution profiles, inherited harness permission and uncovered parent acceptance criteria. A worktree `PLAN.md` is not the source. Malformed recommendations create nothing; when no recommendation exists, decomposition uses the WorkUnit's subtasks or acceptance criteria. Review gaps before using `--accept-uncovered` to record an explicit override. Omit `--sequential` for a proposal: its declared graph determines the order.
 
-Children start as `swarm:draft` and need their own `swarm issue approve` and plan gate. To overrule the recommendation, re-plan the parent with `swarm issue work 12 --phase plan`; later runs reuse a recorded split plan until a new plan replaces it.
+Children start as `swarm:draft` and need their own `swarm issue approve` and plan gate. They inherit constraints, workflow, gate, required capabilities, harness permission and risk. Size and uncertainty are assessed for the child, rather than copied from the parent. On GitHub, native sub-issue order and blocked-by links mirror the graph.
+
+A successful decomposition records the graph, releases the parent's claim and marks it `swarm:decomposed`. Its artifacts, checkpoints and worktree files remain available. Work selection skips the retired parent even if someone edits its labels. Retry the command after a linking or label failure to reuse recorded children. An ambiguous issue-create response blocks the reservation for operator recovery.
+
+Approve and work children in dependency order, using `swarm issue status 12` for progress. Once they merge, `swarm issue reconcile 12 --backend github` closes the parent as completed; reconciling a recorded child also attempts the rollup. A closed or superseded child without verified merge evidence remains a blocker. API failures warn and leave the parent open. These commands also work with the local backend.
 
 ### Following Progress in the Single Living Issue Comment
 As workers claim tasks and move through `plan` $\rightarrow$ `review` $\rightarrow$ `implement` $\rightarrow$ `validate`, SwarmOS updates a **single living comment** (`### 🐝 SwarmOS Orchestration & Provenance State`) on each GitHub Issue rather than spamming new comments on every heartbeat:

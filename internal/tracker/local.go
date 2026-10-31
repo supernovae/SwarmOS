@@ -895,3 +895,17 @@ func (l *LocalTracker) CoordinatorRoot() (string, error) {
 	}
 	return filepath.EvalSymlinks(root)
 }
+
+// CloseIssueCompleted projects verified parent completion.
+func (l *LocalTracker) CloseIssueCompleted(_ context.Context, n int) error {
+	return l.withLock(true, func(st *localState) error {
+		issue := st.Issues[n]
+		if issue == nil {
+			return fmt.Errorf("issue #%d not found", n)
+		}
+		issue.State = "closed"
+		issue.StateReason = "completed"
+		issue.UpdatedAt = time.Now().UTC()
+		return nil
+	})
+}

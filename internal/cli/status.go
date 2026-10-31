@@ -17,8 +17,9 @@ import (
 )
 
 type issueStatus struct {
-	PlanReview  *planReviewDisplay `json:"plan_review,omitempty"`
-	ClaimBudget *lease.ClaimBudget `json:"claim_budget,omitempty"`
+	Decomposition *lease.DecompositionStatus `json:"decomposition,omitempty"`
+	PlanReview    *planReviewDisplay         `json:"plan_review,omitempty"`
+	ClaimBudget   *lease.ClaimBudget         `json:"claim_budget,omitempty"`
 	// Set for a fork-mode claim whose upstream coordinator predates budgets.
 	ClaimBudgetUnavailable bool                        `json:"claim_budget_unavailable,omitempty"`
 	PlanReplanLimit        int                         `json:"plan_replan_limit"`
@@ -92,6 +93,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				}
 				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance, RoleRuns: lease.RoleRuns(state)}
 				if state != nil {
+					entry.Decomposition = manager.InspectDecomposition(cmd.Context(), state)
 					entry.Repair = validation.RepairFromArtifact(state.Artifacts, state.BaseSHA)
 					entry.ClaimBudget, err = manager.Budget(state)
 					if err != nil {
@@ -129,6 +131,19 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			if entry.State == nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s #%d draft/unapproved: %s\n", entry.Repository, entry.Issue.Number, entry.Issue.Title)
 				continue
+			}
+			if d := entry.Decomposition; d != nil {
+				fmt.Fprintln(cmd.OutOrStdout(), "Decomposition:")
+				for _, c := range d.Children {
+					fmt.Fprintf(cmd.OutOrStdout(), "  #%d %s: %s %s\n", c.Number, c.Title, c.State, c.Reason)
+				}
+				if d.AllMerged {
+					fmt.Fprintln(cmd.OutOrStdout(), "All children merged; reconcile parent to complete.")
+				} else if d.Next > 0 {
+					fmt.Fprintf(cmd.OutOrStdout(), "Next child #%d: %s\n", d.Next, d.NextState)
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "No child currently workable; inspect blockers above.")
+				}
 			}
 			state := entry.State
 			if b := entry.ClaimBudget; b != nil {

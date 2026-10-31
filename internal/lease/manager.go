@@ -77,7 +77,165 @@ type UpstreamAdvisoryReview struct {
 	Attestation contract.RoleAttestation `json:"attestation"`
 }
 
+// DecompositionChild retains the normalized graph and durable creation progress.
+type DecompositionChild struct {
+	WorkUnit              contract.WorkUnit `json:"work_unit"`
+	Dependencies          []string          `json:"dependencies"`
+	Covers                []int             `json:"covers"`
+	Profile               string            `json:"profile,omitempty"`
+	Number                int               `json:"number,omitempty"`
+	Creating              bool              `json:"creating,omitempty"`
+	Linked                bool              `json:"linked,omitempty"`
+	DependenciesProjected bool              `json:"dependencies_projected,omitempty"`
+}
+type Decomposition struct {
+	ID               string               `json:"id"`
+	Actor            string               `json:"actor"`
+	ClaimID          string               `json:"claim_id,omitempty"`
+	TaskDigest       string               `json:"task_digest"`
+	PolicyDigest     string               `json:"policy_digest"`
+	DesignDigest     string               `json:"design_digest"`
+	Children         []DecompositionChild `json:"children"`
+	Uncovered        []int                `json:"uncovered,omitempty"`
+	AcceptUncovered  bool                 `json:"accept_uncovered"`
+	Complete         bool                 `json:"complete"`
+	Projected        bool                 `json:"projected"`
+	CompletionIntent bool                 `json:"completion_intent"`
+	Closed           bool                 `json:"closed"`
+	Evidence         map[int]*PROutcome   `json:"evidence,omitempty"`
+}
+
+// DecompositionAdmission refuses pending and retired parents from state alone.
+func DecompositionAdmission(st *IssueState) error {
+	if st == nil || st.Decomposition == nil {
+		return nil
+	}
+	var children []int
+	for _, c := range st.Decomposition.Children {
+		if c.Number > 0 {
+			children = append(children, c.Number)
+		}
+	}
+	return fmt.Errorf("issue #%d is pending decomposition or decomposed; work on child issues %v", st.Lease.IssueNumber, children)
+}
+
+func decompositionDesignDigest(st *IssueState) string {
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		if st.Artifacts[i].Type == contract.ArtifactDesign {
+			return hash(st.Artifacts[i].Body)
+		}
+	}
+	return hash("")
+}
+
+// BeginDecomposition reserves one operator transition. It never manufactures a worker claim.
+func (m *Manager) BeginDecomposition(ctx context.Context, n int, expected *IssueState, d Decomposition) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("decomposition requires a repository operator")
+	}
+	if err := m.tracker.Authorize(ctx, "approve-task"); err != nil {
+		return nil, err
+	}
+	actor, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	if st.Decomposition != nil {
+		return nil, fmt.Errorf("decomposition already reserved; reload before retry")
+	}
+	if st.TaskDigest != expected.TaskDigest || st.PolicyDigest != expected.PolicyDigest || decompositionDesignDigest(st) != decompositionDesignDigest(expected) {
+		return nil, fmt.Errorf("%w: decomposition source changed", ErrClaimFence)
+	}
+	if st.Lease.ClaimID != "" && st.Lease.Status == "active" {
+		if st.Lease.Owner != actor && st.Lease.ExpiresAt.After(m.nowFn()) {
+			return nil, ErrAlreadyClaimed
+		}
+		if err = m.checkStateClaim(ctx, n, actor, st); err != nil {
+			return nil, fmt.Errorf("decompose: %w", err)
+		}
+		d.ClaimID = st.Lease.ClaimID
+	} else if m.token(n) != "" {
+		return nil, ErrClaimFence
+	}
+	if err = m.checkApprovedState(ctx, n, st); err != nil {
+		return nil, err
+	}
+	if st.PRNumber != 0 || st.PRRevision != nil {
+		return nil, fmt.Errorf("cannot decompose a submitted issue")
+	}
+	var entropy [16]byte
+	if _, err = rand.Read(entropy[:]); err != nil {
+		return nil, err
+	}
+	d.ID = hex.EncodeToString(entropy[:])
+	d.Actor = actor
+	d.TaskDigest = st.TaskDigest
+	d.PolicyDigest = st.PolicyDigest
+	d.DesignDigest = decompositionDesignDigest(st)
+	st.Decomposition = &d
+	return m.saveDecomposition(ctx, n, rev, st)
+}
+
+func (m *Manager) saveDecomposition(ctx context.Context, n int, rev string, st *IssueState) (*IssueState, error) {
+	raw, err := marshalCoordinatorState(st)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = m.store.CompareAndSwap(ctx, n, rev, raw); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// AdvanceDecomposition checks operation identity, source content and the live
+// worker fence on every mutation. A CAS conflict never retries a tracker write.
+func (m *Manager) AdvanceDecomposition(ctx context.Context, n int, id string, fn func(*IssueState, *Decomposition) error) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("decomposition requires a repository operator")
+	}
+	if err := m.tracker.Authorize(ctx, "approve-task"); err != nil {
+		return nil, err
+	}
+	actor, err := m.tracker.CurrentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	d := st.Decomposition
+	if d == nil || d.ID != id || d.Actor != actor || d.TaskDigest != st.TaskDigest || d.PolicyDigest != st.PolicyDigest || d.DesignDigest != decompositionDesignDigest(st) {
+		return nil, fmt.Errorf("%w: decomposition identity or source changed", ErrClaimFence)
+	}
+	if !d.Complete {
+		if d.ClaimID != "" {
+			if d.ClaimID != st.Lease.ClaimID {
+				return nil, ErrClaimFence
+			}
+			if err = m.checkStateClaim(ctx, n, actor, st); err != nil {
+				return nil, fmt.Errorf("decompose: %w", err)
+			}
+		} else if st.Lease.Status == "active" || m.token(n) != "" {
+			return nil, ErrClaimFence
+		}
+		if err = m.checkApprovedState(ctx, n, st); err != nil {
+			return nil, err
+		}
+	}
+	if err = fn(st, d); err != nil {
+		return nil, err
+	}
+	return m.saveDecomposition(ctx, n, rev, st)
+}
+
 type IssueState struct {
+	Decomposition *Decomposition `json:"decomposition,omitempty"`
+
 	UpstreamAdvisoryReview *UpstreamAdvisoryReview `json:"upstream_advisory_review,omitempty"`
 	resumeMarker           *resumeMarker
 
@@ -789,6 +947,9 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		return nil, err
 	}
 	if old, rev, err := m.load(ctx, n); err == nil {
+		if err := DecompositionAdmission(old); err != nil {
+			return nil, err
+		}
 		if old.Lease.Status == "active" && old.Lease.ExpiresAt.After(m.nowFn()) {
 			return nil, &AlreadyClaimedError{IssueNumber: n, Owner: old.Lease.Owner, ExpiresAt: old.Lease.ExpiresAt, CommentID: old.ProjectionCommentID}
 		}
@@ -936,15 +1097,23 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if err != nil {
 		return nil, err
 	}
+	st, rev, stateErr := m.load(ctx, n)
+	if stateErr == nil {
+		if err := DecompositionAdmission(st); err != nil {
+			return nil, err
+		}
+	}
 	if err = m.VerifyDependencies(ctx, wu); err != nil {
 		return nil, err
 	}
-	st, rev, err := m.load(ctx, n)
-	if err != nil {
+	if err = stateErr; err != nil {
 		if errors.Is(err, ErrClaimFence) {
 			return nil, err
 		}
 		return nil, &TaskApprovalError{IssueNumber: n, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
+	}
+	if err := DecompositionAdmission(st); err != nil {
+		return nil, err
 	}
 	if st.PRRevision != nil && prNumber != st.PRRevision.Number {
 		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", n, st.PRRevision.Number)
@@ -1115,6 +1284,11 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 	if err != nil {
 		return nil, err
 	}
+	if current, _, readErr := m.loadReadOnly(ctx, issue); readErr == nil {
+		if err := DecompositionAdmission(current); err != nil {
+			return nil, err
+		}
+	}
 	if err = m.VerifyDependencies(ctx, wu); err != nil {
 		return nil, err
 	}
@@ -1125,6 +1299,9 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 				return nil, err
 			}
 			return nil, &TaskApprovalError{IssueNumber: issue, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
+		}
+		if err := DecompositionAdmission(st); err != nil {
+			return nil, err
 		}
 		if st.PRRevision != nil {
 			return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", issue, st.PRRevision.Number)

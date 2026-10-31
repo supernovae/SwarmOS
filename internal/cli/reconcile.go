@@ -145,9 +145,29 @@ func newReconcileCmd(opts *RootOptions) *cobra.Command {
 			}
 			return nil
 		}
+		parent, parentErr := m.DecompositionParent(cmd.Context(), n)
+		if parentErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: parent lookup: %v\n", parentErr)
+		}
+		if parent == n {
+			state, err = m.ReconcileDecomposition(cmd.Context(), n)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: parent remains open: %v\n", err)
+				return nil
+			}
+			if !asJSON {
+				fmt.Fprintf(cmd.OutOrStdout(), "Parent #%d completed\n", n)
+			}
+			return nil
+		}
 		state, err = m.ReconcileSubmission(cmd.Context(), n)
 		if err != nil {
 			return err
+		}
+		if parent > 0 {
+			if _, rollupErr := m.ReconcileDecomposition(cmd.Context(), parent); rollupErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: parent #%d remains open: %v\n", parent, rollupErr)
+			}
 		}
 		if !asJSON {
 			fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d PR #%d: %s\n", n, state.PRNumber, state.PROutcome.Status)

@@ -46,6 +46,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	userCacheDir = func() (string, error) { return cache, nil }
+	os.Setenv("XDG_CACHE_HOME", cache)
+	os.Setenv("HOME", cache)
 	code := m.Run()
 	os.RemoveAll(cache)
 	os.Exit(code)

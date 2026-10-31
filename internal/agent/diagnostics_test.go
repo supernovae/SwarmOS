@@ -33,6 +33,8 @@ func TestMain(m *testing.M) {
 	// lazily by the first saved log rather than here.
 	state := filepath.Join(os.TempDir(), fmt.Sprintf("swarm-agent-test-state-%d", os.Getpid()))
 	os.Setenv("XDG_STATE_HOME", state)
+	os.Setenv("XDG_CACHE_HOME", state+"-cache")
+	os.Setenv("HOME", state+"-home")
 	os.Setenv("SWARM_GITHUB_TOKEN", diagnosticsTestToken)
 	os.Unsetenv(gitcredential.TokenCommandEnv)
 	if _, err := gitcredential.NewRedaction(); err != nil {
@@ -40,6 +42,8 @@ func TestMain(m *testing.M) {
 	}
 	code := m.Run()
 	os.RemoveAll(state)
+	os.RemoveAll(state + "-cache")
+	os.RemoveAll(state + "-home")
 	os.Exit(code)
 }
 

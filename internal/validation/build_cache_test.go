@@ -30,6 +30,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	userCacheDir = func() (string, error) { return dir, nil }
+	storageuse.UserCacheDir = func() (string, error) {
+		base, err := userCacheDir()
+		if err != nil {
+			return os.UserCacheDir()
+		}
+		return base, nil
+	}
+	os.Setenv("XDG_CACHE_HOME", dir)
+	os.Setenv("HOME", dir)
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
@@ -528,5 +537,34 @@ func isolateValidationControl(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", root)
 	if runtime.GOOS == "darwin" {
 		t.Setenv("HOME", root)
+	}
+}
+
+func TestStorageControlRootFollowsProducerCacheHook(t *testing.T) {
+	sentinel := t.TempDir()
+	t.Setenv("HOME", sentinel)
+	t.Setenv("XDG_CACHE_HOME", sentinel)
+	cache := useCacheRoot(t)
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module fixture\ngo 1.24\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, owner, err := storageuse.Ensure(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = validatorBuildCaches(ctx, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err = owner.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(sentinel)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("real cache/home sentinel touched: %v %v", entries, err)
+	}
+	entries, err = os.ReadDir(filepath.Join(cache, "swarm-use"))
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("producer did not write isolated evidence: %v %v", entries, err)
 	}
 }

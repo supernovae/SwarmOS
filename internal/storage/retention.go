@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -87,7 +88,7 @@ func (s *scanner) retention(owner, root, backend string, start int) {
 			s.fail("authoritative retention", errors.New("bounded state refs unavailable"))
 		} else {
 			store := coordination.NewGitStore(root)
-			err := refs.VisitStateRefs(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 2, Bytes: 1 << 20, Reserve: s.b.Charge}, func(number int, sha string) error {
+			err := refs.VisitStateRefs(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 2, Bytes: 16 << 20, Reserve: s.b.Charge, Workspace: s.b.Workspace}, func(number int, sha string) error {
 				issuePath := filepath.Join(root, ".swarm", "worktrees", fmt.Sprintf("issue-%d", number))
 				s.add(Resource{Repository: owner, Owner: owner, Class: "issue-worktree", Path: issuePath, Identity: "worktree:" + issuePath})
 				data, err := store.LoadInventoryObject(s.ctx, sha, s.b.Charge, lease.ProjectInventory)
@@ -136,7 +137,7 @@ func (s *scanner) retention(owner, root, backend string, start int) {
 		listingErr = errors.New("bounded tracker unavailable")
 	}
 	if listingErr == nil {
-		listingErr = visitor.VisitPullRequests(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 100, Bytes: 4 << 20, Reserve: s.b.Charge}, func(pr *tracker.PullRequest) error {
+		listingErr = visitor.VisitPullRequests(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 100, Bytes: 128 << 20, Reserve: s.b.Charge, Workspace: s.b.Workspace}, func(pr *tracker.PullRequest) error {
 			if pr == nil || pr.Number < 1 {
 				return errors.New("invalid PR identity")
 			}
@@ -530,14 +531,42 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		commonInfo[key] = observed
 		scopes[key] = scope
 	}
+	var manager *storageuse.Manager
+	defer func() {
+		if manager != nil {
+			manager.Close()
+		}
+	}()
 	var candidates []storageuse.Resource
 	err := storageuse.VisitResources(ctx, opts.ControlRoot, l.Records, func() error { return s.b.entry(ctx) }, s.b.Workspace, func(r storageuse.Resource) error {
 		if e := s.b.Charge(int64(4096 + 8*(len(r.Location)+len(r.Identity)+len(r.Class)+len(r.Repository)))); e != nil {
 			return e
 		}
+		// Prune absent completed evidence as it is read. Even if a later report
+		// bound is reached, this pass makes progress and a rerun can finish.
+		// Resource deletion still waits for complete candidate discovery below.
+		if apply && storageuse.LocationAbsent(r.Location) {
+			if _, selected := scopes[r.Repository]; selected {
+				if manager == nil {
+					var e error
+					manager, e = storageuse.Open(opts.ControlRoot, opts.CacheRoot, opts.ScratchRoot)
+					if e != nil {
+						return e
+					}
+				}
+				pruned, e := manager.PruneAbsent(ctx, r)
+				if e != nil && !errors.Is(e, storageuse.ErrUnsafe) {
+					return e
+				}
+				if pruned {
+					out.Resources = append(out.Resources, ReclamationResult{Resource: r, Outcome: ReclaimAbsent, Reason: "completed absent registration pruned; admission lock retained for waiting producers"})
+					return nil
+				}
+			}
+		}
 		candidates = append(candidates, r)
 		return nil
-	})
+	}, apply)
 	// An absent control root has no admitted resources. Discovery still reports
 	// unregistered candidates, retaining them without initializing any roots.
 	if errors.Is(err, os.ErrNotExist) && len(candidates) == 0 {
@@ -580,13 +609,11 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		}
 		return out, errors.New("candidate discovery incomplete")
 	}
-	var manager *storageuse.Manager
-	if apply && len(candidates) > 0 {
+	if apply && len(candidates) > 0 && manager == nil {
 		manager, err = storageuse.Open(opts.ControlRoot, opts.CacheRoot, opts.ScratchRoot)
 		if err != nil {
 			return invalid(err)
 		}
-		defer manager.Close()
 	}
 	afterScanner := reclaimScanner(ctx, opts)
 	observeAfter := func(path string) UsageObservation {
@@ -624,6 +651,23 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		}
 		if protected {
 			result.Reason = "resource overlaps repository or Git evidence"
+			out.Resources = append(out.Resources, result)
+			continue
+		}
+		// Dead completed registrations need no retention lookup, but pruning still
+		// requires this resource's exact maintenance exclusion and selected scope.
+		if storageuse.LocationAbsent(r.Location) {
+			result.Outcome = ReclaimAbsent
+			result.Reason = "registered leaf absent"
+			if apply && ok {
+				pruned, e := manager.PruneAbsent(ctx, r)
+				if e != nil {
+					result.Outcome = ReclaimRetained
+					result.Reason = "absent registration retained: " + e.Error()
+				} else if pruned {
+					result.Reason = "completed absent registration pruned; admission lock retained for waiting producers"
+				}
+			}
 			out.Resources = append(out.Resources, result)
 			continue
 		}
@@ -759,6 +803,14 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 					result.After = observeAfter(r.Location)
 				}
 				guard.Close()
+				if err == nil && result.Outcome == ReclaimRemoved {
+					pruned, pruneErr := manager.PruneAbsent(ctx, r)
+					if pruneErr != nil {
+						err = pruneErr
+					} else if pruned {
+						result.Reason += "; registration pruned; admission lock retained for waiting producers"
+					}
+				}
 			}
 		} else {
 			observation, e := storageuse.Observe(ctx, opts.ControlRoot, r, 16<<10, s.b.Workspace)
@@ -829,12 +881,23 @@ type BackendRetention struct {
 }
 
 // Each object is decoded serially; only compact output survives the read.
+// Snapshot readers reserve reusable transport/parser workspace separately from
+// their small retained ref entries. Projection storage is charged by the decoder.
 func inventoryReservation(b *Budget) func(int64) error {
 	return func(n int64) error {
-		if err := b.Workspace(n); err != nil {
-			return err
+		if n < 8192 {
+			return b.Charge(n)
 		}
-		return b.Charge(32 << 10)
+		return b.Workspace(n)
+	}
+}
+func inventoryProjection(b *Budget) coordination.InventoryDecoder {
+	return func(ctx context.Context, r io.Reader, reserve func(int64) error) ([]byte, error) {
+		// ProjectInventory caps output at 16 KiB; include the retained map entry.
+		if err := b.Charge(17 << 10); err != nil {
+			return nil, err
+		}
+		return lease.ProjectInventory(ctx, r, reserve)
 	}
 }
 
@@ -852,12 +915,12 @@ func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote st
 		}
 	}()
 	if scope.Backend == "local" {
-		return coordination.NewFileStore(scope.Root).ReadInventorySnapshot(ctx, budget.Limits.Records, inventoryReservation(budget), lease.ProjectInventory)
+		return coordination.NewFileStore(scope.Root).ReadInventorySnapshot(ctx, budget.Limits.Records, inventoryReservation(budget), inventoryProjection(budget))
 	}
 	if scope.Backend == "github" {
 		store := coordination.NewGitStoreWithRemote(scope.Root, remote)
 		if apply {
-			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, inventoryReservation(budget), lease.ProjectInventory)
+			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, inventoryReservation(budget), inventoryProjection(budget))
 		}
 		if len(visitors) != 1 {
 			return nil, errors.New("bounded pinned state visitor unavailable")
@@ -867,7 +930,7 @@ func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote st
 			return nil, errors.New("bounded pinned state visitor unavailable")
 		}
 		pinned := map[int]string{}
-		err := refs.VisitStateRefs(ctx, tracker.InventoryBudget{Records: budget.Limits.Records, Pages: 2, Bytes: 1 << 20, Reserve: budget.Charge}, func(n int, sha string) error {
+		err := refs.VisitStateRefs(ctx, tracker.InventoryBudget{Records: budget.Limits.Records, Pages: 2, Bytes: 16 << 20, Reserve: budget.Charge, Workspace: budget.Workspace}, func(n int, sha string) error {
 			if n < 1 || pinned[n] != "" {
 				return errors.New("ambiguous state snapshot")
 			}
@@ -883,7 +946,7 @@ func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote st
 		out := map[int][]byte{}
 		var failures []error
 		for n, sha := range pinned {
-			data, err := store.LoadInventoryObject(ctx, sha, inventoryReservation(budget), lease.ProjectInventory)
+			data, err := store.LoadInventoryObject(ctx, sha, inventoryReservation(budget), inventoryProjection(budget))
 			if err != nil {
 				failures = append(failures, fmt.Errorf("issue %d: %w", n, err))
 				out[n] = nil
@@ -923,7 +986,7 @@ func (r BackendRetention) WithRetention(ctx context.Context, scope RepositorySco
 		return fail(err)
 	}
 	prs := map[int]*tracker.PullRequest{}
-	err = tr.VisitPullRequests(ctx, tracker.InventoryBudget{Records: b.Limits.Records, Pages: 100, Bytes: 4 << 20, Reserve: b.Charge}, func(pr *tracker.PullRequest) error {
+	err = tr.VisitPullRequests(ctx, tracker.InventoryBudget{Records: b.Limits.Records, Pages: 100, Bytes: 128 << 20, Reserve: b.Charge, Workspace: b.Workspace}, func(pr *tracker.PullRequest) error {
 		if pr == nil || pr.Number < 1 || prs[pr.Number] != nil {
 			return errors.New("ambiguous PR evidence")
 		}

@@ -15,6 +15,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	os.Setenv("XDG_CACHE_HOME", dir)
+	os.Setenv("HOME", dir)
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

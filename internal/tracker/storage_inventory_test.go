@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -180,4 +181,38 @@ func TestStorageStateRefsBoundedAndNamespaceChecked(t *testing.T) {
 			t.Fatal(err, visits, calls)
 		}
 	}
+}
+
+func TestStoragePRVisitorFiveThousandRealisticResponses(t *testing.T) {
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		rows := []map[string]any{}
+		for n := (page - 1) * 100; n < min(page*100, 5000); n++ {
+			rows = append(rows, map[string]any{"number": n + 1, "state": "open", "body": strings.Repeat("b", 7000), "extra": strings.Repeat("x", 7000)})
+		}
+		writeJSON(t, w, rows)
+	}))
+	var charged, workspace int64
+	charge := func(n int64) error {
+		if n < 0 || charged+n > 64<<20 {
+			return ErrInventoryLimit
+		}
+		charged += n
+		return nil
+	}
+	count := 0
+	err := tr.VisitPullRequests(t.Context(), InventoryBudget{Records: 5000, Pages: 100, Bytes: 128 << 20, Reserve: charge, Workspace: func(n int64) error {
+		if n <= workspace {
+			return nil
+		}
+		if err := charge(n - workspace); err != nil {
+			return err
+		}
+		workspace = n
+		return nil
+	}}, func(*PullRequest) error { count++; return charge(4096) })
+	if err != nil || count != 5000 {
+		t.Fatal(count, charged, err)
+	}
+	t.Logf("5000 PRs charged=%d workspace=%d", charged, workspace)
 }

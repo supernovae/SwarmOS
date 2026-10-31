@@ -4,17 +4,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -359,19 +363,19 @@ func TestReclamationPreviewApplyAndRerun(t *testing.T) {
 				t.Fatalf("accounting %+v", applied)
 			}
 			again, err := ApplyReclamation(context.Background(), o)
-			var absent *ReclamationResult
-			for i := range again.Resources {
-				if again.Resources[i].Resource.Location == r.Location {
-					absent = &again.Resources[i]
-				}
-			}
-			if err != nil || absent == nil || absent.Outcome != ReclaimAbsent || absent.ObservedAllocatedDelta != nil {
+			if err != nil || !again.Complete {
 				t.Fatalf("rerun %+v %v", again, err)
 			}
-			now, _ = os.ReadDir(o.ControlRoot)
-			if len(now) != len(records) {
-				t.Fatal("removed durable evidence")
+			for _, item := range again.Resources {
+				if item.Outcome != ReclaimRetained || item.Resource.Location == r.Location {
+					t.Fatalf("unexpected rerun %+v", again)
+				}
 			}
+			now, _ = os.ReadDir(o.ControlRoot)
+			if len(now) != 1 || !strings.HasSuffix(now[0].Name(), ".lock") {
+				t.Fatal("registration not pruned or admission lock removed", now)
+			}
+
 		})
 	}
 }
@@ -819,15 +823,15 @@ func TestReclamationBackendSnapshotsAndEligibleRemoval(t *testing.T) {
 					t.Fatalf("apply %+v %v", applied, err)
 				}
 				again, err := ApplyReclamation(context.Background(), o)
-				foundAbsent := false
-				for _, item := range again.Resources {
-					if item.Resource.Location == r.Location && item.Outcome == ReclaimAbsent {
-						foundAbsent = true
-					}
-				}
-				if err != nil || !foundAbsent {
+				if err != nil || !again.Complete {
 					t.Fatalf("rerun %+v %v", again, err)
 				}
+				for _, item := range again.Resources {
+					if item.Resource.Location == r.Location || item.Outcome != ReclaimRetained {
+						t.Fatalf("unexpected rerun %+v", again)
+					}
+				}
+
 			})
 		}
 	}
@@ -1126,43 +1130,46 @@ func (v inventoryScaleVisitor) VisitPullRequests(ctx context.Context, b tracker.
 func TestReclamationInventoryRealLedgerScale(t *testing.T) {
 	o, manager, resource := reclaimFixture(t, "agent-build")
 	// Real control roots hold registrations for many independent producer leaves.
-	for n := 1; n < 900; n++ {
+	for n := 1; n < 3500; n++ {
 		r := storageuse.ResourceFor(resource.Repository, "native-scratch", filepath.Join(o.ScratchRoot, fmt.Sprintf("swarm-native-scale-%d", n)))
 		u, err := manager.AcquireUse(context.Background(), r)
 		if err != nil {
 			t.Fatal(err)
 		}
-		put(t, filepath.Join(r.Location, "data"), "scratch")
 		if err := u.Finish(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	o.Scopes[0].Backend = "github"
 	var baseline int64
+	var finalRefs map[int]string
+	var finalPRs []*tracker.PullRequest
 	for _, extra := range []int64{0, 10000} {
-		refs, prs, total, largest := inventoryScaleObjects(t, o.Scopes[0].Root, 166, func(n int) int64 {
+		refs, prs, total, largest := inventoryScaleObjects(t, o.Scopes[0].Root, 445, func(n int) int64 {
 			if n == 1 {
 				return 4533441 + extra
 			}
-			if n == 166 {
-				return 648470 + extra
+			if n == 445 {
+				return 240566 + extra
 			}
-			return 648464 + extra
+			return 240398 + extra
 		})
 		if extra == 0 && (total < 110000000 || total > 115000000 || largest < 4533441) {
 			t.Fatal(total, largest)
 		}
+		finalRefs, finalPRs = refs, prs
+		apiTracker := scaleAPITracker(t, refs, prs)
 		beforeRefs := prunedInventoryRefs(t, o.Scopes[0].Root)
 		b := &Budget{Limits: DefaultLimits()}
 		source := BackendRetention{Budget: b, Tracker: func(RepositoryScope) (tracker.PullRequestVisitor, error) {
-			return inventoryScaleVisitor{refs, prs}, nil
+			return apiTracker, nil
 		}}
 		if _, err := ReadRetentionSnapshot(context.Background(), o.Scopes[0], "", false, b, inventoryScaleVisitor{refs, prs}); err != nil {
 			t.Fatal(err)
 		}
 		o.Retention = source
 		report, err := PreviewReclamation(context.Background(), o)
-		if err != nil || !report.Complete || len(report.Resources) != 900 || report.Resources[0].Outcome != ReclaimEligible {
+		if err != nil || !report.Complete || len(report.Resources) != 1 || report.Resources[0].Outcome != ReclaimEligible {
 			t.Fatalf("%+v %v", report, err)
 		}
 		if b.Counters.Bytes >= DefaultLimits().Bytes {
@@ -1184,13 +1191,53 @@ func TestReclamationInventoryRealLedgerScale(t *testing.T) {
 		}
 		t.Logf("refs=%d total=%d largest=%d budget=%d", len(refs), total, largest, b.Counters.Bytes)
 	}
+	// Apply fetches freshly from the fixture's real local remote while holding
+	// exact-resource maintenance exclusion; no network or credentials are used.
+	if out, err := exec.Command("git", "-C", o.Scopes[0].Root, "remote", "add", "origin", o.Scopes[0].Root).CombinedOutput(); err != nil {
+		t.Fatal(string(out), err)
+	}
+	apiTracker := scaleAPITracker(t, finalRefs, finalPRs)
+	o.Retention = BackendRetention{Apply: true, Tracker: func(RepositoryScope) (tracker.PullRequestVisitor, error) { return apiTracker, nil }}
+	pending := storageuse.ResourceFor(resource.Repository, "native-scratch", filepath.Join(o.ScratchRoot, "swarm-native-pending"))
+	if _, err := manager.AcquireUse(context.Background(), pending); err != nil {
+		t.Fatal(err)
+	}
+	report, err := ApplyReclamation(context.Background(), o)
+	if err != nil || !report.Complete {
+		t.Fatalf("apply complete=%v err=%v", report.Complete, err)
+	}
+	if _, err := os.Stat(resource.Location); !os.IsNotExist(err) {
+		t.Fatal("eligible cache retained", err)
+	}
+	remaining := 0
+	if err := storageuse.VisitResources(context.Background(), o.ControlRoot, 1, func() error { return nil }, func(int64) error { return nil }, func(r storageuse.Resource) error {
+		remaining++
+		if r != pending {
+			t.Errorf("unexpected record %v", r)
+		}
+		return nil
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatal("dead registrations not pruned", remaining)
+	}
+	report, err = ApplyReclamation(context.Background(), o)
+	if err != nil || !report.Complete {
+		t.Fatalf("second apply %+v %v", report, err)
+	}
+	for _, item := range report.Resources {
+		if item.Outcome != ReclaimRetained {
+			t.Fatalf("second apply changed resource %+v", item)
+		}
+	}
 	// A bounded allocation observation catches whole-object buffering separately
 	// from retained-memory accounting. Dataset setup is outside measurement.
 	body := strings.NewReader(`{"lease":{"version":1,"issue_number":1},"ignored":"` + strings.Repeat("x", 4533441) + `"}`)
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	_, err := lease.ProjectInventory(context.Background(), body, func(int64) error { return nil })
+	_, err = lease.ProjectInventory(context.Background(), body, func(int64) error { return nil })
 	runtime.ReadMemStats(&after)
 	if err != nil || after.TotalAlloc-before.TotalAlloc > 1<<20 {
 		t.Fatalf("allocation=%d err=%v", after.TotalAlloc-before.TotalAlloc, err)
@@ -1280,4 +1327,116 @@ func TestReclamationInventoryIssueFailureIsolation(t *testing.T) {
 			}
 		})
 	}
+}
+
+type scaleRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f scaleRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Exercise the production bounded API visitors, including realistic ignored PR
+// payloads, rather than bypassing their byte and retained-memory accounting.
+func scaleAPITracker(t *testing.T, refs map[int]string, prs []*tracker.PullRequest) *tracker.GitHubTracker {
+	t.Helper()
+	previous := http.DefaultTransport
+	http.DefaultTransport = scaleRoundTripper(func(req *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		rec.Header().Set("Content-Type", "application/json")
+		rows := []map[string]any{}
+		switch {
+		case strings.Contains(req.URL.Path, "/pulls"):
+			page, _ := strconv.Atoi(req.URL.Query().Get("page"))
+			start := (page - 1) * 100
+			for n := start; n < min(start+100, 500); n++ {
+				pr := &tracker.PullRequest{Number: 2000 + n, State: "open"}
+				if n < len(prs) {
+					pr = prs[n]
+				}
+				rows = append(rows, map[string]any{"number": pr.Number, "state": pr.State, "merged_at": pr.MergedAt, "merge_commit_sha": pr.MergeCommitSHA, "head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]string{"full_name": "fixture/repo"}}, "base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "fixture/repo"}}, "body": strings.Repeat("b", 7000), "extra": strings.Repeat("x", 7000)})
+			}
+		case strings.Contains(req.URL.Path, "heads/swarm-state/"):
+			for n, sha := range refs {
+				rows = append(rows, map[string]any{"ref": fmt.Sprintf("refs/heads/swarm-state/issue-%d", n), "object": map[string]string{"sha": sha, "type": "commit"}, "url": strings.Repeat("u", 1000)})
+			}
+		case strings.Contains(req.URL.Path, "swarm/state/"):
+		default:
+			t.Errorf("unexpected API request %s", req.URL.Path)
+		}
+		if err := json.NewEncoder(rec).Encode(rows); err != nil {
+			return nil, err
+		}
+		return rec.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	t.Setenv("SWARM_GITHUB_TOKEN", "fixture-token")
+	t.Setenv("GH_TOKEN", "fixture-token")
+	t.Setenv("GH_HOST", "github.com")
+	tr, err := tracker.NewGitHubTracker("fixture/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tr
+}
+
+func TestReclamationTrackerLimitRetains(t *testing.T) {
+	o, _, r := reclaimFixture(t, "agent-build")
+	o.Scopes[0].Backend = "github"
+	refs, prs, _, _ := inventoryScaleObjects(t, o.Scopes[0].Root, 1, func(int) int64 { return 240398 })
+	tr := scaleAPITracker(t, refs, prs)
+	// Force retained-projection exhaustion without changing input ceilings.
+	limits := DefaultLimits()
+	limits.Bytes = 4096
+	failures := map[string]error{}
+	o.Retention = BackendRetention{Budget: &Budget{Limits: limits}, Failures: failures, Tracker: func(RepositoryScope) (tracker.PullRequestVisitor, error) { return tr, nil }}
+	report, err := PreviewReclamation(t.Context(), o)
+	if err != nil || report.Complete || len(report.Resources) != 1 || report.Resources[0].Outcome != ReclaimRetained || !strings.Contains(report.Resources[0].Reason, "limit") || len(failures) != 1 {
+		t.Fatalf("%+v %v failures=%v", report, err, failures)
+	}
+	if _, err := os.Stat(r.Location); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReclamationDeadRegistrationPruningMakesBoundedProgress(t *testing.T) {
+	o, m, r := reclaimFixture(t, "agent-build")
+	for n := 0; n < 150; n++ {
+		dead := storageuse.ResourceFor(r.Repository, "native-scratch", filepath.Join(o.ScratchRoot, fmt.Sprintf("swarm-native-dead-%d", n)))
+		u, err := m.AcquireUse(t.Context(), dead)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = u.Finish(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	limits := DefaultLimits()
+	limits.Records = 1
+	limits.Bytes = 512 << 10
+	o.Limits = limits
+	previous := 151
+	for attempt := 0; attempt < 10; attempt++ {
+		report, err := ApplyReclamation(t.Context(), o)
+		files, e := filepath.Glob(filepath.Join(o.ControlRoot, "*.json"))
+		if e != nil {
+			t.Fatal(e)
+		}
+		if len(files) >= previous {
+			t.Fatalf("no pruning progress: before=%d after=%d err=%v", previous, len(files), err)
+		}
+		previous = len(files)
+		if err == nil && report.Complete {
+			if len(files) != 0 {
+				t.Fatal("completed apply left registrations", files)
+			}
+			if _, e := os.Stat(r.Location); !os.IsNotExist(e) {
+				t.Fatal("eligible cache retained", e)
+			}
+			return
+		}
+		// Incomplete discovery may prune completed absent metadata, but may not
+		// remove the existing cache, even if it was visited before the budget failed.
+		if _, e := os.Stat(r.Location); e != nil {
+			t.Fatal("cache removed on incomplete discovery", e)
+		}
+	}
+	t.Fatal("bounded reruns never finished")
 }

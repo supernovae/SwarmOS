@@ -234,6 +234,20 @@ func (m *Manager) AcquireUse(ctx context.Context, r Resource) (*Use, error) {
 		return nil, err
 	}
 	defer unlock(f)
+	// A pruned registration leaves its admission inode in place. Its marker
+	// certifies completed coverage only until the next admission. Clear and
+	// sync it before writing any pending token, so crashes cannot reuse it.
+	marker := make([]byte, len(prunedMarker)+1)
+	n, markerErr := f.ReadAt(marker, 0)
+	pruned := (markerErr == nil || errors.Is(markerErr, io.EOF)) && string(marker[:n]) == prunedMarker
+	if pruned {
+		if err := f.Truncate(0); err != nil {
+			return nil, err
+		}
+		if err := f.Sync(); err != nil {
+			return nil, err
+		}
+	}
 	v, err := m.read(key, r)
 	if errors.Is(err, os.ErrNotExist) {
 		_, statErr := os.Lstat(r.Location)
@@ -241,7 +255,7 @@ func (m *Manager) AcquireUse(ctx context.Context, r Resource) (*Use, error) {
 			return nil, statErr
 		}
 		now := time.Now().UTC()
-		v = &record{Version: 1, Resource: r, CompleteCoverage: fresh && errors.Is(statErr, os.ErrNotExist), Created: now, LastUse: now, Uses: map[string]bool{}}
+		v = &record{Version: 1, Resource: r, CompleteCoverage: (fresh || pruned) && errors.Is(statErr, os.ErrNotExist), Created: now, LastUse: now, Uses: map[string]bool{}}
 	} else if err != nil {
 		return nil, fmt.Errorf("read storage registration: %w", err)
 	}
@@ -417,10 +431,14 @@ func Observe(ctx context.Context, path string, resource Resource, maxBytes int64
 	return out, nil
 }
 
+// UserCacheDir resolves coordinator storage and can be replaced by package test
+// harnesses alongside their producer cache resolver.
+var UserCacheDir = os.UserCacheDir
+
 // ControlRoot resolves private coordinator evidence separately from cache grants.
 // It does not create storage and may also be used by read-only inventory.
 func ControlRoot() (string, error) {
-	base, err := os.UserCacheDir()
+	base, err := UserCacheDir()
 	if err != nil {
 		return "", err
 	}

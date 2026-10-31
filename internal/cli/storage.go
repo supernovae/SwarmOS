@@ -253,7 +253,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 			if !apply {
 				var e error
 				pt := &storagePreviewTracker{Tracker: tr, states: states}
-				e = visitor.VisitPullRequests(cmd.Context(), tracker.InventoryBudget{Records: b.Limits.Records, Pages: 100, Bytes: 4 << 20, Reserve: b.Charge}, func(pr *tracker.PullRequest) error {
+				e = visitor.VisitPullRequests(cmd.Context(), tracker.InventoryBudget{Records: b.Limits.Records, Pages: 100, Bytes: 128 << 20, Reserve: b.Charge, Workspace: b.Workspace}, func(pr *tracker.PullRequest) error {
 					if pr == nil {
 						return errors.New("invalid PR evidence")
 					}

@@ -20,10 +20,11 @@ import (
 // InventoryBudget belongs to the whole report, not to a backend or page.
 // Reserve must reject an admission before allocating the requested storage.
 type InventoryBudget struct {
-	Records int
-	Pages   int
-	Bytes   int64
-	Reserve func(int64) error
+	Records   int
+	Pages     int
+	Bytes     int64
+	Reserve   func(int64) error
+	Workspace func(int64) error
 }
 
 // PullRequestVisitor is optional: existing Tracker implementations need not
@@ -36,13 +37,15 @@ type PullRequestVisitor interface {
 var ErrInventoryLimit = errors.New("tracker inventory limit reached")
 
 // inventoryReader bounds JSON before decoding, including strings and nesting.
-// Decoder lookahead and token allocations are charged along with raw input.
+// Decoder lookahead and token allocations use reusable page workspace when
+// provided. Retained projections are charged separately from transport input.
 type inventoryReader struct {
 	ctx                context.Context
 	src                io.Reader
 	budget             InventoryBudget
 	buf                [4096]byte
 	depth, quotedBytes int
+	readBytes          int64
 	quoted, escape     bool
 }
 
@@ -56,7 +59,14 @@ func (r *inventoryReader) Read(p []byte) (int, error) {
 	nmax := min(len(p), len(r.buf), int(r.budget.Bytes))
 	n, err := r.src.Read(r.buf[:nmax])
 	if n > 0 {
-		if e := r.budget.Reserve(int64(n) * 64); e != nil {
+		r.readBytes += int64(n)
+		reserve := r.budget.Reserve
+		charge := int64(n) * 64
+		if r.budget.Workspace != nil {
+			reserve = r.budget.Workspace
+			charge = r.readBytes * 4
+		}
+		if e := reserve(charge); e != nil {
 			return 0, e
 		}
 		r.budget.Bytes -= int64(n)
@@ -326,7 +336,10 @@ func (g *GitHubTracker) VisitPullRequests(ctx context.Context, b InventoryBudget
 				if raw.Number < 1 || !strings.Contains("|open|closed|", "|"+raw.State+"|") {
 					return fmt.Errorf("invalid PR inventory record")
 				}
-				if err := b.Reserve(4096); err != nil {
+				// The transport workspace is reusable; strings retained across pages
+				// belong to this projection and must remain charged independently.
+				retained := len(raw.State) + len(raw.MergeCommitSHA) + len(raw.Head.Ref) + len(raw.Head.SHA) + len(raw.Head.Repo.FullName) + len(raw.Base.Ref) + len(raw.Base.Repo.FullName)
+				if err := b.Reserve(int64(4096 + 2*retained)); err != nil {
 					return err
 				}
 				count++

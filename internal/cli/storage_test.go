@@ -12,10 +12,13 @@ import (
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -562,13 +565,10 @@ func TestStorageCleanupRealLedgerScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	for n := 1; n < 900; n++ {
+	for n := 1; n < 3500; n++ {
 		r := storageuse.ResourceFor(key, "native-scratch", filepath.Join(os.TempDir(), fmt.Sprintf("swarm-native-scale-%d", n)))
 		u, err := manager.AcquireUse(context.Background(), r)
 		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(r.Location, 0700); err != nil {
 			t.Fatal(err)
 		}
 		if err := u.Finish(context.Background()); err != nil {
@@ -576,16 +576,16 @@ func TestStorageCleanupRealLedgerScale(t *testing.T) {
 		}
 	}
 
-	refs, prs, total, largest := inventoryScaleObjects(t, f.root, 166, func(n int) int64 {
+	refs, prs, total, largest := inventoryScaleObjects(t, f.root, 445, func(n int) int64 {
 		if n == 1 {
 			return 4533441
 		}
-		if n == 166 {
-			return 648470
+		if n == 445 {
+			return 240566
 		}
-		return 648464
+		return 240398
 	})
-	tr := storageScaleTracker{f.tracker, inventoryScaleVisitor{refs, prs}}
+	tr := storageScaleAPITracker{f.tracker, scaleAPITracker(t, refs, prs)}
 	cmd := f.command(&RootOptions{trackerOverride: tr})
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -598,7 +598,7 @@ func TestStorageCleanupRealLedgerScale(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err, stdout.String())
 	}
-	if !report.Host.Complete || len(report.Host.Resources) != 900 || report.Host.Resources[0].Outcome != storage.ReclaimEligible || len(report.Tasks) != 1 {
+	if !report.Host.Complete || len(report.Host.Resources) != 1 || report.Host.Resources[0].Outcome != storage.ReclaimEligible || len(report.Tasks) != 1 {
 		t.Fatalf("%+v", report)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -760,4 +760,65 @@ func TestStorageCleanupInventoryIssueFailureIsolation(t *testing.T) {
 	if len(report.Errors) != 1 {
 		t.Fatal(report.Errors)
 	}
+}
+
+type scaleRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f scaleRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Exercise the production bounded API visitors, including realistic ignored PR
+// payloads, rather than bypassing their byte and retained-memory accounting.
+func scaleAPITracker(t *testing.T, refs map[int]string, prs []*tracker.PullRequest) *tracker.GitHubTracker {
+	t.Helper()
+	previous := http.DefaultTransport
+	http.DefaultTransport = scaleRoundTripper(func(req *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		rec.Header().Set("Content-Type", "application/json")
+		rows := []map[string]any{}
+		switch {
+		case strings.Contains(req.URL.Path, "/pulls"):
+			page, _ := strconv.Atoi(req.URL.Query().Get("page"))
+			start := (page - 1) * 100
+			for n := start; n < min(start+100, 500); n++ {
+				pr := &tracker.PullRequest{Number: 2000 + n, State: "open"}
+				if n < len(prs) {
+					pr = prs[n]
+				}
+				rows = append(rows, map[string]any{"number": pr.Number, "state": pr.State, "merged_at": pr.MergedAt, "merge_commit_sha": pr.MergeCommitSHA, "head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]string{"full_name": "fixture/repo"}}, "base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "fixture/repo"}}, "body": strings.Repeat("b", 7000), "extra": strings.Repeat("x", 7000)})
+			}
+		case strings.Contains(req.URL.Path, "heads/swarm-state/"):
+			for n, sha := range refs {
+				rows = append(rows, map[string]any{"ref": fmt.Sprintf("refs/heads/swarm-state/issue-%d", n), "object": map[string]string{"sha": sha, "type": "commit"}, "url": strings.Repeat("u", 1000)})
+			}
+		case strings.Contains(req.URL.Path, "swarm/state/"):
+		default:
+			t.Errorf("unexpected API request %s", req.URL.Path)
+		}
+		if err := json.NewEncoder(rec).Encode(rows); err != nil {
+			return nil, err
+		}
+		return rec.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	t.Setenv("SWARM_GITHUB_TOKEN", "fixture-token")
+	t.Setenv("GH_TOKEN", "fixture-token")
+	t.Setenv("GH_HOST", "github.com")
+	tr, err := tracker.NewGitHubTracker("fixture/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tr
+}
+
+type storageScaleAPITracker struct {
+	*tracker.LocalTracker
+	api *tracker.GitHubTracker
+}
+
+func (t storageScaleAPITracker) UpstreamRepo() string { return "fixture/repo" }
+func (t storageScaleAPITracker) VisitStateRefs(c context.Context, b tracker.InventoryBudget, v func(int, string) error) error {
+	return t.api.VisitStateRefs(c, b, v)
+}
+func (t storageScaleAPITracker) VisitPullRequests(c context.Context, b tracker.InventoryBudget, v func(*tracker.PullRequest) error) error {
+	return t.api.VisitPullRequests(c, b, v)
 }

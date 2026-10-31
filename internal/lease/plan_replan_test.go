@@ -46,6 +46,10 @@ func rejectedReplanFixture(t *testing.T, limits ...int) (*Manager, int, *IssueSt
 				t.Fatalf("fixture policy: %v %s", err, out)
 			}
 		}
+		// The committed policy is a new approved identity, including for human gates.
+		if _, err := m.ApproveTask(context.Background(), issue.Number, "local-dev"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ctx := context.Background()
 	st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
@@ -929,7 +933,7 @@ func TestIssueWorkRecoveryAbsentReportsRegeneration(t *testing.T) {
 	if err = m.CheckPlanReplan(st); err != nil {
 		t.Fatal(err)
 	}
-	st, err = m.UpdatePhase(ctx, n, "local-dev", "plan", "active")
+	_, err = m.UpdatePhase(ctx, n, "local-dev", "plan", "active")
 	if err != nil {
 		t.Fatal(err)
 	}

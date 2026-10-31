@@ -292,8 +292,8 @@ func TestPlanReplanTrustedPolicyModes(t *testing.T) {
 				if !errors.Is(err, ErrPlanReplanLimit) {
 					t.Fatal("approved zero limit ignored", err)
 				}
-				for _, decision := range []string{"--reject", "--approve"} {
-					if !strings.Contains(err.Error(), fmt.Sprintf("swarm issue review-plan %d %s", n, decision)) {
+				for _, decision := range []string{"request a revised plan", "approve the current reports"} {
+					if !strings.Contains(err.Error(), decision) {
 						t.Fatal(err)
 					}
 				}
@@ -361,7 +361,7 @@ func TestPlanReplanPendingPRGuidance(t *testing.T) {
 
 func TestPlanReplanHumanGuidance(t *testing.T) {
 	t.Parallel()
-	m, issue, st := rejectedReplanFixture(t)
+	m, _, st := rejectedReplanFixture(t)
 	for _, fork := range []string{"", "contributor/repo"} {
 		for _, pr := range []bool{false, true} {
 			st.PlanReplanCount = 2
@@ -376,9 +376,7 @@ func TestPlanReplanHumanGuidance(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, want := range []string{
-				fmt.Sprintf("swarm issue review-plan %d --reject", issue),
-				fmt.Sprintf("swarm issue review-plan %d --approve", issue),
-				"request a revised plan", "does not approve implementation", "authorized independent upstream maintainer, outside --fork",
+				"request a revised plan", "approve the current reports", "independent upstream maintainer", "outside --fork",
 				"edit and reapprove the WorkUnit", "manually revise both reports", "managed worktree",
 			} {
 				if !strings.Contains(err.Error(), want) {

@@ -46,7 +46,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			defer func() {
 				if runErr != nil && failedReport != nil {
 					if asJSON {
-						outcome := map[string]any{"kind": "submission", "status": "failed", "error": runErr.Error(), "report": failedReport}
+						outcome := map[string]any{"kind": "submission", "status": "failed", "error": messageOnly(runErr), "report": failedReport}
 						if action := nextActionOf(runErr); action != nil {
 							outcome["next_action"] = action
 						}

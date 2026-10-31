@@ -42,7 +42,7 @@ func TestStatusPolicyChangeKeepsHumanPlan(t *testing.T) {
 		t.Parallel()
 		f, n := approved(t, filepath.Join(".swarm", "rules", "new.md"))
 		text := f.must(t, "issue", "status", n)
-		for _, want := range []string{"Plan: policy files changed\n", "Policy paths: .swarm/rules/new.md\n", "Plan review required: swarm issue review-plan " + n + " --approve\n"} {
+		for _, want := range []string{"Plan: policy files changed\n", "Policy paths: .swarm/rules/new.md\n", "Plan approval required.\n", "Next step:", "issue review-plan " + n + " --approve\n"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("status missing %q:\n%s", want, text)
 			}

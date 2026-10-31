@@ -1182,3 +1182,15 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		t.Fatalf("fork coordination left no %s ledger: %v", ns, refs)
 	}
 }
+
+func TestPlanApprovalErrorTransport(t *testing.T) {
+	for _, cause := range []error{&lease.HumanPlanApprovalError{}, &lease.PlanApprovalError{}, lease.ErrApprovalRequired} {
+		decoded := mapCoordinatorError("review-plan", cause.Error())
+		if !errors.Is(decoded, lease.ErrApprovalRequired) || !strings.Contains(decoded.Error(), cause.Error()) {
+			t.Fatalf("transport: %v", decoded)
+		}
+		if strings.Contains(cause.Error(), "plan approval") && strings.Contains(decoded.Error(), "task approval") {
+			t.Fatal(decoded)
+		}
+	}
+}

@@ -78,11 +78,11 @@ func (m *Manager) CheckPlanReplan(st *IssueState) error {
 	}
 	if directIssue(st) && st.HumanPlanReview != nil && !strings.EqualFold(cfg.PlanMode, "interactive") {
 		if !validRejection(st.HumanPlanReview) {
-			return ErrApprovalRequired
+			return ErrPlanApprovalRequired
 		}
 		if st.HumanDraftCount >= cfg.Lease.PlanReplanAttempts() {
 			if CompletePlanPair(st) {
-				return fmt.Errorf("%w (%d/%d): fresh authenticated exact-report approval required; run swarm issue review-plan %d --approve", ErrPlanReplanLimit, st.HumanDraftCount, cfg.Lease.PlanReplanAttempts(), st.Lease.IssueNumber)
+				return fmt.Errorf("%w (%d/%d): fresh authenticated exact-report approval required", ErrPlanReplanLimit, st.HumanDraftCount, cfg.Lease.PlanReplanAttempts())
 			}
 			return fmt.Errorf("%w (%d/%d): %s", ErrPlanReplanLimit, st.HumanDraftCount, cfg.Lease.PlanReplanAttempts(), m.planRevisionGuidance(st))
 		}
@@ -92,7 +92,7 @@ func (m *Manager) CheckPlanReplan(st *IssueState) error {
 		return nil
 	}
 	if directIssue(st) && !validRejection(st.PendingPlanReview) {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	limit := cfg.Lease.PlanReplanAttempts()
 	if st.PlanReplanCount < limit {
@@ -101,11 +101,11 @@ func (m *Manager) CheckPlanReplan(st *IssueState) error {
 	if directIssue(st) && !CompletePlanPair(st) {
 		return fmt.Errorf("%w (%d/%d): %s", ErrPlanReplanLimit, st.PlanReplanCount, limit, m.planRevisionGuidance(st))
 	}
-	guidance := fmt.Sprintf("run swarm issue review-plan %d, or edit and reapprove the WorkUnit", st.Lease.IssueNumber)
+	guidance := "request plan review, or edit and reapprove the WorkUnit"
 	if st.PRRevision != nil {
 		guidance = fmt.Sprintf("run swarm pr work %d --phase review, or edit and reapprove the WorkUnit", st.PRRevision.Number)
 	}
-	guidance += fmt.Sprintf("; an authorized independent upstream maintainer, outside --fork, can run swarm issue review-plan %d --reject to request a revised plan (this does not approve implementation), or swarm issue review-plan %d --approve after reviewing the current reports", st.Lease.IssueNumber, st.Lease.IssueNumber)
+	guidance += "; an independent upstream maintainer can request a revised plan or approve the current reports outside --fork"
 	if !strings.EqualFold(cfg.PlanMode, "agent") {
 		resource, number := "issue", st.Lease.IssueNumber
 		if st.PRRevision != nil {
@@ -182,7 +182,7 @@ func (m *Manager) ResetPlanReplansAfterStage(ctx context.Context, issue int, own
 			return fmt.Errorf("staged plan versions changed")
 		}
 		if p := st.PendingPlanReview; p != nil && (p.TaskDigest != st.TaskDigest || p.PolicyDigest != st.PolicyDigest || p.BaseSHA != st.BaseSHA) {
-			return ErrApprovalRequired
+			return ErrPlanApprovalRequired
 		}
 		st.PlanReplanCount = 0
 		if directIssue(st) {
@@ -364,7 +364,7 @@ func (m *Manager) RecordPlanPair(ctx context.Context, n int, owner string, plan,
 		}
 		if rejection != nil {
 			if !validRejection(rejection) || rejection.TaskDigest != st.TaskDigest || !planReservationMatches(st, rejection) {
-				return ErrApprovalRequired
+				return ErrPlanApprovalRequired
 			}
 			if oldPlan != nil && oldTest != nil && contract.CanonicalArtifactBody(oldPlan.Body) == contract.CanonicalArtifactBody(plan.Body) && contract.CanonicalArtifactBody(oldTest.Body) == contract.CanonicalArtifactBody(test.Body) {
 				return ErrPlanUnchanged
@@ -373,7 +373,7 @@ func (m *Manager) RecordPlanPair(ctx context.Context, n int, owner string, plan,
 				return ErrPlanUnchanged
 			}
 			if st.HumanPlanReview != nil && st.HumanDraftCount == 0 || st.HumanPlanReview == nil && st.PlanReplanCount == 0 {
-				return ErrApprovalRequired
+				return ErrPlanApprovalRequired
 			}
 		}
 		pair := []contract.Artifact{plan, test}
@@ -458,7 +458,7 @@ func planReservationMatches(st *IssueState, p *PlanRejection) bool {
 func (m *Manager) planRevisionGuidance(st *IssueState) string {
 	prefix := ""
 	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(m.nowFn()) {
-		prefix = fmt.Sprintf("the active claim owner must first run swarm issue release %d; ", st.Lease.IssueNumber)
+		prefix = "the active claim owner must first release the claim; "
 	}
-	return fmt.Sprintf("identical WorkUnit cannot recover here; %sa maintainer must run swarm issue edit %d --objective '<maintainer-chosen revised objective>', then separately swarm issue approve %d and swarm issue work %d", prefix, st.Lease.IssueNumber, st.Lease.IssueNumber, st.Lease.IssueNumber)
+	return fmt.Sprintf("identical WorkUnit cannot recover here; %sa maintainer must revise the objective, then separately run swarm issue approve %d and swarm issue work %d", prefix, st.Lease.IssueNumber, st.Lease.IssueNumber)
 }

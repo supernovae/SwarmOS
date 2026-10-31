@@ -25,6 +25,7 @@ type WorkPreflightResult struct {
 	Warnings       []string `json:"warnings"`
 	Commands       []string `json:"commands"`
 	pausedRebase   bool
+	stopCommands   []string
 }
 
 func mergeability(p *tracker.PullRequest) string {
@@ -172,8 +173,14 @@ func (s *Service) checkWork(ctx context.Context, r *Result) error {
 				releaseSuffix = fmt.Sprintf(" --fork --fork-remote %q", s.ForkRemote)
 			}
 			w.Commands = append(w.Commands, fmt.Sprintf("If a claim is active: swarm issue release %d --reason \"re-approve against the new base for PR #%d\" --backend github", r.IssueNumber, r.PR.Number)+releaseSuffix, fmt.Sprintf("Maintainer (upstream): swarm issue approve %d --backend github", r.IssueNumber))
+			w.stopCommands = append(w.stopCommands, w.Commands[len(w.Commands)-2])
 		}
 		w.Commands = append(w.Commands, s.workCommand(r, "rebase", ""), "After resolving and staging conflicts: "+s.workCommand(r, "rebase", "--continue"), "Or resolve with the developer agent: "+s.workCommand(r, "rebase", "--continue --resolve"), s.workCommand(r, "validate", ""), s.workCommand(r, "submit", ""))
+		w.stopCommands = append(w.stopCommands, s.workCommand(r, "rebase", ""), "After resolving and staging conflicts: "+s.workCommand(r, "rebase", "--continue"), s.workCommand(r, "validate", ""), s.workCommand(r, "submit", ""))
+		if !w.pausedRebase {
+			w.stopCommands = append(w.stopCommands, "Or resolve with the developer agent: "+s.workCommand(r, "rebase", "--continue --resolve"))
+		}
+
 	}
 	return nil
 }
@@ -182,7 +189,7 @@ func (s *Service) checkWork(ctx context.Context, r *Result) error {
 // first; a moved base then needs task approval before any new rebase;
 // otherwise the blockers are conflicts.
 func (w *WorkPreflightResult) stopError(r *Result) error {
-	err := fmt.Errorf("%s\n%s", strings.Join(w.Blockers, "\n"), strings.Join(w.Commands, "\n"))
+	err := fmt.Errorf("%s\n%s", strings.Join(w.Blockers, "\n"), strings.Join(w.stopCommands, "\n"))
 	if !w.pausedRebase && w.BaseResult == "moved" {
 		return &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: err}
 	}

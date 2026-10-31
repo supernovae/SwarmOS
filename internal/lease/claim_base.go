@@ -16,7 +16,7 @@ type ClaimBaseApprovalError struct {
 }
 
 func (e *ClaimBaseApprovalError) Error() string {
-	return fmt.Sprintf("issue #%d: %s; run swarm issue approve %d", e.IssueNumber, e.Reason, e.IssueNumber)
+	return fmt.Sprintf("issue #%d: %s", e.IssueNumber, e.Reason)
 }
 func (e *ClaimBaseApprovalError) Unwrap() error { return ErrApprovalRequired }
 

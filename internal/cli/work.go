@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/tracker"
@@ -168,7 +169,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				if jsonOutput {
 					return &planRecoveryError{err: err, recovery: recovery, display: directPlanReviewDisplay(&guidanceOpts, result.State)}
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), recovery)
+				fmt.Fprintln(cmd.OutOrStdout(), planReviewSummary(&guidanceOpts, result.State))
 			}
 			if err != nil {
 				if failedReport = failedWorkValidation(result); !jsonOutput {
@@ -193,11 +194,30 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			if split != "" {
 				fmt.Fprintln(cmd.OutOrStdout(), split)
 			}
+			decision := false
+			if result.State != nil && result.State.EffectiveGate == contract.GateHuman && result.PhaseCompleted != "awaiting-plan" {
+				issue, err := tr.GetIssue(cmd.Context(), result.IssueNumber)
+				if err != nil {
+					return err
+				}
+				wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+				if err != nil {
+					return err
+				}
+				approvedCfg, err := harness.LoadConfigAt(opts.RepoRoot, result.State.BaseSHA)
+				if err != nil {
+					return err
+				}
+				decision = needsHumanPlanDecision(result.State, wu, approvedCfg)
+			}
+			if decision {
+				fmt.Fprintln(cmd.OutOrStdout(), "Plan approval required."+renderNextAction((stopContext{opts: &guidanceOpts}).planApproval(result.IssueNumber)))
+			}
 			if result.PausedForHuman {
 				if result.PhaseCompleted == "awaiting-plan" {
 					fmt.Fprintf(cmd.OutOrStdout(), "Interactive plan required: write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md in %s, then run: swarm issue stage %d --phase plan\n", result.WorktreePath, result.IssueNumber)
 				} else {
-					fmt.Fprintf(cmd.OutOrStdout(), "Plan approval required: swarm issue review-plan %d --approve\n", result.IssueNumber)
+
 					if len(result.PlanReviewers) > 0 {
 						fmt.Fprintf(cmd.OutOrStdout(), "Reviewers requested: %s\n", strings.Join(result.PlanReviewers, ", "))
 					}

@@ -543,7 +543,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 					return nil, bindingErr
 				}
 				if opts.Phase != "review" || opts.Handoff {
-					return nil, fmt.Errorf("%w: explicitly reconcile the reviewed checkpoint before ordinary work", lease.ErrApprovalRequired)
+					return nil, fmt.Errorf("%w: explicitly reconcile the reviewed checkpoint before ordinary work", lease.ErrPlanApprovalRequired)
 				}
 				opts.ExpectedHead, opts.CandidateHead = expected, candidate
 				return e.executeCheckpointPlan(ctx, opts)
@@ -1022,7 +1022,7 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 
 func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, recovery WorkOptions, reporters ...*ProgressReporter) (string, *lease.IssueState, error) {
 	if lease.IncompletePlanPair(st) {
-		return "", st, lease.ErrApprovalRequired
+		return "", st, lease.ErrPlanApprovalRequired
 	}
 
 	if err := e.admitStage(ctx, wu.IssueNumber, owner, "review"); err != nil {
@@ -1119,7 +1119,7 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 			return verdict, st, checkErr
 		}
 		if !reflect.DeepEqual(lease.ReviewBindings(st), lease.ReviewBindings(current.State)) {
-			return verdict, st, lease.ErrApprovalRequired
+			return verdict, st, lease.ErrPlanApprovalRequired
 		}
 	}
 	updated, err := e.LeaseManager.UpdateArtifact(ctx, wu.IssueNumber, owner, contract.Artifact{
@@ -1758,7 +1758,7 @@ func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmC
 	human := st.HumanPlanReview != nil
 	if !opts.IssueContinuation || opts.Phase != "all" {
 		if human && opts.Phase != "plan" {
-			return &lease.HumanPlanApprovalError{IssueNumber: st.Lease.IssueNumber, Err: lease.ErrApprovalRequired}
+			return &lease.HumanPlanApprovalError{IssueNumber: st.Lease.IssueNumber, Err: lease.ErrPlanApprovalRequired}
 		}
 		return nil
 	}
@@ -1767,7 +1767,7 @@ func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmC
 		return nil
 	}
 	if human && !needsPlan {
-		return &lease.HumanPlanApprovalError{IssueNumber: st.Lease.IssueNumber, Err: lease.ErrApprovalRequired}
+		return &lease.HumanPlanApprovalError{IssueNumber: st.Lease.IssueNumber, Err: lease.ErrPlanApprovalRequired}
 	}
 	if needsPlan && (st.PendingPlanReview != nil || human) {
 		rejection := st.PendingPlanReview
@@ -1798,6 +1798,14 @@ func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmC
 		return fmt.Errorf("%w: incomplete plan generation; revise the WorkUnit with swarm issue edit %d --objective '<maintainer-chosen revised objective>' and separately swarm issue approve %d", lease.ErrApprovalRequired, st.Lease.IssueNumber, st.Lease.IssueNumber)
 	}
 	if hasFailedValidationArtifact(st) && opts.instructionsFor("developer") == "" {
+		if needsPlan {
+			return nil
+		} // Planning must repair missing or rejected reports first.
+		if !needsPlan {
+			if err := lease.VerifyHumanPlanApproval(st); err != nil {
+				return err
+			}
+		}
 		repair := validation.RepairFromArtifact(st.Artifacts, st.BaseSHA)
 		if repair != nil && repair.OutsideCandidate() {
 			return fmt.Errorf("%w: %w", ErrOutsideCandidateFailures, validation.ErrRequiredCheckFailed)
@@ -1806,7 +1814,7 @@ func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmC
 			return &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: ErrPreExistingFailures, Operation: "work", Arguments: []string{"--developer-instructions", "Address the failing checks"}}
 		}
 		if st.ValidationRepairCount >= cfg.Lease.ValidationRepairAttempts() {
-			return fmt.Errorf("%w (%d/%d): run swarm issue work %d --phase implement", ErrValidationRepairExhausted, st.ValidationRepairCount, cfg.Lease.ValidationRepairAttempts(), st.Lease.IssueNumber)
+			return fmt.Errorf("%w (%d/%d): automatic allowance exhausted; explicit --phase implement or --developer-instructions may continue subject to approval", ErrValidationRepairExhausted, st.ValidationRepairCount, cfg.Lease.ValidationRepairAttempts())
 		}
 	}
 	return nil

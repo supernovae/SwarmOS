@@ -13,7 +13,7 @@ import (
 // tree. It cannot approve a new task or a changed policy.
 func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBase, target, expectedHead string) (*IssueState, error) {
 	if m.gateway != nil {
-		return nil, fmt.Errorf("routine reapproval requires the upstream coordinator; run swarm issue approve %d", n)
+		return nil, fmt.Errorf("routine reapproval requires task approval by the upstream coordinator")
 	}
 	actor, err := m.tracker.CurrentUser(ctx)
 	if err != nil {
@@ -91,7 +91,7 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 		return nil, err
 	}
 	if oldTree == "" || oldTree != tree || st.PolicyTreeDigest != oldTree {
-		return nil, fmt.Errorf("policy tree changed; run swarm issue approve %d", n)
+		return nil, fmt.Errorf("policy tree changed; task reapproval required")
 	}
 	cfg, err := harness.LoadConfigAt(m.repoRoot, target)
 	if err != nil {
@@ -111,7 +111,7 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 	if st.EffectiveGate != contract.GateNone {
 		if err = VerifyApproval(st, wu); err != nil {
 			if st.EffectiveGate == contract.GateHuman {
-				return nil, &HumanPlanApprovalError{IssueNumber: n, Err: fmt.Errorf("human plan approval required: swarm issue review-plan %d --approve: %w", n, err)}
+				return nil, &HumanPlanApprovalError{IssueNumber: n, Err: fmt.Errorf("human plan approval required: %w", err)}
 			}
 			return nil, fmt.Errorf("plan review required: swarm pr work %d --phase review: %w", number, err)
 		}

@@ -26,7 +26,7 @@ func (r *workRun) plan() (bool, error) {
 	var err error
 	r.rejectedPlan, r.rejectedTest, r.rejectedFindings = rejectedPlanContext(r.st)
 	if r.continuation() && !strings.EqualFold(r.cfg.PlanMode, "interactive") && hasRejectedReview(r.st) && r.opts.instructionsFor("planner") == "" && strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(r.rejectedFindings), "VERDICT: CHANGES_REQUESTED")) == "" {
-		return true, fmt.Errorf("%w: recorded rejection needs planner feedback; run swarm issue work %d --planner-instructions 'Address the plan review'", ErrPlanReviewRejected, r.opts.IssueNumber)
+		return true, &IssueRecoveryError{IssueNumber: r.opts.IssueNumber, Err: fmt.Errorf("%w: recorded rejection needs planner feedback", ErrPlanReviewRejected), Operation: "work", Arguments: []string{"--planner-instructions", "Address the plan review"}}
 	}
 	r.runPlan = r.opts.Phase == "all" || r.opts.Phase == "plan"
 	if r.opts.Phase == "all" && (hasDesignAndTestPlanArtifacts(r.st) && !hasRejectedReview(r.st)) {
@@ -314,7 +314,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 	if role == "reviewer" {
 		_, candidate, present, bindingErr := lease.CheckpointPlanHeads(p.State)
 		if !present || bindingErr != nil || candidate != opts.CandidateHead {
-			return nil, lease.ErrApprovalRequired
+			return nil, lease.ErrPlanApprovalRequired
 		}
 		if p.State.EffectiveGate == contract.GateHuman {
 			return nil, ErrPlanApprovalNeeded

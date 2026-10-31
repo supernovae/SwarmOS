@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -93,7 +95,15 @@ func TestNextActionMatrix(t *testing.T) {
 			if code := ExitCode(fmt.Errorf("outer: %w", wrapped)); code != tc.want.code {
 				t.Fatalf("exit = %d, want %d", code, tc.want.code)
 			}
-			if !errors.Is(wrapped, tc.err) || wrapped.Error() != tc.err.Error() {
+			if strings.Count(wrapped.Error(), "Next step:") != 1 {
+				t.Fatalf("missing or repeated action: %v", wrapped)
+			}
+			line := strings.Split(wrapped.Error(), "Next step: ")[1]
+			parsed, parseErr := exec.Command("sh", "-c", "set -- "+line+"; printf '%s\\0' \"$@\"").Output()
+			if parseErr != nil || !reflect.DeepEqual(strings.Split(strings.TrimSuffix(string(parsed), "\x00"), "\x00"), action.Argv) {
+				t.Fatalf("shell argv: %q %v", parsed, parseErr)
+			}
+			if !errors.Is(wrapped, tc.err) || messageOnly(wrapped) != tc.err.Error() {
 				t.Fatalf("stop changed the error: %v", wrapped)
 			}
 		})
@@ -115,7 +125,7 @@ func TestNextActionMatrix(t *testing.T) {
 			if a == nil || !reflect.DeepEqual(a.Argv, expected) || a.Reason != ReasonNeedsApproval || !a.HumanRequired || ExitCode(stopped) != 4 || !errors.As(stopped, &typed) || !errors.Is(stopped, lease.ErrApprovalRequired) || !errors.Is(stopped, workflow.ErrPlanApprovalNeeded) {
 				t.Fatalf("fork action: %v %+v", stopped, a)
 			}
-			if !strings.HasPrefix(stopped.Error(), original.Error()+"\n") || !strings.Contains(stopped.Error(), "linked upstream issue #7") || !strings.Contains(stopped.Error(), strings.Join(expected, " ")) || (repo == "" && !strings.Contains(stopped.Error(), "Run this command from the upstream repository checkout.")) {
+			if !strings.HasPrefix(stopped.Error(), original.Error()+"\n") || !strings.Contains(stopped.Error(), "upstream maintainer") || !strings.Contains(stopped.Error(), strings.Join(expected, " ")) || (repo == "" && !strings.Contains(stopped.Error(), "Run this command from the upstream repository checkout.")) {
 				t.Fatal(stopped)
 			}
 			root := newRootCmdWithOptions(&RootOptions{})
@@ -131,7 +141,7 @@ func TestNextActionMatrix(t *testing.T) {
 			}
 			for _, higher := range []error{workflow.ErrPlanReviewRejected, &lease.TaskApprovalError{IssueNumber: 7}, &lease.ClaimBaseApprovalError{IssueNumber: 7}} {
 				nested := errors.Join(higher, plan)
-				if got := c.stop(nested); got.Error() != nested.Error() {
+				if got := c.stop(nested); messageOnly(got) != nested.Error() {
 					t.Fatalf("precedence changed text: %v", got)
 				}
 			}
@@ -248,6 +258,9 @@ func assertNextAction(t *testing.T, doc map[string]any, err error, reason string
 	}
 	if raw["reason"] != reason || raw["human_required"] != human || !reflect.DeepEqual(got, argv) {
 		t.Fatalf("next_action = %v, want %s %v %q", raw, reason, human, argv)
+	}
+	if doc["error"] != messageOnly(err) || strings.Contains(fmt.Sprint(doc["error"]), "Next step:") {
+		t.Fatalf("JSON presentation leaked: %v", doc)
 	}
 	if doc["status"] != "failed" || doc["error"] == "" {
 		t.Fatalf("stop not reported as failed: %v", doc)
@@ -494,6 +507,175 @@ func TestTesterRetryNextActionPreservesSelections(t *testing.T) {
 		opts.Fork = true
 		if c.classify(err) != nil {
 			t.Fatal("fork advertised unsupported retry")
+		}
+	}
+}
+
+func TestNextActionHumanMessageBoundary(t *testing.T) {
+	c := stopContext{opts: &RootOptions{RepoRoot: "/repo with 'quotes'", Backend: "local"}, resource: "issue", number: 7}
+	cause := &lease.HumanPlanApprovalError{IssueNumber: 7}
+	err := c.stop(cause)
+	if strings.Count(err.Error(), "Next step:") != 1 || !strings.Contains(err.Error(), "independent maintainer") {
+		t.Fatalf("missing human action: %v", err)
+	}
+	line := strings.Split(err.Error(), "Next step: ")[1]
+	parsed, parseErr := exec.Command("sh", "-c", "set -- "+line+"; printf '%s\\0' \"$@\"").Output()
+	if parseErr != nil || !reflect.DeepEqual(strings.Split(strings.TrimSuffix(string(parsed), "\x00"), "\x00"), nextActionOf(err).Argv) {
+		t.Fatalf("quoted argv: %q %v", parsed, parseErr)
+	}
+	if messageOnly(fmt.Errorf("context: %w", err)) != "context: "+cause.Error() {
+		t.Fatal("JSON diagnostic context lost")
+	}
+	if c.stop(fmt.Errorf("context: %w", err)).Error() != "context: "+err.Error() {
+		t.Fatal("repeated rendering")
+	}
+}
+
+func TestNextActionUnknownIdentity(t *testing.T) {
+	for _, cause := range []error{workflow.ErrValidationRepairExhausted, workflow.ErrPlanReviewRejected, workflow.ErrPreExistingFailures} {
+		if got := (stopContext{resource: "issue"}).classify(cause); got != nil {
+			t.Fatalf("unknown issue: %+v", got)
+		}
+	}
+}
+
+func TestNextActionNoReadyCarrier(t *testing.T) {
+	cause := workflow.ErrValidationRepairExhausted
+	c := stopContext{opts: &RootOptions{Backend: "local", Repo: "acme/repo", RepoRoot: "/a 'repo'"}, resource: "issue", number: 19}
+	e := &noReadyError{cause: cause, action: c.classify(cause), text: "Issue #19: automatic allowance exhausted"}
+	if !errors.Is(e, errNoReadyWork) || !errors.Is(e, cause) || ExitCode(e) != ExitFailure {
+		t.Fatal(e)
+	}
+	var stop *stopError
+	if errors.As(e, &stop) {
+		t.Fatal("selection returned a stop")
+	}
+	wrapped := (stopContext{resource: "issue"}).stop(e)
+	if ExitCode(wrapped) != ExitChangesRequested || !reflect.DeepEqual(nextActionOf(wrapped).Argv, e.action.Argv) || strings.Count(wrapped.Error(), "Next step:") != 1 {
+		t.Fatal(wrapped)
+	}
+	if messageOnly(fmt.Errorf("context: %w", wrapped)) != "context: "+e.text {
+		t.Fatal("message context lost")
+	}
+}
+
+func TestIssueWorkHumanPlanDecisionSurfaces(t *testing.T) {
+	f, n, _, actor, run := recoveryCommandFixture(t, "local", "human", 1)
+	number := strconv.Itoa(n)
+	out, err := run("issue", "work", number, "--phase", "plan", "--agent", "mock", "--progress=false")
+	if err != nil || strings.Count(out, "Next step:") != 1 || !strings.Contains(out, "issue review-plan "+number+" --approve") {
+		t.Fatalf("plan: %v %s", err, out)
+	}
+	out, err = run("issue", "status", number)
+	if err != nil || strings.Count(out, "Next step:") != 1 {
+		t.Fatalf("status: %v %s", err, out)
+	}
+	out, err = run("issue", "approve", number)
+	if err == nil || !strings.Contains(err.Error(), "independent maintainer") || strings.Contains(err.Error(), "release") {
+		t.Fatalf("own claim: %v %s", err, out)
+	}
+	jsonOut, refusalErr := run("issue", "approve", number, "--json")
+	var refusalDoc map[string]any
+	if decodeErr := json.Unmarshal([]byte(jsonOut[strings.Index(jsonOut, "{"):]), &refusalDoc); decodeErr != nil {
+		t.Fatal(decodeErr, jsonOut)
+	}
+	if ExitCode(refusalErr) != ExitFailure || refusalDoc["error"] != messageOnly(refusalErr) || strings.Contains(fmt.Sprint(refusalDoc["error"]), "Next step:") || refusalDoc["next_action"] == nil {
+		t.Fatal(refusalDoc, refusalErr)
+	}
+
+	st, err := f.manager.GetCurrentState(t.Context(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := f.tracker.GetIssue(t.Context(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := harness.LoadConfigAt(f.root, st.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*lease.IssueState)
+		want   bool
+	}{
+		{"first plan", func(*lease.IssueState) {}, true},
+		{"not human", func(s *lease.IssueState) { s.EffectiveGate = contract.GateAgent }, false},
+		{"stale task", func(s *lease.IssueState) { s.TaskDigest = "stale" }, false},
+		{"stale policy", func(s *lease.IssueState) { s.PolicyDigest = "stale" }, false},
+		{"human rejection", func(s *lease.IssueState) { s.HumanPlanReview = &lease.PlanRejection{} }, false},
+		{"pending rejection", func(s *lease.IssueState) { s.PendingPlanReview = &lease.PlanRejection{} }, false},
+		{"missing pair", func(s *lease.IssueState) { s.Artifacts = nil }, false},
+		{"completed", func(s *lease.IssueState) { s.Lease.Status = "completed" }, false},
+		{"linked PR", func(s *lease.IssueState) { s.Lease.Status = "completed"; s.PRNumber = 99 }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			copy := *st
+			tc.change(&copy)
+			if got := needsHumanPlanDecision(&copy, wu, cfg); got != tc.want {
+				t.Fatalf("got %t", got)
+			}
+		})
+	}
+	*actor = "independent-maintainer"
+	if out, err = run("issue", "review-plan", number, "--approve"); err != nil {
+		t.Fatal(err, out)
+	}
+	*actor = "alice"
+	out, err = run("issue", "status", number)
+	if err != nil || strings.Contains(out, "Next step:") {
+		t.Fatalf("approved status: %v %s", err, out)
+	}
+	out, err = run("issue", "approve", number)
+	if err == nil || !strings.Contains(err.Error(), "task approval is current") || strings.Contains(err.Error(), "Next step:") || strings.Contains(err.Error(), "release") {
+		t.Fatalf("current: %v %s", err, out)
+	}
+	issue.Body = strings.Replace(issue.Body, wu.Objective, wu.Objective+" changed", 1)
+	if _, err = f.tracker.UpdateIssueBody(t.Context(), n, issue.Body); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("issue", "approve", number)
+	if err == nil || !strings.Contains(err.Error(), "task reapproval required") || !strings.Contains(err.Error(), "issue release "+number) || strings.Contains(err.Error(), "review-plan") {
+		t.Fatalf("stale task: %v %s", err, out)
+	}
+
+}
+
+func TestIssueWorkPhaseDiagnostics(t *testing.T) {
+	for _, resource := range []string{"issue", "pr"} {
+		cmd := newRootCmdWithOptions(&RootOptions{})
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs([]string{resource, "work", "7", "--phase", "invalid"})
+		err := cmd.ExecuteContext(t.Context())
+		if err == nil || !strings.Contains(err.Error(), "valid: all, plan, review, implement, test") || strings.Contains(err.Error(), "Next step:") {
+			t.Fatal(resource, err)
+		}
+	}
+}
+
+func TestNextActionOperationGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+		no   string
+	}{
+		{[]string{"issue", "approve", "7"}, "authorized maintainer", "independent"},
+		{[]string{"issue", "review-plan", "7", "--approve"}, "independent maintainer", "authorized maintainer"},
+		{[]string{"issue", "review-plan", "7"}, "authorized maintainer", "independent"},
+		{[]string{"issue", "release", "7"}, "active claim owner", "maintainer"},
+		{[]string{"issue", "status", "7"}, "Next step:", "maintainer"},
+		{[]string{"pr", "rebase", "9", "--continue"}, "Next step:", "maintainer"},
+	} {
+		got := renderNextAction(&NextAction{Argv: append([]string{"swarm"}, tc.args...), HumanRequired: true})
+		if !strings.Contains(got, tc.want) || strings.Contains(got, tc.no) {
+			t.Fatal(got)
 		}
 	}
 }

@@ -55,11 +55,7 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 		r.st, err = r.e.failedRun(r.ctx, r.st, r.opts, testerRun, err, "tester")
 		r.res.State = r.st
 		if !r.forkMode && r.checkTestRetry() == nil {
-			command := fmt.Sprintf("swarm issue work %d --phase test", r.opts.IssueNumber)
-			if r.opts.PRNumber != 0 {
-				command = fmt.Sprintf("swarm pr work %d --phase test", r.opts.PRNumber)
-			}
-			return false, &TestRetryAvailableError{Err: fmt.Errorf("rerun with %s: %w", command, err)}
+			return false, &TestRetryAvailableError{Err: err}
 		}
 		return false, err
 	}
@@ -170,7 +166,7 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 				if slices.Equal(failing, previous) {
 					detail = "the same tests still fail"
 				}
-				err = fmt.Errorf("issue #%d: %w after %d of %d repair rounds; %s: %s; rerun with %s: %w", r.opts.IssueNumber, ErrValidationRepairExhausted, r.repairLimit, r.repairLimit, detail, boundedList(failing, maxRepairIdentities), r.rerun, err)
+				err = fmt.Errorf("issue #%d: %w after %d of %d repair rounds; %s: %s; automatic allowance exhausted; explicit --phase implement or --developer-instructions may continue subject to approval: %w", r.opts.IssueNumber, ErrValidationRepairExhausted, r.repairLimit, r.repairLimit, detail, boundedList(failing, maxRepairIdentities), err)
 			}
 			break
 		}
@@ -208,7 +204,7 @@ func (r *workRun) reserveRepair() error {
 	}
 	st, err := r.e.LeaseManager.ReserveValidationRepair(r.ctx, r.opts.IssueNumber, r.opts.Owner)
 	if err != nil {
-		return fmt.Errorf("%w: %w; run %s", ErrValidationRepairExhausted, err, r.rerun)
+		return fmt.Errorf("%w: %w; automatic allowance exhausted; explicit --phase implement or --developer-instructions may continue subject to approval", ErrValidationRepairExhausted, err)
 	}
 	r.st, r.res.State = st, st
 	r.progress.retry("validation-repair", st.ValidationRepairCount, r.repairLimit)

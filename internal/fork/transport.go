@@ -475,6 +475,8 @@ func mapCoordinatorError(op, msg string) error {
 		return fmt.Errorf("%w: %s", lease.ErrPlanReplanLimit, msg)
 	case strings.Contains(lower, lease.ErrClaimFence.Error()):
 		return fmt.Errorf("%w: %s", lease.ErrClaimFence, msg)
+	case strings.Contains(lower, lease.ErrPlanApprovalRequired.Error()):
+		return fmt.Errorf("%w: %s", lease.ErrPlanApprovalRequired, msg)
 	case strings.Contains(lower, lease.ErrApprovalRequired.Error()):
 		return fmt.Errorf("%w: %s", lease.ErrApprovalRequired, msg)
 	case strings.Contains(lower, lease.ErrAlreadyClaimed.Error()):

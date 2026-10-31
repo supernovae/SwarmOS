@@ -26,6 +26,27 @@ import (
 
 var errNoReadyWork = errors.New("no approved ready work matches this node")
 
+// noReadyError retains candidate context without changing claim/node exit semantics.
+type noReadyError struct {
+	showAction bool
+	guidance   string
+	cause      error
+	action     *NextAction
+	text       string
+}
+
+func (e *noReadyError) Error() string {
+	if e.showAction {
+		return e.human()
+	}
+	return e.text
+}
+func (e *noReadyError) Unwrap() error { return e.cause }
+func (e *noReadyError) Is(target error) bool {
+	return target == errNoReadyWork || errors.Is(e.cause, target)
+}
+func (e *noReadyError) human() string { return e.text + e.guidance + renderNextAction(e.action) }
+
 type pulledWorkUnit struct {
 	Repo         string
 	RepoRoot     string
@@ -69,8 +90,26 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 	if err != nil {
 		return nil, err
 	}
-	var blocked []string
-	var lastBlocked error
+	var pending *noReadyError
+	reserveFinal := false
+	defer func() {
+		if pending != nil && !reserveFinal {
+			fmt.Fprintln(progressWriter(cmd), pending.human())
+		}
+	}()
+	block := func(err error, number int, repo, path, backend string) {
+		if pending != nil {
+			fmt.Fprintln(progressWriter(cmd), pending.human())
+		}
+		selected := *rootOpts
+		selected.Repo, selected.RepoRoot, selected.Backend = repo, path, backend
+		c := stopContext{opts: &selected, resource: "issue", number: number}
+		pending = &noReadyError{cause: err, action: c.classify(err), text: fmt.Sprintf("Issue #%d: %s", number, messageOnly(err))}
+		var stopped *stopError
+		if errors.As(c.stop(err), &stopped) {
+			pending.guidance = stopped.guidance
+		}
+	}
 	for _, target := range targets {
 		tr, mgr, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, target)
 		if err != nil {
@@ -123,11 +162,17 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				continue
 			}
 
+			approvedCfg, err := harness.LoadConfigAt(target.Path, state.BaseSHA)
+			if err != nil {
+				return nil, err
+			}
+			if !lease.TaskApprovalCurrent(state, wu, approvedCfg) {
+				block(&lease.TaskApprovalError{IssueNumber: issue.Number}, issue.Number, target.Repo, target.Path, target.Backend)
+				continue
+			}
+
 			if err := engine.CheckIssueContinuation(state, cfg, opts); err != nil {
-				reason := fmt.Sprintf("Issue #%d: %v", issue.Number, err)
-				blocked = append(blocked, reason)
-				lastBlocked = err
-				fmt.Fprintln(progressWriter(cmd), reason)
+				block(err, issue.Number, target.Repo, target.Path, target.Backend)
 				continue
 			}
 			phase := opts.Phase
@@ -152,7 +197,8 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				}
 				if hasPlan {
 					if err := lease.VerifyApproval(state, wu); err != nil {
-						continue // A human decision, not another worker, unblocks this task.
+						block(err, issue.Number, target.Repo, target.Path, target.Backend)
+						continue // A human decision unblocks this task.
 					}
 					if phase == "review" {
 						phase = "implement"
@@ -189,11 +235,11 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				lease.UnlockClaim(lock)
 				var refusal *lease.ClaimBaseApprovalError
 				if errors.As(err, &refusal) {
-					fmt.Fprintln(progressWriter(cmd), refusal)
+					block(err, issue.Number, target.Repo, target.Path, target.Backend)
 					continue
 				}
 				if errors.Is(err, lease.ErrApprovalRequired) {
-					fmt.Fprintf(progressWriter(cmd), "Issue #%d: %v\n", issue.Number, err)
+					block(&lease.TaskApprovalError{IssueNumber: issue.Number, Err: err}, issue.Number, target.Repo, target.Path, target.Backend)
 					continue
 				}
 				if errors.Is(err, lease.ErrAlreadyClaimed) || errors.Is(err, lease.ErrClaimRaceLost) {
@@ -243,8 +289,9 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			return pulled, nil
 		}
 	}
-	if len(blocked) > 0 {
-		return nil, fmt.Errorf("%w: %s: %w", errNoReadyWork, strings.Join(blocked, "; "), lastBlocked)
+	if pending != nil {
+		reserveFinal = true
+		return nil, pending
 	}
 	return nil, errNoReadyWork
 }

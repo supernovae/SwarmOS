@@ -207,7 +207,7 @@ func CheckCheckpointBoundary(ctx context.Context, root, base string, probe bool)
 }
 
 // Validate loads checks and protected paths exclusively from the immutable base.
-func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, opts ValidateOptions) (*ValidationReport, error) {
+func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, opts ValidateOptions) (result *ValidationReport, resultErr error) {
 	started := time.Now()
 	preflightComplete := false
 	defer func() {
@@ -277,6 +277,26 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 				}
 			}
 		}
+	}
+	var checkpointTree string
+	var restoreInstructions func() error
+	if !opts.CIMode {
+		restore, err := workspace.PrepareValidationInstructions(worktreePath)
+		if err != nil {
+			return nil, fmt.Errorf("prepare validation instructions: %v", err)
+		}
+		restoreInstructions = restore
+		defer func() {
+			if restoreInstructions == nil {
+				return
+			}
+			if err := restoreInstructions(); err != nil {
+				// A restoration error is infrastructure failure, never automatic repair.
+				result = nil
+				resultErr = fmt.Errorf("restore validation instructions: %v", err)
+			}
+		}()
+		checkpointTree, _ = workspace.CheckpointTree(ctx, worktreePath)
 	}
 	headSHA, err := resolveCommit(worktreePath, "HEAD")
 	if err != nil {
@@ -379,15 +399,27 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if !report.Passed && !opts.CIMode && ctx.Err() == nil {
 		repairStart := time.Now()
 		phaseEvent(opts.OnProgress, "repair", "started", 0)
-		report.Repair = diagnoseRepair(ctx, runner, report)
+		report.Repair = diagnoseRepairTree(ctx, runner, report, checkpointTree)
 		report.Timings.Repair = PhaseTiming{Duration: time.Since(repairStart), Status: "ran"}
 		phaseEvent(opts.OnProgress, "repair", "PASS", report.Timings.Repair.Duration)
+		for _, check := range report.Repair.FailedChecks {
+			if check.OutsideCandidateTree != "" {
+				fmt.Fprintf(&details, "\nCheck %s passed in checkpoint tree %s; its original validation result remains FAIL.\n", check.Name, check.OutsideCandidateTree)
+			}
+		}
 		if len(report.Repair.Tests) > 0 {
 			details.WriteString("\n### Failing tests compared with the approved base\n")
 			for _, test := range report.Repair.Tests {
 				details.WriteString("- `" + strings.ReplaceAll(testLine(test), "`", "'") + "`\n")
 			}
 			details.WriteString("\nSee `.swarm/active/REPAIR.md` for the repair brief.\n")
+		}
+	}
+	if restoreInstructions != nil {
+		restore := restoreInstructions
+		restoreInstructions = nil
+		if err := restore(); err != nil {
+			return nil, fmt.Errorf("restore validation instructions: %v", err)
 		}
 	}
 	stable := false
@@ -414,6 +446,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	}
 	report.Artifact = contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-validation", issue), IssueNumber: issue, Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: verdict, Summary: summary, Body: markdown.String(), CreatedAt: time.Now().UTC(), Metadata: map[string]string{"base_sha": baseSHA, "head_sha": headSHA}}
 	if report.Repair != nil {
+		report.Artifact.Metadata["validation_checkpoint_tree"] = checkpointTree
 		evidence, _ := json.Marshal(report.Repair)
 		report.Artifact.Metadata[RepairMetadataKey] = string(evidence)
 	}

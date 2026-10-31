@@ -21,7 +21,9 @@ import (
 	"unicode"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 // RepairFile is the coordinator-written repair brief in .swarm/active. Agents
@@ -66,11 +68,12 @@ type FailingTest struct {
 
 // RepairCheck is one failed required check with its bounded diagnostics.
 type RepairCheck struct {
-	Name         string   `json:"name"`
-	Command      string   `json:"command"`
-	ExitCode     int      `json:"exit_code"`
-	FailingTests []string `json:"failing_tests"`
-	OutputTail   string   `json:"output_tail"`
+	OutsideCandidateTree string   `json:"outside_candidate_tree,omitempty"`
+	Name                 string   `json:"name"`
+	Command              string   `json:"command"`
+	ExitCode             int      `json:"exit_code"`
+	FailingTests         []string `json:"failing_tests"`
+	OutputTail           string   `json:"output_tail"`
 	// Unattributed lists packages that failed without a named test, such as
 	// build failures; such failures are never pre-existing.
 	Unattributed        []string `json:"unattributed_packages,omitempty"`
@@ -80,6 +83,7 @@ type RepairCheck struct {
 // RepairSummary is the trusted account of a failed validation. Unavailable
 // explains a summary that could not be decoded or no longer matches.
 type RepairSummary struct {
+	CheckpointTree  string        `json:"checkpoint_tree,omitempty"`
 	BaseSHA         string        `json:"base_sha"`
 	HeadSHA         string        `json:"head_sha"`
 	FailedChecks    []RepairCheck `json:"failed_checks"`
@@ -98,7 +102,7 @@ func (s *RepairSummary) allPreExisting() bool {
 		return false
 	}
 	for _, check := range s.FailedChecks {
-		if check.InfrastructureError || len(check.Unattributed) > 0 || slices.Contains(check.FailingTests, truncationMarker) {
+		if check.OutsideCandidateTree != "" || check.InfrastructureError || len(check.Unattributed) > 0 || slices.Contains(check.FailingTests, truncationMarker) {
 			return false
 		}
 		found := false
@@ -118,11 +122,52 @@ func (s *RepairSummary) allPreExisting() bool {
 	return true
 }
 
+var checkpointTreePattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// OutsideCandidate reports complete evidence covering every failure, with at
+// least one check that passes in the exact checkpoint checkout.
+func (s *RepairSummary) OutsideCandidate() bool {
+	if s == nil || s.Unavailable != "" || !checkpointTreePattern.MatchString(s.CheckpointTree) {
+		return false
+	}
+	// External evidence cannot coexist with orphaned or contradictory test evidence.
+	for _, test := range s.Tests {
+		if test.Name == "" || !slices.ContainsFunc(s.FailedChecks, func(c RepairCheck) bool { return c.Name == test.Check }) {
+			return false
+		}
+	}
+	external := false
+	seen := map[string]bool{}
+	for _, c := range s.FailedChecks {
+		if c.Name == "" || c.Command == "" || c.ExitCode <= 0 || seen[c.Name] {
+			return false
+		}
+		seen[c.Name] = true
+		if c.OutsideCandidateTree == s.CheckpointTree && !c.InfrastructureError && c.ExitCode > 0 && len(c.FailingTests) == 0 && len(c.Unattributed) == 0 {
+			if slices.ContainsFunc(s.Tests, func(test FailingTest) bool { return test.Check == c.Name }) {
+				return false
+			}
+			external = true
+			continue
+		}
+		one := *s
+		one.FailedChecks = []RepairCheck{c}
+		if !one.allPreExisting() {
+			return false
+		}
+	}
+	return external
+}
+
 // diagnoseRepair builds the repair summary of a failed report and classifies
 // its failing Go tests with targeted reruns on the candidate and at baseSHA,
 // both through runner's execution boundary.
 func diagnoseRepair(ctx context.Context, runner *checkRunner, report *ValidationReport) *RepairSummary {
-	summary := &RepairSummary{BaseSHA: report.BaseSHA, HeadSHA: report.HeadSHA, FailedChecks: []RepairCheck{}, Tests: []FailingTest{}, ChangedFiles: []string{}, ChangedPackages: changedPackageDirs(report.ModifiedFiles)}
+	return diagnoseRepairTree(ctx, runner, report, "")
+}
+
+func diagnoseRepairTree(ctx context.Context, runner *checkRunner, report *ValidationReport, tree string) *RepairSummary {
+	summary := &RepairSummary{CheckpointTree: tree, BaseSHA: report.BaseSHA, HeadSHA: report.HeadSHA, FailedChecks: []RepairCheck{}, Tests: []FailingTest{}, ChangedFiles: []string{}, ChangedPackages: changedPackageDirs(report.ModifiedFiles)}
 	for _, file := range report.ModifiedFiles {
 		summary.ChangedFiles = append(summary.ChangedFiles, EscapeDiagnostic(file))
 	}
@@ -130,6 +175,14 @@ func diagnoseRepair(ctx context.Context, runner *checkRunner, report *Validation
 	defer cancel()
 	base := &baseRerun{runner: runner, baseSHA: report.BaseSHA}
 	defer base.close()
+	durations := map[string]time.Duration{}
+	if spec, err := loadTrustedValidationSpec(runner.worktree, report.BaseSHA); err == nil {
+		for _, c := range spec.RequiredChecks {
+			durations[c.Name] = checkTimeout(c.Timeout)
+		}
+	}
+	checkpoint := &baseRerun{runner: runner}
+	defer checkpoint.close()
 	reruns := 0
 	for _, outcome := range report.CheckOutcomes {
 		if outcome.Passed || outcome.FallbackReason != "" {
@@ -138,6 +191,44 @@ func diagnoseRepair(ctx context.Context, runner *checkRunner, report *Validation
 		check := RepairCheck{Name: EscapeDiagnostic(outcome.Name), Command: EscapeDiagnostic(outcome.Command), ExitCode: outcome.ExitCode, FailingTests: outcome.FailingTests, OutputTail: outcome.OutputTail, InfrastructureError: outcome.InfrastructureError}
 		if check.FailingTests == nil {
 			check.FailingTests = []string{}
+		}
+		// Go checks retain their existing test-level attribution.
+		_, goCheck := parseGoTestAll(outcome.Command)
+		if !goCheck && !strings.HasPrefix(strings.TrimSpace(outcome.Command), "go test ") && len(outcome.FailingTests) == 0 && !outcome.InfrastructureError && outcome.ExitCode > 0 && tree != "" && reruns < maxRepairReruns && ctx.Err() == nil {
+			reruns++
+			if checkpoint.baseSHA == "" && checkpoint.err == nil {
+				cmd, _, err := gitcredential.Command(ctx, runner.worktree, "-c", "user.name=SwarmOS", "-c", "user.email=swarm@localhost", "commit-tree", tree, "-m", "Validation checkpoint")
+				if err == nil {
+					var out []byte
+					out, err = cmd.Output()
+					checkpoint.baseSHA = strings.TrimSpace(string(out))
+				}
+				checkpoint.err = err
+			}
+			if checkout, err := checkpoint.prepare(ctx); err == nil {
+				actual, err := gitOutputContext(ctx, checkout.worktree, "rev-parse", "HEAD^{tree}")
+				if err != nil || strings.TrimSpace(string(actual)) != tree {
+					checkpoint.close()
+					checkpoint.tmp, checkpoint.checkout = "", nil
+					summary.FailedChecks = append(summary.FailedChecks, check)
+					continue
+				}
+				duration := min(checkTimeout(""), maxRepairRerun)
+				if configured, ok := durations[outcome.Name]; ok {
+					duration = min(configured, maxRepairRerun)
+				}
+				runCtx, cancel := context.WithTimeout(ctx, duration)
+				output := boundedBuffer{limit: maxRerunOutput}
+				err = checkout.run(runCtx, outcome.Command, duration, &output, &output)
+				completed := runCtx.Err() == nil
+				cancel()
+				after, treeErr := workspace.CheckpointTree(ctx, runner.worktree)
+				if err == nil && completed && treeErr == nil && after == tree {
+					check.OutsideCandidateTree = tree
+				}
+			}
+			checkpoint.close()
+			checkpoint.tmp, checkpoint.checkout = "", nil
 		}
 		evidence := outcome.goFailures
 		if evidence == nil {
@@ -175,6 +266,14 @@ func diagnoseRepair(ctx context.Context, runner *checkRunner, report *Validation
 			check.FailingTests = append(check.FailingTests, truncationMarker)
 		}
 		summary.FailedChecks = append(summary.FailedChecks, check)
+	}
+	if tree != "" {
+		after, err := workspace.CheckpointTree(ctx, runner.worktree)
+		if err != nil || after != tree {
+			for i := range summary.FailedChecks {
+				summary.FailedChecks[i].OutsideCandidateTree = ""
+			}
+		}
 	}
 	summary.AllPreExisting = summary.allPreExisting()
 	return summary
@@ -418,9 +517,7 @@ func (b *baseRerun) close() {
 	if b.tmp == "" {
 		return
 	}
-	if b.checkout != nil {
-		_, _ = gitOutput(b.runner.worktree, "worktree", "remove", "--force", "--", b.checkout.worktree)
-	}
+	_, _ = gitOutput(b.runner.worktree, "worktree", "remove", "--force", "--", filepath.Join(b.tmp, "base"))
 	_ = os.RemoveAll(b.tmp)
 	_, _ = gitOutput(b.runner.worktree, "worktree", "prune")
 }
@@ -464,6 +561,9 @@ func RenderRepairBrief(s *RepairSummary) []byte {
 	}
 	for _, check := range s.FailedChecks {
 		fmt.Fprintf(&data, "\nFailed check: %s (exit %d)\nCommand: %s\n", check.Name, check.ExitCode, check.Command)
+		if check.OutsideCandidateTree != "" {
+			data.WriteString("Passed in checkpoint checkout " + check.OutsideCandidateTree + "; failure is outside the candidate.\n")
+		}
 		if check.InfrastructureError {
 			data.WriteString("The check did not complete (infrastructure error).\n")
 		}
@@ -492,7 +592,9 @@ func RenderRepairBrief(s *RepairSummary) []byte {
 	b.WriteString("# Validation repair brief\n\n")
 	b.WriteString("The SwarmOS coordinator wrote this file from the trusted validation report. It is regenerated before each repair round, and edits to it are rejected.\n\n")
 	b.WriteString("Each failing Go test was rerun once on the candidate and, if it failed again, once at the approved base: **regression** passes on the base or is new in this change, **pre-existing** fails on the base, **flaky** passed on the candidate rerun, and **unclassified** could not be observed reliably.\n\n")
-	if s.AllPreExisting {
+	if s.OutsideCandidate() {
+		b.WriteString("Every failure has checkpoint or approved-base evidence; automatic repair is paused.\n")
+	} else if s.AllPreExisting {
 		b.WriteString("Every failure also fails at the approved base. A maintainer decides how to proceed.\n\n")
 	} else {
 		b.WriteString("Fix regressions and other failures caused by this change. Do not change unrelated code to hide pre-existing or flaky failures.\n\n")
@@ -533,7 +635,9 @@ func RepairStatusText(s *RepairSummary) string {
 	for _, test := range s.Tests {
 		b.WriteString("  " + testLine(test) + "\n")
 	}
-	if s.AllPreExisting {
+	if s.OutsideCandidate() {
+		b.WriteString("Every failure has checkpoint or approved-base evidence; automatic repair is paused.\n")
+	} else if s.AllPreExisting {
 		b.WriteString("  Every failure also fails at the approved base; a maintainer decides the next step.\n")
 	}
 	return b.String()
@@ -587,6 +691,16 @@ func RepairFromArtifact(artifacts []contract.Artifact, baseSHA string) *RepairSu
 		}
 		if s.HeadSHA == "" || s.HeadSHA != art.Metadata["head_sha"] {
 			return &RepairSummary{Unavailable: "recorded for a different candidate head"}
+		}
+		if s.CheckpointTree != "" {
+			if s.CheckpointTree != art.Metadata["validation_checkpoint_tree"] {
+				return &RepairSummary{Unavailable: "checkpoint evidence mismatch"}
+			}
+			for _, c := range s.FailedChecks {
+				if c.OutsideCandidateTree != "" && c.OutsideCandidateTree != s.CheckpointTree {
+					return &RepairSummary{Unavailable: "checkpoint evidence mismatch"}
+				}
+			}
 		}
 		// Recompute rather than trust the stored conclusion.
 		s.AllPreExisting = s.allPreExisting()

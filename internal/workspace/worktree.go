@@ -1137,6 +1137,110 @@ func StripActivePointer(content string) string {
 // CleanEphemeralHarnessMarkers removes the managed <!-- swarm:active:start --> block from AGENTS.md and CLAUDE.md
 // so worktree commits remain clean on `swarm issue submit`. Links stay as they
 // are; the block is removed from the file they resolve to.
+// PrepareValidationInstructions temporarily exposes checkpoint instruction content.
+// The returned function restores managed blocks without discarding check-authored text.
+func PrepareValidationInstructions(root string) (func() error, error) {
+	safe, err := safefs.Open(root)
+	if err != nil {
+		return nil, err
+	}
+	defer safe.Close()
+	resolved, err := safe.ResolveInstructions()
+	if err != nil {
+		return nil, err
+	}
+	targets, err := instructionTargets(safe)
+	if err != nil {
+		return nil, err
+	}
+	type saved struct {
+		path            string
+		original, clean []byte
+		mode            os.FileMode
+		removed         bool
+	}
+	var entries []saved
+	restore := func() error {
+		safe, err := safefs.Open(root)
+		if err != nil {
+			return err
+		}
+		defer safe.Close()
+		current, err := safe.ResolveInstructions()
+		if err != nil {
+			return err
+		}
+		// Missing pointer-only files are expected, but link destinations must remain fixed.
+		if len(current) != len(resolved) {
+			return fmt.Errorf("instruction targets changed during validation")
+		}
+		for i := range current {
+			if current[i].Target != resolved[i].Target || current[i].Link != resolved[i].Link {
+				return fmt.Errorf("instruction targets changed during validation")
+			}
+		}
+		var failures []error
+		for _, entry := range entries {
+			data, mode, err := readInstruction(safe, entry.path)
+			if os.IsNotExist(err) && entry.removed {
+				data, mode, err = nil, entry.mode, nil
+			}
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			if activeBlockRegex.Match(data) {
+				failures = append(failures, fmt.Errorf("instruction marker changed during validation: %s", entry.path))
+				continue
+			}
+			restored := entry.original
+			if string(data) != string(entry.clean) {
+				// Keep every new byte; restore only the managed blocks.
+				blocks := activeBlockRegex.FindAll(entry.original, -1)
+				restored = append([]byte{}, data...)
+				for i := len(blocks) - 1; i >= 0; i-- {
+					restored = append(append([]byte{}, blocks[i]...), restored...)
+				}
+			}
+			if err := safe.WriteFile(entry.path, restored, mode); err != nil {
+				failures = append(failures, err)
+			}
+		}
+		return errors.Join(failures...)
+	}
+	for _, target := range targets {
+		if !target.exists {
+			continue
+		}
+		data, mode, err := readInstruction(safe, target.path)
+		if err != nil {
+			return nil, errors.Join(err, restore())
+		}
+		if !activeBlockRegex.Match(data) {
+			continue
+		}
+		clean := activeBlockRegex.ReplaceAll(data, nil)
+		removed := false
+		if len(clean) == 0 && !target.linked {
+			tracked, err := gitOutput(root, "ls-files", "--", target.path)
+			if err != nil {
+				return nil, errors.Join(err, restore())
+			}
+			removed = strings.TrimSpace(tracked) == ""
+		}
+		if removed {
+			err = safe.Remove(target.path)
+		} else {
+			err = safe.WriteFile(target.path, clean, mode)
+		}
+		if err != nil {
+			return nil, errors.Join(err, restore())
+		}
+		entries = append(entries, saved{target.path, data, clean, mode, removed})
+	}
+	return restore, nil
+}
+
 func CleanEphemeralHarnessMarkers(worktreePath string) error {
 	safe, err := safefs.Open(worktreePath)
 	if err != nil {

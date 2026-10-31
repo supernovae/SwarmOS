@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -425,5 +426,148 @@ func TestCandidateDefinesRejectsSymlink(t *testing.T) {
 	}
 	if file, ok := candidateDefines(dir, []string{"leaf/new_test.go"}, "example.com/m/leaf", "TestNew"); ok {
 		t.Fatalf("a symlinked test file must not define a test: %q", file)
+	}
+}
+
+func TestRepairOutsideCandidateCheckout(t *testing.T) {
+	for _, control := range []string{"external", "candidate", "ignored dependency", "mixed", "mutation"} {
+		t.Run(control, func(t *testing.T) {
+			command := "git ls-files --error-unmatch -- candidate.txt && test \"$(cat candidate.txt)\" = candidate && test ! -e .swarm/active/PLAN.md"
+			if control == "ignored dependency" {
+				command = "test -f dependency && " + command
+			}
+			if control == "candidate" {
+				command += " && false"
+			}
+			if control == "mutation" {
+				command = "echo changed > candidate.txt; " + command
+			}
+			checks := "  - name: shell\n    command: '" + command + "'\n    timeout: 1m\n"
+			if control == "mixed" {
+				checks += "  - name: candidate-failure\n    command: 'false'\n    timeout: 1m\n"
+			}
+			repo, base := setupGoFastPassRepo(t, checks, map[string]string{"candidate.txt": "base", ".gitignore": "dependency\n.swarm/active/\n"})
+			writeRepoFile(t, repo, "candidate.txt", "candidate")
+			writeRepoFile(t, repo, "dependency", "local only")
+			refs := runRepoGit(t, repo, "show-ref")
+			index, _ := os.ReadFile(filepath.Join(repo, ".git/index"))
+			worktrees := runRepoGit(t, repo, "worktree", "list", "--porcelain")
+			report := validateRepair(t, repo, base)
+			want := control == "external"
+			if report.Repair.OutsideCandidate() != want || report.Repair.AllPreExisting {
+				t.Fatalf("diagnosis: %+v", report.Repair)
+			}
+			if want && report.Repair.FailedChecks[0].OutsideCandidateTree == "" {
+				t.Fatal("missing evidence")
+			}
+			if got := runRepoGit(t, repo, "show-ref"); got != refs {
+				t.Fatal("refs changed")
+			}
+			if got := runRepoGit(t, repo, "worktree", "list", "--porcelain"); got != worktrees {
+				t.Fatal("checkout leaked")
+			}
+			after, _ := os.ReadFile(filepath.Join(repo, ".git/index"))
+			if string(after) != string(index) {
+				t.Fatal("index changed")
+			}
+			restored := RepairFromArtifact([]contract.Artifact{report.Artifact}, base)
+			if restored.OutsideCandidate() != want {
+				t.Fatalf("round trip %+v", restored)
+			}
+			if want {
+				restored.CheckpointTree = ""
+				if restored.OutsideCandidate() {
+					t.Fatal("legacy evidence exempted")
+				}
+				// A plain export cannot satisfy the Git-listing check.
+				export := t.TempDir()
+				writeRepoFile(t, export, "candidate.txt", "candidate")
+				runner := &checkRunner{worktree: export, home: t.TempDir(), execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}}
+				output := boundedBuffer{limit: maxRerunOutput}
+				if err := runner.run(t.Context(), command, time.Minute, &output, &output); err == nil {
+					t.Fatal("non-Git export passed")
+				}
+			}
+		})
+	}
+}
+
+func TestRepairOutsideCandidateSetupFailures(t *testing.T) {
+	for _, failure := range []string{"commit-tree", "worktree add"} {
+		t.Run(failure, func(t *testing.T) {
+			repo, base := setupGoFastPassRepo(t, "  - name: shell\n    command: test ! -f .swarm/active/PLAN.md\n    timeout: 1m\n", map[string]string{".gitignore": ".swarm/active/\n"})
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			script := "#!/bin/sh\ncase \" $* \" in *\" " + failure + " \"*) exit 71;; esac\nexec '" + realGit + "' \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			report := validateRepair(t, repo, base)
+			if report.Repair.OutsideCandidate() {
+				t.Fatalf("setup failure exempted: %+v", report.Repair)
+			}
+			if got := runRepoGit(t, repo, "worktree", "list", "--porcelain"); strings.Count(got, "worktree ") != 1 {
+				t.Fatalf("leaked checkout: %s", got)
+			}
+		})
+	}
+}
+
+func TestRepairOutsideCandidateTimeout(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, "  - name: shell\n    command: if test -f .swarm/active/PLAN.md; then exit 1; else sleep 1; fi\n    timeout: 20ms\n", map[string]string{".gitignore": ".swarm/active/\n"})
+	report := validateRepair(t, repo, base)
+	if report.Repair.OutsideCandidate() {
+		t.Fatal("timed out rerun exempted")
+	}
+	if got := runRepoGit(t, repo, "worktree", "list", "--porcelain"); strings.Count(got, "worktree ") != 1 {
+		t.Fatalf("leaked checkout: %s", got)
+	}
+}
+
+func TestRepairOutsideCandidateMalformedEvidence(t *testing.T) {
+	tree := strings.Repeat("a", 40)
+	for _, kind := range []string{"legacy", "bad tree", "mismatch", "unknown", "mixed preexisting", "all external", "external tests", "orphan test"} {
+		t.Run(kind, func(t *testing.T) {
+			s := RepairSummary{BaseSHA: "base", HeadSHA: "head", CheckpointTree: tree, FailedChecks: []RepairCheck{{Name: "shell", Command: "false", ExitCode: 1, OutsideCandidateTree: tree}}}
+			switch kind {
+			case "legacy":
+				s.CheckpointTree = ""
+			case "bad tree":
+				s.CheckpointTree = strings.Repeat("z", 40)
+				s.FailedChecks[0].OutsideCandidateTree = s.CheckpointTree
+			case "mismatch":
+				s.FailedChecks[0].OutsideCandidateTree = strings.Repeat("b", 40)
+			case "unknown":
+				s.FailedChecks = append(s.FailedChecks, RepairCheck{Name: "unknown", Command: "false", ExitCode: 1})
+			case "external tests":
+				s.Tests = []FailingTest{{Check: "shell", Name: "TestContradiction", Classification: TestRegression}}
+			case "orphan test":
+				s.Tests = []FailingTest{{Check: "missing", Name: "TestMissing", Classification: TestUnclassified}}
+			case "mixed preexisting":
+				s.FailedChecks = append(s.FailedChecks, RepairCheck{Name: "go", Command: "go test ./...", ExitCode: 1, FailingTests: []string{"TestOld"}})
+				s.Tests = []FailingTest{{Check: "go", Name: "TestOld", Classification: TestPreExisting}}
+			}
+			raw, _ := json.Marshal(s)
+			art := contract.Artifact{Type: contract.ArtifactValidation, Verdict: "FAIL", Metadata: map[string]string{RepairMetadataKey: string(raw), "base_sha": "base", "head_sha": "head", "validation_checkpoint_tree": s.CheckpointTree}}
+			restored := RepairFromArtifact([]contract.Artifact{art}, "base")
+			want := kind == "mixed preexisting" || kind == "all external"
+			if restored.OutsideCandidate() != want || restored.AllPreExisting {
+				t.Fatalf("%s %+v", kind, restored)
+			}
+		})
+	}
+}
+
+func TestRepairOutsideCandidatePerCheckTimeout(t *testing.T) {
+	command := "if test -f .swarm/active/PLAN.md; then exit 1; else sleep 0.1; fi"
+	checks := "  - name: short\n    command: '" + command + "'\n    timeout: 20ms\n  - name: long\n    command: '" + command + "'\n    timeout: 1s\n"
+	repo, base := setupGoFastPassRepo(t, checks, map[string]string{".gitignore": ".swarm/active/\n"})
+	report := validateRepair(t, repo, base)
+	if report.Repair.OutsideCandidate() || len(report.Repair.FailedChecks) != 2 || report.Repair.FailedChecks[0].OutsideCandidateTree != "" || report.Repair.FailedChecks[1].OutsideCandidateTree == "" {
+		t.Fatalf("per-check timeouts lost: %+v", report.Repair)
 	}
 }

@@ -37,7 +37,8 @@ var (
 	// ErrPreExistingFailures stops a run whose failing required checks are
 	// all Go tests that also fail at the approved base, so a developer round
 	// cannot fix them. The trusted report stays in the WorkResult.
-	ErrPreExistingFailures = errors.New("every validation failure also fails at the approved base; a maintainer decides the next step")
+	ErrOutsideCandidateFailures = errors.New("required checks fail outside the candidate checkpoint; automatic repair stopped")
+	ErrPreExistingFailures      = errors.New("every validation failure also fails at the approved base; a maintainer decides the next step")
 	// ErrValidationRepairExhausted stops a run whose required checks still
 	// fail after lease.validation_repair_limit automatic repair rounds.
 	ErrValidationRepairExhausted = errors.New("validation repair limit reached")
@@ -637,7 +638,7 @@ const (
 // repair round: required checks failed with a trusted report, and not every
 // failure is pre-existing at the approved base.
 func repairableValidation(err error, report *validation.ValidationReport) bool {
-	return errors.Is(err, validation.ErrRequiredCheckFailed) && !errors.Is(err, ErrPreExistingFailures) && report != nil && !report.Passed
+	return errors.Is(err, validation.ErrRequiredCheckFailed) && !errors.Is(err, ErrOutsideCandidateFailures) && !errors.Is(err, ErrPreExistingFailures) && report != nil && !report.Passed
 }
 
 // failingIdentities lists the trusted report's failing tests as
@@ -1599,6 +1600,9 @@ func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmC
 	}
 	if hasFailedValidationArtifact(st) && opts.instructionsFor("developer") == "" {
 		repair := validation.RepairFromArtifact(st.Artifacts, st.BaseSHA)
+		if repair != nil && repair.OutsideCandidate() {
+			return fmt.Errorf("%w: %w", ErrOutsideCandidateFailures, validation.ErrRequiredCheckFailed)
+		}
 		if repair != nil && repair.AllPreExisting {
 			return &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: ErrPreExistingFailures, Operation: "work", Arguments: []string{"--developer-instructions", "Address the failing checks"}}
 		}

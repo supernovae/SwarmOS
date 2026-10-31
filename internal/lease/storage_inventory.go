@@ -152,8 +152,12 @@ func inventoryField(path, key string) string {
 		keys = []string{"version", "issue_number", "status", "phase"}
 	case "":
 		keys = []string{"lease", "branch", "submitted_head_sha", "head_sha", "base_sha", "pr_number", "pr_url", "fork_repo", "pr_revision", "cleanup", "pr_outcome", "checkpoint_heads", "last_rebase", "rebase_transitions"}
+	case "last_rebase", "rebase_transitions":
+		keys = []string{"old_head", "new_head", "old_base", "new_base", "status", "patch_identity", "verified"}
+	case "pr_outcome":
+		keys = []string{"target_branch", "status", "number", "url", "head_repo", "base_repo", "branch", "submitted_head_sha", "final_head_sha", "merge_commit_sha", "merged_at", "observed_at"}
 	default:
-		return key
+		return ""
 	}
 	for _, canonical := range keys {
 		if strings.EqualFold(canonical, key) {
@@ -320,10 +324,7 @@ func (p *inventoryParser) value(depth int, keep bool, path string) error {
 					}
 				}
 			} else {
-				child := path
-				if path == "" {
-					child = key
-				}
+				child := key
 				if err = p.value(depth+1, selected, child); err != nil {
 					return err
 				}

@@ -278,6 +278,12 @@ type RetentionSource interface {
 	WithRetention(context.Context, RepositoryScope, func(RetentionEvidence) error) error
 }
 
+type retentionFunc func(context.Context, RepositoryScope, func(RetentionEvidence) error) error
+
+func (f retentionFunc) WithRetention(c context.Context, s RepositoryScope, v func(RetentionEvidence) error) error {
+	return f(c, s, v)
+}
+
 type ReclaimOptions struct {
 	Scopes                              []RepositoryScope
 	CacheRoot, ScratchRoot, ControlRoot string
@@ -525,7 +531,7 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		scopes[key] = scope
 	}
 	var candidates []storageuse.Resource
-	err := storageuse.VisitResources(ctx, opts.ControlRoot, l.Records, func() error { return s.b.entry(ctx) }, s.b.Charge, func(r storageuse.Resource) error {
+	err := storageuse.VisitResources(ctx, opts.ControlRoot, l.Records, func() error { return s.b.entry(ctx) }, s.b.Workspace, func(r storageuse.Resource) error {
 		if e := s.b.Charge(int64(4096 + 8*(len(r.Location)+len(r.Identity)+len(r.Class)+len(r.Repository)))); e != nil {
 			return e
 		}
@@ -594,6 +600,7 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 	for _, r := range candidates {
 		counts[r.Location]++
 	}
+	previewEvidence := map[string]RetentionEvidence{}
 	var operationErr error
 	var logicalBefore, logicalAfter int64
 	logicalComplete := true
@@ -647,7 +654,19 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 				return nil
 			}
 			called := false
-			return opts.Retention.WithRetention(ctx, scope, func(ev RetentionEvidence) error {
+			source := opts.Retention
+			if !apply {
+				source = retentionFunc(func(c context.Context, sc RepositoryScope, v func(RetentionEvidence) error) error {
+					if ev, ok := previewEvidence[sc.CommonDirectory]; ok {
+						return v(ev)
+					}
+					return opts.Retention.WithRetention(c, sc, func(ev RetentionEvidence) error {
+						previewEvidence[sc.CommonDirectory] = ev
+						return v(ev)
+					})
+				})
+			}
+			return source.WithRetention(ctx, scope, func(ev RetentionEvidence) error {
 				if called {
 					return errors.New("repeated retention callback")
 				}
@@ -742,7 +761,7 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 				guard.Close()
 			}
 		} else {
-			observation, e := storageuse.Observe(ctx, opts.ControlRoot, r, 16<<10, s.b.Charge)
+			observation, e := storageuse.Observe(ctx, opts.ControlRoot, r, 16<<10, s.b.Workspace)
 			if e != nil || !observation.CompleteCoverage || observation.Active == nil || *observation.Active {
 				result.Reason = "use evidence missing, incomplete or unresolved"
 			} else {
@@ -809,26 +828,36 @@ type BackendRetention struct {
 	Tracker  func(RepositoryScope) (tracker.PullRequestVisitor, error)
 }
 
+// Each object is decoded serially; only compact output survives the read.
+func inventoryReservation(b *Budget) func(int64) error {
+	return func(n int64) error {
+		if err := b.Workspace(n); err != nil {
+			return err
+		}
+		return b.Charge(32 << 10)
+	}
+}
+
 // ReadRetentionSnapshot is shared by advisory task inspection and reclamation.
 func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote string, apply bool, budget *Budget, visitors ...tracker.PullRequestVisitor) (states map[int][]byte, resultErr error) {
 	defer func() {
-		if resultErr == nil {
-			for n, data := range states {
-				if _, err := lease.DecodeInventoryState(ctx, data, n); err != nil {
-					states = nil
-					resultErr = fmt.Errorf("issue %d: %w", n, err)
-					break
-				}
+		for n, data := range states {
+			if data == nil {
+				continue
+			}
+			if _, err := lease.DecodeInventoryState(ctx, data, n); err != nil {
+				states[n] = nil
+				resultErr = errors.Join(resultErr, fmt.Errorf("issue %d: %w", n, err))
 			}
 		}
 	}()
 	if scope.Backend == "local" {
-		return coordination.NewFileStore(scope.Root).ReadInventorySnapshot(ctx, budget.Limits.Records, budget.Charge, lease.ProjectInventory)
+		return coordination.NewFileStore(scope.Root).ReadInventorySnapshot(ctx, budget.Limits.Records, inventoryReservation(budget), lease.ProjectInventory)
 	}
 	if scope.Backend == "github" {
 		store := coordination.NewGitStoreWithRemote(scope.Root, remote)
 		if apply {
-			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, budget.Charge, lease.ProjectInventory)
+			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, inventoryReservation(budget), lease.ProjectInventory)
 		}
 		if len(visitors) != 1 {
 			return nil, errors.New("bounded pinned state visitor unavailable")
@@ -852,14 +881,17 @@ func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote st
 			return nil, err
 		}
 		out := map[int][]byte{}
+		var failures []error
 		for n, sha := range pinned {
-			data, err := store.LoadInventoryObject(ctx, sha, budget.Charge, lease.ProjectInventory)
+			data, err := store.LoadInventoryObject(ctx, sha, inventoryReservation(budget), lease.ProjectInventory)
 			if err != nil {
-				return nil, fmt.Errorf("issue %d object %s: %w", n, sha, err)
+				failures = append(failures, fmt.Errorf("issue %d: %w", n, err))
+				out[n] = nil
+				continue
 			}
 			out[n] = data
 		}
-		return out, nil
+		return out, errors.Join(failures...)
 	}
 	return nil, errors.New("unsupported retention backend")
 }
@@ -875,9 +907,9 @@ func (r BackendRetention) WithRetention(ctx context.Context, scope RepositorySco
 		}
 		return visit(ev)
 	}
-	b := r.Budget
-	if b == nil {
-		b = &Budget{Limits: DefaultLimits()}
+	b := &Budget{Limits: DefaultLimits()}
+	if r.Budget != nil {
+		b.Limits = r.Budget.Limits
 	}
 	if r.Tracker == nil {
 		return fail(errors.New("bounded PR evidence unavailable"))

@@ -157,3 +157,22 @@ func TestStorageInventoryStreamingExactCeilingAndLocalChange(t *testing.T) {
 		t.Fatal("oversized local direct read accepted")
 	}
 }
+
+// Nested evidence bodies are validated but never retained, even inside selected
+// authority containers. Fields used by checkpoint lineage must survive.
+func TestStorageInventoryNestedScalarProjection(t *testing.T) {
+	body := `{"lease":{"version":1,"issue_number":1},"last_rebase":{"old_head":"old","new_head":"new","verified":true,"plans":[{"body":"` + strings.Repeat("p", 6474) + `"}],"artifacts":[{"body":"` + strings.Repeat("a", 11543) + `"}]},"rebase_transitions":[{"old_head":"old","new_head":"new","body":"` + strings.Repeat("b", 11543) + `"}]}`
+	compact, err := ProjectInventory(context.Background(), strings.NewReader(body), func(int64) error { return nil })
+	if err != nil || strings.Contains(string(compact), "body") || !strings.Contains(string(compact), `"old_head":"old"`) {
+		t.Fatalf("%s %v", compact, err)
+	}
+	for _, invalid := range []string{
+		strings.Replace(body, `"verified":true`, `"Verified":true`, 1),
+		strings.Replace(body, `"old_head":"old"`, `"old_head":"`+strings.Repeat("x", 4097)+`"`, 1),
+		strings.Replace(body, `"plans":[`, `"plans":[invalid,`, 1),
+	} {
+		if _, err := ProjectInventory(context.Background(), strings.NewReader(invalid), func(int64) error { return nil }); err == nil {
+			t.Fatal("accepted invalid nested evidence")
+		}
+	}
+}

@@ -116,8 +116,8 @@ func (s *GitStore) LoadInventoryObject(ctx context.Context, sha string, reserve 
 		return nil, ctx.Err()
 	}
 	if readErr != nil {
-		if waitErr != nil {
-			return nil, fmt.Errorf("pinned inventory object %s: %w (%s)", sha, errors.Join(readErr, inventoryWaitError{waitErr}), diagnostics.String())
+		if diagnostics.String() != "" {
+			return nil, fmt.Errorf("pinned inventory object %s: %w: %s", sha, readErr, diagnostics.String())
 		}
 		return nil, fmt.Errorf("pinned inventory object %s: %w", sha, readErr)
 	}
@@ -162,8 +162,10 @@ func (r *inventoryReader) Read(p []byte) (int, error) {
 
 type inventoryDiagnostic struct{ data bytes.Buffer }
 
-func (w *inventoryDiagnostic) Len() int       { return w.data.Len() }
-func (w *inventoryDiagnostic) String() string { return w.data.String() }
+func (w *inventoryDiagnostic) Len() int { return w.data.Len() }
+func (w *inventoryDiagnostic) String() string {
+	return strings.Join(strings.Fields(w.data.String()), " ")
+}
 
 func (w *inventoryDiagnostic) Write(p []byte) (int, error) {
 	n := len(p)
@@ -212,6 +214,7 @@ func (s *FileStore) ReadInventorySnapshot(ctx context.Context, limit int, reserv
 		return nil, err
 	}
 	out := map[int][]byte{}
+	var failures []error
 	count := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -238,7 +241,9 @@ func (s *FileStore) ReadInventorySnapshot(ctx context.Context, limit int, reserv
 		}
 		data, e := s.LoadInventoryPreview(ctx, n, InventoryInputLimit, reserve, decoders...)
 		if e != nil {
-			return nil, fmt.Errorf("issue %d: %w", n, e)
+			failures = append(failures, fmt.Errorf("issue %d: %w", n, e))
+			out[n] = nil
+			continue
 		}
 		out[n] = data
 	}
@@ -258,7 +263,7 @@ func (s *FileStore) ReadInventorySnapshot(ctx context.Context, limit int, reserv
 	if !os.SameFile(before, info) || !before.ModTime().Equal(after.ModTime()) || !before.ModTime().Equal(info.ModTime()) {
 		return nil, fmt.Errorf("inventory directory changed")
 	}
-	return out, nil
+	return out, errors.Join(failures...)
 }
 
 // FetchInventoryObjects refreshes only explicitly pinned state objects. It

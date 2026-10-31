@@ -1060,7 +1060,7 @@ func inventoryScaleObjects(t *testing.T, root string, count int, size func(int) 
 			t.Fatal(err)
 		}
 		prefix := fmt.Sprintf(`{"lease":{"version":1,"issue_number":%d,"status":"completed","phase":"submitted"},"branch":"swarm/issue-%d-test","submitted_head_sha":"abc","pr_number":%d,"pr_url":"https://example.test/pr/%d","artifacts":[{"body":"`, n, n, 1000+n, 1000+n)
-		suffix := `"}],"role_runs":[{"history":[true,null,{"ignored":"escaped\nvalue"}]}]}`
+		suffix := `"}],"last_rebase":{"plans":[{"body":"` + strings.Repeat("p", 6474) + `"}],"artifacts":[{"body":"` + strings.Repeat("a", 11543) + `"}]},"role_runs":[{"history":[true,null,{"ignored":"escaped\nvalue"}]}]}`
 		want := size(n)
 		padding := want - int64(len(prefix)+len(suffix))
 		if padding < 0 {
@@ -1124,7 +1124,19 @@ func (v inventoryScaleVisitor) VisitPullRequests(ctx context.Context, b tracker.
 }
 
 func TestReclamationInventoryRealLedgerScale(t *testing.T) {
-	o, _, resource := reclaimFixture(t, "agent-build")
+	o, manager, resource := reclaimFixture(t, "agent-build")
+	// Real control roots hold registrations for many independent producer leaves.
+	for n := 1; n < 900; n++ {
+		r := storageuse.ResourceFor(resource.Repository, "native-scratch", filepath.Join(o.ScratchRoot, fmt.Sprintf("swarm-native-scale-%d", n)))
+		u, err := manager.AcquireUse(context.Background(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		put(t, filepath.Join(r.Location, "data"), "scratch")
+		if err := u.Finish(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	o.Scopes[0].Backend = "github"
 	var baseline int64
 	for _, extra := range []int64{0, 10000} {
@@ -1145,9 +1157,12 @@ func TestReclamationInventoryRealLedgerScale(t *testing.T) {
 		source := BackendRetention{Budget: b, Tracker: func(RepositoryScope) (tracker.PullRequestVisitor, error) {
 			return inventoryScaleVisitor{refs, prs}, nil
 		}}
+		if _, err := ReadRetentionSnapshot(context.Background(), o.Scopes[0], "", false, b, inventoryScaleVisitor{refs, prs}); err != nil {
+			t.Fatal(err)
+		}
 		o.Retention = source
 		report, err := PreviewReclamation(context.Background(), o)
-		if err != nil || !report.Complete || len(report.Resources) != 1 || report.Resources[0].Outcome != ReclaimEligible {
+		if err != nil || !report.Complete || len(report.Resources) != 900 || report.Resources[0].Outcome != ReclaimEligible {
 			t.Fatalf("%+v %v", report, err)
 		}
 		if b.Counters.Bytes >= DefaultLimits().Bytes {
@@ -1236,4 +1251,33 @@ func prunedInventoryRefs(t *testing.T, root string) string {
 		t.Fatal(err)
 	}
 	return string(out)
+}
+
+// An unavailable issue cannot erase independently pinned issue projections.
+func TestReclamationInventoryIssueFailureIsolation(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		t.Run(backend, func(t *testing.T) {
+			o, _, _ := reclaimFixture(t, "agent-build")
+			o.Scopes[0].Backend = backend
+			refs, prs, _, _ := inventoryScaleObjects(t, o.Scopes[0].Root, 2, func(int) int64 { return 40000 })
+			if backend == "local" {
+				data, err := exec.Command("git", "-C", o.Scopes[0].Root, "show", refs[1]+":state.json").Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				put(t, filepath.Join(o.Scopes[0].Root, ".swarm", "coordination", "issue-1.json"), string(data))
+				put(t, filepath.Join(o.Scopes[0].Root, ".swarm", "coordination", "issue-2.json"), "invalid")
+			} else {
+				refs[2] = strings.Repeat("a", 40)
+			}
+			b := &Budget{Limits: DefaultLimits()}
+			states, err := ReadRetentionSnapshot(context.Background(), o.Scopes[0], "", false, b, inventoryScaleVisitor{refs, prs})
+			if err == nil || !strings.Contains(err.Error(), "issue 2") || len(states[1]) == 0 || states[2] != nil {
+				t.Fatalf("states=%v err=%v", states, err)
+			}
+			if strings.Contains(err.Error(), "interrupted") || strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), "()") {
+				t.Fatal(err)
+			}
+		})
+	}
 }

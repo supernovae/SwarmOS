@@ -433,7 +433,7 @@ func inventoryScaleObjects(t *testing.T, root string, count int, size func(int) 
 			t.Fatal(err)
 		}
 		prefix := fmt.Sprintf(`{"lease":{"version":1,"issue_number":%d,"status":"completed","phase":"submitted"},"branch":"swarm/issue-%d-test","submitted_head_sha":"abc","pr_number":%d,"pr_url":"https://example.test/pr/%d","artifacts":[{"body":"`, n, n, 1000+n, 1000+n)
-		suffix := `"}],"role_runs":[{"history":[true,null,{"ignored":"escaped\nvalue"}]}]}`
+		suffix := `"}],"last_rebase":{"plans":[{"body":"` + strings.Repeat("p", 6474) + `"}],"artifacts":[{"body":"` + strings.Repeat("a", 11543) + `"}]},"role_runs":[{"history":[true,null,{"ignored":"escaped\nvalue"}]}]}`
 		want := size(n)
 		padding := want - int64(len(prefix)+len(suffix))
 		if padding < 0 {
@@ -550,6 +550,32 @@ func TestStorageCleanupRealLedgerScale(t *testing.T) {
 	f := newCLIFixture(t)
 	prGit(t, f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git")
 	path := storageScaleHost(t, f.root)
+	common := filepath.Join(f.root, ".git")
+	hash := sha256.Sum256([]byte(common))
+	key := hex.EncodeToString(hash[:16])
+	control, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := storageuse.Open(control, filepath.Join(os.Getenv("XDG_CACHE_HOME"), "swarm"), os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	for n := 1; n < 900; n++ {
+		r := storageuse.ResourceFor(key, "native-scratch", filepath.Join(os.TempDir(), fmt.Sprintf("swarm-native-scale-%d", n)))
+		u, err := manager.AcquireUse(context.Background(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(r.Location, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := u.Finish(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	refs, prs, total, largest := inventoryScaleObjects(t, f.root, 166, func(n int) int64 {
 		if n == 1 {
 			return 4533441
@@ -572,7 +598,7 @@ func TestStorageCleanupRealLedgerScale(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err, stdout.String())
 	}
-	if !report.Host.Complete || len(report.Host.Resources) != 1 || report.Host.Resources[0].Outcome != storage.ReclaimEligible || len(report.Tasks) != 1 {
+	if !report.Host.Complete || len(report.Host.Resources) != 900 || report.Host.Resources[0].Outcome != storage.ReclaimEligible || len(report.Tasks) != 1 {
 		t.Fatalf("%+v", report)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -689,5 +715,49 @@ func TestStorageCleanupInventoryFailureContinuesHealthyApply(t *testing.T) {
 	}
 	if _, err := os.Stat(good); !os.IsNotExist(err) {
 		t.Fatal(err)
+	}
+}
+
+func TestStorageCleanupInventoryIssueFailureIsolation(t *testing.T) {
+	f := newCLIFixture(t)
+	prGit(t, f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git")
+	storageScaleHost(t, f.root)
+	refs, prs, _, _ := inventoryScaleObjects(t, f.root, 2, func(int) int64 { return 40000 })
+	refs[2] = strings.Repeat("a", 40)
+	for _, n := range []int{1, 2} {
+		if err := os.MkdirAll(filepath.Join(f.root, ".swarm", "worktrees", fmt.Sprintf("issue-%d", n)), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := f.command(&RootOptions{trackerOverride: storageScaleTracker{f.tracker, inventoryScaleVisitor{refs, prs}}})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--root", f.root, "--repo", "fixture/repo", "--backend", "github", "storage", "cleanup", "--json"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("missing object succeeded")
+	}
+	var report storageCleanupReport
+	if e := json.Unmarshal(stdout.Bytes(), &report); e != nil {
+		t.Fatal(e)
+	}
+	if len(report.Tasks) != 1 || len(report.Tasks[0].Issues) != 2 {
+		t.Fatalf("%s", stdout.String())
+	}
+	for _, issue := range report.Tasks[0].Issues {
+		if issue.IssueNumber == 1 && strings.Contains(issue.Error, "issue 2") {
+			t.Fatal(issue)
+		}
+	}
+	seen := map[string]bool{}
+	for _, cause := range report.Errors {
+		if seen[cause] || strings.ContainsAny(cause, "\n\r") || strings.Contains(cause, "interrupted") || strings.Contains(cause, "()") {
+			t.Fatal(report.Errors)
+		}
+		seen[cause] = true
+	}
+	if len(report.Errors) != 1 {
+		t.Fatal(report.Errors)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/storage"
@@ -131,7 +132,14 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 		}
 		defer func() {
 			if runErr != nil {
-				report.Errors = append(report.Errors, runErr.Error())
+				seen := map[string]bool{}
+				for _, cause := range strings.Split(runErr.Error(), "\n") {
+					cause = strings.TrimSpace(cause)
+					if cause != "" && !seen[cause] {
+						report.Errors = append(report.Errors, cause)
+						seen[cause] = true
+					}
+				}
 			}
 			if asJSON {
 				e := writeJSON(cmd, report)
@@ -183,7 +191,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 		authorized := []storage.RepositoryScope{}
 		providers := map[string]tracker.PullRequestVisitor{}
 		inventoryFailures := map[string]error{}
-		budget := storage.Budget{Limits: storage.DefaultLimits()}
+
 		for _, scope := range scopes {
 			if err := cmd.Context().Err(); err != nil {
 				failures = append(failures, err)
@@ -218,12 +226,14 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 			}
 			providers[scope.CommonDirectory] = visitor
 			authorized = append(authorized, scope.RepositoryScope)
-			b := &budget
+			b := &storage.Budget{Limits: storage.DefaultLimits()}
 			states, snapshotErr := storage.ReadRetentionSnapshot(cmd.Context(), scope.RepositoryScope, opts.effectiveUpstreamRemote(), apply, b, visitor)
 			if snapshotErr != nil {
 				inventoryFailures[scope.CommonDirectory] = snapshotErr
 				failures = append(failures, snapshotErr)
 				report.Incomplete = append(report.Incomplete, snapshotErr.Error())
+			}
+			if snapshotErr != nil && (apply || len(states) == 0) {
 				summary := &bulkCleanupSummary{Repository: scope.Repository, Root: scope.Root, Kind: "cleanup-bulk", Mode: report.Mode, Status: "failed", Error: snapshotErr.Error(), Issues: []bulkCleanupIssue{}, Unresolved: []lease.UnresolvedCleanupWorktree{}}
 				worktrees, discoveryErr := workspace.DiscoverCleanupWorktrees(cmd.Context(), scope.Root)
 				if discoveryErr != nil {
@@ -264,7 +274,21 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 					previewTracker = &storageUpstreamPreview{pt, scope.Repository}
 				}
 				m = lease.NewManager(previewTracker, contract.SecurityConfig{})
-				m.SetStore(scope.Root, storagePreviewStore(states))
+				issueErrors := map[int]error{}
+				if snapshotErr != nil {
+					for n, data := range states {
+						if data != nil {
+							continue
+						}
+						for _, cause := range strings.Split(snapshotErr.Error(), "\n") {
+							if strings.HasPrefix(cause, fmt.Sprintf("issue %d:", n)) {
+								issueErrors[n] = errors.New(cause)
+								break
+							}
+						}
+					}
+				}
+				m.SetStore(scope.Root, storagePreviewStore{states, issueErrors})
 			}
 			ctx := cmd.Context()
 			if !apply {
@@ -290,7 +314,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 		if err != nil {
 			return errors.Join(append(failures, err)...)
 		}
-		reclaim := storage.ReclaimOptions{Scopes: authorized, CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), ControlRoot: control, Retention: storage.BackendRetention{Failures: inventoryFailures, Budget: &budget, Apply: apply, Remote: opts.effectiveUpstreamRemote(), Tracker: func(s storage.RepositoryScope) (tracker.PullRequestVisitor, error) {
+		reclaim := storage.ReclaimOptions{Scopes: authorized, CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), ControlRoot: control, Retention: storage.BackendRetention{Failures: inventoryFailures, Apply: apply, Remote: opts.effectiveUpstreamRemote(), Tracker: func(s storage.RepositoryScope) (tracker.PullRequestVisitor, error) {
 			if err := inventoryFailures[s.CommonDirectory]; err != nil {
 				return nil, err
 			}
@@ -316,7 +340,26 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 		for _, err := range inventoryFailures {
 			failures = append(failures, err)
 		}
-		return errors.Join(failures...)
+		unique := []error{}
+		seen := map[string]bool{}
+		for _, failure := range failures {
+			for _, cause := range strings.Split(failure.Error(), "\n") {
+				cause = strings.TrimSpace(cause)
+				if strings.HasPrefix(cause, "issue #") {
+					if _, rest, ok := strings.Cut(cause, ": "); ok && strings.HasPrefix(rest, "issue ") {
+						cause = rest
+					}
+				}
+				if cause != "" && !seen[cause] {
+					unique = append(unique, errors.New(cause))
+					seen[cause] = true
+				}
+			}
+		}
+		if cmd.Context().Err() != nil {
+			return cmd.Context().Err()
+		}
+		return errors.Join(unique...)
 	}}
 	cmd.Flags().BoolVar(&apply, "apply", false, "Retire eligible tasks and reclaim admitted idle storage with fresh evidence")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Print one versioned JSON cleanup report")
@@ -324,13 +367,19 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 	return cmd
 }
 
-type storagePreviewStore map[int][]byte
+type storagePreviewStore struct {
+	states   map[int][]byte
+	failures map[int]error
+}
 
 func (s storagePreviewStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	data, ok := s[n]
+	if err := s.failures[n]; err != nil {
+		return nil, "", err
+	}
+	data, ok := s.states[n]
 	if !ok {
 		return nil, "", coordination.ErrNotFound
 	}

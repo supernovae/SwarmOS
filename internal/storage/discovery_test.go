@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -218,5 +219,50 @@ func TestIndexedRustPrefetchScratchMatchesDiscovery(t *testing.T) {
 	}
 	if err := use.Finish(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDiscoverScopesRegisteredOnlyAndConflicts(t *testing.T) {
+	ctx := context.Background()
+	opts := fixture(t)
+	opts.Repository = ""
+	scopes, reasons, err := DiscoverScopes(ctx, opts, true)
+	if err != nil || len(scopes) != 0 || len(reasons) != 0 {
+		t.Fatalf("empty registry %v %v %v", scopes, reasons, err)
+	}
+	repo := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repo
+		if out, e := cmd.CombinedOutput(); e != nil {
+			t.Fatalf("%v: %s %v", args, out, e)
+		}
+	}
+	git("init", "-q")
+	put(t, filepath.Join(repo, "file"), "x")
+	git("add", "file")
+	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "initial")
+	linked := filepath.Join(t.TempDir(), "linked")
+	git("worktree", "add", "-qb", "linked", linked)
+	// ReadSnapshot preserves distinct records, enabling independent common-dir
+	// identity checks even when one registration lies about its display name.
+	put(t, opts.RegistryPath, fmt.Sprintf("version: 1\nrepos:\n  a/repo:\n    repo: a/repo\n    path: %s\n    backend: local\n  b/repo:\n    repo: b/repo\n    path: %s\n    backend: local\n", repo, linked))
+	scopes, reasons, err = DiscoverScopes(ctx, opts, true)
+	if err != nil || len(scopes) != 0 || len(reasons) == 0 {
+		t.Fatalf("conflicting identity accepted: %v %v %v", scopes, reasons, err)
+	}
+	put(t, opts.RegistryPath, fmt.Sprintf("version: 1\nrepos:\n  a/repo:\n    repo: a/repo\n    path: %s\n    backend: local\n", linked))
+	scopes, reasons, err = DiscoverScopes(ctx, opts, true)
+	if err != nil || len(scopes) != 1 || scopes[0].Root != repo || len(reasons) != 0 {
+		t.Fatalf("linked worktree: %v %v %v", scopes, reasons, err)
+	}
+	opts.SelectedRoot = linked
+	scopes, reasons, err = DiscoverScopes(ctx, opts, false)
+	if err != nil || len(scopes) != 1 || scopes[0].Backend != "local" || len(reasons) != 0 {
+		t.Fatalf("registered linked default: %v %v %v", scopes, reasons, err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".swarm")); !os.IsNotExist(err) {
+		t.Fatal("discovery created authority", err)
 	}
 }

@@ -262,15 +262,18 @@ func (s *scanner) retention(owner, root, backend string, start int) {
 // CommonDirectory must match Git's independently observed canonical identity.
 type RepositoryScope struct{ Root, CommonDirectory, Backend string }
 
-// RetentionEvidence must describe a stable authoritative decision. Sources that
-// cannot hold that decision through visit must supply Stable=false.
+// RetentionEvidence describes one complete coherent authoritative snapshot. In
+// apply it is read freshly under caller-held exact-resource maintenance exclusion
+// through deletion. Remote claims cannot consume this host storage. Preview
+// evidence is advisory and must never be reused as apply authority.
 type RetentionEvidence struct {
 	Complete, Stable, Unfinished bool
 	Reason                       string
 }
 
-// RetentionSource implementations must be read-only and hold their decision
-// stable through visit. They must not acquire storage-use admission locks.
+// RetentionSource implementations pin a coherent state set before visiting.
+// Apply refreshes Git objects first; preview never fetches or acquires admission.
+// Sources must not acquire storage-use admission locks: the caller owns exclusion.
 type RetentionSource interface {
 	WithRetention(context.Context, RepositoryScope, func(RetentionEvidence) error) error
 }
@@ -457,9 +460,28 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		if !filepath.IsAbs(*p) || filepath.Clean(*p) == string(filepath.Separator) {
 			return invalid(errors.New("explicit trusted roots required"))
 		}
-		q, err := filepath.EvalSymlinks(*p)
-		if err != nil {
-			return invalid(err)
+		// Resolve an existing prefix without creating missing producer roots.
+		prefix := *p
+		tail := []string{}
+		var q string
+		for {
+			var err error
+			q, err = filepath.EvalSymlinks(prefix)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return invalid(err)
+			}
+			parent := filepath.Dir(prefix)
+			if parent == prefix {
+				return invalid(err)
+			}
+			tail = append(tail, filepath.Base(prefix))
+			prefix = parent
+		}
+		for i := len(tail) - 1; i >= 0; i-- {
+			q = filepath.Join(q, tail[i])
 		}
 		*p = q
 	}
@@ -510,6 +532,11 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		candidates = append(candidates, r)
 		return nil
 	})
+	// An absent control root has no admitted resources. Discovery still reports
+	// unregistered candidates, retaining them without initializing any roots.
+	if errors.Is(err, os.ErrNotExist) && len(candidates) == 0 {
+		err = nil
+	}
 	// Incomplete discovery cannot authorize even a previously observed candidate.
 	if err != nil {
 		out.Complete = false
@@ -548,7 +575,7 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		return out, errors.New("candidate discovery incomplete")
 	}
 	var manager *storageuse.Manager
-	if apply {
+	if apply && len(candidates) > 0 {
 		manager, err = storageuse.Open(opts.ControlRoot, opts.CacheRoot, opts.ScratchRoot)
 		if err != nil {
 			return invalid(err)
@@ -625,8 +652,9 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 					return errors.New("repeated retention callback")
 				}
 				called = true
-				result.Reason = "authoritative retention incomplete or unstable"
+				result.Reason = "authoritative retention incomplete or unstable: " + ev.Reason
 				if !ev.Complete || !ev.Stable {
+					out.Complete = false
 					return nil
 				}
 				if strings.HasSuffix(r.Class, "scratch") && ev.Unfinished {
@@ -652,6 +680,7 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 				result.Reason = "complete idle coverage and stable retention evidence"
 				if !apply {
 					result.Outcome = ReclaimEligible
+					result.Reason += "; advisory preview only"
 					return nil
 				}
 				parent, e := openExisting(filepath.Dir(r.Location))
@@ -768,4 +797,129 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 	}
 	out.ObservedLogicalDelta, out.ObservedAllocatedDelta = usageDelta(out.Before, out.After)
 	return out, operationErr
+}
+
+// BackendRetention reads bounded authoritative state and PR evidence. Apply is
+// selected by the coordinator, never by resource registration metadata.
+type BackendRetention struct {
+	Budget  *Budget
+	Apply   bool
+	Remote  string
+	Tracker func(RepositoryScope) (tracker.PullRequestVisitor, error)
+}
+
+// ReadRetentionSnapshot is shared by advisory task inspection and reclamation.
+func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote string, apply bool, budget *Budget, visitors ...tracker.PullRequestVisitor) (map[int][]byte, error) {
+	if scope.Backend == "local" {
+		return coordination.NewFileStore(scope.Root).ReadInventorySnapshot(ctx, budget.Limits.Records, budget.Charge)
+	}
+	if scope.Backend == "github" {
+		store := coordination.NewGitStoreWithRemote(scope.Root, remote)
+		if apply {
+			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, budget.Charge)
+		}
+		if len(visitors) != 1 {
+			return nil, errors.New("bounded pinned state visitor unavailable")
+		}
+		refs, ok := visitors[0].(tracker.StateRefVisitor)
+		if !ok {
+			return nil, errors.New("bounded pinned state visitor unavailable")
+		}
+		pinned := map[int]string{}
+		err := refs.VisitStateRefs(ctx, tracker.InventoryBudget{Records: budget.Limits.Records, Pages: 2, Bytes: 1 << 20, Reserve: budget.Charge}, func(n int, sha string) error {
+			if n < 1 || pinned[n] != "" {
+				return errors.New("ambiguous state snapshot")
+			}
+			if err := budget.Charge(1024); err != nil {
+				return err
+			}
+			pinned[n] = sha
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := map[int][]byte{}
+		for n, sha := range pinned {
+			data, err := store.LoadInventoryObject(ctx, sha, budget.Charge)
+			if err != nil {
+				return nil, err
+			}
+			out[n] = data
+		}
+		return out, nil
+	}
+	return nil, errors.New("unsupported retention backend")
+}
+func (r BackendRetention) WithRetention(ctx context.Context, scope RepositoryScope, visit func(RetentionEvidence) error) error {
+	ev := RetentionEvidence{}
+	fail := func(err error) error {
+		ev.Reason = err.Error()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return visit(ev)
+	}
+	b := r.Budget
+	if b == nil {
+		b = &Budget{Limits: DefaultLimits()}
+	}
+	if r.Tracker == nil {
+		return fail(errors.New("bounded PR evidence unavailable"))
+	}
+	tr, err := r.Tracker(scope)
+	if err != nil {
+		return fail(err)
+	}
+	states, err := ReadRetentionSnapshot(ctx, scope, r.Remote, r.Apply, b, tr)
+	if err != nil {
+		return fail(err)
+	}
+	prs := map[int]*tracker.PullRequest{}
+	err = tr.VisitPullRequests(ctx, tracker.InventoryBudget{Records: b.Limits.Records, Pages: 100, Bytes: 4 << 20, Reserve: b.Charge}, func(pr *tracker.PullRequest) error {
+		if pr == nil || pr.Number < 1 || prs[pr.Number] != nil {
+			return errors.New("ambiguous PR evidence")
+		}
+		if err := b.Charge(4096); err != nil {
+			return err
+		}
+		prs[pr.Number] = pr
+		return nil
+	})
+	if err != nil {
+		return fail(err)
+	}
+	used := map[int]bool{}
+	for n, data := range states {
+		st, e := lease.DecodeInventoryState(ctx, data, n)
+		if e != nil {
+			return fail(e)
+		}
+		pr := prs[st.PR]
+		if st.PR > 0 && used[st.PR] {
+			return fail(errors.New("ambiguous issue PR linkage"))
+		}
+		used[st.PR] = true
+		if st.Active || st.Pending || !st.Completed || st.ForkRepo != "" || !strings.HasPrefix(st.Branch, fmt.Sprintf("swarm/issue-%d-", n)) || st.PR == 0 || pr == nil || pr.State != "closed" || !pr.Merged || pr.MergedAt == nil || pr.MergeCommitSHA == "" || st.SubmittedHead == "" || pr.HeadSHA != st.SubmittedHead || pr.Head != st.Branch {
+			ev.Unfinished = true
+		}
+		if scope.Backend == "github" && pr != nil {
+			upstream, ok := tr.(interface{ UpstreamRepo() string })
+			if !ok || upstream.UpstreamRepo() == "" || !strings.EqualFold(pr.HeadRepo, upstream.UpstreamRepo()) || !strings.EqualFold(pr.BaseRepo, upstream.UpstreamRepo()) {
+				ev.Unfinished = true
+			}
+		}
+	}
+	for _, pr := range prs {
+		if pr.State == "open" || !used[pr.Number] {
+			ev.Unfinished = true
+		}
+	}
+	ev.Complete = true
+	ev.Stable = true
+	ev.Reason = "fresh coherent authority under host-local maintenance exclusion"
+	if !r.Apply {
+		ev.Reason = "coherent pinned preview; eligibility is advisory"
+	}
+	return visit(ev)
 }

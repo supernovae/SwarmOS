@@ -259,7 +259,7 @@ If a cache directory cannot be prepared safely, for example because it is a syml
 
 The coordinator registers managed cache and temporary-storage use before access and keeps the registration live through execution and output collection. Interrupted uses remain pending when shutdown cannot be verified, and legacy caches keep unknown coverage. The storage report reads this evidence without clearing it or deleting caches.
 
-Because Rust's `CARGO_TARGET_DIR` points at the agent cache, agent runs do not leave a `target/` directory in the workspace, and concurrent runs for one repository wait on Cargo's build-directory lock. Stop all workers, dependency prefetches and validators that use the repository before manually removing its cache directories to reclaim space.
+Because Rust's `CARGO_TARGET_DIR` points at the agent cache, agent runs do not leave a `target/` directory in the workspace, and concurrent runs for one repository wait on Cargo's build-directory lock. Use the preview-first cleanup command below to reclaim admitted idle storage.
 
 **Adding an ecosystem:** add an entry to `buildCacheEcosystems` in `internal/sandbox/build_cache.go`, using an environment variable that names only a build-output directory, never a credential or dependency home, and extend `TestBuildCacheTableSafety`. Ecosystems whose cache home holds credentials stay deferred.
 
@@ -281,6 +281,28 @@ Repository selection narrows the repository inventory; cache and scratch discove
 Logical bytes describe file sizes. Allocated bytes describe observed filesystem blocks, with shared inode identities counted once in the snapshot aggregate. Neither number promises space savings: hardlinks, sparse files and shared Git objects can overlap. Branches have no independent byte total. Filesystem reads may update operating-system access times.
 
 A report marked `complete=false` includes the available observations and the reasons it stopped. Missing usage and use evidence appear as unknown. A scratch prefix or missing repository does not prove abandonment; these candidates remain unknown. The command has no apply option. Authoritative issue registrations can keep missing worktrees visible; active attempts and pending revisions block those resources. GitHub inspection reads pinned state objects already available locally and never fetches missing objects. Completed merged worktrees become advisory candidates only after their registered branch, index and files pass bounded inspection. PR evidence is read once per repository through a bounded traversal. Repository retention eligibility remains unknown where authoritative claim, submission or complete worktree evidence is unavailable.
+
+### Reclaiming managed storage
+
+Use `swarm storage cleanup` to combine merged-task retirement with reclamation of admitted idle cache and scratch leaves. Start with a preview, then apply the scope you reviewed:
+
+```bash
+swarm storage cleanup --backend github
+swarm storage cleanup --backend github --apply --json
+swarm storage cleanup --root /path/to/checkout --backend local
+swarm storage cleanup --repo owner/repo --apply
+swarm storage cleanup --all-repos --apply --json
+```
+
+The default scope is the current checkout. `--root` selects a checkout and `--repo` selects a registered repository. `--all-repos` uses registered checkouts only and cannot be combined with those selectors. Each repository is authorized independently before apply; a failure is reported while other repositories continue. Fork workers cannot run this command.
+
+Preview is advisory: it reads existing pinned state objects and bounded PR evidence without fetching, creating admission records or changing task authority. Apply reinspects task eligibility through the existing bulk retirement path, including reservations and expected branch heads. A closed issue or expired lease does not establish merge.
+
+For each host resource, apply holds local maintenance exclusion from its fresh retention read through deletion. Local state comes from one coherent read-only snapshot. GitHub state objects are refreshed before the final complete set of object identities is pinned; failed refreshes or changing snapshots retain the resource. A remote claim cannot use this host's storage. Local producers register use of the exact resource, so an admitted use protects it and a new use waits while maintenance removes it.
+
+`eligible` means the preview found sufficient evidence; `removed` records a completed host removal and `absent` means a registered leaf was already missing. Retained resources include active or interrupted use and unknown evidence. Legacy, unindexed, orphaned and pending resources remain retained. Incomplete state or PR traversal, including inventory limits, is reported with a reason. Byte deltas describe managed namespace observations; hardlinks and filesystem sharing can prevent physical disk savings.
+
+Rerun after an interruption to inspect what remains. Resolve task state and cleanup reservations using the [single-issue recovery workflow](developer.md#after-a-pull-request-is-merged-or-closed), then rerun explicitly. Missing durable use coverage has no automatic upgrade or age-based recovery; keep that storage until its lifecycle can be established. Preserve manifests and authoritative ledgers for recovery and provenance.
 
 ### Dependency caches
 

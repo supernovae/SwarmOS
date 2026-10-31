@@ -520,3 +520,15 @@ func TestNetworkReadErrorsOnEachPipe(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkLimitedRejectsOversizedAdvertisement(t *testing.T) {
+	repo, _ := networkFixture(t)
+	// One ordinary ref advertisement already exceeds this deliberately tiny cap.
+	out, err := NetworkLimited(context.Background(), repo, false, 1, "ls-remote", "--refs", "origin")
+	if err == nil || len(out) > 1 {
+		t.Fatalf("unbounded advertisement: %d bytes, %v", len(out), err)
+	}
+	if _, err := NetworkLimited(context.Background(), repo, false, 0, "ls-remote", "origin"); err == nil {
+		t.Fatal("invalid cap accepted")
+	}
+}

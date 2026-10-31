@@ -213,3 +213,37 @@ func TestObservationCommandRejectsMutationAndCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalObservationNeverResolvesCredentials(t *testing.T) {
+	t.Setenv("SWARM_GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	marker := filepath.Join(t.TempDir(), "token-command")
+	t.Setenv(TokenCommandEnv, "touch "+marker)
+	resetTokenCache()
+	t.Cleanup(resetTokenCache)
+	ctx := WithLocalObservation(context.Background())
+	cmd, _, err := Command(ctx, t.TempDir(), "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range cmd.Env {
+		if strings.HasPrefix(item, TokenCommandEnv+"=") {
+			t.Fatal("forwarded token command")
+		}
+	}
+	if _, err := Output(ctx, t.TempDir(), "ls-remote", "origin"); err == nil {
+		t.Fatal("allowed remote verification")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("resolved credentials", err)
+	}
+	t.Setenv("GH_TOKEN", "secret-for-observation")
+	cmd, _, err = Command(ctx, t.TempDir(), "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(cmd.Env, "\n"), "secret-for-observation") {
+		t.Fatal("forwarded credentials")
+	}
+}

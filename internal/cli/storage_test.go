@@ -3,8 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
+	"github.com/supernovae/swarmos/internal/tracker"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,5 +195,213 @@ func TestStorageBothRenderersPreserveAuthoritativeState(t *testing.T) {
 				t.Fatal("report changed filesystem or authoritative state")
 			}
 		}
+	}
+}
+
+func TestStorageCleanupPreviewApplyAndJSON(t *testing.T) {
+	f := newCLIFixture(t)
+	task := bulkMerged(t, f)
+	t.Setenv("TMPDIR", t.TempDir())
+	// Keep the fixture within the existing inventory string budget. Full mock
+	// agent transcripts can exceed it and intentionally produce unknown evidence.
+	trackerPath := filepath.Join(f.root, ".swarm", "local-tracker", "state.json")
+	raw, e := os.ReadFile(trackerPath)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var data any
+	if e = json.Unmarshal(raw, &data); e != nil {
+		t.Fatal(e)
+	}
+	var compact func(any)
+	compact = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, item := range x {
+				if k == "body" {
+					x[k] = ""
+				} else {
+					compact(item)
+				}
+			}
+		case []any:
+			for _, item := range x {
+				compact(item)
+			}
+		}
+	}
+	compact(data)
+	raw, e = json.Marshal(data)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(trackerPath, raw, 0600); e != nil {
+		t.Fatal(e)
+	}
+	// Observe the complete checkout, including modes and timestamps. Preview may
+	// read existing objects but must not initialize locks, registries or ledgers.
+	snapshot := func() map[string]string {
+		out := map[string]string{}
+		err := filepath.WalkDir(f.root, func(path string, e os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := e.Info()
+			if err != nil {
+				return err
+			}
+			value := info.Mode().String() + info.ModTime().String()
+			if info.Mode().IsRegular() {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return err
+				}
+				value += string(data)
+			}
+			out[path] = value
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	before := snapshot()
+	marker := filepath.Join(t.TempDir(), "credential-command-ran")
+	t.Setenv("SWARM_GITHUB_TOKEN_COMMAND", "touch "+marker)
+	stdout, _, err := runSplit(f, "storage", "cleanup", "--json")
+	if err != nil {
+		t.Fatalf("%v: %s", err, stdout)
+	}
+	if _, e := os.Stat(marker); !os.IsNotExist(e) {
+		t.Fatal("preview executed credential command", e)
+	}
+	t.Setenv("SWARM_GITHUB_TOKEN_COMMAND", "")
+	var report storageCleanupReport
+	if err = json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatal(err, stdout)
+	}
+	if report.Version != 1 || report.Mode != "preview" || len(report.Tasks) != 1 || report.Totals.Eligible == 0 {
+		t.Fatalf("%+v", report)
+	}
+	if after := snapshot(); !reflect.DeepEqual(before, after) {
+		for path, value := range after {
+			if before[path] != value {
+				t.Errorf("preview changed %s", path)
+			}
+		}
+		t.Fatal("preview changed checkout")
+	}
+	stdout, _, err = runSplit(f, "storage", "cleanup", "--apply", "--json")
+	if err != nil {
+		t.Fatalf("%v: %s", err, stdout)
+	}
+	if err = json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Mode != "apply" || report.Totals.Retired == 0 {
+		t.Fatalf("%+v", report)
+	}
+	if _, err = os.Stat(filepath.Join(f.root, ".swarm", "worktrees", fmt.Sprintf("issue-%d", task.issue))); !os.IsNotExist(err) {
+		t.Fatal("worktree retained", err)
+	}
+	stdout, _, err = runSplit(f, "storage", "cleanup", "--apply", "--json")
+	if err != nil {
+		t.Fatalf("rerun %v: %s", err, stdout)
+	}
+}
+func TestStorageCleanupSelectorsAndErrors(t *testing.T) {
+	for _, args := range [][]string{{"--all-repos", "--root", "/missing"}, {"--all-repos", "--repo", "owner/repo"}, {"unexpected"}, {"--root", "/missing", "--backend", "local"}} {
+		cmd := newRootCmdWithOptions(&RootOptions{})
+		var stdout bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(append([]string{"storage", "cleanup", "--json"}, args...))
+		if err := cmd.Execute(); err == nil {
+			t.Fatal("accepted", args)
+		}
+		var report storageCleanupReport
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || len(report.Errors) == 0 {
+			t.Fatalf("missing single error report: %s %v", stdout.String(), err)
+		}
+	}
+}
+
+type storageDeniedTracker struct{ *tracker.LocalTracker }
+
+func (*storageDeniedTracker) Authorize(context.Context, string) error {
+	return errors.New("operator permission denied")
+}
+func TestStorageCleanupAuthorizationProtectsHost(t *testing.T) {
+	f := newCLIFixture(t)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("TMPDIR", t.TempDir())
+	common := filepath.Join(f.root, ".git")
+	hash := sha256.Sum256([]byte(common))
+	key := hex.EncodeToString(hash[:16])
+	cache := filepath.Join(os.Getenv("XDG_CACHE_HOME"), "swarm")
+	control, _ := storageuse.ControlRoot()
+	manager, err := storageuse.Open(control, cache, os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	path := filepath.Join(cache, "agent-build", key, "go")
+	use, err := manager.AcquireUse(context.Background(), storageuse.ResourceFor(key, "agent-build", path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(path, "data"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = use.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cmd := f.command(&RootOptions{trackerOverride: &storageDeniedTracker{f.tracker}})
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "storage", "cleanup", "--apply", "--json"})
+	if err = cmd.Execute(); err == nil {
+		t.Fatal("unauthorized apply succeeded")
+	}
+	var report storageCleanupReport
+	if err = json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err, stdout.String())
+	}
+	if len(report.Tasks) != 0 || len(report.Errors) == 0 {
+		t.Fatalf("%+v", report)
+	}
+	if raw, err := os.ReadFile(filepath.Join(path, "data")); err != nil || string(raw) != "keep" {
+		t.Fatal("unauthorized host deletion", err)
+	}
+}
+func TestStorageCleanupAllReposContinuesAfterInvalidScope(t *testing.T) {
+	f := newCLIFixture(t)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("TMPDIR", t.TempDir())
+	registryPath := filepath.Join(t.TempDir(), "repos.yaml")
+	f.setenv("SWARM_REGISTRY_PATH", registryPath)
+	raw := fmt.Sprintf("version: 1\nrepos:\n  a/missing:\n    repo: a/missing\n    path: %s\n    backend: local\n  b/valid:\n    repo: b/valid\n    path: %s\n    backend: local\n", filepath.Join(t.TempDir(), "gone"), f.root)
+	if err := os.WriteFile(registryPath, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := f.command(nil)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"storage", "cleanup", "--all-repos", "--apply", "--json"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("invalid scope silently ignored")
+	}
+	var report storageCleanupReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err, stdout.String())
+	}
+	if len(report.Incomplete) == 0 || len(report.Errors) == 0 || len(report.Tasks) != 1 || report.Tasks[0].Status != "completed" {
+		t.Fatalf("%+v", report)
 	}
 }

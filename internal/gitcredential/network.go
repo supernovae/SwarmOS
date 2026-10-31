@@ -71,6 +71,19 @@ func IsNetwork(args []string) bool {
 // No diagnostic writer or reporting worker is invoked. Returned results are
 // snapshots; late reaping cannot change them.
 func Network(ctx context.Context, root string, combined bool, args ...string) ([]byte, error) {
+	return network(ctx, root, combined, 0, args...)
+}
+
+// NetworkLimited uses the same process lifecycle as Network, with a fixed
+// output cap per stream. Exceeding the cap cancels the operation before the
+// buffer grows; callers reserve both stream budgets before starting Git.
+func NetworkLimited(ctx context.Context, root string, combined bool, maxBytes int, args ...string) ([]byte, error) {
+	if maxBytes < 1 {
+		return nil, errors.New("positive Git output limit required")
+	}
+	return network(ctx, root, combined, maxBytes, args...)
+}
+func network(ctx context.Context, root string, combined bool, maxBytes int, args ...string) ([]byte, error) {
 	if !IsNetwork(args) {
 		return nil, errors.New("not a Git network operation")
 	}
@@ -132,7 +145,11 @@ func Network(ctx context.Context, root string, combined bool, args ...string) ([
 		go func(rd *networkRead) {
 			defer close(rd.done)
 			defer rd.file.Close()
-			_, rd.err = readNetwork(&rd.buffer, rd.file)
+			var dst io.Writer = &rd.buffer
+			if maxBytes > 0 {
+				dst = &networkOutputLimit{buffer: &rd.buffer, remaining: maxBytes, cancel: cancel}
+			}
+			_, rd.err = readNetwork(dst, rd.file)
 		}(reader)
 	}
 	go func() {
@@ -252,3 +269,18 @@ func Network(ctx context.Context, root string, combined bool, args ...string) ([
 }
 
 func isExitError(err error) bool { var exit *exec.ExitError; return errors.As(err, &exit) }
+
+type networkOutputLimit struct {
+	buffer    *bytes.Buffer
+	remaining int
+	cancel    context.CancelFunc
+}
+
+func (w *networkOutputLimit) Write(p []byte) (int, error) {
+	if len(p) > w.remaining {
+		w.cancel()
+		return 0, errors.New("git inventory output limit exceeded")
+	}
+	w.remaining -= len(p)
+	return w.buffer.Write(p)
+}

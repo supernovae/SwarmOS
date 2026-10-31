@@ -281,6 +281,7 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm issue reconcile <issue>` | Record the linked PR outcome and repair its issue label and audit projection. |
 | `swarm issue discard-checkpoint <issue> --expected-head <sha>` | Maintainers only: abandon an unsubmitted, unclaimed task checkpoint, keeping its commit under a retention ref, so the next claim starts fresh from the approved base. |
 | `swarm issue cleanup <issue> [--apply]` | Preview task resources; explicitly retire an eligible merged remote branch while retaining local work and provenance. |
+| `swarm storage cleanup [--apply] [--json] [--all-repos]` | Preview merged-task retirement and admitted idle host storage; apply with fresh evidence for the selected repository or all registered checkouts. |
 | `swarm issue cleanup --all-merged [--apply]` | Preview or retire the resources of every local issue and PR worktree in one run, with per-issue retired, retained, and failed counts. |
 | `swarm pr status <PR>` / `swarm pr work <PR> [--instructions <text>]` | Inspect or continue developing a PR linked to an approved WorkUnit, including failing tests and review feedback, in a separate PR worktree. Contributors add `--fork` to revise their own fork PRs. |
 | `swarm pr stage <PR> [--phase plan\|implement] [--harness <name>] [--model <name>] [--handoff] [--json]` | Stage an interactive plan or local implementation checkpoint in the separate managed PR worktree; links artifacts to the original issue without publishing the PR. |

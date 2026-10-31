@@ -30,13 +30,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	userCacheDir = func() (string, error) { return dir, nil }
-	storageuse.UserCacheDir = func() (string, error) {
-		base, err := userCacheDir()
-		if err != nil {
-			return os.UserCacheDir()
-		}
-		return base, nil
-	}
+	storageuse.UserCacheDir = func() (string, error) { return dir, nil }
 	os.Setenv("XDG_CACHE_HOME", dir)
 	os.Setenv("HOME", dir)
 	code := m.Run()
@@ -52,8 +46,13 @@ func useCacheRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	previous := userCacheDir
+	previousControl := storageuse.UserCacheDir
 	userCacheDir = func() (string, error) { return root, nil }
-	t.Cleanup(func() { userCacheDir = previous })
+	storageuse.UserCacheDir = userCacheDir
+	t.Cleanup(func() {
+		userCacheDir = previous
+		storageuse.UserCacheDir = previousControl
+	})
 	return root
 }
 

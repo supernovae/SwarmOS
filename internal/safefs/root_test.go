@@ -2,6 +2,7 @@ package safefs
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net"
 	"os"
@@ -425,5 +426,124 @@ func TestCleanupRepairPreservesDirectoryModeBits(t *testing.T) {
 	}
 	if after.Mode()&os.ModeSticky != info.Mode()&os.ModeSticky || after.Mode().Perm() != 0755 {
 		t.Fatalf("repair changed unrelated mode bits: %v -> %v", info.Mode(), after.Mode())
+	}
+}
+
+func TestCheckedContextRemovalRetainsSubstitutedDescendant(t *testing.T) {
+	base := t.TempDir()
+	leaf := filepath.Join(base, "leaf")
+	if err := os.Mkdir(leaf, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(leaf, "file")
+	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := Open(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	expected, err := root.Lstat("leaf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	visits := 0
+	err = root.RemoveAllCheckedContext(context.Background(), "leaf", expected, func() error {
+		visits++
+		if visits == 3 {
+			// Keep the original inode alive so inode reuse cannot mask substitution.
+			if err := os.Rename(path, filepath.Join(base, "original")); err != nil {
+				return err
+			}
+			return os.WriteFile(path, []byte("replacement"), 0600)
+		}
+		return nil
+	})
+	if err == nil {
+		t.Error("descendant substitution between preflight and deletion accepted")
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil || string(data) != "replacement" {
+		t.Errorf("replacement was not retained: %q, %v", data, readErr)
+	}
+}
+
+func TestCheckedContextRemovalAdversarial(t *testing.T) {
+	for _, attack := range []string{"symlink", "fifo", "socket", "substitution", "cancel", "budget", "success"} {
+		t.Run(attack, func(t *testing.T) {
+			base, outside := t.TempDir(), t.TempDir()
+			if err := os.Mkdir(filepath.Join(base, "leaf"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(base, "leaf", "file"), []byte("data"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			sentinel := filepath.Join(outside, "sentinel")
+			if err := os.WriteFile(sentinel, []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			switch attack {
+			case "symlink":
+				if err := os.Symlink(outside, filepath.Join(base, "leaf", "link")); err != nil {
+					t.Fatal(err)
+				}
+			case "fifo":
+				if err := syscall.Mkfifo(filepath.Join(base, "leaf", "fifo"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "socket":
+				l, err := net.Listen("unix", filepath.Join(base, "leaf", "sock"))
+				if err != nil {
+					t.Skipf("Unix socket fixture unavailable: %v", err)
+				}
+				defer l.Close()
+			}
+			root, err := Open(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			expected, err := root.Lstat("leaf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			visits := 0
+			err = root.RemoveAllCheckedContext(ctx, "leaf", expected, func() error {
+				visits++
+				if visits == 3 { // preflight of leaf+file finished; substitution precedes deletion pass
+					switch attack {
+					case "substitution":
+						if err := os.Rename(filepath.Join(base, "leaf"), filepath.Join(base, "old")); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(outside, filepath.Join(base, "leaf")); err != nil {
+							t.Fatal(err)
+						}
+					case "cancel":
+						cancel()
+					case "budget":
+						return errors.New("bounded traversal exhausted")
+					}
+				}
+				return nil
+			})
+			if attack == "success" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := root.Lstat("leaf"); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+			} else if err == nil {
+				t.Fatal("unsafe removal accepted")
+			}
+			data, err := os.ReadFile(sentinel)
+			if err != nil || string(data) != "keep" {
+				t.Fatal("outside sentinel changed", err)
+			}
+		})
 	}
 }

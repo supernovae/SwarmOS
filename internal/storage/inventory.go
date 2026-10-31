@@ -1,4 +1,5 @@
-// Package storage provides bounded, read-only observations of managed storage.
+// Package storage provides bounded observations and coordinator-only reclamation
+// of managed storage. Scan remains strictly read-only.
 // Observations never authorize reclamation.
 package storage
 

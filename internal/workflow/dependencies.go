@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"os"
 
 	"github.com/supernovae/swarmos/internal/contract"
@@ -30,7 +31,14 @@ var prepareAgentDependencies = func(ctx context.Context, execution contract.Exec
 // AgentDependencies prepares the agent dependency caches for baseSHA. It
 // never falls back to host caches: an error stops the run before an agent
 // starts, and before a claim when called from preflight.
-func (e *Engine) AgentDependencies(ctx context.Context, cfg *contract.SwarmConfig, repo, baseSHA string) (sandbox.Dependencies, error) {
+func (e *Engine) AgentDependencies(ctx context.Context, cfg *contract.SwarmConfig, repo, baseSHA string) (dependencies sandbox.Dependencies, depsErr error) {
+	ctx, scope, scopeErr := storageuse.Ensure(ctx, repo)
+	if scopeErr != nil {
+		return sandbox.Dependencies{}, scopeErr
+	}
+	if scope != nil {
+		defer scope.Complete(&depsErr)
+	}
 	execution, err := contract.ResolveExecution(cfg, e.getenv("SWARM_EXECUTION_MODE"))
 	if err != nil {
 		return sandbox.Dependencies{}, err

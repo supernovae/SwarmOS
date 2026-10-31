@@ -2,10 +2,13 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -192,6 +195,78 @@ func TestAgentDependenciesUseRepositoryPolicy(t *testing.T) {
 		}
 		if got.Mode != want.Mode || got.PrivateGo.Repository != want.PrivateGo.Repository || strings.Join(got.PrivateGo.Patterns, ",") != "example.com/priv" {
 			t.Fatalf("%s: agent prefetch policy = %+v, want %+v", name, got, want)
+		}
+	}
+}
+
+// The enclosing engine owns preflight admission through the last role, without
+// placing completion authority in the worker-visible Dependencies value.
+func TestEngineDependencyScopeLivesThroughRoles(t *testing.T) {
+	rootHome, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CACHE_HOME", rootHome)
+	if runtime.GOOS == "darwin" {
+		t.Setenv("HOME", rootHome)
+	}
+	eng, root, issue := approvedDependencyTask(t)
+	cache := filepath.Join(t.TempDir(), "cache")
+	var resource storageuse.Resource
+	stubAgentDependencies(t, func(ctx context.Context, _ contract.ExecutionConfig, _, _ string, policy sandbox.DependencyPolicy) (sandbox.Dependencies, error) {
+		scope := storageuse.FromContext(ctx)
+		if scope == nil {
+			t.Fatal("preflight has no enclosing owner")
+		}
+		resource = storageuse.ResourceFor(scope.Repository(), "agent-deps", cache)
+		if err := scope.Acquire(ctx, resource); err != nil {
+			return sandbox.Dependencies{}, err
+		}
+		return sandbox.Dependencies{Mode: policy.Mode}, nil
+	})
+	checked := false
+	eng.NewRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+		runner, err := agent.NewConfiguredRunner(name, cfg, local)
+		return dependencyRecorder{Runner: runner, run: func(agent.RunRequest) {
+			control, _ := storageuse.ControlRoot()
+			m, err := storageuse.Open(control)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			if guard, err := m.AcquireMaintenance(context.Background(), resource); !errors.Is(err, storageuse.ErrUnsafe) {
+				if guard != nil {
+					guard.Close()
+				}
+				t.Fatalf("preflight scope ended before role: %v", err)
+			}
+			checked = true
+		}}, err
+	}
+	if _, err := eng.ExecuteWork(context.Background(), WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "mock", Phase: "plan", Headless: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !checked {
+		t.Fatal("no role checked lifetime")
+	}
+	control, _ := storageuse.ControlRoot()
+	records, err := filepath.Glob(filepath.Join(control, "*.json"))
+	if err != nil || len(records) == 0 {
+		t.Fatalf("no evidence: %v", err)
+	}
+	for _, path := range records {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r struct{ Uses map[string]bool }
+		if err := json.Unmarshal(data, &r); err != nil {
+			t.Fatal(err)
+		}
+		for _, done := range r.Uses {
+			if !done {
+				t.Fatalf("ordinary engine completion left pending record %s", filepath.Base(path))
+			}
 		}
 	}
 }

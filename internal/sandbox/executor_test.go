@@ -17,10 +17,10 @@ import (
 )
 
 func TestDelegatedValidationWithoutCodex(t *testing.T) {
-	t.Parallel()
 	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
 		t.Skip("set SWARM_TEST_EXECUTOR=1 for actual delegated validation")
 	}
+	isolateRuntimeControl(t)
 	cfg := &contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: "omp", Binary: "not-used-by-validation"}}}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "source"), []byte("original"), 0600); err != nil {
@@ -40,6 +40,7 @@ func TestDelegatedValidationWithoutCodex(t *testing.T) {
 	if err != nil || string(data) != "original" {
 		t.Fatal("validation changed coordinator workspace", err, string(data))
 	}
+	assertRuntimePending(t, 0)
 }
 
 func TestMCPToolCancellation(t *testing.T) {
@@ -90,6 +91,7 @@ func TestToolExecutorBoundary(t *testing.T) {
 	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
 		t.Skip("set SWARM_TEST_EXECUTOR=1 for real Bubblewrap tests")
 	}
+	isolateRuntimeControl(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := CheckToolExecutor(ctx); err != nil {
@@ -181,6 +183,7 @@ func TestToolExecutorBoundary(t *testing.T) {
 			t.Fatal("host secret changed")
 		}
 	})
+	assertRuntimePending(t, 0)
 }
 
 func TestOMPRealToolRegistration(t *testing.T) {
@@ -248,6 +251,7 @@ func requireExecutor(t *testing.T) {
 
 func TestBubblewrapAgentBuildCacheReuse(t *testing.T) {
 	requireExecutor(t)
+	isolateRuntimeControl(t)
 	useUserCache(t)
 	repo := cacheTestRepo(t)
 	caches, err := agentBuildCaches(t.Context(), repo, resolvedTempDir(t), WorkerOptions{Role: "developer"})
@@ -262,17 +266,18 @@ func TestBubblewrapAgentBuildCacheReuse(t *testing.T) {
 	read := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/m")" = run1; done`
 	for _, script := range []string{write, read} {
 		var out strings.Builder
-		if err := e.Run(t.Context(), script, &out, &out); err != nil {
+		if err := runCoordinatorExecutor(t, e, t.Context(), script, &out, &out); err != nil {
 			t.Fatal(err, out.String())
 		}
 	}
+	assertRuntimePending(t, 0)
 	if _, err := exec.LookPath("go"); err != nil {
 		return
 	}
 	var outputs []string
 	for range 2 {
 		var out strings.Builder
-		if err := e.Run(t.Context(), "go build -x -o /tmp/reuse . 2>&1", &out, &out); err != nil {
+		if err := runCoordinatorExecutor(t, e, t.Context(), "go build -x -o /tmp/reuse . 2>&1", &out, &out); err != nil {
 			t.Skip("go build unavailable in the sandbox:", err, out.String())
 		}
 		outputs = append(outputs, out.String())
@@ -283,10 +288,12 @@ func TestBubblewrapAgentBuildCacheReuse(t *testing.T) {
 	if strings.Contains(outputs[1], "/compile ") {
 		t.Fatalf("second build recompiled despite the agent cache:\n%s", outputs[1])
 	}
+	assertRuntimePending(t, 0)
 }
 
 func TestBubblewrapValidationBuildCacheIsolation(t *testing.T) {
 	requireExecutor(t)
+	isolateRuntimeControl(t)
 	root := useUserCache(t)
 	repo := cacheTestRepo(t)
 	agent := mustPrepare(t, AgentBuildCache, repo, root, resolvedTempDir(t))
@@ -312,17 +319,19 @@ func TestBubblewrapValidationBuildCacheIsolation(t *testing.T) {
 		// Agents can neither see nor write the validator cache.
 		e := ToolExecutor{Work: resolvedTempDir(t), BuildCaches: agent}
 		out.Reset()
-		if err := e.Run(t.Context(), `set -eu; test ! -e "$1"; if (printf x > "$1/agent-wrote") 2>/dev/null; then exit 9; fi`, &out, &out, v.Dir); err != nil {
+		if err := runCoordinatorExecutor(t, e, t.Context(), `set -eu; test ! -e "$1"; if (printf x > "$1/agent-wrote") 2>/dev/null; then exit 9; fi`, &out, &out, v.Dir); err != nil {
 			t.Fatalf("%s: agent reached the validator cache: %v %s", v.Ecosystem, err, out.String())
 		}
 		if _, err := os.Stat(filepath.Join(v.Dir, "agent-wrote")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s: agent wrote the validator cache: %v", v.Ecosystem, err)
 		}
 	}
+	assertRuntimePending(t, 0)
 }
 
 func TestBubblewrapCandidateWritesDiscarded(t *testing.T) {
 	requireExecutor(t)
+	isolateRuntimeControl(t)
 	if !bubblewrapOverlay() {
 		t.Skip("Bubblewrap overlay mounts are unavailable here")
 	}
@@ -348,6 +357,7 @@ func TestBubblewrapCandidateWritesDiscarded(t *testing.T) {
 			t.Fatalf("%s: candidate write persisted: %v", c.Ecosystem, err)
 		}
 	}
+	assertRuntimePending(t, 0)
 }
 
 func TestGoConcurrencyExecutor(t *testing.T) {

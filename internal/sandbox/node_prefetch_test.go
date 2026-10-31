@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -710,15 +711,24 @@ v1dep@^1.0.0:
 }
 
 func TestNodePrefetchMarkerSkipsRepeat(t *testing.T) {
+	isolateRuntimeControl(t)
 	hostNodeEnv(t)
 	calls := recordNodePrefetch(t, nil)
 	repo, base := nodeRepo(t, map[string]string{"package.json": `{"name":"fixture"}`, "package-lock.json": "{}"})
 	userCache := resolvedTempDir(t)
 	prepare := func(base string) {
 		t.Helper()
-		if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, PerRepository); err != nil {
+		ctx, scope, err := storageuse.Ensure(t.Context(), repo)
+		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := PrepareDependencyCaches(ctx, AgentDependencyCache, repo, base, userCache, PerRepository); err != nil {
+			t.Fatal(err)
+		}
+		if err := scope.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		assertNoPendingCacheUses(t)
 	}
 	prepare(base)
 	prepare(base)

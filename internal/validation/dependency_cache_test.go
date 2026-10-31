@@ -44,6 +44,7 @@ func TestValidateUsesValidatorDependencyCache(t *testing.T) {
 		if err != nil || !report.Passed {
 			t.Fatalf("mode %q: validate = %+v, %v", tc.mode, report, err)
 		}
+		assertValidationRepositoryCompleted(t, repo)
 		got := checkEnvOutput(t, report.CheckOutcomes[0].Output, "GOMODCACHE")
 		if tc.shared {
 			if got != hostCache {

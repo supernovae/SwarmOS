@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"io"
 	"net"
 	"os"
@@ -355,13 +356,21 @@ func TestNativeCodexAgentBuildCacheReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	isolateRuntimeControl(t)
 	root := useUserCache(t)
 	repo := cacheTestRepo(t)
-	caches, err := agentBuildCaches(t.Context(), repo, resolvedTempDir(t), WorkerOptions{Role: "developer"})
+	ctx, scope, err := storageuse.Ensure(t.Context(), repo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	validator := mustPrepare(t, ValidatorBuildCache, repo, root, resolvedTempDir(t))
+	caches, err := agentBuildCaches(ctx, repo, resolvedTempDir(t), WorkerOptions{Role: "developer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator, err := PrepareBuildCaches(ctx, ValidatorBuildCache, repo, root, resolvedTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	write := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do printf run1 > "$d/m"; done`
 	read := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/m")" = run1; done; test ! -r "$1"; if (printf x > "$1/agent-wrote") 2>/dev/null; then exit 9; fi`
 	for _, script := range []string{write, read} {
@@ -369,7 +378,7 @@ func TestNativeCodexAgentBuildCacheReuse(t *testing.T) {
 		args := codexPolicy(binary, work, scratch, false, caches, Dependencies{})
 		args = append(args, "sandbox", "-C", work, "-P", "swarm", "--", "/bin/sh", "-c", script, "swarm-cache", validator[0].Dir)
 		var output strings.Builder
-		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err := runNativeCommand(ctx, binary, scratch, nativeEnv(codexHostHome(scratch), false, Dependencies{}), args, nil, &output, &output)
 		cancel()
 		if err != nil {
@@ -379,6 +388,10 @@ func TestNativeCodexAgentBuildCacheReuse(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(validator[0].Dir, "agent-wrote")); !os.IsNotExist(err) {
 		t.Fatal("agent wrote the validator cache", err)
 	}
+	if err := scope.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	assertRuntimePending(t, 0)
 }
 
 // countingCodex writes a fake Codex that records each version, help and

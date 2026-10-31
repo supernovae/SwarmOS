@@ -224,6 +224,7 @@ func (s *scanner) caches() {
 				if strings.HasPrefix(eco.Name(), ".prefetch-rust-") {
 					r.Class = "prefetch-scratch"
 					r.Owner = "unknown"
+					r.Identity = "scratch:" + path
 				}
 				if owner == "" {
 					r.Eligibility = "unknown"
@@ -242,13 +243,7 @@ func (s *scanner) scratch() {
 		return
 	}
 	s.directory(s.opts.ScratchRoot, func(e os.DirEntry) {
-		class := ""
-		for prefix, c := range map[string]string{"swarm-worker-": "sandbox-scratch", "swarm-native-": "native-scratch", "swarm-prefetch-": "prefetch-scratch", "swarm-review-": "review-scratch", "swarm-check-home-": "validation-scratch", "swarm-harness-inspect-": "sandbox-scratch", "swarm-executor-check-": "sandbox-scratch", "swarm-overlay-check-": "sandbox-scratch"} {
-			if strings.HasPrefix(e.Name(), prefix) {
-				class = c
-				break
-			}
-		}
+		class := scratchClass(e.Name())
 		if class == "" {
 			return
 		}
@@ -285,4 +280,14 @@ func privateLayout(base, rel string) bool {
 		}
 	}
 	return true
+}
+
+// scratchClass accepts only the managed temporary-directory naming layouts.
+func scratchClass(name string) string {
+	for prefix, class := range map[string]string{"swarm-worker-": "sandbox-scratch", "swarm-native-": "native-scratch", "swarm-prefetch-": "prefetch-scratch", "swarm-review-": "review-scratch", "swarm-upstream-review-": "review-scratch", "swarm-checkpoint-plan-": "review-scratch", "swarm-check-home-": "validation-scratch", "swarm-warmup-": "validation-scratch", "swarm-repair-base-": "validation-scratch", "swarm-harness-inspect-": "sandbox-scratch", "swarm-executor-check-": "sandbox-scratch", "swarm-overlay-check-": "sandbox-scratch"} {
+		if strings.HasPrefix(name, prefix) && len(name) > len(prefix) {
+			return class
+		}
+	}
+	return ""
 }

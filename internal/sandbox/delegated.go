@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 // InspectDelegatedHarness checks supported interfaces without opening private
@@ -24,14 +25,21 @@ func InspectDelegatedHarness(ctx context.Context, driver, binary string) (string
 // inspectDelegatedHarness also requires the extra flags a configured run uses,
 // such as --effort, so an older harness fails before work starts. It also
 // returns the inspected help text so optional flags are used only when listed.
-func inspectDelegatedHarness(ctx context.Context, driver, binary string, extra []string) (string, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	home, err := os.MkdirTemp("", "swarm-harness-inspect-*")
+func inspectDelegatedHarness(ctx context.Context, driver, binary string, extra []string) (versionResult string, helpResult string, resultErr error) {
+	ctx, own, err := storageuse.Ensure(ctx, "host")
 	if err != nil {
 		return "", "", err
 	}
-	defer os.RemoveAll(home)
+	if own != nil {
+		defer own.Complete(&resultErr)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	home, err := storageuse.FromContext(ctx).TempDir(ctx, "", "swarm-harness-inspect-*", "sandbox-scratch")
+	if err != nil {
+		return "", "", err
+	}
+	defer storageuse.FromContext(ctx).CleanupTemp(home, &resultErr)
 	env := nativeEnv(home, false, Dependencies{})
 	var version, diagnostics process.Output
 	if err := runNativeCommand(ctx, binary, home, env, []string{"--version"}, nil, &version, &diagnostics); err != nil {

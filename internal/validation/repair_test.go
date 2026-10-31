@@ -25,6 +25,7 @@ func validateRepair(t *testing.T, repo, base string) *ValidationReport {
 	if !errors.Is(err, ErrRequiredCheckFailed) || report == nil || report.Repair == nil {
 		t.Fatalf("validation must fail with a repair summary: %+v %v", report, err)
 	}
+	assertValidationRepositoryCompleted(t, repo)
 	return report
 }
 

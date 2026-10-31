@@ -2,9 +2,13 @@ package storageuse
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -343,5 +347,321 @@ func TestObserveDoesNotCreateAndRespectsBudget(t *testing.T) {
 	_, err = Observe(context.Background(), m.path, r, 4096, func(int64) error { return sentinel })
 	if !errors.Is(err, sentinel) {
 		t.Fatal(err)
+	}
+}
+
+func TestScopeCompletionAndRetention(t *testing.T) {
+	for _, mode := range []string{"success", "command-error", "cancel-verified", "unverified", "panic", "finish-write-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			m, r := fixture(t)
+			s := &Scope{repository: r.Repository, manager: m}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := s.Acquire(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.AcquireMaintenance(ctx, r); !errors.Is(err, ErrUnsafe) {
+				t.Fatalf("pending admission: %v", err)
+			}
+			var result error
+			if mode == "command-error" {
+				result = errors.New("command failed")
+			}
+			if mode == "cancel-verified" {
+				cancel()
+			}
+			if mode == "unverified" {
+				s.Retain()
+			}
+			if mode == "panic" {
+				func() {
+					defer func() {
+						if recover() == nil {
+							t.Error("panic swallowed")
+						}
+					}()
+					defer s.Complete(&result)
+					panic("interrupted")
+				}()
+			} else {
+				if mode == "finish-write-failure" {
+					m.Close()
+				}
+				s.Complete(&result)
+			}
+			// Reopen independently, as a later coordinator would. No process or lease
+			// inference may turn a retained or failed completion into permission.
+			reopened, err := Open(m.path, r.Location)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			key, _ := reopened.key(r)
+			record, err := reopened.read(key, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending := 0
+			for _, done := range record.Uses {
+				if !done {
+					pending++
+				}
+			}
+			retained := mode == "unverified" || mode == "panic" || mode == "finish-write-failure"
+			if (pending > 0) != retained {
+				t.Fatalf("pending=%d retained=%v", pending, retained)
+			}
+			if mode == "finish-write-failure" && result == nil {
+				t.Fatal("completion write failure hidden")
+			}
+			if mode == "command-error" && (result == nil || result.Error() != "command failed") {
+				t.Fatalf("primary error lost: %v", result)
+			}
+			guard, err := reopened.AcquireMaintenance(context.Background(), r)
+			if retained {
+				if !errors.Is(err, ErrUnsafe) {
+					t.Fatalf("retained maintenance: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				guard.Close()
+			}
+		})
+	}
+}
+
+func TestScopeTempAdmissionAndInheritedOwner(t *testing.T) {
+	m, _ := fixture(t)
+	s := &Scope{repository: "host-unknown", manager: m}
+	ctx := context.WithValue(context.Background(), scopeKey{}, s)
+	inherited, owner, err := Ensure(ctx, "ignored")
+	if err != nil || owner != nil || FromContext(inherited) != s {
+		t.Fatalf("inherited owner = %v,%v", owner, err)
+	}
+	parent := canonicalTemp(t)
+	path, err := s.TempDir(ctx, parent, "swarm-native-*", "native-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource := ResourceFor(s.Repository(), "native-scratch", path)
+	if _, err := m.AcquireMaintenance(ctx, resource); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("allocation was not admitted: %v", err)
+	}
+	if err := s.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(m.path, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	guard, err := reopened.AcquireMaintenance(ctx, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+}
+
+func TestScopeAdmissionFailureCannotCreateScratch(t *testing.T) {
+	m, _ := fixture(t)
+	s := &Scope{repository: "host-unknown", manager: m}
+	parent := canonicalTemp(t)
+	m.Close()
+	if _, err := s.TempDir(context.Background(), parent, "swarm-native-*", "native-scratch"); err == nil {
+		t.Fatal("closed evidence store admitted scratch")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("admission failure touched storage: %v,%v", entries, err)
+	}
+}
+
+func TestManagedCleanupRejectsReplacementAndRetainsUncertain(t *testing.T) {
+	for _, mode := range []string{"normal", "replacement", "symlink", "unverified", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			m, _ := fixture(t)
+			s := &Scope{repository: "host-unknown", manager: m}
+			parent := canonicalTemp(t)
+			path, err := s.TempDir(context.Background(), parent, "swarm-native-*", "native-scratch")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sentinel := filepath.Join(path, "keep")
+			if err := os.WriteFile(sentinel, []byte("recovery"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "replacement", "symlink":
+				if err := os.Rename(path, path+"-original"); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "replacement" {
+					if err := os.Mkdir(path, 0700); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if err := os.Symlink(path+"-original", path); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "unverified":
+				s.Retain()
+			}
+			var cleanupErr error
+			if mode == "panic" {
+				func() {
+					defer func() {
+						if recover() == nil {
+							t.Error("panic swallowed")
+						}
+					}()
+					defer s.CleanupTemp(path, &cleanupErr)
+					panic("lost completion")
+				}()
+			} else {
+				s.CleanupTemp(path, &cleanupErr)
+			}
+			if mode == "replacement" || mode == "symlink" {
+				if cleanupErr == nil {
+					t.Fatal("replacement removed")
+				}
+				if _, err := os.Stat(filepath.Join(path+"-original", "keep")); err != nil {
+					t.Fatal(err)
+				}
+			} else if mode == "normal" {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("normal cleanup: %v", err)
+				}
+			} else {
+				if _, err := os.Stat(sentinel); err != nil {
+					t.Fatalf("uncertain recovery deleted: %v", err)
+				}
+			}
+			if err := s.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			if mode != "normal" {
+				reopened, err := Open(m.path, path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				resource := ResourceFor(s.Repository(), "native-scratch", path)
+				if guard, err := reopened.AcquireMaintenance(context.Background(), resource); !errors.Is(err, ErrUnsafe) {
+					if guard != nil {
+						guard.Close()
+					}
+					t.Fatalf("uncertain cleanup permitted maintenance: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestScopeControlCannotOverlapOriginalWorkspace(t *testing.T) {
+	repo := canonicalTemp(t)
+	t.Setenv("XDG_CACHE_HOME", repo)
+	if runtime.GOOS == "darwin" {
+		t.Setenv("HOME", repo)
+	}
+	ctx, s, err := Ensure(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(canonicalTemp(t), "cache")
+	if err := s.Acquire(ctx, ResourceFor(s.Repository(), "agent-build", outside)); err == nil {
+		t.Fatal("control evidence could be archived into workspace")
+	}
+	control, err := ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(control); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("control store created before overlap rejection: %v", err)
+	}
+}
+
+func TestScopeDefaultTempAliasAndExplicitAliasRejection(t *testing.T) {
+	parent := canonicalTemp(t)
+	alias := filepath.Join(canonicalTemp(t), "temp-alias")
+	if err := os.Symlink(parent, alias); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", alias)
+	m, _ := fixture(t)
+	s := &Scope{repository: "host-unknown", manager: m}
+	path, err := s.TempDir(context.Background(), "", "swarm-native-*", "native-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(path) != parent {
+		t.Fatalf("temporary alias not canonical: %s", path)
+	}
+	var cleanupErr error
+	s.CleanupTemp(path, &cleanupErr)
+	if cleanupErr != nil {
+		t.Fatal(cleanupErr)
+	}
+	if _, err := s.TempDir(context.Background(), alias, "swarm-native-*", "native-scratch"); err == nil {
+		t.Fatal("explicit alias accepted")
+	}
+	if err := s.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type collisionRandom struct {
+	source   io.Reader
+	path     string
+	collided bool
+}
+
+func (r *collisionRandom) Read(p []byte) (int, error) {
+	if len(p) == 16 {
+		for i := range p {
+			p[i] = 0
+		}
+		return len(p), nil
+	}
+	if !r.collided {
+		r.collided = true
+		if err := os.Mkdir(r.path, 0700); err != nil {
+			return 0, err
+		}
+	}
+	return r.source.Read(p)
+}
+
+func TestTempCollisionNeverPromotesCoverage(t *testing.T) {
+	m, _ := fixture(t)
+	s := &Scope{repository: "host-unknown", manager: m}
+	parent := canonicalTemp(t)
+	path := filepath.Join(parent, "swarm-native-"+strings.Repeat("0", 32))
+	original := rand.Reader
+	injected := &collisionRandom{source: original, path: path}
+	rand.Reader = injected
+	defer func() { rand.Reader = original }()
+	if _, err := s.TempDir(context.Background(), parent, "swarm-native-*", "native-scratch"); err == nil {
+		t.Fatal("colliding allocation succeeded")
+	}
+	if !injected.collided {
+		t.Fatal("collision fixture did not run")
+	}
+	if err := s.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(m.path, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	resource := ResourceFor(s.Repository(), "native-scratch", path)
+	if guard, err := reopened.AcquireMaintenance(context.Background(), resource); !errors.Is(err, ErrUnsafe) {
+		if guard != nil {
+			guard.Close()
+		}
+		t.Fatalf("collision promoted unrelated storage: %v", err)
 	}
 }

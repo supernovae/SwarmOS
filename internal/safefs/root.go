@@ -339,3 +339,30 @@ func (r *Root) Lstat(name string) (os.FileInfo, error) {
 	defer d.Close()
 	return d.Lstat(filepath.Base(name))
 }
+
+// Mkdir exclusively creates a direct child of the pinned root.
+func (r *Root) Mkdir(name string, mode os.FileMode) error {
+	if name != filepath.Base(name) || !filepath.IsLocal(name) {
+		return fmt.Errorf("unsafe directory name %q", name)
+	}
+	return r.root.Mkdir(name, mode)
+}
+
+// RemoveAllChecked removes a direct child only if its identity is unchanged.
+// os.Root keeps recursive removal confined to this pinned parent.
+func (r *Root) RemoveAllChecked(name string, expected os.FileInfo) error {
+	if name != filepath.Base(name) || !filepath.IsLocal(name) {
+		return fmt.Errorf("unsafe directory name %q", name)
+	}
+	info, err := r.root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || expected == nil || !os.SameFile(info, expected) {
+		return fmt.Errorf("managed directory changed before cleanup")
+	}
+	return r.root.RemoveAll(name)
+}

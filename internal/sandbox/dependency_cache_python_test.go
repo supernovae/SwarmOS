@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -384,6 +385,7 @@ func TestPythonRequirementsAccepted(t *testing.T) {
 }
 
 func TestPythonPrefetchFillsCache(t *testing.T) {
+	isolateRuntimeControl(t)
 	const wheel = "needed-1.0-py3-none-any.whl"
 	calls := stubPythonPrefetch(t, "", func(argv []string) ([]byte, error) {
 		dest := argv[slices.Index(argv, "--dest")+1]
@@ -400,13 +402,21 @@ func TestPythonPrefetchFillsCache(t *testing.T) {
 		t.Fatalf("%s exists before the run: %v", wheel, err)
 	}
 	for range 2 {
-		deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, PerRepository)
+		ctx, scope, err := storageuse.Ensure(t.Context(), repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deps, err := PrepareDependencyCaches(ctx, AgentDependencyCache, repo, base, userCache, PerRepository)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := os.Stat(filepath.Join(deps.Caches[0].Dir, wheel)); err != nil {
 			t.Fatalf("%s is not in the per-repository cache: %v", wheel, err)
 		}
+		if err := scope.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		assertNoPendingCacheUses(t)
 	}
 	if len(*calls) != 1 {
 		t.Fatalf("unchanged lockfiles downloaded %d times", len(*calls))

@@ -257,6 +257,8 @@ Validation runs candidate code, which is untrusted, and build caches do not veri
 
 If a cache directory cannot be prepared safely, for example because it is a symlink, writable by other users, or inside the worktree, that run uses a fresh scratch cache instead. The older validator cache at `swarm/go-build/<repository key>` moves to `swarm/validate-build/<repository key>/go` the first time validation runs.
 
+The coordinator registers managed cache and temporary-storage use before access and keeps the registration live through execution and output collection. Interrupted uses remain pending when shutdown cannot be verified, and legacy caches keep unknown coverage. The storage report reads this evidence without clearing it or deleting caches.
+
 Because Rust's `CARGO_TARGET_DIR` points at the agent cache, agent runs do not leave a `target/` directory in the workspace, and concurrent runs for one repository wait on Cargo's build-directory lock. Stop all workers, dependency prefetches and validators that use the repository before manually removing its cache directories to reclaim space.
 
 **Adding an ecosystem:** add an entry to `buildCacheEcosystems` in `internal/sandbox/build_cache.go`, using an environment variable that names only a build-output directory, never a credential or dependency home, and extend `TestBuildCacheTableSafety`. Ecosystems whose cache home holds credentials stay deferred.

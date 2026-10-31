@@ -10,6 +10,7 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -165,6 +166,13 @@ func (r *workRun) finishPlanHandoff() (bool, error) {
 
 // executeCheckpointPlan never enters the implementation/checkpoint pipeline.
 func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (out *WorkResult, runErr error) {
+	ctx, scope, scopeErr := storageuse.Ensure(ctx, e.repoRoot)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	if scope != nil {
+		defer scope.Complete(&runErr)
+	}
 	if e.ForkMode || opts.ForkMode || opts.PRNumber != 0 || opts.Handoff || (opts.Phase != "plan" && opts.Phase != "review") || (opts.PlanCheckpoint && opts.Phase != "plan") {
 		return nil, fmt.Errorf("checkpoint planning requires direct issue plan or authenticated recovery review")
 	}
@@ -288,11 +296,11 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 		return nil, err
 	}
 	reporter.next("workspace")
-	snapshot, err := os.MkdirTemp("", "swarm-checkpoint-plan-*")
+	snapshot, err := storageuse.MkdirTemp(ctx, "", "swarm-checkpoint-plan-*", "review-scratch")
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(snapshot)
+	defer storageuse.FromContext(ctx).CleanupTemp(snapshot, &runErr)
 	if _, err = gitcredential.Output(ctx, e.repoRoot, "clone", "--shared", "--no-checkout", "--", e.repoRoot, snapshot); err != nil {
 		return nil, err
 	}

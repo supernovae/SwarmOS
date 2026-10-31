@@ -207,42 +207,6 @@ func TestStorageCleanupPreviewApplyAndJSON(t *testing.T) {
 	f := newCLIFixture(t)
 	task := bulkMerged(t, f)
 	t.Setenv("TMPDIR", t.TempDir())
-	// Keep the fixture within the existing inventory string budget. Full mock
-	// agent transcripts can exceed it and intentionally produce unknown evidence.
-	trackerPath := filepath.Join(f.root, ".swarm", "local-tracker", "state.json")
-	raw, e := os.ReadFile(trackerPath)
-	if e != nil {
-		t.Fatal(e)
-	}
-	var data any
-	if e = json.Unmarshal(raw, &data); e != nil {
-		t.Fatal(e)
-	}
-	var compact func(any)
-	compact = func(v any) {
-		switch x := v.(type) {
-		case map[string]any:
-			for k, item := range x {
-				if k == "body" {
-					x[k] = ""
-				} else {
-					compact(item)
-				}
-			}
-		case []any:
-			for _, item := range x {
-				compact(item)
-			}
-		}
-	}
-	compact(data)
-	raw, e = json.Marshal(data)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if e = os.WriteFile(trackerPath, raw, 0600); e != nil {
-		t.Fatal(e)
-	}
 	// Observe the complete checkout, including modes and timestamps. Preview may
 	// read existing objects but must not initialize locks, registries or ledgers.
 	snapshot := func() map[string]string {
@@ -784,7 +748,7 @@ func scaleAPITracker(t *testing.T, refs map[int]string, prs []*tracker.PullReque
 				if n < len(prs) {
 					pr = prs[n]
 				}
-				rows = append(rows, map[string]any{"number": pr.Number, "state": pr.State, "merged_at": pr.MergedAt, "merge_commit_sha": pr.MergeCommitSHA, "head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]string{"full_name": "fixture/repo"}}, "base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "fixture/repo"}}, "body": strings.Repeat("b", 7000), "extra": strings.Repeat("x", 7000)})
+				rows = append(rows, map[string]any{"number": pr.Number, "state": pr.State, "merged_at": pr.MergedAt, "merge_commit_sha": pr.MergeCommitSHA, "head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]string{"full_name": "fixture/repo"}}, "base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "fixture/repo"}}, "body": strings.Repeat("plan \"step\"\\path\n\t<&>", 3000), "title": "Implement approved plan", "user": map[string]any{"login": "builder", "id": 42}, "labels": []map[string]string{{"name": "swarm:work"}}, "url": "https://api.github.com/repos/fixture/repo/pulls/" + strconv.Itoa(pr.Number)})
 			}
 		case strings.Contains(req.URL.Path, "heads/swarm-state/"):
 			for n, sha := range refs {

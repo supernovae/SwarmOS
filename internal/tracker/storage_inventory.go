@@ -36,6 +36,10 @@ type PullRequestVisitor interface {
 
 var ErrInventoryLimit = errors.New("tracker inventory limit reached")
 
+// GitHub bodies allow 65,536 characters; JSON escaping and UTF-8 can multiply
+// their wire size. Keep a hard per-string bound as well as the charged input cap.
+const inventoryQuotedBytesLimit = 512 << 10
+
 // inventoryReader bounds JSON before decoding, including strings and nesting.
 // Decoder lookahead and token allocations use reusable page workspace when
 // provided. Retained projections are charged separately from transport input.
@@ -73,7 +77,7 @@ func (r *inventoryReader) Read(p []byte) (int, error) {
 		for _, c := range r.buf[:n] {
 			if r.quoted {
 				r.quotedBytes++
-				if r.quotedBytes > 8192 {
+				if r.quotedBytes > inventoryQuotedBytesLimit {
 					return 0, ErrInventoryLimit
 				}
 				if r.escape {

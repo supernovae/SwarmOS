@@ -1351,7 +1351,7 @@ func scaleAPITracker(t *testing.T, refs map[int]string, prs []*tracker.PullReque
 				if n < len(prs) {
 					pr = prs[n]
 				}
-				rows = append(rows, map[string]any{"number": pr.Number, "state": pr.State, "merged_at": pr.MergedAt, "merge_commit_sha": pr.MergeCommitSHA, "head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]string{"full_name": "fixture/repo"}}, "base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "fixture/repo"}}, "body": strings.Repeat("b", 7000), "extra": strings.Repeat("x", 7000)})
+				rows = append(rows, map[string]any{"number": pr.Number, "state": pr.State, "merged_at": pr.MergedAt, "merge_commit_sha": pr.MergeCommitSHA, "head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]string{"full_name": "fixture/repo"}}, "base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "fixture/repo"}}, "body": strings.Repeat("plan \"step\"\\path\n\t<&>", 3000), "title": "Implement approved plan", "user": map[string]any{"login": "builder", "id": 42}, "labels": []map[string]string{{"name": "swarm:work"}}, "url": "https://api.github.com/repos/fixture/repo/pulls/" + strconv.Itoa(pr.Number)})
 			}
 		case strings.Contains(req.URL.Path, "heads/swarm-state/"):
 			for n, sha := range refs {

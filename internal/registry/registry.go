@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -293,64 +294,110 @@ func (r *Registry) ReadSnapshot(ctx context.Context, maxRepos int, reserve func(
 	if err != nil {
 		return nil, err
 	}
-	// yaml.v3 builds a syntax tree. Bound both its input and conservative
-	// parser/tree/decoded working space, independently of record count.
-	const maxDocument = 256 << 10
-	if info.Size() < 0 || info.Size() > maxDocument {
-		return nil, fmt.Errorf("registry exceeds bounded document size")
-	}
-	if err := reserve(65536 + 128*info.Size() + int64(maxRepos)*1024); err != nil {
+	// Keep only one bounded mapping entry in memory. The canonical writer
+	// emits block YAML; aliases, flow collections and extra documents are refused.
+	const maxLine = 8192
+	if err := reserve(maxLine + 4096); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, info.Size()+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) != info.Size() {
-		return nil, fmt.Errorf("registry changed during observation")
-	}
-	// Avoid aliases and deeply nested input before invoking the YAML parser.
-	// Canonical registries contain only mappings and scalar fields.
-	for _, line := range bytes.Split(data, []byte{'\n'}) {
-		if len(line) > 8192 {
-			return nil, fmt.Errorf("registry field exceeds limit")
+	reader := bufio.NewReaderSize(f, maxLine)
+	var out []RepoEntry
+	var block []byte
+	keys := map[string]bool{}
+	version, repos, keyIndent := false, false, -1
+	finish := func() error {
+		if len(block) == 0 {
+			return nil
 		}
-		indent := 0
-		for indent < len(line) && line[indent] == ' ' {
-			indent++
+		var entry map[string]RepoEntry
+		if err := yaml.Unmarshal(block, &entry); err != nil {
+			return err
 		}
-		if indent > 8 || bytes.ContainsAny(line, "&*[]{}") {
-			return nil, fmt.Errorf("unsupported bounded registry encoding")
+		if len(entry) != 1 {
+			return fmt.Errorf("invalid registry entry")
 		}
+		for key, e := range entry {
+			if keys[key] || ValidateRepoSlug(e.Repo) != nil || !filepath.IsAbs(e.Path) {
+				return fmt.Errorf("invalid registry entry")
+			}
+			keys[key] = true
+			out = append(out, e)
+		}
+		block = nil
+		return nil
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	var rf registryFile
-	if err := yaml.Unmarshal(data, &rf); err != nil {
-		return nil, err
-	}
-	if rf.Version != 1 {
-		return nil, fmt.Errorf("unsupported registry version")
-	}
-	out := make([]RepoEntry, 0, min(len(rf.Repos), maxRepos))
-	keys := make([]string, 0, len(rf.Repos))
-	for key := range rf.Repos {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		e := rf.Repos[key]
+	for {
 		if err := ctx.Err(); err != nil {
 			return out, err
 		}
-		if len(out) >= maxRepos {
-			return out, fmt.Errorf("registry repository limit reached")
+		line, readErr := reader.ReadSlice('\n')
+		if readErr != nil && readErr != io.EOF {
+			return out, fmt.Errorf("registry line exceeds limit")
 		}
-		if ValidateRepoSlug(e.Repo) != nil || !filepath.IsAbs(e.Path) {
-			return out, fmt.Errorf("invalid registry entry")
+		if len(line) > 0 {
+			if err := reserve(int64(128*len(line) + 256)); err != nil {
+				return out, err
+			}
+			text := strings.TrimSpace(string(line))
+			indent := len(line) - len(bytes.TrimLeft(line, " "))
+			if text != "" && !strings.HasPrefix(text, "#") {
+				if indent > 8 || (text != "repos: {}" && strings.ContainsAny(text, "&*[]{}\t")) || text == "---" || text == "..." {
+					return out, fmt.Errorf("unsupported bounded registry encoding")
+				}
+				if indent == 0 {
+					if len(block) > 0 {
+						return out, fmt.Errorf("unexpected registry field")
+					}
+					switch text {
+					case "version: 1":
+						if version {
+							return out, fmt.Errorf("duplicate version")
+						}
+						version = true
+					case "repos:", "repos: {}":
+						if repos || !version {
+							return out, fmt.Errorf("invalid registry header")
+						}
+						repos = true
+					default:
+						return out, fmt.Errorf("unsupported registry header")
+					}
+				} else {
+					if !repos {
+						return out, fmt.Errorf("missing registry header")
+					}
+					if keyIndent < 0 {
+						keyIndent = indent
+					}
+					if indent == keyIndent {
+						if err := finish(); err != nil {
+							return out, err
+						}
+						if len(out) >= maxRepos {
+							return out, fmt.Errorf("registry repository limit reached")
+						}
+						if !strings.HasSuffix(text, ":") {
+							return out, fmt.Errorf("invalid registry key")
+						}
+					} else if indent < keyIndent {
+						return out, fmt.Errorf("invalid registry indentation")
+					}
+					if len(block)+len(line) > 32768 {
+						return out, fmt.Errorf("registry entry exceeds limit")
+					}
+					block = append(block, line...)
+				}
+			}
 		}
-		out = append(out, e)
+		if readErr == io.EOF {
+			break
+		}
+	}
+	if !version || !repos {
+		return out, fmt.Errorf("missing registry header")
+	}
+	if err := finish(); err != nil {
+		return out, err
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Repo < out[j].Repo })
 	after, err := f.Stat()

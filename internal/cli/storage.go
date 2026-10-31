@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/storage"
+	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 func newStorageCmd(opts *RootOptions) *cobra.Command {
@@ -27,7 +28,31 @@ func newStorageCmd(opts *RootOptions) *cobra.Command {
 				return err
 			}
 		}
-		snapshot, scanErr := storage.Scan(cmd.Context(), storage.Options{RegistryPath: opts.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), SelectedRoot: root, Repository: opts.Repo})
+		snapshot, scanErr := storage.Scan(cmd.Context(), storage.Options{RegistryPath: opts.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), SelectedRoot: root, Repository: opts.Repo, Backend: opts.Backend, Tracker: func(owner, root, backend string) (tracker.PullRequestVisitor, error) {
+			if backend == "local" {
+				return tracker.NewLocalTracker(root), nil
+			}
+			if backend != "github" {
+				return nil, fmt.Errorf("repository backend unavailable for retention")
+			}
+			var tr tracker.Tracker
+			var err error
+			if opts.trackerOverride != nil {
+				tr = opts.trackerOverride
+			} else if opts.githubTrackerFunc != nil {
+				tr, err = opts.githubTrackerFunc(owner)
+			} else {
+				tr, err = tracker.NewGitHubTracker(owner)
+			}
+			if err != nil {
+				return nil, err
+			}
+			visitor, ok := tr.(tracker.PullRequestVisitor)
+			if !ok {
+				return nil, fmt.Errorf("bounded tracker unavailable")
+			}
+			return visitor, nil
+		}})
 		if err := renderStorageReport(cmd.OutOrStdout(), snapshot, jsonOutput); err != nil {
 			return err
 		}

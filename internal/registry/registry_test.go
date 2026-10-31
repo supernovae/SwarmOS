@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
@@ -94,7 +95,7 @@ func TestReadSnapshotBoundedAndNoLock(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil || len(got) != 1 || calls != 1 {
+	if err != nil || len(got) != 1 || calls < 2 {
 		t.Fatalf("%v %v calls=%d", got, err, calls)
 	}
 	if _, err := os.Stat(path + ".lock"); !os.IsNotExist(err) {
@@ -111,6 +112,30 @@ func TestReadSnapshotBoundedAndNoLock(t *testing.T) {
 		}
 		if _, err := New(path).ReadSnapshot(context.Background(), 256, func(int64) error { return nil }); err == nil {
 			t.Fatal("accepted oversized or alias input")
+		}
+	}
+}
+
+func TestReadSnapshotStreamsPartialEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "repos.yaml")
+	data := "version: 1\nrepos:\n"
+	for i := 0; i < 4; i++ {
+		data += fmt.Sprintf("    local/repo%d:\n        repo: local/repo%d\n        path: /repo%d\n        backend: local\n", i, i, i)
+	}
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	charged := int64(0)
+	entries, err := New(path).ReadSnapshot(context.Background(), 2, func(n int64) error { charged += n; return nil })
+	if err == nil || len(entries) != 2 {
+		t.Fatalf("partial=%v error=%v", entries, err)
+	}
+	if charged > 128*int64(len(data))+32768 {
+		t.Fatal("unexpected parser budget", charged)
+	}
+	for _, entry := range entries {
+		if entry.Backend != "local" {
+			t.Fatal(entry)
 		}
 	}
 }

@@ -181,6 +181,31 @@ func ObservationCommand(ctx context.Context, root string, args ...string) (*exec
 	if len(args) == 3 && args[0] == "for-each-ref" && args[1] == "--format=%(refname)" && args[2] == "refs/heads/swarm/" {
 		valid = true
 	}
+	if len(args) == 2 && args[0] == "show" {
+		object, ok := strings.CutSuffix(args[1], ":state.json")
+		if ok && (len(object) == 40 || len(object) == 64) {
+			valid = true
+			for _, c := range object {
+				if c < '0' || c > '9' {
+					if c < 'a' || c > 'f' {
+						valid = false
+					}
+				}
+			}
+		}
+	}
+	if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--verify" && args[2] == "HEAD" {
+		valid = true
+	}
+	if len(args) == 3 && args[0] == "symbolic-ref" && args[1] == "-q" && args[2] == "HEAD" {
+		valid = true
+	}
+	if len(args) == 3 && args[0] == "ls-files" && args[1] == "--stage" && args[2] == "-z" {
+		valid = true
+	}
+	if len(args) == 4 && args[0] == "ls-tree" && args[1] == "-r" && args[2] == "-z" && args[3] == "HEAD" {
+		valid = true
+	}
 	if !valid {
 		return nil, fmt.Errorf("unsupported local Git observation")
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/storageuse"
+	"github.com/supernovae/swarmos/internal/tracker"
 )
 
 var ErrLimit = errors.New("storage inventory limit reached")
@@ -91,6 +92,14 @@ type Snapshot struct {
 	ObservedAllocatedBytes int64      `json:"observed_allocated_bytes"`
 }
 type Options struct {
+	// GitOutput supplies a trusted lazy metadata stream for deterministic fixtures.
+	GitOutput func(context.Context, string, ...string) (io.ReadCloser, error)
+	// ReadDirectory is a trusted lazy adapter; the scanner admits every entry.
+	ReadDirectory func(context.Context, string, func(os.DirEntry) error) error
+	Backend       string
+	Remote        string
+	// Tracker is an optional coordinator-owned, bounded read-only adapter factory.
+	Tracker      func(repository, root, backend string) (tracker.PullRequestVisitor, error)
 	UseRoot      string // optional trusted coordinator control root; never inferred from candidate data
 	RegistryPath string
 	CacheRoot    string // user-cache/swarm, never the entire user cache
@@ -122,6 +131,12 @@ func Scan(ctx context.Context, opts Options) (Snapshot, error) {
 	}
 	s := &scanner{ctx: ctx, opts: opts, b: Budget{Limits: l}, seen: map[string]bool{}, inodes: map[fileIdentity]bool{}, repos: map[string]string{}, physical: true}
 	s.out = Snapshot{Version: 1, Scope: "known repositories and host-wide managed cache/scratch candidates", Complete: true, Limits: l, Reasons: []string{}, Resources: []Resource{}}
+	// Fixed admission covers recursive directory buffers, subprocess pipe
+	// buffers and renderer scaffolding in addition to charged retained data.
+	if err := s.b.Charge(2 << 20); err != nil {
+		s.fail("working buffers", err)
+		return s.out, ctx.Err()
+	}
 	if opts.Repository != "" || opts.SelectedRoot != "" {
 		s.out.Scope = "selected repositories and host-wide managed cache/scratch candidates"
 	}
@@ -129,19 +144,41 @@ func Scan(ctx context.Context, opts Options) (Snapshot, error) {
 	if err != nil {
 		s.fail("registry", err)
 	}
+	selectedCommon := ""
+	if opts.SelectedRoot != "" {
+		if anchor, err := openExisting(opts.SelectedRoot); err == nil {
+			anchor.Close()
+			if common, err := s.git(opts.SelectedRoot, "rev-parse", "--path-format=absolute", "--git-common-dir"); err == nil && filepath.IsAbs(common) {
+				selectedCommon = common
+			}
+		}
+	}
 	selected := false
 	for _, e := range entries {
-		if opts.Repository != "" && e.Repo != opts.Repository {
+		if opts.Repository != "" && !strings.EqualFold(e.Repo, opts.Repository) {
 			continue
 		}
+		entryPath := e.Path
 		if opts.SelectedRoot != "" && filepath.Clean(e.Path) != filepath.Clean(opts.SelectedRoot) {
-			continue
+			if selectedCommon == "" {
+				continue
+			}
+			anchor, err := openExisting(e.Path)
+			if err != nil {
+				continue
+			}
+			anchor.Close()
+			common, err := s.git(e.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+			if err != nil || common != selectedCommon {
+				continue
+			}
+			entryPath = opts.SelectedRoot
 		}
-		s.repository(e.Repo, e.Path)
+		s.repository(e.Repo, entryPath, e.Backend)
 		selected = true
 	}
 	if opts.SelectedRoot != "" {
-		s.repository(opts.Repository, opts.SelectedRoot)
+		s.repository(opts.Repository, opts.SelectedRoot, opts.Backend)
 		selected = true
 	}
 	if opts.Repository != "" && !selected {
@@ -150,12 +187,13 @@ func Scan(ctx context.Context, opts Options) (Snapshot, error) {
 	if opts.Repository == "" && opts.SelectedRoot == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			if root, err := s.git(cwd, "rev-parse", "--show-toplevel"); err == nil {
-				s.repository("", root)
+				s.repository("", root, opts.Backend)
 			}
 		}
 	}
 	s.caches()
 	s.scratch()
+	s.indexed()
 	sort.Slice(s.out.Resources, func(i, j int) bool { a, b := s.out.Resources[i], s.out.Resources[j]; return a.Identity < b.Identity })
 	s.out.Counters = s.b.Counters
 	if s.physical && s.out.Complete {
@@ -203,7 +241,7 @@ func (s *scanner) add(r Resource) {
 		s.fail("resources", ErrLimit)
 		return
 	}
-	if err := s.b.Charge(int64(2048 + 8*(len(r.Path)+len(r.Identity)+len(r.Repository)+len(r.Ref)))); err != nil {
+	if err := s.b.Charge(int64(4096 + 64*(len(r.Path)+len(r.Identity)+len(r.Repository)+len(r.Ref)+len(r.Owner)+len(r.Class)+len(r.Reason)+len(r.Evidence)+len(r.UsageReason)))); err != nil {
 		s.fail("resources", err)
 		return
 	}
@@ -279,6 +317,22 @@ func openExisting(path string) (*safefs.Root, error) {
 func (s *scanner) directory(path string, visit func(os.DirEntry)) {
 	if err := s.ctx.Err(); err != nil {
 		s.fail("directory", err)
+		return
+	}
+	if s.opts.ReadDirectory != nil {
+		err := s.opts.ReadDirectory(s.ctx, path, func(e os.DirEntry) error {
+			if err := s.b.entry(s.ctx); err != nil {
+				return err
+			}
+			if err := s.b.Charge(int64(256 + 4*len(e.Name()))); err != nil {
+				return err
+			}
+			visit(e)
+			return s.ctx.Err()
+		})
+		if err != nil {
+			s.fail("directory", err)
+		}
 		return
 	}
 	root, err := openExisting(path)

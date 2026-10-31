@@ -22,7 +22,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func newHTTPGitHubTracker(t *testing.T, handler http.Handler) *GitHubTracker {
 	t.Helper()
-	client, err := api.NewRESTClient(api.ClientOptions{
+	options := api.ClientOptions{
 		Host:      "github.com",
 		AuthToken: "test-token",
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -36,11 +36,16 @@ func newHTTPGitHubTracker(t *testing.T, handler http.Handler) *GitHubTracker {
 			resp.Request = cloned
 			return resp, nil
 		}),
-	})
+	}
+	client, err := api.NewRESTClient(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &GitHubTracker{owner: "octo", repo: "swarm", client: client}
+	inventoryClient, err := newInventoryRESTClient(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &GitHubTracker{owner: "octo", repo: "swarm", client: client, inventoryClient: inventoryClient}
 }
 
 func writeJSON(t *testing.T, w http.ResponseWriter, value any) {

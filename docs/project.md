@@ -278,7 +278,7 @@ Repository selection narrows the repository inventory; cache and scratch discove
 
 Logical bytes describe file sizes. Allocated bytes describe observed filesystem blocks, with shared inode identities counted once in the snapshot aggregate. Neither number promises space savings: hardlinks, sparse files and shared Git objects can overlap. Branches have no independent byte total. Filesystem reads may update operating-system access times.
 
-A report marked `complete=false` includes the available observations and the reasons it stopped. Missing usage and use evidence appear as unknown. A scratch prefix or missing repository does not prove abandonment; these candidates remain unknown. The command has no apply option. Repository retention eligibility remains unknown where authoritative claim, submission or PR evidence is unavailable.
+A report marked `complete=false` includes the available observations and the reasons it stopped. Missing usage and use evidence appear as unknown. A scratch prefix or missing repository does not prove abandonment; these candidates remain unknown. The command has no apply option. Authoritative issue registrations can keep missing worktrees visible; active attempts and pending revisions block those resources. GitHub inspection reads pinned state objects already available locally and never fetches missing objects. Completed merged worktrees become advisory candidates only after their registered branch, index and files pass bounded inspection. PR evidence is read once per repository through a bounded traversal. Repository retention eligibility remains unknown where authoritative claim, submission or complete worktree evidence is unavailable.
 
 ### Dependency caches
 

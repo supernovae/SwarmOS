@@ -47,13 +47,26 @@ func (s *scanner) git(root string, args ...string) (string, error) {
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
+	out := &cappedOutput{remaining: capBytes, cancel: cancel, reserve: s.b.Charge}
+	if s.opts.GitOutput != nil {
+		reader, err := s.opts.GitOutput(ctx, root, args...)
+		if err != nil {
+			return "", err
+		}
+		defer reader.Close()
+		if _, err = io.Copy(out, reader); err != nil {
+			return "", err
+		}
+		if err = ctx.Err(); err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(out.buffer.String()), nil
+	}
 	cmd, err := gitcredential.ObservationCommand(ctx, root, args...)
 	if err != nil {
 		return "", err
 	}
 	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
-	out := &cappedOutput{remaining: capBytes, cancel: cancel, reserve: s.b.Charge}
-	// One writer serializes both streams through os/exec's shared pipe.
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
@@ -61,7 +74,7 @@ func (s *scanner) git(root string, args ...string) (string, error) {
 	}
 	return strings.TrimSpace(out.buffer.String()), nil
 }
-func (s *scanner) repository(owner, path string) {
+func (s *scanner) repository(owner, path, backend string) {
 	if err := s.ctx.Err(); err != nil {
 		s.fail("repositories", err)
 		return
@@ -93,11 +106,21 @@ func (s *scanner) repository(owner, path string) {
 		return
 	}
 	s.b.Counters.Repositories++
+	// A selected linked worktree shares the main checkout's managed paths.
+	// Only use the conventional .git anchor after component-safe validation.
+	if filepath.Base(common) == ".git" {
+		primary := filepath.Dir(common)
+		if anchor, err := openExisting(primary); err == nil {
+			anchor.Close()
+			path = primary
+		}
+	}
 	if owner == "" {
 		owner = "local/" + filepath.Base(path)
 	}
 	s.repos[common] = owner
 	s.add(Resource{Repository: owner, Owner: owner, Class: "shared-git", Path: filepath.Join(common, "objects"), Identity: "git:" + common, Eligibility: "retained", Reason: "shared repository objects; no independent branch savings"})
+	start := len(s.out.Resources)
 	managed := filepath.Join(path, ".swarm", "worktrees")
 	s.directory(managed, func(e os.DirEntry) {
 		p := filepath.Join(managed, e.Name())
@@ -155,6 +178,7 @@ func (s *scanner) repository(owner, path string) {
 			s.add(Resource{Repository: owner, Owner: owner, Class: "code-branch", Path: path, Ref: ref, Identity: "ref:" + common + ":" + ref})
 		}
 	}
+	s.retention(owner, path, backend, start)
 }
 func (s *scanner) cacheOwner(key string) string {
 	if len(key) != 32 {

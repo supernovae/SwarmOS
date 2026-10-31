@@ -274,8 +274,10 @@ func TestSubmitValidationReuseFallbackFailureBlocksPublication(t *testing.T) {
 			if _, e := f.run(resource, "submit", number, "--progress=false"); e == nil {
 				t.Fatal("published failed fallback")
 			}
-			if checkCount(t, counter) != before+1 {
-				t.Fatal("fallback did not execute checks")
+			// One original required check and one failed checkpoint diagnosis.
+			// Neither execution may publish the failing candidate.
+			if checkCount(t, counter) != before+2 {
+				t.Fatal("fallback and checkpoint diagnosis did not both execute")
 			}
 			after := f.state(t, n)
 			if after.Lease.Status == "completed" || after.HeadSHA != published {
@@ -365,5 +367,58 @@ func TestCheckpointSubmitValidationReuse(t *testing.T) {
 				t.Fatal("legacy version gained fingerprint")
 			}
 		})
+	}
+}
+
+func TestIssue396ValidationParity(t *testing.T) {
+	f, counter := countedValidationFixture(t)
+	policy := fmt.Sprintf("required_checks:\n  - name: instructions\n    command: >-\n      printf x >> '%s'; test ! -e CLAUDE.md && ! grep -q swarm:active AGENTS.md\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**', 'AGENTS.md', 'CLAUDE.md']\n", counter)
+	for name, body := range map[string]string{".swarm/validation/required-checks.yaml": policy, "AGENTS.md": "Repository guide\n"} {
+		if err := os.WriteFile(filepath.Join(f.root, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prGit(t, f.root, "add", ".")
+	prGit(t, f.root, "commit", "-m", "instruction check")
+	n := f.create(t, "agent")
+	number := strconv.Itoa(n)
+	f.must(t, "issue", "approve", number)
+	f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
+	if latestValidation(t, f, n).Verdict != "PASS" {
+		t.Fatal("work failed")
+	}
+	wt := workspace.WorktreePath(f.root, n)
+	pointer := "<!-- swarm:active:start -->\nTask\n<!-- swarm:active:end -->\n\n"
+	inject := func() {
+		for name, body := range map[string]string{"AGENTS.md": pointer + "Repository guide\n", "CLAUDE.md": pointer} {
+			if err := os.WriteFile(filepath.Join(wt, name), []byte(body), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	inject()
+	before := checkCount(t, counter)
+	f.must(t, "issue", "validate", number, "--progress=false")
+	if checkCount(t, counter) != before+1 {
+		t.Fatal("standalone checks did not execute")
+	}
+	for name, want := range map[string]string{"AGENTS.md": pointer + "Repository guide\n", "CLAUDE.md": pointer} {
+		got, err := os.ReadFile(filepath.Join(wt, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("standalone restoration %s: %q %v", name, got, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(wt, "AGENTS.md"), []byte(pointer+"Repository guide\nUnapproved edit\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := f.command(nil)
+	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "validate", number, "--progress=false"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "protected") {
+		t.Fatalf("protected edit: %v", err)
+	}
+	inject()
+	submitWithDiagnostics(t, f, "issue", "submit", number, "--json", "--progress=false")
+	if latestValidation(t, f, n).Verdict != "PASS" {
+		t.Fatal("submit differs from work/validate")
 	}
 }

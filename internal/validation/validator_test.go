@@ -219,7 +219,7 @@ func TestTemporaryTaskPointerIsNotAProtectedChange(t *testing.T) {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
-	policy := "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - .swarm/validation/**\n  - AGENTS.md\n"
+	policy := "required_checks:\n  - name: ok\n    command: \"true\"\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n  - .swarm/validation/**\n  - AGENTS.md\n  - CLAUDE.md\n"
 	if err := os.WriteFile(filepath.Join(repo, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +247,16 @@ func TestTemporaryTaskPointerIsNotAProtectedChange(t *testing.T) {
 	if _, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base}); !errors.Is(err, ErrProtectedPathModified) {
 		t.Fatalf("edit beside the task pointer passed: %v", err)
 	}
+	write(pointer + agents)
+	writeRepoFile(t, repo, "CLAUDE.md", pointer)
+	if _, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base}); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "CLAUDE.md")
+	if _, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base}); !errors.Is(err, ErrProtectedPathModified) {
+		t.Fatalf("staged CLAUDE pointer accepted: %v", err)
+	}
+	git("reset", "--", "CLAUDE.md")
 	write(pointer + agents)
 	git("add", "AGENTS.md")
 	if _, err := Validate(ctx, repo, wu, ValidateOptions{BaseSHA: base}); !errors.Is(err, ErrProtectedPathModified) {
@@ -878,5 +888,80 @@ func TestCheckpointBoundaryUsesTrustedPolicyWithoutExecutingPreview(t *testing.T
 	}
 	if _, err = os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("preview executed boundary canary: %v", err)
+	}
+}
+
+func TestValidationInstructionRestoration(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			command := "test ! -e CLAUDE.md && ! grep -q swarm:active AGENTS.md"
+			if fail {
+				command += "; exit 7"
+			}
+			repo, base := setupGoFastPassRepo(t, "  - name: instructions\n    command: '"+command+"'\n    timeout: 1m\n", map[string]string{"AGENTS.md": "Original\n"})
+			pointer := "<!-- swarm:active:start -->\nTask\n<!-- swarm:active:end -->\n\n"
+			writeRepoFile(t, repo, "AGENTS.md", pointer+"Original\n")
+			writeRepoFile(t, repo, "CLAUDE.md", pointer)
+			index, err := os.ReadFile(filepath.Join(repo, ".git/index"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base})
+			for name, want := range map[string]string{"AGENTS.md": pointer + "Original\n", "CLAUDE.md": pointer} {
+				got, readErr := os.ReadFile(filepath.Join(repo, name))
+				if readErr != nil || string(got) != want {
+					t.Fatalf("restoration %s: %q %v", name, got, readErr)
+				}
+			}
+			after, _ := os.ReadFile(filepath.Join(repo, ".git/index"))
+			if string(after) != string(index) {
+				t.Fatal("index changed")
+			}
+			if report == nil || report.Passed == fail || (err != nil) != fail {
+				t.Fatalf("report %+v: %v", report, err)
+			}
+		})
+	}
+}
+
+func TestValidationCIKeepsInstructionMarkers(t *testing.T) {
+	pointer := "<!-- swarm:active:start -->\nCommitted\n<!-- swarm:active:end -->\n\n"
+	repo, base := setupGoFastPassRepo(t, "  - name: committed\n    command: grep -q swarm:active AGENTS.md\n    timeout: 1m\n", map[string]string{"AGENTS.md": pointer})
+	report, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base, CIMode: true})
+	if err != nil || !report.Passed {
+		t.Fatalf("%+v %v", report, err)
+	}
+}
+
+func TestValidationInstructionRestoreFailure(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, "  - name: unsafe\n    command: ln -s AGENTS.md CLAUDE.md\n    timeout: 1m\n", map[string]string{"AGENTS.md": "guide\n"})
+	pointer := "<!-- swarm:active:start -->\nTask\n<!-- swarm:active:end -->\n\n"
+	writeRepoFile(t, repo, "CLAUDE.md", pointer)
+	report, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base})
+	if err == nil || errors.Is(err, ErrRequiredCheckFailed) || report != nil {
+		t.Fatalf("restoration became repairable/reusable: %+v %v", report, err)
+	}
+}
+
+func TestValidationCancellationRestoresInstructions(t *testing.T) {
+	repo, base := setupGoFastPassRepo(t, "  - name: cancelled\n    command: sleep 1\n    timeout: 1m\n", map[string]string{"AGENTS.md": "guide\n"})
+	pointer := "<!-- swarm:active:start -->\nTask\n<!-- swarm:active:end -->\n\n"
+	writeRepoFile(t, repo, "AGENTS.md", pointer+"guide\n")
+	writeRepoFile(t, repo, "CLAUDE.md", pointer)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	report, err := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+		if e.Check == "cancelled" && e.Status == "started" {
+			cancel()
+		}
+	}})
+	if err == nil || report == nil || report.Repair != nil {
+		t.Fatalf("cancelled report %+v %v", report, err)
+	}
+	for name, want := range map[string]string{"AGENTS.md": pointer + "guide\n", "CLAUDE.md": pointer} {
+		data, err := os.ReadFile(filepath.Join(repo, name))
+		if err != nil || string(data) != want {
+			t.Fatalf("cancel restoration %s %q %v", name, data, err)
+		}
 	}
 }

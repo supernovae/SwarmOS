@@ -1020,13 +1020,35 @@ func testerRetryEngine(t *testing.T) (*Engine, *tracker.Issue) {
 	return gatedTesterRetryEngine(t, contract.GateNone)
 }
 
-func gatedTesterRetryEngine(t *testing.T, gate contract.GateMode) (*Engine, *tracker.Issue) {
+func gatedTesterRetryEngine(t *testing.T, gate contract.GateMode, commands ...string) (*Engine, *tracker.Issue) {
 	t.Helper()
 	root, e, tr := setupProjectPlanTestRepo(t)
 	configureValidation(t, root)
 	policy := "required_checks:\n  - name: retry-sentinel\n    command: echo retry-check-executed; if test -f move-during-checks; then git commit --allow-empty -m moved-by-check; fi; if test -f fail-check; then exit 3; fi\n    timeout: 1m\nprotected_paths: ['.swarm/validation/**']\n"
 	if err := os.WriteFile(filepath.Join(root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0644); err != nil {
 		t.Fatal(err)
+	}
+	if len(commands) > 0 && commands[0] == "checkpoint-root" {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		allowed := []string{"'SWARM_IMPLEMENTED.md'"}
+		for _, entry := range entries {
+			if !entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") {
+				allowed = append(allowed, "'"+strings.ReplaceAll(entry.Name(), "'", "'\"'\"'")+"'")
+			}
+		}
+		commands[0] = "for f in *; do if test -f \"$f\"; then case \"$f\" in " + strings.Join(allowed, "|") + ") ;; *) exit 9;; esac; fi; done; test ! -e CLAUDE.md && if test -f AGENTS.md; then ! grep -q swarm:active AGENTS.md; fi"
+	}
+	if len(commands) > 0 {
+		policy = "required_checks:\n  - name: retry-sentinel\n    command: >-\n      echo retry-check-executed; " + commands[0] + "\n    timeout: 1m\nprotected_paths: ['.swarm/validation/**', 'AGENTS.md', 'CLAUDE.md']\n"
+		if len(commands) > 1 {
+			policy = strings.Replace(policy, "protected_paths:", "  - name: candidate-control\n    command: "+commands[1]+"\n    timeout: 1m\nprotected_paths:", 1)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	configPath := filepath.Join(root, ".swarm/config.yaml")
 	cfg, err := os.ReadFile(configPath)
@@ -1878,5 +1900,185 @@ func TestIssueWorkRecoveryDeveloperInstructionMatrix(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestWorkValidationCheckpointView compares bytes immediately after ExecuteWork,
+// before any subsequent role could reinject the pointer.
+func TestWorkValidationCheckpointView(t *testing.T) {
+	testWorkValidationCheckpoint(t, false)
+}
+
+func TestWorkValidationEphemeralDoesNotRepair(t *testing.T) {
+	testWorkValidationCheckpoint(t, true)
+}
+
+func TestWorkValidationOutsideCandidateExplicitImplement(t *testing.T) {
+	testWorkValidationCheckpoint(t, true, true)
+}
+
+func testWorkValidationCheckpoint(t *testing.T, external bool, explicit ...bool) {
+	command := "checkpoint-root"
+	if external {
+		command = "test ! -e .swarm/active/PLAN.md"
+	}
+	e, issue := gatedTesterRetryEngine(t, contract.GateNone, command)
+	initial := true
+	calls := map[string]int{}
+	expected := map[string][]byte{}
+	mock := &agent.MockRunner{}
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			calls[req.Role]++
+			if req.Role == "tester" {
+				if initial {
+					return nil, fmt.Errorf("initial tester interrupted")
+				}
+				for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+					data, err := os.ReadFile(filepath.Join(req.WorktreePath, name))
+					if err != nil {
+						t.Fatal(err)
+					}
+					expected[name] = data
+				}
+			}
+			return mock.Run(ctx, req)
+		}}, nil
+	}
+	opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+	first, err := e.ExecuteWork(t.Context(), opts)
+	if err == nil || first == nil {
+		t.Fatalf("initial %+v %v", first, err)
+	}
+	before, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial = false
+	clear(calls)
+	opts.Phase, opts.ClaimID = "test", before.Lease.ClaimID
+	if before.Lease.Status != "active" {
+		opts.ClaimID = ""
+	}
+	res, err := e.ExecuteWork(t.Context(), opts)
+	for name, want := range expected {
+		got, readErr := os.ReadFile(filepath.Join(first.WorktreePath, name))
+		if readErr != nil || string(got) != string(want) {
+			t.Fatalf("direct restoration %s: %q %v", name, got, readErr)
+		}
+	}
+	if external {
+		if !errors.Is(err, ErrOutsideCandidateFailures) || !errors.Is(err, validation.ErrRequiredCheckFailed) {
+			t.Fatalf("stop: %v", err)
+		}
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if res == nil || res.Validation == nil || len(res.Validation.CheckOutcomes) != 1 || !strings.Contains(res.Validation.CheckOutcomes[0].Output, "retry-check-executed") {
+		t.Fatalf("check not executed %+v", res)
+	}
+	if calls["developer"] != 0 || calls["tester"] != 1 || res.RepairRounds != 0 {
+		t.Fatalf("roles %v rounds %d", calls, res.RepairRounds)
+	}
+	after, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.ValidationRepairCount != after.ValidationRepairCount {
+		t.Fatal("repair allowance spent")
+	}
+	countDevelopers := func(st *lease.IssueState) int {
+		n := 0
+		for _, run := range st.RoleRuns {
+			if run.Role == "developer" {
+				n++
+			}
+		}
+		return n
+	}
+	if countDevelopers(before) != countDevelopers(after) {
+		t.Fatal("developer recorded")
+	}
+	if external {
+		opts.Phase, opts.IssueContinuation = "all", true
+		if err := e.CheckIssueContinuation(after, nil, opts); !errors.Is(err, ErrOutsideCandidateFailures) {
+			t.Fatalf("continuation: %v", err)
+		}
+		clear(calls)
+		opts.ClaimID = after.Lease.ClaimID
+		if after.Lease.Status != "active" {
+			opts.ClaimID = ""
+		}
+		if _, err := e.ExecuteWork(t.Context(), opts); !errors.Is(err, ErrOutsideCandidateFailures) {
+			t.Fatalf("automatic continuation: %v", err)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("automatic continuation ran roles: %v", calls)
+		}
+		if len(explicit) > 0 && explicit[0] {
+			mutateRetryState(t, e, issue.Number, func(st *lease.IssueState) { st.ValidationRepairCount = 2 })
+			exhausted, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := e.CheckIssueContinuation(exhausted, nil, opts); !errors.Is(err, ErrOutsideCandidateFailures) {
+				t.Fatalf("exhausted continuation: %v", err)
+			}
+			clear(calls)
+			opts.Phase, opts.IssueContinuation = "implement", false
+			opts.ClaimID = exhausted.Lease.ClaimID
+			if exhausted.Lease.Status != "active" {
+				opts.ClaimID = ""
+			}
+			launched, err := e.ExecuteWork(t.Context(), opts)
+			if !errors.Is(err, ErrOutsideCandidateFailures) || calls["developer"] != 1 {
+				t.Fatalf("explicit implement: roles %v result %+v err %v", calls, launched, err)
+			}
+			final, loadErr := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if final.ValidationRepairCount != exhausted.ValidationRepairCount || launched.RepairRounds != 0 {
+				t.Fatal("explicit implement changed allowance")
+			}
+			if countDevelopers(final) <= countDevelopers(exhausted) {
+				t.Fatal("explicit developer not recorded")
+			}
+		}
+	}
+}
+
+func TestWorkValidationCandidateControls(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprint(mixed), func(t *testing.T) {
+			commands := []string{"test -f SWARM_IMPLEMENTED.md && false"}
+			if mixed {
+				commands = []string{"test ! -f .swarm/active/PLAN.md", "false"}
+			}
+			e, issue := gatedTesterRetryEngine(t, contract.GateNone, commands...)
+			developers := 0
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "developer" {
+						developers++
+					}
+					return (&agent.MockRunner{}).Run(ctx, req)
+				}}, nil
+			}
+			res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			if err == nil || errors.Is(err, ErrOutsideCandidateFailures) || developers < 2 || res == nil || res.RepairRounds != 1 {
+				t.Fatalf("bounded repair: %d %+v %v", developers, res, err)
+			}
+			st, loadErr := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if st.ValidationRepairCount != 1 {
+				t.Fatalf("repair count %d", st.ValidationRepairCount)
+			}
+			if mixed && (res.Validation.Repair.OutsideCandidate() || res.Validation.Repair.FailedChecks[0].OutsideCandidateTree == "") {
+				t.Fatalf("mixed report %+v", res.Validation.Repair)
+			}
+		})
 	}
 }

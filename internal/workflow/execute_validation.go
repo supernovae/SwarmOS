@@ -116,6 +116,9 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 			return false, updateErr
 		}
 		r.st, r.res.State, r.res.ValidationPassed = updated, updated, report.Passed
+		if err != nil && report.Repair != nil && report.Repair.OutsideCandidate() {
+			return false, fmt.Errorf("%w: %w", ErrOutsideCandidateFailures, err)
+		}
 		if err != nil && report.Repair != nil && report.Repair.AllPreExisting {
 			return false, fmt.Errorf("%w: %w", ErrPreExistingFailures, err)
 		}
@@ -142,6 +145,9 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 	initialRound := 0
 	if !r.testerResume && (!implementationProven(r.st, r.res.HeadSHA) || r.opts.instructionsFor("developer") != "") {
 		if r.continuation() && hasFailedValidationArtifact(r.st) && r.opts.instructionsFor("developer") == "" {
+			if repair := validation.RepairFromArtifact(r.st.Artifacts, r.st.BaseSHA); repair != nil && repair.OutsideCandidate() {
+				return r.res, fmt.Errorf("%w: %w", ErrOutsideCandidateFailures, validation.ErrRequiredCheckFailed)
+			}
 			if repair := validation.RepairFromArtifact(r.st.Artifacts, r.st.BaseSHA); repair != nil && repair.AllPreExisting {
 				return r.res, ErrPreExistingFailures
 			}

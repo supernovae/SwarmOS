@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -261,5 +262,146 @@ func TestRecoveryIndexAcceptsOnlyPointerOnLinkedTarget(t *testing.T) {
 	runWorkspaceGit(t, wt, "add", "docs/AI.md")
 	if err := verifyRecoveryIndex(wt, base); err == nil {
 		t.Fatal("staged user edit on linked target accepted")
+	}
+}
+
+func TestValidationInstructionsLifecycle(t *testing.T) {
+	for _, scenario := range []string{"exact", "edit", "unsafe replacement", "empty", "no pointer"} {
+		t.Run(scenario, func(t *testing.T) {
+			original := "Repository instructions\n"
+			if scenario == "empty" {
+				original = ""
+			}
+			_, wt, _, _ := instructionLinkRepo(t, 396, map[string]string{"AGENTS.md": "->guide.md", "CLAUDE.md": "->guide.md", "guide.md": original})
+			path := filepath.Join(wt, "guide.md")
+			if err := os.Chmod(path, 0755); err != nil {
+				t.Fatal(err)
+			}
+			pointer := "<!-- swarm:active:start -->\nTask\n<!-- swarm:active:end -->\n\n"
+			want := original
+			if scenario != "no pointer" {
+				want = pointer + original
+				if err := os.WriteFile(path, []byte(want), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			restore, err := PrepareValidationInstructions(wt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, _ := os.ReadFile(path)
+			if string(data) != original {
+				t.Fatalf("cleaned %q", data)
+			}
+			if scenario == "edit" {
+				if err := os.WriteFile(path, []byte("Check edit\n"+original), 0755); err != nil {
+					t.Fatal(err)
+				}
+				want = pointer + "Check edit\n" + original
+			}
+			if scenario == "unsafe replacement" {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("other.md", path); err != nil {
+					t.Fatal(err)
+				}
+				if err := restore(); err == nil {
+					t.Fatal("unsafe restore accepted")
+				}
+				return
+			}
+			if err := restore(); err != nil {
+				t.Fatal(err)
+			}
+			data, _ = os.ReadFile(path)
+			if string(data) != want {
+				t.Fatalf("restored %q want %q", data, want)
+			}
+			mode, err := os.Stat(path)
+			if err != nil || mode.Mode().Perm() != 0755 {
+				t.Fatalf("mode %v %v", mode, err)
+			}
+			for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+				target, err := os.Readlink(filepath.Join(wt, name))
+				if err != nil || target != "guide.md" {
+					t.Fatalf("link %s %s %v", name, target, err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidationInstructionsPartialSetup(t *testing.T) {
+	_, wt, _, _ := instructionLinkRepo(t, 396, map[string]string{"AGENTS.md": "guide\n"})
+	pointer := "<!-- swarm:active:start -->\nTask\n<!-- swarm:active:end -->\n\n"
+	want := pointer + "guide\n"
+	if err := os.WriteFile(filepath.Join(wt, "AGENTS.md"), []byte(want), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Resolution succeeds, but reading the second target exceeds the instruction cap.
+	if err := os.WriteFile(filepath.Join(wt, "CLAUDE.md"), []byte(strings.Repeat("x", 17<<20)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareValidationInstructions(wt); err == nil {
+		t.Fatal("oversized target accepted")
+	}
+	data, err := os.ReadFile(filepath.Join(wt, "AGENTS.md"))
+	if err != nil || string(data) != want {
+		t.Fatalf("partial cleanup not restored: %q %v", data, err)
+	}
+}
+
+func TestValidationInstructionsTrackedEmpty(t *testing.T) {
+	_, wt, _, _ := instructionLinkRepo(t, 396, map[string]string{"AGENTS.md": ""})
+	pointer := "<!-- swarm:active:start -->\nTask\n<!-- swarm:active:end -->\n\n"
+	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if err := os.WriteFile(filepath.Join(wt, name), []byte(pointer), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restore, err := PrepareValidationInstructions(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(wt, "AGENTS.md")); err != nil || len(data) != 0 {
+		t.Fatalf("tracked empty removed %q %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "CLAUDE.md")); !os.IsNotExist(err) {
+		t.Fatalf("untracked pointer retained: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "CLAUDE.md"), []byte("Check text\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(wt, "CLAUDE.md")); err != nil || string(data) != pointer+"Check text\n" {
+		t.Fatalf("check edit lost %q %v", data, err)
+	}
+}
+
+func TestValidationInstructionsGitFailure(t *testing.T) {
+	_, wt, _, _ := instructionLinkRepo(t, 396, map[string]string{"AGENTS.md": ""})
+	pointer := "<!-- swarm:active:start -->\nTask\n<!-- swarm:active:end -->\n\n"
+	if err := os.WriteFile(filepath.Join(wt, "AGENTS.md"), []byte(pointer), 0644); err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\nif test \"$1\" = ls-files; then exit 71; fi\nexec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := PrepareValidationInstructions(wt); err == nil {
+		t.Fatal("Git failure treated as untracked")
+	}
+	data, err := os.ReadFile(filepath.Join(wt, "AGENTS.md"))
+	if err != nil || string(data) != pointer {
+		t.Fatalf("Git failure lost tracked file: %q %v", data, err)
 	}
 }

@@ -219,7 +219,7 @@ func (r *workRun) checkWorkApproval(ctx context.Context) error {
 		return err
 	}
 	if r.st != nil && !maps.Equal(lease.ReviewBindings(r.st), lease.ReviewBindings(st)) {
-		return lease.ErrApprovalRequired
+		return lease.ErrPlanApprovalRequired
 	}
 	if err = lease.VerifyApproval(st, r.pre.WorkUnit); err != nil {
 		return err

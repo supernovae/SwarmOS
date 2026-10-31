@@ -193,7 +193,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				result, err := engine.ExecuteWork(ctx, selected)
 				lease.UnlockClaim(lock)
 				if err != nil {
-					return result, err
+					selectedRoot := *rootOpts
+					selectedRoot.Repo, selectedRoot.RepoRoot, selectedRoot.Backend = pulled.Repo, pulled.RepoRoot, pulled.Backend
+					return result, (stopContext{opts: &selectedRoot, resource: "issue", number: pulled.Issue.Number}).stop(err)
 				}
 				if autoSubmit && result.ValidationPassed && result.ClaimBudgetPause == nil {
 					submitOpts := *rootOpts
@@ -230,6 +232,12 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 							pulled, err := pullNextReadyIssue(taskCtx, cmd, rootOpts, allRepos, options, 0)
 							if err != nil {
 								admitted.Add(-1)
+								var noReady *noReadyError
+								if errors.As(err, &noReady) {
+									outputMu.Lock()
+									fmt.Fprintln(out, noReady.human())
+									outputMu.Unlock()
+								}
 								if !errors.Is(err, errNoReadyWork) {
 									failures.Add(1)
 									outputMu.Lock()

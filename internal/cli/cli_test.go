@@ -1896,7 +1896,7 @@ func TestFreshClaimBaseCommands(t *testing.T) {
 				t.Fatalf("invalid JSON %s", out.String())
 			}
 			if refused != 0 {
-				if !strings.Contains(diagnostics.String(), fmt.Sprintf("swarm issue approve %d", refused)) {
+				if !strings.Contains(diagnostics.String(), fmt.Sprintf("issue approve %d", refused)) {
 					t.Fatalf("missing refusal: %s", diagnostics.String())
 				}
 				if f.state(t, refused).Lease.Status == "active" {

@@ -239,7 +239,7 @@ func TestCLIPRRebaseResolveTimeoutLeavesRebasePaused(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "timeout") || !strings.Contains(err.Error(), paths[0]) {
 		t.Fatalf("timeout err = %v", err)
 	}
-	if strings.Contains(err.Error(), "swarm-resolve-") || strings.Contains(err.Error(), os.TempDir()) {
+	if strings.Contains(messageOnly(err), "swarm-resolve-") || strings.Contains(messageOnly(err), os.TempDir()) {
 		t.Fatalf("error leaks the resolver workspace path: %v", err)
 	}
 	worktree := workspace.PRWorktreePath(f.root, number)
@@ -346,6 +346,9 @@ func TestCLIPRWorkAndStageReportPausedRebase(t *testing.T) {
 	}
 	for _, args := range [][]string{{"pr", "work", p, "--agent", "mock", "--progress=false"}, {"pr", "stage", p, "--phase", "implement"}} {
 		_, err := f.run(args...)
+		if args[1] == "stage" && (ExitCode(err) != ExitFailure || strings.Contains(err.Error(), "Next step:")) {
+			t.Fatalf("stage changed exit classification: %v", err)
+		}
 		if err == nil || !strings.Contains(err.Error(), paths[0]) || !strings.Contains(err.Error(), "--resolve") || !strings.Contains(err.Error(), "--abort") || !strings.Contains(err.Error(), "--continue") {
 			t.Fatalf("%v: err = %v", args, err)
 		}
@@ -631,7 +634,7 @@ func TestCLIPRRebasePolicyReviewStopsBeforeGit(t *testing.T) {
 			prGit(t, f.root, "commit", "-m", "Change policy")
 			// Changed policy cannot receive routine task reapproval.
 			p := strconv.Itoa(number)
-			if _, err = f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false"); err == nil || !strings.Contains(err.Error(), "swarm issue approve ") {
+			if _, err = f.run("pr", "rebase", p, "--resolve", "--agent", "mock", "--progress=false"); err == nil || !strings.Contains(err.Error(), "issue approve ") || nextActionOf(err) == nil || strings.Count(err.Error(), "Next step:") != 1 {
 				t.Fatalf("policy silently reapproved: %v", err)
 			}
 			f.must(t, "issue", "approve", strconv.Itoa(issue))
@@ -642,7 +645,7 @@ func TestCLIPRRebasePolicyReviewStopsBeforeGit(t *testing.T) {
 			if err == nil {
 				t.Fatal("rebase passed a closed plan gate")
 			}
-			if kind == "human" && !strings.Contains(err.Error(), "swarm issue review-plan "+strconv.Itoa(issue)+" --approve") {
+			if kind == "human" && !strings.Contains(err.Error(), "issue review-plan "+strconv.Itoa(issue)+" --approve") {
 				t.Fatalf("missing human step: %v", err)
 			}
 			if kind == "rejected" && !strings.Contains(err.Error(), "CHANGES_REQUESTED") {

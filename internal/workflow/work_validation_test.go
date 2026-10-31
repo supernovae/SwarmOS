@@ -354,8 +354,11 @@ func TestWorkValidationRepairRounds(t *testing.T) {
 				t.Fatalf("error %q lacks %q", err, tc.wantContains)
 			}
 			if tc.wantErr == ErrValidationRepairNoChanges || tc.wantErr == ErrValidationRepairExhausted {
-				if !strings.Contains(err.Error(), fmt.Sprintf("swarm issue work %d --phase implement", issue)) {
-					t.Fatalf("error lacks the resume command: %v", err)
+				if strings.Contains(err.Error(), "swarm issue work") {
+					t.Fatalf("service error embeds presentation command: %v", err)
+				}
+				if tc.wantErr == ErrValidationRepairExhausted && (!strings.Contains(err.Error(), "--phase implement") || !strings.Contains(err.Error(), "--developer-instructions") || !strings.Contains(err.Error(), "subject to approval")) {
+					t.Fatalf("missing allowance guidance: %v", err)
 				}
 			}
 			if tc.wantErr == ErrValidationRepairNoChanges {
@@ -1878,5 +1881,41 @@ func TestIssueWorkRecoveryDeveloperInstructionMatrix(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestContinuationHumanApprovalBeforeRepair(t *testing.T) {
+	_, e, _ := setupProjectPlanTestRepo(t)
+	base, err := gitfixture.Command(t, "", "-C", e.repoRoot, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*lease.IssueState, *WorkOptions)
+		want   bool
+	}{
+		{"stale human", func(*lease.IssueState, *WorkOptions) {}, true},
+		{"no failed validation", func(s *lease.IssueState, _ *WorkOptions) { s.Artifacts = s.Artifacts[:2] }, false},
+		{"missing pair", func(s *lease.IssueState, _ *WorkOptions) { s.Artifacts = append(s.Artifacts[:1], s.Artifacts[2]) }, false},
+		{"agent", func(s *lease.IssueState, _ *WorkOptions) { s.EffectiveGate = contract.GateAgent }, false},
+		{"explicit plan", func(_ *lease.IssueState, o *WorkOptions) { o.Phase = "plan" }, false},
+		{"PR", func(s *lease.IssueState, _ *WorkOptions) { s.PRNumber = 9 }, false},
+		{"fork", func(s *lease.IssueState, _ *WorkOptions) { s.ForkRepo = "a/b" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &lease.IssueState{BaseSHA: strings.TrimSpace(string(base)), EffectiveGate: contract.GateHuman, ValidationRepairCount: 99, Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}, {Type: contract.ArtifactValidation, Verdict: "FAIL"}}}
+			st.Lease.IssueNumber = 7
+			opts := WorkOptions{Phase: "all", IssueContinuation: true}
+			tc.change(st, &opts)
+			err := e.CheckIssueContinuation(st, nil, opts)
+			var human *lease.HumanPlanApprovalError
+			if errors.As(err, &human) != tc.want {
+				t.Fatalf("approval precedence: %v", err)
+			}
+			if st.ValidationRepairCount != 99 {
+				t.Fatal("mutated repair count")
+			}
+		})
 	}
 }

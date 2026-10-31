@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -83,7 +84,7 @@ func TestCommandOnlyTestPhase(t *testing.T) {
 	if err := ValidateWorkPhase("test"); err != nil {
 		t.Fatal(err)
 	}
-	if ValidatePhase("test") == nil {
+	if err := ValidatePhase("test"); err == nil || !strings.Contains(err.Error(), "valid: all, plan, review, implement)") {
 		t.Fatal("test admitted to coordination")
 	}
 	if PersistedWorkPhase("test") != "implement" {

@@ -87,7 +87,9 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 					return fmt.Errorf("PR #%d requires an existing managed worktree that is not rebasing", prNumber)
 				}
 				if prStatus.Rebasing {
-					return pr.PausedRebaseError(ctx, worktree, prNumber)
+					// Stage retains its ordinary exit and manual continuation hint.
+					c := stopContext{opts: rootOpts, resource: "pr", number: prNumber}
+					return fmt.Errorf("%w; after staging resolved files, run %s", pr.PausedRebaseError(ctx, worktree, prNumber), formatCommand(c.argv(false, "pr", "rebase", fmt.Sprint(prNumber), "--continue")))
 				}
 			}
 			lock, err := lease.LockClaim(root, issue)
@@ -102,7 +104,9 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 					return e
 				}
 				if fresh.Rebasing {
-					return pr.PausedRebaseError(ctx, worktree, prNumber)
+					// Stage retains its ordinary exit and manual continuation hint.
+					c := stopContext{opts: rootOpts, resource: "pr", number: prNumber}
+					return fmt.Errorf("%w; after staging resolved files, run %s", pr.PausedRebaseError(ctx, worktree, prNumber), formatCommand(c.argv(false, "pr", "rebase", fmt.Sprint(prNumber), "--continue")))
 				}
 				if fresh.Status == pr.StatusDiverged || fresh.Status == pr.StatusPublishedPending || fresh.Worktree != worktree || fresh.State.PRRevision == nil || fresh.State.PRRevision.LocalHeadSHA != prStatus.State.PRRevision.LocalHeadSHA {
 					return fmt.Errorf("PR #%d revision changed or is rebasing; refusing to stage", prNumber)

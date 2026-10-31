@@ -2,10 +2,11 @@ package cli
 
 import (
 	"errors"
-	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -52,8 +53,17 @@ type stopError struct {
 	guidance string
 }
 
-func (e *stopError) Error() string { return e.err.Error() + e.guidance }
+func (e *stopError) Error() string { return e.err.Error() + e.guidance + renderNextAction(e.action) }
 func (e *stopError) Unwrap() error { return e.err }
+
+// approvalRefusalError adds advice while preserving the ordinary refusal exit.
+type approvalRefusalError struct {
+	err    error
+	action *NextAction
+}
+
+func (e *approvalRefusalError) Error() string { return e.err.Error() + renderNextAction(e.action) }
+func (e *approvalRefusalError) Unwrap() error { return e.err }
 
 // ExitCode maps a command error to the process exit status.
 func ExitCode(err error) int {
@@ -80,6 +90,14 @@ func nextActionOf(err error) *NextAction {
 	if errors.As(err, &stop) {
 		return stop.action
 	}
+	var noReady *noReadyError
+	if errors.As(err, &noReady) {
+		return noReady.action
+	}
+	var refusal *approvalRefusalError
+	if errors.As(err, &refusal) {
+		return refusal.action
+	}
 	return nil
 }
 
@@ -99,6 +117,17 @@ func (c stopContext) classify(err error) *NextAction {
 	if err == nil {
 		return nil
 	}
+	if c.number <= 0 {
+		var recovery *workflow.IssueRecoveryError
+		var task *lease.TaskApprovalError
+		var base *lease.ClaimBaseApprovalError
+		var plan *lease.HumanPlanApprovalError
+		var trusted *lease.PlanApprovalError
+		var conflict *pr.ConflictError
+		if !errors.As(err, &recovery) && !errors.As(err, &task) && !errors.As(err, &base) && !errors.As(err, &plan) && !errors.As(err, &trusted) && !errors.As(err, &conflict) {
+			return nil
+		}
+	}
 	var recovery *workflow.IssueRecoveryError
 	if errors.As(err, &recovery) {
 		reason := ReasonChangesRequested
@@ -111,6 +140,9 @@ func (c stopContext) classify(err error) *NextAction {
 		number := c.number
 		if number == 0 {
 			number = recovery.IssueNumber
+		}
+		if number <= 0 {
+			return nil
 		}
 		args := []string{"issue", recovery.Operation, strconv.Itoa(number)}
 		args = append(args, recovery.Arguments...)
@@ -153,6 +185,9 @@ func (c stopContext) classify(err error) *NextAction {
 	}
 	var conflict *pr.ConflictError
 	if errors.As(err, &conflict) {
+		if conflict.PRNumber <= 0 {
+			return nil
+		}
 		number := strconv.Itoa(conflict.PRNumber)
 		switch {
 		case conflict.Manual:
@@ -213,20 +248,109 @@ func (c stopContext) argv(maintainer bool, resource string, args ...string) []st
 // stop wraps err with its recovery so ExitCode can report it. Unclassified
 // errors are returned unchanged.
 func (c stopContext) stop(err error) error {
+	var existing *stopError
+	if errors.As(err, &existing) {
+		return err
+	}
+	var noReady *noReadyError
+	if errors.As(err, &noReady) && noReady.action != nil {
+		return &stopError{err: noReady, action: noReady.action, guidance: noReady.guidance}
+	}
 	if action := c.classify(err); action != nil {
 		stop := &stopError{err: err, action: action}
-		var plan *lease.PlanApprovalError
-		var human *lease.HumanPlanApprovalError
-		var task *lease.TaskApprovalError
-		var base *lease.ClaimBaseApprovalError
-		if c.opts != nil && c.opts.Fork && errors.As(err, &plan) && !errors.As(err, &human) &&
-			action.Reason == ReasonNeedsApproval && !errors.As(err, &task) && !errors.As(err, &base) {
-			stop.guidance = fmt.Sprintf("\nAsk an upstream maintainer to review the current plan for linked upstream issue #%d: %s", plan.IssueNumber, strings.Join(action.Argv, " "))
+		if c.opts != nil && c.opts.Fork && action.HumanRequired && isMaintainerAction(action) {
+			stop.guidance = "\nAsk an upstream maintainer; contributor review is advisory."
 			if c.opts.Repo == "" {
 				stop.guidance += "\nRun this command from the upstream repository checkout."
 			}
+			stop.guidance += "\nResume worker commands with --fork after approval."
 		}
 		return stop
 	}
 	return err
+}
+
+func actionOperation(a *NextAction) (string, string, []string) {
+	if a == nil {
+		return "", "", nil
+	}
+	for i := 1; i < len(a.Argv); {
+		if a.Argv[i] == "--fork" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(a.Argv[i], "--") {
+			i += 2
+			continue
+		}
+		if i+1 < len(a.Argv) {
+			return a.Argv[i], a.Argv[i+1], a.Argv[i+2:]
+		}
+		break
+	}
+	return "", "", nil
+}
+func isMaintainerAction(a *NextAction) bool {
+	resource, operation, _ := actionOperation(a)
+	return resource == "issue" && (operation == "approve" || operation == "review-plan" || operation == "edit")
+}
+
+func renderNextAction(a *NextAction) string {
+	if a == nil {
+		return ""
+	}
+	guidance := ""
+	resource, operation, _ := actionOperation(a)
+	if resource == "issue" && operation == "release" {
+		guidance = "\nThe active claim owner must run the next step."
+	}
+	if isMaintainerAction(a) {
+		guidance = "\nAsk an authorized maintainer to run the next step."
+		_, operation, args := actionOperation(a)
+		if operation == "review-plan" && slices.Contains(args, "--approve") {
+			guidance = "\nAsk an independent maintainer to review the current plan."
+		}
+	}
+	return guidance + "\nNext step: " + formatCommand(a.Argv)
+}
+
+func formatCommand(argv []string) string {
+	args := make([]string, len(argv))
+	for i, arg := range argv {
+		if arg != "" && !strings.ContainsAny(arg, " \t\n\r'\"`$\\;|&<>()*?[]{}!#~") {
+			args[i] = arg
+		} else {
+			args[i] = "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+		}
+	}
+	return strings.Join(args, " ")
+}
+
+// messageOnly removes only presentation contributed by stop wrappers.
+func messageOnly(err error) string {
+	if err == nil {
+		return ""
+	}
+	if refusal, ok := err.(*approvalRefusalError); ok {
+		return messageOnly(refusal.err)
+	}
+	if noReady, ok := err.(*noReadyError); ok {
+		return noReady.text
+	}
+	if stop, ok := err.(*stopError); ok {
+		return messageOnly(stop.err)
+	}
+	var refusal *approvalRefusalError
+	if errors.As(err, &refusal) {
+		return strings.Replace(err.Error(), refusal.Error(), messageOnly(refusal.err), 1)
+	}
+	var stop *stopError
+	if errors.As(err, &stop) {
+		return strings.Replace(err.Error(), stop.Error(), messageOnly(stop.err), 1)
+	}
+	return err.Error()
+}
+
+func needsHumanPlanDecision(st *lease.IssueState, wu *contract.WorkUnit, cfg *contract.SwarmConfig) bool {
+	return st != nil && st.EffectiveGate == contract.GateHuman && lease.TaskApprovalCurrent(st, wu, cfg) && lease.CompletePlanPair(st) && ((st.PendingPlanReview == nil && st.HumanPlanReview == nil) || lease.HasRevisedPlan(st)) && (st.Lease.Status != "completed" || st.PRNumber != 0) && lease.VerifyHumanPlanApproval(st) != nil
 }

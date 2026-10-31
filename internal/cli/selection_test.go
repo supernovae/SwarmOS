@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -534,5 +535,36 @@ func TestSelectorRefusesCommandOnlyTestWithLiveDependencies(t *testing.T) {
 	}
 	if tr.calls != 0 || runs != 0 || !reflect.DeepEqual(before, rootSnapshot(t, f.root)) {
 		t.Fatalf("selector activity: tracker=%d agents=%d", tr.calls, runs)
+	}
+}
+
+func TestNextSelectionHumanPlanAdvice(t *testing.T) {
+	for _, mode := range []string{"work", "claim", "node"} {
+		t.Run(mode, func(t *testing.T) {
+			_, n, _, _, run := recoveryCommandFixture(t, "local", "human", 1)
+			number := strconv.Itoa(n)
+			for _, args := range [][]string{{"issue", "work", number, "--phase", "plan", "--agent", "mock", "--progress=false"}, {"issue", "release", number}} {
+				if out, err := run(args...); err != nil {
+					t.Fatal(err, out)
+				}
+			}
+			args := []string{"issue", mode, "--next", "--agent", "mock"}
+			want := ExitNeedsApproval
+			if mode == "claim" {
+				want = ExitFailure
+			}
+			if mode == "node" {
+				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
+				want = ExitOK
+			}
+			out, err := run(args...)
+			combined := out
+			if err != nil {
+				combined += fmt.Sprintf("Error: %v\n", err)
+			}
+			if ExitCode(err) != want || strings.Count(combined, "Next step:") != 1 || strings.Count(combined, "issue review-plan "+number+" --approve") != 1 || strings.Contains(combined, "issue review-plan 0") || !strings.Contains(combined, "independent maintainer") {
+				t.Fatalf("selection: %v\n%s", err, combined)
+			}
+		})
 	}
 }

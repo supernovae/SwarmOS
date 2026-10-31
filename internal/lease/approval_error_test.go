@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestVerifyApprovalTypesHumanDecisions(t *testing.T) {
 			err := VerifyApproval(tc.st, wu)
 			var task *TaskApprovalError
 			var human *HumanPlanApprovalError
-			if !errors.Is(err, ErrApprovalRequired) || err.Error() != ErrApprovalRequired.Error() {
+			if !errors.Is(err, ErrApprovalRequired) || !strings.Contains(err.Error(), "approval is missing or stale") {
 				t.Fatalf("err = %v", err)
 			}
 			if errors.As(err, &task) != tc.task || errors.As(err, &human) != tc.human {
@@ -58,7 +59,7 @@ func TestVerifyApprovalTypesHumanDecisions(t *testing.T) {
 			err := VerifyApproval(st, wu)
 			var plan *PlanApprovalError
 			typed := mode == "missing review" || mode == "advisory" || mode == "stale"
-			if !errors.Is(err, ErrApprovalRequired) || err.Error() != ErrApprovalRequired.Error() || errors.As(fmt.Errorf("outer: %w", err), &plan) != typed {
+			if !errors.Is(err, ErrApprovalRequired) || !strings.Contains(err.Error(), "approval is missing or stale") || errors.As(fmt.Errorf("outer: %w", err), &plan) != typed {
 				t.Fatalf("approval = %#v", err)
 			}
 			if typed && plan.IssueNumber != 3 {
@@ -125,5 +126,31 @@ func TestVerifyApprovalTypesHumanDecisions(t *testing.T) {
 
 	if err := VerifyApproval(&IssueState{TaskDigest: digest, EffectiveGate: contract.GateNone}, wu); err != nil {
 		t.Fatalf("no-gate approval = %v", err)
+	}
+}
+
+func TestPlanApprovalDiagnosticCompatibility(t *testing.T) {
+	for _, cause := range []error{nil, fmt.Errorf("%w: diagnostic suffix", ErrApprovalRequired)} {
+		for _, err := range []error{&HumanPlanApprovalError{Err: cause}, &PlanApprovalError{Err: cause}} {
+			if !errors.Is(err, ErrApprovalRequired) || !strings.Contains(err.Error(), "plan approval") || strings.Contains(err.Error(), "task approval") {
+				t.Fatalf("plan diagnostic: %v", err)
+			}
+			if cause != nil && (!errors.Is(err, cause) || !strings.Contains(err.Error(), "diagnostic suffix")) {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+func TestVerifyHumanPlanApprovalReadOnly(t *testing.T) {
+	if VerifyHumanPlanApproval(nil) != nil || VerifyHumanPlanApproval(&IssueState{EffectiveGate: contract.GateAgent}) != nil {
+		t.Fatal("non-human check")
+	}
+	st := &IssueState{EffectiveGate: contract.GateHuman}
+	st.Lease.IssueNumber = 17
+	err := VerifyHumanPlanApproval(st)
+	var human *HumanPlanApprovalError
+	if !errors.As(err, &human) || human.IssueNumber != 17 || !errors.Is(err, ErrApprovalRequired) {
+		t.Fatal(err)
 	}
 }

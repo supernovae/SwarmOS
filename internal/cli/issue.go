@@ -139,7 +139,29 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			var claimed *lease.AlreadyClaimedError
 			if errors.As(err, &claimed) && claimed.Owner == owner {
-				return fmt.Errorf("%w; release your claim with swarm issue release %d", err, number)
+				state, inspectErr := mgr.GetCurrentState(cmd.Context(), number)
+				if inspectErr != nil {
+					return fmt.Errorf("%w; inspect current approval: %v", err, inspectErr)
+				}
+				issue, inspectErr := tr.GetIssue(cmd.Context(), number)
+				if inspectErr != nil {
+					return fmt.Errorf("%w; inspect WorkUnit: %v", err, inspectErr)
+				}
+				wu, inspectErr := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+				if inspectErr != nil {
+					return fmt.Errorf("%w; inspect WorkUnit: %v", err, inspectErr)
+				}
+				cfg, inspectErr := harness.LoadConfigAt(rootOpts.resolveRepoRoot(), state.BaseSHA)
+				if inspectErr != nil {
+					return fmt.Errorf("%w; inspect approved policy: %v", err, inspectErr)
+				}
+				if needsHumanPlanDecision(state, wu, cfg) {
+					return &approvalRefusalError{err: fmt.Errorf("%w; plan approval required", err), action: (stopContext{opts: rootOpts}).planApproval(number)}
+				}
+				if lease.TaskApprovalCurrent(state, wu, cfg) {
+					return fmt.Errorf("%w; task approval is current", err)
+				}
+				return fmt.Errorf("%w; task reapproval required; release your claim with swarm issue release %d", err, number)
 			}
 			return err
 		}

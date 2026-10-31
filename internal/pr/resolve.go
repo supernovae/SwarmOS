@@ -84,7 +84,7 @@ func resolveGuidance(number int, paths []string) string {
 	if len(paths) > 0 {
 		fmt.Fprintf(&b, "Conflicted paths: %s\n", strings.Join(paths, ", "))
 	}
-	fmt.Fprintf(&b, "The rebase is still paused. Resolve the files in .swarm/worktrees/pr-%d, git add them, and run swarm pr rebase %d --continue; run swarm pr rebase %d --resolve to retry the agent; or run swarm pr rebase %d --abort.\n", number, number, number, number)
+	fmt.Fprintf(&b, "The rebase is still paused. Resolve the files in .swarm/worktrees/pr-%d, git add them, then continue; run swarm pr rebase %d --resolve to retry the agent; or run swarm pr rebase %d --abort.\n", number, number, number)
 	b.WriteString("Files that contain literal conflict-marker lines (such as marker test fixtures) always need manual resolution.")
 	return b.String()
 }
@@ -96,7 +96,7 @@ func PausedRebaseError(ctx context.Context, worktree string, number int) error {
 	if len(paths) > 0 {
 		msg += " with conflicts in " + strings.Join(paths, ", ")
 	}
-	return &ConflictError{PRNumber: number, Paused: true, Err: fmt.Errorf("%s; run swarm pr rebase %d --continue after staging resolved files, swarm pr rebase %d --resolve, or swarm pr rebase %d --abort", msg, number, number, number)}
+	return &ConflictError{PRNumber: number, Paused: true, Err: fmt.Errorf("%s; stage resolved files before continuing, or run swarm pr rebase %d --resolve or swarm pr rebase %d --abort", msg, number, number)}
 }
 
 // resolveStop gives the developer agent one turn on the current rebase stop and

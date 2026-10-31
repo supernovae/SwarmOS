@@ -61,7 +61,7 @@ func ValidatePhase(phase string) error {
 	case "plan", "review", "implement", "all":
 		return nil
 	}
-	return fmt.Errorf("invalid workflow phase %q", phase)
+	return fmt.Errorf("invalid workflow phase %q (valid: all, plan, review, implement)", phase)
 }
 
 func ValidatePlanMode(mode string) error {
@@ -116,7 +116,10 @@ func ValidateWorkPhase(phase string) error {
 	if phase == "test" {
 		return nil
 	}
-	return ValidatePhase(phase)
+	if err := ValidatePhase(phase); err != nil {
+		return fmt.Errorf("invalid work phase %q (valid: all, plan, review, implement, test)", phase)
+	}
+	return nil
 }
 
 // PersistedWorkPhase maps a work command to its coordination phase.

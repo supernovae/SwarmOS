@@ -78,7 +78,7 @@ func (r *workRun) runReview() (bool, error) {
 	}
 	r.res.State = r.st
 	if lease.IncompletePlanPair(r.st) {
-		return true, lease.ErrApprovalRequired
+		return true, lease.ErrPlanApprovalRequired
 	}
 	reviewer := r.pre.Agents["reviewer"]
 	r.res.RoleAgentsUsed["reviewer"] = reviewer

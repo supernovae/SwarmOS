@@ -16,3 +16,7 @@ func singleLink(_ *os.File, _ os.FileInfo) error {
 func openExisting(_ *os.Root, _ string, _ int) (*os.File, error) {
 	return nil, fmt.Errorf("secure file opening unavailable on this platform")
 }
+
+func openCleanupDirectory(_ *os.Root, _ string) (*os.File, error) {
+	return nil, fmt.Errorf("secure directory permission repair unavailable on this platform")
+}

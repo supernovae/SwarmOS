@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"io"
 	"os"
 	"path/filepath"
@@ -663,5 +664,70 @@ func TestTempCollisionNeverPromotesCoverage(t *testing.T) {
 			guard.Close()
 		}
 		t.Fatalf("collision promoted unrelated storage: %v", err)
+	}
+}
+
+func TestCleanupExhaustionPreservesPrimaryAndEvidence(t *testing.T) {
+	for _, primary := range []error{nil, errors.New("prefetch failed")} {
+		m, _ := fixture(t)
+		s := &Scope{repository: "host-unknown", manager: m}
+		path, err := s.TempDir(context.Background(), canonicalTemp(t), "swarm-prefetch-*", "prefetch-scratch")
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := primary
+		s.cleanupTemp(path, &result, func(temporary) error { return errors.Join(safefs.ErrCleanupIncomplete, os.ErrPermission) })
+		if result != primary || !s.Retained() {
+			t.Fatalf("primary changed: %v; retained=%v", result, s.Retained())
+		}
+		if err := s.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := Open(m.path, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resource := ResourceFor(s.Repository(), "prefetch-scratch", path)
+		guard, err := reopened.AcquireMaintenance(context.Background(), resource)
+		if guard != nil {
+			guard.Close()
+		}
+		if !errors.Is(err, ErrUnsafe) {
+			t.Fatalf("retained evidence permitted maintenance: %v", err)
+		}
+		reopened.Close()
+	}
+}
+
+func TestCleanupMissingOwnershipRetainsEvidence(t *testing.T) {
+	m, _ := fixture(t)
+	s := &Scope{repository: "host-unknown", manager: m}
+	path, err := s.TempDir(context.Background(), canonicalTemp(t), "swarm-prefetch-*", "prefetch-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result error
+	s.CleanupTemp(path+"-unowned", &result)
+	if !errors.Is(result, ErrUnsafe) || !s.Retained() {
+		t.Fatalf("unowned cleanup: %v retained=%v", result, s.Retained())
+	}
+	if err := s.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	resource := ResourceFor(s.Repository(), "prefetch-scratch", path)
+	reopened, err := Open(m.path, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	guard, err := reopened.AcquireMaintenance(context.Background(), resource)
+	if guard != nil {
+		guard.Close()
+	}
+	if !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("missing ownership cleared evidence: %v", err)
 	}
 }

@@ -698,6 +698,13 @@ func (s *Scope) CleanupTemp(path string, result *error) {
 		s.Retain()
 		panic(p)
 	}
+
+	s.cleanupTemp(path, result, func(temp temporary) error {
+		return temp.parent.RemoveAllChecked(temp.name, temp.info)
+	})
+}
+
+func (s *Scope) cleanupTemp(path string, result *error, remove func(temporary) error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.retained {
@@ -705,12 +712,15 @@ func (s *Scope) CleanupTemp(path string, result *error) {
 	}
 	temp, ok := s.temps[path]
 	if !ok {
+		s.retained = true
 		*result = errors.Join(*result, ErrUnsafe)
 		return
 	}
-	if cleanupErr := temp.parent.RemoveAllChecked(temp.name, temp.info); cleanupErr != nil {
+	if cleanupErr := remove(temp); cleanupErr != nil {
 		s.retained = true
-		*result = errors.Join(*result, cleanupErr)
+		if !errors.Is(cleanupErr, safefs.ErrCleanupIncomplete) {
+			*result = errors.Join(*result, cleanupErr)
+		}
 	}
 }
 

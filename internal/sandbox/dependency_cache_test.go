@@ -1032,3 +1032,83 @@ func TestPrefetchVerifiedStopCompletion(t *testing.T) {
 		}
 	})
 }
+
+// A non-writable pinned scratch parent forces ordinary removal exhaustion
+// without a global cleanup hook or network calls. The prefetch runner is the
+// existing serial fixture seam.
+func TestGoPrefetchCleanupExhaustionRetainsEvidence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix directory permissions")
+	}
+	for _, fail := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+			parent, cache, controlHome := resolvedTempDir(t), resolvedTempDir(t), resolvedTempDir(t)
+			t.Setenv("TMPDIR", parent)
+			t.Setenv("XDG_CACHE_HOME", controlHome)
+			t.Setenv("HOME", controlHome)
+			for _, key := range []string{"GOPRIVATE", "GONOPROXY", "GONOSUMDB"} {
+				t.Setenv(key, "")
+			}
+			defer os.Chmod(parent, 0700)
+			var scratch string
+			stubPrefetch(t, "go1.26.10", func(dir string, env, argv []string) {
+				scratch = filepath.Dir(dir)
+				if slices.Equal(argv, goModDownloadArgv) {
+					if err := os.Chmod(parent, 0555); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			previous := runPrefetchCommand
+			runPrefetchCommand = func(ctx context.Context, dir string, env, argv []string) ([]byte, []byte, error) {
+				out, stderr, err := previous(ctx, dir, env, argv)
+				if fail && slices.Equal(argv, goModDownloadArgv) {
+					return nil, nil, errors.New("primary fetch failure")
+				}
+				return out, stderr, err
+			}
+			ctx, scope, err := storageuse.Ensure(t.Context(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = goModDownload(ctx, prefetchRequest{Dir: cache, Files: map[string][]byte{"go.mod": []byte("module example.com/test\n\ngo 1.21\n")}})
+			if fail {
+				if err == nil || !strings.Contains(err.Error(), "primary fetch failure") {
+					t.Fatalf("primary failure lost: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !scope.Retained() {
+				t.Fatal("cleanup exhaustion did not retain scope")
+			}
+			if err := scope.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(scratch); err != nil {
+				t.Fatal(err)
+			}
+			control, err := storageuse.ControlRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			resource := storageuse.ResourceFor(scope.Repository(), "prefetch-scratch", scratch)
+			observed, err := storageuse.Observe(ctx, control, resource, 1<<20, func(int64) error { return nil })
+			if err != nil || observed.Active == nil || !*observed.Active {
+				t.Fatalf("pending evidence lost: %+v %v", observed, err)
+			}
+			manager, err := storageuse.Open(control, scratch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			guard, err := manager.AcquireMaintenance(ctx, resource)
+			if guard != nil {
+				guard.Close()
+			}
+			if !errors.Is(err, storageuse.ErrUnsafe) {
+				t.Fatalf("maintenance admitted: %v", err)
+			}
+		})
+	}
+}

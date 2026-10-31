@@ -461,11 +461,18 @@ func buildCacheRoles(t *testing.T, repo, scratch string) map[string][]BuildCache
 		"developer": {Role: "developer"}, "tester": {Role: "tester"}, "resolver": {Role: "resolver"},
 		"planner": {Role: "planner", ReadOnly: true}, "reviewer": {Role: "reviewer", ReadOnly: true},
 	} {
-		caches, err := agentBuildCaches(ctx, repo, filepath.Join(scratch, role), opts)
+		roleScratch := filepath.Join(scratch, role)
+		if err := os.MkdirAll(roleScratch, 0700); err != nil {
+			t.Fatal(err)
+		}
+		caches, err := agentBuildCaches(ctx, repo, roleScratch, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
 		roles[role] = caches
+	}
+	if err := os.MkdirAll(filepath.Join(scratch, "validation"), 0700); err != nil {
+		t.Fatal(err)
 	}
 	persistent := mustPrepare(t, ValidatorBuildCache, repo, userCacheDirForTest(t), filepath.Join(scratch, "validation"))
 	for _, backend := range []ValidationBackend{ValidationCodex, ValidationBubblewrap} {

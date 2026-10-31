@@ -1440,3 +1440,49 @@ func TestReclamationDeadRegistrationPruningMakesBoundedProgress(t *testing.T) {
 	}
 	t.Fatal("bounded reruns never finished")
 }
+
+func TestReclamationLargeReadOnlyModuleLeaf(t *testing.T) {
+	o, _, r := reclaimFixture(t, "agent-deps")
+	module := filepath.Join(r.Location, "pkg", "mod", "example.org", "module@v1.0.0")
+	if err := os.MkdirAll(module, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 60000; i++ {
+		if err := os.WriteFile(filepath.Join(module, fmt.Sprintf("file-%05d.go", i)), nil, 0400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(module, 0500); err != nil {
+		t.Fatal(err)
+	}
+	// Usage exhaustion is advisory; layout and ownership still authorize cleanup.
+	o.Limits = DefaultLimits()
+	o.Limits.Entries = 1000
+	preview, err := PreviewReclamation(context.Background(), o)
+	if err != nil || !preview.Complete || len(preview.Resources) != 1 || preview.Resources[0].Outcome != ReclaimEligible {
+		t.Fatalf("preview %+v %v", preview, err)
+	}
+	applied, err := ApplyReclamation(context.Background(), o)
+	if err != nil || len(applied.Resources) != 1 || applied.Resources[0].Outcome != ReclaimRemoved {
+		t.Fatalf("apply %+v %v", applied, err)
+	}
+	if _, err := os.Stat(r.Location); !os.IsNotExist(err) {
+		t.Fatalf("leaf remains: %v", err)
+	}
+}
+
+func TestReclamationRemovalBoundRetains(t *testing.T) {
+	o, _, r := reclaimFixture(t, "agent-deps")
+	path := r.Location
+	for i := 0; i < 66; i++ {
+		path = filepath.Join(path, "d")
+	}
+	put(t, filepath.Join(path, "data"), "keep")
+	report, err := ApplyReclamation(context.Background(), o)
+	if err == nil || len(report.Resources) != 1 || report.Resources[0].Outcome != ReclaimRetained || !strings.Contains(report.Resources[0].Reason, "traversal limit") {
+		t.Fatalf("%+v %v", report, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "data")); err != nil || string(data) != "keep" {
+		t.Fatalf("leaf changed: %s %v", data, err)
+	}
+}

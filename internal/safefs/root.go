@@ -354,6 +354,9 @@ func (r *Root) Mkdir(name string, mode os.FileMode) error {
 // retain ownership evidence, but may preserve a successful primary operation.
 var ErrCleanupIncomplete = errors.New("managed cleanup incomplete")
 
+// ErrCleanupLimit means preflight refused a traversal before removal began.
+var ErrCleanupLimit = fmt.Errorf("%w: cleanup traversal limit reached", ErrCleanupIncomplete)
+
 // RemoveAllChecked removes a direct child only if its identity is unchanged.
 // Permission repair uses opened directory handles, never symlink targets.
 func (r *Root) RemoveAllChecked(name string, expected os.FileInfo) error {
@@ -464,7 +467,7 @@ func repairCleanupDirectories(parent *os.Root, name string, expected os.FileInfo
 
 // RemoveAllCheckedContext removes one checked directory with bounded, cancellable
 // traversal. Both passes reject links, special files and device boundaries.
-// Unlike RemoveAllChecked it never repairs permissions. An error can follow
+// Permission repair uses pinned directory handles after identity checks. An error can follow
 // partial removal; callers must preserve recovery and admission evidence.
 func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expected os.FileInfo, visit func() error) error {
 	if name != filepath.Base(name) || !filepath.IsLocal(name) || expected == nil || !expected.IsDir() || visit == nil {
@@ -482,6 +485,11 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 		return errors.New("unknown cleanup device")
 	}
 	inspected := map[string]os.FileInfo{}
+	// Bound retained paths, map overhead and FileInfo objects before admission.
+	// Ordinary module leaves with 100,000 entries fit within this allowance.
+	var identityBytes int64
+	const identityLimit = 128 << 20
+	const entryLimit = 200000
 	var walk func(*os.Root, string, string, os.FileInfo, int, bool) error
 	walk = func(parent *os.Root, child, relative string, want os.FileInfo, depth int, remove bool) error {
 		if remove {
@@ -491,6 +499,11 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 				return errors.New("uninspected cleanup entry")
 			}
 		} else {
+			charge := int64(512 + 2*len(relative))
+			if len(inspected) >= entryLimit || charge > identityLimit-identityBytes {
+				return fmt.Errorf("%w: descendant identity limit reached", ErrCleanupLimit)
+			}
+			identityBytes += charge
 			inspected[relative] = want
 		}
 		if err := ctx.Err(); err != nil {
@@ -500,7 +513,7 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 			return err
 		}
 		if depth > 64 {
-			return errors.New("cleanup depth exceeded")
+			return fmt.Errorf("%w: cleanup depth exceeded", ErrCleanupLimit)
 		}
 		check := func() error {
 			now, err := parent.Lstat(child)
@@ -542,6 +555,15 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 			return err
 		}
 		defer f.Close()
+		if remove && want.Mode().Perm()&0700 != 0700 {
+			if err := f.Chmod(want.Mode() | 0700); err != nil {
+				return err
+			}
+			want, err = f.Stat()
+			if err != nil {
+				return err
+			}
+		}
 		for {
 			if err := ctx.Err(); err != nil {
 				return err

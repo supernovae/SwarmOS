@@ -97,7 +97,7 @@ func TestStoragePRVisitorPagesAndBounds(t *testing.T) {
 				}
 				var rows []map[string]any
 				for i := 0; i < n; i++ {
-					rows = append(rows, map[string]any{"number": start + i, "state": "closed", "merged_at": "2026-01-02T00:00:00Z", "head": map[string]string{"sha": "abc", "ref": "swarm/issue-1"}})
+					rows = append(rows, map[string]any{"number": start + i, "html_url": "https://github.com/fixture/repo/pull/1", "state": "closed", "merged_at": "2026-01-02T00:00:00Z", "head": map[string]string{"sha": "abc", "ref": "swarm/issue-1"}})
 				}
 				writeJSON(t, w, rows)
 			}))
@@ -105,7 +105,7 @@ func TestStoragePRVisitorPagesAndBounds(t *testing.T) {
 			b.Records = limit
 			err := tr.VisitPullRequests(context.Background(), b, func(pr *PullRequest) error {
 				count++
-				if !pr.Merged || pr.HeadSHA != "abc" {
+				if !pr.Merged || pr.HeadSHA != "abc" || pr.HTMLURL != "https://github.com/fixture/repo/pull/1" {
 					t.Error(pr)
 				}
 				return nil

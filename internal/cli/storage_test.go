@@ -748,7 +748,7 @@ func scaleAPITracker(t *testing.T, refs map[int]string, prs []*tracker.PullReque
 				if n < len(prs) {
 					pr = prs[n]
 				}
-				rows = append(rows, map[string]any{"number": pr.Number, "state": pr.State, "merged_at": pr.MergedAt, "merge_commit_sha": pr.MergeCommitSHA, "head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]string{"full_name": "fixture/repo"}}, "base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "fixture/repo"}}, "body": strings.Repeat("plan \"step\"\\path\n\t<&>", 3000), "title": "Implement approved plan", "user": map[string]any{"login": "builder", "id": 42}, "labels": []map[string]string{{"name": "swarm:work"}}, "url": "https://api.github.com/repos/fixture/repo/pulls/" + strconv.Itoa(pr.Number)})
+				rows = append(rows, map[string]any{"number": pr.Number, "html_url": pr.HTMLURL, "state": pr.State, "merged_at": pr.MergedAt, "merge_commit_sha": pr.MergeCommitSHA, "head": map[string]any{"ref": pr.Head, "sha": pr.HeadSHA, "repo": map[string]string{"full_name": "fixture/repo"}}, "base": map[string]any{"ref": "main", "repo": map[string]string{"full_name": "fixture/repo"}}, "body": strings.Repeat("plan \"step\"\\path\n\t<&>", 3000), "title": "Implement approved plan", "user": map[string]any{"login": "builder", "id": 42}, "labels": []map[string]string{{"name": "swarm:work"}}, "url": "https://api.github.com/repos/fixture/repo/pulls/" + strconv.Itoa(pr.Number)})
 			}
 		case strings.Contains(req.URL.Path, "heads/swarm-state/"):
 			for n, sha := range refs {
@@ -785,4 +785,77 @@ func (t storageScaleAPITracker) VisitStateRefs(c context.Context, b tracker.Inve
 }
 func (t storageScaleAPITracker) VisitPullRequests(c context.Context, b tracker.InventoryBudget, v func(*tracker.PullRequest) error) error {
 	return t.api.VisitPullRequests(c, b, v)
+}
+
+func TestStorageCleanupIssueEligibilityParity(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		t.Run(backend, func(t *testing.T) {
+			f := newCLIFixture(t)
+			task := bulkMerged(t, f)
+			t.Setenv("TMPDIR", t.TempDir())
+			var override tracker.Tracker = f.tracker
+			if backend == "github" {
+				prGit(t, f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git")
+				editLocalPR(t, f, task.pr, func(p *tracker.PullRequest) { p.HeadRepo = "fixture/repo"; p.BaseRepo = "fixture/repo" })
+				pr, err := f.tracker.GetPullRequest(context.Background(), task.pr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(f.state(t, task.issue))
+				if err != nil {
+					t.Fatal(err)
+				}
+				git := func(input string, args ...string) string {
+					c := exec.Command("git", append([]string{"-C", f.root}, args...)...)
+					c.Stdin = strings.NewReader(input)
+					out, err := c.CombinedOutput()
+					if err != nil {
+						t.Fatalf("git %v: %s %v", args, out, err)
+					}
+					return strings.TrimSpace(string(out))
+				}
+				blob := git(string(data), "hash-object", "-w", "--stdin")
+				tree := git("100644 blob "+blob+"\tstate.json\n", "mktree")
+				sha := git("", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", tree, "-m", "state")
+				git("", "update-ref", fmt.Sprintf("refs/heads/swarm-state/issue-%d", task.issue), sha)
+				override = storageScaleAPITracker{f.tracker, scaleAPITracker(t, map[int]string{task.issue: sha}, []*tracker.PullRequest{pr})}
+			}
+			run := func(args ...string) string {
+				c := f.command(&RootOptions{trackerOverride: override})
+				var out bytes.Buffer
+				c.SetOut(&out)
+				c.SetErr(&bytes.Buffer{})
+				c.SetArgs(append([]string{"--root", f.root, "--repo", "fixture/repo", "--backend", backend}, args...))
+				if err := c.Execute(); err != nil {
+					t.Fatalf("%v: %s", err, out.String())
+				}
+				return out.String()
+			}
+			bulk := decodeBulk(t, run("issue", "cleanup", "--all-merged", "--json"))
+			var report storageCleanupReport
+			if err := json.Unmarshal([]byte(run("storage", "cleanup", "--json")), &report); err != nil {
+				t.Fatal(err)
+			}
+			if len(report.Tasks) != 1 || len(bulk.Issues) != 1 || (backend == "local" && bulk.Issues[0].Counts.Eligible == 0) {
+				t.Fatalf("bulk %+v storage %+v", bulk, report)
+			}
+			// Both previews retain an unverified remote branch. Their reasons
+			// differ because storage preview deliberately makes no remote calls.
+			// Compare all eligibility and identity fields, preserving errors.
+			for _, issues := range [][]bulkCleanupIssue{bulk.Issues, report.Tasks[0].Issues} {
+				for i := range issues {
+					if issues[i].Error != "" || issues[i].PRStatus != "merged" {
+						t.Fatalf("inspection failed: %+v", issues[i])
+					}
+					issues[i].Blocked = ""
+					for j := range issues[i].Resources {
+						issues[i].Resources[j].Reason = ""
+					}
+				}
+			}
+			if !reflect.DeepEqual(bulk.Issues, report.Tasks[0].Issues) {
+				t.Fatalf("eligibility differs: bulk %+v storage %+v", bulk.Issues, report.Tasks[0].Issues)
+			}
+		})
+	}
 }

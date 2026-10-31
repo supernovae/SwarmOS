@@ -317,6 +317,7 @@ func (g *GitHubTracker) VisitPullRequests(ctx context.Context, b InventoryBudget
 				}
 				var raw struct {
 					Number         int        `json:"number"`
+					HTMLURL        string     `json:"html_url"`
 					State          string     `json:"state"`
 					MergedAt       *time.Time `json:"merged_at"`
 					MergeCommitSHA string     `json:"merge_commit_sha"`
@@ -342,13 +343,13 @@ func (g *GitHubTracker) VisitPullRequests(ctx context.Context, b InventoryBudget
 				}
 				// The transport workspace is reusable; strings retained across pages
 				// belong to this projection and must remain charged independently.
-				retained := len(raw.State) + len(raw.MergeCommitSHA) + len(raw.Head.Ref) + len(raw.Head.SHA) + len(raw.Head.Repo.FullName) + len(raw.Base.Ref) + len(raw.Base.Repo.FullName)
+				retained := len(raw.HTMLURL) + len(raw.State) + len(raw.MergeCommitSHA) + len(raw.Head.Ref) + len(raw.Head.SHA) + len(raw.Head.Repo.FullName) + len(raw.Base.Ref) + len(raw.Base.Repo.FullName)
 				if err := b.Reserve(int64(4096 + 2*retained)); err != nil {
 					return err
 				}
 				count++
 				pageCount++
-				if err := visit(&PullRequest{Number: raw.Number, State: raw.State, Merged: raw.MergedAt != nil, MergedAt: raw.MergedAt, MergeCommitSHA: raw.MergeCommitSHA, UpdatedAt: raw.UpdatedAt, Head: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Base: raw.Base.Ref, BaseRepo: raw.Base.Repo.FullName}); err != nil {
+				if err := visit(&PullRequest{Number: raw.Number, HTMLURL: raw.HTMLURL, State: raw.State, Merged: raw.MergedAt != nil, MergedAt: raw.MergedAt, MergeCommitSHA: raw.MergeCommitSHA, UpdatedAt: raw.UpdatedAt, Head: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Base: raw.Base.Ref, BaseRepo: raw.Base.Repo.FullName}); err != nil {
 					return err
 				}
 			}

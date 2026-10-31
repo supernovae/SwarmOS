@@ -9,6 +9,18 @@ import (
 )
 
 func (s *scanner) account(r *Resource) {
+	// Usage is advisory and has a separate per-resource allowance. It cannot
+	// consume ownership discovery's entries or retained-memory allowance.
+	accounting := *s
+	accounting.b = Budget{Limits: s.b.Limits}
+	accounting.out = Snapshot{Complete: true}
+	accounting.accountUsage(r)
+	s.physical = accounting.physical && r.LogicalBytes != nil
+	s.b.Counters.Identities = len(s.inodes)
+	s.out.ObservedAllocatedBytes += accounting.out.ObservedAllocatedBytes
+}
+
+func (s *scanner) accountUsage(r *Resource) {
 	root, err := openExisting(filepath.Dir(r.Path))
 	if err != nil {
 		r.UsageReason = "path absent or unsafe"
@@ -115,7 +127,7 @@ func (s *scanner) allocate(info os.FileInfo, local *int64) bool {
 	if !s.physical || s.inodes[key] {
 		return true
 	}
-	if s.b.Counters.Identities >= s.b.Limits.Identities {
+	if len(s.inodes) >= s.b.Limits.Identities {
 		s.physical = false
 		s.fail("inode coverage", ErrLimit)
 		return true

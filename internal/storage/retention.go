@@ -764,14 +764,11 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 				if e = ctx.Err(); e != nil {
 					return e
 				}
-				// Reobserve under exclusion before mutation; incomplete accounting retains.
+				// Reobserve usage under exclusion; missing usage remains advisory.
 				result.Before = usage(s, r.Location)
-				if result.Before.LogicalBytes == nil {
-					result.Reason = "before observation incomplete"
-					return nil
-				}
+
 				result.Outcome = ReclaimPartial
-				e = ops.remove(parent, ctx, filepath.Base(r.Location), info, func() error { return s.b.entry(ctx) })
+				e = ops.remove(parent, ctx, filepath.Base(r.Location), info, func() error { return ctx.Err() })
 				_, afterErr := ops.afterStat(parent, filepath.Base(r.Location))
 				if errors.Is(afterErr, os.ErrNotExist) {
 					zero := int64(0)
@@ -827,6 +824,10 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 			}
 			operationErr = errors.Join(operationErr, err)
 			result.Reason = "resource operation failed; evidence preserved"
+			if errors.Is(err, safefs.ErrCleanupLimit) {
+				result.Outcome = ReclaimRetained
+				result.Reason = "cleanup traversal limit reached; leaf and ownership evidence retained"
+			}
 		}
 		if ctx.Err() != nil {
 			result.Outcome = ReclaimCanceled

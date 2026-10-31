@@ -40,7 +40,7 @@ type Counters struct {
 	Bytes        int64 `json:"working_bytes"`
 }
 
-// Budget is shared by discovery and accounting. A scanner uses one worker.
+// Budget bounds discovery. Usage receives an independent per-resource budget.
 // Charges are conservative and never released during a pass.
 type Budget struct {
 	Limits    Limits
@@ -311,10 +311,6 @@ func (s *scanner) add(r Resource) {
 	}
 	if r.Ref == "" {
 		s.account(&r)
-		if r.LogicalBytes == nil && r.Eligibility == "eligible" {
-			r.Eligibility = "unknown"
-			r.Reason = "filesystem observation incomplete; use evidence alone cannot establish eligibility"
-		}
 	} else {
 		r.UsageReason = "branch shares repository Git objects; no independent byte total"
 	}
@@ -341,7 +337,7 @@ func openExisting(path string) (*safefs.Root, error) {
 }
 
 // directory visits one entry at a time, including unknown names. The entry
-// counter is shared with recursive usage accounting.
+// counter bounds ownership discovery independently of usage accounting.
 func (s *scanner) directory(path string, visit func(os.DirEntry)) {
 	if err := s.ctx.Err(); err != nil {
 		s.fail("directory", err)

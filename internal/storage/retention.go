@@ -1,15 +1,21 @@
 package storage
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -249,4 +255,499 @@ func (s *scanner) retention(owner, root, backend string, start int) {
 
 		}
 	}
+}
+
+// RepositoryScope is supplied by the coordinator, never by a registration.
+// CommonDirectory must match Git's independently observed canonical identity.
+type RepositoryScope struct{ Root, CommonDirectory, Backend string }
+
+// RetentionEvidence must describe a stable authoritative decision. Sources that
+// cannot hold that decision through visit must supply Stable=false.
+type RetentionEvidence struct {
+	Complete, Stable, Unfinished bool
+	Reason                       string
+}
+
+// RetentionSource implementations must be read-only and hold their decision
+// stable through visit. They must not acquire storage-use admission locks.
+type RetentionSource interface {
+	WithRetention(context.Context, RepositoryScope, func(RetentionEvidence) error) error
+}
+
+type ReclaimOptions struct {
+	Scopes                              []RepositoryScope
+	CacheRoot, ScratchRoot, ControlRoot string
+	Limits                              Limits
+	Retention                           RetentionSource
+}
+
+type ReclamationOutcome string
+
+const (
+	ReclaimEligible ReclamationOutcome = "eligible"
+	ReclaimRetained ReclamationOutcome = "retained"
+	ReclaimRemoved  ReclamationOutcome = "removed"
+	ReclaimAbsent   ReclamationOutcome = "absent"
+	ReclaimFailed   ReclamationOutcome = "failed"
+	ReclaimPartial  ReclamationOutcome = "partial"
+	ReclaimCanceled ReclamationOutcome = "canceled"
+)
+
+// UsageObservation describes managed namespace observations, not physical savings.
+// Nil values mean unknown. Hardlinks and filesystem sharing can prevent freeing
+// any physical space even when the observed allocated bytes disappear.
+type UsageObservation struct{ LogicalBytes, AllocatedBytes *int64 }
+type ReclamationResult struct {
+	Resource                                     storageuse.Resource
+	Outcome                                      ReclamationOutcome
+	Reason                                       string
+	Before, After                                UsageObservation
+	ObservedLogicalDelta, ObservedAllocatedDelta *int64
+}
+
+// ReclamationReport totals cover inspected admitted leaves only; retained unknown
+// or outside-scope resources have no size claim.
+type ReclamationReport struct {
+	Complete                                     bool
+	Resources                                    []ReclamationResult
+	Before, After                                UsageObservation
+	ObservedLogicalDelta, ObservedAllocatedDelta *int64
+}
+
+// PreviewReclamation observes only existing resources; it creates no admission
+// locks or control records. Its result cannot authorize a later apply.
+func PreviewReclamation(ctx context.Context, opts ReclaimOptions) (ReclamationReport, error) {
+	return reclaim(ctx, opts, false)
+}
+
+// ApplyReclamation discovers candidates afresh and holds maintenance exclusion
+// and fresh authoritative retention evidence through removal and observation.
+func ApplyReclamation(ctx context.Context, opts ReclaimOptions) (ReclamationReport, error) {
+	return reclaim(ctx, opts, true)
+}
+
+func reclaimScanner(ctx context.Context, opts ReclaimOptions) *scanner {
+	return &scanner{ctx: ctx, opts: Options{CacheRoot: opts.CacheRoot, ScratchRoot: opts.ScratchRoot, UseRoot: opts.ControlRoot}, b: Budget{Limits: opts.Limits}, seen: map[string]bool{}, inodes: map[fileIdentity]bool{}, repos: map[string]string{}, physical: true, out: Snapshot{Complete: true}}
+}
+
+func canonicalScope(s *scanner, scope RepositoryScope) (RepositoryScope, error) {
+	if !filepath.IsAbs(scope.Root) || !filepath.IsAbs(scope.CommonDirectory) || (scope.Backend != "local" && scope.Backend != "github") {
+		return scope, errors.New("explicit absolute repository scope and backend required")
+	}
+	root, err := filepath.EvalSymlinks(scope.Root)
+	if err != nil {
+		return scope, err
+	}
+	anchor, err := openExisting(root)
+	if err != nil {
+		return scope, err
+	}
+	anchor.Close()
+	common, err := s.git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return scope, err
+	}
+	common, err = filepath.EvalSymlinks(common)
+	if err != nil {
+		return scope, err
+	}
+	supplied, err := filepath.EvalSymlinks(scope.CommonDirectory)
+	if err != nil || supplied != common {
+		return scope, errors.New("repository common-directory mismatch")
+	}
+	scope.Root, scope.CommonDirectory = root, common
+	return scope, nil
+}
+
+// reclaimLayout independently checks exact producer leaf layouts. Category and
+// repository parents are never leaves. Registrations alone convey no authority.
+func reclaimLayout(o ReclaimOptions, r storageuse.Resource, key string) bool {
+	if r.Repository != key || r.Location != filepath.Clean(r.Location) {
+		return false
+	}
+	rel, err := filepath.Rel(o.CacheRoot, r.Location)
+	parts := strings.Split(rel, string(filepath.Separator))
+	cache := func(class string, count int) bool {
+		return err == nil && filepath.IsLocal(rel) && len(parts) == count && parts[0] == class && parts[1] == key && privateLayout(o.CacheRoot, rel)
+	}
+	switch r.Class {
+	case "agent-build", "validate-build", "agent-deps", "validate-deps":
+		if r.Identity != "cache:"+r.Location || !cache(r.Class, 3) {
+			return false
+		}
+		switch parts[2] {
+		case "go", "rust", "node", "python", "c-cpp":
+			return true
+		}
+		return false
+	case "legacy-go-build":
+		return r.Identity == "cache:"+r.Location && cache("go-build", 2)
+	case "native-scratch", "sandbox-scratch", "prefetch-scratch", "review-scratch", "validation-scratch":
+		if r.Identity != "scratch:"+r.Location {
+			return false
+		}
+		scratchRel, e := filepath.Rel(o.ScratchRoot, r.Location)
+		valid := e == nil && filepath.IsLocal(scratchRel) && filepath.Base(scratchRel) == scratchRel && scratchClass(scratchRel) == r.Class
+		if !valid && r.Class == "prefetch-scratch" {
+			valid = err == nil && filepath.IsLocal(rel) && len(parts) == 3 && (parts[0] == "agent-deps" || parts[0] == "validate-deps") && parts[1] == key && strings.HasPrefix(parts[2], ".prefetch-rust-") && len(parts[2]) > len(".prefetch-rust-") && privateLayout(o.CacheRoot, filepath.Dir(rel))
+		}
+		if !valid {
+			return false
+		}
+		leaf, e := openExisting(r.Location)
+		if e != nil {
+			return false
+		}
+		defer leaf.Close()
+		f, e := leaf.OpenDirectory(".")
+		if e != nil {
+			return false
+		}
+		defer f.Close()
+		info, e := f.Stat()
+		return e == nil && info.Mode().Perm()&0077 == 0
+	}
+	return false
+}
+
+func usage(s *scanner, path string) UsageObservation {
+	r := Resource{Path: path}
+	s.account(&r)
+	return UsageObservation{r.LogicalBytes, r.AllocatedBytes}
+}
+func usageDelta(before, after UsageObservation) (*int64, *int64) {
+	delta := func(a, b *int64) *int64 {
+		if a == nil || b == nil {
+			return nil
+		}
+		n := *a - *b
+		return &n
+	}
+	return delta(before.LogicalBytes, after.LogicalBytes), delta(before.AllocatedBytes, after.AllocatedBytes)
+}
+
+func reclaim(ctx context.Context, opts ReclaimOptions, apply bool) (ReclamationReport, error) {
+	out := ReclamationReport{Complete: true, Resources: []ReclamationResult{}}
+	invalid := func(err error) (ReclamationReport, error) { out.Complete = false; return out, err }
+	if opts.Limits == (Limits{}) {
+		opts.Limits = DefaultLimits()
+	}
+	l := opts.Limits
+	if len(opts.Scopes) == 0 || len(opts.Scopes) > l.Repositories || l.Records < 1 || l.Entries < 1 || l.Identities < 1 || l.Bytes < 4096 {
+		return invalid(errors.New("explicit scopes and positive shared limits required"))
+	}
+	roots := []*string{&opts.CacheRoot, &opts.ScratchRoot, &opts.ControlRoot}
+	for _, p := range roots {
+		if !filepath.IsAbs(*p) || filepath.Clean(*p) == string(filepath.Separator) {
+			return invalid(errors.New("explicit trusted roots required"))
+		}
+		q, err := filepath.EvalSymlinks(*p)
+		if err != nil {
+			return invalid(err)
+		}
+		*p = q
+	}
+	overlap := func(a, b string) bool {
+		rel, e := filepath.Rel(a, b)
+		return e == nil && (rel == "." || filepath.IsLocal(rel))
+	}
+	for i, a := range roots {
+		for j, b := range roots {
+			if i != j && overlap(*a, *b) {
+				return invalid(errors.New("trusted storage roots overlap"))
+			}
+		}
+	}
+	s := reclaimScanner(ctx, opts)
+	scopes := map[string]RepositoryScope{}
+	commonInfo := map[string]os.FileInfo{}
+	for _, requested := range opts.Scopes {
+		scope, err := canonicalScope(s, requested)
+		if err != nil {
+			return invalid(err)
+		}
+		if overlap(opts.CacheRoot, scope.Root) || overlap(scope.Root, opts.CacheRoot) || overlap(opts.ControlRoot, scope.Root) || overlap(scope.Root, opts.ControlRoot) {
+			return invalid(errors.New("repository overlaps managed roots"))
+		}
+		h := sha256.Sum256([]byte(scope.CommonDirectory))
+		key := hex.EncodeToString(h[:16])
+		if prior, ok := scopes[key]; ok && prior.Backend != scope.Backend {
+			return invalid(errors.New("conflicting repository backends"))
+		}
+		anchor, e := openExisting(scope.CommonDirectory)
+		if e != nil {
+			return invalid(e)
+		}
+		observed, e := anchor.Lstat(".")
+		anchor.Close()
+		if e != nil {
+			return invalid(e)
+		}
+		commonInfo[key] = observed
+		scopes[key] = scope
+	}
+	var candidates []storageuse.Resource
+	err := storageuse.VisitResources(ctx, opts.ControlRoot, l.Records, func() error { return s.b.entry(ctx) }, s.b.Charge, func(r storageuse.Resource) error {
+		if e := s.b.Charge(int64(4096 + 8*(len(r.Location)+len(r.Identity)+len(r.Class)+len(r.Repository)))); e != nil {
+			return e
+		}
+		candidates = append(candidates, r)
+		return nil
+	})
+	// Incomplete discovery cannot authorize even a previously observed candidate.
+	if err != nil {
+		out.Complete = false
+		for _, r := range candidates {
+			out.Resources = append(out.Resources, ReclamationResult{Resource: r, Outcome: ReclaimRetained, Reason: "registration discovery incomplete"})
+		}
+		return out, err
+	}
+	// Prefix-only and orphan candidates remain visible, but never acquire
+	// deletion authority. Use the existing bounded, read-only observers.
+	discovered := reclaimScanner(ctx, opts)
+	discovered.b = s.b
+	for _, scope := range scopes {
+		discovered.repos[scope.CommonDirectory] = scope.Root
+	}
+	discovered.caches()
+	discovered.scratch()
+	s.b = discovered.b
+	registered := map[string]bool{}
+	for _, r := range candidates {
+		registered[r.Location] = true
+	}
+	for _, r := range discovered.out.Resources {
+		if !registered[r.Path] {
+			out.Resources = append(out.Resources, ReclamationResult{Resource: storageuse.Resource{Repository: r.useRepository, Class: r.Class, Identity: r.Identity, Location: r.Path}, Outcome: ReclaimRetained, Reason: "unregistered or orphan resource; ownership and use coverage unproven"})
+		}
+	}
+	if !discovered.out.Complete {
+		out.Complete = false
+		for _, r := range candidates {
+			out.Resources = append(out.Resources, ReclamationResult{Resource: r, Outcome: ReclaimRetained, Reason: "bounded candidate discovery incomplete"})
+		}
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+		return out, errors.New("candidate discovery incomplete")
+	}
+	var manager *storageuse.Manager
+	if apply {
+		manager, err = storageuse.Open(opts.ControlRoot, opts.CacheRoot, opts.ScratchRoot)
+		if err != nil {
+			return invalid(err)
+		}
+		defer manager.Close()
+	}
+	afterScanner := reclaimScanner(ctx, opts)
+	observeAfter := func(path string) UsageObservation {
+		afterScanner.b = s.b
+		u := usage(afterScanner, path)
+		s.b = afterScanner.b
+		return u
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Location < candidates[j].Location })
+	counts := map[string]int{}
+	for _, r := range candidates {
+		counts[r.Location]++
+	}
+	var operationErr error
+	var logicalBefore, logicalAfter int64
+	logicalComplete := true
+	for _, r := range candidates {
+		if err := ctx.Err(); err != nil {
+			out.Complete = false
+			return out, err
+		}
+		result := ReclamationResult{Resource: r, Outcome: ReclaimRetained, Reason: "outside explicit scope or unsupported/unsafe producer leaf"}
+		if counts[r.Location] != 1 {
+			result.Reason = "conflicting or duplicate registration"
+			out.Resources = append(out.Resources, result)
+			continue
+		}
+		scope, ok := scopes[r.Repository]
+		protected := false
+		for _, repository := range scopes {
+			if overlap(r.Location, repository.Root) || overlap(repository.Root, r.Location) || overlap(r.Location, repository.CommonDirectory) || overlap(repository.CommonDirectory, r.Location) {
+				protected = true
+			}
+		}
+		if protected {
+			result.Reason = "resource overlaps repository or Git evidence"
+			out.Resources = append(out.Resources, result)
+			continue
+		}
+		// Observe absence separately; it is never claimed as a new saving.
+		parent, e := openExisting(filepath.Dir(r.Location))
+		if e != nil {
+			out.Resources = append(out.Resources, result)
+			continue
+		}
+		info, e := parent.Lstat(filepath.Base(r.Location))
+		parent.Close()
+		if errors.Is(e, os.ErrNotExist) {
+			result.Outcome = ReclaimAbsent
+			result.Reason = "registered leaf absent"
+			out.Resources = append(out.Resources, result)
+			continue
+		}
+		if e != nil || !ok || !reclaimLayout(opts, r, r.Repository) {
+			out.Resources = append(out.Resources, result)
+			continue
+		}
+		if !apply {
+			result.Before = usage(s, r.Location)
+		}
+		process := func() error {
+			if opts.Retention == nil {
+				result.Reason = "authoritative retention provider unavailable"
+				return nil
+			}
+			called := false
+			return opts.Retention.WithRetention(ctx, scope, func(ev RetentionEvidence) error {
+				if called {
+					return errors.New("repeated retention callback")
+				}
+				called = true
+				result.Reason = "authoritative retention incomplete or unstable"
+				if !ev.Complete || !ev.Stable {
+					return nil
+				}
+				if strings.HasSuffix(r.Class, "scratch") && ev.Unfinished {
+					result.Reason = "unfinished work requires recovery retention"
+					return nil
+				}
+				commonRoot, e := openExisting(scope.CommonDirectory)
+				if e != nil {
+					result.Reason = "repository identity unavailable"
+					return nil
+				}
+				observed, e := commonRoot.Lstat(".")
+				commonRoot.Close()
+				if e != nil || !os.SameFile(observed, commonInfo[r.Repository]) {
+					result.Reason = "repository identity changed"
+					return nil
+				}
+				fresh, e := canonicalScope(s, scope)
+				if e != nil || fresh.CommonDirectory != scope.CommonDirectory || !reclaimLayout(opts, r, r.Repository) {
+					result.Reason = "ownership or layout changed"
+					return nil
+				}
+				result.Reason = "complete idle coverage and stable retention evidence"
+				if !apply {
+					result.Outcome = ReclaimEligible
+					return nil
+				}
+				parent, e := openExisting(filepath.Dir(r.Location))
+				if e != nil {
+					result.Outcome = ReclaimFailed
+					return e
+				}
+				defer parent.Close()
+				current, e := parent.Lstat(filepath.Base(r.Location))
+				if e != nil {
+					result.Outcome = ReclaimFailed
+					return e
+				}
+				if !os.SameFile(info, current) {
+					result.Reason = "resource identity changed"
+					return nil
+				}
+				if e = ctx.Err(); e != nil {
+					return e
+				}
+				// Reobserve under exclusion before mutation; incomplete accounting retains.
+				result.Before = usage(s, r.Location)
+				if result.Before.LogicalBytes == nil {
+					result.Reason = "before observation incomplete"
+					return nil
+				}
+				result.Outcome = ReclaimPartial
+				e = parent.RemoveAllCheckedContext(ctx, filepath.Base(r.Location), info, func() error { return s.b.entry(ctx) })
+				_, afterErr := parent.Lstat(filepath.Base(r.Location))
+				if errors.Is(afterErr, os.ErrNotExist) {
+					zero := int64(0)
+					result.After = UsageObservation{&zero, &zero}
+					if e == nil {
+						result.Outcome = ReclaimRemoved
+					}
+				} else {
+					result.After = observeAfter(r.Location)
+				}
+				result.ObservedLogicalDelta, result.ObservedAllocatedDelta = usageDelta(result.Before, result.After)
+				return e
+			})
+		}
+		if apply {
+			guard, e := manager.AcquireMaintenance(ctx, r)
+			if e != nil {
+				result.Reason = "use evidence missing, incomplete or unresolved"
+				if !errors.Is(e, storageuse.ErrUnsafe) {
+					result.Outcome = ReclaimFailed
+					err = e
+				}
+			} else {
+				result.Before = usage(s, r.Location)
+				err = process()
+				if result.After.LogicalBytes == nil && result.Outcome != ReclaimPartial {
+					result.After = observeAfter(r.Location)
+				}
+				guard.Close()
+			}
+		} else {
+			observation, e := storageuse.Observe(ctx, opts.ControlRoot, r, 16<<10, s.b.Charge)
+			if e != nil || !observation.CompleteCoverage || observation.Active == nil || *observation.Active {
+				result.Reason = "use evidence missing, incomplete or unresolved"
+			} else {
+				err = process()
+			}
+		}
+		if err != nil {
+			out.Complete = false
+			if result.Outcome == ReclaimRemoved {
+				result.Outcome = ReclaimPartial
+			}
+			operationErr = errors.Join(operationErr, err)
+			result.Reason = "resource operation failed; evidence preserved"
+		}
+		if ctx.Err() != nil {
+			result.Outcome = ReclaimCanceled
+			out.Complete = false
+		}
+		if result.After.LogicalBytes == nil && result.Outcome != ReclaimRemoved && result.Outcome != ReclaimPartial && result.Outcome != ReclaimCanceled {
+			result.After = observeAfter(r.Location)
+		}
+		if result.Before.LogicalBytes == nil || result.After.LogicalBytes == nil {
+			logicalComplete = false
+		} else if *result.Before.LogicalBytes > math.MaxInt64-logicalBefore || *result.After.LogicalBytes > math.MaxInt64-logicalAfter {
+			logicalComplete = false
+		} else {
+			logicalBefore += *result.Before.LogicalBytes
+			logicalAfter += *result.After.LogicalBytes
+		}
+		out.Resources = append(out.Resources, result)
+		if ctx.Err() != nil {
+			return out, ctx.Err()
+		}
+		err = nil
+	}
+	if !s.out.Complete || !afterScanner.out.Complete {
+		out.Complete = false
+	}
+	if logicalComplete {
+		out.Before.LogicalBytes = &logicalBefore
+		out.After.LogicalBytes = &logicalAfter
+	}
+	// Aggregate physical observations use one device/inode set per pass. Actual
+	// freed physical space remains unknown, including for external hardlinks.
+	if s.physical && s.out.Complete {
+		n := s.out.ObservedAllocatedBytes
+		out.Before.AllocatedBytes = &n
+	}
+	if afterScanner.physical && afterScanner.out.Complete {
+		n := afterScanner.out.ObservedAllocatedBytes
+		out.After.AllocatedBytes = &n
+	}
+	out.ObservedLogicalDelta, out.ObservedAllocatedDelta = usageDelta(out.Before, out.After)
+	return out, operationErr
 }

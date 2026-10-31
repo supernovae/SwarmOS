@@ -3,6 +3,7 @@
 package safefs
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -459,4 +460,113 @@ func repairCleanupDirectories(parent *os.Root, name string, expected os.FileInfo
 		return fmt.Errorf("cleanup directory changed after repair: %w", err)
 	}
 	return nil
+}
+
+// RemoveAllCheckedContext removes one checked directory with bounded, cancellable
+// traversal. Both passes reject links, special files and device boundaries.
+// Unlike RemoveAllChecked it never repairs permissions. An error can follow
+// partial removal; callers must preserve recovery and admission evidence.
+func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expected os.FileInfo, visit func() error) error {
+	if name != filepath.Base(name) || !filepath.IsLocal(name) || expected == nil || !expected.IsDir() || visit == nil {
+		return errors.New("invalid checked removal")
+	}
+	device := func(i os.FileInfo) (uint64, bool) {
+		st, ok := i.Sys().(*syscall.Stat_t)
+		if !ok {
+			return 0, false
+		}
+		return uint64(st.Dev), true
+	}
+	dev, ok := device(expected)
+	if !ok {
+		return errors.New("unknown cleanup device")
+	}
+	var walk func(*os.Root, string, os.FileInfo, int, bool) error
+	walk = func(parent *os.Root, child string, want os.FileInfo, depth int, remove bool) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := visit(); err != nil {
+			return err
+		}
+		if depth > 64 {
+			return errors.New("cleanup depth exceeded")
+		}
+		check := func() error {
+			now, err := parent.Lstat(child)
+			if err != nil {
+				return err
+			}
+			d, known := device(now)
+			if !known || d != dev || !os.SameFile(now, want) || now.Mode() != want.Mode() {
+				return errors.New("cleanup entry changed")
+			}
+			return nil
+		}
+		if err := check(); err != nil {
+			return err
+		}
+		if want.Mode().IsRegular() {
+			if remove {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return parent.Remove(child)
+			}
+			return nil
+		}
+		if !want.IsDir() {
+			return errors.New("unsafe cleanup entry")
+		}
+		dir, err := parent.OpenRoot(child)
+		if err != nil {
+			return err
+		}
+		defer dir.Close()
+		pinned, err := dir.Stat(".")
+		if err != nil || !os.SameFile(pinned, want) {
+			return errors.New("cleanup directory changed")
+		}
+		f, err := dir.Open(".")
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			entries, err := f.ReadDir(1)
+			if len(entries) == 0 {
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				return err
+			}
+			if err := check(); err != nil {
+				return err
+			}
+			info, err := dir.Lstat(entries[0].Name())
+			if err != nil {
+				return err
+			}
+			if err := walk(dir, entries[0].Name(), info, depth+1, remove); err != nil {
+				return err
+			}
+		}
+		if err := check(); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if remove {
+			return parent.Remove(child)
+		}
+		return nil
+	}
+	if err := walk(r.root, name, expected, 0, false); err != nil {
+		return err
+	}
+	return walk(r.root, name, expected, 0, true)
 }

@@ -2,6 +2,9 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -266,4 +269,331 @@ func (p *cacheOnlyRemoteProbe) VisitStateRefs(context.Context, tracker.Inventory
 func (p *cacheOnlyRemoteProbe) VisitPullRequests(context.Context, tracker.InventoryBudget, func(*tracker.PullRequest) error) error {
 	p.prCalls++
 	return nil
+}
+
+type retentionFixture func(context.Context, RepositoryScope, func(RetentionEvidence) error) error
+
+func (f retentionFixture) WithRetention(ctx context.Context, s RepositoryScope, visit func(RetentionEvidence) error) error {
+	return f(ctx, s, visit)
+}
+func completeRetention() RetentionSource {
+	return retentionFixture(func(_ context.Context, _ RepositoryScope, visit func(RetentionEvidence) error) error {
+		return visit(RetentionEvidence{Complete: true, Stable: true})
+	})
+}
+
+func reclaimFixture(t *testing.T, class string) (ReclaimOptions, *storageuse.Manager, storageuse.Resource) {
+	t.Helper()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	common := filepath.Join(repo, ".git")
+	h := sha256.Sum256([]byte(common))
+	key := hex.EncodeToString(h[:16])
+	o := ReclaimOptions{Scopes: []RepositoryScope{{repo, common, "local"}}, CacheRoot: filepath.Join(root, "cache"), ScratchRoot: filepath.Join(root, "scratch"), ControlRoot: filepath.Join(root, "control"), Retention: completeRetention()}
+	for _, p := range []string{o.CacheRoot, o.ScratchRoot} {
+		if err := os.Mkdir(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := storageuse.Open(o.ControlRoot, o.CacheRoot, o.ScratchRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	path := filepath.Join(o.CacheRoot, class, key, "go")
+	if strings.HasSuffix(class, "scratch") {
+		path = filepath.Join(o.ScratchRoot, "swarm-native-fixture")
+	}
+	r := storageuse.ResourceFor(key, class, path)
+	u, err := m.AcquireUse(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(path, "data"), "reproducible")
+	if err := u.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return o, m, r
+}
+func TestReclamationPreviewApplyAndRerun(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		t.Run(backend, func(t *testing.T) {
+			o, _, r := reclaimFixture(t, "agent-build")
+			o.Scopes[0].Backend = backend
+			before, _ := os.Stat(o.ControlRoot)
+			records, _ := os.ReadDir(o.ControlRoot)
+			preview, err := PreviewReclamation(context.Background(), o)
+			if err != nil || len(preview.Resources) != 1 || preview.Resources[0].Outcome != ReclaimEligible {
+				t.Fatalf("%+v %v", preview, err)
+			}
+			after, _ := os.Stat(o.ControlRoot)
+			now, _ := os.ReadDir(o.ControlRoot)
+			if !before.ModTime().Equal(after.ModTime()) || len(records) != len(now) {
+				t.Fatal("preview wrote control storage")
+			}
+			applied, err := ApplyReclamation(context.Background(), o)
+			if err != nil || applied.Resources[0].Outcome != ReclaimRemoved {
+				t.Fatalf("%+v %v", applied, err)
+			}
+			if _, err := os.Stat(r.Location); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			if applied.Resources[0].ObservedLogicalDelta == nil || *applied.Resources[0].ObservedLogicalDelta != 12 {
+				t.Fatalf("accounting %+v", applied)
+			}
+			again, err := ApplyReclamation(context.Background(), o)
+			var absent *ReclamationResult
+			for i := range again.Resources {
+				if again.Resources[i].Resource.Location == r.Location {
+					absent = &again.Resources[i]
+				}
+			}
+			if err != nil || absent == nil || absent.Outcome != ReclaimAbsent || absent.ObservedAllocatedDelta != nil {
+				t.Fatalf("rerun %+v %v", again, err)
+			}
+			now, _ = os.ReadDir(o.ControlRoot)
+			if len(now) != len(records) {
+				t.Fatal("removed durable evidence")
+			}
+		})
+	}
+}
+func TestReclamationRetainsUncertainty(t *testing.T) {
+	for _, scenario := range []string{"missing", "error", "incomplete", "unstable", "unfinished", "pending", "changed", "symlink", "unknown-ecosystem", "parent", "outside-scope"} {
+		t.Run(scenario, func(t *testing.T) {
+			class := "agent-build"
+			if scenario == "unfinished" {
+				class = "native-scratch"
+			}
+			o, m, r := reclaimFixture(t, class)
+			if _, err := PreviewReclamation(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "missing":
+				o.Retention = nil
+			case "error":
+				o.Retention = retentionFixture(func(context.Context, RepositoryScope, func(RetentionEvidence) error) error {
+					return errors.New("authority unavailable")
+				})
+			case "incomplete", "unstable", "unfinished":
+				o.Retention = retentionFixture(func(_ context.Context, _ RepositoryScope, v func(RetentionEvidence) error) error {
+					return v(RetentionEvidence{Complete: scenario != "incomplete", Stable: scenario != "unstable", Unfinished: scenario == "unfinished"})
+				})
+			case "pending":
+				if _, err := m.AcquireUse(context.Background(), r); err != nil {
+					t.Fatal(err)
+				}
+			case "changed":
+				o.Retention = retentionFixture(func(_ context.Context, _ RepositoryScope, v func(RetentionEvidence) error) error {
+					if err := os.Rename(r.Location, r.Location+"-old"); err != nil {
+						t.Fatal(err)
+					}
+					put(t, filepath.Join(r.Location, "replacement"), "keep")
+					return v(RetentionEvidence{Complete: true, Stable: true})
+				})
+			case "symlink":
+				if err := os.Symlink(t.TempDir(), filepath.Join(r.Location, "link")); err != nil {
+					t.Fatal(err)
+				}
+			case "unknown-ecosystem", "parent":
+				newPath := filepath.Join(filepath.Dir(r.Location), "unknown")
+				if scenario == "parent" {
+					newPath = filepath.Dir(r.Location)
+				}
+				rr := storageuse.ResourceFor(r.Repository, r.Class, newPath)
+				if _, err := m.AcquireUse(context.Background(), rr); err != nil {
+					t.Fatal(err)
+				}
+				// Keep original pending as well so neither registration can be removed.
+				if _, err := m.AcquireUse(context.Background(), r); err != nil {
+					t.Fatal(err)
+				}
+			case "outside-scope":
+				o.Scopes[0].CommonDirectory = filepath.Join(t.TempDir(), "missing")
+			}
+			report, _ := ApplyReclamation(context.Background(), o)
+			for _, result := range report.Resources {
+				if result.Outcome == ReclaimRemoved {
+					t.Fatalf("unsafe removal %+v", report)
+				}
+			}
+			if _, err := os.Stat(r.Location); err != nil {
+				t.Fatal("resource lost", err)
+			}
+		})
+	}
+}
+func TestReclamationExplicitScopesAndCancellation(t *testing.T) {
+	o, _, r := reclaimFixture(t, "agent-build")
+	for _, scopes := range [][]RepositoryScope{nil, {{Root: "relative", CommonDirectory: o.Scopes[0].CommonDirectory, Backend: "local"}}, {o.Scopes[0], {Root: o.Scopes[0].Root, CommonDirectory: o.Scopes[0].CommonDirectory, Backend: "github"}}} {
+		bad := o
+		bad.Scopes = scopes
+		if _, err := ApplyReclamation(context.Background(), bad); err == nil {
+			t.Fatal("accepted invalid scope")
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if report, err := ApplyReclamation(ctx, o); !errors.Is(err, context.Canceled) || report.Complete {
+		t.Fatalf("%+v %v", report, err)
+	}
+	if _, err := os.Stat(r.Location); err != nil {
+		t.Fatal(err)
+	}
+}
+func TestReclamationHoldsExclusionThroughRetention(t *testing.T) {
+	o, m, r := reclaimFixture(t, "agent-build")
+	o.Retention = retentionFixture(func(ctx context.Context, _ RepositoryScope, v func(RetentionEvidence) error) error {
+		waiting, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := m.AcquireUse(waiting, r); !errors.Is(err, context.Canceled) {
+			t.Fatalf("admission during retention: %v", err)
+		}
+		err := v(RetentionEvidence{Complete: true, Stable: true})
+		if _, statErr := os.Stat(r.Location); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatal("callback released before removal")
+		}
+		return err
+	})
+	if report, err := ApplyReclamation(context.Background(), o); err != nil || report.Resources[0].Outcome != ReclaimRemoved {
+		t.Fatalf("%+v %v", report, err)
+	}
+	u, err := m.AcquireUse(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = u.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func addReclaimResource(t *testing.T, o ReclaimOptions, m *storageuse.Manager, repo, class string) storageuse.Resource {
+	t.Helper()
+	common := filepath.Join(repo, ".git")
+	h := sha256.Sum256([]byte(common))
+	key := hex.EncodeToString(h[:16])
+	r := storageuse.ResourceFor(key, class, filepath.Join(o.CacheRoot, class, key, "go"))
+	u, err := m.AcquireUse(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(r.Location, "data"), "reproducible")
+	if err = u.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+func TestReclamationMultipleRepositoriesHardlinksAndScopes(t *testing.T) {
+	o, m, first := reclaimFixture(t, "agent-build")
+	repo := filepath.Join(t.TempDir(), "repo")
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	second := addReclaimResource(t, o, m, repo, "validate-deps")
+	// Register a second repository but initially exclude it from authority.
+	report, err := ApplyReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(second.Location); err != nil {
+		t.Fatal("outside scope removed", err)
+	}
+	if _, err := os.Stat(first.Location); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first %+v %v", report, err)
+	}
+	// Recreate first through admission, then share an inode across repositories
+	// and an unmanaged external name. The report claims namespace observations.
+	u, err := m.AcquireUse(context.Background(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(first.Location, "data"), "reproducible")
+	if err = u.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(filepath.Join(second.Location, "data")); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Link(filepath.Join(first.Location, "data"), filepath.Join(second.Location, "data")); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "outside")
+	if err = os.Link(filepath.Join(first.Location, "data"), external); err != nil {
+		t.Fatal(err)
+	}
+	o.Scopes = append(o.Scopes, RepositoryScope{repo, filepath.Join(repo, ".git"), "github"})
+	preview, err := PreviewReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var localAllocated int64
+	for _, r := range preview.Resources {
+		if r.Before.AllocatedBytes != nil {
+			localAllocated += *r.Before.AllocatedBytes
+		}
+	}
+	if preview.Before.AllocatedBytes == nil || *preview.Before.AllocatedBytes >= localAllocated {
+		t.Fatalf("shared inode counted twice: %+v local %d", preview, localAllocated)
+	}
+	o.Scopes[0], o.Scopes[1] = o.Scopes[1], o.Scopes[0]
+	o.Scopes = append(o.Scopes, o.Scopes[0]) // canonical duplicate scope is deduplicated
+	applied, err := ApplyReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatalf("%+v %v", applied, err)
+	}
+	data, err := os.ReadFile(external)
+	if err != nil || string(data) != "reproducible" {
+		t.Fatal("external hardlink changed", err)
+	}
+	for _, r := range applied.Resources {
+		if r.Outcome != ReclaimRemoved {
+			t.Fatalf("%+v", applied)
+		}
+	}
+}
+func TestReclamationCancellationAfterRemovalAndIncompleteDiscovery(t *testing.T) {
+	t.Run("cancellation", func(t *testing.T) {
+		o, m, first := reclaimFixture(t, "agent-build")
+		second := addReclaimResource(t, o, m, o.Scopes[0].Root, "validate-build")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		calls := 0
+		o.Retention = retentionFixture(func(_ context.Context, _ RepositoryScope, v func(RetentionEvidence) error) error {
+			calls++
+			err := v(RetentionEvidence{Complete: true, Stable: true})
+			cancel()
+			return err
+		})
+		report, err := ApplyReclamation(ctx, o)
+		if !errors.Is(err, context.Canceled) || report.Complete || calls != 1 {
+			t.Fatalf("%+v %v calls=%d", report, err, calls)
+		}
+		if _, err := os.Stat(first.Location); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("first removal missing", err)
+		}
+		if _, err := os.Stat(second.Location); err != nil {
+			t.Fatal("scheduled after cancellation", err)
+		}
+		// Evidence and lock files remain usable on rerun.
+		o.Retention = completeRetention()
+		if _, err := ApplyReclamation(context.Background(), o); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("bounded", func(t *testing.T) {
+		o, _, r := reclaimFixture(t, "agent-build")
+		o.Limits = DefaultLimits()
+		o.Limits.Entries = 1
+		report, err := ApplyReclamation(context.Background(), o)
+		if err == nil || report.Complete {
+			t.Fatalf("%+v %v", report, err)
+		}
+		if _, err := os.Stat(r.Location); err != nil {
+			t.Fatal("incomplete discovery authorized removal", err)
+		}
+	})
 }

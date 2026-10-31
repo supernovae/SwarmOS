@@ -1,7 +1,10 @@
 package registry
 
 import (
+	"context"
+	"errors"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,5 +67,50 @@ func TestRegistryAddListRemoveAndSafetyChecks(t *testing.T) {
 	listAfter, _ := reg.List()
 	if len(listAfter) != 1 {
 		t.Fatalf("expected 1 repo after remove, got %d", len(listAfter))
+	}
+}
+
+func TestReadSnapshotDoesNotInitialize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "absent", "repos.yaml")
+	got, err := New(path).ReadSnapshot(context.Background(), 256, func(int64) error { return nil })
+	if err != nil || len(got) != 0 {
+		t.Fatalf("%v %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatalf("created registry directory: %v", err)
+	}
+}
+func TestReadSnapshotBoundedAndNoLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "repos.yaml")
+	data := "version: 1\nrepos:\n  local/test:\n    repo: local/test\n    path: /existing/repository\n    backend: local\n"
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	got, err := New(path).ReadSnapshot(context.Background(), 256, func(n int64) error {
+		calls++
+		if n <= 0 {
+			t.Fatal(n)
+		}
+		return nil
+	})
+	if err != nil || len(got) != 1 || calls != 1 {
+		t.Fatalf("%v %v calls=%d", got, err, calls)
+	}
+	if _, err := os.Stat(path + ".lock"); !os.IsNotExist(err) {
+		t.Fatalf("lock created: %v", err)
+	}
+	sentinel := errors.New("budget refused")
+	_, err = New(path).ReadSnapshot(context.Background(), 256, func(int64) error { return sentinel })
+	if !errors.Is(err, sentinel) {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{strings.Repeat("x", 256<<10+1), "version: 1\nrepos: &recursive\n  x: *recursive\n"} {
+		if err := os.WriteFile(path, []byte(bad), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(path).ReadSnapshot(context.Background(), 256, func(int64) error { return nil }); err == nil {
+			t.Fatal("accepted oversized or alias input")
+		}
 	}
 }

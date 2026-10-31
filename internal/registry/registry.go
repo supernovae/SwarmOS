@@ -1,7 +1,11 @@
 package registry
 
 import (
+	"bytes"
+	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/safefs"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -251,4 +255,110 @@ func DetectGitHubSlugFrom(repoRoot, remote string) string {
 		}
 	}
 	return ""
+}
+
+// ReadSnapshot reads an existing registry without taking locks or initializing
+// storage. The caller reserves parser working space before any input is read.
+// Oversized documents fail closed rather than being decoded and truncated.
+func (r *Registry) ReadSnapshot(ctx context.Context, maxRepos int, reserve func(int64) error) ([]RepoEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if maxRepos <= 0 || reserve == nil {
+		return nil, fmt.Errorf("snapshot budget required")
+	}
+	path, err := filepath.Abs(r.filePath)
+	if err != nil {
+		return nil, err
+	}
+	volume := filepath.VolumeName(path) + string(filepath.Separator)
+	root, err := safefs.Open(volume)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	rel, err := filepath.Rel(volume, path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := root.OpenRegular(rel)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	// yaml.v3 builds a syntax tree. Bound both its input and conservative
+	// parser/tree/decoded working space, independently of record count.
+	const maxDocument = 256 << 10
+	if info.Size() < 0 || info.Size() > maxDocument {
+		return nil, fmt.Errorf("registry exceeds bounded document size")
+	}
+	if err := reserve(65536 + 128*info.Size() + int64(maxRepos)*1024); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, info.Size()+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) != info.Size() {
+		return nil, fmt.Errorf("registry changed during observation")
+	}
+	// Avoid aliases and deeply nested input before invoking the YAML parser.
+	// Canonical registries contain only mappings and scalar fields.
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		if len(line) > 8192 {
+			return nil, fmt.Errorf("registry field exceeds limit")
+		}
+		indent := 0
+		for indent < len(line) && line[indent] == ' ' {
+			indent++
+		}
+		if indent > 8 || bytes.ContainsAny(line, "&*[]{}") {
+			return nil, fmt.Errorf("unsupported bounded registry encoding")
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var rf registryFile
+	if err := yaml.Unmarshal(data, &rf); err != nil {
+		return nil, err
+	}
+	if rf.Version != 1 {
+		return nil, fmt.Errorf("unsupported registry version")
+	}
+	out := make([]RepoEntry, 0, min(len(rf.Repos), maxRepos))
+	keys := make([]string, 0, len(rf.Repos))
+	for key := range rf.Repos {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		e := rf.Repos[key]
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		if len(out) >= maxRepos {
+			return out, fmt.Errorf("registry repository limit reached")
+		}
+		if ValidateRepoSlug(e.Repo) != nil || !filepath.IsAbs(e.Path) {
+			return out, fmt.Errorf("invalid registry entry")
+		}
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Repo < out[j].Repo })
+	after, err := f.Stat()
+	if err != nil {
+		return out, err
+	}
+	if after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+		return out, fmt.Errorf("registry changed during observation")
+	}
+	return out, nil
 }

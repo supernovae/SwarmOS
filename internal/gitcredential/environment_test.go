@@ -196,3 +196,20 @@ func TestMergeTreeConfigurationBudgetFailsClosed(t *testing.T) {
 		t.Fatal("oversized driver configuration allowed inspection")
 	}
 }
+
+func TestObservationCommandRejectsMutationAndCredentials(t *testing.T) {
+	for _, args := range [][]string{{"fetch"}, {"worktree", "prune"}, {"status"}, {"show", "HEAD"}} {
+		if _, err := ObservationCommand(context.Background(), t.TempDir(), args...); err == nil {
+			t.Fatal("accepted", args)
+		}
+	}
+	cmd, err := ObservationCommand(context.Background(), t.TempDir(), "rev-parse", "--show-toplevel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range cmd.Env {
+		if strings.HasPrefix(value, "SWARM_") || strings.HasPrefix(value, "GH_TOKEN=") || strings.HasPrefix(value, "SSH_AUTH_SOCK=") {
+			t.Fatal(value)
+		}
+	}
+}

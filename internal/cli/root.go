@@ -79,6 +79,15 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 				return err
 			}
 		}
+		if cmd.Parent() != nil && cmd.Parent().Name() == "storage" {
+			if cmd.Flags().Changed("fork-remote") && !opts.Fork {
+				return fmt.Errorf("--fork-remote requires --fork or a pr command")
+			}
+			if opts.Fork {
+				return fmt.Errorf("storage report is coordinator-only and cannot be used with --fork")
+			}
+			return nil
+		}
 		prCommand := cmd.Parent() != nil && cmd.Parent().Name() == "pr"
 		if !opts.Fork && !prCommand && cmd.Flags().Changed("fork-remote") {
 			return fmt.Errorf("--fork-remote requires --fork or a pr command")
@@ -120,11 +129,11 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
 	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", opts.ForkRemote, `Writable fork remote for --fork coordination or upstream-authorized PR updates (default "fork", or "origin" when the upstream remote is not origin)`)
 	rootCmd.PersistentFlags().StringVar(&opts.UpstreamRemote, "upstream-remote", opts.UpstreamRemote, `Git remote for the project repository on the github backend (default: the node profile's upstream_remote, then "origin")`)
-	rootCmd.AddCommand(newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPRCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd())
+	rootCmd.AddCommand(newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPRCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd(), newStorageCmd(opts))
 	rootCmd.AddCommand(newInternalToolsCmd())
 	for _, command := range rootCmd.Commands() {
 		switch command.Name() {
-		case "repo", "node", "issue", "pr":
+		case "repo", "node", "issue", "pr", "storage":
 			command.GroupID = "resources"
 		default:
 			command.GroupID = "tools"

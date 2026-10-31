@@ -296,3 +296,52 @@ func TestConcurrentAdmissionsPreserveEveryToken(t *testing.T) {
 	}
 	g.Close()
 }
+
+func TestObserveNoMutationAndUnresolvedUse(t *testing.T) {
+	m, r := fixture(t)
+	defer m.Close()
+	use, err := m.AcquireUse(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := m.key(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(m.path, key+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := Observe(context.Background(), m.path, r, 1<<16, func(int64) error { return nil })
+	if err != nil || observed.Active == nil || !*observed.Active {
+		t.Fatalf("%+v %v", observed, err)
+	}
+	after, err := os.ReadFile(filepath.Join(m.path, key+".json"))
+	if err != nil || string(before) != string(after) {
+		t.Fatalf("recency changed: %v", err)
+	}
+	if err := use.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	observed, err = Observe(context.Background(), m.path, r, 1<<16, func(int64) error { return nil })
+	if err != nil || observed.Active == nil || *observed.Active || !observed.CompleteCoverage {
+		t.Fatalf("%+v %v", observed, err)
+	}
+}
+func TestObserveDoesNotCreateAndRespectsBudget(t *testing.T) {
+	path := filepath.Join(canonicalTemp(t), "missing")
+	_, err := Observe(context.Background(), path, Resource{}, 4096, func(int64) error { return nil })
+	if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("created control root: %v", err)
+	}
+	m, r := fixture(t)
+	defer m.Close()
+	sentinel := errors.New("refused")
+	_, err = Observe(context.Background(), m.path, r, 4096, func(int64) error { return sentinel })
+	if !errors.Is(err, sentinel) {
+		t.Fatal(err)
+	}
+}

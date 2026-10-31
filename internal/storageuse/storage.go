@@ -318,3 +318,96 @@ func (m *Manager) AcquireMaintenance(ctx context.Context, r Resource) (*Maintena
 	}
 	return &Maintenance{file: f}, nil
 }
+
+// Observation contains no use tokens. Active is unknown unless complete
+// coverage exists or an unresolved use positively establishes activity.
+type Observation struct {
+	CompleteCoverage bool
+	LastUse          time.Time
+	Active           *bool
+}
+
+// Observe opens existing control storage only. It never admits a use, acquires
+// a lock, completes a pending use, or updates recency. reserve is called before
+// reading or decoding any record; the cap includes JSON map expansion.
+func Observe(ctx context.Context, path string, resource Resource, maxBytes int64, reserve func(int64) error) (Observation, error) {
+	var out Observation
+	if err := ctx.Err(); err != nil {
+		return out, err
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) == string(filepath.Separator) || maxBytes <= 0 || maxBytes > 1<<20 || reserve == nil {
+		return out, ErrUnsafe
+	}
+	volume := filepath.VolumeName(path) + string(filepath.Separator)
+	base, err := safefs.Open(volume)
+	if err != nil {
+		return out, err
+	}
+	defer base.Close()
+	rel, err := filepath.Rel(volume, filepath.Clean(path))
+	if err != nil {
+		return out, err
+	}
+	root, err := base.Sub(rel, false, 0)
+	if err != nil {
+		return out, err
+	}
+	defer root.Close()
+	f, err := root.OpenDirectory(".")
+	if err != nil {
+		return out, err
+	}
+	info, err := f.Stat()
+	f.Close()
+	if err != nil {
+		return out, err
+	}
+	if info.Mode().Perm()&0077 != 0 {
+		return out, ErrUnsafe
+	}
+	m := &Manager{root: root, path: filepath.Clean(path)}
+	key, err := m.key(resource)
+	if err != nil {
+		return out, err
+	}
+	if err := reserve(4096 + maxBytes*16); err != nil {
+		return out, err
+	}
+	data, err := root.ReadFile(key+".json", maxBytes)
+	if err != nil {
+		return out, err
+	}
+	if err := ctx.Err(); err != nil {
+		return out, err
+	}
+	var v record
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&v); err != nil {
+		return out, err
+	}
+	if d.Decode(new(any)) != io.EOF || v.Version != 1 || v.Resource != resource || v.Uses == nil || v.Created.IsZero() || v.LastUse.Before(v.Created) {
+		return out, ErrUnsafe
+	}
+	active := false
+	for token, complete := range v.Uses {
+		if err := ctx.Err(); err != nil {
+			return Observation{}, err
+		}
+		if len(token) != 64 {
+			return Observation{}, ErrUnsafe
+		}
+		if _, err := hex.DecodeString(token); err != nil {
+			return Observation{}, ErrUnsafe
+		}
+		if !complete {
+			active = true
+		}
+	}
+	out.CompleteCoverage = v.CompleteCoverage
+	out.LastUse = v.LastUse
+	if active || v.CompleteCoverage {
+		out.Active = &active
+	}
+	return out, nil
+}

@@ -323,3 +323,19 @@ func WriteFile(root, name string, data []byte, mode os.FileMode) error {
 	defer r.Close()
 	return r.WriteFile(name, data, mode)
 }
+
+// Lstat observes an entry without following its final symlink or opening file
+// contents. Parent components are pinned and must be real directories. Unlike
+// OpenRegular, this accepts hardlinks because no content is read or written.
+func (r *Root) Lstat(name string) (os.FileInfo, error) {
+	name, err := local(name)
+	if err != nil {
+		return nil, err
+	}
+	d, err := r.directory(filepath.Dir(name), false, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.Lstat(filepath.Base(name))
+}

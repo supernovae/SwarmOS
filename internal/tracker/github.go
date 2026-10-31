@@ -19,10 +19,11 @@ import (
 )
 
 type GitHubTracker struct {
-	owner    string
-	repo     string
-	client   *api.RESTClient
-	ciClient *api.RESTClient
+	owner           string
+	repo            string
+	client          *api.RESTClient
+	ciClient        *api.RESTClient
+	inventoryClient *api.RESTClient
 }
 
 // ResolveGitHubToken returns the configured GitHub API token in precedence order:
@@ -76,7 +77,11 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 	if err != nil {
 		return nil, errors.New("failed to initialize CI evidence client")
 	}
-	return &GitHubTracker{owner: owner, repo: name, client: client, ciClient: ciClient}, nil
+	inventoryClient, err := newInventoryRESTClient(options)
+	if err != nil {
+		return nil, errors.New("failed to initialize storage inventory client")
+	}
+	return &GitHubTracker{owner: owner, repo: name, client: client, ciClient: ciClient, inventoryClient: inventoryClient}, nil
 }
 
 func NewGitHubTrackerWithClient(owner, repo string, client *api.RESTClient) *GitHubTracker {

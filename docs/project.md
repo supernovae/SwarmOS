@@ -263,6 +263,23 @@ Because Rust's `CARGO_TARGET_DIR` points at the agent cache, agent runs do not l
 
 **Changing who can write:** every validator mount is chosen by `ValidatorCacheMounts`, and whether warm-up runs is chosen by `ValidatorCacheReusable`, both in `internal/sandbox/build_cache.go`. Any change that lets candidate code write a shared cache needs a maintainer decision and an update to `SECURITY.md`.
 
+### Inspecting managed storage
+
+Use `swarm storage report` to see managed cache directories, repository worktrees and branches, shared Git objects, and scratch candidates without changing them. The report includes unindexed cache directories and orphan repository keys.
+
+```bash
+swarm storage report
+swarm storage report --json
+swarm storage report --repo owner/repo
+swarm storage report --root /path/to/checkout
+```
+
+Repository selection narrows the repository inventory; cache and scratch discovery remains host-wide under Swarm's user-cache directory and the effective temporary directory. The command also works outside a checkout and does not create a missing repository registry.
+
+Logical bytes describe file sizes. Allocated bytes describe observed filesystem blocks, with shared inode identities counted once in the snapshot aggregate. Neither number promises space savings: hardlinks, sparse files and shared Git objects can overlap. Branches have no independent byte total. Filesystem reads may update operating-system access times.
+
+A report marked `complete=false` includes the available observations and the reasons it stopped. Missing usage and use evidence appear as unknown. A scratch prefix or missing repository does not prove abandonment; these candidates remain unknown. The command has no apply option. Authoritative issue registrations can keep missing worktrees visible; active attempts and pending revisions block those resources. GitHub inspection reads pinned state objects already available locally and never fetches missing objects. Completed merged worktrees become advisory candidates only after their registered branch, index and files pass bounded inspection. PR evidence is read once per repository through a bounded traversal. Repository retention eligibility remains unknown where authoritative claim, submission or complete worktree evidence is unavailable.
+
 ### Dependency caches
 
 Sandboxes have no network, so downloaded dependencies must already be on disk. For Go, Rust and Node, SwarmOS does not mount your own `GOMODCACHE`, Cargo `registry` and `git` caches, or npm, pnpm, Yarn and Bun caches, which hold everything you have ever fetched, including private dependencies. Each repository gets its own cache instead, filled on the host before any agent or validation run starts, and mounted read-only in every sandbox.

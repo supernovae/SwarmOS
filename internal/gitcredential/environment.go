@@ -163,3 +163,54 @@ func Output(ctx context.Context, root string, args ...string) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// ObservationCommand constructs a credential-free local metadata observation.
+// The exact command forms are intentionally restricted: callers cannot fetch,
+// refresh an index or execute configured filters through this entry point.
+func ObservationCommand(ctx context.Context, root string, args ...string) (*exec.Cmd, error) {
+	valid := false
+	if len(args) == 2 && args[0] == "rev-parse" && args[1] == "--show-toplevel" {
+		valid = true
+	}
+	if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--path-format=absolute" && args[2] == "--git-common-dir" {
+		valid = true
+	}
+	if len(args) == 4 && args[0] == "worktree" && args[1] == "list" && args[2] == "--porcelain" && args[3] == "-z" {
+		valid = true
+	}
+	if len(args) == 3 && args[0] == "for-each-ref" && args[1] == "--format=%(refname)" && args[2] == "refs/heads/swarm/" {
+		valid = true
+	}
+	if len(args) == 2 && args[0] == "show" {
+		object, ok := strings.CutSuffix(args[1], ":state.json")
+		if ok && (len(object) == 40 || len(object) == 64) {
+			valid = true
+			for _, c := range object {
+				if c < '0' || c > '9' {
+					if c < 'a' || c > 'f' {
+						valid = false
+					}
+				}
+			}
+		}
+	}
+	if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--verify" && args[2] == "HEAD" {
+		valid = true
+	}
+	if len(args) == 3 && args[0] == "symbolic-ref" && args[1] == "-q" && args[2] == "HEAD" {
+		valid = true
+	}
+	if len(args) == 3 && args[0] == "ls-files" && args[1] == "--stage" && args[2] == "-z" {
+		valid = true
+	}
+	if len(args) == 4 && args[0] == "ls-tree" && args[1] == "-r" && args[2] == "-z" && args[3] == "HEAD" {
+		valid = true
+	}
+	if !valid {
+		return nil, fmt.Errorf("unsupported local Git observation")
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = root
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_CONFIG_COUNT=4", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=" + os.DevNull, "GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false", "GIT_CONFIG_KEY_2=gc.auto", "GIT_CONFIG_VALUE_2=0", "GIT_CONFIG_KEY_3=maintenance.auto", "GIT_CONFIG_VALUE_3=false"}
+	return cmd, nil
+}

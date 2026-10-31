@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/node"
@@ -90,7 +91,7 @@ func (o *RootOptions) storageMaintenance(cmd *cobra.Command, readOnly bool) {
 		}
 		return v, nil
 	}}
-	summary, warn, err := storage.Maintain(cmd.Context(), storage.MaintenanceOptions{Options: options, StateRoot: filepath.Join(cache, "swarm-maintenance"), Now: o.now(), ReadOnly: readOnly, Policy: storage.MaintenancePolicy{TargetBytes: cfg.CacheTargetBytes, IdleAge: cfg.InactiveRetention, Interval: cfg.MaintenanceInterval, WarningInterval: cfg.WarningInterval}, Retention: retention, FreeSpace: func() {
+	runStorageMaintenance(cmd, storage.MaintenanceOptions{Options: options, StateRoot: filepath.Join(cache, "swarm-maintenance"), Now: o.now(), ReadOnly: readOnly, Policy: storage.MaintenancePolicy{TargetBytes: cfg.CacheTargetBytes, IdleAge: cfg.InactiveRetention, Interval: cfg.MaintenanceInterval, WarningInterval: cfg.WarningInterval}, Retention: retention, FreeSpace: func() {
 		// A statfs per managed root also handles roots on different filesystems.
 		for _, path := range []string{cache, control, os.TempDir()} {
 			free, total, e := storage.FilesystemSpace(path)
@@ -105,17 +106,39 @@ func (o *RootOptions) storageMaintenance(cmd *cobra.Command, readOnly bool) {
 
 		}
 	}})
+}
+
+func runStorageMaintenance(cmd *cobra.Command, options storage.MaintenanceOptions) {
+	summary, warn, err := storage.Maintain(cmd.Context(), options)
 	if err != nil {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Storage maintenance incomplete; retry after the maintenance interval:", err)
 	}
 	if warn {
-		renderMaintenanceDiagnostics(cmd, summary)
+		if options.ReadOnly {
+			if summary.InventoryAt.IsZero() {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Storage: no storage inventory exists yet; one will run at the next eligible work, stage, validate or node run lifecycle hook.")
+				return
+			}
+			age := options.Now.Sub(summary.InventoryAt)
+			if age < 0 {
+				age = 0
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "Storage: cached inventory age=%s.\n", age.Round(time.Second))
+			renderMaintenanceSummary(cmd, summary)
+		} else {
+			renderMaintenanceDiagnostics(cmd, summary)
+		}
 	}
 }
 func renderMaintenanceDiagnostics(cmd *cobra.Command, s storage.MaintenanceSummary) {
 	if s.ExcessBytes > 0 || !s.Complete || s.FinishedTasks > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Storage: observed cache bytes=%d; excess=%d; protected/retained=%d; finished task candidates=%d; incomplete=%t; stale=%t. Preview: swarm storage cleanup --all-repos; apply: swarm storage cleanup --all-repos --apply\n", s.ObservedBytes, s.ExcessBytes, s.ProtectedBytes, s.FinishedTasks, !s.Complete, s.Stale)
+		renderMaintenanceSummary(cmd, s)
 	}
+}
+
+func renderMaintenanceSummary(cmd *cobra.Command, s storage.MaintenanceSummary) {
+	fmt.Fprintf(cmd.ErrOrStderr(), "Storage: observed cache bytes=%d (%.1f GB); excess=%d (%.1f GB); protected/retained=%d; finished task candidates=%d; incomplete=%t; stale=%t. Preview: swarm storage cleanup --all-repos; apply: swarm storage cleanup --all-repos --apply\n", s.ObservedBytes, float64(s.ObservedBytes)/1e9, s.ExcessBytes, float64(s.ExcessBytes)/1e9, s.ProtectedBytes, s.FinishedTasks, !s.Complete, s.Stale)
+
 }
 
 func renderMaintenanceSpace(cmd *cobra.Command, path string, free, total uint64, cfg node.StorageSettings) {

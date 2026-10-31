@@ -79,7 +79,10 @@ func Maintain(ctx context.Context, o MaintenanceOptions) (MaintenanceSummary, bo
 	if err != nil {
 		return MaintenanceSummary{}, false, err
 	}
-	root, err := base.Sub(rel, true, 0700)
+	root, err := base.Sub(rel, !o.ReadOnly, 0700)
+	if o.ReadOnly && os.IsNotExist(err) {
+		return MaintenanceSummary{}, true, nil
+	}
 	if err != nil {
 		return MaintenanceSummary{}, false, err
 	}
@@ -88,15 +91,17 @@ func Maintain(ctx context.Context, o MaintenanceOptions) (MaintenanceSummary, bo
 	if err != nil || info.Mode().Perm()&0077 != 0 {
 		return MaintenanceSummary{}, false, errors.New("maintenance root is not private")
 	}
-	lock, err := root.OpenLock("admission.lock")
-	if err != nil {
-		return MaintenanceSummary{}, false, err
+	if !o.ReadOnly {
+		lock, err := root.OpenLock("admission.lock")
+		if err != nil {
+			return MaintenanceSummary{}, false, err
+		}
+		defer lock.Close()
+		if err = filelock.TryLockExclusive(lock); err != nil {
+			return MaintenanceSummary{}, false, nil
+		}
+		defer filelock.Unlock(lock) // best effort admission
 	}
-	defer lock.Close()
-	if err = filelock.TryLockExclusive(lock); err != nil {
-		return MaintenanceSummary{}, false, nil
-	}
-	defer filelock.Unlock(lock) // best effort admission
 	var state maintenanceState
 	if data, e := root.ReadFile("throttle.json", 8192); e == nil {
 		if json.Unmarshal(data, &state) != nil {
@@ -104,6 +109,13 @@ func Maintain(ctx context.Context, o MaintenanceOptions) (MaintenanceSummary, bo
 		}
 	} else if !os.IsNotExist(e) {
 		return state.Summary, false, e
+	}
+	if o.ReadOnly {
+		state.Summary.Stale = state.Summary.InventoryAt.IsZero() || !state.Summary.InventoryAt.Equal(o.Now)
+		if due(o.Now, state.Warning, o.Policy.WarningInterval) && o.FreeSpace != nil {
+			o.FreeSpace()
+		}
+		return state.Summary, true, nil
 	}
 	warning := due(o.Now, state.Warning, o.Policy.WarningInterval)
 	maintenance := !o.ReadOnly && due(o.Now, state.Attempt, o.Policy.Interval)

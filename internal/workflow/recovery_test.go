@@ -106,6 +106,12 @@ func TestEngineDroppedCheckpointRecovery(t *testing.T) {
 
 // This fixture is reused for output, identity-race and boundary regressions.
 func checkpointPlanEngine(t *testing.T, malicious ...bool) (*Engine, WorkOptions, string) {
+	return checkpointPlanEngineLimit(t, 2, malicious...)
+}
+func checkpointPlanEngineLimit(t *testing.T, limit int, malicious ...bool) (*Engine, WorkOptions, string) {
+	return checkpointPlanEngineGate(t, limit, contract.GateAgent, malicious...)
+}
+func checkpointPlanEngineGate(t *testing.T, limit int, gate contract.GateMode, malicious ...bool) (*Engine, WorkOptions, string) {
 	t.Helper()
 	root, e, tr := setupProjectPlanTestRepo(t)
 	git := func(dir string, args ...string) string {
@@ -122,11 +128,20 @@ func checkpointPlanEngine(t *testing.T, malicious ...bool) (*Engine, WorkOptions
 	}
 	cfg.Execution = contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative}
 	cfg.PlanMode = "agent"
+	cfg.DefaultGate = contract.GateNone
 	cfg.Roles = map[string]string{}
 	cfg.Roles["planner"] = "codex"
 	cfg.Roles["reviewer"] = "claude"
 	cfg.Security.IndependentReview = true
 	raw, err := yaml.Marshal(cfg)
+	var policy map[string]any
+	if err == nil {
+		err = yaml.Unmarshal(raw, &policy)
+	}
+	if err == nil {
+		policy["lease"].(map[string]any)["plan_replan_limit"] = limit
+		raw, err = yaml.Marshal(policy)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +164,7 @@ func checkpointPlanEngine(t *testing.T, malicious ...bool) (*Engine, WorkOptions
 		return sandbox.Dependencies{}, nil
 	}
 	t.Cleanup(func() { prepareAgentDependencies = original })
-	wu := &contract.WorkUnit{Objective: "Recover preserved work", Constraints: []string{"Keep checkpoints"}, Acceptance: []string{"Review replacement"}, Workflow: "feature", Gate: contract.GateAgent}
+	wu := &contract.WorkUnit{Objective: "Recover preserved work", Constraints: []string{"Keep checkpoints"}, Acceptance: []string{"Review replacement"}, Workflow: "feature", Gate: gate}
 	issue, err := tr.CreateIssue(t.Context(), "Recovery", contract.FormatIssueMarkdown(wu), []string{"swarm:ready"})
 	if err != nil {
 		t.Fatal(err)
@@ -531,4 +546,158 @@ func TestCheckpointRecoveryProgressHeartbeat(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIssueWorkRecoveryCheckpointHumanDraft(t *testing.T) {
+	for _, gate := range []contract.GateMode{contract.GateNone, contract.GateAgent, contract.GateHuman} {
+		for _, limit := range []int{0, 1, 2} {
+			for _, outcome := range []string{"success", "unchanged", "failure", "refusal", "cancel"} {
+				t.Run(fmt.Sprintf("%s/limit=%d/%s", gate, limit, outcome), func(t *testing.T) {
+					e, opts, _ := checkpointPlanEngineGate(t, limit, gate)
+					m := e.LeaseManager
+					reviewer := lease.NewManager(e.Tracker.(*tracker.LocalTracker).WithUser("independent-maintainer", "OWNER"), e.Config.Security)
+					if err := reviewer.ConfigureStore(e.repoRoot); err != nil {
+						t.Fatal(err)
+					}
+					pair := func(body string) {
+						t.Helper()
+						if _, err := m.RecordPlanPair(t.Context(), opts.IssueNumber, opts.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: "fixture", Summary: "plan", Body: body}, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "fixture", Summary: "tests", Body: "tests"}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					pair("original plan")
+					if outcome == "unchanged" {
+						if _, err := e.ExecuteWork(t.Context(), opts); err != nil {
+							t.Fatal(err)
+						}
+					}
+					rejected, err := reviewer.RecordHumanReview(t.Context(), opts.IssueNumber, "CHANGES_REQUESTED", "Review checkpoint recovery")
+					if err != nil {
+						t.Fatal(err)
+					}
+					identity := *rejected.HumanPlanReview
+					original := e.NewRunner
+					counts := map[string]int{}
+					e.NewRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+						delegate, err := original(name, cfg, local)
+						if err != nil {
+							return nil, err
+						}
+						return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+							counts[req.Role]++
+							if req.Role == "planner" && outcome != "success" && outcome != "unchanged" {
+								if outcome == "cancel" {
+									return nil, context.Canceled
+								}
+								return nil, fmt.Errorf("checkpoint planner %s", outcome)
+							}
+							return delegate.Run(ctx, req)
+						}}, nil
+					}
+					result, err := e.ExecuteWork(t.Context(), opts)
+					st, loadErr := m.GetCurrentState(t.Context(), opts.IssueNumber)
+					if loadErr != nil {
+						t.Fatal(loadErr)
+					}
+					want := 1
+					if limit == 0 {
+						want = 0
+					}
+					if counts["planner"] != want || counts["reviewer"] != 0 || counts["developer"] != 0 || counts["tester"] != 0 || st.HumanDraftCount != want || st.HumanPlanReview == nil || *st.HumanPlanReview != identity {
+						t.Fatalf("counts=%v state=%+v err=%v", counts, st, err)
+					}
+					if limit == 0 {
+						if !errors.Is(err, lease.ErrPlanReplanLimit) {
+							t.Fatal(err)
+						}
+						return
+					}
+					if outcome != "success" {
+						if err == nil || st.PlanGeneration != rejected.PlanGeneration {
+							t.Fatalf("failed draft committed: %v %+v", err, result)
+						}
+						// Restart/reclaim keeps the spent attempt, including cancellation.
+						if _, err = m.Release(t.Context(), opts.IssueNumber, opts.Owner, "restart"); err != nil {
+							t.Fatal(err)
+						}
+						if _, err = m.Acquire(t.Context(), opts.IssueNumber, opts.Owner, "codex", "plan", 4*time.Hour, 0); err != nil {
+							t.Fatal(err)
+						}
+						st, _ = m.GetCurrentState(t.Context(), opts.IssueNumber)
+						if st.HumanDraftCount != 1 {
+							t.Fatal("refunded draft")
+						}
+						opts.ClaimID = st.Lease.ClaimID
+						for attempt := 1; attempt <= limit; attempt++ {
+							_, err = e.ExecuteWork(t.Context(), opts)
+							if err == nil {
+								t.Fatal("failed checkpoint draft became success")
+							}
+							st, _ = m.GetCurrentState(t.Context(), opts.IssueNumber)
+							want := attempt + 1
+							if want > limit {
+								want = limit
+							}
+							if st.HumanDraftCount != want || counts["planner"] != want || st.PlanGeneration != rejected.PlanGeneration || st.HumanPlanReview == nil || *st.HumanPlanReview != identity {
+								t.Fatalf("restart attempt %d counts=%v state=%+v", attempt, counts, st)
+							}
+							if attempt == limit && !errors.Is(err, lease.ErrPlanReplanLimit) {
+								t.Fatalf("exhaustion: %v", err)
+							}
+						}
+						return
+					}
+					if err != nil || !lease.CompletePlanPair(st) || st.PlanGeneration != rejected.PlanGeneration+1 || st.PlanReservation != nil {
+						t.Fatalf("pair not completed exactly once: %v %+v", err, st)
+					}
+					expected, candidate, present, err := lease.CheckpointPlanHeads(st)
+					if err != nil || !present || expected != opts.ExpectedHead || candidate != opts.CandidateHead {
+						t.Fatal("candidate binding", err)
+					}
+					review := opts
+					review.Phase = "review"
+					review.PlanCheckpoint = false
+					_, err = e.ExecuteWork(t.Context(), review)
+					if gate == contract.GateHuman {
+						if !errors.Is(err, ErrPlanApprovalNeeded) {
+							t.Fatalf("human checkpoint review %v", err)
+						}
+					} else if err != nil {
+						t.Fatal(err)
+					}
+					wantReview := 1
+					if gate == contract.GateHuman {
+						wantReview = 0
+					}
+					if counts["reviewer"] != wantReview || counts["planner"] != 1 {
+						t.Fatal(counts)
+					}
+					if _, err = m.ReconcileCheckpoint(t.Context(), opts.IssueNumber, opts.Owner, opts.ExpectedHead, opts.CandidateHead, false); !errors.Is(err, lease.ErrApprovalRequired) {
+						t.Fatalf("advisory agent approved reconcile: %v", err)
+					}
+					// Only authenticated approval of this exact generation discharges it.
+					approved, err := reviewer.RecordHumanReview(t.Context(), opts.IssueNumber, "APPROVED", "Reviewed exact checkpoint reports")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if approved.HumanPlanReview != nil || !lease.CompletePlanPair(approved) {
+						t.Fatal("approval lost pair")
+					}
+					for _, a := range approved.Artifacts {
+						if a.Type == contract.ArtifactReview {
+							for k, v := range lease.ReviewBindings(approved) {
+								if k != "review_claim_id" && a.Metadata[k] != v {
+									t.Fatalf("stale approval %s", k)
+								}
+							}
+						}
+					}
+					if _, err = m.ReconcileCheckpoint(t.Context(), opts.IssueNumber, opts.Owner, opts.ExpectedHead, opts.CandidateHead, false); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		}
+	}
+
 }

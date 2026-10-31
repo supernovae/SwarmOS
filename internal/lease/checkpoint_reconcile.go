@@ -574,7 +574,7 @@ func (m *Manager) RecordCheckpointPlan(ctx context.Context, n int, p *Checkpoint
 		if directIssue(st) && st.HumanPlanReview != nil && !planReservationMatches(st, st.HumanPlanReview) {
 			return ErrApprovalRequired
 		}
-		if st.PendingPlanReview != nil {
+		if st.PendingPlanReview != nil || (directIssue(st) && st.HumanPlanReview != nil) {
 			oldPlan, oldTest := "", ""
 			for _, a := range st.Artifacts {
 				if a.Type == contract.ArtifactDesign {

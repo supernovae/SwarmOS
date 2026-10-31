@@ -1695,3 +1695,188 @@ func TestIssueWorkRecoveryPlanChangesDuringTester(t *testing.T) {
 		t.Fatalf("changed pair became success: %v %+v", err, result)
 	}
 }
+
+// Exercise recorded trusted failures rather than manufacturing repair artifacts.
+func TestIssueWorkRecoveryDeveloperInstructionMatrix(t *testing.T) {
+	for _, kind := range []string{"pre-existing", "regression", "mixed"} {
+		for _, limit := range []int{0, 1, 2} {
+			for _, spent := range []bool{false, true} {
+				if limit == 0 && spent {
+					continue
+				}
+				for _, feedback := range []string{"general", "developer", "precedence", "none", "planner", "reviewer", "tester", "refuse", "cancel", "unchanged", "still failing", "fence", "explicit none", "explicit developer"} {
+					t.Run(fmt.Sprintf("%s/limit=%d/spent=%t/%s", kind, limit, spent, feedback), func(t *testing.T) {
+						e, n := repairFixture(t, strconv.Itoa(limit), func(root string) {
+							policy := "required_checks:\n  - name: test\n    command: go test -count=1 ./...\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n"
+							if err := os.WriteFile(filepath.Join(root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0644); err != nil {
+								t.Fatal(err)
+							}
+						})
+						dir := t.TempDir()
+						script := "#!/bin/sh\nif [ -f fixed.txt ]; then echo PASS; exit 0; fi\nbase=false; case \"$PWD\" in */swarm-repair-base-*) base=true;; esac\n"
+						if kind == "regression" {
+							script += "if $base; then echo PASS; exit 0; fi\n"
+						}
+						if kind == "mixed" {
+							script += "if $base; then case \"$*\" in *TestNew*) echo '--- PASS: TestNew (0.00s)'; echo PASS; exit 0;; esac; fi\necho '--- FAIL: TestOld (0.00s)'\nif $base; then echo '--- PASS: TestNew (0.00s)'; else echo '--- FAIL: TestNew (0.00s)'; fi\n"
+						} else {
+							script += "echo '--- FAIL: TestBroken (0.00s)'\n"
+						}
+						script += "echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
+						if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0755); err != nil {
+							t.Fatal(err)
+						}
+						t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+						calls := map[string]int{}
+						initial := true
+						e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+							return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+								calls[req.Role]++
+								if req.Role == "tester" && initial {
+									return nil, errors.New("interrupt before validation")
+								}
+								if req.Role == "developer" && !initial {
+									want := ""
+									if feedback == "general" {
+										want = "general repair"
+									}
+									if feedback == "developer" {
+										want = "specific repair"
+									}
+									if feedback == "precedence" {
+										want = "general repair\n\nspecific repair"
+									}
+									if feedback == "refuse" || feedback == "cancel" || feedback == "unchanged" || feedback == "still failing" || feedback == "fence" || feedback == "explicit developer" {
+										want = "specific repair"
+									}
+									if req.OperatorInstructions != want {
+										t.Fatalf("developer instructions %q want %q", req.OperatorInstructions, want)
+									}
+									if !strings.Contains(req.TaskPrompt, "REPAIR.md") {
+										t.Fatal("recorded repair brief absent")
+									}
+									if feedback == "refuse" {
+										return nil, errors.New("developer refused task")
+									}
+									if feedback == "cancel" {
+										return nil, context.Canceled
+									}
+									if feedback == "fence" {
+										e.LeaseManager.BindClaim(n, "stale")
+										return nil, lease.ErrClaimFence
+									}
+									if feedback == "unchanged" {
+										return &agent.RunResult{}, nil
+									}
+									name := "fixed.txt"
+									if feedback == "still failing" {
+										name = fmt.Sprintf("attempt-%d", calls["developer"])
+									}
+									if err := os.WriteFile(filepath.Join(req.WorktreePath, name), []byte("fixed"), 0644); err != nil {
+										return nil, err
+									}
+								}
+								return (&agent.MockRunner{}).Run(ctx, req)
+							}}, nil
+						}
+						opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: n, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true}
+						first, err := e.ExecuteWork(t.Context(), opts)
+						if err == nil || first == nil {
+							t.Fatal("missing interrupted initial implementation", err)
+						}
+						initial = false
+						opts.ClaimID = first.State.Lease.ClaimID
+						opts.Phase = "test"
+						failed, err := e.ExecuteWork(t.Context(), opts)
+						if err == nil || failed == nil || failed.Validation == nil || failed.Validation.Repair == nil {
+							t.Fatalf("no trusted failure: %v %+v", err, failed)
+						}
+						repair := failed.Validation.Repair
+						if repair.AllPreExisting != (kind == "pre-existing") {
+							t.Fatalf("wrong classification %+v", repair)
+						}
+						if kind == "mixed" {
+							seen := map[validation.TestClassification]bool{}
+							for _, v := range repair.Tests {
+								seen[v.Classification] = true
+							}
+							if !seen[validation.TestPreExisting] || !seen[validation.TestRegression] {
+								t.Fatalf("not mixed: %+v", repair)
+							}
+						}
+						count := 0
+						if spent {
+							for i := 0; i < limit; i++ {
+								if _, err = e.LeaseManager.ReserveValidationRepair(t.Context(), n, "maintainer"); err != nil {
+									t.Fatal(err)
+								}
+							}
+							count = limit
+						}
+						if _, err = e.LeaseManager.Release(t.Context(), n, "maintainer", "restart repair"); err != nil {
+							t.Fatal(err)
+						}
+						opts.ClaimID = ""
+						opts.Phase = "all"
+						switch feedback {
+						case "general":
+							opts.Instructions = "general repair"
+						case "developer":
+							opts.DeveloperInstructions = "specific repair"
+						case "precedence":
+							opts.Instructions = "general repair"
+							opts.DeveloperInstructions = "specific repair"
+						case "planner":
+							opts.PlannerInstructions = "irrelevant"
+						case "reviewer":
+							opts.ReviewerInstructions = "irrelevant"
+						case "tester":
+							opts.TesterInstructions = "irrelevant"
+						case "refuse", "cancel", "unchanged", "still failing", "fence", "explicit developer":
+							opts.DeveloperInstructions = "specific repair"
+
+						}
+						if strings.HasPrefix(feedback, "explicit ") {
+							opts.Phase = "implement"
+						}
+						clear(calls)
+						result, err := e.ExecuteWork(t.Context(), opts)
+						requested := feedback == "general" || feedback == "developer" || feedback == "precedence" || feedback == "refuse" || feedback == "cancel" || feedback == "unchanged" || feedback == "still failing" || feedback == "fence" || feedback == "explicit developer"
+						allowed := requested || (kind != "pre-existing" && (count < limit || feedback == "explicit none"))
+						terminal := feedback == "refuse" || feedback == "cancel" || feedback == "unchanged" || feedback == "fence"
+						if terminal {
+							if err == nil || calls["developer"] != 1 || calls["tester"] != 0 || len(calls) != 1 {
+								t.Fatalf("terminal requested round: %v calls=%v", err, calls)
+							}
+						} else if feedback == "still failing" {
+							rounds := 1
+							if kind != "pre-existing" {
+								rounds += limit - count
+								count = limit
+							}
+							if err == nil || calls["developer"] != rounds || calls["tester"] != rounds || len(calls) != 2 {
+								t.Fatalf("requested/automatic rounds err=%v calls=%v want=%d", err, calls, rounds)
+							}
+						} else if allowed {
+							if err != nil || result == nil || !result.ValidationPassed || calls["developer"] != 1 || calls["tester"] != 1 || len(calls) != 2 {
+								t.Fatalf("requested repair: %v %+v calls=%v", err, result, calls)
+							}
+							if !requested && feedback != "explicit none" {
+								count++
+							}
+						} else if err == nil || len(calls) != 0 {
+							t.Fatalf("blocked repair: %v calls=%v", err, calls)
+						}
+						st, err := e.LeaseManager.GetCurrentState(t.Context(), n)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if st.ValidationRepairCount != count || st.PRNumber != 0 {
+							t.Fatalf("counter reset or publish %+v", st)
+						}
+					})
+				}
+			}
+		}
+	}
+}

@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/tracker"
@@ -323,11 +326,15 @@ func TestReclamationPreviewApplyAndRerun(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			o, _, r := reclaimFixture(t, "agent-build")
 			o.Scopes[0].Backend = backend
+			snapshot := reclamationSnapshot(t, filepath.Dir(o.ControlRoot))
 			before, _ := os.Stat(o.ControlRoot)
 			records, _ := os.ReadDir(o.ControlRoot)
 			preview, err := PreviewReclamation(context.Background(), o)
 			if err != nil || len(preview.Resources) != 1 || preview.Resources[0].Outcome != ReclaimEligible {
 				t.Fatalf("%+v %v", preview, err)
+			}
+			if !reflect.DeepEqual(snapshot, reclamationSnapshot(t, filepath.Dir(o.ControlRoot))) {
+				t.Fatal("preview changed content, metadata or paths")
 			}
 			after, _ := os.Stat(o.ControlRoot)
 			now, _ := os.ReadDir(o.ControlRoot)
@@ -448,9 +455,9 @@ func TestReclamationExplicitScopesAndCancellation(t *testing.T) {
 func TestReclamationHoldsExclusionThroughRetention(t *testing.T) {
 	o, m, r := reclaimFixture(t, "agent-build")
 	o.Retention = retentionFixture(func(ctx context.Context, _ RepositoryScope, v func(RetentionEvidence) error) error {
-		waiting, cancel := context.WithCancel(ctx)
-		cancel()
-		if _, err := m.AcquireUse(waiting, r); !errors.Is(err, context.Canceled) {
+		waiting, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		if _, err := m.AcquireUse(waiting, r); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("admission during retention: %v", err)
 		}
 		err := v(RetentionEvidence{Complete: true, Stable: true})
@@ -596,4 +603,113 @@ func TestReclamationCancellationAfterRemovalAndIncompleteDiscovery(t *testing.T)
 			t.Fatal("incomplete discovery authorized removal", err)
 		}
 	})
+}
+
+// Snapshot all fixture roots, including Git/workflow files and durable records.
+func reclamationSnapshot(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		data := []byte(nil)
+		if info.Mode().IsRegular() {
+			data, err = os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+		}
+		out[path] = fmt.Sprintf("%v %d %d %x", info.Mode(), info.Size(), info.ModTime().UnixNano(), data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestReclamationLinkedWorktreeScopes(t *testing.T) {
+	o, _, _ := reclaimFixture(t, "agent-build")
+	repo := o.Scopes[0].Root
+	git := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v", out, err)
+		}
+	}
+	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "base")
+	linked := filepath.Join(filepath.Dir(repo), "linked")
+	git("worktree", "add", "-qb", "linked", linked)
+	o.Scopes = append(o.Scopes, RepositoryScope{Root: linked, CommonDirectory: o.Scopes[0].CommonDirectory, Backend: "local"})
+	snapshot := reclamationSnapshot(t, linked)
+	report, err := ApplyReclamation(context.Background(), o)
+	if err != nil || len(report.Resources) != 1 || report.Resources[0].Outcome != ReclaimRemoved {
+		t.Fatalf("%+v %v", report, err)
+	}
+	if !reflect.DeepEqual(snapshot, reclamationSnapshot(t, linked)) {
+		t.Fatal("linked worktree changed")
+	}
+}
+
+func TestReclamationInjectedFailures(t *testing.T) {
+	for _, phase := range []string{"remove", "after-stat"} {
+		t.Run(phase, func(t *testing.T) {
+			o, m, first := reclaimFixture(t, "agent-build")
+			second := addReclaimResource(t, o, m, o.Scopes[0].Root, "validate-build")
+			injected := errors.New("injected " + phase)
+			ops := reclamationIO{
+				afterStat: func(p *safefs.Root, name string) (os.FileInfo, error) { return p.Lstat(name) },
+			}
+			calls := 0
+			// Candidate order is agent-build before validate-build.
+			ops.remove = func(p *safefs.Root, ctx context.Context, name string, info os.FileInfo, visit func() error) error {
+				calls++
+				if phase == "remove" && calls == 1 {
+					return injected
+				}
+				return p.RemoveAllCheckedContext(ctx, name, info, visit)
+			}
+			stats := 0
+			ops.afterStat = func(p *safefs.Root, name string) (os.FileInfo, error) {
+				stats++
+				waiting, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+				defer cancel()
+				resource := first
+				if stats == 2 {
+					resource = second
+				}
+				if _, err := m.AcquireUse(waiting, resource); !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("admission during after observation: %v", err)
+				}
+				if phase == "after-stat" && stats == 1 {
+					return nil, injected
+				}
+				return p.Lstat(name)
+			}
+			report, err := reclaimWithIO(context.Background(), o, true, ops)
+			if !errors.Is(err, injected) || report.Complete || report.Resources[0].Outcome != ReclaimPartial {
+				t.Fatalf("%+v %v", report, err)
+			}
+			if _, err := os.Stat(second.Location); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("independent resource not removed", err)
+			}
+			if phase == "after-stat" && report.Resources[0].ObservedLogicalDelta != nil {
+				t.Fatal("failed after-stat claimed savings")
+			}
+			u, err := m.AcquireUse(context.Background(), first)
+			if err != nil {
+				t.Fatal("exclusion leaked", err)
+			}
+			if err = u.Finish(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			again, err := ApplyReclamation(context.Background(), o)
+			if err != nil {
+				t.Fatalf("rerun %+v %v", again, err)
+			}
+		})
+	}
 }

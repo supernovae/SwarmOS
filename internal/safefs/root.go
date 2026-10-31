@@ -481,8 +481,18 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 	if !ok {
 		return errors.New("unknown cleanup device")
 	}
-	var walk func(*os.Root, string, os.FileInfo, int, bool) error
-	walk = func(parent *os.Root, child string, want os.FileInfo, depth int, remove bool) error {
+	inspected := map[string]os.FileInfo{}
+	var walk func(*os.Root, string, string, os.FileInfo, int, bool) error
+	walk = func(parent *os.Root, child, relative string, want os.FileInfo, depth int, remove bool) error {
+		if remove {
+			var known bool
+			want, known = inspected[relative]
+			if !known {
+				return errors.New("uninspected cleanup entry")
+			}
+		} else {
+			inspected[relative] = want
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -550,7 +560,7 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 			if err != nil {
 				return err
 			}
-			if err := walk(dir, entries[0].Name(), info, depth+1, remove); err != nil {
+			if err := walk(dir, entries[0].Name(), filepath.Join(relative, entries[0].Name()), info, depth+1, remove); err != nil {
 				return err
 			}
 		}
@@ -565,8 +575,8 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 		}
 		return nil
 	}
-	if err := walk(r.root, name, expected, 0, false); err != nil {
+	if err := walk(r.root, name, name, expected, 0, false); err != nil {
 		return err
 	}
-	return walk(r.root, name, expected, 0, true)
+	return walk(r.root, name, name, expected, 0, true)
 }

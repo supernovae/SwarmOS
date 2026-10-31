@@ -15,6 +15,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -426,7 +427,22 @@ func usageDelta(before, after UsageObservation) (*int64, *int64) {
 	return delta(before.LogicalBytes, after.LogicalBytes), delta(before.AllocatedBytes, after.AllocatedBytes)
 }
 
+// reclamationIO provides per-operation fault injection without package globals.
+type reclamationIO struct {
+	remove    func(*safefs.Root, context.Context, string, os.FileInfo, func() error) error
+	afterStat func(*safefs.Root, string) (os.FileInfo, error)
+}
+
 func reclaim(ctx context.Context, opts ReclaimOptions, apply bool) (ReclamationReport, error) {
+	return reclaimWithIO(ctx, opts, apply, reclamationIO{
+		remove: func(p *safefs.Root, ctx context.Context, name string, info os.FileInfo, visit func() error) error {
+			return p.RemoveAllCheckedContext(ctx, name, info, visit)
+		},
+		afterStat: func(p *safefs.Root, name string) (os.FileInfo, error) { return p.Lstat(name) },
+	})
+}
+
+func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops reclamationIO) (ReclamationReport, error) {
 	out := ReclamationReport{Complete: true, Resources: []ReclamationResult{}}
 	invalid := func(err error) (ReclamationReport, error) { out.Complete = false; return out, err }
 	if opts.Limits == (Limits{}) {
@@ -663,14 +679,16 @@ func reclaim(ctx context.Context, opts ReclaimOptions, apply bool) (ReclamationR
 					return nil
 				}
 				result.Outcome = ReclaimPartial
-				e = parent.RemoveAllCheckedContext(ctx, filepath.Base(r.Location), info, func() error { return s.b.entry(ctx) })
-				_, afterErr := parent.Lstat(filepath.Base(r.Location))
+				e = ops.remove(parent, ctx, filepath.Base(r.Location), info, func() error { return s.b.entry(ctx) })
+				_, afterErr := ops.afterStat(parent, filepath.Base(r.Location))
 				if errors.Is(afterErr, os.ErrNotExist) {
 					zero := int64(0)
 					result.After = UsageObservation{&zero, &zero}
 					if e == nil {
 						result.Outcome = ReclaimRemoved
 					}
+				} else if afterErr != nil {
+					e = errors.Join(e, afterErr)
 				} else {
 					result.After = observeAfter(r.Location)
 				}

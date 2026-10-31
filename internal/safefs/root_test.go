@@ -429,6 +429,46 @@ func TestCleanupRepairPreservesDirectoryModeBits(t *testing.T) {
 	}
 }
 
+func TestCheckedContextRemovalRetainsSubstitutedDescendant(t *testing.T) {
+	base := t.TempDir()
+	leaf := filepath.Join(base, "leaf")
+	if err := os.Mkdir(leaf, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(leaf, "file")
+	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := Open(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	expected, err := root.Lstat("leaf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	visits := 0
+	err = root.RemoveAllCheckedContext(context.Background(), "leaf", expected, func() error {
+		visits++
+		if visits == 3 {
+			// Keep the original inode alive so inode reuse cannot mask substitution.
+			if err := os.Rename(path, filepath.Join(base, "original")); err != nil {
+				return err
+			}
+			return os.WriteFile(path, []byte("replacement"), 0600)
+		}
+		return nil
+	})
+	if err == nil {
+		t.Error("descendant substitution between preflight and deletion accepted")
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil || string(data) != "replacement" {
+		t.Errorf("replacement was not retained: %q, %v", data, readErr)
+	}
+}
+
 func TestCheckedContextRemovalAdversarial(t *testing.T) {
 	for _, attack := range []string{"symlink", "fifo", "socket", "substitution", "cancel", "budget", "success"} {
 		t.Run(attack, func(t *testing.T) {

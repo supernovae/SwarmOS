@@ -8,6 +8,9 @@ import (
 )
 
 func (r *workRun) reviewGate() (bool, error) {
+	if r.st.HumanPlanReview != nil && r.st.ForkRepo == "" && r.st.PRNumber == 0 && r.st.PRRevision == nil {
+		return r.awaitHumanReview()
+	}
 	if r.stopForSplit() {
 		return true, nil
 	}
@@ -74,6 +77,9 @@ func (r *workRun) runReview() (bool, error) {
 		return true, err
 	}
 	r.res.State = r.st
+	if lease.IncompletePlanPair(r.st) {
+		return true, lease.ErrApprovalRequired
+	}
 	reviewer := r.pre.Agents["reviewer"]
 	r.res.RoleAgentsUsed["reviewer"] = reviewer
 	r.activePhase = "review"

@@ -210,3 +210,32 @@ func TestRepairRoundStaysOnLaterEvents(t *testing.T) {
 	}
 	p.Finish("completed")
 }
+
+func TestIssueWorkOutputRetryMetadata(t *testing.T) {
+	var events []Event
+	ticks := make(chan time.Time)
+	p := New(t.Context(), 7, 0, func(e Event) { events = append(events, e) }, ticks, time.Now, nil)
+	p.Retry("plan-review", 1, 2)
+	p.Next("plan")
+	p.Next("review")
+	p.Finish("completed")
+	var plans, reviews int
+	for _, e := range events {
+		if e.Status != "started" {
+			continue
+		}
+		if e.Stage == "plan" || e.Stage == "review" {
+			if e.RetryReason != "plan-review" || e.RetryUsed != 1 || e.RetryLimit != 2 {
+				t.Fatalf("retry event: %+v", e)
+			}
+			if e.Stage == "plan" {
+				plans++
+			} else {
+				reviews++
+			}
+		}
+	}
+	if plans != 1 || reviews != 1 {
+		t.Fatalf("stages %d/%d", plans, reviews)
+	}
+}

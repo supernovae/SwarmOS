@@ -242,3 +242,7 @@ from the approved base commit. They affect prompt guidance and evidence
 expectations only. Plan gates, protected paths and required checks continue to
 come from their existing approved policies. Unassessed WorkUnits retain their
 existing prompts.
+
+### Bounded issue recovery
+
+Default direct issue work continues through ordinary stages to a validated checkpoint. Rejected plan findings guide bounded replacement planning; human rejection requires fresh exact-report human approval under every gate. Plan drafts and automatic repair attempts are reserved before execution, and restarting or reclaiming does not replenish them. Effective planner or developer feedback can request the applicable role within the approved contract. See [workflow recovery](WORKFLOWS.md#recovering-from-a-rejected-agent-plan) for exhausted allowances, missing reports and the separate maintainer edit and approval route. Submission remains explicit.

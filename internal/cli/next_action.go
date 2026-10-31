@@ -16,6 +16,7 @@ import (
 // and pr submit when they stop short of success.
 const (
 	ReasonChangesRequested = "changes_requested"
+	ReasonPlanNoProgress   = "plan_no_progress"
 	ReasonNeedsApproval    = "needs_approval"
 	ReasonConflict         = "conflict"
 	// ReasonPreExistingFailures stops a run whose failing tests all fail at
@@ -64,7 +65,7 @@ func ExitCode(err error) int {
 		return ExitFailure
 	}
 	switch stop.action.Reason {
-	case ReasonChangesRequested, ReasonValidationRepairExhausted, ReasonValidationRepairNoChanges:
+	case ReasonChangesRequested, ReasonPlanNoProgress, ReasonValidationRepairExhausted, ReasonValidationRepairNoChanges:
 		return ExitChangesRequested
 	case ReasonNeedsApproval:
 		return ExitNeedsApproval
@@ -98,6 +99,23 @@ func (c stopContext) classify(err error) *NextAction {
 	if err == nil {
 		return nil
 	}
+	var recovery *workflow.IssueRecoveryError
+	if errors.As(err, &recovery) {
+		reason := ReasonChangesRequested
+		if recovery.Human {
+			reason = ReasonNeedsApproval
+		}
+		if errors.Is(err, workflow.ErrPreExistingFailures) {
+			reason = ReasonPreExistingFailures
+		}
+		number := c.number
+		if number == 0 {
+			number = recovery.IssueNumber
+		}
+		args := []string{"issue", recovery.Operation, strconv.Itoa(number)}
+		args = append(args, recovery.Arguments...)
+		return &NextAction{Reason: reason, Argv: c.argv(recovery.Human, args[0], args[1:]...), HumanRequired: recovery.Human}
+	}
 	var retry *workflow.TestRetryAvailableError
 	if errors.As(err, &retry) && (c.opts == nil || !c.opts.Fork) {
 		return &NextAction{Reason: "tester_retry_available", Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "test")}
@@ -110,6 +128,9 @@ func (c stopContext) classify(err error) *NextAction {
 	}
 	if errors.Is(err, workflow.ErrValidationRepairNoChanges) {
 		return &NextAction{Reason: ReasonValidationRepairNoChanges, Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "implement")}
+	}
+	if errors.Is(err, lease.ErrPlanUnchanged) {
+		return &NextAction{Reason: ReasonPlanNoProgress, Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "plan")}
 	}
 	if errors.Is(err, workflow.ErrPlanReviewRejected) {
 		return &NextAction{Reason: ReasonChangesRequested, Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "plan")}

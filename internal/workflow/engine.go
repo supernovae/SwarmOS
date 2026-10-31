@@ -47,12 +47,14 @@ var (
 )
 
 type WorkOptions struct {
-	PlanCheckpoint bool
-	ExpectedHead   string
-	CandidateHead  string
-	Version        string
-	ReviewEvidence tracker.ReviewEvidence
-	CIEvidence     []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
+	IssueContinuation bool
+	RequestedPhase    string
+	PlanCheckpoint    bool
+	ExpectedHead      string
+	CandidateHead     string
+	Version           string
+	ReviewEvidence    tracker.ReviewEvidence
+	CIEvidence        []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
 
 	InspectOnly           bool // report execution blockers without claiming or running work
 	RepoRoot              string
@@ -403,6 +405,10 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	if err != nil {
 		return nil, err
 	}
+
+	if err := e.CheckIssueContinuation(state, cfg, opts); err != nil {
+		return nil, err
+	}
 	if opts.Phase == "plan" || opts.Phase == "all" && (!hasDesignAndTestPlanArtifacts(state) || hasRejectedReview(state)) {
 		if err := e.LeaseManager.CheckPlanReplan(state); err != nil {
 			return nil, err
@@ -412,7 +418,17 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	binaries := make(map[string]string, 4)
 	approvalState := *state
 	approvalState.EffectiveGate = gate
-	roles := rolesForPhase(opts.Phase, gate, (hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)), lease.VerifyApproval(&approvalState, wu) == nil)
+	roles := rolesForPhase(opts.Phase, planningGate(state, gate), (hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)), lease.VerifyApproval(&approvalState, wu) == nil)
+	if opts.IssueContinuation && opts.Phase == "all" && planningGate(state, gate) == contract.GateAgent && !slices.Contains(roles, "planner") && !hasApprovedReviewArtifact(state) && !strings.EqualFold(cfg.PlanMode, "interactive") {
+		limit, limitErr := e.LeaseManager.PlanReplanLimit(state)
+		if limitErr != nil {
+			return nil, limitErr
+		}
+		if state.PlanReplanCount < limit {
+			roles = append(roles, "planner")
+		}
+	}
+	roles = continuationRoles(roles, state, opts)
 	if strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !(hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)))) {
 		agents["planner"] = "interactive"
 		binaries["planner"] = "interactive"
@@ -589,11 +605,21 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		r.res.PhaseCompleted = "test"
 		return r.res, nil
 	}
-	if done, err := r.plan(); done {
-		return r.res, err
-	}
-	if done, err := r.reviewGate(); done {
-		return r.res, err
+	for {
+		if done, err := r.plan(); done {
+			return r.res, err
+		}
+		done, err := r.reviewGate()
+		if errors.Is(err, ErrPlanReviewRejected) && r.continuation() {
+			if err := r.e.CheckIssueContinuation(r.st, r.cfg, r.opts); err != nil {
+				return r.res, err
+			}
+			continue
+		}
+		if done {
+			return r.res, err
+		}
+		break
 	}
 	if done, err := r.prepareImplementation(); done {
 		return r.res, err
@@ -798,6 +824,10 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 }
 
 func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, recovery WorkOptions, reporters ...*ProgressReporter) (string, *lease.IssueState, error) {
+	if lease.IncompletePlanPair(st) {
+		return "", st, lease.ErrApprovalRequired
+	}
+
 	if err := e.admitStage(ctx, wu.IssueNumber, owner, "review"); err != nil {
 		var admission *budgetAdmissionError
 		if errors.As(err, &admission) {
@@ -1328,11 +1358,23 @@ func truncateStr(s string, maxLen int) string {
 // cause a new plan to be rejected.
 func hasRejectedReview(st *lease.IssueState) bool {
 	_, _, findings := rejectedPlanContext(st)
-	return findings != "" || st != nil && st.PendingPlanReview != nil
+	if st != nil && (st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil) {
+		return findings != "" || st.PendingPlanReview != nil
+	}
+	return !lease.HasRevisedPlan(st) && (findings != "" || st != nil && (st.PendingPlanReview != nil || st.HumanPlanReview != nil))
 }
 func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 	if st == nil {
 		return "", "", ""
+	}
+	if st.ForkRepo == "" && st.PRNumber == 0 && st.PRRevision == nil {
+		if p := st.HumanPlanReview; p != nil && p.Findings != "" {
+			return "", "", p.Findings
+		}
+		if p := st.PendingPlanReview; p != nil && p.Findings != "" && !lease.HasRevisedPlan(st) {
+			return "", "", p.Findings
+		}
+
 	}
 	bindings := lease.ReviewBindings(st)
 	var plan, test string
@@ -1500,4 +1542,105 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 		return verdict, updated, ErrPlanReviewRejected
 	}
 	return verdict, updated, nil
+}
+
+// CheckIssueContinuation classifies blocked direct-issue recovery without
+// changing state. Selection and preflight share this decision; fenced writes
+// remain the final authority after acquisition.
+func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmConfig, opts WorkOptions) error {
+	if st == nil || st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil || opts.ForkMode || opts.PRNumber != 0 {
+		return nil
+	}
+	cfg, configErr := harness.LoadConfigAt(e.repoRoot, st.BaseSHA)
+	if configErr != nil {
+		return configErr
+	}
+	human := st.HumanPlanReview != nil
+	if !opts.IssueContinuation || opts.Phase != "all" {
+		if human && opts.Phase != "plan" {
+			return &lease.HumanPlanApprovalError{IssueNumber: st.Lease.IssueNumber, Err: lease.ErrApprovalRequired}
+		}
+		return nil
+	}
+	needsPlan := !hasDesignAndTestPlanArtifacts(st) || hasRejectedReview(st)
+	if needsPlan && strings.EqualFold(cfg.PlanMode, "interactive") {
+		return nil
+	}
+	if human && !needsPlan {
+		return &lease.HumanPlanApprovalError{IssueNumber: st.Lease.IssueNumber, Err: lease.ErrApprovalRequired}
+	}
+	if needsPlan && (st.PendingPlanReview != nil || human) {
+		rejection := st.PendingPlanReview
+		if human {
+			rejection = st.HumanPlanReview
+		}
+		if !lease.ValidPlanRejection(rejection) || rejection.TaskDigest != st.TaskDigest {
+			return fmt.Errorf("%w: rejected plan provenance is incomplete; a maintainer must revise and separately reapprove the WorkUnit", lease.ErrApprovalRequired)
+		}
+		if err := e.LeaseManager.CheckPlanReplan(st); err != nil {
+			if human {
+				if lease.CompletePlanPair(st) {
+					return &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: err, Operation: "review-plan", Arguments: []string{"--approve"}, Human: true}
+				}
+				return contractRevisionRecovery(st, err)
+			}
+			if !lease.CompletePlanPair(st) {
+				return contractRevisionRecovery(st, err)
+			}
+			return &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: err, Operation: "review-plan", Human: true}
+		}
+		_, _, findings := rejectedPlanContext(st)
+		if strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(findings), "VERDICT: CHANGES_REQUESTED")) == "" && opts.instructionsFor("planner") == "" {
+			return &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: fmt.Errorf("%w: recorded rejection needs planner feedback", ErrPlanReviewRejected), Operation: "work", Arguments: []string{"--planner-instructions", "Address the plan review"}}
+		}
+	}
+	if !needsPlan && lease.IncompletePlanPair(st) {
+		return fmt.Errorf("%w: incomplete plan generation; revise the WorkUnit with swarm issue edit %d --objective '<maintainer-chosen revised objective>' and separately swarm issue approve %d", lease.ErrApprovalRequired, st.Lease.IssueNumber, st.Lease.IssueNumber)
+	}
+	if hasFailedValidationArtifact(st) && opts.instructionsFor("developer") == "" {
+		repair := validation.RepairFromArtifact(st.Artifacts, st.BaseSHA)
+		if repair != nil && repair.AllPreExisting {
+			return &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: ErrPreExistingFailures, Operation: "work", Arguments: []string{"--developer-instructions", "Address the failing checks"}}
+		}
+		if st.ValidationRepairCount >= cfg.Lease.ValidationRepairAttempts() {
+			return fmt.Errorf("%w (%d/%d): run swarm issue work %d --phase implement", ErrValidationRepairExhausted, st.ValidationRepairCount, cfg.Lease.ValidationRepairAttempts(), st.Lease.IssueNumber)
+		}
+	}
+	return nil
+}
+
+// IssueRecoveryError carries an advisory operation without making command text
+// authoritative. The CLI adds the selected repository/backend context.
+type IssueRecoveryError struct {
+	Err         error
+	Operation   string
+	IssueNumber int
+	Arguments   []string
+	Human       bool
+}
+
+func (e *IssueRecoveryError) Error() string { return e.Err.Error() }
+func (e *IssueRecoveryError) Unwrap() error { return e.Err }
+
+func planningGate(st *lease.IssueState, gate contract.GateMode) contract.GateMode {
+	if st != nil && st.ForkRepo == "" && st.PRNumber == 0 && st.PRRevision == nil && st.HumanPlanReview != nil {
+		return contract.GateHuman
+	}
+	return gate
+}
+
+func continuationRoles(roles []string, st *lease.IssueState, opts WorkOptions) []string {
+	if opts.IssueContinuation && opts.Phase == "all" && opts.PRNumber == 0 && !opts.ForkMode && st.ForkRepo == "" && st.PRNumber == 0 && st.PRRevision == nil && st.HumanPlanReview == nil && opts.instructionsFor("developer") == "" && !hasFailedValidationArtifact(st) && hasTrustedImplementation(st) {
+		return []string{"tester"}
+	}
+	return roles
+}
+
+func contractRevisionRecovery(st *lease.IssueState, err error) error {
+	r := &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: err, Operation: "edit", Arguments: []string{"--objective", "<maintainer-chosen revised objective>"}, Human: true}
+	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(time.Now()) {
+		r.Operation = "release"
+		r.Arguments = nil
+	}
+	return r
 }

@@ -89,6 +89,13 @@ type IssueState struct {
 	PlanReviewHistory      []workspace.PlanReviewEvidence  `json:"plan_review_history,omitempty"`
 	PlanReviewSequence     int                             `json:"plan_review_sequence,omitempty"`
 	PlanReplanCount        int                             `json:"plan_replan_count"`
+	HumanPlanReview        *PlanRejection                  `json:"human_plan_review,omitempty"`
+	HumanDraftCount        int                             `json:"human_draft_count,omitempty"`
+	PlanGeneration         int                             `json:"plan_generation,omitempty"`
+	PlanReservation        *PlanDraftReservation           `json:"plan_reservation,omitempty"`
+	CompletePlan           *PlanPair                       `json:"complete_plan,omitempty"`
+	ValidationRepairCount  int                             `json:"validation_repair_count,omitempty"`
+	ValidationRepairKey    string                          `json:"validation_repair_key,omitempty"`
 	PendingPlanReview      *PlanRejection                  `json:"pending_plan_review,omitempty"`
 	NextPhaseReason        string                          `json:"next_phase_reason,omitempty"`
 	ClaimPreviousBase      string                          `json:"-"`
@@ -397,9 +404,9 @@ func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string,
 		return nil, "", fmt.Errorf("state issue identity mismatch")
 	}
 	// Upgrade legacy rejected reviews without trusting contributor artifacts.
-	if st.PendingPlanReview == nil {
+	if st.PendingPlanReview == nil || !validRejection(st.PendingPlanReview) {
 		for _, a := range st.Artifacts {
-			if a.Metadata["upstream_review_source"] != "" || a.Type != contract.ArtifactReview || a.Verdict != "CHANGES_REQUESTED" || a.Metadata["review_source"] != "authenticated-agent" || a.Metadata["content_sha256"] != hash(a.Body) || !reviewBodyMatchesVerdict(a.Body, a.Verdict) {
+			if a.Metadata["upstream_review_source"] != "" || a.Type != contract.ArtifactReview || a.Verdict != "CHANGES_REQUESTED" || (a.Metadata["review_source"] != "authenticated-agent" && !(directIssue(&st) && st.HumanPlanReview == nil && a.Metadata["review_source"] == "authenticated-human")) || a.Metadata["content_sha256"] != hash(a.Body) || !reviewBodyMatchesVerdict(a.Body, a.Verdict) {
 				continue
 			}
 			applicable := true
@@ -790,6 +797,12 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 				return nil, err
 			}
 			dropPlanReviewHistory(old)
+			if old.TaskDigest != contract.DigestWorkUnit(wu) {
+				old.HumanPlanReview, old.CompletePlan = nil, nil
+				old.HumanDraftCount, old.PlanGeneration = 0, 0
+				old.PlanReservation = nil
+			}
+			old.ValidationRepairKey, old.ValidationRepairCount = "", 0
 			old.PlanReplanCount = 0
 			old.PendingPlanReview = nil
 			old.NextPhaseReason = ""
@@ -1557,7 +1570,7 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 			test = &st.Artifacts[i]
 		}
 	}
-	if plan == nil || test == nil {
+	if plan == nil || test == nil || verdict == "APPROVED" && IncompletePlanPair(st) {
 		return nil, ErrApprovalRequired
 	}
 	body := "VERDICT: " + verdict + "\n\n" + notes
@@ -1595,12 +1608,12 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 		if st.Artifacts[i].Type == contract.ArtifactReview {
 			art.Version = st.Artifacts[i].Version + 1
 			st.Artifacts[i] = art
-			appendPlanReviewHistory(st, art, false)
+			recordPlanReviewTransition(st, art, false)
 			return m.save(ctx, n, rev, st)
 		}
 	}
 	st.Artifacts = append(st.Artifacts, art)
-	appendPlanReviewHistory(st, art, false)
+	recordPlanReviewTransition(st, art, false)
 	return m.save(ctx, n, rev, st)
 }
 
@@ -1724,6 +1737,9 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			art.Metadata["model_source"] = "self-reported"
 		}
 		if implementation {
+			if directIssue(st) && (st.HumanPlanReview != nil || IncompletePlanPair(st)) {
+				return ErrApprovalRequired
+			}
 			head, branch := implementationCheckpoint(st)
 			if art.Type != contract.ArtifactImplementation || art.Verdict != "PASS" || head == "" || art.Metadata["head_sha"] != head {
 				return fmt.Errorf("successful recorded implementation checkpoint required")
@@ -1779,6 +1795,12 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			}
 		}
 		if art.Type == contract.ArtifactReview {
+			if IncompletePlanPair(st) && (art.Metadata["kind"] != "human" || art.Verdict == "APPROVED") {
+				return ErrApprovalRequired
+			}
+			if art.Metadata["kind"] == "human" && art.Verdict == "APPROVED" && directIssue(st) && st.HumanPlanReview != nil {
+				return fmt.Errorf("human approval requires RecordHumanReview: %w", ErrApprovalRequired)
+			}
 			if err := m.checkCheckpointPlanObservation(ctx, st); err != nil {
 				return err
 			}
@@ -1901,6 +1923,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			})
 		}
 		if art.Type == contract.ArtifactDesign || art.Type == contract.ArtifactTestPlan {
+			st.CompletePlan = nil
 			var kept []contract.Artifact
 			for _, a := range st.Artifacts {
 				if a.Type != contract.ArtifactReview {
@@ -1963,6 +1986,9 @@ func (m *Manager) insertValidationArtifact(st *IssueState, n int, art contract.A
 	}
 	art.Metadata = metadata
 	if trusted {
+		if directIssue(st) && (st.HumanPlanReview != nil || IncompletePlanPair(st)) {
+			return ErrApprovalRequired
+		}
 		art.Metadata["validation_trusted_origin"] = "coordinator"
 		art.Metadata["validation_trusted_owner"] = st.Lease.Owner
 		art.Metadata["validation_trusted_claim"] = st.Lease.ClaimID
@@ -2201,6 +2227,8 @@ func (m *Manager) BeginPRRevision(ctx context.Context, n int, owner string, numb
 }
 
 func invalidatePRRevisionEvidence(st *IssueState) {
+	st.CompletePlan = nil
+	st.PlanReservation = nil
 	st.ApprovalTransition = nil
 	st.Artifacts = nil
 	st.Attestations = nil
@@ -2428,6 +2456,12 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 			gate = contract.GateAgent
 		}
 	}
+	if IncompletePlanPair(st) {
+		return ErrApprovalRequired
+	}
+	if directIssue(st) && st.HumanPlanReview != nil {
+		gate = contract.GateHuman
+	}
 	if gate == contract.GateNone {
 		return nil
 	}
@@ -2562,6 +2596,9 @@ func (m *Manager) implementationTree(ctx context.Context, head string) (string, 
 
 // VerifyTrustedImplementation checks stable producing evidence independently of the retry claim.
 func VerifyTrustedImplementation(st *IssueState, head, tree, branch string) error {
+	if directIssue(st) && (st.HumanPlanReview != nil || IncompletePlanPair(st)) {
+		return ErrApprovalRequired
+	}
 	if st == nil {
 		return fmt.Errorf("missing implementation")
 	}
@@ -3425,4 +3462,38 @@ func (m *Manager) CheckUpstreamReviewer(o *UpstreamPlanReviewObservation, att co
 		return err
 	}
 	return checkAgentReviewer(cfg.Security, o.state, att.Metadata(nil))
+}
+
+var ErrValidationRepairLimit = errors.New("automatic validation repair limit reached")
+
+func validationRepairKey(st *IssueState) string {
+	return hash(st.TaskDigest + "\x00" + st.PolicyDigest + "\x00" + st.BaseSHA)
+}
+
+// ReserveValidationRepair spends one automatic attempt before a developer can
+// run. Claims, checkpoints and report replacement never replenish this budget.
+func (m *Manager) ReserveValidationRepair(ctx context.Context, n int, owner string) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("validation repair reservation requires direct coordinator")
+	}
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if !directIssue(st) {
+			return fmt.Errorf("validation repair reservation requires direct issue")
+		}
+		key := validationRepairKey(st)
+		if st.ValidationRepairKey != "" && st.ValidationRepairKey != key {
+			return ErrApprovalRequired
+		}
+		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		if err != nil {
+			return err
+		}
+		limit := cfg.Lease.ValidationRepairAttempts()
+		if st.ValidationRepairCount >= limit {
+			return fmt.Errorf("%w (%d/%d)", ErrValidationRepairLimit, st.ValidationRepairCount, limit)
+		}
+		st.ValidationRepairKey = key
+		st.ValidationRepairCount++
+		return nil
+	})
 }

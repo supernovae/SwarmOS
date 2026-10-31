@@ -571,10 +571,10 @@ func (m *Manager) RecordCheckpointPlan(ctx context.Context, n int, p *Checkpoint
 		if !sameCheckpointState(st, p.State) {
 			return ErrClaimFence
 		}
-		if err := m.CheckPlanReplan(st); err != nil {
-			return err
+		if directIssue(st) && st.HumanPlanReview != nil && !planReservationMatches(st, st.HumanPlanReview) {
+			return ErrApprovalRequired
 		}
-		if st.PendingPlanReview != nil {
+		if st.PendingPlanReview != nil || (directIssue(st) && st.HumanPlanReview != nil) {
 			oldPlan, oldTest := "", ""
 			for _, a := range st.Artifacts {
 				if a.Type == contract.ArtifactDesign {
@@ -625,7 +625,8 @@ func (m *Manager) RecordCheckpointPlan(ctx context.Context, n int, p *Checkpoint
 			}
 		}
 		st.Artifacts = append(kept, pair...)
-		recordPlanReviewTransition(st, pair[1], false)
+		markPlanPair(st)
+		st.PlanReservation = nil
 		return nil
 	})
 }

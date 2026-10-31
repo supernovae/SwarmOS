@@ -69,6 +69,8 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 	if err != nil {
 		return nil, err
 	}
+	var blocked []string
+	var lastBlocked error
 	for _, target := range targets {
 		tr, mgr, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, target)
 		if err != nil {
@@ -120,14 +122,22 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			if !node.MatchesCapabilities(nodeProf, wu.RequiredCapabilities) {
 				continue
 			}
+
+			if err := engine.CheckIssueContinuation(state, cfg, opts); err != nil {
+				reason := fmt.Sprintf("Issue #%d: %v", issue.Number, err)
+				blocked = append(blocked, reason)
+				lastBlocked = err
+				fmt.Fprintln(progressWriter(cmd), reason)
+				continue
+			}
 			phase := opts.Phase
 			if phase == "" {
 				phase = "all"
 			}
-			if phase == "all" && state.Lease.Status == "handoff" && state.Lease.NextPhase != "" {
+			if !opts.IssueContinuation && phase == "all" && state.Lease.Status == "handoff" && state.Lease.NextPhase != "" {
 				phase = state.Lease.NextPhase
 			}
-			if phase == "all" || phase == "plan" {
+			if !opts.IssueContinuation && (phase == "all" || phase == "plan") {
 				if err := mgr.CheckPlanReplan(state); err != nil {
 					if errors.Is(err, lease.ErrPlanReplanLimit) {
 						continue
@@ -232,6 +242,9 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			lease.UnlockClaim(lock)
 			return pulled, nil
 		}
+	}
+	if len(blocked) > 0 {
+		return nil, fmt.Errorf("%w: %s: %w", errNoReadyWork, strings.Join(blocked, "; "), lastBlocked)
 	}
 	return nil, errNoReadyWork
 }

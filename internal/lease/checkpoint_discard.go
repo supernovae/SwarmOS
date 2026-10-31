@@ -94,6 +94,9 @@ func (m *Manager) DiscardCheckpoint(ctx context.Context, n int, owner, expectedH
 	st.Artifacts, st.Attestations = nil, nil
 	st.ApprovalTransition, st.CarryReason, st.ChangedPolicyPaths = nil, "", nil
 	st.PendingPlanReview, st.PlanReplanCount, st.NextPhaseReason = nil, 0, ""
+	st.HumanPlanReview, st.CompletePlan = nil, nil
+	st.HumanDraftCount, st.PlanGeneration = 0, 0
+	st.PlanReservation = nil
 	st.RevisionPlan, st.LastRebase = nil, nil
 	st.Lease.NextPhase = ""
 	m.stampForSave(ctx, n, st)

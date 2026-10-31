@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/agent"
@@ -34,6 +35,7 @@ type workRun struct {
 	activePhase                                  string
 	preserveCheckpoint                           bool
 	mode, implementationBase                     string
+	testerResume                                 bool
 	runPlan                                      bool
 	rejectedPlan, rejectedTest, rejectedFindings string
 	rerun                                        string
@@ -86,7 +88,12 @@ func (r *workRun) checkRoleImport(importCtx context.Context, role string, paths,
 	if err := r.e.LeaseManager.CheckClaim(importCtx, r.opts.IssueNumber, r.opts.Owner); err != nil {
 		return err
 	}
-	if r.opts.Phase == "test" {
+	if role == "developer" || role == "tester" {
+		if err := r.checkWorkApproval(importCtx); err != nil {
+			return err
+		}
+	}
+	if r.opts.Phase == "test" || r.testerResume {
 		if err := r.checkTestRetry(); err != nil {
 			return err
 		}
@@ -170,6 +177,11 @@ func (r *workRun) admit(phase string) error {
 	if budgetInterrupted(r.ctx, context.Canceled) {
 		return r.e.pauseAdmission(r.coordinatorCtx, r.opts, phase)
 	}
+	if phase == "implement" {
+		if err := r.checkWorkApproval(r.ctx); err != nil {
+			return err
+		}
+	}
 	return r.e.admitStage(r.ctx, r.opts.IssueNumber, r.opts.Owner, phase)
 }
 
@@ -188,3 +200,33 @@ type TestRetryAvailableError struct{ Err error }
 
 func (e *TestRetryAvailableError) Error() string { return e.Err.Error() }
 func (e *TestRetryAvailableError) Unwrap() error { return e.Err }
+
+func (r *workRun) continuation() bool {
+	return r.opts.IssueContinuation && r.opts.Phase == "all" && !r.forkMode && r.opts.PRNumber == 0 && !r.opts.Handoff
+}
+
+// Recheck human obligations and exact approval at every later role boundary;
+// an independent maintainer can legitimately change a decision mid-run.
+func (r *workRun) checkWorkApproval(ctx context.Context) error {
+	if r.forkMode || r.opts.PRNumber != 0 {
+		return nil
+	}
+	if err := r.e.LeaseManager.CheckClaim(ctx, r.opts.IssueNumber, r.opts.Owner); err != nil {
+		return err
+	}
+	st, err := r.e.LeaseManager.GetCurrentState(ctx, r.opts.IssueNumber)
+	if err != nil {
+		return err
+	}
+	if r.st != nil && !maps.Equal(lease.ReviewBindings(r.st), lease.ReviewBindings(st)) {
+		return lease.ErrApprovalRequired
+	}
+	if err = lease.VerifyApproval(st, r.pre.WorkUnit); err != nil {
+		return err
+	}
+	r.st = st
+	if r.res != nil {
+		r.res.State = st
+	}
+	return nil
+}

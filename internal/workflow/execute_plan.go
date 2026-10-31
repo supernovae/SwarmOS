@@ -25,6 +25,9 @@ import (
 func (r *workRun) plan() (bool, error) {
 	var err error
 	r.rejectedPlan, r.rejectedTest, r.rejectedFindings = rejectedPlanContext(r.st)
+	if r.continuation() && !strings.EqualFold(r.cfg.PlanMode, "interactive") && hasRejectedReview(r.st) && r.opts.instructionsFor("planner") == "" && strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(r.rejectedFindings), "VERDICT: CHANGES_REQUESTED")) == "" {
+		return true, fmt.Errorf("%w: recorded rejection needs planner feedback; run swarm issue work %d --planner-instructions 'Address the plan review'", ErrPlanReviewRejected, r.opts.IssueNumber)
+	}
 	r.runPlan = r.opts.Phase == "all" || r.opts.Phase == "plan"
 	if r.opts.Phase == "all" && (hasDesignAndTestPlanArtifacts(r.st) && !hasRejectedReview(r.st)) {
 		r.runPlan = false
@@ -33,11 +36,11 @@ func (r *workRun) plan() (bool, error) {
 		if err := r.admit("plan"); err != nil {
 			return true, err
 		}
-		r.progress.next("plan")
 		if err := r.check(); err != nil {
 			return true, err
 		}
 		if strings.EqualFold(r.cfg.PlanMode, "interactive") {
+			r.progress.next("plan")
 			r.res.RoleAgentsUsed["planner"] = "interactive"
 			r.res.State = r.st
 			if err := compileSetupBundle(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "planner", r.opts.PRNumber); err != nil {
@@ -57,12 +60,17 @@ func (r *workRun) plan() (bool, error) {
 		if err != nil {
 			return true, err
 		}
-		updated, err := r.e.LeaseManager.UpdatePhase(r.ctx, r.opts.IssueNumber, r.opts.Owner, "plan", "active")
-		if err != nil {
+		if r.st, err = r.e.LeaseManager.UpdatePhase(r.ctx, r.opts.IssueNumber, r.opts.Owner, "plan", "active"); err != nil {
 			return true, err
 		}
-		r.st = updated
 		r.res.State = r.st
+
+		if r.st.HumanPlanReview != nil {
+			r.progress.retry("human-plan-draft", r.st.HumanDraftCount, r.cfg.Lease.PlanReplanAttempts())
+		} else if r.st.PendingPlanReview != nil {
+			r.progress.retry("plan-review", r.st.PlanReplanCount, r.cfg.Lease.PlanReplanAttempts())
+		}
+		r.progress.next("plan")
 		if err := compileSetupBundle(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "planner", r.opts.PRNumber); err != nil {
 			return true, err
 		}
@@ -104,13 +112,24 @@ func (r *workRun) plan() (bool, error) {
 		testPlan = guidedReport(testPlan, planRun)
 		observeRun(planRun, r.st, false)
 		planMeta := runMetadata(planRun, nil)
-		if _, err = r.e.LeaseManager.UpdateArtifact(r.ctx, r.opts.IssueNumber, r.opts.Owner, contract.Artifact{Type: contract.ArtifactDesign, Producer: planner + ":planner", Summary: fmt.Sprintf("Implementation plan for #%d", r.opts.IssueNumber), Body: plan, Metadata: planMeta}); err != nil {
+
+		planArt := contract.Artifact{Type: contract.ArtifactDesign, Producer: planner + ":planner", Summary: fmt.Sprintf("Implementation plan for #%d", r.opts.IssueNumber), Body: plan, Metadata: planMeta}
+		testArt := contract.Artifact{Type: contract.ArtifactTestPlan, Producer: planner + ":planner", Summary: fmt.Sprintf("Test plan covering %d acceptance criteria", len(r.pre.WorkUnit.Acceptance)), Body: testPlan, Metadata: runMetadata(planRun, nil)}
+		if !r.forkMode && r.opts.PRNumber == 0 {
+			r.st, err = r.e.LeaseManager.RecordPlanPair(r.ctx, r.opts.IssueNumber, r.opts.Owner, planArt, testArt)
+		} else {
+			_, err = r.e.LeaseManager.UpdateArtifact(r.ctx, r.opts.IssueNumber, r.opts.Owner, planArt)
+			if err == nil {
+				r.st, err = r.e.LeaseManager.UpdateArtifact(r.ctx, r.opts.IssueNumber, r.opts.Owner, testArt)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, lease.ErrPlanUnchanged) {
+				return true, fmt.Errorf("%w: %w", ErrPlanReviewRejected, err)
+			}
 			return true, err
 		}
-		testMeta := runMetadata(planRun, nil)
-		if r.st, err = r.e.LeaseManager.UpdateArtifact(r.ctx, r.opts.IssueNumber, r.opts.Owner, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: planner + ":planner", Summary: fmt.Sprintf("Test plan covering %d acceptance criteria", len(r.pre.WorkUnit.Acceptance)), Body: testPlan, Metadata: testMeta}); err != nil {
-			return true, err
-		}
+
 		r.res.State, r.res.PhaseCompleted = r.st, "plan"
 		if r.stopForSplit() {
 			return true, nil

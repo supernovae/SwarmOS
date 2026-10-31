@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"github.com/supernovae/swarmos/internal/registry"
 	"io"
 	"os"
 	"path/filepath"
@@ -290,4 +292,154 @@ func scratchClass(name string) string {
 		}
 	}
 	return ""
+}
+
+// SelectedRepository is a validated checkout identity, not registry authority.
+type SelectedRepository struct {
+	Repository string `json:"repository"`
+	RepositoryScope
+}
+
+// DiscoverScopes reads only existing registrations and Git metadata. All-known
+// scope never falls back to the caller's current checkout.
+func DiscoverScopes(ctx context.Context, opts Options, all bool) ([]SelectedRepository, []string, error) {
+	b := Budget{Limits: DefaultLimits()}
+	s := &scanner{ctx: ctx, opts: opts, b: b}
+	entries, err := registry.New(opts.RegistryPath).ReadSnapshot(ctx, b.Limits.Repositories, s.b.Charge)
+	reasons := []string{}
+	if err != nil {
+		reasons = append(reasons, "registry snapshot unavailable")
+	}
+	chosen := []registry.RepoEntry{}
+	if all {
+		chosen = entries
+	} else if opts.SelectedRoot != "" {
+		chosen = append(chosen, registry.RepoEntry{Repo: opts.Repository, Path: opts.SelectedRoot, Backend: opts.Backend})
+		for _, e := range entries {
+			if filepath.Clean(e.Path) == filepath.Clean(opts.SelectedRoot) {
+				chosen[0] = e
+				if opts.Repository != "" && !strings.EqualFold(e.Repo, opts.Repository) {
+					return nil, reasons, errors.New("repository selector mismatch")
+				}
+				if opts.Backend != "" && opts.Backend != e.Backend {
+					return nil, reasons, errors.New("backend selector mismatch")
+				}
+			}
+		}
+	} else if opts.Repository != "" {
+		for _, e := range entries {
+			if strings.EqualFold(e.Repo, opts.Repository) {
+				chosen = append(chosen, e)
+			}
+		}
+		if len(chosen) == 0 {
+			reasons = append(reasons, "selected repository is not registered")
+		}
+	} else {
+		cwd, e := os.Getwd()
+		if e != nil {
+			return nil, reasons, e
+		}
+		root, e := s.git(cwd, "rev-parse", "--show-toplevel")
+		if e != nil {
+			return nil, reasons, errors.New("select a repository checkout or --all-repos")
+		}
+		chosen = append(chosen, registry.RepoEntry{Path: root, Backend: opts.Backend})
+	}
+	out := []SelectedRepository{}
+	seen := map[string]int{}
+	bad := map[string]bool{}
+	claims := map[string]registry.RepoEntry{}
+	for _, e := range chosen {
+		if err := ctx.Err(); err != nil {
+			return out, reasons, err
+		}
+		root, err := filepath.Abs(e.Path)
+		if err != nil || !filepath.IsAbs(e.Path) {
+			reasons = append(reasons, "registered root is not absolute")
+			continue
+		}
+		common, err := s.git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		if err != nil {
+			reasons = append(reasons, "repository identity unavailable")
+			continue
+		}
+		if !all && e.Backend == "" {
+			for _, registered := range entries {
+				observed, e2 := s.git(registered.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+				if e2 != nil || observed != common {
+					continue
+				}
+				if e.Repo != "" && !strings.EqualFold(e.Repo, registered.Repo) {
+					bad[common] = true
+					reasons = append(reasons, "repository selector mismatch")
+					continue
+				}
+				if e.Backend != "" && e.Backend != registered.Backend {
+					bad[common] = true
+					reasons = append(reasons, "conflicting registrations")
+					continue
+				}
+				e.Repo = registered.Repo
+				e.Backend = registered.Backend
+			}
+		}
+		if prior, ok := claims[common]; ok && (prior.Backend != e.Backend || !strings.EqualFold(prior.Repo, e.Repo)) {
+			bad[common] = true
+			reasons = append(reasons, "conflicting registrations")
+		}
+		claims[common] = e
+		if opts.Backend != "" && e.Backend != "" && opts.Backend != e.Backend {
+			reasons = append(reasons, "backend selector mismatch")
+			continue
+		}
+		backend := e.Backend
+		if backend == "" {
+			backend = opts.Backend
+		}
+		if backend == "" {
+			backend = "github"
+		}
+		scope, err := canonicalScope(s, RepositoryScope{root, common, backend})
+		if err != nil {
+			reasons = append(reasons, "invalid repository scope")
+			continue
+		}
+		if filepath.Base(scope.CommonDirectory) == ".git" {
+			scope.Root = filepath.Dir(scope.CommonDirectory)
+		}
+		if backend == "github" {
+			owner := registry.DetectGitHubSlugFrom(scope.Root, firstRemote(opts.Remote))
+			if owner == "" || e.Repo != "" && !strings.EqualFold(owner, e.Repo) {
+				reasons = append(reasons, "repository remote identity mismatch")
+				continue
+			}
+			e.Repo = owner
+		}
+		if i, ok := seen[scope.CommonDirectory]; ok {
+			if out[i].Backend != backend || !strings.EqualFold(out[i].Repository, e.Repo) {
+				bad[scope.CommonDirectory] = true
+				reasons = append(reasons, "conflicting registrations")
+			}
+			continue
+		}
+		seen[scope.CommonDirectory] = len(out)
+		out = append(out, SelectedRepository{e.Repo, scope})
+	}
+	filtered := out[:0]
+	for _, e := range out {
+		if !bad[e.CommonDirectory] {
+			filtered = append(filtered, e)
+		}
+	}
+	if err != nil {
+		return filtered, reasons, fmt.Errorf("discover registered repositories: %w", err)
+	}
+	return filtered, reasons, nil
+}
+func firstRemote(remote string) string {
+	if remote == "" {
+		return "origin"
+	}
+	return remote
 }

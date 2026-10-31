@@ -5,6 +5,7 @@ package gitcredential
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,12 +20,16 @@ func Configure(cmd *exec.Cmd) (func(string) string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return configureToken(cmd, token), nil
+}
+
+func configureToken(cmd *exec.Cmd, token string) func(string) string {
 	var env []string
 	for _, item := range os.Environ() {
 		key, _, _ := strings.Cut(item, "=")
 		upper := strings.ToUpper(key)
 		if strings.HasPrefix(upper, "GIT_CONFIG_") || strings.HasPrefix(upper, "GIT_TRACE") || upper == "GIT_CURL_VERBOSE" || upper == "GIT_EXTERNAL_DIFF" || upper == "GIT_DIFF_OPTS" || upper == "GIT_REPLACE_REF_BASE" || upper == "GIT_NO_REPLACE_OBJECTS" ||
-			(token != "" && (upper == "SWARM_GITHUB_TOKEN" || upper == "GH_TOKEN" || upper == "GITHUB_TOKEN")) || upper == TokenCommandEnv {
+			(upper == "SWARM_GITHUB_TOKEN" || upper == "GH_TOKEN" || upper == "GITHUB_TOKEN") || upper == TokenCommandEnv {
 			continue
 		}
 		env = append(env, item)
@@ -43,7 +48,7 @@ func Configure(cmd *exec.Cmd) (func(string) string, error) {
 		env = append(env, "GIT_CONFIG_KEY_"+strconv.Itoa(i)+"="+entry[0], "GIT_CONFIG_VALUE_"+strconv.Itoa(i)+"="+entry[1])
 	}
 	cmd.Env = append(env, "GIT_NO_REPLACE_OBJECTS=1")
-	return redactionFor(token).Redact, nil
+	return redactionFor(token).Redact
 }
 
 // Command constructs a coordinator Git command. Working-tree operations disable
@@ -55,7 +60,16 @@ func Command(ctx context.Context, root string, args ...string) (*exec.Cmd, func(
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root
-	redact, err := Configure(cmd)
+	var redact func(string) string
+	var err error
+	if localObservation(ctx) {
+		if IsNetwork(args) {
+			return nil, nil, errors.New("remote Git verification requires explicit apply")
+		}
+		redact = configureToken(cmd, "")
+	} else {
+		redact, err = Configure(cmd)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -213,4 +227,18 @@ func ObservationCommand(ctx context.Context, root string, args ...string) (*exec
 	cmd.Dir = root
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_CONFIG_COUNT=4", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=" + os.DevNull, "GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false", "GIT_CONFIG_KEY_2=gc.auto", "GIT_CONFIG_VALUE_2=0", "GIT_CONFIG_KEY_3=maintenance.auto", "GIT_CONFIG_VALUE_3=false"}
 	return cmd, nil
+}
+
+// WithLocalObservation confines an advisory coordinator inspection to local Git
+// metadata without consulting publishing credentials or token commands. Normal
+// command hardening still applies; network commands fail closed.
+func WithLocalObservation(ctx context.Context) context.Context {
+	return context.WithValue(ctx, localObservationKey{}, true)
+}
+
+type localObservationKey struct{}
+
+func localObservation(ctx context.Context) bool {
+	v, _ := ctx.Value(localObservationKey{}).(bool)
+	return v
 }

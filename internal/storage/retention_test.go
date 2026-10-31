@@ -309,6 +309,9 @@ func reclaimFixture(t *testing.T, class string) (ReclaimOptions, *storageuse.Man
 	path := filepath.Join(o.CacheRoot, class, key, "go")
 	if strings.HasSuffix(class, "scratch") {
 		path = filepath.Join(o.ScratchRoot, "swarm-native-fixture")
+		if class == "sandbox-scratch" {
+			path = filepath.Join(o.ScratchRoot, "swarm-worker-fixture")
+		}
 	}
 	r := storageuse.ResourceFor(key, class, path)
 	u, err := m.AcquireUse(context.Background(), r)
@@ -709,6 +712,320 @@ func TestReclamationInjectedFailures(t *testing.T) {
 			again, err := ApplyReclamation(context.Background(), o)
 			if err != nil {
 				t.Fatalf("rerun %+v %v", again, err)
+			}
+		})
+	}
+}
+
+type backendPRFixture struct {
+	pr    *tracker.PullRequest
+	visit func()
+	sha   func() string
+}
+
+func (f backendPRFixture) UpstreamRepo() string { return "fixture/repo" }
+
+func (f backendPRFixture) VisitStateRefs(_ context.Context, _ tracker.InventoryBudget, v func(int, string) error) error {
+	if f.sha == nil {
+		return errors.New("state refs unavailable")
+	}
+	return v(1, f.sha())
+}
+func (f backendPRFixture) VisitPullRequests(_ context.Context, _ tracker.InventoryBudget, v func(*tracker.PullRequest) error) error {
+	if f.visit != nil {
+		f.visit()
+	}
+	return v(f.pr)
+}
+
+// backendReclaimFixture uses actual local authority or a bare Git remote. Only
+// GitHub's PR API is replaced; state enumeration and object fetches run Git.
+func backendReclaimFixture(t *testing.T, backend, class string) (ReclaimOptions, *storageuse.Manager, storageuse.Resource, func(string), string) {
+	t.Helper()
+	o, m, r := reclaimFixture(t, class)
+	repo := o.Scopes[0].Root
+	o.Scopes[0].Backend = backend
+	state := func(status string) string {
+		return fmt.Sprintf(`{"lease":{"version":1,"issue_number":1,"status":%q},"branch":"swarm/issue-1-test","submitted_head_sha":"abc","pr_number":2}`, status)
+	}
+	now := time.Now()
+	pr := &tracker.PullRequest{Number: 2, State: "closed", Merged: true, MergedAt: &now, MergeCommitSHA: "def", HeadSHA: "abc", Head: "swarm/issue-1-test", HeadRepo: "fixture/repo", BaseRepo: "fixture/repo"}
+	update := func(status string) {
+		put(t, filepath.Join(repo, ".swarm", "coordination", "issue-1.json"), state(status))
+	}
+	remote := ""
+	pinned := ""
+	if backend == "github" {
+		seed := t.TempDir()
+		remote = filepath.Join(t.TempDir(), "remote.git")
+		git := func(root string, args ...string) string {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = root
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %v: %s %v", args, out, err)
+			}
+			return strings.TrimSpace(string(out))
+		}
+		git(seed, "init", "-q")
+		git(seed, "init", "--bare", "-q", remote)
+		git(seed, "remote", "add", "origin", remote)
+		git(repo, "remote", "add", "origin", remote)
+		update = func(status string) {
+			put(t, filepath.Join(seed, "state.json"), state(status))
+			git(seed, "add", "state.json")
+			git(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", status)
+			git(seed, "push", "-q", "origin", "HEAD:refs/heads/swarm-state/issue-1")
+			pinned = git(seed, "rev-parse", "HEAD")
+		}
+	}
+	update("completed")
+	o.Retention = BackendRetention{Apply: true, Tracker: func(RepositoryScope) (tracker.PullRequestVisitor, error) {
+		return backendPRFixture{pr: pr, sha: func() string { return pinned }}, nil
+	}}
+	return o, m, r, update, remote
+}
+func TestReclamationBackendSnapshotsAndEligibleRemoval(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		for _, class := range []string{"agent-build", "validate-build", "agent-deps", "validate-deps", "native-scratch", "sandbox-scratch"} {
+			t.Run(backend+"/"+class, func(t *testing.T) {
+				o, _, r, _, _ := backendReclaimFixture(t, backend, class)
+				source := o.Retention.(BackendRetention)
+				source.Apply = false
+				o.Retention = source
+				preview, err := PreviewReclamation(context.Background(), o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := ReclaimEligible
+				if backend == "github" {
+					want = ReclaimRetained
+				}
+				if len(preview.Resources) != 1 || preview.Resources[0].Outcome != want {
+					t.Fatalf("preview %+v", preview)
+				}
+				if _, err = os.Stat(r.Location); err != nil {
+					t.Fatal(err)
+				}
+				source.Apply = true
+				o.Retention = source
+				applied, err := ApplyReclamation(context.Background(), o)
+				if err != nil || applied.Resources[0].Outcome != ReclaimRemoved {
+					t.Fatalf("apply %+v %v", applied, err)
+				}
+				again, err := ApplyReclamation(context.Background(), o)
+				foundAbsent := false
+				for _, item := range again.Resources {
+					if item.Resource.Location == r.Location && item.Outcome == ReclaimAbsent {
+						foundAbsent = true
+					}
+				}
+				if err != nil || !foundAbsent {
+					t.Fatalf("rerun %+v %v", again, err)
+				}
+			})
+		}
+	}
+}
+func TestReclamationBackendFreshnessAndFetchFailure(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		for _, scenario := range []string{"advance", "unreadable", "active-use", "maintenance-wins"} {
+			t.Run(backend+"/"+scenario, func(t *testing.T) {
+				o, m, r, update, remote := backendReclaimFixture(t, backend, "native-scratch")
+				// Establish pinned preview objects, then change authority before apply.
+				b := Budget{Limits: DefaultLimits()}
+				if _, err := ReadRetentionSnapshot(context.Background(), o.Scopes[0], "", true, &b); err != nil {
+					t.Fatal(err)
+				}
+				src := o.Retention.(BackendRetention)
+				src.Apply = false
+				o.Retention = src
+				if _, err := PreviewReclamation(context.Background(), o); err != nil {
+					t.Fatal(err)
+				}
+				src.Apply = true
+				o.Retention = src
+				switch scenario {
+				case "advance":
+					update("active")
+				case "unreadable":
+					if backend == "github" {
+						if err := os.Rename(remote, remote+"-gone"); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						put(t, filepath.Join(o.Scopes[0].Root, ".swarm", "coordination", "issue-1.json"), "invalid")
+					}
+				case "active-use":
+					u, err := m.AcquireUse(context.Background(), r)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer u.Finish(context.Background())
+				case "maintenance-wins":
+					// A contender attempts admission while the real backend source visits.
+					// Cancellation provides a deterministic barrier without timing sleeps.
+					original := src.Tracker
+					src.Tracker = func(scope RepositoryScope) (tracker.PullRequestVisitor, error) {
+						tr, err := original(scope)
+						if err != nil {
+							return nil, err
+						}
+						f := tr.(backendPRFixture)
+						f.visit = func() {
+							ctx, cancel := context.WithCancel(context.Background())
+							started := make(chan struct{})
+							done := make(chan error, 1)
+							go func() {
+								close(started)
+								u, e := m.AcquireUse(ctx, r)
+								if u != nil {
+									u.Finish(context.Background())
+								}
+								done <- e
+							}()
+							<-started
+							cancel()
+							if e := <-done; !errors.Is(e, context.Canceled) {
+								t.Errorf("admission crossed maintenance: %v", e)
+							}
+						}
+						return f, nil
+					}
+					o.Retention = src
+				}
+				out, err := ApplyReclamation(context.Background(), o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := ReclaimRetained
+				if scenario == "maintenance-wins" {
+					want = ReclaimRemoved
+				}
+				if len(out.Resources) != 1 || out.Resources[0].Outcome != want {
+					t.Fatalf("%+v", out)
+				}
+				if want == ReclaimRetained {
+					if _, err := os.Stat(r.Location); err != nil {
+						t.Fatal("resource lost", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestReclamationMissingRootsRemainNonCreating(t *testing.T) {
+	o, _, r := reclaimFixture(t, "native-scratch")
+	o.ControlRoot = filepath.Join(t.TempDir(), "missing-control")
+	o.CacheRoot = filepath.Join(t.TempDir(), "missing-cache")
+	o.Retention = nil
+	for _, apply := range []bool{false, true} {
+		var report ReclamationReport
+		var err error
+		if apply {
+			report, err = ApplyReclamation(context.Background(), o)
+		} else {
+			report, err = PreviewReclamation(context.Background(), o)
+		}
+		if err != nil || len(report.Resources) != 1 || report.Resources[0].Outcome != ReclaimRetained {
+			t.Fatalf("%+v %v", report, err)
+		}
+		for _, p := range []string{o.CacheRoot, o.ControlRoot} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Fatal("created missing root", p, err)
+			}
+		}
+		if _, err := os.Stat(r.Location); err != nil {
+			t.Fatal("unregistered scratch removed", err)
+		}
+	}
+}
+
+func TestReclamationBackendMultipleRepositories(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		t.Run(backend, func(t *testing.T) {
+			o, m, first, _, _ := backendReclaimFixture(t, backend, "agent-build")
+			other, _, outside, _, _ := backendReclaimFixture(t, backend, "validate-build")
+			o.Scopes = append(o.Scopes, other.Scopes[0])
+			second := addReclaimResource(t, o, m, other.Scopes[0].Root, "validate-deps")
+			expected := map[string]bool{first.Location: true, second.Location: true}
+			for _, scope := range o.Scopes {
+				for _, class := range []string{"agent-build", "validate-build", "agent-deps", "validate-deps"} {
+					item := addReclaimResource(t, o, m, scope.Root, class)
+					expected[item.Location] = true
+				}
+				hash := sha256.Sum256([]byte(scope.CommonDirectory))
+				key := hex.EncodeToString(hash[:16])
+				for _, kind := range []struct{ class, prefix string }{{"native-scratch", "swarm-native-"}, {"sandbox-scratch", "swarm-worker-"}} {
+					path := filepath.Join(o.ScratchRoot, kind.prefix+key)
+					item := storageuse.ResourceFor(key, kind.class, path)
+					use, err := m.AcquireUse(context.Background(), item)
+					if err != nil {
+						t.Fatal(err)
+					}
+					put(t, filepath.Join(path, "data"), "scratch")
+					if err := use.Finish(context.Background()); err != nil {
+						t.Fatal(err)
+					}
+					expected[path] = true
+				}
+			}
+			outsideLink := filepath.Join(t.TempDir(), "external-hardlink")
+			if err := os.Link(filepath.Join(first.Location, "data"), outsideLink); err != nil {
+				t.Fatal(err)
+			}
+			source := o.Retention.(BackendRetention)
+			source.Budget = &Budget{Limits: DefaultLimits()}
+			o.Retention = source
+			put(t, filepath.Join(o.CacheRoot, "go-build", "legacy", "data"), "keep legacy")
+			report, err := ApplyReclamation(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcomes := map[string]ReclamationOutcome{}
+			for _, item := range report.Resources {
+				outcomes[item.Resource.Location] = item.Outcome
+			}
+			for path := range expected {
+				if outcomes[path] != ReclaimRemoved {
+					t.Fatalf("eligible leaf %s not removed: %+v", path, report)
+				}
+			}
+			if raw, err := os.ReadFile(outsideLink); err != nil || string(raw) != "reproducible" {
+				t.Fatal("external hardlink lost", err)
+			}
+			if _, err := os.Stat(outside.Location); err != nil {
+				t.Fatal("cross-root deletion", err)
+			}
+			if _, err := os.Stat(filepath.Join(o.CacheRoot, "go-build", "legacy", "data")); err != nil {
+				t.Fatal("legacy deletion", err)
+			}
+		})
+	}
+}
+func TestReclamationBackendCacheUseWins(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		t.Run(backend, func(t *testing.T) {
+			o, m, r, _, _ := backendReclaimFixture(t, backend, "agent-build")
+			use, err := m.AcquireUse(context.Background(), r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := ApplyReclamation(context.Background(), o)
+			if err != nil || report.Resources[0].Outcome != ReclaimRetained {
+				t.Fatalf("%+v %v", report, err)
+			}
+			if _, err := os.Stat(r.Location); err != nil {
+				t.Fatal(err)
+			}
+			if err := use.Finish(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			report, err = ApplyReclamation(context.Background(), o)
+			if err != nil || report.Resources[0].Outcome != ReclaimRemoved {
+				t.Fatalf("idle %+v %v", report, err)
 			}
 		})
 	}

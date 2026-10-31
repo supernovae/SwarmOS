@@ -52,3 +52,42 @@ func TestInventoryPreviewBoundedAndNonCreating(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestInventorySnapshotCoherenceAndNoLocks(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".swarm", "coordination")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "issue-1.json")
+	if err := os.WriteFile(path, []byte(`{"lease":{"version":1,"issue_number":1}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewFileStore(root)
+	states, err := store.ReadInventorySnapshot(context.Background(), 10, func(int64) error { return nil })
+	if err != nil || len(states) != 1 {
+		t.Fatalf("%v %v", states, err)
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatal("created lock", files, err)
+	}
+	mutated := false
+	_, err = store.ReadInventorySnapshot(context.Background(), 10, func(int64) error {
+		if !mutated {
+			mutated = true
+			tmp := filepath.Join(dir, "replacement")
+			if e := os.WriteFile(tmp, []byte("replacement"), 0600); e != nil {
+				return e
+			}
+			return os.Rename(tmp, path)
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("mixed snapshot accepted")
+	}
+	if _, err := store.ReadInventorySnapshot(context.Background(), 0, func(int64) error { return nil }); err == nil {
+		t.Fatal("ignored entry bound")
+	}
+}

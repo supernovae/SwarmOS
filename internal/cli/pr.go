@@ -201,7 +201,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					outcome["next_action"] = action
 				}
 				if err != nil {
-					outcome["status"], outcome["error"] = "failed", err.Error()
+					outcome["status"], outcome["error"] = "failed", messageOnly(err)
 				}
 				if outputErr := writeJSON(cmd, outcome); outputErr != nil {
 					return outputErr
@@ -214,7 +214,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 					fmt.Fprintln(cmd.OutOrStdout(), split)
 				}
 				if recovery != "" {
-					fmt.Fprintln(cmd.OutOrStdout(), recovery)
+					fmt.Fprintln(cmd.OutOrStdout(), planReviewSummary(rootOpts, result.State))
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "PR #%d %s: issue=#%d head=%s base=%s\n", opts.Number, result.Status, result.IssueNumber, result.HeadSHA, result.BaseSHA)
 				if result.WorkPreflight != nil {

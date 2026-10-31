@@ -189,7 +189,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	boundExpected, boundCandidate, recovery, bindingErr := CheckpointPlanHeads(st)
 	recoveryMismatch := recovery && (bindingErr != nil || boundExpected != expected || boundCandidate != candidate)
 	if !prepare && recoveryMismatch {
-		return nil, ErrApprovalRequired
+		return nil, ErrPlanApprovalRequired
 	}
 	approvalErr := VerifyApproval(st, wu)
 	reviewRequired := approvalErr != nil
@@ -237,7 +237,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		return result, nil
 	}
 	if reviewRequired {
-		return result, fmt.Errorf("%w: stage a replacement plan naming candidate %s and obtain fresh plan review with swarm issue review-plan %d before reconciling", ErrApprovalRequired, candidate, n)
+		return result, fmt.Errorf("%w: stage a replacement plan naming candidate %s and obtain fresh plan review with swarm issue review-plan %d before reconciling", ErrPlanApprovalRequired, candidate, n)
 	}
 	validationOpts := validation.ValidateOptions{BaseSHA: st.BaseSHA, ClaimID: st.Lease.ClaimID, CIMode: true}
 	if len(options) > 1 {
@@ -523,7 +523,7 @@ func CheckpointPlanHeads(st *IssueState) (expected, candidate string, present bo
 		return
 	}
 	if plan == nil || test == nil {
-		err = ErrApprovalRequired
+		err = ErrPlanApprovalRequired
 		return
 	}
 	expected, candidate = plan.Metadata["checkpoint_plan_predecessor"], plan.Metadata["checkpoint_plan_candidate"]
@@ -533,12 +533,12 @@ func CheckpointPlanHeads(st *IssueState) (expected, candidate string, present bo
 	}
 	for k, v := range required {
 		if v == "" || plan.Metadata[k] != v || test.Metadata[k] != v {
-			err = ErrApprovalRequired
+			err = ErrPlanApprovalRequired
 			return
 		}
 	}
 	if len(expected) != 40 || len(candidate) != 40 || expected == candidate || (st.HeadSHA != expected && st.HeadSHA != candidate) || plan.Metadata["content_sha256"] != hash(plan.Body) || test.Metadata["content_sha256"] != hash(test.Body) {
-		err = ErrApprovalRequired
+		err = ErrPlanApprovalRequired
 	}
 	return
 }
@@ -572,7 +572,7 @@ func (m *Manager) RecordCheckpointPlan(ctx context.Context, n int, p *Checkpoint
 			return ErrClaimFence
 		}
 		if directIssue(st) && st.HumanPlanReview != nil && !planReservationMatches(st, st.HumanPlanReview) {
-			return ErrApprovalRequired
+			return ErrPlanApprovalRequired
 		}
 		if st.PendingPlanReview != nil || (directIssue(st) && st.HumanPlanReview != nil) {
 			oldPlan, oldTest := "", ""
@@ -674,12 +674,12 @@ func prepareCheckpointValidation(ctx context.Context, snapshot string, st *Issue
 			if a.Type == in.kind {
 				in.body = a.Body
 				if a.Metadata["content_sha256"] != hash(a.Body) {
-					return ErrApprovalRequired
+					return ErrPlanApprovalRequired
 				}
 			}
 		}
 		if in.body == "" || bindings[in.digest] != hash(in.body) {
-			return ErrApprovalRequired
+			return ErrPlanApprovalRequired
 		}
 		tracked, err := checkpointGit(ctx, snapshot, "ls-files", "--", in.name)
 		if err != nil || tracked != "" {

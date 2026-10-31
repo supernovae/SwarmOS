@@ -425,7 +425,7 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 			t.Fatalf("fork stop: %v\n%s", err, out)
 		}
 		var stop *stopError
-		if !errors.As(err, &stop) || !strings.HasPrefix(err.Error(), stop.err.Error()+"\n") || !strings.Contains(err.Error(), "linked upstream issue #42") || !strings.Contains(err.Error(), "swarm --backend github issue review-plan 42 --approve") || !strings.Contains(err.Error(), "Run this command from the upstream repository checkout.") {
+		if !errors.As(err, &stop) || !strings.HasPrefix(err.Error(), stop.err.Error()+"\n") || !strings.Contains(err.Error(), "upstream maintainer") || !strings.Contains(err.Error(), "swarm --backend github issue review-plan 42 --approve") || !strings.Contains(err.Error(), "Run this command from the upstream repository checkout.") {
 			t.Fatalf("guidance: %v", err)
 		}
 		if jsonMode {

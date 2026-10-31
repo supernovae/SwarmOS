@@ -22,7 +22,7 @@ func reportJSONFailure(cmd *cobra.Command, asJSON bool, kind string, err error) 
 // report, when there is one, under the document's report key.
 func reportJSONFailureWithReport(cmd *cobra.Command, asJSON bool, kind string, err error, report *validation.ValidationReport) {
 	if asJSON && err != nil {
-		outcome := map[string]any{"kind": kind, "status": "failed", "error": err.Error()}
+		outcome := map[string]any{"kind": kind, "status": "failed", "error": messageOnly(err)}
 		if report != nil {
 			outcome["report"] = report
 		}

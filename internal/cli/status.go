@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
@@ -17,9 +18,10 @@ import (
 )
 
 type issueStatus struct {
-	Decomposition *lease.DecompositionStatus `json:"decomposition,omitempty"`
-	PlanReview    *planReviewDisplay         `json:"plan_review,omitempty"`
-	ClaimBudget   *lease.ClaimBudget         `json:"claim_budget,omitempty"`
+	Decomposition   *lease.DecompositionStatus `json:"decomposition,omitempty"`
+	humanPlanAction *NextAction
+	PlanReview      *planReviewDisplay `json:"plan_review,omitempty"`
+	ClaimBudget     *lease.ClaimBudget `json:"claim_budget,omitempty"`
 	// Set for a fork-mode claim whose upstream coordinator predates budgets.
 	ClaimBudgetUnavailable bool                        `json:"claim_budget_unavailable,omitempty"`
 	PlanReplanLimit        int                         `json:"plan_replan_limit"`
@@ -94,6 +96,21 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance, RoleRuns: lease.RoleRuns(state)}
 				if state != nil {
 					entry.Decomposition = manager.InspectDecomposition(cmd.Context(), state)
+					if state.EffectiveGate == contract.GateHuman {
+						wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+						if err != nil {
+							return err
+						}
+						cfg, err := harness.LoadConfigAt(target.Path, state.BaseSHA)
+						if err != nil {
+							return err
+						}
+						if needsHumanPlanDecision(state, wu, cfg) {
+							selected := *options
+							selected.Repo, selected.RepoRoot, selected.Backend = target.Repo, target.Path, target.Backend
+							entry.humanPlanAction = (stopContext{opts: &selected}).planApproval(issue.Number)
+						}
+					}
 					entry.Repair = validation.RepairFromArtifact(state.Artifacts, state.BaseSHA)
 					entry.ClaimBudget, err = manager.Budget(state)
 					if err != nil {
@@ -164,7 +181,10 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			} else if d != nil && d.NextPhase != "" {
 				fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s\n", d.NextPhase)
 			}
-			if d != nil && len(d.RecoveryCommands) > 0 {
+			if entry.humanPlanAction != nil {
+				fmt.Fprintln(cmd.OutOrStdout(), "Plan approval required."+renderNextAction(entry.humanPlanAction))
+			}
+			if entry.humanPlanAction == nil && d != nil && len(d.RecoveryCommands) > 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), strings.Join(d.RecoveryCommands, "; "))
 			}
 			status := state.Lease.Status
@@ -186,7 +206,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 					if len(state.ChangedPolicyPaths) > 0 {
 						fmt.Fprintf(cmd.OutOrStdout(), "Policy paths: %s\n", strings.Join(state.ChangedPolicyPaths, ", "))
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "Plan review required: swarm issue review-plan %d --approve\n", entry.Issue.Number)
+
 				}
 				if fs := state.FreshStart; fs != nil {
 					fmt.Fprintf(cmd.OutOrStdout(), "Fresh start: next claim begins on %s at the approved base\n", fs.Branch)

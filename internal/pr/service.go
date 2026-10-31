@@ -890,7 +890,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 	}
 	if !opts.Abort && r.PR.BaseSHA != r.BaseSHA {
 		if !opts.Resolve || s.Fork {
-			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("PR base tip differs from approved issue baseline: swarm issue approve %d then retry (release active claim first if needed)", r.IssueNumber)}
+			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("PR base tip differs from approved issue baseline; task reapproval required (release active claim first if needed)")}
 		}
 		// Preflight before changing approval or Git state.
 		earlyResolver, resolveErr := s.newResolver(ctx, r, opts)
@@ -904,11 +904,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("plan review required: swarm pr work %d --phase review", opts.Number)
 		}
 		if _, err = s.Manager.ReapproveRebase(ctx, r.IssueNumber, opts.Number, r.BaseSHA, r.PR.BaseSHA, r.PR.HeadSHA); err != nil {
-			hint := fmt.Sprintf("swarm issue approve %d", r.IssueNumber)
 			wrapped := fmt.Errorf("routine reapproval: %w", err)
-			if !strings.Contains(err.Error(), hint) {
-				wrapped = fmt.Errorf("%w; run %s", wrapped, hint)
-			}
 			return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: wrapped}
 		}
 		r, remote, err = s.openForMutation(ctx, opts.Number, false)
@@ -926,7 +922,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 	if !opts.Abort && r.PR.BaseSHA != r.BaseSHA {
-		return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("PR target moved during approval: swarm issue approve %d", r.IssueNumber)}
+		return nil, &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("PR target moved during approval; task reapproval required")}
 	}
 	var rv *resolver
 	if opts.Resolve {
@@ -954,7 +950,7 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 					return nil, fmt.Errorf("no managed PR rebase in progress")
 				}
 			} else if rebasing && !opts.Resolve {
-				return nil, &ConflictError{PRNumber: opts.Number, Paused: true, Err: fmt.Errorf("rebase already in progress; run swarm pr rebase %d --continue or --abort", opts.Number)}
+				return nil, &ConflictError{PRNumber: opts.Number, Paused: true, Err: fmt.Errorf("rebase already in progress; continue resolution or run swarm pr rebase %d --abort", opts.Number)}
 			} else if dirty && !rebasing {
 				return nil, fmt.Errorf("PR worktree must be clean before starting rebase")
 			}

@@ -503,7 +503,7 @@ func TestCLIPRRebaseConflictAbortAndContinue(t *testing.T) {
 		t.Fatal("conflicting rebase reported success")
 	}
 	worktree := workspace.PRWorktreePath(f.root, number)
-	if _, err := f.run("pr", "rebase", p); err == nil || !strings.Contains(err.Error(), "--continue or --abort") {
+	if _, err := f.run("pr", "rebase", p); err == nil || (!strings.Contains(err.Error(), "--continue --resolve") || !strings.Contains(err.Error(), "--abort") || strings.Count(err.Error(), "Next step:") != 1) {
 		t.Fatalf("missing recovery guidance: %v", err)
 	}
 	f.must(t, "pr", "rebase", p, "--abort")
@@ -559,7 +559,7 @@ func TestCLIApprovalClaimRecovery(t *testing.T) {
 	n := strconv.Itoa(number)
 	f.must(t, "issue", "approve", n)
 	f.must(t, "issue", "claim", n, "--agent", "mock")
-	if _, err := f.run("issue", "approve", n); err == nil || !strings.Contains(err.Error(), "alice") || !strings.Contains(err.Error(), "until") || !strings.Contains(err.Error(), "swarm issue release "+n) {
+	if _, err := f.run("issue", "approve", n); err == nil || !strings.Contains(err.Error(), "alice") || !strings.Contains(err.Error(), "until") || (!strings.Contains(err.Error(), "task approval is current") || strings.Contains(err.Error(), "issue release "+n)) {
 		t.Fatalf("own claim recovery: %v", err)
 	}
 	f.setenv("SWARM_USER", "other-maintainer")

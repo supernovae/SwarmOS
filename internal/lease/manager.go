@@ -518,7 +518,7 @@ func checkAgentReviewer(sec contract.SecurityConfig, st *IssueState, meta map[st
 		agent = strings.TrimSpace(meta["harness"])
 	}
 	if len(sec.ReviewerAgents) > 0 && !slices.Contains(sec.ReviewerAgents, agent) {
-		return fmt.Errorf("%w: reviewer agent %q is not in security.reviewer_agents %v", ErrApprovalRequired, agent, sec.ReviewerAgents)
+		return fmt.Errorf("%w: reviewer agent %q is not in security.reviewer_agents %v", ErrPlanApprovalRequired, agent, sec.ReviewerAgents)
 	}
 	if !sec.IndependentReview {
 		return nil
@@ -532,7 +532,7 @@ func checkAgentReviewer(sec contract.SecurityConfig, st *IssueState, meta map[st
 	}
 	for _, att := range st.Attestations {
 		if att.Role == "planner" && strings.EqualFold(att.Harness, harnessName) && strings.EqualFold(att.Model, model) {
-			return fmt.Errorf("%w: security.independent_review requires a reviewer other than the planner (%s/%s)", ErrApprovalRequired, harnessName, model)
+			return fmt.Errorf("%w: security.independent_review requires a reviewer other than the planner (%s/%s)", ErrPlanApprovalRequired, harnessName, model)
 		}
 	}
 	return nil
@@ -542,7 +542,7 @@ func checkAgentReviewer(sec contract.SecurityConfig, st *IssueState, meta map[st
 // when the approved policy asks for independent review.
 func checkHumanReviewer(sec contract.SecurityConfig, st *IssueState, actor string) error {
 	if sec.IndependentReview && strings.EqualFold(strings.TrimSpace(st.Lease.Owner), strings.TrimSpace(actor)) {
-		return fmt.Errorf("%w: security.independent_review forbids %q from reviewing a plan they claimed", ErrApprovalRequired, actor)
+		return fmt.Errorf("%w: security.independent_review forbids %q from reviewing a plan they claimed", ErrPlanApprovalRequired, actor)
 	}
 	return nil
 }
@@ -1745,7 +1745,7 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	// A submitted issue keeps a completed lease while its linked PR is
 	// revised; a policy move on rebase then needs a fresh human review here.
 	if st.Lease.Status == "completed" && st.PRNumber == 0 {
-		return nil, fmt.Errorf("issue #%d is completed with no linked PR; there is no plan left to review: %w", n, ErrApprovalRequired)
+		return nil, fmt.Errorf("issue #%d is completed with no linked PR; there is no plan left to review: %w", n, ErrPlanApprovalRequired)
 	}
 	if err := m.checkApprovedState(ctx, n, st); err != nil {
 		return nil, err
@@ -1773,7 +1773,7 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 		}
 	}
 	if plan == nil || test == nil || verdict == "APPROVED" && IncompletePlanPair(st) {
-		return nil, ErrApprovalRequired
+		return nil, ErrPlanApprovalRequired
 	}
 	body := "VERDICT: " + verdict + "\n\n" + notes
 	if !reviewBodyMatchesVerdict(body, verdict) {
@@ -1940,7 +1940,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		}
 		if implementation {
 			if directIssue(st) && (st.HumanPlanReview != nil || IncompletePlanPair(st)) {
-				return ErrApprovalRequired
+				return ErrPlanApprovalRequired
 			}
 			head, branch := implementationCheckpoint(st)
 			if art.Type != contract.ArtifactImplementation || art.Verdict != "PASS" || head == "" || art.Metadata["head_sha"] != head {
@@ -1948,7 +1948,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			}
 			bindings := ReviewBindings(st)
 			if bindings["plan_digest"] == "" || bindings["test_plan_digest"] == "" {
-				return ErrApprovalRequired
+				return ErrPlanApprovalRequired
 			}
 			for k, v := range bindings {
 				if v == "" || art.Metadata[k] != v {
@@ -1998,10 +1998,10 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		}
 		if art.Type == contract.ArtifactReview {
 			if IncompletePlanPair(st) && (art.Metadata["kind"] != "human" || art.Verdict == "APPROVED") {
-				return ErrApprovalRequired
+				return ErrPlanApprovalRequired
 			}
 			if art.Metadata["kind"] == "human" && art.Verdict == "APPROVED" && directIssue(st) && st.HumanPlanReview != nil {
-				return fmt.Errorf("human approval requires RecordHumanReview: %w", ErrApprovalRequired)
+				return fmt.Errorf("human approval requires RecordHumanReview: %w", ErrPlanApprovalRequired)
 			}
 			if err := m.checkCheckpointPlanObservation(ctx, st); err != nil {
 				return err
@@ -2064,7 +2064,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			if kind == "agent" && !advisory {
 				for key, expected := range bindings {
 					if expected == "" || art.Metadata[key] != expected {
-						return fmt.Errorf("%w: reviewed inputs changed (%s)", ErrApprovalRequired, key)
+						return fmt.Errorf("%w: reviewed inputs changed (%s)", ErrPlanApprovalRequired, key)
 					}
 				}
 			}
@@ -2189,7 +2189,7 @@ func (m *Manager) insertValidationArtifact(st *IssueState, n int, art contract.A
 	art.Metadata = metadata
 	if trusted {
 		if directIssue(st) && (st.HumanPlanReview != nil || IncompletePlanPair(st)) {
-			return ErrApprovalRequired
+			return ErrPlanApprovalRequired
 		}
 		art.Metadata["validation_trusted_origin"] = "coordinator"
 		art.Metadata["validation_trusted_owner"] = st.Lease.Owner
@@ -2248,7 +2248,7 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 		return nil, err
 	}
 	if _, candidate, present, bindingErr := CheckpointPlanHeads(st); present && (bindingErr != nil || st.HeadSHA != candidate) {
-		return nil, fmt.Errorf("%w: explicit checkpoint reconciliation required", ErrApprovalRequired)
+		return nil, fmt.Errorf("%w: explicit checkpoint reconciliation required", ErrPlanApprovalRequired)
 	}
 	if st.PRRevision != nil {
 		return nil, fmt.Errorf("issue #%d has a pending PR revision; issue checkpoint publication is blocked", n)
@@ -2659,7 +2659,7 @@ func VerifyApproval(st *IssueState, wu *contract.WorkUnit) error {
 		}
 	}
 	if IncompletePlanPair(st) {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	if directIssue(st) && st.HumanPlanReview != nil {
 		gate = contract.GateHuman
@@ -2703,18 +2703,18 @@ func verifyReviewBinding(st *IssueState, gate contract.GateMode) error {
 		}
 	}
 	if plan == nil || test == nil || review == nil || review.Verdict != "APPROVED" || review.Metadata["superseded_by"] != "" {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	if review.Metadata["actor"] == "" || review.Metadata["review_source"] != "authenticated-"+review.Metadata["kind"] ||
 		!reviewBaseMatches(st, review) || review.Metadata["content_sha256"] != hash(review.Body) ||
 		!reviewBodyMatchesVerdict(review.Body, review.Verdict) {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	if review.Metadata["task_digest"] != st.TaskDigest || review.Metadata["plan_digest"] != hash(plan.Body) || review.Metadata["test_plan_digest"] != hash(test.Body) {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	if tree := review.Metadata["policy_tree_digest"]; tree != "" && tree != st.PolicyTreeDigest {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	if _, _, present, err := CheckpointPlanHeads(st); present {
 		if err != nil {
@@ -2722,19 +2722,19 @@ func verifyReviewBinding(st *IssueState, gate contract.GateMode) error {
 		}
 		for k, v := range ReviewBindings(st) {
 			if v == "" || review.Metadata[k] != v {
-				return ErrApprovalRequired
+				return ErrPlanApprovalRequired
 			}
 		}
 	}
 	if context := review.Metadata["upstream_review_context"]; context != "" && context != upstreamReviewContext(st) {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	kind := review.Metadata["kind"]
 	if gate == contract.GateAgent && kind != "agent" && !(kind == "human" && review.Metadata["actor"] != "") {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	if gate == contract.GateHuman && (kind != "human" || review.Metadata["actor"] == "") {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	return nil
 }
@@ -2799,7 +2799,7 @@ func (m *Manager) implementationTree(ctx context.Context, head string) (string, 
 // VerifyTrustedImplementation checks stable producing evidence independently of the retry claim.
 func VerifyTrustedImplementation(st *IssueState, head, tree, branch string) error {
 	if directIssue(st) && (st.HumanPlanReview != nil || IncompletePlanPair(st)) {
-		return ErrApprovalRequired
+		return ErrPlanApprovalRequired
 	}
 	if st == nil {
 		return fmt.Errorf("missing implementation")
@@ -2826,7 +2826,7 @@ func VerifyTrustedImplementation(st *IssueState, head, tree, branch string) erro
 		}
 		bindings := ReviewBindings(st)
 		if bindings["plan_digest"] == "" || bindings["test_plan_digest"] == "" {
-			return ErrApprovalRequired
+			return ErrPlanApprovalRequired
 		}
 		for k, v := range bindings {
 			if k != "review_claim_id" && (v == "" || md["implementation_trusted_"+k] != v) {
@@ -3367,11 +3367,11 @@ func (m *Manager) PrepareUpstreamPlanReview(ctx context.Context, n int) (*Upstre
 			continue
 		}
 		if a.ID == "" || a.Body == "" || a.Metadata["content_sha256"] != hash(a.Body) {
-			return nil, ErrApprovalRequired
+			return nil, ErrPlanApprovalRequired
 		}
 	}
 	if plans != 1 || tests != 1 {
-		return nil, ErrApprovalRequired
+		return nil, ErrPlanApprovalRequired
 	}
 	source, err := m.upstreamReviewSource(ctx, tr.UpstreamRepo(), st)
 	if err != nil {
@@ -3467,7 +3467,7 @@ func (m *Manager) upstreamReviewSource(ctx context.Context, upstream string, st 
 		}
 	}
 	if !reviewCommitID(source.Commit) {
-		return source, ErrApprovalRequired
+		return source, ErrPlanApprovalRequired
 	}
 	if source.Branch != "" {
 		// Only the exact remotely published candidate is reviewable. No source

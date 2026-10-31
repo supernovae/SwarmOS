@@ -173,3 +173,13 @@ func derivePlanReviewDisplay(st *lease.IssueState, mode string, limit int) *plan
 	}
 	return d
 }
+
+func planReviewSummary(opts *RootOptions, st *lease.IssueState) string {
+	if st == nil {
+		return ""
+	}
+	if d := directPlanReviewDisplay(opts, st); d != nil {
+		return fmt.Sprintf("%s. Plan review round %d; automatic plan retries: %d/%d; operator decision needed: %t.", st.NextPhaseReason, d.Round, d.RetriesUsed, d.RetriesAllowed, d.OperatorDecision)
+	}
+	return st.NextPhaseReason
+}

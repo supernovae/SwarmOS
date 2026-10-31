@@ -186,7 +186,7 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 	r.res.State = r.st
 	r.outcomeFailed = failure != ""
 	if round > 0 && unchanged && blocked == "" {
-		return false, fmt.Errorf("issue #%d: %w in repair round %d/%d (%s); rerun with %s", r.opts.IssueNumber, ErrValidationRepairNoChanges, round, r.repairLimit, failure, r.rerun)
+		return false, fmt.Errorf("issue #%d: %w in repair round %d/%d (%s)", r.opts.IssueNumber, ErrValidationRepairNoChanges, round, r.repairLimit, failure)
 	}
 	if failure != "" {
 		return false, fmt.Errorf("issue #%d: %s; rerun with %s", r.opts.IssueNumber, failure, r.rerun)

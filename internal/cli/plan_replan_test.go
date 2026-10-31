@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
@@ -156,7 +157,7 @@ func TestPRPlanReplanCap(t *testing.T) {
 	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 	args := []string{"pr", "work", strconv.Itoa(number), "--agent", "mock", "--progress=false"}
 	out, err := f.run(args...)
-	if !errors.Is(err, workflow.ErrPlanReviewRejected) || !strings.Contains(out, "pr work "+strconv.Itoa(number)+" --phase plan") {
+	if !errors.Is(err, workflow.ErrPlanReviewRejected) || !strings.Contains(out+fmt.Sprint(err), "pr work "+strconv.Itoa(number)+" --phase plan") {
 		t.Fatalf("PR recovery: %v %s", err, out)
 	}
 	for i := 0; i < 2; i++ {
@@ -167,7 +168,7 @@ func TestPRPlanReplanCap(t *testing.T) {
 	if _, err := f.run(args...); !errors.Is(err, lease.ErrPlanReplanLimit) {
 		t.Fatalf("PR cap: %v", err)
 	} else {
-		assertPlanReplanCommands326(t, f, issue, err.Error())
+		assertPlanReplanCommands326(t, f, issue, err.Error(), true)
 		if strings.Contains(err.Error(), "swarm issue review-plan "+strconv.Itoa(number)+" ") {
 			t.Fatal(err)
 		}
@@ -277,11 +278,15 @@ func TestInteractiveWorkIgnoresExhaustedAutomaticBudget(t *testing.T) {
 }
 
 // Check the suggested alternatives against the real registered Cobra tree.
-func assertPlanReplanCommands326(t *testing.T, f *cliFixture, issue int, guidance string) {
+func assertPlanReplanCommands326(t *testing.T, f *cliFixture, issue int, guidance string, commandFree ...bool) {
 	t.Helper()
 	for _, decision := range []string{"reject", "approve"} {
 		args := []string{"issue", "review-plan", strconv.Itoa(issue), "--" + decision, "--notes", "Reviewed reports"}
-		if !strings.Contains(guidance, "swarm "+strings.Join(args[:4], " ")) {
+		expected := "swarm " + strings.Join(args[:4], " ")
+		if len(commandFree) > 0 && commandFree[0] {
+			expected = map[string]string{"reject": "request a revised plan", "approve": "approve the current reports"}[decision]
+		}
+		if !strings.Contains(guidance, expected) {
 			t.Fatal(guidance)
 		}
 		cmd, rest, err := f.command(nil).Find(args)

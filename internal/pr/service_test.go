@@ -1223,7 +1223,7 @@ func TestRebaseRoutineReapprovalSingleHint(t *testing.T) {
 			}
 			_, err = s.Rebase(t.Context(), Options{Number: number, Resolve: true})
 			var approval *lease.TaskApprovalError
-			if !errors.As(err, &approval) || strings.Count(err.Error(), fmt.Sprintf("swarm issue approve %d", issue)) != 1 || !strings.Contains(err.Error(), reason) {
+			if !errors.As(err, &approval) || strings.Count(err.Error(), fmt.Sprintf("swarm issue approve %d", issue)) != 0 || !strings.Contains(err.Error(), reason) {
 				t.Fatalf("%v", err)
 			}
 			after, err := s.Manager.GetCurrentState(t.Context(), issue)

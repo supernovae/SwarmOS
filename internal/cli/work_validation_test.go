@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
@@ -1815,6 +1816,84 @@ func TestIssueWorkRecoveryNodeRejectsWithoutContinuation(t *testing.T) {
 			}
 			if st.PlanReplanCount != 0 || st.PendingPlanReview == nil || !lease.CompletePlanPair(st) || st.PRNumber != 0 {
 				t.Fatalf("node continuation leaked %+v", st)
+			}
+		})
+	}
+}
+
+func TestIssueWorkStaleHumanPlanBeforeRepair(t *testing.T) {
+	for _, phase := range []string{"all", "implement"} {
+		t.Run(phase, func(t *testing.T) {
+			f, n, script, actor, run := recoveryCommandFixture(t, "local", "human", 1, func(f *cliFixture) { setupWorkValidationPolicy(t, f) })
+			number := strconv.Itoa(n)
+			must := func(args ...string) {
+				t.Helper()
+				if out, err := run(args...); err != nil {
+					t.Fatal(err, out)
+				}
+			}
+			must("issue", "work", number, "--phase", "plan", "--agent", "mock", "--progress=false")
+			*actor = "independent-maintainer"
+			must("issue", "review-plan", number, "--approve")
+			*actor = "alice"
+			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "echo fail > fail-shell")
+			if _, err := run("issue", "work", number, "--phase", "implement", "--agent", "mock", "--progress=false"); err == nil {
+				t.Fatal("expected failed validation")
+			}
+			if _, err := run("issue", "work", number, "--agent", "mock", "--progress=false"); ExitCode(err) != ExitChangesRequested || !errors.Is(err, workflow.ErrValidationRepairExhausted) {
+				t.Fatalf("current approval should retain exhausted recovery: %v", err)
+			}
+			must("issue", "work", number, "--phase", "plan", "--planner-instructions", "Replace the reports", "--agent", "mock", "--progress=false")
+			before, err := f.manager.GetCurrentState(t.Context(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.HumanPlanReview != nil || lease.VerifyHumanPlanApproval(before) == nil {
+				t.Fatal("replacement did not invalidate approval")
+			}
+			failed := false
+			for _, a := range before.Artifacts {
+				if a.Type == contract.ArtifactValidation && a.Verdict == "FAIL" {
+					failed = true
+				}
+				if a.Type == contract.ArtifactReview {
+					t.Fatal("fixture should remove old review")
+				}
+			}
+			if !failed {
+				t.Fatal("lost failed validation")
+			}
+			dev := script.counts["developer"]
+			for _, asJSON := range []bool{false, true} {
+				args := []string{"issue", "work", number, "--phase", phase, "--agent", "mock", "--progress=false"}
+				if asJSON {
+					args = append(args, "--json")
+				}
+				out, err := run(args...)
+				if ExitCode(err) != ExitNeedsApproval || nextActionOf(err) == nil || !strings.Contains(strings.Join(nextActionOf(err).Argv, " "), "issue review-plan "+number+" --approve") {
+					t.Fatalf("stale approval lost: %v\n%s", err, out)
+				}
+				if asJSON {
+					var doc map[string]any
+					if decodeErr := json.Unmarshal([]byte(out), &doc); decodeErr != nil {
+						t.Fatal(decodeErr, out)
+					}
+					if doc["error"] != messageOnly(err) || doc["next_action"] == nil || strings.Contains(fmt.Sprint(doc["error"]), "Next step:") {
+						t.Fatal(doc)
+					}
+				} else {
+					combined := out + fmt.Sprintf("Error: %v\n", err)
+					if strings.Count(combined, "Next step:") != 1 || strings.Count(combined, "issue review-plan "+number+" --approve") != 1 {
+						t.Fatal(combined)
+					}
+				}
+			}
+			after, loadErr := f.manager.GetCurrentState(t.Context(), n)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if script.counts["developer"] != dev || before.ValidationRepairCount != after.ValidationRepairCount || before.Lease.ClaimID != after.Lease.ClaimID {
+				t.Fatal("stop mutated execution state")
 			}
 		})
 	}

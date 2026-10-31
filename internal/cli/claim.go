@@ -46,6 +46,12 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		if next {
 			pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, workflow.WorkOptions{AgentName: agentName, Phase: "all", SetupProgress: reporter}, duration)
 			if err != nil {
+				var noReady *noReadyError
+				if !asJSON && errors.As(err, &noReady) {
+					copy := *noReady
+					copy.showAction = true
+					return &copy
+				}
 				return err
 			}
 			reporter.Close()

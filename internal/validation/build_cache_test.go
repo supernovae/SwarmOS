@@ -2,13 +2,20 @@ package validation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/sandbox"
@@ -97,6 +104,7 @@ func TestHostChecksUseRepositoryBuildCaches(t *testing.T) {
 			if err != nil || !report.Passed {
 				t.Fatalf("runnerIsolated=%v: validate = %+v, %v", runnerIsolated, report, err)
 			}
+			assertValidationRepositoryCompleted(t, repo)
 			out := report.CheckOutcomes[0].Output
 			run := map[string]string{"HOME": checkEnvOutput(t, out, "HOME")}
 			for _, key := range cacheEnvKeys {
@@ -332,5 +340,193 @@ func TestValidateWarmsBaseAndReusesReadOnlyOnBubblewrap(t *testing.T) {
 		if data, err := os.ReadFile(filepath.Join(validatorCacheDirs(t, cacheRoot)["go"], "seen")); err != nil || string(data) != "base\n" {
 			t.Fatalf("run %d: persistent cache = %q, %v", run, data, err)
 		}
+	}
+}
+
+// pendingValidationUses reads durable evidence rather than inferring completion
+// from a maintenance denial (which can also mean legacy coverage).
+func pendingValidationUses(t *testing.T) int { return pendingValidationRepositoryUses(t, "") }
+func pendingValidationRepositoryUses(t *testing.T, repository string) int {
+	t.Helper()
+	root, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(root, "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := 0
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record struct {
+			Uses     map[string]bool
+			Resource storageuse.Resource
+		}
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatal(err)
+		}
+		if repository != "" && record.Resource.Repository != repository {
+			continue
+		}
+		for _, done := range record.Uses {
+			if !done {
+				pending++
+			}
+		}
+	}
+	return pending
+}
+
+func TestValidationHostUseCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name, command       string
+		cancel, stopFailure bool
+	}{
+		{name: "success", command: "true"}, {name: "nonzero", command: "exit 7"},
+		{name: "cancel-verified", command: "true", cancel: true},
+		{name: "unverified-stop", command: "true", stopFailure: true},
+		{name: "cancel-unverified", command: "true", cancel: true, stopFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateValidationControl(t)
+			home := t.TempDir()
+			cache := filepath.Join(t.TempDir(), "go")
+			if err := os.Mkdir(cache, 0700); err != nil {
+				t.Fatal(err)
+			}
+			r := &checkRunner{home: home, worktree: home, buildCaches: []sandbox.BuildCache{{Ecosystem: "go", EnvKey: "GOCACHE", Dir: cache, Persistent: true}}, execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			old := stopValidationProcess
+			if tc.stopFailure {
+				stopValidationProcess = func(cmd *exec.Cmd) error {
+					_ = process.StopVerified(cmd)
+					return errors.New("injected unverified stop")
+				}
+			}
+			defer func() { stopValidationProcess = old }()
+			outcome, err := r.runCheck(ctx, "host", tc.command, time.Second, func(event progress.Event) {
+				if tc.cancel && event.Status == "started" {
+					cancel()
+				}
+			})
+			if tc.stopFailure && err == nil {
+				t.Fatal("stop failure swallowed")
+			}
+			if tc.command == "exit 7" && (err == nil || outcome.Passed) {
+				t.Fatal("nonzero check passed")
+			}
+			pending := pendingValidationUses(t)
+			if tc.stopFailure && pending == 0 {
+				t.Fatal("unverified stop erased pending use")
+			}
+			if !tc.stopFailure && pending != 0 {
+				t.Fatalf("verified completion left %d pending uses", pending)
+			}
+		})
+	}
+}
+
+func TestValidationWarmupMarkerUseCompletion(t *testing.T) {
+	isolateValidationControl(t)
+	useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	base := commitRepoChange(t, repo, "version", "base\n")
+	ctx, owner, err := storageuse.Ensure(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	caches, err := validatorBuildCaches(ctx, repo, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &checkRunner{worktree: repo, home: home, buildCaches: caches, execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}}
+	checks := []contract.CheckSpec{{Name: "warm", Command: "true", Timeout: "1m"}}
+	for _, want := range []string{"ran", "skipped-marker"} {
+		timing := &PhaseTiming{}
+		warmBuildCaches(ctx, runner, checks, base, timing, nil)
+		if timing.Status != want {
+			t.Fatalf("warmup=%s, want %s", timing.Status, want)
+		}
+	}
+	if pendingValidationUses(t) == 0 {
+		t.Fatal("outer observer no longer protected")
+	}
+	if err := owner.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if pending := pendingValidationUses(t); pending != 0 {
+		t.Fatalf("warmup and marker hit left %d pending records", pending)
+	}
+}
+
+func assertValidationRepositoryCompleted(t *testing.T, repo string) {
+	t.Helper()
+	ctx, owner, err := storageuse.Ensure(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Finish()
+	if pending := pendingValidationRepositoryUses(t, storageuse.FromContext(ctx).Repository()); pending != 0 {
+		t.Fatalf("completed validation/diagnosis left %d pending uses", pending)
+	}
+}
+
+func TestValidationObserverRetainsUseUntilReturn(t *testing.T) {
+	isolateValidationControl(t)
+	cacheRoot := useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	base := commitPolicy(t, repo, "required_checks:\n  - name: observe\n    command: 'true'\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n")
+	held := false
+	report, err := Validate(context.Background(), repo, nil, ValidateOptions{CIMode: true, BaseSHA: base, OnProgress: func(event progress.Event) {
+		if event.Check != "observe" || event.Status != "PASS" {
+			return
+		}
+		held = true
+		dirs, err := filepath.Glob(filepath.Join(cacheRoot, "swarm", "validate-build", "*", "go"))
+		if err != nil || len(dirs) != 1 {
+			t.Fatalf("caches=%v err=%v", dirs, err)
+		}
+		root, err := storageuse.ControlRoot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		manager, err := storageuse.Open(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer manager.Close()
+		resource := storageuse.ResourceFor(filepath.Base(filepath.Dir(dirs[0])), "validate-build", dirs[0])
+		guard, err := manager.AcquireMaintenance(context.Background(), resource)
+		if err == nil {
+			guard.Close()
+			t.Fatal("maintenance admitted during coordinator observer")
+		}
+		if !errors.Is(err, storageuse.ErrUnsafe) {
+			t.Fatal(err)
+		}
+	}})
+	if err != nil || report == nil || !report.Passed || !held {
+		t.Fatalf("validation=%+v err=%v observer=%v", report, err, held)
+	}
+	if pending := pendingValidationUses(t); pending != 0 {
+		t.Fatalf("completed validation left %d pending uses", pending)
+	}
+}
+
+func isolateValidationControl(t *testing.T) {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CACHE_HOME", root)
+	if runtime.GOOS == "darwin" {
+		t.Setenv("HOME", root)
 	}
 }

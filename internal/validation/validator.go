@@ -23,6 +23,7 @@ import (
 	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/sandbox"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -208,6 +209,18 @@ func CheckCheckpointBoundary(ctx context.Context, root, base string, probe bool)
 
 // Validate loads checks and protected paths exclusively from the immutable base.
 func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, opts ValidateOptions) (result *ValidationReport, resultErr error) {
+	ctx, useScope, scopeErr := storageuse.Ensure(ctx, worktreePath)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	defer func() {
+		if resultErr != nil && result != nil {
+			result.Passed = false
+		}
+	}()
+	if useScope != nil {
+		defer useScope.Complete(&resultErr)
+	}
 	started := time.Now()
 	preflightComplete := false
 	defer func() {
@@ -321,11 +334,11 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	markdown.WriteString("| Check | Command | Status | Duration |\n| :--- | :--- | :--- | :--- |\n")
 	var details strings.Builder
 	var firstErr error
-	checkHome, err := os.MkdirTemp("", "swarm-check-home-*")
+	checkHome, err := storageuse.MkdirTemp(ctx, "", "swarm-check-home-*", "validation-scratch")
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(checkHome)
+	defer storageuse.FromContext(ctx).CleanupTemp(checkHome, &resultErr)
 	// Resolve the validator's build and dependency caches once. OCI checks
 	// get none. Dependency caches never fall back, so a failed prefetch
 	// stops validation before any check runs.
@@ -595,7 +608,21 @@ func (r *checkRunner) run(ctx context.Context, command string, duration time.Dur
 
 // runCheck runs one named command with a fresh timeout derived from ctx and
 // reports its lifecycle to onProgress.
-func (r *checkRunner) runCheck(ctx context.Context, name, command string, duration time.Duration, onProgress func(progress.Event)) (CheckRunOutcome, error) {
+func (r *checkRunner) runCheck(ctx context.Context, name, command string, duration time.Duration, onProgress func(progress.Event)) (result CheckRunOutcome, resultErr error) {
+	ctx, owner, err := r.storageScope(ctx)
+	if owner != nil {
+		defer func() {
+			if resultErr != nil {
+				result.Passed = false
+			}
+		}()
+		defer owner.Complete(&resultErr)
+	}
+
+	if err != nil {
+		return CheckRunOutcome{Name: name, Command: command, InfrastructureError: true}, err
+	}
+
 	checkCtx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
 	if onProgress != nil {
@@ -616,8 +643,8 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 		var exitErr *exec.ExitError
 		outcome.InfrastructureError = !errors.As(runErr, &exitErr)
 		outcome.ExitCode = 1
-		if exit, ok := runErr.(*exec.ExitError); ok {
-			outcome.ExitCode = exit.ExitCode()
+		if exitErr != nil {
+			outcome.ExitCode = exitErr.ExitCode()
 		}
 	}
 	if onProgress != nil {
@@ -644,7 +671,15 @@ func (r *checkRunner) runOnHost(ctx context.Context, command string, stdout, std
 	cmd.WaitDelay = time.Second
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err = cmd.Run()
-	process.Stop(cmd)
+	stopErr := stopValidationProcess(cmd)
+	if stopErr != nil {
+		if scope := storageuse.FromContext(ctx); scope != nil {
+			scope.Retain()
+		}
+	}
+	if stopErr != nil {
+		return errors.Join(err, stopErr)
+	}
 	return err
 }
 
@@ -868,4 +903,34 @@ func renderSkips(b *strings.Builder, report *ValidationReport) {
 	if n := report.SkippedTotal - len(report.SkippedTests); n > 0 {
 		fmt.Fprintf(b, "\n%d additional skip events omitted.\n", n)
 	}
+}
+
+// stopValidationProcess is separate from command outcome so verified failure or
+// cancellation can finish use while an uncertain stop retains durable evidence.
+var stopValidationProcess = process.StopVerified
+
+func (r *checkRunner) storageScope(ctx context.Context) (context.Context, *storageuse.Scope, error) {
+	ctx, owner, err := storageuse.Ensure(ctx, r.worktree)
+	if err != nil {
+		return ctx, owner, err
+	}
+	if owner == nil {
+		return ctx, nil, nil
+	}
+	scope := storageuse.FromContext(ctx)
+	for _, c := range r.buildCaches {
+		if c.Persistent {
+			if err := scope.Acquire(ctx, storageuse.ResourceFor(scope.Repository(), "validate-build", c.Dir)); err != nil {
+				return ctx, owner, err
+			}
+		}
+	}
+	if r.deps.Mode != sandbox.SharedHostCaches {
+		for _, c := range r.deps.Caches {
+			if err := scope.Acquire(ctx, storageuse.ResourceFor(scope.Repository(), "validate-deps", c.Dir)); err != nil {
+				return ctx, owner, err
+			}
+		}
+	}
+	return ctx, owner, nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 const maxReviewBytes = 1 << 20
@@ -36,6 +37,13 @@ func RunReview(ctx context.Context, runner Runner, req RunRequest) (result *RunR
 	if req.WorktreePath == "" {
 		return nil, fmt.Errorf("review worktree path is required")
 	}
+	ctx, own, scopeErr := storageuse.Ensure(ctx, req.WorktreePath)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
+	if own != nil {
+		defer own.Complete(&err)
+	}
 	started := time.Now()
 	originalWorktree := req.WorktreePath
 	req.RecoveryRoot = originalWorktree
@@ -44,15 +52,11 @@ func RunReview(ctx context.Context, runner Runner, req RunRequest) (result *RunR
 		return nil, err
 	}
 	defer destination.Close()
-	temp, err := os.MkdirTemp("", "swarm-review-*")
+	temp, err := storageuse.FromContext(ctx).TempDir(ctx, "", "swarm-review-*", "review-scratch")
 	if err != nil {
 		return nil, fmt.Errorf("create review snapshot: %w", err)
 	}
-	defer func() {
-		if cleanupErr := os.RemoveAll(temp); cleanupErr != nil && err == nil {
-			err = fmt.Errorf("clean up review snapshot: %w", cleanupErr)
-		}
-	}()
+	defer storageuse.FromContext(ctx).CleanupTemp(temp, &err)
 	temp, err = filepath.EvalSymlinks(temp)
 	if err != nil {
 		return nil, fmt.Errorf("resolve review snapshot: %w", err)

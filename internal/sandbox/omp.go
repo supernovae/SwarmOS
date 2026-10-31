@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -13,11 +14,12 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 // RPC host tools are an OMP-supported execution interface. Authentication and
 // model transport remain entirely within OMP, using its existing login.
-func runOMP(ctx context.Context, binary, model, prompt, control string, env []string, executor ToolExecutor, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) error {
+func runOMP(ctx context.Context, binary, model, prompt, control string, env []string, executor ToolExecutor, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) (resultErr error) {
 	config := filepath.Join(control, "omp.json")
 	settings := map[string]any{
 		"disabledProviders": []string{"native", "claude", "codex", "gemini", "github", "opencode", "cursor", "agents-md"},
@@ -39,7 +41,7 @@ func runOMP(ctx context.Context, binary, model, prompt, control string, env []st
 	cmd := exec.CommandContext(childCtx, binary, args...)
 	cmd.Dir, cmd.Env, cmd.Stderr = control, env, stderr
 	process.Configure(cmd)
-	cmd.Cancel = func() error { process.Stop(cmd); return nil }
+	cmd.Cancel = func() error { return process.StopVerified(cmd) }
 	cmd.WaitDelay = time.Second
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -55,7 +57,19 @@ func runOMP(ctx context.Context, binary, model, prompt, control string, env []st
 		out.Close()
 		return err
 	}
-	defer func() { stop(); process.Stop(cmd); in.Close(); out.Close(); _ = cmd.Wait() }()
+	defer func() {
+		stop()
+		stopErr := process.StopVerified(cmd)
+		in.Close()
+		out.Close()
+		_ = cmd.Wait()
+		if stopErr != nil {
+			if scope := storageuse.FromContext(ctx); scope != nil {
+				scope.Retain()
+			}
+			resultErr = errors.Join(resultErr, fmt.Errorf("stop delegated harness: %w", stopErr))
+		}
+	}()
 	var writeMu sync.Mutex
 	send := func(value any) error {
 		writeMu.Lock()

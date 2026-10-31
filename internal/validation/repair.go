@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -174,6 +175,11 @@ func diagnoseRepairTree(ctx context.Context, runner *checkRunner, report *Valida
 	ctx, cancel := context.WithTimeout(ctx, maxRepairDiagnosis)
 	defer cancel()
 	base := &baseRerun{runner: runner, baseSHA: report.BaseSHA}
+	defer func() {
+		if base.err != nil {
+			summary.Unavailable = "Diagnostic checkout cleanup or preparation failed"
+		}
+	}()
 	defer base.close()
 	durations := map[string]time.Duration{}
 	if spec, err := loadTrustedValidationSpec(runner.worktree, report.BaseSHA); err == nil {
@@ -182,6 +188,11 @@ func diagnoseRepairTree(ctx context.Context, runner *checkRunner, report *Valida
 		}
 	}
 	checkpoint := &baseRerun{runner: runner}
+	defer func() {
+		if checkpoint.err != nil {
+			summary.Unavailable = "Diagnostic checkout cleanup or preparation failed"
+		}
+	}()
 	defer checkpoint.close()
 	reruns := 0
 	for _, outcome := range report.CheckOutcomes {
@@ -488,18 +499,20 @@ type baseRerun struct {
 	tmp      string
 	checkout *checkRunner
 	err      error
+	scope    *storageuse.Scope
 }
 
 func (b *baseRerun) prepare(ctx context.Context) (*checkRunner, error) {
 	if b.checkout != nil || b.err != nil {
 		return b.checkout, b.err
 	}
-	tmp, err := os.MkdirTemp("", "swarm-repair-base-*")
+	tmp, err := storageuse.MkdirTemp(ctx, "", "swarm-repair-base-*", "validation-scratch")
 	if err != nil {
 		b.err = err
 		return nil, err
 	}
 	b.tmp = tmp
+	b.scope = storageuse.FromContext(ctx)
 	dir := filepath.Join(tmp, "base")
 	if _, err := gitOutputContext(ctx, b.runner.worktree, "worktree", "add", "--detach", "--", dir, b.baseSHA); err != nil {
 		b.err = err
@@ -514,12 +527,16 @@ func (b *baseRerun) prepare(ctx context.Context) (*checkRunner, error) {
 }
 
 func (b *baseRerun) close() {
-	if b.tmp == "" {
+	if p := recover(); p != nil {
+		if b.scope != nil {
+			b.scope.Retain()
+		}
+		panic(p)
+	}
+	if b.tmp == "" || (b.scope != nil && b.scope.Retained()) {
 		return
 	}
-	_, _ = gitOutput(b.runner.worktree, "worktree", "remove", "--force", "--", filepath.Join(b.tmp, "base"))
-	_ = os.RemoveAll(b.tmp)
-	_, _ = gitOutput(b.runner.worktree, "worktree", "prune")
+	cleanupValidationCheckout(b.scope, b.runner.worktree, b.tmp, &b.err)
 }
 
 // changedPackageDirs lists the directories of changed Go files that

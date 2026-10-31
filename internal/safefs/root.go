@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 type Root struct{ root *os.Root }
@@ -338,4 +339,124 @@ func (r *Root) Lstat(name string) (os.FileInfo, error) {
 	}
 	defer d.Close()
 	return d.Lstat(filepath.Base(name))
+}
+
+// Mkdir exclusively creates a direct child of the pinned root.
+func (r *Root) Mkdir(name string, mode os.FileMode) error {
+	if name != filepath.Base(name) || !filepath.IsLocal(name) {
+		return fmt.Errorf("unsafe directory name %q", name)
+	}
+	return r.root.Mkdir(name, mode)
+}
+
+// ErrCleanupIncomplete identifies ordinary removal exhaustion. Callers must
+// retain ownership evidence, but may preserve a successful primary operation.
+var ErrCleanupIncomplete = errors.New("managed cleanup incomplete")
+
+// RemoveAllChecked removes a direct child only if its identity is unchanged.
+// Permission repair uses opened directory handles, never symlink targets.
+func (r *Root) RemoveAllChecked(name string, expected os.FileInfo) error {
+	return r.removeAllChecked(name, expected, r.root.RemoveAll)
+}
+
+func (r *Root) removeAllChecked(name string, expected os.FileInfo, remove func(string) error) error {
+	if name != filepath.Base(name) || !filepath.IsLocal(name) {
+		return fmt.Errorf("unsafe directory name %q", name)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		info, err := r.root.Lstat(name)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || expected == nil || !os.SameFile(info, expected) {
+			return fmt.Errorf("managed directory changed before cleanup")
+		}
+		err = remove(name)
+		if err == nil {
+			return nil
+		}
+		if !ordinaryCleanupError(err) {
+			return err
+		}
+		// Verify and repair even on the last attempt: an unsafe replacement must
+		// never be classified as an ordinary removal failure.
+		if repairErr := repairCleanupDirectories(r.root, name, expected, 0); repairErr != nil {
+			return repairErr
+		}
+		if attempt == 2 {
+			return errors.Join(ErrCleanupIncomplete, err)
+		}
+	}
+	panic("unreachable")
+}
+
+func ordinaryCleanupError(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EBUSY)
+}
+
+func repairCleanupDirectories(parent *os.Root, name string, expected os.FileInfo, depth int) error {
+	if depth > 256 {
+		return fmt.Errorf("cleanup directory nesting exceeds limit")
+	}
+	f, err := openCleanupDirectory(parent, name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || !os.SameFile(info, expected) {
+		return fmt.Errorf("cleanup directory replaced")
+	}
+	current, err := parent.Lstat(name)
+	if err != nil || !os.SameFile(current, info) {
+		return fmt.Errorf("cleanup directory changed: %w", err)
+	}
+	if info.Mode().Perm()&0700 != 0700 {
+		if err := f.Chmod(info.Mode() | 0700); err != nil {
+			return err
+		}
+	}
+	dir, err := parent.OpenRoot(name)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	pinned, err := dir.Stat(".")
+	if err != nil || !os.SameFile(pinned, info) {
+		return fmt.Errorf("cleanup directory replaced while opening: %w", err)
+	}
+	entries, err := f.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		child, err := dir.Lstat(entry.Name())
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		switch {
+		case child.IsDir():
+			if err := repairCleanupDirectories(dir, entry.Name(), child, depth+1); err != nil {
+				return err
+			}
+		case child.Mode().IsRegular(), child.Mode()&os.ModeSymlink != 0:
+			// Removal unlinks these entries; permission repair never opens them.
+		default:
+			return fmt.Errorf("special file in cleanup directory")
+		}
+	}
+	current, err = parent.Lstat(name)
+	if err != nil || !os.SameFile(current, info) {
+		return fmt.Errorf("cleanup directory changed after repair: %w", err)
+	}
+	return nil
 }

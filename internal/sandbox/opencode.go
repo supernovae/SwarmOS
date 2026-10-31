@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 // OpenCode owns provider authentication. A private, loopback-only server keeps
@@ -30,7 +32,7 @@ func runOpenCode(ctx context.Context, binary, model, prompt, control string, env
 // front and later fetches only that session's messages, so SwarmOS never lists
 // or reads the user's other OpenCode sessions. Any telemetry failure falls back
 // to the untracked --continue flow.
-func runOpenCodeSession(ctx context.Context, binary, model, prompt, control string, env []string, sessionFlag bool, session *HarnessSession, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) error {
+func runOpenCodeSession(ctx context.Context, binary, model, prompt, control string, env []string, sessionFlag bool, session *HarnessSession, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) (resultErr error) {
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return err
@@ -41,7 +43,7 @@ func runOpenCodeSession(ctx context.Context, binary, model, prompt, control stri
 	cmd := exec.CommandContext(childCtx, binary, "serve", "--stdio", "--hostname", "127.0.0.1", "--port", "0")
 	cmd.Dir, cmd.Env, cmd.Stderr = control, env, stderr
 	process.Configure(cmd)
-	cmd.Cancel = func() error { process.Stop(cmd); return nil }
+	cmd.Cancel = func() error { return process.StopVerified(cmd) }
 	cmd.WaitDelay = time.Second
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -57,7 +59,19 @@ func runOpenCodeSession(ctx context.Context, binary, model, prompt, control stri
 		out.Close()
 		return err
 	}
-	defer func() { stop(); process.Stop(cmd); in.Close(); out.Close(); _ = cmd.Wait() }()
+	defer func() {
+		stop()
+		stopErr := process.StopVerified(cmd)
+		in.Close()
+		out.Close()
+		_ = cmd.Wait()
+		if stopErr != nil {
+			if scope := storageuse.FromContext(ctx); scope != nil {
+				scope.Retain()
+			}
+			resultErr = errors.Join(resultErr, fmt.Errorf("stop delegated harness: %w", stopErr))
+		}
+	}()
 	scanner := bufio.NewScanner(out)
 	scanner.Buffer(make([]byte, 4096), 64<<10)
 	if !scanner.Scan() {

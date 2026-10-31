@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/sandbox"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 // TestReviewHelperProcess is a portable hostile reviewer used by the regression
@@ -447,5 +449,44 @@ func TestReviewTimeoutRecoveryRootSurvivesSnapshotCleanup(t *testing.T) {
 	review, err := os.ReadFile(filepath.Join(root, ".swarm/active/REVIEW.md"))
 	if err != nil || string(review) != "existing review" {
 		t.Fatalf("review changed: %s %v", review, err)
+	}
+}
+
+func TestReviewerStorageUseFinishesAfterImport(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	if runtime.GOOS == "darwin" {
+		t.Setenv("HOME", t.TempDir())
+	}
+	root := t.TempDir()
+	mustWriteReviewFixture(t, root, "tracked.txt", "original")
+	mustWriteReviewFixture(t, root, ".swarm/active/PLAN.md", "plan")
+	if _, err := RunReview(context.Background(), helperReviewer{}, RunRequest{Role: "reviewer", WorktreePath: root}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".swarm/active/REVIEW.md")); err != nil {
+		t.Fatal(err)
+	}
+	control, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := filepath.Glob(filepath.Join(control, "*.json"))
+	if err != nil || len(records) == 0 {
+		t.Fatalf("durable records: %v %v", records, err)
+	}
+	for _, path := range records {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record struct{ Uses map[string]bool }
+		if err = json.Unmarshal(data, &record); err != nil {
+			t.Fatal(err)
+		}
+		for _, complete := range record.Uses {
+			if !complete {
+				t.Fatalf("pending review use in %s", path)
+			}
+		}
 	}
 }

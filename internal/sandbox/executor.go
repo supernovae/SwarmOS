@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 // ToolExecutor keeps harness authentication in the harness. Only detached task
@@ -51,7 +53,7 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 	cmd := exec.CommandContext(ctx, binary, flags...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
 	process.Configure(cmd)
-	cmd.Cancel = func() error { process.Stop(cmd); return nil }
+	cmd.Cancel = func() error { return process.StopVerified(cmd) }
 	cmd.WaitDelay = time.Second
 	return cmd, nil
 }
@@ -145,7 +147,15 @@ func executorFlags(work string, readOnly bool, caches []BuildCache, deps Depende
 	return append(flags, args...), nil
 }
 
-func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.Writer, args ...string) error {
+func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.Writer, args ...string) (resultErr error) {
+	// The external internal-tools process carries worker data, never coordinator
+	// storage authority. Its enclosing delegated run retains every cache use.
+	// In-process coordinator callers can share an existing scope across tools.
+	if storageuse.FromContext(ctx) != nil {
+		if err := acquireRuntimeCaches(ctx, e.BuildCaches, e.Dependencies); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	cmd, err := e.command(ctx, script, args...)
@@ -154,7 +164,12 @@ func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.
 	}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err = cmd.Run()
-	process.Stop(cmd)
+	if stopErr := process.StopVerified(cmd); stopErr != nil {
+		if scope := storageuse.FromContext(ctx); scope != nil {
+			scope.Retain()
+		}
+		return errors.Join(err, stopErr)
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -163,14 +178,21 @@ func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.
 
 // CheckToolExecutor tests the same command builder used by every tool. The
 // positive network probe prevents an ambient firewall from passing this check.
-func CheckToolExecutor(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	root, err := os.MkdirTemp("", "swarm-executor-check-*")
+func CheckToolExecutor(ctx context.Context) (resultErr error) {
+	ctx, own, err := storageuse.Ensure(ctx, "host")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(root)
+	if own != nil {
+		defer own.Complete(&resultErr)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	root, err := storageuse.FromContext(ctx).TempDir(ctx, "", "swarm-executor-check-*", "sandbox-scratch")
+	if err != nil {
+		return err
+	}
+	defer storageuse.FromContext(ctx).CleanupTemp(root, &resultErr)
 	work := filepath.Join(root, "workspace")
 	if err := os.MkdirAll(filepath.Join(work, ".swarm", "active"), 0700); err != nil {
 		return err
@@ -218,6 +240,41 @@ printf EXECUTOR_OK`
 	data, err := os.ReadFile(secret)
 	if err != nil || string(data) != "synthetic-secret" {
 		return fmt.Errorf("executor changed host canary")
+	}
+	return nil
+}
+
+// acquireRuntimeCaches reacquires managed readers for standalone role and tool
+// invocations. Descriptors remain data-only; lifetime authority stays in ctx.
+func acquireRuntimeCaches(ctx context.Context, caches []BuildCache, deps Dependencies) error {
+	scope := storageuse.FromContext(ctx)
+	if scope == nil {
+		return fmt.Errorf("storage use scope required for cache readers")
+	}
+	admit := func(path string) error {
+		path = filepath.Clean(path)
+		keyDir := filepath.Dir(path)
+		class := filepath.Base(filepath.Dir(keyDir))
+		switch class {
+		case "agent-build", "validate-build", "agent-deps", "validate-deps":
+		default:
+			return nil
+		}
+		key := filepath.Base(keyDir)
+		if len(key) != 32 {
+			return fmt.Errorf("invalid managed cache repository key")
+		}
+		return scope.Acquire(ctx, storageuse.ResourceFor(key, class, path))
+	}
+	for _, c := range caches {
+		if err := admit(c.Dir); err != nil {
+			return err
+		}
+	}
+	for _, c := range deps.Caches {
+		if err := admit(c.Dir); err != nil {
+			return err
+		}
 	}
 	return nil
 }

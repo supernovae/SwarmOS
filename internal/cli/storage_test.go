@@ -56,7 +56,7 @@ func TestStorageReportOutsideCheckoutNoRegistryMutation(t *testing.T) {
 			t.Fatal(output.String())
 		}
 	}
-	for _, path := range []string{filepath.Dir(registry), marker} {
+	for _, path := range []string{filepath.Dir(registry), marker, filepath.Join(cache, "swarm-use")} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("created %s: %v", path, err)
 		}

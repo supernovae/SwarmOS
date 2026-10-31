@@ -3,6 +3,9 @@ package sandbox
 import (
 	"archive/zip"
 	"context"
+	"encoding/json"
+	"errors"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"go/ast"
 	"go/parser"
@@ -587,6 +590,7 @@ func TestGoPrefetchEnvHardened(t *testing.T) {
 }
 
 func TestGoPrefetchMarkerSkipsRepeat(t *testing.T) {
+	isolateRuntimeControl(t)
 	downloads := 0
 	stubPrefetch(t, "go1.21.0", func(_ string, _, argv []string) {
 		if slices.Equal(argv, goModDownloadArgv) {
@@ -597,9 +601,17 @@ func TestGoPrefetchMarkerSkipsRepeat(t *testing.T) {
 	userCache := resolvedTempDir(t)
 	prepare := func(base string) {
 		t.Helper()
-		if _, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, DependencyPolicy{Mode: PerRepository}); err != nil {
+		ctx, scope, err := storageuse.Ensure(t.Context(), repo)
+		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := PrepareDependencyCaches(ctx, AgentDependencyCache, repo, base, userCache, DependencyPolicy{Mode: PerRepository}); err != nil {
+			t.Fatal(err)
+		}
+		if err := scope.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		assertNoPendingCacheUses(t)
 	}
 	prepare(base)
 	prepare(base)
@@ -906,5 +918,197 @@ func TestDependencyCacheModes(t *testing.T) {
 				t.Errorf("%s mode = %q", m.Name, m.Mode)
 			}
 		}
+	}
+}
+
+// Inspect the durable records themselves: legacy eligibility can independently
+// deny maintenance and would hide leaked use tokens in a maintenance-only test.
+func assertNoPendingCacheUses(t *testing.T) {
+	t.Helper()
+	root, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(root, "*.json"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("use records: %v, %v", files, err)
+	}
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record struct{ Uses map[string]bool }
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatal(err)
+		}
+		for _, complete := range record.Uses {
+			if !complete {
+				t.Fatalf("pending use in %s", filepath.Base(file))
+			}
+		}
+	}
+}
+
+func TestRustPrefetchMarkerCompletesUse(t *testing.T) {
+	isolateRuntimeControl(t)
+	calls := 0
+	stubPrefetch(t, "", func(_ string, _, argv []string) {
+		if argv[0] == "cargo" {
+			calls++
+		}
+	})
+	repo := cacheTestRepo(t)
+	writeWorkerFixture(t, repo, "Cargo.toml", "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n")
+	writeWorkerFixture(t, repo, "Cargo.lock", "version = 3\n")
+	base := gitCommitAll(t, repo, "base")
+	userCache := resolvedTempDir(t)
+	for range 2 {
+		ctx, scope, err := storageuse.Ensure(t.Context(), repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PrepareDependencyCaches(ctx, AgentDependencyCache, repo, base, userCache, PerRepository); err != nil {
+			t.Fatal(err)
+		}
+		if err := scope.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		assertNoPendingCacheUses(t)
+	}
+	if calls != 1 {
+		t.Fatalf("fetch calls = %d", calls)
+	}
+}
+
+func TestPrefetchVerifiedStopCompletion(t *testing.T) {
+	for _, exit := range []string{"0", "17"} {
+		t.Run(exit, func(t *testing.T) {
+			isolateRuntimeControl(t)
+			ctx, scope, err := storageuse.Ensure(t.Context(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resource := storageuse.ResourceFor(scope.Repository(), "agent-deps", filepath.Join(resolvedTempDir(t), "cache"))
+			if err := scope.Acquire(ctx, resource); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = runPrefetchCommand(ctx, resolvedTempDir(t), []string{"PATH=" + os.Getenv("PATH")}, []string{"sh", "-c", "exit " + exit})
+			if (err == nil) != (exit == "0") {
+				t.Fatalf("exit %s: %v", exit, err)
+			}
+			if err := scope.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			assertNoPendingCacheUses(t)
+		})
+	}
+	t.Run("unverified stop", func(t *testing.T) {
+		isolateRuntimeControl(t)
+		previous := stopPrefetchProcess
+		stopPrefetchProcess = func(*exec.Cmd) error { return errors.New("injected stop failure") }
+		t.Cleanup(func() { stopPrefetchProcess = previous })
+		ctx, scope, err := storageuse.Ensure(t.Context(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resource := storageuse.ResourceFor(scope.Repository(), "agent-deps", filepath.Join(resolvedTempDir(t), "cache"))
+		if err := scope.Acquire(ctx, resource); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := runPrefetchCommand(ctx, resolvedTempDir(t), []string{"PATH=" + os.Getenv("PATH")}, []string{"sh", "-c", "exit 0"}); err == nil {
+			t.Fatal("stop failure discarded")
+		}
+		if err := scope.Finish(); err != nil {
+			t.Fatal(err)
+		}
+		control, err := storageuse.ControlRoot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed, err := storageuse.Observe(ctx, control, resource, 1<<20, func(int64) error { return nil })
+		if err != nil || observed.Active == nil || !*observed.Active {
+			t.Fatalf("unverified stop lost pending evidence: %+v %v", observed, err)
+		}
+	})
+}
+
+// A non-writable pinned scratch parent forces ordinary removal exhaustion
+// without a global cleanup hook or network calls. The prefetch runner is the
+// existing serial fixture seam.
+func TestGoPrefetchCleanupExhaustionRetainsEvidence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix directory permissions")
+	}
+	for _, fail := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fail), func(t *testing.T) {
+			parent, cache, controlHome := resolvedTempDir(t), resolvedTempDir(t), resolvedTempDir(t)
+			t.Setenv("TMPDIR", parent)
+			t.Setenv("XDG_CACHE_HOME", controlHome)
+			t.Setenv("HOME", controlHome)
+			for _, key := range []string{"GOPRIVATE", "GONOPROXY", "GONOSUMDB"} {
+				t.Setenv(key, "")
+			}
+			defer os.Chmod(parent, 0700)
+			var scratch string
+			stubPrefetch(t, "go1.26.10", func(dir string, env, argv []string) {
+				scratch = filepath.Dir(dir)
+				if slices.Equal(argv, goModDownloadArgv) {
+					if err := os.Chmod(parent, 0555); err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+			previous := runPrefetchCommand
+			runPrefetchCommand = func(ctx context.Context, dir string, env, argv []string) ([]byte, []byte, error) {
+				out, stderr, err := previous(ctx, dir, env, argv)
+				if fail && slices.Equal(argv, goModDownloadArgv) {
+					return nil, nil, errors.New("primary fetch failure")
+				}
+				return out, stderr, err
+			}
+			ctx, scope, err := storageuse.Ensure(t.Context(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = goModDownload(ctx, prefetchRequest{Dir: cache, Files: map[string][]byte{"go.mod": []byte("module example.com/test\n\ngo 1.21\n")}})
+			if fail {
+				if err == nil || !strings.Contains(err.Error(), "primary fetch failure") {
+					t.Fatalf("primary failure lost: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !scope.Retained() {
+				t.Fatal("cleanup exhaustion did not retain scope")
+			}
+			if err := scope.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(scratch); err != nil {
+				t.Fatal(err)
+			}
+			control, err := storageuse.ControlRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			resource := storageuse.ResourceFor(scope.Repository(), "prefetch-scratch", scratch)
+			observed, err := storageuse.Observe(ctx, control, resource, 1<<20, func(int64) error { return nil })
+			if err != nil || observed.Active == nil || !*observed.Active {
+				t.Fatalf("pending evidence lost: %+v %v", observed, err)
+			}
+			manager, err := storageuse.Open(control, scratch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			guard, err := manager.AcquireMaintenance(ctx, resource)
+			if guard != nil {
+				guard.Close()
+			}
+			if !errors.Is(err, storageuse.ErrUnsafe) {
+				t.Fatalf("maintenance admitted: %v", err)
+			}
+		})
 	}
 }

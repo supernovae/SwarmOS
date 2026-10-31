@@ -13,6 +13,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 // buildCacheEcosystem names one language's compiled-output cache. Deferred
@@ -134,9 +135,18 @@ func agentBuildCaches(ctx context.Context, worktree, scratch string, opts Worker
 // <userCache>/swarm/<owner>/<repo-key>/<ecosystem> when that can be prepared
 // safely, and otherwise <scratch>/build-cache/<ecosystem>; it never falls back
 // to the user's own cache directories. An empty userCache selects scratch.
-// The error reports only a failure to create scratch.
+// Admission failures stop access rather than selecting an unregistered fallback.
+// Callers own the context storage scope through the last returned-cache reader;
+// a standalone preparation retains pending evidence conservatively.
 func PrepareBuildCaches(ctx context.Context, owner BuildCacheOwner, worktree, userCache, scratch string) ([]BuildCache, error) {
-	persistent := persistentBuildCaches(ctx, owner, worktree, userCache)
+	ctx, _, err := storageuse.Ensure(ctx, worktree)
+	if err != nil {
+		return nil, err
+	}
+	persistent, err := persistentBuildCaches(ctx, owner, worktree, userCache)
+	if err != nil {
+		return nil, err
+	}
 	var caches []BuildCache
 	for _, eco := range buildCacheEcosystems {
 		if eco.Deferred != "" {
@@ -145,6 +155,12 @@ func PrepareBuildCaches(ctx context.Context, owner BuildCacheOwner, worktree, us
 		if dir, ok := persistent[eco.Name]; ok {
 			caches = append(caches, BuildCache{Ecosystem: eco.Name, EnvKey: eco.EnvKey, Dir: dir, Persistent: true})
 			continue
+		}
+		scope := storageuse.FromContext(ctx)
+		if !scope.Covers(scratch) {
+			if err := acquireCacheUse(ctx, scope.Repository(), string(owner), filepath.Join(scratch, "build-cache", eco.Name)); err != nil {
+				return nil, err
+			}
 		}
 		dir, err := scratchBuildCache(scratch, eco.Name)
 		if err != nil {
@@ -159,35 +175,51 @@ func scratchBuildCache(scratch, name string) (string, error) {
 	if !filepath.IsAbs(scratch) {
 		return "", fmt.Errorf("build cache scratch %q is not absolute", scratch)
 	}
-	dir := filepath.Join(scratch, "build-cache", name)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	volume := filepath.VolumeName(scratch) + string(filepath.Separator)
+	anchor, err := safefs.Open(volume)
+	if err != nil {
+		return "", err
+	}
+	defer anchor.Close()
+	rel, err := filepath.Rel(volume, scratch)
+	if err != nil {
+		return "", err
+	}
+	root, err := anchor.Sub(rel, false, 0)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	cacheRel := filepath.Join("build-cache", name)
+	if err := root.MkdirAll(cacheRel, 0700); err != nil {
 		return "", fmt.Errorf("prepare scratch build cache: %w", err)
 	}
-	return dir, nil
+	return filepath.Join(scratch, cacheRel), nil
 }
 
 // persistentBuildCaches returns the ecosystems whose persistent directory is
-// safe to use. Any failure leaves that ecosystem out, so it gets scratch.
-func persistentBuildCaches(ctx context.Context, owner BuildCacheOwner, worktree, userCache string) map[string]string {
+// safe to use. Unsafe layouts select scratch; durable admission failures
+// propagate so a fallback cannot silently bypass maintenance exclusion.
+func persistentBuildCaches(ctx context.Context, owner BuildCacheOwner, worktree, userCache string) (map[string]string, error) {
 	dirs := map[string]string{}
 	if userCache == "" || !filepath.IsAbs(userCache) || (owner != AgentBuildCache && owner != ValidatorBuildCache) {
-		return dirs
+		return dirs, nil
 	}
 	base := filepath.Clean(userCache)
 	key, err := repositoryCacheKey(ctx, worktree)
 	if err != nil {
-		return dirs
+		return dirs, nil
 	}
 	keyRel := filepath.Join("swarm", string(owner), key)
 	if insideDir(worktree, filepath.Join(base, keyRel)) {
-		return dirs
+		return dirs, nil
 	}
 	if err := os.MkdirAll(base, 0o700); err != nil {
-		return dirs
+		return dirs, nil
 	}
 	root, err := safefs.Open(base)
 	if err != nil {
-		return dirs
+		return dirs, nil
 	}
 	defer root.Close()
 	for _, eco := range buildCacheEcosystems {
@@ -195,31 +227,51 @@ func persistentBuildCaches(ctx context.Context, owner BuildCacheOwner, worktree,
 			continue
 		}
 		rel := filepath.Join(keyRel, eco.Name)
+		if !safeCacheParents(root, rel) {
+			continue
+		}
+		if err := acquireCacheUse(ctx, key, string(owner), filepath.Join(base, rel)); err != nil {
+			return nil, err
+		}
 		if owner == ValidatorBuildCache && eco.Name == "go" {
-			migrateLegacyGoCache(root, base, key, rel)
+			if err := migrateLegacyGoCache(ctx, root, base, key, rel); err != nil {
+				return nil, err
+			}
 		}
 		if privateCacheDir(root, rel) == nil {
 			dirs[eco.Name] = filepath.Join(base, rel)
 		}
 	}
-	return dirs
+	return dirs, nil
 }
 
 // migrateLegacyGoCache moves the validator's former swarm/go-build/<key> cache
 // into place once. A failure leaves a fresh directory to be created instead.
-func migrateLegacyGoCache(root *safefs.Root, base, key, rel string) {
+func migrateLegacyGoCache(ctx context.Context, root *safefs.Root, base, key, rel string) error {
 	legacy := filepath.Join("swarm", "go-build", key)
+	if !safeCacheParents(root, legacy) {
+		return nil
+	}
+	if err := acquireCacheUse(ctx, key, "legacy-go-build", filepath.Join(base, legacy)); err != nil {
+		return err
+	}
 	info, err := os.Lstat(filepath.Join(base, legacy))
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return
+		return nil
 	}
 	if _, err := os.Lstat(filepath.Join(base, rel)); !errors.Is(err, os.ErrNotExist) {
-		return
+		return nil
 	}
 	if privateCacheDir(root, filepath.Dir(rel)) != nil {
-		return
+		return nil
+	}
+	if scope := storageuse.FromContext(ctx); scope != nil {
+		if err := scope.MarkUnknown(ctx, storageuse.ResourceFor(key, string(ValidatorBuildCache), filepath.Join(base, rel))); err != nil {
+			return err
+		}
 	}
 	_ = root.Rename(legacy, rel)
+	return nil
 }
 
 // privateCacheDir creates rel and checks every component below the user
@@ -325,4 +377,32 @@ func ValidatorCacheMounts(caches []BuildCache, backend ValidationBackend, warmup
 // then, since elsewhere the caches it writes would have no reader.
 func ValidatorCacheReusable(backend ValidationBackend, overlay bool) bool {
 	return backend == ValidationBubblewrap && overlay
+}
+
+// acquireCacheUse admits cache access through the coordinator-owned scope.
+// The scope is intentionally absent from cache descriptors sent to workers.
+func acquireCacheUse(ctx context.Context, repository, class, location string) error {
+	scope := storageuse.FromContext(ctx)
+	if scope == nil {
+		return fmt.Errorf("storage use scope required for %s", class)
+	}
+	return scope.Acquire(ctx, storageuse.ResourceFor(repository, class, location))
+}
+
+// safeCacheParents checks existing components without creating them. An unsafe
+// persistent layout may select separately admitted scratch, but admission errors
+// for a safe location remain fatal.
+func safeCacheParents(root *safefs.Root, rel string) bool {
+	prefix := ""
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		prefix = filepath.Join(prefix, part)
+		info, err := root.Lstat(prefix)
+		if errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+			return false
+		}
+	}
+	return true
 }

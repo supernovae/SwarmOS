@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"os"
 	"path"
 	"path/filepath"
@@ -35,7 +36,15 @@ const pythonExportName = "uv.lock (exported)"
 // requirements*.txt files. Every requirements file is checked in Go first,
 // because a line such as -e, a path, a URL or --no-binary would make pip
 // build package code. An sdist-only dependency is reported, never built.
-func pythonWheelDownload(ctx context.Context, req prefetchRequest) error {
+func pythonWheelDownload(ctx context.Context, req prefetchRequest) (result error) {
+	ctx, owner, scopeErr := storageuse.Ensure(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	if owner != nil {
+		defer owner.Complete(&result)
+	}
+
 	var reqFiles []string
 	for name := range req.Files {
 		if ok, _ := path.Match("requirements*.txt", name); ok {
@@ -56,11 +65,11 @@ func pythonWheelDownload(ctx context.Context, req prefetchRequest) error {
 		return errors.New("approved base has no uv.lock or requirements*.txt")
 	}
 
-	tmp, err := os.MkdirTemp("", "swarm-prefetch-*")
+	tmp, err := prefetchTemp(ctx, "", "swarm-prefetch-*")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer storageuse.FromContext(ctx).CleanupTemp(tmp, &result)
 	project, outside := filepath.Join(tmp, "project"), filepath.Join(tmp, "outside")
 	for _, dir := range []string{project, outside} {
 		if err := os.Mkdir(dir, 0o700); err != nil {

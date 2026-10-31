@@ -32,3 +32,9 @@ func openExisting(parent *os.Root, name string, flags int) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(fd), name), nil
 }
+
+// Open only a real directory relative to the pinned parent. Chmod on this
+// descriptor cannot follow a later name substitution or a symlink.
+func openCleanupDirectory(parent *os.Root, name string) (*os.File, error) {
+	return openExisting(parent, name, unix.O_RDONLY|unix.O_DIRECTORY)
+}

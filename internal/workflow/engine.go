@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -319,7 +320,14 @@ func (e *Engine) Preflight(ctx context.Context, opts WorkOptions) (*PreflightRes
 	return e.preflight(ctx, opts, false)
 }
 
-func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskApproval bool) (*PreflightResult, error) {
+func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskApproval bool) (preflight *PreflightResult, preflightErr error) {
+	ctx, scope, err := storageuse.Ensure(ctx, e.repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	if scope != nil {
+		defer scope.Complete(&preflightErr)
+	}
 	if opts.RepoRoot == "" {
 		opts.RepoRoot = e.repoRoot
 	}
@@ -529,6 +537,13 @@ func rolesForPhase(phase string, gate contract.GateMode, hasPlan, approved bool)
 }
 
 func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *WorkResult, workErr error) {
+	ctx, scope, err := storageuse.Ensure(ctx, e.repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	if scope != nil {
+		defer scope.Complete(&workErr)
+	}
 	if opts.PlanCheckpoint {
 		return e.executeCheckpointPlan(ctx, opts)
 	}
@@ -1020,7 +1035,14 @@ func (e *Engine) RunAgentReview(ctx context.Context, wtPath string, wu *contract
 	return e.runAgentReview(ctx, wtPath, wu, wf, st, owner, reviewerAgent, mode, instructions, prNumber, WorkOptions{IssueNumber: wu.IssueNumber, Owner: owner, PRNumber: prNumber, ReviewerAgent: reviewerAgent}, reporters...)
 }
 
-func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, recovery WorkOptions, reporters ...*ProgressReporter) (string, *lease.IssueState, error) {
+func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, owner, reviewerAgent, mode, instructions string, prNumber int, recovery WorkOptions, reporters ...*ProgressReporter) (reviewResult string, state *lease.IssueState, reviewErr error) {
+	ctx, scope, err := storageuse.Ensure(ctx, e.repoRoot)
+	if err != nil {
+		return "", st, err
+	}
+	if scope != nil {
+		defer scope.Complete(&reviewErr)
+	}
 	if lease.IncompletePlanPair(st) {
 		return "", st, lease.ErrPlanApprovalRequired
 	}
@@ -1623,7 +1645,14 @@ func (e *Engine) configuredRunner(ctx context.Context, name string, cfg *contrac
 
 // RunUpstreamPlanReview runs outside the worker lifecycle. The manager owns
 // authentication and the single fenced write; this method owns execution.
-func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPlanReviewObservation, reviewer string, headless bool, reporter *ProgressReporter) (string, *lease.IssueState, error) {
+func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPlanReviewObservation, reviewer string, headless bool, reporter *ProgressReporter) (reviewResult string, state *lease.IssueState, reviewErr error) {
+	ctx, scope, scopeErr := storageuse.Ensure(ctx, e.repoRoot)
+	if scopeErr != nil {
+		return "", nil, scopeErr
+	}
+	if scope != nil {
+		defer scope.Complete(&reviewErr)
+	}
 	if o == nil {
 		return "", nil, lease.ErrClaimFence
 	}
@@ -1659,11 +1688,11 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 	if err := e.LeaseManager.CheckUpstreamReviewer(o, provenance); err != nil {
 		return "", nil, err
 	}
-	temporary, err := os.MkdirTemp("", "swarm-upstream-review-*")
+	temporary, err := storageuse.MkdirTemp(ctx, "", "swarm-upstream-review-*", "review-scratch")
 	if err != nil {
 		return "", nil, err
 	}
-	defer os.RemoveAll(temporary)
+	defer storageuse.FromContext(ctx).CleanupTemp(temporary, &reviewErr)
 	path := filepath.Join(temporary, "source")
 	// Clone only the coordinator repository's object store, never a contributor
 	// checkout. Git's hardened environment disables hooks and executable filters.

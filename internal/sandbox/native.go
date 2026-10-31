@@ -23,6 +23,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 func qualifiedNativeCodexVersion(output string) (string, error) {
@@ -165,15 +166,22 @@ func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCach
 }
 
 func runNativeCommand(ctx context.Context, binary, dir string, env, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	return runNativeCommandWithStop(ctx, binary, dir, env, args, stdin, stdout, stderr, process.StopVerified)
+}
+
+func runNativeCommandWithStop(ctx context.Context, binary, dir string, env, args []string, stdin io.Reader, stdout, stderr io.Writer, stop func(*exec.Cmd) error) error {
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir, cmd.Env = dir, env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	process.Configure(cmd)
-	cmd.Cancel = func() error { return process.StopVerified(cmd) }
+	cmd.Cancel = func() error { return stop(cmd) }
 	cmd.WaitDelay = time.Second
 	err := cmd.Run()
-	if stopErr := process.StopVerified(cmd); stopErr != nil {
-		return fmt.Errorf("terminate native worker: %w", stopErr)
+	if stopErr := stop(cmd); stopErr != nil {
+		if scope := storageuse.FromContext(ctx); scope != nil {
+			scope.Retain()
+		}
+		return errors.Join(err, fmt.Errorf("terminate native worker: %w", stopErr))
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -397,14 +405,21 @@ func InspectNativeCodex(ctx context.Context, binary string) (string, error) {
 
 // inspectNativeCodexInterface qualifies the version and exec interface in an
 // empty temporary home.
-func inspectNativeCodexInterface(ctx context.Context, binary string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	home, err := os.MkdirTemp("", "swarm-native-inspect-*")
+func inspectNativeCodexInterface(ctx context.Context, binary string) (versionResult string, resultErr error) {
+	ctx, own, err := storageuse.Ensure(ctx, "host")
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(home)
+	if own != nil {
+		defer own.Complete(&resultErr)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	home, err := storageuse.FromContext(ctx).TempDir(ctx, "", "swarm-native-inspect-*", "native-scratch")
+	if err != nil {
+		return "", err
+	}
+	defer storageuse.FromContext(ctx).CleanupTemp(home, &resultErr)
 	if home, err = filepath.EvalSymlinks(home); err != nil {
 		return "", err
 	}
@@ -430,14 +445,21 @@ func inspectNativeCodexInterface(ctx context.Context, binary string) (string, er
 
 // checkNativeCodexBoundary runs the filesystem and loopback canaries. Callers
 // run it on every inspection, cached or not.
-func checkNativeCodexBoundary(ctx context.Context, binary string) error {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	root, err := os.MkdirTemp("", "swarm-native-check-*")
+func checkNativeCodexBoundary(ctx context.Context, binary string) (resultErr error) {
+	ctx, own, err := storageuse.Ensure(ctx, "host")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(root)
+	if own != nil {
+		defer own.Complete(&resultErr)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	root, err := storageuse.FromContext(ctx).TempDir(ctx, "", "swarm-native-check-*", "native-scratch")
+	if err != nil {
+		return err
+	}
+	defer storageuse.FromContext(ctx).CleanupTemp(root, &resultErr)
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return err
@@ -619,6 +641,9 @@ func RunNativeValidation(ctx context.Context, dir, binary, command string, cache
 		return err
 	}
 	return withNativeWorkspace(ctx, dir, WorkerOptions{DiscardChanges: true}, func(ctx context.Context, work, scratch string) error {
+		if err := acquireRuntimeCaches(ctx, caches, deps); err != nil {
+			return err
+		}
 		mounts, err := ValidatorCacheMounts(caches, ValidationCodex, warmup, false, scratch)
 		if err != nil {
 			return err
@@ -637,6 +662,13 @@ func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, ru
 
 // withNativeWorkspaceClock owns the budget clock for this workspace invocation.
 func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOptions, clock budgetClock, run func(context.Context, string, string) error) (resultErr error) {
+	ctx, own, err := storageuse.Ensure(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if own != nil {
+		defer own.Complete(&resultErr)
+	}
 	ctx, budget := newAgentBudget(ctx, opts, clock)
 	defer budget.close()
 	defer func() {
@@ -647,12 +679,15 @@ func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOption
 			}
 		}
 	}()
+	if err := acquireRuntimeCaches(ctx, nil, opts.Dependencies); err != nil {
+		return err
+	}
 	setup := time.Now()
-	root, err := os.MkdirTemp("", "swarm-native-*")
+	root, err := storageuse.FromContext(ctx).TempDir(ctx, "", "swarm-native-*", "native-scratch")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(root)
+	defer storageuse.FromContext(ctx).CleanupTemp(root, &resultErr)
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return err

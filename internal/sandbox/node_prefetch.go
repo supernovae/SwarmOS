@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"os"
 	"path"
 	"path/filepath"
@@ -82,12 +83,20 @@ func nodePrefetch(ctx context.Context, req prefetchRequest) error {
 	return nil
 }
 
-func nodeFetch(ctx context.Context, req prefetchRequest, lockfile string) error {
-	tmp, err := os.MkdirTemp("", "swarm-prefetch-*")
+func nodeFetch(ctx context.Context, req prefetchRequest, lockfile string) (result error) {
+	ctx, owner, scopeErr := storageuse.Ensure(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	if owner != nil {
+		defer owner.Complete(&result)
+	}
+
+	tmp, err := prefetchTemp(ctx, "", "swarm-prefetch-*")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer storageuse.FromContext(ctx).CleanupTemp(tmp, &result)
 	project := filepath.Join(tmp, "project")
 	files := map[string][]byte{lockfile: req.Files[lockfile]}
 	for name, data := range req.Manifests {

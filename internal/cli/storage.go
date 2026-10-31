@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/storage"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
 
@@ -28,7 +29,11 @@ func newStorageCmd(opts *RootOptions) *cobra.Command {
 				return err
 			}
 		}
-		snapshot, scanErr := storage.Scan(cmd.Context(), storage.Options{RegistryPath: opts.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), SelectedRoot: root, Repository: opts.Repo, Backend: opts.Backend, Tracker: func(owner, root, backend string) (tracker.PullRequestVisitor, error) {
+		useRoot, err := storageuse.ControlRoot()
+		if err != nil {
+			return err
+		}
+		snapshot, scanErr := storage.Scan(cmd.Context(), storage.Options{UseRoot: useRoot, RegistryPath: opts.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), SelectedRoot: root, Repository: opts.Repo, Backend: opts.Backend, Tracker: func(owner, root, backend string) (tracker.PullRequestVisitor, error) {
 			if backend == "local" {
 				return tracker.NewLocalTracker(root), nil
 			}

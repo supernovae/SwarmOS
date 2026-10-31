@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 func nativeValidationUsesCodex(cfg *contract.SwarmConfig) bool {
@@ -80,14 +81,40 @@ var bubblewrapOverlay = sync.OnceValue(func() bool { return probeBubblewrapOverl
 
 // probeBubblewrapOverlay runs the real executor with an overlay cache. It
 // passes only if the cache is readable, writable inside, and unchanged after.
-func probeBubblewrapOverlay(ctx context.Context) bool {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	root, err := os.MkdirTemp("", "swarm-overlay-check-*")
+func probeBubblewrapOverlay(ctx context.Context) (ok bool) {
+	ctx, own, err := storageuse.Ensure(ctx, "host")
 	if err != nil {
 		return false
 	}
-	defer os.RemoveAll(root)
+	if own != nil {
+		defer func() {
+			if p := recover(); p != nil {
+				own.Retain()
+				_ = own.Finish()
+				panic(p)
+			}
+			if own.Finish() != nil {
+				ok = false
+			}
+		}()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	root, err := storageuse.FromContext(ctx).TempDir(ctx, "", "swarm-overlay-check-*", "sandbox-scratch")
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			storageuse.FromContext(ctx).Retain()
+			panic(p)
+		}
+		var cleanupErr error
+		storageuse.FromContext(ctx).CleanupTemp(root, &cleanupErr)
+		if cleanupErr != nil {
+			ok = false
+		}
+	}()
 	work, lower := filepath.Join(root, "workspace"), filepath.Join(root, "cache")
 	for _, dir := range []string{work, lower} {
 		if err := os.Mkdir(dir, 0o700); err != nil {

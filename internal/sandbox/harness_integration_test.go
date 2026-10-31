@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -51,7 +52,6 @@ func TestMain(m *testing.M) {
 }
 
 func TestAuthenticatedDelegatedTools(t *testing.T) {
-	t.Parallel()
 	driver := os.Getenv("SWARM_TEST_AUTHENTICATED_HARNESS")
 	if driver == "" {
 		t.Skip("set SWARM_TEST_AUTHENTICATED_HARNESS=claude, opencode or omp to use its existing login")
@@ -71,6 +71,9 @@ func TestAuthenticatedDelegatedTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if runtime.GOOS != "darwin" {
+		isolateRuntimeControl(t)
+	}
 	work, host := t.TempDir(), t.TempDir()
 	secret := filepath.Join(host, "dummy-coordinator-token")
 	os.WriteFile(secret, []byte("synthetic-secret"), 0600)
@@ -89,6 +92,9 @@ func TestAuthenticatedDelegatedTools(t *testing.T) {
 	data, _ = os.ReadFile(secret)
 	if string(data) != "synthetic-secret" {
 		t.Fatal("host canary changed")
+	}
+	if runtime.GOOS != "darwin" {
+		assertRuntimePending(t, 0)
 	}
 	t.Log(driver, version, "authenticated interactive tool workflow completed", output.String())
 }

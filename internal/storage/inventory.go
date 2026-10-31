@@ -65,6 +65,7 @@ func (b *Budget) entry(ctx context.Context) error {
 }
 
 type Resource struct {
+	useRepository  string
 	Owner          string     `json:"owner"`
 	Repository     string     `json:"repository"`
 	Class          string     `json:"class"`
@@ -191,9 +192,9 @@ func Scan(ctx context.Context, opts Options) (Snapshot, error) {
 			}
 		}
 	}
+	s.indexed()
 	s.caches()
 	s.scratch()
-	s.indexed()
 	sort.Slice(s.out.Resources, func(i, j int) bool { a, b := s.out.Resources[i], s.out.Resources[j]; return a.Identity < b.Identity })
 	s.out.Counters = s.b.Counters
 	if s.physical && s.out.Complete {
@@ -260,8 +261,17 @@ func (s *scanner) add(r Resource) {
 		r.Eligibility = "unknown"
 		r.Reason = "complete authoritative use and retention evidence unavailable"
 	}
-	if s.opts.UseRoot != "" && r.Repository != "" && r.Ref == "" {
-		observation, err := storageuse.Observe(s.ctx, s.opts.UseRoot, storageuse.Resource{Repository: r.Repository, Class: r.Class, Identity: r.Identity, Location: r.Path}, 16<<10, s.b.Charge)
+	useRepository := r.useRepository
+	if useRepository == "" && r.Repository != "" && strings.HasPrefix(r.Identity, "cache:") {
+		if rel, err := filepath.Rel(s.opts.CacheRoot, r.Path); err == nil && filepath.IsLocal(rel) {
+			parts := strings.Split(rel, string(filepath.Separator))
+			if len(parts) >= 2 {
+				useRepository = parts[1]
+			}
+		}
+	}
+	if s.opts.UseRoot != "" && useRepository != "" && r.Ref == "" {
+		observation, err := storageuse.Observe(s.ctx, s.opts.UseRoot, storageuse.Resource{Repository: useRepository, Class: r.Class, Identity: r.Identity, Location: r.Path}, 16<<10, s.b.Charge)
 		if err == nil {
 			r.Active = observation.Active
 			r.LastUse = &observation.LastUse
@@ -270,7 +280,7 @@ func (s *scanner) add(r Resource) {
 				r.Eligibility = "blocked"
 				r.Reason = "unresolved durable use"
 			}
-			if observation.CompleteCoverage && r.Active != nil && !*r.Active && r.Eligibility == "unknown" && strings.Contains(r.Class, "build") {
+			if r.Repository != "" && observation.CompleteCoverage && r.Active != nil && !*r.Active && r.Eligibility == "unknown" && strings.Contains(r.Class, "build") {
 				r.Eligibility = "eligible"
 				r.Reason = "complete durable use coverage with no unresolved use; observation only"
 			}

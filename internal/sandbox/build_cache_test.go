@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
@@ -460,11 +461,18 @@ func buildCacheRoles(t *testing.T, repo, scratch string) map[string][]BuildCache
 		"developer": {Role: "developer"}, "tester": {Role: "tester"}, "resolver": {Role: "resolver"},
 		"planner": {Role: "planner", ReadOnly: true}, "reviewer": {Role: "reviewer", ReadOnly: true},
 	} {
-		caches, err := agentBuildCaches(ctx, repo, filepath.Join(scratch, role), opts)
+		roleScratch := filepath.Join(scratch, role)
+		if err := os.MkdirAll(roleScratch, 0700); err != nil {
+			t.Fatal(err)
+		}
+		caches, err := agentBuildCaches(ctx, repo, roleScratch, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
 		roles[role] = caches
+	}
+	if err := os.MkdirAll(filepath.Join(scratch, "validation"), 0700); err != nil {
+		t.Fatal(err)
 	}
 	persistent := mustPrepare(t, ValidatorBuildCache, repo, userCacheDirForTest(t), filepath.Join(scratch, "validation"))
 	for _, backend := range []ValidationBackend{ValidationCodex, ValidationBubblewrap} {
@@ -651,5 +659,162 @@ func TestParseBuildCache(t *testing.T) {
 		if c, err := ParseBuildCache(value, work); err == nil {
 			t.Errorf("ParseBuildCache(%q) = %+v", value, c)
 		}
+	}
+}
+
+func TestBuildCacheUseAdmissionAndCompletion(t *testing.T) {
+	isolateRuntimeControl(t)
+	repo, userCache, scratch := cacheTestRepo(t), resolvedTempDir(t), resolvedTempDir(t)
+	ctx, scope, err := storageuse.Ensure(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caches, err := PrepareBuildCaches(ctx, AgentBuildCache, repo, userCache, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := repositoryCacheKey(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := storageuse.Open(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	for _, cache := range caches {
+		resource := storageuse.ResourceFor(key, string(AgentBuildCache), cache.Dir)
+		if guard, err := manager.AcquireMaintenance(ctx, resource); err == nil {
+			guard.Close()
+			t.Fatal("maintenance admitted during cache use")
+		}
+	}
+	if err := scope.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoPendingCacheUses(t)
+	for _, cache := range caches {
+		resource := storageuse.ResourceFor(key, string(AgentBuildCache), cache.Dir)
+		guard, err := manager.AcquireMaintenance(ctx, resource)
+		if err != nil {
+			t.Fatal(err)
+		}
+		guard.Close()
+	}
+	// A held maintenance lock and canceled admission must stop before mkdir.
+	first := caches[0]
+	if err := os.Remove(first.Dir); err != nil {
+		t.Fatal(err)
+	}
+	resource := storageuse.ResourceFor(key, string(AgentBuildCache), first.Dir)
+	guard, err := manager.AcquireMaintenance(ctx, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	blocked, blockedScope, err := storageuse.Ensure(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, cancel := context.WithCancel(blocked)
+	cancel()
+	if _, err := PrepareBuildCaches(blocked, AgentBuildCache, repo, userCache, scratch); err == nil {
+		t.Fatal("canceled admission accessed cache")
+	}
+	if _, err := os.Lstat(first.Dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache touched before admission: %v", err)
+	}
+	if err := blockedScope.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBuildCacheAdmissionFailureNeverFallsBack(t *testing.T) {
+	isolateRuntimeControl(t)
+	control, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(control), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(resolvedTempDir(t), control); err != nil {
+		t.Skip(err)
+	}
+	repo, persistent, scratch := cacheTestRepo(t), resolvedTempDir(t), resolvedTempDir(t)
+	if _, err := PrepareBuildCaches(t.Context(), AgentBuildCache, repo, persistent, scratch); err == nil {
+		t.Fatal("unsafe durable admission selected cache fallback")
+	}
+	if _, err := os.Lstat(filepath.Join(scratch, "build-cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fallback touched before safe admission: %v", err)
+	}
+	key, err := repositoryCacheKey(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(persistent, "swarm", string(AgentBuildCache), key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("persistent cache touched before safe admission: %v", err)
+	}
+}
+
+func TestScratchBuildCachesShareAdmittedOuterRoot(t *testing.T) {
+	isolateRuntimeControl(t)
+	repo := cacheTestRepo(t)
+	ctx, scope, err := storageuse.Ensure(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch, err := scope.TempDir(ctx, "", "swarm-native-*", "native-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cleanupErr error
+	caches, err := PrepareBuildCaches(ctx, AgentBuildCache, repo, "", scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(caches) == 0 {
+		t.Fatal("no fallback caches")
+	}
+	control, _ := storageuse.ControlRoot()
+	records := 0
+	if err := storageuse.VisitResources(ctx, control, 100, func() error { return nil }, func(int64) error { return nil }, func(resource storageuse.Resource) error {
+		records++
+		if resource.Class != "native-scratch" || resource.Location != scratch {
+			t.Fatalf("nested scratch invented persistent cache identity: %+v", resource)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if records != 1 {
+		t.Fatalf("records=%d, want outer scratch only", records)
+	}
+	// Cleanup occurs before Finish in production; keep that order in the fixture.
+	scope.CleanupTemp(scratch, &cleanupErr)
+	if cleanupErr != nil {
+		t.Fatal(cleanupErr)
+	}
+	if err := scope.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoPendingCacheUses(t)
+}
+
+func TestScratchBuildCacheRejectsSymlinkSubstitution(t *testing.T) {
+	scratch := resolvedTempDir(t)
+	outside := resolvedTempDir(t)
+	if err := os.Symlink(outside, filepath.Join(scratch, "build-cache")); err != nil {
+		t.Skip(err)
+	}
+	if _, err := scratchBuildCache(scratch, "go"); err == nil {
+		t.Fatal("scratch cache followed substituted directory")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "go")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scratch cache wrote outside admitted root: %v", err)
 	}
 }

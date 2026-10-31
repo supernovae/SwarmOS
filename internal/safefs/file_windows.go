@@ -50,3 +50,7 @@ func openExisting(parent *os.Root, name string, flags int) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(handle), name), nil
 }
+
+func openCleanupDirectory(_ *os.Root, _ string) (*os.File, error) {
+	return nil, fmt.Errorf("secure directory permission repair unavailable on this platform")
+}

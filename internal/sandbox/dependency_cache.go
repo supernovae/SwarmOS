@@ -25,6 +25,7 @@ import (
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 // dependencyEcosystem classifies one ecosystem's downloaded dependencies.
@@ -252,6 +253,10 @@ func DependencyCacheModes(mode DependencyCacheMode) []EcosystemMode {
 // starts. SharedHostCaches prepares nothing. Private Go modules are fetched
 // only as policy.PrivateGo allows.
 func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktree, baseSHA, userCache string, source DependencyPolicySource) (Dependencies, error) {
+	ctx, _, scopeErr := storageuse.Ensure(ctx, worktree)
+	if scopeErr != nil {
+		return Dependencies{}, scopeErr
+	}
 	policy := source.dependencyPolicy()
 	deps := Dependencies{Mode: policy.Mode}
 	if policy.Mode == SharedHostCaches {
@@ -317,6 +322,9 @@ func PrepareDependencyCaches(ctx context.Context, owner BuildCacheOwner, worktre
 	}
 	defer root.Close()
 	for _, eco := range detected {
+		if err := acquireCacheUse(ctx, key, string(owner), filepath.Join(keyDir, eco.Name)); err != nil {
+			return deps, err
+		}
 		if err := privateCacheDir(root, filepath.Join(keyRel, eco.Name)); err != nil {
 			return deps, fmt.Errorf("prepare %s dependency cache: %w", eco.Name, err)
 		}
@@ -537,6 +545,8 @@ func shortSHA(sha string) string {
 	return sha
 }
 
+var stopPrefetchProcess = process.StopVerified
+
 // runPrefetchCommand runs one fetch-only command on the host. Replaced in
 // tests to record argv and environment.
 var runPrefetchCommand = func(ctx context.Context, dir string, env, argv []string) ([]byte, []byte, error) {
@@ -552,7 +562,12 @@ var runPrefetchCommand = func(ctx context.Context, dir string, env, argv []strin
 	cmd.Cancel = func() error { process.Stop(cmd); return nil }
 	cmd.WaitDelay = time.Second
 	err = cmd.Run()
-	process.Stop(cmd)
+	if stopErr := stopPrefetchProcess(cmd); stopErr != nil {
+		if scope := storageuse.FromContext(ctx); scope != nil {
+			scope.Retain()
+		}
+		err = errors.Join(err, fmt.Errorf("stop prefetch process: %w", stopErr))
+	}
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
@@ -569,7 +584,15 @@ var goModDownloadArgv = []string{"go", "mod", "download", "-json"}
 // downloaded toolchain runs. When a go.mod or go.work needs a newer Go than
 // the host's, the matching golang.org/toolchain module is fetched too, so the
 // sandboxed go command can switch to it offline.
-func goModDownload(ctx context.Context, req prefetchRequest) error {
+func goModDownload(ctx context.Context, req prefetchRequest) (result error) {
+	ctx, owner, scopeErr := storageuse.Ensure(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	if owner != nil {
+		defer owner.Complete(&result)
+	}
+
 	var modules, workspaces []string
 	for name := range req.Files {
 		switch path.Base(name) {
@@ -584,11 +607,11 @@ func goModDownload(ctx context.Context, req prefetchRequest) error {
 	}
 	sort.Strings(modules)
 	sort.Strings(workspaces)
-	tmp, err := os.MkdirTemp("", "swarm-prefetch-*")
+	tmp, err := prefetchTemp(ctx, "", "swarm-prefetch-*")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer storageuse.FromContext(ctx).CleanupTemp(tmp, &result)
 	tree, outside := filepath.Join(tmp, "tree"), filepath.Join(tmp, "outside")
 	for _, dir := range []string{tree, outside} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
@@ -1018,7 +1041,15 @@ var cargoHomeAllowed = map[string]bool{
 // repository code or configuration reaches cargo. The copy lives under the
 // private cache key directory rather than $TMPDIR, because cargo also reads
 // .cargo/config.toml from every ancestor directory.
-func cargoFetch(ctx context.Context, req prefetchRequest) error {
+func cargoFetch(ctx context.Context, req prefetchRequest) (result error) {
+	ctx, owner, scopeErr := storageuse.Ensure(ctx, "")
+	if scopeErr != nil {
+		return scopeErr
+	}
+	if owner != nil {
+		defer owner.Complete(&result)
+	}
+
 	if _, ok := req.Files["Cargo.lock"]; !ok {
 		return errors.New("approved base has no Cargo.lock")
 	}
@@ -1028,11 +1059,11 @@ func cargoFetch(ctx context.Context, req prefetchRequest) error {
 	if err := checkCargoHome(req.Dir); err != nil {
 		return err
 	}
-	tmp, err := os.MkdirTemp(filepath.Dir(req.Dir), ".prefetch-rust-*")
+	tmp, err := prefetchTemp(ctx, filepath.Dir(req.Dir), ".prefetch-rust-*")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer storageuse.FromContext(ctx).CleanupTemp(tmp, &result)
 	work := filepath.Join(tmp, "work")
 	for rel, data := range req.Files {
 		path := filepath.Join(work, filepath.FromSlash(rel))
@@ -1145,4 +1176,8 @@ func cargoFetchFailure(stderr []byte, runErr error) string {
 	default:
 		return runErr.Error()
 	}
+}
+
+func prefetchTemp(ctx context.Context, parent, pattern string) (string, error) {
+	return storageuse.MkdirTemp(ctx, parent, pattern, "prefetch-scratch")
 }

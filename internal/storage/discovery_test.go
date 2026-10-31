@@ -33,7 +33,7 @@ func TestProvenLegacyAndDurableUseEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	resource := storageuse.Resource{Repository: "local/" + filepath.Base(repo), Class: "agent-build", Identity: "cache:" + path, Location: path}
+	resource := storageuse.Resource{Repository: key, Class: "agent-build", Identity: "cache:" + path, Location: path}
 	use, err := manager.AcquireUse(context.Background(), resource)
 	if err != nil {
 		t.Fatal(err)
@@ -127,5 +127,96 @@ func TestPrivateLayoutRejectsWritableAnchor(t *testing.T) {
 	}
 	if privateLayout(base, filepath.Join("go-build", "key")) {
 		t.Fatal("writable anchor accepted")
+	}
+}
+
+func TestIndexedManagedScratchUseEvidence(t *testing.T) {
+	opts := fixture(t)
+	opts.Repository = ""
+	control := filepath.Join(t.TempDir(), "control")
+	manager, err := storageuse.Open(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	path := filepath.Join(opts.ScratchRoot, "swarm-check-home-indexed")
+	resource := storageuse.ResourceFor("host-unknown", "validation-scratch", path)
+	use, err := manager.AcquireUse(context.Background(), resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(path, "data"), "scratch")
+	opts.UseRoot = control
+	before, err := os.ReadDir(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(active bool) {
+		t.Helper()
+		snapshot, err := Scan(context.Background(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range snapshot.Resources {
+			if r.Path == path {
+				if r.Class != "validation-scratch" || r.Active == nil || *r.Active != active || r.LastUse == nil {
+					t.Fatalf("scratch evidence: %+v", r)
+				}
+				if r.Repository != "" || r.Eligibility == "eligible" {
+					t.Fatalf("host scope inferred repository eligibility: %+v", r)
+				}
+				return
+			}
+		}
+		t.Fatal("indexed scratch not observed")
+	}
+	check(true)
+	if err := use.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+	after, err := os.ReadDir(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != len(after) {
+		t.Fatal("report created control entries")
+	}
+}
+
+func TestIndexedRustPrefetchScratchMatchesDiscovery(t *testing.T) {
+	opts := fixture(t)
+	opts.Repository = ""
+	opts.UseRoot = filepath.Join(t.TempDir(), "control")
+	manager, err := storageuse.Open(opts.UseRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	key := "0123456789abcdef0123456789abcdef"
+	path := filepath.Join(opts.CacheRoot, "agent-deps", key, ".prefetch-rust-fixture")
+	use, err := manager.AcquireUse(context.Background(), storageuse.ResourceFor(key, "prefetch-scratch", path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(path, "consumer"), "active")
+	out, err := Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, r := range out.Resources {
+		if r.Path == path {
+			count++
+			if r.Identity != "scratch:"+path || r.Active == nil || !*r.Active {
+				t.Fatalf("prefetch evidence diverged: %+v", r)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("prefetch resource appears %d times", count)
+	}
+	if err := use.Finish(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

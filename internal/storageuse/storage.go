@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"strings"
 )
 
 var ErrUnsafe = errors.New("storage coverage is incomplete or storage is in use")
@@ -256,8 +258,11 @@ func (m *Manager) AcquireUse(ctx context.Context, r Resource) (*Use, error) {
 	return &Use{manager: m, resource: r, key: key, token: token}, nil
 }
 
-// Finish records positive completion. Call only after all consumers are proven
-// to have exited; exec.Cmd.Wait and process-group kill alone are insufficient.
+// Finish records completion after the execution boundary and all coordinator
+// consumers finish. Host commands require exit plus successful StopVerified;
+// Bubblewrap retains its stronger PID-namespace completion. Deliberately detached
+// sessions are not tracked: cleanup may remove a cache beneath them, while they
+// retain only their existing sandbox access. Unverified stops must not call Finish.
 func (u *Use) Finish(ctx context.Context) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -410,4 +415,326 @@ func Observe(ctx context.Context, path string, resource Resource, maxBytes int64
 		out.Active = &active
 	}
 	return out, nil
+}
+
+// ControlRoot resolves private coordinator evidence separately from cache grants.
+// It does not create storage and may also be used by read-only inventory.
+func ControlRoot() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "swarm-use"), nil
+}
+
+// ResourceFor is shared by producers and inventory. Repository is the canonical
+// Git-common-directory cache key, never the display name of a repository.
+func ResourceFor(repository, class, path string) Resource {
+	prefix := "cache:"
+	if strings.HasSuffix(class, "scratch") {
+		prefix = "scratch:"
+	}
+	return Resource{Repository: repository, Class: class, Identity: prefix + filepath.Clean(path), Location: filepath.Clean(path)}
+}
+
+type scopeKey struct{}
+
+type temporary struct {
+	parent *safefs.Root
+	name   string
+	info   os.FileInfo
+}
+
+// Scope holds coordinator-only lifetime state. It is never serialized to workers.
+// Retain permanently records uncertainty for this scope; neither cancellation nor
+// a later successful command clears that uncertainty.
+type Scope struct {
+	mu         sync.Mutex
+	repository string
+	forbidden  []string
+	manager    *Manager
+	uses       []*Use
+	temps      map[string]temporary
+	retained   bool
+	closed     bool
+}
+
+func FromContext(ctx context.Context) *Scope { s, _ := ctx.Value(scopeKey{}).(*Scope); return s }
+func (s *Scope) Repository() string          { return s.repository }
+
+// Ensure installs a scope only when there is no enclosing coordinator owner.
+// The returned owner is nil for inherited scopes. Creating a scope alone does
+// not touch control storage, grant credentials or create claim authority.
+func Ensure(ctx context.Context, repository string) (context.Context, *Scope, error) {
+	if inherited := FromContext(ctx); inherited != nil {
+		if filepath.IsAbs(repository) {
+			inherited.mu.Lock()
+			if inherited.manager != nil && overlaps(inherited.manager.path, repository) {
+				inherited.mu.Unlock()
+				return ctx, nil, errors.New("control root overlaps coordinator source")
+			}
+			inherited.forbidden = append(inherited.forbidden, repository)
+			inherited.mu.Unlock()
+		}
+		return ctx, nil, nil
+	}
+	identity := "host-unknown"
+	if raw, err := hex.DecodeString(repository); err == nil && len(raw) == 16 {
+		identity = repository
+	}
+	if repository != "" && identity == "host-unknown" {
+		cmd, _, err := gitcredential.Command(ctx, repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		if err == nil {
+			if out, err := cmd.Output(); err == nil {
+				common := strings.TrimSpace(string(out))
+				if filepath.IsAbs(common) {
+					if resolved, err := filepath.EvalSymlinks(common); err == nil {
+						common = resolved
+					}
+					sum := sha256.Sum256([]byte(filepath.Clean(common)))
+					identity = hex.EncodeToString(sum[:16])
+				}
+			}
+		}
+	}
+	s := &Scope{repository: identity}
+	if filepath.IsAbs(repository) {
+		s.forbidden = []string{repository}
+	}
+	return context.WithValue(ctx, scopeKey{}, s), s, nil
+}
+
+func (s *Scope) Acquire(ctx context.Context, resource Resource) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("storage scope is closed")
+	}
+	if s.manager == nil {
+		path, err := ControlRoot()
+		if err != nil {
+			return err
+		}
+		s.manager, err = Open(path, append(s.forbidden, resource.Location)...)
+		if err != nil {
+			return err
+		}
+	}
+	use, err := s.manager.AcquireUse(ctx, resource)
+	if err != nil {
+		return err
+	}
+	s.uses = append(s.uses, use)
+	return nil
+}
+
+func (s *Scope) Retain() { s.mu.Lock(); s.retained = true; s.mu.Unlock() }
+
+// Finish runs independently of canceled work after all consumers have stopped.
+// A retained scope closes handles but leaves every pending durable token intact.
+func (s *Scope) Finish() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.manager == nil {
+		return nil
+	}
+	defer s.manager.Close()
+	defer func() {
+		for _, temp := range s.temps {
+			temp.parent.Close()
+		}
+	}()
+	if s.retained {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var result error
+	for _, use := range s.uses {
+		result = errors.Join(result, use.Finish(ctx))
+	}
+	return result
+}
+
+// MarkUnknown preserves legacy provenance before migrating into a fresh target.
+func (s *Scope) MarkUnknown(ctx context.Context, resource Resource) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.manager == nil || s.closed {
+		return ErrUnsafe
+	}
+	key, err := s.manager.key(resource)
+	if err != nil {
+		return err
+	}
+	f, _, err := s.manager.lock(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer unlock(f)
+	record, err := s.manager.read(key, resource)
+	if err != nil {
+		return err
+	}
+	record.CompleteCoverage = false
+	return s.manager.write(key, record)
+}
+
+// TempDir admits the exact absent resource before exclusive, root-bound mkdir.
+func (s *Scope) TempDir(ctx context.Context, parent, pattern, class string) (string, error) {
+	if parent == "" {
+		parent = os.TempDir()
+		// The OS temporary directory has trusted platform aliases on macOS.
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err != nil {
+			return "", err
+		}
+		parent = resolved
+	}
+	parent, err := filepath.Abs(parent)
+	if err != nil {
+		return "", err
+	}
+	// Validate all existing components before opening the pinned parent.
+	volume := filepath.VolumeName(parent) + string(filepath.Separator)
+	root, err := safefs.Open(volume)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	rel, err := filepath.Rel(volume, parent)
+	if err != nil {
+		return "", err
+	}
+	dir, err := root.Sub(rel, false, 0)
+	if err != nil {
+		return "", err
+	}
+	keepParent := false
+	defer func() {
+		if !keepParent {
+			dir.Close()
+		}
+	}()
+	for attempt := 0; attempt < 10; attempt++ {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return "", err
+		}
+		name := strings.Replace(pattern, "*", hex.EncodeToString(nonce[:]), 1)
+		if name == pattern {
+			name += hex.EncodeToString(nonce[:])
+		}
+		if filepath.Base(name) != name || !filepath.IsLocal(name) {
+			return "", ErrUnsafe
+		}
+		path := filepath.Join(parent, name)
+		if err := s.Acquire(ctx, ResourceFor(s.repository, class, path)); err != nil {
+			return "", err
+		}
+		if err := dir.Mkdir(name, 0700); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				if unknownErr := s.MarkUnknown(ctx, ResourceFor(s.repository, class, path)); unknownErr != nil {
+					s.Retain()
+					return "", unknownErr
+				}
+				continue
+			}
+			return "", err
+		}
+		info, err := dir.Lstat(name)
+		if err != nil {
+			s.Retain()
+			return "", err
+		}
+		s.mu.Lock()
+		if s.temps == nil {
+			s.temps = map[string]temporary{}
+		}
+		s.temps[path] = temporary{dir, name, info}
+		s.mu.Unlock()
+		keepParent = true
+		return path, nil
+	}
+	return "", errors.New("managed temporary directory collisions")
+}
+
+// MkdirTemp requires an enclosing owner so the use outlives allocation.
+func MkdirTemp(ctx context.Context, parent, pattern, class string) (string, error) {
+	s := FromContext(ctx)
+	if s == nil {
+		return "", errors.New("managed temporary allocation requires a storage scope")
+	}
+	return s.TempDir(ctx, parent, pattern, class)
+}
+
+// Retained reports unresolved completion without exposing tokens.
+func (s *Scope) Retained() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.retained }
+
+// Complete is an owner defer: panics leave unresolved evidence and propagate.
+// Pass the named return error so a completion-write failure is never hidden.
+func (s *Scope) Complete(result *error) {
+	if p := recover(); p != nil {
+		s.Retain()
+		_ = s.Finish()
+		panic(p)
+	}
+	if finishErr := s.Finish(); finishErr != nil {
+		*result = errors.Join(*result, finishErr)
+	}
+}
+
+// CleanupTemp is deferred directly by the allocation owner. Panics and uncertain
+// stops preserve scratch; normal cleanup checks identity through the pinned parent.
+func (s *Scope) CleanupTemp(path string, result *error) {
+	if p := recover(); p != nil {
+		s.Retain()
+		panic(p)
+	}
+
+	s.cleanupTemp(path, result, func(temp temporary) error {
+		return temp.parent.RemoveAllChecked(temp.name, temp.info)
+	})
+}
+
+func (s *Scope) cleanupTemp(path string, result *error, remove func(temporary) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retained {
+		return
+	}
+	temp, ok := s.temps[path]
+	if !ok {
+		s.retained = true
+		*result = errors.Join(*result, ErrUnsafe)
+		return
+	}
+	if cleanupErr := remove(temp); cleanupErr != nil {
+		s.retained = true
+		if !errors.Is(cleanupErr, safefs.ErrCleanupIncomplete) {
+			*result = errors.Join(*result, cleanupErr)
+		}
+	}
+}
+
+// Covers reports whether an admitted managed temporary root encloses path.
+// Nested fallback caches share that root's lifetime rather than inventing a
+// persistent-cache identity outside the managed cache layout.
+func (s *Scope) Covers(path string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for root := range s.temps {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && (rel == "." || filepath.IsLocal(rel)) {
+			return true
+		}
+	}
+	return false
 }

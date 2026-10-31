@@ -16,3 +16,8 @@ func physicalStat(info os.FileInfo) (fileIdentity, int64, bool) {
 	}
 	return fileIdentity{uint64(st.Dev), uint64(st.Ino)}, st.Blocks * 512, true
 }
+
+func singleLink(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Nlink == 1
+}

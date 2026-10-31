@@ -282,6 +282,32 @@ Logical bytes describe file sizes. Allocated bytes describe observed filesystem 
 
 A report marked `complete=false` includes the available observations and the reasons it stopped. Missing usage and use evidence appear as unknown. A scratch prefix or missing repository does not prove abandonment; these candidates remain unknown. The command has no apply option. Authoritative issue registrations can keep missing worktrees visible; active attempts and pending revisions block those resources. GitHub inspection reads pinned state objects already available locally and never fetches missing objects. Completed merged worktrees become advisory candidates only after their registered branch, index and files pass bounded inspection. PR evidence is read once per repository through a bounded traversal. Repository retention eligibility remains unknown where authoritative claim, submission or complete worktree evidence is unavailable.
 
+### Automatic cache maintenance
+
+Swarm keeps managed caches near a shared host budget so a node working across many repositories can reuse builds without growing indefinitely. Coordinator commands check before and after issue/PR work, stage and validation, repository validation, and node runs. A node pool also checks after each job. The checks share a durable host throttle: with the defaults, cache inventory runs at most once every 30 minutes, with a 60-second pass deadline. Failed attempts also wait for the next interval. There is no background service.
+
+Configure maintenance in the operator's node profile (`~/.config/swarm/node.yaml`, or an absolute profile path selected by `SWARM_NODE_CONFIG`):
+
+```yaml
+storage:
+  cache_target_bytes: 42949672960
+  inactive_retention: 336h
+  low_free_bytes: 5368709120
+  low_free_percent: 10
+  maintenance_interval: 30m
+  warning_interval: 10m
+```
+
+These are the defaults: a 40 GiB aggregate soft target, a minimum idle age of 14 days, and a low-space threshold of the larger of 5 GiB or 10% of filesystem capacity. Bytes and durations must be positive; percentages must be greater than zero and at most 100. Repository configuration cannot change these settings. Invalid storage settings disable automatic removal and print a diagnostic; `swarm node status` reports configuration errors for inspection.
+
+Automatic removal covers managed agent and validator build caches (including Go, Rust and C/C++) and dependency caches. It chooses the oldest durable last-use records first, only after complete use coverage proves all registered consumers finished. Each chosen leaf is checked again under exclusive admission before removal. Recent caches stay even when the target is exceeded. Task state, worktrees, branches, scratch, shared operator caches, orphan caches and legacy caches without complete use evidence remain for explicit inspection and cleanup.
+
+With the defaults, warnings refresh at most once every 10 minutes. Between inventories they use cached totals marked stale and cheap filesystem free-space checks; partial totals are lower bounds. Active, protected or unknown storage can keep usage above target. Node status reads cached diagnostics without running an inventory or deleting caches. Diagnostics go to stderr, including with JSON output, and maintenance failures leave workflow outcomes unchanged. Finished task candidates are advisory; explicit cleanup checks the worktree and branch before retirement.
+
+Use `swarm storage cleanup --all-repos` to preview cleanup across registered repositories, then `swarm storage cleanup --all-repos --apply` when ready. Both support `--json`. Omit `--all-repos` to select the current repository. Removing caches makes later runs download dependencies or rebuild outputs. Reported namespace-byte changes can differ from physical free-space gains because hardlinks, open files and filesystem sharing may retain blocks.
+
+Offline or incomplete repository evidence retains affected caches. Interrupted consumers keep pending use records until supported workflow recovery establishes completion; use issue/PR status and the existing recovery commands before retrying cleanup. Leave pending use records intact. Retrying maintenance after its interval is safe; explicit cleanup can also be rerun after interruption. Automatic task and worktree retirement is not enabled.
+
 ### Reclaiming managed storage
 
 Use `swarm storage cleanup` to combine merged-task retirement with reclamation of admitted idle cache and scratch leaves. Start with a preview, then apply the scope you reviewed:

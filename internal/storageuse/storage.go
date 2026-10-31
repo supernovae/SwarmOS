@@ -306,8 +306,9 @@ func (u *Use) Finish(ctx context.Context) error {
 
 // Maintenance holds the admission mutex until Close. It never removes data.
 type Maintenance struct {
-	once sync.Once
-	file *os.File
+	once        sync.Once
+	file        *os.File
+	observation Observation
 }
 
 func (g *Maintenance) Close() error { g.once.Do(func() { unlock(g.file) }); return nil }
@@ -335,7 +336,8 @@ func (m *Manager) AcquireMaintenance(ctx context.Context, r Resource) (*Maintena
 			return nil, ErrUnsafe
 		}
 	}
-	return &Maintenance{file: f}, nil
+	active := false
+	return &Maintenance{file: f, observation: Observation{CompleteCoverage: true, LastUse: v.LastUse, Active: &active}}, nil
 }
 
 // Observation contains no use tokens. Active is unknown unless complete
@@ -755,4 +757,12 @@ func (s *Scope) Covers(path string) bool {
 		}
 	}
 	return false
+}
+
+// Observation returns token-free evidence pinned by the held admission lock.
+func (g *Maintenance) Observation() Observation {
+	out := g.observation
+	active := false
+	out.Active = &active
+	return out
 }

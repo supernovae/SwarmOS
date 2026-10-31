@@ -228,6 +228,9 @@ func (s *scanner) caches() {
 					r.Owner = "unknown"
 					r.Identity = "scratch:" + path
 				}
+				if s.opts.cacheOnly && r.Class == "prefetch-scratch" {
+					return
+				}
 				if owner == "" {
 					r.Eligibility = "unknown"
 					r.Reason = "orphan or unproven repository key; abandonment unknown"
@@ -313,6 +316,23 @@ func DiscoverScopes(ctx context.Context, opts Options, all bool) ([]SelectedRepo
 	chosen := []registry.RepoEntry{}
 	if all {
 		chosen = entries
+		if opts.includeSelected && opts.SelectedRoot != "" {
+			current := registry.RepoEntry{Path: opts.SelectedRoot, Backend: opts.Backend}
+			common, e := s.git(opts.SelectedRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")
+			found := false
+			if e == nil {
+				for _, registered := range entries {
+					other, e := s.git(registered.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+					if e == nil && other == common {
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				chosen = append(chosen, current)
+			}
+		}
 	} else if opts.SelectedRoot != "" {
 		chosen = append(chosen, registry.RepoEntry{Repo: opts.Repository, Path: opts.SelectedRoot, Backend: opts.Backend})
 		for _, e := range entries {

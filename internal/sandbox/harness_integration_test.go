@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,6 +47,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	userCacheDir = func() (string, error) { return cache, nil }
+	storageuse.UserCacheDir = os.UserCacheDir
 	os.Setenv("XDG_CACHE_HOME", cache)
 	os.Setenv("HOME", cache)
 	code := m.Run()

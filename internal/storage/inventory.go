@@ -83,6 +83,7 @@ func (b *Budget) entry(ctx context.Context) error {
 }
 
 type Resource struct {
+	uniqueBytes    int64
 	useRepository  string
 	Owner          string     `json:"owner"`
 	Repository     string     `json:"repository"`
@@ -111,6 +112,10 @@ type Snapshot struct {
 	ObservedAllocatedBytes int64      `json:"observed_allocated_bytes"`
 }
 type Options struct {
+	includeSelected bool
+	cacheOnly       bool
+	// allocation is a package-private fixture adapter; identities still come from stat.
+	allocation func(os.FileInfo, int64) int64
 	// GitOutput supplies a trusted lazy metadata stream for deterministic fixtures.
 	GitOutput func(context.Context, string, ...string) (io.ReadCloser, error)
 	// ReadDirectory is a trusted lazy adapter; the scanner admits every entry.
@@ -128,14 +133,17 @@ type Options struct {
 	Limits       Limits
 }
 type scanner struct {
-	ctx      context.Context
-	opts     Options
-	b        Budget
-	out      Snapshot
-	seen     map[string]bool
-	inodes   map[fileIdentity]bool
-	repos    map[string]string
-	physical bool
+	ctx            context.Context
+	opts           Options
+	b              Budget
+	out            Snapshot
+	seen           map[string]bool
+	inodes         map[fileIdentity]bool
+	repos          map[string]string
+	physical       bool
+	usageBudget    *Budget
+	namespaceBytes int64
+	recheckBudget  *Budget
 }
 
 // Scan opens only existing paths. Missing evidence stays unknown. It never

@@ -88,6 +88,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			defer func() { reportJSONFailure(cmd, profileJSON, "node-status", runErr) }()
+			if _, err := node.LoadStorageSettings(rootOpts.nodeConfigPath()); err != nil {
+				return err
+			}
 			prof, err := node.LoadOrDetectProfile(rootOpts.nodeConfigPath())
 			if err != nil {
 				return err
@@ -250,6 +253,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 							selections = append(selections, map[string]any{"repo": pulled.Repo, "issue_number": pulled.Issue.Number, "overlap": pulled.Overlap})
 							outputMu.Unlock()
 							result, err := execute(taskCtx, pulled)
+							outputMu.Lock()
+							rootOpts.storageMaintenance(cmd, false)
+							outputMu.Unlock()
 							if errors.Is(err, lease.ErrPlanReplanLimit) {
 								admitted.Add(-1)
 								continue

@@ -64,7 +64,7 @@ func LoadOrDetectProfile(customPath string) (*contract.NodeProfile, error) {
 		return DetectHostProfile(""), nil
 	}
 	var prof contract.NodeProfile
-	if err := yaml.Unmarshal(data, &prof); err != nil {
+	if err := decodeExecutionProfile(data, &prof); err != nil {
 		return nil, fmt.Errorf("parse node profile %s: %w", customPath, err)
 	}
 	if prof.NodeID == "" {
@@ -167,7 +167,7 @@ func LoadUpstreamRemote(customPath string) (string, error) {
 		return "", fmt.Errorf("read node profile %s: %w", customPath, err)
 	}
 	var prof contract.NodeProfile
-	if err := yaml.Unmarshal(data, &prof); err != nil {
+	if err := decodeExecutionProfile(data, &prof); err != nil {
 		return "", fmt.Errorf("parse node profile %s: %w", customPath, err)
 	}
 	return strings.TrimSpace(prof.UpstreamRemote), nil
@@ -188,7 +188,7 @@ func DependencyCacheMode(customPath string) (sandbox.DependencyCacheMode, error)
 		return sandbox.PerRepository, fmt.Errorf("read node profile %s: %w", customPath, err)
 	}
 	var prof contract.NodeProfile
-	if err := yaml.Unmarshal(data, &prof); err != nil {
+	if err := decodeExecutionProfile(data, &prof); err != nil {
 		return sandbox.PerRepository, fmt.Errorf("parse node profile %s: %w", customPath, err)
 	}
 	return ProfileDependencyCacheMode(&prof), nil

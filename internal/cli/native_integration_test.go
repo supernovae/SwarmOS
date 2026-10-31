@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,6 +44,8 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
 		os.Exit(1)
 	}
+	storageuse.UserCacheDir = os.UserCacheDir
+	maintenanceCacheDir = os.UserCacheDir
 	for _, dir := range []struct{ name, sub string }{
 		{"HOME", "home"},
 		{"XDG_CONFIG_HOME", "config"},

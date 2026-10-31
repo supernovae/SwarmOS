@@ -14,7 +14,6 @@ import (
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/sandbox"
-	"gopkg.in/yaml.v3"
 )
 
 // PrivateGoEntry is one private_go_modules entry of the node profile, as
@@ -140,7 +139,7 @@ func readProfile(customPath string) (*contract.NodeProfile, error) {
 		return nil, fmt.Errorf("read node profile %s: %w", customPath, err)
 	}
 	var prof contract.NodeProfile
-	if err := yaml.Unmarshal(data, &prof); err != nil {
+	if err := decodeExecutionProfile(data, &prof); err != nil {
 		return nil, fmt.Errorf("parse node profile %s: %w", customPath, err)
 	}
 	return &prof, nil

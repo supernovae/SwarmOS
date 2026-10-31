@@ -67,3 +67,98 @@ func TestInventoryRegistrationsReadOnlyAndBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestInventoryDeadRecordsDoNotConsumeAllowance(t *testing.T) {
+	m, live := fixture(t)
+	defer m.Close()
+	for n := 0; n < 25; n++ {
+		r := live
+		r.Location = filepath.Join(t.TempDir(), "missing")
+		u, err := m.AcquireUse(t.Context(), r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = u.Finish(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pending := live
+	if _, err := m.AcquireUse(t.Context(), pending); err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	if err := VisitResources(t.Context(), m.path, 1, func() error { return nil }, func(int64) error { return nil }, func(r Resource) error {
+		count++
+		if r != pending {
+			t.Errorf("visited dead record %v", r)
+		}
+		return nil
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal(count)
+	}
+}
+
+func TestInventoryPruneAbsentAdmissionSafety(t *testing.T) {
+	m, r := fixture(t)
+	defer m.Close()
+	u, err := m.AcquireUse(t.Context(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned, err := m.PruneAbsent(t.Context(), r); pruned || !errors.Is(err, ErrUnsafe) {
+		t.Fatal("pending evidence pruned", pruned, err)
+	}
+	if err = u.Finish(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := m.key(r)
+	before, err := os.Stat(filepath.Join(m.path, key+".lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Open the admission inode before pruning, as a waiting producer can do.
+	waiter, err := m.root.OpenLock(key + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer waiter.Close()
+	if pruned, err := m.PruneAbsent(t.Context(), r); err != nil || !pruned {
+		t.Fatal(pruned, err)
+	}
+	after, err := os.Stat(filepath.Join(m.path, key+".lock"))
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("admission inode changed", err)
+	}
+	if _, err = os.Stat(filepath.Join(m.path, key+".json")); !os.IsNotExist(err) {
+		t.Fatal("registration remains", err)
+	}
+	// Recreating a pruned resource must recover complete coverage while retaining
+	// the same lock, and must clear the marker before persisting pending evidence.
+	u, err = m.AcquireUse(t.Context(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := m.read(key, r)
+	if err != nil || !record.CompleteCoverage {
+		t.Fatal(record, err)
+	}
+	marker, err := os.ReadFile(filepath.Join(m.path, key+".lock"))
+	if err != nil || len(marker) != 0 {
+		t.Fatal("stale prune marker", err)
+	}
+	if pruned, err := m.PruneAbsent(t.Context(), r); pruned || !errors.Is(err, ErrUnsafe) {
+		t.Fatal("new pending use pruned", pruned, err)
+	}
+	if err = u.Finish(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(r.Location, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if pruned, err := m.PruneAbsent(t.Context(), r); err != nil || pruned {
+		t.Fatal("existing resource pruned", pruned, err)
+	}
+}

@@ -20,6 +20,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 const diagnosticsTestToken = "ghp_test_diagnostics_secret"
@@ -33,6 +34,11 @@ func TestMain(m *testing.M) {
 	// lazily by the first saved log rather than here.
 	state := filepath.Join(os.TempDir(), fmt.Sprintf("swarm-agent-test-state-%d", os.Getpid()))
 	os.Setenv("XDG_STATE_HOME", state)
+	os.Setenv("XDG_CACHE_HOME", state+"-cache")
+	preserveHome := telemetryHelperHome(os.Args[1:])
+	if !preserveHome {
+		os.Setenv("HOME", state+"-home")
+	}
 	os.Setenv("SWARM_GITHUB_TOKEN", diagnosticsTestToken)
 	os.Unsetenv(gitcredential.TokenCommandEnv)
 	if _, err := gitcredential.NewRedaction(); err != nil {
@@ -40,7 +46,123 @@ func TestMain(m *testing.M) {
 	}
 	code := m.Run()
 	os.RemoveAll(state)
+	os.RemoveAll(state + "-cache")
+	if !preserveHome {
+		os.RemoveAll(state + "-home")
+	}
 	os.Exit(code)
+}
+
+// telemetryHelperHome admits only the exact selectors and post-separator
+// markers emitted by the telemetry fixtures. Other test processes stay isolated.
+func telemetryHelperHome(args []string) bool {
+	selector := ""
+	for i, arg := range args {
+		if arg == "--" {
+			marker := ""
+			switch selector {
+			case "^TestTelemetrySessionHelper$":
+				marker = "--swarm-telemetry-helper"
+			case "TestTelemetryHarnessHelper":
+				marker = "--swarm-telemetry-fixture"
+			default:
+				return false
+			}
+			for _, tail := range args[i+1:] {
+				if tail == marker {
+					return true
+				}
+			}
+			return false
+		}
+		if strings.HasPrefix(arg, "-test.run=") {
+			if selector != "" {
+				return false
+			}
+			selector = strings.TrimPrefix(arg, "-test.run=")
+		} else {
+			// The fixture emits only a single selector before the separator.
+			return false
+		}
+	}
+	return false
+}
+
+func TestTelemetryHelperHomeClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"session", []string{"-test.run=^TestTelemetrySessionHelper$", "--", "--swarm-telemetry-helper"}, true},
+		{"delegated", []string{"-test.run=TestTelemetryHarnessHelper", "--", "--swarm-telemetry-fixture", "omp", "--version"}, true},
+		{"ordinary", nil, false},
+		{"ordinary selector", []string{"-test.run=TestTelemetry"}, false},
+		{"no marker", []string{"-test.run=^TestTelemetrySessionHelper$", "--"}, false},
+		{"marker only", []string{"--", "--swarm-telemetry-helper"}, false},
+		{"wrong selector", []string{"-test.run=TestDiagnosticsOutputHelper", "--", "--swarm-telemetry-helper"}, false},
+		{"wrong marker", []string{"-test.run=TestTelemetryHarnessHelper", "--", "--swarm-telemetry-helper"}, false},
+		{"before separator", []string{"-test.run=^TestTelemetrySessionHelper$", "--swarm-telemetry-helper", "--"}, false},
+		{"broad selector", []string{"-test.run=TestTelemetry.*", "--", "--swarm-telemetry-helper"}, false},
+		{"duplicate selector", []string{"-test.run=TestOther", "-test.run=TestTelemetryHarnessHelper", "--", "--swarm-telemetry-fixture"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := telemetryHelperHome(tc.args); got != tc.want {
+				t.Fatalf("classification = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBootstrapStorageIsolation(t *testing.T) {
+	state := filepath.Join(os.TempDir(), fmt.Sprintf("swarm-agent-test-state-%d", os.Getpid()))
+	for name, want := range map[string]string{"HOME": state + "-home", "XDG_STATE_HOME": state, "XDG_CACHE_HOME": state + "-cache"} {
+		if got := os.Getenv(name); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+	root, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := state + "-cache"
+	if runtime.GOOS == "darwin" {
+		cache = filepath.Join(state+"-home", "Library", "Caches")
+	}
+	if want := filepath.Join(cache, "swarm-use"); root != want {
+		t.Fatalf("control root = %q, want %q", root, want)
+	}
+	// Earlier tests may have used the suite roots. A fresh fixture must resolve
+	// its own control root without creating any directories.
+	state = filepath.Join(t.TempDir(), "fresh-state")
+	t.Setenv("HOME", state+"-home")
+	t.Setenv("XDG_STATE_HOME", state)
+	t.Setenv("XDG_CACHE_HOME", state+"-cache")
+	root, err = storageuse.ControlRoot()
+	cache = state + "-cache"
+	if runtime.GOOS == "darwin" {
+		cache = filepath.Join(state+"-home", "Library", "Caches")
+	}
+	if want := filepath.Join(cache, "swarm-use"); err != nil || root != want {
+		t.Fatalf("fresh control root = %q, %v; want %q", root, err, want)
+	}
+	for _, path := range []string{state, state + "-home", state + "-cache"} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("fresh root was created: %v", err)
+		}
+	}
+	// Exercise HOME-based cache resolution even on Linux; this is the macOS
+	// layout and must remain inside the bootstrap-owned HOME.
+	original := storageuse.UserCacheDir
+	storageuse.UserCacheDir = func() (string, error) {
+		home, err := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Caches"), err
+	}
+	t.Cleanup(func() { storageuse.UserCacheDir = original })
+	root, err = storageuse.ControlRoot()
+	if want := filepath.Join(state+"-home", "Library", "Caches", "swarm-use"); err != nil || root != want {
+		t.Fatalf("HOME-based control root = %q, %v; want %q", root, err, want)
+	}
 }
 
 // useDiagnosticsState points diagnostics at a fresh, symlink-free state root.

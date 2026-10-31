@@ -21,8 +21,13 @@ func useUserCache(t *testing.T) string {
 	t.Helper()
 	root := resolvedTempDir(t)
 	previous := userCacheDir
+	previousControl := storageuse.UserCacheDir
 	userCacheDir = func() (string, error) { return root, nil }
-	t.Cleanup(func() { userCacheDir = previous })
+	storageuse.UserCacheDir = userCacheDir
+	t.Cleanup(func() {
+		userCacheDir = previous
+		storageuse.UserCacheDir = previousControl
+	})
 	return root
 }
 
@@ -816,5 +821,33 @@ func TestScratchBuildCacheRejectsSymlinkSubstitution(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(outside, "go")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("scratch cache wrote outside admitted root: %v", err)
+	}
+}
+
+// A producer using the test cache hook must not resolve control storage from
+// the process environment, even when a caller replaces HOME and XDG_CACHE_HOME.
+func TestStorageControlRootFollowsProducerCacheHook(t *testing.T) {
+	sentinel := resolvedTempDir(t)
+	t.Setenv("HOME", sentinel)
+	t.Setenv("XDG_CACHE_HOME", sentinel)
+	cache := useUserCache(t)
+	repo := cacheTestRepo(t)
+	ctx, owner, err := storageuse.Ensure(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = PrepareBuildCaches(ctx, AgentBuildCache, repo, cache, resolvedTempDir(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err = owner.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(sentinel)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("real cache/home sentinel touched: %v %v", entries, err)
+	}
+	entries, err = os.ReadDir(filepath.Join(cache, "swarm-use"))
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("producer did not write isolated evidence: %v %v", entries, err)
 	}
 }

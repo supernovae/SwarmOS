@@ -40,6 +40,8 @@ type bulkCleanupIssue struct {
 }
 
 type bulkCleanupSummary struct {
+	Repository   string                            `json:"repository,omitempty"`
+	Root         string                            `json:"root,omitempty"`
 	Kind         string                            `json:"kind"`
 	Mode         string                            `json:"mode"`
 	Status       string                            `json:"status"`
@@ -94,11 +96,30 @@ func runBulkCleanup(cmd *cobra.Command, opts *RootOptions, args []string, apply,
 			return err
 		}
 	}
-	ctx := cmd.Context()
-	root := opts.resolveRepoRoot()
+	summary, runErr = executeBulkCleanup(cmd.Context(), opts.resolveRepoRoot(), tr, m, apply)
+	rendered = true
+	if !asJSON {
+		renderBulkCleanup(cmd.OutOrStdout(), summary)
+	}
+	return runErr
+}
+
+// executeBulkCleanup shares retirement policy with issue cleanup. Callers must
+// authorize apply and provide a read-only manager for preview.
+func executeBulkCleanup(ctx context.Context, root string, tr tracker.Tracker, m *lease.Manager, apply bool) (summary *bulkCleanupSummary, runErr error) {
+	summary = &bulkCleanupSummary{Kind: "cleanup-bulk", Mode: "preview", Issues: []bulkCleanupIssue{}, Unresolved: []lease.UnresolvedCleanupWorktree{}}
+	if apply {
+		summary.Mode = "apply"
+	}
+	defer func() {
+		if runErr != nil {
+			summary.Status = "failed"
+			summary.Error = runErr.Error()
+		}
+	}()
 	worktrees, err := workspace.DiscoverCleanupWorktrees(ctx, root)
 	if err != nil {
-		return err
+		return summary, err
 	}
 	snap := m.SnapshotCleanup(ctx)
 	candidates, unresolved := m.ResolveCleanupWorktrees(ctx, snap, worktrees)
@@ -132,11 +153,7 @@ func runBulkCleanup(cmd *cobra.Command, opts *RootOptions, args []string, apply,
 	default:
 		summary.Status = "preview"
 	}
-	rendered = true
-	if !asJSON {
-		renderBulkCleanup(cmd.OutOrStdout(), summary)
-	}
-	return runErr
+	return summary, runErr
 }
 
 // applyBulkIssue discards the snapshot preview and applies a fresh one. On

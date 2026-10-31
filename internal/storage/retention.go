@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -87,10 +88,10 @@ func (s *scanner) retention(owner, root, backend string, start int) {
 			s.fail("authoritative retention", errors.New("bounded state refs unavailable"))
 		} else {
 			store := coordination.NewGitStore(root)
-			err := refs.VisitStateRefs(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 2, Bytes: 1 << 20, Reserve: s.b.Charge}, func(number int, sha string) error {
+			err := refs.VisitStateRefs(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 2, Bytes: 16 << 20, Reserve: s.b.Charge, Workspace: s.b.Workspace}, func(number int, sha string) error {
 				issuePath := filepath.Join(root, ".swarm", "worktrees", fmt.Sprintf("issue-%d", number))
 				s.add(Resource{Repository: owner, Owner: owner, Class: "issue-worktree", Path: issuePath, Identity: "worktree:" + issuePath})
-				data, err := store.LoadInventoryObject(s.ctx, sha, s.b.Charge)
+				data, err := store.LoadInventoryObject(s.ctx, sha, s.b.Charge, lease.ProjectInventory)
 				if err != nil {
 					retentionComplete = false
 					s.fail("authoritative retention", err)
@@ -136,7 +137,7 @@ func (s *scanner) retention(owner, root, backend string, start int) {
 		listingErr = errors.New("bounded tracker unavailable")
 	}
 	if listingErr == nil {
-		listingErr = visitor.VisitPullRequests(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 100, Bytes: 4 << 20, Reserve: s.b.Charge}, func(pr *tracker.PullRequest) error {
+		listingErr = visitor.VisitPullRequests(s.ctx, tracker.InventoryBudget{Records: s.b.Limits.Records, Pages: 100, Bytes: 128 << 20, Reserve: s.b.Charge, Workspace: s.b.Workspace}, func(pr *tracker.PullRequest) error {
 			if pr == nil || pr.Number < 1 {
 				return errors.New("invalid PR identity")
 			}
@@ -262,17 +263,26 @@ func (s *scanner) retention(owner, root, backend string, start int) {
 // CommonDirectory must match Git's independently observed canonical identity.
 type RepositoryScope struct{ Root, CommonDirectory, Backend string }
 
-// RetentionEvidence must describe a stable authoritative decision. Sources that
-// cannot hold that decision through visit must supply Stable=false.
+// RetentionEvidence describes one complete coherent authoritative snapshot. In
+// apply it is read freshly under caller-held exact-resource maintenance exclusion
+// through deletion. Remote claims cannot consume this host storage. Preview
+// evidence is advisory and must never be reused as apply authority.
 type RetentionEvidence struct {
 	Complete, Stable, Unfinished bool
 	Reason                       string
 }
 
-// RetentionSource implementations must be read-only and hold their decision
-// stable through visit. They must not acquire storage-use admission locks.
+// RetentionSource implementations pin a coherent state set before visiting.
+// Apply refreshes Git objects first; preview never fetches or acquires admission.
+// Sources must not acquire storage-use admission locks: the caller owns exclusion.
 type RetentionSource interface {
 	WithRetention(context.Context, RepositoryScope, func(RetentionEvidence) error) error
+}
+
+type retentionFunc func(context.Context, RepositoryScope, func(RetentionEvidence) error) error
+
+func (f retentionFunc) WithRetention(c context.Context, s RepositoryScope, v func(RetentionEvidence) error) error {
+	return f(c, s, v)
 }
 
 type ReclaimOptions struct {
@@ -457,9 +467,28 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		if !filepath.IsAbs(*p) || filepath.Clean(*p) == string(filepath.Separator) {
 			return invalid(errors.New("explicit trusted roots required"))
 		}
-		q, err := filepath.EvalSymlinks(*p)
-		if err != nil {
-			return invalid(err)
+		// Resolve an existing prefix without creating missing producer roots.
+		prefix := *p
+		tail := []string{}
+		var q string
+		for {
+			var err error
+			q, err = filepath.EvalSymlinks(prefix)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				return invalid(err)
+			}
+			parent := filepath.Dir(prefix)
+			if parent == prefix {
+				return invalid(err)
+			}
+			tail = append(tail, filepath.Base(prefix))
+			prefix = parent
+		}
+		for i := len(tail) - 1; i >= 0; i-- {
+			q = filepath.Join(q, tail[i])
 		}
 		*p = q
 	}
@@ -502,14 +531,47 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		commonInfo[key] = observed
 		scopes[key] = scope
 	}
+	var manager *storageuse.Manager
+	defer func() {
+		if manager != nil {
+			manager.Close()
+		}
+	}()
 	var candidates []storageuse.Resource
-	err := storageuse.VisitResources(ctx, opts.ControlRoot, l.Records, func() error { return s.b.entry(ctx) }, s.b.Charge, func(r storageuse.Resource) error {
+	err := storageuse.VisitResources(ctx, opts.ControlRoot, l.Records, func() error { return s.b.entry(ctx) }, s.b.Workspace, func(r storageuse.Resource) error {
 		if e := s.b.Charge(int64(4096 + 8*(len(r.Location)+len(r.Identity)+len(r.Class)+len(r.Repository)))); e != nil {
 			return e
 		}
+		// Prune absent completed evidence as it is read. Even if a later report
+		// bound is reached, this pass makes progress and a rerun can finish.
+		// Resource deletion still waits for complete candidate discovery below.
+		if apply && storageuse.LocationAbsent(r.Location) {
+			if _, selected := scopes[r.Repository]; selected {
+				if manager == nil {
+					var e error
+					manager, e = storageuse.Open(opts.ControlRoot, opts.CacheRoot, opts.ScratchRoot)
+					if e != nil {
+						return e
+					}
+				}
+				pruned, e := manager.PruneAbsent(ctx, r)
+				if e != nil && !errors.Is(e, storageuse.ErrUnsafe) {
+					return e
+				}
+				if pruned {
+					out.Resources = append(out.Resources, ReclamationResult{Resource: r, Outcome: ReclaimAbsent, Reason: "completed absent registration pruned; admission lock retained for waiting producers"})
+					return nil
+				}
+			}
+		}
 		candidates = append(candidates, r)
 		return nil
-	})
+	}, apply)
+	// An absent control root has no admitted resources. Discovery still reports
+	// unregistered candidates, retaining them without initializing any roots.
+	if errors.Is(err, os.ErrNotExist) && len(candidates) == 0 {
+		err = nil
+	}
 	// Incomplete discovery cannot authorize even a previously observed candidate.
 	if err != nil {
 		out.Complete = false
@@ -547,13 +609,11 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		}
 		return out, errors.New("candidate discovery incomplete")
 	}
-	var manager *storageuse.Manager
-	if apply {
+	if apply && len(candidates) > 0 && manager == nil {
 		manager, err = storageuse.Open(opts.ControlRoot, opts.CacheRoot, opts.ScratchRoot)
 		if err != nil {
 			return invalid(err)
 		}
-		defer manager.Close()
 	}
 	afterScanner := reclaimScanner(ctx, opts)
 	observeAfter := func(path string) UsageObservation {
@@ -567,6 +627,7 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 	for _, r := range candidates {
 		counts[r.Location]++
 	}
+	previewEvidence := map[string]RetentionEvidence{}
 	var operationErr error
 	var logicalBefore, logicalAfter int64
 	logicalComplete := true
@@ -590,6 +651,23 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		}
 		if protected {
 			result.Reason = "resource overlaps repository or Git evidence"
+			out.Resources = append(out.Resources, result)
+			continue
+		}
+		// Dead completed registrations need no retention lookup, but pruning still
+		// requires this resource's exact maintenance exclusion and selected scope.
+		if storageuse.LocationAbsent(r.Location) {
+			result.Outcome = ReclaimAbsent
+			result.Reason = "registered leaf absent"
+			if apply && ok {
+				pruned, e := manager.PruneAbsent(ctx, r)
+				if e != nil {
+					result.Outcome = ReclaimRetained
+					result.Reason = "absent registration retained: " + e.Error()
+				} else if pruned {
+					result.Reason = "completed absent registration pruned; admission lock retained for waiting producers"
+				}
+			}
 			out.Resources = append(out.Resources, result)
 			continue
 		}
@@ -620,13 +698,26 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 				return nil
 			}
 			called := false
-			return opts.Retention.WithRetention(ctx, scope, func(ev RetentionEvidence) error {
+			source := opts.Retention
+			if !apply {
+				source = retentionFunc(func(c context.Context, sc RepositoryScope, v func(RetentionEvidence) error) error {
+					if ev, ok := previewEvidence[sc.CommonDirectory]; ok {
+						return v(ev)
+					}
+					return opts.Retention.WithRetention(c, sc, func(ev RetentionEvidence) error {
+						previewEvidence[sc.CommonDirectory] = ev
+						return v(ev)
+					})
+				})
+			}
+			return source.WithRetention(ctx, scope, func(ev RetentionEvidence) error {
 				if called {
 					return errors.New("repeated retention callback")
 				}
 				called = true
-				result.Reason = "authoritative retention incomplete or unstable"
+				result.Reason = "authoritative retention incomplete or unstable: " + ev.Reason
 				if !ev.Complete || !ev.Stable {
+					out.Complete = false
 					return nil
 				}
 				if strings.HasSuffix(r.Class, "scratch") && ev.Unfinished {
@@ -652,6 +743,7 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 				result.Reason = "complete idle coverage and stable retention evidence"
 				if !apply {
 					result.Outcome = ReclaimEligible
+					result.Reason += "; advisory preview only"
 					return nil
 				}
 				parent, e := openExisting(filepath.Dir(r.Location))
@@ -672,14 +764,11 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 				if e = ctx.Err(); e != nil {
 					return e
 				}
-				// Reobserve under exclusion before mutation; incomplete accounting retains.
+				// Reobserve usage under exclusion; missing usage remains advisory.
 				result.Before = usage(s, r.Location)
-				if result.Before.LogicalBytes == nil {
-					result.Reason = "before observation incomplete"
-					return nil
-				}
+
 				result.Outcome = ReclaimPartial
-				e = ops.remove(parent, ctx, filepath.Base(r.Location), info, func() error { return s.b.entry(ctx) })
+				e = ops.remove(parent, ctx, filepath.Base(r.Location), info, func() error { return ctx.Err() })
 				_, afterErr := ops.afterStat(parent, filepath.Base(r.Location))
 				if errors.Is(afterErr, os.ErrNotExist) {
 					zero := int64(0)
@@ -711,9 +800,17 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 					result.After = observeAfter(r.Location)
 				}
 				guard.Close()
+				if err == nil && result.Outcome == ReclaimRemoved {
+					pruned, pruneErr := manager.PruneAbsent(ctx, r)
+					if pruneErr != nil {
+						err = pruneErr
+					} else if pruned {
+						result.Reason += "; registration pruned; admission lock retained for waiting producers"
+					}
+				}
 			}
 		} else {
-			observation, e := storageuse.Observe(ctx, opts.ControlRoot, r, 16<<10, s.b.Charge)
+			observation, e := storageuse.Observe(ctx, opts.ControlRoot, r, 16<<10, s.b.Workspace)
 			if e != nil || !observation.CompleteCoverage || observation.Active == nil || *observation.Active {
 				result.Reason = "use evidence missing, incomplete or unresolved"
 			} else {
@@ -727,6 +824,10 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 			}
 			operationErr = errors.Join(operationErr, err)
 			result.Reason = "resource operation failed; evidence preserved"
+			if errors.Is(err, safefs.ErrCleanupLimit) {
+				result.Outcome = ReclaimRetained
+				result.Reason = "cleanup traversal limit reached; leaf and ownership evidence retained"
+			}
 		}
 		if ctx.Err() != nil {
 			result.Outcome = ReclaimCanceled
@@ -768,4 +869,168 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 	}
 	out.ObservedLogicalDelta, out.ObservedAllocatedDelta = usageDelta(out.Before, out.After)
 	return out, operationErr
+}
+
+// BackendRetention reads bounded authoritative state and PR evidence. Apply is
+// selected by the coordinator, never by resource registration metadata.
+type BackendRetention struct {
+	Failures map[string]error
+	Budget   *Budget
+	Apply    bool
+	Remote   string
+	Tracker  func(RepositoryScope) (tracker.PullRequestVisitor, error)
+}
+
+// Each object is decoded serially; only compact output survives the read.
+// Snapshot readers reserve reusable transport/parser workspace separately from
+// their small retained ref entries. Projection storage is charged by the decoder.
+func inventoryReservation(b *Budget) func(int64) error {
+	return func(n int64) error {
+		if n < 8192 {
+			return b.Charge(n)
+		}
+		return b.Workspace(n)
+	}
+}
+func inventoryProjection(b *Budget) coordination.InventoryDecoder {
+	return func(ctx context.Context, r io.Reader, reserve func(int64) error) ([]byte, error) {
+		// ProjectInventory caps output at 16 KiB; include the retained map entry.
+		if err := b.Charge(17 << 10); err != nil {
+			return nil, err
+		}
+		return lease.ProjectInventory(ctx, r, reserve)
+	}
+}
+
+// ReadRetentionSnapshot is shared by advisory task inspection and reclamation.
+func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote string, apply bool, budget *Budget, visitors ...tracker.PullRequestVisitor) (states map[int][]byte, resultErr error) {
+	defer func() {
+		for n, data := range states {
+			if data == nil {
+				continue
+			}
+			if _, err := lease.DecodeInventoryState(ctx, data, n); err != nil {
+				states[n] = nil
+				resultErr = errors.Join(resultErr, fmt.Errorf("issue %d: %w", n, err))
+			}
+		}
+	}()
+	if scope.Backend == "local" {
+		return coordination.NewFileStore(scope.Root).ReadInventorySnapshot(ctx, budget.Limits.Records, inventoryReservation(budget), inventoryProjection(budget))
+	}
+	if scope.Backend == "github" {
+		store := coordination.NewGitStoreWithRemote(scope.Root, remote)
+		if apply {
+			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, inventoryReservation(budget), inventoryProjection(budget))
+		}
+		if len(visitors) != 1 {
+			return nil, errors.New("bounded pinned state visitor unavailable")
+		}
+		refs, ok := visitors[0].(tracker.StateRefVisitor)
+		if !ok {
+			return nil, errors.New("bounded pinned state visitor unavailable")
+		}
+		pinned := map[int]string{}
+		err := refs.VisitStateRefs(ctx, tracker.InventoryBudget{Records: budget.Limits.Records, Pages: 2, Bytes: 16 << 20, Reserve: budget.Charge, Workspace: budget.Workspace}, func(n int, sha string) error {
+			if n < 1 || pinned[n] != "" {
+				return errors.New("ambiguous state snapshot")
+			}
+			if err := budget.Charge(1024); err != nil {
+				return err
+			}
+			pinned[n] = sha
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := map[int][]byte{}
+		var failures []error
+		for n, sha := range pinned {
+			data, err := store.LoadInventoryObject(ctx, sha, inventoryReservation(budget), inventoryProjection(budget))
+			if err != nil {
+				failures = append(failures, fmt.Errorf("issue %d: %w", n, err))
+				out[n] = nil
+				continue
+			}
+			out[n] = data
+		}
+		return out, errors.Join(failures...)
+	}
+	return nil, errors.New("unsupported retention backend")
+}
+func (r BackendRetention) WithRetention(ctx context.Context, scope RepositoryScope, visit func(RetentionEvidence) error) error {
+	ev := RetentionEvidence{}
+	fail := func(err error) error {
+		ev.Reason = err.Error()
+		if r.Failures != nil {
+			r.Failures[scope.CommonDirectory] = err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return visit(ev)
+	}
+	b := &Budget{Limits: DefaultLimits()}
+	if r.Budget != nil {
+		b.Limits = r.Budget.Limits
+	}
+	if r.Tracker == nil {
+		return fail(errors.New("bounded PR evidence unavailable"))
+	}
+	tr, err := r.Tracker(scope)
+	if err != nil {
+		return fail(err)
+	}
+	states, err := ReadRetentionSnapshot(ctx, scope, r.Remote, r.Apply, b, tr)
+	if err != nil {
+		return fail(err)
+	}
+	prs := map[int]*tracker.PullRequest{}
+	err = tr.VisitPullRequests(ctx, tracker.InventoryBudget{Records: b.Limits.Records, Pages: 100, Bytes: 128 << 20, Reserve: b.Charge, Workspace: b.Workspace}, func(pr *tracker.PullRequest) error {
+		if pr == nil || pr.Number < 1 || prs[pr.Number] != nil {
+			return errors.New("ambiguous PR evidence")
+		}
+		if err := b.Charge(4096); err != nil {
+			return err
+		}
+		prs[pr.Number] = pr
+		return nil
+	})
+	if err != nil {
+		return fail(err)
+	}
+	used := map[int]bool{}
+	for n, data := range states {
+		st, e := lease.DecodeInventoryState(ctx, data, n)
+		if e != nil {
+			return fail(e)
+		}
+		pr := prs[st.PR]
+		if st.PR > 0 && used[st.PR] {
+			return fail(errors.New("ambiguous issue PR linkage"))
+		}
+		used[st.PR] = true
+		if st.Active || st.Pending || !st.Completed || st.ForkRepo != "" || !strings.HasPrefix(st.Branch, fmt.Sprintf("swarm/issue-%d-", n)) || st.PR == 0 || pr == nil || pr.State != "closed" || !pr.Merged || pr.MergedAt == nil || pr.MergeCommitSHA == "" || st.SubmittedHead == "" || pr.HeadSHA != st.SubmittedHead || pr.Head != st.Branch {
+			ev.Unfinished = true
+		}
+		if scope.Backend == "github" && pr != nil {
+			upstream, ok := tr.(interface{ UpstreamRepo() string })
+			if !ok || upstream.UpstreamRepo() == "" || !strings.EqualFold(pr.HeadRepo, upstream.UpstreamRepo()) || !strings.EqualFold(pr.BaseRepo, upstream.UpstreamRepo()) {
+				ev.Unfinished = true
+			}
+		}
+	}
+	for _, pr := range prs {
+		if pr.State == "open" || !used[pr.Number] {
+			ev.Unfinished = true
+		}
+	}
+	ev.Complete = true
+	ev.Stable = true
+	ev.Reason = "fresh coherent authority under host-local maintenance exclusion"
+	if !r.Apply {
+		ev.Reason = "coherent pinned preview; eligibility is advisory"
+	}
+	return visit(ev)
 }

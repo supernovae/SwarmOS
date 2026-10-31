@@ -40,11 +40,12 @@ type Counters struct {
 	Bytes        int64 `json:"working_bytes"`
 }
 
-// Budget is shared by discovery and accounting. A scanner uses one worker.
+// Budget bounds discovery. Usage receives an independent per-resource budget.
 // Charges are conservative and never released during a pass.
 type Budget struct {
-	Limits   Limits
-	Counters Counters
+	Limits    Limits
+	Counters  Counters
+	workspace int64
 }
 
 func (b *Budget) Charge(n int64) error {
@@ -52,6 +53,22 @@ func (b *Budget) Charge(n int64) error {
 		return ErrLimit
 	}
 	b.Counters.Bytes += n
+	return nil
+}
+
+// Workspace reserves the high-water mark for serial temporary decoding.
+// Retained results must be charged separately with Charge.
+func (b *Budget) Workspace(n int64) error {
+	if n < 0 {
+		return ErrLimit
+	}
+	if n <= b.workspace {
+		return nil
+	}
+	if err := b.Charge(n - b.workspace); err != nil {
+		return err
+	}
+	b.workspace = n
 	return nil
 }
 func (b *Budget) entry(ctx context.Context) error {
@@ -272,7 +289,7 @@ func (s *scanner) add(r Resource) {
 		}
 	}
 	if s.opts.UseRoot != "" && useRepository != "" && r.Ref == "" {
-		observation, err := storageuse.Observe(s.ctx, s.opts.UseRoot, storageuse.Resource{Repository: useRepository, Class: r.Class, Identity: r.Identity, Location: r.Path}, 16<<10, s.b.Charge)
+		observation, err := storageuse.Observe(s.ctx, s.opts.UseRoot, storageuse.Resource{Repository: useRepository, Class: r.Class, Identity: r.Identity, Location: r.Path}, 16<<10, s.b.Workspace)
 		if err == nil {
 			r.Active = observation.Active
 			r.LastUse = &observation.LastUse
@@ -294,10 +311,6 @@ func (s *scanner) add(r Resource) {
 	}
 	if r.Ref == "" {
 		s.account(&r)
-		if r.LogicalBytes == nil && r.Eligibility == "eligible" {
-			r.Eligibility = "unknown"
-			r.Reason = "filesystem observation incomplete; use evidence alone cannot establish eligibility"
-		}
 	} else {
 		r.UsageReason = "branch shares repository Git objects; no independent byte total"
 	}
@@ -324,7 +337,7 @@ func openExisting(path string) (*safefs.Root, error) {
 }
 
 // directory visits one entry at a time, including unknown names. The entry
-// counter is shared with recursive usage accounting.
+// counter bounds ownership discovery independently of usage accounting.
 func (s *scanner) directory(path string, visit func(os.DirEntry)) {
 	if err := s.ctx.Err(); err != nil {
 		s.fail("directory", err)

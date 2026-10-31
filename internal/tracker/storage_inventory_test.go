@@ -8,12 +8,79 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 func inventoryTestBudget() InventoryBudget {
 	return InventoryBudget{Records: 1000, Pages: 10, Bytes: 4 << 20, Reserve: func(int64) error { return nil }}
+}
+
+// Exercise the same encoded-string bound through every production entry point.
+// The closing quote is included in quotedBytes, as in the transport reader.
+func TestStorageInventoryStringLimitParity(t *testing.T) {
+	for _, path := range []string{"pulls", "refs", "local"} {
+		for _, size := range []int{60000, (512 << 10) - 1, 512 << 10} {
+			t.Run(fmt.Sprintf("%s/%d", path, size), func(t *testing.T) {
+				body := strings.Repeat("x", size)
+				pr := fmt.Sprintf(`{"number":1,"state":"open","body":%q}`, body)
+				visits := 0
+				var run func(InventoryBudget) error
+				if path == "local" {
+					root := t.TempDir()
+					file := filepath.Join(root, ".swarm", "local-tracker", "state.json")
+					if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(file, []byte(`{"pull_requests":{"1":`+pr+`}}`), 0600); err != nil {
+						t.Fatal(err)
+					}
+					tr := NewLocalTracker(root)
+					run = func(b InventoryBudget) error {
+						return tr.VisitPullRequests(t.Context(), b, func(*PullRequest) error { visits++; return nil })
+					}
+				} else {
+					tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if path == "refs" {
+							if strings.Contains(r.URL.Path, "/swarm/state/") {
+								fmt.Fprint(w, `[]`)
+								return
+							}
+							fmt.Fprintf(w, `[{"ref":"refs/heads/swarm-state/issue-1","object":{"sha":%q,"type":"commit"},"extra":%q}]`, strings.Repeat("a", 40), body)
+						} else {
+							fmt.Fprint(w, `[`+pr+`]`)
+						}
+					}))
+					run = func(b InventoryBudget) error {
+						if path == "refs" {
+							return tr.VisitStateRefs(t.Context(), b, func(int, string) error { visits++; return nil })
+						}
+						return tr.VisitPullRequests(t.Context(), b, func(*PullRequest) error { visits++; return nil })
+					}
+				}
+				b := inventoryTestBudget()
+				var charge int64
+				b.Workspace = func(n int64) error { charge = max(charge, n); return nil }
+				err := run(b)
+				if size == 512<<10 {
+					if !errors.Is(err, ErrInventoryLimit) {
+						t.Fatalf("accepted oversized string: %v", err)
+					}
+				} else if err != nil || visits != 1 {
+					t.Fatalf("visits=%d: %v", visits, err)
+				}
+				if charge < int64(size)*4 {
+					t.Fatalf("workspace not charged: %d", charge)
+				}
+				refused := errors.New("workspace refused")
+				b.Workspace = func(int64) error { return refused }
+				if err := run(b); !errors.Is(err, refused) {
+					t.Fatalf("lost charging failure: %v", err)
+				}
+			})
+		}
+	}
 }
 func TestStoragePRVisitorPagesAndBounds(t *testing.T) {
 	for _, limit := range []int{99, 100, 101, 102} {
@@ -30,7 +97,7 @@ func TestStoragePRVisitorPagesAndBounds(t *testing.T) {
 				}
 				var rows []map[string]any
 				for i := 0; i < n; i++ {
-					rows = append(rows, map[string]any{"number": start + i, "state": "closed", "merged_at": "2026-01-02T00:00:00Z", "head": map[string]string{"sha": "abc", "ref": "swarm/issue-1"}})
+					rows = append(rows, map[string]any{"number": start + i, "html_url": "https://github.com/fixture/repo/pull/1", "state": "closed", "merged_at": "2026-01-02T00:00:00Z", "head": map[string]string{"sha": "abc", "ref": "swarm/issue-1"}})
 				}
 				writeJSON(t, w, rows)
 			}))
@@ -38,7 +105,7 @@ func TestStoragePRVisitorPagesAndBounds(t *testing.T) {
 			b.Records = limit
 			err := tr.VisitPullRequests(context.Background(), b, func(pr *PullRequest) error {
 				count++
-				if !pr.Merged || pr.HeadSHA != "abc" {
+				if !pr.Merged || pr.HeadSHA != "abc" || pr.HTMLURL != "https://github.com/fixture/repo/pull/1" {
 					t.Error(pr)
 				}
 				return nil
@@ -56,7 +123,7 @@ func TestStoragePRVisitorPagesAndBounds(t *testing.T) {
 	}
 }
 func TestStoragePRVisitorRejectsUnboundedJSON(t *testing.T) {
-	for _, body := range []string{`[{"number":1,"state":"open","body":"` + strings.Repeat("x", 8193) + `"}]`, strings.Repeat("[", 33), `[] trailing`} {
+	for _, body := range []string{`[{"number":1,"state":"open","body":"` + strings.Repeat("x", (512<<10)+1) + `"}]`, strings.Repeat("[", 33), `[] trailing`} {
 		tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
 		if err := tr.VisitPullRequests(context.Background(), inventoryTestBudget(), func(*PullRequest) error { return nil }); err == nil {
 			t.Fatal("accepted hostile JSON")
@@ -180,4 +247,38 @@ func TestStorageStateRefsBoundedAndNamespaceChecked(t *testing.T) {
 			t.Fatal(err, visits, calls)
 		}
 	}
+}
+
+func TestStoragePRVisitorFiveThousandRealisticResponses(t *testing.T) {
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		rows := []map[string]any{}
+		for n := (page - 1) * 100; n < min(page*100, 5000); n++ {
+			rows = append(rows, map[string]any{"number": n + 1, "state": "open", "body": strings.Repeat("b", 7000), "extra": strings.Repeat("x", 7000)})
+		}
+		writeJSON(t, w, rows)
+	}))
+	var charged, workspace int64
+	charge := func(n int64) error {
+		if n < 0 || charged+n > 64<<20 {
+			return ErrInventoryLimit
+		}
+		charged += n
+		return nil
+	}
+	count := 0
+	err := tr.VisitPullRequests(t.Context(), InventoryBudget{Records: 5000, Pages: 100, Bytes: 128 << 20, Reserve: charge, Workspace: func(n int64) error {
+		if n <= workspace {
+			return nil
+		}
+		if err := charge(n - workspace); err != nil {
+			return err
+		}
+		workspace = n
+		return nil
+	}}, func(*PullRequest) error { count++; return charge(4096) })
+	if err != nil || count != 5000 {
+		t.Fatal(count, charged, err)
+	}
+	t.Logf("5000 PRs charged=%d workspace=%d", charged, workspace)
 }

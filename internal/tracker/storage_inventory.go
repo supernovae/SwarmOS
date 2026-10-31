@@ -20,10 +20,11 @@ import (
 // InventoryBudget belongs to the whole report, not to a backend or page.
 // Reserve must reject an admission before allocating the requested storage.
 type InventoryBudget struct {
-	Records int
-	Pages   int
-	Bytes   int64
-	Reserve func(int64) error
+	Records   int
+	Pages     int
+	Bytes     int64
+	Reserve   func(int64) error
+	Workspace func(int64) error
 }
 
 // PullRequestVisitor is optional: existing Tracker implementations need not
@@ -35,14 +36,20 @@ type PullRequestVisitor interface {
 
 var ErrInventoryLimit = errors.New("tracker inventory limit reached")
 
+// GitHub bodies allow 65,536 characters; JSON escaping and UTF-8 can multiply
+// their wire size. Keep a hard per-string bound as well as the charged input cap.
+const inventoryQuotedBytesLimit = 512 << 10
+
 // inventoryReader bounds JSON before decoding, including strings and nesting.
-// Decoder lookahead and token allocations are charged along with raw input.
+// Decoder lookahead and token allocations use reusable page workspace when
+// provided. Retained projections are charged separately from transport input.
 type inventoryReader struct {
 	ctx                context.Context
 	src                io.Reader
 	budget             InventoryBudget
 	buf                [4096]byte
 	depth, quotedBytes int
+	readBytes          int64
 	quoted, escape     bool
 }
 
@@ -56,14 +63,21 @@ func (r *inventoryReader) Read(p []byte) (int, error) {
 	nmax := min(len(p), len(r.buf), int(r.budget.Bytes))
 	n, err := r.src.Read(r.buf[:nmax])
 	if n > 0 {
-		if e := r.budget.Reserve(int64(n) * 64); e != nil {
+		r.readBytes += int64(n)
+		reserve := r.budget.Reserve
+		charge := int64(n) * 64
+		if r.budget.Workspace != nil {
+			reserve = r.budget.Workspace
+			charge = r.readBytes * 4
+		}
+		if e := reserve(charge); e != nil {
 			return 0, e
 		}
 		r.budget.Bytes -= int64(n)
 		for _, c := range r.buf[:n] {
 			if r.quoted {
 				r.quotedBytes++
-				if r.quotedBytes > 8192 {
+				if r.quotedBytes > inventoryQuotedBytesLimit {
 					return 0, ErrInventoryLimit
 				}
 				if r.escape {
@@ -303,6 +317,7 @@ func (g *GitHubTracker) VisitPullRequests(ctx context.Context, b InventoryBudget
 				}
 				var raw struct {
 					Number         int        `json:"number"`
+					HTMLURL        string     `json:"html_url"`
 					State          string     `json:"state"`
 					MergedAt       *time.Time `json:"merged_at"`
 					MergeCommitSHA string     `json:"merge_commit_sha"`
@@ -326,12 +341,15 @@ func (g *GitHubTracker) VisitPullRequests(ctx context.Context, b InventoryBudget
 				if raw.Number < 1 || !strings.Contains("|open|closed|", "|"+raw.State+"|") {
 					return fmt.Errorf("invalid PR inventory record")
 				}
-				if err := b.Reserve(4096); err != nil {
+				// The transport workspace is reusable; strings retained across pages
+				// belong to this projection and must remain charged independently.
+				retained := len(raw.HTMLURL) + len(raw.State) + len(raw.MergeCommitSHA) + len(raw.Head.Ref) + len(raw.Head.SHA) + len(raw.Head.Repo.FullName) + len(raw.Base.Ref) + len(raw.Base.Repo.FullName)
+				if err := b.Reserve(int64(4096 + 2*retained)); err != nil {
 					return err
 				}
 				count++
 				pageCount++
-				if err := visit(&PullRequest{Number: raw.Number, State: raw.State, Merged: raw.MergedAt != nil, MergedAt: raw.MergedAt, MergeCommitSHA: raw.MergeCommitSHA, UpdatedAt: raw.UpdatedAt, Head: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Base: raw.Base.Ref, BaseRepo: raw.Base.Repo.FullName}); err != nil {
+				if err := visit(&PullRequest{Number: raw.Number, HTMLURL: raw.HTMLURL, State: raw.State, Merged: raw.MergedAt != nil, MergedAt: raw.MergedAt, MergeCommitSHA: raw.MergeCommitSHA, UpdatedAt: raw.UpdatedAt, Head: raw.Head.Ref, HeadSHA: raw.Head.SHA, HeadRepo: raw.Head.Repo.FullName, Base: raw.Base.Ref, BaseRepo: raw.Base.Repo.FullName}); err != nil {
 					return err
 				}
 			}

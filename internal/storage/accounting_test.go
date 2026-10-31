@@ -126,3 +126,19 @@ func TestSyntheticGitOutputStopsAtCap(t *testing.T) {
 		t.Fatal("read beyond bounded lookahead", source.bytes)
 	}
 }
+
+func TestUsageExhaustionPreservesDiscovery(t *testing.T) {
+	opts := fixture(t)
+	path := filepath.Join(opts.CacheRoot, "agent-build", "orphan", "go")
+	for i := 0; i < 20; i++ {
+		put(t, filepath.Join(path, fmt.Sprint(i)), "data")
+	}
+	s := scanner{ctx: context.Background(), b: Budget{Limits: DefaultLimits()}, out: Snapshot{Complete: true}, inodes: map[fileIdentity]bool{}, physical: true}
+	s.b.Limits.Entries = 2
+	before := s.b.Counters
+	r := Resource{Path: path}
+	s.account(&r)
+	if !s.out.Complete || len(s.out.Reasons) != 0 || s.b.Counters.Entries != before.Entries || s.b.Counters.Bytes != before.Bytes || r.LogicalBytes != nil || r.UsageReason == "" || s.physical {
+		t.Fatalf("scanner %+v resource %+v", s.out, r)
+	}
+}

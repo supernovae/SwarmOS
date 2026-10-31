@@ -2,15 +2,20 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 )
+
+// ErrIssueNotCreated is returned only when the backend confirms no issue was created.
+var ErrIssueNotCreated = errors.New("issue creation was rejected before creation")
 
 type Issue struct {
 	IsPullRequest     bool      `json:"is_pull_request,omitempty"`
 	Number            int       `json:"number"`
 	Title             string    `json:"title"`
 	Body              string    `json:"body"`
+	StateReason       string    `json:"state_reason,omitempty"`
 	State             string    `json:"state"` // "open", "closed"
 	Type              string    `json:"type,omitempty"`
 	Labels            []string  `json:"labels"`
@@ -121,6 +126,7 @@ type LabelSpec struct {
 
 func DefaultSwarmLabels() []LabelSpec {
 	return []LabelSpec{
+		{Name: "swarm:decomposed", Color: "5319e7", Description: "Parent retired while its recorded child WorkUnits are completed"},
 		{Name: "swarm:ready", Color: "0e8a16", Description: "Work unit vetted and ready for SwarmOS agents"},
 		{Name: "swarm:draft", Color: "cfd3d7", Description: "Structured WorkUnit draft awaiting maintainer approval"},
 		{Name: "swarm:community", Color: "c5def5", Description: "Community bug report, idea, or feedback awaiting maintainer triage"},

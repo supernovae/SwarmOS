@@ -743,3 +743,29 @@ func TestUpstreamPlanReviewRequiresIdentity(t *testing.T) {
 		t.Fatal("accepted empty identity")
 	}
 }
+
+func TestDecompositionCloseCompletedWire(t *testing.T) {
+	calls := 0
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != "PATCH" || r.URL.Path != "/repos/octo/swarm/issues/42" {
+			t.Fatalf("request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["state"] != "closed" || body["state_reason"] != "completed" {
+			t.Fatal(body)
+		}
+		writeJSON(t, w, map[string]any{"number": 42, "state": "closed", "state_reason": "completed"})
+	}))
+	for i := 0; i < 2; i++ {
+		if err := tr.CloseIssueCompleted(t.Context(), 42); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 2 {
+		t.Fatal(calls)
+	}
+}

@@ -283,6 +283,7 @@ func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
 }
 
 func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
+	var dryRun, acceptUncovered bool
 	var sequential bool
 	var asJSON bool
 	cmd := &cobra.Command{Use: "decompose <issue-number>", Short: "Partition a parent WorkUnit issue into linked child WorkUnit issues", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
@@ -292,15 +293,36 @@ func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
 			return err
 		}
 		repoRoot := rootOpts.resolveRepoRoot()
-		tr, err := rootOpts.resolveTracker(cmd)
+		if rootOpts.Fork {
+			return fmt.Errorf("decomposition requires a repository operator")
+		}
+		tr, manager, err := rootOpts.resolveCheckpointManager(cmd)
 		if err != nil {
 			return err
 		}
-		eng, err := workflow.NewEngineWithOptions(repoRoot, tr, rootOpts.engineOptions())
-		if err != nil {
+		eng := workflow.NewEngineWithManagerOptions(repoRoot, tr, manager, nil, false, "", rootOpts.engineOptions())
+		opts := workflow.DecompositionOptions{DryRun: dryRun, AcceptUncovered: acceptUncovered, Sequential: sequential, SequentialExplicit: cmd.Flags().Changed("sequential")}
+		if dryRun {
+			preview, err := eng.PrepareDecomposition(cmd.Context(), repoRoot, parentNum, nil, opts)
+			if err != nil {
+				return err
+			}
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "decomposition-preview", "preview": preview})
+			}
+			for _, c := range preview.Children {
+				w := c.WorkUnit
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: %s; depends_on=%v external=%v; size=%s uncertainty=%s risk=%s profile=%s allow_harness_changes=%t\n", w.ID, w.Title, c.Dependencies, w.DependsOn, w.Size, w.Uncertainty, w.Risk, c.Profile, w.AllowHarnessChanges)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Uncovered parent criteria: %v\n", preview.Uncovered)
+			return nil
+		}
+		token, err := lease.LoadClaimToken(repoRoot, parentNum)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		children, err := eng.DecomposeIssue(cmd.Context(), repoRoot, parentNum, nil, sequential, func(message string) { fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", message) })
+		eng.LeaseManager.BindClaim(parentNum, token)
+		children, err := eng.ExecuteDecomposition(cmd.Context(), repoRoot, parentNum, nil, opts, func(message string) { fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", message) })
 		if err != nil {
 			return err
 		}
@@ -314,6 +336,8 @@ func newDecomposeCmd(rootOpts *RootOptions) *cobra.Command {
 		}
 		return nil
 	}}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview decomposition without writing")
+	cmd.Flags().BoolVar(&acceptUncovered, "accept-uncovered", false, "Explicitly accept and record uncovered parent criteria")
 	cmd.Flags().BoolVar(&sequential, "sequential", true, "Chain child issues sequentially via depends_on")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured child issues")
 	return cmd

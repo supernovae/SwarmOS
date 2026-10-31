@@ -250,6 +250,9 @@ func TestCollaborativeHandoffAndDecomposition(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := eng.LeaseManager.ApproveTask(ctx, parentIss.Number, "local-dev"); err != nil {
+		t.Fatal(err)
+	}
 	children, err := eng.DecomposeIssue(ctx, tmp, parentIss.Number, nil, true)
 	if err != nil || len(children) != 2 {
 		t.Fatalf("expected 2 decomposed child issues, got %d (%v)", len(children), err)

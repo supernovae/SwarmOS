@@ -213,6 +213,15 @@ func TestNativeProjectionDecomposeAndPlanJSONWarnings(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				approve := newIssueCmd(opts)
+				approve.SetOut(&out)
+				approve.SetErr(&stderr)
+				approve.SetArgs([]string{"approve", jsonNumber(parent.Number)})
+				if err := approve.Execute(); err != nil {
+					t.Fatal(err)
+				}
+				out.Reset()
+				stderr.Reset()
 				cmd := newDecomposeCmd(opts)
 				cmd.SetOut(&out)
 				cmd.SetErr(&stderr)

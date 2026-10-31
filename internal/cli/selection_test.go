@@ -536,3 +536,45 @@ func TestSelectorRefusesCommandOnlyTestWithLiveDependencies(t *testing.T) {
 		t.Fatalf("selector activity: tracker=%d agents=%d", tr.calls, runs)
 	}
 }
+
+func TestDecompositionNextSelectionEntryPoints(t *testing.T) {
+	for _, mode := range []string{"claim", "work", "node"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCLIFixture(t)
+			parent := f.create(t, "agent")
+			f.must(t, "issue", "approve", strconv.Itoa(parent))
+			f.must(t, "issue", "decompose", strconv.Itoa(parent))
+			_ = f.tracker.RemoveLabel(t.Context(), parent, "swarm:decomposed")
+			_ = f.tracker.AddLabels(t.Context(), parent, []string{"swarm:ready"})
+			for _, verb := range []string{"claim", "work"} {
+				args := []string{"issue", verb, strconv.Itoa(parent), "--agent", "mock"}
+				if verb == "work" {
+					args = append(args, "--headless", "--progress=false")
+				}
+				out, err := f.run(args...)
+				if err == nil || !strings.Contains(err.Error()+out, "child issues") {
+					t.Fatalf("direct %s: %v %s", verb, err, out)
+				}
+			}
+			winner := f.create(t, "agent")
+			f.must(t, "issue", "approve", strconv.Itoa(winner))
+			_ = f.tracker.AddLabels(t.Context(), winner, []string{"swarm:decomposed"})
+			args := []string{"issue", "claim", "--next", "--agent", "mock"}
+			if mode == "work" {
+				args = []string{"issue", "work", "--next", "--agent", "mock", "--headless", "--progress=false"}
+			}
+			if mode == "node" {
+				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
+			}
+			if out, err := f.run(args...); err != nil {
+				t.Fatalf("%s: %v %s", mode, err, out)
+			}
+			if f.state(t, winner).Lease.ClaimID == "" {
+				t.Fatal("ordinary issue with forged decomposed label was skipped")
+			}
+			if f.state(t, parent).Lease.Status != "decomposed" {
+				t.Fatal("retired parent was executed")
+			}
+		})
+	}
+}

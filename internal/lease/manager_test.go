@@ -2140,3 +2140,98 @@ func (s *upstreamCheckpointRaceStore) CompareAndSwap(ctx context.Context, n int,
 	}
 	return s.Store.CompareAndSwap(ctx, n, rev, raw)
 }
+
+func TestDecompositionFencingAndAdmission(t *testing.T) {
+	for _, scenario := range []string{"unclaimed", "missing token", "expired", "other owner", "source changed", "successor"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, tr, parent := testManager(t)
+			ctx := t.Context()
+			st, _, _ := m.load(ctx, parent.Number)
+			if scenario != "unclaimed" {
+				var err error
+				st, err = m.Acquire(ctx, parent.Number, "local-dev", "mock", "plan", time.Hour, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			expected := *st
+			switch scenario {
+			case "missing token":
+				m.BindClaim(parent.Number, "")
+			case "expired":
+				m.SetNowFunc(func() time.Time { return st.Lease.ExpiresAt.Add(time.Second) })
+			case "other owner":
+				m.tracker = tr.WithUser("other", "OWNER")
+			case "source changed":
+				expected.TaskDigest = "wrong"
+			}
+			reserved, err := m.BeginDecomposition(ctx, parent.Number, &expected, Decomposition{Children: []DecompositionChild{{WorkUnit: contract.WorkUnit{ID: "one"}}}})
+			if scenario == "missing token" || scenario == "expired" || scenario == "source changed" {
+				if !errors.Is(err, ErrClaimFence) {
+					t.Fatalf("fence: %v", err)
+				}
+				return
+			}
+			if scenario == "other owner" {
+				if !errors.Is(err, ErrAlreadyClaimed) {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = m.Acquire(ctx, parent.Number, "local-dev", "mock", "plan", time.Hour, 1); err == nil {
+				t.Fatal("pending parent acquired")
+			}
+			if scenario == "successor" {
+				current, rev, _ := m.load(ctx, parent.Number)
+				current.Lease.ClaimID = "successor"
+				raw, _ := json.Marshal(current)
+				_, _ = m.store.CompareAndSwap(ctx, parent.Number, rev, raw)
+				_, err = m.AdvanceDecomposition(ctx, parent.Number, reserved.Decomposition.ID, func(_ *IssueState, _ *Decomposition) error { return nil })
+				if !errors.Is(err, ErrClaimFence) {
+					t.Fatalf("stale operation: %v", err)
+				}
+			}
+		})
+	}
+}
+func TestDecompositionForgedLabelDoesNotRetire(t *testing.T) {
+	m, tr, parent := testManager(t)
+	if err := tr.AddLabels(t.Context(), parent.Number, []string{"swarm:decomposed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Acquire(t.Context(), parent.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
+		t.Fatalf("label acquired authority: %v", err)
+	}
+}
+
+func TestDecompositionRefusalNamesChildrenBeforePrerequisites(t *testing.T) {
+	m, tr, parent := testManager(t)
+	st, rev, _ := m.load(t.Context(), parent.Number)
+	st.Decomposition = &Decomposition{ID: "reserved", Children: []DecompositionChild{{Number: 42}}}
+	raw, _ := json.Marshal(st)
+	if _, err := m.store.CompareAndSwap(t.Context(), parent.Number, rev, raw); err != nil {
+		t.Fatal(err)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(parent.Number, parent.Title, parent.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wu.DependsOn = []int{999}
+	if _, err := tr.UpdateIssueBody(t.Context(), parent.Number, contract.FormatIssueMarkdown(wu)); err != nil {
+		t.Fatal(err)
+	}
+	for _, fork := range []bool{false, true} {
+		var err error
+		if fork {
+			_, err = m.AcquireFork(t.Context(), parent.Number, "local-dev", "mock", "plan", "contributor/repo", time.Hour, 1)
+		} else {
+			_, err = m.Acquire(t.Context(), parent.Number, "local-dev", "mock", "plan", time.Hour, 1)
+		}
+		if err == nil || !strings.Contains(err.Error(), "child issues [42]") {
+			t.Fatalf("fork=%t refusal=%v", fork, err)
+		}
+	}
+}

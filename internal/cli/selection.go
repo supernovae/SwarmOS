@@ -109,7 +109,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			if err != nil {
 				return nil, err
 			}
-			if state == nil || state.Lease.Status == "completed" ||
+			if state == nil || state.Decomposition != nil || state.Lease.Status == "completed" ||
 				state.Lease.Status == "active" && state.Lease.ExpiresAt.After(rootOpts.now()) {
 				continue
 			}

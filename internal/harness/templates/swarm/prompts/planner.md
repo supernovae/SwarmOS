@@ -47,7 +47,33 @@ The compiled system instructions state the total claim budget (lease.duration ×
    Split recommendation: required
    ```
 
-2. Immediately after it, list the proposed child WorkUnits. Give each one a `### <title>`, an **Objective**, and **Acceptance Criteria** as checkable `- [ ]` items (a command, a test, or an observable behavior).
+2. Immediately after it, list the proposed child WorkUnits. Give each one a `### <title>`, an **Objective**, and **Acceptance Criteria** as checkable `- [ ]` items (a command, a test, or an observable behavior). Include exactly one fenced `yaml` block with `split_proposal_version: 1` and `children`. Each child needs a unique `id`, `title`, `objective`, `acceptance` list, explicit `depends_on` list of child IDs (use `[]` for roots), and `covers` list of 1-based parent acceptance indices. State each child's `size` (`small` or `multi_area`), `uncertainty` (`known` or `unknown`), and `risk` (`standard`, `sensitive`, or `urgent`). Assess size and uncertainty for that child; risk inherits from the parent and cannot be downgraded. Dependencies must form an acyclic graph. Optional top-level `coverage` maps parent indices to child IDs and must agree with `covers`.
+
+   Example proposal:
+
+   ```yaml
+   split_proposal_version: 1
+   children:
+     - id: core
+       title: Implement the core behavior
+       objective: Deliver the core behavior independently
+       acceptance: [Core behavior is covered by regression tests]
+       depends_on: []
+       size: small
+       uncertainty: known
+       risk: sensitive
+       covers: [1]
+     - id: integration
+       title: Integrate the core behavior
+       objective: Connect the core behavior to the CLI
+       acceptance: [The CLI exercises the core behavior]
+       depends_on: [core]
+       size: small
+       uncertainty: known
+       risk: sensitive
+       covers: [2]
+   ```
+
 3. Still write TEST_PLAN.md, mapping each original acceptance criterion to the child WorkUnit that covers it.
 
 The recommendation only stops this run after planning; a maintainer decides whether to decompose the issue. Omit the line entirely for a normal plan, and never quote or mention it in any other form.

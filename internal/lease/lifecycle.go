@@ -3,8 +3,12 @@ package lease
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -168,4 +172,223 @@ func (m *Manager) projectSubmission(ctx context.Context, n int, st *IssueState) 
 	}
 	_, err = m.tracker.CreateComment(ctx, n, body)
 	return err
+}
+
+// DecompositionParent verifies a WorkUnit or native parent hint against its recorded graph.
+// Native relationships alone can never authorize a rollup.
+func (m *Manager) DecompositionParent(ctx context.Context, n int) (int, error) {
+	st, _, err := m.loadReadOnly(ctx, n)
+	if err == nil && st.Decomposition != nil {
+		return n, nil
+	}
+	if err != nil && !errors.Is(err, coordination.ErrNotFound) {
+		return 0, err
+	}
+	// The WorkUnit parent is a lookup hint; membership in the parent's
+	// coordination graph remains the authority even if native links drift.
+	issue, err := m.tracker.GetIssue(ctx, n)
+	if err != nil {
+		return 0, err
+	}
+	parent := 0
+	if wu, parseErr := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body); parseErr == nil {
+		parent = wu.ParentIssue
+	}
+	if parent == 0 {
+		parent, err = m.tracker.ParentIssueNumber(ctx, n)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if parent == 0 {
+		return 0, nil
+	}
+	p, _, err := m.loadReadOnly(ctx, parent)
+	if errors.Is(err, coordination.ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if p.Decomposition != nil {
+		for _, c := range p.Decomposition.Children {
+			if c.Number == n {
+				return parent, nil
+			}
+		}
+	}
+	return 0, nil
+}
+
+// ReconcileDecomposition is an explicit, merge-based parent rollup. It never
+// writes a child's claim, outcome, or artifacts, even when observation fails.
+func (m *Manager) ReconcileDecomposition(ctx context.Context, n int) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("parent reconciliation requires a repository operator")
+	}
+	if err := m.tracker.Authorize(ctx, "approve-task"); err != nil {
+		return nil, err
+	}
+	st, rev, err := m.load(ctx, n)
+	if err != nil {
+		return nil, err
+	}
+	d := st.Decomposition
+	if d == nil || !d.Complete || st.Lease.Status == "active" || st.PRRevision != nil {
+		return nil, fmt.Errorf("parent decomposition is not complete or has an active attempt")
+	}
+	closer, ok := m.tracker.(interface {
+		CloseIssueCompleted(context.Context, int) error
+	})
+	if !ok {
+		return nil, fmt.Errorf("tracker cannot close parent as completed")
+	}
+	evidence := map[int]*PROutcome{}
+	revisions := map[int]string{}
+	for _, c := range d.Children {
+		child, childRev, err := m.loadReadOnly(ctx, c.Number)
+		if err != nil {
+			return st, fmt.Errorf("child #%d: %w", c.Number, err)
+		}
+		if child.Lease.Status == "active" || child.PRRevision != nil || child.Cleanup != nil {
+			return st, fmt.Errorf("child #%d has an active attempt", c.Number)
+		}
+		issue, err := m.tracker.GetIssue(ctx, c.Number)
+		if err != nil {
+			return st, err
+		}
+		wu, err := contract.ParseWorkUnitFromIssue(c.Number, issue.Title, issue.Body)
+		if err != nil || wu.ParentIssue != n {
+			return st, fmt.Errorf("child #%d parent identity mismatch", c.Number)
+		}
+		outcome, err := m.observeSubmission(ctx, child)
+		if err != nil {
+			return st, fmt.Errorf("child #%d has no verified merge (closed or superseded issues still require a merge): %w", c.Number, err)
+		}
+		if outcome.Status != "merged" || outcome.MergeCommitSHA == "" || outcome.MergedAt == nil || outcome.MergedAt.IsZero() || outcome.SubmittedHeadSHA == "" || outcome.FinalHeadSHA != outcome.SubmittedHeadSHA || outcome.TargetBranch == "" || (child.BaseBranch != "" && child.BaseBranch != outcome.TargetBranch) {
+			return st, fmt.Errorf("child #%d is %s or lacks complete merge evidence; closed or superseded is insufficient", c.Number, outcome.Status)
+		}
+		evidence[c.Number] = outcome
+		revisions[c.Number] = childRev
+	}
+	// Reinspect the full child snapshot before committing parent intent.
+	for child, expected := range revisions {
+		_, actual, err := m.loadReadOnly(ctx, child)
+		if err != nil {
+			return st, err
+		}
+		if actual != expected {
+			return st, fmt.Errorf("child #%d changed during reconciliation: %w", child, coordination.ErrConflict)
+		}
+	}
+	d.Evidence = evidence
+	d.CompletionIntent = true
+	raw, err := marshalCoordinatorState(st)
+	if err != nil {
+		return nil, err
+	}
+	intentRev, err := m.store.CompareAndSwap(ctx, n, rev, raw)
+	if err != nil {
+		return nil, err
+	}
+	current, currentRev, err := m.load(ctx, n)
+	if err != nil {
+		return st, err
+	}
+	if currentRev != intentRev || current.Decomposition == nil || current.Decomposition.ID != d.ID || !current.Decomposition.CompletionIntent {
+		return st, coordination.ErrConflict
+	}
+	for child, expected := range revisions {
+		_, actual, err := m.loadReadOnly(ctx, child)
+		if err != nil {
+			return st, err
+		}
+		if actual != expected {
+			return st, coordination.ErrConflict
+		}
+	}
+	if err = closer.CloseIssueCompleted(ctx, n); err != nil {
+		return st, fmt.Errorf("parent completion intent recorded; retry close: %w", err)
+	}
+	current.Decomposition.Closed = true
+	return m.saveDecomposition(ctx, n, currentRev, current)
+}
+
+// DecompositionChildStatus is a read-only view in the recorded topological order.
+type DecompositionChildStatus struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+}
+type DecompositionStatus struct {
+	Children  []DecompositionChildStatus `json:"children"`
+	Next      int                        `json:"next,omitempty"`
+	NextState string                     `json:"next_state,omitempty"`
+	AllMerged bool                       `json:"all_merged"`
+}
+
+func (m *Manager) InspectDecomposition(ctx context.Context, st *IssueState) *DecompositionStatus {
+	if st == nil || st.Decomposition == nil {
+		return nil
+	}
+	out := &DecompositionStatus{AllMerged: st.Decomposition.Complete}
+	for _, c := range st.Decomposition.Children {
+		row := DecompositionChildStatus{Number: c.Number, Title: c.WorkUnit.Title, State: "pending creation"}
+		if c.Number > 0 {
+			issue, err := m.tracker.GetIssue(ctx, c.Number)
+			if err != nil {
+				row.State = "unknown"
+				row.Reason = err.Error()
+			} else {
+				child, _, stateErr := m.loadReadOnly(ctx, c.Number)
+				row.State = "approval needed"
+				if stateErr != nil && !errors.Is(stateErr, coordination.ErrNotFound) {
+					row.State = "unknown"
+					row.Reason = stateErr.Error()
+				} else if child != nil && child.PRNumber > 0 {
+					outcome, err := m.observeSubmission(ctx, child)
+					if err != nil {
+						row.State = "unknown"
+						row.Reason = err.Error()
+					} else if outcome.Status == "merged" && outcome.MergeCommitSHA != "" && outcome.MergedAt != nil && !outcome.MergedAt.IsZero() {
+						row.State = "merged"
+					} else {
+						row.State = outcome.Status
+					}
+				} else if issue.State == "closed" {
+					row.State = "closed-unmerged"
+				} else {
+					wu, err := contract.ParseWorkUnitFromIssue(c.Number, issue.Title, issue.Body)
+					if err != nil {
+						row.State = "unknown"
+						row.Reason = err.Error()
+					} else if err = m.VerifyDependencies(ctx, wu); err != nil {
+						row.State = "waiting on prerequisite"
+						row.Reason = err.Error()
+					} else if child != nil {
+						cfg, err := harness.LoadConfigAt(m.repoRoot, child.BaseSHA)
+						if err != nil {
+							row.State = "unknown"
+							row.Reason = err.Error()
+						} else if TaskApprovalCurrent(child, wu, cfg) && slices.Contains(issue.Labels, cfg.Security.ReadyLabel) {
+							row.State = "workable"
+							if child.Lease.Status == "active" && child.Lease.ExpiresAt.After(m.nowFn()) {
+								row.State = "claimed"
+							}
+						}
+					}
+				}
+			}
+		}
+		if row.State != "merged" {
+			out.AllMerged = false
+		}
+		if out.Next == 0 && (row.State == "workable" || row.State == "approval needed") {
+			out.Next = row.Number
+			out.NextState = row.State
+		}
+		out.Children = append(out.Children, row)
+	}
+	return out
 }

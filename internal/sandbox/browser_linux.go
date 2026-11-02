@@ -173,12 +173,12 @@ func (n *nativeSystemdScope) stop(identity storageuse.NativeIdentity) error {
 		cmd.WaitDelay = time.Second
 		return errors.Join(cmd.Run(), process.StopVerified(cmd))
 	}
-	return n.stopWith(identity, func(identity storageuse.NativeIdentity) bool {
+	return n.stopWith(ctx, identity, func(identity storageuse.NativeIdentity) bool {
 		return storageuse.NativeBoundaryEmpty(identity, os.ReadFile, os.Stat)
 	}, run)
 }
 
-func (n *nativeSystemdScope) stopWith(identity storageuse.NativeIdentity, empty func(storageuse.NativeIdentity) bool, run func(...string) error) error {
+func (n *nativeSystemdScope) stopWith(ctx context.Context, identity storageuse.NativeIdentity, empty func(storageuse.NativeIdentity) bool, run func(...string) error) error {
 	if identity.Unit == n.unit && empty(identity) {
 		return nil
 	}
@@ -189,7 +189,21 @@ func (n *nativeSystemdScope) stopWith(identity storageuse.NativeIdentity, empty 
 		// Kernel proof that the recorded boundary is empty completes cleanup.
 		return nil
 	}
-	return errors.Join(storageuse.ErrUnsafe, killErr, stopErr)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return errors.Join(storageuse.ErrUnsafe, killErr, stopErr)
+		case <-ticker.C:
+			if ctx.Err() != nil {
+				return errors.Join(storageuse.ErrUnsafe, killErr, stopErr)
+			}
+			if identity.Unit == n.unit && empty(identity) {
+				return nil
+			}
+		}
+	}
 }
 
 // ExecNativeScope is the hidden pre-exec helper. Control descriptors never

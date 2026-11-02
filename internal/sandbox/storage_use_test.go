@@ -219,6 +219,17 @@ func TestNativeWorkspaceRejectsControlStorageInsideWorkspace(t *testing.T) {
 	}
 }
 
+// cancelNativeCommandWriter cancels only after the command has started and
+// produced output, so storage registration cannot short-circuit the stop test.
+type cancelNativeCommandWriter struct {
+	cancel context.CancelFunc
+}
+
+func (w cancelNativeCommandWriter) Write(p []byte) (int, error) {
+	w.cancel()
+	return len(p), nil
+}
+
 func TestNativeStopFailureRetainsUse(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "command-success", true: "cancellation"}[canceled], func(t *testing.T) {
@@ -232,13 +243,18 @@ func TestNativeStopFailureRetainsUse(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer os.RemoveAll(dir)
+			var stdout io.Writer = io.Discard
 			if canceled {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
-				cancel()
+				defer cancel()
+				stdout = cancelNativeCommandWriter{cancel: cancel}
 			}
 			failure := errors.New("injected stop verification failure")
-			err = runNativeCommandWithStop(ctx, "/bin/sh", dir, []string{"PATH=/usr/bin:/bin"}, []string{"-c", "exit 0"}, nil, io.Discard, io.Discard, func(*exec.Cmd) error { return failure })
+			err = runNativeCommandWithStop(ctx, "/bin/sh", dir, []string{"PATH=/usr/bin:/bin"}, []string{"-c", "printf ready"}, nil, stdout, io.Discard, func(*exec.Cmd) error { return failure })
+			if canceled && !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("command did not trigger cancellation: %v", ctx.Err())
+			}
 			if !errors.Is(err, failure) {
 				t.Fatalf("stop failure hidden: %v", err)
 			}

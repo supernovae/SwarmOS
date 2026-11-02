@@ -6,7 +6,9 @@ import (
 	"errors"
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"gopkg.in/yaml.v3"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -268,5 +270,72 @@ func TestEngineDependencyScopeLivesThroughRoles(t *testing.T) {
 				t.Fatalf("ordinary engine completion left pending record %s", filepath.Base(path))
 			}
 		}
+	}
+}
+
+func TestBrowserProfilePreflightNoClaim(t *testing.T) {
+	eng, root, issue := approvedDependencyTask(t)
+	path := filepath.Join(root, ".swarm/config.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := harness.LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Execution = contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative, BrowserProfile: true}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", ".swarm/config.yaml"}, {"commit", "-m", "browser policy"}} {
+		if out, err := gitfixture.Command(t, root, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git: %v: %s", err, out)
+		}
+	}
+	if _, err := eng.LeaseManager.ApproveTask(t.Context(), issue, "local-dev"); err != nil {
+		t.Fatal(err)
+	}
+	// A candidate edit cannot turn off the approved requirement.
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Keep Git for approved-base reads, but deliberately omit Bubblewrap.
+	bin := t.TempDir()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(gitPath, filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	eng.LookupEnv = func(key string) (string, bool) {
+		if key == "SWARM_EXECUTION_MODE" {
+			return "isolated", true
+		}
+		return os.LookupEnv(key)
+	}
+	_, err = eng.PreflightForClaim(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue, Phase: "plan", Headless: true})
+	if err == nil || !strings.Contains(err.Error(), "browser profile requested/unavailable") || !strings.Contains(err.Error(), "Bubblewrap") {
+		t.Fatalf("preflight: %v", err)
+	}
+	st, err := eng.LeaseManager.GetCurrentState(t.Context(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Lease.ClaimID != "" {
+		t.Fatal("unavailable browser profile acquired a claim")
+	}
+	result, err := eng.PreflightForClaim(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue, Phase: "plan", InspectOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.BrowserProfile, "unavailable") || len(result.Blockers) == 0 {
+		t.Fatalf("inspection lost browser blocker: %+v", result)
 	}
 }

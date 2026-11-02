@@ -141,6 +141,14 @@ func PreflightWithOptions(name string, cfg *contract.SwarmConfig, local bool, ro
 		return "", err
 	}
 	cr := r.(*configuredRunner)
+	if cfg.Execution.BrowserProfile {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := sandbox.CheckBrowserProfile(ctx); err != nil {
+			return "", fmt.Errorf("browser profile requested, unavailable: %w", err)
+		}
+	}
+
 	if err := cr.validate(RunRequest{Role: role, Model: cr.model, Local: local}); err != nil {
 		return "", err
 	}
@@ -155,7 +163,11 @@ func PreflightWithOptions(name string, cfg *contract.SwarmConfig, local bool, ro
 		if err != nil {
 			return "", err
 		}
-		return "native:codex " + version + "; " + auth + " present; filesystem/network canaries passed; MCP, plugins and hooks disabled; interactive and unattended", nil
+		detail := "native:codex " + version + "; " + auth + " present; filesystem/network canaries passed; MCP, plugins and hooks disabled; interactive and unattended"
+		if cfg.Execution.BrowserProfile {
+			detail += "; browser profile requested/available through Bubblewrap validation"
+		}
+		return detail, nil
 	}
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "harness-tools-bwrap" {
 		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
@@ -178,7 +190,11 @@ func PreflightWithOptions(name string, cfg *contract.SwarmConfig, local bool, ro
 		if cr.model != "" {
 			model = "project model=" + cr.model
 		}
-		return fmt.Sprintf("%s %s; Linux isolated tools (Bubblewrap); %s; %s; workspace read/edit/write and shell; filesystem/network/read-only canaries passed; tool policy checked at launch; external MCP, hooks, plugins and subagents restricted; interactive and unattended", adapter.driver, version, auth, model), nil
+		browserDetail := ""
+		if cfg.Execution.BrowserProfile {
+			browserDetail = "; browser profile requested/available"
+		}
+		return fmt.Sprintf("%s %s; Linux isolated tools (Bubblewrap); %s; %s; workspace read/edit/write and shell; filesystem/network/read-only canaries passed; tool policy checked at launch; external MCP, hooks, plugins and subagents restricted; interactive and unattended", adapter.driver, version, auth, model) + browserDetail, nil
 	}
 	if adapter, ok := cr.Runner.(*CLIAdapter); ok && adapter.sandboxRuntime == "container" {
 		if adapter.executionMode == contract.ExecutionIsolated {

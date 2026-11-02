@@ -437,3 +437,57 @@ A CLI `--gate` flag can always make review stricter (for example, upgrading `non
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](openai-dot.md)** — Configure Codex Cloud environments and remote repositories for OpenAI Dots.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, fencing, and worktree lifecycle.
+
+
+### Task-local browser previews
+
+Enable browser checks when agents need to verify a page's rendered output. Add this to the repository policy before approving work:
+
+```yaml
+execution:
+  mode: isolated
+  backend: native
+  browser_profile: true
+```
+
+The profile supports Linux hosts with Bubblewrap, a systemd 254+ user manager and a mounted cgroup v2 memory controller. While the profile is enabled, every tool command runs in a verified user scope with a fixed 2 GiB memory limit and no swap. Doctor and work preflight check the scope and launch the cached browser before claiming work. Provision Chromium and its system libraries on the host:
+
+```bash
+npx playwright install --with-deps chromium
+swarm repo doctor
+```
+
+SwarmOS discovers the Playwright cache through `PLAYWRIGHT_BROWSERS_PATH` or the usual `ms-playwright` cache directory and mounts it read-only through the existing `node-browsers` dependency support. It never downloads browsers inside a tool command. Changing candidate policy files cannot enable the profile; task execution uses the approved base.
+
+Keep the preview server and browser in one `swarm_shell` command or one required check: their private loopback lasts only for that command, with a two-minute limit. For example, this shell script writes a rendered page and screenshot to `browser-output`:
+
+```bash
+set -eu
+mkdir -p browser-output
+printf '<p>Hello from the preview</p>' > browser-output/index.html
+python3 -m http.server 8765 --bind 127.0.0.1 --directory browser-output > browser-output/server.log 2>&1 &
+server=$!
+trap 'kill "$server" 2>/dev/null || :; wait "$server" 2>/dev/null || :' EXIT
+state=$(mktemp -d)
+for browser in "$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell; do
+    test -x "$browser" && break
+done
+python3 - <<'READY'
+import time, urllib.request
+for attempt in range(100):
+    try:
+        urllib.request.urlopen("http://127.0.0.1:8765/", timeout=.2).close()
+        break
+    except OSError:
+        time.sleep(.05)
+else:
+    raise SystemExit("preview server did not become ready")
+READY
+"$browser" --no-sandbox --headless --disable-gpu --user-data-dir="$state/dom" --dump-dom http://127.0.0.1:8765/ > browser-output/dom.html 2> browser-output/dom.log
+"$browser" --no-sandbox --headless --disable-gpu --user-data-dir="$state/png" --screenshot="$PWD/browser-output/preview.png" http://127.0.0.1:8765/ > browser-output/screenshot.log 2>&1
+test -s browser-output/preview.png
+grep -q 'Hello from the preview' browser-output/dom.html
+rm -rf "$state"
+```
+
+Chromium uses `--no-sandbox` because Bubblewrap supplies the filesystem, credential and network boundary. Browser state stays in fresh task-local directories; host desktop sockets and browser profiles are outside the boundary. Host loopback, LAN and external networks remain inaccessible. Codex agents use this profile through native required-check validation; their own shell sandbox is unchanged. The repository's [preview fixture](../internal/sandbox/testdata/browser-preview.sh) also verifies JavaScript-rendered DOM and the PNG signature.

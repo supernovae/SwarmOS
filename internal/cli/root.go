@@ -131,7 +131,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&opts.ForkRemote, "fork-remote", opts.ForkRemote, `Writable fork remote for --fork coordination or upstream-authorized PR updates (default "fork", or "origin" when the upstream remote is not origin)`)
 	rootCmd.PersistentFlags().StringVar(&opts.UpstreamRemote, "upstream-remote", opts.UpstreamRemote, `Git remote for the project repository on the github backend (default: the node profile's upstream_remote, then "origin")`)
 	rootCmd.AddCommand(newRepoCmd(opts), newNodeCmd(opts), newIssueCmd(opts), newPRCmd(opts), newForkCoordinatorCmd(opts), newVersionCmd(), newStorageCmd(opts))
-	rootCmd.AddCommand(newInternalToolsCmd())
+	rootCmd.AddCommand(newInternalToolsCmd(), newInternalBrowserExecCmd())
 	for _, command := range rootCmd.Commands() {
 		switch command.Name() {
 		case "repo", "node", "issue", "pr", "storage":
@@ -300,7 +300,7 @@ func (o *RootOptions) normalizeCoordinatorRoot(cmd *cobra.Command) error {
 		top = top.Parent()
 	}
 	switch top.Name() {
-	case "version", "help", "completion", "internal-tools", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+	case "version", "help", "completion", "internal-tools", "internal-browser-exec", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
 		return nil
 	}
 	if top.Name() == "repo" && cmd.Name() == "validate" {

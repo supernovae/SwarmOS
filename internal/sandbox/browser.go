@@ -26,8 +26,26 @@ func browserManagerEnv() []string {
 }
 
 func browserScopeArgs(unit, executable, binary string, flags []string) []string {
-	args := []string{"--user", "--scope", "--quiet", "--unit=" + unit, "--property=MemoryMax=" + browserMemoryMax, "--property=MemorySwapMax=0", "--", executable, "internal-browser-exec", unit, binary}
+	args := []string{"--user", "--scope", "--expand-environment=no", "--quiet", "--unit=" + unit, "--property=MemoryMax=" + browserMemoryMax, "--property=MemorySwapMax=0", "--", executable, "internal-browser-exec", unit, binary}
 	return append(args, flags...)
+}
+
+// Older systemd-run versions expand payload variables and cannot safely launch tools.
+func checkBrowserLauncher(ctx context.Context, launcher string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, launcher, "--help")
+	cmd.Env = browserManagerEnv()
+	process.Configure(cmd)
+	cmd.Cancel = func() error { return process.StopVerified(cmd) }
+	cmd.WaitDelay = time.Second
+	var out process.Output
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := errors.Join(cmd.Run(), process.StopVerified(cmd))
+	if err != nil || !strings.Contains(out.String(), "--expand-environment=") {
+		return fmt.Errorf("browser profile requires systemd 254+ with systemd-run --expand-environment=no (capability probe: %v)", err)
+	}
+	return nil
 }
 
 func browserCommand(ctx context.Context, binary string, flags []string) (*exec.Cmd, string, error) {
@@ -37,6 +55,9 @@ func browserCommand(ctx context.Context, binary string, flags []string) (*exec.C
 	launcher, err := exec.LookPath("systemd-run")
 	if err != nil {
 		return nil, "", fmt.Errorf("browser profile requires systemd-run: %w", err)
+	}
+	if err := checkBrowserLauncher(ctx, launcher); err != nil {
+		return nil, "", err
 	}
 	if _, err = exec.LookPath("systemctl"); err != nil {
 		return nil, "", fmt.Errorf("browser profile requires systemctl: %w", err)

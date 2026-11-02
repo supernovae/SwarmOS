@@ -450,7 +450,7 @@ execution:
   browser_profile: true
 ```
 
-The profile supports Linux hosts with Bubblewrap, a systemd user manager and a mounted cgroup v2 memory controller. Each command runs in a verified user scope with a fixed 2 GiB memory limit and no swap. Doctor and work preflight check the scope and launch the cached browser before claiming work. Provision Chromium and its system libraries on the host:
+The profile supports Linux hosts with Bubblewrap, a systemd 254+ user manager and a mounted cgroup v2 memory controller. While the profile is enabled, every tool command runs in a verified user scope with a fixed 2 GiB memory limit and no swap. Doctor and work preflight check the scope and launch the cached browser before claiming work. Provision Chromium and its system libraries on the host:
 
 ```bash
 npx playwright install --with-deps chromium

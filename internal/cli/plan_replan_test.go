@@ -32,8 +32,14 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 	f.must(t, "issue", "approve", n)
 	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
 	out, err := f.run("issue", "work", n, "--agent", "mock", "--progress=false")
-	if !errors.Is(err, workflow.ErrPlanReviewRejected) || !strings.Contains(out, "issue work "+n+" --phase plan") || !strings.Contains(out, "review art-") {
-		t.Fatalf("recovery: %v %s", err, out)
+	if !errors.Is(err, workflow.ErrPlanReviewRejected) {
+		t.Fatalf("missing rejection sentinel: %v %s", err, out)
+	}
+	if !strings.Contains(out+err.Error(), "issue work "+n+" --phase plan") {
+		t.Fatalf("missing replan command: %v %s", err, out)
+	}
+	if !strings.Contains(out+err.Error(), "review art-") {
+		t.Fatalf("missing rejected review identity: %v %s", err, out)
 	}
 	initial := f.state(t, issue)
 	for _, a := range initial.Artifacts {
@@ -57,7 +63,7 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 	if !errors.Is(err, lease.ErrPlanReplanLimit) || !strings.Contains(err.Error(), "review-plan") {
 		t.Fatalf("cap: %v %s", err, out)
 	}
-	assertPlanReplanCommands326(t, f, issue, err.Error())
+	assertPlanReplanCommands326(t, f, issue, err.Error(), true)
 	status := f.must(t, "issue", "status", n)
 	if !strings.Contains(status, "Automatic plan retries: 2/2") || !strings.Contains(status, "CHANGES_REQUESTED") {
 		t.Fatal(status)
@@ -533,5 +539,29 @@ func TestPlanReviewRoundFailureEnvelope(t *testing.T) {
 		if (value["plan_review"] != nil) != direct {
 			t.Fatal("changed excluded envelope", value)
 		}
+	}
+}
+
+func TestPendingPlanReviewWithoutSchedulingReason(t *testing.T) {
+	st := &lease.IssueState{PendingPlanReview: &lease.PlanRejection{
+		ReviewID: "art-rejected", Version: 3, Digest: "digest",
+	}}
+	opts := &RootOptions{Fork: true}
+	for name, got := range map[string]string{
+		"summary":  planReviewSummary(opts, st),
+		"recovery": planReviewRecovery(opts, st, "issue", 412),
+	} {
+		if !strings.Contains(got, "review art-rejected v3 sha256:digest returned CHANGES_REQUESTED") {
+			t.Errorf("%s lost pending rejection identity: %q", name, got)
+		}
+	}
+	st.NextPhaseReason = "existing guidance"
+	if got := planReviewSummary(opts, st); got != st.NextPhaseReason {
+		t.Fatalf("changed existing guidance: %q", got)
+	}
+	st.PendingPlanReview = nil
+	st.NextPhaseReason = ""
+	if got := planReviewSummary(opts, st); got != "" {
+		t.Fatalf("invented pending review: %q", got)
 	}
 }

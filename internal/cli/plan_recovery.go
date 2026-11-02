@@ -52,9 +52,9 @@ func planReviewRecovery(opts *RootOptions, st *lease.IssueState, resource string
 		review = fmt.Sprintf("%s pr work %d --phase review", command, number)
 	}
 	if d := directPlanReviewDisplay(opts, st); d != nil {
-		return fmt.Sprintf("%s. Plan review round %d; automatic plan retries: %d/%d; operator decision needed: %t. %s", st.NextPhaseReason, d.Round, d.RetriesUsed, d.RetriesAllowed, d.OperatorDecision, strings.ReplaceAll(strings.Join(d.RecoveryCommands, "; "), "swarm ", command+" "))
+		return fmt.Sprintf("%s. Plan review round %d; automatic plan retries: %d/%d; operator decision needed: %t. %s", planReviewReason(st), d.Round, d.RetriesUsed, d.RetriesAllowed, d.OperatorDecision, strings.ReplaceAll(strings.Join(d.RecoveryCommands, "; "), "swarm ", command+" "))
 	}
-	return fmt.Sprintf("%s. Revise the plan: %s %s work %d --phase plan; then run %s. Automatic retries remain subject to the per-revision cap.", st.NextPhaseReason, command, resource, number, review)
+	return fmt.Sprintf("%s. Revise the plan: %s %s work %d --phase plan; then run %s. Automatic retries remain subject to the per-revision cap.", planReviewReason(st), command, resource, number, review)
 }
 
 func runCheckpointPlan(cmd *cobra.Command, root *RootOptions, arg string, opts workflow.WorkOptions, dryRun, asJSON, showProgress bool) error {
@@ -179,7 +179,18 @@ func planReviewSummary(opts *RootOptions, st *lease.IssueState) string {
 		return ""
 	}
 	if d := directPlanReviewDisplay(opts, st); d != nil {
-		return fmt.Sprintf("%s. Plan review round %d; automatic plan retries: %d/%d; operator decision needed: %t.", st.NextPhaseReason, d.Round, d.RetriesUsed, d.RetriesAllowed, d.OperatorDecision)
+		return fmt.Sprintf("%s. Plan review round %d; automatic plan retries: %d/%d; operator decision needed: %t.", planReviewReason(st), d.Round, d.RetriesUsed, d.RetriesAllowed, d.OperatorDecision)
 	}
-	return st.NextPhaseReason
+	return planReviewReason(st)
+}
+
+// planReviewReason restores display context after a retry consumes scheduling guidance.
+func planReviewReason(st *lease.IssueState) string {
+	if st.NextPhaseReason != "" {
+		return st.NextPhaseReason
+	}
+	if p := st.PendingPlanReview; p != nil {
+		return fmt.Sprintf("review %s v%d sha256:%s returned CHANGES_REQUESTED", p.ReviewID, p.Version, p.Digest)
+	}
+	return ""
 }

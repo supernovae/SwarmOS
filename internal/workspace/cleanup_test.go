@@ -242,3 +242,219 @@ func TestCleanupWorktreeRelativePaths(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanupIgnoredBuildDirectories(t *testing.T) {
+	for _, dir := range []string{"node_modules", "dist", "packages/a/node_modules", ".venv", "a/.next"} {
+		t.Run(dir, func(t *testing.T) {
+			root, path, _, git := cleanupWorkspaceFixture(t)
+			external := filepath.Join(t.TempDir(), "sentinel")
+			if err := os.WriteFile(external, []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, ".gitignore"), []byte(dir+"/\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			git("-C", path, "add", ".gitignore")
+			git("-C", path, "commit", "-m", "ignore builds")
+			head := git("-C", path, "rev-parse", "HEAD")
+			build := filepath.Join(path, dir)
+			if err := os.MkdirAll(build, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(build, "output"), []byte("build"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for name, target := range map[string]string{"external": external, "internal": "output"} {
+				if err := os.Symlink(target, filepath.Join(build, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			branch := "swarm/issue-1-test"
+			if r := InspectCleanupWorktree(context.Background(), root, path, branch, head); !r.Eligible {
+				t.Fatal(r.Reason)
+			}
+			if _, err := os.Stat(filepath.Join(build, "output")); err != nil {
+				t.Fatal("preview mutated output", err)
+			}
+			if err := RetireCleanupWorktree(context.Background(), root, path, branch, head); err != nil {
+				t.Fatal(err)
+			}
+			if err := DeleteCleanupLocalBranch(context.Background(), root, branch, head); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("worktree survived", err)
+			}
+			if raw, err := os.ReadFile(external); err != nil || string(raw) != "keep" {
+				t.Fatal("external target changed", err)
+			}
+		})
+	}
+}
+
+func TestCleanupBuildRetention(t *testing.T) {
+	for _, tc := range []struct{ name, file, ignore, tracked, marker string }{
+		{name: "env", file: ".env", ignore: ".env"},
+		{name: "other", file: "other/output", ignore: "other/"},
+		{name: "untracked node", file: "node_modules/file"},
+		{name: "untracked dist", file: "dist/file"},
+		{name: "near match", file: "my_node_modules/file", ignore: "my_node_modules/"},
+		{name: "regular dist", file: "dist", ignore: "dist"},
+		{name: "tracked mix", file: "dist/o.js", ignore: "dist/o.js", tracked: "dist/keep.txt"},
+		{name: "nested tracked mix", file: "a/dist/o.js", ignore: "a/dist/o.js", tracked: "a/dist/keep.txt"},
+		{name: "ancestor bypass", file: "dist/node_modules/o.js", ignore: "dist/node_modules/", tracked: "dist/keep.txt"},
+		{name: "nested repository directory", file: "node_modules/file", ignore: "node_modules/", marker: "dir"},
+		{name: "nested repository file", file: "node_modules/file", ignore: "node_modules/", marker: "file"},
+		{name: "recognized symlink", file: "node_modules", ignore: "node_modules", marker: "link"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, path, _, git := cleanupWorkspaceFixture(t)
+			write := func(name, body string) {
+				t.Helper()
+				full := filepath.Join(path, name)
+				if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(".gitignore", tc.ignore+"\n")
+			if tc.tracked != "" {
+				write(tc.tracked, "tracked")
+			}
+			git("-C", path, "add", ".")
+			git("-C", path, "commit", "-m", "fixture")
+			head := git("-C", path, "rev-parse", "HEAD")
+			external := t.TempDir()
+			if tc.marker == "link" {
+				if err := os.Symlink(external, filepath.Join(path, tc.file)); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				write(tc.file, "payload")
+			}
+			if tc.marker == "dir" {
+				if err := os.MkdirAll(filepath.Join(path, "node_modules/.git"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.marker == "file" {
+				write("node_modules/.git", "gitdir: elsewhere")
+			}
+			branch := "swarm/issue-1-test"
+			r := InspectCleanupWorktree(context.Background(), root, path, branch, head)
+			if r.Eligible || r.Reason == "" {
+				t.Fatalf("unexpected eligibility: %+v", r)
+			}
+			if tc.tracked != "" && (!strings.Contains(r.Reason, tc.tracked) || !strings.Contains(r.Reason, tc.file)) {
+				t.Fatalf("missing blocking paths: %s", r.Reason)
+			}
+			if err := RetireCleanupWorktree(context.Background(), root, path, branch, head); err == nil {
+				t.Fatal("retired blocked tree")
+			}
+			if _, err := os.Lstat(filepath.Join(path, tc.file)); err != nil {
+				t.Fatal("payload lost", err)
+			}
+			if got := git("rev-parse", "refs/heads/"+branch); got != head {
+				t.Fatal("branch changed")
+			}
+		})
+	}
+}
+
+func TestCleanupCleanTrackedBuildDirectory(t *testing.T) {
+	root, path, _, git := cleanupWorkspaceFixture(t)
+	if err := os.MkdirAll(filepath.Join(path, "dist"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "dist/keep.txt"), []byte("tracked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	git("-C", path, "add", ".")
+	git("-C", path, "commit", "-m", "tracked dist")
+	head := git("-C", path, "rev-parse", "HEAD")
+	if err := RetireCleanupWorktree(context.Background(), root, path, "swarm/issue-1-test", head); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCleanupTrackedBuildChanges(t *testing.T) {
+	for _, staged := range []bool{false, true} {
+		t.Run(fmt.Sprint(staged), func(t *testing.T) {
+			root, path, _, git := cleanupWorkspaceFixture(t)
+			if err := os.MkdirAll(filepath.Join(path, "dist"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(path, "dist/file")
+			if err := os.WriteFile(file, []byte("original"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			git("-C", path, "add", ".")
+			git("-C", path, "commit", "-m", "tracked build")
+			head := git("-C", path, "rev-parse", "HEAD")
+			if err := os.WriteFile(file, []byte("modified"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if staged {
+				git("-C", path, "add", ".")
+			}
+			if r := InspectCleanupWorktree(context.Background(), root, path, "swarm/issue-1-test", head); r.Eligible || !strings.Contains(r.Reason, "dist/file") {
+				t.Fatalf("unexpected inspection: %+v", r)
+			}
+			if err := RetireCleanupWorktree(context.Background(), root, path, "swarm/issue-1-test", head); err == nil {
+				t.Fatal("removed tracked changes")
+			}
+			if raw, err := os.ReadFile(file); err != nil || string(raw) != "modified" {
+				t.Fatal("lost changes", err)
+			}
+		})
+	}
+}
+
+func TestCleanupBuildComponentInspection(t *testing.T) {
+	root := t.TempDir()
+	if ok, err := cleanupIgnoredBuildPath(root, "dist/missing", nil); err == nil || ok {
+		t.Fatal("accepted failed component inspection")
+	}
+	if err := os.Mkdir(filepath.Join(root, "node_modules"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "node_modules/repo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := cleanupIgnoredBuildPath(root, "node_modules/repo/", nil); err != nil || !ok {
+		t.Fatal("trailing slash rejected", err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "parent")); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := cleanupIgnoredBuildPath(root, "parent/dist/output", nil); err == nil || ok {
+		t.Fatal("accepted symlink parent")
+	}
+}
+
+func TestCleanupIndexInspectionFailure(t *testing.T) {
+	root, path, head, git := cleanupWorkspaceFixture(t)
+	index := git("-C", path, "rev-parse", "--git-path", "index")
+	if !filepath.IsAbs(index) {
+		index = filepath.Join(path, index)
+	}
+	if err := os.WriteFile(index, []byte("invalid index"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	branch := "swarm/issue-1-test"
+	r := InspectCleanupWorktree(context.Background(), root, path, branch, head)
+	if r.Eligible || !strings.Contains(r.Reason, "index inspection failed") {
+		t.Fatalf("unexpected inspection: %+v", r)
+	}
+	if err := RetireCleanupWorktree(context.Background(), root, path, branch, head); err == nil {
+		t.Fatal("removed uninspectable tree")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("worktree lost", err)
+	}
+	if got := git("rev-parse", "refs/heads/"+branch); got != head {
+		t.Fatal("branch changed")
+	}
+}

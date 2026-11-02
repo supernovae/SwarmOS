@@ -57,9 +57,9 @@ func budgetBundle(t *testing.T, wt, base, role string, prNumber int) (string, er
 	wf := &contract.WorkflowSpec{Name: "feature"}
 	var err error
 	if prNumber > 0 {
-		err = CompilePRHarnessBundleAt(wt, wu, wf, nil, role, base, prNumber)
+		err = CompilePRHarnessBundleAt(wt, wu, wf, nil, role, contract.GateAgent, base, prNumber)
 	} else {
-		err = CompileHarnessBundleAt(wt, wu, wf, nil, role, base)
+		err = CompileHarnessBundleAt(wt, wu, wf, nil, role, contract.GateAgent, base)
 	}
 	if err != nil {
 		return "", err

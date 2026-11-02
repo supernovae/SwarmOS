@@ -2066,3 +2066,182 @@ func TestCLIEmptyConstraintsWork(t *testing.T) {
 		t.Fatalf("unexpected workflow outcome: %+v", outcome)
 	}
 }
+
+func TestCLILintEffectiveGate(t *testing.T) {
+	for _, tc := range []struct{ task, workflow, policy, want string }{
+		{"none", "none", "agent", "agent"}, {"none", "human", "agent", "human"}, {"human", "agent", "none", "human"}, {"none", "agent", "human", "human"},
+	} {
+		t.Run(tc.task+tc.workflow+tc.policy, func(t *testing.T) {
+			f := newCLIFixture(t)
+			n := f.create(t, tc.task)
+			config := filepath.Join(f.root, ".swarm/config.yaml")
+			raw, err := os.ReadFile(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = regexp.MustCompile(`(?m)^default_gate:.*$`).ReplaceAll(raw, []byte("default_gate: "+tc.policy))
+			if err := os.WriteFile(config, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(f.root, ".swarm/workflows/feature.yaml")
+			raw, err = os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = regexp.MustCompile(`(?m)^default_gate:.*$`).ReplaceAll(raw, []byte("default_gate: "+tc.workflow))
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			issue, err := f.tracker.GetIssue(context.Background(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := f.must(t, "issue", "lint", strconv.Itoa(n), "--json")
+			var got struct {
+				EffectiveGate string             `json:"effective_gate"`
+				WorkUnit      *contract.WorkUnit `json:"work_unit"`
+			}
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.EffectiveGate != tc.want || !reflect.DeepEqual(got.WorkUnit, wu) {
+				t.Fatalf("lint: %s", out)
+			}
+			out = f.must(t, "issue", "lint", strconv.Itoa(n))
+			if !strings.Contains(out, "gate="+tc.want) || !strings.Contains(out, "task_gate="+tc.task) {
+				t.Fatal(out)
+			}
+		})
+	}
+}
+
+func TestCLIWorkBundleEffectiveGate(t *testing.T) {
+	for _, override := range []string{"", "human", "state-human"} {
+		t.Run("override="+override, func(t *testing.T) {
+			f := newCLIFixture(t)
+			raw := f.must(t, "issue", "create", "--json", "--title", "Inherited gate", "--objective", "Display gate", "--constraint", "Preserve gates", "--acceptance", "Agree")
+			var created struct {
+				Issue *tracker.Issue `json:"issue"`
+			}
+			if err := json.Unmarshal([]byte(raw), &created); err != nil {
+				t.Fatal(err)
+			}
+			n := strconv.Itoa(created.Issue.Number)
+			lint := f.must(t, "issue", "lint", n, "--json")
+			var lintResult struct {
+				EffectiveGate string             `json:"effective_gate"`
+				WorkUnit      *contract.WorkUnit `json:"work_unit"`
+			}
+			if err := json.Unmarshal([]byte(lint), &lintResult); err != nil {
+				t.Fatal(err)
+			}
+			original, err := contract.ParseWorkUnitFromIssue(created.Issue.Number, created.Issue.Title, created.Issue.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lintResult.EffectiveGate != "agent" || !reflect.DeepEqual(lintResult.WorkUnit, original) {
+				t.Fatalf("omitted gate lint: %s", lint)
+			}
+			text := f.must(t, "issue", "lint", n)
+			if !strings.Contains(text, "gate=agent") || !strings.Contains(text, "task_gate=none") {
+				t.Fatal(text)
+			}
+			f.must(t, "issue", "approve", n)
+			before := f.state(t, created.Issue.Number)
+			if override == "state-human" {
+				f.must(t, "issue", "claim", n, "--agent", "mock")
+				claimed := f.state(t, created.Issue.Number)
+				f.manager.BindClaim(created.Issue.Number, claimed.Lease.ClaimID)
+				if _, err := f.manager.RequireGate(context.Background(), created.Issue.Number, "alice", contract.GateHuman); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{"issue", "work", n, "--agent", "mock", "--phase", "plan", "--progress=false"}
+			if override == "human" {
+				args = append(args, "--gate", override)
+			}
+			dry := f.must(t, append(append([]string{}, args...), "--dry-run")...)
+			want := "agent"
+			if override != "" {
+				want = "human"
+			}
+			if !strings.Contains(dry, want) {
+				t.Fatal(dry)
+			}
+			f.must(t, args...)
+			active := filepath.Join(workspace.WorktreePath(f.root, created.Issue.Number), ".swarm/active")
+			bundle, err := os.ReadFile(filepath.Join(active, "WORKUNIT.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(bundle), "**Plan Review Gate**: `"+want+"`") || !strings.Contains(string(bundle), "**Task Plan Gate**: `none`") {
+				t.Fatal(string(bundle))
+			}
+			out := f.must(t, "issue", "stage", n, "--phase", "plan", "--harness", "codex", "--model", "test")
+			if !strings.Contains(out, "gate="+want) {
+				t.Fatal(out)
+			}
+			after := f.state(t, created.Issue.Number)
+			if before.TaskDigest != after.TaskDigest || before.PolicyDigest != after.PolicyDigest {
+				t.Fatal("display changed digests")
+			}
+		})
+	}
+}
+
+func TestCLILintInvalidGateInputs(t *testing.T) {
+	for _, path := range []string{".swarm/config.yaml", ".swarm/workflows/feature.yaml"} {
+		t.Run(path, func(t *testing.T) {
+			f := newCLIFixture(t)
+			n := f.create(t, "none")
+			full := filepath.Join(f.root, path)
+			raw, err := os.ReadFile(full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = regexp.MustCompile(`(?m)^default_gate:.*$`).ReplaceAll(raw, []byte("default_gate: invalid"))
+			if err := os.WriteFile(full, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := f.run("issue", "lint", strconv.Itoa(n), "--json")
+			if err == nil || strings.Contains(out, `"status": "valid"`) {
+				t.Fatalf("invalid policy accepted: %s %v", out, err)
+			}
+		})
+	}
+}
+
+func TestCLILintAbsentTaskGateDisplay(t *testing.T) {
+	f := newCLIFixture(t)
+	n := f.create(t, "none")
+	issue, err := f.tracker.GetIssue(context.Background(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Replace(issue.Body, "### Plan Gate\n\nnone\n", "", 1)
+	if body == issue.Body {
+		t.Fatal("fixture gate section not found")
+	}
+	if _, err := f.tracker.UpdateIssueBody(context.Background(), n, body); err != nil {
+		t.Fatal(err)
+	}
+	out := f.must(t, "issue", "lint", strconv.Itoa(n), "--json")
+	var got struct {
+		EffectiveGate string             `json:"effective_gate"`
+		WorkUnit      *contract.WorkUnit `json:"work_unit"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.EffectiveGate != "agent" || got.WorkUnit.Gate != "" {
+		t.Fatalf("gate serialization changed: %s", out)
+	}
+	out = f.must(t, "issue", "lint", strconv.Itoa(n))
+	if !strings.Contains(out, "gate=agent") || !strings.Contains(out, "task_gate=none") {
+		t.Fatal(out)
+	}
+}

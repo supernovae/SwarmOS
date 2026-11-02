@@ -9,6 +9,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 // CleanupInspection describes one resource without updating the index or refs.
@@ -130,25 +131,43 @@ func InspectCleanupWorktree(ctx context.Context, root, path, branch, expected st
 	if tip != "" && tip != expected {
 		return fail("local branch advanced since submission: " + tip)
 	}
-	// Enumerate tracked changes separately so managed paths never excuse them.
-	for _, args := range [][]string{{"diff", "--cached", "--name-only", "-z", "HEAD", "--"}, {"diff", "--name-only", "-z", "HEAD", "--"}, {"ls-files", "--others", "--exclude-standard", "-z"}, {"ls-files", "--others", "--ignored", "--exclude-standard", "-z"}} {
+	staged, err := cleanupOutput(ctx, path, "ls-files", "--stage", "-z")
+	if err != nil {
+		return fail("index inspection failed")
+	}
+	var tracked []string
+	for _, entry := range strings.Split(staged, "\x00") {
+		if strings.HasPrefix(entry, "160000 ") {
+			return fail("submodule is retained: " + entry)
+		}
+		if entry != "" {
+			_, name, ok := strings.Cut(entry, "\t")
+			if !ok {
+				return fail("invalid index entry")
+			}
+			tracked = append(tracked, name)
+		}
+	}
+	// Tracked changes and non-ignored untracked files remain unconditional blockers.
+	for i, args := range [][]string{{"diff", "--cached", "--name-only", "-z", "HEAD", "--"}, {"diff", "--name-only", "-z", "HEAD", "--"}, {"ls-files", "--others", "--exclude-standard", "-z"}, {"ls-files", "--others", "--ignored", "--exclude-standard", "-z"}} {
 		out, err := cleanupOutput(ctx, path, args...)
 		if err != nil {
 			return fail("cleanliness inspection failed")
 		}
 		for _, name := range strings.Split(out, "\x00") {
-			if name != "" && (args[0] == "diff" || !cleanupManaged(name)) {
-				return fail(fmt.Sprintf("blocking path %q", name))
+			if name == "" || i >= 2 && cleanupManaged(name) {
+				continue
 			}
-		}
-	}
-	staged, err := cleanupOutput(ctx, path, "ls-files", "--stage", "-z")
-	if err != nil {
-		return fail("index inspection failed")
-	}
-	for _, entry := range strings.Split(staged, "\x00") {
-		if strings.HasPrefix(entry, "160000 ") {
-			return fail("submodule is retained: " + entry)
+			if i == 3 {
+				admitted, err := cleanupIgnoredBuildPath(path, name, tracked)
+				if err != nil {
+					return fail(err.Error())
+				}
+				if admitted {
+					continue
+				}
+			}
+			return fail(fmt.Sprintf("blocking path %q", name))
 		}
 	}
 	// Walk also catches nested repositories, symlinks and special managed artifacts.
@@ -179,6 +198,47 @@ func InspectCleanupWorktree(ctx context.Context, root, path, branch, expected st
 	r.Eligible = true
 	r.Reason = "verified merged submitted tip"
 	return r
+}
+
+// cleanupIgnoredBuildPath inspects components without following links. Every
+// recognized ancestor must be free of tracked content, including outer ones.
+func cleanupIgnoredBuildPath(root, name string, tracked []string) (bool, error) {
+	name = strings.TrimSuffix(name, "/")
+	if !filepath.IsLocal(name) {
+		return false, fmt.Errorf("unsafe ignored path %q", name)
+	}
+	parts := strings.Split(name, "/")
+	pinned, err := safefs.Open(root)
+	if err != nil {
+		return false, fmt.Errorf("inspect ignored path %q: %w", name, err)
+	}
+	defer pinned.Close()
+	current := ""
+	admitted := false
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := pinned.Lstat(current)
+		if err != nil {
+			return false, fmt.Errorf("inspect ignored path %q: %w", name, err)
+		}
+		if info.IsDir() && (sandbox.IsEphemeralBuildDir(part) || part == "dist") {
+			dir := strings.Join(parts[:i+1], "/")
+			for _, path := range tracked {
+				if strings.HasPrefix(path, dir+"/") {
+					return false, fmt.Errorf("blocking ignored path %q: directory %q contains tracked path %q", name, dir, path)
+				}
+			}
+			admitted = true
+		}
+		// Git enumerates symlinks as leaves. Never inspect their targets.
+		if !info.IsDir() {
+			if i != len(parts)-1 {
+				return false, fmt.Errorf("unsafe ignored path component %q", current)
+			}
+			break
+		}
+	}
+	return admitted, nil
 }
 
 // RetireCleanupWorktree reinspects before removing disposable artifacts and invoking Git.

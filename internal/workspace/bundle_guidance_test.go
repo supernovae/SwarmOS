@@ -83,7 +83,7 @@ func guidanceWorkUnit(marker string) *contract.WorkUnit {
 
 func compileGuidance(t *testing.T, wt, base, role string, wu *contract.WorkUnit, arts []contract.Artifact) (string, string) {
 	t.Helper()
-	if err := CompileHarnessBundleAt(wt, wu, &contract.WorkflowSpec{Name: "feature"}, arts, role, base); err != nil {
+	if err := CompileHarnessBundleAt(wt, wu, &contract.WorkflowSpec{Name: "feature"}, arts, role, contract.GateNone, base); err != nil {
 		t.Fatal(err)
 	}
 	return readActive(t, wt, "SYSTEM_PROMPT.md"), readActive(t, wt, "WORKUNIT.md")
@@ -361,7 +361,7 @@ func TestBundleGuidanceCleanupFailsClosed(t *testing.T) {
 			if err := os.Symlink(linkTo, target); err != nil {
 				t.Skip(err)
 			}
-			if err := CompileHarnessBundleAt(repo, guidanceWorkUnit("second"), &contract.WorkflowSpec{Name: "feature"}, nil, "developer", base); err == nil {
+			if err := CompileHarnessBundleAt(repo, guidanceWorkUnit("second"), &contract.WorkflowSpec{Name: "feature"}, nil, "developer", contract.GateNone, base); err == nil {
 				t.Fatal("symlinked guidance accepted")
 			}
 			if readActive(t, repo, "SYSTEM_PROMPT.md") != before {
@@ -393,9 +393,9 @@ func TestBundleWorkUnitAndOrdering(t *testing.T) {
 				}
 				var err error
 				if pr > 0 {
-					err = CompilePRHarnessBundleAt(repo, wu, &contract.WorkflowSpec{Name: "feature"}, arts, role, base, pr, &RevisionPlanContext{})
+					err = CompilePRHarnessBundleAt(repo, wu, &contract.WorkflowSpec{Name: "feature"}, arts, role, contract.GateNone, base, pr, &RevisionPlanContext{})
 				} else {
-					err = CompileHarnessBundleAt(repo, wu, &contract.WorkflowSpec{Name: "feature"}, arts, role, base)
+					err = CompileHarnessBundleAt(repo, wu, &contract.WorkflowSpec{Name: "feature"}, arts, role, contract.GateNone, base)
 				}
 				if err != nil {
 					t.Fatal(err)

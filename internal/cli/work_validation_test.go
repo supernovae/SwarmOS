@@ -1005,6 +1005,13 @@ func recoveryCommandFixture(t *testing.T, backend, gate string, limit int, setup
 	for _, fn := range setup {
 		fn(f)
 	}
+	cfg := prepareRecoveryPolicy(t, f, limit)
+	return recoveryCommandFixturePrepared(t, backend, gate, f, cfg)
+}
+
+// prepareRecoveryPolicy builds immutable repository inputs before any issue or claim exists.
+func prepareRecoveryPolicy(t *testing.T, f *cliFixture, limit int) *contract.SwarmConfig {
+	t.Helper()
 	cfg, err := harness.LoadConfig(f.root)
 	if err != nil {
 		t.Fatal(err)
@@ -1024,6 +1031,12 @@ func recoveryCommandFixture(t *testing.T, backend, gate string, limit int, setup
 	}
 	prGit(t, f.root, "add", ".")
 	prGit(t, f.root, "commit", "-m", "recovery test policy")
+	return cfg
+}
+
+func recoveryCommandFixturePrepared(t *testing.T, backend, gate string, f *cliFixture, cfg *contract.SwarmConfig) (*cliFixture, int, *continuationRunner, *string, func(...string) (string, error)) {
+	t.Helper()
+	var err error
 	n := f.create(t, gate)
 	var tr tracker.Tracker = f.tracker
 	if backend == "github" {
@@ -1539,6 +1552,28 @@ echo FAIL; printf 'FAIL\texample.com/m/broken\t0.01s\n'; exit 1
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
+	// Share only committed, root-independent policy inputs. Every leaf copies
+	// regular files into its own root and creates its own tracker/store/claims.
+	seeds := map[string]string{}
+	for _, kind := range []string{"pre-existing", "regression", "mixed"} {
+		for limit := 0; limit <= 2; limit++ {
+			seed := newCLIFixture(t)
+			writeWorker := func(path, body string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(seed.root, path), []byte(body), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeWorker("classification.txt", kind)
+			writeWorker(".swarm/validation/required-checks.yaml", "required_checks:\n  - name: test\n    command: go test -count=1 ./...\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n")
+			prepareRecoveryPolicy(t, seed, limit)
+			if err := inspectCLISeed(seed.root); err != nil {
+				t.Fatal(err)
+			}
+			seeds[kind+strconv.Itoa(limit)] = seed.root
+		}
+	}
+
 	for _, backend := range []string{"local", "github"} {
 		for _, next := range []bool{false, true} {
 			for _, kind := range []string{"pre-existing", "regression", "mixed"} {
@@ -1554,15 +1589,18 @@ echo FAIL; printf 'FAIL\texample.com/m/broken\t0.01s\n'; exit 1
 							if budget == "zero" {
 								limit = 0
 							}
-							f, n, _, _, run := recoveryCommandFixture(t, backend, "none", limit, func(f *cliFixture) {
-								if err := os.WriteFile(filepath.Join(f.root, "classification.txt"), []byte(kind), 0644); err != nil {
-									t.Fatal(err)
-								}
-								policy := "required_checks:\n  - name: test\n    command: go test -count=1 ./...\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n"
-								if err := os.WriteFile(filepath.Join(f.root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0644); err != nil {
-									t.Fatal(err)
-								}
-							})
+							root := t.TempDir()
+							if err := copyCLISeed(root, seeds[kind+strconv.Itoa(limit)]); err != nil {
+								t.Fatal(err)
+							}
+							cfg, err := harness.LoadConfig(root)
+							if err != nil {
+								t.Fatal(err)
+							}
+							tr := tracker.NewLocalTracker(root).WithUser("alice", "")
+							f := &cliFixture{root: root, tracker: tr, env: newFixtureEnv(t)}
+							f.env.set("SWARM_USER", "alice")
+							f, n, _, _, run := recoveryCommandFixturePrepared(t, backend, "none", f, cfg)
 							number := strconv.Itoa(n)
 							must := func(args ...string) {
 								t.Helper()

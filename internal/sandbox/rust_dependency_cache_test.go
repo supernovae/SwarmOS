@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
@@ -14,11 +15,91 @@ import (
 	"testing"
 )
 
+// discoverTestRust probes from neutral scratch with the same hardened settings
+// used by prefetch. Listing installed toolchains never installs a new one.
+func discoverTestRust(ctx context.Context, cargo, rustup, home, toolchain, scratch string) (string, error) {
+	probe := func(selection string) error {
+		env := cargoPrefetchEnv(func(k string) string {
+			if k == "RUSTUP_TOOLCHAIN" {
+				return selection
+			}
+			return os.Getenv(k)
+		}, scratch, filepath.Join(scratch, "cargo"), home)
+		cmd := exec.CommandContext(ctx, cargo, "--version")
+		cmd.Dir, cmd.Env = scratch, env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("cargo --version: %w (%s)", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	first := probe(toolchain)
+	if first == nil {
+		return toolchain, nil
+	}
+	if rustup == "" {
+		return "", first
+	}
+	cmd := exec.CommandContext(ctx, rustup, "toolchain", "list")
+	cmd.Dir = scratch
+	cmd.Env = cargoPrefetchEnv(os.Getenv, scratch, filepath.Join(scratch, "cargo"), home)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%v; rustup toolchain list: %w (%s)", first, err, strings.TrimSpace(string(out)))
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] == "no" {
+			continue
+		}
+		if err := probe(fields[0]); err == nil {
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("%v; no runnable installed rustup toolchain", first)
+}
+
 func requireCargo(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("cargo"); err != nil {
-		t.Skip("cargo is not on PATH")
+	cargo, err := exec.LookPath("cargo")
+	if err != nil {
+		t.Skipf("cargo prerequisite unavailable: %v", err)
 	}
+	rustup, _ := exec.LookPath("rustup")
+	installedCargo := cargo
+	if resolved, err := filepath.EvalSymlinks(cargo); err == nil {
+		installedCargo = resolved
+	}
+	if rustup == "" {
+		candidate := filepath.Join(filepath.Dir(installedCargo), "rustup")
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+			rustup = candidate
+		}
+	}
+	home := os.Getenv("RUSTUP_HOME")
+	if home == "" {
+		// A rustup proxy normally lives in <home>/.cargo/bin. Resolve the
+		// installation before HOME is replaced, including an already overridden HOME.
+		for _, binary := range []string{installedCargo, rustup, cargo} {
+			bin := filepath.Dir(binary)
+			if filepath.Base(bin) == "bin" && filepath.Base(filepath.Dir(bin)) == ".cargo" {
+				home = filepath.Join(filepath.Dir(filepath.Dir(bin)), ".rustup")
+				break
+			}
+		}
+		if home == "" {
+			if user, err := os.UserHomeDir(); err == nil {
+				home = filepath.Join(user, ".rustup")
+			}
+		}
+	}
+	selection, err := discoverTestRust(t.Context(), cargo, rustup, home, os.Getenv("RUSTUP_TOOLCHAIN"), resolvedTempDir(t))
+	if err != nil {
+		t.Skipf("cargo prerequisite unavailable: %v", err)
+	}
+	t.Setenv("RUSTUP_HOME", home)
+	t.Setenv("RUSTUP_TOOLCHAIN", selection)
+	t.Setenv("RUSTUP_AUTO_INSTALL", "0")
 }
 
 // sentinelBuildScript writes a build.rs that records it ran at sentinel.
@@ -448,6 +529,100 @@ func TestCargoCacheHoldsNoConfigOrCredentials(t *testing.T) {
 			deps, err := PrepareDependencyCaches(t.Context(), AgentDependencyCache, repo, base, userCache, PerRepository)
 			if err == nil || len(deps.Caches) != 0 || !strings.Contains(err.Error(), name) {
 				t.Fatalf("PrepareDependencyCaches = %+v, %v; want an error naming %s", deps, err, name)
+			}
+		})
+	}
+}
+
+func TestRustPrerequisiteDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name, explicit                                                      string
+		proxy, defaultSelection, broken, overrideHome, linked, explicitHome bool
+	}{
+		{name: "direct cargo"},
+		{name: "rustup default", proxy: true, defaultSelection: true},
+		{name: "installed without default", proxy: true},
+		{name: "valid explicit selection", proxy: true, explicit: "stable-test"},
+		{name: "overridden HOME", proxy: true, overrideHome: true},
+		{name: "proxy symlink", proxy: true, overrideHome: true, linked: true},
+		{name: "explicit rustup home", proxy: true, overrideHome: true, explicitHome: true},
+		{name: "unusable rustup proxy", proxy: true, broken: true},
+		{name: "unusable cargo", broken: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			install := resolvedTempDir(t)
+			bin := filepath.Join(install, ".cargo", "bin")
+			home := filepath.Join(install, ".rustup")
+			if tc.explicitHome {
+				home = filepath.Join(install, "custom-rustup")
+			}
+			if err := os.MkdirAll(bin, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(home, 0755); err != nil {
+				t.Fatal(err)
+			}
+			body := "#!/bin/sh\n[ \"$RUSTUP_AUTO_INSTALL\" = 0 ] || exit 9\n"
+			if tc.broken {
+				body += "echo broken-cargo >&2; exit 1\n"
+			} else if tc.proxy {
+				body += "[ \"$RUSTUP_HOME\" = " + strconv.Quote(home) + " ] || exit 8\n"
+				body += "[ \"$RUSTUP_TOOLCHAIN\" = stable-test ]"
+				if tc.defaultSelection {
+					body += " || [ -z \"$RUSTUP_TOOLCHAIN\" ]"
+				}
+				body += " || { echo no-default-toolchain >&2; exit 1; }\necho cargo-test\n"
+			} else {
+				body += "echo cargo-direct\n"
+			}
+			cargo := filepath.Join(bin, "cargo")
+			if err := testutil.WriteExecutable(cargo, []byte(body), 0755); err != nil {
+				t.Fatal(err)
+			}
+			rustup := ""
+			if tc.proxy {
+				rustup = filepath.Join(bin, "rustup")
+				if err := testutil.WriteExecutable(rustup, []byte("#!/bin/sh\necho 'stable-test (installed)'\n"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("RUSTUP_TOOLCHAIN", tc.explicit)
+			t.Setenv("RUSTUP_HOME", "")
+			if tc.explicitHome {
+				t.Setenv("RUSTUP_HOME", home)
+			}
+			if tc.overrideHome {
+				t.Setenv("HOME", resolvedTempDir(t))
+			}
+			got, err := discoverTestRust(t.Context(), cargo, rustup, home, tc.explicit, resolvedTempDir(t))
+			if tc.broken {
+				if err == nil || !strings.Contains(err.Error(), "broken-cargo") {
+					t.Fatalf("missing prerequisite failure: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.explicit != "" && got != tc.explicit {
+				t.Fatalf("explicit selection changed: %q", got)
+			}
+			if tc.proxy && !tc.defaultSelection && got != "stable-test" {
+				t.Fatalf("installed selection = %q", got)
+			}
+			// Exercise installation discovery and its survival across HOME replacement.
+			if tc.linked {
+				alias := resolvedTempDir(t)
+				if err := os.Symlink(cargo, filepath.Join(alias, "cargo")); err != nil {
+					t.Fatal(err)
+				}
+				bin = alias
+			}
+			t.Setenv("PATH", bin)
+			requireCargo(t)
+			hostRustEnv(t)
+			if tc.proxy && os.Getenv("RUSTUP_HOME") != home {
+				t.Fatal("lost installation after HOME replacement")
 			}
 		})
 	}

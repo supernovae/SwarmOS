@@ -30,6 +30,40 @@ func TestCodexBrowserPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Decode the complete generated configuration so extra servers or approval
+	// grants cannot hide behind a matching substring.
+	var config struct {
+		ApprovalPolicy string `toml:"approval_policy"`
+		MCPServers     map[string]struct {
+			EnabledTools    []string `toml:"enabled_tools"`
+			DefaultApproval string   `toml:"default_tools_approval_mode"`
+			Tools           map[string]struct {
+				ApprovalMode string `toml:"approval_mode"`
+			} `toml:"tools"`
+		} `toml:"mcp_servers"`
+	}
+	var settings []string
+	for i, arg := range policy {
+		if i > 0 && policy[i-1] == "-c" {
+			settings = append(settings, arg)
+		}
+	}
+	if _, err := toml.Decode(strings.Join(settings, "\n"), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.ApprovalPolicy != "never" || len(config.MCPServers) != 1 {
+		t.Fatalf("unexpected approval policy or servers: %+v", config)
+	}
+	server, ok := config.MCPServers["swarm"]
+	wantTools := []string{"swarm_read", "swarm_write", "swarm_edit", "swarm_shell"}
+	if !ok || server.DefaultApproval != "" || !reflect.DeepEqual(server.EnabledTools, wantTools) || len(server.Tools) != len(wantTools) {
+		t.Fatalf("unexpected server approvals: %+v", config.MCPServers)
+	}
+	for _, name := range wantTools {
+		if server.Tools[name].ApprovalMode != "approve" {
+			t.Fatalf("tool %s is not pre-approved: %+v", name, server.Tools)
+		}
+	}
 	changes := 0
 	for i := range base {
 		if base[i] != policy[i] {

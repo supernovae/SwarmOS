@@ -45,7 +45,9 @@ func codexBrowserPolicy(policy []string, executable, home string, executor ToolE
 	for i, arg := range args {
 		quoted[i] = strconv.Quote(arg)
 	}
-	setting := `mcp_servers={swarm={command="/usr/bin/env",args=[` + strings.Join(quoted, ",") + `],env_vars=[],required=true,startup_timeout_sec=20,tool_timeout_sec=150,enabled_tools=["swarm_read","swarm_write","swarm_edit","swarm_shell"]}}`
+	// Codex 0.166.0 requires explicit MCP approval even with approval_policy=never.
+	// Grant it per tool; future tools on this server must not inherit approval.
+	setting := `mcp_servers={swarm={command="/usr/bin/env",args=[` + strings.Join(quoted, ",") + `],env_vars=[],required=true,startup_timeout_sec=20,tool_timeout_sec=150,enabled_tools=["swarm_read","swarm_write","swarm_edit","swarm_shell"],tools={swarm_read={approval_mode="approve"},swarm_write={approval_mode="approve"},swarm_edit={approval_mode="approve"},swarm_shell={approval_mode="approve"}}}}`
 	result := append([]string(nil), policy...)
 	for i, arg := range result {
 		if arg == "mcp_servers={}" {

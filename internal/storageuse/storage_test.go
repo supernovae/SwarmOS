@@ -1351,3 +1351,38 @@ func TestCompactAdmissionExclusionAndCancellation(t *testing.T) {
 	}
 	guard.Close()
 }
+
+func TestCompactFinishedEvidencePreservesEmptyCoverage(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	u, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = u.Finish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	v, err := m.read(u.key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Evidence = map[string]*useEvidence{u.token: {Consumers: map[string]ProcessIdentity{"finished": {}}}}
+	if err = m.write(u.key, v); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := m.Compact(ctx, r); err != nil || !changed {
+		t.Fatalf("compact: %v %v", changed, err)
+	}
+	after, err := m.read(u.key, r)
+	if err != nil {
+		t.Fatalf("#418 validation rejected compacted empty coverage: %v", err)
+	}
+	if after.Uses == nil || len(after.Uses) != 0 || len(after.Evidence) != 0 || !after.CompleteCoverage || !after.Created.Equal(v.Created) || !after.LastUse.Equal(v.LastUse) {
+		t.Fatalf("compaction changed coverage or metadata: %+v", after)
+	}
+	guard, err := m.AcquireMaintenance(ctx, r)
+	if err != nil {
+		t.Fatalf("empty completed coverage lost maintenance eligibility: %v", err)
+	}
+	guard.Close()
+}

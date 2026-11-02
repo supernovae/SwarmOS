@@ -102,11 +102,10 @@ func checkCodexBrowserCatalog(raw json.RawMessage) error {
 		switch tool.Type {
 		case "function", "custom":
 			switch tool.Name {
-			case "shell", "local_shell", "exec_command", "write_stdin", "apply_patch", "update_plan", "request_user_input", "view_image":
+			case "exec_command", "write_stdin", "view_image", "request_user_input", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource":
 			default:
 				return fmt.Errorf("unexpected top-level tool %q", tool.Name)
 			}
-		case "local_shell", "web_search", "web_search_preview", "image_generation":
 		default:
 			return fmt.Errorf("unexpected tool type %q", tool.Type)
 		}
@@ -123,7 +122,18 @@ func TestCodexBrowserProviderCatalog(t *testing.T) {
 		name, catalog string
 		valid         bool
 	}{
-		{"owned and native", `[` + owned + `,{"type":"function","name":"exec_command"},{"type":"custom","name":"apply_patch"}]`, true},
+		{"owned and native", `[` + owned + `,{"type":"function","name":"exec_command"},{"type":"function","name":"write_stdin"},{"type":"function","name":"view_image"},{"type":"function","name":"request_user_input"},{"type":"function","name":"list_mcp_resources"},{"type":"function","name":"list_mcp_resource_templates"},{"type":"function","name":"read_mcp_resource"}]`, true},
+		{"reject shell function", `[` + owned + `,{"type":"function","name":"shell"}]`, false},
+		{"reject local_shell function", `[` + owned + `,{"type":"function","name":"local_shell"}]`, false},
+		{"reject apply_patch function", `[` + owned + `,{"type":"function","name":"apply_patch"}]`, false},
+		{"reject update_plan function", `[` + owned + `,{"type":"function","name":"update_plan"}]`, false},
+		{"reject web_search function", `[` + owned + `,{"type":"function","name":"web_search"}]`, false},
+		{"reject web_search_preview function", `[` + owned + `,{"type":"function","name":"web_search_preview"}]`, false},
+		{"reject image_generation function", `[` + owned + `,{"type":"function","name":"image_generation"}]`, false},
+		{"reject local_shell type", `[` + owned + `,{"type":"local_shell"}]`, false},
+		{"reject web_search type", `[` + owned + `,{"type":"web_search"}]`, false},
+		{"reject web_search_preview type", `[` + owned + `,{"type":"web_search_preview"}]`, false},
+		{"reject image_generation type", `[` + owned + `,{"type":"image_generation"}]`, false},
 		{"missing", `[]`, false},
 		{"duplicate namespace", `[` + owned + `,` + owned + `]`, false},
 		{"foreign namespace", `[` + owned + `,{"type":"namespace","name":"mcp__host","tools":[]}]`, false},
@@ -171,12 +181,12 @@ func TestCodexBrowserRealTools(t *testing.T) {
 			var calls atomic.Int32
 			var catalog atomic.Bool
 			var providerTools process.Output
-			var out process.Output
+			var out, stderr process.Output
 			var runErr error
 			t.Cleanup(func() {
 				if t.Failed() {
-					t.Logf("Codex result: %v; provider requests: %d\nCodex stdout/stderr (tail):\n%s\nMCP server stderr (tail):\n%s\nProvider tool catalogs (tail):\n%s",
-						runErr, calls.Load(), codexBrowserLogTail(out.String()), codexBrowserFileTail(serverLog), codexBrowserLogTail(providerTools.String()))
+					t.Logf("Codex result: %v; provider requests: %d\nCodex stdout (tail):\n%s\nCodex stderr (tail):\n%s\nMCP server stderr (tail):\n%s\nProvider tool catalogs (tail):\n%s",
+						runErr, calls.Load(), codexBrowserLogTail(out.String()), codexBrowserLogTail(stderr.String()), codexBrowserFileTail(serverLog), codexBrowserLogTail(providerTools.String()))
 				}
 			})
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -280,7 +290,7 @@ func TestCodexBrowserRealTools(t *testing.T) {
 				}()
 			}
 			env := append(nativeEnv(home, false, Dependencies{}), "RUST_LOG=codex_rmcp_client=debug,codex_core=info", "GH_TOKEN=synthetic-coordinator", "OPENAI_API_KEY=synthetic-provider", "SWARM_GITHUB_TOKEN_COMMAND=synthetic-command")
-			runErr = runNativeCommand(ctx, binary, work, env, args, nil, &out, &out)
+			runErr = runNativeCommand(ctx, binary, work, env, args, nil, &out, &stderr)
 			// Codex and its MCP child must both finish before the launcher returns.
 			pidBytes, pidErr := os.ReadFile(filepath.Join(control, "pid"))
 			if pidErr != nil {

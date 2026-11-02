@@ -164,7 +164,10 @@ func PreflightWithOptions(name string, cfg *contract.SwarmConfig, local bool, ro
 			return "", err
 		}
 		detail := "native:codex " + version + "; " + auth + " present; filesystem/network canaries passed; MCP, plugins and hooks disabled; interactive and unattended"
-		if cfg.Execution.BrowserProfile {
+		if sandbox.CodexBrowserEligible(cfg.Execution.BrowserProfile, role, role == "planner" || role == "reviewer") {
+			detail = strings.Replace(detail, "MCP, plugins and hooks disabled", "owned swarm MCP browser transport; external MCP, plugins and hooks disabled", 1)
+			detail += "; browser profile available through swarm_shell (private loopback)"
+		} else if cfg.Execution.BrowserProfile {
 			detail += "; browser profile requested/available through Bubblewrap validation"
 		}
 		return detail, nil

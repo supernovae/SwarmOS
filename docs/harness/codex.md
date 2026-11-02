@@ -38,7 +38,7 @@ Linux native isolated Go commands and worker checks use `GOMAXPROCS=2` and `GOFL
 - **Files.** Tools see a detached task snapshot, private scratch space, and Codex's minimal system runtime files. Live Git metadata, coordinator state, host credential stores, and autoloaded `.codex` and `.agents` directories are left out.
 - **Shell.** Commands run in Codex's Linux sandbox with a clean environment. Provider and publishing tokens are filtered out, and tool networking is disabled.
 - **Permissions.** Pairing and unattended runs use the same profile. Allowed commands run without prompts, and requests to escalate are denied.
-- **Disabled.** User configuration and rules, MCP, plugins, hooks, browser tools, and subagents.
+- **Disabled.** User configuration and rules, external MCP servers, plugins, hooks, built-in browser tools, and subagents. The approved browser profile adds one SwarmOS-owned MCP server for developer and tester runs.
 - **Checks before work.** SwarmOS tests outside-file, symlink, write, and loopback canaries, and confirms the required `codex exec` flags exist.
 
 The Codex process and its internal tool dispatcher run on the host and are trusted. The boundary protects against agent-directed tools, not a compromised Codex binary. Each unattended phase defaults to a 60-minute agent budget with bounded imports, but no CPU, memory, or disk quotas. Use the OCI backend if you need those.
@@ -73,6 +73,27 @@ Codex's [permission profiles](https://learn.chatgpt.com/docs/permissions) are st
 Agent budgets default to 60 minutes and can be configured globally or per role in [approved execution policy](../project.md#agent-run-budgets). Interactive native sessions count working time across turns, exclude waits for coordinator input, and have a four-hour wall cap. A warning appears before the deadline. On timeout, native Codex and harness-tools Bubblewrap preserve a bounded recovery patch for [manual inspection](../developer.md#recovering-from-an-interrupted-run). Interactive OCI counts wall time without idle exclusion, and OCI has no timeout patch export. Individual tool-call limits remain separate.
 
 
-### Browser checks through validation
+### Browser checks
 
-With approved-base `execution.browser_profile: true`, native required checks use the Linux Bubblewrap browser executor even when the tester is Codex. Configure a check that starts the preview server and cached Playwright Chromium in one command and writes its DOM, screenshot and logs to files. Codex's shell keeps its existing sandbox; the browser profile applies through validation. See [host prerequisites and the example](../project.md#task-local-browser-previews).
+With approved-base `execution.browser_profile: true`, native required checks use the Linux Bubblewrap browser executor even when the tester is Codex. Configure a check that starts the preview server and cached Playwright Chromium in one command and writes its DOM, screenshot and logs to files. Native Linux Codex developer and tester runs also receive the four `swarm_*` tools over an owned stdio MCP connection. Use `swarm_shell` for browser checks; native shell networking stays disabled. Planner and reviewer runs keep MCP disabled. The server starts with a clean environment without provider or coordinator credentials. See [host prerequisites and the example](../project.md#task-local-browser-previews).
+
+Start the preview and browser in a single `swarm_shell` call. Paths inside that executor use `/workspace`; background processes end when the call finishes. For example, with the project dependencies already installed:
+
+```bash
+npm run dev -- --host 127.0.0.1 > preview.log 2>&1 &
+preview=$!
+trap 'kill "$preview" 2>/dev/null || true' EXIT
+node - <<'JS'
+const { chromium } = require('playwright');
+(async () => {
+  const browser = await chromium.launch({headless: true, args: ['--no-sandbox']});
+  const page = await browser.newPage();
+  await page.goto('http://127.0.0.1:5173', {waitUntil: 'networkidle'});
+  require('fs').writeFileSync('page.html', await page.content());
+  await page.screenshot({path: 'page.png'});
+  await browser.close();
+})();
+JS
+```
+
+Use your preview's readiness check before launching Chromium. If preflight reports an unavailable browser profile, provision Bubblewrap, systemd 254+, cgroup v2 memory control and cached Chromium as described in the linked host guide. Server startup or protocol errors stop the run; they do not enable native networking.

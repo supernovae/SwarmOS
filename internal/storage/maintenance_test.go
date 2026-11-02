@@ -592,3 +592,100 @@ func TestMaintenanceAggregateAccountingOverflow(t *testing.T) {
 		t.Fatal("aggregate overflow wrapped or became complete", s.out, s.physical)
 	}
 }
+
+func TestMaintenanceIdentityLimitIsAdvisory(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(fmt.Sprint(pending), func(t *testing.T) {
+			o, m, r := maintenanceFixture(t)
+			o.Limits = DefaultLimits()
+			o.Limits.Identities = 1
+			o.allocation = func(_ os.FileInfo, _ int64) int64 { return 4096 }
+			pendingSibling := storageuse.ResourceFor(r.Repository, r.Class, filepath.Join(filepath.Dir(r.Location), "rust"))
+			siblingUse, siblingErr := m.AcquireUse(context.Background(), pendingSibling)
+			if siblingErr != nil {
+				t.Fatal(siblingErr)
+			}
+			t.Cleanup(func() { siblingUse.Finish(context.Background()) })
+			put(t, filepath.Join(pendingSibling.Location, "sentinel"), "pending")
+			unknown := filepath.Join(filepath.Dir(r.Location), "c-cpp")
+			put(t, filepath.Join(unknown, "sentinel"), "unknown")
+			if pending {
+				u, err := m.AcquireUse(context.Background(), r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { u.Finish(context.Background()) })
+			}
+			summary, _, err := Maintain(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary.Complete {
+				t.Fatal("partial accounting reported complete")
+			}
+			_, err = os.Stat(r.Location)
+			if pending && err != nil {
+				t.Fatal("pending cache removed", err)
+			}
+			if !pending && !os.IsNotExist(err) {
+				t.Fatal("finished cache retained at identity limit", summary, err)
+			}
+			for _, path := range []string{pendingSibling.Location, unknown} {
+				if _, err := os.Stat(filepath.Join(path, "sentinel")); err != nil {
+					t.Fatal("protected cache removed", err)
+				}
+			}
+			if summary.RemovedNamespaceBytes > summary.ObservedBytes || summary.ProtectedBytes < 0 {
+				t.Fatal(summary)
+			}
+		})
+	}
+}
+
+func TestMaintenanceIdentityLimitAdmissionWins(t *testing.T) {
+	o, m, r := maintenanceFixture(t)
+	o.Limits = DefaultLimits()
+	o.Limits.Identities = 1
+	o.allocation = func(_ os.FileInfo, _ int64) int64 { return 4096 }
+	o.Retention = retentionFixture(func(ctx context.Context, _ RepositoryScope, visit func(RetentionEvidence) error) error {
+		u, err := m.AcquireUse(ctx, r)
+		if err != nil {
+			return err
+		}
+		t.Cleanup(func() { u.Finish(context.Background()) })
+		return visit(RetentionEvidence{Complete: true, Stable: true})
+	})
+	summary, _, err := Maintain(context.Background(), o)
+	if err != nil || summary.RemovedNamespaceBytes != 0 {
+		t.Fatal(summary, err)
+	}
+	if _, err := os.Stat(filepath.Join(r.Location, "data")); err != nil {
+		t.Fatal("admitted consumer lost cache", err)
+	}
+}
+
+func TestMaintenancePartialAccountingDeductsFreshLowerBound(t *testing.T) {
+	o, _, r := maintenanceFixture(t)
+	put(t, filepath.Join(r.Location, "extra"), "more cache")
+	o.Limits = DefaultLimits()
+	o.Limits.Identities = 2
+	o.allocation = func(_ os.FileInfo, _ int64) int64 { return 4096 }
+	o.Retention = retentionFixture(func(_ context.Context, _ RepositoryScope, visit func(RetentionEvidence) error) error {
+		for _, name := range []string{"data", "extra"} {
+			if err := os.Remove(filepath.Join(r.Location, name)); err != nil {
+				return err
+			}
+		}
+		return visit(RetentionEvidence{Complete: true, Stable: true})
+	})
+	summary, _, err := Maintain(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(r.Location); !os.IsNotExist(err) {
+		t.Fatal("eligible cache retained", err)
+	}
+	if summary.Complete || summary.ObservedBytes != 8192 || summary.RemovedNamespaceBytes != 4096 || summary.ProtectedBytes != 4096 {
+		t.Fatal("unmeasured savings deducted", summary)
+	}
+}

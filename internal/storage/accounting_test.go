@@ -142,3 +142,21 @@ func TestUsageExhaustionPreservesDiscovery(t *testing.T) {
 		t.Fatalf("scanner %+v resource %+v", s.out, r)
 	}
 }
+
+func TestAccountingIdentityLimitPreservesSuccessiveDiscovery(t *testing.T) {
+	opts := fixture(t)
+	s := reclaimScanner(context.Background(), ReclaimOptions{Limits: DefaultLimits()})
+	s.b.Limits.Identities = 1
+	for _, eco := range []string{"go", "rust", "c-cpp"} {
+		path := filepath.Join(opts.CacheRoot, "agent-build", "orphan", eco)
+		put(t, filepath.Join(path, "data"), "cache")
+		r := Resource{Path: path}
+		s.account(&r)
+		if !s.out.Complete || len(s.out.Reasons) != 0 || r.AllocatedBytes != nil || r.LogicalBytes == nil || r.UsageReason == "" {
+			t.Fatalf("discovery poisoned by accounting: %+v %+v", s.out, r)
+		}
+	}
+	if len(s.inodes) != 1 || s.physical {
+		t.Fatal("identity budget escaped", len(s.inodes), s.physical)
+	}
+}

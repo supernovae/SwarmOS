@@ -17,7 +17,11 @@ import (
 
 func isolateRuntimeControl(t *testing.T) {
 	t.Helper()
-	t.Setenv("XDG_CACHE_HOME", resolvedTempDir(t))
+	root := resolvedTempDir(t)
+	previous := storageuse.UserCacheDir
+	storageuse.UserCacheDir = func() (string, error) { return root, nil }
+	t.Cleanup(func() { storageuse.UserCacheDir = previous })
+	t.Setenv("XDG_CACHE_HOME", root)
 	if runtime.GOOS == "darwin" {
 		t.Setenv("HOME", resolvedTempDir(t))
 	}
@@ -196,6 +200,9 @@ func TestHarnessInspectionOrdinaryCompletionHasNoPendingUses(t *testing.T) {
 
 func TestNativeWorkspaceRejectsControlStorageInsideWorkspace(t *testing.T) {
 	source := t.TempDir()
+	previous := storageuse.UserCacheDir
+	storageuse.UserCacheDir = func() (string, error) { return filepath.Join(source, "cache"), nil }
+	t.Cleanup(func() { storageuse.UserCacheDir = previous })
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(source, "cache"))
 	if runtime.GOOS == "darwin" {
 		t.Setenv("HOME", source)

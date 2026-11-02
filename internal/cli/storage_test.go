@@ -478,6 +478,10 @@ func (t storageScaleTracker) VisitPullRequests(ctx context.Context, b tracker.In
 
 func storageScaleHost(t *testing.T, root string) string {
 	t.Helper()
+	ledger := t.TempDir()
+	previous := storageuse.UserCacheDir
+	storageuse.UserCacheDir = func() (string, error) { return ledger, nil }
+	t.Cleanup(func() { storageuse.UserCacheDir = previous })
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("TMPDIR", t.TempDir())
 	return storageScaleResource(t, root)

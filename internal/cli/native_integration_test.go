@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/storageuse"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,11 +28,37 @@ import (
 var cliParallelStartup cliTestParallelDecision
 
 func TestMain(m *testing.M) {
+	ledgerRoot, ledgerErr := os.MkdirTemp("", "swarm-test-ledger-*")
+	if ledgerErr != nil {
+		panic(ledgerErr)
+	}
+	ledgerRoot, ledgerErr = filepath.EvalSymlinks(ledgerRoot)
+	if ledgerErr != nil {
+		panic(ledgerErr)
+	}
+	storageuse.UserCacheDir = func() (string, error) { return ledgerRoot, nil }
+	checkLedger := func() error {
+		control, err := storageuse.ControlRoot()
+		return testutil.CheckStorageLedger(ledgerRoot, control, err)
+	}
+	ledgerExit := func(code int) {
+		if err := checkLedger(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			code = 1
+		}
+		os.RemoveAll(ledgerRoot)
+		os.Exit(code)
+	}
+	if err := checkLedger(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		ledgerExit(1)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "internal-tools" {
 		if err := NewRootCmd().Execute(); err != nil {
-			os.Exit(1)
+			ledgerExit(1)
 		}
-		os.Exit(0)
+		ledgerExit(0)
 	}
 	// Point every user directory at one temporary root before any test runs, so
 	// parallel tests write nothing under the real home, config, state, app-data
@@ -42,9 +69,9 @@ func TestMain(m *testing.M) {
 	root, err := os.MkdirTemp("", "swarm-test-home-*")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
-		os.Exit(1)
+		ledgerExit(1)
 	}
-	storageuse.UserCacheDir = os.UserCacheDir
+
 	maintenanceCacheDir = os.UserCacheDir
 	for _, dir := range []struct{ name, sub string }{
 		{"HOME", "home"},
@@ -57,12 +84,12 @@ func TestMain(m *testing.M) {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			fmt.Fprintln(os.Stderr, "TestMain:", err)
 			os.RemoveAll(root)
-			os.Exit(1)
+			ledgerExit(1)
 		}
 		if err := os.Setenv(dir.name, path); err != nil {
 			fmt.Fprintln(os.Stderr, "TestMain:", err)
 			os.RemoveAll(root)
-			os.Exit(1)
+			ledgerExit(1)
 		}
 	}
 	if !flag.Parsed() {
@@ -79,11 +106,15 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain: parallel policy:", err)
 		os.RemoveAll(root)
-		os.Exit(1)
+		ledgerExit(1)
 	}
 	code := m.Run()
+	if err := checkLedger(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
 	os.RemoveAll(root)
-	os.Exit(code)
+	ledgerExit(code)
 }
 
 // This opt-in test uses the operator's existing Codex login and model quota.
@@ -398,5 +429,43 @@ func TestCLITestParallelTestMain(t *testing.T) {
 		if err != nil || out.overflow {
 			t.Fatal("isolation child failed", err)
 		}
+	}
+}
+
+// Exercise the shared scratch producer used by coordinator workflows after a
+// test changes user directories; the package resolver must remain fixed.
+func TestStorageLedgerProducerIgnoresEnvironment(t *testing.T) {
+	control, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoy := t.TempDir()
+	t.Setenv("HOME", decoy)
+	t.Setenv("XDG_CACHE_HOME", decoy)
+	ctx, scope, err := storageuse.Ensure(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scope.Finish()
+	path, err := scope.TempDir(ctx, t.TempDir(), "producer-*", "review-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = scope.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	resource := storageuse.ResourceFor(scope.Repository(), "review-scratch", path)
+	observation, err := storageuse.Observe(ctx, control, resource, 16<<10, func(int64) error { return nil })
+	if err != nil || !observation.CompleteCoverage || observation.Active == nil || *observation.Active {
+		t.Fatalf("missing finished producer record: %+v %v", observation, err)
+	}
+	for _, candidate := range []string{filepath.Join(decoy, "swarm-use"), filepath.Join(decoy, "Library", "Caches", "swarm-use")} {
+		if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+			t.Fatalf("producer wrote decoy ledger: %s %v", candidate, err)
+		}
+	}
+	restored, err := storageuse.ControlRoot()
+	if err != nil || restored != control {
+		t.Fatal("resolver moved", restored, err)
 	}
 }

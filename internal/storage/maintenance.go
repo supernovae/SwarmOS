@@ -244,7 +244,7 @@ func maintenancePass(ctx context.Context, o MaintenanceOptions) (MaintenanceSumm
 		key := parts[1]
 		sc, ok := selected[key]
 		use := storageuse.ResourceFor(key, r.Class, r.Path)
-		if !ok || !reclaimLayout(ro, use, key) || r.Active == nil || *r.Active || r.LastUse == nil || r.LastUse.IsZero() || r.LastUse.After(o.Now) || o.Now.Sub(*r.LastUse) < o.Policy.IdleAge || r.AllocatedBytes == nil {
+		if !ok || !reclaimLayout(ro, use, key) || r.Active == nil || *r.Active || r.LastUse == nil || r.LastUse.IsZero() || r.LastUse.After(o.Now) || o.Now.Sub(*r.LastUse) < o.Policy.IdleAge {
 			continue
 		}
 		parent, e := openExisting(filepath.Dir(r.Path))
@@ -360,7 +360,8 @@ func splitPath(path string) []string {
 	return out
 }
 func removeMaintenanceUnit(ctx context.Context, s *scanner, ro ReclaimOptions, u maintenanceUnit, g *storageuse.Maintenance) (bool, int64, error) {
-	if !g.Observation().LastUse.Equal(*u.observed.LastUse) {
+	observation := g.Observation()
+	if !observation.CompleteCoverage || observation.Active == nil || *observation.Active || !observation.LastUse.Equal(*u.observed.LastUse) {
 		return false, 0, nil
 	}
 	root, e := openExisting(u.scope.CommonDirectory)
@@ -385,13 +386,14 @@ func removeMaintenanceUnit(ctx context.Context, s *scanner, ro ReclaimOptions, u
 	if e != nil || !os.SameFile(info, u.info) {
 		return false, 0, e
 	}
-	// Recheck accounting under exclusion. An incomplete observation never permits
-	// deletion, and retained units are never walked a second time.
+	// Recheck accounting under exclusion for advisory namespace deltas.
+	// Use coverage, retention and identity checks authorize deletion independently.
 	check := reclaimScanner(ctx, ReclaimOptions{Limits: s.b.Limits})
 	check.opts.allocation = s.opts.allocation
 	check.usageBudget = s.recheckBudget
-	before := usage(check, u.resource.Location)
-	if before.AllocatedBytes == nil || u.observed.AllocatedBytes == nil || *before.AllocatedBytes != *u.observed.AllocatedBytes {
+	before := Resource{Path: u.resource.Location}
+	check.account(&before)
+	if before.AllocatedBytes != nil && u.observed.AllocatedBytes != nil && *before.AllocatedBytes != *u.observed.AllocatedBytes {
 		return false, 0, nil
 	}
 	e = parent.RemoveAllCheckedContext(ctx, filepath.Base(u.resource.Location), info, func() error { return ctx.Err() })
@@ -401,5 +403,9 @@ func removeMaintenanceUnit(ctx context.Context, s *scanner, ro ReclaimOptions, u
 	}
 	// Deduct only unique namespace bytes observed for this unit. Cross-leaf
 	// hardlinks may survive elsewhere; physical savings are never asserted.
-	return true, u.observed.uniqueBytes, nil
+	bytes := u.observed.uniqueBytes
+	if before.uniqueBytes < bytes {
+		bytes = before.uniqueBytes
+	}
+	return true, bytes, nil
 }

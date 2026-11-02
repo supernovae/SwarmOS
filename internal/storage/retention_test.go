@@ -1486,3 +1486,85 @@ func TestReclamationRemovalBoundRetains(t *testing.T) {
 		t.Fatalf("leaf changed: %s %v", data, err)
 	}
 }
+
+func TestReclamationIdentityLimitIsAdvisory(t *testing.T) {
+	o, m, r := reclaimFixture(t, "agent-build")
+	o.Limits = DefaultLimits()
+	o.Limits.Identities = 1
+	second := storageuse.ResourceFor(r.Repository, "validate-build", filepath.Join(o.CacheRoot, "validate-build", r.Repository, "go"))
+	secondUse, err := m.AcquireUse(context.Background(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(second.Location, "data"), "second finished cache")
+	if err := secondUse.Finish(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pending := storageuse.ResourceFor(r.Repository, r.Class, filepath.Join(filepath.Dir(r.Location), "rust"))
+	u, err := m.AcquireUse(context.Background(), pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { u.Finish(context.Background()) })
+	put(t, filepath.Join(pending.Location, "sentinel"), "pending")
+	unknown := filepath.Join(filepath.Dir(r.Location), "c-cpp")
+	put(t, filepath.Join(unknown, "sentinel"), "unknown")
+	preview, err := PreviewReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range preview.Resources {
+		if item.Resource.Location == r.Location || item.Resource.Location == second.Location {
+			found = true
+			if item.Outcome != ReclaimEligible || item.Before.AllocatedBytes != nil {
+				t.Fatalf("%+v", item)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("finished cache missing")
+	}
+	applied, err := ApplyReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range applied.Resources {
+		if (item.Resource.Location == r.Location || item.Resource.Location == second.Location) && item.Outcome != ReclaimRemoved {
+			t.Fatalf("%+v", item)
+		}
+	}
+	if _, err := os.Stat(r.Location); !os.IsNotExist(err) {
+		t.Fatal("finished cache retained", err)
+	}
+	if _, err := os.Stat(second.Location); !os.IsNotExist(err) {
+		t.Fatal("second finished cache retained", err)
+	}
+	for _, path := range []string{pending.Location, unknown} {
+		if _, err := os.Stat(filepath.Join(path, "sentinel")); err != nil {
+			t.Fatal("protected sentinel lost", err)
+		}
+	}
+}
+
+func TestReclamationIdentityLimitPendingAfterPreview(t *testing.T) {
+	o, m, r := reclaimFixture(t, "agent-build")
+	o.Limits = DefaultLimits()
+	o.Limits.Identities = 1
+	preview, err := PreviewReclamation(context.Background(), o)
+	if err != nil || len(preview.Resources) != 1 || preview.Resources[0].Outcome != ReclaimEligible {
+		t.Fatal(preview, err)
+	}
+	u, err := m.AcquireUse(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer u.Finish(context.Background())
+	result, err := ApplyReclamation(context.Background(), o)
+	if err != nil || len(result.Resources) != 1 || result.Resources[0].Outcome != ReclaimRetained {
+		t.Fatal(result, err)
+	}
+	if _, err := os.Stat(filepath.Join(r.Location, "data")); err != nil {
+		t.Fatal(err)
+	}
+}

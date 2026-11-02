@@ -208,6 +208,9 @@ func TestEngineDependencyScopeLivesThroughRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	previousControl := storageuse.UserCacheDir
+	storageuse.UserCacheDir = func() (string, error) { return rootHome, nil }
+	t.Cleanup(func() { storageuse.UserCacheDir = previousControl })
 	t.Setenv("XDG_CACHE_HOME", rootHome)
 	if runtime.GOOS == "darwin" {
 		t.Setenv("HOME", rootHome)

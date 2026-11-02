@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"io"
 	"os"
 	"os/exec"
@@ -30,12 +31,38 @@ var diagnosticsTestBasic = base64.StdEncoding.EncodeToString([]byte("x-access-to
 // TestMain keeps every failed run in this package away from the operator's
 // real state directory and primes the coordinator token used for redaction.
 func TestMain(m *testing.M) {
+	ledgerRoot, ledgerErr := os.MkdirTemp("", "swarm-test-ledger-*")
+	if ledgerErr != nil {
+		panic(ledgerErr)
+	}
+	ledgerRoot, ledgerErr = filepath.EvalSymlinks(ledgerRoot)
+	if ledgerErr != nil {
+		panic(ledgerErr)
+	}
+	storageuse.UserCacheDir = func() (string, error) { return ledgerRoot, nil }
+	checkLedger := func() error {
+		control, err := storageuse.ControlRoot()
+		return testutil.CheckStorageLedger(ledgerRoot, control, err)
+	}
+	ledgerExit := func(code int) {
+		if err := checkLedger(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			code = 1
+		}
+		os.RemoveAll(ledgerRoot)
+		os.Exit(code)
+	}
+	if err := checkLedger(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		ledgerExit(1)
+	}
+
 	// Helper subprocesses exit inside m.Run, so the state directory is created
 	// lazily by the first saved log rather than here.
 	state := filepath.Join(os.TempDir(), fmt.Sprintf("swarm-agent-test-state-%d", os.Getpid()))
 	os.Setenv("XDG_STATE_HOME", state)
 	os.Setenv("XDG_CACHE_HOME", state+"-cache")
-	storageuse.UserCacheDir = os.UserCacheDir
+
 	preserveHome := telemetryHelperHome(os.Args[1:])
 	if !preserveHome {
 		os.Setenv("HOME", state+"-home")
@@ -46,12 +73,16 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	code := m.Run()
+	if err := checkLedger(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
 	os.RemoveAll(state)
 	os.RemoveAll(state + "-cache")
 	if !preserveHome {
 		os.RemoveAll(state + "-home")
 	}
-	os.Exit(code)
+	ledgerExit(code)
 }
 
 // telemetryHelperHome admits only the exact selectors and post-separator
@@ -126,26 +157,14 @@ func TestBootstrapStorageIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache := state + "-cache"
-	if runtime.GOOS == "darwin" {
-		cache = filepath.Join(state+"-home", "Library", "Caches")
-	}
-	if want := filepath.Join(cache, "swarm-use"); root != want {
-		t.Fatalf("control root = %q, want %q", root, want)
-	}
-	// Earlier tests may have used the suite roots. A fresh fixture must resolve
-	// its own control root without creating any directories.
+	originalRoot := root
 	state = filepath.Join(t.TempDir(), "fresh-state")
 	t.Setenv("HOME", state+"-home")
 	t.Setenv("XDG_STATE_HOME", state)
 	t.Setenv("XDG_CACHE_HOME", state+"-cache")
 	root, err = storageuse.ControlRoot()
-	cache = state + "-cache"
-	if runtime.GOOS == "darwin" {
-		cache = filepath.Join(state+"-home", "Library", "Caches")
-	}
-	if want := filepath.Join(cache, "swarm-use"); err != nil || root != want {
-		t.Fatalf("fresh control root = %q, %v; want %q", root, err, want)
+	if err != nil || root != originalRoot {
+		t.Fatalf("ledger moved with environment: %q %v", root, err)
 	}
 	for _, path := range []string{state, state + "-home", state + "-cache"} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -681,5 +700,43 @@ func mustSymlink(t *testing.T, target, link string) {
 	t.Helper()
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
+	}
+}
+
+// Exercise the shared scratch producer used by coordinator workflows after a
+// test changes user directories; the package resolver must remain fixed.
+func TestStorageLedgerProducerIgnoresEnvironment(t *testing.T) {
+	control, err := storageuse.ControlRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoy := t.TempDir()
+	t.Setenv("HOME", decoy)
+	t.Setenv("XDG_CACHE_HOME", decoy)
+	ctx, scope, err := storageuse.Ensure(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scope.Finish()
+	path, err := scope.TempDir(ctx, t.TempDir(), "producer-*", "review-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = scope.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	resource := storageuse.ResourceFor(scope.Repository(), "review-scratch", path)
+	observation, err := storageuse.Observe(ctx, control, resource, 16<<10, func(int64) error { return nil })
+	if err != nil || !observation.CompleteCoverage || observation.Active == nil || *observation.Active {
+		t.Fatalf("missing finished producer record: %+v %v", observation, err)
+	}
+	for _, candidate := range []string{filepath.Join(decoy, "swarm-use"), filepath.Join(decoy, "Library", "Caches", "swarm-use")} {
+		if _, err := os.Stat(candidate); !os.IsNotExist(err) {
+			t.Fatalf("producer wrote decoy ledger: %s %v", candidate, err)
+		}
+	}
+	restored, err := storageuse.ControlRoot()
+	if err != nil || restored != control {
+		t.Fatal("resolver moved", restored, err)
 	}
 }

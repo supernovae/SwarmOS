@@ -1118,6 +1118,10 @@ func TestLiveExecutorGoCachePreparation(t *testing.T) {
 	for _, mode := range []string{"explicit", "fallback", "older-host", "failure-set", "failure-unset", "disabled"} {
 		t.Run(mode, func(t *testing.T) {
 			oldUser, oldStorage, oldPrepared := userCacheDir, storageuse.UserCacheDir, liveExecutorGoCache
+			originalControl, controlErr := storageuse.ControlRoot()
+			if controlErr != nil {
+				t.Fatal(controlErr)
+			}
 			t.Cleanup(func() { userCacheDir, storageuse.UserCacheDir, liveExecutorGoCache = oldUser, oldStorage, oldPrepared })
 			home, source := hostGoEnv(t, "off", "example.com/source@v1.0.0")
 			xdg := resolvedTempDir(t)
@@ -1148,7 +1152,7 @@ func TestLiveExecutorGoCachePreparation(t *testing.T) {
 					t.Fatal("prefetch preceded isolation")
 				}
 				control, err := storageuse.ControlRoot()
-				if err != nil || !strings.HasPrefix(control, root+string(filepath.Separator)) {
+				if err != nil || control != originalControl {
 					t.Fatalf("control root: %s %v", control, err)
 				}
 				if !slices.Contains(env, "GOMODCACHE="+filepath.Join(root, "go-mod")) || !slices.Contains(env, "GOTOOLCHAIN=local") {

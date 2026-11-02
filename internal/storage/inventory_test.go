@@ -280,3 +280,22 @@ func TestReadOnlyMetadataSnapshot(t *testing.T) {
 		}
 	}
 }
+
+func TestInventoryIdentityLimitPreservesFinishedUse(t *testing.T) {
+	ro, _, r := reclaimFixture(t, "agent-build")
+	opts := Options{CacheRoot: ro.CacheRoot, UseRoot: ro.ControlRoot, SelectedRoot: ro.Scopes[0].Root, RegistryPath: filepath.Join(t.TempDir(), "registry.yaml"), Limits: DefaultLimits()}
+	opts.Limits.Identities = 1
+	out, err := Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range out.Resources {
+		if item.Path == r.Location {
+			if item.Active == nil || *item.Active || item.LastUse == nil || item.AllocatedBytes != nil || item.UsageReason == "" || out.UniqueAllocatedBytes != nil {
+				t.Fatalf("%+v %+v", item, out)
+			}
+			return
+		}
+	}
+	t.Fatal("finished leaf missing", out)
+}

@@ -1,6 +1,7 @@
 package storageuse
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -95,11 +96,16 @@ func VisitResources(ctx context.Context, path string, maxRecords int, entry func
 			return e
 		}
 		var record record
-		if e = json.Unmarshal(data, &record); e != nil {
+		if e = uniqueJSON(data); e != nil {
+			return e
+		}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if e = decoder.Decode(&record); e != nil {
 			return e
 		}
 		expected, e := (&Manager{root: root, path: path}).key(record.Resource)
-		if e != nil || expected != key || record.Version != 1 {
+		if e != nil || expected != key || record.validate() != nil {
 			return ErrUnsafe
 		}
 		// Completed absent registrations consume only serial parser workspace.

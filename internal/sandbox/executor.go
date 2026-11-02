@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -160,7 +161,7 @@ func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.
 	// storage authority. Its enclosing delegated run retains every cache use.
 	// In-process coordinator callers can share an existing scope across tools.
 	if storageuse.FromContext(ctx) != nil {
-		if err := acquireRuntimeCaches(ctx, e.BuildCaches, e.Dependencies); err != nil {
+		if err := acquireRuntimeCachesMode(ctx, e.BuildCaches, e.Dependencies, !e.BrowserProfile); err != nil {
 			return err
 		}
 	}
@@ -171,7 +172,60 @@ func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.
 		return err
 	}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	err = cmd.Run()
+	var reservation *storageuse.BoundaryReservation
+	var infoRead, infoWrite *os.File
+	if scope := storageuse.FromContext(ctx); scope != nil {
+		if e.BrowserProfile {
+			if err := scope.OutsideConsumer(ctx); err != nil {
+				return err
+			}
+		} else {
+			locations := []string{e.Work}
+			for _, c := range e.BuildCaches {
+				locations = append(locations, c.Dir)
+			}
+			for _, c := range e.Dependencies.Caches {
+				locations = append(locations, c.Dir)
+			}
+			reservation, err = scope.ReserveBoundary(ctx, locations)
+			if err != nil {
+				return err
+			}
+			infoRead, infoWrite, err = os.Pipe()
+			if err != nil {
+				return err
+			}
+			defer infoRead.Close()
+			defer infoWrite.Close()
+			cmd.ExtraFiles = []*os.File{infoWrite}
+			cmd.Args = append(cmd.Args[:1], append([]string{"--info-fd", "3"}, cmd.Args[1:]...)...)
+		}
+	}
+	err = cmd.Start()
+	if infoWrite != nil {
+		_ = infoWrite.Close()
+	}
+	if err == nil {
+		if reservation != nil {
+			// Missing/short-lived identity leaves the durable reservation incomplete.
+			// It does not weaken execution isolation or invent evidence after exit.
+			_ = infoRead.SetReadDeadline(time.Now().Add(time.Second))
+			var status struct {
+				PID int `json:"child-pid"`
+			}
+			if json.NewDecoder(io.LimitReader(infoRead, 4096)).Decode(&status) == nil {
+				if identity, identityErr := executorBoundaryIdentity(status.PID, cmd.Process.Pid); identityErr == nil {
+					if sealErr := reservation.Seal(ctx, identity); sealErr != nil {
+						// A partially sealed multi-resource launch remains permanently uncertain.
+						// Retain all scope uses and prevent execution from being reported complete.
+						storageuse.FromContext(ctx).Retain()
+						err = sealErr
+					}
+				}
+			}
+		}
+		err = errors.Join(err, cmd.Wait())
+	}
 	stopErr := process.StopVerified(cmd)
 	if e.BrowserProfile {
 		var unit string
@@ -272,6 +326,10 @@ printf EXECUTOR_OK`
 // acquireRuntimeCaches reacquires managed readers for standalone role and tool
 // invocations. Descriptors remain data-only; lifetime authority stays in ctx.
 func acquireRuntimeCaches(ctx context.Context, caches []BuildCache, deps Dependencies) error {
+	return acquireRuntimeCachesMode(ctx, caches, deps, false)
+}
+
+func acquireRuntimeCachesMode(ctx context.Context, caches []BuildCache, deps Dependencies, contained bool) error {
 	scope := storageuse.FromContext(ctx)
 	if scope == nil {
 		return fmt.Errorf("storage use scope required for cache readers")
@@ -289,7 +347,11 @@ func acquireRuntimeCaches(ctx context.Context, caches []BuildCache, deps Depende
 		if len(key) != 32 {
 			return fmt.Errorf("invalid managed cache repository key")
 		}
-		return scope.Acquire(ctx, storageuse.ResourceFor(key, class, path))
+		resource := storageuse.ResourceFor(key, class, path)
+		if contained {
+			return scope.AcquirePrepared(ctx, resource)
+		}
+		return scope.Acquire(ctx, resource)
 	}
 	for _, c := range caches {
 		if err := admit(c.Dir); err != nil {
@@ -319,4 +381,35 @@ func executorProfileFlags(work string, readOnly bool, caches []BuildCache, deps 
 		return nil, fmt.Errorf("browser profile address-space limit missing")
 	}
 	return flags, nil
+}
+
+// executorBoundaryIdentity verifies the coordinator's Bubblewrap status channel
+// names the private PID namespace init, rather than its outer monitor. Workers
+// cannot supply either the status pipe or the PID used here.
+func executorBoundaryIdentity(pid, launcher int) (storageuse.ProcessIdentity, error) {
+	identity, err := storageuse.CaptureProcess(pid)
+	if err != nil {
+		return storageuse.ProcessIdentity{}, err
+	}
+	status, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	if err != nil {
+		return storageuse.ProcessIdentity{}, err
+	}
+	parentOK, initOK := false, false
+	for _, line := range strings.Split(string(status), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "PPid:" {
+			parentOK = fields[1] == strconv.Itoa(launcher)
+		}
+		if len(fields) >= 3 && fields[0] == "NSpid:" {
+			initOK = fields[1] == strconv.Itoa(pid) && fields[len(fields)-1] == "1"
+		}
+	}
+	ownNS, ownErr := os.Readlink("/proc/self/ns/pid")
+	childNS, childErr := os.Readlink("/proc/" + strconv.Itoa(pid) + "/ns/pid")
+	again, captureErr := storageuse.CaptureProcess(pid)
+	if !parentOK || !initOK || ownErr != nil || childErr != nil || childNS == ownNS || captureErr != nil || again != identity {
+		return storageuse.ProcessIdentity{}, storageuse.ErrUnsafe
+	}
+	return identity, nil
 }

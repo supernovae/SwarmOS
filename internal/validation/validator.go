@@ -659,6 +659,11 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 
 // runOnHost runs a required check directly, with a scrubbed environment.
 func (r *checkRunner) runOnHost(ctx context.Context, command string, stdout, stderr io.Writer) error {
+	if scope := storageuse.FromContext(ctx); scope != nil {
+		if err := scope.OutsideConsumer(ctx); err != nil {
+			return err
+		}
+	}
 	caches, err := sandbox.ValidatorCacheMounts(r.buildCaches, sandbox.ValidationOnHost, r.warmup, false, r.home)
 	if err != nil {
 		return err

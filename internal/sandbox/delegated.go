@@ -161,6 +161,9 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 	opts.Lifecycle.addPreflight(preflight)
 	var command []string
 	err = withNativeWorkspace(ctx, dir, opts, func(ctx context.Context, work, scratch string) error {
+		if err := storageuse.FromContext(ctx).OutsideConsumer(ctx); err != nil {
+			return err
+		}
 		control := filepath.Join(filepath.Dir(scratch), "control")
 		if err := os.Mkdir(control, 0700); err != nil {
 			return err

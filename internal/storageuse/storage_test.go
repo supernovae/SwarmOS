@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -763,5 +765,458 @@ func TestMaintenanceLockedObservation(t *testing.T) {
 	defer cancel()
 	if _, e = m.AcquireUse(blocked, r); !errors.Is(e, context.DeadlineExceeded) {
 		t.Fatal(e)
+	}
+}
+
+func TestRecoveryEligibility(t *testing.T) {
+	p := ProcessIdentity{Boot: "11111111-1111-1111-1111-111111111111", PID: 42, Start: 100}
+	boundary := p
+	boundary.PID++
+	for _, mode := range []string{"gone", "outside", "legacy", "incomplete", "live-coordinator", "live-boundary", "unknown-identity", "multiple-boundaries", "one-unknown", "cancelled", "write-failure", "incomplete-coverage"} {
+		t.Run(mode, func(t *testing.T) {
+			m, r := fixture(t)
+			ctx := context.Background()
+			u, err := m.AcquireUse(ctx, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := m.read(u.key, r)
+			e := &useEvidence{Coordinator: p, Consumers: map[string]ProcessIdentity{strings.Repeat("a", 64): boundary}}
+			if err := u.evidence(ctx, func(v *record) error {
+				v.Evidence = map[string]*useEvidence{u.token: e}
+				switch mode {
+				case "outside":
+					e.Outside = true
+				case "legacy":
+					v.Evidence = nil
+				case "incomplete":
+					e.Consumers[strings.Repeat("b", 64)] = ProcessIdentity{}
+				case "unknown-identity":
+					e.Coordinator.Boot = "unreadable"
+				case "multiple-boundaries":
+					other := boundary
+					other.PID++
+					e.Consumers[strings.Repeat("b", 64)] = other
+				case "one-unknown":
+					e.Consumers[strings.Repeat("b", 64)] = ProcessIdentity{}
+				case "incomplete-coverage":
+					v.CompleteCoverage = false
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			now := before.LastUse.Add(time.Hour)
+			if mode == "cancelled" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			if mode == "write-failure" {
+				now = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+			}
+
+			gone := func(q ProcessIdentity) bool {
+				return !(mode == "live-coordinator" && q == p || mode == "live-boundary" && q == boundary)
+			}
+			changed, err := m.recover(ctx, r, now, gone)
+			eligible := mode == "gone" || mode == "multiple-boundaries" || mode == "incomplete-coverage"
+			if mode == "cancelled" || mode == "write-failure" {
+				if mode == "write-failure" {
+					preserved, readErr := m.read(u.key, r)
+					if readErr != nil || preserved.Uses[u.token] || !preserved.LastUse.Equal(before.LastUse) {
+						t.Fatalf("failed durable write changed record: %+v %v", preserved, readErr)
+					}
+				}
+				if err == nil || changed {
+					t.Fatalf("changed=%v err=%v", changed, err)
+				}
+				return
+			}
+			if err != nil || changed != eligible {
+				t.Fatalf("changed=%v expected=%v err=%v", changed, eligible, err)
+			}
+			after, err := m.read(u.key, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Uses[u.token] != eligible {
+				t.Fatal("wrong completion")
+			}
+			if after.CompleteCoverage != before.CompleteCoverage && mode != "incomplete-coverage" {
+				t.Fatal("coverage changed")
+			}
+			if mode == "incomplete-coverage" && after.CompleteCoverage {
+				t.Fatal("coverage upgraded")
+			}
+			if eligible && !after.LastUse.Equal(now) {
+				t.Fatal("recency not advanced")
+			}
+			again, err := m.recover(ctx, r, now.Add(time.Hour), gone)
+			if err != nil || again {
+				t.Fatalf("non-idempotent: %v %v", again, err)
+			}
+			final, _ := m.read(u.key, r)
+			if !final.LastUse.Equal(after.LastUse) {
+				t.Fatal("repeated pass changed recency")
+			}
+		})
+	}
+}
+
+func TestRecoveryProcEvidence(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux proc evidence")
+	}
+	p, err := CaptureProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processGone(p) {
+		t.Fatal("live process declared gone")
+	}
+	other := p
+	other.Start++
+	if !processGone(other) {
+		t.Fatal("different start ticks did not prove absence")
+	}
+	other = p
+	other.Boot = "22222222-2222-2222-2222-222222222222"
+	if !processGone(other) {
+		t.Fatal("different boot did not prove absence")
+	}
+	for _, name := range []string{"simple", "name with spaces", "a (nested) name)"} {
+		stat := strconv.Itoa(p.PID) + " (" + name + ") S " + strings.Repeat("0 ", 18) + "123 0"
+		start, err := processStart([]byte(stat), p.PID)
+		if err != nil || start != 123 {
+			t.Fatalf("%q: %d %v", name, start, err)
+		}
+	}
+	for _, stat := range []string{"", "42 no parentheses", "42 (name) S 0", "42 (name) " + strings.Repeat("x ", 20)} {
+		if _, err := processStart([]byte(stat), 42); err == nil {
+			t.Fatalf("accepted %q", stat)
+		}
+	}
+}
+
+func TestRecoveryMultipleUsesAndReadOnly(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	a, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := ProcessIdentity{Boot: "11111111-1111-1111-1111-111111111111", PID: 42, Start: 100}
+	if err := a.evidence(ctx, func(v *record) error {
+		v.Evidence = map[string]*useEvidence{a.token: {Coordinator: p, Consumers: map[string]ProcessIdentity{strings.Repeat("a", 64): p}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(m.path, a.key+".json")
+	before, _ := os.ReadFile(path)
+	info, _ := os.Stat(path)
+	if _, err := Observe(ctx, m.path, r, 16384, func(int64) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if g, err := m.AcquireMaintenance(ctx, r); err == nil {
+		g.Close()
+		t.Fatal("pending admitted")
+	}
+	after, _ := os.ReadFile(path)
+	later, _ := os.Stat(path)
+	if string(before) != string(after) || !info.ModTime().Equal(later.ModTime()) {
+		t.Fatal("read-only call wrote evidence")
+	}
+	if changed, err := m.recover(ctx, r, time.Now(), func(ProcessIdentity) bool { return true }); err != nil || !changed {
+		t.Fatalf("%v %v", changed, err)
+	}
+	if g, err := m.AcquireMaintenance(ctx, r); err == nil {
+		g.Close()
+		t.Fatal("other pending token ignored")
+	}
+	if err := b.Finish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if g, err := m.AcquireMaintenance(ctx, r); err != nil {
+		t.Fatal(err)
+	} else {
+		g.Close()
+	}
+}
+
+func TestRecoveryScopeReservationAndContamination(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux identities")
+	}
+	for _, mode := range []string{"sealed", "before-start", "outside-before", "outside-after", "concurrent", "legacy"} {
+		t.Run(mode, func(t *testing.T) {
+			m, r := fixture(t)
+			ctx := context.Background()
+			s := &Scope{manager: m, repository: r.Repository}
+			if mode == "outside-before" {
+				if err := s.OutsideConsumer(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var err error
+			if mode == "legacy" {
+				err = s.Acquire(ctx, r)
+			} else {
+				err = s.AcquirePrepared(ctx, r)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := s.ReserveBoundary(ctx, []string{r.Location})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "concurrent" {
+				if _, err := s.ReserveBoundary(ctx, []string{r.Location}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode != "before-start" {
+				p, err := CaptureProcess(os.Getpid())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Seal(ctx, p); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Seal(ctx, p); mode != "legacy" && mode != "outside-before" && err == nil {
+					t.Fatal("reservation could be resealed")
+				}
+			}
+			if mode == "outside-after" {
+				if err := s.OutsideConsumer(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			changed, err := m.recover(ctx, r, time.Now(), func(ProcessIdentity) bool { return true })
+			if err != nil || changed != (mode == "sealed") {
+				t.Fatalf("%v %v", changed, err)
+			}
+		})
+	}
+}
+
+func TestRecoveryRejectsDuplicateEvidence(t *testing.T) {
+	for _, data := range []string{`{"a":1,"a":2}`, `{"Evidence":{"token":{"Consumers":{"id":{},"id":{}}}}}`, `{} {}`} {
+		if err := uniqueJSON([]byte(data)); err == nil {
+			t.Fatalf("accepted %s", data)
+		}
+	}
+}
+
+func TestRecoveryFencesConcurrentAdmissionAndFinish(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	u, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := ProcessIdentity{Boot: "11111111-1111-1111-1111-111111111111", PID: 42, Start: 100}
+	if err := u.evidence(ctx, func(v *record) error {
+		v.Evidence = map[string]*useEvidence{u.token: {Coordinator: p, Consumers: map[string]ProcessIdentity{strings.Repeat("a", 64): p}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	finished := make(chan error, 1)
+	go func() {
+		first := true
+		_, err := m.recover(ctx, r, time.Now().Add(time.Hour), func(ProcessIdentity) bool {
+			if first {
+				first = false
+				close(entered)
+				<-release
+			}
+			return true
+		})
+		finished <- err
+	}()
+	<-entered
+	admitted := make(chan *Use, 1)
+	errs := make(chan error, 1)
+	go func() { v, err := m.AcquireUse(ctx, r); admitted <- v; errs <- err }()
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+	next := <-admitted
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if err := u.Finish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	v, err := m.read(u.key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Uses[u.token] || v.Uses[next.token] || len(v.Uses) != 2 {
+		t.Fatal("recovery lost concurrent admission")
+	}
+}
+
+func TestRecoveryCancellationBeforePersistence(t *testing.T) {
+	m, r := fixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	u, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := ProcessIdentity{Boot: "11111111-1111-1111-1111-111111111111", PID: 42, Start: 100}
+	if err := u.evidence(ctx, func(v *record) error {
+		v.Evidence = map[string]*useEvidence{u.token: {Coordinator: p, Consumers: map[string]ProcessIdentity{strings.Repeat("a", 64): p}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := m.recover(ctx, r, time.Now(), func(ProcessIdentity) bool { cancel(); return true })
+	if changed || !errors.Is(err, context.Canceled) {
+		t.Fatalf("%v %v", changed, err)
+	}
+	v, err := m.read(u.key, r)
+	if err != nil || v.Uses[u.token] {
+		t.Fatal("cancelled recovery persisted", err)
+	}
+}
+
+func TestRecoveryUnknownProcessEvidence(t *testing.T) {
+	p := ProcessIdentity{Boot: "11111111-1111-1111-1111-111111111111", PID: 42, Start: 100}
+	for _, mode := range []string{"same", "different-start", "different-boot", "missing-pid", "missing-stat-only", "boot-permission", "proc-permission", "pid-permission", "malformed-boot", "malformed-stat", "io-error"} {
+		t.Run(mode, func(t *testing.T) {
+			read := func(path string) ([]byte, error) {
+				if strings.HasSuffix(path, "boot_id") {
+					switch mode {
+					case "boot-permission":
+						return nil, os.ErrPermission
+					case "malformed-boot":
+						return []byte("unknown"), nil
+					case "different-boot":
+						return []byte("22222222-2222-2222-2222-222222222222"), nil
+					}
+					return []byte(p.Boot), nil
+				}
+				switch mode {
+				case "missing-pid", "missing-stat-only", "pid-permission":
+					return nil, os.ErrNotExist
+				case "proc-permission":
+					return nil, os.ErrPermission
+				case "io-error":
+					return nil, errors.New("read failure")
+				case "malformed-stat":
+					return []byte("42 (broken)"), nil
+				}
+				ticks := "100"
+				if mode == "different-start" {
+					ticks = "101"
+				}
+				return []byte("42 (name with (parentheses)) S " + strings.Repeat("0 ", 18) + ticks), nil
+			}
+			stat := func(string) (os.FileInfo, error) {
+				if mode == "missing-pid" {
+					return nil, os.ErrNotExist
+				}
+				if mode == "pid-permission" {
+					return nil, os.ErrPermission
+				}
+				return nil, nil
+			}
+			gone := processGoneRead(p, read, stat)
+			want := mode == "different-start" || mode == "different-boot" || mode == "missing-pid"
+			if gone != want {
+				t.Fatalf("gone=%v want=%v", gone, want)
+			}
+		})
+	}
+}
+
+func TestRecoveryOverlappingUnclassifiedAdmission(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux identities")
+	}
+	m, r := fixture(t)
+	ctx := context.Background()
+	s := &Scope{manager: m, repository: r.Repository}
+	if err := s.AcquirePrepared(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.ReserveBoundary(ctx, []string{r.Location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := CaptureProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Seal(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Acquire(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcquirePrepared(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	later, err := s.ReserveBoundary(ctx, []string{r.Location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := later.Seal(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := m.recover(ctx, r, time.Now(), func(ProcessIdentity) bool { return true }); changed || err != nil {
+		t.Fatalf("unclassified consumer erased: %v %v", changed, err)
+	}
+}
+
+func TestRecoveryEvidenceCapacityRetainsWithoutBlockingTools(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux identities")
+	}
+	m, r := fixture(t)
+	ctx := context.Background()
+	s := &Scope{manager: m, repository: r.Repository}
+	if err := s.AcquirePrepared(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	u := s.uses[0]
+	p, err := CaptureProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := u.evidence(ctx, func(v *record) error {
+		e := v.Evidence[u.token]
+		for n := 0; n < 256; n++ {
+			e.Consumers[fmt.Sprintf("%064x", n)] = p
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.ReserveBoundary(ctx, []string{r.Location})
+	if err != nil {
+		t.Fatal("evidence cap blocked admission", err)
+	}
+	if err := b.Seal(ctx, p); err != nil {
+		t.Fatal("outside evidence blocked execution", err)
+	}
+	v, err := m.read(u.key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := v.Evidence[u.token]
+	if !e.Outside || len(e.Consumers) != 256 {
+		t.Fatal("capacity did not permanently disqualify bounded evidence")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -32,6 +33,21 @@ import (
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
+
+const cliGitMaintenanceConfig = "[gc]\n auto = 0\n autoDetach = false\n[maintenance]\n auto = false\n"
+
+// Published once by TestMain, before tests or fixture seeds can run.
+var cliGitTemplate string
+
+// Only the suite-owned constant template is compatible with pristine seeds.
+// Operator-supplied templates still take the original uncached path.
+func cliCustomGitTemplate() string {
+	value := os.Getenv("GIT_TEMPLATE_DIR")
+	if value == cliGitTemplate {
+		return ""
+	}
+	return value
+}
 
 type cliFixture struct {
 	root    string
@@ -261,7 +277,7 @@ type cliFixtureInput struct {
 func realCLIFixtureInputProvider() cliFixtureInputProvider {
 	return cliFixtureInputProvider{
 		root:     func(root string) (bool, error) { e, err := os.ReadDir(root); return len(e) == 0, err },
-		template: func() string { return os.Getenv("GIT_TEMPLATE_DIR") },
+		template: cliCustomGitTemplate,
 		config: func(i int) error {
 			paths := []string{filepath.Join(os.Getenv("HOME"), ".gitconfig"), filepath.Join(os.Getenv("HOME"), ".config", "git", "config"), filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "git", "config"), "/etc/gitconfig"}
 			_, err := os.Lstat(paths[i])
@@ -318,7 +334,7 @@ func cliFixtureInputKey(root string) (string, bool, error) {
 func pristineCLIInputProvider() cliFixtureInputProvider {
 	return cliFixtureInputProvider{
 		root:     func(root string) (bool, error) { e, err := os.ReadDir(root); return len(e) == 0, err },
-		template: func() string { return os.Getenv("GIT_TEMPLATE_DIR") },
+		template: cliCustomGitTemplate,
 		config:   func(int) error { return os.ErrNotExist },
 		identity: func(root string) (string, []string) { return filepath.Base(root), os.Environ() },
 	}
@@ -639,6 +655,18 @@ func TestCLIFixtureSeedLifetimeAndIsolation(t *testing.T) {
 					t.Fatal(err)
 				}
 				gitfixture.Run(t, root, "config", "user.name", "mutated")
+				gitfixture.Run(t, root, "config", "gc.autoDetach", "true")
+				templateInfo, err := os.Stat(filepath.Join(cliGitTemplate, "config"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				copyInfo, err := os.Stat(filepath.Join(root, ".git", "config"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if os.SameFile(templateInfo, copyInfo) {
+					t.Fatal("template config shared with consumer")
+				}
 				gitfixture.Run(t, root, "update-ref", "refs/heads/independent", "HEAD")
 				if err := os.WriteFile(filepath.Join(root, ".swarm", "project.md"), []byte("mutated"), 0644); err != nil {
 					t.Fatal(err)
@@ -652,6 +680,11 @@ func TestCLIFixtureSeedLifetimeAndIsolation(t *testing.T) {
 			})
 		}
 	})
+	template, err := os.ReadFile(filepath.Join(cliGitTemplate, "config"))
+	if err != nil || string(template) != cliGitMaintenanceConfig {
+		t.Fatalf("consumer changed template: %v", err)
+	}
+	assertCLIGitMaintenance(t, seed.root)
 	if !reflect.DeepEqual(pristine, cliTree(t, seed.root, true)) {
 		t.Fatal("concurrent mutations changed seed")
 	}
@@ -659,6 +692,7 @@ func TestCLIFixtureSeedLifetimeAndIsolation(t *testing.T) {
 	if err := seed.populate(later, func(string) error { t.Fatal("seed initialized twice"); return nil }); err != nil {
 		t.Fatal(err)
 	}
+	assertCLIGitMaintenance(t, later)
 	if !reflect.DeepEqual(pristine, cliTree(t, later, true)) {
 		t.Fatal("later copy changed")
 	}
@@ -2106,4 +2140,91 @@ func TestCLIFixtureDifferentKeyFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCLIEquivalent(t, other, original)
+}
+
+// assertCLIGitMaintenance reads repository-local values: command-local settings
+// cannot protect a receiver started by a different Git process.
+func assertCLIGitMaintenance(t *testing.T, root string) {
+	t.Helper()
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false", "gc.autoDetach": "false"} {
+		out, err := exec.Command("git", "-C", root, "config", "--local", "--get", key).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != want {
+			t.Fatalf("local %s = %q, %v; want %s", key, out, err, want)
+		}
+	}
+}
+
+func TestCLIGitMaintenancePolicy(t *testing.T) {
+	f := newCLIFixture(t)
+	assertCLIGitMaintenance(t, f.root)
+	bare := filepath.Join(t.TempDir(), "origin.git")
+	gitfixture.Run(t, "", "init", "--bare", bare)
+	assertCLIGitMaintenance(t, bare)
+	raw := filepath.Join(t.TempDir(), "raw")
+	if out, err := exec.Command("git", "-c", "gc.auto=1", "-c", "maintenance.auto=true", "-c", "gc.autoDetach=true", "init", raw).CombinedOutput(); err != nil {
+		t.Fatalf("init: %v: %s", err, out)
+	}
+	assertCLIGitMaintenance(t, raw)
+	// A CLI command creates a real linked worktree using production Git paths.
+	n := f.create(t, "none")
+	f.must(t, "issue", "approve", strconv.Itoa(n))
+	f.must(t, "issue", "claim", strconv.Itoa(n), "--agent", "mock")
+	assertCLIGitMaintenance(t, filepath.Join(f.root, ".swarm", "worktrees", fmt.Sprintf("issue-%d", n)))
+}
+
+func TestCLIGitReceiveCloneCleanup(t *testing.T) {
+	root := t.TempDir()
+	src, bare, clone := filepath.Join(root, "src"), filepath.Join(root, "origin.git"), filepath.Join(root, "clone")
+	gitfixture.Run(t, "", "init", "-b", "main", src)
+	gitfixture.Run(t, "", "init", "--bare", "--initial-branch=main", bare)
+	// Low thresholds would immediately trigger maintenance without the policy.
+	gitfixture.Run(t, bare, "config", "gc.autoPackLimit", "1")
+	gitfixture.Run(t, bare, "config", "maintenance.loose-objects.auto", "1")
+	assertCLIGitMaintenance(t, bare)
+	gitfixture.Run(t, src, "commit", "--allow-empty", "-m", "receive fixture")
+	trace := filepath.Join(t.TempDir(), "trace.json")
+	cmd := gitfixture.Command(t, src, "push", bare, "HEAD:refs/heads/main")
+	cmd.Env = append(cmd.Env, "GIT_TRACE2_EVENT="+trace)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("push: %v: %s", err, out)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := false
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var event struct {
+			Event string
+			Argv  []string
+		}
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		for _, arg := range event.Argv {
+			if event.Event == "start" && strings.Contains(arg, "receive-pack") {
+				received = true
+			}
+			if event.Event == "child_start" && (arg == "maintenance" || arg == "gc" || arg == "repack") {
+				t.Fatalf("automatic maintenance child: %s", line)
+			}
+		}
+	}
+	if !received {
+		t.Fatal("trace did not observe receiving work")
+	}
+	gitfixture.Run(t, "", "clone", bare, clone)
+	assertCLIGitMaintenance(t, clone)
+	if got := strings.TrimSpace(gitfixture.Run(t, clone, "log", "-1", "--format=%s")); got != "receive fixture" {
+		t.Fatal(got)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("cleanup: %v", err)
+	}
 }

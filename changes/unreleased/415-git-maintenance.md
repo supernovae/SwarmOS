@@ -1,0 +1,1 @@
+- Keep CLI test repositories free of automatic Git maintenance so local clones and cleanup remain stable.

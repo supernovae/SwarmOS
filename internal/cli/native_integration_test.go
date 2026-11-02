@@ -65,6 +65,19 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 	}
+	// Git copies this immutable test-owned config into every init/clone,
+	// including bare receivers. Unlike command-local -c settings it survives
+	// receive-pack and the credential helper's environment filtering.
+	cliGitTemplate = filepath.Join(root, "git-template")
+	if err := os.Mkdir(cliGitTemplate, 0700); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(cliGitTemplate, "config"), []byte(cliGitMaintenanceConfig), 0600); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("GIT_TEMPLATE_DIR", cliGitTemplate); err != nil {
+		panic(err)
+	}
 	if !flag.Parsed() {
 		flag.Parse()
 	}

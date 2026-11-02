@@ -1112,3 +1112,182 @@ func TestGoPrefetchCleanupExhaustionRetainsEvidence(t *testing.T) {
 		})
 	}
 }
+
+// This is deliberately serial: the suite setup and fetch runner use globals.
+func TestLiveExecutorGoCachePreparation(t *testing.T) {
+	for _, mode := range []string{"explicit", "fallback", "older-host", "failure-set", "failure-unset", "disabled"} {
+		t.Run(mode, func(t *testing.T) {
+			oldUser, oldStorage, oldPrepared := userCacheDir, storageuse.UserCacheDir, liveExecutorGoCache
+			t.Cleanup(func() { userCacheDir, storageuse.UserCacheDir, liveExecutorGoCache = oldUser, oldStorage, oldPrepared })
+			home, source := hostGoEnv(t, "off", "example.com/source@v1.0.0")
+			xdg := resolvedTempDir(t)
+			t.Setenv("XDG_CACHE_HOME", xdg)
+			t.Setenv("SWARM_TEST_EXECUTOR", "1")
+			if mode == "fallback" || mode == "failure-unset" {
+				if err := os.Unsetenv("GOMODCACHE"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "disabled" {
+				t.Setenv("SWARM_TEST_EXECUTOR", "")
+			}
+			inherited, set := os.LookupEnv("GOMODCACHE")
+			root, manifests := resolvedTempDir(t), resolvedTempDir(t)
+			writeWorkerFixture(t, manifests, "go.mod", "module example.com/live\n\ngo 1.21\n")
+			writeWorkerFixture(t, manifests, "go.sum", "")
+			beforeHome, _ := os.ReadDir(home)
+			beforeSource, _ := os.Stat(source)
+			fetches := 0
+			version := "go1.21.0"
+			if mode == "older-host" {
+				version = "go1.20.0"
+			}
+			stubPrefetch(t, version, func(_ string, env, argv []string) {
+				fetches++
+				if os.Getenv("HOME") != root || os.Getenv("XDG_CACHE_HOME") != root {
+					t.Fatal("prefetch preceded isolation")
+				}
+				control, err := storageuse.ControlRoot()
+				if err != nil || !strings.HasPrefix(control, root+string(filepath.Separator)) {
+					t.Fatalf("control root: %s %v", control, err)
+				}
+				if !slices.Contains(env, "GOMODCACHE="+filepath.Join(root, "go-mod")) || !slices.Contains(env, "GOTOOLCHAIN=local") {
+					t.Fatalf("unprepared fetch environment: %v", env)
+				}
+				proxy := false
+				for _, value := range env {
+					if strings.HasPrefix(value, "GOPROXY=") && strings.Contains(value, filepath.ToSlash(filepath.Join(source, "cache", "download"))) {
+						proxy = true
+					}
+				}
+				if !proxy {
+					t.Fatal("source proxy lost")
+				}
+				toolchain := "golang.org/toolchain@v0.0.1-go1.21.0." + runtime.GOOS + "-" + runtime.GOARCH
+				toolchainFetch := slices.Equal(argv, append(slices.Clone(goModDownloadArgv), toolchain))
+				if toolchainFetch {
+					dir := filepath.Join(root, "go-mod", filepath.FromSlash(toolchain))
+					if err := os.MkdirAll(filepath.Join(dir, "src"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					writeWorkerFixture(t, dir, "src/_go.mod", "module std\n")
+					writeWorkerFixture(t, dir, "bin/go", "fixture")
+				}
+				if !(slices.Equal(argv, []string{"go", "env", "GOVERSION"}) || slices.Equal(argv, goModDownloadArgv) || toolchainFetch) {
+					t.Fatalf("not fetch-only: %v", argv)
+				}
+			})
+			fail := strings.HasPrefix(mode, "failure")
+			if fail {
+				previous := runPrefetchCommand
+				runPrefetchCommand = func(ctx context.Context, dir string, env, argv []string) ([]byte, []byte, error) {
+					_, _, _ = previous(ctx, dir, env, argv)
+					nested := filepath.Join(root, "go-mod", "partial", "nested")
+					if err := os.MkdirAll(nested, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					writeWorkerFixture(t, nested, "file", "partial")
+					if err := os.Chmod(nested, 0o555); err != nil {
+						t.Fatal(err)
+					}
+					return nil, nil, errors.New("injected fetch failure")
+				}
+			}
+			err := prepareLiveExecutorGoCache(root, manifests)
+			if fail {
+				if err == nil || liveExecutorGoCache != "" {
+					t.Fatalf("failure published cache: %v", err)
+				}
+				got, gotSet := os.LookupEnv("GOMODCACHE")
+				if got != inherited || gotSet != set {
+					t.Fatal("inherited state lost")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "disabled" {
+				if fetches != 0 || os.Getenv("GOMODCACHE") != inherited || liveExecutorGoCache != "" {
+					t.Fatal("non-live preparation changed dependencies")
+				}
+			} else if !fail {
+				if mode == "older-host" {
+					tool := filepath.Join(root, "go-mod", "golang.org", "toolchain@v0.0.1-go1.21.0."+runtime.GOOS+"-"+runtime.GOARCH)
+					info, err := os.Stat(filepath.Join(tool, "bin", "go"))
+					if err != nil || info.Mode()&0o111 == 0 {
+						t.Fatalf("toolchain not completed: %v", err)
+					}
+					if _, err := os.Stat(filepath.Join(tool, "src", "go.mod")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if fetches < 2 || liveExecutorGoCache != os.Getenv("GOMODCACHE") {
+					t.Fatal("execution would precede preparation")
+				}
+				for _, deps := range []Dependencies{liveExecutorDependencies(t), {Mode: SharedHostCaches}} {
+					flags, err := executorFlags(resolvedTempDir(t), false, nil, deps, "true", nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cache := liveExecutorGoCache
+					ro, env := false, false
+					for i, arg := range flags {
+						if arg == "--share-net" {
+							t.Fatal("network enabled")
+						}
+						if i+2 < len(flags) && flags[i+1] == cache {
+							if arg == "--bind" || arg == "--overlay-src" {
+								t.Fatal("writable dependency mount")
+							}
+							if arg == "--ro-bind" && flags[i+2] == cache {
+								ro = true
+							}
+						}
+						if i+2 < len(flags) && arg == "--setenv" && flags[i+1] == "GOMODCACHE" && flags[i+2] == cache {
+							env = true
+						}
+					}
+					if !ro || !env || !slices.Contains(flags, "--unshare-all") {
+						t.Fatalf("missing isolation flags: %v", flags)
+					}
+				}
+				nested := filepath.Join(root, "go-mod", "readonly", "nested")
+				if err := os.MkdirAll(nested, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				writeWorkerFixture(t, nested, "file", "complete")
+				if err := os.Chmod(nested, 0o555); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := cleanupLiveExecutorGoCache(root); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Fatalf("owned tree remains: %v", err)
+			}
+			afterHome, _ := os.ReadDir(home)
+			if len(beforeHome) != len(afterHome) {
+				t.Fatal("original HOME changed")
+			}
+			entries, _ := os.ReadDir(xdg)
+			if len(entries) != 0 {
+				t.Fatal("original XDG changed")
+			}
+			afterSource, _ := os.Stat(source)
+			if beforeSource.Mode() != afterSource.Mode() || !moduleExtracted(source, "example.com/source@v1.0.0") {
+				t.Fatal("source changed")
+			}
+		})
+	}
+	t.Run("cleanup failure", func(t *testing.T) {
+		previous := removeLiveExecutorCache
+		t.Cleanup(func() { removeLiveExecutorCache = previous })
+		removeLiveExecutorCache = func(string) error { return errors.New("injected removal failure") }
+		if err := cleanupLiveExecutorGoCache(resolvedTempDir(t)); err == nil || !strings.Contains(err.Error(), "injected removal") {
+			t.Fatalf("lost cleanup failure: %v", err)
+		}
+	})
+}

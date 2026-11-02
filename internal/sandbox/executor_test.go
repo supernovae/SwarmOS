@@ -261,7 +261,7 @@ func TestBubblewrapAgentBuildCacheReuse(t *testing.T) {
 	work := resolvedTempDir(t)
 	writeWorkerFixture(t, work, "go.mod", "module example.com/reuse\n\ngo 1.21\n")
 	writeWorkerFixture(t, work, "main.go", "package main\n\nfunc main() {}\n")
-	e := ToolExecutor{Work: work, BuildCaches: caches}
+	e := ToolExecutor{Work: work, BuildCaches: caches, Dependencies: liveExecutorDependencies(t)}
 	write := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do printf run1 > "$d/m"; done`
 	read := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/m")" = run1; done`
 	for _, script := range []string{write, read} {
@@ -310,14 +310,14 @@ func TestBubblewrapValidationBuildCacheIsolation(t *testing.T) {
 		script := fmt.Sprintf(`set -eu; test ! -e %q; test ! -e %q; test "$%s" = %q; printf warm > "$%s/validator-marker"`,
 			filepath.Join(c.Dir, "agent-marker"), c.Dir, v.EnvKey, v.Dir, v.EnvKey)
 		var out strings.Builder
-		if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, Dependencies{}, true, &out, &out); err != nil {
+		if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, liveExecutorDependencies(t), true, &out, &out); err != nil {
 			t.Fatal(err, out.String())
 		}
 		if _, err := os.Stat(filepath.Join(v.Dir, "validator-marker")); err != nil {
 			t.Fatalf("%s: warm-up did not write the validator cache: %v", v.Ecosystem, err)
 		}
 		// Agents can neither see nor write the validator cache.
-		e := ToolExecutor{Work: resolvedTempDir(t), BuildCaches: agent}
+		e := ToolExecutor{Work: resolvedTempDir(t), BuildCaches: agent, Dependencies: liveExecutorDependencies(t)}
 		out.Reset()
 		if err := runCoordinatorExecutor(t, e, t.Context(), `set -eu; test ! -e "$1"; if (printf x > "$1/agent-wrote") 2>/dev/null; then exit 9; fi`, &out, &out, v.Dir); err != nil {
 			t.Fatalf("%s: agent reached the validator cache: %v %s", v.Ecosystem, err, out.String())
@@ -346,7 +346,7 @@ func TestBubblewrapCandidateWritesDiscarded(t *testing.T) {
 	cfg := &contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: "omp", Binary: "not-used-by-validation"}}}
 	script := `set -eu; for d in "$GOCACHE" "$CARGO_TARGET_DIR" "$CCACHE_DIR"; do test "$(cat "$d/warm-marker")" = warm; printf bad > "$d/candidate-marker"; printf bad > "$d/warm-marker"; done`
 	var out strings.Builder
-	if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, Dependencies{}, false, &out, &out); err != nil {
+	if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, script, validator, liveExecutorDependencies(t), false, &out, &out); err != nil {
 		t.Fatal(err, out.String())
 	}
 	for _, c := range validator {

@@ -3,9 +3,11 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/storageuse"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,19 +42,115 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	// Agent build caches never touch the real user cache in tests.
 	cache, err := os.MkdirTemp("", "swarm-sandbox-cache-*")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	userCacheDir = func() (string, error) { return cache, nil }
-	storageuse.UserCacheDir = os.UserCacheDir
-	os.Setenv("XDG_CACHE_HOME", cache)
-	os.Setenv("HOME", cache)
-	code := m.Run()
-	os.RemoveAll(cache)
+	code := 1
+	if err := prepareLiveExecutorGoCache(cache, "../.."); err != nil {
+		fmt.Fprintln(os.Stderr, "prepare live executor cache:", err)
+	} else {
+		code = m.Run()
+	}
+	if err := cleanupLiveExecutorGoCache(cache); err != nil {
+		fmt.Fprintln(os.Stderr, "cleanup live executor cache:", err)
+		if code == 0 {
+			code = 1
+		}
+	}
 	os.Exit(code)
+}
+
+var liveExecutorGoCache string
+
+// Capture the source before isolating HOME, but allocate prefetch storage only
+// after isolation. Neither prefetch nor cleanup may write the source cache.
+func prepareLiveExecutorGoCache(root, manifests string) (result error) {
+	liveExecutorGoCache = ""
+	live := os.Getenv("SWARM_TEST_EXECUTOR") == "1"
+	inherited, wasSet := os.LookupEnv("GOMODCACHE")
+	source := ""
+	if live {
+		source = hostGoModCache()
+		if source != "" {
+			var err error
+			source, err = filepath.Abs(source)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	userCacheDir = func() (string, error) { return root, nil }
+	storageuse.UserCacheDir = os.UserCacheDir
+	if err := os.Setenv("XDG_CACHE_HOME", root); err != nil {
+		return err
+	}
+	if err := os.Setenv("HOME", root); err != nil {
+		return err
+	}
+	if !live {
+		return nil
+	}
+	defer func() {
+		if result != nil {
+			if wasSet {
+				_ = os.Setenv("GOMODCACHE", inherited)
+			} else {
+				_ = os.Unsetenv("GOMODCACHE")
+			}
+		}
+	}()
+	if err := os.Setenv("GOMODCACHE", source); err != nil {
+		return err
+	}
+	files := map[string][]byte{}
+	for _, name := range []string{"go.mod", "go.sum"} {
+		data, err := os.ReadFile(filepath.Join(manifests, name))
+		if err != nil {
+			return err
+		}
+		files[name] = data
+	}
+	dest := filepath.Join(root, "go-mod")
+	if err := os.Mkdir(dest, 0o700); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := goModDownload(ctx, prefetchRequest{Dir: dest, Files: files}); err != nil {
+		return err
+	}
+	if err := os.Setenv("GOMODCACHE", dest); err != nil {
+		return err
+	}
+	liveExecutorGoCache = dest
+	return nil
+}
+
+// WalkDir never follows links. Only directories in the owned suite tree are
+// made writable, including Go's read-only extracted module directories.
+func cleanupLiveExecutorGoCache(root string) error {
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0o700)
+		}
+		return nil
+	})
+	return errors.Join(walkErr, removeLiveExecutorCache(root))
+}
+
+var removeLiveExecutorCache = os.RemoveAll
+
+func liveExecutorDependencies(t *testing.T) Dependencies {
+	t.Helper()
+	if liveExecutorGoCache == "" {
+		t.Fatal("live executor Go cache was not prepared")
+	}
+	return Dependencies{Caches: []DependencyCache{{Ecosystem: "go", EnvKey: "GOMODCACHE", Dir: liveExecutorGoCache}}}
 }
 
 func TestAuthenticatedDelegatedTools(t *testing.T) {

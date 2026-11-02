@@ -227,6 +227,12 @@ func maintenancePass(ctx context.Context, o MaintenanceOptions) (MaintenanceSumm
 	out.UsageCounters = s.usageBudget.Counters
 	out.ObservedBytes = s.out.ObservedAllocatedBytes
 	out.Complete = out.Complete && s.out.Complete && s.physical
+	var manager *storageuse.Manager
+	defer func() {
+		if manager != nil {
+			manager.Close()
+		}
+	}()
 	units := []maintenanceUnit{}
 	ro := ReclaimOptions{CacheRoot: o.CacheRoot}
 	for _, r := range s.out.Resources {
@@ -244,6 +250,32 @@ func maintenancePass(ctx context.Context, o MaintenanceOptions) (MaintenanceSumm
 		key := parts[1]
 		sc, ok := selected[key]
 		use := storageuse.ResourceFor(key, r.Class, r.Path)
+		if ok && reclaimLayout(ro, use, key) {
+			if manager == nil {
+				manager, err = storageuse.Open(o.UseRoot, o.CacheRoot)
+				if err != nil {
+					out.Complete = false
+					continue
+				}
+			}
+			lockCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			changed, recoverErr := manager.Recover(lockCtx, use, o.Now, s.b.Workspace)
+			cancel()
+			if recoverErr != nil {
+				continue
+			}
+			if changed {
+				observation, observeErr := storageuse.Observe(ctx, o.UseRoot, use, 16<<10, s.b.Workspace)
+				if observeErr != nil {
+					continue
+				}
+				r.Active = observation.Active
+				r.LastUse = &observation.LastUse
+				// Recovery starts a fresh ordinary idle interval, even if the supplied
+				// maintenance clock has moved backwards.
+				continue
+			}
+		}
 		if !ok || !reclaimLayout(ro, use, key) || r.Active == nil || *r.Active || r.LastUse == nil || r.LastUse.IsZero() || r.LastUse.After(o.Now) || o.Now.Sub(*r.LastUse) < o.Policy.IdleAge || r.AllocatedBytes == nil {
 			continue
 		}
@@ -290,12 +322,7 @@ func maintenancePass(ctx context.Context, o MaintenanceOptions) (MaintenanceSumm
 		}
 	}
 	remaining := out.ObservedBytes
-	var manager *storageuse.Manager
-	defer func() {
-		if manager != nil {
-			manager.Close()
-		}
-	}()
+
 	for _, u := range units {
 		if remaining <= o.Policy.TargetBytes {
 			break

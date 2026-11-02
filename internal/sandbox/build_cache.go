@@ -386,6 +386,9 @@ func acquireCacheUse(ctx context.Context, repository, class, location string) er
 	if scope == nil {
 		return fmt.Errorf("storage use scope required for %s", class)
 	}
+	if class == string(AgentBuildCache) || class == string(ValidatorBuildCache) {
+		return scope.AcquirePrepared(ctx, storageuse.ResourceFor(repository, class, location))
+	}
 	return scope.Acquire(ctx, storageuse.ResourceFor(repository, class, location))
 }
 

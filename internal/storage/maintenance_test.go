@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -590,5 +591,56 @@ func TestMaintenanceAggregateAccountingOverflow(t *testing.T) {
 	_ = usage(s, r.Location)
 	if s.out.ObservedAllocatedBytes != math.MaxInt64 || s.physical {
 		t.Fatal("aggregate overflow wrapped or became complete", s.out, s.physical)
+	}
+}
+
+func TestMaintenanceRecoveryBeforeIdleAndPressureFilter(t *testing.T) {
+	for _, pressure := range []bool{false, true} {
+		t.Run(fmt.Sprint(pressure), func(t *testing.T) {
+			o, _, r := maintenanceFixture(t)
+			o.UseRoot = interruptedRecoveryUse(t, o.UseRoot, r)
+			if !pressure {
+				o.Policy.TargetBytes = math.MaxInt64
+			}
+			before := reclamationSnapshot(t, o.UseRoot)
+			ro := o
+			ro.ReadOnly = true
+			if _, _, err := Maintain(context.Background(), ro); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, reclamationSnapshot(t, o.UseRoot)) {
+				t.Fatal("read-only maintenance changed ledger")
+			}
+			if _, _, err := Maintain(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			observation, err := storageuse.Observe(context.Background(), o.UseRoot, r, 16384, func(int64) error { return nil })
+			if err != nil || observation.Active == nil || *observation.Active || !observation.LastUse.Equal(o.Now) {
+				t.Fatalf("%+v %v", observation, err)
+			}
+			if _, err := os.Stat(r.Location); err != nil {
+				t.Fatal("recovery deleted cache", err)
+			}
+			o.Now = o.Now.Add(o.Policy.Interval)
+			if _, _, err := Maintain(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			again, err := storageuse.Observe(context.Background(), o.UseRoot, r, 16384, func(int64) error { return nil })
+			if err != nil || !again.LastUse.Equal(observation.LastUse) {
+				t.Fatal("repeated pass reset recency", err)
+			}
+			o.Policy.TargetBytes = 1
+			o.Now = o.Now.Add(o.Policy.IdleAge)
+			summary, _, err := Maintain(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary.RemovedNamespaceBytes == 0 {
+				t.Fatalf("idle cache not removed: %+v", summary)
+			}
+			if _, err := os.Stat(r.Location); !os.IsNotExist(err) {
+				t.Fatalf("idle cache remains: %v", err)
+			}
+		})
 	}
 }

@@ -310,3 +310,72 @@ func TestToolExecutorWorkerNoControlHelper(t *testing.T) {
 	// outer run, even when runtime setup fails before a Bubblewrap command starts.
 	_ = executor.Run(context.Background(), "exit 0", io.Discard, io.Discard)
 }
+
+func TestBoundaryEvidenceOutsideConsumerIsPermanent(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux evidence")
+	}
+	isolateRuntimeControl(t)
+	ctx, owner, err := storageuse.Ensure(context.Background(), strings.Repeat("a", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Finish()
+	scope := storageuse.FromContext(ctx)
+	path := filepath.Join(resolvedTempDir(t), "agent-build", strings.Repeat("a", 32), "go")
+	resource := storageuse.ResourceFor(scope.Repository(), "agent-build", path)
+	if err := scope.AcquirePrepared(ctx, resource); err != nil {
+		t.Fatal(err)
+	}
+	if err := runNativeCommand(ctx, "/bin/sh", t.TempDir(), []string{"PATH=/usr/bin:/bin"}, []string{"-c", "exit 0"}, nil, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	// A later contained admission must inherit the earlier native contamination.
+	if err := scope.AcquirePrepared(ctx, resource); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := scope.ReserveBoundary(ctx, []string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := storageuse.CaptureProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.Seal(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := storageuse.ControlRoot()
+	records, _ := filepath.Glob(filepath.Join(root, "*.json"))
+	if len(records) != 1 {
+		t.Fatal(records)
+	}
+	data, err := os.ReadFile(records[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Evidence map[string]struct{ Outside bool }
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Evidence) != 2 {
+		t.Fatalf("missing evidence: %s", data)
+	}
+	for _, e := range v.Evidence {
+		if !e.Outside {
+			t.Fatal("later boundary erased native consumer")
+		}
+	}
+	scope.Retain()
+}
+
+func TestBoundaryEvidenceRejectsLauncherPID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux proc evidence")
+	}
+	if _, err := executorBoundaryIdentity(os.Getpid(), os.Getppid()); err == nil {
+		t.Fatal("host process accepted as namespace init")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -654,6 +655,21 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 			result.Reason = "resource overlaps repository or Git evidence"
 			out.Resources = append(out.Resources, result)
 			continue
+		}
+		if apply && ok && reclaimLayout(opts, r, r.Repository) {
+			recoveryCtx, cancelRecovery := context.WithTimeout(ctx, 100*time.Millisecond)
+			recovered, recoverErr := manager.Recover(recoveryCtx, r, time.Now().UTC(), s.b.Workspace)
+			cancelRecovery()
+			if recoverErr != nil {
+				result.Reason = "use evidence unavailable for recovery"
+				out.Resources = append(out.Resources, result)
+				continue
+			}
+			if recovered {
+				result.Reason = "interrupted boundary use recovered; idle retention restarted"
+				out.Resources = append(out.Resources, result)
+				continue
+			}
 		}
 		// Dead completed registrations need no retention lookup, but pruning still
 		// requires this resource's exact maintenance exclusion and selected scope.

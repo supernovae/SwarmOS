@@ -1486,3 +1486,134 @@ func TestReclamationRemovalBoundRetains(t *testing.T) {
 		t.Fatalf("leaf changed: %s %v", data, err)
 	}
 }
+
+// TestRecoveryCoordinatorHelper runs only in a killed subprocess. It admits
+// through the real coordinator API and publishes readiness after durable sealing.
+func TestRecoveryCoordinatorHelper(t *testing.T) {
+	root := os.Getenv("SWARM_TEST_RECOVERY_ROOT")
+	if root == "" {
+		return
+	}
+	var r storageuse.Resource
+	if err := json.Unmarshal([]byte(os.Getenv("SWARM_TEST_RECOVERY_RESOURCE")), &r); err != nil {
+		t.Fatal(err)
+	}
+	storageuse.UserCacheDir = func() (string, error) { return root, nil }
+	ctx, _, err := storageuse.Ensure(context.Background(), r.Repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := storageuse.FromContext(ctx)
+	if err := scope.AcquirePrepared(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := scope.ReserveBoundary(ctx, []string{r.Location})
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := exec.Command("sleep", "60")
+	if err := boundary.Start(); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := storageuse.CaptureProcess(boundary.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reservation.Seal(ctx, identity); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println(boundary.Process.Pid)
+	_ = boundary.Wait()
+	fmt.Println("reaped")
+	// The parent holds stdin open until it kills this coordinator.
+	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
+func interruptedRecoveryUse(t *testing.T, control string, r storageuse.Resource) string {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux process identities")
+	}
+	target := filepath.Join(filepath.Dir(control), "swarm-use")
+	if control != target {
+		if err := os.Rename(control, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRecoveryCoordinatorHelper$")
+	cmd.Env = append(os.Environ(), "SWARM_TEST_RECOVERY_ROOT="+filepath.Dir(target), "SWARM_TEST_RECOVERY_RESOURCE="+string(data))
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	var pid int
+	if _, err := fmt.Fscanln(out, &pid); err != nil {
+		t.Fatal(err)
+	}
+	boundary, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = boundary.Kill() })
+	// Kill the boundary first, then allow its coordinator to reap it, so proc
+	// disappearance is deterministic even on hosts whose PID 1 leaves zombies.
+	if err := boundary.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	var reaped string
+	if _, err := fmt.Fscanln(out, &reaped); err != nil || reaped != "reaped" {
+		t.Fatalf("boundary barrier: %s %v", reaped, err)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("coordinator was not killed")
+	}
+	// The helper intentionally never calls Scope.Finish: the use is interrupted.
+	return target
+}
+
+func TestAppliedCleanupRecovery(t *testing.T) {
+	o, _, r := reclaimFixture(t, "agent-build")
+	o.ControlRoot = interruptedRecoveryUse(t, o.ControlRoot, r)
+	before := reclamationSnapshot(t, o.ControlRoot)
+	preview, err := PreviewReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Resources) != 1 || preview.Resources[0].Outcome != ReclaimRetained {
+		t.Fatalf("%+v", preview)
+	}
+	if !reflect.DeepEqual(before, reclamationSnapshot(t, o.ControlRoot)) {
+		t.Fatal("preview changed ledger")
+	}
+	result, err := ApplyReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Resources) != 1 || result.Resources[0].Outcome != ReclaimRetained {
+		t.Fatalf("%+v", result)
+	}
+	observation, err := storageuse.Observe(context.Background(), o.ControlRoot, r, 16384, func(int64) error { return nil })
+	if err != nil || observation.Active == nil || *observation.Active {
+		t.Fatalf("%+v %v", observation, err)
+	}
+	if _, err := os.Stat(r.Location); err != nil {
+		t.Fatal("recovered cache removed immediately", err)
+	}
+}

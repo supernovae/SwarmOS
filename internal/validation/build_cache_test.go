@@ -584,3 +584,51 @@ func TestStorageControlRootFollowsProducerCacheHook(t *testing.T) {
 		t.Fatalf("producer did not write isolated evidence: %v %v", entries, err)
 	}
 }
+
+func TestHostValidationBoundaryEvidenceIsOutside(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux process identities")
+	}
+	root := t.TempDir()
+	previous := storageuse.UserCacheDir
+	storageuse.UserCacheDir = func() (string, error) { return root, nil }
+	t.Cleanup(func() { storageuse.UserCacheDir = previous })
+	ctx, owner, err := storageuse.Ensure(context.Background(), strings.Repeat("a", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Finish()
+	scope := storageuse.FromContext(ctx)
+	resource := storageuse.ResourceFor(scope.Repository(), "validate-build", filepath.Join(root, "cache"))
+	if err := scope.AcquirePrepared(ctx, resource); err != nil {
+		t.Fatal(err)
+	}
+	runner := checkRunner{worktree: t.TempDir(), home: t.TempDir()}
+	var output strings.Builder
+	if err := runner.runOnHost(ctx, "true", &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	records, _ := filepath.Glob(filepath.Join(root, "swarm-use", "*.json"))
+	if len(records) != 1 {
+		t.Fatal(records)
+	}
+	data, err := os.ReadFile(records[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Evidence map[string]struct{ Outside bool }
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.Evidence) != 1 {
+		t.Fatal("evidence missing")
+	}
+	for _, e := range v.Evidence {
+		if !e.Outside {
+			t.Fatal("host command retained qualifying evidence")
+		}
+	}
+	scope.Retain()
+}

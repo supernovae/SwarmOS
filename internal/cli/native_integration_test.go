@@ -72,6 +72,24 @@ func TestMain(m *testing.M) {
 		ledgerExit(1)
 	}
 
+	// Persist suppression in every init/clone, including receive-side bare repos.
+	template := filepath.Join(root, "git-template")
+	if err := os.Mkdir(template, 0o700); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.RemoveAll(root)
+		ledgerExit(1)
+	}
+	if err := os.WriteFile(filepath.Join(template, "config"), []byte("[gc]\n auto = 0\n autoDetach = false\n[maintenance]\n auto = false\n"), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.RemoveAll(root)
+		ledgerExit(1)
+	}
+	if err := os.Setenv("GIT_TEMPLATE_DIR", template); err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain:", err)
+		os.RemoveAll(root)
+		ledgerExit(1)
+	}
+
 	maintenanceCacheDir = os.UserCacheDir
 	for _, dir := range []struct{ name, sub string }{
 		{"HOME", "home"},
@@ -467,5 +485,132 @@ func TestStorageLedgerProducerIgnoresEnvironment(t *testing.T) {
 	restored, err := storageuse.ControlRoot()
 	if err != nil || restored != control {
 		t.Fatal("resolver moved", restored, err)
+	}
+}
+
+// maintenanceGit deliberately avoids gitfixture's command-line suppression.
+func maintenanceGit(t *testing.T, dir, trace string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_TRACE2_EVENT="+trace)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestCLIGitMaintenanceConfiguration(t *testing.T) {
+	t.Parallel()
+	f := newCLIFixture(t)
+	raw := filepath.Join(t.TempDir(), "raw")
+	bare := filepath.Join(t.TempDir(), "origin.git")
+	clone := filepath.Join(t.TempDir(), "clone")
+	bareClone := filepath.Join(t.TempDir(), "clone.git")
+	maintenanceGit(t, "", "", "init", raw)
+	maintenanceGit(t, "", "", "init", "--bare", bare)
+	maintenanceGit(t, "", "", "clone", f.root, clone)
+	maintenanceGit(t, "", "", "clone", "--bare", f.root, bareClone)
+	n := strconv.Itoa(f.create(t, "agent"))
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "claim", n, "--agent", "mock")
+	worktree := filepath.Join(f.root, ".swarm", "worktrees", "issue-"+n)
+	common := maintenanceGit(t, worktree, "", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if common != filepath.Join(f.root, ".git") {
+		t.Fatalf("linked worktree common directory = %q", common)
+	}
+	for _, repo := range []string{f.root, raw, bare, clone, bareClone, worktree} {
+		for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false", "gc.autoDetach": "false"} {
+			if got := maintenanceGit(t, repo, "", "config", "--local", "--get", key); got != want {
+				t.Errorf("%s: %s = %q, want %q", repo, key, got, want)
+			}
+		}
+	}
+}
+
+// Git Trace2 emits both child commands and the command line of each Git process.
+func maintenanceTraceCommand(event string, argv []string) string {
+	if event != "start" && event != "child_start" {
+		return ""
+	}
+	for _, arg := range argv {
+		switch arg {
+		case "maintenance", "gc", "repack", "push", "clone":
+			return arg
+		}
+	}
+	return ""
+}
+
+func TestCLIGitMaintenanceTraceParser(t *testing.T) {
+	for _, event := range []string{"start", "child_start"} {
+		for _, command := range []string{"maintenance", "gc", "repack", "push", "clone"} {
+			for _, prefix := range [][]string{{"git"}, {"/usr/bin/git", "-C", "/repo"}, {}} {
+				argv := append(append([]string{}, prefix...), command, "--auto")
+				if got := maintenanceTraceCommand(event, argv); got != command {
+					t.Fatalf("%s %v: got %q", event, argv, got)
+				}
+			}
+		}
+	}
+	if got := maintenanceTraceCommand("exit", []string{"git", "gc"}); got != "" {
+		t.Fatalf("unrelated event matched: %q", got)
+	}
+}
+
+func TestCLIGitMaintenancePackPressure(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	trace := filepath.Join(t.TempDir(), "trace.json")
+	origin := filepath.Join(root, "origin.git")
+	source := filepath.Join(root, "source")
+	clone := filepath.Join(root, "clone")
+	run := func(dir string, args ...string) string { return maintenanceGit(t, dir, trace, args...) }
+	run("", "init", "--bare", origin)
+	run(origin, "config", "gc.autoPackLimit", "1")
+	run(origin, "config", "receive.unpackLimit", "1")
+	run("", "init", source)
+	run(source, "config", "user.name", "Test")
+	run(source, "config", "user.email", "test@example.invalid")
+	for i := range 3 {
+		if err := os.WriteFile(filepath.Join(source, "file"), []byte(strconv.Itoa(i)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		run(source, "add", "file")
+		run(source, "commit", "-m", strconv.Itoa(i))
+		run(source, "push", origin, "HEAD:refs/heads/main")
+	}
+	packs, err := filepath.Glob(filepath.Join(origin, "objects", "pack", "*.pack"))
+	if err != nil || len(packs) < 2 {
+		t.Fatalf("pack pressure missing: %v, %v", packs, err)
+	}
+	run("", "clone", origin, clone)
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil || len(data) == 0 {
+		t.Fatalf("missing trace: %v", err)
+	}
+	seen := map[string]bool{}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	for decoder.More() {
+		var event struct {
+			Event string   `json:"event"`
+			Argv  []string `json:"argv"`
+		}
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		command := maintenanceTraceCommand(event.Event, event.Argv)
+		switch command {
+		case "maintenance", "gc", "repack":
+			t.Errorf("automatic Git worker: %s %v", event.Event, event.Argv)
+		}
+		seen[command] = true
+	}
+	if !seen["push"] || !seen["clone"] {
+		t.Fatalf("trace lacks push/clone activity: %v", seen)
 	}
 }

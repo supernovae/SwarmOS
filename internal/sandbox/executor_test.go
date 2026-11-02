@@ -255,7 +255,8 @@ func TestBubblewrapAgentBuildCacheReuse(t *testing.T) {
 	isolateRuntimeControl(t)
 	useUserCache(t)
 	repo := cacheTestRepo(t)
-	caches, err := agentBuildCaches(t.Context(), repo, resolvedTempDir(t), WorkerOptions{Role: "developer"})
+	prep, complete := fixturePreparation(t, repo)
+	caches, err := agentBuildCaches(prep, repo, resolvedTempDir(t), WorkerOptions{Role: "developer"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,9 +272,17 @@ func TestBubblewrapAgentBuildCacheReuse(t *testing.T) {
 			t.Fatal(err, out.String())
 		}
 	}
+	complete()
 	assertRuntimePending(t, 0)
 	if _, err := exec.LookPath("go"); err != nil {
 		return
+	}
+	prep, complete = fixturePreparation(t, repo)
+	reused := prepareFixtureCaches(t, prep, AgentBuildCache, repo, rootCache(t))
+	for i := range caches {
+		if reused[i].Dir != caches[i].Dir {
+			t.Fatal("reprepared cache changed location")
+		}
 	}
 	var outputs []string
 	for range 2 {
@@ -289,6 +298,7 @@ func TestBubblewrapAgentBuildCacheReuse(t *testing.T) {
 	if strings.Contains(outputs[1], "/compile ") {
 		t.Fatalf("second build recompiled despite the agent cache:\n%s", outputs[1])
 	}
+	complete()
 	assertRuntimePending(t, 0)
 }
 
@@ -297,8 +307,9 @@ func TestBubblewrapValidationBuildCacheIsolation(t *testing.T) {
 	isolateRuntimeControl(t)
 	root := useUserCache(t)
 	repo := cacheTestRepo(t)
-	agent := mustPrepare(t, AgentBuildCache, repo, root, resolvedTempDir(t))
-	validator := mustPrepare(t, ValidatorBuildCache, repo, root, resolvedTempDir(t))
+	prep, complete := fixturePreparation(t, repo)
+	agent := prepareFixtureCaches(t, prep, AgentBuildCache, repo, root)
+	validator := prepareFixtureCaches(t, prep, ValidatorBuildCache, repo, root)
 	for _, c := range agent {
 		if err := os.WriteFile(filepath.Join(c.Dir, "agent-marker"), []byte("agent"), 0o600); err != nil {
 			t.Fatal(err)
@@ -327,6 +338,7 @@ func TestBubblewrapValidationBuildCacheIsolation(t *testing.T) {
 			t.Fatalf("%s: agent wrote the validator cache: %v", v.Ecosystem, err)
 		}
 	}
+	complete()
 	assertRuntimePending(t, 0)
 }
 
@@ -338,7 +350,8 @@ func TestBubblewrapCandidateWritesDiscarded(t *testing.T) {
 	}
 	root := useUserCache(t)
 	repo := cacheTestRepo(t)
-	validator := mustPrepare(t, ValidatorBuildCache, repo, root, resolvedTempDir(t))
+	prep, complete := fixturePreparation(t, repo)
+	validator := prepareFixtureCaches(t, prep, ValidatorBuildCache, repo, root)
 	for _, c := range validator {
 		if err := os.WriteFile(filepath.Join(c.Dir, "warm-marker"), []byte("warm"), 0o600); err != nil {
 			t.Fatal(err)
@@ -358,6 +371,7 @@ func TestBubblewrapCandidateWritesDiscarded(t *testing.T) {
 			t.Fatalf("%s: candidate write persisted: %v", c.Ecosystem, err)
 		}
 	}
+	complete()
 	assertRuntimePending(t, 0)
 }
 

@@ -199,7 +199,7 @@ func runLegacyNativeCommand(ctx context.Context, binary, dir string, env, args [
 		if scope := storageuse.FromContext(ctx); scope != nil {
 			scope.Retain()
 		}
-		return errors.Join(err, &nativeTerminationError{cause: stopErr})
+		return errors.Join(err, &nativeTerminationError{cause: nativeLauncherStopError(stopErr)})
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -837,6 +837,13 @@ func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOption
 
 // Native scope containment adds storage lifetime evidence; the existing native
 // sandbox remains responsible for filesystem, network and credential policy.
+func nativeLauncherStopError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("launcher StopVerified: %w", err)
+}
+
 type nativeTerminationError struct{ cause error }
 
 func (e *nativeTerminationError) Error() string { return "terminate native worker: " + e.cause.Error() }
@@ -1027,13 +1034,13 @@ func runNativeCommandWithBoundary(ctx context.Context, binary, dir string, env, 
 			if scope != nil {
 				scope.Retain()
 			}
-			result = errors.Join(result, &nativeTerminationError{cause: errors.Join(cleanupErr, stopErr)})
+			result = errors.Join(result, &nativeTerminationError{cause: errors.Join(cleanupErr, nativeLauncherStopError(stopErr))})
 		} else if reservation != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := reservation.MarkEmpty(cleanupCtx); err != nil {
 				scope.Retain()
-				result = errors.Join(result, &nativeTerminationError{cause: err})
+				result = errors.Join(result, &nativeTerminationError{cause: fmt.Errorf("reservation MarkEmpty: %w", err)})
 			}
 		}
 	}()

@@ -142,7 +142,7 @@ func (n *nativeSystemdScope) command(ctx context.Context, binary, dir string) (*
 }
 func (n *nativeSystemdScope) verify(identity storageuse.NativeIdentity) error {
 	if identity.Unit != n.unit || !storageuse.ValidNativeIdentity(identity) {
-		return storageuse.ErrUnsafe
+		return fmt.Errorf("%w: invalid native identity or unit mismatch", storageuse.ErrUnsafe)
 	}
 	// Cross-check the helper's report with current kernel state, including the
 	// boot and mounted hierarchy. It must still be the same populated scope.
@@ -156,8 +156,14 @@ func (n *nativeSystemdScope) verify(identity storageuse.NativeIdentity) error {
 	if err != nil {
 		return err
 	}
+	if observed.Boot != identity.Boot {
+		return fmt.Errorf("%w: native boot identity mismatch", storageuse.ErrUnsafe)
+	}
+	if observed.MountDevice != identity.MountDevice || observed.MountInode != identity.MountInode {
+		return fmt.Errorf("%w: native mount identity mismatch", storageuse.ErrUnsafe)
+	}
 	if observed != identity {
-		return storageuse.ErrUnsafe
+		return fmt.Errorf("%w: native cgroup identity mismatch", storageuse.ErrUnsafe)
 	}
 	return nil
 }
@@ -171,20 +177,34 @@ func (n *nativeSystemdScope) stop(identity storageuse.NativeIdentity) error {
 		process.Configure(cmd)
 		cmd.Cancel = func() error { return process.StopVerified(cmd) }
 		cmd.WaitDelay = time.Second
-		return errors.Join(cmd.Run(), process.StopVerified(cmd))
+		err := errors.Join(cmd.Run(), nativeLauncherStopError(process.StopVerified(cmd)))
+		if err != nil {
+			return fmt.Errorf("systemctl %s: %w", args[0], err)
+		}
+		return nil
 	}
-	return n.stopWith(ctx, identity, func(identity storageuse.NativeIdentity) bool {
-		return storageuse.NativeBoundaryEmpty(identity, os.ReadFile, os.Stat)
+	return n.stopWith(10*time.Second, identity, func(identity storageuse.NativeIdentity) error {
+		return storageuse.CheckNativeBoundaryEmpty(identity, os.ReadFile, os.Stat)
 	}, run)
 }
 
-func (n *nativeSystemdScope) stopWith(ctx context.Context, identity storageuse.NativeIdentity, empty func(storageuse.NativeIdentity) bool, run func(...string) error) error {
-	if identity.Unit == n.unit && empty(identity) {
+func (n *nativeSystemdScope) stopWith(budget time.Duration, identity storageuse.NativeIdentity, empty func(storageuse.NativeIdentity) error, run func(...string) error) error {
+	check := func() error {
+		if identity.Unit != n.unit {
+			return fmt.Errorf("%w: native unit mismatch", storageuse.ErrUnsafe)
+		}
+		return empty(identity)
+	}
+	if check() == nil {
 		return nil
 	}
 	killErr := run("kill", "--kill-whom=all", "--signal=KILL", n.unit)
 	stopErr := run("stop", n.unit)
-	if identity.Unit == n.unit && empty(identity) {
+	// systemctl has its own deadline; kernel exit propagation gets a fresh budget.
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	lastErr := check()
+	if lastErr == nil {
 		// Killing the final consumer can unload the scope before stop runs.
 		// Kernel proof that the recorded boundary is empty completes cleanup.
 		return nil
@@ -194,12 +214,13 @@ func (n *nativeSystemdScope) stopWith(ctx context.Context, identity storageuse.N
 	for {
 		select {
 		case <-ctx.Done():
-			return errors.Join(storageuse.ErrUnsafe, killErr, stopErr)
+			return errors.Join(fmt.Errorf("native boundary emptiness deadline: %w", ctx.Err()), lastErr, killErr, stopErr)
 		case <-ticker.C:
 			if ctx.Err() != nil {
-				return errors.Join(storageuse.ErrUnsafe, killErr, stopErr)
+				return errors.Join(fmt.Errorf("native boundary emptiness deadline: %w", ctx.Err()), lastErr, killErr, stopErr)
 			}
-			if identity.Unit == n.unit && empty(identity) {
+			lastErr = check()
+			if lastErr == nil {
 				return nil
 			}
 		}

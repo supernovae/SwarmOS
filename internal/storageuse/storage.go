@@ -1112,20 +1112,23 @@ func (m *Manager) recoverNative(ctx context.Context, r Resource, now time.Time, 
 func (u *Use) evidence(ctx context.Context, change func(*record) error) error {
 	f, _, err := u.manager.lock(ctx, u.key)
 	if err != nil {
-		return err
+		return fmt.Errorf("storage evidence lock: %w", err)
 	}
 	defer unlock(f)
 	v, err := u.manager.read(u.key, u.resource)
 	if err != nil {
-		return err
+		return fmt.Errorf("storage evidence read: %w", err)
 	}
 	if _, ok := v.Uses[u.token]; !ok {
-		return ErrUnsafe
+		return fmt.Errorf("%w: storage use no longer registered", ErrUnsafe)
 	}
 	if err := change(v); err != nil {
 		return err
 	}
-	return u.manager.write(u.key, v)
+	if err := u.manager.write(u.key, v); err != nil {
+		return fmt.Errorf("storage evidence write: %w", err)
+	}
+	return nil
 }
 
 // OutsideConsumer permanently disqualifies this scope, including later uses.
@@ -1375,60 +1378,71 @@ func CaptureNativeIdentity(unit string, read func(string) ([]byte, error), stat 
 // liveness. Missing paths count only after acknowledged creation on the same
 // mounted hierarchy; a changed mount or reused cgroup inode stays unresolved.
 func NativeBoundaryEmpty(n NativeIdentity, read func(string) ([]byte, error), stat func(string) (os.FileInfo, error)) bool {
+	return CheckNativeBoundaryEmpty(n, read, stat) == nil
+}
+
+// CheckNativeBoundaryEmpty returns the exact reason emptiness cannot be proved.
+func CheckNativeBoundaryEmpty(n NativeIdentity, read func(string) ([]byte, error), stat func(string) (os.FileInfo, error)) error {
 	if !ValidNativeIdentity(n) {
-		return false
+		return fmt.Errorf("%w: invalid native identity", ErrUnsafe)
 	}
 	raw, err := read("/proc/sys/kernel/random/boot_id")
 	if err != nil {
-		return false
+		return fmt.Errorf("%w: read /proc/sys/kernel/random/boot_id: %w", ErrUnsafe, err)
 	}
 	boot := strings.TrimSpace(string(raw))
 	if !validIdentity(ProcessIdentity{Boot: boot, PID: 1, Start: 1}) {
-		return false
+		return fmt.Errorf("%w: invalid boot identity %q", ErrUnsafe, boot)
 	}
 	if boot != n.Boot {
-		return true
+		return nil
 	}
 	if _, err = read("/sys/fs/cgroup/cgroup.controllers"); err != nil {
-		return false
+		return fmt.Errorf("%w: read /sys/fs/cgroup/cgroup.controllers: %w", ErrUnsafe, err)
 	}
 	root, err := stat("/sys/fs/cgroup")
 	if err != nil {
-		return false
+		return fmt.Errorf("%w: stat /sys/fs/cgroup: %w", ErrUnsafe, err)
 	}
 	dev, ino := fileIdentity(root)
 	if dev != n.MountDevice || ino != n.MountInode {
-		return false
+		return fmt.Errorf("%w: cgroup mount identity mismatch", ErrUnsafe)
 	}
 	path := filepath.Join("/sys/fs/cgroup", n.Group)
 	info, err := stat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return true
+		return nil
 	}
 	if err != nil {
-		return false
+		return fmt.Errorf("%w: stat %s: %w", ErrUnsafe, path, err)
 	}
 	dev, ino = fileIdentity(info)
 	if dev != n.MountDevice || ino != n.Inode {
-		return false
+		return fmt.Errorf("%w: cgroup identity mismatch at %s", ErrUnsafe, path)
 	}
 	raw, err = read(filepath.Join(path, "cgroup.events"))
-	if err != nil || len(raw) > 4096 {
-		return false
+	if err != nil {
+		return fmt.Errorf("%w: read %s/cgroup.events: %w", ErrUnsafe, path, err)
+	}
+	if len(raw) > 4096 {
+		return fmt.Errorf("%w: oversized cgroup.events", ErrUnsafe)
 	}
 	populated := ""
 	seen := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 || seen[fields[0]] {
-			return false
+			return fmt.Errorf("%w: malformed cgroup.events %q", ErrUnsafe, raw)
 		}
 		seen[fields[0]] = true
 		if fields[0] == "populated" {
 			populated = fields[1]
 		}
 	}
-	return populated == "0"
+	if populated != "0" {
+		return fmt.Errorf("%w: cgroup.events populated=%q (last read %q)", ErrUnsafe, populated, raw)
+	}
+	return nil
 }
 
 func cloneNative(in map[string]NativeEvidence) map[string]NativeEvidence {
@@ -1490,7 +1504,7 @@ func (b *NativeReservation) persist(ctx context.Context, n NativeEvidence, exist
 			}
 			old, ok := e.Native[b.id]
 			if existing && (!ok || old != b.scope.native[b.id]) {
-				return ErrUnsafe
+				return fmt.Errorf("%w: native reservation evidence missing or changed", ErrUnsafe)
 			}
 			if !ok && len(e.Native)+len(e.Consumers) >= 256 {
 				e.Outside = true
@@ -1515,7 +1529,7 @@ func (b *NativeReservation) Seal(ctx context.Context, n NativeIdentity) error {
 	}
 	next := NativeEvidence{Identity: n}
 	if err := b.persist(ctx, next, true); err != nil {
-		return err
+		return fmt.Errorf("native reservation write: %w", err)
 	}
 	b.scope.native[b.id] = next
 	return nil
@@ -1524,15 +1538,21 @@ func (b *NativeReservation) Seal(ctx context.Context, n NativeIdentity) error {
 // MarkEmpty is coordinator-only and must follow NativeBoundaryEmpty. Recovery
 // can also independently prove emptiness after a coordinator interruption.
 func (b *NativeReservation) MarkEmpty(ctx context.Context) error {
+	return b.markEmptyWith(ctx, func(n NativeIdentity) error {
+		return CheckNativeBoundaryEmpty(n, os.ReadFile, os.Stat)
+	})
+}
+
+func (b *NativeReservation) markEmptyWith(ctx context.Context, check func(NativeIdentity) error) error {
 	b.scope.mu.Lock()
 	defer b.scope.mu.Unlock()
 	next := b.scope.native[b.id]
-	if !NativeBoundaryEmpty(next.Identity, os.ReadFile, os.Stat) {
-		return ErrUnsafe
+	if err := check(next.Identity); err != nil {
+		return fmt.Errorf("reservation MarkEmpty verification: %w", err)
 	}
 	next.Empty = true
 	if err := b.persist(ctx, next, true); err != nil {
-		return err
+		return fmt.Errorf("native reservation write: %w", err)
 	}
 	b.scope.native[b.id] = next
 	return nil

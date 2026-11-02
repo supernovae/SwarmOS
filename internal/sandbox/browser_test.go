@@ -1053,14 +1053,15 @@ func TestNativeScopeStopAfterUnitUnloaded(t *testing.T) {
 			if !errors.As(unitNotLoaded, &exitErr) || exitErr.ExitCode() != 5 {
 				t.Fatalf("expected injected exit status 5, got %v", unitNotLoaded)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancel()
-			err := scope.stopWith(ctx, identity, func(got storageuse.NativeIdentity) bool {
+			err := scope.stopWith(100*time.Millisecond, identity, func(got storageuse.NativeIdentity) error {
 				checks++
 				if got != identity {
 					t.Fatalf("checked different boundary: %+v", got)
 				}
-				return !populated
+				if !populated {
+					return nil
+				}
+				return fmt.Errorf("%w: cgroup.events populated=1", storageuse.ErrUnsafe)
 			}, func(args ...string) error {
 				calls = append(calls, args)
 				if args[0] == "kill" {
@@ -1087,16 +1088,17 @@ func TestNativeScopeStopAfterUnitUnloaded(t *testing.T) {
 func TestNativeScopeStopWaitsForEmpty(t *testing.T) {
 	scope := &nativeSystemdScope{unit: "swarm-native-test.scope"}
 	identity := storageuse.NativeIdentity{Unit: scope.unit}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	checks := 0
 	var calls [][]string
-	err := scope.stopWith(ctx, identity, func(got storageuse.NativeIdentity) bool {
+	err := scope.stopWith(2*time.Second, identity, func(got storageuse.NativeIdentity) error {
 		if got != identity {
 			t.Fatalf("checked different boundary: %+v", got)
 		}
 		checks++
-		return checks >= 5
+		if checks >= 5 {
+			return nil
+		}
+		return fmt.Errorf("%w: cgroup.events populated=1", storageuse.ErrUnsafe)
 	}, func(args ...string) error {
 		calls = append(calls, args)
 		return nil
@@ -1110,17 +1112,15 @@ func TestNativeScopeStopWaitsForEmpty(t *testing.T) {
 func TestNativeScopeStopTimeoutRemainsUnsafe(t *testing.T) {
 	scope := &nativeSystemdScope{unit: "swarm-native-test.scope"}
 	identity := storageuse.NativeIdentity{Unit: scope.unit}
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
 	killErr, stopErr := errors.New("kill failed"), errors.New("stop failed")
 	checks := 0
 	var calls [][]string
-	err := scope.stopWith(ctx, identity, func(got storageuse.NativeIdentity) bool {
+	err := scope.stopWith(150*time.Millisecond, identity, func(got storageuse.NativeIdentity) error {
 		if got != identity {
 			t.Fatalf("checked different boundary: %+v", got)
 		}
 		checks++
-		return false
+		return fmt.Errorf("%w: cgroup.events populated=1 observation=%d", storageuse.ErrUnsafe, checks)
 	}, func(args ...string) error {
 		calls = append(calls, args)
 		if args[0] == "kill" {
@@ -1132,7 +1132,55 @@ func TestNativeScopeStopTimeoutRemainsUnsafe(t *testing.T) {
 	if checks <= 2 || !reflect.DeepEqual(calls, want) {
 		t.Fatalf("checks=%d calls=%v", checks, calls)
 	}
-	if ctx.Err() == nil || !errors.Is(err, storageuse.ErrUnsafe) || !errors.Is(err, killErr) || !errors.Is(err, stopErr) {
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, storageuse.ErrUnsafe) || !errors.Is(err, killErr) || !errors.Is(err, stopErr) {
 		t.Fatalf("expected expired cleanup with unsafe boundary and both command errors, got %v", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("observation=%d", checks)) {
+		t.Fatalf("missing final observation: %v", err)
+	}
+}
+
+func TestNativeScopeStopFreshPollingBudget(t *testing.T) {
+	scope := &nativeSystemdScope{unit: "test.scope"}
+	calls, checks := 0, 0
+	err := scope.stopWith(100*time.Millisecond, storageuse.NativeIdentity{Unit: scope.unit}, func(storageuse.NativeIdentity) error {
+		checks++
+		if checks >= 3 {
+			return nil
+		}
+		return fmt.Errorf("%w: cgroup.events populated=1", storageuse.ErrUnsafe)
+	}, func(...string) error {
+		calls++
+		// Exhaust more than the polling budget before it starts.
+		if calls == 2 {
+			time.Sleep(150 * time.Millisecond)
+		}
+		return context.DeadlineExceeded
+	})
+	if err != nil || checks != 3 || calls != 2 {
+		t.Fatalf("err=%v checks=%d calls=%d", err, checks, calls)
+	}
+}
+
+func TestNativeScopeStopDiagnostics(t *testing.T) {
+	scope := &nativeSystemdScope{unit: "test.scope"}
+	for _, mismatch := range []bool{false, true} {
+		identity := storageuse.NativeIdentity{Unit: scope.unit}
+		want := "cgroup.events populated=1"
+		if mismatch {
+			identity.Unit = "other.scope"
+			want = "unit mismatch"
+		}
+		err := scope.stopWith(time.Millisecond, identity, func(storageuse.NativeIdentity) error {
+			return fmt.Errorf("%w: cgroup.events populated=1", storageuse.ErrUnsafe)
+		}, func(...string) error { return nil })
+		if !errors.Is(err, storageuse.ErrUnsafe) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%v", err)
+		}
+	}
+	sentinel := errors.New("stop failed")
+	err := &nativeTerminationError{cause: nativeLauncherStopError(sentinel)}
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "launcher StopVerified") {
+		t.Fatal(err)
 	}
 }

@@ -58,3 +58,8 @@ A value the harness does not report stays `unavailable` in `swarm issue status`,
 The real RPC interface exposes exactly the approved task tools. An authenticated interactive tool task has passed with synthetic host-file denial and workspace editing and testing. A full authenticated WorkUnit is next. The test commands are in the [qualification guide](../native-qualification.md#claude-code-opencode-2-and-ohmypi).
 
 Agent budgets default to 60 minutes and can be configured globally or per role in [approved execution policy](../project.md#agent-run-budgets). Interactive native sessions count working time across turns, exclude waits for coordinator input, and have a four-hour wall cap. A warning appears before the deadline. On timeout, native Codex and harness-tools Bubblewrap preserve a bounded recovery patch for [manual inspection](../developer.md#recovering-from-an-interrupted-run). Interactive OCI counts wall time without idle exclusion, and OCI has no timeout patch export. Individual tool-call limits remain separate.
+
+
+### Browser previews
+
+Approved-base `execution.browser_profile: true` enables task-local Chromium in the Bubblewrap tools on Linux. Provision Playwright Chromium on the host and provide a systemd user manager with cgroup v2 memory accounting; preflight verifies the fixed 2 GiB scope before work starts. Run the preview server and browser in one `swarm_shell` command, use fresh task-local browser state, and save DOM, screenshots and logs to files. Each command has private loopback and a two-minute lifetime. Chromium uses `--no-sandbox` inside the Bubblewrap boundary, with the browser cache mounted read-only. See [setup and the preview example](../project.md#task-local-browser-previews).

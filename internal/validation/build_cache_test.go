@@ -24,6 +24,23 @@ import (
 // TestMain points the SwarmOS build caches at a scratch directory so tests
 // never write the real user cache.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 3 && os.Args[1] == "internal-browser-exec" {
+		if err := sandbox.ExecBrowserScope(os.Args[2], os.Args[3], os.Args[4:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Preserve the provisioned browser cache before test-only HOME/cache isolation.
+	if os.Getenv("SWARM_TEST_EXECUTOR") == "1" && os.Getenv("PLAYWRIGHT_BROWSERS_PATH") == "" {
+		for _, bind := range sandbox.HostToolchains() {
+			if bind.Ecosystem == "node-browsers" && bind.EnvKey == "PLAYWRIGHT_BROWSERS_PATH" {
+				os.Setenv("PLAYWRIGHT_BROWSERS_PATH", bind.EnvVal)
+				break
+			}
+		}
+	}
 	dir, err := os.MkdirTemp("", "swarm-validation-cache-*")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

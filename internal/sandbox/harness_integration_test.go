@@ -23,9 +23,18 @@ import (
 // Exercise the real stdio server from installed harnesses without requiring a
 // separately built swarm binary. This branch is available only in the test binary.
 func TestMain(m *testing.M) {
+	if len(os.Args) > 3 && os.Args[1] == "internal-browser-exec" {
+		if err := ExecBrowserScope(os.Args[2], os.Args[3], os.Args[4:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	if len(os.Args) > 1 && os.Args[1] == "internal-tools" {
 		var executor ToolExecutor
 		flags := flag.NewFlagSet("internal-tools", flag.ExitOnError)
+		flags.BoolVar(&executor.BrowserProfile, "browser-profile", false, "browser profile")
 		flags.StringVar(&executor.Work, "workspace", "", "workspace")
 		flags.BoolVar(&executor.ReadOnly, "read-only", false, "read-only")
 		flags.Func("build-cache", "ecosystem=dir", func(value string) error {
@@ -39,6 +48,16 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+
+	// Preserve the provisioned browser cache before test-only HOME/cache isolation.
+	if os.Getenv("SWARM_TEST_EXECUTOR") == "1" && os.Getenv("PLAYWRIGHT_BROWSERS_PATH") == "" {
+		for _, bind := range HostToolchains() {
+			if bind.Ecosystem == "node-browsers" && bind.EnvKey == "PLAYWRIGHT_BROWSERS_PATH" {
+				os.Setenv("PLAYWRIGHT_BROWSERS_PATH", bind.EnvVal)
+				break
+			}
+		}
 	}
 	// Agent build caches never touch the real user cache in tests.
 	cache, err := os.MkdirTemp("", "swarm-sandbox-cache-*")

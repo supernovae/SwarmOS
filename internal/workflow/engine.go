@@ -155,20 +155,21 @@ func LeadRole(phase string) string {
 
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
-	Execution    contract.ExecutionConfig
-	Blockers     []string
-	Issue        *tracker.Issue
-	WorkUnit     *contract.WorkUnit
-	Workflow     *contract.WorkflowSpec
-	Config       *contract.SwarmConfig
-	BaseSHA      string
-	Gate         contract.GateMode
-	Agents       map[string]string
-	Binaries     map[string]string
-	Validation   *contract.ValidationSpec
-	TaskDigest   string
-	PolicyDigest string
-	Phase        string
+	BrowserProfile string
+	Execution      contract.ExecutionConfig
+	Blockers       []string
+	Issue          *tracker.Issue
+	WorkUnit       *contract.WorkUnit
+	Workflow       *contract.WorkflowSpec
+	Config         *contract.SwarmConfig
+	BaseSHA        string
+	Gate           contract.GateMode
+	Agents         map[string]string
+	Binaries       map[string]string
+	Validation     *contract.ValidationSpec
+	TaskDigest     string
+	PolicyDigest   string
+	Phase          string
 	// Dependencies are the agent dependency caches prefetched for BaseSHA.
 	Dependencies sandbox.Dependencies
 }
@@ -401,6 +402,18 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 		return nil, err
 	}
 	var blockers []string
+	browserProfile := "not requested"
+	if execution.BrowserProfile {
+		browserProfile = "requested/available"
+		if err := sandbox.CheckBrowserProfile(ctx); err != nil {
+			reason := "browser profile requested/unavailable: " + err.Error()
+			browserProfile = reason
+			if !opts.InspectOnly {
+				return nil, fmt.Errorf("%s", reason)
+			}
+			blockers = append(blockers, reason)
+		}
+	}
 	checks, err := harness.LoadValidationSpecAt(opts.RepoRoot, state.BaseSHA)
 	if err != nil {
 		return nil, err
@@ -502,7 +515,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			return nil, err
 		}
 	}
-	return &PreflightResult{Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
+	return &PreflightResult{BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
 		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}, nil
 }
 

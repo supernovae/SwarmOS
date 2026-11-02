@@ -447,3 +447,33 @@ func TestBundleWorkUnitAndOrdering(t *testing.T) {
 		}
 	})
 }
+
+func TestBrowserProfileBundleGuidance(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			repo, _ := guidanceRepo(t, nil)
+			path := filepath.Join(repo, ".swarm/config.yaml")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			approved := strings.Replace(string(raw), "execution:", fmt.Sprintf("execution:\n  browser_profile: %v", enabled), 1)
+			base := commitGuidance(t, repo, map[string]string{".swarm/config.yaml": approved})
+			wt, _, err := ProvisionAt(repo, 9, "Browser", base, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkpointWrite(t, wt, ".swarm/config.yaml", strings.Replace(approved, fmt.Sprintf("browser_profile: %v", enabled), fmt.Sprintf("browser_profile: %v", !enabled), 1))
+			for _, role := range guidanceRoles {
+				sys, _ := compileGuidance(t, wt, base, role, guidanceWorkUnit("browser"), nil)
+				want := enabled && (role == "developer" || role == "tester")
+				if strings.Contains(sys, "Browser profile enabled") != want {
+					t.Fatalf("%s: browser guidance selection", role)
+				}
+				if want && (!strings.Contains(sys, "one swarm_shell command") || !strings.Contains(sys, "Codex agents run browser checks through Bubblewrap required-check validation") || !strings.Contains(sys, "output files")) {
+					t.Fatalf("%s: incomplete guidance", role)
+				}
+			}
+		})
+	}
+}

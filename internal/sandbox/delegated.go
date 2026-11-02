@@ -150,7 +150,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 	if err != nil {
 		return nil, "", err
 	}
-	if err := CheckToolExecutor(ctx); err != nil {
+	if err := checkToolExecutor(ctx, opts.BrowserProfile); err != nil {
 		return nil, "", err
 	}
 	if driver == "claude" {
@@ -179,7 +179,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 		if err != nil {
 			return err
 		}
-		executor := ToolExecutor{Work: work, ReadOnly: opts.ReadOnly, BuildCaches: caches, Dependencies: opts.Dependencies}
+		executor := ToolExecutor{BrowserProfile: opts.BrowserProfile, Work: work, ReadOnly: opts.ReadOnly, BuildCaches: caches, Dependencies: opts.Dependencies}
 		prompt = "The task files are in /workspace inside the SwarmOS tools. Use swarm_read, swarm_write, swarm_edit and swarm_shell for file access, editing, searching and testing.\n" + prompt
 		if driver == "omp" {
 			command = []string{binary, "--mode", "rpc"}
@@ -253,6 +253,9 @@ func claudeArgs(config, settings, model, effort string) []string {
 // only the detached snapshot, so the agent caches travel as flags.
 func internalToolArgs(executor ToolExecutor) []string {
 	args := []string{"internal-tools", "--workspace", executor.Work}
+	if executor.BrowserProfile {
+		args = append(args, "--browser-profile")
+	}
 	if executor.ReadOnly {
 		args = append(args, "--read-only")
 	}

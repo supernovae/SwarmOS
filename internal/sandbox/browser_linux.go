@@ -162,9 +162,6 @@ func (n *nativeSystemdScope) verify(identity storageuse.NativeIdentity) error {
 	return nil
 }
 func (n *nativeSystemdScope) stop(identity storageuse.NativeIdentity) error {
-	if identity.Unit == n.unit && storageuse.NativeBoundaryEmpty(identity, os.ReadFile, os.Stat) {
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	run := func(args ...string) error {
@@ -176,10 +173,21 @@ func (n *nativeSystemdScope) stop(identity storageuse.NativeIdentity) error {
 		cmd.WaitDelay = time.Second
 		return errors.Join(cmd.Run(), process.StopVerified(cmd))
 	}
+	return n.stopWith(identity, func(identity storageuse.NativeIdentity) bool {
+		return storageuse.NativeBoundaryEmpty(identity, os.ReadFile, os.Stat)
+	}, run)
+}
+
+func (n *nativeSystemdScope) stopWith(identity storageuse.NativeIdentity, empty func(storageuse.NativeIdentity) bool, run func(...string) error) error {
+	if identity.Unit == n.unit && empty(identity) {
+		return nil
+	}
 	killErr := run("kill", "--kill-whom=all", "--signal=KILL", n.unit)
 	stopErr := run("stop", n.unit)
-	if identity.Unit == n.unit && storageuse.NativeBoundaryEmpty(identity, os.ReadFile, os.Stat) {
-		return errors.Join(killErr, stopErr)
+	if identity.Unit == n.unit && empty(identity) {
+		// Killing the final consumer can unload the scope before stop runs.
+		// Kernel proof that the recorded boundary is empty completes cleanup.
+		return nil
 	}
 	return errors.Join(storageuse.ErrUnsafe, killErr, stopErr)
 }

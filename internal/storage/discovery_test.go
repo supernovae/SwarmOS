@@ -266,3 +266,44 @@ func TestDiscoverScopesRegisteredOnlyAndConflicts(t *testing.T) {
 		t.Fatal("discovery created authority", err)
 	}
 }
+
+func TestDiscoveryMalformedUseEvidenceIsLocal(t *testing.T) {
+	ro, m, bad := reclaimFixture(t, "agent-build")
+	good := addReclaimResource(t, ro, m, ro.Scopes[0].Root, "validate-build")
+	path := seedFinishedHistory(t, ro.ControlRoot, bad)
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts := fixture(t)
+	opts.CacheRoot = ro.CacheRoot
+	opts.ScratchRoot = ro.ScratchRoot
+	opts.UseRoot = ro.ControlRoot
+	opts.SelectedRoot = ro.Scopes[0].Root
+	opts.Repository = ""
+	opts.Backend = "local"
+	snapshot, err := Scan(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Complete {
+		t.Fatalf("local issue stopped discovery: %+v", snapshot.Reasons)
+	}
+	foundBad, foundGood := false, false
+	for _, r := range snapshot.Resources {
+		if r.Path == bad.Location {
+			foundBad = true
+			if r.Eligibility != "retained" {
+				t.Fatalf("bad resource: %+v", r)
+			}
+		}
+		if r.Path == good.Location {
+			foundGood = true
+			if r.Active == nil || *r.Active {
+				t.Fatalf("healthy coverage lost: %+v", r)
+			}
+		}
+	}
+	if !foundBad || !foundGood {
+		t.Fatalf("missing physical resources: %+v", snapshot.Resources)
+	}
+}

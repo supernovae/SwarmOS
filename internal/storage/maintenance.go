@@ -258,6 +258,21 @@ func maintenancePass(ctx context.Context, o MaintenanceOptions) (MaintenanceSumm
 					continue
 				}
 			}
+			compactCtx, cancelCompact := context.WithTimeout(ctx, 100*time.Millisecond)
+			compacted, compactErr := manager.Compact(compactCtx, use, s.b.Workspace)
+			cancelCompact()
+			if errors.Is(compactErr, ErrLimit) {
+				out.Complete = false
+				continue
+			}
+			if compacted {
+				observation, e := storageuse.Observe(ctx, o.UseRoot, use, 16<<10, s.b.Workspace)
+				if e != nil {
+					continue
+				}
+				r.Active = observation.Active
+				r.LastUse = &observation.LastUse
+			}
 			lockCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 			changed, recoverErr := manager.Recover(lockCtx, use, o.Now, s.b.Workspace)
 			cancel()

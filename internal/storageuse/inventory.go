@@ -19,6 +19,12 @@ import (
 // reads one capped record at a time and never follows its Location. The caller
 // must separately admit that location under its trusted discovery roots.
 func VisitResources(ctx context.Context, path string, maxRecords int, entry func() error, reserve func(int64) error, visit func(Resource) error, includeAbsent ...bool) error {
+	return VisitResourcesWithIssues(ctx, path, maxRecords, entry, reserve, visit, func(_ string, err error) error { return err }, includeAbsent...)
+}
+
+// VisitResourcesWithIssues isolates unsafe records by filename key. Issues never
+// supply resource identities; callers correlate only independently found paths.
+func VisitResourcesWithIssues(ctx context.Context, path string, maxRecords int, entry func() error, reserve func(int64) error, visit func(Resource) error, issue func(string, error) error, includeAbsent ...bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -75,38 +81,60 @@ func VisitResources(ctx context.Context, path string, maxRecords int, entry func
 			continue
 		}
 		key := strings.TrimSuffix(name, ".json")
-		if len(key) != 64 {
-			return ErrUnsafe
-		}
-		if _, e := hex.DecodeString(key); e != nil {
-			return ErrUnsafe
-		}
-		info, e := root.Lstat(name)
-		if e != nil {
-			return e
-		}
-		if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > 16384 {
-			return ErrUnsafe
-		}
-		if err = reserve(8192 + 128*info.Size()); err != nil {
+		var record record
+		local := func() error {
+			if len(key) != 64 {
+				return ErrUnsafe
+			}
+			if _, e := hex.DecodeString(key); e != nil {
+				return ErrUnsafe
+			}
+			info, e := root.Lstat(name)
+			if e != nil {
+				return e
+			}
+			if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > 16384 {
+				return ErrUnsafe
+			}
+			if err = reserve(8192 + 128*info.Size()); err != nil {
+				return err
+			}
+			data, e := root.ReadFile(name, info.Size())
+			if e != nil {
+				return e
+			}
+			if e = uniqueJSON(data); e != nil {
+				return e
+			}
+			decoder := json.NewDecoder(bytes.NewReader(data))
+			decoder.DisallowUnknownFields()
+			if e = decoder.Decode(&record); e != nil {
+				return e
+			}
+			expected, e := (&Manager{root: root, path: path}).key(record.Resource)
+			if e != nil || expected != key || record.validate() != nil {
+				return ErrUnsafe
+			}
+			return nil
+		}()
+		if err != nil {
 			return err
 		}
-		data, e := root.ReadFile(name, info.Size())
-		if e != nil {
-			return e
-		}
-		var record record
-		if e = uniqueJSON(data); e != nil {
-			return e
-		}
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
-		if e = decoder.Decode(&record); e != nil {
-			return e
-		}
-		expected, e := (&Manager{root: root, path: path}).key(record.Resource)
-		if e != nil || expected != key || record.validate() != nil {
-			return ErrUnsafe
+		if local != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if count >= maxRecords {
+				return fmt.Errorf("storage-use registration limit reached")
+			}
+			count++
+			if err := reserve(8192); err != nil {
+				return err
+			}
+			if err := issue(key, fmt.Errorf("unsafe storage-use record (malformed, oversized or unreadable): %w", local)); err != nil {
+				return err
+			}
+			continue
 		}
 		// Completed absent registrations consume only serial parser workspace.
 		// Pending records remain evidence even when the producer location vanished.

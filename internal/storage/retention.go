@@ -539,8 +539,60 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 			manager.Close()
 		}
 	}()
+	// Physical discovery supplies identities independently of ledger payloads.
+	discovered := reclaimScanner(ctx, opts)
+	discovered.b = s.b
+	for _, scope := range scopes {
+		discovered.repos[scope.CommonDirectory] = scope.Root
+	}
+	discovered.caches()
+	discovered.scratch()
+	s.b = discovered.b
+	if !discovered.out.Complete {
+		return invalid(errors.New("bounded candidate discovery incomplete"))
+	}
+	controlExists := false
+	if existing, e := openExisting(opts.ControlRoot); e == nil {
+		existing.Close()
+		controlExists = true
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return invalid(e)
+	}
+	repairFailures := map[string]string{}
+	if apply && controlExists && len(discovered.out.Resources) > 0 {
+		var openErr error
+		manager, openErr = storageuse.Open(opts.ControlRoot, opts.CacheRoot, opts.ScratchRoot)
+		if openErr != nil {
+			return invalid(openErr)
+		}
+		for _, physical := range discovered.out.Resources {
+			r := storageuse.ResourceFor(physical.useRepository, physical.Class, physical.Path)
+			if r.Repository == "" {
+				rel, _ := filepath.Rel(opts.CacheRoot, r.Location)
+				parts := splitPath(rel)
+				if len(parts) == 3 {
+					r.Repository = parts[1]
+				}
+			}
+			if _, ok := scopes[r.Repository]; !ok || !reclaimLayout(opts, r, r.Repository) {
+				continue
+			}
+			lockCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			_, compactErr := manager.Compact(lockCtx, r, s.b.Workspace)
+			cancel()
+			if errors.Is(compactErr, ErrLimit) {
+				return invalid(compactErr)
+			}
+			if compactErr != nil && !errors.Is(compactErr, os.ErrNotExist) {
+				if e := s.b.Charge(int64(4096 + len(r.Location))); e != nil {
+					return invalid(e)
+				}
+				repairFailures[r.Location] = "storage-use compaction unavailable: " + compactErr.Error()
+			}
+		}
+	}
 	var candidates []storageuse.Resource
-	err := storageuse.VisitResources(ctx, opts.ControlRoot, l.Records, func() error { return s.b.entry(ctx) }, s.b.Workspace, func(r storageuse.Resource) error {
+	err := storageuse.VisitResourcesWithIssues(ctx, opts.ControlRoot, l.Records, func() error { return s.b.entry(ctx) }, s.b.Workspace, func(r storageuse.Resource) error {
 		if e := s.b.Charge(int64(4096 + 8*(len(r.Location)+len(r.Identity)+len(r.Class)+len(r.Repository)))); e != nil {
 			return e
 		}
@@ -568,6 +620,12 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		}
 		candidates = append(candidates, r)
 		return nil
+	}, func(key string, err error) error {
+		if e := s.b.Charge(int64(4096 + len(key))); e != nil {
+			return e
+		}
+		out.Resources = append(out.Resources, ReclamationResult{Outcome: ReclaimRetained, Reason: "ledger entry " + key + ": " + err.Error()})
+		return nil
 	}, apply)
 	// An absent control root has no admitted resources. Discovery still reports
 	// unregistered candidates, retaining them without initializing any roots.
@@ -584,21 +642,13 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 	}
 	// Prefix-only and orphan candidates remain visible, but never acquire
 	// deletion authority. Use the existing bounded, read-only observers.
-	discovered := reclaimScanner(ctx, opts)
-	discovered.b = s.b
-	for _, scope := range scopes {
-		discovered.repos[scope.CommonDirectory] = scope.Root
-	}
-	discovered.caches()
-	discovered.scratch()
-	s.b = discovered.b
 	registered := map[string]bool{}
 	for _, r := range candidates {
 		registered[r.Location] = true
 	}
 	for _, r := range discovered.out.Resources {
 		if !registered[r.Path] {
-			out.Resources = append(out.Resources, ReclamationResult{Resource: storageuse.Resource{Repository: r.useRepository, Class: r.Class, Identity: r.Identity, Location: r.Path}, Outcome: ReclaimRetained, Reason: "unregistered or orphan resource; ownership and use coverage unproven"})
+			out.Resources = append(out.Resources, ReclamationResult{Resource: storageuse.Resource{Repository: r.useRepository, Class: r.Class, Identity: r.Identity, Location: r.Path}, Outcome: ReclaimRetained, Reason: "unregistered or unsafe storage-use evidence (malformed, oversized or unreadable); ownership and use coverage unproven"})
 		}
 	}
 	if !discovered.out.Complete {
@@ -639,6 +689,11 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 			return out, err
 		}
 		result := ReclamationResult{Resource: r, Outcome: ReclaimRetained, Reason: "outside explicit scope or unsupported/unsafe producer leaf"}
+		if reason, failed := repairFailures[r.Location]; failed {
+			result.Reason = reason
+			out.Resources = append(out.Resources, result)
+			continue
+		}
 		if counts[r.Location] != 1 {
 			result.Reason = "conflicting or duplicate registration"
 			out.Resources = append(out.Resources, result)

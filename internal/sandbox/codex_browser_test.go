@@ -62,6 +62,86 @@ func TestCodexBrowserPolicy(t *testing.T) {
 	}
 }
 
+// checkCodexBrowserCatalog accepts the owned namespace and Codex's native tools.
+// An explicit built-in list keeps an unexpected flat MCP tool from passing.
+func checkCodexBrowserCatalog(raw json.RawMessage) error {
+	var tools []struct {
+		Type  string `json:"type"`
+		Name  string `json:"name"`
+		Tools []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return err
+	}
+	owned := 0
+	for _, tool := range tools {
+		if tool.Type == "namespace" {
+			if tool.Name != "mcp__swarm" {
+				return fmt.Errorf("unexpected namespace %q", tool.Name)
+			}
+			owned++
+			names := map[string]bool{"swarm_read": false, "swarm_write": false, "swarm_edit": false, "swarm_shell": false}
+			if len(tool.Tools) != len(names) {
+				return fmt.Errorf("owned namespace has %d tools", len(tool.Tools))
+			}
+			for _, child := range tool.Tools {
+				seen, ok := names[child.Name]
+				if child.Type != "function" || !ok || seen {
+					return fmt.Errorf("unexpected or duplicate owned tool %q (%s)", child.Name, child.Type)
+				}
+				names[child.Name] = true
+			}
+			continue
+		}
+		if len(tool.Tools) != 0 {
+			return fmt.Errorf("unexpected nested tools on %q", tool.Name)
+		}
+		switch tool.Type {
+		case "function", "custom":
+			switch tool.Name {
+			case "shell", "local_shell", "exec_command", "write_stdin", "apply_patch", "update_plan", "request_user_input", "view_image":
+			default:
+				return fmt.Errorf("unexpected top-level tool %q", tool.Name)
+			}
+		case "local_shell", "web_search", "web_search_preview", "image_generation":
+		default:
+			return fmt.Errorf("unexpected tool type %q", tool.Type)
+		}
+	}
+	if owned != 1 {
+		return fmt.Errorf("expected one mcp__swarm namespace, got %d", owned)
+	}
+	return nil
+}
+
+func TestCodexBrowserProviderCatalog(t *testing.T) {
+	owned := `{"type":"namespace","name":"mcp__swarm","tools":[{"type":"function","name":"swarm_read"},{"type":"function","name":"swarm_write"},{"type":"function","name":"swarm_edit"},{"type":"function","name":"swarm_shell"}]}`
+	for _, tc := range []struct {
+		name, catalog string
+		valid         bool
+	}{
+		{"owned and native", `[` + owned + `,{"type":"function","name":"exec_command"},{"type":"custom","name":"apply_patch"}]`, true},
+		{"missing", `[]`, false},
+		{"duplicate namespace", `[` + owned + `,` + owned + `]`, false},
+		{"foreign namespace", `[` + owned + `,{"type":"namespace","name":"mcp__host","tools":[]}]`, false},
+		{"flat MCP", `[` + owned + `,{"type":"function","name":"mcp__swarm__swarm_shell"}]`, false},
+		{"unknown flat tool", `[` + owned + `,{"type":"function","name":"host_shell"}]`, false},
+		{"duplicate child", `[` + strings.Replace(owned, "swarm_read", "swarm_shell", 1) + `]`, false},
+		{"missing child", `[` + strings.Replace(owned, `,{"type":"function","name":"swarm_shell"}`, "", 1) + `]`, false},
+		{"foreign child", `[` + strings.Replace(owned, "swarm_read", "host_shell", 1) + `]`, false},
+		{"nonfunction child", `[` + strings.Replace(owned, `"type":"function"`, `"type":"custom"`, 1) + `]`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkCodexBrowserCatalog(json.RawMessage(tc.catalog)); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v: %v", tc.valid, err)
+			}
+		})
+	}
+}
+
 // Real Codex talks to a local Responses provider; no login or paid model is used.
 // The catalog observed by the provider proves initialize/list, and probe.txt
 // proves the actual advertised tool was called through the installed CLI.
@@ -111,30 +191,35 @@ func TestCodexBrowserRealTools(t *testing.T) {
 					return
 				}
 				fmt.Fprintf(&providerTools, "%s\n", request.Tools)
-				var tools []struct {
-					Name string `json:"name"`
-				}
-				if err := json.Unmarshal(request.Tools, &tools); err != nil {
-					t.Error("invalid provider tool catalog", err)
+				if err := checkCodexBrowserCatalog(request.Tools); err != nil {
+					t.Error(err)
 					http.Error(w, "invalid tool catalog", 400)
 					return
 				}
-				owned := 0
-				for _, tool := range tools {
-					if strings.HasPrefix(tool.Name, "mcp__swarm__") {
-						owned++
-						if !strings.Contains("|swarm_read|swarm_write|swarm_edit|swarm_shell|", "|"+strings.TrimPrefix(tool.Name, "mcp__swarm__")+"|") {
-							t.Errorf("unexpected owned tool %s", tool.Name)
+				catalog.Store(true)
+				n := calls.Add(1)
+				if behavior == "forged-host-tool" && n == 2 {
+					var input []struct {
+						Type   string          `json:"type"`
+						CallID string          `json:"call_id"`
+						Output json.RawMessage `json:"output"`
+					}
+					if err := json.Unmarshal(request.Input, &input); err != nil {
+						t.Error(err)
+					}
+					refused := false
+					for _, item := range input {
+						if item.Type == "function_call_output" && item.CallID == "call_1" && strings.Contains(strings.ToLower(string(item.Output)), "unsupported") {
+							refused = true
 						}
 					}
+					if !refused {
+						t.Errorf("forged host call did not return an unsupported-call refusal: %s", request.Input)
+					}
 				}
-				if owned == 4 {
-					catalog.Store(true)
-				}
-				n := calls.Add(1)
 				output := []any{}
 				if n == 1 {
-					name, command := "mcp__swarm__swarm_shell", "env > tool-env; printf allowed > probe.txt"
+					namespace, name, command := "mcp__swarm", "swarm_shell", "env > tool-env; printf allowed > probe.txt"
 					if behavior == "developer" || behavior == "tester" {
 						fixture, err := os.ReadFile("testdata/browser-preview.sh")
 						if err != nil {
@@ -145,14 +230,14 @@ func TestCodexBrowserRealTools(t *testing.T) {
 						command = "env > tool-env; printf allowed > probe.txt;\n" + string(fixture)
 					}
 					if behavior == "forged-host-tool" {
-						name = "mcp__swarm__host_shell"
+						namespace, name = "mcp__host", "host_shell"
 						command = "printf escaped > forged"
 					}
 					if behavior == "cancellation" {
 						command = "echo started > started; setsid sh -c 'sleep 2; echo escaped > survived' & wait"
 					}
 					args, _ := json.Marshal(map[string]string{"command": command})
-					output = append(output, map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": name, "arguments": string(args), "status": "completed"})
+					output = append(output, map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "namespace": namespace, "name": name, "arguments": string(args), "status": "completed"})
 				} else {
 					output = append(output, map[string]any{"type": "message", "id": "msg_1", "role": "assistant", "status": "completed", "content": []any{map[string]string{"type": "output_text", "text": "done"}}})
 				}
@@ -239,8 +324,8 @@ func TestCodexBrowserRealTools(t *testing.T) {
 				return
 			}
 			if behavior == "forged-host-tool" {
-				if calls.Load() == 0 {
-					t.Fatal("forged call not submitted")
+				if calls.Load() < 2 {
+					t.Fatal("forged call refusal not returned to provider")
 				}
 				if _, err := os.Stat(filepath.Join(work, "forged")); !os.IsNotExist(err) {
 					t.Fatal("forged tool executed")

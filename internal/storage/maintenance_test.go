@@ -741,3 +741,17 @@ func TestMaintenanceRecoveryBeforeIdleAndPressureFilter(t *testing.T) {
 		})
 	}
 }
+
+func TestMaintenanceCompactsHistoricalRecord(t *testing.T) {
+	o, _, r := maintenanceFixture(t)
+	setLastUse(t, o.UseRoot, r, o.Now.Add(-60*24*time.Hour))
+	seedFinishedHistory(t, o.UseRoot, r)
+	o.allocation = func(_ os.FileInfo, blocks int64) int64 { return blocks * (1 << 20) }
+	summary, _, err := Maintain(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(r.Location); !os.IsNotExist(err) {
+		t.Fatalf("historical cache retained: %+v %v", summary, err)
+	}
+}

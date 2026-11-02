@@ -311,7 +311,12 @@ func (s *scanner) add(r Resource) {
 				r.Reason = "complete durable use coverage with no unresolved use; observation only"
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			s.fail("use evidence", err)
+			if errors.Is(err, ErrLimit) || s.ctx.Err() != nil {
+				s.fail("use evidence", err)
+			} else {
+				r.Eligibility = "retained"
+				r.Reason = "unsafe storage-use evidence (malformed, oversized or unreadable): " + err.Error()
+			}
 		}
 	}
 	if r.Evidence == "" {

@@ -1220,3 +1220,134 @@ func TestRecoveryEvidenceCapacityRetainsWithoutBlockingTools(t *testing.T) {
 		t.Fatal("capacity did not permanently disqualify bounded evidence")
 	}
 }
+
+func TestFinishedHistoryBounded(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	for i := 0; i < 3000; i++ {
+		u, err := m.AcquireUse(ctx, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = u.Finish(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err = u.Finish(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key, _ := m.key(r)
+	info, err := m.root.Lstat(key + ".json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() >= 16384 {
+		t.Fatalf("history grew to %d", info.Size())
+	}
+	v, err := m.read(key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Uses == nil || !v.CompleteCoverage {
+		t.Fatal("lost coverage")
+	}
+	g, err := m.AcquireMaintenance(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.Close()
+}
+
+func TestCompactPreservesPendingAndValidEvidence(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	u, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := m.key(r)
+	v, err := m.read(key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Evidence = map[string]*useEvidence{u.token: {Consumers: map[string]ProcessIdentity{"pending": {}}}}
+	for i := 0; i < 400; i++ {
+		token := fmt.Sprintf("%064x", i)
+		v.Uses[token] = true
+		v.Evidence[token] = &useEvidence{Consumers: map[string]ProcessIdentity{"finished": {}}}
+	}
+	v.CompleteCoverage = false
+	if err = m.write(key, v); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := m.root.Lstat(key + ".json")
+	if before.Size() <= 16384 {
+		t.Fatal("fixture not oversized")
+	}
+	changed, err := m.Compact(ctx, r)
+	if err != nil || !changed {
+		t.Fatalf("compact: %v %v", changed, err)
+	}
+	after, err := m.read(key, r)
+	if err != nil {
+		t.Fatalf("#418 validation failed: %v", err)
+	}
+	if len(after.Uses) != 1 || after.Uses[u.token] || len(after.Evidence) != 1 || after.Evidence[u.token] == nil {
+		t.Fatal("pending evidence changed")
+	}
+	if after.CompleteCoverage || !after.Created.Equal(v.Created) || !after.LastUse.Equal(v.LastUse) {
+		t.Fatal("metadata changed")
+	}
+	if changed, err = m.Compact(ctx, r); err != nil || changed {
+		t.Fatalf("idempotence: %v %v", changed, err)
+	}
+}
+
+func TestCompactAdmissionExclusionAndCancellation(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	u, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = u.Finish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := m.AcquireMaintenance(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	if _, err = m.Compact(blocked, r); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("maintenance exclusion: %v", err)
+	}
+	cancel()
+	guard.Close()
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 100; i++ {
+			if _, e := m.Compact(ctx, r); e != nil {
+				done <- e
+				return
+			}
+		}
+		done <- nil
+	}()
+	for i := 0; i < 100; i++ {
+		use, e := m.AcquireUse(ctx, r)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = use.Finish(ctx); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	guard, err = m.AcquireMaintenance(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guard.Close()
+}

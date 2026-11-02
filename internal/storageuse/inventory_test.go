@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -160,5 +161,25 @@ func TestInventoryPruneAbsentAdmissionSafety(t *testing.T) {
 	}
 	if pruned, err := m.PruneAbsent(t.Context(), r); err != nil || pruned {
 		t.Fatal("existing resource pruned", pruned, err)
+	}
+}
+
+func TestInventoryLocalIssueContinues(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	u, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = u.Finish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = m.root.WriteFileDurable(strings.Repeat("f", 64)+".json", []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	visits, issues := 0, 0
+	err = VisitResourcesWithIssues(ctx, m.path, 10, func() error { return nil }, func(int64) error { return nil }, func(Resource) error { visits++; return nil }, func(key string, err error) error { issues++; return nil })
+	if err != nil || visits != 1 || issues != 1 {
+		t.Fatalf("visits=%d issues=%d err=%v", visits, issues, err)
 	}
 }

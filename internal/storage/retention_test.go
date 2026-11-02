@@ -1699,3 +1699,161 @@ func TestAppliedCleanupRecovery(t *testing.T) {
 		t.Fatal("recovered cache removed immediately", err)
 	}
 }
+
+func seedFinishedHistory(t *testing.T, root string, r storageuse.Resource) string {
+	t.Helper()
+	raw, _ := json.Marshal(r)
+	h := sha256.Sum256(raw)
+	path := filepath.Join(root, hex.EncodeToString(h[:])+".json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]any
+	if err = json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	uses := map[string]bool{}
+	for i := 0; i < 400; i++ {
+		uses[fmt.Sprintf("%064x", i)] = true
+	}
+	v["Uses"] = uses
+	raw, err = json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) <= 16384 {
+		t.Fatal("fixture not oversized")
+	}
+	if err = os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestReclamationCompactsHistoricalRecord(t *testing.T) {
+	o, _, r := reclaimFixture(t, "agent-build")
+	path := seedFinishedHistory(t, o.ControlRoot, r)
+	before, _ := os.ReadFile(path)
+	preview, err := PreviewReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range preview.Resources {
+		if result.Outcome == ReclaimEligible {
+			t.Fatal("oversized eligible")
+		}
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("preview mutated evidence")
+	}
+	report, err := ApplyReclamation(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(r.Location); !os.IsNotExist(err) {
+		t.Fatalf("not removed: %+v %v", report, err)
+	}
+}
+
+func TestReclamationMalformedRecordIsLocal(t *testing.T) {
+	for _, kind := range []string{"truncated", "version", "identity", "token", "nil", "trailing", "unknown", "symlink", "oversized-pending"} {
+		t.Run(kind, func(t *testing.T) {
+			o, m, bad := reclaimFixture(t, "agent-build")
+			good := addReclaimResource(t, o, m, o.Scopes[0].Root, "validate-build")
+			path := seedFinishedHistory(t, o.ControlRoot, bad)
+			raw, _ := os.ReadFile(path)
+			var v map[string]any
+			if err := json.Unmarshal(raw, &v); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "truncated":
+				raw = []byte("{")
+			case "version":
+				v["Version"] = 2
+			case "identity":
+				v["Resource"].(map[string]any)["Identity"] = "wrong"
+			case "token":
+				v["Uses"] = map[string]bool{"bad": true}
+			case "nil":
+				v["Uses"] = nil
+			case "trailing":
+				raw = append(raw, []byte(" {}")...)
+			case "unknown":
+				v["Unknown"] = true
+			case "oversized-pending":
+				uses := map[string]bool{}
+				for i := 0; i < 400; i++ {
+					uses[fmt.Sprintf("%064x", i)] = false
+				}
+				v["Uses"] = uses
+			}
+			if kind != "truncated" && kind != "trailing" {
+				raw, _ = json.Marshal(v)
+			}
+			if err := os.WriteFile(path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "symlink" {
+				target := path + ".target"
+				if err := os.Rename(path, target); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			preview, err := PreviewReclamation(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eligible := false
+			for _, result := range preview.Resources {
+				if result.Resource.Location == good.Location && result.Outcome == ReclaimEligible {
+					eligible = true
+				}
+			}
+			if !eligible {
+				t.Fatalf("healthy preview ineligible: %+v", preview)
+			}
+			report, err := ApplyReclamation(context.Background(), o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = os.Stat(good.Location); !os.IsNotExist(err) {
+				t.Fatalf("healthy retained: %+v %v", report, err)
+			}
+			if _, err = os.Stat(bad.Location); err != nil {
+				t.Fatal("bad resource removed", err)
+			}
+			after, _ := os.ReadFile(path)
+			if string(raw) != string(after) {
+				t.Fatal("invalid evidence rewritten")
+			}
+		})
+	}
+}
+
+func TestReclamationBusyCompactionDoesNotStallOthers(t *testing.T) {
+	o, m, busy := reclaimFixture(t, "agent-build")
+	good := addReclaimResource(t, o, m, o.Scopes[0].Root, "validate-build")
+	guard, err := m.AcquireMaintenance(context.Background(), busy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guard.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	report, err := ApplyReclamation(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(good.Location); !os.IsNotExist(err) {
+		t.Fatalf("healthy cache stalled: %+v %v", report, err)
+	}
+	if _, err = os.Stat(busy.Location); err != nil {
+		t.Fatal("busy resource removed", err)
+	}
+}

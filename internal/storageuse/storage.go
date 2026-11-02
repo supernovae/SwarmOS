@@ -42,7 +42,7 @@ type record struct {
 	CompleteCoverage bool
 	Created          time.Time
 	LastUse          time.Time
-	Uses             map[string]bool         // false means unresolved; completed records are retained
+	Uses             map[string]bool         // false means unresolved; finished history is compacted
 	Evidence         map[string]*useEvidence `json:",omitempty"`
 }
 
@@ -221,6 +221,59 @@ func (m *Manager) write(key string, v *record) error {
 	return m.root.WriteFileDurable(key+".json", b, 0600)
 }
 
+// compactFinished preserves pending evidence and all coverage and recency metadata.
+func compactFinished(v *record) bool {
+	changed := false
+	for token, done := range v.Uses {
+		if done {
+			delete(v.Uses, token)
+			delete(v.Evidence, token)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// Compact removes finished history under admission exclusion. It never recovers
+// pending uses or establishes coverage. reserve bounds serial decoding workspace.
+func (m *Manager) Compact(ctx context.Context, r Resource, reserve ...func(int64) error) (bool, error) {
+	key, err := m.key(r)
+	if err != nil {
+		return false, err
+	}
+	f, _, err := m.lock(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	defer unlock(f)
+	info, err := m.root.Lstat(key + ".json")
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > 16<<20 {
+		return false, ErrUnsafe
+	}
+	if len(reserve) > 0 {
+		if err := reserve[0](8192 + 128*info.Size()); err != nil {
+			return false, err
+		}
+	}
+	v, err := m.readLimited(key, r, info.Size())
+	if err != nil {
+		return false, err
+	}
+	if !compactFinished(v) {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := m.write(key, v); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Use is an unexported token bound to its coordinator manager. Dropping it or
 // closing the manager does not complete the durable use.
 type Use struct {
@@ -274,6 +327,9 @@ func (m *Manager) AcquireUse(ctx context.Context, r Resource) (*Use, error) {
 	}
 	token := hex.EncodeToString(nonce[:])
 	v.Uses[token] = false
+	if len(v.Uses) > 64 {
+		compactFinished(v)
+	}
 	v.LastUse = time.Now().UTC()
 	if err = m.write(key, v); err != nil {
 		return nil, err
@@ -305,6 +361,9 @@ func (u *Use) Finish(ctx context.Context) error {
 		return ErrUnsafe
 	}
 	v.Uses[u.token] = true
+	if len(v.Uses) > 64 {
+		compactFinished(v)
+	}
 	v.LastUse = time.Now().UTC()
 	if err = u.manager.write(u.key, v); err != nil {
 		return err

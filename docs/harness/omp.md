@@ -29,6 +29,8 @@ In RPC mode, SwarmOS answers OhMyPi's host tool calls itself, routing each one t
 
 Linux native isolated Go commands and worker checks use `GOMAXPROCS=2` and `GOFLAGS=-buildvcs=false -p=2`; see the [shared concurrency defaults](README.md#go-concurrency).
 
+For recoverable managed-cache bookkeeping after an interrupted command, optionally configure [native storage lifetimes](README.md#native-storage-lifetimes). Native execution continues when scope support is unavailable; its storage uses remain unrecoverable.
+
 - **Tool catalog.** Before each turn, SwarmOS checks that OhMyPi's effective tool list contains exactly the approved task tools.
 - **Files and shell.** Same Bubblewrap executor as Claude Code: detached snapshot at `/workspace`, read-only `/usr`, private temporary storage, clean environment, no network, and read-only source for planners and reviewers.
 - **Limits.** Two-minute tool deadlines, per-process resource limits, and 256 MiB of temporary storage per call.

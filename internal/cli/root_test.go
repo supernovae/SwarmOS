@@ -127,3 +127,30 @@ func TestFailedResumeKeepsClaimForStagingRecovery(t *testing.T) {
 		t.Fatalf("failed resume released the existing claim: %+v", state.Lease)
 	}
 }
+
+func TestInternalNativeCommandRegistration(t *testing.T) {
+	root := newRootCmdWithOptions(&RootOptions{Backend: "invalid-backend", Repo: "invalid-repo", RepoRoot: filepath.Join(t.TempDir(), "absent")})
+	cmd, args, err := root.Find([]string{"internal-native-exec", "invalid-unit"})
+	if err != nil || cmd.Name() != "internal-native-exec" || !cmd.Hidden || !cmd.DisableFlagParsing {
+		t.Fatalf("native helper registration: %v %v", cmd, err)
+	}
+	if err = cmd.Args(cmd, args); err != nil {
+		t.Fatal(err)
+	}
+	if err = root.PersistentPreRunE(cmd, args); err != nil {
+		t.Fatalf("helper ran coordinator startup: %v", err)
+	}
+	for _, args := range [][]string{nil, {"unit", "unexpected"}} {
+		if err = cmd.Args(cmd, args); err == nil {
+			t.Fatalf("helper accepted args %q", args)
+		}
+	}
+	// Public commands must still validate coordinator options.
+	public, _, err := root.Find([]string{"version"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = root.PersistentPreRunE(public, nil); err == nil {
+		t.Fatal("native exemption leaked to public command")
+	}
+}

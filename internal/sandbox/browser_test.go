@@ -3,11 +3,15 @@
 package sandbox
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
+	"github.com/supernovae/swarmos/internal/storageuse"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -591,5 +596,445 @@ test -z "${GH_TOKEN+x}"`
 	}
 	if out.String() != "${VAR}\n${GH_TOKEN+x}\n" {
 		t.Fatalf("payload expanded before sandbox shell: %q", out.String())
+	}
+}
+
+// This fixture replaces only the kernel-membership read in the helper. It
+// exercises the production runner's private pipes without certifying a cgroup.
+func TestNativeControlFixture(t *testing.T) {
+	if os.Getenv("SWARM_NATIVE_CONTROL_FIXTURE") != "1" {
+		return
+	}
+	payload := os.NewFile(3, "payload")
+	identity := os.NewFile(4, "identity")
+	ack := os.NewFile(5, "ack")
+	var p nativePayload
+	if err := readNativeFrame(payload, &p); err != nil {
+		os.Exit(71)
+	}
+	payload.Close()
+	n := nativeFixtureIdentity()
+	if err := writeNativeFrame(identity, n); err != nil {
+		os.Exit(72)
+	}
+	identity.Close()
+	var approved [1]byte
+	if _, err := io.ReadFull(ack, approved[:]); err != nil || approved[0] != 1 {
+		os.Exit(73)
+	}
+	ack.Close()
+	if err := os.Chdir(p.Dir); err != nil {
+		os.Exit(74)
+	}
+	if err := syscall.Exec(p.Binary, append([]string{p.Arg0}, p.Args...), p.Env); err != nil {
+		os.Exit(75)
+	}
+}
+
+func nativeFixtureIdentity() storageuse.NativeIdentity {
+	return storageuse.NativeIdentity{Boot: "11111111-1111-1111-1111-111111111111", Unit: "swarm-native-0123456789abcdef0123456789abcdef.scope", Group: "/user.slice/swarm-native-0123456789abcdef0123456789abcdef.scope", MountDevice: 1, MountInode: 2, Inode: 3}
+}
+
+type nativeFixtureBoundary struct {
+	verifyErr, stopErr      error
+	stopped                 bool
+	commandEnv, commandArgs []string
+}
+
+func (n *nativeFixtureBoundary) command(ctx context.Context, _, dir string) (*exec.Cmd, error) {
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestNativeControlFixture$")
+	cmd.Dir, cmd.Env = dir, []string{"SWARM_NATIVE_CONTROL_FIXTURE=1"}
+	n.commandEnv, n.commandArgs = cmd.Env, cmd.Args
+	return cmd, nil
+}
+func (n *nativeFixtureBoundary) verify(storageuse.NativeIdentity) error { return n.verifyErr }
+func (n *nativeFixtureBoundary) stop(storageuse.NativeIdentity) error {
+	n.stopped = true
+	return n.stopErr
+}
+
+type nativePayloadObservation struct {
+	Args, Env      []string
+	Dir, Input     string
+	ControlsClosed bool
+}
+
+func TestNativePayloadFixture(t *testing.T) {
+	if os.Getenv("SWARM_NATIVE_PAYLOAD_FIXTURE") != "1" {
+		return
+	}
+	if os.Getenv("SWARM_NATIVE_FIXTURE_WAIT") == "1" {
+		fmt.Fprintln(os.Stdout, "ready")
+		var b [1]byte
+		_, _ = os.Stdin.Read(b[:])
+		os.Exit(0)
+	}
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(81)
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		os.Exit(82)
+	}
+	controlsClosed := true
+	for fd := 3; fd <= 5; fd++ {
+		// Go may reuse closed descriptors during runtime initialization. The
+		// inherited pipe names must be absent even if a runtime descriptor exists.
+		target, _ := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+		if strings.HasPrefix(target, "pipe:") {
+			controlsClosed = false
+		}
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(nativePayloadObservation{Args: os.Args, Env: os.Environ(), Dir: dir, Input: string(input), ControlsClosed: controlsClosed})
+	os.Exit(0)
+}
+
+func TestNativeScopeLiteralEnvironmentArgument(t *testing.T) {
+	env := []string{"SWARM_NATIVE_PAYLOAD_FIXTURE=1", "VAR=expanded-sentinel", "PATH=/usr/bin:/bin", "SYNTHETIC_TOKEN=private-payload-value"}
+	args := []string{"-test.run=^TestNativePayloadFixture$", "--", "${VAR}"}
+	boundary := &nativeFixtureBoundary{}
+	var out, diagnostics process.Output
+	dir := resolvedTempDir(t)
+	err := runNativeCommandWithBoundary(context.Background(), os.Args[0], dir, env, args, strings.NewReader("stdin bytes"), &out, &diagnostics, process.StopVerified, func(context.Context) (nativeScopeBoundary, error) { return boundary, nil })
+	if err != nil {
+		t.Fatalf("native transport: %v: %s", err, diagnostics.String())
+	}
+	var got nativePayloadObservation
+	if err = json.Unmarshal([]byte(out.String()), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Args, append([]string{os.Args[0]}, args...)) || !reflect.DeepEqual(got.Env, env) || got.Dir != dir || got.Input != "stdin bytes" || !got.ControlsClosed {
+		t.Fatalf("payload transport: %+v", got)
+	}
+	if !boundary.stopped {
+		t.Fatal("boundary teardown omitted")
+	}
+	for _, arg := range append(boundary.commandEnv, boundary.commandArgs...) {
+		if strings.Contains(arg, "private-payload-value") {
+			t.Fatal("payload environment escaped private pipe")
+		}
+	}
+	launch := nativeScopeArgs(nativeFixtureIdentity().Unit, "/usr/bin/swarm")
+	if !slices.Contains(launch, "--expand-environment=no") {
+		t.Fatal("scope expansion enabled")
+	}
+	for _, arg := range launch {
+		if strings.Contains(arg, "Memory") || strings.Contains(arg, "Delegate") {
+			t.Fatal("native scope inherited browser policy")
+		}
+	}
+}
+
+func TestNativeScopeFailureRetainsUse(t *testing.T) {
+	for _, mode := range []string{"verify", "stop", "process stop", "cancellation"} {
+		t.Run(mode, func(t *testing.T) {
+			isolateRuntimeControl(t)
+			ctx, scope, err := storageuse.Ensure(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir, err := scope.TempDir(ctx, "", "swarm-native-failure-*", "native-scratch")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(dir)
+			failure := errors.New("injected boundary failure")
+			boundary := &nativeFixtureBoundary{stopErr: failure}
+			if mode == "verify" {
+				boundary.verifyErr = failure
+			}
+			stop := process.StopVerified
+			if mode == "process stop" {
+				boundary.stopErr = nil
+				stop = func(cmd *exec.Cmd) error { return errors.Join(process.StopVerified(cmd), failure) }
+			}
+			args := []string{"-test.run=^TestNativePayloadFixture$"}
+			env := []string{"SWARM_NATIVE_PAYLOAD_FIXTURE=1"}
+			var input io.Reader
+			var out io.Writer = io.Discard
+			if mode == "cancellation" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				reader, writer, pipeErr := os.Pipe()
+				if pipeErr != nil {
+					t.Fatal(pipeErr)
+				}
+				defer reader.Close()
+				defer writer.Close()
+				input = reader
+				output, ready, pipeErr := os.Pipe()
+				if pipeErr != nil {
+					t.Fatal(pipeErr)
+				}
+				defer output.Close()
+				defer ready.Close()
+				out = ready
+				env = append(env, "SWARM_NATIVE_FIXTURE_WAIT=1")
+				if err = output.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				go func() { _, _ = bufio.NewReader(output).ReadString('\n'); cancel() }()
+			}
+			err = runNativeCommandWithBoundary(ctx, os.Args[0], dir, env, args, input, out, io.Discard, stop, func(context.Context) (nativeScopeBoundary, error) { return boundary, nil })
+			if !errors.Is(err, failure) || !boundary.stopped || !scope.Retained() {
+				t.Fatalf("uncertain teardown: stopped=%v retained=%v err=%v", boundary.stopped, scope.Retained(), err)
+			}
+			if err = scope.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			assertRuntimePending(t, 1)
+		})
+	}
+}
+
+func TestNativeScopeUnavailablePreservesCommand(t *testing.T) {
+	for _, reason := range []string{"no cgroup v2", "missing launcher", "missing manager", "unreachable manager", "unsupported expansion"} {
+		t.Run(reason, func(t *testing.T) {
+			isolateRuntimeControl(t)
+			ctx, scope, err := storageuse.Ensure(context.Background(), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir, err := scope.TempDir(ctx, "", "swarm-native-legacy-*", "native-scratch")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(dir)
+			if err = scope.AcquirePrepared(ctx, storageuse.ResourceFor(scope.Repository(), "agent-build", dir+"-cache")); err != nil {
+				t.Fatal(err)
+			}
+			var out, diagnostics process.Output
+			env := []string{"SWARM_NATIVE_PAYLOAD_FIXTURE=1", "VAR=expanded-sentinel"}
+			err = runNativeCommandWithBoundary(ctx, os.Args[0], dir, env, []string{"-test.run=^TestNativePayloadFixture$", "--", "${VAR}"}, strings.NewReader("legacy input"), &out, &diagnostics, process.StopVerified, func(context.Context) (nativeScopeBoundary, error) {
+				return nil, fmt.Errorf("%s: %w", reason, errNativeScopeUnavailable)
+			})
+			if err != nil {
+				t.Fatalf("unavailable: %v %s", err, diagnostics.String())
+			}
+			var got nativePayloadObservation
+			if err = json.Unmarshal([]byte(out.String()), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Args[len(got.Args)-1] != "${VAR}" || !reflect.DeepEqual(got.Env, env) || got.Dir != dir || got.Input != "legacy input" {
+				t.Fatalf("legacy transport %+v", got)
+			}
+			scope.Retain()
+			if err = scope.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			assertRuntimePending(t, 2)
+			root, _ := storageuse.ControlRoot()
+			files, _ := filepath.Glob(filepath.Join(root, "*.json"))
+			outside := false
+			for _, path := range files {
+				raw, _ := os.ReadFile(path)
+				outside = outside || strings.Contains(string(raw), `"Outside":true`)
+			}
+			if !outside {
+				t.Fatal("legacy launch lacks permanent Outside evidence")
+			}
+		})
+	}
+}
+
+func init() {
+	nativeTestDispatch = func() {
+		if os.Getenv("SWARM_NATIVE_CONTROL_FIXTURE") == "1" {
+			TestNativeControlFixture(nil)
+			os.Exit(90)
+		}
+		if os.Getenv("SWARM_NATIVE_PAYLOAD_FIXTURE") == "1" {
+			TestNativePayloadFixture(nil)
+			os.Exit(91)
+		}
+	}
+}
+
+// Runs automatically when the host exposes cgroup v2 and a usable user manager.
+// The test executable dispatches the same hidden helper as the installed CLI.
+func TestNativeScopeRealContainment(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	prepared, err := prepareNativeScope(ctx)
+	if errors.Is(err, errNativeScopeUnavailable) {
+		t.Skip("real native scope requires mounted cgroup v2, systemd-run with --expand-environment=no, and a reachable user manager")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolateRuntimeControl(t)
+	ctx, owner, err := storageuse.Ensure(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Finish()
+	dir, err := owner.TempDir(ctx, "", "swarm-real-native-*", "native-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	if err = owner.AcquirePrepared(ctx, storageuse.ResourceFor(owner.Repository(), "agent-build", dir+"-cache")); err != nil {
+		t.Fatal(err)
+	}
+	input, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	defer writer.Close()
+	reader, output, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer output.Close()
+	if err = reader.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "delayed-write")
+	env := []string{"SWARM_COMPLETION_FIXTURE_ROLE=parent", "SWARM_COMPLETION_FIXTURE_OUTPUT=" + path}
+	err = runNativeCommandWithBoundary(ctx, os.Args[0], dir, env, []string{"-test.run=^TestNativeCommandSuccessCanLeaveStorageConsumer$"}, input, output, output, process.StopVerified, func(context.Context) (nativeScopeBoundary, error) { return prepared, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(reader).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	// The readiness pipe guarantees the detached child existed before teardown.
+	// A delayed write must now be impossible, even if the parent exited cleanly.
+	input.Close()
+	if _, err = writer.Write([]byte{'x'}); err == nil {
+		t.Fatal("detached descendant still holds stdin after scope teardown")
+	}
+	if _, err = os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("detached descendant wrote after teardown: %v", err)
+	}
+	root, _ := storageuse.ControlRoot()
+	files, _ := filepath.Glob(filepath.Join(root, "*.json"))
+	confirmed := false
+	for _, file := range files {
+		raw, _ := os.ReadFile(file)
+		confirmed = confirmed || strings.Contains(string(raw), `"Empty":true`)
+	}
+	if !confirmed {
+		t.Fatal("durable native empty evidence missing")
+	}
+	// Repeat literal argv transport through the actual systemd launcher.
+	actual, err := prepareNativeScope(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out process.Output
+	err = runNativeCommandWithBoundary(ctx, os.Args[0], dir, []string{"SWARM_NATIVE_PAYLOAD_FIXTURE=1", "VAR=expanded-sentinel"}, []string{"-test.run=^TestNativePayloadFixture$", "--", "${VAR}"}, nil, &out, &out, process.StopVerified, func(context.Context) (nativeScopeBoundary, error) { return actual, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got nativePayloadObservation
+	if err = json.Unmarshal([]byte(out.String()), &got); err != nil || len(got.Args) == 0 || got.Args[len(got.Args)-1] != "${VAR}" {
+		t.Fatalf("real literal transport: %s: %v", out.String(), err)
+	}
+}
+
+func TestNativeScopeCapabilitySelection(t *testing.T) {
+	for _, mode := range []string{"available", "cgroup absent", "launcher absent", "manager absent", "expansion unsupported", "manager unreachable"} {
+		t.Run(mode, func(t *testing.T) {
+			checks := nativeScopeCapabilities{
+				stat: func(string) (os.FileInfo, error) {
+					if mode == "cgroup absent" {
+						return nil, os.ErrNotExist
+					}
+					return nil, nil
+				},
+				lookup: func(name string) (string, error) {
+					if name == "systemd-run" && mode == "launcher absent" || name == "systemctl" && mode == "manager absent" {
+						return "", exec.ErrNotFound
+					}
+					return "/usr/bin/" + name, nil
+				},
+				launcher: func(context.Context, string) error {
+					if mode == "expansion unsupported" {
+						return errors.New("unknown expansion option")
+					}
+					return nil
+				},
+				manager: func(context.Context, string) error {
+					if mode == "manager unreachable" {
+						return errors.New("no user bus")
+					}
+					return nil
+				},
+			}
+			boundary, err := prepareNativeScopeWith(context.Background(), checks)
+			if mode == "available" {
+				if err != nil || boundary == nil {
+					t.Fatalf("available: %v", err)
+				}
+			} else if !errors.Is(err, errNativeScopeUnavailable) || boundary != nil {
+				t.Fatalf("unavailable: %v %v", boundary, err)
+			}
+		})
+	}
+}
+
+func TestNativeScopeFrameValidation(t *testing.T) {
+	for _, data := range [][]byte{{0, 0, 0, 0}, {255, 255, 255, 255}, {0, 0, 0, 8, '{', '}'}} {
+		if err := readNativeFrame(bytes.NewReader(data), new(nativePayload)); err == nil {
+			t.Fatal("accepted invalid native control frame")
+		}
+	}
+	var encoded bytes.Buffer
+	if err := writeNativeFrame(&encoded, map[string]string{"unknown": "value"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := readNativeFrame(&encoded, new(nativePayload)); err == nil {
+		t.Fatal("accepted unknown control field")
+	}
+	if err := writeNativeFrame(io.Discard, strings.Repeat("x", nativeFrameLimit)); err == nil {
+		t.Fatal("accepted oversized native control frame")
+	}
+}
+
+func TestNativeScopeUnavailableExitAndCancellation(t *testing.T) {
+	unavailable := func(context.Context) (nativeScopeBoundary, error) { return nil, errNativeScopeUnavailable }
+	var out process.Output
+	err := runNativeCommandWithBoundary(context.Background(), "/bin/sh", t.TempDir(), []string{"PATH=/usr/bin:/bin"}, []string{"-c", "printf exactly-once; exit 27"}, nil, &out, &out, process.StopVerified, unavailable)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 27 || out.String() != "exactly-once" {
+		t.Fatalf("legacy exit: %v %q", err, out.String())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	if err = reader.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan error, 1)
+	go func() {
+		line, err := bufio.NewReader(reader).ReadString('\n')
+		if err == nil && line != "ready\n" {
+			err = fmt.Errorf("unexpected readiness %q", line)
+		}
+		ready <- err
+		cancel()
+	}()
+	err = runNativeCommandWithBoundary(ctx, "/bin/sh", t.TempDir(), []string{"PATH=/usr/bin:/bin"}, []string{"-c", "printf 'ready\\n'; exec sleep 60"}, nil, writer, io.Discard, process.StopVerified, unavailable)
+	if readyErr := <-ready; readyErr != nil {
+		t.Fatal(readyErr)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("legacy cancellation: %v", err)
 	}
 }

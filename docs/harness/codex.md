@@ -35,6 +35,8 @@ Each turn is a fresh `codex exec` session. Task files carry progress between tur
 
 Linux native isolated Go commands and worker checks use `GOMAXPROCS=2` and `GOFLAGS=-buildvcs=false -p=2`; see the [shared concurrency defaults](README.md#go-concurrency).
 
+For recoverable managed-cache bookkeeping after an interrupted command, optionally configure [native storage lifetimes](README.md#native-storage-lifetimes). Native execution continues when scope support is unavailable; its storage uses remain unrecoverable.
+
 - **Files.** Tools see a detached task snapshot, private scratch space, and Codex's minimal system runtime files. Live Git metadata, coordinator state, host credential stores, and autoloaded `.codex` and `.agents` directories are left out.
 - **Shell.** Commands run in Codex's Linux sandbox with a clean environment. Provider and publishing tokens are filtered out, and tool networking is disabled.
 - **Permissions.** Pairing and unattended runs use the same profile. Allowed commands run without prompts, and requests to escalate are denied.

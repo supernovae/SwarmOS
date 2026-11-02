@@ -77,6 +77,14 @@ You can also set the mode locally with `SWARM_EXECUTION_MODE`, unless approved p
 
 On a CI runner, `swarm repo validate` runs required checks directly on the ephemeral runner, so stock GitHub runners do not need a harness installed. See [execution modes](../../SECURITY.md#execution-modes).
 
+### Native storage lifetimes
+
+Linux hosts can make interrupted managed-cache uses recoverable by providing a mounted cgroup v2 hierarchy, a reachable systemd user manager, and systemd 254 or newer with `systemd-run --expand-environment=no`. Start Swarm from a user session with access to that manager; for unattended workers, configure the host to keep the user manager available between sessions.
+
+Swarm places each native command in its own scope and stops the whole scope, including detached descendants, before completing cache bookkeeping. It records the verified kernel identity and emptiness so maintenance can recover an interrupted use once the coordinator and every recorded consumer have ended. Temporary scratch and other unclassified uses remain conservative.
+
+This setup is optional for native execution. When scope support is unavailable, native commands continue with the existing process cleanup and their storage uses stay unrecoverable (recorded as Outside). Harness sandbox prerequisites and filesystem, network, and credential restrictions still apply.
+
 ### OCI backend qualification
 
 The container tests are opt-in. Run them on a disposable machine with a local Docker-compatible daemon and a preloaded Linux image pinned by SHA-256 digest. The image needs `/bin/sh`, `sleep`, `cat`, `chmod`, `mkdir`, `rm`, `ln`, and `dd`.

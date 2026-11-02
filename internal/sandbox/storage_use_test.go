@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
@@ -334,10 +335,10 @@ func TestBoundaryEvidenceOutsideConsumerIsPermanent(t *testing.T) {
 	if err := scope.AcquirePrepared(ctx, resource); err != nil {
 		t.Fatal(err)
 	}
-	if err := runNativeCommand(ctx, "/bin/sh", t.TempDir(), []string{"PATH=/usr/bin:/bin"}, []string{"-c", "exit 0"}, nil, io.Discard, io.Discard); err != nil {
+	if err := runLegacyNativeCommand(ctx, "/bin/sh", t.TempDir(), []string{"PATH=/usr/bin:/bin"}, []string{"-c", "exit 0"}, nil, io.Discard, io.Discard, process.StopVerified); err != nil {
 		t.Fatal(err)
 	}
-	// A later contained admission must inherit the earlier native contamination.
+	// A later contained admission must inherit the earlier unclassified contamination.
 	if err := scope.AcquirePrepared(ctx, resource); err != nil {
 		t.Fatal(err)
 	}

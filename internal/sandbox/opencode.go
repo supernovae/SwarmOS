@@ -10,14 +10,13 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os/exec"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/process"
-	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 // OpenCode owns provider authentication. A private, loopback-only server keeps
@@ -40,35 +39,30 @@ func runOpenCodeSession(ctx context.Context, binary, model, prompt, control stri
 	env = append(append([]string(nil), env...), "OPENCODE_PASSWORD="+hex.EncodeToString(nonce))
 	childCtx, stop := context.WithCancel(ctx)
 	defer stop()
-	cmd := exec.CommandContext(childCtx, binary, "serve", "--stdio", "--hostname", "127.0.0.1", "--port", "0")
-	cmd.Dir, cmd.Env, cmd.Stderr = control, env, stderr
-	process.Configure(cmd)
-	cmd.Cancel = func() error { return process.StopVerified(cmd) }
-	cmd.WaitDelay = time.Second
-	in, err := cmd.StdinPipe()
+	serverInput, in, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	out, err := cmd.StdoutPipe()
+	out, output, err := os.Pipe()
 	if err != nil {
+		serverInput.Close()
 		in.Close()
 		return err
 	}
-	if err := cmd.Start(); err != nil {
-		in.Close()
-		out.Close()
-		return err
-	}
+	done := make(chan error, 1)
+	go func() {
+		err := runNativeCommand(childCtx, binary, control, env, []string{"serve", "--stdio", "--hostname", "127.0.0.1", "--port", "0"}, serverInput, output, stderr)
+		serverInput.Close()
+		output.Close()
+		done <- err
+	}()
 	defer func() {
 		stop()
-		stopErr := process.StopVerified(cmd)
 		in.Close()
 		out.Close()
-		_ = cmd.Wait()
-		if stopErr != nil {
-			if scope := storageuse.FromContext(ctx); scope != nil {
-				scope.Retain()
-			}
+		stopErr := <-done
+		var terminationErr *nativeTerminationError
+		if stopErr != nil && (!errors.Is(stopErr, context.Canceled) || errors.As(stopErr, &terminationErr)) {
 			resultErr = errors.Join(resultErr, fmt.Errorf("stop delegated harness: %w", stopErr))
 		}
 	}()

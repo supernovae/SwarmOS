@@ -29,6 +29,8 @@ The private server listens only on loopback and is protected by a temporary pass
 
 Linux native isolated Go commands and worker checks use `GOMAXPROCS=2` and `GOFLAGS=-buildvcs=false -p=2`; see the [shared concurrency defaults](README.md#go-concurrency).
 
+For recoverable managed-cache bookkeeping after an interrupted command, optionally configure [native storage lifetimes](README.md#native-storage-lifetimes). Native execution continues when scope support is unavailable; its storage uses remain unrecoverable.
+
 - **Permissions.** The generated configuration denies every tool and integration except the `swarm` MCP server and its `swarm_*` tools. Skills are denied.
 - **Checks before work.** SwarmOS waits until the `swarm` MCP server reports connected, rejects any other MCP server in the catalog, and checks the merged agent permissions before the first model request.
 - **Configuration discovery.** OpenCode's customization lookup points at a SwarmOS control directory. Provider data stays in its normal location.

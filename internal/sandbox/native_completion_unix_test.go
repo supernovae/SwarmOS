@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/process"
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"io"
 	"os"
@@ -43,7 +44,7 @@ func TestNativeCommandSuccessCanLeaveStorageConsumer(t *testing.T) {
 	defer cancel()
 	path := filepath.Join(t.TempDir(), "consumer-output")
 	env := append(os.Environ(), "SWARM_COMPLETION_FIXTURE_ROLE=parent", "SWARM_COMPLETION_FIXTURE_OUTPUT="+path)
-	if err := runNativeCommand(ctx, os.Args[0], t.TempDir(), env, []string{"-test.run=^TestNativeCommandSuccessCanLeaveStorageConsumer$"}, input, output, output); err != nil {
+	if err := runLegacyNativeCommand(ctx, os.Args[0], t.TempDir(), env, []string{"-test.run=^TestNativeCommandSuccessCanLeaveStorageConsumer$"}, input, output, output, process.StopVerified); err != nil {
 		t.Fatal(err)
 	}
 	scan := bufio.NewReader(reader)

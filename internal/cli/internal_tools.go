@@ -67,3 +67,8 @@ func newInternalBrowserExecCmd() *cobra.Command {
 			return sandbox.ExecBrowserScope(args[0], args[1], args[2:])
 		}}
 }
+
+func newInternalNativeExecCmd() *cobra.Command {
+	return &cobra.Command{Use: "internal-native-exec", Hidden: true, DisableFlagParsing: true, Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error { return sandbox.ExecNativeScope(args[0]) }}
+}

@@ -29,7 +29,18 @@ func completionFixtureRole(role string) bool { return role == "parent" || role =
 
 // Exercise the real stdio server from installed harnesses without requiring a
 // separately built swarm binary. This branch is available only in the test binary.
+var nativeTestDispatch = func() {}
+
 func TestMain(m *testing.M) {
+	nativeTestDispatch()
+	if len(os.Args) == 3 && os.Args[1] == "internal-native-exec" {
+		if err := ExecNativeScope(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	ledgerRoot, ledgerErr := os.MkdirTemp("", "swarm-test-ledger-*")
 	if ledgerErr != nil {
 		panic(ledgerErr)

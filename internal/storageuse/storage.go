@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"sync"
@@ -549,6 +550,7 @@ type Scope struct {
 	retained         bool
 	outside          bool
 	outsideResources []Resource
+	native           map[string]NativeEvidence
 	closed           bool
 }
 
@@ -655,7 +657,7 @@ func (s *Scope) acquire(ctx context.Context, resource Resource, prepared bool) e
 				for _, prior := range s.outsideResources {
 					outside = outside || overlaps(prior.Location, resource.Location)
 				}
-				v.Evidence[use.token] = &useEvidence{Coordinator: p, Outside: outside, Consumers: map[string]ProcessIdentity{}}
+				v.Evidence[use.token] = &useEvidence{Coordinator: p, Outside: outside, Consumers: map[string]ProcessIdentity{}, Native: cloneNative(s.native)}
 				return nil
 			})
 		}
@@ -893,6 +895,7 @@ type useEvidence struct {
 	Coordinator ProcessIdentity
 	Outside     bool
 	Consumers   map[string]ProcessIdentity
+	Native      map[string]NativeEvidence
 }
 
 func validIdentity(p ProcessIdentity) bool {
@@ -1010,7 +1013,7 @@ func (v *record) validate() error {
 		}
 		// Incomplete identities and reservations deliberately remain readable and
 		// pending; they never satisfy recovery.
-		if len(evidence.Consumers) > 256 {
+		if len(evidence.Consumers)+len(evidence.Native) > 256 {
 			return ErrUnsafe
 		}
 	}
@@ -1024,6 +1027,10 @@ func (m *Manager) Recover(ctx context.Context, r Resource, now time.Time, reserv
 }
 
 func (m *Manager) recover(ctx context.Context, r Resource, now time.Time, gone func(ProcessIdentity) bool, reserve ...func(int64) error) (bool, error) {
+	return m.recoverNative(ctx, r, now, gone, func(n NativeIdentity) bool { return NativeBoundaryEmpty(n, os.ReadFile, os.Stat) }, reserve...)
+}
+
+func (m *Manager) recoverNative(ctx context.Context, r Resource, now time.Time, gone func(ProcessIdentity) bool, empty func(NativeIdentity) bool, reserve ...func(int64) error) (bool, error) {
 	key, err := m.key(r)
 	if err != nil {
 		return false, err
@@ -1057,7 +1064,7 @@ func (m *Manager) recover(ctx context.Context, r Resource, now time.Time, gone f
 			return false, err
 		}
 		e := v.Evidence[token]
-		if done || e == nil || e.Outside || !validIdentity(e.Coordinator) || len(e.Consumers) == 0 || !gone(e.Coordinator) {
+		if done || e == nil || e.Outside || !validIdentity(e.Coordinator) || len(e.Consumers)+len(e.Native) == 0 || !gone(e.Coordinator) {
 			continue
 		}
 		eligible := true
@@ -1069,6 +1076,15 @@ func (m *Manager) recover(ctx context.Context, r Resource, now time.Time, gone f
 				break
 			}
 			seen[p] = true
+		}
+		seenNative := map[NativeIdentity]bool{}
+		for id, n := range e.Native {
+			_, idErr := hex.DecodeString(id)
+			if len(id) != 64 || idErr != nil || !ValidNativeIdentity(n.Identity) || seenNative[n.Identity] || !empty(n.Identity) {
+				eligible = false
+				break
+			}
+			seenNative[n.Identity] = true
 		}
 		if eligible {
 			v.Uses[token] = true
@@ -1164,7 +1180,7 @@ func (s *Scope) ReserveBoundary(ctx context.Context, locations []string) (*Bound
 				if e.Consumers == nil {
 					e.Consumers = map[string]ProcessIdentity{}
 				}
-				if len(e.Consumers) >= 256 {
+				if len(e.Consumers)+len(e.Native) >= 256 {
 					// Bound evidence growth without limiting the number of tool launches.
 					// Once tracking is exhausted the use stays permanently nonqualifying.
 					e.Outside = true
@@ -1256,5 +1272,268 @@ func uniqueJSON(data []byte) error {
 	if _, err := d.Token(); err != io.EOF {
 		return ErrUnsafe
 	}
+	return nil
+}
+
+// NativeIdentity identifies an acknowledged cgroup v2 scope on one kernel and
+// one mounted hierarchy. A launcher PID is never a native boundary identity.
+type NativeIdentity struct {
+	Boot        string
+	Unit        string
+	Group       string
+	MountDevice uint64
+	MountInode  uint64
+	Inode       uint64
+}
+
+type NativeEvidence struct {
+	Identity NativeIdentity
+	Empty    bool
+}
+
+func ValidNativeIdentity(n NativeIdentity) bool {
+	p := ProcessIdentity{Boot: n.Boot, PID: 1, Start: 1}
+	nonce := strings.TrimSuffix(strings.TrimPrefix(n.Unit, "swarm-native-"), ".scope")
+	decoded, err := hex.DecodeString(nonce)
+	return validIdentity(p) && err == nil && strings.ToLower(nonce) == nonce && len(decoded) == 16 && n.Unit == "swarm-native-"+nonce+".scope" && len(n.Group) <= 4096 && strings.HasPrefix(n.Group, "/") && filepath.Clean(n.Group) == n.Group && filepath.Base(n.Group) == n.Unit && !strings.ContainsAny(n.Group, "\\\n\r\x00\t") && n.MountDevice != 0 && n.MountInode != 0 && n.Inode != 0
+}
+
+// fileIdentity is platform-neutral at compile time. Only Linux stat data is
+// accepted, and callers additionally require a mounted unified hierarchy.
+func fileIdentity(info os.FileInfo) (uint64, uint64) {
+	if info == nil || !info.IsDir() || info.Sys() == nil {
+		return 0, 0
+	}
+	v := reflect.ValueOf(info.Sys())
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return 0, 0
+	}
+	v = v.Elem()
+	if v.Kind() != reflect.Struct {
+		return 0, 0
+	}
+	number := func(name string) uint64 {
+		f := v.FieldByName(name)
+		if f.CanUint() {
+			return f.Uint()
+		}
+		if f.CanInt() && f.Int() > 0 {
+			return uint64(f.Int())
+		}
+		return 0
+	}
+	return number("Dev"), number("Ino")
+}
+
+// CaptureNativeIdentity is called before payload exec. The membership must be
+// read from the helper itself, never inferred from systemd's launcher PID.
+func CaptureNativeIdentity(unit string, read func(string) ([]byte, error), stat func(string) (os.FileInfo, error)) (NativeIdentity, error) {
+	n := NativeIdentity{Unit: unit}
+	raw, err := read("/proc/self/cgroup")
+	if err != nil {
+		return n, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.HasPrefix(line, "0::/") {
+			if n.Group != "" {
+				return n, ErrUnsafe
+			}
+			n.Group = strings.TrimPrefix(line, "0::")
+		}
+	}
+	raw, err = read("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return n, err
+	}
+	n.Boot = strings.TrimSpace(string(raw))
+	if _, err = read("/sys/fs/cgroup/cgroup.controllers"); err != nil {
+		return n, err
+	}
+	root, err := stat("/sys/fs/cgroup")
+	if err != nil {
+		return n, err
+	}
+	n.MountDevice, n.MountInode = fileIdentity(root)
+	// Validate the path before using it for a filesystem observation.
+	n.Inode = 1
+	if !ValidNativeIdentity(n) {
+		return n, ErrUnsafe
+	}
+	group, err := stat(filepath.Join("/sys/fs/cgroup", n.Group))
+	if err != nil {
+		return n, err
+	}
+	device, inode := fileIdentity(group)
+	n.Inode = inode
+	if device != n.MountDevice || !ValidNativeIdentity(n) {
+		return n, ErrUnsafe
+	}
+	return n, nil
+}
+
+// NativeBoundaryEmpty is deliberately independent of manager text and PID
+// liveness. Missing paths count only after acknowledged creation on the same
+// mounted hierarchy; a changed mount or reused cgroup inode stays unresolved.
+func NativeBoundaryEmpty(n NativeIdentity, read func(string) ([]byte, error), stat func(string) (os.FileInfo, error)) bool {
+	if !ValidNativeIdentity(n) {
+		return false
+	}
+	raw, err := read("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return false
+	}
+	boot := strings.TrimSpace(string(raw))
+	if !validIdentity(ProcessIdentity{Boot: boot, PID: 1, Start: 1}) {
+		return false
+	}
+	if boot != n.Boot {
+		return true
+	}
+	if _, err = read("/sys/fs/cgroup/cgroup.controllers"); err != nil {
+		return false
+	}
+	root, err := stat("/sys/fs/cgroup")
+	if err != nil {
+		return false
+	}
+	dev, ino := fileIdentity(root)
+	if dev != n.MountDevice || ino != n.MountInode {
+		return false
+	}
+	path := filepath.Join("/sys/fs/cgroup", n.Group)
+	info, err := stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	dev, ino = fileIdentity(info)
+	if dev != n.MountDevice || ino != n.Inode {
+		return false
+	}
+	raw, err = read(filepath.Join(path, "cgroup.events"))
+	if err != nil || len(raw) > 4096 {
+		return false
+	}
+	populated := ""
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || seen[fields[0]] {
+			return false
+		}
+		seen[fields[0]] = true
+		if fields[0] == "populated" {
+			populated = fields[1]
+		}
+	}
+	return populated == "0"
+}
+
+func cloneNative(in map[string]NativeEvidence) map[string]NativeEvidence {
+	out := make(map[string]NativeEvidence, len(in))
+	for id, n := range in {
+		out[id] = n
+	}
+	return out
+}
+
+// NativeReservation is distinct from PID-namespace reservations. Every current
+// and later resource receives the incomplete entry before any payload runs.
+type NativeReservation struct {
+	scope *Scope
+	id    string
+}
+
+func (s *Scope) ReserveNative(ctx context.Context) (*NativeReservation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	id := hex.EncodeToString(nonce[:])
+	if s.native == nil {
+		s.native = map[string]NativeEvidence{}
+	}
+	if len(s.native) >= 256 {
+		s.outside = true
+		for _, u := range s.uses {
+			if err := u.evidence(ctx, func(v *record) error {
+				if e := v.Evidence[u.token]; e != nil {
+					e.Outside = true
+				}
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}
+	s.native[id] = NativeEvidence{}
+	b := &NativeReservation{scope: s, id: id}
+	if err := b.persist(ctx, NativeEvidence{}, false); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+func (b *NativeReservation) persist(ctx context.Context, n NativeEvidence, existing bool) error {
+	for _, u := range b.scope.uses {
+		if err := u.evidence(ctx, func(v *record) error {
+			e := v.Evidence[u.token]
+			if e == nil || e.Outside {
+				return nil
+			}
+			if e.Native == nil {
+				e.Native = map[string]NativeEvidence{}
+			}
+			old, ok := e.Native[b.id]
+			if existing && (!ok || old != b.scope.native[b.id]) {
+				return ErrUnsafe
+			}
+			if !ok && len(e.Native)+len(e.Consumers) >= 256 {
+				e.Outside = true
+				return nil
+			}
+			e.Native[b.id] = n
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (b *NativeReservation) Seal(ctx context.Context, n NativeIdentity) error {
+	if !ValidNativeIdentity(n) {
+		return ErrUnsafe
+	}
+	b.scope.mu.Lock()
+	defer b.scope.mu.Unlock()
+	if b.scope.native[b.id] != (NativeEvidence{}) {
+		return ErrUnsafe
+	}
+	next := NativeEvidence{Identity: n}
+	if err := b.persist(ctx, next, true); err != nil {
+		return err
+	}
+	b.scope.native[b.id] = next
+	return nil
+}
+
+// MarkEmpty is coordinator-only and must follow NativeBoundaryEmpty. Recovery
+// can also independently prove emptiness after a coordinator interruption.
+func (b *NativeReservation) MarkEmpty(ctx context.Context) error {
+	b.scope.mu.Lock()
+	defer b.scope.mu.Unlock()
+	next := b.scope.native[b.id]
+	if !NativeBoundaryEmpty(next.Identity, os.ReadFile, os.Stat) {
+		return ErrUnsafe
+	}
+	next.Empty = true
+	if err := b.persist(ctx, next, true); err != nil {
+		return err
+	}
+	b.scope.native[b.id] = next
 	return nil
 }

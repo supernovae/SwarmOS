@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
 func TestDelegatedValidationWithoutCodex(t *testing.T) {
@@ -435,5 +436,133 @@ func TestGoConcurrencyBoundaries(t *testing.T) {
 			}
 			goConcurrencyOutput(t, out.String())
 		})
+	}
+}
+
+// TestToolExecutorRecoveryBoundary is the maintainer's live teardown check.
+// The helper coordinator is killed only after the writer and durable evidence
+// are ready. No stand-in launcher supplies the production boundary identity.
+func TestToolExecutorRecoveryBoundary(t *testing.T) {
+	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
+		t.Skip("set SWARM_TEST_EXECUTOR=1 for live Bubblewrap recovery")
+	}
+	if root := os.Getenv("SWARM_TEST_RECOVERY_EXECUTOR_ROOT"); root != "" {
+		storageuse.UserCacheDir = func() (string, error) { return root, nil }
+		ctx, _, err := storageuse.Ensure(context.Background(), strings.Repeat("a", 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache := filepath.Join(root, "cache", "agent-build", strings.Repeat("a", 32), "go")
+		scope := storageuse.FromContext(ctx)
+		if err := scope.AcquirePrepared(ctx, storageuse.ResourceFor(scope.Repository(), "agent-build", cache)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(cache, 0700); err != nil {
+			t.Fatal(err)
+		}
+		e := ToolExecutor{Work: filepath.Join(root, "work"), BuildCaches: []BuildCache{{Ecosystem: "go", EnvKey: "GOCACHE", Dir: cache, Persistent: true}}}
+		if err := e.Run(ctx, `echo ready > /workspace/ready; while :; do echo running >> "$GOCACHE/writer"; sleep 0.05; done`, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	root := resolvedTempDir(t)
+	work := filepath.Join(root, "work")
+	if err := os.Mkdir(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestToolExecutorRecoveryBoundary$", "-test.timeout=30s")
+	cmd.Env = append(os.Environ(), "SWARM_TEST_RECOVERY_EXECUTOR_ROOT="+root)
+	var diagnostics strings.Builder
+	cmd.Stdout = &diagnostics
+	cmd.Stderr = &diagnostics
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	control := filepath.Join(root, "swarm-use")
+	cache := filepath.Join(root, "cache", "agent-build", strings.Repeat("a", 32), "go")
+	resource := storageuse.ResourceFor(strings.Repeat("a", 32), "agent-build", cache)
+	var boundary storageuse.ProcessIdentity
+	ready := false
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_, readyErr := os.Stat(filepath.Join(work, "ready"))
+		records, _ := filepath.Glob(filepath.Join(control, "*.json"))
+		sealed := 0
+		for _, path := range records {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			var v struct {
+				Evidence map[string]struct {
+					Consumers map[string]storageuse.ProcessIdentity
+				}
+			}
+			if json.Unmarshal(data, &v) != nil {
+				continue
+			}
+			for _, e := range v.Evidence {
+				for _, p := range e.Consumers {
+					if p.PID > 0 {
+						boundary = p
+						sealed++
+					}
+				}
+			}
+		}
+		if readyErr == nil && sealed == 2 {
+			ready = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready || boundary.PID == 0 {
+		t.Fatal("no complete durable namespace identity before deadline")
+	}
+	if _, err := os.Stat(filepath.Join(work, "ready")); err != nil {
+		t.Fatal("writer not ready", err)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	manager, err := storageuse.Open(control, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	deadline = time.Now().Add(10 * time.Second)
+	recovered := false
+	for time.Now().Before(deadline) {
+		changed, err := manager.Recover(context.Background(), resource, time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if changed {
+			recovered = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !recovered {
+		t.Fatal("killed coordinator/boundary did not become recoverable")
+	}
+	if current, err := storageuse.CaptureProcess(boundary.PID); err == nil && current == boundary {
+		t.Fatal("recorded boundary survived recovery")
+	}
+	first, err := os.ReadFile(filepath.Join(cache, "writer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	last, err := os.ReadFile(filepath.Join(cache, "writer"))
+	if err != nil || string(first) != string(last) {
+		t.Fatal("storage writer survived teardown", err)
+	}
+	observation, err := storageuse.Observe(context.Background(), control, resource, 16384, func(int64) error { return nil })
+	if err != nil || observation.Active == nil || *observation.Active {
+		t.Fatalf("recovery: %+v %v", observation, err)
 	}
 }

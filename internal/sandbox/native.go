@@ -170,6 +170,11 @@ func runNativeCommand(ctx context.Context, binary, dir string, env, args []strin
 }
 
 func runNativeCommandWithStop(ctx context.Context, binary, dir string, env, args []string, stdin io.Reader, stdout, stderr io.Writer, stop func(*exec.Cmd) error) error {
+	if scope := storageuse.FromContext(ctx); scope != nil {
+		if err := scope.OutsideConsumer(ctx); err != nil {
+			return err
+		}
+	}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir, cmd.Env = dir, env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr

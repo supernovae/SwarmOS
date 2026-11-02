@@ -1,6 +1,6 @@
 // Package storageuse keeps coordinator-owned, durable evidence of storage use.
-// A lost coordinator leaves pending records. Neither time nor process IDs can
-// turn those records into permission to perform maintenance.
+// Interrupted uses remain pending unless explicit recovery proves that the
+// coordinator and every exclusively contained PID-namespace consumer have ended.
 package storageuse
 
 import (
@@ -15,6 +15,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -40,7 +42,8 @@ type record struct {
 	CompleteCoverage bool
 	Created          time.Time
 	LastUse          time.Time
-	Uses             map[string]bool // false means unresolved; completed records are retained
+	Uses             map[string]bool         // false means unresolved; completed records are retained
+	Evidence         map[string]*useEvidence `json:",omitempty"`
 }
 
 // Manager must remain in the coordinator; it is never part of worker options.
@@ -177,8 +180,14 @@ func (m *Manager) lock(ctx context.Context, key string) (*os.File, bool, error) 
 }
 
 func (m *Manager) read(key string, r Resource) (*record, error) {
-	b, err := m.root.ReadFile(key+".json", 16<<20)
+	return m.readLimited(key, r, 16<<20)
+}
+func (m *Manager) readLimited(key string, r Resource, limit int64) (*record, error) {
+	b, err := m.root.ReadFile(key+".json", limit)
 	if err != nil {
+		return nil, err
+	}
+	if err := uniqueJSON(b); err != nil {
 		return nil, err
 	}
 	var v record
@@ -191,7 +200,7 @@ func (m *Manager) read(key string, r Resource) (*record, error) {
 	if d.Decode(&extra) != io.EOF {
 		return nil, ErrUnsafe
 	}
-	if v.Version != 1 || v.Resource != r || v.Uses == nil || v.Created.IsZero() || v.LastUse.Before(v.Created) {
+	if v.Resource != r || v.validate() != nil {
 		return nil, ErrUnsafe
 	}
 	for token := range v.Uses {
@@ -401,13 +410,16 @@ func Observe(ctx context.Context, path string, resource Resource, maxBytes int64
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}
+	if err := uniqueJSON(data); err != nil {
+		return out, err
+	}
 	var v record
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&v); err != nil {
 		return out, err
 	}
-	if d.Decode(new(any)) != io.EOF || v.Version != 1 || v.Resource != resource || v.Uses == nil || v.Created.IsZero() || v.LastUse.Before(v.Created) {
+	if d.Decode(new(any)) != io.EOF || v.Resource != resource || v.validate() != nil {
 		return out, ErrUnsafe
 	}
 	active := false
@@ -469,14 +481,16 @@ type temporary struct {
 // Retain permanently records uncertainty for this scope; neither cancellation nor
 // a later successful command clears that uncertainty.
 type Scope struct {
-	mu         sync.Mutex
-	repository string
-	forbidden  []string
-	manager    *Manager
-	uses       []*Use
-	temps      map[string]temporary
-	retained   bool
-	closed     bool
+	mu               sync.Mutex
+	repository       string
+	forbidden        []string
+	manager          *Manager
+	uses             []*Use
+	temps            map[string]temporary
+	retained         bool
+	outside          bool
+	outsideResources []Resource
+	closed           bool
 }
 
 func FromContext(ctx context.Context) *Scope { s, _ := ctx.Value(scopeKey{}).(*Scope); return s }
@@ -525,6 +539,16 @@ func Ensure(ctx context.Context, repository string) (context.Context, *Scope, er
 }
 
 func (s *Scope) Acquire(ctx context.Context, resource Resource) error {
+	return s.acquire(ctx, resource, false)
+}
+
+// AcquirePrepared admits coordinator-only directory preparation. A use remains
+// pending unless every subsequent accessor has durable boundary evidence.
+func (s *Scope) AcquirePrepared(ctx context.Context, resource Resource) error {
+	return s.acquire(ctx, resource, true)
+}
+
+func (s *Scope) acquire(ctx context.Context, resource Resource, prepared bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -545,6 +569,38 @@ func (s *Scope) Acquire(ctx context.Context, resource Resource) error {
 		return err
 	}
 	s.uses = append(s.uses, use)
+	if !prepared {
+		s.outsideResources = append(s.outsideResources, resource)
+		for _, prior := range s.uses {
+			if !overlaps(prior.resource.Location, resource.Location) {
+				continue
+			}
+			if err := prior.evidence(ctx, func(v *record) error {
+				if e := v.Evidence[prior.token]; e != nil {
+					e.Outside = true
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if prepared {
+		p, captureErr := CaptureProcess(os.Getpid())
+		if captureErr == nil {
+			return use.evidence(ctx, func(v *record) error {
+				if v.Evidence == nil {
+					v.Evidence = map[string]*useEvidence{}
+				}
+				outside := s.outside
+				for _, prior := range s.outsideResources {
+					outside = outside || overlaps(prior.Location, resource.Location)
+				}
+				v.Evidence[use.token] = &useEvidence{Coordinator: p, Outside: outside, Consumers: map[string]ProcessIdentity{}}
+				return nil
+			})
+		}
+	}
 	return nil
 }
 
@@ -765,4 +821,381 @@ func (g *Maintenance) Observation() Observation {
 	active := false
 	out.Active = &active
 	return out
+}
+
+// ProcessIdentity is local coordinator evidence, never worker input.
+type ProcessIdentity struct {
+	Boot  string
+	PID   int
+	Start uint64
+}
+
+type useEvidence struct {
+	Coordinator ProcessIdentity
+	Outside     bool
+	Consumers   map[string]ProcessIdentity
+}
+
+func validIdentity(p ProcessIdentity) bool {
+	if p.PID <= 0 || p.Start == 0 || len(p.Boot) != 36 {
+		return false
+	}
+	for i, c := range p.Boot {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if c != '-' {
+				return false
+			}
+			continue
+		}
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+	return true
+}
+
+// CaptureProcess reads Linux boot identity and start ticks. Other platforms and
+// unavailable proc data cannot establish a recoverable identity.
+func CaptureProcess(pid int) (ProcessIdentity, error) {
+	if runtime.GOOS != "linux" || pid <= 0 {
+		return ProcessIdentity{}, ErrUnsafe
+	}
+	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return ProcessIdentity{}, err
+	}
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return ProcessIdentity{}, err
+	}
+	start, err := processStart(data, pid)
+	if err != nil {
+		return ProcessIdentity{}, err
+	}
+	p := ProcessIdentity{Boot: strings.TrimSpace(string(boot)), PID: pid, Start: start}
+	if !validIdentity(p) {
+		return ProcessIdentity{}, ErrUnsafe
+	}
+	return p, nil
+}
+
+func processStart(data []byte, pid int) (uint64, error) {
+	text := string(data)
+	end := strings.LastIndexByte(text, ')')
+	begin := strings.IndexByte(text, '(')
+	if begin < 1 || end <= begin || strings.TrimSpace(text[:begin]) != strconv.Itoa(pid) {
+		return 0, ErrUnsafe
+	}
+	fields := strings.Fields(text[end+1:])
+	if len(fields) < 20 {
+		return 0, ErrUnsafe
+	}
+	start, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil || start == 0 {
+		return 0, ErrUnsafe
+	}
+	return start, nil
+}
+
+func processGone(p ProcessIdentity) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	return processGoneRead(p, os.ReadFile, os.Stat)
+}
+func processGoneRead(p ProcessIdentity, read func(string) ([]byte, error), stat func(string) (os.FileInfo, error)) bool {
+	if !validIdentity(p) {
+		return false
+	}
+	boot, err := read("/proc/sys/kernel/random/boot_id")
+	if err != nil {
+		return false
+	}
+	now := strings.TrimSpace(string(boot))
+	check := p
+	check.Boot = now
+	if !validIdentity(check) {
+		return false
+	}
+	if now != p.Boot {
+		return true
+	}
+	data, err := read("/proc/" + strconv.Itoa(p.PID) + "/stat")
+	if errors.Is(err, os.ErrNotExist) {
+		// A missing stat file alone is not evidence that the PID entry is gone.
+		_, pidErr := stat("/proc/" + strconv.Itoa(p.PID))
+		return errors.Is(pidErr, os.ErrNotExist)
+	}
+	if err != nil {
+		return false
+	}
+	start, err := processStart(data, p.PID)
+	return err == nil && start != p.Start
+}
+
+func (v *record) validate() error {
+	if v.Version != 1 || v.Uses == nil || v.Created.IsZero() || v.LastUse.Before(v.Created) {
+		return ErrUnsafe
+	}
+	for token := range v.Uses {
+		if len(token) != 64 {
+			return ErrUnsafe
+		}
+		if _, err := hex.DecodeString(token); err != nil {
+			return ErrUnsafe
+		}
+	}
+	for token, evidence := range v.Evidence {
+		if _, ok := v.Uses[token]; !ok || evidence == nil {
+			return ErrUnsafe
+		}
+		// Incomplete identities and reservations deliberately remain readable and
+		// pending; they never satisfy recovery.
+		if len(evidence.Consumers) > 256 {
+			return ErrUnsafe
+		}
+	}
+	return nil
+}
+
+// Recover resolves only fully recorded, exclusively PID-namespace consumers.
+// It is explicit: admission, observation and manager reopen never invoke it.
+func (m *Manager) Recover(ctx context.Context, r Resource, now time.Time, reserve ...func(int64) error) (bool, error) {
+	return m.recover(ctx, r, now, processGone, reserve...)
+}
+
+func (m *Manager) recover(ctx context.Context, r Resource, now time.Time, gone func(ProcessIdentity) bool, reserve ...func(int64) error) (bool, error) {
+	key, err := m.key(r)
+	if err != nil {
+		return false, err
+	}
+	f, _, err := m.lock(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	defer unlock(f)
+	// Match the read-only inventory cap, rather than expanding large ledgers
+	// during a bounded maintenance pass.
+	info, err := m.root.Lstat(key + ".json")
+	if err != nil {
+		return false, err
+	}
+	if info.Size() > 16384 {
+		return false, ErrUnsafe
+	}
+	if len(reserve) > 0 {
+		if err := reserve[0](8192 + 128*info.Size()); err != nil {
+			return false, err
+		}
+	}
+	v, err := m.readLimited(key, r, info.Size())
+	if err != nil {
+		return false, err
+	}
+	changed := false
+	for token, done := range v.Uses {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		e := v.Evidence[token]
+		if done || e == nil || e.Outside || !validIdentity(e.Coordinator) || len(e.Consumers) == 0 || !gone(e.Coordinator) {
+			continue
+		}
+		eligible := true
+		seen := map[ProcessIdentity]bool{}
+		for id, p := range e.Consumers {
+			_, idErr := hex.DecodeString(id)
+			if len(id) != 64 || idErr != nil || seen[p] || !validIdentity(p) || !gone(p) {
+				eligible = false
+				break
+			}
+			seen[p] = true
+		}
+		if eligible {
+			v.Uses[token] = true
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	if now.After(v.LastUse) {
+		v.LastUse = now
+	}
+	if err := m.write(key, v); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (u *Use) evidence(ctx context.Context, change func(*record) error) error {
+	f, _, err := u.manager.lock(ctx, u.key)
+	if err != nil {
+		return err
+	}
+	defer unlock(f)
+	v, err := u.manager.read(u.key, u.resource)
+	if err != nil {
+		return err
+	}
+	if _, ok := v.Uses[u.token]; !ok {
+		return ErrUnsafe
+	}
+	if err := change(v); err != nil {
+		return err
+	}
+	return u.manager.write(u.key, v)
+}
+
+// OutsideConsumer permanently disqualifies this scope, including later uses.
+// Call before launching any native or otherwise unclassified consumer.
+func (s *Scope) OutsideConsumer(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.outside = true
+	for _, u := range s.uses {
+		if err := u.evidence(ctx, func(v *record) error {
+			if e := v.Evidence[u.token]; e != nil {
+				e.Outside = true
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// BoundaryReservation is coordinator-only launch state. It may only be sealed
+// with the verified namespace init identity, never the launcher or a wrapper.
+type BoundaryReservation struct {
+	scope *Scope
+	id    string
+	uses  []*Use
+}
+
+// ReserveBoundary persists incomplete consumers before starting the process.
+func (s *Scope) ReserveBoundary(ctx context.Context, locations []string) (*BoundaryReservation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	b := &BoundaryReservation{scope: s, id: hex.EncodeToString(nonce[:])}
+	for _, u := range s.uses {
+		matched := false
+		for _, location := range locations {
+			if overlaps(u.resource.Location, location) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if err := u.evidence(ctx, func(v *record) error {
+			if e := v.Evidence[u.token]; e != nil && !e.Outside {
+				if e.Consumers == nil {
+					e.Consumers = map[string]ProcessIdentity{}
+				}
+				if len(e.Consumers) >= 256 {
+					// Bound evidence growth without limiting the number of tool launches.
+					// Once tracking is exhausted the use stays permanently nonqualifying.
+					e.Outside = true
+					return nil
+				}
+				e.Consumers[b.id] = ProcessIdentity{}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		b.uses = append(b.uses, u)
+	}
+	return b, nil
+}
+
+func (b *BoundaryReservation) Seal(ctx context.Context, p ProcessIdentity) error {
+	if !validIdentity(p) {
+		return ErrUnsafe
+	}
+	b.scope.mu.Lock()
+	defer b.scope.mu.Unlock()
+	for _, u := range b.uses {
+		if err := u.evidence(ctx, func(v *record) error {
+			if e := v.Evidence[u.token]; e != nil && !e.Outside {
+				old, ok := e.Consumers[b.id]
+				if !ok || old != (ProcessIdentity{}) {
+					return ErrUnsafe
+				}
+				e.Consumers[b.id] = p
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// uniqueJSON rejects duplicate object keys instead of letting later consumers
+// or evidence silently replace an earlier reservation during decoding.
+func uniqueJSON(data []byte) error {
+	d := json.NewDecoder(bytes.NewReader(data))
+	var value func(int) error
+	value = func(depth int) error {
+		if depth > 32 {
+			return ErrUnsafe
+		}
+		t, err := d.Token()
+		if err != nil {
+			return err
+		}
+		delim, compound := t.(json.Delim)
+		if !compound {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := map[string]bool{}
+			for d.More() {
+				key, err := d.Token()
+				if err != nil {
+					return err
+				}
+				name, ok := key.(string)
+				if !ok || seen[name] {
+					return ErrUnsafe
+				}
+				seen[name] = true
+				if err := value(depth + 1); err != nil {
+					return err
+				}
+			}
+		case '[':
+			for d.More() {
+				if err := value(depth + 1); err != nil {
+					return err
+				}
+			}
+		default:
+			return ErrUnsafe
+		}
+		_, err = d.Token()
+		return err
+	}
+	if err := value(0); err != nil {
+		return err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return ErrUnsafe
+	}
+	return nil
 }

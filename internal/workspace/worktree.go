@@ -854,6 +854,10 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 		}
 	}
 	if cfgErr == nil {
+		if cfg.Execution.BrowserProfile && (role == "developer" || role == "tester") {
+			guidance.policy = append(guidance.policy, "Browser profile enabled by approved-base policy. For delegated tools, run the preview server and Chromium in one swarm_shell command; each command has its own private loopback and a two-minute lifetime. Use the read-only Playwright Chromium headless shell with --no-sandbox and fresh task-local --user-data-dir paths. Write DOM, PNG and logs to task output files. Start python3 -m http.server --bind 127.0.0.1, wait for readiness, run Chromium --dump-dom and --screenshot, assert outputs and trap server cleanup in the same command. Codex agents run browser checks through Bubblewrap required-check validation; the Codex shell does not gain this profile.")
+		}
+
 		if profile := contract.SelectProfile(wu, cfg.Profiles); profile != nil {
 			variant, err := harness.LoadPromptVariantAt(worktreePath, role, profile.PromptVariant, baseSHA)
 			if err != nil {

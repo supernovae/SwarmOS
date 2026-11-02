@@ -13,6 +13,9 @@ import (
 )
 
 func nativeValidationUsesCodex(cfg *contract.SwarmConfig) bool {
+	if cfg.Execution.BrowserProfile {
+		return false
+	}
 	name := cfg.Roles["tester"]
 	if name == "" {
 		name = cfg.DefaultAgent
@@ -21,9 +24,12 @@ func nativeValidationUsesCodex(cfg *contract.SwarmConfig) bool {
 	return ok && (ac.Harness == "codex" || ac.Harness == "" && name == "codex")
 }
 
-// CheckNativeValidationAvailable resolves the configured boundary without
-// executing a canary or creating any files.
+// CheckNativeValidationAvailable resolves the configured boundary. The browser
+// profile additionally verifies its memory scope and cached Chromium launch.
 func CheckNativeValidationAvailable(cfg *contract.SwarmConfig) error {
+	if cfg.Execution.BrowserProfile {
+		return CheckBrowserProfile(context.Background())
+	}
 	if nativeValidationUsesCodex(cfg) {
 		_, err := NativeValidationBinary(cfg)
 		return err
@@ -32,6 +38,9 @@ func CheckNativeValidationAvailable(cfg *contract.SwarmConfig) error {
 }
 
 func CheckNativeValidation(ctx context.Context, cfg *contract.SwarmConfig) error {
+	if cfg.Execution.BrowserProfile {
+		return CheckBrowserProfile(ctx)
+	}
 	if nativeValidationUsesCodex(cfg) {
 		binary, err := NativeValidationBinary(cfg)
 		if err != nil {
@@ -62,7 +71,7 @@ func RunConfiguredNativeValidation(ctx context.Context, dir string, cfg *contrac
 		}
 		return RunNativeValidation(ctx, dir, binary, command, caches, deps, warmup, stdout, stderr)
 	}
-	if err := CheckToolExecutor(ctx); err != nil {
+	if err := checkToolExecutor(ctx, cfg.Execution.BrowserProfile); err != nil {
 		return err
 	}
 	return withNativeWorkspace(ctx, dir, WorkerOptions{DiscardChanges: true}, func(ctx context.Context, work, scratch string) error {
@@ -70,7 +79,7 @@ func RunConfiguredNativeValidation(ctx context.Context, dir string, cfg *contrac
 		if err != nil {
 			return err
 		}
-		return (ToolExecutor{Work: work, BuildCaches: mounts, Dependencies: deps}).Run(ctx, command, stdout, stderr)
+		return (ToolExecutor{BrowserProfile: cfg.Execution.BrowserProfile, Work: work, BuildCaches: mounts, Dependencies: deps}).Run(ctx, command, stdout, stderr)
 	})
 }
 

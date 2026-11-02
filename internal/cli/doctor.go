@@ -69,6 +69,9 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 					}
 					return harness.DoctorCheck{Category: "execution", Name: "mode", Status: status, Detail: detail}
 				}))
+				checks = append(checks, run.Run("execution", "browser-profile", func() harness.DoctorCheck {
+					return doctorBrowserProfileCheck(cmd.Context(), cfg, sandbox.CheckBrowserProfile)
+				}))
 				preflight := func(name string, cfg *contract.SwarmConfig, local bool, role string) (string, error) {
 					return agent.PreflightWithOptions(name, cfg, local, role, rootOpts.runnerOptions())
 				}
@@ -266,4 +269,16 @@ func dependencyCacheSummary(mode sandbox.DependencyCacheMode) string {
 		parts = append(parts, "sharing host caches read-only (no fetch-only prefetch): "+strings.Join(shared, ", "))
 	}
 	return strings.Join(parts, "; ")
+}
+
+func doctorBrowserProfileCheck(ctx context.Context, cfg *contract.SwarmConfig, probe func(context.Context) error) harness.DoctorCheck {
+	status, detail := "OK", "not requested in inspected repository config"
+	if cfg.Execution.BrowserProfile {
+		detail = "requested/available in inspected repository config"
+		if err := probe(ctx); err != nil {
+			status = "FAIL"
+			detail = "requested/unavailable: " + err.Error()
+		}
+	}
+	return harness.DoctorCheck{Category: "execution", Name: "browser-profile", Status: status, Detail: detail}
 }

@@ -71,3 +71,8 @@ Qualified on Linux/amd64 with an authenticated WorkUnit covering all four roles,
 Codex's [permission profiles](https://learn.chatgpt.com/docs/permissions) are still beta, so review each new release before raising the minimum version.
 
 Agent budgets default to 60 minutes and can be configured globally or per role in [approved execution policy](../project.md#agent-run-budgets). Interactive native sessions count working time across turns, exclude waits for coordinator input, and have a four-hour wall cap. A warning appears before the deadline. On timeout, native Codex and harness-tools Bubblewrap preserve a bounded recovery patch for [manual inspection](../developer.md#recovering-from-an-interrupted-run). Interactive OCI counts wall time without idle exclusion, and OCI has no timeout patch export. Individual tool-call limits remain separate.
+
+
+### Browser checks through validation
+
+With approved-base `execution.browser_profile: true`, native required checks use the Linux Bubblewrap browser executor even when the tester is Codex. Configure a check that starts the preview server and cached Playwright Chromium in one command and writes its DOM, screenshot and logs to files. Codex's shell keeps its existing sandbox; the browser profile applies through validation. See [host prerequisites and the example](../project.md#task-local-browser-previews).

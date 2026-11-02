@@ -48,6 +48,7 @@ func (a *CLIAdapter) runIsolated(ctx context.Context, req RunRequest, lifecycle 
 	}
 	options := sandbox.WorkerOptions{Runtime: a.containerRuntime, Image: a.container, Role: req.Role,
 		ReadOnly: req.ReadOnly || req.Role == "planner" || req.Role == "reviewer", Limits: limits, Warning: os.Stderr, RecoveryRoot: req.RecoveryRoot, CheckImport: req.CheckImport, PreserveRejected: req.PreserveRejected}
+	options.BrowserProfile = a.executionPolicy.BrowserProfile
 	options.Lifecycle = lifecycle
 	options.Effort = a.effort
 	collector := &GuidanceCollector{}

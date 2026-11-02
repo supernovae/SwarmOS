@@ -20,6 +20,7 @@ func newInternalToolsCmd() *cobra.Command {
 			}
 			return sandbox.ServeTools(cmd.Context(), executor, cmd.InOrStdin(), cmd.OutOrStdout())
 		}}
+	cmd.Flags().BoolVar(&executor.BrowserProfile, "browser-profile", false, "Approved browser execution profile")
 	cmd.Flags().StringVar(&executor.Work, "workspace", "", "Detached task workspace")
 	cmd.Flags().BoolVar(&executor.ReadOnly, "read-only", false, "Permit writes only to role artifacts")
 	cmd.Flags().StringArrayVar(&caches, "build-cache", nil, "Agent build cache as ecosystem=dir (repeatable)")
@@ -58,4 +59,11 @@ func parseDependencyCaches(values []string, shareHost bool, workspace string) (s
 		deps.Caches = append(deps.Caches, cache)
 	}
 	return deps, nil
+}
+
+func newInternalBrowserExecCmd() *cobra.Command {
+	return &cobra.Command{Use: "internal-browser-exec", Hidden: true, DisableFlagParsing: true, Args: cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return sandbox.ExecBrowserScope(args[0], args[1], args[2:])
+		}}
 }

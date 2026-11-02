@@ -15,6 +15,7 @@ const (
 // ExecutionConfig selects the default worker boundary. RequireIsolation is the
 // repository minimum; an operator may always request a stronger boundary.
 type ExecutionConfig struct {
+	BrowserProfile   bool              `yaml:"browser_profile,omitempty" json:"browser_profile,omitempty"`
 	AgentTimeout     *string           `yaml:"agent_timeout,omitempty" json:"agent_timeout,omitempty"`
 	RoleTimeouts     map[string]string `yaml:"role_timeouts,omitempty" json:"role_timeouts,omitempty"`
 	Mode             string            `yaml:"mode,omitempty" json:"mode,omitempty"`
@@ -52,6 +53,9 @@ func ResolveExecution(cfg *SwarmConfig, operatorMode string) (ExecutionConfig, e
 		if e.ContainerImage != "" || e.ContainerRuntime != "" {
 			e.Backend = BackendOCI
 		}
+	}
+	if e.BrowserProfile && (e.Mode != ExecutionIsolated || e.Backend != BackendNative) {
+		return e, fmt.Errorf("execution.browser_profile requires isolated native execution")
 	}
 	if e.Backend != BackendNative && e.Backend != BackendOCI {
 		return e, fmt.Errorf("execution.backend must be native or oci")

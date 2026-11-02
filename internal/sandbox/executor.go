@@ -21,8 +21,9 @@ import (
 // ToolExecutor keeps harness authentication in the harness. Only detached task
 // files cross into Bubblewrap; tools never inherit harness or coordinator state.
 type ToolExecutor struct {
-	Work     string
-	ReadOnly bool
+	BrowserProfile bool
+	Work           string
+	ReadOnly       bool
 	// BuildCaches are bound at their host paths; overlay caches are read-only
 	// with a write layer discarded when the command exits.
 	BuildCaches []BuildCache
@@ -46,9 +47,16 @@ func (e ToolExecutor) command(ctx context.Context, script string, args ...string
 	if !filepath.IsAbs(work) || work == "/" {
 		return nil, fmt.Errorf("executor requires an absolute task workspace")
 	}
-	flags, err := executorFlags(work, e.ReadOnly, e.BuildCaches, e.Dependencies, script, args)
+	flags, err := executorProfileFlags(work, e.ReadOnly, e.BuildCaches, e.Dependencies, script, args, e.BrowserProfile)
 	if err != nil {
 		return nil, err
+	}
+	if e.BrowserProfile {
+		if _, err := browserShell(e.Dependencies, work); err != nil {
+			return nil, err
+		}
+		cmd, _, err := browserCommand(ctx, binary, flags)
+		return cmd, err
 	}
 	cmd := exec.CommandContext(ctx, binary, flags...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent"}
@@ -164,7 +172,22 @@ func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.
 	}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err = cmd.Run()
-	if stopErr := process.StopVerified(cmd); stopErr != nil {
+	stopErr := process.StopVerified(cmd)
+	if e.BrowserProfile {
+		var unit string
+		for _, arg := range cmd.Args {
+			if strings.HasPrefix(arg, "--unit=swarm-browser-") {
+				unit = strings.TrimPrefix(arg, "--unit=")
+				break
+			}
+		}
+		if unit == "" {
+			stopErr = errors.Join(stopErr, fmt.Errorf("browser scope unit missing"))
+		} else {
+			stopErr = errors.Join(stopErr, stopBrowserScope(unit))
+		}
+	}
+	if stopErr != nil {
 		if scope := storageuse.FromContext(ctx); scope != nil {
 			scope.Retain()
 		}
@@ -178,7 +201,9 @@ func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.
 
 // CheckToolExecutor tests the same command builder used by every tool. The
 // positive network probe prevents an ambient firewall from passing this check.
-func CheckToolExecutor(ctx context.Context) (resultErr error) {
+func CheckToolExecutor(ctx context.Context) error { return checkToolExecutor(ctx, false) }
+
+func checkToolExecutor(ctx context.Context, browser bool) (resultErr error) {
 	ctx, own, err := storageuse.Ensure(ctx, "host")
 	if err != nil {
 		return err
@@ -216,7 +241,7 @@ func CheckToolExecutor(ctx context.Context) (resultErr error) {
 	conn.Close()
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 	var out process.Output
-	e := ToolExecutor{Work: work}
+	e := ToolExecutor{Work: work, BrowserProfile: browser}
 	script := `set -eu
 test ! -r "$1"
 test ! -r escape
@@ -277,4 +302,21 @@ func acquireRuntimeCaches(ctx context.Context, caches []BuildCache, deps Depende
 		}
 	}
 	return nil
+}
+
+func executorProfileFlags(work string, readOnly bool, caches []BuildCache, deps Dependencies, script string, args []string, browser bool) ([]string, error) {
+	flags, err := executorFlags(work, readOnly, caches, deps, script, args)
+	if err != nil {
+		return nil, err
+	}
+	if browser {
+		// This argv is executable only through the scope's pre-exec verifier.
+		for i, flag := range flags {
+			if flag == "--as=8589934592" {
+				return append(flags[:i], flags[i+1:]...), nil
+			}
+		}
+		return nil, fmt.Errorf("browser profile address-space limit missing")
+	}
+	return flags, nil
 }

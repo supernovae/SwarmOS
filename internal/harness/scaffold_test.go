@@ -1553,3 +1553,58 @@ func TestValidationRepairLimitConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestBrowserProfileApprovedBase(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			root := t.TempDir()
+			if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+				t.Fatal(err)
+			}
+			git := func(args ...string) string {
+				t.Helper()
+				out, err := gitfixture.Command(t, root, args...).CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, out)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			git("init", "-b", "main")
+			git("config", "user.name", "Test")
+			git("config", "user.email", "test@example.invalid")
+			path := filepath.Join(root, ".swarm/config.yaml")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			approved := strings.Replace(string(raw), "execution:", fmt.Sprintf("execution:\n  browser_profile: %v", enabled), 1)
+			if approved == string(raw) {
+				t.Fatal("missing execution section")
+			}
+			if err := os.WriteFile(path, []byte(approved), 0600); err != nil {
+				t.Fatal(err)
+			}
+			git("add", ".")
+			git("commit", "-m", "approved policy")
+			base := git("rev-parse", "HEAD")
+			candidate := strings.Replace(approved, fmt.Sprintf("browser_profile: %v", enabled), fmt.Sprintf("browser_profile: %v", !enabled), 1)
+			if err := os.WriteFile(path, []byte(candidate), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigAt(root, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Execution.BrowserProfile != enabled {
+				t.Fatal("candidate changed approved browser policy")
+			}
+			local, err := LoadConfig(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if local.Execution.BrowserProfile == enabled {
+				t.Fatal("candidate mutation not exercised")
+			}
+		})
+	}
+}

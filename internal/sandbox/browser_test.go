@@ -63,7 +63,7 @@ func TestBrowserProfileScopeVerification(t *testing.T) {
 
 func TestBrowserProfileScopeArgs(t *testing.T) {
 	args := browserScopeArgs("swarm-browser-test.scope", "/usr/bin/swarm", "/usr/bin/bwrap", []string{"--unshare-all", "--die-with-parent"})
-	want := []string{"--user", "--scope", "--quiet", "--unit=swarm-browser-test.scope", "--property=MemoryMax=2147483648", "--property=MemorySwapMax=0", "--", "/usr/bin/swarm", "internal-browser-exec", "swarm-browser-test.scope", "/usr/bin/bwrap", "--unshare-all", "--die-with-parent"}
+	want := []string{"--user", "--scope", "--expand-environment=no", "--quiet", "--unit=swarm-browser-test.scope", "--property=MemoryMax=2147483648", "--property=MemorySwapMax=0", "--", "/usr/bin/swarm", "internal-browser-exec", "swarm-browser-test.scope", "/usr/bin/bwrap", "--unshare-all", "--die-with-parent"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("scope argv: %q", args)
 	}
@@ -375,7 +375,10 @@ with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as probe:
         raise AssertionError('outside network route available')
 PY
 if touch "$PLAYWRIGHT_BROWSERS_PATH/swarm-cache-write-probe" 2>/dev/null; then exit 41; fi
-"$1" --no-sandbox --headless --disable-gpu --user-data-dir=/tmp/host-boundary --dump-dom "$2" > host-dom.html 2> host-browser.log
+browser_status=0
+"$1" --no-sandbox --headless --disable-gpu --user-data-dir=/tmp/host-boundary --dump-dom "$2" > host-dom.html 2> host-browser.log || browser_status=$?
+test "$browser_status" -eq 0 || test "$browser_status" -eq 1
+grep -q "net::ERR_" host-browser.log
 if grep -q HOST_BROWSER_SENTINEL host-dom.html; then exit 42; fi`
 	// UDP connect checks host route selection without sending any packets.
 	control, err := net.Dial("udp4", "192.0.2.1:53")
@@ -431,7 +434,10 @@ except OSError:
 else:
     raise AssertionError('outside address reachable')
 PY
-"$1" --no-sandbox --headless --disable-gpu --user-data-dir=/tmp/dns-boundary --dump-dom https://example.com/ > outside-dom.html 2> outside-browser.log
+browser_status=0
+"$1" --no-sandbox --headless --disable-gpu --user-data-dir=/tmp/dns-boundary --dump-dom https://example.com/ > outside-dom.html 2> outside-browser.log || browser_status=$?
+test "$browser_status" -eq 0 || test "$browser_status" -eq 1
+grep -q "net::ERR_" outside-browser.log
 if grep -q 'Example Domain' outside-dom.html; then exit 42; fi`
 	if err := (ToolExecutor{Work: work, BrowserProfile: true}).Run(t.Context(), script, &out, &out, shell); err != nil {
 		t.Fatalf("DNS/external boundary: %v: %s", err, out.String())
@@ -542,5 +548,48 @@ func TestBrowserProfileScopeRechecksEveryInvocation(t *testing.T) {
 	memory = "max"
 	if err := verifyBrowserScope(unit, read); err == nil {
 		t.Fatal("verification reused a withdrawn memory cap")
+	}
+}
+
+func TestBrowserProfileLauncherCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		fail       bool
+	}{
+		{"supported", "printf '%s\\n' '--expand-environment=BOOL'", false},
+		{"old", "printf '%s\\n' 'systemd-run options'", true},
+		{"failed probe", "exit 1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launcher := filepath.Join(t.TempDir(), "systemd-run")
+			if err := os.WriteFile(launcher, []byte("#!/bin/sh\n"+tc.body+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkBrowserLauncher(t.Context(), launcher); (err != nil) != tc.fail {
+				t.Fatalf("capability: %v", err)
+			}
+		})
+	}
+}
+
+func TestBrowserProfileLiveLiteralEnvironment(t *testing.T) {
+	if os.Getenv("SWARM_TEST_EXECUTOR") != "1" {
+		t.Skip("set SWARM_TEST_EXECUTOR=1")
+	}
+	if err := browserScopePrerequisites(); err != nil {
+		t.Skipf("runtime prerequisite: %v", err)
+	}
+	requireBrowserProfileLive(t)
+	var out process.Output
+	script := `set -eu
+printf '%s\n' '${VAR}' '${GH_TOKEN+x}'
+VAR=sandbox-value
+test "${VAR}" = sandbox-value
+test -z "${GH_TOKEN+x}"`
+	if err := (ToolExecutor{Work: t.TempDir(), BrowserProfile: true}).Run(t.Context(), script, &out, &out); err != nil {
+		t.Fatalf("literal payload: %v: %s", err, out.String())
+	}
+	if out.String() != "${VAR}\n${GH_TOKEN+x}\n" {
+		t.Fatalf("payload expanded before sandbox shell: %q", out.String())
 	}
 }

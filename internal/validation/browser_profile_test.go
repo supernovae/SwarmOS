@@ -61,7 +61,7 @@ func TestBrowserProfileLiveRequiredChecks(t *testing.T) {
 		if fail {
 			command += " && grep -q deliberate-missing-text browser-output/dom.html"
 		}
-		policy := "required_checks:\n  - name: browser\n    command: '" + command + "'\n    timeout: 1m\n  - name: still-runs\n    command: 'printf SECOND_CHECK_RAN'\n    timeout: 1m\n"
+		policy := "required_checks:\n  - name: browser\n    command: '" + command + "'\n    timeout: 1m\n  - name: still-runs\n    command: 'printf SECOND_CHECK_RAN'\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n"
 		base := commitPolicy(t, repo, policy)
 		// Candidate policy cannot disable the approved profile.
 		if err := os.WriteFile(filepath.Join(repo, ".swarm/config.yaml"), []byte("execution:\n  browser_profile: false\n"), 0600); err != nil {

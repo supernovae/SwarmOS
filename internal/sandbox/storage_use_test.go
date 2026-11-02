@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
@@ -41,23 +43,22 @@ func assertRuntimePending(t *testing.T, want int) {
 		t.Fatal("no durable registration")
 	}
 	pending := 0
+	var details strings.Builder
 	for _, path := range records {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var r struct{ Uses map[string]bool }
+		var r pendingFixtureRecord
 		if err = json.Unmarshal(data, &r); err != nil {
 			t.Fatal(err)
 		}
-		for _, done := range r.Uses {
-			if !done {
-				pending++
-			}
-		}
+		n, detail := pendingFixtureDetails(r)
+		pending += n
+		details.WriteString(detail)
 	}
 	if pending != want {
-		t.Fatalf("pending records=%d, want %d", pending, want)
+		t.Fatalf("pending records=%d, want %d (incomplete use tokens)\n%s", pending, want, details.String())
 	}
 }
 
@@ -385,4 +386,143 @@ func TestBoundaryEvidenceRejectsLauncherPID(t *testing.T) {
 	if _, err := executorBoundaryIdentity(os.Getpid(), os.Getppid()); err == nil {
 		t.Fatal("host process accepted as namespace init")
 	}
+}
+
+// Preparation owners must never be passed into runtime calls.
+func fixturePreparation(t *testing.T, repo string) (context.Context, func()) {
+	t.Helper()
+	ctx, owner, err := storageuse.Ensure(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := func() {
+		var err error
+		owner.Complete(&err)
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(complete)
+	return ctx, complete
+}
+func rootCache(t *testing.T) string {
+	t.Helper()
+	root, err := userCacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+func prepareFixtureCaches(t *testing.T, ctx context.Context, owner BuildCacheOwner, repo, root string) []BuildCache {
+	t.Helper()
+	caches, err := PrepareBuildCaches(ctx, owner, repo, root, resolvedTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(caches) != len(cachedEcosystems()) {
+		t.Fatalf("caches = %+v, want one per cached ecosystem", caches)
+	}
+	return caches
+}
+
+type pendingFixtureRecord struct {
+	Resource         storageuse.Resource
+	Uses             map[string]bool
+	CompleteCoverage bool
+	Evidence         json.RawMessage
+}
+
+func pendingFixtureDetails(r pendingFixtureRecord) (int, string) {
+	n := 0
+	for _, done := range r.Uses {
+		if !done {
+			n++
+		}
+	}
+	if n == 0 {
+		return 0, ""
+	}
+	return n, fmt.Sprintf("class=%s location=%s total=%d incomplete=%d coverage=%v evidence=%s\n", r.Resource.Class, r.Resource.Location, len(r.Uses), n, r.CompleteCoverage, r.Evidence)
+}
+func TestRuntimePendingDiagnostics(t *testing.T) {
+	n, detail := pendingFixtureDetails(pendingFixtureRecord{Resource: storageuse.Resource{Class: "agent-build", Location: "/cache/go"}, Uses: map[string]bool{"a": false, "b": false, "c": true}, Evidence: json.RawMessage(`{"boundary":"closed"}`)})
+	if n != 2 {
+		t.Fatal(n)
+	}
+	for _, want := range []string{"class=agent-build", "location=/cache/go", "total=3", "incomplete=2", "boundary"} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("missing %q: %s", want, detail)
+		}
+	}
+}
+func TestLiveFixtureStorageScopeOwnership(t *testing.T) {
+	for _, sets := range []int{1, 2} {
+		t.Run(fmt.Sprint(sets), func(t *testing.T) {
+			root := useUserCache(t)
+			repo := cacheTestRepo(t)
+			ctx, complete := fixturePreparation(t, repo)
+			for i := 0; i < sets; i++ {
+				owner := AgentBuildCache
+				if i == 1 {
+					owner = ValidatorBuildCache
+				}
+				caches := prepareFixtureCaches(t, ctx, owner, repo, root)
+				for _, c := range caches {
+					if !strings.HasPrefix(c.Dir, root) {
+						t.Fatal(c.Dir)
+					}
+				}
+			}
+			want := 3
+			if sets == 2 {
+				want = 7
+			}
+			assertRuntimePending(t, want)
+			control, err := storageuse.ControlRoot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths, err := filepath.Glob(filepath.Join(control, "*.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range paths {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var r pendingFixtureRecord
+				if err = json.Unmarshal(data, &r); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(r.Resource.Class, "build") || !strings.HasPrefix(r.Resource.Location, root) {
+					t.Fatalf("unexpected preparation resource: %+v", r.Resource)
+				}
+			}
+			complete()
+			assertRuntimePending(t, 0)
+		})
+	}
+}
+
+func TestConfiguredValidationStorageOwnership(t *testing.T) {
+	requireExecutor(t)
+	root := useUserCache(t)
+	repo := cacheTestRepo(t)
+	prep, complete := fixturePreparation(t, repo)
+	caches := prepareFixtureCaches(t, prep, ValidatorBuildCache, repo, root)
+	cfg := &contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: "omp", Binary: "not-used-by-validation"}}}
+	for _, warmup := range []bool{true, false} {
+		if !warmup && !bubblewrapOverlay() {
+			t.Skip("Bubblewrap overlay mounts unavailable")
+		}
+		var out strings.Builder
+		if err := RunConfiguredNativeValidation(t.Context(), resolvedTempDir(t), cfg, "true", caches, liveExecutorDependencies(t), warmup, &out, &out); err != nil {
+			t.Fatal(err, out.String())
+		}
+		// Preparation stays pending; runtime owners must have completed independently.
+		assertRuntimePending(t, 4)
+	}
+	complete()
+	assertRuntimePending(t, 0)
 }

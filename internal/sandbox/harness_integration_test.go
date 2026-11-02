@@ -23,6 +23,10 @@ import (
 	"github.com/supernovae/swarmos/internal/process"
 )
 
+var runCompletionFixture = func() int { return 7 }
+
+func completionFixtureRole(role string) bool { return role == "parent" || role == "child" }
+
 // Exercise the real stdio server from installed harnesses without requiring a
 // separately built swarm binary. This branch is available only in the test binary.
 func TestMain(m *testing.M) {
@@ -77,6 +81,31 @@ func TestMain(m *testing.M) {
 			ledgerExit(1)
 		}
 		ledgerExit(0)
+	}
+
+	if completionFixtureRole(os.Getenv("SWARM_COMPLETION_FIXTURE_ROLE")) {
+		cache, err := os.MkdirTemp("", "swarm-completion-cache-*")
+		if err != nil {
+			ledgerExit(1)
+		}
+		// Use the non-live isolation path while preserving the fixture protocol's flag.
+		live, set := os.LookupEnv("SWARM_TEST_EXECUTOR")
+		os.Setenv("SWARM_TEST_EXECUTOR", "0")
+		err = prepareLiveExecutorGoCache(cache, "unused")
+		if set {
+			os.Setenv("SWARM_TEST_EXECUTOR", live)
+		} else {
+			os.Unsetenv("SWARM_TEST_EXECUTOR")
+		}
+		code := 1
+		if err == nil {
+			code = runCompletionFixture()
+		}
+		if err := cleanupLiveExecutorGoCache(cache); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			code = 1
+		}
+		ledgerExit(code)
 	}
 
 	// Preserve the provisioned browser cache before test-only HOME/cache isolation.

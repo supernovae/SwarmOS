@@ -306,7 +306,7 @@ func TestIssue83AuthenticatedIssueSubmitPublishesStager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := workspace.CompilePRHarnessBundleAt(path, unit, wf, nil, "planner", claimed.BaseSHA, pr.Number); err != nil {
+	if err := workspace.CompilePRHarnessBundleAt(path, unit, wf, nil, "planner", claimed.EffectiveGate, claimed.BaseSHA, pr.Number); err != nil {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{"PLAN.md": "# Authenticated revision plan", "TEST_PLAN.md": "# Authenticated revision tests"} {

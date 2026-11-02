@@ -786,7 +786,7 @@ func showHarnessFile(worktreePath, baseSHA, path string) (string, error) {
 
 // CompileHarnessBundleAt builds the active prompt only from base-pinned
 // harness instructions so a candidate cannot alter its own execution policy.
-func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, baseSHA string) error {
+func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string) error {
 	if role == "" {
 		role = "planner"
 	}
@@ -810,7 +810,7 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 	if err != nil {
 		return err
 	}
-	var guidance bundleGuidance
+	guidance := bundleGuidance{effectiveGate: effectiveGate}
 	for _, optPath := range []string{".swarm/goals.md", ".swarm/SKILLS.md"} {
 		if content, optErr := showHarnessFile(worktreePath, baseSHA, optPath); optErr == nil && strings.TrimSpace(content) != "" {
 			guidance.policy = append(guidance.policy, strings.TrimSpace(content))
@@ -903,6 +903,12 @@ func claimBudgetDoc(lc contract.LeaseConfig) (string, error) {
 }
 
 func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, budgetDoc string, guidance bundleGuidance) error {
+	if guidance.effectiveGate == "" {
+		return fmt.Errorf("effective plan gate is missing; rerun swarm issue approve")
+	}
+	if err := contract.ValidateGate(guidance.effectiveGate); err != nil {
+		return err
+	}
 	safe, err := safefs.Open(worktreePath)
 	if err != nil {
 		return err
@@ -948,7 +954,7 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	if err := active.WriteFile("REVIEW_EVIDENCE.md", []byte(evidence.String()), 0644); err != nil {
 		return err
 	}
-	workunitMD := renderWorkUnitMarkdown(wu, wf, artifacts, role)
+	workunitMD := renderWorkUnitMarkdown(wu, wf, artifacts, guidance.effectiveGate, role)
 	if guidance.profileName != "" {
 		workunitMD = strings.Replace(workunitMD, "## Objective", "- **Execution profile**: `"+guidance.profileName+"`\n\n## Objective", 1)
 	}
@@ -1279,12 +1285,17 @@ func CleanEphemeralHarnessMarkers(worktreePath string) error {
 	return nil
 }
 
-func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, roles ...string) string {
+func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, effectiveGate contract.GateMode, roles ...string) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("# Work Unit %s: %s\n\n", wu.ID, wu.Title))
 	sb.WriteString(fmt.Sprintf("- **Issue Number**: #%d\n", wu.IssueNumber))
 	sb.WriteString(fmt.Sprintf("- **Workflow**: `%s`\n", wu.Workflow))
-	sb.WriteString(fmt.Sprintf("- **Plan Review Gate**: `%s`\n", wu.Gate))
+	sb.WriteString(fmt.Sprintf("- **Plan Review Gate**: `%s`\n", effectiveGate))
+	taskGate := wu.Gate
+	if taskGate == "" {
+		taskGate = contract.GateNone
+	}
+	sb.WriteString(fmt.Sprintf("- **Task Plan Gate**: `%s`\n", taskGate))
 	sb.WriteString(fmt.Sprintf("- **Allow Harness Changes**: `%v`\n\n", wu.AllowHarnessChanges))
 
 	if wu.Size != "" {

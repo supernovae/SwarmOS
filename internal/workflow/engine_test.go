@@ -1125,7 +1125,7 @@ func TestPlanReviewHistoryRoleAndRevisionScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := &lease.IssueState{BaseSHA: strings.TrimSpace(string(out)), TaskDigest: "task", PolicyDigest: "policy"}
+	st := &lease.IssueState{BaseSHA: strings.TrimSpace(string(out)), TaskDigest: "task", PolicyDigest: "policy", EffectiveGate: contract.GateAgent}
 	wu := &contract.WorkUnit{ID: "ISSUE-375", IssueNumber: 375, Workflow: "feature"}
 	history := []workspace.PlanReviewEvidence{{Round: 1, Findings: "history-secret-marker", TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, BaseSHA: st.BaseSHA}}
 	for _, tc := range []struct {

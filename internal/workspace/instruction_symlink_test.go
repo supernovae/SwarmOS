@@ -218,7 +218,7 @@ func TestPRWorktreeInstructionSymlinkPair(t *testing.T) {
 	}
 	wu := &contract.WorkUnit{ID: "ISSUE-8", IssueNumber: 8, Title: "Repair", Objective: "Fix PR"}
 	for _, role := range []string{"planner", "developer"} {
-		if err := CompilePRHarnessBundleAt(path, wu, wf, nil, role, base, 32); err != nil {
+		if err := CompilePRHarnessBundleAt(path, wu, wf, nil, role, contract.GateNone, base, 32); err != nil {
 			t.Fatal(err)
 		}
 	}

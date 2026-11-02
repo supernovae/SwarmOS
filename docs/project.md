@@ -204,6 +204,8 @@ Decomposition mirrors dependencies as native blocked-by links and orders sub-iss
 
 ## Validation policy and protected paths
 
+Under native Linux validation, child-process stdout and stderr may be missing, or process capture may report `EPERM`. Write test output to files so you can inspect the results when capture fails. In an observation with Codex CLI 0.166.0, Node's `spawnSync` returned status 0 together with an `EPERM` error: a Node child's output was empty, while a shell child's output was captured alongside the same error. The denied `shutdown` call tracked in [#370](https://github.com/supernovae/swarmos/issues/370) is a suspected cause; it has not been confirmed.
+
 `.swarm/validation/required-checks.yaml` defines the checks and protected paths that every task must satisfy:
 
 ```yaml

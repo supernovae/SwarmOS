@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"gopkg.in/yaml.v3"
 )
@@ -29,10 +30,11 @@ const (
 // Policy documents are always inlined; skills are indexed and inlined only
 // when their front matter selects the active role and workflow.
 type bundleGuidance struct {
-	profileName string
-	profileDoc  string
-	policy      []string
-	skills      []guidanceSkill
+	effectiveGate contract.GateMode
+	profileName   string
+	profileDoc    string
+	policy        []string
+	skills        []guidanceSkill
 }
 
 type guidanceSkill struct {

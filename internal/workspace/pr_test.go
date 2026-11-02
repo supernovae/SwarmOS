@@ -37,12 +37,12 @@ func TestCompilePRHarnessBundlePreservesUnmanagedInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	wu := &contract.WorkUnit{ID: "ISSUE-7", IssueNumber: 7, Title: "Repair", Objective: "Fix PR"}
-	if err := CompilePRHarnessBundleAt(path, wu, wf, nil, "developer", base, 31); err != nil {
+	if err := CompilePRHarnessBundleAt(path, wu, wf, nil, "developer", contract.GateNone, base, 31); err != nil {
 		t.Fatal(err)
 	}
 	for _, role := range []string{"planner", "reviewer", "developer", "tester"} {
 		c := &RevisionPlanContext{Original: PlanPair{Plan: "full approved plan", TestPlan: "full approved tests"}}
-		if err := CompilePRHarnessBundleAt(path, wu, wf, nil, role, base, 31, c); err != nil {
+		if err := CompilePRHarnessBundleAt(path, wu, wf, nil, role, contract.GateNone, base, 31, c); err != nil {
 			t.Fatal(err)
 		}
 
@@ -64,7 +64,7 @@ func TestCompilePRHarnessBundlePreservesUnmanagedInstructions(t *testing.T) {
 			}
 		}
 	}
-	if err := CompilePRHarnessBundleAt(path, wu, wf, nil, "planner", base, 31); err != nil {
+	if err := CompilePRHarnessBundleAt(path, wu, wf, nil, "planner", contract.GateNone, base, 31); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(path, ".swarm", "active", "SYSTEM_PROMPT.md"))

@@ -34,9 +34,9 @@ func TestIssue83IssueAndPRPointerSequence(t *testing.T) {
 	wu := &contract.WorkUnit{ID: "ISSUE-83", IssueNumber: 83, Title: "Human-led", Objective: "Test pointers"}
 	for _, pr := range []bool{false, true} {
 		if pr {
-			err = CompilePRHarnessBundleAt(root, wu, wf, nil, "developer", base, 321)
+			err = CompilePRHarnessBundleAt(root, wu, wf, nil, "developer", contract.GateNone, base, 321)
 		} else {
-			err = CompileHarnessBundleAt(root, wu, wf, nil, "developer", base)
+			err = CompileHarnessBundleAt(root, wu, wf, nil, "developer", contract.GateNone, base)
 		}
 		if err != nil {
 			t.Fatal(err)

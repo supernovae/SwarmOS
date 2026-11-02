@@ -252,7 +252,7 @@ func TestCleanupLocalIgnoredRetention(t *testing.T) {
 	t.Parallel()
 	f, n, _ := cleanupLocalFixture(t)
 	restore := snapshotCLIFixture(t, f)
-	for _, name := range []string{"ignored", ".swarm/unexpected", "hidden dir/ignored"} {
+	for _, name := range []string{"ignored", ".swarm/unexpected", "hidden dir/ignored", ".env", "other/output"} {
 		t.Run(name, func(t *testing.T) {
 			restore(t)
 			path := workspace.WorktreePath(f.root, n)
@@ -1250,6 +1250,145 @@ func TestCleanupLocalVerifiedRebaseEvidenceChangedBeforeApply(t *testing.T) {
 				t.Fatal("stale preview retired the issue worktree")
 			}
 			prGit(t, f.root, "show-ref", "--verify", "refs/heads/"+st.Branch)
+		})
+	}
+}
+
+func TestCleanupLocalIgnoredBuildRetire(t *testing.T) {
+	f, n, pr := cleanupLocalFixture(t)
+	path := workspace.WorktreePath(f.root, n)
+	exclude := prGit(t, f.root, "rev-parse", "--git-path", "info/exclude")
+	if !filepath.IsAbs(exclude) {
+		exclude = filepath.Join(f.root, exclude)
+	}
+	file, err := os.OpenFile(exclude, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = file.WriteString("\nnode_modules/\ndist/\n")
+	file.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "sentinel")
+	if err := os.WriteFile(external, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"node_modules", "dist", "packages/a/node_modules"} {
+		full := filepath.Join(path, dir)
+		if err := os.MkdirAll(full, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(full, "output"), []byte("build"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(external, filepath.Join(full, "external")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.must(t, "issue", "cleanup", strconv.Itoa(n), "--json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("preview changed tree", err)
+	}
+	p := localCleanupApply(t, f, n)
+	count := 0
+	for _, r := range p.Resources {
+		if r.Retired {
+			count++
+		}
+	}
+	if count != 4 {
+		t.Fatalf("expected four retirements: %+v", p.Resources)
+	}
+	for _, p := range []string{path, workspace.PRWorktreePath(f.root, pr)} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatal("tree survived", err)
+		}
+	}
+	if raw, err := os.ReadFile(external); err != nil || string(raw) != "keep" {
+		t.Fatal("external target changed", err)
+	}
+}
+
+func TestCleanupLocalBuildRetention(t *testing.T) {
+	f, n, _ := cleanupLocalFixture(t)
+	restore := snapshotCLIFixture(t, f)
+	for _, kind := range []string{"untracked-node", "untracked-dist", "symlink", "nested-repo", "regular-dist", "near-match"} {
+		t.Run(kind, func(t *testing.T) {
+			restore(t)
+			path := workspace.WorktreePath(f.root, n)
+			name := "node_modules/file"
+			switch kind {
+			case "untracked-dist":
+				name = "dist/file"
+			case "symlink":
+				name = "node_modules"
+			case "regular-dist":
+				name = "dist"
+			case "near-match":
+				name = "my_node_modules/file"
+			}
+			if !strings.HasPrefix(kind, "untracked-") {
+				exclude := prGit(t, f.root, "rev-parse", "--git-path", "info/exclude")
+				if !filepath.IsAbs(exclude) {
+					exclude = filepath.Join(f.root, exclude)
+				}
+				file, err := os.OpenFile(exclude, os.O_APPEND|os.O_WRONLY, 0600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = file.WriteString("\nnode_modules\ndist\nmy_node_modules/\n")
+				file.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			full := filepath.Join(path, name)
+			if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+				t.Fatal(err)
+			}
+			external := filepath.Join(t.TempDir(), "sentinel")
+			if err := os.WriteFile(external, []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "symlink" {
+				if err := os.Symlink(filepath.Dir(external), full); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.WriteFile(full, []byte("payload"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "nested-repo" {
+				if err := os.WriteFile(filepath.Join(path, "node_modules/.git"), []byte("gitdir: elsewhere"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			preview := f.must(t, "issue", "cleanup", strconv.Itoa(n), "--json")
+			if !strings.Contains(preview, "blocking") && !strings.Contains(preview, "nested repository") {
+				t.Fatal(preview)
+			}
+			p := localCleanupApply(t, f, n)
+			found := false
+			for _, r := range p.Resources {
+				if r.Name == path {
+					found = true
+					if r.Retired || r.Reason == "" {
+						t.Fatalf("unsafe retirement: %+v", r)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("missing worktree result")
+			}
+			if _, err := os.Lstat(full); err != nil {
+				t.Fatal("lost payload", err)
+			}
+			if raw, err := os.ReadFile(external); err != nil || string(raw) != "keep" {
+				t.Fatal("changed external target", err)
+			}
+			prGit(t, f.root, "rev-parse", "refs/heads/"+f.state(t, n).Branch)
 		})
 	}
 }

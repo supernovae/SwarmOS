@@ -272,7 +272,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					if err != nil {
 						return err
 					}
-					return workspace.CompileHarnessBundleAt(worktree, wu, wf, claimed.Artifacts, role, claimed.BaseSHA)
+					return workspace.CompileHarnessBundleAt(worktree, wu, wf, claimed.Artifacts, role, claimed.EffectiveGate, claimed.BaseSHA)
 				}); err != nil {
 					return nil, err
 				}

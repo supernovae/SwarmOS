@@ -701,3 +701,37 @@ func TestIssueWorkRecoveryCheckpointHumanDraft(t *testing.T) {
 	}
 
 }
+
+func TestCheckpointRecoveryBundleEffectiveGate(t *testing.T) {
+	e, opts, _ := checkpointPlanEngine(t)
+	opts.Gate = contract.GateHuman
+	original := e.NewRunner
+	var rendered string
+	e.NewRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+		delegate, err := original(name, cfg, local)
+		if err != nil {
+			return nil, err
+		}
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			raw, err := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm/active/WORKUNIT.md"))
+			if err != nil {
+				return nil, err
+			}
+			rendered = string(raw)
+			return delegate.Run(ctx, req)
+		}}, nil
+	}
+	result, err := e.ExecuteWork(t.Context(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State.EffectiveGate != contract.GateHuman {
+		t.Fatalf("state gate: %s", result.State.EffectiveGate)
+	}
+	if !strings.Contains(rendered, "**Plan Review Gate**: `human`") {
+		t.Fatalf("checkpoint recovery lost raised gate: %s", rendered)
+	}
+	if !strings.Contains(rendered, "**Task Plan Gate**: `agent`") {
+		t.Fatalf("task gate changed: %s", rendered)
+	}
+}

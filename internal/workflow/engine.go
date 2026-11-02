@@ -1020,9 +1020,9 @@ func (e *Engine) ExecuteDecomposition(ctx context.Context, root string, n int, s
 
 func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, excludeHistory ...bool) error {
 	if prNumber != 0 {
-		return workspace.CompilePRHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA, prNumber, prRevisionContext(st))
+		return workspace.CompilePRHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, prNumber, prRevisionContext(st))
 	}
-	if err := workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.BaseSHA); err != nil {
+	if err := workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA); err != nil {
 		return err
 	}
 	if role == "reviewer" && lease.DirectPlanReview(st) && (len(excludeHistory) == 0 || !excludeHistory[0]) {

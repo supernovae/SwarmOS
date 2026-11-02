@@ -22,7 +22,7 @@ func TestActiveBundleRejectsSymlinkDirectory(t *testing.T) {
 			if err := os.Symlink(outside, filepath.Join(root, name)); err != nil {
 				t.Skip(err)
 			}
-			err := compileHarnessBundle(root, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, &contract.WorkflowSpec{Name: "feature"}, nil, "planner", "prompt", "", "", "", "policy", "", bundleGuidance{})
+			err := compileHarnessBundle(root, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, &contract.WorkflowSpec{Name: "feature"}, nil, "planner", "prompt", "", "", "", "policy", "", bundleGuidance{effectiveGate: contract.GateNone})
 			if err == nil {
 				t.Fatal("symlink active directory accepted")
 			}

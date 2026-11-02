@@ -23,7 +23,7 @@ func TestRoleContextAndReviewOnlyLessons(t *testing.T) {
 			}
 			checkpointWrite(t, filepath.Join(root, ".swarm/active"), "LESSONS.md", "- active-lesson-marker")
 			wu := &contract.WorkUnit{ID: "ISSUE-56", IssueNumber: 56, Title: "workunit-title-marker", Objective: "workunit-objective-marker"}
-			err := compileHarnessBundle(root, wu, nil, artifacts, role, "role prompt", "", "", "", "checks", "", bundleGuidance{})
+			err := compileHarnessBundle(root, wu, nil, artifacts, role, "role prompt", "", "", "", "checks", "", bundleGuidance{effectiveGate: contract.GateNone})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -110,7 +110,7 @@ func TestPlanReviewHistoryEvidence(t *testing.T) {
 	history := []PlanReviewEvidence{{Round: 1, ReviewID: "review", Version: 1, Verdict: "CHANGES_REQUESTED", Findings: "old finding", Digest: "digest", PlanDigest: "plan", TestPlanDigest: "test"}}
 	compile := func() {
 		t.Helper()
-		if err := compileHarnessBundle(root, wu, nil, artifacts, "reviewer", "review prompt", "", "", "", "checks", "", bundleGuidance{}); err != nil {
+		if err := compileHarnessBundle(root, wu, nil, artifacts, "reviewer", "review prompt", "", "", "", "checks", "", bundleGuidance{effectiveGate: contract.GateNone}); err != nil {
 			t.Fatal(err)
 		}
 	}

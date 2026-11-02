@@ -199,13 +199,29 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
+		cfg, err := harness.LoadConfig(rootOpts.resolveRepoRoot())
+		if err != nil {
+			return err
+		}
+		wf, err := harness.LoadWorkflow(rootOpts.resolveRepoRoot(), wu.Workflow)
+		if err != nil {
+			return err
+		}
+		effectiveGate, err := contract.ResolveGate(wu.Gate, wf.DefaultGate, cfg.DefaultGate)
+		if err != nil {
+			return err
+		}
+		taskGate := wu.Gate
+		if taskGate == "" {
+			taskGate = contract.GateNone
+		}
 		assessment := assessDimensions(rootOpts.resolveRepoRoot(), wu)
 		warnings := dependencyDriftWarnings(cmd.Context(), tr, iss, wu.DependsOn)
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "warnings": warnings, "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "signals": assessment.Signals, "hints": assessment.Hints, "dimensions": workflow.Dimensions{Size: wu.Size, Uncertainty: wu.Uncertainty, Risk: wu.Risk}, "suggested_dimensions": assessment.SuggestedDimensions})
+			return writeJSON(cmd, map[string]any{"kind": "issue-lint", "status": "valid", "effective_gate": effectiveGate, "warnings": warnings, "work_unit": wu, "allow_harness_changes": wu.AllowHarnessChanges, "signals": assessment.Signals, "hints": assessment.Hints, "dimensions": workflow.Dimensions{Size: wu.Size, Uncertainty: wu.Uncertainty, Risk: wu.Risk}, "suggested_dimensions": assessment.SuggestedDimensions})
 		}
 		out := cmd.OutOrStdout()
-		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v, allow_harness_changes=%t]\n", wu.IssueNumber, wu.ID, wu.Workflow, wu.Gate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities, wu.AllowHarnessChanges)
+		fmt.Fprintf(out, "Issue #%d (%s) is a valid WorkUnit [workflow=%s, gate=%s, task_gate=%s, constraints=%d, acceptance=%d, depends_on=%v, capabilities=%v, allow_harness_changes=%t]\n", wu.IssueNumber, wu.ID, wu.Workflow, effectiveGate, taskGate, len(wu.Constraints), len(wu.Acceptance), wu.DependsOn, wu.RequiredCapabilities, wu.AllowHarnessChanges)
 		fmt.Fprintf(out, "Dimensions: size=%s uncertainty=%s risk=%s\n", wu.Size, wu.Uncertainty, wu.Risk)
 		writeDimensionAdvice(out, assessment)
 		for _, warning := range warnings {

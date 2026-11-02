@@ -73,12 +73,12 @@ func TestHarnessCleanupPreservesUserInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := CompileHarnessBundleAt(wtPath, wu, wf, nil, "planner", base); err != nil {
+	if err := CompileHarnessBundleAt(wtPath, wu, wf, nil, "planner", contract.GateNone, base); err != nil {
 		t.Fatalf("CompileHarnessBundle failed: %v", err)
 	}
 
 	// Replacing the active role must not accumulate markers or consume user text.
-	if err := CompileHarnessBundleAt(wtPath, wu, wf, nil, "reviewer", base); err != nil {
+	if err := CompileHarnessBundleAt(wtPath, wu, wf, nil, "reviewer", contract.GateNone, base); err != nil {
 		t.Fatal(err)
 	}
 

@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/BurntSushi/toml"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/supernovae/swarmos/internal/process"
 )
 
@@ -82,25 +83,44 @@ func TestCodexBrowserRealTools(t *testing.T) {
 			// Test-only trusted launcher captures the actual server environment before
 			// exec. It lives outside the native filesystem profile, as does its log.
 			launcher := filepath.Join(control, "server")
-			script := "#!/bin/sh\n/usr/bin/env > " + strconv.Quote(filepath.Join(control, "environment")) + "\necho $$ > " + strconv.Quote(filepath.Join(control, "pid")) + "\nexec " + strconv.Quote(executable) + " \"$@\"\n"
+			serverLog := filepath.Join(control, "server-stderr")
+			script := "#!/bin/sh\nexec 2> " + strconv.Quote(serverLog) + "\n/usr/bin/env > " + strconv.Quote(filepath.Join(control, "environment")) + "\necho $$ > " + strconv.Quote(filepath.Join(control, "pid")) + "\nexec " + strconv.Quote(executable) + " \"$@\"\n"
 			if err := os.WriteFile(launcher, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			var calls atomic.Int32
 			var catalog atomic.Bool
+			var providerTools process.Output
+			var out process.Output
+			var runErr error
+			t.Cleanup(func() {
+				if t.Failed() {
+					t.Logf("Codex result: %v; provider requests: %d\nCodex stdout/stderr (tail):\n%s\nMCP server stderr (tail):\n%s\nProvider tool catalogs (tail):\n%s",
+						runErr, calls.Load(), codexBrowserLogTail(out.String()), codexBrowserFileTail(serverLog), codexBrowserLogTail(providerTools.String()))
+				}
+			})
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
-					Tools []struct {
-						Name string `json:"name"`
-					} `json:"tools"`
+					// Keep the full wire catalog to diagnose namespaces/deferred tools
+					// as well as failures to start or list the MCP server.
+					Tools json.RawMessage `json:"tools"`
 					Input json.RawMessage `json:"input"`
 				}
 				if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&request); err != nil {
 					http.Error(w, err.Error(), 400)
 					return
 				}
+				fmt.Fprintf(&providerTools, "%s\n", request.Tools)
+				var tools []struct {
+					Name string `json:"name"`
+				}
+				if err := json.Unmarshal(request.Tools, &tools); err != nil {
+					t.Error("invalid provider tool catalog", err)
+					http.Error(w, "invalid tool catalog", 400)
+					return
+				}
 				owned := 0
-				for _, tool := range request.Tools {
+				for _, tool := range tools {
 					if strings.HasPrefix(tool.Name, "mcp__swarm__") {
 						owned++
 						if !strings.Contains("|swarm_read|swarm_write|swarm_edit|swarm_shell|", "|"+strings.TrimPrefix(tool.Name, "mcp__swarm__")+"|") {
@@ -174,13 +194,12 @@ func TestCodexBrowserRealTools(t *testing.T) {
 					}
 				}()
 			}
-			env := append(nativeEnv(home, false, Dependencies{}), "GH_TOKEN=synthetic-coordinator", "OPENAI_API_KEY=synthetic-provider", "SWARM_GITHUB_TOKEN_COMMAND=synthetic-command")
-			var out process.Output
-			runErr := runNativeCommand(ctx, binary, work, env, args, nil, &out, &out)
+			env := append(nativeEnv(home, false, Dependencies{}), "RUST_LOG=codex_rmcp_client=debug,codex_core=info", "GH_TOKEN=synthetic-coordinator", "OPENAI_API_KEY=synthetic-provider", "SWARM_GITHUB_TOKEN_COMMAND=synthetic-command")
+			runErr = runNativeCommand(ctx, binary, work, env, args, nil, &out, &out)
 			// Codex and its MCP child must both finish before the launcher returns.
 			pidBytes, pidErr := os.ReadFile(filepath.Join(control, "pid"))
 			if pidErr != nil {
-				t.Fatal("missing child pid", pidErr, out.String())
+				t.Fatal("missing child pid", pidErr)
 			}
 			pid, pidErr := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 			if pidErr != nil {
@@ -199,7 +218,7 @@ func TestCodexBrowserRealTools(t *testing.T) {
 			}
 			captured, err := os.ReadFile(filepath.Join(control, "environment"))
 			if err != nil {
-				t.Fatal("server never started", err, out.String())
+				t.Fatal("server never started", err)
 			}
 			for _, key := range []string{"GH_TOKEN=", "OPENAI_API_KEY=", "SWARM_GITHUB_TOKEN_COMMAND=", "SSH_AUTH_SOCK="} {
 				if strings.Contains(string(captured), key) {
@@ -207,11 +226,11 @@ func TestCodexBrowserRealTools(t *testing.T) {
 				}
 			}
 			if !catalog.Load() {
-				t.Fatal("initialize/list did not expose four owned tools", out.String())
+				t.Fatal("initialize/list did not expose four owned tools")
 			}
 			if behavior == "cancellation" {
 				if !<-started || runErr == nil {
-					t.Fatal("tool cancellation not exercised", out.String())
+					t.Fatal("tool cancellation not exercised")
 				}
 				time.Sleep(2200 * time.Millisecond)
 				if _, err := os.Stat(filepath.Join(work, "survived")); !os.IsNotExist(err) {
@@ -229,11 +248,11 @@ func TestCodexBrowserRealTools(t *testing.T) {
 				return
 			}
 			if runErr != nil {
-				t.Fatal(runErr, out.String())
+				t.Fatal(runErr)
 			}
 			data, err := os.ReadFile(filepath.Join(work, "probe.txt"))
 			if err != nil || string(data) != "allowed" || calls.Load() < 2 {
-				t.Fatal("tool cycle failed", err, out.String())
+				t.Fatal("tool cycle failed", err)
 			}
 			for _, name := range []string{"dom.html", "preview.png"} {
 				artifact, err := os.ReadFile(filepath.Join(work, "browser-output", name))
@@ -310,6 +329,54 @@ func TestCodexBrowserTransport(t *testing.T) {
 	}
 }
 
+const codexBrowserDiagnosticLimit = 16 << 10
+
+func codexBrowserLogTail(text string) string {
+	if len(text) > codexBrowserDiagnosticLimit {
+		return "[earlier output truncated]\n" + text[len(text)-codexBrowserDiagnosticLimit:]
+	}
+	return text
+}
+
+func codexBrowserFileTail(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Sprintf("[stderr unavailable: %v]", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Sprintf("[stderr stat failed: %v]", err)
+	}
+	// Read at most the diagnostic budget plus one byte to retain truncation
+	// information, even when the server wrote a very large stderr file.
+	if info.Size() > codexBrowserDiagnosticLimit {
+		if _, err := file.Seek(info.Size()-codexBrowserDiagnosticLimit-1, io.SeekStart); err != nil {
+			return fmt.Sprintf("[stderr seek failed: %v]", err)
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(file, codexBrowserDiagnosticLimit+1))
+	if err != nil {
+		return fmt.Sprintf("[stderr read failed: %v]", err)
+	}
+	return codexBrowserLogTail(string(data))
+}
+
+func TestCodexBrowserDiagnostics(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stderr")
+	if got := codexBrowserFileTail(path); !strings.Contains(got, "stderr unavailable") {
+		t.Fatal("missing stderr was not diagnosed", got)
+	}
+	for _, data := range []string{"", "server exited early\n", strings.Repeat("x", 2*codexBrowserDiagnosticLimit) + "last error\n"} {
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if got := codexBrowserFileTail(path); got != codexBrowserLogTail(data) {
+			t.Fatalf("file diagnostics differ from bounded process diagnostics: %d bytes", len(got))
+		}
+	}
+}
+
 func TestCodexBrowserServerChild(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("native Linux transport")
@@ -327,8 +394,9 @@ func TestCodexBrowserServerChild(t *testing.T) {
 	}
 	var config struct {
 		Servers map[string]struct {
-			Command string
-			Args    []string
+			Command      string
+			Args         []string
+			EnabledTools []string `toml:"enabled_tools"`
 		} `toml:"mcp_servers"`
 	}
 	if _, err := toml.Decode(policy[1], &config); err != nil {
@@ -341,7 +409,7 @@ func TestCodexBrowserServerChild(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	child := exec.CommandContext(ctx, server.Command, server.Args...)
-	child.Env = []string{"GH_TOKEN=synthetic-coordinator", "OPENAI_API_KEY=synthetic-provider"}
+	child.Env = []string{"GH_TOKEN=synthetic-coordinator", "OPENAI_API_KEY=synthetic-provider", "RUST_LOG=codex_rmcp_client=debug,codex_core=info"}
 	input, err := child.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -358,7 +426,7 @@ func TestCodexBrowserServerChild(t *testing.T) {
 	defer func() { cancel(); _ = child.Wait() }()
 	encoder, decoder := json.NewEncoder(input), json.NewDecoder(output)
 	for i, request := range []map[string]any{
-		{"method": "initialize", "params": map[string]string{"protocolVersion": "2024-11-05"}},
+		{"method": "initialize", "params": map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "codex-probe", "version": "0.166.0"}}},
 		{"method": "tools/list"},
 		{"method": "tools/call", "params": map[string]any{"name": "host_shell", "arguments": map[string]string{"command": "true"}}},
 	} {
@@ -373,6 +441,32 @@ func TestCodexBrowserServerChild(t *testing.T) {
 		if err := decoder.Decode(&response); err != nil {
 			t.Fatal(err, diagnostics.String())
 		}
+		if i == 0 {
+			var initialized struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			}
+			if err := json.Unmarshal(response.Result, &initialized); err != nil || initialized.ProtocolVersion != "2024-11-05" {
+				t.Fatal("protocol negotiation failed", err, string(response.Result))
+			}
+			if err := encoder.Encode(map[string]string{"jsonrpc": "2.0", "method": "notifications/initialized"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if i == 1 {
+			var catalog struct {
+				Tools []ToolDefinition `json:"tools"`
+			}
+			if err := json.Unmarshal(response.Result, &catalog); err != nil {
+				t.Fatal(err)
+			}
+			names := make([]string, len(catalog.Tools))
+			for j, tool := range catalog.Tools {
+				names[j] = tool.Name
+			}
+			if !reflect.DeepEqual(names, server.EnabledTools) {
+				t.Fatalf("enabled_tools %v differ from advertised names %v", server.EnabledTools, names)
+			}
+		}
 		if i == 2 {
 			var result ToolResult
 			if err := json.Unmarshal(response.Result, &result); err != nil || !result.IsError {
@@ -384,7 +478,7 @@ func TestCodexBrowserServerChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"GH_TOKEN=", "OPENAI_API_KEY=", "SWARM_GITHUB_TOKEN_COMMAND=", "SSH_AUTH_SOCK="} {
+	for _, key := range []string{"GH_TOKEN=", "OPENAI_API_KEY=", "SWARM_GITHUB_TOKEN_COMMAND=", "SSH_AUTH_SOCK=", "RUST_LOG=", "SWARM_TEST_EXECUTOR="} {
 		if strings.Contains(string(captured), key) {
 			t.Fatal("credential in actual child", key)
 		}

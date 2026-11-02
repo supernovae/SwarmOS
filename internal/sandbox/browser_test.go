@@ -1038,3 +1038,46 @@ func TestNativeScopeUnavailableExitAndCancellation(t *testing.T) {
 		t.Fatalf("legacy cancellation: %v", err)
 	}
 }
+
+func TestNativeScopeStopAfterUnitUnloaded(t *testing.T) {
+	for _, remainsPopulated := range []bool{false, true} {
+		t.Run(fmt.Sprintf("remains-populated=%t", remainsPopulated), func(t *testing.T) {
+			scope := &nativeSystemdScope{unit: "swarm-native-test.scope"}
+			identity := storageuse.NativeIdentity{Unit: scope.unit}
+			populated := true
+			checks := 0
+			var calls [][]string
+			cmd := exec.Command("/bin/sh", "-c", "exit 5")
+			unitNotLoaded := cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(unitNotLoaded, &exitErr) || exitErr.ExitCode() != 5 {
+				t.Fatalf("expected injected exit status 5, got %v", unitNotLoaded)
+			}
+			err := scope.stopWith(identity, func(got storageuse.NativeIdentity) bool {
+				checks++
+				if got != identity {
+					t.Fatalf("checked different boundary: %+v", got)
+				}
+				return !populated
+			}, func(args ...string) error {
+				calls = append(calls, args)
+				if args[0] == "kill" {
+					populated = remainsPopulated
+					return nil
+				}
+				return unitNotLoaded
+			})
+			want := [][]string{{"kill", "--kill-whom=all", "--signal=KILL", scope.unit}, {"stop", scope.unit}}
+			if checks != 2 || !reflect.DeepEqual(calls, want) {
+				t.Fatalf("checks=%d calls=%v", checks, calls)
+			}
+			if remainsPopulated {
+				if !errors.Is(err, storageuse.ErrUnsafe) || !errors.Is(err, unitNotLoaded) {
+					t.Fatalf("expected unsafe boundary and systemctl error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("verified empty boundary must stop cleanly: %v", err)
+			}
+		})
+	}
+}

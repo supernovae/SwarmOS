@@ -49,7 +49,7 @@ func TestBrowserProfileLiveRequiredChecks(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := setupGitRepoForValidation(t)
-	config := "version: 1\ndefault_agent: browser-tester\ndefault_gate: none\nexecution:\n  mode: isolated\n  backend: native\n  browser_profile: true\nagents:\n  browser-tester:\n    binary: deliberately-unavailable-codex\n    harness: codex\n"
+	config := "version: 1\ndefault_agent: browser-tester\ndefault_gate: none\nexecution:\n  mode: isolated\n  backend: native\n  browser_profile: true\nlease: {duration: 1h, max_renewals: 1}\nsecurity: {require_isolation: true, require_ready_label: true, ready_label: swarm:ready}\nagents:\n  browser-tester:\n    binary: deliberately-unavailable-codex\n    harness: codex\n"
 	commitRepoChange(t, repo, ".swarm/config.yaml", config)
 	fixture, err := os.ReadFile("../sandbox/testdata/browser-preview.sh")
 	if err != nil {

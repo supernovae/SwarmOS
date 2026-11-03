@@ -79,3 +79,41 @@ func TestNewTesterSnapshotReplacesPrevious(t *testing.T) {
 		})
 	}
 }
+
+func TestRecordedAcceptanceReadiness(t *testing.T) {
+	for _, change := range []string{"", "head_sha", "base_sha", "validation_base", "validation_claim", "validation_trusted_origin", "validation_trusted_owner", "validation_trusted_claim", "validation_tree", "validation_policy", "newer-missing", "newer-malformed", "newer-unmet"} {
+		t.Run(change, func(t *testing.T) {
+			md := map[string]string{"head_sha": "head", "base_sha": "base", "validation_base": "base", "validation_claim": "claim", "validation_tree": "tree", "validation_policy": "policy", "validation_trusted_origin": "coordinator", "validation_trusted_owner": "owner", "validation_trusted_claim": "claim"}
+			validation.StoreAcceptanceSnapshot(md, validation.CaptureAcceptanceEvidence(validation.AcceptanceEvidenceStart+"\n"+`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"external","reason":"Windows host"}]}`+"\n"+validation.AcceptanceEvidenceEnd))
+			art := contract.Artifact{Type: contract.ArtifactValidation, Verdict: "PASS", Metadata: md}
+			st := &IssueState{HeadSHA: "head", BaseSHA: "base", Lease: contract.Lease{Owner: "owner", ClaimID: "claim"}, Artifacts: []contract.Artifact{art}}
+			if strings.HasPrefix(change, "newer-") {
+				next := art
+				next.Metadata = map[string]string{}
+				for k, v := range md {
+					next.Metadata[k] = v
+				}
+				delete(next.Metadata, validation.AcceptanceEvidenceKey)
+				if change == "newer-malformed" {
+					validation.StoreAcceptanceSnapshot(next.Metadata, validation.AcceptanceSnapshot{State: "malformed"})
+				}
+				if change == "newer-unmet" {
+					validation.StoreAcceptanceSnapshot(next.Metadata, validation.CaptureAcceptanceEvidence(validation.AcceptanceEvidenceStart+"\n"+`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"unmet"}]}`+"\n"+validation.AcceptanceEvidenceEnd))
+				}
+				st.Artifacts = append(st.Artifacts, next)
+			} else if change != "" {
+				md[change] = ""
+			}
+			got := RecordedReadiness(st, []string{"works"})
+			if (got.AcceptanceEvidence.State == "complete") != (change == "") {
+				t.Fatal(got)
+			}
+			if change == "" && (got.RequiredChecks != "passed" || got.ExternalVerification != "pending") {
+				t.Fatal(got)
+			}
+			if change != "" && !strings.HasPrefix(change, "newer-") && got.RequiredChecks != "unavailable" {
+				t.Fatal(got)
+			}
+		})
+	}
+}

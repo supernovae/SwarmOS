@@ -371,6 +371,7 @@ func TestIssueSubmitNextAction(t *testing.T) {
 	n := strconv.Itoa(issue)
 	f.must(t, "issue", "approve", n)
 	f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, issue)
 	restore := reviseTask(t, f, issue)
 	before := f.state(t, issue)
 	doc, err := f.runJSON(t, "issue", "submit", n, "--json", "--progress=false")

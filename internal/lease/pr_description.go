@@ -725,6 +725,14 @@ func DescriptionIssueSection(unit *contract.WorkUnit, state *IssueState, stateRe
 	for _, c := range unit.Acceptance {
 		b.WriteString("- [ ] " + DescriptionSlot(c+"\n"))
 	}
+	r := RecordedReadiness(state, unit.Acceptance)
+	b.WriteString("\n## Submission readiness\n\n" + DescriptionSlot(r.Text()))
+	if len(r.AcceptanceEvidence.External) > 0 {
+		b.WriteString("\n## External verification\n\n")
+		for _, e := range r.AcceptanceEvidence.External {
+			b.WriteString("- [ ] " + DescriptionSlot(fmt.Sprintf("%d. %s — %s\n", e.Index, e.Criterion, e.Reason)))
+		}
+	}
 	b.WriteString("\n## Review handoff\n\nUse the test plan and validation results to verify each criterion, then mark this PR ready for review in GitHub.\n")
 	if state != nil {
 		b.WriteString(DescriptionProductionSummary(state, context))

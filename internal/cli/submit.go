@@ -43,10 +43,11 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				p.Finish(status)
 			}()
 			var failedReport *validation.ValidationReport
+			var readiness *validation.Readiness
 			defer func() {
 				if runErr != nil && failedReport != nil {
 					if asJSON {
-						outcome := map[string]any{"kind": "submission", "status": "failed", "error": messageOnly(runErr), "report": failedReport}
+						outcome := map[string]any{"kind": "submission", "status": "failed", "error": messageOnly(runErr), "report": failedReport, "readiness": readiness}
 						if action := nextActionOf(runErr); action != nil {
 							outcome["next_action"] = action
 						}
@@ -55,7 +56,11 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 						writeValidationChecks(cmd, failedReport)
 					}
 				} else {
-					reportJSONFailure(cmd, asJSON, "submission", runErr)
+					if runErr != nil && readiness != nil && asJSON {
+						_ = writeJSON(cmd, map[string]any{"kind": "submission", "status": "failed", "error": messageOnly(runErr), "readiness": readiness})
+					} else {
+						reportJSONFailure(cmd, asJSON, "submission", runErr)
+					}
 				}
 			}()
 			stops := stopContext{opts: rootOpts, resource: "issue"}
@@ -134,18 +139,24 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				if err := requireCleanHead(ctx, worktree, state.HeadSHA); err != nil {
 					return err
 				}
+				r := lease.RecordedReadiness(state, unit.Acceptance)
+				readiness = &r
+				fmt.Fprint(advisoryOut, r.Text())
+				if err := r.SubmissionError(issue, rootOpts.Fork); err != nil {
+					return err
+				}
+				if r.RequiredChecks != "passed" {
+					return fmt.Errorf("trusted required checks are %s", r.RequiredChecks)
+				}
 				if !rootOpts.Fork {
 					if err := projectSubmitted(ctx, tr, issue); err != nil {
 						return err
 					}
 				}
-				warnings := lease.RecordedAcceptanceWarnings(state, unit.Acceptance)
-				fmt.Fprint(advisoryOut, validation.AcceptanceEvidenceNotice(warnings))
+
 				if asJSON {
 					outcome := map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": state.PRNumber, "pr_url": state.PRURL, "head_sha": state.HeadSHA}
-					if len(warnings) > 0 {
-						outcome["acceptance_evidence_warnings"] = warnings
-					}
+					outcome["readiness"] = readiness
 					return writeJSON(cmd, outcome)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "Draft PR #%d already submitted for issue #%d (%s)\n", state.PRNumber, issue, state.PRURL)
@@ -174,6 +185,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			}
 			p.Next("validation")
 			validationOpts := validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork || manager.HasWorkerGateway(), LookupEnv: rootOpts.lookupEnv, DependencyPolicy: rootOpts.dependencyPolicy(worktree)}
+			acceptanceBefore, _ := validation.AcceptanceCandidateIdentity(ctx, worktree, validationOpts)
 			report, valErr := validation.Reuse(ctx, worktree, validationOpts, owner, state.Artifacts)
 			if valErr == nil && report == nil {
 				report, valErr = validation.Validate(ctx, worktree, unit, validationOpts)
@@ -187,6 +199,20 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			}
 			if report != nil {
 				failedReport = report
+				if acceptanceBefore != nil {
+					after, identityErr := validation.AcceptanceCandidateIdentity(ctx, worktree, validationOpts)
+					stable := identityErr == nil
+					for k, v := range acceptanceBefore {
+						if after[k] != v {
+							stable = false
+						}
+					}
+					if stable {
+						for k, v := range after {
+							report.Artifact.Metadata[k] = v
+						}
+					}
+				}
 				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 				lease.PreserveTesterGuidance(state, &report.Artifact)
 				lease.PreserveAcceptanceEvidence(state, &report.Artifact)
@@ -194,15 +220,33 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 					return errors.Join(valErr, err)
 				}
 			}
-			if valErr != nil {
-				return fmt.Errorf("trusted validation failed: %w", valErr)
+			checks := "unavailable"
+			snapshot := validation.AcceptanceSnapshot{State: "missing"}
+			if report != nil {
+				checks = "failed"
+				if report.Passed {
+					checks = "passed"
+				}
+				snapshot = validation.AcceptanceSnapshotFromMetadata(report.Artifact.Metadata)
 			}
+			r := validation.NewReadiness(checks, unit.Acceptance, snapshot)
+			readiness = &r
+			fmt.Fprint(advisoryOut, r.Text())
+			if valErr != nil {
+				return errors.Join(fmt.Errorf("trusted validation failed: %w", valErr), r.SubmissionError(issue, rootOpts.Fork))
+			}
+			if checks != "passed" {
+				return fmt.Errorf("trusted required checks are %s", checks)
+			}
+			if err := r.SubmissionError(issue, rootOpts.Fork); err != nil {
+				return err
+			}
+
 			if err := requireCleanHead(ctx, worktree, head); err != nil {
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
 			}
 			freshness := checkSubmissionFreshnessFrom(ctx, root, manager.UpstreamRemote(), baseBranch, state.BaseSHA, head)
-			warnings := validation.AcceptanceEvidenceWarnings(unit.Acceptance, validation.AcceptanceSnapshotFromMetadata(report.Artifact.Metadata))
-			fmt.Fprint(advisoryOut, validation.AcceptanceEvidenceNotice(warnings))
+
 			fmt.Fprint(advisoryOut, freshness.advisory())
 			var policyWarning *workspace.HarnessPolicyWarning
 			if unit.AllowHarnessChanges && freshness.TargetSHA != "" {
@@ -302,9 +346,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			}
 			if asJSON {
 				outcome := map[string]any{"kind": "submission", "status": "submitted", "issue_number": issue, "pr_number": pr.Number, "pr_url": pr.HTMLURL, "head_sha": head, "base_freshness": freshness, "report": report}
-				if len(warnings) > 0 {
-					outcome["acceptance_evidence_warnings"] = warnings
-				}
+				outcome["readiness"] = readiness
 				if policyWarning != nil {
 					prepareHarnessPolicyWarning(policyWarning, issue, pr.Number, rootOpts)
 					outcome["harness_policy_warning"] = policyWarning

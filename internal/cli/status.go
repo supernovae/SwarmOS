@@ -18,6 +18,7 @@ import (
 )
 
 type issueStatus struct {
+	Readiness       *validation.Readiness      `json:"readiness,omitempty"`
 	Decomposition   *lease.DecompositionStatus `json:"decomposition,omitempty"`
 	humanPlanAction *NextAction
 	PlanReview      *planReviewDisplay `json:"plan_review,omitempty"`
@@ -94,6 +95,10 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 					provenance = append(provenance, state.Attestations...)
 				}
 				entry := issueStatus{Repository: target.Repo, Issue: issue, State: state, Provenance: provenance, RoleRuns: lease.RoleRuns(state)}
+				if wu, parseErr := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body); parseErr == nil {
+					r := lease.RecordedReadiness(state, wu.Acceptance)
+					entry.Readiness = &r
+				}
 				if state != nil {
 					entry.Decomposition = manager.InspectDecomposition(cmd.Context(), state)
 					if state.EffectiveGate == contract.GateHuman {
@@ -161,6 +166,9 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				} else {
 					fmt.Fprintln(cmd.OutOrStdout(), "No child currently workable; inspect blockers above.")
 				}
+			}
+			if entry.Readiness != nil {
+				fmt.Fprint(cmd.OutOrStdout(), entry.Readiness.Text())
 			}
 			state := entry.State
 			if b := entry.ClaimBudget; b != nil {

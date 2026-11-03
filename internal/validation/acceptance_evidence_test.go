@@ -137,3 +137,39 @@ func TestAcceptanceEvidenceRepeatedReuse(t *testing.T) {
 		t.Fatal(restored)
 	}
 }
+
+func TestAcceptanceAssessment(t *testing.T) {
+	for _, tc := range []struct{ raw, state, external string }{
+		{`{"version":1,"criteria":[]}`, "incomplete", "none"},
+		{`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"external","reason":"Windows host"}]}`, "complete", "pending"},
+		{`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"external","reason":" "}]}`, "malformed", "none"},
+		{`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"met","evidence":"x"},{"index":2,"criterion":"extra","status":"met","evidence":"x"}]}`, "malformed", "none"},
+	} {
+		r := NewReadiness("failed", []string{"works"}, CaptureAcceptanceEvidence(evidenceBlock(tc.raw)))
+		if r.AcceptanceEvidence.State != tc.state || r.ExternalVerification != tc.external || r.RequiredChecks != "failed" {
+			t.Fatalf("%+v", r)
+		}
+	}
+	if r := NewReadiness("unavailable", nil, AcceptanceSnapshot{State: "malformed"}); r.AcceptanceEvidence.State != "complete" {
+		t.Fatal(r)
+	}
+}
+
+func TestAcceptanceAssessmentMixed(t *testing.T) {
+	criteria := []string{"first", "second", "third"}
+	snapshot := CaptureAcceptanceEvidence(evidenceBlock(`{"version":1,"criteria":[{"index":1,"criterion":"first","status":"met","evidence":"observed"},{"index":2,"criterion":"second","status":"unmet"}]}`))
+	a := AssessAcceptance(criteria, snapshot)
+	if a.State != "incomplete" || len(a.Blockers) != 2 || a.Blockers[0].Index != 2 || a.Blockers[1].Index != 3 {
+		t.Fatal(a)
+	}
+	r := NewReadiness("passed", criteria, snapshot)
+	err := r.SubmissionError(440, true)
+	if err == nil || !strings.Contains(err.Error(), "2. second (unmet)") || !strings.Contains(err.Error(), "3. third (unmentioned)") || !strings.Contains(err.Error(), "upstream") {
+		t.Fatal(err)
+	}
+	snapshot = CaptureAcceptanceEvidence(evidenceBlock(`{"version":1,"criteria":[{"index":3,"criterion":"third","status":"external","reason":"macOS host"},{"index":1,"criterion":"first","status":"met","evidence":"observed"},{"index":2,"criterion":"second","status":"external","reason":"Windows host"}]}`))
+	a = AssessAcceptance(criteria, snapshot)
+	if a.State != "complete" || len(a.External) != 2 || a.External[0].Index != 2 || a.External[1].Index != 3 {
+		t.Fatal(a)
+	}
+}

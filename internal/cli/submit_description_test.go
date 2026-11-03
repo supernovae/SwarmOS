@@ -54,6 +54,7 @@ func TestSubmitDescriptionStrictComposedAPI(t *testing.T) {
 	n := strconv.Itoa(issue)
 	f.must(t, "issue", "approve", n)
 	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	// Make the issue-generated source exceed the API limit before actual submit.
 	store := coordination.NewFileStore(f.root)
 	save := func(st *lease.IssueState) {
@@ -314,6 +315,7 @@ func TestIssueDescriptionPublicationRetry(t *testing.T) {
 			n := strconv.Itoa(issue)
 			f.must(t, "issue", "approve", n)
 			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 			st := f.state(t, issue)
 			var existing *tracker.PullRequest
 			if mode != "lost-create" {

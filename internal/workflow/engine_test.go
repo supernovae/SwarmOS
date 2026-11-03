@@ -1220,6 +1220,29 @@ func TestStructuredReviewVerdictConsistency(t *testing.T) {
 	}
 }
 
+func TestBuiltInMockStructuredReviewAccepted(t *testing.T) {
+	for _, verdict := range []string{"APPROVED", "CHANGES_REQUESTED"} {
+		t.Run(verdict, func(t *testing.T) {
+			t.Setenv("SWARM_MOCK_VERDICT", verdict)
+			root := t.TempDir()
+			if _, err := agent.RunReview(context.Background(), &agent.MockRunner{}, agent.RunRequest{Role: "reviewer", WorktreePath: root, Mode: "headless"}); err != nil {
+				t.Fatal(err)
+			}
+			body, err := os.ReadFile(filepath.Join(root, ".swarm/active/REVIEW.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ParseReviewVerdict(string(body))
+			if err != nil || got != verdict {
+				t.Fatalf("verdict = %q, error = %v", got, err)
+			}
+			if err := validateStructuredReview(string(body), got, &lease.IssueState{}); err != nil {
+				t.Fatalf("built-in mock review rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
 	for _, body := range []string{"missing-output", "", "VERDICT: APPROVED\n", structuredReviewFixture("CHANGES_REQUESTED"), structuredReviewFixture("APPROVED")} {
 		t.Run(fmt.Sprint(len(body)), func(t *testing.T) {

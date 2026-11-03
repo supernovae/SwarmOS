@@ -274,7 +274,7 @@ func dependencyCacheSummary(mode sandbox.DependencyCacheMode) string {
 func doctorBrowserProfileCheck(ctx context.Context, cfg *contract.SwarmConfig, probe func(context.Context) error) harness.DoctorCheck {
 	status, detail := "OK", "not requested in inspected repository config"
 	if cfg.Execution.BrowserProfile {
-		detail = "requested/available in inspected repository config"
+		detail = "requested/available in inspected repository config; native Linux Codex developer/tester: owned stdio swarm_shell; native shell network disabled"
 		if err := probe(ctx); err != nil {
 			status = "FAIL"
 			detail = "requested/unavailable: " + err.Error()

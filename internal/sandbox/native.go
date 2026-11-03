@@ -558,6 +558,9 @@ func CodexAuthentication(ctx context.Context, binary string) (string, error) {
 // RunNativeCodex leaves provider authentication in the trusted Codex process.
 // Model-controlled commands use Codex's native profile, with no host credentials.
 func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts WorkerOptions, interactive bool, stdin io.Reader, stdout, stderr io.Writer) ([]string, string, error) {
+	if opts.BrowserProfile && opts.ReadOnly && (opts.Role == "developer" || opts.Role == "tester") {
+		return nil, "", fmt.Errorf("codex browser transport requires a writable developer or tester workspace")
+	}
 	preflight := time.Now()
 	version, err := opts.Inspections.InspectNativeCodex(ctx, binary, opts.InspectionPolicy)
 	if err != nil {
@@ -572,13 +575,33 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		return nil, version, err
 	}
 	var command []string
-	err = withNativeWorkspace(ctx, dir, opts, func(ctx context.Context, work, scratch string) error {
+	err = withNativeWorkspace(ctx, dir, opts, func(ctx context.Context, work, scratch string) (resultErr error) {
 		// dir is the real worktree, so the cache key names its repository.
 		caches, err := agentBuildCaches(ctx, dir, scratch, opts)
 		if err != nil {
 			return err
 		}
 		args := codexPolicy(binary, work, scratch, opts.ReadOnly, caches, opts.Dependencies)
+		if CodexBrowserEligible(opts.BrowserProfile, opts.Role, opts.ReadOnly) {
+			if err := CheckBrowserProfile(ctx); err != nil {
+				return fmt.Errorf("codex browser transport unavailable: %w", err)
+			}
+			executable, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			// Keep server HOME outside the native profile's writable scratch.
+			control, err := storageuse.FromContext(ctx).TempDir(ctx, "", "swarm-codex-tools-*", "native-scratch")
+			if err != nil {
+				return err
+			}
+			defer storageuse.FromContext(ctx).CleanupTemp(control, &resultErr)
+			args, err = codexBrowserPolicy(args, executable, control, ToolExecutor{BrowserProfile: true, Work: work, BuildCaches: caches, Dependencies: opts.Dependencies})
+			if err != nil {
+				return err
+			}
+			prompt = codexBrowserGuidance + prompt
+		}
 		args = append(args, codexExecArgs(work, model, opts.Effort)...)
 		// Each exec turn is its own Codex session, named on stderr. Only those
 		// ids are looked up afterwards; observation never changes the result.

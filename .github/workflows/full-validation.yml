@@ -62,12 +62,66 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test -timeout=15m ./... 2>&1 | tee "$RUNNER_TEMP/full-validation/test.log"
+          {
+            all_output=$(go list ./...)
+            cli_package=$(go list ./internal/cli)
+            [[ -n "$all_output" && -n "$cli_package" && "$cli_package" != *$'\n'* ]] || { echo 'Invalid package discovery'; exit 1; }
+            mapfile -t all_packages <<< "$all_output"
+            other_packages=()
+            cli_count=0
+            for package in "${all_packages[@]}"; do
+              if [[ "$package" == "$cli_package" ]]; then
+                cli_count=$((cli_count + 1))
+              else
+                other_packages+=("$package")
+              fi
+            done
+            [[ "$cli_count" -eq 1 && "${#other_packages[@]}" -gt 0 ]] || { echo 'Expected one CLI package and nonempty remaining packages'; exit 1; }
+            for package in "${other_packages[@]}"; do
+              [[ "$package" != "$cli_package" ]] || { echo 'CLI package overlaps remaining packages'; exit 1; }
+            done
+            original=$(printf '%s\n' "${all_packages[@]}" | LC_ALL=C sort)
+            partitioned=$(printf '%s\n' "${other_packages[@]}" "$cli_package" | LC_ALL=C sort)
+            [[ "$original" == "$partitioned" ]] || { echo 'Package partition does not cover ./... exactly'; exit 1; }
+            go test -timeout=15m "${other_packages[@]}"
+          } 2>&1 | tee "$RUNNER_TEMP/full-validation/test.log"
+      - name: Full CLI tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -timeout=30m ./internal/cli 2>&1 | tee "$RUNNER_TEMP/full-validation/cli-test.log"
       - name: Full race tests
         shell: bash
         run: |
           set -euo pipefail
-          go test -race -timeout=15m ./... 2>&1 | tee "$RUNNER_TEMP/full-validation/race.log"
+          {
+            all_output=$(go list ./...)
+            cli_package=$(go list ./internal/cli)
+            [[ -n "$all_output" && -n "$cli_package" && "$cli_package" != *$'\n'* ]] || { echo 'Invalid package discovery'; exit 1; }
+            mapfile -t all_packages <<< "$all_output"
+            other_packages=()
+            cli_count=0
+            for package in "${all_packages[@]}"; do
+              if [[ "$package" == "$cli_package" ]]; then
+                cli_count=$((cli_count + 1))
+              else
+                other_packages+=("$package")
+              fi
+            done
+            [[ "$cli_count" -eq 1 && "${#other_packages[@]}" -gt 0 ]] || { echo 'Expected one CLI package and nonempty remaining packages'; exit 1; }
+            for package in "${other_packages[@]}"; do
+              [[ "$package" != "$cli_package" ]] || { echo 'CLI package overlaps remaining packages'; exit 1; }
+            done
+            original=$(printf '%s\n' "${all_packages[@]}" | LC_ALL=C sort)
+            partitioned=$(printf '%s\n' "${other_packages[@]}" "$cli_package" | LC_ALL=C sort)
+            [[ "$original" == "$partitioned" ]] || { echo 'Package partition does not cover ./... exactly'; exit 1; }
+            go test -race -timeout=15m "${other_packages[@]}"
+          } 2>&1 | tee "$RUNNER_TEMP/full-validation/race.log"
+      - name: Full CLI race tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -timeout=30m ./internal/cli 2>&1 | tee "$RUNNER_TEMP/full-validation/cli-race.log"
       - name: Build CLI
         run: go build -o swarm-ci.exe ./cmd/swarm
       - name: Exercise CLI surface

@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -39,10 +40,13 @@ func (s *Service) preflightRebaseReview(ctx context.Context, r *Result, opts Opt
 		return nil
 	}
 	if r.State.EffectiveGate == contract.GateHuman {
-		return &lease.HumanPlanApprovalError{IssueNumber: r.IssueNumber, Err: lease.ErrPlanApprovalRequired}
+		return &lease.HumanPlanApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("%w\n%s", lease.ErrPlanApprovalRequired, strings.Join(s.recoveryCommands(ctx, r, true), "\n"))}
 	}
-	if s.Fork || !policyReviewNeeded(r.State, rv.unit) {
+	if s.Fork {
 		return fmt.Errorf("plan review required: swarm pr work %d --phase review", r.PR.Number)
+	}
+	if !policyReviewNeeded(r.State, rv.unit) {
+		return fmt.Errorf("plan review required:\n%s", strings.Join(s.recoveryCommands(ctx, r, true), "\n"))
 	}
 	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
 	if err != nil {
@@ -57,8 +61,17 @@ func (s *Service) reviewRebasePlan(ctx context.Context, r *Result, owner string,
 	if lease.VerifyApproval(st, rv.unit) == nil {
 		return st, nil
 	}
-	if s.Fork || !policyReviewNeeded(st, rv.unit) {
+	if st.EffectiveGate == contract.GateHuman {
+		fresh := *r
+		fresh.State = st
+		r = &fresh
+		return st, &lease.HumanPlanApprovalError{IssueNumber: r.IssueNumber, Err: fmt.Errorf("%w\n%s", lease.ErrPlanApprovalRequired, strings.Join(s.recoveryCommands(ctx, r, true), "\n"))}
+	}
+	if s.Fork {
 		return st, fmt.Errorf("plan approval required: swarm pr work %d --phase review", r.PR.Number)
+	}
+	if !policyReviewNeeded(st, rv.unit) {
+		return st, fmt.Errorf("plan approval required:\n%s", strings.Join(s.recoveryCommands(ctx, r, true), "\n"))
 	}
 	if err := restoreApprovedPlan(r.Worktree, st); err != nil {
 		return st, err
@@ -73,6 +86,11 @@ func (s *Service) reviewRebasePlan(ctx context.Context, r *Result, owner string,
 	}
 	name := workflow.ResolveRoleAgent(cfg, "reviewer", opts.Work)
 	engine := s.newEngine(cfg)
+	if st.PRRevision != nil && !s.Manager.HasWorkerGateway() {
+		engine.NewRunner = s.preservingRunnerFactory(ctx, r.Worktree)
+	} else {
+		engine.NewRunner = s.NewRunner
+	}
 	_, updated, err := engine.RunAgentReview(ctx, r.Worktree, rv.unit, wf, st, owner, name, rv.mode, "Review the unchanged approved plan under the new policy; do not re-plan.", r.PR.Number)
 	if cleanErr := workspace.CleanEphemeralHarnessMarkers(r.Worktree); cleanErr != nil {
 		return updated, cleanErr

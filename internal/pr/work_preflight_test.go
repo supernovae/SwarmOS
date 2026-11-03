@@ -444,7 +444,7 @@ func TestPRWorkRejectsRevisionOutsideApprovedBase(t *testing.T) {
 				} else if err == nil {
 					t.Fatal("unsafe work accepted")
 				}
-				if r == nil || !strings.Contains(strings.Join(r.WorkPreflight.Commands, " "), fmt.Sprintf("swarm pr rebase %d --resolve", number)) {
+				if r == nil || !strings.Contains(strings.Join(r.WorkPreflight.Commands, " "), s.workCommand(r, "rebase", "--resolve")) {
 					t.Fatalf("missing recovery: %+v %v", r, err)
 				}
 				after, _, err := s.Manager.Store().Load(ctx, issue)

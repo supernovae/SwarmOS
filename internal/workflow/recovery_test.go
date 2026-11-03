@@ -221,7 +221,7 @@ func checkpointPlanEngineGate(t *testing.T, limit int, gate contract.GateMode, m
 					}
 				}
 			} else if req.Role == "reviewer" {
-				if err := os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active-output/REVIEW.md"), []byte("VERDICT: APPROVED\n\nExact candidate reviewed.\n"), 0644); err != nil {
+				if err := os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active-output/REVIEW.md"), []byte(structuredReviewFixture("APPROVED")), 0644); err != nil {
 					return nil, err
 				}
 			} else {
@@ -436,7 +436,7 @@ func TestCheckpointRecoveryPlanReviewFences(t *testing.T) {
 						run.Attestation.Harness = "codex"
 						run.Attestation.Agent = "codex"
 					case "reject-replan":
-						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active-output/REVIEW.md"), []byte("VERDICT: CHANGES_REQUESTED\n\nRevise the plan.\n"), 0644)
+						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active-output/REVIEW.md"), []byte(structuredReviewFixture("CHANGES_REQUESTED")), 0644)
 					}
 					return run, err
 				}}, nil

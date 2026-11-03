@@ -1283,7 +1283,7 @@ func TestTestRetryRefusesUnsatisfiedGateBeforeTester(t *testing.T) {
 						mutateRetryState(t, e, issue.Number, func(st *lease.IssueState) {
 							for i, a := range st.Artifacts {
 								if a.Type == contract.ArtifactReview {
-									body := "VERDICT: CHANGES_REQUESTED\n\nRework the plan.\n"
+									body := structuredReviewFixture("CHANGES_REQUESTED")
 									sum := sha256.Sum256([]byte(body))
 									st.Artifacts[i].Verdict, st.Artifacts[i].Body = "CHANGES_REQUESTED", body
 									st.Artifacts[i].Metadata["content_sha256"] = hex.EncodeToString(sum[:])

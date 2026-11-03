@@ -30,6 +30,7 @@ const (
 // Policy documents are always inlined; skills are indexed and inlined only
 // when their front matter selects the active role and workflow.
 type bundleGuidance struct {
+	prReview      bool
 	effectiveGate contract.GateMode
 	profileName   string
 	profileDoc    string

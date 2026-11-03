@@ -204,16 +204,28 @@ func DirectPlanReview(st *IssueState) bool {
 }
 
 func appendPlanReviewHistory(st *IssueState, art contract.Artifact, advisory bool) {
-	if !DirectPlanReview(st) || advisory || art.Type != contract.ArtifactReview {
+	if st == nil || st.PRNumber != 0 || st.PRRevision != nil || art.Type != contract.ArtifactReview {
 		return
 	}
 	source := art.Metadata["review_source"]
+	if advisory {
+		if _, err := contract.ParsePlanFindings(art.Body); err != nil || source != "authenticated-agent" {
+			return
+		}
+	}
 	if source != "authenticated-agent" && source != "authenticated-human" {
 		return
 	}
 	findings := contract.CanonicalArtifactBody(art.Body)
 	const marker = "\n[Earlier review findings truncated]"
-	if len(findings) > 16<<10 {
+	_, structuredErr := contract.ParsePlanFindings(findings)
+	if structuredErr == nil {
+		// Keep only the bounded complete ledger; narrative must not evict stable IDs.
+		start := strings.Index(findings, contract.PlanFindingsStart)
+		end := strings.Index(findings, contract.PlanFindingsEnd) + len(contract.PlanFindingsEnd)
+		findings = "VERDICT: " + art.Verdict + "\n" + findings[start:end]
+	}
+	if structuredErr != nil && len(findings) > 16<<10 {
 		findings = findings[:(16<<10)-len(marker)]
 		for !utf8.ValidString(findings) {
 			findings = findings[:len(findings)-1]
@@ -221,7 +233,7 @@ func appendPlanReviewHistory(st *IssueState, art contract.Artifact, advisory boo
 		findings += marker
 	}
 	st.PlanReviewSequence++
-	entry := workspace.PlanReviewEvidence{Round: st.PlanReviewSequence, ReviewID: art.ID, Version: art.Version, Verdict: art.Verdict, Findings: findings, Digest: hash(art.Body), TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, BaseSHA: st.BaseSHA, PlanDigest: art.Metadata["plan_digest"], TestPlanDigest: art.Metadata["test_plan_digest"]}
+	entry := workspace.PlanReviewEvidence{Source: source, Round: st.PlanReviewSequence, ReviewID: art.ID, Version: art.Version, Verdict: art.Verdict, Findings: findings, Digest: hash(art.Body), TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, BaseSHA: st.BaseSHA, PlanDigest: art.Metadata["plan_digest"], TestPlanDigest: art.Metadata["test_plan_digest"]}
 	// Allocate independently of previously loaded state and bounded slice storage.
 	history := append(append([]workspace.PlanReviewEvidence(nil), st.PlanReviewHistory...), entry)
 	if len(history) > 8 {
@@ -232,7 +244,7 @@ func appendPlanReviewHistory(st *IssueState, art contract.Artifact, advisory boo
 
 // ReviewHistory projects only evidence from this approved revision.
 func ReviewHistory(st *IssueState) []workspace.PlanReviewEvidence {
-	if !DirectPlanReview(st) {
+	if st == nil || st.PRNumber != 0 || st.PRRevision != nil {
 		return nil
 	}
 	var result []workspace.PlanReviewEvidence

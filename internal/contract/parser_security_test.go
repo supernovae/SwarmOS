@@ -96,3 +96,116 @@ func TestCommandOnlyTestPhase(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanFindingsStrictParser(t *testing.T) {
+	wrap := func(raw string) string { return PlanFindingsStart + raw + PlanFindingsEnd }
+	valid := `{"version":1,"findings":[{"id":"F1","blocking":true,"disposition":"open","criterion":"Fence","trigger":"Stale write","expected":"Reject","actual":"Accept","check":"Unit test"}]}`
+	for name, raw := range map[string]string{
+		"valid": valid, "empty": `{"version":1,"findings":[]}`,
+		"duplicate key":    `{"version":1,"version":1,"findings":[]}`,
+		"null list":        `{"version":1,"findings":null}`,
+		"version":          `{"version":2,"findings":[]}`,
+		"case alias":       strings.Replace(valid, `"version"`, `"Version"`, 1),
+		"null blocking":    strings.Replace(valid, `"blocking":true`, `"blocking":null`, 1),
+		"unknown":          `{"version":1,"findings":[],"extra":0}`,
+		"trailing":         valid + `{}`,
+		"blank criterion":  strings.Replace(valid, `"Fence"`, `" "`, 1),
+		"missing check":    strings.Replace(valid, `,"check":"Unit test"`, "", 1),
+		"bad disposition":  strings.Replace(valid, `"open"`, `"closed"`, 1),
+		"bad id":           strings.Replace(valid, `"F1"`, `"F0"`, 1),
+		"missing blocking": strings.Replace(valid, `"blocking":true,`, "", 1),
+		"oversize":         strings.Repeat(" ", 64<<10) + valid,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParsePlanFindings(wrap(raw))
+			want := name == "valid" || name == "empty"
+			if (err == nil) != want {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+	for _, body := range []string{"", PlanFindingsEnd + valid + PlanFindingsStart, wrap(valid) + wrap(valid), PlanFindingsStart + valid} {
+		if _, err := ParsePlanFindings(body); err == nil {
+			t.Fatal("accepted invalid delimiters")
+		}
+	}
+	for _, field := range []string{"criterion", "trigger", "expected", "actual", "check"} {
+		var r map[string]interface{}
+		_ = json.Unmarshal([]byte(valid), &r)
+		f := r["findings"].([]interface{})[0].(map[string]interface{})
+		f[field] = ""
+		raw, _ := json.Marshal(r)
+		if _, err := ParsePlanFindings(wrap(string(raw))); err == nil {
+			t.Fatalf("accepted blank %s", field)
+		}
+	}
+}
+
+func TestPlanFindingContinuity(t *testing.T) {
+	f := PlanFinding{ID: "F1", Blocking: true, Disposition: "resolved", Criterion: "Fence", Trigger: "Stale", Expected: "Reject", Actual: "Accept", Check: "Test"}
+	prior := PlanFindings{Version: 1, Findings: []PlanFinding{f}}
+	if ValidatePlanContinuity(PlanFindings{Version: 1, Findings: []PlanFinding{}}, []PlanFindings{prior}) == nil {
+		t.Fatal("omission accepted")
+	}
+	f.Disposition = "open"
+	current := PlanFindings{Version: 1, Findings: []PlanFinding{f}}
+	if ValidatePlanContinuity(current, []PlanFindings{prior}) == nil {
+		t.Fatal("reversal accepted without evidence")
+	}
+	current.Findings[0].ReversalNote = "New stale write counterexample in UpdateArtifact; test fails"
+	if err := ValidatePlanContinuity(current, []PlanFindings{prior}); err != nil {
+		t.Fatal(err)
+	}
+	prior.Findings[0].ReversalNote = current.Findings[0].ReversalNote
+	if ValidatePlanContinuity(current, []PlanFindings{prior}) == nil {
+		t.Fatal("stale reversal evidence accepted")
+	}
+
+	f.Disposition = "superseded"
+	f.SupersededBy = "F2"
+	second := f
+	second.ID = "F2"
+	second.SupersededBy = "F3"
+	third := f
+	third.ID = "F3"
+	third.Disposition = "open"
+	third.SupersededBy = ""
+	ledger := PlanFindings{Version: 1, Findings: []PlanFinding{f, second, third}}
+	raw, _ := json.Marshal(ledger)
+	if _, err := ParsePlanFindings(PlanFindingsStart + string(raw) + PlanFindingsEnd); err != nil {
+		t.Fatal(err)
+	}
+	ledger.Findings[2].Disposition = "superseded"
+	ledger.Findings[2].SupersededBy = "F1"
+	raw, _ = json.Marshal(ledger)
+	if _, err := ParsePlanFindings(PlanFindingsStart + string(raw) + PlanFindingsEnd); err == nil {
+		t.Fatal("cycle accepted")
+	}
+}
+
+func TestPlanFindingsInvalidReferences(t *testing.T) {
+	base := PlanFinding{ID: "F1", Disposition: "superseded", SupersededBy: "F2"}
+	for name, findings := range map[string][]PlanFinding{
+		"missing target": {base},
+		"self":           {{ID: "F1", Disposition: "superseded", SupersededBy: "F1"}},
+		"duplicate":      {{ID: "F1", Disposition: "open"}, {ID: "F1", Disposition: "resolved"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, _ := json.Marshal(PlanFindings{Version: 1, Findings: findings})
+			if _, err := ParsePlanFindings(PlanFindingsStart + string(raw) + PlanFindingsEnd); err == nil {
+				t.Fatal("invalid references accepted")
+			}
+		})
+	}
+	old := PlanFindings{Version: 1, Findings: []PlanFinding{{ID: "F2", Disposition: "withdrawn"}}}
+	next := PlanFindings{Version: 1, Findings: []PlanFinding{{ID: "F2", Disposition: "withdrawn"}, {ID: "F1", Disposition: "open"}}}
+	if ValidatePlanContinuity(next, []PlanFindings{old}) == nil {
+		t.Fatal("recycled earlier ID accepted")
+	}
+	for _, disposition := range []string{"resolved", "withdrawn", "superseded"} {
+		next := PlanFindings{Version: 1, Findings: []PlanFinding{{ID: "F2", Disposition: disposition}}}
+		if err := ValidatePlanContinuity(next, []PlanFindings{old}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

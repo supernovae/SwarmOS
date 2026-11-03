@@ -786,7 +786,7 @@ func showHarnessFile(worktreePath, baseSHA, path string) (string, error) {
 
 // CompileHarnessBundleAt builds the active prompt only from base-pinned
 // harness instructions so a candidate cannot alter its own execution policy.
-func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string) error {
+func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, prReview ...bool) error {
 	if role == "" {
 		role = "planner"
 	}
@@ -876,6 +876,7 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 			return err
 		}
 	}
+	guidance.prReview = len(prReview) > 0 && prReview[0]
 	return compileHarnessBundle(worktreePath, wu, wf, artifacts, role, rolePrompt, projectDoc, archDoc, convDoc, validationDoc, budgetDoc, guidance)
 }
 
@@ -934,6 +935,20 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 			return err
 		}
 	}
+	if role == "planner" && !guidance.prReview {
+		artifacts = append([]contract.Artifact(nil), artifacts...)
+		for i := range artifacts {
+			if artifacts[i].Type == contract.ArtifactReview && artifacts[i].Metadata["review_source"] != "authenticated-human" {
+				artifacts[i].Body = contract.PlannerReviewBody(artifacts[i].Body)
+			}
+		}
+	}
+	humanReviewCopy := false
+	for _, a := range artifacts {
+		if a.Type == contract.ArtifactReview {
+			humanReviewCopy = a.Metadata["review_source"] == "authenticated-human"
+		}
+	}
 	// Strip coordinator guidance from delivered report copies, preserving stored artifacts.
 	for _, name := range []string{"PLAN.md", "TEST_PLAN.md", "REVIEW.md", "IMPLEMENTATION.md", "VALIDATION.md"} {
 		body, readErr := active.ReadFile(name, 8<<20)
@@ -943,7 +958,11 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 		if readErr != nil {
 			return readErr
 		}
-		if err := active.WriteFile(name, []byte(contract.CanonicalArtifactBody(string(body))), 0644); err != nil {
+		delivered := contract.CanonicalArtifactBody(string(body))
+		if role == "planner" && !guidance.prReview && !humanReviewCopy && name == "REVIEW.md" {
+			delivered = contract.PlannerReviewBody(delivered)
+		}
+		if err := active.WriteFile(name, []byte(delivered), 0644); err != nil {
 			return err
 		}
 	}
@@ -1539,6 +1558,7 @@ func VerifyBaseBranch(root, remote, recorded, actual string) error {
 
 // PlanReviewEvidence is coordinator-held context, separate from gate artifacts.
 type PlanReviewEvidence struct {
+	Source         string `json:"source,omitempty"`
 	Round          int    `json:"round"`
 	ReviewID       string `json:"review_id"`
 	Version        int    `json:"version"`

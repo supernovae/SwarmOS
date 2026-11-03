@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1424,6 +1425,7 @@ func TestNativeBoundaryIdentityAndEmpty(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, events, boot                          string
+		eventsErr                                   error
 		missing, denied, changedMount, changedGroup bool
 		deniedRead, deniedStat                      string
 		want                                        bool
@@ -1435,6 +1437,12 @@ func TestNativeBoundaryIdentityAndEmpty(t *testing.T) {
 		{name: "loose match", events: "populated 01\n"},
 		{name: "permission", denied: true},
 		{name: "controllers unreadable", deniedRead: "/sys/fs/cgroup/cgroup.controllers"},
+		{name: "events removed on open", eventsErr: &os.PathError{Op: "open", Err: syscall.ENOENT}, want: true},
+		{name: "events removed on read", eventsErr: &os.PathError{Op: "read", Err: syscall.ENODEV}, want: true},
+		{name: "events access denied", eventsErr: &os.PathError{Op: "open", Err: syscall.EACCES}},
+		{name: "events other read error", eventsErr: &os.PathError{Op: "read", Err: syscall.EIO}},
+		{name: "removed events changed mount", changedMount: true, eventsErr: syscall.ENOENT},
+		{name: "removed events reused inode", changedGroup: true, eventsErr: syscall.ENODEV},
 		{name: "events unreadable", deniedRead: "/sys/fs/cgroup/user.slice/" + unit + "/cgroup.events"},
 		{name: "root unreadable", deniedStat: "/sys/fs/cgroup"},
 		{name: "group unreadable", deniedStat: "/sys/fs/cgroup/user.slice/" + unit},
@@ -1454,6 +1462,12 @@ func TestNativeBoundaryIdentityAndEmpty(t *testing.T) {
 					return []byte(tc.boot), nil
 				}
 				if strings.HasSuffix(path, "cgroup.events") {
+					if path != filepath.Join("/sys/fs/cgroup", n.Group, "cgroup.events") {
+						t.Fatalf("unexpected events path: %s", path)
+					}
+					if tc.eventsErr != nil {
+						return nil, tc.eventsErr
+					}
 					return []byte(tc.events), nil
 				}
 				return baseRead(path)
@@ -1478,6 +1492,9 @@ func TestNativeBoundaryIdentityAndEmpty(t *testing.T) {
 				"missing field": "populated=\"\"", "loose match": "populated=\"01\"",
 				"permission": "/proc/sys/kernel/random/boot_id", "unmounted": "mount identity mismatch",
 				"reused inode": "cgroup identity mismatch", "invalid boot": "invalid boot identity",
+				"events access denied": "read ", "events other read error": "read ",
+				"removed events changed mount": "mount identity mismatch",
+				"removed events reused inode":  "cgroup identity mismatch",
 			}
 			if tc.deniedRead != "" {
 				reason[tc.name] = "read " + tc.deniedRead

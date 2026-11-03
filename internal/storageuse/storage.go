@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/filelock"
@@ -1421,6 +1422,12 @@ func CheckNativeBoundaryEmpty(n NativeIdentity, read func(string) ([]byte, error
 		return fmt.Errorf("%w: cgroup identity mismatch at %s", ErrUnsafe, path)
 	}
 	raw, err = read(filepath.Join(path, "cgroup.events"))
+	// The kernel only removes empty cgroups. After verifying the recorded
+	// boot, mount and group identity, disappearance during open or read is
+	// therefore also proof that this boundary is empty.
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENODEV) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("%w: read %s/cgroup.events: %w", ErrUnsafe, path, err)
 	}

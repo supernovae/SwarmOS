@@ -750,6 +750,11 @@ func (f backendPRFixture) VisitPullRequests(_ context.Context, _ tracker.Invento
 // GitHub's PR API is replaced; state enumeration and object fetches run Git.
 func backendReclaimFixture(t *testing.T, backend, class string) (ReclaimOptions, *storageuse.Manager, storageuse.Resource, func(string), string) {
 	t.Helper()
+	return backendReclaimLayoutFixture(t, backend, class, coordination.BranchLayout)
+}
+
+func backendReclaimLayoutFixture(t *testing.T, backend, class string, layout coordination.RefLayout) (ReclaimOptions, *storageuse.Manager, storageuse.Resource, func(string), string) {
+	t.Helper()
 	o, m, r := reclaimFixture(t, class)
 	repo := o.Scopes[0].Root
 	o.Scopes[0].Backend = backend
@@ -776,15 +781,23 @@ func backendReclaimFixture(t *testing.T, backend, class string) (ReclaimOptions,
 			}
 			return strings.TrimSpace(string(out))
 		}
-		git(seed, "init", "-q")
-		git(seed, "init", "--bare", "-q", remote)
+		git(seed, "init", "-q", "--initial-branch=main")
+		git(seed, "init", "--bare", "-q", "--initial-branch=main", remote)
 		git(seed, "remote", "add", "origin", remote)
 		git(repo, "remote", "add", "origin", remote)
+		if layout == coordination.HiddenLayout {
+			put(t, filepath.Join(seed, ".swarm", "config.yaml"), retentionNamespaceConfig("hidden"))
+			git(seed, "add", ".swarm/config.yaml")
+		}
+		git(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "trusted default")
+		git(seed, "push", "-q", "origin", "HEAD:refs/heads/main")
+		git(seed, "checkout", "--orphan", "ledger")
+		git(seed, "rm", "-rf", "--ignore-unmatch", ".")
 		update = func(status string) {
 			put(t, filepath.Join(seed, "state.json"), state(status))
 			git(seed, "add", "state.json")
 			git(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", status)
-			git(seed, "push", "-q", "origin", "HEAD:refs/heads/swarm-state/issue-1")
+			git(seed, "push", "-q", "origin", "HEAD:"+layout.StateRef(1))
 			pinned = git(seed, "rev-parse", "HEAD")
 		}
 	}
@@ -1196,6 +1209,7 @@ func TestReclamationInventoryRealLedgerScale(t *testing.T) {
 	if out, err := exec.Command("git", "-C", o.Scopes[0].Root, "remote", "add", "origin", o.Scopes[0].Root).CombinedOutput(); err != nil {
 		t.Fatal(string(out), err)
 	}
+	seedInventoryTrustedDefault(t, o.Scopes[0].Root)
 	apiTracker := scaleAPITracker(t, finalRefs, finalPRs)
 	o.Retention = BackendRetention{Apply: true, Tracker: func(RepositoryScope) (tracker.PullRequestVisitor, error) { return apiTracker, nil }}
 	pending := storageuse.ResourceFor(resource.Repository, "native-scratch", filepath.Join(o.ScratchRoot, "swarm-native-pending"))
@@ -1256,6 +1270,9 @@ func TestReclamationInventoryOverLimitRetains(t *testing.T) {
 					t.Fatal(string(out), err)
 				}
 			}
+			if backend == "github" {
+				seedInventoryTrustedDefault(t, o.Scopes[0].Root)
+			}
 			if backend == "local" {
 				data, err := exec.Command("git", "-C", o.Scopes[0].Root, "show", refs[1]+":state.json").Output()
 				if err != nil {
@@ -1307,6 +1324,9 @@ func TestReclamationInventoryIssueFailureIsolation(t *testing.T) {
 			o, _, _ := reclaimFixture(t, "agent-build")
 			o.Scopes[0].Backend = backend
 			refs, prs, _, _ := inventoryScaleObjects(t, o.Scopes[0].Root, 2, func(int) int64 { return 40000 })
+			if backend == "github" {
+				seedInventoryTrustedDefault(t, o.Scopes[0].Root)
+			}
 			if backend == "local" {
 				data, err := exec.Command("git", "-C", o.Scopes[0].Root, "show", refs[1]+":state.json").Output()
 				if err != nil {
@@ -1856,4 +1876,130 @@ func TestReclamationBusyCompactionDoesNotStallOthers(t *testing.T) {
 	if _, err = os.Stat(busy.Location); err != nil {
 		t.Fatal("busy resource removed", err)
 	}
+}
+
+func TestRetentionSnapshotSelectedLayout(t *testing.T) {
+	for _, layout := range []coordination.RefLayout{coordination.BranchLayout, coordination.HiddenLayout} {
+		for _, scenario := range []string{"selected", "counterpart", "missing-object", "fetch-failure", "invalid-trusted", "unreadable-trusted"} {
+			t.Run(layout.Name()+"/"+scenario, func(t *testing.T) {
+				o, _, r, _, remote := backendReclaimLayoutFixture(t, "github", "native-scratch", layout)
+				root := o.Scopes[0].Root
+				git := func(dir string, args ...string) string {
+					t.Helper()
+					cmd := exec.Command("git", args...)
+					cmd.Dir = dir
+					out, err := cmd.CombinedOutput()
+					if err != nil {
+						t.Fatalf("git %v: %s %v", args, out, err)
+					}
+					return strings.TrimSpace(string(out))
+				}
+				// Local candidate policy deliberately disagrees with upstream authority.
+				put(t, filepath.Join(root, ".swarm", "config.yaml"), retentionNamespaceConfig(layout.Counterpart().Name()))
+				switch scenario {
+				case "counterpart":
+					sha := git(remote, "rev-parse", layout.StateRef(1))
+					git(remote, "update-ref", layout.Counterpart().StateRef(1), sha)
+				case "fetch-failure":
+					realGit, err := exec.LookPath("git")
+					if err != nil {
+						t.Fatal(err)
+					}
+					bin := t.TempDir()
+					script := "#!/bin/sh\nif [ \"$1 $2\" = 'fetch --no-tags' ]; then echo 'inventory fetch refused' >&2; exit 42; fi\nexec '" + realGit + "' \"$@\"\n"
+					if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				case "missing-object":
+					// A valid commit without state.json is an incomplete state object.
+					sha := git(remote, "rev-parse", "refs/heads/main")
+					git(remote, "update-ref", layout.StateRef(1), sha)
+				case "invalid-trusted":
+					seed := t.TempDir()
+					git(seed, "clone", "-q", remote, ".")
+					put(t, filepath.Join(seed, ".swarm", "config.yaml"), retentionNamespaceConfig("invalid"))
+					git(seed, "add", ".swarm/config.yaml")
+					git(seed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "invalid config")
+					git(seed, "push", "-q", "origin", "HEAD:main")
+				case "unreadable-trusted":
+					git(remote, "symbolic-ref", "HEAD", "refs/heads/missing")
+				}
+				b := Budget{Limits: DefaultLimits()}
+				states, err := ReadRetentionSnapshot(context.Background(), o.Scopes[0], "", true, &b)
+				if scenario == "selected" {
+					if err != nil || len(states) != 1 || states[1] == nil {
+						t.Fatalf("states=%v err=%v", states, err)
+					}
+				} else {
+					if err == nil {
+						t.Fatal("accepted incomplete authority")
+					}
+					if scenario == "fetch-failure" && err.Error() != "git fetch: exit status 42" {
+						t.Fatal(err)
+					}
+					if scenario == "invalid-trusted" && (!strings.Contains(err.Error(), "resolve ledger namespace from upstream default branch") || !strings.Contains(err.Error(), "ledger_namespace")) {
+						t.Fatal(err)
+					}
+					if scenario == "unreadable-trusted" && !strings.Contains(err.Error(), "resolve ledger namespace from upstream default branch") {
+						t.Fatal(err)
+					}
+				}
+				out, err := ApplyReclamation(context.Background(), o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := ReclaimRetained
+				if scenario == "selected" {
+					want = ReclaimRemoved
+				}
+				if len(out.Resources) != 1 || out.Resources[0].Outcome != want {
+					t.Fatalf("%+v", out)
+				}
+				if want == ReclaimRetained {
+					if _, err := os.Stat(r.Location); err != nil {
+						t.Fatal("resource lost", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func retentionNamespaceConfig(namespace string) string {
+	return `version: 1
+default_agent: codex
+default_gate: agent
+execution:
+  mode: isolated
+  backend: native
+security:
+  require_ready_label: true
+  ready_label: swarm:ready
+lease:
+  duration: 4h
+agents:
+  codex:
+    binary: codex
+ledger_namespace: ` + namespace + "\n"
+}
+
+// Scale fixtures use their own checkout as a local upstream. Give that upstream
+// a code-only default commit separate from every state object's ancestry.
+func seedInventoryTrustedDefault(t *testing.T, root string) {
+	t.Helper()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %s %v", args, out, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	tree := git("mktree")
+	sha := git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", tree, "-m", "trusted code default")
+	git("update-ref", "refs/heads/fixture-default", sha)
+	git("symbolic-ref", "HEAD", "refs/heads/fixture-default")
 }

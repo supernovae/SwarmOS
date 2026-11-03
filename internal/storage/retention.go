@@ -993,6 +993,15 @@ func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote st
 	if scope.Backend == "github" {
 		store := coordination.NewGitStoreWithRemote(scope.Root, remote)
 		if apply {
+			namespace, err := workspace.TrustedLedgerNamespace(scope.Root, remote)
+			if err != nil {
+				return nil, err
+			}
+			layout, err := coordination.LayoutFor(namespace)
+			if err != nil {
+				return nil, err
+			}
+			store = coordination.NewGitStoreWithLayout(scope.Root, remote, layout)
 			return store.ReadInventorySnapshot(ctx, true, budget.Limits.Records, inventoryReservation(budget), inventoryProjection(budget))
 		}
 		if len(visitors) != 1 {

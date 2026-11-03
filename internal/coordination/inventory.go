@@ -284,13 +284,13 @@ func (s *GitStore) FetchInventoryObjects(ctx context.Context, ids []string) erro
 	return err
 }
 
-// ReadInventorySnapshot obtains the complete branch-ledger ref set in one Git
-// advertisement. Apply refreshes objects before pinning the final set. Hidden
-// ledger coverage is deliberately rejected until explicitly supported here.
+// ReadInventorySnapshot obtains the complete selected-layout state ref set in one
+// Git advertisement. Apply refreshes objects before pinning the final set.
 func (s *GitStore) ReadInventorySnapshot(ctx context.Context, apply bool, limit int, reserve func(int64) error, decoders ...InventoryDecoder) (map[int][]byte, error) {
 	if !apply {
 		return nil, fmt.Errorf("preview requires externally pinned bounded ref evidence")
 	}
+	prefix := s.layout.StatePrefix() + "issue-"
 	list := func() (map[int]string, error) {
 		if err := reserve(256 << 10); err != nil {
 			return nil, err
@@ -309,11 +309,11 @@ func (s *GitStore) ReadInventorySnapshot(ctx context.Context, apply bool, limit 
 				continue
 			}
 			fields := strings.Fields(line)
-			if len(fields) != 2 || !inventorySHA(fields[0]) || !strings.HasPrefix(fields[1], "refs/heads/swarm-state/issue-") {
+			if len(fields) != 2 || !inventorySHA(fields[0]) || !strings.HasPrefix(fields[1], prefix) {
 				return nil, fmt.Errorf("unsupported state snapshot")
 			}
-			n, e := strconv.Atoi(strings.TrimPrefix(fields[1], "refs/heads/swarm-state/issue-"))
-			if e != nil || n < 1 || fields[1] != fmt.Sprintf("refs/heads/swarm-state/issue-%d", n) || out[n] != "" {
+			n, e := strconv.Atoi(strings.TrimPrefix(fields[1], prefix))
+			if e != nil || n < 1 || fields[1] != s.layout.StateRef(n) || out[n] != "" {
 				return nil, fmt.Errorf("ambiguous state snapshot")
 			}
 			if len(out) >= limit {

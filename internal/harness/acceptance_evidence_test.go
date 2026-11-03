@@ -29,7 +29,7 @@ func TestAcceptanceEvidenceTesterPrompt(t *testing.T) {
 	if !bytes.Equal(normalize(repo), normalize(template)) || !bytes.Equal(normalize(scaffold), normalize(template)) {
 		t.Fatal("prompt drift")
 	}
-	for _, want := range []string{"IMPLEMENTATION.md", "VALIDATION.md", "unmet or unverified", "one-based indices", "without Markdown checkbox prefixes", "<!-- swarm:acceptance-evidence:start -->", "<!-- swarm:acceptance-evidence:end -->", `"version":1`, `"evidence":`, "64 KiB"} {
+	for _, want := range []string{"IMPLEMENTATION.md", "VALIDATION.md", "unmet or unverified", "one-based indices", "without Markdown checkbox prefixes", "<!-- swarm:acceptance-evidence:start -->", "<!-- swarm:acceptance-evidence:end -->", `"version":1`, `"evidence":`, "64 KiB", "`external`", "`reason`", "blocks issue submission", "cannot reach"} {
 		if !strings.Contains(string(template), want) {
 			t.Fatal(want)
 		}

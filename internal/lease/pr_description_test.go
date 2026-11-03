@@ -274,3 +274,25 @@ func TestDescriptionTrustedRemote(t *testing.T) {
 		t.Fatal("upstream remote was not shell-quoted", text)
 	}
 }
+
+func TestDescriptionAcceptanceExternal(t *testing.T) {
+	md := map[string]string{"head_sha": "head", "base_sha": "base", "validation_claim": "claim", "validation_base": "base", "validation_tree": "tree", "validation_policy": "policy", "validation_trusted_origin": "coordinator", "validation_trusted_owner": "owner", "validation_trusted_claim": "claim"}
+	reason := "Windows <host> <!-- swarm:issue-description:end -->"
+	raw, _ := json.Marshal(map[string]any{"version": 1, "criteria": []map[string]any{{"index": 1, "criterion": "works", "status": "external", "reason": reason}}})
+	validation.StoreAcceptanceSnapshot(md, validation.AcceptanceSnapshot{State: "valid", Block: string(raw)})
+	st := &IssueState{HeadSHA: "head", BaseSHA: "base", Lease: contract.Lease{Owner: "owner", ClaimID: "claim"}, Artifacts: []contract.Artifact{{Type: contract.ArtifactValidation, Verdict: "PASS", Metadata: md}}}
+	unit := &contract.WorkUnit{IssueNumber: 440, Acceptance: []string{"works"}}
+	section := DescriptionIssueSection(unit, st, "ref", ProjectionContext{})
+	body, err := ComposePRDescription("", "issue-description", section, "ref", 440)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Required checks: passed", "Acceptance evidence: complete", "External verification: pending", "## External verification", "works", "1. works", "&lt;!-- swarm:issue-description:end -->"} {
+		if !strings.Contains(body, want) {
+			t.Fatal(want, body)
+		}
+	}
+	if strings.Count(body, "<!-- swarm:issue-description:end -->") != 1 || strings.Count(body, "- [ ] ") != 2 {
+		t.Fatal("unescaped environment", body)
+	}
+}

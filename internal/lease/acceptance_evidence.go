@@ -58,3 +58,32 @@ func RecordedAcceptanceWarnings(st *IssueState, criteria []string) []validation.
 	}
 	return validation.AcceptanceEvidenceWarnings(criteria, validation.AcceptanceSnapshotFromMetadata(dst.Metadata))
 }
+
+// RecordedReadiness is a read-only projection, not fresh validation authority.
+func RecordedReadiness(st *IssueState, criteria []string) validation.Readiness {
+	dst := contract.Artifact{Metadata: map[string]string{}}
+	checks := "unavailable"
+	if st != nil {
+		for i := len(st.Artifacts) - 1; i >= 0; i-- {
+			src := st.Artifacts[i]
+			if src.Type != contract.ArtifactValidation {
+				continue
+			}
+			for _, k := range []string{"head_sha", "base_sha", "validation_claim", "validation_base", "validation_tree", "validation_policy"} {
+				dst.Metadata[k] = src.Metadata[k]
+			}
+			dst.Metadata["head_sha"] = st.HeadSHA
+			PreserveAcceptanceEvidence(st, &dst)
+			// Preservation eligibility also applies when a report contains no mapping.
+			if _, ok := dst.Metadata[validation.AcceptanceEvidenceKey]; ok {
+				if src.Verdict == "PASS" {
+					checks = "passed"
+				} else {
+					checks = "failed"
+				}
+			}
+			break
+		}
+	}
+	return validation.NewReadiness(checks, criteria, validation.AcceptanceSnapshotFromMetadata(dst.Metadata))
+}

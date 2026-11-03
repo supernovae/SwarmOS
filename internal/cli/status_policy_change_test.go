@@ -17,6 +17,7 @@ func TestStatusPolicyChangeKeepsHumanPlan(t *testing.T) {
 		n := strconv.Itoa(f.create(t, "human"))
 		f.must(t, "issue", "approve", n)
 		f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+		seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 		f.setenv("SWARM_USER", "independent-maintainer")
 		f.must(t, "issue", "review-plan", n, "--approve", "--notes", "Checked exact plan and test plan")
 		f.setenv("SWARM_USER", "alice")
@@ -58,6 +59,7 @@ func TestStatusPolicyChangeKeepsHumanPlan(t *testing.T) {
 			t.Fatalf("hint survived a fresh review:\n%s", text)
 		}
 		f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+		seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 		f.must(t, "issue", "submit", n)
 	})
 }

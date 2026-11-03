@@ -140,6 +140,7 @@ func TestSubmitFreshnessJSON(t *testing.T) {
 				n := strconv.Itoa(number)
 				f.must(t, "issue", "approve", n)
 				f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+				seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 				old := f.state(t, number)
 				if drift {
 					freshnessWrite(t, f.root, "target-only", "advance")
@@ -173,7 +174,7 @@ func TestSubmitFreshnessJSON(t *testing.T) {
 					}
 				} else if !drift {
 					want := fmt.Sprintf("Submitted draft PR #%d for issue #%d on %s (%s)\n", state.PRNumber, number, state.Branch, state.PRURL)
-					want = "Warning: acceptance evidence gaps (advisory; submission proceeds):\n  1. Produce a checked checkpoint (unmentioned)\n" + want
+					want = "Required checks: passed\nAcceptance evidence: complete\nExternal verification: none\n" + want
 					if !strings.HasSuffix(out, want) {
 						t.Fatalf("%q != %q", out, want)
 					}
@@ -221,6 +222,7 @@ func TestSubmitFreshnessFetchFailure(t *testing.T) {
 			f.must(t, "issue", "edit", number, "--allow-harness-changes")
 			f.must(t, "issue", "approve", number)
 			f.must(t, "issue", "work", number, "--agent", "mock", "--headless")
+			seedCompleteIssueAcceptance(t, f, mustIssueNumber(number))
 			base := f.state(t, n).BaseSHA
 			freshnessGit(t, f.root, "remote", "add", "origin", filepath.Join(f.root, "missing-secret-remote"))
 			freshnessGit(t, f.root, "update-ref", "refs/remotes/origin/main", base)
@@ -260,6 +262,7 @@ func TestSubmitFreshnessConflicts(t *testing.T) {
 			n := strconv.Itoa(number)
 			f.must(t, "issue", "approve", n)
 			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 			state := f.state(t, number)
 			if existing {
 				if _, err := f.tracker.CreateDraftPR(t.Context(), tracker.DraftPRRequest{IssueNumber: number, Title: "Existing", Body: "Existing", Head: state.Branch, Base: "main"}); err != nil {
@@ -361,6 +364,7 @@ func TestSubmitFreshnessFailedDescriptionUpdate(t *testing.T) {
 			n := strconv.Itoa(issue)
 			f.must(t, "issue", "approve", n)
 			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 			state := f.state(t, issue)
 			if existing {
 				if _, err := f.tracker.CreateDraftPR(t.Context(), tracker.DraftPRRequest{IssueNumber: issue, Title: "Existing", Head: state.Branch, Base: "main"}); err != nil {
@@ -488,6 +492,7 @@ func TestSubmitHarnessPolicyWarning(t *testing.T) {
 					}
 					f.must(t, "issue", "approve", n)
 					f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+					seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 					old := f.state(t, number)
 					path := map[string]string{"source": "ordinary.txt", "config": ".swarm/config.yaml", "prompt": ".swarm/prompts/developer.md"}[change]
 					if path != "" {

@@ -59,10 +59,12 @@ func TestIssue324NoopRetry(t *testing.T) {
 	before := snapshot()
 	f.must(t, "issue", "status", n, "--json")
 	f.must(t, "issue", "work", n, "--phase", "plan", "--agent", "mock", "--dry-run")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	if after := snapshot(); after != before {
 		t.Fatal("read-only commands changed state or source")
 	}
 	f.must(t, "issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	// Reacquire through the normal CLI as well as preserving the existing-claim inspection.
 	f.must(t, "issue", "release", n)
 	f.must(t, "issue", "claim", n, "--agent", "mock")
@@ -187,6 +189,7 @@ func TestIssue324SubmitFailureDeniesResume(t *testing.T) {
 			f.must(t, "issue", "approve", n)
 			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo implemented > feature.txt")
 			f.must(t, "issue", "work", n, "--agent", "mock", "--headless", "--progress=false")
+			seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 			st := f.state(t, number)
 			tr := &issue324PublicationTracker{LocalTracker: f.tracker, fail: failure}
 			if failure == "update error" {
@@ -270,4 +273,5 @@ func TestIssue324ForkReadOnlyConfiguration(t *testing.T) {
 	}
 	prGit(t, f.root, "remote", "set-url", "origin", remote)
 	f.must(t, "issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 }

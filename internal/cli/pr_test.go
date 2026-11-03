@@ -42,11 +42,13 @@ func submittedPRFixture(t *testing.T, gate string, setup ...func(*cliFixture)) (
 	issue := strconv.Itoa(n)
 	f.must(t, "issue", "approve", issue)
 	f.must(t, "issue", "work", issue, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(issue))
 	if gate == "human" {
 		f.setenv("SWARM_USER", "independent-maintainer")
 		f.must(t, "issue", "review-plan", issue, "--approve", "--notes", "Checked initial plan")
 		f.setenv("SWARM_USER", "alice")
 		f.must(t, "issue", "work", issue, "--agent", "mock", "--progress=false")
+		seedCompleteIssueAcceptance(t, f, mustIssueNumber(issue))
 	}
 	f.must(t, "issue", "submit", issue)
 	number := f.state(t, n).PRNumber
@@ -462,6 +464,7 @@ func TestCLIIssueInteractivePlanPauseKeepsClaimActive(t *testing.T) {
 	n := strconv.Itoa(issue)
 	f.must(t, "issue", "approve", n)
 	out := f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	if !strings.Contains(out, "Interactive plan required") {
 		t.Fatalf("issue work did not pause for an interactive plan:\n%s", out)
 	}
@@ -827,6 +830,7 @@ func TestCLIPRSubmitHarnessPolicyWarning(t *testing.T) {
 			f.must(t, "issue", "edit", n, "--allow-harness-changes")
 			f.must(t, "issue", "approve", n)
 			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 			f.must(t, "issue", "submit", n)
 			number := f.state(t, issue).PRNumber
 			p := strconv.Itoa(number)

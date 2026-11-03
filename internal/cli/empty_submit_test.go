@@ -135,6 +135,10 @@ func TestSubmitCheckpointsRealUncommittedWork(t *testing.T) {
 			if err := refuseEmptySubmitEarly(t.Context(), f.root, wt, n); err != nil {
 				t.Fatalf("real work refused: %v", err)
 			}
+			if _, err := f.run("issue", "submit", number); err == nil || !strings.Contains(err.Error(), "acceptance evidence blocks") {
+				t.Fatalf("unchecked real work: %v", err)
+			}
+			seedCompleteIssueAcceptance(t, f, n)
 			f.must(t, "issue", "submit", number)
 			if state := f.state(t, n); state.PRNumber == 0 || state.HeadSHA == state.BaseSHA {
 				t.Fatal("real work not submitted")
@@ -174,6 +178,7 @@ func TestIssueInstructionsAndStatusEvidence(t *testing.T) {
 	if !strings.Contains(status, "Operator-steered") || !strings.Contains(status, "SHA-256") {
 		t.Fatal(status)
 	}
+	seedCompleteIssueAcceptance(t, f, n)
 	f.must(t, "issue", "submit", number)
 	state = f.state(t, n)
 	pr, err := f.tracker.GetPullRequest(t.Context(), state.PRNumber)

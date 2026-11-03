@@ -18,6 +18,7 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -129,6 +130,7 @@ func TestIssue83CLIStagingStatusAndLocalPublication(t *testing.T) {
 	before, _ := json.Marshal(st)
 	f.must(t, "issue", "validate", n)
 	issue83AssertStandaloneTester(t, f.state(t, number))
+	seedCompleteIssueAcceptance(t, f, number)
 	f.must(t, "issue", "submit", n)
 	issue83AssertStandaloneTester(t, f.state(t, number))
 	after := f.state(t, number)
@@ -246,6 +248,25 @@ func TestIssue83AuthenticatedIssueSubmitPublishesStager(t *testing.T) {
 		t.Fatal(err)
 	}
 	run("issue", "stage", n, "--phase", "implement", "--harness", "codex", "--model", "default")
+	seedManager := lease.NewManager(tr, contract.SecurityConfig{})
+	if err := seedManager.ConfigureStore(f.root); err != nil {
+		t.Fatal(err)
+	}
+	seedState, seedErr := seedManager.GetCurrentState(t.Context(), number)
+	if seedErr != nil {
+		t.Fatal(seedErr)
+	}
+	seedManager.BindClaim(number, seedState.Lease.ClaimID)
+	var art contract.Artifact
+	for _, a := range seedState.Artifacts {
+		if a.Type == contract.ArtifactValidation {
+			art = a
+		}
+	}
+	validation.StoreAcceptanceSnapshot(art.Metadata, validation.CaptureAcceptanceEvidence(validation.AcceptanceEvidenceStart+"\n"+`{"version":1,"criteria":[{"index":1,"criterion":"Produce a checked checkpoint","status":"met","evidence":"staging fixture"}]}`+"\n"+validation.AcceptanceEvidenceEnd))
+	if _, err := seedManager.RecordTrustedValidation(t.Context(), number, seedState.Lease.Owner, art); err != nil {
+		t.Fatal(err)
+	}
 	run("issue", "submit", n)
 	manager := lease.NewManager(tr, contract.SecurityConfig{})
 	if err := manager.ConfigureStore(f.root); err != nil {

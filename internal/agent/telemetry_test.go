@@ -293,3 +293,39 @@ func TestMockPlanReviewFindingsAccepted(t *testing.T) {
 		})
 	}
 }
+
+func TestMockPlanReviewFindingsAcrossRounds(t *testing.T) {
+	root := t.TempDir()
+	var previous []contract.PlanFindings
+	var evidence strings.Builder
+	for round, verdict := range []string{"CHANGES_REQUESTED", "CHANGES_REQUESTED", "APPROVED", "CHANGES_REQUESTED", "APPROVED"} {
+		mock := &MockRunner{ReviewVerdict: verdict, lookupEnv: func(string) (string, bool) { return "", false }}
+		if _, err := RunReview(context.Background(), mock, RunRequest{Role: "reviewer", WorktreePath: root, Mode: "headless"}); err != nil {
+			t.Fatalf("round %d: %v", round+1, err)
+		}
+		body, err := os.ReadFile(filepath.Join(root, ".swarm/active/REVIEW.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, err := contract.ParsePlanFindings(string(body))
+		if err != nil {
+			t.Fatalf("round %d: %v", round+1, err)
+		}
+		if err := contract.ValidatePlanContinuity(report, previous); err != nil {
+			t.Fatalf("round %d: %v", round+1, err)
+		}
+		if !strings.HasPrefix(string(body), "VERDICT: "+verdict+"\n") || (report.OpenBlockers() != "") != (verdict == "CHANGES_REQUESTED") {
+			t.Fatalf("round %d: inconsistent mock report: %s", round+1, body)
+		}
+		wantCount := 1
+		if round >= 3 {
+			wantCount = 2
+		}
+		if len(report.Findings) != wantCount {
+			t.Fatalf("round %d: got %d findings, want %d", round+1, len(report.Findings), wantCount)
+		}
+		previous = append(previous, report)
+		evidence.Write(body)
+		mustWriteReviewFixture(t, root, ".swarm/active/REVIEW_EVIDENCE.md", evidence.String())
+	}
+}

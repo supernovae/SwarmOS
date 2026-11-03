@@ -780,7 +780,7 @@ func (r upstreamWorkflowRunner) Run(ctx context.Context, req agent.RunRequest) (
 }
 func TestUpstreamPlanReviewInitialCompletion(t *testing.T) {
 	for _, boundary := range []string{"codex-native", "harness-tools-bwrap"} {
-		for _, outcome := range []string{"approved", "rejected", "runner failure", "canceled", "invalid report", "invalid provenance"} {
+		for _, outcome := range []string{"approved", "rejected", "runner failure", "canceled", "invalid report", "bare report", "approved blocker", "empty rejection", "invalid provenance"} {
 			t.Run(boundary+"/"+outcome, func(t *testing.T) {
 				ctx := context.Background()
 				root := t.TempDir()
@@ -879,12 +879,21 @@ func TestUpstreamPlanReviewInitialCompletion(t *testing.T) {
 					if outcome == "canceled" {
 						return nil, context.Canceled
 					}
-					body := "VERDICT: APPROVED\n"
+					body := structuredReviewFixture("APPROVED")
 					if outcome == "rejected" {
-						body = "VERDICT: CHANGES_REQUESTED\n"
+						body = structuredReviewFixture("CHANGES_REQUESTED")
 					}
 					if outcome == "invalid report" {
 						body = "APPROVED"
+					}
+					if outcome == "bare report" {
+						body = "VERDICT: APPROVED\n"
+					}
+					if outcome == "approved blocker" {
+						body = strings.Replace(structuredReviewFixture("CHANGES_REQUESTED"), "VERDICT: CHANGES_REQUESTED", "VERDICT: APPROVED", 1)
+					}
+					if outcome == "empty rejection" {
+						body = strings.Replace(structuredReviewFixture("APPROVED"), "VERDICT: APPROVED", "VERDICT: CHANGES_REQUESTED", 1)
 					}
 					if err := os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(body), 0644); err != nil {
 						return nil, err
@@ -1063,7 +1072,7 @@ func TestPlanReviewHistoryAndPlannerReplanTelemetry(t *testing.T) {
 				}
 			}
 			if req.Role == "reviewer" && reviews == 1 {
-				text := "VERDICT: CHANGES_REQUESTED\n\ncontinuity-finding: add missing coverage"
+				text := structuredReviewFixture("CHANGES_REQUESTED")
 				if err := os.WriteFile(filepath.Join(active, "REVIEW.md"), []byte(text), 0644); err != nil {
 					t.Fatal(err)
 				}
@@ -1155,7 +1164,7 @@ func TestPlanReviewHistoryRoleAndRevisionScope(t *testing.T) {
 			if err := compileExecutionBundle(root, wu, nil, st, tc.role, tc.pr, tc.gateway); err != nil {
 				t.Fatal(err)
 			}
-			included := tc.role == "reviewer" && !tc.fork && tc.pr == 0 && !tc.gateway
+			included := tc.role == "reviewer" && tc.pr == 0
 			if included {
 				if !strings.Contains(read("REVIEW_EVIDENCE.md"), "history-secret-marker") {
 					t.Fatal("missing history")
@@ -1172,5 +1181,120 @@ func TestPlanReviewHistoryRoleAndRevisionScope(t *testing.T) {
 				t.Fatal("history leaked into excluded bundle")
 			}
 		})
+	}
+}
+
+func structuredReviewFixture(verdict string) string {
+	findings := `{"version":1,"findings":[]}`
+	if verdict == "CHANGES_REQUESTED" {
+		findings = `{"version":1,"findings":[{"id":"F1","blocking":true,"disposition":"open","criterion":"Test coverage","trigger":"continuity-finding: add missing coverage","expected":"Coverage","actual":"Missing coverage","check":"Add test"}]}`
+	}
+	return "VERDICT: " + verdict + "\n" + contract.PlanFindingsStart + "\n" + findings + "\n" + contract.PlanFindingsEnd + "\n"
+}
+
+func TestStructuredReviewVerdictConsistency(t *testing.T) {
+	empty := structuredReviewFixture("APPROVED")
+	populated := structuredReviewFixture("CHANGES_REQUESTED")
+	for _, tt := range []struct {
+		name, body, verdict string
+		ok                  bool
+	}{
+		{"approved", empty, "APPROVED", true},
+		{"notes", empty + "\nOptional note", "APPROVED", true},
+		{"rejected", populated, "CHANGES_REQUESTED", true},
+		{"bare", "VERDICT: APPROVED", "APPROVED", false},
+		{"approved blocker", populated, "APPROVED", false},
+		{"empty rejection", empty, "CHANGES_REQUESTED", false},
+		{"closed rejection", strings.ReplaceAll(populated, `"open"`, `"resolved"`), "CHANGES_REQUESTED", false},
+		{"nonblocking rejection", strings.ReplaceAll(populated, `"blocking":true`, `"blocking":false`), "CHANGES_REQUESTED", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateStructuredReview(tt.body, tt.verdict, &lease.IssueState{})
+			if (err == nil) != tt.ok {
+				t.Fatalf("err=%v", err)
+			}
+			if errors.Is(err, ErrPlanReviewRejected) {
+				t.Fatal("malformed is not a rejection")
+			}
+		})
+	}
+}
+
+func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
+	for _, body := range []string{"missing-output", "", "VERDICT: APPROVED\n", structuredReviewFixture("CHANGES_REQUESTED"), structuredReviewFixture("APPROVED")} {
+		t.Run(fmt.Sprint(len(body)), func(t *testing.T) {
+			root, e, tr := setupProjectPlanTestRepo(t)
+			ctx := context.Background()
+			wu := &contract.WorkUnit{Objective: "Review", Constraints: []string{"Preserve gates"}, Acceptance: []string{"Exact review"}, Workflow: "feature", Gate: contract.GateAgent}
+			issue, err := tr.CreateIssue(ctx, "Review", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = e.LeaseManager.ApproveTask(ctx, issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			// Deliberately contradict the structured ledger when one is present.
+			report := body
+			if strings.HasPrefix(report, "VERDICT: CHANGES_REQUESTED") {
+				report = strings.Replace(report, "VERDICT: CHANGES_REQUESTED", "VERDICT: APPROVED", 1)
+			} else if strings.Contains(report, contract.PlanFindingsStart) {
+				report = strings.Replace(report, "VERDICT: APPROVED", "VERDICT: CHANGES_REQUESTED", 1)
+			}
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "reviewer" {
+						if report == "missing-output" {
+							err = os.Remove(filepath.Join(req.WorktreePath, ".swarm/active-output/REVIEW.md"))
+						} else {
+							err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(report), 0644)
+						}
+					}
+					return result, err
+				}}, nil
+			}
+			result, err := e.ExecuteWork(ctx, WorkOptions{RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Phase: "all", Headless: true})
+			if err == nil || errors.Is(err, ErrPlanReviewRejected) {
+				t.Fatalf("malformed review classified as rejection: %v", err)
+			}
+			if result == nil || result.State == nil {
+				t.Fatal("missing state")
+			}
+			st, err := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactReview {
+					t.Fatal("malformed review recorded")
+				}
+			}
+			if st.PendingPlanReview != nil || len(st.PlanReviewHistory) != 0 {
+				t.Fatal("malformed review became rejection")
+			}
+			found := false
+			for _, run := range st.RoleRuns {
+				if run.Role == "reviewer" && run.FailureClass == "unknown" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("failed reviewer run missing")
+			}
+		})
+	}
+}
+
+func TestRejectedPlanContextFiltersStructuredFeedback(t *testing.T) {
+	body := structuredReviewFixture("CHANGES_REQUESTED") + "\nNARRATIVE_SENTINEL"
+	st := &lease.IssueState{PendingPlanReview: &lease.PlanRejection{Findings: body}}
+	_, _, feedback := rejectedPlanContext(st)
+	if strings.Contains(feedback, "NARRATIVE_SENTINEL") || !strings.Contains(feedback, "F1") || !strings.Contains(feedback, "Respond per ID") {
+		t.Fatal(feedback)
+	}
+	st.HumanPlanReview = &lease.PlanRejection{Findings: body}
+	_, _, feedback = rejectedPlanContext(st)
+	if feedback != body {
+		t.Fatal("human feedback changed")
 	}
 }

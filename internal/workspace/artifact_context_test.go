@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"os"
@@ -136,5 +137,41 @@ func TestPlanReviewHistoryEvidence(t *testing.T) {
 	compile()
 	if strings.Contains(read("REVIEW_EVIDENCE.md"), "Earlier-round") || strings.Contains(read("SYSTEM_PROMPT.md"), PlanReviewContinuity) {
 		t.Fatal("stale evidence survived recompilation")
+	}
+}
+
+func TestPlannerOnlyReceivesOpenBlockers(t *testing.T) {
+	root := t.TempDir()
+	r := contract.PlanFindings{Version: 1, Findings: []contract.PlanFinding{
+		{ID: "F1", Blocking: true, Disposition: "open", Criterion: "Open criterion", Trigger: "Reachable", Expected: "Reject", Actual: "Accept", Check: "Small test"},
+		{ID: "F2", Blocking: true, Disposition: "resolved", Criterion: "CLOSED_SENTINEL", Trigger: "closed", Expected: "closed", Actual: "closed", Check: "closed"},
+		{ID: "F3", Blocking: false, Disposition: "open", Criterion: "NOTE_SENTINEL"},
+	}}
+	raw, _ := json.Marshal(r)
+	body := "VERDICT: CHANGES_REQUESTED\nNARRATIVE_SENTINEL\n" + contract.PlanFindingsStart + string(raw) + contract.PlanFindingsEnd
+	active := filepath.Join(root, ".swarm/active")
+	if err := os.MkdirAll(active, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(active, "REVIEW.md"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	arts := []contract.Artifact{{Type: contract.ArtifactReview, Body: body, Verdict: "CHANGES_REQUESTED"}}
+	if err := compileHarnessBundle(root, &contract.WorkUnit{ID: "ISSUE-1"}, nil, arts, "planner", "prompt", "", "", "", "policy", "", bundleGuidance{effectiveGate: contract.GateNone}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"REVIEW.md", "REVIEW_EVIDENCE.md", "WORKUNIT.md"} {
+		data, err := os.ReadFile(filepath.Join(active, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, hidden := range []string{"CLOSED_SENTINEL", "NOTE_SENTINEL", "NARRATIVE_SENTINEL", "F2", "F3"} {
+			if strings.Contains(string(data), hidden) {
+				t.Fatalf("%s leaked %s", name, hidden)
+			}
+		}
+		if !strings.Contains(string(data), "F1") || !strings.Contains(string(data), "Respond per ID") {
+			t.Fatalf("%s missing feedback", name)
+		}
 	}
 }

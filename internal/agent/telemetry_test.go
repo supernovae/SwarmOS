@@ -270,3 +270,26 @@ func TestTelemetryRunReviewAddsOuterSnapshotOnce(t *testing.T) {
 		t.Fatalf("review import changed: %q %v", got, err)
 	}
 }
+
+func TestMockPlanReviewFindingsAccepted(t *testing.T) {
+	for _, verdict := range []string{"APPROVED", "CHANGES_REQUESTED"} {
+		t.Run(verdict, func(t *testing.T) {
+			root := t.TempDir()
+			_, err := RunReview(context.Background(), &MockRunner{ReviewVerdict: verdict, lookupEnv: func(string) (string, bool) { return "", false }}, RunRequest{Role: "reviewer", WorktreePath: root, Mode: "headless"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := os.ReadFile(filepath.Join(root, ".swarm/active/REVIEW.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := contract.ParsePlanFindings(string(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (r.OpenBlockers() != "") != (verdict == "CHANGES_REQUESTED") {
+				t.Fatal("inconsistent mock verdict")
+			}
+		})
+	}
+}

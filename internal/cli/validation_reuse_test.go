@@ -91,6 +91,7 @@ func TestIssueSubmitValidationReuse(t *testing.T) {
 			if checkCount(t, counter) != explicitBefore+1 {
 				t.Fatal("explicit issue validate reused checks")
 			}
+			seedCompleteIssueAcceptance(t, f, n)
 			before := checkCount(t, counter)
 			source := latestValidation(t, f, n)
 			switch kind {
@@ -126,7 +127,13 @@ func TestIssueSubmitValidationReuse(t *testing.T) {
 					t.Fatal(e)
 				}
 			}
-			out, diag := submitWithDiagnostics(t, f, "issue", "submit", number, "--json", "--progress=false")
+			out, diag, submitErr := runProgressCommand(t, f, "issue", "submit", number, "--json", "--progress=false")
+			// Submit checkpoints the dirty candidate to a new head. Check reuse
+			// remains valid by tree; acceptance stays bound to the old head.
+			if submitErr == nil || !strings.Contains(submitErr.Error(), "acceptance evidence blocks") || f.state(t, n).PRNumber != 0 {
+				t.Fatalf("stale evidence submitted: %v", submitErr)
+			}
+
 			if !json.Valid([]byte(out)) {
 				t.Fatalf("invalid JSON: %s", out)
 			}
@@ -145,13 +152,6 @@ func TestIssueSubmitValidationReuse(t *testing.T) {
 				if artifact.Metadata["validation_reused"] != "true" {
 					t.Fatal("missing reuse metadata")
 				}
-				pr, e := f.tracker.GetPullRequest(t.Context(), f.state(t, n).PRNumber)
-				if e != nil {
-					t.Fatal(e)
-				}
-				if !strings.Contains(pr.Body, "Reusing validation") || !strings.Contains(pr.Body, "Submitted head:") || !strings.Contains(pr.Body, "Source head:") || !strings.Contains(pr.Body, "Total wall time:") || !strings.Contains(pr.Body, "Current reuse wall time:") {
-					t.Fatal("PR lacks disclosure")
-				}
 			} else if artifact.Metadata["validation_reused"] == "true" {
 				t.Fatal("mismatch reused")
 			}
@@ -168,6 +168,7 @@ func TestPRSubmitValidationReuse(t *testing.T) {
 	number := strconv.Itoa(n)
 	f.must(t, "issue", "approve", number)
 	f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(number))
 	f.must(t, "issue", "submit", number)
 	prNumber := strconv.Itoa(f.state(t, n).PRNumber)
 	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf revision > revision.txt")
@@ -257,6 +258,7 @@ func TestSubmitValidationReuseFallbackFailureBlocksPublication(t *testing.T) {
 			f.must(t, "issue", "approve", number)
 			f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
 			if resource == "pr" {
+				seedCompleteIssueAcceptance(t, f, mustIssueNumber(number))
 				f.must(t, "issue", "submit", number)
 				number = strconv.Itoa(f.state(t, n).PRNumber)
 				f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf revision > revision.txt")
@@ -350,6 +352,7 @@ func TestCheckpointSubmitValidationReuse(t *testing.T) {
 			if source.Metadata["validation_trusted_claim"] != f.state(t, n).Lease.ClaimID {
 				t.Fatal("unbound reconciliation")
 			}
+			seedCompleteIssueAcceptance(t, f, n)
 			_, submitDiag := submitWithDiagnostics(t, f, "issue", "submit", number, "--json", "--progress=false")
 			want := before + 2
 			if version == "v1.2.3" {
@@ -417,6 +420,8 @@ func TestIssue396ValidationParity(t *testing.T) {
 		t.Fatalf("protected edit: %v", err)
 	}
 	inject()
+	f.must(t, "issue", "validate", number, "--progress=false")
+	seedCompleteIssueAcceptance(t, f, n)
 	submitWithDiagnostics(t, f, "issue", "submit", number, "--json", "--progress=false")
 	if latestValidation(t, f, n).Verdict != "PASS" {
 		t.Fatal("submit differs from work/validate")

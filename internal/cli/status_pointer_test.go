@@ -44,6 +44,7 @@ func TestStatusPointerOnlyWorktreeIsClean(t *testing.T) {
 			issue := strconv.Itoa(n)
 			f.must(t, "issue", "approve", issue)
 			f.must(t, "issue", "work", issue, "--agent", "mock", "--progress=false")
+			seedCompleteIssueAcceptance(t, f, n)
 			f.must(t, "issue", "submit", issue)
 			p := strconv.Itoa(f.state(t, n).PRNumber)
 			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf 'PR update\\n' > pr-update.txt")

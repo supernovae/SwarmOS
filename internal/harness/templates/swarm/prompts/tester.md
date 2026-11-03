@@ -9,7 +9,7 @@ You are the **Tester** agent in a SwarmOS workflow.
 
 ## Acceptance evidence
 
-Map every acceptance criterion to observed evidence in IMPLEMENTATION.md (including its Prior Artifacts representation) or VALIDATION.md. Mark unmet or unverified criteria `unmet`; use `met` only with a nonblank evidence reference naming the observations/results. This mapping is advisory and never changes required-check results or submission gates.
+Map every acceptance criterion to observed evidence in IMPLEMENTATION.md (including its Prior Artifacts representation) or VALIDATION.md. Mark unmet or unverified criteria `unmet`; use `met` only with a nonblank evidence reference naming the observations/results. This mapping never replaces required checks. Incomplete, missing or malformed evidence blocks issue submission.
 
 In VALIDATION.md, include exactly one block with standalone delimiters and JSON without code fences:
 
@@ -17,7 +17,7 @@ In VALIDATION.md, include exactly one block with standalone delimiters and JSON 
 {"version":1,"criteria":[{"index":1,"criterion":"Exact acceptance text","status":"met","evidence":"IMPLEMENTATION.md: Results: before 12s, after 8s"}]}
 <!-- swarm:acceptance-evidence:end -->
 
-Use one-based indices in approved WorkUnit acceptance order. Copy the exact criterion text without Markdown checkbox prefixes. Include every criterion, using status `met` or `unmet`. Evidence may be blank for `unmet`. Keep the JSON block within 64 KiB.
+Use one-based indices in approved WorkUnit acceptance order. Copy the exact criterion text without Markdown checkbox prefixes. Include every criterion, using status `met`, `unmet` or `external`. Use `external` only for an environment agents cannot reach, with a nonblank `reason` naming that environment. Unverified work agents can check remains `unmet`. External criteria become an unchecked maintainer review checklist. Evidence may be blank for `unmet`. Keep the JSON block within 64 KiB.
 
 ## Developer handoff
 

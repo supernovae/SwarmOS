@@ -51,6 +51,7 @@ func TestCLIApprovalWorkAndIdempotentSubmission(t *testing.T) {
 	}
 	f.must(t, "issue", "approve", n)
 	result := f.must(t, "issue", "work", n, "--agent", "mock", "--headless", "--json")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	var outcome struct {
 		Status string              `json:"status"`
 		Result workflow.WorkResult `json:"result"`
@@ -84,6 +85,7 @@ func TestCLIHumanGateCannotBeBypassedByReviewOrSubmit(t *testing.T) {
 	n := strconv.Itoa(number)
 	f.must(t, "issue", "approve", n)
 	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	var paused struct {
 		Status string `json:"status"`
 	}
@@ -104,6 +106,7 @@ func TestCLIHumanGateCannotBeBypassedByReviewOrSubmit(t *testing.T) {
 	f.must(t, "issue", "review-plan", n, "--approve", "--notes", "Checked exact plan and test plan")
 	f.setenv("SWARM_USER", "alice")
 	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	f.must(t, "issue", "submit", n)
 }
 
@@ -178,6 +181,7 @@ func TestCLIClaimNextSelectorsAndPreparedWork(t *testing.T) {
 		t.Fatalf("selection ran work: %+v", before)
 	}
 	f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	if after := f.state(t, number); after.Lease.ClaimID != before.Lease.ClaimID {
 		t.Fatal("explicit work did not resume the prepared claim")
 	}
@@ -189,6 +193,7 @@ func TestCLIClaimNextResumesHandoffPhase(t *testing.T) {
 	n := strconv.Itoa(f.create(t, "agent"))
 	f.must(t, "issue", "approve", n)
 	f.must(t, "issue", "work", n, "--agent", "mock", "--phase", "plan", "--handoff", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	before := f.state(t, 1)
 	worktree := workspace.WorktreePath(f.root, 1)
 	checkpoint, err := gitfixture.Command(t, "", "-C", worktree, "rev-parse", "HEAD").Output()
@@ -369,6 +374,7 @@ func TestCLIIssueLeafJSONAndReviewDelegation(t *testing.T) {
 		t.Fatalf("lint text should keep its verdict and add a shape and hints:\n%s", out)
 	}
 	f.must(t, "issue", "work", n, "--agent", "mock", "--phase", "plan", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	raw = f.must(t, "issue", "review-plan", n, "--agent", "mock", "--json")
 	var review struct {
 		Kind string `json:"kind"`
@@ -1509,6 +1515,7 @@ func TestCLIStatusProvenance(t *testing.T) {
 	n := strconv.Itoa(number)
 	f.must(t, "issue", "approve", n)
 	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	before := f.state(t, number)
 	roles := []string{"planner", "reviewer", "developer", "tester"}
 	if len(before.Attestations) != len(roles) {
@@ -1922,6 +1929,7 @@ func TestCLIQueueSkipsResumedStaleApproval(t *testing.T) {
 			n := strconv.Itoa(stale)
 			f.must(t, "issue", "approve", n)
 			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 			f.must(t, "issue", "release", n)
 			before := f.state(t, stale)
 			if before.Branch == "" || before.HeadSHA == "" || before.PRNumber != 0 || before.Lease.Status == "active" {
@@ -2055,6 +2063,7 @@ func TestCLIEmptyConstraintsWork(t *testing.T) {
 	}
 	f.must(t, "issue", "approve", n)
 	result := f.must(t, "issue", "work", n, "--agent", "mock", "--headless", "--json")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 	var outcome struct {
 		Status string              `json:"status"`
 		Result workflow.WorkResult `json:"result"`

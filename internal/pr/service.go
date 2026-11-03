@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -379,6 +380,14 @@ func (s *Service) Status(ctx context.Context, number int) (*Result, error) {
 			}
 		}
 	}
+	if !s.Fork && !s.Manager.HasWorkerGateway() && r.State.PRRevision != nil {
+		if err := s.checkWork(ctx, r); err != nil {
+			return r, err
+		}
+		if len(r.WorkPreflight.Blockers) > 0 {
+			r.Status = "blocked"
+		}
+	}
 	s.diagnoseLocalDroppedPaths(ctx, r)
 	r.Checks, err = s.Tracker.GetCheckStatus(ctx, r.PR.HeadSHA)
 	if err != nil {
@@ -698,7 +707,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Work.Phase == "test" && (r.State.PRRevision == nil || r.State.PRRevision.Intent == "rebase" || r.State.PRRevision.LocalHeadSHA == "") {
 		return r, fmt.Errorf("test retry requires an implemented pending PR revision")
 	}
-	if err = s.checkWork(ctx, r); err != nil {
+	if err = s.checkWork(ctx, r, opts.Work.Phase); err != nil {
 		return r, err
 	}
 	if len(r.WorkPreflight.Blockers) > 0 {
@@ -734,6 +743,9 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 	}
 	engine := s.newEngine(cfg)
 	engine.NewRunner = s.NewRunner
+	if !s.Fork && !s.Manager.HasWorkerGateway() && (opts.Work.Phase == "plan" || opts.Work.Phase == "review") && r.State.PRRevision != nil {
+		engine.NewRunner = s.preservingRunnerFactory(ctx, r.Worktree)
+	}
 	pre, preflightErr := engine.Preflight(ctx, opts.Work)
 	if preflightErr != nil {
 		return nil, preflightErr
@@ -752,6 +764,14 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		claimPhase = "implement"
 	}
 	return s.withClaimForPhase(ctx, r, false, opts.Work.SetupProgress, claimPhase, func(ctx context.Context, owner string, st *lease.IssueState) (*Result, error) {
+		fresh := *r
+		fresh.State, fresh.BaseSHA = st, st.BaseSHA
+		if e := s.checkWork(ctx, &fresh, opts.Work.Phase); e != nil {
+			return nil, e
+		}
+		if len(fresh.WorkPreflight.Blockers) > 0 {
+			return nil, fresh.WorkPreflight.stopError(&fresh)
+		}
 		var path, branch string
 		e := opts.Work.SetupProgress.ReportSetupPhase(ctx, r.IssueNumber, "workspace", func() error {
 			var setupErr error
@@ -772,7 +792,12 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 			if dirty {
 				return nil, fmt.Errorf("PR worktree must be clean and not rebasing before work")
 			}
-			if opts.Work.Phase == "test" {
+			if !s.Fork && !s.Manager.HasWorkerGateway() && opts.Work.Phase == "review" && st.PRRevision != nil {
+				if e := restoreApprovedPlan(path, st); e != nil {
+					return nil, e
+				}
+			}
+			if opts.Work.Phase == "test" || s.recoveryPlanning(&fresh, opts.Work.Phase) {
 				if st.PRRevision == nil || st.PRRevision.Number != opts.Number || st.PRRevision.LocalHeadSHA != head || st.PRRevision.Branch != branch || st.PRRevision.RemoteHeadSHA != r.PR.HeadSHA {
 					return nil, fmt.Errorf("test retry PR checkpoint changed")
 				}
@@ -1441,4 +1466,106 @@ func (s *Service) dependencyPolicy(worktree string) sandbox.DependencyPolicy {
 
 func (s *Service) newEngine(cfg *contract.SwarmConfig) *workflow.Engine {
 	return workflow.NewEngineWithManagerOptions(s.Root, s.Tracker, s.Manager, cfg, false, "", workflow.EngineOptions{LookupEnv: s.LookupEnv, NodeProfilePath: s.NodeProfilePath, RegistryPath: s.RegistryPath})
+}
+
+// preservedPRRunner checks coordinator-observed source before workflow imports
+// any agent output. Embedding preserves runner capabilities and provenance.
+type preservedPRRunner struct {
+	agent.Runner
+	root string
+}
+
+func prSourceSnapshot(ctx context.Context, root string) ([32]byte, error) {
+	h := sha256.New()
+	git := func(args ...string) ([]byte, error) {
+		cmd, redact, err := gitcredential.Command(ctx, root, args...)
+		if err != nil {
+			return nil, err
+		}
+		out, err := cmd.Output()
+		if err != nil {
+			return nil, fmt.Errorf("source snapshot: %s: %w", redact(strings.Join(args, " ")), err)
+		}
+		fmt.Fprintf(h, "%d:", len(out))
+		h.Write(out)
+		return out, nil
+	}
+	if _, err := git("rev-parse", "HEAD"); err != nil {
+		return [32]byte{}, err
+	}
+	if _, err := git("write-tree"); err != nil {
+		return [32]byte{}, err
+	}
+	paths, err := git("ls-files", "-z", "--cached")
+	if err != nil {
+		return [32]byte{}, err
+	}
+	for _, name := range strings.Split(string(paths), "\x00") {
+		if name == "" {
+			continue
+		}
+		path := filepath.Join(root, name)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			fmt.Fprint(h, "deleted;")
+			continue
+		}
+		if err != nil {
+			return [32]byte{}, err
+		}
+		fmt.Fprintf(h, "%d:", info.Mode())
+		var data []byte
+		switch {
+		case info.Mode().IsRegular():
+			data, err = os.ReadFile(path)
+		case info.Mode()&os.ModeSymlink != 0:
+			var target string
+			target, err = os.Readlink(path)
+			data = []byte(target)
+		default:
+			return [32]byte{}, fmt.Errorf("unsupported tracked source type: %q", name)
+		}
+		if err != nil {
+			return [32]byte{}, err
+		}
+		fmt.Fprintf(h, "%d:", len(data))
+		h.Write(data)
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum, nil
+}
+
+func (r *preservedPRRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	if req.Role != "planner" && req.Role != "reviewer" {
+		return r.Runner.Run(ctx, req)
+	}
+	before, err := prSourceSnapshot(ctx, r.root)
+	if err != nil {
+		return nil, fmt.Errorf("PR source preservation: %w", err)
+	}
+	result, runErr := r.Runner.Run(ctx, req)
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	after, readErr := prSourceSnapshot(cleanup, r.root)
+	if readErr != nil || before != after {
+		return nil, errors.Join(fmt.Errorf("PR source preservation failed; inspect the worktree and restore from the recorded pending revision"), readErr, runErr)
+	}
+	return result, runErr
+}
+
+func (s *Service) preservingRunnerFactory(ctx context.Context, root string) func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+	return func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+		factory := s.NewRunner
+		if factory == nil {
+			factory = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+				return agent.NewConfiguredRunnerWithOptions(name, cfg, local, s.runnerOptions(ctx))
+			}
+		}
+		runner, err := factory(name, cfg, local)
+		if err != nil {
+			return nil, err
+		}
+		return &preservedPRRunner{Runner: runner, root: root}, nil
+	}
 }

@@ -2,11 +2,13 @@ package pr
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -39,10 +41,11 @@ func mergeability(p *tracker.PullRequest) string {
 }
 
 func (s *Service) workCommand(r *Result, operation, flags string) string {
-	cmd := fmt.Sprintf("swarm pr %s %d --backend github", operation, r.PR.Number)
+	cmd := fmt.Sprintf("swarm pr %s %d", operation, r.PR.Number)
 	if flags != "" {
 		cmd += " " + flags
 	}
+	cmd += " --backend " + s.Tracker.BackendName()
 	if s.Fork {
 		cmd += fmt.Sprintf(" --fork --fork-remote %q", s.ForkRemote)
 	}
@@ -66,7 +69,12 @@ func (s *Service) localRebaseSupersedes(ctx context.Context, r *Result) bool {
 	return err == nil
 }
 
-func (s *Service) checkWork(ctx context.Context, r *Result) error {
+func (s *Service) checkWork(ctx context.Context, r *Result, phases ...string) error {
+	phase := ""
+	if len(phases) > 0 {
+		phase = phases[0]
+	}
+	planning := s.recoveryPlanning(r, phase)
 	w := &WorkPreflightResult{Status: "ready", Mergeable: r.PR.Mergeable, MergeableState: r.PR.MergeableState, Mergeability: mergeability(r.PR), ApprovedBase: r.BaseSHA, TargetBase: r.PR.BaseSHA, BaseResult: "matching"}
 	r.WorkPreflight = w
 	// Inspect only an existing worktree; never prepare one during the advisory check.
@@ -77,15 +85,35 @@ func (s *Service) checkWork(ctx context.Context, r *Result) error {
 		return nil
 	}
 
+	if !s.Fork && r.State.PRRevision != nil && r.PR.BaseSHA != r.BaseSHA {
+		w.Status, w.BaseResult = "blocked", "moved"
+		w.Blockers = append(w.Blockers, "PR target differs from approved baseline")
+		w.Commands = s.recoveryCommands(ctx, r, true)
+		w.stopCommands = append([]string(nil), w.Commands...)
+		return nil
+	}
+	if !s.Fork && r.State.PRRevision != nil {
+		defer func() {
+			if len(w.Commands) == 0 && !w.pausedRebase {
+				w.Commands = s.recoveryCommands(ctx, r, false)
+				w.stopCommands = append([]string(nil), w.Commands...)
+			}
+		}()
+	}
 	if rev := r.State.PRRevision; rev != nil {
 		ancestor, err := workspace.BaseIsAncestor(ctx, s.Root, r.BaseSHA, rev.LocalHeadSHA)
 		if err != nil {
 			return fmt.Errorf("inspect pending PR revision: %w; run swarm pr rebase %d --resolve", err, r.PR.Number)
 		}
-		if !ancestor {
+		if !ancestor && !planning {
 			w.Status = "blocked"
 			w.Blockers = append(w.Blockers, "pending PR revision does not descend from the approved baseline")
-			w.Commands = []string{fmt.Sprintf("swarm pr rebase %d --resolve", r.PR.Number)}
+			if s.Fork || s.Manager.HasWorkerGateway() {
+				w.Commands = []string{fmt.Sprintf("swarm pr rebase %d --resolve", r.PR.Number)}
+			} else {
+				w.Commands = s.recoveryCommands(ctx, r, true)
+			}
+			w.stopCommands = append([]string(nil), w.Commands...)
 			return nil
 		}
 	}
@@ -108,7 +136,7 @@ func (s *Service) checkWork(ctx context.Context, r *Result) error {
 			w.Blockers = append(w.Blockers, fmt.Sprintf("PR #%d target base %s differs from issue #%d approved baseline %s", p.Number, p.BaseSHA, r.IssueNumber, r.BaseSHA))
 		}
 		if w.Mergeability == "conflicting" {
-			if s.localRebaseSupersedes(ctx, r) {
+			if planning || s.localRebaseSupersedes(ctx, r) {
 				w.Warnings = append(w.Warnings, "published head superseded by local rebase")
 			} else {
 				raw := "null"
@@ -194,4 +222,57 @@ func (w *WorkPreflightResult) stopError(r *Result) error {
 		return &lease.TaskApprovalError{IssueNumber: r.IssueNumber, Err: err}
 	}
 	return &ConflictError{PRNumber: r.PR.Number, Paused: w.pausedRebase, Err: err}
+}
+
+// recoveryPlanning is deliberately unavailable to status and code phases.
+// verifyLink and workflow preflight independently require current task approval.
+func (s *Service) recoveryPlanning(r *Result, phase string) bool {
+	rev := r.State.PRRevision
+	return (phase == "plan" || phase == "review") && !s.Fork && !s.Manager.HasWorkerGateway() &&
+		strings.EqualFold(r.PR.HeadRepo, r.PR.BaseRepo) && rev != nil && rev.Number == r.PR.Number && rev.Intent == "work" &&
+		rev.RemoteHeadSHA == r.PR.HeadSHA && rev.LocalHeadSHA != "" && r.BaseSHA == r.PR.BaseSHA
+}
+
+func (s *Service) recoveryCommands(ctx context.Context, r *Result, rebase bool) []string {
+	commands := []string{}
+	if r.PR.BaseSHA != r.BaseSHA {
+		backend := s.Tracker.BackendName()
+		commands = append(commands, fmt.Sprintf("If a claim is active: swarm issue release %d --reason %q --backend %s", r.IssueNumber, "approve current PR base", backend),
+			fmt.Sprintf("Maintainer (upstream): swarm issue approve %d --backend %s", r.IssueNumber, backend))
+	}
+	issue, err := s.Tracker.GetIssue(ctx, r.IssueNumber)
+	var unit *contract.WorkUnit
+	if err == nil {
+		unit, err = contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	}
+	if err != nil || lease.VerifyApproval(r.State, unit) != nil {
+		if r.PR.BaseSHA != r.BaseSHA || !currentPRPlanPair(r.State) {
+			commands = append(commands, s.workCommand(r, "work", "--phase plan"))
+		}
+		if r.State.EffectiveGate == contract.GateHuman {
+			commands = append(commands, fmt.Sprintf("Independent maintainer: swarm issue review-plan %d --approve --backend %s", r.IssueNumber, s.Tracker.BackendName()))
+		} else {
+			commands = append(commands, s.workCommand(r, "work", "--phase review"))
+		}
+	}
+	if rebase {
+		commands = append(commands, s.workCommand(r, "rebase", "--resolve"))
+	}
+	return commands
+}
+
+func currentPRPlanPair(st *lease.IssueState) bool {
+	var plan, test bool
+	for _, a := range st.Artifacts {
+		if a.Type != contract.ArtifactDesign && a.Type != contract.ArtifactTestPlan {
+			continue
+		}
+		current := a.Body != "" && a.Metadata["superseded_by"] == "" && a.Metadata["content_sha256"] == fmt.Sprintf("%x", sha256.Sum256([]byte(a.Body)))
+		if a.Type == contract.ArtifactDesign {
+			plan = current
+		} else {
+			test = current
+		}
+	}
+	return plan && test
 }

@@ -37,6 +37,7 @@ func harnessGrantFixture(t *testing.T, setup ...func(*cliFixture)) (f *cliFixtur
 	f.must(t, "issue", "approve", n)
 	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf '# approved harness edit\\n' >> .swarm/validation/required-checks.yaml")
 	f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, issue)
 	f.must(t, "issue", "submit", n)
 	st := f.state(t, issue)
 	if st.PRNumber == 0 || st.PRNumber == issue || st.SubmittedHeadSHA == "" {

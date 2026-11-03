@@ -7,3 +7,5 @@ Inspect the repository without modifying production source files.
 Produce:
 1. `.swarm/active/PLAN.md` with **What we know** (with evidence), **What we're assuming**, and **Open questions**, followed by exact files, symbols, and step-by-step implementation details. If WorkUnit dimensions are absent, state suggested size, uncertainty, and risk as advisory. Only the compiled approved execution profile supplies variant requirements.
 2. `.swarm/active/TEST_PLAN.md` mapping every Acceptance Criterion in `.swarm/active/WORKUNIT.md` to concrete test cases and verification commands.
+
+For every check expected to take more than 5 minutes, list the command/check, exactly one owner (`developer`, `tester`, `coordinator`, or `CI`), expected duration, and later roles that reuse its result instead of rerunning it. Specify its evidence location and source-tree identity/applicability.

@@ -89,6 +89,15 @@ func TestWorkerTestScopeInstructionsAndPromptSync(t *testing.T) {
 					t.Errorf("wrapper retains %q", obsolete)
 				}
 			}
+			owner := "developer"
+			if tc.name == "swarm-validate.md" {
+				owner = "tester"
+			}
+			tc.want = append(tc.want, "Run only the expensive checks assigned to "+owner+" in TEST_PLAN.md")
+			tc.want = append(tc.want, "Run only the expensive checks assigned to", "source tree is unchanged", "record the evidence reference", "Missing evidence or unresolved applicability remains unverified", "runs once", "never skipped because an agent reported a pass")
+			if tc.name == "swarm-validate.md" {
+				tc.want = append(tc.want, "from `.swarm/active/IMPLEMENTATION.md` (including its Prior Artifacts representation)")
+			}
 			for _, want := range append(tc.want, "The full trusted required policy is coordinator-owned reference, not a per-role execution list") {
 				if !strings.Contains(string(template), want) {
 					t.Errorf("wrapper lacks %q", want)
@@ -98,6 +107,11 @@ func TestWorkerTestScopeInstructionsAndPromptSync(t *testing.T) {
 	}
 
 	shared := []string{
+		"Run only the expensive checks assigned to",
+		"source tree is unchanged",
+		"record the evidence reference",
+		"Missing evidence or unresolved applicability remains unverified",
+		"never skipped because an agent reported a pass",
 		"coordinator runs the complete trusted-base required policy once after agent roles finish",
 		"coordinator-owned reference, not a per-role execution list",
 		"Agent observations remain advisory and cannot satisfy claim-bound validation or publication",
@@ -143,7 +157,7 @@ func TestWorkerTestScopeInstructionsAndPromptSync(t *testing.T) {
 					t.Errorf("%s retains %q", tc.role, obsolete)
 				}
 			}
-			for _, text := range append(append([]string{}, shared...), tc.extra...) {
+			for _, text := range append(append(append([]string{}, shared...), "Run only the expensive checks assigned to "+tc.role+" in TEST_PLAN.md"), tc.extra...) {
 				if !strings.Contains(string(template), text) {
 					t.Errorf("%s prompt lacks %q", tc.role, text)
 				}

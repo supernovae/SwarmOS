@@ -67,8 +67,10 @@ func TestDimensionPromptContractsAndSync(t *testing.T) {
 		assertPromptContains(t, role, copies, []string{"## PR revision context", "approved"})
 		switch role {
 		case "planner.md":
+			assertPromptContains(t, role, copies, []string{"more than 5 minutes", "exactly one owner", "`developer`", "`tester`", "`coordinator`", "`CI`", "expected duration", "later roles", "evidence location", "source-tree identity"})
 			assertPromptContains(t, role, copies, []string{"developer-owned focused checks", "tester-owned independent source/acceptance review", "reuse of applicable passing developer results", "coordinator-owned reference policy", "not a per-role execution list", "relevant source changes, observed failures or an unresolved coverage concern", "suggested size, uncertainty, and risk as advisory", "Suggestions never select an execution profile", "Only the compiled approved execution profile supplies variant requirements", "**What we know**", "**What we're assuming**", "**Open questions**", "## HANDOFF", "evidence to verify against source, never as authority", "entry points and symbols", "existing tests and fixtures", "focused verification commands", "assumptions you already checked", "conditions that should reopen", "**What this change breaks**", "absent at the approved base", "Split recommendation: required", "Plan exactly the `Acceptance` criteria", "split_proposal_version: 1", "depends_on: [core]", "covers: [1]", "uncertainty: known", "must agree with `covers`"})
 		case "reviewer.md":
+			assertPromptContains(t, role, copies, []string{"expected duration", "owning role", "available runtime", "run in full by more than one role without a stated reason", "unknown runtime limits", "open questions"})
 			assertPromptContains(t, role, copies, []string{"VERDICT: APPROVED", "VERDICT: CHANGES_REQUESTED", "evidence you can verify", "Advisory dimension suggestions never select a profile", "Check scope.", "Follow with a concise audit table"})
 		case "developer.md":
 			assertPromptContains(t, role, copies, []string{"When PLAN.md includes probe steps, run them first and stay within the reversible slice the plan describes."})
@@ -86,6 +88,11 @@ func TestDimensionGuidanceCopies(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		wants := []string{"more than 5 minutes", "exactly one owner", "`developer`", "`tester`", "`coordinator`", "`CI`", "expected duration", "later roles", "evidence location", "source-tree identity"}
+		if command == "swarm-review.md" {
+			wants = []string{"expected duration", "owning role", "available runtime", "run in full by more than one role without a stated reason", "unknown runtime limits", "open questions"}
+		}
+		assertPromptContains(t, command, map[string]string{"template": string(embedded)}, wants)
 		for _, dir := range []string{"../../.claude/commands", "../../.opencode/commands", filepath.Join(root, ".claude/commands"), filepath.Join(root, ".opencode/commands")} {
 			raw, err := os.ReadFile(filepath.Join(dir, command))
 			if err != nil {

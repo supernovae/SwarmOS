@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1385,4 +1386,422 @@ func TestCompactFinishedEvidencePreservesEmptyCoverage(t *testing.T) {
 		t.Fatalf("empty completed coverage lost maintenance eligibility: %v", err)
 	}
 	guard.Close()
+}
+
+// Native observations use the same parser and identity checks as teardown.
+// Kernel files are injected here; this test does not claim real containment.
+func TestNativeBoundaryIdentityAndEmpty(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux stat identity")
+	}
+	root := canonicalTemp(t)
+	group := filepath.Join(root, "group")
+	if err := os.Mkdir(group, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const unit = "swarm-native-0123456789abcdef0123456789abcdef.scope"
+	const boot = "11111111-1111-1111-1111-111111111111"
+	baseRead := func(path string) ([]byte, error) {
+		switch path {
+		case "/proc/self/cgroup":
+			return []byte("0::/user.slice/" + unit + "\n"), nil
+		case "/proc/sys/kernel/random/boot_id":
+			return []byte(boot), nil
+		case "/sys/fs/cgroup/cgroup.controllers":
+			return []byte("memory pids"), nil
+		default:
+			return []byte("populated 0\nfrozen 0\n"), nil
+		}
+	}
+	baseStat := func(path string) (os.FileInfo, error) {
+		if path == "/sys/fs/cgroup" {
+			return os.Stat(root)
+		}
+		return os.Stat(group)
+	}
+	n, err := CaptureNativeIdentity(unit, baseRead, baseStat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, events, boot                          string
+		eventsErr                                   error
+		missing, denied, changedMount, changedGroup bool
+		deniedRead, deniedStat                      string
+		want                                        bool
+	}{
+		{name: "empty", events: "populated 0\nfrozen 0\n", want: true},
+		{name: "descendant", events: "populated 1\nfrozen 0\n"},
+		{name: "duplicate", events: "populated 0\npopulated 1\n"},
+		{name: "missing field", events: "frozen 0\n"},
+		{name: "loose match", events: "populated 01\n"},
+		{name: "permission", denied: true},
+		{name: "controllers unreadable", deniedRead: "/sys/fs/cgroup/cgroup.controllers"},
+		{name: "events removed on open", eventsErr: &os.PathError{Op: "open", Err: syscall.ENOENT}, want: true},
+		{name: "events removed on read", eventsErr: &os.PathError{Op: "read", Err: syscall.ENODEV}, want: true},
+		{name: "events access denied", eventsErr: &os.PathError{Op: "open", Err: syscall.EACCES}},
+		{name: "events other read error", eventsErr: &os.PathError{Op: "read", Err: syscall.EIO}},
+		{name: "removed events changed mount", changedMount: true, eventsErr: syscall.ENOENT},
+		{name: "removed events reused inode", changedGroup: true, eventsErr: syscall.ENODEV},
+		{name: "events unreadable", deniedRead: "/sys/fs/cgroup/user.slice/" + unit + "/cgroup.events"},
+		{name: "root unreadable", deniedStat: "/sys/fs/cgroup"},
+		{name: "group unreadable", deniedStat: "/sys/fs/cgroup/user.slice/" + unit},
+
+		{name: "removed after creation", missing: true, want: true},
+		{name: "unmounted", changedMount: true},
+		{name: "reused inode", changedGroup: true},
+		{name: "reboot", boot: "22222222-2222-2222-2222-222222222222", want: true},
+		{name: "invalid boot", boot: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read := func(path string) ([]byte, error) {
+				if tc.denied || path == tc.deniedRead {
+					return nil, os.ErrPermission
+				}
+				if path == "/proc/sys/kernel/random/boot_id" && tc.boot != "" {
+					return []byte(tc.boot), nil
+				}
+				if strings.HasSuffix(path, "cgroup.events") {
+					if path != filepath.Join("/sys/fs/cgroup", n.Group, "cgroup.events") {
+						t.Fatalf("unexpected events path: %s", path)
+					}
+					if tc.eventsErr != nil {
+						return nil, tc.eventsErr
+					}
+					return []byte(tc.events), nil
+				}
+				return baseRead(path)
+			}
+			stat := func(path string) (os.FileInfo, error) {
+				if path == tc.deniedStat {
+					return nil, os.ErrPermission
+				}
+				if path != "/sys/fs/cgroup" && tc.missing {
+					return nil, os.ErrNotExist
+				}
+				if path == "/sys/fs/cgroup" && tc.changedMount {
+					return os.Stat(group)
+				}
+				if path != "/sys/fs/cgroup" && tc.changedGroup {
+					return os.Stat(root)
+				}
+				return baseStat(path)
+			}
+			reason := map[string]string{
+				"descendant": "populated=\"1\"", "duplicate": "malformed cgroup.events",
+				"missing field": "populated=\"\"", "loose match": "populated=\"01\"",
+				"permission": "/proc/sys/kernel/random/boot_id", "unmounted": "mount identity mismatch",
+				"reused inode": "cgroup identity mismatch", "invalid boot": "invalid boot identity",
+				"events access denied": "read ", "events other read error": "read ",
+				"removed events changed mount": "mount identity mismatch",
+				"removed events reused inode":  "cgroup identity mismatch",
+			}
+			if tc.deniedRead != "" {
+				reason[tc.name] = "read " + tc.deniedRead
+			}
+			if tc.deniedStat != "" {
+				reason[tc.name] = "stat " + tc.deniedStat
+			}
+			if err := CheckNativeBoundaryEmpty(n, read, stat); !tc.want {
+				if !errors.Is(err, ErrUnsafe) || !strings.Contains(err.Error(), reason[tc.name]) {
+					t.Fatalf("diagnostic: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckNativeBoundaryEmpty(NativeIdentity{}, read, stat); !errors.Is(err, ErrUnsafe) || !strings.Contains(err.Error(), "invalid native identity") {
+				t.Fatal(err)
+			}
+			if got := NativeBoundaryEmpty(n, read, stat); got != tc.want {
+				t.Fatalf("empty=%v, want %v", got, tc.want)
+			}
+			if NativeBoundaryEmpty(NativeIdentity{}, read, stat) {
+				t.Fatal("unacknowledged creation recovered")
+			}
+		})
+	}
+	for _, membership := range []string{"0::/wrong.scope", "0::/user.slice/" + unit + "\n0::/user.slice/" + unit, "0::/a/../" + unit, "1:memory:/" + unit} {
+		read := func(path string) ([]byte, error) {
+			if path == "/proc/self/cgroup" {
+				return []byte(membership), nil
+			}
+			return baseRead(path)
+		}
+		if _, err := CaptureNativeIdentity(unit, read, baseStat); err == nil {
+			t.Fatalf("accepted membership %q", membership)
+		}
+	}
+}
+
+func TestNativeRecoveryReservations(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux identities")
+	}
+	for _, mode := range []string{"reserved", "sealed live", "sealed empty", "outside before", "outside after", "mixed live", "mixed empty", "coordinator live", "later admission", "bad identity", "duplicate identity", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			m, r := fixture(t)
+			ctx := context.Background()
+			s := &Scope{manager: m, repository: r.Repository}
+			if mode == "outside before" {
+				if err := s.OutsideConsumer(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.AcquirePrepared(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+			b, err := s.ReserveNative(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := NativeIdentity{Boot: "11111111-1111-1111-1111-111111111111", Unit: "swarm-native-0123456789abcdef0123456789abcdef.scope", Group: "/user.slice/swarm-native-0123456789abcdef0123456789abcdef.scope", MountDevice: 1, MountInode: 2, Inode: 3}
+			if mode != "reserved" {
+				if err = b.Seal(ctx, n); err != nil {
+					t.Fatal(err)
+				}
+				if err = b.Seal(ctx, n); err == nil {
+					t.Fatal("resealed native reservation")
+				}
+			}
+			if mode == "outside after" {
+				if err = s.OutsideConsumer(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.HasPrefix(mode, "mixed") {
+				ns, err := s.ReserveBoundary(ctx, []string{r.Location})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = ns.Seal(ctx, ProcessIdentity{Boot: n.Boot, PID: 42, Start: 99}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "later admission" {
+				if err = s.AcquirePrepared(ctx, r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "bad identity" || mode == "duplicate identity" {
+				u := s.uses[0]
+				if err = u.evidence(ctx, func(v *record) error {
+					e := v.Evidence[u.token]
+					if mode == "bad identity" {
+						e.Native[b.id] = NativeEvidence{Identity: NativeIdentity{}, Empty: true}
+					} else {
+						e.Native[strings.Repeat("a", 64)] = e.Native[b.id]
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "canceled" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			changed, err := m.recoverNative(ctx, r, time.Now(), func(p ProcessIdentity) bool {
+				return mode != "coordinator live" && (mode != "mixed live" || p.PID != 42)
+			}, func(NativeIdentity) bool { return mode != "sealed live" })
+			if mode == "canceled" {
+				if !errors.Is(err, context.Canceled) || changed {
+					t.Fatalf("canceled recovery: %v %v", changed, err)
+				}
+				return
+			}
+			want := mode == "sealed empty" || mode == "mixed empty" || mode == "later admission"
+			if err != nil || changed != want {
+				t.Fatalf("recovery %v %v, want %v", changed, err, want)
+			}
+			if !want {
+				if maintenance, err := m.AcquireMaintenance(ctx, r); err != nil && !errors.Is(err, ErrUnsafe) {
+					t.Fatal(err)
+				} else if maintenance != nil {
+					maintenance.Close()
+					t.Fatal("pending native use released")
+				}
+			}
+		})
+	}
+}
+
+func TestNativeReservationPartialPersistence(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux identities")
+	}
+	m, r := fixture(t)
+	ctx := context.Background()
+	s := &Scope{manager: m, repository: r.Repository}
+	if err := s.AcquirePrepared(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	other := r
+	other.Identity += "-other"
+	other.Location += "-other"
+	if err := s.AcquirePrepared(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := s.ReserveNative(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A failed second durable write must not advance in-memory acknowledgement.
+	key, err := m.key(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = m.root.WriteFileDurable(key+".json", []byte("invalid ledger"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	n := NativeIdentity{Boot: "11111111-1111-1111-1111-111111111111", Unit: "swarm-native-0123456789abcdef0123456789abcdef.scope", Group: "/user.slice/swarm-native-0123456789abcdef0123456789abcdef.scope", MountDevice: 1, MountInode: 2, Inode: 3}
+	if err = reservation.Seal(ctx, n); err == nil {
+		t.Fatal("partial identity write was acknowledged")
+	}
+	if s.native[reservation.id] != (NativeEvidence{}) {
+		t.Fatal("failed persistence advanced native identity")
+	}
+	if err = reservation.MarkEmpty(ctx); err == nil {
+		t.Fatal("partial registration acquired empty evidence")
+	}
+}
+
+func TestNativeEvidenceLimitIsPermanentOutside(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux identities")
+	}
+	m, r := fixture(t)
+	ctx := context.Background()
+	s := &Scope{manager: m, repository: r.Repository, native: map[string]NativeEvidence{}}
+	// Exhaust memory-side registration without repeatedly writing a large ledger.
+	for i := 0; i < 256; i++ {
+		s.native[fmt.Sprintf("%064x", i)] = NativeEvidence{}
+	}
+	if err := s.AcquirePrepared(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	if reservation, err := s.ReserveNative(ctx); err != nil || reservation != nil {
+		t.Fatalf("exhaustion: %v %v", reservation, err)
+	}
+	if !s.outside {
+		t.Fatal("exhaustion did not contaminate future uses")
+	}
+	if err := s.AcquirePrepared(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	key, _ := m.key(r)
+	record, err := m.read(key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range record.Evidence {
+		if !e.Outside {
+			t.Fatal("evidence exhaustion was not permanent")
+		}
+	}
+}
+
+func TestNativeReservationConcurrentAdmissionAndDiagnostics(t *testing.T) {
+	for _, mode := range []string{"concurrent admission", "changed evidence", "missing use", "verification", "ledger read", "lock timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			m, r := fixture(t)
+			ctx := context.Background()
+			s := &Scope{manager: m, repository: r.Repository}
+			if err := s.AcquirePrepared(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+			b, err := s.ReserveNative(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := NativeIdentity{Boot: "11111111-1111-1111-1111-111111111111", Unit: "swarm-native-0123456789abcdef0123456789abcdef.scope", Group: "/user.slice/swarm-native-0123456789abcdef0123456789abcdef.scope", MountDevice: 1, MountInode: 2, Inode: 3}
+			if err := b.Seal(ctx, n); err != nil {
+				t.Fatal(err)
+			}
+			u := s.uses[0]
+			want := ""
+			switch mode {
+			case "changed evidence":
+				want = "native reservation evidence missing or changed"
+				if err := u.evidence(ctx, func(v *record) error { delete(v.Evidence[u.token].Native, b.id); return nil }); err != nil {
+					t.Fatal(err)
+				}
+			case "missing use":
+				want = "storage use no longer registered"
+				if err := u.evidence(ctx, func(v *record) error { delete(v.Uses, u.token); delete(v.Evidence, u.token); return nil }); err != nil {
+					t.Fatal(err)
+				}
+			case "verification":
+				want = "reservation MarkEmpty verification"
+			case "ledger read":
+				want = "storage evidence read"
+				if err := m.root.WriteFileDurable(u.key+".json", []byte("invalid ledger"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "lock timeout":
+				want = "storage evidence lock"
+				f, _, err := m.lock(ctx, u.key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer unlock(f)
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 25*time.Millisecond)
+				defer cancel()
+
+			}
+			done := make(chan error, 1)
+			if mode == "concurrent admission" {
+				go func() {
+					for i := 0; i < 20; i++ {
+						if err := s.AcquirePrepared(ctx, r); err != nil {
+							done <- err
+							return
+						}
+					}
+					done <- nil
+				}()
+			}
+			err = b.markEmptyWith(ctx, func(got NativeIdentity) error {
+				if got != n {
+					t.Fatalf("identity changed: %+v", got)
+				}
+				if mode == "verification" {
+					return fmt.Errorf("%w: unreadable cgroup.events", ErrUnsafe)
+				}
+				return nil
+			})
+			if want != "" {
+				if err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("err=%v want=%s", err, want)
+				}
+				if mode == "lock timeout" {
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatal(err)
+					}
+				} else if mode != "ledger read" && !errors.Is(err, ErrUnsafe) {
+					t.Fatal(err)
+				}
+				if s.native[b.id].Empty {
+					t.Fatal("failed persistence marked empty")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				for _, u := range s.uses {
+					v, err := m.read(u.key, u.resource)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !v.Evidence[u.token].Native[b.id].Empty {
+						t.Fatal("admission lost empty evidence")
+					}
+				}
+			}
+		})
+	}
 }

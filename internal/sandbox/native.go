@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -170,8 +172,19 @@ func runNativeCommand(ctx context.Context, binary, dir string, env, args []strin
 }
 
 func runNativeCommandWithStop(ctx context.Context, binary, dir string, env, args []string, stdin io.Reader, stdout, stderr io.Writer, stop func(*exec.Cmd) error) error {
+	return runNativeCommandWithBoundary(ctx, binary, dir, env, args, stdin, stdout, stderr, stop, prepareNativeScope)
+}
+
+func runLegacyNativeCommand(ctx context.Context, binary, dir string, env, args []string, stdin io.Reader, stdout, stderr io.Writer, stop func(*exec.Cmd) error) error {
 	if scope := storageuse.FromContext(ctx); scope != nil {
 		if err := scope.OutsideConsumer(ctx); err != nil {
+			if ctx.Err() != nil {
+				unstarted := exec.Command(binary, args...)
+				if stopErr := stop(unstarted); stopErr != nil {
+					scope.Retain()
+					return errors.Join(err, stopErr)
+				}
+			}
 			return err
 		}
 	}
@@ -186,7 +199,7 @@ func runNativeCommandWithStop(ctx context.Context, binary, dir string, env, args
 		if scope := storageuse.FromContext(ctx); scope != nil {
 			scope.Retain()
 		}
-		return errors.Join(err, fmt.Errorf("terminate native worker: %w", stopErr))
+		return errors.Join(err, &nativeTerminationError{cause: nativeLauncherStopError(stopErr)})
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -724,6 +737,9 @@ func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOption
 		return err
 	}
 	runErr := run(ctx, work, scratch)
+	if storageuse.FromContext(ctx).Retained() {
+		return errors.Join(runErr, storageuse.ErrUnsafe)
+	}
 	// Observe the harness's own scratch-HOME session log before cleanup.
 	opts.Lifecycle.observe(scratch)
 	budget.finish()
@@ -817,4 +833,265 @@ func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOption
 		return claimpause.ErrBudget
 	}
 	return nil
+}
+
+// Native scope containment adds storage lifetime evidence; the existing native
+// sandbox remains responsible for filesystem, network and credential policy.
+func nativeLauncherStopError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("launcher StopVerified: %w", err)
+}
+
+type nativeTerminationError struct{ cause error }
+
+func (e *nativeTerminationError) Error() string { return "terminate native worker: " + e.cause.Error() }
+func (e *nativeTerminationError) Unwrap() error { return e.cause }
+
+var errNativeScopeUnavailable = errors.New("native storage scope unavailable")
+
+type nativeScopeBoundary interface {
+	command(context.Context, string, string) (*exec.Cmd, error)
+	verify(storageuse.NativeIdentity) error
+	stop(storageuse.NativeIdentity) error
+}
+
+type nativePayload struct {
+	Binary, Arg0, Dir string
+	Args, Env         []string
+}
+
+const nativeFrameLimit = 1 << 20
+
+func writeNativeFrame(w io.Writer, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if len(data) > nativeFrameLimit {
+		return fmt.Errorf("native control frame exceeds limit")
+	}
+	if err = binary.Write(w, binary.BigEndian, uint32(len(data))); err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
+}
+func readNativeFrame(r io.Reader, v any) error {
+	var size uint32
+	if err := binary.Read(r, binary.BigEndian, &size); err != nil {
+		return err
+	}
+	if size == 0 || size > nativeFrameLimit {
+		return fmt.Errorf("invalid native control frame")
+	}
+	data := make([]byte, size)
+	if _, err := io.ReadFull(r, data); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(v); err != nil {
+		return err
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return fmt.Errorf("trailing native control data")
+	}
+	return nil
+}
+
+func runNativeCommandWithBoundary(ctx context.Context, binary, dir string, env, args []string, stdin io.Reader, stdout, stderr io.Writer, stop func(*exec.Cmd) error, prepare func(context.Context) (nativeScopeBoundary, error)) (result error) {
+	boundary, err := prepare(ctx)
+	if errors.Is(err, errNativeScopeUnavailable) {
+		return runLegacyNativeCommand(ctx, binary, dir, env, args, stdin, stdout, stderr, stop)
+	}
+	if err != nil {
+		return err
+	}
+	arg0 := binary
+	resolved, err := exec.LookPath(binary)
+	if err != nil {
+		return err
+	}
+	scope := storageuse.FromContext(ctx)
+	var reservation *storageuse.NativeReservation
+	if scope != nil {
+		reservation, err = scope.ReserveNative(ctx)
+		if err != nil {
+			scope.Retain()
+			return err
+		}
+	}
+	// No payload can run until both identity verification and durable sealing
+	// finish. Environment and acknowledgement use separate private pipes.
+	payloadRead, payloadWrite, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer payloadRead.Close()
+	defer payloadWrite.Close()
+	identityRead, identityWrite, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer identityRead.Close()
+	defer identityWrite.Close()
+	ackRead, ackWrite, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer ackRead.Close()
+	defer ackWrite.Close()
+	cmd, err := boundary.command(ctx, binary, dir)
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = stdin
+	// exec.Cmd must not wait for descendant-held output pipes before we get a
+	// chance to stop the scope. Own the forwarding pipes and drain after stop.
+	type outputPipe struct {
+		read, write *os.File
+		done        chan error
+	}
+	var outputs []outputPipe
+	writers := []io.Writer{stdout, stderr}
+	sameOutput := stdout != nil && reflect.TypeOf(stdout).Comparable() && stdout == stderr
+	for index, writer := range writers {
+		if index == 1 && sameOutput {
+			writers[1] = writers[0]
+			continue
+		}
+		if _, ok := writer.(*os.File); ok {
+			continue
+		}
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			for _, p := range outputs {
+				p.read.Close()
+				p.write.Close()
+			}
+			return pipeErr
+		}
+		p := outputPipe{read: r, write: w, done: make(chan error, 1)}
+		if writer == nil {
+			writer = io.Discard
+		}
+		go func(p outputPipe, destination io.Writer) {
+			_, copyErr := io.Copy(destination, p.read)
+			p.done <- copyErr
+		}(p, writer)
+		outputs = append(outputs, p)
+		writers[index] = w
+	}
+	cmd.Stdout, cmd.Stderr = writers[0], writers[1]
+	defer func() {
+		for _, p := range outputs {
+			p.write.Close()
+			p.read.Close()
+		}
+	}()
+	if cmd.Dir == "" {
+		cmd.Dir, err = os.Getwd()
+	} else {
+		cmd.Dir, err = filepath.Abs(cmd.Dir)
+	}
+	if err != nil {
+		return err
+	}
+	cmd.ExtraFiles = []*os.File{payloadRead, identityWrite, ackRead}
+	process.Configure(cmd)
+	cmd.Cancel = func() error { return stop(cmd) }
+	cmd.WaitDelay = time.Second
+	if err = cmd.Start(); err != nil {
+		// exec did not start; no helper or payload can have run.
+		return runLegacyNativeCommand(ctx, binary, dir, env, args, stdin, stdout, stderr, stop)
+	}
+	payloadRead.Close()
+	identityWrite.Close()
+	ackRead.Close()
+	var identity storageuse.NativeIdentity
+	defer func() {
+		ackWrite.Close()
+		payloadWrite.Close()
+		identityRead.Close()
+		cleanupErr := boundary.stop(identity)
+		stopErr := stop(cmd)
+		for _, p := range outputs {
+			p.write.Close()
+			if cleanupErr != nil || stopErr != nil {
+				p.read.Close()
+			}
+			select {
+			case copyErr := <-p.done:
+				result = errors.Join(result, copyErr)
+			case <-time.After(time.Second):
+				p.read.Close()
+				result = errors.Join(result, fmt.Errorf("native output forwarding did not finish"))
+			}
+		}
+		if cleanupErr != nil || stopErr != nil {
+			if scope != nil {
+				scope.Retain()
+			}
+			result = errors.Join(result, &nativeTerminationError{cause: errors.Join(cleanupErr, nativeLauncherStopError(stopErr))})
+		} else if reservation != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := reservation.MarkEmpty(cleanupCtx); err != nil {
+				scope.Retain()
+				result = errors.Join(result, &nativeTerminationError{cause: fmt.Errorf("reservation MarkEmpty: %w", err)})
+			}
+		}
+	}()
+	handshakeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// Closing pipes interrupts blocked control I/O on cancellation or timeout.
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-handshakeCtx.Done():
+			payloadWrite.Close()
+			identityRead.Close()
+			ackWrite.Close()
+		case <-finished:
+		}
+	}()
+	send := make(chan error, 1)
+	go func() {
+		send <- writeNativeFrame(payloadWrite, nativePayload{Binary: resolved, Arg0: arg0, Dir: cmd.Dir, Args: args, Env: env})
+		payloadWrite.Close()
+	}()
+	handshakeErr := readNativeFrame(identityRead, &identity)
+	if handshakeErr == nil {
+		handshakeErr = boundary.verify(identity)
+	}
+	if handshakeErr == nil && reservation != nil {
+		handshakeErr = reservation.Seal(handshakeCtx, identity)
+	}
+	if handshakeErr == nil {
+		handshakeErr = <-send
+	}
+	if handshakeErr == nil {
+		_, handshakeErr = ackWrite.Write([]byte{1})
+	}
+	ackWrite.Close()
+	if handshakeErr != nil {
+		// The helper never receives acknowledgement on failed verification or
+		// persistence. Unknown creation still retains the incomplete ledger.
+		initialStopErr := stop(cmd)
+		if initialStopErr != nil && scope != nil {
+			scope.Retain()
+		}
+		waitErr := cmd.Wait()
+		return errors.Join(fmt.Errorf("native pre-exec handshake: %w", handshakeErr), waitErr, initialStopErr)
+	}
+	// The helper closes all three control descriptors before exec. Output
+	// forwarding is drained only after the entire scope has stopped.
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		return errors.Join(ctx.Err(), waitErr)
+	}
+	return waitErr
 }

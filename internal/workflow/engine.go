@@ -1038,7 +1038,7 @@ func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.Wor
 	if err := workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA); err != nil {
 		return err
 	}
-	if role == "reviewer" && lease.DirectPlanReview(st) && (len(excludeHistory) == 0 || !excludeHistory[0]) {
+	if role == "reviewer" && st.PRNumber == 0 && st.PRRevision == nil {
 		return workspace.AppendPlanReviewEvidence(path, lease.ReviewHistory(st), st.Artifacts)
 	}
 	return nil
@@ -1111,16 +1111,35 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 		return "", st, err
 	}
 	revRun, err := agent.RunReview(ctx, runner, req)
+	if err != nil && revRun != nil && revRun.ExitCode == 0 && prNumber == 0 && st.PRRevision == nil {
+		// Successful processes with no importable report are malformed review runs.
+		err = &planReviewOutputError{err}
+		if revRun.Telemetry != nil {
+			revRun.Telemetry.FailureClass = "unknown"
+		}
+	}
 	if err != nil {
 		st, err = e.failedRun(ctx, st, recovery, revRun, err, "reviewer")
 		return "", st, err
 	}
 	review, err := readRequiredArtifact(wtPath, "REVIEW.md")
-	if err != nil {
-		return "", st, fmt.Errorf("reviewer agent %q: %w", reviewerAgent, err)
+	var verdict string
+	if err == nil {
+		verdict, err = ParseReviewVerdict(review)
 	}
-	verdict, err := ParseReviewVerdict(review)
+	if err == nil && prNumber == 0 && st.PRRevision == nil {
+		err = validateStructuredReview(review, verdict, st)
+	}
 	if err != nil {
+		if revRun != nil && revRun.Telemetry != nil {
+			revRun.Telemetry.FailureClass = "unknown"
+			updated, recordErr := e.LeaseManager.RecordFailedRoleRun(ctx, wu.IssueNumber, owner, revRun.Telemetry)
+			if recordErr != nil {
+				err = errors.Join(err, recordErr)
+			} else {
+				st = updated
+			}
+		}
 		return "", st, err
 	}
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
@@ -1604,7 +1623,7 @@ func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 			return "", "", p.Findings
 		}
 		if p := st.PendingPlanReview; p != nil && p.Findings != "" && !lease.HasRevisedPlan(st) {
-			return "", "", p.Findings
+			return "", "", contract.PlannerReviewBody(p.Findings)
 		}
 
 	}
@@ -1635,6 +1654,9 @@ func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 		}
 		if a.Verdict == "CHANGES_REQUESTED" {
 			findings := a.Body
+			if lease.DirectPlanReview(st) && a.Metadata["review_source"] != "authenticated-human" {
+				findings = contract.PlannerReviewBody(findings)
+			}
 			if strings.TrimSpace(findings) == "" {
 				findings = "CHANGES_REQUESTED"
 			}
@@ -1757,17 +1779,37 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 	}
 	run, err := agent.RunReview(ctx, runner, agent.RunRequest{Agent: reviewer, Role: "reviewer", Mode: mode, WorktreePath: path, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", Dependencies: deps, TaskPrompt: revisionTaskPrompt("Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.", st, st.PRNumber)})
 	if err != nil {
+		if run != nil && run.ExitCode == 0 && run.Telemetry != nil && st.PRNumber == 0 && st.PRRevision == nil {
+			run.Telemetry.FailureClass = "unknown"
+			updated, recordErr := e.LeaseManager.RecordFailedUpstreamPlanReview(ctx, o, run.Telemetry)
+			if recordErr != nil {
+				return "", nil, errors.Join(err, recordErr)
+			}
+			return "", updated, err
+		}
 		return "", nil, err
 	}
 	if run == nil || run.ExitCode != 0 {
 		return "", nil, fmt.Errorf("reviewer returned no successful execution evidence")
 	}
 	body, err := readRequiredArtifact(path, "REVIEW.md")
-	if err != nil {
-		return "", nil, err
+	var verdict string
+	if err == nil {
+		verdict, err = ParseReviewVerdict(body)
 	}
-	verdict, err := ParseReviewVerdict(body)
+	if err == nil && st.PRNumber == 0 && st.PRRevision == nil {
+		err = validateStructuredReview(body, verdict, st)
+	}
 	if err != nil {
+		if run.Telemetry != nil {
+			run.Telemetry.FailureClass = "unknown"
+			updated, recordErr := e.LeaseManager.RecordFailedUpstreamPlanReview(ctx, o, run.Telemetry)
+			if recordErr != nil {
+				err = errors.Join(err, recordErr)
+			} else {
+				return "", updated, err
+			}
+		}
 		return "", nil, err
 	}
 	if run.Attestation.Agent != reviewer || run.Attestation.Harness != provenance.Harness || run.Attestation.Model != provenance.Model || run.Attestation.Sandbox != provenance.Sandbox {
@@ -1897,3 +1939,33 @@ func contractRevisionRecovery(st *lease.IssueState, err error) error {
 	}
 	return r
 }
+
+func validateStructuredReview(body, verdict string, st *lease.IssueState) error {
+	r, err := contract.ParsePlanFindings(body)
+	if err != nil {
+		return fmt.Errorf("malformed plan review: %w", err)
+	}
+	var previous []contract.PlanFindings
+	for _, h := range lease.ReviewHistory(st) {
+		if h.Source == "authenticated-human" {
+			continue
+		}
+		if p, e := contract.ParsePlanFindings(h.Findings); e == nil {
+			previous = append(previous, p)
+		}
+	}
+	if err = contract.ValidatePlanContinuity(r, previous); err != nil {
+		return fmt.Errorf("malformed plan review: %w", err)
+	}
+	open := r.OpenBlockers() != ""
+	if (verdict == "APPROVED" && open) || (verdict == "CHANGES_REQUESTED" && !open) {
+		return fmt.Errorf("malformed plan review: verdict contradicts open blockers")
+	}
+	return nil
+}
+
+// planReviewOutputError classifies successful processes that fail report import.
+type planReviewOutputError struct{ error }
+
+func (*planReviewOutputError) FailureClass() string { return "unknown" }
+func (e *planReviewOutputError) Unwrap() error      { return e.error }

@@ -3539,6 +3539,9 @@ func (m *Manager) RecordUpstreamPlanReview(ctx context.Context, o *UpstreamPlanR
 	if fresh.gate == contract.GateHuman {
 		art.Metadata["advisory"] = "true"
 		st.UpstreamAdvisoryReview = &UpstreamAdvisoryReview{Artifact: art, Attestation: att}
+		if _, structuredErr := contract.ParsePlanFindings(body); structuredErr == nil {
+			appendPlanReviewHistory(st, art, false)
+		}
 		updated, err := m.save(ctx, o.issue, fresh.revision, st)
 		if err != nil {
 			return nil, fmt.Errorf("upstream advisory recording conflict: %w: %w", ErrClaimFence, err)
@@ -3557,6 +3560,9 @@ func (m *Manager) RecordUpstreamPlanReview(ctx context.Context, o *UpstreamPlanR
 	}
 	if !replaced {
 		st.Artifacts = append(st.Artifacts, art)
+	}
+	if _, structuredErr := contract.ParsePlanFindings(body); structuredErr == nil {
+		appendPlanReviewHistory(st, art, false)
 	}
 	// Upstream review intentionally leaves lease, phase and claim budget intact.
 	// No worker transition helper is used, including for rejected reports.
@@ -3698,4 +3704,37 @@ func (m *Manager) ReserveValidationRepair(ctx context.Context, n int, owner stri
 		st.ValidationRepairCount++
 		return nil
 	})
+}
+
+// RecordFailedUpstreamPlanReview records failed-run telemetry under the same
+// authenticated observation fence as an upstream verdict, without gate evidence.
+func (m *Manager) RecordFailedUpstreamPlanReview(ctx context.Context, o *UpstreamPlanReviewObservation, telemetry *contract.RoleRunTelemetry) (*IssueState, error) {
+	if o == nil || o.manager != m {
+		return nil, ErrClaimFence
+	}
+	fresh, err := m.PrepareUpstreamPlanReview(ctx, o.issue)
+	if err != nil {
+		return nil, fmt.Errorf("refresh failed review: %w: %w", ErrClaimFence, err)
+	}
+	if fresh.actor != o.actor || fresh.revision != o.revision || fresh.stateJSON != o.stateJSON || fresh.source != o.source {
+		return nil, ErrClaimFence
+	}
+	value, err := telemetry.Encode()
+	if err != nil {
+		return nil, err
+	}
+	copy, err := contract.ParseRoleRunTelemetry(value)
+	if err != nil {
+		return nil, err
+	}
+	if copy.Role != "reviewer" || copy.FailureClass == "" {
+		return nil, fmt.Errorf("failed reviewer telemetry required")
+	}
+	st := fresh.state
+	appendRoleRun(st, copy)
+	updated, err := m.save(ctx, o.issue, fresh.revision, st)
+	if err != nil {
+		return nil, fmt.Errorf("failed review recording conflict: %w: %w", ErrClaimFence, err)
+	}
+	return updated, nil
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/progress"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -391,6 +393,57 @@ func (m *MockRunner) Run(ctx context.Context, req RunRequest) (*RunResult, error
 			verdict = "APPROVED"
 		}
 		reviewContent := fmt.Sprintf("VERDICT: %s\n\n## Plan Audit Summary\n\n- **Objective Alignment**: PASS\n- **Constraints Check**: PASS\n- **Test Plan Coverage**: PASS\n- **Protected Paths**: Unmodified\n", verdict)
+		findings := `{"version":1,"findings":[]}`
+		if verdict == "CHANGES_REQUESTED" {
+			findings = `{"version":1,"findings":[{"id":"F1","blocking":true,"disposition":"open","criterion":"Mock plan completeness","trigger":"Run mock review with CHANGES_REQUESTED","expected":"A complete plan","actual":"Mock requests a plan revision","check":"Run the mock reviewer again after revising the plan"}]}`
+		}
+		// The deterministic mock carries the cumulative ledger through review rounds.
+		if data, e := active.ReadFile("REVIEW_EVIDENCE.md", 8<<20); e == nil {
+			prior := contract.PlanFindings{Version: 1, Findings: []contract.PlanFinding{}}
+			rest := string(data)
+			for {
+				start := strings.Index(rest, contract.PlanFindingsStart)
+				if start < 0 {
+					break
+				}
+				rest = rest[start:]
+				end := strings.Index(rest, contract.PlanFindingsEnd)
+				if end < 0 {
+					break
+				}
+				end += len(contract.PlanFindingsEnd)
+				if r, e := contract.ParsePlanFindings(rest[:end]); e == nil {
+					prior = r
+				}
+				rest = rest[end:]
+			}
+			if len(prior.Findings) > 0 {
+				for i := range prior.Findings {
+					if verdict == "APPROVED" && prior.Findings[i].Disposition == "open" {
+						prior.Findings[i].Disposition = "resolved"
+					}
+				}
+				if verdict == "CHANGES_REQUESTED" && prior.OpenBlockers() == "" {
+					maxID := 0
+					for _, f := range prior.Findings {
+						n, _ := strconv.Atoi(strings.TrimPrefix(f.ID, "F"))
+						if n > maxID {
+							maxID = n
+						}
+					}
+					var fresh contract.PlanFindings
+					if json.Unmarshal([]byte(findings), &fresh) == nil && len(fresh.Findings) > 0 {
+						f := fresh.Findings[0]
+						f.ID = fmt.Sprintf("F%d", maxID+1)
+						prior.Findings = append(prior.Findings, f)
+					}
+				}
+				if b, e := json.Marshal(prior); e == nil {
+					findings = string(b)
+				}
+			}
+		}
+		reviewContent += "\n" + contract.PlanFindingsStart + "\n" + findings + "\n" + contract.PlanFindingsEnd + "\n"
 		reviewName := filepath.Join(".swarm", "active", "REVIEW.md")
 		if req.ReadOnly {
 			reviewName = filepath.Join(".swarm", "active-output", "REVIEW.md")

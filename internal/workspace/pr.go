@@ -23,7 +23,7 @@ func CompilePRHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *co
 	if prNumber <= 0 || wu == nil {
 		return fmt.Errorf("PR number and linked WorkUnit are required")
 	}
-	if err := CompileHarnessBundleAt(worktreePath, wu, wf, arts, role, effectiveGate, baseSHA); err != nil {
+	if err := CompileHarnessBundleAt(worktreePath, wu, wf, arts, role, effectiveGate, baseSHA, true); err != nil {
 		return err
 	}
 	var c *RevisionPlanContext

@@ -943,3 +943,21 @@ func TestIssueWorkRecoveryAbsentReportsRegeneration(t *testing.T) {
 		t.Fatal("replacement lost obligation, findings or consumption")
 	}
 }
+
+func TestStructuredHistorySurvivesBounds(t *testing.T) {
+	st := &IssueState{TaskDigest: "task", PolicyDigest: "policy", BaseSHA: "base"}
+	r := contract.PlanFindings{Version: 1, Findings: []contract.PlanFinding{{ID: "F1", Blocking: true, Disposition: "open", Criterion: "Fence", Trigger: strings.Repeat("x", 17000), Expected: "Reject", Actual: "Accept", Check: "Test"}}}
+	for round := 1; round <= 9; round++ {
+		raw, _ := json.Marshal(r)
+		appendPlanReviewHistory(st, contract.Artifact{Type: contract.ArtifactReview, ID: fmt.Sprint(round), Verdict: "CHANGES_REQUESTED", Body: "VERDICT: CHANGES_REQUESTED\n" + contract.PlanFindingsStart + string(raw) + contract.PlanFindingsEnd, Metadata: map[string]string{"review_source": "authenticated-agent"}}, false)
+	}
+	if len(st.PlanReviewHistory) != 8 {
+		t.Fatal("history bounds changed")
+	}
+	for _, h := range ReviewHistory(st) {
+		r, e := contract.ParsePlanFindings(h.Findings)
+		if e != nil || r.Findings[0].ID != "F1" || len(r.Findings[0].Trigger) != 17000 {
+			t.Fatalf("lost ledger: %v", e)
+		}
+	}
+}

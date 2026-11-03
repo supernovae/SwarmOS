@@ -226,3 +226,35 @@ func TestFailedRoleRunPersistence(t *testing.T) {
 		})
 	}
 }
+
+func TestFailedUpstreamReviewObservationFence(t *testing.T) {
+	worker, upstream, _, n := upstreamReviewFixture(t)
+	ctx := context.Background()
+	o, err := upstream.PrepareUpstreamPlanReview(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tel := contract.NewRoleRunTelemetry("reviewer", "codex", time.Now())
+	tel.FailureClass = "unknown"
+	before := o.State()
+	after, err := upstream.RecordFailedUpstreamPlanReview(ctx, o, tel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.RoleRuns) != len(before.RoleRuns)+1 || after.RoleRuns[len(after.RoleRuns)-1].FailureClass != "unknown" {
+		t.Fatal("failed review missing")
+	}
+	if len(after.Artifacts) != len(before.Artifacts) || after.UpstreamAdvisoryReview != nil {
+		t.Fatal("failed review recorded gate evidence")
+	}
+	if _, err = upstream.RecordFailedUpstreamPlanReview(ctx, o, tel); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("stale observation accepted: %v", err)
+	}
+	persisted, err := worker.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.RoleRuns) != len(after.RoleRuns) {
+		t.Fatal("stale write changed state")
+	}
+}

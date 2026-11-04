@@ -324,6 +324,8 @@ type ReclamationResult struct {
 // ReclamationReport totals cover inspected admitted leaves only; retained unknown
 // or outside-scope resources have no size claim.
 type ReclamationReport struct {
+	DiscoveryReasons                             []string
+	DiscoveryCounters                            Counters
 	Complete                                     bool
 	Resources                                    []ReclamationResult
 	Before, After                                UsageObservation
@@ -428,6 +430,9 @@ func reclaimLayout(o ReclaimOptions, r storageuse.Resource, key string) bool {
 
 func usage(s *scanner, path string) UsageObservation {
 	r := Resource{Path: path}
+	// Retained inode identities and accounting workspace share the live proof
+	// budget with registration and result metadata.
+	s.usageBudget = &s.b
 	s.account(&r)
 	return UsageObservation{r.LogicalBytes, r.AllocatedBytes}
 }
@@ -545,14 +550,28 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 	// Physical discovery supplies identities independently of ledger payloads.
 	discovered := reclaimScanner(ctx, opts)
 	discovered.b = s.b
+	discovered.opts.enumerateOnly = true
+	// Optional inventory may consume only a quarter of the remaining budget.
+	// Restore limits, never counters: its retained allocations remain charged.
+	discovered.b.Limits.Entries = s.b.Counters.Entries + (l.Entries-s.b.Counters.Entries)/4
+	discovered.b.Limits.Records = s.b.Counters.Records + max(1, (l.Records-s.b.Counters.Records)/4)
+	discovered.b.Limits.Bytes = s.b.Counters.Bytes + (l.Bytes-s.b.Counters.Bytes)/4
 	for _, scope := range scopes {
 		discovered.repos[scope.CommonDirectory] = scope.Root
 	}
+	discovered.opts.discoveryArea = "cache discovery"
 	discovered.caches()
+	discovered.opts.discoveryArea = "scratch discovery"
 	discovered.scratch()
 	s.b = discovered.b
+	s.b.Limits = l
+	out.DiscoveryCounters = s.b.Counters
+	out.DiscoveryReasons = discovered.out.Reasons
 	if !discovered.out.Complete {
-		return invalid(errors.New("bounded candidate discovery incomplete"))
+		out.Complete = false
+	}
+	if ctx.Err() != nil {
+		return invalid(ctx.Err())
 	}
 	controlExists := false
 	if existing, e := openExisting(opts.ControlRoot); e == nil {
@@ -635,7 +654,7 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 	if errors.Is(err, os.ErrNotExist) && len(candidates) == 0 {
 		err = nil
 	}
-	// Incomplete discovery cannot authorize even a previously observed candidate.
+	// Incomplete registration traversal cannot authorize even a previously observed candidate.
 	if err != nil {
 		out.Complete = false
 		for _, r := range candidates {
@@ -653,16 +672,6 @@ func reclaimWithIO(ctx context.Context, opts ReclaimOptions, apply bool, ops rec
 		if !registered[r.Path] {
 			out.Resources = append(out.Resources, ReclamationResult{Resource: storageuse.Resource{Repository: r.useRepository, Class: r.Class, Identity: r.Identity, Location: r.Path}, Outcome: ReclaimRetained, Reason: "unregistered or unsafe storage-use evidence (malformed, oversized or unreadable); ownership and use coverage unproven"})
 		}
-	}
-	if !discovered.out.Complete {
-		out.Complete = false
-		for _, r := range candidates {
-			out.Resources = append(out.Resources, ReclamationResult{Resource: r, Outcome: ReclaimRetained, Reason: "bounded candidate discovery incomplete"})
-		}
-		if ctx.Err() != nil {
-			return out, ctx.Err()
-		}
-		return out, errors.New("candidate discovery incomplete")
 	}
 	if apply && len(candidates) > 0 && manager == nil {
 		manager, err = storageuse.Open(opts.ControlRoot, opts.CacheRoot, opts.ScratchRoot)

@@ -863,3 +863,90 @@ func TestStorageCleanupIssueEligibilityParity(t *testing.T) {
 		})
 	}
 }
+
+func TestStorageCleanupAllReposEmptyRegistry(t *testing.T) {
+	for _, apply := range []bool{false, true} {
+		for _, structured := range []bool{false, true} {
+			t.Run(fmt.Sprint(apply, structured), func(t *testing.T) {
+				f := newCLIFixture(t)
+				path := filepath.Join(t.TempDir(), "missing", "repos.yaml")
+				f.setenv("SWARM_REGISTRY_PATH", path)
+				cmd := f.command(nil)
+				var out bytes.Buffer
+				cmd.SetOut(&out)
+				cmd.SetErr(&bytes.Buffer{})
+				args := []string{"storage", "cleanup", "--all-repos"}
+				if apply {
+					args = append(args, "--apply")
+				}
+				if structured {
+					args = append(args, "--json")
+				}
+				cmd.SetArgs(args)
+				err := cmd.Execute()
+				if err == nil || !strings.Contains(err.Error(), "no repositories are registered") || !strings.Contains(err.Error(), "swarm repo add") {
+					t.Fatalf("%v %s", err, out.String())
+				}
+				if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+					t.Fatal("created registry", err)
+				}
+			})
+		}
+	}
+}
+
+func TestStorageCleanupIncompleteDiscoveryOutput(t *testing.T) {
+	for _, mode := range []string{"preview", "apply"} {
+		report := storageCleanupReport{Mode: mode, Incomplete: []string{"cache discovery: inventory limit reached", "scratch discovery: inventory limit reached"}, Host: storage.ReclamationReport{Resources: []storage.ReclamationResult{{Resource: storageuse.Resource{Class: "agent-build", Location: "/managed/go"}, Outcome: storage.ReclaimRetained, Reason: "unresolved durable use"}}}}
+		var out bytes.Buffer
+		renderStorageCleanup(&out, report)
+		for _, want := range []string{mode, "cache discovery: inventory limit reached", "scratch discovery: inventory limit reached", "/managed/go", "unresolved durable use"} {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("missing %q in %s", want, out.String())
+			}
+		}
+	}
+}
+
+func TestStorageCleanupAllReposRegistryDiagnostics(t *testing.T) {
+	for _, scenario := range []string{"empty", "invalid", "directory", "invalid-scope"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newCLIFixture(t)
+			path := filepath.Join(t.TempDir(), "repos.yaml")
+			f.setenv("SWARM_REGISTRY_PATH", path)
+			raw := "version: 1\nrepos: {}\n"
+			switch scenario {
+			case "invalid":
+				raw = "[invalid yaml"
+			case "directory":
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "invalid-scope":
+				raw = "version: 1\nrepos:\n  owner/repo:\n    repo: owner/repo\n    path: /missing-checkout\n    backend: local\n"
+			}
+			if scenario != "directory" {
+				if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := f.command(nil)
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"storage", "cleanup", "--all-repos", "--json"})
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("expected selection failure")
+			}
+			empty := strings.Contains(err.Error(), "no repositories are registered")
+			if empty != (scenario == "empty") {
+				t.Fatalf("wrong diagnostic: %v", err)
+			}
+			var report storageCleanupReport
+			if err := json.Unmarshal(out.Bytes(), &report); err != nil || len(report.Errors) == 0 {
+				t.Fatalf("invalid error report: %s %v", out.String(), err)
+			}
+		})
+	}
+}

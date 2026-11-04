@@ -112,6 +112,8 @@ type Snapshot struct {
 	ObservedAllocatedBytes int64      `json:"observed_allocated_bytes"`
 }
 type Options struct {
+	enumerateOnly   bool
+	discoveryArea   string
 	includeSelected bool
 	cacheOnly       bool
 	// allocation is a package-private fixture adapter; identities still come from stat.
@@ -231,6 +233,9 @@ func Scan(ctx context.Context, opts Options) (Snapshot, error) {
 }
 func (s *scanner) fail(area string, err error) {
 	s.out.Complete = false
+	if s.opts.discoveryArea != "" {
+		area = s.opts.discoveryArea
+	}
 	// One bounded reason per area; never retain attacker-controlled diagnostics.
 	reason := area + ": incomplete observation"
 	if errors.Is(err, ErrLimit) {
@@ -286,6 +291,11 @@ func (s *scanner) add(r Resource) {
 	if r.Eligibility == "" {
 		r.Eligibility = "unknown"
 		r.Reason = "complete authoritative use and retention evidence unavailable"
+	}
+	if s.opts.enumerateOnly {
+		r.UsageReason = "physical enumeration only; byte usage unknown"
+		s.out.Resources = append(s.out.Resources, r)
+		return
 	}
 	useRepository := r.useRepository
 	if useRepository == "" && r.Repository != "" && strings.HasPrefix(r.Identity, "cache:") {

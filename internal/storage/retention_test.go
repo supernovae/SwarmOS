@@ -2019,3 +2019,100 @@ func storageFixtureTracker(t *testing.T, root, value string) {
 	t.Helper()
 	put(t, filepath.Join(root, ".swarm", "config.yaml"), "version: 1\ntracker: "+value+"\ndefault_agent: mock\ndefault_gate: none\nlease:\n  duration: 30m\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  mock:\n    binary: git\n    harness: mock\n")
 }
+
+func TestReclamationBoundedDiscoveryProgress(t *testing.T) {
+	for _, bound := range []string{"entries", "bytes"} {
+		for _, uncertainty := range []string{"", "active", "retention", "symlink", "parent", "unselected"} {
+			t.Run(bound+"/"+uncertainty, func(t *testing.T) {
+				o, m, r := reclaimFixture(t, "agent-build")
+				o.Limits = DefaultLimits()
+				if bound == "entries" {
+					o.Limits.Entries = 160
+				} else {
+					o.Limits.Bytes = 2 << 20
+				}
+				for i := 0; i < 200; i++ {
+					put(t, filepath.Join(o.CacheRoot, "agent-build", fmt.Sprint(i), "go", "data"), "keep")
+				}
+				preview, err := PreviewReclamation(context.Background(), o)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if preview.Complete || len(preview.DiscoveryReasons) == 0 {
+					t.Fatalf("missing discovery exhaustion: %+v", preview)
+				}
+				if preview.DiscoveryCounters.Entries > o.Limits.Entries || preview.DiscoveryCounters.Bytes > o.Limits.Bytes {
+					t.Fatal("budget exceeded")
+				}
+				switch uncertainty {
+				case "active":
+					if _, err := m.AcquireUse(context.Background(), r); err != nil {
+						t.Fatal(err)
+					}
+				case "retention":
+					o.Retention = nil
+				case "unselected":
+					r.Repository = strings.Repeat("a", 32)
+					// A mismatched registration is created separately; both locations must remain protected.
+					if _, err := m.AcquireUse(context.Background(), r); err != nil {
+						t.Fatal(err)
+					}
+				case "symlink", "parent":
+					path := r.Location
+					if uncertainty == "parent" {
+						path = filepath.Dir(path)
+					}
+					if err := os.Rename(path, path+"-saved"); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(path+"-saved", path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				report, err := ApplyReclamation(context.Background(), o)
+				if err != nil {
+					t.Fatalf("report=%+v error=%v", report, err)
+				}
+				if report.Complete || len(report.DiscoveryReasons) == 0 {
+					t.Fatal("expected incomplete physical discovery")
+				}
+				if _, err := os.Stat(filepath.Join(o.CacheRoot, "agent-build", "0", "go", "data")); err != nil {
+					t.Fatal("unregistered sentinel removed", err)
+				}
+				for _, result := range report.Resources {
+					if result.Resource.Location != r.Location {
+						continue
+					}
+					if uncertainty == "" && result.Outcome == ReclaimRemoved {
+						if _, err := os.Stat(r.Location); !os.IsNotExist(err) {
+							t.Fatal("leaf survived", err)
+						}
+						return
+					}
+					if uncertainty != "" && result.Outcome == ReclaimRetained && result.Reason != "" {
+						if _, err := os.Lstat(r.Location); err != nil {
+							t.Fatal("uncertain leaf removed", err)
+						}
+						return
+					}
+				}
+				t.Fatalf("unexpected proven leaf outcome: %+v", report)
+			})
+		}
+	}
+}
+
+func TestReclamationBoundedDiscoveryIncompleteLedger(t *testing.T) {
+	o, m, r := reclaimFixture(t, "agent-build")
+	o.Limits = DefaultLimits()
+	o.Limits.Records = 1
+	// Registration traversal cannot establish the conflict set within one record.
+	addReclaimResource(t, o, m, r.Repository, "validate-build")
+	report, err := ApplyReclamation(context.Background(), o)
+	if err == nil || report.Complete {
+		t.Fatalf("partial ledger accepted: %+v %v", report, err)
+	}
+	if _, err := os.Stat(r.Location); err != nil {
+		t.Fatal("partial ledger deleted leaf", err)
+	}
+}

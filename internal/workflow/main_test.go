@@ -3,16 +3,29 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestMain keeps the persistent Go build cache that host validation creates
 // under XDG_CACHE_HOME out of the real user cache directory.
 func TestMain(m *testing.M) {
+	if len(os.Args) == 3 && os.Args[1] == "internal-native-exec" {
+		if err := sandbox.ExecNativeScope(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	ledgerRoot, ledgerErr := os.MkdirTemp("", "swarm-test-ledger-*")
 	if ledgerErr != nil {
 		panic(ledgerErr)
@@ -91,5 +104,42 @@ func TestStorageLedgerProducerIgnoresEnvironment(t *testing.T) {
 	restored, err := storageuse.ControlRoot()
 	if err != nil || restored != control {
 		t.Fatal("resolver moved", restored, err)
+	}
+}
+
+// TestNativeHelperDispatch exercises the helper protocol without a live manager.
+func TestNativeHelperDispatch(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, malformed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("malformed=%v", malformed), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, executable, "internal-native-exec", "swarm-native-test.scope")
+			if malformed {
+				file, err := os.Open(os.DevNull)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer file.Close()
+				cmd.ExtraFiles = []*os.File{file, file, file}
+			}
+			output, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("helper did not terminate: %v\n%s", ctx.Err(), output)
+			}
+			if err == nil {
+				t.Fatalf("helper accepted invalid control descriptors: %s", output)
+			}
+			want := "native control pipe"
+			if runtime.GOOS != "linux" {
+				want = "native storage scope unavailable"
+			}
+			if !strings.Contains(string(output), want) {
+				t.Fatalf("helper validation not reached: %v\n%s", err, output)
+			}
+		})
 	}
 }

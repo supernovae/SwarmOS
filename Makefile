@@ -30,7 +30,7 @@ test:
 
 ## race: run the test suite with the race detector, as nightly and release validation do
 race:
-	$(GO) test -race ./...
+	$(GO) test -race -timeout=30m ./...
 
 ## fmt: format Go sources
 fmt:

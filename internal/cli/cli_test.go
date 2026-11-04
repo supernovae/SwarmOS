@@ -539,7 +539,7 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 	if err := json.Unmarshal([]byte(planJSON), &parsedPlan); err != nil {
 		t.Fatalf("unmarshal plan JSON: %v\n%s", err, planJSON)
 	}
-	if parsedPlan.Report.EpicIssue == nil || !parsedPlan.Report.EpicCreated || !parsedPlan.Report.EpicIssue.IsEpic() {
+	if parsedPlan.Report.EpicIssue == nil || !parsedPlan.Report.EpicCreated || !parsedPlan.Report.EpicIssue.IsParent() || parsedPlan.Report.EpicIssue.Type != "" {
 		t.Fatalf("expected epic_issue (EpicCreated=true), got %+v", parsedPlan.Report)
 	}
 	if len(parsedPlan.Report.CreatedIssues) != 1 || len(parsedPlan.Report.ExistingIssues) != 0 {
@@ -565,12 +565,20 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 
 type mockDoctorTracker struct {
 	tracker.Tracker
+	ownerType   string
+	metadataErr error
+	typeCalls   int
 	epicTypeErr error
 	authErr     error
 	created     int
 }
 
+func (m *mockDoctorTracker) RepositoryOwnerType(context.Context) (string, error) {
+	return m.ownerType, m.metadataErr
+}
+
 func (m *mockDoctorTracker) CheckIssueType(_ context.Context, issueType string) error {
+	m.typeCalls++
 	return m.epicTypeErr
 }
 
@@ -659,6 +667,7 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	}
 	mockTr := &mockDoctorTracker{
 		Tracker:     f.tracker,
+		ownerType:   "User",
 		epicTypeErr: errors.New("issue type \"Epic\" is not enabled"),
 		authErr:     errors.New("actor lacks maintainer permission"),
 	}
@@ -675,12 +684,34 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 		t.Fatalf("doctor should report WARN without failing: %v\n%s", err, docBuf.String())
 	}
 	docText := docBuf.String()
-	if !strings.Contains(docText, "github-epic-type") || !strings.Contains(docText, "github-epic-auth") || !strings.Contains(docText, "WARN") {
+	if !strings.Contains(docText, "github-hierarchy") || strings.Contains(docText, "github-epic-type") || strings.Contains(docText, "github-epic-auth") {
 		t.Fatalf("expected doctor output to include WARN for github-epic-type and github-epic-auth:\n%s", docText)
+	}
+	if mockTr.typeCalls != 0 || !strings.Contains(docText, "require an organization") {
+		t.Fatalf("doctor used type API or missing guidance: %s", docText)
 	}
 	if mockTr.created != 0 {
 		t.Fatalf("doctor must be read-only, created %d issues", mockTr.created)
 	}
+	for _, tc := range []struct {
+		owner       string
+		metadataErr error
+	}{{"Organization", nil}, {"", errors.New("metadata unavailable")}, {"User", nil}} {
+		mockTr.ownerType = tc.owner
+		mockTr.metadataErr = tc.metadataErr
+		command := f.command(&RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: mockTr})
+		var output bytes.Buffer
+		command.SetOut(&output)
+		command.SetErr(&bytes.Buffer{})
+		command.SetArgs([]string{"--root", f.root, "repo", "doctor", "--backend", "github", "--json"})
+		if err := command.Execute(); err != nil {
+			t.Fatalf("doctor JSON: %v", err)
+		}
+		if !json.Valid(output.Bytes()) || !strings.Contains(output.String(), "github-hierarchy") || mockTr.typeCalls != 0 || mockTr.created != 0 {
+			t.Fatalf("%s", output.String())
+		}
+	}
+
 }
 
 func TestForkCLISmoke(t *testing.T) {
@@ -2252,5 +2283,64 @@ func TestCLILintAbsentTaskGateDisplay(t *testing.T) {
 	out = f.must(t, "issue", "lint", strconv.Itoa(n))
 	if !strings.Contains(out, "gate=agent") || !strings.Contains(out, "task_gate=none") {
 		t.Fatal(out)
+	}
+}
+
+func TestCLIParentCreation(t *testing.T) {
+	f := newCLIFixture(t)
+	body := filepath.Join(f.root, "parent.md")
+	if err := os.WriteFile(body, []byte("Roadmap"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, typed := range []bool{false, true} {
+		args := []string{"issue", "parent", "create", "--title", "Parent", "--body-file", body, "--json"}
+		if typed {
+			args = append(args, "--epic")
+		}
+		out := f.must(t, args...)
+		var result struct {
+			Kind  string
+			Issue *tracker.Issue
+		}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Kind != "parent" || !result.Issue.IsParent() || result.Issue.IsEpic() != typed {
+			t.Fatalf("%s", out)
+		}
+		number := strconv.Itoa(result.Issue.Number)
+		for _, operation := range []string{"approve", "claim"} {
+			if _, err := f.run("issue", operation, number); err == nil {
+				t.Fatalf("%s accepted parent", operation)
+			}
+		}
+	}
+	for _, args := range [][]string{{"repo", "plan", "--epic", "--scan", "--apply"}, {"repo", "plan", "--epic", "--from", body}} {
+		if _, err := f.run(args...); err == nil {
+			t.Fatalf("accepted %v", args)
+		}
+	}
+}
+
+func TestCLIParentLabelSync(t *testing.T) {
+	f := newCLIFixture(t)
+	for n := 0; n < 2; n++ {
+		out := f.must(t, "repo", "init", "--sync-labels")
+		if !strings.Contains(out, fmt.Sprintf("Synced %d swarm:* labels", len(tracker.DefaultSwarmLabels()))) {
+			t.Fatal(out)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(f.root, ".swarm", "local-tracker", "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state struct {
+		Labels map[string]tracker.LabelSpec `json:"defined_labels"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Labels[tracker.ParentLabel].Name != tracker.ParentLabel {
+		t.Fatal("parent label not synchronized")
 	}
 }

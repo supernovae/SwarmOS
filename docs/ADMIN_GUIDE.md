@@ -8,6 +8,8 @@ flowchart LR
     Midday --> Afternoon["🌇 3. Afternoon<br/>Audit Provenance & Merge<br/>Living Comment & Draft PR"]
 ```
 
+Optional for organization repositories: use `swarm issue parent create --epic --title "Roadmap" --body-file ROADMAP.md` or `swarm repo plan --from ROADMAP.md --apply --epic` to request the Epic issue type. `swarm issue epic create` remains a compatibility alias for typed creation.
+
 ---
 
 ## 1. One-Time Setup: Define Your Repository's Goals, Skills & Issue Forms
@@ -38,8 +40,8 @@ After the first run, Claude Code and OpenCode also have the guide as `/swarm-onb
 
 > [!NOTE]
 > **GitHub Organization & Repository Checklist:**
-> 1. **Enable the `Epic` Issue Type**: In your GitHub Organization Settings (**Settings → Issues → Issue types**), ensure the `Epic` issue type is enabled so `swarm repo plan --from <file> --apply` and `swarm issue epic create` can publish native Epic hierarchy and sub-issues.
-> 2. **Verify Current Actor & Issue Type**: Run `swarm repo doctor --backend github` to check whether the `Epic` issue type is enabled on the repository and whether your current GitHub identity has `maintain` or `admin` permission to publish Epics through SwarmOS.
+> 1. **Use Parent Issues**: SwarmOS uses `swarm:parent` issues with native sub-issues on personal and organization repositories. No issue type setup is needed.
+> 2. **Check Repository Setup**: Run `swarm repo doctor --backend github`. Publishing parent hierarchies requires repository `maintain` or `admin` permission.
 > 3. **Review Issue Forms & Intake Settings**: `swarm repo init` creates local `.github/ISSUE_TEMPLATE/` forms and syncs `swarm:*` labels, while GitHub's own web UI and API issue creation remain governed by your GitHub repository and organization settings. Review your repository's issue forms (`swarm-community.yml` vs `swarm-workunit.yml`) and organization issue-type permissions in GitHub Settings.
 As a repo admin, tailor three foundational files before your team or community starts swarming:
 
@@ -62,15 +64,15 @@ Commit your `.swarm/` and `.github/` changes to `main` so they become the immuta
 
 Instead of waiting for uncoordinated PRs to land in your review queue, start the day by shaping the backlog with `swarm repo plan` (using `/swarm-project-plan` in Claude Code / OpenCode, or the shared `.swarm/skills/triage-and-plan.md` skill as a regular prompt in Codex / `omp`).
 
-### Option A: Turn an Idea into a Roadmap File, Native Epic & Child WorkUnits (`--from`)
+### Option A: Turn an Idea into a Roadmap File, Parent Issue & Child WorkUnits (`--from`)
 
-Write a repo-local Markdown roadmap (`ROADMAP.md`) with a top-level `# <Epic Title>` and one `## <Task Title>` section per child task (each with `### Objective`, `### Constraints`, observable `### Acceptance Criteria` checkboxes, and optional `depends on: <earlier-step-number>`), then preview and publish the hierarchy:
+Write a repo-local Markdown roadmap (`ROADMAP.md`) with a top-level `# <Roadmap Title>` and one `## <Task Title>` section per child task (each with `### Objective`, `### Constraints`, observable `### Acceptance Criteria` checkboxes, and optional `depends on: <earlier-step-number>`), then preview and publish the hierarchy:
 
 ```bash
-# 1. Preview the Epic and Step 1..N child tasks and execution waves (no tracker changes)
+# 1. Preview the Parent and Step 1..N child tasks and execution waves (no tracker changes)
 swarm repo plan --from ROADMAP.md --backend github
 
-# 2. Maintainer-only: publish one unlabeled Epic issue (type: Epic) containing the full plan
+# 2. Maintainer-only: publish one parent issue labelled `swarm:parent` containing the full plan
 #    and attach draft child WorkUnit sub-issues (swarm:draft)
 swarm repo plan --from ROADMAP.md --apply --backend github
 
@@ -80,10 +82,10 @@ swarm issue approve 2 --backend github
 
 Publishing also mirrors child dependencies as native blocked-by links and sets sub-issue order to match the roadmap. Projection failures produce warnings while preserving created issues and their WorkUnits; hierarchy-link failures still stop publication. Reapplying retries these projections for reused children.
 
-Re-running `swarm repo plan --from ROADMAP.md --apply` is idempotent: it reuses the existing Epic and unchanged child issues, refreshes the Epic body if you added new tasks, creates and links only the new child tasks as `swarm:draft`, and reports any removed tasks as leftovers without closing them. You can also create a standalone Epic and attach child WorkUnits directly:
+Re-running `swarm repo plan --from ROADMAP.md --apply` is idempotent: it reuses the existing parent issue and unchanged child issues, refreshes the parent body if you added new tasks, creates and links only the new child tasks as `swarm:draft`, and reports any removed tasks as leftovers without closing them. You can also create a standalone parent issue and attach child WorkUnits directly:
 
 ```bash
-swarm issue epic create --title "Q4 Reliability Epic" --body-file EPIC.md --backend github
+swarm issue parent create --title "Q4 Reliability Roadmap" --body-file EPIC.md --backend github
 swarm issue create --parent 10 --title "Add circuit breaker" \
   --objective "Prevent cascading retries" \
   --constraint "No new external dependencies" \
@@ -103,7 +105,7 @@ swarm repo plan --scan --backend github
 swarm repo plan --scan --apply --normalize --publish-issue 1 --backend github
 ```
 
-What `swarm repo plan --scan` does for you (while automatically skipping non-executable `Epic` issues):
+What `swarm repo plan --scan` does for you (while automatically skipping non-executable parent issues):
 - **Classifies open issues (including `swarm:community` intake reports) with a triage label**:
   - `swarm:ready` — Valid, maintainer-approved `WorkUnit` ready for agents to claim.
   - `swarm:draft` — Valid structured `WorkUnit` awaiting your `swarm issue approve <N>`.
@@ -210,10 +212,10 @@ Once you merge the PR for a Wave 1 issue, any Wave 2 issues that listed it under
 | Daily Admin Task | Command |
 | :--- | :--- |
 | Sync all 10 `swarm:*` labels (`ready`, `draft`, `community`, `needs-scope`, `blocked`, etc.) | `swarm repo init --sync-labels --backend github` |
-| Check GitHub `Epic` issue type availability and maintainer `create-epic` permission | `swarm repo doctor --backend github` |
+| Check repository setup and parent hierarchy guidance | `swarm repo doctor --backend github` |
 | Preview `ROADMAP.md` decomposition (`Step 1..N`) without tracker writes | `swarm repo plan --from ROADMAP.md --backend github` |
-| Publish native `Epic` and linked `swarm:draft` child WorkUnits | `swarm repo plan --from ROADMAP.md --apply --backend github` |
-| Create a standalone `Epic` issue from a Markdown file | `swarm issue epic create --title "..." --body-file EPIC.md --backend github` |
+| Publish parent issue and linked `swarm:draft` child WorkUnits | `swarm repo plan --from ROADMAP.md --apply --backend github` |
+| Create a standalone parent issue from a Markdown file | `swarm issue parent create --title "..." --body-file EPIC.md --backend github` |
 | Scan open issues, apply triage labels & normalize raw/`swarm:community` issues | `swarm repo plan --scan --apply --normalize --backend github` |
 | Turn what agents learned in merged PRs into `.swarm/rules/lessons.md` entries | `swarm repo lessons --apply --backend github` |
 | Lint and approve a child WorkUnit issue for agent execution | `swarm issue lint <N> && swarm issue approve <N> --backend github` |

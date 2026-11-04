@@ -145,6 +145,8 @@ func TestGitHubTrackerAuthorizePermissionsAndHumanReview(t *testing.T) {
 		{name: "admin approves task", permission: "admin", reqPermission: "approve-task"},
 		{name: "read cannot approve task", permission: "read", reqPermission: "approve-task", wantErr: true},
 		{name: "bot cannot review as human", accountType: "Bot", permission: "admin", reqPermission: "review-human", wantErr: true},
+		{name: "write cannot create parent", permission: "write", reqPermission: "create-parent", wantErr: true},
+		{name: "maintain can create parent", permission: "maintain", reqPermission: "create-parent"},
 		{name: "write cannot create epic", permission: "write", reqPermission: "create-epic", wantErr: true},
 		{name: "maintain can create epic", permission: "maintain", reqPermission: "create-epic"},
 		{name: "admin can create epic", permission: "admin", reqPermission: "create-epic"},
@@ -767,5 +769,58 @@ func TestDecompositionCloseCompletedWire(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatal(calls)
+	}
+}
+
+func TestParentPredicate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		issue *Issue
+		want  bool
+	}{
+		{"nil", nil, false}, {"ordinary", &Issue{}, false},
+		{"label", &Issue{Labels: []string{ParentLabel, "swarm:ready"}}, true},
+		{"typed", &Issue{Type: "Epic"}, true},
+		{"both", &Issue{Type: "Epic", Labels: []string{ParentLabel}}, true},
+		{"decomposed", &Issue{Labels: []string{"swarm:decomposed"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.issue.IsParent() != tc.want {
+				t.Fatal(tc.issue)
+			}
+		})
+	}
+}
+
+func TestGitHubParentDefaultWithoutIssueTypes(t *testing.T) {
+	ctx := context.Background()
+	tr := newHTTPGitHubTracker(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/octo/swarm":
+			writeJSON(t, w, map[string]any{"owner": map[string]string{"type": "User"}})
+		case "/repos/octo/swarm/issues":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			if _, exists := payload["type"]; exists {
+				t.Error("default parent sent type")
+			}
+			labels, _ := payload["labels"].([]any)
+			if len(labels) != 1 || labels[0] != ParentLabel {
+				t.Errorf("labels: %v", labels)
+			}
+			writeJSON(t, w, map[string]any{"number": 1, "labels": []map[string]string{{"name": ParentLabel}}})
+		default:
+			t.Errorf("forbidden default request: %s", r.URL.Path)
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	if owner, err := tr.RepositoryOwnerType(ctx); err != nil || owner != "User" {
+		t.Fatalf("%s %v", owner, err)
+	}
+	issue, err := tr.CreateIssue(ctx, "Parent", "Plan", []string{ParentLabel})
+	if err != nil || !issue.IsParent() || issue.IsEpic() {
+		t.Fatalf("%+v %v", issue, err)
 	}
 }

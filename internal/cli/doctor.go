@@ -79,26 +79,20 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 				checks = append(checks, run.Run("security", "plan-reviewers", func() harness.DoctorCheck { return doctorReviewerCheck(cfg) }))
 			}
 			if checkGHAuth && (strings.EqualFold(rootOpts.Backend, "github") || rootOpts.trackerOverride != nil || rootOpts.Repo != "" || hasGitRemote(repoRoot)) {
-				var tr tracker.Tracker
-				var resolveErr error
-				checks = append(checks, run.Run("tracker", "github-epic-type", func() harness.DoctorCheck {
-					tr, resolveErr = rootOpts.resolveTracker(cmd)
-					if resolveErr != nil {
-						return harness.DoctorCheck{Category: "tracker", Name: "github-epic-type", Status: "WARN", Detail: fmt.Sprintf("unable to check GitHub Epic issue type (configure GitHub remote and token): %v", resolveErr)}
+				checks = append(checks, run.Run("tracker", "github-hierarchy", func() harness.DoctorCheck {
+					detail := "Parent issues with native sub-issues are supported; use swarm issue parent create"
+					tr, err := rootOpts.resolveTracker(cmd)
+					if err != nil {
+						detail += fmt.Sprintf("; repository metadata unavailable: %v", err)
+					} else if metadata, ok := tr.(tracker.RepositoryMetadata); ok {
+						ownerType, err := metadata.RepositoryOwnerType(cmd.Context())
+						if err != nil {
+							detail += fmt.Sprintf("; repository metadata unavailable: %v", err)
+						} else if strings.EqualFold(ownerType, "User") {
+							detail += "; optional Epic issue types require an organization repository"
+						}
 					}
-					if err := tr.CheckIssueType(cmd.Context(), "Epic"); err != nil {
-						return harness.DoctorCheck{Category: "tracker", Name: "github-epic-type", Status: "WARN", Detail: err.Error()}
-					}
-					return harness.DoctorCheck{Category: "tracker", Name: "github-epic-type", Status: "OK", Detail: "organization issue type \"Epic\" is enabled"}
-				}))
-				checks = append(checks, run.Run("tracker", "github-epic-auth", func() harness.DoctorCheck {
-					if resolveErr != nil {
-						return harness.DoctorCheck{Category: "tracker", Name: "github-epic-auth", Status: "WARN", Detail: fmt.Sprintf("unable to check maintainer create-epic permission: %v", resolveErr)}
-					}
-					if err := tr.Authorize(cmd.Context(), "create-epic"); err != nil {
-						return harness.DoctorCheck{Category: "tracker", Name: "github-epic-auth", Status: "WARN", Detail: fmt.Sprintf("current actor cannot publish Epics (maintainer/admin role required): %v", err)}
-					}
-					return harness.DoctorCheck{Category: "tracker", Name: "github-epic-auth", Status: "OK", Detail: "current actor is authorized to publish Epics (maintain/admin)"}
+					return harness.DoctorCheck{Category: "tracker", Name: "github-hierarchy", Status: "INFO", Detail: detail}
 				}))
 			}
 

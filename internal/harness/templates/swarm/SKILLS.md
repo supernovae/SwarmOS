@@ -40,9 +40,11 @@ When working interactively on a single approved `WorkUnit` issue (using `/swarm-
    - Use `swarm pr rebase <PR>` for ancestry changes; a newer base requires maintainer approval of the linked issue first.
    - Work in the separate reported PR worktree, satisfy the plan gate, then run `swarm pr validate <PR>` and `swarm pr submit <PR>` to update the same PR. Maintainers need upstream write access; contributors revise their own fork PRs by adding `--fork` (for example, `swarm --fork pr work <PR>`), and a maintainer approves the revised plan with `swarm issue review-plan <issue> --approve`.
 
-## 2. Repository-Wide Roadmap Ideation, Epics & Backlog Triage (`swarm repo plan`)
+## 2. Repository-Wide Roadmap Ideation, Parent Issues & Backlog Triage (`swarm repo plan`)
 
-Maintainers use `swarm repo plan` (with `/swarm-project-plan` in Claude Code / OpenCode, or by referencing `.swarm/skills/triage-and-plan.md` in regular prompts with Codex / `omp`) to turn repository-wide ideas into a reviewed plan file, a non-executable parent `Epic` issue, and linked draft child `WorkUnit` issues:
+Optional for organization repositories: use `swarm issue parent create --epic --title "Roadmap" --body-file ROADMAP.md` or `swarm repo plan --from ROADMAP.md --apply --epic` to request the Epic issue type. `swarm issue epic create` remains a compatibility alias for typed creation.
+
+Maintainers use `swarm repo plan` (with `/swarm-project-plan` in Claude Code / OpenCode, or by referencing `.swarm/skills/triage-and-plan.md` in regular prompts with Codex / `omp`) to turn repository-wide ideas into a reviewed plan file, a non-executable parent issue, and linked draft child `WorkUnit` issues:
 
 1. **Interactive Idea $\rightarrow$ Repo-Local Plan File**:
    - Discuss the idea and outcome, inspect `.swarm/goals.md`, `.swarm/rules/`, implementation code, and open issues, and agree on independent `## <title>` tasks with `### Objective`, `### Constraints`, observable `### Acceptance Criteria` checkboxes, and explicit `depends on: <earlier-step-number>` lines.
@@ -51,12 +53,12 @@ Maintainers use `swarm repo plan` (with `/swarm-project-plan` in Claude Code / O
    ```bash
    swarm repo plan --from ROADMAP.md --backend github
    ```
-3. **Publish Native Epic & Draft Child WorkUnits (Maintainer Only)**:
-   - Only on explicit maintainer instruction, publish the unlabeled `Epic` issue (`type: Epic`) containing the full plan and attach draft child `WorkUnit` sub-issues (`swarm:draft`):
+3. **Publish Parent Issue & Draft Child WorkUnits (Maintainer Only)**:
+   - Only on explicit maintainer instruction, publish the parent issue (`swarm:parent`) containing the full plan and attach draft child `WorkUnit` sub-issues (`swarm:draft`):
      ```bash
      swarm repo plan --from ROADMAP.md --apply --backend github
      ```
-   - Selectively approve child `WorkUnit` issues when ready for workers to claim (never approve or execute the `Epic` issue itself):
+   - Selectively approve child `WorkUnit` issues when ready for workers to claim (never approve or execute the parent issue itself):
      ```bash
      swarm issue approve <child-issue-number> --backend github
      ```

@@ -99,7 +99,7 @@ func (l *LocalTracker) Authorize(ctx context.Context, permission string) error {
 			return nil
 		}
 		return fmt.Errorf("local actor %q is not authorized for %s", l.user, permission)
-	case "create-epic":
+	case "create-epic", "create-parent":
 		if l.assoc == "OWNER" {
 			return nil
 		}

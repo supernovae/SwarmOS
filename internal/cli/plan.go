@@ -15,6 +15,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 	var normalize bool
 	var agentName string
 	var apply bool
+	var epic bool
 	var ready bool
 	var publishIssue int
 	var staleDays int
@@ -25,6 +26,9 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 		Short: "Decompose a project roadmap into WorkUnit issues (--from) or scan/import open issues against project goals (--scan)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if epic && (fromFile == "" || !apply || scanOpen) {
+				return fmt.Errorf("--epic requires --from and --apply, without --scan")
+			}
 			if fromFile != "" && scanOpen {
 				return fmt.Errorf("--from and --scan are mutually exclusive")
 			}
@@ -76,6 +80,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 				Normalize:    normalize,
 				AgentName:    agentName,
 				Apply:        apply,
+				Epic:         epic,
 				Ready:        ready,
 				PublishIssue: publishIssue,
 				StaleDays:    staleDays,
@@ -117,6 +122,7 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&scanOpen, "scan", false, "Scan, sense-make, and audit open tracker issues against project goals and rules")
 	cmd.Flags().BoolVar(&normalize, "normalize", false, "When used with --scan --apply, convert unstructured raw issues into structured WorkUnit markdown")
 	cmd.Flags().StringVar(&agentName, "agent", "", "Optional configured planner agent to draft/enrich the project plan")
+	cmd.Flags().BoolVar(&epic, "epic", false, "With --from and --apply, use the optional organization Epic issue type")
 	cmd.Flags().BoolVar(&apply, "apply", false, "Create/update issues, apply triage labels, or publish report on the tracker")
 	cmd.Flags().BoolVar(&ready, "ready", false, "When used with --apply, also approve created/normalized WorkUnit issues as swarm:ready")
 	cmd.Flags().IntVar(&publishIssue, "publish-issue", 0, "Optional tracking issue number to post the sense-making report to when --apply is set")

@@ -610,3 +610,155 @@ func TestNextSelectionHumanPlanAdvice(t *testing.T) {
 		})
 	}
 }
+
+func TestParentLabelOrdering(t *testing.T) {
+	f := newCLIFixture(t)
+	ctx := context.Background()
+	parent, err := f.tracker.CreateIssue(ctx, "Parent", "", []string{tracker.ParentLabel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := f.tracker.CreateIssue(ctx, "a", "", nil)
+	b, _ := f.tracker.CreateIssue(ctx, "b", "", nil)
+	if err := f.tracker.LinkSubIssue(ctx, parent.Number, b.Number); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.tracker.LinkSubIssue(ctx, parent.Number, a.Number); err != nil {
+		t.Fatal(err)
+	}
+	got, err := orderReadyIssues(ctx, f.tracker, []*tracker.Issue{a, b}, &bytes.Buffer{})
+	if err != nil || !reflect.DeepEqual(issueNumbers(got), []int{b.Number, a.Number}) {
+		t.Fatalf("%v %v", issueNumbers(got), err)
+	}
+}
+
+func TestNextSelectionEntryPointsParentLabel(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"claim", "work", "node", "fallback"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCLIFixture(t)
+			ctx := context.Background()
+			epic, err := f.tracker.CreateIssue(ctx, "Parent", "", []string{tracker.ParentLabel})
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := f.create(t, "agent")
+			second := f.create(t, "agent")
+			for _, n := range []int{first, second} {
+				f.must(t, "issue", "approve", strconv.Itoa(n))
+			}
+			for _, n := range []int{second, first} {
+				if err := f.tracker.LinkSubIssue(ctx, epic.Number, n); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var tr tracker.Tracker = f.tracker
+			want := second
+			if mode == "fallback" {
+				tr = &orderingTracker{Tracker: f.tracker, parents: map[int]int{first: epic.Number, second: epic.Number}, listErr: errors.New("offline"), calls: map[int]int{}}
+				want = first
+			}
+			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+			var output, diagnostics bytes.Buffer
+			cmd.SetOut(&output)
+			cmd.SetErr(&diagnostics)
+			args := []string{"issue", "claim", "--next", "--agent", "mock", "--json"}
+			if mode == "work" {
+				args = []string{"issue", "work", "--next", "--agent", "mock", "--headless", "--progress=false"}
+			}
+			if mode == "node" {
+				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
+			}
+			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("%v %s %s", err, &output, &diagnostics)
+			}
+			if f.state(t, want).Lease.ClaimID == "" {
+				t.Fatal("expected sibling was not selected")
+			}
+			other := first
+			if want == first {
+				other = second
+			}
+			if f.state(t, other).Lease.ClaimID != "" {
+				t.Fatal("selected extra candidate")
+			}
+			if mode == "fallback" {
+				if !strings.Contains(diagnostics.String(), "warning:") || !json.Valid(output.Bytes()) {
+					t.Fatalf("warning/output: %s %s", &diagnostics, &output)
+				}
+			}
+		})
+	}
+}
+
+// Repository traversal retains the registry's existing order, regardless of
+// relative issue numbers in different repositories.
+func TestNextSelectionFallbackEligibilityParentLabel(t *testing.T) {
+	t.Parallel()
+	f := newCLIFixture(t)
+	ctx := context.Background()
+	epic, err := f.tracker.CreateIssue(ctx, "Parent", "", []string{"swarm:ready", tracker.ParentLabel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := f.create(t, "agent")
+	capability := f.create(t, "agent")
+	active := f.create(t, "agent")
+	human := f.create(t, "human")
+	prOpen := f.create(t, "agent")
+	winner := f.create(t, "agent")
+	for _, n := range []int{blocked, capability} {
+		issue, err := f.tracker.GetIssue(ctx, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == blocked {
+			wu.DependsOn = []int{999}
+		} else {
+			wu.RequiredCapabilities = []string{"unavailable-test-capability"}
+		}
+		raw, err := yaml.Marshal(wu)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Replace the body with a canonical fenced contract before approval.
+		if _, err := f.tracker.UpdateIssueBody(ctx, n, "```yaml\n"+string(raw)+"```\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, n := range []int{blocked, capability, active, human, prOpen, winner} {
+		f.must(t, "issue", "approve", strconv.Itoa(n))
+	}
+	f.must(t, "issue", "claim", strconv.Itoa(active), "--agent", "mock")
+	f.must(t, "issue", "work", strconv.Itoa(human), "--agent", "mock", "--headless")
+	if err := f.tracker.AddLabels(ctx, prOpen, []string{"swarm:pr-open"}); err != nil {
+		t.Fatal(err)
+	}
+	parents := map[int]int{}
+	for _, n := range []int{blocked, capability, active, human, prOpen, winner} {
+		parents[n] = epic.Number
+	}
+	tr := &orderingTracker{Tracker: f.tracker, parents: parents, listErr: errors.New("offline"), calls: map[int]int{}}
+	cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+	var out, diagnostics bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&diagnostics)
+	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "claim", "--next", "--agent", "mock", "--json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("%v %s %s", err, &out, &diagnostics)
+	}
+	var result struct{ Selection pulledWorkUnit }
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Selection.Issue.Number != winner || !strings.Contains(diagnostics.String(), "warning:") {
+		t.Fatalf("selected %d: %s", result.Selection.Issue.Number, &diagnostics)
+	}
+}
+
+// createTouching creates an approved task whose objective names touchpoint.

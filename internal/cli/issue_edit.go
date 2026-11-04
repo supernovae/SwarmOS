@@ -70,8 +70,8 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if issue.IsEpic() {
-			return fmt.Errorf("issue #%d is an Epic; edit requires a WorkUnit", number)
+		if issue.IsParent() {
+			return fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent); edit requires a WorkUnit", number)
 		}
 		edit := contract.WorkUnitEdit{}
 		if cmd.Flags().Changed("title") {
@@ -212,7 +212,7 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if latest.Body != issue.Body || latest.Title != issue.Title || latest.IsEpic() {
+		if latest.Body != issue.Body || latest.Title != issue.Title || latest.IsParent() {
 			return fmt.Errorf("issue #%d changed concurrently; rerun issue edit to review the new version", number)
 		}
 		if err = writeIssueEdit(cmd.Context(), tr, issue, newTitle, body, p.DigestChanged && st != nil && st.ApprovedBy != "", readyLabel); err != nil {

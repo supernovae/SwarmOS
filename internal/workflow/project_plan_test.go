@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"gopkg.in/yaml.v3"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -135,10 +139,10 @@ depends on: 1
 	if err != nil {
 		t.Fatalf("RunProjectPlan --from --apply: %v", err)
 	}
-	if fromReport.EpicIssue == nil || !fromReport.EpicCreated || !fromReport.EpicIssue.IsEpic() {
+	if fromReport.EpicIssue == nil || !fromReport.EpicCreated || !fromReport.EpicIssue.IsParent() {
 		t.Fatalf("expected created Epic issue, got epic=%#v created=%t", fromReport.EpicIssue, fromReport.EpicCreated)
 	}
-	if len(fromReport.EpicIssue.Labels) != 0 {
+	if len(fromReport.EpicIssue.Labels) != 1 || fromReport.EpicIssue.Type != "" {
 		t.Fatalf("expected Epic issue to have no readiness labels, got %v", fromReport.EpicIssue.Labels)
 	}
 	if !strings.Contains(fromReport.EpicIssue.Body, "# Q4 Roadmap") {
@@ -222,7 +226,7 @@ depends on: 1
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(epicAfterScan.Labels) != 0 || epicAfterScan.Body != fromReport.EpicIssue.Body {
+	if len(epicAfterScan.Labels) != 1 || epicAfterScan.Body != fromReport.EpicIssue.Body {
 		t.Fatalf("scan modified Epic issue #%d: labels=%v", epicAfterScan.Number, epicAfterScan.Labels)
 	}
 	updatedRaw, err := tr.GetIssue(ctx, rawIss.Number)
@@ -509,6 +513,8 @@ func TestMarshalProjectPlanReport(t *testing.T) {
 	report := &ProjectPlanReport{
 		Mode: "from-plan", BaseSHA: "abc", PolicyDigest: "policy", GoalsDigest: "goals",
 		EpicIssue:      &tracker.Issue{Number: 42, Title: "Release", Labels: []string{}},
+		ParentIssue:    &tracker.Issue{Number: 42, Title: "Release", Labels: []string{tracker.ParentLabel}},
+		ParentCreated:  true,
 		ProposedUnits:  []contract.WorkUnit{{ID: "task", Title: "Unicode café", Objective: "First\nSecond", Constraints: []string{"Keep order"}, Acceptance: []string{"Works"}, DependsOn: []int{3, 1}, Subtasks: []contract.WorkUnit{{ID: "nested", Constraints: []string{}, Acceptance: []string{}}}}},
 		BacklogItems:   []IssueSenseItem{{IssueNumber: 7, RecommendedLabel: "swarm:draft", Touchpoints: []string{"b.go", "a.go"}}},
 		ExecutionWaves: [][]int{{3, 1}, {7}}, SummaryMarkdown: "# Release\n\nReady.\n",
@@ -558,5 +564,239 @@ func TestMarshalProjectPlanReport(t *testing.T) {
 		if _, err := MarshalProjectPlanReport(tc.r, tc.f); err == nil {
 			t.Fatal("expected error")
 		}
+	}
+}
+
+type parentOnlyTracker struct {
+	tracker.Tracker
+	types int
+}
+
+func (p *parentOnlyTracker) CheckIssueType(context.Context, string) error {
+	p.types++
+	return fmt.Errorf("Epic unavailable; apply without --epic")
+}
+func (p *parentOnlyTracker) CreateTypedIssue(context.Context, string, string, []string, string) (*tracker.Issue, error) {
+	p.types++
+	return nil, fmt.Errorf("unexpected typed creation")
+}
+
+func TestProjectPlanParentDefaultAndEpicOptIn(t *testing.T) {
+	root, _, tr := setupProjectPlanTestRepo(t)
+	proxy := &parentOnlyTracker{Tracker: tr}
+	eng, err := NewEngine(root, proxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "parent-plan.md")
+	if err := os.WriteFile(file, []byte("# Roadmap\n\n## Task\n### Objective\nBuild task\n### Acceptance Criteria\n- [ ] Works\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, options := range []ProjectPlanOptions{{Epic: true, FromFile: file}, {Epic: true, ScanOpen: true, Apply: true}} {
+		if _, err := eng.RunProjectPlan(ctx, options); err == nil {
+			t.Fatal("invalid opt-in accepted")
+		}
+	}
+	if _, err := eng.RunProjectPlan(ctx, ProjectPlanOptions{FromFile: file, Apply: true, Epic: true}); err == nil {
+		t.Fatal("missing type accepted")
+	}
+	issues, _ := tr.ListIssues(ctx, tracker.IssueFilter{State: "all"})
+	if len(issues) != 0 {
+		t.Fatal("type failure mutated issues")
+	}
+	proxy.types = 0
+	for n := 0; n < 2; n++ {
+		report, err := eng.RunProjectPlan(ctx, ProjectPlanOptions{FromFile: file, Apply: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proxy.types != 0 || report.ParentIssue == nil || report.ParentIssue.Type != "" || !report.ParentIssue.IsParent() || report.ParentCreated != (n == 0) || report.ParentIssue.Number != report.EpicIssue.Number {
+			t.Fatalf("%+v calls=%d", report, proxy.types)
+		}
+	}
+	// A normal tracker supports typed creation, but cannot retype an existing parent.
+	normal, _ := NewEngine(root, tr)
+	if _, err := normal.RunProjectPlan(ctx, ProjectPlanOptions{FromFile: file, Apply: true, Epic: true}); err == nil || !strings.Contains(err.Error(), "without --epic") {
+		t.Fatalf("mode mismatch: %v", err)
+	}
+}
+
+func TestProjectPlanEpicOptInAndLegacyReuse(t *testing.T) {
+	root, eng, tr := setupProjectPlanTestRepo(t)
+	file := filepath.Join(root, "typed-plan.md")
+	if err := os.WriteFile(file, []byte("# Typed roadmap\n\n## Task\n### Objective\nBuild task\n### Acceptance Criteria\n- [ ] Works\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	report, err := eng.RunProjectPlan(ctx, ProjectPlanOptions{FromFile: file, Apply: true, Epic: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.ParentIssue.IsEpic() || !slices.Contains(report.ParentIssue.Labels, tracker.ParentLabel) {
+		t.Fatalf("%+v", report.ParentIssue)
+	}
+	if err := tr.RemoveLabel(ctx, report.ParentIssue.Number, tracker.ParentLabel); err != nil {
+		t.Fatal(err)
+	}
+	proxy := &parentOnlyTracker{Tracker: tr}
+	eng, _ = NewEngine(root, proxy)
+	reused, err := eng.RunProjectPlan(ctx, ProjectPlanOptions{FromFile: file, Apply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.types != 0 || reused.ParentCreated || reused.ParentIssue.Number != report.ParentIssue.Number || !reused.ParentIssue.IsEpic() {
+		t.Fatalf("%+v calls=%d", reused, proxy.types)
+	}
+}
+
+// Requests are served in process; every issue-type request is rejected.
+type parentPlanTransport func(*http.Request) (*http.Response, error)
+
+func (f parentPlanTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestProjectPlanUserRepositoryWithoutIssueTypes(t *testing.T) {
+	root, eng, _ := setupProjectPlanTestRepo(t)
+	issues := []map[string]any{}
+	linked := false
+	linkCalls := 0
+	client, err := api.NewRESTClient(api.ClientOptions{Host: "github.com", AuthToken: "fixture", Transport: parentPlanTransport(func(r *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		respond := func(value any) {
+			rec.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(rec).Encode(value); err != nil {
+				t.Error(err)
+			}
+		}
+		path := r.URL.Path
+		switch {
+		case path == "/user":
+			respond(map[string]string{"login": "maintainer", "type": "User"})
+		case path == "/repos/octo/swarm":
+			respond(map[string]any{"owner": map[string]string{"type": "User"}})
+		case path == "/repos/octo/swarm/collaborators/maintainer/permission":
+			respond(map[string]string{"permission": "maintain"})
+		case path == "/repos/octo/swarm/issues" && r.Method == "GET":
+			respond(issues)
+		case path == "/repos/octo/swarm/issues" && r.Method == "POST":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			if _, ok := payload["type"]; ok {
+				t.Error("default roadmap sent typed payload")
+			}
+			labels := []map[string]string{}
+			for _, l := range payload["labels"].([]any) {
+				labels = append(labels, map[string]string{"name": l.(string)})
+			}
+			payload["labels"] = labels
+			payload["number"] = len(issues) + 1
+			payload["id"] = 9000 + len(issues)
+			payload["state"] = "open"
+			issues = append(issues, payload)
+			respond(payload)
+		case path == "/repos/octo/swarm/issues/1":
+			respond(issues[0])
+		case path == "/repos/octo/swarm/issues/2":
+			respond(issues[1])
+		case path == "/repos/octo/swarm/issues/2/parent":
+			if linked {
+				respond(issues[0])
+			} else {
+				http.Error(rec, `{"message":"Not Found"}`, 404)
+			}
+		case path == "/repos/octo/swarm/issues/1/sub_issues" && r.Method == "POST":
+			var payload struct {
+				ID int `json:"sub_issue_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			if payload.ID != 9001 {
+				t.Errorf("native link used %d, want database ID 9001", payload.ID)
+			}
+			linked = true
+			linkCalls++
+			respond(issues[1])
+		default:
+			t.Errorf("forbidden request: %s %s", r.Method, path)
+			http.Error(rec, "unexpected endpoint", 500)
+		}
+		resp := rec.Result()
+		resp.Request = r
+		return resp, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tracker.NewGitHubTrackerWithClient("octo", "swarm", client)
+	if owner, err := tr.RepositoryOwnerType(context.Background()); err != nil || owner != "User" {
+		t.Fatalf("%s %v", owner, err)
+	}
+	eng.Tracker = tr
+	file := filepath.Join(root, "github-parent-plan.md")
+	if err := os.WriteFile(file, []byte("# Personal roadmap\n\n## Task\n### Objective\nBuild task\n### Acceptance Criteria\n- [ ] Works\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for n := 0; n < 2; n++ {
+		report, err := eng.RunProjectPlan(context.Background(), ProjectPlanOptions{FromFile: file, Apply: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !report.ParentIssue.IsParent() || report.ParentIssue.IsEpic() || report.ParentCreated != (n == 0) {
+			t.Fatalf("%+v", report)
+		}
+	}
+	if len(issues) != 2 || !linked || linkCalls != 1 {
+		t.Fatalf("issues=%d linked=%t calls=%d", len(issues), linked, linkCalls)
+	}
+}
+
+func TestProjectPlanParentCannotBeDependencyOrChild(t *testing.T) {
+	for _, typed := range []bool{false, true} {
+		t.Run(fmt.Sprint(typed), func(t *testing.T) {
+			root, eng, tr := setupProjectPlanTestRepo(t)
+			ctx := context.Background()
+			if _, err := tr.CreateIssue(ctx, "Filler", "", nil); err != nil {
+				t.Fatal(err)
+			}
+			var parent *tracker.Issue
+			var err error
+			if typed {
+				parent, err = tr.CreateTypedIssue(ctx, "External parent", "", nil, "Epic")
+			} else {
+				parent, err = tr.CreateIssue(ctx, "External parent", "", []string{tracker.ParentLabel})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(root, "dependency-plan.md")
+			body := fmt.Sprintf("# Dependency roadmap\n\n## Task\n### Objective\nBuild task\n### Acceptance Criteria\n- [ ] Works\ndepends on: %d\n", parent.Number)
+			if err := os.WriteFile(file, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := eng.RunProjectPlan(ctx, ProjectPlanOptions{FromFile: file, Apply: true}); err == nil || !strings.Contains(err.Error(), "cannot be a WorkUnit dependency") {
+				t.Fatalf("%v", err)
+			}
+			issues, _ := tr.ListIssues(ctx, tracker.IssueFilter{State: "all"})
+			if len(issues) != 2 {
+				t.Fatal("dependency rejection mutated issues")
+			}
+			body = strings.Split(body, "depends on:")[0]
+			if err := os.WriteFile(file, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			report, err := eng.RunProjectPlan(ctx, ProjectPlanOptions{FromFile: file, Apply: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tr.AddLabels(ctx, report.CreatedIssues[0].Number, []string{tracker.ParentLabel}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := eng.RunProjectPlan(ctx, ProjectPlanOptions{FromFile: file, Apply: true}); err == nil || !strings.Contains(err.Error(), "child WorkUnit marker") {
+				t.Fatalf("%v", err)
+			}
+		})
 	}
 }

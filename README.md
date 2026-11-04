@@ -208,7 +208,6 @@ swarm node init
 swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
 ```
 
-
 ---
 
 ## Fork-Based Open-Source Contributions (`--fork`)
@@ -265,13 +264,13 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | :--- | :--- |
 | `swarm repo init [--dry-run] [--force] [--sync-labels] [--template-dir <dir>] [--fork-coordinator]` | Scaffold or upgrade `.swarm/`, `AGENTS.md`, `.swarm/SKILLS.md`, GitHub Issue Forms, consumer CI / fork-coordinator workflows, and `/swarm-*` slash commands. Rerun it after upgrading swarm: untouched generated files are updated, while your edits and your own files (including other workflows and an existing `AGENTS.md`, which gets a marked SwarmOS section) are kept (`--force` replaces files at SwarmOS paths, never your `AGENTS.md` or other workflows). `--swarm-version <ref>` overrides the pinned release. `--dry-run` previews the changes, with diffs for existing files, and writes nothing. |
 | `swarm repo onboard` | Print a guide your coding agent follows to onboard or upgrade the repository with you: preview init, propose validation checks from your CI, merge with existing files, and hand back a reviewable diff. Also available as `/swarm-onboard`. |
-| `swarm repo doctor` | Check `git`, `gh`, GitHub `Epic` issue type & maintainer auth, `.swarm/` schemas, and configured agent binaries. Warns, with a suggested `required-checks.yaml` entry, when CI runs a lint or format tool that no required check runs. |
-| `swarm issue create`, `swarm issue epic create`, `swarm issue approve`, `swarm issue lint`, `swarm issue decompose` | Create draft WorkUnits (`--parent`), standalone Epics (`--body-file`), approve revisions, lint schemas (with hints on how to strengthen an issue), or preview a recorded split with `issue decompose <N> --dry-run` and create ordered draft children with `issue decompose <N>` (`--accept-uncovered` records a coverage override). Approve and work children individually; `issue status <N>` shows progress and `issue reconcile <N>` closes the retired parent after every child merges. |
+| `swarm repo doctor` | Check `git`, `gh`, repository hierarchy setup, `.swarm/` schemas, and configured agent binaries. Warns, with a suggested `required-checks.yaml` entry, when CI runs a lint or format tool that no required check runs. |
+| `swarm issue create`, `swarm issue parent create`, `swarm issue approve`, `swarm issue lint`, `swarm issue decompose` | Create draft WorkUnits (`--parent`), standalone parent issues (`--body-file`), approve revisions, lint schemas (with hints on how to strengthen an issue), or preview a recorded split with `issue decompose <N> --dry-run` and create ordered draft children with `issue decompose <N>` (`--accept-uncovered` records a coverage override). Approve and work children individually; `issue status <N>` shows progress and `issue reconcile <N>` closes the retired parent after every child merges. |
 | `swarm issue convert <issue> --objective <text> --acceptance <text> [--dry-run] [--json]` | Convert one intake issue in place into a draft with explicit requirements; see [individual conversion](docs/WORKFLOWS.md#convert-one-intake-issue) and [backlog triage](docs/backlog.md). |
 | `swarm issue edit <issue> [--dry-run] [--json]` | Replace selected WorkUnit sections with lint and approval/claim checks; preview a diff before editing and reapprove changed contracts separately. |
 | `swarm repo lessons [--apply]` | Propose additions to `.swarm/rules/lessons.md` from what agents learned in merged PRs; `--apply` appends them locally for you to review and commit. |
-| `swarm repo plan [--from <file> \| --scan] [--normalize] [--apply] [--ready] [--export <path>]` | Preview `Step N` tasks from a roadmap, publish a native `Epic` with linked draft child WorkUnits (`--apply`), scan and triage open issues and pull requests (`--scan`), or export a plan snapshot. |
-| `swarm issue claim <issue>` / `swarm issue claim --next [--all]` | Claim a specific approved issue or select ready work by lowest issue number, with native epic sibling order, without running agents. |
+| `swarm repo plan [--from <file> \| --scan] [--normalize] [--apply] [--ready] [--export <path>]` | Preview `Step N` tasks from a roadmap, publish a native parent with linked draft child WorkUnits (`--apply`), scan and triage open issues and pull requests (`--scan`), or export a plan snapshot. |
+| `swarm issue claim <issue>` / `swarm issue claim --next [--all]` | Claim a specific approved issue or select ready work by lowest issue number, with native parent sibling order, without running agents. |
 | `swarm issue work [<issue>] [--next] [--all]` | Run `plan`, `review`, `implement`, and `validate`; `--next` shares claim selection order (supports `--dry-run`, `--handoff`, and role overrides). |
 | `swarm issue stage [<issue>] [--phase plan\|implement] [--harness <name>] [--model <name>] [--handoff]` | Stage interactive or harness-produced plan and implementation artifacts onto an active lease with provenance metadata. |
 | `swarm issue review-plan <issue> [--approve\|--reject]` | Run an isolated agent review or record a maintainer's human gate decision. |
@@ -292,6 +291,8 @@ See the [**Fork Mode Guide (`docs/fork-mode.md`)**](docs/fork-mode.md) for archi
 | `swarm issue renew <issue>` / `swarm issue release <issue>` | Extend an active lease's TTL or release a claim back to the queue. |
 | `swarm fork-coordinator --event <path> [--json]` | Process a verified `issue_comment.created` fork worker request inside the upstream GitHub Action. |
 | `swarm version [--json]` | Print version, commit, and platform metadata. |
+
+Optional for organization repositories: use `swarm issue parent create --epic --title "Roadmap" --body-file ROADMAP.md` or `swarm repo plan --from ROADMAP.md --apply --epic` to request the Epic issue type. `swarm issue epic create` remains a compatibility alias for typed creation.
 
 `swarm issue validate` and `swarm pr validate` always run the required checks. With a released build, `issue submit` and `pr submit` reuse a passing validation from the same worker and claim when the checkpoint content, approved base, trusted policy, and swarm version match exactly. Submit reports the original validation's age and tree SHA and includes that provenance in the PR. Edits, context changes, development builds, and fork submissions run checks again. CI always runs its checks. Checks that run on the host share a persistent SwarmOS-owned Go build cache per repository, so repeat runs stay fast; see [validation policy](docs/project.md#validation-policy-and-protected-paths).
 
@@ -321,4 +322,3 @@ For an existing approved WorkUnit PR, use `pr work` to develop or fix its implem
 - **[Changelog (`CHANGELOG.md`)](CHANGELOG.md)** — What changed in each release.
 - **[Security Policy (`SECURITY.md`)](SECURITY.md)** — Trust model, reviewer isolation, vulnerability reporting, and release attestation verification.
 - **[Agent & Contributor Guide (`AGENTS.md`)](AGENTS.md)** — Repository conventions, documentation voice guardrails, and review rules for coding agents and contributors.
-

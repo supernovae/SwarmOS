@@ -35,6 +35,29 @@ func (i *Issue) IsEpic() bool {
 	return i != nil && IsEpicIssueType(i.Type)
 }
 
+// ParentLabel marks a non-executable planning parent.
+const ParentLabel = "swarm:parent"
+
+func (i *Issue) IsParent() bool {
+	if i == nil {
+		return false
+	}
+	if i.IsEpic() {
+		return true
+	}
+	for _, label := range i.Labels {
+		if label == ParentLabel {
+			return true
+		}
+	}
+	return false
+}
+
+// RepositoryMetadata is an optional informational capability.
+type RepositoryMetadata interface {
+	RepositoryOwnerType(context.Context) (string, error)
+}
+
 type Comment struct {
 	ID                int64     `json:"id"`
 	IssueNum          int       `json:"issue_num"`
@@ -126,6 +149,7 @@ type LabelSpec struct {
 
 func DefaultSwarmLabels() []LabelSpec {
 	return []LabelSpec{
+		{Name: ParentLabel, Color: "5319e7", Description: "Non-executable planning parent with native sub-issues"},
 		{Name: "swarm:decomposed", Color: "5319e7", Description: "Parent retired while its recorded child WorkUnits are completed"},
 		{Name: "swarm:ready", Color: "0e8a16", Description: "Work unit vetted and ready for SwarmOS agents"},
 		{Name: "swarm:draft", Color: "cfd3d7", Description: "Structured WorkUnit draft awaiting maintainer approval"},

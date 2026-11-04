@@ -279,6 +279,16 @@ func TestCollaborativeHandoffAndDecomposition(t *testing.T) {
 	if _, err := eng.Preflight(ctx, WorkOptions{RepoRoot: tmp, IssueNumber: epicIss.Number, Phase: "plan"}); err == nil {
 		t.Fatal("expected Preflight to reject Epic issue")
 	}
+	parentMarker, err := lt.CreateIssue(ctx, "Labelled parent", "# Parent", []string{tracker.ParentLabel, "swarm:ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.DecomposeIssue(ctx, tmp, parentMarker.Number, nil, true); err == nil {
+		t.Fatal("decomposed labelled parent")
+	}
+	if _, err := eng.Preflight(ctx, WorkOptions{RepoRoot: tmp, IssueNumber: parentMarker.Number, Phase: "plan"}); err == nil {
+		t.Fatal("executed labelled parent")
+	}
 	// Child #2 depends on Child #1 -> attempting to execute Child #2 before Child #1 is completed must fail with ErrDependenciesUnmet!
 	_, err = eng.ExecuteWork(ctx, WorkOptions{
 		RepoRoot:    tmp,

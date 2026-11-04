@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/fork"
@@ -429,6 +430,10 @@ func TestNodeHumanGateWaitsThenResumesImplementation(t *testing.T) {
 		t.Fatal("worker reclaimed a task blocked on human approval")
 	}
 	f.must(t, "issue", "review-plan", n, "--approve")
+	f.resolverRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+		runner, err := agent.NewConfiguredRunnerWithOptions(name, cfg, local, agent.RunnerOptions{LookupEnv: f.env.lookup()})
+		return acceptanceFixtureRunner{runner}, err
+	}
 	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1", "--auto-submit")
 	if completed := f.state(t, issue); completed.PRNumber == 0 || completed.Lease.Status != "completed" {
 		t.Fatalf("approved human handoff did not reach submission: %+v", completed)
@@ -1363,6 +1368,11 @@ func TestForkCLISmoke(t *testing.T) {
 		t.Fatal("fork main moved unexpectedly", got)
 	}
 
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "stage", "42", "--phase", "implement"); err != nil {
+		t.Fatal(err, out)
+	}
+	seedGitIssueAcceptance(t, aliceRoot, upstreamRoot, maintTracker, 42, now)
+
 	// 6. Alice runs `swarm --fork issue submit 42`: records checkpoint SHA B on fork & upstream, creates Draft PR with head=alice:swarm/issue-42-<claim_id> and base=main
 	submitOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42")
 	if err != nil {
@@ -1929,6 +1939,7 @@ func TestFreshClaimBaseCommands(t *testing.T) {
 						t.Fatal("review used old base")
 					}
 				}
+				seedCompleteIssueAcceptance(t, f, n)
 				f.must(t, "issue", "submit", strconv.Itoa(n))
 			}
 			if mode != "node" && !json.Valid(out.Bytes()) {

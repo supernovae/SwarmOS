@@ -252,6 +252,7 @@ func TestCLIInjectedValidationExecutionMode(t *testing.T) {
 		expectRejected(t, f, "issue", "validate", n)
 		f.must(t, "issue", "validate", n)
 		expectRejected(t, f, "issue", "submit", n)
+		seedCompleteIssueAcceptance(t, f, number)
 		f.must(t, "issue", "submit", n)
 	})
 	t.Run("interactive stage", func(t *testing.T) {
@@ -286,6 +287,7 @@ func TestCLIInjectedValidationExecutionMode(t *testing.T) {
 		}
 		expectRejected(t, f, "issue", "stage", n, "--phase", "implement")
 		f.must(t, "issue", "stage", n, "--phase", "implement")
+		seedCompleteIssueAcceptance(t, f, number)
 		f.must(t, "issue", "submit", n)
 	})
 	t.Run("pr", func(t *testing.T) {

@@ -75,6 +75,7 @@ func TestProgressContainsOnlyMetadataChildOutput(t *testing.T) {
 			}
 			if path == "submit" {
 				f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+				seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 				args = []string{"issue", "submit", n, "--json"}
 			}
 			captures := make(chan string, 10)

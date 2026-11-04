@@ -572,7 +572,12 @@ func (r *continuationRunner) Run(ctx context.Context, req agent.RunRequest) (*ag
 			if req.ReadOnly {
 				name = ".swarm/active-output/REVIEW.md"
 			}
-			body := "VERDICT: CHANGES_REQUESTED\n\nInclude the missing recovery case."
+			findings := contract.PlanFindings{Version: 1, Findings: []contract.PlanFinding{{ID: "F1", Blocking: true, Disposition: "open", Criterion: "Plan completeness", Trigger: "Review the staged plan", Expected: "Include the missing recovery case.", Actual: "Recovery coverage is missing", Check: "Review recovery coverage after revising the plan"}}}
+			raw, marshalErr := json.Marshal(findings)
+			if marshalErr != nil {
+				return nil, marshalErr
+			}
+			body := "VERDICT: CHANGES_REQUESTED\n" + contract.PlanFindingsStart + "\n" + string(raw) + "\n" + contract.PlanFindingsEnd
 			if r.bare {
 				body = "VERDICT: CHANGES_REQUESTED"
 			}
@@ -1946,6 +1951,39 @@ func TestIssueWorkStaleHumanPlanBeforeRepair(t *testing.T) {
 			}
 			if script.counts["developer"] != dev || before.ValidationRepairCount != after.ValidationRepairCount || before.Lease.ClaimID != after.Lease.ClaimID {
 				t.Fatal("stop mutated execution state")
+			}
+		})
+	}
+}
+
+func TestCLIPlanReviewRejectsMissingFindings(t *testing.T) {
+	for _, bare := range []bool{true, false} {
+		t.Run("bare="+strconv.FormatBool(bare), func(t *testing.T) {
+			f, issue, script, _, run := recoveryCommandFixture(t, "local", "agent", 2)
+			n := strconv.Itoa(issue)
+			if out, err := run("issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false"); err != nil {
+				t.Fatal(err, out)
+			}
+			script.reject, script.bare = true, bare
+			out, err := run("issue", "work", n, "--phase", "review", "--agent", "mock", "--progress=false")
+			if err == nil {
+				t.Fatal("rejected review succeeded", out)
+			}
+			st := f.state(t, issue)
+			if script.counts["reviewer"] != 1 || script.counts["developer"] != 0 || st.HeadSHA != "" {
+				t.Fatal("review executed implementation", script.counts, st.HeadSHA)
+			}
+			for _, art := range st.Artifacts {
+				if art.Type == contract.ArtifactReview && art.Verdict == "APPROVED" {
+					t.Fatal("invalid review approved gate", art)
+				}
+			}
+			if bare {
+				if !strings.Contains(err.Error(), "expected one plan findings block") || st.PendingPlanReview != nil {
+					t.Fatal("missing findings did not fail at parser", err, st.PendingPlanReview, out)
+				}
+			} else if st.PendingPlanReview == nil {
+				t.Fatal("structured rejection did not reach recovery gate", err, out)
 			}
 		})
 	}

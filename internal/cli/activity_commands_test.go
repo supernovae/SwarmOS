@@ -65,6 +65,7 @@ func TestCommandProgressShowsOperation(t *testing.T) {
 				args = []string{"issue", "review-plan", strconv.Itoa(n), "--agent", "mock", "--json"}
 			case "issue-submit":
 				f.must(t, "issue", "work", strconv.Itoa(n), "--agent", "mock", "--progress=false")
+				seedCompleteIssueAcceptance(t, f, n)
 				args = []string{"issue", "submit", strconv.Itoa(n), "--json"}
 			case "pr-work":
 				var number int

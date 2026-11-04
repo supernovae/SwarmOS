@@ -1284,6 +1284,7 @@ func TestIssue322GitHubCommands(t *testing.T) {
 				recordingFence = false
 				injectRecordingSentinel = false
 			}
+			seedGitIssueAcceptance(t, root, upstreamRoot, maintTracker, 42, now)
 			must(RootOptions{Backend: "github"}, worker("issue", "submit", "42", "--progress=false", "--json")...)
 			prepared := must(RootOptions{Backend: "github"}, worker("pr", "work", "1", "--phase", "plan", "--agent", "mock", "--progress=false", "--json")...)
 			prWork := readPROutcome(t, prepared)

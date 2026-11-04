@@ -139,6 +139,7 @@ func TestIssue102LocalApprovalMatrix(t *testing.T) {
 			if after.PRNumber != 0 || after.HeadSHA != before.HeadSHA {
 				t.Fatal("mismatch published")
 			}
+			seedCompleteIssueAcceptance(t, f, number)
 			f.must(t, "issue", "submit", n)
 			state = f.state(t, number)
 			pr, err := f.tracker.GetPullRequest(context.Background(), state.PRNumber)
@@ -294,6 +295,7 @@ func TestTester102ExplicitTargetGrantRoundTrip(t *testing.T) {
 				f.must(t, "issue", "approve", n)
 				f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf '# approved harness edit\\n' >> .swarm/validation/required-checks.yaml")
 				f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+				seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 				f.must(t, "issue", "submit", n, "--base", "release")
 				st := f.state(t, issue)
 				pr, base = st.PRNumber, st.BaseSHA

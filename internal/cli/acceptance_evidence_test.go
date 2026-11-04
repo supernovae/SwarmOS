@@ -2,9 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -15,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPRSubmitAcceptanceEvidenceOutput(t *testing.T) {
@@ -57,19 +62,36 @@ func TestPRSubmitAcceptanceEvidenceOutput(t *testing.T) {
 // eligible evidence; generic mock reports remain missing by default.
 func seedCompleteIssueAcceptance(t *testing.T, f *cliFixture, issue int) {
 	t.Helper()
-	st := f.state(t, issue)
+	// Preserve legacy opt-in calls made after plan-only or no-op attempts.
+	for _, art := range f.state(t, issue).Artifacts {
+		if art.Type == contract.ArtifactValidation {
+			seedIssueAcceptance(t, f.root, f.tracker, f.manager, issue, "alice", "")
+			return
+		}
+	}
+}
+
+// seedIssueAcceptance also supports fixtures whose worker checkout and
+// authoritative tracker live in separate repositories.
+func seedIssueAcceptance(t *testing.T, root string, tr tracker.Tracker, manager *lease.Manager, issue int, owner, externalReason string) {
+	t.Helper()
+	st, err := manager.GetCurrentState(t.Context(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var art contract.Artifact
 	found := false
 	for _, a := range st.Artifacts {
 		if a.Type == contract.ArtifactValidation {
 			found = true
+			art = a
 		}
 	}
 	if !found {
-		return
+		t.Fatal("acceptance fixture requires an existing validation artifact")
 	}
-	f.manager.BindClaim(issue, st.Lease.ClaimID)
-	art := latestValidation(t, f, issue)
-	identity, identityErr := validation.AcceptanceCandidateIdentity(t.Context(), workspace.WorktreePath(f.root, issue), validation.ValidateOptions{BaseSHA: st.BaseSHA, ClaimID: st.Lease.ClaimID, Version: Version})
+	manager.BindClaim(issue, st.Lease.ClaimID)
+	identity, identityErr := validation.AcceptanceCandidateIdentity(t.Context(), workspace.WorktreePath(root, issue), validation.ValidateOptions{BaseSHA: st.BaseSHA, ClaimID: st.Lease.ClaimID, Version: Version})
 	if identityErr != nil {
 		t.Fatal(identityErr)
 	}
@@ -78,7 +100,7 @@ func seedCompleteIssueAcceptance(t *testing.T, f *cliFixture, issue int) {
 			art.Metadata[k] = v
 		}
 	}
-	iss, err := f.tracker.GetIssue(t.Context(), issue)
+	iss, err := tr.GetIssue(t.Context(), issue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,13 +108,12 @@ func seedCompleteIssueAcceptance(t *testing.T, f *cliFixture, issue int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries := make([]map[string]any, 0, len(wu.Acceptance))
-	for i, c := range wu.Acceptance {
-		entries = append(entries, map[string]any{"index": i + 1, "criterion": c, "status": "met", "evidence": "fixture observation"})
+	block, err := fixtureAcceptanceBlock(wu.Acceptance, externalReason)
+	if err != nil {
+		t.Fatal(err)
 	}
-	raw, _ := json.Marshal(map[string]any{"version": 1, "criteria": entries})
-	validation.StoreAcceptanceSnapshot(art.Metadata, validation.CaptureAcceptanceEvidence(validation.AcceptanceEvidenceStart+"\n"+string(raw)+"\n"+validation.AcceptanceEvidenceEnd))
-	if _, err := f.manager.RecordTrustedValidation(t.Context(), issue, "alice", art); err != nil {
+	validation.StoreAcceptanceSnapshot(art.Metadata, validation.CaptureAcceptanceEvidence(block))
+	if _, err := manager.RecordTrustedValidation(t.Context(), issue, owner, art); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -305,4 +326,54 @@ func TestSubmitAcceptanceCompletedRetryRefusesGaps(t *testing.T) {
 	if !bytes.Equal(beforeLabels, afterLabels) {
 		t.Fatal("rejected retry projected submitted labels")
 	}
+}
+
+func fixtureAcceptanceBlock(criteria []string, externalReason string) (string, error) {
+	entries := make([]map[string]any, 0, len(criteria))
+	for i, c := range criteria {
+		entry := map[string]any{"index": i + 1, "criterion": c, "status": "met", "evidence": "fixture observation"}
+		if externalReason != "" {
+			entry = map[string]any{"index": i + 1, "criterion": c, "status": "external", "reason": externalReason}
+		}
+		entries = append(entries, entry)
+	}
+	raw, err := json.Marshal(map[string]any{"version": 1, "criteria": entries})
+	return validation.AcceptanceEvidenceStart + "\n" + string(raw) + "\n" + validation.AcceptanceEvidenceEnd, err
+}
+
+// acceptanceFixtureRunner supplies evidence during a single auto-submit run,
+// where there is no command boundary between testing and publication.
+type acceptanceFixtureRunner struct{ agent.Runner }
+
+func (r acceptanceFixtureRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	result, err := r.Runner.Run(ctx, req)
+	if err != nil || req.Role != "tester" {
+		return result, err
+	}
+	wu, err := workspace.LoadActiveWorkUnit(req.WorktreePath)
+	if err != nil {
+		return nil, err
+	}
+	block, err := fixtureAcceptanceBlock(wu.Acceptance, "")
+	if err != nil {
+		return nil, err
+	}
+	err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte("# Fixture validation\n\n"+block+"\n"), 0644)
+	return result, err
+}
+
+func seedGitIssueAcceptance(t *testing.T, workerRoot, authorityRoot string, tr tracker.Tracker, issue int, now time.Time) {
+	t.Helper()
+	cfg, err := harness.LoadConfig(authorityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := lease.NewManager(tr, cfg.Security)
+	manager.SetStore(authorityRoot, trustedLedgerStore(t, authorityRoot, ""))
+	manager.SetNowFunc(func() time.Time { return now })
+	st, err := manager.GetCurrentState(t.Context(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedIssueAcceptance(t, workerRoot, tr, manager, issue, st.Lease.Owner, "")
 }

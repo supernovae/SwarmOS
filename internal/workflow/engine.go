@@ -348,8 +348,8 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	if err != nil {
 		return nil, err
 	}
-	if iss.IsEpic() {
-		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be claimed or executed as a WorkUnit", opts.IssueNumber)
+	if iss.IsParent() {
+		return nil, fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be claimed or executed as a WorkUnit", opts.IssueNumber)
 	}
 	wu, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
 	if err != nil {
@@ -768,8 +768,8 @@ func (e *Engine) PrepareDecomposition(ctx context.Context, root string, n int, s
 	if err != nil {
 		return nil, err
 	}
-	if parent.IsEpic() {
-		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be decomposed", n)
+	if parent.IsParent() {
+		return nil, fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be decomposed", n)
 	}
 	wu, err := contract.ParseWorkUnitFromIssueWithRoot(n, parent.Title, parent.Body, root)
 	if err != nil {

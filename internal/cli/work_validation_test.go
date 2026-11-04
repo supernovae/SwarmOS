@@ -949,6 +949,20 @@ func TestIssueWorkRecoveryFeedbackSelection(t *testing.T) {
 					if _, err := run("issue", "work", number, "--phase", "review", "--agent", "mock", "--progress=false"); err == nil {
 						t.Fatal("bare explicit rejection continued")
 					}
+					// This selection case needs a persisted legacy rejection with no
+					// feedback. New reviewer output must have structured findings;
+					// a bare verdict now correctly records a failed run, not rejection.
+					st, err := f.manager.GetCurrentState(t.Context(), n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					f.manager.BindClaim(n, st.Lease.ClaimID)
+					meta := lease.ReviewBindings(st)
+					meta["kind"] = "agent"
+					if _, err := f.manager.UpdateArtifact(t.Context(), n, "alice", contract.Artifact{Type: contract.ArtifactReview, Producer: "mock:reviewer", Summary: "Legacy rejection without feedback", Verdict: "CHANGES_REQUESTED", Body: "VERDICT: CHANGES_REQUESTED", Metadata: meta}); err != nil {
+						t.Fatal(err)
+					}
+					script.reject = false
 					must("issue", "release", number)
 					before, err := f.manager.GetCurrentState(t.Context(), n)
 					if err != nil {

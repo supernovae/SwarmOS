@@ -107,7 +107,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 	createCmd.Flags().StringVar(&size, "size", "", "WorkUnit size (small, multi_area)")
 	createCmd.Flags().StringVar(&uncertainty, "uncertainty", "", "WorkUnit uncertainty (known, unknown)")
 	createCmd.Flags().StringVar(&risk, "risk", "", "WorkUnit risk (standard, sensitive, urgent)")
-	createCmd.Flags().IntVar(&parentIssue, "parent", 0, "Parent epic/workunit issue number")
+	createCmd.Flags().IntVar(&parentIssue, "parent", 0, "Parent issue or WorkUnit issue number")
 	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured issue results")
 	approveCmd := &cobra.Command{Use: "approve <issue-number>", Short: "Approve the current immutable WorkUnit revision for execution", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 		defer func() { reportJSONFailure(cmd, asJSON, "task-approval", runErr) }()
@@ -230,7 +230,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 		return nil
 	}}
 	lintCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured lint results")
-	issueCmd.AddCommand(newIssueConvertCmd(rootOpts), newIssueEditCmd(rootOpts), newReconcileCmd(rootOpts), newCleanupCmd(rootOpts), createCmd, approveCmd, newDiscardCheckpointCmd(rootOpts), lintCmd, newDecomposeCmd(rootOpts), newIssueEpicCmd(rootOpts), newClaimCmd(rootOpts), newWorkCmd(rootOpts), newStageCmd(rootOpts), newReviewCmd(rootOpts), newValidateCmd(rootOpts), newSubmitCmd(rootOpts), newStatusCmd(rootOpts), newRenewCmd(rootOpts), newReleaseCmd(rootOpts), newRevokeCmd(rootOpts))
+	issueCmd.AddCommand(newIssueConvertCmd(rootOpts), newIssueEditCmd(rootOpts), newReconcileCmd(rootOpts), newCleanupCmd(rootOpts), createCmd, approveCmd, newDiscardCheckpointCmd(rootOpts), lintCmd, newDecomposeCmd(rootOpts), newIssueEpicCmd(rootOpts), newIssueParentCmd(rootOpts, false), newClaimCmd(rootOpts), newWorkCmd(rootOpts), newStageCmd(rootOpts), newReviewCmd(rootOpts), newValidateCmd(rootOpts), newSubmitCmd(rootOpts), newStatusCmd(rootOpts), newRenewCmd(rootOpts), newReleaseCmd(rootOpts), newRevokeCmd(rootOpts))
 	return issueCmd
 }
 
@@ -269,10 +269,17 @@ func writeDimensionAdvice(out io.Writer, assessment workflow.DimensionAssessment
 	}
 }
 
-func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
+func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command { return newIssueParentCmd(rootOpts, true) }
+
+func newIssueParentCmd(rootOpts *RootOptions, compatibility bool) *cobra.Command {
+	kind := "parent"
+	if compatibility {
+		kind = "epic"
+	}
+	typed := compatibility
 	epicCmd := &cobra.Command{
-		Use:   "epic",
-		Short: "Create or manage non-executable Epic planning issues",
+		Use:   kind,
+		Short: "Create non-executable parent planning issues",
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
@@ -281,10 +288,10 @@ func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
 	var asJSON bool
 	createCmd := &cobra.Command{
 		Use:   "create",
-		Short: "Create a standalone typed Epic issue from a body file (maintainer only)",
+		Short: "Create a parent issue from a body file (maintainer only)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
-			defer func() { reportJSONFailure(cmd, asJSON, "epic", runErr) }()
+			defer func() { reportJSONFailure(cmd, asJSON, kind, runErr) }()
 			if strings.TrimSpace(title) == "" {
 				return fmt.Errorf("--title is required")
 			}
@@ -293,29 +300,47 @@ func newIssueEpicCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			rawBody, err := os.ReadFile(bodyFile)
 			if err != nil {
-				return fmt.Errorf("read epic body file %q: %w", bodyFile, err)
+				return fmt.Errorf("read parent body file %q: %w", bodyFile, err)
 			}
 			if strings.TrimSpace(string(rawBody)) == "" {
-				return fmt.Errorf("epic body file %q is empty", bodyFile)
+				return fmt.Errorf("parent body file %q is empty", bodyFile)
 			}
 			tr, err := rootOpts.resolveTracker(cmd)
 			if err != nil {
 				return err
 			}
-			iss, err := tr.CreateTypedIssue(cmd.Context(), strings.TrimSpace(title), string(rawBody), nil, "Epic")
+			if rootOpts.Fork {
+				return fmt.Errorf("parent creation is maintainer-only and cannot be used with --fork")
+			}
+			if err := tr.Authorize(cmd.Context(), "create-parent"); err != nil {
+				return err
+			}
+			var iss *tracker.Issue
+			if typed {
+				iss, err = tr.CreateTypedIssue(cmd.Context(), strings.TrimSpace(title), string(rawBody), []string{tracker.ParentLabel}, "Epic")
+			} else {
+				iss, err = tr.CreateIssue(cmd.Context(), strings.TrimSpace(title), string(rawBody), []string{tracker.ParentLabel})
+			}
 			if err != nil {
 				return err
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "epic", "status": "created", "issue": iss})
+				return writeJSON(cmd, map[string]any{"kind": kind, "status": "created", "issue": iss})
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Created Epic issue #%d: %s (%s)\n", iss.Number, iss.Title, iss.HTMLURL)
+			label := "parent"
+			if compatibility {
+				label = "Epic"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Created %s issue #%d: %s (%s)\n", label, iss.Number, iss.Title, iss.HTMLURL)
 			return nil
 		},
 	}
-	createCmd.Flags().StringVar(&title, "title", "", "Epic issue title")
-	createCmd.Flags().StringVar(&bodyFile, "body-file", "", "Path to Markdown file containing the Epic body")
-	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured Epic creation output")
+	createCmd.Flags().StringVar(&title, "title", "", "Parent issue title")
+	createCmd.Flags().StringVar(&bodyFile, "body-file", "", "Path to Markdown file containing the parent body")
+	createCmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured parent creation output")
+	if !compatibility {
+		createCmd.Flags().BoolVar(&typed, "epic", false, "Use the optional organization Epic issue type")
+	}
 	epicCmd.AddCommand(createCmd)
 	return epicCmd
 }

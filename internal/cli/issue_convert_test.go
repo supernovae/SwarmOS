@@ -147,11 +147,13 @@ func TestIssueConvertBackendLocal(t *testing.T) {
 	}
 }
 func TestIssueConvertRefusals(t *testing.T) {
-	for _, kind := range []string{"epic", "closed", "pr", "denied", "valid", "fork", "state"} {
+	for _, kind := range []string{"parent", "epic", "closed", "pr", "denied", "valid", "fork", "state"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newConvertFixture(t)
 			r.onRead = func(_ int, got *tracker.Issue) error {
 				switch kind {
+				case "parent":
+					got.Labels = append(got.Labels, tracker.ParentLabel)
 				case "epic":
 					got.Type = "Epic"
 				case "closed":
@@ -193,7 +195,7 @@ func TestIssueConvertRefusals(t *testing.T) {
 	}
 }
 func TestIssueConvertConcurrent(t *testing.T) {
-	for _, kind := range []string{"title", "body", "type", "closed", "pr", "labels", "assignees", "timestamp", "error", "state"} {
+	for _, kind := range []string{"parent", "title", "body", "type", "closed", "pr", "labels", "assignees", "timestamp", "error", "state"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newConvertFixture(t)
 			r.onRead = func(read int, got *tracker.Issue) error {
@@ -205,6 +207,8 @@ func TestIssueConvertConcurrent(t *testing.T) {
 					got.Title += " edit"
 				case "body":
 					got.Body += " edit"
+				case "parent":
+					got.Labels = append(got.Labels, tracker.ParentLabel)
 				case "type":
 					got.Type = "Epic"
 				case "closed":

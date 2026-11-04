@@ -61,8 +61,8 @@ func issueConvertTarget(i *tracker.Issue) error {
 	if i.State != "open" {
 		return fmt.Errorf("issue #%d is not open", i.Number)
 	}
-	if i.IsEpic() {
-		return fmt.Errorf("issue #%d is an Epic; conversion requires an intake issue", i.Number)
+	if i.IsParent() {
+		return fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent); conversion requires an intake issue", i.Number)
 	}
 	return nil
 }

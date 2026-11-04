@@ -111,7 +111,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 			for child := cmd; child != nil && child.Parent() != nil; child = child.Parent() {
 				if child.Parent().Name() == "issue" {
 					switch child.Name() {
-					case "create", "approve", "lint", "decompose", "epic":
+					case "create", "approve", "lint", "decompose", "epic", "parent":
 						return fmt.Errorf("%s is maintainer-only and cannot be used with --fork", child.CommandPath())
 					}
 					break

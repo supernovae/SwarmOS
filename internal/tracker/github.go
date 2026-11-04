@@ -208,7 +208,7 @@ func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if permission != "approve-task" && permission != "review-human" && permission != "review-agent" && permission != "create-epic" && permission != "edit-task" {
+	if permission != "approve-task" && permission != "review-human" && permission != "review-agent" && permission != "create-epic" && permission != "create-parent" && permission != "edit-task" {
 		return fmt.Errorf("unknown permission %q", permission)
 	}
 	var me struct {
@@ -232,7 +232,7 @@ func (g *GitHubTracker) Authorize(ctx context.Context, permission string) error 
 		return fmt.Errorf("github authorization permission: %w", err)
 	}
 	perm := strings.ToLower(collaborator.Permission)
-	if permission == "create-epic" {
+	if permission == "create-epic" || permission == "create-parent" {
 		switch perm {
 		case "admin", "maintain":
 			return nil
@@ -264,14 +264,14 @@ func (g *GitHubTracker) CheckIssueType(ctx context.Context, issueType string) er
 	path := fmt.Sprintf("repos/%s/%s/issue-types", g.owner, g.repo)
 	var types []ghIssueTypeResponse
 	if err := g.client.DoWithContext(ctx, "GET", path, nil, &types); err != nil {
-		return fmt.Errorf("github issue types unavailable on %s/%s (enable organization issue types including \"Epic\" and verify token permissions): %w", g.owner, g.repo, err)
+		return fmt.Errorf("github issue types unavailable on %s/%s (use swarm issue parent create or apply a plan without --epic): %w", g.owner, g.repo, err)
 	}
 	for _, t := range types {
 		if IsEpicIssueType(t.Name) && (t.IsEnabled == nil || *t.IsEnabled) {
 			return nil
 		}
 	}
-	return fmt.Errorf("github issue type \"Epic\" is not enabled on %s/%s; enable the organization \"Epic\" issue type in GitHub settings", g.owner, g.repo)
+	return fmt.Errorf("github issue type \"Epic\" is not enabled on %s/%s; use swarm issue parent create or apply a plan without --epic", g.owner, g.repo)
 }
 
 type ghIssueResponse struct {
@@ -1032,4 +1032,14 @@ func (g *GitHubTracker) CloseIssueCompleted(ctx context.Context, n int) error {
 	raw, _ := json.Marshal(map[string]string{"state": "closed", "state_reason": "completed"})
 	var resp ghIssueResponse
 	return g.client.DoWithContext(ctx, "PATCH", fmt.Sprintf("repos/%s/%s/issues/%d", g.owner, g.repo, n), bytes.NewReader(raw), &resp)
+}
+
+func (g *GitHubTracker) RepositoryOwnerType(ctx context.Context) (string, error) {
+	var metadata struct {
+		Owner struct {
+			Type string `json:"type"`
+		} `json:"owner"`
+	}
+	err := g.client.DoWithContext(ctx, "GET", fmt.Sprintf("repos/%s/%s", g.owner, g.repo), nil, &metadata)
+	return metadata.Owner.Type, err
 }

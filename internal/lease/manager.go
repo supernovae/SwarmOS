@@ -928,8 +928,8 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	if err != nil {
 		return nil, err
 	}
-	if issue.IsEpic() {
-		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be approved as an executable WorkUnit", n)
+	if issue.IsParent() {
+		return nil, fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be approved as an executable WorkUnit", n)
 	}
 	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 	if err != nil {
@@ -1115,8 +1115,8 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if err != nil {
 		return nil, err
 	}
-	if issue.IsEpic() {
-		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be claimed for execution", n)
+	if issue.IsParent() {
+		return nil, fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be claimed for execution", n)
 	}
 	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 	if err != nil {
@@ -1302,8 +1302,8 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 	if err != nil {
 		return nil, err
 	}
-	if iss.IsEpic() {
-		return nil, fmt.Errorf("issue #%d has type \"Epic\" and cannot be claimed for execution", issue)
+	if iss.IsParent() {
+		return nil, fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be claimed for execution", issue)
 	}
 	wu, err := contract.ParseWorkUnitFromIssue(issue, iss.Title, iss.Body)
 	if err != nil {
@@ -1457,8 +1457,8 @@ func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState)
 	if err != nil {
 		return err
 	}
-	if issue.IsEpic() {
-		return fmt.Errorf("issue #%d has type \"Epic\" and cannot be executed as a WorkUnit", n)
+	if issue.IsParent() {
+		return fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be executed as a WorkUnit", n)
 	}
 	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
 	if err != nil {

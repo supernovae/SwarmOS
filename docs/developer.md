@@ -32,7 +32,7 @@ Helpful CLI conventions:
 - **Headless vs. interactive**: `swarm issue work` runs non-interactively (`--headless=true`) by default. Pass `--headless=false` to follow the agent's work and add instructions between turns.
 - **Structured JSON output**: Use `--json` on a leaf that supports it, such as `swarm issue claim --next --json`, `swarm issue work 42 --json`, `swarm issue status 42 --json`, or `swarm repo validate --base <trusted-full-commit-sha> --json`. Bare `swarm issue` and `swarm repo` are command groups, not JSON-producing operations.
 
-Automatic selection tries the lowest issue number first within each repository. Ready candidates sharing a native parent Epic take that epic's sub-issue order within the positions those siblings occupy. For example, issues 10, 20, 30 with siblings ordered 30, 10 are tried as 30, 20, 10: an earlier sibling can move ahead of a lower-numbered standalone issue.
+Automatic selection tries the lowest issue number first within each repository. Ready candidates sharing a native parent issue take that parent's sub-issue order within the positions those siblings occupy. For example, issues 10, 20, 30 with siblings ordered 30, 10 are tried as 30, 20, 10: an earlier sibling can move ahead of a lower-numbered standalone issue.
 
 Dependencies, capabilities, gates, and leases still determine eligibility; an ineligible sibling is skipped. With `--all`, repository traversal order stays unchanged.
 
@@ -61,7 +61,7 @@ A task's branch is named from its title at the first claim and recorded in coord
 
 Changing an approved task's parsed content moves its ready label to `swarm:draft` and requires a separate `swarm issue approve 42`. Formatting changes that preserve the task digest retain approval and labels. Editing never grants approval.
 
-Inline Markdown and fenced YAML WorkUnits are supported. For a `swarm-workunit-path` reference, edit the referenced repository file instead. Ambiguous duplicate sections and YAML anchors or aliases must be simplified before editing. Epics use their own planning workflow and cannot be edited with this command. Fork contributors work with an upstream maintainer to revise the contract.
+Inline Markdown and fenced YAML WorkUnits are supported. For a `swarm-workunit-path` reference, edit the referenced repository file instead. Ambiguous duplicate sections and YAML anchors or aliases must be simplified before editing. Parent issues use their own planning workflow and cannot be edited with this command. Fork contributors work with an upstream maintainer to revise the contract.
 
 The command re-reads the issue and claim state before writing and refuses a detected concurrent edit. GitHub's issue PATCH is unconditional, leaving a short interval between that final read and the write; coordinate edits with other maintainers. If a body, title, or label request fails after an earlier request succeeds, the error identifies completed steps so you can inspect the issue and retry.
 
@@ -148,7 +148,7 @@ Start interactively when you want to stay close to the changes. Move repeatable 
 | :--- | :--- |
 | **Pair with an agent** | Run `swarm issue work 42 --headless=false`. Native Codex streams its work, then accepts a follow-up instruction; press Enter to finish the phase. |
 | **Stay in your current agent session** | Follow the [human-led guide](human-led.md). Use `swarm issue claim <issue>` or `swarm issue claim --next`, work in the assigned worktree, and record each phase with `swarm issue stage`. Your existing session keeps its own permissions. |
-| **Let a worker pick up tasks** | Run `swarm issue work --next` for one task or `swarm node run --watch` for a continuing queue. Both use the same numeric and epic sibling ordering as `claim --next` and run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
+| **Let a worker pick up tasks** | Run `swarm issue work --next` for one task or `swarm node run --watch` for a continuing queue. Both use the same numeric and parent sibling ordering as `claim --next` and run headlessly; configure the harness to complete allowed work without waiting for keyboard input. |
 
 Native Codex uses the same bounded permissions for pairing and unattended work. Allowed commands run without approval prompts; requests for broader access are denied. Each turn uses an ephemeral session, with task files carrying progress forward. For an existing agent session or `trusted-local` setup, keep the harness's approval prompts enabled when pairing. Reserve full-access or “YOLO” settings for disposable workers with independently enforced isolation; CI alone does not provide that boundary.
 
@@ -545,7 +545,6 @@ The branch moves with a compare-and-swap, so if anything else moved it, nothing 
 
 When a worktree has commits or edits of its own, SwarmOS still refuses and prints the recovery commands. First copy out any edits you want to keep. Then remove the worktree with `git worktree remove --force -- '<path>'` and rename the task branch with `git branch -m '<branch>' 'swarm-backup/issue-<N>'`, which keeps its commits. Finally, run `swarm issue work <issue>` again.
 
-
 ---
 
 ## 3. Multi-Repository Registry & Worker Pools
@@ -577,6 +576,8 @@ Workers use the same selection order as `swarm issue claim --next` and `swarm is
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS state refs, fencing, and checkpoint mechanics.
 - **[Security Policy (`SECURITY.md`)](../SECURITY.md)** — Trust boundaries, reviewer isolation, and release verification.
+
+Optional for organization repositories: use `swarm issue parent create --epic --title "Roadmap" --body-file ROADMAP.md` or `swarm repo plan --from ROADMAP.md --apply --epic` to request the Epic issue type. `swarm issue epic create` remains a compatibility alias for typed creation.
 
 ### Revising rejected plans
 

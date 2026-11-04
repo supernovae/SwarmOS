@@ -250,7 +250,7 @@ func TestIssueEditClaim(t *testing.T) {
 }
 func TestIssueEditConcurrent(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{"body", "title", "epic", "error", "claim"} {
+	for _, kind := range []string{"parent", "body", "title", "epic", "error", "claim"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
 			ctx := context.Background()
@@ -261,6 +261,8 @@ func TestIssueEditConcurrent(t *testing.T) {
 						got.Body += "web edit"
 					case "title":
 						got.Title = "web title"
+					case "parent":
+						got.Labels = append(got.Labels, tracker.ParentLabel)
 					case "epic":
 						got.Type = "Epic"
 					case "error":
@@ -291,9 +293,12 @@ func TestIssueEditConcurrent(t *testing.T) {
 }
 func TestIssueEditEpicAuthorizationFork(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{"epic", "unauthorized", "fork"} {
+	for _, kind := range []string{"parent", "epic", "unauthorized", "fork"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newEditFixture(t)
+			if kind == "parent" {
+				r.onRead = func(_ int, i *tracker.Issue) error { i.Labels = append(i.Labels, tracker.ParentLabel); return nil }
+			}
 			if kind == "epic" {
 				r.onRead = func(_ int, i *tracker.Issue) error { i.Type = "Epic"; return nil }
 			}

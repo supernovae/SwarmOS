@@ -27,6 +27,7 @@ import (
 
 type ProjectPlanOptions struct {
 	RepoRoot     string
+	Epic         bool      // opt in to organization Epic issue type
 	FromFile     string    // path to markdown/YAML project roadmap or plan
 	ScanOpen     bool      // scan and sense-make open tracker issues
 	Normalize    bool      // when ScanOpen && Apply, rewrite raw open issues into structured WorkUnit markdown and label swarm:draft
@@ -69,6 +70,8 @@ type ProjectPlanReport struct {
 	BaseSHA         string              `yaml:"base_sha" json:"base_sha"`
 	PolicyDigest    string              `yaml:"policy_digest" json:"policy_digest"`
 	GoalsDigest     string              `yaml:"goals_digest" json:"goals_digest"`
+	ParentIssue     *tracker.Issue      `yaml:"parent_issue,omitempty" json:"parent_issue,omitempty"`
+	ParentCreated   bool                `yaml:"parent_created" json:"parent_created"`
 	EpicIssue       *tracker.Issue      `yaml:"epic_issue,omitempty" json:"epic_issue,omitempty"`
 	EpicCreated     bool                `yaml:"epic_created" json:"epic_created"`
 	ProposedUnits   []contract.WorkUnit `yaml:"proposed_units,omitempty" json:"proposed_units,omitempty"`
@@ -125,6 +128,9 @@ func MarshalProjectPlanReport(report *ProjectPlanReport, format string) ([]byte,
 }
 
 func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*ProjectPlanReport, error) {
+	if opts.Epic && (opts.FromFile == "" || !opts.Apply || opts.ScanOpen) {
+		return nil, fmt.Errorf("--epic requires --from and --apply, without --scan")
+	}
 	root := opts.RepoRoot
 	if root == "" {
 		root = e.repoRoot
@@ -156,7 +162,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 	if opts.FromFile != "" {
 		report.Mode = "from-plan"
 		if opts.Apply {
-			if err := e.Tracker.Authorize(ctx, "create-epic"); err != nil {
+			if err := e.Tracker.Authorize(ctx, "create-parent"); err != nil {
 				return nil, err
 			}
 		}
@@ -230,7 +236,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 		now = time.Now()
 	}
 	for _, iss := range issues {
-		if iss.IsEpic() {
+		if iss.IsParent() {
 			continue
 		}
 		tps := extractTouchpoints(root, iss.Title+"\n"+iss.Body)
@@ -1052,8 +1058,10 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 	units []contract.WorkUnit,
 	report *ProjectPlanReport,
 ) error {
-	if err := e.Tracker.CheckIssueType(ctx, "Epic"); err != nil {
-		return err
+	if opts.Epic {
+		if err := e.Tracker.CheckIssueType(ctx, "Epic"); err != nil {
+			return err
+		}
 	}
 	var owner string
 	if opts.Ready {
@@ -1085,8 +1093,8 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 				if !ok {
 					return fmt.Errorf("%s step %d (%s): external depends_on issue #%d does not exist", opts.FromFile, stepNum, u.Title, dep)
 				}
-				if extIss.IsEpic() {
-					return fmt.Errorf("%s step %d (%s): external depends_on issue #%d is an Epic and cannot be a WorkUnit dependency", opts.FromFile, stepNum, u.Title, dep)
+				if extIss.IsParent() {
+					return fmt.Errorf("%s step %d (%s): external depends_on issue #%d is an parent and cannot be a WorkUnit dependency", opts.FromFile, stepNum, u.Title, dep)
 				}
 			}
 		}
@@ -1098,7 +1106,7 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 	// Check Epic title does not collide with any proposed task title in the same plan.
 	for i, u := range units {
 		if strings.EqualFold(strings.TrimSpace(u.Title), strings.TrimSpace(epicTitle)) {
-			return fmt.Errorf("%s step %d (%s): task title collides with Epic title %q", opts.FromFile, i+1, u.Title, epicTitle)
+			return fmt.Errorf("%s step %d (%s): task title collides with parent title %q", opts.FromFile, i+1, u.Title, epicTitle)
 		}
 	}
 
@@ -1121,27 +1129,27 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 			return fmt.Errorf("issue #%d: %w", iss.Number, childErr)
 		}
 		if hasEpicM && hasChildM {
-			return fmt.Errorf("issue #%d contains both Epic and child project-plan markers", iss.Number)
+			return fmt.Errorf("issue #%d contains both parent and child project-plan markers", iss.Number)
 		}
 		if hasEpicM && epicM.sourceHash == sourceHash {
 			if existingEpic != nil {
-				return fmt.Errorf("duplicate roadmap Epic issues #%d and #%d for %s", existingEpic.Number, iss.Number, relSourceSlash)
+				return fmt.Errorf("duplicate roadmap parent issues #%d and #%d for %s", existingEpic.Number, iss.Number, relSourceSlash)
 			}
-			if !iss.IsEpic() {
-				return fmt.Errorf("existing roadmap Epic issue #%d has type %q, want \"Epic\"", iss.Number, iss.Type)
+			if !iss.IsParent() {
+				return fmt.Errorf("existing roadmap parent issue #%d is missing swarm:parent or Epic type (got %q)", iss.Number, iss.Type)
 			}
 			if strings.TrimSpace(iss.Title) != strings.TrimSpace(epicTitle) {
-				return fmt.Errorf("existing roadmap Epic issue #%d title %q was edited or does not match %q", iss.Number, iss.Title, epicTitle)
+				return fmt.Errorf("existing roadmap parent issue #%d title %q was edited or does not match %q", iss.Number, iss.Title, epicTitle)
 			}
 			if sha256Hex(epicM.bodyBefore) != epicM.bodyHash {
-				return fmt.Errorf("existing roadmap Epic issue #%d body was manually modified (body hash mismatch)", iss.Number)
+				return fmt.Errorf("existing roadmap parent issue #%d body was manually modified (body hash mismatch)", iss.Number)
 			}
 			existingEpic = iss
 			existingEpicMarker = epicM
 		}
 		if hasChildM && childM.sourceHash == sourceHash {
-			if iss.IsEpic() {
-				return fmt.Errorf("issue #%d has type \"Epic\" but carries a child WorkUnit marker", iss.Number)
+			if iss.IsParent() {
+				return fmt.Errorf("parent issue #%d carries a child WorkUnit marker", iss.Number)
 			}
 			if prev, dup := existingChildrenByKey[childM.keyHash]; dup {
 				return fmt.Errorf("duplicate roadmap child issues #%d and #%d for same task key in %s", prev.issue.Number, iss.Number, relSourceSlash)
@@ -1163,18 +1171,18 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 
 	if existingEpic == nil && len(existingChildrenByKey) > 0 {
 		for _, ch := range existingChildrenByKey {
-			return fmt.Errorf("existing child issue #%d references roadmap %s, but no matching Epic issue exists", ch.issue.Number, relSourceSlash)
+			return fmt.Errorf("existing child issue #%d references roadmap %s, but no matching parent issue exists", ch.issue.Number, relSourceSlash)
 		}
 	}
 
 	// Check native parent consistency for all existing same-source children (including leftovers).
 	for _, ch := range existingChildrenByKey {
 		if ch.parent != 0 && existingEpic != nil && ch.parent != existingEpic.Number {
-			return fmt.Errorf("roadmap child issue #%d is linked to conflicting parent #%d (expected Epic #%d)", ch.issue.Number, ch.parent, existingEpic.Number)
+			return fmt.Errorf("roadmap child issue #%d is linked to conflicting parent #%d (expected parent #%d)", ch.issue.Number, ch.parent, existingEpic.Number)
 		}
 		if wu, err := contract.ParseWorkUnitFromIssue(ch.issue.Number, ch.issue.Title, ch.issue.Body); err == nil && wu != nil {
 			if existingEpic != nil && wu.ParentIssue != 0 && wu.ParentIssue != existingEpic.Number {
-				return fmt.Errorf("roadmap child issue #%d body specifies parent #%d (expected Epic #%d)", ch.issue.Number, wu.ParentIssue, existingEpic.Number)
+				return fmt.Errorf("roadmap child issue #%d body specifies parent #%d (expected parent #%d)", ch.issue.Number, wu.ParentIssue, existingEpic.Number)
 			}
 		}
 	}
@@ -1273,7 +1281,10 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 	})
 	report.LeftoverIssues = leftovers
 
-	// Preflight succeeded! Now reconcile or create Epic.
+	if opts.Epic && existingEpic != nil && !existingEpic.IsEpic() {
+		return fmt.Errorf("existing parent #%d is untyped; apply without --epic", existingEpic.Number)
+	}
+	// Preflight succeeded! Now reconcile or create parent.
 	epicMarker := fmt.Sprintf("<!-- swarm:project-plan-epic:v1 source=%s body=%s -->", sourceHash, expectedEpicBodyHash)
 	fullEpicBody := epicBodyBeforeMarker + "\n" + epicMarker
 	if existingEpic != nil {
@@ -1281,13 +1292,19 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 		if existingEpicMarker.bodyHash != expectedEpicBodyHash {
 			updated, err := e.Tracker.UpdateIssueBody(ctx, existingEpic.Number, fullEpicBody)
 			if err != nil {
-				return fmt.Errorf("refresh Epic issue #%d body: %w", existingEpic.Number, err)
+				return fmt.Errorf("refresh parent issue #%d body: %w", existingEpic.Number, err)
 			}
 			existingEpic = updated
 		}
 		report.EpicIssue = existingEpic
 	} else {
-		createdEpic, err := e.Tracker.CreateTypedIssue(ctx, epicTitle, fullEpicBody, nil, "Epic")
+		var createdEpic *tracker.Issue
+		var err error
+		if opts.Epic {
+			createdEpic, err = e.Tracker.CreateTypedIssue(ctx, epicTitle, fullEpicBody, []string{tracker.ParentLabel}, "Epic")
+		} else {
+			createdEpic, err = e.Tracker.CreateIssue(ctx, epicTitle, fullEpicBody, []string{tracker.ParentLabel})
+		}
 		if err != nil {
 			return err
 		}
@@ -1298,7 +1315,9 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 
 	warn := func(message string) { report.Warnings = append(report.Warnings, message) }
 	var orderedChildren []int
-	// Create or reuse child issues in file order and link to Epic.
+	report.ParentIssue = report.EpicIssue
+	report.ParentCreated = report.EpicCreated
+	// Create or reuse child issues in file order and link to parent.
 	stepToIssueNum := make(map[int]int, len(units))
 	var createdNums []int
 	for i := range units {
@@ -1322,7 +1341,7 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 			u.IssueNumber = childIss.Number
 			stepToIssueNum[stepNum] = childIss.Number
 			if err := e.Tracker.LinkSubIssue(ctx, existingEpic.Number, childIss.Number); err != nil {
-				return fmt.Errorf("link existing child issue #%d to Epic #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
+				return fmt.Errorf("link existing child issue #%d to parent #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
 			}
 			projectIssueDependencies(ctx, e.Tracker, childIss, warn)
 			orderedChildren = append(orderedChildren, childIss.Number)
@@ -1337,20 +1356,20 @@ func (e *Engine) applyRoadmapEpicAndChildren(
 
 		childIss, err := e.Tracker.CreateIssue(ctx, u.Title, fullChildBody, []string{"swarm:draft"})
 		if err != nil {
-			return fmt.Errorf("create child step %d (%s) under Epic #%d (created children: %v): %w", stepNum, u.Title, existingEpic.Number, createdNums, err)
+			return fmt.Errorf("create child step %d (%s) under parent #%d (created children: %v): %w", stepNum, u.Title, existingEpic.Number, createdNums, err)
 		}
 		createdNums = append(createdNums, childIss.Number)
 		u.IssueNumber = childIss.Number
 		stepToIssueNum[stepNum] = childIss.Number
 
 		if err := e.Tracker.LinkSubIssue(ctx, existingEpic.Number, childIss.Number); err != nil {
-			return fmt.Errorf("link created child issue #%d to Epic #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
+			return fmt.Errorf("link created child issue #%d to parent #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
 		}
 		projectIssueDependencies(ctx, e.Tracker, childIss, warn)
 		orderedChildren = append(orderedChildren, childIss.Number)
 		if opts.Ready {
 			if _, err := e.LeaseManager.ApproveTask(ctx, childIss.Number, owner); err != nil {
-				return fmt.Errorf("approve created child issue #%d under Epic #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
+				return fmt.Errorf("approve created child issue #%d under parent #%d (created children: %v): %w", childIss.Number, existingEpic.Number, createdNums, err)
 			}
 			if refreshed, refErr := e.Tracker.GetIssue(ctx, childIss.Number); refErr == nil && refreshed != nil {
 				childIss = refreshed
@@ -1595,12 +1614,12 @@ func renderFromPlanMarkdown(report *ProjectPlanReport, epicTitle string, applied
 		if report.EpicCreated {
 			epicAction = "created"
 		}
-		sb.WriteString(fmt.Sprintf("- **Epic Issue**: `#%d` %s (`type: %s`, state: `%s`, %s, %s)\n",
-			report.EpicIssue.Number, report.EpicIssue.Title, report.EpicIssue.Type, report.EpicIssue.State, epicAction, report.EpicIssue.HTMLURL))
+		sb.WriteString(fmt.Sprintf("- **Parent Issue**: `#%d` %s (state: `%s`, %s, %s)\n",
+			report.EpicIssue.Number, report.EpicIssue.Title, report.EpicIssue.State, epicAction, report.EpicIssue.HTMLURL))
 		sb.WriteString(fmt.Sprintf("- **Child WorkUnits**: `%d` total (`%d` created, `%d` existing, `%d` leftover)\n\n",
 			len(report.ProposedUnits), len(report.CreatedIssues), len(report.ExistingIssues), len(report.LeftoverIssues)))
 	} else {
-		sb.WriteString(fmt.Sprintf("- **Epic Preview**: %s (`type: Epic`, preview only — not yet published)\n", epicTitle))
+		sb.WriteString(fmt.Sprintf("- **Parent Preview**: %s (preview only — not yet published)\n", epicTitle))
 		sb.WriteString(fmt.Sprintf("- **Proposed WorkUnits**: `%d`\n\n", len(report.ProposedUnits)))
 	}
 

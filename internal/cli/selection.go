@@ -134,7 +134,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 		}
 		engine := workflow.NewEngineWithManagerOptions(target.Path, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
 		for _, issue := range issues {
-			if issue.IsEpic() || slices.Contains(issue.Labels, "swarm:pr-open") {
+			if issue.IsParent() || slices.Contains(issue.Labels, "swarm:pr-open") {
 				continue
 			}
 			wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
@@ -354,7 +354,7 @@ func orderByOverlap(ctx context.Context, tr tracker.Tracker, mgr *lease.Manager,
 		fmt.Fprintf(stderr, "warning: cannot list open issues for overlap scheduling; using ready order: %v\n", listErr)
 	}
 	for _, issue := range open {
-		if issue == nil || issue.IsEpic() {
+		if issue == nil || issue.IsParent() {
 			continue
 		}
 		state, err := mgr.GetCurrentState(ctx, issue.Number)
@@ -441,7 +441,7 @@ func issueRefs(numbers []int) string {
 	return strings.Join(refs, ", ")
 }
 
-// orderReadyIssues permutes only supplied candidates. Each epic retains its
+// orderReadyIssues permutes only supplied candidates. Each parent retains its
 // numeric slots, avoiding a cyclic comparator for mixed standalone/sibling work.
 func orderReadyIssues(ctx context.Context, tr tracker.Tracker, issues []*tracker.Issue, stderr io.Writer) ([]*tracker.Issue, error) {
 	out := append([]*tracker.Issue(nil), issues...)
@@ -490,7 +490,7 @@ func orderReadyIssues(ctx context.Context, tr tracker.Tracker, issues []*tracker
 			warn(parent, fmt.Errorf("missing parent"))
 			continue
 		}
-		if !epic.IsEpic() {
+		if !epic.IsParent() {
 			continue
 		}
 		children, err := tr.ListSubIssues(ctx, parent)

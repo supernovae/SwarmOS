@@ -45,7 +45,7 @@ swarm repo doctor --backend github
 
 > [!TIP]
 > - `swarm repo init` pins generated automation to the swarm you run it with (a `v0.6.0`+ release, or the exact commit of a clean source build); a build with uncommitted changes keeps your existing pin. Rerun it after upgrading swarm to update untouched generated files; files you edited, and existing files SwarmOS did not generate, are kept and listed. `.swarm/managed.json` records what init generated. Commit the reviewed `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
-> - `swarm repo init --sync-labels --backend github` provisions local issue forms and `swarm:*` labels on the repository; it does not configure organization-wide GitHub issue types or restrict direct GitHub web/API issue creation. Enable the organization `Epic` issue type in GitHub Settings, review your repository's issue forms and maintainer permissions manually, and run `swarm repo doctor --backend github` to verify that `Epic` is enabled and your current actor is authorized for `create-epic`.
+> - `swarm repo init --sync-labels --backend github` provisions local issue forms and `swarm:*` labels, including `swarm:parent`. Review repository issue forms and maintainer permissions in GitHub Settings; run `swarm repo doctor --backend github` to check setup.
 >
 > When upgrading, install a resource-CLI-compatible binary and review the generated workflow, slash-command instructions, and immutable pin together. Existing generated files are preserved by default; update the relevant tracked copies deliberately rather than using blanket `--force` scaffolding.
 ---
@@ -169,10 +169,12 @@ This setting applies to commits created by `swarm issue work`, `swarm issue stag
 
 You can create structured WorkUnits from the GitHub Issue Form (`swarm:draft`), fenced YAML blocks, external `.swarm/workunits/<id>.yaml` references, roadmap files (`swarm repo plan --from <file> --apply`), or the CLI. Community members can submit bugs, ideas, and feedback through the **Community report** form (`swarm:community`), which remains intake until a maintainer scopes and approves a WorkUnit.
 
+Optional for organization repositories: use `swarm issue parent create --epic --title "Roadmap" --body-file ROADMAP.md` or `swarm repo plan --from ROADMAP.md --apply --epic` to request the Epic issue type. `swarm issue epic create` remains a compatibility alias for typed creation.
+
 ```bash
-# Create a standalone non-executable Epic issue (requires maintainer/admin permission)
-swarm issue epic create --backend github \
-  --title "HTTP Client Resilience Epic" \
+# Create a standalone non-executable parent issue (requires maintainer/admin permission)
+swarm issue parent create --backend github \
+  --title "HTTP Client Resilience Roadmap" \
   --body-file plans/http-resilience.md
 
 # Create a draft child WorkUnit linked as a native sub-issue of parent #10
@@ -191,7 +193,7 @@ swarm issue approve 42 --backend github
 
 On GitHub, `swarm issue create --depends-on 7,8` also adds native blocked-by links so prerequisites appear on the issue. The WorkUnit body remains the source of dependency truth; later body edits are not synchronized automatically.
 
-Approving a child WorkUnit records its canonical WorkUnit digest, `.swarm/` policy digest, and trusted base SHA in Git state and applies the `swarm:ready` label. Epics (`type: Epic`) are non-executable planning containers: they carry no readiness label and cannot be approved or claimed directly.
+Approving a child WorkUnit records its canonical WorkUnit digest, `.swarm/` policy digest, and trusted base SHA in Git state and applies the `swarm:ready` label. Parent issues (`swarm:parent` or `type: Epic`) are non-executable planning containers: they cannot be approved or claimed directly.
 
 To split an existing multi-item WorkUnit issue into linked `swarm:draft` child sub-issues, run:
 
@@ -439,7 +441,6 @@ A CLI `--gate` flag can always make review stricter (for example, upgrading `non
 - **[Working with OpenAI Dot & Codex (`docs/openai-dot.md`)](openai-dot.md)** — Configure Codex Cloud environments and remote repositories for OpenAI Dots.
 - **[Workflows & Review Gates (`docs/WORKFLOWS.md`)](WORKFLOWS.md)** — Role prompts, artifacts, and gate transitions.
 - **[Architecture (`docs/ARCHITECTURE.md`)](ARCHITECTURE.md)** — Git-CAS coordination, fencing, and worktree lifecycle.
-
 
 ### Task-local browser previews
 

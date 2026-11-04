@@ -167,7 +167,7 @@ func TestNativeProjectionRoadmapHierarchySkipsReady(t *testing.T) {
 	issues, _ := local.ListIssues(t.Context(), tracker.IssueFilter{State: "all"})
 	children := 0
 	for _, issue := range issues {
-		if issue.IsEpic() {
+		if issue.IsParent() {
 			continue
 		}
 		children++

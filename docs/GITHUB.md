@@ -255,17 +255,19 @@ Native blocked-by links and sub-issue priority use the existing GitHub credentia
 
 | Action | Required GitHub Permission | `.swarm/config.yaml` / Tracker Policy Check |
 | :--- | :--- | :--- |
-| `swarm repo plan --from <file> --apply` / `swarm issue epic create` | Repository `maintain` or `admin` | Verifies maintainer role (`create-epic`) and enabled organization `Epic` issue type before creating the unlabeled Epic or linking native sub-issues. |
-| `swarm issue approve <N>` | Repository `write`, `maintain`, or `admin` | Rejects `Epic` issues; must be an authenticated collaborator; pins `task_digest`, `policy_digest`, and `base_sha` and applies `swarm:ready`. |
-| `swarm issue claim <N>` / `swarm issue work <N>` | Repository `write` | Rejects `Epic` issues; actor must match `security.approved_collaborators` (when configured) and issue must carry `swarm:ready`. |
+| `swarm repo plan --from <file> --apply` / `swarm issue parent create` | Repository `maintain` or `admin` | Verifies maintainer role (`create-parent`) before creating a `swarm:parent` issue or linking native sub-issues. |
+| `swarm issue approve <N>` | Repository `write`, `maintain`, or `admin` | Rejects parent issues; must be an authenticated collaborator; pins `task_digest`, `policy_digest`, and `base_sha` and applies `swarm:ready`. |
+| `swarm issue claim <N>` / `swarm issue work <N>` | Repository `write` | Rejects parent issues; actor must match `security.approved_collaborators` (when configured) and issue must carry `swarm:ready`. |
 | `swarm issue review-plan <N>` (Agent Gate) | Repository `write` | Actor must match `security.reviewer_collaborators` (when configured); reviewer agent must be listed in `security.reviewer_agents` (when configured) and differ from the planner when `security.independent_review` is set; reviewer subprocess runs in a read-only sandbox. |
 | `swarm issue review-plan <N> --approve` (Human Gate) | Repository `write`, `maintain`, or `admin` (non-Bot account) | Actor must be a human GitHub user and match `security.reviewer_collaborators` (when configured); with `security.independent_review`, the actor can't be the contributor who claimed the task. |
 | `swarm issue submit <N>` | Repository `write` | Requires a verified review verdict matching the current `WorkUnit`, `PLAN.md`, and `TEST_PLAN.md` digests plus passing baseline-pinned checks. |
 
+Optional for organization repositories: use `swarm issue parent create --epic --title "Roadmap" --body-file ROADMAP.md` or `swarm repo plan --from ROADMAP.md --apply --epic` to request the Epic issue type. `swarm issue epic create` remains a compatibility alias for typed creation.
+
 > [!NOTE]
 > **Organization Issue Types & Web Intake:**
-> - Native `Epic` issues and sub-issue hierarchy require GitHub's organization `Epic` issue type to be enabled on the repository. Run `swarm repo doctor --backend github` to check `Epic` availability and your current actor's `create-epic` permission.
-> - `swarm repo init --sync-labels --backend github` scaffolds `.github/ISSUE_TEMPLATE/swarm-community.yml` (`swarm:community` intake) and `swarm-workunit.yml` (`swarm:draft`) and syncs labels. Because GitHub's web UI and REST API allow users with repository access to open issues directly, maintainers should review repository issue forms and organization issue-type settings in GitHub Settings; SwarmOS enforces execution gating by requiring explicit `swarm issue approve <N>` on non-Epic WorkUnits.
+> - Parent issues and native sub-issues work on personal and organization repositories. Publishing hierarchies requires repository `maintain` or `admin` permission.
+> - `swarm repo init --sync-labels --backend github` scaffolds `.github/ISSUE_TEMPLATE/swarm-community.yml` (`swarm:community` intake) and `swarm-workunit.yml` (`swarm:draft`) and syncs labels. Because GitHub's web UI and REST API allow users with repository access to open issues directly, maintainers should review repository issue forms and organization issue-type settings in GitHub Settings; SwarmOS enforces execution gating by requiring explicit `swarm issue approve <N>` on non-parent WorkUnits.
 ---
 
 ## 4. Working Alongside Hosted Agents & Review Bots

@@ -33,7 +33,7 @@ swarm issue work 123
 
 Conversion keeps the original issue number, URL and report, plus unrelated labels and metadata. It removes readiness and needs-scope labels and adds `swarm:draft`; approval remains a separate maintainer decision. The task gate defaults to `none`, with stricter workflow or repository gates enforced at approval. The linked PR references the original issue and closes it automatically when merged into the default branch.
 
-Existing WorkUnits use `swarm issue edit`; external-file contracts are edited in their referenced file. Conversion refuses closed issues, pull requests, Epics and issues with recorded coordination state. Follow the reported status and recovery guidance before retrying. A failed write reports completed steps; after the contract body has been saved, use `issue edit` for further changes. Dependency projection warnings leave the converted contract intact and identify links to retry.
+Existing WorkUnits use `swarm issue edit`; external-file contracts are edited in their referenced file. Conversion refuses closed issues, pull requests, Parent issues and issues with recorded coordination state. Follow the reported status and recovery guidance before retrying. A failed write reports completed steps; after the contract body has been saved, use `issue edit` for further changes. Dependency projection warnings leave the converted contract intact and identify links to retry.
 
 ## 1. Built-In Workflow Recipes (`.swarm/workflows/`)
 
@@ -94,6 +94,8 @@ Plans ground decisions in evidence, assumptions, and open questions. Reviewers c
 When something about the repo surprises an agent, it notes it in `.swarm/active/LESSONS.md`. SwarmOS copies those notes into the implementation summary under **What we learned**, and `swarm repo lessons` turns lessons from merged PRs into proposed `.swarm/rules/lessons.md` entries for a maintainer to commit.
 
 `swarm repo plan --scan` and `swarm issue lint <N>` suggest dimensions from the issue text and touchpoints, with signals and hints such as a missing reproduction step. These suggestions stay advisory. Only maintainer-set dimensions on the approved WorkUnit select a profile. If dimensions are absent, the planner records advisory suggestions and follows general evidence and acceptance coverage guidance.
+
+Optional for organization repositories: use `swarm issue parent create --epic --title "Roadmap" --body-file ROADMAP.md` or `swarm repo plan --from ROADMAP.md --apply --epic` to request the Epic issue type. `swarm issue epic create` remains a compatibility alias for typed creation.
 
 ---
 
@@ -201,7 +203,7 @@ SwarmOS separates per-issue execution planning from repository-wide roadmap plan
 - **At the repository root for onboarding & upgrades**:
   - `/swarm-onboard` (in Claude Code and OpenCode) or `swarm repo onboard` as a prompt for any harness — Preview `swarm repo init`, agree on validation checks that match your CI, merge SwarmOS files with what the repository already has, and hand back a reviewable diff.
 - **At the repository root for roadmap ideation & backlog triage**:
-  - `/swarm-project-plan` (in Claude Code and OpenCode) or the shared `.swarm/skills/triage-and-plan.md` skill (used as a regular prompt in Codex and `omp`) — Collaboratively refine an idea into a repo-local plan file, preview `Step N` child tasks with `swarm repo plan --from <file>`, publish a native `Epic` and draft child sub-issues on explicit maintainer instruction (`--apply`), and selectively approve child WorkUnits with `swarm issue approve <N>`, or triage open issues with `swarm repo plan --scan`.
+  - `/swarm-project-plan` (in Claude Code and OpenCode) or the shared `.swarm/skills/triage-and-plan.md` skill (used as a regular prompt in Codex and `omp`) — Collaboratively refine an idea into a repo-local plan file, preview `Step N` child tasks with `swarm repo plan --from <file>`, publish a parent issue and draft child sub-issues on explicit maintainer instruction (`--apply`), and selectively approve child WorkUnits with `swarm issue approve <N>`, or triage open issues with `swarm repo plan --scan`.
 
 ## 5. Command Progress
 

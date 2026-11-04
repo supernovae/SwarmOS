@@ -308,6 +308,7 @@ func submittedInteractivePRFixture(t *testing.T, gates ...string) (*cliFixture, 
 		t.Fatal(err)
 	}
 	f.must(t, "issue", "stage", n, "--phase", "implement")
+	seedCompleteIssueAcceptance(t, f, issue)
 	f.must(t, "issue", "submit", n)
 	number := f.state(t, issue).PRNumber
 	if number == issue {

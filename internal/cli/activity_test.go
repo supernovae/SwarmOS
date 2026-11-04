@@ -104,7 +104,16 @@ func (r upstreamCLIReviewRunner) Run(_ context.Context, req agent.RunRequest) (*
 	if !req.ReadOnly {
 		return nil, fmt.Errorf("review must be read-only")
 	}
-	if err := os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte("VERDICT: "+r.verdict+"\n"), 0644); err != nil {
+	findings := contract.PlanFindings{Version: 1, Findings: []contract.PlanFinding{}}
+	if r.verdict == "CHANGES_REQUESTED" {
+		findings.Findings = append(findings.Findings, contract.PlanFinding{ID: "F1", Blocking: true, Disposition: "open", Criterion: "Plan completeness", Trigger: "Review the staged plan", Expected: "A complete recovery plan", Actual: "Recovery coverage is missing", Check: "Review recovery coverage after revising the plan"})
+	}
+	raw, err := json.Marshal(findings)
+	if err != nil {
+		return nil, err
+	}
+	body := "VERDICT: " + r.verdict + "\n" + contract.PlanFindingsStart + "\n" + string(raw) + "\n" + contract.PlanFindingsEnd + "\n"
+	if err := os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(body), 0644); err != nil {
 		return nil, err
 	}
 	return &agent.RunResult{Agent: "codex", Role: "reviewer", Attestation: r.Provenance("reviewer", true)}, nil

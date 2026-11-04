@@ -488,6 +488,7 @@ func TestCLIInteractiveStageProvenanceAndPlanCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.must(t, "issue", "stage", n, "--phase", "implement", "--harness", "codex", "--model", "gpt-5-codex")
+	seedCompleteIssueAcceptance(t, f, number)
 	f.must(t, "issue", "submit", n)
 
 	state := f.state(t, number)

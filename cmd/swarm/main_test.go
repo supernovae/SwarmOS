@@ -12,7 +12,12 @@ import (
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/cli"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 // TestMain lets the test binary act as the swarm executable, so exit codes are
@@ -78,6 +83,74 @@ func (p process) create(title string) string {
 	return strconv.Itoa(created.Issue.Number)
 }
 
+// seedCompleteAcceptance supplies evidence only for this successful lifecycle fixture.
+func (p process) seedCompleteAcceptance(issue string) {
+	p.t.Helper()
+	ctx := p.t.Context()
+	number, err := strconv.Atoi(issue)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	tr := tracker.NewLocalTracker(p.root).WithUser("alice", "")
+	cfg, err := harness.LoadConfig(p.root)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	manager := lease.NewManager(tr, cfg.Security)
+	if err := manager.ConfigureStore(p.root); err != nil {
+		p.t.Fatal(err)
+	}
+	st, err := manager.GetCurrentState(ctx, number)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	manager.BindClaim(number, st.Lease.ClaimID)
+	var art contract.Artifact
+	found := false
+	for _, candidate := range st.Artifacts {
+		if candidate.Type == contract.ArtifactValidation {
+			art = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		p.t.Fatal("missing validation")
+	}
+	if art.Metadata == nil {
+		art.Metadata = make(map[string]string)
+	}
+	identity, err := validation.AcceptanceCandidateIdentity(ctx, workspace.WorktreePath(p.root, number), validation.ValidateOptions{BaseSHA: st.BaseSHA, ClaimID: st.Lease.ClaimID, Version: cli.Version})
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	for k, v := range identity {
+		if art.Metadata[k] == "" {
+			art.Metadata[k] = v
+		}
+	}
+	iss, err := tr.GetIssue(ctx, number)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(number, iss.Title, iss.Body)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	entries := make([]map[string]any, 0, len(wu.Acceptance))
+	for i, criterion := range wu.Acceptance {
+		entries = append(entries, map[string]any{"index": i + 1, "criterion": criterion, "status": "met", "evidence": "This deterministic lifecycle fixture supplies the documented-exit-code scenario."})
+	}
+	raw, err := json.Marshal(map[string]any{"version": 1, "criteria": entries})
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	validation.StoreAcceptanceSnapshot(art.Metadata, validation.CaptureAcceptanceEvidence(validation.AcceptanceEvidenceStart+"\n"+string(raw)+"\n"+validation.AcceptanceEvidenceEnd))
+	if _, err := manager.RecordTrustedValidation(ctx, number, "alice", art); err != nil {
+		p.t.Fatal(err)
+	}
+}
+
 func newProcess(t *testing.T) process {
 	t.Setenv("SWARM_EXECUTION_MODE", "trusted-local")
 	t.Setenv("HOME", t.TempDir())
@@ -129,6 +202,7 @@ func TestProcessExitCodes(t *testing.T) {
 	issue := p.create("Conflicting")
 	p.must("issue", "approve", issue)
 	p.must("issue", "work", issue, "--agent", "mock", "--progress=false")
+	p.seedCompleteAcceptance(issue)
 	var submitted struct {
 		PRNumber int    `json:"pr_number"`
 		HeadSHA  string `json:"head_sha"`

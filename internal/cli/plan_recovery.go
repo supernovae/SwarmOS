@@ -29,9 +29,6 @@ func planReviewRecovery(opts *RootOptions, st *lease.IssueState, resource string
 	}
 	command := "swarm"
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	if opts.Backend != "" {
-		command += " --backend " + quote(opts.Backend)
-	}
 	if opts.Repo != "" {
 		command += " --repo " + quote(opts.Repo)
 	}

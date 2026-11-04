@@ -81,7 +81,7 @@ func TestCLICheckpointReconciliationAndStatus(t *testing.T) {
 	prGit(t, path, "commit", "--amend", "-m", "B")
 	b := prGit(t, path, "rev-parse", "HEAD")
 	run := func(args ...string) (string, error) {
-		opts := &RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: tr}
+		opts := &RootOptions{RepoRoot: f.root, Repo: "test/repo", trackerOverride: tr}
 		cmd := f.command(opts)
 		var out bytes.Buffer
 		cmd.SetOut(&out)
@@ -252,7 +252,7 @@ func TestCheckpointReleasedReapprovedRecovery(t *testing.T) {
 			controlled := &checkpointTokenFailureTracker{Tracker: tr}
 			tr = controlled
 			runAs := func(actor tracker.Tracker, args ...string) (string, error) {
-				opts := &RootOptions{RepoRoot: f.root, Repo: "octo/swarm", Backend: backend, trackerOverride: actor}
+				opts := &RootOptions{RepoRoot: f.root, Repo: "octo/swarm", trackerOverride: actor}
 				cmd := f.command(opts)
 				var out bytes.Buffer
 				cmd.SetOut(&out)

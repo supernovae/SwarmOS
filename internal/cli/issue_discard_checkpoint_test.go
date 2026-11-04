@@ -79,7 +79,7 @@ func testCLIDiscardCheckpointAndStatus(t *testing.T, ns string) {
 		t.Fatal(err)
 	}
 	run := func(args ...string) (string, error) {
-		opts := &RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: checkpointCLITracker{f.tracker}}
+		opts := &RootOptions{RepoRoot: f.root, Repo: "test/repo", trackerOverride: checkpointCLITracker{f.tracker}}
 		cmd := f.command(opts)
 		var out bytes.Buffer
 		cmd.SetOut(&out)

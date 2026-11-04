@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"io"
 	"os"
@@ -161,12 +162,9 @@ func (r *Registry) AddFromRemote(repo, localPath, backend, upstreamRemote string
 		return nil, fmt.Errorf("repository mismatch: path %q has remote %q, which does not match %q", gitRoot, detectedSlug, repo)
 	}
 
-	if backend == "" {
-		if strings.HasPrefix(repo, "local/") || detectedSlug == "" {
-			backend = "local"
-		} else {
-			backend = "github"
-		}
+	backend, err = harness.ConfiguredTracker(gitRoot)
+	if err != nil {
+		return nil, err
 	}
 
 	key := strings.ToLower(repo)

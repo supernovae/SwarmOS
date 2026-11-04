@@ -45,7 +45,6 @@ func (s *Service) workCommand(r *Result, operation, flags string) string {
 	if flags != "" {
 		cmd += " " + flags
 	}
-	cmd += " --backend " + s.Tracker.BackendName()
 	if s.Fork {
 		cmd += fmt.Sprintf(" --fork --fork-remote %q", s.ForkRemote)
 	}
@@ -200,7 +199,7 @@ func (s *Service) checkWork(ctx context.Context, r *Result, phases ...string) er
 			if s.Fork {
 				releaseSuffix = fmt.Sprintf(" --fork --fork-remote %q", s.ForkRemote)
 			}
-			w.Commands = append(w.Commands, fmt.Sprintf("If a claim is active: swarm issue release %d --reason \"re-approve against the new base for PR #%d\" --backend github", r.IssueNumber, r.PR.Number)+releaseSuffix, fmt.Sprintf("Maintainer (upstream): swarm issue approve %d --backend github", r.IssueNumber))
+			w.Commands = append(w.Commands, fmt.Sprintf("If a claim is active: swarm issue release %d --reason \"re-approve against the new base for PR #%d\"", r.IssueNumber, r.PR.Number)+releaseSuffix, fmt.Sprintf("Maintainer (upstream): swarm issue approve %d", r.IssueNumber))
 			w.stopCommands = append(w.stopCommands, w.Commands[len(w.Commands)-2])
 		}
 		w.Commands = append(w.Commands, s.workCommand(r, "rebase", ""), "After resolving and staging conflicts: "+s.workCommand(r, "rebase", "--continue"), "Or resolve with the developer agent: "+s.workCommand(r, "rebase", "--continue --resolve"), s.workCommand(r, "validate", ""), s.workCommand(r, "submit", ""))
@@ -236,9 +235,8 @@ func (s *Service) recoveryPlanning(r *Result, phase string) bool {
 func (s *Service) recoveryCommands(ctx context.Context, r *Result, rebase bool) []string {
 	commands := []string{}
 	if r.PR.BaseSHA != r.BaseSHA {
-		backend := s.Tracker.BackendName()
-		commands = append(commands, fmt.Sprintf("If a claim is active: swarm issue release %d --reason %q --backend %s", r.IssueNumber, "approve current PR base", backend),
-			fmt.Sprintf("Maintainer (upstream): swarm issue approve %d --backend %s", r.IssueNumber, backend))
+		commands = append(commands, fmt.Sprintf("If a claim is active: swarm issue release %d --reason %q", r.IssueNumber, "approve current PR base"),
+			fmt.Sprintf("Maintainer (upstream): swarm issue approve %d", r.IssueNumber))
 	}
 	issue, err := s.Tracker.GetIssue(ctx, r.IssueNumber)
 	var unit *contract.WorkUnit
@@ -250,7 +248,7 @@ func (s *Service) recoveryCommands(ctx context.Context, r *Result, rebase bool) 
 			commands = append(commands, s.workCommand(r, "work", "--phase plan"))
 		}
 		if r.State.EffectiveGate == contract.GateHuman {
-			commands = append(commands, fmt.Sprintf("Independent maintainer: swarm issue review-plan %d --approve --backend %s", r.IssueNumber, s.Tracker.BackendName()))
+			commands = append(commands, fmt.Sprintf("Independent maintainer: swarm issue review-plan %d --approve", r.IssueNumber))
 		} else {
 			commands = append(commands, s.workCommand(r, "work", "--phase review"))
 		}

@@ -153,7 +153,7 @@ func (f *fixture) response(name string, args []string) []byte {
 	if contributor {
 		root, remote = f.o.ForkRoot, "upstream"
 	}
-	want := []string{"--backend", "github", "--repo", f.o.Upstream, "--root", root, "--upstream-remote", remote}
+	want := []string{"--repo", f.o.Upstream, "--root", root, "--upstream-remote", remote}
 	if contributor {
 		want = append(want, "--fork", "--fork-remote", "origin")
 	}

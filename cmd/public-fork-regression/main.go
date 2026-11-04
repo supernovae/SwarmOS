@@ -135,7 +135,7 @@ func (d *driver) swarm(ctx context.Context, contributor bool, step string, args 
 	if contributor {
 		root, remote = d.o.ForkRoot, "upstream"
 	}
-	base := []string{"--backend", "github", "--repo", d.o.Upstream, "--root", root, "--upstream-remote", remote}
+	base := []string{"--repo", d.o.Upstream, "--root", root, "--upstream-remote", remote}
 	if contributor {
 		base = append(base, "--fork", "--fork-remote", "origin")
 	}
@@ -767,7 +767,7 @@ func (d *driver) pause(r record) error {
 	if e := d.saveRecord(r); e != nil {
 		return e
 	}
-	fmt.Fprintf(d.out, "Independent maintainer: swarm --backend github --repo %s --root 'UPSTREAM_CHECKOUT' --upstream-remote origin issue review-plan %d --approve --notes '<maintainer-decision>'\n", d.o.Upstream, r.Issue)
+	fmt.Fprintf(d.out, "Independent maintainer: swarm --repo %s --root 'UPSTREAM_CHECKOUT' --upstream-remote origin issue review-plan %d --approve --notes '<maintainer-decision>'\n", d.o.Upstream, r.Issue)
 	return errPaused
 }
 
@@ -841,7 +841,7 @@ func (d *driver) preview() {
 	for _, s := range []string{"upstream issue create --title <unique-title> --objective <unique-file> --constraint <unique-file-only> --acceptance <file-result> --workflow feature --gate " + d.o.Gate + " --json", "upstream issue approve <issue> --json", "contributor issue claim <issue> --json", "contributor issue work <issue> --phase plan --json", d.previewGate("issue"), "upstream issue status <issue> --json; verify exact approval and gate", "contributor issue work <issue> --phase implement --json", "upstream issue status <issue> --json; require <candidate-head>", "contributor issue submit <issue> --json; verify draft <PR> and <candidate-head>", "contributor pr work <PR> --phase plan --instructions <unique-file-revision> --json", d.previewGate("revision") + "; fresh issue status and approval verification", "contributor pr work <PR> --phase implement --instructions <unique-file-revision> --json", "contributor pr status <PR> --json; require <revision-head>", "contributor pr submit <PR> --json; require same PR and <revision-head>"} {
 		fmt.Fprintln(d.out, s)
 	}
-	fmt.Fprintf(d.out, "Every swarm command: --backend github --repo %s --root <checkout> --upstream-remote origin (upstream) or upstream (contributor); contributor also --fork --fork-remote origin. Resume dry-run never reads or advances a record.\n", d.o.Upstream)
+	fmt.Fprintf(d.out, "Every swarm command: --repo %s --root <checkout> --upstream-remote origin (upstream) or upstream (contributor); contributor also --fork --fork-remote origin. Resume dry-run never reads or advances a record.\n", d.o.Upstream)
 }
 
 func (d *driver) previewGate(stage string) string {

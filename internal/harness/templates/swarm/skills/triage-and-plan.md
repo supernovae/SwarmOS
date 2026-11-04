@@ -17,8 +17,8 @@ Optional for organization repositories: use `swarm issue parent create --epic --
    - `### Constraints`
    - `### Acceptance Criteria` with observable `- [ ]` checkboxes
    - Optional `depends on: <earlier-step-number>`
-5. **Preview Before Publishing**: Show the saved file and run `swarm repo plan --from <file> --backend github` to preview the parent issue and `Step N` child tasks.
-6. **Publish on Explicit Maintainer Instruction**: Run `swarm repo plan --from <file> --apply --backend github` only when a maintainer explicitly asks to publish. Show the parent issue (`swarm:parent`) and draft child WorkUnit links (`swarm:draft`), and recommend selective `swarm issue approve <N>` on child tasks (never approve or execute the parent issue, and do not pass `--ready` automatically).
+5. **Preview Before Publishing**: Show the saved file and run `swarm repo plan --from <file>` to preview the parent issue and `Step N` child tasks.
+6. **Publish on Explicit Maintainer Instruction**: Run `swarm repo plan --from <file> --apply` only when a maintainer explicitly asks to publish. Show the parent issue (`swarm:parent`) and draft child WorkUnit links (`swarm:draft`), and recommend selective `swarm issue approve <N>` on child tasks (never approve or execute the parent issue, and do not pass `--ready` automatically).
 
 ## 2. Issue Types & Triage Label Taxonomy (`swarm repo plan --scan`)
 
@@ -53,4 +53,4 @@ swarm issue convert 123 --objective 'Return an empty result for an empty query' 
 
 Only on explicit maintainer instruction, repeat the reviewed command without `--dry-run` to update the existing issue into a draft. Conversion preserves its number, URL and original report; a linked PR closes that same issue on merge. Run `swarm issue lint 123`, request a separate maintainer decision to run `swarm issue approve 123`, then start `swarm issue work 123` when authorized. Never approve or start implementation automatically. Existing WorkUnits use `swarm issue edit`; follow status/recovery guidance for issues with recorded coordination state.
 
-For the whole backlog, preview `swarm repo plan --scan --backend github`. On explicit maintainer instruction apply suggested normalization with `swarm repo plan --scan --apply --normalize --backend github`. Review each resulting draft's requirements before separate approval. Do not add `--ready` automatically. Individual conversion accepts prepared fields; backlog normalization suggests them across multiple issues.
+For the whole backlog, preview `swarm repo plan --scan`. On explicit maintainer instruction apply suggested normalization with `swarm repo plan --scan --apply --normalize`. Review each resulting draft's requirements before separate approval. Do not add `--ready` automatically. Individual conversion accepts prepared fields; backlog normalization suggests them across multiple issues.

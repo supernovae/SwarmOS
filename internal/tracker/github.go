@@ -46,7 +46,7 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 	} else {
 		r, err := repository.Current()
 		if err != nil {
-			return nil, fmt.Errorf("could not resolve current GitHub repository (use --backend local or --repo owner/repo): %w", err)
+			return nil, fmt.Errorf("could not resolve current GitHub repository (use tracker: local in .swarm/config.yaml or --repo owner/repo): %w", err)
 		}
 		owner, name = r.Owner, r.Name
 	}

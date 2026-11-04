@@ -1,0 +1,6 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "description": "Tracker selection; other configuration fields are validated by the YAML configuration loader.",
+ "type": "object",
+ "properties": {"tracker": {"type": "string", "enum": ["github", "local"], "default": "github"}}
+}

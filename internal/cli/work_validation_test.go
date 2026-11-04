@@ -262,7 +262,7 @@ func TestTestPhaseRequiresExplicitIssueBeforeSelection(t *testing.T) {
 	for _, flags := range [][]string{{"--next"}, {"--next", "--all"}} {
 		// No backend, repository, tracker, manager, or runner is available: any
 		// selection or setup call would fail instead of producing this usage error.
-		opts := &RootOptions{RepoRoot: t.TempDir(), Backend: "invalid"}
+		opts := &RootOptions{RepoRoot: t.TempDir()}
 		cmd := newWorkCmd(opts)
 		cmd.SetOut(io.Discard)
 		cmd.SetErr(io.Discard)
@@ -376,7 +376,7 @@ func TestExplicitTestWorkFakeGitHub(t *testing.T) {
 				pull.Mergeable = &mergeable
 				pull.MergeableState = "clean"
 			}
-			opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: workCLITracker{Tracker: f.tracker, pr: pull}}
+			opts := &RootOptions{RepoRoot: f.root, trackerOverride: workCLITracker{Tracker: f.tracker, pr: pull}}
 			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 77")
 			doc, err := runJSON(t, f.options(opts), resource, "work", strconv.Itoa(number), "--phase", "test", "--agent", "mock", "--json", "--progress=false")
 			if err != nil {
@@ -468,7 +468,7 @@ func TestTestPhaseNextRefusesBeforeAnyCoordinatorActivity(t *testing.T) {
 			}
 			run := func(phase string) (*untouchedSelectionTracker, error) {
 				tr := &untouchedSelectionTracker{}
-				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "github", Repo: "owner/repo", trackerOverride: tr})
+				cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "owner/repo", trackerOverride: tr})
 				cmd.SetOut(io.Discard)
 				cmd.SetErr(io.Discard)
 				cmd.SetArgs(append([]string{"issue", "work", "--phase", phase, "--agent", "mock", "--progress=false"}, flags...))
@@ -636,7 +636,7 @@ func TestIssueWorkContinuationCommand(t *testing.T) {
 				scripted := &continuationRunner{counts: map[string]int{}, reject: true}
 				f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return scripted, nil }
 				run := func(args ...string) (string, error) {
-					cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: backend, Repo: "octo/swarm", trackerOverride: tr})
+					cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "octo/swarm", trackerOverride: tr})
 					var out bytes.Buffer
 					cmd.SetOut(&out)
 					cmd.SetErr(&out)
@@ -759,7 +759,7 @@ func TestIssueWorkRecoveryMissingReports(t *testing.T) {
 					scripted := &continuationRunner{counts: map[string]int{}}
 					f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return scripted, nil }
 					run := func(args ...string) (string, error) {
-						cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: backend, Repo: "octo/swarm", trackerOverride: tr})
+						cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "octo/swarm", trackerOverride: tr})
 						var out bytes.Buffer
 						cmd.SetOut(&out)
 						cmd.SetErr(&out)
@@ -934,7 +934,7 @@ func TestIssueWorkRecoveryFeedbackSelection(t *testing.T) {
 					script := &continuationRunner{counts: map[string]int{}, reject: true, bare: true}
 					f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return script, nil }
 					run := func(args ...string) (string, error) {
-						cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: backend, Repo: "octo/swarm", trackerOverride: tr})
+						cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "octo/swarm", trackerOverride: tr})
 						var out bytes.Buffer
 						cmd.SetOut(&out)
 						cmd.SetErr(&out)
@@ -1075,7 +1075,7 @@ func recoveryCommandFixturePrepared(t *testing.T, backend, gate string, f *cliFi
 	script := &continuationRunner{counts: map[string]int{}}
 	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return script, nil }
 	run := func(args ...string) (string, error) {
-		cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: backend, Repo: "octo/swarm", trackerOverride: tr})
+		cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "octo/swarm", trackerOverride: tr})
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)

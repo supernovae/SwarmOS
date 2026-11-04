@@ -76,7 +76,7 @@ SwarmOS supports two review gate styles so you can choose how plans are approved
 - **Human Plan Gate (`--gate human`)**: Ask Grok Bot to review the proposed plan and post its findings on the issue or in chat. When you are ready to green-light the plan, record your maintainer decision via the CLI and resume execution:
   ```bash
   swarm issue review-plan 42 --approve --notes "Reviewed plan with Grok Bot; ready to implement"
-  swarm issue work 42 --backend github
+  swarm issue work 42
   ```
 - **Automated Agent Gate (`--gate agent`)**: SwarmOS runs your configured reviewer harness inside an isolated read-only snapshot and verifies that `.swarm/active/REVIEW.md` begins with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED` before starting implementation.
 
@@ -92,19 +92,19 @@ On the computer where Grok Bot will run `swarm`, install `git`, `gh`, the pinned
 
 ```bash
 cd /workspace/your-repo
-swarm repo doctor --backend github
-swarm repo add --backend github
+swarm repo doctor
+swarm repo add
 ```
 
 ### Give Grok Bot a task handoff
 
 ```text
 Work on OWNER/REPO from its checkout in /workspace/your-repo.
-1. Run `swarm issue status --backend github` and `swarm issue work 42 --dry-run --backend github`
+1. Run `swarm issue status` and `swarm issue work 42 --dry-run`
    so we can see the resolved agents, plan gate, and base commit.
-2. Run `swarm issue work 42 --backend github`. If the task pauses on a human gate,
+2. Run `swarm issue work 42`. If the task pauses on a human gate,
    share the generated PLAN.md and TEST_PLAN.md with me and wait for my approval.
-3. Once implementation and `swarm issue validate 42` pass, run `swarm issue submit 42 --backend github`
+3. Once implementation and `swarm issue validate 42` pass, run `swarm issue submit 42`
    and send me the Draft PR link.
 ```
 
@@ -114,7 +114,7 @@ When you have several approved issues queued up across one or more repositories,
 
 ```bash
 swarm node init --id grok-coordinator
-swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
+swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit
 ```
 
 Add `--watch` when you want the worker pool to keep polling for newly approved issues.
@@ -132,7 +132,7 @@ When Grok Bot (or an external contributor) does not have push access to the upst
 ```bash
 # Generate .github/workflows/swarm-fork-coordinator.yml, pinned to the swarm you run it with
 swarm repo init --fork-coordinator
-swarm issue approve 42 --backend github
+swarm issue approve 42
 ```
 
 **2. Contributor / Grok Bot fork walkthrough:**
@@ -172,7 +172,7 @@ agents:
 Then route any role to `grok`:
 
 ```bash
-swarm issue work 42 --planner-agent grok --reviewer-agent grok --developer-agent codex --backend github
+swarm issue work 42 --planner-agent grok --reviewer-agent grok --developer-agent codex
 ```
 
 ---

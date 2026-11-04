@@ -112,7 +112,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 						}
 						if needsHumanPlanDecision(state, wu, cfg) {
 							selected := *options
-							selected.Repo, selected.RepoRoot, selected.Backend = target.Repo, target.Path, target.Backend
+							selected.Repo, selected.RepoRoot = target.Repo, target.Path
 							entry.humanPlanAction = (stopContext{opts: &selected}).planApproval(issue.Number)
 						}
 					}

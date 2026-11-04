@@ -240,6 +240,8 @@ func TestDiscoverScopesRegisteredOnlyAndConflicts(t *testing.T) {
 		}
 	}
 	git("init", "-q")
+	storageFixtureTracker(t, repo, "local")
+	git("add", ".swarm/config.yaml")
 	put(t, filepath.Join(repo, "file"), "x")
 	git("add", "file")
 	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "initial")
@@ -262,8 +264,8 @@ func TestDiscoverScopesRegisteredOnlyAndConflicts(t *testing.T) {
 	if err != nil || len(scopes) != 1 || scopes[0].Backend != "local" || len(reasons) != 0 {
 		t.Fatalf("registered linked default: %v %v %v", scopes, reasons, err)
 	}
-	if _, err := os.Stat(filepath.Join(repo, ".swarm")); !os.IsNotExist(err) {
-		t.Fatal("discovery created authority", err)
+	if entries, err := os.ReadDir(filepath.Join(repo, ".swarm")); err != nil || len(entries) != 1 || entries[0].Name() != "config.yaml" {
+		t.Fatal("discovery created authority", entries, err)
 	}
 }
 
@@ -305,5 +307,38 @@ func TestDiscoveryMalformedUseEvidenceIsLocal(t *testing.T) {
 	}
 	if !foundBad || !foundGood {
 		t.Fatalf("missing physical resources: %+v", snapshot.Resources)
+	}
+}
+
+func TestTrackerConfigOverridesStorageMetadata(t *testing.T) {
+	for _, configured := range []string{"local", "github"} {
+		t.Run(configured, func(t *testing.T) {
+			opts := fixture(t)
+			root := t.TempDir()
+			if out, err := exec.Command("git", "init", "-q", root).CombinedOutput(); err != nil {
+				t.Fatalf("%s %v", out, err)
+			}
+			if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", "https://github.com/fixture/repo.git").CombinedOutput(); err != nil {
+				t.Fatalf("%s %v", out, err)
+			}
+			storageFixtureTracker(t, root, configured)
+			stale := "local"
+			if configured == "local" {
+				stale = "github"
+			}
+			put(t, opts.RegistryPath, fmt.Sprintf("version: 1\nrepos:\n  fixture/repo:\n    repo: fixture/repo\n    path: %s\n    backend: %s\n", root, stale))
+			opts.SelectedRoot, opts.Backend, opts.Repository = root, stale, "fixture/repo"
+			for _, all := range []bool{false, true} {
+				scopes, reasons, err := DiscoverScopes(context.Background(), opts, all)
+				if err != nil || len(reasons) != 0 || len(scopes) != 1 || scopes[0].Backend != configured {
+					t.Fatalf("config %s: %v %v %v", configured, scopes, reasons, err)
+				}
+			}
+			storageFixtureTracker(t, root, "invalid")
+			scopes, reasons, err := DiscoverScopes(context.Background(), opts, true)
+			if err != nil || len(scopes) != 0 || len(reasons) == 0 {
+				t.Fatalf("invalid config admitted: %v %v %v", scopes, reasons, err)
+			}
+		})
 	}
 }

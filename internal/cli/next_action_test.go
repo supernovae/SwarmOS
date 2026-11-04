@@ -31,8 +31,8 @@ import (
 //   - issue submit and pr submit run no agent review, so changes_requested is
 //     unreachable.
 func TestNextActionMatrix(t *testing.T) {
-	opts := &RootOptions{Backend: "local", RepoRoot: "/repo"}
-	base := []string{"swarm", "--backend", "local", "--root", "/repo"}
+	opts := &RootOptions{RepoRoot: "/repo"}
+	base := []string{"swarm", "--root", "/repo"}
 	argv := func(args ...string) []string { return append(append([]string(nil), base...), args...) }
 	rejected := fmt.Errorf("agent review: %w: reviewer %q returned CHANGES_REQUESTED", workflow.ErrPlanReviewRejected, "mock")
 	task := &lease.TaskApprovalError{IssueNumber: 7}
@@ -110,13 +110,13 @@ func TestNextActionMatrix(t *testing.T) {
 	}
 	for _, resource := range []string{"issue", "pr"} {
 		for _, repo := range []string{"", "acme/widgets"} {
-			o := &RootOptions{Backend: "github", Repo: repo, Fork: true, RepoRoot: "/contributor", UpstreamRemote: "upstream", ForkRemote: "personal"}
+			o := &RootOptions{Repo: repo, Fork: true, RepoRoot: "/contributor", UpstreamRemote: "upstream", ForkRemote: "personal"}
 			c := stopContext{opts: o, resource: resource, number: 9}
 			plan := &lease.PlanApprovalError{IssueNumber: 7}
 			original := fmt.Errorf("%w: %w", workflow.ErrPlanApprovalNeeded, plan)
 			stopped := c.stop(original)
 			a := nextActionOf(stopped)
-			expected := []string{"swarm", "--backend", "github"}
+			expected := []string{"swarm"}
 			if repo != "" {
 				expected = append(expected, "--repo", repo)
 			}
@@ -189,26 +189,26 @@ func TestNextActionLeavesOtherErrorsUnclassified(t *testing.T) {
 
 func TestNextActionArgvKeepsRepositorySelection(t *testing.T) {
 	root := "/work/it's a repo"
-	fork := &RootOptions{Backend: "github", Repo: "acme/widgets", RepoRoot: root, Fork: true, ForkRemote: "my fork"}
-	upstream := &RootOptions{Backend: "github", RepoRoot: root, ForkRemote: workspace.DefaultForkRemote}
-	custom := &RootOptions{Backend: "github", ForkRemote: "writable"}
+	fork := &RootOptions{Repo: "acme/widgets", RepoRoot: root, Fork: true, ForkRemote: "my fork"}
+	upstream := &RootOptions{RepoRoot: root, ForkRemote: workspace.DefaultForkRemote}
+	custom := &RootOptions{ForkRemote: "writable"}
 	for _, tc := range []struct {
 		name string
 		got  *NextAction
 		want []string
 	}{
 		{"fork worker keeps fork flags", stopContext{opts: fork, resource: "pr", number: 3}.classify(&pr.ConflictError{PRNumber: 3, Err: errors.New("x")}),
-			[]string{"swarm", "--backend", "github", "--repo", "acme/widgets", "--root", root, "--fork", "--fork-remote", "my fork", "pr", "rebase", "3", "--resolve"}},
+			[]string{"swarm", "--repo", "acme/widgets", "--root", root, "--fork", "--fork-remote", "my fork", "pr", "rebase", "3", "--resolve"}},
 		{"fork approval targets upstream maintainer", stopContext{opts: fork, resource: "issue", number: 2}.classify(&lease.TaskApprovalError{IssueNumber: 2}),
-			[]string{"swarm", "--backend", "github", "--repo", "acme/widgets", "issue", "approve", "2"}},
+			[]string{"swarm", "--repo", "acme/widgets", "issue", "approve", "2"}},
 		{"fork issue revise", stopContext{opts: fork, resource: "issue", number: 2}.classify(workflow.ErrPlanReviewRejected),
-			[]string{"swarm", "--backend", "github", "--repo", "acme/widgets", "--root", root, "--fork", "--fork-remote", "my fork", "issue", "work", "2", "--phase", "plan"}},
+			[]string{"swarm", "--repo", "acme/widgets", "--root", root, "--fork", "--fork-remote", "my fork", "issue", "work", "2", "--phase", "plan"}},
 		{"default fork remote omitted", stopContext{opts: upstream, resource: "pr", number: 3}.classify(workflow.ErrPlanReviewRejected),
-			[]string{"swarm", "--backend", "github", "--root", root, "pr", "work", "3", "--phase", "plan"}},
+			[]string{"swarm", "--root", root, "pr", "work", "3", "--phase", "plan"}},
 		{"upstream-authorized remote kept for pr", stopContext{opts: custom, resource: "pr", number: 3}.classify(workflow.ErrPlanReviewRejected),
-			[]string{"swarm", "--backend", "github", "--fork-remote", "writable", "pr", "work", "3", "--phase", "plan"}},
+			[]string{"swarm", "--fork-remote", "writable", "pr", "work", "3", "--phase", "plan"}},
 		{"remote ignored for issue", stopContext{opts: custom, resource: "issue", number: 2}.classify(workflow.ErrPlanReviewRejected),
-			[]string{"swarm", "--backend", "github", "issue", "work", "2", "--phase", "plan"}},
+			[]string{"swarm", "issue", "work", "2", "--phase", "plan"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.got == nil || !reflect.DeepEqual(tc.got.Argv, tc.want) {
@@ -243,7 +243,7 @@ func runJSON(t *testing.T, opts *RootOptions, args ...string) (map[string]any, e
 
 func (f *cliFixture) runJSON(t *testing.T, args ...string) (map[string]any, error) {
 	t.Helper()
-	return runJSON(t, f.options(nil), append([]string{"--root", f.root, "--backend", "local"}, args...)...)
+	return runJSON(t, f.options(nil), append([]string{"--root", f.root}, args...)...)
 }
 
 func assertNextAction(t *testing.T, doc map[string]any, err error, reason string, human bool, code int, argv ...string) {
@@ -305,7 +305,7 @@ func reviseTask(t *testing.T, f *cliFixture, issue int) func() {
 }
 
 func localArgv(f *cliFixture, args ...string) []string {
-	return append([]string{"swarm", "--backend", "local", "--root", f.root}, args...)
+	return append([]string{"swarm", "--root", f.root}, args...)
 }
 
 func TestIssueWorkNextAction(t *testing.T) {
@@ -472,9 +472,9 @@ func TestPRWorkGitHubBlockersNextAction(t *testing.T) {
 		code   int
 		argv   []string
 	}{
-		{"conflict", false, ReasonConflict, false, ExitConflict, []string{"swarm", "--backend", "github", "--root", f.root, "pr", "rebase", p, "--resolve"}},
+		{"conflict", false, ReasonConflict, false, ExitConflict, []string{"swarm", "--root", f.root, "pr", "rebase", p, "--resolve"}},
 		// A moved base needs re-approval before any rebase, even when conflicting.
-		{"moved", true, ReasonNeedsApproval, true, ExitNeedsApproval, []string{"swarm", "--backend", "github", "--root", f.root, "issue", "approve", strconv.Itoa(issue)}},
+		{"moved", true, ReasonNeedsApproval, true, ExitNeedsApproval, []string{"swarm", "--root", f.root, "issue", "approve", strconv.Itoa(issue)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pull := *original
@@ -482,7 +482,7 @@ func TestPRWorkGitHubBlockersNextAction(t *testing.T) {
 			if tc.moved {
 				pull.BaseSHA = "advanced"
 			}
-			opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: workCLITracker{Tracker: f.tracker, pr: pull}}
+			opts := &RootOptions{RepoRoot: f.root, trackerOverride: workCLITracker{Tracker: f.tracker, pr: pull}}
 			doc, err := runJSON(t, f.options(opts), "pr", "work", p, "--agent", "mock", "--progress=false", "--json")
 			assertNextAction(t, doc, err, tc.reason, tc.human, tc.code, tc.argv...)
 			if _, statErr := os.Stat(workspace.PRWorktreePath(f.root, number)); !os.IsNotExist(statErr) {
@@ -494,11 +494,11 @@ func TestPRWorkGitHubBlockersNextAction(t *testing.T) {
 
 func TestTesterRetryNextActionPreservesSelections(t *testing.T) {
 	for _, resource := range []string{"issue", "pr"} {
-		opts := &RootOptions{Backend: "github", Repo: "org/repo", RepoRoot: "/checkout", UpstreamRemote: "upstream"}
+		opts := &RootOptions{Repo: "org/repo", RepoRoot: "/checkout", UpstreamRemote: "upstream"}
 		c := stopContext{opts: opts, resource: resource, number: 42}
 		err := &workflow.TestRetryAvailableError{Err: errors.New("tester refused output")}
 		action := c.classify(err)
-		want := []string{"swarm", "--backend", "github", "--repo", "org/repo", "--root", "/checkout", "--upstream-remote", "upstream", resource, "work", "42", "--phase", "test"}
+		want := []string{"swarm", "--repo", "org/repo", "--root", "/checkout", "--upstream-remote", "upstream", resource, "work", "42", "--phase", "test"}
 		if action == nil || action.Reason != "tester_retry_available" || action.HumanRequired || !reflect.DeepEqual(action.Argv, want) {
 			t.Fatalf("action %+v", action)
 		}
@@ -513,7 +513,7 @@ func TestTesterRetryNextActionPreservesSelections(t *testing.T) {
 }
 
 func TestNextActionHumanMessageBoundary(t *testing.T) {
-	c := stopContext{opts: &RootOptions{RepoRoot: "/repo with 'quotes'", Backend: "local"}, resource: "issue", number: 7}
+	c := stopContext{opts: &RootOptions{RepoRoot: "/repo with 'quotes'"}, resource: "issue", number: 7}
 	cause := &lease.HumanPlanApprovalError{IssueNumber: 7}
 	err := c.stop(cause)
 	if strings.Count(err.Error(), "Next step:") != 1 || !strings.Contains(err.Error(), "independent maintainer") {
@@ -542,7 +542,7 @@ func TestNextActionUnknownIdentity(t *testing.T) {
 
 func TestNextActionNoReadyCarrier(t *testing.T) {
 	cause := workflow.ErrValidationRepairExhausted
-	c := stopContext{opts: &RootOptions{Backend: "local", Repo: "acme/repo", RepoRoot: "/a 'repo'"}, resource: "issue", number: 19}
+	c := stopContext{opts: &RootOptions{Repo: "acme/repo", RepoRoot: "/a 'repo'"}, resource: "issue", number: 19}
 	e := &noReadyError{cause: cause, action: c.classify(cause), text: "Issue #19: automatic allowance exhausted"}
 	if !errors.Is(e, errNoReadyWork) || !errors.Is(e, cause) || ExitCode(e) != ExitFailure {
 		t.Fatal(e)

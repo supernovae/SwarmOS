@@ -83,7 +83,7 @@ Every cross-trust-boundary step in fork mode is designed to fail closed:
   Upstream maintainers can explicitly run an independent agent review from their upstream checkout while the contributor keeps the active lease:
 
   ```bash
-  swarm issue review-plan 42 --json --backend github
+  swarm issue review-plan 42 --json
   ```
 
   This path supports public personal forks with native Codex or harness-tools Bubblewrap. The reviewer receives no coordinator credentials. A fresh initial plan is reviewed against the approved base with the recorded plan and test plan; checkpoint and pending PR revision plans require their exact candidate commit to be published on the fork. Missing or moved source information stops review. The command records an agent verdict and reports `advisory: true` at a human gate. Human gates still need an independent maintainer’s `swarm issue review-plan 42 --approve`. If the isolated reviewer is unavailable, maintainers can use that manual decision after reviewing the current artifacts; contributors keep their existing claim throughout.
@@ -125,7 +125,7 @@ fork:
 Maintainers create and approve issues in the upstream repository as usual:
 
 ```bash
-swarm issue approve 42 --backend github
+swarm issue approve 42
 ```
 
 ---

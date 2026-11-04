@@ -79,7 +79,7 @@ func TestInspectionCommandSessionPerExecution(t *testing.T) {
 		return nil
 	}})
 	for range 2 {
-		root.SetArgs([]string{"probe", "--backend", "local"})
+		root.SetArgs([]string{"probe"})
 		if err := root.ExecuteContext(context.Background()); err != nil {
 			t.Fatal(err)
 		}

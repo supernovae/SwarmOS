@@ -965,3 +965,48 @@ func TestValidationCancellationRestoresInstructions(t *testing.T) {
 		}
 	}
 }
+
+func TestCandidateTrackerConfigValidation(t *testing.T) {
+	t.Parallel()
+	root := setupGitRepoForValidation(t)
+	base := gitRevision(t, root, "HEAD")
+	path := filepath.Join(root, ".swarm", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, []byte("\ntracker: unknown\n")...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Validate(context.Background(), root, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base})
+	if err == nil || !strings.Contains(err.Error(), "tracker") || !strings.Contains(err.Error(), ".swarm/config.yaml") {
+		t.Fatalf("invalid candidate tracker: %v", err)
+	}
+	if cfg, err := harness.LoadConfigAt(root, base); err != nil {
+		t.Fatal(err)
+	} else if value, _ := contract.ResolveTracker(cfg); value != "github" {
+		t.Fatal(value)
+	}
+}
+
+func TestCandidateTrackerDoesNotLoadExecutionPolicy(t *testing.T) {
+	t.Parallel()
+	root := setupGitRepoForValidation(t)
+	base := gitRevision(t, root, "HEAD")
+	path := filepath.Join(root, ".swarm", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := strings.Replace(string(data), "mode: trusted-local", "mode: invalid-candidate-mode", 1) + "\ntracker: local\n"
+	if err := os.WriteFile(path, []byte(candidate), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.LoadConfig(root); err == nil {
+		t.Fatal("fixture must have invalid candidate execution policy")
+	}
+	report, err := Validate(context.Background(), root, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base})
+	if err != nil || report == nil || !report.Passed {
+		t.Fatalf("approved execution policy was replaced by candidate: %+v %v", report, err)
+	}
+}

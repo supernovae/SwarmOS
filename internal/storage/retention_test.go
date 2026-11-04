@@ -36,6 +36,7 @@ func TestInventoryLocalAuthorityAndMissingRegistrations(t *testing.T) {
 	opts.Repository = ""
 	opts.SelectedRoot = repo
 	opts.Backend = "local"
+	storageFixtureTracker(t, opts.SelectedRoot, "local")
 	state := filepath.Join(repo, ".swarm", "coordination", "issue-7.json")
 	put(t, state, `{"lease":{"version":1,"issue_number":7,"status":"active","expires_at":"2000-01-01T00:00:00Z","claim_id":"must-never-appear"},"branch":"swarm/issue-7-test","pr_number":11}`)
 	trackerPath := filepath.Join(repo, ".swarm", "local-tracker", "state.json")
@@ -95,6 +96,7 @@ func TestInventoryCachesDoNotTriggerPRTraversal(t *testing.T) {
 	opts.Repository = ""
 	opts.SelectedRoot = repo
 	opts.Backend = "github"
+	storageFixtureTracker(t, opts.SelectedRoot, "github")
 	put(t, filepath.Join(opts.CacheRoot, "agent-build", "orphan", "go", "data"), "cache")
 	probe := &cacheOnlyRemoteProbe{}
 	opts.Tracker = func(string, string, string) (tracker.PullRequestVisitor, error) { return probe, nil }
@@ -174,6 +176,7 @@ func TestInventoryRemotePinnedStateWithoutFetch(t *testing.T) {
 	opts.Repository = ""
 	opts.SelectedRoot = root
 	opts.Backend = "github"
+	storageFixtureTracker(t, opts.SelectedRoot, "github")
 	remote := &inventoryRemoteFixture{sha: sha}
 	opts.Tracker = func(string, string, string) (tracker.PullRequestVisitor, error) { return remote, nil }
 	before := git("show-ref")
@@ -236,6 +239,7 @@ func TestInventoryCleanMergedWorktreeAndDirtyRetention(t *testing.T) {
 	opts.SelectedRoot = root
 	opts.Repository = ""
 	opts.Backend = "local"
+	storageFixtureTracker(t, opts.SelectedRoot, "local")
 	opts.Tracker = func(string, string, string) (tracker.PullRequestVisitor, error) {
 		return tracker.NewLocalTracker(root), nil
 	}
@@ -300,6 +304,7 @@ func reclaimFixture(t *testing.T, class string) (ReclaimOptions, *storageuse.Man
 	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
 		t.Fatalf("%s %v", out, err)
 	}
+	storageFixtureTracker(t, repo, "local")
 	common := filepath.Join(repo, ".git")
 	h := sha256.Sum256([]byte(common))
 	key := hex.EncodeToString(h[:16])
@@ -337,6 +342,7 @@ func TestReclamationPreviewApplyAndRerun(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			o, _, r := reclaimFixture(t, "agent-build")
 			o.Scopes[0].Backend = backend
+			storageFixtureTracker(t, o.Scopes[0].Root, backend)
 			snapshot := reclamationSnapshot(t, filepath.Dir(o.ControlRoot))
 			before, _ := os.Stat(o.ControlRoot)
 			records, _ := os.ReadDir(o.ControlRoot)
@@ -758,6 +764,7 @@ func backendReclaimLayoutFixture(t *testing.T, backend, class string, layout coo
 	o, m, r := reclaimFixture(t, class)
 	repo := o.Scopes[0].Root
 	o.Scopes[0].Backend = backend
+	storageFixtureTracker(t, o.Scopes[0].Root, backend)
 	state := func(status string) string {
 		return fmt.Sprintf(`{"lease":{"version":1,"issue_number":1,"status":%q},"branch":"swarm/issue-1-test","submitted_head_sha":"abc","pr_number":2}`, status)
 	}
@@ -1154,6 +1161,7 @@ func TestReclamationInventoryRealLedgerScale(t *testing.T) {
 		}
 	}
 	o.Scopes[0].Backend = "github"
+	storageFixtureTracker(t, o.Scopes[0].Root, "github")
 	var baseline int64
 	var finalRefs map[int]string
 	var finalPRs []*tracker.PullRequest
@@ -1264,6 +1272,7 @@ func TestReclamationInventoryOverLimitRetains(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			o, _, resource := reclaimFixture(t, "agent-build")
 			o.Scopes[0].Backend = backend
+			storageFixtureTracker(t, o.Scopes[0].Root, backend)
 			refs, prs, _, _ := inventoryScaleObjects(t, o.Scopes[0].Root, 1, func(int) int64 { return coordination.InventoryInputLimit + 1 })
 			if backend == "github" {
 				if out, err := exec.Command("git", "-C", o.Scopes[0].Root, "remote", "add", "origin", o.Scopes[0].Root).CombinedOutput(); err != nil {
@@ -1323,6 +1332,7 @@ func TestReclamationInventoryIssueFailureIsolation(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			o, _, _ := reclaimFixture(t, "agent-build")
 			o.Scopes[0].Backend = backend
+			storageFixtureTracker(t, o.Scopes[0].Root, backend)
 			refs, prs, _, _ := inventoryScaleObjects(t, o.Scopes[0].Root, 2, func(int) int64 { return 40000 })
 			if backend == "github" {
 				seedInventoryTrustedDefault(t, o.Scopes[0].Root)
@@ -1400,6 +1410,7 @@ func scaleAPITracker(t *testing.T, refs map[int]string, prs []*tracker.PullReque
 func TestReclamationTrackerLimitRetains(t *testing.T) {
 	o, _, r := reclaimFixture(t, "agent-build")
 	o.Scopes[0].Backend = "github"
+	storageFixtureTracker(t, o.Scopes[0].Root, "github")
 	refs, prs, _, _ := inventoryScaleObjects(t, o.Scopes[0].Root, 1, func(int) int64 { return 240398 })
 	tr := scaleAPITracker(t, refs, prs)
 	// Force retained-projection exhaustion without changing input ceilings.
@@ -2002,4 +2013,9 @@ func seedInventoryTrustedDefault(t *testing.T, root string) {
 	sha := git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", tree, "-m", "trusted code default")
 	git("update-ref", "refs/heads/fixture-default", sha)
 	git("symbolic-ref", "HEAD", "refs/heads/fixture-default")
+}
+
+func storageFixtureTracker(t *testing.T, root, value string) {
+	t.Helper()
+	put(t, filepath.Join(root, ".swarm", "config.yaml"), "version: 1\ntracker: "+value+"\ndefault_agent: mock\ndefault_gate: none\nlease:\n  duration: 30m\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  mock:\n    binary: git\n    harness: mock\n")
 }

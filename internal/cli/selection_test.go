@@ -153,7 +153,7 @@ func TestNextSelectionEntryPoints(t *testing.T) {
 				tr = &orderingTracker{Tracker: f.tracker, parents: map[int]int{first: epic.Number, second: epic.Number}, listErr: errors.New("offline"), calls: map[int]int{}}
 				want = first
 			}
-			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 			var output, diagnostics bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&diagnostics)
@@ -164,7 +164,7 @@ func TestNextSelectionEntryPoints(t *testing.T) {
 			if mode == "node" {
 				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
 			}
-			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			cmd.SetArgs(append([]string{"--root", f.root}, args...))
 			if err := cmd.Execute(); err != nil {
 				t.Fatalf("%v %s %s", err, &output, &diagnostics)
 			}
@@ -270,11 +270,11 @@ func TestNextSelectionFallbackEligibility(t *testing.T) {
 		parents[n] = epic.Number
 	}
 	tr := &orderingTracker{Tracker: f.tracker, parents: parents, listErr: errors.New("offline"), calls: map[int]int{}}
-	cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+	cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 	var out, diagnostics bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diagnostics)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "claim", "--next", "--agent", "mock", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "issue", "claim", "--next", "--agent", "mock", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("%v %s %s", err, &out, &diagnostics)
 	}
@@ -334,7 +334,7 @@ func TestOverlapSelectionPrefersNonOverlapping(t *testing.T) {
 			if mode == "node" {
 				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock", "--json"}
 			}
-			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			cmd.SetArgs(append([]string{"--root", f.root}, args...))
 			if err := cmd.Execute(); err != nil {
 				t.Fatalf("%v %s %s", err, &output, &diagnostics)
 			}
@@ -395,7 +395,7 @@ func TestOverlapSelectionIsAdvisory(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "claim", "--next", "--agent", "mock", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "issue", "claim", "--next", "--agent", "mock", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("overlap refused a claim: %v %s", err, &diagnostics)
 	}
@@ -526,7 +526,7 @@ func TestSelectorRefusesCommandOnlyTestWithLiveDependencies(t *testing.T) {
 	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 		return &countingRunner{runs: &runs}, nil
 	}
-	opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "github", Repo: "owner/repo", trackerOverride: tr})
+	opts := f.options(&RootOptions{RepoRoot: f.root, Repo: "owner/repo", trackerOverride: tr})
 	before := rootSnapshot(t, f.root)
 	for _, all := range []bool{false, true} {
 		if _, err := pullNextReadyIssue(t.Context(), f.command(opts), opts, all, workflow.WorkOptions{Phase: "test", AgentName: "mock"}, 0); err == nil || !strings.Contains(err.Error(), "invalid workflow phase") {
@@ -658,7 +658,7 @@ func TestNextSelectionEntryPointsParentLabel(t *testing.T) {
 				tr = &orderingTracker{Tracker: f.tracker, parents: map[int]int{first: epic.Number, second: epic.Number}, listErr: errors.New("offline"), calls: map[int]int{}}
 				want = first
 			}
-			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 			var output, diagnostics bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&diagnostics)
@@ -669,7 +669,7 @@ func TestNextSelectionEntryPointsParentLabel(t *testing.T) {
 			if mode == "node" {
 				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
 			}
-			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			cmd.SetArgs(append([]string{"--root", f.root}, args...))
 			if err := cmd.Execute(); err != nil {
 				t.Fatalf("%v %s %s", err, &output, &diagnostics)
 			}
@@ -744,11 +744,11 @@ func TestNextSelectionFallbackEligibilityParentLabel(t *testing.T) {
 		parents[n] = epic.Number
 	}
 	tr := &orderingTracker{Tracker: f.tracker, parents: parents, listErr: errors.New("offline"), calls: map[int]int{}}
-	cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+	cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 	var out, diagnostics bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diagnostics)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "claim", "--next", "--agent", "mock", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "issue", "claim", "--next", "--agent", "mock", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("%v %s %s", err, &out, &diagnostics)
 	}

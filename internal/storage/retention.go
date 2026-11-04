@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/storageuse"
@@ -23,9 +24,11 @@ import (
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
-func (s *scanner) retention(owner, root, backend string, start int) {
-	if s.opts.Backend != "" {
-		backend = s.opts.Backend
+func (s *scanner) retention(owner, root string, start int) {
+	backend, err := harness.ConfiguredTracker(root)
+	if err != nil {
+		s.fail("tracker configuration", err)
+		return
 	}
 	// Local coordination files are authoritative only for an explicitly selected
 	// local backend. A familiar directory in a GitHub checkout grants no authority.
@@ -1051,6 +1054,13 @@ func (r BackendRetention) WithRetention(ctx context.Context, scope RepositorySco
 			return ctx.Err()
 		}
 		return visit(ev)
+	}
+	configured, configErr := harness.ConfiguredTracker(scope.Root)
+	if configErr != nil {
+		return fail(configErr)
+	}
+	if configured != scope.Backend {
+		return fail(errors.New("tracker configuration changed; rediscover repository scope"))
 	}
 	b := &Budget{Limits: DefaultLimits()}
 	if r.Budget != nil {

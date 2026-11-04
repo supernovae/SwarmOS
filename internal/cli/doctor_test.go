@@ -110,7 +110,7 @@ func TestDoctorReportsCIDriftAsWarningOnly(t *testing.T) {
 			}
 		}
 		var stdout bytes.Buffer
-		cmd := newDoctorCmdWithRunner(&RootOptions{RepoRoot: root, Backend: "local"}, factory)
+		cmd := newDoctorCmdWithRunner(&RootOptions{RepoRoot: root}, factory)
 		cmd.SetContext(context.Background())
 		cmd.SetOut(&stdout)
 		cmd.SetErr(io.Discard)

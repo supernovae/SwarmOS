@@ -38,7 +38,7 @@ func leaseReminderRenewCommand(opts *RootOptions, backend string, issue int) str
 		backend = "github"
 	}
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	command := "swarm --backend " + quote(backend)
+	command := "swarm"
 	for _, flag := range []struct{ name, value string }{{"repo", opts.Repo}, {"root", opts.RepoRoot}} {
 		if flag.value != "" {
 			command += " --" + flag.name + " " + quote(flag.value)

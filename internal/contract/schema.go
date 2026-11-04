@@ -115,3 +115,32 @@ func formatValidationError(wu *WorkUnit, schemaErr error) error {
 	}
 	return schemaErr
 }
+
+//go:embed config.schema.json
+var configSchemaBytes []byte
+
+func ConfigSchemaBytes() []byte { return configSchemaBytes }
+
+// ValidateConfigJSON validates raw configuration JSON, including tracker types.
+func ValidateConfigJSON(data []byte) error {
+	compiler := jsonschema.NewCompiler()
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(configSchemaBytes))
+	if err != nil {
+		return err
+	}
+	if err = compiler.AddResource("config.schema.json", doc); err != nil {
+		return err
+	}
+	schema, err := compiler.Compile("config.schema.json")
+	if err != nil {
+		return err
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	if err = schema.Validate(instance); err != nil {
+		return fmt.Errorf("tracker configuration in .swarm/config.yaml: %w", err)
+	}
+	return nil
+}

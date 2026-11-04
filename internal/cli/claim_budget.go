@@ -21,7 +21,7 @@ func claimBudgetGuidance(opts *RootOptions, result *workflow.WorkResult, resourc
 func swarmCommand(opts *RootOptions) string {
 	command := "swarm"
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	for _, flag := range []struct{ name, value string }{{"backend", opts.Backend}, {"repo", opts.Repo}, {"root", opts.RepoRoot}, {"upstream-remote", opts.UpstreamRemote}} {
+	for _, flag := range []struct{ name, value string }{{"repo", opts.Repo}, {"root", opts.RepoRoot}, {"upstream-remote", opts.UpstreamRemote}} {
 		if flag.value != "" {
 			command += " --" + flag.name + " " + quote(flag.value)
 		}

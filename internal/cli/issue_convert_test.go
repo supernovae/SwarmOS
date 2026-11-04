@@ -64,7 +64,7 @@ func newConvertFixture(t *testing.T) (*cliFixture, *tracker.Issue, *convertRecor
 	return f, i, &convertRecordingTracker{editRecordingTracker: &editRecordingTracker{Tracker: f.tracker}}
 }
 func runConvert(f *cliFixture, r tracker.Tracker, args ...string) (string, error) {
-	cmd := newIssueConvertCmd(f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: r}))
+	cmd := newIssueConvertCmd(f.options(&RootOptions{RepoRoot: f.root, trackerOverride: r}))
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)

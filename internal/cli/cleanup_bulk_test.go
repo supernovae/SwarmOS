@@ -70,7 +70,7 @@ func runSplit(f *cliFixture, args ...string) (string, string, error) {
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
-	cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+	cmd.SetArgs(append([]string{"--root", f.root}, args...))
 	err := cmd.Execute()
 	return output.String(), diagnostics.String(), err
 }

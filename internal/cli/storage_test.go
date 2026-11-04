@@ -159,7 +159,7 @@ func TestStorageBothRenderersPreserveAuthoritativeState(t *testing.T) {
 	before := snapshot()
 	for _, cancelled := range []bool{false, true} {
 		for _, jsonOutput := range []bool{false, true} {
-			options := &RootOptions{RepoRoot: repo, Backend: "local", lookupEnv: func(key string) (string, bool) {
+			options := &RootOptions{RepoRoot: repo, lookupEnv: func(key string) (string, bool) {
 				if key == "SWARM_REGISTRY_PATH" {
 					return filepath.Join(root, "absent", "repos.yaml"), true
 				}
@@ -280,7 +280,7 @@ func TestStorageCleanupPreviewApplyAndJSON(t *testing.T) {
 	}
 }
 func TestStorageCleanupSelectorsAndErrors(t *testing.T) {
-	for _, args := range [][]string{{"--all-repos", "--root", "/missing"}, {"--all-repos", "--repo", "owner/repo"}, {"unexpected"}, {"--root", "/missing", "--backend", "local"}} {
+	for _, args := range [][]string{{"--all-repos", "--root", "/missing"}, {"--all-repos", "--repo", "owner/repo"}, {"unexpected"}, {"--root", "/missing"}} {
 		cmd := newRootCmdWithOptions(&RootOptions{})
 		var stdout bytes.Buffer
 		cmd.SetOut(&stdout)
@@ -333,7 +333,7 @@ func TestStorageCleanupAuthorizationProtectsHost(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "storage", "cleanup", "--apply", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "storage", "cleanup", "--apply", "--json"})
 	if err = cmd.Execute(); err == nil {
 		t.Fatal("unauthorized apply succeeded")
 	}
@@ -519,6 +519,7 @@ func storageScaleResource(t *testing.T, root string) string {
 }
 func TestStorageCleanupRealLedgerScale(t *testing.T) {
 	f := newCLIFixture(t)
+	setFixtureTracker(t, f.root, "github")
 	prGit(t, f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git")
 	path := storageScaleHost(t, f.root)
 	common := filepath.Join(f.root, ".git")
@@ -558,7 +559,7 @@ func TestStorageCleanupRealLedgerScale(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--root", f.root, "--repo", "fixture/repo", "--backend", "github", "storage", "cleanup", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "--repo", "fixture/repo", "storage", "cleanup", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("%v: %s", err, stdout.String())
 	}
@@ -576,6 +577,7 @@ func TestStorageCleanupRealLedgerScale(t *testing.T) {
 }
 func TestStorageCleanupInventoryFailureReport(t *testing.T) {
 	f := newCLIFixture(t)
+	setFixtureTracker(t, f.root, "github")
 	path := storageScaleHost(t, f.root)
 	refs, prs, _, _ := inventoryScaleObjects(t, f.root, 1, func(int) int64 { return coordination.InventoryInputLimit + 1 })
 	if out, err := exec.Command("git", "-C", f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git").CombinedOutput(); err != nil {
@@ -587,9 +589,10 @@ func TestStorageCleanupInventoryFailureReport(t *testing.T) {
 		var stdout bytes.Buffer
 		cmd.SetOut(&stdout)
 		cmd.SetErr(&bytes.Buffer{})
-		args := []string{"--root", f.root, "--repo", "fixture/repo", "--backend", "github", "storage", "cleanup", "--json"}
+		args := []string{"--root", f.root, "--repo", "fixture/repo", "storage", "cleanup", "--json"}
 		if apply {
 			// Local apply consumes the same oversized pinned ledger through safefs.
+			setFixtureTracker(t, f.root, "local")
 			dir := filepath.Join(f.root, ".swarm", "coordination")
 			if err := os.MkdirAll(dir, 0700); err != nil {
 				t.Fatal(err)
@@ -605,11 +608,6 @@ func TestStorageCleanupInventoryFailureReport(t *testing.T) {
 			}
 			if err = out.Close(); err != nil {
 				t.Fatal(err)
-			}
-			for i := range args {
-				if args[i] == "github" {
-					args[i] = "local"
-				}
 			}
 			args = append(args, "--apply")
 		}
@@ -688,6 +686,7 @@ func TestStorageCleanupInventoryFailureContinuesHealthyApply(t *testing.T) {
 
 func TestStorageCleanupInventoryIssueFailureIsolation(t *testing.T) {
 	f := newCLIFixture(t)
+	setFixtureTracker(t, f.root, "github")
 	prGit(t, f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git")
 	storageScaleHost(t, f.root)
 	refs, prs, _, _ := inventoryScaleObjects(t, f.root, 2, func(int) int64 { return 40000 })
@@ -701,7 +700,7 @@ func TestStorageCleanupInventoryIssueFailureIsolation(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"--root", f.root, "--repo", "fixture/repo", "--backend", "github", "storage", "cleanup", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "--repo", "fixture/repo", "storage", "cleanup", "--json"})
 	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("missing object succeeded")
@@ -796,6 +795,7 @@ func TestStorageCleanupIssueEligibilityParity(t *testing.T) {
 		t.Run(backend, func(t *testing.T) {
 			f := newCLIFixture(t)
 			task := bulkMerged(t, f)
+			setFixtureTracker(t, f.root, backend)
 			t.Setenv("TMPDIR", t.TempDir())
 			var override tracker.Tracker = f.tracker
 			if backend == "github" {
@@ -829,7 +829,7 @@ func TestStorageCleanupIssueEligibilityParity(t *testing.T) {
 				var out bytes.Buffer
 				c.SetOut(&out)
 				c.SetErr(&bytes.Buffer{})
-				c.SetArgs(append([]string{"--root", f.root, "--repo", "fixture/repo", "--backend", backend}, args...))
+				c.SetArgs(append([]string{"--root", f.root, "--repo", "fixture/repo"}, args...))
 				if err := c.Execute(); err != nil {
 					t.Fatalf("%v: %s", err, out.String())
 				}

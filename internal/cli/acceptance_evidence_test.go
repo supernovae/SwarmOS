@@ -34,7 +34,7 @@ func TestPRSubmitAcceptanceEvidenceOutput(t *testing.T) {
 				var out, diagnostics bytes.Buffer
 				cmd.SetOut(&out)
 				cmd.SetErr(&diagnostics)
-				args := []string{"--root", f.root, "--backend", "local", "pr", "submit", p}
+				args := []string{"--root", f.root, "pr", "submit", p}
 				if asJSON {
 					args = append(args, "--json")
 				}
@@ -188,7 +188,7 @@ func TestIssueSubmitAcceptanceRefusal(t *testing.T) {
 				var out, diag bytes.Buffer
 				cmd.SetOut(&out)
 				cmd.SetErr(&diag)
-				args := []string{"--root", f.root, "--backend", "local", "issue", "submit", n}
+				args := []string{"--root", f.root, "issue", "submit", n}
 				if asJSON {
 					args = append(args, "--json")
 				}

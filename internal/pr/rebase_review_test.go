@@ -655,6 +655,11 @@ func TestPRRecoveryCommandSuggestions(t *testing.T) {
 					if offbase {
 						expected = append(expected, s.workCommand(r, "rebase", "--resolve"))
 					}
+					for _, command := range r.WorkPreflight.Commands {
+						if strings.Contains(command, "--backend") {
+							t.Fatalf("removed selector in recovery: %s", command)
+						}
+					}
 					if !reflect.DeepEqual(r.WorkPreflight.Commands, expected) {
 						t.Fatalf("got %v want %v", r.WorkPreflight.Commands, expected)
 					}

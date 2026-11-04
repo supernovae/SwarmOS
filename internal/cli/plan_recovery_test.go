@@ -22,7 +22,7 @@ import (
 func TestPlanReviewRecovery(t *testing.T) {
 	st := &lease.IssueState{PendingPlanReview: &lease.PlanRejection{}, NextPhaseReason: "CHANGES_REQUESTED"}
 	st.Lease.IssueNumber = 12
-	opts := &RootOptions{Backend: "github", Repo: "owner/repo", RepoRoot: "a'b", Fork: true, ForkRemote: "fork"}
+	opts := &RootOptions{Repo: "owner/repo", RepoRoot: "a'b", Fork: true, ForkRemote: "fork"}
 	for _, resource := range []string{"issue", "pr"} {
 		text := planReviewRecovery(opts, st, resource, 37)
 		want := "issue review-plan 12"
@@ -98,7 +98,7 @@ func TestCheckpointRecoveryPlanCLIInputs(t *testing.T) {
 			calls := 0
 			f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { calls++; return nil, os.ErrNotExist }
 			run := func(args ...string) (string, error) {
-				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: backend, Repo: "octo/swarm", trackerOverride: tr})
+				cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "octo/swarm", trackerOverride: tr})
 				var out bytes.Buffer
 				cmd.SetOut(&out)
 				cmd.SetErr(&out)

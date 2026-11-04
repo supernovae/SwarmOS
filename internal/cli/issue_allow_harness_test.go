@@ -211,7 +211,7 @@ func addTestOrigin(t *testing.T, f *cliFixture) {
 }
 
 func runIssueCmd(f *cliFixture, tr tracker.Tracker, args ...string) (string, error) {
-	opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr, nowFn: time.Now})
+	opts := f.options(&RootOptions{RepoRoot: f.root, trackerOverride: tr, nowFn: time.Now})
 	cmd := newIssueCmd(opts)
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -489,7 +489,7 @@ func checkIssueCreateGitHubLabels(t *testing.T, ready, denied bool) {
 	if len(fake.issues) != 1 {
 		t.Fatal("issue was not created")
 	}
-	opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr, nowFn: time.Now})
+	opts := f.options(&RootOptions{RepoRoot: f.root, trackerOverride: tr, nowFn: time.Now})
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	_, mgr, _, err := opts.resolveLeaseManager(cmd)

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/registry"
 	"io"
 	"os"
@@ -118,6 +119,17 @@ func (s *scanner) repository(owner, path, backend string) {
 		}
 	}
 	if owner == "" {
+		entries, err := registry.New(s.opts.RegistryPath).ReadSnapshot(s.ctx, s.b.Limits.Repositories, s.b.Charge)
+		if err == nil {
+			for _, entry := range entries {
+				if filepath.Clean(entry.Path) == filepath.Clean(path) {
+					owner = entry.Repo
+					break
+				}
+			}
+		}
+	}
+	if owner == "" {
 		owner = "local/" + filepath.Base(path)
 	}
 	s.repos[common] = owner
@@ -180,7 +192,7 @@ func (s *scanner) repository(owner, path, backend string) {
 			s.add(Resource{Repository: owner, Owner: owner, Class: "code-branch", Path: path, Ref: ref, Identity: "ref:" + common + ":" + ref})
 		}
 	}
-	s.retention(owner, path, backend, start)
+	s.retention(owner, path, start)
 }
 func (s *scanner) cacheOwner(key string) string {
 	if len(key) != 32 {
@@ -341,9 +353,6 @@ func DiscoverScopes(ctx context.Context, opts Options, all bool) ([]SelectedRepo
 				if opts.Repository != "" && !strings.EqualFold(e.Repo, opts.Repository) {
 					return nil, reasons, errors.New("repository selector mismatch")
 				}
-				if opts.Backend != "" && opts.Backend != e.Backend {
-					return nil, reasons, errors.New("backend selector mismatch")
-				}
 			}
 		}
 	} else if opts.Repository != "" {
@@ -384,42 +393,17 @@ func DiscoverScopes(ctx context.Context, opts Options, all bool) ([]SelectedRepo
 			reasons = append(reasons, "repository identity unavailable")
 			continue
 		}
-		if !all && e.Backend == "" {
-			for _, registered := range entries {
-				observed, e2 := s.git(registered.Path, "rev-parse", "--path-format=absolute", "--git-common-dir")
-				if e2 != nil || observed != common {
-					continue
-				}
-				if e.Repo != "" && !strings.EqualFold(e.Repo, registered.Repo) {
-					bad[common] = true
-					reasons = append(reasons, "repository selector mismatch")
-					continue
-				}
-				if e.Backend != "" && e.Backend != registered.Backend {
-					bad[common] = true
-					reasons = append(reasons, "conflicting registrations")
-					continue
-				}
-				e.Repo = registered.Repo
-				e.Backend = registered.Backend
-			}
+		backend, configErr := harness.ConfiguredTracker(root)
+		if configErr != nil {
+			reasons = append(reasons, "tracker configuration unavailable: "+configErr.Error())
+			continue
 		}
-		if prior, ok := claims[common]; ok && (prior.Backend != e.Backend || !strings.EqualFold(prior.Repo, e.Repo)) {
+		e.Backend = backend
+		if prior, ok := claims[common]; ok && !strings.EqualFold(prior.Repo, e.Repo) {
 			bad[common] = true
 			reasons = append(reasons, "conflicting registrations")
 		}
 		claims[common] = e
-		if opts.Backend != "" && e.Backend != "" && opts.Backend != e.Backend {
-			reasons = append(reasons, "backend selector mismatch")
-			continue
-		}
-		backend := e.Backend
-		if backend == "" {
-			backend = opts.Backend
-		}
-		if backend == "" {
-			backend = "github"
-		}
 		scope, err := canonicalScope(s, RepositoryScope{root, common, backend})
 		if err != nil {
 			reasons = append(reasons, "invalid repository scope")
@@ -428,6 +412,12 @@ func DiscoverScopes(ctx context.Context, opts Options, all bool) ([]SelectedRepo
 		if filepath.Base(scope.CommonDirectory) == ".git" {
 			scope.Root = filepath.Dir(scope.CommonDirectory)
 		}
+		configured, configErr := harness.ConfiguredTracker(scope.Root)
+		if configErr != nil {
+			reasons = append(reasons, "tracker configuration unavailable: "+configErr.Error())
+			continue
+		}
+		backend, scope.Backend = configured, configured
 		if backend == "github" {
 			owner := registry.DetectGitHubSlugFrom(scope.Root, firstRemote(opts.Remote))
 			if owner == "" || e.Repo != "" && !strings.EqualFold(owner, e.Repo) {

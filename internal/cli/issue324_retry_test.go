@@ -107,7 +107,7 @@ func TestIssue324RecordedImplementationResume(t *testing.T) {
 				f.manager.SetStore(f.root, trustedLedgerStore(t, f.root, ""))
 				tr := checkpointCLITracker{f.tracker}
 				run = func(args ...string) (string, error) {
-					cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: tr})
+					cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "test/repo", trackerOverride: tr})
 					var out bytes.Buffer
 					cmd.SetOut(&out)
 					cmd.SetErr(&out)
@@ -197,7 +197,7 @@ func TestIssue324SubmitFailureDeniesResume(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 			var out bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&out)
@@ -233,6 +233,7 @@ func TestIssue324ForkReadOnlyConfiguration(t *testing.T) {
 	if out, err := f.run("issue", "work", n, "--agent", "mock", "--progress=false"); err == nil || !strings.Contains(err.Error(), "developer produced no implementation") {
 		t.Fatalf("no-op setup: %v %s", err, out)
 	}
+	setFixtureTracker(t, f.root, "github")
 	prGit(t, f.root, "remote", "add", "upstream", up.projectBare)
 	prGit(t, f.root, "remote", "set-url", "origin", up.aliceBare)
 	prGit(t, f.root, "fetch", "upstream")
@@ -272,6 +273,7 @@ func TestIssue324ForkReadOnlyConfiguration(t *testing.T) {
 		t.Fatal("read-only commands dispatched mutation")
 	}
 	prGit(t, f.root, "remote", "set-url", "origin", remote)
+	setFixtureTracker(t, f.root, "local")
 	f.must(t, "issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false")
 	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 }

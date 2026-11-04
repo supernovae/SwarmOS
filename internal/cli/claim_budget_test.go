@@ -24,9 +24,9 @@ import (
 func TestClaimBudgetGuidanceRetainsSelection(t *testing.T) {
 	for _, resource := range []string{"issue", "pr"} {
 		res := &workflow.WorkResult{HandedOffToPhase: "implement", ClaimBudgetPause: &workflow.ClaimBudgetPause{Reason: "paused for claim budget: 1h available, 3 renewals used, 0 remaining"}}
-		opts := &RootOptions{Backend: "github", Repo: "owner/repo", RepoRoot: "/path with space", Fork: true, ForkRemote: "contributor"}
+		opts := &RootOptions{Repo: "owner/repo", RepoRoot: "/path with space", Fork: true, ForkRemote: "contributor"}
 		text := claimBudgetGuidance(opts, res, resource, 79)
-		for _, want := range []string{"paused for claim budget", "--backend 'github'", "--repo 'owner/repo'", "--root '/path with space'", "--fork --fork-remote 'contributor'", resource + " work 79 --phase implement"} {
+		for _, want := range []string{"paused for claim budget", "--repo 'owner/repo'", "--root '/path with space'", "--fork --fork-remote 'contributor'", resource + " work 79 --phase implement"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("missing %s in %s", want, text)
 			}
@@ -53,7 +53,7 @@ func TestCLIStatusClaimBudgetUsesManagerClock(t *testing.T) {
 	now := base.Add(time.Hour)
 	run := func(args ...string) string {
 		t.Helper()
-		cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", nowFn: func() time.Time { return now }})
+		cmd := f.command(&RootOptions{RepoRoot: f.root, nowFn: func() time.Time { return now }})
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
@@ -136,7 +136,7 @@ func TestCLIWorkAndNodeBudgetPauseIsSuccessfulAndActionable(t *testing.T) {
 				base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 				var elapsed atomic.Int64
 				tr := &budgetClockTracker{Tracker: f.tracker, manager: f.manager, elapsed: &elapsed}
-				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr, nowFn: func() time.Time { return base.Add(time.Duration(elapsed.Load())) }})
+				cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr, nowFn: func() time.Time { return base.Add(time.Duration(elapsed.Load())) }})
 				var out, diag bytes.Buffer
 				cmd.SetOut(&out)
 				cmd.SetErr(&diag)

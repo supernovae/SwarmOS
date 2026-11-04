@@ -51,20 +51,20 @@ Maintainers use `swarm repo plan` (with `/swarm-project-plan` in Claude Code / O
    - Write the plan to a user-chosen repo-local file (without overwriting existing files unless instructed).
 2. **Preview `Step N` Decomposition (Read-Only)**:
    ```bash
-   swarm repo plan --from ROADMAP.md --backend github
+   swarm repo plan --from ROADMAP.md
    ```
 3. **Publish Parent Issue & Draft Child WorkUnits (Maintainer Only)**:
    - Only on explicit maintainer instruction, publish the parent issue (`swarm:parent`) containing the full plan and attach draft child `WorkUnit` sub-issues (`swarm:draft`):
      ```bash
-     swarm repo plan --from ROADMAP.md --apply --backend github
+     swarm repo plan --from ROADMAP.md --apply
      ```
    - Selectively approve child `WorkUnit` issues when ready for workers to claim (never approve or execute the parent issue itself):
      ```bash
-     swarm issue approve <child-issue-number> --backend github
+     swarm issue approve <child-issue-number>
      ```
 4. **Scan, Sense-Make & Triage Open Issues (`--scan`)**:
    - Audit open issues (including `swarm:community` intake reports) against `.swarm/goals.md`, `.swarm/rules/`, and file touchpoints:
      ```bash
-     swarm repo plan --scan --backend github
-     swarm repo plan --scan --apply --normalize --backend github
+     swarm repo plan --scan
+     swarm repo plan --scan --apply --normalize
      ```

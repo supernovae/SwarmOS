@@ -61,7 +61,7 @@ func (o *RootOptions) storageMaintenance(cmd *cobra.Command, readOnly bool) {
 	if err != nil {
 		return
 	}
-	options := storage.Options{RegistryPath: o.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), UseRoot: control, SelectedRoot: o.RepoRoot, Backend: o.Backend, Remote: o.effectiveUpstreamRemote()}
+	options := storage.Options{RegistryPath: o.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), UseRoot: control, SelectedRoot: o.RepoRoot, Remote: o.effectiveUpstreamRemote()}
 	if options.SelectedRoot != "" {
 		options.SelectedRoot, err = filepath.Abs(options.SelectedRoot)
 		if err != nil {

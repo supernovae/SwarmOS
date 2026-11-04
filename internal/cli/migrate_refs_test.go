@@ -88,7 +88,7 @@ func (f *ledgerCLIFixture) run(opts RootOptions, args ...string) (string, error)
 // managerLayout resolves the lease manager as every github command does.
 func (f *ledgerCLIFixture) managerLayout() (coordination.RefLayout, error) {
 	f.t.Helper()
-	opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: checkpointCLITracker{tracker.NewLocalTracker(f.root)}}
+	opts := &RootOptions{RepoRoot: f.root, trackerOverride: checkpointCLITracker{tracker.NewLocalTracker(f.root)}}
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	_, mgr, _, err := opts.resolveLeaseManager(cmd)
@@ -137,12 +137,16 @@ func TestRepoMigrateRefsCutover(t *testing.T) {
 		want string
 	}{
 		{"fork", RootOptions{RepoRoot: f.root, Fork: true}, "cannot run with --fork"},
-		{"local backend", RootOptions{RepoRoot: f.root, Backend: "local"}, "local backend"},
+		{"local backend", RootOptions{RepoRoot: f.root}, "local backend"},
 	} {
+		if tc.name == "local backend" {
+			setFixtureTracker(t, f.root, "local")
+		}
 		if out, err := f.run(tc.opts, "repo", "migrate-refs"); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: %v\n%s", tc.name, err, out)
 		}
 	}
+	setFixtureTracker(t, f.root, "github")
 	out, err := f.run(RootOptions{RepoRoot: f.root}, "repo", "migrate-refs", "--dry-run")
 	if err != nil || !strings.Contains(out, "WOULD MOVE refs/heads/swarm-state/issue-5 -> refs/swarm/state/issue-5") {
 		t.Fatalf("dry run: %v\n%s", err, out)

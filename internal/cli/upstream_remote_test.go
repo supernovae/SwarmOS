@@ -135,7 +135,7 @@ func newUpstreamRemoteFixture(t *testing.T) *upstreamRemoteFixture {
 	}
 	wuBody := "```yaml swarm-workunit\nid: ISSUE-42\nobjective: Exercise the origin=fork layout\nconstraints: [No upstream push access]\nacceptance: [Cross-repo Draft PR opened]\nworkflow: feature\ngate: agent\nallow_harness_changes: true\n```"
 	f.issues = map[int]*tracker.Issue{42: {Number: 42, Title: "Upstream remote task", Body: wuBody, State: "open", Author: "maintainer"}}
-	if out, err := f.run(RootOptions{RepoRoot: f.upstreamRoot, Backend: "github", trackerOverride: f.maintainer}, "issue", "approve", "42"); err != nil {
+	if out, err := f.run(RootOptions{RepoRoot: f.upstreamRoot, trackerOverride: f.maintainer}, "issue", "approve", "42"); err != nil {
 		t.Fatalf("approve: %v\n%s", err, out)
 	}
 	return f
@@ -156,8 +156,7 @@ func (f *upstreamRemoteFixture) aliceClone(name string) string {
 // as runs commands as login with the real repository identity resolution.
 func (f *upstreamRemoteFixture) as(login, root string) RootOptions {
 	return RootOptions{
-		RepoRoot: root, Backend: "github",
-		githubTrackerFunc: func(slug string) (tracker.Tracker, error) {
+		RepoRoot: root, githubTrackerFunc: func(slug string) (tracker.Tracker, error) {
 			return f.githubTracker(slug, login, "User"), nil
 		},
 		remoteSlugFunc: func(root, remote string) string {
@@ -425,7 +424,7 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 			t.Fatalf("fork stop: %v\n%s", err, out)
 		}
 		var stop *stopError
-		if !errors.As(err, &stop) || !strings.HasPrefix(err.Error(), stop.err.Error()+"\n") || !strings.Contains(err.Error(), "upstream maintainer") || !strings.Contains(err.Error(), "swarm --backend github issue review-plan 42 --approve") || !strings.Contains(err.Error(), "Run this command from the upstream repository checkout.") {
+		if !errors.As(err, &stop) || !strings.HasPrefix(err.Error(), stop.err.Error()+"\n") || !strings.Contains(err.Error(), "upstream maintainer") || !strings.Contains(err.Error(), "swarm issue review-plan 42 --approve") || !strings.Contains(err.Error(), "Run this command from the upstream repository checkout.") {
 			t.Fatalf("guidance: %v", err)
 		}
 		if jsonMode {
@@ -433,7 +432,7 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 			if e := json.NewDecoder(strings.NewReader(out)).Decode(&doc); e != nil {
 				t.Fatalf("JSON: %v\n%s", e, out)
 			}
-			assertNextAction(t, doc, err, ReasonNeedsApproval, true, ExitNeedsApproval, "swarm", "--backend", "github", "issue", "review-plan", "42", "--approve")
+			assertNextAction(t, doc, err, ReasonNeedsApproval, true, ExitNeedsApproval, "swarm", "issue", "review-plan", "42", "--approve")
 		}
 	}
 	checkStop(out, err, false)
@@ -450,7 +449,7 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workspace.WorktreePath(alice, 42), "fork-only.txt")); !os.IsNotExist(err) {
 		t.Fatalf("worktree was based on the fork's default branch: %v", err)
 	}
-	if out, err := f.run(RootOptions{RepoRoot: f.upstreamRoot, Backend: "github", trackerOverride: f.maintainer}, "issue", "review-plan", "42", "--approve", "--notes", "Reviewed"); err != nil {
+	if out, err := f.run(RootOptions{RepoRoot: f.upstreamRoot, trackerOverride: f.maintainer}, "issue", "review-plan", "42", "--approve", "--notes", "Reviewed"); err != nil {
 		t.Fatalf("review-plan: %v\n%s", err, out)
 	}
 
@@ -688,11 +687,12 @@ func TestForkRemoteDefaults(t *testing.T) {
 
 func TestUpstreamRemoteConfiguration(t *testing.T) {
 	t.Parallel()
+	f := newCLIFixture(t)
 	env := newFixtureEnv(t)
 	cfg := filepath.Join(t.TempDir(), "node.yaml")
 	env.set("SWARM_NODE_CONFIG", cfg)
 	run := func(args ...string) (string, error) {
-		cmd := newRootCmdWithOptions(&RootOptions{lookupEnv: env.lookup()})
+		cmd := newRootCmdWithOptions(&RootOptions{RepoRoot: f.root, lookupEnv: env.lookup()})
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
@@ -725,7 +725,7 @@ func TestUpstreamRemoteConfiguration(t *testing.T) {
 	if _, err := run("--upstream-remote", "bad/name", "node", "status"); err == nil || !strings.Contains(err.Error(), "invalid git remote name") {
 		t.Fatalf("invalid name accepted: %v", err)
 	}
-	if _, err := run("--backend", "local", "--upstream-remote", "upstream", "issue", "status"); err == nil || !strings.Contains(err.Error(), "--upstream-remote requires the github backend") {
+	if _, err := run("--upstream-remote", "upstream", "issue", "status"); err == nil || !strings.Contains(err.Error(), "--upstream-remote requires the github tracker") {
 		t.Fatalf("local backend accepted --upstream-remote: %v", err)
 	}
 	if err := os.WriteFile(cfg, []byte("upstream_remote: [not, a, name\n"), 0o644); err != nil {
@@ -749,7 +749,7 @@ func TestUpstreamRemoteConfiguration(t *testing.T) {
 }
 
 func TestUpstreamRemoteGeneratedCommands(t *testing.T) {
-	o := &RootOptions{Backend: "github", UpstreamRemote: "my upstream", Fork: true}
+	o := &RootOptions{UpstreamRemote: "my upstream", Fork: true}
 	if got := strings.Join(stopContext{opts: o}.argv(false, "issue", "work", "2"), " "); !strings.Contains(got, "--upstream-remote my upstream --fork issue work 2") {
 		t.Fatalf("contributor argv = %s", got)
 	}

@@ -683,7 +683,7 @@ func TestCLIPRWorkGitHubDryRun(t *testing.T) {
 			if tc.moved {
 				p.BaseSHA = "advanced"
 			}
-			opts := &RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: workCLITracker{Tracker: f.tracker, pr: p}}
+			opts := &RootOptions{RepoRoot: f.root, trackerOverride: workCLITracker{Tracker: f.tracker, pr: p}}
 			cmd := f.command(opts)
 			var out, diagnostics bytes.Buffer
 			cmd.SetOut(&out)

@@ -222,9 +222,6 @@ func (c stopContext) argv(maintainer bool, resource string, args ...string) []st
 	if o == nil {
 		o = &RootOptions{}
 	}
-	if o.Backend != "" {
-		argv = append(argv, "--backend", o.Backend)
-	}
 	if o.Repo != "" {
 		argv = append(argv, "--repo", o.Repo)
 	}

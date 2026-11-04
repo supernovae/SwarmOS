@@ -38,7 +38,7 @@ type process struct {
 
 func (p process) run(args ...string) (string, int) {
 	p.t.Helper()
-	cmd := exec.Command(os.Args[0], append([]string{"--root", p.root, "--backend", "local"}, args...)...)
+	cmd := exec.Command(os.Args[0], append([]string{"--root", p.root}, args...)...)
 	cmd.Env = append(os.Environ(), "SWARM_MAIN_HELPER=1")
 	out, err := cmd.Output()
 	var exit *exec.ExitError
@@ -158,7 +158,6 @@ func newProcess(t *testing.T) process {
 	t.Setenv("SWARM_USER", "alice")
 	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
 	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
-	t.Setenv("SWARM_BACKEND", "")
 	t.Setenv("SWARM_REPO", "")
 	p := process{t: t, root: t.TempDir()}
 	p.git("init", "-b", "main")
@@ -167,6 +166,15 @@ func newProcess(t *testing.T) process {
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: p.root}); err != nil {
 		t.Fatal(err)
 	}
+	configPath := filepath.Join(p.root, ".swarm", "config.yaml")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(strings.Replace(string(configData), "tracker: github", "tracker: local", 1)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SWARM_BACKEND", "github") // Removed environment selector cannot override repository config.
 	policy := "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
 	if err := os.WriteFile(filepath.Join(p.root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
 		t.Fatal(err)

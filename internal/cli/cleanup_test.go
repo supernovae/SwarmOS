@@ -611,7 +611,7 @@ func TestCleanupLocalRelativeRootPreview(t *testing.T) {
 		cmd := f.command(nil)
 		var output strings.Builder
 		cmd.SetOut(&output)
-		cmd.SetArgs(append(args, "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--json"))
+		cmd.SetArgs(append(args, "issue", "cleanup", strconv.Itoa(n), "--json"))
 		if err := cmd.Execute(); err != nil {
 			t.Fatal(err)
 		}
@@ -639,7 +639,7 @@ func TestCleanupLocalRelativeRootPreview(t *testing.T) {
 	cmd := f.command(nil)
 	var output strings.Builder
 	cmd.SetOut(&output)
-	cmd.SetArgs([]string{"--root", ".", "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--apply", "--json"})
+	cmd.SetArgs([]string{"--root", ".", "issue", "cleanup", strconv.Itoa(n), "--apply", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +711,7 @@ func TestCleanupLocalRelativeRootRecoverFailedApply(t *testing.T) {
 	cmd := f.command(nil)
 	var output strings.Builder
 	cmd.SetOut(&output)
-	cmd.SetArgs([]string{"--root", ".", "--backend", "local", "issue", "cleanup", strconv.Itoa(n), "--recover-reservation", "--json"})
+	cmd.SetArgs([]string{"--root", ".", "issue", "cleanup", strconv.Itoa(n), "--recover-reservation", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}

@@ -53,7 +53,7 @@ func TestEmptySubmitBeforeAnyTrackerCall(t *testing.T) {
 			}
 			checkpointWrite(".swarm/active/IMPLEMENTATION.md", "Blocked before implementation")
 			tr := &untouchedSubmitTracker{}
-			opts := &RootOptions{RepoRoot: f.root, Backend: "github", Repo: "owner/repo", trackerOverride: tr}
+			opts := &RootOptions{RepoRoot: f.root, Repo: "owner/repo", trackerOverride: tr}
 			cmd := f.command(opts)
 			var out bytes.Buffer
 			cmd.SetOut(&out)

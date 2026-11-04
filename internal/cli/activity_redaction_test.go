@@ -101,7 +101,7 @@ func TestProgressContainsOnlyMetadataChildOutput(t *testing.T) {
 			var out, diag bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&diag)
-			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			cmd.SetArgs(append([]string{"--root", f.root}, args...))
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			if err := cmd.ExecuteContext(ctx); err != nil {

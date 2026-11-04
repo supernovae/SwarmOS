@@ -155,7 +155,7 @@ func TestCLIRepoValidateHarnessGrantFlags(t *testing.T) {
 	var output bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&output)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "github", "--fork", "repo", "validate", "--base", base, "--issue", "3", "--pr", "4"})
+	cmd.SetArgs([]string{"--root", f.root, "--fork", "repo", "validate", "--base", base, "--issue", "3", "--pr", "4"})
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "cannot be used with --fork") {
 		t.Fatalf("fork grant error = %v (%s)", err, output.String())
 	}

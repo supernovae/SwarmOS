@@ -92,6 +92,9 @@ func TestSubmitDescriptionStrictComposedAPI(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatal(err)
 			}
+			if strings.Contains(req.Body, "--backend") {
+				t.Fatalf("removed selector in persisted PR description: %s", req.Body)
+			}
 			if !utf8.ValidString(req.Body) || len(req.Body) >= 60000 {
 				rejected++
 				rec.WriteHeader(http.StatusUnprocessableEntity)
@@ -136,7 +139,7 @@ func TestSubmitDescriptionStrictComposedAPI(t *testing.T) {
 	if !errors.As(negativeErr, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity || rejected != 1 {
 		t.Fatalf("negative control: %v, rejections %d", negativeErr, rejected)
 	}
-	cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+	cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -331,7 +334,7 @@ func TestIssueDescriptionPublicationRetry(t *testing.T) {
 			}
 			tr := &descriptionFailureTracker{Tracker: f.tracker, mode: mode}
 			run := func() error {
-				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+				cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 				var output bytes.Buffer
 				cmd.SetOut(&output)
 				cmd.SetErr(&output)

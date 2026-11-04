@@ -29,7 +29,7 @@ flowchart TB
 
 ## 1. Git Compare-and-Swap Coordination (`internal/coordination/` & `internal/lease/`)
 
-SwarmOS stores authoritative task coordination state in dedicated Git refs (`refs/heads/swarm-state/issue-<N>` or `refs/swarm/state/issue-<N>` on GitHub, or a file-locked CAS store when `--backend local` is explicitly selected) and projects a human-readable summary comment onto the GitHub Issue.
+SwarmOS stores authoritative task coordination state in dedicated Git refs (`refs/heads/swarm-state/issue-<N>` or `refs/swarm/state/issue-<N>` on GitHub, or a file-locked CAS store when `.swarm/config.yaml` sets `tracker: local`) and projects a human-readable summary comment onto the GitHub Issue.
 
 The `ledger_namespace` setting selects one ref layout per repository for issue state, checkpoint retention, and fork contributor indexes: `branch` (`refs/heads/swarm-state/`, `swarm-checkpoints/`, `swarm-contributors/`; the default when the key is absent) or `hidden` (`refs/swarm/state/`, `checkpoints/`, `contributors/`; written by `swarm repo init` for new repositories). The CLI, lease manager, and fork coordinator resolve it from `.swarm/config.yaml` on the upstream remote's advertised default branch before their first ledger read, never from a worktree, candidate commit, or fork. Every ledger read and write also checks the same entry in the other namespace and fails with both ref names if it exists, so there is never a fallback or a second authority. Task branches stay under `refs/heads/swarm/` in both modes. `swarm repo migrate-refs` moves an existing repository's ledgers in one atomic, leased push; see [Ledger ref namespaces](GITHUB.md#ledger-ref-namespaces).
 

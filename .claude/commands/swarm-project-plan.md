@@ -41,15 +41,15 @@ Optional for organization repositories: use `swarm issue parent create --epic --
    ```
 5. **Show the Plan & Preview (`Step N`)**: Show the saved file and run the read-only preview:
    ```bash
-   swarm repo plan --from <file> --backend github
+   swarm repo plan --from <file>
    ```
 6. **Publish Only on Explicit Maintainer Instruction**: Wait for the maintainer to confirm publishing, then run:
    ```bash
-   swarm repo plan --from <file> --apply --backend github
+   swarm repo plan --from <file> --apply
    ```
    Show the created parent issue (`swarm:parent`) and the linked `swarm:draft` child WorkUnit issues. Recommend selective approval for the child issues ready to execute:
    ```bash
-   swarm issue approve <child-issue-number> --backend github
+   swarm issue approve <child-issue-number>
    ```
    Never run `swarm issue approve` or `swarm issue work` on the parent issue itself, and do not pass `--ready` automatically unless the maintainer explicitly asks for immediate approval.
 
@@ -57,9 +57,9 @@ Optional for organization repositories: use `swarm issue parent create --epic --
 
 - **Preview open backlog & `swarm:community` intake alignment**:
   ```bash
-  swarm repo plan --scan --backend github
+  swarm repo plan --scan
   ```
 - **Apply triage labels (`swarm:ready`, `swarm:draft`, `swarm:needs-scope`, `swarm:blocked`) and optionally normalize unstructured issues into draft WorkUnits**:
   ```bash
-  swarm repo plan --scan --apply --normalize --backend github
+  swarm repo plan --scan --apply --normalize
   ```

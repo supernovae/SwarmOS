@@ -63,7 +63,7 @@ func testUntouchedBaseAdvance(t *testing.T, backend, sequence, entry string) {
 		f.manager.SetStore(f.root, trustedLedgerStore(t, f.root, ""))
 		tr := checkpointCLITracker{f.tracker}
 		run = func(args ...string) (string, error) {
-			cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "test/repo", Backend: "github", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "test/repo", trackerOverride: tr})
 			var out bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&out)

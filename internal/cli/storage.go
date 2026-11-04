@@ -41,7 +41,7 @@ func newStorageCmd(opts *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		snapshot, scanErr := storage.Scan(cmd.Context(), storage.Options{UseRoot: useRoot, RegistryPath: opts.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), SelectedRoot: root, Repository: opts.Repo, Backend: opts.Backend, Tracker: func(owner, root, backend string) (tracker.PullRequestVisitor, error) {
+		snapshot, scanErr := storage.Scan(cmd.Context(), storage.Options{UseRoot: useRoot, RegistryPath: opts.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), SelectedRoot: root, Repository: opts.Repo, Tracker: func(owner, root, backend string) (tracker.PullRequestVisitor, error) {
 			if backend == "local" {
 				return tracker.NewLocalTracker(root), nil
 			}
@@ -178,7 +178,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 				return err
 			}
 		}
-		scopes, reasons, err := storage.DiscoverScopes(cmd.Context(), storage.Options{RegistryPath: opts.registryPath(), SelectedRoot: root, Repository: opts.Repo, Backend: opts.Backend, Remote: opts.effectiveUpstreamRemote()}, all)
+		scopes, reasons, err := storage.DiscoverScopes(cmd.Context(), storage.Options{RegistryPath: opts.registryPath(), SelectedRoot: root, Repository: opts.Repo, Remote: opts.effectiveUpstreamRemote()}, all)
 		report.Scopes = scopes
 		report.Incomplete = reasons
 		failures := []error{}
@@ -200,7 +200,6 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 			cp := *opts
 			cp.RepoRoot = scope.Root
 			cp.Repo = scope.Repository
-			cp.Backend = scope.Backend
 			var tr tracker.Tracker
 			var m *lease.Manager
 			var err error

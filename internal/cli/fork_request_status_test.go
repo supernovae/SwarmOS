@@ -11,25 +11,33 @@ import (
 )
 
 func TestForkRequestStatusHelpAndArguments(t *testing.T) {
-	for _, args := range [][]string{
+	for index, args := range [][]string{
 		{"fork-coordinator", "request-status", "--help"},
 		{"--fork", "fork-coordinator", "request-status"},
 		{"fork-coordinator", "request-status", "1", "100"},
 		{"--fork", "fork-coordinator", "request-status", "0", "100"},
 		{"--fork", "fork-coordinator", "request-status", "1", "9223372036854775808"},
 		{"--fork", "fork-coordinator", "request-status", "1", "0"},
-		{"--fork", "--backend", "local", "fork-coordinator", "request-status", "1", "100"},
+		{"--fork", "fork-coordinator", "request-status", "1", "100"},
 		{"--fork", "fork-coordinator", "request-status", "1", "100", "--event", "x"},
 		{"fork-coordinator"},
 		{"fork-coordinator", "--event", "missing-event"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			cmd := newRootCmdWithOptions(&RootOptions{})
+			opts := &RootOptions{}
+			if index == 6 {
+				f := newCLIFixture(t)
+				opts = f.options(&RootOptions{RepoRoot: f.root})
+			}
+			cmd := newRootCmdWithOptions(opts)
 			var out bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&out)
 			cmd.SetArgs(args)
 			err := cmd.Execute()
+			if index == 6 && (err == nil || !strings.Contains(err.Error(), "tracker: local")) {
+				t.Fatalf("local fork must fail for tracker configuration: %v", err)
+			}
 			if args[len(args)-1] == "--help" {
 				if err != nil || !strings.Contains(out.String(), "request-status <issue> <request-id>") || strings.Contains(out.String(), "--event") || strings.Contains(out.String(), "--json") {
 					t.Fatal(err, out.String())

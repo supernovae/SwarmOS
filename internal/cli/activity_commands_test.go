@@ -108,7 +108,7 @@ func TestCommandProgressShowsOperation(t *testing.T) {
 			var out, diag bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&diag)
-			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			cmd.SetArgs(append([]string{"--root", f.root}, args...))
 			go func() { defer close(done); runErr = cmd.ExecuteContext(ctx) }()
 			commandActivityWait(t, b.entered)
 			previous := time.Duration(0)

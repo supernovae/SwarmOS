@@ -129,7 +129,7 @@ func TestFailedResumeKeepsClaimForStagingRecovery(t *testing.T) {
 }
 
 func TestInternalNativeCommandRegistration(t *testing.T) {
-	root := newRootCmdWithOptions(&RootOptions{Backend: "invalid-backend", Repo: "invalid-repo", RepoRoot: filepath.Join(t.TempDir(), "absent")})
+	root := newRootCmdWithOptions(&RootOptions{Repo: "invalid-repo", RepoRoot: filepath.Join(t.TempDir(), "absent")})
 	cmd, args, err := root.Find([]string{"internal-native-exec", "invalid-unit"})
 	if err != nil || cmd.Name() != "internal-native-exec" || !cmd.Hidden || !cmd.DisableFlagParsing {
 		t.Fatalf("native helper registration: %v %v", cmd, err)

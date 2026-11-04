@@ -1,6 +1,6 @@
 # Developer, Team & Worker Guide
 
-This guide covers day-to-day SwarmOS workflows—whether you are an individual developer, an open-source contributor donating agent compute to a project's ready queue, or an engineering team running internal worker pools across private GitHub repositories. Pass `--backend github` when working against GitHub Issues, or `--backend local` when running an offline local fixture.
+This guide covers day-to-day SwarmOS workflows—whether you are an individual developer, an open-source contributor donating agent compute to a project's ready queue, or an engineering team running internal worker pools across private GitHub repositories. Choose `tracker: github` (the default) or `tracker: local` for offline use in `.swarm/config.yaml`.
 
 ---
 
@@ -8,17 +8,17 @@ This guide covers day-to-day SwarmOS workflows—whether you are an individual d
 
 ```bash
 # Inspect the resolved agents, gate, and base commit without claiming or running processes
-swarm issue work 42 --dry-run --backend github
+swarm issue work 42 --dry-run
 
 # Reserve an approved task and provision .swarm/worktrees/issue-42
-swarm issue claim 42 --backend github
+swarm issue claim 42
 
 # Run (or resume) planning, review gate, implementation, and validation
-swarm issue work 42 --backend github
+swarm issue work 42
 
 # Run validation checks directly or submit the validated branch as a Draft PR
-swarm issue validate 42 --backend github
-swarm issue submit 42 --backend github
+swarm issue validate 42
+swarm issue submit 42
 ```
 
 Developer and tester results are checked before import. If a run changes protected files or approved inputs in `.swarm/active/`, the error and `swarm issue status 42` list every rejected path. The returned changes are discarded and the worktree stays as it was at launch. When a tester stops after a successful coordinator-recorded implementation, retry the unchanged checkpoint with `swarm issue work 42 --phase test`. Use `--phase implement` when implementation recovery is needed. Developers may write `IMPLEMENTATION.md` and `LESSONS.md` in the active bundle, and never the coordinator's `REPAIR.md`; testers may write `VALIDATION.md` and `LESSONS.md`. The coordinator restores approved plan inputs before the tester starts.
@@ -43,16 +43,17 @@ If ordering metadata cannot be read, SwarmOS warns on stderr and keeps numeric o
 Use `swarm issue edit` to revise a WorkUnit with a lint check and a clear view of its approval impact. Maintainers and repository collaborators with write access can use it on the GitHub backend; the local backend supports the same flow.
 
 ```bash
-swarm issue edit 42 --objective 'Add structured WorkUnit editing' --dry-run --backend github
-swarm issue edit 42 --objective 'Add structured WorkUnit editing' --backend github
-swarm issue approve 42 --backend github
+swarm issue edit 42 --objective 'Add structured WorkUnit editing' --dry-run
+swarm issue edit 42 --objective 'Add structured WorkUnit editing'
+swarm issue approve 42
 ```
 
 `--title`, `--objective`, `--constraint`, `--acceptance`, `--depends-on`, `--gate`, and `--workflow` replace their named fields. Omitted sections keep their original bytes. Repeat `--constraint` or `--acceptance` to supply the complete replacement list. Use `--depends-on=` to clear prerequisites. `--allow-harness-changes=true` or `--allow-harness-changes=false` grants or removes the WorkUnit's permission to edit protected harness paths; `swarm issue create --allow-harness-changes` grants it at creation, and `swarm issue lint` reports it as `allow_harness_changes`. The edited contract must pass the same validation as `swarm issue lint`.
 
 ```bash
 swarm issue edit 42 --constraint 'Keep claims fenced' --constraint 'Preserve existing formats' --dry-run
-swarm issue edit 42 --depends-on= --dry-run --json --backend local
+# For this offline example, set tracker: local in .swarm/config.yaml.
+swarm issue edit 42 --depends-on= --dry-run --json
 ```
 
 `--dry-run` shows the body diff, title change, lint result, and approval and claim impact without writing. Add `--json` for structured results. An active claim blocks editing and identifies its owner and expiry; coordinate with the worker and use `swarm issue release 42` before revising the contract.
@@ -70,30 +71,30 @@ The command re-reads the issue and claim state before writing and refuses a dete
 Keep the issue's recorded submission connected to its GitHub outcome with an explicit reconciliation. Repository operators with write access can refresh the PR outcome and repair the `swarm:pr-open` label and audit comment:
 
 ```bash
-swarm issue reconcile 42 --backend github
-swarm issue status 42 --backend github
-swarm issue cleanup 42 --backend github
+swarm issue reconcile 42
+swarm issue status 42
+swarm issue cleanup 42
 ```
 
 Reconciliation distinguishes open, merged, and closed without merge; closing an issue alone never marks its PR merged. Status commands remain read-only. The cleanup preview reports the remote branch, local branches, managed worktrees, and retained state ledgers separately.
 
-Run `swarm issue cleanup 42 --apply --backend github` to retire eligible same-repository task worktrees and code branches. Cleanup requires each worktree's HEAD to equal the recorded submitted head, which must match the merged PR's final head. This is the submitted tip rather than the merge commit, including for squash and rebase merges. An active attempt, pending revision, incomplete merge evidence, or open PR using either task branch blocks the operation. Fork branches remain with their owners.
+Run `swarm issue cleanup 42 --apply` to retire eligible same-repository task worktrees and code branches. Cleanup requires each worktree's HEAD to equal the recorded submitted head, which must match the merged PR's final head. This is the submitted tip rather than the merge commit, including for squash and rebase merges. An active attempt, pending revision, incomplete merge evidence, or open PR using either task branch blocks the operation. Fork branches remain with their owners.
 
 Stop editors, agents, and other writers in completed checkouts before applying cleanup. Tracked changes, unexpected untracked or ignored files, a moved HEAD, or unsafe worktree paths retain the affected worktree and its branch with a reason. Untracked artifacts under `.swarm/active/` and `.swarm/active-output/` are disposable, as are git-ignored dependency and build directories recognized by SwarmOS (such as `node_modules/`, `.venv/`, and `dist/`) at any depth, including `packages/a/node_modules/`. Symlinks inside those build directories are removed without following their targets. A recognized name must be a real directory: a symlink named `node_modules` does not qualify. Other ignored files, directories containing tracked files alongside ignored output, and nested repositories retain the worktree. Cleanup checks again before non-forced Git removal; these checks cannot prevent an outside process from writing after inspection. Independent clean resources can still retire, and text and JSON output report each result.
 
 Remote deletion and its state progress record use one atomic Git push with exact expected heads. Local branch deletion uses the original expected tip in a Git compare-and-swap; a moved branch stays intact. Rerun cleanup to handle remaining resources, including after the remote branch is already absent. State and contributor ledgers remain available for status and provenance inspection.
 
-With `--backend local`, local resources are scoped to the current repository and remote branch verification is reported as not applicable. Local open PRs with no repository identity conflict by branch name against both the issue branch and `swarm/pr-<N>`; unrelated branches do not block cleanup. The local backend consumes recorded merged outcomes but currently has no offline merge or mark-merged command. The GitHub backend continues to require matching upstream, PR, and project-remote repository identities; the project remote is `origin` unless you [select another one](#choose-your-git-remote-layout).
+With `tracker: local` in `.swarm/config.yaml`, local resources are scoped to the current repository and remote branch verification is reported as not applicable. Local open PRs with no repository identity conflict by branch name against both the issue branch and `swarm/pr-<N>`; unrelated branches do not block cleanup. The local backend consumes recorded merged outcomes but currently has no offline merge or mark-merged command. The GitHub backend continues to require matching upstream, PR, and project-remote repository identities; the project remote is `origin` unless you [select another one](#choose-your-git-remote-layout).
 
 Coordinator work, stage, validation and node-pool boundaries also run [throttled cache maintenance](project.md#automatic-cache-maintenance) after managed consumers finish. Operator settings control the shared budget and minimum idle age; task and worktree retirement still requires explicit cleanup.
 
 To include managed host caches and scratch in the same operation, use [`swarm storage cleanup`](project.md#reclaiming-managed-storage). It previews the current repository by default; add `--apply` to execute or `--all-repos` to select registered checkouts.
 
-To clean up many merged tasks at once, run `swarm issue cleanup --all-merged --backend github`. It finds every issue and PR worktree under `.swarm/worktrees/` and previews each issue's resources with a reason, using one pull request listing instead of a lookup per issue. A PR worktree is matched to an issue only when that issue's coordination state records the PR. Worktrees that no issue records are listed as retained. The preview changes nothing, and its eligibility is advisory.
+To clean up many merged tasks at once, run `swarm issue cleanup --all-merged`. It finds every issue and PR worktree under `.swarm/worktrees/` and previews each issue's resources with a reason, using one pull request listing instead of a lookup per issue. A PR worktree is matched to an issue only when that issue's coordination state records the PR. Worktrees that no issue records are listed as retained. The preview changes nothing, and its eligibility is advisory.
 
 Add `--apply` to retire them. Each issue that previews an eligible resource is checked again with fresh tracker reads and retired with the same checks and reservation as `swarm issue cleanup <issue> --apply`. Issues run one at a time. A failure is reported with that issue and does not stop later issues or undo earlier ones. The command prints retired, retained, and failed counts for each issue and in total, and exits with an error if any issue failed. `--json` prints one summary document. `--all-merged` takes no issue number and cannot be combined with `--recover-reservation`; recover an interrupted cleanup for a single issue as described below.
 
-If an interrupted cleanup leaves a reservation, run `swarm issue cleanup 42 --recover-reservation --backend github` to fence that operation and preview again, then rerun cleanup explicitly. Recovery retains the operation's audit history. GitHub cannot transact PR creation together with Git ref deletion; cleanup rechecks open PRs immediately before deletion, but a PR created after that check can race with it.
+If an interrupted cleanup leaves a reservation, run `swarm issue cleanup 42 --recover-reservation` to fence that operation and preview again, then rerun cleanup explicitly. Recovery retains the operation's audit history. GitHub cannot transact PR creation together with Git ref deletion; cleanup rechecks open PRs immediately before deletion, but a PR created after that check can race with it.
 
 ### Resume after a claim-budget pause
 
@@ -208,7 +209,7 @@ swarm picks the remotes in this order:
 
 Before anything is written (claims, coordinator requests, worktrees, checkpoints, or pushes), swarm checks that the project remote resolves to the repository named by `--repo` when you pass it, that the fork remote is a GitHub repository owned by your authenticated account that you can push to, and that the two are different repositories, including when their URLs are spelled differently. If a check fails, swarm stops instead of trying another remote. The error names the remote and how to fix it: add or correct the remote, pass `--upstream-remote <project-remote>`, or pass `--fork-remote <your-fork-remote>`. swarm never renames or rewrites your remotes.
 
-The same selection applies without `--fork`: maintainers and collaborators whose `origin` is a personal fork pass `--upstream-remote upstream`, and swarm reads and writes coordination state, approved bases, and task branches on that remote. `--upstream-remote` applies only to the GitHub backend. The fork coordinator Action runs in a fresh checkout of the project, where `origin` is the project, so it needs no setting. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `--backend local` selects local coordination storage; execution mode still controls how workers run.
+The same selection applies without `--fork`: maintainers and collaborators whose `origin` is a personal fork pass `--upstream-remote upstream`, and swarm reads and writes coordination state, approved bases, and task branches on that remote. `--upstream-remote` applies only to the GitHub backend. The fork coordinator Action runs in a fresh checkout of the project, where `origin` is the project, so it needs no setting. See [project configuration](project.md#shared-defaults-and-personal-choices) for shared defaults and agent presets, and [execution modes](../SECURITY.md#execution-modes) for runtime setup. `tracker: local` in `.swarm/config.yaml` selects local coordination storage; execution mode still controls how workers run.
 
 ---
 
@@ -225,7 +226,7 @@ The following are the `trusted-local` CLI drivers. Isolated adapters use the sam
 | **[OpenAI Codex](https://learn.chatgpt.com/docs/codex/cli)** (`codex`, native integration checked with `0.163.0`) | `codex exec <combined prompt>` | `codex <task>` |
 | **[OpenCode 2](https://dev.opencode.ai/v2/docs/)** (`opencode`, V2; checked with `2.1.2`) | `opencode run --standalone <combined prompt>` | `opencode mini --standalone --prompt <task>` |
 
-When an entry sets `model: <name>`, SwarmOS passes that exact choice to the harness. With no model set, the harness selects its default; SwarmOS has no built-in model-name mapping. Claude Code and Codex entries can also set `effort:` to choose reasoning effort from a fixed list (Claude: `low`, `medium`, `high`, `max`; Codex: `minimal`, `low`, `medium`, `high`); other harnesses reject it. Model and effort are recorded in run provenance, and a separate entry per role, mapped under `roles:`, gives each role its own setting. Isolated runs use controlled execution settings, so choose a project model here when you need a consistent selection across workers. For offline tests and local dry runs (`--backend local`), you can also configure the deterministic built-in `mock` runner with explicit `trusted-local` execution.
+When an entry sets `model: <name>`, SwarmOS passes that exact choice to the harness. With no model set, the harness selects its default; SwarmOS has no built-in model-name mapping. Claude Code and Codex entries can also set `effort:` to choose reasoning effort from a fixed list (Claude: `low`, `medium`, `high`, `max`; Codex: `minimal`, `low`, `medium`, `high`); other harnesses reject it. Model and effort are recorded in run provenance, and a separate entry per role, mapped under `roles:`, gives each role its own setting. Isolated runs use controlled execution settings, so choose a project model here when you need a consistent selection across workers. For offline tests and local dry runs (`tracker: local` in `.swarm/config.yaml`), you can also configure the deterministic built-in `mock` runner with explicit `trusted-local` execution.
 
 ### Grok Bot and OpenAI Dot
 
@@ -267,10 +268,10 @@ One teammate or node can complete the planning phase, checkpoint the branch and 
 
 ```bash
 # Teammate A generates and checkpoints PLAN.md + TEST_PLAN.md, then releases into handoff mode
-swarm issue work 42 --phase plan --handoff --backend github
+swarm issue work 42 --phase plan --handoff
 
 # Teammate B (or a worker node) picks up the handed-off task and continues from the verified checkpoint
-swarm issue work --next --all --backend github
+swarm issue work --next --all
 ```
 
 ### Taking a Submitted PR Through Acceptance Review
@@ -315,11 +316,11 @@ If commits are pushed to the PR branch outside SwarmOS, `pr status` reports `unv
 
 ```bash
 # 33 is the PR number; its linked WorkUnit may have a different issue number.
-swarm pr status 33 --backend github
-swarm pr work 33 --dry-run --backend github
-swarm pr work 33 --instructions "Fix the failing checks within the approved scope" --backend github
-swarm pr validate 33 --backend github
-swarm pr submit 33 --backend github
+swarm pr status 33
+swarm pr work 33 --dry-run
+swarm pr work 33 --instructions "Fix the failing checks within the approved scope"
+swarm pr validate 33
+swarm pr submit 33
 ```
 
 When an approved plan is available, PR work writes a focused revision plan: each change names the finding or request it addresses, the affected acceptance criterion, and how to verify it. The planner receives the original plan and test plan, accepted revisions, current CI evidence, and GitHub review summaries and inline comments. Review evidence is quoted and bounded; it supplies diagnostic context while the WorkUnit defines scope.
@@ -404,15 +405,15 @@ The target is the linked issue's approved branch, pinned to a full commit. When 
 
 ```bash
 # 33 is the PR number, 16 its linked issue.
-swarm issue release 16 --reason "re-approve against the new base for PR #33" --backend github
-swarm issue approve 16 --backend github
-swarm pr rebase 33 --backend github
+swarm issue release 16 --reason "re-approve against the new base for PR #33"
+swarm issue approve 16
+swarm pr rebase 33
 
 # If Git reports conflicts, resolve them in .swarm/worktrees/pr-33 and stage them:
 git -C .swarm/worktrees/pr-33 add path/to/resolved_file.go
-swarm pr rebase 33 --continue --backend github
+swarm pr rebase 33 --continue
 # Or abandon the in-progress rebase and restore the starting commit:
-swarm pr rebase 33 --abort --backend github
+swarm pr rebase 33 --abort
 ```
 
 A conflict at the current approved baseline needs a rebase, without another issue approval. When the target has moved, follow the release → maintainer approval → rebase sequence above. Contributors add `--fork` (and `--fork-remote <name>` for a custom fork remote) to their PR commands; issue approval is a maintainer action against upstream, without fork flags. After a paused rebase, finish with `--continue` after staging files, use `--resolve` (the same as `--continue --resolve`), or restore the starting commit with `--abort`.
@@ -423,11 +424,11 @@ Most rebase conflicts are routine: imports added next to each other, tests both 
 
 ```bash
 # Start the rebase and resolve each conflicted commit with the developer agent
-swarm pr rebase 33 --resolve --backend github
+swarm pr rebase 33 --resolve
 
 # Already paused, or the agent's last attempt was rejected? Resolve what is still unmerged;
 # files you staged by hand stay as they are. --continue --resolve does the same.
-swarm pr rebase 33 --resolve --backend github
+swarm pr rebase 33 --resolve
 ```
 
 At each conflicted commit, the agent first writes `.swarm/active/REBASE_PLAN.md` on a disposable copy of the conflicted files, both sides, the WorkUnit, and the approved plan. For each path it describes both sides, the intended resolution, and how the approved behavior is preserved. Each section needs `Ours:`, `Theirs:`, `Resolution:`, and `Approved behavior:` labels with text; bold labels, list items, and text on the following lines are accepted. If the only problem is a missing or incomplete micro-plan, SwarmOS gives the agent one more planning turn with the reason (same-repository PRs only). SwarmOS records this evidence before starting a separate resolution turn, and passes the accumulated micro-plan to later turns. The turn uses the developer role's normal time limits. SwarmOS accepts the result only when the agent changed nothing but those files and left no conflict markers. It then stages them and continues to the next commit. If the agent fails, times out, touches anything else, or leaves markers, the rebase stays paused exactly as Git left it, and the command lists the conflicted files with the manual `--continue`, retry `--resolve`, and `--abort` steps.
@@ -499,9 +500,9 @@ Recovery output is excluded from snapshots and checkpoints. Submission rejects r
 Agent budgets default to 60 minutes. Interactive native Codex and Bubblewrap sessions exclude waits at coordinator input prompts and have a four-hour wall cap. Interactive OCI counts all wall time, capped at four hours and shortened by an explicit approved timeout. Configure global and per-role budgets in [Agent run budgets](project.md#agent-run-budgets); a warning appears shortly before the deadline.
 
 If an agent exits early, a lease expires, or a validation check fails:
-1. Run `swarm issue status <issue> --backend github` to inspect the current lease, phase, and published artifacts.
+1. Run `swarm issue status <issue>` to inspect the current lease, phase, and published artifacts.
 2. Fix the code, test, or agent configuration inside `.swarm/worktrees/issue-<N>`.
-3. Re-run `swarm issue work <issue> --backend github`—if your claim token is still active, SwarmOS resumes in place; if the lease expired, it acquires a fresh attempt on the verified checkpoint branch.
+3. Re-run `swarm issue work <issue>`—if your claim token is still active, SwarmOS resumes in place; if the lease expired, it acquires a fresh attempt on the verified checkpoint branch.
 4. Run `swarm issue validate <issue>` and `swarm issue submit <issue>` when all checks pass.
 
 An implementation that produces no checkpoint beyond the approved base fails before testing. An explicit blocked outcome in `IMPLEMENTATION.md` also fails, and `swarm issue status <issue>` shows its reason. For PR revisions, the implementation must advance the revision's starting head. Issue reruns can reuse an existing checkpoint ahead of the approved base to repeat testing.
@@ -511,10 +512,8 @@ Use `--instructions` on `issue work` or `pr work` for guidance that every role s
 Use `--phase test` to rerun one tester and every required check without invoking a developer or automatically repairing source. This requires a clean, unchanged successful implementation checkpoint recorded by the coordinator, the same task, base, policy, approved plan and test plan, and a valid current claim. A new claim can reuse the original completion evidence. Manual staging and legacy implementation artifacts do not qualify; use `--phase implement` when the checkpoint is ineligible. Test retry requires an explicit issue or PR number and direct GitHub or local coordination.
 
 ```bash
-swarm issue work 42 --phase test --backend github
-swarm issue work 42 --phase test --backend local
-swarm pr work 123 --phase test --backend github
-swarm pr work 123 --phase test --backend local
+swarm issue work 42 --phase test
+swarm pr work 123 --phase test
 ```
 
 Steer a recovery with specific instructions:
@@ -530,7 +529,7 @@ After a plan review requests changes, the default `swarm issue work <issue>` or 
 
 `swarm issue submit` refuses an empty branch and points to an implementation rerun. Claims saved by this version carry a local base hint so this refusal happens before contacting GitHub. Older claim files use the authoritative check after loading state; running `swarm issue work` refreshes the hint. Real uncommitted edits are checkpointed normally.
 
-If a checkpoint no longer descends from the approved base, a maintainer can re-approve the issue with `swarm issue approve <issue> --backend github`. Release any active claim first with `swarm issue release <issue> --backend github`. When the new base contains every commit in the checkpoint, approval drops that checkpoint and reports it. The next `swarm issue work` moves the clean local task branch and worktree forward to the new base; the remote task branch advances with the next checkpoint publication. Eligible plan approval carries forward when the WorkUnit and policy are unchanged, while implementation and validation evidence are cleared. If the committed `.swarm/` policy changed, a human-gated issue without a linked PR keeps its plan and test plan unchanged, but the earlier approval no longer counts: `swarm issue status <issue>` shows `Plan: policy files changed` and the changed policy paths, `swarm issue work` pauses at the human gate, and a maintainer reviews the kept plan again with `swarm issue review-plan <issue> --approve`.
+If a checkpoint no longer descends from the approved base, a maintainer can re-approve the issue with `swarm issue approve <issue>`. Release any active claim first with `swarm issue release <issue>`. When the new base contains every commit in the checkpoint, approval drops that checkpoint and reports it. The next `swarm issue work` moves the clean local task branch and worktree forward to the new base; the remote task branch advances with the next checkpoint publication. Eligible plan approval carries forward when the WorkUnit and policy are unchanged, while implementation and validation evidence are cleared. If the committed `.swarm/` policy changed, a human-gated issue without a linked PR keeps its plan and test plan unchanged, but the earlier approval no longer counts: `swarm issue status <issue>` shows `Plan: policy files changed` and the changed policy paths, `swarm issue work` pauses at the human gate, and a maintainer reviews the kept plan again with `swarm issue review-plan <issue> --approve`.
 
 Save or move aside local edits before resuming. A checkpoint containing commits absent from the new base still requires explicit reconciliation; SwarmOS keeps those commits and refuses to reset the branch. A task branch changed by someone else also requires inspection before recovery can continue.
 
@@ -553,15 +552,15 @@ Register the repositories you want to work on so `swarm issue claim --next --all
 
 ```bash
 # Register the current checkout or clone a remote GitHub repository
-swarm repo add --backend github
-swarm repo add OWNER/REPO --clone --backend github
+swarm repo add
+swarm repo add OWNER/REPO --clone
 swarm repo list
 
 # Initialize a worker node profile (~/.config/swarm/node.yaml)
 swarm node init
 
 # Drain up to 4 ready tasks across registered repositories with 2 concurrent workers
-swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
+swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit
 ```
 
 Workers use the same selection order as `swarm issue claim --next` and `swarm issue work --next`, skipping candidates that are not eligible. By default, `swarm node run` drains the currently available ready queue and exits cleanly. Add `--watch` (and optional `--poll-interval 30s`) when you want the worker pool to keep polling for newly approved tasks.
@@ -591,11 +590,11 @@ Check `swarm issue status <issue>` for the count and limit. When automation reac
 
 ```json
 {"kind": "work", "status": "failed", "error": "...", "recovery": "...",
- "next_action": {"reason": "changes_requested", "argv": ["swarm", "--backend", "github", "issue", "work", "42", "--phase", "plan"], "human_required": false}}
+ "next_action": {"reason": "changes_requested", "argv": ["swarm", "issue", "work", "42", "--phase", "plan"], "human_required": false}}
 ```
 
 - `reason` is `changes_requested`, `needs_approval`, `conflict`, `pre_existing_failures`, `validation_repair_exhausted`, `validation_repair_no_changes`, or `tester_retry_available`. The latter suggests `issue work <issue> --phase test` or `pr work <PR> --phase test` only after coordinator eligibility checks.
-- `argv` is the suggested command as separate literal arguments, starting with `swarm`. Run it without a shell, or quote each element yourself. It repeats the `--backend`, `--repo`, `--root`, and `--upstream-remote` you used, and for worker commands `--fork` and `--fork-remote`. Maintainer commands (`issue approve`, `issue review-plan --approve`) are run upstream, so they leave out fork flags, and in fork mode they also leave out `--root`.
+- `argv` is the suggested command as separate literal arguments, starting with `swarm`. Run it without a shell, or quote each element yourself. It repeats the `--repo`, `--root`, and `--upstream-remote` you used, and for worker commands `--fork` and `--fork-remote`. Maintainer commands (`issue approve`, `issue review-plan --approve`) are run upstream, so they leave out fork flags, and in fork mode they also leave out `--root`.
 - `human_required` is `true` when a person has to act, such as a maintainer approving or someone resolving files by hand.
 
 `next_action` is advisory. It never grants authority and contains no credentials: the command it names still goes through every approval, claim, and policy check. Existing fields such as `error`, `recovery`, `report`, and `result` are unchanged.
@@ -751,7 +750,7 @@ Review the exact plan and test plan, then decide independently. For example,
 an approving maintainer runs this command manually with the actual issue number:
 
 ```bash
-swarm --backend github --repo UPSTREAM_OWNER/PUBLIC_FIXTURE \
+swarm --repo UPSTREAM_OWNER/PUBLIC_FIXTURE \
   --root /path/to/upstream-checkout --upstream-remote origin \
   issue review-plan 123 --approve --notes 'Reviewed the current plan and test plan'
 ```

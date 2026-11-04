@@ -28,7 +28,7 @@ func (f *cliFixture) runSplit(args ...string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
-	cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+	cmd.SetArgs(append([]string{"--root", f.root}, args...))
 	err := cmd.Execute()
 	return stdout.String(), stderr.String(), err
 }
@@ -163,7 +163,7 @@ func TestIssueWorkStopsOnSplitRecommendation(t *testing.T) {
 	f.must(t, "issue", "approve", n)
 	t.Setenv("SWARM_MOCK_PLAN_APPEND", cliSplitPlan)
 	out := f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
-	for _, want := range []string{"split-recommended: phase=plan", "The planner recommends a split", "swarm --backend 'local' --root '" + f.root + "' issue decompose " + n} {
+	for _, want := range []string{"split-recommended: phase=plan", "The planner recommends a split", "swarm --root '" + f.root + "' issue decompose " + n} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("issue work output missing %q:\n%s", want, out)
 		}
@@ -267,7 +267,7 @@ func TestDecompositionPreviewAndStatusCLI(t *testing.T) {
 	if out, err := f.run("issue", "approve", strconv.Itoa(parent.Number)); err != nil {
 		t.Fatalf("approve: %v %s", err, out)
 	}
-	opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local"})
+	opts := f.options(&RootOptions{RepoRoot: f.root})
 	cmd := newIssueCmd(opts)
 	_, m, _, err := opts.resolveLeaseManager(cmd)
 	if err != nil {
@@ -354,7 +354,7 @@ func TestDecompositionStatusMatrix(t *testing.T) {
 			if out, err := f.run(args...); err != nil {
 				t.Fatalf("%v %s", err, out)
 			}
-			opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local"})
+			opts := f.options(&RootOptions{RepoRoot: f.root})
 			_, m, _, err := opts.resolveLeaseManager(newIssueCmd(opts))
 			if err != nil {
 				t.Fatal(err)
@@ -401,7 +401,7 @@ func TestDecompositionStatusMatrix(t *testing.T) {
 				}
 			}
 			for _, asJSON := range []bool{false, true} {
-				opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+				opts := f.options(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 				cmd := newStatusCmd(opts)
 				var buf bytes.Buffer
 				cmd.SetOut(&buf)

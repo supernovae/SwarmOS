@@ -22,18 +22,17 @@ import (
 // an injected lookup reads the real process environment.
 func TestRootDefaultEnvironment(t *testing.T) {
 	f := newCLIFixture(t)
-	t.Setenv("SWARM_BACKEND", "local")
 	t.Setenv("SWARM_REPO", "acme/process-default")
 	t.Setenv("SWARM_USER", "process-user")
 	t.Setenv("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
 	t.Setenv("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
 	cmd := NewRootCmd()
-	for name, want := range map[string]string{"backend": "local", "repo": "acme/process-default"} {
+	for name, want := range map[string]string{"repo": "acme/process-default"} {
 		if got := cmd.PersistentFlags().Lookup(name).DefValue; got != want {
 			t.Fatalf("--%s default = %q, want %q", name, got, want)
 		}
 	}
-	opts := &RootOptions{RepoRoot: f.root, Backend: "local"}
+	opts := &RootOptions{RepoRoot: f.root}
 	if got, want := opts.registryPath(), registry.DefaultRegistryPath(); got != want {
 		t.Fatalf("registry path = %q, want default %q", got, want)
 	}
@@ -54,7 +53,7 @@ func TestRootDefaultEnvironment(t *testing.T) {
 	var out bytes.Buffer
 	doctor.SetOut(&out)
 	doctor.SetErr(&out)
-	doctor.SetArgs([]string{"--root", f.root, "--backend", "local", "repo", "doctor", "--json"})
+	doctor.SetArgs([]string{"--root", f.root, "repo", "doctor", "--json"})
 	_ = doctor.Execute()
 	if !strings.Contains(out.String(), `execution mode \"process-mode\"`) {
 		t.Fatalf("doctor did not read the process execution mode:\n%s", out.String())
@@ -64,7 +63,6 @@ func TestRootDefaultEnvironment(t *testing.T) {
 // TestRootInjectedEnvironment is serial so the process can hold conflicting
 // values that the injected lookup must override.
 func TestRootInjectedEnvironment(t *testing.T) {
-	t.Setenv("SWARM_BACKEND", "github")
 	t.Setenv("SWARM_REPO", "acme/process")
 	t.Setenv("SWARM_USER", "process-user")
 	t.Setenv("SWARM_REGISTRY_PATH", "/process/repos.yaml")
@@ -86,19 +84,19 @@ func TestRootInjectedEnvironment(t *testing.T) {
 	}{
 		{
 			name:    "injected values",
-			vars:    map[string]string{"SWARM_BACKEND": "local", "SWARM_REPO": "acme/injected", "SWARM_USER": "injected-user", "SWARM_REGISTRY_PATH": "/injected/repos.yaml", "SWARM_NODE_CONFIG": "/injected/node.yaml", "SWARM_REPOS_DIR": "/injected/repos"},
+			vars:    map[string]string{"SWARM_REPO": "acme/injected", "SWARM_USER": "injected-user", "SWARM_REGISTRY_PATH": "/injected/repos.yaml", "SWARM_NODE_CONFIG": "/injected/node.yaml", "SWARM_REPOS_DIR": "/injected/repos"},
 			backend: "local", repo: "acme/injected", user: "injected-user", registry: "/injected/repos.yaml", node: "/injected/node.yaml", cloneBase: "/injected/repos",
 		},
 		{
 			name:    "explicit flags win",
-			vars:    map[string]string{"SWARM_BACKEND": "github", "SWARM_REPO": "acme/injected"},
-			args:    []string{"--backend", "local", "--repo", "acme/flag"},
+			vars:    map[string]string{"SWARM_REPO": "acme/injected"},
+			args:    []string{"--repo", "acme/flag"},
 			backend: "local", repo: "acme/flag", user: "local-dev",
 			registry: filepath.Join(".", ".swarm", "repos.yaml"), node: filepath.Join(".", ".swarm", "node.yaml"), cloneBase: filepath.Join(".", ".swarm", "repos"),
 		},
 		{
 			name:     "empty values fall back like unset ones",
-			vars:     map[string]string{"SWARM_BACKEND": "", "SWARM_REPO": "", "SWARM_USER": "", "USER": "injected-login", "SWARM_REGISTRY_PATH": "", "SWARM_NODE_CONFIG": "", "SWARM_REPOS_DIR": "", "HOME": home, "USERPROFILE": home, "home": home},
+			vars:     map[string]string{"SWARM_REPO": "", "SWARM_USER": "", "USER": "injected-login", "SWARM_REGISTRY_PATH": "", "SWARM_NODE_CONFIG": "", "SWARM_REPOS_DIR": "", "HOME": home, "USERPROFILE": home, "home": home},
 			user:     "injected-login",
 			registry: filepath.Join(home, ".config", "swarm", "repos.yaml"), node: filepath.Join(home, ".config", "swarm", "node.yaml"), cloneBase: filepath.Join(home, ".swarm", "repos"),
 		},
@@ -116,7 +114,7 @@ func TestRootInjectedEnvironment(t *testing.T) {
 				t.Fatal(err)
 			}
 			for name, got := range map[string][2]string{
-				"backend": {opts.Backend, tc.backend}, "repo": {opts.Repo, tc.repo}, "user": {opts.localUser(), tc.user},
+				"repo": {opts.Repo, tc.repo}, "user": {opts.localUser(), tc.user},
 				"registry": {opts.registryPath(), tc.registry}, "node": {opts.nodeConfigPath(), tc.node}, "clone base": {opts.cloneBaseDir(), tc.cloneBase},
 			} {
 				if got[0] != got[1] {

@@ -23,8 +23,8 @@ make install GOBIN="$HOME/.local/bin"
 Keep the installation directory on `PATH`. For CLI-only use, `go install github.com/supernovae/swarmos/cmd/swarm@<compatible-release>`, `go install ./cmd/swarm`, or `go build -o swarm ./cmd/swarm` remain supported; these commands do not supply the Linux restore helper. Then run `swarm repo init` inside your repository checkout:
 
 ```bash
-swarm repo init --sync-labels --backend github
-swarm repo doctor --backend github
+swarm repo init --sync-labels
+swarm repo doctor
 ```
 
 `swarm repo init` detects your project stack (`Go`, `Rust`, `Python`, or `TypeScript/JavaScript`) and scaffolds:
@@ -45,7 +45,7 @@ swarm repo doctor --backend github
 
 > [!TIP]
 > - `swarm repo init` pins generated automation to the swarm you run it with (a `v0.6.0`+ release, or the exact commit of a clean source build); a build with uncommitted changes keeps your existing pin. Rerun it after upgrading swarm to update untouched generated files; files you edited, and existing files SwarmOS did not generate, are kept and listed. `.swarm/managed.json` records what init generated. Commit the reviewed `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files to your default branch before approving work.
-> - `swarm repo init --sync-labels --backend github` provisions local issue forms and `swarm:*` labels, including `swarm:parent`. Review repository issue forms and maintainer permissions in GitHub Settings; run `swarm repo doctor --backend github` to check setup.
+> - `swarm repo init --sync-labels` provisions local issue forms and `swarm:*` labels, including `swarm:parent`. Review repository issue forms and maintainer permissions in GitHub Settings; run `swarm repo doctor` to check setup.
 >
 > When upgrading, install a resource-CLI-compatible binary and review the generated workflow, slash-command instructions, and immutable pin together. Existing generated files are preserved by default; update the relevant tracked copies deliberately rather than using blanket `--force` scaffolding.
 ---
@@ -173,12 +173,12 @@ Optional for organization repositories: use `swarm issue parent create --epic --
 
 ```bash
 # Create a standalone non-executable parent issue (requires maintainer/admin permission)
-swarm issue parent create --backend github \
+swarm issue parent create \
   --title "HTTP Client Resilience Roadmap" \
   --body-file plans/http-resilience.md
 
 # Create a draft child WorkUnit linked as a native sub-issue of parent #10
-swarm issue create --backend github \
+swarm issue create \
   --parent 10 \
   --title "Add retry policy" \
   --objective "Retry transient HTTP failures" \
@@ -187,8 +187,8 @@ swarm issue create --backend github \
   --workflow feature --gate human
 
 # Validate the child issue schema and approve its revision for execution
-swarm issue lint 42 --backend github
-swarm issue approve 42 --backend github
+swarm issue lint 42
+swarm issue approve 42
 ```
 
 On GitHub, `swarm issue create --depends-on 7,8` also adds native blocked-by links so prerequisites appear on the issue. The WorkUnit body remains the source of dependency truth; later body edits are not synchronized automatically.
@@ -198,7 +198,7 @@ Approving a child WorkUnit records its canonical WorkUnit digest, `.swarm/` poli
 To split an existing multi-item WorkUnit issue into linked `swarm:draft` child sub-issues, run:
 
 ```bash
-swarm issue decompose 42 --sequential --backend github
+swarm issue decompose 42 --sequential
 ```
 
 Decomposition mirrors dependencies as native blocked-by links and orders sub-issues in decomposition order. If either projection fails, the command warns and still reports the created issues. Hierarchy-link failures still stop the command.
@@ -319,9 +319,10 @@ Offline or incomplete repository evidence retains affected caches. Maintenance c
 Use `swarm storage cleanup` to combine merged-task retirement with reclamation of admitted idle cache and scratch leaves. Start with a preview, then apply the scope you reviewed:
 
 ```bash
-swarm storage cleanup --backend github
-swarm storage cleanup --backend github --apply --json
-swarm storage cleanup --root /path/to/checkout --backend local
+swarm storage cleanup
+swarm storage cleanup --apply --json
+# Set tracker: local in /path/to/checkout/.swarm/config.yaml for offline tracking.
+swarm storage cleanup --root /path/to/checkout
 swarm storage cleanup --repo owner/repo --apply
 swarm storage cleanup --all-repos --apply --json
 ```

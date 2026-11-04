@@ -2,7 +2,7 @@ package cli
 
 import (
 	"fmt"
-	"strings"
+	"github.com/supernovae/swarmos/internal/harness"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/coordination"
@@ -39,7 +39,11 @@ func runMigrateRefs(cmd *cobra.Command, options *RootOptions, dryRun, asJSON boo
 	if options.Fork {
 		return fmt.Errorf("swarm repo migrate-refs is a maintainer operation on the upstream remote and cannot run with --fork")
 	}
-	if strings.EqualFold(strings.TrimSpace(options.Backend), "local") {
+	backend, err := harness.ConfiguredTracker(options.resolveRepoRoot())
+	if err != nil {
+		return err
+	}
+	if backend == "local" {
 		return fmt.Errorf("swarm repo migrate-refs migrates Git ledger refs; the local backend has none")
 	}
 	store := coordination.NewGitStoreWithRemote(options.resolveRepoRoot(), options.effectiveUpstreamRemote())

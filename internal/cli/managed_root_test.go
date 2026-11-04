@@ -34,7 +34,7 @@ func runManaged(t *testing.T, f *cliFixture, opts *RootOptions, dir string, args
 
 func mustManaged(t *testing.T, f *cliFixture, dir string, args ...string) (string, string) {
 	t.Helper()
-	stdout, stderr, err := runManaged(t, f, nil, dir, append([]string{"--backend", "local"}, args...)...)
+	stdout, stderr, err := runManaged(t, f, nil, dir, append([]string{}, args...)...)
 	if err != nil {
 		t.Fatalf("swarm %v in %s: %v\n%s%s", args, dir, err, stdout, stderr)
 	}
@@ -206,7 +206,7 @@ func TestManagedRootRefusesBeforeWrites(t *testing.T) {
 			{"issue", "status", n},
 		} {
 			before := snapshotTree(t, roots...)
-			stdout, stderr, err := runManaged(t, f, nil, dir, append([]string{"--backend", "local"}, args...)...)
+			stdout, stderr, err := runManaged(t, f, nil, dir, append([]string{}, args...)...)
 			if err == nil {
 				t.Fatalf("swarm %v succeeded without a main checkout: %s", args, stdout)
 			}
@@ -247,7 +247,7 @@ func TestManagedRootRefusesBeforeWrites(t *testing.T) {
 		prGit(t, f.root, "worktree", "add", "-b", "stray", stray)
 		assertRefusals(t, f, stray, second, f.root, other)
 		// Naming the verified main checkout explicitly still works.
-		stdout, _, err := runManaged(t, f, nil, stray, "--backend", "local", "--root", f.root, "issue", "status", strconv.Itoa(second), "--json")
+		stdout, _, err := runManaged(t, f, nil, stray, "--root", f.root, "issue", "status", strconv.Itoa(second), "--json")
 		if err != nil || !strings.Contains(stdout, `"kind": "status"`) && !strings.Contains(stdout, `"kind":"status"`) {
 			t.Fatalf("explicit main --root: %v %s", err, stdout)
 		}
@@ -258,7 +258,6 @@ func TestManagedRootBackendRouting(t *testing.T) {
 	f, first, _, firstWorktree := managedRootFixture(t)
 	var roots []string
 	opts := &RootOptions{
-		Backend:           "github",
 		githubTrackerFunc: func(string) (tracker.Tracker, error) { return f.tracker, nil },
 		remoteSlugFunc: func(root, remote string) string {
 			roots = append(roots, root)
@@ -282,7 +281,7 @@ func TestManagedRootBackendRouting(t *testing.T) {
 
 func TestManagedRootRegistryTargets(t *testing.T) {
 	f, first, _, firstWorktree := managedRootFixture(t)
-	opts := f.options(&RootOptions{Backend: "local"})
+	opts := f.options(&RootOptions{})
 	reg := registry.New(opts.registryPath())
 	if _, err := reg.Add("local/main", firstWorktree, "local"); err != nil {
 		t.Fatal(err)
@@ -330,7 +329,7 @@ func TestManagedRootIssueArgsFromInvokingWorktree(t *testing.T) {
 	opts := f.options(&RootOptions{RepoRoot: firstWorktree})
 	cmd := newRootCmdWithOptions(opts)
 	cmd.SetErr(new(bytes.Buffer))
-	cmd.SetArgs([]string{"--backend", "local", "issue", "status", strconv.Itoa(first)})
+	cmd.SetArgs([]string{"issue", "status", strconv.Itoa(first)})
 	cmd.SetOut(new(bytes.Buffer))
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)

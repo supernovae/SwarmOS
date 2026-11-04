@@ -103,15 +103,15 @@ Optional for organization repositories: use `swarm issue parent create --epic --
 
 ```bash
 # Preview the effective workflow, resolved gate, and role agents without side effects
-swarm issue work 42 --dry-run --backend github
+swarm issue work 42 --dry-run
 
 # Agent gate: planner writes PLAN.md + TEST_PLAN.md, then the sandboxed reviewer audits it
-swarm issue work 42 --gate agent --planner-agent claude --reviewer-agent omp --developer-agent codex --backend github
+swarm issue work 42 --gate agent --planner-agent claude --reviewer-agent omp --developer-agent codex
 
 # Human gate: generate and publish the plan, pause for maintainer review, then resume
-swarm issue work 42 --gate human --phase plan --backend github
-swarm issue review-plan 42 --approve --notes "Plan looks great; proceed with implementation" --backend github
-swarm issue work 42 --phase implement --backend github
+swarm issue work 42 --gate human --phase plan
+swarm issue review-plan 42 --approve --notes "Plan looks great; proceed with implementation"
+swarm issue work 42 --phase implement
 ```
 
 How gate verification keeps reviews trustworthy:

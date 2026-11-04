@@ -63,7 +63,7 @@ func newFixtureEnv(t *testing.T) *fixtureEnv {
 	}
 	e.set("SWARM_REGISTRY_PATH", filepath.Join(t.TempDir(), "repos.yaml"))
 	e.set("SWARM_NODE_CONFIG", filepath.Join(t.TempDir(), "node.yaml"))
-	for _, name := range []string{"SWARM_BACKEND", "SWARM_REPO", "SWARM_REPOS_DIR", "SWARM_MOCK_VERDICT", "SWARM_MOCK_DEVELOPER_CMD"} {
+	for _, name := range []string{"SWARM_REPO", "SWARM_REPOS_DIR", "SWARM_MOCK_VERDICT", "SWARM_MOCK_DEVELOPER_CMD"} {
 		e.unset(name)
 	}
 	return e
@@ -157,7 +157,7 @@ func (f *cliFixture) run(args ...string) (string, error) {
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
-	cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+	cmd.SetArgs(append([]string{"--root", f.root}, args...))
 	err := cmd.Execute()
 	if err != nil {
 		output.Write(diagnostics.Bytes())
@@ -215,6 +215,7 @@ func initializeCLIFixture(t *testing.T, root string) error {
 	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: root}); err != nil {
 		return err
 	}
+	setFixtureTracker(t, root, "local")
 	policy := "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
 	if err := os.WriteFile(filepath.Join(root, ".swarm", "validation", "required-checks.yaml"), []byte(policy), 0o644); err != nil {
 		return err
@@ -780,7 +781,13 @@ func TestCLIFixtureManagedDigests(t *testing.T) {
 	}
 	for rel, digest := range manifest.Files {
 		actual := fmt.Sprintf("%x", sha256.Sum256(read(rel)))
-		if rel == ".swarm/validation/required-checks.yaml" {
+		if rel == ".swarm/config.yaml" {
+			configured := read(rel)
+			template := bytes.Replace(configured, []byte("tracker: local"), []byte("tracker: github"), 1)
+			if bytes.Equal(configured, template) || fmt.Sprintf("%x", sha256.Sum256(template)) != digest {
+				t.Fatal("fixture tracker override changed template content")
+			}
+		} else if rel == ".swarm/validation/required-checks.yaml" {
 			if actual == digest {
 				t.Fatal("policy overwrite unexpectedly refreshed manifest")
 			}
@@ -2106,4 +2113,28 @@ func TestCLIFixtureDifferentKeyFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertCLIEquivalent(t, other, original)
+}
+
+// setFixtureTracker selects tracking in fixture configuration, before policy commits.
+func setFixtureTracker(t *testing.T, root, tracker string) {
+	t.Helper()
+	path := filepath.Join(root, ".swarm", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(line, "tracker:") {
+			lines[i] = "tracker: " + tracker
+			found = true
+		}
+	}
+	if !found {
+		lines = append(lines, "tracker: "+tracker)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644); err != nil {
+		t.Fatal(err)
+	}
 }

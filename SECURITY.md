@@ -134,7 +134,7 @@ Security fixes ship with adversarial regression tests that fail against the vuln
 ## Operational guidance
 
 1. Commit strict `.swarm/config.yaml`, workflows, prompts, and validation policy to the default branch.
-2. Use explicit GitHub backend configuration in production; use `--backend local` only when intentionally offline.
+2. Use explicit GitHub backend configuration in production; set `tracker: local` in `.swarm/config.yaml` only when intentionally offline.
 3. Create draft tasks, inspect them, then approve the exact revision. Reapprove after substantive issue or policy changes.
 4. Use human plan gates for changes requiring maintainer judgment. Review `--dry-run` policy output before unattended work.
 5. Configure and verify isolated execution on each worker platform. If you explicitly choose `trusted-local`, use a disposable, least-privilege account and keep publishing authority separate.

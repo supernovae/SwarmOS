@@ -65,6 +65,7 @@ func TestMaintenanceAggregateBudgetAndOrder(t *testing.T) {
 		if data, e := exec.Command("git", "init", "-q", root).CombinedOutput(); e != nil {
 			t.Fatal(string(data), e)
 		}
+		storageFixtureTracker(t, root, "local")
 		if _, e := registry.New(o.RegistryPath).Add(fmt.Sprintf("fixture/repo%d", repo), root, "local"); e != nil {
 			t.Fatal(e)
 		}
@@ -317,6 +318,7 @@ func TestMaintenanceRealShapeScaleAndEvidenceBudget(t *testing.T) {
 		if data, e := exec.Command("git", "init", "-q", root).CombinedOutput(); e != nil {
 			t.Fatal(string(data), e)
 		}
+		storageFixtureTracker(t, root, "local")
 		if _, e := registry.New(o.RegistryPath).Add(fmt.Sprintf("scale/repo%d", n), root, "local"); e != nil {
 			t.Fatal(e)
 		}

@@ -109,7 +109,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				if opts.IssueContinuation {
 					opts.Phase = opts.RequestedPhase
 				}
-				guidanceOpts.Repo, guidanceOpts.RepoRoot, guidanceOpts.Backend = pulled.Repo, pulled.RepoRoot, pulled.Backend
+				guidanceOpts.Repo, guidanceOpts.RepoRoot = pulled.Repo, pulled.RepoRoot
 				tr, mgr, cfg, err = rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend})
 				if err != nil {
 					return err

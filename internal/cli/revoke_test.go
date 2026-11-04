@@ -14,7 +14,7 @@ import (
 )
 
 func (f *upstreamRemoteFixture) maintainerOpts() RootOptions {
-	return RootOptions{RepoRoot: f.upstreamRoot, Backend: "github", trackerOverride: f.maintainer}
+	return RootOptions{RepoRoot: f.upstreamRoot, trackerOverride: f.maintainer}
 }
 
 // sameRepoClaim claims issue 42 as login directly through the lease manager,
@@ -129,7 +129,7 @@ func TestCLIRevokeRefusals(t *testing.T) {
 	f := newUpstreamRemoteFixture(t)
 	f.sameRepoClaim("bob")
 	alice := f.aliceClone("alice")
-	bob := RootOptions{RepoRoot: f.upstreamRoot, Backend: "github", trackerOverride: f.githubTracker("octo/swarm", "bob", "User")}
+	bob := RootOptions{RepoRoot: f.upstreamRoot, trackerOverride: f.githubTracker("octo/swarm", "bob", "User")}
 	for _, tc := range []struct {
 		name string
 		opts RootOptions

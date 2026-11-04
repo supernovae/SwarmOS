@@ -102,7 +102,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			fmt.Fprintln(progressWriter(cmd), pending.human())
 		}
 		selected := *rootOpts
-		selected.Repo, selected.RepoRoot, selected.Backend = repo, path, backend
+		selected.Repo, selected.RepoRoot = repo, path
 		c := stopContext{opts: &selected, resource: "issue", number: number}
 		pending = &noReadyError{cause: err, action: c.classify(err), text: fmt.Sprintf("Issue #%d: %s", number, messageOnly(err))}
 		var stopped *stopError
@@ -314,6 +314,10 @@ func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error
 				return nil, fmt.Errorf("%s: %w", entries[i].Repo, err)
 			}
 			entries[i].Path = root
+			entries[i].Backend, err = harness.ConfiguredTracker(root)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", entries[i].Repo, err)
+			}
 		}
 		return entries, nil
 	}
@@ -326,11 +330,15 @@ func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error
 			slug = "local/repo"
 		}
 	}
+	backend, err := harness.ConfiguredTracker(root)
+	if err != nil {
+		return nil, err
+	}
 	return []registry.RepoEntry{
 		{
 			Repo:    slug,
 			Path:    root,
-			Backend: o.Backend,
+			Backend: backend,
 		},
 	}, nil
 }

@@ -115,8 +115,8 @@ Release binaries include the version, commit, build date, Go toolchain, and plat
 From a Git checkout connected to GitHub (`gh auth login`), scaffold your `.swarm/` harness and run diagnostics:
 
 ```bash
-swarm repo init --sync-labels --backend github
-swarm repo doctor --backend github
+swarm repo init --sync-labels
+swarm repo doctor
 ```
 
 > [!TIP]
@@ -146,7 +146,7 @@ Commit the generated `.swarm/`, `.github/`, `.claude/`, and `.opencode/` files t
 
 ```bash
 # 1. Create a structured WorkUnit issue (starts as a draft; pass --ready to approve immediately)
-swarm issue create --backend github \
+swarm issue create \
   --title "Add JSON output to the status command" \
   --objective "Let scripts read application status as JSON" \
   --constraint "Keep the existing text output unchanged" \
@@ -154,16 +154,16 @@ swarm issue create --backend github \
   --workflow feature --gate agent
 
 # 2. Approve the issue when the scope looks right (replace 42 with your issue number)
-swarm issue approve 42 --backend github
+swarm issue approve 42
 
 # 3. Preview the resolved agents and gate, then run the workflow and open a Draft PR
-swarm issue work 42 --dry-run --backend github
-swarm issue work 42 --backend github
-swarm issue submit 42 --backend github
+swarm issue work 42 --dry-run
+swarm issue work 42
+swarm issue submit 42
 ```
 
 > [!TIP]
-> `swarm issue work` runs headlessly by default. Pass `--headless=false` to pair with your agent, or use `swarm node run --watch` to keep picking up approved tasks. On Linux, isolated execution uses Codex's native sandbox or bounded tools for Claude Code, OpenCode 2, and OhMyPi, with provider login managed by the harness. Start with `swarm repo doctor`; the [worker guide](docs/developer.md#choose-how-you-work) covers setup and other harnesses. Use `--backend local` to experiment with local coordination storage.
+> `swarm issue work` runs headlessly by default. Pass `--headless=false` to pair with your agent, or use `swarm node run --watch` to keep picking up approved tasks. On Linux, isolated execution uses Codex's native sandbox or bounded tools for Claude Code, OpenCode 2, and OhMyPi, with provider login managed by the harness. Start with `swarm repo doctor`; the [worker guide](docs/developer.md#choose-how-you-work) covers setup and other harnesses. Set `tracker: local` in `.swarm/config.yaml` to experiment with local coordination storage.
 
 `swarm repo doctor` highlights your selected agents and reports unused, unqualified harnesses as `OPTIONAL`. The [harness guides](docs/harness/README.md) cover setup and boundaries for each agent, and the [qualification guide](docs/native-qualification.md) tracks tested releases.
 
@@ -195,17 +195,17 @@ Register the repositories you work on so teammates and worker pools can pull fro
 
 ```bash
 # Register this checkout in ~/.config/swarm/repos.yaml
-swarm repo add --backend github
+swarm repo add
 
 # Checkpoint a completed plan so another teammate or worker can pick up the next phase
-swarm issue work 42 --phase plan --handoff --backend github
+swarm issue work 42 --phase plan --handoff
 
 # Claim and run the next ready task across all registered repositories
-swarm issue work --next --all --backend github
+swarm issue work --next --all
 
 # Run a bounded worker pool that drains up to 4 tasks and opens Draft PRs
 swarm node init
-swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit --backend github
+swarm node run --all --concurrency 2 --max-jobs 4 --auto-submit
 ```
 
 ---
@@ -218,7 +218,7 @@ External contributors do not need push access to the upstream repository. When m
 # Maintainer (once, on the upstream default branch):
 # Generates .github/workflows/swarm-fork-coordinator.yml; later `swarm repo init` runs keep it current
 swarm repo init --fork-coordinator
-swarm issue approve 42 --backend github
+swarm issue approve 42
 
 # Contributor (clones upstream as origin, adds writable personal fork as "fork"):
 git clone https://github.com/OWNER/REPO.git

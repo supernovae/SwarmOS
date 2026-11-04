@@ -49,7 +49,7 @@ func TestIssue83GuideCommandRegistration(t *testing.T) {
 		return nil
 	}
 	for _, command := range commands {
-		for _, selectors := range []string{"", "--fork ", "--backend github --upstream-remote upstream "} {
+		for _, selectors := range []string{"", "--fork ", "--upstream-remote upstream "} {
 			argv := strings.Fields(command + " " + selectors)
 			t.Run(strings.Join(argv, " "), func(t *testing.T) {
 				if err := validate(argv); err != nil {
@@ -225,7 +225,7 @@ func TestIssue83AuthenticatedIssueSubmitPublishesStager(t *testing.T) {
 		if len(args) > 1 && args[1] == "review-plan" {
 			activeTracker = issue83GitHubCLITracker{Tracker: f.tracker.WithUser("authenticated-independent-reviewer", "OWNER"), test: t, root: f.root}
 		}
-		cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: activeTracker})
+		cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: activeTracker})
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)

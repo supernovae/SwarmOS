@@ -33,7 +33,7 @@ func TestHeadlessWorkProgressKeepsJSONOnStdout(t *testing.T) {
 			var output, diagnostics bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(&diagnostics)
-			args := []string{"--root", f.root, "--backend", "local", "issue", "work", n, "--agent", "mock", "--json"}
+			args := []string{"--root", f.root, "issue", "work", n, "--agent", "mock", "--json"}
 			cmd.SetArgs(append(args, tc.flags...))
 			if err := cmd.Execute(); err != nil {
 				t.Fatalf("%v\n%s", err, diagnostics.String())
@@ -72,7 +72,7 @@ func TestWorkProgressCanBeDisabledAndDryRunIsSilent(t *testing.T) {
 		var output, diagnostics bytes.Buffer
 		cmd.SetOut(&output)
 		cmd.SetErr(&diagnostics)
-		args := []string{"--root", f.root, "--backend", "local", "issue", "work", n, "--agent", "mock", "--json"}
+		args := []string{"--root", f.root, "issue", "work", n, "--agent", "mock", "--json"}
 		cmd.SetArgs(append(args, flags...))
 		if err := cmd.Execute(); err != nil {
 			t.Fatal(err)
@@ -91,7 +91,7 @@ func TestWorkFailureReportsTerminalStageAndJSON(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "work", n, "--agent", "mock", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "issue", "work", n, "--agent", "mock", "--json"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("unapproved work ran")
 	}
@@ -121,7 +121,7 @@ func TestClaimSetupProgressJSON(t *testing.T) {
 			if next {
 				target = "--next"
 			}
-			cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "claim", target, "--agent", "mock", "--json"})
+			cmd.SetArgs([]string{"--root", f.root, "issue", "claim", target, "--agent", "mock", "--json"})
 			if err := cmd.Execute(); err != nil {
 				t.Fatalf("%v: %s", err, diagnostics.String())
 			}
@@ -174,7 +174,7 @@ func TestIssueWorkSetupProgressModes(t *testing.T) {
 					if next {
 						target = "--next"
 					}
-					args := []string{"--root", f.root, "--backend", "local", "issue", "work", target, "--agent", "mock", "--phase", "plan", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(enabled)}
+					args := []string{"--root", f.root, "issue", "work", target, "--agent", "mock", "--phase", "plan", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(enabled)}
 					if headless {
 						args = append(args, "--json")
 					}
@@ -220,7 +220,7 @@ func TestPRWorkSetupProgressModes(t *testing.T) {
 					var output, diagnostics bytes.Buffer
 					cmd.SetOut(&output)
 					cmd.SetErr(&diagnostics)
-					args := []string{"--root", f.root, "--backend", "local", "pr", "work", strconv.Itoa(number), "--agent", "mock", "--phase", "plan", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(enabled)}
+					args := []string{"--root", f.root, "pr", "work", strconv.Itoa(number), "--agent", "mock", "--phase", "plan", "--headless=" + strconv.FormatBool(headless), "--progress=" + strconv.FormatBool(enabled)}
 					if headless {
 						args = append(args, "--json")
 					}
@@ -258,7 +258,7 @@ func TestClaimSetupProgressStopsAtFailure(t *testing.T) {
 	var output, diagnostics bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diagnostics)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "claim", n, "--agent", "mock", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "issue", "claim", n, "--agent", "mock", "--json"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("acquired an active claim")
 	}

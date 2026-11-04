@@ -165,7 +165,7 @@ func TestIssueStatusShowsPreExistingRepair(t *testing.T) {
 	n := strconv.Itoa(issue)
 	f.must(t, "issue", "approve", n)
 	doc, err := f.runJSON(t, "issue", "work", n, "--agent", "mock", "--progress=false", "--json")
-	assertNextAction(t, doc, err, ReasonPreExistingFailures, true, ExitFailure, "swarm", "--backend", "local", "--root", f.root, "issue", "status", n)
+	assertNextAction(t, doc, err, ReasonPreExistingFailures, true, ExitFailure, "swarm", "--root", f.root, "issue", "status", n)
 	if report, _ := doc["report"].(map[string]any); report == nil || report["repair"] == nil {
 		t.Fatalf("work JSON lacks the repair summary: %v", doc)
 	}

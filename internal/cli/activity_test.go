@@ -61,7 +61,7 @@ func TestReviewPlanProgressKeepsJSONOnStdout(t *testing.T) {
 	var output, diag bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&diag)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "review-plan", n, "--agent", "mock", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "issue", "review-plan", n, "--agent", "mock", "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("%v: %s", err, diag.String())
 	}
@@ -125,7 +125,7 @@ func TestUpstreamPlanReviewCLISeparateCheckout(t *testing.T) {
 				f := newUpstreamRemoteFixture(t)
 				if gate == "human" {
 					f.issues[42].Body = strings.Replace(f.issues[42].Body, "gate: agent", "gate: human", 1)
-					if out, err := f.run(RootOptions{RepoRoot: f.upstreamRoot, Backend: "github", trackerOverride: f.maintainer}, "issue", "approve", "42"); err != nil {
+					if out, err := f.run(RootOptions{RepoRoot: f.upstreamRoot, trackerOverride: f.maintainer}, "issue", "approve", "42"); err != nil {
 						t.Fatalf("approve human task: %v %s", err, out)
 					}
 				}
@@ -138,7 +138,7 @@ func TestUpstreamPlanReviewCLISeparateCheckout(t *testing.T) {
 				if before.HeadSHA != "" || before.Branch != "" || len(before.CheckpointHeads) != 0 || before.PRNumber != 0 || before.PRRevision != nil {
 					t.Fatalf("not initial fork fixture: %+v", before)
 				}
-				opts := RootOptions{RepoRoot: f.upstreamRoot, Backend: "github", trackerOverride: upstreamCLIReviewTracker{f.maintainer}, lookupEnv: f.env.lookup(), nowFn: func() time.Time { return f.now }, resolverRunner: func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				opts := RootOptions{RepoRoot: f.upstreamRoot, trackerOverride: upstreamCLIReviewTracker{f.maintainer}, lookupEnv: f.env.lookup(), nowFn: func() time.Time { return f.now }, resolverRunner: func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 					return &upstreamCLIReviewRunner{verdict: verdict}, nil
 				}}
 				cmd := newRootCmdWithOptions(&opts)

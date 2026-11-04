@@ -50,7 +50,7 @@ func submitWithDiagnostics(t *testing.T, f *cliFixture, args ...string) (string,
 	var out, diag bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diag)
-	cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+	cmd.SetArgs(append([]string{"--root", f.root}, args...))
 	if e := cmd.Execute(); e != nil {
 		t.Fatalf("submit: %v %s %s", e, out.String(), diag.String())
 	}
@@ -329,7 +329,7 @@ func TestCheckpointSubmitValidationReuse(t *testing.T) {
 			if version == "dev" {
 				args = append(args, "--progress=false")
 			}
-			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			cmd.SetArgs(append([]string{"--root", f.root}, args...))
 			if err := cmd.Execute(); err != nil {
 				t.Fatalf("reconcile: %v %s", err, diag.String())
 			}
@@ -415,7 +415,7 @@ func TestIssue396ValidationParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := f.command(nil)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "validate", number, "--progress=false"})
+	cmd.SetArgs([]string{"--root", f.root, "issue", "validate", number, "--progress=false"})
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "protected") {
 		t.Fatalf("protected edit: %v", err)
 	}

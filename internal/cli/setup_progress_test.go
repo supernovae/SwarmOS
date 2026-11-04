@@ -57,7 +57,7 @@ func TestSetupProgressNativeGitHub(t *testing.T) {
 			if _, err := manager.ApproveTask(t.Context(), n, "alice"); err != nil {
 				t.Fatal(err)
 			}
-			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 			var stdout, stderr bytes.Buffer
 			cmd.SetOut(&stdout)
 			cmd.SetErr(&stderr)

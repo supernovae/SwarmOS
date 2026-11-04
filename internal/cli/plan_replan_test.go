@@ -140,7 +140,7 @@ func TestRejectedReviewJSONRecovery(t *testing.T) {
 	var out, diagnostic bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diagnostic)
-	cmd.SetArgs([]string{"--root", f.root, "--backend", "local", "issue", "work", n, "--agent", "mock", "--progress=false", "--json"})
+	cmd.SetArgs([]string{"--root", f.root, "issue", "work", n, "--agent", "mock", "--progress=false", "--json"})
 	err := cmd.Execute()
 	if !errors.Is(err, workflow.ErrPlanReviewRejected) {
 		t.Fatal(err)
@@ -338,7 +338,7 @@ func TestPlanReplanHumanRejectionRecovery326(t *testing.T) {
 		}
 	}
 	for _, decision := range []string{"--reject", "--approve"} {
-		cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: f.tracker.WithUser("outsider", "NONE")})
+		cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: f.tracker.WithUser("outsider", "NONE")})
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
 		cmd.SetArgs([]string{"issue", "review-plan", n, decision})

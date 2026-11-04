@@ -194,6 +194,7 @@ func TestApprovedPolicyIgnoresCandidateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	detailed := strings.Replace(string(configData), "detail: concise", "detail: detailed", 1)
+	detailed = strings.Replace(detailed, "tracker: github", "tracker: local", 1)
 	if detailed == string(configData) {
 		t.Fatal("generated config missing concise detail")
 	}
@@ -212,6 +213,9 @@ func TestApprovedPolicyIgnoresCandidateChanges(t *testing.T) {
 	cfg, err := LoadConfigAt(root, base)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if configured, err := contract.ResolveTracker(cfg); err != nil || configured != "local" {
+		t.Fatalf("approved tracker: %s %v", configured, err)
 	}
 	if !cfg.Security.RequireReadyLabel {
 		t.Fatal("approved readiness policy weakened by candidate")
@@ -1606,5 +1610,60 @@ func TestBrowserProfileApprovedBase(t *testing.T) {
 				t.Fatal("candidate mutation not exercised")
 			}
 		})
+	}
+}
+
+func TestTrackerConfigTypes(t *testing.T) {
+	for _, value := range []string{"github", "local", "other", "2", "true", "null", "[]", "{}", "''"} {
+		t.Run(value, func(t *testing.T) {
+			root := t.TempDir()
+			if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, ".swarm", "config.yaml")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data = []byte(strings.Replace(string(data), "tracker: github", "tracker: "+value, 1))
+			if err := os.WriteFile(path, data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			_, err = LoadConfig(root)
+			valid := value == "github" || value == "local"
+			if (err == nil) != valid {
+				t.Fatalf("tracker %s: %v", value, err)
+			}
+		})
+	}
+}
+
+func TestConfiguredTrackerMissingAndDanglingConfig(t *testing.T) {
+	root := t.TempDir()
+	if value, err := ConfiguredTracker(root); err != nil || value != "github" {
+		t.Fatalf("bootstrap: %s %v", value, err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".swarm"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".swarm", "config.yaml")
+	if err := os.Symlink(filepath.Join(root, "absent.yaml"), path); err != nil {
+		t.Skip(err)
+	}
+	if _, err := ConfiguredTracker(root); err == nil || !strings.Contains(err.Error(), ".swarm/config.yaml") {
+		t.Fatalf("dangling config: %v", err)
+	}
+}
+
+func TestTrackerConfigMergedTypes(t *testing.T) {
+	for _, value := range []string{"github", "local", "unknown", "null", "true", "2", "[]"} {
+		data := []byte("defaults: &defaults\n  tracker: " + value + "\n<<: *defaults\n")
+		err := validateTrackerYAML(data)
+		if (err == nil) != (value == "github" || value == "local") {
+			t.Fatalf("merged tracker %s: %v", value, err)
+		}
+	}
+	if err := validateTrackerYAML([]byte("tracker: github\n---\ntracker: unknown\n")); err == nil {
+		t.Fatal("accepted multiple configuration documents")
 	}
 }

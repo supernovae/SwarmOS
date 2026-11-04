@@ -22,7 +22,7 @@ func runProgressCommand(t *testing.T, f *cliFixture, args ...string) (string, st
 	var out, diag bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diag)
-	cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+	cmd.SetArgs(append([]string{"--root", f.root}, args...))
 	err := cmd.Execute()
 	return out.String(), diag.String(), err
 }
@@ -88,10 +88,10 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 							var stdout, stderr bytes.Buffer
 							cmd.SetOut(&stdout)
 							cmd.SetErr(&stderr)
-							cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+							cmd.SetArgs(append([]string{"--root", f.root}, args...))
 							err = cmd.Execute()
 							out, diag = stdout.String(), stderr.String()
-							want := fmt.Sprintf("Claim time remaining for issue #%d: %s\nRenew: swarm --backend 'local' --root '%s' issue renew %d\n", number, state.Lease.ExpiresAt.Sub(now).Round(time.Second), f.root, number)
+							want := fmt.Sprintf("Claim time remaining for issue #%d: %s\nRenew: swarm --root '%s' issue renew %d\n", number, state.Lease.ExpiresAt.Sub(now).Round(time.Second), f.root, number)
 							if strings.Count(diag, want) != 1 {
 								t.Fatalf("expected exact advisory once: %q", diag)
 							}

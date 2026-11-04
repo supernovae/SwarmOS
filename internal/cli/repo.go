@@ -78,7 +78,7 @@ func newRepoCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 
 			reg := registry.New(rootOpts.registryPath())
-			entry, err := reg.AddFromRemote(slug, localPath, rootOpts.Backend, upstreamRemote)
+			entry, err := reg.AddFromRemote(slug, localPath, "", upstreamRemote)
 			if err != nil {
 				return err
 			}

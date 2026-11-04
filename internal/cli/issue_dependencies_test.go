@@ -75,7 +75,7 @@ func TestNativeProjectionLintQualified(t *testing.T) {
 }
 
 func executeProjectionIssue(f *cliFixture, tr tracker.Tracker, args ...string) (string, string, error) {
-	opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr, nowFn: time.Now})
+	opts := f.options(&RootOptions{RepoRoot: f.root, trackerOverride: tr, nowFn: time.Now})
 	cmd := newIssueCmd(opts)
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -206,7 +206,7 @@ func TestNativeProjectionDecomposeAndPlanJSONWarnings(t *testing.T) {
 			addTestOrigin(t, f)
 			d := &driftTracker{Tracker: f.tracker}
 			var out, stderr bytes.Buffer
-			opts := f.options(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: d, nowFn: time.Now})
+			opts := f.options(&RootOptions{RepoRoot: f.root, trackerOverride: d, nowFn: time.Now})
 			if mode == "decompose" {
 				wu := &contract.WorkUnit{ID: "parent", Objective: "Deliver parent feature", Acceptance: []string{"First works", "Second works"}, Constraints: []string{}, Workflow: "feature", Gate: "none"}
 				parent, err := f.tracker.CreateIssue(t.Context(), "parent", contract.FormatIssueMarkdown(wu), nil)

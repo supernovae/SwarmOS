@@ -29,7 +29,11 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			repoRoot := rootOpts.resolveRepoRoot()
-			checkGHAuth := !strings.EqualFold(rootOpts.Backend, "local")
+			backend, err := harness.ConfiguredTracker(repoRoot)
+			if err != nil {
+				return err
+			}
+			checkGHAuth := backend == "github"
 			var observer func(progress.Event)
 			if !asJSON {
 				observer = operationProgressPrinter(progressWriter(cmd))
@@ -78,7 +82,7 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 				checks = append(checks, doctorAgentChecksWithRunner(cfg, !checkGHAuth, preflight, run)...)
 				checks = append(checks, run.Run("security", "plan-reviewers", func() harness.DoctorCheck { return doctorReviewerCheck(cfg) }))
 			}
-			if checkGHAuth && (strings.EqualFold(rootOpts.Backend, "github") || rootOpts.trackerOverride != nil || rootOpts.Repo != "" || hasGitRemote(repoRoot)) {
+			if checkGHAuth && (rootOpts.trackerOverride != nil || rootOpts.Repo != "" || hasGitRemote(repoRoot)) {
 				checks = append(checks, run.Run("tracker", "github-hierarchy", func() harness.DoctorCheck {
 					detail := "Parent issues with native sub-issues are supported; use swarm issue parent create"
 					tr, err := rootOpts.resolveTracker(cmd)

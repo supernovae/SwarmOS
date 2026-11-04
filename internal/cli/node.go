@@ -197,14 +197,13 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				lease.UnlockClaim(lock)
 				if err != nil {
 					selectedRoot := *rootOpts
-					selectedRoot.Repo, selectedRoot.RepoRoot, selectedRoot.Backend = pulled.Repo, pulled.RepoRoot, pulled.Backend
+					selectedRoot.Repo, selectedRoot.RepoRoot = pulled.Repo, pulled.RepoRoot
 					return result, (stopContext{opts: &selectedRoot, resource: "issue", number: pulled.Issue.Number}).stop(err)
 				}
 				if autoSubmit && result.ValidationPassed && result.ClaimBudgetPause == nil {
 					submitOpts := *rootOpts
 					submitOpts.Repo = pulled.Repo
 					submitOpts.RepoRoot = pulled.RepoRoot
-					submitOpts.Backend = pulled.Backend
 					// Buffer submission output so validation does not hold the
 					// shared output lock and stall other workers' reporting.
 					var submitOut, submitErr bytes.Buffer
@@ -268,7 +267,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 							} else {
 								fmt.Fprintf(out, "[worker-%d] %s #%d %s: phase=%s validation=%t\n", worker+1, pulled.Repo, pulled.Issue.Number, result.Outcome(), result.PhaseCompleted, result.ValidationPassed)
 								selectedRoot := *rootOpts
-								selectedRoot.Repo, selectedRoot.RepoRoot, selectedRoot.Backend = pulled.Repo, pulled.RepoRoot, pulled.Backend
+								selectedRoot.Repo, selectedRoot.RepoRoot = pulled.Repo, pulled.RepoRoot
 								if guidance := claimBudgetGuidance(&selectedRoot, result, "issue", pulled.Issue.Number); guidance != "" {
 									fmt.Fprintln(out, guidance)
 									pauses = append(pauses, result.ClaimBudgetPause)

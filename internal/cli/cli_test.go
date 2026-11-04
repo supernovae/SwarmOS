@@ -671,6 +671,7 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(cfgText), 0600); err != nil {
 		t.Fatal(err)
 	}
+	setFixtureTracker(t, f.root, "github")
 	mockTr := &mockDoctorTracker{
 		Tracker:     f.tracker,
 		ownerType:   "User",
@@ -679,13 +680,12 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	}
 	docCmd := f.command(&RootOptions{
 		RepoRoot:        f.root,
-		Backend:         "github",
 		trackerOverride: mockTr,
 	})
 	var docBuf bytes.Buffer
 	docCmd.SetOut(&docBuf)
 	docCmd.SetErr(&docBuf)
-	docCmd.SetArgs([]string{"--root", f.root, "repo", "doctor", "--backend", "github"})
+	docCmd.SetArgs([]string{"--root", f.root, "repo", "doctor"})
 	if err := docCmd.Execute(); err != nil {
 		t.Fatalf("doctor should report WARN without failing: %v\n%s", err, docBuf.String())
 	}
@@ -705,11 +705,11 @@ func TestCLIEpicCommandsParentLinkingPullSkipAndDoctor(t *testing.T) {
 	}{{"Organization", nil}, {"", errors.New("metadata unavailable")}, {"User", nil}} {
 		mockTr.ownerType = tc.owner
 		mockTr.metadataErr = tc.metadataErr
-		command := f.command(&RootOptions{RepoRoot: f.root, Backend: "github", trackerOverride: mockTr})
+		command := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: mockTr})
 		var output bytes.Buffer
 		command.SetOut(&output)
 		command.SetErr(&bytes.Buffer{})
-		command.SetArgs([]string{"--root", f.root, "repo", "doctor", "--backend", "github", "--json"})
+		command.SetArgs([]string{"--root", f.root, "repo", "doctor", "--json"})
 		if err := command.Execute(); err != nil {
 			t.Fatalf("doctor JSON: %v", err)
 		}
@@ -1200,10 +1200,12 @@ func TestForkCLISmoke(t *testing.T) {
 		return out, err
 	}
 
-	// 0. Flag & backend validation checks
-	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--backend", "local", "--fork", "issue", "status"); err == nil {
-		t.Fatal("expected --backend local --fork to fail explicitly")
+	// 0. Flag and configured tracker validation checks
+	setFixtureTracker(t, upstreamRoot, "local")
+	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--fork", "issue", "status"); err == nil {
+		t.Fatal("expected tracker: local with --fork to fail explicitly")
 	}
+	setFixtureTracker(t, upstreamRoot, "github")
 	if _, err := runCmd(RootOptions{RepoRoot: upstreamRoot}, "--fork-remote", "fork", "issue", "status"); err == nil {
 		t.Fatal("expected --fork-remote without --fork to fail explicitly")
 	}
@@ -1234,7 +1236,7 @@ func TestForkCLISmoke(t *testing.T) {
 	}
 
 	// 1. Maintainer approves issue #42 at SHA A on upstream
-	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "issue", "approve", "42"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: maintTracker}, "issue", "approve", "42"); err != nil {
 		t.Fatalf("maintainer issue approve 42 failed: %v\n%s", err, out)
 	}
 
@@ -1247,12 +1249,12 @@ func TestForkCLISmoke(t *testing.T) {
 	git(aliceRoot, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "no-upstream-push.git"))
 
 	// 3. Alice runs `swarm --fork issue claim 42 --agent mock`
-	claimOut, err := runMutation("acquire", "accepted", RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "claim", "42", "--agent", "mock")
+	claimOut, err := runMutation("acquire", "accepted", RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "claim", "42", "--agent", "mock")
 	if err != nil {
 		t.Fatalf("alice --fork claim 42 failed: %v\n%s", err, claimOut)
 	}
 	t.Logf("claim output:\n%s", claimOut)
-	if out, err := runMutation("renew", "accepted", RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "renew", "42", "--json"); err != nil {
+	if out, err := runMutation("renew", "accepted", RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "renew", "42", "--json"); err != nil {
 		t.Fatalf("JSON renew: %v %s", err, out)
 	} else {
 		var result struct {
@@ -1293,14 +1295,14 @@ func TestForkCLISmoke(t *testing.T) {
 
 	// 4. Contributor review is advisory: the authenticated maintainer must
 	// approve the current plan before the contributor can resume implementation.
-	workOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "work", "42", "--agent", "mock", "--headless")
+	workOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "work", "42", "--agent", "mock", "--headless")
 	if !errors.Is(err, workflow.ErrPlanApprovalNeeded) {
 		t.Fatalf("expected contributor review to stop at the trusted approval gate, got %v\n%s", err, workOut)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "issue", "review-plan", "42", "--approve", "--notes", "Reviewed the contributor plan and test plan"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: maintTracker}, "issue", "review-plan", "42", "--approve", "--notes", "Reviewed the contributor plan and test plan"); err != nil {
 		t.Fatalf("maintainer review failed: %v\n%s", err, out)
 	}
-	workOut, err = runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "work", "42", "--agent", "mock", "--headless", "--phase", "implement")
+	workOut, err = runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "work", "42", "--agent", "mock", "--headless", "--phase", "implement")
 	if err != nil {
 		t.Fatalf("alice --fork work 42 --phase implement after trusted approval failed: %v\n%s", err, workOut)
 	}
@@ -1323,7 +1325,7 @@ func TestForkCLISmoke(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt42, ".swarm", "validation", "required-checks.yaml"), []byte("required_checks: []\nprotected_paths: []\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil {
 		t.Fatalf("expected --fork submit with tampered required-checks.yaml to fail, got:\n%s", out)
 	}
 	// Discard the rejected tamper while preserving the recorded checkpoint.
@@ -1338,7 +1340,7 @@ func TestForkCLISmoke(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(wt42, ".github", "workflows", "swarm-fork-coordinator.yml"), []byte("name: Tampered\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil {
 		t.Fatalf("expected --fork submit with tampered workflow to fail, got:\n%s", out)
 	}
 	mu.Lock()
@@ -1368,11 +1370,11 @@ func TestForkCLISmoke(t *testing.T) {
 		t.Fatal("fork main moved unexpectedly", got)
 	}
 
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "stage", "42", "--phase", "implement"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "stage", "42", "--phase", "implement"); err != nil {
 		t.Fatal(err, out)
 	}
 	// Imported worker validation cannot authorize the first fork publication.
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil || !strings.Contains(err.Error(), "acceptance evidence blocks") {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil || !strings.Contains(err.Error(), "acceptance evidence blocks") {
 		t.Fatal("first fork submit must require trusted evidence", err, out)
 	}
 	mu.Lock()
@@ -1384,7 +1386,7 @@ func TestForkCLISmoke(t *testing.T) {
 	seedGitIssueAcceptance(t, aliceRoot, upstreamRoot, maintTracker, 42, now)
 
 	// 6. Alice runs `swarm --fork issue submit 42`: records checkpoint SHA B on fork & upstream, creates Draft PR with head=alice:swarm/issue-42-<claim_id> and base=main
-	submitOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42")
+	submitOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42")
 	if err != nil {
 		t.Fatalf("alice --fork submit 42 failed: %v\n%s", err, submitOut)
 	}
@@ -1400,7 +1402,7 @@ func TestForkCLISmoke(t *testing.T) {
 		t.Fatalf("unexpected upstream state after submit: %+v (want shaB=%s)", stSubmitted, shaB)
 	}
 	// Repeat submit is idempotent and returns the same PR
-	repeatOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42")
+	repeatOut, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42")
 	if err != nil {
 		t.Fatalf("repeat --fork submit 42 failed: %v\n%s", err, repeatOut)
 	}
@@ -1430,10 +1432,10 @@ func TestForkCLISmoke(t *testing.T) {
 		HTMLURL: "https://github.com/octo/swarm/issues/43",
 	}
 	mu.Unlock()
-	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker}, "issue", "approve", "43"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: upstreamRoot, trackerOverride: maintTracker}, "issue", "approve", "43"); err != nil {
 		t.Fatalf("approve 43: %v\n%s", err, out)
 	}
-	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "claim", "43", "--agent", "mock", "--json"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "claim", "43", "--agent", "mock", "--json"); err != nil {
 		t.Fatalf("alice claim 43: %v\n%s", err, out)
 	}
 
@@ -1449,7 +1451,7 @@ func TestForkCLISmoke(t *testing.T) {
 	git(bobRoot, "remote", "add", "fork", bobForkBare)
 	git(bobRoot, "remote", "set-url", "--push", "origin", filepath.Join(tmp, "no-upstream-push.git"))
 
-	if out, err := runCmd(RootOptions{RepoRoot: bobRoot, Backend: "github", trackerOverride: bobTracker}, "--fork", "issue", "claim", "43", "--agent", "mock", "--json"); err != nil {
+	if out, err := runCmd(RootOptions{RepoRoot: bobRoot, trackerOverride: bobTracker}, "--fork", "issue", "claim", "43", "--agent", "mock", "--json"); err != nil {
 		t.Fatalf("bob takeover claim 43 failed: %v\n%s", err, out)
 	}
 	raw43Before, _, err := upstreamStore.Load(ctx, 43)
@@ -1463,10 +1465,10 @@ func TestForkCLISmoke(t *testing.T) {
 	}
 
 	// Alice's stale renew and submit on #43 must fail and leave upstream #43 state untouched
-	if _, err := runMutation("renew", "rejected", RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "renew", "43", "--json"); err == nil {
+	if _, err := runMutation("renew", "rejected", RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "renew", "43", "--json"); err == nil {
 		t.Fatal("expected alice stale renew on #43 to fail after bob takeover")
 	}
-	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "43"); err == nil {
+	if _, err := runCmd(RootOptions{RepoRoot: aliceRoot, trackerOverride: aliceTracker}, "--fork", "issue", "submit", "43"); err == nil {
 		t.Fatal("expected alice stale submit on #43 to fail after bob takeover")
 	}
 	raw43After, _, err := upstreamStore.Load(ctx, 43)
@@ -1478,7 +1480,7 @@ func TestForkCLISmoke(t *testing.T) {
 	if st43After.Lease.Owner != "bob" || st43After.Lease.ClaimID != st43Before.Lease.ClaimID || st43After.ForkRepo != "bob/swarm" {
 		t.Fatalf("alice stale operations modified #43 state after takeover: %+v", st43After)
 	}
-	if out, err := runMutation("release", "accepted", RootOptions{RepoRoot: bobRoot, Backend: "github", trackerOverride: bobTracker}, "--fork", "issue", "release", "43", "--json"); err != nil {
+	if out, err := runMutation("release", "accepted", RootOptions{RepoRoot: bobRoot, trackerOverride: bobTracker}, "--fork", "issue", "release", "43", "--json"); err != nil {
 		t.Fatalf("JSON release: %v %s", err, out)
 	}
 }
@@ -1497,7 +1499,7 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 		cmd := NewRootCmd()
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
-		cmd.SetArgs(append([]string{"--root", root, "--backend", "local"}, args...))
+		cmd.SetArgs(append([]string{"--root", root}, args...))
 		return cmd.Execute()
 	}
 
@@ -1728,7 +1730,7 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 		cmd := NewRootCmd()
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
-		cmd.SetArgs(append([]string{"--root", root, "--backend", "local"}, args...))
+		cmd.SetArgs(append([]string{"--root", root}, args...))
 		err := cmd.Execute()
 		return buf.String(), err
 	}
@@ -1823,7 +1825,7 @@ func TestRepoOnboardAndInitDryRun(t *testing.T) {
 		cmd := NewRootCmd()
 		cmd.SetOut(&buf)
 		cmd.SetErr(&buf)
-		cmd.SetArgs(append([]string{"--root", root, "--backend", "local"}, args...))
+		cmd.SetArgs(append([]string{"--root", root}, args...))
 		err := cmd.Execute()
 		return buf.String(), err
 	}
@@ -1921,7 +1923,7 @@ func TestFreshClaimBaseCommands(t *testing.T) {
 			case "node":
 				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
 			}
-			cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+			cmd.SetArgs(append([]string{"--root", f.root}, args...))
 			if err := cmd.Execute(); err != nil {
 				t.Fatalf("%v: %s %s", err, out.String(), diagnostics.String())
 			}

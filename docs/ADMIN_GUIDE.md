@@ -1,5 +1,7 @@
 # Day in the Life of a SwarmOS Repository Admin
 
+Configure `tracker` in `.swarm/config.yaml`; it defaults to `github`. Set it to `local` for offline tracking.
+
 This guide walks through how a repository maintainer, tech lead, or engineering manager uses SwarmOS day-to-day to stay **ahead of Pull Requests**—turning roadmaps and raw issue backlogs into dependency-ordered `WorkUnit` contracts, governing how plans are produced and reviewed, and auditing provenance-attested Draft PRs.
 
 ```mermaid
@@ -17,8 +19,8 @@ Optional for organization repositories: use `swarm issue parent create --epic --
 When you initialize a repository (or upgrade an existing `.swarm/` setup), SwarmOS scaffolds local agent factory contracts, preset GitHub Issue Forms (including `.github/ISSUE_TEMPLATE/swarm-community.yml` for community intake and `swarm-workunit.yml` for draft WorkUnits), and syncs `swarm:*` repository labels:
 
 ```bash
-swarm repo init --sync-labels --backend github
-swarm repo doctor --backend github
+swarm repo init --sync-labels
+swarm repo doctor
 ```
 
 In a Go repository, the generated `.swarm/validation/required-checks.yaml` includes a gofmt `fmt` check next to `build`, `test`, and `go vet`. If your CI runs other lint or format tools, such as staticcheck or golangci-lint, `swarm repo doctor` warns about each one that no required check covers and suggests an entry. Add the ones you want to the policy on your default branch so agents catch those findings before CI does. See [validation policy](project.md#validation-policy-and-protected-paths).
@@ -41,7 +43,7 @@ After the first run, Claude Code and OpenCode also have the guide as `/swarm-onb
 > [!NOTE]
 > **GitHub Organization & Repository Checklist:**
 > 1. **Use Parent Issues**: SwarmOS uses `swarm:parent` issues with native sub-issues on personal and organization repositories. No issue type setup is needed.
-> 2. **Check Repository Setup**: Run `swarm repo doctor --backend github`. Publishing parent hierarchies requires repository `maintain` or `admin` permission.
+> 2. **Check Repository Setup**: Run `swarm repo doctor`. Publishing parent hierarchies requires repository `maintain` or `admin` permission.
 > 3. **Review Issue Forms & Intake Settings**: `swarm repo init` creates local `.github/ISSUE_TEMPLATE/` forms and syncs `swarm:*` labels, while GitHub's own web UI and API issue creation remain governed by your GitHub repository and organization settings. Review your repository's issue forms (`swarm-community.yml` vs `swarm-workunit.yml`) and organization issue-type permissions in GitHub Settings.
 As a repo admin, tailor three foundational files before your team or community starts swarming:
 
@@ -70,14 +72,14 @@ Write a repo-local Markdown roadmap (`ROADMAP.md`) with a top-level `# <Roadmap 
 
 ```bash
 # 1. Preview the Parent and Step 1..N child tasks and execution waves (no tracker changes)
-swarm repo plan --from ROADMAP.md --backend github
+swarm repo plan --from ROADMAP.md
 
 # 2. Maintainer-only: publish one parent issue labelled `swarm:parent` containing the full plan
 #    and attach draft child WorkUnit sub-issues (swarm:draft)
-swarm repo plan --from ROADMAP.md --apply --backend github
+swarm repo plan --from ROADMAP.md --apply
 
 # 3. Selectively approve the child WorkUnit issues you want workers to claim first
-swarm issue approve 2 --backend github
+swarm issue approve 2
 ```
 
 Publishing also mirrors child dependencies as native blocked-by links and sets sub-issue order to match the roadmap. Projection failures produce warnings while preserving created issues and their WorkUnits; hierarchy-link failures still stop publication. Reapplying retries these projections for reused children.
@@ -85,12 +87,11 @@ Publishing also mirrors child dependencies as native blocked-by links and sets s
 Re-running `swarm repo plan --from ROADMAP.md --apply` is idempotent: it reuses the existing parent issue and unchanged child issues, refreshes the parent body if you added new tasks, creates and links only the new child tasks as `swarm:draft`, and reports any removed tasks as leftovers without closing them. You can also create a standalone parent issue and attach child WorkUnits directly:
 
 ```bash
-swarm issue parent create --title "Q4 Reliability Roadmap" --body-file EPIC.md --backend github
+swarm issue parent create --title "Q4 Reliability Roadmap" --body-file EPIC.md
 swarm issue create --parent 10 --title "Add circuit breaker" \
   --objective "Prevent cascading retries" \
   --constraint "No new external dependencies" \
-  --acceptance "Unit tests cover open/half-open transitions" \
-  --backend github
+  --acceptance "Unit tests cover open/half-open transitions"
 ```
 ### Option B: Scan, Import & Triage Open GitHub Issues (`--scan`)
 
@@ -98,11 +99,11 @@ When users or teammates open raw, unstructured issues on GitHub, run `swarm repo
 
 ```bash
 # Preview the backlog sense-making report in your terminal
-swarm repo plan --scan --backend github
+swarm repo plan --scan
 
 # Apply triage labels, normalize unstructured issues into valid WorkUnits,
 # and post the sense-making report to tracking issue #1
-swarm repo plan --scan --apply --normalize --publish-issue 1 --backend github
+swarm repo plan --scan --apply --normalize --publish-issue 1
 ```
 
 What `swarm repo plan --scan` does for you (while automatically skipping non-executable parent issues):
@@ -124,8 +125,8 @@ What `swarm repo plan --scan` does for you (while automatically skipping non-exe
 Once you are happy with the scope of the issues in **Wave 1**, approve them for execution:
 
 ```bash
-swarm issue approve 12 --backend github
-swarm issue approve 14 --backend github
+swarm issue approve 12
+swarm issue approve 14
 ```
 
 `swarm issue approve` removes `swarm:draft` / `swarm:needs-scope` / `swarm:blocked`, applies `swarm:ready`, and records the cryptographic `task_digest`, `policy_digest`, and `base_sha` in `refs/heads/swarm-state/issue-<N>`. This approves the issue's WorkUnit contract for execution, not the plan or completed code.
@@ -139,9 +140,9 @@ The planner sizes each WorkUnit against the approved total claim budget, `lease.
 Preview the planner's versioned child graph from the latest recorded design artifact:
 
 ```bash
-swarm issue decompose 12 --dry-run --backend github
-swarm issue decompose 12 --backend github
-swarm issue status 12 --backend github
+swarm issue decompose 12 --dry-run
+swarm issue decompose 12
+swarm issue status 12
 ```
 
 The preview includes symbolic dependencies, dimensions, execution profiles, inherited harness permission and uncovered parent acceptance criteria. A worktree `PLAN.md` is not the source. Malformed recommendations create nothing; when no recommendation exists, decomposition uses the WorkUnit's subtasks or acceptance criteria. Review gaps before using `--accept-uncovered` to record an explicit override. Omit `--sequential` for a proposal: its declared graph determines the order.
@@ -150,7 +151,7 @@ Children start as `swarm:draft` and need their own `swarm issue approve` and pla
 
 A successful decomposition records the graph, releases the parent's claim and marks it `swarm:decomposed`. Its artifacts, checkpoints and worktree files remain available. Work selection skips the retired parent even if someone edits its labels. Retry the command after a linking or label failure to reuse recorded children. An ambiguous issue-create response blocks the reservation for operator recovery.
 
-Approve and work children in dependency order, using `swarm issue status 12` for progress. Once they merge, `swarm issue reconcile 12 --backend github` closes the parent as completed; reconciling a recorded child also attempts the rollup. A closed or superseded child without verified merge evidence remains a blocker. API failures warn and leave the parent open. These commands also work with the local backend.
+Approve and work children in dependency order, using `swarm issue status 12` for progress. Once they merge, `swarm issue reconcile 12` closes the parent as completed; reconciling a recorded child also attempts the rollup. A closed or superseded child without verified merge evidence remains a blocker. API failures warn and leave the parent open. These commands also work with the local backend.
 
 ### Following Progress in the Single Living Issue Comment
 As workers claim tasks and move through `plan` $\rightarrow$ `review` $\rightarrow$ `implement` $\rightarrow$ `validate`, SwarmOS updates a **single living comment** (`### 🐝 SwarmOS Orchestration & Provenance State`) on each GitHub Issue rather than spamming new comments on every heartbeat:
@@ -165,7 +166,7 @@ Every claim and renewal lasts at most the `lease.duration` in the task's approve
 If a claim is abandoned or held without progress, a maintainer with `approve-task` permission can end it:
 
 ```bash
-swarm issue revoke 12 --reason "No progress since Monday; returning to the queue" --backend github
+swarm issue revoke 12 --reason "No progress since Monday; returning to the queue"
 ```
 
 Revoke works on the github backend for same-repository and fork-coordinated claims. It records your login, the reason, and the time in `refs/heads/swarm-state/issue-<N>`, posts an audit comment naming you and the reason, and removes the `swarm:claimed` and `swarm:in-progress` labels. For a fork claim, the same atomic push removes the claim from the contributor's `refs/heads/swarm-contributors/<login>` index, so it no longer counts toward `fork.max_active_claims`.
@@ -178,7 +179,7 @@ For sensitive architectural tasks where you set `gate: human`:
 2. Expand the `📋 Implementation Plan` and `🧪 Test Plan` blocks in the living issue comment.
 3. Approve or request changes from your terminal:
    ```bash
-   swarm issue review-plan 12 --approve --notes "Approved — keep the retry backoff capped at 30s" --backend github
+   swarm issue review-plan 12 --approve --notes "Approved — keep the retry backoff capped at 30s"
    ```
 
 `swarm issue review-plan` records the separate implementation-plan approval; code and acceptance review happen later on the linked PR in GitHub.
@@ -211,17 +212,17 @@ Once you merge the PR for a Wave 1 issue, any Wave 2 issues that listed it under
 
 | Daily Admin Task | Command |
 | :--- | :--- |
-| Sync all 10 `swarm:*` labels (`ready`, `draft`, `community`, `needs-scope`, `blocked`, etc.) | `swarm repo init --sync-labels --backend github` |
-| Check repository setup and parent hierarchy guidance | `swarm repo doctor --backend github` |
-| Preview `ROADMAP.md` decomposition (`Step 1..N`) without tracker writes | `swarm repo plan --from ROADMAP.md --backend github` |
-| Publish parent issue and linked `swarm:draft` child WorkUnits | `swarm repo plan --from ROADMAP.md --apply --backend github` |
-| Create a standalone parent issue from a Markdown file | `swarm issue parent create --title "..." --body-file EPIC.md --backend github` |
-| Scan open issues, apply triage labels & normalize raw/`swarm:community` issues | `swarm repo plan --scan --apply --normalize --backend github` |
-| Turn what agents learned in merged PRs into `.swarm/rules/lessons.md` entries | `swarm repo lessons --apply --backend github` |
-| Lint and approve a child WorkUnit issue for agent execution | `swarm issue lint <N> && swarm issue approve <N> --backend github` |
-| Approve or reject a human-gated plan | `swarm issue review-plan <N> --approve --notes "..." --backend github` |
-| Inspect active leases and artifacts across the repo | `swarm issue status --backend github` |
-| End an abandoned or hoarded claim, keeping its checkpoints | `swarm issue revoke <N> --reason "..." --backend github` |
+| Sync all 10 `swarm:*` labels (`ready`, `draft`, `community`, `needs-scope`, `blocked`, etc.) | `swarm repo init --sync-labels` |
+| Check repository setup and parent hierarchy guidance | `swarm repo doctor` |
+| Preview `ROADMAP.md` decomposition (`Step 1..N`) without tracker writes | `swarm repo plan --from ROADMAP.md` |
+| Publish parent issue and linked `swarm:draft` child WorkUnits | `swarm repo plan --from ROADMAP.md --apply` |
+| Create a standalone parent issue from a Markdown file | `swarm issue parent create --title "..." --body-file EPIC.md` |
+| Scan open issues, apply triage labels & normalize raw/`swarm:community` issues | `swarm repo plan --scan --apply --normalize` |
+| Turn what agents learned in merged PRs into `.swarm/rules/lessons.md` entries | `swarm repo lessons --apply` |
+| Lint and approve a child WorkUnit issue for agent execution | `swarm issue lint <N> && swarm issue approve <N>` |
+| Approve or reject a human-gated plan | `swarm issue review-plan <N> --approve --notes "..."` |
+| Inspect active leases and artifacts across the repo | `swarm issue status` |
+| End an abandoned or hoarded claim, keeping its checkpoints | `swarm issue revoke <N> --reason "..."` |
 
 ---
 

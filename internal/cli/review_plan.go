@@ -54,7 +54,7 @@ independent human decision.`,
 				return err
 			}
 			if !approve && !reject {
-				if !rootOpts.Fork && rootOpts.Backend != "local" {
+				if !rootOpts.Fork {
 					tr, manager, cfg, err := rootOpts.resolveLeaseManager(cmd)
 					if err != nil {
 						return err

@@ -94,7 +94,7 @@ func TestCLINodeSelectionDurationUsesApprovedPolicy(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cmd := &cobra.Command{}
 			cmd.SetContext(context.Background())
-			pulled, err := pullNextReadyIssue(context.Background(), cmd, f.options(&RootOptions{RepoRoot: f.root, Backend: "local"}), false, workflow.WorkOptions{AgentName: "mock", Phase: "all"}, override)
+			pulled, err := pullNextReadyIssue(context.Background(), cmd, f.options(&RootOptions{RepoRoot: f.root}), false, workflow.WorkOptions{AgentName: "mock", Phase: "all"}, override)
 			if err != nil {
 				t.Fatal(err)
 			}

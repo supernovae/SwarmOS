@@ -100,8 +100,8 @@ func TestIssue322Selectors(t *testing.T) {
 		contains      []string
 		absent        string
 	}{
-		{"local", "local", RootOptions{RepoRoot: "/some path/it's"}, []string{"--backend 'local'", "--root '/some path/it'\\''s'"}, "--upstream-remote"},
-		{"github", "github (owner/repo)", RootOptions{Repo: "owner/repo", ForkRemote: "unused"}, []string{"--backend 'github'", "--upstream-remote 'origin'", "--repo 'owner/repo'"}, "--fork-remote"},
+		{"local", "local", RootOptions{RepoRoot: "/some path/it's"}, []string{"--root '/some path/it'\\''s'"}, "--upstream-remote"},
+		{"github", "github (owner/repo)", RootOptions{Repo: "owner/repo", ForkRemote: "unused"}, []string{"--upstream-remote 'origin'", "--repo 'owner/repo'"}, "--fork-remote"},
 		{"fork", "github", RootOptions{Fork: true}, []string{"--fork --fork-remote 'fork'"}, ""},
 		{"profile", "github", RootOptions{Fork: true, profileUpstreamRemote: "upstream"}, []string{"--upstream-remote 'upstream'", "--fork-remote 'origin'"}, ""},
 		{"custom", "github", RootOptions{Fork: true, UpstreamRemote: "project", ForkRemote: "personal"}, []string{"--upstream-remote 'project'", "--fork-remote 'personal'"}, ""},
@@ -145,7 +145,7 @@ func issue322Run(t *testing.T, f *cliFixture, now time.Time, args ...string) (st
 	var out, diag bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&diag)
-	cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+	cmd.SetArgs(append([]string{"--root", f.root}, args...))
 	err := cmd.Execute()
 	return out.String(), diag.String(), err
 }
@@ -426,7 +426,7 @@ func issue322CompletionCases(t *testing.T, f *cliFixture, issue int, args ...str
 		cmd := f.command(&RootOptions{nowFn: func() time.Time { return now }})
 		cmd.SetOut(out)
 		cmd.SetErr(&diag)
-		cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+		cmd.SetArgs(append([]string{"--root", f.root}, args...))
 		err := cmd.ExecuteContext(ctx)
 		cancel()
 		if !out.fired {
@@ -455,7 +455,7 @@ func issue322CompletionCases(t *testing.T, f *cliFixture, issue int, args ...str
 		}
 		want := ""
 		if mode == "baseline" {
-			want = fmt.Sprintf("Claim time remaining for issue #%d: 1m0s\nRenew: swarm --backend 'local' --root '%s' issue renew %d\n", issue, f.root, issue)
+			want = fmt.Sprintf("Claim time remaining for issue #%d: 1m0s\nRenew: swarm --root '%s' issue renew %d\n", issue, f.root, issue)
 		} else if mode == "fresh-expiry" {
 			want = fmt.Sprintf("Claim time remaining for issue #%d: 2h0m0s\n", issue)
 		}
@@ -1017,7 +1017,7 @@ func TestIssue322GitHubCommands(t *testing.T) {
 				return out
 			}
 			// Approval uses the maintainer checkout, before worker mutations.
-			approveOpts := RootOptions{RepoRoot: upstreamRoot, Backend: "github", trackerOverride: maintTracker, nowFn: func() time.Time { return now }, lookupEnv: env.lookup()}
+			approveOpts := RootOptions{RepoRoot: upstreamRoot, trackerOverride: maintTracker, nowFn: func() time.Time { return now }, lookupEnv: env.lookup()}
 			approve := newRootCmdWithOptions(&approveOpts)
 			approve.SetOut(io.Discard)
 			approve.SetErr(io.Discard)
@@ -1030,7 +1030,7 @@ func TestIssue322GitHubCommands(t *testing.T) {
 				flags = append(flags, "--fork")
 			}
 			worker := func(args ...string) []string { return append(append([]string{}, flags...), args...) }
-			must(RootOptions{Backend: "github"}, worker("issue", "claim", "42", "--agent", "mock")...)
+			must(RootOptions{}, worker("issue", "claim", "42", "--agent", "mock")...)
 			store := trustedLedgerStore(t, upstreamRoot, "origin")
 			read := func() *lease.IssueState {
 				t.Helper()
@@ -1192,7 +1192,7 @@ func TestIssue322GitHubCommands(t *testing.T) {
 				check(opts, expectedRenew, textArgs...)
 			}
 
-			renew := "swarm --backend 'github' --root '" + root + "' --upstream-remote 'origin'"
+			renew := "swarm --root '" + root + "' --upstream-remote 'origin'"
 			if forkMode {
 				renew += " --fork --fork-remote 'fork'"
 			}
@@ -1207,12 +1207,12 @@ func TestIssue322GitHubCommands(t *testing.T) {
 			if err := review.ExecuteContext(ctx); err != nil {
 				t.Fatal(err)
 			}
-			explicitRenew := "swarm --backend 'github' --repo 'octo/swarm' --root '" + root + "' --upstream-remote 'project'"
+			explicitRenew := "swarm --repo 'octo/swarm' --root '" + root + "' --upstream-remote 'project'"
 			if forkMode {
 				explicitRenew += " --fork --fork-remote 'personal'"
 			}
 			explicitRenew += " issue renew 42"
-			explicit := RootOptions{Backend: "github", Repo: "octo/swarm", UpstreamRemote: "project"}
+			explicit := RootOptions{Repo: "octo/swarm", UpstreamRemote: "project"}
 			if forkMode {
 				explicit.ForkRemote = "personal"
 			}
@@ -1222,12 +1222,12 @@ func TestIssue322GitHubCommands(t *testing.T) {
 			git(wt, "add", "feature.txt")
 			git(wt, "commit", "-m", "feature")
 			checkBoth(explicit, explicitRenew, "issue", "stage", "42", "--phase", "implement", "--json")
-			checkBoth(RootOptions{Backend: "github"}, renew, "issue", "validate", "42", "--json", "--progress=false")
+			checkBoth(RootOptions{}, renew, "issue", "validate", "42", "--json", "--progress=false")
 			failPath := filepath.Join(wt, "issue322-fail")
 			if err := os.WriteFile(failPath, []byte("fail"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			checkBoth(RootOptions{Backend: "github"}, renew, "issue", "validate", "42", "--json", "--progress=false")
+			checkBoth(RootOptions{}, renew, "issue", "validate", "42", "--json", "--progress=false")
 			if err := os.Remove(failPath); err != nil {
 				t.Fatal(err)
 			}
@@ -1246,7 +1246,7 @@ func TestIssue322GitHubCommands(t *testing.T) {
 							recordingFence = !sentinel
 							injectRecordingSentinel = sentinel
 							before := read()
-							out, diag, err := run(RootOptions{Backend: "github"}, func() {}, worker("issue", "validate", "42", "--json", "--progress=false")...)
+							out, diag, err := run(RootOptions{}, func() {}, worker("issue", "validate", "42", "--json", "--progress=false")...)
 							wantErr := error(lease.ErrClaimFence)
 							if sentinel {
 								wantErr = recordingSentinel
@@ -1285,8 +1285,8 @@ func TestIssue322GitHubCommands(t *testing.T) {
 				injectRecordingSentinel = false
 			}
 			seedGitIssueAcceptance(t, root, upstreamRoot, maintTracker, 42, now)
-			must(RootOptions{Backend: "github"}, worker("issue", "submit", "42", "--progress=false", "--json")...)
-			prepared := must(RootOptions{Backend: "github"}, worker("pr", "work", "1", "--phase", "plan", "--agent", "mock", "--progress=false", "--json")...)
+			must(RootOptions{}, worker("issue", "submit", "42", "--progress=false", "--json")...)
+			prepared := must(RootOptions{}, worker("pr", "work", "1", "--phase", "plan", "--agent", "mock", "--progress=false", "--json")...)
 			prWork := readPROutcome(t, prepared)
 			for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
 				if err := os.WriteFile(filepath.Join(prWork.Worktree, ".swarm", "active", name), []byte("# PR revision plan\n"), 0600); err != nil {
@@ -1297,7 +1297,7 @@ func TestIssue322GitHubCommands(t *testing.T) {
 			now = read().Lease.ExpiresAt.Add(-time.Minute)
 			mu.Unlock()
 			// Nonfork PR accepts --fork-remote but must omit it from renew advice.
-			prOpts := RootOptions{Backend: "github"}
+			prOpts := RootOptions{}
 			if !forkMode {
 				prOpts.ForkRemote = "personal"
 			}
@@ -1316,8 +1316,7 @@ func TestIssue322GitHubCommands(t *testing.T) {
 				t.Fatal(err)
 			}
 			env.set("SWARM_NODE_CONFIG", profilePath)
-			env.set("SWARM_BACKEND", "github")
-			profileRenew := "swarm --backend 'github' --root '" + root + "' --upstream-remote 'project'"
+			profileRenew := "swarm --root '" + root + "' --upstream-remote 'project'"
 			if forkMode {
 				originIsFork = true
 				git(root, "remote", "set-url", "origin", aliceForkBare)

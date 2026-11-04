@@ -32,7 +32,6 @@ type RootOptions struct {
 	maintenanceHook  func(*cobra.Command, bool)
 	progressReporter func(context.Context, func(workflow.ProgressEvent)) *workflow.ProgressReporter
 	progressSession  func(context.Context, func(progress.Event)) *progress.Session
-	Backend          string
 	Repo             string
 	RepoRoot         string
 	trackerOverride  tracker.Tracker
@@ -71,12 +70,15 @@ func NewRootCmd() *cobra.Command {
 
 func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 	rootCmd := &cobra.Command{Use: "swarm", Short: "SwarmOS — contract-driven multi-agent orchestration", SilenceUsage: true, SilenceErrors: true}
+	rootCmd.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		if err.Error() == "unknown flag: --backend" {
+			return fmt.Errorf("--backend was removed; configure tracker in .swarm/config.yaml")
+		}
+		return err
+	})
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		if cmd.Name() == "internal-native-exec" {
 			return nil
-		}
-		if opts.Backend != "" && opts.Backend != "github" && opts.Backend != "local" {
-			return fmt.Errorf("unknown tracker backend %q (must be github or local)", opts.Backend)
 		}
 		if opts.Repo != "" {
 			if err := registry.ValidateRepoSlug(opts.Repo); err != nil {
@@ -105,9 +107,6 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 			}
 		}
 		if opts.Fork {
-			if strings.EqualFold(strings.TrimSpace(opts.Backend), "local") {
-				return fmt.Errorf("--fork requires the github backend and cannot be used with --backend local")
-			}
 			for child := cmd; child != nil && child.Parent() != nil; child = child.Parent() {
 				if child.Parent().Name() == "issue" {
 					switch child.Name() {
@@ -127,7 +126,6 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		&cobra.Group{ID: "resources", Title: "Resources:"},
 		&cobra.Group{ID: "tools", Title: "Tools:"},
 	)
-	rootCmd.PersistentFlags().StringVar(&opts.Backend, "backend", firstNonEmptyStr(opts.Backend, opts.getenv("SWARM_BACKEND")), "Tracker backend: github or local")
 	rootCmd.PersistentFlags().StringVar(&opts.Repo, "repo", firstNonEmptyStr(opts.Repo, opts.getenv("SWARM_REPO")), "GitHub repository (owner/repo)")
 	rootCmd.PersistentFlags().StringVar(&opts.RepoRoot, "root", opts.RepoRoot, "Repository root path")
 	rootCmd.PersistentFlags().BoolVar(&opts.Fork, "fork", opts.Fork, "Contribute via a personal GitHub fork and the upstream fork coordinator Action")
@@ -173,9 +171,6 @@ func (o *RootOptions) loadUpstreamRemote(cmd *cobra.Command) error {
 	upstream := o.effectiveUpstreamRemote()
 	if err := workspace.ValidateRemoteName(upstream); err != nil {
 		return fmt.Errorf("--upstream-remote: %w", err)
-	}
-	if upstream != workspace.DefaultUpstreamRemote && strings.TrimSpace(o.UpstreamRemote) != "" && strings.EqualFold(strings.TrimSpace(o.Backend), "local") {
-		return fmt.Errorf("--upstream-remote requires the github backend and cannot be used with --backend local")
 	}
 	return nil
 }
@@ -334,23 +329,26 @@ func (o *RootOptions) issueArgs(args []string) []string {
 	return args
 }
 func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error) {
-	if o.trackerOverride != nil {
-		return o.trackerOverride, nil
-	}
 	root := o.resolveRepoRoot()
-	backend := strings.ToLower(strings.TrimSpace(o.Backend))
-	if backend == "" && o.Repo != "" {
-		if entry, ok, err := registry.New(o.registryPath()).Get(o.Repo); err == nil && ok && entry.Backend != "" {
-			backend = strings.ToLower(entry.Backend)
+	backend, err := harness.ConfiguredTracker(root)
+	if err != nil {
+		return nil, err
+	}
+	if backend == "local" {
+		if o.Fork {
+			return nil, fmt.Errorf("--fork requires the github tracker and cannot be used with tracker: local in .swarm/config.yaml")
+		}
+		if o.UpstreamRemote != "" && o.effectiveUpstreamRemote() != workspace.DefaultUpstreamRemote {
+			return nil, fmt.Errorf("--upstream-remote requires the github tracker; configure tracker in .swarm/config.yaml")
 		}
 	}
-	if backend == "" && (o.Repo != "" || hasGitRemote(root)) {
-		backend = "github"
+	if o.trackerOverride != nil {
+		return o.trackerOverride, nil
 	}
 	switch backend {
 	case "local":
 		if o.Fork {
-			return nil, fmt.Errorf("--fork requires the github backend and cannot be used with --backend local")
+			return nil, fmt.Errorf("--fork requires the github backend and cannot be used with tracker: local in .swarm/config.yaml")
 		}
 		local := tracker.NewLocalTracker(root)
 		if o.lookupEnv != nil {
@@ -381,9 +379,9 @@ func (o *RootOptions) resolveTracker(cmd *cobra.Command) (tracker.Tracker, error
 		return tracker.NewGitHubTracker(detected)
 	case "":
 		// Offline operation is never selected as a fallback.
-		return nil, fmt.Errorf("tracker backend is required; pass --backend local for offline use or --backend github")
+		return nil, fmt.Errorf("configure tracker in .swarm/config.yaml")
 	default:
-		return nil, fmt.Errorf("unknown tracker backend %q (must be github or local)", o.Backend)
+		return nil, fmt.Errorf("unknown tracker backend %q (must be github or local)", backend)
 	}
 }
 func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error) {
@@ -394,7 +392,7 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 	}
 	if o.Fork {
 		if strings.EqualFold(tr.BackendName(), "local") {
-			return nil, nil, nil, fmt.Errorf("--fork requires the github backend and cannot be used with --backend local")
+			return nil, nil, nil, fmt.Errorf("--fork requires the github backend and cannot be used with tracker: local in .swarm/config.yaml")
 		}
 		_, verifiedForkSlug, err := o.verifyForkRemote(cmd.Context(), root, tr)
 		if err != nil {
@@ -452,7 +450,6 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 }
 func (o *RootOptions) resolveTargetLeaseManager(cmd *cobra.Command, tgt registry.RepoEntry) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error) {
 	cp := *o
-	cp.Backend = firstNonEmptyStr(o.Backend, tgt.Backend)
 	cp.Repo = tgt.Repo
 	cp.RepoRoot = tgt.Path
 	return (&cp).resolveLeaseManager(cmd)

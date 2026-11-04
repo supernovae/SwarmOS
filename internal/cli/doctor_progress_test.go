@@ -41,7 +41,7 @@ func TestDoctorProgressOutput(t *testing.T) {
 						return real.Run(category, name, func() harness.DoctorCheck { return result })
 					}
 				}
-				cmd := newDoctorCmdWithRunner(&RootOptions{RepoRoot: t.TempDir(), Backend: "local"}, factory)
+				cmd := newDoctorCmdWithRunner(&RootOptions{RepoRoot: t.TempDir()}, factory)
 				cmd.SetContext(context.Background())
 				cmd.SetOut(&stdout)
 				cmd.SetErr(&stderr)

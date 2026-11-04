@@ -315,6 +315,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err != nil {
 		return nil, err
 	}
+	if err := harness.ValidateTrackerConfig(worktreePath); err != nil {
+		return nil, fmt.Errorf("candidate tracker configuration: %w", err)
+	}
 	cfg, err := harness.LoadConfigAt(worktreePath, baseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load approved execution policy: %w", err)

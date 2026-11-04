@@ -387,7 +387,7 @@ func TestSubmitFreshnessFailedDescriptionUpdate(t *testing.T) {
 					t.Fatal("second PATCH lacks numbered conflict recovery")
 				}
 			}
-			cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+			cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 			var out, diagnostics bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(&diagnostics)
@@ -517,7 +517,7 @@ func TestSubmitHarnessPolicyWarning(t *testing.T) {
 					cmd := f.command(nil)
 					cmd.SetOut(&stdoutBuffer)
 					cmd.SetErr(&stderrBuffer)
-					cmd.SetArgs(append([]string{"--root", f.root, "--backend", "local"}, args...))
+					cmd.SetArgs(append([]string{"--root", f.root}, args...))
 					err := cmd.Execute()
 					out, stderr := stdoutBuffer.String(), stderrBuffer.String()
 					if err != nil {

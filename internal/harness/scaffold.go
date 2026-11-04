@@ -580,10 +580,37 @@ func LoadConfigAt(repoRoot, baseSHA string) (*contract.SwarmConfig, error) {
 	return decodeConfig(data)
 }
 
+func validateTrackerYAML(data []byte) error {
+	// Decode just the selector as a node: YAML merges are resolved without
+	// coercing numeric, null or boolean values into a Go string.
+	var selector struct {
+		Tracker yaml.Node `yaml:"tracker"`
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	if err := decoder.Decode(&selector); err != nil && err != io.EOF {
+		return fmt.Errorf("parse .swarm/config.yaml: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("parse .swarm/config.yaml: expected a single YAML document")
+	}
+	value := selector.Tracker
+	if value.Kind != 0 && (value.Tag != "!!str" || (value.Value != "github" && value.Value != "local")) {
+		return fmt.Errorf("tracker in .swarm/config.yaml must be github or local")
+	}
+	return nil
+}
+
 func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
+	if err := validateTrackerYAML(data); err != nil {
+		return nil, err
+	}
 	var cfg contract.SwarmConfig
 	if err := decodeStrictYAML(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse .swarm/config.yaml: %w", err)
+	}
+	if _, err := contract.ResolveTracker(&cfg); err != nil {
+		return nil, err
 	}
 	if err := contract.ValidateBaseBranch(cfg.BaseBranch); err != nil {
 		return nil, err
@@ -891,7 +918,7 @@ func RunDoctorWithRunner(repoRoot string, checkGitHubAuth bool, run DoctorRunner
 				Category: "harness",
 				Name:     ".swarm/config.yaml",
 				Status:   "OK",
-				Detail:   fmt.Sprintf("v%d (default_agent=%s, default_gate=%s)", cfg.Version, cfg.DefaultAgent, cfg.DefaultGate),
+				Detail:   fmt.Sprintf("v%d (default_agent=%s, default_gate=%s, tracker=%s)", cfg.Version, cfg.DefaultAgent, cfg.DefaultGate, mustTracker(cfg)),
 			}
 		} else {
 			return DoctorCheck{
@@ -1138,4 +1165,42 @@ func LoadPromptVariantAt(root, role, variant, base string) (string, error) {
 	}
 	data, err := readAt(root, base, path)
 	return string(data), err
+}
+
+// ConfiguredTracker reads repository configuration, using GitHub for bootstrap
+// repositories where config.yaml does not yet exist. Existing invalid files fail.
+func ConfiguredTracker(root string) (string, error) {
+	cfg, err := LoadConfig(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// A dangling config symlink is an existing broken configuration.
+			// Only an absent directory entry selects the bootstrap default.
+			if _, statErr := os.Lstat(filepath.Join(root, ".swarm", "config.yaml")); errors.Is(statErr, os.ErrNotExist) {
+				return "github", nil
+			}
+		}
+		return "", err
+	}
+	return contract.ResolveTracker(cfg)
+}
+
+func mustTracker(cfg *contract.SwarmConfig) string {
+	value, _ := contract.ResolveTracker(cfg)
+	return value
+}
+
+// ValidateTrackerConfig checks candidate tracker syntax without loading candidate
+// execution, security or validation policy. Missing config uses the bootstrap default.
+func ValidateTrackerConfig(root string) error {
+	path := filepath.Join(root, ".swarm", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			}
+		}
+		return fmt.Errorf("read .swarm/config.yaml: %w", err)
+	}
+	return validateTrackerYAML(data)
 }

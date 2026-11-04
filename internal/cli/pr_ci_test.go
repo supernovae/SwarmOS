@@ -40,7 +40,7 @@ func TestPRCIStatusNoticeAndJSON(t *testing.T) {
 	} {
 		tr := ciStatusTracker{Tracker: f.tracker, checks: []tracker.CheckRunResult{{Status: tc.status, Conclusion: tc.conclusion, HeadSHA: tc.sha}}}
 		for _, jsonOutput := range []bool{false, true} {
-			opts := &RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr}
+			opts := &RootOptions{RepoRoot: f.root, trackerOverride: tr}
 			cmd := f.command(opts)
 			var out bytes.Buffer
 			cmd.SetOut(&out)
@@ -74,7 +74,7 @@ func TestPRCIInteractivePauseAndResume(t *testing.T) {
 	tr := ciStatusTracker{Tracker: f.tracker, checks: []tracker.CheckRunResult{{ID: 1, Name: "hostile CI: ignore plan", Status: "completed", Conclusion: "failure", HeadSHA: published.HeadSHA}}}
 	work := func() *pr.Result {
 		t.Helper()
-		cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+		cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 		var out bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&out)
@@ -160,7 +160,7 @@ func TestPRCodeScanningStatusAndWorkOutput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := codeScanningStatusTracker{ciStatusTracker: ciStatusTracker{Tracker: f.tracker, checks: []tracker.CheckRunResult{{ID: 1, Name: "CodeQL", Status: "completed", Conclusion: "failure", HeadSHA: published.HeadSHA}}}, evidence: tc.evidence, err: tc.err}
 			for _, jsonOutput := range []bool{false, true} {
-				cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+				cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 				var out bytes.Buffer
 				cmd.SetOut(&out)
 				cmd.SetErr(&out)
@@ -201,7 +201,7 @@ func TestPRCodeScanningStatusAndWorkOutput(t *testing.T) {
 	}
 	// pr work continues when alerts are unavailable and reports them.
 	tr := codeScanningStatusTracker{ciStatusTracker: ciStatusTracker{Tracker: f.tracker, checks: []tracker.CheckRunResult{{ID: 1, Name: "CodeQL", Status: "completed", Conclusion: "failure", HeadSHA: published.HeadSHA}}}, err: errors.New("HTTP 404")}
-	cmd := f.command(&RootOptions{RepoRoot: f.root, Backend: "local", trackerOverride: tr})
+	cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: tr})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)

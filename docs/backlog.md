@@ -19,7 +19,7 @@ flowchart LR
 Run a scan from your repository checkout. Without `--apply` it only reads:
 
 ```bash
-swarm repo plan --scan --backend github
+swarm repo plan --scan
 ```
 
 At the top of the report is **Backlog at a Glance**, one row per lane:
@@ -52,7 +52,7 @@ For one report with requirements you have already prepared, follow [individual i
 When the report looks right, sync the triage labels and turn raw issues into WorkUnit drafts:
 
 ```bash
-swarm repo plan --scan --apply --normalize --backend github
+swarm repo plan --scan --apply --normalize
 ```
 
 - Labels are only added when an issue doesn't already have them, so re-running the scan doesn't make every issue look freshly active.
@@ -62,7 +62,7 @@ swarm repo plan --scan --apply --normalize --backend github
 To share the report with your team, post it to a tracking issue:
 
 ```bash
-swarm repo plan --scan --apply --publish-issue 1 --backend github
+swarm repo plan --scan --apply --publish-issue 1
 ```
 
 Long reports are trimmed to fit in one GitHub comment. The lanes always come first, and the trimmed comment says where to find the full list.
@@ -135,8 +135,7 @@ swarm issue create \
   --objective "Apply the pending Dependabot updates for GitHub Actions and keep CI green" \
   --constraint "Pin every action to a full commit SHA with a version comment" \
   --acceptance "All workflows use the new major versions" \
-  --acceptance "SwarmOS Validation and the existing CI checks pass" \
-  --backend github
+  --acceptance "SwarmOS Validation and the existing CI checks pass"
 ```
 
 For an update that touches `.github/workflows/**` or `.swarm/`, edit the new issue's WorkUnit to set `allow_harness_changes: true`, then run `swarm issue approve <N>`. The agent works in its own worktree, validates against the approved base, and opens one Draft PR. Once that merges, Dependabot normally closes its own PRs for the same updates, because the dependencies are already current.
@@ -152,10 +151,10 @@ Once that work is merged, collect the lessons:
 
 ```bash
 # See what agents learned in the last 50 merged PRs
-swarm repo lessons --backend github
+swarm repo lessons
 
 # Append the new ones to .swarm/rules/lessons.md, then review and commit
-swarm repo lessons --apply --backend github
+swarm repo lessons --apply
 git diff .swarm/rules/lessons.md
 ```
 

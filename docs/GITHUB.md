@@ -20,8 +20,8 @@ Set only one of `SWARM_GITHUB_TOKEN` or `SWARM_GITHUB_TOKEN_COMMAND`. If both ar
 ```bash
 # Run any SwarmOS command on a headless machine without installing gh
 export SWARM_GITHUB_TOKEN="github_pat_..."
-swarm repo doctor --backend github
-swarm issue work --next --backend github
+swarm repo doctor
+swarm issue work --next
 ```
 
 > [!NOTE]
@@ -47,8 +47,8 @@ If you already keep secrets in a password manager, point `SWARM_GITHUB_TOKEN_COM
 
 ```bash
 export SWARM_GITHUB_TOKEN_COMMAND="op read op://Private/GitHub/swarm-token"
-swarm repo doctor --backend github
-swarm issue work --next --backend github
+swarm repo doctor
+swarm issue work --next
 ```
 
 What happens:
@@ -235,18 +235,18 @@ With `approved_collaborators` and `reviewer_collaborators` committed to `main`, 
 
 ```bash
 # 1. Maintainer approves the WorkUnit issue on main
-SWARM_GITHUB_TOKEN="$MAINTAINER_TOKEN" swarm issue approve 42 --backend github
+SWARM_GITHUB_TOKEN="$MAINTAINER_TOKEN" swarm issue approve 42
 
 # 2. Worker collaborator claims #42, generates PLAN.md + TEST_PLAN.md, and hands off to review
-SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue work 42 --phase plan --handoff --backend github
+SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue work 42 --phase plan --handoff
 
 # 3. Reviewer collaborator audits the plan, publishes REVIEW.md, and hands off to implementation
 #    (If $WORKER_TOKEN attempts `swarm issue review-plan 42`, SwarmOS rejects it via reviewer_collaborators!)
-SWARM_GITHUB_TOKEN="$REVIEWER_TOKEN" swarm issue work 42 --phase review --handoff --backend github
+SWARM_GITHUB_TOKEN="$REVIEWER_TOKEN" swarm issue work 42 --phase review --handoff
 
 # 4. Worker collaborator implements the approved plan, validates against base_sha, and opens the Draft PR
-SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue work 42 --phase implement --backend github
-SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue submit 42 --backend github
+SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue work 42 --phase implement
+SWARM_GITHUB_TOKEN="$WORKER_TOKEN" swarm issue submit 42
 ```
 
 Native blocked-by links and sub-issue priority use the existing GitHub credentials. If GitHub denies a projection request, the command warns and keeps the created issue. Check GitHub’s [dependency endpoint permissions](https://docs.github.com/en/rest/issues/issue-dependencies) and [sub-issue endpoint permissions](https://docs.github.com/en/rest/issues/sub-issues) for your token type before enabling these views in your workflow.
@@ -267,7 +267,7 @@ Optional for organization repositories: use `swarm issue parent create --epic --
 > [!NOTE]
 > **Organization Issue Types & Web Intake:**
 > - Parent issues and native sub-issues work on personal and organization repositories. Publishing hierarchies requires repository `maintain` or `admin` permission.
-> - `swarm repo init --sync-labels --backend github` scaffolds `.github/ISSUE_TEMPLATE/swarm-community.yml` (`swarm:community` intake) and `swarm-workunit.yml` (`swarm:draft`) and syncs labels. Because GitHub's web UI and REST API allow users with repository access to open issues directly, maintainers should review repository issue forms and organization issue-type settings in GitHub Settings; SwarmOS enforces execution gating by requiring explicit `swarm issue approve <N>` on non-parent WorkUnits.
+> - `swarm repo init --sync-labels` scaffolds `.github/ISSUE_TEMPLATE/swarm-community.yml` (`swarm:community` intake) and `swarm-workunit.yml` (`swarm:draft`) and syncs labels. Because GitHub's web UI and REST API allow users with repository access to open issues directly, maintainers should review repository issue forms and organization issue-type settings in GitHub Settings; SwarmOS enforces execution gating by requiring explicit `swarm issue approve <N>` on non-parent WorkUnits.
 ---
 
 ## 4. Working Alongside Hosted Agents & Review Bots

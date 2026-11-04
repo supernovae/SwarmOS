@@ -1371,6 +1371,16 @@ func TestForkCLISmoke(t *testing.T) {
 	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "stage", "42", "--phase", "implement"); err != nil {
 		t.Fatal(err, out)
 	}
+	// Imported worker validation cannot authorize the first fork publication.
+	if out, err := runCmd(RootOptions{RepoRoot: aliceRoot, Backend: "github", trackerOverride: aliceTracker}, "--fork", "issue", "submit", "42"); err == nil || !strings.Contains(err.Error(), "acceptance evidence blocks") {
+		t.Fatal("first fork submit must require trusted evidence", err, out)
+	}
+	mu.Lock()
+	prCountBeforeEvidence := len(prs)
+	mu.Unlock()
+	if st := readUpstreamState(); prCountBeforeEvidence != 0 || st.PRNumber != 0 || st.SubmittedHeadSHA != "" || st.Lease.Status == "completed" {
+		t.Fatal("untrusted first submission published", st)
+	}
 	seedGitIssueAcceptance(t, aliceRoot, upstreamRoot, maintTracker, 42, now)
 
 	// 6. Alice runs `swarm --fork issue submit 42`: records checkpoint SHA B on fork & upstream, creates Draft PR with head=alice:swarm/issue-42-<claim_id> and base=main

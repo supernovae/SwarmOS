@@ -142,13 +142,21 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				r := lease.RecordedReadiness(state, unit.Acceptance)
 				readiness = &r
 				fmt.Fprint(advisoryOut, r.Text())
-				if err := r.SubmissionError(issue, rootOpts.Fork); err != nil {
-					return err
+				// A completed fork receipt already passed first-submit gates and
+				// coordinator PR verification. Imported validation stays advisory.
+				if state.ForkRepo != "" {
+					if state.SubmittedHeadSHA == "" || state.SubmittedHeadSHA != state.HeadSHA {
+						return fmt.Errorf("completed fork submission does not match recorded head")
+					}
+				} else {
+					if err := r.SubmissionError(issue, rootOpts.Fork); err != nil {
+						return err
+					}
+					if r.RequiredChecks != "passed" {
+						return fmt.Errorf("trusted required checks are %s", r.RequiredChecks)
+					}
 				}
-				if r.RequiredChecks != "passed" {
-					return fmt.Errorf("trusted required checks are %s", r.RequiredChecks)
-				}
-				if !rootOpts.Fork {
+				if !rootOpts.Fork && state.ForkRepo == "" {
 					if err := projectSubmitted(ctx, tr, issue); err != nil {
 						return err
 					}

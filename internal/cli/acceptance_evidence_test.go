@@ -328,6 +328,122 @@ func TestSubmitAcceptanceCompletedRetryRefusesGaps(t *testing.T) {
 	}
 }
 
+// Completed receipts are authoritative; imported validation remains advisory.
+func TestSubmitForkCompletedRetry(t *testing.T) {
+	for _, mode := range []string{"valid", "owner", "claim", "pr", "completion", "submitted-head", "missing-head", "dirty", "changed"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCLIFixture(t)
+			issue := f.create(t, "agent")
+			n := strconv.Itoa(issue)
+			f.must(t, "issue", "approve", n)
+			f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+			seedCompleteIssueAcceptance(t, f, issue)
+			f.must(t, "issue", "submit", n)
+			editForkRetryState(t, f, issue, func(st map[string]any) {
+				switch mode {
+				case "owner":
+					st["lease"].(map[string]any)["owner"] = "mallory"
+				case "claim":
+					st["lease"].(map[string]any)["claim_id"] = "other"
+				case "pr":
+					st["pr_number"] = 0
+				case "completion":
+					st["lease"].(map[string]any)["status"] = "active"
+				case "submitted-head":
+					st["submitted_head_sha"] = "other"
+				case "missing-head":
+					delete(st, "submitted_head_sha")
+				}
+			})
+			wt := workspace.WorktreePath(f.root, issue)
+			if mode == "dirty" || mode == "changed" {
+				if err := os.WriteFile(filepath.Join(wt, "retry-change.txt"), []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "changed" {
+					prGit(t, wt, "add", "retry-change.txt")
+					prGit(t, wt, "commit", "-m", "changed")
+				}
+			}
+			before, rev, err := f.manager.Store().Load(t.Context(), issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := f.run("issue", "submit", n, "--json", "--progress=false")
+			if mode == "valid" {
+				st := f.state(t, issue)
+				if err != nil || !strings.Contains(out, `"pr_number":`+strconv.Itoa(st.PRNumber)) || !strings.Contains(out, st.HeadSHA) || !strings.Contains(out, `"required_checks":"unavailable"`) {
+					t.Fatal(err, out)
+				}
+			} else if err == nil {
+				t.Fatal("accepted invalid retry", out)
+			}
+			after, afterRev, loadErr := f.manager.Store().Load(t.Context(), issue)
+			if mode == "completion" {
+				st := f.state(t, issue)
+				if st.Lease.Status == "completed" {
+					t.Fatal("incomplete receipt authorized submission")
+				}
+			} else if loadErr != nil || !bytes.Equal(before, after) || rev != afterRev {
+				t.Fatal("retry mutated receipt", loadErr)
+			}
+		})
+	}
+}
+
+func editForkRetryState(t *testing.T, f *cliFixture, issue int, edit func(map[string]any)) {
+	t.Helper()
+	raw, rev, err := f.manager.Store().Load(t.Context(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st map[string]any
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	st["fork_repo"] = "alice/swarm"
+	for _, v := range st["artifacts"].([]any) {
+		a := v.(map[string]any)
+		if a["type"] == "validation" {
+			m := a["metadata"].(map[string]any)
+			for k := range m {
+				if strings.HasPrefix(k, "validation_trusted_") {
+					delete(m, k)
+				}
+			}
+		}
+	}
+	edit(st)
+	raw, err = json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.Store().CompareAndSwap(t.Context(), issue, rev, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSubmitForkUntrustedEvidenceRefused(t *testing.T) {
+	for _, mode := range []string{"missing", "imported"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCLIFixture(t)
+			issue := f.create(t, "agent")
+			n := strconv.Itoa(issue)
+			f.must(t, "issue", "approve", n)
+			f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+			if mode == "imported" {
+				seedCompleteIssueAcceptance(t, f, issue)
+			}
+			editForkRetryState(t, f, issue, func(map[string]any) {})
+			out, err := f.run("issue", "submit", n, "--json", "--progress=false")
+			st := f.state(t, issue)
+			if err == nil || !strings.Contains(err.Error(), "acceptance evidence blocks") || st.PRNumber != 0 || st.SubmittedHeadSHA != "" || st.Lease.Status == "completed" {
+				t.Fatal(err, out, st)
+			}
+		})
+	}
+}
+
 func fixtureAcceptanceBlock(criteria []string, externalReason string) (string, error) {
 	entries := make([]map[string]any, 0, len(criteria))
 	for i, c := range criteria {

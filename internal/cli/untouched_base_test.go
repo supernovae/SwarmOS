@@ -197,5 +197,6 @@ func testUntouchedBaseAdvance(t *testing.T, backend, sequence, entry string) {
 			t.Fatalf("stale %s survived advancement", name)
 		}
 	}
+	seedCompleteIssueAcceptance(t, f, number)
 	must("issue", "submit", n)
 }

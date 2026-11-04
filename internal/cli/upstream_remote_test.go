@@ -469,6 +469,10 @@ func TestUpstreamRemoteForkFlow(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace.WorktreePath(alice, 42), "feature.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if out, err := f.run(opts, "--fork", "issue", "stage", "42", "--phase", "implement"); err != nil {
+		t.Fatal(err, out)
+	}
+	seedGitIssueAcceptance(t, alice, f.upstreamRoot, f.maintainer, 42, f.now)
 	out, err = f.run(opts, "--fork", "issue", "submit", "42")
 	if err != nil {
 		t.Fatalf("submit: %v\n%s", err, out)
@@ -620,6 +624,10 @@ func TestUpstreamRemoteSameRepository(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workspace.WorktreePath(root, 42), "feature.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if out, err := f.run(opts, "--upstream-remote", "upstream", "issue", "stage", "42", "--phase", "implement"); err != nil {
+		t.Fatal(err, out)
+	}
+	seedGitIssueAcceptance(t, root, f.upstreamRoot, f.maintainer, 42, f.now)
 	if out, err := f.run(opts, "--upstream-remote", "upstream", "issue", "submit", "42"); err != nil {
 		t.Fatalf("submit: %v\n%s", err, out)
 	}

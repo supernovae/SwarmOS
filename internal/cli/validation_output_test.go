@@ -67,6 +67,7 @@ func TestFailedDiagnosticsAcrossCommands(t *testing.T) {
 	number := strconv.Itoa(n)
 	f.must(t, "issue", "approve", number)
 	f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, n)
 	f.must(t, "issue", "submit", number)
 	prNumber := strconv.Itoa(f.state(t, n).PRNumber)
 	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo fail > fail-check")
@@ -249,6 +250,7 @@ func TestSkipNoticesAcrossCommands(t *testing.T) {
 		return out
 	}
 	check("issue", "work", number, "--agent", "mock")
+	seedCompleteIssueAcceptance(t, f, mustIssueNumber(number))
 	check("issue", "submit", number)
 	n, _ := strconv.Atoi(number)
 	p := strconv.Itoa(f.state(t, n).PRNumber)

@@ -28,6 +28,7 @@ func bulkSubmit(t *testing.T, f *cliFixture) bulkTask {
 	issue := strconv.Itoa(n)
 	f.must(t, "issue", "approve", issue)
 	f.must(t, "issue", "work", issue, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, n)
 	f.must(t, "issue", "submit", issue)
 	return bulkTask{n, f.state(t, n).PRNumber}
 }

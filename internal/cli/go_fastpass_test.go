@@ -58,6 +58,9 @@ func TestGoFastPassEntryPoints(t *testing.T) {
 		{[]string{"issue", "validate", n, "--progress=false"}, false},
 		{[]string{"issue", "submit", n, "--progress=false"}, false},
 	} {
+		if step.args[1] == "submit" {
+			seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
+		}
 		f.must(t, step.args...)
 		got := invocations()
 		if strings.Contains(got, preliminary) != step.fast || !strings.HasSuffix(got, "test -json ./...\n") {

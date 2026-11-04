@@ -49,6 +49,9 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 				n := strconv.Itoa(number)
 				f.must(t, "issue", "approve", n)
 				f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+				if operation == "submit" {
+					seedIssueAcceptance(t, f.root, f.tracker, f.manager, number, "alice", "Maintainer verifies the published checkpoint")
+				}
 			} else {
 				var prNumber int
 				f, _, prNumber = submittedPRFixture(t, "agent")
@@ -103,6 +106,9 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 							expected := ""
 							if operation == "submit" && asJSON {
 								expected = validation.AcceptanceEvidenceNotice([]validation.AcceptanceWarning{{Index: 1, Criterion: "Produce a checked checkpoint", Reason: "unmentioned"}})
+								if family == "issue" {
+									expected = "Required checks: passed\nAcceptance evidence: complete\nExternal verification: pending\n  1. Produce a checked checkpoint (Maintainer verifies the published checkpoint)\n"
+								}
 							}
 							if diag != expected {
 								t.Fatalf("quiet progress: %s", diag)

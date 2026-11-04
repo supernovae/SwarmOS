@@ -141,6 +141,7 @@ func TestManagedRootIssueLifecycle(t *testing.T) {
 		t.Fatalf("main checkout printed a notice: %s", stderr)
 	}
 
+	seedCompleteIssueAcceptance(t, f, second)
 	mustManaged(t, f, firstWorktree, "issue", "submit", n)
 	submitted := f.state(t, second)
 	if submitted.PRNumber == 0 || submitted.Lease.Status != "completed" {

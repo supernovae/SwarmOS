@@ -248,14 +248,12 @@ func persistentBuildCaches(ctx context.Context, owner BuildCacheOwner, worktree,
 				if err != nil {
 					return nil, err
 				}
+				options, _ := ctx.Value(goCacheTrimOptionsKey{}).(goCacheTrimOptions)
 				resource := storageuse.ResourceFor(key, string(owner), dirs[eco.Name])
 				if err := storageuse.FromContext(ctx).OnCompletion(dirs[eco.Name], func(manager *storageuse.Manager) error {
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					ctx, cancel := context.WithTimeout(context.Background(), goCacheMaintenanceTimeout)
 					defer cancel()
-					if err := trimGoBuildCache(ctx, manager, resource, base, info, goBuildCacheCap); err != nil {
-						return fmt.Errorf("go cache maintenance: %w", err)
-					}
-					return nil
+					return trimGoBuildCacheWithOptions(ctx, manager, resource, base, info, goBuildCacheCap, options)
 				}); err != nil {
 					return nil, err
 				}
@@ -433,8 +431,26 @@ func safeCacheParents(root *safefs.Root, rel string) bool {
 // Logical regular-file bytes, per repository and owner; dependency caches are
 // deliberately excluded. This is a fixed policy rather than a user setting.
 const goBuildCacheCap int64 = 10 << 30
+const goCacheMaintenanceTimeout = 60 * time.Second
+
+// Per-invocation test controls are captured during preparation, never global.
+type goCacheTrimOptionsKey struct{}
+type goCacheTrimOptions struct {
+	entries       int
+	beforeLock    func(context.Context) context.Context
+	beforeMeasure func(context.Context) context.Context
+	beforeRemove  func() error
+}
+type goCacheMaintenanceError string
+
+func (e goCacheMaintenanceError) Error() string             { return string(e) }
+func (e goCacheMaintenanceError) MaintenanceReason() string { return string(e) }
 
 func trimGoBuildCache(ctx context.Context, manager *storageuse.Manager, resource storageuse.Resource, base string, expected os.FileInfo, limit int64) error {
+	return trimGoBuildCacheWithOptions(ctx, manager, resource, base, expected, limit, goCacheTrimOptions{})
+}
+
+func trimGoBuildCacheWithOptions(ctx context.Context, manager *storageuse.Manager, resource storageuse.Resource, base string, expected os.FileInfo, limit int64, options goCacheTrimOptions) error {
 	if resource.Class != string(AgentBuildCache) && resource.Class != string(ValidatorBuildCache) {
 		return errors.New("invalid cache owner")
 	}
@@ -446,8 +462,17 @@ func trimGoBuildCache(ctx context.Context, manager *storageuse.Manager, resource
 	if !filepath.IsAbs(base) || resource.Location != filepath.Join(base, rel) {
 		return errors.New("invalid Go cache location")
 	}
+	if options.beforeLock != nil {
+		ctx = options.beforeLock(ctx)
+	}
 	guard, err := manager.AcquireMaintenance(ctx, resource)
 	if err != nil {
+		if errors.Is(err, storageuse.ErrUnsafe) {
+			return goCacheMaintenanceError("unsafe coverage or pending use")
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return goCacheMaintenanceError("lock timeout")
+		}
 		return err
 	}
 	defer guard.Close()
@@ -488,6 +513,13 @@ func trimGoBuildCache(ctx context.Context, manager *storageuse.Manager, resource
 	if err != nil || !os.SameFile(info, pinned) {
 		return errors.New("go cache changed")
 	}
+	if options.beforeMeasure != nil {
+		ctx = options.beforeMeasure(ctx)
+	}
+	entryLimit := options.entries
+	if entryLimit == 0 {
+		entryLimit = 200000
+	}
 	var size int64
 	entries := 0
 	var measure func(*safefs.Root, int) error
@@ -510,8 +542,8 @@ func trimGoBuildCache(ctx context.Context, manager *storageuse.Manager, resource
 					return err
 				}
 				entries++
-				if entries > 200000 {
-					return errors.New("cache entry limit")
+				if entries > entryLimit {
+					return goCacheMaintenanceError("measurement limit")
 				}
 				i, err := root.Lstat(entry.Name())
 				if err != nil {
@@ -535,15 +567,6 @@ func trimGoBuildCache(ctx context.Context, manager *storageuse.Manager, resource
 					if i.Mode().Perm()&0400 == 0 || i.Size() < 0 || i.Size() > math.MaxInt64-size {
 						return errors.New("unreadable or oversized cache entry")
 					}
-					file, err := root.OpenRegular(entry.Name())
-					if err != nil {
-						return err
-					}
-					actual, statErr := file.Stat()
-					file.Close()
-					if statErr != nil || !os.SameFile(i, actual) {
-						return errors.New("cache file changed")
-					}
 					size += i.Size()
 				default:
 					return errors.New("link or special file in Go cache")
@@ -561,10 +584,23 @@ func trimGoBuildCache(ctx context.Context, manager *storageuse.Manager, resource
 		return errors.New("unreadable Go cache")
 	}
 	if err := measure(dir, 0); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return goCacheMaintenanceError("measurement timeout")
+		}
 		return err
 	}
 	if size <= limit {
 		return nil
 	}
-	return parent.RemoveAllCheckedContext(ctx, "go", info, func() error { return ctx.Err() })
+	if err := parent.RemoveAllCheckedContext(ctx, "go", info, func() error {
+		if options.beforeRemove != nil {
+			if err := options.beforeRemove(); err != nil {
+				return err
+			}
+		}
+		return ctx.Err()
+	}); err != nil {
+		return goCacheMaintenanceError("removal failure")
+	}
+	return nil
 }

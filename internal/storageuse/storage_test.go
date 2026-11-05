@@ -1809,6 +1809,14 @@ func TestNativeReservationConcurrentAdmissionAndDiagnostics(t *testing.T) {
 func TestScopeCompletion(t *testing.T) {
 	for _, mode := range []string{"success", "retained", "failed-use", "callback-error"} {
 		t.Run(mode, func(t *testing.T) {
+			output, err := os.CreateTemp(t.TempDir(), "stderr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer output.Close()
+			original := os.Stderr
+			os.Stderr = output
+			defer func() { os.Stderr = original }()
 			manager, resource := fixture(t)
 			use, err := manager.AcquireUse(t.Context(), resource)
 			if err != nil {
@@ -1857,7 +1865,7 @@ func TestScopeCompletion(t *testing.T) {
 			if mode == "failed-use" && err == nil {
 				t.Fatal("missing completion error")
 			}
-			if mode == "callback-error" && !errors.Is(err, sentinel) {
+			if mode == "callback-error" && err != nil {
 				t.Fatal(err)
 			}
 			if (mode == "success" || mode == "retained") && err != nil {
@@ -1876,9 +1884,70 @@ func TestScopeCompletion(t *testing.T) {
 			if called != want {
 				t.Fatal("callback repeated")
 			}
+			diagnostic, err := os.ReadFile(output.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantDiagnostic := ""
+			if mode == "callback-error" {
+				wantDiagnostic = "swarm: cache maintenance skipped: maintenance failed\n"
+			}
+			if string(diagnostic) != wantDiagnostic {
+				t.Fatalf("diagnostic %q", diagnostic)
+			}
 			if err := scope.OnCompletion("late", callback); err == nil {
 				t.Fatal("closed registration allowed")
 			}
 		})
+	}
+}
+
+func TestScopeCompletionCommandErrors(t *testing.T) {
+	for _, failedUse := range []bool{false, true} {
+		for _, primaryFailure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("durable=%v/primary=%v", failedUse, primaryFailure), func(t *testing.T) {
+				manager, resource := fixture(t)
+				use, err := manager.AcquireUse(t.Context(), resource)
+				if err != nil {
+					t.Fatal(err)
+				}
+				scope := &Scope{manager: manager, uses: []*Use{use}}
+				called := false
+				if err := scope.OnCompletion("go", func(*Manager) error { called = true; return errors.New("secret callback error") }); err != nil {
+					t.Fatal(err)
+				}
+				if failedUse {
+					use.token = "missing-token"
+				}
+				sentinel := errors.New("primary")
+				run := func() (result error) {
+					defer scope.Complete(&result)
+					if primaryFailure {
+						return sentinel
+					}
+					return nil
+				}
+				err = run()
+				if failedUse {
+					if !errors.Is(err, ErrUnsafe) || called {
+						t.Fatalf("durable error lost or callback ran: %v %v", err, called)
+					}
+					if primaryFailure && !errors.Is(err, sentinel) {
+						t.Fatal("primary lost")
+					}
+				} else {
+					if !called {
+						t.Fatal("callback missing")
+					}
+					if primaryFailure {
+						if err != sentinel {
+							t.Fatalf("primary changed: %v", err)
+						}
+					} else if err != nil {
+						t.Fatal(err)
+					}
+				}
+			})
+		}
 	}
 }

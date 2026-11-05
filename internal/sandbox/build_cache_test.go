@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // useUserCache changes a package-global hook; callers must remain serial.
@@ -976,8 +977,8 @@ func TestGoBuildCacheCap(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := scope.Finish(); err == nil {
-					t.Fatal("active use unreported")
+				if err := scope.Finish(); err != nil {
+					t.Fatal(err)
 				}
 				if err := trimGoBuildCache(ctx, manager, resource, base, info, 1); err == nil {
 					t.Fatal("trimmed active cache")
@@ -1101,8 +1102,8 @@ func TestGoBuildCacheCapFinalConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Finish(); err == nil {
-		t.Fatal("active use not reported")
+	if err := a.Finish(); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := os.Stat(caches[0].Dir); err != nil {
 		t.Fatal("removed during active use", err)
@@ -1112,5 +1113,136 @@ func TestGoBuildCacheCapFinalConsumer(t *testing.T) {
 	}
 	if _, err := os.Stat(caches[0].Dir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("final consumer did not trim", err)
+	}
+}
+
+// Serial: stderr capture and runtime-control fixture are process-global.
+func TestGoBuildCacheCapCompletionSkips(t *testing.T) {
+	for _, owner := range []BuildCacheOwner{AgentBuildCache, ValidatorBuildCache} {
+		for _, mode := range []string{"coverage", "pending", "deadline", "entries", "lock", "removal"} {
+			for _, completion := range []string{"finish", "complete", "primary"} {
+				t.Run(fmt.Sprintf("%s/%s/%s", owner, mode, completion), func(t *testing.T) {
+					isolateRuntimeControl(t)
+					repo, base := cacheTestRepo(t), resolvedTempDir(t)
+					key, err := repositoryCacheKey(t.Context(), repo)
+					if err != nil {
+						t.Fatal(err)
+					}
+					dir := filepath.Join(base, "swarm", string(owner), key, "go")
+					// Truly pre-existing caches lack complete ledger coverage.
+					if mode == "coverage" {
+						if err := os.MkdirAll(dir, 0700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					options := goCacheTrimOptions{}
+					expired := func(ctx context.Context) context.Context {
+						ctx, cancel := context.WithDeadline(ctx, time.Unix(1, 0))
+						cancel()
+						return ctx
+					}
+					switch mode {
+					case "deadline":
+						options.beforeMeasure = expired
+					case "entries":
+						options.entries = 1
+					case "lock":
+						options.beforeLock = expired
+					case "removal":
+						options.beforeRemove = func() error { return errors.New("private-path private-token") }
+					}
+					ctx := context.WithValue(t.Context(), goCacheTrimOptionsKey{}, options)
+					ctx, scope, err := storageuse.Ensure(ctx, repo)
+					if err != nil {
+						t.Fatal(err)
+					}
+					caches, err := PrepareBuildCaches(ctx, owner, repo, base, resolvedTempDir(t))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if caches[0].Dir != dir {
+						t.Fatal("unexpected cache")
+					}
+					f, err := os.Create(filepath.Join(dir, "large"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					err = f.Truncate(goBuildCacheCap + 1)
+					f.Close()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dir, "keep"), []byte("contents"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					var other *storageuse.Scope
+					if mode == "pending" {
+						second, b, err := storageuse.Ensure(t.Context(), repo)
+						if err != nil {
+							t.Fatal(err)
+						}
+						other = b
+						if _, err := PrepareBuildCaches(second, owner, repo, base, resolvedTempDir(t)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					output, err := os.CreateTemp(t.TempDir(), "stderr")
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer output.Close()
+					original := os.Stderr
+					os.Stderr = output
+					defer func() { os.Stderr = original }()
+					primary := errors.New("primary")
+					run := func() (result error) {
+						defer scope.Complete(&result)
+						if completion == "primary" {
+							return primary
+						}
+						return nil
+					}
+					if completion == "finish" {
+						err = scope.Finish()
+					} else {
+						err = run()
+					}
+					if completion == "primary" {
+						if err != primary {
+							t.Fatalf("primary changed: %v", err)
+						}
+					} else if err != nil {
+						t.Fatalf("maintenance failed run: %v", err)
+					}
+					if err := scope.Finish(); err != nil {
+						t.Fatal(err)
+					}
+					diagnostic, err := os.ReadFile(output.Name())
+					if err != nil {
+						t.Fatal(err)
+					}
+					reasons := map[string]string{"coverage": "unsafe coverage or pending use", "pending": "unsafe coverage or pending use", "deadline": "measurement timeout", "entries": "measurement limit", "lock": "lock timeout", "removal": "removal failure"}
+					want := "swarm: cache maintenance skipped: " + reasons[mode] + "\n"
+					if string(diagnostic) != want {
+						t.Fatalf("diagnostic %q want %q", diagnostic, want)
+					}
+					if data, err := os.ReadFile(filepath.Join(dir, "keep")); err != nil || string(data) != "contents" {
+						t.Fatalf("contents changed: %q %v", data, err)
+					}
+					if info, err := os.Stat(filepath.Join(dir, "large")); err != nil || info.Size() != goBuildCacheCap+1 {
+						t.Fatalf("large changed: %v", err)
+					}
+					os.Stderr = original
+					if other != nil {
+						if err := other.Finish(); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+							t.Fatalf("final consumer did not trim: %v", err)
+						}
+					}
+				})
+			}
+		}
 	}
 }

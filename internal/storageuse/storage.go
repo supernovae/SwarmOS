@@ -720,7 +720,17 @@ func (s *Scope) Finish() error {
 	}
 	if result == nil {
 		for _, callback := range s.completion {
-			result = errors.Join(result, callback(s.manager))
+			if err := callback(s.manager); err != nil {
+				reason := "maintenance failed"
+				var classified interface{ MaintenanceReason() string }
+				if errors.As(err, &classified) {
+					switch r := classified.MaintenanceReason(); r {
+					case "unsafe coverage or pending use", "lock timeout", "measurement limit", "measurement timeout", "removal failure":
+						reason = r
+					}
+				}
+				fmt.Fprintln(os.Stderr, "swarm: cache maintenance skipped:", reason)
+			}
 		}
 	}
 	return result

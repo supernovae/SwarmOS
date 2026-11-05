@@ -252,6 +252,19 @@ func ToolCapabilities(driver, role, policy string, delegated, authorized, verifi
 	}
 	if driver == "codex" {
 		b.Tools = []string{"mcp__swarm.swarm_shell"}
+		if !delegated {
+			b.Tools = nil
+			for _, tool := range executorTools() {
+				b.Tools = append(b.Tools, "mcp__swarm."+tool.Name)
+			}
+			b.Limits.ReadEditBytes = toolReadEditBytes
+			b.Operations = append(b.Operations, "read")
+			if ro {
+				b.Restrictions = append(b.Restrictions, "write/edit denied for read-only roles")
+			} else {
+				b.Operations = append(b.Operations, "write", "edit")
+			}
+		}
 	}
 	if driver == "claude" {
 		b.Tools = []string{"mcp__swarm__swarm_shell"}

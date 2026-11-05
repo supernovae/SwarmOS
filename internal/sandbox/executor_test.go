@@ -683,3 +683,77 @@ func TestToolCapabilitySharedFields(t *testing.T) {
 		t.Fatal("executor limits attributed to native tools")
 	}
 }
+
+func TestToolCapabilityNativeBrowserServerTools(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := codexBrowserPolicy([]string{"mcp_servers={}"}, executable, t.TempDir(), ToolExecutor{Work: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, enabled, ok := strings.Cut(policy[0], "enabled_tools=")
+	if !ok {
+		t.Fatal("missing enabled tools")
+	}
+	enabled, _, ok = strings.Cut(enabled, "]")
+	if !ok {
+		t.Fatal("invalid enabled tools")
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(enabled+"]"), &names); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	if err := ServeTools(t.Context(), ToolExecutor{}, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &output); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Result struct {
+			Tools []ToolDefinition `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(output.String()), &response); err != nil {
+		t.Fatal(err)
+	}
+	var expected []string
+	for _, definition := range response.Result.Tools {
+		for _, name := range names {
+			if definition.Name == name {
+				if !strings.Contains(policy[0], name+`={approval_mode="approve"}`) {
+					t.Fatalf("tool %s lacks approval", name)
+				}
+				expected = append(expected, "mcp__swarm."+name)
+			}
+		}
+	}
+	if len(expected) == 0 || len(expected) != len(names) || len(expected) != len(response.Result.Tools) {
+		t.Fatal("enabled server definitions differ", names, response.Result.Tools)
+	}
+	for _, role := range []string{"developer", "tester", "planner", "reviewer"} {
+		t.Run(role, func(t *testing.T) {
+			report := ToolCapabilities("codex", role, "approved_task", false, true, true, true)
+			native, mcp := report.Entries[0], report.Entries[1]
+			if strings.Join(mcp.Tools, ",") != strings.Join(expected, ",") {
+				t.Fatalf("report tools %v; enabled server tools %v", mcp.Tools, expected)
+			}
+			if native.Limits != (ToolCapabilityLimits{}) || mcp.Limits != (ToolCapabilityLimits{ArgumentBytes: toolArgumentBytes, ReadEditBytes: toolReadEditBytes, CommandSeconds: toolCommandSeconds}) {
+				t.Fatal("native and MCP limits", native.Limits, mcp.Limits)
+			}
+			ro := role == "planner" || role == "reviewer"
+			for _, operation := range []string{"write", "edit"} {
+				has := false
+				for _, actual := range mcp.Operations {
+					has = has || actual == operation
+				}
+				if has == ro {
+					t.Fatal("incorrect writable operation", mcp)
+				}
+			}
+			if ro && (!mcp.ReadOnly || mcp.Authorized || mcp.Usable || mcp.Reason != "role_denied" || !strings.Contains(strings.Join(mcp.Restrictions, ","), "write/edit denied")) {
+				t.Fatal("read-only MCP permission", mcp)
+			}
+		})
+	}
+}

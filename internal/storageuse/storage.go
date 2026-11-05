@@ -552,6 +552,7 @@ type Scope struct {
 	outside          bool
 	outsideResources []Resource
 	native           map[string]NativeEvidence
+	completion       map[string]func(*Manager) error
 	closed           bool
 }
 
@@ -666,6 +667,23 @@ func (s *Scope) acquire(ctx context.Context, resource Resource, prepared bool) e
 	return nil
 }
 
+// OnCompletion schedules coordinator maintenance once per key, after successful
+// durable completion. Inherited contexts register with the enclosing owner.
+func (s *Scope) OnCompletion(key string, callback func(*Manager) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || callback == nil {
+		return errors.New("storage scope is closed or callback is nil")
+	}
+	if s.completion == nil {
+		s.completion = make(map[string]func(*Manager) error)
+	}
+	if _, exists := s.completion[key]; !exists {
+		s.completion[key] = callback
+	}
+	return nil
+}
+
 func (s *Scope) Retain() { s.mu.Lock(); s.retained = true; s.mu.Unlock() }
 
 // Finish runs independently of canceled work after all consumers have stopped.
@@ -675,11 +693,13 @@ func (s *Scope) Finish() error {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
+	retained := s.retained
+	s.mu.Unlock()
 	if s.manager == nil {
 		return nil
 	}
@@ -689,7 +709,7 @@ func (s *Scope) Finish() error {
 			temp.parent.Close()
 		}
 	}()
-	if s.retained {
+	if retained {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -697,6 +717,11 @@ func (s *Scope) Finish() error {
 	var result error
 	for _, use := range s.uses {
 		result = errors.Join(result, use.Finish(ctx))
+	}
+	if result == nil {
+		for _, callback := range s.completion {
+			result = errors.Join(result, callback(s.manager))
+		}
 	}
 	return result
 }

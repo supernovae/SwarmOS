@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
@@ -240,6 +243,23 @@ func persistentBuildCaches(ctx context.Context, owner BuildCacheOwner, worktree,
 		}
 		if privateCacheDir(root, rel) == nil {
 			dirs[eco.Name] = filepath.Join(base, rel)
+			if eco.Name == "go" {
+				info, err := root.Lstat(".")
+				if err != nil {
+					return nil, err
+				}
+				resource := storageuse.ResourceFor(key, string(owner), dirs[eco.Name])
+				if err := storageuse.FromContext(ctx).OnCompletion(dirs[eco.Name], func(manager *storageuse.Manager) error {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := trimGoBuildCache(ctx, manager, resource, base, info, goBuildCacheCap); err != nil {
+						return fmt.Errorf("go cache maintenance: %w", err)
+					}
+					return nil
+				}); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return dirs, nil
@@ -408,4 +428,143 @@ func safeCacheParents(root *safefs.Root, rel string) bool {
 		}
 	}
 	return true
+}
+
+// Logical regular-file bytes, per repository and owner; dependency caches are
+// deliberately excluded. This is a fixed policy rather than a user setting.
+const goBuildCacheCap int64 = 10 << 30
+
+func trimGoBuildCache(ctx context.Context, manager *storageuse.Manager, resource storageuse.Resource, base string, expected os.FileInfo, limit int64) error {
+	if resource.Class != string(AgentBuildCache) && resource.Class != string(ValidatorBuildCache) {
+		return errors.New("invalid cache owner")
+	}
+	key, err := hex.DecodeString(resource.Repository)
+	if err != nil || len(key) != 16 {
+		return errors.New("invalid repository cache key")
+	}
+	rel := filepath.Join("swarm", resource.Class, resource.Repository, "go")
+	if !filepath.IsAbs(base) || resource.Location != filepath.Join(base, rel) {
+		return errors.New("invalid Go cache location")
+	}
+	guard, err := manager.AcquireMaintenance(ctx, resource)
+	if err != nil {
+		return err
+	}
+	defer guard.Close()
+	volume := filepath.VolumeName(base) + string(filepath.Separator)
+	anchor, err := safefs.Open(volume)
+	if err != nil {
+		return err
+	}
+	defer anchor.Close()
+	baseRel, err := filepath.Rel(volume, base)
+	if err != nil {
+		return err
+	}
+	root, err := anchor.Sub(baseRel, false, 0)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	current, err := root.Lstat(".")
+	if err != nil || expected == nil || !os.SameFile(expected, current) {
+		return errors.New("cache anchor changed")
+	}
+	parent, err := root.Sub(filepath.Dir(rel), false, 0)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	info, err := parent.Lstat("go")
+	if err != nil {
+		return err
+	}
+	dir, err := parent.Sub("go", false, 0)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	pinned, err := dir.Lstat(".")
+	if err != nil || !os.SameFile(info, pinned) {
+		return errors.New("go cache changed")
+	}
+	var size int64
+	entries := 0
+	var measure func(*safefs.Root, int) error
+	measure = func(root *safefs.Root, depth int) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if depth > 128 {
+			return errors.New("cache depth limit")
+		}
+		f, err := root.OpenDirectory(".")
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		for {
+			batch, readErr := f.ReadDir(128)
+			for _, entry := range batch {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				entries++
+				if entries > 200000 {
+					return errors.New("cache entry limit")
+				}
+				i, err := root.Lstat(entry.Name())
+				if err != nil {
+					return err
+				}
+				switch {
+				case i.IsDir():
+					if i.Mode().Perm()&0500 != 0500 {
+						return errors.New("unreadable cache directory")
+					}
+					child, err := root.Sub(entry.Name(), false, 0)
+					if err != nil {
+						return err
+					}
+					err = measure(child, depth+1)
+					child.Close()
+					if err != nil {
+						return err
+					}
+				case i.Mode().IsRegular():
+					if i.Mode().Perm()&0400 == 0 || i.Size() < 0 || i.Size() > math.MaxInt64-size {
+						return errors.New("unreadable or oversized cache entry")
+					}
+					file, err := root.OpenRegular(entry.Name())
+					if err != nil {
+						return err
+					}
+					actual, statErr := file.Stat()
+					file.Close()
+					if statErr != nil || !os.SameFile(i, actual) {
+						return errors.New("cache file changed")
+					}
+					size += i.Size()
+				default:
+					return errors.New("link or special file in Go cache")
+				}
+			}
+			if readErr == io.EOF {
+				return nil
+			}
+			if readErr != nil {
+				return readErr
+			}
+		}
+	}
+	if info.Mode().Perm()&0500 != 0500 {
+		return errors.New("unreadable Go cache")
+	}
+	if err := measure(dir, 0); err != nil {
+		return err
+	}
+	if size <= limit {
+		return nil
+	}
+	return parent.RemoveAllCheckedContext(ctx, "go", info, func() error { return ctx.Err() })
 }

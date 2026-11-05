@@ -55,7 +55,7 @@ func NativeValidationBinary(cfg *contract.SwarmConfig) (string, error) {
 
 func nativeEnv(home string, authentication bool, deps Dependencies) []string {
 	toolchains := deps.toolchains()
-	env := []string{"PATH=" + SandboxPath(toolchains), "HOME=" + home, "GOFLAGS=-buildvcs=false"}
+	env := []string{"PATH=" + SandboxPath(toolchains), "HOME=" + home, "GOFLAGS=-buildvcs=false -trimpath"}
 	for _, b := range toolchains {
 		if b.EnvKey != "" && b.EnvVal != "" {
 			env = append(env, b.EnvKey+"="+b.EnvVal)
@@ -86,7 +86,7 @@ func codexHostHome(fallback string) string {
 
 // Linux child scheduling defaults bound runtime and package-build concurrency.
 const linuxGoMaxProcs = "2"
-const linuxGoFlags = "-buildvcs=false -p=2"
+const linuxGoFlags = "-buildvcs=false -p=2 -trimpath"
 
 // codexPolicy uses a named native profile rather than workspace-write's broad
 // default read access. :minimal supplies Codex's platform runtime files. Each
@@ -118,7 +118,7 @@ func codexPolicy(binary, work, scratch string, readOnly bool, caches []BuildCach
 	if readOnly {
 		fs = append(fs, strconv.Quote(filepath.Join(work, ".swarm", "active"))+`="write"`)
 	}
-	goFlags := "-buildvcs=false"
+	goFlags := "-buildvcs=false -trimpath"
 	if runtime.GOOS == "linux" {
 		goFlags = linuxGoFlags
 	}

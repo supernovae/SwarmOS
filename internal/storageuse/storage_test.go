@@ -1805,3 +1805,80 @@ func TestNativeReservationConcurrentAdmissionAndDiagnostics(t *testing.T) {
 		})
 	}
 }
+
+func TestScopeCompletion(t *testing.T) {
+	for _, mode := range []string{"success", "retained", "failed-use", "callback-error"} {
+		t.Run(mode, func(t *testing.T) {
+			manager, resource := fixture(t)
+			use, err := manager.AcquireUse(t.Context(), resource)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := &Scope{manager: manager, uses: []*Use{use}}
+			called := 0
+			sentinel := errors.New("completion error")
+			callback := func(m *Manager) error {
+				called++
+				// Reentry must not deadlock, and admission must already be completed.
+				scope.Retain()
+				guard, err := m.AcquireMaintenance(t.Context(), resource)
+				if err != nil {
+					return err
+				}
+				defer guard.Close()
+				blocked, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+				defer cancel()
+				if use, err := m.AcquireUse(blocked, resource); err == nil {
+					use.Finish(t.Context())
+					t.Error("maintenance allowed admission")
+				}
+				if mode == "callback-error" {
+					return sentinel
+				}
+				return nil
+			}
+			if err := scope.OnCompletion("go", callback); err != nil {
+				t.Fatal(err)
+			}
+			if err := scope.OnCompletion("go", func(*Manager) error { t.Error("duplicate callback"); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			inherited, owner, err := Ensure(context.WithValue(t.Context(), scopeKey{}, scope), "common-dir")
+			if err != nil || owner != nil || FromContext(inherited) != scope {
+				t.Fatal("lost enclosing owner")
+			}
+			if mode == "retained" {
+				scope.Retain()
+			}
+			if mode == "failed-use" {
+				use.token = "missing-token"
+			}
+			err = scope.Finish()
+			if mode == "failed-use" && err == nil {
+				t.Fatal("missing completion error")
+			}
+			if mode == "callback-error" && !errors.Is(err, sentinel) {
+				t.Fatal(err)
+			}
+			if (mode == "success" || mode == "retained") && err != nil {
+				t.Fatal(err)
+			}
+			want := 1
+			if mode == "retained" || mode == "failed-use" {
+				want = 0
+			}
+			if called != want {
+				t.Fatalf("callbacks %d want %d", called, want)
+			}
+			if err := scope.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			if called != want {
+				t.Fatal("callback repeated")
+			}
+			if err := scope.OnCompletion("late", callback); err == nil {
+				t.Fatal("closed registration allowed")
+			}
+		})
+	}
+}

@@ -44,7 +44,7 @@ func (r *workRun) plan() (bool, error) {
 			r.progress.next("plan")
 			r.res.RoleAgentsUsed["planner"] = "interactive"
 			r.res.State = r.st
-			if err := compileSetupBundle(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "planner", r.opts.PRNumber); err != nil {
+			if err := compileSetupBundleWithCapabilities(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "planner", r.opts.PRNumber, r.roleCapabilityReport("planner")); err != nil {
 				return true, err
 			}
 			if r.st, err = r.e.LeaseManager.UpdatePhase(r.ctx, r.opts.IssueNumber, r.opts.Owner, "plan", "active"); err != nil {
@@ -72,7 +72,7 @@ func (r *workRun) plan() (bool, error) {
 			r.progress.retry("plan-review", r.st.PlanReplanCount, r.cfg.Lease.PlanReplanAttempts())
 		}
 		r.progress.next("plan")
-		if err := compileSetupBundle(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "planner", r.opts.PRNumber); err != nil {
+		if err := compileSetupBundleWithCapabilities(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "planner", r.opts.PRNumber, r.roleCapabilityReport("planner")); err != nil {
 			return true, err
 		}
 		planPrompt := "Execute /swarm-plan and write .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md."
@@ -310,7 +310,8 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 	if err = checkpointPlanProjection(ctx, snapshot, p.State.BaseSHA); err != nil {
 		return nil, err
 	}
-	if err = compileSetupBundle(ctx, opts.SetupProgress, snapshot, wu, wf, p.State, role, 0); err != nil {
+	roleReport := agent.CapabilityReport(name, cfg, role, e.runnerOptions(ctx), "approved_task", false)
+	if err = compileSetupBundleWithCapabilities(ctx, opts.SetupProgress, snapshot, wu, wf, p.State, role, 0, &roleReport); err != nil {
 		return nil, err
 	}
 	if err = e.LeaseManager.CheckPreparedPlan(ctx, opts.IssueNumber, p); err != nil {

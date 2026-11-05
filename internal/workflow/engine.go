@@ -155,35 +155,37 @@ func LeadRole(phase string) string {
 
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
-	BrowserProfile string
-	Execution      contract.ExecutionConfig
-	Blockers       []string
-	Issue          *tracker.Issue
-	WorkUnit       *contract.WorkUnit
-	Workflow       *contract.WorkflowSpec
-	Config         *contract.SwarmConfig
-	BaseSHA        string
-	Gate           contract.GateMode
-	Agents         map[string]string
-	Binaries       map[string]string
-	Validation     *contract.ValidationSpec
-	TaskDigest     string
-	PolicyDigest   string
-	Phase          string
+	ToolCapabilities map[string]sandbox.ToolCapabilityReport
+	BrowserProfile   string
+	Execution        contract.ExecutionConfig
+	Blockers         []string
+	Issue            *tracker.Issue
+	WorkUnit         *contract.WorkUnit
+	Workflow         *contract.WorkflowSpec
+	Config           *contract.SwarmConfig
+	BaseSHA          string
+	Gate             contract.GateMode
+	Agents           map[string]string
+	Binaries         map[string]string
+	Validation       *contract.ValidationSpec
+	TaskDigest       string
+	PolicyDigest     string
+	Phase            string
 	// Dependencies are the agent dependency caches prefetched for BaseSHA.
 	Dependencies sandbox.Dependencies
 }
 
 type Engine struct {
-	progressTicks <-chan time.Time
-	progressNow   func() time.Time
-	NewRunner     func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
-	Tracker       tracker.Tracker
-	LeaseManager  *lease.Manager
-	Config        *contract.SwarmConfig
-	repoRoot      string
-	ForkMode      bool
-	ForkRemote    string
+	InspectCapabilityEntry func(string) error
+	progressTicks          <-chan time.Time
+	progressNow            func() time.Time
+	NewRunner              func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
+	Tracker                tracker.Tracker
+	LeaseManager           *lease.Manager
+	Config                 *contract.SwarmConfig
+	repoRoot               string
+	ForkMode               bool
+	ForkRemote             string
 	// LookupEnv resolves execution mode and agent environment for this engine;
 	// nil reads the process environment.
 	LookupEnv func(string) (string, bool)
@@ -195,9 +197,10 @@ type Engine struct {
 // construction. Zero values keep the process environment and the default node
 // profile path.
 type EngineOptions struct {
-	NewRunner       func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
-	LookupEnv       func(string) (string, bool)
-	NodeProfilePath string
+	InspectCapabilityEntry func(string) error
+	NewRunner              func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
+	LookupEnv              func(string) (string, bool)
+	NodeProfilePath        string
 	// RegistryPath locates the repository registry that keys the node
 	// profile's private Go modules; empty uses the registry default.
 	RegistryPath string
@@ -214,7 +217,7 @@ func (e *Engine) getenv(name string) string {
 // runnerOptions reuses inspection only within the command session carried by
 // ctx, so a reused Engine never shares results across commands.
 func (e *Engine) runnerOptions(ctx context.Context) agent.RunnerOptions {
-	return agent.RunnerOptions{LookupEnv: e.LookupEnv, Inspections: sandbox.InspectionSessionFrom(ctx)}
+	return agent.RunnerOptions{InspectCapabilityEntry: e.InspectCapabilityEntry, LookupEnv: e.LookupEnv, Inspections: sandbox.InspectionSessionFrom(ctx)}
 }
 
 // upstreamRemote names the project remote configured on the lease manager.
@@ -244,7 +247,7 @@ func NewEngineWithOptions(repoRoot string, tr tracker.Tracker, opts EngineOption
 	// A malformed profile keeps the default per-repository caches and
 	// allows no private modules.
 	policy := node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot)
-	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, LookupEnv: opts.LookupEnv, NewRunner: opts.NewRunner, DependencyPolicy: policy}, nil
+	return &Engine{Tracker: tr, LeaseManager: mgr, Config: cfg, repoRoot: repoRoot, InspectCapabilityEntry: opts.InspectCapabilityEntry, LookupEnv: opts.LookupEnv, NewRunner: opts.NewRunner, DependencyPolicy: policy}, nil
 }
 
 func NewEngineWithManager(repoRoot string, tr tracker.Tracker, mgr *lease.Manager, cfg *contract.SwarmConfig, forkMode bool, forkRemote string) *Engine {
@@ -256,15 +259,16 @@ func NewEngineWithManagerOptions(repoRoot string, tr tracker.Tracker, mgr *lease
 		mgr.SetNodeProfile(prof)
 	}
 	return &Engine{
-		DependencyPolicy: node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot),
-		Tracker:          tr,
-		LeaseManager:     mgr,
-		Config:           cfg,
-		repoRoot:         repoRoot,
-		ForkMode:         forkMode,
-		ForkRemote:       forkRemote,
-		LookupEnv:        opts.LookupEnv,
-		NewRunner:        opts.NewRunner,
+		DependencyPolicy:       node.DependencyPolicy(opts.NodeProfilePath, opts.RegistryPath, repoRoot),
+		Tracker:                tr,
+		LeaseManager:           mgr,
+		Config:                 cfg,
+		repoRoot:               repoRoot,
+		ForkMode:               forkMode,
+		ForkRemote:             forkRemote,
+		InspectCapabilityEntry: opts.InspectCapabilityEntry,
+		LookupEnv:              opts.LookupEnv,
+		NewRunner:              opts.NewRunner,
 	}
 }
 
@@ -406,7 +410,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	if execution.BrowserProfile {
 		browserProfile = "requested/available"
 		if err := sandbox.CheckBrowserProfile(ctx); err != nil {
-			reason := "browser profile requested/unavailable: " + err.Error()
+			reason := "browser profile requested/unavailable: unavailable; " + sandbox.CapabilityReason("unavailable")
 			browserProfile = reason
 			if !opts.InspectOnly {
 				return nil, fmt.Errorf("%s", reason)
@@ -441,6 +445,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	}
 	agents := make(map[string]string, 4)
 	binaries := make(map[string]string, 4)
+	capabilities := make(map[string]sandbox.ToolCapabilityReport, 4)
 	approvalState := *state
 	approvalState.EffectiveGate = gate
 	roles := rolesForPhase(opts.Phase, planningGate(state, gate), (hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)), lease.VerifyApproval(&approvalState, wu) == nil)
@@ -475,7 +480,8 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 				}
 				blockers = append(blockers, err.Error())
 			}
-			resolved, err := agent.PreflightWithOptions(name, cfg, e.Tracker.BackendName() == "local", role, e.runnerOptions(ctx))
+			resolved, report, err := agent.InspectWithOptions(name, cfg, e.Tracker.BackendName() == "local", role, e.runnerOptions(ctx), "approved_task")
+			capabilities[role] = report
 			if err != nil {
 				if !opts.InspectOnly {
 					return nil, fmt.Errorf("%s agent preflight: %w", role, err)
@@ -515,7 +521,10 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			return nil, err
 		}
 	}
-	return &PreflightResult{BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
+	for role, report := range capabilities {
+		capabilities[role] = sandbox.PreparedCapabilities(report, deps)
+	}
+	return &PreflightResult{ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
 		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}, nil
 }
 
@@ -1032,10 +1041,30 @@ func (e *Engine) ExecuteDecomposition(ctx context.Context, root string, n int, s
 }
 
 func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, excludeHistory ...bool) error {
-	if prNumber != 0 {
-		return workspace.CompilePRHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, prNumber, prRevisionContext(st))
+	return compileExecutionBundleWithCapabilities(path, wu, wf, st, role, prNumber, nil, excludeHistory...)
+}
+
+func compileExecutionBundleWithCapabilities(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, supplied *sandbox.ToolCapabilityReport, excludeHistory ...bool) error {
+
+	// Refresh policy description for each role; no runtime observation is reused
+	// from an earlier command. Actual launch independently rechecks the boundary.
+	cfg, _ := harness.LoadConfigAt(path, st.BaseSHA)
+	name := ""
+	if cfg != nil {
+		name = cfg.Roles[role]
+		if name == "" {
+			name = cfg.DefaultAgent
+		}
 	}
-	if err := workspace.CompileHarnessBundleAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA); err != nil {
+	report := agent.CapabilityReport(name, cfg, role, agent.RunnerOptions{}, "approved_task", false)
+	if supplied != nil {
+		report = *supplied
+	}
+
+	if prNumber != 0 {
+		return workspace.CompilePRHarnessBundleWithCapabilitiesAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, prNumber, &report, prRevisionContext(st))
+	}
+	if err := workspace.CompileHarnessBundleWithCapabilitiesAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, &report); err != nil {
 		return err
 	}
 	if role == "reviewer" && st.PRNumber == 0 && st.PRRevision == nil {
@@ -1081,7 +1110,8 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 	if len(reporters) > 0 {
 		reporter = reporters[0]
 	}
-	if err := compileSetupBundle(ctx, reporter, wtPath, wu, wf, st, "reviewer", prNumber, e.ForkMode || e.LeaseManager.HasWorkerGateway()); err != nil {
+	roleReport := agent.CapabilityReport(reviewerAgent, e.Config, "reviewer", e.runnerOptions(ctx), "approved_task", false)
+	if err := compileSetupBundleWithCapabilities(ctx, reporter, wtPath, wu, wf, st, "reviewer", prNumber, &roleReport, e.ForkMode || e.LeaseManager.HasWorkerGateway()); err != nil {
 		return "", st, err
 	}
 	runner, err := e.configuredRunner(ctx, reviewerAgent, e.Config, e.Tracker.BackendName() == "local")
@@ -1667,8 +1697,11 @@ func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 	return "", "", ""
 }
 
-func compileSetupBundle(ctx context.Context, reporter *ProgressReporter, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, excludeHistory ...bool) error {
-	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error { return compileExecutionBundle(path, wu, wf, st, role, prNumber, excludeHistory...) })
+func compileSetupBundleWithCapabilities(ctx context.Context, reporter *ProgressReporter, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, report *sandbox.ToolCapabilityReport, excludeHistory ...bool) error {
+
+	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error {
+		return compileExecutionBundleWithCapabilities(path, wu, wf, st, role, prNumber, report, excludeHistory...)
+	})
 }
 
 func (e *Engine) configuredRunner(ctx context.Context, name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
@@ -1752,7 +1785,8 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 	if err := ensurePlanArtifactsInWorktree(path, st); err != nil {
 		return "", nil, err
 	}
-	if err := compileSetupBundle(ctx, reporter, path, wu, wf, st, "reviewer", st.PRNumber, true); err != nil {
+	roleReport := agent.CapabilityReport(reviewer, cfg, "reviewer", e.runnerOptions(ctx), "approved_task", false)
+	if err := compileSetupBundleWithCapabilities(ctx, reporter, path, wu, wf, st, "reviewer", st.PRNumber, &roleReport, true); err != nil {
 		return "", nil, err
 	}
 	for _, a := range st.Artifacts {

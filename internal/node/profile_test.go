@@ -28,6 +28,21 @@ func TestNodeProfileSaveLoadAndCapabilities(t *testing.T) {
 		t.Fatalf("unexpected loaded profile: %+v", loaded)
 	}
 
+	// Runtime tool reports must not redefine the existing declaration matching.
+	for _, tc := range []struct {
+		profile  *contract.NodeProfile
+		required []string
+		want     bool
+	}{
+		{nil, []string{"undeclared"}, true},
+		{loaded, nil, true},
+		{loaded, []string{" CODING ", " Testing "}, true},
+		{loaded, []string{"swarm_shell"}, false},
+	} {
+		if got := MatchesCapabilities(tc.profile, tc.required); got != tc.want {
+			t.Fatalf("capability matching %v: got %t want %t", tc.required, got, tc.want)
+		}
+	}
 	if !MatchesCapabilities(loaded, []string{"coding", "testing"}) {
 		t.Fatal("expected MatchesCapabilities to return true for coding+testing")
 	}

@@ -49,7 +49,7 @@ func TestBrowserProfileInternalHelperHidden(t *testing.T) {
 }
 
 func TestBrowserProfileDoctor(t *testing.T) {
-	for _, reason := range []string{"", "missing Bubblewrap", "missing Playwright Chromium cache", "unverifiable cgroup v2 memory cap"} {
+	for _, reason := range []string{"", "missing Bubblewrap", "missing Playwright Chromium cache", "unverifiable cgroup v2 memory cap", "TOKEN /home/private-user/secret"} {
 		cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{BrowserProfile: true}}
 		probe := func(context.Context) error {
 			if reason == "" {
@@ -62,7 +62,7 @@ func TestBrowserProfileDoctor(t *testing.T) {
 			if result.Status != "OK" || !strings.Contains(result.Detail, "requested/available") {
 				t.Fatalf("%+v", result)
 			}
-		} else if result.Status != "FAIL" || !strings.Contains(result.Detail, reason) {
+		} else if result.Status != "FAIL" || !strings.Contains(result.Detail, "requested/unavailable: unavailable") || strings.Contains(result.Detail, reason) {
 			t.Fatalf("%+v", result)
 		}
 	}

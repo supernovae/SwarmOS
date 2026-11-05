@@ -230,3 +230,13 @@ func (r *workRun) checkWorkApproval(ctx context.Context) error {
 	}
 	return nil
 }
+
+// roleCapabilityReport retains the actual approved role selection, including
+// command overrides, within this command. Launch still rechecks readiness.
+func (r *workRun) roleCapabilityReport(role string) *sandbox.ToolCapabilityReport {
+	report, ok := r.pre.ToolCapabilities[role]
+	if !ok {
+		return nil
+	}
+	return &report
+}

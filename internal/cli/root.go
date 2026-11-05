@@ -29,12 +29,13 @@ import (
 )
 
 type RootOptions struct {
-	maintenanceHook  func(*cobra.Command, bool)
-	progressReporter func(context.Context, func(workflow.ProgressEvent)) *workflow.ProgressReporter
-	progressSession  func(context.Context, func(progress.Event)) *progress.Session
-	Repo             string
-	RepoRoot         string
-	trackerOverride  tracker.Tracker
+	inspectCapabilityEntry func(string) error
+	maintenanceHook        func(*cobra.Command, bool)
+	progressReporter       func(context.Context, func(workflow.ProgressEvent)) *workflow.ProgressReporter
+	progressSession        func(context.Context, func(progress.Event)) *progress.Session
+	Repo                   string
+	RepoRoot               string
+	trackerOverride        tracker.Tracker
 	// githubTrackerFunc and remoteSlugFunc stand in for the GitHub API and
 	// github.com URL parsing in tests; repository identity checks still run.
 	githubTrackerFunc func(slug string) (tracker.Tracker, error)

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
@@ -105,5 +106,49 @@ func TestInspectionPreflightFailureStopsBeforeClaim(t *testing.T) {
 	}
 	if st.Lease.ClaimID != "" {
 		t.Fatalf("failed inspection acquired claim %q", st.Lease.ClaimID)
+	}
+}
+
+func TestToolCapabilityOptionalFailurePreflight(t *testing.T) {
+	eng, root, issue, _ := inspectionTask(t, "2.1.2")
+	candidate, err := harness.LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.Execution.BrowserProfile = true
+	candidate.Agents["opencode"] = contract.AgentConfig{Binary: "candidate-grant", Harness: "claude"}
+	raw, err := yaml.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".swarm/config.yaml"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	eng.InspectCapabilityEntry = func(id string) error {
+		if id == "browser" {
+			return fmt.Errorf("TOKEN /home/private-user/secret")
+		}
+		return nil
+	}
+	for _, inspectOnly := range []bool{false, true} {
+		result, err := eng.Preflight(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "opencode", Phase: "plan", InspectOnly: inspectOnly})
+		if err != nil || len(result.Blockers) != 0 {
+			t.Fatalf("optional report failure blocked preflight: %v %+v", err, result)
+		}
+		for _, r := range result.ToolCapabilities {
+			if r.Harness != "opencode" || r.Entries[1].Declared {
+				t.Fatal("candidate config influenced report", r)
+			}
+			if r.Entries[1].Runtime != "not_probed" || r.Entries[1].Usable {
+				t.Fatal(r)
+			}
+			if strings.Contains(sandbox.FormatToolCapabilities(r), "TOKEN") {
+				t.Fatal("secret escaped")
+			}
+		}
+	}
+	st, err := eng.LeaseManager.GetCurrentState(t.Context(), issue)
+	if err != nil || st.Lease.ClaimID != "" {
+		t.Fatal("preflight acquired a lease", err)
 	}
 }

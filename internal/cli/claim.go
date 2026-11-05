@@ -120,7 +120,11 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return workspace.CompileHarnessBundleAt(path, preflight.WorkUnit, wf, state.Artifacts, "planner", state.EffectiveGate, state.BaseSHA)
+			report, ok := preflight.ToolCapabilities["planner"]
+			if !ok {
+				return workspace.CompileHarnessBundleAt(path, preflight.WorkUnit, wf, state.Artifacts, "planner", state.EffectiveGate, state.BaseSHA)
+			}
+			return workspace.CompileHarnessBundleWithCapabilitiesAt(path, preflight.WorkUnit, wf, state.Artifacts, "planner", state.EffectiveGate, state.BaseSHA, &report)
 		}); err != nil {
 			return fail(err)
 		}

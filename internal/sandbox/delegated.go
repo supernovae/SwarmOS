@@ -183,7 +183,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 			return err
 		}
 		executor := ToolExecutor{BrowserProfile: opts.BrowserProfile, Work: work, ReadOnly: opts.ReadOnly, BuildCaches: caches, Dependencies: opts.Dependencies}
-		prompt = "The task files are in /workspace inside the SwarmOS tools. Use swarm_read, swarm_write, swarm_edit and swarm_shell for file access, editing, searching and testing.\n" + prompt
+		prompt = FormatToolCapabilities(LaunchToolCapabilities(driver, opts.Role, true, opts.BrowserProfile, opts.ReadOnly, opts.Dependencies)) + prompt
 		if driver == "omp" {
 			command = []string{binary, "--mode", "rpc"}
 			return runOMP(ctx, binary, model, prompt, control, env, executor, interactive, input, stdout, stderr, opts.GuidanceDelivered)

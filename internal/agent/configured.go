@@ -14,7 +14,9 @@ import (
 // RunnerOptions carries one invocation's environment into configured runners.
 // A nil LookupEnv reads the process environment.
 type RunnerOptions struct {
-	LookupEnv func(string) (string, bool)
+	// InspectCapabilityEntry is optional diagnostic enrichment; failures never block execution.
+	InspectCapabilityEntry func(string) error
+	LookupEnv              func(string) (string, bool)
 	// Inspections reuses harness interface inspection within one command,
 	// partitioned by the approved config. Nil inspects on every call.
 	Inspections *sandbox.InspectionSession
@@ -329,3 +331,67 @@ func resolveHarness(name, harness string) (string, error) {
 		return "", fmt.Errorf("agent %q uses unsupported harness %q", name, driver)
 	}
 }
+
+// InspectWithOptions preserves the legacy blocking result and error identity. Report
+// assembly is advisory and never supplies a new execution failure.
+func InspectWithOptions(name string, cfg *contract.SwarmConfig, local bool, role string, opts RunnerOptions, policyContext string) (string, sandbox.ToolCapabilityReport, error) {
+	detail, err := PreflightWithOptions(name, cfg, local, role, opts)
+	report := CapabilityReport(name, cfg, role, opts, policyContext, err == nil)
+	if err != nil {
+		if report.Entries[0].Reason != "report_unavailable" && report.Entries[0].Authorized {
+			report.Entries[0].Runtime = "unavailable"
+			report.Entries[0].Reason = "unavailable"
+			report.Entries[0].Action = sandbox.CapabilityReason("unavailable")
+		}
+		return "", report, &capabilityInspectionError{cause: err}
+	}
+	return detail, report, nil
+}
+
+// CapabilityReport consumes coordinator-owned policy and existing probe facts.
+// It neither executes candidate commands nor reads candidate report files.
+func CapabilityReport(name string, cfg *contract.SwarmConfig, role string, opts RunnerOptions, policyContext string, verified bool) sandbox.ToolCapabilityReport {
+	driver := "unknown"
+	authorized, delegated, browser := false, false, false
+	declared, roleDenied := false, false
+	if cfg != nil {
+		ac, ok := cfg.Agents[name]
+		declared = ok
+		if ok {
+			if d, err := resolveHarness(name, ac.Harness); err == nil {
+				driver = d
+			}
+			authorized = true
+			if len(ac.Roles) > 0 {
+				_, authorized = allowedRoles(ac.Roles)[role]
+				roleDenied = !authorized
+			}
+		}
+		execution, err := contract.ResolveExecution(cfg, getenvWith(opts.LookupEnv, "SWARM_EXECUTION_MODE"))
+		authorized = authorized && err == nil && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative
+		delegated = driver != "codex"
+		browser = execution.BrowserProfile
+	}
+	r := sandbox.ToolCapabilities(driver, role, policyContext, delegated, authorized, verified, browser)
+	r.Entries[0].Declared = declared
+	if roleDenied {
+		r.Entries[0].Reason = "role_denied"
+		r.Entries[0].Action = sandbox.CapabilityReason("role_denied")
+	}
+	for i := range r.Entries {
+		if opts.InspectCapabilityEntry != nil {
+			id := r.Entries[i].ID
+			r.Entries[i] = sandbox.InspectCapabilityEntry(r.Entries[i], func() error { return opts.InspectCapabilityEntry(id) })
+		}
+	}
+	return r
+}
+
+// capabilityInspectionError retains error identity for callers without
+// projecting raw runtime output or host paths into inspection consumers.
+type capabilityInspectionError struct{ cause error }
+
+func (e *capabilityInspectionError) Error() string {
+	return "runtime unavailable: " + sandbox.CapabilityReason("unavailable")
+}
+func (e *capabilityInspectionError) Unwrap() error { return e.cause }

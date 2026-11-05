@@ -602,6 +602,7 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 			}
 			prompt = codexBrowserGuidance + prompt
 		}
+		prompt = FormatToolCapabilities(LaunchToolCapabilities("codex", opts.Role, false, opts.BrowserProfile, opts.ReadOnly, opts.Dependencies)) + prompt
 		args = append(args, codexExecArgs(work, model, opts.Effort)...)
 		// Each exec turn is its own Codex session, named on stderr. Only those
 		// ids are looked up afterwards; observation never changes the result.

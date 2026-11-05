@@ -97,11 +97,11 @@ func (o *RootOptions) localUser() string {
 }
 
 func (o *RootOptions) runnerOptions() agent.RunnerOptions {
-	return agent.RunnerOptions{LookupEnv: o.lookupEnv}
+	return agent.RunnerOptions{LookupEnv: o.lookupEnv, InspectCapabilityEntry: o.inspectCapabilityEntry}
 }
 
 func (o *RootOptions) engineOptions() workflow.EngineOptions {
-	return workflow.EngineOptions{NewRunner: o.resolverRunner, LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath(), RegistryPath: o.registryPath()}
+	return workflow.EngineOptions{InspectCapabilityEntry: o.inspectCapabilityEntry, NewRunner: o.resolverRunner, LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath(), RegistryPath: o.registryPath()}
 }
 
 // dependencyPolicy is the node profile's dependency cache policy for

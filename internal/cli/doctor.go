@@ -44,7 +44,7 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 			} else {
 				run = harness.NewDoctorRunner(cmd.Context(), observer, nil, nil)
 			}
-			var capabilities []sandbox.ToolCapabilityReport
+			capabilities := []sandbox.ToolCapabilityReport{}
 			checks := harness.RunDoctorWithRunner(repoRoot, checkGHAuth, run)
 			checks = append(checks, run.Run("system", "git-identity", func() harness.DoctorCheck {
 				if err := workspace.CheckCommitIdentity(cmd.Context(), repoRoot); err != nil {

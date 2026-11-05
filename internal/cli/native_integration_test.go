@@ -46,7 +46,10 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, err)
 			code = 1
 		}
-		os.RemoveAll(ledgerRoot)
+		if err := os.RemoveAll(ledgerRoot); err != nil {
+			fmt.Fprintln(os.Stderr, "cleanup test ledger:", err)
+			code = 1
+		}
 		os.Exit(code)
 	}
 	if err := checkLedger(); err != nil {

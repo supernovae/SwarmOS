@@ -988,7 +988,7 @@ func goConcurrencyHostileEnv(t *testing.T) {
 
 func goConcurrencyAssertEnv(t *testing.T, env []string, cache string) {
 	t.Helper()
-	for key, want := range map[string]string{"GOMAXPROCS": "2", "GOFLAGS": "-buildvcs=false -p=2", "GOCACHE": cache} {
+	for key, want := range map[string]string{"GOMAXPROCS": "2", "GOFLAGS": "-buildvcs=false -p=2 -trimpath", "GOCACHE": cache} {
 		count := 0
 		for _, entry := range env {
 			if strings.HasPrefix(entry, key+"=") {
@@ -1038,7 +1038,7 @@ go run .
 
 func goConcurrencyOutput(t *testing.T, output string) {
 	t.Helper()
-	if !strings.Contains(output, "runtime=2 flags=-buildvcs=false -p=2") || !strings.Contains(output, "-buildvcs=false -p=2\n") || !strings.Contains(output, "example.com/concurrency/lib") {
+	if !strings.Contains(output, "runtime=2 flags=-buildvcs=false -p=2 -trimpath") || !strings.Contains(output, "-buildvcs=false -p=2 -trimpath\n") || !strings.Contains(output, "example.com/concurrency/lib") {
 		t.Fatalf("missing child runtime/build/test evidence:\n%s", output)
 	}
 }
@@ -1088,14 +1088,100 @@ func TestGoConcurrencyNativePolicy(t *testing.T) {
 	outer := nativeEnv(t.TempDir(), false, Dependencies{})
 	flagCount := 0
 	for _, entry := range outer {
-		if entry == "GOFLAGS=-buildvcs=false" {
+		if entry == "GOFLAGS=-buildvcs=false -trimpath" {
 			flagCount++
 		}
-		if strings.HasPrefix(entry, "GOMAXPROCS=") || strings.HasPrefix(entry, "GOFLAGS=") && entry != "GOFLAGS=-buildvcs=false" {
+		if strings.HasPrefix(entry, "GOMAXPROCS=") || strings.HasPrefix(entry, "GOFLAGS=") && entry != "GOFLAGS=-buildvcs=false -trimpath" {
 			t.Fatalf("outer host defaults changed: %q", entry)
 		}
 	}
 	if flagCount != 1 {
 		t.Fatalf("outer host GOFLAGS entries: %d", flagCount)
+	}
+}
+
+func TestGoTrimpathEnvironment(t *testing.T) {
+	goConcurrencyHostileEnv(t)
+	for _, auth := range []bool{false, true} {
+		count := 0
+		for _, value := range nativeEnv(t.TempDir(), auth, Dependencies{}) {
+			if strings.HasPrefix(value, "GOFLAGS=") {
+				count++
+				if value != "GOFLAGS=-buildvcs=false -trimpath" {
+					t.Fatal(value)
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatalf("GOFLAGS count %d", count)
+		}
+	}
+}
+
+func TestGoTrimpathCacheReuse(t *testing.T) {
+	// A dependency-free library avoids executable build IDs and network access.
+	root := resolvedTempDir(t)
+	dirs := []string{filepath.Join(root, "one"), filepath.Join(root, "two")}
+	for _, dir := range dirs {
+		if err := os.Mkdir(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		for name, data := range map[string]string{"go.mod": "module example.com/reuse\n\ngo 1.24\n", "lib.go": "package reuse\nfunc Value() int { return 42 }\n"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, trim := range []bool{false, true} {
+		cache := filepath.Join(root, fmt.Sprintf("cache-%v", trim))
+		flags := "-buildvcs=false -p=2"
+		if trim {
+			flags = linuxGoFlags
+		}
+		inventory := func() map[string]bool {
+			result := map[string]bool{}
+			err := filepath.WalkDir(cache, func(path string, entry os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				// Go's README and trim.txt are administrative metadata, not actions/data.
+				if !entry.IsDir() && (strings.HasSuffix(path, "-a") || strings.HasSuffix(path, "-d")) {
+					rel, err := filepath.Rel(cache, path)
+					if err != nil {
+						return err
+					}
+					result[rel] = true
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+		var first map[string]bool
+		for i, dir := range dirs {
+			cmd := exec.CommandContext(t.Context(), "go", "build", "./...")
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "GOCACHE=" + cache, "GOMODCACHE=" + filepath.Join(root, "modules"), "GOFLAGS=" + flags, "GOENV=off", "GOWORK=off", "GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0", "GODEBUG="}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("build: %v %s", err, out)
+			}
+			now := inventory()
+			if i == 0 {
+				first = now
+				continue
+			}
+			added := 0
+			for name := range now {
+				if !first[name] {
+					added++
+				}
+			}
+			t.Logf("trimpath=%v: first=%d second=%d added=%d", trim, len(first), len(now), added)
+			if len(first) == 0 || (trim && added != 0) || (!trim && added == 0) {
+				t.Fatalf("unexpected cache reuse: trimpath=%v added=%d", trim, added)
+			}
+		}
 	}
 }

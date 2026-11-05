@@ -13,7 +13,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // useUserCache changes a package-global hook; callers must remain serial.
@@ -849,5 +851,398 @@ func TestStorageControlRootFollowsProducerCacheHook(t *testing.T) {
 	entries, err = os.ReadDir(filepath.Join(cache, "swarm-use"))
 	if err != nil || len(entries) == 0 {
 		t.Fatalf("producer did not write isolated evidence: %v %v", entries, err)
+	}
+}
+
+func TestGoBuildCacheCap(t *testing.T) {
+	if goBuildCacheCap != 10<<30 {
+		t.Fatal(goBuildCacheCap)
+	}
+	for _, owner := range []BuildCacheOwner{AgentBuildCache, ValidatorBuildCache} {
+		for _, size := range []int64{goBuildCacheCap - 1, goBuildCacheCap, goBuildCacheCap + 1} {
+			t.Run(fmt.Sprintf("%s/%d", owner, size), func(t *testing.T) {
+				isolateRuntimeControl(t)
+				repo, base := cacheTestRepo(t), resolvedTempDir(t)
+				ctx, scope, err := storageuse.Ensure(t.Context(), repo)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(ctx)
+				defer cancel()
+				caches, err := PrepareBuildCaches(ctx, owner, repo, base, resolvedTempDir(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				cancel() // Completion maintenance must be independent of the run context.
+				goDir := caches[0].Dir
+				f, err := os.Create(filepath.Join(goDir, "data"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Sparse logical size exercises the production cap without allocating GiB.
+				err = f.Truncate(size)
+				f.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				sibling := filepath.Join(caches[1].Dir, "keep")
+				if err := os.WriteFile(sibling, []byte("keep"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				protected := []string{
+					filepath.Join(base, "swarm", "agent-deps", "other", "go", "keep"),
+					filepath.Join(base, "swarm", "validate-deps", "other", "go", "keep"),
+					filepath.Join(base, "swarm", string(owner), "other", "go", "keep"),
+					filepath.Join(base, "scratch", "go", "keep"),
+				}
+				for _, path := range protected {
+					if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte("keep"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := scope.Finish(); err != nil {
+					t.Fatal(err)
+				}
+				for _, path := range protected {
+					if data, err := os.ReadFile(path); err != nil || string(data) != "keep" {
+						t.Fatalf("protected sibling: %s %q %v", path, data, err)
+					}
+				}
+				if size <= goBuildCacheCap {
+					if info, err := os.Stat(filepath.Join(goDir, "data")); err != nil || info.Size() != size {
+						t.Fatalf("under-cap file changed: %v", err)
+					}
+				}
+				_, err = os.Stat(goDir)
+				if size > goBuildCacheCap {
+					if !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("not trimmed: %v", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if data, err := os.ReadFile(sibling); err != nil || string(data) != "keep" {
+					t.Fatalf("sibling: %q %v", data, err)
+				}
+				if err := scope.Finish(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
+	for _, mode := range []string{"active", "retained", "canceled", "link", "ancestor", "child", "root", "special", "unreadable", "coverage", "substituted", "timeout", "invalid-owner", "invalid-location"} {
+		t.Run(mode, func(t *testing.T) {
+			isolateRuntimeControl(t)
+			repo, base := cacheTestRepo(t), resolvedTempDir(t)
+			ctx, scope, err := storageuse.Ensure(t.Context(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			caches, err := PrepareBuildCaches(ctx, AgentBuildCache, repo, base, resolvedTempDir(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := caches[0].Dir
+			if err := os.WriteFile(filepath.Join(dir, "data"), []byte("cache data"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, _ := repositoryCacheKey(ctx, repo)
+			resource := storageuse.ResourceFor(key, string(AgentBuildCache), dir)
+			control, _ := storageuse.ControlRoot()
+			manager, err := storageuse.Open(control)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			// Standalone calls below use a tiny threshold with the same admission and path checks.
+			switch mode {
+			case "retained":
+				scope.Retain()
+				if err := scope.Finish(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(dir); err != nil {
+					t.Fatal(err)
+				}
+				return
+			case "active":
+				use, err := manager.AcquireUse(ctx, resource)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := scope.Finish(); err != nil {
+					t.Fatal(err)
+				}
+				if err := trimGoBuildCache(ctx, manager, resource, base, info, 1); err == nil {
+					t.Fatal("trimmed active cache")
+				}
+				if _, err := os.Stat(dir); err != nil {
+					t.Fatal(err)
+				}
+				if err := use.Finish(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := trimGoBuildCache(ctx, manager, resource, base, info, 1); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				return
+			case "coverage":
+				if err := scope.MarkUnknown(ctx, resource); err != nil {
+					t.Fatal(err)
+				}
+			}
+			finishErr := scope.Finish()
+			if mode != "coverage" && finishErr != nil {
+				t.Fatal(finishErr)
+			}
+			switch mode {
+			case "link":
+				if err := os.Symlink(resolvedTempDir(t), filepath.Join(dir, "link")); err != nil {
+					t.Skip(err)
+				}
+			case "child":
+				if err := os.Rename(dir, dir+"-saved"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(dir+"-saved", dir); err != nil {
+					t.Skip(err)
+				}
+			case "ancestor", "root":
+				target := filepath.Dir(dir)
+				if mode == "root" {
+					target = base
+				}
+				if err := os.Rename(target, target+"-saved"); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Remove(target); os.Rename(target+"-saved", target) })
+				if err := os.Symlink(target+"-saved", target); err != nil {
+					t.Skip(err)
+				}
+			case "special":
+				if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0600); err != nil {
+					t.Skip(err)
+				}
+			case "unreadable":
+				path := filepath.Join(dir, "data")
+				if err := os.Chmod(path, 0000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(path, 0600) })
+			case "substituted":
+				if err := os.Rename(base, base+"-saved"); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.RemoveAll(base); os.Rename(base+"-saved", base) })
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "invalid-owner":
+				resource.Class = "agent-deps"
+			case "invalid-location":
+				resource.Location = base
+			case "timeout":
+				guard, err := manager.AcquireMaintenance(ctx, resource)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer guard.Close()
+			}
+			callCtx := ctx
+			if mode == "timeout" || mode == "canceled" {
+				var cancel context.CancelFunc
+				callCtx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			err = trimGoBuildCache(callCtx, manager, resource, base, info, 1)
+			if err == nil {
+				t.Fatal("unsafe trim admitted")
+			}
+			if _, err := os.Lstat(dir); err != nil {
+				t.Fatalf("cache removed: %v", err)
+			}
+		})
+	}
+}
+
+func TestGoBuildCacheCapFinalConsumer(t *testing.T) {
+	isolateRuntimeControl(t)
+	repo, base := cacheTestRepo(t), resolvedTempDir(t)
+	first, a, err := storageuse.Ensure(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caches, err := PrepareBuildCaches(first, AgentBuildCache, repo, base, resolvedTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, b, err := storageuse.Ensure(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareBuildCaches(second, AgentBuildCache, repo, base, resolvedTempDir(t)); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(filepath.Join(caches[0].Dir, "large"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.Truncate(goBuildCacheCap + 1)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(caches[0].Dir); err != nil {
+		t.Fatal("removed during active use", err)
+	}
+	if err := b.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(caches[0].Dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("final consumer did not trim", err)
+	}
+}
+
+// Serial: stderr capture and runtime-control fixture are process-global.
+func TestGoBuildCacheCapCompletionSkips(t *testing.T) {
+	for _, owner := range []BuildCacheOwner{AgentBuildCache, ValidatorBuildCache} {
+		for _, mode := range []string{"coverage", "pending", "deadline", "entries", "lock", "removal"} {
+			for _, completion := range []string{"finish", "complete", "primary"} {
+				t.Run(fmt.Sprintf("%s/%s/%s", owner, mode, completion), func(t *testing.T) {
+					isolateRuntimeControl(t)
+					repo, base := cacheTestRepo(t), resolvedTempDir(t)
+					key, err := repositoryCacheKey(t.Context(), repo)
+					if err != nil {
+						t.Fatal(err)
+					}
+					dir := filepath.Join(base, "swarm", string(owner), key, "go")
+					// Truly pre-existing caches lack complete ledger coverage.
+					if mode == "coverage" {
+						if err := os.MkdirAll(dir, 0700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					options := goCacheTrimOptions{}
+					expired := func(ctx context.Context) context.Context {
+						ctx, cancel := context.WithDeadline(ctx, time.Unix(1, 0))
+						cancel()
+						return ctx
+					}
+					switch mode {
+					case "deadline":
+						options.beforeMeasure = expired
+					case "entries":
+						options.entries = 1
+					case "lock":
+						options.beforeLock = expired
+					case "removal":
+						options.beforeRemove = func() error { return errors.New("private-path private-token") }
+					}
+					ctx := context.WithValue(t.Context(), goCacheTrimOptionsKey{}, options)
+					ctx, scope, err := storageuse.Ensure(ctx, repo)
+					if err != nil {
+						t.Fatal(err)
+					}
+					caches, err := PrepareBuildCaches(ctx, owner, repo, base, resolvedTempDir(t))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if caches[0].Dir != dir {
+						t.Fatal("unexpected cache")
+					}
+					f, err := os.Create(filepath.Join(dir, "large"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					err = f.Truncate(goBuildCacheCap + 1)
+					f.Close()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dir, "keep"), []byte("contents"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					var other *storageuse.Scope
+					if mode == "pending" {
+						second, b, err := storageuse.Ensure(t.Context(), repo)
+						if err != nil {
+							t.Fatal(err)
+						}
+						other = b
+						if _, err := PrepareBuildCaches(second, owner, repo, base, resolvedTempDir(t)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					output, err := os.CreateTemp(t.TempDir(), "stderr")
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer output.Close()
+					original := os.Stderr
+					os.Stderr = output
+					defer func() { os.Stderr = original }()
+					primary := errors.New("primary")
+					run := func() (result error) {
+						defer scope.Complete(&result)
+						if completion == "primary" {
+							return primary
+						}
+						return nil
+					}
+					if completion == "finish" {
+						err = scope.Finish()
+					} else {
+						err = run()
+					}
+					if completion == "primary" {
+						if err != primary {
+							t.Fatalf("primary changed: %v", err)
+						}
+					} else if err != nil {
+						t.Fatalf("maintenance failed run: %v", err)
+					}
+					if err := scope.Finish(); err != nil {
+						t.Fatal(err)
+					}
+					diagnostic, err := os.ReadFile(output.Name())
+					if err != nil {
+						t.Fatal(err)
+					}
+					reasons := map[string]string{"coverage": "unsafe coverage or pending use", "pending": "unsafe coverage or pending use", "deadline": "measurement timeout", "entries": "measurement limit", "lock": "lock timeout", "removal": "removal failure"}
+					want := "swarm: cache maintenance skipped: " + reasons[mode] + "\n"
+					if string(diagnostic) != want {
+						t.Fatalf("diagnostic %q want %q", diagnostic, want)
+					}
+					if data, err := os.ReadFile(filepath.Join(dir, "keep")); err != nil || string(data) != "contents" {
+						t.Fatalf("contents changed: %q %v", data, err)
+					}
+					if info, err := os.Stat(filepath.Join(dir, "large")); err != nil || info.Size() != goBuildCacheCap+1 {
+						t.Fatalf("large changed: %v", err)
+					}
+					os.Stderr = original
+					if other != nil {
+						if err := other.Finish(); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+							t.Fatalf("final consumer did not trim: %v", err)
+						}
+					}
+				})
+			}
+		}
 	}
 }

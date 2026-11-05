@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -298,4 +299,24 @@ func TestInventoryIdentityLimitPreservesFinishedUse(t *testing.T) {
 		}
 	}
 	t.Fatal("finished leaf missing", out)
+}
+
+func TestInventoryReclamationEnumerationSkipsAccounting(t *testing.T) {
+	o := fixture(t)
+	path := filepath.Join(o.CacheRoot, "agent-build", "orphan", "go")
+	for i := 0; i < 100; i++ {
+		put(t, filepath.Join(path, fmt.Sprint(i)), "cache")
+	}
+	options := ReclaimOptions{CacheRoot: o.CacheRoot, ScratchRoot: o.ScratchRoot, Limits: DefaultLimits()}
+	s := reclaimScanner(context.Background(), options)
+	s.opts.enumerateOnly = true
+	s.caches()
+	if len(s.out.Resources) != 1 || s.out.Resources[0].LogicalBytes != nil || len(s.inodes) != 0 || s.b.Counters.Entries >= 100 {
+		t.Fatalf("recursive accounting during enumeration: %+v", s.out)
+	}
+	normal := reclaimScanner(context.Background(), options)
+	normal.caches()
+	if len(normal.out.Resources) != 1 || normal.out.Resources[0].LogicalBytes == nil {
+		t.Fatalf("ordinary accounting lost: %+v", normal.out)
+	}
 }

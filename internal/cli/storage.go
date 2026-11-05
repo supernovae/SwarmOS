@@ -146,20 +146,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 				runErr = errors.Join(runErr, e)
 				return
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Storage cleanup %s: eligibility is advisory until apply; byte deltas describe namespace observations, not physical savings.\n", report.Mode)
-			for _, s := range report.Tasks {
-				fmt.Fprintf(cmd.OutOrStdout(), "Repository %q at %q\n", s.Repository, s.Root)
-				renderBulkCleanup(cmd.OutOrStdout(), s)
-			}
-			for _, r := range report.Host.Resources {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s %s: %s: %s\n", r.Resource.Class, r.Resource.Location, r.Outcome, r.Reason)
-			}
-			for _, r := range report.Incomplete {
-				fmt.Fprintln(cmd.OutOrStdout(), "INCOMPLETE:", r)
-			}
-			for _, r := range report.Errors {
-				fmt.Fprintln(cmd.OutOrStdout(), "ERROR:", r)
-			}
+			renderStorageCleanup(cmd.OutOrStdout(), report)
 		}()
 		if len(args) > 0 {
 			return errors.New("storage cleanup takes no positional arguments")
@@ -179,6 +166,9 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 			}
 		}
 		scopes, reasons, err := storage.DiscoverScopes(cmd.Context(), storage.Options{RegistryPath: opts.registryPath(), SelectedRoot: root, Repository: opts.Repo, Remote: opts.effectiveUpstreamRemote()}, all)
+		if all && err == nil && len(reasons) == 0 && len(scopes) == 0 {
+			return errors.New("no repositories are registered; run swarm repo add inside a repository, or run swarm storage cleanup without --all-repos")
+		}
 		report.Scopes = scopes
 		report.Incomplete = reasons
 		failures := []error{}
@@ -332,6 +322,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 			if err != nil {
 				failures = append(failures, err)
 			}
+			report.Incomplete = append(report.Incomplete, report.Host.DiscoveryReasons...)
 			if !report.Host.Complete {
 				report.Incomplete = append(report.Incomplete, "host reclamation has incomplete evidence; see retained resource reasons")
 			}
@@ -411,3 +402,20 @@ type storageUpstreamPreview struct {
 }
 
 func (t *storageUpstreamPreview) UpstreamRepo() string { return t.owner }
+
+func renderStorageCleanup(w io.Writer, report storageCleanupReport) {
+	fmt.Fprintf(w, "Storage cleanup %s: eligibility is advisory until apply; byte deltas describe namespace observations, not physical savings.\n", report.Mode)
+	for _, s := range report.Tasks {
+		fmt.Fprintf(w, "Repository %q at %q\n", s.Repository, s.Root)
+		renderBulkCleanup(w, s)
+	}
+	for _, r := range report.Host.Resources {
+		fmt.Fprintf(w, "%s %s: %s: %s\n", r.Resource.Class, r.Resource.Location, r.Outcome, r.Reason)
+	}
+	for _, r := range report.Incomplete {
+		fmt.Fprintln(w, "INCOMPLETE:", r)
+	}
+	for _, r := range report.Errors {
+		fmt.Fprintln(w, "ERROR:", r)
+	}
+}

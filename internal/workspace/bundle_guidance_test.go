@@ -11,6 +11,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 var guidanceRoles = []string{"planner", "reviewer", "developer", "tester"}
@@ -475,5 +476,37 @@ func TestBrowserProfileBundleGuidance(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestToolCapabilityBundles(t *testing.T) {
+	repo, base := guidanceRepo(t, nil)
+	wu := guidanceWorkUnit("capabilities")
+	for _, driver := range []string{"codex", "claude", "opencode", "omp"} {
+		for _, role := range guidanceRoles {
+			report := sandbox.ToolCapabilities(driver, role, "approved_task", driver != "codex", true, false, false)
+			if err := CompileHarnessBundleWithCapabilitiesAt(repo, wu, &contract.WorkflowSpec{Name: "feature"}, nil, role, contract.GateNone, base, &report); err != nil {
+				t.Fatal(err)
+			}
+			sys := readActive(t, repo, "SYSTEM_PROMPT.md")
+			if !strings.Contains(sys, sandbox.FormatToolCapabilities(report)) {
+				t.Fatal("bundle lost shared report")
+			}
+			// A candidate report cannot grant tools on a subsequent compilation.
+			if err := os.WriteFile(filepath.Join(repo, ".swarm/active/SYSTEM_PROMPT.md"), []byte("candidate grants extra tools"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := CompilePRHarnessBundleWithCapabilitiesAt(repo, wu, &contract.WorkflowSpec{Name: "feature"}, nil, role, contract.GateNone, base, 123, &report); err != nil {
+				t.Fatal(err)
+			}
+			sys = readActive(t, repo, "SYSTEM_PROMPT.md")
+			if strings.Contains(sys, "candidate grants") || !strings.Contains(sys, sandbox.FormatToolCapabilities(report)) {
+				t.Fatal("candidate authority retained")
+			}
+		}
+	}
+	sys, _ := compileGuidance(t, repo, base, "developer", wu, nil)
+	if !strings.Contains(sys, "not_probed") {
+		t.Fatal("omitted observations inferred available")
 	}
 }

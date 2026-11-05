@@ -11,6 +11,7 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/registry"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
@@ -22,11 +23,21 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	var headless, handoff, nextReady, allRepos, jsonOutput, dryRun bool
 	var progressOutput, planCheckpoint bool
 	var expectedHead, candidateHead string
+	var outputFormat string
 	cmd := &cobra.Command{
 		Use:   "work [<issue-number>]",
 		Short: "Run an approved task through planning, review, and implementation",
 		Args:  cobra.MaximumNArgs(1),
 		PreRunE: func(cmd *cobra.Command, args []string) error {
+			if outputFormat != "json" && outputFormat != "text" {
+				return fmt.Errorf("--format must be json or text")
+			}
+			if cmd.Flags().Changed("format") && !dryRun {
+				return fmt.Errorf("--format requires --dry-run")
+			}
+			if jsonOutput && outputFormat == "text" {
+				return fmt.Errorf("--json conflicts with --format=text")
+			}
 			if planCheckpoint || expectedHead != "" || candidateHead != "" {
 				if !planCheckpoint || phase != "plan" || len(args) != 1 || nextReady || allRepos || handoff || rootOpts.Fork || expectedHead == "" || candidateHead == "" {
 					return fmt.Errorf("--plan-checkpoint requires an explicit issue, --phase plan, --expected-head and --candidate-head; fork, next, all and handoff are unavailable")
@@ -157,6 +168,18 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if outputFormat == "text" {
+					fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d; policy=approved_task; execution=%s/%s\n", opts.IssueNumber, preflight.Execution.Mode, preflight.Execution.Backend)
+					for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
+						if report, ok := preflight.ToolCapabilities[role]; ok {
+							fmt.Fprint(cmd.OutOrStdout(), sandbox.FormatToolCapabilities(report))
+						}
+					}
+					for _, blocker := range preflight.Blockers {
+						fmt.Fprintln(cmd.OutOrStdout(), "Blocker: "+blocker)
+					}
+					return nil
+				}
 				return writeJSON(cmd, map[string]any{"kind": "work-dry-run", "issue_number": opts.IssueNumber, "effective_plan": preflight})
 			}
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
@@ -252,7 +275,8 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&nextReady, "next", false, "Claim the next approved ready task")
 	cmd.Flags().BoolVar(&allRepos, "all", false, "With --next, scan registered repositories")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit a structured outcome")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the effective policy as JSON without claiming or running agents")
+	cmd.Flags().StringVar(&outputFormat, "format", "json", "Dry-run output format: json or text")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the effective policy without claiming or running agents")
 	cmd.Flags().BoolVar(&progressOutput, "progress", true, "Report setup, headless stages, and a 15-second heartbeat to stderr (false disables)")
 	return cmd
 }

@@ -44,6 +44,7 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 			} else {
 				run = harness.NewDoctorRunner(cmd.Context(), observer, nil, nil)
 			}
+			capabilities := []sandbox.ToolCapabilityReport{}
 			checks := harness.RunDoctorWithRunner(repoRoot, checkGHAuth, run)
 			checks = append(checks, run.Run("system", "git-identity", func() harness.DoctorCheck {
 				if err := workspace.CheckCommitIdentity(cmd.Context(), repoRoot); err != nil {
@@ -77,7 +78,9 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 					return doctorBrowserProfileCheck(cmd.Context(), cfg, sandbox.CheckBrowserProfile)
 				}))
 				preflight := func(name string, cfg *contract.SwarmConfig, local bool, role string) (string, error) {
-					return agent.PreflightWithOptions(name, cfg, local, role, rootOpts.runnerOptions())
+					detail, report, err := agent.InspectWithOptions(name, cfg, local, role, rootOpts.runnerOptions(), "repository_inspection")
+					capabilities = append(capabilities, report)
+					return detail, err
 				}
 				checks = append(checks, doctorAgentChecksWithRunner(cfg, !checkGHAuth, preflight, run)...)
 				checks = append(checks, run.Run("security", "plan-reviewers", func() harness.DoctorCheck { return doctorReviewerCheck(cfg) }))
@@ -111,11 +114,14 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 				if failures > 0 {
 					status = "failed"
 				}
-				if err := writeJSON(cmd, map[string]any{"kind": "doctor", "status": status, "checks": checks}); err != nil {
+				if err := writeJSON(cmd, map[string]any{"kind": "doctor", "status": status, "checks": checks, "tool_capabilities": capabilities}); err != nil {
 					return err
 				}
 			} else {
 				out := cmd.OutOrStdout()
+				for _, report := range capabilities {
+					fmt.Fprint(out, sandbox.FormatToolCapabilities(report))
+				}
 				fmt.Fprintln(out, "CATEGORY   CHECK                                    STATUS   DETAIL")
 				fmt.Fprintln(out, "--------   -----                                    ------   ------")
 				for _, c := range checks {
@@ -275,7 +281,7 @@ func doctorBrowserProfileCheck(ctx context.Context, cfg *contract.SwarmConfig, p
 		detail = "requested/available in inspected repository config; native Linux Codex developer/tester: owned stdio swarm_shell; native shell network disabled"
 		if err := probe(ctx); err != nil {
 			status = "FAIL"
-			detail = "requested/unavailable: " + err.Error()
+			detail = "requested/unavailable: unavailable; " + sandbox.CapabilityReason("unavailable")
 		}
 	}
 	return harness.DoctorCheck{Category: "execution", Name: "browser-profile", Status: status, Detail: detail}

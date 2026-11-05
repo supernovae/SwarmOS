@@ -8,6 +8,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -787,6 +788,13 @@ func showHarnessFile(worktreePath, baseSHA, path string) (string, error) {
 // CompileHarnessBundleAt builds the active prompt only from base-pinned
 // harness instructions so a candidate cannot alter its own execution policy.
 func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, prReview ...bool) error {
+	return CompileHarnessBundleWithCapabilitiesAt(worktreePath, wu, wf, artifacts, role, effectiveGate, baseSHA, nil, prReview...)
+}
+
+// CompileHarnessBundleWithCapabilitiesAt accepts observations supplied by the
+// coordinator. Missing observations remain not probed; Markdown grants nothing.
+func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, report *sandbox.ToolCapabilityReport, prReview ...bool) error {
+
 	if role == "" {
 		role = "planner"
 	}
@@ -811,6 +819,9 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 		return err
 	}
 	guidance := bundleGuidance{effectiveGate: effectiveGate}
+	if report != nil {
+		guidance.capabilities = sandbox.FormatToolCapabilities(*report)
+	}
 	for _, optPath := range []string{".swarm/goals.md", ".swarm/SKILLS.md"} {
 		if content, optErr := showHarnessFile(worktreePath, baseSHA, optPath); optErr == nil && strings.TrimSpace(content) != "" {
 			guidance.policy = append(guidance.policy, strings.TrimSpace(content))
@@ -997,6 +1008,10 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 	sys.WriteString("## Approved validation policy\n\n```yaml\n")
 	sys.WriteString(strings.TrimSpace(validationDoc))
 	sys.WriteString("\n```\n\nThe approved validation policy is a coordinator-owned reference, not a per-role execution list. After agent roles finish, the coordinator runs the complete trusted-base required policy once on the final candidate. Agent observations remain advisory and cannot satisfy claim-bound validation or publication. Roles follow their focused responsibilities in TEST_PLAN.md. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
+	if guidance.capabilities == "" {
+		guidance.capabilities = "Tool capabilities: not_probed. Runtime observations were not supplied by the coordinator. Launch checks the approved execution boundary. Node scheduling capabilities are separate declarations.\n"
+	}
+	sys.WriteString("## Tool capabilities\n\n" + guidance.capabilities + "\n")
 	sys.WriteString(strings.TrimSpace(rolePrompt) + "\n\n")
 	if guidance.profileDoc != "" {
 		sys.WriteString(strings.TrimSpace(guidance.profileDoc) + "\n\n")

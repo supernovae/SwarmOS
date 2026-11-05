@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
@@ -86,5 +88,60 @@ func TestInspectionCommandSessionPerExecution(t *testing.T) {
 	}
 	if len(seen) != 2 || seen[0] == nil || seen[1] == nil || seen[0] == seen[1] {
 		t.Fatalf("commands did not each receive a fresh inspection session: %v", seen)
+	}
+}
+
+func TestToolCapabilityOptionalFailureDryRun(t *testing.T) {
+	f := newCLIFixture(t)
+	n := strconv.Itoa(f.create(t, "agent"))
+	f.must(t, "issue", "approve", n)
+	for _, format := range []string{"json", "text"} {
+		var output bytes.Buffer
+		calls := 0
+		cmd := f.command(&RootOptions{inspectCapabilityEntry: func(id string) error {
+			if id == "browser" {
+				calls++
+				return fmt.Errorf("TOKEN /home/private-user/secret")
+			}
+			return nil
+		}})
+		cmd.SetOut(&output)
+		cmd.SetErr(&output)
+		cmd.SetArgs([]string{"--root", f.root, "issue", "work", n, "--dry-run", "--agent", "mock", "--format=" + format})
+		if err := cmd.Execute(); err != nil {
+			t.Fatal(err, output.String())
+		}
+		if calls == 0 {
+			t.Fatal("report assembler was not exercised")
+		}
+		if strings.Contains(output.String(), "TOKEN") || strings.Contains(output.String(), "/home/private-user") {
+			t.Fatal("secret escaped")
+		}
+		if format == "json" {
+			var result struct {
+				Plan workflow.PreflightResult `json:"effective_plan"`
+			}
+			if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Plan.Blockers) > 0 {
+				t.Fatal(result.Plan.Blockers)
+			}
+			for _, r := range result.Plan.ToolCapabilities {
+				if r.Entries[1].Runtime != "not_probed" {
+					t.Fatal(r)
+				}
+			}
+		} else if !strings.Contains(output.String(), "runtime=not_probed") {
+			t.Fatal(output.String())
+		}
+	}
+	issue, _ := strconv.Atoi(n)
+	if st := f.state(t, issue); st.Lease.ClaimID != "" {
+		t.Fatal("dry-run acquired a claim")
+	}
+	_, err := f.run("issue", "work", n, "--dry-run", "--format=text", "--json")
+	if err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatal(err)
 	}
 }

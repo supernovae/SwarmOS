@@ -1,0 +1,1 @@
+- Show authorized sandbox tool capabilities in doctor, task dry-run and role bundles, with JSON or text dry-run output and nonblocking optional diagnostics.

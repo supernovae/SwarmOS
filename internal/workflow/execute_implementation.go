@@ -41,7 +41,7 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 	if _, err := r.e.LeaseManager.UpdatePhase(r.ctx, r.opts.IssueNumber, r.opts.Owner, "implement", "active"); err != nil {
 		return false, err
 	}
-	if err := compileSetupBundle(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "developer", r.opts.PRNumber); err != nil {
+	if err := compileSetupBundleWithCapabilities(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "developer", r.opts.PRNumber, r.roleCapabilityReport("developer")); err != nil {
 		return false, err
 	}
 	if round > 0 {

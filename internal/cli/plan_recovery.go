@@ -99,6 +99,11 @@ func runCheckpointPlan(cmd *cobra.Command, root *RootOptions, arg string, opts w
 		return fmt.Errorf("checkpoint planning requires native isolated Codex or harness-tools Bubblewrap and agent plan mode")
 	}
 	if dryRun {
+		format, _ := cmd.Flags().GetString("format")
+		if format == "text" {
+			fmt.Fprintf(cmd.OutOrStdout(), "Checkpoint plan preview: claim_required=%t boundary_probe_required=%t validation_required=%t review_required=%t\n", p.ClaimRequired, p.BoundaryProbeRequired, p.ValidationRequired, p.ReviewRequired)
+			return nil
+		}
 		return writeJSON(cmd, map[string]any{"kind": "checkpoint-plan-dry-run", "checkpoint": p})
 	}
 	if showProgress {

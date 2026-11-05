@@ -580,3 +580,180 @@ func TestToolExecutorRecoveryBoundary(t *testing.T) {
 		t.Fatalf("recovery: %+v %v", observation, err)
 	}
 }
+
+func TestToolCapabilityPrototype(t *testing.T) {
+	for _, driver := range []string{"codex", "claude", "opencode", "omp"} {
+		for _, delegated := range []bool{false, true} {
+			if !delegated && driver != "codex" {
+				continue
+			}
+			for _, role := range []string{"developer", "planner", "reviewer"} {
+				for _, browser := range []bool{false, true} {
+					for _, verified := range []bool{false, true} {
+						r := ToolCapabilities(driver, role, "approved_task", delegated, true, verified, browser)
+						raw, err := json.Marshal(r)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if len(r.Entries) != 3 || !strings.Contains(FormatToolCapabilities(r), r.Entries[0].Transport) {
+							t.Fatal(string(raw))
+						}
+						if !verified && r.Entries[0].Usable {
+							t.Fatal("unprobed usable")
+						}
+						if role != "developer" && strings.Contains(strings.Join(r.Entries[0].Operations, ","), "write") {
+							t.Fatal("read-only write promise")
+						}
+						b := InspectCapabilityEntry(r.Entries[1], func() error { return errors.New("TOKEN /home/private-user/secret") })
+						raw, _ = json.Marshal(b)
+						if strings.Contains(string(raw), "TOKEN") || strings.Contains(string(raw), "/home/") || b.Runtime != "not_probed" || b.Usable {
+							t.Fatal(string(raw))
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestToolCapabilityAssemblyPanicAndTimeout(t *testing.T) {
+	e := ToolCapabilities("codex", "developer", "approved_task", true, true, true, true).Entries[1]
+	e = InspectCapabilityEntry(e, func() error { panic("TOKEN /home/private-user/secret") })
+	if e.Runtime != "not_probed" || e.Usable {
+		t.Fatal(e)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	start := time.Now()
+	e = InspectCapabilityEntry(e, func() error { <-release; return nil })
+	if e.Runtime != "not_probed" || e.Usable || time.Since(start) > 3*time.Second {
+		t.Fatal(e)
+	}
+}
+
+func TestToolCapabilityPreparationAndLaunch(t *testing.T) {
+	deps := Dependencies{Caches: []DependencyCache{{Ecosystem: "go", Dir: "/home/private-user/TOKEN"}, {Ecosystem: "TOKEN", Dir: "/secret"}}}
+	r := LaunchToolCapabilities("omp", "developer", true, false, true, deps)
+	if !r.Entries[0].ReadOnly || r.Entries[0].Limits.CommandSeconds != toolCommandSeconds {
+		t.Fatal(r)
+	}
+	if strings.Contains(strings.Join(r.Entries[0].Operations, ","), "write") {
+		t.Fatal("read-only launch promised writes")
+	}
+	b, _ := json.Marshal(r)
+	if strings.Contains(string(b), "TOKEN") || strings.Contains(string(b), "/home/") || r.Entries[2].Runtime != "available" || r.Entries[2].Usable {
+		t.Fatal(string(b))
+	}
+	r.Entries[2] = InspectCapabilityEntry(r.Entries[2], func() error { return errors.New("failure") })
+	r = PreparedCapabilities(r, deps)
+	if r.Entries[2].Runtime != "not_probed" {
+		t.Fatal("preparation overwrote report assembly failure")
+	}
+}
+
+func TestToolCapabilitySharedFields(t *testing.T) {
+	for _, tc := range []struct{ driver, tool, transport string }{
+		{"codex", "mcp__swarm.swarm_read", "owned_mcp"},
+		{"claude", "mcp__swarm__swarm_read", "owned_mcp"},
+		{"opencode", "swarm_swarm_read", "owned_mcp"},
+		{"omp", "swarm_read", "host_rpc"},
+	} {
+		r := ToolCapabilities(tc.driver, "developer", "approved_task", true, true, true, false)
+		e := r.Entries[0]
+		if e.Tools[0] != tc.tool || e.Transport != tc.transport || e.Limits.ArgumentBytes != toolArgumentBytes || e.Limits.ReadEditBytes != toolReadEditBytes || e.Limits.CommandSeconds != toolCommandSeconds {
+			t.Fatal(e)
+		}
+		b, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded ToolCapabilityReport
+		if err := json.Unmarshal(b, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if FormatToolCapabilities(decoded) != FormatToolCapabilities(r) {
+			t.Fatal("text and JSON disagree")
+		}
+		if r.Entries[1].Declared || r.Entries[1].Authorized || r.Entries[1].Usable {
+			t.Fatal("optional browser enabled")
+		}
+	}
+	r := ToolCapabilities("codex", "developer", "approved_task", false, true, true, false)
+	if r.Entries[0].Limits.ArgumentBytes != 0 || r.Entries[0].Limits.CommandSeconds != 0 {
+		t.Fatal("executor limits attributed to native tools")
+	}
+}
+
+func TestToolCapabilityNativeBrowserServerTools(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := codexBrowserPolicy([]string{"mcp_servers={}"}, executable, t.TempDir(), ToolExecutor{Work: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, enabled, ok := strings.Cut(policy[0], "enabled_tools=")
+	if !ok {
+		t.Fatal("missing enabled tools")
+	}
+	enabled, _, ok = strings.Cut(enabled, "]")
+	if !ok {
+		t.Fatal("invalid enabled tools")
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(enabled+"]"), &names); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	if err := ServeTools(t.Context(), ToolExecutor{}, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &output); err != nil {
+		t.Fatal(err)
+	}
+	var response struct {
+		Result struct {
+			Tools []ToolDefinition `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(output.String()), &response); err != nil {
+		t.Fatal(err)
+	}
+	var expected []string
+	for _, definition := range response.Result.Tools {
+		for _, name := range names {
+			if definition.Name == name {
+				if !strings.Contains(policy[0], name+`={approval_mode="approve"}`) {
+					t.Fatalf("tool %s lacks approval", name)
+				}
+				expected = append(expected, "mcp__swarm."+name)
+			}
+		}
+	}
+	if len(expected) == 0 || len(expected) != len(names) || len(expected) != len(response.Result.Tools) {
+		t.Fatal("enabled server definitions differ", names, response.Result.Tools)
+	}
+	for _, role := range []string{"developer", "tester", "planner", "reviewer"} {
+		t.Run(role, func(t *testing.T) {
+			report := ToolCapabilities("codex", role, "approved_task", false, true, true, true)
+			native, mcp := report.Entries[0], report.Entries[1]
+			if strings.Join(mcp.Tools, ",") != strings.Join(expected, ",") {
+				t.Fatalf("report tools %v; enabled server tools %v", mcp.Tools, expected)
+			}
+			if native.Limits != (ToolCapabilityLimits{}) || mcp.Limits != (ToolCapabilityLimits{ArgumentBytes: toolArgumentBytes, ReadEditBytes: toolReadEditBytes, CommandSeconds: toolCommandSeconds}) {
+				t.Fatal("native and MCP limits", native.Limits, mcp.Limits)
+			}
+			ro := role == "planner" || role == "reviewer"
+			for _, operation := range []string{"write", "edit"} {
+				has := false
+				for _, actual := range mcp.Operations {
+					has = has || actual == operation
+				}
+				if has == ro {
+					t.Fatal("incorrect writable operation", mcp)
+				}
+			}
+			if ro && (!mcp.ReadOnly || mcp.Authorized || mcp.Usable || mcp.Reason != "role_denied" || !strings.Contains(strings.Join(mcp.Restrictions, ","), "write/edit denied")) {
+				t.Fatal("read-only MCP permission", mcp)
+			}
+		})
+	}
+}

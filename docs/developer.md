@@ -794,3 +794,32 @@ For live PR review, retain:
 Offline command-sequence and refusal tests run with
 `go test -timeout=2m ./cmd/public-fork-regression -count=1`. Live fixture execution
 is an operator review step using the current driver.
+
+
+## Inspecting task tools
+
+Before claiming work, inspect the tools permitted by the task's approved policy:
+
+```bash
+swarm issue work 380 --dry-run
+swarm issue work 380 --dry-run --format=text
+swarm repo doctor --json
+```
+
+Dry-run defaults to JSON; `--format=json` selects it explicitly.
+`--json` conflicts with `--format=text`. Doctor inspects the repository
+configuration, while task dry-run reads the approved base. Each report labels
+that policy context.
+
+The shared report separates declared, authorized and runtime status. An entry
+is usable only after authorization and applicable runtime verification.
+`not_probed` means readiness has not been verified. Optional report assembly
+failures remain informational; existing execution checks and an explicitly
+enabled browser profile retain their preflight requirements.
+
+Role bundles include coordinator-supplied tool observations. Bundles without
+runtime observations say `not_probed`; launch still checks the boundary.
+Read-only roles may see write tool names, but workspace writes remain denied.
+Dependency preparation supplies read-only caches and resolved toolchain mounts;
+it does not grant agent network access. Node capability labels and WorkUnit
+`required_capabilities` continue to select workers independently of this report.

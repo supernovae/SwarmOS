@@ -25,7 +25,7 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	if err := compileSetupBundle(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "tester", r.opts.PRNumber); err != nil {
+	if err := compileSetupBundleWithCapabilities(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "tester", r.opts.PRNumber, r.roleCapabilityReport("tester")); err != nil {
 		return false, err
 	}
 	if err := ensurePlanArtifactsInWorktree(r.wtPath, r.st); err != nil {

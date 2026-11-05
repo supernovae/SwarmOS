@@ -13,6 +13,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 )
 
 var prCommitSHA = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
@@ -20,10 +21,17 @@ var prCommitSHA = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 // CompilePRHarnessBundleAt reads the approved issue's base-pinned harness,
 // then replaces only the managed active pointer for the PR lifecycle.
 func CompilePRHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, arts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, prNumber int, revision ...*RevisionPlanContext) error {
+	return CompilePRHarnessBundleWithCapabilitiesAt(worktreePath, wu, wf, arts, role, effectiveGate, baseSHA, prNumber, nil, revision...)
+}
+
+// CompilePRHarnessBundleWithCapabilitiesAt carries coordinator observations to
+// PR bundles without consuming candidate-written reports.
+func CompilePRHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, arts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, prNumber int, report *sandbox.ToolCapabilityReport, revision ...*RevisionPlanContext) error {
+
 	if prNumber <= 0 || wu == nil {
 		return fmt.Errorf("PR number and linked WorkUnit are required")
 	}
-	if err := CompileHarnessBundleAt(worktreePath, wu, wf, arts, role, effectiveGate, baseSHA, true); err != nil {
+	if err := CompileHarnessBundleWithCapabilitiesAt(worktreePath, wu, wf, arts, role, effectiveGate, baseSHA, report, true); err != nil {
 		return err
 	}
 	var c *RevisionPlanContext

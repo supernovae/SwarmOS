@@ -66,3 +66,32 @@ Agent budgets default to 60 minutes and can be configured globally or per role i
 ### Browser previews
 
 Approved-base `execution.browser_profile: true` enables task-local Chromium in the Bubblewrap tools on Linux. Provision Playwright Chromium on the host and provide a systemd user manager with cgroup v2 memory accounting; preflight verifies the fixed 2 GiB scope before work starts. Run the preview server and browser in one `swarm_shell` command, use fresh task-local browser state, and save DOM, screenshots and logs to files. Each command has private loopback and a two-minute lifetime. Chromium uses `--no-sandbox` inside the Bubblewrap boundary, with the browser cache mounted read-only. See [setup and the preview example](../project.md#task-local-browser-previews).
+
+
+## Inspecting task tools
+
+Before claiming work, inspect the tools permitted by the task's approved policy:
+
+```bash
+swarm issue work 380 --dry-run
+swarm issue work 380 --dry-run --format=text
+swarm repo doctor --json
+```
+
+Dry-run defaults to JSON; `--format=json` selects it explicitly.
+`--json` conflicts with `--format=text`. Doctor inspects the repository
+configuration, while task dry-run reads the approved base. Each report labels
+that policy context.
+
+The shared report separates declared, authorized and runtime status. An entry
+is usable only after authorization and applicable runtime verification.
+`not_probed` means readiness has not been verified. Optional report assembly
+failures remain informational; existing execution checks and an explicitly
+enabled browser profile retain their preflight requirements.
+
+Role bundles include coordinator-supplied tool observations. Bundles without
+runtime observations say `not_probed`; launch still checks the boundary.
+Read-only roles may see write tool names, but workspace writes remain denied.
+Dependency preparation supplies read-only caches and resolved toolchain mounts;
+it does not grant agent network access. Node capability labels and WorkUnit
+`required_capabilities` continue to select workers independently of this report.

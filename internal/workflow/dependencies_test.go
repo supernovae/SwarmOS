@@ -324,7 +324,7 @@ func TestBrowserProfilePreflightNoClaim(t *testing.T) {
 		return os.LookupEnv(key)
 	}
 	_, err = eng.PreflightForClaim(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue, Phase: "plan", Headless: true})
-	if err == nil || !strings.Contains(err.Error(), "browser profile requested/unavailable") || !strings.Contains(err.Error(), "Bubblewrap") {
+	if err == nil || !strings.Contains(err.Error(), "browser profile requested/unavailable") || !strings.Contains(err.Error(), sandbox.CapabilityReason("unavailable")) {
 		t.Fatalf("preflight: %v", err)
 	}
 	st, err := eng.LeaseManager.GetCurrentState(t.Context(), issue)

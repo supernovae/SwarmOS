@@ -165,7 +165,7 @@ func (e ToolExecutor) Run(ctx context.Context, script string, stdout, stderr io.
 			return err
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, toolCommandSeconds*time.Second)
 	defer cancel()
 	cmd, err := e.command(ctx, script, args...)
 	if err != nil {

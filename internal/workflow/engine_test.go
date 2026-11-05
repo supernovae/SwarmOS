@@ -21,6 +21,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -1329,5 +1330,26 @@ func TestRejectedPlanContextFiltersStructuredFeedback(t *testing.T) {
 	_, _, feedback = rejectedPlanContext(st)
 	if feedback != body {
 		t.Fatal("human feedback changed")
+	}
+}
+
+func TestToolCapabilityRoleBundleSelection(t *testing.T) {
+	root, _, _ := setupProjectPlanTestRepo(t)
+	raw, err := gitfixture.Command(t, root, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &lease.IssueState{BaseSHA: strings.TrimSpace(string(raw)), EffectiveGate: contract.GateNone}
+	wu := &contract.WorkUnit{ID: "ISSUE-380", IssueNumber: 380, Workflow: "feature"}
+	for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
+		report := sandbox.ToolCapabilities("omp", role, "approved_task", true, true, false, false)
+		run := &workRun{pre: &PreflightResult{ToolCapabilities: map[string]sandbox.ToolCapabilityReport{role: report}}}
+		if err := compileExecutionBundleWithCapabilities(root, wu, nil, st, role, 0, run.roleCapabilityReport(role)); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(filepath.Join(root, ".swarm/active/SYSTEM_PROMPT.md"))
+		if err != nil || !strings.Contains(string(raw), sandbox.FormatToolCapabilities(report)) {
+			t.Fatal("selected role observation lost", err)
+		}
 	}
 }

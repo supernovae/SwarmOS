@@ -78,6 +78,29 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		return err
 	})
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		rerun := cmd.CommandPath()
+		for _, arg := range args {
+			if _, err := strconv.Atoi(arg); err == nil {
+				rerun += " " + arg
+			}
+		}
+		if opts.Fork {
+			rerun = strings.Replace(rerun, "swarm ", "swarm --fork ", 1)
+		}
+		var notice func(string, int, int, time.Duration)
+		machine, _ := cmd.Flags().GetBool("json")
+		quiet, _ := cmd.Flags().GetBool("quiet")
+		enabled := true
+		if cmd.Flags().Lookup("progress") != nil {
+			enabled, _ = cmd.Flags().GetBool("progress")
+		}
+		if !machine && !quiet && enabled {
+			out := progressWriter(cmd)
+			notice = func(reason string, next, limit int, delay time.Duration) {
+				fmt.Fprintf(out, "GitHub unreachable (%s); retry %d/%d in %s\n", reason, next, limit, delay.Round(time.Second))
+			}
+		}
+		cmd.SetContext(gitcredential.WithNetworkRetry(cmd.Context(), rerun, notice))
 		if cmd.Name() == "internal-native-exec" {
 			return nil
 		}

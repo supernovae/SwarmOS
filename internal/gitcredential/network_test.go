@@ -3,9 +3,13 @@ package gitcredential
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -530,5 +534,178 @@ func TestNetworkLimitedRejectsOversizedAdvertisement(t *testing.T) {
 	}
 	if _, err := NetworkLimited(context.Background(), repo, false, 0, "ls-remote", "origin"); err == nil {
 		t.Fatal("invalid cap accepted")
+	}
+}
+
+func TestSharedRetryClassification(t *testing.T) {
+	for _, tc := range []struct {
+		op, diagnostic string
+		retry          bool
+	}{
+		{"fetch", "Connection timed out", true}, {"ls-remote", "Could not resolve host", true},
+		{"fetch", "connection reset", true}, {"fetch", "The requested URL returned error: 503", true},
+		{"push", "Could not resolve host", true}, {"push", "Failed to connect to github.com port 443", true},
+		{"push", "connection reset", false}, {"push", "Connection timed out", false},
+		{"push", "[rejected] stale info; Could not resolve host", false},
+		{"fetch", "authentication failed; Connection timed out", false},
+		{"fetch", "repository not found; connection reset", false},
+	} {
+		t.Run(tc.op+tc.diagnostic, func(t *testing.T) {
+			got := RetryReason(RetryObservation{Operation: tc.op, Err: errors.New("exit"), Diagnostic: tc.diagnostic}) != ""
+			if got != tc.retry {
+				t.Fatalf("retry=%v, want %v", got, tc.retry)
+			}
+		})
+	}
+	for _, cause := range []error{ErrInterrupted, ErrCleanupIncomplete, &KnownResultCleanupError{ExitCode: 0}} {
+		if RetryReason(RetryObservation{Operation: "push", Err: cause, Diagnostic: "Could not resolve host"}) != "" {
+			t.Fatal("replayed ambiguous push")
+		}
+	}
+}
+
+func TestSharedRetryBudgetAndCancellation(t *testing.T) {
+	oldWait, oldJitter, oldNow := retryWait, retryJitter, retryNow
+	t.Cleanup(func() { retryWait, retryJitter, retryNow = oldWait, oldJitter, oldNow })
+	retryJitter = func(d time.Duration) time.Duration { return d }
+	var waits []time.Duration
+	retryWait = func(ctx context.Context, d time.Duration) error { waits = append(waits, d); return ctx.Err() }
+	ctx := WithNetworkRetry(context.Background(), "swarm issue work 462", func(string, int, int, time.Duration) {})
+	var p RetryPolicy
+	for i := 0; i < 4; i++ {
+		again, err := p.Next(ctx, RetryObservation{Operation: "fetch", Diagnostic: "connection reset"})
+		if err != nil || again != (i < 3) {
+			t.Fatalf("attempt %d: %v %v", i, again, err)
+		}
+	}
+	if len(waits) != 3 || waits[0] != 8*time.Second || waits[1] != 16*time.Second || waits[2] != 32*time.Second {
+		t.Fatalf("waits %v", waits)
+	}
+	sentinel := errors.New("original")
+	err := p.Error(ctx, "git fetch", sentinel)
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "4 attempt(s); rerun swarm issue work 462") {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	var q RetryPolicy
+	if _, err := q.Next(canceled, RetryObservation{Operation: "GET", Status: 503}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func TestSharedRetryAfter(t *testing.T) {
+	oldWait, oldJitter, oldNow := retryWait, retryJitter, retryNow
+	t.Cleanup(func() { retryWait, retryJitter, retryNow = oldWait, oldJitter, oldNow })
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	retryNow = func() time.Time { return now }
+	retryJitter = func(time.Duration) time.Duration { return time.Second }
+	var waited time.Duration
+	retryWait = func(_ context.Context, d time.Duration) error { waited = d; return nil }
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+		again bool
+	}{
+		{"12", 12 * time.Second, true}, {now.Add(20 * time.Second).Format(http.TimeFormat), 20 * time.Second, true},
+		{"61", 0, false}, {"999999999999999999", 0, false}, {"malformed", time.Second, true}, {"-1", time.Second, true},
+	} {
+		var p RetryPolicy
+		waited = 0
+		again, err := p.Next(WithNetworkRetry(context.Background(), "", nil), RetryObservation{Operation: "GET", Status: 429, Header: map[string][]string{"Retry-After": {tc.value}}})
+		if err != nil || again != tc.again || waited != tc.want {
+			t.Errorf("%q: %v %v %s", tc.value, again, err, waited)
+		}
+	}
+}
+
+func TestNetworkRetryActualTransport(t *testing.T) {
+	oldWait := retryWait
+	t.Cleanup(func() { retryWait = oldWait })
+	retryWait = func(context.Context, time.Duration) error { return nil }
+	for _, op := range []string{"fetch", "ls-remote", "push"} {
+		for _, combined := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/%v", op, combined), func(t *testing.T) {
+				root := t.TempDir()
+				script := `#!/bin/sh
+printf '%s\n' "$*" >> calls
+if [ ! -f attempted ]; then
+ touch attempted
+ echo 'fatal: Could not resolve host: example.invalid' >&2
+ exit 128
+fi
+printf 'success\n'
+`
+				if err := testutil.WriteExecutable(filepath.Join(root, "git"), []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+				args := []string{op, "origin"}
+				if op == "push" {
+					args = append(args, "--force-with-lease=refs/heads/task:abc", "HEAD:refs/heads/task")
+				}
+				output, err := Network(WithNetworkRetry(t.Context(), "swarm issue work 462", nil), root, combined, args...)
+				if err != nil || string(output) != "success\n" {
+					t.Fatalf("%q %v", output, err)
+				}
+				calls, err := os.ReadFile(filepath.Join(root, "calls"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+				if len(lines) != 2 || lines[0] != lines[1] || lines[0] != strings.Join(args, " ") {
+					t.Fatalf("replayed argv: %q", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestNetworkRetryExhaustionAndImmediateRefusal(t *testing.T) {
+	oldWait := retryWait
+	t.Cleanup(func() { retryWait = oldWait })
+	retryWait = func(context.Context, time.Duration) error { return nil }
+	for _, tc := range []struct {
+		op, diagnostic string
+		calls          int
+	}{
+		{"fetch", "connection reset fixture-secret", 4},
+		{"push", "connection reset fixture-secret", 1},
+		{"push", "[rejected] stale info; Could not resolve host", 1},
+		{"fetch", "Authentication failed; Connection timed out", 1},
+	} {
+		t.Run(tc.op+tc.diagnostic, func(t *testing.T) {
+			root := t.TempDir()
+			script := "#!/bin/sh\nprintf 'call\\n' >> calls\necho '" + tc.diagnostic + "' >&2\nexit 128\n"
+			if err := testutil.WriteExecutable(filepath.Join(root, "git"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+			notices := 0
+			ctx := WithNetworkRetry(t.Context(), "swarm issue work 462", func(reason string, next, limit int, delay time.Duration) {
+				notices++
+				if strings.Contains(reason, "fixture-secret") || next != notices+1 || limit != 4 {
+					t.Fatal(reason, next, limit)
+				}
+			})
+			_, err := Network(ctx, root, false, tc.op, "origin")
+			if err == nil || strings.Contains(err.Error(), "fixture-secret") {
+				t.Fatal(err)
+			}
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("lost exit error: %v", err)
+			}
+			calls, readErr := os.ReadFile(filepath.Join(root, "calls"))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if strings.Count(string(calls), "call") != tc.calls || notices != tc.calls-1 {
+				t.Fatalf("calls=%q notices=%d", calls, notices)
+			}
+			if tc.calls == 4 && !strings.Contains(err.Error(), "4 attempt(s); rerun swarm issue work 462") {
+				t.Fatal(err)
+			}
+		})
 	}
 }

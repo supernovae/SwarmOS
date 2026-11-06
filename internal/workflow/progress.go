@@ -322,3 +322,10 @@ func (p *workProgress) retry(reason string, used, limit int) {
 	defer p.mu.Unlock()
 	p.retryReason, p.retryUsed, p.retryLimit = reason, used, limit
 }
+
+func (p *workProgress) retryContext(ctx context.Context) context.Context {
+	if p != nil && p.session != nil {
+		return p.session.RetryContext(ctx)
+	}
+	return ctx
+}

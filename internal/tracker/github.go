@@ -56,6 +56,7 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 		return nil, err
 	}
 	options := api.ClientOptions{}
+	options.Transport = githubRetryTransport{base: http.DefaultTransport}
 	if token != "" && (source == "SWARM_GITHUB_TOKEN" || source == gitcredential.TokenCommandEnv) {
 		host := strings.TrimSpace(os.Getenv("GH_HOST"))
 		if host == "" {
@@ -77,7 +78,9 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 	if err != nil {
 		return nil, errors.New("failed to initialize CI evidence client")
 	}
-	inventoryClient, err := newInventoryRESTClient(options)
+	inventoryOptions := options
+	inventoryOptions.Transport = nil
+	inventoryClient, err := newInventoryRESTClient(inventoryOptions)
 	if err != nil {
 		return nil, errors.New("failed to initialize storage inventory client")
 	}
@@ -1042,4 +1045,65 @@ func (g *GitHubTracker) RepositoryOwnerType(ctx context.Context) (string, error)
 	}
 	err := g.client.DoWithContext(ctx, "GET", fmt.Sprintf("repos/%s/%s", g.owner, g.repo), nil, &metadata)
 	return metadata.Owner.Type, err
+}
+
+// githubRetryTransport shares Git's classification and wait budget. It sits
+// below go-gh's headers and above the base transport, so discarded responses
+// cannot reach API decoding or verbose response logging.
+type githubRetryTransport struct{ base http.RoundTripper }
+
+func (t githubRetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	var policy gitcredential.RetryPolicy
+	current := req
+	for {
+		resp, err := t.base.RoundTrip(current)
+		observation := gitcredential.RetryObservation{Operation: req.Method, Err: err}
+		if resp != nil {
+			observation.Status, observation.Header = resp.StatusCode, resp.Header
+			if req.Method == "GET" && resp.StatusCode == 403 && resp.Header.Get("Retry-After") == "" && resp.Header.Get("X-RateLimit-Remaining") != "0" {
+				// Inspect at most 4 KiB; restore every consumed byte for final API decoding.
+				prefix, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				resp.Body = struct {
+					io.Reader
+					io.Closer
+				}{io.MultiReader(bytes.NewReader(prefix), resp.Body), resp.Body}
+				if readErr == nil {
+					observation.SecondaryLimit = bytes.Contains(bytes.ToLower(prefix), []byte("you have exceeded a secondary rate limit"))
+				}
+			}
+		}
+		// A body without GetBody cannot be replayed, even after a dial failure.
+		replayable := req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
+		if !replayable {
+			policy.Attempts = 1
+			if err != nil {
+				return resp, policy.Error(req.Context(), "GitHub REST "+req.Method, err)
+			}
+			return resp, nil
+		}
+		again, waitErr := policy.Next(req.Context(), observation)
+		if waitErr != nil {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			return nil, policy.Error(req.Context(), "GitHub REST "+req.Method, waitErr)
+		}
+		if !again {
+			if err != nil {
+				return resp, policy.Error(req.Context(), "GitHub REST "+req.Method, err)
+			}
+			return resp, nil
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		current = req.Clone(req.Context())
+		if req.GetBody != nil {
+			body, bodyErr := req.GetBody()
+			if bodyErr != nil {
+				return nil, policy.Error(req.Context(), "GitHub REST "+req.Method, bodyErr)
+			}
+			current.Body = body
+		}
+	}
 }

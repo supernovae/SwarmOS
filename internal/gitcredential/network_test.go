@@ -724,3 +724,20 @@ func TestSharedRetryMutationRequiresDialOperation(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedRetryRejectsMixedPushEvidence(t *testing.T) {
+	for _, evidence := range []string{"Connected to proxy; Could not resolve host", "Could not resolve host; upload completely sent off", "Writing objects: 100%; Failed to connect to github.com", "Could not resolve host; remote end hung up"} {
+		if reason := RetryReason(RetryObservation{Operation: "push", Diagnostic: evidence}); reason != "" {
+			t.Fatalf("ambiguous push retried: %q", evidence)
+		}
+	}
+}
+
+func TestSharedRetryOverflowingRetryAfter(t *testing.T) {
+	var p RetryPolicy
+	ctx := WithNetworkRetry(t.Context(), "swarm issue work 462", func(string, int, int, time.Duration) { t.Fatal("scheduled early retry") })
+	again, err := p.Next(ctx, RetryObservation{Operation: "GET", Status: 429, Header: http.Header{"Retry-After": {"999999999999999999999999999999999999"}}})
+	if again || err != nil {
+		t.Fatalf("again=%v err=%v", again, err)
+	}
+}

@@ -44,6 +44,8 @@ The enforced controls in the Git-CAS workflow are:
 
 HTML comments are stripped before parsing an issue contract. This reduces one hidden-text input path; it does **not** prevent prompt injection in visible issue text, source files, tool output, dependencies, or an agent's external context. Treat all untrusted content as data and review generated plans and changes.
 
+When implementation checkpoint publication fails, SwarmOS retains the local commit and developer report. For a same-repository issue with a recorded predecessor, the error gives a `swarm issue reconcile` command pinned to both full commit SHAs. Inspect the candidate before running it; reconciliation checks the claim, approval, candidate and remote head. Fork checkpoints and PR revisions require their existing workflows because issue checkpoint reconciliation supports direct upstream issues only.
+
 ## Writable agent returns
 
 Before importing developer or tester results, SwarmOS checks every added, changed, removed, or mode-changed file against protected paths from the approved base. Protected edits require an approved WorkUnit with `allow_harness_changes`. Fork runs retain the stricter prohibition on `.swarm/` and `.github/workflows/` changes, with exact role reports permitted.

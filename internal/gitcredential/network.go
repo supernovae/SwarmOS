@@ -326,7 +326,7 @@ func RetryReason(o RetryObservation) string {
 		}
 	}
 	if o.Operation == "push" {
-		for _, ambiguous := range []string{"connection reset", "remote:", "unexpected disconnect", "empty reply", "eof", "http 5", "error: 5", "broken pipe", "send failure", "recv failure"} {
+		for _, ambiguous := range []string{"connection reset", "remote:", "unexpected disconnect", "empty reply", "eof", "http 5", "error: 5", "broken pipe", "send failure", "recv failure", "connected to", "upload", "sent off", "writing objects", "receiving objects", "remote end hung up"} {
 			if strings.Contains(d, ambiguous) {
 				return ""
 			}
@@ -424,6 +424,10 @@ func (p *RetryPolicy) Next(ctx context.Context, o RetryObservation) (bool, error
 			if seconds > 0 {
 				requested = time.Duration(seconds) * time.Second
 			}
+		} else if strings.Trim(value, "0123456789") == "" {
+			// An overflowing delta-seconds value still requests a wait beyond
+			// our budget; treating it as malformed would retry too early.
+			return false, nil
 		} else if date, err := http.ParseTime(value); err == nil {
 			requested = date.Sub(retryNow())
 		}

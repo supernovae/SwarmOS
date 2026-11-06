@@ -83,11 +83,12 @@ flowchart TD
 
 ### Ledger ref namespaces
 
-SwarmOS keeps three ledgers on the upstream remote: authoritative issue state, permanent checkpoint retention, and fork contributor claim indexes. `ledger_namespace` in `.swarm/config.yaml` chooses where they live:
+SwarmOS keeps authoritative issue state, checkpoint retention, fork contributor claim indexes, and an archive index on the upstream remote. `ledger_namespace` in `.swarm/config.yaml` chooses where they live:
 
 | Ledger | `ledger_namespace: branch` | `ledger_namespace: hidden` |
 |---|---|---|
 | Issue state | `refs/heads/swarm-state/issue-<N>` | `refs/swarm/state/issue-<N>` |
+| Archive index | `refs/heads/swarm-archive` | `refs/swarm/archive` |
 | Checkpoint retention | `refs/heads/swarm-checkpoints/issue-<N>/<SHA>` | `refs/swarm/checkpoints/issue-<N>/<SHA>` |
 | Fork contributor index | `refs/heads/swarm-contributors/<login>` | `refs/swarm/contributors/<login>` |
 
@@ -315,3 +316,12 @@ Contributors can come into a SwarmOS task, finish it, and leave, and the rest of
 - **[Day in the Life of a Repo Admin (`docs/ADMIN_GUIDE.md`)](ADMIN_GUIDE.md)** — End-to-end maintainer playbook for roadmap decomposition, backlog scanning, and PR auditing.
 - **[Project & Maintainer Setup (`docs/project.md`)](project.md)** — Initialize `.swarm/`, configure validation checks, and manage Issue Forms.
 - **[Developer & Worker Guide (`docs/developer.md`)](developer.md)** — Interactive `swarm issue stage` workflows, handoffs, and multi-repo worker pools.
+
+### Archiving finished issue ledgers
+
+Maintainers can relocate a finished issue's state and checkpoint refs to a Git
+archive to keep the upstream remote quieter. See [Archive and restore](WORKFLOWS.md#archive-and-restore)
+for the preview, apply, and restore commands. Branch-mode rulesets must allow the
+archiving identity to delete `swarm-state/**` and `swarm-checkpoints/**` and update
+`swarm-archive`. Keep these permissions limited to trusted maintainers. Hidden
+refs use the repository's write permission. Both layouts require atomic pushes.

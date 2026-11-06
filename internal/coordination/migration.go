@@ -57,6 +57,18 @@ func (s *GitStore) MigrateLedgerRefs(ctx context.Context, now time.Time, dryRun 
 		if err := validateLedgerRef(layout, ref, refs[ref]); err != nil {
 			return nil, err
 		}
+		if ref == layout.ArchiveRef() {
+			if _, err := s.run(ctx, "", "fetch", "--no-write-fetch-head", s.Remote(), refs[ref]); err != nil {
+				return nil, err
+			}
+			raw, err := s.run(ctx, "", "show", refs[ref]+":archive.json")
+			if err != nil {
+				return nil, err
+			}
+			if _, err := parseArchiveIndex([]byte(raw)); err != nil {
+				return nil, fmt.Errorf("invalid archive index: %w", err)
+			}
+		}
 		if strings.HasPrefix(ref, layout.StatePrefix()) {
 			states = append(states, ref)
 		}
@@ -179,6 +191,9 @@ func ledgerLayoutOf(ref string) (RefLayout, bool) {
 // validateLedgerRef checks the shape SwarmOS writes, so migration never
 // carries an unknown ref into the hidden namespace.
 func validateLedgerRef(layout RefLayout, ref, sha string) error {
+	if ref == layout.ArchiveRef() {
+		return validCheckpointSHA(sha)
+	}
 	invalid := fmt.Errorf("unexpected ledger ref %s; remove or rename it before migrating", ref)
 	if rest, ok := strings.CutPrefix(ref, layout.StatePrefix()); ok {
 		if !validIssueName(rest) {

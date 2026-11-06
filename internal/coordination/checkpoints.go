@@ -24,6 +24,10 @@ func validCheckpointSHA(head string) error {
 // heads atomically, leased on the loaded state revision. A head missing locally
 // is fetched from the upstream remote first; an unavailable commit fails closed.
 func (s *GitStore) CompareAndSwapRetaining(ctx context.Context, n int, old string, next []byte, heads ...string) (string, error) {
+	fence, err := s.initialArchiveFence(ctx, n, old)
+	if err != nil {
+		return "", err
+	}
 	if len(heads) == 0 {
 		return "", fmt.Errorf("no checkpoint to retain")
 	}
@@ -62,6 +66,7 @@ func (s *GitStore) CompareAndSwapRetaining(ctx context.Context, n int, old strin
 		stateLease = stateRef + ":"
 	}
 	push := append([]string{"push", "--atomic", s.Remote(), "--force-with-lease=" + stateLease, commit + ":" + stateRef}, retention...)
+	push = append(push, fence...)
 	if err = s.push(ctx, push...); err != nil {
 		if publicationStatus(err) {
 			return "", err

@@ -170,6 +170,9 @@ func ParseArchiveManifest(data []byte) (*ArchiveManifest, error) {
 	if len(data) > MaxArchiveManifestBytes {
 		return nil, fmt.Errorf("archive manifest too large")
 	}
+	if err := ValidateArchiveJSON(data); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var m ArchiveManifest
@@ -183,4 +186,59 @@ func ParseArchiveManifest(data []byte) (*ArchiveManifest, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// ValidateArchiveJSON rejects duplicate object members, which otherwise let
+// different readers assign different authority to the same archive document.
+func ValidateArchiveJSON(data []byte) error {
+	d := json.NewDecoder(bytes.NewReader(data))
+	var value func(int) error
+	value = func(depth int) error {
+		if depth > 32 {
+			return fmt.Errorf("archive JSON nesting limit exceeded")
+		}
+		token, err := d.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := map[string]bool{}
+			for d.More() {
+				key, err := d.Token()
+				if err != nil {
+					return err
+				}
+				name, ok := key.(string)
+				if !ok || seen[name] {
+					return fmt.Errorf("duplicate or invalid archive object member")
+				}
+				seen[name] = true
+				if err = value(depth + 1); err != nil {
+					return err
+				}
+			}
+		case '[':
+			for d.More() {
+				if err = value(depth + 1); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("invalid archive JSON delimiter")
+		}
+		_, err = d.Token()
+		return err
+	}
+	if err := value(0); err != nil {
+		return err
+	}
+	if _, err := d.Token(); err != io.EOF {
+		return fmt.Errorf("trailing archive JSON data")
+	}
+	return nil
 }

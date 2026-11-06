@@ -155,3 +155,11 @@ func TestArchiveDestinationValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestArchiveDuplicateJSON(t *testing.T) {
+	for _, data := range []string{`{"version":1,"version":2}`, `{"entries":{"1":{},"1":{}}}`, `[] []`, strings.Repeat("[", 40) + strings.Repeat("]", 40)} {
+		if err := ValidateArchiveJSON([]byte(data)); err == nil {
+			t.Fatal("ambiguous or excessive document accepted")
+		}
+	}
+}

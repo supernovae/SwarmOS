@@ -271,6 +271,9 @@ func (s *GitStore) remoteSHA(ctx context.Context, ref string) (string, error) {
 	return sha, nil
 }
 func (s *GitStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	if err := s.archiveAdmission(ctx, n, false); err != nil {
+		return nil, "", err
+	}
 	ref := s.ref(n)
 	sha, err := s.remoteSHA(ctx, ref)
 	if err != nil {
@@ -289,6 +292,9 @@ func (s *GitStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 // LoadCheckpointPreview never fetches. An unavailable pinned state must be
 // fetched explicitly by the operator before a read-only preview can inspect it.
 func (s *GitStore) LoadCheckpointPreview(ctx context.Context, n int) ([]byte, string, error) {
+	if err := s.archiveAdmission(ctx, n, true); err != nil {
+		return nil, "", err
+	}
 	sha, err := s.remoteSHA(ctx, s.ref(n))
 	if err != nil {
 		return nil, "", err
@@ -301,6 +307,10 @@ func (s *GitStore) LoadCheckpointPreview(ctx context.Context, n int) ([]byte, st
 }
 
 func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next []byte) (string, error) {
+	fence, err := s.initialArchiveFence(ctx, n, old)
+	if err != nil {
+		return "", err
+	}
 	blob, err := s.run(ctx, string(next), "hash-object", "-w", "--stdin")
 	if err != nil {
 		return "", errors.Join(err, ctx.Err())
@@ -325,7 +335,7 @@ func (s *GitStore) CompareAndSwap(ctx context.Context, n int, old string, next [
 	if old == "" {
 		leaseArg = ref + ":"
 	}
-	return s.publishState(ctx, ref, old, commit, []string{"push", s.Remote(), "--force-with-lease=" + leaseArg, commit + ":" + ref})
+	return s.publishState(ctx, ref, old, commit, append([]string{"push", s.Remote(), "--force-with-lease=" + leaseArg, commit + ":" + ref}, fence...))
 }
 
 // commitRefsTransient deliberately recognizes only the observed complete Git
@@ -476,6 +486,10 @@ func (s *GitStore) CompareAndSwapAndReconcileCheckpoint(ctx context.Context, n i
 }
 
 func (s *GitStore) publishCheckpoint(ctx context.Context, n int, old string, next []byte, branch, head string, expected *string) (string, error) {
+	fence, err := s.initialArchiveFence(ctx, n, old)
+	if err != nil {
+		return "", err
+	}
 	if !strings.HasPrefix(branch, "swarm/issue-") || strings.Contains(branch, "..") || head == "" {
 		return "", fmt.Errorf("invalid checkpoint branch or head")
 	}
@@ -525,6 +539,7 @@ func (s *GitStore) publishCheckpoint(ctx context.Context, n int, old string, nex
 		return "", err
 	}
 	push := append([]string{"push", "--atomic", s.Remote(), "--force-with-lease=" + stateLease, "--force-with-lease=" + branchLease, commit + ":" + stateRef, head + ":" + branchRef}, retention...)
+	push = append(push, fence...)
 	if err = s.push(ctx, push...); err != nil {
 		if publicationStatus(err) {
 			return "", err
@@ -538,6 +553,12 @@ func (s *GitStore) publishCheckpoint(ctx context.Context, n int, old string, nex
 }
 
 func (s *GitStore) CompareAndSwapAndPublishPR(ctx context.Context, n int, oldState string, next []byte, branch, expectedHead, head string) (string, error) {
+	if oldState == "" {
+		return "", fmt.Errorf("publication requires existing state")
+	}
+	if err := s.archiveAdmission(ctx, n, false); err != nil {
+		return "", err
+	}
 	if oldState == "" || len(expectedHead) != 40 || len(head) != 40 || expectedHead == head || branch == "" || strings.HasPrefix(branch, "-") {
 		return "", fmt.Errorf("invalid PR publication identity")
 	}
@@ -787,6 +808,10 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 	if s.requestID <= 0 {
 		return "", fmt.Errorf("fork indexed store requires a positive request ID")
 	}
+	fence, err := s.git.initialArchiveFence(ctx, n, old)
+	if err != nil {
+		return "", err
+	}
 	stateRef := s.git.ref(n)
 	if err := s.git.checkLedger(ctx, stateRef); err != nil {
 		return "", err
@@ -830,6 +855,7 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 			return "", err
 		}
 		push := append([]string{"push", "--atomic", s.git.Remote(), "--force-with-lease=" + stateLease, stateCommit + ":" + stateRef}, retention...)
+		push = append(push, fence...)
 		if err := s.git.push(ctx, push...); err != nil {
 			if publicationStatus(err) {
 				return "", err
@@ -876,7 +902,7 @@ func (s *ForkIndexedStore) CompareAndSwap(ctx context.Context, n int, old string
 			return "", err
 		}
 		contribLease := contribRef + ":" + oldIndexSHA
-		if err := s.git.push(ctx, "push", "--atomic", s.git.Remote(), "--force-with-lease="+stateLease, "--force-with-lease="+contribLease, stateCommit+":"+stateRef, indexCommit+":"+contribRef); err != nil {
+		if err := s.git.push(ctx, append([]string{"push", "--atomic", s.git.Remote(), "--force-with-lease=" + stateLease, "--force-with-lease=" + contribLease, stateCommit + ":" + stateRef, indexCommit + ":" + contribRef}, fence...)...); err != nil {
 			if publicationStatus(err) {
 				return "", err
 			}

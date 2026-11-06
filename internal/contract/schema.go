@@ -144,3 +144,30 @@ func ValidateConfigJSON(data []byte) error {
 	}
 	return nil
 }
+
+//go:embed archive.schema.json
+var archiveSchemaBytes []byte
+
+func validateArchiveSchema(manifest *ArchiveManifest) error {
+	compiler := jsonschema.NewCompiler()
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(archiveSchemaBytes))
+	if err != nil {
+		return err
+	}
+	if err = compiler.AddResource("archive.schema.json", doc); err != nil {
+		return err
+	}
+	schema, err := compiler.Compile("archive.schema.json")
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return err
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	return schema.Validate(instance)
+}

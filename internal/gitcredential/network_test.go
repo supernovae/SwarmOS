@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -707,5 +708,19 @@ func TestNetworkRetryExhaustionAndImmediateRefusal(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestSharedRetryMutationRequiresDialOperation(t *testing.T) {
+	for _, operation := range []string{"POST", "PATCH", "PUT", "DELETE"} {
+		for _, phase := range []string{"dial", "read", "write"} {
+			t.Run(operation+"/"+phase, func(t *testing.T) {
+				cause := &net.OpError{Op: phase, Net: "tcp", Err: &net.DNSError{Err: "temporary failure", Name: "example.invalid"}}
+				got := RetryReason(RetryObservation{Operation: operation, Err: cause}) != ""
+				if got != (phase == "dial") {
+					t.Fatalf("retry=%v for %s", got, phase)
+				}
+			})
+		}
 	}
 }

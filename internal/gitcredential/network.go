@@ -341,7 +341,12 @@ func RetryReason(o RetryObservation) string {
 	}
 	var dns *net.DNSError
 	var op *net.OpError
-	connect := errors.As(o.Err, &dns) || (errors.As(o.Err, &op) && op.Op == "dial")
+	// A DNS cause nested in a read/write error does not prove that no
+	// request was sent. The outer network operation takes precedence.
+	connect := errors.As(o.Err, &dns)
+	if errors.As(o.Err, &op) {
+		connect = op.Op == "dial"
+	}
 	gitConnect := strings.Contains(d, "could not resolve host") || strings.Contains(d, "failed to connect to")
 	if connect || gitConnect {
 		return "connection unavailable"

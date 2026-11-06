@@ -22,7 +22,7 @@ func newDoctorCmd(rootOpts *RootOptions) *cobra.Command {
 }
 
 func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context, func(progress.Event)) harness.DoctorRunner) *cobra.Command {
-	var asJSON bool
+	var asJSON, showCapabilities bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Verify git, GitHub auth, .swarm/ contracts, and agent binaries (claude, codex, opencode, omp)",
@@ -120,7 +120,11 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 			} else {
 				out := cmd.OutOrStdout()
 				for _, report := range capabilities {
-					fmt.Fprint(out, sandbox.FormatToolCapabilities(report))
+					if showCapabilities {
+						fmt.Fprint(out, sandbox.FormatToolCapabilities(report))
+					} else {
+						fmt.Fprint(out, formatDoctorToolCapabilitySummary(report))
+					}
 				}
 				fmt.Fprintln(out, "CATEGORY   CHECK                                    STATUS   DETAIL")
 				fmt.Fprintln(out, "--------   -----                                    ------   ------")
@@ -135,7 +139,24 @@ func newDoctorCmdWithRunner(rootOpts *RootOptions, factory func(context.Context,
 		},
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit doctor checks as JSON")
+	cmd.Flags().BoolVar(&showCapabilities, "capabilities", false, "Show full tool capability reports")
 	return cmd
+}
+
+func formatDoctorToolCapabilitySummary(report sandbox.ToolCapabilityReport) string {
+	entries := make([]string, 0, len(report.Entries))
+	for _, entry := range report.Entries {
+		state := entry.Reason
+		if entry.Usable {
+			state = "usable"
+		}
+		part := entry.ID + "=" + state
+		if !entry.Usable && (entry.Declared || entry.Authorized) {
+			part += " (" + entry.Action + ")"
+		}
+		entries = append(entries, part)
+	}
+	return fmt.Sprintf("Tool capabilities (%s; %s/%s): %s\n", report.PolicyContext, report.Harness, report.Role, strings.Join(entries, "; "))
 }
 
 // doctorReviewerCheck reports who can satisfy plan gates under the local policy.

@@ -120,6 +120,8 @@ Before claiming work, inspect the tools permitted by the task's approved policy:
 ```bash
 swarm issue work 380 --dry-run
 swarm issue work 380 --dry-run --format=text
+swarm repo doctor
+swarm repo doctor --capabilities
 swarm repo doctor --json
 ```
 
@@ -127,6 +129,12 @@ Dry-run defaults to JSON; `--format=json` selects it explicitly.
 `--json` conflicts with `--format=text`. Doctor inspects the repository
 configuration, while task dry-run reads the approved base. Each report labels
 that policy context.
+
+Doctor shows one capability summary line per harness/role by default, naming
+each tool entry and its usable state or reason code. Declared or authorized
+tools that are unusable include their action text on that line. Use
+`swarm repo doctor --capabilities` for full reports. JSON output is unchanged
+with or without `--capabilities`.
 
 The shared report separates declared, authorized and runtime status. An entry
 is usable only after authorization and applicable runtime verification.

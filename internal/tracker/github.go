@@ -1092,6 +1092,12 @@ func (t githubRetryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			if err != nil {
 				return resp, policy.Error(req.Context(), "GitHub REST "+req.Method, err)
 			}
+			if policy.Exhausted() && resp != nil {
+				// Decode the final response exactly as go-gh does, retaining HTTPError
+				// fields and cause typing for every client consumer, including raw requests.
+				defer resp.Body.Close()
+				return nil, policy.Error(req.Context(), "GitHub REST "+req.Method, api.HandleHTTPError(resp))
+			}
 			return resp, nil
 		}
 		if resp != nil {

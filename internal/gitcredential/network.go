@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -320,13 +321,23 @@ func RetryReason(o RetryObservation) string {
 		return ""
 	}
 	d := strings.ToLower(o.Diagnostic)
-	for _, fatal := range []string{"authentication", "permission denied", "access denied", "repository not found", "not found", "rejected", "stale info", "non-fast-forward", "failed to push", "401", "403"} {
+	for _, fatal := range []string{"authentication", "permission denied", "access denied", "repository not found", "rejected", "stale info", "non-fast-forward", "failed to push"} {
 		if strings.Contains(d, fatal) {
 			return ""
 		}
 	}
+	statuses := gitHTTPStatus.FindAllStringSubmatch(d, -1)
+	for _, match := range statuses {
+		code, _ := strconv.Atoi(match[1])
+		if code == 401 || code == 403 || code == 404 || (o.Operation == "push" && code >= 500) {
+			return ""
+		}
+	}
+	if gitMissingRepository.MatchString(d) {
+		return ""
+	}
 	if o.Operation == "push" {
-		for _, ambiguous := range []string{"connection reset", "remote:", "unexpected disconnect", "empty reply", "eof", "http 5", "error: 5", "broken pipe", "send failure", "recv failure", "connected to", "upload", "sent off", "writing objects", "receiving objects", "remote end hung up"} {
+		for _, ambiguous := range []string{"connection reset", "remote:", "unexpected disconnect", "empty reply", "eof", "broken pipe", "send failure", "recv failure", "connected to", "upload", "sent off", "writing objects", "receiving objects", "remote end hung up"} {
 			if strings.Contains(d, ambiguous) {
 				return ""
 			}
@@ -366,13 +377,21 @@ func RetryReason(o RetryObservation) string {
 			return "connection interrupted"
 		}
 	}
-	for _, transient := range []string{"connection timed out", "connection reset", "http 500", "http 502", "http 503", "http 504", "error: 500", "error: 502", "error: 503", "error: 504"} {
+	for _, match := range statuses {
+		if match[1][0] == '5' {
+			return "connection interrupted"
+		}
+	}
+	for _, transient := range []string{"connection timed out", "connection reset"} {
 		if strings.Contains(d, transient) {
 			return "connection interrupted"
 		}
 	}
 	return ""
 }
+
+var gitHTTPStatus = regexp.MustCompile(`(?:http(?:/[0-9.]+)?\s+|(?:requested url returned )?error:\s*)([1-5][0-9]{2})(?:[^0-9]|$)`)
+var gitMissingRepository = regexp.MustCompile(`repository ['"].*['"] not found`)
 
 type retryContextKey struct{}
 type retryContext struct {
@@ -384,6 +403,9 @@ type retryContext struct {
 // retry notices to the command's serialized progress observer. A nil observer
 // suppresses human output for machine-readable commands.
 func WithNetworkRetry(ctx context.Context, command string, notify func(string, int, int, time.Duration)) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return context.WithValue(ctx, retryContextKey{}, retryContext{command, notify})
 }
 
@@ -404,14 +426,20 @@ var retryWait = func(ctx context.Context, delay time.Duration) error {
 
 // RetryPolicy owns the attempt and cumulative wait caps for one logical call.
 type RetryPolicy struct {
-	Attempts int
-	delay    time.Duration
+	Attempts  int
+	delay     time.Duration
+	exhausted bool
 }
 
 func (p *RetryPolicy) Next(ctx context.Context, o RetryObservation) (bool, error) {
+	p.exhausted = false
 	p.Attempts++
 	reason := RetryReason(o)
-	if reason == "" || p.Attempts >= RetryAttempts {
+	if reason == "" {
+		return false, nil
+	}
+	if p.Attempts >= RetryAttempts {
+		p.exhausted = true
 		return false, nil
 	}
 	delay := retryJitter(time.Duration(1<<(p.Attempts-1)) * 8 * time.Second)
@@ -419,12 +447,14 @@ func (p *RetryPolicy) Next(ctx context.Context, o RetryObservation) (bool, error
 		requested := time.Duration(0)
 		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
 			if seconds > 60 {
+				p.exhausted = true
 				return false, nil
 			}
 			if seconds > 0 {
 				requested = time.Duration(seconds) * time.Second
 			}
 		} else if strings.Trim(value, "0123456789") == "" {
+			p.exhausted = true
 			// An overflowing delta-seconds value still requests a wait beyond
 			// our budget; treating it as malformed would retry too early.
 			return false, nil
@@ -436,6 +466,7 @@ func (p *RetryPolicy) Next(ctx context.Context, o RetryObservation) (bool, error
 		}
 	}
 	if delay > retryDelayBudget-p.delay {
+		p.exhausted = true
 		return false, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -454,13 +485,40 @@ func (p *RetryPolicy) Next(ctx context.Context, o RetryObservation) (bool, error
 	}
 	return true, nil
 }
+
+// RetryExhaustedError marks a retryable failure stopped by the shared caps.
+// Its cause remains available for errors.Is and errors.As.
+type RetryExhaustedError struct {
+	Operation string
+	Attempts  int
+	cause     error
+}
+
+func (e *RetryExhaustedError) Error() string { return e.cause.Error() }
+func (e *RetryExhaustedError) Unwrap() error { return e.cause }
+
+// Exhausted reports whether the last observation reached an attempt or wait cap.
+func (p *RetryPolicy) Exhausted() bool { return p.exhausted }
+
 func (p *RetryPolicy) Error(ctx context.Context, operation string, err error) error {
 	command := "the same swarm command"
 	if reporting, ok := ctx.Value(retryContextKey{}).(retryContext); ok && reporting.command != "" {
 		command = reporting.command
 	}
 	// Keep the cause for errors.Is/As without exposing transport URLs or bodies.
-	return &networkError{fmt.Sprintf("%s failed after %d attempt(s); rerun %s", operation, p.Attempts, command), err, ""}
+	redaction, redactErr := NewRedaction()
+	if redactErr != nil {
+		command = "the same swarm command"
+		operation = "network operation"
+	} else {
+		command = redaction.Redact(command)
+		operation = redaction.Redact(operation)
+	}
+	failure := &networkError{fmt.Sprintf("%s failed after %d attempt(s); rerun %s", operation, p.Attempts, command), err, ""}
+	if p.exhausted && ctx.Err() == nil {
+		return &RetryExhaustedError{Operation: operation, Attempts: p.Attempts, cause: failure}
+	}
+	return failure
 }
 
 func network(ctx context.Context, root string, combined bool, maxBytes int, args ...string) ([]byte, error) {
@@ -484,7 +542,7 @@ func network(ctx context.Context, root string, combined bool, maxBytes int, args
 		}
 		if !again {
 			// Preserve established lifecycle diagnostics and typed error chains.
-			if policy.Attempts == 1 {
+			if policy.Attempts == 1 && !policy.exhausted {
 				return output, err
 			}
 			return output, policy.Error(ctx, "git "+args[0], err)

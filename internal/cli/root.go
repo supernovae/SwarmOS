@@ -100,7 +100,11 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 				fmt.Fprintf(out, "GitHub unreachable (%s); retry %d/%d in %s\n", reason, next, limit, delay.Round(time.Second))
 			}
 		}
-		cmd.SetContext(gitcredential.WithNetworkRetry(cmd.Context(), rerun, notice))
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		cmd.SetContext(gitcredential.WithNetworkRetry(ctx, rerun, notice))
 		if cmd.Name() == "internal-native-exec" {
 			return nil
 		}

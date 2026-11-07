@@ -139,11 +139,19 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 	if r.continuation() && r.opts.instructionsFor("developer") == "" && !hasFailedValidationArtifact(r.st) && hasTrustedImplementation(r.st) {
 		if err := r.prepareTestRetry(); err == nil {
 			r.testerResume = true
-			report, reuseErr := validation.Reuse(r.ctx, r.wtPath, validation.ValidateOptions{Version: r.opts.Version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA}, r.opts.Owner, r.st.Artifacts)
+			report, reuseErr := validation.Reuse(r.ctx, r.wtPath, validation.ValidateOptions{ForkMode: r.forkMode || r.e.LeaseManager.HasWorkerGateway(), DirectIssueReuse: !r.forkMode && r.opts.PRNumber == 0 && !r.e.LeaseManager.HasWorkerGateway(), Version: r.opts.Version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA}, r.opts.Owner, r.st.Artifacts)
 			if reuseErr != nil {
 				return r.res, reuseErr
 			}
 			if report != nil {
+				updated, err := r.e.LeaseManager.RecordTrustedValidation(r.ctx, r.opts.IssueNumber, r.opts.Owner, report.Artifact)
+				if err != nil {
+					return r.res, err
+				}
+				if _, err := recordGuidance(r.wtPath, "VALIDATION.md", canonicalReport(report.Artifact.Body), nil); err != nil {
+					return r.res, err
+				}
+				r.st, r.res.State = updated, updated
 				r.res.Validation, r.res.ValidationPassed = report, true
 				return r.finish()
 			}

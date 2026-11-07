@@ -2,13 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -425,5 +431,205 @@ func TestIssue396ValidationParity(t *testing.T) {
 	submitWithDiagnostics(t, f, "issue", "submit", number, "--json", "--progress=false")
 	if latestValidation(t, f, n).Verdict != "PASS" {
 		t.Fatal("submit differs from work/validate")
+	}
+}
+
+// issue470FreshClaim uses real expiry/acquisition, preserving A's evidence.
+func issue470FreshClaim(t *testing.T) (*cliFixture, string, int, string) {
+	t.Helper()
+	f, counter := countedValidationFixture(t)
+	policyPath := filepath.Join(f.root, ".swarm/validation/required-checks.yaml")
+	policy, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy = []byte(strings.Replace(string(policy), "protected_paths:", fmt.Sprintf("  - name: second\n    command: \"printf y >> '%s'\"\n    timeout: 1m\nprotected_paths:", counter), 1))
+	if err := os.WriteFile(policyPath, policy, 0644); err != nil {
+		t.Fatal(err)
+	}
+	prGit(t, f.root, "add", ".")
+	prGit(t, f.root, "commit", "-m", "two checks")
+	n := f.create(t, "agent")
+	number := strconv.Itoa(n)
+	f.must(t, "issue", "approve", number)
+	f.must(t, "issue", "work", number, "--agent", "mock", "--progress=false")
+	a := f.state(t, n)
+	f.manager.SetNowFunc(func() time.Time { return a.Lease.ExpiresAt.Add(time.Second) })
+	b, err := f.manager.Acquire(t.Context(), n, a.Lease.Owner, "mock", "implement", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Lease.ClaimID == b.Lease.ClaimID {
+		t.Fatal("claim did not change")
+	}
+	f.manager.SetNowFunc(time.Now)
+	if err := lease.SaveClaimToken(f.root, n, b.Lease.ClaimID, b.BaseSHA); err != nil {
+		t.Fatal(err)
+	}
+	return f, counter, n, a.Lease.ClaimID
+}
+
+func TestIssue470FreshClaimValidationReuse(t *testing.T) {
+	old := Version
+	Version = "v1.2.3"
+	t.Cleanup(func() { Version = old })
+	for _, checkpoint := range []bool{false, true} {
+		t.Run(strconv.FormatBool(checkpoint), func(t *testing.T) {
+			f, counter, n, a := issue470FreshClaim(t)
+			number := strconv.Itoa(n)
+			before := checkCount(t, counter)
+			wt := workspace.WorktreePath(f.root, n)
+			workOut, workDiag, workErr := runProgressCommand(t, f, "issue", "work", number, "--agent", "mock", "--progress=false")
+			if workErr != nil {
+				t.Fatalf("work: %v %s %s", workErr, workOut, workDiag)
+			}
+			for _, want := range []string{"REUSED counted", "REUSED second"} {
+				if !strings.Contains(workOut, want) {
+					t.Fatalf("work output missing %s: %s", want, workOut)
+				}
+			}
+			if checkCount(t, counter) != before {
+				t.Fatal("work executed checks")
+			}
+			art := latestValidation(t, f, n)
+			if art.Metadata["validation_source_claim"] != a {
+				t.Fatalf("lost source: %v", art.Metadata)
+			}
+			// Real trusted-writer round trip: work recorded A's reused PASS under B.
+			st := f.state(t, n)
+			opts := validation.ValidateOptions{BaseSHA: st.BaseSHA, Version: Version, ClaimID: st.Lease.ClaimID, DirectIssueReuse: true}
+			reused, err := validation.Reuse(t.Context(), wt, opts, st.Lease.Owner, st.Artifacts)
+			if err != nil || reused == nil {
+				t.Fatalf("B reuse: %v", err)
+			}
+			if reused.Artifact.Metadata["validation_source_time"] != art.Metadata["validation_source_time"] {
+				t.Fatal("time renewed")
+			}
+			body, err := os.ReadFile(filepath.Join(wt, ".swarm/active/VALIDATION.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(string(body), "| **REUSED** |") != 2 {
+				t.Fatalf("missing reused check rows: %s", body)
+			}
+			for _, value := range []string{a, art.Metadata["validation_source_time"], art.Metadata["validation_tree"], art.Metadata["validation_policy"], "REUSED"} {
+				if !strings.Contains(string(body), value) {
+					t.Fatalf("report missing %q", value)
+				}
+			}
+			if checkpoint {
+				prGit(t, wt, "commit", "--allow-empty", "-m", "same tree")
+				st := f.state(t, n)
+				f.manager.BindClaim(n, st.Lease.ClaimID)
+				if _, err := f.manager.RecordCheckpoint(t.Context(), n, st.Lease.Owner, st.Branch, prGit(t, wt, "rev-parse", "HEAD")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Rebind the reused check report to the checkpoint head before supplying
+			// independent acceptance evidence for that exact head.
+			st = f.state(t, n)
+			rebound, err := validation.Reuse(t.Context(), wt, opts, st.Lease.Owner, st.Artifacts)
+			if err != nil || rebound == nil {
+				t.Fatalf("checkpoint reuse: %v", err)
+			}
+			f.manager.BindClaim(n, st.Lease.ClaimID)
+			if _, err = f.manager.RecordTrustedValidation(t.Context(), n, st.Lease.Owner, rebound.Artifact); err != nil {
+				t.Fatal(err)
+			}
+
+			seedCompleteIssueAcceptance(t, f, n)
+			submitWithDiagnostics(t, f, "issue", "submit", number, "--progress=false")
+			if checkCount(t, counter) != before {
+				t.Fatal("submit executed checks")
+			}
+			pr, err := f.tracker.GetPullRequest(t.Context(), f.state(t, n).PRNumber)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, value := range []string{a, art.Metadata["validation_source_time"], art.Metadata["validation_tree"], art.Metadata["validation_policy"], "REUSED"} {
+				if !strings.Contains(pr.Body, value) {
+					t.Fatalf("PR missing %q", value)
+				}
+			}
+		})
+	}
+}
+
+type issue470CountingTracker struct {
+	tracker.Tracker
+	creates, updates int
+}
+
+func (tr *issue470CountingTracker) CreateDraftPR(ctx context.Context, r tracker.DraftPRRequest) (*tracker.PullRequest, error) {
+	tr.creates++
+	return tr.Tracker.CreateDraftPR(ctx, r)
+}
+func (tr *issue470CountingTracker) UpdateDraftPR(ctx context.Context, n int, title, body string) (*tracker.PullRequest, error) {
+	tr.updates++
+	return tr.Tracker.UpdateDraftPR(ctx, n, title, body)
+}
+
+func TestIssue470StaleClaimCannotCheckpointOrSubmit(t *testing.T) {
+	old := Version
+	Version = "v1.2.3"
+	t.Cleanup(func() { Version = old })
+	for _, operation := range []string{"submit", "stage"} {
+		t.Run(operation, func(t *testing.T) {
+			f, _, n, a := issue470FreshClaim(t)
+			number := strconv.Itoa(n)
+			st := f.state(t, n)
+			wt := workspace.WorktreePath(f.root, n)
+			reused, err := validation.Reuse(t.Context(), wt, validation.ValidateOptions{BaseSHA: st.BaseSHA, ClaimID: st.Lease.ClaimID, Version: Version, DirectIssueReuse: true}, st.Lease.Owner, st.Artifacts)
+			if err != nil || reused == nil {
+				t.Fatalf("B cannot reuse: %v", err)
+			}
+			seedCompleteIssueAcceptance(t, f, n)
+			remote := filepath.Join(t.TempDir(), "remote.git")
+			prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
+			prGit(t, f.root, "remote", "add", "origin", remote)
+			prGit(t, f.root, "push", "origin", "main")
+			remoteBefore := prGit(t, f.root, "ls-remote", "--refs", "origin")
+			if err := os.WriteFile(filepath.Join(wt, "pending.txt"), []byte("checkpointable"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := lease.SaveClaimToken(f.root, n, a, st.BaseSHA); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal(f.state(t, n))
+			rawBefore, revisionBefore, err := f.manager.Store().Load(t.Context(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			head := prGit(t, wt, "rev-parse", "HEAD")
+			refs := prGit(t, f.root, "show-ref")
+			tr := &issue470CountingTracker{Tracker: f.tracker}
+			cmd := f.command(&RootOptions{trackerOverride: tr})
+			var output bytes.Buffer
+			cmd.SetOut(&output)
+			cmd.SetErr(&output)
+			args := []string{"--root", f.root, "issue", operation, number}
+			if operation == "stage" {
+				args = append(args, "--phase", "implement")
+			}
+			cmd.SetArgs(args)
+			err = cmd.Execute()
+			if !errors.Is(err, lease.ErrClaimFence) {
+				t.Fatalf("want fence, got %v: %s", err, output.String())
+			}
+			after, _ := json.Marshal(f.state(t, n))
+			rawAfter, revisionAfter, err := f.manager.Store().Load(t.Context(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(rawBefore, rawAfter) || revisionBefore != revisionAfter {
+				t.Fatal("CAS changed")
+			}
+			if remoteBefore != prGit(t, f.root, "ls-remote", "--refs", "origin") {
+				t.Fatal("remote refs changed")
+			}
+			if !bytes.Equal(before, after) || head != prGit(t, wt, "rev-parse", "HEAD") || refs != prGit(t, f.root, "show-ref") || tr.creates != 0 || tr.updates != 0 {
+				t.Fatalf("stale effects: state equal=%t HEAD=%s -> %s refs=%s -> %s creates=%d updates=%d", bytes.Equal(before, after), head, prGit(t, wt, "rev-parse", "HEAD"), refs, prGit(t, f.root, "show-ref"), tr.creates, tr.updates)
+			}
+		})
 	}
 }

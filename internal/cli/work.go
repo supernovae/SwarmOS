@@ -185,6 +185,12 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			result, err := engine.ExecuteWork(cmd.Context(), opts)
 			if result != nil {
 				writeValidationSkipNotice(cmd, result.Validation)
+				if result.Validation != nil && result.Validation.Reused {
+					fmt.Fprintln(cmd.ErrOrStderr(), result.Validation.Artifact.Summary)
+					if !jsonOutput {
+						writeValidationChecks(cmd, result.Validation)
+					}
+				}
 			}
 			opts.SetupProgress.Close()
 			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {

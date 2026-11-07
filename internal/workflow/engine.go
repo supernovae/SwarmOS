@@ -678,7 +678,7 @@ const (
 // repair round: required checks failed with a trusted report, and not every
 // failure is pre-existing at the approved base.
 func repairableValidation(err error, report *validation.ValidationReport) bool {
-	return errors.Is(err, validation.ErrRequiredCheckFailed) && !errors.Is(err, ErrOutsideCandidateFailures) && !errors.Is(err, ErrPreExistingFailures) && report != nil && !report.Passed
+	return !errors.Is(err, errRetryCandidateRejected) && errors.Is(err, validation.ErrRequiredCheckFailed) && !errors.Is(err, ErrOutsideCandidateFailures) && !errors.Is(err, ErrPreExistingFailures) && report != nil && !report.Passed
 }
 
 // failingIdentities lists the trusted report's failing tests as

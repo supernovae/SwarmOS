@@ -12,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1058,7 +1059,11 @@ func gatedTesterRetryEngine(t *testing.T, gate contract.GateMode, commands ...st
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg = []byte(strings.Replace(string(cfg), "lease:\n", "lease:\n  validation_repair_limit: 2\n", 1))
+	budget := "2"
+	if len(commands) > 2 {
+		budget = commands[2]
+	}
+	cfg = []byte(strings.Replace(string(cfg), "lease:\n", "lease:\n  validation_repair_limit: "+budget+"\n", 1))
 	if err := os.WriteFile(configPath, cfg, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -2119,5 +2124,215 @@ func TestContinuationHumanApprovalBeforeRepair(t *testing.T) {
 				t.Fatal("mutated repair count")
 			}
 		})
+	}
+}
+
+func TestTesterResumeDirtyCandidate(t *testing.T) {
+	for _, phase := range []string{"all", "test"} {
+		for _, budget := range []int{0, 2} {
+			t.Run(fmt.Sprintf("%s/%d", phase, budget), func(t *testing.T) {
+				counter := filepath.Join(t.TempDir(), "checks")
+				e, issue := gatedTesterRetryEngine(t, contract.GateNone, "echo ran >> '"+counter+"'", "true", strconv.Itoa(budget))
+				mock := &agent.MockRunner{}
+				initial, developers := true, 0
+				e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+					return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+						if req.Role == "developer" {
+							developers++
+						}
+						if req.Role == "tester" {
+							if initial {
+								return nil, fmt.Errorf("interrupted")
+							}
+							if err := os.WriteFile(filepath.Join(req.WorktreePath, "regression_test.go"), []byte("package regression\n"), 0644); err != nil {
+								t.Fatal(err)
+							}
+							result, err := mock.Run(ctx, req)
+							if err == nil {
+								err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte("PASS: distinctive regression finding"), 0644)
+							}
+							return result, err
+						}
+						return mock.Run(ctx, req)
+					}}, nil
+				}
+				opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+				first, err := e.ExecuteWork(t.Context(), opts)
+				if err == nil || first == nil {
+					t.Fatalf("initial: %v", err)
+				}
+				before, _ := json.Marshal(implementationArtifact(first.State))
+				initial = false
+				opts.Phase, opts.ClaimID = phase, first.State.Lease.ClaimID
+				opts.IssueContinuation = true
+				res, err := e.ExecuteWork(t.Context(), opts)
+				if err == nil || !strings.Contains(err.Error(), "regression_test.go") || !strings.Contains(err.Error(), fmt.Sprintf("swarm issue work %d --phase implement", issue.Number)) || !strings.Contains(err.Error(), "distinctive regression finding") {
+					t.Fatalf("diagnostic: %v", err)
+				}
+				if _, err := os.Stat(counter); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("checks executed: %v", err)
+				}
+				if res.Validation != nil || res.ValidationPassed || developers != 1 {
+					t.Fatalf("unexpected validation/developer: %+v %d", res, developers)
+				}
+				if res.State.ValidationRepairCount != first.State.ValidationRepairCount || res.HeadSHA != first.HeadSHA {
+					t.Fatal("dirty retry changed checkpoint or consumed repair allowance")
+				}
+				for _, art := range res.State.Artifacts {
+					if art.Type == contract.ArtifactValidation {
+						t.Fatal("dirty candidate recorded validation")
+					}
+				}
+				after, _ := json.Marshal(implementationArtifact(res.State))
+				if string(before) != string(after) {
+					t.Fatal("implementation changed")
+				}
+				body, err := os.ReadFile(filepath.Join(res.WorktreePath, ".swarm/active/VALIDATION.md"))
+				if err != nil || !strings.Contains(string(body), "distinctive regression finding") {
+					t.Fatalf("finding lost: %s %v", body, err)
+				}
+				e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+					return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+						if req.Role == "developer" {
+							body, readErr := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"))
+							if readErr != nil || !strings.Contains(string(body), "distinctive regression finding") {
+								t.Fatalf("developer finding: %s %v", body, readErr)
+							}
+							if _, statErr := os.Stat(filepath.Join(req.WorktreePath, "regression_test.go")); statErr != nil {
+								t.Fatal(statErr)
+							}
+						}
+						if req.Role == "tester" {
+							content := retryGit(t, req.WorktreePath, "show", "HEAD:regression_test.go")
+							if content != "package regression" {
+								t.Fatalf("not checkpointed: %s", content)
+							}
+						}
+						return mock.Run(ctx, req)
+					}}, nil
+				}
+				opts.Phase = "implement"
+				recovered, recoverErr := e.ExecuteWork(t.Context(), opts)
+				if recoverErr != nil || !recovered.ValidationPassed {
+					t.Fatalf("recovery: %v", recoverErr)
+				}
+			})
+		}
+	}
+}
+
+func TestTesterResumeDirtyDiagnostics(t *testing.T) {
+	for _, kind := range []string{"tracked", "staged", "rename", "FAIL", "BLOCKED", "report-only", "pointer-only"} {
+		t.Run(kind, func(t *testing.T) {
+			counter := filepath.Join(t.TempDir(), "checks")
+			e, issue := gatedTesterRetryEngine(t, contract.GateNone, "echo ran >> '"+counter+"'")
+			mock := &agent.MockRunner{}
+			initial := true
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "tester" {
+						if initial {
+							return nil, fmt.Errorf("interrupted")
+						}
+						result, err := mock.Run(ctx, req)
+						if err != nil {
+							return result, err
+						}
+						switch kind {
+						case "tracked", "staged":
+							err = os.WriteFile(filepath.Join(req.WorktreePath, "SWARM_IMPLEMENTED.md"), []byte("changed"), 0644)
+							if kind == "staged" {
+								retryGit(t, req.WorktreePath, "add", "SWARM_IMPLEMENTED.md")
+							}
+						case "rename":
+							retryGit(t, req.WorktreePath, "mv", "SWARM_IMPLEMENTED.md", "renamed file")
+						case "FAIL", "BLOCKED":
+							err = os.WriteFile(filepath.Join(req.WorktreePath, "new\n test.go"), []byte("test"), 0644)
+							if err == nil {
+								err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte(kind+": retain this finding"), 0644)
+							}
+						}
+						// Setup already injects instruction pointers. Leaving them alone
+						// exercises the normal pointer-only cleanliness exception.
+						return result, err
+					}
+					return mock.Run(ctx, req)
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			first, err := e.ExecuteWork(t.Context(), opts)
+			if err == nil {
+				t.Fatal("expected interruption")
+			}
+			initial = false
+			opts.Phase, opts.ClaimID = "test", first.State.Lease.ClaimID
+			res, err := e.ExecuteWork(t.Context(), opts)
+			if kind == "report-only" || kind == "pointer-only" {
+				if err != nil || !res.ValidationPassed {
+					t.Fatalf("clean retry: %v", err)
+				}
+				return
+			}
+			path := strconv.Quote("SWARM_IMPLEMENTED.md")
+			if kind == "FAIL" || kind == "BLOCKED" {
+				path = strconv.Quote("new\n test.go")
+			}
+			if err == nil || !strings.Contains(err.Error(), path) {
+				t.Fatalf("missing path %s: %v", path, err)
+			}
+			if kind == "rename" && !strings.Contains(err.Error(), strconv.Quote("renamed file")) {
+				t.Fatalf("rename: %v", err)
+			}
+			if (kind == "FAIL" || kind == "BLOCKED") && !strings.Contains(err.Error(), kind) {
+				t.Fatalf("outcome: %v", err)
+			}
+			if _, statErr := os.Stat(counter); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("checks ran: %v", statErr)
+			}
+		})
+	}
+
+	got := retryChangedPaths("?? a b\x00 M line\nfile\x00R  new\x00old\x00A  staged\x00")
+	want := []string{`"a b"`, `"line\nfile"`, `"new"`, `"old"`, `"staged"`}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("paths: %q want %q", got, want)
+	}
+}
+
+func TestTesterResumeCheckFailureDiagnostics(t *testing.T) {
+	e, issue := gatedTesterRetryEngine(t, contract.GateNone, "echo changed > check-change; exit 3")
+	mock := &agent.MockRunner{}
+	initial := true
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			if req.Role == "tester" && initial {
+				return nil, fmt.Errorf("interrupted")
+			}
+			return mock.Run(ctx, req)
+		}}, nil
+	}
+	opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+	first, err := e.ExecuteWork(t.Context(), opts)
+	if err == nil {
+		t.Fatal("expected interruption")
+	}
+	initial = false
+	opts.ClaimID = first.State.Lease.ClaimID
+	opts.IssueContinuation = true
+	res, err := e.ExecuteWork(t.Context(), opts)
+	if !errors.Is(err, validation.ErrRequiredCheckFailed) || !errors.Is(err, errRetryCandidateRejected) || !strings.Contains(err.Error(), "retry-sentinel") || !strings.Contains(err.Error(), "check-change") {
+		t.Fatalf("error: %v", err)
+	}
+	if res.Validation == nil || res.ValidationPassed || repairableValidation(err, res.Validation) {
+		t.Fatalf("report/repair: %+v", res)
+	}
+	for _, art := range res.State.Artifacts {
+		if art.Type == contract.ArtifactValidation {
+			t.Fatal("rejected report recorded as trusted")
+		}
+	}
+	body, readErr := os.ReadFile(filepath.Join(res.WorktreePath, ".swarm/active/VALIDATION.md"))
+	if readErr != nil || !strings.Contains(string(body), "retry-sentinel") {
+		t.Fatalf("local report: %s %v", body, readErr)
 	}
 }

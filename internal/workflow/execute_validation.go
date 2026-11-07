@@ -5,10 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/claimpause"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -66,6 +70,11 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 		return false, err
 	}
 	testerBody, _ := readRequiredArtifact(r.wtPath, "VALIDATION.md")
+	if !r.forkMode && r.opts.PRNumber == 0 && (r.opts.Phase == "test" || r.testerResume) {
+		if guardErr := r.checkTestRetry(); guardErr != nil {
+			return false, r.retryCandidateError(guardErr, testerBody)
+		}
+	}
 	if outcome := parseTesterOutcome(testerBody); outcome == testerFail || outcome == testerBlocked {
 		command := fmt.Sprintf("swarm issue work %d --phase implement", r.opts.IssueNumber)
 		if r.opts.PRNumber != 0 {
@@ -93,8 +102,12 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 			return false, writeErr
 		}
 		if r.opts.Phase == "test" || r.testerResume {
-			if err := r.checkTestRetry(); err != nil {
-				return false, err
+			if guardErr := r.checkTestRetry(); guardErr != nil {
+				if !r.forkMode && r.opts.PRNumber == 0 {
+					return false, errors.Join(r.retryCandidateError(guardErr, testerBody), err,
+						fmt.Errorf("failing checks: %s", boundedList(failingIdentities(report), maxRepairIdentities)))
+				}
+				return false, guardErr
 			}
 		}
 		record := r.e.LeaseManager.RecordTrustedValidation
@@ -218,4 +231,47 @@ func hasTrustedImplementation(st *lease.IssueState) bool {
 		}
 	}
 	return false
+}
+
+// A rejected retry report must never drive automatic repair, even if checks failed.
+var errRetryCandidateRejected = errors.New("tester retry candidate rejected")
+
+func (r *workRun) retryCandidateError(cause error, finding string) error {
+	detail := "changed paths unavailable"
+	cmd, _, err := gitcredential.Command(r.ctx, r.wtPath, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err == nil {
+		if out, statusErr := cmd.Output(); statusErr == nil {
+			detail = "changed paths: " + boundedList(retryChangedPaths(string(out)), maxRepairIdentities)
+		}
+	}
+	// Keep a bounded finding in the diagnostic as well as the local artifact:
+	// a subsequent developer setup may refresh local role artifacts.
+	finding = strings.TrimSpace(finding)
+	if len(finding) > 1024 {
+		finding = finding[:1024] + "..."
+	}
+	return fmt.Errorf("%w: %w; %s; tester finding retained in .swarm/active/VALIDATION.md (%s); run swarm issue work %d --phase implement",
+		errRetryCandidateRejected, cause, detail, strconv.Quote(finding), r.opts.IssueNumber)
+}
+
+func retryChangedPaths(status string) []string {
+	entries := strings.Split(status, "\x00")
+	seen := map[string]bool{}
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		if len(entry) < 4 {
+			continue
+		}
+		seen[strconv.Quote(entry[3:])] = true
+		if strings.ContainsAny(entry[:2], "RC") && i+1 < len(entries) {
+			i++
+			seen[strconv.Quote(entries[i])] = true
+		}
+	}
+	paths := make([]string, 0, len(seen))
+	for path := range seen {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }

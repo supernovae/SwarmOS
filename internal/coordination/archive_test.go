@@ -153,6 +153,49 @@ func TestArchiveRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+// assertArchiveInventories checks every ref, including unrelated refs, so retry
+// success cannot hide extra archive copies or leftover live retention refs.
+func assertArchiveInventories(t *testing.T, f *retentionFixture, m *contract.ArchiveManifest, before string) {
+	t.Helper()
+	inventory := func(repo string) map[string]string {
+		refs := map[string]string{}
+		for _, line := range strings.Split(f.git(repo, "for-each-ref", "--format=%(refname) %(objectname)"), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 {
+				refs[fields[0]] = fields[1]
+			}
+		}
+		return refs
+	}
+	source := map[string]string{}
+	for _, line := range strings.Split(before, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 {
+			source[fields[0]] = fields[1]
+		}
+	}
+	tomb, err := f.store.ArchiveTombstone(context.Background(), m.Issue, false)
+	if err != nil || tomb == nil {
+		t.Fatalf("retry tombstone: %v", err)
+	}
+	if err := f.store.verifyArchive(context.Background(), *tomb); err != nil {
+		t.Fatal(err)
+	}
+	destination := map[string]string{archiveManifestRef(m.Issue): tomb.ManifestTip}
+	for _, r := range m.Refs {
+		delete(source, r.Source)
+		destination[r.Destination] = r.SHA
+	}
+	source[f.store.layout.ArchiveRef()] = f.git(f.remote, "rev-parse", f.store.layout.ArchiveRef())
+	if got := inventory(f.remote); !reflect.DeepEqual(got, source) {
+		t.Fatalf("source inventory: got %v want %v", got, source)
+	}
+	if got := inventory(strings.TrimPrefix(m.Destination, "file://")); !reflect.DeepEqual(got, destination) {
+		t.Fatalf("destination inventory: got %v want %v", got, destination)
+	}
+}
+
 func TestArchiveFailuresPreserveSource(t *testing.T) {
 	for _, layout := range []RefLayout{BranchLayout, HiddenLayout} {
 		for _, failure := range []string{"destination", "state", "checkpoint", "index", "recheck", "corrupt-manifest", "restore-conflict"} {
@@ -213,12 +256,29 @@ func TestArchiveFailuresPreserveSource(t *testing.T) {
 				if got := f.git(f.remote, "for-each-ref", "--format=%(refname) %(objectname)"); got != before {
 					t.Fatalf("failed archive changed source\n%s\n%s", before, got)
 				}
-				if failure == "recheck" {
-					m.ArchivedAt = m.ArchivedAt.Add(time.Hour)
-					if err := f.store.Archive(ctx, m, func(context.Context) error { return nil }); err != nil {
-						t.Fatalf("identical retry: %v", err)
+				// Undo only the injected concurrent write; retry the same immutable snapshot.
+				dest := strings.TrimPrefix(m.Destination, "file://")
+				if failure == "destination" {
+					if err := os.Remove(filepath.Join(dest, "hooks", "pre-receive")); err != nil {
+						t.Fatal(err)
 					}
 				}
+				if failure == "state" || failure == "checkpoint" {
+					for _, r := range m.Refs {
+						f.git(f.clone, "push", "origin", "+"+r.SHA+":"+r.Source)
+					}
+				}
+				if failure == "index" {
+					// ArchiveSnapshot created the original empty index before the race.
+					raced := f.git(f.remote, "rev-parse", layout.ArchiveRef())
+					original := f.git(f.clone, "rev-parse", raced+"^")
+					f.git(f.clone, "push", "origin", "+"+original+":"+layout.ArchiveRef())
+				}
+				before = f.git(f.remote, "for-each-ref", "--format=%(refname) %(objectname)")
+				if err := f.store.Archive(ctx, m, func(context.Context) error { return nil }); err != nil {
+					t.Fatalf("retry: %v", err)
+				}
+				assertArchiveInventories(t, f, m, before)
 			})
 		}
 	}
@@ -266,6 +326,15 @@ func TestArchiveReadBackAndRestoreRaces(t *testing.T) {
 					if inventory() != before {
 						t.Fatal("failed verification changed source")
 					}
+					if err := os.Remove(filepath.Join(dest, "hooks", "post-receive")); err != nil {
+						t.Fatal(err)
+					}
+					// Remove the injected bad manifest; never overwrite an immutable conflicting copy.
+					f.git(dest, "update-ref", "-d", ref)
+					if err := f.store.Archive(ctx, m, func(context.Context) error { return nil }); err != nil {
+						t.Fatalf("read-back retry: %v", err)
+					}
+					assertArchiveInventories(t, f, m, before)
 					return
 				}
 				if err := f.store.Archive(ctx, m, func(context.Context) error { return nil }); err != nil {

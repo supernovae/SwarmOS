@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,11 +155,20 @@ func TestArchiveEligibility(t *testing.T) {
 	}
 }
 func TestArchivedManagerAdmission(t *testing.T) {
-	m, _, n, _, dest := archiveManagerFixture(t)
+	m, tr, n, remote, dest := archiveManagerFixture(t)
 	ctx := context.Background()
 	if _, err := m.ArchiveIssue(ctx, n, dest, true); err != nil {
 		t.Fatal(err)
 	}
+	tr.open = true // A reopened tracker issue must never become a new task.
+	inventory := func() string {
+		out, err := gitfixture.Command(t, "", "--git-dir="+remote, "for-each-ref", "--format=%(refname) %(objectname)").CombinedOutput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	before := inventory()
 	var archived *coordination.ArchivedError
 	if _, _, err := m.load(ctx, n); !errors.As(err, &archived) || !strings.Contains(err.Error(), "swarm repo archive restore") {
 		t.Fatalf("load archived: %v", err)
@@ -167,6 +177,14 @@ func TestArchivedManagerAdmission(t *testing.T) {
 		t.Fatalf("new state: %v", err)
 	}
 	checks := map[string]func() error{
+		"checkpoint": func() error {
+			_, e := m.RecordCheckpoint(ctx, n, "maintainer", fmt.Sprintf("swarm/issue-%d-test", n), strings.Repeat("a", 40))
+			return e
+		},
+		"submit": func() error {
+			_, e := m.RecordSubmission(ctx, n, "maintainer", 25, "https://github.com/octo/swarm/pull/25")
+			return e
+		},
 		"approve": func() error { _, e := m.ApproveTask(ctx, n, "maintainer"); return e },
 		"claim":   func() error { _, e := m.Acquire(ctx, n, "maintainer", "codex", "plan", time.Minute, 0); return e },
 		"fork": func() error {
@@ -179,9 +197,12 @@ func TestArchivedManagerAdmission(t *testing.T) {
 		},
 	}
 	for name, check := range checks {
-		if e := check(); !errors.As(e, &archived) {
+		if e := check(); !errors.As(e, &archived) || !strings.Contains(e.Error(), fmt.Sprintf("swarm repo archive restore %d", n)) {
 			t.Errorf("%s: %v", name, e)
 		}
+	}
+	if inventory() != before {
+		t.Fatal("admission changed remote refs")
 	}
 	if _, err := m.RestoreIssueArchive(ctx, n, true); err != nil {
 		t.Fatal(err)

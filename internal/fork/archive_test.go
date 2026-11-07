@@ -58,10 +58,16 @@ func TestArchivedCoordinatorAdmission(t *testing.T) {
 				t.Fatal(err)
 			}
 			coord := &Coordinator{RepoRoot: clone, UpstreamRepo: "octo/swarm"}
-			_, _, err = coord.executeRequest(ctx, 500, "alice", lease.ForkRequest{Version: 1, IssueNumber: 363, Operation: "acquire"})
-			var archived *coordination.ArchivedError
-			if !errors.As(err, &archived) {
-				t.Fatalf("archive error replaced: %v", err)
+			before := git(remote, "for-each-ref", "--format=%(refname) %(objectname)")
+			for _, operation := range []string{"acquire", "record-checkpoint", "record-submission", "acquire-pr"} {
+				_, _, err = coord.executeRequest(ctx, 500, "alice", lease.ForkRequest{Version: 1, IssueNumber: 363, Operation: operation})
+				var archived *coordination.ArchivedError
+				if !errors.As(err, &archived) || !strings.Contains(err.Error(), "swarm repo archive restore 363") {
+					t.Fatalf("%s archive error replaced: %v", operation, err)
+				}
+				if got := git(remote, "for-each-ref", "--format=%(refname) %(objectname)"); got != before {
+					t.Fatalf("%s changed refs", operation)
+				}
 			}
 		})
 	}

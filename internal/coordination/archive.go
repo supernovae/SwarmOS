@@ -544,57 +544,46 @@ func (s *GitStore) RestoreArchive(ctx context.Context, n int, repository string,
 	if _, err = s.run(ctx, "", fetch...); err != nil {
 		return &t, err
 	}
-	// Reserve every absent ref with a unique value. Git elides identical
-	// updates (and their leases), so pushing the archived SHAs directly cannot
-	// enforce create-only semantics. Keep the tombstone throughout reservation.
-	reservationTip, err := s.indexCommit(ctx, idx, tip)
+	// Advance only the index first; no live refs are reserved. A failed final
+	// transaction leaves every source ref absent and the tombstone retryable.
+	generation, err := s.indexCommit(ctx, idx, tip)
 	if err != nil {
 		return &t, err
 	}
-	reservations := make(map[string]string, len(restoreRefs))
-	reserve := []string{"push", "--atomic", source, "--force-with-lease=" + s.layout.ArchiveRef() + ":" + tip, reservationTip + ":" + s.layout.ArchiveRef()}
-	for _, r := range restoreRefs {
-		value, createErr := s.archiveCommit(ctx, "restore-reservation", []byte(reservationTip), r.SHA)
-		if createErr != nil {
-			return &t, createErr
-		}
-		reservations[r.Source] = value
-		reserve = append(reserve, "--force-with-lease="+r.Source+":", value+":"+r.Source)
-	}
-	if err = s.push(ctx, reserve...); err != nil {
-		// A lost response is safe to continue only after exact confirmation.
+	if err = s.push(ctx, "push", "--atomic", source, "--force-with-lease="+s.layout.ArchiveRef()+":"+tip, generation+":"+s.layout.ArchiveRef()); err != nil {
 		current, readErr := s.listRemoteRefs(ctx)
 		if readErr != nil {
 			return &t, errors.Join(err, readErr)
 		}
-		completed := current[s.layout.ArchiveRef()] == reservationTip
-		for ref, value := range reservations {
-			completed = completed && current[ref] == value
-		}
-		if !completed {
-			return &t, fmt.Errorf("%w: restore reservation: %w", ErrConflict, err)
+		if current[s.layout.ArchiveRef()] != generation {
+			return &t, err
 		}
 	}
-	tip = reservationTip
-	// If final publication fails, remove only reservations still owned by
-	// this transaction. An index race prevents cleanup as well, preserving
-	// the competing writer's authority and the tombstone.
-	published := false
-	defer func() {
-		if published {
-			return
-		}
-		idx.Entries[n] = t
-		rollbackTip, rollbackErr := s.indexCommit(ctx, idx, reservationTip)
-		if rollbackErr != nil {
-			return
-		}
-		rollback := []string{"push", "--atomic", source, "--force-with-lease=" + s.layout.ArchiveRef() + ":" + reservationTip, rollbackTip + ":" + s.layout.ArchiveRef()}
-		for ref, value := range reservations {
-			rollback = append(rollback, "--force-with-lease="+ref+":"+value, ":"+ref)
-		}
-		_ = s.push(ctx, rollback...)
-	}()
+	tip = generation
+	// Git drops identical updates before checking their leases. Validate the
+	// actual advertised update set in pre-push, then let the server enforce
+	// the absent-ref leases atomically against changes after advertisement.
+	scratch, cleanup, err := s.archiveScratch(ctx)
+	if err != nil {
+		return &t, err
+	}
+	defer cleanup()
+	fetch = []string{"fetch", "--no-write-fetch-head", s.root}
+	for _, r := range restoreRefs {
+		fetch = append(fetch, r.SHA)
+	}
+	if _, err = scratch.run(ctx, "", fetch...); err != nil {
+		return &t, err
+	}
+	var hook strings.Builder
+	hook.WriteString("#!/bin/sh\nupdates=$(cat) || exit 1\n")
+	for _, r := range restoreRefs {
+		// Manifest validation restricts source names to canonical ledger refs.
+		fmt.Fprintf(&hook, "printf '%%s\\n' \"$updates\" | grep -F -x '%s %s %s 0000000000000000000000000000000000000000' >/dev/null || exit 1\n", r.SHA, r.SHA, r.Source)
+	}
+	if err = safefs.WriteFile(scratch.root, "hooks/pre-push", []byte(hook.String()), 0700); err != nil {
+		return &t, err
+	}
 	delete(idx.Entries, n)
 	commit, err := s.indexCommit(ctx, idx, tip)
 	if err != nil {
@@ -602,9 +591,12 @@ func (s *GitStore) RestoreArchive(ctx context.Context, n int, repository string,
 	}
 	push := []string{"push", "--atomic", source, "--force-with-lease=" + s.layout.ArchiveRef() + ":" + tip, commit + ":" + s.layout.ArchiveRef()}
 	for _, r := range restoreRefs {
-		push = append(push, "--force-with-lease="+r.Source+":"+reservations[r.Source], r.SHA+":"+r.Source)
+		push = append(push, "--force-with-lease="+r.Source+":", r.SHA+":"+r.Source)
 	}
-	if err = s.push(ctx, push...); err != nil {
+	if _, err = scratch.run(ctx, "", append([]string{"fetch", "--no-write-fetch-head", s.root}, commit)...); err != nil {
+		return &t, err
+	}
+	if err = scratch.push(ctx, append([]string{"-c", "core.hooksPath=" + filepath.Join(scratch.root, "hooks")}, push...)...); err != nil {
 		current, readErr := s.listRemoteRefs(ctx)
 		if readErr != nil {
 			return &t, errors.Join(err, readErr)
@@ -614,12 +606,10 @@ func (s *GitStore) RestoreArchive(ctx context.Context, n int, repository string,
 			completed = completed && current[r.Source] == r.SHA
 		}
 		if completed {
-			published = true
 			return &t, nil
 		}
 		return &t, fmt.Errorf("%w: restore transaction: %w", ErrConflict, err)
 	}
-	published = true
 	return &t, nil
 }
 

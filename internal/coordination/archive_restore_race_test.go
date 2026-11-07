@@ -37,7 +37,11 @@ func TestArchiveRestoreIdenticalRefBeforeAdvertisement(t *testing.T) {
 				}
 				dir := t.TempDir()
 				script := `#!/bin/sh
-if [ "$1" = push ] && [ "$3" = "$RESTORE_RACE_SOURCE" ]; then
+is_push=false
+for arg do
+ [ "$arg" != push ] || is_push=true
+done
+if [ "$is_push" = true ]; then
  "$RESTORE_RACE_REAL" --git-dir="$RESTORE_RACE_REMOTE" update-ref "$RESTORE_RACE_REF" "$RESTORE_RACE_SHA" || exit $?
 fi
 exec "$RESTORE_RACE_REAL" "$@"

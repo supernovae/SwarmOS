@@ -625,6 +625,9 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 	if err := r.resumeForkCheckpoint(); err != nil {
 		return nil, err
 	}
+	if err := r.recoverCheckpointCompletion(); err != nil {
+		return nil, err
+	}
 	if err := r.provisionWorkspace(); err != nil {
 		return nil, err
 	}

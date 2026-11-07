@@ -136,23 +136,12 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 		return false, err
 	}
 	predecessor := r.st.HeadSHA
+	if predecessor == "" {
+		predecessor = r.st.BaseSHA
+	}
 	if r.st.PRRevision != nil {
 		predecessor = r.st.PRRevision.LocalHeadSHA
 	}
-	if r.opts.PRNumber != 0 {
-		r.st, err = r.e.LeaseManager.RecordPRHead(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.opts.PRNumber, r.branch, checkpointHead)
-	} else {
-		if r.forkMode {
-			if err := workspace.PushForkCheckpointFrom(r.ctx, r.opts.RepoRoot, r.e.upstreamRemote(), r.forkRemote, r.branch, checkpointHead); err != nil {
-				return false, r.checkpointPublicationError(err, predecessor, checkpointHead)
-			}
-		}
-		r.st, err = r.e.LeaseManager.RecordCheckpoint(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.branch, checkpointHead)
-	}
-	if err != nil {
-		return false, r.checkpointPublicationError(err, predecessor, checkpointHead)
-	}
-	r.res.State, r.res.HeadSHA = r.st, checkpointHead
 	verdict := "PASS"
 	failure := ""
 	unchanged := checkpointHead == roundBase
@@ -180,12 +169,39 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 		devMeta[key] = value
 	}
 	devMeta["head_sha"] = checkpointHead
+	completionArtifact := contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: verdict, Summary: summary, Body: body, Metadata: devMeta}
+	completionSaved := false
+	if verdict == "PASS" && len(predecessor) == 40 && predecessor != checkpointHead && reportWarning == "" && strings.TrimSpace(developerReport) != "" && !r.forkMode && !r.e.LeaseManager.HasWorkerGateway() && r.opts.PRNumber == 0 && r.st.PRNumber == 0 && r.st.PRRevision == nil {
+		if err := r.e.LeaseManager.SaveCheckpointCompletion(r.ctx, r.opts.IssueNumber, r.opts.Owner, predecessor, checkpointHead, completionArtifact); err != nil {
+			return false, fmt.Errorf("preserve implementation completion before publication: %w", err)
+		}
+		completionSaved = true
+	}
+	if r.opts.PRNumber != 0 {
+		r.st, err = r.e.LeaseManager.RecordPRHead(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.opts.PRNumber, r.branch, checkpointHead)
+	} else {
+		if r.forkMode {
+			if err := workspace.PushForkCheckpointFrom(r.ctx, r.opts.RepoRoot, r.e.upstreamRemote(), r.forkRemote, r.branch, checkpointHead); err != nil {
+				return false, r.checkpointPublicationError(err, predecessor, checkpointHead)
+			}
+		}
+		r.st, err = r.e.LeaseManager.RecordCheckpoint(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.branch, checkpointHead)
+	}
+	if err != nil {
+		return false, r.checkpointPublicationError(err, predecessor, checkpointHead)
+	}
+	r.res.State, r.res.HeadSHA = r.st, checkpointHead
 	record := r.e.LeaseManager.UpdateArtifact
 	if verdict == "PASS" && !r.forkMode && !r.e.LeaseManager.HasWorkerGateway() {
 		record = r.e.LeaseManager.RecordTrustedImplementation
 	}
-	if r.st, err = record(r.ctx, r.opts.IssueNumber, r.opts.Owner, contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: verdict, Summary: summary, Body: body, Metadata: devMeta}); err != nil {
+	if r.st, err = record(r.ctx, r.opts.IssueNumber, r.opts.Owner, completionArtifact); err != nil {
 		return false, fmt.Errorf("record implementation outcome: %w", err)
+	}
+	if completionSaved {
+		if r.st, err = r.e.LeaseManager.RecoverCheckpointCompletion(r.ctx, r.opts.IssueNumber, r.opts.Owner); err != nil {
+			return false, err
+		}
 	}
 	r.res.State = r.st
 	r.outcomeFailed = failure != ""

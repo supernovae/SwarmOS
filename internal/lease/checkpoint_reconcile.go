@@ -48,16 +48,16 @@ func (m *Manager) ReconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if dryRun {
 		return m.PrepareCheckpoint(ctx, n, owner, expected, candidate, false)
 	}
-	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, false, false, false, "", options...)
+	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, false, false, false, "", nil, options...)
 }
 
 // PrepareCheckpoint authenticates and observes recovery without acquiring a
 // claim, fetching objects, opening locks, or running candidate checks.
 func (m *Manager) PrepareCheckpoint(ctx context.Context, n int, owner, expected, candidate string, probe bool) (*CheckpointReconciliation, error) {
-	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, true, true, probe, "")
+	return m.reconcileCheckpoint(ctx, n, owner, expected, candidate, true, true, probe, "", nil)
 }
 
-func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expected, candidate string, dryRun, prepare, probe bool, pinned string, options ...validation.ValidateOptions) (*CheckpointReconciliation, error) {
+func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expected, candidate string, dryRun, prepare, probe bool, pinned string, eligibility func(*IssueState) error, options ...validation.ValidateOptions) (*CheckpointReconciliation, error) {
 	if m.gateway != nil {
 		return nil, fmt.Errorf("checkpoint reconciliation is upstream-only; use the fork PR revision workflow")
 	}
@@ -146,6 +146,11 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	}
 	if !dryRun {
 		if err := m.denyResume(n); err != nil {
+			return nil, err
+		}
+	}
+	if eligibility != nil {
+		if err = eligibility(st); err != nil {
 			return nil, err
 		}
 	}
@@ -324,6 +329,11 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if _, err = inspect(); err != nil {
 		return nil, err
 	}
+	if eligibility != nil {
+		if err = eligibility(fresh); err != nil {
+			return nil, err
+		}
+	}
 	preserveCheckpointHeads(st, st.HeadSHA, st.SubmittedHeadSHA, candidate)
 	clearHeadEvidence(st)
 	st.HeadSHA = candidate
@@ -456,7 +466,7 @@ func (m *Manager) ReconcilePreparedCheckpoint(ctx context.Context, n int, p *Che
 	if p == nil || !p.prepared || p.ClaimRequired {
 		return nil, ErrClaimFence
 	}
-	return m.reconcileCheckpoint(ctx, n, p.owner, p.expected, p.candidate, false, false, false, p.revision, options...)
+	return m.reconcileCheckpoint(ctx, n, p.owner, p.expected, p.candidate, false, false, false, p.revision, nil, options...)
 }
 
 func (m *Manager) loadCheckpointPreview(ctx context.Context, n int) (*IssueState, string, error) {

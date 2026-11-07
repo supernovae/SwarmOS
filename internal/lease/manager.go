@@ -2783,7 +2783,14 @@ func (m *Manager) RecordTrustedImplementation(ctx context.Context, n int, owner 
 	if m.gateway != nil {
 		return nil, fmt.Errorf("trusted implementation requires direct coordinator")
 	}
-	return m.updateArtifact(ctx, n, owner, art, false, false, true)
+	return m.recordTrustedImplementation(ctx, n, owner, art)
+}
+
+func (m *Manager) recordTrustedImplementation(ctx context.Context, n int, owner string, art contract.Artifact, eligibility ...func(*IssueState) error) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("trusted implementation requires direct coordinator")
+	}
+	return m.updateArtifact(ctx, n, owner, art, false, false, true, eligibility...)
 }
 
 func implementationCheckpoint(st *IssueState) (string, string) {

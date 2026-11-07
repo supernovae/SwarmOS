@@ -476,7 +476,7 @@ func (s *GitStore) CompareAndSwapAndPublishExpected(ctx context.Context, n int, 
 // Unlike recovery, it does not impose fast-forward ancestry; the manager checks
 // reviewed lineage before invoking this expected-head transaction.
 func (s *GitStore) CompareAndSwapAndReconcileCheckpoint(ctx context.Context, n int, old string, next []byte, branch, head, expected string) (string, error) {
-	if len(expected) != 40 {
+	if expected != "" && len(expected) != 40 {
 		return "", fmt.Errorf("invalid predecessor checkpoint")
 	}
 	if _, err := hex.DecodeString(expected); err != nil {

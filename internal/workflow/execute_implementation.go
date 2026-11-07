@@ -136,6 +136,9 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 		return false, err
 	}
 	predecessor := r.st.HeadSHA
+	if predecessor == "" {
+		predecessor = r.st.BaseSHA
+	}
 	if r.st.PRRevision != nil {
 		predecessor = r.st.PRRevision.LocalHeadSHA
 	}

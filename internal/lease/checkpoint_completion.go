@@ -28,6 +28,7 @@ const completionLimit = 4 << 20
 // worktree input. Callers cannot turn a deserialized value into authority.
 type CheckpointCompletion struct {
 	Version                                                    int
+	NoRecordedHead                                             bool
 	Repository                                                 string
 	Issue                                                      int
 	Claim, Owner, Predecessor, Candidate, Tree, Branch, Report string
@@ -112,10 +113,10 @@ func (m *Manager) SaveCheckpointCompletion(ctx context.Context, n int, owner, pr
 	if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
 		return err
 	}
-	if art.Type != contract.ArtifactImplementation || art.Verdict != "PASS" || art.Body == "" || len(predecessor) != 40 || len(candidate) != 40 || predecessor == candidate || st.HeadSHA != predecessor {
+	if art.Type != contract.ArtifactImplementation || art.Verdict != "PASS" || art.Body == "" || len(predecessor) != 40 || len(candidate) != 40 || predecessor == candidate || checkpointPredecessor(st) != predecessor {
 		return fmt.Errorf("successful implementation checkpoint required")
 	}
-	c := &CheckpointCompletion{Version: 1, Issue: n, Claim: st.Lease.ClaimID, Owner: owner, Predecessor: predecessor, Candidate: candidate, Branch: st.Branch, Bindings: ReviewBindings(st), Approval: completionApproval(st), Artifact: art}
+	c := &CheckpointCompletion{Version: 1, NoRecordedHead: st.HeadSHA == "", Issue: n, Claim: st.Lease.ClaimID, Owner: owner, Predecessor: predecessor, Candidate: candidate, Branch: st.Branch, Bindings: ReviewBindings(st), Approval: completionApproval(st), Artifact: art}
 	c.Tree, err = m.implementationTree(ctx, candidate)
 	if err != nil {
 		return err
@@ -220,11 +221,17 @@ func (m *Manager) InspectCheckpointCompletion(ctx context.Context, n int) (resul
 }
 
 func (m *Manager) checkCompletion(ctx context.Context, st *IssueState, c *CheckpointCompletion) error {
-	if m.gateway != nil || !directIssue(st) || st.DroppedCheckpoint != nil || st.Lease.ClaimID != c.Claim || st.Lease.Owner != c.Owner || st.Branch != c.Branch || (st.HeadSHA != c.Predecessor && st.HeadSHA != c.Candidate) || !reflect.DeepEqual(ReviewBindings(st), c.Bindings) || completionApproval(st) != c.Approval {
+	if m.gateway != nil || !directIssue(st) || st.DroppedCheckpoint != nil || st.Lease.ClaimID != c.Claim || st.Lease.Owner != c.Owner || st.Branch != c.Branch || (!completionPredecessorMatches(st, c) && st.HeadSHA != c.Candidate) || !reflect.DeepEqual(ReviewBindings(st), c.Bindings) || completionApproval(st) != c.Approval {
 		return fmt.Errorf("%w: completion inputs changed", ErrClaimFence)
 	}
 	if err := m.checkStateClaim(ctx, c.Issue, c.Owner, st); err != nil {
 		return err
+	}
+	if c.NoRecordedHead {
+		ancestor, err := workspace.BaseIsAncestor(ctx, m.repoRoot, st.BaseSHA, c.Candidate)
+		if c.Predecessor != st.BaseSHA || err != nil || !ancestor {
+			return fmt.Errorf("%w: first checkpoint must descend from approved base", ErrClaimFence)
+		}
 	}
 	issue, err := m.tracker.GetIssue(ctx, c.Issue)
 	if err != nil {
@@ -282,7 +289,7 @@ func (m *Manager) RecoverCheckpointCompletion(ctx context.Context, n int, owner 
 	if err = m.checkCompletion(ctx, st, c); err != nil {
 		return nil, err
 	}
-	if st.HeadSHA == c.Predecessor {
+	if completionPredecessorMatches(st, c) {
 		p, err := m.PrepareCheckpoint(ctx, n, owner, c.Predecessor, c.Candidate, false)
 		if err != nil {
 			return nil, err
@@ -369,4 +376,19 @@ func completionPublicError(err error) error {
 		return &completionStorageError{err}
 	}
 	return err
+}
+
+// checkpointPredecessor names the approved base until the first publication.
+func checkpointPredecessor(st *IssueState) string {
+	if st.HeadSHA == "" {
+		return st.BaseSHA
+	}
+	return st.HeadSHA
+}
+
+func completionPredecessorMatches(st *IssueState, c *CheckpointCompletion) bool {
+	if c.NoRecordedHead {
+		return st.HeadSHA == "" && c.Predecessor == st.BaseSHA
+	}
+	return st.HeadSHA == c.Predecessor
 }

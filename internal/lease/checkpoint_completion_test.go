@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -442,5 +443,92 @@ func TestCheckpointCompletionDoesNotMintIncompleteOutcome(t *testing.T) {
 				t.Fatal("receipt minted", err)
 			}
 		})
+	}
+}
+
+func TestCheckpointCompletionFirstCheckpoint(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		for _, scenario := range []string{"recover", "recorded-head", "unrelated", "successor", "save-unrelated"} {
+			t.Run(fmt.Sprintf("local=%v/%s", local, scenario), func(t *testing.T) {
+				f := completionFixture(t, local)
+				c, err := f.m.InspectCheckpointCompletion(t.Context(), f.n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				root, _, err := f.m.completionRoot(t.Context(), false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer root.Close()
+				if err = root.Remove(completionName(f.n)); err != nil {
+					t.Fatal(err)
+				}
+				_, err = f.m.mutate(t.Context(), f.n, "local-dev", func(st *IssueState) error { st.HeadSHA = ""; return nil })
+				if err != nil {
+					t.Fatal(err)
+				}
+				st, err := f.m.GetCurrentState(t.Context(), f.n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !local {
+					f.git(f.m.repoRoot, "push", "origin", ":refs/heads/"+f.branch)
+				}
+				unrelated := func() {
+					tree := f.git(f.path, "rev-parse", "HEAD^{tree}")
+					head := f.git(f.path, "commit-tree", tree, "-m", "unrelated root")
+					f.git(f.path, "reset", "--hard", head)
+					c.Candidate = head
+					c.Tree = tree
+					c.Artifact.Metadata["head_sha"] = head
+				}
+				if scenario == "save-unrelated" {
+					unrelated()
+				}
+				err = f.m.SaveCheckpointCompletion(t.Context(), f.n, "local-dev", st.BaseSHA, c.Candidate, c.Artifact)
+				if scenario == "save-unrelated" {
+					if err == nil {
+						t.Fatal("saved unrelated candidate")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				c, err = f.m.InspectCheckpointCompletion(t.Context(), f.n)
+				if err != nil || !c.NoRecordedHead || c.Predecessor != st.BaseSHA {
+					t.Fatalf("first receipt: %+v %v", c, err)
+				}
+				switch scenario {
+				case "recorded-head", "successor":
+					_, err = f.m.mutate(t.Context(), f.n, "local-dev", func(st *IssueState) error {
+						if scenario == "recorded-head" {
+							st.HeadSHA = st.BaseSHA
+						} else {
+							st.Lease.ClaimID = "successor"
+						}
+						return nil
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+				case "unrelated":
+					unrelated()
+					rewriteCompletion(t, f, c)
+				}
+				if scenario != "recover" {
+					assertCompletionRejected(t, f)
+
+					return
+				}
+				result, err := f.m.RecoverCheckpointCompletion(t.Context(), f.n, "local-dev")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = VerifyTrustedImplementation(result, c.Candidate, c.Tree, c.Branch); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
 	}
 }

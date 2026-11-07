@@ -270,3 +270,34 @@ func TestCheckpointPreviewDoesNotCreateLocksOrFetchMissingObjects(t *testing.T) 
 		t.Fatal("preview imported missing state object")
 	}
 }
+
+func TestCheckpointReconcileFirstPublication(t *testing.T) {
+	for _, appeared := range []bool{false, true} {
+		t.Run(fmt.Sprint(appeared), func(t *testing.T) {
+			f := newRetentionFixture(t)
+			branch := "swarm/issue-1-first"
+			base := f.git(f.clone, "rev-parse", "HEAD")
+			rev, err := f.store.CompareAndSwap(t.Context(), 1, "", []byte(`{"head_sha":""}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.git(f.clone, "commit", "--allow-empty", "-m", "candidate")
+			head := f.git(f.clone, "rev-parse", "HEAD")
+			if appeared {
+				f.git(f.clone, "push", "origin", base+":refs/heads/"+branch)
+			}
+			_, err = f.store.CompareAndSwapAndReconcileCheckpoint(t.Context(), 1, rev, []byte(fmt.Sprintf(`{"head_sha":%q}`, head)), branch, head, "")
+			if appeared {
+				if !errors.Is(err, ErrConflict) {
+					t.Fatalf("expected absent-ref fence: %v", err)
+				}
+				_, current, loadErr := f.store.Load(t.Context(), 1)
+				if loadErr != nil || current != rev {
+					t.Fatalf("state changed: %v", loadErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

@@ -122,7 +122,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 	if st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil || st.DroppedCheckpoint != nil {
 		return nil, fmt.Errorf("checkpoint reconciliation requires upstream issue work without submitted PR or pending recovery; use the PR revision workflow for linked PRs")
 	}
-	if st.HeadSHA != expected || st.Branch == "" {
+	if checkpointPredecessor(st) != expected || st.Branch == "" {
 		return nil, fmt.Errorf("%w: authoritative checkpoint %s differs from expected %s", ErrClaimFence, st.HeadSHA, expected)
 	}
 	inspect := func() (workspace.CheckpointState, error) {
@@ -135,7 +135,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 			o.RemoteBranch = workspace.HeadObservation{}
 		}
 		if o.Error != "" || o.Worktree.Error != "" || o.LocalBranch.Error != "" || o.RemoteBranch.Error != "" ||
-			o.Dirty || o.Rebasing || o.AttachedBranch != st.Branch || o.Worktree.SHA != candidate || o.LocalBranch.SHA != candidate || gitStore && o.RemoteBranch.SHA != expected {
+			o.Dirty || o.Rebasing || o.AttachedBranch != st.Branch || o.Worktree.SHA != candidate || o.LocalBranch.SHA != candidate || gitStore && o.RemoteBranch.SHA != st.HeadSHA {
 			return o, fmt.Errorf("%w: reconciliation preconditions failed: %s", ErrClaimFence, o.String())
 		}
 		return o, nil
@@ -377,7 +377,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 			return err
 		}
 		if gitStore {
-			_, err = publisher.CompareAndSwapAndReconcileCheckpoint(ctx, n, rev, raw, st.Branch, candidate, expected)
+			_, err = publisher.CompareAndSwapAndReconcileCheckpoint(ctx, n, rev, raw, st.Branch, candidate, observation.RemoteBranch.SHA)
 		} else {
 			_, err = m.store.CompareAndSwap(ctx, n, rev, raw)
 		}

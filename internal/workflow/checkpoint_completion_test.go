@@ -52,7 +52,7 @@ func completionGit(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
-func completionEngineFixture(t *testing.T, ambiguous bool) (*Engine, WorkOptions, *atomic.Int32, *atomic.Int32) {
+func completionEngineFixture(t *testing.T, ambiguous bool, seeded ...bool) (*Engine, WorkOptions, *atomic.Int32, *atomic.Int32) {
 	t.Helper()
 	t.Setenv("SWARM_MOCK_DEVELOPER_CMD", "printf finished > finished.txt; printf 'Implemented and tested.\n' > .swarm/active/IMPLEMENTATION.md")
 	root, e, tr := setupProjectPlanTestRepo(t)
@@ -86,12 +86,14 @@ func completionEngineFixture(t *testing.T, ambiguous bool) (*Engine, WorkOptions
 		t.Fatal(err)
 	}
 	opts.ClaimID = planned.State.Lease.ClaimID
-	_, branch, err := workspace.ProvisionAt(root, issue.Number, issue.Title, planned.State.BaseSHA, "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = e.LeaseManager.RecordCheckpoint(t.Context(), issue.Number, "maintainer", branch, planned.State.BaseSHA); err != nil {
-		t.Fatal(err)
+	if len(seeded) > 0 && seeded[0] {
+		_, branch, err := workspace.ProvisionAt(root, issue.Number, issue.Title, planned.State.BaseSHA, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = e.LeaseManager.RecordCheckpoint(t.Context(), issue.Number, "maintainer", branch, planned.State.BaseSHA); err != nil {
+			t.Fatal(err)
+		}
 	}
 	opts.Phase = "all"
 	e.LeaseManager.SetStore(root, &completionPublicationStore{Store: e.LeaseManager.Store(), root: root, ambiguous: ambiguous})
@@ -137,31 +139,55 @@ func completionEngineFixture(t *testing.T, ambiguous bool) (*Engine, WorkOptions
 }
 func TestCheckpointCompletionFreshEngineResume(t *testing.T) {
 	for _, ambiguous := range []bool{false, true} {
-		t.Run(fmt.Sprint(ambiguous), func(t *testing.T) {
-			e, opts, dev, tester := completionEngineFixture(t, ambiguous)
-			result, err := e.ExecuteWork(t.Context(), opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			tree, err := workspace.CheckpointTree(t.Context(), result.WorktreePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = lease.VerifyTrustedImplementation(result.State, result.HeadSHA, tree, result.BranchName); err != nil {
-				t.Fatal(err)
-			}
-			if !result.ValidationPassed || dev.Load() != 1 || tester.Load() != 1 {
-				t.Fatalf("validation=%v dev=%d tester=%d", result.ValidationPassed, dev.Load(), tester.Load())
-			}
-		})
+		for _, seeded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("ambiguous=%v/seeded=%v", ambiguous, seeded), func(t *testing.T) {
+				e, opts, dev, tester := completionEngineFixture(t, ambiguous, seeded)
+				result, err := e.ExecuteWork(t.Context(), opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tree, err := workspace.CheckpointTree(t.Context(), result.WorktreePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = lease.VerifyTrustedImplementation(result.State, result.HeadSHA, tree, result.BranchName); err != nil {
+					t.Fatal(err)
+				}
+				if !result.ValidationPassed || dev.Load() != 1 || tester.Load() != 1 {
+					t.Fatalf("validation=%v dev=%d tester=%d", result.ValidationPassed, dev.Load(), tester.Load())
+				}
+			})
+		}
 	}
 }
 func TestCheckpointCompletionEarlyRejection(t *testing.T) {
-	for _, name := range []string{"report", "dirty", "candidate", "branch", "receipt", "missing-receipt", "worktree-forgery", "instructions"} {
+	for _, name := range []string{"report", "dirty", "candidate", "branch", "receipt", "missing-receipt", "worktree-forgery", "instructions", "recorded-head", "successor"} {
 		t.Run(name, func(t *testing.T) {
 			e, opts, dev, tester := completionEngineFixture(t, false)
 			path := workspace.WorktreePath(e.repoRoot, opts.IssueNumber)
 			switch name {
+			case "recorded-head", "successor":
+				store := e.LeaseManager.Store()
+				raw, rev, err := store.Load(t.Context(), opts.IssueNumber)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var st lease.IssueState
+				if err = json.Unmarshal(raw, &st); err != nil {
+					t.Fatal(err)
+				}
+				if name == "recorded-head" {
+					st.HeadSHA = st.BaseSHA
+				} else {
+					st.Lease.ClaimID = "successor"
+				}
+				raw, err = json.Marshal(st)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = store.CompareAndSwap(t.Context(), opts.IssueNumber, rev, raw); err != nil {
+					t.Fatal(err)
+				}
 			case "report":
 				os.WriteFile(filepath.Join(path, ".swarm/active/IMPLEMENTATION.md"), []byte("edited"), 0600)
 			case "dirty":
@@ -189,11 +215,19 @@ func TestCheckpointCompletionEarlyRejection(t *testing.T) {
 			case "instructions":
 				opts.DeveloperInstructions = "change more"
 			}
+			stateBefore, _, err := e.LeaseManager.Store().Load(t.Context(), opts.IssueNumber)
+			if err != nil {
+				t.Fatal(err)
+			}
 			head := completionGit(t, path, "rev-parse", "HEAD")
 			status := completionGit(t, path, "status", "--porcelain")
 			report, _ := os.ReadFile(filepath.Join(path, ".swarm/active/IMPLEMENTATION.md"))
 			if _, err := e.ExecuteWork(t.Context(), opts); err == nil {
 				t.Fatal("recovery accepted changed input")
+			}
+			stateAfter, _, err := e.LeaseManager.Store().Load(t.Context(), opts.IssueNumber)
+			if err != nil || string(stateBefore) != string(stateAfter) {
+				t.Fatalf("rejection changed state: %v", err)
 			}
 			if dev.Load() != 1 || tester.Load() != 0 {
 				t.Fatal("rejection launched an agent")

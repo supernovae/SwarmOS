@@ -2,9 +2,13 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"github.com/supernovae/swarmos/internal/validation"
 	"os"
 	"path/filepath"
 	"strings"
@@ -492,5 +496,106 @@ func TestSuppliedBudgetReasonUnchanged(t *testing.T) {
 	b := &lease.ClaimBudget{Available: time.Hour, Threshold: 20 * time.Minute, RenewalsUsed: 2, RenewalsRemaining: 1}
 	if got, want := (&budgetAdmissionError{budget: b}).budgetReason(), "paused for claim budget: 1h0m0s available (reserve 20m0s), 2 renewals used, 1 remaining"; got != want {
 		t.Fatalf("reason %q, want %q", got, want)
+	}
+}
+
+func TestIssue466ValidationReusePreview(t *testing.T) {
+	e, issue := budgetEngine(t)
+	st, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Lease.Owner, st.Lease.ClaimID, st.Lease.Status = "owner", "claim", "active"
+	now := time.Now().UTC()
+	st.Lease.ExpiresAt = now.Add(time.Hour)
+	st.HeadSHA = st.BaseSHA
+	wt := workspace.WorktreePath(e.repoRoot, issue.Number)
+	if err := os.MkdirAll(filepath.Dir(wt), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := gitfixture.Command(t, e.repoRoot, "worktree", "add", "-b", "preview", wt, st.HeadSHA).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	read := func(args ...string) []byte {
+		t.Helper()
+		out, err := gitfixture.Command(t, e.repoRoot, args...).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	tree := strings.TrimSpace(string(read("rev-parse", st.HeadSHA+"^{tree}")))
+	policy := sha256.Sum256(read("show", st.BaseSHA+":.swarm/validation/required-checks.yaml"))
+	report, err := json.Marshal(validation.ValidationReport{Passed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := contract.Artifact{Type: contract.ArtifactValidation, Verdict: "PASS", CreatedAt: now,
+		Metadata: map[string]string{"validation_trusted_origin": "coordinator", "validation_trusted_owner": "owner",
+			"validation_claim": "claim", "validation_trusted_claim": "claim", "validation_base": st.BaseSHA,
+			"validation_version": "v1.2.3", "validation_tree": tree, "validation_policy": hex.EncodeToString(policy[:]), "validation_report": string(report)}}
+	cfg, err := harness.LoadConfigAt(e.repoRoot, st.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"same claim", "cross claim", "stale", "version", "base", "tree", "policy", "owner", "missing", "malformed", "changed candidate"} {
+		t.Run(kind, func(t *testing.T) {
+			a := original
+			a.Metadata = map[string]string{}
+			for k, v := range original.Metadata {
+				a.Metadata[k] = v
+			}
+			version, owner := "v1.2.3", "owner"
+			st.Lease.ClaimID = "claim"
+			switch kind {
+			case "cross claim":
+				st.Lease.ClaimID = "new"
+			case "stale":
+				st.Lease.ClaimID = "new"
+				a.CreatedAt = now.Add(-365 * 24 * time.Hour)
+			case "version":
+				version = "dev"
+			case "base":
+				a.Metadata["validation_base"] = "other"
+			case "tree":
+				a.Metadata["validation_tree"] = "other"
+			case "policy":
+				a.Metadata["validation_policy"] = "other"
+			case "owner":
+				owner = "other"
+			case "malformed":
+				a.Metadata["validation_report"] = "{"
+			case "changed candidate":
+				if err := os.WriteFile(filepath.Join(wt, "untracked.txt"), []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				defer os.Remove(filepath.Join(wt, "untracked.txt"))
+			}
+			st.Artifacts = []contract.Artifact{a}
+			if kind == "missing" {
+				st.Artifacts = nil
+			}
+			p := InspectContinuation(st, wu, WorkOptions{Phase: "all", Version: version}, owner, "claim", now)
+			if p.ValidationReuse == "conditional" {
+				inspectValidationReuse(t.Context(), e.repoRoot, st, cfg, p, now)
+			}
+			want := "unavailable"
+			if kind == "same claim" {
+				want = "eligible"
+			}
+			if kind == "cross claim" {
+				want = "conditional"
+			}
+			if p.ValidationReuse != want {
+				t.Fatalf("reuse: %+v want %s", p, want)
+			}
+			if kind == "cross claim" && p.AcceptanceEvidence != "tester required after claim replacement" {
+				t.Fatal("cross-claim acceptance incorrectly reused")
+			}
+		})
 	}
 }

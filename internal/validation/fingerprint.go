@@ -66,7 +66,7 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 		if art.Type != contract.ArtifactValidation {
 			continue
 		}
-		if art.Verdict != "PASS" || art.Metadata["validation_trusted_origin"] != "coordinator" || art.Metadata["validation_trusted_owner"] != owner || art.Metadata["validation_claim"] == "" || art.Metadata["validation_trusted_claim"] != art.Metadata["validation_claim"] {
+		if ReuseMetadataReason(art, opts.Version, owner, opts.BaseSHA) != "" {
 			return nil, nil
 		}
 		for k, v := range current {
@@ -164,4 +164,30 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 		return &report, nil
 	}
 	return nil, nil
+}
+
+// ReuseMetadataReason checks the stable prerequisites without touching Git.
+// An empty reason is only eligibility for further identity and age checks.
+func ReuseMetadataReason(art contract.Artifact, version, owner, base string) string {
+	md := art.Metadata
+	if !reusableVersion(version) {
+		return "an immutable build version is required"
+	}
+	if art.Verdict != "PASS" || md["validation_trusted_origin"] != "coordinator" || owner == "" || md["validation_trusted_owner"] != owner || md["validation_claim"] == "" || md["validation_trusted_claim"] != md["validation_claim"] {
+		return "no trusted passing validation for this owner"
+	}
+	if base == "" || md["validation_base"] != base {
+		return "approved base differs"
+	}
+	if md["validation_version"] != version {
+		return "build version differs"
+	}
+	var report ValidationReport
+	if err := json.Unmarshal([]byte(md["validation_report"]), &report); err != nil || !report.Passed {
+		return "passing validation report is unavailable"
+	}
+	if source, ok := md["validation_source_claim"]; ok && (source == "" || md["validation_source_time"] == "") {
+		return "original validation identity is unavailable"
+	}
+	return ""
 }

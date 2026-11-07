@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -14,10 +15,65 @@ import (
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
+type stoppedAt struct {
+	LastCompletedRole  string     `json:"last_completed_role,omitempty"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	NextMissingRole    string     `json:"next_missing_role"`
+	TesterStatus       string     `json:"tester_status"`
+	ClaimStatus        string     `json:"claim_status"`
+	ExpiresAt          time.Time  `json:"expires_at"`
+	FreshClaimRequired bool       `json:"fresh_claim_required"`
+}
+
+func recordedStop(st *lease.IssueState, now time.Time) *stoppedAt {
+	p := &stoppedAt{NextMissingRole: "developer", TesterStatus: "not run", ClaimStatus: st.Lease.Status, ExpiresAt: st.Lease.ExpiresAt}
+	if p.ClaimStatus == "active" && !p.ExpiresAt.After(now) {
+		p.ClaimStatus = "expired"
+	}
+	p.FreshClaimRequired = p.ClaimStatus != "active" && p.ClaimStatus != "completed"
+	if a := workflow.RecordedImplementation(st); a != nil {
+		p.LastCompletedRole, p.NextMissingRole = "developer", "tester"
+		if !a.CreatedAt.IsZero() {
+			at := a.CreatedAt
+			p.CompletedAt = &at
+		}
+	}
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		a := st.Artifacts[i]
+		if a.Type != contract.ArtifactValidation {
+			continue
+		}
+		md := a.Metadata
+		if md["validation_trusted_origin"] == "coordinator" && md["validation_trusted_owner"] == st.Lease.Owner && md["validation_trusted_claim"] == st.Lease.ClaimID && st.Lease.ClaimID != "" && md["head_sha"] == st.HeadSHA && md["base_sha"] == st.BaseSHA {
+			p.TesterStatus = "recorded"
+			if a.Verdict == "FAIL" {
+				p.TesterStatus = "failed"
+			}
+			if a.Verdict == "PASS" {
+				p.LastCompletedRole, p.NextMissingRole, p.CompletedAt = "tester", "", nil
+				if !a.CreatedAt.IsZero() {
+					at := a.CreatedAt
+					p.CompletedAt = &at
+				}
+			}
+		}
+		break
+	}
+	for _, run := range lease.RoleRuns(st) {
+		if run.Role == "tester" && p.TesterStatus == "not run" {
+			p.TesterStatus = "attempted"
+		}
+	}
+	return p
+}
+
 type issueStatus struct {
+	StoppedAt       *stoppedAt                 `json:"stopped_at,omitempty"`
+	NextAction      *NextAction                `json:"next_action,omitempty"`
 	Readiness       *validation.Readiness      `json:"readiness,omitempty"`
 	Decomposition   *lease.DecompositionStatus `json:"decomposition,omitempty"`
 	humanPlanAction *NextAction
@@ -143,6 +199,28 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 					observed := workspace.InspectCheckpoint(cmd.Context(), target.Path, remote, issueNumber, state.Branch, state.HeadSHA)
 					entry.Checkpoint = &observed
 				}
+				if !options.Fork && state != nil {
+					wu, parseErr := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+					if parseErr == nil {
+						cfg, cfgErr := harness.LoadConfigAt(target.Path, state.BaseSHA)
+						if cfgErr != nil {
+							return cfgErr
+						}
+						owner, ownerErr := tr.CurrentUser(cmd.Context())
+						if ownerErr != nil {
+							return ownerErr
+						}
+						token, tokenErr := lease.LoadClaimToken(target.Path, issue.Number)
+						if tokenErr != nil && !os.IsNotExist(tokenErr) {
+							return tokenErr
+						}
+						selected := *options
+						selected.Repo, selected.RepoRoot = target.Repo, target.Path
+						c := stopContext{opts: &selected, resource: "issue", number: issue.Number}
+						entry.StoppedAt = recordedStop(state, options.now())
+						entry.NextAction = c.statusAction(state, wu, cfg, entry.humanPlanAction, entry.Readiness, owner, token, options.now())
+					}
+				}
 				entries = append(entries, entry)
 			}
 		}
@@ -170,6 +248,24 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			if entry.Readiness != nil {
 				fmt.Fprint(cmd.OutOrStdout(), entry.Readiness.Text())
 			}
+			if p := entry.StoppedAt; p != nil {
+				completion := "no trusted completion recorded"
+				if p.LastCompletedRole != "" {
+					at := "unknown time"
+					if p.CompletedAt != nil {
+						at = p.CompletedAt.Format(time.RFC3339)
+					}
+					completion = p.LastCompletedRole + " completed at " + at
+				}
+				fresh := ""
+				if p.FreshClaimRequired {
+					fresh = "; will be replaced by a fresh claim"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "Stopped at: %s; tester %s; claim %s at %s%s\n", completion, p.TesterStatus, p.ClaimStatus, p.ExpiresAt.Format(time.RFC3339), fresh)
+			}
+			if entry.NextAction != nil {
+				fmt.Fprintln(cmd.OutOrStdout(), strings.TrimPrefix(renderNextAction(entry.NextAction), "\n"))
+			}
 			state := entry.State
 			if b := entry.ClaimBudget; b != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Claim budget: %d renewals used, %d remaining; total allowance left=%s deadline=%s; available=%s current expiry=%s (active=%t)\n", b.RenewalsUsed, b.RenewalsRemaining, b.Remaining, b.Deadline.Format(time.RFC3339), b.Available, state.Lease.ExpiresAt.Format(time.RFC3339), b.Active)
@@ -190,7 +286,11 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "Next phase: %s\n", d.NextPhase)
 			}
 			if entry.humanPlanAction != nil {
-				fmt.Fprintln(cmd.OutOrStdout(), "Plan approval required."+renderNextAction(entry.humanPlanAction))
+				if entry.NextAction == nil {
+					fmt.Fprintln(cmd.OutOrStdout(), "Plan approval required."+renderNextAction(entry.humanPlanAction))
+				} else {
+					fmt.Fprintln(cmd.OutOrStdout(), "Plan approval required.")
+				}
 			}
 			if entry.humanPlanAction == nil && d != nil && len(d.RecoveryCommands) > 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), strings.Join(d.RecoveryCommands, "; "))

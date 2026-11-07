@@ -3,15 +3,24 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIssue324NoopRetry(t *testing.T) {
@@ -276,4 +285,345 @@ func TestIssue324ForkReadOnlyConfiguration(t *testing.T) {
 	setFixtureTracker(t, f.root, "local")
 	f.must(t, "issue", "work", n, "--phase", "plan", "--agent", "mock", "--progress=false")
 	seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
+}
+
+// issue466Fixture creates a real coordinator-bound implementation. Tests edit
+// the local authority only to reproduce interrupted/expired runs.
+func issue466Fixture(t *testing.T) (*cliFixture, int) {
+	t.Helper()
+	f := newCLIFixture(t)
+	n := f.create(t, "agent")
+	f.must(t, "issue", "approve", strconv.Itoa(n))
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo implemented > feature.txt")
+	f.must(t, "issue", "work", strconv.Itoa(n), "--agent", "mock", "--headless", "--progress=false")
+	return f, n
+}
+
+func issue466State(t *testing.T, f *cliFixture, n int, change func(*lease.IssueState)) {
+	t.Helper()
+	store := coordination.NewFileStore(f.root)
+	raw, rev, err := store.Load(t.Context(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st lease.IssueState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	change(&st)
+	raw, err = json.Marshal(&st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.CompareAndSwap(t.Context(), n, rev, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func issue466Run(t *testing.T, f *cliFixture, now time.Time, args ...string) string {
+	t.Helper()
+	cmd := f.command(&RootOptions{RepoRoot: f.root, nowFn: func() time.Time { return now }})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(args)
+	if err := cmd.ExecuteContext(t.Context()); err != nil {
+		t.Fatalf("%v: %v\n%s", args, err, out.String())
+	}
+	return out.String()
+}
+
+func issue466Status(t *testing.T, raw string) issueStatus {
+	t.Helper()
+	var got struct {
+		Issues []issueStatus `json:"issues"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got.Issues) != 1 {
+		t.Fatalf("status JSON: %v %s", err, raw)
+	}
+	return got.Issues[0]
+}
+
+func TestIssue466ExpiredDeveloperStatus(t *testing.T) {
+	for _, mode := range []string{"completed", "missing time", "untrusted", "stale", "failed tester"} {
+		t.Run(mode, func(t *testing.T) {
+			f, n := issue466Fixture(t)
+			completed := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+			expiry := completed.Add(time.Hour)
+			issue466State(t, f, n, func(st *lease.IssueState) {
+				var arts []contract.Artifact
+				for _, a := range st.Artifacts {
+					if a.Type == contract.ArtifactValidation {
+						if mode == "failed tester" {
+							a.Verdict = "FAIL"
+							arts = append(arts, a)
+						}
+						continue
+					}
+					if a.Type == contract.ArtifactImplementation {
+						a.CreatedAt = completed
+						switch mode {
+						case "missing time":
+							a.CreatedAt = time.Time{}
+						case "untrusted":
+							delete(a.Metadata, "implementation_trusted_origin")
+						case "stale":
+							a.Metadata["implementation_trusted_head"] = "other"
+						}
+					}
+					arts = append(arts, a)
+				}
+				st.Artifacts, st.RoleRuns = arts, nil
+				st.Lease.Status, st.Lease.ExpiresAt = "active", expiry
+			})
+			now := expiry.Add(time.Minute)
+			text := issue466Run(t, f, now, "issue", "status", strconv.Itoa(n))
+			got := issue466Status(t, issue466Run(t, f, now, "issue", "status", strconv.Itoa(n), "--json"))
+			if got.NextAction == nil || got.StoppedAt == nil {
+				t.Fatal("missing continuation JSON")
+			}
+			trusted := mode != "untrusted" && mode != "stale"
+			if (got.StoppedAt.LastCompletedRole == "developer") != trusted {
+				t.Fatalf("completion: %+v", got.StoppedAt)
+			}
+			if trusted && mode != "missing time" && (got.StoppedAt.CompletedAt == nil || !got.StoppedAt.CompletedAt.Equal(completed)) {
+				t.Fatal("timestamp not recorded completion")
+			}
+			if mode == "missing time" && got.StoppedAt.CompletedAt != nil {
+				t.Fatal("invented timestamp")
+			}
+			if mode == "completed" {
+				for _, want := range []string{"developer completed at " + completed.Format(time.RFC3339), "tester not run", "claim expired at " + expiry.Format(time.RFC3339), "will be replaced by a fresh claim", "Next step:", "issue work " + strconv.Itoa(n)} {
+					if !strings.Contains(text, want) {
+						t.Fatalf("missing %q: %s", want, text)
+					}
+				}
+			}
+			if mode == "failed tester" && got.StoppedAt.TesterStatus != "failed" {
+				t.Fatal("failed tester shown as not run")
+			}
+			if got.StoppedAt.ClaimStatus != "expired" || !got.StoppedAt.FreshClaimRequired {
+				t.Fatal("expiry projection")
+			}
+		})
+	}
+}
+
+func TestIssue466StatusNextActionMatrix(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason, op string
+		args             []string
+		human            bool
+	}{
+		{"human plan", ReasonNeedsApproval, "review-plan", []string{"--approve"}, true},
+		{"failed checks", ReasonValidationRepairExhausted, "work", []string{"--phase", "implement"}, false},
+		{"pre-existing checks", ReasonPreExistingFailures, "status", nil, true},
+		{"missing acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
+		{"unmet acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
+		{"ready", "ready_to_submit", "submit", nil, false},
+		{"expired ready", "resumable_work", "work", nil, false},
+		{"submitted", "submitted", "status", nil, false},
+		{"other actor", "claim_unavailable", "status", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, n := issue466Fixture(t)
+			seedCompleteIssueAcceptance(t, f, n)
+			now := time.Now()
+			issue466State(t, f, n, func(st *lease.IssueState) {
+				switch tc.name {
+				case "human plan":
+					st.EffectiveGate = contract.GateHuman
+					st.HumanPlanReview = nil
+				case "expired ready":
+					st.Lease.ExpiresAt = now.Add(-time.Second)
+				case "submitted":
+					st.PRNumber = 42
+					st.Lease.Status = "completed"
+				case "other actor":
+					st.Lease.Owner = "bob"
+				}
+				for i := range st.Artifacts {
+					a := &st.Artifacts[i]
+					if a.Type == contract.ArtifactValidation {
+						switch tc.name {
+						case "failed checks":
+							a.Verdict = "FAIL"
+						case "pre-existing checks":
+							a.Verdict = "FAIL"
+							summary := validation.RepairSummary{BaseSHA: st.BaseSHA, HeadSHA: st.HeadSHA,
+								FailedChecks: []validation.RepairCheck{{Name: "test", Command: "go test", ExitCode: 1, FailingTests: []string{"TestBaseline"}}},
+								Tests:        []validation.FailingTest{{Check: "test", Name: "TestBaseline", Classification: validation.TestPreExisting}}}
+							raw, err := json.Marshal(summary)
+							if err != nil {
+								t.Fatal(err)
+							}
+							a.Metadata[validation.RepairMetadataKey] = string(raw)
+						case "missing acceptance":
+							delete(a.Metadata, validation.AcceptanceEvidenceKey)
+						case "unmet acceptance":
+							raw := strings.ReplaceAll(a.Metadata[validation.AcceptanceEvidenceKey], "met", "unmet")
+							a.Metadata[validation.AcceptanceEvidenceKey] = raw
+						}
+					}
+				}
+			})
+			raw := issue466Run(t, f, now, "issue", "status", strconv.Itoa(n), "--json")
+			entry := issue466Status(t, raw)
+			a := entry.NextAction
+			if a == nil || a.Reason != tc.reason || a.HumanRequired != tc.human {
+				t.Fatalf("action: %+v\n%s", a, raw)
+			}
+			resource, op, args := actionOperation(a)
+			wantArgs := append([]string{strconv.Itoa(n)}, tc.args...)
+			if resource != "issue" || op != tc.op || !reflect.DeepEqual(args, wantArgs) {
+				t.Fatalf("argv: %v want %v", a.Argv, wantArgs)
+			}
+			text := issue466Run(t, f, now, "issue", "status", strconv.Itoa(n))
+			if !strings.Contains(text, "Next step: "+formatCommand(a.Argv)) || strings.Count(text, "Next step:") != 1 {
+				t.Fatalf("text/JSON parity: %s", text)
+			}
+			// Parse the literal argv through the production Cobra tree without
+			// executing a potentially mutating recommendation.
+			root := f.command(nil)
+			found, rest, err := root.Find(a.Argv[1:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := found.ParseFlags(rest); err != nil {
+				t.Fatal(err)
+			}
+			if err := found.ValidateArgs(found.Flags().Args()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestIssue466WorkDryRunResume(t *testing.T) {
+	for _, tc := range []struct {
+		name, claim, role string
+		phase             string
+	}{
+		{"live", "reuse", "tester", "all"},
+		{"expired", "fresh", "tester", "all"},
+		{"released", "fresh", "tester", "all"},
+		{"other actor", "blocked", "tester", "all"},
+		{"missing token", "blocked", "tester", "all"},
+		{"mismatched token", "blocked", "tester", "all"},
+		{"plan", "reuse", "planner", "plan"},
+		{"test", "reuse", "tester", "test"},
+		{"instructions", "reuse", "developer", "all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, n := issue466Fixture(t)
+			now := time.Now()
+			issue466State(t, f, n, func(st *lease.IssueState) {
+				// The developer checkpoint survives interruption before tester.
+				var arts []contract.Artifact
+				for _, a := range st.Artifacts {
+					if a.Type != contract.ArtifactValidation {
+						arts = append(arts, a)
+					}
+				}
+				st.Artifacts = arts
+				switch tc.name {
+				case "expired":
+					st.Lease.ExpiresAt = now.Add(-time.Second)
+				case "released":
+					st.Lease.Status = "released"
+				case "other actor":
+					st.Lease.Owner = "bob"
+				case "mismatched token":
+					st.Lease.ClaimID = "different"
+				}
+			})
+			if tc.name == "missing token" {
+				config, err := os.UserConfigDir()
+				if err != nil {
+					t.Fatal(err)
+				}
+				common, err := filepath.EvalSymlinks(filepath.Join(f.root, ".git"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest := sha256.Sum256([]byte(common))
+				if err := os.Remove(filepath.Join(config, "swarm", "claims", hex.EncodeToString(digest[:]), strconv.Itoa(n)+".json")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := []string{"issue", "work", strconv.Itoa(n), "--agent", "mock", "--phase", tc.phase, "--dry-run"}
+			if tc.name == "instructions" {
+				args = append(args, "--developer-instructions", "Revise implementation")
+			}
+			text := issue466Run(t, f, now, append(args, "--format", "text")...)
+			for _, want := range []string{"Claim: " + tc.claim, "Resume at: " + tc.role, "Validation reuse: unavailable", "Submission ready:"} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("missing %s: %s", want, text)
+				}
+			}
+			var got struct {
+				Plan workflow.PreflightResult `json:"effective_plan"`
+			}
+			if err := json.Unmarshal([]byte(issue466Run(t, f, now, args...)), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Plan.Continuation == nil || got.Plan.Continuation.Claim != tc.claim || got.Plan.Continuation.ResumeRole != tc.role {
+				t.Fatalf("JSON preview: %+v", got.Plan.Continuation)
+			}
+		})
+	}
+}
+
+func TestIssue466InspectionReadOnly(t *testing.T) {
+	f, n := issue466Fixture(t)
+	wt := workspace.WorktreePath(f.root, n)
+	snapshot := func() string {
+		t.Helper()
+		var b strings.Builder
+		token, err := lease.LoadClaimToken(f.root, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.WriteString(token)
+		for _, root := range []string{f.root, wt} {
+			// Includes token, tracker, CAS state, raw index, worktree and refs.
+			err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if d.IsDir() {
+					return nil
+				}
+				data, err := os.ReadFile(p)
+				if err != nil {
+					return err
+				}
+				b.WriteString(p)
+				b.Write(data)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return b.String()
+	}
+	for _, expired := range []bool{false, true} {
+		now := time.Now()
+		if expired {
+			now = f.state(t, n).Lease.ExpiresAt.Add(time.Minute)
+		}
+		before := snapshot()
+		for _, args := range [][]string{
+			{"issue", "status", strconv.Itoa(n)},
+			{"issue", "status", strconv.Itoa(n), "--json"},
+			{"issue", "work", strconv.Itoa(n), "--agent", "mock", "--dry-run", "--format", "text"},
+			{"issue", "work", strconv.Itoa(n), "--agent", "mock", "--dry-run"},
+		} {
+			issue466Run(t, f, now, args...)
+		}
+		if after := snapshot(); before != after {
+			t.Fatal("inspection changed authority, token, refs, index or worktree")
+		}
+	}
 }

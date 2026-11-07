@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -164,11 +165,15 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			if dryRun {
 				opts.InspectOnly = true
+				opts.InspectionTime = rootOpts.now()
 				preflight, err := engine.Preflight(cmd.Context(), opts)
 				if err != nil {
 					return err
 				}
 				if outputFormat == "text" {
+					if c := preflight.Continuation; c != nil {
+						fmt.Fprintf(cmd.OutOrStdout(), "Claim: %s (%s); expiry=%s\nResume at: %s\nValidation reuse: %s (%s)\nAcceptance evidence: %s\nSubmission ready: %t\n", c.Claim, c.ClaimReason, c.ExpiresAt.Format(time.RFC3339), c.ResumeRole, c.ValidationReuse, c.ValidationReason, c.AcceptanceEvidence, c.SubmissionReady)
+					}
 					fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d; policy=approved_task; execution=%s/%s\n", opts.IssueNumber, preflight.Execution.Mode, preflight.Execution.Backend)
 					for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
 						if report, ok := preflight.ToolCapabilities[role]; ok {

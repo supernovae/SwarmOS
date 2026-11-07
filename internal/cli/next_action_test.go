@@ -10,9 +10,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -677,6 +679,33 @@ func TestNextActionOperationGuidance(t *testing.T) {
 		got := renderNextAction(&NextAction{Argv: append([]string{"swarm"}, tc.args...), HumanRequired: true})
 		if !strings.Contains(got, tc.want) || strings.Contains(got, tc.no) {
 			t.Fatal(got)
+		}
+	}
+}
+
+func TestIssue466StatusSelectors(t *testing.T) {
+	f, n := issue466Fixture(t)
+	st := f.state(t, n)
+	iss, err := f.tracker.GetIssue(t.Context(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := harness.LoadConfigAt(f.root, st.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := &RootOptions{Repo: "owner/repo with spaces", RepoRoot: "/checkout with spaces", UpstreamRemote: "upstream space"}
+	a := (stopContext{opts: opts, number: n, resource: "issue"}).statusAction(st, wu, cfg, nil, nil, "alice", st.Lease.ClaimID, time.Now())
+	if a == nil {
+		t.Fatal("no action")
+	}
+	for _, value := range []string{opts.Repo, opts.RepoRoot, opts.UpstreamRemote} {
+		if !slices.Contains(a.Argv, value) || !strings.Contains(renderNextAction(a), "'"+value+"'") {
+			t.Fatalf("literal selector lost: %v", a)
 		}
 	}
 }

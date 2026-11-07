@@ -2,7 +2,9 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/progress"
@@ -58,7 +60,8 @@ type WorkOptions struct {
 	ReviewEvidence    tracker.ReviewEvidence
 	CIEvidence        []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
 
-	InspectOnly           bool // report execution blockers without claiming or running work
+	InspectionTime        time.Time // read-only preview clock; zero uses wall clock
+	InspectOnly           bool      // report execution blockers without claiming or running work
 	RepoRoot              string
 	IssueNumber           int
 	Owner                 string
@@ -155,6 +158,7 @@ func LeadRole(phase string) string {
 
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
+	Continuation     *ContinuationPreview `json:"continuation,omitempty"`
 	ToolCapabilities map[string]sandbox.ToolCapabilityReport
 	BrowserProfile   string
 	Execution        contract.ExecutionConfig
@@ -524,7 +528,33 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	for role, report := range capabilities {
 		capabilities[role] = sandbox.PreparedCapabilities(report, deps)
 	}
-	return &PreflightResult{ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
+	var continuation *ContinuationPreview
+	if opts.InspectOnly && opts.PRNumber == 0 && state.PRRevision == nil && state.ForkRepo == "" && !e.ForkMode && !opts.ForkMode && !e.LeaseManager.HasWorkerGateway() {
+		owner := opts.Owner
+		if owner == "" {
+			owner, err = e.Tracker.CurrentUser(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+		token := opts.ClaimID
+		if token == "" {
+			var tokenErr error
+			token, tokenErr = lease.LoadClaimToken(opts.RepoRoot, opts.IssueNumber)
+			if tokenErr != nil && !os.IsNotExist(tokenErr) {
+				return nil, fmt.Errorf("load persisted claim: %w", tokenErr)
+			}
+		}
+		now := opts.InspectionTime
+		if now.IsZero() {
+			now = time.Now()
+		}
+		continuation = InspectContinuation(state, wu, opts, owner, token, now)
+		if continuation.ValidationReuse == "conditional" {
+			inspectValidationReuse(ctx, opts.RepoRoot, state, cfg, continuation, now)
+		}
+	}
+	return &PreflightResult{Continuation: continuation, ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
 		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}, nil
 }
 
@@ -2006,3 +2036,148 @@ type planReviewOutputError struct{ error }
 
 func (*planReviewOutputError) FailureClass() string { return "unknown" }
 func (e *planReviewOutputError) Unwrap() error      { return e.error }
+
+// ContinuationPreview describes recorded state only; execution rechecks the
+// candidate, approval and fenced claim before resuming.
+type ContinuationPreview struct {
+	Claim              string    `json:"claim"`
+	ClaimReason        string    `json:"claim_reason"`
+	ExpiresAt          time.Time `json:"expires_at"`
+	ResumeRole         string    `json:"resume_role"`
+	ValidationReuse    string    `json:"validation_reuse"`
+	ValidationReason   string    `json:"validation_reason"`
+	AcceptanceEvidence string    `json:"acceptance_evidence"`
+	SubmissionReady    bool      `json:"submission_ready"`
+}
+
+// RecordedImplementation returns completion only when all stable coordinator
+// bindings still match the recorded checkpoint and approved inputs.
+func RecordedImplementation(st *lease.IssueState) *contract.Artifact {
+	if st == nil {
+		return nil
+	}
+	for i := range st.Artifacts {
+		a := &st.Artifacts[i]
+		if a.Type == contract.ArtifactImplementation && lease.VerifyTrustedImplementation(st, st.HeadSHA, a.Metadata["implementation_trusted_tree"], st.Branch) == nil {
+			return a
+		}
+	}
+	return nil
+}
+
+// InspectContinuation never fingerprints the worktree: optional reuse creates
+// a temporary index and must remain an execution-time decision.
+func InspectContinuation(st *lease.IssueState, wu *contract.WorkUnit, opts WorkOptions, owner, token string, now time.Time) *ContinuationPreview {
+	p := &ContinuationPreview{Claim: "fresh", ClaimReason: "take a fresh claim", ResumeRole: "planner", ValidationReuse: "unavailable", ValidationReason: "no prior eligible validation", AcceptanceEvidence: "tester required after claim replacement"}
+	if st == nil {
+		return p
+	}
+	p.ExpiresAt = st.Lease.ExpiresAt
+	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
+		p.Claim, p.ClaimReason = "blocked", "active claim requires the matching owner and persisted token"
+		if owner != "" && owner == st.Lease.Owner && token != "" && token == st.Lease.ClaimID {
+			p.Claim, p.ClaimReason = "reuse", "reuse the active claim"
+		}
+	}
+	if hasDesignAndTestPlanArtifacts(st) {
+		p.ResumeRole = "developer"
+		if lease.VerifyApproval(st, wu) != nil {
+			p.ResumeRole = "reviewer"
+		}
+	}
+	if lease.VerifyApproval(st, wu) == nil && RecordedImplementation(st) != nil && !hasFailedValidationArtifact(st) && opts.instructionsFor("developer") == "" {
+		p.ResumeRole = "tester"
+	}
+	switch opts.Phase {
+	case "plan":
+		p.ResumeRole = "planner"
+	case "review":
+		p.ResumeRole = "reviewer"
+	case "test":
+		p.ResumeRole = "tester"
+	case "implement":
+		p.ResumeRole = "developer"
+		if lease.VerifyApproval(st, wu) != nil {
+			p.ResumeRole = "reviewer"
+		}
+	}
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		a := st.Artifacts[i]
+		if a.Type != contract.ArtifactValidation {
+			continue
+		}
+		if reason := validation.ReuseMetadataReason(a, opts.Version, owner, st.BaseSHA); reason == "" {
+			p.ValidationReuse = "conditional"
+			p.ValidationReason = "checks may be reused after candidate tree, policy and original evidence age are verified"
+		} else {
+			p.ValidationReason = reason
+		}
+		break
+	}
+	if p.Claim == "reuse" {
+		r := lease.RecordedReadiness(st, wu.Acceptance)
+		p.AcceptanceEvidence = r.AcceptanceEvidence.State
+		p.SubmissionReady = r.RequiredChecks == "passed" && r.AcceptanceEvidence.State == "complete"
+	}
+	return p
+}
+
+// inspectValidationReuse uses read-only Git observations, never CheckpointTree.
+func inspectValidationReuse(ctx context.Context, root string, st *lease.IssueState, cfg *contract.SwarmConfig, p *ContinuationPreview, now time.Time) {
+	unavailable := func(reason string) { p.ValidationReuse, p.ValidationReason = "unavailable", reason }
+	var a contract.Artifact
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		if st.Artifacts[i].Type == contract.ArtifactValidation {
+			a = st.Artifacts[i]
+			break
+		}
+	}
+	source := a.Metadata["validation_source_time"]
+	if source == "" {
+		source = a.CreatedAt.Format(time.RFC3339Nano)
+	}
+	when, err := time.Parse(time.RFC3339Nano, source)
+	_, budget, budgetErr := cfg.Lease.ClaimBudget()
+	crossClaim := p.Claim != "reuse" || a.Metadata["validation_claim"] != st.Lease.ClaimID || a.Metadata["validation_source_claim"] != "" && a.Metadata["validation_source_claim"] != st.Lease.ClaimID
+	if err != nil || when.IsZero() || when.After(now) || crossClaim && (budgetErr != nil || now.Sub(when) > budget) {
+		unavailable("original validation evidence is stale or its age is unavailable")
+		return
+	}
+	wt := workspace.WorktreePath(root, st.Lease.IssueNumber)
+	head, dirty, rebasing, err := workspace.StatusPRHead(ctx, wt)
+	if err != nil {
+		p.ValidationReason = "candidate unavailable; tree, policy and evidence must be verified during execution"
+		return
+	}
+	if head != st.HeadSHA || dirty || rebasing {
+		unavailable("candidate changed or is not clean")
+		return
+	}
+	read := func(dir string, args ...string) (string, error) {
+		cmd, _, err := gitcredential.Command(ctx, dir, args...)
+		if err != nil {
+			return "", err
+		}
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	tree, err := read(wt, "rev-parse", "--verify", "HEAD^{tree}")
+	if err != nil || tree == "" || tree != a.Metadata["validation_tree"] {
+		unavailable("candidate tree differs")
+		return
+	}
+	cmd, _, err := gitcredential.Command(ctx, root, "show", st.BaseSHA+":.swarm/validation/required-checks.yaml")
+	if err != nil {
+		unavailable("approved validation policy unavailable")
+		return
+	}
+	policy, err := cmd.Output()
+	digest := sha256.Sum256(policy)
+	if err != nil || hex.EncodeToString(digest[:]) != a.Metadata["validation_policy"] {
+		unavailable("validation policy differs")
+		return
+	}
+	if !crossClaim {
+		p.ValidationReuse, p.ValidationReason = "eligible", "recorded checks match the clean candidate; execution will recheck"
+	}
+}

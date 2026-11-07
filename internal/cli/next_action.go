@@ -5,10 +5,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -350,4 +352,66 @@ func messageOnly(err error) string {
 
 func needsHumanPlanDecision(st *lease.IssueState, wu *contract.WorkUnit, cfg *contract.SwarmConfig) bool {
 	return st != nil && st.EffectiveGate == contract.GateHuman && lease.TaskApprovalCurrent(st, wu, cfg) && lease.CompletePlanPair(st) && ((st.PendingPlanReview == nil && st.HumanPlanReview == nil) || lease.HasRevisedPlan(st)) && (st.Lease.Status != "completed" || st.PRNumber != 0) && lease.VerifyHumanPlanApproval(st) != nil
+}
+
+// statusAction uses the same typed recovery classifications as execution.
+// Submitted state and approval blockers outrank advisory recorded readiness.
+func (c stopContext) statusAction(st *lease.IssueState, wu *contract.WorkUnit, cfg *contract.SwarmConfig, human *NextAction, readiness *validation.Readiness, owner, token string, now time.Time) *NextAction {
+	n := strconv.Itoa(c.number)
+	action := func(reason, op string, args ...string) *NextAction {
+		return &NextAction{Reason: reason, Argv: c.argv(false, "issue", append([]string{op, n}, args...)...)}
+	}
+	if st.PRNumber != 0 || st.Lease.Status == "completed" {
+		return action("submitted", "status")
+	}
+	if !lease.TaskApprovalCurrent(st, wu, cfg) {
+		return c.taskApproval(c.number)
+	}
+	if human != nil {
+		return human
+	}
+	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) && (owner == "" || owner != st.Lease.Owner || token == "" || token != st.Lease.ClaimID) {
+		a := action("claim_unavailable", "status")
+		a.HumanRequired = true
+		return a
+	}
+	if err := lease.VerifyApproval(st, wu); err != nil {
+		if a := c.classify(err); a != nil {
+			return a
+		}
+		if _, rejected := lease.SupersededReview(st); rejected {
+			return action("plan_review_required", "work", "--phase", "plan")
+		}
+		return action("plan_review_required", "work")
+	}
+	if repair := validation.RepairFromArtifact(st.Artifacts, st.BaseSHA); recordedValidationFailed(st) && repair != nil && repair.HeadSHA == st.HeadSHA {
+		if repair.AllPreExisting || repair.OutsideCandidate() {
+			return c.classify(workflow.ErrPreExistingFailures)
+		}
+		return c.classify(workflow.ErrValidationRepairExhausted)
+	}
+	if recordedValidationFailed(st) {
+		return c.classify(workflow.ErrValidationRepairExhausted)
+	}
+	live := st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now)
+	if live && readiness != nil && readiness.RequiredChecks == "passed" && readiness.AcceptanceEvidence.State == "complete" {
+		return action("ready_to_submit", "submit")
+	}
+	if live && !recordedValidationFailed(st) && workflow.RecordedImplementation(st) != nil && readiness != nil && readiness.AcceptanceEvidence.State != "complete" {
+		return action("tester_retry_available", "work", "--phase", "test")
+	}
+	return action("resumable_work", "work")
+}
+
+// recordedValidationFailed considers the latest coordinator report for this
+// checkpoint; stale failures cannot outrank the current continuation.
+func recordedValidationFailed(st *lease.IssueState) bool {
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		a := st.Artifacts[i]
+		if a.Type != contract.ArtifactValidation {
+			continue
+		}
+		return a.Verdict == "FAIL" && a.Metadata["validation_trusted_origin"] == "coordinator" && a.Metadata["head_sha"] == st.HeadSHA && a.Metadata["base_sha"] == st.BaseSHA
+	}
+	return false
 }

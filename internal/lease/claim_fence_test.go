@@ -424,3 +424,32 @@ func TestManagerClaimScopedWritesRejectStaleClaim(t *testing.T) {
 		})
 	}
 }
+
+func TestIssue470ReusedProvenanceCannotAuthorizeWrite(t *testing.T) {
+	f := newClaimFenceFixture(t, "RecordTrustedValidation", "superseded")
+	a := f.state.Lease
+	now := a.ExpiresAt.Add(time.Second)
+	f.m.SetNowFunc(func() time.Time { return now })
+	b, err := f.m.Acquire(t.Context(), f.n, fenceOwner, "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.m.BindClaim(f.n, a.ClaimID)
+	before, revision, err := f.m.Store().Load(t.Context(), f.n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	art := contract.Artifact{Type: contract.ArtifactValidation, Verdict: "PASS", Metadata: map[string]string{
+		"validation_source_claim": a.ClaimID, "validation_claim": b.Lease.ClaimID, "validation_trusted_claim": b.Lease.ClaimID, "validation_reused": "true",
+	}}
+	if _, err := f.m.RecordTrustedValidation(t.Context(), f.n, fenceOwner, art); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("provenance authorized stale writer: %v", err)
+	}
+	after, next, err := f.m.Store().Load(t.Context(), f.n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || revision != next {
+		t.Fatal("stale writer changed CAS")
+	}
+}

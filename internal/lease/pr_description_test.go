@@ -144,11 +144,29 @@ func TestValidationDescriptionInventory(t *testing.T) {
 	a.Metadata["head_sha"] = "other"
 	a.Metadata["validation_reused"] = "true"
 	a.Metadata["validation_reuse_duration"] = "2ms"
+	a.Metadata["validation_source_time"] = "2026-11-01T00:00:00.123456789Z"
+	a.Metadata["validation_source_claim"] = "source|claim"
+	a.Metadata["validation_tree"] = strings.Repeat("a", 40)
+	a.Metadata["validation_policy"] = strings.Repeat("b", 64)
 	inventory = validationTimingInventory(st, a)
 	if !strings.Contains(inventory, "Source head: candidate") || !strings.Contains(inventory, "Submitted head: other") || !strings.Contains(inventory, "REUSED") || !strings.Contains(inventory, "2ms") {
 		t.Fatal(inventory)
 	}
 
+	for _, want := range []string{"2026-11-01T00:00:00.123456789Z", timingCell("source|claim"), strings.Repeat("a", 40), strings.Repeat("b", 64)} {
+		if !strings.Contains(inventory, want) {
+			t.Fatalf("missing %q", want)
+		}
+	}
+	a.Metadata["validation_source_claim"] = strings.Repeat("x", 1000) + "|tail"
+	inventory = validationTimingInventory(st, a)
+	if strings.Contains(inventory, strings.Repeat("x", 300)) {
+		t.Fatal("unbounded provenance")
+	}
+	a.Metadata["validation_trusted_claim"] = "stale"
+	if !strings.Contains(validationTimingInventory(st, a), "unavailable") {
+		t.Fatal("stale authority displayed")
+	}
 }
 
 func TestDescriptionAllocation(t *testing.T) {

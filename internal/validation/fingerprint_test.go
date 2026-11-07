@@ -151,3 +151,154 @@ func TestFingerprintUsesTrustedPolicyBytes(t *testing.T) {
 		t.Fatalf("bad fingerprint: %+v", m)
 	}
 }
+
+func TestIssue470CrossClaimReuseBindings(t *testing.T) {
+	root := setupGitRepoForValidation(t)
+	if err := os.WriteFile(filepath.Join(root, ".git/info/exclude"), []byte(".swarm/active/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts := ValidateOptions{BaseSHA: gitRevision(t, root, "HEAD"), Version: "v1.2.3", ClaimID: "A"}
+	report, err := Validate(t.Context(), root, &contract.WorkUnit{IssueNumber: 1}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := report.Artifact
+	original.Metadata["validation_trusted_origin"] = "coordinator"
+	original.Metadata["validation_trusted_owner"] = "owner"
+	original.Metadata["validation_trusted_claim"] = "A"
+	now := original.CreatedAt.Add(time.Minute)
+	for _, kind := range []string{"match", "owner", "tree", "base", "policy", "version", "FAIL", "untrusted", "incoherent", "missing", "future", "malformed", "expired", "default", "fork", "ci", "rebound-inside", "rebound-exact", "rebound-outside", "newer-fail", "newer-untrusted", "source-empty"} {
+		t.Run(kind, func(t *testing.T) {
+			art := original
+			art.Metadata = map[string]string{}
+			for k, v := range original.Metadata {
+				art.Metadata[k] = v
+			}
+			o := opts
+			o.ClaimID = "B"
+			o.DirectIssueReuse = true
+			switch kind {
+			case "source-empty":
+				art.Metadata["validation_source_claim"] = ""
+			case "owner":
+				art.Metadata["validation_trusted_owner"] = "other"
+			case "tree", "base", "policy", "version":
+				art.Metadata["validation_"+kind] = "other"
+			case "FAIL":
+				art.Verdict = "FAIL"
+			case "untrusted":
+				art.Metadata["validation_trusted_origin"] = "worker"
+			case "incoherent":
+				art.Metadata["validation_claim"] = "B"
+			case "missing":
+				delete(art.Metadata, "validation_claim")
+			case "future":
+				art.Metadata["validation_source_time"] = now.Add(time.Nanosecond).Format(time.RFC3339Nano)
+			case "malformed":
+				art.Metadata["validation_source_time"] = "bad"
+			case "expired":
+				art.Metadata["validation_source_time"] = now.Add(-2*time.Hour - time.Nanosecond).Format(time.RFC3339Nano)
+			case "default":
+				o.DirectIssueReuse = false
+			case "fork":
+				o.ForkMode = true
+			case "ci":
+				o.CIMode = true
+			case "rebound-inside", "rebound-exact", "rebound-outside":
+				art.Metadata["validation_source_claim"] = "A"
+				art.Metadata["validation_claim"] = "B"
+				art.Metadata["validation_trusted_claim"] = "B"
+				age := 2 * time.Hour
+				if kind == "rebound-inside" {
+					age -= time.Nanosecond
+				}
+				if kind == "rebound-outside" {
+					age += time.Nanosecond
+				}
+				art.Metadata["validation_source_time"] = now.Add(-age).Format(time.RFC3339Nano)
+			}
+			artifacts := []contract.Artifact{art}
+			if kind == "newer-fail" || kind == "newer-untrusted" {
+				newer := art
+				newer.Metadata = map[string]string{}
+				for k, v := range art.Metadata {
+					newer.Metadata[k] = v
+				}
+				if kind == "newer-fail" {
+					newer.Verdict = "FAIL"
+				} else {
+					newer.Metadata["validation_trusted_origin"] = "worker"
+				}
+				artifacts = append(artifacts, newer)
+			}
+			reused, err := reuseAt(t.Context(), root, o, "owner", artifacts, now)
+			want := kind == "match" || kind == "rebound-inside" || kind == "rebound-exact"
+			if err != nil || (reused != nil) != want {
+				t.Fatalf("reuse=%v want=%v err=%v", reused != nil, want, err)
+			}
+			if reused != nil {
+				if reused.Artifact.Metadata["validation_source_claim"] != "A" || reused.Artifact.Metadata["validation_claim"] != "B" {
+					t.Fatal("lost provenance")
+				}
+				// Model the trusted writer's current authority stamp for another reuse.
+				reused.Artifact.Metadata["validation_trusted_claim"] = "B"
+				again, err := reuseAt(t.Context(), root, o, "owner", []contract.Artifact{reused.Artifact}, now)
+				if err != nil || again == nil {
+					t.Fatalf("repeat: %v", err)
+				}
+				if again.Artifact.Metadata["validation_source_time"] != reused.Artifact.Metadata["validation_source_time"] {
+					t.Fatal("renewed source time")
+				}
+
+				next := o
+				next.ClaimID = "C"
+				third, err := reuseAt(t.Context(), root, next, "owner", []contract.Artifact{again.Artifact}, now)
+				if err != nil || third == nil || third.Artifact.Metadata["validation_source_claim"] != "A" || third.Artifact.Metadata["validation_source_time"] != again.Artifact.Metadata["validation_source_time"] {
+					t.Fatalf("B to C provenance: %v", err)
+				}
+				if _, exists := original.Metadata["validation_source_claim"]; exists {
+					t.Fatal("mutated input provenance")
+				}
+				expired, err := reuseAt(t.Context(), root, o, "owner", []contract.Artifact{again.Artifact}, now.Add(3*time.Hour))
+				if err != nil || expired != nil {
+					t.Fatal("rebound evidence escaped budget")
+				}
+			}
+		})
+	}
+}
+
+func TestIssue470InvalidSourcePolicy(t *testing.T) {
+	for _, policy := range []string{"invalid", "version: 1\nlease:\n  duration: 1h\n  max_renewals: -1\n", "version: 1\nlease:\n  duration: 1000000h\n  max_renewals: 1000000\n"} {
+		t.Run(policy, func(t *testing.T) {
+			root := setupGitRepoForValidation(t)
+			if err := os.WriteFile(filepath.Join(root, ".git/info/exclude"), []byte(".swarm/active/\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".swarm/config.yaml"), []byte(policy), 0644); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"add", "."}, {"commit", "-m", "invalid policy"}} {
+				if _, err := gitOutput(root, args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			opts := ValidateOptions{BaseSHA: gitRevision(t, root, "HEAD"), Version: "v1.2.3", ClaimID: "B", DirectIssueReuse: true}
+			md, err := fingerprint(t.Context(), root, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			md["validation_trusted_origin"] = "coordinator"
+			md["validation_trusted_owner"] = "owner"
+			md["validation_trusted_claim"] = "B"
+			md["validation_source_claim"] = "A"
+			md["validation_source_time"] = time.Now().Add(-time.Minute).Format(time.RFC3339Nano)
+			md["validation_report"] = `{"passed":true}`
+			art := contract.Artifact{Type: contract.ArtifactValidation, Verdict: "PASS", CreatedAt: time.Now(), Metadata: md}
+			reused, err := Reuse(t.Context(), root, opts, "owner", []contract.Artifact{art})
+			if err != nil || reused != nil {
+				t.Fatalf("invalid policy reused: %v", err)
+			}
+		})
+	}
+}

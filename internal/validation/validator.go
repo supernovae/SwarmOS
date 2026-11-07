@@ -128,6 +128,7 @@ func (r *ValidationReport) TimingSummary() string {
 		fmt.Fprintf(&b, "Total wall time: %s\n", r.Timings.Total.Round(time.Millisecond))
 	}
 	if r.Reused {
+		fmt.Fprintf(&b, "Source claim: %s; candidate tree: %s; policy digest: %s\n", EscapeDiagnostic(r.Artifact.Metadata["validation_source_claim"]), EscapeDiagnostic(r.Artifact.Metadata["validation_tree"]), EscapeDiagnostic(r.Artifact.Metadata["validation_policy"]))
 		fmt.Fprintf(&b, "Reused source head: %s; source time: %s; current reuse: %s\n", EscapeDiagnostic(r.SourceHead), EscapeDiagnostic(r.SourceTime), DurationText(r.ReuseDuration))
 	}
 	return b.String()
@@ -145,6 +146,8 @@ func DurationText(d *time.Duration) string {
 }
 
 type ValidateOptions struct {
+	// DirectIssueReuse permits bounded same-owner cross-claim reuse for direct issues.
+	DirectIssueReuse bool
 	// Version and ClaimID identify the coordinator validation context. Empty
 	// context preserves ordinary validation without reusable evidence.
 	Version string

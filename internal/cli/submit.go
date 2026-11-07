@@ -92,6 +92,12 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
+			// Reject stale workers before default-branch discovery can update refs.
+			if state.Lease.Status != "completed" {
+				if err := manager.CheckClaim(ctx, issue, owner); err != nil {
+					return err
+				}
+			}
 			if err := requireIssueWorkspace(state); err != nil {
 				return err
 			}
@@ -192,7 +198,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return emptySubmitError(issue, state.BaseSHA)
 			}
 			p.Next("validation")
-			validationOpts := validation.ValidateOptions{Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork || manager.HasWorkerGateway(), LookupEnv: rootOpts.lookupEnv, DependencyPolicy: rootOpts.dependencyPolicy(worktree)}
+			validationOpts := validation.ValidateOptions{DirectIssueReuse: !rootOpts.Fork && !manager.HasWorkerGateway(), Version: Version, ClaimID: state.Lease.ClaimID, OnProgress: p.Observe, BaseSHA: state.BaseSHA, ForkMode: rootOpts.Fork || manager.HasWorkerGateway(), LookupEnv: rootOpts.lookupEnv, DependencyPolicy: rootOpts.dependencyPolicy(worktree)}
 			acceptanceBefore, _ := validation.AcceptanceCandidateIdentity(ctx, worktree, validationOpts)
 			report, valErr := validation.Reuse(ctx, worktree, validationOpts, owner, state.Artifacts)
 			if valErr == nil && report == nil {

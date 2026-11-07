@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -34,6 +35,10 @@ func fingerprint(ctx context.Context, root string, opts ValidateOptions) (map[st
 // Reuse returns nil on any mismatch. Only a coordinator-stamped PASS is eligible.
 // Explicit Validate and CI never consult this function.
 func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string, artifacts []contract.Artifact) (*ValidationReport, error) {
+	return reuseAt(ctx, root, opts, owner, artifacts, time.Now())
+}
+
+func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner string, artifacts []contract.Artifact, now time.Time) (*ValidationReport, error) {
 	started := time.Now()
 	if opts.ForkMode || opts.CIMode || !reusableVersion(opts.Version) || opts.ClaimID == "" || owner == "" {
 		return nil, nil
@@ -61,10 +66,13 @@ func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string,
 		if art.Type != contract.ArtifactValidation {
 			continue
 		}
-		if art.Verdict != "PASS" || art.Metadata["validation_trusted_origin"] != "coordinator" || art.Metadata["validation_trusted_owner"] != owner || art.Metadata["validation_trusted_claim"] != opts.ClaimID {
+		if art.Verdict != "PASS" || art.Metadata["validation_trusted_origin"] != "coordinator" || art.Metadata["validation_trusted_owner"] != owner || art.Metadata["validation_claim"] == "" || art.Metadata["validation_trusted_claim"] != art.Metadata["validation_claim"] {
 			return nil, nil
 		}
 		for k, v := range current {
+			if k == "validation_claim" {
+				continue
+			}
 			if v == "" || art.Metadata[k] != v {
 				return nil, nil
 			}
@@ -78,8 +86,31 @@ func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string,
 			source = art.CreatedAt.Format(time.RFC3339Nano)
 		}
 		when, err := time.Parse(time.RFC3339Nano, source)
-		if err != nil {
+		if err != nil || when.After(now) {
 			return nil, nil
+		}
+		sourceClaim, hasSourceClaim := art.Metadata["validation_source_claim"]
+		if hasSourceClaim && (sourceClaim == "" || art.Metadata["validation_source_time"] == "") {
+			return nil, nil
+		}
+		if sourceClaim == "" {
+			sourceClaim = art.Metadata["validation_claim"]
+		}
+		if art.Metadata["validation_claim"] != opts.ClaimID && !opts.DirectIssueReuse {
+			return nil, nil
+		}
+		if sourceClaim != opts.ClaimID {
+			if !opts.DirectIssueReuse {
+				return nil, nil
+			}
+			cfg, err := harness.LoadConfigAt(root, opts.BaseSHA)
+			if err != nil {
+				return nil, nil
+			}
+			_, budget, err := cfg.Lease.ClaimBudget()
+			if err != nil || now.Sub(when) > budget {
+				return nil, nil
+			}
 		}
 		head, err := resolveCommit(root, "HEAD")
 		if err != nil {
@@ -92,15 +123,17 @@ func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string,
 		art.Metadata = metadata
 		// Reuse may accept the same tree at another commit. Advisory tester
 		// evidence is narrower: carry it only for the same head and base.
-		if art.Metadata["head_sha"] != head || art.Metadata["base_sha"] != opts.BaseSHA || head == "" || opts.BaseSHA == "" {
+		if art.Metadata["validation_claim"] != opts.ClaimID || art.Metadata["head_sha"] != head || art.Metadata["base_sha"] != opts.BaseSHA || head == "" || opts.BaseSHA == "" {
 			delete(art.Metadata, AcceptanceEvidenceKey)
 		}
 		art.Metadata["validation_source_time"] = source
+		art.Metadata["validation_source_claim"] = sourceClaim
+		art.Metadata["validation_claim"] = opts.ClaimID
 		art.Metadata["validation_reused"] = "true"
 		if art.Metadata["validation_source_digest"] == "" {
 			art.Metadata["validation_source_digest"] = art.Metadata["content_sha256"]
 		}
-		age := time.Since(when).Round(time.Second)
+		age := now.Sub(when).Round(time.Second)
 		if age < 0 {
 			return nil, nil
 		}
@@ -109,12 +142,13 @@ func Reuse(ctx context.Context, root string, opts ValidateOptions, owner string,
 			return nil, nil
 		}
 		message := fmt.Sprintf("Reusing validation from %s (%s ago, tree %s; source head %s, submitted head %s)", source, age, tree[:12], report.HeadSHA, head)
+		message += fmt.Sprintf("; source claim %s; candidate tree %s; policy digest %s", sourceClaim, tree, current["validation_policy"])
 		art.Summary = message
 		// The original report body is stored in validation_report; repeated reuse
 		// therefore retains evidence without accumulating reuse notices.
 		elapsed := time.Since(started)
 		art.Metadata["validation_reuse_duration"] = elapsed.String()
-		art.Body = RestoreAcceptanceEvidence(message+"\nCurrent reuse wall time: "+DurationText(&elapsed)+"\n\n"+report.Artifact.Body, art.Metadata)
+		art.Body = RestoreAcceptanceEvidence(message+"\nCurrent reuse wall time: "+DurationText(&elapsed)+"\n\n"+strings.NewReplacer("| **PASS** |", "| **REUSED** |", "| PASS |", "| REUSED |").Replace(report.Artifact.Body), art.Metadata)
 		digest := sha256.Sum256([]byte(art.Body))
 		art.Metadata["content_sha256"] = hex.EncodeToString(digest[:])
 		art.CreatedAt = time.Now().UTC()

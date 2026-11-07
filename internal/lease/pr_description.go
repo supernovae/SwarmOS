@@ -521,6 +521,9 @@ func validationTimingInventory(st *IssueState, a contract.Artifact) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Submitted head: %s; base: %s\n", timingCell(head), timingCell(st.BaseSHA))
 	fmt.Fprintf(&b, "Source head: %s; source time: %s; reused: %t\n", timingCell(r.HeadSHA), timingCell(r.Artifact.CreatedAt.Format(time.RFC3339)), reused)
+	if reused {
+		fmt.Fprintf(&b, "Original validation time: %s; source claim: %s; candidate tree: %s; policy digest: %s\n", timingCell(md["validation_source_time"]), timingCell(md["validation_source_claim"]), timingCell(md["validation_tree"]), timingCell(md["validation_policy"]))
+	}
 	b.WriteString("| Check | Command | Status | Duration |\n| --- | --- | --- | --- |\n")
 	for _, c := range r.CheckOutcomes {
 		status := "FAIL"

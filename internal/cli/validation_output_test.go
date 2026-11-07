@@ -38,6 +38,7 @@ func TestValidationOutput(t *testing.T) {
 	}
 	out.Reset()
 	report.Reused = true
+	report.Artifact.Metadata = map[string]string{"validation_source_claim": "A", "validation_tree": "tree", "validation_policy": "policy"}
 	report.SourceHead = "original"
 	report.SourceTime = "2026-10-29T00:00:00Z"
 	d := 2 * time.Millisecond
@@ -46,7 +47,7 @@ func TestValidationOutput(t *testing.T) {
 	report.CheckOutcomes = report.CheckOutcomes[:1]
 	report.CheckOutcomes[0].Duration = time.Second
 	writeValidationChecks(cmd, report)
-	for _, want := range []string{"REUSED ok (1s)", "Total wall time: 3s", "source head: original", "current reuse: 2ms"} {
+	for _, want := range []string{"Source claim: A; candidate tree: tree; policy digest: policy", "REUSED ok (1s)", "Total wall time: 3s", "source head: original", "source time: 2026-10-29T00:00:00Z", "current reuse: 2ms"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatal(out.String())
 		}

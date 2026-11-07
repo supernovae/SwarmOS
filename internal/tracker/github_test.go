@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
 )
@@ -822,5 +827,201 @@ func TestGitHubParentDefaultWithoutIssueTypes(t *testing.T) {
 	issue, err := tr.CreateIssue(ctx, "Parent", "Plan", []string{ParentLabel})
 	if err != nil || !issue.IsParent() || issue.IsEpic() {
 		t.Fatalf("%+v %v", issue, err)
+	}
+}
+
+func TestGitHubSharedRetryTransport(t *testing.T) {
+	for _, method := range []string{"GET", "POST"} {
+		t.Run(method, func(t *testing.T) {
+			ctx := gitcredential.WithNetworkRetry(t.Context(), "swarm issue work 462", nil)
+			request, _ := http.NewRequestWithContext(ctx, method, "https://api.github.com/test", strings.NewReader("payload"))
+			calls := 0
+			transport := githubRetryTransport{base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				body, _ := io.ReadAll(req.Body)
+				req.Body.Close()
+				if string(body) != "payload" {
+					t.Fatalf("body %q", body)
+				}
+				if calls == 1 {
+					if method == "POST" {
+						return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect refused")}
+					}
+					return &http.Response{StatusCode: 503, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("retry"))}, nil
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("final"))}, nil
+			})}
+			response, err := transport.RoundTrip(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			body, _ := io.ReadAll(response.Body)
+			if calls != 2 || string(body) != "final" {
+				t.Fatalf("calls=%d body=%q", calls, body)
+			}
+		})
+	}
+}
+
+func TestGitHubSharedRetryRefusesMutationsAndPermissionFailures(t *testing.T) {
+	for _, method := range []string{"GET", "POST", "PATCH", "PUT", "DELETE"} {
+		for _, status := range []int{403, 404, 503} {
+			if method == "GET" && status == 503 {
+				continue
+			}
+			request, _ := http.NewRequestWithContext(t.Context(), method, "https://api.github.com/test", nil)
+			calls := 0
+			transport := githubRetryTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("final"))}, nil
+			})}
+			response, err := transport.RoundTrip(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if calls != 1 {
+				t.Fatalf("%s %d calls=%d", method, status, calls)
+			}
+		}
+	}
+	for _, method := range []string{"POST", "PATCH", "PUT", "DELETE"} {
+		request, _ := http.NewRequestWithContext(t.Context(), method, "https://api.github.com/test", nil)
+		calls := 0
+		cause := io.ErrUnexpectedEOF
+		transport := githubRetryTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) { calls++; return nil, cause })}
+		_, err := transport.RoundTrip(request)
+		if calls != 1 || !errors.Is(err, cause) {
+			t.Fatalf("%s %d %v", method, calls, err)
+		}
+	}
+}
+
+func TestGitHubSharedRetryCancellationAndSanitization(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	notices := 0
+	ctx = gitcredential.WithNetworkRetry(ctx, "swarm issue work 462", func(_ string, next, limit int, _ time.Duration) {
+		notices++
+		if next != 2 || limit != 4 {
+			t.Error(next, limit)
+		}
+		cancel()
+	})
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/test", nil)
+	calls := 0
+	transport := githubRetryTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, &net.OpError{Op: "read", Net: "tcp", Err: errors.New("secret-token in URL")}
+	})}
+	_, err := transport.RoundTrip(req)
+	if !errors.Is(err, context.Canceled) || calls != 1 || notices != 1 || strings.Contains(err.Error(), "secret-token") {
+		t.Fatal(calls, notices, err)
+	}
+}
+
+func TestGitHubSecondaryLimitBoundedAndFinalBodyPreserved(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	notices := 0
+	ctx = gitcredential.WithNetworkRetry(ctx, "swarm issue work 462", func(string, int, int, time.Duration) { notices++; cancel() })
+	request, _ := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/test", nil)
+	transport := githubRetryTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 403, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"message":"You have exceeded a secondary rate limit."}`))}, nil
+	})}
+	_, err := transport.RoundTrip(request)
+	if !errors.Is(err, context.Canceled) || notices != 1 {
+		t.Fatal(notices, err)
+	}
+	text := strings.Repeat("ordinary forbidden text", 1000)
+	request, _ = http.NewRequestWithContext(t.Context(), "GET", "https://api.github.com/test", nil)
+	transport.base = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 403, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(text))}, nil
+	})
+	response, err := transport.RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if string(body) != text {
+		t.Fatal("truncated final body")
+	}
+	hostile := &retryInspectionBody{}
+	transport.base = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 403, Header: http.Header{}, Body: hostile}, nil
+	})
+	response, err = transport.RoundTrip(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if hostile.bytes != 4096 || !hostile.closed {
+		t.Fatal("unbounded inspection", hostile.bytes, hostile.closed)
+	}
+}
+
+type retryInspectionBody struct {
+	bytes  int
+	closed bool
+}
+
+func (b *retryInspectionBody) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	b.bytes += len(p)
+	return len(p), nil
+}
+func (b *retryInspectionBody) Close() error { b.closed = true; return nil }
+
+func TestGitHubSharedRetryStatusExhaustionClient(t *testing.T) {
+	t.Setenv("SWARM_GITHUB_TOKEN", "dummy-token")
+	t.Setenv("GH_TOKEN", "dummy-token")
+	for _, status := range []int{503, 429, 403, 401, 404} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				old := http.DefaultTransport
+				defer func() { http.DefaultTransport = old }()
+				calls := 0
+				http.DefaultTransport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					calls++
+					h := make(http.Header)
+					h.Set("Content-Type", "application/json")
+					if status == 429 {
+						h.Set("Retry-After", "61")
+					}
+					body := `{"message":"final response"}`
+					if status == 403 {
+						body = `{"message":"You have exceeded a secondary rate limit"}`
+					}
+					return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+				})
+				g, err := NewGitHubTracker("o/r")
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx := gitcredential.WithNetworkRetry(t.Context(), "swarm issue status 462", nil)
+				_, err = g.RepositoryOwnerType(ctx)
+				var apiErr *api.HTTPError
+				if !errors.As(err, &apiErr) || apiErr.StatusCode != status || !strings.Contains(apiErr.Message, "final response") && status != 403 {
+					t.Fatalf("API error: %v", err)
+				}
+				var exhausted *gitcredential.RetryExhaustedError
+				marked := errors.As(err, &exhausted)
+				if status == 503 || status == 403 || status == 429 {
+					want := 4
+					if status == 429 {
+						want = 1
+					}
+					if !marked || calls != want || exhausted.Attempts != want || !strings.Contains(err.Error(), "swarm issue status 462") {
+						t.Fatalf("calls=%d error=%v", calls, err)
+					}
+				} else if marked || calls != 1 {
+					t.Fatalf("ordinary error marked: calls=%d err=%v", calls, err)
+				}
+			})
+		})
 	}
 }

@@ -34,7 +34,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 			p := rootOpts.operationProgress(cmd.Context(), cmd.ErrOrStderr(), showProgress)
-			cmd.SetContext(progress.WithActivity(cmd.Context(), p.Activity()))
+			cmd.SetContext(p.RetryContext(progress.WithActivity(cmd.Context(), p.Activity())))
 			defer func() {
 				status := "completed"
 				if runErr != nil {

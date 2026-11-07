@@ -135,18 +135,22 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 	if err != nil {
 		return false, err
 	}
+	predecessor := r.st.HeadSHA
+	if r.st.PRRevision != nil {
+		predecessor = r.st.PRRevision.LocalHeadSHA
+	}
 	if r.opts.PRNumber != 0 {
 		r.st, err = r.e.LeaseManager.RecordPRHead(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.opts.PRNumber, r.branch, checkpointHead)
 	} else {
 		if r.forkMode {
 			if err := workspace.PushForkCheckpointFrom(r.ctx, r.opts.RepoRoot, r.e.upstreamRemote(), r.forkRemote, r.branch, checkpointHead); err != nil {
-				return false, err
+				return false, r.checkpointPublicationError(err, predecessor, checkpointHead)
 			}
 		}
 		r.st, err = r.e.LeaseManager.RecordCheckpoint(r.ctx, r.opts.IssueNumber, r.opts.Owner, r.branch, checkpointHead)
 	}
 	if err != nil {
-		return false, err
+		return false, r.checkpointPublicationError(err, predecessor, checkpointHead)
 	}
 	r.res.State, r.res.HeadSHA = r.st, checkpointHead
 	verdict := "PASS"
@@ -280,4 +284,21 @@ func (r *workRun) checkTestRetry() error {
 		r.st, r.res.State = updated, updated
 	}
 	return err
+}
+
+// checkpointPublicationError preserves the transport cause and identifies the
+// local work without offering a reconcile command for unsupported destinations.
+func (r *workRun) checkpointPublicationError(cause error, predecessor, candidate string) error {
+	detail := fmt.Sprintf("local checkpoint %s and IMPLEMENTATION.md retained (recorded predecessor %s)", candidate, predecessor)
+	if r.forkMode || r.e.LeaseManager.HasWorkerGateway() {
+		return fmt.Errorf("%s; automatic checkpoint reconciliation is unavailable for fork mode: %w", detail, cause)
+	}
+	if r.opts.PRNumber != 0 {
+		return fmt.Errorf("%s; checkpoint reconciliation is unavailable for PR revisions: %w", detail, cause)
+	}
+	fullSHA := func(s string) bool { return len(s) == 40 && strings.Trim(s, "0123456789abcdef") == "" }
+	if !fullSHA(predecessor) || !fullSHA(candidate) || predecessor == candidate {
+		return fmt.Errorf("%s; inspect authoritative state before continuing: %w", detail, cause)
+	}
+	return fmt.Errorf("%s; inspect and reconcile with swarm issue reconcile %d --checkpoint --expected-head %s --candidate-head %s: %w", detail, r.opts.IssueNumber, predecessor, candidate, cause)
 }

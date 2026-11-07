@@ -607,7 +607,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 	}
 
-	r.ctx = progress.WithActivity(ctx, r.progress.activityTracker())
+	r.ctx = r.progress.retryContext(progress.WithActivity(ctx, r.progress.activityTracker()))
 	defer func() { r.progress.finish(result, workErr) }()
 	if err := r.preflightRun(); err != nil {
 		return nil, err

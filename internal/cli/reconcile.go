@@ -69,7 +69,7 @@ func newReconcileCmd(opts *RootOptions) *cobra.Command {
 			var p *progress.Session
 			if !dryRun {
 				p = opts.operationProgress(cmd.Context(), progressWriter(cmd), showProgress)
-				cmd.SetContext(progress.WithActivity(cmd.Context(), p.Activity()))
+				cmd.SetContext(p.RetryContext(progress.WithActivity(cmd.Context(), p.Activity())))
 				defer func() {
 					status := "completed"
 					if runErr != nil {

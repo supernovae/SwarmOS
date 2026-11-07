@@ -3,6 +3,7 @@ package progress
 
 import (
 	"context"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"sync"
 	"time"
 )
@@ -11,6 +12,7 @@ import (
 // prompts, command arguments, claim tokens, or artifact contents.
 type Event struct {
 	RetryReason                   string
+	RetryDelay                    time.Duration
 	RetryUsed, RetryLimit         int
 	Role, Tool, Operation         string
 	ActivityKnown                 bool
@@ -285,12 +287,33 @@ func (p *Session) Activity() *Activity {
 	return p.activity
 }
 
-// Retry records coordinator-selected retry metadata for subsequent events.
-func (p *Session) Retry(reason string, used, limit int) {
+// Retry records plan retry metadata. With a delay, it emits one immediate
+// network notice and restores the existing plan retry metadata afterwards.
+func (p *Session) Retry(reason string, used, limit int, delay ...time.Duration) {
 	if p == nil {
 		return
 	}
+	p.delivery.Lock()
+	defer p.delivery.Unlock()
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	previous := p.event
 	p.event.RetryReason, p.event.RetryUsed, p.event.RetryLimit = reason, used, limit
+	p.mu.Unlock()
+	if len(delay) != 0 && p.emit != nil {
+		p.mu.Lock()
+		p.event.RetryDelay = delay[0]
+		p.mu.Unlock()
+		p.send("retry")
+		p.mu.Lock()
+		p.event.RetryReason = previous.RetryReason
+		p.event.RetryUsed = previous.RetryUsed
+		p.event.RetryLimit = previous.RetryLimit
+		p.event.RetryDelay = previous.RetryDelay
+		p.mu.Unlock()
+	}
+}
+
+// RetryContext routes network notices through this session's serialized delivery.
+func (p *Session) RetryContext(ctx context.Context) context.Context {
+	return gitcredential.WithRetryObserver(ctx, func(reason string, next, limit int, delay time.Duration) { p.Retry(reason, next, limit, delay) })
 }

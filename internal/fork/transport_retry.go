@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
 
-// retryWaits is the backoff between attempts of an idempotent tracker read
-// and between reconciliation scans after an ambiguous request post.
-var retryWaits = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond}
+// reconciliationWaits separates successful scans after an ambiguous request post.
+var reconciliationWaits = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond}
 
 // reconcileLookback bounds every reconciliation scan from the local time just
 // before the first post, allowing for several minutes of clock skew.
@@ -27,6 +27,10 @@ const reconcileLookback = 10 * time.Minute
 // the caller's own deadline are never transient.
 func isTransientError(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var exhausted *gitcredential.RetryExhaustedError
+	if errors.As(err, &exhausted) {
 		return false
 	}
 	var httpErr *api.HTTPError
@@ -51,29 +55,17 @@ func (g *Gateway) sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// listComments reads issue comments, retrying transient failures with bounded
-// backoff. Comment listing is idempotent; writes never go through here.
+// listComments delegates network retries to the shared tracker transport.
 func (g *Gateway) listComments(ctx context.Context, issueNumber int, since time.Time) ([]*tracker.Comment, error) {
-	for attempt := 0; ; attempt++ {
-		var comments []*tracker.Comment
-		var err error
-		if incremental, ok := g.Tracker.(interface {
-			ListCommentsSince(context.Context, int, time.Time) ([]*tracker.Comment, error)
-		}); ok {
-			comments, err = incremental.ListCommentsSince(ctx, issueNumber, since)
-		} else {
-			comments, err = g.Tracker.ListComments(ctx, issueNumber)
-		}
-		if err == nil || !isTransientError(ctx, err) {
-			return comments, err
-		}
-		if attempt >= len(retryWaits) {
-			return nil, fmt.Errorf("after %d attempts: %w", attempt+1, err)
-		}
-		if waitErr := g.sleep(ctx, retryWaits[attempt]); waitErr != nil {
-			return nil, fmt.Errorf("%w (retry interrupted: %w)", err, waitErr)
-		}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+	if incremental, ok := g.Tracker.(interface {
+		ListCommentsSince(context.Context, int, time.Time) ([]*tracker.Comment, error)
+	}); ok {
+		return incremental.ListCommentsSince(ctx, issueNumber, since)
+	}
+	return g.Tracker.ListComments(ctx, issueNumber)
 }
 
 // postRequest creates the request comment. When GitHub reports a 5xx or
@@ -128,10 +120,10 @@ func (g *Gateway) findPostedRequest(ctx context.Context, req lease.ForkRequest, 
 		if err != nil || found != nil {
 			return found, err
 		}
-		if scan >= len(retryWaits) {
+		if scan >= len(reconciliationWaits) {
 			return nil, nil
 		}
-		if err := g.sleep(ctx, retryWaits[scan]); err != nil {
+		if err := g.sleep(ctx, reconciliationWaits[scan]); err != nil {
 			return nil, err
 		}
 	}

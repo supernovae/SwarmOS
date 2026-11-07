@@ -20,6 +20,9 @@ func workProgressPrinter(out io.Writer) func(workflow.ProgressEvent) {
 	return func(event workflow.ProgressEvent) {
 		mu.Lock()
 		defer mu.Unlock()
+		if printNetworkRetry(out, event) {
+			return
+		}
 		// Stage and status come from coordinator-owned enums, never child
 		// output; check names come from the trusted policy and are quoted.
 		stage := event.Stage
@@ -66,6 +69,9 @@ func operationProgress(ctx context.Context, out io.Writer, enabled bool) *progre
 }
 func operationProgressPrinter(out io.Writer) func(progress.Event) {
 	return func(e progress.Event) {
+		if printNetworkRetry(out, e) {
+			return
+		}
 		if e.Check != "" {
 			fmt.Fprintf(out, "Check %s %s (elapsed %s)%s\n", fmt.Sprintf("%+q", e.Check), e.Status, progressDuration(e), activitySuffix(e))
 		} else {
@@ -149,4 +155,12 @@ func (o *RootOptions) operationProgress(ctx context.Context, out io.Writer, enab
 		return o.progressSession(ctx, operationProgressPrinter(out))
 	}
 	return operationProgress(ctx, out, enabled)
+}
+
+func printNetworkRetry(out io.Writer, e progress.Event) bool {
+	if e.Status != "retry" {
+		return false
+	}
+	fmt.Fprintf(out, "GitHub unreachable (%s); retry %d/%d in %s\n", e.RetryReason, e.RetryUsed, e.RetryLimit, e.RetryDelay.Round(time.Second))
+	return true
 }

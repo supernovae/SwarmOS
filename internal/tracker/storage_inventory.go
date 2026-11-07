@@ -396,7 +396,7 @@ func newInventoryRESTClient(options api.ClientOptions) (*api.RESTClient, error) 
 			transport = clone
 		}
 	}
-	options.Transport = inventoryTransport{base: transport}
+	options.Transport = inventoryTransport{base: githubRetryTransport{base: transport}}
 	options.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	options.EnableCache = false
 	options.LogIgnoreEnv = true

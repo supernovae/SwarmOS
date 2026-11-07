@@ -239,3 +239,40 @@ func TestIssueWorkOutputRetryMetadata(t *testing.T) {
 		t.Fatalf("stages %d/%d", plans, reviews)
 	}
 }
+
+func TestNetworkRetryImmediateAndPreservesPlanMetadata(t *testing.T) {
+	var events []Event
+	p := New(t.Context(), 462, 0, func(e Event) { events = append(events, e) }, make(chan time.Time), time.Now, nil)
+	p.Retry("plan-review", 1, 2)
+	before := len(events)
+	p.Retry("connection unavailable", 2, 4, 8*time.Second)
+	if len(events) != before+1 {
+		t.Fatal("retry was not delivered immediately")
+	}
+	e := events[len(events)-1]
+	if e.Status != "retry" || e.RetryUsed != 2 || e.RetryLimit != 4 || e.RetryDelay != 8*time.Second {
+		t.Fatalf("%+v", e)
+	}
+	if got := p.Snapshot(); got.RetryReason != "plan-review" || got.RetryUsed != 1 || got.RetryLimit != 2 {
+		t.Fatalf("plan retry lost: %+v", got)
+	}
+	p.Finish("completed")
+}
+
+func TestNetworkRetryConcurrentDelivery(t *testing.T) {
+	var notices int
+	p := New(t.Context(), 462, 0, func(e Event) {
+		if e.Status == "retry" {
+			notices++
+		}
+	}, make(chan time.Time), time.Now, nil)
+	var workers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		workers.Go(func() { p.Retry("connection unavailable", 2, 4, time.Second) })
+	}
+	workers.Wait()
+	p.Finish("completed")
+	if notices != 32 {
+		t.Fatalf("notices=%d", notices)
+	}
+}

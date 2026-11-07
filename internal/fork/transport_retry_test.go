@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
+	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
@@ -482,93 +487,34 @@ func mustMarshal(t *testing.T, req lease.ForkRequest) []byte {
 }
 
 func TestGatewayReadRetry(t *testing.T) {
-	schedule := []time.Duration{250 * time.Millisecond, 500 * time.Millisecond}
 	for _, incremental := range []bool{false, true} {
-		for _, phase := range []string{"reconcile", "poll"} {
-			name := fmt.Sprintf("%s/incremental=%v", phase, incremental)
-			// A recovered reconciliation is followed by one outcome poll.
-			pollReads := 0
-			if phase == "reconcile" {
-				pollReads = 1
+		for _, failure := range []error{httpStatus(502), httpStatus(404), timeoutError{}} {
+			ct := &commentTracker{readErrs: []error{failure}}
+			var tr tracker.Tracker = ct
+			if incremental {
+				tr = &incrementalTracker{commentTracker: ct}
 			}
-			newGateway := func(readErrs []error) (*Gateway, *commentTracker, *[]time.Duration) {
-				ct := &commentTracker{readErrs: readErrs}
-				if phase == "reconcile" {
-					ct.posts = []postOutcome{{store: true, err: httpStatus(502)}}
-				}
-				var tr tracker.Tracker = ct
-				if incremental {
-					tr = &incrementalTracker{commentTracker: ct}
-				}
-				g := &Gateway{Tracker: tr, Store: releasedAt(100)}
-				return g, ct, recordWaits(g)
+			g := &Gateway{Tracker: tr}
+			waits := recordWaits(g)
+			_, err := g.listComments(t.Context(), 1, time.Time{})
+			if !errors.Is(err, failure) || ct.reads != 1 || len(*waits) != 0 {
+				t.Fatalf("reads=%d waits=%v err=%v", ct.reads, *waits, err)
 			}
-			t.Run(name+"/recovers", func(t *testing.T) {
-				for _, code := range []int{500, 502, 503} {
-					g, tr, waits := newGateway([]error{httpStatus(code), httpStatus(code)})
-					if _, err := g.Apply(t.Context(), releaseRequest()); err != nil {
-						t.Fatal(err)
-					}
-					if tr.reads != 3+pollReads || len(tr.bodies) != 1 || len(*waits) != 2 || (*waits)[0] != schedule[0] || (*waits)[1] != schedule[1] {
-						t.Fatalf("reads=%d posts=%d waits=%v", tr.reads, len(tr.bodies), *waits)
-					}
-				}
-			})
-			t.Run(name+"/persistent", func(t *testing.T) {
-				g, tr, waits := newGateway([]error{httpStatus(502), httpStatus(502), httpStatus(502), httpStatus(502)})
-				_, err := g.Apply(t.Context(), releaseRequest())
-				if err == nil || tr.reads != 3 || len(tr.bodies) != 1 || len(*waits) != 2 || httpStatusOf(err) != 502 {
-					t.Fatalf("reads=%d posts=%d waits=%v err=%v", tr.reads, len(tr.bodies), *waits, err)
-				}
-				want := "request 100"
-				if phase == "reconcile" {
-					want = "nonce " + requestNonce(t, tr.bodies[0])
-				}
-				if !strings.Contains(err.Error(), want) {
-					t.Fatalf("error does not identify the request (%s): %v", want, err)
-				}
-			})
-			t.Run(name+"/4xx not retried", func(t *testing.T) {
-				g, tr, waits := newGateway([]error{httpStatus(404)})
-				if _, err := g.Apply(t.Context(), releaseRequest()); err == nil || tr.reads != 1 || len(*waits) != 0 || len(tr.bodies) != 1 {
-					t.Fatalf("reads=%d waits=%v err=%v", tr.reads, *waits, err)
-				}
-			})
-			t.Run(name+"/timeout retried", func(t *testing.T) {
-				g, tr, _ := newGateway([]error{&url.Error{Op: "Get", URL: "u", Err: timeoutError{}}})
-				if _, err := g.Apply(t.Context(), releaseRequest()); err != nil || tr.reads != 2+pollReads {
-					t.Fatalf("reads=%d err=%v", tr.reads, err)
-				}
-			})
 		}
 	}
-	t.Run("cancel during wait", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
-		tr := &commentTracker{readErrs: []error{httpStatus(502), httpStatus(502)}}
-		g := &Gateway{Tracker: tr, Store: releasedAt(100)}
-		g.wait = func(ctx context.Context, _ time.Duration) error { cancel(); return ctx.Err() }
-		_, err := g.Apply(ctx, releaseRequest())
-		if !errors.Is(err, context.Canceled) || tr.reads != 1 {
-			t.Fatalf("reads=%d err=%v", tr.reads, err)
-		}
-	})
-	t.Run("deadline already expired", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
-		tr := &commentTracker{}
-		g := &Gateway{Tracker: tr, Store: releasedAt(100)}
-		comments, err := g.listComments(ctx, 1, time.Time{})
-		if comments != nil || !errors.Is(err, context.Canceled) || tr.reads != 0 {
-			t.Fatalf("reads=%d err=%v", tr.reads, err)
-		}
-	})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	ct := &commentTracker{}
+	_, err := (&Gateway{Tracker: ct}).listComments(ctx, 1, time.Time{})
+	if !errors.Is(err, context.Canceled) || ct.reads != 0 {
+		t.Fatalf("reads=%d err=%v", ct.reads, err)
+	}
 	t.Run("real wait honors deadline", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		defer cancel()
-		g := &Gateway{}
 		start := time.Now()
-		if err := g.sleep(ctx, time.Minute); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 5*time.Second {
-			t.Fatalf("sleep err=%v", err)
+		if err := (&Gateway{}).sleep(ctx, time.Minute); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 5*time.Second {
+			t.Fatalf("wait: %v", err)
 		}
 	})
 }
@@ -653,5 +599,91 @@ func TestGatewayOldCoordinatorRejection(t *testing.T) {
 				t.Fatalf("result was not ignored: rejected=%v err=%v", rejected, err)
 			}
 		})
+	}
+}
+
+type budgetTransport func(*http.Request) (*http.Response, error)
+
+func (f budgetTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestGatewayPostRetryBudget(t *testing.T) {
+	t.Setenv("SWARM_GITHUB_TOKEN", "dummy-token")
+	for _, success := range []bool{false, true} {
+		t.Run(fmt.Sprint(success), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				old := http.DefaultTransport
+				defer func() { http.DefaultTransport = old }()
+				posts, gets, notices := 0, 0, 0
+				var delays time.Duration
+				var bodies []string
+				http.DefaultTransport = budgetTransport(func(r *http.Request) (*http.Response, error) {
+					if r.Method != "POST" {
+						gets++
+						return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`[]`)), Request: r}, nil
+					}
+					posts++
+					b, _ := io.ReadAll(r.Body)
+					r.Body.Close()
+					bodies = append(bodies, string(b))
+					if success && posts == 4 {
+						return &http.Response{StatusCode: 201, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":123,"body":"ok"}`)), Request: r}, nil
+					}
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: timeoutError{}}
+				})
+				tr, err := tracker.NewGitHubTracker("o/r")
+				if err != nil {
+					t.Fatal(err)
+				}
+				g := &Gateway{Tracker: tr}
+				waits := recordWaits(g)
+				ctx := gitcredential.WithNetworkRetry(t.Context(), "swarm --fork issue release 462", func(_ string, _, _ int, d time.Duration) { notices++; delays += d })
+				_, err = g.postRequest(ctx, releaseRequest(), "nonce", "payload", time.Now())
+				if success {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					var exhausted *gitcredential.RetryExhaustedError
+					var timeout net.Error
+					if !errors.As(err, &exhausted) || !errors.As(err, &timeout) || exhausted.Attempts != 4 || exhausted.Operation != "GitHub REST POST" || !strings.Contains(err.Error(), "swarm --fork issue release 462") {
+						t.Fatalf("terminal error: %v", err)
+					}
+					if isTransientError(ctx, fmt.Errorf("wrapped: %w", &url.Error{Op: "Post", URL: "u", Err: err})) {
+						t.Fatal("exhaustion treated as transient")
+					}
+				}
+				if posts != 4 || gets != 0 || notices != 3 || delays > time.Minute || len(*waits) != 0 {
+					t.Fatalf("posts=%d gets=%d notices=%d delays=%v waits=%v", posts, gets, notices, delays, *waits)
+				}
+				for _, b := range bodies {
+					if b != `{"body":"payload"}` {
+						t.Fatalf("body=%q", b)
+					}
+				}
+				t.Logf("posts=%d gets=%d notices=%d delay=%v", posts, gets, notices, delays)
+			})
+		})
+	}
+}
+
+func TestGatewayPostRetryBudgetEarlyExhaustion(t *testing.T) {
+	ctx := gitcredential.WithNetworkRetry(t.Context(), "swarm --fork issue release 462", nil)
+	cause := &net.OpError{Op: "dial", Net: "tcp", Err: timeoutError{}}
+	var policy gitcredential.RetryPolicy
+	again, err := policy.Next(ctx, gitcredential.RetryObservation{Operation: "GET", Err: cause, Status: 429, Header: http.Header{"Retry-After": []string{"61"}}})
+	if again || err != nil {
+		t.Fatalf("policy: %v %v", again, err)
+	}
+	terminal := policy.Error(ctx, "GitHub REST POST", cause)
+	for _, failure := range []error{terminal, fmt.Errorf("wrapped: %w", terminal), &url.Error{Op: "Post", URL: "u", Err: terminal}} {
+		ct := &commentTracker{posts: []postOutcome{{err: failure}}}
+		g := &Gateway{Tracker: ct}
+		waits := recordWaits(g)
+		_, err = g.postRequest(ctx, releaseRequest(), "nonce", "payload", time.Now())
+		var exhausted *gitcredential.RetryExhaustedError
+		var dial *net.OpError
+		if !errors.As(err, &exhausted) || exhausted.Attempts != 1 || exhausted.Operation != "GitHub REST POST" || !errors.As(err, &dial) || !dial.Timeout() || len(ct.bodies) != 1 || ct.reads != 0 || len(*waits) != 0 {
+			t.Fatalf("posts=%d reads=%d waits=%v err=%v", len(ct.bodies), ct.reads, *waits, err)
+		}
 	}
 }

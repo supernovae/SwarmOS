@@ -105,6 +105,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			var session *progresspkg.Session
 			if operation == "validate" || operation == "submit" {
 				session = operationProgress(cmd.Context(), cmd.ErrOrStderr(), progress)
+				cmd.SetContext(session.RetryContext(cmd.Context()))
 				defer func() {
 					status := "completed"
 					if runErr != nil {

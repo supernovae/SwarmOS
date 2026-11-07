@@ -18,6 +18,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 	var baseSHA string
 	cmd := &cobra.Command{Use: "validate [<issue-number>]", Short: "Run issue checks and protected-path policy from the approved immutable base", Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 		p := operationProgress(cmd.Context(), cmd.ErrOrStderr(), showProgress)
+		cmd.SetContext(p.RetryContext(cmd.Context()))
 		defer func() {
 			status := "completed"
 			if runErr != nil {

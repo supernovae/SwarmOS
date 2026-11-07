@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
@@ -265,5 +266,34 @@ func TestTesterOutcomeParsing(t *testing.T) {
 		if got := parseTesterOutcome(tc.body); got != tc.want {
 			t.Errorf("%q: got %q want %q", tc.body, got, tc.want)
 		}
+	}
+}
+
+func TestCheckpointPublicationFailureGuidance(t *testing.T) {
+	predecessor, candidate := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	cause := errors.New("publication unavailable")
+	for _, tc := range []struct {
+		name string
+		fork bool
+		pr   int
+		want string
+	}{
+		{"issue", false, 0, "swarm issue reconcile 462 --checkpoint --expected-head " + predecessor + " --candidate-head " + candidate},
+		{"fork", true, 0, "automatic checkpoint reconciliation is unavailable for fork mode"},
+		{"pr", false, 9, "checkpoint reconciliation is unavailable for PR revisions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &workRun{e: &Engine{LeaseManager: &lease.Manager{}}, opts: WorkOptions{IssueNumber: 462, PRNumber: tc.pr}, forkMode: tc.fork}
+			err := r.checkpointPublicationError(cause, predecessor, candidate)
+			if !errors.Is(err, cause) || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "IMPLEMENTATION.md retained") {
+				t.Fatal(err)
+			}
+			if (tc.fork || tc.pr != 0) && strings.Contains(err.Error(), "swarm issue reconcile") {
+				t.Fatal("unsupported reconcile hint", err)
+			}
+			if err := r.checkpointPublicationError(cause, "", candidate); strings.Contains(err.Error(), "swarm issue reconcile") {
+				t.Fatal("unpinned reconcile hint", err)
+			}
+		})
 	}
 }

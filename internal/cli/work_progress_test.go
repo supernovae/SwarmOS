@@ -371,3 +371,13 @@ func TestWorkProgressNamesRepairRound(t *testing.T) {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
+
+func TestNetworkRetryProgressLine(t *testing.T) {
+	for _, printer := range []func(io.Writer) func(workflow.ProgressEvent){workProgressPrinter, operationProgressPrinter} {
+		var output bytes.Buffer
+		printer(&output)(workflow.ProgressEvent{Status: "retry", RetryReason: "connection unavailable", RetryUsed: 2, RetryLimit: 4, RetryDelay: 8 * time.Second})
+		if got := output.String(); got != "GitHub unreachable (connection unavailable); retry 2/4 in 8s\n" {
+			t.Fatalf("%q", got)
+		}
+	}
+}

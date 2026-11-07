@@ -356,14 +356,14 @@ if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.backoff" ]; then
 fi
 if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.bad" ]; then
  case "$CAS_MODE" in
- malformed-sha) spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; ref=${spec#*:}; echo "not-a-sha $ref"; exit 0;;
+ malformed-sha) spec=$(tail -n 1 "$CAS_LOG"); spec=$(echo "$spec" | cut -d " " -f4); ref=${spec#*:}; echo "not-a-sha $ref"; exit 0;;
  read-error) echo inspection-failed >&2; exit 17;;
  namespace) "$CAS_REAL" "$@"; echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/swarm-state/issue-306"; echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/swarm/state/issue-306"; exit 0;;
  pre-*)
  if [ ! -f "$CAS_LOG.read" ]; then touch "$CAS_LOG.read"; exec "$CAS_REAL" "$@"; fi
  case "$CAS_MODE" in
  pre-delete)
- spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; ref=${spec#*:}
+ spec=$(tail -n 1 "$CAS_LOG"); spec=$(echo "$spec" | cut -d " " -f4); ref=${spec#*:}
  "$CAS_REAL" push upstream ":$ref" >/dev/null 2>&1
  rm "$CAS_LOG.bad"
  exec "$CAS_REAL" "$@";;
@@ -372,7 +372,7 @@ if [ "$1" = ls-remote ] && [ -f "$CAS_LOG.bad" ]; then
  pre-cancel) touch "$CAS_LOG.landed"; while :; do :; done;;
  pre-malformed) echo malformed; exit 0;;
  pre-desired|pre-successor)
- spec=$(tail -n 1 "$CAS_LOG"); spec=${spec##* }; desired=${spec%%:*}; ref=${spec#*:}
+ spec=$(tail -n 1 "$CAS_LOG"); spec=$(echo "$spec" | cut -d " " -f4); desired=${spec%%:*}; ref=${spec#*:}
  "$CAS_REAL" push upstream "$desired:$ref" >/dev/null 2>&1 || exit 2
  if [ "$CAS_MODE" = pre-successor ]; then
  tree=$("$CAS_REAL" rev-parse "$desired^{tree}")
@@ -450,7 +450,15 @@ exec "$CAS_REAL" "$@"
 						}
 					}
 					argv := strings.Fields(lines[0])
-					if len(argv) != 4 || argv[1] != "upstream" || argv[2] != "--force-with-lease="+layout.StateRef(306)+":"+old || !strings.HasSuffix(argv[3], ":"+layout.StateRef(306)) {
+					if !existing && (len(argv) != 7 || argv[4] != "--atomic" || argv[5] != "--force-with-lease="+layout.ArchiveRef()+":" || !strings.HasSuffix(argv[6], ":"+layout.ArchiveRef())) {
+						t.Fatalf("missing atomic index fence: %s", lines[0])
+					}
+
+					wantArgs := 4
+					if !existing {
+						wantArgs = 7
+					}
+					if len(argv) != wantArgs || argv[1] != "upstream" || argv[2] != "--force-with-lease="+layout.StateRef(306)+":"+old || !strings.HasSuffix(argv[3], ":"+layout.StateRef(306)) {
 						t.Fatalf("original CAS fence changed: %s", lines[0])
 					}
 					if mode == "successor" || mode == "pre-successor" || mode == "race-successor" || mode == "ack-successor" {
@@ -460,7 +468,11 @@ exec "$CAS_REAL" "$@"
 						}
 					}
 					prep, _ := os.ReadFile(log + ".prep")
-					if len(strings.Split(strings.TrimSpace(string(prep)), "\n")) != 3 {
+					wantPrep := 3
+					if !existing {
+						wantPrep = 6
+					}
+					if len(strings.Split(strings.TrimSpace(string(prep)), "\n")) != wantPrep {
 						t.Fatalf("preparation replayed: %s", prep)
 					}
 					switch mode {

@@ -70,8 +70,8 @@ func TestMigrateLedgerRefsMovesEverythingInOneAtomicPush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two states, two retention refs, and one contributor index.
-	if len(report.Moves) != 5 || report.AlreadyHidden != 0 {
+	// Two states, two retention refs, contributor index, and archive index.
+	if len(report.Moves) != 6 || report.AlreadyHidden != 0 {
 		t.Fatalf("report = %+v", report)
 	}
 	got := map[string]string{}
@@ -106,14 +106,14 @@ func TestMigrateLedgerRefsMovesEverythingInOneAtomicPush(t *testing.T) {
 			t.Errorf("unexpected update %s", line)
 		}
 	}
-	if creates != 5 || deletes != 5 {
+	if creates != 6 || deletes != 6 {
 		t.Fatalf("one push carried %d creates and %d deletes", creates, deletes)
 	}
 
 	// Rerunning is a no-op.
 	before := f.snapshot()
 	again, err := NewGitStore(f.clone).MigrateLedgerRefs(ctx, migrationNow, false)
-	if err != nil || len(again.Moves) != 0 || again.AlreadyHidden != 5 {
+	if err != nil || len(again.Moves) != 0 || again.AlreadyHidden != 6 {
 		t.Fatalf("rerun = %+v, %v", again, err)
 	}
 	if f.snapshot() != before {
@@ -150,9 +150,11 @@ func TestMigrateLedgerRefsRefusesUnsafeSnapshots(t *testing.T) {
 			}
 		}, "active claims in refs/heads/swarm-state/issue-3"},
 		{"active claim already hidden", func(t *testing.T, f *ledgerFixture) {
-			if _, err := NewGitStoreWithLayout(f.clone, "", HiddenLayout).CompareAndSwap(ctx, 3, "", leaseState(3, "active", migrationNow.Add(time.Hour))); err != nil {
+			commit, err := NewGitStore(f.clone).commitBlob(ctx, "state.json", leaseState(3, "active", migrationNow.Add(time.Hour)), "", "mixed migration fixture")
+			if err != nil {
 				t.Fatal(err)
 			}
+			f.git(f.clone, "push", "origin", commit+":"+HiddenLayout.StateRef(3))
 		}, "active claims in refs/swarm/state/issue-3"},
 		{"malformed state", func(t *testing.T, f *ledgerFixture) {
 			if _, err := NewGitStore(f.clone).CompareAndSwap(ctx, 3, "", []byte("not json")); err != nil {
@@ -206,13 +208,14 @@ func TestMigrateLedgerRefsEmptyPartialAndDryRun(t *testing.T) {
 	if _, err := hidden.CompareAndSwap(ctx, 1, "", leaseState(1, "released", migrationNow)); err != nil {
 		t.Fatal(err)
 	}
-	branchRev, err := NewGitStore(f.clone).CompareAndSwap(ctx, 2, "", leaseState(2, "released", migrationNow))
+	branchRev, err := NewGitStore(f.clone).commitBlob(ctx, "state.json", leaseState(2, "released", migrationNow), "", "mixed migration fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.git(f.clone, "push", "origin", branchRev+":"+BranchLayout.StateRef(2))
 	before = f.snapshot()
 	report, err = NewGitStore(f.clone).MigrateLedgerRefs(ctx, migrationNow, true)
-	if err != nil || len(report.Moves) != 1 || report.AlreadyHidden != 1 || !report.DryRun || f.snapshot() != before {
+	if err != nil || len(report.Moves) != 1 || report.AlreadyHidden != 2 || !report.DryRun || f.snapshot() != before {
 		t.Fatalf("dry run: %+v, %v", report, err)
 	}
 	report, err = NewGitStore(f.clone).MigrateLedgerRefs(ctx, migrationNow, false)

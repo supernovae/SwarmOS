@@ -170,11 +170,11 @@ Sometimes a recorded checkpoint should not be continued. For example, an attempt
 swarm issue discard-checkpoint 29 --expected-head FULL_RECORDED_CHECKPOINT_SHA
 ```
 
-This command needs the same authority as `swarm issue approve`. It is refused while the issue is claimed, after a PR is opened, or for a fork contributor's checkpoint. The command keeps the commit permanently under its retention ref in the repository's ledger namespace (`refs/heads/swarm-checkpoints/issue-29/<sha>` in branch mode, `refs/swarm/checkpoints/issue-29/<sha>` in hidden mode; see [Checkpoint retention](#checkpoint-retention)) and leaves the old task branch where it is. `swarm issue status` lists every discarded checkpoint with its retention ref. The next claim starts on a new `swarm/issue-29-restart-<sha>` branch at the approved base and plans again from scratch. If your clone still has the old worktree at `.swarm/worktrees/issue-29`, it is moved, unchanged, to `.swarm/worktrees/issue-29-discarded-<sha>`.
+This command needs the same authority as `swarm issue approve`. It is refused while the issue is claimed, after a PR is opened, or for a fork contributor's checkpoint. The command keeps the commit under its retention ref until explicit verified archiving in the repository's ledger namespace (`refs/heads/swarm-checkpoints/issue-29/<sha>` in branch mode, `refs/swarm/checkpoints/issue-29/<sha>` in hidden mode; see [Checkpoint retention](#checkpoint-retention)) and leaves the old task branch where it is. `swarm issue status` lists every discarded checkpoint with its retention ref. The next claim starts on a new `swarm/issue-29-restart-<sha>` branch at the approved base and plans again from scratch. If your clone still has the old worktree at `.swarm/worktrees/issue-29`, it is moved, unchanged, to `.swarm/worktrees/issue-29-discarded-<sha>`.
 
 ### Checkpoint retention
 
-Git-backed checkpoint publication, PR publication, and verified fork recording retain commits permanently. With `ledger_namespace: branch` (the default when the key is absent), retention refs are `refs/heads/swarm-checkpoints/issue-<number>/<full-SHA>`. With `ledger_namespace: hidden`, they are `refs/swarm/checkpoints/issue-<number>/<full-SHA>`. Task-branch cleanup preserves these refs, so historical checkpoints survive branch rewrites, deletion, and Git garbage collection. Fetch a retained checkpoint explicitly:
+Git-backed checkpoint publication, PR publication, and verified fork recording retain commits until a maintainer explicitly archives them to a verified destination. With `ledger_namespace: branch` (the default when the key is absent), retention refs are `refs/heads/swarm-checkpoints/issue-<number>/<full-SHA>`. With `ledger_namespace: hidden`, they are `refs/swarm/checkpoints/issue-<number>/<full-SHA>`. Task-branch cleanup preserves these refs, so historical checkpoints survive branch rewrites, deletion, and Git garbage collection. Fetch a retained checkpoint explicitly:
 
 ```bash
 issue=29
@@ -284,3 +284,47 @@ gets a detailed handoff, and small work gets compact guidance. Profiles supply
 prompt variants and evidence expectations; all existing gates and required
 checks still apply. Planners follow the compiled profile. When dimensions are
 absent, suggested dimensions remain advisory and general planning guidance applies.
+
+### Archive and restore
+
+To reduce the ledgers listed on a busy upstream remote, maintainers can move one
+finished issue's state and checkpoint refs to a separate Git repository. Ordinary
+task cleanup keeps these ledgers in place; archiving is a separate, opt-in action
+with the same permission as issue approval. It supports the GitHub backend over
+HTTPS, SSH (including `git@host:path`), and `file://` bare repositories.
+
+Pause workers and coordinator dispatch for the maintenance window. Close the
+issue, finish or release its lease, and retire its remote task branch first.
+The preview reports each requirement: no active or handoff lease, pending PR
+revision, cleanup reservation, open linked PR, contributor index reference, or
+open WorkUnit depending on the issue. A closed unmerged PR or no linked PR is
+also eligible. Keep the upstream default commit, state, archive index, and
+contributor index objects available in your clone for read-only previews;
+fetch them before retrying if a preview reports an unavailable pinned object.
+
+```bash
+swarm repo archive 29 --json
+swarm repo archive 29 --apply --to file:///srv/git/swarm-archive.git
+swarm repo archive restore 29 --json
+swarm repo archive restore 29 --apply
+```
+
+Archive copies exact state and checkpoint SHAs under `refs/archive/issue-29/`
+with a versioned `manifest.json` commit. It reads every copy back into a clean
+object store before atomically deleting source refs and recording a tombstone in
+the namespace's archive index. Every source ref and the index have exact leases;
+a concurrent change rejects the transaction. GitHub eligibility is checked again
+immediately before that push; keep dispatch paused because GitHub issue and PR
+updates cannot be part of a Git ref transaction.
+
+An archived issue cannot be claimed, approved, checkpointed, or submitted until
+restored. Restore uses the destination recorded in the tombstone, verifies the
+manifest and retained objects, then atomically recreates the absent source refs
+and removes that tombstone. After `migrate-refs`, restore recreates the corresponding refs in the selected namespace while verifying the original manifest. Archive copies remain available. Both commands
+preview by default, support `--json`, and require `--apply` for changes. They
+are unavailable with `--fork`, a worker gateway, or the local backend.
+
+A retry of the same snapshot reuses identical archive copies. If the source
+advanced after a failed attempt, fixed destination refs preserve the earlier
+copy: retry with `--to` pointing at a clean archive repository. Keep the earlier
+copy for recovery. Destination conflicts never overwrite archived objects.

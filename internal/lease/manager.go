@@ -924,6 +924,9 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	if err = m.tracker.Authorize(ctx, "approve-task"); err != nil {
 		return nil, err
 	}
+	if err := m.checkArchiveAdmission(ctx, n); err != nil {
+		return nil, err
+	}
 	issue, err := m.tracker.GetIssue(ctx, n)
 	if err != nil {
 		return nil, err
@@ -1111,6 +1114,9 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if duration <= 0 {
 		return nil, fmt.Errorf("lease duration must be positive")
 	}
+	if err := m.checkArchiveAdmission(ctx, n); err != nil {
+		return nil, err
+	}
 	issue, err := m.tracker.GetIssue(ctx, n)
 	if err != nil {
 		return nil, err
@@ -1132,7 +1138,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 		return nil, err
 	}
 	if err = stateErr; err != nil {
-		if errors.Is(err, ErrClaimFence) {
+		if !errors.Is(err, coordination.ErrNotFound) {
 			return nil, err
 		}
 		return nil, &TaskApprovalError{IssueNumber: n, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
@@ -1298,6 +1304,9 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 	if forkRepo == "" || !strings.Contains(forkRepo, "/") {
 		return nil, fmt.Errorf("fork repository owner/repo is required")
 	}
+	if err := m.checkArchiveAdmission(ctx, issue); err != nil {
+		return nil, err
+	}
 	iss, err := m.tracker.GetIssue(ctx, issue)
 	if err != nil {
 		return nil, err
@@ -1313,6 +1322,8 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		if err := m.DecompositionAdmission(ctx, current); err != nil {
 			return nil, err
 		}
+	} else if !errors.Is(readErr, coordination.ErrNotFound) {
+		return nil, readErr
 	}
 	if err = m.VerifyDependencies(ctx, wu); err != nil {
 		return nil, err
@@ -1320,7 +1331,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 	for attempt := range 4 {
 		st, rev, err := m.load(ctx, issue)
 		if err != nil {
-			if errors.Is(err, ErrClaimFence) {
+			if !errors.Is(err, coordination.ErrNotFound) {
 				return nil, err
 			}
 			return nil, &TaskApprovalError{IssueNumber: issue, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}

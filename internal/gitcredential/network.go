@@ -69,6 +69,11 @@ type networkRun struct {
 
 // IsNetwork identifies the bounded coordinator network verbs.
 func IsNetwork(args []string) bool {
+	// Global configuration arguments precede the verb, including the trusted
+	// restore hook override. They must not bypass bounded transport handling.
+	for len(args) >= 2 && args[0] == "-c" {
+		args = args[2:]
+	}
 	return len(args) > 0 && (args[0] == "fetch" || args[0] == "push" || args[0] == "ls-remote")
 }
 

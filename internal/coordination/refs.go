@@ -53,7 +53,7 @@ func (l RefLayout) StatePrefix() string {
 	return "refs/heads/swarm-state/"
 }
 
-// CheckpointPrefix holds permanent checkpoint object retention refs.
+// CheckpointPrefix holds checkpoint retention refs until verified archiving.
 func (l RefLayout) CheckpointPrefix() string {
 	if l.hidden {
 		return "refs/swarm/checkpoints/"
@@ -72,8 +72,9 @@ func (l RefLayout) ContributorPrefix() string {
 // StateRef is the authoritative state ref of issue n.
 func (l RefLayout) StateRef(n int) string { return fmt.Sprintf("%sissue-%d", l.StatePrefix(), n) }
 
-// CheckpointRef is permanent object retention, independent of task branches and
-// the ledger's code-free ancestry. Cleanup must never remove this namespace.
+// CheckpointRef retains objects independently of task branches and the ledger's
+// code-free ancestry. Cleanup never removes it; explicit maintainer archiving
+// relocates it only after an independent read-back verifies the retained copy.
 func (l RefLayout) CheckpointRef(n int, head string) string {
 	return fmt.Sprintf("%sissue-%d/%s", l.CheckpointPrefix(), n, head)
 }
@@ -86,9 +87,20 @@ func (l RefLayout) prefixes() []string {
 	return []string{l.StatePrefix(), l.CheckpointPrefix(), l.ContributorPrefix()}
 }
 
+// ArchiveRef holds the authoritative archive tombstones for this namespace.
+func (l RefLayout) ArchiveRef() string {
+	if l.hidden {
+		return "refs/swarm/archive"
+	}
+	return "refs/heads/swarm-archive"
+}
+
 // counterpartRef maps a ledger ref of this layout to the same ledger entry in
 // the other namespace. Non-ledger refs such as task branches have none.
 func (l RefLayout) counterpartRef(ref string) (string, bool) {
+	if ref == l.ArchiveRef() {
+		return l.Counterpart().ArchiveRef(), true
+	}
 	other := l.Counterpart().prefixes()
 	for i, prefix := range l.prefixes() {
 		if rest, ok := strings.CutPrefix(ref, prefix); ok && rest != "" {

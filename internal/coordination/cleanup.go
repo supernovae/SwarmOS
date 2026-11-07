@@ -11,6 +11,9 @@ import (
 // remote transaction as its durable progress record. Both leases are supplied
 // by the caller's reserved snapshot; neither is refreshed on failure.
 func (s *GitStore) CompareAndSwapAndDeleteBranch(ctx context.Context, n int, old string, next []byte, branch, expected string) (string, error) {
+	if err := s.archiveAdmission(ctx, n, false); err != nil {
+		return "", err
+	}
 	if n <= 0 || old == "" || !strings.HasPrefix(branch, fmt.Sprintf("swarm/issue-%d-", n)) || strings.Contains(branch, "..") || len(expected) != 40 {
 		return "", fmt.Errorf("invalid task branch deletion identity")
 	}

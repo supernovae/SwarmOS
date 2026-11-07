@@ -1171,7 +1171,7 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		if strings.HasPrefix(ref, layout.ContributorPrefix()) {
 			contributors++
 		}
-		if coordination.IsLedgerRef(ref) && !strings.HasPrefix(ref, layout.StatePrefix()) && !strings.HasPrefix(ref, layout.CheckpointPrefix()) && !strings.HasPrefix(ref, layout.ContributorPrefix()) {
+		if coordination.IsLedgerRef(ref) && ref != layout.ArchiveRef() && !strings.HasPrefix(ref, layout.StatePrefix()) && !strings.HasPrefix(ref, layout.CheckpointPrefix()) && !strings.HasPrefix(ref, layout.ContributorPrefix()) {
 			t.Errorf("ledger ref %s outside the %s namespace", ref, ns)
 		}
 		if ns == contract.LedgerNamespaceHidden && strings.HasPrefix(ref, "refs/heads/") && ref != "refs/heads/main" && !strings.HasPrefix(ref, "refs/heads/swarm/issue-") {

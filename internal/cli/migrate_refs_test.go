@@ -162,7 +162,7 @@ func TestRepoMigrateRefsCutover(t *testing.T) {
 		Status string                       `json:"status"`
 		Report coordination.MigrationReport `json:"report"`
 	}
-	if err := json.Unmarshal([]byte(out), &result); err != nil || result.Status != "ok" || len(result.Report.Moves) != 1 {
+	if err := json.Unmarshal([]byte(out), &result); err != nil || result.Status != "ok" || len(result.Report.Moves) != 2 {
 		t.Fatalf("migrate JSON: %v\n%s", err, out)
 	}
 	// Between migration and the config merge, branch-mode commands refuse.
@@ -173,7 +173,7 @@ func TestRepoMigrateRefsCutover(t *testing.T) {
 		t.Fatalf("branch load during cutover: %v", err)
 	}
 	out, err = f.run(RootOptions{RepoRoot: f.root}, "repo", "migrate-refs")
-	if err != nil || !strings.Contains(out, "Nothing to migrate; 1 ledger ref(s) already hidden.") {
+	if err != nil || !strings.Contains(out, "Nothing to migrate; 2 ledger ref(s) already hidden.") {
 		t.Fatalf("rerun: %v\n%s", err, out)
 	}
 	f.setNamespace("hidden")

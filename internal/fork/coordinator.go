@@ -3,6 +3,7 @@ package fork
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -277,6 +278,9 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 	readStore := coordination.NewGitStoreWithLayout(c.RepoRoot, c.upstreamRemote(), layout)
 	rawCurrent, _, err := readStore.Load(ctx, req.IssueNumber)
 	if err != nil {
+		if !errors.Is(err, coordination.ErrNotFound) {
+			return nil, "", err
+		}
 		return nil, "", fmt.Errorf("%w: approve task first", lease.ErrApprovalRequired)
 	}
 	var currentState lease.IssueState

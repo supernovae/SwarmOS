@@ -29,6 +29,9 @@ type revokeStateEnvelope struct {
 // old still holds claimID as its active claim. The contributor index owner
 // comes from the authoritative old state, never from the revoking actor.
 func (s *GitStore) CompareAndSwapAndRevokeClaim(ctx context.Context, n int, old, claimID string, next []byte) (string, error) {
+	if err := s.archiveAdmission(ctx, n, false); err != nil {
+		return "", err
+	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}

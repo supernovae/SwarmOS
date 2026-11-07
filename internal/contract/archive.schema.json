@@ -1,0 +1,17 @@
+{
+ "$schema":"https://json-schema.org/draft/2020-12/schema",
+ "type":"object", "additionalProperties":false,
+ "required":["version","repository","issue","namespace","destination","refs","state_tip","pr_outcome","actor","archived_at"],
+ "properties":{
+  "version":{"const":1},
+  "repository":{"type":"string","minLength":3,"maxLength":256},
+  "issue":{"type":"integer","minimum":1},
+  "namespace":{"enum":["branch","hidden"]},
+  "destination":{"type":"string","minLength":1,"maxLength":4096},
+  "refs":{"type":"array","minItems":1,"maxItems":10000,"items":{"type":"object","additionalProperties":false,"required":["source","destination","sha"],"properties":{"source":{"type":"string"},"destination":{"type":"string"},"sha":{"type":"string","pattern":"^[0-9a-f]{40}$"}}}},
+  "state_tip":{"type":"string","pattern":"^[0-9a-f]{40}$"},
+  "pr_outcome":{"enum":["none","merged","closed"]},
+  "actor":{"type":"string","minLength":1,"maxLength":100},
+  "archived_at":{"type":"string","format":"date-time"}
+ }
+}

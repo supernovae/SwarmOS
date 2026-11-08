@@ -510,3 +510,19 @@ func TestToolCapabilityBundles(t *testing.T) {
 		t.Fatal("omitted observations inferred available")
 	}
 }
+
+func TestPartialImplementationPromptCompilation(t *testing.T) {
+	repo, base := guidanceRepo(t, nil)
+	if err := os.WriteFile(filepath.Join(repo, ".swarm/prompts/developer.md"), []byte("candidate wording"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	prompt, _ := compileGuidance(t, repo, base, "developer", guidanceWorkUnit("partial"), nil)
+	for _, want := range []string{"Status: PARTIAL", "unmet acceptance criteria"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("missing %q", want)
+		}
+	}
+	if strings.Contains(prompt, "candidate wording") {
+		t.Fatal("untrusted prompt used")
+	}
+}

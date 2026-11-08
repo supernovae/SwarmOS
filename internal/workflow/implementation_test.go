@@ -297,3 +297,17 @@ func TestCheckpointPublicationFailureGuidance(t *testing.T) {
 		})
 	}
 }
+
+func TestPartialImplementationParsing(t *testing.T) {
+	for _, tc := range []struct{ report, want string }{
+		{"Status: PARTIAL\nSDK criterion unmet\n## Handoff\nother", "SDK criterion unmet"},
+		{"Status: PARTIAL", "Approved plan assumption failed; unmet acceptance criteria require reassessment"},
+		{"partial implementation", ""}, {"> Status: PARTIAL", ""},
+		{"```text\nStatus: PARTIAL\n```", ""}, {"~~~\nStatus: PARTIAL\n~~~", ""},
+		{"Status: PARTIAL extra", ""}, {"status: partial", ""}, {"", ""},
+	} {
+		if got := partialReason(tc.report); got != tc.want {
+			t.Errorf("%q: %q want %q", tc.report, got, tc.want)
+		}
+	}
+}

@@ -584,3 +584,91 @@ func TestRejectedUnsupportedAssetsSaveLoadRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestCompletedUnownedActiveOutputGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		role, refused string
+		wants         []string
+	}{
+		{"tester", ".swarm/active/TESTER_VALIDATION.md", []string{"--phase test --tester-instructions", ".swarm/active/VALIDATION.md", "acceptance evidence block", "Replace its contents even if it currently contains a coordinator report."}},
+		{"developer", ".swarm/active/DEV_NOTES.md", []string{"--phase implement --developer-instructions", ".swarm/active/IMPLEMENTATION.md", "notes, test results, and blocked checks"}},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			mock := &agent.MockRunner{}
+			const report = "coordinator report\n"
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role != tc.role {
+						return mock.Run(ctx, req)
+					}
+					if tc.role == "tester" {
+						if err := os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte(report), 0644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					err := req.CheckImport(ctx, []string{tc.refused}, nil)
+					return &agent.RunResult{Role: tc.role}, &sandbox.CompletedImportError{Cause: err}
+				}}, nil
+			}
+			res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			var rejection *importRejection
+			if !errors.As(err, &rejection) || !rejection.Completed {
+				t.Fatalf("classification: %v", err)
+			}
+			if !rejection.ActiveOnly || rejection.OutputOnly || rejection.Recoverable || !reflect.DeepEqual(rejection.Paths, []string{tc.refused}) {
+				t.Fatalf("policy changed: %+v", rejection)
+			}
+			for _, text := range []string{err.Error(), res.State.NextPhaseReason, importRejectionReason(rejection, issue.Number, 0, true)} {
+				wants := append([]string{tc.refused, "swarm issue work " + strconv.Itoa(issue.Number), "returned changes were not imported", "worktree was left unchanged", "TMPDIR"}, tc.wants...)
+				for _, want := range wants {
+					if !strings.Contains(text, want) {
+						t.Errorf("missing %q: %s", want, text)
+					}
+				}
+				if strings.Count(text, "'") != 2 {
+					t.Errorf("unsafe instruction quoting: %s", text)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(res.WorktreePath, tc.refused)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("imported refused file: %v", err)
+			}
+			if tc.role == "tester" {
+				data, err := os.ReadFile(filepath.Join(res.WorktreePath, ".swarm/active/VALIDATION.md"))
+				if err != nil || string(data) != report {
+					t.Fatalf("changed coordinator report: %q %v", data, err)
+				}
+			}
+		})
+	}
+}
+
+func TestUnownedActiveGuidanceFallback(t *testing.T) {
+	for _, paths := range [][]string{{"protected.txt"}, {".swarm/active/TESTER_VALIDATION.md", "protected.txt"}} {
+		var rejection *importRejection
+		if !errors.As(writableImportPolicy("tester", paths, []string{"protected.txt"}, false, false), &rejection) {
+			t.Fatal("missing rejection")
+		}
+		rejection.Completed = true
+		want := rejection.Error() + "; returned changes were not imported; worktree was left unchanged; rerun with swarm issue work 477 --phase implement"
+		if got := importRejectionReason(rejection, 477, 0, false); got != want {
+			t.Fatalf("fallback changed: %s", got)
+		}
+	}
+	deleted := &importRejection{Role: "developer", Paths: []string{"old.go"}, Deleted: true, Completed: true}
+	want := "rejected agent changes to: old.go (unplanned deletion of approved-base files); returned changes were not imported; worktree was left unchanged; keep or restore approved-base files the approved plan does not delete (the next developer round's .swarm/active/REPAIR.md carries the approved-base contents of any file a checkpoint lacks); an intentional removal needs an approved PLAN.md line such as " + "`- Delete path/to/file.go`" + "; rerun with swarm issue work 477 --phase implement"
+	if got := importRejectionReason(deleted, 477, 0); got != want {
+		t.Fatalf("deletion changed: %s", got)
+	}
+	rejection := &importRejection{Role: "tester", Paths: []string{".swarm/active/TESTER_VALIDATION.md"}, ActiveOnly: true, Completed: true}
+	for _, pr := range []int{0, 42} {
+		got := importRejectionReason(rejection, 477, pr, false)
+		command := "swarm issue work 477"
+		if pr != 0 {
+			command = "swarm pr work 42"
+		}
+		if !strings.Contains(got, command+" --phase implement") || strings.Contains(got, "--phase test") {
+			t.Fatal(got)
+		}
+	}
+}

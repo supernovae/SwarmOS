@@ -188,7 +188,14 @@ func importRejectionReason(rejection *importRejection, issue, pr int, eligible .
 			reason += " --developer-instructions '" + developerOutputInstructions + "'"
 		}
 		if !rejection.OutputOnly {
-			reason += " --" + rejection.Role + "-instructions 'Write logs and scratch output to the sandbox temporary directory (TMPDIR), never under the workspace or .swarm/active/. Redirect output to \"$TMPDIR/check.log\".'"
+			instructions := "Write logs and scratch output to the sandbox temporary directory (TMPDIR), never under the workspace or .swarm/active/. Redirect output to \"$TMPDIR/check.log\"."
+			switch rejection.Role {
+			case "developer":
+				instructions = developerOutputInstructions + " " + instructions
+			case "tester":
+				instructions = "Record validation results, including the acceptance evidence block, in .swarm/active/VALIDATION.md. Replace its contents even if it currently contains a coordinator report. Leave other roles output files unchanged. " + instructions
+			}
+			reason += " --" + rejection.Role + "-instructions '" + instructions + "'"
 		} else if rejection.Role == "tester" {
 			reason += " --tester-instructions 'Record validation results in .swarm/active/VALIDATION.md; leave other roles output files unchanged.'"
 		}

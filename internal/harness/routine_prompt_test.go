@@ -88,7 +88,7 @@ func TestDimensionGuidanceCopies(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wants := []string{"more than 5 minutes", "exactly one owner", "`developer`", "`tester`", "`coordinator`", "`CI`", "expected duration", "later roles", "evidence location", "source-tree identity"}
+		wants := []string{"more than 5 minutes", "exactly one owner", "`developer`", "`tester`", "`coordinator`", "`CI`", "expected duration", "later roles", "evidence location", "source-tree identity", "## HANDOFF", "**What this change breaks**", "absent at the approved base", "Plan exactly the Acceptance Criteria", "never drop a criterion silently"}
 		if command == "swarm-review.md" {
 			wants = []string{"expected duration", "owning role", "available runtime", "run in full by more than one role without a stated reason", "unknown runtime limits", "open questions"}
 		}

@@ -67,6 +67,64 @@ func TestRoleContextAndReviewOnlyLessons(t *testing.T) {
 	}
 }
 
+// A passing coordinator validation report restates checks the coordinator
+// reruns, so it stays out of every role prompt while REVIEW_EVIDENCE.md keeps
+// it. Failing coordinator reports and agent validation reports still appear.
+func TestPromptArtifactsOmitPassingCoordinatorValidation(t *testing.T) {
+	t.Parallel()
+	coordinator := map[string]string{"validation_trusted_origin": "coordinator"}
+	artifacts := []contract.Artifact{
+		{Type: contract.ArtifactImplementation, Verdict: "PASS", Producer: "mock:developer", Body: "implementation-body-marker"},
+		{Type: contract.ArtifactValidation, Verdict: "PASS", Producer: "swarm:validator", Metadata: coordinator, Body: "coordinator-pass-marker"},
+		{Type: contract.ArtifactValidation, Verdict: "FAIL", Producer: "swarm:validator", Metadata: coordinator, Body: "coordinator-fail-marker"},
+		{Type: contract.ArtifactValidation, Verdict: "PASS", Producer: "mock:tester", Body: "tester-pass-marker"},
+	}
+	wu := &contract.WorkUnit{ID: "ISSUE-57", IssueNumber: 57, Title: "Prior", Objective: "Prior artifacts"}
+	compile := func(t *testing.T, role string, arts []contract.Artifact) (string, string) {
+		t.Helper()
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, ".swarm/active"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := compileHarnessBundle(root, wu, nil, arts, role, "role prompt", "", "", "", "checks", "", bundleGuidance{effectiveGate: contract.GateNone}); err != nil {
+			t.Fatal(err)
+		}
+		workunit, err := os.ReadFile(filepath.Join(root, ".swarm/active/WORKUNIT.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence, err := os.ReadFile(filepath.Join(root, ".swarm/active/REVIEW_EVIDENCE.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(workunit), string(evidence)
+	}
+	for _, role := range []string{"planner", "developer", "reviewer", "tester"} {
+		t.Run(role, func(t *testing.T) {
+			t.Parallel()
+			workunit, evidence := compile(t, role, artifacts)
+			if strings.Contains(workunit, "coordinator-pass-marker") {
+				t.Fatalf("passing coordinator validation reached the %s prompt:\n%s", role, workunit)
+			}
+			for _, want := range []string{"## Prior Artifacts", "implementation-body-marker", "coordinator-fail-marker", "tester-pass-marker"} {
+				if !strings.Contains(workunit, want) {
+					t.Fatalf("%s WORKUNIT.md lacks %q:\n%s", role, want, workunit)
+				}
+			}
+			if !strings.Contains(evidence, "coordinator-pass-marker") {
+				t.Fatal("review evidence dropped the coordinator report")
+			}
+		})
+	}
+	t.Run("only omitted", func(t *testing.T) {
+		t.Parallel()
+		workunit, evidence := compile(t, "tester", artifacts[1:2])
+		if strings.Contains(workunit, "## Prior Artifacts") || !strings.Contains(evidence, "coordinator-pass-marker") {
+			t.Fatalf("empty prior artifacts section:\n%s", workunit)
+		}
+	})
+}
+
 func TestReviewEvidenceStripsOperatorAppendix(t *testing.T) {
 	t.Parallel()
 	body := "Keep review finding\n<!-- swarm:guidance:start -->\n## Operator guidance\n\ndeveloper-private-marker\n<!-- swarm:guidance:end -->\n"

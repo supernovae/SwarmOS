@@ -12,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/sandbox"
+	"gopkg.in/yaml.v3"
 )
 
 var guidanceRoles = []string{"planner", "reviewer", "developer", "tester"}
@@ -149,7 +150,7 @@ func TestBundleGuidanceAllRoles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []string{strings.TrimSpace(string(policy)), "coordinator-owned reference, not a per-role execution list", "coordinator runs the complete trusted-base required policy once", "Agent observations remain advisory", "agent subprocesses must not request coordinator credentials"} {
+			for _, want := range []string{"## Approved validation policy", "coordinator-owned reference, not a per-role execution list", "coordinator runs the complete trusted-base required policy once", "Agent observations remain advisory", "agent subprocesses must not request coordinator credentials"} {
 				if !strings.Contains(sys, want) {
 					t.Errorf("%s lacks %q", role, want)
 				}
@@ -157,11 +158,46 @@ func TestBundleGuidanceAllRoles(t *testing.T) {
 			if strings.Contains(sys, "Run these check commands directly") {
 				t.Fatal("agent policy checklist retained")
 			}
-
-			for _, marker := range []string{"project-policy-marker", "conventions-policy-marker", "goals-policy-marker", "manual-policy-marker", "rules-policy-marker", "safety-rule-marker", "validation-policy-marker", "architecture-small-marker"} {
+			// The planner assigns check ownership and the reviewer audits it, so
+			// they read the whole policy. The developer and tester read the check
+			// names and protected paths; TEST_PLAN.md carries their commands.
+			var spec contract.ValidationSpec
+			if err := yaml.Unmarshal(policy, &spec); err != nil || len(spec.RequiredChecks) == 0 || len(spec.ProtectedPaths) == 0 {
+				t.Fatalf("scaffold policy: %v", err)
+			}
+			inline := []string{"project-policy-marker", "conventions-policy-marker", "goals-policy-marker", "rules-policy-marker", "safety-rule-marker", "architecture-small-marker"}
+			if role == "developer" || role == "tester" {
+				if strings.Contains(sys, "command:") || strings.Contains(sys, "timeout:") || strings.Contains(sys, "validation-policy-marker") {
+					t.Fatalf("%s prompt inlines check commands:\n%s", role, sys)
+				}
+				for _, check := range spec.RequiredChecks {
+					if strings.Count(sys, "`"+check.Name+"`") != 1 {
+						t.Fatalf("%s prompt must name check %q once", role, check.Name)
+					}
+				}
+				for _, protected := range spec.ProtectedPaths {
+					if !strings.Contains(sys, protected) {
+						t.Fatalf("%s prompt lacks protected path %q", role, protected)
+					}
+				}
+			} else {
+				inline = append(inline, "validation-policy-marker")
+				if !strings.Contains(sys, strings.TrimSpace(string(policy))) {
+					t.Fatalf("%s prompt lacks the full approved policy", role)
+				}
+			}
+			for _, marker := range inline {
 				if strings.Count(sys, marker) != 1 {
 					t.Fatalf("%s must be inline once for %s", marker, role)
 				}
+			}
+			// SKILLS.md is a swarm command manual for interactive sessions: indexed
+			// with an approved copy, never inlined into a role prompt.
+			if strings.Contains(sys, "manual-policy-marker") || strings.Count(sys, "`.swarm/SKILLS.md`") != 1 || !strings.Contains(sys, "approved copy: `.swarm/active/guidance/SKILLS.md`") {
+				t.Fatalf("SKILLS.md must be index-only for %s:\n%s", role, sys)
+			}
+			if copy := readActive(t, repo, "guidance/SKILLS.md"); copy != guidancePolicy[".swarm/SKILLS.md"] {
+				t.Fatalf("approved copy of SKILLS.md = %q", copy)
 			}
 			for path, body := range skills {
 				if strings.Count(sys, "`"+path+"`") != 1 {
@@ -258,7 +294,17 @@ func TestBundleGuidanceApprovedBase(t *testing.T) {
 				sys, _ := compileGuidance(t, wt, base, role, guidanceWorkUnit("base"), nil)
 				all := activeText(t, wt)
 				policy := workspaceGitOutput(t, repo, "show", base+":.swarm/validation/required-checks.yaml")
-				if !strings.Contains(sys, strings.TrimSpace(policy)) {
+				var spec contract.ValidationSpec
+				if err := yaml.Unmarshal([]byte(policy), &spec); err != nil || len(spec.ProtectedPaths) == 0 {
+					t.Fatalf("base policy: %v", err)
+				}
+				if role == "developer" || role == "tester" {
+					for _, protected := range spec.ProtectedPaths {
+						if !strings.Contains(sys, protected) {
+							t.Fatalf("%s lost trusted protected path %q", role, protected)
+						}
+					}
+				} else if !strings.Contains(sys, strings.TrimSpace(policy)) {
 					t.Fatal("trusted policy reference lost")
 				}
 
@@ -331,6 +377,7 @@ func TestBundleGuidanceBaseTransition(t *testing.T) {
 		".swarm/skills/nested/new.md":      "",
 		".swarm/skills/nested/kept.md":     "",
 		".swarm/skills/triage-and-plan.md": "",
+		".swarm/SKILLS.md":                 "",
 		".swarm/rules/default.md":          "",
 		".swarm/rules/nested/sec.md":       "",
 		".swarm/rules/lessons.md":          "",
@@ -414,11 +461,11 @@ func TestBundleWorkUnitAndOrdering(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				order := []string{"project-policy-marker", "conventions-policy-marker", "goals-policy-marker", "manual-policy-marker", "rules-policy-marker", "## Approved validation policy", strings.SplitN(rolePrompt, "\n", 2)[0]}
+				order := []string{"project-policy-marker", "conventions-policy-marker", "goals-policy-marker", "rules-policy-marker", "## Approved validation policy", strings.SplitN(rolePrompt, "\n", 2)[0]}
 				if role == "planner" {
 					order = append(order, "## Claim budget")
 				}
-				order = append(order, "architecture-small-marker", "## Skill index", "all-body-marker")
+				order = append(order, "architecture-small-marker", "## Skill index", "`.swarm/SKILLS.md`", "all-body-marker")
 				if role == "planner" {
 					order = append(order, "Address the previous CHANGES_REQUESTED")
 				}

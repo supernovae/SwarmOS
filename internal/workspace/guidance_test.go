@@ -100,6 +100,9 @@ func TestSkillTitlesAndIndex(t *testing.T) {
 	if got := skills[2].copyPath(); got != "guidance/skills/nested/deep/b.md" {
 		t.Fatalf("copy path = %q", got)
 	}
+	if got := (guidanceSkill{path: ".swarm/SKILLS.md"}).copyPath(); got != "guidance/SKILLS.md" {
+		t.Fatalf("manual copy path = %q", got)
+	}
 	text := renderSkillGuidance(skills, "developer", "feature")
 	if text != renderSkillGuidance(skills, "developer", "feature") {
 		t.Fatal("index is not deterministic")

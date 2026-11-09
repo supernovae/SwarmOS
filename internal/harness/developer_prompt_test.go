@@ -60,13 +60,14 @@ func TestWorkerTestScopeInstructionsAndPromptSync(t *testing.T) {
 		name string
 		want []string
 	}{
-		{"swarm-implement.md", []string{"Status: PARTIAL", "unmet acceptance criteria", "developer-owned focused checks specified in `.swarm/active/TEST_PLAN.md`"}},
+		{"swarm-implement.md", []string{"Status: PARTIAL", "unmet acceptance criteria", "developer-owned focused checks specified in `.swarm/active/TEST_PLAN.md`", "`.swarm/active/IMPLEMENTATION.md`", "`## HANDOFF` section for the tester", "discards your run"}},
 		{"swarm-validate.md", []string{
 			"Independently review source and every acceptance criterion",
 			"reuse applicable passing developer results",
 			"recording evidence references and reuse decisions",
 			"Run focused diagnostics only for relevant changes, observed failures or an unresolved coverage gap",
 			"The coordinator performs claim-bound `swarm issue validate` and publication; do not request its credentials or treat candidate policy as authoritative.",
+			"<!-- swarm:acceptance-evidence:start -->", "<!-- swarm:acceptance-evidence:end -->", "`met`, `unmet` or `external`", "refuses a missing or malformed block",
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -64,8 +64,8 @@ Each workflow phase binds to a role prompt in `.swarm/prompts/` and reads/writes
 | :--- | :--- | :--- | :--- |
 | **Planner** (`planner`) | `.swarm/prompts/planner.md` | `WORKUNIT.md` and repository context | `.swarm/active/PLAN.md` (`design`, ending with a `## HANDOFF` section) & `.swarm/active/TEST_PLAN.md` (`test-plan`) |
 | **Reviewer** (`reviewer`) | `.swarm/prompts/reviewer.md` | `WORKUNIT.md`, `PLAN.md`, `TEST_PLAN.md` | `.swarm/active/REVIEW.md` (`review` starting with `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`) |
-| **Developer** (`developer`) | `.swarm/prompts/developer.md` | Approved `PLAN.md` (including its handoff) and `TEST_PLAN.md` | Working-tree implementation changes + checkpoint commit, and `.swarm/active/IMPLEMENTATION.md` (`implementation`, ending with a `## HANDOFF` section) |
-| **Tester / Validator** (`tester`) | `.swarm/prompts/tester.md` | Implementation, the developer's handoff in `WORKUNIT.md`, and approved-base validation policy | Validation check output (`validation` artifact) |
+| **Developer** (`developer`) | `.swarm/prompts/developer.md` | Approved `PLAN.md` (including its handoff) and `TEST_PLAN.md` | Working-tree implementation changes + checkpoint commit, and `.swarm/active/IMPLEMENTATION.md` (`implementation`, ending with a `## HANDOFF` section). On native issue work, a standalone `Status: PARTIAL` line reports a failed plan assumption and stops the run before testing so the plan or WorkUnit can be revised |
+| **Tester / Validator** (`tester`) | `.swarm/prompts/tester.md` | Implementation, the developer's handoff in `WORKUNIT.md`, and approved-base validation policy | `.swarm/active/VALIDATION.md` (`validation`) with one acceptance-evidence JSON block marking every criterion `met`, `unmet` or `external`; `swarm issue submit` requires the block and refuses `unmet` criteria |
 
 SwarmOS compiles `.swarm/active/WORKUNIT.md` and `.swarm/active/SYSTEM_PROMPT.md` freshly for each claimed task and injects managed pointer blocks into `AGENTS.md` and `CLAUDE.md` inside the worktree so interactive and headless tools find the active contract immediately.
 

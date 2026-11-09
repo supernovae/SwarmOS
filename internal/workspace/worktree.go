@@ -822,10 +822,21 @@ func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.Wo
 	if report != nil {
 		guidance.capabilities = sandbox.FormatToolCapabilities(*report)
 	}
-	for _, optPath := range []string{".swarm/goals.md", ".swarm/SKILLS.md"} {
-		if content, optErr := showHarnessFile(worktreePath, baseSHA, optPath); optErr == nil && strings.TrimSpace(content) != "" {
-			guidance.policy = append(guidance.policy, strings.TrimSpace(content))
+	if content, optErr := showHarnessFile(worktreePath, baseSHA, ".swarm/goals.md"); optErr == nil && strings.TrimSpace(content) != "" {
+		guidance.policy = append(guidance.policy, strings.TrimSpace(content))
+	}
+	// SKILLS.md documents the swarm command lifecycle for interactive sessions
+	// and maintainers. Headless roles never run swarm, so it is indexed with an
+	// approved copy instead of being inlined into every role prompt.
+	if content, optErr := showHarnessFile(worktreePath, baseSHA, ".swarm/SKILLS.md"); optErr == nil && strings.TrimSpace(content) != "" {
+		manual, err := parseGuidanceSkill(".swarm/SKILLS.md", content)
+		if err != nil {
+			return err
 		}
+		if manual.description == "" {
+			manual.description = "swarm command lifecycle for interactive sessions; read it when a step needs a swarm command"
+		}
+		guidance.skills = append(guidance.skills, manual)
 	}
 	rules, err := approvedMarkdownFiles(worktreePath, baseSHA, ".swarm/rules")
 	if err != nil {
@@ -874,7 +885,10 @@ func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.Wo
 			if err != nil {
 				return err
 			}
-			profileDoc := "## Execution profile: " + profile.Name + "\n\n" + strings.TrimSpace(variant) + "\n\n"
+			profileDoc := "## Execution profile: " + profile.Name + "\n\n"
+			if variant = strings.TrimSpace(variant); variant != "" {
+				profileDoc += variant + "\n\n"
+			}
 			for _, evidence := range profile.Evidence {
 				profileDoc += "- " + evidence + "\n"
 			}
@@ -1005,9 +1019,9 @@ func compileHarnessBundle(worktreePath string, wu *contract.WorkUnit, wf *contra
 			sys.WriteString(strings.TrimSpace(doc) + "\n\n")
 		}
 	}
-	sys.WriteString("## Approved validation policy\n\n```yaml\n")
-	sys.WriteString(strings.TrimSpace(validationDoc))
-	sys.WriteString("\n```\n\nThe approved validation policy is a coordinator-owned reference, not a per-role execution list. After agent roles finish, the coordinator runs the complete trusted-base required policy once on the final candidate. Agent observations remain advisory and cannot satisfy claim-bound validation or publication. Roles follow their focused responsibilities in TEST_PLAN.md. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
+	sys.WriteString("## Approved validation policy\n\n")
+	sys.WriteString(renderValidationPolicy(validationDoc, role))
+	sys.WriteString("\nThe approved validation policy is a coordinator-owned reference, not a per-role execution list. After agent roles finish, the coordinator runs the complete trusted-base required policy once on the final candidate. Agent observations remain advisory and cannot satisfy claim-bound validation or publication. Roles follow their focused responsibilities in TEST_PLAN.md. Claim-bound validation and publication belong to the coordinator; agent subprocesses must not request coordinator credentials.\n\n")
 	if guidance.capabilities == "" {
 		guidance.capabilities = "Tool capabilities: not_probed. Runtime observations were not supplied by the coordinator. Launch checks the approved execution boundary. Node scheduling capabilities are separate declarations.\n"
 	}
@@ -1375,13 +1389,13 @@ func renderWorkUnitMarkdown(wu *contract.WorkUnit, wf *contract.WorkflowSpec, ar
 		sb.WriteString("\n")
 	}
 
-	if len(artifacts) > 0 {
+	if prior := promptArtifacts(artifacts); len(prior) > 0 {
 		sb.WriteString("## Prior Artifacts\n\n")
 		role := ""
 		if len(roles) > 0 {
 			role = roles[0]
 		}
-		sb.WriteString(renderArtifactContext(artifacts, role))
+		sb.WriteString(renderArtifactContext(prior, role))
 	}
 
 	return sb.String()

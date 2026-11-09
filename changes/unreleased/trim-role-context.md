@@ -1,0 +1,1 @@
+- Trim each role prompt: the `swarm` command manual is indexed instead of inlined, developers and testers see check names and protected paths rather than the full policy, passing coordinator validation reports stay out of Prior Artifacts, and an execution profile without a role variant renders no empty body.

@@ -112,6 +112,26 @@ func TestPlannerCannotChangeProfile(t *testing.T) {
 	}
 }
 
+// Variants exist only for the planner and reviewer. Other roles get the
+// profile heading and evidence bullets without an empty body between them.
+func TestProfileWithoutVariantHasNoEmptyBody(t *testing.T) {
+	t.Parallel()
+	wt, base := budgetRepo(t, "lease:\n  duration: 30m\n  renewable: false\n  max_renewals: 0\n")
+	for _, role := range []string{"developer", "tester"} {
+		wu := &contract.WorkUnit{ID: "ISSUE-7", IssueNumber: 7, Title: "Profile", Objective: "Implement profiles", Workflow: "feature", Size: "small"}
+		if err := CompileHarnessBundleAt(wt, wu, &contract.WorkflowSpec{Name: "feature"}, nil, role, contract.GateNone, base); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(filepath.Join(wt, ".swarm/active/SYSTEM_PROMPT.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), "## Execution profile: compact\n\n- ") || strings.Contains(string(raw), "## Execution profile: compact\n\n\n") {
+			t.Fatalf("%s profile section has an empty variant body:\n%s", role, raw)
+		}
+	}
+}
+
 func TestProfileMissingConfigNonPlanner(t *testing.T) {
 	t.Parallel()
 	wt, _ := budgetRepo(t, "lease:\n  duration: 30m\n  renewable: false\n  max_renewals: 0\n")

@@ -50,8 +50,41 @@ type guidanceSkill struct {
 }
 
 // copyPath is where the approved copy of a skill is written under .swarm/active.
+// Skills keep their layout under guidance/skills; a top-level document such as
+// .swarm/SKILLS.md is written directly under guidance.
 func (s guidanceSkill) copyPath() string {
-	return path.Join(guidanceDir, "skills", strings.TrimPrefix(s.path, ".swarm/skills/"))
+	if rel, ok := strings.CutPrefix(s.path, ".swarm/skills/"); ok {
+		return path.Join(guidanceDir, "skills", rel)
+	}
+	return path.Join(guidanceDir, path.Base(s.path))
+}
+
+// renderValidationPolicy inlines the approved policy for one role prompt. The
+// planner assigns check ownership and the reviewer audits it, so they read the
+// whole document. The developer and tester run only the TEST_PLAN.md checks
+// they own, so they read the check names and the protected paths; a document
+// that does not parse as a validation spec is inlined whole.
+func renderValidationPolicy(doc, role string) string {
+	doc = strings.TrimSpace(doc)
+	full := "```yaml\n" + doc + "\n```\n"
+	if role != "developer" && role != "tester" {
+		return full
+	}
+	var spec contract.ValidationSpec
+	if err := yaml.Unmarshal([]byte(doc), &spec); err != nil || len(spec.RequiredChecks) == 0 {
+		return full
+	}
+	names := make([]string, 0, len(spec.RequiredChecks))
+	for _, c := range spec.RequiredChecks {
+		names = append(names, "`"+c.Name+"`")
+	}
+	paths, err := yaml.Marshal(struct {
+		ProtectedPaths []string `yaml:"protected_paths"`
+	}{spec.ProtectedPaths})
+	if err != nil {
+		return full
+	}
+	return "Required checks the coordinator runs on the final candidate: " + strings.Join(names, ", ") + ". TEST_PLAN.md names the focused checks each role owns.\n\n```yaml\n" + strings.TrimSpace(string(paths)) + "\n```\n"
 }
 
 // selected reports whether the skill is inlined for role and workflow. Each

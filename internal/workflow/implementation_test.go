@@ -388,6 +388,9 @@ func TestPartialImplementationOutcomeStopsBeforeTester(t *testing.T) {
 func TestPartialImplementationPASSOnlyConsumers(t *testing.T) {
 	st := &lease.IssueState{BaseSHA: "base", TaskDigest: "task", PolicyDigest: "policy", NextPhaseReason: "claim budget", Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}}}
 	md := lease.ReviewBindings(st)
+	for k, v := range lease.ReviewBindings(st) {
+		md["implementation_trusted_"+k] = v
+	}
 	md["head_sha"] = "head"
 	md["implementation_trusted_origin"] = "coordinator"
 	md["implementation_outcome"] = "partial"
@@ -428,6 +431,74 @@ func TestPartialImplementationScopeExclusions(t *testing.T) {
 			}
 			if got := r.partialImplementationReason(report); (got != "") != (mode == "native") {
 				t.Fatalf("%s: %q", mode, got)
+			}
+		})
+	}
+}
+
+func TestHasTrustedImplementationCurrentBindings(t *testing.T) {
+	for _, change := range []string{"matching", "retry claim", "checkpoint matching", "checkpoint changed", "checkpoint invalid", "policy tree absent", "plan", "test-plan", "missing plan", "missing test-plan", "task", "policy", "base", "policy tree", "missing metadata", "empty binding", "untrusted", "failed"} {
+		t.Run(change, func(t *testing.T) {
+			st := &lease.IssueState{BaseSHA: "base", TaskDigest: "task", PolicyDigest: "policy", PolicyTreeDigest: "policy-tree", Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}}}
+			if strings.HasPrefix(change, "checkpoint") {
+				st.Lease.ClaimID = "claim"
+				st.HeadSHA = strings.Repeat("a", 40)
+				for i := range st.Artifacts {
+					st.Artifacts[i].Metadata = map[string]string{
+						"checkpoint_plan_origin": "coordinator", "checkpoint_plan_claim": "claim",
+						"checkpoint_plan_task": st.TaskDigest, "checkpoint_plan_policy": st.PolicyDigest,
+						"checkpoint_plan_base": st.BaseSHA, "checkpoint_plan_policy_tree": st.PolicyTreeDigest,
+						"checkpoint_plan_predecessor": st.HeadSHA, "checkpoint_plan_candidate": strings.Repeat("b", 40),
+						"content_sha256": lease.ReviewBindings(st)[map[contract.ArtifactType]string{contract.ArtifactDesign: "plan_digest", contract.ArtifactTestPlan: "test_plan_digest"}[st.Artifacts[i].Type]],
+					}
+				}
+			}
+			if change == "policy tree absent" {
+				st.PolicyTreeDigest = ""
+			}
+
+			md := map[string]string{"implementation_trusted_origin": "coordinator"}
+			for k, v := range lease.ReviewBindings(st) {
+				md["implementation_trusted_"+k] = v
+			}
+			implementation := contract.Artifact{Type: contract.ArtifactImplementation, Verdict: "PASS", Metadata: md}
+			switch change {
+			case "checkpoint changed":
+				md["implementation_trusted_checkpoint_candidate"] = "different"
+			case "checkpoint invalid":
+				st.Artifacts[0].Metadata["checkpoint_plan_claim"] = "stale"
+			case "retry claim":
+				st.Lease.ClaimID = "successor-claim"
+			case "plan":
+				st.Artifacts[0].Body += " changed"
+			case "test-plan":
+				st.Artifacts[1].Body += " changed"
+			case "missing plan":
+				st.Artifacts = st.Artifacts[1:]
+			case "missing test-plan":
+				st.Artifacts = st.Artifacts[:1]
+			case "task":
+				st.TaskDigest = "changed"
+			case "policy":
+				st.PolicyDigest = "changed"
+			case "base":
+				st.BaseSHA = "changed"
+			case "policy tree":
+				st.PolicyTreeDigest = "changed"
+			case "missing metadata":
+				delete(md, "implementation_trusted_plan_digest")
+			case "empty binding":
+				st.TaskDigest = ""
+				md["implementation_trusted_task_digest"] = ""
+			case "untrusted":
+				delete(md, "implementation_trusted_origin")
+			case "failed":
+				implementation.Verdict = "FAIL"
+			}
+			st.Artifacts = append(st.Artifacts, implementation)
+			want := change == "matching" || change == "retry claim" || change == "checkpoint matching" || change == "policy tree absent"
+			if got := hasTrustedImplementation(st); got != want {
+				t.Fatalf("hasTrustedImplementation = %t, want %t", got, want)
 			}
 		})
 	}

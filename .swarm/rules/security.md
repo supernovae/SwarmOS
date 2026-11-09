@@ -1,0 +1,15 @@
+# Security Invariants
+
+SwarmOS lets maintainers hand real repositories to agents and outside contributors. These invariants are what make that safe. A change that weakens one needs an explicit maintainer decision and an update to `SECURITY.md`, not a quiet refactor.
+
+1. **Policy comes from the trusted base.** Validation checks, `protected_paths`, role prompts, and lease policy load from the approved `base_sha`, never from the candidate worktree or a contributor's fork (`internal/validation/`, `internal/workflow/`).
+2. **Every worker mutation is fenced.** Claim, artifact, checkpoint, PR-revision, and submission writes go through CAS and check `claim_id`, owner, expiry, and the task/policy digests (`internal/lease/`). A stale worker must fail with `ErrClaimFence`, never publish over a successor. Keep `%w` wrapping so callers can detect it.
+3. **Approvals bind to exact content.** Plan approval is tied to the current WorkUnit, policy, `PLAN.md`, and `TEST_PLAN.md` digests. Agent verdicts never satisfy a human gate, and contributor-supplied review artifacts never satisfy a trusted gate.
+4. **Comments are projections, not authority.** Issue comments and PR descriptions can never create claims, approvals, artifacts, or PR links. Fork requests carry parameters only; `internal/fork/coordinator.go` re-verifies each one against GitHub and authoritative state before it writes. When you add a fork operation, add it to `fork.Operations`, the transport, and both coordinator workflow admission lists — `TestOperationListsStayInSync` enforces this.
+5. **Credentials stay with the coordinator.** Agents never receive GitHub tokens, `SWARM_GITHUB_TOKEN_COMMAND`, Git credentials, or SSH agents. Tokens never appear in argv, logs, or files; Git runs with the hardened environment from `internal/gitcredential/`. Agent `env` allowlists reject coordinator and host credential variables (`internal/agent/`).
+6. **Isolation never falls back.** If the selected boundary is unavailable or a canary fails, stop before claiming work. Never add a bypass or "skip verification" flag. A new harness capability (MCP, subagents, hooks, network) needs its own boundary tests before it is enabled.
+7. **File operations are root-bound.** Writes to state, scaffold destinations, active bundles, and imported artifacts use `internal/safefs/` with exclusive temporary files and atomic replacement, and reject symlinks and special files. Do not replace these with plain `os.WriteFile` on paths an agent or contributor can influence.
+8. **Publishing is explicit and head-fenced.** Only `issue submit` and `pr submit` publish, each with an expected remote head. Never force-push over a head SwarmOS did not verify.
+9. **Projections carry no PII.** Provenance attestations and issue comments never include local hostnames, usernames, file paths, or environment-variable values.
+
+Every security fix ships with a regression test that fails against the old behavior. Do not delete or weaken an adversarial test to make a change pass; fix the change instead.

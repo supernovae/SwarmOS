@@ -2,6 +2,16 @@
 
 Welcome to **SwarmOS (`github.com/supernovae/swarmos`)**. Every coding agent, reviewer bot, and human contributor working in this repository should read this file first.
 
+## Who reads what
+
+| Reader | Reads | Does not see |
+| :--- | :--- | :--- |
+| Maintainers and contributors | This file, `docs/`, `SECURITY.md` | — |
+| Interactive agents (Claude Code, OpenCode, Codex, `omp`) in a task worktree | This file, then `.swarm/active/WORKUNIT.md` and `SYSTEM_PROMPT.md`; the `/swarm-*` commands | — |
+| Headless roles under `swarm issue work` | Only the compiled `.swarm/active/SYSTEM_PROMPT.md` and `WORKUNIT.md`, built from the approved base's `.swarm/` files | This file. Anything a role must know belongs in `.swarm/`, not here |
+
+Sections 3 and 5 below are verbatim copies of `.swarm/architecture.md` and `.swarm/rules/security.md`, which are compiled into every role prompt; a test keeps them identical. Edit the `.swarm/` file and mirror it here.
+
 ---
 
 ## 1. The SwarmOS Vision & Voice
@@ -38,11 +48,11 @@ Our documentation (`README.md`, `docs/*.md`, `SECURITY.md`) is the front door to
 
 - **`cmd/swarm/` & `internal/cli/`**: Cobra CLI entrypoint and resource groups (`repo init/doctor/plan/validate/lessons/add/list/remove`, `issue create/approve/lint/decompose/epic/claim/work/stage/review-plan/validate/submit/status/renew/release`, `pr status/work/stage/rebase/validate/submit`, `node init/status/run`), plus root `version` and `fork-coordinator`.
 - **`internal/contract/`**: Canonical `WorkUnit`, `Lease`, `Artifact`, `WorkflowSpec`, `ValidationSpec`, and `.swarm/config.yaml` types, JSON Schema validation, and HTML comment stripping.
-- **`internal/coordination/` & `internal/lease/`**: Git compare-and-swap state refs (`refs/heads/swarm-state/issue-<N>`), file-locked local CAS store (`--backend local`), fenced claims (`claim_id`), heartbeats, and issue audit comments.
-- **`internal/workspace/`**: Isolated Git worktree provisioning (`.swarm/worktrees/issue-<N>`), checkpoint commits, and active bundle compilation (`.swarm/active/WORKUNIT.md`, `SYSTEM_PROMPT.md`). Note that SwarmOS injects an ephemeral `` pointer block into `AGENTS.md` and `CLAUDE.md` inside task worktrees and strips it automatically before checkpoints and submissions—never delete content outside those markers.
-- **`internal/agent/` & `internal/sandbox/`**: Adapters for `claude`, `codex`, `opencode`, `omp`, and local/test `mock`, plus isolated read-only snapshot sandboxing (`sandbox-exec`, `bwrap`, or OCI `docker`/`podman`) for the `reviewer` role. Each harness's setup, invocation, and boundary is documented in `docs/harness/` — update the matching guide when an adapter's flags, minimum version, or restrictions change.
-- **`internal/workflow/` & `internal/validation/`**: Plan-first execution engine (`plan` $\rightarrow$ `gate` $\rightarrow$ `implement` $\rightarrow$ `validate`), cryptographic binding of review verdicts to `WorkUnit`/`PLAN.md`/`TEST_PLAN.md` digests, and baseline-pinned validation of `required-checks.yaml` and `protected_paths`.
-- **`internal/pr/`**: Continued development of PRs authoritatively linked to approved WorkUnits. PR commands use PR numbers, retain the linked issue's fenced claim and approval gates, prepare changes in separate PR worktrees, and publish only through explicit `pr submit` with an expected remote head. Contributors revise their own fork PRs with `--fork`; `internal/fork` verifies each PR revision step (`acquire-pr` through `complete-pr-revision`) against GitHub before it changes upstream state.
+- **`internal/coordination/` & `internal/lease/`**: Git compare-and-swap state refs (`refs/heads/swarm-state/issue-<N>`, or `refs/swarm/state/issue-<N>` with the hidden ledger namespace), file-locked local CAS store (`--backend local`), fenced claims (`claim_id`), heartbeats, and issue audit comments.
+- **`internal/workspace/`**: Isolated Git worktree provisioning (`.swarm/worktrees/issue-<N>`), checkpoint commits, and the compiled active bundle (`.swarm/active/WORKUNIT.md`, `SYSTEM_PROMPT.md`, approved guidance copies under `.swarm/active/guidance/`). SwarmOS injects an ephemeral pointer block into `AGENTS.md` and `CLAUDE.md` inside task worktrees and strips it before checkpoints and submissions; never delete content outside those markers.
+- **`internal/agent/` & `internal/sandbox/`**: Adapters for `claude`, `codex`, `opencode`, `omp`, and local/test `mock`, plus isolated read-only snapshot sandboxing (`sandbox-exec`, `bwrap`, or OCI `docker`/`podman`) for the `reviewer` role. Each harness's setup, invocation, and boundary is documented in `docs/harness/`; update the matching guide when an adapter's flags, minimum version, or restrictions change.
+- **`internal/workflow/` & `internal/validation/`**: Plan-first execution engine (`plan` → `gate` → `implement` → `validate`), cryptographic binding of review verdicts to `WorkUnit`/`PLAN.md`/`TEST_PLAN.md` digests, and baseline-pinned validation of `required-checks.yaml` and `protected_paths`.
+- **`internal/pr/` & `internal/fork/`**: Continued development of PRs linked to approved WorkUnits. PR commands use PR numbers, retain the linked issue's fenced claim and approval gates, prepare changes in separate PR worktrees, and publish only through explicit `pr submit` with an expected remote head. Contributors revise their own fork PRs with `--fork`; `internal/fork` verifies each PR revision step against GitHub before it changes upstream state.
 
 ---
 
@@ -78,6 +88,7 @@ SwarmOS lets maintainers hand real repositories to agents and outside contributo
 6. **Isolation never falls back.** If the selected boundary is unavailable or a canary fails, stop before claiming work. Never add a bypass or "skip verification" flag. A new harness capability (MCP, subagents, hooks, network) needs its own boundary tests before it is enabled.
 7. **File operations are root-bound.** Writes to state, scaffold destinations, active bundles, and imported artifacts use `internal/safefs/` with exclusive temporary files and atomic replacement, and reject symlinks and special files. Do not replace these with plain `os.WriteFile` on paths an agent or contributor can influence.
 8. **Publishing is explicit and head-fenced.** Only `issue submit` and `pr submit` publish, each with an expected remote head. Never force-push over a head SwarmOS did not verify.
+9. **Projections carry no PII.** Provenance attestations and issue comments never include local hostnames, usernames, file paths, or environment-variable values.
 
 Every security fix ships with a regression test that fails against the old behavior. Do not delete or weaken an adversarial test to make a change pass; fix the change instead.
 

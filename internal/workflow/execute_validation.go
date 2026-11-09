@@ -233,9 +233,24 @@ func (r *workRun) reserveRepair() error {
 }
 
 func hasTrustedImplementation(st *lease.IssueState) bool {
+	bindings := lease.ReviewBindings(st)
+	if bindings["plan_digest"] == "" || bindings["test_plan_digest"] == "" {
+		return false
+	}
+	// Scheduling checks input freshness; CheckImplementationRetry remains the
+	// authoritative admission check for the claim and candidate checkpoint.
 	for _, a := range st.Artifacts {
 		if a.Type == contract.ArtifactImplementation && a.Verdict == "PASS" && a.Metadata["implementation_trusted_origin"] == "coordinator" {
-			return true
+			current := true
+			for k, v := range bindings {
+				if k != "review_claim_id" && (v == "" || a.Metadata["implementation_trusted_"+k] != v) {
+					current = false
+					break
+				}
+			}
+			if current {
+				return true
+			}
 		}
 	}
 	return false

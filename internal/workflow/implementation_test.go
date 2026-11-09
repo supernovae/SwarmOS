@@ -432,3 +432,50 @@ func TestPartialImplementationScopeExclusions(t *testing.T) {
 		})
 	}
 }
+
+func TestHasTrustedImplementationCurrentBindings(t *testing.T) {
+	for _, change := range []string{"matching", "retry claim", "plan", "test-plan", "missing plan", "missing test-plan", "task", "policy", "base", "policy tree", "missing metadata", "empty binding", "untrusted", "failed"} {
+		t.Run(change, func(t *testing.T) {
+			st := &lease.IssueState{BaseSHA: "base", TaskDigest: "task", PolicyDigest: "policy", PolicyTreeDigest: "policy-tree", Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}}}
+			md := map[string]string{"implementation_trusted_origin": "coordinator"}
+			for k, v := range lease.ReviewBindings(st) {
+				md["implementation_trusted_"+k] = v
+			}
+			implementation := contract.Artifact{Type: contract.ArtifactImplementation, Verdict: "PASS", Metadata: md}
+			switch change {
+			case "retry claim":
+				st.Lease.ClaimID = "successor-claim"
+			case "plan":
+				st.Artifacts[0].Body += " changed"
+			case "test-plan":
+				st.Artifacts[1].Body += " changed"
+			case "missing plan":
+				st.Artifacts = st.Artifacts[1:]
+			case "missing test-plan":
+				st.Artifacts = st.Artifacts[:1]
+			case "task":
+				st.TaskDigest = "changed"
+			case "policy":
+				st.PolicyDigest = "changed"
+			case "base":
+				st.BaseSHA = "changed"
+			case "policy tree":
+				st.PolicyTreeDigest = "changed"
+			case "missing metadata":
+				delete(md, "implementation_trusted_plan_digest")
+			case "empty binding":
+				st.TaskDigest = ""
+				md["implementation_trusted_task_digest"] = ""
+			case "untrusted":
+				delete(md, "implementation_trusted_origin")
+			case "failed":
+				implementation.Verdict = "FAIL"
+			}
+			st.Artifacts = append(st.Artifacts, implementation)
+			want := change == "matching" || change == "retry claim"
+			if got := hasTrustedImplementation(st); got != want {
+				t.Fatalf("hasTrustedImplementation = %t, want %t", got, want)
+			}
+		})
+	}
+}

@@ -231,6 +231,12 @@ func TestArchiveWorkerRefusal(t *testing.T) {
 		if _, err := m.ArchiveIssue(context.Background(), n, dest, apply); err == nil {
 			t.Fatal("worker archived issue")
 		}
+		if _, err := m.ArchivePolicyIssue(context.Background(), n, nil, dest, apply); err == nil {
+			t.Fatal("worker used policy-aware archive")
+		}
+		if _, err := m.ArchiveAllEligible(context.Background(), nil, dest, apply); err == nil {
+			t.Fatal("worker used bulk archive")
+		}
 		if _, err := m.RestoreIssueArchive(context.Background(), n, apply); err == nil {
 			t.Fatal("worker restored issue")
 		}

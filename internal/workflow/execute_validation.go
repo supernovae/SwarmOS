@@ -19,6 +19,11 @@ import (
 )
 
 func (r *workRun) validationRound(round int) (paused bool, err error) {
+	return r.validationRoundWithReuse(round, false)
+}
+
+// Only a continuation with an eligible PASS may refresh evidence while reusing checks.
+func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused bool, err error) {
 	if err := r.admit("implement"); err != nil {
 		return false, err
 	}
@@ -44,6 +49,12 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	}
 	if r.opts.Phase == "test" || r.testerResume {
 		if err := r.checkTestRetry(); err != nil {
+			return false, err
+		}
+	}
+	if reuseChecks {
+		// Capture fresh tester output separately from the reused check report.
+		if _, err := recordGuidance(r.wtPath, "VALIDATION.md", "", nil); err != nil {
 			return false, err
 		}
 	}
@@ -87,7 +98,16 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	if version == "" && (r.opts.Phase == "test" || r.testerResume || (!r.forkMode && r.opts.PRNumber == 0)) {
 		version = "dev"
 	}
-	report, err := validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
+	var report *validation.ValidationReport
+	if reuseChecks {
+		report, err = validation.Reuse(r.ctx, r.wtPath, validation.ValidateOptions{ForkMode: r.forkMode || r.e.LeaseManager.HasWorkerGateway(), DirectIssueReuse: !r.forkMode && r.opts.PRNumber == 0 && !r.e.LeaseManager.HasWorkerGateway(), Version: r.opts.Version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA}, r.opts.Owner, r.st.Artifacts)
+		if err != nil {
+			return false, err
+		}
+	}
+	if report == nil {
+		report, err = validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
+	}
 	if context.Cause(r.ctx) == claimpause.ErrBudget {
 		return true, r.e.pauseWork(r.coordinatorCtx, r.res, r.opts, r.pre.WorkUnit, "implement", true, r.forkMode, r.forkRemote)
 	}
@@ -149,6 +169,7 @@ func (r *workRun) acceptanceRepair() validation.AcceptanceAssessment {
 
 func (r *workRun) validateAndRepair() (*WorkResult, error) {
 	reused := false
+	refreshEvidence := false
 	if r.continuation() && r.opts.instructionsFor("developer") == "" && !hasFailedValidationArtifact(r.st) && hasTrustedImplementation(r.st) {
 		if err := r.prepareTestRetry(); err == nil {
 			r.testerResume = true
@@ -171,6 +192,7 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 					return r.finish()
 				}
 				reused = assessment.NeedsRepair()
+				refreshEvidence = !reused
 			}
 		} else {
 			return r.res, err
@@ -199,7 +221,7 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 	if reused {
 		err = errAcceptanceUnmet
 	} else {
-		paused, err = r.validationRound(initialRound)
+		paused, err = r.validationRoundWithReuse(initialRound, refreshEvidence)
 	}
 	var previous []string
 	for round := initialRound + 1; err != nil && !paused && (repairableValidation(err, r.res.Validation) || errors.Is(err, errAcceptanceUnmet)); round++ {

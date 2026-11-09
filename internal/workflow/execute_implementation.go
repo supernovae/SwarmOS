@@ -117,6 +117,7 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 	summary, body := SummarizeImplementationChanges(r.ctx, r.wtPath, r.opts.IssueNumber)
 	developerReport, reportWarning := implementationReport(r.wtPath)
 	blocked := blockingReason(developerReport)
+	partial := r.partialImplementationReason(developerReport)
 	if developerReport != "" {
 		body += "\n## Developer report\n\n" + developerReport
 	}
@@ -154,6 +155,9 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 	if blocked != "" {
 		failure = "developer blocked: " + blocked
 	}
+	if partial != "" {
+		failure = "partial implementation: " + partial
+	}
 	if failure != "" {
 		verdict = "FAIL"
 		summary = failure
@@ -169,6 +173,9 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 		devMeta[key] = value
 	}
 	devMeta["head_sha"] = checkpointHead
+	if partial != "" {
+		devMeta["implementation_outcome"] = "partial"
+	}
 	completionArtifact := contract.Artifact{Type: contract.ArtifactImplementation, Producer: developer + ":developer", Verdict: verdict, Summary: summary, Body: body, Metadata: devMeta}
 	completionSaved := false
 	if verdict == "PASS" && len(predecessor) == 40 && predecessor != checkpointHead && reportWarning == "" && strings.TrimSpace(developerReport) != "" && !r.forkMode && !r.e.LeaseManager.HasWorkerGateway() && r.opts.PRNumber == 0 && r.st.PRNumber == 0 && r.st.PRRevision == nil {
@@ -205,6 +212,9 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 	}
 	r.res.State = r.st
 	r.outcomeFailed = failure != ""
+	if partial != "" {
+		return false, &PartialImplementationError{IssueNumber: r.opts.IssueNumber, Details: partial}
+	}
 	if round > 0 && unchanged && blocked == "" {
 		return false, fmt.Errorf("issue #%d: %w in repair round %d/%d (%s)", r.opts.IssueNumber, ErrValidationRepairNoChanges, round, r.repairLimit, failure)
 	}
@@ -317,4 +327,12 @@ func (r *workRun) checkpointPublicationError(cause error, predecessor, candidate
 		return fmt.Errorf("%s; inspect authoritative state before continuing: %w", detail, cause)
 	}
 	return fmt.Errorf("%s; inspect and reconcile with swarm issue reconcile %d --checkpoint --expected-head %s --candidate-head %s: %w", detail, r.opts.IssueNumber, predecessor, candidate, cause)
+}
+
+// partialImplementationReason limits the scheduling declaration to native issue work.
+func (r *workRun) partialImplementationReason(report string) string {
+	if blockingReason(report) != "" || r.forkMode || r.e.LeaseManager.HasWorkerGateway() || r.opts.PRNumber != 0 || r.st.PRNumber != 0 || r.st.PRRevision != nil {
+		return ""
+	}
+	return partialReason(report)
 }

@@ -31,6 +31,8 @@ func TestDeveloperOutputInstructionsAndPromptSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, text := range []string{
+		"Status: PARTIAL",
+		"unmet acceptance criteria",
 		"notes, test results, and any blocked or failing checks",
 		"`.swarm/active/IMPLEMENTATION.md`",
 		"`.swarm/active/LESSONS.md` is also allowed",
@@ -58,7 +60,7 @@ func TestWorkerTestScopeInstructionsAndPromptSync(t *testing.T) {
 		name string
 		want []string
 	}{
-		{"swarm-implement.md", []string{"developer-owned focused checks specified in `.swarm/active/TEST_PLAN.md`"}},
+		{"swarm-implement.md", []string{"Status: PARTIAL", "unmet acceptance criteria", "developer-owned focused checks specified in `.swarm/active/TEST_PLAN.md`"}},
 		{"swarm-validate.md", []string{
 			"Independently review source and every acceptance criterion",
 			"reuse applicable passing developer results",

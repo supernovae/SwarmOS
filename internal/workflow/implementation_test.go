@@ -297,3 +297,138 @@ func TestCheckpointPublicationFailureGuidance(t *testing.T) {
 		})
 	}
 }
+
+func TestPartialImplementationParsing(t *testing.T) {
+	for _, tc := range []struct{ report, want string }{
+		{"Status: PARTIAL\nSDK criterion unmet\n## Handoff\nother", "SDK criterion unmet"},
+		{"Status: PARTIAL", "Approved plan assumption failed; unmet acceptance criteria require reassessment"},
+		{"partial implementation", ""}, {"> Status: PARTIAL", ""},
+		{"```text\nStatus: PARTIAL\n```", ""}, {"~~~\nStatus: PARTIAL\n~~~", ""},
+		{"Status: PARTIAL extra", ""}, {"status: partial", ""}, {"", ""},
+	} {
+		if got := partialReason(tc.report); got != tc.want {
+			t.Errorf("%q: %q want %q", tc.report, got, tc.want)
+		}
+	}
+}
+
+func TestPartialImplementationOutcomeStopsBeforeTester(t *testing.T) {
+	for _, tc := range []struct {
+		name, cmd string
+		fail      bool
+	}{
+		{"partial", "printf work > real.txt; printf 'Status: PARTIAL\nUnmet criterion: SDK integration\n' > .swarm/active/IMPLEMENTATION.md", true},
+		{"unchanged-partial", "printf 'Status: PARTIAL\nUnmet criterion: SDK integration\n' > .swarm/active/IMPLEMENTATION.md", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, eng, tr := setupProjectPlanTestRepo(t)
+			configureValidation(t, root)
+			for _, args := range [][]string{{"add", "."}, {"commit", "-m", "validation"}} {
+				if out, err := gitfixture.Command(t, "", append([]string{"-C", root}, args...)...).CombinedOutput(); err != nil {
+					t.Fatalf("%v %s", err, out)
+				}
+			}
+			issue, err := tr.CreateIssue(context.Background(), "Outcome", contract.FormatIssueMarkdown(&contract.WorkUnit{Objective: "Implement", Constraints: []string{"Scoped"}, Acceptance: []string{"Works"}, Workflow: "feature", Gate: contract.GateAgent}), []string{"swarm:ready"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := eng.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("SWARM_MOCK_DEVELOPER_CMD", tc.cmd)
+			var stages []string
+			result, err := eng.ExecuteWork(t.Context(), WorkOptions{RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Phase: "all", Headless: true, Instructions: "Use the local fixtures", OnProgress: func(e ProgressEvent) { stages = append(stages, e.Stage) }})
+			if result == nil || result.State == nil {
+				t.Fatalf("missing result: %v", err)
+			}
+			if (err != nil) != tc.fail {
+				t.Fatalf("err=%v fail=%t", err, tc.fail)
+			}
+			var art contract.Artifact
+			for _, a := range result.State.Artifacts {
+				if a.Type == contract.ArtifactImplementation {
+					art = a
+				}
+			}
+			if tc.fail {
+				var partial *PartialImplementationError
+				if !errors.As(err, &partial) || !strings.Contains(err.Error(), "swarm issue edit") || art.Metadata["implementation_outcome"] != "partial" || art.Metadata["implementation_trusted_origin"] != "" || !strings.Contains(art.Summary, "Unmet criterion: SDK integration") || !strings.Contains(art.Body, "Unmet criterion: SDK integration") || art.Metadata["head_sha"] != result.HeadSHA {
+					t.Fatalf("partial evidence: %+v %v", art, err)
+				}
+				if c, e := eng.LeaseManager.InspectCheckpointCompletion(t.Context(), issue.Number); e != nil || c != nil {
+					t.Fatalf("completion: %+v %v", c, e)
+				}
+				if art.Verdict != "FAIL" || !strings.Contains(err.Error(), "--phase plan") {
+					t.Fatalf("%+v %v", art, err)
+				}
+				for _, stage := range stages {
+					if stage == "test" || stage == "required-checks" {
+						t.Fatalf("failed implementation reached %s", stage)
+					}
+				}
+				if strings.Contains(tc.name, "blocked") && !strings.Contains(art.Summary, "missing SDK") && !strings.Contains(art.Summary, "Missing test fixture") {
+					t.Fatal(art.Summary)
+				}
+			} else if art.Verdict != "PASS" || !result.ValidationPassed {
+				t.Fatalf("normal run failed: %+v", result)
+			}
+			if art.Metadata["operator_steered"] != "true" || !strings.Contains(art.Body, "Use the local fixtures") {
+				t.Fatal("missing steering evidence")
+			}
+			data, readErr := os.ReadFile(filepath.Join(result.WorktreePath, ".swarm/active/IMPLEMENTATION.md"))
+			// A tester launch strips the previous role appendix from delivered copies.
+			// Failed developer rounds keep their report; stored evidence above always retains it.
+			if readErr != nil || strings.Contains(string(data), "Use the local fixtures") != tc.fail {
+				t.Fatalf("report guidance: %v %s", readErr, data)
+			}
+		})
+	}
+}
+
+func TestPartialImplementationPASSOnlyConsumers(t *testing.T) {
+	st := &lease.IssueState{BaseSHA: "base", TaskDigest: "task", PolicyDigest: "policy", NextPhaseReason: "claim budget", Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}}}
+	md := lease.ReviewBindings(st)
+	md["head_sha"] = "head"
+	md["implementation_trusted_origin"] = "coordinator"
+	md["implementation_outcome"] = "partial"
+	st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactImplementation, Verdict: "PASS", Metadata: md})
+	if !implementationProven(st, "head") || !hasTrustedImplementation(st) {
+		t.Fatal("invalid PASS control")
+	}
+	st.Artifacts[len(st.Artifacts)-1].Verdict = "FAIL"
+	if implementationProven(st, "head") || hasTrustedImplementation(st) {
+		t.Fatal("partial accepted as success")
+	}
+}
+
+type partialGateway struct{}
+
+func (partialGateway) Apply(context.Context, lease.ForkRequest) (*lease.IssueState, error) {
+	return nil, errors.New("unexpected gateway call")
+}
+
+func TestPartialImplementationScopeExclusions(t *testing.T) {
+	for _, mode := range []string{"native", "fork", "gateway", "option-pr", "state-pr", "revision", "blocked"} {
+		t.Run(mode, func(t *testing.T) {
+			r := &workRun{e: &Engine{LeaseManager: &lease.Manager{}}, st: &lease.IssueState{}}
+			report := "Status: PARTIAL\nUnmet criterion\n"
+			switch mode {
+			case "fork":
+				r.forkMode = true
+			case "gateway":
+				r.e.LeaseManager.SetWorkerGateway(partialGateway{})
+			case "option-pr":
+				r.opts.PRNumber = 1
+			case "state-pr":
+				r.st.PRNumber = 1
+			case "revision":
+				r.st.PRRevision = &lease.PRRevision{}
+			case "blocked":
+				report += "Status: BLOCKED: missing SDK"
+			}
+			if got := r.partialImplementationReason(report); (got != "") != (mode == "native") {
+				t.Fatalf("%s: %q", mode, got)
+			}
+		})
+	}
+}

@@ -532,3 +532,31 @@ func TestCheckpointCompletionFirstCheckpoint(t *testing.T) {
 		}
 	}
 }
+
+func TestPartialImplementationCheckpointCompletion(t *testing.T) {
+	f := completionFixture(t, true)
+	c, err := f.m.InspectCheckpointCompletion(t.Context(), f.n)
+	if err != nil || c == nil {
+		t.Fatalf("PASS control: %+v %v", c, err)
+	}
+	c.Artifact.Verdict = "FAIL"
+	c.Artifact.Metadata["implementation_outcome"] = "partial"
+	// Retire the valid control before testing save refusal independently.
+	root, _, err := f.m.completionRoot(t.Context(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = root.Remove(completionName(f.n)); err != nil {
+		t.Fatal(err)
+	}
+	root.Close()
+	if err = f.m.SaveCheckpointCompletion(t.Context(), f.n, "local-dev", f.a, f.b, c.Artifact); err == nil {
+		t.Fatal("saved partial completion")
+	}
+	if saved, e := f.m.InspectCheckpointCompletion(t.Context(), f.n); e != nil || saved != nil {
+		t.Fatalf("stored partial: %+v %v", saved, e)
+	}
+	// Inject a correctly signed completion to exercise recovery's independent checks.
+	rewriteCompletion(t, f, c)
+	assertCompletionRejected(t, f)
+}

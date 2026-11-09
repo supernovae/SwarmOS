@@ -87,3 +87,48 @@ func parseTesterOutcome(report string) testerOutcome {
 	}
 	return testerOutcome(match[1])
 }
+
+func partialReason(report string) string {
+	lines := strings.Split(canonicalReport(report), "\n")
+	fence := ""
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if fence != "" {
+			if strings.HasPrefix(line, fence) {
+				fence = ""
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			fence = line[:3]
+			continue
+		}
+		if line != "Status: PARTIAL" {
+			continue
+		}
+		var details []string
+		for _, next := range lines[i+1:] {
+			if strings.HasPrefix(strings.TrimSpace(next), "#") {
+				break
+			}
+			details = append(details, next)
+		}
+		reason := strings.TrimSpace(strings.Join(details, "\n"))
+		if reason == "" {
+			reason = "Approved plan assumption failed; unmet acceptance criteria require reassessment"
+		}
+		return reason
+	}
+	return ""
+}
+
+// PartialImplementationError stops native issue work for plan reassessment.
+// It carries advisory developer details, never approval or validation authority.
+type PartialImplementationError struct {
+	IssueNumber int
+	Details     string
+}
+
+func (e *PartialImplementationError) Error() string {
+	return fmt.Sprintf("issue #%d: partial implementation: %s; reopen planning with swarm issue work %d --phase plan or edit the WorkUnit with swarm issue edit %d", e.IssueNumber, e.Details, e.IssueNumber, e.IssueNumber)
+}

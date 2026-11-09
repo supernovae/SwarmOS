@@ -709,3 +709,58 @@ func TestIssue466StatusSelectors(t *testing.T) {
 		}
 	}
 }
+
+func TestIssuePartialImplementationStatusAndNextAction(t *testing.T) {
+	f := newCLIFixture(t)
+	n := strconv.Itoa(f.create(t, "agent"))
+	f.must(t, "issue", "approve", n)
+	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf work > real.txt; printf 'Status: PARTIAL\nUnmet criterion: SDK integration\n' > .swarm/active/IMPLEMENTATION.md")
+	doc, err := f.runJSON(t, "issue", "work", n, "--agent", "mock", "--progress=false", "--json")
+	assertNextAction(t, doc, err, ReasonPartialImplementation, false, ExitFailure, localArgv(f, "issue", "work", n, "--phase", "plan")...)
+	if !strings.Contains(err.Error(), "swarm issue edit "+n) {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"issue", "status", n}, {"issue", "status", n, "--json"}} {
+		out, e := f.run(args...)
+		if e != nil || !strings.Contains(out, "partial") || !strings.Contains(out, "Unmet criterion: SDK integration") {
+			t.Fatalf("%s %v", out, e)
+		}
+	}
+	wrapped := fmt.Errorf("%w: %w", &workflow.PartialImplementationError{IssueNumber: 1, Details: "unmet"}, workflow.ErrValidationRepairExhausted)
+	c := stopContext{resource: "issue", number: 1}
+	if a := c.classify(wrapped); a == nil || a.Reason != ReasonPartialImplementation {
+		t.Fatalf("%+v", a)
+	}
+	if a := (stopContext{resource: "pr", number: 1}).classify(&workflow.PartialImplementationError{IssueNumber: 1}); a != nil {
+		t.Fatal(a)
+	}
+}
+
+func TestIssuePartialImplementationCurrentOutcome(t *testing.T) {
+	st := &lease.IssueState{HeadSHA: "head", BaseSHA: "base", TaskDigest: "task", PolicyDigest: "policy", Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}}}
+	md := lease.ReviewBindings(st)
+	md["head_sha"] = "head"
+	md["implementation_outcome"] = "partial"
+	st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactImplementation, Verdict: "FAIL", Metadata: md})
+	if !currentPartialImplementation(st) {
+		t.Fatal("current partial not selected")
+	}
+	for k := range md {
+		if k == "review_claim_id" {
+			continue
+		}
+		old := md[k]
+		md[k] = "stale"
+		if currentPartialImplementation(st) {
+			t.Fatalf("accepted stale %s", k)
+		}
+		md[k] = old
+	}
+	for _, verdict := range []string{"PASS", "FAIL"} {
+		st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactImplementation, Verdict: verdict})
+		if currentPartialImplementation(st) {
+			t.Fatal("superseded partial")
+		}
+		st.Artifacts = st.Artifacts[:len(st.Artifacts)-1]
+	}
+}

@@ -16,8 +16,9 @@ const (
 
 // AcceptanceSnapshot is bounded advisory content, never a validation verdict.
 type AcceptanceSnapshot struct {
-	State string `json:"state"`
-	Block string `json:"block,omitempty"`
+	State    string `json:"state"`
+	Block    string `json:"block,omitempty"`
+	Findings string `json:"findings,omitempty"`
 }
 
 type AcceptanceWarning struct {
@@ -83,7 +84,11 @@ func CaptureAcceptanceEvidence(body string) AcceptanceSnapshot {
 	if _, ok := decodeAcceptance(raw); !ok {
 		return bad
 	}
-	return AcceptanceSnapshot{State: "valid", Block: raw}
+	findings := strings.TrimSpace(body[:start] + body[end+len(AcceptanceEvidenceEnd):])
+	if len(findings) > MaxAcceptanceEvidenceBytes {
+		findings = findings[:MaxAcceptanceEvidenceBytes]
+	}
+	return AcceptanceSnapshot{State: "valid", Block: raw, Findings: findings}
 }
 
 func AcceptanceSnapshotFromMetadata(metadata map[string]string) AcceptanceSnapshot {
@@ -93,14 +98,15 @@ func AcceptanceSnapshotFromMetadata(metadata map[string]string) AcceptanceSnapsh
 		return AcceptanceSnapshot{State: "missing"}
 	}
 	// JSON escaping can expand the bounded block up to sixfold.
-	if len(raw) > 6*MaxAcceptanceEvidenceBytes+128 || json.Unmarshal([]byte(raw), &s) != nil {
+	if len(raw) > 12*MaxAcceptanceEvidenceBytes+256 || json.Unmarshal([]byte(raw), &s) != nil {
 		return AcceptanceSnapshot{State: "malformed"}
 	}
 	switch s.State {
 	case "missing", "malformed":
 		s.Block = ""
+		s.Findings = ""
 	case "valid":
-		if _, ok := decodeAcceptance(s.Block); !ok {
+		if _, ok := decodeAcceptance(s.Block); !ok || len(s.Findings) > MaxAcceptanceEvidenceBytes {
 			return AcceptanceSnapshot{State: "malformed"}
 		}
 	default:
@@ -174,6 +180,9 @@ func AcceptanceEvidenceNotice(warnings []AcceptanceWarning) string {
 func RestoreAcceptanceEvidence(body string, metadata map[string]string) string {
 	s := AcceptanceSnapshotFromMetadata(metadata)
 	block := AcceptanceEvidenceStart + s.Block + AcceptanceEvidenceEnd
+	if s.Findings != "" {
+		block += "\n\n" + s.Findings
+	}
 	if s.State == "valid" && !strings.Contains(body, block) {
 		// Keep the mapping in the report, ahead of the review-only appendix.
 		if i := strings.Index(body, "\n<!-- swarm:guidance:start -->\n"); i >= 0 {
@@ -189,6 +198,7 @@ type AcceptanceAssessment struct {
 	State    string              `json:"state"`
 	Blockers []AcceptanceWarning `json:"blockers,omitempty"`
 	External []AcceptanceWarning `json:"external,omitempty"`
+	Findings string              `json:"findings,omitempty"`
 }
 
 func AssessAcceptance(criteria []string, snapshot AcceptanceSnapshot) AcceptanceAssessment {
@@ -268,6 +278,18 @@ func AssessAcceptance(criteria []string, snapshot AcceptanceSnapshot) Acceptance
 	if len(a.Blockers) == 0 {
 		a.State = "complete"
 	}
+	if a.NeedsRepair() {
+		var b strings.Builder
+		m, _ := decodeAcceptance(snapshot.Block)
+		for _, raw := range m.Criteria {
+			var e acceptanceEntry
+			if json.Unmarshal(raw, &e) == nil && e.Status == "unmet" {
+				fmt.Fprintf(&b, "%d. %s\nEvidence: %s\nReason: %s\n", e.Index, e.Criterion, e.Evidence, e.Reason)
+			}
+		}
+		b.WriteString(snapshot.Findings)
+		a.Findings = b.String()
+	}
 	// Present external criteria in WorkUnit order, regardless of report ordering.
 	for i := 0; i < len(a.External); i++ {
 		for j := i + 1; j < len(a.External); j++ {
@@ -277,6 +299,19 @@ func AssessAcceptance(criteria []string, snapshot AcceptanceSnapshot) Acceptance
 		}
 	}
 	return a
+}
+
+// NeedsRepair admits only an otherwise well-formed mapping with explicit unmet criteria.
+func (a AcceptanceAssessment) NeedsRepair() bool {
+	if a.State != "incomplete" {
+		return false
+	}
+	for _, w := range a.Blockers {
+		if w.Reason == "unmet" {
+			return true
+		}
+	}
+	return false
 }
 
 type Readiness struct {
@@ -309,7 +344,11 @@ func (r Readiness) SubmissionError(issue int, fork bool) error {
 	for _, w := range r.AcceptanceEvidence.Blockers {
 		fmt.Fprintf(&b, "  %d. %s (%s)\n", w.Index, EscapeDiagnostic(w.Criterion), EscapeDiagnostic(w.Reason))
 	}
-	fmt.Fprintf(&b, "Run swarm issue work %d --phase test", issue)
+	phase := "test"
+	if !fork && r.AcceptanceEvidence.NeedsRepair() {
+		phase = "implement"
+	}
+	fmt.Fprintf(&b, "Run swarm issue work %d --phase %s", issue, phase)
 	if fork {
 		b.WriteString(" upstream (fork test phase is unavailable)")
 	}

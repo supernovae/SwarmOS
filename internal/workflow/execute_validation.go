@@ -84,7 +84,7 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 	}
 	r.progress.next("required-checks")
 	version := r.opts.Version
-	if (r.opts.Phase == "test" || r.testerResume) && version == "" {
+	if version == "" && (r.opts.Phase == "test" || r.testerResume || (!r.forkMode && r.opts.PRNumber == 0)) {
 		version = "dev"
 	}
 	report, err := validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
@@ -132,10 +132,23 @@ func (r *workRun) validationRound(round int) (paused bool, err error) {
 			return false, fmt.Errorf("%w: %w", ErrPreExistingFailures, err)
 		}
 	}
+	if err == nil && r.acceptanceRepair().NeedsRepair() {
+		return false, errAcceptanceUnmet
+	}
 	return false, err
 }
 
+var errAcceptanceUnmet = errors.New("acceptance criteria unmet")
+
+func (r *workRun) acceptanceRepair() validation.AcceptanceAssessment {
+	if r.forkMode || r.e.LeaseManager.HasWorkerGateway() || r.opts.PRNumber != 0 || r.st.PRNumber != 0 || r.st.PRRevision != nil || r.opts.Phase == "test" {
+		return validation.AcceptanceAssessment{}
+	}
+	return lease.RecordedReadiness(r.st, r.pre.WorkUnit.Acceptance).AcceptanceEvidence
+}
+
 func (r *workRun) validateAndRepair() (*WorkResult, error) {
+	reused := false
 	if r.continuation() && r.opts.instructionsFor("developer") == "" && !hasFailedValidationArtifact(r.st) && hasTrustedImplementation(r.st) {
 		if err := r.prepareTestRetry(); err == nil {
 			r.testerResume = true
@@ -153,7 +166,11 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 				}
 				r.st, r.res.State = updated, updated
 				r.res.Validation, r.res.ValidationPassed = report, true
-				return r.finish()
+				assessment := r.acceptanceRepair()
+				if assessment.State == "complete" {
+					return r.finish()
+				}
+				reused = assessment.NeedsRepair()
 			}
 		} else {
 			return r.res, err
@@ -177,12 +194,25 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 			return r.res, err
 		}
 	}
-	paused, err := r.validationRound(initialRound)
+	var paused bool
+	var err error
+	if reused {
+		err = errAcceptanceUnmet
+	} else {
+		paused, err = r.validationRound(initialRound)
+	}
 	var previous []string
-	for round := initialRound + 1; err != nil && !paused && repairableValidation(err, r.res.Validation); round++ {
+	for round := initialRound + 1; err != nil && !paused && (repairableValidation(err, r.res.Validation) || errors.Is(err, errAcceptanceUnmet)); round++ {
 		failing := failingIdentities(r.res.Validation)
+		if errors.Is(err, errAcceptanceUnmet) {
+			for _, w := range r.acceptanceRepair().Blockers {
+				if w.Reason == "unmet" {
+					failing = append(failing, fmt.Sprintf("acceptance %d: %s", w.Index, w.Criterion))
+				}
+			}
+		}
 		if round > r.repairLimit {
-			if r.repairLimit > 0 {
+			if r.repairLimit > 0 || errors.Is(err, errAcceptanceUnmet) {
 				detail := "failing tests changed since the previous round"
 				if slices.Equal(failing, previous) {
 					detail = "the same tests still fail"

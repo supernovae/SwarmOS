@@ -92,6 +92,7 @@ A WorkUnit should finish in one plan → implement → validate cycle. Scope tha
 1. State one outcome in the objective, followed by one sentence for what is in scope and one for what is out of scope.
 2. Name the backends, harnesses, and platforms the change covers (for example "native Codex and harness-tools Bubblewrap; OCI is out of scope"). Never write "every backend" unless the change needs it.
 3. Write acceptance criteria that can be checked inside the agent sandbox or by CI. Anything that needs an environment agents can't reach, such as an OCI image, a Windows host, or a live GitHub flow, goes in the PR review checklist or a follow-up issue.
+   For a `bugfix`, make one criterion a regression test that reproduces the bug, for example "a regression test that reproduces the refused retry fails before the fix and passes after". `swarm issue lint` looks for this, and it is how reviewers confirm the fix.
 4. Keep nice-to-haves out of the acceptance criteria. File them as their own issue, linked with `--depends-on` if they build on this one.
 5. If `swarm issue lint` suggests decomposing, split the parts that can merge independently. Keep tightly coupled parts together rather than leaving half-finished pieces.
 

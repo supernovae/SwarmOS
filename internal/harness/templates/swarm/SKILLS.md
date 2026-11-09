@@ -47,7 +47,7 @@ Optional for organization repositories: use `swarm issue parent create --epic --
 Maintainers use `swarm repo plan` (with `/swarm-project-plan` in Claude Code / OpenCode, or by referencing `.swarm/skills/triage-and-plan.md` in regular prompts with Codex / `omp`) to turn repository-wide ideas into a reviewed plan file, a non-executable parent issue, and linked draft child `WorkUnit` issues:
 
 1. **Interactive Idea $\rightarrow$ Repo-Local Plan File**:
-   - Discuss the idea and outcome, inspect `.swarm/goals.md`, `.swarm/rules/`, implementation code, and open issues, and agree on independent `## <title>` tasks with `### Objective`, `### Constraints`, observable `### Acceptance Criteria` checkboxes (for a bugfix, one names a regression test that fails before the fix), and explicit `depends on: <earlier-step-number>` lines.
+   - Discuss the idea and outcome, inspect `.swarm/goals.md`, `.swarm/rules/`, implementation code, and open issues, and agree on independent `## <title>` tasks with `### Objective`, `### Constraints`, observable `### Acceptance Criteria` checkboxes (for a bugfix, one names a regression test that fails before the fix; never "make check passes", which the coordinator already runs), and explicit `depends on: <earlier-step-number>` lines.
    - Write the plan to a user-chosen repo-local file (without overwriting existing files unless instructed).
 2. **Preview `Step N` Decomposition (Read-Only)**:
    ```bash

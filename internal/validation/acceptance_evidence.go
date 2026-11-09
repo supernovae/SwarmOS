@@ -2,6 +2,7 @@ package validation
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -359,4 +360,39 @@ func (r Readiness) SubmissionError(issue int, fork bool) error {
 // Callers compare identities before and after validation before carrying evidence.
 func AcceptanceCandidateIdentity(ctx context.Context, root string, opts ValidateOptions) (map[string]string, error) {
 	return fingerprint(ctx, root, opts)
+}
+
+// AcceptanceGap preserves the tester verdict and evidence for final PR review.
+type AcceptanceGap struct {
+	Index     int    `json:"index"`
+	Criterion string `json:"criterion"`
+	Evidence  string `json:"evidence"`
+	Findings  string `json:"findings,omitempty"`
+}
+
+// AcceptanceGaps admits only a complete mapping whose only blockers are unmet.
+func AcceptanceGaps(criteria []string, snapshot AcceptanceSnapshot) ([]AcceptanceGap, string, error) {
+	a := AssessAcceptance(criteria, snapshot)
+	if !a.NeedsRepair() {
+		return nil, "", fmt.Errorf("acceptance evidence has no acknowledgeable gaps")
+	}
+	for _, w := range a.Blockers {
+		if w.Reason != "unmet" {
+			return nil, "", fmt.Errorf("acceptance evidence is incomplete")
+		}
+	}
+	m, _ := decodeAcceptance(snapshot.Block)
+	entries := map[int]acceptanceEntry{}
+	for _, raw := range m.Criteria {
+		var e acceptanceEntry
+		_ = json.Unmarshal(raw, &e)
+		entries[e.Index] = e
+	}
+	gaps := make([]AcceptanceGap, 0, len(a.Blockers))
+	for _, w := range a.Blockers {
+		gaps = append(gaps, AcceptanceGap{w.Index, w.Criterion, entries[w.Index].Evidence, snapshot.Findings})
+	}
+	raw, _ := json.Marshal(snapshot)
+	digest := sha256.Sum256(raw)
+	return gaps, fmt.Sprintf("%x", digest), nil
 }

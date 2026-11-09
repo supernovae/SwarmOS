@@ -728,6 +728,22 @@ func DescriptionIssueSection(unit *contract.WorkUnit, state *IssueState, stateRe
 	for _, c := range unit.Acceptance {
 		b.WriteString("- [ ] " + DescriptionSlot(c+"\n"))
 	}
+	if gaps := KnownGaps(state, unit); len(gaps) > 0 {
+		b.WriteString("\n## Known gaps\n\n")
+		for _, g := range gaps {
+			fmt.Fprintf(&b, "\n### Criterion %d\n\n", g.Index)
+			b.WriteString(DescriptionSlot(g.Criterion))
+			evidence := g.Evidence
+			if strings.TrimSpace(evidence) == "" {
+				evidence = "No evidence supplied"
+			}
+			b.WriteString("\nEvidence: " + DescriptionSlot(evidence))
+		}
+		if gaps[0].Findings != "" {
+			b.WriteString("\nTester findings: " + DescriptionSlot(gaps[0].Findings))
+		}
+	}
+
 	r := RecordedReadiness(state, unit.Acceptance)
 	b.WriteString("\n## Submission readiness\n\n" + DescriptionSlot(r.Text()))
 	if r.AcceptanceEvidence.Findings != "" {

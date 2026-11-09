@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/cli/go-gh/v2/pkg/api"
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -496,4 +497,145 @@ func seedGitIssueAcceptance(t *testing.T, workerRoot, authorityRoot string, tr t
 		t.Fatal(err)
 	}
 	seedIssueAcceptance(t, workerRoot, tr, manager, issue, st.Lease.Owner, "")
+}
+
+func TestSubmitGapAcknowledgment(t *testing.T) {
+	for _, flags := range [][]string{{"--acknowledge-gap", "1"}, {}, {"--acknowledge-gap", "0"}, {"--acknowledge-gap", "2"}, {"--acknowledge-gap", "1", "--acknowledge-gap", "1"}, {"--acknowledge-gap", "-1"}, {"--acknowledge-gap", "x"}} {
+		t.Run(strings.Join(flags, " "), func(t *testing.T) {
+			f := newCLIFixture(t)
+			issue := f.create(t, "agent")
+			n := strconv.Itoa(issue)
+			f.must(t, "issue", "approve", n)
+			f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+			st := f.state(t, issue)
+			f.manager.BindClaim(issue, st.Lease.ClaimID)
+			art := latestValidation(t, f, issue)
+			validation.StoreAcceptanceSnapshot(art.Metadata, validation.CaptureAcceptanceEvidence("Independent finding\n"+validation.AcceptanceEvidenceStart+"\n"+`{"version":1,"criteria":[{"index":1,"criterion":"Produce a checked checkpoint","status":"unmet","evidence":"fixture observation"}]}`+"\n"+validation.AcceptanceEvidenceEnd))
+			if _, err := f.manager.RecordTrustedValidation(t.Context(), issue, "alice", art); err != nil {
+				t.Fatal(err)
+			}
+			if len(flags) == 2 && flags[1] == "1" {
+				cmd := f.command(&RootOptions{trackerOverride: gapFailedPublication{Tracker: f.tracker}})
+				cmd.SetArgs([]string{"--root", f.root, "issue", "submit", n, "--acknowledge-gap", "1"})
+				cmd.SetOut(&bytes.Buffer{})
+				cmd.SetErr(&bytes.Buffer{})
+				if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "injected publication failure") {
+					t.Fatal(err)
+				}
+				if f.state(t, issue).PRNumber != 0 {
+					t.Fatal("failed publication completed")
+				}
+			}
+			args := append([]string{"issue", "submit", n}, flags...)
+			_, err := f.run(args...)
+			success := len(flags) == 2 && flags[1] == "1"
+			if success != (err == nil) {
+				t.Fatalf("success=%v err=%v", success, err)
+			}
+			current := f.state(t, issue)
+			if !success {
+				if current.PRNumber != 0 || current.HeadSHA != st.HeadSHA {
+					t.Fatal("rejected gap request published")
+				}
+				if len(flags) == 0 && !strings.Contains(err.Error(), "--acknowledge-gap") {
+					t.Fatal(err)
+				}
+				return
+			}
+			iss, _ := f.tracker.GetIssue(t.Context(), issue)
+			unit, _ := contract.ParseWorkUnitFromIssue(issue, iss.Title, iss.Body)
+			if gaps := lease.KnownGaps(current, unit); len(gaps) != 1 || gaps[0].Evidence != "fixture observation" {
+				t.Fatal(gaps)
+			}
+			body := draftPRSection(unit, current, "state")
+			if !strings.Contains(body, "## Known gaps") || !strings.Contains(body, "fixture observation") {
+				t.Fatal(body)
+			}
+			status := f.must(t, "issue", "status", n, "--json")
+			if !strings.Contains(status, `"known_gaps"`) || !strings.Contains(status, "fixture observation") {
+				t.Fatal(status)
+			}
+			f.must(t, "issue", "submit", n)
+			f.must(t, "issue", "submit", n, "--acknowledge-gap", "1")
+			// The actual authorized record must expire independently for each identity.
+			for _, change := range []string{"head", "task", "claim", "findings", "block"} {
+				clone := *current
+				clone.Artifacts = append([]contract.Artifact(nil), current.Artifacts...)
+				switch change {
+				case "head":
+					clone.HeadSHA = "other"
+				case "task":
+					clone.TaskDigest = "other"
+				case "claim":
+					clone.Lease.ClaimID = "other"
+				default:
+					last := len(clone.Artifacts) - 1
+					md := map[string]string{}
+					for k, v := range clone.Artifacts[last].Metadata {
+						md[k] = v
+					}
+					clone.Artifacts[last].Metadata = md
+					snapshot := validation.AcceptanceSnapshotFromMetadata(md)
+					if change == "findings" {
+						snapshot.Findings += "changed"
+					} else {
+						snapshot.Block = strings.ReplaceAll(snapshot.Block, "fixture observation", "changed")
+					}
+					validation.StoreAcceptanceSnapshot(md, snapshot)
+				}
+				if len(lease.KnownGaps(&clone, unit)) != 0 {
+					t.Fatalf("ack survives %s", change)
+				}
+			}
+		})
+	}
+}
+
+type gapFailedPublication struct{ tracker.Tracker }
+
+func (g gapFailedPublication) CreateDraftPR(context.Context, tracker.DraftPRRequest) (*tracker.PullRequest, error) {
+	return nil, fmt.Errorf("injected publication failure")
+}
+
+func TestSubmitGapAcknowledgmentUnauthorized(t *testing.T) {
+	f := newCLIFixture(t)
+	issue := f.create(t, "agent")
+	n := strconv.Itoa(issue)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "work", n, "--agent", "mock", "--headless")
+	before := f.state(t, issue)
+	for _, mode := range []string{"denied", "blank", "fork"} {
+		t.Run(mode, func(t *testing.T) {
+			cmd := f.command(&RootOptions{trackerOverride: gapDeniedTracker{Tracker: f.tracker, blank: mode == "blank"}})
+			args := []string{"--root", f.root, "issue", "submit", n, "--acknowledge-gap", "1"}
+			if mode == "fork" {
+				args = append([]string{"--fork"}, args...)
+			}
+			cmd.SetArgs(args)
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetErr(&bytes.Buffer{})
+			if err := cmd.Execute(); err == nil {
+				t.Fatal("unauthorized acknowledgment")
+			}
+			after := f.state(t, issue)
+			if after.PRNumber != 0 || after.HeadSHA != before.HeadSHA || after.Lease.Status != before.Lease.Status {
+				t.Fatal("rejection published")
+			}
+		})
+	}
+}
+
+type gapDeniedTracker struct {
+	tracker.Tracker
+	blank bool
+}
+
+func (g gapDeniedTracker) CurrentUser(ctx context.Context) (string, error) {
+	if g.blank {
+		return "", nil
+	}
+	return g.Tracker.CurrentUser(ctx)
+}
+func (g gapDeniedTracker) Authorize(context.Context, string) error {
+	return fmt.Errorf("denied approve-task")
 }

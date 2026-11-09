@@ -259,6 +259,8 @@ func (m *Manager) AdvanceDecomposition(ctx context.Context, n int, id string, fn
 }
 
 type IssueState struct {
+	gapAcknowledgment *GapAcknowledgment
+
 	Decomposition *Decomposition `json:"decomposition,omitempty"`
 
 	UpstreamAdvisoryReview *UpstreamAdvisoryReview `json:"upstream_advisory_review,omitempty"`
@@ -2289,6 +2291,9 @@ func (m *Manager) RecordCheckpoint(ctx context.Context, n int, owner, branch, he
 			return nil, fmt.Errorf("checkpoint does not descend from approved activation base")
 		}
 	}
+	if err := m.checkGapPublication(ctx, st, head); err != nil {
+		return nil, err
+	}
 	predecessor := st.HeadSHA
 	if predecessor != "" && predecessor != head {
 		ancestor, e := workspace.BaseIsAncestor(ctx, m.repoRoot, predecessor, head)
@@ -2912,18 +2917,21 @@ type resumeMarker struct {
 func marshalCoordinatorState(st *IssueState) ([]byte, error) {
 	return json.Marshal(struct {
 		*IssueState
-		Resume *resumeMarker `json:"_local_resume,omitempty"`
-	}{st, st.resumeMarker})
+		Resume *resumeMarker      `json:"_local_resume,omitempty"`
+		Gaps   *GapAcknowledgment `json:"_gap_acknowledgment,omitempty"`
+	}{st, st.resumeMarker, st.gapAcknowledgment})
 }
 func unmarshalCoordinatorState(b []byte, st *IssueState) error {
 	aux := struct {
 		*IssueState
-		Resume *resumeMarker `json:"_local_resume,omitempty"`
+		Resume *resumeMarker      `json:"_local_resume,omitempty"`
+		Gaps   *GapAcknowledgment `json:"_gap_acknowledgment,omitempty"`
 	}{IssueState: st}
 	if err := json.Unmarshal(b, &aux); err != nil {
 		return err
 	}
 	st.resumeMarker = aux.Resume
+	st.gapAcknowledgment = aux.Gaps
 	return nil
 }
 func (m *Manager) denyResume(n int) error {
@@ -2995,6 +3003,9 @@ func (m *Manager) BeginPublicationAttempt(ctx context.Context, n int, owner stri
 	if err := m.checkStateClaim(ctx, n, owner, st); err != nil {
 		return err
 	}
+	if err := m.checkGapPublication(ctx, st, ""); err != nil {
+		return err
+	}
 	if fs, ok := m.store.(*coordination.FileStore); ok {
 		return fs.WithLockedState(ctx, n, func(b []byte, current string, _ func([]byte) error) error {
 			if current != rev {
@@ -3005,6 +3016,9 @@ func (m *Manager) BeginPublicationAttempt(ctx context.Context, n int, owner stri
 				return err
 			}
 			if err := m.checkStateClaim(ctx, n, owner, &locked); err != nil {
+				return err
+			}
+			if err := m.checkGapPublication(ctx, &locked, ""); err != nil {
 				return err
 			}
 			return m.denyResume(n)

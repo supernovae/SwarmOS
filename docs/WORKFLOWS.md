@@ -271,6 +271,14 @@ swarm issue work 42 --developer-instructions 'Address the known failing check wi
 
 Further automatic rounds use only the remaining allowance. Refusal, unchanged repair, cancellation, claim loss and security failures stop the run. PR repair retains its existing invocation budget. Publishing remains separate: review the checkpoint, then explicitly run `swarm issue submit <N>`.
 
+When tester evidence leaves acceptance criteria unmet, continue implementation with `swarm issue work <N> --phase implement`. A maintainer who wants to decide those gaps during PR review can acknowledge every unmet criterion by its one-based index:
+
+```bash
+swarm issue submit 42 --acknowledge-gap 2 --acknowledge-gap 4
+```
+
+This direct upstream issue submission requires the same authenticated maintainer authorization as `swarm issue approve`. Name every unmet index exactly once; met or external criteria cannot be acknowledged. Trusted required checks must pass, and missing or malformed acceptance evidence still needs repair. The draft PR and `swarm issue status` show the criteria and tester evidence under Known gaps, while final acceptance checkboxes remain unchecked for PR review. An acknowledgment applies to the exact candidate head, complete acceptance snapshot, task, and claim. Changes require a new decision; an unchanged retry can reuse the recorded acknowledgment. Fork submissions and `swarm pr submit` retain their existing acceptance gates.
+
 Released builds can reuse coordinator-recorded validation during `swarm issue submit` and `swarm pr submit` when the checkpoint tree, approved base, trusted policy, claim, worker, and swarm version match. Successful checkpoint reconciliation records validation atomically with the checkpoint, so an unchanged submit can reuse that run under the same rules. Reuse output and PR evidence show the original run's age and tree SHA. Explicit `issue validate` and `pr validate` always run checks, as do CI, development builds, and fork submissions.
 
 ### Policy-selected execution profiles

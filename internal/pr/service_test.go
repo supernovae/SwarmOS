@@ -1238,3 +1238,28 @@ func TestRebaseRoutineReapprovalSingleHint(t *testing.T) {
 		})
 	}
 }
+
+func TestPartialImplementationRefusesUnimplementedRevision(t *testing.T) {
+	s, _, n, base := fixture(t)
+	r, err := s.Status(t.Context(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Worktree = filepath.Join(t.TempDir(), "absent")
+	r.State.PRRevision = &lease.PRRevision{Number: n, LocalHeadSHA: base, RemoteHeadSHA: base}
+	r.State.Artifacts = []contract.Artifact{{Type: contract.ArtifactDesign, Body: "approved plan"}, {Type: contract.ArtifactTestPlan, Body: "approved tests"}}
+	if _, err = s.requireApproval(t.Context(), r, r.State); err != nil {
+		t.Fatalf("approval control: %v", err)
+	}
+	md := lease.ReviewBindings(r.State)
+	md["head_sha"] = base
+	md["implementation_outcome"] = "partial"
+	r.State.Artifacts = append(r.State.Artifacts, contract.Artifact{Type: contract.ArtifactImplementation, Verdict: "PASS", Metadata: md})
+	if err = s.refuseUnimplementedRevision(t.Context(), r); err != nil {
+		t.Fatalf("PASS control: %v", err)
+	}
+	r.State.Artifacts[len(r.State.Artifacts)-1].Verdict = "FAIL"
+	if err = s.refuseUnimplementedRevision(t.Context(), r); err == nil || !strings.Contains(err.Error(), "no new implementation") {
+		t.Fatalf("partial permitted: %v", err)
+	}
+}

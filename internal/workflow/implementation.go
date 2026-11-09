@@ -121,3 +121,14 @@ func partialReason(report string) string {
 	}
 	return ""
 }
+
+// PartialImplementationError stops native issue work for plan reassessment.
+// It carries advisory developer details, never approval or validation authority.
+type PartialImplementationError struct {
+	IssueNumber int
+	Details     string
+}
+
+func (e *PartialImplementationError) Error() string {
+	return fmt.Sprintf("issue #%d: partial implementation: %s; reopen planning with swarm issue work %d --phase plan or edit the WorkUnit with swarm issue edit %d", e.IssueNumber, e.Details, e.IssueNumber, e.IssueNumber)
+}

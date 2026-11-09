@@ -18,10 +18,11 @@ import (
 // Next-action reasons emitted by issue work, issue submit, pr work, pr rebase,
 // and pr submit when they stop short of success.
 const (
-	ReasonChangesRequested = "changes_requested"
-	ReasonPlanNoProgress   = "plan_no_progress"
-	ReasonNeedsApproval    = "needs_approval"
-	ReasonConflict         = "conflict"
+	ReasonPartialImplementation = "partial_implementation"
+	ReasonChangesRequested      = "changes_requested"
+	ReasonPlanNoProgress        = "plan_no_progress"
+	ReasonNeedsApproval         = "needs_approval"
+	ReasonConflict              = "conflict"
 	// ReasonPreExistingFailures stops a run whose failing tests all fail at
 	// the approved base; a maintainer inspects the status and decides.
 	ReasonPreExistingFailures = "pre_existing_failures"
@@ -118,6 +119,16 @@ type stopContext struct {
 func (c stopContext) classify(err error) *NextAction {
 	if err == nil {
 		return nil
+	}
+	var partial *workflow.PartialImplementationError
+	if c.resource == "issue" && (c.opts == nil || !c.opts.Fork) && errors.As(err, &partial) {
+		number := c.number
+		if number <= 0 {
+			number = partial.IssueNumber
+		}
+		if number > 0 {
+			return &NextAction{Reason: ReasonPartialImplementation, Argv: c.argv(false, "issue", "work", strconv.Itoa(number), "--phase", "plan")}
+		}
 	}
 	if c.number <= 0 {
 		var recovery *workflow.IssueRecoveryError
@@ -299,6 +310,12 @@ func renderNextAction(a *NextAction) string {
 		return ""
 	}
 	guidance := ""
+	if a.Reason == ReasonPartialImplementation {
+		_, _, args := actionOperation(a)
+		if len(args) > 0 {
+			guidance = "\nOr edit the WorkUnit with swarm issue edit " + args[0] + "."
+		}
+	}
 	resource, operation, _ := actionOperation(a)
 	if resource == "issue" && operation == "release" {
 		guidance = "\nThe active claim owner must run the next step."
@@ -384,6 +401,9 @@ func (c stopContext) statusAction(st *lease.IssueState, wu *contract.WorkUnit, c
 		}
 		return action("plan_review_required", "work")
 	}
+	if c.resource == "issue" && (c.opts == nil || !c.opts.Fork) && currentPartialImplementation(st) {
+		return action(ReasonPartialImplementation, "work", "--phase", "plan")
+	}
 	if repair := validation.RepairFromArtifact(st.Artifacts, st.BaseSHA); recordedValidationFailed(st) && repair != nil && repair.HeadSHA == st.HeadSHA {
 		if repair.AllPreExisting || repair.OutsideCandidate() {
 			return c.classify(workflow.ErrPreExistingFailures)
@@ -412,6 +432,32 @@ func recordedValidationFailed(st *lease.IssueState) bool {
 			continue
 		}
 		return a.Verdict == "FAIL" && a.Metadata["validation_trusted_origin"] == "coordinator" && a.Metadata["head_sha"] == st.HeadSHA && a.Metadata["base_sha"] == st.BaseSHA
+	}
+	return false
+}
+
+// Only the latest implementation can supply current partial recovery advice.
+func currentPartialImplementation(st *lease.IssueState) bool {
+	if st == nil || st.PRNumber != 0 || st.PRRevision != nil {
+		return false
+	}
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		a := st.Artifacts[i]
+		if a.Type != contract.ArtifactImplementation {
+			continue
+		}
+		if a.Verdict != "FAIL" || a.Metadata["implementation_outcome"] != "partial" || st.HeadSHA == "" || a.Metadata["head_sha"] != st.HeadSHA {
+			return false
+		}
+		for k, v := range lease.ReviewBindings(st) {
+			if k == "review_claim_id" {
+				continue
+			}
+			if v == "" || a.Metadata[k] != v {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

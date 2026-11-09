@@ -2336,3 +2336,108 @@ func TestTesterResumeCheckFailureDiagnostics(t *testing.T) {
 		t.Fatalf("local report: %s %v", body, readErr)
 	}
 }
+
+func TestPartialImplementationRepairStops(t *testing.T) {
+	for _, resumed := range []bool{false, true} {
+		t.Run(fmt.Sprint(resumed), func(t *testing.T) {
+			log := installFixableGo(t)
+			limit := "2"
+			if resumed {
+				limit = "0"
+			}
+			e, n := repairFixture(t, limit)
+			devCalls, testCalls := 0, 0
+			beforeChecks := ""
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "tester" {
+						testCalls++
+					}
+					if req.Role == "developer" {
+						devCalls++
+						if devCalls == 1 {
+							return &agent.RunResult{}, writeFile("feature.txt", "feature\n")(req.WorktreePath)
+						}
+						data, _ := os.ReadFile(log)
+						beforeChecks = string(data)
+						return &agent.RunResult{}, writeFile(".swarm/active/IMPLEMENTATION.md", "Status: PARTIAL\nUnmet criterion: repair design\n")(req.WorktreePath)
+					}
+					return (&agent.MockRunner{}).Run(ctx, req)
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: n, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			res, err := e.ExecuteWork(t.Context(), opts)
+			if resumed {
+				if !errors.Is(err, validation.ErrRequiredCheckFailed) {
+					t.Fatal(err)
+				}
+				opts.Phase, opts.ClaimID = "implement", res.State.Lease.ClaimID
+				opts.DeveloperInstructions = "Reassess the repair"
+				res, err = e.ExecuteWork(t.Context(), opts)
+			}
+			var partial *PartialImplementationError
+			if !errors.As(err, &partial) || devCalls != 2 || testCalls != 1 || res.ValidationPassed {
+				t.Fatalf("%v developer=%d tester=%d", err, devCalls, testCalls)
+			}
+			after, _ := os.ReadFile(log)
+			if string(after) != beforeChecks {
+				t.Fatal("checks ran after partial declaration")
+			}
+			if errors.Is(err, ErrValidationRepairNoChanges) {
+				t.Fatal("partial classified as no-change repair")
+			}
+		})
+	}
+}
+
+func TestPartialImplementationStaleWorkerFailsWithClaimFence(t *testing.T) {
+	log := installFixableGo(t)
+	e, issue := repairFixture(t, "2")
+	var before, stale string
+	testerCalls := 0
+	prompts := 0
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			switch req.Role {
+			case "tester":
+				testerCalls++
+			case "developer":
+				prompts++
+				if prompts == 1 {
+					return &agent.RunResult{}, writeFile("feature.txt", "feature\n")(req.WorktreePath)
+				}
+				st, err := e.LeaseManager.GetCurrentState(ctx, issue)
+				if err != nil {
+					return nil, err
+				}
+				before, stale = st.HeadSHA, st.Lease.ClaimID
+				// A successor claim replaces this worker's during the repair
+				// round; the worker keeps its now stale token.
+				if _, err := e.LeaseManager.Release(ctx, issue, "maintainer", "operator reclaimed"); err != nil {
+					return nil, err
+				}
+				if _, err := e.LeaseManager.Acquire(ctx, issue, "maintainer", "mock", "implement", time.Hour, 0); err != nil {
+					return nil, err
+				}
+				e.LeaseManager.BindClaim(issue, stale)
+				return &agent.RunResult{}, writeFile(".swarm/active/IMPLEMENTATION.md", "Status: PARTIAL\nUnmet criterion: repair\n")(req.WorktreePath)
+			}
+			return (&agent.MockRunner{}).Run(ctx, req)
+		}}, nil
+	}
+	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+	if !errors.Is(err, lease.ErrClaimFence) || errors.Is(err, validation.ErrRequiredCheckFailed) {
+		t.Fatalf("stale repair worker: %v", err)
+	}
+	if prompts != 2 || testerCalls != 1 || res == nil || res.ValidationPassed {
+		t.Fatalf("stale worker continued: %d developer, %d tester calls", prompts, testerCalls)
+	}
+	data, _ := os.ReadFile(log)
+	if runs := strings.Count(string(data), "-count=1 ./..."); runs != 1 {
+		t.Fatalf("validation ran after the fence: %d full runs", runs)
+	}
+	st, stateErr := e.LeaseManager.GetCurrentState(t.Context(), issue)
+	if stateErr != nil || st.Lease.ClaimID == stale || st.HeadSHA != before {
+		t.Fatalf("successor state changed: %+v %v", st, stateErr)
+	}
+}

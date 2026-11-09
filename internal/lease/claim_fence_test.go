@@ -30,6 +30,8 @@ type claimFenceWrite struct {
 // This literal inventory deliberately requires a human classification whenever
 // Manager gains an exported method. Empty reasons denote claim-scoped writers.
 var claimFenceInventory = map[string]string{
+	"AuthorizeGapAcknowledgment":     "read-only authenticated authorization; no durable state write",
+	"RecordGapAcknowledgment":        "",
 	"Acquire":                        "claim acquisition",
 	"AcquireFork":                    "claim acquisition",
 	"AcquirePR":                      "claim acquisition",
@@ -125,6 +127,10 @@ func claimFenceWrites() []claimFenceWrite {
 		return contract.Artifact{Type: kind, Producer: "mock", Body: "report", Summary: "report", Verdict: "PASS"}
 	}
 	return []claimFenceWrite{
+		{"RecordGapAcknowledgment", func(ctx context.Context, f *claimFenceFixture) error {
+			_, err := f.m.RecordGapAcknowledgment(ctx, f.n, fenceOwner, f.head, []int{1})
+			return err
+		}},
 		{"StartHeartbeat", func(ctx context.Context, f *claimFenceFixture) error {
 			h := f.m.StartHeartbeat(ctx, f.n, fenceOwner, time.Hour)
 			defer h.Stop()

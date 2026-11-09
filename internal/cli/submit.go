@@ -18,6 +18,7 @@ import (
 
 func newSubmitCmd(rootOpts *RootOptions) *cobra.Command {
 	var baseBranch string
+	var acknowledged []int
 	var asJSON bool
 	var showProgress bool
 	cmd := &cobra.Command{
@@ -84,6 +85,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				return err
 			}
 			ctx := cmd.Context()
+			if cmd.Flags().Changed("acknowledge-gap") && (rootOpts.Fork || manager.HasWorkerGateway()) {
+				return fmt.Errorf("--acknowledge-gap is available only for direct upstream issues")
+			}
 			owner, claim, err := bindPersistedClaim(ctx, root, tr, manager, issue)
 			if err != nil {
 				return err
@@ -91,6 +95,14 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			state, err := manager.GetCurrentState(ctx, issue)
 			if err != nil {
 				return err
+			}
+			if cmd.Flags().Changed("acknowledge-gap") {
+				if state.ForkRepo != "" {
+					return fmt.Errorf("--acknowledge-gap is unavailable for fork issues")
+				}
+				if err := manager.AuthorizeGapAcknowledgment(ctx, owner); err != nil {
+					return err
+				}
 			}
 			// Reject stale workers before default-branch discovery can update refs.
 			if state.Lease.Status != "completed" {
@@ -155,7 +167,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 						return fmt.Errorf("completed fork submission does not match recorded head")
 					}
 				} else {
-					if err := r.SubmissionError(issue, rootOpts.Fork); err != nil {
+					if err := issueGapAdmission(ctx, manager, issue, owner, state.HeadSHA, unit, state, acknowledged, cmd.Flags().Changed("acknowledge-gap"), rootOpts.Fork); err != nil {
 						return err
 					}
 					if r.RequiredChecks != "passed" {
@@ -252,10 +264,17 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if checks != "passed" {
 				return fmt.Errorf("trusted required checks are %s", checks)
 			}
-			if err := r.SubmissionError(issue, rootOpts.Fork); err != nil {
+			state, err = manager.GetCurrentState(ctx, issue)
+			if err != nil {
+				return err
+			}
+			if err := issueGapAdmission(ctx, manager, issue, owner, head, unit, state, acknowledged, cmd.Flags().Changed("acknowledge-gap"), rootOpts.Fork); err != nil {
 				return err
 			}
 
+			if !rootOpts.Fork && !manager.HasWorkerGateway() {
+				ctx = lease.WithGapSubmission(ctx, head)
+			}
 			if err := requireCleanHead(ctx, worktree, head); err != nil {
 				return fmt.Errorf("validation changed the candidate; review and rerun submission: %w", err)
 			}
@@ -371,6 +390,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			return nil
 		},
 	}
+	cmd.Flags().IntSliceVar(&acknowledged, "acknowledge-gap", nil, "Acknowledge every unmet one-based criterion index (repeat for each gap; maintainer only)")
 	cmd.Flags().StringVar(&baseBranch, "base", "", "Target branch name for the draft PR (must match the approved target)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the durable submission identity")
 	cmd.Flags().BoolVar(&showProgress, "progress", true, "Report progress on stderr")
@@ -448,4 +468,29 @@ func refuseEmptySubmitEarly(ctx context.Context, root, worktree string, issue in
 		return nil
 	}
 	return emptySubmitError(issue, base)
+}
+
+func issueGapAdmission(ctx context.Context, manager *lease.Manager, issue int, owner, head string, unit *contract.WorkUnit, state *lease.IssueState, indices []int, explicit, fork bool) error {
+	candidate := *state
+	candidate.HeadSHA = head
+	r := lease.RecordedReadiness(&candidate, unit.Acceptance)
+	if explicit {
+		var err error
+		state, err = manager.RecordGapAcknowledgment(ctx, issue, owner, head, indices)
+		if err != nil {
+			return err
+		}
+		candidate = *state
+		candidate.HeadSHA = head
+	}
+	if !fork && len(lease.KnownGaps(&candidate, unit)) > 0 {
+		return nil
+	}
+	if err := r.SubmissionError(issue, fork); err != nil {
+		if !fork && !manager.HasWorkerGateway() {
+			return fmt.Errorf("%w; an authorized maintainer may repeat --acknowledge-gap <index> for every unmet criterion", err)
+		}
+		return err
+	}
+	return nil
 }

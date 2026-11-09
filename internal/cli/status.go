@@ -72,6 +72,7 @@ func recordedStop(st *lease.IssueState, now time.Time) *stoppedAt {
 }
 
 type issueStatus struct {
+	KnownGaps       []validation.AcceptanceGap `json:"known_gaps,omitempty"`
 	StoppedAt       *stoppedAt                 `json:"stopped_at,omitempty"`
 	NextAction      *NextAction                `json:"next_action,omitempty"`
 	Readiness       *validation.Readiness      `json:"readiness,omitempty"`
@@ -154,6 +155,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				if wu, parseErr := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body); parseErr == nil {
 					r := lease.RecordedReadiness(state, wu.Acceptance)
 					entry.Readiness = &r
+					entry.KnownGaps = lease.KnownGaps(state, wu)
 				}
 				if state != nil {
 					entry.Decomposition = manager.InspectDecomposition(cmd.Context(), state)
@@ -247,6 +249,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 			}
 			if entry.Readiness != nil {
 				fmt.Fprint(cmd.OutOrStdout(), entry.Readiness.Text())
+				fmt.Fprint(cmd.OutOrStdout(), lease.KnownGapsText(entry.KnownGaps))
 			}
 			if p := entry.StoppedAt; p != nil {
 				completion := "no trusted completion recorded"

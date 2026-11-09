@@ -252,3 +252,33 @@ func TestIssue464BoundedAndLegacyFindings(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptanceGapsStrictMapping(t *testing.T) {
+	for _, mode := range []string{"unmet", "omitted", "met", "external", "missing", "malformed", "duplicate"} {
+		t.Run(mode, func(t *testing.T) {
+			block := `{"version":1,"criteria":[{"index":1,"criterion":"one","status":"unmet"}`
+			if mode != "omitted" {
+				block += `,{"index":2,"criterion":"two","status":"` + mode + `","evidence":"observed","reason":"host"}`
+			}
+			if mode == "duplicate" {
+				block += `,{"index":1,"criterion":"one","status":"unmet"}`
+			}
+			snapshot := AcceptanceSnapshot{State: "valid", Block: block + `]}`, Findings: "details"}
+			if mode == "missing" || mode == "malformed" {
+				snapshot.State = mode
+			}
+			gaps, digest, err := AcceptanceGaps([]string{"one", "two"}, snapshot)
+			success := mode == "unmet" || mode == "met" || mode == "external"
+			if success != (err == nil) {
+				t.Fatal(gaps, err)
+			}
+			if success {
+				snapshot.Findings += "changed"
+				_, other, _ := AcceptanceGaps([]string{"one", "two"}, snapshot)
+				if digest == other {
+					t.Fatal("findings excluded from binding")
+				}
+			}
+		})
+	}
+}

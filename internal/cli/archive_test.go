@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
@@ -169,6 +170,31 @@ func TestArchiveBulkCLI(t *testing.T) {
 			if r.Totals.Candidates != 4 || r.Totals.Previewed != 1 || r.Totals.Skipped != 3 {
 				t.Fatalf("%s", out)
 			}
+			cutoff := time.Date(2026, 2, 28, 12, 0, 0, 0, time.UTC)
+			human, humanErr := f.run(opts, "repo", "archive", "--all-eligible", "--to", "file://"+dest)
+			if humanErr != nil {
+				t.Fatal(humanErr)
+			}
+			if len(r.Issues) != len(dates) {
+				t.Fatalf("missing candidates: %s", out)
+			}
+			for i, issue := range r.Issues {
+				stamp, _ := time.Parse(time.RFC3339, dates[i])
+				eligible := i == 0
+				status := "skipped"
+				if eligible {
+					status = "preview"
+				}
+				if issue.Issue != i+1 || issue.Eligible != eligible || issue.Status != status || issue.CommitterTime == nil || !issue.CommitterTime.Equal(stamp) || issue.Cutoff == nil || !issue.Cutoff.Equal(cutoff) || issue.AfterDays != 30 || issue.StateTip != f.git(f.project, "rev-parse", layout.StateRef(i+1)) {
+					t.Fatalf("candidate %d age evidence: %+v", i+1, issue)
+				}
+				if !strings.Contains(human, fmt.Sprintf("#%d: %s eligible=%t tip=%s", issue.Issue, issue.Status, issue.Eligible, issue.StateTip)) {
+					t.Fatalf("human/JSON mismatch: %s", human)
+				}
+			}
+			if !strings.Contains(human, fmt.Sprintf("totals: %+v", r.Totals)) {
+				t.Fatalf("human totals: %s", human)
+			}
 			if before != inv(f.project) || local != inv(f.root) || db != inv(dest) {
 				t.Fatal("preview changed refs")
 			}
@@ -176,6 +202,25 @@ func TestArchiveBulkCLI(t *testing.T) {
 			if err != nil || json.Unmarshal([]byte(out), &r) != nil || r.Totals.Archived != 1 {
 				t.Fatalf("%s %v", out, err)
 			}
+			store := coordination.NewGitStoreWithLayout(f.root, "origin", layout)
+			tomb, err := store.ArchiveTombstone(context.Background(), 1, true)
+			if err != nil || tomb == nil || tomb.Manifest.Cutoff == nil || !tomb.Manifest.Cutoff.Equal(cutoff) {
+				t.Fatalf("tombstone cutoff: %v %v", tomb, err)
+			}
+			manifest, err := contract.ParseArchiveManifest([]byte(f.git(dest, "show", "refs/archive/issue-1/manifest:manifest.json")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, digest, err := contract.MarshalArchiveManifest(manifest)
+			if err != nil || digest != tomb.Digest || manifest.StateTip != tomb.Manifest.StateTip || manifest.Cutoff == nil || !manifest.Cutoff.Equal(cutoff) {
+				t.Fatal("destination/tombstone identity mismatch")
+			}
+			for _, ref := range manifest.Refs {
+				if f.git(dest, "rev-parse", ref.Destination) != ref.SHA {
+					t.Fatal("destination SHA mismatch")
+				}
+			}
+
 		})
 	}
 }
@@ -212,33 +257,37 @@ func TestArchiveKeepTrustedAndGrammar(t *testing.T) {
 				if e = os.WriteFile(path, []byte(text), 0600); e != nil {
 					t.Fatal(e)
 				}
-				f.git(f.root, "commit", "-am", "untrusted opt in")
-				inv := func(dir string) string { return f.git(dir, "for-each-ref", "--format=%(refname) %(objectname)") }
-				before, local, db := inv(f.project), inv(f.root), inv(dest)
-				opts := RootOptions{RepoRoot: f.root, trackerOverride: &archiveCLITracker{}}
-				for _, args := range [][]string{
-					{"repo", "archive", "1", "--apply", "--to", "file://" + dest, "--json"},
-					{"repo", "archive", "--all-eligible", "--apply", "--to", "file://" + dest, "--json"},
-					{"repo", "archive", "1", "--apply", "--json"},
-					{"repo", "archive", "--all-eligible", "--apply", "--json"},
-					{"repo", "archive", "--json"}, {"repo", "archive", "1", "--all-eligible", "--json"},
-				} {
-					out, err := f.run(opts, args...)
-					if err == nil {
-						t.Fatalf("accepted %v", args)
+				for _, phase := range []string{"worktree", "candidate"} {
+					if phase == "candidate" {
+						f.git(f.root, "commit", "-am", "untrusted opt in")
 					}
-					var doc map[string]any
-					if e = json.Unmarshal([]byte(out), &doc); e != nil {
-						t.Fatalf("not one JSON: %s %v", out, e)
+					inv := func(dir string) string { return f.git(dir, "for-each-ref", "--format=%(refname) %(objectname)") }
+					before, local, db := inv(f.project), inv(f.root), inv(dest)
+					opts := RootOptions{RepoRoot: f.root, trackerOverride: &archiveCLITracker{}}
+					for _, args := range [][]string{
+						{"repo", "archive", "1", "--apply", "--to", "file://" + dest, "--json"},
+						{"repo", "archive", "--all-eligible", "--apply", "--to", "file://" + dest, "--json"},
+						{"repo", "archive", "1", "--apply", "--json"},
+						{"repo", "archive", "--all-eligible", "--apply", "--json"},
+						{"repo", "archive", "--json"}, {"repo", "archive", "1", "--all-eligible", "--json"},
+					} {
+						out, err := f.run(opts, args...)
+						if err == nil {
+							t.Fatalf("accepted %v", args)
+						}
+						var doc map[string]any
+						if e = json.Unmarshal([]byte(out), &doc); e != nil {
+							t.Fatalf("not one JSON: %s %v", out, e)
+						}
 					}
-				}
-				out, e := f.run(opts, "repo", "archive", "--all-eligible", "--json")
-				var report lease.BulkArchiveReport
-				if e != nil || json.Unmarshal([]byte(out), &report) != nil || report.Totals.Skipped != 1 || !strings.Contains(out, "strategy: keep") {
-					t.Fatalf("%s %v", out, e)
-				}
-				if before != inv(f.project) || local != inv(f.root) || db != inv(dest) {
-					t.Fatal("keep changed refs")
+					out, e := f.run(opts, "repo", "archive", "--all-eligible", "--json")
+					var report lease.BulkArchiveReport
+					if e != nil || json.Unmarshal([]byte(out), &report) != nil || report.Totals.Skipped != 1 || !strings.Contains(out, "strategy: keep") {
+						t.Fatalf("%s %v", out, e)
+					}
+					if before != inv(f.project) || local != inv(f.root) || db != inv(dest) {
+						t.Fatal("keep changed refs")
+					}
 				}
 			})
 		}
@@ -276,6 +325,14 @@ func TestArchiveBulkJSONPartialFailureRetry(t *testing.T) {
 						t.Fatal(e)
 					}
 				}
+				inventory := func(n int) string {
+					return f.git(f.project, "for-each-ref", "--format=%(refname) %(objectname)", layout.StateRef(n), fmt.Sprintf("%sissue-%d/", layout.CheckpointPrefix(), n))
+				}
+				before := map[int]string{}
+				for n := 1; n <= 3; n++ {
+					before[n] = inventory(n)
+				}
+				main := f.git(f.project, "rev-parse", "refs/heads/main")
 				stamp, e := store.ArchiveCommitTime(ctx, tip)
 				if e != nil {
 					t.Fatal(e)
@@ -303,6 +360,29 @@ func TestArchiveBulkJSONPartialFailureRetry(t *testing.T) {
 				if e == nil || json.Unmarshal([]byte(out), &r) != nil || r.Totals.Archived != 2 || r.Totals.Failed != 1 || len(r.Issues) != 3 || r.Issues[1].Status != "failed" {
 					t.Fatalf("%s %v", out, e)
 				}
+				if got := inventory(2); got != before[2] {
+					t.Fatalf("failed issue refs changed: %s != %s", got, before[2])
+				}
+				for n := 1; n <= 3; n++ {
+					tomb, err := store.ArchiveTombstone(ctx, n, true)
+					if n == 2 {
+						if !errors.Is(err, coordination.ErrNotFound) || tomb != nil {
+							t.Fatalf("failed issue tombstone: %v %v", tomb, err)
+						}
+						continue
+					}
+					if err != nil || tomb == nil || inventory(n) != "" {
+						t.Fatalf("successful issue %d not atomically archived: %v %v", n, tomb, err)
+					}
+					for _, ref := range tomb.Manifest.Refs {
+						if got := f.git(dest, "rev-parse", ref.Destination); got != ref.SHA {
+							t.Fatalf("copy mismatch: %s", ref.Destination)
+						}
+					}
+				}
+				if got := f.git(f.project, "rev-parse", "refs/heads/main"); got != main {
+					t.Fatal("unrelated main changed")
+				}
 				var original string
 				if failure == "delete" {
 					original = f.git(dest, "show", "refs/archive/issue-2/manifest:manifest.json")
@@ -311,7 +391,7 @@ func TestArchiveBulkJSONPartialFailureRetry(t *testing.T) {
 					t.Fatal(e)
 				}
 				out, e = runArchiveClock(f, opts, now.Add(24*time.Hour), args...)
-				if e != nil || json.Unmarshal([]byte(out), &r) != nil || r.Totals.Archived != 1 || r.Totals.Failed != 0 {
+				if e != nil || json.Unmarshal([]byte(out), &r) != nil || r.Totals.Archived != 1 || r.Totals.Failed != 0 || len(r.Issues) != 1 || r.Issues[0].Issue != 2 {
 					t.Fatalf("%s %v", out, e)
 				}
 				emptyOut, emptyErr := runArchiveClock(f, opts, now.Add(48*time.Hour), args...)

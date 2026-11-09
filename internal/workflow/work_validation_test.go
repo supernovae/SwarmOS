@@ -2441,3 +2441,151 @@ func TestPartialImplementationStaleWorkerFailsWithClaimFence(t *testing.T) {
 		t.Fatalf("successor state changed: %+v %v", st, stateErr)
 	}
 }
+
+func TestIssueWorkReplanContinuation(t *testing.T) {
+	for _, change := range []string{"plan", "test-plan", "workunit", "unchanged"} {
+		t.Run(change, func(t *testing.T) {
+			e, issue := gatedTesterRetryEngine(t, contract.GateAgent)
+			initial := true
+			var roles []string
+			var wantPlan, wantTests string
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "developer" || req.Role == "tester" {
+						roles = append(roles, req.Role)
+					}
+					if req.Role == "tester" && initial {
+						return nil, errors.New("tester process interrupted")
+					}
+					if req.Role == "developer" && !initial {
+						for name, want := range map[string]string{"PLAN.md": wantPlan, "TEST_PLAN.md": wantTests} {
+							got, err := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm/active", name))
+							if err != nil || string(got) != want {
+								t.Fatalf("developer received %s = %q, want %q: %v", name, got, want, err)
+							}
+						}
+					}
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "developer" && !initial {
+						err = os.WriteFile(filepath.Join(req.WorktreePath, "replanned.txt"), []byte("Implemented revised inputs: "+change), 0644)
+					}
+					return result, err
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true}
+			first, err := e.ExecuteWork(t.Context(), opts)
+			if err == nil || !strings.Contains(err.Error(), "tester process interrupted") || first == nil || strings.Join(roles, ",") != "developer,tester" {
+				t.Fatalf("initial run: %v roles=%v", err, roles)
+			}
+			st, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var plan, tests, implementation contract.Artifact
+			for _, a := range st.Artifacts {
+				switch a.Type {
+				case contract.ArtifactDesign:
+					plan = a
+				case contract.ArtifactTestPlan:
+					tests = a
+				case contract.ArtifactImplementation:
+					implementation = a
+				}
+			}
+			if implementation.Verdict != "PASS" || implementation.Metadata["implementation_trusted_origin"] != "coordinator" || !hasTrustedImplementation(st) || !hasApprovedReviewArtifact(st) {
+				t.Fatal("initial implementation and approval were not trusted/current")
+			}
+			opts.ClaimID = st.Lease.ClaimID
+			if change == "workunit" {
+				if _, err = e.LeaseManager.Release(t.Context(), issue.Number, "maintainer", "edit task"); err != nil {
+					t.Fatal(err)
+				}
+				wu, parseErr := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+				if parseErr != nil {
+					t.Fatal(parseErr)
+				}
+				wu.Objective += " with revised requirements"
+				if _, err = e.Tracker.UpdateIssueBody(t.Context(), issue.Number, contract.FormatIssueMarkdown(wu)); err != nil {
+					t.Fatal(err)
+				}
+				st, err = e.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer")
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, a := range st.Artifacts {
+					if a.Type == contract.ArtifactImplementation {
+						t.Fatal("task edit retained implementation")
+					}
+				}
+				opts.ClaimID = ""
+				planOpts := opts
+				planOpts.Phase = "plan"
+				planned, planErr := e.ExecuteWork(t.Context(), planOpts)
+				if planErr != nil {
+					t.Fatal(planErr)
+				}
+				opts.ClaimID = planned.State.Lease.ClaimID
+				st = planned.State
+				for _, a := range st.Artifacts {
+					if a.Type == contract.ArtifactDesign {
+						plan = a
+					}
+					if a.Type == contract.ArtifactTestPlan {
+						tests = a
+					}
+				}
+			} else if change != "unchanged" {
+				if change == "plan" {
+					plan.Body += "\nRevised implementation steps.\n"
+				} else {
+					tests.Body += "\nRevised verification steps.\n"
+				}
+				st, err = e.LeaseManager.RecordPlanPair(t.Context(), issue.Number, "maintainer", plan, tests)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if change != "unchanged" {
+				reviewOpts := opts
+				reviewOpts.Phase = "review"
+				reviewed, reviewErr := e.ExecuteWork(t.Context(), reviewOpts)
+				if reviewErr != nil {
+					t.Fatal(reviewErr)
+				}
+				st = reviewed.State
+				if !hasApprovedReviewArtifact(st) {
+					t.Fatal("new plan not approved")
+				}
+			}
+			if change == "plan" || change == "test-plan" {
+				key := "plan_digest"
+				if change == "test-plan" {
+					key = "test_plan_digest"
+				}
+				retained := false
+				for _, a := range st.Artifacts {
+					if a.Type == contract.ArtifactImplementation && a.Verdict == "PASS" && a.Metadata["implementation_trusted_"+key] == implementation.Metadata["implementation_trusted_"+key] {
+						retained = true
+					}
+				}
+				if !retained || implementation.Metadata["implementation_trusted_"+key] == lease.ReviewBindings(st)[key] {
+					t.Fatal("stale implementation not retained across re-approval")
+				}
+			}
+			if change == "unchanged" && !hasTrustedImplementation(st) {
+				t.Fatal("unchanged implementation lost")
+			}
+			wantPlan, wantTests = plan.Body, tests.Body
+			initial = false
+			roles = nil
+			resumed, err := e.ExecuteWork(t.Context(), opts)
+			wantRoles := "developer,tester"
+			if change == "unchanged" {
+				wantRoles = "tester"
+			}
+			if err != nil || resumed == nil || !resumed.ValidationPassed || strings.Join(roles, ",") != wantRoles {
+				t.Fatalf("continuation: %v roles=%v, want %s", err, roles, wantRoles)
+			}
+		})
+	}
+}

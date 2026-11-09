@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTesterAcceptanceCaptureIgnoresCheckOutput(t *testing.T) {
@@ -245,6 +246,161 @@ func TestIssue464AcceptanceRepair(t *testing.T) {
 				}
 			} else if resumeErr != nil || devs != before || resumed == nil {
 				t.Fatalf("met reuse: %v", resumeErr)
+			}
+		})
+	}
+}
+
+func TestIssue492ReusablePassAcceptanceStates(t *testing.T) {
+	for _, state := range []string{"complete", "unmet", "missing", "malformed", "tester-unmet", "ineligible"} {
+		t.Run(state, func(t *testing.T) {
+			root, e, tr := setupProjectPlanTestRepo(t)
+			configureValidation(t, root)
+			setRepairLimit(t, root, "1")
+			counter := filepath.Join(t.TempDir(), "checks")
+			policy := fmt.Sprintf("required_checks:\n  - name: counted\n    command: \"echo check >> '%s'\"\n    timeout: 1m\nprotected_paths: ['.github/**']\n", counter)
+			if err := os.WriteFile(filepath.Join(root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "reuse fixture").CombinedOutput(); err != nil {
+				t.Fatal(err, string(out))
+			}
+			evidence := func(status string) string {
+				return validation.AcceptanceEvidenceStart + "\n" + `{"version":1,"criteria":[{"index":1,"criterion":"works","status":"` + status + `","evidence":"Independent observation"}]}` + "\n" + validation.AcceptanceEvidenceEnd
+			}
+			var roles []string
+			resuming := false
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err != nil {
+						return result, err
+					}
+					if req.Role == "developer" {
+						roles = append(roles, "developer")
+						err = os.WriteFile(filepath.Join(req.WorktreePath, fmt.Sprintf("change-%d.txt", len(roles))), []byte("changed"), 0600)
+					}
+					if req.Role == "tester" {
+						roles = append(roles, "tester")
+						body := evidence("met")
+						if !resuming {
+							switch state {
+							case "missing", "tester-unmet", "ineligible":
+								body = ""
+							case "malformed":
+								body = validation.AcceptanceEvidenceStart
+							}
+						} else if state == "tester-unmet" && len(roles) == 1 {
+							body = evidence("unmet")
+						}
+						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte(body), 0600)
+					}
+					return result, err
+				}}, nil
+			}
+			wu := &contract.WorkUnit{Objective: "Reuse", Constraints: []string{"Keep fencing"}, Acceptance: []string{"works"}, Workflow: "feature", Gate: contract.GateNone}
+			issue, err := tr.CreateIssue(t.Context(), "Reuse", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = e.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			opts := WorkOptions{RepoRoot: root, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, Version: "v1.2.3"}
+			first, err := e.ExecuteWork(t.Context(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceTime := first.Validation.Artifact.CreatedAt
+			sourceClaim := first.State.Lease.ClaimID
+			sourceDigest := ""
+			for _, art := range first.State.Artifacts {
+				if art.Type == contract.ArtifactValidation {
+					sourceDigest = art.Metadata["content_sha256"]
+				}
+			}
+			if state == "unmet" {
+				// Explicit testing records unmet evidence without starting a repair.
+				resuming = true
+				e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+					return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+						result, err := (&agent.MockRunner{}).Run(ctx, req)
+						if err == nil && req.Role == "tester" {
+							err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte(evidence("unmet")), 0600)
+						}
+						return result, err
+					}}, nil
+				}
+				opts.Phase, opts.ClaimID = "test", sourceClaim
+				first, err = e.ExecuteWork(t.Context(), opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sourceTime = first.Validation.Artifact.CreatedAt
+			}
+			// Restore a runner that reports met after any required repair.
+			if state == "unmet" {
+				e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+					return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+						result, err := (&agent.MockRunner{}).Run(ctx, req)
+						roles = append(roles, req.Role)
+						if err == nil && req.Role == "developer" {
+							err = os.WriteFile(filepath.Join(req.WorktreePath, "repair.txt"), []byte("fixed"), 0600)
+						}
+						if err == nil && req.Role == "tester" {
+							err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte(evidence("met")), 0600)
+						}
+						return result, err
+					}}, nil
+				}
+			}
+			before, err := os.ReadFile(counter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roles, resuming = nil, true
+			opts.Phase, opts.ClaimID, opts.IssueContinuation = "all", sourceClaim, true
+			if state == "ineligible" {
+				// Version mismatch must execute checks even though evidence is missing.
+				opts.Version = "v1.2.4"
+			}
+			got, err := e.ExecuteWork(t.Context(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRoles := "tester"
+			wantChecks, wantRepairs := 0, 0
+			switch state {
+			case "complete":
+				wantRoles = ""
+			case "unmet":
+				wantRoles, wantChecks, wantRepairs = "developer,tester", 1, 1
+			case "tester-unmet":
+				wantRoles, wantChecks, wantRepairs = "tester,developer,tester", 1, 1
+			case "ineligible":
+				wantChecks = 1
+			}
+			after, err := os.ReadFile(counter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(roles, ",") != wantRoles || strings.Count(string(after), "check")-strings.Count(string(before), "check") != wantChecks || got.State.ValidationRepairCount != wantRepairs {
+				t.Fatalf("roles=%v checks=%q -> %q repairs=%d", roles, before, after, got.State.ValidationRepairCount)
+			}
+			if !got.Validation.Passed {
+				t.Fatal("lost PASS")
+			}
+			if state == "complete" || state == "missing" || state == "malformed" {
+				md := got.Validation.Artifact.Metadata
+				if md["validation_reused"] != "true" || md["validation_source_claim"] != sourceClaim || md["validation_source_time"] != sourceTime.Format(time.RFC3339Nano) || md["validation_source_digest"] != sourceDigest || !strings.Contains(got.Validation.Artifact.Body, "REUSED") {
+					t.Fatalf("lost reuse provenance: %v", md)
+				}
+				if warnings := validation.AcceptanceEvidenceWarnings(wu.Acceptance, validation.AcceptanceSnapshotFromMetadata(md)); len(warnings) != 0 {
+					t.Fatal(warnings)
+				}
+				if strings.Count(got.Validation.Artifact.Body, "Independent observation") != 1 {
+					t.Fatal("duplicated or missing tester evidence", got.Validation.Artifact.Body)
+				}
 			}
 		})
 	}

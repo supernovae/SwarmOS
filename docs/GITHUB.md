@@ -325,3 +325,31 @@ for the preview, apply, and restore commands. Branch-mode rulesets must allow th
 archiving identity to delete `swarm-state/**` and `swarm-checkpoints/**` and update
 `swarm-archive`. Keep these permissions limited to trusted maintainers. Hidden
 refs use the repository's write permission. Both layouts require atomic pushes.
+
+Archive policy defaults to `keep`, so upgrading preserves all ledgers. To keep
+the remote focused on active work, create a private destination repository such
+as `acme/private-swarm-archive`, grant the maintenance identity write access to
+both repositories, and commit this opt-in on the upstream default branch:
+
+```yaml
+archive:
+  strategy: repo
+  after_days: 30
+  repo: acme/private-swarm-archive
+```
+
+```bash
+swarm repo archive --all-eligible --json
+swarm repo archive --all-eligible --apply --json
+# A pre-created bare repository can override the destination for one run:
+swarm repo archive --all-eligible --apply --to file:///srv/git/swarm-archive.git
+```
+
+Only state tips whose committer time is strictly before the UTC cutoff (run time
+minus 30 periods of 24 hours here) and pass the finished-issue checks are
+archived. Preview shows age evidence and reasons for skips. Each issue transfers
+independently: failures retain its source refs, other issues continue, and the
+command exits non-zero. Resolve the reported failure and rerun. A retry retains
+the destination's original audit cutoff while reporting the current run's cutoff.
+Single-issue archive apply also requires opting in; `--to` cannot override
+`keep`. Restore remains available under either strategy.

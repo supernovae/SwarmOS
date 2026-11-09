@@ -301,6 +301,46 @@ task cleanup keeps these ledgers in place; archiving is a separate, opt-in actio
 with the same permission as issue approval. It supports the GitHub backend over
 HTTPS, SSH (including `git@host:path`), and `file://` bare repositories.
 
+Archiving defaults to `strategy: keep`, including when the block is absent.
+To opt in, create a private GitHub repository (for example
+`acme/private-swarm-archive`) and give the maintenance identity write access to
+both repositories. Commit this configuration on the upstream default branch:
+
+```yaml
+archive:
+  strategy: repo
+  after_days: 30
+  repo: acme/private-swarm-archive
+```
+
+The default branch selects this policy and the ledger namespace together.
+Single-issue archive apply also requires this opt-in. A one-run `--to` override
+can select a different destination, including a pre-created local bare
+repository; it still requires `strategy: repo`. Restore remains available with
+`strategy: keep`.
+
+```bash
+swarm repo archive --all-eligible --json
+swarm repo archive --all-eligible --apply --json
+# Override only this run's destination:
+swarm repo archive --all-eligible --apply --to file:///srv/git/swarm-archive.git
+```
+
+Bulk archiving measures age from the state tip's **committer time**. An issue
+must be strictly older than the UTC cutoff (run time minus `after_days` periods
+of 24 hours), and must pass the safety checks below. Preview reports the state
+tip, committer time, threshold, cutoff, and each eligibility check. Each applied
+issue has its own verified copy and atomic source transaction. A failure keeps
+that issue's source refs, allows subsequent issues to continue, and returns a
+non-zero exit status; fix the reported cause and rerun for remaining issues.
+
+JSON output is one report with per-issue outcomes and totals. Candidates equal
+previewed + archived + skipped + failed; eligible counts issues that passed
+initial checks, including any whose later transfer failed. Current-run cutoff
+is reported separately from the destination manifest's retained audit cutoff.
+A retry preserves the original manifest and its cutoff; legacy manifests without
+a cutoff remain readable and keep that omission.
+
 Pause workers and coordinator dispatch for the maintenance window. Close the
 issue, finish or release its lease, and retire its remote task branch first.
 The preview reports each requirement: no active or handoff lease, pending PR

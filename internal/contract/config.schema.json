@@ -1,6 +1,72 @@
 {
- "$schema": "https://json-schema.org/draft/2020-12/schema",
- "description": "Tracker selection; other configuration fields are validated by the YAML configuration loader.",
- "type": "object",
- "properties": {"tracker": {"type": "string", "enum": ["github", "local"], "default": "github"}}
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Tracker selection; other configuration fields are validated by the YAML configuration loader.",
+  "type": "object",
+  "properties": {
+    "tracker": {
+      "type": "string",
+      "enum": [
+        "github",
+        "local"
+      ],
+      "default": "github"
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "enum": [
+            "",
+            "keep",
+            "repo"
+          ]
+        },
+        "after_days": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 106751
+        },
+        "repo": {
+          "type": "string",
+          "anyOf": [
+            {
+              "const": ""
+            },
+            {
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+              "not": {
+                "pattern": "^(\\.\\.?/|[^/]+/\\.\\.?$)"
+              }
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "strategy": {
+                "const": "repo"
+              }
+            },
+            "required": [
+              "strategy"
+            ]
+          },
+          "then": {
+            "required": [
+              "after_days",
+              "repo"
+            ],
+            "properties": {
+              "repo": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
 }

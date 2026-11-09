@@ -127,6 +127,7 @@ type CheckSpec struct {
 }
 
 type SwarmConfig struct {
+	Archive       *ArchiveConfig       `yaml:"archive,omitempty" json:"archive,omitempty"`
 	Tracker       string               `yaml:"tracker,omitempty" json:"tracker,omitempty"`
 	BaseBranch    string               `yaml:"base_branch,omitempty" json:"base_branch,omitempty"`
 	Profiles      []ProfileSpec        `yaml:"profiles,omitempty" json:"profiles,omitempty"`

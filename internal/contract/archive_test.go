@@ -163,3 +163,77 @@ func TestArchiveDuplicateJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestArchivePolicyValidation(t *testing.T) {
+	days := 30
+	zero := 0
+	negative := -1
+	overflow := 106752
+	cases := []struct {
+		c     *ArchiveConfig
+		valid bool
+	}{
+		{nil, true}, {&ArchiveConfig{}, true}, {&ArchiveConfig{Strategy: "keep"}, true},
+		{&ArchiveConfig{Strategy: "repo", AfterDays: &days, Repo: "acme/private-archive"}, true},
+		{&ArchiveConfig{Strategy: "purge"}, false}, {&ArchiveConfig{Strategy: "local"}, false},
+		{&ArchiveConfig{Strategy: "unknown"}, false}, {&ArchiveConfig{AfterDays: &zero}, false},
+		{&ArchiveConfig{AfterDays: &negative}, false}, {&ArchiveConfig{AfterDays: &overflow}, false},
+		{&ArchiveConfig{Strategy: "repo", Repo: "acme/archive"}, false},
+		{&ArchiveConfig{Strategy: "repo", AfterDays: &days}, false},
+	}
+	for _, repo := range []string{"../archive", "acme/..", "https://github.com/acme/archive", "acme/a b", "acme/a;rm", "acme/a/b", "a@b/c", "./repo"} {
+		cases = append(cases, struct {
+			c     *ArchiveConfig
+			valid bool
+		}{&ArchiveConfig{Repo: repo}, false})
+	}
+	for _, tc := range cases {
+		if err := ValidateArchiveConfig(tc.c); (err == nil) != tc.valid {
+			t.Fatalf("%+v: %v", tc.c, err)
+		}
+	}
+	data, _ := json.Marshal(SwarmConfig{})
+	if bytes.Contains(data, []byte(`"archive"`)) {
+		t.Fatal("omitted policy serialized")
+	}
+}
+func TestArchiveManifestCutoff(t *testing.T) {
+	m := archiveManifestFixture("branch")
+	legacy, oldDigest, e := MarshalArchiveManifest(m)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if bytes.Contains(legacy, []byte("cutoff")) {
+		t.Fatal("legacy bytes changed")
+	}
+	cutoff := time.Date(2026, 10, 1, 2, 0, 0, 0, time.FixedZone("offset", 7200))
+	m.Cutoff = &cutoff
+	data, digest, e := MarshalArchiveManifest(m)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if digest == oldDigest {
+		t.Fatal("cutoff not in digest")
+	}
+	parsed, e := ParseArchiveManifest(data)
+	if e != nil || !parsed.Cutoff.Equal(cutoff) || parsed.Cutoff.Location() != time.UTC {
+		t.Fatalf("%s %v", data, e)
+	}
+	zero := time.Time{}
+	m.Cutoff = &zero
+	if _, _, e = MarshalArchiveManifest(m); e == nil {
+		t.Fatal("zero cutoff accepted")
+	}
+}
+
+func TestArchiveConfigSchemaAgreement(t *testing.T) {
+	for _, raw := range []string{`{}`, `{"strategy":""}`, `{"strategy":"keep"}`, `{"strategy":"repo","after_days":30,"repo":"acme/archive"}`, `{"strategy":"purge"}`, `{"after_days":0}`, `{"after_days":-1}`, `{"after_days":1.5}`, `{"after_days":106752}`, `{"strategy":"repo"}`, `{"repo":"../archive"}`, `{"repo":"a/.."}`, `{"repo":"https://github.com/a/b"}`} {
+		var c ArchiveConfig
+		err := json.Unmarshal([]byte(raw), &c)
+		valid := err == nil && ValidateArchiveConfig(&c) == nil
+		schemaErr := ValidateConfigJSON([]byte(`{"archive":` + raw + `}`))
+		if (schemaErr == nil) != valid {
+			t.Fatalf("%s: Go valid=%t schema=%v", raw, valid, schemaErr)
+		}
+	}
+}

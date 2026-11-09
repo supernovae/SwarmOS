@@ -233,8 +233,25 @@ func (r *workRun) reserveRepair() error {
 }
 
 func hasTrustedImplementation(st *lease.IssueState) bool {
+	if st == nil {
+		return false
+	}
+	bindings := lease.ReviewBindings(st)
+	if bindings["plan_digest"] == "" || bindings["test_plan_digest"] == "" {
+		return false
+	}
 	for _, a := range st.Artifacts {
-		if a.Type == contract.ArtifactImplementation && a.Verdict == "PASS" && a.Metadata["implementation_trusted_origin"] == "coordinator" {
+		if a.Type != contract.ArtifactImplementation || a.Verdict != "PASS" || a.Metadata["implementation_trusted_origin"] != "coordinator" {
+			continue
+		}
+		matches := true
+		for k, v := range bindings {
+			if k != "review_claim_id" && (v == "" || a.Metadata["implementation_trusted_"+k] != v) {
+				matches = false
+				break
+			}
+		}
+		if matches {
 			return true
 		}
 	}

@@ -2441,3 +2441,135 @@ func TestPartialImplementationStaleWorkerFailsWithClaimFence(t *testing.T) {
 		t.Fatalf("successor state changed: %+v %v", st, stateErr)
 	}
 }
+
+func TestIssueWorkContinuationChangedInputs(t *testing.T) {
+	for _, input := range []string{"plan_digest", "test_plan_digest", "task_digest", "unchanged"} {
+		t.Run(input, func(t *testing.T) {
+			if input == "task_digest" {
+				t.Skip("normal task reapproval removes implementation evidence; approved fixture assumption requires scope review")
+			}
+			e, issue := gatedTesterRetryEngine(t, contract.GateHuman)
+			initial := true
+			var roles []string
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					roles = append(roles, req.Role)
+					if req.Role == "tester" && initial {
+						return nil, errors.New("tester process interrupted")
+					}
+					return (&agent.MockRunner{}).Run(ctx, req)
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "plan", Headless: true}
+			planned, err := e.ExecuteWork(t.Context(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = e.LeaseManager.RecordHumanReview(t.Context(), issue.Number, "APPROVED", "Initial plan"); err != nil {
+				t.Fatal(err)
+			}
+			opts.Phase, opts.IssueContinuation, opts.ClaimID = "all", true, planned.State.Lease.ClaimID
+			first, err := e.ExecuteWork(t.Context(), opts)
+			if err == nil || !strings.Contains(err.Error(), "tester process interrupted") || first == nil {
+				t.Fatalf("initial: %v", err)
+			}
+			var prior contract.Artifact
+			for _, a := range first.State.Artifacts {
+				if a.Type == contract.ArtifactValidation {
+					t.Fatal("interrupted tester recorded validation")
+				}
+				if a.Type == contract.ArtifactImplementation {
+					prior = a
+				}
+			}
+			if prior.Verdict != "PASS" || prior.Metadata["implementation_trusted_origin"] != "coordinator" {
+				t.Fatal("missing trusted PASS")
+			}
+			st := first.State
+			if input == "task_digest" {
+				if _, err = e.LeaseManager.Release(t.Context(), issue.Number, "maintainer", "update task"); err != nil {
+					t.Fatal(err)
+				}
+				wu, parseErr := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+				if parseErr != nil {
+					t.Fatal(parseErr)
+				}
+				wu.Objective += " with updated requirements"
+				if _, err = e.Tracker.UpdateIssueBody(t.Context(), issue.Number, contract.FormatIssueMarkdown(wu)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = e.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+					t.Fatal(err)
+				}
+				st, err = e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "all", time.Hour, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if input != "unchanged" {
+				var plan, test contract.Artifact
+				for _, a := range first.State.Artifacts {
+					if a.Type == contract.ArtifactDesign {
+						plan = a
+					}
+					if a.Type == contract.ArtifactTestPlan {
+						test = a
+					}
+				}
+				if input == "plan_digest" {
+					plan.Body += "\nUpdated approved plan.\n"
+				}
+				if input == "test_plan_digest" {
+					test.Body += "\nUpdated approved tests.\n"
+				}
+				st, err = e.LeaseManager.RecordPlanPair(t.Context(), issue.Number, "maintainer", plan, test)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if input != "unchanged" {
+				st, err = e.LeaseManager.RecordHumanReview(t.Context(), issue.Number, "APPROVED", "Updated inputs")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if prior.Metadata["implementation_trusted_"+input] == lease.ReviewBindings(st)[input] {
+					t.Fatal("input did not change")
+				}
+			}
+			currentIssue, err := e.Tracker.GetIssue(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wu, err := contract.ParseWorkUnitFromIssue(issue.Number, currentIssue.Title, currentIssue.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !lease.TaskApprovalCurrent(st, wu, e.Config) {
+				t.Fatal("task approval stale")
+			}
+			if err = lease.VerifyApproval(st, wu); err != nil {
+				t.Fatal(err)
+			}
+			retained := false
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactImplementation && a.Verdict == "PASS" && a.Metadata["implementation_trusted_"+input] == prior.Metadata["implementation_trusted_"+input] {
+					retained = true
+				}
+			}
+			if !retained {
+				t.Fatal("prior implementation lost")
+			}
+			initial, roles = false, nil
+			opts.ClaimID = st.Lease.ClaimID
+			resumed, err := e.ExecuteWork(t.Context(), opts)
+			want := "developer,tester"
+			if input == "unchanged" {
+				want = "tester"
+			}
+			if err != nil || resumed == nil || !resumed.ValidationPassed || strings.Join(roles, ",") != want {
+				t.Fatalf("continuation: %v roles=%v want=%s", err, roles, want)
+			}
+		})
+	}
+}

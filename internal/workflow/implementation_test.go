@@ -388,6 +388,9 @@ func TestPartialImplementationOutcomeStopsBeforeTester(t *testing.T) {
 func TestPartialImplementationPASSOnlyConsumers(t *testing.T) {
 	st := &lease.IssueState{BaseSHA: "base", TaskDigest: "task", PolicyDigest: "policy", NextPhaseReason: "claim budget", Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}}}
 	md := lease.ReviewBindings(st)
+	for k, v := range lease.ReviewBindings(st) {
+		md["implementation_trusted_"+k] = v
+	}
 	md["head_sha"] = "head"
 	md["implementation_trusted_origin"] = "coordinator"
 	md["implementation_outcome"] = "partial"
@@ -430,5 +433,63 @@ func TestPartialImplementationScopeExclusions(t *testing.T) {
 				t.Fatalf("%s: %q", mode, got)
 			}
 		})
+	}
+}
+
+func TestHasTrustedImplementationBindings(t *testing.T) {
+	newState := func() *lease.IssueState {
+		st := &lease.IssueState{BaseSHA: "base", TaskDigest: "task", PolicyDigest: "policy", PolicyTreeDigest: "tree", Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: "plan"}, {Type: contract.ArtifactTestPlan, Body: "tests"}}}
+		md := map[string]string{"implementation_trusted_origin": "coordinator"}
+		for k, v := range lease.ReviewBindings(st) {
+			md["implementation_trusted_"+k] = v
+		}
+		st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactImplementation, Verdict: "PASS", Metadata: md})
+		return st
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*lease.IssueState)
+		want   bool
+	}{
+		{"matching", func(*lease.IssueState) {}, true},
+		{"retry claim", func(st *lease.IssueState) { st.Lease.ClaimID = "replacement" }, true},
+		{"missing plan", func(st *lease.IssueState) { st.Artifacts = st.Artifacts[1:] }, false},
+		{"missing tests", func(st *lease.IssueState) { st.Artifacts = append(st.Artifacts[:1], st.Artifacts[2]) }, false},
+		{"empty required", func(st *lease.IssueState) {
+			st.BaseSHA = ""
+			st.Artifacts[2].Metadata["implementation_trusted_base_sha"] = ""
+		}, false},
+		{"failed", func(st *lease.IssueState) { st.Artifacts[2].Verdict = "FAIL" }, false},
+		{"untrusted", func(st *lease.IssueState) { st.Artifacts[2].Metadata["implementation_trusted_origin"] = "agent" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newState()
+			tc.change(st)
+			if got := hasTrustedImplementation(st); got != tc.want {
+				t.Fatalf("got %v want %v", got, tc.want)
+			}
+		})
+	}
+	for k := range lease.ReviewBindings(newState()) {
+		if k == "review_claim_id" {
+			continue
+		}
+		for _, mode := range []string{"changed", "missing"} {
+			t.Run(k+"/"+mode, func(t *testing.T) {
+				st := newState()
+				md := st.Artifacts[2].Metadata
+				if mode == "missing" {
+					delete(md, "implementation_trusted_"+k)
+				} else {
+					md["implementation_trusted_"+k] = "stale"
+				}
+				if hasTrustedImplementation(st) {
+					t.Fatal("stale binding accepted")
+				}
+			})
+		}
+	}
+	if hasTrustedImplementation(nil) {
+		t.Fatal("nil state accepted")
 	}
 }

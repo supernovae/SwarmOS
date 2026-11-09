@@ -1480,12 +1480,17 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 			if res == nil {
 				t.Fatalf("missing result: %v", err)
 			}
-			if testers != 1 || developers != 1 {
+			acceptanceRepair := tc.name == "331" || tc.name == "legacy"
+			wantRoles := 1
+			if acceptanceRepair {
+				wantRoles = 2
+			}
+			if testers != wantRoles || developers != wantRoles {
 				t.Fatalf("role calls %d/%d", developers, testers)
 			}
 			for _, name := range []string{"one", "two"} {
 				data, _ := os.ReadFile(filepath.Join(counterDir, name))
-				want := 1
+				want := wantRoles
 				if tc.stop {
 					want = 0
 				}
@@ -1527,6 +1532,10 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 					if data, _ := os.ReadFile(filepath.Join(counterDir, name)); len(data) != 0 {
 						t.Fatal("retry ran checks")
 					}
+				}
+			} else if acceptanceRepair {
+				if !errors.Is(err, ErrValidationRepairExhausted) || errors.Is(err, validation.ErrRequiredCheckFailed) || !res.ValidationPassed || res.State.ValidationRepairCount != 1 {
+					t.Fatalf("acceptance repair: %v", err)
 				}
 			} else if err != nil || !res.ValidationPassed {
 				t.Fatalf("normal validation: %v", err)

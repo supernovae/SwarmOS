@@ -314,3 +314,36 @@ func TestDescriptionAcceptanceExternal(t *testing.T) {
 		t.Fatal("unescaped environment", body)
 	}
 }
+
+func TestIssue464DescriptionFindings(t *testing.T) {
+	md := map[string]string{"head_sha": "head", "base_sha": "base", "validation_claim": "claim", "validation_base": "base", "validation_tree": "tree", "validation_policy": "policy", "validation_trusted_origin": "coordinator", "validation_trusted_owner": "owner", "validation_trusted_claim": "claim"}
+	body := "## Independent acceptance review 1\nFirst behavior is absent.\n## Independent acceptance review 2\nSecond behavior loses data. <!-- swarm:issue-description:end -->\n" + validation.AcceptanceEvidenceStart + "\n" + `{"version":1,"criteria":[{"index":1,"criterion":"first","status":"unmet","evidence":"Independent acceptance review 1"},{"index":2,"criterion":"second","status":"unmet","evidence":"Independent acceptance review 2"}]}` + "\n" + validation.AcceptanceEvidenceEnd
+	validation.StoreAcceptanceSnapshot(md, validation.CaptureAcceptanceEvidence(body))
+	st := &IssueState{HeadSHA: "head", BaseSHA: "base", Lease: contract.Lease{Owner: "owner", ClaimID: "claim"}, Artifacts: []contract.Artifact{{Type: contract.ArtifactValidation, Verdict: "PASS", Metadata: md}}}
+	for i := 0; i < 3; i++ {
+		dst := contract.Artifact{Type: contract.ArtifactValidation, Verdict: "PASS", Metadata: map[string]string{}}
+		for k, v := range md {
+			if k != validation.AcceptanceEvidenceKey {
+				dst.Metadata[k] = v
+			}
+		}
+		PreserveAcceptanceEvidence(st, &dst)
+		if strings.Count(dst.Body, "First behavior is absent.") != 1 {
+			t.Fatal("findings lost/duplicated", dst.Body)
+		}
+		st.Artifacts = append(st.Artifacts, dst)
+	}
+	unit := &contract.WorkUnit{IssueNumber: 464, Acceptance: []string{"first", "second"}}
+	section, err := ComposePRDescription("", "issue-description", DescriptionIssueSection(unit, st, "ref", ProjectionContext{}), "ref", 464)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"First behavior is absent.", "Second behavior loses data.", "Independent acceptance review 1", "Independent acceptance review 2", "&lt;!-- swarm:issue-description:end -->"} {
+		if !strings.Contains(section, want) {
+			t.Fatalf("missing %q: %s", want, section)
+		}
+	}
+	if RecordedReadiness(st, unit.Acceptance).SubmissionError(464, false) == nil {
+		t.Fatal("unmet evidence allowed submission")
+	}
+}

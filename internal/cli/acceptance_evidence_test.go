@@ -216,7 +216,11 @@ func TestIssueSubmitAcceptanceRefusal(t *testing.T) {
 					if current.PRNumber != 0 || current.Lease.Status == "completed" || current.HeadSHA != st.HeadSHA {
 						t.Fatal("published rejected evidence")
 					}
-					if !strings.Contains(err.Error(), "swarm issue work "+n+" --phase test") || !strings.Contains(err.Error(), "Produce a checked checkpoint") {
+					phase := "test"
+					if mode == "unmet" {
+						phase = "implement"
+					}
+					if !strings.Contains(err.Error(), "swarm issue work "+n+" --phase "+phase) || !strings.Contains(err.Error(), "Produce a checked checkpoint") {
 						t.Fatal(err)
 					}
 				}

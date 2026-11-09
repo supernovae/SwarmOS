@@ -409,7 +409,7 @@ func TestIssue466ExpiredDeveloperStatus(t *testing.T) {
 	}
 }
 
-func TestIssue466StatusNextActionMatrix(t *testing.T) {
+func TestIssue464StatusNextActionMatrix(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason, op string
 		args             []string
@@ -419,7 +419,9 @@ func TestIssue466StatusNextActionMatrix(t *testing.T) {
 		{"failed checks", ReasonValidationRepairExhausted, "work", []string{"--phase", "implement"}, false},
 		{"pre-existing checks", ReasonPreExistingFailures, "status", nil, true},
 		{"missing acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
-		{"unmet acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
+		{"malformed acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
+		{"unmentioned acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
+		{"unmet acceptance", ReasonValidationRepairExhausted, "work", []string{"--phase", "implement"}, false},
 		{"ready", "ready_to_submit", "submit", nil, false},
 		{"expired ready", "resumable_work", "work", nil, false},
 		{"submitted", "submitted", "status", nil, false},
@@ -460,6 +462,10 @@ func TestIssue466StatusNextActionMatrix(t *testing.T) {
 							a.Metadata[validation.RepairMetadataKey] = string(raw)
 						case "missing acceptance":
 							delete(a.Metadata, validation.AcceptanceEvidenceKey)
+						case "malformed acceptance":
+							validation.StoreAcceptanceSnapshot(a.Metadata, validation.AcceptanceSnapshot{State: "malformed"})
+						case "unmentioned acceptance":
+							validation.StoreAcceptanceSnapshot(a.Metadata, validation.AcceptanceSnapshot{State: "valid", Block: `{"version":1,"criteria":[]}`})
 						case "unmet acceptance":
 							raw := strings.ReplaceAll(a.Metadata[validation.AcceptanceEvidenceKey], "met", "unmet")
 							a.Metadata[validation.AcceptanceEvidenceKey] = raw

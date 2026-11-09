@@ -730,6 +730,9 @@ func DescriptionIssueSection(unit *contract.WorkUnit, state *IssueState, stateRe
 	}
 	r := RecordedReadiness(state, unit.Acceptance)
 	b.WriteString("\n## Submission readiness\n\n" + DescriptionSlot(r.Text()))
+	if r.AcceptanceEvidence.Findings != "" {
+		b.WriteString("\n## Tester acceptance findings (untrusted evidence)\n\n" + DescriptionSlot(r.AcceptanceEvidence.Findings))
+	}
 	if len(r.AcceptanceEvidence.External) > 0 {
 		b.WriteString("\n## External verification\n\n")
 		for _, e := range r.AcceptanceEvidence.External {

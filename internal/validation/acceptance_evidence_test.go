@@ -105,7 +105,7 @@ func TestAcceptanceEvidenceRepeatedReuse(t *testing.T) {
 	art.Metadata["validation_trusted_origin"] = "coordinator"
 	art.Metadata["validation_trusted_owner"] = "owner"
 	art.Metadata["validation_trusted_claim"] = "claim"
-	snapshot := CaptureAcceptanceEvidence(evidenceBlock(`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"met","evidence":"VALIDATION.md: result"}]}`))
+	snapshot := CaptureAcceptanceEvidence("## Independent acceptance review 1\nThe behavior loses data.\n" + evidenceBlock(`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"unmet","evidence":"Independent acceptance review 1"}]}`))
 	StoreAcceptanceSnapshot(art.Metadata, snapshot)
 	for i := 0; i < 3; i++ {
 		reused, err := Reuse(t.Context(), root, opts, "owner", []contract.Artifact{art})
@@ -113,7 +113,7 @@ func TestAcceptanceEvidenceRepeatedReuse(t *testing.T) {
 			t.Fatal(err)
 		}
 		art = reused.Artifact
-		if strings.Count(art.Body, AcceptanceEvidenceStart) != 1 || len(AcceptanceEvidenceWarnings([]string{"works"}, AcceptanceSnapshotFromMetadata(art.Metadata))) != 0 {
+		if strings.Count(art.Body, AcceptanceEvidenceStart) != 1 || strings.Count(art.Body, "The behavior loses data.") != 1 || !strings.Contains(art.Body, "Independent acceptance review 1") {
 			t.Fatal(art)
 		}
 	}
@@ -171,5 +171,84 @@ func TestAcceptanceAssessmentMixed(t *testing.T) {
 	a = AssessAcceptance(criteria, snapshot)
 	if a.State != "complete" || len(a.External) != 2 || a.External[0].Index != 2 || a.External[1].Index != 3 {
 		t.Fatal(a)
+	}
+}
+
+func TestIssue464FindingsAndAction(t *testing.T) {
+	body := "## Independent acceptance review 1\nThe first behavior is absent.\n\n## Independent acceptance review 2\nThe second behavior loses data.\n" + evidenceBlock(`{"version":1,"criteria":[{"index":1,"criterion":"first","status":"unmet","evidence":"Independent acceptance review 1"},{"index":2,"criterion":"second","status":"unmet","evidence":"Independent acceptance review 2"}]}`)
+	metadata := map[string]string{}
+	StoreAcceptanceSnapshot(metadata, CaptureAcceptanceEvidence(body))
+	restored := RestoreAcceptanceEvidence("Required checks passed.\n", metadata)
+	for _, sentence := range []string{"The first behavior is absent.", "The second behavior loses data."} {
+		if !strings.Contains(restored, sentence) {
+			t.Errorf("lost finding: %s", sentence)
+		}
+	}
+	if again := RestoreAcceptanceEvidence(restored, metadata); again != restored {
+		t.Error("restoration accumulates findings")
+	}
+	r := NewReadiness("passed", []string{"first", "second"}, AcceptanceSnapshotFromMetadata(metadata))
+	if err := r.SubmissionError(464, false); err == nil || !strings.Contains(err.Error(), "--phase implement") {
+		t.Errorf("wrong action: %v", err)
+	}
+}
+
+func TestIssue464RepairAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name, entries string
+		repair        bool
+	}{
+		{"unmet", `{"index":1,"criterion":"first","status":"unmet"}`, true},
+		{"missing", "", false},
+		{"malformed", `{"index":1,"criterion":"first","status":"unmet"},{"index":2,"criterion":"second","status":"oops"}`, false},
+		{"duplicate", `{"index":1,"criterion":"first","status":"unmet"},{"index":1,"criterion":"first","status":"unmet"}`, false},
+		{"mismatch", `{"index":1,"criterion":"other","status":"unmet"}`, false},
+		{"outside", `{"index":3,"criterion":"other","status":"unmet"}`, false},
+		{"mixed", `{"index":1,"criterion":"first","status":"unmet"},{"index":2,"criterion":"second","status":"external","reason":"Windows host"}`, true},
+		{"external", `{"index":1,"criterion":"first","status":"external","reason":"Windows host"},{"index":2,"criterion":"second","status":"met","evidence":"observed"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewReadiness("passed", []string{"first", "second"}, CaptureAcceptanceEvidence(evidenceBlock(`{"version":1,"criteria":[`+tc.entries+`]}`)))
+			if r.AcceptanceEvidence.NeedsRepair() != tc.repair {
+				t.Fatalf("%+v", r)
+			}
+			err := r.SubmissionError(464, false)
+			if err != nil {
+				phase := "test"
+				if tc.repair {
+					phase = "implement"
+				}
+				if !strings.Contains(err.Error(), "--phase "+phase) {
+					t.Fatal(err)
+				}
+			}
+			if forkErr := r.SubmissionError(464, true); forkErr != nil && !strings.Contains(forkErr.Error(), "--phase test upstream") {
+				t.Fatal(forkErr)
+			}
+		})
+	}
+}
+
+func TestIssue464BoundedAndLegacyFindings(t *testing.T) {
+	block := evidenceBlock(`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"unmet"}]}`)
+	snapshot := CaptureAcceptanceEvidence(strings.Repeat("x", MaxAcceptanceEvidenceBytes+1) + "\n" + block)
+	if len(snapshot.Findings) != MaxAcceptanceEvidenceBytes {
+		t.Fatal("unbounded findings")
+	}
+	md := map[string]string{}
+	StoreAcceptanceSnapshot(md, snapshot)
+	if AcceptanceSnapshotFromMetadata(md).State != "valid" {
+		t.Fatal("bounded snapshot unreadable")
+	}
+	// Old metadata contains the mapping without a prose field.
+	md[AcceptanceEvidenceKey] = `{"state":"valid","block":"{\"version\":1,\"criteria\":[]}"}`
+	if s := AcceptanceSnapshotFromMetadata(md); s.State != "valid" || s.Findings != "" {
+		t.Fatal(s)
+	}
+	for _, state := range []string{"missing", "malformed"} {
+		StoreAcceptanceSnapshot(md, AcceptanceSnapshot{State: state, Findings: "stale finding"})
+		if s := AcceptanceSnapshotFromMetadata(md); s.Findings != "" || strings.Contains(RestoreAcceptanceEvidence("", md), "stale finding") {
+			t.Fatal(s)
+		}
 	}
 }

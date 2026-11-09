@@ -418,6 +418,9 @@ func (c stopContext) statusAction(st *lease.IssueState, wu *contract.WorkUnit, c
 		return action("ready_to_submit", "submit")
 	}
 	if live && !recordedValidationFailed(st) && workflow.RecordedImplementation(st) != nil && readiness != nil && readiness.AcceptanceEvidence.State != "complete" {
+		if c.resource == "issue" && (c.opts == nil || !c.opts.Fork) && st.PRNumber == 0 && st.PRRevision == nil && readiness.AcceptanceEvidence.NeedsRepair() {
+			return action(ReasonValidationRepairExhausted, "work", "--phase", "implement")
+		}
 		return action("tester_retry_available", "work", "--phase", "test")
 	}
 	return action("resumable_work", "work")

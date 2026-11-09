@@ -145,3 +145,65 @@ func TestLedgerNamespaceAtTrustedCommit(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeConfigArchive(t *testing.T) {
+	for _, tc := range []struct {
+		extra string
+		valid bool
+	}{
+		{"", true}, {"archive: {}\n", true}, {"archive:\n  strategy: keep\n", true},
+		{"archive:\n  strategy: repo\n  after_days: 30\n  repo: acme/private-archive\n", true},
+		{"archive:\n  strategy: purge\n", false}, {"archive:\n  strategy: repo\n", false},
+		{"archive:\n  after_days: 0\n", false}, {"archive:\n  after_days: -1\n", false},
+		{"archive:\n  after_days: 1.5\n", false}, {"archive:\n  after_days: 1.0\n", false},
+		{"archive:\n  after_days: 106752\n", false}, {"archive:\n  after_days: null\n", false},
+		{"archive:\n  repo: ../repo\n", false}, {"archive:\n  strategy: 1\n", false},
+	} {
+		_, err := decodeConfig([]byte(ledgerTestConfig + tc.extra))
+		if (err == nil) != tc.valid {
+			t.Fatalf("%s: %v", tc.extra, err)
+		}
+	}
+}
+func TestArchivePolicyAtTrustedCommit(t *testing.T) {
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, e := gitfixture.Command(t, root, args...).CombinedOutput()
+		if e != nil {
+			t.Fatalf("%s %v", out, e)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-b", "main")
+	git("commit", "--allow-empty", "-m", "missing config")
+	missing := git("rev-parse", "HEAD")
+	path := filepath.Join(root, ".swarm", "config.yaml")
+	if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
+		t.Fatal(e)
+	}
+	opt := ledgerTestConfig + "archive:\n  strategy: repo\n  after_days: 30\n  repo: acme/archive\n"
+	if e := os.WriteFile(path, []byte(opt), 0600); e != nil {
+		t.Fatal(e)
+	}
+	git("add", ".")
+	git("commit", "-m", "opt in")
+	repo := git("rev-parse", "HEAD")
+	if e := os.WriteFile(path, []byte(ledgerTestConfig), 0600); e != nil {
+		t.Fatal(e)
+	}
+	for _, tc := range []struct {
+		sha, strategy string
+		valid         bool
+	}{
+		{missing, "keep", true}, {repo, "repo", true}, {"HEAD", "", false}, {strings.Repeat("a", 40), "", false},
+	} {
+		c, e := ArchivePolicyAt(root, tc.sha)
+		if (e == nil) != tc.valid {
+			t.Fatalf("%s %v", tc.sha, e)
+		}
+		if e == nil && c.EffectiveStrategy() != tc.strategy {
+			t.Fatalf("worktree selected policy")
+		}
+	}
+}

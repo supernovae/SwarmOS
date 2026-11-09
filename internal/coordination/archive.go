@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
@@ -369,6 +370,17 @@ func (s *GitStore) Archive(ctx context.Context, m *contract.ArchiveManifest, rec
 		candidate := *m
 		candidate.ArchivedAt = prior.ArchivedAt
 		candidate.Actor = prior.Actor
+		if prior.Cutoff != nil {
+			stamp, e := scratch.run(ctx, "", "show", "-s", "--format=%ct", prior.StateTip)
+			if e != nil {
+				return e
+			}
+			seconds, e := strconv.ParseInt(strings.TrimSpace(stamp), 10, 64)
+			if e != nil || !time.Unix(seconds, 0).Before(*prior.Cutoff) {
+				return fmt.Errorf("retained archive cutoff inconsistent with state tip")
+			}
+		}
+		candidate.Cutoff = prior.Cutoff
 		candidateBytes, _, e := contract.MarshalArchiveManifest(&candidate)
 		if e != nil || string(candidateBytes) != body {
 			return fmt.Errorf("archive manifest conflict; use a clean destination")
@@ -658,4 +670,68 @@ func (s *GitStore) CheckArchiveDestination(ctx context.Context, destination stri
 // a missing issue. Store mutations independently repeat this check and fence.
 func (s *GitStore) CheckArchived(ctx context.Context, n int) error {
 	return s.archiveAdmission(ctx, n, false)
+}
+
+type ArchiveCandidate struct {
+	Issue    int    `json:"issue"`
+	StateTip string `json:"state_tip"`
+}
+
+// ArchiveCandidates lists only canonical issue state refs in the selected layout.
+func (s *GitStore) ArchiveCandidates(ctx context.Context) ([]ArchiveCandidate, error) {
+	raw, err := s.run(ctx, "", "ls-remote", "--refs", s.Remote(), s.layout.StatePrefix()+"*")
+	if err != nil {
+		return nil, err
+	}
+	seen := map[int]string{}
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) != 2 || !validArchiveSHA(f[0]) || !strings.HasPrefix(f[1], "refs/") {
+			return nil, fmt.Errorf("malformed archive candidate evidence")
+		}
+		n, e := strconv.Atoi(strings.TrimPrefix(f[1], s.layout.StatePrefix()+"issue-"))
+		if e != nil || n <= 0 || f[1] != s.layout.StateRef(n) {
+			continue
+		}
+		if old, ok := seen[n]; ok && old != f[0] {
+			return nil, fmt.Errorf("conflicting candidate evidence")
+		}
+		seen[n] = f[0]
+	}
+	out := make([]ArchiveCandidate, 0, len(seen))
+	for n, sha := range seen {
+		out = append(out, ArchiveCandidate{n, sha})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Issue < out[j].Issue })
+	return out, nil
+}
+func validArchiveSHA(sha string) bool {
+	if len(sha) != 40 || sha == strings.Repeat("0", 40) {
+		return false
+	}
+	for _, c := range sha {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ArchiveCommitTime inspects the exact advertised object without fetching or ref writes.
+func (s *GitStore) ArchiveCommitTime(ctx context.Context, sha string) (time.Time, error) {
+	if !validArchiveSHA(sha) {
+		return time.Time{}, fmt.Errorf("invalid archive state tip")
+	}
+	raw, err := s.run(ctx, "", "show", "-s", "--format=%ct", sha+"^{commit}")
+	if err != nil {
+		return time.Time{}, fmt.Errorf("state tip unavailable locally; fetch before preview: %w", err)
+	}
+	seconds, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(seconds, 0).UTC(), nil
 }

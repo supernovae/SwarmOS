@@ -585,6 +585,11 @@ func validateTrackerYAML(data []byte) error {
 	// coercing numeric, null or boolean values into a Go string.
 	var selector struct {
 		Tracker yaml.Node `yaml:"tracker"`
+		Archive *struct {
+			Strategy  yaml.Node `yaml:"strategy"`
+			AfterDays yaml.Node `yaml:"after_days"`
+			Repo      yaml.Node `yaml:"repo"`
+		} `yaml:"archive"`
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	if err := decoder.Decode(&selector); err != nil && err != io.EOF {
@@ -594,6 +599,18 @@ func validateTrackerYAML(data []byte) error {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return fmt.Errorf("parse .swarm/config.yaml: expected a single YAML document")
 	}
+	if selector.Archive != nil {
+		for _, node := range []yaml.Node{selector.Archive.Strategy, selector.Archive.Repo} {
+			if node.Kind != 0 && node.Tag != "!!str" {
+				return fmt.Errorf("archive strategy and repo must be strings")
+			}
+		}
+		node := selector.Archive.AfterDays
+		if node.Kind != 0 && node.Tag != "!!int" {
+			return fmt.Errorf("archive.after_days must be an integer")
+		}
+	}
+
 	value := selector.Tracker
 	if value.Kind != 0 && (value.Tag != "!!str" || (value.Value != "github" && value.Value != "local")) {
 		return fmt.Errorf("tracker in .swarm/config.yaml must be github or local")
@@ -628,6 +645,9 @@ func decodeConfig(data []byte) (*contract.SwarmConfig, error) {
 		return nil, err
 	}
 	if err := contract.ValidatePlanMode(cfg.PlanMode); err != nil {
+		return nil, err
+	}
+	if err := contract.ValidateArchiveConfig(cfg.Archive); err != nil {
 		return nil, err
 	}
 	if err := contract.ValidateLedgerNamespace(cfg.LedgerNamespace); err != nil {
@@ -1203,4 +1223,26 @@ func ValidateTrackerConfig(root string) error {
 		return fmt.Errorf("read .swarm/config.yaml: %w", err)
 	}
 	return validateTrackerYAML(data)
+}
+
+// ArchivePolicyAt reads only immutable upstream configuration, defaulting to keep.
+func ArchivePolicyAt(repoRoot, sha string) (*contract.ArchiveConfig, error) {
+	if err := validCommitSHA(sha); err != nil {
+		return nil, err
+	}
+	if _, err := gitcredential.Output(context.Background(), repoRoot, "cat-file", "-e", sha+"^{commit}"); err != nil {
+		return nil, err
+	}
+	listed, err := gitcredential.Output(context.Background(), repoRoot, "ls-tree", "--name-only", sha, "--", ".swarm/config.yaml")
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(string(listed)) == "" {
+		return nil, nil
+	}
+	cfg, err := LoadConfigAt(repoRoot, sha)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.Archive, nil
 }

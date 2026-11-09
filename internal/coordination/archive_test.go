@@ -538,3 +538,91 @@ exec "$ARCHIVE_LOST_REAL" "$@"
 		})
 	}
 }
+
+func TestArchiveCanonicalCandidates(t *testing.T) {
+	for _, layout := range []RefLayout{BranchLayout, HiddenLayout} {
+		t.Run(layout.Name(), func(t *testing.T) {
+			f, m := archiveFixture(t, layout)
+			for _, ref := range []string{layout.StateRef(2), layout.StatePrefix() + "issue-01", layout.StatePrefix() + "issue-0", layout.StatePrefix() + "issue-999999999999999999999999", layout.StatePrefix() + "issue-4/nested", layout.StatePrefix() + "issue-4-suffix"} {
+				f.git(f.remote, "update-ref", ref, m.StateTip)
+			}
+			before := f.git(f.clone, "for-each-ref")
+			candidates, e := f.store.ArchiveCandidates(context.Background())
+			if e != nil {
+				t.Fatal(e)
+			}
+			if len(candidates) != 2 || candidates[0].Issue != 2 || candidates[1].Issue != 363 {
+				t.Fatalf("%+v", candidates)
+			}
+			if before != f.git(f.clone, "for-each-ref") {
+				t.Fatal("enumeration changed refs")
+			}
+			if _, e = f.store.ArchiveCommitTime(context.Background(), strings.Repeat("a", 40)); e == nil {
+				t.Fatal("missing object accepted")
+			}
+		})
+	}
+}
+func TestArchiveRetainedCutoffRejectsInconsistentAge(t *testing.T) {
+	f, m := archiveFixture(t, BranchLayout)
+	ctx := context.Background()
+	stamp, e := f.store.ArchiveCommitTime(ctx, m.StateTip)
+	if e != nil {
+		t.Fatal(e)
+	}
+	m.Cutoff = &stamp
+	// A structurally valid but age-inconsistent prior manifest must never authorize a retry.
+	stop := errors.New("stop after copy")
+	if e = f.store.Archive(ctx, m, func(context.Context) error { return stop }); !errors.Is(e, stop) {
+		t.Fatalf("%v", e)
+	}
+	later := stamp.Add(24 * time.Hour)
+	m.Cutoff = &later
+	if e = f.store.Archive(ctx, m, func(context.Context) error { return nil }); e == nil {
+		t.Fatal("age-inconsistent retained cutoff accepted")
+	}
+	if got := f.git(f.remote, "rev-parse", BranchLayout.StateRef(363)); got != m.StateTip {
+		t.Fatal("source removed")
+	}
+}
+
+func TestArchiveCutoffNormalizationKeepsIdentityExact(t *testing.T) {
+	for _, field := range []string{"repository", "namespace", "destination", "outcome", "checkpoint", "state"} {
+		t.Run(field, func(t *testing.T) {
+			f, m := archiveFixture(t, BranchLayout)
+			ctx := context.Background()
+			stamp, e := f.store.ArchiveCommitTime(ctx, m.StateTip)
+			if e != nil {
+				t.Fatal(e)
+			}
+			c1 := stamp.Add(24 * time.Hour)
+			m.Cutoff = &c1
+			if e = f.store.Archive(ctx, m, func(context.Context) error { return errors.New("copied") }); e == nil {
+				t.Fatal("expected post-copy failure")
+			}
+			c2 := c1.Add(24 * time.Hour)
+			m.Cutoff = &c2
+			switch field {
+			case "repository":
+				m.Repository = "other/repository"
+			case "namespace":
+				m.Namespace = "hidden"
+			case "destination":
+				m.Destination += "/../archive.git"
+			case "outcome":
+				m.PROutcome = "merged"
+			case "checkpoint":
+				m.Refs = m.Refs[1:]
+			case "state":
+				m.StateTip = strings.Repeat("a", 40)
+			}
+			before := f.git(f.remote, "for-each-ref")
+			if e = f.store.Archive(ctx, m, func(context.Context) error { return nil }); e == nil {
+				t.Fatal("identity mismatch accepted")
+			}
+			if before != f.git(f.remote, "for-each-ref") {
+				t.Fatal("failed identity check changed source")
+			}
+		})
+	}
+}

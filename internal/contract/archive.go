@@ -33,6 +33,7 @@ type ArchiveManifest struct {
 	StateTip    string       `json:"state_tip"`
 	PROutcome   string       `json:"pr_outcome"`
 	Actor       string       `json:"actor"`
+	Cutoff      *time.Time   `json:"cutoff,omitempty"`
 	ArchivedAt  time.Time    `json:"archived_at"`
 }
 
@@ -100,6 +101,9 @@ func ValidateArchiveManifest(m *ArchiveManifest) error {
 	if m == nil {
 		return fmt.Errorf("archive manifest is nil")
 	}
+	if m.Cutoff != nil && m.Cutoff.IsZero() {
+		return fmt.Errorf("invalid archive cutoff")
+	}
 	if err := validateArchiveSchema(m); err != nil {
 		return err
 	}
@@ -155,6 +159,10 @@ func MarshalArchiveManifest(m *ArchiveManifest) ([]byte, string, error) {
 	copy.Refs = append([]ArchiveRef(nil), m.Refs...)
 	sort.Slice(copy.Refs, func(i, j int) bool { return copy.Refs[i].Source < copy.Refs[j].Source })
 	copy.ArchivedAt = copy.ArchivedAt.UTC()
+	if copy.Cutoff != nil {
+		t := copy.Cutoff.UTC()
+		copy.Cutoff = &t
+	}
 	data, err := json.Marshal(copy)
 	if err != nil {
 		return nil, "", err
@@ -239,6 +247,41 @@ func ValidateArchiveJSON(data []byte) error {
 	}
 	if _, err := d.Token(); err != io.EOF {
 		return fmt.Errorf("trailing archive JSON data")
+	}
+	return nil
+}
+
+// ArchiveConfig is opt-in retention policy from the upstream default branch.
+type ArchiveConfig struct {
+	Strategy  string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+	AfterDays *int   `yaml:"after_days,omitempty" json:"after_days,omitempty"`
+	Repo      string `yaml:"repo,omitempty" json:"repo,omitempty"`
+}
+
+func (c *ArchiveConfig) EffectiveStrategy() string {
+	if c == nil || c.Strategy == "" {
+		return "keep"
+	}
+	return c.Strategy
+}
+func ValidateArchiveConfig(c *ArchiveConfig) error {
+	if c == nil {
+		return nil
+	}
+	if c.EffectiveStrategy() != "keep" && c.EffectiveStrategy() != "repo" {
+		return fmt.Errorf("archive.strategy must be keep or repo")
+	}
+	if c.AfterDays != nil && (*c.AfterDays <= 0 || int64(*c.AfterDays) > int64(1<<63-1)/int64(24*time.Hour)) {
+		return fmt.Errorf("archive.after_days must be a positive supported number of days")
+	}
+	if c.Repo != "" {
+		parts := strings.Split(c.Repo, "/")
+		if !archiveRepository.MatchString(c.Repo) || len(parts) != 2 || parts[0] == "." || parts[0] == ".." || parts[1] == "." || parts[1] == ".." {
+			return fmt.Errorf("archive.repo must be owner/repo")
+		}
+	}
+	if c.EffectiveStrategy() == "repo" && (c.AfterDays == nil || c.Repo == "") {
+		return fmt.Errorf("archive repo strategy requires after_days and repo")
 	}
 	return nil
 }

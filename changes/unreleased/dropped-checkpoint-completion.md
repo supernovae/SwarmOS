@@ -1,0 +1,1 @@
+- Fix issue work stopping at the checkpoint with "completion inputs changed" after `swarm issue approve` on a new base dropped a checkpoint the base already contained; the finished implementation is now preserved and checkpointed on the same task branch.

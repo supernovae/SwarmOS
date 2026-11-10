@@ -10,6 +10,7 @@ import (
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -311,16 +312,38 @@ func TestValidateFallsBackToScratchBuildCache(t *testing.T) {
 }
 
 func TestOCIChecksGetNoBuildCache(t *testing.T) {
+	cacheRoot := useCacheRoot(t)
 	repo := setupGitRepoForValidation(t)
 	config := "version: 1\ndefault_agent: codex\ndefault_gate: agent\nexecution:\n  mode: isolated\n  backend: oci\nlease:\n  duration: 1h\n  max_renewals: 1\nsecurity:\n  require_isolation: true\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  codex:\n    binary: swarm-test-missing-codex\n"
 	base := commitRepoChange(t, repo, ".swarm/config.yaml", config)
-	previous := userCacheDir
-	resolved := false
-	userCacheDir = func() (string, error) { resolved = true; return "", errors.New("must not resolve") }
-	t.Cleanup(func() { userCacheDir = previous })
-	_, _ = Validate(context.Background(), repo, nil, ValidateOptions{CIMode: true, BaseSHA: base})
-	if resolved {
-		t.Fatal("OCI validation resolved a build cache")
+	// Duration history uses the coordinator cache on every backend. Check
+	// the actual cache namespaces rather than treating any lookup as a build
+	// cache: OCI must receive budgets without preparing candidate caches.
+	runs := 0
+	report, err := Validate(context.Background(), repo, nil, ValidateOptions{
+		CIMode: true, BaseSHA: base,
+		runCommand: func(context.Context, string, time.Duration, io.Writer, io.Writer) error {
+			runs++
+			return nil
+		},
+	})
+	if err != nil || report == nil || !report.Passed || runs == 0 {
+		t.Fatalf("OCI validation = %+v, %v; check runs = %d", report, err, runs)
+	}
+	for _, namespace := range []string{"validate-build", "validate-deps"} {
+		if _, err := os.Lstat(filepath.Join(cacheRoot, "swarm", namespace)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("OCI validation prepared %s cache: %v", namespace, err)
+		}
+	}
+	root, err := durationRoot(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for _, outcome := range report.CheckOutcomes {
+		if samples := readDurations(root, durationKey(outcome.Name, outcome.Command)).Samples; len(samples) != 1 {
+			t.Fatalf("OCI passing duration samples = %v, want one", samples)
+		}
 	}
 }
 

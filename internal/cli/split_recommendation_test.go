@@ -491,3 +491,37 @@ func TestDecompositionStatusMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestIssueWorkStopsOnWorkUnitCorrection(t *testing.T) {
+	for _, gate := range []string{"agent", "human"} {
+		t.Run(gate, func(t *testing.T) {
+			f := newCLIFixture(t)
+			number := f.create(t, gate)
+			n := strconv.Itoa(number)
+			f.must(t, "issue", "approve", n)
+			t.Setenv("SWARM_MOCK_PLAN_APPEND", "WorkUnit correction: required\nSplit recommendation: required")
+			out := f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+			approve := "swarm --root '" + f.root + "' issue approve " + n
+			work := "swarm --root '" + f.root + "' issue work " + n
+			for _, want := range []string{"Issue #" + n, "workunit-correction-required: phase=plan", "WorkUnit needs a maintainer edit", approve, work} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("missing %q: %s", want, out)
+				}
+			}
+			if strings.Index(out, approve) >= strings.Index(out, work) || strings.Contains(out, "review-plan") || strings.Contains(out, "Plan approval required") || strings.Contains(out, "issue decompose") {
+				t.Fatal(out)
+			}
+			assertNoSplitProgress(t, f.state(t, number))
+			raw := f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false", "--json")
+			var outcome struct {
+				Status string
+				Result struct {
+					Required bool `json:"workunit_correction_required"`
+				}
+			}
+			if err := json.Unmarshal([]byte(raw), &outcome); err != nil || outcome.Status != "workunit-correction-required" || !outcome.Result.Required {
+				t.Fatalf("%s: %v", raw, err)
+			}
+		})
+	}
+}

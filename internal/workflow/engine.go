@@ -104,6 +104,8 @@ type WorkResult struct {
 	PhaseCompleted   string
 	HandedOffToPhase string
 	PausedForHuman   bool
+	// WorkUnitCorrectionRequired reports a planner-requested stop for a maintainer edit.
+	WorkUnitCorrectionRequired bool `json:"workunit_correction_required,omitempty"`
 	// SplitRecommended reports a run stopped after planning because the
 	// recorded plan recommends splitting the WorkUnit.
 	SplitRecommended bool `json:"split_recommended,omitempty"`
@@ -131,6 +133,8 @@ func (r *WorkResult) Outcome() string {
 	switch {
 	case r.ClaimBudgetPause != nil:
 		return "paused-claim-budget"
+	case r.WorkUnitCorrectionRequired:
+		return "workunit-correction-required"
 	case r.SplitRecommended:
 		return "split-recommended"
 	case r.PausedForHuman:

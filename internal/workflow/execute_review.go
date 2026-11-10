@@ -8,6 +8,9 @@ import (
 )
 
 func (r *workRun) reviewGate() (bool, error) {
+	if r.stopForWorkUnitCorrection() {
+		return true, nil
+	}
 	if r.st.HumanPlanReview != nil && r.st.ForkRepo == "" && r.st.PRNumber == 0 && r.st.PRRevision == nil {
 		return r.awaitHumanReview()
 	}

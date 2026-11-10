@@ -1667,3 +1667,20 @@ func TestTrackerConfigMergedTypes(t *testing.T) {
 		t.Fatal("accepted multiple configuration documents")
 	}
 }
+
+func TestPlannerWorkUnitCorrectionInstructions(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, ".swarm", "prompts", "planner.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := string(raw)
+	for _, want := range []string{"WorkUnit correction: required", "initial plan", "conflicting criteria with path:line evidence", "Still write TEST_PLAN.md mapping every acceptance criterion, including blocked coverage", "open review finding cannot be closed without changing the WorkUnit", "never approves a plan, edits the WorkUnit, resets or spends plan-review retries, or satisfies any gate"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("planner prompt missing %q", want)
+		}
+	}
+}

@@ -82,13 +82,6 @@ type CheckRunOutcome struct {
 	Duration            time.Duration `json:"duration"`
 	Output              string        `json:"output"`
 	Passed              bool          `json:"passed"`
-	// Preliminary marks the changed-package pass that runs before a full
-	// go test check. It can fail validation early but never passes a check.
-	Preliminary bool     `json:"preliminary,omitempty"`
-	Packages    []string `json:"packages,omitempty"`
-	// FallbackReason explains a preliminary attempt that did not finish, such
-	// as a timeout or sandbox error. The full check decided the result instead.
-	FallbackReason string `json:"fallback_reason,omitempty"`
 	// goFailures is the raw, package-attributed Go test evidence of a failed
 	// check, kept in memory only for repair diagnosis.
 	goFailures *goEvidence
@@ -412,7 +405,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		warmNote = warmBuildCaches(ctx, runner, spec.RequiredChecks, baseSHA, &report.Timings.Warmup, opts.OnProgress)
 	}
 	record := func(outcome CheckRunOutcome) {
-		if outcome.Passed && !outcome.Preliminary {
+		if outcome.Passed {
 			report.SkippedTotal += outcome.SkippedTotal
 			for _, skip := range outcome.SkippedTests {
 				if len(report.SkippedTests) < 60 {
@@ -423,9 +416,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		}
 		report.CheckOutcomes = append(report.CheckOutcomes, outcome)
 		status := "PASS"
-		if outcome.FallbackReason != "" {
-			status = "SKIPPED (" + outcome.FallbackReason + ")"
-		} else if !outcome.Passed {
+		if !outcome.Passed {
 			status = fmt.Sprintf("FAIL (exit %d)", outcome.ExitCode)
 			if validLimit(outcome.Outcome) {
 				status = outcome.Outcome
@@ -534,7 +525,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	timingReport.SkippedTests = nil
 	timingReport.CheckOutcomes = make([]CheckRunOutcome, len(report.CheckOutcomes))
 	for i, c := range report.CheckOutcomes {
-		timingReport.CheckOutcomes[i] = CheckRunOutcome{Name: c.Name, Command: c.Command, Outcome: c.Outcome, Passed: c.Passed, ExitCode: c.ExitCode, Duration: c.Duration, Preliminary: c.Preliminary}
+		timingReport.CheckOutcomes[i] = CheckRunOutcome{Name: c.Name, Command: c.Command, Outcome: c.Outcome, Passed: c.Passed, ExitCode: c.ExitCode, Duration: c.Duration}
 	}
 	timingEvidence, _ := json.Marshal(timingReport)
 	report.Artifact.Metadata["validation_timing_report"] = string(timingEvidence)

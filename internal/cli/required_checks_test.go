@@ -10,19 +10,13 @@ import (
 	"testing"
 )
 
-// TestGoFastPassEntryPoints checks which commands run changed-package tests
-// before a required `go test ./...` check. A scripted go command records each
-// invocation, so no Go toolchain work happens here.
-func TestGoFastPassEntryPoints(t *testing.T) {
+// TestConfiguredRequiredCheckEntryPoints verifies each entry point runs only the
+// configured all-package test check using a scripted Go command.
+func TestConfiguredRequiredCheckEntryPoints(t *testing.T) {
 	f := newCLIFixture(t)
 	bin := t.TempDir()
 	log := filepath.Join(bin, "log")
-	metadata := filepath.Join(bin, "metadata.json")
-	module := `"Module":{"Path":"example.com/m","Dir":"/m","Main":true}`
-	if err := os.WriteFile(metadata, []byte(`{"ImportPath":"example.com/m/leaf","Dir":"/m/leaf",`+module+"}\n"+`{"ImportPath":"example.com/m/other","Dir":"/m/other",`+module+"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\nif [ \"$1\" = list ]; then cat '" + metadata + "'; fi\n"
+	script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\n"
 	if err := testutil.WriteExecutable(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -49,21 +43,25 @@ func TestGoFastPassEntryPoints(t *testing.T) {
 		}
 		return string(data)
 	}
-	const preliminary = "test -json example.com/m/leaf\n"
 	for _, step := range []struct {
 		args []string
-		fast bool
 	}{
-		{[]string{"issue", "work", n, "--agent", "mock", "--progress=false"}, false},
-		{[]string{"issue", "validate", n, "--progress=false"}, false},
-		{[]string{"issue", "submit", n, "--progress=false"}, false},
+		{[]string{"issue", "work", n, "--agent", "mock", "--progress=false"}},
+		{[]string{"issue", "validate", n, "--progress=false"}},
+		{[]string{"issue", "submit", n, "--progress=false"}},
 	} {
 		if step.args[1] == "submit" {
 			seedCompleteIssueAcceptance(t, f, mustIssueNumber(n))
 		}
 		f.must(t, step.args...)
 		got := invocations()
-		if strings.Contains(got, preliminary) != step.fast || !strings.HasSuffix(got, "test -json ./...\n") {
+		var tests []string
+		for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+			if strings.HasPrefix(line, "test ") {
+				tests = append(tests, line)
+			}
+		}
+		if len(tests) != 1 || tests[0] != "test -json ./..." {
 			t.Fatalf("swarm %v ran go with:\n%s", step.args, got)
 		}
 	}

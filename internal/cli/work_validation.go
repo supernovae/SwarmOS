@@ -28,7 +28,7 @@ func writeWorkValidationFailure(cmd *cobra.Command, result *workflow.WorkResult)
 	failed := *report
 	failed.CheckOutcomes = nil
 	for _, check := range report.CheckOutcomes {
-		if !check.Passed && check.FallbackReason == "" {
+		if !check.Passed {
 			failed.CheckOutcomes = append(failed.CheckOutcomes, check)
 		}
 	}

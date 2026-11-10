@@ -749,8 +749,8 @@ func TestRequiredCheckDurationHistoryStorage(t *testing.T) {
 			t.Fatalf("accepted %s: %v", raw, got)
 		}
 	}
-	// Failed, preliminary and abandoned runs cannot become training samples.
-	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Duration: time.Second}, {Name: c.Name, Command: c.Command, Passed: true, Preliminary: true, Duration: time.Second}, {Name: c.Name, Command: c.Command, Passed: true, FallbackReason: "skipped", Duration: time.Second}})
+	// Failed runs cannot become training samples.
+	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Duration: time.Second}})
 	if got := requiredCheckBudget(t.Context(), repo, c); got != time.Millisecond {
 		t.Fatalf("invalid training: %v", got)
 	}

@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -180,7 +181,8 @@ func DurationText(d *time.Duration) string {
 }
 
 type ValidateOptions struct {
-	runCommand func(context.Context, string, time.Duration, io.Writer, io.Writer) error
+	requiredCheckWorkers int // zero selects the CPU-derived production bound
+	runCommand           func(context.Context, string, time.Duration, io.Writer, io.Writer) error
 	// DirectIssueReuse permits bounded same-owner cross-claim reuse for direct issues.
 	DirectIssueReuse bool
 	// Version and ClaimID identify the coordinator validation context. Empty
@@ -443,16 +445,24 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			firstErr = fmt.Errorf("%w: check %q (%s) exited with %d: %v", ErrRequiredCheckFailed, outcome.Name, outcome.Command, outcome.ExitCode, runErr)
 		}
 	}
-	required := 0
+	required := len(spec.RequiredChecks)
 	checksStart := time.Now()
-	for _, check := range spec.RequiredChecks {
-		duration := requiredCheckBudget(ctx, worktreePath, check)
-		required++
-		outcome, runErr := runner.runCheck(ctx, check.Name, check.Command, duration, opts.OnProgress)
+	jobs := make([]requiredCheckJob, required)
+	for i, check := range spec.RequiredChecks {
+		jobs[i] = requiredCheckJob{check.Name, check.Command, requiredCheckBudget(ctx, worktreePath, check)}
+	}
+	workers := opts.requiredCheckWorkers
+	if workers == 0 {
+		workers = requiredCheckParallelism(required, runtime.NumCPU())
+	}
+	runner.runRequiredChecks(ctx, jobs, workers, opts.OnProgress, func(outcome CheckRunOutcome, runErr error) {
 		if runErr != nil {
 			fail(&outcome, runErr)
 		}
 		record(outcome)
+	})
+	if ctx.Err() != nil {
+		report.Passed = false
 	}
 	report.Timings.Checks = PhaseTiming{Duration: time.Since(checksStart), Status: "PASS"}
 	if !report.Passed {
@@ -704,6 +714,84 @@ func (r *checkRunner) run(ctx context.Context, command string, duration time.Dur
 	return r.runOnHost(ctx, command, stdout, stderr)
 }
 
+type requiredCheckJob struct {
+	name, command string
+	budget        time.Duration
+}
+
+func requiredCheckParallelism(checks, cpus int) int {
+	return min(checks, max(1, cpus))
+}
+
+// runRequiredChecks joins all workers before returning. Only this coordinator
+// presents results; each worker owns one indexed slot at a time.
+func (r *checkRunner) runRequiredChecks(ctx context.Context, jobs []requiredCheckJob, workers int, observe func(progress.Event), record func(CheckRunOutcome, error)) {
+	if len(jobs) == 0 {
+		return
+	}
+	workers = requiredCheckParallelism(len(jobs), workers)
+	type result struct {
+		outcome CheckRunOutcome
+		err     error
+		done    chan struct{}
+	}
+	results := make([]result, len(jobs))
+	for i := range results {
+		results[i].done = make(chan struct{})
+	}
+	started := func(i int) {
+		if observe != nil {
+			observe(progress.Event{Check: jobs[i].name, Status: "started"})
+		}
+	}
+	started(0)
+	queue := make(chan int, len(jobs))
+	for i := range jobs {
+		queue <- i
+	}
+	close(queue)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range queue {
+				job := jobs[i]
+				outcome, err := r.runCheck(ctx, job.name, job.command, job.budget, nil)
+				if err == nil && ctx.Err() != nil {
+					err = ctx.Err()
+					outcome.Passed, outcome.ExitCode, outcome.Outcome = false, 1, "failure"
+				}
+				results[i].outcome, results[i].err = outcome, err
+				close(results[i].done)
+			}
+		}()
+	}
+	for i := range jobs {
+		if i > 0 {
+			started(i)
+		}
+		<-results[i].done
+		outcome := results[i].outcome
+		if observe != nil {
+			observe(checkTerminalEvent(outcome))
+		}
+		record(outcome, results[i].err)
+	}
+	wg.Wait()
+}
+
+func checkTerminalEvent(outcome CheckRunOutcome) progress.Event {
+	status := "PASS"
+	if !outcome.Passed {
+		status = "FAIL"
+		if validLimit(outcome.Outcome) {
+			status = outcome.Outcome
+		}
+	}
+	return progress.Event{Check: outcome.Name, Status: status, StageElapsed: outcome.Duration}
+}
+
 // runCheck runs one named command with a fresh timeout derived from ctx and
 // reports its lifecycle to onProgress.
 func (r *checkRunner) runCheck(ctx context.Context, name, command string, duration time.Duration, onProgress func(progress.Event)) (result CheckRunOutcome, resultErr error) {
@@ -754,14 +842,7 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 		}
 	}
 	if onProgress != nil {
-		status := "PASS"
-		if !outcome.Passed {
-			status = "FAIL"
-			if validLimit(outcome.Outcome) {
-				status = outcome.Outcome
-			}
-		}
-		onProgress(progress.Event{Check: name, Status: status, StageElapsed: outcome.Duration})
+		onProgress(checkTerminalEvent(outcome))
 	}
 	return outcome, runErr
 }

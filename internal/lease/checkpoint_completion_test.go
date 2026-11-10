@@ -14,6 +14,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 func completionFixture(t *testing.T, local bool, commands ...string) *reconciliationFixture {
@@ -559,4 +560,84 @@ func TestPartialImplementationCheckpointCompletion(t *testing.T) {
 	// Inject a correctly signed completion to exercise recovery's independent checks.
 	rewriteCompletion(t, f, c)
 	assertCompletionRejected(t, f)
+}
+
+// Re-approval on a new base can retire a checkpoint the base already
+// contains. The first new implementation must still preserve its completion.
+func TestCheckpointCompletionAfterDroppedCheckpoint(t *testing.T) {
+	for _, local := range []bool{false, true} {
+		for _, scenario := range []string{"recover", "pending-not-contained", "recorded-head"} {
+			t.Run(fmt.Sprintf("local=%v/%s", local, scenario), func(t *testing.T) {
+				f := completionFixture(t, local)
+				c, err := f.m.InspectCheckpointCompletion(t.Context(), f.n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				root, _, err := f.m.completionRoot(t.Context(), false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer root.Close()
+				if err = root.Remove(completionName(f.n)); err != nil {
+					t.Fatal(err)
+				}
+				pending := ""
+				if scenario == "pending-not-contained" {
+					tree := f.git(f.path, "rev-parse", "HEAD^{tree}")
+					pending = f.git(f.path, "commit-tree", tree, "-m", "outside the base")
+				}
+				_, err = f.m.mutate(t.Context(), f.n, "local-dev", func(st *IssueState) error {
+					head := st.BaseSHA
+					if pending != "" {
+						head = pending
+					}
+					st.DroppedCheckpoint = &workspace.DroppedCheckpoint{Branch: st.Branch, HeadSHA: head}
+					st.CheckpointDropped = true
+					st.Branch, st.HeadSHA = "", ""
+					if scenario == "recorded-head" {
+						st.HeadSHA = st.BaseSHA
+					}
+					return nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				st, err := f.m.GetCurrentState(t.Context(), f.n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = f.m.SaveCheckpointCompletion(t.Context(), f.n, "local-dev", checkpointPredecessor(st), c.Candidate, c.Artifact)
+				if scenario != "recover" {
+					if err == nil {
+						t.Fatal("saved a completion that does not match the pending checkpoint recovery")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("completion after a dropped checkpoint: %v", err)
+				}
+				saved, err := f.m.InspectCheckpointCompletion(t.Context(), f.n)
+				if err != nil || saved.Branch != f.branch || !saved.NoRecordedHead {
+					t.Fatalf("completion must name the pending branch: %+v %v", saved, err)
+				}
+				// As in issue work: record the checkpoint, then settle the completion.
+				if !local {
+					f.git(f.m.repoRoot, "push", "--force", "origin", st.DroppedCheckpoint.HeadSHA+":refs/heads/"+f.branch)
+				}
+				if _, err = f.m.RecordCheckpoint(t.Context(), f.n, "local-dev", f.branch, c.Candidate); err != nil {
+					t.Fatal(err)
+				}
+				result, err := f.m.RecoverCheckpointCompletion(t.Context(), f.n, "local-dev")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result.DroppedCheckpoint != nil || result.Branch != f.branch || result.HeadSHA != c.Candidate {
+					t.Fatalf("checkpoint not recorded on the pending branch: %+v", result)
+				}
+				if err = VerifyTrustedImplementation(result, c.Candidate, c.Tree, c.Branch); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+	}
 }

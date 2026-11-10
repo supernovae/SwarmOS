@@ -116,7 +116,7 @@ func (m *Manager) SaveCheckpointCompletion(ctx context.Context, n int, owner, pr
 	if art.Type != contract.ArtifactImplementation || art.Verdict != "PASS" || art.Body == "" || len(predecessor) != 40 || len(candidate) != 40 || predecessor == candidate || checkpointPredecessor(st) != predecessor {
 		return fmt.Errorf("successful implementation checkpoint required")
 	}
-	c := &CheckpointCompletion{Version: 1, NoRecordedHead: st.HeadSHA == "", Issue: n, Claim: st.Lease.ClaimID, Owner: owner, Predecessor: predecessor, Candidate: candidate, Branch: st.Branch, Bindings: ReviewBindings(st), Approval: completionApproval(st), Artifact: art}
+	c := &CheckpointCompletion{Version: 1, NoRecordedHead: st.HeadSHA == "", Issue: n, Claim: st.Lease.ClaimID, Owner: owner, Predecessor: predecessor, Candidate: candidate, Branch: completionBranch(st), Bindings: ReviewBindings(st), Approval: completionApproval(st), Artifact: art}
 	c.Tree, err = m.implementationTree(ctx, candidate)
 	if err != nil {
 		return err
@@ -221,11 +221,20 @@ func (m *Manager) InspectCheckpointCompletion(ctx context.Context, n int) (resul
 }
 
 func (m *Manager) checkCompletion(ctx context.Context, st *IssueState, c *CheckpointCompletion) error {
-	if m.gateway != nil || !directIssue(st) || st.DroppedCheckpoint != nil || st.Lease.ClaimID != c.Claim || st.Lease.Owner != c.Owner || st.Branch != c.Branch || (!completionPredecessorMatches(st, c) && st.HeadSHA != c.Candidate) || !reflect.DeepEqual(ReviewBindings(st), c.Bindings) || completionApproval(st) != c.Approval {
+	if m.gateway != nil || !directIssue(st) || st.Lease.ClaimID != c.Claim || st.Lease.Owner != c.Owner || completionBranch(st) != c.Branch || (!completionPredecessorMatches(st, c) && st.HeadSHA != c.Candidate) || !reflect.DeepEqual(ReviewBindings(st), c.Bindings) || completionApproval(st) != c.Approval {
 		return fmt.Errorf("%w: completion inputs changed", ErrClaimFence)
 	}
 	if err := m.checkStateClaim(ctx, c.Issue, c.Owner, st); err != nil {
 		return err
+	}
+	if pending := st.DroppedCheckpoint; pending != nil {
+		// Re-approval retired a checkpoint the base already contains. The first
+		// new checkpoint replaces it, so apply the same identity and ancestry
+		// checks RecordCheckpoint applies before clearing the pending record.
+		contained, err := workspace.BaseIsAncestor(ctx, m.repoRoot, pending.HeadSHA, st.BaseSHA)
+		if !c.NoRecordedHead || st.HeadSHA != "" || pending.Branch != c.Branch || err != nil || !contained {
+			return fmt.Errorf("%w: completion differs from pending checkpoint recovery", ErrClaimFence)
+		}
 	}
 	if c.NoRecordedHead {
 		ancestor, err := workspace.BaseIsAncestor(ctx, m.repoRoot, st.BaseSHA, c.Candidate)
@@ -379,6 +388,15 @@ func completionPublicError(err error) error {
 }
 
 // checkpointPredecessor names the approved base until the first publication.
+// completionBranch is the branch the next checkpoint records. After
+// re-approval drops a contained checkpoint, that is the pending recovery branch.
+func completionBranch(st *IssueState) string {
+	if st.Branch == "" && st.DroppedCheckpoint != nil {
+		return st.DroppedCheckpoint.Branch
+	}
+	return st.Branch
+}
+
 func checkpointPredecessor(st *IssueState) string {
 	if st.HeadSHA == "" {
 		return st.BaseSHA

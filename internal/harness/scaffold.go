@@ -234,6 +234,7 @@ type InitOptions struct {
 	SwarmVersion    string
 	TemplateDir     string
 	ForkCoordinator bool
+	Archive         bool
 	// UpstreamRemote names the project remote used for the repository name
 	// and default branch; empty means origin.
 	UpstreamRemote string
@@ -270,6 +271,9 @@ type InitResult struct {
 // repository has it, init keeps it current without --fork-coordinator.
 const CoordinatorWorkflowPath = ".github/workflows/swarm-fork-coordinator.yml"
 
+// ArchiveWorkflowPath is opt-in and stays managed on subsequent init runs.
+const ArchiveWorkflowPath = ".github/workflows/swarm-archive.yml"
+
 func InitRepository(opts InitOptions) (*InitResult, error) {
 	if opts.SwarmVersion != "" {
 		if err := ValidateSwarmVersionPin(opts.SwarmVersion); err != nil {
@@ -281,6 +285,10 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		root = "."
 	}
 	forkCoordinator := opts.ForkCoordinator || fileExists(filepath.Join(root, CoordinatorWorkflowPath))
+	archive := opts.Archive || fileExists(filepath.Join(root, ArchiveWorkflowPath))
+	if archive && strings.TrimSpace(opts.SwarmVersion) == "" {
+		return nil, fmt.Errorf("the archive workflow requires a specific swarm pin; pass --swarm-version <release-or-full-commit-SHA>")
+	}
 	if forkCoordinator && strings.TrimSpace(opts.SwarmVersion) == "" {
 		return nil, fmt.Errorf("the fork coordinator workflow must install a specific swarm, but this build is neither a release nor a clean commit (for example, it has uncommitted changes); run repo init from a released or committed swarm, or pass --swarm-version <v0.6.0-or-newer-tag-or-full-commit-SHA>")
 	}
@@ -454,6 +462,17 @@ func InitRepository(opts InitOptions) (*InitResult, error) {
 		}
 		render := func(pin string) []byte { return bytes.ReplaceAll(template, []byte("SWARM_VERSION_PIN"), []byte(pin)) }
 		if err := writer.write(CoordinatorWorkflowPath, render(opts.SwarmVersion), samePinnedTemplate(render)); err != nil {
+			return nil, err
+		}
+	}
+
+	if archive {
+		template, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-archive.yml")
+		if err != nil {
+			return nil, err
+		}
+		render := func(pin string) []byte { return bytes.ReplaceAll(template, []byte("SWARM_VERSION_PIN"), []byte(pin)) }
+		if err := writer.write(ArchiveWorkflowPath, render(opts.SwarmVersion), samePinnedTemplate(render)); err != nil {
 			return nil, err
 		}
 	}

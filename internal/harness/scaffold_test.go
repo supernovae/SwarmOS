@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -1682,5 +1683,254 @@ func TestPlannerWorkUnitCorrectionInstructions(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("planner prompt missing %q", want)
 		}
+	}
+}
+
+func TestArchiveWorkflowScaffoldAndManagedUpgrade(t *testing.T) {
+	root := t.TempDir()
+	init := func(pin string, archive, force, dry bool) *InitResult {
+		t.Helper()
+		r, err := InitRepository(InitOptions{RepoRoot: root, SwarmVersion: pin, Archive: archive, Force: force, DryRun: dry})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	read := func() string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, ArchiveWorkflowPath))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	init("v0.6.0", false, false, false)
+	if fileExists(filepath.Join(root, ArchiveWorkflowPath)) {
+		t.Fatal("archive must be opt-in")
+	}
+	for _, pin := range []string{"", "main", "v0.5.0"} {
+		if _, err := InitRepository(InitOptions{RepoRoot: t.TempDir(), Archive: true, SwarmVersion: pin}); err == nil {
+			t.Fatalf("accepted pin %q", pin)
+		}
+	}
+	init("v0.6.0", true, false, false)
+	original := read()
+	init("v0.6.0", true, false, false)
+	if read() != original {
+		t.Fatal("not idempotent")
+	}
+	init("v0.7.0", false, false, true)
+	if read() != original {
+		t.Fatal("dry run wrote file")
+	}
+	init("v0.7.0", false, false, false)
+	if !strings.Contains(read(), "SWARM_VERSION: v0.7.0") {
+		t.Fatal("existing workflow not upgraded")
+	}
+	custom := read() + "\n# custom\n"
+	if err := os.WriteFile(filepath.Join(root, ArchiveWorkflowPath), []byte(custom), 0600); err != nil {
+		t.Fatal(err)
+	}
+	init("v0.8.0", false, false, false)
+	if read() != custom {
+		t.Fatal("customization lost")
+	}
+	init("v0.8.0", false, true, false)
+	if read() == custom {
+		t.Fatal("force did not replace")
+	}
+	// An archive-only install without a manifest retains pin discovery and upgrades.
+	only := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(only, ".github/workflows"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(only, ArchiveWorkflowPath), []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if ExistingSwarmPin(only) != "v0.6.0" {
+		t.Fatal("archive-only pin missing")
+	}
+	if _, err := InitRepository(InitOptions{RepoRoot: only, SwarmVersion: "v0.7.0"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(only, ArchiveWorkflowPath))
+	if !strings.Contains(string(b), "SWARM_VERSION: v0.7.0") {
+		t.Fatal("legacy upgrade failed")
+	}
+	unmanaged := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(unmanaged, ".github/workflows"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unmanaged, ArchiveWorkflowPath), []byte(custom), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InitRepository(InitOptions{RepoRoot: unmanaged, SwarmVersion: "v0.9.0"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(filepath.Join(unmanaged, ArchiveWorkflowPath))
+	if string(b) != custom {
+		t.Fatal("unmanaged edits lost")
+	}
+}
+
+func TestArchiveWorkflowTemplateSecurityAndSummary(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Fatal("jq required for archive recovery tests")
+	}
+	raw, err := embeddedTemplates.ReadFile("templates/github/workflows/swarm-archive.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w struct {
+		On          map[string]any
+		Permissions map[string]string
+		Concurrency struct {
+			Group  string
+			Cancel bool `yaml:"cancel-in-progress"`
+		}
+		Jobs map[string]struct {
+			Permissions map[string]string
+			Timeout     int `yaml:"timeout-minutes"`
+			Steps       []struct {
+				Uses, Run string
+				With      map[string]any
+				Env       map[string]string
+			}
+		}
+	}
+	if err := yaml.Unmarshal(raw, &w); err != nil {
+		t.Fatal(err)
+	}
+	job := w.Jobs["archive"]
+	if len(w.Jobs) != 1 || len(job.Steps) != 4 {
+		t.Fatal("unexpected jobs or steps")
+	}
+	if len(w.On) != 2 || !reflect.DeepEqual(w.On["schedule"], []any{map[string]any{"cron": "17 3 * * 0"}}) {
+		t.Fatal("unexpected triggers")
+	}
+	if _, ok := w.On["workflow_dispatch"]; !ok {
+		t.Fatal("missing dispatch")
+	}
+	if !reflect.DeepEqual(w.Permissions, map[string]string{"contents": "read"}) || len(job.Permissions) != 0 {
+		t.Fatal("excess permissions")
+	}
+	if w.Concurrency.Group != "swarm-archive-${{ github.repository }}" || w.Concurrency.Cancel || job.Timeout != 30 {
+		t.Fatal("concurrency/timeout")
+	}
+	if job.Steps[0].With["persist-credentials"] != false || job.Steps[0].With["ref"] != "${{ github.event.repository.default_branch }}" {
+		t.Fatal("unsafe checkout")
+	}
+	for i, step := range job.Steps {
+		if step.Uses != "" && !regexp.MustCompile(`@[0-9a-f]{40}$`).MatchString(strings.Fields(step.Uses)[0]) {
+			t.Fatal("mutable action")
+		}
+		if strings.Contains(step.Run, "secrets.") || strings.Contains(fmt.Sprint(step.With), "secrets.") {
+			t.Fatal("secret interpolation")
+		}
+		if i != 3 && strings.Contains(fmt.Sprint(step.Env), "SWARM_ARCHIVE_TOKEN") {
+			t.Fatal("secret scope")
+		}
+		if step.Run != "" {
+			cmd := exec.Command(bash, "-n")
+			cmd.Stdin = strings.NewReader(step.Run)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("syntax: %v %s", err, out)
+			}
+		}
+	}
+	if job.Steps[2].Env["SWARM_VERSION"] != "SWARM_VERSION_PIN" || job.Steps[3].Env["SWARM_GITHUB_TOKEN"] != "${{ secrets.SWARM_ARCHIVE_TOKEN }}" {
+		t.Fatal("pin/credential env")
+	}
+	keep := "archive disabled by strategy: keep; opt in with archive.strategy: repo on the upstream default branch"
+	report := func(status, reason string) string {
+		b, _ := json.Marshal(map[string]any{"kind": "archive", "status": status, "error": reason, "issues": []any{}, "archived": 0, "failed": 0})
+		return string(b)
+	}
+	for _, tc := range []struct {
+		name, apply, preview         string
+		applyCode, previewCode, want int
+		recover, noJQ                bool
+	}{
+		{"keep", report("failed", keep), report("preview", ""), 17, 0, 0, true, false},
+		{"apply", report("archived", ""), "", 0, 0, 0, false, false},
+		{"other", report("failed", "denied"), "", 17, 0, 17, false, false},
+		{"substring", report("failed", "prefix "+keep), "", 17, 0, 17, false, false},
+		{"preview-failed", report("failed", keep), report("failed", "preview denied"), 17, 23, 23, true, false},
+		{"malformed", "{", "", 17, 0, 17, false, false},
+		{"empty", "", "", 17, 0, 17, false, false},
+		{"stderr-only", report("failed", ""), "", 17, 0, 17, false, false},
+		{"no-jq", report("failed", keep), "", 17, 0, 17, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "swarm-bin")
+			if err := os.Mkdir(bin, 0755); err != nil {
+				t.Fatal(err)
+			}
+			stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RUNNER_TEMP/calls\"\nprintf '%s\\n' \"$DIAGNOSTIC\" >&2\ncase \" $* \" in\n*' --apply '*) printf '%s\\n' \"$APPLY\"; exit \"$APPLY_CODE\";;\n*) printf '%s\\n' \"$PREVIEW\"; exit \"$PREVIEW_CODE\";;\nesac\n"
+			if err := os.WriteFile(filepath.Join(bin, "swarm"), []byte(stub), 0755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", job.Steps[3].Run)
+			path := os.Getenv("PATH")
+			if tc.noJQ {
+				path = t.TempDir()
+				cat, err := exec.LookPath("cat")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(cat, filepath.Join(path, "cat")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd.Env = append(os.Environ(), "PATH="+path, "RUNNER_TEMP="+dir, "GITHUB_STEP_SUMMARY="+filepath.Join(dir, "summary"), "SWARM_GITHUB_TOKEN=sentinel-secret", "APPLY="+tc.apply, "PREVIEW="+tc.preview, fmt.Sprintf("APPLY_CODE=%d", tc.applyCode), fmt.Sprintf("PREVIEW_CODE=%d", tc.previewCode), "DIAGNOSTIC="+keep)
+			out, err := cmd.CombinedOutput()
+			code := 0
+			if err != nil {
+				if e, ok := err.(*exec.ExitError); ok {
+					code = e.ExitCode()
+				} else {
+					t.Fatal(err)
+				}
+			}
+			if code != tc.want {
+				t.Fatalf("exit %d want %d: %s", code, tc.want, out)
+			}
+			calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
+			wantCalls := "repo archive --all-eligible --apply --json\n"
+			expected := tc.apply
+			if tc.recover {
+				wantCalls += "repo archive --all-eligible --json\n"
+				expected = tc.preview
+			}
+			if string(calls) != wantCalls {
+				t.Fatalf("calls %q", calls)
+			}
+			summary, _ := os.ReadFile(filepath.Join(dir, "summary"))
+			if !strings.Contains(string(out), expected) || !strings.Contains(string(summary), expected) {
+				t.Fatal("missing report")
+			}
+			if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+				if err != nil {
+					return err
+				}
+				if !d.IsDir() {
+					b, _ := os.ReadFile(path)
+					if strings.Contains(string(b), "sentinel-secret") {
+						t.Errorf("credential persisted in %s", path)
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(out), "sentinel-secret") {
+				t.Fatal("credential logged")
+			}
+		})
 	}
 }

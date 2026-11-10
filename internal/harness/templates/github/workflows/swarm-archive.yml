@@ -1,0 +1,61 @@
+name: SwarmOS Archive
+
+on:
+  schedule:
+    - cron: '17 3 * * 0' # Sundays at 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swarm-archive-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.10'
+          cache: false
+      - name: Install pinned SwarmOS
+        env:
+          SWARM_VERSION: SWARM_VERSION_PIN
+          GOBIN: ${{ runner.temp }}/swarm-bin
+        working-directory: ${{ runner.temp }}
+        run: |
+          go install github.com/supernovae/swarmos/cmd/swarm@"$SWARM_VERSION"
+      - name: Archive eligible ledgers
+        env:
+          SWARM_GITHUB_TOKEN: ${{ secrets.SWARM_ARCHIVE_TOKEN }}
+          SWARM_REPO: ${{ github.repository }}
+        run: |
+          report="$RUNNER_TEMP/swarm-archive.json"
+          diagnostics="$RUNNER_TEMP/swarm-archive.stderr"
+          status=0
+          "$RUNNER_TEMP/swarm-bin/swarm" repo archive --all-eligible --apply --json > "$report" 2> "$diagnostics" || status=$?
+          cat "$diagnostics" >&2
+          if [ "$status" -ne 0 ] && jq -e -s '
+            length == 1 and (.[0] | .kind == "archive" and .status == "failed" and
+            .error == "archive disabled by strategy: keep; opt in with archive.strategy: repo on the upstream default branch")
+            ' "$report" > /dev/null 2>&1; then
+            # Apply refused before mutation. Preview reports keep without changing refs.
+            status=0
+            "$RUNNER_TEMP/swarm-bin/swarm" repo archive --all-eligible --json > "$report" 2> "$diagnostics" || status=$?
+            cat "$diagnostics" >&2
+          fi
+          cat "$report"
+          {
+            printf '### SwarmOS archive\n\n```json\n'
+            cat "$report"
+            printf '\n```\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

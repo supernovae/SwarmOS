@@ -1509,10 +1509,10 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 	}
 
 	Version = "0.6.0"
-	if err := runCmd(root, "repo", "init", "--fork-coordinator"); err != nil {
+	if err := runCmd(root, "repo", "init", "--fork-coordinator", "--archive"); err != nil {
 		t.Fatalf("expected repo init --fork-coordinator on release v0.6.0 to succeed, got: %v", err)
 	}
-	for _, rel := range []string{".github/workflows/swarm-validate.yml", ".github/workflows/swarm-fork-coordinator.yml"} {
+	for _, rel := range []string{".github/workflows/swarm-validate.yml", ".github/workflows/swarm-fork-coordinator.yml", ".github/workflows/swarm-archive.yml"} {
 		raw, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
@@ -1529,7 +1529,7 @@ func TestInitDefaultsToInstalledReleaseForCIAndForkCoordinator(t *testing.T) {
 			if out, err := gitfixture.Command(t, "", "-C", devRoot, "init", "-b", "main").CombinedOutput(); err != nil {
 				t.Fatalf("git init: %v (%s)", err, out)
 			}
-			if err := runCmd(devRoot, "repo", "init", "--fork-coordinator"); err == nil {
+			if err := runCmd(devRoot, "repo", "init", "--fork-coordinator", "--archive"); err == nil {
 				t.Fatal("expected non-release build without --swarm-version to fail")
 			}
 			if err := runCmd(devRoot, "repo", "init"); err != nil {
@@ -1750,7 +1750,7 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 	// A clean development build pins its exact commit, with no flag required.
 	buildCommit := strings.Repeat("b", 40)
 	Version, Commit = "dev", buildCommit
-	if out, err := run(root, "repo", "init", "--fork-coordinator"); err != nil || !strings.Contains(out, "push that commit") {
+	if out, err := run(root, "repo", "init", "--fork-coordinator", "--archive"); err != nil || !strings.Contains(out, "push that commit") {
 		t.Fatalf("dev build init: %v\n%s", err, out)
 	}
 	coordinator := ".github/workflows/swarm-fork-coordinator.yml"
@@ -1790,7 +1790,7 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(read(root, coordinator), "SWARM_VERSION: v0.6.1") || !strings.Contains(read(root, ".github/workflows/swarm-validate.yml"), "SWARM_VERSION: v0.6.1") {
+	if !strings.Contains(read(root, ".github/workflows/swarm-archive.yml"), "SWARM_VERSION: v0.6.1") || !strings.Contains(read(root, coordinator), "SWARM_VERSION: v0.6.1") || !strings.Contains(read(root, ".github/workflows/swarm-validate.yml"), "SWARM_VERSION: v0.6.1") {
 		t.Fatal("upgrade did not move untouched workflows to the new release")
 	}
 	if read(root, ".swarm/goals.md") != "# Our goals\n" || !strings.Contains(out, "kept your edits to .swarm/goals.md") {
@@ -1805,7 +1805,7 @@ func TestInitPinsBuildsAndUpgradesUntouchedFiles(t *testing.T) {
 	if _, err := run(root, "repo", "init"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(read(root, coordinator), "SWARM_VERSION: v0.6.2") {
+	if !strings.Contains(read(root, ".github/workflows/swarm-archive.yml"), "SWARM_VERSION: v0.6.2") || !strings.Contains(read(root, coordinator), "SWARM_VERSION: v0.6.2") {
 		t.Fatal("legacy coordinator workflow was not upgraded")
 	}
 	if read(root, ".swarm/goals.md") != "# Our goals\n" {

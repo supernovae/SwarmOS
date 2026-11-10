@@ -470,28 +470,18 @@ func expectedResultPresent(st *lease.IssueState, req lease.ForkRequest) bool {
 
 func mapCoordinatorError(op, msg string) error {
 	lower := strings.ToLower(msg)
-	switch {
-	case strings.Contains(lower, lease.ErrPlanReplanLimit.Error()):
-		return fmt.Errorf("%w: %s", lease.ErrPlanReplanLimit, msg)
-	case strings.Contains(lower, lease.ErrClaimFence.Error()):
-		return fmt.Errorf("%w: %s", lease.ErrClaimFence, msg)
-	case strings.Contains(lower, lease.ErrPlanApprovalRequired.Error()):
-		return fmt.Errorf("%w: %s", lease.ErrPlanApprovalRequired, msg)
-	case strings.Contains(lower, lease.ErrApprovalRequired.Error()):
-		return fmt.Errorf("%w: %s", lease.ErrApprovalRequired, msg)
-	case strings.Contains(lower, lease.ErrAlreadyClaimed.Error()):
-		return fmt.Errorf("%w: %s", lease.ErrAlreadyClaimed, msg)
-	case strings.Contains(lower, lease.ErrClaimRaceLost.Error()):
-		return fmt.Errorf("%w: %s", lease.ErrClaimRaceLost, msg)
-	case strings.Contains(lower, lease.ErrMaxRenewals.Error()):
-		return fmt.Errorf("%w: %s", lease.ErrMaxRenewals, msg)
-	case strings.Contains(lower, coordination.ErrForkClaimLimit.Error()):
-		return fmt.Errorf("%w: %s", coordination.ErrForkClaimLimit, msg)
-	case strings.Contains(lower, coordination.ErrReplay.Error()):
-		return fmt.Errorf("%w: %s", coordination.ErrReplay, msg)
-	default:
-		return fmt.Errorf("fork coordinator rejected %s: %s", op, msg)
+	// Compare case-insensitively on both sides so a sentinel with capitals
+	// (for example "fork request comment ID already processed") still matches.
+	for _, sentinel := range []error{
+		lease.ErrPlanReplanLimit, lease.ErrClaimFence, lease.ErrPlanApprovalRequired, lease.ErrApprovalRequired,
+		lease.ErrAlreadyClaimed, lease.ErrClaimRaceLost, lease.ErrMaxRenewals,
+		coordination.ErrForkClaimLimit, coordination.ErrReplay,
+	} {
+		if strings.Contains(lower, strings.ToLower(sentinel.Error())) {
+			return fmt.Errorf("%w: %s", sentinel, msg)
+		}
 	}
+	return fmt.Errorf("fork coordinator rejected %s: %s", op, msg)
 }
 
 var _ lease.WorkerGateway = (*Gateway)(nil)

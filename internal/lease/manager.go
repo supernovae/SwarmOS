@@ -105,11 +105,6 @@ type Decomposition struct {
 	Evidence         map[int]*PROutcome   `json:"evidence,omitempty"`
 }
 
-// DecompositionAdmission refuses pending and retired parents from state alone.
-func DecompositionAdmission(st *IssueState) error {
-	return decompositionAdmission(context.Background(), nil, st)
-}
-
 // DecompositionAdmission enriches refusal with tracker state without making
 // retirement depend on tracker availability.
 func (m *Manager) DecompositionAdmission(ctx context.Context, st *IssueState) error {

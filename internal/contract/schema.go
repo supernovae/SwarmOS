@@ -119,8 +119,6 @@ func formatValidationError(wu *WorkUnit, schemaErr error) error {
 //go:embed config.schema.json
 var configSchemaBytes []byte
 
-func ConfigSchemaBytes() []byte { return configSchemaBytes }
-
 // ValidateConfigJSON validates raw configuration JSON, including tracker types.
 func ValidateConfigJSON(data []byte) error {
 	compiler := jsonschema.NewCompiler()

@@ -103,7 +103,7 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 	if unchanged.RoleAgentsUsed["planner"] != "mock" || unchanged.RoleAgentsUsed["reviewer"] != "" {
 		t.Fatalf("unchanged plan was reviewed: %+v", unchanged.RoleAgentsUsed)
 	}
-	if unchangedErr == nil || !strings.Contains(unchangedErr.Error(), "re-plan is unchanged") {
+	if unchangedErr == nil || !strings.Contains(unchangedErr.Error(), "re-plan is unchanged") || !errors.Is(unchangedErr, lease.ErrPlanUnchanged) {
 		t.Fatalf("unchanged replan accepted: %v", unchangedErr)
 	}
 	// Explicit review remains available to an operator who wants to re-review

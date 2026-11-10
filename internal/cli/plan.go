@@ -119,13 +119,13 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 
 	cmd.Flags().StringVar(&exportPath, "export", "", "Export project plan snapshot to a .yaml, .yml, or .json file")
 	cmd.Flags().StringVar(&fromFile, "from", "", "Path to Markdown or YAML project roadmap/plan file")
-	cmd.Flags().BoolVar(&scanOpen, "scan", false, "Scan, sense-make, and audit open tracker issues against project goals and rules")
+	cmd.Flags().BoolVar(&scanOpen, "scan", false, "Scan and triage open issues and pull requests against project goals and rules")
 	cmd.Flags().BoolVar(&normalize, "normalize", false, "When used with --scan --apply, convert unstructured raw issues into structured WorkUnit markdown")
 	cmd.Flags().StringVar(&agentName, "agent", "", "Optional configured planner agent to draft/enrich the project plan")
 	cmd.Flags().BoolVar(&epic, "epic", false, "With --from and --apply, use the optional organization Epic issue type")
 	cmd.Flags().BoolVar(&apply, "apply", false, "Create/update issues, apply triage labels, or publish report on the tracker")
 	cmd.Flags().BoolVar(&ready, "ready", false, "When used with --apply, also approve created/normalized WorkUnit issues as swarm:ready")
-	cmd.Flags().IntVar(&publishIssue, "publish-issue", 0, "Optional tracking issue number to post the sense-making report to when --apply is set")
+	cmd.Flags().IntVar(&publishIssue, "publish-issue", 0, "Optional tracking issue number to post the scan report to when --apply is set")
 	cmd.Flags().IntVar(&staleDays, "stale-days", workflow.DefaultStaleDays, "With --scan, days without activity before an issue is listed as quiet (0 turns this off)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit structured project plan report as JSON")
 	return cmd

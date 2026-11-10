@@ -225,10 +225,6 @@ func (r *Registry) List() ([]RepoEntry, error) {
 	return list, err
 }
 
-func DetectGitHubSlug(repoRoot string) string {
-	return DetectGitHubSlugFrom(repoRoot, "")
-}
-
 // DetectGitHubSlugFrom reads the GitHub owner/repo of the named remote; empty
 // means origin. It returns "" for a missing, invalid, or non-GitHub remote.
 func DetectGitHubSlugFrom(repoRoot, remote string) string {

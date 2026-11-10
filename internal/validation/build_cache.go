@@ -256,7 +256,7 @@ func recordRequiredDurations(ctx context.Context, repo string, outcomes []CheckR
 		return
 	}
 	for _, c := range outcomes {
-		if !c.Passed && !c.Preliminary && c.FallbackReason == "" {
+		if !c.Passed {
 			return
 		}
 	}
@@ -266,7 +266,7 @@ func recordRequiredDurations(ctx context.Context, repo string, outcomes []CheckR
 	}
 	defer root.Close()
 	for _, c := range outcomes {
-		if !c.Passed || c.Preliminary || c.FallbackReason != "" || c.Duration <= 0 || c.Duration > maxCheckTimeout {
+		if !c.Passed || c.Duration <= 0 || c.Duration > maxCheckTimeout {
 			continue
 		}
 		key := durationKey(c.Name, c.Command)

@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -119,7 +118,7 @@ func TestGoFastPassFailingChangedPackage(t *testing.T) {
 		t.Fatalf("required checks missing: %+v", report.CheckOutcomes)
 	}
 	pre := report.CheckOutcomes[0]
-	if pre.Name != "test" || pre.Preliminary || pre.Passed || pre.InfrastructureError || pre.Command != "go test -count=1 ./..." {
+	if pre.Name != "test" || pre.Passed || pre.InfrastructureError || pre.Command != "go test -count=1 ./..." {
 		t.Fatalf("authoritative outcome: %+v", pre)
 	}
 	if !slices.Contains(pre.FailingTests, "TestLeaf") || report.Artifact.Verdict != "FAIL" || report.Artifact.Metadata["validation_report"] != "" {
@@ -141,8 +140,7 @@ func TestGoFastPassThenFull(t *testing.T) {
 		pass      bool
 	}{
 		{"full passes", nil, true},
-		// The unrelated failure is outside the changed-package selection, so
-		// only the full run can find it.
+		// The configured check also catches failures outside the edited package.
 		{"full fails", map[string]string{"unrelated/unrelated_test.go": "package unrelated\n\nimport \"testing\"\n\nfunc TestUnrelated(t *testing.T) { t.Fatal(\"broken\") }\n"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,7 +163,7 @@ func TestGoFastPassThenFull(t *testing.T) {
 				t.Fatal("timings did not round-trip")
 			}
 			full := report.CheckOutcomes[0]
-			if full.Name != "test" || full.Command != command || full.Preliminary || full.Passed != tc.pass {
+			if full.Name != "test" || full.Command != command || full.Passed != tc.pass {
 				t.Fatalf("full check must run unchanged: %+v", full)
 			}
 			want := []string{"test started", "test PASS", "ok started", "ok PASS"}
@@ -195,7 +193,7 @@ func TestGoFastPassNoGoChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.CheckOutcomes) != 1 || report.CheckOutcomes[0].Preliminary || !slices.Equal(events, []string{"test started", "test PASS"}) {
+	if len(report.CheckOutcomes) != 1 || !slices.Equal(events, []string{"test started", "test PASS"}) {
 		t.Fatalf("documentation change must not add a preliminary run: %+v %v", report.CheckOutcomes, events)
 	}
 	if strings.Contains(report.Artifact.Body, "Changed-package") {
@@ -234,7 +232,7 @@ func TestGoFastPassOptOutAndCIMode(t *testing.T) {
 			commitRepoFile(t, repo, "leaf/leaf.go", failingLeaf)
 			opts.BaseSHA = base
 			report, err := Validate(t.Context(), repo, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, opts)
-			if !errors.Is(err, ErrRequiredCheckFailed) || len(report.CheckOutcomes) != 1 || report.CheckOutcomes[0].Preliminary {
+			if !errors.Is(err, ErrRequiredCheckFailed) || len(report.CheckOutcomes) != 1 {
 				t.Fatalf("only the full check may run: %+v %v", report, err)
 			}
 		})
@@ -253,7 +251,7 @@ func TestGoFastPassDirtyIssueValidate(t *testing.T) {
 	if !errors.Is(err, ErrRequiredCheckFailed) || len(report.CheckOutcomes) != 1 {
 		t.Fatalf("dirty edit must fail early: %+v %v", report, err)
 	}
-	if full := report.CheckOutcomes[0]; full.Preliminary || full.Command != "go test -count=1 ./..." {
+	if full := report.CheckOutcomes[0]; full.Command != "go test -count=1 ./..." {
 		t.Fatalf("full check: %+v", full)
 	}
 	if staged := runRepoGit(t, repo, "diff", "--cached", "--name-only"); staged != "" {
@@ -274,7 +272,7 @@ func TestGoFastPassModuleChangesUseFullRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.CheckOutcomes) != 1 || report.CheckOutcomes[0].Preliminary {
+	if len(report.CheckOutcomes) != 1 {
 		t.Fatalf("module change must fall back to the full run: %+v %s", report.CheckOutcomes, report.Artifact.Body)
 	}
 }
@@ -345,8 +343,7 @@ func TestGoFastPassInfrastructureFallback(t *testing.T) {
 		pass     bool
 		fallback string
 	}{
-		// The preliminary run uses its whole allowance; the full run then gets
-		// a fresh timeout, so finishing after the old deadline still passes.
+		// The configured check receives its full timeout allowance.
 		{"timeout then full pass", "sleep 1; exit 0", true, "timed out"},
 		{"timeout then full fail", "exit 3", false, "timed out"},
 	} {
@@ -359,7 +356,7 @@ func TestGoFastPassInfrastructureFallback(t *testing.T) {
 			if (err == nil) != tc.pass || report.Passed != tc.pass {
 				t.Fatalf("full run must decide: %+v %v", report, err)
 			}
-			if len(report.CheckOutcomes) != 1 || report.CheckOutcomes[0].Preliminary || report.CheckOutcomes[0].Passed != tc.pass {
+			if len(report.CheckOutcomes) != 1 || report.CheckOutcomes[0].Passed != tc.pass {
 				t.Fatalf("authoritative: %+v", report)
 			}
 			if tc.pass && report.Artifact.Metadata["validation_report"] != "" {
@@ -402,43 +399,6 @@ func TestGoFastPassCancellationStartsNoFullRun(t *testing.T) {
 	}
 }
 
-func TestGoFastPassReverseDependencies(t *testing.T) {
-	t.Parallel()
-	module := func(path, dir string, imports, testImports, xtestImports []string) goPackage {
-		pkg := goPackage{ImportPath: path, Dir: dir, Imports: imports, TestImports: testImports, XTestImports: xtestImports}
-		return pkg
-	}
-	packages := []goPackage{
-		module("m/leaf", "leaf", []string{"fmt"}, nil, nil),
-		module("m/consumer", "consumer", []string{"m/leaf"}, nil, nil),
-		module("m/transitive", "transitive", []string{"m/consumer"}, nil, nil),
-		module("m/testonly", "testonly", nil, []string{"m/leaf"}, nil),
-		module("m/xtest", "xtest", nil, nil, []string{"m/xtest", "m/leaf"}),
-		module("m/a", "a", []string{"m/b"}, nil, nil),
-		module("m/b", "b", []string{"m/a"}, nil, nil),
-		module("m/unrelated", "unrelated", []string{"example.org/other"}, nil, nil),
-		module("m", ".", nil, nil, nil),
-	}
-	for _, tc := range []struct {
-		dirs []string
-		want []string
-	}{
-		{[]string{"leaf", "leaf"}, []string{"m/consumer", "m/leaf", "m/testonly", "m/transitive", "m/xtest"}},
-		{[]string{"consumer"}, []string{"m/consumer", "m/transitive"}},
-		{[]string{"a"}, []string{"m/a", "m/b"}},
-		{[]string{"."}, []string{"m"}},
-	} {
-		got, err := affectedPackages(packages, tc.dirs)
-		if err != nil || !slices.Equal(got, tc.want) {
-			t.Fatalf("affectedPackages(%v) = %v, %v; want %v", tc.dirs, got, err, tc.want)
-		}
-	}
-	if _, err := affectedPackages(packages, []string{"deleted"}); err == nil {
-		t.Fatal("a changed directory that is not a package must not be guessed")
-	}
-
-}
-
 func TestParseGoTestAll(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -472,50 +432,6 @@ func TestParseGoTestAll(t *testing.T) {
 		got, ok := parseGoTestAll(tc.command)
 		if ok != tc.ok || (ok && !slices.Equal(got.buildFlags, tc.build)) {
 			t.Errorf("parseGoTestAll(%q) = %+v, %v", tc.command, got, ok)
-		}
-	}
-}
-
-func TestFastPassFits(t *testing.T) {
-	t.Parallel()
-	many := func(n, size int) []string {
-		packages := make([]string, n)
-		for i := range packages {
-			packages[i] = "example.com/m/" + strings.Repeat("p", size) + strconv.Itoa(i)
-		}
-		return packages
-	}
-	for _, tc := range []struct {
-		packages []string
-		fits     bool
-	}{
-		{many(1, 1), true},
-		{many(maxFastPassPackages, 1), true},
-		{many(maxFastPassPackages+1, 1), false},
-		{many(100, 400), false},
-	} {
-		if got := fastPassFits([]string{"-race"}, tc.packages); got != tc.fits {
-			t.Errorf("%d packages of %d bytes: fits = %v", len(tc.packages), len(tc.packages[0]), got)
-		}
-	}
-}
-
-func TestParseGoListRejectsUnsafeMetadata(t *testing.T) {
-	t.Parallel()
-	const mod = `"Module":{"Path":"example.com/m","Dir":"/m","Main":true}`
-	for name, data := range map[string]string{
-		"option-like":   `{"ImportPath":"-exec=x","Dir":"/m/x",` + mod + `}`,
-		"shell":         `{"ImportPath":"example.com/m/$(x)","Dir":"/m/x",` + mod + `}`,
-		"other module":  `{"ImportPath":"example.com/other","Dir":"/m/x",` + mod + `}`,
-		"outside root":  `{"ImportPath":"example.com/m/x","Dir":"/elsewhere",` + mod + `}`,
-		"not main":      `{"ImportPath":"example.com/m/x","Dir":"/m/x","Module":{"Path":"example.com/m","Dir":"/m"}}`,
-		"invalid":       `{"ImportPath":`,
-		"empty":         ``,
-		"two modules":   `{"ImportPath":"example.com/m","Dir":"/m",` + mod + `}{"ImportPath":"example.com/m/x","Dir":"/n/x","Module":{"Path":"example.com/m","Dir":"/n","Main":true}}`,
-		"dot traversal": `{"ImportPath":"example.com/m/../x","Dir":"/m/x",` + mod + `}`,
-	} {
-		if _, err := parseGoList([]byte(data)); err == nil {
-			t.Errorf("%s: metadata accepted", name)
 		}
 	}
 }

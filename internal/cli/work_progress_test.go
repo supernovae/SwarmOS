@@ -307,11 +307,10 @@ func TestValidationChecksShowChangedPackagePass(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	writeValidationChecks(cmd, &validation.ValidationReport{CheckOutcomes: []validation.CheckRunOutcome{
-		{Name: "test (changed packages)", Preliminary: true, FallbackReason: "timed out; the full check decides"},
 		{Name: "test", Passed: true},
-		{Name: "lint (changed packages)", Preliminary: true, ExitCode: 1, FailingTests: []string{"TestLeaf"}, OutputTail: "FAIL\texample.com/m/leaf"},
+		{Name: "lint", ExitCode: 1, FailingTests: []string{"TestLeaf"}, OutputTail: "FAIL\texample.com/m/leaf"},
 	}})
-	want := "SKIP test (changed packages): timed out; the full check decides\nPASS test (unavailable)\nFAIL lint (changed packages) (exit 1; unavailable)\nfailing tests: TestLeaf\nFAIL\texample.com/m/leaf\n"
+	want := "PASS test (unavailable)\nFAIL lint (exit 1; unavailable)\nfailing tests: TestLeaf\nFAIL\texample.com/m/leaf\n"
 	if stdout.String() != want {
 		t.Fatalf("got %q", stdout.String())
 	}

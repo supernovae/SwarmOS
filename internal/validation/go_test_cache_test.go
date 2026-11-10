@@ -22,7 +22,7 @@ func TestGoFastPassReusesTestCache(t *testing.T) {
 		t.Fatalf("validation: %+v %v", report, err)
 	}
 	full := report.CheckOutcomes[0]
-	if full.Command != "go test ./..." || full.Preliminary || !full.Passed {
+	if full.Command != "go test ./..." || !full.Passed {
 		t.Fatalf("full check must run unchanged: %+v", full)
 	}
 	if !strings.Contains(full.Output, "example.com/m/unrelated") {
@@ -40,7 +40,7 @@ func TestGoFastPassCachedFullStillFails(t *testing.T) {
 		t.Fatalf("an unrelated failure must fail validation: %+v %v", report, err)
 	}
 	full := report.CheckOutcomes[0]
-	if full.Preliminary || full.Passed || !strings.Contains(full.Output, "TestUnrelated") {
+	if full.Passed || !strings.Contains(full.Output, "TestUnrelated") {
 		t.Fatal(full.Output)
 	}
 

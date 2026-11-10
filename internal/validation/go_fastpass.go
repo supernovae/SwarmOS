@@ -2,22 +2,10 @@ package validation
 
 import (
 	"bytes"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/contract"
-)
-
-const (
-	// Larger selections fall back to the full check alone; the generated
-	// command must stay well within shell argument limits.
-	maxFastPassPackages = 200
-	maxFastPassCommand  = 32 << 10
 )
 
 // goTestFlags are accepted in a recognized `go test ./...` command. Build
@@ -75,15 +63,6 @@ func safeShellRune(r rune) bool {
 	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_-.,:/+=", r)
 }
 
-// fastPassFits bounds the generated command's package count and length.
-func fastPassFits(flags, packages []string) bool {
-	length := len("go test ") + len(strings.Join(flags, " "))
-	for _, pkg := range packages {
-		length += len(pkg) + 3
-	}
-	return len(packages) <= maxFastPassPackages && length <= maxFastPassCommand
-}
-
 // goIgnoredDir reports directories that `./...` never matches.
 func goIgnoredDir(dir string) bool {
 	for _, part := range strings.Split(dir, "/") {
@@ -92,58 +71,6 @@ func goIgnoredDir(dir string) bool {
 		}
 	}
 	return false
-}
-
-// goPackage is a package from `go list -json`, with Dir relative to the module root.
-type goPackage struct {
-	ImportPath   string
-	Dir          string
-	Imports      []string
-	TestImports  []string
-	XTestImports []string
-	Module       *struct {
-		Path string
-		Dir  string
-		Main bool
-	}
-}
-
-// parseGoList reads `go list -json` output, keeping only main-module packages
-// rooted at the module directory. It treats the output as untrusted.
-func parseGoList(data []byte) ([]goPackage, error) {
-	var packages []goPackage
-	var modulePath, moduleDir string
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	for {
-		var pkg goPackage
-		if err := decoder.Decode(&pkg); err == io.EOF {
-			break
-		} else if err != nil {
-			return nil, fmt.Errorf("invalid package metadata: %w", err)
-		}
-		if pkg.Module == nil || !pkg.Module.Main {
-			return nil, errors.New("package outside the main module")
-		}
-		if modulePath == "" {
-			modulePath, moduleDir = pkg.Module.Path, pkg.Module.Dir
-		}
-		if pkg.Module.Path != modulePath || pkg.Module.Dir != moduleDir {
-			return nil, errors.New("more than one module")
-		}
-		if !validImportPath(pkg.ImportPath) || (pkg.ImportPath != modulePath && !strings.HasPrefix(pkg.ImportPath, modulePath+"/")) {
-			return nil, fmt.Errorf("unexpected package %q", pkg.ImportPath)
-		}
-		rel, err := filepath.Rel(moduleDir, pkg.Dir)
-		if err != nil || !filepath.IsLocal(rel) && rel != "." {
-			return nil, fmt.Errorf("package %q outside the module root", pkg.ImportPath)
-		}
-		pkg.Dir = filepath.ToSlash(rel)
-		packages = append(packages, pkg)
-	}
-	if len(packages) == 0 {
-		return nil, errors.New("no packages")
-	}
-	return packages, nil
 }
 
 // validImportPath accepts only paths that are safe as a quoted shell word and
@@ -163,53 +90,6 @@ func validImportPath(p string) bool {
 		}
 	}
 	return true
-}
-
-// affectedPackages maps changed directories to packages and adds every
-// package whose code or tests import one of them, directly or transitively.
-// The result is sorted. A changed directory that is no longer a package (for
-// example a deleted one) cannot be resolved, so it is an error.
-func affectedPackages(packages []goPackage, dirs []string) ([]string, error) {
-	byDir := make(map[string]string, len(packages))
-	importers := make(map[string][]string)
-	for _, pkg := range packages {
-		byDir[pkg.Dir] = pkg.ImportPath
-		for _, list := range [][]string{pkg.Imports, pkg.TestImports, pkg.XTestImports} {
-			for _, imported := range list {
-				if imported != pkg.ImportPath {
-					importers[imported] = append(importers[imported], pkg.ImportPath)
-				}
-			}
-		}
-	}
-	seen := map[string]bool{}
-	var queue []string
-	for _, dir := range dirs {
-		pkg, ok := byDir[dir]
-		if !ok {
-			return nil, fmt.Errorf("changed directory %q is not a package in this module", dir)
-		}
-		if !seen[pkg] {
-			seen[pkg] = true
-			queue = append(queue, pkg)
-		}
-	}
-	for len(queue) > 0 {
-		pkg := queue[0]
-		queue = queue[1:]
-		for _, importer := range importers[pkg] {
-			if !seen[importer] {
-				seen[importer] = true
-				queue = append(queue, importer)
-			}
-		}
-	}
-	selected := make([]string, 0, len(seen))
-	for pkg := range seen {
-		selected = append(selected, pkg)
-	}
-	slices.Sort(selected)
-	return selected, nil
 }
 
 // boundedBuffer keeps at most limit bytes and records any overflow.

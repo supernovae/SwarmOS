@@ -196,7 +196,7 @@ func diagnoseRepairTree(ctx context.Context, runner *checkRunner, report *Valida
 	defer checkpoint.close()
 	reruns := 0
 	for _, outcome := range report.CheckOutcomes {
-		if outcome.Passed || outcome.FallbackReason != "" {
+		if outcome.Passed {
 			continue
 		}
 		check := RepairCheck{Name: EscapeDiagnostic(outcome.Name), Command: EscapeDiagnostic(outcome.Command), ExitCode: outcome.ExitCode, FailingTests: outcome.FailingTests, OutputTail: outcome.OutputTail, InfrastructureError: outcome.InfrastructureError}

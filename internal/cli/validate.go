@@ -237,10 +237,6 @@ func writeValidationChecks(cmd *cobra.Command, report *validation.ValidationRepo
 			fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", validationCheckStatus(report), name, checkDuration(check))
 			continue
 		}
-		if check.FallbackReason != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), "SKIP %s: %s\n", name, validation.EscapeDiagnostic(check.FallbackReason))
-			continue
-		}
 		fmt.Fprintf(cmd.OutOrStdout(), "FAIL %s (exit %d; %s)\n", name, check.ExitCode, checkDuration(check))
 		if len(check.FailingTests) > 0 {
 			fmt.Fprintf(cmd.OutOrStdout(), "failing tests: %s\n", strings.Join(check.FailingTests, ", "))

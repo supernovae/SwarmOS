@@ -30,11 +30,13 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 	go func() {
 		defer close(h.done)
 		rctx := progress.WithActivity(ctx, nil)
-		st, err := m.GetCurrentState(rctx, issue)
+		st, err := m.CheckClaimState(rctx, issue, owner)
+		first := true
 		for {
-			if err == nil {
+			if !first && err == nil {
 				err = m.CheckClaim(rctx, issue, owner)
 			}
+			first = false
 			var b *ClaimBudget
 			if err == nil {
 				b, err = m.WorkBudget(st, duration)

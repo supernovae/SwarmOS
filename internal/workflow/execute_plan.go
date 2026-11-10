@@ -106,7 +106,7 @@ func (r *workRun) plan() (bool, error) {
 			return true, err
 		}
 		if r.rejectedFindings != "" && canonicalReport(plan) == r.rejectedPlan && canonicalReport(testPlan) == r.rejectedTest {
-			return true, fmt.Errorf("issue #%d re-plan is unchanged after CHANGES_REQUESTED; revise PLAN.md or TEST_PLAN.md before review", r.opts.IssueNumber)
+			return true, fmt.Errorf("issue #%d %w; revise PLAN.md or TEST_PLAN.md before review", r.opts.IssueNumber, lease.ErrPlanUnchanged)
 		}
 		// Keep canonical plan files independent of steering evidence in artifacts.
 		plan = guidedReport(plan, planRun)

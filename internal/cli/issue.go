@@ -280,8 +280,10 @@ func newIssueParentCmd(rootOpts *RootOptions, compatibility bool) *cobra.Command
 	epicCmd := &cobra.Command{
 		Use:   kind,
 		Short: "Create non-executable parent planning issues",
-		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return cmd.Help() },
+		// epic is kept as a compatibility alias of parent create --epic.
+		Hidden: compatibility,
+		Args:   cobra.NoArgs,
+		RunE:   func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
 	var title string
 	var bodyFile string

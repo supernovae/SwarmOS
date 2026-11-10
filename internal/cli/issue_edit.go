@@ -40,7 +40,7 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 	var constraints, acceptance []string
 	var depends []int
 	var dryRun, asJSON, allowHarnessChanges bool
-	cmd := &cobra.Command{Use: "edit <issue-number>", Short: "Preview and lint structured WorkUnit replacements before editing", Args: cobra.ExactArgs(1)}
+	cmd := &cobra.Command{Use: "edit <issue-number>", Short: "Replace WorkUnit sections after lint and claim checks (--dry-run previews the change)", Args: cobra.ExactArgs(1)}
 	cmd.RunE = func(cmd *cobra.Command, args []string) (runErr error) {
 		if asJSON {
 			cmd.SilenceErrors = true

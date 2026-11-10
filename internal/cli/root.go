@@ -89,12 +89,11 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		}
 		var notice func(string, int, int, time.Duration)
 		machine, _ := cmd.Flags().GetBool("json")
-		quiet, _ := cmd.Flags().GetBool("quiet")
 		enabled := true
 		if cmd.Flags().Lookup("progress") != nil {
 			enabled, _ = cmd.Flags().GetBool("progress")
 		}
-		if !machine && !quiet && enabled {
+		if !machine && enabled {
 			out := progressWriter(cmd)
 			notice = func(reason string, next, limit int, delay time.Duration) {
 				fmt.Fprintf(out, "GitHub unreachable (%s); retry %d/%d in %s\n", reason, next, limit, delay.Round(time.Second))
@@ -118,7 +117,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 				return fmt.Errorf("--fork-remote requires --fork or a pr command")
 			}
 			if opts.Fork {
-				return fmt.Errorf("storage report is coordinator-only and cannot be used with --fork")
+				return fmt.Errorf("swarm storage commands run on the upstream checkout and cannot be used with --fork")
 			}
 			return nil
 		}

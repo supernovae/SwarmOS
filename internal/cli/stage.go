@@ -2,7 +2,7 @@ package cli
 
 import (
 	"fmt"
-	"os"
+	"github.com/supernovae/swarmos/internal/safefs"
 	"path/filepath"
 	"strings"
 
@@ -172,11 +172,13 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 				if strings.EqualFold(cfg.PlanMode, "agent") {
 					return fmt.Errorf("repository policy sets plan_mode: agent; interactive/manual plan staging is disabled")
 				}
-				planBytes, err := os.ReadFile(filepath.Join(worktree, ".swarm", "active", "PLAN.md"))
+				// Agents write these reports; read them root-bound so a symlink cannot
+				// publish a file from outside the worktree as a plan artifact.
+				planBytes, err := safefs.ReadFile(worktree, filepath.Join(".swarm", "active", "PLAN.md"), 1<<20)
 				if err != nil || strings.TrimSpace(string(planBytes)) == "" {
 					return fmt.Errorf("missing or empty .swarm/active/PLAN.md in %s", worktree)
 				}
-				testBytes, err := os.ReadFile(filepath.Join(worktree, ".swarm", "active", "TEST_PLAN.md"))
+				testBytes, err := safefs.ReadFile(worktree, filepath.Join(".swarm", "active", "TEST_PLAN.md"), 1<<20)
 				if err != nil || strings.TrimSpace(string(testBytes)) == "" {
 					return fmt.Errorf("missing or empty .swarm/active/TEST_PLAN.md in %s", worktree)
 				}

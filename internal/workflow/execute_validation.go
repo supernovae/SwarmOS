@@ -276,8 +276,13 @@ func (r *workRun) reserveRepair() error {
 		return err
 	}
 	st, err := r.e.LeaseManager.ReserveValidationRepair(r.ctx, r.opts.IssueNumber, r.opts.Owner)
-	if err != nil {
+	if errors.Is(err, lease.ErrValidationRepairLimit) {
 		return fmt.Errorf("%w: %w; automatic allowance exhausted; explicit --phase implement or --developer-instructions may continue subject to approval", ErrValidationRepairExhausted, err)
+	}
+	if err != nil {
+		// A lost claim, stale approval or failed state write is not an exhausted
+		// allowance; report it as itself so the next step is accurate.
+		return err
 	}
 	r.st, r.res.State = st, st
 	r.progress.retry("validation-repair", st.ValidationRepairCount, r.repairLimit)

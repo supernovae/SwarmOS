@@ -26,7 +26,7 @@ func newForkRequestStatusCmd(o *RootOptions) *cobra.Command {
 			}
 			id, err := strconv.ParseInt(args[1], 10, 64)
 			if err != nil || id <= 0 {
-				return fmt.Errorf("request ID must be a positive int64")
+				return fmt.Errorf("request ID must be a positive integer")
 			}
 			tr, err := o.resolveTracker(cmd)
 			if err != nil {

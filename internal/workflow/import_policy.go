@@ -147,11 +147,6 @@ func RecoverableRejection(role string, rejected, patterns []string, allowHarness
 	return len(unique) == len(rejection.Paths)
 }
 
-// ImportPolicy applies the agent import policy to a recovered change set.
-func ImportPolicy(role string, paths, patterns []string, allowHarness bool) error {
-	return writableImportPolicy(role, paths, patterns, allowHarness, false)
-}
-
 // developerOutputOnly reports whether a developer was refused only the
 // tester-owned VALIDATION.md, which usually means results went to the wrong file.
 func (e *importRejection) developerOutputOnly() bool {

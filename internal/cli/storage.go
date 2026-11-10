@@ -23,7 +23,7 @@ import (
 )
 
 func newStorageCmd(opts *RootOptions) *cobra.Command {
-	cmd := &cobra.Command{Use: "storage", Short: "Inspect Swarm-managed host storage"}
+	cmd := &cobra.Command{Use: "storage", Short: "Inspect and clean up Swarm-managed host storage"}
 	jsonOutput := false
 	report := &cobra.Command{Use: "report", Short: "Report storage observations without changing storage or workflow state", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		cache, err := os.UserCacheDir()

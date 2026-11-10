@@ -375,15 +375,7 @@ A developer that reports itself blocked, an import rejection, or a claim fence (
 
 Issue and PR `validate` and `submit` commands report phases, check starts, and PASS/FAIL results with elapsed time on stderr. A running line appears every 15 seconds during a check or phase. Add `--progress=false` for quiet operation; stdout, PR URLs, and `--json` results stay the same. Issue submission creates a checkpoint and creates or updates its draft PR; PR submission publishes the existing checkpoint and updates review evidence and rebase metadata.
 
-#### Changed-package validation
-
-`swarm issue work`, `swarm issue validate`, and `swarm pr validate` report a failing Go test sooner. Before each required check that is exactly `go test [flags] ./...`, they first test only the packages changed since the approved base, plus packages in the same module whose code or tests import them, directly or transitively. Progress shows this run as `<check> (changed packages)`, separate from the full check. Swarm computes the changed files itself, by comparing the approved base with the checkpoint content. Uncommitted issue edits are included, and nothing agents write is consulted. Package discovery and the changed-package run use the same sandbox as the full check.
-
-- If the changed packages fail, validation stops. The report names the packages and failing tests. The full check and any remaining required checks don't run, and the failed result is never reused.
-- If they pass, the full required check still runs exactly as configured and decides the result.
-- If the changed-package run times out or can't start, the report lists it as `SKIP` with the reason, and the full check decides. Each run gets its own timeout, so the full check keeps its configured time.
-
-Validation runs only the full check when no `.go` files changed, the check has any other form (another package pattern, shell syntax, or an unrecognized flag), `go.mod` or `go.sum` changed, the repository isn't a single module with `go.mod` at its root, a changed directory is no longer a package, or every package (or more than 200) would be selected. `swarm issue submit`, `swarm pr submit`, staging, rebase repair, and `swarm repo validate` don't use the changed-package run. Neither does CI.
+Validation runs each required check exactly as configured; there is no changed-package pre-run.
 
 `pr submit` runs trusted validation or reuses matching passing evidence from the current claim and publishes to the existing PR branch. It preserves the PR's title, human-written description, draft/ready state, and identity, and updates a managed rebase context section; GitHub applies the repository's review rules to the new commits. Publication uses the remote head observed when the revision began; a concurrent remote update is rejected rather than overwritten. Same-repository publication updates the PR branch and issue coordination state atomically.
 
@@ -696,15 +688,14 @@ go test -timeout=5m ./internal/sandbox -run '^Test(WorkerArchiveRoundTripAndImpo
 go test -timeout=5m ./internal/fork -run '^Test(GatewayDeadlineCancelsInFlightScan|GatewayIgnoresMismatchedOrEditedResults|ForkJSONRejectsTrailingMalformedData|ForkCoordinatorSecurityAndLifecycle|OperationListsStayInSync|ForkRequestRejectsCarryAuthority)$' -count=1
 go test -timeout=10m ./internal/validation/... ./internal/harness/... ./internal/coordination/... ./internal/lease/... ./internal/contract/...
 go test -timeout=5m ./cmd/changelog ./internal/changelog
+go test -timeout=15m ./internal/cli
 ```
 
-There is no changed-file selector or conditional broad-change fallback: broad changes retain this fixed profile and receive full behavior coverage in nightly/release validation, including the entire CLI package. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
+There is no changed-file selector or conditional broad-change fallback: broad changes retain this fixed profile, which runs the entire CLI package on every PR. Nightly and release validation add the race suite and the remaining packages. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
 
 The [full validation workflow](../.github/workflows/full-validation.yml) runs nightly at 04:23 UTC and can be started from Actions with **Run workflow**. It runs full normal and race suites, with dedicated CLI steps using a 30-minute per-package timeout and all other packages retaining a 15-minute timeout. It also runs static and vulnerability checks, CLI smoke, changelog validation and Linux/macOS/Windows builds on amd64 and arm64. No existing benchmark or performance target is available. Each run records its commit and retains test/build logs for 14 days, including failures, with an Actions summary linking the outcome to the commit.
 
 Release snapshot and publishing jobs require the shared full gate and existing release eligibility checks for the same resolved immutable commit. A failed or skipped gate blocks packaging; a successful nightly run for another commit cannot satisfy release validation. Publishing retains the release environment approval and provenance attestation.
-
-The bootstrap PR still validates against its old trusted base, including that base's full test policy. The fixed profile takes effect once merged into a trusted base. Contributors and agents cannot override that policy. Before merging, maintainers should update any branch protection requiring the removed `Lint and vulnerabilities` or `Test and CLI smoke` jobs to the retained policy and CLI smoke jobs, and confirm the nightly schedule in Actions.
 
 ## Public personal-fork lifecycle regression driver
 

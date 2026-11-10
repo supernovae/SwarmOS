@@ -383,7 +383,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 		return nil, err
 	}
 	if state.PRRevision != nil && opts.PRNumber == 0 {
-		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work/validate/submit", opts.IssueNumber)
+		return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", opts.IssueNumber, state.PRRevision.Number)
 	}
 	if opts.PRNumber != 0 && (state.PRRevision == nil || state.PRRevision.Number != opts.PRNumber) && !opts.InspectOnly && !opts.FreshPRRevision {
 		return nil, fmt.Errorf("PR revision is not linked to this issue")

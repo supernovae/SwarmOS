@@ -80,15 +80,6 @@ func ValidateCommitMessageDetail(detail string) error {
 	return fmt.Errorf("invalid commit_message.detail %q (must be concise or detailed)", detail)
 }
 
-func DigestSecurityPolicy(sec SecurityConfig) string {
-	b, err := json.Marshal(sec)
-	if err != nil {
-		return ""
-	}
-	s := sha256.Sum256(b)
-	return hex.EncodeToString(s[:])
-}
-
 func DigestConfig(cfg *SwarmConfig) string {
 	if cfg == nil {
 		return ""

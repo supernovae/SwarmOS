@@ -964,7 +964,7 @@ func RunDoctorWithRunner(repoRoot string, checkGitHubAuth bool, run DoctorRunner
 				Category: "harness",
 				Name:     ".swarm/config.yaml",
 				Status:   "FAIL",
-				Detail:   fmt.Sprintf("missing or invalid .swarm/config.yaml: %v (run `swarm repo init`)", configErr),
+				Detail:   fmt.Sprintf("missing or invalid .swarm/config.yaml: %v", configErr),
 			}
 		}
 	}))

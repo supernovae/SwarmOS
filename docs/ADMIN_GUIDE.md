@@ -25,6 +25,15 @@ swarm repo doctor
 
 In a Go repository, the generated `.swarm/validation/required-checks.yaml` includes a gofmt `fmt` check next to `build`, `test`, and `go vet`. If your CI runs other lint or format tools, such as staticcheck or golangci-lint, `swarm repo doctor` warns about each one that no required check covers and suggests an entry. Add the ones you want to the policy on your default branch so agents catch those findings before CI does. See [validation policy](project.md#validation-policy-and-protected-paths).
 
+SwarmOS itself uses a repository-specific required policy to catch regressions before merge. Alongside formatting, build, vet, and staticcheck, its required test checks cover:
+
+- The full non-race `internal/cli` package (`cli-regressions`), plus the named CLI smoke/security subset.
+- The full `internal/validation`, `internal/harness`, `internal/coordination`, `internal/lease`, and `internal/contract` package trees (`core-regressions`).
+- The full `internal/gitcredential` and `internal/safefs` package trees (`filesystem-security`), and `cmd/changelog` and `internal/changelog` (`changelog-regressions`).
+- Named security subsets in `internal/agent`, `internal/sandbox`, and `internal/fork`.
+
+See the [required policy](../.swarm/validation/required-checks.yaml) for the exact commands and test selections. `make test` runs the ordinary full repository suite. Full repository race coverage runs through `make check` locally and the scheduled/release full-validation workflow; it is not part of the required PR policy. Policy updates take effect for subsequent PRs after merging because validation uses the PR's trusted base policy.
+
 ### Onboarding an existing repository
 
 A repository with years of history, its own CI, and an established `AGENTS.md` deserves a gentler start than a fresh scaffold. Two tools help:

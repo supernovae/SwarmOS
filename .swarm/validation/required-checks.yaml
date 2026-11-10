@@ -15,7 +15,7 @@ required_checks:
       command: 'go test -timeout=5m ./internal/cli -run ''^Test(CLIRepoValidateHarnessGrantNeedsAuthoritativeState|RepoValidateGrantOnlyRunsNoChecks|RepoValidateGrantFileRechecked|RootDefaultEnvironment|RootInjectedEnvironment|ResolveBuildVersion|ResolveBuildVersionWithoutVCS)$'' -count=1'
       timeout: 10m
     - name: cli-regressions
-      command: go test -timeout=15m ./internal/cli
+      command: go test -timeout=15m -parallel=8 ./internal/cli
       timeout: 15m
     - name: filesystem-security
       command: 'go test -timeout=5m ./internal/gitcredential/... ./internal/safefs/... -count=1'

@@ -1029,7 +1029,7 @@ func repositoryCLIRegressionsCheck(t *testing.T) contract.CheckSpec {
 		t.Fatalf("want exactly one cli-regressions check, got %d", len(found))
 	}
 	check := found[0]
-	if check.Command != "go test -timeout=15m ./internal/cli" {
+	if check.Command != "go test -timeout=15m -parallel=8 ./internal/cli" {
 		t.Fatalf("want unfiltered full CLI command, got %q", check.Command)
 	}
 	if check.Timeout != "15m" {

@@ -168,9 +168,17 @@ func ReadOnlyCommand(dir, output, bin string, args []string, opts Options) (*exe
 		if !allowNetwork {
 			wrapped = append(wrapped, "--unshare-net")
 		}
+		wrapped = append(wrapped, linuxRuntimeMasks(allowNetwork)...)
 		for _, denied := range denyPaths {
-			if absDenied, denyErr := filepath.Abs(denied); denyErr == nil && absDenied != "/" && filepath.Dir(absDenied) != "/" {
-				wrapped = append(wrapped, "--tmpfs", filepath.Dir(absDenied))
+			absDenied, denyErr := filepath.Abs(denied)
+			if denyErr != nil || absDenied == "/" {
+				continue
+			}
+			if parent := filepath.Dir(absDenied); parent != "/" {
+				wrapped = append(wrapped, "--tmpfs", parent)
+			} else {
+				// A top-level directory has no parent to hide; hide it directly.
+				wrapped = append(wrapped, "--tmpfs", absDenied)
 			}
 		}
 		wrapped = append(wrapped, "--ro-bind", absDir, absDir, "--bind", absOutput, absOutput, "--bind", agentHome, agentHome, "--ro-bind", bin, bin, "--proc", "/proc", "--dev", "/dev", "--chdir", absDir, "--", bin)
@@ -181,6 +189,50 @@ func ReadOnlyCommand(dir, output, bin string, args []string, opts Options) (*exe
 	default:
 		return nil, fmt.Errorf("review isolation unsupported on %s; configure a container runtime", runtime.GOOS)
 	}
+}
+
+// linuxRuntimeMasks hides host runtime state directories from the reviewer.
+// They hold per-user and system service endpoints that a read-only review has
+// no reason to see. With network access allowed, only the resolver file is
+// kept when the host stores it under a masked directory.
+func linuxRuntimeMasks(allowNetwork bool) []string {
+	masks := []string{}
+	masked := []string{}
+	candidates := []string{"/run", "/var/run", os.Getenv("XDG_RUNTIME_DIR")}
+	for _, dir := range candidates {
+		if dir == "" || !filepath.IsAbs(dir) || filepath.Clean(dir) == "/" {
+			continue
+		}
+		dir = filepath.Clean(dir)
+		// bwrap cannot mount over a symlink, and a link into an already masked
+		// directory needs no mount of its own.
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		covered := false
+		for _, m := range masked {
+			if dir == m || strings.HasPrefix(dir, m+"/") {
+				covered = true
+			}
+		}
+		if covered {
+			continue
+		}
+		masked = append(masked, dir)
+		masks = append(masks, "--tmpfs", dir)
+	}
+	if allowNetwork {
+		if resolved, err := filepath.EvalSymlinks("/etc/resolv.conf"); err == nil {
+			for _, m := range masked {
+				if strings.HasPrefix(resolved, m+"/") {
+					masks = append(masks, "--ro-bind", resolved, resolved)
+					break
+				}
+			}
+		}
+	}
+	return masks
 }
 
 // RemoveContainer stops daemon-owned processes after a failed/cancelled client.

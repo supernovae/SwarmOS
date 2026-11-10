@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -322,5 +324,36 @@ func TestCLIFixtureMockControlsStayOutOfChildProcesses(t *testing.T) {
 	}
 	if _, ok := os.LookupEnv("SWARM_MOCK_DEVELOPER_CMD"); ok {
 		t.Fatal("fixture control changed the process environment")
+	}
+}
+
+func TestCommandLookupSession(t *testing.T) {
+	parent := newCommandSessions(context.Background())
+	first, second := newCommandSessions(parent), newCommandSessions(parent)
+	a, b := gitcredential.CommandLookupSessionFrom(first), gitcredential.CommandLookupSessionFrom(second)
+	if a == nil || b == nil || a == b || a == gitcredential.CommandLookupSessionFrom(parent) {
+		t.Fatal("command/task inherited lookup owner")
+	}
+	if sandbox.InspectionSessionFrom(first) == sandbox.InspectionSessionFrom(second) {
+		t.Fatal("command/task inherited inspection owner")
+	}
+	// Exercise actual command entry twice on the same Cobra command.
+	f := newCLIFixture(t)
+	cmd := NewRootCmd()
+	cmd.SetArgs([]string{"--root", f.root, "version"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := cmd.Find([]string{"version"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := gitcredential.CommandLookupSessionFrom(child.Context())
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	after := gitcredential.CommandLookupSessionFrom(child.Context())
+	if before == nil || after == nil || before == after {
+		t.Fatal("separate CLI invocations shared lookup session")
 	}
 }

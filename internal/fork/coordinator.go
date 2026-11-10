@@ -295,7 +295,7 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 	}
 	_ = workspace.FetchCommit(c.RepoRoot, c.upstreamRemote(), currentState.BaseSHA)
 
-	cfg, err := harness.LoadConfigAt(c.RepoRoot, currentState.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, c.RepoRoot, currentState.BaseSHA)
 	if err != nil {
 		return nil, "", fmt.Errorf("load approved policy at %s: %w", currentState.BaseSHA, err)
 	}

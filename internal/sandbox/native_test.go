@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/storageuse"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1183,5 +1185,228 @@ func TestGoTrimpathCacheReuse(t *testing.T) {
 				t.Fatalf("unexpected cache reuse: trimpath=%v added=%d", trim, added)
 			}
 		}
+	}
+}
+
+func TestExecutableHashCommandCache(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(binary, []byte("first"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := executableStat(info); !ok {
+		t.Skip("complete stat identity unavailable; fallback hashes every lookup")
+	}
+	s := NewInspectionSession()
+	calls := 0
+	s.digest = func(r io.Reader) ([sha256.Size]byte, error) {
+		calls++
+		h := sha256.New()
+		_, err := io.Copy(h, r)
+		var sum [sha256.Size]byte
+		copy(sum[:], h.Sum(nil))
+		return sum, err
+	}
+	inspect := func(context.Context) (string, error) { return "v1", nil }
+	for i := 0; i < 3; i++ {
+		if _, err := s.reuse(context.Background(), "driver", binary, "policy", inspect); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("unchanged executable hashed %d times, want 1", calls)
+	}
+	guard, err := s.launchGuard(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for turn := 0; turn < 2; turn++ {
+		if err := guard(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("launch hashes=%d want 3", calls)
+	}
+	if err := os.WriteFile(binary, []byte("other"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(binary, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	executions := 0
+	for turn := 0; turn < 2; turn++ {
+		if err := guard(); err == nil {
+			executions++
+		}
+	}
+	if executions != 0 || calls != 5 {
+		t.Fatalf("swap: executions=%d hashes=%d", executions, calls)
+	}
+	if _, err := s.reuse(context.Background(), "driver", binary, "policy", inspect); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 6 {
+		t.Fatalf("changed executable hashes=%d want 6", calls)
+	}
+	nilGuard, err := (*InspectionSession)(nil).launchGuard(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binary, []byte("third"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := nilGuard(); err == nil {
+		t.Fatal("nil session launch accepted changed binary")
+	}
+}
+
+func TestExecutableHashFailureAndMutation(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(binary, []byte("first"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	s := NewInspectionSession()
+	calls := 0
+	s.digest = func(r io.Reader) ([sha256.Size]byte, error) { calls++; return [sha256.Size]byte{}, io.ErrUnexpectedEOF }
+	for i := 0; i < 2; i++ {
+		if _, err := s.identity(binary); err == nil {
+			t.Fatal("hash failure ignored")
+		}
+	}
+	if calls != 2 {
+		t.Fatal("cached failure")
+	}
+	s.digest = func(r io.Reader) ([sha256.Size]byte, error) {
+		if err := os.WriteFile(binary, []byte("altered"), 0700); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		return [sha256.Size]byte{}, nil
+	}
+	if _, err := s.identity(binary); err == nil {
+		t.Fatal("accepted mutation during hashing")
+	}
+}
+
+func TestExecutableHashConcurrentAndSessionIsolation(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(binary, []byte("first"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(binary)
+	if _, ok := executableStat(info); !ok {
+		t.Skip("complete stat identity unavailable")
+	}
+	var calls atomic.Int32
+	digest := func(r io.Reader) ([sha256.Size]byte, error) {
+		calls.Add(1)
+		h := sha256.New()
+		_, err := io.Copy(h, r)
+		var sum [sha256.Size]byte
+		copy(sum[:], h.Sum(nil))
+		return sum, err
+	}
+	s := NewInspectionSession()
+	s.digest = digest
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.identity(binary); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent hashes=%d", calls.Load())
+	}
+	other := NewInspectionSession()
+	other.digest = digest
+	if _, err := other.identity(binary); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatal("sessions shared digest")
+	}
+	replacement := binary + ".replacement"
+	if err := os.WriteFile(replacement, []byte("first"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, binary); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.identity(binary); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 {
+		t.Fatal("inode replacement reused digest")
+	}
+}
+
+func TestExecutableHashLaunchUsesQualifiedIdentity(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "agent")
+	if err := os.WriteFile(binary, []byte("qualified"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range []*InspectionSession{NewInspectionSession(), nil} {
+		if err := os.WriteFile(binary, []byte("qualified"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		result, err := session.reuseInspection(context.Background(), "driver", binary, "policy", func(context.Context) (inspection, error) { return inspection{version: "v1"}, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Guard construction must use what was qualified, even if workspace setup
+		// or another actor has replaced the named executable in the meantime.
+		if err := os.WriteFile(binary, []byte("replacement"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		guard, err := session.launchGuard(binary, result.identity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for turn := 0; turn < 2; turn++ {
+			if err := guard(); err == nil {
+				t.Fatal("launch accepted bytes different from qualified identity")
+			}
+		}
+	}
+}
+
+func TestExecutableHashRejectsSymlinkRetargetDuringHash(t *testing.T) {
+	dir := t.TempDir()
+	a, b, link := filepath.Join(dir, "a"), filepath.Join(dir, "b"), filepath.Join(dir, "agent")
+	for _, file := range []string{a, b} {
+		if err := os.WriteFile(file, []byte(file), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(a, link); err != nil {
+		t.Fatal(err)
+	}
+	s := NewInspectionSession()
+	s.digest = func(r io.Reader) ([sha256.Size]byte, error) {
+		h := sha256.New()
+		_, err := io.Copy(h, r)
+		var sum [sha256.Size]byte
+		copy(sum[:], h.Sum(nil))
+		if err != nil {
+			return sum, err
+		}
+		if err := os.Remove(link); err != nil {
+			return sum, err
+		}
+		return sum, os.Symlink(b, link)
+	}
+	if _, err := s.identity(link); err == nil {
+		t.Fatal("accepted symlink retarget during hashing")
 	}
 }

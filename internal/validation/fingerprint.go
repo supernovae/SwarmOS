@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -24,7 +25,7 @@ func fingerprint(ctx context.Context, root string, opts ValidateOptions) (map[st
 	if err != nil {
 		return nil, err
 	}
-	policy, err := gitOutput(root, "show", opts.BaseSHA+":.swarm/validation/required-checks.yaml")
+	policy, err := gitcredential.ReadBaseFile(ctx, root, opts.BaseSHA, ".swarm/validation/required-checks.yaml")
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +44,7 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 	if opts.ForkMode || opts.CIMode || !reusableVersion(opts.Version) || opts.ClaimID == "" || owner == "" {
 		return nil, nil
 	}
-	if _, err := loadTrustedValidationSpec(root, opts.BaseSHA); err != nil {
+	if _, err := loadTrustedValidationSpecContext(ctx, root, opts.BaseSHA); err != nil {
 		return nil, err
 	}
 	current, err := fingerprint(ctx, root, opts)
@@ -103,7 +104,7 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 			if !opts.DirectIssueReuse {
 				return nil, nil
 			}
-			cfg, err := harness.LoadConfigAt(root, opts.BaseSHA)
+			cfg, err := harness.LoadConfigAtContext(ctx, root, opts.BaseSHA)
 			if err != nil {
 				return nil, nil
 			}

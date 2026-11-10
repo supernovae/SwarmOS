@@ -1,8 +1,10 @@
 package harness
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"maps"
@@ -1932,5 +1934,55 @@ func TestArchiveWorkflowTemplateSecurityAndSummary(t *testing.T) {
 				t.Fatal("credential logged")
 			}
 		})
+	}
+}
+
+func TestLoadConfigAtCommandCache(t *testing.T) {
+	root := t.TempDir()
+	data, err := embeddedTemplates.ReadFile("templates/swarm/config.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(root, "fixture")
+	count := filepath.Join(root, "count")
+	if err := os.WriteFile(fixture, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "git"), []byte("#!/bin/sh\nprintf x >> '"+count+"'\ncat '"+fixture+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx := gitcredential.WithCommandLookupSession(context.Background(), gitcredential.NewCommandLookupSession())
+	sha := strings.Repeat("a", 40)
+	first, err := LoadConfigAtContext(ctx, root, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pristine, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Version = -1
+	first.Agents["codex"] = contract.AgentConfig{Binary: "changed"}
+	first.Profiles[0].Evidence[0] = "changed"
+	second, err := LoadConfigAtContext(ctx, root, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := json.Marshal(second)
+	if string(got) != string(pristine) {
+		t.Fatal("decoded config aliases prior return")
+	}
+	if _, err := LoadConfigAtContext(ctx, root, strings.Repeat("b", 40)); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(count)
+	if err != nil || len(calls) != 2 {
+		t.Fatalf("git calls=%d err=%v", len(calls), err)
+	}
+	for _, ref := range []string{"main", "abcdef1"} {
+		if _, err := LoadConfigAtContext(ctx, root, ref); err == nil {
+			t.Fatal("accepted mutable ref")
+		}
 	}
 }

@@ -187,10 +187,14 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 		return a.runIsolated(ctx, req, &observation.lifecycle)
 	}
 	preflight := time.Now()
+	var launchGuard func() error
 	if a.driver == "opencode" && a.sandboxRuntime != "container" {
-		if _, err := a.inspections.InspectDelegatedHarness(ctx, a.driver, a.binary, a.inspectionPolicy); err != nil {
+
+		_, guard, err := a.inspections.InspectDelegatedHarnessForLaunch(ctx, a.driver, a.binary, a.inspectionPolicy)
+		if err != nil {
 			return nil, err
 		}
+		launchGuard = guard
 	}
 	bin, args := a.BuildCommand(req)
 	if a.sandboxRuntime != "container" {
@@ -255,6 +259,11 @@ func (a *CLIAdapter) Run(ctx context.Context, req RunRequest) (result *RunResult
 		cmd.Stdout, cmd.Stderr = capture, capture
 	}
 	observation.lifecycle.Setup = durationSince(setup)
+	if launchGuard != nil {
+		if err := launchGuard(); err != nil {
+			return nil, err
+		}
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start agent %q: %w", a.agentName, err)
 	}

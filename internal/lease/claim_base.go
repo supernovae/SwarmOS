@@ -49,7 +49,7 @@ func (m *Manager) prepareClaimBase(ctx context.Context, n int, original *IssueSt
 	refuse := func(reason string) (*IssueState, error) {
 		return nil, &ClaimBaseApprovalError{IssueNumber: n, Reason: reason}
 	}
-	wf, err := harness.LoadWorkflowAt(m.repoRoot, wu.Workflow, original.BaseSHA)
+	wf, err := harness.LoadWorkflowAtContext(ctx, m.repoRoot, wu.Workflow, original.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func (m *Manager) prepareClaimBase(ctx context.Context, n int, original *IssueSt
 	if err != nil || !ancestor {
 		return refuse("old base ancestry could not be verified")
 	}
-	nextCfg, err := harness.LoadConfigAt(m.repoRoot, base)
+	nextCfg, err := harness.LoadConfigAtContext(ctx, m.repoRoot, base)
 	if err != nil {
 		return nil, err
 	}

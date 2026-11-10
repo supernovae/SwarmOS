@@ -143,11 +143,11 @@ func resolveArchiveRun(cmd *cobra.Command, opts *RootOptions, apply bool) (*leas
 			return nil, nil, err
 		}
 	}
-	ns, err := harness.LedgerNamespaceAt(root, tip)
+	ns, err := harness.LedgerNamespaceAtContext(cmd.Context(), root, tip)
 	if err != nil {
 		return nil, nil, fmt.Errorf("trusted upstream config unavailable locally; fetch the default branch before preview: %w", err)
 	}
-	policy, err := harness.ArchivePolicyAt(root, tip)
+	policy, err := harness.ArchivePolicyAtContext(cmd.Context(), root, tip)
 	if err != nil {
 		return nil, nil, err
 	}

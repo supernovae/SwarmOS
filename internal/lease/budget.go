@@ -1,6 +1,7 @@
 package lease
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -35,6 +36,10 @@ func policyBudget(cfg contract.LeaseConfig) (time.Duration, time.Duration, error
 // In fork mode it returns nil when the upstream coordinator predates claim
 // budgets and supplied no projection.
 func (m *Manager) Budget(st *IssueState) (*ClaimBudget, error) {
+	return m.BudgetContext(context.Background(), st)
+}
+
+func (m *Manager) BudgetContext(ctx context.Context, st *IssueState) (*ClaimBudget, error) {
 	if st == nil || st.Lease.ClaimedAt.IsZero() {
 		return nil, nil
 	}
@@ -54,7 +59,7 @@ func (m *Manager) Budget(st *IssueState) (*ClaimBudget, error) {
 		}
 		return &b, nil
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, m.repoRoot, st.BaseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load approved budget policy: %w", err)
 	}
@@ -66,7 +71,11 @@ func (m *Manager) Budget(st *IssueState) (*ClaimBudget, error) {
 // with a reserve of a third of duration. The fallback grants nothing: the
 // coordinator still fences every renewal and claim check.
 func (m *Manager) WorkBudget(st *IssueState, duration time.Duration) (*ClaimBudget, error) {
-	b, err := m.Budget(st)
+	return m.WorkBudgetContext(context.Background(), st, duration)
+}
+
+func (m *Manager) WorkBudgetContext(ctx context.Context, st *IssueState, duration time.Duration) (*ClaimBudget, error) {
+	b, err := m.BudgetContext(ctx, st)
 	if err != nil || b != nil || m.gateway == nil || st == nil || st.Lease.ClaimedAt.IsZero() {
 		return b, err
 	}

@@ -112,12 +112,12 @@ independent human decision.`,
 			}
 			if asJSON {
 				outcome := map[string]any{"kind": "review", "issue_number": issue, "reviewer_kind": "human", "verdict": verdict}
-				if d := directPlanReviewDisplay(rootOpts, reviewed); d != nil {
+				if d := directPlanReviewDisplayContext(cmd.Context(), rootOpts, reviewed); d != nil {
 					outcome["plan_review"] = d
 				}
 				return writeJSON(cmd, outcome)
 			}
-			if d := directPlanReviewDisplay(rootOpts, reviewed); d != nil {
+			if d := directPlanReviewDisplayContext(cmd.Context(), rootOpts, reviewed); d != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Plan review round: %d; automatic plan retries: %d/%d; operator decision needed: %t\n", d.Round, d.RetriesUsed, d.RetriesAllowed, d.OperatorDecision)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Human review recorded for issue #%d: %s\n", issue, verdict)

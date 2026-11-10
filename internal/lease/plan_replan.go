@@ -64,7 +64,11 @@ func recordPlanReviewTransition(st *IssueState, art contract.Artifact, advisory 
 
 // PlanReplanLimit always resolves policy from the approved base.
 func (m *Manager) PlanReplanLimit(st *IssueState) (int, error) {
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	return m.PlanReplanLimitContext(context.Background(), st)
+}
+
+func (m *Manager) PlanReplanLimitContext(ctx context.Context, st *IssueState) (int, error) {
+	cfg, err := harness.LoadConfigAtContext(ctx, m.repoRoot, st.BaseSHA)
 	if err != nil {
 		return 0, err
 	}
@@ -72,7 +76,11 @@ func (m *Manager) PlanReplanLimit(st *IssueState) (int, error) {
 }
 
 func (m *Manager) CheckPlanReplan(st *IssueState) error {
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	return m.CheckPlanReplanContext(context.Background(), st)
+}
+
+func (m *Manager) CheckPlanReplanContext(ctx context.Context, st *IssueState) error {
+	cfg, err := harness.LoadConfigAtContext(ctx, m.repoRoot, st.BaseSHA)
 	if err != nil {
 		return err
 	}
@@ -121,11 +129,11 @@ func (m *Manager) CheckPlanReplan(st *IssueState) error {
 
 // reservePlanReplan runs inside the existing update-phase fenced CAS. Fork
 // requests use that same operation; callers cannot choose a count or a limit.
-func (m *Manager) reservePlanReplan(st *IssueState) error {
-	if err := m.CheckPlanReplan(st); err != nil {
+func (m *Manager) reservePlanReplanContext(ctx context.Context, st *IssueState) error {
+	if err := m.CheckPlanReplanContext(ctx, st); err != nil {
 		return err
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, m.repoRoot, st.BaseSHA)
 	if err != nil {
 		return err
 	}
@@ -162,7 +170,7 @@ func (m *Manager) ResetPlanReplansAfterStage(ctx context.Context, issue int, own
 		if st.ForkRepo != "" {
 			return fmt.Errorf("fork staging cannot reset plan retries")
 		}
-		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		cfg, err := harness.LoadConfigAtContext(ctx, m.repoRoot, st.BaseSHA)
 		if err != nil {
 			return err
 		}

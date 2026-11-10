@@ -491,3 +491,39 @@ esac
 		t.Fatal("cached inspection skipped the failing canary")
 	}
 }
+
+func TestInspectionTrustedLocalLaunchSwap(t *testing.T) {
+	for _, withSession := range []bool{false, true} {
+		t.Run(strconv.FormatBool(withSession), func(t *testing.T) {
+			dir := t.TempDir()
+			binary := filepath.Join(dir, "opencode")
+			run := filepath.Join(dir, "run")
+			script := "#!/bin/sh\ncase \"$1 ${2:-}\" in\n'--version ') echo 'opencode v2.1.2';;\n'run --help') echo '--standalone --server --continue --model --agent --format --title';;\n*) printf x >> '" + run + "';;\nesac\n"
+			if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			var session *sandbox.InspectionSession
+			if withSession {
+				session = sandbox.NewInspectionSession()
+			}
+			swapped := false
+			adapter := &CLIAdapter{agentName: "opencode", driver: "opencode", binary: binary, executionMode: contract.ExecutionTrustedLocal, inspections: session}
+			adapter.lookupEnv = func(name string) (string, bool) {
+				if name == "PATH" && !swapped {
+					swapped = true
+					if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf x >> '"+run+"'\n"), 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return os.LookupEnv(name)
+			}
+			_, err := adapter.Run(t.Context(), RunRequest{Role: "developer", WorktreePath: t.TempDir(), Mode: "headless"})
+			if !swapped || err == nil {
+				t.Fatalf("swapped=%v error=%v", swapped, err)
+			}
+			if _, err := os.Stat(run); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("replacement executed: %v", err)
+			}
+		})
+	}
+}

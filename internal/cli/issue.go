@@ -151,7 +151,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 				if inspectErr != nil {
 					return fmt.Errorf("%w; inspect WorkUnit: %v", err, inspectErr)
 				}
-				cfg, inspectErr := harness.LoadConfigAt(rootOpts.resolveRepoRoot(), state.BaseSHA)
+				cfg, inspectErr := harness.LoadConfigAtContext(cmd.Context(), rootOpts.resolveRepoRoot(), state.BaseSHA)
 				if inspectErr != nil {
 					return fmt.Errorf("%w; inspect approved policy: %v", err, inspectErr)
 				}

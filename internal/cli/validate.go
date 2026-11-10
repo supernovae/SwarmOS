@@ -69,7 +69,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), baseSHA)
+		cfg, duration, err := approvedLeasePolicyContext(cmd.Context(), root, manager.UpstreamRemote(), baseSHA)
 		if err != nil {
 			return err
 		}

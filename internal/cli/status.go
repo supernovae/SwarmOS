@@ -164,7 +164,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 						if err != nil {
 							return err
 						}
-						cfg, err := harness.LoadConfigAt(target.Path, state.BaseSHA)
+						cfg, err := harness.LoadConfigAtContext(cmd.Context(), target.Path, state.BaseSHA)
 						if err != nil {
 							return err
 						}
@@ -175,20 +175,20 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 						}
 					}
 					entry.Repair = validation.RepairFromArtifact(state.Artifacts, state.BaseSHA)
-					entry.ClaimBudget, err = manager.Budget(state)
+					entry.ClaimBudget, err = manager.BudgetContext(cmd.Context(), state)
 					if err != nil {
 						return err
 					}
 					entry.ClaimBudgetUnavailable = entry.ClaimBudget == nil && manager.HasWorkerGateway() && !state.Lease.ClaimedAt.IsZero()
 					displayOpts := *options
 					displayOpts.RepoRoot = target.Path
-					entry.PlanReview = directPlanReviewDisplay(&displayOpts, state)
+					entry.PlanReview = directPlanReviewDisplayContext(cmd.Context(), &displayOpts, state)
 					if entry.PlanReview != nil {
 						copyState := *state
 						copyState.Lease.NextPhase = entry.PlanReview.NextPhase
 						entry.State = &copyState
 					}
-					entry.PlanReplanLimit, err = manager.PlanReplanLimit(state)
+					entry.PlanReplanLimit, err = manager.PlanReplanLimitContext(cmd.Context(), state)
 					if err != nil {
 						return err
 					}
@@ -204,7 +204,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				if !options.Fork && state != nil {
 					wu, parseErr := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
 					if parseErr == nil {
-						cfg, cfgErr := harness.LoadConfigAt(target.Path, state.BaseSHA)
+						cfg, cfgErr := harness.LoadConfigAtContext(cmd.Context(), target.Path, state.BaseSHA)
 						if cfgErr != nil {
 							return cfgErr
 						}

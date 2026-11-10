@@ -180,10 +180,10 @@ type ValidateOptions struct {
 // CheckCheckpointBoundary uses the validator's approved execution selection.
 // Preview resolves availability only; actual admission also probes isolation.
 func CheckCheckpointBoundary(ctx context.Context, root, base string, probe bool) (bool, error) {
-	if _, err := loadTrustedValidationSpec(root, base); err != nil {
+	if _, err := loadTrustedValidationSpecContext(ctx, root, base); err != nil {
 		return false, err
 	}
-	cfg, err := harness.LoadConfigAt(root, base)
+	cfg, err := harness.LoadConfigAtContext(ctx, root, base)
 	if err != nil {
 		return false, err
 	}
@@ -245,7 +245,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if !opts.CIMode && opts.Version != "" && opts.ClaimID != "" {
 		before, _ = fingerprint(ctx, worktreePath, opts)
 	}
-	spec, err := loadTrustedValidationSpec(worktreePath, opts.BaseSHA)
+	spec, err := loadTrustedValidationSpecContext(ctx, worktreePath, opts.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +321,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err := harness.ValidateTrackerConfig(worktreePath); err != nil {
 		return nil, fmt.Errorf("candidate tracker configuration: %w", err)
 	}
-	cfg, err := harness.LoadConfigAt(worktreePath, baseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, worktreePath, baseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load approved execution policy: %w", err)
 	}
@@ -502,7 +502,10 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 }
 
 func loadTrustedValidationSpec(repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
-	spec, err := harness.LoadValidationSpecAt(repoRoot, baseSHA)
+	return loadTrustedValidationSpecContext(context.Background(), repoRoot, baseSHA)
+}
+func loadTrustedValidationSpecContext(ctx context.Context, repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
+	spec, err := harness.LoadValidationSpecAtContext(ctx, repoRoot, baseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("%w: load validation policy at %s: %v", ErrInvalidPolicy, baseSHA, err)
 	}

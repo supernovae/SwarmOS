@@ -367,7 +367,7 @@ func (m *Manager) InspectDecomposition(ctx context.Context, st *IssueState) *Dec
 						row.State = "waiting on prerequisite"
 						row.Reason = err.Error()
 					} else if child != nil {
-						cfg, err := harness.LoadConfigAt(m.repoRoot, child.BaseSHA)
+						cfg, err := harness.LoadConfigAtContext(ctx, m.repoRoot, child.BaseSHA)
 						if err != nil {
 							row.State = "unknown"
 							row.Reason = err.Error()

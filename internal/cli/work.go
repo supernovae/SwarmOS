@@ -201,7 +201,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			if errors.Is(err, workflow.ErrPlanReviewRejected) && result != nil {
 				recovery := planReviewRecovery(&guidanceOpts, result.State, "issue", opts.IssueNumber)
 				if jsonOutput {
-					return &planRecoveryError{err: err, recovery: recovery, display: directPlanReviewDisplay(&guidanceOpts, result.State)}
+					return &planRecoveryError{err: err, recovery: recovery, display: directPlanReviewDisplayContext(cmd.Context(), &guidanceOpts, result.State)}
 				}
 				fmt.Fprintln(cmd.OutOrStdout(), planReviewSummary(&guidanceOpts, result.State))
 			}
@@ -241,7 +241,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				approvedCfg, err := harness.LoadConfigAt(opts.RepoRoot, result.State.BaseSHA)
+				approvedCfg, err := harness.LoadConfigAtContext(cmd.Context(), opts.RepoRoot, result.State.BaseSHA)
 				if err != nil {
 					return err
 				}

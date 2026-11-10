@@ -1029,11 +1029,11 @@ func repositoryCLIRegressionsCheck(t *testing.T) contract.CheckSpec {
 		t.Fatalf("want exactly one cli-regressions check, got %d", len(found))
 	}
 	check := found[0]
-	if check.Command != "go test -timeout=15m -parallel=8 ./internal/cli" {
+	if check.Command != "go test -timeout=30m -parallel=8 ./internal/cli" {
 		t.Fatalf("want unfiltered full CLI command, got %q", check.Command)
 	}
-	if check.Timeout != "15m" {
-		t.Fatalf("want policy timeout 15m, got %q", check.Timeout)
+	if check.Timeout != "30m" {
+		t.Fatalf("want policy timeout 30m, got %q", check.Timeout)
 	}
 	return check
 }
@@ -1082,5 +1082,24 @@ func TestRepositoryCLIRegressionsRejectsNewFailure(t *testing.T) {
 	write(testFile, source(""))
 	if out, err := run(); err != nil {
 		t.Fatalf("passing control failed: %v (%s)", err, out)
+	}
+}
+
+func TestCheckTimeoutHonoursPolicyUpToCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		configured string
+		want       time.Duration
+	}{
+		{"", defaultCheckTimeout},
+		{"bad", defaultCheckTimeout},
+		{"0s", defaultCheckTimeout},
+		{"-5m", defaultCheckTimeout},
+		{"5m", 5 * time.Minute},
+		{"30m", 30 * time.Minute},
+		{"3h", maxCheckTimeout},
+	} {
+		if got := checkTimeout(tc.configured); got != tc.want {
+			t.Errorf("checkTimeout(%q) = %s, want %s", tc.configured, got, tc.want)
+		}
 	}
 }

@@ -15,22 +15,75 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/node"
+	"github.com/supernovae/swarmos/internal/registry"
 	"github.com/supernovae/swarmos/internal/storage"
 )
 
 func TestStorageMaintenanceDiagnostics(t *testing.T) {
-	cmd := &cobra.Command{}
-	var out, errOut bytes.Buffer
-	cmd.SetOut(&out)
-	cmd.SetErr(&errOut)
-	renderMaintenanceDiagnostics(cmd, storage.MaintenanceSummary{ObservedBytes: 100, ExcessBytes: 80, ProtectedBytes: 100, FinishedTasks: 2, Stale: true})
-	if out.Len() != 0 {
-		t.Fatal("diagnostics changed stdout")
+	const target = 40 << 30
+	for _, tc := range []struct {
+		name    string
+		summary storage.MaintenanceSummary
+		want    []string
+		quiet   bool
+	}{
+		// Within the target with nothing to retire there is nothing to act on,
+		// even when part of the inventory could not be measured.
+		{name: "within target", summary: storage.MaintenanceSummary{ObservedBytes: 11 << 30, ProtectedBytes: 11 << 30, Stale: true}, quiet: true},
+		{name: "over target", summary: storage.MaintenanceSummary{ObservedBytes: 45 << 30, ExcessBytes: 5 << 30, Complete: true}, want: []string{"Swarm caches use 45.0 GiB, 5.0 GiB over the 40.0 GiB target.", "\n  See what can be removed: swarm storage cleanup\n"}},
+		{name: "finished tasks", summary: storage.MaintenanceSummary{ObservedBytes: 3 << 20, FinishedTasks: 2}, want: []string{"Swarm caches use 3.0 MiB of the 40.0 GiB target.", "2 finished tasks can be cleaned up.", "Some storage could not be measured", "swarm storage cleanup\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := &cobra.Command{}
+			var out, errOut bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+			renderMaintenanceDiagnostics(cmd, tc.summary, target, "swarm storage cleanup")
+			if out.Len() != 0 {
+				t.Fatal("diagnostics changed stdout")
+			}
+			if tc.quiet != (errOut.Len() == 0) {
+				t.Fatal(errOut.String())
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(errOut.String(), want) {
+					t.Fatal(want, errOut.String())
+				}
+			}
+			// One runnable command per line: never a "preview; apply" pair, raw
+			// byte counts, or key=value fields.
+			for _, banned := range []string{"; apply:", "--apply", "=", "bytes"} {
+				if strings.Contains(errOut.String(), banned) {
+					t.Fatal(banned, errOut.String())
+				}
+			}
+		})
 	}
-	for _, want := range []string{"excess=80", "protected/retained=100", "finished task candidates=2", "incomplete=true", "stale=true", "swarm storage cleanup --all-repos", "swarm storage cleanup --all-repos --apply"} {
-		if !strings.Contains(errOut.String(), want) {
-			t.Fatal(want, errOut.String())
-		}
+}
+
+// The suggested preview must run on this host: --all-repos fails when no
+// repository is registered, and looking must not create the registry.
+func TestStorageCleanupCommandMatchesRegistry(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "none", "repos.yaml")
+	if got := storageCleanupCommand(cmd, missing); got != "swarm storage cleanup" {
+		t.Fatal(got)
+	}
+	if _, err := os.Stat(filepath.Dir(missing)); !os.IsNotExist(err) {
+		t.Fatal("created registry directory", err)
+	}
+	if got := storageCleanupCommand(cmd, ""); got != "swarm storage cleanup" {
+		t.Fatal(got)
+	}
+	f := newCLIFixture(t)
+	path := filepath.Join(dir, "repos.yaml")
+	if _, err := registry.New(path).Add("local/fixture", f.root, "local"); err != nil {
+		t.Fatal(err)
+	}
+	if got := storageCleanupCommand(cmd, path); got != "swarm storage cleanup --all-repos" {
+		t.Fatal(got)
 	}
 }
 func TestStorageMaintenanceLifecycleAndFailureIsolation(t *testing.T) {
@@ -89,7 +142,7 @@ func TestStorageMaintenanceLowSpaceThresholds(t *testing.T) {
 		var out, errOut bytes.Buffer
 		cmd.SetOut(&out)
 		cmd.SetErr(&errOut)
-		renderMaintenanceSpace(cmd, "fixture-filesystem", tc.free, tc.total, cfg)
+		renderMaintenanceSpace(cmd, "fixture-filesystem", tc.free, tc.total, cfg, "swarm storage cleanup")
 		if (errOut.Len() > 0) != tc.low || out.Len() != 0 {
 			t.Fatal(tc, errOut.String())
 		}
@@ -152,12 +205,12 @@ func TestStorageMaintenanceRepeatedStatus(t *testing.T) {
 					t.Fatal("changed stdout", stdout.String())
 				}
 				if cached {
-					for _, want := range []string{"age=2m0s", "60700000000 (60.7 GB)", "17800000000 (17.8 GB)", "stale=true"} {
+					for _, want := range []string{"Swarm caches use 56.5 GiB, 16.6 GiB over the 40.0 GiB target (measured 2m0s ago).", "See what can be removed: swarm storage cleanup"} {
 						if !strings.Contains(stderr.String(), want) {
 							t.Fatal(want, stderr.String())
 						}
 					}
-				} else if !strings.Contains(stderr.String(), "no storage inventory exists yet; one will run at the next eligible work, stage, validate or node run") || strings.Contains(stderr.String(), "observed cache bytes=0") {
+				} else if !strings.Contains(stderr.String(), "caches have not been measured yet; the next swarm work, stage, validate or node run measures them") || strings.Contains(stderr.String(), "caches use") {
 					t.Fatal(stderr.String())
 				}
 			}

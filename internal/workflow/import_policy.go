@@ -56,14 +56,22 @@ func (e *importRejection) Error() string {
 // backticks, followed by whitespace or the end of the line.
 var deletionDirective = regexp.MustCompile("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?i:delete|remove|rm|drop)[ \t]+(?:`([^`\\s]+)`|([^`\\s]+))(?:[ \t]|$)")
 
-// plannedDeletions returns the paths an approved plan explicitly deletes.
-// Mentioning a path, or calling it new or modified, never authorizes deletion.
+// renameDirective matches one physical PLAN.md line that renames a path: the
+// same list marker, a rename verb, the exact source path, "to", and a named
+// destination. Only the source is removed, so only it is authorized.
+var renameDirective = regexp.MustCompile("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?i:rename|move|mv)[ \t]+(?:`([^`\\s]+)`|([^`\\s]+))[ \t]+(?i:to)[ \t]+(?:`[^`\\s]+`|[^`\\s]+(?:[ \t]|$))")
+
+// plannedDeletions returns the paths an approved plan explicitly deletes or
+// renames away. Mentioning a path, or calling it new or modified, never
+// authorizes deletion.
 func plannedDeletions(plan string) map[string]bool {
 	planned := map[string]bool{}
 	for _, line := range strings.Split(plan, "\n") {
-		match := deletionDirective.FindStringSubmatch(strings.TrimSuffix(line, "\r"))
-		if match != nil {
-			planned[match[1]+match[2]] = true
+		line = strings.TrimSuffix(line, "\r")
+		for _, directive := range []*regexp.Regexp{deletionDirective, renameDirective} {
+			if match := directive.FindStringSubmatch(line); match != nil {
+				planned[match[1]+match[2]] = true
+			}
 		}
 	}
 	return planned

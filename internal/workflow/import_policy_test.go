@@ -330,6 +330,16 @@ func TestDeletionDirectivePlanLines(t *testing.T) {
 		{"- Delete recovery.go", false},
 		{"- Delete ./internal/workspace/recovery.go", false},
 		{"- Delete\ninternal/workspace/recovery.go", false},
+		// The #520 plan line: a rename removes its source.
+		{"4. Rename `internal/workspace/recovery.go` to `internal/workspace/restore.go`; rename the test.", true},
+		{"- move internal/workspace/recovery.go to internal/workspace/restore.go", true},
+		{"- mv `internal/workspace/recovery.go` TO `internal/workspace/restore.go`", true},
+		{"- Rename internal/workspace/recovery.go", false},
+		{"- Rename internal/workspace/recovery.go to", false},
+		{"- Rename internal/workspace/restore.go to internal/workspace/recovery.go", false},
+		{"- Rename the test in internal/workspace/recovery.go to TestRestore", false},
+		{"Do not rename internal/workspace/recovery.go to internal/workspace/restore.go", false},
+		{"- Renamed internal/workspace/recovery.go to internal/workspace/restore.go", false},
 	} {
 		if got := plannedDeletions("# Plan\n\n" + tc.line + "\n")[path]; got != tc.want {
 			t.Errorf("%q: planned=%v want %v", tc.line, got, tc.want)

@@ -47,11 +47,14 @@ var claimFenceInventory = map[string]string{
 	"BeginPublicationAttempt":        "",
 	"BindClaim":                      "manager configuration only",
 	"Budget":                         "read-only admission, observation or local binding; no durable state write",
+	"BudgetContext":                  "read-only admission, observation or local binding; no durable state write",
 	"CheckClaim":                     "read-only admission, observation or local binding; no durable state write",
 	"CheckImplementationRetry":       "read-only admission, observation or local binding; no durable state write",
 	"CheckPlanReplan":                "read-only admission, observation or local binding; no durable state write",
+	"CheckPlanReplanContext":         "read-only admission, observation or local binding; no durable state write",
 	"CheckPreparedPlan":              "read-only admission, observation or local binding; no durable state write",
 	"CheckUpstreamReviewer":          "read-only admission, observation or local binding; no durable state write",
+	"CheckUpstreamReviewerContext":   "read-only admission, observation or local binding; no durable state write",
 	"CompletePRRevision":             "",
 	"CompletePRRevisionLocal":        "",
 	"ConfigureStore":                 "manager configuration only",
@@ -70,6 +73,7 @@ var claimFenceInventory = map[string]string{
 	"LedgerLayout":                   "read-only admission, observation or local binding; no durable state write",
 	"NotifyPlanReviewers":            "reviewer notification projection",
 	"PlanReplanLimit":                "read-only admission, observation or local binding; no durable state write",
+	"PlanReplanLimitContext":         "read-only admission, observation or local binding; no durable state write",
 	"PrepareCheckpoint":              "read-only admission, observation or local binding; no durable state write",
 	"PrepareUpstreamPlanReview":      "read-only admission, observation or local binding; no durable state write",
 	"ProjectRebaseApprovalAudit":     "projects existing rebase approval",
@@ -122,6 +126,7 @@ var claimFenceInventory = map[string]string{
 	"VerifyDependencies":             "read-only admission, observation or local binding; no durable state write",
 	"VerifyTrustPolicy":              "read-only admission, observation or local binding; no durable state write",
 	"WorkBudget":                     "read-only admission, observation or local binding; no durable state write",
+	"WorkBudgetContext":              "read-only admission, observation or local binding; no durable state write",
 }
 
 func claimFenceWrites() []claimFenceWrite {

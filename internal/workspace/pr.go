@@ -27,11 +27,15 @@ func CompilePRHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *co
 // CompilePRHarnessBundleWithCapabilitiesAt carries coordinator observations to
 // PR bundles without consuming candidate-written reports.
 func CompilePRHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, arts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, prNumber int, report *sandbox.ToolCapabilityReport, revision ...*RevisionPlanContext) error {
+	return CompilePRHarnessBundleWithCapabilitiesAtContext(context.Background(), worktreePath, wu, wf, arts, role, effectiveGate, baseSHA, prNumber, report, revision...)
+}
+
+func CompilePRHarnessBundleWithCapabilitiesAtContext(ctx context.Context, worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, arts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, prNumber int, report *sandbox.ToolCapabilityReport, revision ...*RevisionPlanContext) error {
 
 	if prNumber <= 0 || wu == nil {
 		return fmt.Errorf("PR number and linked WorkUnit are required")
 	}
-	if err := CompileHarnessBundleWithCapabilitiesAt(worktreePath, wu, wf, arts, role, effectiveGate, baseSHA, report, true); err != nil {
+	if err := CompileHarnessBundleWithCapabilitiesAtContext(ctx, worktreePath, wu, wf, arts, role, effectiveGate, baseSHA, report, true); err != nil {
 		return err
 	}
 	var c *RevisionPlanContext

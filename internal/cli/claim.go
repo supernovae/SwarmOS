@@ -116,7 +116,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			return fail(err)
 		}
 		if err := reporter.ReportSetupPhase(cmd.Context(), issue, "bundle", func() error {
-			wf, err := harness.LoadWorkflowAt(root, preflight.WorkUnit.Workflow, state.BaseSHA)
+			wf, err := harness.LoadWorkflowAtContext(cmd.Context(), root, preflight.WorkUnit.Workflow, state.BaseSHA)
 			if err != nil {
 				return err
 			}

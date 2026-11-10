@@ -130,7 +130,7 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 		readyLabel := "swarm:ready"
 		if st != nil && st.ApprovedBy != "" {
 			// Label policy, like approval, comes from the recorded trusted base.
-			cfg, loadErr := harness.LoadConfigAt(opts.resolveRepoRoot(), st.BaseSHA)
+			cfg, loadErr := harness.LoadConfigAtContext(cmd.Context(), opts.resolveRepoRoot(), st.BaseSHA)
 			if loadErr != nil {
 				return loadErr
 			}

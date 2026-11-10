@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -245,5 +247,207 @@ func TestLocalObservationNeverResolvesCredentials(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(cmd.Env, "\n"), "secret-for-observation") {
 		t.Fatal("forwarded credentials")
+	}
+}
+
+func TestCommandLookupCopiesAndKeys(t *testing.T) {
+	s := NewCommandLookupSession()
+	calls := 0
+	s.run = func(_ context.Context, root string, args ...string) ([]byte, error) {
+		calls++
+		return []byte(root + strings.Join(args, " ")), nil
+	}
+	ctx := WithCommandLookupSession(context.Background(), s)
+	sha := strings.Repeat("a", 40)
+	_, err := ReadBaseFile(ctx, t.TempDir(), sha, "config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	first, err := ReadBaseFile(ctx, root, sha, "config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := string(first)
+	first[0] = '!'
+	second, err := ReadBaseFile(ctx, root, sha, "config")
+	if err != nil || string(second) != want || calls != 2 {
+		t.Fatalf("copy/reuse: calls=%d bytes=%q err=%v", calls, second, err)
+	}
+	for _, key := range []struct{ root, sha, path string }{{root, strings.Repeat("b", 40), "config"}, {root, sha, "other"}, {t.TempDir(), sha, "config"}} {
+		if _, err := ReadBaseFile(ctx, key.root, key.sha, key.path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 5 {
+		t.Fatalf("key partitioning: %d calls", calls)
+	}
+}
+
+func TestCommandLookupMutableRefs(t *testing.T) {
+	s := NewCommandLookupSession()
+	calls := 0
+	s.run = func(context.Context, string, ...string) ([]byte, error) { calls++; return []byte{byte(calls)}, nil }
+	// Ineligible refs must bypass even the session runner: fake Git returns current bytes.
+	root := t.TempDir()
+	count := filepath.Join(root, "count")
+	script := filepath.Join(root, "git")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf x >> '"+count+"'\ncat '"+count+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx := WithCommandLookupSession(context.Background(), s)
+	for _, ref := range []string{"main", "abcdef1", strings.Repeat("a", 64)} {
+		a, err := ReadBaseFile(ctx, root, ref, "config")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := ReadBaseFile(ctx, root, ref, "config")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(a) == string(b) {
+			t.Fatalf("cached mutable ref %s", ref)
+		}
+	}
+	if calls != 0 {
+		t.Fatal("ineligible refs entered cache")
+	}
+}
+
+func TestCommandLookupConcurrentAndRetry(t *testing.T) {
+	s := NewCommandLookupSession()
+	var calls atomic.Int32
+	s.run = func(context.Context, string, ...string) ([]byte, error) { calls.Add(1); return []byte("ok"), nil }
+	ctx := WithCommandLookupSession(context.Background(), s)
+	root := t.TempDir()
+	sha := strings.Repeat("a", 40)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := ReadBaseFile(ctx, root, sha, "config"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if calls.Load() != 1 {
+		t.Fatalf("concurrent calls: %d", calls.Load())
+	}
+	s = NewCommandLookupSession()
+	attempts := 0
+	s.run = func(context.Context, string, ...string) ([]byte, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, context.Canceled
+		}
+		return []byte("ok"), nil
+	}
+	ctx = WithCommandLookupSession(context.Background(), s)
+	if _, err := ReadBaseFile(ctx, root, sha, "config"); err == nil {
+		t.Fatal("missing failure")
+	}
+	if _, err := ReadBaseFile(ctx, root, sha, "config"); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 {
+		t.Fatal(attempts)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := ReadBaseFile(canceled, root, sha, "config"); err != context.Canceled {
+		t.Fatal(err)
+	}
+}
+
+func TestCommonDirectoryCommandCache(t *testing.T) {
+	root := t.TempDir()
+	calls := 0
+	session := func() *CommandLookupSession {
+		s := NewCommandLookupSession()
+		s.run = func(context.Context, string, ...string) ([]byte, error) {
+			calls++
+			if calls == 1 {
+				return nil, context.Canceled
+			}
+			return []byte("/common"), nil
+		}
+		return s
+	}
+	ctx := WithCommandLookupSession(context.Background(), session())
+	if _, err := CommonDirectory(ctx, root); err == nil {
+		t.Fatal("expected failure")
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := CommonDirectory(ctx, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 2 {
+		t.Fatal(calls)
+	}
+	if _, err := CommonDirectory(ctx, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CommonDirectory(WithCommandLookupSession(ctx, session()), root); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 4 {
+		t.Fatal(calls)
+	}
+}
+
+func TestCommandLookupCanceledWaiter(t *testing.T) {
+	s := NewCommandLookupSession()
+	started, release := make(chan struct{}), make(chan struct{})
+	s.run = func(context.Context, string, ...string) ([]byte, error) {
+		close(started)
+		<-release
+		return []byte("ok"), nil
+	}
+	ctx := WithCommandLookupSession(context.Background(), s)
+	root := t.TempDir()
+	sha := strings.Repeat("a", 40)
+	done := make(chan error, 1)
+	go func() { _, err := ReadBaseFile(ctx, root, sha, "config"); done <- err }()
+	<-started
+	waiter, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := ReadBaseFile(waiter, root, sha, "config"); err != context.Canceled {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if data, err := ReadBaseFile(ctx, root, sha, "config"); err != nil || string(data) != "ok" {
+		t.Fatalf("waiter poisoned owner: %q %v", data, err)
+	}
+}
+
+func TestCommonDirectoryCommandCacheInvalidOutputRetries(t *testing.T) {
+	s := NewCommandLookupSession()
+	calls := 0
+	s.run = func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return []byte("relative"), nil
+		}
+		return []byte("/common"), nil
+	}
+	ctx := WithCommandLookupSession(context.Background(), s)
+	root := t.TempDir()
+	if _, err := CommonDirectory(ctx, root); err == nil {
+		t.Fatal("accepted relative common directory")
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := CommonDirectory(ctx, root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("invalid output cached or successful output not reused: %d", calls)
 	}
 }

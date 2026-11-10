@@ -34,8 +34,12 @@ func bindPersistedClaim(ctx context.Context, root string, tr tracker.Tracker, ma
 // approvedLeasePolicy loads the lease policy from the task's approved base,
 // fetching that commit first when it is not yet local.
 func approvedLeasePolicy(root, upstreamRemote, baseSHA string) (*contract.SwarmConfig, time.Duration, error) {
+	return approvedLeasePolicyContext(context.Background(), root, upstreamRemote, baseSHA)
+}
+
+func approvedLeasePolicyContext(ctx context.Context, root, upstreamRemote, baseSHA string) (*contract.SwarmConfig, time.Duration, error) {
 	_ = workspace.FetchCommit(root, upstreamRemote, baseSHA) // best effort; LoadConfigAt fails if the commit is missing
-	cfg, err := harness.LoadConfigAt(root, baseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, root, baseSHA)
 	if err != nil {
 		return nil, 0, err
 	}

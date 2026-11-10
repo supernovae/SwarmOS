@@ -190,7 +190,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := harness.LoadConfigAt(e.repoRoot, p.State.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, e.repoRoot, p.State.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +226,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 		return nil, fmt.Errorf("reviewer is not allowlisted")
 	}
 	if role == "planner" {
-		if err = e.LeaseManager.CheckPlanReplan(p.State); err != nil {
+		if err = e.LeaseManager.CheckPlanReplanContext(ctx, p.State); err != nil {
 			return nil, err
 		}
 	}
@@ -291,7 +291,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 	if err != nil {
 		return nil, err
 	}
-	wf, err := harness.LoadWorkflowAt(e.repoRoot, wu.Workflow, p.State.BaseSHA)
+	wf, err := harness.LoadWorkflowAtContext(ctx, e.repoRoot, wu.Workflow, p.State.BaseSHA)
 	if err != nil {
 		return nil, err
 	}

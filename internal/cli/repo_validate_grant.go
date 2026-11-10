@@ -72,7 +72,7 @@ func resolveHarnessGrant(ctx context.Context, options *RootOptions, cmd *cobra.C
 	if err != nil {
 		return nil, err
 	}
-	ns, err := harness.LedgerNamespaceAt(root, base)
+	ns, err := harness.LedgerNamespaceAtContext(ctx, root, base)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func resolveHarnessGrant(ctx context.Context, options *RootOptions, cmd *cobra.C
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := harness.LoadConfigAt(root, base)
+	cfg, err := harness.LoadConfigAtContext(ctx, root, base)
 	if err != nil {
 		return nil, fmt.Errorf("load trusted policy: %w", err)
 	}
@@ -165,7 +165,7 @@ func readHarnessGrantFile(ctx context.Context, root, path, base string) (*contra
 	if err := contract.ValidateBaseBranch(record.BaseBranch); err != nil {
 		return refuse("grant file has an invalid base branch")
 	}
-	cfg, err := harness.LoadConfigAt(root, base)
+	cfg, err := harness.LoadConfigAtContext(ctx, root, base)
 	if err != nil || contract.DigestApprovedBranchPolicy(record.ApprovedBase, cfg, record.BaseBranch) != record.PolicyDigest {
 		return refuse("policy digest differs from the verified grant")
 	}

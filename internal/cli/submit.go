@@ -117,7 +117,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
-			approvalCfg, _, err := approvedLeasePolicy(root, manager.UpstreamRemote(), state.BaseSHA)
+			approvalCfg, _, err := approvedLeasePolicyContext(cmd.Context(), root, manager.UpstreamRemote(), state.BaseSHA)
 			if err != nil {
 				return err
 			}
@@ -191,7 +191,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err := manager.CheckClaim(ctx, issue, owner); err != nil {
 				return err
 			}
-			cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), state.BaseSHA)
+			cfg, duration, err := approvedLeasePolicyContext(cmd.Context(), root, manager.UpstreamRemote(), state.BaseSHA)
 			if err != nil {
 				return err
 			}

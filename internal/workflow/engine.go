@@ -401,7 +401,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 		state = &copyState
 	}
 	_ = workspace.FetchCommit(opts.RepoRoot, e.upstreamRemote(), state.BaseSHA)
-	cfg, err := harness.LoadConfigAt(opts.RepoRoot, state.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, opts.RepoRoot, state.BaseSHA)
 	if err != nil {
 		return nil, fmt.Errorf("load approved base config: %w", err)
 	}
@@ -426,11 +426,11 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			blockers = append(blockers, reason)
 		}
 	}
-	checks, err := harness.LoadValidationSpecAt(opts.RepoRoot, state.BaseSHA)
+	checks, err := harness.LoadValidationSpecAtContext(ctx, opts.RepoRoot, state.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
-	wf, err := harness.LoadWorkflowAt(opts.RepoRoot, wu.Workflow, state.BaseSHA)
+	wf, err := harness.LoadWorkflowAtContext(ctx, opts.RepoRoot, wu.Workflow, state.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -443,11 +443,11 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 		return nil, err
 	}
 
-	if err := e.CheckIssueContinuation(state, cfg, opts); err != nil {
+	if err := e.CheckIssueContinuationContext(ctx, state, cfg, opts); err != nil {
 		return nil, err
 	}
 	if opts.Phase == "plan" || opts.Phase == "all" && (!hasDesignAndTestPlanArtifacts(state) || hasRejectedReview(state)) {
-		if err := e.LeaseManager.CheckPlanReplan(state); err != nil {
+		if err := e.LeaseManager.CheckPlanReplanContext(ctx, state); err != nil {
 			return nil, err
 		}
 	}
@@ -458,7 +458,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	approvalState.EffectiveGate = gate
 	roles := rolesForPhase(opts.Phase, planningGate(state, gate), (hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)), lease.VerifyApproval(&approvalState, wu) == nil)
 	if opts.IssueContinuation && opts.Phase == "all" && planningGate(state, gate) == contract.GateAgent && !slices.Contains(roles, "planner") && !hasApprovedReviewArtifact(state) && !strings.EqualFold(cfg.PlanMode, "interactive") {
-		limit, limitErr := e.LeaseManager.PlanReplanLimit(state)
+		limit, limitErr := e.LeaseManager.PlanReplanLimitContext(ctx, state)
 		if limitErr != nil {
 			return nil, limitErr
 		}
@@ -689,7 +689,7 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 		done, err := r.reviewGate()
 		if errors.Is(err, ErrPlanReviewRejected) && r.continuation() {
-			if err := r.e.CheckIssueContinuation(r.st, r.cfg, r.opts); err != nil {
+			if err := r.e.CheckIssueContinuationContext(ctx, r.st, r.cfg, r.opts); err != nil {
 				return r.res, err
 			}
 			continue
@@ -825,7 +825,7 @@ func (e *Engine) PrepareDecomposition(ctx context.Context, root string, n int, s
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := harness.LoadConfigAt(root, st.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, root, st.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -1082,10 +1082,14 @@ func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.Wor
 }
 
 func compileExecutionBundleWithCapabilities(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, supplied *sandbox.ToolCapabilityReport, excludeHistory ...bool) error {
+	return compileExecutionBundleWithCapabilitiesContext(context.Background(), path, wu, wf, st, role, prNumber, supplied, excludeHistory...)
+}
+
+func compileExecutionBundleWithCapabilitiesContext(ctx context.Context, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, supplied *sandbox.ToolCapabilityReport, excludeHistory ...bool) error {
 
 	// Refresh policy description for each role; no runtime observation is reused
 	// from an earlier command. Actual launch independently rechecks the boundary.
-	cfg, _ := harness.LoadConfigAt(path, st.BaseSHA)
+	cfg, _ := harness.LoadConfigAtContext(ctx, path, st.BaseSHA)
 	name := ""
 	if cfg != nil {
 		name = cfg.Roles[role]
@@ -1099,9 +1103,9 @@ func compileExecutionBundleWithCapabilities(path string, wu *contract.WorkUnit, 
 	}
 
 	if prNumber != 0 {
-		return workspace.CompilePRHarnessBundleWithCapabilitiesAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, prNumber, &report, prRevisionContext(st))
+		return workspace.CompilePRHarnessBundleWithCapabilitiesAtContext(ctx, path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, prNumber, &report, prRevisionContext(st))
 	}
-	if err := workspace.CompileHarnessBundleWithCapabilitiesAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, &report); err != nil {
+	if err := workspace.CompileHarnessBundleWithCapabilitiesAtContext(ctx, path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, &report); err != nil {
 		return err
 	}
 	if role == "reviewer" && st.PRNumber == 0 && st.PRRevision == nil {
@@ -1754,7 +1758,7 @@ func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 func compileSetupBundleWithCapabilities(ctx context.Context, reporter *ProgressReporter, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, report *sandbox.ToolCapabilityReport, excludeHistory ...bool) error {
 
 	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error {
-		return compileExecutionBundleWithCapabilities(path, wu, wf, st, role, prNumber, report, excludeHistory...)
+		return compileExecutionBundleWithCapabilitiesContext(ctx, path, wu, wf, st, role, prNumber, report, excludeHistory...)
 	})
 }
 
@@ -1779,7 +1783,7 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 		return "", nil, lease.ErrClaimFence
 	}
 	st, source := o.State(), o.Source()
-	cfg, err := harness.LoadConfigAt(e.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, e.repoRoot, st.BaseSHA)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1791,7 +1795,7 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 	if err != nil {
 		return "", nil, err
 	}
-	wf, err := harness.LoadWorkflowAt(e.repoRoot, wu.Workflow, st.BaseSHA)
+	wf, err := harness.LoadWorkflowAtContext(ctx, e.repoRoot, wu.Workflow, st.BaseSHA)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1807,7 +1811,7 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 	if provenance.Sandbox != "codex-native" && provenance.Sandbox != "harness-tools-bwrap" {
 		return "", nil, fmt.Errorf("upstream review requires native Codex or harness-tools Bubblewrap")
 	}
-	if err := e.LeaseManager.CheckUpstreamReviewer(o, provenance); err != nil {
+	if err := e.LeaseManager.CheckUpstreamReviewerContext(ctx, o, provenance); err != nil {
 		return "", nil, err
 	}
 	temporary, err := storageuse.MkdirTemp(ctx, "", "swarm-upstream-review-*", "review-scratch")
@@ -1916,14 +1920,18 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 // CheckIssueContinuation classifies blocked direct-issue recovery without
 // changing state. Selection and preflight share this decision; fenced writes
 // remain the final authority after acquisition.
-func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmConfig, opts WorkOptions) error {
-	if err := e.LeaseManager.DecompositionAdmission(context.Background(), st); err != nil {
+func (e *Engine) CheckIssueContinuation(st *lease.IssueState, cfgIgnored *contract.SwarmConfig, opts WorkOptions) error {
+	return e.CheckIssueContinuationContext(context.Background(), st, cfgIgnored, opts)
+}
+
+func (e *Engine) CheckIssueContinuationContext(ctx context.Context, st *lease.IssueState, cfgIgnored *contract.SwarmConfig, opts WorkOptions) error {
+	if err := e.LeaseManager.DecompositionAdmission(ctx, st); err != nil {
 		return err
 	}
 	if st == nil || st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil || opts.ForkMode || opts.PRNumber != 0 {
 		return nil
 	}
-	cfg, configErr := harness.LoadConfigAt(e.repoRoot, st.BaseSHA)
+	cfg, configErr := harness.LoadConfigAtContext(ctx, e.repoRoot, st.BaseSHA)
 	if configErr != nil {
 		return configErr
 	}

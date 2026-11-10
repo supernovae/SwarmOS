@@ -161,7 +161,7 @@ func importRepair(worktree string, before, after map[string]planFile, paths []st
 }
 
 func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner string, rv *resolver, selections []string) (*Result, error) {
-	cfg, err := harness.LoadConfigAt(s.Root, r.State.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, s.Root, r.State.BaseSHA)
 	if err != nil {
 		return r, err
 	}

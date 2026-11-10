@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Configure avoids exposing credentials in process arguments or Git config files.
@@ -245,4 +247,118 @@ type localObservationKey struct{}
 func localObservation(ctx context.Context) bool {
 	v, _ := ctx.Value(localObservationKey{}).(bool)
 	return v
+}
+
+// CommandLookupSession owns immutable observations for one command only.
+type CommandLookupSession struct {
+	mu      sync.Mutex
+	entries map[commandLookupKey]*commandLookupEntry
+	run     func(context.Context, string, ...string) ([]byte, error)
+}
+type commandLookupKey struct{ root, sha, path string }
+type commandLookupEntry struct {
+	done chan struct{}
+	data []byte
+	err  error
+}
+type commandLookupSessionKey struct{}
+
+// NewCommandLookupSession starts an empty session using hardened Git commands.
+func NewCommandLookupSession() *CommandLookupSession {
+	return &CommandLookupSession{entries: make(map[commandLookupKey]*commandLookupEntry), run: Output}
+}
+
+// WithCommandLookupSession attaches an explicitly owned session.
+func WithCommandLookupSession(ctx context.Context, session *CommandLookupSession) context.Context {
+	return context.WithValue(ctx, commandLookupSessionKey{}, session)
+}
+func (s *CommandLookupSession) lookup(ctx context.Context, key commandLookupKey, args ...string) ([]byte, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		entry, found := s.entries[key]
+		if !found {
+			entry = &commandLookupEntry{done: make(chan struct{})}
+			s.entries[key] = entry
+		}
+		s.mu.Unlock()
+		if found {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-entry.done:
+			}
+			if entry.err != nil {
+				continue
+			}
+			return bytes.Clone(entry.data), nil
+		}
+		data, err := runLookup(ctx, s.run, key.root, args...)
+		if err == nil {
+			err = ctx.Err()
+		}
+		entry.data, entry.err = bytes.Clone(data), err
+		s.mu.Lock()
+		if err != nil {
+			delete(s.entries, key)
+		}
+		close(entry.done)
+		s.mu.Unlock()
+		return bytes.Clone(entry.data), err
+	}
+}
+
+// ReadBaseFile reads exact object bytes. Only full SHA-1 commits are reusable.
+func ReadBaseFile(ctx context.Context, root, sha, path string) ([]byte, error) {
+	eligible := len(sha) == 40
+	for _, c := range sha {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			eligible = false
+		}
+	}
+	return commandLookup(ctx, root, sha, path, eligible, "show", sha+":"+path)
+}
+
+// CommonDirectory returns the Git common-directory observation for this root.
+func CommonDirectory(ctx context.Context, root string) ([]byte, error) {
+	return commandLookup(ctx, root, "", "", true, "rev-parse", "--path-format=absolute", "--git-common-dir")
+}
+func commandLookup(ctx context.Context, root, sha, path string, eligible bool, args ...string) ([]byte, error) {
+	s := CommandLookupSessionFrom(ctx)
+	if s == nil || !eligible {
+		return runLookup(ctx, Output, root, args...)
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	return s.lookup(ctx, commandLookupKey{filepath.Clean(absolute), sha, path}, args...)
+}
+
+// CommandLookupSessionFrom returns the explicitly attached owner, or nil.
+func CommandLookupSessionFrom(ctx context.Context) *CommandLookupSession {
+	if ctx == nil {
+		return nil
+	}
+	session, _ := ctx.Value(commandLookupSessionKey{}).(*CommandLookupSession)
+	return session
+}
+
+// Resolve identity before retaining a common-directory result. Invalid output
+// remains retryable, and scopes still own their accounting independently.
+func runLookup(ctx context.Context, run func(context.Context, string, ...string) ([]byte, error), root string, args ...string) ([]byte, error) {
+	data, err := run(ctx, root, args...)
+	if err != nil || len(args) != 3 || args[0] != "rev-parse" || args[2] != "--git-common-dir" {
+		return data, err
+	}
+	common := strings.TrimSpace(string(data))
+	if !filepath.IsAbs(common) {
+		return nil, fmt.Errorf("git common directory is not absolute")
+	}
+	if resolved, err := filepath.EvalSymlinks(common); err == nil {
+		common = resolved
+	}
+	return []byte(filepath.Clean(common)), nil
 }

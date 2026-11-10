@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
@@ -32,12 +33,12 @@ type issueConvertPreview struct {
 }
 
 // Resolve policy exactly as approval's no-state path, never from the candidate.
-func issueConvertPolicy(root, remote string) (string, *contract.SwarmConfig, error) {
+func issueConvertPolicyContext(ctx context.Context, root, remote string) (string, *contract.SwarmConfig, error) {
 	base, err := workspace.ResolveBaseFrom(root, remote)
 	if err != nil {
 		return "", nil, err
 	}
-	cfg, err := harness.LoadConfigAt(root, base)
+	cfg, err := harness.LoadConfigAtContext(ctx, root, base)
 	if err != nil {
 		return "", nil, err
 	}
@@ -46,7 +47,7 @@ func issueConvertPolicy(root, remote string) (string, *contract.SwarmConfig, err
 		if err != nil {
 			return "", nil, err
 		}
-		cfg, err = harness.LoadConfigAt(root, base)
+		cfg, err = harness.LoadConfigAtContext(ctx, root, base)
 	}
 	return base, cfg, err
 }
@@ -131,7 +132,7 @@ func newIssueConvertCmd(opts *RootOptions) *cobra.Command {
 		if err = issueConvertState(st, n, now); err != nil {
 			return err
 		}
-		base, cfg, err := issueConvertPolicy(opts.resolveRepoRoot(), mgr.UpstreamRemote())
+		base, cfg, err := issueConvertPolicyContext(cmd.Context(), opts.resolveRepoRoot(), mgr.UpstreamRemote())
 		if err != nil {
 			return fmt.Errorf("resolve trusted conversion policy: %w", err)
 		}
@@ -185,7 +186,7 @@ func newIssueConvertCmd(opts *RootOptions) *cobra.Command {
 		if !reflect.DeepEqual(issue, latest) {
 			return fmt.Errorf("issue #%d changed concurrently; rerun conversion preview", n)
 		}
-		latestBase, latestCfg, err := issueConvertPolicy(opts.resolveRepoRoot(), mgr.UpstreamRemote())
+		latestBase, latestCfg, err := issueConvertPolicyContext(cmd.Context(), opts.resolveRepoRoot(), mgr.UpstreamRemote())
 		if err != nil {
 			return err
 		}

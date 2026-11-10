@@ -87,11 +87,11 @@ func (r *workRun) loadClaimPolicy() error {
 			return fmt.Errorf("persist claim token: %w", err)
 		}
 	}
-	r.cfg, err = harness.LoadConfigAt(r.opts.RepoRoot, r.st.BaseSHA)
+	r.cfg, err = harness.LoadConfigAtContext(r.ctx, r.opts.RepoRoot, r.st.BaseSHA)
 	if err != nil {
 		return fmt.Errorf("load approved base config: %w", err)
 	}
-	r.wf, err = harness.LoadWorkflowAt(r.opts.RepoRoot, r.pre.WorkUnit.Workflow, r.st.BaseSHA)
+	r.wf, err = harness.LoadWorkflowAtContext(r.ctx, r.opts.RepoRoot, r.pre.WorkUnit.Workflow, r.st.BaseSHA)
 	if err != nil {
 		return fmt.Errorf("load approved base workflow: %w", err)
 	}
@@ -117,7 +117,7 @@ func (r *workRun) loadClaimPolicy() error {
 		return err
 	}
 	r.gate = r.st.EffectiveGate
-	if err := r.e.CheckIssueContinuation(r.st, r.cfg, r.opts); err != nil {
+	if err := r.e.CheckIssueContinuationContext(r.ctx, r.st, r.cfg, r.opts); err != nil {
 		return err
 	}
 	if !(strings.EqualFold(r.cfg.PlanMode, "interactive") && (r.opts.Phase == "plan" || (r.opts.Phase == "all" && !(hasDesignAndTestPlanArtifacts(r.st) && !hasRejectedReview(r.st))))) {

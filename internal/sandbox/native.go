@@ -212,8 +212,11 @@ func runLegacyNativeCommand(ctx context.Context, binary, dir string, env, args [
 // session inspects every time. It never caches authentication, executor
 // checks or boundary canaries.
 type InspectionSession struct {
-	mu      sync.Mutex
-	entries map[inspectionKey]*inspectionEntry
+	mu       sync.Mutex
+	entries  map[inspectionKey]*inspectionEntry
+	digestMu sync.Mutex
+	digests  map[executableMetadata][sha256.Size]byte
+	digest   func(io.Reader) ([sha256.Size]byte, error)
 }
 
 type inspectionKey struct {
@@ -232,6 +235,7 @@ type inspectionEntry struct {
 // inspected help, so a reused result still names the optional flags it lists.
 type inspection struct {
 	version, help string
+	identity      inspectionKey
 }
 
 // NewInspectionSession starts an empty command-scoped inspection session.
@@ -267,9 +271,48 @@ func InspectionPolicy(cfg *contract.SwarmConfig) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// executableIdentity names the resolved file by path, size, mtime and content.
-// A file that changes while being hashed is rejected rather than trusted.
+// executableMetadata includes change time so restored mtimes cannot hide rewrites.
+type executableMetadata struct {
+	device, inode                    uint64
+	size, mtime, ctimeSec, ctimeNano int64
+}
+
+// executableStat supports Linux and Darwin layouts; incomplete metadata disables reuse.
+func executableStat(info os.FileInfo) (executableMetadata, bool) {
+	key := executableMetadata{size: info.Size(), mtime: info.ModTime().UnixNano()}
+	v := reflect.ValueOf(info.Sys())
+	if v.Kind() != reflect.Ptr || v.IsNil() {
+		return key, false
+	}
+	v = v.Elem()
+	if v.Kind() != reflect.Struct {
+		return key, false
+	}
+	dev, ino := v.FieldByName("Dev"), v.FieldByName("Ino")
+	if !dev.IsValid() || !ino.IsValid() || !dev.CanUint() || !ino.CanUint() {
+		return key, false
+	}
+	key.device, key.inode = dev.Uint(), ino.Uint()
+	ct := v.FieldByName("Ctim")
+	if !ct.IsValid() {
+		ct = v.FieldByName("Ctimespec")
+	}
+	if !ct.IsValid() || ct.Kind() != reflect.Struct {
+		return key, false
+	}
+	sec, nsec := ct.FieldByName("Sec"), ct.FieldByName("Nsec")
+	if !sec.IsValid() || !nsec.IsValid() || !sec.CanInt() || !nsec.CanInt() {
+		return key, false
+	}
+	key.ctimeSec, key.ctimeNano = sec.Int(), nsec.Int()
+	return key, true
+}
+
+// executableIdentity always hashes fresh bytes and rejects changes during the read.
 func executableIdentity(binary string) (inspectionKey, error) {
+	return (*InspectionSession)(nil).identity(binary)
+}
+func (s *InspectionSession) identity(binary string) (inspectionKey, error) {
 	var key inspectionKey
 	path, err := filepath.EvalSymlinks(binary)
 	if err != nil {
@@ -290,10 +333,34 @@ func executableIdentity(binary string) (inspectionKey, error) {
 	if !before.Mode().IsRegular() {
 		return key, fmt.Errorf("inspected executable %s is not a regular file", filepath.Base(path))
 	}
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return key, fmt.Errorf("hash inspected executable: %w", err)
+
+	metadata, reusable := executableStat(before)
+	if s != nil {
+		s.digestMu.Lock()
+		defer s.digestMu.Unlock()
 	}
+	var digest [sha256.Size]byte
+	hit := false
+	if s != nil && reusable {
+		digest, hit = s.digests[metadata]
+	}
+	if !hit {
+		hash := func(r io.Reader) ([sha256.Size]byte, error) {
+			h := sha256.New()
+			_, err := io.Copy(h, r)
+			var sum [sha256.Size]byte
+			copy(sum[:], h.Sum(nil))
+			return sum, err
+		}
+		if s != nil && s.digest != nil {
+			hash = s.digest
+		}
+		digest, err = hash(f)
+		if err != nil {
+			return key, fmt.Errorf("hash inspected executable: %w", err)
+		}
+	}
+
 	after, err := f.Stat()
 	if err != nil {
 		return key, err
@@ -302,11 +369,33 @@ func executableIdentity(binary string) (inspectionKey, error) {
 	if err != nil {
 		return key, err
 	}
-	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !os.SameFile(after, named) {
+
+	// Re-resolve the launch name too: checking only the resolved target would
+	// miss a symlink retargeted while its old target was being hashed.
+	namedPath, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		return key, err
+	}
+	namedPath, err = filepath.Abs(namedPath)
+	if err != nil {
+		return key, err
+	}
+	if namedPath != path {
+		return key, fmt.Errorf("inspected executable %s changed while being identified", filepath.Base(binary))
+	}
+	afterMetadata, afterReusable := executableStat(after)
+	namedMetadata, namedReusable := executableStat(named)
+	if (reusable && (!afterReusable || !namedReusable || metadata != afterMetadata || metadata != namedMetadata)) || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !os.SameFile(after, named) {
 		return key, fmt.Errorf("inspected executable %s changed while being identified", filepath.Base(path))
 	}
 	key.path, key.size, key.mtime = path, before.Size(), before.ModTime().UnixNano()
-	copy(key.hash[:], h.Sum(nil))
+	key.hash = digest
+	if s != nil && reusable && !hit {
+		if s.digests == nil {
+			s.digests = make(map[executableMetadata][sha256.Size]byte)
+		}
+		s.digests[metadata] = digest
+	}
 	return key, nil
 }
 
@@ -324,9 +413,9 @@ func (s *InspectionSession) reuse(ctx context.Context, driver, binary, policy st
 // reuseInspection is reuse for the complete inspection result.
 func (s *InspectionSession) reuseInspection(ctx context.Context, driver, binary, policy string, inspect func(context.Context) (inspection, error)) (inspection, error) {
 	if s == nil {
-		return inspect(ctx)
+		return NewInspectionSession().reuseInspection(ctx, driver, binary, policy, inspect)
 	}
-	key, err := executableIdentity(binary)
+	key, err := s.identity(binary)
 	if err != nil {
 		return inspection{}, err
 	}
@@ -353,7 +442,7 @@ func (s *InspectionSession) reuseInspection(ctx context.Context, driver, binary,
 		}
 		entry.result, entry.err = inspect(ctx)
 		if entry.err == nil {
-			if after, err := executableIdentity(binary); err != nil {
+			if after, err := s.identity(binary); err != nil {
 				entry.err = err
 			} else if after.path != key.path || after.size != key.size || after.mtime != key.mtime || after.hash != key.hash {
 				entry.err = fmt.Errorf("inspected executable %s changed during inspection", filepath.Base(key.path))
@@ -364,6 +453,7 @@ func (s *InspectionSession) reuseInspection(ctx context.Context, driver, binary,
 			delete(s.entries, key)
 			s.mu.Unlock()
 		}
+		entry.result.identity = key
 		close(entry.done)
 		return entry.result, entry.err
 	}
@@ -372,16 +462,21 @@ func (s *InspectionSession) reuseInspection(ctx context.Context, driver, binary,
 // InspectNativeCodex is the package InspectNativeCodex with version and
 // interface qualification reused from s. Boundary canaries run on every call.
 func (s *InspectionSession) InspectNativeCodex(ctx context.Context, binary, policy string) (string, error) {
+	result, err := s.inspectNativeCodex(ctx, binary, policy)
+	return result.version, err
+}
+func (s *InspectionSession) inspectNativeCodex(ctx context.Context, binary, policy string) (inspection, error) {
 	if runtime.GOOS != "linux" {
-		return "", errNativeCodexPlatform
+		return inspection{}, errNativeCodexPlatform
 	}
-	version, err := s.reuse(ctx, "codex", binary, policy, func(ctx context.Context) (string, error) {
-		return inspectNativeCodexInterface(ctx, binary)
+	result, err := s.reuseInspection(ctx, "codex", binary, policy, func(ctx context.Context) (inspection, error) {
+		version, err := inspectNativeCodexInterface(ctx, binary)
+		return inspection{version: version}, err
 	})
 	if err != nil {
-		return "", err
+		return inspection{}, err
 	}
-	return version, checkNativeCodexBoundary(ctx, binary)
+	return result, checkNativeCodexBoundary(ctx, binary)
 }
 
 // InspectDelegatedHarness is the package InspectDelegatedHarness reused from s.
@@ -561,10 +656,16 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 	if opts.BrowserProfile && opts.ReadOnly && (opts.Role == "developer" || opts.Role == "tester") {
 		return nil, "", fmt.Errorf("codex browser transport requires a writable developer or tester workspace")
 	}
+
 	preflight := time.Now()
-	version, err := opts.Inspections.InspectNativeCodex(ctx, binary, opts.InspectionPolicy)
+	inspected, err := opts.Inspections.inspectNativeCodex(ctx, binary, opts.InspectionPolicy)
+	version := inspected.version
 	if err != nil {
 		return nil, "", err
+	}
+	guard, err := opts.Inspections.launchGuard(binary, inspected.identity)
+	if err != nil {
+		return nil, version, err
 	}
 	if _, err := CodexAuthentication(ctx, binary); err != nil {
 		return nil, version, err
@@ -613,6 +714,9 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		}()
 		return runFollowupTurns(ctx, prompt, "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, true, stdin, stdout, func(turn string) error {
 			command = append(append([]string{binary}, args...), turn)
+			if err := guard(); err != nil {
+				return err
+			}
 			if err := runNativeCommand(ctx, binary, work, nativeEnv(home, true, opts.Dependencies), command[1:], nil, stdout, stderr); err != nil {
 				return fmt.Errorf("native Codex run: %w", err)
 			}
@@ -1118,4 +1222,47 @@ func runNativeCommandWithBoundary(ctx context.Context, binary, dir string, env, 
 		return errors.Join(ctx.Err(), waitErr)
 	}
 	return waitErr
+}
+
+// launchGuard checks fresh bytes against the qualified executable at every turn.
+func (s *InspectionSession) launchGuard(binary string, qualified ...inspectionKey) (func() error, error) {
+	var expected inspectionKey
+	if len(qualified) > 0 {
+		expected = qualified[0]
+	} else {
+		var err error
+		expected, err = s.identity(binary)
+		if err != nil {
+			return nil, err
+		}
+	}
+	expected.driver, expected.policy = "", ""
+	return func() error {
+
+		identify := executableIdentity
+		if s != nil && s.digest != nil {
+			// The test seam counts launch reads without sharing any digest entries.
+			fresh := &InspectionSession{digest: s.digest}
+			identify = fresh.identity
+		}
+		actual, err := identify(binary)
+		if err != nil {
+			return err
+		}
+		if actual != expected {
+			return fmt.Errorf("inspected executable %s changed before launch", filepath.Base(binary))
+		}
+		return nil
+	}, nil
+}
+
+// InspectDelegatedHarnessForLaunch returns qualification and a fresh-byte guard
+// for callers that launch the inspected executable outside the isolated runner.
+func (s *InspectionSession) InspectDelegatedHarnessForLaunch(ctx context.Context, driver, binary, policy string) (string, func() error, error) {
+	result, err := s.inspectDelegated(ctx, driver, binary, policy)
+	if err != nil {
+		return "", nil, err
+	}
+	guard, err := s.launchGuard(binary, result.identity)
+	return result.version, guard, err
 }

@@ -145,7 +145,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), state.BaseSHA)
+			cfg, duration, err := approvedLeasePolicyContext(cmd.Context(), root, manager.UpstreamRemote(), state.BaseSHA)
 			if err != nil {
 				return err
 			}

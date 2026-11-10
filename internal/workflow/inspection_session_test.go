@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"gopkg.in/yaml.v3"
@@ -304,5 +305,51 @@ func testToolCapabilityInjectedBoundaryPreflight(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCommandLookupSessionApprovedPolicy(t *testing.T) {
+	eng, root, issue, _ := inspectionTask(t, "2.1.2")
+	state, err := eng.LeaseManager.GetCurrentState(context.Background(), issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	count := filepath.Join(dir, "count")
+	script := "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in\n '" + state.BaseSHA + ":.swarm/config.yaml') printf x >> '" + count + "';;\nesac\ndone\nexec '" + realGit + "' \"$@\"\n"
+
+	if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx := gitcredential.WithCommandLookupSession(context.Background(), gitcredential.NewCommandLookupSession())
+
+	ctx = sandbox.WithInspectionSession(ctx, sandbox.NewInspectionSession())
+	opts := WorkOptions{RepoRoot: root, IssueNumber: issue, AgentName: "opencode", Phase: "all", InspectOnly: true}
+	for i := 0; i < 2; i++ {
+		if _, err := eng.Preflight(ctx, opts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Candidate policy edits cannot affect either cached or fresh approved-base reads.
+	if err := os.WriteFile(filepath.Join(root, ".swarm", "config.yaml"), []byte("invalid candidate config"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		cfg, err := harness.LoadConfigAtContext(ctx, root, state.BaseSHA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Agents["opencode"].Binary == "" {
+			t.Fatal("lost approved policy")
+		}
+	}
+	calls, err := os.ReadFile(count)
+	if err != nil || len(calls) != 1 {
+		t.Fatalf("policy reads=%d err=%v", len(calls), err)
 	}
 }

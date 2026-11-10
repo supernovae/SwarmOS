@@ -146,7 +146,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		}
 		// Roles in one command reuse harness inspection; the next command,
 		// even in the same process, starts empty.
-		cmd.SetContext(sandbox.WithInspectionSession(cmd.Context(), sandbox.NewInspectionSession()))
+		cmd.SetContext(newCommandSessions(cmd.Context()))
 		return opts.normalizeCoordinatorRoot(cmd)
 	}
 	rootCmd.AddGroup(
@@ -287,9 +287,9 @@ func (o *RootOptions) verifyForkRemote(ctx context.Context, root string, tr trac
 	}
 	return "", "", fmt.Errorf("tracker %s does not support GitHub fork verification", tr.BackendName())
 }
-func loadTrustedUpstreamConfig(root, upstreamRemote string) (*contract.SwarmConfig, error) {
+func loadTrustedUpstreamConfigContext(ctx context.Context, root, upstreamRemote string) (*contract.SwarmConfig, error) {
 	if baseSHA, err := workspace.ResolveBaseFrom(root, upstreamRemote); err == nil && baseSHA != "" {
-		if cfg, loadErr := harness.LoadConfigAt(root, baseSHA); loadErr == nil && cfg != nil {
+		if cfg, loadErr := harness.LoadConfigAtContext(ctx, root, baseSHA); loadErr == nil && cfg != nil {
 			return cfg, nil
 		}
 	}
@@ -425,7 +425,7 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		cfg, err := loadTrustedUpstreamConfig(root, o.effectiveUpstreamRemote())
+		cfg, err := loadTrustedUpstreamConfigContext(cmd.Context(), root, o.effectiveUpstreamRemote())
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -563,4 +563,10 @@ func resolveIssueAndWorktree(repoRoot string, args []string) (int, string, error
 		}
 		return 0, repoRoot, fmt.Errorf("several issue worktrees exist (%s); pass the issue number", strings.Join(labels, ", "))
 	}
+}
+
+// newCommandSessions gives each invocation or node task independent lookup owners.
+func newCommandSessions(ctx context.Context) context.Context {
+	ctx = gitcredential.WithCommandLookupSession(ctx, gitcredential.NewCommandLookupSession())
+	return sandbox.WithInspectionSession(ctx, sandbox.NewInspectionSession())
 }

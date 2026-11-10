@@ -230,7 +230,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 						defer workers.Done()
 						for ctx.Err() == nil && reserve() {
 							// Each claimed task is its own command for inspection reuse.
-							taskCtx := sandbox.WithInspectionSession(ctx, sandbox.NewInspectionSession())
+							taskCtx := newCommandSessions(ctx)
 							pulled, err := pullNextReadyIssue(taskCtx, cmd, rootOpts, allRepos, options, 0)
 							if err != nil {
 								admitted.Add(-1)

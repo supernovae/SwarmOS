@@ -162,7 +162,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				continue
 			}
 
-			approvedCfg, err := harness.LoadConfigAt(target.Path, state.BaseSHA)
+			approvedCfg, err := harness.LoadConfigAtContext(ctx, target.Path, state.BaseSHA)
 			if err != nil {
 				return nil, err
 			}
@@ -171,7 +171,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				continue
 			}
 
-			if err := engine.CheckIssueContinuation(state, cfg, opts); err != nil {
+			if err := engine.CheckIssueContinuationContext(ctx, state, cfg, opts); err != nil {
 				block(err, issue.Number, target.Repo, target.Path, target.Backend)
 				continue
 			}
@@ -183,7 +183,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				phase = state.Lease.NextPhase
 			}
 			if !opts.IssueContinuation && (phase == "all" || phase == "plan") {
-				if err := mgr.CheckPlanReplan(state); err != nil {
+				if err := mgr.CheckPlanReplanContext(ctx, state); err != nil {
 					if errors.Is(err, lease.ErrPlanReplanLimit) {
 						continue
 					}
@@ -268,7 +268,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					return nil, err
 				}
 				if err := opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "bundle", func() error {
-					wf, err := harness.LoadWorkflowAt(target.Path, wu.Workflow, claimed.BaseSHA)
+					wf, err := harness.LoadWorkflowAtContext(ctx, target.Path, wu.Workflow, claimed.BaseSHA)
 					if err != nil {
 						return err
 					}

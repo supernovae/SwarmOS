@@ -181,7 +181,7 @@ func (s *Service) linkedInspection(ctx context.Context, number int) (*Result, er
 			return nil, err
 		}
 		if st != nil {
-			if result, err = s.verifyLink(pr, issue, st); err != nil {
+			if result, err = s.verifyLinkContext(ctx, pr, issue, st); err != nil {
 				return nil, err
 			}
 			break
@@ -206,7 +206,7 @@ func (s *Service) linkedInspection(ctx context.Context, number int) (*Result, er
 			if result != nil {
 				return nil, fmt.Errorf("PR #%d has multiple authoritative issue links", number)
 			}
-			if result, err = s.verifyLink(pr, issues[i], st); err != nil {
+			if result, err = s.verifyLinkContext(ctx, pr, issues[i], st); err != nil {
 				return nil, err
 			}
 		}
@@ -277,6 +277,10 @@ func (s *Service) linkedState(ctx context.Context, issueNumber, prNumber int) (*
 
 // verifyLink checks a PR against the approved state of the issue that records it.
 func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *lease.IssueState) (*Result, error) {
+	return s.verifyLinkContext(context.Background(), pr, issue, st)
+}
+
+func (s *Service) verifyLinkContext(ctx context.Context, pr *tracker.PullRequest, issue *tracker.Issue, st *lease.IssueState) (*Result, error) {
 	number := pr.Number
 	if err := workspace.VerifyBaseBranch(s.Root, s.upstreamRemote(), st.BaseBranch, pr.Base); err != nil {
 		return nil, err
@@ -288,7 +292,7 @@ func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *
 	if st.BaseBranch != "" {
 		pr.BaseSHA = tip
 	}
-	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, s.Root, st.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -566,7 +570,7 @@ func (s *Service) withClaimForPhase(ctx context.Context, r *Result, renew bool, 
 	if st.PRNumber != r.PR.Number || (st.PRRevision != nil && st.PRRevision.RemoteHeadSHA != r.PR.HeadSHA && st.PRRevision.LocalHeadSHA != r.PR.HeadSHA) {
 		return nil, fmt.Errorf("PR coordination state changed")
 	}
-	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, s.Root, st.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -727,7 +731,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		opts.Work.Phase = "all"
 	}
 	opts.Work.FreshPRRevision = r.State.PRRevision == nil
-	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, s.Root, r.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -1089,11 +1093,11 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 // newResolver selects and preflights the developer agent from the approved
 // base's policy. Nothing here reads the PR worktree or a mid-rebase tree.
 func (s *Service) newResolver(ctx context.Context, r *Result, opts Options) (*resolver, error) {
-	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, s.Root, r.BaseSHA)
 	if err != nil {
 		return nil, err
 	}
-	spec, err := harness.LoadValidationSpecAt(s.Root, r.BaseSHA)
+	spec, err := harness.LoadValidationSpecAtContext(ctx, s.Root, r.BaseSHA)
 	if err != nil {
 		return nil, err
 	}

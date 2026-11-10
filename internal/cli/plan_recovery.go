@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/spf13/cobra"
@@ -87,7 +88,7 @@ func runCheckpointPlan(cmd *cobra.Command, root *RootOptions, arg string, opts w
 			return lease.ErrClaimFence
 		}
 	}
-	cfg, err := harness.LoadConfigAt(repo, p.State.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(cmd.Context(), repo, p.State.BaseSHA)
 	if err != nil {
 		return err
 	}
@@ -142,10 +143,14 @@ type planReviewDisplay struct {
 }
 
 func directPlanReviewDisplay(opts *RootOptions, st *lease.IssueState) *planReviewDisplay {
+	return directPlanReviewDisplayContext(context.Background(), opts, st)
+}
+
+func directPlanReviewDisplayContext(ctx context.Context, opts *RootOptions, st *lease.IssueState) *planReviewDisplay {
 	if opts.Fork || !lease.DirectPlanReview(st) {
 		return nil
 	}
-	cfg, err := harness.LoadConfigAt(opts.resolveRepoRoot(), st.BaseSHA)
+	cfg, err := harness.LoadConfigAtContext(ctx, opts.resolveRepoRoot(), st.BaseSHA)
 	if err != nil {
 		return nil
 	}

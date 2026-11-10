@@ -211,7 +211,7 @@ func (o *RootOptions) resolveCheckpointManager(cmd *cobra.Command) (tracker.Trac
 		if len(fields) != 2 || fields[1] != "HEAD" {
 			return nil, nil, fmt.Errorf("upstream advertised default head unavailable")
 		}
-		namespace, err := harness.LedgerNamespaceAt(root, fields[0])
+		namespace, err := harness.LedgerNamespaceAtContext(cmd.Context(), root, fields[0])
 		if err != nil {
 			return nil, nil, fmt.Errorf("upstream default policy unavailable locally; fetch upstream before checkpoint reconciliation: %w", err)
 		}

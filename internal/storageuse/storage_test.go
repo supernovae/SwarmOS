@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"io"
 	"os"
@@ -1949,5 +1950,42 @@ func TestScopeCompletionCommandErrors(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCommonDirectoryCommandCacheScopes(t *testing.T) {
+	root := canonicalTemp(t)
+	count := filepath.Join(root, "count")
+	common := canonicalTemp(t)
+	script := "#!/bin/sh\nprintf x >> '" + count + "'\nprintf '%s\\n' '" + common + "'\n"
+	if err := os.WriteFile(filepath.Join(root, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx := gitcredential.WithCommandLookupSession(context.Background(), gitcredential.NewCommandLookupSession())
+	firstCtx, first, err := Ensure(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := Ensure(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || first.repository != second.repository {
+		t.Fatal("scope ownership or identity changed")
+	}
+	if len(first.forbidden) != 1 || first.forbidden[0] != root {
+		t.Fatal("missing forbidden source root")
+	}
+	_, owner, err := Ensure(firstCtx, common)
+	if err != nil || owner != nil {
+		t.Fatal("inherited scope ownership changed")
+	}
+	if len(first.forbidden) != 2 || len(second.forbidden) != 1 {
+		t.Fatal("independent scopes share mutable state")
+	}
+	calls, err := os.ReadFile(count)
+	if err != nil || len(calls) != 1 {
+		t.Fatalf("git calls=%d err=%v", len(calls), err)
 	}
 }

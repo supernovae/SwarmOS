@@ -142,13 +142,20 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 	var inspected inspection
 	var err error
 	if len(extra) > 0 {
-		inspected.version, inspected.help, err = inspectDelegatedHarness(ctx, driver, binary, extra)
+		inspected, err = (*InspectionSession)(nil).reuseInspection(ctx, driver, binary, opts.InspectionPolicy, func(ctx context.Context) (inspection, error) {
+			version, help, err := inspectDelegatedHarness(ctx, driver, binary, extra)
+			return inspection{version: version, help: help}, err
+		})
 	} else {
 		inspected, err = opts.Inspections.inspectDelegated(ctx, driver, binary, opts.InspectionPolicy)
 	}
 	version, help := inspected.version, inspected.help
 	if err != nil {
 		return nil, "", err
+	}
+	guard, guardErr := opts.Inspections.launchGuard(binary, inspected.identity)
+	if guardErr != nil {
+		return nil, version, guardErr
 	}
 	if err := checkToolExecutor(ctx, opts.BrowserProfile); err != nil {
 		return nil, "", err
@@ -233,6 +240,9 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 			}
 			turn = append(turn, "--", prompt)
 			command = append([]string{binary}, turn...)
+			if err := guard(); err != nil {
+				return err
+			}
 			return runNativeCommand(ctx, binary, control, env, turn, nil, stdout, stderr)
 		}, opts.GuidanceDelivered)
 	})

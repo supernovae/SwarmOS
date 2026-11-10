@@ -64,7 +64,7 @@ func Command(ctx context.Context, root string, args ...string) (*exec.Cmd, func(
 	var err error
 	if localObservation(ctx) {
 		if IsNetwork(args) {
-			return nil, nil, errors.New("remote Git verification requires explicit apply")
+			return nil, nil, errors.New(RemoteVerificationDeferred)
 		}
 		redact = configureToken(cmd, "")
 	} else {
@@ -228,6 +228,10 @@ func ObservationCommand(ctx context.Context, root string, args ...string) (*exec
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GIT_NO_REPLACE_OBJECTS=1", "GIT_CONFIG_COUNT=4", "GIT_CONFIG_KEY_0=core.hooksPath", "GIT_CONFIG_VALUE_0=" + os.DevNull, "GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false", "GIT_CONFIG_KEY_2=gc.auto", "GIT_CONFIG_VALUE_2=0", "GIT_CONFIG_KEY_3=maintenance.auto", "GIT_CONFIG_VALUE_3=false"}
 	return cmd, nil
 }
+
+// RemoteVerificationDeferred is the reason a local-only inspection gives for
+// anything it could not confirm without contacting the remote.
+const RemoteVerificationDeferred = "remote Git verification requires explicit apply"
 
 // WithLocalObservation confines an advisory coordinator inspection to local Git
 // metadata without consulting publishing credentials or token commands. Normal

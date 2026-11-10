@@ -124,8 +124,8 @@ type storageCleanupReport struct {
 }
 
 func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
-	var apply, asJSON, all bool
-	cmd := &cobra.Command{Use: "cleanup", Short: "Preview task retirement and managed host storage reclamation", RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+	var apply, asJSON, all, details bool
+	cmd := &cobra.Command{Use: "cleanup", Short: "Preview, or with --apply remove, finished task worktrees and idle Swarm caches", RunE: func(cmd *cobra.Command, args []string) (runErr error) {
 		report := storageCleanupReport{Host: storage.ReclamationReport{Resources: []storage.ReclamationResult{}}, Version: 1, Mode: "preview", Scopes: []storage.SelectedRepository{}, Tasks: []*bulkCleanupSummary{}, Incomplete: []string{}, Errors: []string{}}
 		if apply {
 			report.Mode = "apply"
@@ -146,7 +146,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 				runErr = errors.Join(runErr, e)
 				return
 			}
-			renderStorageCleanup(cmd.OutOrStdout(), report)
+			renderStorageCleanup(cmd.OutOrStdout(), report, details)
 		}()
 		if len(args) > 0 {
 			return errors.New("storage cleanup takes no positional arguments")
@@ -354,6 +354,7 @@ func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&apply, "apply", false, "Retire eligible tasks and reclaim admitted idle storage with fresh evidence")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Print one versioned JSON cleanup report")
 	cmd.Flags().BoolVar(&all, "all-repos", false, "Select all registered repositories")
+	cmd.Flags().BoolVar(&details, "details", false, "List every task resource and host cache with its outcome and reason")
 	return cmd
 }
 
@@ -402,20 +403,3 @@ type storageUpstreamPreview struct {
 }
 
 func (t *storageUpstreamPreview) UpstreamRepo() string { return t.owner }
-
-func renderStorageCleanup(w io.Writer, report storageCleanupReport) {
-	fmt.Fprintf(w, "Storage cleanup %s: eligibility is advisory until apply; byte deltas describe namespace observations, not physical savings.\n", report.Mode)
-	for _, s := range report.Tasks {
-		fmt.Fprintf(w, "Repository %q at %q\n", s.Repository, s.Root)
-		renderBulkCleanup(w, s)
-	}
-	for _, r := range report.Host.Resources {
-		fmt.Fprintf(w, "%s %s: %s: %s\n", r.Resource.Class, r.Resource.Location, r.Outcome, r.Reason)
-	}
-	for _, r := range report.Incomplete {
-		fmt.Fprintln(w, "INCOMPLETE:", r)
-	}
-	for _, r := range report.Errors {
-		fmt.Fprintln(w, "ERROR:", r)
-	}
-}

@@ -308,9 +308,16 @@ These are the defaults: a 40 GiB aggregate soft target, a minimum idle age of 14
 
 Automatic removal covers managed agent and validator build caches (including Go, Rust and C/C++) and dependency caches. It chooses the oldest durable last-use records first, only after complete use coverage proves all registered consumers finished. Each chosen leaf is checked again under exclusive admission before removal. Recent caches stay even when the target is exceeded. Task state, worktrees, branches, scratch, shared operator caches, orphan caches and legacy caches without complete use evidence remain for explicit inspection and cleanup.
 
-With the defaults, warnings refresh at most once every 10 minutes. Between inventories they use cached totals marked stale and cheap filesystem free-space checks; partial totals are lower bounds. Active, protected or unknown storage can keep usage above target. Node status reads cached diagnostics without running an inventory or deleting caches. Diagnostics go to stderr, including with JSON output, and maintenance failures leave workflow outcomes unchanged. Finished task candidates are advisory; explicit cleanup checks the worktree and branch before retirement.
+Swarm stays quiet about storage while caches are within the target. During work it prints a short notice, at most once every 10 minutes with the defaults, only when there is something you can act on: caches are over the target, finished tasks are waiting to be cleaned up, or a filesystem is low on free space. The notice gives sizes in GiB and one preview command that works on that host:
 
-Use `swarm storage cleanup --all-repos` to preview cleanup across registered repositories, then `swarm storage cleanup --all-repos --apply` when ready. Both support `--json`. Omit `--all-repos` to select the current repository. Removing caches makes later runs download dependencies or rebuild outputs. Reported namespace-byte changes can differ from physical free-space gains because hardlinks, open files and filesystem sharing may retain blocks.
+```text
+Storage: Swarm caches use 45.0 GiB, 5.0 GiB over the 40.0 GiB target. 3 finished tasks can be cleaned up.
+  See what can be removed: swarm storage cleanup
+```
+
+`swarm node status` always shows current usage against the target and how long ago it was measured, without running an inventory or deleting caches. When part of the inventory could not be measured, the notice says so and the total is a lower bound. Caches that are in use or were used recently can keep usage above the target. Notices go to stderr, including with JSON output, and maintenance failures leave workflow outcomes unchanged. The finished-task count is an estimate; cleanup checks each worktree and branch before removing it.
+
+Use `swarm storage cleanup` to preview cleanup for the current repository, then add `--apply` when ready. Add `--all-repos` to cover every repository registered with `swarm repo add`. Both support `--json`. Removing caches makes later runs download dependencies or rebuild outputs. Reported namespace-byte changes can differ from physical free-space gains because hardlinks, open files and filesystem sharing may retain blocks.
 
 Offline or incomplete repository evidence retains affected caches. Maintenance checks qualifying interrupted Bubblewrap uses even when no space needs reclaiming. Recovery restarts the cache's idle interval, so automatic removal waits for the configured retention period and a later pass. Uses with native or unclassified consumers, incomplete boundary evidence, or live or unreadable process identities stay retained. Leave their pending records intact. Retrying maintenance after its interval is safe; explicit cleanup can also be rerun after interruption. Automatic task and worktree retirement is not enabled.
 
@@ -326,6 +333,26 @@ swarm storage cleanup --root /path/to/checkout
 swarm storage cleanup --repo owner/repo --apply
 swarm storage cleanup --all-repos --apply --json
 ```
+
+The preview prints a summary: how many tasks and caches are ready, how many were kept grouped by reason, and the next step. Add `--details` to list every worktree, branch and cache with its outcome.
+
+```text
+Storage cleanup preview. Nothing is removed until you run it with --apply.
+
+owner/repo (/path/to/checkout)
+  Tasks: 2 of 14 ready to clean up
+    5 not checked yet: a preview does not contact the remote; --apply checks them
+    4 kept: recorded PR is not merged
+    3 kept: no recorded PR submission
+
+Host caches and scratch: 1 of 9 ready to reclaim (about 1.5 GiB)
+    8 kept: use evidence missing, incomplete or unresolved
+
+3 items are ready. Run the same command with --apply to clean up; each one is checked again first.
+Add --details to list every item and why it was kept.
+```
+
+A preview never contacts the remote, so tasks whose remote branch has to be compared show as not checked yet. `--apply` checks them and cleans up the ones that are finished.
 
 The default scope is the current checkout. `--root` selects a checkout and `--repo` selects a registered repository. `--all-repos` uses registered checkouts only and cannot be combined with those selectors. Each repository is authorized independently before apply; a failure is reported while other repositories continue. Fork workers cannot run this command.
 

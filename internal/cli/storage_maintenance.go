@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -102,8 +103,7 @@ func (o *RootOptions) storageMaintenance(cmd *cobra.Command, readOnly bool) {
 				fmt.Fprintln(cmd.ErrOrStderr(), "Storage: free space unavailable")
 				continue
 			}
-			renderMaintenanceSpace(cmd, path, free, total, cfg)
-
+			renderMaintenanceSpace(cmd, path, free, total, cfg, storageCleanupCommand(cmd, o.registryPath()))
 		}
 	}})
 }
@@ -111,42 +111,90 @@ func (o *RootOptions) storageMaintenance(cmd *cobra.Command, readOnly bool) {
 func runStorageMaintenance(cmd *cobra.Command, options storage.MaintenanceOptions) {
 	summary, warn, err := storage.Maintain(cmd.Context(), options)
 	if err != nil {
-		fmt.Fprintln(cmd.ErrOrStderr(), "Storage maintenance incomplete; retry after the maintenance interval:", err)
+		fmt.Fprintln(cmd.ErrOrStderr(), "Storage: the cache check did not finish; it runs again after the maintenance interval:", err)
 	}
-	if warn {
-		if options.ReadOnly {
-			if summary.InventoryAt.IsZero() {
-				fmt.Fprintln(cmd.ErrOrStderr(), "Storage: no storage inventory exists yet; one will run at the next eligible work, stage, validate or node run lifecycle hook.")
-				return
-			}
-			age := options.Now.Sub(summary.InventoryAt)
-			if age < 0 {
-				age = 0
-			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "Storage: cached inventory age=%s.\n", age.Round(time.Second))
-			renderMaintenanceSummary(cmd, summary)
-		} else {
-			renderMaintenanceDiagnostics(cmd, summary)
+	if !warn {
+		return
+	}
+	target, cleanup := options.Policy.TargetBytes, storageCleanupCommand(cmd, options.RegistryPath)
+	if !options.ReadOnly {
+		renderMaintenanceDiagnostics(cmd, summary, target, cleanup)
+		return
+	}
+	if summary.InventoryAt.IsZero() {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Storage: caches have not been measured yet; the next swarm work, stage, validate or node run measures them.")
+		return
+	}
+	age := options.Now.Sub(summary.InventoryAt)
+	if age < 0 {
+		age = 0
+	}
+	fmt.Fprintln(cmd.ErrOrStderr(), maintenanceNotice(summary, target, cleanup, fmt.Sprintf(" (measured %s ago)", age.Round(time.Second))))
+}
+
+// renderMaintenanceDiagnostics speaks up during work only when the operator
+// can act: caches are over the target or finished tasks are waiting.
+func renderMaintenanceDiagnostics(cmd *cobra.Command, s storage.MaintenanceSummary, target int64, cleanup string) {
+	if s.ExcessBytes > 0 || s.FinishedTasks > 0 {
+		fmt.Fprintln(cmd.ErrOrStderr(), maintenanceNotice(s, target, cleanup, ""))
+	}
+}
+
+// storageCleanupCommand names a preview that works on this host: --all-repos
+// needs a registered repository, and the default covers the current checkout.
+func storageCleanupCommand(cmd *cobra.Command, registryPath string) string {
+	if registryPath != "" {
+		// ReadSnapshot never creates the registry or its lock file.
+		entries, err := registry.New(registryPath).ReadSnapshot(cmd.Context(), 4096, func(int64) error { return nil })
+		if err != nil || len(entries) > 0 {
+			return "swarm storage cleanup --all-repos"
 		}
 	}
+	return "swarm storage cleanup"
 }
-func renderMaintenanceDiagnostics(cmd *cobra.Command, s storage.MaintenanceSummary) {
-	if s.ExcessBytes > 0 || !s.Complete || s.FinishedTasks > 0 {
-		renderMaintenanceSummary(cmd, s)
+
+func maintenanceNotice(s storage.MaintenanceSummary, target int64, cleanup, measured string) string {
+	var b strings.Builder
+	if s.ExcessBytes > 0 {
+		fmt.Fprintf(&b, "Storage: Swarm caches use %s, %s over the %s target%s.", humanBytes(s.ObservedBytes), humanBytes(s.ExcessBytes), humanBytes(target), measured)
+	} else {
+		fmt.Fprintf(&b, "Storage: Swarm caches use %s of the %s target%s.", humanBytes(s.ObservedBytes), humanBytes(target), measured)
+	}
+	if s.FinishedTasks == 1 {
+		b.WriteString(" 1 finished task can be cleaned up.")
+	} else if s.FinishedTasks > 1 {
+		fmt.Fprintf(&b, " %d finished tasks can be cleaned up.", s.FinishedTasks)
+	}
+	if !s.Complete {
+		b.WriteString(" Some storage could not be measured, so usage may be higher.")
+	}
+	if s.ExcessBytes > 0 || s.FinishedTasks > 0 {
+		fmt.Fprintf(&b, "\n  See what can be removed: %s", cleanup)
+	}
+	return b.String()
+}
+
+// humanBytes renders binary units, matching du -h and the 40 GiB default target.
+func humanBytes(n int64) string {
+	const kib, mib, gib = 1 << 10, 1 << 20, 1 << 30
+	switch v := float64(n); {
+	case v >= gib:
+		return fmt.Sprintf("%.1f GiB", v/gib)
+	case v >= mib:
+		return fmt.Sprintf("%.1f MiB", v/mib)
+	case v >= kib:
+		return fmt.Sprintf("%.1f KiB", v/kib)
+	default:
+		return fmt.Sprintf("%d bytes", n)
 	}
 }
 
-func renderMaintenanceSummary(cmd *cobra.Command, s storage.MaintenanceSummary) {
-	fmt.Fprintf(cmd.ErrOrStderr(), "Storage: observed cache bytes=%d (%.1f GB); excess=%d (%.1f GB); protected/retained=%d; finished task candidates=%d; incomplete=%t; stale=%t. Preview: swarm storage cleanup --all-repos; apply: swarm storage cleanup --all-repos --apply\n", s.ObservedBytes, float64(s.ObservedBytes)/1e9, s.ExcessBytes, float64(s.ExcessBytes)/1e9, s.ProtectedBytes, s.FinishedTasks, !s.Complete, s.Stale)
-
-}
-
-func renderMaintenanceSpace(cmd *cobra.Command, path string, free, total uint64, cfg node.StorageSettings) {
+func renderMaintenanceSpace(cmd *cobra.Command, path string, free, total uint64, cfg node.StorageSettings, cleanup string) {
 	threshold := float64(cfg.LowFreeBytes)
 	if fraction := float64(total) * cfg.LowFreePercent / 100; fraction > threshold {
 		threshold = fraction
 	}
 	if float64(free) < threshold {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Storage: low free space at %q (%d bytes available). Preview: swarm storage cleanup --all-repos; apply: swarm storage cleanup --all-repos --apply\n", path, free)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Storage: low free space at %q (%s free of %s).\n  See what can be removed: %s\n", path, humanBytes(int64(free)), humanBytes(int64(total)), cleanup)
 	}
 }

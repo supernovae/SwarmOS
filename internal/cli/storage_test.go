@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/storage"
 )
 
@@ -897,14 +899,88 @@ func TestStorageCleanupAllReposEmptyRegistry(t *testing.T) {
 
 func TestStorageCleanupIncompleteDiscoveryOutput(t *testing.T) {
 	for _, mode := range []string{"preview", "apply"} {
-		report := storageCleanupReport{Mode: mode, Incomplete: []string{"cache discovery: inventory limit reached", "scratch discovery: inventory limit reached"}, Host: storage.ReclamationReport{Resources: []storage.ReclamationResult{{Resource: storageuse.Resource{Class: "agent-build", Location: "/managed/go"}, Outcome: storage.ReclaimRetained, Reason: "unresolved durable use"}}}}
-		var out bytes.Buffer
-		renderStorageCleanup(&out, report)
-		for _, want := range []string{mode, "cache discovery: inventory limit reached", "scratch discovery: inventory limit reached", "/managed/go", "unresolved durable use"} {
-			if !strings.Contains(out.String(), want) {
-				t.Fatalf("missing %q in %s", want, out.String())
+		for _, details := range []bool{false, true} {
+			report := storageCleanupReport{Mode: mode, Incomplete: []string{"cache discovery: inventory limit reached", "scratch discovery: inventory limit reached"}, Host: storage.ReclamationReport{Resources: []storage.ReclamationResult{{Resource: storageuse.Resource{Class: "agent-build", Location: "/managed/go"}, Outcome: storage.ReclaimRetained, Reason: "unresolved durable use"}}}}
+			var out bytes.Buffer
+			renderStorageCleanup(&out, report, details)
+			want := []string{"cache discovery: inventory limit reached", "scratch discovery: inventory limit reached", "unresolved durable use"}
+			if details {
+				want = append(want, "agent-build /managed/go: retained")
+			} else {
+				want = append(want, "Host caches and scratch: 0 of 1", "1 kept: unresolved durable use", "--details")
+			}
+			for _, w := range want {
+				if !strings.Contains(out.String(), w) {
+					t.Fatalf("missing %q in %s", w, out.String())
+				}
+			}
+			if details == strings.Contains(out.String(), "Add --details") {
+				t.Fatal(out.String())
 			}
 		}
+	}
+}
+
+// The default cleanup output is a summary an operator can read at a glance:
+// counts, grouped reasons, and one next step. It never repeats the returned
+// error or prints a header when nothing was inspected.
+func TestStorageCleanupSummaryOutput(t *testing.T) {
+	size := int64(3 << 29)
+	issue := func(n int, c bulkCleanupCounts, disposition, reason string) bulkCleanupIssue {
+		return bulkCleanupIssue{IssueNumber: n, Counts: c, Resources: []bulkCleanupResource{
+			{CleanupResource: lease.CleanupResource{Kind: "worktree", Name: fmt.Sprintf("/w/issue-%d", n), Reason: reason}, Disposition: disposition},
+			{CleanupResource: lease.CleanupResource{Kind: "ledger", Name: "refs", Reason: "retained authoritative state and provenance"}, Disposition: "ledger"},
+		}}
+	}
+	tasks := &bulkCleanupSummary{Repository: "owner/repo", Root: "/checkout", Mode: "preview", Issues: []bulkCleanupIssue{
+		issue(1, bulkCleanupCounts{Eligible: 3}, "eligible", "merged"),
+		issue(2, bulkCleanupCounts{Retained: 3}, "retained", "recorded PR is not merged"),
+		issue(3, bulkCleanupCounts{Retained: 3}, "retained", "recorded PR is not merged"),
+		issue(4, bulkCleanupCounts{Retained: 3}, "retained", "no recorded PR submission"),
+		issue(5, bulkCleanupCounts{Retained: 3}, "retained", gitcredential.RemoteVerificationDeferred),
+	}, Unresolved: []lease.UnresolvedCleanupWorktree{{Reason: "unrecognized managed worktree name"}}}
+	host := storage.ReclamationReport{Resources: []storage.ReclamationResult{
+		{Resource: storageuse.Resource{Class: "agent-build", Location: "/cache/a"}, Outcome: storage.ReclaimEligible, Before: storage.UsageObservation{AllocatedBytes: &size}},
+		{Resource: storageuse.Resource{Class: "agent-build", Location: "/cache/b"}, Outcome: storage.ReclaimRetained, Reason: "ledger entry 0a1b: in use"},
+		{Resource: storageuse.Resource{Class: "agent-build", Location: "/cache/c"}, Outcome: storage.ReclaimRetained, Reason: "ledger entry 2c3d: in use"},
+		{Resource: storageuse.Resource{Class: "agent-build", Location: "/cache/d"}, Outcome: storage.ReclaimAbsent},
+	}}
+	var out bytes.Buffer
+	renderStorageCleanup(&out, storageCleanupReport{Mode: "preview", Tasks: []*bulkCleanupSummary{tasks}, Host: host, Errors: []string{"boom"}}, false)
+	for _, want := range []string{
+		"Storage cleanup preview. Nothing is removed until you run it with --apply.",
+		"owner/repo (/checkout)",
+		"  Tasks: 1 of 5 ready to clean up\n    1 not checked yet: a preview does not contact the remote; --apply checks them\n",
+		"    2 kept: recorded PR is not merged\n    1 kept: no recorded PR submission\n",
+		"  Other worktrees: 1 left alone\n    1 kept: unrecognized managed worktree name\n",
+		"Host caches and scratch: 1 of 3 ready to reclaim (about 1.5 GiB)\n    2 kept: in use\n",
+		"2 items are ready. Run the same command with --apply",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q in:\n%s", want, out.String())
+		}
+	}
+	for _, banned := range []string{"ERROR", "boom", "/w/issue-", "/cache/a", "eligible=", "ledger"} {
+		if strings.Contains(out.String(), banned) {
+			t.Fatalf("unexpected %q in:\n%s", banned, out.String())
+		}
+	}
+	out.Reset()
+	renderStorageCleanup(&out, storageCleanupReport{Mode: "preview", Tasks: []*bulkCleanupSummary{{Repository: "owner/repo", Root: "/checkout", Issues: []bulkCleanupIssue{issue(2, bulkCleanupCounts{Retained: 3}, "retained", "recorded PR is not merged")}}}}, false)
+	if !strings.Contains(out.String(), "Nothing to clean up right now.") || strings.Contains(out.String(), "ready.") {
+		t.Fatal(out.String())
+	}
+	// A local preview cannot confirm tasks that need a remote comparison, so it
+	// must not claim there is nothing to do.
+	out.Reset()
+	renderStorageCleanup(&out, storageCleanupReport{Mode: "preview", Tasks: []*bulkCleanupSummary{{Repository: "owner/repo", Root: "/checkout", Issues: []bulkCleanupIssue{issue(5, bulkCleanupCounts{Retained: 3}, "retained", gitcredential.RemoteVerificationDeferred)}}}}, false)
+	if !strings.Contains(out.String(), "1 task has not been checked. Run the same command with --apply") || strings.Contains(out.String(), "Nothing to clean up") {
+		t.Fatal(out.String())
+	}
+	out.Reset()
+	renderStorageCleanup(&out, storageCleanupReport{Mode: "preview", Errors: []string{"no repositories are registered"}}, false)
+	if out.Len() != 0 {
+		t.Fatal("rendered a report when nothing was inspected:", out.String())
 	}
 }
 

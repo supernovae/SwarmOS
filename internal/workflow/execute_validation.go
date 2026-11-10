@@ -155,6 +155,14 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 	if err == nil && r.acceptanceRepair().NeedsRepair() {
 		return false, errAcceptanceUnmet
 	}
+	var limit *validation.LimitError
+	if errors.As(err, &limit) {
+		command := fmt.Sprintf("swarm issue validate %d", r.opts.IssueNumber)
+		if r.opts.PRNumber != 0 {
+			command = fmt.Sprintf("swarm pr validate %d", r.opts.PRNumber)
+		}
+		err = fmt.Errorf("%w; rerun the complete required checks with %s", err, command)
+	}
 	return false, err
 }
 
@@ -199,7 +207,8 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 		}
 	}
 	initialRound := 0
-	if !r.testerResume && (!implementationProven(r.st, r.res.HeadSHA) || r.opts.instructionsFor("developer") != "") {
+	limitContinuation := r.continuation() && r.opts.instructionsFor("developer") == "" && validation.LimitFromArtifacts(r.st.Artifacts, r.res.HeadSHA, r.st.BaseSHA) != ""
+	if !limitContinuation && !r.testerResume && (!implementationProven(r.st, r.res.HeadSHA) || r.opts.instructionsFor("developer") != "") {
 		if r.continuation() && hasFailedValidationArtifact(r.st) && r.opts.instructionsFor("developer") == "" {
 			if repair := validation.RepairFromArtifact(r.st.Artifacts, r.st.BaseSHA); repair != nil && repair.OutsideCandidate() {
 				return r.res, fmt.Errorf("%w: %w", ErrOutsideCandidateFailures, validation.ErrRequiredCheckFailed)

@@ -715,7 +715,8 @@ const (
 // repair round: required checks failed with a trusted report, and not every
 // failure is pre-existing at the approved base.
 func repairableValidation(err error, report *validation.ValidationReport) bool {
-	return !errors.Is(err, errRetryCandidateRejected) && errors.Is(err, validation.ErrRequiredCheckFailed) && !errors.Is(err, ErrOutsideCandidateFailures) && !errors.Is(err, ErrPreExistingFailures) && report != nil && !report.Passed
+	var limit *validation.LimitError
+	return !errors.As(err, &limit) && (report == nil || report.Limit == "") && !errors.Is(err, errRetryCandidateRejected) && errors.Is(err, validation.ErrRequiredCheckFailed) && !errors.Is(err, ErrOutsideCandidateFailures) && !errors.Is(err, ErrPreExistingFailures) && report != nil && !report.Passed
 }
 
 // failingIdentities lists the trusted report's failing tests as
@@ -1977,7 +1978,7 @@ func (e *Engine) CheckIssueContinuationContext(ctx context.Context, st *lease.Is
 	if !needsPlan && lease.IncompletePlanPair(st) {
 		return fmt.Errorf("%w: incomplete plan generation; revise the WorkUnit with swarm issue edit %d --objective '<maintainer-chosen revised objective>' and separately swarm issue approve %d", lease.ErrApprovalRequired, st.Lease.IssueNumber, st.Lease.IssueNumber)
 	}
-	if hasFailedValidationArtifact(st) && opts.instructionsFor("developer") == "" {
+	if hasFailedValidationArtifact(st) && opts.instructionsFor("developer") == "" && validation.LimitFromArtifacts(st.Artifacts, st.HeadSHA, st.BaseSHA) == "" {
 		if needsPlan {
 			return nil
 		} // Planning must repair missing or rejected reports first.

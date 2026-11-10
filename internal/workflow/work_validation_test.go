@@ -2598,3 +2598,105 @@ func TestIssueWorkReplanContinuation(t *testing.T) {
 		})
 	}
 }
+
+func TestRequiredCheckLimitDoesNotRepair(t *testing.T) {
+	for _, mode := range []struct {
+		mixed  bool
+		budget string
+	}{{false, "0"}, {false, "2"}, {true, "0"}, {true, "2"}} {
+		mixed, budget := mode.mixed, mode.budget
+		t.Run(fmt.Sprint("mixed=", mixed, "/budget=", budget), func(t *testing.T) {
+			counter := filepath.Join(t.TempDir(), "checks")
+			command := "echo ran >> '" + counter + "'; if test -f stall-check; then sleep 2; fi"
+			ordinary := "true"
+			if mixed {
+				ordinary = "if test -f stall-check; then exit 9; fi"
+			}
+			firstCommand, secondCommand := command, ordinary
+			if mixed {
+				firstCommand, secondCommand = ordinary, command
+			}
+			e, issue := gatedTesterRetryEngine(t, contract.GateNone, firstCommand, secondCommand, budget)
+			// Fixture policy is committed before approval. Use a short required-check
+			// deadline; never mutate the trusted policy in the candidate.
+			path := filepath.Join(e.repoRoot, ".swarm/validation/required-checks.yaml")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(path, []byte(strings.ReplaceAll(string(raw), "timeout: 1m", "timeout: 50ms")), 0644); err != nil {
+				t.Fatal(err)
+			}
+			retryGit(t, e.repoRoot, "commit", "-am", "short check budget")
+			// Task approval binds the base after the fixture's policy adjustment.
+			if _, err = e.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			developer := 0
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "developer" {
+						developer++
+						if err := os.WriteFile(filepath.Join(req.WorktreePath, "stall-check"), nil, 0644); err != nil {
+							return nil, err
+						}
+					}
+					return (&agent.MockRunner{}).Run(ctx, req)
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true}
+			first, err := e.ExecuteWork(t.Context(), opts)
+			var limit *validation.LimitError
+			if first == nil || !errors.As(err, &limit) || limit.Outcome != validation.OutcomeTimeLimit || first.Validation == nil || first.Validation.Passed || first.State.ValidationRepairCount != 0 || developer != 1 {
+				t.Fatalf("limit reserved repair: %+v %v developer=%d", first, err, developer)
+			}
+			if validation.LimitFromArtifacts(first.State.Artifacts, first.State.HeadSHA, first.State.BaseSHA) != validation.OutcomeTimeLimit {
+				t.Fatal("limit not persisted")
+			}
+			// A continuation must rerun checks without spending an exhausted repair
+			// allowance. Keep the same candidate; replace only the external sleep
+			// condition through a fake sleep executable rather than changing policy.
+			bin := t.TempDir()
+			if err := testutil.WriteExecutable(filepath.Join(bin, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			opts.ClaimID = first.State.Lease.ClaimID
+			second, err := e.ExecuteWork(t.Context(), opts)
+			if mixed {
+				expectedDevelopers, expectedRepairs := 1, 0
+				if budget == "2" {
+					expectedDevelopers, expectedRepairs = 2, 1
+				}
+				if second == nil || !errors.Is(err, validation.ErrRequiredCheckFailed) || second.Validation == nil || second.Validation.Limit != "" || developer != expectedDevelopers || second.State.ValidationRepairCount != expectedRepairs {
+					t.Fatalf("ordinary retry handling: %+v %v developer=%d", second, err, developer)
+				}
+				return
+			}
+			if err != nil || second == nil || !second.ValidationPassed || developer != 1 || second.State.ValidationRepairCount != 0 {
+				t.Fatalf("continuation: %+v %v developer=%d", second, err, developer)
+			}
+			bytes, _ := os.ReadFile(counter)
+			if strings.Count(string(bytes), "ran") < 2 {
+				t.Fatalf("complete check not rerun: %q", bytes)
+			}
+		})
+	}
+}
+
+func TestRequiredCheckLimitGuidance(t *testing.T) {
+	for _, outcome := range []string{validation.OutcomeTimeLimit, validation.OutcomeStalled} {
+		report := &validation.ValidationReport{Passed: false, Limit: outcome}
+		err := errors.Join(errors.New("ordinary failure"), &validation.LimitError{Outcome: outcome})
+		if repairableValidation(err, report) {
+			t.Fatalf("limit admitted repair: %s", outcome)
+		}
+		if repairableValidation(validation.ErrRequiredCheckFailed, report) {
+			t.Fatal("persisted limit admitted repair")
+		}
+	}
+	if !repairableValidation(validation.ErrRequiredCheckFailed, &validation.ValidationReport{Passed: false}) {
+		t.Fatal("ordinary failure no longer repairable")
+	}
+}

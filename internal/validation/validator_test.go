@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -474,7 +475,11 @@ func TestValidationProgressFailureTimeoutAndCancellation(t *testing.T) {
 			if err == nil || report == nil || report.Passed {
 				t.Fatalf("missing failed result: %+v %v", report, err)
 			}
-			if len(events) != 2 || events[0].Status != "started" || events[1].Status != "FAIL" || events[1].Check != "trusted" {
+			wantStatus := "FAIL"
+			if tc.name == "timeout" {
+				wantStatus = OutcomeTimeLimit
+			}
+			if len(events) != 2 || events[0].Status != "started" || events[1].Status != wantStatus || events[1].Check != "trusted" {
 				t.Fatalf("unexpected events %+v", events)
 			}
 		})
@@ -1101,5 +1106,213 @@ func TestCheckTimeoutHonoursPolicyUpToCeiling(t *testing.T) {
 		if got := checkTimeout(tc.configured); got != tc.want {
 			t.Errorf("checkTimeout(%q) = %s, want %s", tc.configured, got, tc.want)
 		}
+	}
+}
+
+func TestRequiredCheckDurationHistory(t *testing.T) {
+	useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	base := gitRevision(t, repo, "HEAD")
+	// Use the repository's actual approved command when checking dispatch.
+	spec, err := loadTrustedValidationSpec(repo, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := spec.RequiredChecks[0]
+	policy := checkTimeout(check.Timeout)
+	recorded := min(max(policy, time.Second), 25*time.Minute)
+	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: check.Name, Command: check.Command, Passed: true, Duration: recorded}})
+	if got := requiredCheckBudget(t.Context(), repo, check); got != max(policy, recorded*2) {
+		t.Fatalf("budget %v", got)
+	}
+	budgets := []time.Duration{}
+	report, err := Validate(t.Context(), repo, nil, ValidateOptions{BaseSHA: base, runCommand: func(ctx context.Context, cmd string, budget time.Duration, stdout, stderr io.Writer) error {
+		budgets = append(budgets, budget)
+		return nil
+	}})
+	if err != nil || !report.Passed || len(budgets) == 0 || budgets[len(budgets)-1] != max(policy, recorded*2) {
+		t.Fatalf("dispatch %v: %+v %v", budgets, report, err)
+	}
+	check.Command += " "
+	if got := requiredCheckBudget(t.Context(), repo, check); got != policy {
+		t.Fatalf("changed command %v", got)
+	}
+	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: check.Name, Command: check.Command, Passed: true, Duration: 50 * time.Minute}})
+	if got := requiredCheckBudget(t.Context(), repo, check); got != time.Hour {
+		t.Fatalf("ceiling %v", got)
+	}
+	check.Name += "-different"
+	if got := requiredCheckBudget(t.Context(), repo, check); got != policy {
+		t.Fatalf("name reset %v", got)
+	}
+}
+
+func TestRequiredCheckCPUStall(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux procfs")
+	}
+	for _, tc := range []struct {
+		name, command string
+		stalled       bool
+	}{
+		{"sleeping descendants", "sleep 10 & echo child:$!; wait", true},
+		{"active grandchild", "sh -c 'i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done' & wait", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &checkRunner{worktree: t.TempDir(), home: t.TempDir(), stallWindow: 150 * time.Millisecond, sampleInterval: 20 * time.Millisecond}
+			start := time.Now()
+			c, err := r.runCheck(t.Context(), tc.name, tc.command, 5*time.Second, nil)
+			if tc.stalled {
+				if err == nil || c.Outcome != OutcomeStalled || time.Since(start) > 3*time.Second {
+					t.Fatalf("%+v %v", c, err)
+				}
+				pid := strings.TrimSpace(strings.TrimPrefix(c.Output, "child:"))
+				if raw, e := os.ReadFile(filepath.Join("/proc", pid, "stat")); e == nil {
+					end := strings.LastIndexByte(string(raw), ')')
+					if end < 0 || !strings.HasPrefix(string(raw[end+1:]), " Z ") {
+						t.Fatalf("stalled child still running: %s", raw)
+					}
+				}
+			} else if err != nil || !c.Passed {
+				t.Fatalf("CPU progress killed: %+v %v", c, err)
+			}
+		})
+	}
+	t.Run("supervisor preserves output and exit", func(t *testing.T) {
+		marker := "swarm-test-marker"
+		cmd := exec.Command("sh", "-c", nativeCheckSupervisor("printf '%s' \"quoted ' value\"; exit 7", marker))
+		out, err := cmd.CombinedOutput()
+		var exit *exec.ExitError
+		if string(out) != "quoted ' value" || !errors.As(err, &exit) || exit.ExitCode() != 7 {
+			t.Fatalf("%q %v", out, err)
+		}
+	})
+}
+
+func TestRequiredCheckUnobservableTree(t *testing.T) {
+	r := &checkRunner{worktree: t.TempDir(), home: t.TempDir(), stallWindow: 10 * time.Millisecond, sampleInterval: time.Millisecond, sampleProcesses: func() (map[int]checkProcess, error) { return nil, errors.New("unreadable procfs") }}
+	c, err := r.runCheck(t.Context(), "unreadable", "sleep 10", 100*time.Millisecond, nil)
+	if err == nil || c.Outcome != OutcomeTimeLimit {
+		t.Fatalf("%+v %v", c, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	c, err = r.runCheck(ctx, "cancelled", "sleep 10", time.Second, nil)
+	if err == nil || validLimit(c.Outcome) {
+		t.Fatalf("parent cancellation classified as limit: %+v %v", c, err)
+	}
+	// All backends receive the centrally computed deadline; OCI never starts a
+	// procfs observer, even when its client is an idle descendant.
+	r.execution = contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendOCI}
+	var observations atomic.Int32
+	r.sampleProcesses = func() (map[int]checkProcess, error) {
+		observations.Add(1)
+		return nil, errors.New("must not observe OCI")
+	}
+	r.runOCI = func(ctx context.Context, _ string, budget time.Duration, _, _ io.Writer) error {
+		if budget != 20*time.Millisecond {
+			t.Errorf("OCI budget %v", budget)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	c, err = r.runCheck(t.Context(), "OCI", "fake runtime", 20*time.Millisecond, nil)
+	if err == nil || c.Outcome != OutcomeTimeLimit {
+		t.Fatalf("OCI: %+v %v", c, err)
+	}
+	if observations.Load() != 0 {
+		t.Fatal("OCI client was observed")
+	}
+}
+
+func TestRequiredCheckCPUStallObserver(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux observer")
+	}
+	for _, tc := range []struct {
+		name     string
+		errAfter int
+		mutate   func(int, map[int]checkProcess)
+		stalled  bool
+	}{
+		{name: "idle native root", stalled: true},
+		{name: "unreadable after discovery", errAfter: 2},
+		{name: "missing intermediate ancestry", mutate: func(i int, m map[int]checkProcess) {
+			if i > 1 {
+				delete(m, 100002)
+				m[100003] = checkProcess{pid: 100003, parent: 100002, start: 3, cpu: 100}
+			}
+		}},
+		{name: "active grandchild", mutate: func(i int, m map[int]checkProcess) {
+			m[100003] = checkProcess{pid: 100003, parent: 100002, start: 3, cpu: uint64(i)}
+		}},
+		{name: "short lived children", mutate: func(i int, m map[int]checkProcess) {
+			p := m[100001]
+			p.cpu = uint64(i)
+			m[100001] = p
+			m[100004+i] = checkProcess{pid: 100004 + i, parent: 100001, start: uint64(4 + i), cpu: 1}
+		}},
+		{name: "PID identity changed", mutate: func(i int, m map[int]checkProcess) {
+			if i > 1 {
+				p := m[100001]
+				p.start = 99
+				m[100001] = p
+			}
+		}},
+		{name: "ambiguous marker", mutate: func(_ int, m map[int]checkProcess) {
+			m[100005] = checkProcess{pid: 100005, parent: os.Getpid(), start: 5, args: []string{"sh", "-c", "supervisor", "marker"}}
+		}},
+		{name: "missing root", mutate: func(_ int, m map[int]checkProcess) { delete(m, 100001) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			i := 0
+			r := &checkRunner{stallWindow: 30 * time.Millisecond, sampleInterval: time.Millisecond, now: func() time.Time { return time.Unix(1, int64(i)*int64(10*time.Millisecond)) }, sampleProcesses: func() (map[int]checkProcess, error) {
+				i++
+				if tc.errAfter != 0 && i >= tc.errAfter {
+					return nil, errors.New("procfs unreadable")
+				}
+				m := map[int]checkProcess{os.Getpid(): {pid: os.Getpid(), start: 1}, 100001: {pid: 100001, parent: os.Getpid(), start: 1, args: []string{"sh", "-c", "supervisor", "marker"}}, 100002: {pid: 100002, parent: 100001, start: 2}, 100006: {pid: 100006, parent: os.Getpid(), start: 6, cpu: 999, args: []string{"sh", "-c", "unrelated", "other-marker"}}}
+				if tc.mutate != nil {
+					tc.mutate(i, m)
+				}
+				return m, nil
+			}}
+			stop := r.observeCPU(ctx, cancel, 0, "marker")
+			select {
+			case <-ctx.Done():
+			case <-time.After(30 * time.Millisecond):
+			}
+			stop() // also proves monitor termination without a running child.
+			if errors.Is(context.Cause(ctx), errCheckStalled) != tc.stalled {
+				t.Fatalf("cause: %v", context.Cause(ctx))
+			}
+		})
+	}
+	t.Run("direct root pinned before wait", func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(nil)
+		calls := 0
+		r := &checkRunner{stallWindow: 3 * time.Millisecond, sampleInterval: time.Millisecond, sampleProcesses: func() (map[int]checkProcess, error) {
+			calls++
+			start := uint64(1)
+			if calls > 1 {
+				start = 99
+			}
+			return map[int]checkProcess{100001: {pid: 100001, start: start}}, nil
+		}}
+		stop := r.observeCPU(ctx, cancel, 100001, "")
+		select {
+		case <-ctx.Done():
+		case <-time.After(15 * time.Millisecond):
+		}
+		stop()
+		if context.Cause(ctx) != nil {
+			t.Fatalf("reused direct PID triggered stall: %v", context.Cause(ctx))
+		}
+	})
+	if cpuObservationEnabled("darwin", contract.ExecutionConfig{}, false) || cpuObservationEnabled("linux", contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendOCI}, false) {
+		t.Fatal("unobservable backend enabled")
 	}
 }

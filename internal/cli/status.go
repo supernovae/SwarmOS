@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"io"
 	"os"
 	"strings"
@@ -164,7 +165,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 						if err != nil {
 							return err
 						}
-						cfg, err := harness.LoadConfigAt(target.Path, state.BaseSHA)
+						cfg, err := harness.LoadConfigAt(target.Path, state.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 						if err != nil {
 							return err
 						}
@@ -204,7 +205,7 @@ func newStatusCmd(options *RootOptions) *cobra.Command {
 				if !options.Fork && state != nil {
 					wu, parseErr := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
 					if parseErr == nil {
-						cfg, cfgErr := harness.LoadConfigAt(target.Path, state.BaseSHA)
+						cfg, cfgErr := harness.LoadConfigAt(target.Path, state.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 						if cfgErr != nil {
 							return cfgErr
 						}

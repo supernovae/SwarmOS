@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"os"
@@ -87,7 +88,7 @@ func runCheckpointPlan(cmd *cobra.Command, root *RootOptions, arg string, opts w
 			return lease.ErrClaimFence
 		}
 	}
-	cfg, err := harness.LoadConfigAt(repo, p.State.BaseSHA)
+	cfg, err := harness.LoadConfigAt(repo, p.State.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 	if err != nil {
 		return err
 	}
@@ -145,7 +146,7 @@ func directPlanReviewDisplay(opts *RootOptions, st *lease.IssueState) *planRevie
 	if opts.Fork || !lease.DirectPlanReview(st) {
 		return nil
 	}
-	cfg, err := harness.LoadConfigAt(opts.resolveRepoRoot(), st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(opts.resolveRepoRoot(), st.BaseSHA, opts.lookups)
 	if err != nil {
 		return nil
 	}

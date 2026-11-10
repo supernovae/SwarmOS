@@ -591,8 +591,8 @@ func LoadConfig(repoRoot string) (*contract.SwarmConfig, error) {
 }
 
 // LoadConfigAt reads policy from the approved immutable commit, never candidate files.
-func LoadConfigAt(repoRoot, baseSHA string) (*contract.SwarmConfig, error) {
-	data, err := readAt(repoRoot, baseSHA, ".swarm/config.yaml")
+func LoadConfigAt(repoRoot, baseSHA string, sessions ...*gitcredential.LookupSession) (*contract.SwarmConfig, error) {
+	data, err := readAt(repoRoot, baseSHA, ".swarm/config.yaml", sessions...)
 	if err != nil {
 		return nil, err
 	}
@@ -734,11 +734,15 @@ func validCommitSHA(sha string) error {
 	return nil
 }
 
-func readAt(root, sha, path string) ([]byte, error) {
+func readAt(root, sha, path string, sessions ...*gitcredential.LookupSession) ([]byte, error) {
 	if err := validCommitSHA(sha); err != nil {
 		return nil, err
 	}
-	out, err := gitcredential.Output(context.Background(), root, "show", sha+":"+path)
+	var session *gitcredential.LookupSession
+	if len(sessions) > 0 {
+		session = sessions[0]
+	}
+	out, err := session.ReadFile(context.Background(), root, sha, path)
 	if err != nil {
 		return nil, fmt.Errorf("read approved %s at %s: %w", path, sha, err)
 	}
@@ -756,11 +760,11 @@ func LoadWorkflow(repoRoot, name string) (*contract.WorkflowSpec, error) {
 	return decodeWorkflow(data)
 }
 
-func LoadWorkflowAt(repoRoot, name, baseSHA string) (*contract.WorkflowSpec, error) {
+func LoadWorkflowAt(repoRoot, name, baseSHA string, sessions ...*gitcredential.LookupSession) (*contract.WorkflowSpec, error) {
 	if err := validateWorkflowName(name); err != nil {
 		return nil, err
 	}
-	data, err := readAt(repoRoot, baseSHA, ".swarm/workflows/"+name+".yaml")
+	data, err := readAt(repoRoot, baseSHA, ".swarm/workflows/"+name+".yaml", sessions...)
 	if err != nil {
 		return nil, err
 	}
@@ -797,8 +801,8 @@ func LoadValidationSpec(repoRoot string) (*contract.ValidationSpec, error) {
 	return DecodeValidationSpec(data)
 }
 
-func LoadValidationSpecAt(repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
-	data, err := readAt(repoRoot, baseSHA, ".swarm/validation/required-checks.yaml")
+func LoadValidationSpecAt(repoRoot, baseSHA string, sessions ...*gitcredential.LookupSession) (*contract.ValidationSpec, error) {
+	data, err := readAt(repoRoot, baseSHA, ".swarm/validation/required-checks.yaml", sessions...)
 	if err != nil {
 		return nil, err
 	}
@@ -847,13 +851,13 @@ func decodeStrictYAML(data []byte, value any) error {
 	return nil
 }
 
-func LoadRolePromptAt(repoRoot, role, baseSHA string) (string, error) {
+func LoadRolePromptAt(repoRoot, role, baseSHA string, sessions ...*gitcredential.LookupSession) (string, error) {
 	switch role {
 	case "planner", "reviewer", "developer", "tester":
 	default:
 		return "", fmt.Errorf("unknown role %q", role)
 	}
-	data, err := readAt(repoRoot, baseSHA, ".swarm/prompts/"+role+".md")
+	data, err := readAt(repoRoot, baseSHA, ".swarm/prompts/"+role+".md", sessions...)
 	if err != nil {
 		return "", err
 	}
@@ -1160,7 +1164,7 @@ func repositoryName(root, remote string) string {
 // LedgerNamespaceAt reads ledger_namespace from the trusted commit sha. A
 // commit without .swarm/config.yaml selects branch, as an omitted key does;
 // an unreadable or invalid configuration is an error, never a default.
-func LedgerNamespaceAt(repoRoot, sha string) (string, error) {
+func LedgerNamespaceAt(repoRoot, sha string, sessions ...*gitcredential.LookupSession) (string, error) {
 	if err := validCommitSHA(sha); err != nil {
 		return "", err
 	}
@@ -1174,7 +1178,7 @@ func LedgerNamespaceAt(repoRoot, sha string) (string, error) {
 	if strings.TrimSpace(string(listed)) == "" {
 		return contract.LedgerNamespaceBranch, nil
 	}
-	cfg, err := LoadConfigAt(repoRoot, sha)
+	cfg, err := LoadConfigAt(repoRoot, sha, sessions...)
 	if err != nil {
 		return "", err
 	}
@@ -1182,7 +1186,7 @@ func LedgerNamespaceAt(repoRoot, sha string) (string, error) {
 }
 
 // LoadPromptVariantAt reads an optional prompt exclusively from approved policy.
-func LoadPromptVariantAt(root, role, variant, base string) (string, error) {
+func LoadPromptVariantAt(root, role, variant, base string, sessions ...*gitcredential.LookupSession) (string, error) {
 	if err := contract.ValidateProfiles([]contract.ProfileSpec{{Name: "variant", PromptVariant: variant}}); err != nil {
 		return "", err
 	}
@@ -1202,7 +1206,7 @@ func LoadPromptVariantAt(root, role, variant, base string) (string, error) {
 	if len(bytes.TrimSpace(out)) == 0 {
 		return "", nil
 	}
-	data, err := readAt(root, base, path)
+	data, err := readAt(root, base, path, sessions...)
 	return string(data), err
 }
 
@@ -1245,7 +1249,7 @@ func ValidateTrackerConfig(root string) error {
 }
 
 // ArchivePolicyAt reads only immutable upstream configuration, defaulting to keep.
-func ArchivePolicyAt(repoRoot, sha string) (*contract.ArchiveConfig, error) {
+func ArchivePolicyAt(repoRoot, sha string, sessions ...*gitcredential.LookupSession) (*contract.ArchiveConfig, error) {
 	if err := validCommitSHA(sha); err != nil {
 		return nil, err
 	}
@@ -1259,7 +1263,7 @@ func ArchivePolicyAt(repoRoot, sha string) (*contract.ArchiveConfig, error) {
 	if strings.TrimSpace(string(listed)) == "" {
 		return nil, nil
 	}
-	cfg, err := LoadConfigAt(repoRoot, sha)
+	cfg, err := LoadConfigAt(repoRoot, sha, sessions...)
 	if err != nil {
 		return nil, err
 	}

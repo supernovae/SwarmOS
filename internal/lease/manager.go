@@ -335,6 +335,7 @@ func (st *IssueState) ProvisionContext(forkMode bool) workspace.ProvisionContext
 }
 
 type Manager struct {
+	lookups              *gitcredential.LookupSession
 	heartbeatTimerFn     func(time.Duration) HeartbeatTimer
 	tracker              tracker.Tracker
 	security             contract.SecurityConfig
@@ -355,6 +356,10 @@ type Manager struct {
 func NewManager(tr tracker.Tracker, security contract.SecurityConfig) *Manager {
 	return &Manager{tracker: tr, security: security, nowFn: time.Now, tokens: make(map[int]string)}
 }
+
+// SetLookupSession binds immutable observations before store configuration.
+func (m *Manager) SetLookupSession(s *gitcredential.LookupSession) { m.lookups = s }
+func (m *Manager) LookupSession() *gitcredential.LookupSession     { return m.lookups }
 
 func (m *Manager) SetNodeProfile(profile *contract.NodeProfile) { m.nodeProfile = profile }
 
@@ -417,7 +422,7 @@ func (m *Manager) ConfigureStore(root string) error {
 	m.repoRoot = root
 	if strings.HasPrefix(m.tracker.BackendName(), "github") {
 		// Only the upstream default branch selects the ledger namespace.
-		ns, err := workspace.TrustedLedgerNamespace(root, m.upstreamRemote)
+		ns, err := workspace.TrustedLedgerNamespace(root, m.upstreamRemote, m.lookups)
 		if err != nil {
 			return err
 		}
@@ -970,7 +975,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 	if err != nil {
 		return nil, err
 	}
-	trustedCfg, err := harness.LoadConfigAt(m.repoRoot, base)
+	trustedCfg, err := harness.LoadConfigAt(m.repoRoot, base, m.lookups)
 	if err != nil {
 		return nil, fmt.Errorf("load trusted default config: %w", err)
 	}
@@ -984,11 +989,11 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 			return nil, err
 		}
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, base)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, base, m.lookups)
 	if err != nil {
 		return nil, fmt.Errorf("load approved policy: %w", err)
 	}
-	wf, err := harness.LoadWorkflowAt(m.repoRoot, wu.Workflow, base)
+	wf, err := harness.LoadWorkflowAt(m.repoRoot, wu.Workflow, base, m.lookups)
 	if err != nil {
 		return nil, err
 	}
@@ -1180,7 +1185,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if prNumber != 0 && st.PRNumber != prNumber {
 		return nil, fmt.Errorf("PR #%d is not linked to issue #%d", prNumber, n)
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return nil, fmt.Errorf("load approved policy: %w", err)
 	}
@@ -1370,7 +1375,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 		if st.PRRevision != nil {
 			return nil, fmt.Errorf("issue #%d has a pending PR revision; use swarm pr work %d", issue, st.PRRevision.Number)
 		}
-		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 		if err != nil {
 			return nil, fmt.Errorf("load approved policy: %w", err)
 		}
@@ -1499,7 +1504,7 @@ func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState)
 	if issue.IsParent() {
 		return fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be executed as a WorkUnit", n)
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return fmt.Errorf("load approved policy: %w", err)
 	}
@@ -1558,7 +1563,7 @@ func (m *Manager) Renew(ctx context.Context, n int, owner string, d time.Duratio
 		return nil, fmt.Errorf("renew duration must be positive")
 	}
 	return m.mutate(ctx, n, owner, func(st *IssueState) error {
-		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 		if err != nil {
 			return err
 		}
@@ -1723,7 +1728,7 @@ func (m *Manager) NotifyPlanReviewers(ctx context.Context, n int) ([]string, err
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return nil, fmt.Errorf("load approved reviewer policy: %w", err)
 	}
@@ -1803,7 +1808,7 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	if err := m.checkCheckpointPlanObservation(ctx, st); err != nil {
 		return nil, err
 	}
-	cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if cfgErr != nil {
 		return nil, fmt.Errorf("load approved reviewer policy: %w", cfgErr)
 	}
@@ -2077,7 +2082,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 				if err := m.tracker.Authorize(ctx, permission); err != nil {
 					return err
 				}
-				cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+				cfg, cfgErr := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 				if cfgErr != nil {
 					return fmt.Errorf("load approved reviewer policy: %w", cfgErr)
 				}
@@ -3289,7 +3294,7 @@ func (m *Manager) ProvisionIssueWorkspace(ctx context.Context, captured *IssueSt
 			if err != nil {
 				return err
 			}
-			cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+			cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 			if err != nil {
 				return err
 			}
@@ -3400,7 +3405,7 @@ func (m *Manager) PrepareUpstreamPlanReview(ctx context.Context, n int) (*Upstre
 	if err := m.checkApprovedState(ctx, n, st); err != nil {
 		return nil, err
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return nil, err
 	}
@@ -3456,7 +3461,7 @@ func (m *Manager) PrepareUpstreamPlanReview(ctx context.Context, n int) (*Upstre
 		if err != nil {
 			return nil, err
 		}
-		wf, err := harness.LoadWorkflowAt(m.repoRoot, wu.Workflow, st.BaseSHA)
+		wf, err := harness.LoadWorkflowAt(m.repoRoot, wu.Workflow, st.BaseSHA, m.lookups)
 		if err != nil {
 			return nil, err
 		}
@@ -3585,7 +3590,7 @@ func (m *Manager) RecordUpstreamPlanReview(ctx context.Context, o *UpstreamPlanR
 		return nil, fmt.Errorf("upstream review requires qualified isolated reviewer provenance")
 	}
 	st := fresh.state
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return nil, err
 	}
@@ -3734,7 +3739,7 @@ func (m *Manager) CheckUpstreamReviewer(o *UpstreamPlanReviewObservation, att co
 	if o == nil || o.manager != m {
 		return ErrClaimFence
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, o.state.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, o.state.BaseSHA, m.lookups)
 	if err != nil {
 		return err
 	}
@@ -3761,7 +3766,7 @@ func (m *Manager) ReserveValidationRepair(ctx context.Context, n int, owner stri
 		if st.ValidationRepairKey != "" && st.ValidationRepairKey != key {
 			return ErrApprovalRequired
 		}
-		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 		if err != nil {
 			return err
 		}

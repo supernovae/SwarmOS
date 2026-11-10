@@ -3,13 +3,16 @@ package gitcredential
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -245,5 +248,167 @@ func TestLocalObservationNeverResolvesCredentials(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(cmd.Env, "\n"), "secret-for-observation") {
 		t.Fatal("forwarded credentials")
+	}
+}
+
+func TestImmutableLookupIsolation(t *testing.T) {
+	ctx := context.Background()
+	sha := strings.Repeat("a", 40)
+	session := NewLookupSession()
+	calls := 0
+	session.run = func(context.Context, string, ...string) ([]byte, error) { calls++; return []byte("original"), nil }
+	root := t.TempDir()
+	first, err := session.ReadFile(ctx, root, sha, "policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first[0] = 'X'
+	second, err := session.ReadFile(ctx, root, sha, "policy")
+	if err != nil || string(second) != "original" || calls != 1 {
+		t.Fatalf("copy/reuse: %q calls=%d err=%v", second, calls, err)
+	}
+	for _, key := range [][3]string{{t.TempDir(), sha, "policy"}, {root, strings.Repeat("b", 40), "policy"}, {root, sha, "other"}} {
+		if _, err := session.ReadFile(ctx, key[0], key[1], key[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 4 {
+		t.Fatal("root/SHA/path not separated", calls)
+	}
+	independent := NewLookupSession()
+	independent.run = session.run
+	if _, err := independent.ReadFile(ctx, root, sha, "policy"); err != nil || calls != 5 {
+		t.Fatal(calls, err)
+	}
+	t.Run("failure-retry", func(t *testing.T) {
+		s := NewLookupSession()
+		n := 0
+		s.run = func(context.Context, string, ...string) ([]byte, error) {
+			n++
+			if n == 1 {
+				return nil, errors.New("transient")
+			}
+			return []byte("ok"), nil
+		}
+		if _, err := s.ReadFile(ctx, root, sha, "p"); err == nil {
+			t.Fatal("accepted failure")
+		}
+		if out, err := s.ReadFile(ctx, root, sha, "p"); err != nil || string(out) != "ok" || n != 2 {
+			t.Fatal(n, err)
+		}
+	})
+	t.Run("concurrent-canceled-waiter", func(t *testing.T) {
+		s := NewLookupSession()
+		started, release := make(chan struct{}), make(chan struct{})
+		n := 0
+		s.run = func(context.Context, string, ...string) ([]byte, error) {
+			n++
+			close(started)
+			<-release
+			return []byte("ok"), nil
+		}
+		owner := make(chan error, 1)
+		go func() { _, err := s.ReadFile(ctx, root, sha, "p"); owner <- err }()
+		<-started
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := s.ReadFile(canceled, root, sha, "p"); !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		errs := make(chan error, 8)
+		for range 8 {
+			wg.Add(1)
+			go func() { defer wg.Done(); _, err := s.ReadFile(ctx, root, sha, "p"); errs <- err }()
+		}
+		close(release)
+		if err := <-owner; err != nil {
+			t.Fatal(err)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n != 1 {
+			t.Fatal("concurrent loads", n)
+		}
+	})
+	t.Run("canceled-owner-retry", func(t *testing.T) {
+		s := NewLookupSession()
+		started := make(chan struct{})
+		n := 0
+		s.run = func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+			n++
+			if n == 1 {
+				close(started)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return []byte("ok"), nil
+		}
+		canceled, cancel := context.WithCancel(ctx)
+		done := make(chan error, 1)
+		go func() { _, err := s.ReadFile(canceled, root, sha, "p"); done <- err }()
+		<-started
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		if _, err := s.ReadFile(ctx, root, sha, "p"); err != nil || n != 2 {
+			t.Fatal(n, err)
+		}
+	})
+}
+
+func TestImmutableLookupMutableRefs(t *testing.T) {
+	for _, ref := range []string{"main", "abcdef0", strings.Repeat("c", 64), "-bad", strings.Repeat("G", 40)} {
+		t.Run(ref, func(t *testing.T) {
+			s := NewLookupSession()
+			n := 0
+			s.run = func(context.Context, string, ...string) ([]byte, error) { n++; return []byte(strconv.Itoa(n)), nil }
+			root := t.TempDir()
+			for i := 1; i <= 2; i++ {
+				out, err := s.ReadFile(context.Background(), root, ref, "p")
+				if err != nil || string(out) != strconv.Itoa(i) {
+					t.Fatal(string(out), err)
+				}
+			}
+			if n != 2 || len(s.entries) != 0 {
+				t.Fatal("mutable ref cached", n)
+			}
+		})
+	}
+}
+
+func TestImmutableLookupCommonDirectory(t *testing.T) {
+	s := NewLookupSession()
+	root := t.TempDir()
+	common := t.TempDir()
+	calls := 0
+	s.run = func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("transient")
+		}
+		return []byte(common), nil
+	}
+	if _, err := s.CommonDirectory(context.Background(), root); err == nil {
+		t.Fatal("failure accepted")
+	}
+	for range 2 {
+		if got, err := s.CommonDirectory(context.Background(), root); err != nil || got != common {
+			t.Fatal(got, err)
+		}
+	}
+	if calls != 2 {
+		t.Fatal("resolution calls", calls)
+	}
+	s2 := NewLookupSession()
+	s2.run = s.run
+	if _, err := s2.CommonDirectory(context.Background(), root); err != nil || calls != 3 {
+		t.Fatal(calls, err)
 	}
 }

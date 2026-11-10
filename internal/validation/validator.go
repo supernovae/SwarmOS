@@ -180,10 +180,10 @@ type ValidateOptions struct {
 // CheckCheckpointBoundary uses the validator's approved execution selection.
 // Preview resolves availability only; actual admission also probes isolation.
 func CheckCheckpointBoundary(ctx context.Context, root, base string, probe bool) (bool, error) {
-	if _, err := loadTrustedValidationSpec(root, base); err != nil {
+	if _, err := loadTrustedValidationSpec(root, base, gitcredential.LookupSessionFrom(ctx)); err != nil {
 		return false, err
 	}
-	cfg, err := harness.LoadConfigAt(root, base)
+	cfg, err := harness.LoadConfigAt(root, base, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return false, err
 	}
@@ -245,7 +245,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if !opts.CIMode && opts.Version != "" && opts.ClaimID != "" {
 		before, _ = fingerprint(ctx, worktreePath, opts)
 	}
-	spec, err := loadTrustedValidationSpec(worktreePath, opts.BaseSHA)
+	spec, err := loadTrustedValidationSpec(worktreePath, opts.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +321,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err := harness.ValidateTrackerConfig(worktreePath); err != nil {
 		return nil, fmt.Errorf("candidate tracker configuration: %w", err)
 	}
-	cfg, err := harness.LoadConfigAt(worktreePath, baseSHA)
+	cfg, err := harness.LoadConfigAt(worktreePath, baseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("load approved execution policy: %w", err)
 	}
@@ -501,8 +501,8 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	return report, nil
 }
 
-func loadTrustedValidationSpec(repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
-	spec, err := harness.LoadValidationSpecAt(repoRoot, baseSHA)
+func loadTrustedValidationSpec(repoRoot, baseSHA string, sessions ...*gitcredential.LookupSession) (*contract.ValidationSpec, error) {
+	spec, err := harness.LoadValidationSpecAt(repoRoot, baseSHA, sessions...)
 	if err != nil {
 		return nil, fmt.Errorf("%w: load validation policy at %s: %v", ErrInvalidPolicy, baseSHA, err)
 	}

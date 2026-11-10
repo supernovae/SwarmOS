@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"os"
 	"strings"
 	"time"
@@ -241,7 +242,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				approvedCfg, err := harness.LoadConfigAt(opts.RepoRoot, result.State.BaseSHA)
+				approvedCfg, err := harness.LoadConfigAt(opts.RepoRoot, result.State.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 				if err != nil {
 					return err
 				}

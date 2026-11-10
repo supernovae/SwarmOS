@@ -5,12 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
+	"github.com/supernovae/swarmos/internal/storageuse"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -76,8 +81,10 @@ func TestInspectionCommandSessionPerExecution(t *testing.T) {
 	}}
 	root := newRootCmdWithOptions(opts)
 	var seen []*sandbox.InspectionSession
+	var lookupSeen []*gitcredential.LookupSession
 	root.AddCommand(&cobra.Command{Use: "probe", RunE: func(cmd *cobra.Command, args []string) error {
 		seen = append(seen, sandbox.InspectionSessionFrom(cmd.Context()))
+		lookupSeen = append(lookupSeen, gitcredential.LookupSessionFrom(cmd.Context()))
 		return nil
 	}})
 	for range 2 {
@@ -88,6 +95,9 @@ func TestInspectionCommandSessionPerExecution(t *testing.T) {
 	}
 	if len(seen) != 2 || seen[0] == nil || seen[1] == nil || seen[0] == seen[1] {
 		t.Fatalf("commands did not each receive a fresh inspection session: %v", seen)
+	}
+	if len(lookupSeen) != 2 || lookupSeen[0] == nil || lookupSeen[1] == nil || lookupSeen[0] == lookupSeen[1] {
+		t.Fatal("lookup session not reset")
 	}
 }
 
@@ -143,5 +153,97 @@ func TestToolCapabilityOptionalFailureDryRun(t *testing.T) {
 	_, err := f.run("issue", "work", n, "--dry-run", "--format=text", "--json")
 	if err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatal(err)
+	}
+}
+
+func TestImmutableLookupCommandLifecycle(t *testing.T) {
+	f := newCLIFixture(t)
+	n := f.create(t, "agent")
+	f.must(t, "issue", "approve", strconv.Itoa(n))
+	st := f.state(t, n)
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	log := filepath.Join(dir, "reads")
+	script := `#!/bin/sh
+case "$1" in
+show) printf '%s\n' "$*" >> '` + log + `' ;;
+rev-parse) for arg; do if [ "$arg" = --git-common-dir ]; then printf 'COMMON\n' >> '` + log + `'; fi; done ;;
+esac
+exec '` + realGit + `' "$@"
+`
+	if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	opts := f.options(&RootOptions{})
+	root := newRootCmdWithOptions(opts)
+	var sessions []*gitcredential.LookupSession
+	root.AddCommand(&cobra.Command{Use: "lookup-probe", RunE: func(cmd *cobra.Command, args []string) error {
+		s := gitcredential.LookupSessionFrom(cmd.Context())
+		if s == nil {
+			t.Fatal("missing command lookup session")
+		}
+		sessions = append(sessions, s)
+		_, manager, _, err := opts.resolveLeaseManager(cmd)
+		if err != nil {
+			return err
+		}
+		if manager.LookupSession() != s {
+			t.Fatal("manager did not receive command session")
+		}
+		for range 2 {
+			if _, err := harness.LoadConfigAt(f.root, st.BaseSHA, s); err != nil {
+				return err
+			}
+			if _, err := harness.LoadValidationSpecAt(f.root, st.BaseSHA, s); err != nil {
+				return err
+			}
+			budgetState := *st
+			budgetState.Lease.ClaimedAt = time.Now()
+			budgetState.Lease.ExpiresAt = time.Now().Add(time.Hour)
+			if _, err := manager.Budget(&budgetState); err != nil {
+				return err
+			}
+		}
+		beforeScope, _ := os.ReadFile(log)
+		siblingCtx := gitcredential.WithLookupSession(context.Background(), s)
+		_, a, err := storageuse.Ensure(siblingCtx, f.root)
+		if err != nil {
+			return err
+		}
+		_, b, err := storageuse.Ensure(siblingCtx, f.root)
+		if err != nil {
+			return err
+		}
+		if a == b || a.Repository() != b.Repository() {
+			t.Fatal("storage scopes incorrectly shared ownership")
+		}
+		afterScope, _ := os.ReadFile(log)
+		if strings.Count(string(afterScope), "COMMON")-strings.Count(string(beforeScope), "COMMON") != 1 {
+			t.Fatal("sibling scopes did not share one resolution")
+		}
+		return nil
+	}})
+	for i := 1; i <= 2; i++ {
+		root.SetArgs([]string{"--root", f.root, "lookup-probe"})
+		if err := root.ExecuteContext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(raw)
+		for _, key := range []string{st.BaseSHA + ":.swarm/config.yaml", st.BaseSHA + ":.swarm/validation/required-checks.yaml"} {
+			if got := strings.Count(text, key); got != i {
+				t.Fatalf("execution %d: %s observed %d times; log=%s", i, key, got, text)
+			}
+		}
+	}
+	if sessions[0] == sessions[1] {
+		t.Fatal("commands share lookup state")
 	}
 }

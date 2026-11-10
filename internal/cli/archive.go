@@ -143,11 +143,11 @@ func resolveArchiveRun(cmd *cobra.Command, opts *RootOptions, apply bool) (*leas
 			return nil, nil, err
 		}
 	}
-	ns, err := harness.LedgerNamespaceAt(root, tip)
+	ns, err := harness.LedgerNamespaceAt(root, tip, gitcredential.LookupSessionFrom(cmd.Context()))
 	if err != nil {
 		return nil, nil, fmt.Errorf("trusted upstream config unavailable locally; fetch the default branch before preview: %w", err)
 	}
-	policy, err := harness.ArchivePolicyAt(root, tip)
+	policy, err := harness.ArchivePolicyAt(root, tip, gitcredential.LookupSessionFrom(cmd.Context()))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -156,6 +156,7 @@ func resolveArchiveRun(cmd *cobra.Command, opts *RootOptions, apply bool) (*leas
 		return nil, nil, err
 	}
 	m := lease.NewManager(tr, contract.SecurityConfig{})
+	m.SetLookupSession(gitcredential.LookupSessionFrom(cmd.Context()))
 	m.SetUpstreamRemote(remote)
 	m.SetStore(root, coordination.NewGitStoreWithLayout(root, remote, layout))
 	if opts.nowFn != nil {

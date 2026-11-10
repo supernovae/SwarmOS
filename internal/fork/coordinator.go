@@ -265,9 +265,10 @@ var Operations = []string{
 }
 
 func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor string, req lease.ForkRequest) (*lease.IssueState, string, error) {
+	ctx = gitcredential.WithLookupSession(ctx, gitcredential.NewLookupSession())
 	// The namespace routes the first state read, so it comes from the current
 	// upstream default branch, never the contributor fork or issue base.
-	ns, err := workspace.TrustedLedgerNamespace(c.RepoRoot, c.upstreamRemote())
+	ns, err := workspace.TrustedLedgerNamespace(c.RepoRoot, c.upstreamRemote(), gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, "", err
 	}
@@ -295,7 +296,7 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 	}
 	_ = workspace.FetchCommit(c.RepoRoot, c.upstreamRemote(), currentState.BaseSHA)
 
-	cfg, err := harness.LoadConfigAt(c.RepoRoot, currentState.BaseSHA)
+	cfg, err := harness.LoadConfigAt(c.RepoRoot, currentState.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, "", fmt.Errorf("load approved policy at %s: %w", currentState.BaseSHA, err)
 	}
@@ -305,6 +306,7 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 
 	actTracker := &actionTracker{Tracker: c.Tracker, actor: actor}
 	mgr := lease.NewManager(actTracker, cfg.Security)
+	mgr.SetLookupSession(gitcredential.LookupSessionFrom(ctx))
 	mgr.SetUpstreamRemote(c.upstreamRemote())
 	mgr.SetStore(c.RepoRoot, idxStore)
 	mgr.SetNowFunc(c.now)

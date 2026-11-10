@@ -3,6 +3,7 @@ package pr
 import (
 	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"strings"
 
 	"github.com/supernovae/swarmos/internal/agent"
@@ -48,7 +49,7 @@ func (s *Service) preflightRebaseReview(ctx context.Context, r *Result, opts Opt
 	if !policyReviewNeeded(r.State, rv.unit) {
 		return fmt.Errorf("plan review required:\n%s", strings.Join(s.recoveryCommands(ctx, r, true), "\n"))
 	}
-	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
+	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return err
 	}
@@ -76,11 +77,11 @@ func (s *Service) reviewRebasePlan(ctx context.Context, r *Result, owner string,
 	if err := restoreApprovedPlan(r.Worktree, st); err != nil {
 		return st, err
 	}
-	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return st, err
 	}
-	wf, err := harness.LoadWorkflowAt(s.Root, rv.unit.Workflow, st.BaseSHA)
+	wf, err := harness.LoadWorkflowAt(s.Root, rv.unit.Workflow, st.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return st, err
 	}

@@ -131,6 +131,11 @@ func writeHarnessJSON(path string, value any) error {
 // The host-side harness starts in a coordinator-owned control directory, never
 // in candidate code. Its only execution surface is the selected tool transport.
 func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt string, opts WorkerOptions, interactive bool, input io.Reader, stdout, stderr io.Writer) ([]string, string, error) {
+	guard, err := newLaunchGuard(opts.Inspections, binary)
+	if err != nil {
+		return nil, "", err
+	}
+	guard.observe, _ = ctx.Value(launchObservationKey{}).(func(string))
 	preflight := time.Now()
 	var extra []string
 	if driver == "claude" && opts.Effort != "" {
@@ -140,7 +145,6 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 	// flags inspects in full rather than reuse an under-qualified result. The
 	// cached help still names the optional session flags.
 	var inspected inspection
-	var err error
 	if len(extra) > 0 {
 		inspected.version, inspected.help, err = inspectDelegatedHarness(ctx, driver, binary, extra)
 	} else {
@@ -148,6 +152,9 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 	}
 	version, help := inspected.version, inspected.help
 	if err != nil {
+		return nil, "", err
+	}
+	if err := guard.verify("inspected", false); err != nil {
 		return nil, "", err
 	}
 	if err := checkToolExecutor(ctx, opts.BrowserProfile); err != nil {
@@ -186,7 +193,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 		prompt = FormatToolCapabilities(LaunchToolCapabilities(driver, opts.Role, true, opts.BrowserProfile, opts.ReadOnly, opts.Dependencies)) + prompt
 		if driver == "omp" {
 			command = []string{binary, "--mode", "rpc"}
-			return runOMP(ctx, binary, model, prompt, control, env, executor, interactive, input, stdout, stderr, opts.GuidanceDelivered)
+			return runOMPGuarded(ctx, guard, binary, model, prompt, control, env, executor, interactive, input, stdout, stderr, opts.GuidanceDelivered)
 		}
 		executable, err := os.Executable()
 		if err != nil {
@@ -215,7 +222,7 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 				return err
 			}
 			command = []string{binary, "serve", "--stdio"}
-			return runOpenCodeSession(ctx, binary, model, prompt, control, env, helpLists(help, "--session"), &session, interactive, input, stdout, stderr, opts.GuidanceDelivered)
+			return runOpenCodeSessionGuarded(ctx, guard, binary, model, prompt, control, env, helpLists(help, "--session"), &session, interactive, input, stdout, stderr, opts.GuidanceDelivered)
 		default:
 			return fmt.Errorf("unsupported harness %q", driver)
 		}
@@ -233,6 +240,9 @@ func RunDelegatedHarness(ctx context.Context, dir, driver, binary, model, prompt
 			}
 			turn = append(turn, "--", prompt)
 			command = append([]string{binary}, turn...)
+			if err := guard.verify("claude-turn", true); err != nil {
+				return err
+			}
 			return runNativeCommand(ctx, binary, control, env, turn, nil, stdout, stderr)
 		}, opts.GuidanceDelivered)
 	})

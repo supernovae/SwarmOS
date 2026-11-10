@@ -190,7 +190,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := harness.LoadConfigAt(e.repoRoot, p.State.BaseSHA)
+	cfg, err := harness.LoadConfigAt(e.repoRoot, p.State.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func (e *Engine) executeCheckpointPlan(ctx context.Context, opts WorkOptions) (o
 	if err != nil {
 		return nil, err
 	}
-	wf, err := harness.LoadWorkflowAt(e.repoRoot, wu.Workflow, p.State.BaseSHA)
+	wf, err := harness.LoadWorkflowAt(e.repoRoot, wu.Workflow, p.State.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}

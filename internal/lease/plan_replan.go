@@ -64,7 +64,7 @@ func recordPlanReviewTransition(st *IssueState, art contract.Artifact, advisory 
 
 // PlanReplanLimit always resolves policy from the approved base.
 func (m *Manager) PlanReplanLimit(st *IssueState) (int, error) {
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return 0, err
 	}
@@ -72,7 +72,7 @@ func (m *Manager) PlanReplanLimit(st *IssueState) (int, error) {
 }
 
 func (m *Manager) CheckPlanReplan(st *IssueState) error {
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func (m *Manager) reservePlanReplan(st *IssueState) error {
 	if err := m.CheckPlanReplan(st); err != nil {
 		return err
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return err
 	}
@@ -162,7 +162,7 @@ func (m *Manager) ResetPlanReplansAfterStage(ctx context.Context, issue int, own
 		if st.ForkRepo != "" {
 			return fmt.Errorf("fork staging cannot reset plan retries")
 		}
-		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 		if err != nil {
 			return err
 		}

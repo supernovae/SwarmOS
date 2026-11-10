@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"io"
 	"math"
 	"os"
@@ -1005,7 +1006,7 @@ func ReadRetentionSnapshot(ctx context.Context, scope RepositoryScope, remote st
 	if scope.Backend == "github" {
 		store := coordination.NewGitStoreWithRemote(scope.Root, remote)
 		if apply {
-			namespace, err := workspace.TrustedLedgerNamespace(scope.Root, remote)
+			namespace, err := workspace.TrustedLedgerNamespace(scope.Root, remote, gitcredential.LookupSessionFrom(ctx))
 			if err != nil {
 				return nil, err
 			}

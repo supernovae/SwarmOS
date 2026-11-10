@@ -211,7 +211,7 @@ func (o *RootOptions) resolveCheckpointManager(cmd *cobra.Command) (tracker.Trac
 		if len(fields) != 2 || fields[1] != "HEAD" {
 			return nil, nil, fmt.Errorf("upstream advertised default head unavailable")
 		}
-		namespace, err := harness.LedgerNamespaceAt(root, fields[0])
+		namespace, err := harness.LedgerNamespaceAt(root, fields[0], gitcredential.LookupSessionFrom(cmd.Context()))
 		if err != nil {
 			return nil, nil, fmt.Errorf("upstream default policy unavailable locally; fetch upstream before checkpoint reconciliation: %w", err)
 		}
@@ -222,6 +222,7 @@ func (o *RootOptions) resolveCheckpointManager(cmd *cobra.Command) (tracker.Trac
 		store = coordination.NewGitStoreWithLayout(root, o.effectiveUpstreamRemote(), layout)
 	}
 	m := lease.NewManager(tr, contract.SecurityConfig{})
+	m.SetLookupSession(gitcredential.LookupSessionFrom(cmd.Context()))
 	if o.nowFn != nil {
 		m.SetNowFunc(o.nowFn)
 	}

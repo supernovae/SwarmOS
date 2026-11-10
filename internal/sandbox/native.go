@@ -212,14 +212,19 @@ func runLegacyNativeCommand(ctx context.Context, binary, dir string, env, args [
 // session inspects every time. It never caches authentication, executor
 // checks or boundary canaries.
 type InspectionSession struct {
-	mu      sync.Mutex
-	entries map[inspectionKey]*inspectionEntry
+	digestMu     sync.Mutex
+	digests      map[executableStat][sha256.Size]byte
+	hashReader   func(io.Reader) ([sha256.Size]byte, error)
+	statIdentity func(os.FileInfo) (executableStat, bool)
+	mu           sync.Mutex
+	entries      map[inspectionKey]*inspectionEntry
 }
 
 type inspectionKey struct {
 	driver, path, policy string
 	size, mtime          int64
 	hash                 [sha256.Size]byte
+	stat                 executableStat
 }
 
 type inspectionEntry struct {
@@ -267,15 +272,86 @@ func InspectionPolicy(cfg *contract.SwarmConfig) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// executableIdentity names the resolved file by path, size, mtime and content.
-// A file that changes while being hashed is rejected rather than trusted.
-func executableIdentity(binary string) (inspectionKey, error) {
+// executableStat contains every field needed for safe digest reuse. Unsupported
+// stat layouts bypass the digest table rather than using a weaker identity.
+type executableStat struct {
+	device, inode                    uint64
+	size, mtime, ctimeSec, ctimeNsec int64
+	mode                             os.FileMode
+}
+
+// Stat device numbers are unsigned on Linux and signed on Darwin. Preserve
+// either representation as an opaque identity component.
+func statNumber(value reflect.Value) (uint64, bool) {
+	if !value.IsValid() {
+		return 0, false
+	}
+	if value.CanUint() {
+		return value.Uint(), true
+	}
+	if value.CanInt() {
+		return uint64(value.Int()), true
+	}
+	return 0, false
+}
+
+func completeExecutableStat(info os.FileInfo) (executableStat, bool) {
+	key := executableStat{size: info.Size(), mtime: info.ModTime().UnixNano(), mode: info.Mode()}
+	value := reflect.ValueOf(info.Sys())
+	if value.Kind() != reflect.Pointer || value.IsNil() {
+		return key, false
+	}
+	value = value.Elem()
+	if value.Kind() != reflect.Struct {
+		return key, false
+	}
+	dev, devOK := statNumber(value.FieldByName("Dev"))
+	ino, inoOK := statNumber(value.FieldByName("Ino"))
+	if !devOK || !inoOK {
+		return key, false
+	}
+	ct := value.FieldByName("Ctim")
+	if !ct.IsValid() {
+		ct = value.FieldByName("Ctimespec")
+	}
+	if !ct.IsValid() || ct.Kind() != reflect.Struct {
+		return key, false
+	}
+	sec, nsec := ct.FieldByName("Sec"), ct.FieldByName("Nsec")
+	if !sec.IsValid() || !nsec.IsValid() || !sec.CanInt() || !nsec.CanInt() {
+		return key, false
+	}
+	key.device, key.inode, key.ctimeSec, key.ctimeNsec = dev, ino, sec.Int(), nsec.Int()
+	return key, true
+}
+func hashExecutable(reader io.Reader) ([sha256.Size]byte, error) {
+	var digest [sha256.Size]byte
+	h := sha256.New()
+	if _, err := io.Copy(h, reader); err != nil {
+		return digest, err
+	}
+	copy(digest[:], h.Sum(nil))
+	return digest, nil
+}
+
+// identity re-resolves and opens the named path on every observation, including
+// cache hits. Holding digestMu also coalesces concurrent content reads.
+func (s *InspectionSession) identity(binary string, fresh bool) (inspectionKey, error) {
+	if s != nil {
+		s.digestMu.Lock()
+		defer s.digestMu.Unlock()
+	}
+	statIdentity := completeExecutableStat
+	if s != nil && s.statIdentity != nil {
+		statIdentity = s.statIdentity
+	}
 	var key inspectionKey
 	path, err := filepath.EvalSymlinks(binary)
 	if err != nil {
 		return key, fmt.Errorf("resolve inspected executable: %w", err)
 	}
-	if path, err = filepath.Abs(path); err != nil {
+	path, err = filepath.Abs(path)
+	if err != nil {
 		return key, err
 	}
 	f, err := os.Open(path)
@@ -290,11 +366,40 @@ func executableIdentity(binary string) (inspectionKey, error) {
 	if !before.Mode().IsRegular() {
 		return key, fmt.Errorf("inspected executable %s is not a regular file", filepath.Base(path))
 	}
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return key, fmt.Errorf("hash inspected executable: %w", err)
+	stat, supported := statIdentity(before)
+	namedBefore, err := os.Stat(path)
+	if err != nil {
+		return key, err
+	}
+	namedStat, namedSupported := statIdentity(namedBefore)
+	if !os.SameFile(before, namedBefore) || (supported && (!namedSupported || stat != namedStat)) {
+		return key, fmt.Errorf("executable identity mismatch before hashing")
+	}
+	var digest [sha256.Size]byte
+	cached := false
+	if s != nil && supported && !fresh {
+		digest, cached = s.digests[stat]
+	}
+	if !cached {
+		hash := hashExecutable
+		if s != nil && s.hashReader != nil {
+			hash = s.hashReader
+		}
+		digest, err = hash(f)
+		if err != nil {
+			return key, fmt.Errorf("hash inspected executable: %w", err)
+		}
 	}
 	after, err := f.Stat()
+	if err != nil {
+		return key, err
+	}
+	// Re-resolve the original name as well as checking the opened descriptor.
+	resolved, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		return key, err
+	}
+	resolved, err = filepath.Abs(resolved)
 	if err != nil {
 		return key, err
 	}
@@ -302,12 +407,59 @@ func executableIdentity(binary string) (inspectionKey, error) {
 	if err != nil {
 		return key, err
 	}
-	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !os.SameFile(after, named) {
-		return key, fmt.Errorf("inspected executable %s changed while being identified", filepath.Base(path))
+	afterStat, afterSupported := statIdentity(after)
+	namedStat, namedSupported = statIdentity(named)
+	if resolved != path || !os.SameFile(before, after) || !os.SameFile(after, named) || before.Size() != after.Size() || before.Size() != named.Size() || before.Mode() != after.Mode() || before.Mode() != named.Mode() || !before.ModTime().Equal(after.ModTime()) || !before.ModTime().Equal(named.ModTime()) || (supported && (!afterSupported || !namedSupported || stat != afterStat || stat != namedStat)) {
+		return key, fmt.Errorf("executable identity mismatch: %s changed while being identified", filepath.Base(path))
 	}
-	key.path, key.size, key.mtime = path, before.Size(), before.ModTime().UnixNano()
-	copy(key.hash[:], h.Sum(nil))
+	if s != nil && supported && !cached && !fresh {
+		if s.digests == nil {
+			s.digests = make(map[executableStat][sha256.Size]byte)
+		}
+		s.digests[stat] = digest
+	}
+	key.path, key.size, key.mtime, key.stat, key.hash = path, before.Size(), before.ModTime().UnixNano(), stat, digest
 	return key, nil
+}
+
+// launchGuard retains the identity captured before interface inspection. Each
+// process start hashes fresh bytes and compares against that same baseline.
+type launchGuard struct {
+	session  *InspectionSession
+	binary   string
+	baseline inspectionKey
+	observe  func(string)
+}
+
+// launchObservationKey is a per-run instrumentation seam. Observers execute
+// before verification and cannot suppress either verification or boundaries.
+type launchObservationKey struct{}
+
+func (g *launchGuard) verify(stage string, fresh bool) error {
+	if g != nil && g.observe != nil {
+		g.observe(stage)
+	}
+	return g.check(fresh)
+}
+func newLaunchGuard(s *InspectionSession, binary string) (*launchGuard, error) {
+	key, err := s.identity(binary, false)
+	if err != nil {
+		return nil, err
+	}
+	return &launchGuard{session: s, binary: binary, baseline: key}, nil
+}
+func (g *launchGuard) check(fresh bool) error {
+	if g == nil {
+		return nil
+	}
+	key, err := g.session.identity(g.binary, fresh)
+	if err != nil {
+		return fmt.Errorf("executable identity mismatch: %w", err)
+	}
+	if key != g.baseline {
+		return fmt.Errorf("executable identity mismatch: %s changed since inspection began", filepath.Base(g.binary))
+	}
+	return nil
 }
 
 // reuse returns a successful inspection of the same executable, driver and
@@ -326,7 +478,7 @@ func (s *InspectionSession) reuseInspection(ctx context.Context, driver, binary,
 	if s == nil {
 		return inspect(ctx)
 	}
-	key, err := executableIdentity(binary)
+	key, err := s.identity(binary, false)
 	if err != nil {
 		return inspection{}, err
 	}
@@ -353,9 +505,9 @@ func (s *InspectionSession) reuseInspection(ctx context.Context, driver, binary,
 		}
 		entry.result, entry.err = inspect(ctx)
 		if entry.err == nil {
-			if after, err := executableIdentity(binary); err != nil {
+			if after, err := s.identity(binary, false); err != nil {
 				entry.err = err
-			} else if after.path != key.path || after.size != key.size || after.mtime != key.mtime || after.hash != key.hash {
+			} else if after.path != key.path || after.size != key.size || after.mtime != key.mtime || after.hash != key.hash || after.stat != key.stat {
 				entry.err = fmt.Errorf("inspected executable %s changed during inspection", filepath.Base(key.path))
 			}
 		}
@@ -561,10 +713,18 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 	if opts.BrowserProfile && opts.ReadOnly && (opts.Role == "developer" || opts.Role == "tester") {
 		return nil, "", fmt.Errorf("codex browser transport requires a writable developer or tester workspace")
 	}
+	guard, err := newLaunchGuard(opts.Inspections, binary)
+	if err != nil {
+		return nil, "", err
+	}
+	guard.observe, _ = ctx.Value(launchObservationKey{}).(func(string))
 	preflight := time.Now()
 	version, err := opts.Inspections.InspectNativeCodex(ctx, binary, opts.InspectionPolicy)
 	if err != nil {
 		return nil, "", err
+	}
+	if err := guard.verify("inspected", false); err != nil {
+		return nil, version, err
 	}
 	if _, err := CodexAuthentication(ctx, binary); err != nil {
 		return nil, version, err
@@ -613,6 +773,9 @@ func RunNativeCodex(ctx context.Context, dir, binary, model, prompt string, opts
 		}()
 		return runFollowupTurns(ctx, prompt, "Continue the same SwarmOS task. Read .swarm/active/SYSTEM_PROMPT.md and .swarm/active/WORKUNIT.md.\n", interactive, true, stdin, stdout, func(turn string) error {
 			command = append(append([]string{binary}, args...), turn)
+			if err := guard.verify("codex-turn", true); err != nil {
+				return err
+			}
 			if err := runNativeCommand(ctx, binary, work, nativeEnv(home, true, opts.Dependencies), command[1:], nil, stdout, stderr); err != nil {
 				return fmt.Errorf("native Codex run: %w", err)
 			}

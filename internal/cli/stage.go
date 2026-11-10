@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"path/filepath"
 	"strings"
@@ -145,7 +146,7 @@ func newStageCommand(rootOpts *RootOptions, prStage bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), state.BaseSHA)
+			cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), state.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 			if err != nil {
 				return err
 			}

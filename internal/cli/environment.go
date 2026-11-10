@@ -101,7 +101,7 @@ func (o *RootOptions) runnerOptions() agent.RunnerOptions {
 }
 
 func (o *RootOptions) engineOptions() workflow.EngineOptions {
-	return workflow.EngineOptions{InspectCapabilityEntry: o.inspectCapabilityEntry, NewRunner: o.resolverRunner, LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath(), RegistryPath: o.registryPath()}
+	return workflow.EngineOptions{Lookups: o.lookups, InspectCapabilityEntry: o.inspectCapabilityEntry, NewRunner: o.resolverRunner, LookupEnv: o.lookupEnv, NodeProfilePath: o.nodeConfigPath(), RegistryPath: o.registryPath()}
 }
 
 // dependencyPolicy is the node profile's dependency cache policy for

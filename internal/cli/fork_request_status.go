@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"strconv"
 	"strings"
 
@@ -36,7 +37,7 @@ func newForkRequestStatusCmd(o *RootOptions) *cobra.Command {
 				return fmt.Errorf("request-status requires the github backend")
 			}
 			root, remote := o.resolveRepoRoot(), o.effectiveUpstreamRemote()
-			ns, err := workspace.TrustedLedgerNamespace(root, remote)
+			ns, err := workspace.TrustedLedgerNamespace(root, remote, gitcredential.LookupSessionFrom(cmd.Context()))
 			if err != nil {
 				return err
 			}

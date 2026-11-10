@@ -288,7 +288,7 @@ func (s *Service) verifyLink(pr *tracker.PullRequest, issue *tracker.Issue, st *
 	if st.BaseBranch != "" {
 		pr.BaseSHA = tip
 	}
-	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA, s.Manager.LookupSession())
 	if err != nil {
 		return nil, err
 	}
@@ -566,7 +566,7 @@ func (s *Service) withClaimForPhase(ctx context.Context, r *Result, renew bool, 
 	if st.PRNumber != r.PR.Number || (st.PRRevision != nil && st.PRRevision.RemoteHeadSHA != r.PR.HeadSHA && st.PRRevision.LocalHeadSHA != r.PR.HeadSHA) {
 		return nil, fmt.Errorf("PR coordination state changed")
 	}
-	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(s.Root, st.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -727,7 +727,7 @@ func (s *Service) Work(ctx context.Context, opts Options) (*Result, error) {
 		opts.Work.Phase = "all"
 	}
 	opts.Work.FreshPRRevision = r.State.PRRevision == nil
-	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
+	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -1089,11 +1089,11 @@ func (s *Service) Rebase(ctx context.Context, opts Options) (*Result, error) {
 // newResolver selects and preflights the developer agent from the approved
 // base's policy. Nothing here reads the PR worktree or a mid-rebase tree.
 func (s *Service) newResolver(ctx context.Context, r *Result, opts Options) (*resolver, error) {
-	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA)
+	cfg, err := harness.LoadConfigAt(s.Root, r.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
-	spec, err := harness.LoadValidationSpecAt(s.Root, r.BaseSHA)
+	spec, err := harness.LoadValidationSpecAt(s.Root, r.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}

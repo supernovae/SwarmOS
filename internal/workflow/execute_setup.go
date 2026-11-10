@@ -3,6 +3,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"strings"
 	"time"
 
@@ -87,11 +88,11 @@ func (r *workRun) loadClaimPolicy() error {
 			return fmt.Errorf("persist claim token: %w", err)
 		}
 	}
-	r.cfg, err = harness.LoadConfigAt(r.opts.RepoRoot, r.st.BaseSHA)
+	r.cfg, err = harness.LoadConfigAt(r.opts.RepoRoot, r.st.BaseSHA, gitcredential.LookupSessionFrom(r.ctx))
 	if err != nil {
 		return fmt.Errorf("load approved base config: %w", err)
 	}
-	r.wf, err = harness.LoadWorkflowAt(r.opts.RepoRoot, r.pre.WorkUnit.Workflow, r.st.BaseSHA)
+	r.wf, err = harness.LoadWorkflowAt(r.opts.RepoRoot, r.pre.WorkUnit.Workflow, r.st.BaseSHA, gitcredential.LookupSessionFrom(r.ctx))
 	if err != nil {
 		return fmt.Errorf("load approved base workflow: %w", err)
 	}

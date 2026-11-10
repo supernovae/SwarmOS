@@ -3,6 +3,7 @@ package harness
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"maps"
@@ -211,7 +212,8 @@ func TestApprovedPolicyIgnoresCandidateChanges(t *testing.T) {
 	if _, err := LoadConfig(root); err == nil {
 		t.Fatal("candidate malformed policy accepted")
 	}
-	cfg, err := LoadConfigAt(root, base)
+	session := gitcredential.NewLookupSession()
+	cfg, err := LoadConfigAt(root, base, session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,6 +225,25 @@ func TestApprovedPolicyIgnoresCandidateChanges(t *testing.T) {
 	}
 	if cfg.CommitMessage == nil || cfg.CommitMessage.Detail != "detailed" || cfg.CommitMessageDetail() != "detailed" {
 		t.Fatalf("approved detailed commit message policy lost: %+v", cfg.CommitMessage)
+	}
+	// Both candidate edits and mutations of a decoded policy leave the
+	// approved bytes in this command untouched.
+	spec, err := LoadValidationSpecAt(root, base, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalCommand := spec.RequiredChecks[0].Command
+	spec.RequiredChecks[0].Command = "candidate command"
+	if err := os.WriteFile(filepath.Join(root, ".swarm", "validation", "required-checks.yaml"), []byte("required_checks: []\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	again, err := LoadValidationSpecAt(root, base, session)
+	if err != nil || again.RequiredChecks[0].Command != originalCommand {
+		t.Fatal("candidate validation policy affected approved reads", err)
+	}
+	approvedAgain, err := LoadConfigAt(root, base, session)
+	if err != nil || !approvedAgain.Security.RequireReadyLabel {
+		t.Fatal("candidate config affected reused approved reads", err)
 	}
 	if _, err := LoadConfigAt(root, "HEAD"); err == nil {
 		t.Fatal("mutable base accepted")
@@ -1932,5 +1953,150 @@ func TestArchiveWorkflowTemplateSecurityAndSummary(t *testing.T) {
 				t.Fatal("credential logged")
 			}
 		})
+	}
+}
+
+// immutableLookupFixture counts the hardened Git runner's actual subprocesses.
+func immutableLookupFixture(t *testing.T) (string, func() int) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"config.yaml", "validation/required-checks.yaml"} {
+		var data []byte
+		if name == "config.yaml" {
+			var err error
+			data, err = embeddedTemplates.ReadFile("templates/swarm/" + name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := strings.Replace(string(data), "    binary: codex", "    binary: codex\n    args: [original]\n    env: [SAFE_VALUE=original]", 1)
+			text = strings.Replace(text, `  ready_label: "swarm:ready"`, `  ready_label: "swarm:ready"`+"\n  reviewer_agents: [codex]", 1)
+			data = []byte(text + "\nroles: {developer: codex}\n")
+		} else {
+			data = []byte("required_checks:\n  - name: focused\n    command: go test ./internal/harness\n    timeout: 1m\nprotected_paths: [policy]\n")
+		}
+		path := filepath.Join(dir, filepath.Base(name))
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := `#!/bin/sh
+printf x >> '` + dir + `/calls'
+for arg; do last="$arg"; done
+case "$last" in
+*:path-does-not-exist) exit 1 ;;
+*required-checks.yaml) cat '` + dir + `/required-checks.yaml' ;;
+*) cat '` + dir + `/config.yaml' ;;
+esac
+`
+	if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return dir, func() int {
+		data, err := os.ReadFile(filepath.Join(dir, "calls"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return len(data)
+	}
+}
+func TestImmutableLookupConfigReuse(t *testing.T) {
+	fixture, count := immutableLookupFixture(t)
+	root := t.TempDir()
+	sha := strings.Repeat("a", 40)
+	s := gitcredential.NewLookupSession()
+	first, err := LoadConfigAt(root, sha, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ac := first.Agents["codex"]
+	ac.Args[0] = "changed"
+	ac.Env[0] = "changed"
+	first.Agents["codex"] = ac
+	first.Roles["developer"] = "changed"
+	first.Profiles[0].Evidence[0] = "changed"
+	first.CommitMessage.Detail = "detailed"
+	first.Security.ReviewerAgents[0] = "changed"
+	second, err := LoadConfigAt(root, sha, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pristine, err := os.ReadFile(filepath.Join(fixture, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := decodeConfig(pristine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(second, want) || count() != 1 {
+		t.Fatalf("decoded objects shared state or raw read repeated: calls=%d", count())
+	}
+	second.Profiles[0].Evidence[0] = "also changed"
+	third, err := LoadConfigAt(root, sha, s)
+	if err != nil || !reflect.DeepEqual(third, want) {
+		t.Fatal("later object mutated", err)
+	}
+	if _, err := LoadConfigAt(root, strings.Repeat("b", 40), s); err != nil || count() != 2 {
+		t.Fatal(count(), err)
+	}
+	if _, err := LoadConfigAt(t.TempDir(), sha, s); err != nil || count() != 3 {
+		t.Fatal(count(), err)
+	}
+	// Legacy callers and independent commands observe separately.
+	for range 2 {
+		if _, err := LoadConfigAt(root, sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count() != 5 {
+		t.Fatal("nil session cached", count())
+	}
+	if _, err := LoadConfigAt(root, sha, gitcredential.NewLookupSession()); err != nil || count() != 6 {
+		t.Fatal(count(), err)
+	}
+}
+func TestImmutableLookupMutableRefs(t *testing.T) {
+	_, count := immutableLookupFixture(t)
+	root := t.TempDir()
+	s := gitcredential.NewLookupSession()
+	for _, ref := range []string{"main", "abcdef0", "-bad", strings.Repeat("G", 40)} {
+		for range 2 {
+			if _, err := LoadConfigAt(root, ref, s); err == nil {
+				t.Fatal("accepted mutable/malformed base", ref)
+			}
+		}
+	}
+	if count() != 0 {
+		t.Fatal("invalid refs invoked Git", count())
+	}
+	for range 2 {
+		if _, err := LoadConfigAt(root, strings.Repeat("a", 64), s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if count() != 2 {
+		t.Fatal("SHA-256 compatibility/cache", count())
+	}
+}
+func TestImmutableLookupValidationPolicy(t *testing.T) {
+	_, count := immutableLookupFixture(t)
+	root := t.TempDir()
+	sha := strings.Repeat("a", 40)
+	s := gitcredential.NewLookupSession()
+	first, err := LoadValidationSpecAt(root, sha, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := first.ProtectedPaths[0]
+	first.ProtectedPaths[0] = "changed"
+	first.RequiredChecks[0].Command = "changed"
+	second, err := LoadValidationSpecAt(root, sha, s)
+	if err != nil || second.ProtectedPaths[0] != original || second.RequiredChecks[0].Command == "changed" || count() != 1 {
+		t.Fatal("shared decoded validation policy", count(), err)
+	}
+	// Both policy paths are distinct keys even at the same commit.
+	if _, err := LoadConfigAt(root, sha, s); err != nil || count() != 2 {
+		t.Fatal(count(), err)
 	}
 }

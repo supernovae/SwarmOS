@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"io"
 	"maps"
 	"slices"
@@ -162,7 +163,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 				continue
 			}
 
-			approvedCfg, err := harness.LoadConfigAt(target.Path, state.BaseSHA)
+			approvedCfg, err := harness.LoadConfigAt(target.Path, state.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 			if err != nil {
 				return nil, err
 			}
@@ -268,11 +269,11 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 					return nil, err
 				}
 				if err := opts.SetupProgress.ReportSetupPhase(ctx, issue.Number, "bundle", func() error {
-					wf, err := harness.LoadWorkflowAt(target.Path, wu.Workflow, claimed.BaseSHA)
+					wf, err := harness.LoadWorkflowAt(target.Path, wu.Workflow, claimed.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 					if err != nil {
 						return err
 					}
-					return workspace.CompileHarnessBundleAt(worktree, wu, wf, claimed.Artifacts, role, claimed.EffectiveGate, claimed.BaseSHA)
+					return workspace.CompileHarnessBundleWithCapabilitiesAtSession(gitcredential.LookupSessionFrom(cmd.Context()), worktree, wu, wf, claimed.Artifacts, role, claimed.EffectiveGate, claimed.BaseSHA, nil)
 				}); err != nil {
 					return nil, err
 				}

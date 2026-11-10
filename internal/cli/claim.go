@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -116,15 +117,15 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			return fail(err)
 		}
 		if err := reporter.ReportSetupPhase(cmd.Context(), issue, "bundle", func() error {
-			wf, err := harness.LoadWorkflowAt(root, preflight.WorkUnit.Workflow, state.BaseSHA)
+			wf, err := harness.LoadWorkflowAt(root, preflight.WorkUnit.Workflow, state.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 			if err != nil {
 				return err
 			}
 			report, ok := preflight.ToolCapabilities["planner"]
 			if !ok {
-				return workspace.CompileHarnessBundleAt(path, preflight.WorkUnit, wf, state.Artifacts, "planner", state.EffectiveGate, state.BaseSHA)
+				return workspace.CompileHarnessBundleWithCapabilitiesAtSession(gitcredential.LookupSessionFrom(cmd.Context()), path, preflight.WorkUnit, wf, state.Artifacts, "planner", state.EffectiveGate, state.BaseSHA, nil)
 			}
-			return workspace.CompileHarnessBundleWithCapabilitiesAt(path, preflight.WorkUnit, wf, state.Artifacts, "planner", state.EffectiveGate, state.BaseSHA, &report)
+			return workspace.CompileHarnessBundleWithCapabilitiesAtSession(gitcredential.LookupSessionFrom(cmd.Context()), path, preflight.WorkUnit, wf, state.Artifacts, "planner", state.EffectiveGate, state.BaseSHA, &report)
 		}); err != nil {
 			return fail(err)
 		}

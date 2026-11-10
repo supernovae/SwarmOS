@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"strings"
 	"time"
 
@@ -130,7 +131,7 @@ func newIssueEditCmd(opts *RootOptions) *cobra.Command {
 		readyLabel := "swarm:ready"
 		if st != nil && st.ApprovedBy != "" {
 			// Label policy, like approval, comes from the recorded trusted base.
-			cfg, loadErr := harness.LoadConfigAt(opts.resolveRepoRoot(), st.BaseSHA)
+			cfg, loadErr := harness.LoadConfigAt(opts.resolveRepoRoot(), st.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 			if loadErr != nil {
 				return loadErr
 			}

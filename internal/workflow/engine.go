@@ -205,6 +205,7 @@ type Engine struct {
 // construction. Zero values keep the process environment and the default node
 // profile path.
 type EngineOptions struct {
+	Lookups                *gitcredential.LookupSession
 	InspectCapabilityEntry func(string) error
 	NewRunner              func(string, *contract.SwarmConfig, bool) (agent.Runner, error)
 	LookupEnv              func(string) (string, bool)
@@ -246,6 +247,7 @@ func NewEngineWithOptions(repoRoot string, tr tracker.Tracker, opts EngineOption
 		return nil, fmt.Errorf("load SwarmOS config: %w", err)
 	}
 	mgr := lease.NewManager(tr, cfg.Security)
+	mgr.SetLookupSession(opts.Lookups)
 	if err := mgr.ConfigureStore(repoRoot); err != nil {
 		return nil, fmt.Errorf("configure coordination store: %w", err)
 	}
@@ -401,7 +403,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 		state = &copyState
 	}
 	_ = workspace.FetchCommit(opts.RepoRoot, e.upstreamRemote(), state.BaseSHA)
-	cfg, err := harness.LoadConfigAt(opts.RepoRoot, state.BaseSHA)
+	cfg, err := harness.LoadConfigAt(opts.RepoRoot, state.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("load approved base config: %w", err)
 	}
@@ -426,11 +428,11 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			blockers = append(blockers, reason)
 		}
 	}
-	checks, err := harness.LoadValidationSpecAt(opts.RepoRoot, state.BaseSHA)
+	checks, err := harness.LoadValidationSpecAt(opts.RepoRoot, state.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
-	wf, err := harness.LoadWorkflowAt(opts.RepoRoot, wu.Workflow, state.BaseSHA)
+	wf, err := harness.LoadWorkflowAt(opts.RepoRoot, wu.Workflow, state.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -825,7 +827,7 @@ func (e *Engine) PrepareDecomposition(ctx context.Context, root string, n int, s
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := harness.LoadConfigAt(root, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(root, st.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -1082,10 +1084,14 @@ func compileExecutionBundle(path string, wu *contract.WorkUnit, wf *contract.Wor
 }
 
 func compileExecutionBundleWithCapabilities(path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, supplied *sandbox.ToolCapabilityReport, excludeHistory ...bool) error {
+	return compileExecutionBundleWithCapabilitiesSession(nil, path, wu, wf, st, role, prNumber, supplied, excludeHistory...)
+}
+
+func compileExecutionBundleWithCapabilitiesSession(lookups *gitcredential.LookupSession, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, supplied *sandbox.ToolCapabilityReport, excludeHistory ...bool) error {
 
 	// Refresh policy description for each role; no runtime observation is reused
 	// from an earlier command. Actual launch independently rechecks the boundary.
-	cfg, _ := harness.LoadConfigAt(path, st.BaseSHA)
+	cfg, _ := harness.LoadConfigAt(path, st.BaseSHA, lookups)
 	name := ""
 	if cfg != nil {
 		name = cfg.Roles[role]
@@ -1099,9 +1105,9 @@ func compileExecutionBundleWithCapabilities(path string, wu *contract.WorkUnit, 
 	}
 
 	if prNumber != 0 {
-		return workspace.CompilePRHarnessBundleWithCapabilitiesAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, prNumber, &report, prRevisionContext(st))
+		return workspace.CompilePRHarnessBundleWithCapabilitiesAtSession(lookups, path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, prNumber, &report, prRevisionContext(st))
 	}
-	if err := workspace.CompileHarnessBundleWithCapabilitiesAt(path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, &report); err != nil {
+	if err := workspace.CompileHarnessBundleWithCapabilitiesAtSession(lookups, path, wu, wf, st.Artifacts, role, st.EffectiveGate, st.BaseSHA, &report); err != nil {
 		return err
 	}
 	if role == "reviewer" && st.PRNumber == 0 && st.PRRevision == nil {
@@ -1754,7 +1760,7 @@ func rejectedPlanContext(st *lease.IssueState) (string, string, string) {
 func compileSetupBundleWithCapabilities(ctx context.Context, reporter *ProgressReporter, path string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, st *lease.IssueState, role string, prNumber int, report *sandbox.ToolCapabilityReport, excludeHistory ...bool) error {
 
 	return reporter.ReportSetupPhase(ctx, wu.IssueNumber, "bundle", func() error {
-		return compileExecutionBundleWithCapabilities(path, wu, wf, st, role, prNumber, report, excludeHistory...)
+		return compileExecutionBundleWithCapabilitiesSession(gitcredential.LookupSessionFrom(ctx), path, wu, wf, st, role, prNumber, report, excludeHistory...)
 	})
 }
 
@@ -1779,7 +1785,7 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 		return "", nil, lease.ErrClaimFence
 	}
 	st, source := o.State(), o.Source()
-	cfg, err := harness.LoadConfigAt(e.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(e.repoRoot, st.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return "", nil, err
 	}
@@ -1791,7 +1797,7 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 	if err != nil {
 		return "", nil, err
 	}
-	wf, err := harness.LoadWorkflowAt(e.repoRoot, wu.Workflow, st.BaseSHA)
+	wf, err := harness.LoadWorkflowAt(e.repoRoot, wu.Workflow, st.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return "", nil, err
 	}
@@ -1923,7 +1929,7 @@ func (e *Engine) CheckIssueContinuation(st *lease.IssueState, _ *contract.SwarmC
 	if st == nil || st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil || opts.ForkMode || opts.PRNumber != 0 {
 		return nil
 	}
-	cfg, configErr := harness.LoadConfigAt(e.repoRoot, st.BaseSHA)
+	cfg, configErr := harness.LoadConfigAt(e.repoRoot, st.BaseSHA, e.LeaseManager.LookupSession())
 	if configErr != nil {
 		return configErr
 	}

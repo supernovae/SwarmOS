@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"strings"
 	"time"
 
@@ -43,7 +44,7 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 	if opts.ForkMode || opts.CIMode || !reusableVersion(opts.Version) || opts.ClaimID == "" || owner == "" {
 		return nil, nil
 	}
-	if _, err := loadTrustedValidationSpec(root, opts.BaseSHA); err != nil {
+	if _, err := loadTrustedValidationSpec(root, opts.BaseSHA, gitcredential.LookupSessionFrom(ctx)); err != nil {
 		return nil, err
 	}
 	current, err := fingerprint(ctx, root, opts)
@@ -103,7 +104,7 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 			if !opts.DirectIssueReuse {
 				return nil, nil
 			}
-			cfg, err := harness.LoadConfigAt(root, opts.BaseSHA)
+			cfg, err := harness.LoadConfigAt(root, opts.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 			if err != nil {
 				return nil, nil
 			}

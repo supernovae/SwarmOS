@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"os"
 	"strings"
 
@@ -69,7 +70,7 @@ func newValidateCmd(options *RootOptions) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), baseSHA)
+		cfg, duration, err := approvedLeasePolicy(root, manager.UpstreamRemote(), baseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 		if err != nil {
 			return err
 		}

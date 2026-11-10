@@ -182,7 +182,7 @@ func diagnoseRepairTree(ctx context.Context, runner *checkRunner, report *Valida
 	}()
 	defer base.close()
 	durations := map[string]time.Duration{}
-	if spec, err := loadTrustedValidationSpec(runner.worktree, report.BaseSHA); err == nil {
+	if spec, err := loadTrustedValidationSpec(runner.worktree, report.BaseSHA, gitcredential.LookupSessionFrom(ctx)); err == nil {
 		for _, c := range spec.RequiredChecks {
 			durations[c.Name] = checkTimeout(c.Timeout)
 		}

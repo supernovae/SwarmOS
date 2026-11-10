@@ -103,7 +103,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		if err = m.checkApprovedState(ctx, n, st); err != nil {
 			return nil, err
 		}
-		cfg, e := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+		cfg, e := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 		if e != nil {
 			return nil, e
 		}
@@ -415,7 +415,7 @@ func (m *Manager) AcquirePreparedCheckpoint(ctx context.Context, n int, p *Check
 	if fresh.revision != p.revision || !sameCheckpointState(fresh.State, p.State) {
 		return nil, fmt.Errorf("%w: prepared observation changed", ErrClaimFence)
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, p.State.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, p.State.BaseSHA, m.lookups)
 	if err != nil {
 		return nil, err
 	}

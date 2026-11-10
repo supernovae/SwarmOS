@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -145,7 +146,7 @@ func (e *Engine) RunProjectPlan(ctx context.Context, opts ProjectPlanOptions) (*
 	baseSHA, _ := workspace.ResolveBaseFrom(root, e.upstreamRemote())
 	cfg := e.Config
 	if baseSHA != "" {
-		if pinnedCfg, err := harness.LoadConfigAt(root, baseSHA); err == nil {
+		if pinnedCfg, err := harness.LoadConfigAt(root, baseSHA, gitcredential.LookupSessionFrom(ctx)); err == nil {
 			cfg = pinnedCfg
 		}
 	}

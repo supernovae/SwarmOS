@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/testutil"
 	"io"
 	"os"
 	"path/filepath"
@@ -1949,5 +1951,63 @@ func TestScopeCompletionCommandErrors(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestImmutableLookupCommonDirectory(t *testing.T) {
+	dir := canonicalTemp(t)
+	common := filepath.Join(dir, "common")
+	if err := os.Mkdir(common, 0700); err != nil {
+		t.Fatal(err)
+	}
+	script := `#!/bin/sh
+printf x >> '` + dir + `/calls'
+[ -e '` + dir + `/fail' ] && exit 1
+printf '%s\n' '` + common + `'
+`
+	if err := testutil.WriteExecutable(filepath.Join(dir, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	calls := func() int { data, _ := os.ReadFile(filepath.Join(dir, "calls")); return len(data) }
+	ctx := gitcredential.WithLookupSession(context.Background(), gitcredential.NewLookupSession())
+	root := t.TempDir()
+	firstCtx, first, err := Ensure(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, second, err := Ensure(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second || first.Repository() != second.Repository() || first.Repository() == "host-unknown" || calls() != 1 {
+		t.Fatal("identity reuse or scope isolation", calls())
+	}
+	inherited, inheritedOwner, err := Ensure(firstCtx, root)
+	if err != nil || inheritedOwner != nil || FromContext(inherited) != first || calls() != 1 {
+		t.Fatal("inheritance changed", err)
+	}
+	_, _, err = Ensure(ctx, t.TempDir())
+	if err != nil || calls() != 2 {
+		t.Fatal("root separation", calls(), err)
+	}
+	_, _, err = Ensure(gitcredential.WithLookupSession(context.Background(), gitcredential.NewLookupSession()), root)
+	if err != nil || calls() != 3 {
+		t.Fatal("session separation", calls(), err)
+	}
+	failRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fail"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, failed, err := Ensure(ctx, failRoot)
+	if err != nil || failed.Repository() != "host-unknown" {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "fail")); err != nil {
+		t.Fatal(err)
+	}
+	_, retried, err := Ensure(ctx, failRoot)
+	if err != nil || retried.Repository() == "host-unknown" || calls() != 5 {
+		t.Fatal("fallback cached", calls(), err)
 	}
 }

@@ -60,7 +60,7 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 	if err != nil {
 		return nil, err
 	}
-	oldCfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	oldCfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 	if oldTree == "" || oldTree != tree || st.PolicyTreeDigest != oldTree {
 		return nil, fmt.Errorf("policy tree changed; task reapproval required")
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, target)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, target, m.lookups)
 	if err != nil {
 		return nil, err
 	}

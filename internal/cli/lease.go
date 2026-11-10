@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -44,7 +45,7 @@ func newLeaseMutationCmd(options *RootOptions, renew bool) *cobra.Command {
 			return err
 		}
 		if renew {
-			cfg, approved, loadErr := approvedLeasePolicy(options.resolveRepoRoot(), manager.UpstreamRemote(), state.BaseSHA)
+			cfg, approved, loadErr := approvedLeasePolicy(options.resolveRepoRoot(), manager.UpstreamRemote(), state.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 			if loadErr != nil {
 				return loadErr
 			}

@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Configure avoids exposing credentials in process arguments or Git config files.
@@ -245,4 +247,135 @@ type localObservationKey struct{}
 func localObservation(ctx context.Context) bool {
 	v, _ := ctx.Value(localObservationKey{}).(bool)
 	return v
+}
+
+// LookupSession owns immutable observations for one command. It must not be
+// shared across command executions. A nil session deliberately bypasses reuse.
+type LookupSession struct {
+	mu      sync.Mutex
+	entries map[lookupKey]*lookupEntry
+	run     func(context.Context, string, ...string) ([]byte, error)
+}
+type lookupKey struct {
+	root, sha, path string
+	common          bool
+}
+type lookupEntry struct {
+	done chan struct{}
+	data []byte
+	err  error
+}
+type lookupSessionKey struct{}
+
+func NewLookupSession() *LookupSession {
+	return &LookupSession{entries: make(map[lookupKey]*lookupEntry), run: Output}
+}
+func WithLookupSession(ctx context.Context, s *LookupSession) context.Context {
+	return context.WithValue(ctx, lookupSessionKey{}, s)
+}
+func LookupSessionFrom(ctx context.Context) *LookupSession {
+	if ctx == nil {
+		return nil
+	}
+	s, _ := ctx.Value(lookupSessionKey{}).(*LookupSession)
+	return s
+}
+func (s *LookupSession) output(ctx context.Context, root string, args ...string) ([]byte, error) {
+	if s != nil && s.run != nil {
+		return s.run(ctx, root, args...)
+	}
+	return Output(ctx, root, args...)
+}
+func fullSHA(sha string) bool {
+	if len(sha) != 40 {
+		return false
+	}
+	for _, c := range sha {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return false
+		}
+	}
+	return true
+}
+func (s *LookupSession) lookup(ctx context.Context, key lookupKey, load func() ([]byte, error)) ([]byte, error) {
+	if s == nil {
+		return load()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		s.mu.Lock()
+		if s.entries == nil {
+			s.entries = make(map[lookupKey]*lookupEntry)
+		}
+		entry, found := s.entries[key]
+		if !found {
+			entry = &lookupEntry{done: make(chan struct{})}
+			s.entries[key] = entry
+		}
+		s.mu.Unlock()
+		if found {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-entry.done:
+			}
+			if entry.err != nil {
+				continue
+			}
+			return bytes.Clone(entry.data), nil
+		}
+		data, err := load()
+		if err == nil {
+			err = ctx.Err()
+		}
+		entry.data, entry.err = bytes.Clone(data), err
+		s.mu.Lock()
+		if err != nil {
+			delete(s.entries, key)
+		}
+		close(entry.done)
+		s.mu.Unlock()
+		return bytes.Clone(entry.data), err
+	}
+}
+
+// ReadFile reads exactly one Git object path. Only full SHA-1 object names
+// qualify for reuse; refs and other object formats are observed every time.
+func (s *LookupSession) ReadFile(ctx context.Context, root, sha, path string) ([]byte, error) {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	load := func() ([]byte, error) { return s.output(ctx, absolute, "show", sha+":"+path) }
+	if !fullSHA(sha) {
+		return load()
+	}
+	return s.lookup(ctx, lookupKey{root: absolute, sha: sha, path: path}, load)
+}
+
+// CommonDirectory resolves a canonical common directory. Failures are retried
+// on the next observation, so callers can retain their host-unknown fallback.
+func (s *LookupSession) CommonDirectory(ctx context.Context, root string) (string, error) {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	data, err := s.lookup(ctx, lookupKey{root: absolute, common: true}, func() ([]byte, error) {
+		out, err := s.output(ctx, absolute, "rev-parse", "--path-format=absolute", "--git-common-dir")
+		if err != nil {
+			return nil, err
+		}
+		common := strings.TrimSpace(string(out))
+		if !filepath.IsAbs(common) {
+			return nil, fmt.Errorf("git common directory is not absolute")
+		}
+		common, err = filepath.EvalSymlinks(common)
+		if err != nil {
+			return nil, err
+		}
+		return []byte(filepath.Clean(common)), nil
+	})
+	return string(data), err
 }

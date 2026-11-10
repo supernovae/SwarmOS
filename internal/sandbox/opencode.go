@@ -32,6 +32,10 @@ func runOpenCode(ctx context.Context, binary, model, prompt, control string, env
 // or reads the user's other OpenCode sessions. Any telemetry failure falls back
 // to the untracked --continue flow.
 func runOpenCodeSession(ctx context.Context, binary, model, prompt, control string, env []string, sessionFlag bool, session *HarnessSession, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) (resultErr error) {
+	return runOpenCodeSessionGuarded(ctx, nil, binary, model, prompt, control, env, sessionFlag, session, interactive, input, stdout, stderr, guidance...)
+}
+
+func runOpenCodeSessionGuarded(ctx context.Context, guard *launchGuard, binary, model, prompt, control string, env []string, sessionFlag bool, session *HarnessSession, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) (resultErr error) {
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return err
@@ -51,7 +55,10 @@ func runOpenCodeSession(ctx context.Context, binary, model, prompt, control stri
 	}
 	done := make(chan error, 1)
 	go func() {
-		err := runNativeCommand(childCtx, binary, control, env, []string{"serve", "--stdio", "--hostname", "127.0.0.1", "--port", "0"}, serverInput, output, stderr)
+		err := guard.verify("opencode-server", true)
+		if err == nil {
+			err = runNativeCommand(childCtx, binary, control, env, []string{"serve", "--stdio", "--hostname", "127.0.0.1", "--port", "0"}, serverInput, output, stderr)
+		}
 		serverInput.Close()
 		output.Close()
 		done <- err
@@ -86,6 +93,9 @@ func runOpenCodeSession(ctx context.Context, binary, model, prompt, control stri
 	api := func(ctx context.Context, operation string, args ...string) ([]byte, error) {
 		var output, diagnostics process.Output
 		command := append([]string{"api", "--server", started.URL, operation}, args...)
+		if err := guard.verify("opencode-api:"+operation, true); err != nil {
+			return nil, err
+		}
 		if err := runNativeCommand(ctx, binary, control, env, command, nil, &output, &diagnostics); err != nil {
 			return nil, fmt.Errorf("OpenCode %s: %w: %s", operation, err, diagnostics.String())
 		}
@@ -93,10 +103,19 @@ func runOpenCodeSession(ctx context.Context, binary, model, prompt, control stri
 	}
 	// Telemetry calls read through a strict cap so a truncated export is never
 	// mistaken for a complete one.
+	var guardErr error
+	defer func() { resultErr = errors.Join(resultErr, guardErr) }()
 	apiTo := func(ctx context.Context, operation string, args ...string) ([]byte, bool) {
 		output := &cappedBuffer{limit: telemetryRecordsMax}
 		var diagnostics process.Output
 		command := append([]string{"api", "--server", started.URL, operation}, args...)
+		if guardErr != nil {
+			return nil, false
+		}
+		if err := guard.verify("opencode-api:"+operation, true); err != nil {
+			guardErr = err
+			return nil, false
+		}
 		if runNativeCommand(ctx, binary, control, env, command, nil, output, &diagnostics) != nil || output.overflow {
 			return nil, false
 		}
@@ -152,6 +171,9 @@ func runOpenCodeSession(ctx context.Context, binary, model, prompt, control stri
 	if session != nil && sessionFlag {
 		sessionID = createOpenCodeSession(ctx, apiTo, control)
 	}
+	if guardErr != nil {
+		return guardErr
+	}
 	if sessionID != "" {
 		session.SessionIDs = []string{sessionID}
 		args = append(args, "--session", sessionID)
@@ -167,6 +189,9 @@ func runOpenCodeSession(ctx context.Context, binary, model, prompt, control stri
 	}
 	for {
 		turn := append(append([]string(nil), args...), "--", prompt)
+		if err := guard.verify("opencode-run", true); err != nil {
+			return err
+		}
 		if err := runNativeCommand(ctx, binary, control, env, turn, nil, stdout, stderr); err != nil {
 			return err
 		}

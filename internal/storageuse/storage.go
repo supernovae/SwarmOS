@@ -580,18 +580,9 @@ func Ensure(ctx context.Context, repository string) (context.Context, *Scope, er
 		identity = repository
 	}
 	if repository != "" && identity == "host-unknown" {
-		cmd, _, err := gitcredential.Command(ctx, repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
-		if err == nil {
-			if out, err := cmd.Output(); err == nil {
-				common := strings.TrimSpace(string(out))
-				if filepath.IsAbs(common) {
-					if resolved, err := filepath.EvalSymlinks(common); err == nil {
-						common = resolved
-					}
-					sum := sha256.Sum256([]byte(filepath.Clean(common)))
-					identity = hex.EncodeToString(sum[:16])
-				}
-			}
+		if common, err := gitcredential.LookupSessionFrom(ctx).CommonDirectory(ctx, repository); err == nil {
+			sum := sha256.Sum256([]byte(common))
+			identity = hex.EncodeToString(sum[:16])
 		}
 	}
 	s := &Scope{repository: identity}

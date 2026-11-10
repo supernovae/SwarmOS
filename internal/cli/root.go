@@ -29,6 +29,7 @@ import (
 )
 
 type RootOptions struct {
+	lookups                *gitcredential.LookupSession
 	inspectCapabilityEntry func(string) error
 	maintenanceHook        func(*cobra.Command, bool)
 	progressReporter       func(context.Context, func(workflow.ProgressEvent)) *workflow.ProgressReporter
@@ -78,6 +79,8 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		return err
 	})
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		opts.lookups = gitcredential.NewLookupSession()
+		cmd.SetContext(gitcredential.WithLookupSession(cmd.Context(), opts.lookups))
 		rerun := cmd.CommandPath()
 		for _, arg := range args {
 			if _, err := strconv.Atoi(arg); err == nil {
@@ -287,9 +290,9 @@ func (o *RootOptions) verifyForkRemote(ctx context.Context, root string, tr trac
 	}
 	return "", "", fmt.Errorf("tracker %s does not support GitHub fork verification", tr.BackendName())
 }
-func loadTrustedUpstreamConfig(root, upstreamRemote string) (*contract.SwarmConfig, error) {
+func loadTrustedUpstreamConfig(root, upstreamRemote string, sessions ...*gitcredential.LookupSession) (*contract.SwarmConfig, error) {
 	if baseSHA, err := workspace.ResolveBaseFrom(root, upstreamRemote); err == nil && baseSHA != "" {
-		if cfg, loadErr := harness.LoadConfigAt(root, baseSHA); loadErr == nil && cfg != nil {
+		if cfg, loadErr := harness.LoadConfigAt(root, baseSHA, sessions...); loadErr == nil && cfg != nil {
 			return cfg, nil
 		}
 	}
@@ -425,12 +428,12 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		cfg, err := loadTrustedUpstreamConfig(root, o.effectiveUpstreamRemote())
+		cfg, err := loadTrustedUpstreamConfig(root, o.effectiveUpstreamRemote(), o.lookups)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		// Only the upstream default branch selects the ledger namespace.
-		ns, err := workspace.TrustedLedgerNamespace(root, o.effectiveUpstreamRemote())
+		ns, err := workspace.TrustedLedgerNamespace(root, o.effectiveUpstreamRemote(), gitcredential.LookupSessionFrom(cmd.Context()))
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("configure authoritative state store: %w", err)
 		}
@@ -440,6 +443,7 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 		}
 		store := coordination.NewGitStoreWithLayout(root, o.effectiveUpstreamRemote(), layout)
 		mgr := lease.NewManager(tr, cfg.Security)
+		mgr.SetLookupSession(gitcredential.LookupSessionFrom(cmd.Context()))
 		if o.nowFn != nil {
 			mgr.SetNowFunc(o.nowFn)
 		}
@@ -464,6 +468,7 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 		return nil, nil, nil, fmt.Errorf("missing .swarm/config.yaml; run swarm repo init")
 	}
 	mgr := lease.NewManager(tr, cfg.Security)
+	mgr.SetLookupSession(gitcredential.LookupSessionFrom(cmd.Context()))
 	if o.nowFn != nil {
 		mgr.SetNowFunc(o.nowFn)
 	}

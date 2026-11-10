@@ -777,8 +777,13 @@ func samePath(a, b string) bool {
 	return filepath.Clean(aAbs) == filepath.Clean(bAbs)
 }
 
-func showHarnessFile(worktreePath, baseSHA, path string) (string, error) {
-	out, err := gitOutput(worktreePath, "show", baseSHA+":"+path)
+func showHarnessFile(worktreePath, baseSHA, path string, sessions ...*gitcredential.LookupSession) (string, error) {
+	var lookups *gitcredential.LookupSession
+	if len(sessions) > 0 {
+		lookups = sessions[0]
+	}
+	data, err := lookups.ReadFile(context.Background(), worktreePath, baseSHA, path)
+	out := string(data)
 	if err != nil {
 		return "", fmt.Errorf("load approved harness file %q: %w", path, err)
 	}
@@ -794,27 +799,31 @@ func CompileHarnessBundleAt(worktreePath string, wu *contract.WorkUnit, wf *cont
 // CompileHarnessBundleWithCapabilitiesAt accepts observations supplied by the
 // coordinator. Missing observations remain not probed; Markdown grants nothing.
 func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, report *sandbox.ToolCapabilityReport, prReview ...bool) error {
+	return CompileHarnessBundleWithCapabilitiesAtSession(nil, worktreePath, wu, wf, artifacts, role, effectiveGate, baseSHA, report, prReview...)
+}
+
+func CompileHarnessBundleWithCapabilitiesAtSession(lookups *gitcredential.LookupSession, worktreePath string, wu *contract.WorkUnit, wf *contract.WorkflowSpec, artifacts []contract.Artifact, role string, effectiveGate contract.GateMode, baseSHA string, report *sandbox.ToolCapabilityReport, prReview ...bool) error {
 
 	if role == "" {
 		role = "planner"
 	}
-	rolePrompt, err := harness.LoadRolePromptAt(worktreePath, role, baseSHA)
+	rolePrompt, err := harness.LoadRolePromptAt(worktreePath, role, baseSHA, lookups)
 	if err != nil {
 		return err
 	}
-	projectDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/project.md")
+	projectDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/project.md", lookups)
 	if err != nil {
 		return err
 	}
-	archDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/architecture.md")
+	archDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/architecture.md", lookups)
 	if err != nil {
 		return err
 	}
-	convDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/conventions.md")
+	convDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/conventions.md", lookups)
 	if err != nil {
 		return err
 	}
-	validationDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/validation/required-checks.yaml")
+	validationDoc, err := showHarnessFile(worktreePath, baseSHA, ".swarm/validation/required-checks.yaml", lookups)
 	if err != nil {
 		return err
 	}
@@ -822,13 +831,13 @@ func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.Wo
 	if report != nil {
 		guidance.capabilities = sandbox.FormatToolCapabilities(*report)
 	}
-	if content, optErr := showHarnessFile(worktreePath, baseSHA, ".swarm/goals.md"); optErr == nil && strings.TrimSpace(content) != "" {
+	if content, optErr := showHarnessFile(worktreePath, baseSHA, ".swarm/goals.md", lookups); optErr == nil && strings.TrimSpace(content) != "" {
 		guidance.policy = append(guidance.policy, strings.TrimSpace(content))
 	}
 	// SKILLS.md documents the swarm command lifecycle for interactive sessions
 	// and maintainers. Headless roles never run swarm, so it is indexed with an
 	// approved copy instead of being inlined into every role prompt.
-	if content, optErr := showHarnessFile(worktreePath, baseSHA, ".swarm/SKILLS.md"); optErr == nil && strings.TrimSpace(content) != "" {
+	if content, optErr := showHarnessFile(worktreePath, baseSHA, ".swarm/SKILLS.md", lookups); optErr == nil && strings.TrimSpace(content) != "" {
 		manual, err := parseGuidanceSkill(".swarm/SKILLS.md", content)
 		if err != nil {
 			return err
@@ -843,7 +852,7 @@ func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.Wo
 		return err
 	}
 	for _, f := range rules {
-		content, err := showHarnessFile(worktreePath, baseSHA, f)
+		content, err := showHarnessFile(worktreePath, baseSHA, f, lookups)
 		if err != nil {
 			return err
 		}
@@ -856,7 +865,7 @@ func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.Wo
 		return err
 	}
 	for _, f := range skills {
-		content, err := showHarnessFile(worktreePath, baseSHA, f)
+		content, err := showHarnessFile(worktreePath, baseSHA, f, lookups)
 		if err != nil {
 			return err
 		}
@@ -867,7 +876,7 @@ func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.Wo
 		guidance.skills = append(guidance.skills, skill)
 	}
 	var budgetDoc string
-	cfg, cfgErr := harness.LoadConfigAt(worktreePath, baseSHA)
+	cfg, cfgErr := harness.LoadConfigAt(worktreePath, baseSHA, lookups)
 	if cfgErr != nil {
 		// Only an absent config is compatible with legacy non-planner fixtures.
 		files, listErr := gitOutput(worktreePath, "ls-tree", "--name-only", baseSHA, "--", ".swarm/config.yaml")
@@ -881,7 +890,7 @@ func CompileHarnessBundleWithCapabilitiesAt(worktreePath string, wu *contract.Wo
 		}
 
 		if profile := contract.SelectProfile(wu, cfg.Profiles); profile != nil {
-			variant, err := harness.LoadPromptVariantAt(worktreePath, role, profile.PromptVariant, baseSHA)
+			variant, err := harness.LoadPromptVariantAt(worktreePath, role, profile.PromptVariant, baseSHA, lookups)
 			if err != nil {
 				return err
 			}

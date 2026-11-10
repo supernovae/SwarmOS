@@ -54,7 +54,7 @@ func (m *Manager) Budget(st *IssueState) (*ClaimBudget, error) {
 		}
 		return &b, nil
 	}
-	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+	cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 	if err != nil {
 		return nil, fmt.Errorf("load approved budget policy: %w", err)
 	}

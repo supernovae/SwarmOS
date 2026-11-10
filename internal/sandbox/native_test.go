@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1183,5 +1184,421 @@ func TestGoTrimpathCacheReuse(t *testing.T) {
 				t.Fatalf("unexpected cache reuse: trimpath=%v added=%d", trim, added)
 			}
 		}
+	}
+}
+
+func TestInspectionHashReuse(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "harness")
+	if err := testutil.WriteExecutable(binary, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := completeExecutableStat(info); !ok {
+		t.Skip("complete file identity unavailable; uncached fallback")
+	}
+	s := NewInspectionSession()
+	hashes := 0
+	s.hashReader = func(r io.Reader) ([32]byte, error) { hashes++; return hashExecutable(r) }
+	guard, err := newLaunchGuard(s, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspections := 0
+	inspect := func(context.Context) (string, error) { inspections++; return "qualified", nil }
+	for range 4 {
+		if _, err := s.reuse(context.Background(), "omp", binary, "policy", inspect); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if hashes != 1 || inspections != 1 {
+		t.Fatalf("hashes=%d inspections=%d; want 1 each", hashes, inspections)
+	}
+	if err := guard.check(true); err != nil || hashes != 2 {
+		t.Fatal("launch did not hash fresh bytes", hashes, err)
+	}
+	if err := testutil.WriteExecutable(binary, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.reuse(context.Background(), "omp", binary, "policy", inspect); err != nil || hashes != 3 || inspections != 2 {
+		t.Fatal("changed file was not rehashed/inspected", hashes, inspections, err)
+	}
+	if err := guard.check(true); err == nil || hashes != 4 {
+		t.Fatal("launch accepted replacement", hashes, err)
+	}
+}
+
+func TestInspectionHashAdversarial(t *testing.T) {
+	for _, mode := range []string{"inplace-restored-mtime", "inode-replacement", "symlink", "disappearance", "nonregular", "during-hash", "failed-hash", "concurrent", "unsupported-stat"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			binary := filepath.Join(dir, "harness")
+			original := []byte("#!/bin/sh\nexit 0\n")
+			if err := testutil.WriteExecutable(binary, original, 0700); err != nil {
+				t.Fatal(err)
+			}
+			s := NewInspectionSession()
+			hashes := 0
+			s.hashReader = func(r io.Reader) ([32]byte, error) { hashes++; return hashExecutable(r) }
+			if mode == "unsupported-stat" {
+				s.statIdentity = func(os.FileInfo) (executableStat, bool) { return executableStat{}, false }
+			}
+			if mode == "failed-hash" {
+				s.hashReader = func(r io.Reader) ([32]byte, error) {
+					hashes++
+					if hashes == 1 {
+						return [32]byte{}, errors.New("read failure")
+					}
+					return hashExecutable(r)
+				}
+				if _, err := s.identity(binary, false); err == nil {
+					t.Fatal("accepted hash failure")
+				}
+				if _, err := s.identity(binary, false); err != nil || hashes != 2 {
+					t.Fatal("failure cached", hashes, err)
+				}
+				return
+			}
+			if mode == "during-hash" {
+				s.hashReader = func(r io.Reader) ([32]byte, error) {
+					hashes++
+					data, err := hashExecutable(r)
+					if err != nil {
+						return data, err
+					}
+					return data, os.WriteFile(binary, []byte("#!/bin/sh\nexit 8\n# changed\n"), 0700)
+				}
+				if _, err := s.identity(binary, false); err == nil {
+					t.Fatal("accepted file mutated during hashing")
+				}
+				return
+			}
+			first, err := s.identity(binary, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(binary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "inplace-restored-mtime":
+				if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 7\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(binary, info.ModTime(), info.ModTime()); err != nil {
+					t.Fatal(err)
+				}
+			case "inode-replacement":
+				other := filepath.Join(dir, "new")
+				if err := testutil.WriteExecutable(other, []byte("#!/bin/sh\nexit 7\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(other, info.ModTime(), info.ModTime()); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(other, binary); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				other := filepath.Join(dir, "new")
+				if err := testutil.WriteExecutable(other, original, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(binary); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(other, binary); err != nil {
+					t.Fatal(err)
+				}
+			case "disappearance", "nonregular":
+				if err := os.Remove(binary); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "nonregular" {
+					if err := os.Mkdir(binary, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := s.identity(binary, false); err == nil {
+					t.Fatal("accepted absent/nonregular file")
+				}
+				return
+			case "concurrent":
+				var wg sync.WaitGroup
+				errs := make(chan error, 16)
+				for range 16 {
+					wg.Add(1)
+					go func() { defer wg.Done(); _, err := s.identity(binary, false); errs <- err }()
+				}
+				wg.Wait()
+				close(errs)
+				for err := range errs {
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, ok := completeExecutableStat(info); ok && hashes != 1 {
+					t.Fatal("concurrent content reads", hashes)
+				}
+				return
+			case "unsupported-stat":
+				if _, err := s.identity(binary, false); err != nil || hashes != 2 || len(s.digests) != 0 {
+					t.Fatal("unsafe fallback reuse", hashes, err)
+				}
+				return
+			}
+			after, err := s.identity(binary, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after == first || hashes != 2 {
+				t.Fatal("identity change reused digest", mode, hashes)
+			}
+		})
+	}
+}
+
+// inspectionLaunchFixture implements the existing local interface/protocol
+// fixtures. It never contacts a model or runs model-selected tools.
+func inspectionLaunchFixture(t *testing.T, driver string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	binary := filepath.Join(dir, driver)
+	marker := filepath.Join(dir, "replacement-ran")
+	version := map[string]string{"codex": "codex-cli 0.163.0", "claude": "2.1.311 (Claude Code)", "omp": "omp/18.12.6", "opencode": "opencode v2.1.2"}[driver]
+	script := `#!/bin/sh
+flags='--ignore-user-config --ignore-rules --ephemeral --skip-git-repo-check --restricted --strict-mcp-config --tools --settings --permission-mode --effort --mode --no-tools --no-extensions --no-rules --config --standalone --server --continue --model --agent --format --title --session'
+case "$1" in
+--version) echo '` + version + `'; exit ;;
+--help) echo "$flags"; exit ;;
+exec) echo "$flags"; exit ;;
+auth) echo '{"loggedIn":true,"authMethod":"fixture"}'; exit ;;
+login) echo 'Logged in using ChatGPT'; exit ;;
+run) if [ "$2" = --help ]; then echo "$flags"; exit; fi ;;
+esac
+for arg; do if [ "$arg" = swarm-canary ]; then printf SWARM_NATIVE_BOUNDARY_OK; exit; fi; done
+case "$1" in
+serve) echo '{"url":"http://127.0.0.1:12345"}'; cat >/dev/null ;;
+api) case "$4" in
+ mcp.list) echo '{"data":[{"name":"swarm","status":{"status":"connected"}}]}' ;;
+ agent.get) echo '{"data":{"id":"swarm","permissions":[{"Action":"*","Resource":"*","Effect":"deny"},{"Action":"swarm_swarm_*","Resource":"*","Effect":"allow"}]}}' ;;
+ session.create) printf '{"data":{"id":"ses_RUN","directory":"%s"}}\n' "$PWD" ;;
+ session.messages) echo '{"data":[]}' ;;
+ esac ;;
+--mode)
+ echo '{"type":"ready"}'
+ turn=1
+ while IFS= read -r frame; do
+ case "$frame" in
+ *set_host_tools*) echo '{"type":"response","id":"swarm-tools","success":true,"data":{"toolNames":["swarm_read","swarm_write","swarm_edit","swarm_shell"]}}' ;;
+ *get_state*) echo '{"type":"response","id":"swarm-inspect","success":true,"data":{"dumpTools":[{"name":"swarm_read"},{"name":"swarm_write"},{"name":"swarm_edit"},{"name":"swarm_shell"}]}}' ;;
+ *'"type":"prompt"'*) printf '{"type":"prompt_result","id":"turn-%s","agentInvoked":true,"status":"completed","sessionSettled":true}\n' "$turn"; turn=$((turn+1)) ;;
+ esac
+ done ;;
+esac
+`
+	if err := testutil.WriteExecutable(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return binary, marker
+}
+
+func TestInspectionLaunchHashFresh(t *testing.T) {
+	// All instrumentation is run-local. The real Run entry points and mandatory
+	// boundary checks execute unchanged before the relevant observation hook.
+	for _, driver := range []string{"codex", "claude", "omp", "opencode"} {
+		t.Run(driver, func(t *testing.T) {
+			type launchCase struct {
+				name, stage                           string
+				nilSession, effort, success, followup bool
+			}
+			cases := []launchCase{
+				{name: "after-inspection", stage: "inspected"},
+				{name: "nil_session", stage: "inspected", nilSession: true},
+			}
+			launchStage := map[string]string{"codex": "codex-turn", "claude": "claude-turn", "omp": "omp-start", "opencode": "opencode-server"}[driver]
+			cases = append(cases, launchCase{name: "during-preparation", stage: launchStage}, launchCase{name: "unchanged", success: true}, launchCase{name: "unchanged-followups", success: true, followup: true})
+			if driver == "claude" {
+				cases = append(cases, launchCase{name: "claude_effort", stage: "inspected", effort: true}, launchCase{name: "nil_session_effort", stage: "inspected", nilSession: true, effort: true})
+			}
+			if driver != "omp" {
+				cases = append(cases, launchCase{name: "followup", stage: map[string]string{"codex": "codex-turn", "claude": "claude-turn", "opencode": "opencode-run"}[driver], followup: true})
+			}
+			if driver == "opencode" {
+				for _, stage := range []string{"opencode-api:mcp.list", "opencode-api:session.create", "opencode-api:session.messages", "opencode-run"} {
+					cases = append(cases, launchCase{name: stage, stage: stage})
+				}
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					isolateRuntimeControl(t)
+					if driver == "codex" {
+						requireLinuxInspection(t)
+					}
+					if tc.stage != "inspected" {
+						requireLoopbackCanary(t)
+						if driver != "codex" {
+							if err := checkToolExecutor(context.Background(), false); err != nil {
+								t.Skipf("required executor boundary unavailable: %v", err)
+							}
+						}
+					}
+					binary, marker := inspectionLaunchFixture(t, driver)
+					session := NewInspectionSession()
+					hashes := 0
+					session.hashReader = func(r io.Reader) ([32]byte, error) { hashes++; return hashExecutable(r) }
+					opts := WorkerOptions{Role: "developer", Inspections: session}
+					if tc.nilSession {
+						opts.Inspections = nil
+					}
+					if tc.effort {
+						opts.Effort = "high"
+					}
+					var starts atomic.Int64
+					stageCalls := 0
+					swapped := false
+					ctx := context.WithValue(context.Background(), launchObservationKey{}, func(stage string) {
+						if stage != "inspected" {
+							starts.Add(1)
+						}
+						if stage != tc.stage || tc.success {
+							return
+						}
+						stageCalls++
+						if tc.followup && stageCalls < 2 {
+							return
+						}
+						swapped = true
+						replacement := []byte("#!/bin/sh\nprintf ran > '" + marker + "'\nexit 0\n")
+						if err := testutil.WriteExecutable(binary, replacement, 0700); err != nil {
+							t.Fatal(err)
+						}
+					})
+					ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+					defer cancel()
+					var err error
+					input := strings.NewReader("follow up\n\n")
+					if driver == "codex" {
+						_, _, err = RunNativeCodex(ctx, t.TempDir(), binary, "", "task", opts, tc.followup, input, io.Discard, io.Discard)
+					} else {
+						_, _, err = RunDelegatedHarness(ctx, t.TempDir(), driver, binary, "", "task", opts, tc.followup, input, io.Discard, io.Discard)
+					}
+					if tc.success {
+						if err != nil {
+							t.Fatal("unchanged launch failed", err)
+						}
+						if int64(hashes) != 1+starts.Load() {
+							t.Fatalf("hashes=%d starts=%d; each start must freshly hash", hashes, starts.Load())
+						}
+					} else {
+						if !swapped || err == nil || !strings.Contains(err.Error(), "executable identity mismatch") {
+							t.Fatalf("swap=%v; expected identity mismatch, got %v", swapped, err)
+						}
+						if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+							t.Fatal("replacement executed", statErr)
+						}
+					}
+				})
+			}
+		})
+	}
+	t.Run("claude_effort_during_inspection", func(t *testing.T) {
+		for _, nilSession := range []bool{false, true} {
+			t.Run(fmt.Sprint(nilSession), func(t *testing.T) {
+				isolateRuntimeControl(t)
+				binary, marker := inspectionLaunchFixture(t, "claude")
+				data, err := os.ReadFile(binary)
+				if err != nil {
+					t.Fatal(err)
+				}
+				replacement := filepath.Join(filepath.Dir(binary), "replacement")
+				if err := testutil.WriteExecutable(replacement, []byte("#!/bin/sh\nprintf ran > '"+marker+"'\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				changed := strings.Replace(string(data), "--help) echo", "--help) mv '"+replacement+"' '"+binary+"'; echo", 1)
+				if err := testutil.WriteExecutable(binary, []byte(changed), 0700); err != nil {
+					t.Fatal(err)
+				}
+				opts := WorkerOptions{Effort: "high", Inspections: NewInspectionSession()}
+				if nilSession {
+					opts.Inspections = nil
+				}
+				_, _, err = RunDelegatedHarness(context.Background(), t.TempDir(), "claude", binary, "", "task", opts, false, nil, io.Discard, io.Discard)
+				if err == nil || !strings.Contains(err.Error(), "executable identity mismatch") {
+					t.Fatal("baseline captured after effort inspection", err)
+				}
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatal("replacement executed", err)
+				}
+			})
+		}
+	})
+}
+
+func TestInspectionLaunchProtocolFixtures(t *testing.T) {
+	for _, driver := range []string{"omp", "opencode"} {
+		t.Run(driver, func(t *testing.T) {
+			isolateRuntimeControl(t)
+			binary, _ := inspectionLaunchFixture(t, driver)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			control := t.TempDir()
+			env := nativeEnv(control, false, Dependencies{})
+			var err error
+			if driver == "omp" {
+				err = runOMP(ctx, binary, "", "task", control, env, ToolExecutor{Work: t.TempDir()}, true, strings.NewReader("follow up\n\n"), io.Discard, io.Discard)
+			} else {
+				session := &HarnessSession{}
+				err = runOpenCodeSession(ctx, binary, "", "task", control, env, true, session, true, strings.NewReader("follow up\n\n"), io.Discard, io.Discard)
+				if len(session.SessionIDs) != 1 || len(session.Records) == 0 {
+					t.Fatal("session telemetry fixture failed", session)
+				}
+			}
+			if err != nil {
+				t.Fatal("protocol fixture failed", err)
+			}
+		})
+	}
+}
+
+type inspectionStatFixture struct {
+	os.FileInfo
+	sys any
+}
+
+func (f inspectionStatFixture) Sys() any { return f.sys }
+
+func TestInspectionStatLayouts(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "binary")
+	if err := os.WriteFile(file, []byte("binary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timestamp := struct{ Sec, Nsec int64 }{123, 456}
+	layouts := []any{
+		&struct {
+			Dev, Ino uint64
+			Ctim     struct{ Sec, Nsec int64 }
+		}{7, 8, timestamp},
+		&struct {
+			Dev       int32
+			Ino       uint64
+			Ctimespec struct{ Sec, Nsec int64 }
+		}{7, 8, timestamp},
+	}
+	for _, layout := range layouts {
+		identity, ok := completeExecutableStat(inspectionStatFixture{info, layout})
+		if !ok || identity.device != 7 || identity.inode != 8 || identity.ctimeSec != 123 || identity.ctimeNsec != 456 {
+			t.Fatalf("incomplete stat identity for %T: %+v %v", layout, identity, ok)
+		}
+	}
+	if _, ok := completeExecutableStat(inspectionStatFixture{info, &struct{ Dev, Ino uint64 }{7, 8}}); ok {
+		t.Fatal("accepted stat without ctime")
 	}
 }

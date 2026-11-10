@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/lease"
 	"io"
 	"os"
@@ -151,7 +152,7 @@ func newIssueCmd(rootOpts *RootOptions) *cobra.Command {
 				if inspectErr != nil {
 					return fmt.Errorf("%w; inspect WorkUnit: %v", err, inspectErr)
 				}
-				cfg, inspectErr := harness.LoadConfigAt(rootOpts.resolveRepoRoot(), state.BaseSHA)
+				cfg, inspectErr := harness.LoadConfigAt(rootOpts.resolveRepoRoot(), state.BaseSHA, gitcredential.LookupSessionFrom(cmd.Context()))
 				if inspectErr != nil {
 					return fmt.Errorf("%w; inspect approved policy: %v", err, inspectErr)
 				}

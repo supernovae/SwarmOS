@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 
 	"github.com/supernovae/swarmos/internal/harness"
 )
@@ -10,12 +11,12 @@ import (
 // advertised default branch. Task worktrees, candidate commits, local
 // configuration, and contributor forks never select the namespace, and a
 // missing or unreadable upstream is an error rather than a fallback.
-func TrustedLedgerNamespace(repoRoot, upstreamRemote string) (string, error) {
+func TrustedLedgerNamespace(repoRoot, upstreamRemote string, sessions ...*gitcredential.LookupSession) (string, error) {
 	sha, err := ResolveTrustedDefault(repoRoot, upstreamRemote)
 	if err != nil {
 		return "", fmt.Errorf("resolve ledger namespace from upstream default branch: %w", err)
 	}
-	ns, err := harness.LedgerNamespaceAt(repoRoot, sha)
+	ns, err := harness.LedgerNamespaceAt(repoRoot, sha, sessions...)
 	if err != nil {
 		return "", fmt.Errorf("resolve ledger namespace from upstream default branch %s: %w", sha, err)
 	}

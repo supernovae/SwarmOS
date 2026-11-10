@@ -218,7 +218,7 @@ func (m *Manager) UpdateRebaseContext(ctx context.Context, n int, owner string, 
 			r.RepairScopeSet = true
 		}
 		if report.RepairAttempt != nil {
-			cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA)
+			cfg, err := harness.LoadConfigAt(m.repoRoot, st.BaseSHA, m.lookups)
 			if err != nil {
 				return err
 			}

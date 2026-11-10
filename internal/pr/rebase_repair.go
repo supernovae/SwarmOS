@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"os"
 	"path"
 	"path/filepath"
@@ -161,7 +162,7 @@ func importRepair(worktree string, before, after map[string]planFile, paths []st
 }
 
 func (s *Service) finishResolvedRebase(ctx context.Context, r *Result, owner string, rv *resolver, selections []string) (*Result, error) {
-	cfg, err := harness.LoadConfigAt(s.Root, r.State.BaseSHA)
+	cfg, err := harness.LoadConfigAt(s.Root, r.State.BaseSHA, gitcredential.LookupSessionFrom(ctx))
 	if err != nil {
 		return r, err
 	}

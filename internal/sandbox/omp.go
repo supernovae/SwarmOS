@@ -20,6 +20,10 @@ import (
 // RPC host tools are an OMP-supported execution interface. Authentication and
 // model transport remain entirely within OMP, using its existing login.
 func runOMP(ctx context.Context, binary, model, prompt, control string, env []string, executor ToolExecutor, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) (resultErr error) {
+	return runOMPGuarded(ctx, nil, binary, model, prompt, control, env, executor, interactive, input, stdout, stderr, guidance...)
+}
+
+func runOMPGuarded(ctx context.Context, guard *launchGuard, binary, model, prompt, control string, env []string, executor ToolExecutor, interactive bool, input io.Reader, stdout, stderr io.Writer, guidance ...func(string)) (resultErr error) {
 	config := filepath.Join(control, "omp.json")
 	settings := map[string]any{
 		"disabledProviders": []string{"native", "claude", "codex", "gemini", "github", "opencode", "cursor", "agents-md"},
@@ -50,6 +54,11 @@ func runOMP(ctx context.Context, binary, model, prompt, control string, env []st
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		in.Close()
+		return err
+	}
+	if err := guard.verify("omp-start", true); err != nil {
+		in.Close()
+		out.Close()
 		return err
 	}
 	if err := cmd.Start(); err != nil {

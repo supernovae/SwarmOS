@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"strings"
 	"time"
 
@@ -33,9 +34,9 @@ func bindPersistedClaim(ctx context.Context, root string, tr tracker.Tracker, ma
 
 // approvedLeasePolicy loads the lease policy from the task's approved base,
 // fetching that commit first when it is not yet local.
-func approvedLeasePolicy(root, upstreamRemote, baseSHA string) (*contract.SwarmConfig, time.Duration, error) {
+func approvedLeasePolicy(root, upstreamRemote, baseSHA string, sessions ...*gitcredential.LookupSession) (*contract.SwarmConfig, time.Duration, error) {
 	_ = workspace.FetchCommit(root, upstreamRemote, baseSHA) // best effort; LoadConfigAt fails if the commit is missing
-	cfg, err := harness.LoadConfigAt(root, baseSHA)
+	cfg, err := harness.LoadConfigAt(root, baseSHA, sessions...)
 	if err != nil {
 		return nil, 0, err
 	}

@@ -138,7 +138,7 @@ func ExistingSwarmPin(repoRoot string) string {
 		return ""
 	}
 	defer safe.Close()
-	for _, rel := range []string{".github/workflows/swarm-validate.yml", ".github/workflows/swarm-fork-coordinator.yml"} {
+	for _, rel := range []string{".github/workflows/swarm-validate.yml", ".github/workflows/swarm-fork-coordinator.yml", ArchiveWorkflowPath} {
 		data, err := safe.ReadFile(rel, 1<<20)
 		if err != nil {
 			continue

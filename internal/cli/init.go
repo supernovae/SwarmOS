@@ -21,6 +21,7 @@ func newInitCmd(rootOpts *RootOptions) *cobra.Command {
 	var verbose bool
 	var asJSON bool
 	var forkCoordinator bool
+	var archive bool
 	var dryRun bool
 
 	cmd := &cobra.Command{
@@ -33,7 +34,8 @@ paths). Your other workflows are never edited, and an existing AGENTS.md gets a
 marked SwarmOS section instead of being replaced. Generated workflows
 install this build of swarm (or keep the repository's existing pin when run
 from a development build). --fork-coordinator adds the fork coordinator
-workflow; once present, later runs keep it current. --dry-run reports what would
+workflow; --archive adds scheduled archiving. Once present, later runs keep
+these workflows current. --dry-run reports what would
 change, with diffs for existing files, and writes nothing.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
@@ -49,6 +51,7 @@ change, with diffs for existing files, and writes nothing.`,
 				SwarmVersion:    pin,
 				TemplateDir:     templateDir,
 				ForkCoordinator: forkCoordinator,
+				Archive:         archive,
 				UpstreamRemote:  rootOpts.effectiveUpstreamRemote(),
 				DryRun:          dryRun,
 			})
@@ -133,6 +136,7 @@ change, with diffs for existing files, and writes nothing.`,
 	cmd.Flags().BoolVar(&force, "force", false, "Overwrite existing .swarm/ and template files")
 	cmd.Flags().BoolVar(&syncLabels, "sync-labels", false, "Idempotently create swarm:* labels on the issue tracker")
 	cmd.Flags().StringVar(&swarmVersion, "swarm-version", "", "Override the SwarmOS release (v0.6.0 or newer) or full commit SHA that generated workflows install (defaults to this build)")
+	cmd.Flags().BoolVar(&archive, "archive", false, "Generate .github/workflows/swarm-archive.yml for scheduled archive maintenance")
 	cmd.Flags().BoolVar(&forkCoordinator, "fork-coordinator", false, "Generate .github/workflows/swarm-fork-coordinator.yml for --fork contributor mode")
 	cmd.Flags().StringVar(&templateDir, "template-dir", "", "Directory of custom GitHub Issue Forms (.yml/.yaml) and .swarm/{rules,skills}/*.md templates")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Report what init would change, with diffs for existing files, without writing anything")

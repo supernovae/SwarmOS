@@ -319,17 +319,27 @@ Contributors can come into a SwarmOS task, finish it, and leave, and the rest of
 
 ### Archiving finished issue ledgers
 
-Maintainers can relocate a finished issue's state and checkpoint refs to a Git
-archive to keep the upstream remote quieter. See [Archive and restore](WORKFLOWS.md#archive-and-restore)
-for the preview, apply, and restore commands. Branch-mode rulesets must allow the
-archiving identity to delete `swarm-state/**` and `swarm-checkpoints/**` and update
-`swarm-archive`. Keep these permissions limited to trusted maintainers. Hidden
-refs use the repository's write permission. Both layouts require atomic pushes.
+Scheduled archiving keeps the upstream remote focused on active work by moving
+finished issue ledgers to a private Git archive. See [Archive and restore](WORKFLOWS.md#archive-and-restore)
+for details. To enable weekly cleanup (Sundays at 03:17 UTC):
 
-Archive policy defaults to `keep`, so upgrading preserves all ledgers. To keep
-the remote focused on active work, create a private destination repository such
-as `acme/private-swarm-archive`, grant the maintenance identity write access to
-both repositories, and commit this opt-in on the upstream default branch:
+1. Create a private archive repository, for example `acme/private-swarm-archive`.
+2. Give a trusted maintenance identity write access to the source and archive
+   repositories, including deletion of source ledger and checkpoint refs and
+   updates to the archive index. Branch-mode rulesets must allow deletion of
+   `swarm-state/**` and `swarm-checkpoints/**` and updates to `swarm-archive`;
+   configure ruleset bypass for this identity where needed. Hidden refs use
+   repository write permission. Both layouts require atomic pushes.
+3. Store that identity's token as the source repository Actions secret
+   `SWARM_ARCHIVE_TOKEN`. The workflow supplies it through `SWARM_GITHUB_TOKEN`.
+   The job's `GITHUB_TOKEN` cannot write the separate archive repository.
+   This secret is required even while the archive policy is still `keep`.
+4. Commit the archive policy below on the upstream default branch. The default
+   strategy is `keep`, which preserves all ledgers.
+5. Run `swarm repo init --archive` and commit the generated
+   `.github/workflows/swarm-archive.yml`. Later init runs keep an unedited workflow
+   current without repeating the flag. You can also run it with workflow_dispatch;
+   it always checks out the upstream default branch.
 
 ```yaml
 archive:
@@ -353,3 +363,18 @@ command exits non-zero. Resolve the reported failure and rerun. A retry retains
 the destination's original audit cutoff while reporting the current run's cutoff.
 Single-issue archive apply also requires opting in; `--to` cannot override
 `keep`. Restore remains available under either strategy.
+
+The scheduled job prints JSON to its log and step summary. With `strategy: keep`,
+it reports a read-only preview and succeeds without changing refs. Other archive
+failures fail the job so maintainers can resolve them and retry.
+
+To restore an archived issue, preview first, then apply:
+
+```bash
+swarm repo archive restore 29 --json
+swarm repo archive restore 29 --apply --json
+```
+
+PR review checklist for maintainers: configure the real secret and ruleset rights,
+then inspect the first manual or scheduled run for the expected archive or keep
+result and credential-free JSON in the log and step summary.

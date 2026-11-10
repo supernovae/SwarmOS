@@ -1316,3 +1316,262 @@ func TestRequiredCheckCPUStallObserver(t *testing.T) {
 		t.Fatal("unobservable backend enabled")
 	}
 }
+
+// requiredReceive bounds every synchronization wait, including negative controls.
+func requiredReceive[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case value := <-ch:
+		return value
+	case <-time.After(5 * time.Second):
+		t.Fatal("required check synchronization timed out")
+	}
+	var zero T
+	return zero
+}
+
+func TestRequiredChecksConcurrency(t *testing.T) {
+	for _, tc := range []struct{ checks, cpus, want int }{{0, 0, 0}, {1, 0, 1}, {9, 2, 2}, {2, 99, 2}} {
+		if got := requiredCheckParallelism(tc.checks, tc.cpus); got != tc.want {
+			t.Fatalf("bound: %d != %d", got, tc.want)
+		}
+	}
+	for _, bound := range []int{1, 2, 4} {
+		t.Run(fmt.Sprint(bound), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			entered := make(chan string, 4)
+			releases := make(chan struct{})
+			var active, maximum, calls atomic.Int32
+			runner := &checkRunner{runCommand: func(ctx context.Context, command string, _ time.Duration, _, _ io.Writer) error {
+				n := active.Add(1)
+				defer active.Add(-1)
+				calls.Add(1)
+				for old := maximum.Load(); n > old; old = maximum.Load() {
+					if maximum.CompareAndSwap(old, n) {
+						break
+					}
+				}
+				entered <- command
+				select {
+				case <-releases:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}}
+			jobs := []requiredCheckJob{{"a", "a", time.Minute}, {"b", "b", time.Minute}, {"c", "c", time.Minute}, {"d", "d", time.Minute}}
+			done := make(chan struct{})
+			var outcomes []CheckRunOutcome
+			go func() {
+				defer close(done)
+				runner.runRequiredChecks(ctx, jobs, bound, nil, func(o CheckRunOutcome, _ error) { outcomes = append(outcomes, o) })
+			}()
+			for i := 0; i < 4; i++ {
+				name := requiredReceive(t, entered)
+				if bound == 1 && name != jobs[i].name {
+					t.Fatalf("serial dispatch: %s", name)
+				}
+				// Fill every available worker before releasing any: serial scheduling deadlocks here.
+				if i == bound-1 || i >= bound {
+					releases <- struct{}{}
+				}
+			}
+			for i := 1; i < bound; i++ {
+				releases <- struct{}{}
+			}
+			requiredReceive(t, done)
+			if maximum.Load() != int32(bound) || calls.Load() != 4 || len(outcomes) != 4 {
+				t.Fatalf("bound %d: maximum=%d calls=%d outcomes=%d", bound, maximum.Load(), calls.Load(), len(outcomes))
+			}
+		})
+	}
+	(&checkRunner{}).runRequiredChecks(t.Context(), nil, 0, nil, func(CheckRunOutcome, error) { t.Fatal("empty policy ran") })
+}
+
+func requiredPolicyRepo(t *testing.T) (string, string) {
+	t.Helper()
+	repo := setupGitRepoForValidation(t)
+	policy := "required_checks:\n"
+	for _, name := range []string{"a", "b", "c"} {
+		policy += fmt.Sprintf("  - name: %s\n    command: %s\n    timeout: 1m\n", name, name)
+	}
+	policy += "protected_paths:\n  - protected/**\n"
+	if err := os.WriteFile(filepath.Join(repo, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "parallel policy"}} {
+		if out, err := gitfixture.Command(t, repo, args...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	return repo, gitRevision(t, repo, "HEAD")
+}
+
+func TestRequiredChecksPolicyOrder(t *testing.T) { testRequiredChecksPolicyOrder(t, false) }
+func TestRequiredChecksProgressSessionPolicyOrder(t *testing.T) {
+	testRequiredChecksPolicyOrder(t, true)
+}
+
+func testRequiredChecksPolicyOrder(t *testing.T, withSession bool) {
+	repo, base := requiredPolicyRepo(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	entered := make(chan string, 3)
+	completed := make(chan string, 3)
+	releases := map[string]chan struct{}{"a": make(chan struct{}), "b": make(chan struct{}), "c": make(chan struct{})}
+	events := make(chan progress.Event, 32)
+	session := progress.New(ctx, 1, 0, func(e progress.Event) { events <- e }, make(chan time.Time), time.Now, func() {})
+	<-events
+	session.Next("validation")
+	<-events
+	<-events
+	defer session.Finish("completed")
+	var raw, visible []progress.Event
+	var observing atomic.Bool
+	type result struct {
+		report *ValidationReport
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		report, err := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, CIMode: true, requiredCheckWorkers: 3,
+			runCommand: func(ctx context.Context, command string, _ time.Duration, out, _ io.Writer) error {
+				entered <- command
+				select {
+				case <-releases[command]:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				fmt.Fprint(out, "PRIVATE_OUTPUT")
+				completed <- command
+				if command == "a" || command == "b" {
+					return errors.New("intentional " + command)
+				}
+				return nil
+			}, OnProgress: func(e progress.Event) {
+				if strings.HasPrefix(e.Check, "preparation:") {
+					return
+				}
+				if observing.Swap(true) {
+					t.Error("concurrent observer")
+				}
+				defer observing.Store(false)
+				raw = append(raw, e)
+				if withSession {
+					session.Observe(e)
+					visible = append(visible, <-events)
+				}
+			}})
+		done <- result{report, err}
+	}()
+	for i := 0; i < 3; i++ {
+		requiredReceive(t, entered)
+	}
+	for _, name := range []string{"c", "b", "a"} {
+		close(releases[name])
+		if got := requiredReceive(t, completed); got != name {
+			t.Fatalf("completion %s", got)
+		}
+	}
+	got := requiredReceive(t, done)
+	if got.err == nil || got.report == nil || got.report.Passed || !strings.Contains(got.err.Error(), `check "a"`) {
+		t.Fatalf("result %+v %v", got.report, got.err)
+	}
+	if len(raw) != 6 {
+		t.Fatalf("raw events %+v", raw)
+	}
+	lastRow, lastDetail := -1, -1
+	for i, name := range []string{"a", "b", "c"} {
+		o := got.report.CheckOutcomes[i]
+		if o.Name != name {
+			t.Fatalf("outcome order %+v", got.report.CheckOutcomes)
+		}
+		row := strings.Index(got.report.Artifact.Body, "| `"+name+"`")
+		detail := strings.Index(got.report.Artifact.Body, "### Output: `"+name+"`")
+		if row <= lastRow || detail <= lastDetail {
+			t.Fatal("unordered report")
+		}
+		lastRow, lastDetail = row, detail
+		status := "FAIL"
+		if name == "c" {
+			status = "PASS"
+		}
+		for _, stream := range [][]progress.Event{visible, raw} {
+			if len(stream) == 0 {
+				continue
+			}
+			start, end := stream[2*i], stream[2*i+1]
+			if start.Check != name || start.Status != "started" || end.Check != name || end.Status != status || end.StageElapsed != o.Duration {
+				t.Fatalf("lifecycle %+v", stream)
+			}
+			if strings.Contains(fmt.Sprint(stream), "PRIVATE_OUTPUT") {
+				t.Fatal("output leaked")
+			}
+		}
+	}
+}
+
+func TestRequiredChecksCancellation(t *testing.T) {
+	for _, mode := range []string{"running", "queued", "started", "nil-after-cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			repo, base := requiredPolicyRepo(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			entered := make(chan struct{}, 3)
+			var active, calls atomic.Int32
+			type result struct {
+				report *ValidationReport
+				err    error
+			}
+			done := make(chan result, 1)
+			bound := 3
+			if mode == "queued" {
+				bound = 1
+			}
+			go func() {
+				report, err := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, CIMode: true, requiredCheckWorkers: bound,
+					OnProgress: func(e progress.Event) {
+						if mode == "started" && e.Check == "a" && e.Status == "started" {
+							cancel()
+						}
+					},
+					runCommand: func(ctx context.Context, _ string, _ time.Duration, _, _ io.Writer) error {
+						active.Add(1)
+						defer active.Add(-1)
+						calls.Add(1)
+						entered <- struct{}{}
+						<-ctx.Done()
+						if mode == "nil-after-cancel" {
+							return nil
+						}
+						return ctx.Err()
+					}})
+				done <- result{report, err}
+			}()
+			if mode != "started" {
+				for i := 0; i < bound; i++ {
+					requiredReceive(t, entered)
+				}
+				cancel()
+			}
+			got := requiredReceive(t, done)
+			if !errors.Is(got.err, context.Canceled) || got.report == nil || got.report.Passed || got.report.Artifact.Verdict != "FAIL" || got.report.Timings.Checks.Status != "FAIL" || len(got.report.CheckOutcomes) != 3 || active.Load() != 0 || calls.Load() != 3 {
+				t.Fatalf("cancelled pass: %+v err=%v active=%d calls=%d", got.report, got.err, active.Load(), calls.Load())
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	count := 0
+	runner := &checkRunner{runCommand: func(ctx context.Context, _ string, _ time.Duration, _, _ io.Writer) error { return ctx.Err() }}
+	runner.runRequiredChecks(ctx, []requiredCheckJob{{"a", "a", time.Minute}}, 1, nil, func(o CheckRunOutcome, err error) {
+		count++
+		if o.Passed || !errors.Is(err, context.Canceled) {
+			t.Error("cancelled success")
+		}
+	})
+	if count != 1 {
+		t.Fatal("missing cancelled outcome")
+	}
+}

@@ -631,8 +631,52 @@ func TestIssueWorkHumanPlanDecisionSurfaces(t *testing.T) {
 	}
 	*actor = "alice"
 	out, err = run("issue", "status", number)
-	if err != nil || strings.Contains(out, "Next step:") {
+	wantArgv := []string{"swarm", "--repo", "octo/swarm", "--root", f.root, "issue", "work", number}
+	if err != nil || strings.Count(out, "Next step:") != 1 {
 		t.Fatalf("approved status: %v %s", err, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Next step:") && line != "Next step: "+formatCommand(wantArgv) {
+			t.Fatalf("approved next step: %s", line)
+		}
+	}
+	for _, guidance := range []string{"Ask an", "issue release", "review-plan", "issue approve"} {
+		if strings.Contains(out, guidance) {
+			t.Fatalf("approved status suggests human intervention (%q): %s", guidance, out)
+		}
+	}
+	jsonOut, err = run("issue", "status", number, "--json")
+	if err != nil {
+		t.Fatal(err, jsonOut)
+	}
+	var approvedDoc struct {
+		Issues []struct {
+			Issue struct {
+				Number int `json:"number"`
+			} `json:"issue"`
+			NextAction *struct {
+				Argv          []string `json:"argv"`
+				Reason        string   `json:"reason"`
+				HumanRequired *bool    `json:"human_required"`
+			} `json:"next_action"`
+		} `json:"issues"`
+	}
+	if err := json.Unmarshal([]byte(jsonOut), &approvedDoc); err != nil {
+		t.Fatal(err, jsonOut)
+	}
+	if len(approvedDoc.Issues) != 1 || approvedDoc.Issues[0].Issue.Number != n {
+		t.Fatalf("approved status issue: %s", jsonOut)
+	}
+	action := approvedDoc.Issues[0].NextAction
+	if action == nil || !slices.Equal(action.Argv, wantArgv) || action.Reason != "resumable_work" || action.HumanRequired == nil || *action.HumanRequired {
+		t.Fatalf("approved status action: %s", jsonOut)
+	}
+	st, err = f.manager.GetCurrentState(t.Context(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if needsHumanPlanDecision(st, wu, cfg) {
+		t.Fatal("approved plan still needs a human decision")
 	}
 	out, err = run("issue", "approve", number)
 	if err == nil || !strings.Contains(err.Error(), "task approval is current") || strings.Contains(err.Error(), "Next step:") || strings.Contains(err.Error(), "release") {

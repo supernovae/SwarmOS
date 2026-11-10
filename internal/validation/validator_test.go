@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -1008,5 +1009,78 @@ func TestCandidateTrackerDoesNotLoadExecutionPolicy(t *testing.T) {
 	report, err := Validate(context.Background(), root, &contract.WorkUnit{ID: "ISSUE-1", IssueNumber: 1}, ValidateOptions{BaseSHA: base})
 	if err != nil || report == nil || !report.Passed {
 		t.Fatalf("approved execution policy was replaced by candidate: %+v %v", report, err)
+	}
+}
+
+// Load the repository policy rather than a copy that could drift from PR checks.
+func repositoryCLIRegressionsCheck(t *testing.T) contract.CheckSpec {
+	t.Helper()
+	spec, err := harness.LoadValidationSpec(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []contract.CheckSpec
+	for _, check := range spec.RequiredChecks {
+		if check.Name == "cli-regressions" {
+			found = append(found, check)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly one cli-regressions check, got %d", len(found))
+	}
+	check := found[0]
+	if check.Command != "go test -timeout=15m ./internal/cli" {
+		t.Fatalf("want unfiltered full CLI command, got %q", check.Command)
+	}
+	if check.Timeout != "15m" {
+		t.Fatalf("want policy timeout 15m, got %q", check.Timeout)
+	}
+	return check
+}
+
+func TestRepositoryCLIRegressionsPolicy(t *testing.T) {
+	repositoryCLIRegressionsCheck(t)
+}
+
+func TestRepositoryCLIRegressionsRejectsNewFailure(t *testing.T) {
+	check := repositoryCLIRegressionsCheck(t)
+	root := t.TempDir()
+	cli := filepath.Join(root, "internal", "cli")
+	if err := os.MkdirAll(cli, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, contents string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(root, "go.mod"), "module example.com/cli-policy-fixture\n\ngo 1.22\n")
+	testFile := filepath.Join(cli, "regression_test.go")
+	const testName = "TestArbitraryFutureCLIRegression"
+	source := func(body string) string {
+		return "package cli\nimport \"testing\"\nfunc TestOrdinaryPassing(t *testing.T) {}\nfunc " + testName + "(t *testing.T) {" + body + "}\n"
+	}
+	run := func() ([]byte, error) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "sh", "-c", check.Command)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=", "GOPROXY=off", "GOSUMDB=off")
+		out, err := cmd.CombinedOutput()
+		if ctx.Err() != nil {
+			t.Fatalf("fixture command timed out: %v (%s)", ctx.Err(), out)
+		}
+		return out, err
+	}
+	write(testFile, source(`t.Fatal("arbitrary CLI failure reached")`))
+	out, err := run()
+	if err == nil || !strings.Contains(string(out), "--- FAIL: "+testName) || !strings.Contains(string(out), "arbitrary CLI failure reached") {
+		t.Fatalf("want failure from arbitrary CLI test, got %v (%s)", err, out)
+	}
+	write(testFile, source(""))
+	if out, err := run(); err != nil {
+		t.Fatalf("passing control failed: %v (%s)", err, out)
 	}
 }

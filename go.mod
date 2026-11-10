@@ -3,13 +3,13 @@ module github.com/supernovae/swarmos
 go 1.26.10
 
 require (
-	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c
+	github.com/BurntSushi/toml v1.6.0
 	github.com/cli/go-gh/v2 v2.17.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	golang.org/x/mod v0.42.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

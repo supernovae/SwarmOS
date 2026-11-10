@@ -52,14 +52,14 @@ func (e *importRejection) Error() string {
 }
 
 // deletionDirective matches one physical PLAN.md line that deletes a path: an
-// optional list marker, a delete verb, and the exact path, bare or in
+// optional list marker, a delete verb, an optional "existing", and the exact path, bare or in
 // backticks, followed by whitespace or the end of the line.
-var deletionDirective = regexp.MustCompile("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?i:delete|remove|rm|drop)[ \t]+(?:`([^`\\s]+)`|([^`\\s]+))(?:[ \t]|$)")
+var deletionDirective = regexp.MustCompile("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?i:delete|remove|rm|drop)[ \t]+(?i:existing[ \t]+)?(?:`([^`\\s]+)`|([^`\\s]+))(?:[ \t]|$)")
 
 // renameDirective matches one physical PLAN.md line that renames a path: the
 // same list marker, a rename verb, the exact source path, "to", and a named
 // destination. Only the source is removed, so only it is authorized.
-var renameDirective = regexp.MustCompile("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?i:rename|move|mv)[ \t]+(?:`([^`\\s]+)`|([^`\\s]+))[ \t]+(?i:to)[ \t]+(?:`[^`\\s]+`|[^`\\s]+(?:[ \t]|$))")
+var renameDirective = regexp.MustCompile("^[ \t]*(?:(?:[-*+]|[0-9]+[.)])[ \t]+)?(?i:rename|move|mv)[ \t]+(?i:existing[ \t]+)?(?:`([^`\\s]+)`|([^`\\s]+))[ \t]+(?i:to)[ \t]+(?:`[^`\\s]+`|[^`\\s]+(?:[ \t]|$))")
 
 // plannedDeletions returns the paths an approved plan explicitly deletes or
 // renames away. Mentioning a path, or calling it new or modified, never
@@ -180,7 +180,7 @@ func importRejectionReason(rejection *importRejection, issue, pr int, eligible .
 	}
 	reason := fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; rerun with %s", rejection, rerun)
 	if rejection.Deleted {
-		reason = fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; keep or restore approved-base files the approved plan does not delete (the next developer round's .swarm/active/REPAIR.md carries the approved-base contents of any file a checkpoint lacks); an intentional removal needs an approved PLAN.md line such as `- Delete path/to/file.go`; rerun with %s", rejection, rerun)
+		reason = fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; keep or restore approved-base files the approved plan does not delete (the next developer round's .swarm/active/REPAIR.md carries the approved-base contents of any file a checkpoint lacks); an intentional removal needs an approved PLAN.md line such as `- Delete path/to/file.go` or `- Rename path/to/old.go to path/to/new.go`; rerun with %s", rejection, rerun)
 	}
 	if rejection.developerOutputOnly() {
 		reason = fmt.Sprintf("%s; returned changes were not imported; worktree was left unchanged; developers record results in .swarm/active/IMPLEMENTATION.md, not %s; rerun with %s --developer-instructions '%s'", rejection, strings.Join(rejection.Paths, ", "), rerun, developerOutputInstructions)

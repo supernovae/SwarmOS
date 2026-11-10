@@ -332,6 +332,10 @@ func TestDeletionDirectivePlanLines(t *testing.T) {
 		{"- Delete\ninternal/workspace/recovery.go", false},
 		// The #520 plan line: a rename removes its source.
 		{"4. Rename `internal/workspace/recovery.go` to `internal/workspace/restore.go`; rename the test.", true},
+		// The #520 re-plan line: "existing" before the path.
+		{"4. Rename existing `internal/workspace/recovery.go` to `internal/workspace/restore.go`, and its test.", true},
+		{"- Delete existing internal/workspace/recovery.go", true},
+		{"- Rename existing file internal/workspace/recovery.go to internal/workspace/restore.go", false},
 		{"- move internal/workspace/recovery.go to internal/workspace/restore.go", true},
 		{"- mv `internal/workspace/recovery.go` TO `internal/workspace/restore.go`", true},
 		{"- Rename internal/workspace/recovery.go", false},

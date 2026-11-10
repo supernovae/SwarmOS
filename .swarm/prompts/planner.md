@@ -28,6 +28,8 @@ You are the **Planner** agent in a SwarmOS workflow.
 
    Confirm that every file the plan calls new is absent at the approved base. If it already exists, the plan names it as modified, never as new.
 
+   A developer run that removes a file present at the approved base is refused unless PLAN.md authorizes it on its own line, written exactly as `- Delete path/to/file.go` or `- Rename path/to/old.go to path/to/new.go`, with the full path and no words between the verb and the path.
+
 ## Use approved profile guidance
 Only the compiled approved execution profile supplies variant requirements. Without a profile, use the general evidence and acceptance coverage requirements above. Keep the plan proportional to the work; advisory dimension suggestions do not activate a variant.
 

@@ -656,7 +656,7 @@ func TestUnownedActiveGuidanceFallback(t *testing.T) {
 		}
 	}
 	deleted := &importRejection{Role: "developer", Paths: []string{"old.go"}, Deleted: true, Completed: true}
-	want := "rejected agent changes to: old.go (unplanned deletion of approved-base files); returned changes were not imported; worktree was left unchanged; keep or restore approved-base files the approved plan does not delete (the next developer round's .swarm/active/REPAIR.md carries the approved-base contents of any file a checkpoint lacks); an intentional removal needs an approved PLAN.md line such as " + "`- Delete path/to/file.go`" + "; rerun with swarm issue work 477 --phase implement"
+	want := "rejected agent changes to: old.go (unplanned deletion of approved-base files); returned changes were not imported; worktree was left unchanged; keep or restore approved-base files the approved plan does not delete (the next developer round's .swarm/active/REPAIR.md carries the approved-base contents of any file a checkpoint lacks); an intentional removal needs an approved PLAN.md line such as " + "`- Delete path/to/file.go` or `- Rename path/to/old.go to path/to/new.go`" + "; rerun with swarm issue work 477 --phase implement"
 	if got := importRejectionReason(deleted, 477, 0); got != want {
 		t.Fatalf("deletion changed: %s", got)
 	}

@@ -1,0 +1,1 @@
+- The planner prompt now tells the planner how to write a line that lets the developer remove a file: `- Delete path/to/file.go` or `- Rename path/to/old.go to path/to/new.go`. These lines may also say "existing" before the path, as in `- Rename existing old.go to new.go`. The rejection message for an unplanned deletion now shows the rename form too.

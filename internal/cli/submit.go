@@ -167,7 +167,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 						return fmt.Errorf("completed fork submission does not match recorded head")
 					}
 				} else {
-					if err := issueGapAdmission(ctx, manager, issue, owner, state.HeadSHA, unit, state, acknowledged, cmd.Flags().Changed("acknowledge-gap"), rootOpts.Fork); err != nil {
+					if err := issueGapAdmission(ctx, manager, issue, owner, state.HeadSHA, unit, state, acknowledged, cmd.Flags().Changed("acknowledge-gap"), rootOpts.Fork, nil); err != nil {
 						return err
 					}
 					if r.RequiredChecks != "passed" {
@@ -223,6 +223,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if report != nil && report.Reused {
 				fmt.Fprintln(cmd.ErrOrStderr(), report.Artifact.Summary)
 			}
+			var admission *submitAcceptance
 			if report != nil {
 				failedReport = report
 				if acceptanceBefore != nil {
@@ -234,6 +235,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 						}
 					}
 					if stable {
+						if rootOpts.Fork || manager.HasWorkerGateway() {
+							admission = captureSubmitAcceptance(state, after, report)
+						}
 						for k, v := range after {
 							report.Artifact.Metadata[k] = v
 						}
@@ -242,6 +246,9 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 				report.Artifact.Metadata = lease.TesterMetadata(state, report.Artifact.Metadata)
 				lease.PreserveTesterGuidance(state, &report.Artifact)
 				lease.PreserveAcceptanceEvidence(state, &report.Artifact)
+				if admission != nil {
+					admission.report = report.Artifact
+				}
 				if _, err := manager.RecordTrustedValidation(ctx, issue, owner, report.Artifact); err != nil {
 					return errors.Join(valErr, err)
 				}
@@ -268,7 +275,7 @@ swarm issue review-plan approves the implementation plan, not the finished PR.`,
 			if err != nil {
 				return err
 			}
-			if err := issueGapAdmission(ctx, manager, issue, owner, head, unit, state, acknowledged, cmd.Flags().Changed("acknowledge-gap"), rootOpts.Fork); err != nil {
+			if err := issueGapAdmission(ctx, manager, issue, owner, head, unit, state, acknowledged, cmd.Flags().Changed("acknowledge-gap"), rootOpts.Fork, admission); err != nil {
 				return err
 			}
 
@@ -470,10 +477,20 @@ func refuseEmptySubmitEarly(ctx context.Context, root, worktree string, issue in
 	return emptySubmitError(issue, base)
 }
 
-func issueGapAdmission(ctx context.Context, manager *lease.Manager, issue int, owner, head string, unit *contract.WorkUnit, state *lease.IssueState, indices []int, explicit, fork bool) error {
+func issueGapAdmission(ctx context.Context, manager *lease.Manager, issue int, owner, head string, unit *contract.WorkUnit, state *lease.IssueState, indices []int, explicit, fork bool, preserved *submitAcceptance) error {
 	candidate := *state
 	candidate.HeadSHA = head
 	r := lease.RecordedReadiness(&candidate, unit.Acceptance)
+	if (fork || manager.HasWorkerGateway()) && preserved != nil && preserved.matches(state, head) {
+		checks := "failed"
+		if preserved.report.Verdict == "PASS" {
+			checks = "passed"
+		}
+		r = validation.NewReadiness(checks, unit.Acceptance, preserved.snapshot)
+		if r.RequiredChecks != "passed" {
+			return fmt.Errorf("trusted required checks are %s", r.RequiredChecks)
+		}
+	}
 	if explicit {
 		var err error
 		state, err = manager.RecordGapAcknowledgment(ctx, issue, owner, head, indices)
@@ -483,7 +500,7 @@ func issueGapAdmission(ctx context.Context, manager *lease.Manager, issue int, o
 		candidate = *state
 		candidate.HeadSHA = head
 	}
-	if !fork && len(lease.KnownGaps(&candidate, unit)) > 0 {
+	if !fork && !manager.HasWorkerGateway() && len(lease.KnownGaps(&candidate, unit)) > 0 {
 		return nil
 	}
 	if err := r.SubmissionError(issue, fork); err != nil {
@@ -493,4 +510,79 @@ func issueGapAdmission(ctx context.Context, manager *lease.Manager, issue int, o
 		return err
 	}
 	return nil
+}
+
+// submitAcceptance is ephemeral admission authority. It is never written into
+// the imported report or used by readiness projections outside this submit.
+type submitAcceptance struct {
+	before          lease.IssueState
+	identity        map[string]string
+	snapshot        validation.AcceptanceSnapshot
+	previousVersion int
+	report          contract.Artifact
+}
+
+var submitIdentityKeys = []string{"head_sha", "base_sha", "validation_claim", "validation_base", "validation_tree", "validation_policy"}
+
+func latestSubmitValidation(st *lease.IssueState) *contract.Artifact {
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		if st.Artifacts[i].Type == contract.ArtifactValidation {
+			return &st.Artifacts[i]
+		}
+	}
+	return nil
+}
+
+func captureSubmitAcceptance(st *lease.IssueState, identity map[string]string, report *validation.ValidationReport) *submitAcceptance {
+	dst := contract.Artifact{Metadata: map[string]string{
+		"head_sha": report.HeadSHA, "base_sha": report.BaseSHA,
+	}}
+	if report.HeadSHA == "" || report.BaseSHA != st.BaseSHA ||
+		report.Artifact.Metadata["head_sha"] != report.HeadSHA ||
+		report.Artifact.Metadata["base_sha"] != report.BaseSHA {
+		return nil
+	}
+	for _, k := range submitIdentityKeys[2:] {
+		if identity[k] == "" {
+			return nil
+		}
+		dst.Metadata[k] = identity[k]
+	}
+	lease.PreserveAcceptanceEvidence(st, &dst)
+	if _, ok := dst.Metadata[validation.AcceptanceEvidenceKey]; !ok {
+		return nil
+	}
+	snapshot := validation.AcceptanceSnapshotFromMetadata(dst.Metadata)
+	if snapshot.State != "valid" {
+		return nil
+	}
+	previous := latestSubmitValidation(st)
+	if previous == nil {
+		return nil
+	}
+	return &submitAcceptance{before: *st, identity: dst.Metadata, snapshot: snapshot, previousVersion: previous.Version, report: report.Artifact}
+}
+
+func (s *submitAcceptance) matches(st *lease.IssueState, head string) bool {
+	before := &s.before
+	if st.Lease.Owner != before.Lease.Owner || st.Lease.ClaimID != before.Lease.ClaimID ||
+		st.TaskDigest != before.TaskDigest || st.PolicyDigest != before.PolicyDigest ||
+		st.PolicyTreeDigest != before.PolicyTreeDigest || st.BaseSHA != before.BaseSHA ||
+		st.HeadSHA != before.HeadSHA || head != s.identity["head_sha"] {
+		return false
+	}
+	latest := latestSubmitValidation(st)
+	// Validation artifacts replace their predecessor and increment its version.
+	// Exactly one recording must separate capture and admission, and that report
+	// must be the one this submit produced.
+	if latest == nil || latest.Version != s.previousVersion+1 ||
+		latest.Body != s.report.Body || latest.Verdict != s.report.Verdict {
+		return false
+	}
+	for _, k := range submitIdentityKeys {
+		if latest.Metadata[k] != s.identity[k] {
+			return false
+		}
+	}
+	return true
 }

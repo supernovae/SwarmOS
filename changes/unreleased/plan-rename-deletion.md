@@ -1,0 +1,1 @@
+- `swarm issue work` and `swarm pr work` now accept a developer run that renames a file when the approved PLAN.md has a line such as `- Rename old/path.go to new/path.go`. Before, only a delete line authorized removing the old path, so a planned rename was refused as an unplanned deletion.

@@ -131,3 +131,16 @@ func TestClaimBudgetOverflowIsRejected(t *testing.T) {
 		t.Fatalf("budget doc = %q, %v", doc, err)
 	}
 }
+
+func TestPlannerBundleWorkUnitCorrectionInstructions(t *testing.T) {
+	wt, base := budgetRepo(t, "lease:\n  duration: 30m\n  renewable: false\n  max_renewals: 0\n")
+	sys, err := budgetBundle(t, wt, base, "planner", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"WorkUnit correction: required", "initial plan", "conflicting criteria with path:line evidence", "Still write TEST_PLAN.md mapping every acceptance criterion, including blocked coverage", "open review finding cannot be closed without changing the WorkUnit", "never approves a plan, edits the WorkUnit, resets or spends plan-review retries, or satisfies any gate"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("compiled planner missing %q", want)
+		}
+	}
+}

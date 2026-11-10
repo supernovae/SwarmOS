@@ -185,6 +185,14 @@ func (r *workRun) admit(phase string) error {
 	return r.e.admitStage(r.ctx, r.opts.IssueNumber, r.opts.Owner, phase)
 }
 
+func (r *workRun) stopForWorkUnitCorrection() bool {
+	if r.forkMode || r.opts.PRNumber != 0 || !workUnitCorrectionRequired(r.st) {
+		return false
+	}
+	r.res.State, r.res.PhaseCompleted, r.res.WorkUnitCorrectionRequired = r.st, "plan", true
+	return true
+}
+
 func (r *workRun) stopForSplit() bool {
 	if !splitRecommended(r.st) {
 		return false

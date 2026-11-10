@@ -16,3 +16,11 @@ func splitGuidance(opts *RootOptions, result *workflow.WorkResult, issue int) st
 	result.DecomposeCommand = swarmCommand(opts) + fmt.Sprintf(" issue decompose %d", issue)
 	return fmt.Sprintf("The planner recommends a split: issue #%d cannot finish within one claim. Review the proposed child WorkUnits in the recorded PLAN.md, then run: %s", issue, result.DecomposeCommand)
 }
+
+func workUnitCorrectionGuidance(opts *RootOptions, result *workflow.WorkResult, issue int) string {
+	if result == nil || !result.WorkUnitCorrectionRequired {
+		return ""
+	}
+	command := swarmCommand(opts)
+	return fmt.Sprintf("Issue #%d: the WorkUnit needs a maintainer edit. Edit the WorkUnit, then run: %s issue approve %d followed by %s issue work %d", issue, command, issue, command, issue)
+}

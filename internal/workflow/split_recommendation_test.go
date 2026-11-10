@@ -682,3 +682,264 @@ func TestDecompositionStableTopologicalOrder(t *testing.T) {
 		t.Fatalf("unstable order: %v", children)
 	}
 }
+
+func TestWorkUnitCorrectionMarker(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		plan string
+		want bool
+	}{
+		{"absent", "# Plan\n\nNormal work.\n", false},
+		{"exact LF", "# Plan\n\nWorkUnit correction: required\n\n### Child\n", true},
+		{"exact CRLF", "# Plan\r\n\r\nWorkUnit correction: required\r\n### Child\r\n", true},
+		{"trailing space", "WorkUnit correction: required  \n", true},
+		{"first line", "WorkUnit correction: required", true},
+		{"inline prose", "We considered a `WorkUnit correction: required` line but rejected it.\n", false},
+		{"quoted", "> WorkUnit correction: required\n", false},
+		{"prefixed", "- WorkUnit correction: required\n", false},
+		{"indented", "    WorkUnit correction: required\n", false},
+		{"case variant", "workunit correction: required\n", false},
+		{"other value", "WorkUnit correction: optional\n", false},
+		{"guidance only", "# Plan\n\nNormal work.\n" + guidanceStart + "## Operator guidance\n\n> x\nWorkUnit correction: required\n<!-- swarm:guidance:end -->\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := PlanRequiresWorkUnitCorrection(tc.plan); got != tc.want {
+				t.Fatalf("PlanRequiresWorkUnitCorrection(%q) = %t, want %t", tc.plan, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkUnitCorrectionLatestDesign(t *testing.T) {
+	t.Parallel()
+	marker := "WorkUnit correction: required\n"
+	for _, tc := range []struct {
+		name string
+		arts []contract.Artifact
+		want bool
+	}{
+		{"latest design", []contract.Artifact{{Type: contract.ArtifactDesign, Body: "old"}, {Type: contract.ArtifactDesign, Body: marker}}, true},
+		{"superseded design", []contract.Artifact{{Type: contract.ArtifactDesign, Body: marker}, {Type: contract.ArtifactDesign, Body: "normal"}}, false},
+		{"test plan only", []contract.Artifact{{Type: contract.ArtifactDesign, Body: "normal"}, {Type: contract.ArtifactTestPlan, Body: marker}}, false},
+		{"review evidence only", []contract.Artifact{{Type: contract.ArtifactDesign, Body: "normal"}, {Type: contract.ArtifactReview, Body: marker}}, false},
+		{"no design", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := workUnitCorrectionRequired(&lease.IssueState{Artifacts: tc.arts}); got != tc.want {
+				t.Fatalf("workUnitCorrectionRequired = %t, want %t", got, tc.want)
+			}
+		})
+	}
+	if workUnitCorrectionRequired(nil) {
+		t.Fatal("nil state recommended a split")
+	}
+}
+
+func assertCorrectionStop(t *testing.T, res *WorkResult, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("correction stop returned error: %v", err)
+	}
+	if !res.WorkUnitCorrectionRequired || res.Outcome() != "workunit-correction-required" || res.PhaseCompleted != "plan" || res.ValidationPassed || res.HandedOffToPhase != "" || res.PausedForHuman {
+		t.Fatalf("unexpected split result: %+v", res)
+	}
+	for _, a := range res.State.Artifacts {
+		switch a.Type {
+		case contract.ArtifactReview, contract.ArtifactImplementation, contract.ArtifactValidation:
+			t.Fatalf("correction stop recorded a %s artifact (%s)", a.Type, a.Verdict)
+		}
+		if a.Verdict == "FAIL" {
+			t.Fatalf("correction stop recorded a FAIL verdict: %+v", a)
+		}
+	}
+	if res.State.Lease.Status == "handoff" {
+		t.Fatalf("correction stop handed off the claim: %+v", res.State.Lease)
+	}
+}
+
+func TestWorkUnitCorrectionInitialStop(t *testing.T) {
+	for _, gate := range []contract.GateMode{contract.GateNone, contract.GateAgent, contract.GateHuman} {
+		t.Run(string(gate), func(t *testing.T) {
+			e, tr, issue, spy := splitEngine(t, gate)
+			before, err := tr.GetIssue(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			t.Setenv("SWARM_MOCK_PLAN_APPEND", "WorkUnit correction: required\nSplit recommendation: required")
+			res, err := e.ExecuteWork(t.Context(), opts)
+			assertCorrectionStop(t, res, err)
+			opts.ClaimID = res.State.Lease.ClaimID
+			if roles := spy.take(); !slices.Equal(roles, []string{"planner"}) {
+				t.Fatalf("roles run = %v, want only planner", roles)
+			}
+			if !hasDesignAndTestPlanArtifacts(res.State) {
+				t.Fatal("correction stop lost the recorded plan artifacts")
+			}
+			wu, err := contract.ParseWorkUnitFromIssue(before.Number, before.Title, before.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.VerifyApproval(res.State, wu) == nil && gate != contract.GateNone {
+				t.Fatal("correction marker satisfied the plan gate")
+			}
+
+			// Mutable files cannot remove the recorded stop.
+			if err := os.WriteFile(filepath.Join(res.WorktreePath, ".swarm/active/PLAN.md"), []byte("Normal work"), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Resuming reuses the recorded plan and stops again before review
+			// or implementation, whichever phase is requested.
+			t.Setenv("SWARM_MOCK_PLAN_APPEND", "")
+			for _, phase := range []string{"all", "review", "implement"} {
+				opts.Phase = phase
+				res, err := e.ExecuteWork(t.Context(), opts)
+				assertCorrectionStop(t, res, err)
+				if roles := spy.take(); len(roles) != 0 {
+					t.Fatalf("phase %s ran %v on a correction plan", phase, roles)
+				}
+			}
+
+			// The WorkUnit, its approval, and the issue set are unchanged.
+			after, err := tr.GetIssue(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Title != before.Title || after.Body != before.Body {
+				t.Fatal("correction marker changed the WorkUnit")
+			}
+			issues, err := tr.ListIssues(t.Context(), tracker.IssueFilter{State: "all"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(issues) != 1 {
+				t.Fatalf("correction marker created issues: %d", len(issues))
+			}
+
+			// A fresh normal plan goes back through the usual gates.
+			opts.Phase = "plan"
+			if _, err := e.ExecuteWork(t.Context(), opts); err != nil {
+				t.Fatal(err)
+			}
+			spy.take()
+			opts.Phase = "all"
+			res, err = e.ExecuteWork(t.Context(), opts)
+			if res != nil && res.WorkUnitCorrectionRequired {
+				t.Fatal("normal re-plan still stopped for a correction")
+			}
+			roles := spy.take()
+			switch gate {
+			case contract.GateHuman:
+				if err != nil || !res.PausedForHuman || slices.Contains(roles, "developer") {
+					t.Fatalf("human gate after re-plan: %v %+v roles=%v", err, res, roles)
+				}
+			default:
+				if err != nil || !slices.Contains(roles, "reviewer") || !slices.Contains(roles, "developer") {
+					t.Fatalf("agent gate after re-plan should review then implement: %v roles=%v", err, roles)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkUnitCorrectionRetryStop(t *testing.T) {
+	e, tr, issue, _ := splitEngine(t, contract.GateAgent)
+	var roles []string
+	var reservations []int
+	mock := &agent.MockRunner{}
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			roles = append(roles, req.Role)
+			result, err := mock.Run(ctx, req)
+			if err != nil {
+				return result, err
+			}
+			active := filepath.Join(req.WorktreePath, ".swarm/active")
+			if req.Role == "planner" {
+				st, err := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reservations = append(reservations, st.PlanReplanCount)
+				if len(reservations) == 2 {
+					for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
+						path := filepath.Join(active, name)
+						b, err := os.ReadFile(path)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path, append(b, []byte("\nWorkUnit correction: required\n")...), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			if req.Role == "reviewer" {
+				text := structuredReviewFixture("CHANGES_REQUESTED")
+				if err := os.WriteFile(filepath.Join(active, "REVIEW.md"), []byte(text), 0600); err != nil {
+					t.Fatal(err)
+				}
+				result.Output = text
+			}
+			return result, nil
+		}}, nil
+	}
+	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.WorkUnitCorrectionRequired || res.Outcome() != "workunit-correction-required" || res.PhaseCompleted != "plan" || res.ValidationPassed {
+		t.Fatalf("result: %+v", res)
+	}
+	if !slices.Equal(roles, []string{"planner", "reviewer", "planner"}) || !slices.Equal(reservations, []int{0, 1}) || res.State.PlanReplanCount != 1 {
+		t.Fatalf("roles=%v reservations=%v state=%+v", roles, reservations, res.State)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.VerifyApproval(res.State, wu) == nil {
+		t.Fatal("correction approved the plan")
+	}
+	after, err := tr.GetIssue(t.Context(), issue.Number)
+	if err != nil || after.Body != issue.Body {
+		t.Fatalf("WorkUnit changed: %v", err)
+	}
+}
+
+func TestWorkUnitCorrectionDirectScope(t *testing.T) {
+	st := &lease.IssueState{Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: WorkUnitCorrectionLine}}}
+	for _, tc := range []struct {
+		fork bool
+		pr   int
+		want bool
+	}{{false, 0, true}, {true, 0, false}, {false, 7, false}} {
+		r := &workRun{st: st, res: &WorkResult{}, forkMode: tc.fork, opts: WorkOptions{PRNumber: tc.pr}}
+		if got := r.stopForWorkUnitCorrection(); got != tc.want {
+			t.Fatalf("%+v: %t", tc, got)
+		}
+	}
+}
+
+func TestWorkUnitCorrectionPlanHandoffStops(t *testing.T) {
+	e, _, issue, spy := splitEngine(t, contract.GateAgent)
+	t.Setenv("SWARM_MOCK_PLAN_APPEND", WorkUnitCorrectionLine)
+	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "plan", Handoff: true, Headless: true})
+	assertCorrectionStop(t, res, err)
+	if roles := spy.take(); !slices.Equal(roles, []string{"planner"}) {
+		t.Fatal(roles)
+	}
+}
+
+func TestWorkUnitCorrectionBeforeHumanReview(t *testing.T) {
+	st := &lease.IssueState{HumanPlanReview: &lease.PlanRejection{}, Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: WorkUnitCorrectionLine}}}
+	r := &workRun{st: st, res: &WorkResult{}, gate: contract.GateHuman}
+	done, err := r.reviewGate()
+	if err != nil || !done || !r.res.WorkUnitCorrectionRequired || r.res.PausedForHuman {
+		t.Fatalf("done=%t err=%v result=%+v", done, err, r.res)
+	}
+}

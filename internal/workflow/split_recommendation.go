@@ -41,6 +41,33 @@ func splitRecommended(st *lease.IssueState) bool {
 	return false
 }
 
+// WorkUnitCorrectionLine requests a stop for maintainer correction, without granting authority.
+const WorkUnitCorrectionLine = "WorkUnit correction: required"
+
+// PlanRequiresWorkUnitCorrection recognizes a standalone marker, ignoring operator guidance.
+func PlanRequiresWorkUnitCorrection(plan string) bool {
+	for _, line := range strings.Split(canonicalReport(plan), "\n") {
+		if strings.TrimRight(line, " \t\r") == WorkUnitCorrectionLine {
+			return true
+		}
+	}
+	return false
+}
+
+// workUnitCorrectionRequired reports whether the latest recorded design artifact
+// requests a WorkUnit correction. Only the fenced artifact counts, never worktree files.
+func workUnitCorrectionRequired(st *lease.IssueState) bool {
+	if st == nil {
+		return false
+	}
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		if st.Artifacts[i].Type == contract.ArtifactDesign {
+			return PlanRequiresWorkUnitCorrection(st.Artifacts[i].Body)
+		}
+	}
+	return false
+}
+
 // SplitChild is an untrusted planner proposal, not a WorkUnit approval.
 type SplitChild struct {
 	ID          string   `yaml:"id" json:"id"`

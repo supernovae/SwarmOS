@@ -213,6 +213,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			guidance := claimBudgetGuidance(&guidanceOpts, result, "issue", result.IssueNumber)
 			split := splitGuidance(&guidanceOpts, result, result.IssueNumber)
+			if result.WorkUnitCorrectionRequired {
+				split = workUnitCorrectionGuidance(&guidanceOpts, result, result.IssueNumber)
+			}
 			status := result.Outcome()
 			if jsonOutput {
 				outcome := map[string]any{"kind": "work", "status": status, "result": result}
@@ -229,7 +232,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), split)
 			}
 			decision := false
-			if result.State != nil && result.State.EffectiveGate == contract.GateHuman && result.PhaseCompleted != "awaiting-plan" {
+			if !result.WorkUnitCorrectionRequired && result.State != nil && result.State.EffectiveGate == contract.GateHuman && result.PhaseCompleted != "awaiting-plan" {
 				issue, err := tr.GetIssue(cmd.Context(), result.IssueNumber)
 				if err != nil {
 					return err

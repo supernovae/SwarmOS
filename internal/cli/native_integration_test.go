@@ -75,6 +75,17 @@ func TestMain(m *testing.M) {
 		ledgerExit(1)
 	}
 
+	// Agent programs installed on this machine would otherwise be started by
+	// doctor and preflight checks, which makes the suite minutes slower and
+	// host-dependent. The opt-in authenticated qualification tests keep them.
+	if os.Getenv("SWARM_TEST_CODEX_AUTHENTICATED") != "1" && os.Getenv("SWARM_TEST_MIXED_AUTHENTICATED") != "1" && os.Getenv("SWARM_TEST_WORKFLOW_HARNESS") == "" {
+		if err := testutil.HideHostAgents(root); err != nil {
+			fmt.Fprintln(os.Stderr, "TestMain:", err)
+			os.RemoveAll(root)
+			ledgerExit(1)
+		}
+	}
+
 	// Persist suppression in every init/clone, including receive-side bare repos.
 	template := filepath.Join(root, "git-template")
 	if err := os.Mkdir(template, 0o700); err != nil {

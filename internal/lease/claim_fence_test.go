@@ -30,6 +30,8 @@ type claimFenceWrite struct {
 // This literal inventory deliberately requires a human classification whenever
 // Manager gains an exported method. Empty reasons denote claim-scoped writers.
 var claimFenceInventory = map[string]string{
+	"LookupSession":                  "read-only access to command-local lookup session; no durable state write",
+	"SetLookupSession":               "manager configuration only; no durable state write",
 	"AuthorizeGapAcknowledgment":     "read-only authenticated authorization; no durable state write",
 	"RecordGapAcknowledgment":        "",
 	"Acquire":                        "claim acquisition",

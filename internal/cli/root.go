@@ -79,8 +79,12 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 		return err
 	})
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
 		opts.lookups = gitcredential.NewLookupSession()
-		cmd.SetContext(gitcredential.WithLookupSession(cmd.Context(), opts.lookups))
+		cmd.SetContext(gitcredential.WithLookupSession(ctx, opts.lookups))
 		rerun := cmd.CommandPath()
 		for _, arg := range args {
 			if _, err := strconv.Atoi(arg); err == nil {
@@ -102,11 +106,7 @@ func newRootCmdWithOptions(opts *RootOptions) *cobra.Command {
 				fmt.Fprintf(out, "GitHub unreachable (%s); retry %d/%d in %s\n", reason, next, limit, delay.Round(time.Second))
 			}
 		}
-		ctx := cmd.Context()
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		cmd.SetContext(gitcredential.WithNetworkRetry(ctx, rerun, notice))
+		cmd.SetContext(gitcredential.WithNetworkRetry(cmd.Context(), rerun, notice))
 		if cmd.Name() == "internal-native-exec" {
 			return nil
 		}

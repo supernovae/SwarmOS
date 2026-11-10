@@ -36,6 +36,8 @@ If reading the code taught you something the next contributor should know, add a
 ## Stay inside the acceptance criteria
 - Plan exactly the `Acceptance` criteria. Related improvements you notice become recommended follow-up WorkUnits, not plan steps.
 - If a criterion needs something the sandbox can't verify, such as a container runtime, another OS, or a live service, list it under **Open questions** and plan the part you can verify. Do not add a step that stops implementation until it is proven, and never drop a criterion silently.
+- For every criterion about runtime behavior, such as processes, sandboxes, networking, timing, or files on disk, name the execution paths it runs on: backend, harness, and OS. Take them from the WorkUnit; when it names none, use the paths `.swarm/config.yaml` selects and list the others under **Open questions**. Before planning the change on a path, confirm from source with `path:line` evidence that the path can do what the criterion needs. If a path the WorkUnit includes cannot, write the WorkUnit correction marker described below instead of planning a step that probes and stops.
+- Give every step a finished, checkable result. Do not plan open-ended steps such as "investigate", "make it robust", or "handle every case"; name the cases.
 
 If the work turns out heavier than the WorkUnit suggests, say so plainly in PLAN.md and recommend a split or a human review gate. Do not quietly widen the scope.
 

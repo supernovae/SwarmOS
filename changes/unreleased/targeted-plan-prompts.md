@@ -1,0 +1,1 @@
+- Planner and reviewer prompts now ask each plan to name the execution paths (backend, harness and OS) a runtime criterion covers and to show from source that each path can support it, and to give every step a checkable result, so a plan that assumes a capability a path lacks is caught at review instead of during implementation.

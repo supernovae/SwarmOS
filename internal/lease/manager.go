@@ -695,6 +695,37 @@ func short(s string) string {
 const maxProjectedArtifactChars = 12000
 
 // TruncateArtifactBody bounds a projected artifact, pointing at stateRef for the full body.
+// recordableNodeID keeps a node ID the operator chose and drops one derived
+// from this machine's hostname: state is stored with the repository, so it
+// must not carry a local hostname (Security Invariant 9).
+func recordableNodeID(id string) string {
+	host, err := nodeHostname()
+	if err != nil || host == "" {
+		return id
+	}
+	short := strings.ToLower(strings.Split(host, ".")[0])
+	lower := strings.ToLower(id)
+	if short != "" && (lower == short || strings.HasPrefix(lower, short+"-") || strings.HasPrefix(lower, strings.ToLower(host))) {
+		return ""
+	}
+	return id
+}
+
+var nodeHostname = os.Hostname
+
+// projectedArtifactBody is what an artifact contributes to the issue comment.
+// Raw check output stays in the state ref: it is whatever a check printed and
+// may name local paths, so the comment carries the result table only.
+func projectedArtifactBody(a contract.Artifact, stateRef string) string {
+	body := a.Body
+	if a.Type == contract.ArtifactValidation {
+		if summary, _, found := strings.Cut(body, "\n### Output:"); found {
+			body = strings.TrimSpace(summary) + fmt.Sprintf("\n\nCheck output is stored in `%s`.", stateRef)
+		}
+	}
+	return TruncateArtifactBody(body, stateRef)
+}
+
 func TruncateArtifactBody(body, stateRef string) string {
 	trimmed := strings.TrimSpace(body)
 	if len(trimmed) <= maxProjectedArtifactChars {
@@ -907,7 +938,7 @@ func RenderStateProjection(wu *contract.WorkUnit, st *IssueState, layout coordin
 			default:
 				title = fmt.Sprintf("📄 Artifact (%s — sha256:%s)", a.Type, short(digest))
 			}
-			sb.WriteString(fmt.Sprintf("<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, TruncateArtifactBody(a.Body, layout.StateRef(issueNum))))
+			sb.WriteString(fmt.Sprintf("<details>\n<summary>%s</summary>\n\n%s\n\n</details>\n\n", title, projectedArtifactBody(a, layout.StateRef(issueNum))))
 		}
 	}
 	return sb.String()
@@ -1249,7 +1280,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 		st.Lease.NextPhase = "plan"
 	}
 	if m.nodeProfile != nil {
-		st.Lease.NodeID = m.nodeProfile.NodeID
+		st.Lease.NodeID = recordableNodeID(m.nodeProfile.NodeID)
 		st.Lease.Capabilities = append([]string(nil), m.nodeProfile.Capabilities...)
 	}
 	if _, err = m.save(ctx, n, rev, st); err != nil {
@@ -1416,7 +1447,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			st.Lease.NextPhase = "plan"
 		}
 		if m.nodeProfile != nil {
-			st.Lease.NodeID = m.nodeProfile.NodeID
+			st.Lease.NodeID = recordableNodeID(m.nodeProfile.NodeID)
 			st.Lease.Capabilities = append([]string(nil), m.nodeProfile.Capabilities...)
 		}
 		if _, err = m.save(ctx, issue, rev, st); err != nil {
@@ -1637,6 +1668,17 @@ func (m *Manager) RequireGate(ctx context.Context, issue int, owner string, requ
 		return nil
 	})
 }
+
+// ValidateRequestedPhaseStatus limits the status a fork request may ask a
+// phase update to record. A phase update only ever marks the claim active;
+// every other lease status has its own fenced operation.
+func ValidateRequestedPhaseStatus(status string) error {
+	if status != "" && status != "active" {
+		return fmt.Errorf("unsupported phase status")
+	}
+	return nil
+}
+
 func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status string) (*IssueState, error) {
 	if m.gateway != nil {
 		return m.gateway.Apply(ctx, ForkRequest{

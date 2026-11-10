@@ -403,6 +403,9 @@ func (c *Coordinator) executeRequest(ctx context.Context, requestID int64, actor
 			}
 
 		case "update-phase":
+			if err = lease.ValidateRequestedPhaseStatus(req.Status); err != nil {
+				return nil, "", err
+			}
 			updated, err = mgr.UpdatePhase(ctx, req.IssueNumber, actor, req.Phase, req.Status)
 			if err != nil {
 				return nil, "", err

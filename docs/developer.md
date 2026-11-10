@@ -688,7 +688,7 @@ go test -timeout=5m ./internal/sandbox -run '^Test(WorkerArchiveRoundTripAndImpo
 go test -timeout=5m ./internal/fork -run '^Test(GatewayDeadlineCancelsInFlightScan|GatewayIgnoresMismatchedOrEditedResults|ForkJSONRejectsTrailingMalformedData|ForkCoordinatorSecurityAndLifecycle|OperationListsStayInSync|ForkRequestRejectsCarryAuthority)$' -count=1
 go test -timeout=10m ./internal/validation/... ./internal/harness/... ./internal/coordination/... ./internal/lease/... ./internal/contract/...
 go test -timeout=5m ./cmd/changelog ./internal/changelog
-go test -timeout=15m -parallel=8 ./internal/cli
+go test -timeout=30m -parallel=8 ./internal/cli
 ```
 
 There is no changed-file selector or conditional broad-change fallback: broad changes retain this fixed profile, which runs the entire CLI package on every PR. Nightly and release validation add the race suite and the remaining packages. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.

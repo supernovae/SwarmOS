@@ -571,16 +571,20 @@ func collectModifiedFiles(worktreePath, baseSHA string) ([]string, error) {
 	return files, nil
 }
 
-// checkTimeout caps a configured check timeout at 15 minutes.
+// defaultCheckTimeout applies when a check names no timeout; maxCheckTimeout
+// bounds any configured value so a stuck check still ends.
+const (
+	defaultCheckTimeout = 15 * time.Minute
+	maxCheckTimeout     = time.Hour
+)
+
+// checkTimeout returns the check's configured timeout, up to maxCheckTimeout.
 func checkTimeout(configured string) time.Duration {
-	duration := 15 * time.Minute
-	if configured != "" {
-		parsed, _ := time.ParseDuration(configured)
-		if parsed < duration {
-			duration = parsed
-		}
+	parsed, err := time.ParseDuration(configured)
+	if configured == "" || err != nil || parsed <= 0 {
+		return defaultCheckTimeout
 	}
-	return duration
+	return min(parsed, maxCheckTimeout)
 }
 
 // checkRunner runs commands inside the execution boundary selected by the

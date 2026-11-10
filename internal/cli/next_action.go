@@ -18,6 +18,7 @@ import (
 // Next-action reasons emitted by issue work, issue submit, pr work, pr rebase,
 // and pr submit when they stop short of success.
 const (
+	ReasonRequiredCheckLimit    = "required_check_limit"
 	ReasonPartialImplementation = "partial_implementation"
 	ReasonChangesRequested      = "changes_requested"
 	ReasonPlanNoProgress        = "plan_no_progress"
@@ -164,6 +165,28 @@ func (c stopContext) classify(err error) *NextAction {
 	var retry *workflow.TestRetryAvailableError
 	if errors.As(err, &retry) && (c.opts == nil || !c.opts.Fork) {
 		return &NextAction{Reason: "tester_retry_available", Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "test")}
+	}
+	// Limit advice outranks repair evidence, while claim and approval blockers
+	// retain authority when a caller joins their error with the failed report.
+	var limit *validation.LimitError
+	if errors.As(err, &limit) {
+		var task *lease.TaskApprovalError
+		var base *lease.ClaimBaseApprovalError
+		var plan *lease.HumanPlanApprovalError
+		var trusted *lease.PlanApprovalError
+		switch {
+		case errors.Is(err, lease.ErrClaimFence):
+			return nil
+		case errors.As(err, &task):
+			return c.taskApproval(task.IssueNumber)
+		case errors.As(err, &base):
+			return c.taskApproval(base.IssueNumber)
+		case errors.As(err, &plan):
+			return c.planApproval(plan.IssueNumber)
+		case errors.As(err, &trusted):
+			return c.planApproval(trusted.IssueNumber)
+		}
+		return &NextAction{Reason: ReasonRequiredCheckLimit, Argv: c.argv(false, c.resource, "validate", strconv.Itoa(c.number))}
 	}
 	if errors.Is(err, workflow.ErrPreExistingFailures) {
 		return &NextAction{Reason: ReasonPreExistingFailures, Argv: c.argv(false, c.resource, "status", strconv.Itoa(c.number)), HumanRequired: true}
@@ -403,6 +426,9 @@ func (c stopContext) statusAction(st *lease.IssueState, wu *contract.WorkUnit, c
 	}
 	if c.resource == "issue" && (c.opts == nil || !c.opts.Fork) && currentPartialImplementation(st) {
 		return action(ReasonPartialImplementation, "work", "--phase", "plan")
+	}
+	if limit := validation.LimitFromArtifacts(st.Artifacts, st.HeadSHA, st.BaseSHA); limit != "" {
+		return c.classify(&validation.LimitError{Outcome: limit})
 	}
 	if repair := validation.RepairFromArtifact(st.Artifacts, st.BaseSHA); recordedValidationFailed(st) && repair != nil && repair.HeadSHA == st.HeadSHA {
 		if repair.AllPreExisting || repair.OutsideCandidate() {

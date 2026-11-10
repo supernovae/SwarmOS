@@ -10,11 +10,13 @@ import (
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -310,16 +312,38 @@ func TestValidateFallsBackToScratchBuildCache(t *testing.T) {
 }
 
 func TestOCIChecksGetNoBuildCache(t *testing.T) {
+	cacheRoot := useCacheRoot(t)
 	repo := setupGitRepoForValidation(t)
 	config := "version: 1\ndefault_agent: codex\ndefault_gate: agent\nexecution:\n  mode: isolated\n  backend: oci\nlease:\n  duration: 1h\n  max_renewals: 1\nsecurity:\n  require_isolation: true\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  codex:\n    binary: swarm-test-missing-codex\n"
 	base := commitRepoChange(t, repo, ".swarm/config.yaml", config)
-	previous := userCacheDir
-	resolved := false
-	userCacheDir = func() (string, error) { resolved = true; return "", errors.New("must not resolve") }
-	t.Cleanup(func() { userCacheDir = previous })
-	_, _ = Validate(context.Background(), repo, nil, ValidateOptions{CIMode: true, BaseSHA: base})
-	if resolved {
-		t.Fatal("OCI validation resolved a build cache")
+	// Duration history uses the coordinator cache on every backend. Check
+	// the actual cache namespaces rather than treating any lookup as a build
+	// cache: OCI must receive budgets without preparing candidate caches.
+	runs := 0
+	report, err := Validate(context.Background(), repo, nil, ValidateOptions{
+		CIMode: true, BaseSHA: base,
+		runCommand: func(context.Context, string, time.Duration, io.Writer, io.Writer) error {
+			runs++
+			return nil
+		},
+	})
+	if err != nil || report == nil || !report.Passed || runs == 0 {
+		t.Fatalf("OCI validation = %+v, %v; check runs = %d", report, err, runs)
+	}
+	for _, namespace := range []string{"validate-build", "validate-deps"} {
+		if _, err := os.Lstat(filepath.Join(cacheRoot, "swarm", namespace)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("OCI validation prepared %s cache: %v", namespace, err)
+		}
+	}
+	root, err := durationRoot(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for _, outcome := range report.CheckOutcomes {
+		if samples := readDurations(root, durationKey(outcome.Name, outcome.Command)).Samples; len(samples) != 1 {
+			t.Fatalf("OCI passing duration samples = %v, want one", samples)
+		}
 	}
 }
 
@@ -705,4 +729,180 @@ func TestHostValidationBoundaryEvidenceIsOutside(t *testing.T) {
 		}
 	}
 	scope.Retain()
+}
+
+func TestRequiredCheckDurationHistoryStorage(t *testing.T) {
+	useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	c := contract.CheckSpec{Name: "history", Command: "true", Timeout: "1ms"}
+	root, err := durationRoot(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	key := durationKey(c.Name, c.Command)
+	for _, raw := range []string{`{}`, `garbage`, `{"version":1,"samples":[-1]}`, `{"version":1,"samples":[9223372036854775808]}`, `{"version":2,"samples":[10000000000]}`} {
+		if err := root.WriteFile(key+".json", []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if got := requiredCheckBudget(t.Context(), repo, c); got != time.Millisecond {
+			t.Fatalf("accepted %s: %v", raw, got)
+		}
+	}
+	// Failed, preliminary and abandoned runs cannot become training samples.
+	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Duration: time.Second}, {Name: c.Name, Command: c.Command, Passed: true, Preliminary: true, Duration: time.Second}, {Name: c.Name, Command: c.Command, Passed: true, FallbackReason: "skipped", Duration: time.Second}})
+	if got := requiredCheckBudget(t.Context(), repo, c); got != time.Millisecond {
+		t.Fatalf("invalid training: %v", got)
+	}
+	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Passed: true, Duration: time.Second}})
+	linked := filepath.Join(t.TempDir(), "linked")
+	if out, err := gitfixture.Command(t, "", "-C", repo, "worktree", "add", "--detach", linked, "HEAD").CombinedOutput(); err != nil {
+		t.Fatalf("%s %v", out, err)
+	}
+	if got := requiredCheckBudget(t.Context(), linked, c); got != 2*time.Second {
+		t.Fatalf("linked identity: %v", got)
+	}
+	other := setupGitRepoForValidation(t)
+	if got := requiredCheckBudget(t.Context(), other, c); got != time.Millisecond {
+		t.Fatalf("repository isolation: %v", got)
+	}
+	for i := 0; i < 30; i++ {
+		recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Passed: true, Duration: time.Second}})
+	}
+	if h := readDurations(root, key); len(h.Samples) != 20 {
+		t.Fatalf("unbounded history: %+v", h)
+	}
+	// Root-bound writes reject a symlink in either the record or lock position.
+	cache, _ := userCacheDir()
+	matches, _ := filepath.Glob(filepath.Join(cache, "swarm", "validate-duration", "*", key+".json"))
+	if len(matches) != 1 {
+		t.Fatal(matches)
+	}
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(matches[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, matches[0]); err != nil {
+		t.Fatal(err)
+	}
+	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Passed: true, Duration: time.Minute}})
+	if raw, _ := os.ReadFile(target); string(raw) != "untouched" {
+		t.Fatal("symlink write escaped")
+	}
+	if got := requiredCheckBudget(t.Context(), repo, c); got != time.Millisecond {
+		t.Fatalf("followed history link: %v", got)
+	}
+}
+
+func TestRequiredCheckDurationHistoryConcurrent(t *testing.T) {
+	useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	c := CheckRunOutcome{Name: "concurrent", Command: "true", Passed: true, Duration: time.Second}
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{c}) }()
+	}
+	wg.Wait()
+	root, err := durationRoot(t.Context(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if h := readDurations(root, durationKey(c.Name, c.Command)); len(h.Samples) != 12 {
+		t.Fatalf("lost updates: %+v", h)
+	}
+}
+
+func TestRequiredCheckDurationHistoryCompleteRunsOnly(t *testing.T) {
+	useCacheRoot(t)
+	for _, kind := range []string{"failed", "cancelled", "passed"} {
+		t.Run(kind, func(t *testing.T) {
+			repo := setupGitRepoForValidation(t)
+			last := "exit 1"
+			if kind == "passed" {
+				last = "true"
+			}
+			base := commitRepoChange(t, repo, ".swarm/validation/required-checks.yaml", "required_checks:\n  - name: first\n    command: true\n    timeout: 1m\n  - name: last\n    command: "+last+"\n    timeout: 1m\nprotected_paths: [protected/**]\n")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			report, runErr := Validate(ctx, repo, nil, ValidateOptions{BaseSHA: base, OnProgress: func(e progress.Event) {
+				if kind == "cancelled" && e.Check == "last" && e.Status == "started" {
+					cancel()
+				}
+			}})
+			if report == nil {
+				t.Fatalf("missing report: %v", runErr)
+			}
+			root, err := durationRoot(t.Context(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			samples := readDurations(root, durationKey("first", "true")).Samples
+			if (len(samples) > 0) != (kind == "passed") {
+				t.Fatalf("%s samples: %v", kind, samples)
+			}
+			if strings.Contains(report.Artifact.Body, "validate-duration") || strings.Contains(report.Artifact.Metadata["validation_timing_report"], "samples") {
+				t.Fatal("history projected")
+			}
+		})
+	}
+}
+
+func TestRequiredCheckDurationHistoryRejectsWorktreeCache(t *testing.T) {
+	useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	// Coordinator configuration must never turn a candidate directory into state.
+	userCacheDir = func() (string, error) { return repo, nil }
+	if r, err := durationRoot(t.Context(), repo); err == nil {
+		r.Close()
+		t.Fatal("history inside worktree admitted")
+	}
+}
+
+func TestRequiredCheckDurationHistoryUnsafeLayout(t *testing.T) {
+	cache := useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	c := contract.CheckSpec{Name: "layout", Command: "true", Timeout: "1ms"}
+	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Passed: true, Duration: time.Second}})
+	records, _ := filepath.Glob(filepath.Join(cache, "swarm", "validate-duration", "*", durationKey(c.Name, c.Command)+".json"))
+	if len(records) != 1 {
+		t.Fatal(records)
+	}
+	record := records[0]
+	if runtime.GOOS == "linux" {
+		if err := os.Remove(record); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("mkfifo", record).CombinedOutput(); err != nil {
+			t.Fatalf("mkfifo: %s %v", out, err)
+		}
+		if got := requiredCheckBudget(t.Context(), repo, c); got != time.Millisecond {
+			t.Fatalf("special file read %v", got)
+		}
+		recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Passed: true, Duration: time.Second}})
+		if info, err := os.Lstat(record); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+			t.Fatal("special file was replaced")
+		}
+	}
+	target := t.TempDir()
+	parent := filepath.Join(cache, "swarm", "validate-duration")
+	if err := os.Rename(parent, parent+"-saved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, parent); err != nil {
+		t.Fatal(err)
+	}
+	recordRequiredDurations(t.Context(), repo, []CheckRunOutcome{{Name: c.Name, Command: c.Command, Passed: true, Duration: time.Second}})
+	entries, err := os.ReadDir(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("history followed parent link: %v %v", entries, err)
+	}
+	if got := requiredCheckBudget(t.Context(), repo, c); got != time.Millisecond {
+		t.Fatalf("unsafe history budget %v", got)
+	}
 }

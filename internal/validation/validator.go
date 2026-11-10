@@ -3,6 +3,8 @@ package validation
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -36,7 +39,37 @@ var (
 	ErrUnsafePath            = errors.New("unsafe repository path")
 )
 
+// LimitError identifies a failed run that should rerun checks before code repair.
+type LimitError struct{ Outcome string }
+
+func (e *LimitError) Error() string {
+	return "required checks ended: " + e.Outcome + "; rerun required validation"
+}
+func (e *LimitError) Unwrap() error { return ErrRequiredCheckFailed }
+
+const LimitMetadataKey = "validation_limit"
+const OutcomeTimeLimit = "time-limit"
+const OutcomeStalled = "stalled"
+
+func validLimit(s string) bool { return s == OutcomeTimeLimit || s == OutcomeStalled }
+
+// LimitFromArtifacts only accepts the latest current coordinator FAIL.
+func LimitFromArtifacts(artifacts []contract.Artifact, head, base string) string {
+	for i := len(artifacts) - 1; i >= 0; i-- {
+		a := artifacts[i]
+		if a.Type != contract.ArtifactValidation {
+			continue
+		}
+		if head != "" && base != "" && a.Verdict == "FAIL" && a.Metadata["validation_trusted_origin"] == "coordinator" && a.Metadata["head_sha"] == head && a.Metadata["base_sha"] == base && validLimit(a.Metadata[LimitMetadataKey]) {
+			return a.Metadata[LimitMetadataKey]
+		}
+		return ""
+	}
+	return ""
+}
+
 type CheckRunOutcome struct {
+	Outcome             string        `json:"outcome,omitempty"`
 	SkippedTests        []SkippedTest `json:"skipped_tests,omitempty"`
 	SkippedTotal        int           `json:"skipped_total,omitempty"`
 	OutputTail          string        `json:"output_tail,omitempty"`
@@ -70,6 +103,7 @@ type goEvidence struct {
 }
 
 type ValidationReport struct {
+	Limit         string        `json:"limit,omitempty"`
 	SkippedTests  []SkippedTest `json:"skipped_tests,omitempty"`
 	SkippedTotal  int           `json:"skipped_total,omitempty"`
 	Reused        bool          `json:"reused,omitempty"`
@@ -146,6 +180,7 @@ func DurationText(d *time.Duration) string {
 }
 
 type ValidateOptions struct {
+	runCommand func(context.Context, string, time.Duration, io.Writer, io.Writer) error
 	// DirectIssueReuse permits bounded same-owner cross-claim reuse for direct issues.
 	DirectIssueReuse bool
 	// Version and ClaimID identify the coordinator validation context. Empty
@@ -216,6 +251,11 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if scopeErr != nil {
 		return nil, scopeErr
 	}
+	defer func() {
+		if resultErr == nil && result != nil && result.Passed && !result.Reused && ctx.Err() == nil {
+			recordRequiredDurations(ctx, worktreePath, result.CheckOutcomes)
+		}
+	}()
 	defer func() {
 		if resultErr != nil && result != nil {
 			result.Passed = false
@@ -358,7 +398,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			return nil, fmt.Errorf("validation preflight: %w", err)
 		}
 	}
-	runner := &checkRunner{worktree: worktreePath, home: checkHome, buildCaches: caches, deps: deps, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated}
+	runner := &checkRunner{worktree: worktreePath, home: checkHome, buildCaches: caches, deps: deps, cfg: cfg, execution: execution, runnerIsolated: opts.RunnerIsolated, runCommand: opts.runCommand}
 	// Only the trusted base writes the persistent caches, and only where a
 	// candidate can read them back (sandbox.ValidatorCacheReusable).
 	report.Timings.Preflight = PhaseTiming{Duration: time.Since(started), Status: "ran"}
@@ -385,6 +425,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			status = "SKIPPED (" + outcome.FallbackReason + ")"
 		} else if !outcome.Passed {
 			status = fmt.Sprintf("FAIL (exit %d)", outcome.ExitCode)
+			if validLimit(outcome.Outcome) {
+				status = outcome.Outcome
+			}
 		}
 		markdown.WriteString(fmt.Sprintf("| `%s` | `%s` | **%s** | `%s` |\n", reportCell(outcome.Name), reportCell(outcome.Command), status, outcome.Duration.Round(time.Millisecond)))
 		if strings.TrimSpace(outcome.Output) != "" {
@@ -393,6 +436,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	}
 	fail := func(outcome *CheckRunOutcome, runErr error) {
 		report.Passed = false
+		if validLimit(outcome.Outcome) {
+			report.Limit = outcome.Outcome
+		}
 		if firstErr == nil {
 			firstErr = fmt.Errorf("%w: check %q (%s) exited with %d: %v", ErrRequiredCheckFailed, outcome.Name, outcome.Command, outcome.ExitCode, runErr)
 		}
@@ -400,7 +446,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	required := 0
 	checksStart := time.Now()
 	for _, check := range spec.RequiredChecks {
-		duration := checkTimeout(check.Timeout)
+		duration := requiredCheckBudget(ctx, worktreePath, check)
 		required++
 		outcome, runErr := runner.runCheck(ctx, check.Name, check.Command, duration, opts.OnProgress)
 		if runErr != nil {
@@ -415,7 +461,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	report.Timings.Repair.Status = "not-applicable"
 	details.WriteString(warmNote)
 	// Diagnosis is coordinator work after the verdict; it never changes it.
-	if !report.Passed && !opts.CIMode && ctx.Err() == nil {
+	if !report.Passed && report.Limit == "" && !opts.CIMode && ctx.Err() == nil {
 		repairStart := time.Now()
 		phaseEvent(opts.OnProgress, "repair", "started", 0)
 		report.Repair = diagnoseRepairTree(ctx, runner, report, checkpointTree)
@@ -464,6 +510,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		issue = 1
 	}
 	report.Artifact = contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-validation", issue), IssueNumber: issue, Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: verdict, Summary: summary, Body: markdown.String(), CreatedAt: time.Now().UTC(), Metadata: map[string]string{"base_sha": baseSHA, "head_sha": headSHA}}
+	if report.Limit != "" {
+		report.Artifact.Metadata[LimitMetadataKey] = report.Limit
+	}
 	if report.Repair != nil {
 		report.Artifact.Metadata["validation_checkpoint_tree"] = checkpointTree
 		evidence, _ := json.Marshal(report.Repair)
@@ -475,7 +524,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	timingReport.SkippedTests = nil
 	timingReport.CheckOutcomes = make([]CheckRunOutcome, len(report.CheckOutcomes))
 	for i, c := range report.CheckOutcomes {
-		timingReport.CheckOutcomes[i] = CheckRunOutcome{Name: c.Name, Command: c.Command, Passed: c.Passed, ExitCode: c.ExitCode, Duration: c.Duration, Preliminary: c.Preliminary}
+		timingReport.CheckOutcomes[i] = CheckRunOutcome{Name: c.Name, Command: c.Command, Outcome: c.Outcome, Passed: c.Passed, ExitCode: c.ExitCode, Duration: c.Duration, Preliminary: c.Preliminary}
 	}
 	timingEvidence, _ := json.Marshal(timingReport)
 	report.Artifact.Metadata["validation_timing_report"] = string(timingEvidence)
@@ -494,6 +543,12 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 		if err := WriteRepairBrief(worktreePath, report.Repair); err != nil {
 			return nil, err
 		}
+	}
+	if ctx.Err() != nil {
+		return report, errors.Join(ctx.Err(), firstErr)
+	}
+	if report.Limit != "" {
+		return report, &LimitError{Outcome: report.Limit}
 	}
 	if firstErr != nil {
 		return report, firstErr
@@ -603,15 +658,45 @@ type checkRunner struct {
 	cfg            *contract.SwarmConfig
 	execution      contract.ExecutionConfig
 	runnerIsolated bool
+	runCommand     func(context.Context, string, time.Duration, io.Writer, io.Writer) error
+	runOCI         func(context.Context, string, time.Duration, io.Writer, io.Writer) error
+	// Per-run observer seams; defaults are Linux procfs, one second, five minutes.
+	stallWindow     time.Duration
+	sampleInterval  time.Duration
+	sampleProcesses func() (map[int]checkProcess, error)
+	now             func() time.Time
 }
 
 // run executes command under ctx, which the caller bounds by duration.
 func (r *checkRunner) run(ctx context.Context, command string, duration time.Duration, stdout, stderr io.Writer) error {
+	if r.runCommand != nil {
+		return r.runCommand(ctx, command, duration, stdout, stderr)
+	}
 	if r.runnerIsolated {
 		return r.runOnHost(ctx, command, stdout, stderr)
 	} else if r.execution.Mode == contract.ExecutionIsolated && r.execution.Backend == contract.BackendNative {
-		return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, r.buildCaches, r.deps, r.warmup, stdout, stderr)
+		if runtime.GOOS != "linux" {
+			return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, r.buildCaches, r.deps, r.warmup, stdout, stderr)
+		}
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return err
+		}
+		marker := "swarm-validation-" + hex.EncodeToString(nonce[:])
+		wrapped := nativeCheckSupervisor(command, marker)
+		observedCtx, cancel := context.WithCancelCause(ctx)
+		defer cancel(nil)
+		stop := r.observeCPU(observedCtx, cancel, 0, marker)
+		defer stop()
+		err := sandbox.RunConfiguredNativeValidation(observedCtx, r.worktree, r.cfg, wrapped, r.buildCaches, r.deps, r.warmup, stdout, stderr)
+		if errors.Is(context.Cause(observedCtx), errCheckStalled) && ctx.Err() == nil && err != nil {
+			return errors.Join(err, errCheckStalled)
+		}
+		return err
 	} else if r.execution.Mode == contract.ExecutionIsolated {
+		if r.runOCI != nil {
+			return r.runOCI(ctx, command, duration, stdout, stderr)
+		}
 		return sandbox.RunWorker(ctx, r.worktree, "/bin/sh", []string{"-c", command}, sandbox.WorkerOptions{
 			Runtime: r.execution.ContainerRuntime, Image: r.execution.ContainerImage, Role: "validation", Timeout: duration, DiscardChanges: true,
 		}, nil, stdout, stderr)
@@ -646,6 +731,14 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 	runErr := r.run(checkCtx, actual, duration, output, output)
 	output.finish()
 	outcome := CheckRunOutcome{Name: name, Command: command, Duration: time.Since(start), Output: output.raw.String(), Passed: runErr == nil}
+	if runErr != nil {
+		outcome.Outcome = "failure"
+		if ctx.Err() == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
+			outcome.Outcome = OutcomeTimeLimit
+		} else if ctx.Err() == nil && errors.Is(runErr, errCheckStalled) {
+			outcome.Outcome = OutcomeStalled
+		}
+	}
 	if runErr == nil {
 		outcome.SkippedTests = output.skips
 		outcome.SkippedTotal = output.skipTotal
@@ -664,6 +757,9 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 		status := "PASS"
 		if !outcome.Passed {
 			status = "FAIL"
+			if validLimit(outcome.Outcome) {
+				status = outcome.Outcome
+			}
 		}
 		onProgress(progress.Event{Check: name, Status: status, StageElapsed: outcome.Duration})
 	}
@@ -681,14 +777,24 @@ func (r *checkRunner) runOnHost(ctx context.Context, command string, stdout, std
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	observedCtx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	cmd := exec.CommandContext(observedCtx, "sh", "-c", command)
 	cmd.Dir = r.worktree
 	cmd.Env = cleanCheckEnv(r.home, caches, r.deps)
 	process.Configure(cmd)
 	cmd.Cancel = func() error { process.Stop(cmd); return nil }
 	cmd.WaitDelay = time.Second
 	cmd.Stdout, cmd.Stderr = stdout, stderr
-	err = cmd.Run()
+	err = cmd.Start()
+	if err == nil {
+		stop := r.observeCPU(observedCtx, cancel, cmd.Process.Pid, "")
+		err = cmd.Wait()
+		stop()
+		if ctx.Err() == nil && err != nil && errors.Is(context.Cause(observedCtx), errCheckStalled) {
+			err = errors.Join(err, errCheckStalled)
+		}
+	}
 	stopErr := stopValidationProcess(cmd)
 	if stopErr != nil {
 		if scope := storageuse.FromContext(ctx); scope != nil {
@@ -951,4 +1057,222 @@ func (r *checkRunner) storageScope(ctx context.Context) (context.Context, *stora
 		}
 	}
 	return ctx, owner, nil
+}
+
+var errCheckStalled = errors.New("required check CPU stalled")
+
+type checkProcess struct {
+	pid, parent int
+	start, cpu  uint64
+	args        []string
+}
+
+// A waiting supervisor retains its marker while the original shell executes.
+// The original command is an argument, not interpolated into supervisor code.
+func nativeCheckSupervisor(command, marker string) string {
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+	return "/bin/sh -c " + quote(`/bin/sh -c "$1" & child=$!; wait "$child"`) + " " + quote(marker) + " " + quote(command)
+}
+func checkProcesses() (map[int]checkProcess, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[int]checkProcess)
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		end := strings.LastIndexByte(string(raw), ')')
+		if end < 0 {
+			return nil, errors.New("invalid proc stat")
+		}
+		fields := strings.Fields(string(raw[end+1:]))
+		if len(fields) < 20 {
+			return nil, errors.New("short proc stat")
+		}
+		parent, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return nil, err
+		}
+		start, err := strconv.ParseUint(fields[19], 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		cpu := uint64(0)
+		for _, index := range []int{11, 12, 13, 14} {
+			value, err := strconv.ParseUint(fields[index], 10, 64)
+			if err != nil || cpu+value < cpu {
+				return nil, errors.New("invalid proc CPU")
+			}
+			cpu += value
+		}
+		args, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		result[pid] = checkProcess{pid: pid, parent: parent, start: start, cpu: cpu, args: strings.Split(string(args), "\x00")}
+	}
+	return result, nil
+}
+func checkDescendant(tree map[int]checkProcess, pid, root int) bool {
+	seen := make(map[int]bool)
+	for pid != 0 && !seen[pid] {
+		if pid == root {
+			return true
+		}
+		seen[pid] = true
+		p, ok := tree[pid]
+		if !ok {
+			return false
+		}
+		pid = p.parent
+	}
+	return false
+}
+
+// Observation is advisory. Any sampling error disables termination for the
+// invocation; deadlines and verified process cleanup remain authoritative.
+func cpuObservationEnabled(platform string, execution contract.ExecutionConfig, runnerIsolated bool) bool {
+	return platform == "linux" && (runnerIsolated || execution.Mode != contract.ExecutionIsolated || execution.Backend == contract.BackendNative)
+}
+func (r *checkRunner) observeCPU(ctx context.Context, cancel context.CancelCauseFunc, root int, marker string) func() {
+	if !cpuObservationEnabled(runtime.GOOS, r.execution, r.runnerIsolated) {
+		return func() {}
+	}
+	sample := r.sampleProcesses
+	if sample == nil {
+		sample = checkProcesses
+	}
+	now := r.now
+	if now == nil {
+		now = time.Now
+	}
+	interval, window := r.sampleInterval, r.stallWindow
+	if interval <= 0 {
+		interval = time.Second
+	}
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	// Capture direct identity before cmd.Wait can reap the shell and allow
+	// its PID to be reused while inherited output pipes are still open.
+	var pinnedStart uint64
+	if root != 0 {
+		tree, err := sample()
+		if err != nil {
+			return func() {}
+		}
+		p, ok := tree[root]
+		if !ok || p.start == 0 {
+			return func() {}
+		}
+		pinnedStart = p.start
+	}
+	done, joined := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(joined)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		previous := make(map[[2]uint64]uint64)
+		rootStart := pinnedStart
+		var last time.Time
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+			}
+			tree, err := sample()
+			if err != nil {
+				return
+			}
+			// A partial ancestry snapshot cannot establish which CPU belongs
+			// to this check. Disable observation instead of counting zero.
+			for pid, p := range tree {
+				if p.pid != pid || p.start == 0 {
+					return
+				}
+				if p.parent != 0 {
+					if _, ok := tree[p.parent]; !ok {
+						return
+					}
+				}
+			}
+			if marker != "" {
+				found := 0
+				for pid, p := range tree {
+					if !checkDescendant(tree, pid, os.Getpid()) {
+						continue
+					}
+					// Require the shell's positional marker, never substring matches in
+					// launcher arguments containing a copy of the whole command.
+					if len(p.args) >= 4 && p.args[1] == "-c" && p.args[3] == marker {
+						if found != 0 {
+							return
+						}
+						found = pid
+					}
+				}
+				if found == 0 {
+					if root != 0 {
+						return
+					}
+					continue
+				}
+				if root != 0 && root != found {
+					return
+				}
+				root = found
+			}
+			parent, ok := tree[root]
+			if !ok {
+				return
+			}
+			if rootStart != 0 && parent.start != rootStart {
+				return
+			}
+			rootStart = parent.start
+			progress := false
+			for pid, p := range tree {
+				if !checkDescendant(tree, pid, root) {
+					continue
+				}
+				id := [2]uint64{uint64(pid), p.start}
+				old, known := previous[id]
+				if known && p.cpu < old {
+					return
+				}
+				if p.cpu > old {
+					progress = true
+				}
+				previous[id] = p.cpu
+				if len(previous) > 100000 {
+					return
+				}
+			}
+			current := now()
+			if last.IsZero() || progress {
+				last = current
+			}
+			if current.Sub(last) >= window {
+				cancel(errCheckStalled)
+				return
+			}
+		}
+	}()
+	return func() { close(done); <-joined }
 }

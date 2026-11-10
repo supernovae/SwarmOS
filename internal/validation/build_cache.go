@@ -2,8 +2,13 @@ package validation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/filelock"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/progress"
 	"os"
 	"path/filepath"
@@ -163,5 +168,148 @@ func cleanupValidationCheckout(scope *storageuse.Scope, repo, tmp string, result
 	if cleanupErr == nil {
 		_, err := gitOutput(repo, "worktree", "prune")
 		*result = errors.Join(*result, err)
+	}
+}
+
+// Duration history is coordinator-only state, never a candidate cache mount.
+type durationHistory struct {
+	Version int             `json:"version"`
+	Samples []time.Duration `json:"samples"`
+}
+
+func durationKey(name, command string) string {
+	b, _ := json.Marshal([]string{name, command})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+func durationRoot(ctx context.Context, repo string) (*safefs.Root, error) {
+	common, err := gitcredential.CommonDirectory(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := filepath.EvalSymlinks(strings.TrimSpace(string(common)))
+	if err != nil || !filepath.IsAbs(canonical) {
+		return nil, errors.New("invalid repository identity")
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(canonical)))
+	cache, err := userCacheDir()
+	if err != nil || cache == "" {
+		return nil, errors.New("duration cache unavailable")
+	}
+	canonicalCache, err := filepath.EvalSymlinks(cache)
+	if err != nil {
+		return nil, err
+	}
+	location := filepath.Join(canonicalCache, "swarm", "validate-duration", hex.EncodeToString(sum[:16]))
+	worktrees, err := gitOutputContext(ctx, repo, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return nil, err
+	}
+	for _, field := range strings.Split(string(worktrees), "\x00") {
+		if work, ok := strings.CutPrefix(field, "worktree "); ok {
+			work, err = filepath.EvalSymlinks(work)
+			if err != nil {
+				return nil, err
+			}
+			relative, err := filepath.Rel(work, location)
+			if err != nil || relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+				return nil, errors.New("duration cache overlaps worktree")
+			}
+		}
+	}
+	// Pin the cache directory, then reject symlinks at every component below it.
+	root, err := safefs.Open(cache)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return root.Sub(filepath.Join("swarm", "validate-duration", hex.EncodeToString(sum[:16])), true, 0700)
+}
+func readDurations(root *safefs.Root, key string) durationHistory {
+	var h durationHistory
+	data, err := root.ReadFile(key+".json", 4096)
+	if err != nil || json.Unmarshal(data, &h) != nil || h.Version != 1 || len(h.Samples) > 20 {
+		return durationHistory{Version: 1}
+	}
+	for _, d := range h.Samples {
+		if d <= 0 || d > maxCheckTimeout {
+			return durationHistory{Version: 1}
+		}
+	}
+	return h
+}
+func requiredCheckBudget(ctx context.Context, repo string, check contract.CheckSpec) time.Duration {
+	budget := checkTimeout(check.Timeout)
+	root, err := durationRoot(ctx, repo)
+	if err != nil {
+		return budget
+	}
+	defer root.Close()
+	for _, d := range readDurations(root, durationKey(check.Name, check.Command)).Samples {
+		// Bound before multiplying to avoid overflow.
+		budget = max(budget, min(d, maxCheckTimeout/2)*2)
+	}
+	return min(budget, maxCheckTimeout)
+}
+func recordRequiredDurations(ctx context.Context, repo string, outcomes []CheckRunOutcome) {
+	if ctx.Err() != nil {
+		return
+	}
+	for _, c := range outcomes {
+		if !c.Passed && !c.Preliminary && c.FallbackReason == "" {
+			return
+		}
+	}
+	root, err := durationRoot(ctx, repo)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	for _, c := range outcomes {
+		if !c.Passed || c.Preliminary || c.FallbackReason != "" || c.Duration <= 0 || c.Duration > maxCheckTimeout {
+			continue
+		}
+		key := durationKey(c.Name, c.Command)
+		lock, err := root.OpenLock(key + ".lock")
+		if err != nil {
+			continue
+		}
+		// Bounded, cancellable lock acquisition serializes read/merge/write.
+		lockCtx, cancel := context.WithTimeout(ctx, time.Second)
+		err = lockDurationHistory(lockCtx, lock)
+		cancel()
+		if err != nil {
+			lock.Close()
+			continue
+		}
+		h := readDurations(root, key)
+		h.Samples = append(h.Samples, c.Duration)
+		if len(h.Samples) > 20 {
+			h.Samples = h.Samples[len(h.Samples)-20:]
+		}
+		data, err := json.Marshal(h)
+		if err == nil && ctx.Err() == nil {
+			_ = root.WriteFile(key+".json", data, 0600)
+		}
+		_ = filelock.Unlock(lock)
+		_ = lock.Close()
+	}
+}
+
+func lockDurationHistory(ctx context.Context, lock *os.File) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := filelock.TryLockExclusive(lock); err == nil {
+			return nil
+		}
+		timer := time.NewTimer(5 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 }

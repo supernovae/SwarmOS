@@ -22,6 +22,7 @@ import (
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
 	"github.com/supernovae/swarmos/internal/pr"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
@@ -806,5 +807,165 @@ func TestIssuePartialImplementationCurrentOutcome(t *testing.T) {
 			t.Fatal("superseded partial")
 		}
 		st.Artifacts = st.Artifacts[:len(st.Artifacts)-1]
+	}
+}
+
+func TestRequiredCheckLimitNextAction(t *testing.T) {
+	t.Run("printed work stops and complete retries", requiredCheckLimitNextActionCompleteRetry)
+	f, n := issue466Fixture(t)
+	st := f.state(t, n)
+	iss, err := f.tracker.GetIssue(t.Context(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := harness.LoadConfigAt(f.root, st.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range []string{"issue", "pr"} {
+		for _, outcome := range []string{validation.OutcomeTimeLimit, validation.OutcomeStalled} {
+			t.Run(resource+"/"+outcome, func(t *testing.T) {
+				number := n
+				if resource == "pr" {
+					number = n + 100
+				}
+				opts := &RootOptions{Repo: "owner/project", RepoRoot: "/checkout with spaces", UpstreamRemote: "upstream"}
+				c := stopContext{opts: opts, resource: resource, number: number}
+				typed := fmt.Errorf("wrapped: %w", errors.Join(workflow.ErrValidationRepairExhausted, &validation.LimitError{Outcome: outcome}))
+				want := c.argv(false, resource, "validate", strconv.Itoa(number))
+				assert := func(a *NextAction) {
+					t.Helper()
+					if a == nil || a.Reason != ReasonRequiredCheckLimit || !reflect.DeepEqual(a.Argv, want) || strings.Contains(renderNextAction(a), "--phase") {
+						t.Fatalf("retry action: %+v want %v", a, want)
+					}
+				}
+				assert(c.classify(typed))
+				if stopped := c.stop(typed); !strings.Contains(stopped.Error(), "Next step:") || !strings.Contains(stopped.Error(), resource+" validate") {
+					t.Fatalf("work-stop output: %v", stopped)
+				}
+				cmd, _, findErr := NewRootCmd().Find([]string{resource, "validate", strconv.Itoa(number)})
+				if findErr != nil || cmd.Name() != "validate" {
+					t.Fatalf("unknown emitted command: %v %v", cmd, findErr)
+				}
+				current := *st
+				current.Artifacts = append(append([]contract.Artifact{}, st.Artifacts...), contract.Artifact{Type: contract.ArtifactValidation, Verdict: "FAIL", Metadata: map[string]string{"validation_trusted_origin": "coordinator", "head_sha": st.HeadSHA, "base_sha": st.BaseSHA, validation.LimitMetadataKey: outcome}})
+				status := func() *NextAction {
+					return c.statusAction(&current, wu, cfg, nil, nil, "alice", st.Lease.ClaimID, time.Now())
+				}
+				repairData, _ := json.Marshal(validation.RepairSummary{HeadSHA: st.HeadSHA})
+				current.Artifacts[len(current.Artifacts)-1].Metadata[validation.RepairMetadataKey] = string(repairData)
+				assert(status())
+				if resource == "issue" {
+					issue466State(t, f, n, func(saved *lease.IssueState) { saved.Artifacts = current.Artifacts })
+					printed, e := f.run("issue", "status", strconv.Itoa(n))
+					if e != nil || !strings.Contains(printed, "issue validate "+strconv.Itoa(n)) || strings.Contains(printed, "--phase implement") {
+						t.Fatalf("status output: %v\n%s", e, printed)
+					}
+				}
+				for _, key := range []string{"validation_trusted_origin", "head_sha", "base_sha", validation.LimitMetadataKey} {
+					md := current.Artifacts[len(current.Artifacts)-1].Metadata
+					saved := md[key]
+					md[key] = "stale-or-malformed"
+					if a := status(); a != nil && a.Reason == ReasonRequiredCheckLimit {
+						t.Fatalf("accepted %s", key)
+					}
+					md[key] = saved
+				}
+				current.Artifacts = append(current.Artifacts, contract.Artifact{Type: contract.ArtifactValidation, Verdict: "PASS"})
+				if a := status(); a != nil && a.Reason == ReasonRequiredCheckLimit {
+					t.Fatal("old limit outranks latest pass")
+				}
+				if a := c.classify(errors.Join(typed, &lease.TaskApprovalError{IssueNumber: n})); a == nil || a.Reason != ReasonNeedsApproval {
+					t.Fatal("limit outranks approval")
+				}
+				if a := c.classify(errors.Join(typed, lease.ErrClaimFence)); a != nil {
+					t.Fatal("limit outranks fencing")
+				}
+				if a := c.classify(workflow.ErrValidationRepairExhausted); a == nil || a.Reason != ReasonValidationRepairExhausted {
+					t.Fatal("ordinary failure changed")
+				}
+			})
+		}
+	}
+}
+
+func requiredCheckLimitNextActionCompleteRetry(t *testing.T) {
+	for _, resource := range []string{"issue", "pr"} {
+		t.Run(resource, func(t *testing.T) {
+			counters := t.TempDir()
+			setup := func(f *cliFixture) {
+				policy := "required_checks:\n  - name: first\n    command: echo ran >> '" + filepath.Join(counters, "first") + "'\n    timeout: 1m\n  - name: second\n    command: echo ran >> '" + filepath.Join(counters, "second") + "'; if test -f trigger; then sleep 2; fi\n    timeout: 50ms\nprotected_paths: ['.swarm/**']\n"
+				if err := os.WriteFile(filepath.Join(f.root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0644); err != nil {
+					t.Fatal(err)
+				}
+				prGit(t, f.root, "commit", "-am", "required retry checks")
+				f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo implemented > feature.txt")
+			}
+			var f *cliFixture
+			var issue, number int
+			if resource == "pr" {
+				f, issue, number = submittedPRFixture(t, "agent", setup)
+			} else {
+				f = newCLIFixture(t)
+				setup(f)
+				issue = f.create(t, "agent")
+				number = issue
+				f.must(t, "issue", "approve", strconv.Itoa(issue))
+			}
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo timeout > trigger; echo changed >> feature.txt")
+			n := strconv.Itoa(number)
+			doc, err := f.runJSON(t, resource, "work", n, "--agent", "mock", "--headless", "--progress=false", "--json")
+			assertNextAction(t, doc, err, ReasonRequiredCheckLimit, false, ExitFailure, localArgv(f, resource, "validate", n)...)
+			var limit *validation.LimitError
+			if !errors.As(err, &limit) {
+				t.Fatalf("typed limit lost in actual work: %v", err)
+			}
+			initial := f.state(t, issue)
+			if initial.ValidationRepairCount != 0 {
+				t.Fatal("work reserved repair")
+			}
+			if resource == "issue" {
+				out, e := f.run("issue", "status", n)
+				if e != nil || !strings.Contains(out, "issue validate "+n) || strings.Contains(out, "--phase implement") {
+					t.Fatalf("status: %v %s", e, out)
+				}
+			}
+			// Change the external runtime condition while preserving candidate and policy.
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "sleep"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			for _, name := range []string{"first", "second"} {
+				if err := os.WriteFile(filepath.Join(counters, name), nil, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Execute the exact emitted resource, operation and number. f.run supplies
+			// the same repository selection already present in localArgv.
+			action := nextActionOf(err)
+			if action == nil {
+				t.Fatal("missing next action")
+			}
+			args := append([]string{}, action.Argv[3:]...)
+			args = append(args, "--progress=false")
+			if out, err := f.run(args...); err != nil {
+				t.Fatalf("retry %v: %v %s", args, err, out)
+			}
+			for _, name := range []string{"first", "second"} {
+				data, _ := os.ReadFile(filepath.Join(counters, name))
+				if string(data) != "ran\n" {
+					t.Fatalf("check %s not rerun once: %q", name, data)
+				}
+			}
+			final := f.state(t, issue)
+			if final.ValidationRepairCount != initial.ValidationRepairCount || final.HeadSHA != initial.HeadSHA {
+				t.Fatal("check retry changed implementation or repair count")
+			}
+		})
 	}
 }

@@ -671,6 +671,55 @@ func TestTempCollisionNeverPromotesCoverage(t *testing.T) {
 	}
 }
 
+// A slow scratch removal must not hold the scope lock: concurrent required
+// checks share one scope, and each native handshake must reserve under it
+// within a bounded deadline.
+func TestCleanupTempRemovalDoesNotBlockConcurrentReservation(t *testing.T) {
+	m, _ := fixture(t)
+	s := &Scope{repository: "host-unknown", manager: m}
+	path, err := s.TempDir(context.Background(), canonicalTemp(t), "swarm-native-*", "native-scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removing, release := make(chan struct{}), make(chan struct{})
+	cleaned := make(chan error, 1)
+	go func() {
+		var result error
+		s.cleanupTemp(path, &result, func(temp temporary) error {
+			close(removing)
+			<-release
+			return temp.parent.RemoveAllChecked(temp.name, temp.info)
+		})
+		cleaned <- result
+	}()
+	<-removing
+	reserved := make(chan error, 1)
+	go func() {
+		_, err := s.ReserveNative(context.Background())
+		reserved <- err
+	}()
+	select {
+	case err := <-reserved:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		close(release)
+		<-cleaned
+		t.Fatal("native reservation waited for an unrelated scratch removal")
+	}
+	close(release)
+	if err := <-cleaned; err != nil || s.Retained() {
+		t.Fatalf("cleanup result=%v retained=%v", err, s.Retained())
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scratch not removed: %v", err)
+	}
+	if err := s.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCleanupExhaustionPreservesPrimaryAndEvidence(t *testing.T) {
 	for _, primary := range []error{nil, errors.New("prefetch failed")} {
 		m, _ := fixture(t)

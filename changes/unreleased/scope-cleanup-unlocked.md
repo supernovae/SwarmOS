@@ -1,0 +1,1 @@
+- Concurrent required checks no longer fail with `native pre-exec handshake: native reservation write: storage evidence lock: context deadline exceeded` while another check deletes its scratch directory. The deletion used to hold a lock that every check's sandbox startup also needs.

@@ -872,18 +872,22 @@ func (s *Scope) CleanupTemp(path string, result *error) {
 
 func (s *Scope) cleanupTemp(path string, result *error, remove func(temporary) error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.retained {
+		s.mu.Unlock()
 		return
 	}
 	temp, ok := s.temps[path]
 	if !ok {
 		s.retained = true
+		s.mu.Unlock()
 		*result = errors.Join(*result, ErrUnsafe)
 		return
 	}
+	s.mu.Unlock()
+	// Remove without the scope lock: a large scratch tree can take longer than
+	// a concurrent consumer's bounded pre-exec handshake, which needs the lock.
 	if cleanupErr := remove(temp); cleanupErr != nil {
-		s.retained = true
+		s.Retain()
 		if !errors.Is(cleanupErr, safefs.ErrCleanupIncomplete) {
 			*result = errors.Join(*result, cleanupErr)
 		}

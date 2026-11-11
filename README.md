@@ -6,7 +6,7 @@
 
 [![CI & Validation](https://github.com/supernovae/SwarmOS/actions/workflows/swarm-validate.yml/badge.svg)](https://github.com/supernovae/SwarmOS/actions/workflows/swarm-validate.yml)
 [![Security Scanning](https://github.com/supernovae/SwarmOS/actions/workflows/security.yml/badge.svg)](https://github.com/supernovae/SwarmOS/actions/workflows/security.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.26.10+-00ADD8?style=flat-square&logo=go)](go.mod)
+[![Go Version](https://img.shields.io/badge/Go-1.26.11+-00ADD8?style=flat-square&logo=go)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 [![Agents](https://img.shields.io/badge/Agents-Claude%20%7C%20Codex%20%7C%20OpenCode%20%7C%20OhMyPi-7B61FF?style=flat-square)](#bring-your-own-agents)
 
@@ -79,7 +79,7 @@ mkdir -p "$HOME/.local/bin"
 install -m 755 swarm swarm-restore-helper "$HOME/.local/bin/"
 ```
 
-With Go 1.26.10+, build and install from one source checkout using Make. On Linux these targets include the helper; macOS and Windows builds contain the CLI only:
+With Go 1.26.11+, build and install from one source checkout using Make. On Linux these targets include the helper; macOS and Windows builds contain the CLI only:
 
 ```bash
 make build BIN_DIR="./build output"

@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -52,6 +53,8 @@ type record struct {
 type Manager struct {
 	root *safefs.Root
 	path string
+	// writes counts durable record replacements; tests bound per-launch cost.
+	writes atomic.Int64
 }
 
 // Open opens private control storage outside every granted root. Paths are
@@ -220,6 +223,7 @@ func (m *Manager) write(key string, v *record) error {
 	if err != nil {
 		return err
 	}
+	m.writes.Add(1)
 	return m.root.WriteFileDurable(key+".json", b, 0600)
 }
 
@@ -627,18 +631,14 @@ func (s *Scope) acquire(ctx context.Context, resource Resource, prepared bool) e
 	s.uses = append(s.uses, use)
 	if !prepared {
 		s.outsideResources = append(s.outsideResources, resource)
+		var overlapping []*Use
 		for _, prior := range s.uses {
-			if !overlaps(prior.resource.Location, resource.Location) {
-				continue
+			if overlaps(prior.resource.Location, resource.Location) {
+				overlapping = append(overlapping, prior)
 			}
-			if err := prior.evidence(ctx, func(v *record) error {
-				if e := v.Evidence[prior.token]; e != nil {
-					e.Outside = true
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
+		}
+		if err := evidenceEach(ctx, overlapping, markOutside); err != nil {
+			return err
 		}
 	}
 	if prepared {
@@ -1164,23 +1164,78 @@ func (u *Use) evidence(ctx context.Context, change func(*record) error) error {
 	return nil
 }
 
+// evidenceEach applies change to every use, rewriting each ledger record once.
+// Concurrent checks in one scope register many uses of the same cache, so a
+// per-use rewrite made every native launch durably rewrite one large record
+// once per check while holding the scope lock, stalling other launches past
+// their pre-exec handshake. A failed change leaves its record unwritten.
+func evidenceEach(ctx context.Context, uses []*Use, change func(*Use, *record) error) error {
+	type recordKey struct {
+		manager *Manager
+		key     string
+	}
+	var order []recordKey
+	groups := map[recordKey][]*Use{}
+	for _, u := range uses {
+		k := recordKey{u.manager, u.key}
+		if _, ok := groups[k]; !ok {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], u)
+	}
+	for _, k := range order {
+		group := groups[k]
+		if err := evidenceRecord(ctx, group, change); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func evidenceRecord(ctx context.Context, group []*Use, change func(*Use, *record) error) error {
+	first := group[0]
+	for _, u := range group[1:] {
+		if u.resource != first.resource {
+			return ErrUnsafe
+		}
+	}
+	f, _, err := first.manager.lock(ctx, first.key)
+	if err != nil {
+		return fmt.Errorf("storage evidence lock: %w", err)
+	}
+	defer unlock(f)
+	v, err := first.manager.read(first.key, first.resource)
+	if err != nil {
+		return fmt.Errorf("storage evidence read: %w", err)
+	}
+	for _, u := range group {
+		if _, ok := v.Uses[u.token]; !ok {
+			return fmt.Errorf("%w: storage use no longer registered", ErrUnsafe)
+		}
+		if err := change(u, v); err != nil {
+			return err
+		}
+	}
+	if err := first.manager.write(first.key, v); err != nil {
+		return fmt.Errorf("storage evidence write: %w", err)
+	}
+	return nil
+}
+
+func markOutside(u *Use, v *record) error {
+	if e := v.Evidence[u.token]; e != nil {
+		e.Outside = true
+	}
+	return nil
+}
+
 // OutsideConsumer permanently disqualifies this scope, including later uses.
 // Call before launching any native or otherwise unclassified consumer.
 func (s *Scope) OutsideConsumer(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.outside = true
-	for _, u := range s.uses {
-		if err := u.evidence(ctx, func(v *record) error {
-			if e := v.Evidence[u.token]; e != nil {
-				e.Outside = true
-			}
-			return nil
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return evidenceEach(ctx, s.uses, markOutside)
 }
 
 // BoundaryReservation is coordinator-only launch state. It may only be sealed
@@ -1200,36 +1255,33 @@ func (s *Scope) ReserveBoundary(ctx context.Context, locations []string) (*Bound
 		return nil, err
 	}
 	b := &BoundaryReservation{scope: s, id: hex.EncodeToString(nonce[:])}
+	var matched []*Use
 	for _, u := range s.uses {
-		matched := false
 		for _, location := range locations {
 			if overlaps(u.resource.Location, location) {
-				matched = true
+				matched = append(matched, u)
 				break
 			}
 		}
-		if !matched {
-			continue
-		}
-		if err := u.evidence(ctx, func(v *record) error {
-			if e := v.Evidence[u.token]; e != nil && !e.Outside {
-				if e.Consumers == nil {
-					e.Consumers = map[string]ProcessIdentity{}
-				}
-				if len(e.Consumers)+len(e.Native) >= 256 {
-					// Bound evidence growth without limiting the number of tool launches.
-					// Once tracking is exhausted the use stays permanently nonqualifying.
-					e.Outside = true
-					return nil
-				}
-				e.Consumers[b.id] = ProcessIdentity{}
-			}
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-		b.uses = append(b.uses, u)
 	}
+	if err := evidenceEach(ctx, matched, func(u *Use, v *record) error {
+		if e := v.Evidence[u.token]; e != nil && !e.Outside {
+			if e.Consumers == nil {
+				e.Consumers = map[string]ProcessIdentity{}
+			}
+			if len(e.Consumers)+len(e.Native) >= 256 {
+				// Bound evidence growth without limiting the number of tool launches.
+				// Once tracking is exhausted the use stays permanently nonqualifying.
+				e.Outside = true
+				return nil
+			}
+			e.Consumers[b.id] = ProcessIdentity{}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	b.uses = matched
 	return b, nil
 }
 
@@ -1239,21 +1291,16 @@ func (b *BoundaryReservation) Seal(ctx context.Context, p ProcessIdentity) error
 	}
 	b.scope.mu.Lock()
 	defer b.scope.mu.Unlock()
-	for _, u := range b.uses {
-		if err := u.evidence(ctx, func(v *record) error {
-			if e := v.Evidence[u.token]; e != nil && !e.Outside {
-				old, ok := e.Consumers[b.id]
-				if !ok || old != (ProcessIdentity{}) {
-					return ErrUnsafe
-				}
-				e.Consumers[b.id] = p
+	return evidenceEach(ctx, b.uses, func(u *Use, v *record) error {
+		if e := v.Evidence[u.token]; e != nil && !e.Outside {
+			old, ok := e.Consumers[b.id]
+			if !ok || old != (ProcessIdentity{}) {
+				return ErrUnsafe
 			}
-			return nil
-		}); err != nil {
-			return err
+			e.Consumers[b.id] = p
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // uniqueJSON rejects duplicate object keys instead of letting later consumers
@@ -1512,15 +1559,8 @@ func (s *Scope) ReserveNative(ctx context.Context) (*NativeReservation, error) {
 	}
 	if len(s.native) >= 256 {
 		s.outside = true
-		for _, u := range s.uses {
-			if err := u.evidence(ctx, func(v *record) error {
-				if e := v.Evidence[u.token]; e != nil {
-					e.Outside = true
-				}
-				return nil
-			}); err != nil {
-				return nil, err
-			}
+		if err := evidenceEach(ctx, s.uses, markOutside); err != nil {
+			return nil, err
 		}
 		return nil, nil
 	}
@@ -1532,30 +1572,25 @@ func (s *Scope) ReserveNative(ctx context.Context) (*NativeReservation, error) {
 	return b, nil
 }
 func (b *NativeReservation) persist(ctx context.Context, n NativeEvidence, existing bool) error {
-	for _, u := range b.scope.uses {
-		if err := u.evidence(ctx, func(v *record) error {
-			e := v.Evidence[u.token]
-			if e == nil || e.Outside {
-				return nil
-			}
-			if e.Native == nil {
-				e.Native = map[string]NativeEvidence{}
-			}
-			old, ok := e.Native[b.id]
-			if existing && (!ok || old != b.scope.native[b.id]) {
-				return fmt.Errorf("%w: native reservation evidence missing or changed", ErrUnsafe)
-			}
-			if !ok && len(e.Native)+len(e.Consumers) >= 256 {
-				e.Outside = true
-				return nil
-			}
-			e.Native[b.id] = n
+	return evidenceEach(ctx, b.scope.uses, func(u *Use, v *record) error {
+		e := v.Evidence[u.token]
+		if e == nil || e.Outside {
 			return nil
-		}); err != nil {
-			return err
 		}
-	}
-	return nil
+		if e.Native == nil {
+			e.Native = map[string]NativeEvidence{}
+		}
+		old, ok := e.Native[b.id]
+		if existing && (!ok || old != b.scope.native[b.id]) {
+			return fmt.Errorf("%w: native reservation evidence missing or changed", ErrUnsafe)
+		}
+		if !ok && len(e.Native)+len(e.Consumers) >= 256 {
+			e.Outside = true
+			return nil
+		}
+		e.Native[b.id] = n
+		return nil
+	})
 }
 func (b *NativeReservation) Seal(ctx context.Context, n NativeIdentity) error {
 	if !ValidNativeIdentity(n) {

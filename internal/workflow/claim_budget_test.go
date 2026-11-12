@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"github.com/supernovae/swarmos/internal/validation"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -595,6 +597,206 @@ func TestIssue466ValidationReusePreview(t *testing.T) {
 			}
 			if kind == "cross claim" && p.AcceptanceEvidence != "tester required after claim replacement" {
 				t.Fatal("cross-claim acceptance incorrectly reused")
+			}
+		})
+	}
+}
+
+// claimLoadStore counts actual state reads and can install a successor after a
+// detached admission snapshot has been captured, or during a CAS conflict.
+type claimLoadStore struct {
+	coordination.Store
+	loads   atomic.Int64
+	hook    func(context.Context, int, []byte, string, string)
+	casHook func(context.Context, int, string, []byte) (string, error)
+}
+
+func claimLoadPath() string {
+	pcs := make([]uintptr, 32)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	var names []string
+	for {
+		f, more := frames.Next()
+		names = append(names, f.Function)
+		if !more {
+			break
+		}
+	}
+	return strings.Join(names, "\n")
+}
+func (s *claimLoadStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	s.loads.Add(1)
+	raw, rev, err := s.Store.Load(ctx, n)
+	if err == nil && s.hook != nil {
+		s.hook(ctx, n, append([]byte(nil), raw...), rev, claimLoadPath())
+	}
+	return raw, rev, err
+}
+func (s *claimLoadStore) CompareAndSwap(ctx context.Context, n int, rev string, raw []byte) (string, error) {
+	if s.casHook != nil {
+		return s.casHook(ctx, n, rev, raw)
+	}
+	return s.Store.CompareAndSwap(ctx, n, rev, raw)
+}
+func claimReviewFixture(t *testing.T) (*Engine, *contract.WorkUnit, *lease.IssueState, string) {
+	t.Helper()
+	e, issue := budgetEngine(t)
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	e.LeaseManager.SetNowFunc(func() time.Time { return now })
+	_, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", 4*time.Hour, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := e.LeaseManager.RecordPlanPair(t.Context(), issue.Number, "maintainer", contract.Artifact{Type: contract.ArtifactDesign, Producer: "fixture", Summary: "plan", Body: "plan"}, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "fixture", Summary: "tests", Body: "tests"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wu, err := contract.ParseWorkUnitFromIssue(issue.Number, issue.Title, issue.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := workspace.WorktreePath(e.repoRoot, issue.Number)
+	if err := os.MkdirAll(filepath.Dir(wt), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := gitfixture.Command(t, e.repoRoot, "worktree", "add", "-b", "claim-review", wt, st.BaseSHA).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	return e, wu, st, wt
+}
+func TestClaimAdmissionLoadCounts(t *testing.T) {
+	for _, review := range []bool{false, true} {
+		name := "admitStage"
+		if review {
+			name = "RunAgentReview"
+		}
+		t.Run(name, func(t *testing.T) {
+			e, wu, st, wt := claimReviewFixture(t)
+			store := &claimLoadStore{Store: e.LeaseManager.Store()}
+			e.LeaseManager.SetStore(e.repoRoot, store)
+			if !review {
+				if err := e.admitStage(t.Context(), wu.IssueNumber, "maintainer", "review"); err != nil {
+					t.Fatal(err)
+				}
+				if got := store.loads.Load(); got != 1 {
+					t.Fatalf("admission loads = %d, want 1", got)
+				}
+				return
+			}
+			sentinel := errors.New("review launched")
+			var launched atomic.Int64
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(context.Context, agent.RunRequest) (*agent.RunResult, error) {
+					launched.Add(1)
+					state, _, loadErr := store.Store.Load(t.Context(), wu.IssueNumber)
+					var phaseState lease.IssueState
+					if loadErr != nil {
+						t.Fatal(loadErr)
+					}
+					if err := json.Unmarshal(state, &phaseState); err != nil {
+						t.Fatal(err)
+					}
+					if phaseState.Lease.Phase != "review" {
+						t.Errorf("phase write missing: %s", phaseState.Lease.Phase)
+					}
+
+					if got := store.loads.Load(); got != 3 {
+						t.Errorf("review startup loads = %d, want 3", got)
+					}
+					return nil, sentinel
+				}}, nil
+			}
+			_, _, err := e.RunAgentReview(t.Context(), wt, wu, nil, st, "maintainer", "mock", "headless", "", 0)
+			if launched.Load() != 1 || !errors.Is(err, sentinel) {
+				t.Fatalf("launches=%d error=%v", launched.Load(), err)
+			}
+		})
+	}
+}
+func TestClaimFenceAfterAdmission(t *testing.T) {
+	for _, mode := range []string{"RunAgentReview", "UpdatePhase", "CASRetry"} {
+		t.Run(mode, func(t *testing.T) {
+			e, wu, st, wt := claimReviewFixture(t)
+			underlying := e.LeaseManager.Store()
+			store := &claimLoadStore{Store: underlying}
+			var successor []byte
+			var paths []string
+			takeovers, attempts := 0, 0
+			install := func(ctx context.Context, n int, raw []byte, rev string) {
+				var next lease.IssueState
+				if err := json.Unmarshal(raw, &next); err != nil {
+					t.Fatal(err)
+				}
+				next.Lease.ClaimID = "successor-token"
+				data, err := json.Marshal(next)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := underlying.CompareAndSwap(ctx, n, rev, data); err != nil {
+					t.Fatal(err)
+				}
+				successor, _, err = underlying.Load(ctx, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				takeovers++
+			}
+			store.hook = func(ctx context.Context, n int, raw []byte, rev, path string) {
+				paths = append(paths, path)
+				if mode != "CASRetry" && takeovers == 0 && strings.Contains(path, ".admitStage") {
+					install(ctx, n, raw, rev)
+				}
+			}
+			store.casHook = func(ctx context.Context, n int, rev string, raw []byte) (string, error) {
+				attempts++
+				if mode != "CASRetry" {
+					t.Error("worker attempted CAS after takeover")
+					return "", coordination.ErrConflict
+				}
+				if attempts == 1 {
+					old, current, err := underlying.Load(ctx, n)
+					if err != nil {
+						t.Fatal(err)
+					}
+					install(ctx, n, old, current)
+					return "", coordination.ErrConflict
+				}
+				t.Error("worker retried CAS after takeover")
+				return "", coordination.ErrConflict
+			}
+			e.LeaseManager.SetStore(e.repoRoot, store)
+			var launches atomic.Int64
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(context.Context, agent.RunRequest) (*agent.RunResult, error) {
+					launches.Add(1)
+					return nil, errors.New("unexpected launch")
+				}}, nil
+			}
+			var err error
+			if mode == "RunAgentReview" {
+				_, _, err = e.RunAgentReview(t.Context(), wt, wu, nil, st, "maintainer", "mock", "headless", "", 0)
+			} else {
+				if err = e.admitStage(t.Context(), wu.IssueNumber, "maintainer", "review"); err != nil {
+					t.Fatal(err)
+				}
+				_, err = e.LeaseManager.UpdatePhase(t.Context(), wu.IssueNumber, "maintainer", "review", "active")
+			}
+			if !errors.Is(err, lease.ErrClaimFence) || launches.Load() != 0 || takeovers != 1 {
+				t.Fatalf("err=%v launches=%d takeovers=%d", err, launches.Load(), takeovers)
+			}
+			if len(paths) < 2 || !strings.Contains(paths[1], ".mutate") || !strings.Contains(paths[1], ".UpdatePhase") {
+				t.Fatalf("next load must be fenced phase write; paths: %v", paths)
+			}
+			if mode != "CASRetry" && (len(paths) != 2 || attempts != 0) {
+				t.Fatalf("loads=%d attempts=%d", len(paths), attempts)
+			}
+			if mode == "CASRetry" && (len(paths) != 3 || attempts != 1 || !strings.Contains(paths[2], ".mutate")) {
+				t.Fatalf("retry loads=%d attempts=%d", len(paths), attempts)
+			}
+			after, _, loadErr := underlying.Load(t.Context(), wu.IssueNumber)
+			if loadErr != nil || !bytes.Equal(after, successor) {
+				t.Fatalf("successor changed: %v", loadErr)
 			}
 		})
 	}

@@ -1139,9 +1139,6 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 		}
 		return "", st, err
 	}
-	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
-		return "", st, fmt.Errorf("%w: %w", ErrLeaseLost, err)
-	}
 	if _, err := e.LeaseManager.UpdatePhase(ctx, wu.IssueNumber, owner, "review", "active"); err != nil {
 		return "", st, err
 	}

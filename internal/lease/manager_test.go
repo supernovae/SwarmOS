@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2284,5 +2285,108 @@ func TestParentIssuesRejectedAtApproveAcquireAndCheckApprovedState(t *testing.T)
 	}
 	if _, err := m.RecordCheckpoint(ctx, iss.Number, "local-dev", "swarm/issue-1-test", claimed.BaseSHA); err == nil {
 		t.Fatal("RecordCheckpoint must reject issue retyped to Epic")
+	}
+}
+
+type checkedStateStore struct {
+	coordination.Store
+	loads     atomic.Int64
+	afterLoad func()
+}
+
+func (s *checkedStateStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	s.loads.Add(1)
+	raw, rev, err := s.Store.Load(ctx, n)
+	if s.afterLoad != nil {
+		s.afterLoad()
+	}
+	return raw, rev, err
+}
+func TestCheckClaimStateAndResume(t *testing.T) {
+	for _, method := range []string{"CheckClaimState", "Resume", "CheckClaim"} {
+		for _, scenario := range []string{"valid", "token", "owner", "expired", "inactive", "approval"} {
+			t.Run(method+"/"+scenario, func(t *testing.T) {
+				m, tr, issue := testManager(t)
+				now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+				m.SetNowFunc(func() time.Time { return now })
+				st, err := m.Acquire(t.Context(), issue.Number, "local-dev", "mock", "plan", time.Hour, 3)
+				if err != nil {
+					t.Fatal(err)
+				}
+				id, owner := st.Lease.ClaimID, "local-dev"
+				switch scenario {
+				case "token":
+					id = "wrong"
+				case "owner":
+					owner = "other"
+				case "expired":
+					now = st.Lease.ExpiresAt
+				case "inactive":
+					if _, err := m.Handoff(t.Context(), issue.Number, "local-dev", "plan", "plan", "test"); err != nil {
+						t.Fatal(err)
+					}
+				case "approval":
+					if _, err := tr.UpdateIssueBody(t.Context(), issue.Number, strings.Replace(issue.Body, "Harden coordination state", "Changed objective", 1)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				m.BindClaim(issue.Number, id)
+				store := &checkedStateStore{Store: m.Store()}
+				// Replace the backing state after capturing it: the result must be the
+				// checked snapshot, with no second load that could return a different one.
+				if scenario == "valid" {
+					store.afterLoad = func() {
+						raw, rev, err := store.Store.Load(t.Context(), issue.Number)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var next IssueState
+						if err := json.Unmarshal(raw, &next); err != nil {
+							t.Fatal(err)
+						}
+						next.Lease.ClaimID = "successor"
+						raw, err = json.Marshal(next)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := store.Store.CompareAndSwap(t.Context(), issue.Number, rev, raw); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				m.SetStore(m.repoRoot, store)
+				var got *IssueState
+				switch method {
+				case "CheckClaimState":
+					got, err = m.CheckClaimState(t.Context(), issue.Number, owner)
+				case "Resume":
+					got, err = m.Resume(t.Context(), issue.Number, owner, id)
+				case "CheckClaim":
+					err = m.CheckClaim(t.Context(), issue.Number, owner)
+				}
+				if store.loads.Load() != 1 {
+					t.Fatalf("loads=%d, want 1", store.loads.Load())
+				}
+				if scenario == "valid" {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if method != "CheckClaim" && (got == nil || got.Lease.ClaimID != st.Lease.ClaimID) {
+						t.Fatalf("wrong snapshot: %+v", got)
+					}
+				} else {
+					if err == nil || got != nil {
+						t.Fatalf("state=%+v err=%v", got, err)
+					}
+					if scenario != "approval" && !errors.Is(err, ErrClaimFence) {
+						t.Fatalf("missing claim fence: %v", err)
+					}
+					var approval *TaskApprovalError
+					if scenario == "approval" && !errors.As(err, &approval) {
+						t.Fatalf("missing task approval error: %v", err)
+					}
+				}
+			})
+		}
 	}
 }

@@ -179,7 +179,7 @@ func (s renewalTracker) GetIssue(ctx context.Context, n int) (*tracker.Issue, er
 	return s.Tracker.GetIssue(ctx, n)
 }
 func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
-	for _, stopAt := range []string{"initial-read", "initial-check", "initial-check-tracker", "reload", "recheck", "recheck-tracker", "renew-read", "renew-check", "cas", "projection", "next-check", "next-check-tracker", "normal"} {
+	for _, stopAt := range []string{"initial-read", "initial-check-tracker", "reload", "recheck", "recheck-tracker", "renew-read", "renew-check", "cas", "projection", "next-check", "next-check-tracker", "normal"} {
 		t.Run(stopAt, func(t *testing.T) {
 			m, _, iss := testManager(t)
 			if _, err := m.Acquire(t.Context(), iss.Number, "local-dev", "mock", "implement", time.Hour, 3); err != nil {
@@ -229,7 +229,8 @@ func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
 				close(c.release)
 				return true
 			}
-			if !check("initial-read", "load") || !check("initial-check", "load") || !check("initial-check-tracker", "tracker") {
+			// Startup validates the claim using the same state read used for its budget.
+			if !check("initial-read", "load") || !check("initial-check-tracker", "tracker") {
 				return
 			}
 			for range 2 {
@@ -305,7 +306,7 @@ func TestRenewalMaxRenewalsReloadMasking(t *testing.T) {
 			t.Fatal("missing renewal read")
 		}
 	}
-	read(true)
+	// The checked startup snapshot requires only one store read.
 	read(true)
 	select {
 	case timer := <-ready:

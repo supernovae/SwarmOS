@@ -58,10 +58,7 @@ func (e *Engine) admitStage(ctx context.Context, issue int, owner, phase string)
 		defer cancel()
 		ctx = cleanup
 	}
-	if err := e.LeaseManager.CheckClaim(ctx, issue, owner); err != nil {
-		return err
-	}
-	st, err := e.LeaseManager.GetCurrentState(ctx, issue)
+	st, err := e.LeaseManager.CheckClaimState(ctx, issue, owner)
 	if err != nil {
 		return err
 	}

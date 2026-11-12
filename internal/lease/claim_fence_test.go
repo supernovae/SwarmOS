@@ -49,6 +49,7 @@ var claimFenceInventory = map[string]string{
 	"Budget":                         "read-only admission, observation or local binding; no durable state write",
 	"BudgetContext":                  "read-only admission, observation or local binding; no durable state write",
 	"CheckClaim":                     "read-only admission, observation or local binding; no durable state write",
+	"CheckClaimState":                "read-only checked claim snapshot; never authorizes writes",
 	"CheckImplementationRetry":       "read-only admission, observation or local binding; no durable state write",
 	"CheckPlanReplan":                "read-only admission, observation or local binding; no durable state write",
 	"CheckPlanReplanContext":         "read-only admission, observation or local binding; no durable state write",

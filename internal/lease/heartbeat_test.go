@@ -196,3 +196,50 @@ func TestHeartbeatWithoutUpstreamBudgetKeepsClaimFence(t *testing.T) {
 		t.Fatalf("stale claim: %v", h.Err())
 	}
 }
+
+func TestHeartbeatStartupLoadsOnce(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(fmt.Sprint("stale=", stale), func(t *testing.T) {
+			m, _, issue := testManager(t)
+			if _, err := m.Acquire(t.Context(), issue.Number, "local-dev", "mock", "plan", time.Hour, 3); err != nil {
+				t.Fatal(err)
+			}
+			if stale {
+				m.BindClaim(issue.Number, "stale")
+			}
+			store := &checkedStateStore{Store: m.Store()}
+			m.SetStore(m.repoRoot, store)
+			scheduled := make(chan struct{}, 1)
+			m.SetHeartbeatTimerFunc(func(time.Duration) HeartbeatTimer {
+				scheduled <- struct{}{}
+				return firedTimer{c: make(chan time.Time)}
+			})
+			h := m.StartHeartbeat(t.Context(), issue.Number, "local-dev", time.Hour)
+			defer h.Stop()
+			if stale {
+				select {
+				case <-h.Context().Done():
+				case <-time.After(5 * time.Second):
+					t.Fatal("stale startup did not stop")
+				}
+				if !errors.Is(h.Err(), ErrClaimFence) {
+					t.Fatalf("startup error: %v", h.Err())
+				}
+				select {
+				case <-scheduled:
+					t.Fatal("stale startup scheduled timer")
+				default:
+				}
+			} else {
+				select {
+				case <-scheduled:
+				case <-time.After(5 * time.Second):
+					t.Fatal("startup did not schedule timer")
+				}
+			}
+			if got := store.loads.Load(); got != 1 {
+				t.Fatalf("startup loads=%d, want 1", got)
+			}
+		})
+	}
+}

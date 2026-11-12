@@ -1474,21 +1474,24 @@ func approvedLeaseDuration(policy string, requested time.Duration) (time.Duratio
 func claimID() string { b := make([]byte, 16); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func (m *Manager) Resume(ctx context.Context, n int, owner, id string) (*IssueState, error) {
 	m.BindClaim(n, id)
+	return m.CheckClaimState(ctx, n, owner)
+}
+func (m *Manager) CheckClaim(ctx context.Context, n int, owner string) error {
+	_, err := m.CheckClaimState(ctx, n, owner)
+	return err
+}
+
+// CheckClaimState returns the snapshot validated against the bound claim and
+// current task approval. Writers must still load and fence their own state.
+func (m *Manager) CheckClaimState(ctx context.Context, n int, owner string) (*IssueState, error) {
 	st, _, err := m.load(ctx, n)
 	if err != nil {
 		return nil, err
 	}
-	if err = m.CheckClaim(ctx, n, owner); err != nil {
+	if err := m.checkStateClaim(ctx, n, owner, st); err != nil {
 		return nil, err
 	}
 	return st, nil
-}
-func (m *Manager) CheckClaim(ctx context.Context, n int, owner string) error {
-	st, _, err := m.load(ctx, n)
-	if err != nil {
-		return err
-	}
-	return m.checkStateClaim(ctx, n, owner, st)
 }
 
 func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState) error {

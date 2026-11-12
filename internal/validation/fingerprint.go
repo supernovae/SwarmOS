@@ -124,7 +124,7 @@ func reuseAt(ctx context.Context, root string, opts ValidateOptions, owner strin
 		art.Metadata = metadata
 		// Reuse may accept the same tree at another commit. Advisory tester
 		// evidence is narrower: carry it only for the same head and base.
-		if art.Metadata["validation_claim"] != opts.ClaimID || art.Metadata["head_sha"] != head || art.Metadata["base_sha"] != opts.BaseSHA || head == "" || opts.BaseSHA == "" {
+		if art.Metadata["head_sha"] != head || art.Metadata["base_sha"] != opts.BaseSHA || head == "" || opts.BaseSHA == "" {
 			delete(art.Metadata, AcceptanceEvidenceKey)
 		}
 		art.Metadata["validation_source_time"] = source

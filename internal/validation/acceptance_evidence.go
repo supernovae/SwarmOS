@@ -349,7 +349,10 @@ func (r Readiness) SubmissionError(issue int, fork bool) error {
 	if !fork && r.AcceptanceEvidence.NeedsRepair() {
 		phase = "implement"
 	}
-	fmt.Fprintf(&b, "Run swarm issue work %d --phase %s", issue, phase)
+	fmt.Fprintf(&b, "Run swarm issue work %d", issue)
+	if fork || r.AcceptanceEvidence.State != "missing" {
+		fmt.Fprintf(&b, " --phase %s", phase)
+	}
 	if fork {
 		b.WriteString(" upstream (fork test phase is unavailable)")
 	}

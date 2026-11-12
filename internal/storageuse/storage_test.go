@@ -2038,3 +2038,78 @@ func TestCommonDirectoryCommandCacheScopes(t *testing.T) {
 		t.Fatalf("git calls=%d err=%v", len(calls), err)
 	}
 }
+
+// Concurrent required checks share one scope and each registers the same
+// caches again. Every native launch must rewrite each ledger record once, not
+// once per registered use, or the serialized rewrites outlast the pre-exec
+// handshake of the other checks.
+func TestNativeEvidenceWritesOncePerRecord(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux identities")
+	}
+	m, r := fixture(t)
+	ctx := context.Background()
+	s := &Scope{manager: m, repository: r.Repository}
+	const checks = 12
+	for i := 0; i < checks; i++ {
+		if err := s.AcquirePrepared(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := r
+	other.Identity += "-other"
+	other.Location += "-other"
+	if err := s.AcquirePrepared(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	writes := func(name string, want int64, op func() error) {
+		t.Helper()
+		before := m.writes.Load()
+		if err := op(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := m.writes.Load() - before; got != want {
+			t.Fatalf("%s rewrote ledger records %d times, want %d (one per record)", name, got, want)
+		}
+	}
+	var reservation *NativeReservation
+	writes("ReserveNative", 2, func() (err error) {
+		reservation, err = s.ReserveNative(ctx)
+		return err
+	})
+	n := NativeIdentity{Boot: "11111111-1111-1111-1111-111111111111", Unit: "swarm-native-0123456789abcdef0123456789abcdef.scope", Group: "/user.slice/swarm-native-0123456789abcdef0123456789abcdef.scope", MountDevice: 1, MountInode: 2, Inode: 3}
+	writes("Seal", 2, func() error { return reservation.Seal(ctx, n) })
+	writes("MarkEmpty", 2, func() error {
+		return reservation.markEmptyWith(ctx, func(NativeIdentity) error { return nil })
+	})
+	writes("ReserveBoundary", 1, func() error {
+		_, err := s.ReserveBoundary(ctx, []string{r.Location})
+		return err
+	})
+	writes("OutsideConsumer", 2, func() error { return s.OutsideConsumer(ctx) })
+
+	// Batching must still record the reservation against every registered use.
+	key, err := m.key(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := m.read(key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := NativeEvidence{Identity: n, Empty: true}
+	recorded := 0
+	for _, u := range s.uses {
+		if u.resource != r {
+			continue
+		}
+		e := v.Evidence[u.token]
+		if e == nil || e.Native[reservation.id] != want || len(e.Consumers) != 1 || !e.Outside {
+			t.Fatalf("use %s evidence = %+v, want native %+v, one consumer and outside", u.token[:8], e, want)
+		}
+		recorded++
+	}
+	if recorded != checks {
+		t.Fatalf("recorded evidence for %d uses, want %d", recorded, checks)
+	}
+}

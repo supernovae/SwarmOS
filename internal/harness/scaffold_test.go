@@ -985,7 +985,7 @@ func validateWorkflowCopies(t *testing.T) map[string][]workflowStep {
 	for _, c := range []struct {
 		name, job string
 		raw       []byte
-	}{{"template", "validate", template}, {"repository", "policy", own}} {
+	}{{"template", "validate", template}, {"repository", "policy-shard", own}} {
 		var workflow struct {
 			Jobs map[string]struct {
 				Steps []workflowStep `yaml:"steps"`

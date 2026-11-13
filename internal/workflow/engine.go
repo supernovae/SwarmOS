@@ -1179,6 +1179,8 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 		}
 		return "", st, err
 	}
+	originalTask := req.TaskPrompt
+
 	var revRun *agent.RunResult
 	var review, verdict, firstVerdict string
 	var firstErr error
@@ -1234,7 +1236,7 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 			return "", st, errors.Join(err, admitErr)
 		}
 		reporter.retry("review-format", attempt+1, reviewFormatRetries)
-		req.TaskPrompt = reviewFormatRepairPrompt(err, firstVerdict)
+		req.TaskPrompt = e.planReviewRepairTask(originalTask, err, firstVerdict, st, prNumber, recovery)
 	}
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
 		return verdict, st, fmt.Errorf("%w: %w", ErrLeaseLost, err)
@@ -2098,6 +2100,15 @@ func validateStructuredReview(body, verdict string, st *lease.IssueState) error 
 
 // reviewFormatRetries bounds automatic rewrites of an unparseable plan review.
 const reviewFormatRetries = 1
+
+// planReviewRepairTask preserves the audit task for direct issue reviews.
+func (e *Engine) planReviewRepairTask(original string, err error, verdict string, st *lease.IssueState, prNumber int, recovery WorkOptions) string {
+	if prNumber == 0 && st.PRNumber == 0 && st.PRRevision == nil && st.ForkRepo == "" &&
+		!e.ForkMode && !recovery.ForkMode && recovery.PRNumber == 0 && !e.LeaseManager.HasWorkerGateway() {
+		return original + "\n" + err.Error()
+	}
+	return reviewFormatRepairPrompt(err, verdict)
+}
 
 // reviewFormatRepairPrompt tells the reviewer why its report was rejected. The
 // reason comes from the reviewer's own output, so it is escaped and bounded.

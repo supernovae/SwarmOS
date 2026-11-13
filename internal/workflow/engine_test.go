@@ -1255,7 +1255,7 @@ func TestBuiltInMockStructuredReviewAccepted(t *testing.T) {
 }
 
 func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
-	for _, body := range []string{"missing-output", "", "VERDICT: APPROVED\n", structuredReviewFixture("CHANGES_REQUESTED"), structuredReviewFixture("APPROVED")} {
+	for _, body := range []string{"runner-error", "missing-output", "", "VERDICT: APPROVED\n", structuredReviewFixture("CHANGES_REQUESTED"), structuredReviewFixture("APPROVED")} {
 		t.Run(fmt.Sprint(len(body)), func(t *testing.T) {
 			root, e, tr := setupProjectPlanTestRepo(t)
 			ctx := context.Background()
@@ -1274,11 +1274,16 @@ func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
 			} else if strings.Contains(report, contract.PlanFindingsStart) {
 				report = strings.Replace(report, "VERDICT: APPROVED", "VERDICT: CHANGES_REQUESTED", 1)
 			}
+			launches := 0
 			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
 					result, err := (&agent.MockRunner{}).Run(ctx, req)
 					if err == nil && req.Role == "reviewer" {
-						if report == "missing-output" {
+						launches++
+						if report == "runner-error" {
+							result.ExitCode = 1
+							return result, errors.New("review runner failed")
+						} else if report == "missing-output" {
 							err = os.Remove(filepath.Join(req.WorktreePath, ".swarm/active-output/REVIEW.md"))
 						} else {
 							err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(report), 0644)
@@ -1288,6 +1293,13 @@ func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
 				}}, nil
 			}
 			result, err := e.ExecuteWork(ctx, WorkOptions{RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Phase: "all", Headless: true})
+			wantLaunches := 2
+			if report == "" || report == "missing-output" || report == "runner-error" {
+				wantLaunches = 1
+			}
+			if launches != wantLaunches {
+				t.Fatalf("launches=%d, want %d", launches, wantLaunches)
+			}
 			if err == nil || errors.Is(err, ErrPlanReviewRejected) {
 				t.Fatalf("malformed review classified as rejection: %v", err)
 			}
@@ -1312,7 +1324,7 @@ func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
 					found = true
 				}
 			}
-			if !found {
+			if !found && report != "runner-error" {
 				t.Fatal("failed reviewer run missing")
 			}
 		})
@@ -1330,6 +1342,7 @@ func TestMalformedAgentReviewGetsOneFormatRepair(t *testing.T) {
 		ok      bool
 	}{
 		{"repaired", []string{invented, nonBlocking}, true},
+		{"missing verdict", []string{"No verdict", nonBlocking}, true},
 		{"still malformed", []string{invented, invented, nonBlocking}, false},
 		{"verdict flip", []string{strings.Replace(invented, "APPROVED", "CHANGES_REQUESTED", 1), nonBlocking}, false},
 	} {
@@ -1350,6 +1363,9 @@ func TestMalformedAgentReviewGetsOneFormatRepair(t *testing.T) {
 					result, err := (&agent.MockRunner{}).Run(ctx, req)
 					if err == nil && req.Role == "reviewer" {
 						prompts = append(prompts, req.TaskPrompt)
+						if len(prompts) > len(tt.reports) {
+							t.Fatal("unexpected extra reviewer launch")
+						}
 						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(tt.reports[len(prompts)-1]), 0644)
 					}
 					return result, err
@@ -1359,8 +1375,12 @@ func TestMalformedAgentReviewGetsOneFormatRepair(t *testing.T) {
 			if len(prompts) != 2 {
 				t.Fatalf("reviewer runs = %d, want exactly one repair", len(prompts))
 			}
-			if strings.Contains(prompts[0], "Format repair only") || !strings.Contains(prompts[1], "Format repair only") || !strings.Contains(prompts[1], `unknown field \"note\"`) || strings.Contains(prompts[1], "Execute /swarm-review") {
-				t.Fatalf("repair prompt missing rejection reason:\n%s", prompts[1])
+			firstVerdict, diagnostic := ParseReviewVerdict(tt.reports[0])
+			if diagnostic == nil {
+				diagnostic = validateStructuredReview(tt.reports[0], firstVerdict, &lease.IssueState{})
+			}
+			if diagnostic == nil || prompts[1] != prompts[0]+"\n"+diagnostic.Error() {
+				t.Fatalf("repair prompt differs from original task plus exact error:\n%s", prompts[1])
 			}
 			st, stErr := e.LeaseManager.GetCurrentState(ctx, issue.Number)
 			if stErr != nil {
@@ -1425,5 +1445,156 @@ func TestToolCapabilityRoleBundleSelection(t *testing.T) {
 		if err != nil || !strings.Contains(string(raw), sandbox.FormatToolCapabilities(report)) {
 			t.Fatal("selected role observation lost", err)
 		}
+	}
+}
+
+// History comes from a recorded rejection, followed by a separately staged plan.
+func TestMalformedAgentReviewOmittedPriorFinding(t *testing.T) {
+	for _, repair := range []bool{true, false} {
+		t.Run(fmt.Sprint(repair), func(t *testing.T) {
+			root, e, tr := setupProjectPlanTestRepo(t)
+			ctx := context.Background()
+			wu := &contract.WorkUnit{Objective: "Review continuity", Constraints: []string{"Preserve gates"}, Acceptance: []string{"Exact review"}, Workflow: "feature", Gate: contract.GateAgent}
+			issue, err := tr.CreateIssue(ctx, "Review", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = e.LeaseManager.ApproveTask(ctx, issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			one := structuredReviewFixture("CHANGES_REQUESTED")
+			start := strings.Index(one, `{"id":"F1"`)
+			end := strings.Index(one[start:], "}]") + start + 1
+			two := one[:end] + "," + strings.Replace(one[start:end], `"F1"`, `"F2"`, 1) + one[end:]
+			reports := []string{two, one, one}
+			if repair {
+				reports[2] = two
+			}
+			var prompts []string
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "planner" && len(prompts) > 0 {
+						for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
+							f, openErr := os.OpenFile(filepath.Join(req.WorktreePath, ".swarm/active", name), os.O_APPEND|os.O_WRONLY, 0)
+							if openErr != nil {
+								t.Fatal(openErr)
+							}
+							_, writeErr := f.WriteString("\nRevised coverage.\n")
+							closeErr := f.Close()
+							if writeErr != nil || closeErr != nil {
+								t.Fatalf("append plan: %v %v", writeErr, closeErr)
+							}
+						}
+					}
+					if err == nil && req.Role == "reviewer" {
+						if len(prompts) >= len(reports) {
+							t.Fatal("unexpected third repair launch")
+						}
+						report := reports[len(prompts)]
+						prompts = append(prompts, req.TaskPrompt)
+						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(report), 0644)
+					}
+					return result, err
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Phase: "all", Headless: true}
+			first, err := e.ExecuteWork(ctx, opts)
+			if !errors.Is(err, ErrPlanReviewRejected) {
+				t.Fatalf("initial rejection: %v", err)
+			}
+			opts.ClaimID, opts.Phase = first.State.Lease.ClaimID, "plan"
+			staged, err := e.ExecuteWork(ctx, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := staged.State
+			diagnostic := validateStructuredReview(one, "CHANGES_REQUESTED", before)
+			if diagnostic == nil || !strings.Contains(diagnostic.Error(), "omitted prior finding F2") {
+				t.Fatalf("history not authoritative: %v", diagnostic)
+			}
+			opts.Phase = "review"
+			_, err = e.ExecuteWork(ctx, opts)
+			if len(prompts) != 3 {
+				t.Fatalf("review launches after staging = %d", len(prompts)-1)
+			}
+			if prompts[2] != prompts[1]+"\n"+diagnostic.Error() {
+				t.Fatalf("unexpected repair task: %q", prompts[2])
+			}
+			current, stateErr := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+			if stateErr != nil {
+				t.Fatal(stateErr)
+			}
+			if current.PlanReplanCount != before.PlanReplanCount {
+				t.Fatal("repair consumed planner retry")
+			}
+			recorded := 0
+			for _, a := range current.Artifacts {
+				if a.Type != contract.ArtifactReview {
+					continue
+				}
+				recorded++
+				if !repair || a.Verdict != "CHANGES_REQUESTED" || a.Body != two {
+					t.Fatalf("unexpected review artifact: %+v", a)
+				}
+				for k, v := range lease.ReviewBindings(current) {
+					if a.Metadata[k] != v {
+						t.Fatalf("binding %s differs", k)
+					}
+				}
+			}
+			if repair {
+				if !errors.Is(err, ErrPlanReviewRejected) || recorded != 1 {
+					t.Fatalf("valid verdict not recorded: %v, %d", err, recorded)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), diagnostic.Error()) || errors.Is(err, ErrPlanReviewRejected) || recorded != 0 {
+					t.Fatalf("malformed review accepted: %v, %d", err, recorded)
+				}
+				if len(current.PlanReviewHistory) != len(before.PlanReviewHistory) || !reflect.DeepEqual(current.PendingPlanReview, before.PendingPlanReview) {
+					t.Fatal("malformed review became rejection history")
+				}
+			}
+		})
+	}
+}
+
+func TestMalformedAgentReviewRepairTaskScope(t *testing.T) {
+	for _, name := range []string{"direct", "pr argument", "pr state", "revision", "fork state", "engine fork", "recovery fork", "recovery pr", "worker gateway"} {
+		t.Run(name, func(t *testing.T) {
+			_, e, _ := setupProjectPlanTestRepo(t)
+			st := &lease.IssueState{}
+			pr := 0
+			recovery := WorkOptions{}
+			switch name {
+			case "pr argument":
+				pr = 123
+			case "pr state":
+				st.PRNumber = 123
+			case "revision":
+				st.PRRevision = &lease.PRRevision{}
+			case "fork state":
+				st.ForkRepo = "contributor/repo"
+			case "engine fork":
+				e.ForkMode = true
+			case "recovery fork":
+				recovery.ForkMode = true
+			case "recovery pr":
+				recovery.PRNumber = 123
+			case "worker gateway":
+				e.LeaseManager.SetWorkerGateway(partialGateway{})
+			}
+			// Include characters escaped by the legacy helper and exceed its limit.
+			diagnostic := errors.New(strings.Repeat("long diagnostic ", 60) + "\"quoted\"\n<finding>")
+			original := "original audit\noperator guidance"
+			got := e.planReviewRepairTask(original, diagnostic, "APPROVED", st, pr, recovery)
+			want := reviewFormatRepairPrompt(diagnostic, "APPROVED")
+			if name == "direct" {
+				want = original + "\n" + diagnostic.Error()
+			}
+			if got != want {
+				t.Fatalf("unexpected prompt: %q", got)
+			}
+		})
 	}
 }

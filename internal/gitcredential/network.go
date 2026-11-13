@@ -43,6 +43,34 @@ func (e *networkError) Error() string { return e.message }
 func (e *networkError) Unwrap() error { return e.cause }
 
 var networkTimeout = 10 * time.Minute
+var shortReadTimeout = time.Minute
+
+// operationTimeout only shortens reads whose complete shape is understood.
+func operationTimeout(args []string) time.Duration {
+	for len(args) >= 2 && args[0] == "-c" {
+		args = args[2:]
+	}
+	if len(args) > 0 && args[0] == "ls-remote" {
+		return shortReadTimeout
+	}
+	if len(args) > 0 && args[0] == "fetch" {
+		args = args[1:]
+		for len(args) > 0 {
+			switch args[0] {
+			case "--no-write-fetch-head", "--no-tags", "--quiet", "--depth=1":
+				args = args[1:]
+			default:
+				goto operands
+			}
+		}
+	operands:
+		if len(args) == 2 && !strings.HasPrefix(args[0], "-") && regexp.MustCompile(`^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$`).MatchString(args[1]) {
+			return shortReadTimeout
+		}
+	}
+	return networkTimeout
+}
+
 var reapGrace = 5 * time.Second
 var ioGrace = 2 * time.Second
 var newPipe = os.Pipe
@@ -104,12 +132,14 @@ func networkAttempt(ctx context.Context, root string, combined bool, maxBytes in
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("git %s not started: %w", op, err)
 	}
-	bounded, cancel := context.WithTimeout(ctx, networkTimeout)
+	bounded, cancel := context.WithTimeout(ctx, operationTimeout(args))
 	defer cancel()
 	cmd, redact, err := Command(bounded, root, args...)
 	if err != nil {
 		return nil, err
 	}
+	appendConfig(cmd, "http.lowSpeedLimit", "1")
+	appendConfig(cmd, "http.lowSpeedTime", "60")
 	r := &networkRun{cmd: cmd, reaped: make(chan struct{}), settled: make(chan struct{}), settledExit: make(chan struct{}), waiterExit: make(chan struct{})}
 	r.deadline, _ = bounded.Deadline()
 	var files []*os.File

@@ -288,7 +288,7 @@ func (o *RootOptions) verifyForkRemote(ctx context.Context, root string, tr trac
 	return "", "", fmt.Errorf("tracker %s does not support GitHub fork verification", tr.BackendName())
 }
 func loadTrustedUpstreamConfigContext(ctx context.Context, root, upstreamRemote string) (*contract.SwarmConfig, error) {
-	if baseSHA, err := workspace.ResolveBaseFrom(root, upstreamRemote); err == nil && baseSHA != "" {
+	if baseSHA, err := workspace.ResolveBaseFromContext(ctx, root, upstreamRemote); err == nil && baseSHA != "" {
 		if cfg, loadErr := harness.LoadConfigAtContext(ctx, root, baseSHA); loadErr == nil && cfg != nil {
 			return cfg, nil
 		}
@@ -430,7 +430,7 @@ func (o *RootOptions) resolveLeaseManager(cmd *cobra.Command) (tracker.Tracker, 
 			return nil, nil, nil, err
 		}
 		// Only the upstream default branch selects the ledger namespace.
-		ns, err := workspace.TrustedLedgerNamespace(root, o.effectiveUpstreamRemote())
+		ns, err := workspace.TrustedLedgerNamespaceContext(cmd.Context(), root, o.effectiveUpstreamRemote())
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("configure authoritative state store: %w", err)
 		}

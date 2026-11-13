@@ -34,7 +34,7 @@ type issueConvertPreview struct {
 
 // Resolve policy exactly as approval's no-state path, never from the candidate.
 func issueConvertPolicyContext(ctx context.Context, root, remote string) (string, *contract.SwarmConfig, error) {
-	base, err := workspace.ResolveBaseFrom(root, remote)
+	base, err := workspace.ResolveBaseFromContext(ctx, root, remote)
 	if err != nil {
 		return "", nil, err
 	}

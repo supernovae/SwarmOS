@@ -1025,3 +1025,98 @@ func TestGitHubSharedRetryStatusExhaustionClient(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubClientOptionsTimeout(t *testing.T) {
+	ordinary, ci, inventory := githubClientOptions("", "")
+	for name, options := range map[string]api.ClientOptions{"ordinary": ordinary, "CI": ci, "inventory": inventory} {
+		t.Run(name, func(t *testing.T) {
+			if options.Timeout <= 0 || options.Timeout != githubRequestTimeout {
+				t.Fatalf("production Timeout = %s, want %s", options.Timeout, githubRequestTimeout)
+			}
+		})
+	}
+}
+
+func TestGitHubRESTTimeout(t *testing.T) {
+	for _, kind := range []string{"ordinary", "CI", "inventory"} {
+		for _, mode := range []string{"GET", "POST", "cancel"} {
+			t.Run(kind+"/"+mode, func(t *testing.T) {
+				listener, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Skipf("loopback unavailable: %v", err)
+				}
+				defer listener.Close()
+				accepted := make(chan net.Conn, 8)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					for {
+						c, e := listener.Accept()
+						if e != nil {
+							return
+						}
+						accepted <- c
+					}
+				}()
+				defer func() {
+					listener.Close()
+					<-done
+					close(accepted)
+					for c := range accepted {
+						c.Close()
+					}
+				}()
+				ordinary, ci, inventory := githubClientOptions("", "")
+				options := ordinary
+				if kind == "CI" {
+					options = ci
+				}
+				if kind == "inventory" {
+					options = inventory
+				}
+				options.Host = listener.Addr().String()
+				options.AuthToken = "fixture-token"
+				options.Timeout = 200 * time.Millisecond
+				var client *api.RESTClient
+				if kind == "inventory" {
+					client, err = newInventoryRESTClient(options)
+				} else {
+					client, err = api.NewRESTClient(options)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				method := mode
+				if mode == "cancel" {
+					method = "GET"
+					timer := time.AfterFunc(30*time.Millisecond, cancel)
+					defer timer.Stop()
+				}
+				start := time.Now()
+				err = client.DoWithContext(ctx, method, "http://"+listener.Addr().String()+"/stall", nil, nil)
+				if time.Since(start) > 2*time.Second {
+					t.Fatal("request unbounded")
+				}
+				if mode == "cancel" {
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("cancellation: %v", err)
+					}
+					return
+				}
+				var ne net.Error
+				if !errors.As(err, &ne) || !ne.Timeout() {
+					t.Fatalf("timeout cause missing: %v", err)
+				}
+				reason := gitcredential.RetryReason(gitcredential.RetryObservation{Operation: method, Err: err})
+				if method == "GET" && reason == "" {
+					t.Fatal("GET timeout not retry eligible")
+				}
+				if method == "POST" && (reason != "" || len(accepted) != 1) {
+					t.Fatalf("mutation replay: reason=%q connections=%d", reason, len(accepted))
+				}
+			})
+		}
+	}
+}

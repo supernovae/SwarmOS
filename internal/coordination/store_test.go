@@ -783,3 +783,246 @@ exec "$CANCEL_REAL" "$@"
 		})
 	}
 }
+
+// loadGitLog intercepts only this test's Git invocations, retaining real local transport.
+func loadGitLog(t *testing.T, hook string) (string, func() string) {
+	t.Helper()
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> '%s'\n%s\nexec '%s' \"$@\"\n", log, hook, real)
+	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log, func() string {
+		b, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+}
+func assertLoadCounts(t *testing.T, log string, ls, fetch int) {
+	t.Helper()
+	counts := map[string]int{}
+	for line := range strings.SplitSeq(strings.TrimSpace(log), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 {
+			counts[fields[0]]++
+		}
+	}
+	if counts["ls-remote"] != ls || counts["fetch"] != fetch || counts["push"] != 0 {
+		t.Fatalf("network commands=%d (ls-remote=%d fetch=%d push=%d), want ls-remote=%d fetch=%d push=0\n%s", counts["ls-remote"]+counts["fetch"]+counts["push"], counts["ls-remote"], counts["fetch"], counts["push"], ls, fetch, log)
+	}
+}
+func TestGitLoadLocalRoundTrip(t *testing.T) {
+	bothLayouts(t, func(t *testing.T, layout RefLayout) {
+		f := newLedgerFixture(t, layout)
+		s := f.store(f.clone)
+		ctx := context.Background()
+		sha, err := s.CompareAndSwap(ctx, 1, "", []byte(`{"value":1}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		log, read := loadGitLog(t, "")
+		for i := 0; i < 2; i++ {
+			if err := os.WriteFile(log, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			body, rev, err := s.Load(ctx, 1)
+			if err != nil || rev != sha || string(body) != `{"value":1}` {
+				t.Fatalf("%s %s %v", body, rev, err)
+			}
+			calls := read()
+			assertLoadCounts(t, calls, 1, 0)
+			for _, ref := range []string{layout.StateRef(1), layout.Counterpart().StateRef(1), layout.ArchiveRef(), layout.Counterpart().ArchiveRef()} {
+				if !strings.Contains(calls, ref) {
+					t.Fatalf("missing %s: %s", ref, calls)
+				}
+			}
+			if i == 1 && strings.Contains(calls, ":archive.json") {
+				t.Fatal("warm cache reread archive")
+			}
+		}
+		f.git(f.remote, "update-ref", "-d", layout.ArchiveRef())
+		if err := os.WriteFile(log, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.Load(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+		assertLoadCounts(t, read(), 1, 0)
+	})
+}
+
+func TestGitLoadFetchAndRefresh(t *testing.T) {
+	bothLayouts(t, func(t *testing.T, layout RefLayout) {
+		f := newLedgerFixture(t, layout)
+		writer, reader := f.store(f.clone), f.store(f.second)
+		ctx := context.Background()
+		old, err := writer.CompareAndSwap(ctx, 1, "", []byte("old"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tip := f.git(f.remote, "rev-parse", layout.ArchiveRef())
+		f.git(f.second, "fetch", "origin", tip)
+		if _, err := reader.run(ctx, "", "cat-file", "-e", old+"^{commit}"); err == nil {
+			t.Fatal("state unexpectedly local")
+		}
+		log, read := loadGitLog(t, "")
+		for i := 0; i < 2; i++ {
+			want, body := old, "old"
+			if i == 1 {
+				want, err = writer.CompareAndSwap(ctx, 1, old, []byte("new"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				body = "new"
+			}
+			if err := os.WriteFile(log, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, rev, err := reader.Load(ctx, 1)
+			if err != nil || rev != want || string(got) != body {
+				t.Fatalf("%s %s %v", got, rev, err)
+			}
+			assertLoadCounts(t, read(), 1, 1)
+			if !strings.Contains(read(), "fetch --no-write-fetch-head origin "+want) {
+				t.Fatal(read())
+			}
+		}
+	})
+}
+
+func TestGitLoadPinnedSnapshot(t *testing.T) {
+	bothLayouts(t, func(t *testing.T, layout RefLayout) {
+		f := newLedgerFixture(t, layout)
+		s := f.store(f.clone)
+		ctx := context.Background()
+		old, err := s.CompareAndSwap(ctx, 1, "", []byte("old"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := s.archiveCommit(ctx, "state.json", []byte("new"), old)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.git(f.clone, "push", "origin", next+":refs/heads/staged")
+		real, err := exec.LookPath("git")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hook := fmt.Sprintf("if [ \"$1\" = ls-remote ]; then '%s' \"$@\" || exit $?; '%s' -C '%s' update-ref '%s' '%s'; exit $?; fi", real, real, f.remote, layout.StateRef(1), next)
+		loadGitLog(t, hook)
+		for _, want := range []string{old, next} {
+			got, rev, err := s.Load(ctx, 1)
+			if err != nil || rev != want {
+				t.Fatalf("%s %s %v want %s", got, rev, err, want)
+			}
+			if (rev == old && string(got) != "old") || (rev == next && string(got) != "new") {
+				t.Fatal(string(got))
+			}
+		}
+	})
+}
+
+func TestGitLoadNamespaceConflicts(t *testing.T) {
+	bothLayouts(t, func(t *testing.T, layout RefLayout) {
+		for _, archive := range []bool{false, true} {
+			for _, selected := range []bool{false, true} {
+				t.Run(fmt.Sprintf("archive=%t/selected=%t", archive, selected), func(t *testing.T) {
+					f := newLedgerFixture(t, layout)
+					s := f.store(f.clone)
+					ctx := context.Background()
+					if _, err := s.CompareAndSwap(ctx, 1, "", []byte("state")); err != nil {
+						t.Fatal(err)
+					}
+					if _, _, err := s.Load(ctx, 1); err != nil {
+						t.Fatal(err)
+					}
+					ref := layout.StateRef(1)
+					if archive {
+						ref = layout.ArchiveRef()
+					}
+					other, _ := layout.counterpartRef(ref)
+					sha := f.git(f.remote, "rev-parse", ref)
+					f.git(f.remote, "update-ref", other, sha)
+					if !selected {
+						f.git(f.remote, "update-ref", "-d", ref)
+					}
+					_, _, err := s.Load(ctx, 1)
+					if !errors.Is(err, ErrLedgerNamespace) || !strings.Contains(err.Error(), ref) || !strings.Contains(err.Error(), other) {
+						t.Fatal(err)
+					}
+				})
+			}
+		}
+	})
+}
+
+func TestGitLoadFailsClosed(t *testing.T) {
+	for _, mode := range []string{"remote", "fetch", "cat-file", "show", "cancel", "malformed", "missing-archive"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newLedgerFixture(t, BranchLayout)
+			s := f.store(f.clone)
+			ctx := context.Background()
+			if _, err := s.CompareAndSwap(ctx, 1, "", []byte("state")); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := s.Load(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+			hook := ""
+			switch mode {
+			case "remote":
+				f.git(f.clone, "remote", "set-url", "origin", filepath.Join(f.root, "absent"))
+			case "fetch":
+				hook = "if [ \"$1\" = cat-file ] || [ \"$1\" = fetch ]; then exit 77; fi"
+			case "cat-file":
+				hook = "if [ \"$1\" = cat-file ]; then echo corrupt >&2; exit 77; fi"
+			case "show":
+				hook = "if [ \"$1\" = show ]; then exit 77; fi"
+			case "cancel":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			case "malformed", "missing-archive":
+				name := "archive.json"
+				if mode == "missing-archive" {
+					name = "other"
+				}
+				sha, err := s.archiveCommit(ctx, name, []byte(`{}`), "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.git(f.clone, "push", "--force", "origin", sha+":"+s.layout.ArchiveRef())
+			}
+			_, read := loadGitLog(t, hook)
+			_, _, err := s.Load(ctx, 1)
+			if mode == "cat-file" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertLoadCounts(t, read(), 1, 1)
+				return
+			}
+			if err == nil || errors.Is(err, ErrNotFound) {
+				t.Fatalf("did not fail closed: %v", err)
+			}
+			if mode == "malformed" || mode == "missing-archive" {
+				sha, err := s.indexCommit(ctx, freshArchiveIndex(), "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.git(f.clone, "push", "--force", "origin", sha+":"+s.layout.ArchiveRef())
+				if _, _, err := s.Load(ctx, 1); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}

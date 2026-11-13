@@ -103,6 +103,53 @@ func (s *GitStore) archiveIndex(ctx context.Context, preview bool) (*ArchiveInde
 	idx, err := parseArchiveIndex([]byte(raw))
 	return idx, tip, err
 }
+
+// pinnedArchiveAdmission keeps a private, immutable single-tip index. Writers
+// continue to obtain independent mutable indexes through archiveIndex.
+func (s *GitStore) pinnedArchiveAdmission(ctx context.Context, n int, tip string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if tip == "" {
+		return nil
+	}
+	if err := validCheckpointSHA(tip); err != nil {
+		return err
+	}
+	s.admissionMu.Lock()
+	idx := s.admissionIndex
+	if s.admissionTip != tip {
+		idx = nil
+	}
+	s.admissionMu.Unlock()
+	if idx == nil {
+		if err := s.ensureCommit(ctx, tip); err != nil {
+			return err
+		}
+		raw, err := s.run(ctx, "", "show", tip+":archive.json")
+		if err != nil {
+			return err
+		}
+		idx, err = parseArchiveIndex([]byte(raw))
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.admissionMu.Lock()
+		s.admissionTip, s.admissionIndex = tip, idx
+		s.admissionMu.Unlock()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, ok := idx.Entries[n]; ok {
+		return &ArchivedError{n}
+	}
+	return nil
+}
+
 func (s *GitStore) archiveAdmission(ctx context.Context, n int, preview bool) error {
 	if err := s.checkLedger(ctx, s.ref(n)); err != nil {
 		return err

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/filelock"
@@ -94,6 +95,21 @@ func (s *FileStore) Load(ctx context.Context, n int) ([]byte, string, error) {
 		return nil, "", err
 	}
 	return b, digest(b), nil
+}
+
+// ensureCommit fetches only immutable objects missing from the local database.
+func (s *GitStore) ensureCommit(ctx context.Context, sha string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validCheckpointSHA(sha); err != nil {
+		return err
+	}
+	if _, err := s.run(ctx, "", "cat-file", "-e", sha+"^{commit}"); err == nil {
+		return nil
+	}
+	_, err := s.run(ctx, "", "fetch", "--no-write-fetch-head", s.Remote(), sha)
+	return err
 }
 
 // LoadCheckpointPreview observes the atomically replaced state without creating
@@ -200,8 +216,11 @@ func (s *FileStore) WithLockedState(ctx context.Context, n int, fn func([]byte, 
 func (s *FileStore) Root() string { return s.repoRoot }
 
 type GitStore struct {
-	root, remote string
-	layout       RefLayout
+	root, remote   string
+	layout         RefLayout
+	admissionMu    sync.Mutex
+	admissionTip   string
+	admissionIndex *ArchiveIndex
 }
 
 // NewGitStore keeps authoritative state on the origin remote.
@@ -271,15 +290,28 @@ func (s *GitStore) remoteSHA(ctx context.Context, ref string) (string, error) {
 	return sha, nil
 }
 func (s *GitStore) Load(ctx context.Context, n int) ([]byte, string, error) {
-	if err := s.archiveAdmission(ctx, n, false); err != nil {
-		return nil, "", err
-	}
 	ref := s.ref(n)
-	sha, err := s.remoteSHA(ctx, ref)
+	other, _ := s.layout.counterpartRef(ref)
+	archive := s.layout.ArchiveRef()
+	archiveOther, _ := s.layout.counterpartRef(archive)
+	found, err := s.remoteRefs(ctx, ref, other, archive, archiveOther)
 	if err != nil {
 		return nil, "", err
 	}
-	if _, err = s.run(ctx, "", "fetch", "--no-write-fetch-head", s.Remote(), sha); err != nil {
+	for _, pair := range [][2]string{{ref, other}, {archive, archiveOther}} {
+		if _, conflict := found[pair[1]]; conflict {
+			_, exists := found[pair[0]]
+			return nil, "", s.layout.ledgerConflict(pair[0], pair[1], exists)
+		}
+	}
+	if err := s.pinnedArchiveAdmission(ctx, n, found[archive]); err != nil {
+		return nil, "", err
+	}
+	sha, ok := found[ref]
+	if !ok {
+		return nil, "", ErrNotFound
+	}
+	if err := s.ensureCommit(ctx, sha); err != nil {
 		return nil, "", fmt.Errorf("fetch pinned state %s: %w", ref, err)
 	}
 	body, err := s.run(ctx, "", "show", sha+":state.json")

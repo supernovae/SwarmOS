@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -99,6 +100,7 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 	var baseSHA, protectedMode, grantFile string
 	var issue, prNumber int
 	var asJSON, grantOnly bool
+	var shard string
 	cmd := &cobra.Command{Use: "validate", Short: "Validate a repository checkout against a trusted immutable base", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		usage := func(err error) error {
 			reportJSONFailure(cmd, asJSON, "validation", err)
@@ -125,6 +127,13 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 		}
 		if !grantOnly && linked && grantFile != "" {
 			return usage(fmt.Errorf("--grant-file without --grant-only cannot be combined with --issue and --pr"))
+		}
+		shardIndex, shardCount, err := parseValidationShard(shard)
+		if err != nil {
+			return usage(err)
+		}
+		if grantOnly && shardCount != 0 {
+			return usage(fmt.Errorf("--shard cannot be combined with --grant-only, which runs no checks"))
 		}
 		ctx, root := cmd.Context(), options.resolveRepoRoot()
 		notes := cmd.OutOrStdout()
@@ -164,9 +173,12 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 				writeHarnessGrantAccepted(notes, wu.IssueNumber)
 			}
 		}
-		report, err := validation.Validate(ctx, root, unit, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork, ReportProtectedChanges: protectedMode == "report", LookupEnv: options.lookupEnv})
+		report, err := validation.Validate(ctx, root, unit, validation.ValidateOptions{CIMode: true, RunnerIsolated: onCIRunner(), BaseSHA: baseSHA, ForkMode: options.Fork, ReportProtectedChanges: protectedMode == "report", LookupEnv: options.lookupEnv, ShardIndex: shardIndex, ShardCount: shardCount})
 		if !asJSON && report != nil {
 			writeProtectedChanges(cmd, report.ProtectedChanges)
+			if report.Shard != "" {
+				fmt.Fprintln(cmd.OutOrStdout(), report.Shard)
+			}
 		}
 		return writeValidationOutcome(cmd, report, err, asJSON)
 	}}
@@ -177,7 +189,22 @@ func newRepoValidateCmd(options *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&grantOnly, "grant-only", false, "Verify the linked issue's harness grant and write it to --grant-file without running checks")
 	cmd.Flags().StringVar(&grantFile, "grant-file", "", "Harness grant file written by --grant-only; re-checked against this checkout before use")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit a structured validation outcome")
+	cmd.Flags().StringVar(&shard, "shard", "", "Run only shard i/N of the required checks, for CI runners in parallel; every shard must pass")
 	return cmd
+}
+
+// parseValidationShard reads --shard i/N; empty means every check.
+func parseValidationShard(s string) (int, int, error) {
+	if s == "" {
+		return 0, 0, nil
+	}
+	a, b, ok := strings.Cut(s, "/")
+	i, errI := strconv.Atoi(a)
+	n, errN := strconv.Atoi(b)
+	if !ok || errI != nil || errN != nil || n < 1 || n > validation.MaxValidationShards || i < 1 || i > n {
+		return 0, 0, fmt.Errorf("--shard must be i/N with 1 <= i <= N <= %d, not %q", validation.MaxValidationShards, s)
+	}
+	return i, n, nil
 }
 
 // writeProtectedChanges lists reported protected-path changes so reviewers see

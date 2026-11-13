@@ -557,6 +557,21 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	return report, nil
 }
 
+// ChecksSkippedKey marks a failed validation whose required checks were not
+// run. Such a report can never pass, satisfy reuse or allow submission.
+const ChecksSkippedKey = "required_checks"
+
+// SkippedChecksReport records a failed validation without running required
+// checks, for a round whose outcome is already decided. The caller attaches
+// tester evidence through the normal recording path.
+func SkippedChecksReport(issue int, baseSHA, headSHA, reason string) *ValidationReport {
+	if issue <= 0 {
+		issue = 1
+	}
+	body := "# Validation Report\n\nRequired checks were not run: " + reason + ".\n"
+	return &ValidationReport{Passed: false, BaseSHA: baseSHA, HeadSHA: headSHA, Artifact: contract.Artifact{Version: 1, ID: fmt.Sprintf("art-%d-validation", issue), IssueNumber: issue, Type: contract.ArtifactValidation, Producer: "swarm:validator", Verdict: "FAIL", Summary: "Required checks not run: " + reason, Body: body, CreatedAt: time.Now().UTC(), Metadata: map[string]string{"base_sha": baseSHA, "head_sha": headSHA, ChecksSkippedKey: "skipped"}}}
+}
+
 func loadTrustedValidationSpec(repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
 	return loadTrustedValidationSpecContext(context.Background(), repoRoot, baseSHA)
 }

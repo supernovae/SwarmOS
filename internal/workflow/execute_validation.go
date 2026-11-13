@@ -93,13 +93,19 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 		}
 		return false, fmt.Errorf("tester declared %s in .swarm/active/VALIDATION.md; complete implementation and rerun with %s", outcome, command)
 	}
-	r.progress.next("required-checks")
+	var report *validation.ValidationReport
+	if skip, skipErr := r.skipChecksForUnmetAcceptance(round, reuseChecks, testerBody); skipErr != nil {
+		return false, skipErr
+	} else if skip != nil {
+		report, err = skip, fmt.Errorf("%w: required checks were not run because the tester recorded unmet acceptance criteria and no repair rounds remain", errAcceptanceUnmet)
+	} else {
+		r.progress.next("required-checks")
+	}
 	version := r.opts.Version
 	if version == "" && (r.opts.Phase == "test" || r.testerResume || (!r.forkMode && r.opts.PRNumber == 0)) {
 		version = "dev"
 	}
-	var report *validation.ValidationReport
-	if reuseChecks {
+	if report == nil && reuseChecks {
 		report, err = validation.Reuse(r.ctx, r.wtPath, validation.ValidateOptions{ForkMode: r.forkMode || r.e.LeaseManager.HasWorkerGateway(), DirectIssueReuse: !r.forkMode && r.opts.PRNumber == 0 && !r.e.LeaseManager.HasWorkerGateway(), Version: r.opts.Version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA}, r.opts.Owner, r.st.Artifacts)
 		if err != nil {
 			return false, err
@@ -168,11 +174,30 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 
 var errAcceptanceUnmet = errors.New("acceptance criteria unmet")
 
+// skipChecksForUnmetAcceptance returns a failed, checks-skipped report when the
+// tester recorded an unmet criterion in the last allowed round. Running the
+// required checks then cannot change the outcome: the round fails either way,
+// so the full suite would only spend time. The tester evidence is still
+// recorded, so the next explicit developer round sees it.
+func (r *workRun) skipChecksForUnmetAcceptance(round int, reuseChecks bool, testerBody string) (*validation.ValidationReport, error) {
+	if reuseChecks || r.testerResume || round < r.repairLimit || r.forkMode || r.e.LeaseManager.HasWorkerGateway() || r.opts.PRNumber != 0 || r.st.PRNumber != 0 || r.st.PRRevision != nil || r.opts.Phase == "test" {
+		return nil, nil
+	}
+	if !validation.AssessAcceptance(r.pre.WorkUnit.Acceptance, validation.CaptureAcceptanceEvidence(testerBody)).NeedsRepair() {
+		return nil, nil
+	}
+	head, err := gitcredential.Output(r.ctx, r.wtPath, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return nil, fmt.Errorf("resolve candidate head: %w", err)
+	}
+	return validation.SkippedChecksReport(r.opts.IssueNumber, r.st.BaseSHA, strings.TrimSpace(string(head)), "the tester recorded unmet acceptance criteria and no repair rounds remain"), nil
+}
+
 func (r *workRun) acceptanceRepair() validation.AcceptanceAssessment {
 	if r.forkMode || r.e.LeaseManager.HasWorkerGateway() || r.opts.PRNumber != 0 || r.st.PRNumber != 0 || r.st.PRRevision != nil || r.opts.Phase == "test" {
 		return validation.AcceptanceAssessment{}
 	}
-	return lease.RecordedReadiness(r.st, r.pre.WorkUnit.Acceptance).AcceptanceEvidence
+	return lease.RepairAcceptance(r.st, r.pre.WorkUnit.Acceptance)
 }
 
 func (r *workRun) validateAndRepair() (*WorkResult, error) {

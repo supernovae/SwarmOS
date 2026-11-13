@@ -95,6 +95,35 @@ func RecordedReadiness(st *IssueState, criteria []string) validation.Readiness {
 	return validation.NewReadiness(checks, criteria, validation.AcceptanceSnapshotFromMetadata(dst.Metadata))
 }
 
+// RepairAcceptance is RecordedReadiness for repair guidance only. Failed
+// reports carry no reuse fingerprint, so RecordedReadiness cannot see their
+// tester evidence; without this, a round that failed a required check and an
+// acceptance criterion repaired only the check (#526). It surfaces unmet
+// criteria from the latest trusted failed report for the current claim, head
+// and base, and never reports a failed report's criteria as met. Submission
+// and status keep using RecordedReadiness.
+func RepairAcceptance(st *IssueState, criteria []string) validation.AcceptanceAssessment {
+	recorded := RecordedReadiness(st, criteria).AcceptanceEvidence
+	if recorded.NeedsRepair() || st == nil || st.Lease.ClaimID == "" || st.Lease.Owner == "" {
+		return recorded
+	}
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		src := st.Artifacts[i]
+		if src.Type != contract.ArtifactValidation {
+			continue
+		}
+		md := src.Metadata
+		if src.Verdict == "PASS" || md["validation_trusted_origin"] != "coordinator" || md["validation_trusted_owner"] != st.Lease.Owner || md["validation_trusted_claim"] != st.Lease.ClaimID || md["head_sha"] == "" || md["head_sha"] != st.HeadSHA || md["base_sha"] != st.BaseSHA {
+			return recorded
+		}
+		if failed := validation.AssessAcceptance(criteria, validation.AcceptanceSnapshotFromMetadata(md)); failed.NeedsRepair() {
+			return failed
+		}
+		return recorded
+	}
+	return recorded
+}
+
 // GapAcknowledgment is a coordinator-only decision, never imported from artifacts
 // or public IssueState JSON.
 type GapAcknowledgment struct {

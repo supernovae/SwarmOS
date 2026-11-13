@@ -17,6 +17,9 @@ import (
 
 const InventoryInputLimit int64 = 64 << 20
 
+// ErrInventorySnapshotChanged reports a ref set that changed during refresh.
+var ErrInventorySnapshotChanged = errors.New("state snapshot changed during refresh")
+
 // InventoryDecoder consumes a pinned stream synchronously.
 type InventoryDecoder func(context.Context, io.Reader, func(int64) error) ([]byte, error)
 
@@ -346,11 +349,11 @@ func (s *GitStore) ReadInventorySnapshot(ctx context.Context, apply bool, limit 
 			return nil, e
 		}
 		if len(fresh) != len(refs) {
-			return nil, fmt.Errorf("state snapshot changed during refresh")
+			return nil, ErrInventorySnapshotChanged
 		}
 		for n, sha := range fresh {
 			if refs[n] != sha {
-				return nil, fmt.Errorf("state snapshot changed during refresh")
+				return nil, ErrInventorySnapshotChanged
 			}
 		}
 		refs = fresh

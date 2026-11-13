@@ -261,7 +261,7 @@ func TestGitInventorySnapshotRefresh(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-				} else if err == nil || !strings.Contains(err.Error(), "state snapshot changed during refresh") {
+				} else if !errors.Is(err, ErrInventorySnapshotChanged) || !strings.Contains(err.Error(), "state snapshot changed during refresh") {
 					t.Fatal(err)
 				}
 				calls, e := os.ReadFile(log)
@@ -308,10 +308,43 @@ func TestGitInventorySnapshotLimits(t *testing.T) {
 			})
 		}
 		t.Run("advertisement-overflow", func(t *testing.T) {
-			raw := strings.Repeat(row, 4000)
-			inventoryGitStub(t, raw, raw)
-			if _, err := NewGitStoreWithLayout(t.TempDir(), "", layout).ReadInventorySnapshot(context.Background(), true, 10000, func(int64) error { return nil }, testInventoryDecoder); err == nil {
-				t.Fatal("accepted oversized advertisement")
+			var listing strings.Builder
+			for n := 1; n <= 4000; n++ {
+				fmt.Fprintf(&listing, "%s\t%s\n", strings.Repeat("a", 40), layout.StateRef(n))
+			}
+			raw := listing.String()
+			if len(raw) <= 128<<10 {
+				t.Fatal("fixture too small")
+			}
+			log := inventoryGitStub(t, raw, raw)
+			_, err := NewGitStoreWithLayout(t.TempDir(), "", layout).ReadInventorySnapshot(context.Background(), true, 10000, func(int64) error { return nil }, testInventoryDecoder)
+			t.Logf("outer error: %v", err)
+			var contains func(error) bool
+			contains = func(e error) bool {
+				if e == nil {
+					return false
+				}
+				if strings.Contains(e.Error(), "git inventory output limit exceeded") {
+					return true
+				}
+				if multi, ok := e.(interface{ Unwrap() []error }); ok {
+					for _, child := range multi.Unwrap() {
+						if contains(child) {
+							return true
+						}
+					}
+				}
+				return contains(errors.Unwrap(e))
+			}
+			if !contains(err) || strings.Contains(fmt.Sprint(err), "inventory ref limit") {
+				t.Fatalf("wrong limit: %v", err)
+			}
+			calls, e := os.ReadFile(log)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if strings.Count(string(calls), "ls-remote ") != 1 || strings.Contains(string(calls), "fetch ") || strings.Contains(string(calls), "show ") {
+				t.Fatalf("calls: %s", calls)
 			}
 		})
 		for _, extra := range []string{"", " "} {

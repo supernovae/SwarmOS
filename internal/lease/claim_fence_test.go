@@ -110,6 +110,7 @@ var claimFenceInventory = map[string]string{
 	"RetireCleanupLocalResources":    "cleanup operation token",
 	"Revoke":                         "independent maintainer revocation",
 	"SaveCheckpointCompletion":       "",
+	"SelectionStateReader":           "read-only advisory selection snapshot; never authorizes writes",
 	"SetHeartbeatTimerFunc":          "manager configuration only",
 	"SetNodeProfile":                 "manager configuration only",
 	"SetNowFunc":                     "manager configuration only",

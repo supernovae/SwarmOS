@@ -234,20 +234,12 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 	}
 	var previous []string
 	for round := initialRound + 1; err != nil && !paused && (repairableValidation(err, r.res.Validation) || errors.Is(err, errAcceptanceUnmet)); round++ {
-		failing := failingIdentities(r.res.Validation)
-		if errors.Is(err, errAcceptanceUnmet) {
-			for _, w := range r.acceptanceRepair().Blockers {
-				if w.Reason == "unmet" {
-					failing = append(failing, fmt.Sprintf("acceptance %d: %s", w.Index, w.Criterion))
-				}
-			}
-		}
+		// Unmet criteria are targets even when checks failed too, so progress
+		// and the final message name everything the round had to fix.
+		failing := repairTargets(r.res.Validation, r.acceptanceRepair())
 		if round > r.repairLimit {
 			if r.repairLimit > 0 || errors.Is(err, errAcceptanceUnmet) {
-				detail := "failing tests changed since the previous round"
-				if slices.Equal(failing, previous) {
-					detail = "the same tests still fail"
-				}
+				detail := repairOutcome(failing, previous)
 				err = fmt.Errorf("issue #%d: %w after %d of %d repair rounds; %s: %s; automatic allowance exhausted; explicit --phase implement or --developer-instructions may continue subject to approval: %w", r.opts.IssueNumber, ErrValidationRepairExhausted, r.repairLimit, r.repairLimit, detail, boundedList(failing, maxRepairIdentities), err)
 			}
 			break
@@ -273,6 +265,30 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 		return r.res, err
 	}
 	return r.finish()
+}
+
+func repairTargets(report *validation.ValidationReport, acceptance validation.AcceptanceAssessment) []string {
+	failing := failingIdentities(report)
+	if acceptance.NeedsRepair() {
+		for _, w := range acceptance.Blockers {
+			if w.Reason == "unmet" {
+				failing = append(failing, fmt.Sprintf("acceptance %d: %s", w.Index, w.Criterion))
+			}
+		}
+	}
+	return failing
+}
+
+func repairOutcome(failing, previous []string) string {
+	if slices.Equal(failing, previous) {
+		return "the same targets are still unresolved"
+	}
+	for _, f := range failing {
+		if !slices.Contains(previous, f) {
+			return "new failures appeared since the previous round"
+		}
+	}
+	return "targets from the previous round are still unresolved"
 }
 
 func (r *workRun) finish() (*WorkResult, error) {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -303,8 +304,8 @@ func TestWorkValidationRepairRounds(t *testing.T) {
 		{name: "default limit repairs on round 1", rounds: []func(string) error{feature, fix}, wantRounds: 1, wantCalls: 2},
 		{name: "explicit zero disables repair", limit: "0", rounds: []func(string) error{feature, fix}, wantErr: validation.ErrRequiredCheckFailed, wantCalls: 1},
 		{name: "limit 2 succeeds on the second repair", limit: "2", rounds: []func(string) error{feature, writeFile("try.txt", "x\n"), fix}, wantRounds: 2, wantCalls: 3},
-		{name: "exhausted with the same failing tests", rounds: []func(string) error{feature, writeFile("try.txt", "x\n")}, wantErr: ErrValidationRepairExhausted, wantRounds: 1, wantCalls: 2, wantContains: "the same tests still fail: check marker, example.com/m/broken.TestBroken"},
-		{name: "changed failing tests do not reset the budget", rounds: []func(string) error{feature, writeFile("other.txt", "x\n")}, wantErr: ErrValidationRepairExhausted, wantRounds: 1, wantCalls: 2, wantContains: "failing tests changed since the previous round: check marker, example.com/m/broken.TestOther"},
+		{name: "exhausted with the same failing tests", rounds: []func(string) error{feature, writeFile("try.txt", "x\n")}, wantErr: ErrValidationRepairExhausted, wantRounds: 1, wantCalls: 2, wantContains: "the same targets are still unresolved: check marker, example.com/m/broken.TestBroken"},
+		{name: "changed failing tests do not reset the budget", rounds: []func(string) error{feature, writeFile("other.txt", "x\n")}, wantErr: ErrValidationRepairExhausted, wantRounds: 1, wantCalls: 2, wantContains: "new failures appeared since the previous round: check marker, example.com/m/broken.TestOther"},
 		{name: "a round with only notes changes stops", rounds: []func(string) error{feature, notesOnly}, wantErr: ErrValidationRepairNoChanges, wantRounds: 1, wantCalls: 2},
 		{name: "blocked developer stops", limit: "3", rounds: []func(string) error{feature, writeFile(".swarm/active/IMPLEMENTATION.md", "Status: blocked - needs a maintainer\n")}, wantErr: validation.ErrRequiredCheckFailed, wantRounds: 1, wantCalls: 2, wantContains: "developer blocked"},
 	} {
@@ -2698,5 +2699,26 @@ func TestRequiredCheckLimitGuidance(t *testing.T) {
 	}
 	if !repairableValidation(validation.ErrRequiredCheckFailed, &validation.ValidationReport{Passed: false}) {
 		t.Fatal("ordinary failure no longer repairable")
+	}
+}
+
+// Issue #526: a round with both failing checks and an unmet criterion must
+// target both, and a criterion that stays unmet is not reported as "changed".
+func TestRepairTargetsIncludeUnmetAcceptanceWithFailingChecks(t *testing.T) {
+	report := &validation.ValidationReport{Repair: &validation.RepairSummary{Tests: []validation.FailingTest{{Check: "core-regressions", Package: "example.com/m/lease", Name: "TestInventory"}}}}
+	unmet := validation.AcceptanceAssessment{State: "incomplete", Blockers: []validation.AcceptanceWarning{{Index: 2, Criterion: "same choice", Reason: "unmet"}}}
+	first := repairTargets(report, unmet)
+	if !slices.Contains(first, "acceptance 2: same choice") || len(first) != 2 {
+		t.Fatalf("round targets dropped the unmet criterion: %v", first)
+	}
+	second := repairTargets(nil, unmet)
+	if got := repairOutcome(second, first); got != "targets from the previous round are still unresolved" {
+		t.Fatal(got)
+	}
+	if got := repairOutcome(first, first); got != "the same targets are still unresolved" {
+		t.Fatal(got)
+	}
+	if got := repairOutcome([]string{"acceptance 3: other"}, first); got != "new failures appeared since the previous round" {
+		t.Fatal(got)
 	}
 }

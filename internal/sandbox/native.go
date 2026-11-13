@@ -977,6 +977,42 @@ type nativeTerminationError struct{ cause error }
 func (e *nativeTerminationError) Error() string { return "terminate native worker: " + e.cause.Error() }
 func (e *nativeTerminationError) Unwrap() error { return e.cause }
 
+// NativeFailureCause describes a known native launch or teardown failure without
+// exposing the variable context carried by the underlying error.
+func NativeFailureCause(err error) string {
+	termination := false
+	var visit func(error) bool
+	visit = func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if _, ok := err.(*nativeTerminationError); ok {
+			termination = true
+		}
+		if child, ok := err.(interface{ Unwrap() error }); ok {
+			if strings.HasPrefix(err.Error(), "native pre-exec handshake: ") {
+				return true
+			}
+			return visit(child.Unwrap())
+		}
+		if children, ok := err.(interface{ Unwrap() []error }); ok {
+			for _, child := range children.Unwrap() {
+				if visit(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if visit(err) {
+		return "native pre-exec handshake"
+	}
+	if termination {
+		return "native termination"
+	}
+	return ""
+}
+
 var errNativeScopeUnavailable = errors.New("native storage scope unavailable")
 
 type nativeScopeBoundary interface {

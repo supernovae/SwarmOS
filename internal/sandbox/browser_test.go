@@ -1184,3 +1184,54 @@ func TestNativeScopeStopDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNativeFailureCause(t *testing.T) {
+	secret := errors.New("/home/synthetic-user/private synthetic-host ENV=secret\x1b[31m\n")
+	exitErr := exec.Command("sh", "-c", "exit 7").Run()
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"unknown", secret, ""},
+		{"termination", &nativeTerminationError{secret}, "native termination"},
+		{"exit and termination", errors.Join(exitErr, &nativeTerminationError{secret}), "native termination"},
+		{"nested", fmt.Errorf("outer: %w", errors.Join(secret, &nativeTerminationError{secret})), "native termination"},
+		{"precedence", errors.Join(&nativeTerminationError{secret}, fmt.Errorf("native pre-exec handshake: %w", secret)), "native pre-exec handshake"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NativeFailureCause(tc.err); got != tc.want {
+				t.Fatalf("cause %q", got)
+			}
+		})
+	}
+	t.Run("launch", func(t *testing.T) {
+		isolateRuntimeControl(t)
+		dir := resolvedTempDir(t)
+		marker := filepath.Join(dir, "payload-ran")
+		boundary := &nativeFixtureBoundary{verifyErr: secret}
+		var out, diagnostics bytes.Buffer
+		err := runNativeCommandWithBoundary(t.Context(), "/bin/sh", dir, nil, []string{"-c", "touch payload-ran"}, nil, &out, &diagnostics, process.StopVerified, func(context.Context) (nativeScopeBoundary, error) { return boundary, nil })
+		if err == nil || NativeFailureCause(err) != "native pre-exec handshake" {
+			t.Fatalf("launch: %v", err)
+		}
+		if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+			t.Fatal("payload executed")
+		}
+		// Optional private bridge to the validation package's runner regression.
+		if path := os.Getenv("SWARM_NATIVE_CAUSE_RESULT"); path != "" {
+			result := struct{ Error, Output, Cause string }{err.Error(), out.String() + diagnostics.String(), NativeFailureCause(err)}
+			data, marshalErr := json.Marshal(result)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if len(data) > 16384 {
+				t.Fatal("oversized bridge")
+			}
+			if writeErr := os.WriteFile(path, data, 0600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+		}
+	})
+}

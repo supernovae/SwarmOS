@@ -2,6 +2,7 @@ package validation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/progress"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 )
@@ -1574,4 +1576,108 @@ func TestRequiredChecksCancellation(t *testing.T) {
 	if count != 1 {
 		t.Fatal("missing cancelled outcome")
 	}
+}
+
+func TestFormatInfrastructureCause(t *testing.T) {
+	for _, tc := range []struct{ label, want string }{
+		{"native pre-exec handshake", "[swarm: infrastructure cause: native pre-exec handshake]"},
+		{"native\x1b[31m\nhandshake", "[swarm: infrastructure cause: native\\x1b[31m\\nhandshake]"},
+	} {
+		if got := formatInfrastructureCause(tc.label); got != tc.want {
+			t.Errorf("got %q, want %q", got, tc.want)
+		}
+	}
+}
+
+func TestRequiredCheckInfrastructureCause(t *testing.T) {
+	secret := "/home/synthetic-user/private synthetic-host ENV=secret\x1b[31m\n"
+	cmd := exec.Command("sh", "-c", "printf command-marker; exit 7")
+	commandOutput, exitErr := cmd.CombinedOutput()
+	if exitErr == nil {
+		t.Fatal("expected exit error")
+	}
+	for _, tc := range []struct {
+		name, output, label string
+		err                 error
+		infra               bool
+		code                int
+	}{
+		{"handshake", "helper stderr", "native pre-exec handshake", errors.Join(fmt.Errorf("native pre-exec handshake: %w", errors.New(secret)), exitErr), false, 7},
+		{"generic", "helper stderr\n", "infrastructure failure", errors.New(secret), true, 1},
+		{"long", strings.Repeat("helper line\n", 10000), "native pre-exec handshake", fmt.Errorf("native pre-exec handshake: %w", errors.New(secret)), true, 1},
+		{"command_exit", string(commandOutput), "", exitErr, false, 7},
+		{"success", "success marker", "", nil, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &checkRunner{worktree: t.TempDir(), home: t.TempDir(), runCommand: func(_ context.Context, _ string, _ time.Duration, stdout, stderr io.Writer) error {
+				io.WriteString(stderr, tc.output)
+				return tc.err
+			}}
+			got, err := r.runCheck(t.Context(), tc.name, "fixture", time.Minute, nil)
+			if err != tc.err || got.InfrastructureError != tc.infra || got.ExitCode != tc.code {
+				t.Fatalf("classification: %+v %v", got, err)
+			}
+			if tc.label == "" {
+				if got.Output != tc.output || strings.Contains(got.OutputTail, "infrastructure cause") {
+					t.Fatalf("changed command output: %+v", got)
+				}
+				if tc.err != nil && got.OutputTail != tc.output {
+					t.Fatal("changed exit tail")
+				}
+				return
+			}
+			line := "[swarm: infrastructure cause: " + tc.label + "]"
+			if got.Output != strings.TrimSuffix(tc.output, "\n")+"\n"+line+"\n" || !strings.HasSuffix(got.OutputTail, line) {
+				t.Fatal("missing cause or changed helper output")
+			}
+			for _, sentinel := range []string{"/home/", "synthetic-user", "synthetic-host", "ENV=secret", "\x1b"} {
+				if strings.Contains(got.Output, sentinel) || strings.Contains(got.OutputTail, sentinel) {
+					t.Fatal("private context leaked")
+				}
+			}
+			if len(got.OutputTail) > diagnosticBytes || strings.Count(got.OutputTail, "\n") >= diagnosticLines {
+				t.Fatal("tail bounds")
+			}
+		})
+	}
+	t.Run("real_launch", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("native control fixture requires Linux")
+		}
+		dir := t.TempDir()
+		binary := filepath.Join(dir, "sandbox.test")
+		build := exec.Command("go", "test", "-c", "-o", binary, "../sandbox")
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build fixture: %v: %s", err, out)
+		}
+		resultPath := filepath.Join(dir, "result.json")
+		r := &checkRunner{worktree: dir, home: dir, runCommand: func(ctx context.Context, _ string, _ time.Duration, stdout, stderr io.Writer) error {
+			child := exec.CommandContext(ctx, binary, "-test.run=^TestNativeFailureCause/launch$", "-test.timeout=30s")
+			child.Env = append(os.Environ(), "SWARM_NATIVE_CAUSE_RESULT="+resultPath)
+			if out, err := child.CombinedOutput(); err != nil {
+				t.Fatalf("fixture: %v: %s", err, out)
+			}
+			f, err := os.Open(resultPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			var result struct{ Error, Output, Cause string }
+			if err := json.NewDecoder(io.LimitReader(f, 16384)).Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+			// Preserve the actual launch context across the process boundary. Types do
+			// not survive JSON; the sandbox test checks recognition before transport.
+			launchErr := fmt.Errorf("%w", errors.New(result.Error))
+			if sandbox.NativeFailureCause(launchErr) != result.Cause {
+				t.Fatal("bridge changed classification")
+			}
+			io.WriteString(stderr, result.Output)
+			return launchErr
+		}}
+		got, err := r.runCheck(t.Context(), "native", "fixture", time.Minute, nil)
+		if err == nil || !strings.Contains(got.Output, "[swarm: infrastructure cause: native pre-exec handshake]") || !strings.Contains(got.OutputTail, "[swarm: infrastructure cause: native pre-exec handshake]") {
+			t.Fatalf("real launch cause missing: %+v %v", got, err)
+		}
+	})
 }

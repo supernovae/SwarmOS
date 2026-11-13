@@ -1165,7 +1165,7 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 		Dependencies:         deps,
 		OperatorInstructions: instructions, Agent: reviewerAgent, Role: "reviewer", Mode: mode, WorktreePath: wtPath,
 		SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md",
-		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Read .swarm/active/REVIEW_EVIDENCE.md for previous reports and unmerged lessons as review evidence. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
+		TaskPrompt:   "Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Read .swarm/active/REVIEW_EVIDENCE.md for previous reports and unmerged lessons as review evidence. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED. " + reviewOutputInstruction,
 	}
 	req.TaskPrompt = revisionTaskPrompt(req.TaskPrompt, st, prNumber)
 	if instructions != "" {
@@ -1194,8 +1194,24 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 			}
 		}
 		if err != nil {
+			missing := errors.Is(err, sandbox.ErrMissingRoleOutput) && prNumber == 0 && st.PRRevision == nil
 			st, err = e.failedRun(ctx, st, recovery, revRun, err, "reviewer")
-			return "", st, err
+			if firstErr != nil {
+				err = errors.Join(firstErr, err)
+			}
+			if !missing || attempt >= reviewFormatRetries {
+				return "", st, err
+			}
+			// The review was left only in the reviewer's final message, which
+			// the coordinator never reads. Ask once for the file itself; the
+			// result is validated exactly like any other review.
+			firstErr = err
+			if admitErr := e.admitStage(ctx, wu.IssueNumber, owner, "review"); admitErr != nil {
+				return "", st, errors.Join(err, admitErr)
+			}
+			reporter.retry("review-format", attempt+1, reviewFormatRetries)
+			req.TaskPrompt = e.planReviewRepairTask(originalTask, errReviewNotWritten, "", st, prNumber, recovery)
+			continue
 		}
 		review, err = readRequiredArtifact(wtPath, "REVIEW.md")
 		verdict = ""
@@ -1907,7 +1923,7 @@ func (e *Engine) RunUpstreamPlanReview(ctx context.Context, o *lease.UpstreamPla
 	if headless {
 		mode = "headless"
 	}
-	run, err := agent.RunReview(ctx, runner, agent.RunRequest{Agent: reviewer, Role: "reviewer", Mode: mode, WorktreePath: path, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", Dependencies: deps, TaskPrompt: revisionTaskPrompt("Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.", st, st.PRNumber)})
+	run, err := agent.RunReview(ctx, runner, agent.RunRequest{Agent: reviewer, Role: "reviewer", Mode: mode, WorktreePath: path, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", Dependencies: deps, TaskPrompt: revisionTaskPrompt("Execute /swarm-review: audit .swarm/active/PLAN.md and .swarm/active/TEST_PLAN.md against .swarm/active/WORKUNIT.md. Write exactly one first-line verdict: VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED. "+reviewOutputInstruction, st, st.PRNumber)})
 	if err != nil {
 		if run != nil && run.ExitCode == 0 && run.Telemetry != nil && st.PRNumber == 0 && st.PRRevision == nil {
 			run.Telemetry.FailureClass = "unknown"
@@ -2097,6 +2113,13 @@ func validateStructuredReview(body, verdict string, st *lease.IssueState) error 
 	}
 	return nil
 }
+
+// reviewOutputInstruction names the only output the coordinator reads.
+// Slash commands are disabled in isolated harnesses, so the task prompt must
+// carry this itself; a reviewer once returned its review only as text (#521).
+const reviewOutputInstruction = "Write the complete review to .swarm/active/REVIEW.md with the workspace write tool. That file is the only output the coordinator reads; a review left only in your final message is lost."
+
+var errReviewNotWritten = errors.New("the previous attempt finished without writing .swarm/active/REVIEW.md, so its review was lost; write the complete review to that file with the workspace write tool")
 
 // reviewFormatRetries bounds automatic rewrites of an unparseable plan review.
 const reviewFormatRetries = 1

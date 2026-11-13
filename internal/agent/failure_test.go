@@ -182,3 +182,16 @@ func TestCompletedImportFailureFormatting(t *testing.T) {
 		t.Fatalf("cancellation: %v", err)
 	}
 }
+
+// Issue #521: a reviewer that ends with its review only as text was reported
+// as a generic agent failure; the coordinator knows the cause and names it.
+func TestMissingRoleOutputIsNamed(t *testing.T) {
+	result := &RunResult{Output: "VERDICT: APPROVED private-transcript"}
+	err := safeRunFailure(t.Context(), "reviewer", "", result, fmt.Errorf("%w: REVIEW.md", sandbox.ErrMissingRoleOutput), true)
+	if err.Error() != "reviewer agent finished without writing its output artifact" || !errors.Is(err, sandbox.ErrMissingRoleOutput) {
+		t.Fatal(err)
+	}
+	if result.Output != "" {
+		t.Fatal("harness output kept on a failed run")
+	}
+}

@@ -142,6 +142,9 @@ func newReconcileCmd(opts *RootOptions) *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d checkpoint reconciled: %s -> %s\n", n, expected, candidate)
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "%s\nDry run: %t; validation required: %t; fresh plan review required: %t; new claim required: %t; boundary probe required: %t\n", reconciliation.Observation.String(), dryRun, reconciliation.ValidationRequired, reconciliation.ReviewRequired, reconciliation.ClaimRequired, reconciliation.BoundaryProbeRequired)
+				if dryRun && reconciliation.ReviewRequired {
+					fmt.Fprintf(cmd.OutOrStdout(), "Next: %s\n", lease.CheckpointReplanSteps(n, expected, candidate))
+				}
 			}
 			return nil
 		}

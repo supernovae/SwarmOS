@@ -336,6 +336,11 @@ func TestChangedCheckpointRequiresFreshCandidatePlan(t *testing.T) {
 	if _, err = f.m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false); !errors.Is(err, ErrApprovalRequired) {
 		t.Fatalf("stale review authorized changed patch: %v", err)
 	}
+	// #521: the refusal names the runnable re-plan command, not just a goal
+	// that issue work then refuses with a pointer back to reconcile.
+	if want := fmt.Sprintf("swarm issue work %d --plan-checkpoint --phase plan --expected-head %s --candidate-head %s", f.n, f.a, f.b); !strings.Contains(err.Error(), want) {
+		t.Fatalf("refusal does not name the re-plan command:\n%v", err)
+	}
 	f.review("Replacement plan for candidate " + f.b)
 	if _, err = f.m.ReconcileCheckpoint(ctx, f.n, "local-dev", f.a, f.b, false); err != nil {
 		t.Fatal(err)

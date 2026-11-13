@@ -785,6 +785,10 @@ func checkTerminalEvent(outcome CheckRunOutcome) progress.Event {
 
 // runCheck runs one named command with a fresh timeout derived from ctx and
 // reports its lifecycle to onProgress.
+func formatInfrastructureCause(label string) string {
+	return EscapeDiagnostic("[swarm: infrastructure cause: " + label + "]")
+}
+
 func (r *checkRunner) runCheck(ctx context.Context, name, command string, duration time.Duration, onProgress func(progress.Event)) (result CheckRunOutcome, resultErr error) {
 	ctx, owner, err := r.storageScope(ctx)
 	if owner != nil {
@@ -827,6 +831,35 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 		outcome.goFailures = output.evidence(command)
 		var exitErr *exec.ExitError
 		outcome.InfrastructureError = !errors.As(runErr, &exitErr)
+		label := sandbox.NativeFailureCause(runErr)
+		if label == "" && outcome.InfrastructureError && outcome.Outcome == "failure" && ctx.Err() == nil {
+			label = "infrastructure failure"
+		}
+		if label != "" {
+			line := formatInfrastructureCause(label)
+			if outcome.Output != "" && !strings.HasSuffix(outcome.Output, "\n") {
+				outcome.Output += "\n"
+			}
+			outcome.Output += line + "\n"
+			// Reserve room for the cause without re-escaping the existing tail.
+			tail := strings.TrimSuffix(outcome.OutputTail, "\n")
+			dropped := false
+			for len(tail) > diagnosticBytes-len(line)-len(truncationMarker)-2 || strings.Count(tail, "\n") >= diagnosticLines-2 {
+				if i := strings.IndexByte(tail, '\n'); i >= 0 {
+					tail = tail[i+1:]
+				} else {
+					tail = ""
+				}
+				dropped = true
+			}
+			if dropped {
+				tail = truncationMarker + "\n" + tail
+			}
+			if tail != "" {
+				tail += "\n"
+			}
+			outcome.OutputTail = tail + line
+		}
 		outcome.ExitCode = 1
 		if exitErr != nil {
 			outcome.ExitCode = exitErr.ExitCode()

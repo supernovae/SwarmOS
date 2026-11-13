@@ -881,31 +881,77 @@ func TestSelectionBatchCount(t *testing.T) {
 		})
 	}
 }
-func TestSelectionBatchEquivalence(t *testing.T) {
-	var wantNum int
-	var wantOverlap *overlapSelection
-	var wantDiag string
-	for _, batch := range []bool{false, true} {
-		f := newCLIFixture(t)
-		active := f.createTouching(t, "internal/lease/a.go")
-		f.claimInFlight(t, active)
-		f.createTouching(t, "internal/lease/b.go")
-		f.createTouching(t, "docs/change.md")
-		s := selectionFixtureStore(t, f)
-		var store coordination.Store = s.Store
-		if batch {
-			store = s
-		}
-		got, diag, e := selectFixture(t, f, store, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
-		if e != nil {
-			t.Fatalf("%v %s", e, diag)
-		}
-		if !batch {
-			wantNum, wantOverlap, wantDiag = got.Issue.Number, got.Overlap, diag
-		} else if got.Issue.Number != wantNum || !reflect.DeepEqual(got.Overlap, wantOverlap) || diag != wantDiag {
-			t.Fatalf("batch differs: %d %+v %q vs %d %+v %q", got.Issue.Number, got.Overlap, diag, wantNum, wantOverlap, wantDiag)
-		}
+
+type selectionArchivedStore struct {
+	coordination.Store
+	archived int
+}
+
+func (s selectionArchivedStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	if n == s.archived {
+		return nil, "", &coordination.ArchivedError{Issue: n}
 	}
+	return s.Store.Load(ctx, n)
+}
+
+func TestSelectionBatchEquivalence(t *testing.T) {
+	t.Run("ordinary states", func(t *testing.T) {
+		var wantNum int
+		var wantOverlap *overlapSelection
+		var wantDiag string
+		for _, batch := range []bool{false, true} {
+			f := newCLIFixture(t)
+			active := f.createTouching(t, "internal/lease/a.go")
+			f.claimInFlight(t, active)
+			f.createTouching(t, "internal/lease/b.go")
+			f.createTouching(t, "docs/change.md")
+			s := selectionFixtureStore(t, f)
+			var store coordination.Store = s.Store
+			if batch {
+				store = s
+			}
+			got, diag, e := selectFixture(t, f, store, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
+			if e != nil {
+				t.Fatalf("%v %s", e, diag)
+			}
+			if !batch {
+				wantNum, wantOverlap, wantDiag = got.Issue.Number, got.Overlap, diag
+			} else if got.Issue.Number != wantNum || !reflect.DeepEqual(got.Overlap, wantOverlap) || diag != wantDiag {
+				t.Fatalf("batch differs: %d %+v %q vs %d %+v %q", got.Issue.Number, got.Overlap, diag, wantNum, wantOverlap, wantDiag)
+			}
+		}
+	})
+
+	t.Run("archived and reopened", func(t *testing.T) {
+		var wantDiag, wantErr string
+		for _, batch := range []bool{false, true} {
+			f := newCLIFixture(t)
+			archived := f.createTouching(t, "docs/archived.md")
+			f.createTouching(t, "docs/later.md")
+			s := selectionFixtureStore(t, f)
+			// Archive relocation removes the state ref; reopening leaves the tracker
+			// issue ready while ordinary Load still reports the archive tombstone.
+			delete(s.data, archived)
+			s.Store = selectionArchivedStore{Store: s.Store, archived: archived}
+			var store coordination.Store = s.Store
+			if batch {
+				store = s
+			}
+			got, diag, err := selectFixture(t, f, store, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
+			var archiveErr *coordination.ArchivedError
+			if got != nil || !errors.As(err, &archiveErr) || archiveErr.Issue != archived {
+				t.Fatalf("got=%v err=%v diagnostics=%q", got, err, diag)
+			}
+			if !strings.Contains(diag, "warning:") || !strings.Contains(err.Error(), "swarm repo archive restore") {
+				t.Fatalf("missing archive/overlap guidance: %v %q", err, diag)
+			}
+			if !batch {
+				wantDiag, wantErr = diag, err.Error()
+			} else if diag != wantDiag || err.Error() != wantErr {
+				t.Fatalf("batch differs: %q / %v; want %q / %s", diag, err, wantDiag, wantErr)
+			}
+		}
+	})
 }
 func TestSelectionBatchSnapshotFallback(t *testing.T) {
 	for _, failure := range []error{errors.New("inventory output limit exceeded"), errors.New("unsupported state snapshot"), errors.New("budget exceeded"), errors.New("fetch failed"), errors.New("closed issue object unreadable"), context.Canceled} {

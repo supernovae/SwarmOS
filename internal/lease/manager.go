@@ -3899,7 +3899,9 @@ func (m *Manager) SelectionStateReader(ctx context.Context) (func(context.Contex
 				}
 				b, ok := states[n]
 				if !ok {
-					return nil, coordination.ErrNotFound
+					// Inventory omits relocated archive state refs. Preserve Load's
+					// archive admission errors (and genuinely missing states).
+					return m.GetCurrentState(ctx, n)
 				}
 				return decodeIssueState(b, n)
 			}, nil

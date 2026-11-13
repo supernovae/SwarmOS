@@ -2424,7 +2424,7 @@ func TestSelectionStateReaderRefreshRetry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			s := &selectionSnapshotStore{}
+			s := &selectionSnapshotStore{Store: coordination.NewFileStore(t.TempDir())}
 			s.snapshot = func(context.Context, int, func(int64) error, []coordination.InventoryDecoder) (map[int][]byte, error) {
 				if tc.cancel {
 					cancel()
@@ -2455,6 +2455,9 @@ func TestSelectionStateReaderRefreshRetry(t *testing.T) {
 				}
 				if _, err = read(ctx, 1); !errors.Is(err, coordination.ErrNotFound) {
 					t.Fatal(err)
+				}
+				if s.loads != 1 {
+					t.Fatalf("absent snapshot entry must retain ordinary admission: loads=%d", s.loads)
 				}
 			}
 		})

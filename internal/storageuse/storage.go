@@ -366,10 +366,8 @@ func (u *Use) Finish(ctx context.Context) error {
 	if _, ok := v.Uses[u.token]; !ok {
 		return ErrUnsafe
 	}
-	v.Uses[u.token] = true
-	if len(v.Uses) > 64 {
-		compactFinished(v)
-	}
+	delete(v.Uses, u.token)
+	delete(v.Evidence, u.token)
 	v.LastUse = time.Now().UTC()
 	if err = u.manager.write(u.key, v); err != nil {
 		return err

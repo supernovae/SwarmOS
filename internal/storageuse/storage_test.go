@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -81,7 +82,7 @@ func TestConcurrentUseAndExclusiveMaintenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(v.Uses) != 2 {
+	if v.Uses == nil || len(v.Uses) != 0 {
 		t.Fatalf("cancelled admission wrote a use: %#v", v)
 	}
 	if !v.CompleteCoverage || v.LastUse.Before(v.Created) {
@@ -1112,7 +1113,10 @@ func TestRecoveryFencesConcurrentAdmissionAndFinish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !v.Uses[u.token] || v.Uses[next.token] || len(v.Uses) != 2 {
+	_, oldPresent := v.Uses[u.token]
+	_, evidencePresent := v.Evidence[u.token]
+	done, nextPresent := v.Uses[next.token]
+	if oldPresent || evidencePresent || !nextPresent || done || len(v.Uses) != 1 {
 		t.Fatal("recovery lost concurrent admission")
 	}
 }
@@ -1417,6 +1421,7 @@ func TestCompactFinishedEvidencePreservesEmptyCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	v.Uses[u.token] = true // Seed legacy finished history for explicit maintenance.
 	v.Evidence = map[string]*useEvidence{u.token: {Consumers: map[string]ProcessIdentity{"finished": {}}}}
 	if err = m.write(u.key, v); err != nil {
 		t.Fatal(err)
@@ -2111,5 +2116,143 @@ func TestNativeEvidenceWritesOncePerRecord(t *testing.T) {
 	}
 	if recorded != checks {
 		t.Fatalf("recorded evidence for %d uses, want %d", recorded, checks)
+	}
+}
+
+func TestFinishCompactsFinishedEvidence(t *testing.T) {
+	for _, coverage := range []bool{true, false} {
+		t.Run(fmt.Sprint(coverage), func(t *testing.T) {
+			m, r := fixture(t)
+			ctx := context.Background()
+			uses := make([]*Use, 3)
+			for i := range uses {
+				u, err := m.AcquireUse(ctx, r)
+				if err != nil {
+					t.Fatal(err)
+				}
+				uses[i] = u
+				if err := u.evidence(ctx, func(v *record) error {
+					if v.Evidence == nil {
+						v.Evidence = map[string]*useEvidence{}
+					}
+					v.Evidence[u.token] = &useEvidence{Consumers: map[string]ProcessIdentity{fmt.Sprint(i): {}}}
+					v.CompleteCoverage = coverage
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := m.read(uses[0].key, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writes := m.writes.Load()
+			if err := uses[0].Finish(ctx); err != nil {
+				t.Fatal(err)
+			}
+			after, err := m.read(uses[0].key, r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := after.Uses[uses[0].token]; ok {
+				t.Fatal("finished token retained")
+			}
+			if _, ok := after.Evidence[uses[0].token]; ok {
+				t.Fatal("finished evidence retained")
+			}
+			if len(after.Uses) != 2 || len(after.Evidence) != 2 {
+				t.Fatalf("unexpected entries: %+v", after)
+			}
+			for _, u := range uses[1:] {
+				if done, ok := after.Uses[u.token]; !ok || done {
+					t.Fatal("pending use lost")
+				}
+				if !reflect.DeepEqual(before.Evidence[u.token], after.Evidence[u.token]) {
+					t.Fatal("pending evidence changed")
+				}
+			}
+			if !reflect.DeepEqual(before.Resource, after.Resource) || before.Version != after.Version ||
+				!before.Created.Equal(after.Created) || before.CompleteCoverage != after.CompleteCoverage ||
+				after.LastUse.Before(before.LastUse) || after.LastUse.Before(after.Created) {
+				t.Fatal("metadata changed unexpectedly")
+			}
+			if m.writes.Load() != writes+1 {
+				t.Fatal("Finish did not write exactly once")
+			}
+			if err := uses[0].Finish(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if m.writes.Load() != writes+1 {
+				t.Fatal("repeated Finish wrote again")
+			}
+		})
+	}
+}
+
+func TestFinishRejectsUnregisteredUse(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	registered, err := m.AcquireUse(ctx, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := m.read(registered.key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.Repeat("a", 64)
+	if _, ok := before.Uses[token]; ok {
+		token = strings.Repeat("b", 64)
+	}
+	u := &Use{manager: m, resource: r, key: registered.key, token: token}
+	writes := m.writes.Load()
+	if err := u.Finish(ctx); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("Finish: %v", err)
+	}
+	after, err := m.read(u.key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) || m.writes.Load() != writes || u.finished {
+		t.Fatal("unregistered Finish mutated state")
+	}
+}
+
+func TestFinishPreservesOtherFinishedUses(t *testing.T) {
+	m, r := fixture(t)
+	ctx := context.Background()
+	uses := make([]*Use, 3)
+	for i := range uses {
+		u, err := m.AcquireUse(ctx, r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uses[i] = u
+	}
+	if err := uses[0].evidence(ctx, func(v *record) error {
+		v.Uses[uses[1].token] = true
+		v.Evidence = map[string]*useEvidence{}
+		for i, u := range uses {
+			v.Evidence[u.token] = &useEvidence{Consumers: map[string]ProcessIdentity{fmt.Sprint(i): {}}}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := m.read(uses[0].key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := uses[0].Finish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := m.read(uses[0].key, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(before.Uses, uses[0].token)
+	delete(before.Evidence, uses[0].token)
+	if !reflect.DeepEqual(before.Uses, after.Uses) || !reflect.DeepEqual(before.Evidence, after.Evidence) {
+		t.Fatal("Finish changed other uses or retained its own entries")
 	}
 }

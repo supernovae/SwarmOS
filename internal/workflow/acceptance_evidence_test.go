@@ -186,13 +186,20 @@ func TestIssue464AcceptanceRepair(t *testing.T) {
 				return
 			}
 			if tc.persistent {
-				if !errors.Is(err, ErrValidationRepairExhausted) {
+				if !errors.Is(err, ErrValidationRepairExhausted) || !strings.Contains(err.Error(), "required checks were not run") {
 					t.Fatalf("expected exhaustion: %v", err)
+				}
+				// The last allowed round cannot pass, so its required checks are
+				// skipped; the tester evidence is still recorded for the next round.
+				if res == nil || res.Validation == nil || res.Validation.Passed || res.Validation.Artifact.Verdict != "FAIL" || res.Validation.Artifact.Metadata[validation.ChecksSkippedKey] != "skipped" {
+					t.Fatal("final round ran checks or recorded a passing verdict")
+				}
+				if !lease.RepairAcceptance(res.State, wu.Acceptance).NeedsRepair() {
+					t.Fatal("skipped round lost the tester's unmet criteria")
 				}
 			} else if err != nil {
 				t.Fatal(err)
-			}
-			if res == nil || res.Validation == nil || !res.Validation.Passed {
+			} else if res == nil || res.Validation == nil || !res.Validation.Passed {
 				t.Fatal("acceptance changed trusted verdict")
 			}
 			if tc.name != "malformed" {
@@ -403,5 +410,73 @@ func TestIssue492ReusablePassAcceptanceStates(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Issue #526: a round that fails a required check and an acceptance criterion
+// must repair both. Failed reports carry no reuse fingerprint, so the tester's
+// unmet criteria used to be invisible to the repair round.
+func TestRepairSeesUnmetAcceptanceWhenChecksFail(t *testing.T) {
+	root, e, tr := setupProjectPlanTestRepo(t)
+	configureValidation(t, root)
+	setRepairLimit(t, root, "1")
+	if err := os.WriteFile(filepath.Join(root, ".swarm/validation/required-checks.yaml"), []byte("required_checks:\n  - name: fixed\n    command: 'test -f fixed.txt'\n    timeout: 1m\nprotected_paths: ['.github/**']\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := gitfixture.Command(t, "", "-C", root, "commit", "-am", "failing check fixture").CombinedOutput(); err != nil {
+		t.Fatal(err, string(out))
+	}
+	wu := &contract.WorkUnit{Objective: "Repair both", Constraints: []string{"Keep fencing"}, Acceptance: []string{"archive parity"}, Workflow: "feature", Gate: contract.GateNone}
+	iss, err := tr.CreateIssue(t.Context(), "Repair", contract.FormatIssueMarkdown(wu), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = e.LeaseManager.ApproveTask(t.Context(), iss.Number, "maintainer"); err != nil {
+		t.Fatal(err)
+	}
+	devs, testers := 0, 0
+	var repairPrompt, repairBrief string
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			result, err := (&agent.MockRunner{}).Run(ctx, req)
+			if err != nil {
+				return result, err
+			}
+			switch req.Role {
+			case "developer":
+				devs++
+				name := "change.txt"
+				if devs > 1 {
+					repairPrompt = req.TaskPrompt
+					brief, _ := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm/active/REPAIR.md"))
+					repairBrief = string(brief)
+					name = "fixed.txt"
+				}
+				err = os.WriteFile(filepath.Join(req.WorktreePath, name), []byte("x"), 0600)
+			case "tester":
+				testers++
+				status := "unmet"
+				if testers > 1 {
+					status = "met"
+				}
+				raw, _ := json.Marshal(map[string]any{"version": 1, "criteria": []map[string]any{{"index": 1, "criterion": "archive parity", "status": status, "evidence": "Independent acceptance review 1"}}})
+				body := "## Independent acceptance review 1\nArchived issues differ.\n" + validation.AcceptanceEvidenceStart + "\n" + string(raw) + "\n" + validation.AcceptanceEvidenceEnd
+				err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte(body), 0600)
+			}
+			return result, err
+		}}, nil
+	}
+	_, err = e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: iss.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, Version: "v1.2.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if devs != 2 {
+		t.Fatalf("developer rounds = %d", devs)
+	}
+	if !strings.Contains(repairPrompt, "address the listed unmet acceptance criteria") || !strings.Contains(repairPrompt, "not advisory") {
+		t.Fatalf("repair prompt omitted the unmet criterion:\n%s", repairPrompt)
+	}
+	if !strings.Contains(repairBrief, "Unmet acceptance criteria") || !strings.Contains(repairBrief, "Archived issues differ.") || !strings.Contains(repairBrief, "fixed") {
+		t.Fatalf("repair brief omitted the check or the criterion:\n%s", repairBrief)
 	}
 }

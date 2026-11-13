@@ -1323,7 +1323,7 @@ func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
 // reason; the rewritten report is held to the same strict format.
 func TestMalformedAgentReviewGetsOneFormatRepair(t *testing.T) {
 	invented := "VERDICT: APPROVED\n" + contract.PlanFindingsStart + "\n" + `{"version":1,"findings":[{"id":"F1","blocking":false,"disposition":"open","note":"Also cover the timeout path"}]}` + "\n" + contract.PlanFindingsEnd + "\n"
-	nonBlocking := "VERDICT: APPROVED\n" + contract.PlanFindingsStart + "\n" + `{"version":1,"findings":[{"id":"F1","blocking":false,"disposition":"open","criterion":"Acceptance criterion 3","check":"Also assert the timeout path"}]}` + "\n" + contract.PlanFindingsEnd + "\n"
+	nonBlocking := "VERDICT: APPROVED\n" + contract.PlanFindingsStart + "\n" + `{"version":1,"findings":[{"id":"F1","blocking":false,"disposition":"open","criterion":"Test readability","check":"Name the table cases after the scenario"}]}` + "\n" + contract.PlanFindingsEnd + "\n"
 	for _, tt := range []struct {
 		name    string
 		reports []string

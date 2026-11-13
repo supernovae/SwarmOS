@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/spf13/cobra"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -985,6 +986,11 @@ func TestIssue322GitHubCommands(t *testing.T) {
 				opts.lookupEnv = env.lookup()
 				opts.forkDispatcher = dispatch
 				opts.forkPollTimeout = time.Second
+				// Storage maintenance keeps its interval state in the process-wide
+				// cache directory, so under t.Parallel another test decides whether
+				// it runs inside this test's injected failures. This test covers
+				// lease reminders only; storage_maintenance_test.go covers maintenance.
+				opts.maintenanceHook = func(*cobra.Command, bool) {}
 				opts.remoteSlugFunc = func(_, remote string) string {
 					if remote == "fork" || remote == "personal" || remote == "origin" && originIsFork {
 						return "alice/swarm"

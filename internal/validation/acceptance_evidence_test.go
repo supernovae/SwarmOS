@@ -282,3 +282,34 @@ func TestAcceptanceGapsStrictMapping(t *testing.T) {
 		})
 	}
 }
+
+func TestIssue547RecoveryAction(t *testing.T) {
+	for _, state := range []string{"missing", "unmet", "malformed", "incomplete", "complete"} {
+		for _, fork := range []bool{false, true} {
+			r := Readiness{}
+			r.AcceptanceEvidence.State = state
+			if state == "unmet" {
+				r.AcceptanceEvidence.State = "incomplete"
+				r.AcceptanceEvidence.Blockers = []AcceptanceWarning{{Index: 1, Criterion: "works", Reason: "unmet"}}
+			}
+			err := r.SubmissionError(547, fork)
+			if state == "complete" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			want := "Run swarm issue work 547"
+			if fork {
+				want += " --phase test upstream (fork test phase is unavailable)"
+			} else if state == "unmet" {
+				want += " --phase implement"
+			} else if state != "missing" {
+				want += " --phase test"
+			}
+			if err == nil || !strings.HasSuffix(err.Error(), "\n"+want) {
+				t.Fatalf("%s fork=%v: %v; want %s", state, fork, err, want)
+			}
+		}
+	}
+}

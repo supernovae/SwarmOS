@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-// PreserveAcceptanceEvidence considers only the latest validation. Missing or
+// PreserveAcceptanceEvidence retains an explicit snapshot, including one carried
+// by an eligible reuse report. History fallback is current-claim-only and
+// considers only the latest validation. Missing or
 // malformed newer tester evidence must never resurrect an older met mapping.
 func PreserveAcceptanceEvidence(st *IssueState, dst *contract.Artifact) {
 	if st == nil || dst == nil {

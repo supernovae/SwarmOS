@@ -7,6 +7,8 @@ import (
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +333,143 @@ func TestGapAcknowledgmentExactSetAndDescription(t *testing.T) {
 	}
 	if RecordedReadiness(st, unit.Acceptance).AcceptanceEvidence.State != "incomplete" {
 		t.Fatal("ack changed verdict")
+	}
+}
+
+func TestIssue547AcceptanceEvidenceReclaim(t *testing.T) {
+	for _, mode := range []string{"same", "task", "fork", "owner"} {
+		t.Run(mode, func(t *testing.T) {
+			m, tr, iss := testManager(t)
+			ctx := t.Context()
+			git := func(args ...string) string {
+				t.Helper()
+				cmd := fixtureGitCommand(t, args...)
+				cmd.Dir = m.repoRoot
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v %s", args, err, out)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			write := func(name, body string) {
+				t.Helper()
+				path := filepath.Join(m.repoRoot, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(".git/info/exclude", ".swarm/active/\n.swarm/local-tracker/\n.swarm/coordination/\n")
+			counter := filepath.Join(t.TempDir(), "counter")
+			write(".swarm/validation/required-checks.yaml", "required_checks:\n - name: count\n   command: \"echo run >> '"+counter+"'\"\n   timeout: 1m\nprotected_paths: ['.github/**']\n")
+			config, err := os.ReadFile(filepath.Join(m.repoRoot, ".swarm/config.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(".swarm/config.yaml", string(config)+"execution:\n  mode: trusted-local\n")
+			git("add", ".swarm/validation/required-checks.yaml", ".swarm/config.yaml")
+			git("-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "policy")
+			if _, err := m.ApproveTask(ctx, iss.Number, "local-dev"); err != nil {
+				t.Fatal(err)
+			}
+			st, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := st.Lease.ClaimID
+			opts := validation.ValidateOptions{BaseSHA: st.BaseSHA, Version: "v1.2.3", ClaimID: first, DirectIssueReuse: true}
+			unit, err := contract.ParseWorkUnitFromIssue(iss.Number, iss.Title, iss.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			write(".swarm/active/PLAN.md", "plan")
+			write(".swarm/active/TEST_PLAN.md", "tests")
+			report, err := validation.Validate(ctx, m.repoRoot, unit, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !report.Passed {
+				t.Fatalf("validation failed: %s", report.Artifact.Body)
+			}
+			validation.StoreAcceptanceSnapshot(report.Artifact.Metadata, validation.CaptureAcceptanceEvidence(validation.AcceptanceEvidenceStart+"\n"+`{"version":1,"criteria":[{"index":1,"criterion":"Claims are fenced","status":"met","evidence":"independent review"}]}`+"\n"+validation.AcceptanceEvidenceEnd))
+			if _, err := m.mutate(ctx, iss.Number, "local-dev", func(st *IssueState) error { st.HeadSHA = report.HeadSHA; return nil }); err != nil {
+				t.Fatal(err)
+			}
+			st, err = m.RecordTrustedValidation(ctx, iss.Number, "local-dev", report.Artifact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r := RecordedReadiness(st, unit.Acceptance); r.SubmissionError(547, false) != nil {
+				t.Fatalf("initial: %+v", r)
+			}
+			if _, err := m.Release(ctx, iss.Number, "local-dev", "retry"); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "task" {
+				if _, err := tr.UpdateIssueBody(ctx, iss.Number, strings.Replace(iss.Body, "Harden coordination state", "Changed task", 1)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1); err == nil {
+					t.Fatal("changed unapproved task acquired")
+				}
+				st, err = m.ApproveTask(ctx, iss.Number, "local-dev")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(st.Artifacts) != 0 {
+					t.Fatal("changed task retained artifacts")
+				}
+			}
+			st, err = m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Lease.ClaimID == first {
+				t.Fatal("claim not replaced")
+			}
+			opts.ClaimID = st.Lease.ClaimID
+			opts.ForkMode = mode == "fork"
+			owner := "local-dev"
+			if mode == "owner" {
+				owner = "other"
+			}
+			reused, err := validation.Reuse(ctx, m.repoRoot, opts, owner, st.Artifacts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode != "same" {
+				if reused != nil {
+					t.Fatal("ineligible reuse")
+				}
+				dst := contract.Artifact{Metadata: report.Artifact.Metadata}
+				delete(dst.Metadata, validation.AcceptanceEvidenceKey)
+				PreserveAcceptanceEvidence(st, &dst)
+				if validation.AcceptanceSnapshotFromMetadata(dst.Metadata).State != "missing" {
+					t.Fatal("history resurrected evidence")
+				}
+				return
+			}
+			if reused == nil {
+				t.Fatalf("checks did not reuse: status=%s metadata=%v", git("status", "--porcelain"), st.Artifacts)
+			}
+			PreserveAcceptanceEvidence(st, &reused.Artifact)
+			st, err = m.RecordTrustedValidation(ctx, iss.Number, "local-dev", reused.Artifact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := RecordedReadiness(st, unit.Acceptance)
+			if err := r.SubmissionError(547, false); err != nil {
+				t.Fatalf("reclaimed acceptance: %s: %v", r.AcceptanceEvidence.State, err)
+			}
+			if reused.Artifact.Metadata["validation_source_claim"] != first {
+				t.Fatal("lost source claim")
+			}
+			got, err := os.ReadFile(counter)
+			if err != nil || string(got) != "run\n" {
+				t.Fatalf("check count: %q %v", got, err)
+			}
+		})
 	}
 }

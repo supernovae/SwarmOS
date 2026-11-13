@@ -217,11 +217,17 @@ func TestIssueSubmitAcceptanceRefusal(t *testing.T) {
 					if current.PRNumber != 0 || current.Lease.Status == "completed" || current.HeadSHA != st.HeadSHA {
 						t.Fatal("published rejected evidence")
 					}
+					action := "swarm issue work " + n
 					phase := "test"
 					if mode == "unmet" {
 						phase = "implement"
 					}
-					if !strings.Contains(err.Error(), "swarm issue work "+n+" --phase "+phase) || !strings.Contains(err.Error(), "Produce a checked checkpoint") {
+					if mode != "missing" {
+						action += " --phase " + phase
+					} else if strings.Contains(err.Error(), "--phase") {
+						t.Fatal(err)
+					}
+					if !strings.Contains(err.Error(), action+";") || !strings.Contains(err.Error(), "Produce a checked checkpoint") {
 						t.Fatal(err)
 					}
 				}

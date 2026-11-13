@@ -166,8 +166,9 @@ func TestIssue470CrossClaimReuseBindings(t *testing.T) {
 	original.Metadata["validation_trusted_origin"] = "coordinator"
 	original.Metadata["validation_trusted_owner"] = "owner"
 	original.Metadata["validation_trusted_claim"] = "A"
+	StoreAcceptanceSnapshot(original.Metadata, CaptureAcceptanceEvidence(evidenceBlock(`{"version":1,"criteria":[{"index":1,"criterion":"works","status":"met","evidence":"observed"}]}`)))
 	now := original.CreatedAt.Add(time.Minute)
-	for _, kind := range []string{"match", "owner", "tree", "base", "policy", "version", "FAIL", "untrusted", "incoherent", "missing", "future", "malformed", "expired", "default", "fork", "ci", "rebound-inside", "rebound-exact", "rebound-outside", "newer-fail", "newer-untrusted", "source-empty"} {
+	for _, kind := range []string{"match", "head", "owner", "tree", "base", "policy", "version", "FAIL", "untrusted", "incoherent", "missing", "future", "malformed", "expired", "default", "fork", "ci", "rebound-inside", "rebound-exact", "rebound-outside", "newer-fail", "newer-untrusted", "source-empty"} {
 		t.Run(kind, func(t *testing.T) {
 			art := original
 			art.Metadata = map[string]string{}
@@ -178,6 +179,8 @@ func TestIssue470CrossClaimReuseBindings(t *testing.T) {
 			o.ClaimID = "B"
 			o.DirectIssueReuse = true
 			switch kind {
+			case "head":
+				art.Metadata["head_sha"] = "other"
 			case "source-empty":
 				art.Metadata["validation_source_claim"] = ""
 			case "owner":
@@ -232,11 +235,17 @@ func TestIssue470CrossClaimReuseBindings(t *testing.T) {
 				artifacts = append(artifacts, newer)
 			}
 			reused, err := reuseAt(t.Context(), root, o, "owner", artifacts, now)
-			want := kind == "match" || kind == "rebound-inside" || kind == "rebound-exact"
+			want := kind == "head" || kind == "match" || kind == "rebound-inside" || kind == "rebound-exact"
 			if err != nil || (reused != nil) != want {
 				t.Fatalf("reuse=%v want=%v err=%v", reused != nil, want, err)
 			}
 			if reused != nil {
+				if got := AcceptanceSnapshotFromMetadata(reused.Artifact.Metadata).State; (got == "valid") != (kind != "head") {
+					t.Fatalf("acceptance state=%s", got)
+				}
+				if original.Metadata[AcceptanceEvidenceKey] == "" {
+					t.Fatal("mutated input evidence")
+				}
 				if reused.Artifact.Metadata["validation_source_claim"] != "A" || reused.Artifact.Metadata["validation_claim"] != "B" {
 					t.Fatal("lost provenance")
 				}
@@ -255,6 +264,9 @@ func TestIssue470CrossClaimReuseBindings(t *testing.T) {
 				third, err := reuseAt(t.Context(), root, next, "owner", []contract.Artifact{again.Artifact}, now)
 				if err != nil || third == nil || third.Artifact.Metadata["validation_source_claim"] != "A" || third.Artifact.Metadata["validation_source_time"] != again.Artifact.Metadata["validation_source_time"] {
 					t.Fatalf("B to C provenance: %v", err)
+				}
+				if kind != "head" && third.Artifact.Metadata[AcceptanceEvidenceKey] != original.Metadata[AcceptanceEvidenceKey] {
+					t.Fatal("lost repeated evidence")
 				}
 				if _, exists := original.Metadata["validation_source_claim"]; exists {
 					t.Fatal("mutated input provenance")

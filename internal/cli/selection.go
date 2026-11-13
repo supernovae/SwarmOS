@@ -76,6 +76,10 @@ type overlapSelection struct {
 }
 
 func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration) (*pulledWorkUnit, error) {
+	return pullNextReadyIssueResolved(ctx, cmd, rootOpts, allRepos, opts, durOverride, rootOpts.resolveTargetLeaseManager)
+}
+
+func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration, resolve func(*cobra.Command, registry.RepoEntry) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error)) (*pulledWorkUnit, error) {
 	if err := contract.ValidatePhase(opts.Phase); err != nil {
 		return nil, err
 	}
@@ -111,7 +115,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 		}
 	}
 	for _, target := range targets {
-		tr, mgr, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, target)
+		tr, mgr, cfg, err := resolve(cmd, target)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", target.Repo, err)
 		}
@@ -124,7 +128,11 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 		if err != nil {
 			return nil, err
 		}
-		issues, overlaps, err := orderByOverlap(ctx, tr, mgr, target.Path, issues, rootOpts.now(), cmd.ErrOrStderr())
+		readState, err := selectionStateReader(ctx, mgr, cmd.ErrOrStderr())
+		if err != nil {
+			return nil, err
+		}
+		issues, overlaps, err := orderByOverlap(ctx, tr, readState, target.Path, issues, rootOpts.now(), cmd.ErrOrStderr())
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +149,7 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 			if err != nil {
 				continue
 			}
-			state, err := mgr.GetCurrentState(ctx, issue.Number)
+			state, err := readState(ctx, issue.Number)
 			if errors.Is(err, coordination.ErrNotFound) {
 				continue
 			}
@@ -346,10 +354,10 @@ func (o *RootOptions) resolveTargets(allRepos bool) ([]registry.RepoEntry, error
 // orderByOverlap stable-sorts candidates (already in ready order) by how many
 // in-flight claims their likely touchpoints overlap, so equal scores keep the
 // ready order. In-flight work is read from every open issue, ready or not,
-// with an active unexpired lease. The snapshot is advisory and only orders
-// candidates: read failures other than cancellation degrade to a warning and a
-// partial signal, and eligibility is still checked against current state.
-func orderByOverlap(ctx context.Context, tr tracker.Tracker, mgr *lease.Manager, repoRoot string, issues []*tracker.Issue, now time.Time, stderr io.Writer) ([]*tracker.Issue, map[int]*overlapSelection, error) {
+// with an active unexpired lease. Read failures other than cancellation degrade
+// to a warning and a partial signal. Eligibility shares the advisory snapshot;
+// claiming independently reads fresh state.
+func orderByOverlap(ctx context.Context, tr tracker.Tracker, readState func(context.Context, int) (*lease.IssueState, error), repoRoot string, issues []*tracker.Issue, now time.Time, stderr io.Writer) ([]*tracker.Issue, map[int]*overlapSelection, error) {
 	inFlight := make(map[int][]string)
 	complete, failed := true, 0
 	var firstErr error
@@ -365,7 +373,7 @@ func orderByOverlap(ctx context.Context, tr tracker.Tracker, mgr *lease.Manager,
 		if issue == nil || issue.IsParent() {
 			continue
 		}
-		state, err := mgr.GetCurrentState(ctx, issue.Number)
+		state, err := readState(ctx, issue.Number)
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
@@ -538,4 +546,16 @@ func orderReadyIssues(ctx context.Context, tr tracker.Tracker, issues []*tracker
 		return nil, err
 	}
 	return out, nil
+}
+
+func selectionStateReader(ctx context.Context, mgr *lease.Manager, stderr io.Writer) (func(context.Context, int) (*lease.IssueState, error), error) {
+	read, err := mgr.SelectionStateReader(ctx)
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "warning: batched selection state unavailable; using per-issue reads")
+		return mgr.GetCurrentState, nil
+	}
+	return read, nil
 }

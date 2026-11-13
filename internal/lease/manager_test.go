@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/testutil/gittransport"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2388,5 +2390,157 @@ func TestCheckClaimStateAndResume(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type selectionSnapshotStore struct {
+	coordination.Store
+	calls, loads int
+	snapshot     func(context.Context, int, func(int64) error, []coordination.InventoryDecoder) (map[int][]byte, error)
+}
+
+func (s *selectionSnapshotStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	s.loads++
+	return s.Store.Load(ctx, n)
+}
+func (s *selectionSnapshotStore) ReadInventorySnapshot(ctx context.Context, apply bool, limit int, reserve func(int64) error, decoders ...coordination.InventoryDecoder) (map[int][]byte, error) {
+	s.calls++
+	return s.snapshot(ctx, limit, reserve, decoders)
+}
+func TestSelectionStateReaderRefreshRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		failures, want int
+		err            error
+		cancel         bool
+	}{
+		{"second", 1, 2, coordination.ErrInventorySnapshotChanged, false},
+		{"third", 2, 3, coordination.ErrInventorySnapshotChanged, false},
+		{"exhausted", 3, 3, coordination.ErrInventorySnapshotChanged, false},
+		{"transport", 1, 1, io.ErrUnexpectedEOF, false},
+		{"limit", 1, 1, errors.New("inventory ref limit"), false},
+		{"cancel", 1, 1, coordination.ErrInventorySnapshotChanged, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			s := &selectionSnapshotStore{}
+			s.snapshot = func(context.Context, int, func(int64) error, []coordination.InventoryDecoder) (map[int][]byte, error) {
+				if tc.cancel {
+					cancel()
+				}
+				if s.calls <= tc.failures {
+					return nil, fmt.Errorf("wrapped: %w", tc.err)
+				}
+				return map[int][]byte{}, nil
+			}
+			m := &Manager{store: s}
+			read, err := m.SelectionStateReader(ctx)
+			if s.calls != tc.want || s.loads != 0 {
+				t.Fatalf("calls=%d loads=%d", s.calls, s.loads)
+			}
+			if tc.cancel {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal(err)
+				}
+				return
+			}
+			if tc.failures >= tc.want {
+				if !errors.Is(err, tc.err) {
+					t.Fatal(err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = read(ctx, 1); !errors.Is(err, coordination.ErrNotFound) {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+	t.Run("cumulative budget", func(t *testing.T) {
+		s := &selectionSnapshotStore{}
+		s.snapshot = func(_ context.Context, _ int, reserve func(int64) error, _ []coordination.InventoryDecoder) (map[int][]byte, error) {
+			if err := reserve(150 << 20); err != nil {
+				return nil, err
+			}
+			return nil, coordination.ErrInventorySnapshotChanged
+		}
+		_, err := (&Manager{store: s}).SelectionStateReader(t.Context())
+		if err == nil || s.calls != 2 || s.loads != 0 {
+			t.Fatalf("%v %+v", err, s)
+		}
+	})
+}
+func TestSelectionStateReaderDecode(t *testing.T) {
+	m, _, issue := testManager(t)
+	// Preserve a legacy authenticated rejection in raw state, before read normalization.
+	b0, rev, e := m.store.Load(t.Context(), issue.Number)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var legacy IssueState
+	if e = unmarshalCoordinatorState(b0, &legacy); e != nil {
+		t.Fatal(e)
+	}
+	body := "VERDICT: CHANGES_REQUESTED\nRevise the plan"
+	meta := ReviewBindings(&legacy)
+	meta["review_source"] = "authenticated-agent"
+	meta["content_sha256"] = hash(body)
+	legacy.Artifacts = append(legacy.Artifacts, contract.Artifact{ID: "legacy", Type: contract.ArtifactReview, Verdict: "CHANGES_REQUESTED", Version: 1, Body: body, Metadata: meta})
+	b0, e = marshalCoordinatorState(&legacy)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = m.store.CompareAndSwap(t.Context(), issue.Number, rev, b0); e != nil {
+		t.Fatal(e)
+	}
+	// Unsupported stores retain live reads, including their original errors.
+	live, err := m.SelectionStateReader(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary, ordinaryErr := live(t.Context(), issue.Number)
+	if ordinaryErr != nil || ordinary.PendingPlanReview == nil || ordinary.Lease.NextPhase != "plan" {
+		t.Fatalf("legacy rejection not normalized: %+v %v", ordinary, ordinaryErr)
+	}
+	b, _, loadErr := m.store.Load(t.Context(), issue.Number)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	s := &selectionSnapshotStore{Store: m.store}
+	s.snapshot = func(ctx context.Context, _ int, reserve func(int64) error, d []coordination.InventoryDecoder) (map[int][]byte, error) {
+		data, e := d[0](ctx, strings.NewReader(string(b)), reserve)
+		return map[int][]byte{issue.Number: data, 2: []byte("bad"), 3: []byte(`{"lease":{"issue_number":4}}`)}, e
+	}
+	m.store = s
+	read, err := m.SelectionStateReader(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		got, e := read(t.Context(), issue.Number)
+		if !reflect.DeepEqual(got, ordinary) || fmt.Sprint(e) != fmt.Sprint(ordinaryErr) {
+			t.Fatalf("decode differs: %v %v", got, e)
+		}
+	}
+	for _, n := range []int{2, 3} {
+		if _, e := read(t.Context(), n); e == nil {
+			t.Fatalf("accepted invalid %d", n)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, e := read(ctx, issue.Number); !errors.Is(e, context.Canceled) {
+		t.Fatal(e)
+	}
+	if s.calls != 1 || s.loads != 0 {
+		t.Fatalf("%+v", s)
+	}
+	// The authoritative reader remains attached to the original store.
+	_, _ = m.GetCurrentState(t.Context(), issue.Number)
+	if s.loads != 1 {
+		t.Fatal("store replaced")
 	}
 }

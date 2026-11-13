@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/progress"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -576,12 +577,20 @@ func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string,
 	if err != nil {
 		return nil, "", err
 	}
+	st, err := decodeIssueState(b, n)
+	if err != nil {
+		return nil, "", err
+	}
+	return st, rev, nil
+}
+
+func decodeIssueState(b []byte, n int) (*IssueState, error) {
 	var st IssueState
-	if err = unmarshalCoordinatorState(b, &st); err != nil {
-		return nil, "", fmt.Errorf("invalid authoritative state: %w", err)
+	if err := unmarshalCoordinatorState(b, &st); err != nil {
+		return nil, fmt.Errorf("invalid authoritative state: %w", err)
 	}
 	if st.Lease.IssueNumber != 0 && st.Lease.IssueNumber != n {
-		return nil, "", fmt.Errorf("state issue identity mismatch")
+		return nil, fmt.Errorf("state issue identity mismatch")
 	}
 	// Upgrade legacy rejected reviews without trusting contributor artifacts.
 	if st.PendingPlanReview == nil || !validRejection(st.PendingPlanReview) {
@@ -600,7 +609,7 @@ func (m *Manager) loadReadOnly(ctx context.Context, n int) (*IssueState, string,
 			}
 		}
 	}
-	return &st, rev, nil
+	return &st, nil
 }
 func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (*IssueState, error) {
 	_, localStore := m.store.(*coordination.FileStore)
@@ -3813,4 +3822,91 @@ func (m *Manager) RecordFailedUpstreamPlanReview(ctx context.Context, o *Upstrea
 		return nil, fmt.Errorf("failed review recording conflict: %w: %w", ErrClaimFence, err)
 	}
 	return updated, nil
+}
+
+// SelectionStateReader returns advisory state only; acquisition always uses the store.
+func (m *Manager) SelectionStateReader(ctx context.Context) (func(context.Context, int) (*IssueState, error), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if m.configErr != nil {
+		return nil, m.configErr
+	}
+	snapshot, ok := m.store.(interface {
+		ReadInventorySnapshot(context.Context, bool, int, func(int64) error, ...coordination.InventoryDecoder) (map[int][]byte, error)
+	})
+	if !ok {
+		return m.GetCurrentState, nil
+	}
+	var used int64
+	budgetErr := errors.New("selection inventory budget exceeded")
+	refused := false
+	reserve := func(n int64) error {
+		if n < 0 || n > (256<<20)-used {
+			refused = true
+			return budgetErr
+		}
+		used += n
+		return nil
+	}
+	decoder := func(ctx context.Context, r io.Reader, reserve func(int64) error) ([]byte, error) {
+		var data []byte
+		var buf [8192]byte
+		if err := reserve(int64(len(buf))); err != nil {
+			return nil, err
+		}
+		for {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			n, err := r.Read(buf[:])
+			if n > 0 {
+				if int64(len(data)+n) > coordination.InventoryInputLimit {
+					return nil, fmt.Errorf("selection state input limit exceeded")
+				}
+				// Charge each allocation before copying, including abandoned growth buffers.
+				if len(data)+n > cap(data) {
+					size := max(len(data)+n, cap(data)*2)
+					if e := reserve(int64(size)); e != nil {
+						return nil, e
+					}
+					next := make([]byte, len(data), size)
+					copy(next, data)
+					data = next
+				}
+				data = append(data, buf[:n]...)
+			}
+			if err == io.EOF {
+				return data, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		states, err := snapshot.ReadInventorySnapshot(ctx, true, 10000, reserve, decoder)
+		if e := ctx.Err(); e != nil {
+			return nil, e
+		}
+		if err == nil {
+			return func(ctx context.Context, n int) (*IssueState, error) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				b, ok := states[n]
+				if !ok {
+					return nil, coordination.ErrNotFound
+				}
+				return decodeIssueState(b, n)
+			}, nil
+		}
+		if refused || !errors.Is(err, coordination.ErrInventorySnapshotChanged) || attempt == 2 {
+			return nil, fmt.Errorf("selection inventory: %w", err)
+		}
+	}
+	panic("unreachable selection inventory attempt")
 }

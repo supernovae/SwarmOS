@@ -6,6 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
+	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/registry"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -465,7 +474,7 @@ func TestOverlapSelectionSnapshot(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var diagnostics bytes.Buffer
-			got, overlaps, err := orderByOverlap(ctx, tc.tr, f.manager, f.root, candidates(), tc.now, &diagnostics)
+			got, overlaps, err := orderByOverlap(ctx, tc.tr, f.manager.GetCurrentState, f.root, candidates(), tc.now, &diagnostics)
 			if err != nil || !reflect.DeepEqual(issueNumbers(got), tc.want) {
 				t.Fatalf("got %v, %v", issueNumbers(got), err)
 			}
@@ -486,7 +495,7 @@ func TestOverlapSelectionSnapshot(t *testing.T) {
 	}
 	f.must(t, "issue", "release", strconv.Itoa(active))
 	var diagnostics bytes.Buffer
-	got, overlaps, err := orderByOverlap(ctx, f.tracker, f.manager, f.root, candidates(), time.Now(), &diagnostics)
+	got, overlaps, err := orderByOverlap(ctx, f.tracker, f.manager.GetCurrentState, f.root, candidates(), time.Now(), &diagnostics)
 	if err != nil || !reflect.DeepEqual(issueNumbers(got), []int{overlapping, free, unknown}) || overlaps[overlapping].InFlight != 0 {
 		t.Fatalf("released: %v %v %+v", issueNumbers(got), err, overlaps[overlapping])
 	}
@@ -497,14 +506,14 @@ func TestOverlapSelectionSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	diagnostics.Reset()
-	got, overlaps, err = orderByOverlap(ctx, f.tracker, f.manager, f.root, candidates()[:1], time.Now(), &diagnostics)
+	got, overlaps, err = orderByOverlap(ctx, f.tracker, f.manager.GetCurrentState, f.root, candidates()[:1], time.Now(), &diagnostics)
 	if err != nil || len(got) != 1 || overlaps[overlapping].Complete || !strings.Contains(overlaps[overlapping].Reason, "partial") || !strings.Contains(diagnostics.String(), "warning: overlap scheduling signal is partial") {
 		t.Fatalf("partial: %v %+v %s", err, overlaps[overlapping], &diagnostics)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, _, err := orderByOverlap(canceled, f.tracker, f.manager, f.root, candidates(), time.Now(), &diagnostics); !errors.Is(err, context.Canceled) {
+	if _, _, err := orderByOverlap(canceled, f.tracker, f.manager.GetCurrentState, f.root, candidates(), time.Now(), &diagnostics); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancellation: %v", err)
 	}
 }
@@ -762,3 +771,438 @@ func TestNextSelectionFallbackEligibilityParentLabel(t *testing.T) {
 }
 
 // createTouching creates an approved task whose objective names touchpoint.
+
+type selectionCountingStore struct {
+	coordination.Store
+	provider         func(context.Context, bool, int, func(int64) error, ...coordination.InventoryDecoder) (map[int][]byte, error)
+	readNumbers      []int
+	data             map[int][]byte
+	snapshots, loads int
+	failure          error
+	after            func()
+}
+
+func (s *selectionCountingStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	s.loads++
+	s.readNumbers = append(s.readNumbers, n)
+	return s.Store.Load(ctx, n)
+}
+func (s *selectionCountingStore) ReadInventorySnapshot(ctx context.Context, _ bool, _ int, reserve func(int64) error, d ...coordination.InventoryDecoder) (map[int][]byte, error) {
+	s.snapshots++
+	if s.provider != nil {
+		return s.provider(ctx, true, 10000, reserve, d...)
+	}
+	if s.failure != nil {
+		return nil, s.failure
+	}
+	out := map[int][]byte{}
+	for n, b := range s.data {
+		v, e := d[0](ctx, bytes.NewReader(b), reserve)
+		if e != nil {
+			return nil, e
+		}
+		out[n] = v
+	}
+	if s.after != nil {
+		s.after()
+	}
+	return out, nil
+}
+func selectionFixtureStore(t *testing.T, f *cliFixture) *selectionCountingStore {
+	t.Helper()
+	s := &selectionCountingStore{Store: f.manager.Store(), data: map[int][]byte{}}
+	issues, e := f.tracker.ListIssues(t.Context(), tracker.IssueFilter{State: "open"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, issue := range issues {
+		b, _, e := s.Store.Load(t.Context(), issue.Number)
+		if errors.Is(e, coordination.ErrNotFound) {
+			continue
+		}
+		if e != nil {
+			t.Fatal(e)
+		}
+		s.data[issue.Number] = b
+	}
+	return s
+}
+func selectFixture(t *testing.T, f *cliFixture, store coordination.Store, options workflow.WorkOptions) (*pulledWorkUnit, string, error) {
+	return selectFixtureContext(t.Context(), t, f, store, options)
+}
+func selectFixtureContext(ctx context.Context, t *testing.T, f *cliFixture, store coordination.Store, options workflow.WorkOptions) (*pulledWorkUnit, string, error) {
+	t.Helper()
+	cfg, e := harness.LoadConfig(f.root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	mgr := lease.NewManager(f.tracker, cfg.Security)
+	mgr.SetStore(f.root, store)
+	opts := f.options(&RootOptions{RepoRoot: f.root})
+	cmd := f.command(opts)
+	var diagnostics bytes.Buffer
+	cmd.SetErr(&diagnostics)
+	cmd.SetOut(io.Discard)
+	result, e := pullNextReadyIssueResolved(ctx, cmd, opts, false, options, time.Hour, func(*cobra.Command, registry.RepoEntry) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error) {
+		return f.tracker, mgr, cfg, nil
+	})
+	return result, diagnostics.String(), e
+}
+func TestSelectionBatchCount(t *testing.T) {
+	for _, count := range []int{1, 10} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			f := newCLIFixture(t)
+			for i := 0; i < count; i++ {
+				n := f.createTouching(t, "docs/change.md")
+				if i < count-1 {
+					switch i {
+					case 0, 1:
+						editSelectionState(t, f, n, func(st *lease.IssueState) { st.Lease.Status = "completed" })
+					case 2, 3:
+						editSelectionState(t, f, n, func(st *lease.IssueState) { st.TaskDigest = "changed" })
+					default:
+						f.claimInFlight(t, n)
+					}
+				}
+			}
+			s := selectionFixtureStore(t, f)
+			got, diag, e := selectFixture(t, f, s, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
+			if e != nil {
+				t.Fatalf("%v %s", e, diag)
+			}
+			if got == nil || s.snapshots != 1 {
+				t.Fatalf("got=%v snapshots=%d", got, s.snapshots)
+			}
+			// Only the winning issue is read authoritatively by preflight/acquisition.
+			t.Logf("authoritative loads: %v", s.readNumbers)
+			if !reflect.DeepEqual(s.readNumbers, []int{got.Issue.Number, got.Issue.Number}) {
+				t.Fatalf("selection performed individual reads: %d", s.loads)
+			}
+		})
+	}
+}
+func TestSelectionBatchEquivalence(t *testing.T) {
+	var wantNum int
+	var wantOverlap *overlapSelection
+	var wantDiag string
+	for _, batch := range []bool{false, true} {
+		f := newCLIFixture(t)
+		active := f.createTouching(t, "internal/lease/a.go")
+		f.claimInFlight(t, active)
+		f.createTouching(t, "internal/lease/b.go")
+		f.createTouching(t, "docs/change.md")
+		s := selectionFixtureStore(t, f)
+		var store coordination.Store = s.Store
+		if batch {
+			store = s
+		}
+		got, diag, e := selectFixture(t, f, store, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
+		if e != nil {
+			t.Fatalf("%v %s", e, diag)
+		}
+		if !batch {
+			wantNum, wantOverlap, wantDiag = got.Issue.Number, got.Overlap, diag
+		} else if got.Issue.Number != wantNum || !reflect.DeepEqual(got.Overlap, wantOverlap) || diag != wantDiag {
+			t.Fatalf("batch differs: %d %+v %q vs %d %+v %q", got.Issue.Number, got.Overlap, diag, wantNum, wantOverlap, wantDiag)
+		}
+	}
+}
+func TestSelectionBatchSnapshotFallback(t *testing.T) {
+	for _, failure := range []error{errors.New("inventory output limit exceeded"), errors.New("unsupported state snapshot"), errors.New("budget exceeded"), errors.New("fetch failed"), errors.New("closed issue object unreadable"), context.Canceled} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			f := newCLIFixture(t)
+			n := f.createTouching(t, "docs/change.md")
+			s := selectionFixtureStore(t, f)
+			s.failure = failure
+			got, diag, e := selectFixture(t, f, s, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
+			if e != nil || got.Issue.Number != n || s.snapshots != 1 || s.loads == 0 || strings.Count(diag, "warning: batched selection state unavailable") != 1 {
+				t.Fatalf("%v %s snapshots=%d loads=%d", e, diag, s.snapshots, s.loads)
+			}
+		})
+	}
+}
+func TestSelectionBatchClaimRace(t *testing.T) {
+	f := newCLIFixture(t)
+	first := f.createTouching(t, "docs/first.md")
+	second := f.createTouching(t, "docs/second.md")
+	s := selectionFixtureStore(t, f)
+	var competitor *lease.IssueState
+	cfg, err := harness.LoadConfig(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := lease.NewManager(f.tracker.WithUser("competitor", ""), cfg.Security)
+	other.SetStore(f.root, s.Store)
+	var raceErr error
+	reporter := workflow.NewProgressReporter(t.Context(), func(e workflow.ProgressEvent) {
+		if e.Stage == "claim" && e.IssueNumber == first && competitor == nil {
+			competitor, raceErr = other.Acquire(t.Context(), first, "competitor", "mock", "plan", time.Hour, 1)
+		}
+	})
+	defer reporter.Close()
+	got, diag, err := selectFixture(t, f, s, workflow.WorkOptions{Phase: "plan", AgentName: "mock", SetupProgress: reporter})
+	if err != nil || got.Issue.Number != second || competitor == nil || raceErr != nil {
+		t.Fatalf("%v %s got=%v competitor=%v race=%v", err, diag, got, competitor, raceErr)
+	}
+	if _, e := lease.LoadClaimToken(f.root, first); !os.IsNotExist(e) {
+		t.Fatalf("loser token: %v", e)
+	}
+	if !reflect.DeepEqual(s.readNumbers, []int{first, first, second, second}) {
+		t.Fatalf("fresh reads: %v", s.readNumbers)
+	}
+	current := f.state(t, first)
+	if current.Lease.ClaimID != competitor.Lease.ClaimID {
+		t.Fatal("competitor overwritten")
+	}
+	if _, err := os.Stat(filepath.Join(f.root, ".swarm", "worktrees", fmt.Sprintf("issue-%d", first))); !os.IsNotExist(err) {
+		t.Fatalf("loser workspace: %v", err)
+	}
+}
+
+// Script only the inventory commands; fixture preflight and real acquisition use Git.
+func selectionInventoryScript(t *testing.T, s *selectionCountingStore, layout coordination.RefLayout, mode string) string {
+	t.Helper()
+	dir := t.TempDir()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows strings.Builder
+	for n, b := range s.data {
+		sha := fmt.Sprintf("%040x", n)
+		fmt.Fprintf(&rows, "%s\t%s\n", sha, layout.StateRef(n))
+		if err := os.WriteFile(filepath.Join(dir, sha), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(name, data string) {
+		t.Helper()
+		if e := os.WriteFile(filepath.Join(dir, name), []byte(data), 0700); e != nil {
+			t.Fatal(e)
+		}
+	}
+	write("rows", rows.String())
+	var over strings.Builder
+	for n := 1; n <= 4000; n++ {
+		fmt.Fprintf(&over, "%040x\t%s\n", n, layout.StateRef(n))
+	}
+	write("overflow", over.String())
+	log := filepath.Join(dir, "log")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+ls-remote)
+ if [ "$2" = '--refs' ]; then
+  echo list >> '%[1]s/log'
+  n=0; [ ! -f '%[1]s/count' ] || n=$(cat '%[1]s/count'); n=$((n+1)); echo "$n" > '%[1]s/count'
+  case '%[3]s' in
+   overflow) cat '%[1]s/overflow'; exit 0;;
+   unsupported) printf '%%s\t%%s\n' '%[4]s' '%[5]s'; exit 0;;
+  esac
+  cat '%[1]s/rows'
+  if { [ '%[3]s' = persistent ] && [ $((n%%2)) = 1 ]; } || { [ '%[3]s' = stabilize ] && [ "$n" = 1 ]; }; then
+   printf '%%s\t%%s\n' '%[4]s' '%[6]s'
+  fi
+  exit 0
+ fi;;
+fetch)
+ if [ "$2 $3" = '--no-tags --no-write-fetch-head' ]; then echo fetch >> '%[1]s/log';exit 0;fi;;
+show)
+ sha=${2%%:state.json}
+ if [ -f '%[1]s/'"$sha" ]; then echo show >> '%[1]s/log';cat '%[1]s/'"$sha";exit 0;fi;;
+esac
+exec '%[2]s' "$@"
+`, dir, realGit, mode, strings.Repeat("a", 40), layout.Counterpart().StateRef(999), layout.StateRef(999))
+	write("git", script)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+func TestSelectionBatchSnapshotRefreshRetry(t *testing.T) {
+	for _, layout := range []coordination.RefLayout{coordination.BranchLayout, coordination.HiddenLayout} {
+		for _, mode := range []string{"stabilize", "persistent", "overflow", "unsupported"} {
+			t.Run(fmt.Sprintf("%v/%s", layout, mode), func(t *testing.T) {
+				f := newCLIFixture(t)
+				want := f.createTouching(t, "docs/change.md")
+				s := selectionFixtureStore(t, f)
+				log := selectionInventoryScript(t, s, layout, mode)
+				gitStore := coordination.NewGitStoreWithLayout(f.root, "", layout)
+				s.provider = gitStore.ReadInventorySnapshot
+				got, diag, e := selectFixture(t, f, s, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
+				if e != nil || got == nil || got.Issue.Number != want {
+					t.Fatalf("%v %s got=%v", e, diag, got)
+				}
+				calls, err := os.ReadFile(log)
+				if err != nil {
+					t.Fatal(err)
+				}
+				attempts, lists, fetches, warnings := 1, 1, 0, 1
+				switch mode {
+				case "stabilize":
+					attempts, lists, fetches, warnings = 2, 4, 2, 0
+				case "persistent":
+					attempts, lists, fetches = 3, 6, 3
+				}
+				if s.snapshots != attempts || strings.Count(string(calls), "list\n") != lists || strings.Count(string(calls), "fetch\n") != fetches || strings.Count(diag, "warning: batched selection state unavailable") != warnings {
+					t.Fatalf("snapshots=%d calls=%s diag=%s", s.snapshots, calls, diag)
+				}
+			})
+		}
+	}
+}
+
+func editSelectionState(t *testing.T, f *cliFixture, n int, edit func(*lease.IssueState)) {
+	t.Helper()
+	b, rev, e := f.manager.Store().Load(t.Context(), n)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var st lease.IssueState
+	if e = json.Unmarshal(b, &st); e != nil {
+		t.Fatal(e)
+	}
+	edit(&st)
+	b, e = json.Marshal(st)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = f.manager.Store().CompareAndSwap(t.Context(), n, rev, b); e != nil {
+		t.Fatal(e)
+	}
+}
+
+// Paired fixtures exercise filtering and blocked diagnostics before any eligible candidate.
+func TestSelectionBatchEquivalenceEligibility(t *testing.T) {
+	for _, noReady := range []bool{false, true} {
+		var wantNum int
+		var wantOverlap *overlapSelection
+		var wantDiag, wantErr string
+		for _, mode := range []string{"ordinary", "batch", "limit", "unsupported listing", "budget", "fetch", "unrelated closed object", "internally canceled"} {
+			f := newCLIFixture(t)
+			active := f.createTouching(t, "internal/lease/a.go")
+			f.claimInFlight(t, active)
+			for _, kind := range []string{"completed", "decomposed", "unapproved", "dependency", "capability", "human"} {
+				n := f.createTouching(t, "docs/blocked.md")
+				switch kind {
+				case "completed":
+					editSelectionState(t, f, n, func(st *lease.IssueState) { st.Lease.Status = "completed" })
+				case "decomposed":
+					editSelectionState(t, f, n, func(st *lease.IssueState) { st.Decomposition = &lease.Decomposition{ID: "test"} })
+				case "unapproved":
+					editSelectionState(t, f, n, func(st *lease.IssueState) { st.TaskDigest = "changed" })
+				case "human":
+					editSelectionState(t, f, n, func(st *lease.IssueState) {
+						st.EffectiveGate = contract.GateHuman
+						st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactDesign, Body: "plan"})
+					})
+				default:
+					issue, e := f.tracker.GetIssue(t.Context(), n)
+					if e != nil {
+						t.Fatal(e)
+					}
+					wu, e := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
+					if e != nil {
+						t.Fatal(e)
+					}
+					if kind == "dependency" {
+						wu.DependsOn = []int{999}
+					} else {
+						wu.RequiredCapabilities = []string{"unavailable-test-capability"}
+					}
+					raw, e := yaml.Marshal(wu)
+					if e != nil {
+						t.Fatal(e)
+					}
+					if _, e = f.tracker.UpdateIssueBody(t.Context(), n, "```yaml\n"+string(raw)+"```\n"); e != nil {
+						t.Fatal(e)
+					}
+					f.must(t, "issue", "approve", strconv.Itoa(n))
+				}
+			}
+			// Missing state still appears as open ready work.
+			issue, e := f.tracker.GetIssue(t.Context(), active)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if _, e = f.tracker.CreateIssue(t.Context(), "missing", issue.Body, []string{"swarm:ready"}); e != nil {
+				t.Fatal(e)
+			}
+			if !noReady {
+				n := f.createTouching(t, "docs/winner.md")
+				editSelectionState(t, f, n, func(st *lease.IssueState) {
+					st.Lease.Status = "active"
+					st.Lease.ExpiresAt = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+				})
+				f.createTouching(t, "docs/tied.md")
+			}
+			s := selectionFixtureStore(t, f)
+			var store coordination.Store = s.Store
+			if mode != "ordinary" {
+				store = s
+			}
+			if mode != "ordinary" && mode != "batch" {
+				s.failure = errors.New(mode)
+				if mode == "internally canceled" {
+					s.failure = context.Canceled
+				}
+			}
+			got, diag, e := selectFixture(t, f, store, workflow.WorkOptions{Phase: "all", AgentName: "mock"})
+			diag = strings.ReplaceAll(diag, "warning: batched selection state unavailable; using per-issue reads\n", "")
+			diag = strings.ReplaceAll(diag, f.root, "<root>")
+			errText := strings.ReplaceAll(fmt.Sprint(e), f.root, "<root>")
+			n := 0
+			var overlap *overlapSelection
+			if got != nil {
+				n, overlap = got.Issue.Number, got.Overlap
+			}
+			if mode == "ordinary" {
+				wantNum, wantOverlap, wantDiag, wantErr = n, overlap, diag, errText
+			} else if n != wantNum || !reflect.DeepEqual(overlap, wantOverlap) || diag != wantDiag || errText != wantErr {
+				t.Fatalf("%s differs: %d %+v %q %q vs %d %+v %q %q", mode, n, overlap, diag, errText, wantNum, wantOverlap, wantDiag, wantErr)
+			}
+			if noReady && !errors.Is(e, errNoReadyWork) {
+				t.Fatalf("expected no ready: %v", e)
+			}
+			if !noReady && e != nil {
+				t.Fatalf("%v %s", e, diag)
+			}
+		}
+	}
+}
+func TestSelectionBatchCancellation(t *testing.T) {
+	f := newCLIFixture(t)
+	f.createTouching(t, "docs/test.md")
+	s := selectionFixtureStore(t, f)
+	ctx, cancel := context.WithCancel(t.Context())
+	s.provider = func(context.Context, bool, int, func(int64) error, ...coordination.InventoryDecoder) (map[int][]byte, error) {
+		cancel()
+		return nil, errors.New("transport failed")
+	}
+	_, diag, e := selectFixtureContext(ctx, t, f, s, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
+	if !errors.Is(e, context.Canceled) || s.loads != 0 || strings.Contains(diag, "batched selection state unavailable") {
+		t.Fatalf("%v %q loads=%d", e, diag, s.loads)
+	}
+}
+
+type selectionFailLoadStore struct {
+	coordination.Store
+	number int
+	err    error
+}
+
+func (s *selectionFailLoadStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	if n == s.number {
+		return nil, "", s.err
+	}
+	return s.Store.Load(ctx, n)
+}
+func TestSelectionBatchSnapshotFallbackRequestedLoadError(t *testing.T) {
+	f := newCLIFixture(t)
+	n := f.createTouching(t, "docs/change.md")
+	s := selectionFixtureStore(t, f)
+	sentinel := errors.New("requested issue load failed")
+	s.Store = &selectionFailLoadStore{Store: s.Store, number: n, err: sentinel}
+	s.failure = errors.New("snapshot fetch failed")
+	got, diag, err := selectFixture(t, f, s, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
+	if got != nil || !errors.Is(err, sentinel) || s.snapshots != 1 || strings.Count(diag, "batched selection state unavailable") != 1 || !strings.Contains(diag, "overlap scheduling signal is partial") {
+		t.Fatalf("%v %s got=%v", err, diag, got)
+	}
+}

@@ -519,7 +519,10 @@ func TestRepairOutsideCandidateSetupFailures(t *testing.T) {
 }
 
 func TestRepairOutsideCandidateTimeout(t *testing.T) {
-	repo, base := setupGoFastPassRepo(t, "  - name: shell\n    command: if test -f .swarm/active/PLAN.md; then exit 1; else sleep 1; fi\n    timeout: 20ms\n", map[string]string{".gitignore": ".swarm/active/\n"})
+	// The candidate run fails at once; only the outside-candidate rerun sleeps
+	// past the limit. Margins are wide so a loaded CI host never times out the
+	// candidate run itself, which would classify the report as a time limit.
+	repo, base := setupGoFastPassRepo(t, "  - name: shell\n    command: if test -f .swarm/active/PLAN.md; then exit 1; else sleep 4; fi\n    timeout: 2s\n", map[string]string{".gitignore": ".swarm/active/\n"})
 	report := validateRepair(t, repo, base)
 	if report.Repair.OutsideCandidate() {
 		t.Fatal("timed out rerun exempted")
@@ -564,8 +567,10 @@ func TestRepairOutsideCandidateMalformedEvidence(t *testing.T) {
 }
 
 func TestRepairOutsideCandidatePerCheckTimeout(t *testing.T) {
-	command := "if test -f .swarm/active/PLAN.md; then exit 1; else sleep 0.1; fi"
-	checks := "  - name: short\n    command: '" + command + "'\n    timeout: 20ms\n  - name: long\n    command: '" + command + "'\n    timeout: 1s\n"
+	// See TestRepairOutsideCandidateTimeout: 20ms limits timed out the candidate
+	// run on loaded CI hosts. Only the outside rerun of "short" should time out.
+	command := "if test -f .swarm/active/PLAN.md; then exit 1; else sleep 4; fi"
+	checks := "  - name: short\n    command: '" + command + "'\n    timeout: 2s\n  - name: long\n    command: '" + command + "'\n    timeout: 15s\n"
 	repo, base := setupGoFastPassRepo(t, checks, map[string]string{".gitignore": ".swarm/active/\n"})
 	report := validateRepair(t, repo, base)
 	if report.Repair.OutsideCandidate() || len(report.Repair.FailedChecks) != 2 || report.Repair.FailedChecks[0].OutsideCandidateTree != "" || report.Repair.FailedChecks[1].OutsideCandidateTree == "" {

@@ -242,7 +242,7 @@ func (m *Manager) reconcileCheckpoint(ctx context.Context, n int, owner, expecte
 		return result, nil
 	}
 	if reviewRequired {
-		return result, fmt.Errorf("%w: stage a replacement plan naming candidate %s and obtain fresh plan review with swarm issue review-plan %d before reconciling", ErrPlanApprovalRequired, candidate, n)
+		return result, fmt.Errorf("%w: the preserved candidate needs a replacement plan and fresh plan review before reconciling; %s", ErrPlanApprovalRequired, CheckpointReplanSteps(n, expected, candidate))
 	}
 	validationOpts := validation.ValidateOptions{BaseSHA: st.BaseSHA, ClaimID: st.Lease.ClaimID, CIMode: true}
 	if len(options) > 1 {
@@ -511,6 +511,13 @@ func checkpointGit(ctx context.Context, root string, args ...string) (string, er
 		return "", fmt.Errorf("git %s: %w: %s", redact(strings.Join(args, " ")), err, redact(strings.TrimSpace(string(out))))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// CheckpointReplanSteps names the commands that re-plan a preserved checkpoint
+// candidate. Both reconcile and issue work point here, so the recovery path is
+// never a loop between their errors (#521).
+func CheckpointReplanSteps(n int, expected, candidate string) string {
+	return fmt.Sprintf("run swarm issue work %d --plan-checkpoint --phase plan --expected-head %s --candidate-head %s, then swarm issue review-plan %d, then swarm issue reconcile %d --checkpoint --expected-head %s --candidate-head %s", n, expected, candidate, n, n, expected, candidate)
 }
 
 // CheckpointPlanHeads reads only a coordinator-authored, matching report pair.

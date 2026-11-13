@@ -254,7 +254,7 @@ The two caches are never shared. Agent sandboxes never see the validator cache, 
 
 Validation runs candidate code, which is untrusted, and build caches do not verify their entries when they read them. So candidate code never writes a persistent cache:
 
-- **Warm-up.** On Bubblewrap with overlay support, the first validation at a new approved base commit first runs the required checks on a clean checkout of that base, with the validator cache writable. A `.warm-<base commit>` file in the repository's cache directory records that this ran. A failing base check is noted in the report and never changes the candidate's result.
+- **Warm-up.** On Bubblewrap with overlay support, the first validation at a new approved base commit warms recognized direct Go commands on a clean checkout of that base: Go tests compile without running test cases, build and vet commands run unchanged, and other commands are skipped, with the validator cache writable. A `.warm-<base commit>` file in the repository's cache directory records that this ran. A failing base check is noted in the report and never changes the candidate's result.
 - **Bubblewrap.** Candidate checks see the warmed cache read-only, with a temporary write layer that is thrown away when the check exits.
 - **Codex native and host checks.** These include trusted-local execution and `swarm repo validate` on CI runners. They cannot layer a cache, so candidate checks get a fresh scratch cache. No warm-up runs there, because nothing would read the cache it writes.
 - **OCI.** Validation and worker containers get no build cache.

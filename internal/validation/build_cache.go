@@ -46,7 +46,100 @@ func validatorDependencyCaches(ctx context.Context, worktree, baseSHA string, po
 	return sandbox.PrepareDependencyCaches(ctx, sandbox.ValidatorDependencyCache, worktree, baseSHA, base, policy)
 }
 
-// warmBuildCaches runs the trusted required checks against a clean checkout
+// warmupCommand recognizes a deliberately small shell-free subset of Go commands.
+// Unknown flags and syntax skip warm-up rather than executing the original.
+func warmupCommand(command string) (string, bool) {
+	if strings.ContainsAny(command, "\n\r\\;`|&<>(){}!*?#") {
+		return "", false
+	}
+	var tokens []string
+	var token strings.Builder
+	var quote rune
+	for _, c := range command {
+		switch {
+		case c == '$' && quote != '\'':
+			return "", false
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				token.WriteRune(c)
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == ' ' || c == '\t':
+			if token.Len() > 0 {
+				tokens = append(tokens, token.String())
+				token.Reset()
+			}
+		default:
+			token.WriteRune(c)
+		}
+	}
+	if quote != 0 {
+		return "", false
+	}
+	if token.Len() > 0 {
+		tokens = append(tokens, token.String())
+	}
+	if len(tokens) < 2 || tokens[0] != "go" {
+		return "", false
+	}
+	kind := tokens[1]
+	if kind != "test" && kind != "build" && kind != "vet" {
+		return "", false
+	}
+	out := []string{"go", kind}
+	for i := 2; i < len(tokens); i++ {
+		t := tokens[i]
+		if !strings.HasPrefix(t, "-") {
+			// Package patterns only, not source files or shell globbing.
+			if strings.HasSuffix(t, ".go") || strings.ContainsAny(t, " ='\":") {
+				return "", false
+			}
+			out = append(out, t)
+			continue
+		}
+		flag, value, equal := strings.Cut(t, "=")
+		selector := kind == "test" && (flag == "-run" || flag == "-bench" || flag == "-fuzz")
+		boolean := flag == "-race" || flag == "-msan" || flag == "-asan" || flag == "-trimpath" || flag == "-a" || flag == "-v" || flag == "-x" || flag == "-work" || (kind == "test" && (flag == "-short" || flag == "-failfast" || flag == "-cover"))
+		valued := flag == "-tags" || flag == "-mod" || flag == "-modfile" || flag == "-p" || flag == "-gcflags" || flag == "-asmflags" || flag == "-ldflags" || (kind == "test" && (flag == "-timeout" || flag == "-count" || flag == "-parallel" || flag == "-cpu" || flag == "-covermode" || flag == "-coverpkg"))
+		if !selector && !boolean && !valued {
+			return "", false
+		}
+		if selector || valued {
+			if !equal {
+				i++
+				if i == len(tokens) {
+					return "", false
+				}
+				value = tokens[i]
+			}
+			if value == "" {
+				return "", false
+			}
+		} else if equal && value != "true" && value != "false" {
+			return "", false
+		}
+		if !selector {
+			if equal || valued {
+				out = append(out, flag+"="+value)
+			} else {
+				out = append(out, flag)
+			}
+		}
+	}
+	if kind != "test" {
+		return command, true
+	}
+	// Quote every reconstructed argument: flag values are never shell syntax.
+	for i := range out {
+		out[i] = "'" + strings.ReplaceAll(out[i], "'", "'\\''") + "'"
+	}
+	return strings.Join(out, " ") + " -run '^$'", true
+}
+
+// warmBuildCaches compiles recognized Go checks against a clean checkout
 // of the approved base, once per base. It is the only run that writes the
 // persistent validator caches; candidate runs reuse them read-only or not at
 // all (sandbox.ValidatorCacheMounts). Warm-up is best-effort: it never changes
@@ -81,6 +174,14 @@ func warmBuildCaches(ctx context.Context, r *checkRunner, checks []contract.Chec
 		timing.Duration = time.Since(start)
 		phaseEvent(observe, "warm-up", timing.Status, timing.Duration)
 	}()
+	var applicable []contract.CheckSpec
+	for _, check := range checks {
+		if command, ok := warmupCommand(check.Command); ok {
+			check.Command = command
+			applicable = append(applicable, check)
+		}
+	}
+	checks = applicable
 	keyDir := ""
 	for _, c := range r.buildCaches {
 		if c.Persistent {

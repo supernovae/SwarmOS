@@ -60,10 +60,18 @@ jobs:
       - name: Check changelog fragments
         run: go run ./cmd/changelog --check
 
-  policy:
-    name: SwarmOS policy validation
+  # The required checks run in three shards on separate runners; one 4-core
+  # runner took about 28 minutes, nearly all of it cli-regressions competing
+  # with eleven other checks. Check i runs in shard i%3+1, so the shards
+  # always cover every check; the aggregate job below is the required status.
+  policy-shard:
+    name: SwarmOS policy validation (shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       GOMAXPROCS: '4'
       GOFLAGS: '-p=2'
@@ -156,6 +164,7 @@ jobs:
       - name: Validate against trusted base
         env:
           PROTECTED_MODE: ${{ steps.protected.outputs.mode || 'enforce' }}
+          SHARD: ${{ matrix.shard }}
         run: |
           swarm="$RUNNER_TEMP/swarm-bin/swarm"
           if ! "$swarm" repo validate --help | grep -q -- '--protected-paths'; then
@@ -166,8 +175,33 @@ jobs:
           if [ -f "$RUNNER_TEMP/swarm-harness-grant.json" ]; then
             set -- --grant-file "$RUNNER_TEMP/swarm-harness-grant.json"
           fi
+          if "$swarm" repo validate --help | grep -q -- '--shard'; then
+            set -- "$@" --shard "$SHARD/3"
+          elif [ "$SHARD" != 1 ]; then
+            # A trusted base from before sharding runs every check in shard 1.
+            echo "::notice::The validator at the trusted base predates --shard; shard 1 runs every required check."
+            exit 0
+          fi
           status=0
           "$swarm" repo validate --base "$BASE_SHA" --protected-paths "$PROTECTED_MODE" "$@" > "$RUNNER_TEMP/swarm-validate.txt" 2>&1 || status=$?
           cat "$RUNNER_TEMP/swarm-validate.txt"
           { echo '### SwarmOS validation'; echo '```text'; cat "$RUNNER_TEMP/swarm-validate.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
+
+  # Branch protection requires this name. It passes only when every shard
+  # passed; a cancelled, skipped or failed shard fails it.
+  policy:
+    name: SwarmOS policy validation
+    needs: policy-shard
+    if: always()
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every shard
+        env:
+          RESULT: ${{ needs.policy-shard.result }}
+        run: |
+          if [ "$RESULT" != success ]; then
+            echo "::error::Policy validation shards finished with: $RESULT"
+            exit 1
+          fi

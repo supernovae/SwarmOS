@@ -105,6 +105,8 @@ type ValidationReport struct {
 	BaseSHA       string        `json:"base_sha"`
 	HeadSHA       string        `json:"head_sha"`
 	ModifiedFiles []string      `json:"modified_files"`
+	// Shard names the CI shard this report covers; empty means every check.
+	Shard string `json:"shard,omitempty"`
 	// ProtectedChanges lists changed files that match the trusted protected
 	// paths when they were reported rather than rejected.
 	ProtectedChanges []string          `json:"protected_changes,omitempty"`
@@ -198,6 +200,11 @@ type ValidateOptions struct {
 	// only in CIMode, where `swarm repo validate` checks a maintainer-authored
 	// pull request at merge time; agent work and fork mode always reject.
 	ReportProtectedChanges bool
+	// ShardIndex and ShardCount split the required checks across CI runners.
+	// Check i, in trusted policy order, runs in shard i%ShardCount+1, so the
+	// shards together always cover every check. Only CIMode accepts a shard;
+	// a sharded report proves only its own checks and is never reusable.
+	ShardIndex, ShardCount int
 	// LookupEnv resolves SWARM_EXECUTION_MODE for this validation; nil reads
 	// the process environment. Check subprocesses still receive cleanCheckEnv.
 	LookupEnv func(string) (string, bool)
@@ -283,6 +290,12 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	spec, err := loadTrustedValidationSpecContext(ctx, worktreePath, opts.BaseSHA)
 	if err != nil {
 		return nil, err
+	}
+	shardNote := ""
+	if opts.ShardCount != 0 {
+		if spec, shardNote, err = shardSpec(spec, opts); err != nil {
+			return nil, err
+		}
 	}
 	baseSHA, err := resolveCommit(worktreePath, opts.BaseSHA)
 	if err != nil {
@@ -372,6 +385,10 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	var markdown strings.Builder
 	markdown.WriteString("# Validation Report\n\n")
 	markdown.WriteString(fmt.Sprintf("Trusted base: `%s`  \nCandidate head: `%s`\n\n", baseSHA, headSHA))
+	if shardNote != "" {
+		report.Shard = shardNote
+		markdown.WriteString(shardNote + "\n\n")
+	}
 	markdown.WriteString("| Check | Command | Status | Duration |\n| :--- | :--- | :--- | :--- |\n")
 	var details strings.Builder
 	var firstErr error
@@ -575,6 +592,32 @@ func SkippedChecksReport(issue int, baseSHA, headSHA, reason string) *Validation
 func loadTrustedValidationSpec(repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
 	return loadTrustedValidationSpecContext(context.Background(), repoRoot, baseSHA)
 }
+
+// MaxValidationShards bounds --shard so a typo cannot fan out runners.
+const MaxValidationShards = 16
+
+// shardSpec keeps only this shard's required checks, in policy order.
+func shardSpec(spec *contract.ValidationSpec, opts ValidateOptions) (*contract.ValidationSpec, string, error) {
+	n, i := opts.ShardCount, opts.ShardIndex
+	if !opts.CIMode {
+		return nil, "", fmt.Errorf("validation shards are only available in CI")
+	}
+	if n < 1 || n > MaxValidationShards || i < 1 || i > n {
+		return nil, "", fmt.Errorf("invalid validation shard %d/%d: want i/N with 1 <= i <= N <= %d", i, n, MaxValidationShards)
+	}
+	sharded := *spec
+	sharded.RequiredChecks = nil
+	var names []string
+	for k, check := range spec.RequiredChecks {
+		if k%n == i-1 {
+			sharded.RequiredChecks = append(sharded.RequiredChecks, check)
+			names = append(names, check.Name)
+		}
+	}
+	note := fmt.Sprintf("Shard %d/%d: %d of %d required checks (%s). The other shards run the rest.", i, n, len(sharded.RequiredChecks), len(spec.RequiredChecks), strings.Join(names, ", "))
+	return &sharded, note, nil
+}
+
 func loadTrustedValidationSpecContext(ctx context.Context, repoRoot, baseSHA string) (*contract.ValidationSpec, error) {
 	spec, err := harness.LoadValidationSpecAtContext(ctx, repoRoot, baseSHA)
 	if err != nil {

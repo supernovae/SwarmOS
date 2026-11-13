@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -802,6 +803,11 @@ func RunNativeValidation(ctx context.Context, dir, binary, command string, cache
 
 // Reuse the OCI filesystem acceptance rules. Native workers also operate on a
 // detached snapshot, so tools cannot access live Git or coordinator state.
+// ErrMissingRoleOutput means a read-only role finished without writing the
+// artifact the coordinator reads, such as REVIEW.md. The run itself may have
+// succeeded; the role ended with its result only in its final message.
+var ErrMissingRoleOutput = errors.New("role finished without writing its output artifact")
+
 func withNativeWorkspace(ctx context.Context, dir string, opts WorkerOptions, run func(context.Context, string, string) error) (resultErr error) {
 	return withNativeWorkspaceClock(ctx, dir, opts, realBudgetClock, run)
 }
@@ -907,6 +913,9 @@ func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOption
 			}
 			artifacts[i], err = safefs.ReadFile(work, filepath.Join(".swarm", "active", name), 1<<20)
 			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					return fmt.Errorf("%w: %s", ErrMissingRoleOutput, name)
+				}
 				return fmt.Errorf("read native role output %s: %w", name, err)
 			}
 		}

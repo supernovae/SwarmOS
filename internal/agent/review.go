@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/safefs"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/storageuse"
 )
 
@@ -116,6 +119,9 @@ func RunReview(ctx context.Context, runner Runner, req RunRequest) (result *RunR
 		return result, err
 	}
 	data, err := outputRoot.ReadFile("REVIEW.md", maxReviewBytes)
+	if errors.Is(err, fs.ErrNotExist) {
+		return result, fmt.Errorf("%w: REVIEW.md", sandbox.ErrMissingRoleOutput)
+	}
 	if err != nil {
 		return result, fmt.Errorf("read isolated reviewer output: %w", err)
 	}

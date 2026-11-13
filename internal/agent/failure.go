@@ -35,6 +35,9 @@ func (e *runFailure) status() string {
 	if errors.As(e.cause, &timeout) {
 		return timeout.Error()
 	}
+	if errors.Is(e.cause, sandbox.ErrMissingRoleOutput) && !errors.Is(e.cause, context.Canceled) && !errors.Is(e.cause, context.DeadlineExceeded) {
+		return fmt.Sprintf("%s agent finished without writing its output artifact", e.role)
+	}
 	status := "failed"
 	if errors.Is(e.cause, context.Canceled) {
 		status = "canceled"

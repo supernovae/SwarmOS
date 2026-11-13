@@ -1970,7 +1970,12 @@ func TestCLIPlanReviewRejectsMissingFindings(t *testing.T) {
 				t.Fatal("rejected review succeeded", out)
 			}
 			st := f.state(t, issue)
-			if script.counts["reviewer"] != 1 || script.counts["developer"] != 0 || st.HeadSHA != "" {
+			// A bare report gets exactly one format repair, which may not flip the verdict.
+			reviews := 1
+			if bare {
+				reviews = 2
+			}
+			if script.counts["reviewer"] != reviews || script.counts["developer"] != 0 || st.HeadSHA != "" {
 				t.Fatal("review executed implementation", script.counts, st.HeadSHA)
 			}
 			for _, art := range st.Artifacts {

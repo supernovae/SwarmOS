@@ -1319,6 +1319,80 @@ func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
 	}
 }
 
+// A reviewer that invents a finding key gets one rewrite with the rejection
+// reason; the rewritten report is held to the same strict format.
+func TestMalformedAgentReviewGetsOneFormatRepair(t *testing.T) {
+	invented := "VERDICT: APPROVED\n" + contract.PlanFindingsStart + "\n" + `{"version":1,"findings":[{"id":"F1","blocking":false,"disposition":"open","note":"Also cover the timeout path"}]}` + "\n" + contract.PlanFindingsEnd + "\n"
+	nonBlocking := "VERDICT: APPROVED\n" + contract.PlanFindingsStart + "\n" + `{"version":1,"findings":[{"id":"F1","blocking":false,"disposition":"open","criterion":"Acceptance criterion 3","check":"Also assert the timeout path"}]}` + "\n" + contract.PlanFindingsEnd + "\n"
+	for _, tt := range []struct {
+		name    string
+		reports []string
+		ok      bool
+	}{
+		{"repaired", []string{invented, nonBlocking}, true},
+		{"still malformed", []string{invented, invented, nonBlocking}, false},
+		{"verdict flip", []string{strings.Replace(invented, "APPROVED", "CHANGES_REQUESTED", 1), nonBlocking}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root, e, tr := setupProjectPlanTestRepo(t)
+			ctx := context.Background()
+			wu := &contract.WorkUnit{Objective: "Review", Constraints: []string{"Preserve gates"}, Acceptance: []string{"Exact review"}, Workflow: "feature", Gate: contract.GateAgent}
+			issue, err := tr.CreateIssue(ctx, "Review", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = e.LeaseManager.ApproveTask(ctx, issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			var prompts []string
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "reviewer" {
+						prompts = append(prompts, req.TaskPrompt)
+						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(tt.reports[len(prompts)-1]), 0644)
+					}
+					return result, err
+				}}, nil
+			}
+			_, err = e.ExecuteWork(ctx, WorkOptions{RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Phase: "all", Headless: true})
+			if len(prompts) != 2 {
+				t.Fatalf("reviewer runs = %d, want exactly one repair", len(prompts))
+			}
+			if strings.Contains(prompts[0], "Format repair only") || !strings.Contains(prompts[1], "Format repair only") || !strings.Contains(prompts[1], `unknown field \"note\"`) || strings.Contains(prompts[1], "Execute /swarm-review") {
+				t.Fatalf("repair prompt missing rejection reason:\n%s", prompts[1])
+			}
+			st, stErr := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+			if stErr != nil {
+				t.Fatal(stErr)
+			}
+			failed, recorded := 0, 0
+			for _, run := range st.RoleRuns {
+				if run.Role == "reviewer" && run.FailureClass == "unknown" {
+					failed++
+				}
+			}
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactReview {
+					recorded++
+					if strings.Contains(a.Body, `"note"`) {
+						t.Fatal("malformed review recorded")
+					}
+				}
+			}
+			if tt.ok {
+				if (err != nil && strings.Contains(err.Error(), "malformed plan review")) || failed != 1 || recorded != 1 {
+					t.Fatalf("err=%v failed=%d recorded=%d", err, failed, recorded)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "malformed plan review") || failed != 2 || recorded != 0 {
+				t.Fatalf("err=%v failed=%d recorded=%d", err, failed, recorded)
+			}
+		})
+	}
+}
+
 func TestRejectedPlanContextFiltersStructuredFeedback(t *testing.T) {
 	body := structuredReviewFixture("CHANGES_REQUESTED") + "\nNARRATIVE_SENTINEL"
 	st := &lease.IssueState{PendingPlanReview: &lease.PlanRejection{Findings: body}}

@@ -1179,37 +1179,62 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 		}
 		return "", st, err
 	}
-	revRun, err := agent.RunReview(ctx, runner, req)
-	if err != nil && revRun != nil && revRun.ExitCode == 0 && prNumber == 0 && st.PRRevision == nil {
-		// Successful processes with no importable report are malformed review runs.
-		err = &planReviewOutputError{err}
-		if revRun.Telemetry != nil {
-			revRun.Telemetry.FailureClass = "unknown"
+	var revRun *agent.RunResult
+	var review, verdict, firstVerdict string
+	var firstErr error
+	for attempt := 0; ; attempt++ {
+		revRun, err = agent.RunReview(ctx, runner, req)
+		if err != nil && revRun != nil && revRun.ExitCode == 0 && prNumber == 0 && st.PRRevision == nil {
+			// Successful processes with no importable report are malformed review runs.
+			err = &planReviewOutputError{err}
+			if revRun.Telemetry != nil {
+				revRun.Telemetry.FailureClass = "unknown"
+			}
 		}
-	}
-	if err != nil {
-		st, err = e.failedRun(ctx, st, recovery, revRun, err, "reviewer")
-		return "", st, err
-	}
-	review, err := readRequiredArtifact(wtPath, "REVIEW.md")
-	var verdict string
-	if err == nil {
-		verdict, err = ParseReviewVerdict(review)
-	}
-	if err == nil && prNumber == 0 && st.PRRevision == nil {
-		err = validateStructuredReview(review, verdict, st)
-	}
-	if err != nil {
+		if err != nil {
+			st, err = e.failedRun(ctx, st, recovery, revRun, err, "reviewer")
+			return "", st, err
+		}
+		review, err = readRequiredArtifact(wtPath, "REVIEW.md")
+		verdict = ""
+		if err == nil {
+			verdict, err = ParseReviewVerdict(review)
+		}
+		if attempt == 0 {
+			firstVerdict = verdict
+		}
+		if err == nil && prNumber == 0 && st.PRRevision == nil {
+			err = validateStructuredReview(review, verdict, st)
+		}
+		if err == nil && firstErr != nil && firstVerdict != "" && verdict != firstVerdict {
+			// A format repair fixes syntax only; it is never a second opinion.
+			err = fmt.Errorf("malformed plan review: format repair changed the verdict from %s to %s", firstVerdict, verdict)
+		}
+		if err == nil {
+			break
+		}
+		if firstErr != nil {
+			err = errors.Join(firstErr, err)
+		}
 		if revRun != nil && revRun.Telemetry != nil {
 			revRun.Telemetry.FailureClass = "unknown"
 			updated, recordErr := e.LeaseManager.RecordFailedRoleRun(ctx, wu.IssueNumber, owner, revRun.Telemetry)
 			if recordErr != nil {
-				err = errors.Join(err, recordErr)
-			} else {
-				st = updated
+				return "", st, errors.Join(err, recordErr)
 			}
+			st = updated
 		}
-		return "", st, err
+		// One format repair: the rewritten report is validated exactly like
+		// the first, so a retry can fix a malformed report but never relax it.
+		if attempt >= reviewFormatRetries || review == "" {
+			return "", st, err
+		}
+		firstErr = err
+		if admitErr := e.admitStage(ctx, wu.IssueNumber, owner, "review"); admitErr != nil {
+			return "", st, errors.Join(err, admitErr)
+		}
+		reporter.retry("review-format", attempt+1, reviewFormatRetries)
+		req.TaskPrompt = reviewFormatRepairPrompt(err, firstVerdict)
 	}
 	if err := e.LeaseManager.CheckClaim(ctx, wu.IssueNumber, owner); err != nil {
 		return verdict, st, fmt.Errorf("%w: %w", ErrLeaseLost, err)
@@ -2056,6 +2081,27 @@ func validateStructuredReview(body, verdict string, st *lease.IssueState) error 
 		return fmt.Errorf("malformed plan review: verdict contradicts open blockers")
 	}
 	return nil
+}
+
+// reviewFormatRetries bounds automatic rewrites of an unparseable plan review.
+const reviewFormatRetries = 1
+
+// reviewFormatRepairPrompt tells the reviewer why its report was rejected. The
+// reason comes from the reviewer's own output, so it is escaped and bounded.
+// The repair replaces the audit task, so the retry costs a format fix rather
+// than a second full review.
+func reviewFormatRepairPrompt(err error, verdict string) string {
+	reason := validation.EscapeDiagnostic(err.Error())
+	if len(reason) > 400 {
+		reason = reason[:400] + "..."
+	}
+	keep := "Keep your verdict and findings."
+	if verdict != "" {
+		keep = "Keep the first line VERDICT: " + verdict + " and your findings; the coordinator rejects a repair that changes the verdict."
+	}
+	return "Format repair only; do not re-audit the plan. The coordinator rejected .swarm/active/REVIEW.md: " + reason +
+		"\nRead .swarm/active/REVIEW.md and rewrite it so the structured plan findings block follows the documented format. " + keep +
+		" Use only the documented finding keys and move free-form notes into prose outside the block."
 }
 
 // planReviewOutputError classifies successful processes that fail report import.

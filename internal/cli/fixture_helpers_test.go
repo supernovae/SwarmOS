@@ -2138,3 +2138,63 @@ func setFixtureTracker(t *testing.T, root, tracker string) {
 		t.Fatal(err)
 	}
 }
+
+func TestIssue521FixtureBootstrapIsolation(t *testing.T) {
+	t.Parallel()
+	owner := t
+	var seed *upstreamRepositoryBootstrap
+	t.Run("initializer", func(t *testing.T) {
+		// Allocate through the parent, so the initializer's cleanup cannot remove
+		// repositories needed by the parallel consumers below.
+		seed = newUpstreamRepositoryBootstrap(owner)
+	})
+	for _, name := range []string{"first", "second"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newUpstreamRemoteFixtureFromBootstrap(t, seed, false)
+			if f.git(f.upstreamRoot, "rev-parse", "HEAD") != seed.baseSHA || f.git(f.projectBare, "rev-parse", "main") != seed.baseSHA || f.git(f.aliceBare, "rev-parse", "HEAD") != seed.forkMainSHA || seed.baseSHA == seed.forkMainSHA {
+				t.Fatal("bootstrap commits or fork divergence changed")
+			}
+			for _, repo := range []string{f.upstreamRoot, f.aliceBare} {
+				if got := f.git(repo, "remote", "get-url", "origin"); got != f.projectBare {
+					t.Fatalf("nonlocal origin: %s", got)
+				}
+			}
+			alice := f.aliceClone("consumer")
+			for remote, want := range map[string]string{"origin": f.aliceBare, "upstream": f.projectBare} {
+				if got := f.git(alice, "remote", "get-url", remote); got != want {
+					t.Fatalf("nonlocal %s: %s", remote, got)
+				}
+			}
+			if got := f.git(alice, "remote", "get-url", "--push", "upstream"); got != filepath.Join(f.tmp, "no-upstream-push.git") {
+				t.Fatalf("push destination: %s", got)
+			}
+			// Each consumer starts with fresh maps, then mutates the same keys, refs
+			// and files. Shared storage would either race or change the seed checks.
+			if len(f.prs) != 0 || f.issues[42].Title != "Upstream remote task" {
+				t.Fatal("shared tracker state")
+			}
+			f.issues[42].Title = name
+			f.prs[99] = &tracker.PullRequest{Number: 99}
+			f.git(f.projectBare, "update-ref", "refs/heads/consumer", seed.baseSHA)
+			path := filepath.Join(f.upstreamRoot, "AGENTS.md")
+			if err := os.WriteFile(path, []byte(name), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.git(seed.project, "for-each-ref", "--format=%(refname)", "refs/heads/consumer"); got != "" {
+				t.Fatal("seed ref mutated", got)
+			}
+			original, err := os.ReadFile(filepath.Join(seed.maintainer, "AGENTS.md"))
+			if err != nil || string(original) == name {
+				t.Fatal("seed file mutated", err)
+			}
+			if got := f.git(f.projectBare, "rev-parse", "consumer"); got != seed.baseSHA {
+				t.Fatal("consumer ref changed", got)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != name {
+				t.Fatal("consumer file changed", err)
+			}
+		})
+	}
+}

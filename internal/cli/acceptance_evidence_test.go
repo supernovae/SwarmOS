@@ -120,8 +120,10 @@ func seedIssueAcceptance(t *testing.T, root string, tr tracker.Tracker, manager 
 }
 
 func TestIssueSubmitAcceptanceRefusal(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"missing", "malformed", "omitted", "unmet", "duplicate", "mismatch", "outside", "blank-external", "met", "external"} {
 		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
 			f := newCLIFixture(t)
 			remote := filepath.Join(t.TempDir(), "origin.git")
 			prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
@@ -648,7 +650,10 @@ func (g gapDeniedTracker) Authorize(context.Context, string) error {
 
 // Exercise admission through the real fork transport and authoritative ledger.
 func TestIssueSubmitForkTrustedEvidenceAdmission(t *testing.T) {
+	t.Parallel()
+	seed := newUpstreamRepositoryBootstrap(t)
 	t.Run("direct-missing", func(t *testing.T) {
+		t.Parallel()
 		f := newCLIFixture(t)
 		issue := f.create(t, "agent")
 		n := strconv.Itoa(issue)
@@ -663,7 +668,8 @@ func TestIssueSubmitForkTrustedEvidenceAdmission(t *testing.T) {
 
 	for _, mode := range []string{"trusted", "missing", "imported", "head_sha", "base_sha", "validation_claim", "validation_tree", "validation_policy", "validation_trusted_owner", "validation_trusted_claim", "newer-missing", "newer-malformed", "candidate-changed", "interleaved"} {
 		t.Run(mode, func(t *testing.T) {
-			f := newUpstreamRemoteFixture(t)
+			t.Parallel()
+			f := newUpstreamRemoteFixtureFromBootstrap(t, seed, false)
 			alice := f.aliceClone("alice")
 			opts := f.as("alice", alice)
 			run := func(args ...string) (string, error) {

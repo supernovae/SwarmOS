@@ -470,10 +470,12 @@ func TestSubmitFreshnessInspectionFailure(t *testing.T) {
 }
 
 func TestSubmitHarnessPolicyWarning(t *testing.T) {
+	t.Parallel()
 	for _, allow := range []bool{false, true} {
 		for _, change := range []string{"none", "source", "config", "prompt"} {
 			for _, asJSON := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%t/%s/%t", allow, change, asJSON), func(t *testing.T) {
+					t.Parallel()
 					f := newCLIFixture(t)
 					number := f.create(t, "agent")
 					n := strconv.Itoa(number)

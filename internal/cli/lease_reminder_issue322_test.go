@@ -484,8 +484,10 @@ func issue322CompletionCases(t *testing.T, f *cliFixture, issue int, args ...str
 }
 
 func TestIssue322GitHubCommands(t *testing.T) {
+	t.Parallel()
 	for _, forkMode := range []bool{false, true} {
 		t.Run(strconv.FormatBool(forkMode), func(t *testing.T) {
+			t.Parallel()
 			env := newFixtureEnv(t)
 			ctx := context.Background()
 			tmp := t.TempDir()

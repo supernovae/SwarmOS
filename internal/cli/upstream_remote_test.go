@@ -61,7 +61,24 @@ func (f *upstreamRemoteFixture) git(dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// upstreamRepositoryBootstrap holds only immutable repository paths and commit IDs.
+// Its owning parent test outlives every parallel consumer.
+type upstreamRepositoryBootstrap struct {
+	project, fork, maintainer, baseSHA, forkMainSHA string
+}
+
+func newUpstreamRepositoryBootstrap(t *testing.T) *upstreamRepositoryBootstrap {
+	t.Helper()
+	f := newUpstreamRemoteFixtureFromBootstrap(t, nil, true)
+	return &upstreamRepositoryBootstrap{f.projectBare, f.aliceBare, f.upstreamRoot, f.baseSHA, f.forkMainSHA}
+}
+
 func newUpstreamRemoteFixture(t *testing.T) *upstreamRemoteFixture {
+	t.Helper()
+	return newUpstreamRemoteFixtureFromBootstrap(t, nil, false)
+}
+
+func newUpstreamRemoteFixtureFromBootstrap(t *testing.T, seed *upstreamRepositoryBootstrap, bootstrapOnly bool) *upstreamRemoteFixture {
 	t.Helper()
 	f := &upstreamRemoteFixture{
 		t: t, tmp: t.TempDir(), env: newFixtureEnv(t),
@@ -78,48 +95,66 @@ func newUpstreamRemoteFixture(t *testing.T) *upstreamRemoteFixture {
 			t.Fatal(err)
 		}
 	}
-	f.git(f.tmp, "init", "--bare", "--initial-branch=main", f.projectBare)
 	f.upstreamRoot = filepath.Join(f.tmp, "maintainer")
-	f.git(f.tmp, "clone", f.projectBare, f.upstreamRoot)
-	f.git(f.upstreamRoot, "config", "user.name", "Maintainer")
-	f.git(f.upstreamRoot, "config", "user.email", "maintainer@example.invalid")
-	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: f.upstreamRoot, SwarmVersion: "a1b2c3d4e5f60123456789abcdef0123456789ab", ForkCoordinator: true}); err != nil {
-		t.Fatal(err)
-	}
-	cfgPath := filepath.Join(f.upstreamRoot, ".swarm", "config.yaml")
-	cfg, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cfgPath, append(cfg, []byte("\n  mock:\n    binary: git\n    harness: mock\n")...), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	checks := "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
-	if err := os.WriteFile(filepath.Join(f.upstreamRoot, ".swarm", "validation", "required-checks.yaml"), []byte(checks), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	f.git(f.upstreamRoot, "add", ".")
-	f.git(f.upstreamRoot, "commit", "-m", "approved upstream baseline")
-	f.git(f.upstreamRoot, "push", "origin", "main")
-	f.git(f.projectBare, "symbolic-ref", "HEAD", "refs/heads/main")
-	f.baseSHA = f.git(f.upstreamRoot, "rev-parse", "HEAD")
+	if seed == nil {
+		f.git(f.tmp, "init", "--bare", "--initial-branch=main", f.projectBare)
+		f.git(f.tmp, "clone", f.projectBare, f.upstreamRoot)
+		f.git(f.upstreamRoot, "config", "user.name", "Maintainer")
+		f.git(f.upstreamRoot, "config", "user.email", "maintainer@example.invalid")
+		if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: f.upstreamRoot, SwarmVersion: "a1b2c3d4e5f60123456789abcdef0123456789ab", ForkCoordinator: true}); err != nil {
+			t.Fatal(err)
+		}
+		cfgPath := filepath.Join(f.upstreamRoot, ".swarm", "config.yaml")
+		cfg, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfgPath, append(cfg, []byte("\n  mock:\n    binary: git\n    harness: mock\n")...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		checks := "required_checks:\n  - name: git-available\n    command: git --version\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
+		if err := os.WriteFile(filepath.Join(f.upstreamRoot, ".swarm", "validation", "required-checks.yaml"), []byte(checks), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.git(f.upstreamRoot, "add", ".")
+		f.git(f.upstreamRoot, "commit", "-m", "approved upstream baseline")
+		f.git(f.upstreamRoot, "push", "origin", "main")
+		f.git(f.projectBare, "symbolic-ref", "HEAD", "refs/heads/main")
+		f.baseSHA = f.git(f.upstreamRoot, "rev-parse", "HEAD")
 
-	// The fork advertises a different default branch carrying a fork-only
-	// commit, so a base taken from origin would be detectably wrong.
-	f.git(f.tmp, "clone", "--bare", f.projectBare, f.aliceBare)
-	scratch := filepath.Join(f.tmp, "fork-scratch")
-	f.git(f.tmp, "clone", f.aliceBare, scratch)
-	f.git(scratch, "config", "user.name", "Alice")
-	f.git(scratch, "config", "user.email", "alice@example.invalid")
-	f.git(scratch, "switch", "-c", "fork-default")
-	if err := os.WriteFile(filepath.Join(scratch, "fork-only.txt"), []byte("fork\n"), 0o644); err != nil {
-		t.Fatal(err)
+		// The fork advertises a different default branch carrying a fork-only
+		// commit, so a base taken from origin would be detectably wrong.
+		f.git(f.tmp, "clone", "--bare", f.projectBare, f.aliceBare)
+		scratch := filepath.Join(f.tmp, "fork-scratch")
+		f.git(f.tmp, "clone", f.aliceBare, scratch)
+		f.git(scratch, "config", "user.name", "Alice")
+		f.git(scratch, "config", "user.email", "alice@example.invalid")
+		f.git(scratch, "switch", "-c", "fork-default")
+		if err := os.WriteFile(filepath.Join(scratch, "fork-only.txt"), []byte("fork\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.git(scratch, "add", "fork-only.txt")
+		f.git(scratch, "commit", "-m", "fork-only default branch")
+		f.git(scratch, "push", "origin", "fork-default")
+		f.git(f.aliceBare, "symbolic-ref", "HEAD", "refs/heads/fork-default")
+		f.forkMainSHA = f.git(scratch, "rev-parse", "HEAD")
+
+	} else {
+		for _, pair := range [][2]string{{f.projectBare, seed.project}, {f.aliceBare, seed.fork}, {f.upstreamRoot, seed.maintainer}} {
+			if err := os.MkdirAll(pair[0], 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := copyCLISeed(pair[0], pair[1]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f.git(f.upstreamRoot, "remote", "set-url", "origin", f.projectBare)
+		f.git(f.aliceBare, "remote", "set-url", "origin", f.projectBare)
+		f.baseSHA, f.forkMainSHA = seed.baseSHA, seed.forkMainSHA
 	}
-	f.git(scratch, "add", "fork-only.txt")
-	f.git(scratch, "commit", "-m", "fork-only default branch")
-	f.git(scratch, "push", "origin", "fork-default")
-	f.git(f.aliceBare, "symbolic-ref", "HEAD", "refs/heads/fork-default")
-	f.forkMainSHA = f.git(scratch, "rev-parse", "HEAD")
+	if bootstrapOnly {
+		return f
+	}
 
 	f.maintainer = f.githubTracker("octo/swarm", "maintainer", "User")
 	bot := f.githubTracker("octo/swarm", fork.ActionsBotLogin, "Bot")

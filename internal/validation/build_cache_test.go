@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -223,9 +224,33 @@ func TestWarmupRunsOncePerBase(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "version"), []byte("candidate\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	checks := []contract.CheckSpec{{Name: "record", Command: `cat version >> "$GOCACHE/warm-log"`, Timeout: "1m"}}
+	checks := []contract.CheckSpec{{Name: "record", Command: "go test ./...", Timeout: "1m"}}
 	runner := warmupRunner(t, repo)
 	goCache := runner.buildCaches[0].Dir
+	runner.runCommand = func(ctx context.Context, command string, _ time.Duration, stdout, stderr io.Writer) error {
+		// Inspect Git's actual linked base checkout, not the candidate tree.
+		data, err := gitOutput(repo, "worktree", "list", "--porcelain")
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if path, ok := strings.CutPrefix(line, "worktree "); ok && path != repo {
+				version, err := os.ReadFile(filepath.Join(path, "version"))
+				if err != nil {
+					return err
+				}
+				f, err := os.OpenFile(filepath.Join(goCache, "warm-log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+				if err != nil {
+					return err
+				}
+				defer f.Close()
+				_, err = f.Write(version)
+				return err
+			}
+		}
+		return errors.New("base checkout missing")
+	}
+
 	log := func() string {
 		data, _ := os.ReadFile(filepath.Join(goCache, "warm-log"))
 		return string(data)
@@ -266,8 +291,14 @@ func TestWarmupFailureDoesNotAffectCandidate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "version"), []byte("candidate\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	checks := []contract.CheckSpec{{Name: "candidate-only", Command: `test "$(cat version)" = candidate`, Timeout: "1m"}}
+	checks := []contract.CheckSpec{{Name: "candidate-only", Command: "go test ./...", Timeout: "1m"}}
 	runner := warmupRunner(t, repo)
+	runner.runCommand = func(_ context.Context, command string, _ time.Duration, _, _ io.Writer) error {
+		if strings.Contains(command, "-run") {
+			return errors.New("injected warm failure")
+		}
+		return nil
+	}
 	timing := &PhaseTiming{}
 	note := warmBuildCaches(context.Background(), runner, checks, base, timing, nil)
 	if timing.Status != "failed-checks" || timing.Duration < 0 || !strings.Contains(note, "`candidate-only` failed on the base") {
@@ -397,7 +428,22 @@ func TestValidateWarmsBaseAndReusesReadOnlyOnBubblewrap(t *testing.T) {
 	config := "version: 1\ndefault_agent: worker\ndefault_gate: none\nexecution:\n  mode: isolated\n  backend: native\nlease:\n  duration: 1h\n  max_renewals: 1\nsecurity:\n  require_isolation: true\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  worker:\n    binary: not-used-by-validation\n    harness: omp\n"
 	commitRepoChange(t, repo, ".swarm/config.yaml", config)
 	commitRepoChange(t, repo, "version", "base\n")
-	policy := "required_checks:\n  - name: cache\n    command: 'cat \"$GOCACHE/seen\" 2>/dev/null || true; cat version >> \"$GOCACHE/seen\"'\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n"
+	commitRepoChange(t, repo, "go.mod", "module fixture\ngo 1.26\n")
+	commitRepoChange(t, repo, "cache_test.go", `package fixture
+import ("fmt"; "os"; "path/filepath"; "testing")
+func init() {
+ path := filepath.Join(os.Getenv("GOCACHE"), "seen")
+ data, _ := os.ReadFile(path)
+ fmt.Print(string(data))
+ version, _ := os.ReadFile("version")
+ f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+ if err != nil { panic(err) }
+ defer f.Close()
+ f.Write(version)
+}
+func TestCache(t *testing.T) {}
+`)
+	policy := "required_checks:\n  - name: cache\n    command: 'go test -v -count=1 ./...'\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n"
 	base := commitPolicy(t, repo, policy)
 	commitRepoChange(t, repo, "version", "candidate\n")
 	if !sandbox.NativeValidationReusesCache(&contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: "omp"}}}) {
@@ -526,7 +572,8 @@ func TestValidationWarmupMarkerUseCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &checkRunner{worktree: repo, home: home, buildCaches: caches, execution: contract.ExecutionConfig{Mode: contract.ExecutionTrustedLocal}}
-	checks := []contract.CheckSpec{{Name: "warm", Command: "true", Timeout: "1m"}}
+	runner.runCommand = func(context.Context, string, time.Duration, io.Writer, io.Writer) error { return nil }
+	checks := []contract.CheckSpec{{Name: "warm", Command: "go build ./...", Timeout: "1m"}}
 	for _, want := range []string{"ran", "skipped-marker"} {
 		timing := &PhaseTiming{}
 		warmBuildCaches(ctx, runner, checks, base, timing, nil)
@@ -904,5 +951,197 @@ func TestRequiredCheckDurationHistoryUnsafeLayout(t *testing.T) {
 	}
 	if got := requiredCheckBudget(t.Context(), repo, c); got != time.Millisecond {
 		t.Fatalf("unsafe history budget %v", got)
+	}
+}
+
+func TestWarmupCommand(t *testing.T) {
+	for _, command := range []string{
+		"go test -timeout=15m ./internal/cli",
+		"go test -timeout=30m -parallel=8 ./internal/cli",
+		"go test -timeout=5m ./internal/gitcredential/... ./internal/safefs/... -count=1",
+		"go test -timeout=10m ./internal/validation/... ./internal/harness/... ./internal/coordination/... ./internal/lease/... ./internal/contract/...",
+		"go test -timeout=5m ./cmd/changelog ./internal/changelog",
+		"go test -race -tags=example ./a ./b",
+	} {
+		got, ok := warmupCommand(command)
+		if !ok || got != command+" -run '^$'" {
+			t.Errorf("%q => %q, %v", command, got, ok)
+		}
+	}
+	for _, command := range []string{"go build ./...", "go vet ./..."} {
+		if got, ok := warmupCommand(command); !ok || got != command {
+			t.Errorf("%q => %q, %v", command, got, ok)
+		}
+	}
+	for _, command := range []string{"go test -run=Example -bench=Benchmark ./...", "go test -run Example -bench Benchmark ./..."} {
+		if got, ok := warmupCommand(command); !ok || got != "go test ./... -run '^$'" {
+			t.Errorf("%q => %q, %v", command, got, ok)
+		}
+	}
+	// The quoted security filters in cli-smoke-security, agent-security,
+	// sandbox-security and fork-security are deliberately unsupported.
+	for _, command := range []string{
+		"go test ./... | cat", "echo marker", "go tool staticcheck ./...",
+		"go test ./...; echo marker", "go test $(echo ./...)", "go test ./... > out",
+		"env go test ./...", "GOFLAGS=-v go test ./...", "go test ./...\necho marker",
+		"go test -run '^Test(A|B)$' ./...", "go test -args -run=Example",
+		"go test -- ./...", "go test -exec=wrapper ./...", "go test -fuzz=Fuzz ./...",
+		"go test -test.run=Example ./...", "go test -run",
+	} {
+		if got, ok := warmupCommand(command); ok {
+			t.Errorf("unsupported %q => %q", command, got)
+		}
+	}
+}
+
+func TestWarmupSkipsUnsupportedChecks(t *testing.T) {
+	useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	base := commitRepoChange(t, repo, "version", "base")
+	runner := warmupRunner(t, repo)
+	calls := 0
+	runner.runCommand = func(_ context.Context, command string, _ time.Duration, _, _ io.Writer) error {
+		calls++
+		if command != "go build ./..." {
+			t.Fatalf("unexpected command %q", command)
+		}
+		return nil
+	}
+	checks := []contract.CheckSpec{{Name: "pipeline", Command: "go test ./... | cat"}, {Name: "shell", Command: "echo marker"}}
+	timing := &PhaseTiming{}
+	warmBuildCaches(t.Context(), runner, checks, base, timing, nil)
+	if calls != 0 || timing.Status != "no-applicable-checks" {
+		t.Fatalf("calls=%d timing=%+v", calls, timing)
+	}
+	marker := filepath.Join(filepath.Dir(runner.buildCaches[0].Dir), ".warm-"+base)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker: %v", err)
+	}
+	checks = append(checks, contract.CheckSpec{Name: "build", Command: "go build ./..."})
+	warmBuildCaches(t.Context(), runner, checks, base, timing, nil)
+	if calls != 1 || checks[2].Command != "go build ./..." {
+		t.Fatalf("calls=%d checks=%+v", calls, checks)
+	}
+}
+
+func TestWarmupCompileOnly(t *testing.T) {
+	useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	commitRepoChange(t, repo, "go.mod", "module fixture\ngo 1.26\n")
+	source := "package cli\nimport \"testing\"\nfunc TestBody(t *testing.T) { t.Fatal(\"BODY_RAN\") }\n"
+	commitRepoChange(t, repo, "internal/cli/cli_test.go", source)
+	runner := warmupRunner(t, repo)
+	command := "go test -timeout=15m ./internal/cli"
+	derived, ok := warmupCommand(command)
+	if !ok {
+		t.Fatal("not recognized")
+	}
+	if outcome, err := runner.runCheck(t.Context(), "fixture", derived, time.Minute, nil); err != nil || !outcome.Passed || strings.Contains(outcome.Output, "BODY_RAN") {
+		t.Fatalf("empty selection: %+v %v", outcome, err)
+	}
+	if outcome, err := runner.runCheck(t.Context(), "fixture", command, time.Minute, nil); err == nil || outcome.Passed || outcome.Command != command || !strings.Contains(outcome.Output, "BODY_RAN") {
+		t.Fatalf("candidate: %+v %v", outcome, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "internal/cli/cli_test.go"), []byte(source+"invalid syntax\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := runner.runCheck(t.Context(), "fixture", derived, time.Minute, nil); err == nil || outcome.Passed {
+		t.Fatalf("test source was not compiled: %+v %v", outcome, err)
+	}
+}
+
+func TestWarmupValidationFailureIsAdvisory(t *testing.T) {
+	cfg := &contract.SwarmConfig{DefaultAgent: "worker", Agents: map[string]contract.AgentConfig{"worker": {Harness: "omp"}}}
+	if !sandbox.NativeValidationReusesCache(cfg) {
+		t.Skip("Bubblewrap overlay unavailable; lower-level warm failure regression still runs")
+	}
+	for _, candidateFails := range []bool{false, true} {
+		var control []CheckRunOutcome
+		for _, warmFails := range []bool{false, true} {
+			useCacheRoot(t)
+			repo := setupGitRepoForValidation(t)
+			config := "version: 1\ndefault_agent: worker\ndefault_gate: none\nexecution:\n  mode: isolated\n  backend: native\nlease:\n  duration: 1h\n  max_renewals: 1\nsecurity:\n  require_isolation: true\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  worker:\n    binary: not-used-by-validation\n    harness: omp\n"
+			commitRepoChange(t, repo, ".swarm/config.yaml", config)
+			command := "go test -timeout=15m ./internal/cli"
+			base := commitPolicy(t, repo, "required_checks:\n  - name: fixture\n    command: '"+command+"'\n    timeout: 1m\nprotected_paths: [protected/**]\n")
+			var commands []string
+			report, err := Validate(t.Context(), repo, nil, ValidateOptions{CIMode: true, BaseSHA: base,
+				runCommand: func(_ context.Context, got string, _ time.Duration, stdout, stderr io.Writer) error {
+					commands = append(commands, got)
+					if strings.Contains(got, "-run") {
+						if warmFails {
+							return errors.New("warm failure")
+						}
+						return nil
+					}
+					fmt.Fprint(stdout, "candidate output")
+					if candidateFails {
+						return errors.New("candidate failure")
+					}
+					return nil
+				},
+			})
+			if report == nil || report.Passed == candidateFails {
+				t.Fatalf("report=%+v err=%v", report, err)
+			}
+			if len(commands) != 2 || commands[0] != command+" -run '^$'" || commands[1] != command {
+				t.Fatalf("commands=%v", commands)
+			}
+			if warmFails != strings.Contains(report.Artifact.Body, "failed on the base") {
+				t.Fatal(report.Artifact.Body)
+			}
+			outcomes := append([]CheckRunOutcome(nil), report.CheckOutcomes...)
+			for i := range outcomes {
+				outcomes[i].Duration = 0
+			}
+			if !warmFails {
+				control = outcomes
+			} else if !reflect.DeepEqual(control, outcomes) {
+				t.Fatalf("candidate outcomes changed: %+v vs %+v", control, outcomes)
+			}
+		}
+	}
+}
+
+func TestWarmupCandidateOutcomesUnchanged(t *testing.T) {
+	for _, candidateFails := range []bool{false, true} {
+		var control CheckRunOutcome
+		for _, warmFails := range []bool{false, true} {
+			useCacheRoot(t)
+			repo := setupGitRepoForValidation(t)
+			base := commitRepoChange(t, repo, "version", "base")
+			runner := warmupRunner(t, repo)
+			command := "go test -timeout=15m ./internal/cli"
+			checks := []contract.CheckSpec{{Name: "fixture", Command: command, Timeout: "1m"}}
+			var commands []string
+			runner.runCommand = func(_ context.Context, got string, _ time.Duration, stdout, stderr io.Writer) error {
+				commands = append(commands, got)
+				if strings.Contains(got, "-run") {
+					if warmFails {
+						return errors.New("warm failure")
+					}
+					return nil
+				}
+				fmt.Fprint(stdout, "candidate output")
+				if candidateFails {
+					return errors.New("candidate failure")
+				}
+				return nil
+			}
+			warmBuildCaches(t.Context(), runner, checks, base, &PhaseTiming{}, nil)
+			outcome, err := runner.runCheck(t.Context(), checks[0].Name, checks[0].Command, time.Minute, nil)
+			if outcome.Passed == candidateFails || (err != nil) != candidateFails {
+				t.Fatalf("outcome=%+v err=%v", outcome, err)
+			}
+			if !reflect.DeepEqual(commands, []string{command + " -run '^$'", command}) || checks[0].Command != command {
+				t.Fatalf("commands=%v checks=%+v", commands, checks)
+			}
+			outcome.Duration = 0
+			if !warmFails {
+				control = outcome
+			} else if !reflect.DeepEqual(control, outcome) {
+				t.Fatalf("outcomes differ: %+v vs %+v", control, outcome)
+			}
+		}
 	}
 }

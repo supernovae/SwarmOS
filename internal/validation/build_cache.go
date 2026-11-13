@@ -46,7 +46,60 @@ func validatorDependencyCaches(ctx context.Context, worktree, baseSHA string, po
 	return sandbox.PrepareDependencyCaches(ctx, sandbox.ValidatorDependencyCache, worktree, baseSHA, base, policy)
 }
 
-// warmBuildCaches runs the trusted required checks against a clean checkout
+// warmupCommand accepts only literal, direct Go commands. Unsupported shell
+// syntax is skipped rather than interpreted. Empty test selection still runs
+// package initialization and TestMain.
+func warmupCommand(command string) (string, bool) {
+	if strings.ContainsAny(command, "\n\r") {
+		return "", false
+	}
+	for _, c := range command {
+		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./-=,:+ \t", c) {
+			return "", false
+		}
+	}
+	words := strings.Fields(command)
+	if len(words) < 2 || words[0] != "go" {
+		return "", false
+	}
+	switch words[1] {
+	case "build", "vet":
+		return command, true
+	case "test":
+	default:
+		return "", false
+	}
+	out := []string{"go", "test"}
+	for i := 2; i < len(words); i++ {
+		word := words[i]
+		if !strings.HasPrefix(word, "-") {
+			out = append(out, word)
+			continue
+		}
+		flag, _, equals := strings.Cut(word, "=")
+		switch flag {
+		case "-run", "-bench":
+			if !equals {
+				i++
+				if i >= len(words) || strings.HasPrefix(words[i], "-") {
+					return "", false
+				}
+			}
+		case "-race", "-short", "-v", "-cover", "-x", "-work":
+			out = append(out, word)
+		case "-timeout", "-count", "-parallel", "-cpu", "-tags", "-p", "-covermode", "-coverpkg":
+			if !equals {
+				return "", false
+			}
+			out = append(out, word)
+		default:
+			return "", false
+		}
+	}
+	return strings.Join(out, " ") + " -run '^$'", true
+}
+
+// warmBuildCaches compiles recognized Go checks against a clean checkout
 // of the approved base, once per base. It is the only run that writes the
 // persistent validator caches; candidate runs reuse them read-only or not at
 // all (sandbox.ValidatorCacheMounts). Warm-up is best-effort: it never changes
@@ -81,6 +134,14 @@ func warmBuildCaches(ctx context.Context, r *checkRunner, checks []contract.Chec
 		timing.Duration = time.Since(start)
 		phaseEvent(observe, "warm-up", timing.Status, timing.Duration)
 	}()
+	derived := make([]contract.CheckSpec, 0, len(checks))
+	for _, check := range checks {
+		if command, ok := warmupCommand(check.Command); ok {
+			check.Command = command
+			derived = append(derived, check)
+		}
+	}
+	checks = derived
 	keyDir := ""
 	for _, c := range r.buildCaches {
 		if c.Persistent {

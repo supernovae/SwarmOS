@@ -2,11 +2,16 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/harness"
@@ -261,5 +266,77 @@ func TestCheckCommitIdentity(t *testing.T) {
 	}
 	if err := CheckCommitIdentity(context.Background(), repo); err != nil {
 		t.Fatalf("configured identity = %v", err)
+	}
+}
+
+func TestResolveDefaultFetchCancellation(t *testing.T) {
+	for _, stage := range []string{"fetch", "set-head", "pre-cancel"} {
+		t.Run(stage, func(t *testing.T) {
+			if os.PathSeparator != '/' {
+				t.Skip("POSIX process fixture")
+			}
+			realGit, err := exec.LookPath("git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo := gitfixture.Init(t, "", "-b", "main")
+			gitfixture.Run(t, repo, "remote", "add", "origin", "https://example.invalid/repo")
+			bin := t.TempDir()
+			marker := filepath.Join(bin, "leader")
+			// The shell itself stalls; there are no grandchildren holding Git pipes.
+			script := "#!/bin/sh\ncase \"$*\" in\n"
+			if stage == "set-head" {
+				script += "'fetch '*) exit 0;;\n'remote set-head '*) echo $$ > '" + marker + "'; while :; do :; done;;\n"
+			} else {
+				script += "'fetch '*) echo $$ > '" + marker + "'; while :; do :; done;;\n"
+			}
+			script += "esac\nexec '" + realGit + "' \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if stage == "pre-cancel" {
+				cancel()
+				_, err := ResolveBaseFromContext(ctx, repo, "origin")
+				if err == nil {
+					t.Fatal("ignored cancellation")
+				}
+				return
+			}
+			result := make(chan error, 1)
+			go func() { _, e := ResolveBaseFromContext(ctx, repo, "origin"); result <- e }()
+			var pid int
+			deadline := time.After(3 * time.Second)
+		wait:
+			for {
+				select {
+				case <-deadline:
+					t.Fatal("Git stage never started")
+				default:
+				}
+				if data, e := os.ReadFile(marker); e == nil {
+					pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+					if pid > 0 {
+						break wait
+					}
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			cancel()
+			select {
+			case err := <-result:
+				if err == nil {
+					t.Fatal("ignored cancellation")
+				}
+			case <-time.After(3 * time.Second):
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				t.Fatal("cancellation unbounded")
+			}
+			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("Git leader not reaped: %v", err)
+			}
+		})
 	}
 }

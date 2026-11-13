@@ -55,7 +55,29 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := api.ClientOptions{}
+	options, ciOptions, inventoryOptions := githubClientOptions(token, source)
+	client, err := api.NewRESTClient(options)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize GitHub REST client (set SWARM_GITHUB_TOKEN_COMMAND, SWARM_GITHUB_TOKEN, or GH_TOKEN, or run gh auth login): %w", err)
+	}
+	// Evidence has a separate transport policy so storage redirects never
+	// affect ordinary repository requests or enable verbose signed-URL logging.
+	ciClient, err := api.NewRESTClient(ciOptions)
+	if err != nil {
+		return nil, errors.New("failed to initialize CI evidence client")
+	}
+	inventoryClient, err := newInventoryRESTClient(inventoryOptions)
+	if err != nil {
+		return nil, errors.New("failed to initialize storage inventory client")
+	}
+	return &GitHubTracker{owner: owner, repo: name, client: client, ciClient: ciClient, inventoryClient: inventoryClient}, nil
+}
+
+const githubRequestTimeout = time.Minute
+
+func githubClientOptions(token, source string) (api.ClientOptions, api.ClientOptions, api.ClientOptions) {
+	options := api.ClientOptions{Timeout: githubRequestTimeout}
 	options.Transport = githubRetryTransport{base: http.DefaultTransport}
 	if token != "" && (source == "SWARM_GITHUB_TOKEN" || source == gitcredential.TokenCommandEnv) {
 		host := strings.TrimSpace(os.Getenv("GH_HOST"))
@@ -65,26 +87,12 @@ func NewGitHubTracker(repoOverride string) (*GitHubTracker, error) {
 		options.Host = host
 		options.AuthToken = token
 	}
-	client, err := api.NewRESTClient(options)
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize GitHub REST client (set SWARM_GITHUB_TOKEN_COMMAND, SWARM_GITHUB_TOKEN, or GH_TOKEN, or run gh auth login): %w", err)
-	}
-	// Evidence has a separate transport policy so storage redirects never
-	// affect ordinary repository requests or enable verbose signed-URL logging.
-	options.CheckRedirect = ciRedirect
-	options.LogIgnoreEnv = true
-	ciClient, err := api.NewRESTClient(options)
-	if err != nil {
-		return nil, errors.New("failed to initialize CI evidence client")
-	}
-	inventoryOptions := options
+	ciOptions := options
+	ciOptions.CheckRedirect = ciRedirect
+	ciOptions.LogIgnoreEnv = true
+	inventoryOptions := ciOptions
 	inventoryOptions.Transport = nil
-	inventoryClient, err := newInventoryRESTClient(inventoryOptions)
-	if err != nil {
-		return nil, errors.New("failed to initialize storage inventory client")
-	}
-	return &GitHubTracker{owner: owner, repo: name, client: client, ciClient: ciClient, inventoryClient: inventoryClient}, nil
+	return options, ciOptions, inventoryOptions
 }
 
 func NewGitHubTrackerWithClient(owner, repo string, client *api.RESTClient) *GitHubTracker {

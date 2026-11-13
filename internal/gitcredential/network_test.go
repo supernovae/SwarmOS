@@ -22,6 +22,9 @@ import (
 )
 
 func networkBudgets(t *testing.T) {
+	oldS := shortReadTimeout
+	shortReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { shortReadTimeout = oldS })
 	oldN, oldR, oldI := networkTimeout, reapGrace, ioGrace
 	networkTimeout, reapGrace, ioGrace = 300*time.Millisecond, time.Second, 300*time.Millisecond
 	t.Cleanup(func() { networkTimeout, reapGrace, ioGrace = oldN, oldR, oldI })
@@ -839,5 +842,93 @@ func TestSharedRetryExhaustionRedactsCommand(t *testing.T) {
 	var exhausted *RetryExhaustedError
 	if !errors.As(err, &exhausted) || exhausted.Attempts != 1 || !errors.Is(err, cause) || strings.Contains(err.Error(), "retry-fixture-secret") || strings.Contains(err.Error(), basicAuth("retry-fixture-secret")) || !strings.Contains(err.Error(), "[REDACTED]") {
 		t.Fatal(err)
+	}
+}
+
+func TestNetworkOperationTimeout(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	for _, tc := range []struct {
+		args  []string
+		short bool
+	}{
+		{[]string{"ls-remote", "origin"}, true},
+		{[]string{"-c", "foo.bar=baz", "ls-remote", "origin"}, true},
+		{[]string{"fetch", "--no-write-fetch-head", "origin", sha}, true},
+		{[]string{"fetch", "--no-tags", "--depth=1", "origin", sha}, true},
+		{[]string{"fetch", "origin", "main"}, false},
+		{[]string{"fetch", "origin", sha, sha}, false},
+		{[]string{"fetch", "--unknown", "origin", sha}, false},
+		{[]string{"push", "origin", sha}, false},
+	} {
+		want := networkTimeout
+		if tc.short {
+			want = shortReadTimeout
+		}
+		if got := operationTimeout(tc.args); got != want {
+			t.Errorf("%v: %s != %s", tc.args, got, want)
+		}
+	}
+}
+
+func TestNetworkShortReadTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("loopback unavailable: %v", err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, e := listener.Accept()
+		if e == nil {
+			time.AfterFunc(700*time.Millisecond, func() { _ = c.Close() })
+			accepted <- c
+		}
+	}()
+	old := shortReadTimeout
+	shortReadTimeout = 200 * time.Millisecond
+	defer func() { shortReadTimeout = old }()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err = Network(ctx, t.TempDir(), true, "ls-remote", "http://"+listener.Addr().String()+"/repo")
+	select {
+	case c := <-accepted:
+		c.Close()
+	default:
+		t.Fatal("Git never connected")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("stall bound: %s, %v", time.Since(start), err)
+	}
+	if reason := RetryReason(RetryObservation{Operation: "ls-remote", Err: err}); reason != "" {
+		t.Fatalf("interrupted operation unexpectedly retryable: %s", reason)
+	}
+}
+
+func TestNetworkLowSpeedConfig(t *testing.T) {
+	old := lastRun
+	defer func() { lastRun = old }()
+	var run *networkRun
+	lastRun = func(r *networkRun) { run = r }
+	_, _ = Network(context.Background(), t.TempDir(), true, "ls-remote", t.TempDir())
+	if run == nil {
+		t.Fatal("no Git run")
+	}
+	assertSettled(t, run)
+	for key, want := range map[string]string{"http.lowSpeedLimit": "1", "http.lowSpeedTime": "60"} {
+		found := false
+		for _, entry := range run.cmd.Env {
+			if strings.HasPrefix(entry, "GIT_CONFIG_KEY_") && strings.HasSuffix(entry, "="+key) {
+				idx := strings.TrimSuffix(strings.TrimPrefix(entry, "GIT_CONFIG_KEY_"), "="+key)
+				for _, v := range run.cmd.Env {
+					if v == "GIT_CONFIG_VALUE_"+idx+"="+want {
+						found = true
+					}
+				}
+			}
+		}
+		if !found {
+			t.Errorf("missing %s=%s", key, want)
+		}
 	}
 }

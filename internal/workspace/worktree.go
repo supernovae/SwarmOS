@@ -254,56 +254,68 @@ func ResolveBase(repoRoot string) (string, error) {
 // branch as the authority. Only a missing origin falls back to local HEAD; a
 // missing named upstream remote is an error.
 func ResolveBaseFrom(repoRoot, upstreamRemote string) (string, error) {
+	return ResolveBaseFromContext(context.Background(), repoRoot, upstreamRemote)
+}
+
+// ResolveBaseFromContext preserves caller cancellation during discovery.
+func ResolveBaseFromContext(ctx context.Context, repoRoot, upstreamRemote string) (string, error) {
 	upstreamRemote = UpstreamRemoteOrDefault(upstreamRemote)
 	if err := ValidateRemoteName(upstreamRemote); err != nil {
 		return "", err
 	}
-	if _, err := gitOutput(repoRoot, "rev-parse", "--show-toplevel"); err != nil {
+	if _, err := gitOutputContext(ctx, repoRoot, "rev-parse", "--show-toplevel"); err != nil {
 		return "", fmt.Errorf("resolve repository root: %w", err)
 	}
-	if _, err := gitOutput(repoRoot, "remote", "get-url", upstreamRemote); err != nil {
+	if _, err := gitOutputContext(ctx, repoRoot, "remote", "get-url", upstreamRemote); err != nil {
 		if !errors.Is(err, errGitFailed) {
 			return "", err
 		}
 		if upstreamRemote != DefaultUpstreamRemote {
 			return "", MissingUpstreamRemoteError(upstreamRemote)
 		}
-		return resolveCommit(repoRoot, "HEAD")
+		out, err := gitOutputContext(ctx, repoRoot, "rev-parse", "--verify", "HEAD^{commit}")
+		return strings.TrimSpace(out), err
 	}
-	return resolveAdvertisedDefault(repoRoot, upstreamRemote)
+	return resolveAdvertisedDefault(ctx, repoRoot, upstreamRemote)
 }
 
 // ResolveTrustedDefault resolves the upstream remote's advertised default
 // branch commit with no fallback: a missing remote, even origin, is an error.
 func ResolveTrustedDefault(repoRoot, upstreamRemote string) (string, error) {
+	return ResolveTrustedDefaultContext(context.Background(), repoRoot, upstreamRemote)
+}
+
+// ResolveTrustedDefaultContext preserves caller cancellation during discovery.
+func ResolveTrustedDefaultContext(ctx context.Context, repoRoot, upstreamRemote string) (string, error) {
 	upstreamRemote = UpstreamRemoteOrDefault(upstreamRemote)
 	if err := ValidateRemoteName(upstreamRemote); err != nil {
 		return "", err
 	}
-	if _, err := gitOutput(repoRoot, "rev-parse", "--show-toplevel"); err != nil {
+	if _, err := gitOutputContext(ctx, repoRoot, "rev-parse", "--show-toplevel"); err != nil {
 		return "", fmt.Errorf("resolve repository root: %w", err)
 	}
-	if _, err := gitOutput(repoRoot, "remote", "get-url", upstreamRemote); err != nil {
+	if _, err := gitOutputContext(ctx, repoRoot, "remote", "get-url", upstreamRemote); err != nil {
 		if !errors.Is(err, errGitFailed) {
 			return "", err
 		}
 		return "", MissingUpstreamRemoteError(upstreamRemote)
 	}
-	return resolveAdvertisedDefault(repoRoot, upstreamRemote)
+	return resolveAdvertisedDefault(ctx, repoRoot, upstreamRemote)
 }
 
-func resolveAdvertisedDefault(repoRoot, upstreamRemote string) (string, error) {
-	if _, err := gitOutput(repoRoot, "fetch", "--no-write-fetch-head", "--prune", upstreamRemote); err != nil {
+func resolveAdvertisedDefault(ctx context.Context, repoRoot, upstreamRemote string) (string, error) {
+	if _, err := gitOutputContext(ctx, repoRoot, "fetch", "--no-write-fetch-head", "--prune", upstreamRemote); err != nil {
 		return "", fmt.Errorf("fetch %s before resolving base: %w", upstreamRemote, err)
 	}
-	if _, err := gitOutput(repoRoot, "remote", "set-head", upstreamRemote, "--auto"); err != nil {
+	if _, err := gitOutputContext(ctx, repoRoot, "remote", "set-head", upstreamRemote, "--auto"); err != nil {
 		return "", fmt.Errorf("discover advertised %s default branch: %w", upstreamRemote, err)
 	}
-	out, err := gitOutput(repoRoot, "symbolic-ref", "--quiet", "refs/remotes/"+upstreamRemote+"/HEAD")
+	out, err := gitOutputContext(ctx, repoRoot, "symbolic-ref", "--quiet", "refs/remotes/"+upstreamRemote+"/HEAD")
 	if err != nil {
 		return "", fmt.Errorf("%s has no advertised default branch: %w", upstreamRemote, err)
 	}
-	return resolveCommit(repoRoot, strings.TrimSpace(out))
+	out, err = gitOutputContext(ctx, repoRoot, "rev-parse", "--verify", strings.TrimSpace(out)+"^{commit}")
+	return strings.TrimSpace(out), err
 }
 
 // MissingUpstreamRemoteError names a selected upstream remote that is not

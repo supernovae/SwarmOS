@@ -1495,6 +1495,11 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 				if tc.stop {
 					want = 0
 				}
+				if acceptanceRepair {
+					// The last allowed round is already decided by the unmet
+					// criteria, so its required checks are skipped (#556).
+					want = 1
+				}
 				if got := strings.Count(string(data), "x\n"); got != want {
 					t.Errorf("check %s ran %d times, want %d", name, got, want)
 				}
@@ -1535,8 +1540,11 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 					}
 				}
 			} else if acceptanceRepair {
-				if !errors.Is(err, ErrValidationRepairExhausted) || errors.Is(err, validation.ErrRequiredCheckFailed) || !res.ValidationPassed || res.State.ValidationRepairCount != 1 {
+				if !errors.Is(err, ErrValidationRepairExhausted) || errors.Is(err, validation.ErrRequiredCheckFailed) || res.ValidationPassed || res.State.ValidationRepairCount != 1 || !strings.Contains(err.Error(), "required checks were not run") {
 					t.Fatalf("acceptance repair: %v", err)
+				}
+				if res.Validation == nil || res.Validation.Artifact.Metadata[validation.ChecksSkippedKey] != "skipped" {
+					t.Fatal("final round did not record skipped checks")
 				}
 			} else if err != nil || !res.ValidationPassed {
 				t.Fatalf("normal validation: %v", err)

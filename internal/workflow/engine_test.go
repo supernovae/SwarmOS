@@ -1294,7 +1294,9 @@ func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
 			}
 			result, err := e.ExecuteWork(ctx, WorkOptions{RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Phase: "all", Headless: true})
 			wantLaunches := 2
-			if report == "" || report == "missing-output" || report == "runner-error" {
+			// A missing REVIEW.md gets one retry (#521); an empty report or a
+			// runner error does not.
+			if report == "" || report == "runner-error" {
 				wantLaunches = 1
 			}
 			if launches != wantLaunches {
@@ -1333,6 +1335,71 @@ func TestMalformedAgentReviewIsFailedRun(t *testing.T) {
 
 // A reviewer that invents a finding key gets one rewrite with the rejection
 // reason; the rewritten report is held to the same strict format.
+// Issue #521: a reviewer that leaves its review only in its final message gets
+// one retry that names the output file; the retried review is validated as usual.
+func TestMissingAgentReviewGetsOneRetry(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		missing int
+		ok      bool
+	}{{"repaired", 1, true}, {"still missing", 2, false}} {
+		t.Run(tt.name, func(t *testing.T) {
+			root, e, tr := setupProjectPlanTestRepo(t)
+			ctx := context.Background()
+			wu := &contract.WorkUnit{Objective: "Review", Constraints: []string{"Preserve gates"}, Acceptance: []string{"Exact review"}, Workflow: "feature", Gate: contract.GateAgent}
+			issue, err := tr.CreateIssue(ctx, "Review", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = e.LeaseManager.ApproveTask(ctx, issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			var prompts []string
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "reviewer" {
+						prompts = append(prompts, req.TaskPrompt)
+						if len(prompts) <= tt.missing {
+							err = os.Remove(filepath.Join(req.WorktreePath, ".swarm/active-output/REVIEW.md"))
+						}
+					}
+					return result, err
+				}}, nil
+			}
+			_, err = e.ExecuteWork(ctx, WorkOptions{RepoRoot: root, IssueNumber: issue.Number, AgentName: "mock", Phase: "all", Headless: true})
+			if len(prompts) != 2 {
+				t.Fatalf("reviewer runs = %d, want exactly one retry", len(prompts))
+			}
+			if !strings.Contains(prompts[0], ".swarm/active/REVIEW.md with the workspace write tool") {
+				t.Fatalf("first task does not name the output file:\n%s", prompts[0])
+			}
+			if !strings.Contains(prompts[1], "finished without writing .swarm/active/REVIEW.md") {
+				t.Fatalf("retry does not explain the missing file:\n%s", prompts[1])
+			}
+			st, stErr := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+			if stErr != nil {
+				t.Fatal(stErr)
+			}
+			recorded := 0
+			for _, a := range st.Artifacts {
+				if a.Type == contract.ArtifactReview {
+					recorded++
+				}
+			}
+			if tt.ok {
+				if (err != nil && errors.Is(err, sandbox.ErrMissingRoleOutput)) || recorded != 1 {
+					t.Fatalf("err=%v recorded=%d", err, recorded)
+				}
+				return
+			}
+			if !errors.Is(err, sandbox.ErrMissingRoleOutput) || recorded != 0 || errors.Is(err, ErrPlanReviewRejected) {
+				t.Fatalf("err=%v recorded=%d", err, recorded)
+			}
+		})
+	}
+}
+
 func TestMalformedAgentReviewGetsOneFormatRepair(t *testing.T) {
 	invented := "VERDICT: APPROVED\n" + contract.PlanFindingsStart + "\n" + `{"version":1,"findings":[{"id":"F1","blocking":false,"disposition":"open","note":"Also cover the timeout path"}]}` + "\n" + contract.PlanFindingsEnd + "\n"
 	nonBlocking := "VERDICT: APPROVED\n" + contract.PlanFindingsStart + "\n" + `{"version":1,"findings":[{"id":"F1","blocking":false,"disposition":"open","criterion":"Test readability","check":"Name the table cases after the scenario"}]}` + "\n" + contract.PlanFindingsEnd + "\n"

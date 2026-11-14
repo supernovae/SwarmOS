@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -625,4 +626,83 @@ func TestArchiveCutoffNormalizationKeepsIdentityExact(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGitLoadArchiveAdmission(t *testing.T) {
+	bothLayouts(t, func(t *testing.T, layout RefLayout) {
+		f, m := archiveFixture(t, layout)
+		s := f.store
+		ctx := context.Background()
+		if _, _, err := s.Load(ctx, 363); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Archive(ctx, m, func(context.Context) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		var archived *ArchivedError
+		if _, _, err := s.Load(ctx, 363); !errors.As(err, &archived) || archived.Issue != 363 || err.Error() != "issue #363 is archived; run swarm repo archive restore 363" {
+			t.Fatalf("%v", err)
+		}
+		// A writer's mutable copy must never alias admission's cached map.
+		idx, _, err := s.archiveIndex(ctx, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delete(idx.Entries, 363)
+		if _, _, err := s.Load(ctx, 363); !errors.As(err, &archived) {
+			t.Fatalf("mutable index escaped: %v", err)
+		}
+		// Unrelated tombstones permit a missing issue to retain ErrNotFound.
+		if _, _, err := s.Load(ctx, 364); !errors.Is(err, ErrNotFound) {
+			t.Fatal(err)
+		}
+		if _, err := s.RestoreArchive(ctx, 363, "octo/swarm", true); err != nil {
+			t.Fatal(err)
+		}
+		if _, rev, err := s.Load(ctx, 363); err != nil || rev != m.StateTip {
+			t.Fatalf("%s %v", rev, err)
+		}
+	})
+}
+
+func TestGitLoadArchiveCache(t *testing.T) {
+	bothLayouts(t, func(t *testing.T, layout RefLayout) {
+		f := newLedgerFixture(t, layout)
+		s := f.store(f.clone)
+		ctx := context.Background()
+		if _, err := s.CompareAndSwap(ctx, 1, "", []byte("state")); err != nil {
+			t.Fatal(err)
+		}
+		// Concurrent cold-cache publication and subsequent reuse share immutable maps.
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, _, err := s.Load(ctx, 1); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+		tip := f.git(f.remote, "rev-parse", layout.ArchiveRef())
+		if s.admissionTip != tip || s.admissionIndex == nil {
+			t.Fatal("cache not populated")
+		}
+		next, err := s.indexCommit(ctx, freshArchiveIndex(), tip)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.git(f.clone, "push", "origin", next+":"+layout.ArchiveRef())
+		if _, _, err := s.Load(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+		if s.admissionTip != next {
+			t.Fatal("cache did not replace old tip")
+		}
+		f.git(f.remote, "update-ref", "-d", layout.ArchiveRef())
+		if _, _, err := s.Load(ctx, 2); !errors.Is(err, ErrNotFound) {
+			t.Fatal(err)
+		}
+	})
 }

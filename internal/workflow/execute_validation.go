@@ -86,7 +86,10 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 			return false, r.retryCandidateError(guardErr, testerBody)
 		}
 	}
-	if outcome := parseTesterOutcome(testerBody); outcome == testerFail || outcome == testerBlocked {
+	outcome := parseTesterOutcome(testerBody)
+	negative := outcome == testerFail || outcome == testerBlocked
+	direct := !r.forkMode && !r.e.LeaseManager.HasWorkerGateway() && r.opts.PRNumber == 0 && r.st.PRNumber == 0 && r.st.PRRevision == nil
+	if negative && !direct {
 		command := fmt.Sprintf("swarm issue work %d --phase implement", r.opts.IssueNumber)
 		if r.opts.PRNumber != 0 {
 			command = fmt.Sprintf("swarm pr work %d --phase implement", r.opts.PRNumber)
@@ -94,7 +97,20 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 		return false, fmt.Errorf("tester declared %s in .swarm/active/VALIDATION.md; complete implementation and rerun with %s", outcome, command)
 	}
 	var report *validation.ValidationReport
-	if skip, skipErr := r.skipChecksForUnmetAcceptance(round, reuseChecks, testerBody); skipErr != nil {
+	if negative && direct {
+		head, headErr := gitcredential.Output(r.ctx, r.wtPath, "rev-parse", "--verify", "HEAD^{commit}")
+		if headErr != nil {
+			return false, headErr
+		}
+		report = validation.SkippedChecksReport(r.opts.IssueNumber, r.st.BaseSHA, strings.TrimSpace(string(head)), "tester declared "+string(outcome)+" in .swarm/active/VALIDATION.md")
+		report.Artifact.Metadata[testerNegativeKey] = string(outcome)
+		findings := testerBody
+		if len(findings) > validation.MaxAcceptanceEvidenceBytes {
+			findings = findings[:validation.MaxAcceptanceEvidenceBytes]
+		}
+		report.Artifact.Metadata[testerFindingsKey] = findings
+		err = fmt.Errorf("%w: tester declared %s in .swarm/active/VALIDATION.md", errAcceptanceUnmet, outcome)
+	} else if skip, skipErr := r.skipChecksForUnmetAcceptance(round, reuseChecks, testerBody); skipErr != nil {
 		return false, skipErr
 	} else if skip != nil {
 		report, err = skip, fmt.Errorf("%w: required checks were not run because the tester recorded unmet acceptance criteria and no repair rounds remain", errAcceptanceUnmet)
@@ -262,6 +278,9 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 		// Unmet criteria are targets even when checks failed too, so progress
 		// and the final message name everything the round had to fix.
 		failing := repairTargets(r.res.Validation, r.acceptanceRepair())
+		if a := testerFailure(r.st); a != nil {
+			failing = append(failing, "tester verdict: "+a.Metadata[testerNegativeKey])
+		}
 		if round > r.repairLimit {
 			if r.repairLimit > 0 || errors.Is(err, errAcceptanceUnmet) {
 				detail := repairOutcome(failing, previous)
@@ -404,4 +423,30 @@ func retryChangedPaths(status string) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+const testerNegativeKey = "workflow_tester_negative"
+const testerFindingsKey = "workflow_tester_findings"
+
+// Only coordinator-recorded evidence for the current candidate may drive repair.
+// Prose and acceptance mappings cannot supply this scheduling marker.
+func testerFailure(st *lease.IssueState) *contract.Artifact {
+	if st == nil || st.ForkRepo != "" || st.PRNumber != 0 || st.PRRevision != nil || st.Lease.ClaimID == "" || st.Lease.Owner == "" {
+		return nil
+	}
+	for i := len(st.Artifacts) - 1; i >= 0; i-- {
+		a := &st.Artifacts[i]
+		if a.Type != contract.ArtifactValidation {
+			continue
+		}
+		md := a.Metadata
+		if a.Verdict != "FAIL" || md["validation_trusted_origin"] != "coordinator" || md["validation_trusted_owner"] != st.Lease.Owner || md["validation_trusted_claim"] != st.Lease.ClaimID || md["head_sha"] == "" || md["head_sha"] != st.HeadSHA || md["base_sha"] != st.BaseSHA {
+			return nil
+		}
+		if md[testerNegativeKey] == "FAIL" || md[testerNegativeKey] == "BLOCKED" {
+			return a
+		}
+		return nil
+	}
+	return nil
 }

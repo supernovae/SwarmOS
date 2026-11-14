@@ -1993,3 +1993,49 @@ func TestCLIPlanReviewRejectsMissingFindings(t *testing.T) {
 		})
 	}
 }
+
+type testerNegativeRunner struct{ agent.Runner }
+
+func (r *testerNegativeRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	result, err := r.Runner.Run(ctx, req)
+	if err == nil && req.Role == "tester" {
+		err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte("VERDICT: FAIL\nmissing required behavior"), 0600)
+	}
+	return result, err
+}
+
+func TestIssueWorkTesterFailureNextAction(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		t.Run(strconv.FormatBool(asJSON), func(t *testing.T) {
+			f, n, _, _, run := recoveryCommandFixture(t, "local", "agent", 0)
+			delegate := f.resolverRunner
+			f.resolverRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+				r, err := delegate(name, cfg, local)
+				return &testerNegativeRunner{Runner: r}, err
+			}
+			args := []string{"issue", "work", strconv.Itoa(n), "--agent", "mock", "--progress=false"}
+			if asJSON {
+				args = append(args, "--json")
+			}
+			out, err := run(args...)
+			if !errors.Is(err, workflow.ErrValidationRepairExhausted) {
+				t.Fatalf("typed error: %v %s", err, out)
+			}
+			action := nextActionOf(err)
+			want := "issue work " + strconv.Itoa(n) + " --phase implement"
+			if action == nil || !strings.HasSuffix(strings.Join(action.Argv, " "), want) {
+				t.Fatalf("action %+v", action)
+			}
+			if asJSON {
+				var doc map[string]any
+				if err := json.Unmarshal([]byte(out), &doc); err != nil {
+					t.Fatal(err, out)
+				}
+				raw, _ := json.Marshal(doc["next_action"])
+				if !strings.Contains(string(raw), "implement") {
+					t.Fatal(string(raw))
+				}
+			}
+		})
+	}
+}

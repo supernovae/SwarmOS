@@ -1483,7 +1483,7 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 			}
 			acceptanceRepair := tc.name == "331" || tc.name == "legacy"
 			wantRoles := 1
-			if acceptanceRepair {
+			if acceptanceRepair || tc.stop {
 				wantRoles = 2
 			}
 			if testers != wantRoles || developers != wantRoles {
@@ -1508,8 +1508,8 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 				if err == nil || errors.Is(err, validation.ErrRequiredCheckFailed) || !strings.Contains(err.Error(), "VALIDATION.md") || !strings.Contains(err.Error(), "--phase implement") {
 					t.Fatalf("stop error: %v", err)
 				}
-				if res.ValidationPassed || res.Validation != nil {
-					t.Fatal("fabricated trusted report")
+				if res.ValidationPassed || res.Validation == nil || res.Validation.Passed {
+					t.Fatal("missing failed trusted report")
 				}
 				out, diffErr := gitfixture.Command(t, "", "-C", res.WorktreePath, "diff", res.State.BaseSHA, "--", ".swarm/project.md").CombinedOutput()
 				if diffErr != nil || !strings.Contains(string(out), "+\n") {
@@ -1531,7 +1531,7 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 				if retryErr == nil || retry == nil || retry.ValidationPassed {
 					t.Fatalf("retry accepted: %v", retryErr)
 				}
-				if developers != 1 || testers != 2 {
+				if developers != 2 || testers != 3 {
 					t.Fatalf("retry role calls %d/%d", developers, testers)
 				}
 				for _, name := range []string{"one", "two"} {
@@ -2728,5 +2728,133 @@ func TestRepairTargetsIncludeUnmetAcceptanceWithFailingChecks(t *testing.T) {
 	}
 	if got := repairOutcome([]string{"acceptance 3: other"}, first); got != "new failures appeared since the previous round" {
 		t.Fatal(got)
+	}
+}
+
+func TestTesterFailureRepairExhausted(t *testing.T) {
+	for _, verdict := range []string{"FAIL", "BLOCKED"} {
+		t.Run(verdict, func(t *testing.T) {
+			e, n := repairFixture(t, "0")
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "tester" {
+						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte("VERDICT: "+verdict+"\nunique tester findings"), 0600)
+					}
+					return result, err
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: n, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			res, err := e.ExecuteWork(t.Context(), opts)
+			if !errors.Is(err, ErrValidationRepairExhausted) {
+				t.Fatalf("expected typed exhaustion, got %v", err)
+			}
+			if res.Validation == nil || res.ValidationPassed || res.Validation.HeadSHA != res.State.HeadSHA {
+				t.Fatal("missing bound failure")
+			}
+			if a := testerFailure(res.State); a == nil || !strings.Contains(a.Metadata[testerFindingsKey], "unique tester findings") || validation.AcceptanceSnapshotFromMetadata(a.Metadata).State != "missing" {
+				t.Fatal("failure findings or original snapshot lost")
+			}
+			opts.ClaimID = res.State.Lease.ClaimID
+			opts.IssueContinuation = true
+			if _, err := e.ExecuteWork(t.Context(), opts); !errors.Is(err, ErrValidationRepairExhausted) {
+				t.Fatalf("rerun reset budget: %v", err)
+			}
+			opts.Phase = "implement"
+			opts.IssueContinuation = false
+			if _, err := e.ExecuteWork(t.Context(), opts); !errors.Is(err, ErrValidationRepairExhausted) {
+				t.Fatalf("explicit recovery: %v", err)
+			}
+		})
+	}
+}
+
+func TestTesterFailureRepairResume(t *testing.T) {
+	for _, body := range []string{"VERDICT: FAIL\nunique findings", "VERDICT: BLOCKED\nunique findings", "VERDICT: FAIL\nunique findings\n" + validation.AcceptanceEvidenceStart + "\n" + `{"version":1,"criteria":[{"index":1,"criterion":"Repair failures","status":"met","evidence":"review"}]}` + "\n" + validation.AcceptanceEvidenceEnd, "VERDICT: FAIL\nunique findings\n" + validation.AcceptanceEvidenceStart} {
+		t.Run(body[:13], func(t *testing.T) {
+			installFixableGo(t)
+			e, n := repairFixture(t, "3")
+			developers, testers := 0, 0
+			interrupted := errors.New("interrupt repair")
+			var order []string
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					order = append(order, req.Role)
+					if req.Role == "developer" {
+						developers++
+						if developers > 1 {
+							brief, err := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm/active/REPAIR.md"))
+							if err != nil || !strings.Contains(string(brief), "unique findings") || !strings.Contains(req.TaskPrompt, "REPAIR.md") {
+								t.Fatalf("missing repair evidence: %s %v", brief, err)
+							}
+							if developers == 2 {
+								return nil, interrupted
+							}
+							if err := writeFile("fixed.txt", "fixed")(req.WorktreePath); err != nil {
+								return nil, err
+							}
+						}
+					}
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "tester" {
+						testers++
+						text := body
+						if testers > 1 {
+							text = "VERDICT: PASS"
+						}
+						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte(text), 0600)
+					}
+					return result, err
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: n, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			res, err := e.ExecuteWork(t.Context(), opts)
+			if !errors.Is(err, interrupted) || res == nil {
+				t.Fatalf("expected interrupted repair: %v", err)
+			}
+			if testers != 1 || res.ValidationPassed || testerFailure(res.State) == nil {
+				t.Fatal("failure not retained")
+			}
+			before := len(order)
+			opts.IssueContinuation = true
+			opts.ClaimID = res.State.Lease.ClaimID
+			res, err = e.ExecuteWork(t.Context(), opts)
+			if err != nil || !res.ValidationPassed {
+				t.Fatalf("resume: %v", err)
+			}
+			if order[before] != "developer" || testers != 2 || developers != 3 {
+				t.Fatalf("role order: %v", order)
+			}
+			if res.State.ValidationRepairCount != 2 {
+				t.Fatalf("repair count %d", res.State.ValidationRepairCount)
+			}
+		})
+	}
+}
+
+func TestTesterFailureArtifactNotReused(t *testing.T) {
+	st := &lease.IssueState{HeadSHA: "head", BaseSHA: "base"}
+	st.Lease.Owner = "owner"
+	st.Lease.ClaimID = "claim"
+	a := contract.Artifact{Type: contract.ArtifactValidation, Verdict: "FAIL", Body: "VERDICT: FAIL", Metadata: map[string]string{"head_sha": "head", "base_sha": "base", "validation_trusted_origin": "coordinator", "validation_trusted_owner": "owner", "validation_trusted_claim": "claim"}}
+	st.Artifacts = []contract.Artifact{a}
+	if testerFailure(st) != nil {
+		t.Fatal("prose created a repair marker")
+	}
+	a.Metadata[testerNegativeKey] = "FAIL"
+	if testerFailure(st) == nil {
+		t.Fatal("missing current failure")
+	}
+	for _, key := range []string{"head_sha", "base_sha", "validation_trusted_owner", "validation_trusted_claim", "validation_trusted_origin"} {
+		old := a.Metadata[key]
+		a.Metadata[key] = "stale"
+		if testerFailure(st) != nil {
+			t.Fatalf("accepted stale %s", key)
+		}
+		a.Metadata[key] = old
+	}
+	st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactValidation, Verdict: "PASS"})
+	if testerFailure(st) != nil {
+		t.Fatal("older failure superseded latest report")
 	}
 }

@@ -102,6 +102,8 @@ var claimFenceInventory = map[string]string{
 	"Release":                        "",
 	"Renew":                          "",
 	"RequireGate":                    "",
+	"RefundRetryReservation":         "",
+	"CompleteRetryReservation":       "",
 	"ReserveValidationRepair":        "",
 	"ResetPlanReplansAfterStage":     "",
 	"ResolveCleanupWorktrees":        "read-only admission, observation or local binding; no durable state write",
@@ -136,6 +138,14 @@ func claimFenceWrites() []claimFenceWrite {
 		return contract.Artifact{Type: kind, Producer: "mock", Body: "report", Summary: "report", Verdict: "PASS"}
 	}
 	return []claimFenceWrite{
+		{"RefundRetryReservation", func(ctx context.Context, f *claimFenceFixture) error {
+			_, err := f.m.RefundRetryReservation(ctx, f.n, fenceOwner, "reservation")
+			return err
+		}},
+		{"CompleteRetryReservation", func(ctx context.Context, f *claimFenceFixture) error {
+			_, err := f.m.CompleteRetryReservation(ctx, f.n, fenceOwner, "reservation")
+			return err
+		}},
 		{"RecordGapAcknowledgment", func(ctx context.Context, f *claimFenceFixture) error {
 			_, err := f.m.RecordGapAcknowledgment(ctx, f.n, fenceOwner, f.head, []int{1})
 			return err

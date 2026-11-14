@@ -276,6 +276,8 @@ type IssueState struct {
 	PlanReservation        *PlanDraftReservation           `json:"plan_reservation,omitempty"`
 	CompletePlan           *PlanPair                       `json:"complete_plan,omitempty"`
 	ValidationRepairCount  int                             `json:"validation_repair_count,omitempty"`
+	PlanRetryReservation   *RetryReservation               `json:"plan_retry_reservation,omitempty"`
+	RepairRetryReservation *RetryReservation               `json:"repair_retry_reservation,omitempty"`
 	ValidationRepairKey    string                          `json:"validation_repair_key,omitempty"`
 	PendingPlanReview      *PlanRejection                  `json:"pending_plan_review,omitempty"`
 	NextPhaseReason        string                          `json:"next_phase_reason,omitempty"`
@@ -2196,6 +2198,12 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			}
 			st.Artifacts = kept
 		}
+		if art.Type == contract.ArtifactImplementation {
+			st.RepairRetryReservation = nil
+		}
+		if art.Type == contract.ArtifactDesign || art.Type == contract.ArtifactTestPlan {
+			st.PlanRetryReservation = nil
+		}
 		if art.Type == contract.ArtifactValidation {
 			return m.insertValidationArtifact(st, n, art, trusted)
 		}
@@ -3787,6 +3795,11 @@ func (m *Manager) ReserveValidationRepair(ctx context.Context, n int, owner stri
 		}
 		st.ValidationRepairKey = key
 		st.ValidationRepairCount++
+		reservation, err := newRetryReservation(st)
+		if err != nil {
+			return err
+		}
+		st.RepairRetryReservation = reservation
 		return nil
 	})
 }

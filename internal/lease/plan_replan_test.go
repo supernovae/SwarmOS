@@ -961,3 +961,207 @@ func TestStructuredHistorySurvivesBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestRetryReservationRefund(t *testing.T) {
+	for _, kind := range []string{"plan", "repair"} {
+		for _, scenario := range []string{"refund", "complete", "wrong_id", "missing_id", "wrong_owner", "stale_claim", "reclaim", "expired", "binding", "artifact", "old_state", "concurrent", "replay"} {
+			t.Run(kind+"/"+scenario, func(t *testing.T) {
+				m, n, _ := rejectedReplanFixture(t)
+				ctx := t.Context()
+				reserve := func() (*IssueState, error) {
+					if kind == "plan" {
+						return m.UpdatePhase(ctx, n, "local-dev", "plan", "active")
+					}
+					return m.ReserveValidationRepair(ctx, n, "local-dev")
+				}
+				reservation := func(st *IssueState) *RetryReservation {
+					if kind == "plan" {
+						return st.PlanRetryReservation
+					}
+					return st.RepairRetryReservation
+				}
+				count := func(st *IssueState) int {
+					if kind == "plan" {
+						return st.PlanReplanCount
+					}
+					return st.ValidationRepairCount
+				}
+				st, err := reserve()
+				if err != nil {
+					t.Fatal(err)
+				}
+				id := reservation(st).ID
+				owner := "local-dev"
+				switch scenario {
+				case "wrong_id":
+					id = "wrong"
+				case "missing_id":
+					id = ""
+				case "wrong_owner":
+					owner = "another"
+				case "stale_claim":
+					m.BindClaim(n, "stale")
+				case "reclaim":
+					if _, err = m.Release(ctx, n, owner, "reclaim"); err != nil {
+						t.Fatal(err)
+					}
+					next, acquireErr := m.Acquire(ctx, n, owner, "mock", "all", time.Hour, 1)
+					if acquireErr != nil {
+						t.Fatal(acquireErr)
+					}
+					if count(next) != 1 {
+						t.Fatal("reclaim replenished allowance")
+					}
+				case "expired":
+					m.SetNowFunc(func() time.Time { return st.Lease.ExpiresAt.Add(time.Second) })
+				case "binding":
+					_, err = m.mutate(ctx, n, owner, func(s *IssueState) error { s.HeadSHA = "changed"; return nil })
+				case "old_state":
+					_, err = m.mutate(ctx, n, owner, func(s *IssueState) error {
+						if kind == "plan" {
+							s.PlanRetryReservation = nil
+						} else {
+							s.RepairRetryReservation = nil
+						}
+						return nil
+					})
+				case "artifact":
+					typ := contract.ArtifactImplementation
+					if kind == "plan" {
+						typ = contract.ArtifactDesign
+					}
+					_, err = m.UpdateArtifact(ctx, n, owner, contract.Artifact{Type: typ, Producer: "mock", Summary: "completed", Body: "completed", Verdict: "PASS"})
+				case "complete":
+					st, err = m.CompleteRetryReservation(ctx, n, owner, id)
+					if err == nil && count(st) != 1 {
+						t.Fatal("completion refunded")
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := m.GetCurrentState(ctx, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "concurrent" {
+					results := make(chan error, 2)
+					for range 2 {
+						go func() { _, err := m.RefundRetryReservation(ctx, n, owner, id); results <- err }()
+					}
+					successes := 0
+					for range 2 {
+						err := <-results
+						if err == nil {
+							successes++
+						} else if !errors.Is(err, ErrClaimFence) {
+							t.Fatal(err)
+						}
+					}
+					if successes != 1 {
+						t.Fatalf("successful refunds = %d", successes)
+					}
+					st, err = m.GetCurrentState(ctx, n)
+					if err != nil || count(st) != 0 {
+						t.Fatalf("concurrent count: %v %+v", err, st)
+					}
+					return
+				}
+				st, err = m.RefundRetryReservation(ctx, n, owner, id)
+				if scenario == "refund" || scenario == "replay" {
+					if err != nil || count(st) != 0 {
+						t.Fatalf("refund: %v %+v", err, st)
+					}
+					if scenario == "replay" {
+						st, err = reserve()
+						if err != nil {
+							t.Fatal(err)
+						}
+						if reservation(st).ID == id {
+							t.Fatal("reused identity")
+						}
+					}
+					_, err = m.RefundRetryReservation(ctx, n, owner, id)
+					if !errors.Is(err, ErrClaimFence) {
+						t.Fatalf("replay: %v", err)
+					}
+					after, err := m.GetCurrentState(ctx, n)
+					if err != nil || !reflect.DeepEqual(st, after) {
+						t.Fatal("replay changed state", err)
+					}
+				} else {
+					if !errors.Is(err, ErrClaimFence) {
+						t.Fatalf("refund error = %v, want claim fence", err)
+					}
+					after, err := m.GetCurrentState(ctx, n)
+					if err != nil || !reflect.DeepEqual(before, after) {
+						t.Fatal("rejected refund changed state", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRetryReservationHumanDraftRetiresAutomaticIdentity(t *testing.T) {
+	m, n, _ := rejectedReplanFixture(t)
+	st, err := m.UpdatePhase(t.Context(), n, "local-dev", "plan", "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := st.PlanRetryReservation.ID
+	if _, err = m.RecordHumanReview(t.Context(), n, "CHANGES_REQUESTED", "Revise reports"); err != nil {
+		t.Fatal(err)
+	}
+	st, err = m.UpdatePhase(t.Context(), n, "local-dev", "plan", "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PlanRetryReservation != nil || st.HumanDraftCount != 1 || st.PlanReplanCount != 0 {
+		t.Fatal("human draft retained automatic refund authority")
+	}
+	if _, err = m.RefundRetryReservation(t.Context(), n, "local-dev", id); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("old automatic refund: %v", err)
+	}
+}
+
+func TestRetryReservationIdenticalApprovalPreservesConsumption(t *testing.T) {
+	for _, kind := range []string{"plan", "repair"} {
+		t.Run(kind, func(t *testing.T) {
+			m, n, _ := rejectedReplanFixture(t)
+			var st *IssueState
+			var err error
+			var id string
+			if kind == "plan" {
+				st, err = m.UpdatePhase(t.Context(), n, "local-dev", "plan", "active")
+			} else {
+				st, err = m.ReserveValidationRepair(t.Context(), n, "local-dev")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "plan" {
+				id = st.PlanRetryReservation.ID
+			} else {
+				id = st.RepairRetryReservation.ID
+			}
+			if _, err = m.CompleteRetryReservation(t.Context(), n, "local-dev", id); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = m.Release(t.Context(), n, "local-dev", "reapprove"); err != nil {
+				t.Fatal(err)
+			}
+			st, err = m.ApproveTask(t.Context(), n, "local-dev")
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := st.PlanReplanCount
+			if kind == "repair" {
+				count = st.ValidationRepairCount
+			}
+			if count != 1 {
+				t.Fatal("identical approval replenished consumed allowance")
+			}
+		})
+	}
+}

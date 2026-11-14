@@ -354,6 +354,7 @@ func (r *workRun) reserveRepair() error {
 		return err
 	}
 	r.st, r.res.State = st, st
+	r.repairReservationID = st.RepairRetryReservation.ID
 	r.progress.retry("validation-repair", st.ValidationRepairCount, r.repairLimit)
 	return nil
 }

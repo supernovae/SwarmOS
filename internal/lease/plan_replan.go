@@ -2,6 +2,9 @@ package lease
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/supernovae/swarmos/internal/workspace"
@@ -137,6 +140,9 @@ func (m *Manager) reservePlanReplanContext(ctx context.Context, st *IssueState) 
 	if err != nil {
 		return err
 	}
+	// A new planner admission retires any older unfinished identity, including
+	// when a human decision changed which allowance applies.
+	st.PlanRetryReservation = nil
 	if directIssue(st) && !strings.EqualFold(cfg.PlanMode, "interactive") {
 		p := st.PendingPlanReview
 		if st.HumanPlanReview != nil {
@@ -156,6 +162,13 @@ func (m *Manager) reservePlanReplanContext(ctx context.Context, st *IssueState) 
 		st.HumanDraftCount++
 	} else if st.PendingPlanReview != nil && !strings.EqualFold(cfg.PlanMode, "interactive") {
 		st.PlanReplanCount++
+		if directIssue(st) {
+			reservation, err := newRetryReservation(st)
+			if err != nil {
+				return err
+			}
+			st.PlanRetryReservation = reservation
+		}
 	}
 	return nil
 }
@@ -434,6 +447,7 @@ func (m *Manager) RecordPlanPair(ctx context.Context, n int, owner string, plan,
 		}
 		st.Artifacts = append(kept, pair...)
 		markPlanPair(st)
+		st.PlanRetryReservation = nil
 		st.PlanReservation = nil
 		return nil
 	})
@@ -481,4 +495,80 @@ func (m *Manager) planRevisionGuidance(st *IssueState) string {
 		prefix = "the active claim owner must first release the claim; "
 	}
 	return fmt.Sprintf("identical WorkUnit cannot recover here; %sa maintainer must revise the objective, then separately run swarm issue approve %d and swarm issue work %d", prefix, st.Lease.IssueNumber, st.Lease.IssueNumber)
+}
+
+// RetryReservation is coordinator-owned authority for one unfinished automatic
+// attempt. Older states without an identity cannot authorize a refund.
+type RetryReservation struct {
+	ID      string `json:"id"`
+	ClaimID string `json:"claim_id"`
+	Binding string `json:"binding"`
+}
+
+func retryBinding(st *IssueState) string {
+	body, _ := json.Marshal(struct {
+		Task, Policy, Base, Head, Branch string
+		Generation                       int
+		Rejection, Human                 *PlanRejection
+		Artifacts                        []contract.Artifact
+	}{st.TaskDigest, st.PolicyDigest, st.BaseSHA, st.HeadSHA, st.Branch, st.PlanGeneration, st.PendingPlanReview, st.HumanPlanReview, st.Artifacts})
+	return hash(string(body))
+}
+
+func newRetryReservation(st *IssueState) (*RetryReservation, error) {
+	var entropy [32]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return nil, err
+	}
+	return &RetryReservation{ID: hex.EncodeToString(entropy[:]), ClaimID: st.Lease.ClaimID, Binding: retryBinding(st)}, nil
+}
+
+// RefundRetryReservation returns exactly one still-uncompleted attempt. The
+// caller supplies only its opaque identity, never a counter or decrement.
+func (m *Manager) RefundRetryReservation(ctx context.Context, n int, owner, id string) (*IssueState, error) {
+	return m.finishRetryReservation(ctx, n, owner, id, true)
+}
+
+// CompleteRetryReservation seals consumption before output is processed, even
+// when that output will subsequently be rejected. Plan draft admission survives.
+func (m *Manager) CompleteRetryReservation(ctx context.Context, n int, owner, id string) (*IssueState, error) {
+	return m.finishRetryReservation(ctx, n, owner, id, false)
+}
+
+func (m *Manager) finishRetryReservation(ctx context.Context, n int, owner, id string, refund bool) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("retry completion requires direct coordinator")
+	}
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if !directIssue(st) || id == "" {
+			return ErrClaimFence
+		}
+		reservation := st.PlanRetryReservation
+		plan := reservation != nil && reservation.ID == id
+		if !plan {
+			reservation = st.RepairRetryReservation
+		}
+		if reservation == nil || reservation.ID != id || reservation.ClaimID != st.Lease.ClaimID || reservation.Binding != retryBinding(st) {
+			return ErrClaimFence
+		}
+		if plan {
+			if st.PlanReplanCount <= 0 || st.HumanPlanReview != nil || !planReservationMatches(st, st.PendingPlanReview) {
+				return ErrClaimFence
+			}
+			if refund {
+				st.PlanReplanCount--
+				st.PlanReservation = nil
+			}
+			st.PlanRetryReservation = nil
+		} else {
+			if st.ValidationRepairCount <= 0 || st.ValidationRepairKey != validationRepairKey(st) {
+				return ErrClaimFence
+			}
+			if refund {
+				st.ValidationRepairCount--
+			}
+			st.RepairRetryReservation = nil
+		}
+		return nil
+	})
 }

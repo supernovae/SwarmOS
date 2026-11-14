@@ -1665,3 +1665,173 @@ func TestMalformedAgentReviewRepairTaskScope(t *testing.T) {
 		})
 	}
 }
+
+func TestAutomaticRetryPlannerRefund(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		failure   error
+		output    string
+		unchanged bool
+		charged   bool
+		budget    bool
+	}{
+		{name: "budget_pause", budget: true},
+		{name: "rate_limit", failure: &providerFixtureError{"rate_limit"}},
+		{name: "network", failure: &providerFixtureError{"network"}},
+		{name: "deadline", failure: context.DeadlineExceeded},
+		{name: "unknown", failure: errors.New("unclassified"), charged: true},
+		{name: "missing", failure: sandbox.ErrMissingRoleOutput, charged: true},
+		{name: "unchanged", unchanged: true, charged: true},
+		{name: "completed_output", failure: &providerFixtureError{"rate_limit"}, output: "completed plan", charged: true},
+		{name: "completed_import", failure: errors.Join(&sandbox.CompletedImportError{Cause: context.DeadlineExceeded}, &providerFixtureError{"network"}), charged: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, e, tr := setupProjectPlanTestRepo(t)
+			ctx := t.Context()
+			wu := &contract.WorkUnit{Objective: "Refund planner retry", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Keep retry"}, Workflow: "feature", Gate: contract.GateAgent}
+			issue, err := tr.CreateIssue(ctx, "Retry", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = e.LeaseManager.ApproveTask(ctx, issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			retry := false
+			planners := 0
+			var base time.Time
+			var elapsed atomic.Int64
+			timers := make(chan *workBudgetTimer, 100)
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "planner" {
+						planners++
+						if retry && tc.budget {
+							timer := <-timers
+							for range 3 {
+								if _, err := e.LeaseManager.Renew(t.Context(), issue.Number, "maintainer", 4*time.Hour); err != nil {
+									t.Fatal(err)
+								}
+							}
+							elapsed.Store(int64(4*time.Hour - 4*time.Hour/3))
+							timer.ch <- base.Add(time.Duration(elapsed.Load()))
+							<-ctx.Done()
+							return nil, ctx.Err()
+						}
+						if retry && !tc.unchanged {
+							return &agent.RunResult{Output: tc.output}, tc.failure
+						}
+					}
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err == nil && req.Role == "reviewer" {
+						text := structuredReviewFixture("CHANGES_REQUESTED")
+						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/REVIEW.md"), []byte(text), 0644)
+						result.Output = text
+					}
+					return result, err
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: root, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			first, err := e.ExecuteWork(ctx, opts)
+			if !errors.Is(err, ErrPlanReviewRejected) {
+				t.Fatalf("rejection: %v", err)
+			}
+			if tc.budget {
+				base = first.State.Lease.ClaimedAt
+				e.LeaseManager.SetNowFunc(func() time.Time { return base.Add(time.Duration(elapsed.Load())) })
+				e.LeaseManager.SetHeartbeatTimerFunc(func(time.Duration) lease.HeartbeatTimer {
+					timer := &workBudgetTimer{make(chan time.Time, 1)}
+					timers <- timer
+					return timer
+				})
+			}
+			before := first.State.PlanReplanCount
+			retry = true
+			opts.ClaimID = first.State.Lease.ClaimID
+			opts.Phase = "plan"
+			result, retryErr := e.ExecuteWork(ctx, opts)
+			err = retryErr
+			if tc.budget {
+				if err != nil || result == nil || result.ClaimBudgetPause == nil {
+					t.Fatalf("budget pause: %v %+v", err, result)
+				}
+			}
+			if err == nil && !tc.budget {
+				t.Fatal("expected failed/rejected retry")
+			}
+			st, loadErr := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			want := before
+			if tc.charged {
+				want++
+			}
+			if st.PlanReplanCount != want {
+				t.Fatalf("PlanReplanCount = %d, want %d", st.PlanReplanCount, want)
+			}
+			if planners != 2 {
+				t.Fatalf("automatic rerun: %d planners", planners)
+			}
+			for _, beforeArt := range first.State.Artifacts {
+				if beforeArt.Type != contract.ArtifactDesign && beforeArt.Type != contract.ArtifactTestPlan {
+					continue
+				}
+				found := false
+				for _, afterArt := range st.Artifacts {
+					if afterArt.Type == beforeArt.Type {
+						found = true
+						if afterArt.Version != beforeArt.Version || afterArt.Body != beforeArt.Body {
+							t.Fatal("failed attempt replaced report")
+						}
+					}
+				}
+				if !found {
+					t.Fatal("failed attempt removed report")
+				}
+			}
+			if tc.unchanged && !errors.Is(err, lease.ErrPlanUnchanged) {
+				t.Fatalf("unchanged: %v", err)
+			}
+			if st.PlanRetryReservation != nil {
+				t.Fatal("finished run retained refund authority")
+			}
+			if tc.unchanged {
+				_, err = e.ExecuteWork(ctx, opts)
+				if !errors.Is(err, lease.ErrPlanUnchanged) {
+					t.Fatalf("second unchanged attempt: %v", err)
+				}
+				_, err = e.ExecuteWork(ctx, opts)
+				if !errors.Is(err, lease.ErrPlanReplanLimit) {
+					t.Fatalf("exhausted: %v", err)
+				}
+			}
+
+		})
+	}
+}
+
+func TestAutomaticRetryFailurePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result *agent.RunResult
+		err    error
+		refund bool
+	}{
+		{name: "success", err: nil},
+		{name: "unknown", err: errors.New("unknown")},
+		{name: "empty_class", err: &providerFixtureError{""}},
+		{name: "usage_limit", err: &providerFixtureError{"usage_limit"}, refund: true},
+		{name: "capacity", err: &providerFixtureError{"capacity"}, refund: true},
+		{name: "cancel", err: context.Canceled, refund: true},
+		{name: "missing_with_timeout", err: errors.Join(sandbox.ErrMissingRoleOutput, context.DeadlineExceeded)},
+		{name: "completed_import_with_cancel", err: errors.Join(&sandbox.CompletedImportError{Cause: context.Canceled}, &providerFixtureError{"rate_limit"})},
+		{name: "rejected_with_timeout", err: errors.Join(&importRejection{}, context.DeadlineExceeded)},
+		{name: "output_with_class", result: &agent.RunResult{Output: "completed"}, err: &providerFixtureError{"rate_limit"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := refundableRetry(tc.result, tc.err); got != tc.refund {
+				t.Fatalf("refund = %t, want %t", got, tc.refund)
+			}
+		})
+	}
+}

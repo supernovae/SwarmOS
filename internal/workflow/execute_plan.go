@@ -65,6 +65,10 @@ func (r *workRun) plan() (bool, error) {
 			return true, err
 		}
 		r.res.State = r.st
+		reservationID := ""
+		if r.st.PlanRetryReservation != nil {
+			reservationID = r.st.PlanRetryReservation.ID
+		}
 
 		if r.st.HumanPlanReview != nil {
 			r.progress.retry("human-plan-draft", r.st.HumanDraftCount, r.cfg.Lease.PlanReplanAttempts())
@@ -86,6 +90,9 @@ func (r *workRun) plan() (bool, error) {
 			return true, err
 		}
 		planRun, err := runner.Run(r.ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, r.st, r.opts.PRNumber), OperatorInstructions: r.opts.instructionsFor("planner"), Dependencies: r.deps})
+		if settleErr := r.settleRetry(reservationID, planRun, err); settleErr != nil {
+			return true, settleErr
+		}
 		if paused, pauseErr := r.pauseInterrupted(err, "plan", false); paused {
 			return true, pauseErr
 		}

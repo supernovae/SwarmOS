@@ -41,6 +41,8 @@ type workRun struct {
 	rerun                                        string
 	repairLimit                                  int
 	outcomeFailed                                bool
+	repairReservationID                          string
+	retrySettlementFailed                        bool
 }
 
 func (r *workRun) releaseFailedSetup() {
@@ -73,7 +75,7 @@ func (r *workRun) finishAdmission(result **WorkResult, workErr *error) {
 
 func (r *workRun) finishInterrupted(result **WorkResult, workErr *error) {
 	var rejection *importRejection
-	if *workErr != nil && !errors.As(*workErr, &rejection) && budgetInterrupted(r.ctx, *workErr) {
+	if *workErr != nil && !r.retrySettlementFailed && !errors.As(*workErr, &rejection) && budgetInterrupted(r.ctx, *workErr) {
 		*workErr = r.e.pauseWork(r.coordinatorCtx, r.res, r.opts, r.pre.WorkUnit, r.activePhase, r.preserveCheckpoint, r.forkMode, r.forkRemote)
 		*result = r.res
 	}
@@ -247,4 +249,50 @@ func (r *workRun) roleCapabilityReport(role string) *sandbox.ToolCapabilityRepor
 		return nil
 	}
 	return &report
+}
+
+// settleRetry runs only after Run returns. Setup and admission failures never
+// refund. A live bounded context lets cancellation clean up before pausing.
+func (r *workRun) settleRetry(id string, run *agent.RunResult, runErr error) error {
+	if id == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.coordinatorCtx), 5*time.Second)
+	defer cancel()
+	var st *lease.IssueState
+	var err error
+	if refundableRetry(run, runErr) {
+		st, err = r.e.LeaseManager.RefundRetryReservation(ctx, r.opts.IssueNumber, r.opts.Owner, id)
+	} else {
+		st, err = r.e.LeaseManager.CompleteRetryReservation(ctx, r.opts.IssueNumber, r.opts.Owner, id)
+	}
+	if err != nil {
+		r.retrySettlementFailed = true
+		return errors.Join(runErr, fmt.Errorf("settle automatic retry: %w", err))
+	}
+	r.st, r.res.State = st, st
+	return nil
+}
+
+func refundableRetry(run *agent.RunResult, err error) bool {
+	if err == nil || run != nil && run.Output != "" {
+		return false
+	}
+	var completed *sandbox.CompletedImportError
+	var rejection *importRejection
+	if errors.As(err, &completed) || errors.As(err, &rejection) || errors.Is(err, sandbox.ErrMissingRoleOutput) {
+		return false
+	}
+	var timeout *sandbox.AgentTimeoutError
+	if errors.As(err, &timeout) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var classified interface{ FailureClass() string }
+	if errors.As(err, &classified) {
+		switch classified.FailureClass() {
+		case "rate_limit", "usage_limit", "capacity", "network":
+			return true
+		}
+	}
+	return false
 }

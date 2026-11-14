@@ -23,6 +23,7 @@ import (
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
 )
@@ -2856,5 +2857,156 @@ func TestTesterFailureArtifactNotReused(t *testing.T) {
 	st.Artifacts = append(st.Artifacts, contract.Artifact{Type: contract.ArtifactValidation, Verdict: "PASS"})
 	if testerFailure(st) != nil {
 		t.Fatal("older failure superseded latest report")
+	}
+}
+
+func TestAutomaticRetryRepairRefund(t *testing.T) {
+	for _, continuation := range []bool{false, true} {
+		for _, tc := range []struct {
+			name string
+			err  error
+		}{
+			{"network", &providerFixtureError{"network"}},
+			{"deadline", context.DeadlineExceeded},
+			{"cancellation", context.Canceled},
+		} {
+			t.Run(fmt.Sprintf("%s/continuation=%t", tc.name, continuation), func(t *testing.T) {
+				e, issue := testerRetryEngine(t)
+				failureCtx, cancelFailure := context.WithCancel(t.Context())
+				defer cancelFailure()
+				stage := "initial"
+				developers := 0
+				e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+					return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+						if req.Role == "developer" {
+							developers++
+							st, err := e.LeaseManager.GetCurrentState(ctx, issue.Number)
+							if err != nil {
+								return nil, err
+							}
+							if st.ValidationRepairCount > 0 && stage != "success" {
+								if tc.name == "cancellation" {
+									cancelFailure()
+								}
+								return nil, tc.err
+							}
+							path := filepath.Join(req.WorktreePath, "fail-check")
+							if stage == "success" {
+								if err := os.Remove(path); err != nil {
+									return nil, err
+								}
+							} else {
+								if err := os.WriteFile(path, []byte("fail"), 0644); err != nil {
+									return nil, err
+								}
+							}
+						}
+						if continuation && stage == "initial" && req.Role == "tester" {
+							return nil, errors.New("tester interrupted")
+						}
+						return (&agent.MockRunner{}).Run(ctx, req)
+					}}, nil
+				}
+				opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true}
+				first, err := e.ExecuteWork(failureCtx, opts)
+				if first == nil || err == nil {
+					t.Fatalf("initial: %v", err)
+				}
+				opts.ClaimID = first.State.Lease.ClaimID
+				if continuation {
+					stage = "test"
+					opts.Phase = "test"
+					failed, err := e.ExecuteWork(failureCtx, opts)
+					if failed == nil || !errors.Is(err, validation.ErrRequiredCheckFailed) {
+						t.Fatalf("validation: %v", err)
+					}
+					opts.Phase = "all"
+					stage = "failure"
+					first, err = e.ExecuteWork(failureCtx, opts)
+					if first == nil || err == nil {
+						t.Fatalf("repair: %v", err)
+					}
+				}
+				st, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if st.ValidationRepairCount != 0 {
+					t.Fatalf("ValidationRepairCount = %d, want 0", st.ValidationRepairCount)
+				}
+				if developers != 2 {
+					t.Fatalf("developer runs = %d, want 2", developers)
+				}
+				for _, a := range st.Artifacts {
+					if a.Type == contract.ArtifactImplementation && a.Version != 1 {
+						t.Fatal("failed repair recorded implementation")
+					}
+				}
+				stage = "success"
+				developers = 0
+				repaired, err := e.ExecuteWork(t.Context(), opts)
+				if err != nil || repaired == nil || !repaired.ValidationPassed || developers != 1 || repaired.State.ValidationRepairCount != 1 {
+					t.Fatalf("next work: %v %+v developers=%d", err, repaired, developers)
+				}
+			})
+		}
+	}
+}
+
+func TestAutomaticRetryCompletedDeveloperCharged(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		output string
+	}{
+		{name: "no_changes"},
+		{name: "unknown", err: errors.New("unclassified")},
+		{name: "missing", err: sandbox.ErrMissingRoleOutput},
+		{name: "completed_import", err: errors.Join(&sandbox.CompletedImportError{Cause: context.Canceled}, &providerFixtureError{"network"})},
+		{name: "completed_output", err: &providerFixtureError{"rate_limit"}, output: "completed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, issue := testerRetryEngine(t)
+			initial := true
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "developer" && !initial && tc.err != nil {
+						return &agent.RunResult{Output: tc.output}, tc.err
+					}
+					if req.Role == "developer" && initial {
+						if err := os.WriteFile(filepath.Join(req.WorktreePath, "fail-check"), []byte("fail"), 0644); err != nil {
+							return nil, err
+						}
+					}
+					if req.Role == "tester" && initial {
+						return nil, errors.New("tester interrupted")
+					}
+					return (&agent.MockRunner{}).Run(ctx, req)
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true}
+			first, err := e.ExecuteWork(t.Context(), opts)
+			if first == nil || err == nil {
+				t.Fatalf("initial: %v", err)
+			}
+			initial = false
+			opts.ClaimID = first.State.Lease.ClaimID
+			opts.Phase = "test"
+			_, err = e.ExecuteWork(t.Context(), opts)
+			if !errors.Is(err, validation.ErrRequiredCheckFailed) {
+				t.Fatal(err)
+			}
+			opts.Phase = "all"
+			for attempt := 1; attempt <= 2; attempt++ {
+				result, err := e.ExecuteWork(t.Context(), opts)
+				if err == nil || result == nil || result.State.ValidationRepairCount != attempt {
+					t.Fatalf("completed attempt %d: %v %+v", attempt, err, result)
+				}
+			}
+			_, err = e.ExecuteWork(t.Context(), opts)
+			if !errors.Is(err, ErrValidationRepairExhausted) {
+				t.Fatalf("exhausted: %v", err)
+			}
+		})
 	}
 }

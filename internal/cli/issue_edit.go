@@ -266,7 +266,7 @@ func issueEditTaskBranch(st *lease.IssueState) string {
 }
 func issueEditClaim(st *lease.IssueState, n int, now time.Time) error {
 	if st != nil && st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
-		return fmt.Errorf("issue #%d claimed by %q until %s; use swarm issue release %d", n, st.Lease.Owner, st.Lease.ExpiresAt.Format(time.RFC3339), n)
+		return fmt.Errorf("issue #%d claimed by %q until %s; the claim owner can run swarm issue release %d; a maintainer can run swarm issue revoke %d --reason 'explain recovery'", n, st.Lease.Owner, st.Lease.ExpiresAt.Format(time.RFC3339), n, n)
 	}
 	return nil
 }

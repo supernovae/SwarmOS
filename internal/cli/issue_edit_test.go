@@ -236,7 +236,7 @@ func TestIssueEditClaim(t *testing.T) {
 					args = append(args, "--dry-run")
 				}
 				out, err := runEdit(f, r, now, args...)
-				if err == nil || !strings.Contains(out+err.Error(), owner) || !strings.Contains(out+err.Error(), st.Lease.ExpiresAt.Format(time.RFC3339)) || !strings.Contains(out+err.Error(), "swarm issue release") {
+				if err == nil || !strings.Contains(out+err.Error(), owner) || !strings.Contains(out+err.Error(), st.Lease.ExpiresAt.Format(time.RFC3339)) || !strings.Contains(out+err.Error(), fmt.Sprintf("claim owner can run swarm issue release %d", i.Number)) || !strings.Contains(out+err.Error(), fmt.Sprintf("maintainer can run swarm issue revoke %d --reason 'explain recovery'", i.Number)) {
 					t.Fatalf("%v %s", err, out)
 				}
 			}

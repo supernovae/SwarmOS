@@ -889,7 +889,7 @@ func TestRequiredCheckLimitNextAction(t *testing.T) {
 				if a := c.classify(errors.Join(typed, &lease.TaskApprovalError{IssueNumber: n})); a == nil || a.Reason != ReasonNeedsApproval {
 					t.Fatal("limit outranks approval")
 				}
-				if a := c.classify(errors.Join(typed, lease.ErrClaimFence)); a != nil {
+				if a := c.classify(errors.Join(typed, lease.ErrClaimFence)); (resource == "issue" && (a == nil || a.Reason != ReasonClaimExpired)) || (resource != "issue" && a != nil) {
 					t.Fatal("limit outranks fencing")
 				}
 				if a := c.classify(workflow.ErrValidationRepairExhausted); a == nil || a.Reason != ReasonValidationRepairExhausted {
@@ -974,5 +974,156 @@ func requiredCheckLimitNextActionCompleteRetry(t *testing.T) {
 				t.Fatal("check retry changed implementation or repair count")
 			}
 		})
+	}
+}
+
+func rewriteRecoveryState(t *testing.T, f *cliFixture, n int, change func(*lease.IssueState)) *lease.IssueState {
+	t.Helper()
+	raw, rev, err := f.manager.Store().Load(context.Background(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st lease.IssueState
+	if err = json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	change(&st)
+	raw, err = json.Marshal(&st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.manager.Store().CompareAndSwap(context.Background(), n, rev, raw); err != nil {
+		t.Fatal(err)
+	}
+	return &st
+}
+
+func TestIssueSubmitExpiredClaimNextAction(t *testing.T) {
+	f := newCLIFixture(t)
+	issue := f.create(t, "agent")
+	n := strconv.Itoa(issue)
+	f.must(t, "issue", "approve", n)
+	f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false")
+	seedCompleteIssueAcceptance(t, f, issue)
+	rewriteRecoveryState(t, f, issue, func(st *lease.IssueState) { st.Lease.ExpiresAt = time.Now().Add(-time.Hour) })
+	before := f.state(t, issue)
+	for _, jsonMode := range []bool{true, false} {
+		args := []string{"issue", "submit", n, "--progress=false"}
+		if jsonMode {
+			args = append(args, "--json")
+		}
+		out, err := f.run(args...)
+		if !errors.Is(err, lease.ErrClaimFence) || ExitCode(err) == 0 {
+			t.Fatalf("expected fenced failure: %v %s", err, out)
+		}
+		a := nextActionOf(err)
+		if a == nil {
+			t.Fatalf("missing next action: %v %s", err, out)
+		}
+		if !reflect.DeepEqual(a.Argv, []string{"swarm", "issue", "work", n}) {
+			t.Fatalf("action: %+v", a)
+		}
+		if strings.Contains(out, f.root) || strings.Contains(out, before.Lease.ClaimID) {
+			t.Fatal("recovery leaked root or token")
+		}
+		if jsonMode {
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(out), &doc); err != nil || doc["next_action"] == nil {
+				t.Fatalf("JSON: %v %s", err, out)
+			}
+		} else if !strings.Contains(out+err.Error(), "swarm issue work "+n) {
+			t.Fatalf("text advice missing: %s %v", out, err)
+		}
+		if after := f.state(t, issue); !reflect.DeepEqual(before, after) {
+			t.Fatal("fenced submit changed authoritative state")
+		}
+	}
+}
+
+func TestNextActionClaimFence(t *testing.T) {
+	for _, resource := range []string{"issue", "pr"} {
+		for _, n := range []int{0, 7} {
+			for _, op := range []string{"submit", "stage", "validate", "release"} {
+				opts := &RootOptions{RepoRoot: "/sentinel-local-root", Repo: "org/repo", UpstreamRemote: "upstream", Fork: true, ForkRemote: "fork"}
+				c := stopContext{opts: opts, resource: resource, number: n}
+				err := c.stop(fmt.Errorf("%s: %w", op, lease.ErrClaimFence))
+				if !errors.Is(err, lease.ErrClaimFence) {
+					t.Fatal("lost fence identity")
+				}
+				a := nextActionOf(err)
+				if resource != "issue" || n == 0 {
+					if a != nil {
+						t.Fatalf("unexpected action: %+v", a)
+					}
+					continue
+				}
+				want := []string{"swarm", "--repo", "org/repo", "--upstream-remote", "upstream", "--fork", "--fork-remote", "fork", "issue", "work", "7"}
+				if a == nil || a.Reason != ReasonClaimExpired || !reflect.DeepEqual(a.Argv, want) {
+					t.Fatalf("action: %+v", a)
+				}
+				if opts.RepoRoot != "/sentinel-local-root" {
+					t.Fatal("mutated options")
+				}
+			}
+		}
+	}
+}
+
+func TestIssueStatusClaimRecovery(t *testing.T) {
+	f, issue, prNumber := submittedPRFixture(t, "agent")
+	n := strconv.Itoa(issue)
+	for _, kind := range []string{"submitted", "completed", "foreign"} {
+		rewriteRecoveryState(t, f, issue, func(st *lease.IssueState) {
+			if kind != "submitted" {
+				st.PRNumber = 0
+				st.Lease.Status = "completed"
+			}
+			if kind == "foreign" {
+				st.Lease.Status = "active"
+				st.Lease.Owner = "another-owner"
+				st.Lease.ClaimID = "sentinel-private-token"
+				st.Lease.ExpiresAt = time.Now().Add(time.Hour).Truncate(time.Second)
+			}
+		})
+		before := f.state(t, issue)
+		for _, jsonMode := range []bool{true, false} {
+			args := []string{"issue", "status", n}
+			if jsonMode {
+				args = append(args, "--json")
+			}
+			out := f.must(t, args...)
+			if jsonMode {
+				var doc struct {
+					Issues []issueStatus `json:"issues"`
+				}
+				if err := json.Unmarshal([]byte(out), &doc); err != nil || len(doc.Issues) != 1 {
+					t.Fatalf("status: %v %s", err, out)
+				}
+				a := doc.Issues[0].NextAction
+				if kind == "submitted" {
+					if a == nil || a.Reason != "submitted" || !reflect.DeepEqual(a.Argv, []string{"swarm", "--repo", "local/repo", "pr", "status", strconv.Itoa(prNumber)}) {
+						t.Fatalf("action: %+v", a)
+					}
+				} else if a != nil {
+					t.Fatalf("unexpected action: %+v", a)
+				}
+				if kind == "foreign" && (doc.Issues[0].State.Lease.Owner != before.Lease.Owner || !doc.Issues[0].State.Lease.ExpiresAt.Equal(before.Lease.ExpiresAt)) {
+					t.Fatal("missing lease information")
+				}
+			} else {
+				if kind == "submitted" && !strings.Contains(out, "swarm --repo local/repo pr status "+strconv.Itoa(prNumber)) {
+					t.Fatal(out)
+				}
+				if kind != "submitted" && strings.Contains(out, "Next step:") {
+					t.Fatal(out)
+				}
+				if kind == "foreign" && (!strings.Contains(out, before.Lease.Owner) || !strings.Contains(out, before.Lease.ExpiresAt.Format(time.RFC3339))) {
+					t.Fatal(out)
+				}
+			}
+			if !reflect.DeepEqual(before, f.state(t, issue)) {
+				t.Fatal("status changed state")
+			}
+		}
 	}
 }

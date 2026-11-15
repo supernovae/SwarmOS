@@ -76,7 +76,7 @@ func issueConvertState(st *lease.IssueState, n int, now time.Time) error {
 		return fmt.Errorf("issue #%d has linked PR/revision state; inspect swarm issue status %d and swarm pr status %d; continue through the PR workflow", n, n, st.PRNumber)
 	}
 	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) {
-		return fmt.Errorf("issue #%d is claimed by %q; inspect swarm issue status %d; the owner must release the claim or wait for expiry before maintainer recovery", n, st.Lease.Owner, n)
+		return fmt.Errorf("issue #%d is claimed by %q; the claim owner can run swarm issue release %d; a maintainer can run swarm issue revoke %d --reason 'explain recovery'", n, st.Lease.Owner, n, n)
 	}
 	return fmt.Errorf("issue #%d has authoritative state; inspect swarm issue status %d; use swarm issue edit %d for a valid contract, otherwise have a maintainer restore the contract in place from its recorded approved version, then approve the repaired revision separately", n, n, n)
 }

@@ -33,7 +33,7 @@ func (m *Manager) ReapproveRebase(ctx context.Context, n, number int, expectedBa
 		return nil, fmt.Errorf("approval state changed")
 	}
 	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(m.nowFn()) {
-		return nil, fmt.Errorf("active claim: run swarm issue release %d before reapproval", n)
+		return nil, fmt.Errorf("active claim: the claim owner can run swarm issue release %d; a maintainer can run swarm issue revoke %d --reason 'explain recovery' before reapproval", n, n)
 	}
 	pr, err := m.tracker.GetPullRequest(ctx, number)
 	if err != nil {

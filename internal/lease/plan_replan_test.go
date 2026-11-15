@@ -1165,3 +1165,43 @@ func TestRetryReservationIdenticalApprovalPreservesConsumption(t *testing.T) {
 		})
 	}
 }
+
+func TestReapproveRebaseActiveClaimGuidance(t *testing.T) {
+	m, _, issue := testManager(t)
+	ctx := context.Background()
+	if _, err := m.ApproveTask(ctx, issue.Number, "local-dev"); err != nil {
+		t.Fatal(err)
+	}
+	st, rev, err := m.load(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.PRNumber = 42
+	st.Lease = contract.Lease{Status: "active", Owner: "another-owner", ClaimID: "sentinel-private-token", ExpiresAt: time.Now().Add(time.Hour)}
+	if _, err = m.save(ctx, issue.Number, rev, st); err != nil {
+		t.Fatal(err)
+	}
+	before, err := m.GetCurrentState(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.ReapproveRebase(ctx, issue.Number, 42, st.BaseSHA, st.BaseSHA, "unused-head")
+	if err == nil {
+		t.Fatal("accepted active claim")
+	}
+	for _, want := range []string{fmt.Sprintf("claim owner can run swarm issue release %d", issue.Number), fmt.Sprintf("maintainer can run swarm issue revoke %d --reason 'explain recovery'", issue.Number)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), st.Lease.ClaimID) || strings.Contains(err.Error(), m.repoRoot) {
+		t.Fatal("guidance leaked local data")
+	}
+	after, err := m.GetCurrentState(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("refusal changed state")
+	}
+}

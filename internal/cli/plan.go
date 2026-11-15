@@ -25,7 +25,13 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 		Use:   "plan",
 		Short: "Decompose a project roadmap into WorkUnit issues (--from) or scan/import open issues against project goals (--scan)",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			emitted := false
+			defer func() {
+				if !emitted {
+					reportJSONFailure(cmd, asJSON, "project-plan", runErr)
+				}
+			}()
 			if epic && (fromFile == "" || !apply || scanOpen) {
 				return fmt.Errorf("--epic requires --from and --apply, without --scan")
 			}
@@ -104,10 +110,13 @@ func newPlanCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			if asJSON {
-				if err := writeJSON(cmd, map[string]any{
-					"kind":   "project-plan",
-					"report": report,
-				}); err != nil {
+				outcome := map[string]any{"kind": "project-plan", "report": report}
+				if publishErr != nil {
+					outcome["status"] = "failed"
+					outcome["error"] = publishErr.Error()
+				}
+				emitted = true
+				if err := writeJSON(cmd, outcome); err != nil {
 					return err
 				}
 				return publishErr

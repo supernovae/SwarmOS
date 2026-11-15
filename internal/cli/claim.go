@@ -56,7 +56,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			reporter.Close()
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "claim", "status": "claimed", "selection": pulled})
+				return writeJSON(cmd, map[string]any{"kind": "claim", "status": "claimed", "selection": pulled, "issue_number": pulled.Issue.Number, "state": pulled.State, "branch": pulled.BranchName, "worktree": pulled.WorktreePath})
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Claimed [%s] issue #%d: %s [phase=%s, expires=%s]\n", pulled.Repo, pulled.Issue.Number, pulled.Issue.Title, pulled.TargetPhase, pulled.State.Lease.ExpiresAt.Format(time.RFC3339))
@@ -130,7 +130,7 @@ func newClaimCmd(rootOpts *RootOptions) *cobra.Command {
 		}
 		reporter.Close()
 		if asJSON {
-			return writeJSON(cmd, map[string]any{"kind": "claim", "issue_number": issue, "state": state, "branch": branch, "worktree": path})
+			return writeJSON(cmd, map[string]any{"kind": "claim", "status": "claimed", "selection": nil, "issue_number": issue, "state": state, "branch": branch, "worktree": path})
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Claimed issue #%d as %s [agent=%s expires=%s]\nBranch: %s\nWorktree: %s\n", issue, owner, state.Lease.Agent, state.Lease.ExpiresAt.Format(time.RFC3339), branch, path)
 		return nil

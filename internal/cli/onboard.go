@@ -8,7 +8,8 @@ import (
 )
 
 func newOnboardCmd() *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "onboard",
 		Short: "Print a guide your coding agent can follow to onboard or upgrade this repository",
 		Long: `Print the SwarmOS onboarding guide as a prompt for the coding agent of your
@@ -26,10 +27,16 @@ guide as the /swarm-onboard slash command.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			guide, err := harness.OnboardingGuide()
 			if err != nil {
+				reportJSONFailure(cmd, asJSON, "onboard", err)
 				return err
+			}
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "onboard", "guide": guide})
 			}
 			_, err = fmt.Fprint(cmd.OutOrStdout(), guide)
 			return err
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit the onboarding guide as JSON")
+	return cmd
 }

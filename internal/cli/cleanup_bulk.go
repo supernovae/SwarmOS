@@ -99,7 +99,7 @@ func runBulkCleanup(cmd *cobra.Command, opts *RootOptions, args []string, apply,
 	summary, runErr = executeBulkCleanup(cmd.Context(), opts.resolveRepoRoot(), tr, m, apply)
 	rendered = true
 	if !asJSON {
-		renderBulkCleanup(cmd.OutOrStdout(), summary)
+		renderIssueCleanupSummary(cmd.OutOrStdout(), summary, "swarm issue cleanup --all-merged"+outputSelectors(opts), "swarm issue status"+outputSelectors(opts))
 	}
 	return runErr
 }
@@ -247,4 +247,53 @@ func renderBulkCleanup(w io.Writer, s *bulkCleanupSummary) {
 	}
 	t := s.Totals
 	fmt.Fprintf(w, "total: issues=%d failed_issues=%d unresolved=%d eligible=%d retired=%d retained=%d failed=%d\n", len(s.Issues), s.FailedIssues, len(s.Unresolved), t.Eligible, t.Retired, t.Retained, t.Failed)
+}
+
+// Task counts are separate from the resource counts in the JSON report.
+func renderIssueCleanupSummary(w io.Writer, s *bulkCleanupSummary, next, status string) {
+	ready, cleaned, keptCount, failed := 0, 0, 0, 0
+	var kept reasonTally
+	for _, i := range s.Issues {
+		switch {
+		case i.Error != "" || i.Counts.Failed > 0:
+			failed++
+			fmt.Fprintf(w, "issue #%d: failed: %s (%d resources cleaned)\n", i.IssueNumber, i.Error, i.Counts.Retired)
+		case i.Counts.Eligible > 0:
+			ready++
+			fmt.Fprintf(w, "issue #%d: ready\n", i.IssueNumber)
+		case i.Counts.Retired > 0:
+			cleaned++
+			fmt.Fprintf(w, "issue #%d: cleaned\n", i.IssueNumber)
+		default:
+			keptCount++
+			reason := i.Blocked
+			for _, r := range i.Resources {
+				if reason == "" && r.Disposition == "retained" {
+					reason = r.Reason
+				}
+			}
+			kept.add(reason)
+		}
+	}
+	fmt.Fprintf(w, "Tasks: %d ready, %d cleaned, %d kept, %d failed\n", ready, cleaned, keptCount, failed)
+	kept.render(w, "  ")
+	if len(s.Unresolved) > 0 {
+		var other reasonTally
+		for _, u := range s.Unresolved {
+			other.add(u.Reason)
+		}
+		fmt.Fprintf(w, "Other worktrees: %d left alone\n", len(s.Unresolved))
+		other.render(w, "  ")
+	}
+	if s.Error != "" && len(s.Issues) == 0 {
+		fmt.Fprintln(w, "Could not inspect tasks: "+s.Error)
+	}
+	if s.Mode != "apply" {
+		if ready > 0 {
+			next += " --apply"
+		} else {
+			next = status
+		}
+	}
+	fmt.Fprintln(w, "Next: "+next)
 }

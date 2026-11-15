@@ -188,11 +188,11 @@ func TestArchiveBulkCLI(t *testing.T) {
 				if issue.Issue != i+1 || issue.Eligible != eligible || issue.Status != status || issue.CommitterTime == nil || !issue.CommitterTime.Equal(stamp) || issue.Cutoff == nil || !issue.Cutoff.Equal(cutoff) || issue.AfterDays != 30 || issue.StateTip != f.git(f.project, "rev-parse", layout.StateRef(i+1)) {
 					t.Fatalf("candidate %d age evidence: %+v", i+1, issue)
 				}
-				if !strings.Contains(human, fmt.Sprintf("#%d: %s eligible=%t tip=%s", issue.Issue, issue.Status, issue.Eligible, issue.StateTip)) {
+				if !strings.Contains(human, fmt.Sprintf("#%d: %s", issue.Issue, issue.Status)) {
 					t.Fatalf("human/JSON mismatch: %s", human)
 				}
 			}
-			if !strings.Contains(human, fmt.Sprintf("totals: %+v", r.Totals)) {
+			if !strings.Contains(human, fmt.Sprintf("Totals: %d candidates", r.Totals.Candidates)) {
 				t.Fatalf("human totals: %s", human)
 			}
 			if before != inv(f.project) || local != inv(f.root) || db != inv(dest) {
@@ -404,5 +404,58 @@ func TestArchiveBulkJSONPartialFailureRetry(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestArchiveReadableOutput(t *testing.T) {
+	stamp := time.Date(2026, 2, 28, 12, 0, 0, 0, time.UTC)
+	for _, kind := range []string{"archive", "restore"} {
+		for _, apply := range []bool{false, true} {
+			for _, eligible := range []bool{false, true} {
+				for _, bulk := range []bool{false, true} {
+					r := &lease.ArchiveReport{Kind: kind, Issue: 42, Status: "preview", Eligible: eligible, CommitterTime: &stamp, Cutoff: &stamp}
+					if !eligible {
+						r.Checks = []lease.ArchiveCheck{{Name: "lease", Reason: "busy"}}
+					}
+					var all *lease.BulkArchiveReport
+					single := r
+					if bulk {
+						all = &lease.BulkArchiveReport{Issues: []*lease.ArchiveReport{r}, Totals: lease.BulkArchiveTotals{Candidates: 1}}
+						single = nil
+					}
+					var b bytes.Buffer
+					next := "swarm repo archive 42 --to 'file:///archive' --root '/checkout'"
+					if kind == "restore" {
+						next = "swarm repo archive restore 42 --root '/checkout'"
+					}
+					renderArchiveOutput(&b, single, all, apply, next, "swarm issue status")
+					text := b.String()
+					for _, want := range []string{"#42: preview", "Committed: 2026-02-28; cutoff: 2026-02-28", "Next:"} {
+						if !strings.Contains(text, want) {
+							t.Fatal(text)
+						}
+					}
+					for _, bad := range []string{"12:00", "UTC", "eligible=", "<nil>", "{Candidates:"} {
+						if strings.Contains(text, bad) {
+							t.Fatal(text)
+						}
+					}
+					if strings.Contains(text, "--apply") != (!apply && eligible) {
+						t.Fatal(text)
+					}
+					if (apply || eligible) && !strings.Contains(text, next) {
+						t.Fatal(text)
+					}
+					if !eligible && !strings.Contains(text, "1 kept: busy") {
+						t.Fatal(text)
+					}
+				}
+			}
+		}
+	}
+	var b bytes.Buffer
+	renderArchiveOutput(&b, &lease.ArchiveReport{Issue: 42, Status: "failed", Error: "transfer interrupted"}, nil, true, "swarm repo archive 42", "swarm issue status")
+	if !strings.Contains(b.String(), "Committed: unavailable; cutoff: unavailable") || !strings.Contains(b.String(), "Failed: transfer interrupted") {
+		t.Fatal(b.String())
 	}
 }

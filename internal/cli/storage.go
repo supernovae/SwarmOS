@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -25,6 +26,7 @@ import (
 func newStorageCmd(opts *RootOptions) *cobra.Command {
 	cmd := &cobra.Command{Use: "storage", Short: "Inspect and clean up Swarm-managed host storage"}
 	jsonOutput := false
+	details := false
 	report := &cobra.Command{Use: "report", Short: "Report storage observations without changing storage or workflow state", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		cache, err := os.UserCacheDir()
 		if err != nil {
@@ -66,50 +68,127 @@ func newStorageCmd(opts *RootOptions) *cobra.Command {
 			}
 			return visitor, nil
 		}})
-		if err := renderStorageReport(cmd.OutOrStdout(), snapshot, jsonOutput); err != nil {
+		if err := renderStorageReport(cmd.OutOrStdout(), snapshot, jsonOutput, details, storageReportNext(opts, details)); err != nil {
 			return err
 		}
 		return scanErr
 	}}
 	report.Flags().BoolVar(&jsonOutput, "json", false, "Print a JSON snapshot including unknown and incomplete observations")
+	report.Flags().BoolVar(&details, "details", false, "List every resource and its observations")
 	cmd.AddCommand(report, newStorageCleanupCmd(opts))
 	return cmd
 }
-func renderStorageReport(w io.Writer, s storage.Snapshot, asJSON bool) error {
+func renderStorageReport(w io.Writer, s storage.Snapshot, asJSON, details bool, next string) error {
 	if asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(s)
 	}
-	if _, err := fmt.Fprintf(w, "Storage report: complete=%t\nScope: %s\nAllocated bytes are observations, not reclaimable savings. Unknown use evidence retains storage.\n", s.Complete, s.Scope); err != nil {
-		return err
-	}
-	for _, reason := range s.Reasons {
-		if _, err := fmt.Fprintf(w, "INCOMPLETE: %s\n", reason); err != nil {
-			return err
-		}
-	}
-	number := func(v *int64) string {
-		if v == nil {
-			return "unknown"
-		}
-		return strconv.FormatInt(*v, 10)
-	}
-	for _, r := range s.Resources {
-		active := "unknown"
-		if r.Active != nil {
-			active = strconv.FormatBool(*r.Active)
-		}
-		last := "unknown"
-		if r.LastUse != nil {
-			last = r.LastUse.UTC().Format("2006-01-02T15:04:05Z")
-		}
-		if _, err := fmt.Fprintf(w, "%s owner=%q repository=%q path=%q ref=%q\n  logical=%s allocated=%s active=%s last-use=%s eligibility=%s\n  %s; evidence=%s; usage=%s\n", r.Class, r.Owner, r.Repository, r.Path, r.Ref, number(r.LogicalBytes), number(r.AllocatedBytes), active, last, r.Eligibility, r.Reason, r.Evidence, r.UsageReason); err != nil {
-			return err
-		}
-	}
-	_, err := fmt.Fprintf(w, "Resources: %d; entries observed: %d; unique allocated bytes: %s (partial observed: %d)\n", len(s.Resources), s.Counters.Entries, number(s.UniqueAllocatedBytes), s.ObservedAllocatedBytes)
+	var text bytes.Buffer
+	renderStorageSummary(&text, s, details)
+	fmt.Fprintf(&text, "Next: %s\n", next)
+	_, err := w.Write(text.Bytes())
 	return err
+}
+
+func storageReportNext(opts *RootOptions, details bool) string {
+	next := "swarm storage report --details"
+	if details {
+		next = "swarm storage cleanup"
+	}
+	return next + outputSelectors(opts)
+}
+
+func outputSelectors(opts *RootOptions) string {
+	s := ""
+	if opts.RepoRoot != "" {
+		s += " --root " + shellArg(opts.RepoRoot)
+	}
+	if opts.UpstreamRemote != "" {
+		s += " --upstream-remote " + shellArg(opts.UpstreamRemote)
+	}
+	if opts.Repo != "" {
+		s += " --repo " + shellArg(opts.Repo)
+	}
+	return s
+}
+func shellArg(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
+
+func observedBytes(n *int64) string {
+	if n == nil {
+		return "unknown"
+	}
+	return humanBytes(*n)
+}
+func renderStorageSummary(w io.Writer, s storage.Snapshot, details bool) {
+	fmt.Fprintf(w, "Storage report\nScope: %s\n", s.Scope)
+	type total struct {
+		count, unknownLogical, unknownAllocated int
+		logical, allocated                      int64
+	}
+	classes := map[string]*total{}
+	var kept reasonTally
+	for _, r := range s.Resources {
+		t := classes[r.Class]
+		if t == nil {
+			t = &total{}
+			classes[r.Class] = t
+		}
+		t.count++
+		if r.LogicalBytes == nil {
+			t.unknownLogical++
+		} else {
+			t.logical += *r.LogicalBytes
+		}
+		if r.AllocatedBytes == nil {
+			t.unknownAllocated++
+		} else {
+			t.allocated += *r.AllocatedBytes
+		}
+		if r.Eligibility != "eligible" {
+			kept.add(r.Reason)
+		}
+	}
+	keys := []string{}
+	for k := range classes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		t := classes[k]
+		fmt.Fprintf(w, "  %s: %d resources; logical %s observed (%d unknown); allocated %s observed (%d unknown)\n", k, t.count, humanBytes(t.logical), t.unknownLogical, humanBytes(t.allocated), t.unknownAllocated)
+	}
+	fmt.Fprintf(w, "Resources: %d; unique allocated: %s; partial observed: %s\nAllocated sizes are observations, not reclaimable savings.\n", len(s.Resources), observedBytes(s.UniqueAllocatedBytes), humanBytes(s.ObservedAllocatedBytes))
+	kept.render(w, "  ")
+	if !s.Complete || len(s.Reasons) > 0 {
+		fmt.Fprintln(w, "Report incomplete:")
+		seen := map[string]bool{}
+		for _, r := range s.Reasons {
+			if !seen[r] {
+				fmt.Fprintln(w, "  "+r)
+				seen[r] = true
+			}
+		}
+	}
+	if details {
+		for _, r := range s.Resources {
+			fmt.Fprintf(w, "%s: %s; %s\n", r.Class, r.Eligibility, r.Reason)
+			for _, v := range []struct{ name, value string }{{"owner", r.Owner}, {"repository", r.Repository}, {"path", r.Path}, {"ref", r.Ref}, {"evidence", r.Evidence}, {"usage", r.UsageReason}} {
+				if v.value != "" {
+					fmt.Fprintf(w, "  %s: %s\n", v.name, v.value)
+				}
+			}
+			active := "unknown"
+			if r.Active != nil {
+				active = fmt.Sprint(*r.Active)
+			}
+			last := "unknown"
+			if r.LastUse != nil {
+				last = r.LastUse.UTC().Format("2006-01-02")
+			}
+			fmt.Fprintf(w, "  logical: %s; allocated: %s; active: %s; last use: %s\n", observedBytes(r.LogicalBytes), observedBytes(r.AllocatedBytes), active, last)
+		}
+	}
 }
 
 type storageCleanupReport struct {

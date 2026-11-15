@@ -8,7 +8,9 @@ import (
 	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"io"
 	"strings"
+	"time"
 )
 
 func newArchiveCmd(opts *RootOptions) *cobra.Command {
@@ -73,29 +75,26 @@ func newArchiveCmd(opts *RootOptions) *cobra.Command {
 				report, err = m.RestoreIssueArchive(cmd.Context(), n, apply)
 			} else if all {
 				bulk, err = m.ArchiveAllEligible(cmd.Context(), policy, destination, apply)
-				if !asJSON && bulk != nil {
-					for _, r := range bulk.Issues {
-						fmt.Fprintf(cmd.OutOrStdout(), "#%d: %s eligible=%t tip=%s committer=%v cutoff=%v after_days=%d %s\n", r.Issue, r.Status, r.Eligible, r.StateTip, r.CommitterTime, r.Cutoff, r.AfterDays, r.Error)
-						for _, c := range r.Checks {
-							fmt.Fprintf(cmd.OutOrStdout(), "  %s: eligible=%t: %s\n", c.Name, c.Eligible, c.Reason)
-						}
-					}
-					fmt.Fprintf(cmd.OutOrStdout(), "totals: %+v\n", bulk.Totals)
-				}
 			} else {
 				report, err = m.ArchivePolicyIssue(cmd.Context(), n, policy, destination, apply)
 			}
-			if !asJSON && report != nil {
-				for _, c := range report.Checks {
-					fmt.Fprintf(cmd.OutOrStdout(), "%s: eligible=%t: %s\n", c.Name, c.Eligible, c.Reason)
+			if !asJSON {
+				next := "swarm repo archive"
+				if restore {
+					next += " restore"
 				}
-				for _, r := range report.Refs {
-					fmt.Fprintf(cmd.OutOrStdout(), "%s %s -> %s\n", r.SHA, r.Source, r.Destination)
+				if all {
+					next += " --all-eligible"
+				} else {
+					next += fmt.Sprintf(" %d", n)
 				}
-				if err == nil {
-					fmt.Fprintln(cmd.OutOrStdout(), report.Status)
+				if destination != "" {
+					next += " --to " + shellArg(destination)
 				}
+				next += outputSelectors(opts)
+				renderArchiveOutput(cmd.OutOrStdout(), report, bulk, apply, next, "swarm issue status"+outputSelectors(opts))
 			}
+
 			return err
 		}}
 		cmd.Flags().BoolVar(&apply, "apply", false, "Apply the verified ledger transfer")
@@ -162,4 +161,60 @@ func resolveArchiveRun(cmd *cobra.Command, opts *RootOptions, apply bool) (*leas
 		m.SetNowFunc(opts.nowFn)
 	}
 	return m, policy, nil
+}
+
+func archiveDate(t *time.Time) string {
+	if t == nil {
+		return "unavailable"
+	}
+	return t.Format("2006-01-02")
+}
+func renderArchiveOutput(w io.Writer, report *lease.ArchiveReport, bulk *lease.BulkArchiveReport, apply bool, next, status string) {
+	reports := []*lease.ArchiveReport{}
+	if bulk != nil {
+		reports = bulk.Issues
+	} else if report != nil {
+		reports = append(reports, report)
+	} else {
+		return
+	}
+	ready := false
+	var kept reasonTally
+	for _, r := range reports {
+		fmt.Fprintf(w, "#%d: %s\n", r.Issue, r.Status)
+		if r.StateTip != "" {
+			fmt.Fprintln(w, "  State tip: "+r.StateTip)
+		}
+		fmt.Fprintf(w, "  Committed: %s; cutoff: %s\n", archiveDate(r.CommitterTime), archiveDate(r.Cutoff))
+		if r.Error != "" {
+			fmt.Fprintln(w, "  Failed: "+r.Error)
+		}
+		if r.Eligible && r.Error == "" {
+			ready = true
+		}
+		for _, c := range r.Checks {
+			if !c.Eligible {
+				kept.add(c.Reason)
+			}
+		}
+		for _, ref := range r.Refs {
+			fmt.Fprintf(w, "  %s %s -> %s\n", ref.SHA, ref.Source, ref.Destination)
+		}
+	}
+	kept.render(w, "  ")
+	if bulk != nil {
+		t := bulk.Totals
+		fmt.Fprintf(w, "Totals: %d candidates, %d eligible, %d previewed, %d archived, %d kept, %d failed\n", t.Candidates, t.Eligible, t.Previewed, t.Archived, t.Skipped, t.Failed)
+		if bulk.Error != "" {
+			fmt.Fprintln(w, "Failed: "+bulk.Error)
+		}
+	}
+	if !apply {
+		if ready {
+			next += " --apply"
+		} else {
+			next = status
+		}
+	}
+	fmt.Fprintln(w, "Next: "+next)
 }

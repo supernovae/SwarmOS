@@ -1394,3 +1394,24 @@ func TestCleanupLocalBuildRetention(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanupSummaryOutput(t *testing.T) {
+	f, n, _ := cleanupLocalFixture(t)
+	for _, apply := range []bool{false, true} {
+		args := []string{"issue", "cleanup", strconv.Itoa(n)}
+		if apply {
+			args = append(args, "--apply")
+		}
+		out, err := f.run(args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "1 ready, 0 cleaned"
+		if apply {
+			want = "0 ready, 1 cleaned"
+		}
+		if !strings.Contains(out, want) || strings.Contains(out, "eligible=") || strings.Contains(out, "expected=") || strings.Count(out, "Next:") != 1 {
+			t.Fatal(out)
+		}
+	}
+}

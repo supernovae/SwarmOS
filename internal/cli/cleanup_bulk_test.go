@@ -263,7 +263,7 @@ func TestCleanupBulkPreviewReadOnly(t *testing.T) {
 	if s.Totals.Eligible != 4 || s.Totals.Retired != 0 || s.Totals.Failed != 0 {
 		t.Fatalf("totals: %+v", s.Totals)
 	}
-	for _, want := range []string{"advisory", "issue #" + strconv.Itoa(x.merged.issue), "eligible=4", "unresolved worktree " + x.orphanDir, "total: issues=4"} {
+	for _, want := range []string{"issue #" + strconv.Itoa(x.merged.issue), "ready", "Other worktrees: 1 left alone", "Tasks:"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("text output lacks %q:\n%s", want, text)
 		}
@@ -297,7 +297,7 @@ func TestCleanupBulkApplyMixed(t *testing.T) {
 	if after := f.state(t, x.merged.issue); after.PRNumber != x.merged.pr || after.Cleanup != nil {
 		t.Fatalf("authoritative state not retained: %+v", after)
 	}
-	if !strings.Contains(text, "issue #"+strconv.Itoa(x.merged.issue)+" (PR #"+strconv.Itoa(x.merged.pr)+" merged): eligible=0 retired=4 retained=0 failed=0") {
+	if !strings.Contains(text, "issue #"+strconv.Itoa(x.merged.issue)+": cleaned") {
 		t.Fatalf("apply text lacks per-issue counts:\n%s", text)
 	}
 	if !strings.Contains(text, "blocking path") {
@@ -378,10 +378,10 @@ func TestCleanupBulkApplyFailureAfterPartialRetirement(t *testing.T) {
 		t.Fatalf("injected failure lost identity: %v", err)
 	}
 	for _, want := range []string{
-		"issue #" + strconv.Itoa(first.issue) + " (PR #" + strconv.Itoa(first.pr) + " merged): eligible=0 retired=3 retained=0 failed=1",
-		"error: finish CAS lost",
-		"issue #" + strconv.Itoa(last.issue) + " (PR #" + strconv.Itoa(last.pr) + " merged): eligible=0 retired=4 retained=0 failed=0",
-		"failed_issues=1",
+		"issue #" + strconv.Itoa(first.issue) + ": failed:",
+		"failed: finish CAS lost (3 resources cleaned)",
+		"issue #" + strconv.Itoa(last.issue) + ": cleaned",
+		"1 failed",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
@@ -466,6 +466,41 @@ func TestCleanupBulkArguments(t *testing.T) {
 		_, err := f.run(append([]string{"issue", "cleanup"}, tc.args...)...)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%v: got %v, want %q", tc.args, err, tc.want)
+		}
+	}
+}
+
+func TestCleanupBulkSummaryOutput(t *testing.T) {
+	for _, mode := range []string{"preview", "apply"} {
+		for _, tc := range []struct {
+			name      string
+			issues    []bulkCleanupIssue
+			want      string
+			applyNext bool
+		}{
+			{"empty", nil, "0 ready, 0 cleaned, 0 kept, 0 failed", false},
+			{"ready", []bulkCleanupIssue{{IssueNumber: 1, Counts: bulkCleanupCounts{Eligible: 4}}}, "1 ready, 0 cleaned, 0 kept, 0 failed", true},
+			{"kept", []bulkCleanupIssue{{Blocked: "busy"}, {Blocked: "busy"}}, "0 ready, 0 cleaned, 2 kept, 0 failed", false},
+			{"cleaned", []bulkCleanupIssue{{Counts: bulkCleanupCounts{Retired: 4}}}, "0 ready, 1 cleaned, 0 kept, 0 failed", false},
+			{"partial", []bulkCleanupIssue{{IssueNumber: 42, Error: "lost fence", Counts: bulkCleanupCounts{Retired: 3, Failed: 1, Eligible: 1}}}, "0 ready, 0 cleaned, 0 kept, 1 failed", false},
+		} {
+			t.Run(mode+tc.name, func(t *testing.T) {
+				var b bytes.Buffer
+				renderIssueCleanupSummary(&b, &bulkCleanupSummary{Mode: mode, Issues: tc.issues}, "swarm issue cleanup --all-merged", "swarm issue status")
+				text := b.String()
+				if !strings.Contains(text, tc.want) || strings.Contains(text, "=") {
+					t.Fatal(text)
+				}
+				if strings.Contains(text, "--apply") != (mode == "preview" && tc.applyNext) {
+					t.Fatal(text)
+				}
+				if tc.name == "kept" && !strings.Contains(text, "2 kept: busy") {
+					t.Fatal(text)
+				}
+				if tc.name == "partial" && !strings.Contains(text, "issue #42: failed: lost fence (3 resources cleaned)") {
+					t.Fatal(text)
+				}
+			})
 		}
 	}
 }

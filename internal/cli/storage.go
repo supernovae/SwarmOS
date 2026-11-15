@@ -30,17 +30,26 @@ func newStorageCmd(opts *RootOptions) *cobra.Command {
 	report := &cobra.Command{Use: "report", Short: "Report storage observations without changing storage or workflow state", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		cache, err := os.UserCacheDir()
 		if err != nil {
+			reportJSONFailure(cmd, jsonOutput, "storage-report", err)
 			return err
 		}
 		root := opts.RepoRoot
 		if root != "" {
 			root, err = filepath.Abs(root)
 			if err != nil {
+				reportJSONFailure(cmd, jsonOutput, "storage-report", err)
+				return err
+			}
+		}
+		if jsonOutput && root != "" {
+			if err := validateStorageReportRoot(root); err != nil {
+				reportJSONFailure(cmd, true, "storage-report", err)
 				return err
 			}
 		}
 		useRoot, err := storageuse.ControlRoot()
 		if err != nil {
+			reportJSONFailure(cmd, jsonOutput, "storage-report", err)
 			return err
 		}
 		snapshot, scanErr := storage.Scan(cmd.Context(), storage.Options{UseRoot: useRoot, RegistryPath: opts.registryPath(), CacheRoot: filepath.Join(cache, "swarm"), ScratchRoot: os.TempDir(), SelectedRoot: root, Repository: opts.Repo, Tracker: func(owner, root, backend string) (tracker.PullRequestVisitor, error) {
@@ -68,6 +77,17 @@ func newStorageCmd(opts *RootOptions) *cobra.Command {
 			}
 			return visitor, nil
 		}})
+		if jsonOutput && scanErr != nil {
+			if err := writeJSON(cmd, struct {
+				Kind   string `json:"kind"`
+				Status string `json:"status"`
+				Error  string `json:"error"`
+				storage.Snapshot
+			}{"storage-report", "failed", scanErr.Error(), snapshot}); err != nil {
+				return err
+			}
+			return scanErr
+		}
 		if err := renderStorageReport(cmd.OutOrStdout(), snapshot, jsonOutput, details, storageReportNext(opts, details)); err != nil {
 			return err
 		}
@@ -82,7 +102,10 @@ func renderStorageReport(w io.Writer, s storage.Snapshot, asJSON, details bool, 
 	if asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(s)
+		return enc.Encode(struct {
+			Kind string `json:"kind"`
+			storage.Snapshot
+		}{"storage-report", s})
 	}
 	var text bytes.Buffer
 	renderStorageSummary(&text, s, details)
@@ -192,6 +215,7 @@ func renderStorageSummary(w io.Writer, s storage.Snapshot, details bool) {
 }
 
 type storageCleanupReport struct {
+	Kind       string                       `json:"kind"`
 	Version    int                          `json:"version"`
 	Mode       string                       `json:"mode"`
 	Scopes     []storage.SelectedRepository `json:"scopes"`
@@ -205,7 +229,7 @@ type storageCleanupReport struct {
 func newStorageCleanupCmd(opts *RootOptions) *cobra.Command {
 	var apply, asJSON, all, details bool
 	cmd := &cobra.Command{Use: "cleanup", Short: "Preview, or with --apply remove, finished task worktrees and idle Swarm caches", RunE: func(cmd *cobra.Command, args []string) (runErr error) {
-		report := storageCleanupReport{Host: storage.ReclamationReport{Resources: []storage.ReclamationResult{}}, Version: 1, Mode: "preview", Scopes: []storage.SelectedRepository{}, Tasks: []*bulkCleanupSummary{}, Incomplete: []string{}, Errors: []string{}}
+		report := storageCleanupReport{Host: storage.ReclamationReport{Resources: []storage.ReclamationResult{}}, Kind: "storage-cleanup", Version: 2, Mode: "preview", Scopes: []storage.SelectedRepository{}, Tasks: []*bulkCleanupSummary{}, Incomplete: []string{}, Errors: []string{}}
 		if apply {
 			report.Mode = "apply"
 		}
@@ -482,3 +506,22 @@ type storageUpstreamPreview struct {
 }
 
 func (t *storageUpstreamPreview) UpstreamRepo() string { return t.owner }
+
+func validateStorageReportRoot(root string) error {
+	f, err := os.Open(root)
+	if err != nil {
+		return fmt.Errorf("selected storage root: %w", err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("selected storage root: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("selected storage root %q is not a directory", root)
+	}
+	if _, err = f.Readdirnames(1); err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read selected storage root: %w", err)
+	}
+	return nil
+}

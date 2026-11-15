@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -214,5 +215,33 @@ func TestCLIPlanRejectsFlagsThatWouldBeIgnored(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("repo plan %s = %v, want %q", args, err, want)
 		}
+	}
+}
+
+type planPublicationFailure struct {
+	tracker.Tracker
+	failure error
+}
+
+func (p planPublicationFailure) CreateComment(context.Context, int, string) (*tracker.Comment, error) {
+	return nil, p.failure
+}
+func TestCLIPlanExportJSONPublicationFailure(t *testing.T) {
+	f := newCLIFixture(t)
+	injected := errors.New("injected summary publication failure")
+	opts := f.options(&RootOptions{RepoRoot: f.root})
+	opts.trackerOverride = planPublicationFailure{f.tracker, injected}
+	c := newRootCmdWithOptions(opts)
+	var out, stderr bytes.Buffer
+	c.SetOut(&out)
+	c.SetErr(&stderr)
+	c.SetArgs([]string{"repo", "plan", "--from", exportRoadmap(t, f), "--apply", "--publish-issue", "1", "--json"})
+	err := c.Execute()
+	if !errors.Is(err, injected) {
+		t.Fatalf("error identity: %v", err)
+	}
+	v := decodeJSONDocument(t, out.String())
+	if v["kind"] != "project-plan" || v["status"] != "failed" || v["report"] == nil || v["error"] != err.Error() {
+		t.Fatal(v)
 	}
 }

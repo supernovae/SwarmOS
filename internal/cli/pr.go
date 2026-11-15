@@ -118,7 +118,7 @@ func newPRActionCmd(rootOpts *RootOptions, operation string) *cobra.Command {
 			classifies := (operation == "work" || operation == "rebase" || operation == "submit") && !opts.Work.InspectOnly
 			tr, manager, _, err := rootOpts.resolveLeaseManager(cmd)
 			if err != nil {
-				reportJSONFailure(cmd, asJSON && classifies, "pr-"+operation, err)
+				reportJSONFailure(cmd, asJSON && (classifies || operation == "status"), "pr-"+operation, err)
 				return err
 			}
 			service := rootOpts.prService(tr, manager)

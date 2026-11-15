@@ -12,11 +12,13 @@ import (
 )
 
 func newForkRequestStatusCmd(o *RootOptions) *cobra.Command {
-	return &cobra.Command{
+	var asJSON bool
+	cmd := &cobra.Command{
 		Use:   "request-status <issue> <request-id>",
 		Short: "Observe the original public fork request without resuming work",
 		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+			defer func() { reportJSONFailure(cmd, asJSON, "fork-request-status", runErr) }()
 			if !o.Fork {
 				return fmt.Errorf("request-status requires --fork")
 			}
@@ -49,8 +51,13 @@ func newForkRequestStatusCmd(o *RootOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if asJSON {
+				return writeJSON(cmd, map[string]any{"kind": "fork-request-status", "issue_number": issue, "request_id": id, "operation": op, "status": "confirmed"})
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Request %d (%s) on issue #%d confirmed by upstream state. Recovery does not resume work, restore a local claim token or repair the local checkpoint.\n", id, op, issue)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "Emit request status as JSON")
+	return cmd
 }

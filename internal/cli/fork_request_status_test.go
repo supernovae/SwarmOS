@@ -40,7 +40,7 @@ func TestForkRequestStatusHelpAndArguments(t *testing.T) {
 				t.Fatalf("local fork must fail for tracker configuration: %v", err)
 			}
 			if args[len(args)-1] == "--help" {
-				if err != nil || !strings.Contains(out.String(), "request-status <issue> <request-id>") || strings.Contains(out.String(), "--event") || strings.Contains(out.String(), "--json") {
+				if err != nil || !strings.Contains(out.String(), "request-status <issue> <request-id>") || strings.Contains(out.String(), "--event") || !strings.Contains(out.String(), "--json") {
 					t.Fatal(err, out.String())
 				}
 			} else if err == nil {
@@ -52,6 +52,11 @@ func TestForkRequestStatusHelpAndArguments(t *testing.T) {
 
 func TestForkRequestStatusStateOnly(t *testing.T) {
 	t.Parallel()
+	assertForkRequestStatusStateOnly(t)
+}
+
+func assertForkRequestStatusStateOnly(t *testing.T) {
+	t.Helper()
 	f := newUpstreamRemoteFixture(t)
 	root := f.aliceClone("request-status")
 	body, err := fork.FormatRequestComment(lease.ForkRequest{Operation: "acquire", IssueNumber: 42, ForkRepo: "alice/swarm"})
@@ -81,6 +86,22 @@ func TestForkRequestStatusStateOnly(t *testing.T) {
 		if err != nil || !strings.Contains(out, "(acquire) on issue #42 confirmed by upstream state") || !strings.Contains(out, "does not resume work, restore a local claim token") || strings.Contains(out, "posted") {
 			t.Fatal(err, out)
 		}
+	}
+
+	cmd := newRootCmdWithOptions(&opts)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--fork", "--upstream-remote", "upstream", "fork-coordinator", "request-status", "42", strconv.FormatInt(c.ID, 10), "--json"})
+	err = cmd.Execute()
+	out := stdout.String()
+	if err != nil {
+		t.Fatal(err, out)
+	}
+	v := decodeJSONDocument(t, out)
+	assertSnakeKeys(t, v)
+	if v["kind"] != "fork-request-status" || v["operation"] != "acquire" || v["status"] != "confirmed" {
+		t.Fatal(v)
 	}
 	if f.refs() != before || f.postedComments() != posted {
 		t.Fatal("recovery mutated upstream")

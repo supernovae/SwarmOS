@@ -255,7 +255,7 @@ func TestStorageCleanupPreviewApplyAndJSON(t *testing.T) {
 	if err = json.Unmarshal([]byte(stdout), &report); err != nil {
 		t.Fatal(err, stdout)
 	}
-	if report.Version != 1 || report.Mode != "preview" || len(report.Tasks) != 1 || report.Totals.Eligible == 0 {
+	if report.Version != 2 || report.Mode != "preview" || len(report.Tasks) != 1 || report.Totals.Eligible == 0 {
 		t.Fatalf("%+v", report)
 	}
 	if after := snapshot(); !reflect.DeepEqual(before, after) {

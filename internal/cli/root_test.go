@@ -1,9 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"github.com/spf13/cobra"
+	"github.com/supernovae/swarmos/internal/storage"
+	"github.com/supernovae/swarmos/internal/storageuse"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -154,5 +161,204 @@ func TestInternalNativeCommandRegistration(t *testing.T) {
 	}
 	if err = root.PersistentPreRunE(public, nil); err == nil {
 		t.Fatal("native exemption leaked to public command")
+	}
+}
+
+func decodeJSONDocument(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	d := json.NewDecoder(strings.NewReader(raw))
+	var v map[string]any
+	if err := d.Decode(&v); err != nil {
+		t.Fatalf("decode: %v: %s", err, raw)
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		t.Fatalf("extra output: %v: %s", err, raw)
+	}
+	return v
+}
+func TestRunnableLeavesHaveJSON(t *testing.T) {
+	root := NewRootCmd()
+	root.InitDefaultHelpCmd()
+	root.InitDefaultCompletionCmd()
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.Hidden || c.Name() == "help" || c.Name() == "completion" {
+			return
+		}
+		if c.Runnable() && len(c.Commands()) == 0 {
+			flag := c.Flags().Lookup("json")
+			if flag == nil {
+				flag = c.InheritedFlags().Lookup("json")
+			}
+			if flag == nil || flag.Value.Type() != "bool" {
+				t.Errorf("%s lacks boolean --json", c.CommandPath())
+			}
+		}
+		for _, child := range c.Commands() {
+			walk(child)
+		}
+	}
+	walk(root)
+}
+func TestJSONEarlyCommandFailures(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", base)
+	file := filepath.Join(base, "file")
+	if err := os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, kind string
+		args       []string
+	}{
+		{"plan", "project-plan", []string{"repo", "plan"}},
+		{"missing", "storage-report", []string{"storage", "report", "--root", filepath.Join(base, "missing")}},
+		{"file", "storage-report", []string{"storage", "report", "--root", file}},
+		{"pr", "pr-status", []string{"pr", "status", "1", "--root", base}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewRootCmd()
+			if tc.kind == "storage-cleanup" {
+				f := newCLIFixture(t)
+				bulkMerged(t, f)
+				t.Setenv("TMPDIR", t.TempDir())
+				c = newRootCmdWithOptions(f.options(&RootOptions{RepoRoot: f.root}))
+				tc.args = []string{"storage", "cleanup"}
+			}
+			var out, stderr bytes.Buffer
+			c.SetOut(&out)
+			c.SetErr(&stderr)
+			c.SetArgs(append(tc.args, "--json"))
+			err := c.Execute()
+			if err == nil || ExitCode(err) == 0 {
+				t.Errorf("expected nonzero error, got %v", err)
+			}
+			v := decodeJSONDocument(t, out.String())
+			if v["kind"] != tc.kind || v["status"] != "failed" || v["error"] == "" || v["error"] == nil {
+				t.Fatalf("failure: %v", v)
+			}
+			if err != nil && v["error"] != err.Error() {
+				t.Fatalf("error changed: %v %v", v, err)
+			}
+		})
+	}
+	for _, root := range []string{filepath.Join(base, "missing"), file, base} {
+		c := NewRootCmd()
+		var out bytes.Buffer
+		c.SetOut(&out)
+		c.SetArgs([]string{"storage", "report", "--root", root})
+		if err := c.Execute(); err != nil || !strings.Contains(out.String(), "Storage report:") {
+			t.Fatalf("text changed: %v %s", err, out.String())
+		}
+	}
+}
+
+func assertSnakeKeys(t *testing.T, v any) {
+	t.Helper()
+	switch x := v.(type) {
+	case map[string]any:
+		for k, v := range x {
+			if !regexp.MustCompile("^[a-z][a-z0-9]*(_[a-z0-9]+)*$").MatchString(k) {
+				t.Errorf("non snake_case key: %s", k)
+			}
+			assertSnakeKeys(t, v)
+		}
+	case []any:
+		for _, v := range x {
+			assertSnakeKeys(t, v)
+		}
+	}
+}
+func TestJSONNamedCommandDocuments(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", base)
+	for _, tc := range []struct {
+		kind string
+		args []string
+	}{
+		{"fork-request-status", nil},
+		{"onboard", []string{"repo", "onboard"}},
+		{"storage-report", []string{"storage", "report", "--root", base}},
+		{"storage-cleanup", []string{"storage", "cleanup", "--root", base}},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			if tc.kind == "fork-request-status" {
+				assertForkRequestStatusStateOnly(t)
+				return
+			}
+			c := NewRootCmd()
+			if tc.kind == "storage-cleanup" {
+				f := newCLIFixture(t)
+				bulkMerged(t, f)
+				t.Setenv("TMPDIR", t.TempDir())
+				c = newRootCmdWithOptions(f.options(&RootOptions{RepoRoot: f.root}))
+				tc.args = []string{"storage", "cleanup"}
+			}
+			var out, stderr bytes.Buffer
+			c.SetOut(&out)
+			c.SetErr(&stderr)
+			c.SetArgs(append(tc.args, "--json"))
+			if err := c.Execute(); err != nil {
+				t.Fatalf("%v: %s", err, stderr.String())
+			}
+			v := decodeJSONDocument(t, out.String())
+			if v["kind"] != tc.kind {
+				t.Fatal(v)
+			}
+			assertSnakeKeys(t, v)
+			if tc.kind == "storage-cleanup" && v["version"] != float64(2) {
+				t.Fatal(v)
+			}
+		})
+	}
+	n := int64(42)
+	report := storageCleanupReport{Kind: "storage-cleanup", Version: 2, Scopes: []storage.SelectedRepository{{}}, Host: storage.ReclamationReport{
+		DiscoveryReasons: []string{"fixture"}, Resources: []storage.ReclamationResult{{Resource: storageuse.Resource{Repository: "repo", Identity: "id", Location: "path"}, Before: storage.UsageObservation{LogicalBytes: &n, AllocatedBytes: &n}, ObservedLogicalDelta: &n}},
+	}}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := decodeJSONDocument(t, string(raw))
+	assertSnakeKeys(t, v)
+	host := v["host"].(map[string]any)
+	resource := host["resources"].([]any)[0].(map[string]any)["resource"].(map[string]any)
+	if resource["repository"] != "repo" || resource["identity"] != "id" {
+		t.Fatal(resource)
+	}
+}
+func TestJSONClaimShapes(t *testing.T) {
+	var previous map[string]bool
+	for _, next := range []bool{false, true} {
+		f := newCLIFixture(t)
+		number := f.create(t, "agent")
+		n := strconv.Itoa(number)
+		f.must(t, "issue", "approve", n)
+		args := []string{"issue", "claim", n, "--agent", "mock", "--json"}
+		if next {
+			f.must(t, "repo", "add", "octo/repo", f.root)
+			args = []string{"issue", "claim", "--next", "--all", "--agent", "mock", "--json"}
+		}
+		v := decodeJSONDocument(t, f.must(t, args...))
+		keys := map[string]bool{}
+		for k := range v {
+			keys[k] = true
+		}
+		if previous != nil && !reflect.DeepEqual(keys, previous) {
+			t.Fatalf("keys differ: %v %v", keys, previous)
+		}
+		previous = keys
+		if v["kind"] != "claim" || v["status"] != "claimed" || v["issue_number"] != float64(number) || v["branch"] == "" || v["worktree"] == "" || v["state"] == nil {
+			t.Fatal(v)
+		}
+		if next {
+			sel := v["selection"].(map[string]any)
+			if sel["BranchName"] != v["branch"] || sel["WorktreePath"] != v["worktree"] {
+				t.Fatal(v)
+			}
+		} else if v["selection"] != nil {
+			t.Fatal(v)
+		}
 	}
 }

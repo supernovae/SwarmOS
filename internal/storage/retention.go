@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -265,7 +266,11 @@ func (s *scanner) retention(owner, root string, start int) {
 
 // RepositoryScope is supplied by the coordinator, never by a registration.
 // CommonDirectory must match Git's independently observed canonical identity.
-type RepositoryScope struct{ Root, CommonDirectory, Backend string }
+type RepositoryScope struct {
+	Root            string `json:"root"`
+	CommonDirectory string `json:"common_directory"`
+	Backend         string `json:"backend"`
+}
 
 // RetentionEvidence describes one complete coherent authoritative snapshot. In
 // apply it is read freshly under caller-held exact-resource maintenance exclusion
@@ -312,24 +317,49 @@ const (
 // UsageObservation describes managed namespace observations, not physical savings.
 // Nil values mean unknown. Hardlinks and filesystem sharing can prevent freeing
 // any physical space even when the observed allocated bytes disappear.
-type UsageObservation struct{ LogicalBytes, AllocatedBytes *int64 }
+
+type UsageObservation struct {
+	LogicalBytes   *int64 `json:"logical_bytes"`
+	AllocatedBytes *int64 `json:"allocated_bytes"`
+}
 type ReclamationResult struct {
-	Resource                                     storageuse.Resource
-	Outcome                                      ReclamationOutcome
-	Reason                                       string
-	Before, After                                UsageObservation
-	ObservedLogicalDelta, ObservedAllocatedDelta *int64
+	Resource               storageuse.Resource `json:"resource"`
+	Outcome                ReclamationOutcome  `json:"outcome"`
+	Reason                 string              `json:"reason"`
+	Before                 UsageObservation    `json:"before"`
+	After                  UsageObservation    `json:"after"`
+	ObservedLogicalDelta   *int64              `json:"observed_logical_delta"`
+	ObservedAllocatedDelta *int64              `json:"observed_allocated_delta"`
 }
 
-// ReclamationReport totals cover inspected admitted leaves only; retained unknown
-// or outside-scope resources have no size claim.
+func (r ReclamationResult) MarshalJSON() ([]byte, error) {
+	type result ReclamationResult
+	return json.Marshal(struct {
+		result
+		Resource struct {
+			Repository string `json:"repository"`
+			Class      string `json:"class"`
+			Identity   string `json:"identity"`
+			Location   string `json:"location"`
+		} `json:"resource"`
+	}{result: result(r), Resource: struct {
+		Repository string `json:"repository"`
+		Class      string `json:"class"`
+		Identity   string `json:"identity"`
+		Location   string `json:"location"`
+	}{r.Resource.Repository, string(r.Resource.Class), r.Resource.Identity, r.Resource.Location}})
+}
+
+// ReclamationReport totals cover inspected admitted leaves only.
 type ReclamationReport struct {
-	DiscoveryReasons                             []string
-	DiscoveryCounters                            Counters
-	Complete                                     bool
-	Resources                                    []ReclamationResult
-	Before, After                                UsageObservation
-	ObservedLogicalDelta, ObservedAllocatedDelta *int64
+	DiscoveryReasons       []string            `json:"discovery_reasons"`
+	DiscoveryCounters      Counters            `json:"discovery_counters"`
+	Complete               bool                `json:"complete"`
+	Resources              []ReclamationResult `json:"resources"`
+	Before                 UsageObservation    `json:"before"`
+	After                  UsageObservation    `json:"after"`
+	ObservedLogicalDelta   *int64              `json:"observed_logical_delta"`
+	ObservedAllocatedDelta *int64              `json:"observed_allocated_delta"`
 }
 
 // PreviewReclamation observes only existing resources; it creates no admission

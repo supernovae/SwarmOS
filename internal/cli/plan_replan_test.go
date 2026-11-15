@@ -64,6 +64,33 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 		t.Fatalf("cap: %v %s", err, out)
 	}
 	assertPlanReplanCommands326(t, f, issue, err.Error(), true)
+	action := nextActionOf(err)
+	want := []string{"swarm", "--root", f.root, "issue", "review-plan", n, "--reject", "--notes", "Revise the plan"}
+	if action == nil || !action.HumanRequired || !reflect.DeepEqual(action.Argv, want) {
+		t.Fatalf("retry recovery: %+v want %v", action, want)
+	}
+	if !strings.Contains(err.Error(), renderNextAction(action)) {
+		t.Fatal("text and argv differ")
+	}
+	beforeRecovery := f.state(t, issue)
+	raw, jsonErr := f.run("issue", "work", n, "--agent", "mock", "--progress=false", "--json")
+	if !errors.Is(jsonErr, lease.ErrPlanReplanLimit) {
+		t.Fatal(jsonErr)
+	}
+	var envelope struct {
+		NextAction *NextAction `json:"next_action"`
+	}
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(envelope.NextAction, action) {
+		t.Fatalf("JSON action: %s", raw)
+	}
+	afterRecovery := f.state(t, issue)
+	if afterRecovery.Lease.Status != "released" || !reflect.DeepEqual(beforeRecovery.Artifacts, afterRecovery.Artifacts) || !reflect.DeepEqual(beforeRecovery.PlanReviewHistory, afterRecovery.PlanReviewHistory) || afterRecovery.PlanReplanCount != 2 {
+		t.Fatal("recovery changed planning evidence")
+	}
+
 	status := f.must(t, "issue", "status", n)
 	if !strings.Contains(status, "Automatic plan retries: 2/2") || !strings.Contains(status, "CHANGES_REQUESTED") {
 		t.Fatal(status)
@@ -88,7 +115,9 @@ func TestIssuePlanReplanCapAndRecovery(t *testing.T) {
 		t.Fatal("status mutated retry count")
 	}
 	// The capped issue is released so the node must skip it and run another.
-	f.must(t, "issue", "release", n)
+	if f.state(t, issue).Lease.Status != "released" {
+		t.Fatal("retry cap retained claim")
+	}
 	f.must(t, "node", "run", "--agent", "mock", "--max-jobs", "1")
 	other := f.create(t, "agent")
 	f.must(t, "issue", "approve", strconv.Itoa(other))
@@ -350,7 +379,7 @@ func TestPlanReplanHumanRejectionRecovery326(t *testing.T) {
 		}
 	}
 	f.setenv("SWARM_USER", "independent-maintainer")
-	f.must(t, "issue", "review-plan", n, "--reject", "--notes", "Revise reports")
+	f.must(t, "issue", "review-plan", n, "--reject", "--notes", "Revise the plan")
 	rejected := f.state(t, issue)
 	if rejected.PlanReplanCount != 0 || rejected.PendingPlanReview != nil || rejected.NextPhaseReason != "" || rejected.Lease.NextPhase != "" {
 		t.Fatal("human rejection did not clear retry state")
@@ -478,7 +507,7 @@ func TestPlanReviewRoundDisplay(t *testing.T) {
 				if d.OperatorDecision != exhausted || (exhausted && d.NextPhase == "plan") {
 					t.Fatalf("display: %+v", d)
 				}
-				if strings.Contains(strings.Join(d.RecoveryCommands, ";"), "issue stage") != (mode != "agent") {
+				if strings.Contains(strings.Join(d.RecoveryCommands, ";"), "issue stage") != (mode == "interactive") {
 					t.Fatal("invalid staging advice")
 				}
 				// A failed final planner may clear NextPhase without resolving the rejection.

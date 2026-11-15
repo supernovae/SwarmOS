@@ -140,7 +140,7 @@ func assertSplitStop(t *testing.T, res *WorkResult, err error) {
 			t.Fatalf("split stop recorded a FAIL verdict: %+v", a)
 		}
 	}
-	if res.State.Lease.Status == "handoff" {
+	if res.State.ForkRepo == "" && res.State.PRNumber == 0 && res.State.PRRevision == nil && res.State.Lease.Status != "released" {
 		t.Fatalf("split stop handed off the claim: %+v", res.State.Lease)
 	}
 }
@@ -157,7 +157,7 @@ func TestExecuteWorkStopsOnSplitRecommendation(t *testing.T) {
 			t.Setenv("SWARM_MOCK_PLAN_APPEND", splitPlanAppend)
 			res, err := e.ExecuteWork(t.Context(), opts)
 			assertSplitStop(t, res, err)
-			opts.ClaimID = res.State.Lease.ClaimID
+			opts.ClaimID = ""
 			if roles := spy.take(); !slices.Equal(roles, []string{"planner"}) {
 				t.Fatalf("roles run = %v, want only planner", roles)
 			}
@@ -202,9 +202,11 @@ func TestExecuteWorkStopsOnSplitRecommendation(t *testing.T) {
 
 			// A fresh normal plan goes back through the usual gates.
 			opts.Phase = "plan"
-			if _, err := e.ExecuteWork(t.Context(), opts); err != nil {
+			normal, err := e.ExecuteWork(t.Context(), opts)
+			if err != nil {
 				t.Fatal(err)
 			}
+			opts.ClaimID = normal.State.Lease.ClaimID
 			spy.take()
 			opts.Phase = "all"
 			res, err = e.ExecuteWork(t.Context(), opts)
@@ -242,17 +244,19 @@ func TestSplitRecommendationCannotSkipRequiredGate(t *testing.T) {
 			e, tr, issue, spy := splitEngine(t, gate)
 			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "plan", Headless: true}
 			t.Setenv("SWARM_MOCK_PLAN_APPEND", splitPlanAppend)
-			res, err := e.ExecuteWork(t.Context(), opts)
+			_, err := e.ExecuteWork(t.Context(), opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			opts.ClaimID = res.State.Lease.ClaimID
+			opts.ClaimID = ""
 			// Replace the split plan with a normal one, then try to implement
 			// without a review: the gate still refuses.
 			t.Setenv("SWARM_MOCK_PLAN_APPEND", "")
-			if _, err := e.ExecuteWork(t.Context(), opts); err != nil {
+			normal, err := e.ExecuteWork(t.Context(), opts)
+			if err != nil {
 				t.Fatal(err)
 			}
+			opts.ClaimID = normal.State.Lease.ClaimID
 			spy.take()
 			opts.Phase = "implement"
 			_, err = e.ExecuteWork(t.Context(), opts)
@@ -755,7 +759,7 @@ func assertCorrectionStop(t *testing.T, res *WorkResult, err error) {
 			t.Fatalf("correction stop recorded a FAIL verdict: %+v", a)
 		}
 	}
-	if res.State.Lease.Status == "handoff" {
+	if res.State.ForkRepo == "" && res.State.PRNumber == 0 && res.State.PRRevision == nil && res.State.Lease.Status != "released" {
 		t.Fatalf("correction stop handed off the claim: %+v", res.State.Lease)
 	}
 }
@@ -772,7 +776,7 @@ func TestWorkUnitCorrectionInitialStop(t *testing.T) {
 			t.Setenv("SWARM_MOCK_PLAN_APPEND", "WorkUnit correction: required\nSplit recommendation: required")
 			res, err := e.ExecuteWork(t.Context(), opts)
 			assertCorrectionStop(t, res, err)
-			opts.ClaimID = res.State.Lease.ClaimID
+			opts.ClaimID = ""
 			if roles := spy.take(); !slices.Equal(roles, []string{"planner"}) {
 				t.Fatalf("roles run = %v, want only planner", roles)
 			}
@@ -822,9 +826,11 @@ func TestWorkUnitCorrectionInitialStop(t *testing.T) {
 
 			// A fresh normal plan goes back through the usual gates.
 			opts.Phase = "plan"
-			if _, err := e.ExecuteWork(t.Context(), opts); err != nil {
+			normal, err := e.ExecuteWork(t.Context(), opts)
+			if err != nil {
 				t.Fatal(err)
 			}
+			opts.ClaimID = normal.State.Lease.ClaimID
 			spy.take()
 			opts.Phase = "all"
 			res, err = e.ExecuteWork(t.Context(), opts)
@@ -912,14 +918,19 @@ func TestWorkUnitCorrectionRetryStop(t *testing.T) {
 }
 
 func TestWorkUnitCorrectionDirectScope(t *testing.T) {
-	st := &lease.IssueState{Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: WorkUnitCorrectionLine}}}
+	e, _, issue, _ := splitEngine(t, contract.GateAgent)
+	st, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Artifacts = []contract.Artifact{{Type: contract.ArtifactDesign, Body: WorkUnitCorrectionLine}}
 	for _, tc := range []struct {
 		fork bool
 		pr   int
 		want bool
 	}{{false, 0, true}, {true, 0, false}, {false, 7, false}} {
-		r := &workRun{st: st, res: &WorkResult{}, forkMode: tc.fork, opts: WorkOptions{PRNumber: tc.pr}}
-		if got := r.stopForWorkUnitCorrection(); got != tc.want {
+		r := &workRun{e: e, ctx: t.Context(), st: st, res: &WorkResult{}, forkMode: tc.fork, opts: WorkOptions{IssueNumber: issue.Number, Owner: "maintainer", PRNumber: tc.pr}}
+		if got, _ := r.stopForWorkUnitCorrection(); got != tc.want {
 			t.Fatalf("%+v: %t", tc, got)
 		}
 	}
@@ -936,10 +947,80 @@ func TestWorkUnitCorrectionPlanHandoffStops(t *testing.T) {
 }
 
 func TestWorkUnitCorrectionBeforeHumanReview(t *testing.T) {
-	st := &lease.IssueState{HumanPlanReview: &lease.PlanRejection{}, Artifacts: []contract.Artifact{{Type: contract.ArtifactDesign, Body: WorkUnitCorrectionLine}}}
-	r := &workRun{st: st, res: &WorkResult{}, gate: contract.GateHuman}
+	e, _, issue, _ := splitEngine(t, contract.GateHuman)
+	st, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.HumanPlanReview = &lease.PlanRejection{}
+	st.Artifacts = []contract.Artifact{{Type: contract.ArtifactDesign, Body: WorkUnitCorrectionLine}}
+	r := &workRun{e: e, ctx: t.Context(), st: st, res: &WorkResult{}, gate: contract.GateHuman, opts: WorkOptions{IssueNumber: issue.Number, Owner: "maintainer"}}
 	done, err := r.reviewGate()
 	if err != nil || !done || !r.res.WorkUnitCorrectionRequired || r.res.PausedForHuman {
 		t.Fatalf("done=%t err=%v result=%+v", done, err, r.res)
+	}
+}
+
+func TestMaintainerStopReleaseFence(t *testing.T) {
+	for _, mode := range []string{"owner", "stale-token", "wrong-owner", "successor", "unbound", "fork", "pr", "revision"} {
+		t.Run(mode, func(t *testing.T) {
+			e, _, issue, _ := splitEngine(t, contract.GateAgent)
+			_, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st, err := e.LeaseManager.RecordPlanPair(t.Context(), issue.Number, "maintainer", contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock", Summary: "plan", Body: WorkUnitCorrectionLine}, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "mock", Summary: "tests", Body: "tests"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := &workRun{e: e, ctx: t.Context(), st: st, res: &WorkResult{State: st}, opts: WorkOptions{IssueNumber: issue.Number, Owner: "maintainer"}}
+			switch mode {
+			case "stale-token":
+				e.LeaseManager.BindClaim(issue.Number, "stale")
+			case "unbound":
+				e.LeaseManager.BindClaim(issue.Number, "")
+			case "wrong-owner":
+				r.opts.Owner = "other"
+			case "successor":
+				if _, err := e.LeaseManager.Release(t.Context(), issue.Number, "maintainer", "handover"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", time.Hour, 1); err != nil {
+					t.Fatal(err)
+				}
+				e.LeaseManager.BindClaim(issue.Number, st.Lease.ClaimID)
+			case "fork":
+				r.opts.ForkMode = true
+			case "pr":
+				r.opts.PRNumber = 7
+			case "revision":
+				// A PR-associated state is outside the direct-issue lifecycle.
+				r.st.PRNumber = 7
+			}
+			before, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = r.releaseMaintainerStop(t.Context())
+			after, getErr := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if mode == "owner" {
+				if err != nil || after.Lease.Status != "released" || r.res.State.Lease.Status != "released" {
+					t.Fatalf("release: %v %+v", err, after.Lease)
+				}
+				if !reflect.DeepEqual(before.Artifacts, after.Artifacts) || before.PlanReplanCount != after.PlanReplanCount || !reflect.DeepEqual(before.PlanReviewHistory, after.PlanReviewHistory) {
+					t.Fatal("release changed evidence")
+				}
+			} else {
+				if mode != "fork" && mode != "pr" && mode != "revision" && !errors.Is(err, lease.ErrClaimFence) {
+					t.Fatalf("missing fence: %v", err)
+				}
+				if !reflect.DeepEqual(before, after) {
+					t.Fatal("refused or excluded release changed state")
+				}
+			}
+		})
 	}
 }

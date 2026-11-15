@@ -1835,3 +1835,93 @@ func TestAutomaticRetryFailurePrecedence(t *testing.T) {
 		})
 	}
 }
+
+func TestMaintainerStopRetryLimit(t *testing.T) {
+	for _, mode := range []string{"owner", "stale", "unbound", "wrong-owner"} {
+		t.Run(mode, func(t *testing.T) {
+			e, _, issue, _ := splitEngine(t, contract.GateAgent)
+			plans := 0
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					result, err := (&agent.MockRunner{}).Run(ctx, req)
+					if err != nil {
+						return result, err
+					}
+					active := filepath.Join(req.WorktreePath, ".swarm/active")
+					if req.Role == "planner" {
+						plans++
+						for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
+							path := filepath.Join(active, name)
+							b, err := os.ReadFile(path)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if err := os.WriteFile(path, append(b, []byte(fmt.Sprintf("\nRevision %d\n", plans))...), 0600); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					if req.Role == "reviewer" {
+						result.Output = structuredReviewFixture("CHANGES_REQUESTED")
+						if err := os.WriteFile(filepath.Join(active, "REVIEW.md"), []byte(result.Output), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return result, nil
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, IssueContinuation: true}
+			result, err := e.ExecuteWork(t.Context(), opts)
+			if !errors.Is(err, lease.ErrPlanReplanLimit) || result == nil || result.State.Lease.Status != "released" || result.State.PlanReplanCount != 2 {
+				t.Fatalf("continuing stop: %v %+v", err, result)
+			}
+			st, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts.ClaimID = st.Lease.ClaimID
+			switch mode {
+			case "stale":
+				opts.ClaimID = "stale"
+			case "unbound":
+				opts.ClaimID = ""
+				e.LeaseManager.BindClaim(issue.Number, "")
+			case "wrong-owner":
+				opts.Owner = "other"
+			}
+			// Classification must leave even an owned live claim untouched.
+			_, err = e.PreflightForClaim(t.Context(), opts)
+			if !errors.Is(err, lease.ErrPlanReplanLimit) {
+				t.Fatal(err)
+			}
+			after, _ := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("preflight mutated claim")
+			}
+			_, err = e.ExecuteWork(t.Context(), opts)
+			if !errors.Is(err, lease.ErrPlanReplanLimit) {
+				t.Fatalf("lost retry sentinel: %v", err)
+			}
+			after, _ = e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if mode == "owner" {
+				if after.Lease.Status != "released" {
+					t.Fatal("owned preflight stop retained claim")
+				}
+				if !reflect.DeepEqual(before.Artifacts, after.Artifacts) || !reflect.DeepEqual(before.PlanReviewHistory, after.PlanReviewHistory) || before.PlanReplanCount != after.PlanReplanCount {
+					t.Fatal("release changed evidence")
+				}
+			} else {
+				if !errors.Is(err, lease.ErrClaimFence) {
+					t.Fatalf("lost release fence: %v", err)
+				}
+				if !reflect.DeepEqual(before, after) {
+					t.Fatal("unowned stop changed claim")
+				}
+			}
+		})
+	}
+}

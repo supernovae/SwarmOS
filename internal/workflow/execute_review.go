@@ -8,14 +8,14 @@ import (
 )
 
 func (r *workRun) reviewGate() (bool, error) {
-	if r.stopForWorkUnitCorrection() {
-		return true, nil
+	if done, err := r.stopForWorkUnitCorrection(); done {
+		return true, err
 	}
 	if r.st.HumanPlanReview != nil && r.st.ForkRepo == "" && r.st.PRNumber == 0 && r.st.PRRevision == nil {
 		return r.awaitHumanReview()
 	}
-	if r.stopForSplit() {
-		return true, nil
+	if done, err := r.stopForSplit(); done {
+		return true, err
 	}
 	if r.gate == contract.GateHuman && (r.opts.Phase == "review" || r.opts.Phase == "all" && (r.runPlan || lease.VerifyApproval(r.st, r.pre.WorkUnit) != nil)) {
 		return r.awaitHumanReview()

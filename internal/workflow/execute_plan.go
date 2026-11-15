@@ -139,8 +139,11 @@ func (r *workRun) plan() (bool, error) {
 		}
 
 		r.res.State, r.res.PhaseCompleted = r.st, "plan"
-		if r.stopForWorkUnitCorrection() || r.stopForSplit() {
-			return true, nil
+		if done, err := r.stopForWorkUnitCorrection(); done {
+			return true, err
+		}
+		if done, err := r.stopForSplit(); done {
+			return true, err
 		}
 		if done, err := r.finishPlanHandoff(); done {
 			return true, err

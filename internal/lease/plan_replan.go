@@ -445,6 +445,7 @@ func (m *Manager) RecordPlanPair(ctx context.Context, n int, owner string, plan,
 				kept = append(kept, a)
 			}
 		}
+		delete(st.AttemptDiagnostics, "planner")
 		st.Artifacts = append(kept, pair...)
 		markPlanPair(st)
 		st.PlanRetryReservation = nil

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -833,4 +834,172 @@ func TestPreviousAttemptTimeout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPreviousAttemptTimeoutRoleSites(t *testing.T) {
+	for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
+		t.Run(role, func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			// Exercise the ordinary plan review site as part of ExecuteWork.
+			if role == "reviewer" {
+				wu := &contract.WorkUnit{Objective: "Preserve work", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Resume checkpoint"}, Workflow: "feature", Gate: contract.GateAgent}
+				if _, err := e.Tracker.UpdateIssueBody(t.Context(), issue.Number, contract.FormatIssueMarkdown(wu)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := e.LeaseManager.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			mock := &agent.MockRunner{}
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role != role {
+						return mock.Run(ctx, req)
+					}
+					calls++
+					if calls == 1 {
+						return nil, context.DeadlineExceeded
+					}
+					if !strings.Contains(req.TaskPrompt, "previous attempt timed out; it ran for ") {
+						t.Fatalf("missing timeout in %s prompt: %s", role, req.TaskPrompt)
+					}
+					return mock.Run(ctx, req)
+				}}, nil
+			}
+			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+			_, err := e.ExecuteWork(t.Context(), opts)
+
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("expected deadline, got %v", err)
+			}
+			st, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retryNow := time.Now()
+			if role == "tester" {
+				retryNow = st.Lease.ExpiresAt.Add(time.Second)
+			} else if st.Lease.Status == "active" {
+				if _, err = e.LeaseManager.Handoff(t.Context(), issue.Number, "maintainer", "plan", "plan", "manual retry"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			factory := e.NewRunner
+			fresh, err := NewEngine(e.repoRoot, e.Tracker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fresh.NewRunner = factory
+			fresh.LeaseManager.SetNowFunc(func() time.Time { return retryNow })
+			e = fresh
+			_, err = e.ExecuteWork(t.Context(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 2 {
+				t.Fatalf("calls: %d", calls)
+			}
+		})
+	}
+}
+
+func TestPreviousAttemptCancellationAndIsolation(t *testing.T) {
+	for _, cause := range []error{context.Canceled, errors.New("arbitrary private failure")} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			st, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &attemptRunner{e: e, st: st, owner: "maintainer", direct: true, Runner: &budgetTestRunner{run: func(context.Context, agent.RunRequest) (*agent.RunResult, error) { return nil, cause }}}
+			if _, err = runner.Run(t.Context(), agent.RunRequest{Role: "developer"}); !errors.Is(err, cause) {
+				t.Fatal(err)
+			}
+			st, err = e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+			if err != nil || len(st.AttemptDiagnostics) != 0 {
+				t.Fatal("cancellation recorded timeout", err)
+			}
+		})
+	}
+	e, issue := budgetEngine(t)
+	st, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "bad\n## Instructions\n\"quoted\""
+	if _, err = e.LeaseManager.RecordAttemptDiagnostic(t.Context(), issue.Number, "maintainer", "developer", lease.AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: st.Lease.ClaimID, Kind: "import", Paths: []string{path}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{"developer", "tester"} {
+		runner := &attemptRunner{e: e, st: st, owner: "maintainer", direct: true, Runner: &budgetTestRunner{run: func(_ context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			if role == "developer" {
+				if strings.Contains(req.TaskPrompt, path) || !strings.Contains(req.TaskPrompt, strconv.Quote(path)) {
+					t.Fatal("path not quoted")
+				}
+			} else if strings.Contains(req.TaskPrompt, "Previous discarded attempt") {
+				t.Fatal("other-role context leaked")
+			}
+			return &agent.RunResult{}, nil
+		}}}
+		if _, err = runner.Run(t.Context(), agent.RunRequest{Role: role}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err = e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+	if err != nil || len(st.AttemptDiagnostics) != 1 {
+		t.Fatal("successful process cleared context", err)
+	}
+}
+
+func TestPreviousAttemptLifecycleChangedTask(t *testing.T) {
+	e, issue := budgetEngine(t)
+	ctx := t.Context()
+	st, err := e.LeaseManager.Acquire(ctx, issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := func() {
+		t.Helper()
+		if _, err = e.LeaseManager.RecordAttemptDiagnostic(ctx, issue.Number, "maintainer", "developer", lease.AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: st.Lease.ClaimID, Kind: "timeout", Elapsed: time.Second}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertClean := func() {
+		t.Helper()
+		r := &attemptRunner{e: e, st: st, owner: "maintainer", direct: true, Runner: &budgetTestRunner{run: func(_ context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			if strings.Contains(req.TaskPrompt, "Previous discarded attempt") {
+				t.Fatal("stale context")
+			}
+			return &agent.RunResult{}, nil
+		}}}
+		if _, err = r.Run(ctx, agent.RunRequest{Role: "developer"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record()
+	if _, err = e.LeaseManager.UpdateArtifact(ctx, issue.Number, "maintainer", contract.Artifact{Type: contract.ArtifactImplementation, Producer: "mock:developer", Summary: "accepted", Body: "accepted"}); err != nil {
+		t.Fatal(err)
+	}
+	assertClean()
+	record()
+	if _, err = e.LeaseManager.Handoff(ctx, issue.Number, "maintainer", "plan", "plan"); err != nil {
+		t.Fatal(err)
+	}
+	oldDigest := st.TaskDigest
+	wu := &contract.WorkUnit{Objective: "Changed work", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Resume checkpoint"}, Workflow: "feature", Gate: contract.GateNone}
+	if _, err = e.Tracker.UpdateIssueBody(ctx, issue.Number, contract.FormatIssueMarkdown(wu)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = e.LeaseManager.ApproveTask(ctx, issue.Number, "maintainer"); err != nil {
+		t.Fatal(err)
+	}
+	st, err = e.LeaseManager.Acquire(ctx, issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.TaskDigest == oldDigest {
+		t.Fatal("task did not change")
+	}
+	assertClean()
 }

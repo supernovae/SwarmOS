@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/agent"
 	"github.com/supernovae/swarmos/internal/contract"
@@ -709,10 +710,31 @@ func TestPreviousAttemptImportRejection(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(res.WorktreePath, ".swarm/active/DEV_NOTES.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("refused file imported")
 	}
+	old, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old.Lease.Status != "handoff" || old.Lease.ExpiresAt.After(time.Now()) {
+		t.Fatal("rejection did not expire claim")
+	}
+	runnerFactory := e.NewRunner
+	fresh, err := NewEngine(e.repoRoot, e.Tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh.NewRunner = runnerFactory
+	e = fresh
 	opts.Phase = "implement"
 	_, err = e.ExecuteWork(t.Context(), opts)
 	if err != nil {
 		t.Fatal(err)
+	}
+	successor, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if successor.Lease.ClaimID == old.Lease.ClaimID {
+		t.Fatal("claim was not replaced")
 	}
 	if calls != 2 {
 		t.Fatalf("developer calls %d", calls)

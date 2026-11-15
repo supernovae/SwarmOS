@@ -9,6 +9,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,8 +27,16 @@ import (
 
 var errNoReadyWork = errors.New("no approved ready work matches this node")
 
+type skippedIssue struct {
+	Repo        string `json:"repo"`
+	IssueNumber int    `json:"issue_number"`
+	Reason      string `json:"reason"`
+	NextStep    string `json:"next_step"`
+}
+
 // noReadyError retains candidate context without changing claim/node exit semantics.
 type noReadyError struct {
+	skipped    []skippedIssue
 	showAction bool
 	guidance   string
 	cause      error
@@ -48,16 +57,17 @@ func (e *noReadyError) Is(target error) bool {
 func (e *noReadyError) human() string { return e.text + e.guidance + renderNextAction(e.action) }
 
 type pulledWorkUnit struct {
-	Repo         string
-	RepoRoot     string
-	Backend      string
-	Issue        *tracker.Issue
-	WorkUnit     *contract.WorkUnit
-	State        *lease.IssueState
-	TargetPhase  string
-	WorktreePath string
-	BranchName   string
-	Overlap      *overlapSelection
+	SkippedIssues []skippedIssue `json:"skipped_issues,omitempty"`
+	Repo          string
+	RepoRoot      string
+	Backend       string
+	Issue         *tracker.Issue
+	WorkUnit      *contract.WorkUnit
+	State         *lease.IssueState
+	TargetPhase   string
+	WorktreePath  string
+	BranchName    string
+	Overlap       *overlapSelection
 }
 
 // overlapSelection explains how in-flight touchpoint overlap ordered a --next
@@ -98,6 +108,7 @@ func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpt
 	if err != nil {
 		return nil, err
 	}
+	var skipped []skippedIssue
 	var pending *noReadyError
 	reserveFinal := false
 	defer func() {
@@ -110,13 +121,20 @@ func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpt
 			fmt.Fprintln(progressWriter(cmd), pending.human())
 		}
 		selected := *rootOpts
-		selected.Repo, selected.RepoRoot = repo, path
+		selected.Repo, selected.RepoRoot = repo, ""
 		c := stopContext{opts: &selected, resource: "issue", number: number}
 		pending = &noReadyError{cause: err, action: c.classify(err), text: fmt.Sprintf("Issue #%d: %s", number, messageOnly(err))}
 		var stopped *stopError
 		if errors.As(c.stop(err), &stopped) {
 			pending.guidance = stopped.guidance
 		}
+
+		next := strings.TrimSpace(pending.guidance + renderNextAction(pending.action))
+		if next == "" {
+			next = messageOnly(err)
+		}
+		skipped = append(skipped, skippedIssue{Repo: repo, IssueNumber: number, Reason: messageOnly(err), NextStep: next})
+		pending.skipped = skipped
 	}
 	for _, target := range targets {
 		tr, mgr, cfg, err := resolve(cmd, target)
@@ -200,6 +218,7 @@ func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpt
 			if !opts.IssueContinuation && (phase == "all" || phase == "plan") {
 				if err := mgr.CheckPlanReplanContext(ctx, state); err != nil {
 					if errors.Is(err, lease.ErrPlanReplanLimit) {
+						block(err, issue.Number, target.Repo, target.Path, target.Backend)
 						if policy != nil {
 							policy.exhausted(target, issue.Number, err)
 						}
@@ -224,6 +243,15 @@ func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpt
 				}
 			}
 			if !node.SupportsPhaseCapability(nodeProf, phase) {
+				continue
+			}
+			// Match issue admission: explicit PR work uses its own revision path.
+			if opts.PRNumber == 0 && state.PRRevision != nil {
+				block(fmt.Errorf("pending PR revision #%d", state.PRRevision.Number), issue.Number, target.Repo, target.Path, target.Backend)
+				selected := *rootOpts
+				selected.Repo, selected.RepoRoot = target.Repo, ""
+				pending.action = &NextAction{Reason: "pending_pr_revision", Argv: (stopContext{opts: &selected}).argv(false, "pr", "work", strconv.Itoa(state.PRRevision.Number))}
+				skipped[len(skipped)-1].NextStep = strings.TrimSpace(renderNextAction(pending.action))
 				continue
 			}
 			selection := opts
@@ -295,7 +323,7 @@ func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpt
 					return nil, err
 				}
 				return &pulledWorkUnit{Repo: target.Repo, RepoRoot: target.Path, Backend: target.Backend, Issue: issue,
-					WorkUnit: wu, State: claimed, TargetPhase: phase, WorktreePath: worktree, BranchName: branch, Overlap: overlap}, nil
+					SkippedIssues: skipped, WorkUnit: wu, State: claimed, TargetPhase: phase, WorktreePath: worktree, BranchName: branch, Overlap: overlap}, nil
 			}
 			pulled, err := setup()
 			if err != nil {

@@ -175,6 +175,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			var pauses []*workflow.ClaimBudgetPause
 			var splits []map[string]any
+			var skipped []skippedIssue
 			var selections []map[string]any
 			var stoppedIssues []*nodeIssueStop
 			// Serialize selection with settlement and exclusion recording. The local
@@ -182,12 +183,14 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			var selectionMu sync.Mutex
 			excluded := map[string]bool{}
 			key := func(repo string, n int) string { return repo + "#" + strconv.Itoa(n) }
-			record := func(stop *nodeIssueStop) {
+			record := func(stop *nodeIssueStop, report bool) {
 				excluded[key(stop.Repo, stop.IssueNumber)] = true
 				outputMu.Lock()
 				defer outputMu.Unlock()
 				stoppedIssues = append(stoppedIssues, stop)
-				fmt.Fprintf(out, "%s #%d stopped: %s%s\n", stop.Repo, stop.IssueNumber, stop.Message, renderNextAction(stop.NextAction))
+				if report {
+					fmt.Fprintf(out, "%s #%d stopped: %s%s\n", stop.Repo, stop.IssueNumber, stop.Message, renderNextAction(stop.NextAction))
+				}
 			}
 			policy := &nodeSelectionPolicy{
 				excluded: func(repo string, n int) bool { return excluded[key(repo, n)] },
@@ -195,7 +198,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					selected := *rootOpts
 					selected.Repo, selected.RepoRoot = target.Repo, target.Path
 					stop := classifyNodeStop(stopContext{opts: &selected, resource: "issue", number: n}, err, "plan")
-					record(stop)
+					record(stop, false)
 				},
 			}
 			execute := func(ctx context.Context, pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
@@ -254,7 +257,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					} else if state.Lease.Status != "released" {
 						return result, fmt.Errorf("settle stopped issue: %w", lease.ErrClaimFence)
 					}
-					record(stop)
+					record(stop, true)
 					return result, stop
 				}
 				lease.UnlockClaim(lock)
@@ -298,6 +301,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								var noReady *noReadyError
 								if errors.As(err, &noReady) {
 									outputMu.Lock()
+									skipped = append(skipped, noReady.skipped...)
 									fmt.Fprintln(out, noReady.human())
 									outputMu.Unlock()
 								}
@@ -310,6 +314,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								return
 							}
 							outputMu.Lock()
+							skipped = append(skipped, pulled.SkippedIssues...)
 							selections = append(selections, map[string]any{"repo": pulled.Repo, "issue_number": pulled.Issue.Number, "overlap": pulled.Overlap})
 							outputMu.Unlock()
 							result, err := execute(taskCtx, pulled)
@@ -355,7 +360,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 				if failures.Load() > 0 {
 					if asJSON {
-						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections, "stopped_issues": stoppedIssues})
+						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections, "stopped_issues": stoppedIssues, "skipped_issues": skipped})
 					}
 					return fmt.Errorf("node %q encountered %d failure(s)", profile.NodeID, failures.Load())
 				}
@@ -369,7 +374,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections, "stopped_issues": stoppedIssues})
+				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections, "stopped_issues": stoppedIssues, "skipped_issues": skipped})
 			}
 			fmt.Fprintf(out, "Node %q finished: %d task attempt(s)\n", profile.NodeID, completed.Load())
 			return nil

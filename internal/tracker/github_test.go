@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1118,5 +1119,118 @@ func TestGitHubRESTTimeout(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Unlike retryInspectionBody, this fixture always reaches EOF.
+type finiteRetryBody515 struct {
+	io.ReadCloser
+	closed bool
+}
+
+func (b *finiteRetryBody515) Close() error { b.closed = true; return b.ReadCloser.Close() }
+
+func TestGitHubRetryIssue515(t *testing.T) {
+	for _, mode := range []string{"primary", "mutation", "server", "ambiguous"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				reset := start.Add(120 * time.Second).Truncate(time.Second)
+				calls, notices := 0, 0
+				var delay time.Duration
+				var bodies []*finiteRetryBody515
+				cause := &net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("body-token-sentinel: %w", syscall.ECONNRESET)}
+				method := "GET"
+				if mode == "mutation" || mode == "ambiguous" {
+					method = "POST"
+				}
+				ctx := gitcredential.WithNetworkRetry(t.Context(), "swarm issue status 515", func(reason string, _, _ int, d time.Duration) {
+					notices++
+					delay += d
+					if strings.Contains(reason, "sentinel") {
+						t.Fatal(reason)
+					}
+				})
+				transport := githubRetryTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					calls++
+					if r.Method != method {
+						t.Fatal(r.Method)
+					}
+					if method == "POST" {
+						data, err := io.ReadAll(r.Body)
+						if err != nil || string(data) != "request-payload" {
+							t.Fatalf("body=%q err=%v", data, err)
+						}
+						r.Body.Close()
+					}
+					if mode == "ambiguous" {
+						return nil, cause
+					}
+					status := 200
+					h := http.Header{"Content-Type": {"application/json"}}
+					if mode == "primary" {
+						status = 403
+						h.Set("X-RateLimit-Remaining", "0")
+						h.Set("X-RateLimit-Reset", fmt.Sprint(reset.Unix()))
+					} else if calls == 1 {
+						if mode == "mutation" {
+							status = 429
+							h.Set("Retry-After", "2")
+						} else {
+							status = 500
+						}
+					}
+					body := &finiteRetryBody515{ReadCloser: io.NopCloser(strings.NewReader(`{"message":"body-token-sentinel"}`))}
+					bodies = append(bodies, body)
+					return &http.Response{StatusCode: status, Header: h, Body: body, Request: r}, nil
+				})}
+				req, err := http.NewRequestWithContext(ctx, method, "https://api.github.com/test", strings.NewReader("request-payload"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var resp *http.Response
+				if mode == "primary" {
+					client, clientErr := api.NewRESTClient(api.ClientOptions{Host: "github.com", AuthToken: "test-token", Transport: transport})
+					if clientErr != nil {
+						t.Fatal(clientErr)
+					}
+					err = client.DoWithContext(ctx, method, "test", nil, nil)
+				} else {
+					resp, err = transport.RoundTrip(req)
+				}
+				if resp != nil {
+					defer resp.Body.Close()
+				}
+				switch mode {
+				case "primary":
+					var apiErr *api.HTTPError
+					var exhausted *gitcredential.RetryExhaustedError
+					if calls != 1 || notices != 0 || time.Since(start) != 0 || !errors.As(err, &apiErr) || !errors.As(err, &exhausted) || !strings.Contains(err.Error(), reset.UTC().Format(time.RFC3339)) {
+						t.Fatalf("calls=%d notices=%d elapsed=%v err=%v", calls, notices, time.Since(start), err)
+					}
+				case "ambiguous":
+					if calls != 1 || notices != 0 || !errors.Is(err, cause) {
+						t.Fatalf("calls=%d notices=%d err=%v", calls, notices, err)
+					}
+				default:
+					if err != nil || calls != 2 || notices != 1 || time.Since(start) != delay || delay < 2*time.Second || delay > time.Minute {
+						t.Fatalf("calls=%d notices=%d delay=%v err=%v", calls, notices, delay, err)
+					}
+					if resp.StatusCode != 200 {
+						t.Fatal(resp.StatusCode)
+					}
+					data, readErr := io.ReadAll(resp.Body)
+					if readErr != nil || string(data) != `{"message":"body-token-sentinel"}` {
+						t.Fatalf("%q %v", data, readErr)
+					}
+				}
+				if err != nil && strings.Contains(err.Error(), "sentinel") {
+					t.Fatal(err)
+				}
+				if len(bodies) > 0 && !bodies[0].closed {
+					t.Fatal("discarded body not closed")
+				}
+			})
+		})
 	}
 }

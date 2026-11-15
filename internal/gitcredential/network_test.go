@@ -932,3 +932,106 @@ func TestNetworkLowSpeedConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedRetryIssue515Classification(t *testing.T) {
+	for _, tc := range []struct {
+		op        string
+		status    int
+		header    http.Header
+		secondary bool
+		want      string
+	}{
+		{"GET", 500, nil, false, "service unavailable"},
+		{"POST", 429, nil, false, "rate limited"},
+		{"POST", 403, http.Header{"Retry-After": {"2"}}, false, "rate limited"},
+		{"PATCH", 403, nil, true, "rate limited"},
+		{"POST", 403, http.Header{"X-Ratelimit-Remaining": {"0"}}, false, ""},
+		{"POST", 403, nil, false, ""},
+		{"POST", 500, nil, false, ""},
+		{"POST", 503, nil, false, ""},
+		{"push", 429, nil, false, ""},
+		{"push", 403, http.Header{"Retry-After": {"2"}}, true, ""},
+		{"fetch", 500, nil, false, ""},
+	} {
+		if got := RetryReason(RetryObservation{Operation: tc.op, Status: tc.status, Header: tc.header, SecondaryLimit: tc.secondary}); got != tc.want {
+			t.Errorf("%s %d: %q want %q", tc.op, tc.status, got, tc.want)
+		}
+	}
+	for _, cause := range []error{context.Canceled, ErrCleanupIncomplete, &KnownResultCleanupError{}} {
+		if got := RetryReason(RetryObservation{Operation: "POST", Status: 429, Err: cause}); got != "" {
+			t.Fatal(got)
+		}
+	}
+	if got := RetryReason(RetryObservation{Operation: "POST", Status: 429, Diagnostic: "permission denied"}); got != "" {
+		t.Fatal(got)
+	}
+}
+
+func TestSharedRetryIssue515PrimaryReset(t *testing.T) {
+	oldWait, oldJitter, oldNow := retryWait, retryJitter, retryNow
+	t.Cleanup(func() { retryWait, retryJitter, retryNow = oldWait, oldJitter, oldNow })
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	retryNow = func() time.Time { return now }
+	retryJitter = func(time.Duration) time.Duration { return time.Second }
+	for _, tc := range []struct {
+		name, reset, after string
+		spent, want        time.Duration
+		again              bool
+		guidance           bool
+	}{
+		{"beyond", fmt.Sprint(now.Add(61 * time.Second).Unix()), "", 0, 0, false, true},
+		{"within", fmt.Sprint(now.Add(20 * time.Second).Unix()), "", 0, 20 * time.Second, true, true},
+		{"remaining", fmt.Sprint(now.Add(20 * time.Second).Unix()), "", 50 * time.Second, 0, false, true},
+		{"later-after", fmt.Sprint(now.Add(20 * time.Second).Unix()), "30", 0, 30 * time.Second, true, true},
+		{"later-reset", fmt.Sprint(now.Add(20 * time.Second).Unix()), "2", 0, 20 * time.Second, true, true},
+		{"after-over-cap", fmt.Sprint(now.Add(20 * time.Second).Unix()), "61", 0, 0, false, true},
+		{"missing", "", "", 0, time.Second, true, false},
+		{"malformed", "header-sentinel", "", 0, time.Second, true, false},
+		{"negative", "-1", "", 0, time.Second, true, false},
+		{"past", fmt.Sprint(now.Add(-time.Second).Unix()), "", 0, time.Second, true, false},
+		{"overflow", "999999999999999999999999", "", 0, 0, false, false},
+		{"max-int", "9223372036854775807", "", 0, 0, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var waited time.Duration
+			notices := 0
+			retryWait = func(_ context.Context, d time.Duration) error { waited += d; return nil }
+			ctx := WithNetworkRetry(context.Background(), "swarm issue status 515", func(reason string, _, _ int, d time.Duration) {
+				notices++
+				if reason != "rate limited" {
+					t.Fatal(reason)
+				}
+			})
+			p := RetryPolicy{delay: tc.spent}
+			h := http.Header{"X-Ratelimit-Remaining": {"0"}, "X-Ratelimit-Reset": {tc.reset}, "Retry-After": {tc.after}}
+			again, err := p.Next(ctx, RetryObservation{Operation: "GET", Status: 403, Header: h})
+			if err != nil || again != tc.again || waited != tc.want || p.Attempts != 1 || p.Exhausted() == tc.again {
+				t.Fatalf("again=%v err=%v wait=%v policy=%+v", again, err, waited, p)
+			}
+			if (notices == 1) != tc.again {
+				t.Fatal(notices)
+			}
+			cause := errors.New("token-body-sentinel")
+			final := p.Error(ctx, "GET", cause)
+			if !errors.Is(final, cause) || strings.Contains(final.Error(), "sentinel") {
+				t.Fatal(final)
+			}
+			if tc.guidance && !strings.Contains(final.Error(), time.Unix(mustReset515(t, tc.reset), 0).UTC().Format(time.RFC3339)) {
+				t.Fatal(final)
+			}
+			_, _ = p.Next(ctx, RetryObservation{Operation: "GET", Status: 401})
+			if strings.Contains(p.Error(ctx, "GET", cause).Error(), "reset") {
+				t.Fatal("stale guidance")
+			}
+		})
+	}
+}
+
+func mustReset515(t *testing.T, value string) int64 {
+	t.Helper()
+	var seconds int64
+	if _, err := fmt.Sscan(value, &seconds); err != nil {
+		t.Fatal(err)
+	}
+	return seconds
+}

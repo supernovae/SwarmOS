@@ -1,6 +1,7 @@
 package lease
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -614,6 +615,9 @@ func decodeIssueState(b []byte, n int) (*IssueState, error) {
 	return &st, nil
 }
 func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (*IssueState, error) {
+	return m.saveWithIssue(ctx, n, rev, st, nil)
+}
+func (m *Manager) saveWithIssue(ctx context.Context, n int, rev string, st *IssueState, issue *tracker.Issue) (*IssueState, error) {
 	_, localStore := m.store.(*coordination.FileStore)
 	_, localTracker := m.tracker.(*tracker.LocalTracker)
 	if !localStore || !localTracker {
@@ -632,7 +636,7 @@ func (m *Manager) save(ctx context.Context, n int, rev string, st *IssueState) (
 	if err != nil {
 		return nil, err
 	}
-	m.project(ctx, n, st)
+	m.projectWithIssue(ctx, n, st, issue)
 	return st, nil
 }
 
@@ -667,18 +671,33 @@ func (m *Manager) findProjectionCommentID(ctx context.Context, n int) int64 {
 }
 
 func (m *Manager) project(ctx context.Context, n int, st *IssueState) {
+	m.projectWithIssue(ctx, n, st, nil)
+}
+func (m *Manager) projectWithIssue(ctx context.Context, n int, st *IssueState, issue *tracker.Issue) {
 	defer progress.Begin(ctx, progress.OpTrackerUpdate, time.Now())()
 	if m.tracker == nil || st == nil {
 		return
 	}
 	var wu *contract.WorkUnit
-	if iss, err := m.tracker.GetIssue(ctx, n); err == nil && iss != nil {
-		wu, _ = contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
+	if issue == nil {
+		issue, _ = m.tracker.GetIssue(ctx, n)
+	}
+	if issue != nil {
+		wu, _ = contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 	}
 	body := RenderStateProjection(wu, st, m.LedgerLayout())
 	commentID := st.ProjectionCommentID
-	if commentID == 0 {
-		commentID = m.findProjectionCommentID(ctx, n)
+	comments, listErr := m.tracker.ListComments(ctx, n)
+	if listErr == nil {
+		for _, c := range comments {
+			if commentID == 0 && strings.HasPrefix(strings.TrimSpace(c.Body), "<!-- swarm:audit:v1 -->") {
+				commentID = c.ID
+			}
+			if c.ID == commentID && c.Body == body {
+				st.ProjectionCommentID = commentID
+				return
+			}
+		}
 	}
 	if commentID > 0 {
 		if _, err := m.tracker.UpdateComment(ctx, commentID, body); err == nil {
@@ -1070,13 +1089,13 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		}
 		old.ApprovedBy = owner
 		old.ApprovedAt = m.nowFn()
-		if _, err = m.save(ctx, n, rev, old); err != nil {
+		if _, err = m.saveWithIssue(ctx, n, rev, old, issue); err != nil {
 			return nil, err
 		}
 		for _, staleLabel := range []string{"swarm:draft", "swarm:needs-scope", "swarm:blocked"} {
-			_ = m.tracker.RemoveLabel(ctx, n, staleLabel)
+			_ = m.removeLabel(ctx, n, issue, staleLabel)
 		}
-		if err = m.tracker.AddLabels(ctx, n, []string{sec.ReadyLabel}); err != nil {
+		if err = m.addLabels(ctx, n, issue, []string{sec.ReadyLabel}); err != nil {
 			return nil, err
 		}
 		return old, nil
@@ -1084,13 +1103,13 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 		return nil, err
 	}
 	st := &IssueState{Lease: contract.Lease{Version: 1, IssueNumber: n, Status: "draft"}, TaskDigest: contract.DigestWorkUnit(wu), PolicyDigest: digest, PolicyTreeDigest: tree, BaseSHA: base, BaseBranch: branch, EffectiveGate: gate, ApprovedBy: owner, ApprovedAt: m.nowFn()}
-	if err = m.saveInitialApproval(ctx, n, issue.Title, st); err != nil {
+	if err = m.saveInitialApproval(ctx, n, issue, st); err != nil {
 		return nil, err
 	}
 	for _, staleLabel := range []string{"swarm:draft", "swarm:needs-scope", "swarm:blocked"} {
-		_ = m.tracker.RemoveLabel(ctx, n, staleLabel)
+		_ = m.removeLabel(ctx, n, issue, staleLabel)
 	}
-	if err = m.tracker.AddLabels(ctx, n, []string{sec.ReadyLabel}); err != nil {
+	if err = m.addLabels(ctx, n, issue, []string{sec.ReadyLabel}); err != nil {
 		return nil, err
 	}
 	return st, nil
@@ -1289,14 +1308,14 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 		st.Lease.NodeID = recordableNodeID(m.nodeProfile.NodeID)
 		st.Lease.Capabilities = append([]string(nil), m.nodeProfile.Capabilities...)
 	}
-	if _, err = m.save(ctx, n, rev, st); err != nil {
+	if _, err = m.saveWithIssue(ctx, n, rev, st, issue); err != nil {
 		if errors.Is(err, coordination.ErrConflict) {
 			return nil, fmt.Errorf("%w: %w", ErrClaimRaceLost, err)
 		}
 		return nil, err
 	}
 	m.BindClaim(n, id)
-	_ = m.tracker.AddLabels(ctx, n, []string{"swarm:claimed", "swarm:in-progress"})
+	_ = m.addLabels(ctx, n, issue, []string{"swarm:claimed", "swarm:in-progress"})
 	return st, nil
 }
 
@@ -1456,14 +1475,14 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			st.Lease.NodeID = recordableNodeID(m.nodeProfile.NodeID)
 			st.Lease.Capabilities = append([]string(nil), m.nodeProfile.Capabilities...)
 		}
-		if _, err = m.save(ctx, issue, rev, st); err != nil {
+		if _, err = m.saveWithIssue(ctx, issue, rev, st, iss); err != nil {
 			if errors.Is(err, coordination.ErrConflict) {
 				continue
 			}
 			return nil, err
 		}
 		m.BindClaim(issue, id)
-		_ = m.tracker.AddLabels(ctx, issue, []string{"swarm:claimed", "swarm:in-progress"})
+		_ = m.addLabels(ctx, issue, iss, []string{"swarm:claimed", "swarm:in-progress"})
 		return st, nil
 	}
 	return nil, ErrClaimRaceLost
@@ -1506,28 +1525,32 @@ func (m *Manager) CheckClaimState(ctx context.Context, n int, owner string) (*Is
 }
 
 func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState) error {
+	_, err := m.approvedIssue(ctx, n, st)
+	return err
+}
+func (m *Manager) approvedIssue(ctx context.Context, n int, st *IssueState) (*tracker.Issue, error) {
 	issue, err := m.tracker.GetIssue(ctx, n)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if issue.IsParent() {
-		return fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be executed as a WorkUnit", n)
+		return nil, fmt.Errorf("issue #%d is a parent issue (Epic or swarm:parent) and cannot be executed as a WorkUnit", n)
 	}
 	cfg, err := harness.LoadConfigAtContext(ctx, m.repoRoot, st.BaseSHA)
 	if err != nil {
-		return fmt.Errorf("load approved policy: %w", err)
+		return nil, fmt.Errorf("load approved policy: %w", err)
 	}
 	if err = verifyTrust(cfg.Security, issue); err != nil {
-		return err
+		return nil, err
 	}
 	wu, err := contract.ParseWorkUnitFromIssue(n, issue.Title, issue.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !TaskApprovalCurrent(st, wu, cfg) {
-		return &TaskApprovalError{IssueNumber: n}
+		return nil, &TaskApprovalError{IssueNumber: n}
 	}
-	return nil
+	return issue, nil
 }
 
 func (m *Manager) checkClaimFence(n int, owner string, st *IssueState) error {
@@ -1544,26 +1567,50 @@ func (m *Manager) checkStateClaim(ctx context.Context, n int, owner string, st *
 	return m.checkApprovedState(ctx, n, st)
 }
 func (m *Manager) mutate(ctx context.Context, n int, owner string, fn func(*IssueState) error) (*IssueState, error) {
-	// Heartbeats and human decisions can legitimately race this same attempt.
-	// Re-read on CAS conflict; a successor's token never passes the next check.
+	st, _, err := m.mutateWithIssue(ctx, n, owner, fn)
+	return st, err
+}
+
+// mutateWithIssue returns only the successful attempt's approved issue snapshot.
+// CAS conflicts reload both state and approval; a successor must pass the fence.
+func (m *Manager) mutateWithIssue(ctx context.Context, n int, owner string, fn func(*IssueState) error) (*IssueState, *tracker.Issue, error) {
 	for range 4 {
 		st, rev, err := m.load(ctx, n)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if err = m.checkStateClaim(ctx, n, owner, st); err != nil {
-			return nil, err
+		if err = m.checkClaimFence(n, owner, st); err != nil {
+			return nil, nil, err
+		}
+		issue, err := m.approvedIssue(ctx, n, st)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Capture bytes before the callback can edit nested or private fields.
+		before, err := marshalCoordinatorState(st)
+		if err != nil {
+			return nil, nil, err
 		}
 		if err = fn(st); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		out, err := m.save(ctx, n, rev, st)
+		after, err := marshalCoordinatorState(st)
+		if err != nil {
+			return nil, nil, err
+		}
+		if bytes.Equal(before, after) {
+			return st, issue, nil
+		}
+		out, err := m.saveWithIssue(ctx, n, rev, st, issue)
 		if errors.Is(err, coordination.ErrConflict) {
 			continue
 		}
-		return out, err
+		if err != nil {
+			return nil, nil, err
+		}
+		return out, issue, nil
 	}
-	return nil, coordination.ErrConflict
+	return nil, nil, coordination.ErrConflict
 }
 func (m *Manager) Renew(ctx context.Context, n int, owner string, d time.Duration) (*IssueState, error) {
 	if m.gateway != nil {
@@ -1626,23 +1673,27 @@ func (m *Manager) Release(ctx context.Context, n int, owner, reason string) (*Is
 		if err != nil {
 			return nil, err
 		}
-		if st.ForkRepo != "" {
-			err = m.checkStateClaim(ctx, n, owner, st)
-		} else {
-			err = m.checkClaimFence(n, owner, st)
+		var issue *tracker.Issue
+		err = m.checkClaimFence(n, owner, st)
+		if err == nil {
+			if st.ForkRepo != "" {
+				issue, err = m.approvedIssue(ctx, n, st)
+			} else {
+				issue, _ = m.tracker.GetIssue(ctx, n)
+			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("release claim: %w", err)
 		}
 		st.Lease.Status = "released"
 		st.Lease.ExpiresAt = m.nowFn()
-		out, err := m.save(ctx, n, rev, st)
+		out, err := m.saveWithIssue(ctx, n, rev, st, issue)
 		if errors.Is(err, coordination.ErrConflict) {
 			continue
 		}
 		if err == nil {
-			_ = m.tracker.RemoveLabel(ctx, n, "swarm:claimed")
-			_ = m.tracker.RemoveLabel(ctx, n, "swarm:in-progress")
+			_ = m.removeLabel(ctx, n, issue, "swarm:claimed")
+			_ = m.removeLabel(ctx, n, issue, "swarm:in-progress")
 		}
 		return out, err
 	}
@@ -1665,7 +1716,7 @@ func (m *Manager) Handoff(ctx context.Context, n int, owner, done, next string, 
 		})
 	}
 	var validUntil time.Time
-	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+	st, issue, err := m.mutateWithIssue(ctx, n, owner, func(st *IssueState) error {
 		validUntil = st.Lease.ExpiresAt
 		if err := contract.ValidatePhase(next); err != nil {
 			return err
@@ -1681,7 +1732,7 @@ func (m *Manager) Handoff(ctx context.Context, n int, owner, done, next string, 
 		return nil, fmt.Errorf("%w: claim expired during handoff", ErrClaimFence)
 	}
 	if err == nil && m.tracker != nil && st.EffectiveGate != contract.GateNone && (done == "plan" || next == "review") {
-		_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+		_ = m.addLabels(ctx, n, issue, []string{"swarm:plan-review"})
 	}
 	return st, err
 }
@@ -1728,7 +1779,7 @@ func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status s
 			Status:      status,
 		})
 	}
-	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+	st, issue, err := m.mutateWithIssue(ctx, n, owner, func(st *IssueState) error {
 		if phase != "" {
 			if err := contract.ValidatePhase(phase); err != nil {
 				return err
@@ -1750,7 +1801,7 @@ func (m *Manager) UpdatePhase(ctx context.Context, n int, owner, phase, status s
 		return nil
 	})
 	if err == nil && m.tracker != nil && st.EffectiveGate != contract.GateNone && phase == "review" {
-		_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+		_ = m.addLabels(ctx, n, issue, []string{"swarm:plan-review"})
 	}
 	return st, err
 }
@@ -1930,7 +1981,7 @@ func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, num
 	if url == "" {
 		return nil, fmt.Errorf("submission requires PR number and URL")
 	}
-	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+	st, issue, err := m.mutateWithIssue(ctx, n, owner, func(st *IssueState) error {
 		if err := m.denyResume(n); err != nil {
 			return err
 		}
@@ -1963,11 +2014,11 @@ func (m *Manager) RecordSubmission(ctx context.Context, n int, owner string, num
 	}
 	if m.tracker != nil {
 		for _, label := range []string{"swarm:in-progress", "swarm:claimed"} {
-			if err := m.tracker.RemoveLabel(ctx, n, label); err != nil {
+			if err := m.removeLabel(ctx, n, issue, label); err != nil {
 				return st, err
 			}
 		}
-		if err := m.tracker.AddLabels(ctx, n, []string{"swarm:pr-open"}); err != nil {
+		if err := m.addLabels(ctx, n, issue, []string{"swarm:pr-open"}); err != nil {
 			return st, err
 		}
 	}
@@ -2013,7 +2064,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 			Artifact:    &artCopy,
 		})
 	}
-	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error {
+	st, issue, err := m.mutateWithIssue(ctx, n, owner, func(st *IssueState) error {
 		for _, verify := range eligibility {
 			if err := verify(st); err != nil {
 				return err
@@ -2255,19 +2306,19 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		switch art.Type {
 		case contract.ArtifactTestPlan:
 			if st.EffectiveGate != contract.GateNone {
-				_ = m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"})
+				_ = m.addLabels(ctx, n, issue, []string{"swarm:plan-review"})
 			}
 		case contract.ArtifactReview:
 			if art.Verdict == "APPROVED" && !advisory {
-				if err := m.tracker.RemoveLabel(ctx, n, "swarm:plan-review"); err != nil {
+				if err := m.removeLabel(ctx, n, issue, "swarm:plan-review"); err != nil {
 					return st, err
 				}
-				if err := m.tracker.AddLabels(ctx, n, []string{"swarm:plan-approved"}); err != nil {
+				if err := m.addLabels(ctx, n, issue, []string{"swarm:plan-approved"}); err != nil {
 					return st, err
 				}
 			} else {
-				_ = m.tracker.RemoveLabel(ctx, n, "swarm:plan-approved")
-				if err := m.tracker.AddLabels(ctx, n, []string{"swarm:plan-review"}); err != nil {
+				_ = m.removeLabel(ctx, n, issue, "swarm:plan-approved")
+				if err := m.addLabels(ctx, n, issue, []string{"swarm:plan-review"}); err != nil {
 					return st, err
 				}
 			}
@@ -3143,11 +3194,11 @@ func (m *Manager) resumeRemote(ctx context.Context, branch string) (bool, error)
 	return result != "", err
 }
 
-func (m *Manager) saveInitialApproval(ctx context.Context, n int, title string, st *IssueState) error {
+func (m *Manager) saveInitialApproval(ctx context.Context, n int, snapshot *tracker.Issue, st *IssueState) error {
 	fs, local := m.store.(*coordination.FileStore)
 	tr, concrete := m.tracker.(*tracker.LocalTracker)
 	if !local || !concrete || m.gateway != nil {
-		_, err := m.save(ctx, n, "", st)
+		_, err := m.saveWithIssue(ctx, n, "", st, snapshot)
 		return err
 	}
 	if m.configErr != nil {
@@ -3161,7 +3212,7 @@ func (m *Manager) saveInitialApproval(ctx context.Context, n int, title string, 
 			return coordination.ErrConflict
 		}
 		return tr.WithResumeReceipt(n, func(r *tracker.ResumeReceipt, issue *tracker.Issue, commit func() error) error {
-			branch := workspace.BranchName(n, title)
+			branch := workspace.BranchName(n, snapshot.Title)
 			scope, scopeErr := m.resumeScope(ctx, fs, st, branch)
 			eligible := r != nil && r.Status == "created" && issue != nil && scopeErr == nil
 			if eligible {
@@ -3235,7 +3286,7 @@ func (m *Manager) saveInitialApproval(ctx context.Context, n int, title string, 
 		})
 	})
 	if err == nil {
-		m.project(ctx, n, st)
+		m.projectWithIssue(ctx, n, st, snapshot)
 	}
 	return err
 }
@@ -3953,4 +4004,37 @@ func (m *Manager) SelectionStateReader(ctx context.Context) (func(context.Contex
 		}
 	}
 	panic("unreachable selection inventory attempt")
+}
+
+// Label deltas are best-effort projections of an operation-local snapshot.
+// Concurrent external label edits converge on a later operation.
+func (m *Manager) addLabels(ctx context.Context, n int, issue *tracker.Issue, labels []string) error {
+	missing := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if issue == nil || !slices.Contains(issue.Labels, label) {
+			missing = append(missing, label)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if err := m.tracker.AddLabels(ctx, n, missing); err != nil {
+		return err
+	}
+	if issue != nil {
+		issue.Labels = append(issue.Labels, missing...)
+	}
+	return nil
+}
+func (m *Manager) removeLabel(ctx context.Context, n int, issue *tracker.Issue, label string) error {
+	if issue != nil && !slices.Contains(issue.Labels, label) {
+		return nil
+	}
+	if err := m.tracker.RemoveLabel(ctx, n, label); err != nil {
+		return err
+	}
+	if issue != nil {
+		issue.Labels = slices.DeleteFunc(issue.Labels, func(v string) bool { return v == label })
+	}
+	return nil
 }

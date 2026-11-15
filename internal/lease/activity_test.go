@@ -178,6 +178,12 @@ func (s renewalTracker) GetIssue(ctx context.Context, n int) (*tracker.Issue, er
 	}
 	return s.Tracker.GetIssue(ctx, n)
 }
+func (s renewalTracker) ListComments(ctx context.Context, n int) ([]*tracker.Comment, error) {
+	if err := s.gates.block(ctx, "projection"); err != nil {
+		return nil, err
+	}
+	return s.Tracker.ListComments(ctx, n)
+}
 func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
 	for _, stopAt := range []string{"initial-read", "initial-check-tracker", "reload", "recheck", "recheck-tracker", "renew-read", "renew-check", "cas", "projection", "next-check", "next-check-tracker", "normal"} {
 		t.Run(stopAt, func(t *testing.T) {
@@ -241,7 +247,7 @@ func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
 					t.Fatal("missing timer")
 				}
 				timer.ch <- time.Now()
-				for _, step := range [][2]string{{"reload", "load"}, {"recheck", "load"}, {"recheck-tracker", "tracker"}, {"renew-read", "load"}, {"renew-check", "tracker"}, {"cas", "cas"}, {"projection", "tracker"}, {"next-check", "load"}, {"next-check-tracker", "tracker"}} {
+				for _, step := range [][2]string{{"reload", "load"}, {"recheck", "load"}, {"recheck-tracker", "tracker"}, {"renew-read", "load"}, {"renew-check", "tracker"}, {"cas", "cas"}, {"projection", "projection"}, {"next-check", "load"}, {"next-check-tracker", "tracker"}} {
 					if !check(step[0], step[1]) {
 						return
 					}

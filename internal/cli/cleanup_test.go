@@ -1255,6 +1255,7 @@ func TestCleanupLocalVerifiedRebaseEvidenceChangedBeforeApply(t *testing.T) {
 }
 
 func TestCleanupLocalIgnoredBuildRetire(t *testing.T) {
+	t.Parallel()
 	f, n, pr := cleanupLocalFixture(t)
 	path := workspace.WorktreePath(f.root, n)
 	exclude := prGit(t, f.root, "rev-parse", "--git-path", "info/exclude")
@@ -1311,6 +1312,7 @@ func TestCleanupLocalIgnoredBuildRetire(t *testing.T) {
 }
 
 func TestCleanupLocalBuildRetention(t *testing.T) {
+	t.Parallel()
 	f, n, _ := cleanupLocalFixture(t)
 	restore := snapshotCLIFixture(t, f)
 	for _, kind := range []string{"untracked-node", "untracked-dist", "symlink", "nested-repo", "regular-dist", "near-match"} {

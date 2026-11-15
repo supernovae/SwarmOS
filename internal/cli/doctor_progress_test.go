@@ -16,6 +16,7 @@ import (
 )
 
 func TestDoctorProgressOutput(t *testing.T) {
+	t.Parallel()
 	for _, jsonMode := range []bool{false, true} {
 		for _, failing := range []bool{false, true} {
 			t.Run(fmt.Sprintf("json=%v/fail=%v", jsonMode, failing), func(t *testing.T) {
@@ -102,6 +103,7 @@ type doctorFailWriter struct{}
 func (doctorFailWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 
 func TestDoctorProgressQuotesAndIgnoresWriterErrors(t *testing.T) {
+	t.Parallel()
 	for _, out := range []io.Writer{&bytes.Buffer{}, doctorFailWriter{}} {
 		run := harness.NewDoctorRunner(context.Background(), operationProgressPrinter(out), nil, nil)
 		want := harness.DoctorCheck{Status: "WARN", Detail: "secret detail"}
@@ -117,6 +119,7 @@ func TestDoctorProgressQuotesAndIgnoresWriterErrors(t *testing.T) {
 }
 
 func TestDoctorAgentChecksRunInsideBoundary(t *testing.T) {
+	t.Parallel()
 	cfg := &contract.SwarmConfig{DefaultAgent: "z", Agents: map[string]contract.AgentConfig{"z": {}, "a": {Roles: []string{"developer"}}}}
 	active := ""
 	var names []string

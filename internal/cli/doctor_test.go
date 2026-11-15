@@ -80,6 +80,7 @@ func TestDoctorRejectsExcludedSelectedRole(t *testing.T) {
 }
 
 func TestDoctorReportsCIDriftAsWarningOnly(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	files := map[string]string{
 		".swarm/validation/required-checks.yaml": "required_checks:\n  - name: lint\n    command: go vet ./...\n    timeout: 5m\nprotected_paths:\n  - .swarm/validation/**\n",
@@ -154,6 +155,7 @@ func TestDoctorReportsCIDriftAsWarningOnly(t *testing.T) {
 }
 
 func TestDoctorCapabilitySummary(t *testing.T) {
+	t.Parallel()
 	for _, harnessName := range []string{"codex", "claude"} {
 		for _, role := range []string{"planner", "developer"} {
 			report := sandbox.ToolCapabilityReport{PolicyContext: "repository_inspection", Harness: harnessName, Role: role, Entries: []sandbox.ToolCapability{
@@ -241,6 +243,7 @@ func runDoctorCapabilityFixture(t *testing.T, root string, flags ...string) stri
 }
 
 func TestDoctorCapabilityOutput(t *testing.T) {
+	t.Parallel()
 	root, reports := doctorCapabilityFixture(t)
 	summary := runDoctorCapabilityFixture(t, root)
 	full := runDoctorCapabilityFixture(t, root, "--capabilities")
@@ -267,6 +270,7 @@ func TestDoctorCapabilityOutput(t *testing.T) {
 }
 
 func TestDoctorCapabilitiesJSON(t *testing.T) {
+	t.Parallel()
 	root, reports := doctorCapabilityFixture(t)
 	plain := runDoctorCapabilityFixture(t, root, "--json")
 	full := runDoctorCapabilityFixture(t, root, "--json", "--capabilities")

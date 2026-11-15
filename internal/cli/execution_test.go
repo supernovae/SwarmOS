@@ -68,6 +68,7 @@ func TestDryRunReportsIsolationBlockersWithoutClaim(t *testing.T) {
 }
 
 func TestInspectionCommandSessionPerExecution(t *testing.T) {
+	t.Parallel()
 	opts := &RootOptions{RepoRoot: t.TempDir(), lookupEnv: func(name string) (string, bool) {
 		if name == "SWARM_NODE_CONFIG" {
 			return filepath.Join(t.TempDir(), "node.yaml"), true
@@ -92,6 +93,7 @@ func TestInspectionCommandSessionPerExecution(t *testing.T) {
 }
 
 func TestToolCapabilityOptionalFailureDryRun(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := strconv.Itoa(f.create(t, "agent"))
 	f.must(t, "issue", "approve", n)

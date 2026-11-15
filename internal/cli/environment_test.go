@@ -328,6 +328,7 @@ func TestCLIFixtureMockControlsStayOutOfChildProcesses(t *testing.T) {
 }
 
 func TestCommandLookupSession(t *testing.T) {
+	t.Parallel()
 	parent := newCommandSessions(context.Background())
 	first, second := newCommandSessions(parent), newCommandSessions(parent)
 	a, b := gitcredential.CommandLookupSessionFrom(first), gitcredential.CommandLookupSessionFrom(second)

@@ -7,6 +7,7 @@ import (
 )
 
 func TestInternalToolsBuildCacheFlag(t *testing.T) {
+	t.Parallel()
 	work := t.TempDir()
 	caches, err := parseBuildCaches([]string{"go=/abs/go", "rust=/abs/rust", "c-cpp=/abs/cc"}, work)
 	if err != nil {

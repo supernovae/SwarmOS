@@ -823,6 +823,7 @@ func TestCLIPRWorkRestorationEvidence(t *testing.T) {
 }
 
 func TestCLIPRSubmitHarnessPolicyWarning(t *testing.T) {
+	t.Parallel()
 	for _, asJSON := range []bool{false, true} {
 		t.Run(strconv.FormatBool(asJSON), func(t *testing.T) {
 			f := newCLIFixture(t)

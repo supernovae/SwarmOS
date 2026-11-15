@@ -380,6 +380,7 @@ func TestCheckpointSubmitValidationReuse(t *testing.T) {
 }
 
 func TestIssue396ValidationParity(t *testing.T) {
+	t.Parallel()
 	f, counter := countedValidationFixture(t)
 	policy := fmt.Sprintf("required_checks:\n  - name: instructions\n    command: >-\n      printf x >> '%s'; test ! -e CLAUDE.md && ! grep -q swarm:active AGENTS.md\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**', 'AGENTS.md', 'CLAUDE.md']\n", counter)
 	for name, body := range map[string]string{".swarm/validation/required-checks.yaml": policy, "AGENTS.md": "Repository guide\n"} {

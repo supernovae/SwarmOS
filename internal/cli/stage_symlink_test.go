@@ -13,6 +13,7 @@ import (
 // Staging publishes PLAN.md and TEST_PLAN.md as artifacts. A report that is a
 // symlink must be refused instead of publishing the file it points at.
 func TestIssueStagePlanRefusesSymlinkedReports(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "human")
 	n := strconv.Itoa(issue)

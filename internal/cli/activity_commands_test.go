@@ -53,6 +53,7 @@ func commandActivityWait(t *testing.T, ch <-chan struct{}) {
 	}
 }
 func TestCommandProgressShowsOperation(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{"issue-work", "review-plan", "pr-work", "issue-submit"} {
 		t.Run(path, func(t *testing.T) {
 			f := newCLIFixture(t)

@@ -150,6 +150,7 @@ func TestValidationSubmissionProgressOutput(t *testing.T) {
 }
 
 func TestProgressContainsOnlyMetadata(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	operationProgressPrinter(&out)(progress.Event{Check: "trusted\n\x1b[31m\t", Status: "PASS"})
 	if strings.Count(out.String(), "\n") != 1 || strings.ContainsAny(strings.TrimSuffix(out.String(), "\n"), "\x1b\t") {

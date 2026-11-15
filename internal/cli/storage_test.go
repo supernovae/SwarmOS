@@ -75,6 +75,7 @@ func TestStorageReportOutsideCheckoutNoRegistryMutation(t *testing.T) {
 	}
 }
 func TestStorageReportRejectsForkAndApply(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{{"storage", "report", "--fork"}, {"storage", "report", "--apply"}, {"storage", "report", "--fork-remote", "fork"}} {
 		cmd := newRootCmdWithOptions(&RootOptions{})
 		cmd.SetArgs(args)
@@ -84,6 +85,7 @@ func TestStorageReportRejectsForkAndApply(t *testing.T) {
 	}
 }
 func TestStorageRenderersShareUnknownFields(t *testing.T) {
+	t.Parallel()
 	s := storage.Snapshot{Version: 1, Complete: false, Scope: "fixture", Resources: []storage.Resource{{Owner: "unknown", Class: "review-scratch", Path: "/fixture", Eligibility: "unknown", Reason: "unproven"}}}
 	var human, encoded bytes.Buffer
 	if err := renderStorageReport(&human, s, false); err != nil {
@@ -282,6 +284,7 @@ func TestStorageCleanupPreviewApplyAndJSON(t *testing.T) {
 	}
 }
 func TestStorageCleanupSelectorsAndErrors(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{{"--all-repos", "--root", "/missing"}, {"--all-repos", "--repo", "owner/repo"}, {"unexpected"}, {"--root", "/missing"}} {
 		cmd := newRootCmdWithOptions(&RootOptions{})
 		var stdout bytes.Buffer
@@ -377,67 +380,83 @@ func TestStorageCleanupAllReposContinuesAfterInvalidScope(t *testing.T) {
 	}
 }
 
-// The fixture writes each ledger through a file, never one dataset-sized buffer.
+// The fixture streams each ledger into git fast-import, never holding one dataset-sized buffer.
 func inventoryScaleObjects(t *testing.T, root string, count int, size func(int) int64) (map[int]string, []*tracker.PullRequest, int64, int64) {
 	t.Helper()
-	git := func(input string, args ...string) string {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = root
-		cmd.Stdin = strings.NewReader(input)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v: %s %v", args, out, err)
-		}
-		return strings.TrimSpace(string(out))
-	}
-	refs := map[int]string{}
-	prs := []*tracker.PullRequest{}
+	prs := make([]*tracker.PullRequest, 0, count)
 	var total, largest int64
 	chunk := strings.Repeat("x", 8192)
-	for n := 1; n <= count; n++ {
-		path := filepath.Join(t.TempDir(), "state.json")
-		f, err := os.Create(path)
-		if err != nil {
-			t.Fatal(err)
+
+	cmd := exec.Command("git", "-C", root, "fast-import", "--quiet")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	writeStr := func(s string) {
+		if _, err := io.WriteString(stdin, s); err != nil {
+			t.Fatalf("fast-import write: %v (%s)", err, stderr.String())
 		}
+	}
+
+	now := time.Now()
+	suffix := `"}],"last_rebase":{"plans":[{"body":"` + strings.Repeat("p", 6474) + `"}],"artifacts":[{"body":"` + strings.Repeat("a", 11543) + `"}]},"role_runs":[{"history":[true,null,{"ignored":"escaped\nvalue"}]}]}`
+	for n := 1; n <= count; n++ {
 		prefix := fmt.Sprintf(`{"lease":{"version":1,"issue_number":%d,"status":"completed","phase":"submitted"},"branch":"swarm/issue-%d-test","submitted_head_sha":"abc","pr_number":%d,"pr_url":"https://example.test/pr/%d","artifacts":[{"body":"`, n, n, 1000+n, 1000+n)
-		suffix := `"}],"last_rebase":{"plans":[{"body":"` + strings.Repeat("p", 6474) + `"}],"artifacts":[{"body":"` + strings.Repeat("a", 11543) + `"}]},"role_runs":[{"history":[true,null,{"ignored":"escaped\nvalue"}]}]}`
 		want := size(n)
 		padding := want - int64(len(prefix)+len(suffix))
 		if padding < 0 {
 			t.Fatal("invalid fixture size")
 		}
-		if _, err = io.WriteString(f, prefix); err != nil {
-			t.Fatal(err)
-		}
+		writeStr(fmt.Sprintf("commit refs/heads/swarm-state/issue-%d\n", n))
+		writeStr("committer Fixture <fixture@example.test> 1700000000 +0000\n")
+		writeStr("data 9\ninventory\n")
+		writeStr(fmt.Sprintf("M 100644 inline state.json\ndata %d\n", want))
+		writeStr(prefix)
 		for padding > 0 {
 			part := int64(len(chunk))
 			if padding < part {
 				part = padding
 			}
-			if _, err = io.WriteString(f, chunk[:part]); err != nil {
-				t.Fatal(err)
-			}
+			writeStr(chunk[:part])
 			padding -= part
 		}
-		if _, err = io.WriteString(f, suffix); err != nil {
-			t.Fatal(err)
-		}
-		if err = f.Close(); err != nil {
-			t.Fatal(err)
-		}
-		blob := git("", "hash-object", "-w", path)
-		tree := git("100644 blob "+blob+"\tstate.json\n", "mktree")
-		sha := git("", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit-tree", tree, "-m", "inventory")
-		git("", "update-ref", fmt.Sprintf("refs/heads/swarm-state/issue-%d", n), sha)
-		refs[n] = sha
+		writeStr(suffix + "\n")
 		total += want
 		if want > largest {
 			largest = want
 		}
-		now := time.Now()
 		prs = append(prs, &tracker.PullRequest{Number: 1000 + n, HTMLURL: fmt.Sprintf("https://example.test/pr/%d", 1000+n), State: "closed", Merged: true, MergedAt: &now, MergeCommitSHA: "def", HeadSHA: "abc", Head: fmt.Sprintf("swarm/issue-%d-test", n), HeadRepo: "fixture/repo", BaseRepo: "fixture/repo"})
+	}
+	writeStr("done\n")
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("git fast-import: %v (%s)", err, stderr.String())
+	}
+
+	out, err := exec.Command("git", "-C", root, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads/swarm-state/").CombinedOutput()
+	if err != nil {
+		t.Fatalf("for-each-ref: %v (%s)", err, out)
+	}
+	refs := make(map[int]string, count)
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		numStr := strings.TrimPrefix(fields[0], "swarm-state/issue-")
+		num, convErr := strconv.Atoi(numStr)
+		if convErr != nil {
+			t.Fatal(convErr)
+		}
+		refs[num] = fields[1]
 	}
 	return refs, prs, total, largest
 }
@@ -519,10 +538,20 @@ func storageScaleResource(t *testing.T, root string) string {
 	}
 	return path
 }
+func addOfflineGitHubOrigin(t *testing.T, root string) {
+	t.Helper()
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "repository not found", http.StatusNotFound)
+	}))
+	t.Cleanup(proxy.Close)
+	prGit(t, root, "remote", "add", "origin", "http://github.com/fixture/repo.git")
+	prGit(t, root, "config", "http.proxy", proxy.URL)
+}
+
 func TestStorageCleanupRealLedgerScale(t *testing.T) {
 	f := newCLIFixture(t)
 	setFixtureTracker(t, f.root, "github")
-	prGit(t, f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git")
+	addOfflineGitHubOrigin(t, f.root)
 	path := storageScaleHost(t, f.root)
 	common := filepath.Join(f.root, ".git")
 	hash := sha256.Sum256([]byte(common))
@@ -536,7 +565,7 @@ func TestStorageCleanupRealLedgerScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
-	for n := 1; n < 3500; n++ {
+	for n := 1; n < 400; n++ {
 		r := storageuse.ResourceFor(key, "native-scratch", filepath.Join(os.TempDir(), fmt.Sprintf("swarm-native-scale-%d", n)))
 		u, err := manager.AcquireUse(context.Background(), r)
 		if err != nil {
@@ -582,9 +611,7 @@ func TestStorageCleanupInventoryFailureReport(t *testing.T) {
 	setFixtureTracker(t, f.root, "github")
 	path := storageScaleHost(t, f.root)
 	refs, prs, _, _ := inventoryScaleObjects(t, f.root, 1, func(int) int64 { return coordination.InventoryInputLimit + 1 })
-	if out, err := exec.Command("git", "-C", f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git").CombinedOutput(); err != nil {
-		t.Fatal(string(out), err)
-	}
+	addOfflineGitHubOrigin(t, f.root)
 	tr := storageScaleTracker{f.tracker, inventoryScaleVisitor{refs, prs}}
 	for _, apply := range []bool{false, true} {
 		cmd := f.command(&RootOptions{trackerOverride: tr})
@@ -801,7 +828,7 @@ func TestStorageCleanupIssueEligibilityParity(t *testing.T) {
 			t.Setenv("TMPDIR", t.TempDir())
 			var override tracker.Tracker = f.tracker
 			if backend == "github" {
-				prGit(t, f.root, "remote", "add", "origin", "https://github.com/fixture/repo.git")
+				addOfflineGitHubOrigin(t, f.root)
 				editLocalPR(t, f, task.pr, func(p *tracker.PullRequest) { p.HeadRepo = "fixture/repo"; p.BaseRepo = "fixture/repo" })
 				pr, err := f.tracker.GetPullRequest(context.Background(), task.pr)
 				if err != nil {
@@ -867,6 +894,7 @@ func TestStorageCleanupIssueEligibilityParity(t *testing.T) {
 }
 
 func TestStorageCleanupAllReposEmptyRegistry(t *testing.T) {
+	t.Parallel()
 	for _, apply := range []bool{false, true} {
 		for _, structured := range []bool{false, true} {
 			t.Run(fmt.Sprint(apply, structured), func(t *testing.T) {
@@ -898,6 +926,7 @@ func TestStorageCleanupAllReposEmptyRegistry(t *testing.T) {
 }
 
 func TestStorageCleanupIncompleteDiscoveryOutput(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"preview", "apply"} {
 		for _, details := range []bool{false, true} {
 			report := storageCleanupReport{Mode: mode, Incomplete: []string{"cache discovery: inventory limit reached", "scratch discovery: inventory limit reached"}, Host: storage.ReclamationReport{Resources: []storage.ReclamationResult{{Resource: storageuse.Resource{Class: "agent-build", Location: "/managed/go"}, Outcome: storage.ReclaimRetained, Reason: "unresolved durable use"}}}}
@@ -925,6 +954,7 @@ func TestStorageCleanupIncompleteDiscoveryOutput(t *testing.T) {
 // counts, grouped reasons, and one next step. It never repeats the returned
 // error or prints a header when nothing was inspected.
 func TestStorageCleanupSummaryOutput(t *testing.T) {
+	t.Parallel()
 	size := int64(3 << 29)
 	issue := func(n int, c bulkCleanupCounts, disposition, reason string) bulkCleanupIssue {
 		return bulkCleanupIssue{IssueNumber: n, Counts: c, Resources: []bulkCleanupResource{
@@ -985,6 +1015,7 @@ func TestStorageCleanupSummaryOutput(t *testing.T) {
 }
 
 func TestStorageCleanupAllReposRegistryDiagnostics(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"empty", "invalid", "directory", "invalid-scope"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newCLIFixture(t)

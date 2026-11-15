@@ -682,6 +682,7 @@ func TestUpstreamRemoteSameRepository(t *testing.T) {
 }
 
 func TestForkRemoteDefaults(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name                      string
 		upstream, profile, forkRm string
@@ -784,6 +785,7 @@ func TestUpstreamRemoteConfiguration(t *testing.T) {
 }
 
 func TestUpstreamRemoteGeneratedCommands(t *testing.T) {
+	t.Parallel()
 	o := &RootOptions{UpstreamRemote: "my upstream", Fork: true}
 	if got := strings.Join(stopContext{opts: o}.argv(false, "issue", "work", "2"), " "); !strings.Contains(got, "--upstream-remote my upstream --fork issue work 2") {
 		t.Fatalf("contributor argv = %s", got)

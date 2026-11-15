@@ -15,6 +15,7 @@ import (
 )
 
 func TestBrowserProfileInternalTools(t *testing.T) {
+	t.Parallel()
 	for _, enabled := range []bool{false, true} {
 		cmd := newInternalToolsCmd()
 		args := []string{"--workspace", t.TempDir()}
@@ -39,6 +40,7 @@ func TestBrowserProfileInternalTools(t *testing.T) {
 }
 
 func TestBrowserProfileInternalHelperHidden(t *testing.T) {
+	t.Parallel()
 	cmd := newInternalBrowserExecCmd()
 	if !cmd.Hidden || !cmd.DisableFlagParsing {
 		t.Fatal("scope helper must be hidden with literal argv")
@@ -49,6 +51,7 @@ func TestBrowserProfileInternalHelperHidden(t *testing.T) {
 }
 
 func TestBrowserProfileDoctor(t *testing.T) {
+	t.Parallel()
 	for _, reason := range []string{"", "missing Bubblewrap", "missing Playwright Chromium cache", "unverifiable cgroup v2 memory cap", "TOKEN /home/private-user/secret"} {
 		cfg := &contract.SwarmConfig{Execution: contract.ExecutionConfig{BrowserProfile: true}}
 		probe := func(context.Context) error {
@@ -76,6 +79,7 @@ func TestBrowserProfileDoctor(t *testing.T) {
 // The live validator test exercises Chromium; this fixture independently
 // exercises publication refusal for the resulting required-check failure.
 func TestBrowserProfileSubmissionRefusesFailedAssertion(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	policy := "required_checks:\n  - name: browser-assertion\n    command: 'test -s browser-output/preview.png'\n    timeout: 1m\nprotected_paths: ['.swarm/**', '.github/**']\n"
 	if err := os.WriteFile(filepath.Join(f.root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0600); err != nil {

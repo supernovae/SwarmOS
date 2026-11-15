@@ -2132,6 +2132,7 @@ func TestCLIEmptyConstraintsWork(t *testing.T) {
 }
 
 func TestCLILintEffectiveGate(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ task, workflow, policy, want string }{
 		{"none", "none", "agent", "agent"}, {"none", "human", "agent", "human"}, {"human", "agent", "none", "human"}, {"none", "agent", "human", "human"},
 	} {
@@ -2184,6 +2185,7 @@ func TestCLILintEffectiveGate(t *testing.T) {
 }
 
 func TestCLIWorkBundleEffectiveGate(t *testing.T) {
+	t.Parallel()
 	for _, override := range []string{"", "human", "state-human"} {
 		t.Run("override="+override, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -2258,6 +2260,7 @@ func TestCLIWorkBundleEffectiveGate(t *testing.T) {
 }
 
 func TestCLILintInvalidGateInputs(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{".swarm/config.yaml", ".swarm/workflows/feature.yaml"} {
 		t.Run(path, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -2280,6 +2283,7 @@ func TestCLILintInvalidGateInputs(t *testing.T) {
 }
 
 func TestCLILintAbsentTaskGateDisplay(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := f.create(t, "none")
 	issue, err := f.tracker.GetIssue(context.Background(), n)
@@ -2311,6 +2315,7 @@ func TestCLILintAbsentTaskGateDisplay(t *testing.T) {
 }
 
 func TestCLIParentCreation(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	body := filepath.Join(f.root, "parent.md")
 	if err := os.WriteFile(body, []byte("Roadmap"), 0600); err != nil {
@@ -2347,6 +2352,7 @@ func TestCLIParentCreation(t *testing.T) {
 }
 
 func TestCLIParentLabelSync(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	for n := 0; n < 2; n++ {
 		out := f.must(t, "repo", "init", "--sync-labels")

@@ -6,6 +6,7 @@ import (
 )
 
 func TestResolveBuildVersion(t *testing.T) {
+	t.Parallel()
 	const revision = "989eaf9361d5ab6ee60585a30b4c37b9f4ff365d"
 	const commitTime = "2026-10-23T16:07:02Z"
 	for _, tt := range []struct {
@@ -66,6 +67,7 @@ func TestResolveBuildVersion(t *testing.T) {
 }
 
 func TestResolveBuildVersionWithoutVCS(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		module string
 		want   string

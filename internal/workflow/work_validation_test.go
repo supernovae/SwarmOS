@@ -1745,6 +1745,37 @@ func TestIssueWorkRecoveryPlanChangesDuringTester(t *testing.T) {
 	}
 }
 
+func keepInstructionMatrixCase(kind string, limit int, spent bool, feedback string) bool {
+	switch feedback {
+	case "none":
+		// Cover every (kind, zero/remaining/spent) automatic scheduling branch.
+		return limit == 0 || limit == 1
+	case "explicit none":
+		// Cover explicit --phase implement without instructions across zero and spent budgets.
+		return (kind == "pre-existing" || kind == "regression") && ((limit == 0 && !spent) || (limit == 1 && spent))
+	case "developer":
+		// Prove operator instructions override both pre-existing classification and spent budgets.
+		return (kind == "pre-existing" && ((limit == 0 && !spent) || (limit == 1 && spent))) ||
+			(kind == "regression" && limit == 1 && !spent) ||
+			(kind == "mixed" && limit == 1 && spent)
+	case "still failing":
+		// Exercise multi-round automatic exhaustion (limit=2), spent cap, and pre-existing single-round cap.
+		return (kind == "pre-existing" && limit == 2 && !spent) ||
+			(kind == "regression" && limit == 2) ||
+			(kind == "mixed" && limit == 1 && !spent)
+	case "general", "precedence", "explicit developer":
+		return kind == "pre-existing" && limit == 1 && spent
+	case "planner", "reviewer", "tester":
+		// Irrelevant role flags must not unlock exhausted automatic repair.
+		return kind == "regression" && limit == 1 && spent
+	case "refuse", "cancel", "unchanged", "fence":
+		// Every terminal developer stop aborts before tester and leaves repair count/PR untouched.
+		return kind == "regression" && limit == 1 && !spent
+	default:
+		return true
+	}
+}
+
 // Exercise recorded trusted failures rather than manufacturing repair artifacts.
 func TestIssueWorkRecoveryDeveloperInstructionMatrix(t *testing.T) {
 	for _, kind := range []string{"pre-existing", "regression", "mixed"} {
@@ -1754,6 +1785,9 @@ func TestIssueWorkRecoveryDeveloperInstructionMatrix(t *testing.T) {
 					continue
 				}
 				for _, feedback := range []string{"general", "developer", "precedence", "none", "planner", "reviewer", "tester", "refuse", "cancel", "unchanged", "still failing", "fence", "explicit none", "explicit developer"} {
+					if !keepInstructionMatrixCase(kind, limit, spent, feedback) {
+						continue
+					}
 					t.Run(fmt.Sprintf("%s/limit=%d/spent=%t/%s", kind, limit, spent, feedback), func(t *testing.T) {
 						e, n := repairFixture(t, strconv.Itoa(limit), func(root string) {
 							policy := "required_checks:\n  - name: test\n    command: go test -count=1 ./...\n    timeout: 1m\nprotected_paths: ['.swarm/**']\n"

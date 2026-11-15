@@ -24,6 +24,7 @@ import (
 )
 
 func TestPRSubmitAcceptanceEvidenceOutput(t *testing.T) {
+	t.Parallel()
 	for _, asJSON := range []bool{false, true} {
 		t.Run(strconv.FormatBool(asJSON), func(t *testing.T) {
 			f, _, number := submittedPRFixture(t, "agent")
@@ -245,6 +246,7 @@ func TestIssueSubmitAcceptanceRefusal(t *testing.T) {
 func mustIssueNumber(s string) int { n, _ := strconv.Atoi(s); return n }
 
 func TestSubmitAcceptanceFailedChecks(t *testing.T) {
+	t.Parallel()
 	for _, external := range []bool{false, true} {
 		t.Run(strconv.FormatBool(external), func(t *testing.T) {
 			f, counter := countedValidationFixture(t)
@@ -274,6 +276,7 @@ func TestSubmitAcceptanceFailedChecks(t *testing.T) {
 }
 
 func TestStatusAcceptanceReadiness(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)
@@ -291,6 +294,7 @@ func TestStatusAcceptanceReadiness(t *testing.T) {
 }
 
 func TestSubmitAcceptanceCompletedRetryRefusesGaps(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)
@@ -343,6 +347,7 @@ func TestSubmitAcceptanceCompletedRetryRefusesGaps(t *testing.T) {
 
 // Completed receipts are authoritative; imported validation remains advisory.
 func TestSubmitForkCompletedRetry(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"valid", "owner", "claim", "pr", "completion", "submitted-head", "missing-head", "dirty", "changed"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -437,6 +442,7 @@ func editForkRetryState(t *testing.T, f *cliFixture, issue int, edit func(map[st
 }
 
 func TestSubmitForkUntrustedEvidenceRefused(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"missing", "imported"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -508,6 +514,7 @@ func seedGitIssueAcceptance(t *testing.T, workerRoot, authorityRoot string, tr t
 }
 
 func TestSubmitGapAcknowledgment(t *testing.T) {
+	t.Parallel()
 	for _, flags := range [][]string{{"--acknowledge-gap", "1"}, {}, {"--acknowledge-gap", "0"}, {"--acknowledge-gap", "2"}, {"--acknowledge-gap", "1", "--acknowledge-gap", "1"}, {"--acknowledge-gap", "-1"}, {"--acknowledge-gap", "x"}} {
 		t.Run(strings.Join(flags, " "), func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -606,6 +613,7 @@ func (g gapFailedPublication) CreateDraftPR(context.Context, tracker.DraftPRRequ
 }
 
 func TestSubmitGapAcknowledgmentUnauthorized(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	issue := f.create(t, "agent")
 	n := strconv.Itoa(issue)
@@ -848,6 +856,7 @@ func (g submitEvidenceGateway) Apply(ctx context.Context, req lease.ForkRequest)
 }
 
 func TestIssueSubmitForkTrustedEvidenceAdmissionGateway(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"trusted", "missing", "imported", "failed", "owner-changed", "claim-changed", "task-changed", "policy-changed", "base-changed", "head-changed", "interleaved-before", "interleaved-after", "different-report", "identity-failure"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)

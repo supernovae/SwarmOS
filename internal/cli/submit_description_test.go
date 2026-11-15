@@ -269,6 +269,7 @@ func TestSubmitDescriptionStrictComposedAPI(t *testing.T) {
 }
 
 func TestFormatDraftDescriptionOversized(t *testing.T) {
+	t.Parallel()
 	unit := &contract.WorkUnit{IssueNumber: 303, Objective: strings.Repeat("目的🙂", 20000), Constraints: []string{strings.Repeat("constraint ", 10000)}, Acceptance: []string{strings.Repeat("criterion ", 10000)}}
 	st := &lease.IssueState{}
 	for _, typ := range []contract.ArtifactType{contract.ArtifactDesign, contract.ArtifactTestPlan, contract.ArtifactReview, contract.ArtifactImplementation, contract.ArtifactValidation} {
@@ -310,6 +311,7 @@ func (s *descriptionFailureTracker) UpdateDraftPR(ctx context.Context, n int, ti
 	return s.Tracker.UpdateDraftPR(ctx, n, title, body)
 }
 func TestIssueDescriptionPublicationRetry(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"lost-create", "nil-update", "failed-update", "outside-excess"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)

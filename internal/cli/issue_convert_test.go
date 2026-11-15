@@ -77,6 +77,7 @@ func convertArgs(n int) []string {
 }
 
 func TestIssueConvertFieldsAndPreview(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"dry-run", "json", "invalid", "missing", "parent"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newConvertFixture(t)
@@ -108,6 +109,7 @@ func TestIssueConvertFieldsAndPreview(t *testing.T) {
 	}
 }
 func TestIssueConvertBackendLocal(t *testing.T) {
+	t.Parallel()
 	f, i, r := newConvertFixture(t)
 	args := append(convertArgs(i.Number), "--title", "Converted title", "--constraint", "Keep metadata", "--constraint", "Stay scoped", "--acceptance", "Second criterion", "--depends-on", "2,2,1", "--capability", "coding,testing", "--allow-harness-changes", "--size", "multi_area", "--uncertainty", "known", "--risk", "sensitive", "--json")
 	out, err := runConvert(f, r, args...)
@@ -147,6 +149,7 @@ func TestIssueConvertBackendLocal(t *testing.T) {
 	}
 }
 func TestIssueConvertRefusals(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"parent", "epic", "closed", "pr", "denied", "valid", "fork", "state"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newConvertFixture(t)
@@ -195,6 +198,7 @@ func TestIssueConvertRefusals(t *testing.T) {
 	}
 }
 func TestIssueConvertConcurrent(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"parent", "title", "body", "type", "closed", "pr", "labels", "assignees", "timestamp", "error", "state"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newConvertFixture(t)
@@ -241,6 +245,7 @@ func TestIssueConvertConcurrent(t *testing.T) {
 	}
 }
 func TestIssueConvertPartialFailure(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"remove", "labels", "body", "title", "projection"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newConvertFixture(t)
@@ -269,6 +274,7 @@ func TestIssueConvertPartialFailure(t *testing.T) {
 }
 
 func TestIssueConvertBackendGitHub(t *testing.T) {
+	t.Parallel()
 	for _, pr := range []bool{false, true} {
 		t.Run(fmt.Sprint(pr), func(t *testing.T) {
 			f, i, _ := newConvertFixture(t)
@@ -356,6 +362,7 @@ func TestIssueConvertBackendGitHub(t *testing.T) {
 }
 
 func TestIssueConvertAuthoritativeState(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"active", "expired", "released", "approved", "checkpoint", "pr", "revision", "corrupt", "read-failure"} {
 		for _, late := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/late=%v", kind, late), func(t *testing.T) {
@@ -418,6 +425,7 @@ func TestIssueConvertAuthoritativeState(t *testing.T) {
 }
 
 func TestIssueConvertTrustedPolicy(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"candidate", "branch", "missing-branch", "bad-config", "changed-base", "changed-policy", "resolve-failure"} {
 		t.Run(kind, func(t *testing.T) {
 			f, i, r := newConvertFixture(t)
@@ -527,6 +535,7 @@ func TestIssueConvertTrustedPolicy(t *testing.T) {
 }
 
 func TestIssueConvertApprovalDefaults(t *testing.T) {
+	t.Parallel()
 	for _, gate := range []contract.GateMode{contract.GateAgent, contract.GateHuman} {
 		t.Run(string(gate), func(t *testing.T) {
 			f, i, r := newConvertFixture(t)
@@ -572,6 +581,7 @@ func TestIssueConvertApprovalDefaults(t *testing.T) {
 }
 
 func TestIssueConvertWarningText(t *testing.T) {
+	t.Parallel()
 	f, i, r := newConvertFixture(t)
 	r.projectFail = true
 	out, err := runConvert(f, r, append(convertArgs(i.Number), "--depends-on", "2,2,1")...)

@@ -269,6 +269,7 @@ func TestClaimSetupProgressStopsAtFailure(t *testing.T) {
 }
 
 func TestSetupProgressHeartbeatFormatting(t *testing.T) {
+	t.Parallel()
 	for _, phase := range []string{"claim", "workspace", "bundle"} {
 		t.Run(phase, func(t *testing.T) {
 			cmd := NewRootCmd()
@@ -287,6 +288,7 @@ func TestSetupProgressHeartbeatFormatting(t *testing.T) {
 }
 
 func TestWorkProgressNamesChangedPackagePass(t *testing.T) {
+	t.Parallel()
 	cmd := NewRootCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -303,6 +305,7 @@ func TestWorkProgressNamesChangedPackagePass(t *testing.T) {
 }
 
 func TestValidationChecksShowChangedPackagePass(t *testing.T) {
+	t.Parallel()
 	cmd := NewRootCmd()
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -354,6 +357,7 @@ func assertStableSetupJSON(t *testing.T, data []byte, previous map[string]any, k
 }
 
 func TestWorkProgressNamesRepairRound(t *testing.T) {
+	t.Parallel()
 	cmd := NewRootCmd()
 	var stdout, stderr bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -372,6 +376,7 @@ func TestWorkProgressNamesRepairRound(t *testing.T) {
 }
 
 func TestNetworkRetryProgressLine(t *testing.T) {
+	t.Parallel()
 	for _, printer := range []func(io.Writer) func(workflow.ProgressEvent){workProgressPrinter, operationProgressPrinter} {
 		var output bytes.Buffer
 		printer(&output)(workflow.ProgressEvent{Status: "retry", RetryReason: "connection unavailable", RetryUsed: 2, RetryLimit: 4, RetryDelay: 8 * time.Second})

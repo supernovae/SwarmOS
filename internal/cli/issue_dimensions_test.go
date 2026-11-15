@@ -16,6 +16,7 @@ import (
 )
 
 func TestIssueDimensions(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		t.Run(backend, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -74,6 +75,7 @@ func TestIssueDimensions(t *testing.T) {
 }
 
 func TestIssueCreateConstraints(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name        string
 		constraints []string

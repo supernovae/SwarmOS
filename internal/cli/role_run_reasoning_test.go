@@ -14,6 +14,7 @@ import (
 // and the issueStatus JSON; reasoning shows when reported and stays
 // unavailable (JSON null) when not.
 func TestRoleRunsShowReasoningTokens(t *testing.T) {
+	t.Parallel()
 	omp := contract.NewRoleRunTelemetry("developer", "omp", time.Now())
 	omp.InputTokens, omp.OutputTokens, omp.CachedInputTokens, omp.ReasoningTokens = contract.Count(1806), contract.Count(66), contract.Count(1200), contract.Count(21)
 	omp.UsageSource = contract.UsageSourceSessionLog

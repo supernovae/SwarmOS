@@ -94,6 +94,7 @@ func runEdit(f *cliFixture, r tracker.Tracker, now time.Time, args ...string) (s
 	return out.String(), err
 }
 func TestIssueEditFlags(t *testing.T) {
+	t.Parallel()
 	cmd := newIssueEditCmd(&RootOptions{})
 	for _, name := range []string{"title", "objective", "constraint", "acceptance", "depends-on", "gate", "workflow", "dry-run", "json"} {
 		if cmd.Flags().Lookup(name) == nil {
@@ -344,6 +345,7 @@ func TestIssueEditApprovalPartialFailure(t *testing.T) {
 	}
 }
 func TestIssueEditDiff(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ a, b string }{{"", "new\n"}, {"old\n", ""}, {"old", "new"}, {"same", "same\n"}, {strings.Repeat("old\n", 3000), strings.Repeat("new\n", 3000)}} {
 		diff := issueEditDiff(tc.a, tc.b)
 		if !strings.Contains(diff, "--- a/body\n+++ b/body\n@@ -") {
@@ -360,6 +362,7 @@ func TestIssueEditDiff(t *testing.T) {
 
 // A lease expires exactly at its recorded expiry, not one tick later.
 func TestIssueEditClaimBoundary(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	st := &lease.IssueState{Lease: contract.Lease{Status: "active", ExpiresAt: now}}
 	if err := issueEditClaim(st, 1, now); err != nil {
@@ -639,6 +642,7 @@ func TestIssueEditDryRunApprovedAndClaimJSON(t *testing.T) {
 }
 
 func TestIssueEditDiffContext(t *testing.T) {
+	t.Parallel()
 	want := "--- a/body\n+++ b/body\n@@ -1 +1 @@\n-old\n+new\n"
 	if got := issueEditDiff("old\n", "new\n"); got != want {
 		t.Fatalf("%q", got)

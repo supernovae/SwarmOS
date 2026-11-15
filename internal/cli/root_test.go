@@ -12,6 +12,7 @@ import (
 )
 
 func TestResolveIssueAndWorktreeNeverGuesses(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if _, _, err := resolveIssueAndWorktree(root, []string{"9"}); err == nil || !strings.Contains(err.Error(), "no worktree for issue #9") {
 		t.Fatalf("explicit issue without worktree = %v", err)
@@ -129,6 +130,7 @@ func TestFailedResumeKeepsClaimForStagingRecovery(t *testing.T) {
 }
 
 func TestInternalNativeCommandRegistration(t *testing.T) {
+	t.Parallel()
 	root := newRootCmdWithOptions(&RootOptions{Repo: "invalid-repo", RepoRoot: filepath.Join(t.TempDir(), "absent")})
 	cmd, args, err := root.Find([]string{"internal-native-exec", "invalid-unit"})
 	if err != nil || cmd.Name() != "internal-native-exec" || !cmd.Hidden || !cmd.DisableFlagParsing {

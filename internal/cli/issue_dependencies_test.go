@@ -53,6 +53,7 @@ func (d *driftTracker) LinkSubIssue(ctx context.Context, parent, child int) erro
 }
 
 func TestNativeProjectionLintQualified(t *testing.T) {
+	t.Parallel()
 	issue := &tracker.Issue{Number: 11, HTMLURL: "https://github.com/current/repo/issues/11"}
 	d := &driftTracker{refs: []tracker.BlockedByReference{{Owner: "other", Repo: "repo", Number: 7}}}
 	want := []string{"missing native blocked-by link: current/repo#7", "native blocked-by link absent from depends_on: other/repo#7"}
@@ -86,6 +87,7 @@ func executeProjectionIssue(f *cliFixture, tr tracker.Tracker, args ...string) (
 }
 
 func TestNativeProjectionCreateWarningsAndHierarchy(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	local := tracker.NewLocalTracker(f.root)
 	d := &driftTracker{Tracker: local}
@@ -131,6 +133,7 @@ func TestNativeProjectionCreateWarningsAndHierarchy(t *testing.T) {
 func jsonNumber(n int) string { b, _ := json.Marshal(n); return string(b) }
 
 func TestNativeProjectionLintOutput(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	wu := &contract.WorkUnit{ID: "test", Objective: "Deliver dependent feature", Acceptance: []string{"Feature works"}, Constraints: []string{}, Workflow: "feature", Gate: "none", DependsOn: []int{7, 8}}
 	issue := &tracker.Issue{Number: 11, Title: "feature", Body: contract.FormatIssueMarkdown(wu), HTMLURL: "https://github.com/octo/swarm/issues/11"}
@@ -164,6 +167,7 @@ func TestNativeProjectionLintOutput(t *testing.T) {
 }
 
 func TestNativeProjectionCreateHTTPWarning(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	fake, _ := newFakeGitHubTracker(t)
 	client, err := api.NewRESTClient(api.ClientOptions{Host: "github.com", AuthToken: "test-token", Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
@@ -200,6 +204,7 @@ func TestNativeProjectionCreateHTTPWarning(t *testing.T) {
 }
 
 func TestNativeProjectionDecomposeAndPlanJSONWarnings(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"decompose", "plan"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -254,6 +259,7 @@ func TestNativeProjectionDecomposeAndPlanJSONWarnings(t *testing.T) {
 }
 
 func TestNativeProjectionLintHTTPPagination(t *testing.T) {
+	t.Parallel()
 	for _, localFirst := range []bool{false, true} {
 		for _, includeLocal := range []bool{false, true} {
 			t.Run(jsonNumber(map[bool]int{false: 0, true: 1}[localFirst])+jsonNumber(map[bool]int{false: 0, true: 1}[includeLocal]), func(t *testing.T) {

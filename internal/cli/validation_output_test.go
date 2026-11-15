@@ -20,6 +20,7 @@ import (
 )
 
 func TestValidationOutput(t *testing.T) {
+	t.Parallel()
 	report := &validation.ValidationReport{CheckOutcomes: []validation.CheckRunOutcome{
 		{Name: "ok", Passed: true, Output: "do not display passing output"},
 		{Name: "test\x1b", ExitCode: 7, OutputTail: "failure detail", FailingTests: []string{"TestAlpha", "TestAlpha/sub"}},
@@ -196,6 +197,7 @@ func TestIssueStatusShowsPreExistingRepair(t *testing.T) {
 }
 
 func TestValidationSkipNotice(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		report *validation.ValidationReport
@@ -223,6 +225,7 @@ func TestValidationSkipNotice(t *testing.T) {
 }
 
 func TestSkipNoticesAcrossCommands(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	policy := "required_checks:\n  - name: test\n    command: go test ./...\n    timeout: 2m\nprotected_paths: ['.swarm/**', '.github/**']\n"
 	for name, data := range map[string]string{

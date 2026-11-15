@@ -121,9 +121,12 @@ func DefaultProtectedPaths() []string {
 }
 
 type CheckSpec struct {
-	Name    string `yaml:"name" json:"name"`
-	Command string `yaml:"command" json:"command"`
-	Timeout string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Name    string   `yaml:"name" json:"name"`
+	Command string   `yaml:"command" json:"command"`
+	Timeout string   `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Tier    string   `yaml:"tier,omitempty" json:"tier,omitempty"`
+	Scope   string   `yaml:"scope,omitempty" json:"scope,omitempty"`
+	Paths   []string `yaml:"paths,omitempty" json:"paths,omitempty"`
 }
 
 type SwarmConfig struct {

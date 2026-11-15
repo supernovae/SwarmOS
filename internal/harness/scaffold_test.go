@@ -161,11 +161,16 @@ agents:
 
 func TestValidationPolicyCannotSilentlyDisableChecks(t *testing.T) {
 	for name, data := range map[string]string{
-		"empty":         "required_checks: []\nprotected_paths: []\n",
-		"empty command": "required_checks: [{name: test, command: '', timeout: 1m}]\nprotected_paths: ['.swarm/**']\n",
-		"zero timeout":  "required_checks: [{name: test, command: echo test, timeout: 0s}]\nprotected_paths: ['.swarm/**']\n",
-		"duplicate":     "required_checks: [{name: test, command: echo test, timeout: 1m}, {name: test, command: echo duplicate, timeout: 1m}]\nprotected_paths: ['.swarm/**']\n",
-		"unknown key":   "required_checks: [{name: test, command: echo test, timeout: 1m}]\nprotected_paths: ['.swarm/**']\nignore_errors: true\n",
+		"empty":           "required_checks: []\nprotected_paths: []\n",
+		"empty command":   "required_checks: [{name: test, command: '', timeout: 1m}]\nprotected_paths: ['.swarm/**']\n",
+		"zero timeout":    "required_checks: [{name: test, command: echo test, timeout: 0s}]\nprotected_paths: ['.swarm/**']\n",
+		"duplicate":       "required_checks: [{name: test, command: echo test, timeout: 1m}, {name: test, command: echo duplicate, timeout: 1m}]\nprotected_paths: ['.swarm/**']\n",
+		"unknown key":     "required_checks: [{name: test, command: echo test, timeout: 1m}]\nprotected_paths: ['.swarm/**']\nignore_errors: true\n",
+		"invalid tier":    "required_checks: [{name: test, command: echo test, timeout: 1m, tier: never}]\nprotected_paths: ['.swarm/**']\n",
+		"invalid scope":   "required_checks: [{name: test, command: echo test, timeout: 1m, scope: none}]\nprotected_paths: ['.swarm/**']\n",
+		"paths empty":     "required_checks: [{name: test, command: echo test, timeout: 1m, scope: paths}]\nprotected_paths: ['.swarm/**']\n",
+		"paths unscoped":  "required_checks: [{name: test, command: echo test, timeout: 1m, paths: ['**/*.go']}]\nprotected_paths: ['.swarm/**']\n",
+		"paths traversal": "required_checks: [{name: test, command: echo test, timeout: 1m, scope: paths, paths: ['../outside']}]\nprotected_paths: ['.swarm/**']\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeValidationSpec([]byte(data)); err == nil {

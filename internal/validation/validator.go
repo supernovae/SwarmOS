@@ -381,6 +381,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if err != nil {
 		return nil, err
 	}
+	activeChecks, scopeNote := scopeChecks(worktreePath, spec.RequiredChecks, modified, opts.CIMode)
 	report := &ValidationReport{Timings: &ValidationTimings{}, Passed: true, BaseSHA: baseSHA, HeadSHA: headSHA, ModifiedFiles: modified, ProtectedChanges: protected}
 	var markdown strings.Builder
 	markdown.WriteString("# Validation Report\n\n")
@@ -388,6 +389,9 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	if shardNote != "" {
 		report.Shard = shardNote
 		markdown.WriteString(shardNote + "\n\n")
+	}
+	if scopeNote != "" {
+		markdown.WriteString(scopeNote + "\n\n")
 	}
 	markdown.WriteString("| Check | Command | Status | Duration |\n| :--- | :--- | :--- | :--- |\n")
 	var details strings.Builder
@@ -402,7 +406,7 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	// stops validation before any check runs.
 	var caches []sandbox.BuildCache
 	var deps sandbox.Dependencies
-	if opts.RunnerIsolated || execution.Mode != contract.ExecutionIsolated || execution.Backend == contract.BackendNative {
+	if len(activeChecks) > 0 && (opts.RunnerIsolated || execution.Mode != contract.ExecutionIsolated || execution.Backend == contract.BackendNative) {
 		if caches, err = validatorBuildCaches(ctx, worktreePath, checkHome); err != nil {
 			return nil, err
 		}
@@ -418,8 +422,8 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 	phaseEvent(opts.OnProgress, "preflight", "PASS", report.Timings.Preflight.Duration)
 	warmNote := ""
 	report.Timings.Warmup.Status = "not-applicable"
-	if !opts.RunnerIsolated && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative && sandbox.NativeValidationReusesCache(cfg) {
-		warmNote = warmBuildCaches(ctx, runner, spec.RequiredChecks, baseSHA, &report.Timings.Warmup, opts.OnProgress)
+	if len(activeChecks) > 0 && !opts.RunnerIsolated && execution.Mode == contract.ExecutionIsolated && execution.Backend == contract.BackendNative && sandbox.NativeValidationReusesCache(cfg) {
+		warmNote = warmBuildCaches(ctx, runner, activeChecks, baseSHA, &report.Timings.Warmup, opts.OnProgress)
 	}
 	record := func(outcome CheckRunOutcome) {
 		if outcome.Passed {
@@ -453,10 +457,10 @@ func Validate(ctx context.Context, worktreePath string, wu *contract.WorkUnit, o
 			firstErr = fmt.Errorf("%w: check %q (%s) exited with %d: %v", ErrRequiredCheckFailed, outcome.Name, outcome.Command, outcome.ExitCode, runErr)
 		}
 	}
-	required := len(spec.RequiredChecks)
+	required := len(activeChecks)
 	checksStart := time.Now()
 	jobs := make([]requiredCheckJob, required)
-	for i, check := range spec.RequiredChecks {
+	for i, check := range activeChecks {
 		jobs[i] = requiredCheckJob{check.Name, check.Command, requiredCheckBudget(ctx, worktreePath, check)}
 	}
 	workers := opts.requiredCheckWorkers
@@ -626,6 +630,13 @@ func loadTrustedValidationSpecContext(ctx context.Context, repoRoot, baseSHA str
 	for _, pattern := range spec.ProtectedPaths {
 		if err := checkProtectedPattern(pattern); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrInvalidPolicy, err)
+		}
+	}
+	for _, check := range spec.RequiredChecks {
+		for _, pattern := range check.Paths {
+			if err := checkProtectedPattern(pattern); err != nil {
+				return nil, fmt.Errorf("%w: check %q: %v", ErrInvalidPolicy, check.Name, err)
+			}
 		}
 	}
 	return spec, nil
@@ -802,6 +813,7 @@ func isGoToolCommand(command string) bool {
 // instead of compiled redundantly by every concurrent Go check.
 func scratchGoCachePrimerIndex(jobs []requiredCheckJob) int {
 	primer := -1
+	primerIsBuild := false
 	goChecks := 0
 	for i, job := range jobs {
 		if !isGoToolCommand(job.command) {
@@ -809,9 +821,12 @@ func scratchGoCachePrimerIndex(jobs []requiredCheckJob) int {
 		}
 		goChecks++
 		trimmed := strings.Join(strings.Fields(job.command), " ")
-		if trimmed == "go build ./..." && (primer < 0 || strings.Join(strings.Fields(jobs[primer].command), " ") != "go build ./...") {
+		isBuild := trimmed == "go build ./..." || strings.HasPrefix(trimmed, "go build ./")
+		isVet := trimmed == "go vet ./..." || strings.HasPrefix(trimmed, "go vet ./")
+		if isBuild && !primerIsBuild {
 			primer = i
-		} else if trimmed == "go vet ./..." && primer < 0 {
+			primerIsBuild = true
+		} else if isVet && primer < 0 {
 			primer = i
 		}
 	}

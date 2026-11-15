@@ -23,7 +23,6 @@ jobs:
     timeout-minutes: 60
     env:
       GOMAXPROCS: '4'
-      GOFLAGS: '-p=2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -60,10 +59,10 @@ jobs:
       - name: Check changelog fragments
         run: go run ./cmd/changelog --check
 
-  # The required checks run in three shards on separate runners; one 4-core
-  # runner took about 28 minutes, nearly all of it cli-regressions competing
-  # with eleven other checks. Check i runs in shard i%3+1, so the shards
-  # always cover every check; the aggregate job below is the required status.
+  # The required checks run in three shards on separate runners, with
+  # cli-regressions-a, cli-regressions-b, and core/sandbox checks balanced across
+  # shards. Check i runs in shard i%3+1, so the shards always cover every check;
+  # the aggregate job below is the required status.
   policy-shard:
     name: SwarmOS policy validation (shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-26.04
@@ -74,7 +73,6 @@ jobs:
         shard: [1, 2, 3]
     env:
       GOMAXPROCS: '4'
-      GOFLAGS: '-p=2'
     permissions:
       contents: read
       issues: read

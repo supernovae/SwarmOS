@@ -27,7 +27,7 @@ In a Go repository, the generated `.swarm/validation/required-checks.yaml` inclu
 
 SwarmOS itself uses a repository-specific required policy to catch regressions before merge. Alongside formatting, build, vet, and staticcheck, its required test checks cover:
 
-- The full non-race `internal/cli` package (`cli-regressions`), plus the named CLI smoke/security subset.
+- The full non-race `internal/cli` package split across CI shards (`cli-regressions-a` and `cli-regressions-b`), plus the named CLI smoke/security subset (`cli-smoke-security`) during local task loops.
 - The full `internal/validation`, `internal/harness`, `internal/coordination`, `internal/lease`, and `internal/contract` package trees (`core-regressions`).
 - The full `internal/gitcredential` and `internal/safefs` package trees (`filesystem-security`), and `cmd/changelog` and `internal/changelog` (`changelog-regressions`).
 - Named security subsets in `internal/agent`, `internal/sandbox`, and `internal/fork`.

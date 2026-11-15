@@ -1020,37 +1020,48 @@ func TestCandidateTrackerDoesNotLoadExecutionPolicy(t *testing.T) {
 }
 
 // Load the repository policy rather than a copy that could drift from PR checks.
-func repositoryCLIRegressionsCheck(t *testing.T) contract.CheckSpec {
+func repositoryCLIRegressionsChecks(t *testing.T) []contract.CheckSpec {
 	t.Helper()
 	spec, err := harness.LoadValidationSpec(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantCommands := map[string]string{
+		"cli-regressions-a": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test[A-M]'",
+		"cli-regressions-b": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test([^A-M]|$)'",
+	}
 	var found []contract.CheckSpec
-	for _, check := range spec.RequiredChecks {
-		if check.Name == "cli-regressions" {
+	seen := map[string]int{}
+	for idx, check := range spec.RequiredChecks {
+		if wantCmd, ok := wantCommands[check.Name]; ok {
+			if check.Command != wantCmd {
+				t.Fatalf("%s: want command %q, got %q", check.Name, wantCmd, check.Command)
+			}
+			if check.Timeout != "20m" {
+				t.Fatalf("%s: want policy timeout 20m, got %q", check.Name, check.Timeout)
+			}
+			if check.Tier != "ci" || check.Scope != "affected" {
+				t.Fatalf("%s: want tier=ci scope=affected, got tier=%q scope=%q", check.Name, check.Tier, check.Scope)
+			}
+			seen[check.Name] = idx % 3
 			found = append(found, check)
 		}
 	}
-	if len(found) != 1 {
-		t.Fatalf("want exactly one cli-regressions check, got %d", len(found))
+	if len(found) != 2 {
+		t.Fatalf("want cli-regressions-a and cli-regressions-b, got %d", len(found))
 	}
-	check := found[0]
-	if check.Command != "go test -timeout=30m -parallel=8 ./internal/cli" {
-		t.Fatalf("want unfiltered full CLI command, got %q", check.Command)
+	if seen["cli-regressions-a"] == seen["cli-regressions-b"] {
+		t.Fatalf("want cli-regressions-a and cli-regressions-b in distinct 3-way CI shards, both landed in %d", seen["cli-regressions-a"]+1)
 	}
-	if check.Timeout != "30m" {
-		t.Fatalf("want policy timeout 30m, got %q", check.Timeout)
-	}
-	return check
+	return found
 }
 
 func TestRepositoryCLIRegressionsPolicy(t *testing.T) {
-	repositoryCLIRegressionsCheck(t)
+	repositoryCLIRegressionsChecks(t)
 }
 
 func TestRepositoryCLIRegressionsRejectsNewFailure(t *testing.T) {
-	check := repositoryCLIRegressionsCheck(t)
+	checks := repositoryCLIRegressionsChecks(t)
 	root := t.TempDir()
 	cli := filepath.Join(root, "internal", "cli")
 	if err := os.MkdirAll(cli, 0o755); err != nil {
@@ -1064,31 +1075,41 @@ func TestRepositoryCLIRegressionsRejectsNewFailure(t *testing.T) {
 	}
 	write(filepath.Join(root, "go.mod"), "module example.com/cli-policy-fixture\n\ngo 1.22\n")
 	testFile := filepath.Join(cli, "regression_test.go")
-	const testName = "TestArbitraryFutureCLIRegression"
-	source := func(body string) string {
-		return "package cli\nimport \"testing\"\nfunc TestOrdinaryPassing(t *testing.T) {}\nfunc " + testName + "(t *testing.T) {" + body + "}\n"
-	}
-	run := func() ([]byte, error) {
+	runAll := func() (string, error) {
 		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "sh", "-c", check.Command)
-		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=", "GOPROXY=off", "GOSUMDB=off")
-		out, err := cmd.CombinedOutput()
-		if ctx.Err() != nil {
-			t.Fatalf("fixture command timed out: %v (%s)", ctx.Err(), out)
+		var combined strings.Builder
+		var firstErr error
+		for _, check := range checks {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			cmd := exec.CommandContext(ctx, "sh", "-c", check.Command)
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=", "GOPROXY=off", "GOSUMDB=off")
+			out, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				cancel()
+				t.Fatalf("fixture command %s timed out: %v (%s)", check.Name, ctx.Err(), out)
+			}
+			cancel()
+			combined.Write(out)
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
-		return out, err
+		return combined.String(), firstErr
 	}
-	write(testFile, source(`t.Fatal("arbitrary CLI failure reached")`))
-	out, err := run()
-	if err == nil || !strings.Contains(string(out), "--- FAIL: "+testName) || !strings.Contains(string(out), "arbitrary CLI failure reached") {
-		t.Fatalf("want failure from arbitrary CLI test, got %v (%s)", err, out)
-	}
-	write(testFile, source(""))
-	if out, err := run(); err != nil {
-		t.Fatalf("passing control failed: %v (%s)", err, out)
+	for _, testName := range []string{"TestArbitraryFutureCLIRegression", "TestZArbitraryFutureCLIRegression", "Test_arbitraryFutureCLIRegression"} {
+		source := func(body string) string {
+			return "package cli\nimport \"testing\"\nfunc TestOrdinaryPassing(t *testing.T) {}\nfunc " + testName + "(t *testing.T) {" + body + "}\n"
+		}
+		write(testFile, source(`t.Fatal("arbitrary CLI failure reached")`))
+		out, err := runAll()
+		if err == nil || !strings.Contains(out, "--- FAIL: "+testName) || !strings.Contains(out, "arbitrary CLI failure reached") {
+			t.Fatalf("%s: want failure from CLI regression partitions, got %v (%s)", testName, err, out)
+		}
+		write(testFile, source(""))
+		if out, err := runAll(); err != nil {
+			t.Fatalf("%s: passing control failed: %v (%s)", testName, err, out)
+		}
 	}
 }
 

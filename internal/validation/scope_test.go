@@ -102,7 +102,7 @@ func TestScopeChecksTierAndDiffFiltering(t *testing.T) {
 		if cmds["staticcheck"] != "go tool staticcheck ./cmd/changelog ./internal/changelog" {
 			t.Fatalf("unexpected narrowed staticcheck command: %q", cmds["staticcheck"])
 		}
-		if !strings.Contains(note, "deferred to CI (cli-regressions)") {
+		if !strings.Contains(note, "deferred to CI (cli-regressions-a, cli-regressions-b)") {
 			t.Fatalf("missing CI deferral note: %q", note)
 		}
 	})
@@ -111,7 +111,7 @@ func TestScopeChecksTierAndDiffFiltering(t *testing.T) {
 		// internal/safefs is imported directly by internal/harness (1-hop),
 		// NOT by internal/validation (2-hop).
 		active, _ := scopeChecks(root, spec.RequiredChecks, []string{"internal/safefs/safefs.go"}, false)
-		want := []string{"fmt", "build", "lint", "staticcheck", "cli-smoke-security", "filesystem-security", "core-regressions"}
+		want := []string{"fmt", "build", "lint", "staticcheck", "cli-smoke-security", "core-regressions", "filesystem-security"}
 		if got := namesOf(active); !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %v, want %v", got, want)
 		}

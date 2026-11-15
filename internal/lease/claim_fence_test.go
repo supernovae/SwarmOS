@@ -86,6 +86,7 @@ var claimFenceInventory = map[string]string{
 	"ReconcileSubmission":            "verified PR outcome observation",
 	"RecordCheckpoint":               "",
 	"RecordCheckpointPlan":           "",
+	"RecordAttemptDiagnostic":        "",
 	"RecordFailedRoleRun":            "",
 	"RecordFailedUpstreamPlanReview": "authenticated review observation",
 	"RecordHumanReview":              "independent maintainer review",
@@ -138,6 +139,10 @@ func claimFenceWrites() []claimFenceWrite {
 		return contract.Artifact{Type: kind, Producer: "mock", Body: "report", Summary: "report", Verdict: "PASS"}
 	}
 	return []claimFenceWrite{
+		{"RecordAttemptDiagnostic", func(ctx context.Context, f *claimFenceFixture) error {
+			_, err := f.m.RecordAttemptDiagnostic(ctx, f.n, fenceOwner, "developer", AttemptDiagnostic{TaskDigest: f.state.TaskDigest, ClaimID: f.state.Lease.ClaimID, Kind: "timeout", Elapsed: time.Second})
+			return err
+		}},
 		{"RefundRetryReservation", func(ctx context.Context, f *claimFenceFixture) error {
 			_, err := f.m.RefundRetryReservation(ctx, f.n, fenceOwner, "reservation")
 			return err

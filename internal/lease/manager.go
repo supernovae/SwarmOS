@@ -288,6 +288,27 @@ func (m *Manager) RecordAttemptDiagnostic(ctx context.Context, n int, owner, rol
 	})
 }
 
+// transferAttemptDiagnostics retains advisory context only for the same direct task.
+// The caller persists the rebinding atomically with the successor lease.
+func transferAttemptDiagnostics(st *IssueState, predecessorClaim, predecessorTask string, eligible bool) {
+	kept := map[string]AttemptDiagnostic{}
+	if eligible && directIssue(st) && predecessorClaim != "" && predecessorTask == st.TaskDigest {
+		for role, d := range st.AttemptDiagnostics {
+			switch role {
+			case "planner", "developer", "tester", "reviewer":
+			default:
+				continue
+			}
+			if d.ClaimID != predecessorClaim || d.TaskDigest != st.TaskDigest || (d.Kind != "import" && d.Kind != "timeout") {
+				continue
+			}
+			d.ClaimID = st.Lease.ClaimID
+			kept[role] = d
+		}
+	}
+	st.AttemptDiagnostics = kept
+}
+
 func clearAttemptDiagnostic(st *IssueState, kind contract.ArtifactType) {
 	role := ""
 	switch kind {
@@ -1272,6 +1293,8 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 			return nil, err
 		}
 	}
+	predecessorClaim, predecessorTask := st.Lease.ClaimID, st.TaskDigest
+	diagnosticEligible := prNumber == 0 && directIssue(st)
 	if fresh {
 		previousBase := st.BaseSHA
 		st, err = m.prepareClaimBase(ctx, n, st, wu, cfg)
@@ -1332,6 +1355,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if err != nil {
 		return nil, err
 	}
+	transferAttemptDiagnostics(st, predecessorClaim, predecessorTask, diagnosticEligible)
 	st.Lease.Contributors = contributors
 	if st.PendingPlanReview != nil {
 		st.Lease.NextPhase = "plan"
@@ -1426,6 +1450,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			}
 			return nil, &TaskApprovalError{IssueNumber: issue, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
 		}
+		st.AttemptDiagnostics = nil
 		if err := m.DecompositionAdmission(ctx, st); err != nil {
 			return nil, err
 		}
@@ -1953,6 +1978,7 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	for i := range st.Artifacts {
 		if st.Artifacts[i].Type == contract.ArtifactReview {
 			art.Version = st.Artifacts[i].Version + 1
+			clearAttemptDiagnostic(st, art.Type)
 			st.Artifacts[i] = art
 			recordPlanReviewTransition(st, art, false)
 			return m.save(ctx, n, rev, st)
@@ -2291,6 +2317,7 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		for i, a := range st.Artifacts {
 			if a.Type == art.Type {
 				art.Version = a.Version + 1
+				clearAttemptDiagnostic(st, art.Type)
 				st.Artifacts[i] = art
 				recordPlanReviewTransition(st, art, advisory)
 				return nil
@@ -2370,6 +2397,7 @@ func (m *Manager) insertValidationArtifact(st *IssueState, n int, art contract.A
 	for i, a := range st.Artifacts {
 		if a.Type == art.Type {
 			art.Version = a.Version + 1
+			clearAttemptDiagnostic(st, art.Type)
 			st.Artifacts[i] = art
 			return nil
 		}
@@ -3725,6 +3753,7 @@ func (m *Manager) RecordUpstreamPlanReview(ctx context.Context, o *UpstreamPlanR
 	for i, a := range st.Artifacts {
 		if a.Type == contract.ArtifactReview {
 			art.Version = a.Version + 1
+			clearAttemptDiagnostic(st, art.Type)
 			st.Artifacts[i] = art
 			replaced = true
 			break

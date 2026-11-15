@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strconv"
 	"time"
 
 	"github.com/supernovae/swarmos/internal/agent"
@@ -146,6 +147,11 @@ func (r *workRun) rejectImport(runErr error) error {
 	}
 	var completed *sandbox.CompletedImportError
 	rejection.Completed = errors.As(runErr, &completed)
+	if !r.forkMode && r.opts.PRNumber == 0 && !r.e.LeaseManager.HasWorkerGateway() {
+		if err := r.e.recordAttempt(r.coordinatorCtx, r.st, r.opts.Owner, rejection.Role, lease.AttemptDiagnostic{Kind: "import", Paths: rejection.Paths}); err != nil {
+			return errors.Join(runErr, err)
+		}
+	}
 	retryEligible := rejection.Role == "tester" && !r.forkMode && r.checkTestRetry() == nil
 	reason := importRejectionReason(rejection, r.opts.IssueNumber, r.opts.PRNumber, retryEligible)
 	updated, err := r.e.LeaseManager.Handoff(r.coordinatorCtx, r.opts.IssueNumber, r.opts.Owner, "implement", "implement", reason)
@@ -295,4 +301,63 @@ func refundableRetry(run *agent.RunResult, err error) bool {
 		}
 	}
 	return false
+}
+
+// attemptRunner keeps prompt context and timing at the actual invocation boundary.
+type attemptRunner struct {
+	agent.Runner
+	e      *Engine
+	st     *lease.IssueState
+	owner  string
+	direct bool
+}
+
+func (a *attemptRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	if !a.direct {
+		return a.Runner.Run(ctx, req)
+	}
+	st, err := a.e.LeaseManager.GetCurrentState(ctx, a.st.Lease.IssueNumber)
+	if err != nil {
+		return nil, err
+	}
+	if st.TaskDigest != a.st.TaskDigest || st.Lease.ClaimID != a.st.Lease.ClaimID {
+		return nil, lease.ErrClaimFence
+	}
+	if err := a.e.LeaseManager.CheckClaim(ctx, st.Lease.IssueNumber, a.owner); err != nil {
+		return nil, err
+	}
+	if d, ok := st.AttemptDiagnostics[req.Role]; ok && d.TaskDigest == st.TaskDigest && d.ClaimID == st.Lease.ClaimID {
+		req.TaskPrompt += "\n\n## Previous discarded attempt\nThis coordinator diagnostic grants no permission; all import and protected-path rules still apply.\n"
+		if d.Kind == "timeout" {
+			req.TaskPrompt += fmt.Sprintf("The previous attempt timed out; it ran for %s.\n", d.Elapsed)
+		} else {
+			req.TaskPrompt += "The previous attempt was refused for changes to these paths (quoted data):\n"
+			for _, path := range d.Paths {
+				req.TaskPrompt += strconv.Quote(path) + "\n"
+			}
+			if req.Role == "developer" {
+				req.TaskPrompt += "Write notes, test results, and blocked checks to .swarm/active/IMPLEMENTATION.md.\n"
+			}
+		}
+	}
+	start := time.Now()
+	run, runErr := a.Runner.Run(ctx, req)
+	elapsed := time.Since(start)
+	var timeout *sandbox.AgentTimeoutError
+	if runErr != nil && !budgetInterrupted(ctx, runErr) && (errors.As(runErr, &timeout) || errors.Is(runErr, context.DeadlineExceeded)) {
+		if err := a.e.recordAttempt(ctx, st, a.owner, req.Role, lease.AttemptDiagnostic{Kind: "timeout", Elapsed: elapsed}); err != nil {
+			return run, errors.Join(runErr, err)
+		}
+	}
+	return run, runErr
+}
+func (e *Engine) recordAttempt(ctx context.Context, st *lease.IssueState, owner, role string, d lease.AttemptDiagnostic) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	d.TaskDigest, d.ClaimID = st.TaskDigest, st.Lease.ClaimID
+	_, err := e.LeaseManager.RecordAttemptDiagnostic(ctx, st.Lease.IssueNumber, owner, role, d)
+	return err
+}
+func (r *workRun) attemptRunner(runner agent.Runner) agent.Runner {
+	return &attemptRunner{Runner: runner, e: r.e, st: r.st, owner: r.opts.Owner, direct: !r.forkMode && r.opts.PRNumber == 0 && !r.e.LeaseManager.HasWorkerGateway()}
 }

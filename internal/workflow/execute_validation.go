@@ -58,7 +58,7 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 			return false, err
 		}
 	}
-	testerRun, err := testerRunner.Run(r.ctx, agent.RunRequest{CheckImport: r.checkImport("tester"), PreserveRejected: r.preserveRejected("tester"), Agent: tester, Role: "tester", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: r.opts.instructionsFor("tester"), Dependencies: r.deps})
+	testerRun, err := r.attemptRunner(testerRunner).Run(r.ctx, agent.RunRequest{CheckImport: r.checkImport("tester"), PreserveRejected: r.preserveRejected("tester"), Agent: tester, Role: "tester", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: r.opts.instructionsFor("tester"), Dependencies: r.deps})
 	var rejection *importRejection
 	if errors.As(err, &rejection) {
 		return false, r.rejectImport(err)

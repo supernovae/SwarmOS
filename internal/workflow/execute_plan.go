@@ -89,7 +89,7 @@ func (r *workRun) plan() (bool, error) {
 		if err := r.admit("plan"); err != nil {
 			return true, err
 		}
-		planRun, err := runner.Run(r.ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, r.st, r.opts.PRNumber), OperatorInstructions: r.opts.instructionsFor("planner"), Dependencies: r.deps})
+		planRun, err := r.attemptRunner(runner).Run(r.ctx, agent.RunRequest{Agent: planner, Role: "planner", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(planPrompt, r.st, r.opts.PRNumber), OperatorInstructions: r.opts.instructionsFor("planner"), Dependencies: r.deps})
 		if settleErr := r.settleRetry(reservationID, planRun, err); settleErr != nil {
 			return true, settleErr
 		}

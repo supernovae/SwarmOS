@@ -1185,7 +1185,7 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 	var review, verdict, firstVerdict string
 	var firstErr error
 	for attempt := 0; ; attempt++ {
-		revRun, err = agent.RunReview(ctx, runner, req)
+		revRun, err = agent.RunReview(ctx, &attemptRunner{Runner: runner, e: e, st: st, owner: owner, direct: recovery.CandidateHead == "" && prNumber == 0 && !e.ForkMode && !e.LeaseManager.HasWorkerGateway()}, req)
 		if err != nil && revRun != nil && revRun.ExitCode == 0 && prNumber == 0 && st.PRRevision == nil {
 			// Successful processes with no importable report are malformed review runs.
 			err = &planReviewOutputError{err}

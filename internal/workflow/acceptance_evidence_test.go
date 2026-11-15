@@ -186,13 +186,12 @@ func TestIssue464AcceptanceRepair(t *testing.T) {
 				return
 			}
 			if tc.persistent {
-				if !errors.Is(err, ErrValidationRepairExhausted) || !strings.Contains(err.Error(), "required checks were not run") {
+				if !errors.Is(err, ErrValidationRepairExhausted) {
 					t.Fatalf("expected exhaustion: %v", err)
 				}
-				// The last allowed round cannot pass, so its required checks are
-				// skipped; the tester evidence is still recorded for the next round.
-				if res == nil || res.Validation == nil || res.Validation.Passed || res.Validation.Artifact.Verdict != "FAIL" || res.Validation.Artifact.Metadata[validation.ChecksSkippedKey] != "skipped" {
-					t.Fatal("final round ran checks or recorded a passing verdict")
+				// The final round retains executed checks and unmet tester evidence.
+				if res == nil || res.Validation == nil || res.Validation.Passed || res.Validation.Artifact.Verdict != "FAIL" || res.Validation.Artifact.Metadata[validation.ChecksSkippedKey] != "" || len(res.Validation.CheckOutcomes) == 0 {
+					t.Fatal("final round lost checks or recorded a passing verdict")
 				}
 				if !lease.RepairAcceptance(res.State, wu.Acceptance).NeedsRepair() {
 					t.Fatal("skipped round lost the tester's unmet criteria")
@@ -455,10 +454,7 @@ func TestRepairSeesUnmetAcceptanceWhenChecksFail(t *testing.T) {
 				err = os.WriteFile(filepath.Join(req.WorktreePath, name), []byte("x"), 0600)
 			case "tester":
 				testers++
-				status := "unmet"
-				if testers > 1 {
-					status = "met"
-				}
+				status := "met"
 				raw, _ := json.Marshal(map[string]any{"version": 1, "criteria": []map[string]any{{"index": 1, "criterion": "archive parity", "status": status, "evidence": "Independent acceptance review 1"}}})
 				body := "## Independent acceptance review 1\nArchived issues differ.\n" + validation.AcceptanceEvidenceStart + "\n" + string(raw) + "\n" + validation.AcceptanceEvidenceEnd
 				err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte(body), 0600)
@@ -473,10 +469,7 @@ func TestRepairSeesUnmetAcceptanceWhenChecksFail(t *testing.T) {
 	if devs != 2 {
 		t.Fatalf("developer rounds = %d", devs)
 	}
-	if !strings.Contains(repairPrompt, "address the listed unmet acceptance criteria") || !strings.Contains(repairPrompt, "not advisory") {
-		t.Fatalf("repair prompt omitted the unmet criterion:\n%s", repairPrompt)
-	}
-	if !strings.Contains(repairBrief, "Unmet acceptance criteria") || !strings.Contains(repairBrief, "Archived issues differ.") || !strings.Contains(repairBrief, "fixed") {
-		t.Fatalf("repair brief omitted the check or the criterion:\n%s", repairBrief)
+	if testers != 1 || !strings.Contains(repairPrompt, ".swarm/active/REPAIR.md") || !strings.Contains(repairBrief, "fixed") || strings.Contains(repairBrief, "Archived issues differ.") {
+		t.Fatalf("checks-only repair: testers=%d prompt=%s brief=%s", testers, repairPrompt, repairBrief)
 	}
 }

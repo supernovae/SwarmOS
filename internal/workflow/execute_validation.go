@@ -27,119 +27,176 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 	if err := r.admit("implement"); err != nil {
 		return false, err
 	}
-	r.progress.next("test")
-	tester := r.pre.Agents["tester"]
-	r.res.RoleAgentsUsed["tester"] = tester
-	testerRunner, err := r.e.configuredRunner(r.ctx, tester, r.cfg, r.e.Tracker.BackendName() == "local")
-	if err != nil {
-		return false, err
-	}
-	if err := compileSetupBundleWithCapabilities(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "tester", r.opts.PRNumber, r.roleCapabilityReport("tester")); err != nil {
-		return false, err
-	}
-	if err := ensurePlanArtifactsInWorktree(r.wtPath, r.st); err != nil {
-		return false, err
-	}
-	testPrompt := "Execute /swarm-validate and record acceptance evidence."
-	if r.opts.instructionsFor("tester") != "" {
-		testPrompt += "\nOperator instructions: " + r.opts.instructionsFor("tester")
-	}
-	if err := r.admit("implement"); err != nil {
-		return false, err
-	}
-	if r.opts.Phase == "test" || r.testerResume {
-		if err := r.checkTestRetry(); err != nil {
-			return false, err
-		}
-	}
-	if reuseChecks {
-		// Capture fresh tester output separately from the reused check report.
-		if _, err := recordGuidance(r.wtPath, "VALIDATION.md", "", nil); err != nil {
-			return false, err
-		}
-	}
-	testerRun, err := testerRunner.Run(r.ctx, agent.RunRequest{CheckImport: r.checkImport("tester"), PreserveRejected: r.preserveRejected("tester"), Agent: tester, Role: "tester", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: r.opts.instructionsFor("tester"), Dependencies: r.deps})
-	var rejection *importRejection
-	if errors.As(err, &rejection) {
-		return false, r.rejectImport(err)
-	}
-	if paused, pauseErr := r.pauseInterrupted(err, "implement", true); paused {
-		return true, pauseErr
-	}
-	if err != nil {
-		r.st, err = r.e.failedRun(r.ctx, r.st, r.opts, testerRun, err, "tester")
-		r.res.State = r.st
-		if !r.forkMode && r.checkTestRetry() == nil {
-			return false, &TestRetryAvailableError{Err: err}
-		}
-		return false, err
-	}
-	if err := r.check(); err != nil {
-		return false, err
-	}
-	if err := r.checkWorkApproval(r.ctx); err != nil {
-		return false, err
-	}
-	testerBody, _ := readRequiredArtifact(r.wtPath, "VALIDATION.md")
-	if !r.forkMode && r.opts.PRNumber == 0 && (r.opts.Phase == "test" || r.testerResume) {
-		if guardErr := r.checkTestRetry(); guardErr != nil {
-			return false, r.retryCandidateError(guardErr, testerBody)
-		}
-	}
-	outcome := parseTesterOutcome(testerBody)
-	negative := outcome == testerFail || outcome == testerBlocked
 	direct := !r.forkMode && !r.e.LeaseManager.HasWorkerGateway() && r.opts.PRNumber == 0 && r.st.PRNumber == 0 && r.st.PRRevision == nil
-	if negative && !direct {
-		command := fmt.Sprintf("swarm issue work %d --phase implement", r.opts.IssueNumber)
-		if r.opts.PRNumber != 0 {
-			command = fmt.Sprintf("swarm pr work %d --phase implement", r.opts.PRNumber)
-		}
-		return false, fmt.Errorf("tester declared %s in .swarm/active/VALIDATION.md; complete implementation and rerun with %s", outcome, command)
-	}
+	// Fresh direct-issue rounds spend tester time only after coordinator checks pass.
+	// Reused checks and PR/fork flows keep their existing sequencing.
+	checksFirst := direct && !reuseChecks
 	var report *validation.ValidationReport
-	if negative && direct {
-		head, headErr := gitcredential.Output(r.ctx, r.wtPath, "rev-parse", "--verify", "HEAD^{commit}")
-		if headErr != nil {
-			return false, headErr
-		}
-		report = validation.SkippedChecksReport(r.opts.IssueNumber, r.st.BaseSHA, strings.TrimSpace(string(head)), "tester declared "+string(outcome)+" in .swarm/active/VALIDATION.md")
-		report.Artifact.Metadata[testerNegativeKey] = string(outcome)
-		findings := testerBody
-		if len(findings) > validation.MaxAcceptanceEvidenceBytes {
-			findings = findings[:validation.MaxAcceptanceEvidenceBytes]
-		}
-		report.Artifact.Metadata[testerFindingsKey] = findings
-		err = fmt.Errorf("%w: tester declared %s in .swarm/active/VALIDATION.md", errAcceptanceUnmet, outcome)
-	} else if skip, skipErr := r.skipChecksForUnmetAcceptance(round, reuseChecks, testerBody); skipErr != nil {
-		return false, skipErr
-	} else if skip != nil {
-		report, err = skip, fmt.Errorf("%w: required checks were not run because the tester recorded unmet acceptance criteria and no repair rounds remain", errAcceptanceUnmet)
-	} else {
-		r.progress.next("required-checks")
-	}
+	var testerRun *agent.RunResult
+	var testerBody string
+	var testerCompleted bool
+	var checkedTree string
 	version := r.opts.Version
 	if version == "" && (r.opts.Phase == "test" || r.testerResume || (!r.forkMode && r.opts.PRNumber == 0)) {
 		version = "dev"
 	}
-	if report == nil && reuseChecks {
-		report, err = validation.Reuse(r.ctx, r.wtPath, validation.ValidateOptions{ForkMode: r.forkMode || r.e.LeaseManager.HasWorkerGateway(), DirectIssueReuse: !r.forkMode && r.opts.PRNumber == 0 && !r.e.LeaseManager.HasWorkerGateway(), Version: r.opts.Version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA}, r.opts.Owner, r.st.Artifacts)
+
+	if checksFirst {
+		if r.opts.Phase == "test" || r.testerResume {
+			if err := r.checkTestRetry(); err != nil {
+				return false, err
+			}
+		}
+		r.progress.next("required-checks")
+		checkedTree, err = workspace.CheckpointTree(r.ctx, r.wtPath)
 		if err != nil {
 			return false, err
 		}
-	}
-	if report == nil {
 		report, err = validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
+		if context.Cause(r.ctx) == claimpause.ErrBudget {
+			return true, r.e.pauseWork(r.coordinatorCtx, r.res, r.opts, r.pre.WorkUnit, "implement", true, r.forkMode, r.forkRemote)
+		}
+		if report == nil {
+			return false, err
+		}
+	}
+	if !checksFirst || (err == nil && report.Passed) {
+		r.progress.next("test")
+		tester := r.pre.Agents["tester"]
+		r.res.RoleAgentsUsed["tester"] = tester
+		var testerRunner agent.Runner
+		testerRunner, err = r.e.configuredRunner(r.ctx, tester, r.cfg, r.e.Tracker.BackendName() == "local")
+		if err != nil {
+			return false, err
+		}
+		if err := compileSetupBundleWithCapabilities(r.ctx, r.opts.SetupProgress, r.wtPath, r.pre.WorkUnit, r.wf, r.st, "tester", r.opts.PRNumber, r.roleCapabilityReport("tester")); err != nil {
+			return false, err
+		}
+		if err := ensurePlanArtifactsInWorktree(r.wtPath, r.st); err != nil {
+			return false, err
+		}
+		testPrompt := "Execute /swarm-validate and record acceptance evidence."
+		if r.opts.instructionsFor("tester") != "" {
+			testPrompt += "\nOperator instructions: " + r.opts.instructionsFor("tester")
+		}
+		if err := r.admit("implement"); err != nil {
+			return false, err
+		}
+		if r.opts.Phase == "test" || r.testerResume {
+			if err := r.checkTestRetry(); err != nil {
+				return false, err
+			}
+		}
+		if reuseChecks || checksFirst {
+			// Capture only this tester run, separately from coordinator check output.
+			if _, err := recordGuidance(r.wtPath, "VALIDATION.md", "", nil); err != nil {
+				return false, err
+			}
+		}
+		testerRun, err = testerRunner.Run(r.ctx, agent.RunRequest{CheckImport: r.checkImport("tester"), PreserveRejected: r.preserveRejected("tester"), Agent: tester, Role: "tester", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: testPrompt, OperatorInstructions: r.opts.instructionsFor("tester"), Dependencies: r.deps})
+		var rejection *importRejection
+		if errors.As(err, &rejection) {
+			return false, r.rejectImport(err)
+		}
+		if paused, pauseErr := r.pauseInterrupted(err, "implement", true); paused {
+			return true, pauseErr
+		}
+		if err != nil {
+			r.st, err = r.e.failedRun(r.ctx, r.st, r.opts, testerRun, err, "tester")
+			r.res.State = r.st
+			if !r.forkMode && r.checkTestRetry() == nil {
+				return false, &TestRetryAvailableError{Err: err}
+			}
+			return false, err
+		}
+		if err := r.check(); err != nil {
+			return false, err
+		}
+		if err := r.checkWorkApproval(r.ctx); err != nil {
+			return false, err
+		}
+		testerCompleted = true
+		testerBody, _ = readRequiredArtifact(r.wtPath, "VALIDATION.md")
+		if !r.forkMode && r.opts.PRNumber == 0 && (r.opts.Phase == "test" || r.testerResume) {
+			if guardErr := r.checkTestRetry(); guardErr != nil {
+				return false, r.retryCandidateError(guardErr, testerBody)
+			}
+		}
+
+		if checksFirst {
+			head, headErr := gitcredential.Output(r.ctx, r.wtPath, "rev-parse", "--verify", "HEAD^{commit}")
+			if headErr != nil {
+				return false, headErr
+			}
+			tree, treeErr := workspace.CheckpointTree(r.ctx, r.wtPath)
+			if treeErr != nil {
+				return false, treeErr
+			}
+			if strings.TrimSpace(string(head)) != report.HeadSHA || tree != checkedTree {
+				return false, r.retryCandidateError(errors.New("candidate changed after required checks"), testerBody)
+			}
+		}
+		outcome := parseTesterOutcome(testerBody)
+		negative := outcome == testerFail || outcome == testerBlocked
+		if negative && !direct {
+			command := fmt.Sprintf("swarm issue work %d --phase implement", r.opts.IssueNumber)
+			if r.opts.PRNumber != 0 {
+				command = fmt.Sprintf("swarm pr work %d --phase implement", r.opts.PRNumber)
+			}
+			return false, fmt.Errorf("tester declared %s in .swarm/active/VALIDATION.md; complete implementation and rerun with %s", outcome, command)
+		}
+		if negative && direct {
+			if !checksFirst {
+				head, headErr := gitcredential.Output(r.ctx, r.wtPath, "rev-parse", "--verify", "HEAD^{commit}")
+				if headErr != nil {
+					return false, headErr
+				}
+				report = validation.SkippedChecksReport(r.opts.IssueNumber, r.st.BaseSHA, strings.TrimSpace(string(head)), "tester declared "+string(outcome)+" in .swarm/active/VALIDATION.md")
+			}
+			report.Artifact.Metadata[testerNegativeKey] = string(outcome)
+			findings := testerBody
+			if len(findings) > validation.MaxAcceptanceEvidenceBytes {
+				findings = findings[:validation.MaxAcceptanceEvidenceBytes]
+			}
+			report.Artifact.Metadata[testerFindingsKey] = findings
+			err = fmt.Errorf("%w: tester declared %s in .swarm/active/VALIDATION.md", errAcceptanceUnmet, outcome)
+		} else if skip, skipErr := r.skipChecksForUnmetAcceptance(round, reuseChecks || checksFirst, testerBody); skipErr != nil {
+			return false, skipErr
+		} else if skip != nil {
+			report, err = skip, fmt.Errorf("%w: required checks were not run because the tester recorded unmet acceptance criteria and no repair rounds remain", errAcceptanceUnmet)
+		} else if !checksFirst {
+			r.progress.next("required-checks")
+		}
+
+		if report == nil && reuseChecks {
+			report, err = validation.Reuse(r.ctx, r.wtPath, validation.ValidateOptions{ForkMode: r.forkMode || r.e.LeaseManager.HasWorkerGateway(), DirectIssueReuse: !r.forkMode && r.opts.PRNumber == 0 && !r.e.LeaseManager.HasWorkerGateway(), Version: r.opts.Version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA}, r.opts.Owner, r.st.Artifacts)
+			if err != nil {
+				return false, err
+			}
+		}
+		if report == nil {
+			report, err = validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
+		}
 	}
 	if context.Cause(r.ctx) == claimpause.ErrBudget {
 		return true, r.e.pauseWork(r.coordinatorCtx, r.res, r.opts, r.pre.WorkUnit, "implement", true, r.forkMode, r.forkRemote)
 	}
 	if report != nil {
+		if checksFirst && (errors.Is(err, errAcceptanceUnmet) || (round >= r.repairLimit && r.opts.Phase != "test" && validation.AssessAcceptance(r.pre.WorkUnit.Acceptance, validation.CaptureAcceptanceEvidence(testerBody)).NeedsRepair())) {
+			report.Passed = false
+			report.Artifact.Verdict = "FAIL"
+			if err == nil {
+				err = errAcceptanceUnmet
+			}
+		}
 		r.res.Validation = report
-		observeRun(testerRun, r.st, false)
-		report.Artifact.Metadata = runMetadata(testerRun, report.Artifact.Metadata)
-		validation.StoreAcceptanceSnapshot(report.Artifact.Metadata, validation.CaptureAcceptanceEvidence(testerBody))
-		report.Artifact.Body += "\n" + testerBody
-		report.Artifact.Body = guidedReport(report.Artifact.Body, testerRun)
+		if testerCompleted {
+			observeRun(testerRun, r.st, false)
+			report.Artifact.Metadata = runMetadata(testerRun, report.Artifact.Metadata)
+			validation.StoreAcceptanceSnapshot(report.Artifact.Metadata, validation.CaptureAcceptanceEvidence(testerBody))
+			report.Artifact.Body += "\n" + testerBody
+			report.Artifact.Body = guidedReport(report.Artifact.Body, testerRun)
+		}
 		if _, writeErr := recordGuidance(r.wtPath, "VALIDATION.md", canonicalReport(report.Artifact.Body), testerRun); writeErr != nil {
 			return false, writeErr
 		}

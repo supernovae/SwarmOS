@@ -197,7 +197,7 @@ func TestTesterRetryProgressUsesExistingSession(t *testing.T) {
 			finishes++
 		}
 	}
-	if len(events) == 0 || events[0].Stage != "preflight" || testIndex <= 0 || checkIndex <= testIndex || finishes != 1 {
+	if len(events) == 0 || events[0].Stage != "preflight" || testIndex <= 0 || checkIndex <= 0 || testIndex <= checkIndex || finishes != 1 {
 		t.Fatalf("events: %+v", events)
 	}
 }

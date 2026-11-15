@@ -460,7 +460,7 @@ func TestWorkRepairStaleWorkerFailsWithClaimFence(t *testing.T) {
 	if !errors.Is(err, lease.ErrClaimFence) || errors.Is(err, validation.ErrRequiredCheckFailed) {
 		t.Fatalf("stale repair worker: %v", err)
 	}
-	if prompts != 2 || testerCalls != 1 || res == nil || res.ValidationPassed {
+	if prompts != 2 || testerCalls != 0 || res == nil || res.ValidationPassed {
 		t.Fatalf("stale worker continued: %d developer, %d tester calls", prompts, testerCalls)
 	}
 	data, _ := os.ReadFile(log)
@@ -505,7 +505,15 @@ func TestWorkRepairPausesNearClaimBudget(t *testing.T) {
 			return (&agent.MockRunner{}).Run(ctx, req)
 		}}, nil
 	}
-	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, OnProgress: func(ev ProgressEvent) {
+		if ev.Stage == "required-checks" && ev.Check != "" && ev.Status == "FAIL" {
+			st, err := e.LeaseManager.GetCurrentState(t.Context(), issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			offset.Store(int64(time.Until(st.Lease.ExpiresAt.Add(-time.Hour))))
+		}
+	}})
 	if err != nil || res == nil || res.ClaimBudgetPause == nil {
 		t.Fatalf("budget stop: %+v %v", res, err)
 	}
@@ -859,7 +867,13 @@ func TestWorkRepairRestorationEvidence(t *testing.T) {
 func TestExplicitTesterRetry(t *testing.T) {
 	for _, scenario := range []string{"refused", "runner error", "new claim", "check failure", "dirty tracked", "dirty staged", "dirty untracked", "moved head", "stale claim", "repeat refusal", "move during tester", "successor during tester", "plan during tester", "move during checks"} {
 		t.Run(scenario, func(t *testing.T) {
-			e, issue := testerRetryEngine(t)
+			var e *Engine
+			var issue *tracker.Issue
+			if scenario == "check failure" {
+				e, issue = gatedTesterRetryEngine(t, contract.GateNone, "if test -f fail-check; then exit 3; fi", "true", "0")
+			} else {
+				e, issue = testerRetryEngine(t)
+			}
 			mock := &agent.MockRunner{}
 			developer, tester := 0, 0
 			initial := true
@@ -921,7 +935,11 @@ func TestExplicitTesterRetry(t *testing.T) {
 			}
 			opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
 			first, err := e.ExecuteWork(t.Context(), opts)
-			if err == nil || first == nil || developer != 1 || tester != 1 {
+			wantDev, wantInitialTester := 1, 1
+			if scenario == "check failure" {
+				wantDev, wantInitialTester = 1, 0
+			}
+			if err == nil || first == nil || developer != wantDev || tester != wantInitialTester {
 				t.Fatalf("initial: %v %+v calls %d/%d", err, first, developer, tester)
 			}
 			before, _ := json.Marshal(implementationArtifact(first.State))
@@ -970,7 +988,7 @@ func TestExplicitTesterRetry(t *testing.T) {
 				t.Fatalf("developer invoked %d", developer)
 			}
 			wantTester := 0
-			if wantPass || scenario == "check failure" || scenario == "repeat refusal" || scenario == "move during tester" || scenario == "successor during tester" || scenario == "plan during tester" || scenario == "move during checks" {
+			if wantPass || scenario == "repeat refusal" || scenario == "move during tester" || scenario == "successor during tester" || scenario == "plan during tester" {
 				wantTester = 1
 			}
 			if tester != wantTester {
@@ -1493,14 +1511,6 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 			for _, name := range []string{"one", "two"} {
 				data, _ := os.ReadFile(filepath.Join(counterDir, name))
 				want := wantRoles
-				if tc.stop {
-					want = 0
-				}
-				if acceptanceRepair {
-					// The last allowed round is already decided by the unmet
-					// criteria, so its required checks are skipped (#556).
-					want = 1
-				}
 				if got := strings.Count(string(data), "x\n"); got != want {
 					t.Errorf("check %s ran %d times, want %d", name, got, want)
 				}
@@ -1516,10 +1526,8 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 				if diffErr != nil || !strings.Contains(string(out), "+\n") {
 					t.Fatalf("missing blank-line residue: %s %v", out, diffErr)
 				}
-				for _, stage := range stages {
-					if stage == "required-checks" {
-						t.Fatal("announced required checks")
-					}
+				if !slices.Contains(stages, "required-checks") {
+					t.Fatal("required checks not announced")
 				}
 				for _, a := range res.State.Artifacts {
 					if a.Type == contract.ArtifactValidation && a.Verdict == "PASS" {
@@ -1536,16 +1544,16 @@ func TestTesterOutcomeScheduling(t *testing.T) {
 					t.Fatalf("retry role calls %d/%d", developers, testers)
 				}
 				for _, name := range []string{"one", "two"} {
-					if data, _ := os.ReadFile(filepath.Join(counterDir, name)); len(data) != 0 {
-						t.Fatal("retry ran checks")
+					if data, _ := os.ReadFile(filepath.Join(counterDir, name)); strings.Count(string(data), "x\n") != 3 {
+						t.Fatal("retry did not run checks once")
 					}
 				}
 			} else if acceptanceRepair {
-				if !errors.Is(err, ErrValidationRepairExhausted) || errors.Is(err, validation.ErrRequiredCheckFailed) || res.ValidationPassed || res.State.ValidationRepairCount != 1 || !strings.Contains(err.Error(), "required checks were not run") {
+				if !errors.Is(err, ErrValidationRepairExhausted) || errors.Is(err, validation.ErrRequiredCheckFailed) || res.ValidationPassed || res.State.ValidationRepairCount != 1 {
 					t.Fatalf("acceptance repair: %v", err)
 				}
-				if res.Validation == nil || res.Validation.Artifact.Metadata[validation.ChecksSkippedKey] != "skipped" {
-					t.Fatal("final round did not record skipped checks")
+				if res.Validation == nil || res.Validation.Artifact.Metadata[validation.ChecksSkippedKey] != "" || len(res.Validation.CheckOutcomes) != 2 {
+					t.Fatal("final round did not retain executed checks")
 				}
 			} else if err != nil || !res.ValidationPassed {
 				t.Fatalf("normal validation: %v", err)
@@ -1616,19 +1624,19 @@ func TestIssueWorkResumeTesterOnly(t *testing.T) {
 }
 
 func TestIssueWorkRecoveryResumeRepairBudget(t *testing.T) {
-	e, issue := testerRetryEngine(t)
+	failure := filepath.Join(t.TempDir(), "fail")
+	e, issue := gatedTesterRetryEngine(t, contract.GateNone, "test ! -f '"+failure+"'")
 	developer, tester := 0, 0
 	initial := true
 	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
 			if req.Role == "developer" {
 				developer++
-				if initial {
-					if err := os.WriteFile(filepath.Join(req.WorktreePath, "fail-check"), []byte("fail"), 0644); err != nil {
+				if !initial {
+					if err := os.Remove(failure); err != nil {
 						return nil, err
 					}
-				} else {
-					if err := os.Remove(filepath.Join(req.WorktreePath, "fail-check")); err != nil {
+					if err := writeFile("repaired.txt", "fixed")(req.WorktreePath); err != nil {
 						return nil, err
 					}
 				}
@@ -1648,6 +1656,9 @@ func TestIssueWorkRecoveryResumeRepairBudget(t *testing.T) {
 		t.Fatalf("initial: %v", err)
 	}
 	initial = false
+	if err := os.WriteFile(failure, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	opts.ClaimID = first.State.Lease.ClaimID
 	opts.Phase = "test"
 	failed, err := e.ExecuteWork(t.Context(), opts)
@@ -1796,7 +1807,11 @@ func TestIssueWorkRecoveryDeveloperInstructionMatrix(t *testing.T) {
 							}
 						})
 						dir := t.TempDir()
-						script := "#!/bin/sh\nif [ -f fixed.txt ]; then echo PASS; exit 0; fi\nbase=false; case \"$PWD\" in */swarm-repair-base-*) base=true;; esac\n"
+						initialChecks := filepath.Join(dir, "initial-checks")
+						if err := os.WriteFile(initialChecks, nil, 0600); err != nil {
+							t.Fatal(err)
+						}
+						script := "#!/bin/sh\nif [ -f '" + initialChecks + "' ]; then echo PASS; exit 0; fi\nif [ -f fixed.txt ]; then echo PASS; exit 0; fi\nbase=false; case \"$PWD\" in */swarm-repair-base-*) base=true;; esac\n"
 						if kind == "regression" {
 							script += "if $base; then echo PASS; exit 0; fi\n"
 						}
@@ -1868,6 +1883,9 @@ func TestIssueWorkRecoveryDeveloperInstructionMatrix(t *testing.T) {
 							t.Fatal("missing interrupted initial implementation", err)
 						}
 						initial = false
+						if err := os.Remove(initialChecks); err != nil {
+							t.Fatal(err)
+						}
 						opts.ClaimID = first.State.Lease.ClaimID
 						opts.Phase = "test"
 						failed, err := e.ExecuteWork(t.Context(), opts)
@@ -1937,7 +1955,7 @@ func TestIssueWorkRecoveryDeveloperInstructionMatrix(t *testing.T) {
 								rounds += limit - count
 								count = limit
 							}
-							if err == nil || calls["developer"] != rounds || calls["tester"] != rounds || len(calls) != 2 {
+							if err == nil || calls["developer"] != rounds || calls["tester"] != 0 || len(calls) != 1 {
 								t.Fatalf("requested/automatic rounds err=%v calls=%v want=%d", err, calls, rounds)
 							}
 						} else if allowed {
@@ -2038,7 +2056,11 @@ func testWorkValidationCheckpoint(t *testing.T, external bool, explicit ...bool)
 	if res == nil || res.Validation == nil || len(res.Validation.CheckOutcomes) != 1 || !strings.Contains(res.Validation.CheckOutcomes[0].Output, "retry-check-executed") {
 		t.Fatalf("check not executed %+v", res)
 	}
-	if calls["developer"] != 0 || calls["tester"] != 1 || res.RepairRounds != 0 {
+	wantTesters := 1
+	if external {
+		wantTesters = 0
+	}
+	if calls["developer"] != 0 || calls["tester"] != wantTesters || res.RepairRounds != 0 {
 		t.Fatalf("roles %v rounds %d", calls, res.RepairRounds)
 	}
 	after, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
@@ -2222,8 +2244,8 @@ func TestTesterResumeDirtyCandidate(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "regression_test.go") || !strings.Contains(err.Error(), fmt.Sprintf("swarm issue work %d --phase implement", issue.Number)) || !strings.Contains(err.Error(), "distinctive regression finding") {
 					t.Fatalf("diagnostic: %v", err)
 				}
-				if _, err := os.Stat(counter); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("checks executed: %v", err)
+				if data, err := os.ReadFile(counter); err != nil || strings.Count(string(data), "ran\n") != 2 {
+					t.Fatalf("expected only checks before testers: %q %v", data, err)
 				}
 				if res.Validation != nil || res.ValidationPassed || developers != 1 {
 					t.Fatalf("unexpected validation/developer: %+v %d", res, developers)
@@ -2339,8 +2361,8 @@ func TestTesterResumeDirtyDiagnostics(t *testing.T) {
 			if (kind == "FAIL" || kind == "BLOCKED") && !strings.Contains(err.Error(), kind) {
 				t.Fatalf("outcome: %v", err)
 			}
-			if _, statErr := os.Stat(counter); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("checks ran: %v", statErr)
+			if data, err := os.ReadFile(counter); err != nil || strings.Count(string(data), "ran\n") != 2 {
+				t.Fatalf("expected only checks before testers: %q %v", data, err)
 			}
 		})
 	}
@@ -2353,7 +2375,8 @@ func TestTesterResumeDirtyDiagnostics(t *testing.T) {
 }
 
 func TestTesterResumeCheckFailureDiagnostics(t *testing.T) {
-	e, issue := gatedTesterRetryEngine(t, contract.GateNone, "echo changed > check-change; exit 3")
+	failure := filepath.Join(t.TempDir(), "fail")
+	e, issue := gatedTesterRetryEngine(t, contract.GateNone, "if test -f '"+failure+"'; then echo changed > check-change; exit 3; fi")
 	mock := &agent.MockRunner{}
 	initial := true
 	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
@@ -2370,6 +2393,9 @@ func TestTesterResumeCheckFailureDiagnostics(t *testing.T) {
 		t.Fatal("expected interruption")
 	}
 	initial = false
+	if err := os.WriteFile(failure, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	opts.ClaimID = first.State.Lease.ClaimID
 	opts.IssueContinuation = true
 	res, err := e.ExecuteWork(t.Context(), opts)
@@ -2429,7 +2455,7 @@ func TestPartialImplementationRepairStops(t *testing.T) {
 				res, err = e.ExecuteWork(t.Context(), opts)
 			}
 			var partial *PartialImplementationError
-			if !errors.As(err, &partial) || devCalls != 2 || testCalls != 1 || res.ValidationPassed {
+			if !errors.As(err, &partial) || devCalls != 2 || testCalls != 0 || res.ValidationPassed {
 				t.Fatalf("%v developer=%d tester=%d", err, devCalls, testCalls)
 			}
 			after, _ := os.ReadFile(log)
@@ -2482,7 +2508,7 @@ func TestPartialImplementationStaleWorkerFailsWithClaimFence(t *testing.T) {
 	if !errors.Is(err, lease.ErrClaimFence) || errors.Is(err, validation.ErrRequiredCheckFailed) {
 		t.Fatalf("stale repair worker: %v", err)
 	}
-	if prompts != 2 || testerCalls != 1 || res == nil || res.ValidationPassed {
+	if prompts != 2 || testerCalls != 0 || res == nil || res.ValidationPassed {
 		t.Fatalf("stale worker continued: %d developer, %d tester calls", prompts, testerCalls)
 	}
 	data, _ := os.ReadFile(log)
@@ -2767,11 +2793,17 @@ func TestRepairTargetsIncludeUnmetAcceptanceWithFailingChecks(t *testing.T) {
 }
 
 func TestTesterFailureRepairExhausted(t *testing.T) {
+	installFixableGo(t)
 	for _, verdict := range []string{"FAIL", "BLOCKED"} {
 		t.Run(verdict, func(t *testing.T) {
 			e, n := repairFixture(t, "0")
 			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "developer" {
+						if err := writeFile("fixed.txt", "fixed")(req.WorktreePath); err != nil {
+							return nil, err
+						}
+					}
 					result, err := (&agent.MockRunner{}).Run(ctx, req)
 					if err == nil && req.Role == "tester" {
 						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte("VERDICT: "+verdict+"\nunique tester findings"), 0600)
@@ -2825,9 +2857,14 @@ func TestTesterFailureRepairResume(t *testing.T) {
 							if developers == 2 {
 								return nil, interrupted
 							}
-							if err := writeFile("fixed.txt", "fixed")(req.WorktreePath); err != nil {
+							if err := writeFile("repaired.txt", "fixed")(req.WorktreePath); err != nil {
 								return nil, err
 							}
+						}
+					}
+					if req.Role == "developer" {
+						if err := writeFile("fixed.txt", "fixed")(req.WorktreePath); err != nil {
+							return nil, err
 						}
 					}
 					result, err := (&agent.MockRunner{}).Run(ctx, req)
@@ -2905,7 +2942,8 @@ func TestAutomaticRetryRepairRefund(t *testing.T) {
 			{"cancellation", context.Canceled},
 		} {
 			t.Run(fmt.Sprintf("%s/continuation=%t", tc.name, continuation), func(t *testing.T) {
-				e, issue := testerRetryEngine(t)
+				failureEnabled := filepath.Join(t.TempDir(), "failure-enabled")
+				e, issue := gatedTesterRetryEngine(t, contract.GateNone, "if test -f '"+failureEnabled+"' && test -f fail-check; then exit 3; fi")
 				failureCtx, cancelFailure := context.WithCancel(t.Context())
 				defer cancelFailure()
 				stage := "initial"
@@ -2942,9 +2980,18 @@ func TestAutomaticRetryRepairRefund(t *testing.T) {
 					}}, nil
 				}
 				opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", IssueContinuation: true, Headless: true}
+				// Continuations first stop in the tester; fresh work fails checks immediately.
+				if !continuation {
+					if err := os.WriteFile(failureEnabled, nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				first, err := e.ExecuteWork(failureCtx, opts)
 				if first == nil || err == nil {
 					t.Fatalf("initial: %v", err)
+				}
+				if err := os.WriteFile(failureEnabled, nil, 0600); err != nil {
+					t.Fatal(err)
 				}
 				opts.ClaimID = first.State.Lease.ClaimID
 				if continuation {
@@ -3000,7 +3047,8 @@ func TestAutomaticRetryCompletedDeveloperCharged(t *testing.T) {
 		{name: "completed_output", err: &providerFixtureError{"rate_limit"}, output: "completed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e, issue := testerRetryEngine(t)
+			failureEnabled := filepath.Join(t.TempDir(), "failure-enabled")
+			e, issue := gatedTesterRetryEngine(t, contract.GateNone, "if test -f '"+failureEnabled+"' && test -f fail-check; then exit 3; fi")
 			initial := true
 			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
@@ -3023,6 +3071,9 @@ func TestAutomaticRetryCompletedDeveloperCharged(t *testing.T) {
 			if first == nil || err == nil {
 				t.Fatalf("initial: %v", err)
 			}
+			if err := os.WriteFile(failureEnabled, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
 			initial = false
 			opts.ClaimID = first.State.Lease.ClaimID
 			opts.Phase = "test"
@@ -3040,6 +3091,133 @@ func TestAutomaticRetryCompletedDeveloperCharged(t *testing.T) {
 			_, err = e.ExecuteWork(t.Context(), opts)
 			if !errors.Is(err, ErrValidationRepairExhausted) {
 				t.Fatalf("exhausted: %v", err)
+			}
+		})
+	}
+}
+
+func TestDirectIssueChecksBeforeTester(t *testing.T) {
+	for _, scenario := range []string{"failure", "pass", "repair", "candidate_changed", "head_changed", "tester_error"} {
+		t.Run(scenario, func(t *testing.T) {
+			log := installFixableGo(t)
+			limit := "0"
+			if scenario == "repair" {
+				limit = "1"
+			}
+			e, issue := repairFixture(t, limit)
+			devs, testers := 0, 0
+			var brief string
+			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					switch req.Role {
+					case "developer":
+						devs++
+						if devs == 2 {
+							data, _ := os.ReadFile(filepath.Join(req.WorktreePath, ".swarm/active/REPAIR.md"))
+							brief = string(data)
+							st, err := e.LeaseManager.GetCurrentState(ctx, issue)
+							if err != nil {
+								t.Fatal(err)
+							}
+							for _, a := range st.Artifacts {
+								if a.Type == contract.ArtifactValidation && (a.Verdict != "FAIL" || (a.Metadata["role"] != "" || a.Metadata["acceptance_evidence"] != "") || strings.Contains(a.Body, "stale acceptance")) {
+									t.Fatalf("checks-only artifact: %+v", a)
+								}
+							}
+						}
+						if scenario != "failure" && (scenario != "repair" || devs > 1) {
+							return &agent.RunResult{}, writeFile("fixed.txt", "fixed\n")(req.WorktreePath)
+						}
+						if err := writeFile(".swarm/active/VALIDATION.md", "stale acceptance")(req.WorktreePath); err != nil {
+							return nil, err
+						}
+						return &agent.RunResult{}, writeFile("feature.txt", "feature\n")(req.WorktreePath)
+					case "tester":
+						testers++
+						data, _ := os.ReadFile(log)
+						wantChecks := 1
+						if scenario == "repair" {
+							wantChecks = 2
+						}
+						if strings.Count(string(data), "-count=1 ./...") != wantChecks {
+							t.Error("tester launched before this round's checks")
+						}
+						if scenario == "candidate_changed" {
+							return &agent.RunResult{}, writeFile("fixed.txt", "changed\n")(req.WorktreePath)
+						}
+						if scenario == "head_changed" {
+							out, err := gitfixture.Command(t, "", "-C", req.WorktreePath, "commit", "--allow-empty", "-m", "moved").CombinedOutput()
+							if err != nil {
+								t.Fatalf("%v: %s", err, out)
+							}
+						}
+						if scenario == "tester_error" {
+							return nil, errors.New("tester unavailable")
+						}
+						body := "## Current review\nRepair verified.\n" + validation.AcceptanceEvidenceStart + "\n" + `{"version":1,"criteria":[{"index":1,"criterion":"Repair failures","status":"met","evidence":"Current review"}]}` + "\n" + validation.AcceptanceEvidenceEnd
+						result, err := (&agent.MockRunner{}).Run(ctx, req)
+						if err != nil {
+							return result, err
+						}
+						return result, writeFile(".swarm/active/VALIDATION.md", body)(req.WorktreePath)
+					}
+					return (&agent.MockRunner{}).Run(ctx, req)
+				}}, nil
+			}
+			res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			wantTesters := 1
+			if scenario == "failure" {
+				wantTesters = 0
+			}
+			if testers != wantTesters {
+				t.Fatalf("tester calls %d, want %d (%v)", testers, wantTesters, err)
+			}
+			if scenario == "pass" || scenario == "repair" {
+				if err != nil || !res.ValidationPassed {
+					t.Fatalf("pass: %v", err)
+				}
+				if res.Validation.HeadSHA != res.HeadSHA || res.State.HeadSHA != res.HeadSHA || res.Validation.Artifact.Metadata["head_sha"] != res.HeadSHA {
+					t.Fatal("head binding mismatch")
+				}
+				md := res.Validation.Artifact.Metadata
+				if md["base_sha"] != res.State.BaseSHA || md["validation_claim"] != res.State.Lease.ClaimID || !strings.Contains(md["acceptance_evidence"], "Current review") || md["role"] != "tester" {
+					t.Fatalf("missing current evidence: %+v", md)
+				}
+				recorded := false
+				for _, art := range res.State.Artifacts {
+					if art.Type == contract.ArtifactValidation && art.Verdict == "PASS" && art.Metadata["head_sha"] == res.HeadSHA && art.Metadata["validation_trusted_claim"] == res.State.Lease.ClaimID && strings.Contains(art.Metadata["acceptance_evidence"], "Current review") {
+						recorded = true
+					}
+				}
+				if !recorded {
+					t.Fatal("same-head trusted evidence missing")
+				}
+				data, _ := os.ReadFile(log)
+				wantChecks := 1
+				if scenario == "repair" {
+					wantChecks = 2
+				}
+				if strings.Count(string(data), "-count=1 ./...") != wantChecks {
+					t.Fatalf("checks executed twice in one round: %s", data)
+				}
+				if scenario == "repair" && (devs != 2 || !strings.Contains(brief, "TestBroken")) {
+					t.Fatalf("repair guidance: %s", brief)
+				}
+			} else {
+				if err == nil || res.ValidationPassed {
+					t.Fatalf("unexpected success: %v", err)
+				}
+				for _, a := range res.State.Artifacts {
+					if a.Type != contract.ArtifactValidation {
+						continue
+					}
+					if a.Verdict == "PASS" {
+						t.Fatal("checks-only PASS recorded")
+					}
+					if scenario == "failure" && (a.Metadata["role"] != "" || a.Metadata["acceptance_evidence"] != "" || strings.Contains(a.Body, "stale acceptance")) {
+						t.Fatalf("stale tester evidence: %+v", a)
+					}
+				}
 			}
 		})
 	}

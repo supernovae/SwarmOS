@@ -2547,3 +2547,251 @@ func TestSelectionStateReaderDecode(t *testing.T) {
 		t.Fatal("store replaced")
 	}
 }
+
+// issue505EditedClaim acquires before editing, reproducing the release/approval deadlock.
+func issue505EditedClaim(t *testing.T) (*Manager, *tracker.LocalTracker, *tracker.Issue, time.Time) {
+	t.Helper()
+	m, tr, iss := testManager(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	m.SetNowFunc(func() time.Time { return now })
+	if _, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 3); err != nil {
+		t.Fatal(err)
+	}
+	objective := "Edited after claim acquisition"
+	_, body, err := contract.EditWorkUnitIssue(iss.Number, iss.Title, iss.Body, contract.WorkUnitEdit{Objective: &objective})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.UpdateIssueBody(ctx, iss.Number, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.AddLabels(ctx, iss.Number, []string{"swarm:in-progress"}); err != nil {
+		t.Fatal(err)
+	}
+	st := issue505State(t, m, iss.Number)
+	if err := m.checkApprovedState(ctx, iss.Number, st); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("edited claim approval = %v", err)
+	}
+	return m, tr, iss, now
+}
+
+func issue505State(t *testing.T, m *Manager, n int) *IssueState {
+	t.Helper()
+	st, _, err := m.load(context.Background(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+func issue505Unchanged(t *testing.T, m *Manager, tr *tracker.LocalTracker, n int, before *IssueState, labels []string) {
+	t.Helper()
+	if got := issue505State(t, m, n); !reflect.DeepEqual(before, got) {
+		t.Fatalf("failed release changed state: before=%+v after=%+v", before, got)
+	}
+	iss, err := tr.GetIssue(context.Background(), n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(labels, iss.Labels) {
+		t.Fatalf("failed release changed labels: %v", iss.Labels)
+	}
+}
+
+func TestIssue505ReleaseEditedWorkUnit(t *testing.T) {
+	m, tr, iss, now := issue505EditedClaim(t)
+	ctx := context.Background()
+	before := issue505State(t, m, iss.Number)
+	if _, err := m.ApproveTask(ctx, iss.Number, "local-dev"); err == nil {
+		t.Fatal("approved active edited claim")
+	}
+	if _, err := m.Release(ctx, iss.Number, "local-dev", "edited"); err != nil {
+		t.Fatalf("release edited claim: %v", err)
+	}
+	after := issue505State(t, m, iss.Number)
+	want := *before
+	want.Lease.Status = "released"
+	want.Lease.ExpiresAt = now
+	if !reflect.DeepEqual(&want, after) {
+		t.Fatalf("release changed unexpected fields: want=%+v got=%+v", &want, after)
+	}
+	current, err := tr.GetIssue(ctx, iss.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(current.Labels, "swarm:claimed") || slices.Contains(current.Labels, "swarm:in-progress") {
+		t.Fatalf("release labels: %v", current.Labels)
+	}
+	if err := m.checkApprovedState(ctx, iss.Number, after); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("release minted approval: %v", err)
+	}
+	if _, err := m.ApproveTask(ctx, iss.Number, "local-dev"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Lease.Status != "active" || fresh.Lease.ClaimID == before.Lease.ClaimID {
+		t.Fatal("reclaim did not create fresh active claim")
+	}
+}
+
+func TestIssue505ReleaseEditedWorkUnitFences(t *testing.T) {
+	for _, kind := range []string{"stale", "foreign", "empty", "expired", "inactive", "renew", "handoff"} {
+		t.Run(kind, func(t *testing.T) {
+			m, tr, iss, now := issue505EditedClaim(t)
+			ctx := context.Background()
+			owner := "local-dev"
+			switch kind {
+			case "stale":
+				m.BindClaim(iss.Number, "stale")
+			case "foreign":
+				owner = "other"
+			case "empty":
+				owner = ""
+			case "expired":
+				m.SetNowFunc(func() time.Time { return now.Add(time.Hour) })
+			case "inactive":
+				st, rev, err := m.load(ctx, iss.Number)
+				if err != nil {
+					t.Fatal(err)
+				}
+				st.Lease.Status = "released"
+				if _, err := m.save(ctx, iss.Number, rev, st); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := issue505State(t, m, iss.Number)
+			current, err := tr.GetIssue(ctx, iss.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantErr := ErrClaimFence
+			switch kind {
+			case "renew":
+				_, err = m.Renew(ctx, iss.Number, owner, time.Hour)
+				wantErr = ErrApprovalRequired
+			case "handoff":
+				_, err = m.Handoff(ctx, iss.Number, owner, "plan", "implement")
+				wantErr = ErrApprovalRequired
+			default:
+				_, err = m.Release(ctx, iss.Number, owner, "edited")
+			}
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("%s: got %v want %v", kind, err, wantErr)
+			}
+			issue505Unchanged(t, m, tr, iss.Number, before, current.Labels)
+		})
+	}
+}
+
+type issue505ConflictStore struct {
+	coordination.Store
+	calls    int
+	conflict func(context.Context, int, string) error
+}
+
+func (s *issue505ConflictStore) CompareAndSwap(ctx context.Context, n int, rev string, next []byte) (string, error) {
+	s.calls++
+	if err := s.conflict(ctx, n, rev); err != nil {
+		return "", err
+	}
+	return s.Store.CompareAndSwap(ctx, n, rev, next)
+}
+
+func TestIssue505ReleaseCASConflict(t *testing.T) {
+	for _, kind := range []string{"retry", "successor", "exhaustion", "storage-error", "fork-on-retry"} {
+		t.Run(kind, func(t *testing.T) {
+			m, tr, iss, _ := issue505EditedClaim(t)
+			ctx := context.Background()
+			before := issue505State(t, m, iss.Number)
+			current, err := tr.GetIssue(ctx, iss.Number)
+			if err != nil {
+				t.Fatal(err)
+			}
+			injected := errors.New("storage unavailable")
+			store := &issue505ConflictStore{Store: m.store}
+			store.conflict = func(ctx context.Context, n int, rev string) error {
+				if kind == "exhaustion" {
+					return coordination.ErrConflict
+				}
+				if kind == "storage-error" {
+					return injected
+				}
+				if store.calls > 1 {
+					return nil
+				}
+				if kind == "successor" || kind == "fork-on-retry" {
+					st := issue505State(t, m, n)
+					if kind == "successor" {
+						st.Lease.ClaimID = "successor"
+					} else {
+						st.ForkRepo = "contributor/repo"
+					}
+					raw, err := marshalCoordinatorState(st)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := store.Store.CompareAndSwap(ctx, n, rev, raw); err != nil {
+						t.Fatal(err)
+					}
+					before = st
+				}
+				return coordination.ErrConflict
+			}
+			m.store = store
+			_, err = m.Release(ctx, iss.Number, "local-dev", "edited")
+			switch kind {
+			case "retry":
+				if err != nil || store.calls != 2 {
+					t.Fatalf("retry: calls=%d err=%v", store.calls, err)
+				}
+				if st := issue505State(t, m, iss.Number); st.Lease.Status != "released" {
+					t.Fatal("retry did not persist release")
+				}
+				return
+			case "successor":
+				if !errors.Is(err, ErrClaimFence) {
+					t.Fatalf("successor: %v", err)
+				}
+			case "fork-on-retry":
+				if !errors.Is(err, ErrApprovalRequired) {
+					t.Fatalf("fork retry: %v", err)
+				}
+			case "exhaustion":
+				if !errors.Is(err, coordination.ErrConflict) || store.calls != 4 {
+					t.Fatalf("exhaustion: calls=%d err=%v", store.calls, err)
+				}
+			case "storage-error":
+				if !errors.Is(err, injected) || store.calls != 1 {
+					t.Fatalf("storage error: calls=%d err=%v", store.calls, err)
+				}
+			}
+			issue505Unchanged(t, m, tr, iss.Number, before, current.Labels)
+		})
+	}
+}
+
+func TestIssue505ForkReleaseRequiresApproval(t *testing.T) {
+	m, tr, iss, _ := issue505EditedClaim(t)
+	ctx := context.Background()
+	st, rev, err := m.load(ctx, iss.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.ForkRepo = "contributor/repo"
+	if _, err := m.save(ctx, iss.Number, rev, st); err != nil {
+		t.Fatal(err)
+	}
+	before := issue505State(t, m, iss.Number)
+	current, err := tr.GetIssue(ctx, iss.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Release(ctx, iss.Number, "local-dev", "edited"); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("fork release: %v", err)
+	}
+	issue505Unchanged(t, m, tr, iss.Number, before, current.Labels)
+}

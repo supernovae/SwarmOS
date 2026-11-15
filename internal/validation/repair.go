@@ -95,6 +95,48 @@ type RepairSummary struct {
 	Unavailable     string        `json:"unavailable,omitempty"`
 }
 
+// RetryWithoutRepair reports complete, exclusively transient failure evidence.
+// A diagnosis alone never makes the failed validation pass.
+func (s *RepairSummary) RetryWithoutRepair() bool {
+	if s == nil || s.Unavailable != "" || len(s.FailedChecks) == 0 {
+		return false
+	}
+	infrastructure := s.FailedChecks[0].InfrastructureError
+	checks := map[string]RepairCheck{}
+	for _, c := range s.FailedChecks {
+		if c.Name == "" || c.Command == "" || c.OutsideCandidateTree != "" || c.InfrastructureError != infrastructure || len(c.Unattributed) != 0 || slices.Contains(c.FailingTests, truncationMarker) {
+			return false
+		}
+		if _, exists := checks[c.Name]; exists {
+			return false
+		}
+		checks[c.Name] = c
+		if infrastructure {
+			if len(c.FailingTests) != 0 {
+				return false
+			}
+			continue
+		}
+		if c.ExitCode <= 0 || len(c.FailingTests) == 0 {
+			return false
+		}
+		for _, name := range c.FailingTests {
+			if name == "" || !slices.ContainsFunc(s.Tests, func(t FailingTest) bool {
+				return t.Check == c.Name && t.Name == name && t.Package != "" && t.Classification == TestFlaky
+			}) {
+				return false
+			}
+		}
+	}
+	for _, t := range s.Tests {
+		c, exists := checks[t.Check]
+		if infrastructure || !exists || t.Name == "" || t.Package == "" || t.Classification != TestFlaky || !slices.Contains(c.FailingTests, t.Name) {
+			return false
+		}
+	}
+	return true
+}
+
 // allPreExisting reports whether every failure is a Go test that also fails
 // at the approved base. Any non-test, unattributed, truncated, flaky,
 // regression, or unclassified failure keeps the developer round.

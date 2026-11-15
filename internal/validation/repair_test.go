@@ -100,7 +100,7 @@ func TestRepairClassifiesPreExisting(t *testing.T) {
 func TestRepairClassifiesFlakyBeforeBase(t *testing.T) {
 	t.Parallel()
 	// The test fails on the base too, but passes on the candidate rerun, so it
-	// is flaky rather than pre-existing and cannot stop the developer round.
+	// is flaky rather than pre-existing; diagnosis alone cannot pass validation.
 	marker := filepath.Join(t.TempDir(), "ran")
 	flaky := "package unrelated\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestUnrelated(t *testing.T) {\n\tif _, err := os.Stat(" + `"` + marker + `"` + "); err != nil {\n\t\t_ = os.WriteFile(" + `"` + marker + `"` + ", nil, 0o600)\n\t\tt.Fatal(\"first run\")\n\t}\n}\n"
 	repo, base := setupGoFastPassRepo(t, repairCheck, map[string]string{"unrelated/unrelated_test.go": failingUnrelated})
@@ -575,5 +575,57 @@ func TestRepairOutsideCandidatePerCheckTimeout(t *testing.T) {
 	report := validateRepair(t, repo, base)
 	if report.Repair.OutsideCandidate() || len(report.Repair.FailedChecks) != 2 || report.Repair.FailedChecks[0].OutsideCandidateTree != "" || report.Repair.FailedChecks[1].OutsideCandidateTree == "" {
 		t.Fatalf("per-check timeouts lost: %+v", report.Repair)
+	}
+}
+
+func TestRepairRetryWithoutRepair(t *testing.T) {
+	flaky := func() *RepairSummary {
+		return &RepairSummary{FailedChecks: []RepairCheck{{Name: "test", Command: "go test ./...", ExitCode: 1, FailingTests: []string{"TestX"}}}, Tests: []FailingTest{{Check: "test", Package: "example.com/m", Name: "TestX", Classification: TestFlaky}}}
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*RepairSummary)
+		want   bool
+	}{
+		{"flaky", func(*RepairSummary) {}, true},
+		{"unavailable", func(s *RepairSummary) { s.Unavailable = "missing" }, false},
+		{"empty", func(s *RepairSummary) { s.FailedChecks = nil; s.Tests = nil }, false},
+		{"infrastructure", func(s *RepairSummary) {
+			s.FailedChecks[0].InfrastructureError = true
+			s.FailedChecks[0].FailingTests = nil
+			s.Tests = nil
+		}, true},
+		{"contradictory_infrastructure", func(s *RepairSummary) { s.FailedChecks[0].InfrastructureError = true }, false},
+		{"mixed", func(s *RepairSummary) {
+			s.FailedChecks = append(s.FailedChecks, RepairCheck{Name: "infra", Command: "build", InfrastructureError: true})
+		}, false},
+		{"regression", func(s *RepairSummary) { s.Tests[0].Classification = TestRegression }, false},
+		{"unclassified", func(s *RepairSummary) { s.Tests[0].Classification = TestUnclassified }, false},
+		{"preexisting", func(s *RepairSummary) { s.Tests[0].Classification = TestPreExisting }, false},
+		{"no_attribution", func(s *RepairSummary) { s.Tests = nil }, false},
+		{"orphan", func(s *RepairSummary) {
+			s.Tests = append(s.Tests, FailingTest{Check: "other", Name: "TestX", Package: "m", Classification: TestFlaky})
+		}, false},
+		{"unattributed", func(s *RepairSummary) { s.FailedChecks[0].Unattributed = []string{"m"} }, false},
+		{"truncated", func(s *RepairSummary) {
+			s.FailedChecks[0].FailingTests = append(s.FailedChecks[0].FailingTests, truncationMarker)
+		}, false},
+		{"nameless_failure", func(s *RepairSummary) {
+			s.FailedChecks = append(s.FailedChecks, RepairCheck{Name: "build", Command: "build", ExitCode: 1})
+		}, false},
+		{"outside", func(s *RepairSummary) { s.FailedChecks[0].OutsideCandidateTree = "tree" }, false},
+		{"duplicate", func(s *RepairSummary) { s.FailedChecks = append(s.FailedChecks, s.FailedChecks[0]) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := flaky()
+			tc.change(s)
+			if got := s.RetryWithoutRepair(); got != tc.want {
+				t.Fatalf("got %t want %t: %+v", got, tc.want, s)
+			}
+		})
+	}
+	var missing *RepairSummary
+	if missing.RetryWithoutRepair() {
+		t.Fatal("nil eligible")
 	}
 }

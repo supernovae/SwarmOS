@@ -3044,3 +3044,310 @@ func TestAutomaticRetryCompletedDeveloperCharged(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkTransientValidationRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name, limit string
+		persistent  bool
+	}{
+		{name: "flaky_then_pass"}, {name: "flakes_still_failing", persistent: true}, {name: "zero_allowance", limit: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			log := filepath.Join(dir, "runs")
+			script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\n"
+			script += "case \"$*\" in *-run*) echo '--- PASS: TestBroken (0.00s)'; echo PASS; exit 0;; esac\n"
+			if !tc.persistent {
+				script += "if [ -f '" + dir + "/once' ]; then echo PASS; exit 0; fi\ntouch '" + dir + "/once'\n"
+			}
+			script += "echo '--- FAIL: TestBroken (0.00s)'; echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
+			if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			e, issue := repairFixture(t, tc.limit, func(root string) {
+				p := filepath.Join(root, ".swarm", "validation", "required-checks.yaml")
+				data, err := os.ReadFile(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data = []byte(strings.Replace(string(data), "command: test -f fixed.txt", "command: echo marker >> '"+log+"'; test -f fixed.txt", 1))
+				if err := os.WriteFile(p, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			})
+			prompts := repairDeveloper(e, writeFile("fixed.txt", "fixed\n"))
+			factory := e.NewRunner
+			testerCalls := 0
+			e.NewRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
+				inner, err := factory(name, cfg, local)
+				if err != nil {
+					return nil, err
+				}
+				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "tester" {
+						testerCalls++
+					}
+					return inner.Run(ctx, req)
+				}}, nil
+			}
+
+			res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+			if res == nil {
+				t.Fatal(err)
+			}
+			state, stateErr := e.LeaseManager.GetCurrentState(t.Context(), issue)
+			if stateErr != nil || state.ValidationRepairCount != 0 || state.RepairRetryReservation != nil {
+				t.Fatalf("authoritative repair state: %+v %v", state, stateErr)
+			}
+			if testerCalls != 1 {
+				t.Fatalf("tester ran %d times", testerCalls)
+			}
+			if len(*prompts) != 1 || res.RepairRounds != 0 || res.State.ValidationRepairCount != 0 || res.State.RepairRetryReservation != nil {
+				t.Fatalf("spent repair: calls=%d rounds=%d count=%d err=%v", len(*prompts), res.RepairRounds, res.State.ValidationRepairCount, err)
+			}
+			if tc.persistent {
+				if !errors.Is(err, validation.ErrRequiredCheckFailed) || res.ValidationPassed {
+					t.Fatalf("persistent: %v", err)
+				}
+			} else if err != nil || !res.ValidationPassed {
+				t.Fatalf("retry did not pass: %v", err)
+			}
+			data, _ := os.ReadFile(log)
+			if n := strings.Count(string(data), "-count=1 ./..."); n != 2 {
+				t.Fatalf("full runs=%d: %s", n, data)
+			}
+			if n := strings.Count(string(data), "marker"); n != 2 {
+				t.Fatalf("passing check was not rerun: %s", data)
+			}
+			foundPass := false
+			for _, a := range state.Artifacts {
+				if a.Type == contract.ArtifactValidation && a.Verdict == "PASS" {
+					foundPass = true
+				}
+			}
+			if foundPass == tc.persistent {
+				t.Fatalf("wrong trusted artifact verdict: %+v", state.Artifacts)
+			}
+			if len(res.Validation.CheckOutcomes) != 2 {
+				t.Fatalf("incomplete report: %+v", res.Validation)
+			}
+		})
+	}
+}
+
+func TestWorkTransientValidationRetryInfrastructure(t *testing.T) {
+	for _, recoverShell := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recover=%t", recoverShell), func(t *testing.T) {
+			installFixableGo(t)
+			dir := t.TempDir()
+			// Starting this shell fails with a non-exit execution error. Git and the
+			// mock roles execute directly and do not depend on this shell.
+			if err := testutil.WriteExecutable(filepath.Join(dir, "sh"), []byte("#!/nonexistent-swarmos-test-interpreter\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			e, issue := repairFixture(t, "")
+			prompts := repairDeveloper(e, writeFile("fixed.txt", "fixed\n"))
+			started := 0
+			res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, OnProgress: func(ev ProgressEvent) {
+				if recoverShell && ev.Check == "preparation: repair" && ev.Status == "PASS" {
+					if removeErr := os.Remove(filepath.Join(dir, "sh")); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+						t.Error(removeErr)
+					}
+				}
+				if (ev.Check == "test" || ev.Check == "marker") && ev.Status == "started" {
+					started++
+				}
+			}})
+			if res == nil {
+				t.Fatal(err)
+			}
+			if !recoverShell && (!errors.Is(err, validation.ErrRequiredCheckFailed) || !errors.Is(err, errTransientValidationStopped) || res.Validation == nil || res.ValidationPassed) {
+				t.Fatalf("result: %+v error: %v", res, err)
+			}
+			state, stateErr := e.LeaseManager.GetCurrentState(t.Context(), issue)
+			if stateErr != nil || state.ValidationRepairCount != 0 || state.RepairRetryReservation != nil {
+				t.Fatalf("authoritative repair state: %+v %v", state, stateErr)
+			}
+			if len(*prompts) != 1 || res.State.ValidationRepairCount != 0 || res.State.RepairRetryReservation != nil {
+				t.Fatalf("repair spent: calls=%d count=%d", len(*prompts), res.State.ValidationRepairCount)
+			}
+			if started != 4 {
+				t.Fatalf("expected two complete runs of two checks, started=%d", started)
+			}
+			if recoverShell {
+				if err != nil || !res.ValidationPassed {
+					t.Fatalf("infrastructure retry did not pass: %v", err)
+				}
+				return
+			}
+			for _, c := range res.Validation.CheckOutcomes {
+				if !c.InfrastructureError {
+					t.Fatalf("not infrastructure: %+v", c)
+				}
+			}
+			if !strings.Contains(err.Error(), "nonexistent") && !strings.Contains(err.Error(), "no such file") {
+				t.Fatalf("lost execution diagnostic: %v", err)
+			}
+
+		})
+	}
+}
+
+func TestWorkTransientValidationRetryMixedRegression(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "runs")
+	script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\n" +
+		"case \"$PWD\" in */swarm-repair-base-*) echo '--- PASS: TestRegression (0.00s)'; echo PASS; exit 0;; esac\n" +
+		"case \"$*\" in *-run*TestBroken*) echo '--- PASS: TestBroken (0.00s)'; echo PASS; exit 0;; esac\n" +
+		"if [ -f repaired.txt ]; then echo PASS; exit 0; fi\n" +
+		"case \"$*\" in *-run*) ;; *) echo '--- FAIL: TestBroken (0.00s)';; esac\n" +
+		"echo '--- FAIL: TestRegression (0.00s)'; echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
+	if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e, issue := repairFixture(t, "")
+	prompts := repairDeveloper(e, writeFile("fixed.txt", "fixed\n"), writeFile("repaired.txt", "yes\n"))
+	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+	if err != nil || res == nil || !res.ValidationPassed || len(*prompts) != 2 {
+		t.Fatalf("regression repair: %v calls=%d", err, len(*prompts))
+	}
+	state, stateErr := e.LeaseManager.GetCurrentState(t.Context(), issue)
+	if stateErr != nil || state.ValidationRepairCount != 1 {
+		t.Fatalf("repair state: %+v %v", state, stateErr)
+	}
+	data, _ := os.ReadFile(log)
+	if n := strings.Count(string(data), "-count=1 ./..."); n != 2 {
+		t.Fatalf("unexpected free retry: %d %s", n, data)
+	}
+}
+
+func TestWorkTransientValidationRetryCandidateMutation(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$*\" in *-run*) echo '--- PASS: TestBroken (0.00s)'; echo PASS; exit 0;; esac\n" +
+		"if [ -f '" + dir + "/once' ]; then echo changed > fixed.txt; echo PASS; exit 0; fi\ntouch '" + dir + "/once'\n" +
+		"echo '--- FAIL: TestBroken (0.00s)'; echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
+	if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e, issue := repairFixture(t, "")
+	prompts := repairDeveloper(e, writeFile("fixed.txt", "fixed\n"))
+	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+	if !errors.Is(err, errTransientValidationStopped) || res.ValidationPassed || len(*prompts) != 1 {
+		t.Fatalf("mutated candidate accepted: %v", err)
+	}
+	state, stateErr := e.LeaseManager.GetCurrentState(t.Context(), issue)
+	if stateErr != nil || state.ValidationRepairCount != 0 {
+		t.Fatalf("repair state: %+v %v", state, stateErr)
+	}
+	for _, a := range state.Artifacts {
+		if a.Type == contract.ArtifactValidation && a.Verdict == "PASS" {
+			t.Fatal("recorded stale PASS")
+		}
+	}
+}
+
+func TestWorkTransientValidationRetryDoesNotMerge(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$*\" in *-run*) echo '--- PASS: TestBroken (0.00s)'; echo PASS; exit 0;; esac\n" +
+		"if [ -f '" + dir + "/once' ]; then echo PASS; exit 0; fi\ntouch '" + dir + "/once'\n" +
+		"echo '--- FAIL: TestBroken (0.00s)'; echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
+	if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e, issue := repairFixture(t, "0", func(root string) {
+		p := filepath.Join(root, ".swarm", "validation", "required-checks.yaml")
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := "command: if test -f '" + dir + "/marker'; then exit 1; fi; touch '" + dir + "/marker'"
+		if err := os.WriteFile(p, []byte(strings.Replace(string(data), "command: test -f fixed.txt", command, 1)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	prompts := repairDeveloper(e, writeFile("fixed.txt", "fixed\n"))
+	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+	if !errors.Is(err, validation.ErrRequiredCheckFailed) || res.ValidationPassed || len(*prompts) != 1 {
+		t.Fatalf("merged reports: %v", err)
+	}
+	outcomes := map[string]bool{}
+	for _, c := range res.Validation.CheckOutcomes {
+		outcomes[c.Name] = c.Passed
+	}
+	if !outcomes["test"] || outcomes["marker"] {
+		t.Fatalf("not latest complete report: %+v", outcomes)
+	}
+	state, stateErr := e.LeaseManager.GetCurrentState(t.Context(), issue)
+	if stateErr != nil || state.ValidationRepairCount != 0 {
+		t.Fatalf("repair state: %+v %v", state, stateErr)
+	}
+}
+
+func TestWorkTransientValidationRetryInterrupted(t *testing.T) {
+	for _, claimLoss := range []bool{false, true} {
+		t.Run(fmt.Sprintf("claim_loss=%t", claimLoss), func(t *testing.T) {
+			dir := t.TempDir()
+			log := filepath.Join(dir, "runs")
+			script := "#!/bin/sh\necho \"$*\" >> '" + log + "'\n" +
+				"case \"$*\" in *-run*) echo '--- PASS: TestBroken (0.00s)'; echo PASS; exit 0;; esac\n" +
+				"echo '--- FAIL: TestBroken (0.00s)'; echo FAIL; printf 'FAIL\\texample.com/m/broken\\t0.01s\\n'; exit 1\n"
+			if err := testutil.WriteExecutable(filepath.Join(dir, "go"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			e, issue := repairFixture(t, "")
+			prompts := repairDeveloper(e, writeFile("fixed.txt", "fixed\n"))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			interrupted := false
+			res, err := e.ExecuteWork(ctx, WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, OnProgress: func(ev ProgressEvent) {
+				if interrupted || ev.Check != "preparation: repair" || ev.Status != "PASS" {
+					return
+				}
+				interrupted = true
+				if !claimLoss {
+					cancel()
+					return
+				}
+				state, stateErr := e.LeaseManager.GetCurrentState(t.Context(), issue)
+				if stateErr != nil {
+					t.Error(stateErr)
+					return
+				}
+				stale := state.Lease.ClaimID
+				if _, releaseErr := e.LeaseManager.Release(t.Context(), issue, "maintainer", "test successor"); releaseErr != nil {
+					t.Error(releaseErr)
+					return
+				}
+				if _, acquireErr := e.LeaseManager.Acquire(t.Context(), issue, "maintainer", "mock", "implement", time.Hour, 0); acquireErr != nil {
+					t.Error(acquireErr)
+					return
+				}
+				e.LeaseManager.BindClaim(issue, stale)
+			}})
+			want := error(context.Canceled)
+			if claimLoss {
+				want = lease.ErrClaimFence
+			}
+			if !interrupted || !errors.Is(err, want) || len(*prompts) != 1 {
+				t.Fatalf("interruption: %v calls=%d", err, len(*prompts))
+			}
+			if res != nil && res.ValidationPassed {
+				t.Fatal("interrupted validation passed")
+			}
+			data, _ := os.ReadFile(log)
+			if n := strings.Count(string(data), "-count=1 ./..."); n != 1 {
+				t.Fatalf("retried after interruption: %d", n)
+			}
+			state, stateErr := e.LeaseManager.GetCurrentState(t.Context(), issue)
+			if stateErr != nil || state.ValidationRepairCount != 0 {
+				t.Fatalf("repair state: %+v %v", state, stateErr)
+			}
+		})
+	}
+}

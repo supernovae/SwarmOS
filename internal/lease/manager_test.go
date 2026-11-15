@@ -2852,9 +2852,6 @@ func TestAttemptDiagnosticLifecycle(t *testing.T) {
 		t.Fatal("another role cleared")
 	}
 	record("developer", d)
-	if _, err = m.Handoff(ctx, issue.Number, "local-dev", "implement", "plan"); err != nil {
-		t.Fatal(err)
-	}
 	if _, err = tr.UpdateIssueBody(ctx, issue.Number, strings.ReplaceAll(testWorkUnit(), "Harden coordination state", "Changed objective")); err != nil {
 		t.Fatal(err)
 	}

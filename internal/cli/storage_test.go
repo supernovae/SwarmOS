@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/spf13/cobra"
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/storageuse"
 	"github.com/supernovae/swarmos/internal/tracker"
@@ -64,7 +65,7 @@ func TestStorageReportOutsideCheckoutNoRegistryMutation(t *testing.T) {
 			if err := json.Unmarshal(output.Bytes(), &snap); err != nil || snap.Complete {
 				t.Fatalf("%s %v", output.String(), err)
 			}
-		} else if !strings.Contains(output.String(), "complete=false") {
+		} else if !strings.Contains(output.String(), "Report incomplete:") {
 			t.Fatal(output.String())
 		}
 	}
@@ -88,10 +89,10 @@ func TestStorageRenderersShareUnknownFields(t *testing.T) {
 	t.Parallel()
 	s := storage.Snapshot{Version: 1, Complete: false, Scope: "fixture", Resources: []storage.Resource{{Owner: "unknown", Class: "review-scratch", Path: "/fixture", Eligibility: "unknown", Reason: "unproven"}}}
 	var human, encoded bytes.Buffer
-	if err := renderStorageReport(&human, s, false); err != nil {
+	if err := renderStorageReport(&human, s, false, true, "swarm storage cleanup"); err != nil {
 		t.Fatal(err)
 	}
-	if err := renderStorageReport(&encoded, s, true); err != nil {
+	if err := renderStorageReport(&encoded, s, true, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"review-scratch", "unknown", "/fixture", "unproven"} {
@@ -995,6 +996,11 @@ func TestStorageCleanupSummaryOutput(t *testing.T) {
 			t.Fatalf("unexpected %q in:\n%s", banned, out.String())
 		}
 	}
+	var details bytes.Buffer
+	renderStorageCleanup(&details, storageCleanupReport{Mode: "preview", Tasks: []*bulkCleanupSummary{tasks}, Host: host}, true)
+	if !strings.Contains(details.String(), "issue #1 (no recorded PR): eligible=3 retired=0 retained=0 failed=0") || !strings.Contains(details.String(), "/w/issue-1: eligible: merged") {
+		t.Fatal(details.String())
+	}
 	out.Reset()
 	renderStorageCleanup(&out, storageCleanupReport{Mode: "preview", Tasks: []*bulkCleanupSummary{{Repository: "owner/repo", Root: "/checkout", Issues: []bulkCleanupIssue{issue(2, bulkCleanupCounts{Retained: 3}, "retained", "recorded PR is not merged")}}}}, false)
 	if !strings.Contains(out.String(), "Nothing to clean up right now.") || strings.Contains(out.String(), "ready.") {
@@ -1056,4 +1062,88 @@ func TestStorageCleanupAllReposRegistryDiagnostics(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStorageReportSummaryAndDetails(t *testing.T) {
+	n := int64(2048)
+	s := storage.Snapshot{Scope: "fixture", Reasons: []string{"scan unavailable", "scan unavailable"}, Resources: []storage.Resource{
+		{Class: "cache", Path: "/private/cache", Owner: "fixture-owner", Ref: "fixture-ref", AllocatedBytes: &n, LogicalBytes: &n, Reason: "busy"},
+		{Class: "cache", Reason: "busy"}, {Class: "scratch", AllocatedBytes: new(int64)},
+	}, UniqueAllocatedBytes: &n, ObservedAllocatedBytes: n}
+	for _, details := range []bool{false, true} {
+		var b bytes.Buffer
+		next := storageReportNext(&RootOptions{Repo: "owner/repo"}, details)
+		if err := renderStorageReport(&b, s, false, details, next); err != nil {
+			t.Fatal(err)
+		}
+		text := b.String()
+		for _, want := range []string{"cache: 2 resources", "scratch: 1 resources", "2.0 KiB observed (1 unknown)", "unique allocated: 2.0 KiB", "2 kept: busy", "Next: " + next} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("missing %q: %s", want, text)
+			}
+		}
+		if strings.Count(text, "scan unavailable") != 1 {
+			t.Fatal(text)
+		}
+		for _, id := range []string{"/private/cache", "fixture-owner", "fixture-ref"} {
+			if strings.Contains(text, id) != details {
+				t.Fatal(text)
+			}
+		}
+		if details && strings.HasSuffix(strings.TrimSpace(text), "swarm storage report --details") {
+			t.Fatal(text)
+		}
+	}
+	cmd := newStorageCmd(&RootOptions{})
+	report, _, err := cmd.Find([]string{"report"})
+	if err != nil || report.Flags().Lookup("details") == nil {
+		t.Fatal("missing details flag", err)
+	}
+	var b bytes.Buffer
+	if err := renderStorageReport(&b, storage.Snapshot{Complete: true}, false, false, "swarm storage report --details"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "Resources: 0") {
+		t.Fatal(b.String())
+	}
+}
+
+func TestStorageReportJSONCompatibility(t *testing.T) {
+	checkReadableJSONFixture(t, 0, storage.Snapshot{Version: 1, Scope: "fixture", Reasons: []string{"unavailable"}, Resources: []storage.Resource{{Class: "cache", Reason: "unknown"}}})
+}
+func TestCleanupJSONCompatibility(t *testing.T) {
+	checkReadableJSONFixture(t, 1, &lease.CleanupPreview{})
+	checkReadableJSONFixture(t, 2, &bulkCleanupSummary{Kind: "cleanup-bulk", Mode: "preview", Error: "fixture failure"})
+}
+func TestArchiveJSONCompatibility(t *testing.T) {
+	checkReadableJSONFixture(t, 3, &lease.ArchiveReport{Kind: "archive", Status: "failed", Error: "fixture failure"})
+	checkReadableJSONFixture(t, 4, &lease.BulkArchiveReport{Kind: "archive"})
+	checkReadableJSONFixture(t, 5, &lease.ArchiveReport{Kind: "restore", Status: "preview"})
+}
+func checkReadableJSONFixture(t *testing.T, i int, fixture any) {
+	t.Helper()
+	for _, details := range []bool{false, true} {
+		var b bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&b)
+		if i == 0 {
+			if err := renderStorageReport(&b, fixture.(storage.Snapshot), true, details, ""); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := writeJSON(cmd, fixture); err != nil {
+			t.Fatal(err)
+		}
+		if b.String() != readableJSONBaseline[i] {
+			t.Fatalf("fixture %d changed JSON: %s", i, b.String())
+		}
+	}
+}
+
+var readableJSONBaseline = []string{
+	"{\n  \"version\": 1,\n  \"scope\": \"fixture\",\n  \"complete\": false,\n  \"limits\": {\n    \"repositories\": 0,\n    \"records\": 0,\n    \"entries\": 0,\n    \"identities\": 0,\n    \"working_bytes\": 0\n  },\n  \"counters\": {\n    \"repositories\": 0,\n    \"records\": 0,\n    \"entries\": 0,\n    \"identities\": 0,\n    \"working_bytes\": 0\n  },\n  \"incomplete_reasons\": [\n    \"unavailable\"\n  ],\n  \"resources\": [\n    {\n      \"owner\": \"\",\n      \"repository\": \"\",\n      \"class\": \"cache\",\n      \"path\": \"\",\n      \"ref\": \"\",\n      \"identity\": \"\",\n      \"logical_bytes\": null,\n      \"allocated_bytes\": null,\n      \"usage_reason\": \"\",\n      \"last_use\": null,\n      \"evidence\": \"\",\n      \"active\": null,\n      \"eligibility\": \"\",\n      \"reason\": \"unknown\"\n    }\n  ],\n  \"unique_allocated_bytes\": null,\n  \"observed_allocated_bytes\": 0\n}\n",
+	"{\"remote_applicable\":false,\"status\":\"\",\"kind\":\"\",\"issue_number\":0,\"outcome\":null,\"resources\":null}\n",
+	"{\"kind\":\"cleanup-bulk\",\"mode\":\"preview\",\"status\":\"\",\"error\":\"fixture failure\",\"issues\":null,\"unresolved\":null,\"totals\":{\"eligible\":0,\"retired\":0,\"retained\":0,\"failed\":0},\"failed_issues\":0}\n",
+	"{\"kind\":\"archive\",\"status\":\"failed\",\"issue\":0,\"checks\":null,\"refs\":null,\"eligible\":false,\"error\":\"fixture failure\"}\n",
+	"{\"kind\":\"archive\",\"status\":\"\",\"issues\":null,\"totals\":{\"candidates\":0,\"eligible\":0,\"previewed\":0,\"archived\":0,\"skipped\":0,\"failed\":0}}\n",
+	"{\"kind\":\"restore\",\"status\":\"preview\",\"issue\":0,\"checks\":null,\"refs\":null,\"eligible\":false}\n",
 }

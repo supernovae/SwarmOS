@@ -77,19 +77,36 @@ func newCleanupCmd(opts *RootOptions) *cobra.Command {
 			return err
 		}
 		if !asJSON {
-			for _, r := range preview.Resources {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s %s: eligible=%t absent=%t expected=%s: %s\n", r.Kind, r.Name, r.Eligible, r.Absent, r.ExpectedHead, r.Reason)
-			}
+			defer func() {
+				for _, r := range preview.Resources {
+					status := "kept"
+					switch {
+					case r.Retired:
+						status = "cleaned"
+					case r.Absent:
+						status = "absent"
+					case r.Eligible:
+						status = "ready"
+						if runErr != nil {
+							status = "failed"
+						}
+					}
+					if status != "kept" {
+						fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: %s\n", r.Kind, r.Name, status)
+					}
+				}
+				result := bulkIssueResult(lease.CleanupCandidate{IssueNumber: n}, preview, runErr)
+				mode := "preview"
+				if apply {
+					mode = "apply"
+				}
+				renderIssueCleanupSummary(cmd.OutOrStdout(), &bulkCleanupSummary{Mode: mode, Issues: []bulkCleanupIssue{result}}, fmt.Sprintf("swarm issue cleanup %d", n)+outputSelectors(opts), "swarm issue status"+outputSelectors(opts))
+			}()
 		}
 		if !apply {
 			return nil
 		}
-		started, err := applyIssueCleanup(cmd.Context(), tr, m, n, preview)
-		if started && !asJSON {
-			for _, r := range preview.Resources {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s %s: %s\n", r.Kind, r.Name, r.Reason)
-			}
-		}
+		_, err = applyIssueCleanup(cmd.Context(), tr, m, n, preview)
 		return err
 	}}
 	cmd.Flags().BoolVar(&recoverReservation, "recover-reservation", false, "Fence and release an interrupted cleanup before previewing again")

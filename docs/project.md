@@ -280,10 +280,11 @@ Because Rust's `CARGO_TARGET_DIR` points at the agent cache, agent runs do not l
 
 ### Inspecting managed storage
 
-Use `swarm storage report` to see managed cache directories, repository worktrees and branches, shared Git objects, and scratch candidates without changing them. The report includes unindexed cache directories and orphan repository keys.
+Use `swarm storage report` to see managed cache directories, repository worktrees and branches, shared Git objects, and scratch candidates without changing them. The report summarizes counts and observed sizes by resource class, including unindexed cache directories and orphan repository keys. Add `--details` to list each resource and its evidence.
 
 ```bash
 swarm storage report
+swarm storage report --details
 swarm storage report --json
 swarm storage report --repo owner/repo
 swarm storage report --root /path/to/checkout

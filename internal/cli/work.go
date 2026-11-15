@@ -110,12 +110,14 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 			var mgr *lease.Manager
 			var cfg *contract.SwarmConfig
 			var err error
+			var skipped []skippedIssue
 			var selection *overlapSelection
 			if nextReady {
 				pulled, err := pullNextReadyIssue(cmd.Context(), cmd, rootOpts, allRepos, opts, 0)
 				if err != nil {
 					return err
 				}
+				skipped = pulled.SkippedIssues
 				selection = pulled.Overlap
 				opts.IssueNumber, opts.RepoRoot, opts.Phase, opts.ClaimID = pulled.Issue.Number, pulled.RepoRoot, pulled.TargetPhase, pulled.State.Lease.ClaimID
 				if opts.IssueContinuation {
@@ -221,6 +223,7 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 				outcome := map[string]any{"kind": "work", "status": status, "result": result}
 				if selection != nil {
 					outcome["selection"] = selection
+					outcome["skipped_issues"] = skipped
 				}
 				return writeJSON(cmd, outcome)
 			}

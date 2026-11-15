@@ -647,6 +647,11 @@ func (m *Manager) stampForSave(ctx context.Context, n int, st *IssueState) {
 			st.ProjectionCommentID = existingID
 		}
 	}
+	m.stampForkRequest(st)
+}
+
+// stampForkRequest records accepted requests even when their callback is a no-op.
+func (m *Manager) stampForkRequest(st *IssueState) {
 	if stamper, ok := m.store.(interface{ RequestID() int64 }); ok {
 		if reqID := stamper.RequestID(); reqID > 0 {
 			st.LastForkRequestID = reqID
@@ -1594,6 +1599,8 @@ func (m *Manager) mutateWithIssue(ctx context.Context, n int, owner string, fn f
 		if err = fn(st); err != nil {
 			return nil, nil, err
 		}
+		// A new fork request changes replay/confirmation state even when fn does not.
+		m.stampForkRequest(st)
 		after, err := marshalCoordinatorState(st)
 		if err != nil {
 			return nil, nil, err

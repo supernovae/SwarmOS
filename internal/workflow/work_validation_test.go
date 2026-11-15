@@ -505,7 +505,15 @@ func TestWorkRepairPausesNearClaimBudget(t *testing.T) {
 			return (&agent.MockRunner{}).Run(ctx, req)
 		}}, nil
 	}
-	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true})
+	res, err := e.ExecuteWork(t.Context(), WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true, OnProgress: func(ev ProgressEvent) {
+		if ev.Stage == "required-checks" && ev.Check != "" && ev.Status == "FAIL" {
+			st, err := e.LeaseManager.GetCurrentState(t.Context(), issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			offset.Store(int64(time.Until(st.Lease.ExpiresAt.Add(-time.Hour))))
+		}
+	}})
 	if err != nil || res == nil || res.ClaimBudgetPause == nil {
 		t.Fatalf("budget stop: %+v %v", res, err)
 	}
@@ -1616,19 +1624,19 @@ func TestIssueWorkResumeTesterOnly(t *testing.T) {
 }
 
 func TestIssueWorkRecoveryResumeRepairBudget(t *testing.T) {
-	e, issue := testerRetryEngine(t)
+	failure := filepath.Join(t.TempDir(), "fail")
+	e, issue := gatedTesterRetryEngine(t, contract.GateNone, "test ! -f '"+failure+"'")
 	developer, tester := 0, 0
 	initial := true
 	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
 			if req.Role == "developer" {
 				developer++
-				if initial {
-					if err := os.WriteFile(filepath.Join(req.WorktreePath, "fail-check"), []byte("fail"), 0644); err != nil {
+				if !initial {
+					if err := os.Remove(failure); err != nil {
 						return nil, err
 					}
-				} else {
-					if err := os.Remove(filepath.Join(req.WorktreePath, "fail-check")); err != nil {
+					if err := writeFile("repaired.txt", "fixed")(req.WorktreePath); err != nil {
 						return nil, err
 					}
 				}
@@ -1648,6 +1656,9 @@ func TestIssueWorkRecoveryResumeRepairBudget(t *testing.T) {
 		t.Fatalf("initial: %v", err)
 	}
 	initial = false
+	if err := os.WriteFile(failure, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	opts.ClaimID = first.State.Lease.ClaimID
 	opts.Phase = "test"
 	failed, err := e.ExecuteWork(t.Context(), opts)
@@ -2045,7 +2056,11 @@ func testWorkValidationCheckpoint(t *testing.T, external bool, explicit ...bool)
 	if res == nil || res.Validation == nil || len(res.Validation.CheckOutcomes) != 1 || !strings.Contains(res.Validation.CheckOutcomes[0].Output, "retry-check-executed") {
 		t.Fatalf("check not executed %+v", res)
 	}
-	if calls["developer"] != 0 || calls["tester"] != 1 || res.RepairRounds != 0 {
+	wantTesters := 1
+	if external {
+		wantTesters = 0
+	}
+	if calls["developer"] != 0 || calls["tester"] != wantTesters || res.RepairRounds != 0 {
 		t.Fatalf("roles %v rounds %d", calls, res.RepairRounds)
 	}
 	after, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
@@ -2229,8 +2244,8 @@ func TestTesterResumeDirtyCandidate(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "regression_test.go") || !strings.Contains(err.Error(), fmt.Sprintf("swarm issue work %d --phase implement", issue.Number)) || !strings.Contains(err.Error(), "distinctive regression finding") {
 					t.Fatalf("diagnostic: %v", err)
 				}
-				if _, err := os.Stat(counter); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("checks executed: %v", err)
+				if data, err := os.ReadFile(counter); err != nil || strings.Count(string(data), "ran\n") != 2 {
+					t.Fatalf("expected only checks before testers: %q %v", data, err)
 				}
 				if res.Validation != nil || res.ValidationPassed || developers != 1 {
 					t.Fatalf("unexpected validation/developer: %+v %d", res, developers)
@@ -2346,8 +2361,8 @@ func TestTesterResumeDirtyDiagnostics(t *testing.T) {
 			if (kind == "FAIL" || kind == "BLOCKED") && !strings.Contains(err.Error(), kind) {
 				t.Fatalf("outcome: %v", err)
 			}
-			if _, statErr := os.Stat(counter); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("checks ran: %v", statErr)
+			if data, err := os.ReadFile(counter); err != nil || strings.Count(string(data), "ran\n") != 2 {
+				t.Fatalf("expected only checks before testers: %q %v", data, err)
 			}
 		})
 	}
@@ -2360,7 +2375,8 @@ func TestTesterResumeDirtyDiagnostics(t *testing.T) {
 }
 
 func TestTesterResumeCheckFailureDiagnostics(t *testing.T) {
-	e, issue := gatedTesterRetryEngine(t, contract.GateNone, "echo changed > check-change; exit 3")
+	failure := filepath.Join(t.TempDir(), "fail")
+	e, issue := gatedTesterRetryEngine(t, contract.GateNone, "if test -f '"+failure+"'; then echo changed > check-change; exit 3; fi")
 	mock := &agent.MockRunner{}
 	initial := true
 	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
@@ -2377,6 +2393,9 @@ func TestTesterResumeCheckFailureDiagnostics(t *testing.T) {
 		t.Fatal("expected interruption")
 	}
 	initial = false
+	if err := os.WriteFile(failure, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	opts.ClaimID = first.State.Lease.ClaimID
 	opts.IssueContinuation = true
 	res, err := e.ExecuteWork(t.Context(), opts)
@@ -2774,11 +2793,17 @@ func TestRepairTargetsIncludeUnmetAcceptanceWithFailingChecks(t *testing.T) {
 }
 
 func TestTesterFailureRepairExhausted(t *testing.T) {
+	installFixableGo(t)
 	for _, verdict := range []string{"FAIL", "BLOCKED"} {
 		t.Run(verdict, func(t *testing.T) {
 			e, n := repairFixture(t, "0")
 			e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 				return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+					if req.Role == "developer" {
+						if err := writeFile("fixed.txt", "fixed")(req.WorktreePath); err != nil {
+							return nil, err
+						}
+					}
 					result, err := (&agent.MockRunner{}).Run(ctx, req)
 					if err == nil && req.Role == "tester" {
 						err = os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active/VALIDATION.md"), []byte("VERDICT: "+verdict+"\nunique tester findings"), 0600)
@@ -2832,9 +2857,14 @@ func TestTesterFailureRepairResume(t *testing.T) {
 							if developers == 2 {
 								return nil, interrupted
 							}
-							if err := writeFile("fixed.txt", "fixed")(req.WorktreePath); err != nil {
+							if err := writeFile("repaired.txt", "fixed")(req.WorktreePath); err != nil {
 								return nil, err
 							}
+						}
+					}
+					if req.Role == "developer" {
+						if err := writeFile("fixed.txt", "fixed")(req.WorktreePath); err != nil {
+							return nil, err
 						}
 					}
 					result, err := (&agent.MockRunner{}).Run(ctx, req)

@@ -146,13 +146,13 @@ func TestEnginePlanGateLifecycle(t *testing.T) {
 			started = append(started, event.Stage)
 		}
 	}
-	if !slices.Equal(started, []string{"preflight", "claim", "workspace", "implement", "checkpoint", "test", "required-checks"}) {
+	if !slices.Equal(started, []string{"preflight", "claim", "workspace", "implement", "checkpoint", "required-checks", "test"}) {
 		t.Fatalf("resumed stage sequence: %v", started)
 	}
 	if len(checks) == 0 || !strings.HasSuffix(checks[0], " started") || !strings.HasSuffix(checks[len(checks)-1], " PASS") {
 		t.Fatalf("issue work check progress: %v", checks)
 	}
-	if last := completedEvents[len(completedEvents)-1]; last.Stage != "required-checks" || last.Status != "completed" {
+	if last := completedEvents[len(completedEvents)-1]; last.Stage != "test" || last.Status != "completed" {
 		t.Fatalf("completion progress: %+v", last)
 	}
 
@@ -567,7 +567,7 @@ func TestEngineSetupProgressSharedSessionBundles(t *testing.T) {
 	if len(checks) == 0 || !strings.HasSuffix(checks[0], " started") || !strings.HasSuffix(checks[len(checks)-1], " PASS") {
 		t.Fatalf("shared reporter check progress: %v", checks)
 	}
-	want := []string{"preflight", "claim", "workspace", "plan", "bundle", "review", "bundle", "implement", "bundle", "checkpoint", "test", "bundle", "required-checks"}
+	want := []string{"preflight", "claim", "workspace", "plan", "bundle", "review", "bundle", "implement", "bundle", "checkpoint", "required-checks", "test", "bundle"}
 	if !slices.Equal(starts, want) {
 		t.Fatalf("starts: %v", starts)
 	}

@@ -734,8 +734,15 @@ func (r *checkRunner) run(ctx context.Context, command string, duration time.Dur
 	if r.runnerIsolated {
 		return r.runOnHost(ctx, command, stdout, stderr)
 	} else if r.execution.Mode == contract.ExecutionIsolated && r.execution.Backend == contract.BackendNative {
+		caches := r.buildCaches
+		if !r.warmup && r.home != "" && !sandbox.NativeValidationReusesCache(r.cfg) {
+			var err error
+			if caches, err = sandbox.ValidatorCacheMounts(caches, sandbox.ValidationCodex, false, false, r.home); err != nil {
+				return err
+			}
+		}
 		if runtime.GOOS != "linux" {
-			return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, r.buildCaches, r.deps, r.warmup, stdout, stderr)
+			return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, caches, r.deps, r.warmup, stdout, stderr)
 		}
 		var nonce [16]byte
 		if _, err := rand.Read(nonce[:]); err != nil {
@@ -747,7 +754,7 @@ func (r *checkRunner) run(ctx context.Context, command string, duration time.Dur
 		defer cancel(nil)
 		stop := r.observeCPU(observedCtx, cancel, 0, marker)
 		defer stop()
-		err := sandbox.RunConfiguredNativeValidation(observedCtx, r.worktree, r.cfg, wrapped, r.buildCaches, r.deps, r.warmup, stdout, stderr)
+		err := sandbox.RunConfiguredNativeValidation(observedCtx, r.worktree, r.cfg, wrapped, caches, r.deps, r.warmup, stdout, stderr)
 		if errors.Is(context.Cause(observedCtx), errCheckStalled) && ctx.Err() == nil && err != nil {
 			return errors.Join(err, errCheckStalled)
 		}
@@ -772,6 +779,48 @@ func requiredCheckParallelism(checks, cpus int) int {
 	return min(checks, max(1, cpus))
 }
 
+// usesScratchGoCache reports whether checks in this run share a cold scratch
+// Go build cache (rather than a pre-warmed Bubblewrap overlay cache or OCI).
+func (r *checkRunner) usesScratchGoCache() bool {
+	if r.home == "" || len(r.buildCaches) == 0 {
+		return false
+	}
+	if r.runnerIsolated || r.execution.Mode != contract.ExecutionIsolated {
+		return true
+	}
+	return r.execution.Backend == contract.BackendNative && !sandbox.NativeValidationReusesCache(r.cfg)
+}
+
+func isGoToolCommand(command string) bool {
+	fields := strings.Fields(command)
+	return len(fields) >= 2 && fields[0] == "go" && (fields[1] == "build" || fields[1] == "vet" || fields[1] == "test" || fields[1] == "tool")
+}
+
+// scratchGoCachePrimerIndex returns the index of a fast whole-module compile
+// check (`go build ./...` preferred, else `go vet ./...`) when at least one
+// other Go check is present, so a cold scratch GOCACHE is populated once
+// instead of compiled redundantly by every concurrent Go check.
+func scratchGoCachePrimerIndex(jobs []requiredCheckJob) int {
+	primer := -1
+	goChecks := 0
+	for i, job := range jobs {
+		if !isGoToolCommand(job.command) {
+			continue
+		}
+		goChecks++
+		trimmed := strings.Join(strings.Fields(job.command), " ")
+		if trimmed == "go build ./..." && (primer < 0 || strings.Join(strings.Fields(jobs[primer].command), " ") != "go build ./...") {
+			primer = i
+		} else if trimmed == "go vet ./..." && primer < 0 {
+			primer = i
+		}
+	}
+	if goChecks < 2 {
+		return -1
+	}
+	return primer
+}
+
 // runRequiredChecks joins all workers before returning. Only this coordinator
 // presents results; each worker owns one indexed slot at a time.
 func (r *checkRunner) runRequiredChecks(ctx context.Context, jobs []requiredCheckJob, workers int, observe func(progress.Event), record func(CheckRunOutcome, error)) {
@@ -794,9 +843,31 @@ func (r *checkRunner) runRequiredChecks(ctx context.Context, jobs []requiredChec
 		}
 	}
 	started(0)
+	primer := -1
+	var goPrimed chan struct{}
+	if workers > 1 && r.runCommand == nil && r.usesScratchGoCache() {
+		if idx := scratchGoCachePrimerIndex(jobs); idx >= 0 {
+			primer = idx
+			goPrimed = make(chan struct{})
+		}
+	}
 	queue := make(chan int, len(jobs))
-	for i := range jobs {
-		queue <- i
+	if primer >= 0 {
+		queue <- primer
+		for i := range jobs {
+			if i != primer && !isGoToolCommand(jobs[i].command) {
+				queue <- i
+			}
+		}
+		for i := range jobs {
+			if i != primer && isGoToolCommand(jobs[i].command) {
+				queue <- i
+			}
+		}
+	} else {
+		for i := range jobs {
+			queue <- i
+		}
 	}
 	close(queue)
 	var wg sync.WaitGroup
@@ -806,6 +877,12 @@ func (r *checkRunner) runRequiredChecks(ctx context.Context, jobs []requiredChec
 			defer wg.Done()
 			for i := range queue {
 				job := jobs[i]
+				if primer >= 0 && i != primer && isGoToolCommand(job.command) {
+					select {
+					case <-goPrimed:
+					case <-ctx.Done():
+					}
+				}
 				outcome, err := r.runCheck(ctx, job.name, job.command, job.budget, nil)
 				if err == nil && ctx.Err() != nil {
 					err = ctx.Err()
@@ -813,6 +890,9 @@ func (r *checkRunner) runRequiredChecks(ctx context.Context, jobs []requiredChec
 				}
 				results[i].outcome, results[i].err = outcome, err
 				close(results[i].done)
+				if i == primer {
+					close(goPrimed)
+				}
 			}
 		}()
 	}

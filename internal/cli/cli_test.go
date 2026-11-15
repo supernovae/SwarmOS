@@ -402,9 +402,9 @@ func TestNodeAdmissionLimitAndFailedExecutionStatus(t *testing.T) {
 	if claimed != 1 {
 		t.Fatalf("max-jobs=1 admitted %d tasks", claimed)
 	}
-	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "exit 17")
-	if _, err := f.run("node", "run", "--max-jobs", "1", "--agent", "mock"); err == nil {
-		t.Fatal("failed developer produced successful node exit")
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return &nodeFailingRunner{}, nil }
+	if _, err := f.run("node", "run", "--max-jobs", "1", "--agent", "mock"); err != nil {
+		t.Fatal("ordinary developer stop failed node", err)
 	}
 }
 
@@ -2372,5 +2372,161 @@ func TestCLIParentLabelSync(t *testing.T) {
 	}
 	if state.Labels[tracker.ParentLabel].Name != tracker.ParentLabel {
 		t.Fatal("parent label not synchronized")
+	}
+}
+
+// Models the safe, typed execution failure returned by native harnesses.
+type nodeAgentFailure struct{}
+
+func (nodeAgentFailure) Error() string        { return "safe agent failure" }
+func (nodeAgentFailure) FailureClass() string { return "rate_limit" }
+
+type nodeFailingRunner struct {
+	agent.MockRunner
+	beforeFailure func() error
+}
+
+func (r nodeFailingRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	if req.Role == "developer" {
+		if r.beforeFailure != nil {
+			if err := r.beforeFailure(); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nodeAgentFailure{}
+	}
+	return r.MockRunner.Run(ctx, req)
+}
+
+func TestNodeFatalErrors(t *testing.T) {
+	for _, args := range [][]string{{"--concurrency", "0"}, {"--gate", "bogus"}} {
+		f := newCLIFixture(t)
+		if out, err := f.run(append([]string{"node", "run"}, args...)...); err == nil {
+			t.Fatal("fatal configuration accepted", out)
+		}
+	}
+	f := newCLIFixture(t)
+	if err := os.WriteFile(*f.env.vars["SWARM_NODE_CONFIG"], []byte("invalid: ["), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.run("node", "run"); err == nil {
+		t.Fatal("malformed config accepted")
+	}
+}
+
+func TestNodeFatalErrorsRegistry(t *testing.T) {
+	f := newCLIFixture(t)
+	if err := os.WriteFile(*f.env.vars["SWARM_REGISTRY_PATH"], []byte("repos: ["), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := f.run("node", "run", "--all"); err == nil {
+		t.Fatal("invalid registry accepted", out)
+	}
+}
+
+func TestNodeStopSettlementSafety(t *testing.T) {
+	c := stopContext{opts: &RootOptions{Repo: "octo/swarm"}, resource: "issue", number: 1}
+	for _, fatal := range []error{lease.ErrClaimFence, workflow.ErrLeaseLost, context.Canceled, errors.New("credential failure"), &lease.TaskApprovalError{IssueNumber: 1}} {
+		err := fmt.Errorf("wrapped: %w", errors.Join(workflow.ErrPlanReviewRejected, fatal))
+		if classifyNodeStop(c, err, "plan") != nil {
+			t.Fatalf("fatal error treated as stop: %v", err)
+		}
+	}
+}
+
+func TestNodeStopSettlementSafetySuccessor(t *testing.T) {
+	f := newCLIFixture(t)
+	n := f.create(t, "agent")
+	f.must(t, "issue", "approve", strconv.Itoa(n))
+	successor := ""
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &nodeFailingRunner{beforeFailure: func() error {
+			st, err := f.manager.GetCurrentState(t.Context(), n)
+			if err != nil {
+				return err
+			}
+			f.manager.BindClaim(n, st.Lease.ClaimID)
+			if _, err = f.manager.Release(t.Context(), n, st.Lease.Owner, "test successor"); err != nil {
+				return err
+			}
+			st, err = f.manager.Acquire(t.Context(), n, st.Lease.Owner, "mock", "implement", time.Hour, 1)
+			if err == nil {
+				successor = st.Lease.ClaimID
+			}
+			return err
+		}}, nil
+	}
+	out, err := f.run("node", "run", "--agent", "mock", "--max-jobs", "1", "--auto-submit")
+	if err == nil || successor == "" {
+		t.Fatal(err, out)
+	}
+	st := f.state(t, n)
+	if st.Lease.ClaimID != successor || st.Lease.Status != "active" || st.PRNumber != 0 {
+		t.Fatalf("successor changed: %+v", st.Lease)
+	}
+}
+
+func TestNodeStoppedIssueOutput(t *testing.T) {
+	c := stopContext{opts: &RootOptions{Repo: "octo/swarm"}, resource: "issue", number: 1}
+	for _, err := range []error{workflow.ErrPlanReviewRejected, lease.ErrPlanUnchanged, lease.ErrPlanReplanLimit, workflow.ErrValidationRepairExhausted, nodeAgentFailure{}} {
+		stop := classifyNodeStop(c, err, "implement")
+		if stop == nil || stop.Repo != "octo/swarm" || stop.IssueNumber != 1 || stop.Message == "" || stop.Reason == "" || stop.NextPhase == "" || stop.NextAction == nil || !strings.Contains(renderNextAction(stop.NextAction), "Next step:") {
+			t.Fatalf("missing stop advice: %+v %v", stop, err)
+		}
+	}
+}
+
+func TestNodeStopWatchAndConcurrency(t *testing.T) {
+	f := newCLIFixture(t)
+	for i := 0; i < 2; i++ {
+		n := f.create(t, "agent")
+		f.must(t, "issue", "approve", strconv.Itoa(n))
+	}
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return &nodeFailingRunner{}, nil }
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	cmd := f.command(&RootOptions{RepoRoot: f.root, Repo: "octo/swarm"})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"node", "run", "--agent", "mock", "--concurrency", "2", "--watch", "--poll-interval", "5ms"})
+	err := cmd.ExecuteContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err, out.String())
+	}
+	if strings.Count(out.String(), "stopped: agent execution stopped") != 2 {
+		t.Fatal(out.String())
+	}
+	for n := 1; n <= 2; n++ {
+		st := f.state(t, n)
+		if st.Lease.Status != "handoff" || st.Lease.NextPhase != "implement" || st.PRNumber != 0 {
+			t.Fatalf("%+v", st)
+		}
+	}
+}
+
+type nodeRetryLimitRunner struct{ agent.MockRunner }
+
+func (r *nodeRetryLimitRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	if req.Role == "planner" {
+		return nil, lease.ErrPlanReplanLimit
+	}
+	return r.MockRunner.Run(ctx, req)
+}
+func TestNodeStoppedIssueOutputExecutedRetryLimit(t *testing.T) {
+	f := newCLIFixture(t)
+	n := f.create(t, "agent")
+	f.must(t, "issue", "approve", strconv.Itoa(n))
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return &nodeRetryLimitRunner{}, nil }
+	out := f.must(t, "node", "run", "--agent", "mock", "--json")
+	var summary struct {
+		Attempts int             `json:"attempts"`
+		Stops    []nodeIssueStop `json:"stopped_issues"`
+	}
+	if err := json.Unmarshal([]byte(out[strings.LastIndex(out, "\n{")+1:]), &summary); err != nil {
+		t.Fatal(err, out)
+	}
+	if summary.Attempts != 1 || len(summary.Stops) != 1 || summary.Stops[0].IssueNumber != n {
+		t.Fatal(out)
 	}
 }

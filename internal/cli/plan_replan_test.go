@@ -568,3 +568,36 @@ func TestPendingPlanReviewWithoutSchedulingReason(t *testing.T) {
 		t.Fatalf("invented pending review: %q", got)
 	}
 }
+
+func TestNodeStoppedIssueOutputRetryLimit(t *testing.T) {
+	f := newCLIFixture(t)
+	n := f.create(t, "agent")
+	number := strconv.Itoa(n)
+	f.must(t, "issue", "approve", number)
+	f.setenv("SWARM_MOCK_VERDICT", "CHANGES_REQUESTED")
+	for i := 0; i < 2; i++ {
+		if _, err := f.run("issue", "work", number, "--agent", "mock", "--progress=false"); err == nil {
+			t.Fatal("expected stop")
+		}
+	}
+	f.must(t, "issue", "release", number)
+	before := f.state(t, n)
+	second := f.create(t, "agent")
+	f.must(t, "issue", "approve", strconv.Itoa(second))
+	f.setenv("SWARM_MOCK_VERDICT", "APPROVED")
+	out := f.must(t, "node", "run", "--agent", "mock", "--json", "--max-jobs", "1")
+	var summary struct {
+		Attempts int             `json:"attempts"`
+		Stops    []nodeIssueStop `json:"stopped_issues"`
+	}
+	if err := json.Unmarshal([]byte(out[strings.LastIndex(out, "\n{")+1:]), &summary); err != nil {
+		t.Fatal(err, out)
+	}
+	if summary.Attempts != 1 || len(summary.Stops) != 1 || summary.Stops[0].IssueNumber != n {
+		t.Fatal(out)
+	}
+	after := f.state(t, n)
+	if after.Lease.ClaimID != before.Lease.ClaimID || after.PlanReplanCount != 2 {
+		t.Fatal("retry limit issue mutated")
+	}
+}

@@ -79,7 +79,11 @@ func pullNextReadyIssue(ctx context.Context, cmd *cobra.Command, rootOpts *RootO
 	return pullNextReadyIssueResolved(ctx, cmd, rootOpts, allRepos, opts, durOverride, rootOpts.resolveTargetLeaseManager)
 }
 
-func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration, resolve func(*cobra.Command, registry.RepoEntry) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error)) (*pulledWorkUnit, error) {
+func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpts *RootOptions, allRepos bool, opts workflow.WorkOptions, durOverride time.Duration, resolve func(*cobra.Command, registry.RepoEntry) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error), policies ...*nodeSelectionPolicy) (*pulledWorkUnit, error) {
+	var policy *nodeSelectionPolicy
+	if len(policies) > 0 {
+		policy = policies[0]
+	}
 	if err := contract.ValidatePhase(opts.Phase); err != nil {
 		return nil, err
 	}
@@ -142,6 +146,9 @@ func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpt
 		}
 		engine := workflow.NewEngineWithManagerOptions(target.Path, tr, mgr, cfg, rootOpts.Fork, rootOpts.effectiveForkRemote(), rootOpts.engineOptions())
 		for _, issue := range issues {
+			if policy != nil && policy.excluded(target.Repo, issue.Number) {
+				continue
+			}
 			if issue.IsParent() || slices.Contains(issue.Labels, "swarm:pr-open") {
 				continue
 			}
@@ -193,6 +200,9 @@ func pullNextReadyIssueResolved(ctx context.Context, cmd *cobra.Command, rootOpt
 			if !opts.IssueContinuation && (phase == "all" || phase == "plan") {
 				if err := mgr.CheckPlanReplanContext(ctx, state); err != nil {
 					if errors.Is(err, lease.ErrPlanReplanLimit) {
+						if policy != nil {
+							policy.exhausted(target, issue.Number, err)
+						}
 						continue
 					}
 					return nil, err

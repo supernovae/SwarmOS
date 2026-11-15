@@ -1902,7 +1902,7 @@ func TestIssueWorkRecoveryNodeRejectsWithoutContinuation(t *testing.T) {
 			f, n, script, _, run := recoveryCommandFixture(t, backend, "agent", 2)
 			script.reject = true
 			out, err := run("node", "run", "--agent", "mock", "--max-jobs", "2", "--auto-submit")
-			if err == nil || !reflect.DeepEqual(script.counts, map[string]int{"planner": 1, "reviewer": 1}) {
+			if err != nil || !reflect.DeepEqual(script.counts, map[string]int{"planner": 1, "reviewer": 1}) {
 				t.Fatalf("node rejection: %v %s counts=%v", err, out, script.counts)
 			}
 			st, err := f.manager.GetCurrentState(t.Context(), n)
@@ -2077,5 +2077,132 @@ func TestIssueWorkTesterFailureNextAction(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNodeContinuesAfterIssueStop(t *testing.T) {
+	f, first, script, _, run := recoveryCommandFixture(t, "local", "agent", 2)
+	second := f.create(t, "agent")
+	if out, err := run("issue", "approve", strconv.Itoa(second)); err != nil {
+		t.Fatal(err, out)
+	}
+	script.reject = true
+	out, err := run("node", "run", "--agent", "mock", "--json", "--auto-submit=false")
+	if err != nil {
+		t.Fatal(err, out)
+	}
+	var summary struct {
+		Attempts int             `json:"attempts"`
+		Stops    []nodeIssueStop `json:"stopped_issues"`
+	}
+	if err := json.Unmarshal([]byte(out[strings.LastIndex(out, "\n{")+1:]), &summary); err != nil {
+		t.Fatal(err, out)
+	}
+	if summary.Attempts != 2 || len(summary.Stops) != 1 || summary.Stops[0].IssueNumber != first || summary.Stops[0].NextPhase != "plan" || summary.Stops[0].NextAction == nil {
+		t.Fatalf("summary %+v %s", summary, out)
+	}
+	if script.counts["planner"] != 2 || script.counts["reviewer"] != 2 || script.counts["developer"] != 1 {
+		t.Fatal(script.counts)
+	}
+	st, err := f.manager.GetCurrentState(t.Context(), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Lease.Status != "handoff" || st.Lease.NextPhase != "plan" || st.PendingPlanReview == nil || st.PlanReplanCount != 0 || st.PRNumber != 0 {
+		t.Fatalf("bad settlement %+v", st)
+	}
+}
+
+func TestNodeStoppedIssueResumes(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		t.Run(backend, func(t *testing.T) {
+			f, n, script, _, run := recoveryCommandFixture(t, backend, "agent", 2)
+			script.reject = true
+			if out, err := run("node", "run", "--agent", "mock"); err != nil {
+				t.Fatal(err, out)
+			}
+			before, err := f.manager.GetCurrentState(t.Context(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Lease.Status != "handoff" || before.Lease.NextPhase != "plan" {
+				t.Fatalf("%+v", before.Lease)
+			}
+			if out, err := run("issue", "work", strconv.Itoa(n), "--phase", "plan", "--agent", "mock", "--planner-instructions", "Include the missing recovery case."); err != nil {
+				t.Fatal(err, out)
+			}
+			after, err := f.manager.GetCurrentState(t.Context(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Lease.ClaimID == after.Lease.ClaimID || script.counts["planner"] != 2 {
+				t.Fatal("did not resume with a new claim")
+			}
+		})
+	}
+}
+
+func TestNodeStoppedIssueValidationResumes(t *testing.T) {
+	for _, backend := range []string{"local", "github"} {
+		t.Run(backend, func(t *testing.T) {
+			f, n, _, _, run := recoveryCommandFixture(t, backend, "agent", 2, func(f *cliFixture) { setupWorkValidationPolicy(t, f) })
+			f.resolverRunner = nil
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "echo fail > fail-shell")
+			out, err := run("node", "run", "--agent", "mock")
+			if err != nil {
+				t.Fatal(err, out)
+			}
+			before, err := f.manager.GetCurrentState(t.Context(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.Lease.Status != "handoff" || before.Lease.NextPhase != "implement" || before.PRNumber != 0 {
+				t.Fatalf("lease=%+v output=%s", before.Lease, out)
+			}
+			f.setenv("SWARM_MOCK_DEVELOPER_CMD", "rm -f fail-shell")
+			out, err = run("issue", "work", strconv.Itoa(n), "--phase", "implement", "--agent", "mock")
+			if err != nil {
+				t.Fatal(err, out)
+			}
+			after, err := f.manager.GetCurrentState(t.Context(), n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Lease.ClaimID == before.Lease.ClaimID {
+				t.Fatal("claim not renewed")
+			}
+		})
+	}
+}
+
+type nodeMixedRunner struct{ continuationRunner }
+
+func (r *nodeMixedRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+	if req.Role == "planner" && r.counts["planner"] == 1 {
+		return nil, errors.New("fatal runner setup")
+	}
+	return r.continuationRunner.Run(ctx, req)
+}
+func TestNodeStoppedIssueOutputBeforeFatal(t *testing.T) {
+	f, _, _, _, run := recoveryCommandFixture(t, "local", "agent", 2)
+	n := f.create(t, "agent")
+	if out, err := run("issue", "approve", strconv.Itoa(n)); err != nil {
+		t.Fatal(err, out)
+	}
+	runner := &nodeMixedRunner{continuationRunner{counts: map[string]int{}, reject: true}}
+	f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) { return runner, nil }
+	out, err := run("node", "run", "--agent", "mock", "--json")
+	if err == nil {
+		t.Fatal("fatal setup ignored", out)
+	}
+	var summary struct {
+		Status string          `json:"status"`
+		Stops  []nodeIssueStop `json:"stopped_issues"`
+	}
+	if err := json.Unmarshal([]byte(out[strings.LastIndex(out, "\n{")+1:]), &summary); err != nil {
+		t.Fatal(err, out)
+	}
+	if summary.Status != "failed" || len(summary.Stops) != 1 {
+		t.Fatal(out)
 	}
 }

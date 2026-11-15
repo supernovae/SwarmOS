@@ -18,6 +18,7 @@ import (
 // Next-action reasons emitted by issue work, issue submit, pr work, pr rebase,
 // and pr submit when they stop short of success.
 const (
+	ReasonClaimExpired          = "claim_expired"
 	ReasonRequiredCheckLimit    = "required_check_limit"
 	ReasonPartialImplementation = "partial_implementation"
 	ReasonChangesRequested      = "changes_requested"
@@ -162,6 +163,9 @@ func (c stopContext) classify(err error) *NextAction {
 		args = append(args, recovery.Arguments...)
 		return &NextAction{Reason: reason, Argv: c.argv(recovery.Human, args[0], args[1:]...), HumanRequired: recovery.Human}
 	}
+	if errors.Is(err, lease.ErrClaimFence) && c.resource == "issue" && c.number > 0 {
+		return &NextAction{Reason: ReasonClaimExpired, Argv: c.pathFreeArgv("issue", "work", strconv.Itoa(c.number))}
+	}
 	var retry *workflow.TestRetryAvailableError
 	if errors.As(err, &retry) && (c.opts == nil || !c.opts.Fork) {
 		return &NextAction{Reason: "tester_retry_available", Argv: c.argv(false, c.resource, "work", strconv.Itoa(c.number), "--phase", "test")}
@@ -276,6 +280,16 @@ func (c stopContext) argv(maintainer bool, resource string, args ...string) []st
 		}
 	}
 	return append(append(argv, resource), args...)
+}
+
+// pathFreeArgv keeps portable repository selection without exposing a local root.
+func (c stopContext) pathFreeArgv(resource string, args ...string) []string {
+	if c.opts != nil {
+		opts := *c.opts
+		opts.RepoRoot = ""
+		c.opts = &opts
+	}
+	return c.argv(false, resource, args...)
 }
 
 // stop wraps err with its recovery so ExitCode can report it. Unclassified
@@ -401,8 +415,11 @@ func (c stopContext) statusAction(st *lease.IssueState, wu *contract.WorkUnit, c
 	action := func(reason, op string, args ...string) *NextAction {
 		return &NextAction{Reason: reason, Argv: c.argv(false, "issue", append([]string{op, n}, args...)...)}
 	}
-	if st.PRNumber != 0 || st.Lease.Status == "completed" {
-		return action("submitted", "status")
+	if st.PRNumber != 0 {
+		return &NextAction{Reason: "submitted", Argv: c.pathFreeArgv("pr", "status", strconv.Itoa(st.PRNumber))}
+	}
+	if st.Lease.Status == "completed" {
+		return nil
 	}
 	if !lease.TaskApprovalCurrent(st, wu, cfg) {
 		return c.taskApproval(c.number)
@@ -411,9 +428,7 @@ func (c stopContext) statusAction(st *lease.IssueState, wu *contract.WorkUnit, c
 		return human
 	}
 	if st.Lease.Status == "active" && st.Lease.ExpiresAt.After(now) && (owner == "" || owner != st.Lease.Owner || token == "" || token != st.Lease.ClaimID) {
-		a := action("claim_unavailable", "status")
-		a.HumanRequired = true
-		return a
+		return nil
 	}
 	if err := lease.VerifyApproval(st, wu); err != nil {
 		if a := c.classify(err); a != nil {

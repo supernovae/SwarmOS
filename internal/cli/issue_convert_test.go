@@ -416,6 +416,13 @@ func TestIssueConvertAuthoritativeState(t *testing.T) {
 					install()
 				}
 				out, err := runConvert(f, r, convertArgs(i.Number)...)
+				if kind == "active" {
+					for _, want := range []string{fmt.Sprintf("claim owner can run swarm issue release %d", i.Number), fmt.Sprintf("maintainer can run swarm issue revoke %d --reason 'explain recovery'", i.Number)} {
+						if err == nil || !strings.Contains(out+err.Error(), want) {
+							t.Fatalf("missing %q: %s %v", want, out, err)
+						}
+					}
+				}
 				if err == nil || r.writes != 0 || len(r.links) != 0 {
 					t.Fatalf("%v %s", err, out)
 				}

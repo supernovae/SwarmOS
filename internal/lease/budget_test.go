@@ -140,13 +140,13 @@ func TestHeartbeatFinalRenewalPausesWithoutExtraRenewal(t *testing.T) {
 			h := m.StartHeartbeat(ctx, iss.Number, "local-dev", 4*time.Hour)
 			defer h.Stop()
 			first := <-timers
-			elapsed.Store(int64(time.Hour))
+			elapsed.Store(int64(8 * time.Hour / 3))
 			if manual {
 				if _, err = m.Renew(ctx, iss.Number, "local-dev", 4*time.Hour); err != nil {
 					t.Fatal(err)
 				}
 			}
-			first.ch <- base.Add(time.Hour)
+			first.ch <- base.Add(time.Duration(elapsed.Load()))
 			second := <-timers
 			current, _ := m.GetCurrentState(ctx, iss.Number)
 			if current.Lease.Renewals != 1 {

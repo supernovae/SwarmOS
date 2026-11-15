@@ -7,14 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"github.com/supernovae/swarmos/internal/harness"
-	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
-	"github.com/supernovae/swarmos/internal/validation"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -22,8 +21,11 @@ import (
 	"github.com/supernovae/swarmos/internal/claimpause"
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/validation"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -799,5 +801,68 @@ func TestClaimFenceAfterAdmission(t *testing.T) {
 				t.Fatalf("successor changed: %v", loadErr)
 			}
 		})
+	}
+}
+
+type heartbeatOutageStore struct {
+	coordination.Store
+	armed atomic.Bool
+	cause error
+}
+
+func (s *heartbeatOutageStore) Load(ctx context.Context, n int) ([]byte, string, error) {
+	if s.armed.Load() {
+		return nil, "", s.cause
+	}
+	return s.Store.Load(ctx, n)
+}
+func TestHeartbeatTransportLeaseLost(t *testing.T) {
+	e, issue := budgetEngine(t)
+	base := time.Now()
+	var elapsed atomic.Int64
+	e.LeaseManager.SetNowFunc(func() time.Time { return base.Add(time.Duration(elapsed.Load())) })
+	if _, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "implement", 4*time.Hour, 3); err != nil {
+		t.Fatal(err)
+	}
+	cause := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	store := &heartbeatOutageStore{Store: e.LeaseManager.Store(), cause: cause}
+	e.LeaseManager.SetStore(e.repoRoot, store)
+	ticks := make(chan *workBudgetTimer, 10)
+	e.LeaseManager.SetHeartbeatTimerFunc(func(time.Duration) lease.HeartbeatTimer {
+		timer := &workBudgetTimer{make(chan time.Time, 1)}
+		ticks <- timer
+		return timer
+	})
+	h := e.LeaseManager.StartHeartbeat(t.Context(), issue.Number, "maintainer", 4*time.Hour)
+	defer h.Stop()
+	receive := func() *workBudgetTimer {
+		t.Helper()
+		select {
+		case timer := <-ticks:
+			return timer
+		case <-time.After(5 * time.Second):
+			t.Fatal("no heartbeat timer")
+			return nil
+		}
+	}
+	timer := receive()
+	store.armed.Store(true)
+	elapsed.Store(int64(time.Hour))
+	timer.ch <- base.Add(time.Hour)
+	timer = receive()
+	if h.Context().Err() != nil {
+		t.Fatal(h.Err())
+	}
+	elapsed.Store(int64(4*time.Hour - 30*time.Second))
+	timer.ch <- base.Add(time.Duration(elapsed.Load()))
+	select {
+	case <-h.Context().Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("outage did not stop at cutoff")
+	}
+	run := &workRun{e: e, heartbeat: h, ctx: h.Context(), coordinatorCtx: t.Context(), opts: WorkOptions{IssueNumber: issue.Number, Owner: "maintainer"}}
+	err := run.check()
+	if !errors.Is(err, ErrLeaseLost) || !errors.Is(err, cause) || errors.Is(err, claimpause.ErrBudget) || budgetInterrupted(h.Context(), err) {
+		t.Fatalf("outage became budget handoff or lost cause: %v", err)
 	}
 }

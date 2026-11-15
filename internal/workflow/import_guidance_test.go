@@ -672,3 +672,56 @@ func TestUnownedActiveGuidanceFallback(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviousAttemptImportRejection(t *testing.T) {
+	e, issue := budgetEngine(t)
+	mock := &agent.MockRunner{}
+	calls := 0
+	e.NewRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
+		return &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+			if req.Role != "developer" {
+				return mock.Run(ctx, req)
+			}
+			calls++
+			if calls == 1 {
+				if strings.Contains(req.TaskPrompt, "Previous discarded attempt") {
+					t.Fatal("unexpected initial diagnostic")
+				}
+				return &agent.RunResult{Role: req.Role, Output: "PRIVATE OUTPUT"}, &sandbox.CompletedImportError{Cause: req.CheckImport(ctx, []string{".swarm/active/DEV_NOTES.md"}, nil)}
+			}
+			for _, want := range []string{"Previous discarded attempt", ".swarm/active/DEV_NOTES.md", ".swarm/active/IMPLEMENTATION.md", "grants no permission"} {
+				if !strings.Contains(req.TaskPrompt, want) {
+					t.Errorf("missing %q in %s", want, req.TaskPrompt)
+				}
+			}
+			if strings.Contains(req.TaskPrompt, "PRIVATE OUTPUT") {
+				t.Fatal("agent output leaked")
+			}
+			return mock.Run(ctx, req)
+		}}, nil
+	}
+	opts := WorkOptions{RepoRoot: e.repoRoot, IssueNumber: issue.Number, Owner: "maintainer", AgentName: "mock", Phase: "all", Headless: true}
+	res, err := e.ExecuteWork(t.Context(), opts)
+	var rejection *importRejection
+	if !errors.As(err, &rejection) {
+		t.Fatalf("expected rejection: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(res.WorktreePath, ".swarm/active/DEV_NOTES.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("refused file imported")
+	}
+	opts.Phase = "implement"
+	_, err = e.ExecuteWork(t.Context(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("developer calls %d", calls)
+	}
+	st, err := e.LeaseManager.GetCurrentState(t.Context(), issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.AttemptDiagnostics["developer"]; ok {
+		t.Fatal("accepted implementation did not clear diagnostic")
+	}
+}

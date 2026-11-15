@@ -23,6 +23,7 @@ import (
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 	"github.com/supernovae/swarmos/internal/validation"
@@ -864,5 +865,37 @@ func TestHeartbeatTransportLeaseLost(t *testing.T) {
 	err := run.check()
 	if !errors.Is(err, ErrLeaseLost) || !errors.Is(err, cause) || errors.Is(err, claimpause.ErrBudget) || budgetInterrupted(h.Context(), err) {
 		t.Fatalf("outage became budget handoff or lost cause: %v", err)
+	}
+}
+
+func TestPreviousAttemptTimeout(t *testing.T) {
+	for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
+		t.Run(role, func(t *testing.T) {
+			e, issue := budgetEngine(t)
+			st, err := e.LeaseManager.Acquire(t.Context(), issue.Number, "maintainer", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			runner := &attemptRunner{e: e, st: st, owner: "maintainer", direct: true, Runner: &budgetTestRunner{run: func(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
+				calls++
+				if calls == 1 {
+					return nil, &sandbox.AgentTimeoutError{}
+				}
+				if !strings.Contains(req.TaskPrompt, "previous attempt timed out; it ran for ") {
+					t.Fatalf("missing timeout: %s", req.TaskPrompt)
+				}
+				return &agent.RunResult{}, nil
+			}}}
+			_, err = runner.Run(t.Context(), agent.RunRequest{Role: role})
+			var timeout *sandbox.AgentTimeoutError
+			if !errors.As(err, &timeout) {
+				t.Fatal("lost timeout classification")
+			}
+			_, err = runner.Run(t.Context(), agent.RunRequest{Role: role})
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

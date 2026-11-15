@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/supernovae/swarmos/internal/validation"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -174,6 +176,28 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			var pauses []*workflow.ClaimBudgetPause
 			var splits []map[string]any
 			var selections []map[string]any
+			var stoppedIssues []*nodeIssueStop
+			// Serialize selection with settlement and exclusion recording. The local
+			// claim lock remains held until a stopped issue is excluded.
+			var selectionMu sync.Mutex
+			excluded := map[string]bool{}
+			key := func(repo string, n int) string { return repo + "#" + strconv.Itoa(n) }
+			record := func(stop *nodeIssueStop) {
+				excluded[key(stop.Repo, stop.IssueNumber)] = true
+				outputMu.Lock()
+				defer outputMu.Unlock()
+				stoppedIssues = append(stoppedIssues, stop)
+				fmt.Fprintf(out, "%s #%d stopped: %s%s\n", stop.Repo, stop.IssueNumber, stop.Message, renderNextAction(stop.NextAction))
+			}
+			policy := &nodeSelectionPolicy{
+				excluded: func(repo string, n int) bool { return excluded[key(repo, n)] },
+				exhausted: func(target registry.RepoEntry, n int, err error) {
+					selected := *rootOpts
+					selected.Repo, selected.RepoRoot = target.Repo, target.Path
+					stop := classifyNodeStop(stopContext{opts: &selected, resource: "issue", number: n}, err, "plan")
+					record(stop)
+				},
+			}
 			execute := func(ctx context.Context, pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
 				tr, manager, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
 					Repo: pulled.Repo, Path: pulled.RepoRoot, Backend: pulled.Backend,
@@ -194,12 +218,47 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 					return lease.SaveClaimToken(pulled.RepoRoot, pulled.Issue.Number, state.Lease.ClaimID, state.BaseSHA)
 				}
 				result, err := engine.ExecuteWork(ctx, selected)
-				lease.UnlockClaim(lock)
+				defer func() {
+					if lock != nil {
+						lease.UnlockClaim(lock)
+					}
+				}()
 				if err != nil {
 					selectedRoot := *rootOpts
 					selectedRoot.Repo, selectedRoot.RepoRoot = pulled.Repo, pulled.RepoRoot
-					return result, (stopContext{opts: &selectedRoot, resource: "issue", number: pulled.Issue.Number}).stop(err)
+					c := stopContext{opts: &selectedRoot, resource: "issue", number: pulled.Issue.Number}
+					state, readErr := manager.GetCurrentState(ctx, pulled.Issue.Number)
+					if readErr != nil {
+						return result, fmt.Errorf("read stopped claim: %w", readErr)
+					}
+					stop := classifyNodeStop(c, err, state.Lease.Phase)
+					if stop == nil {
+						return result, c.stop(err)
+					}
+					selectionMu.Lock()
+					defer selectionMu.Unlock()
+					if state.Lease.ClaimID != pulled.State.Lease.ClaimID || state.Lease.Owner != pulled.State.Lease.Owner {
+						return result, fmt.Errorf("settle stopped issue: %w", lease.ErrClaimFence)
+					}
+					if state.Lease.Status == "active" {
+						reason := state.NextPhaseReason
+						if reason == "" {
+							reason = stop.Reason
+						}
+						_, settleErr := manager.Handoff(ctx, pulled.Issue.Number, state.Lease.Owner, state.Lease.Phase, stop.NextPhase, reason)
+						if settleErr != nil {
+							return result, fmt.Errorf("settle stopped issue: %w", settleErr)
+						}
+					} else if state.Lease.Status == "handoff" && state.Lease.NextPhase != "" {
+						stop.NextPhase = state.Lease.NextPhase
+					} else if state.Lease.Status != "released" {
+						return result, fmt.Errorf("settle stopped issue: %w", lease.ErrClaimFence)
+					}
+					record(stop)
+					return result, stop
 				}
+				lease.UnlockClaim(lock)
+				lock = nil
 				if autoSubmit && result.ValidationPassed && result.ClaimBudgetPause == nil {
 					submitOpts := *rootOpts
 					submitOpts.Repo = pulled.Repo
@@ -231,7 +290,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 						for ctx.Err() == nil && reserve() {
 							// Each claimed task is its own command for inspection reuse.
 							taskCtx := newCommandSessions(ctx)
-							pulled, err := pullNextReadyIssue(taskCtx, cmd, rootOpts, allRepos, options, 0)
+							selectionMu.Lock()
+							pulled, err := pullNextReadyIssueResolved(taskCtx, cmd, rootOpts, allRepos, options, 0, rootOpts.resolveTargetLeaseManager, policy)
+							selectionMu.Unlock()
 							if err != nil {
 								admitted.Add(-1)
 								var noReady *noReadyError
@@ -255,8 +316,9 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 							outputMu.Lock()
 							rootOpts.storageMaintenance(cmd, false)
 							outputMu.Unlock()
-							if errors.Is(err, lease.ErrPlanReplanLimit) {
-								admitted.Add(-1)
+							var stopped *nodeIssueStop
+							if errors.As(err, &stopped) {
+								completed.Add(1)
 								continue
 							}
 							completed.Add(1)
@@ -288,14 +350,14 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			for {
 				runBatch()
-				if failures.Load() > 0 {
-					if asJSON {
-						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections})
-					}
-					return fmt.Errorf("node %q encountered %d failure(s)", profile.NodeID, failures.Load())
-				}
 				if ctx.Err() != nil {
 					return ctx.Err()
+				}
+				if failures.Load() > 0 {
+					if asJSON {
+						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections, "stopped_issues": stoppedIssues})
+					}
+					return fmt.Errorf("node %q encountered %d failure(s)", profile.NodeID, failures.Load())
 				}
 				if !watch || maxJobs > 0 && admitted.Load() >= int64(maxJobs) {
 					break
@@ -307,7 +369,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections})
+				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections, "stopped_issues": stoppedIssues})
 			}
 			fmt.Fprintf(out, "Node %q finished: %d task attempt(s)\n", profile.NodeID, completed.Load())
 			return nil
@@ -340,4 +402,93 @@ func printNodeProfile(cmd *cobra.Command, prof *contract.NodeProfile) {
 	fmt.Fprintf(out, "  Resources:    %s/%s, %d CPUs, %s RAM\n",
 		prof.Resources.OS, prof.Resources.Arch, prof.Resources.CPUs, prof.Resources.RAM)
 	fmt.Fprintf(out, "  Upstream:     %s\n", workspace.UpstreamRemoteOrDefault(prof.UpstreamRemote))
+}
+
+// nodeSelectionPolicy is optional; standalone issue selectors keep their behavior.
+type nodeSelectionPolicy struct {
+	excluded  func(string, int) bool
+	exhausted func(registry.RepoEntry, int, error)
+}
+
+type nodeIssueStop struct {
+	Repo        string      `json:"repo"`
+	IssueNumber int         `json:"issue_number"`
+	Status      string      `json:"status"`
+	Reason      string      `json:"reason"`
+	Message     string      `json:"message"`
+	NextPhase   string      `json:"next_phase"`
+	NextAction  *NextAction `json:"next_action"`
+}
+
+func (s *nodeIssueStop) Error() string { return s.Message }
+
+func classifyNodeStop(c stopContext, err error, phase string) *nodeIssueStop {
+	if err == nil {
+		return nil
+	}
+	if nodeFatalCause(err) {
+		return nil
+	}
+	reason, message, next := "", "", phase
+	switch {
+	case errors.Is(err, workflow.ErrPlanReviewRejected):
+		reason, message, next = "changes_requested", "plan review requested changes", "plan"
+	case errors.Is(err, lease.ErrPlanUnchanged):
+		reason, message, next = "plan_no_progress", "plan made no progress", "plan"
+	case errors.Is(err, lease.ErrPlanReplanLimit):
+		reason, message, next = "plan_retry_limit", "plan retry limit reached", "plan"
+	case errors.Is(err, validation.ErrRequiredCheckFailed), errors.Is(err, workflow.ErrValidationRepairExhausted), errors.Is(err, workflow.ErrValidationRepairNoChanges), errors.Is(err, workflow.ErrPreExistingFailures), errors.Is(err, workflow.ErrOutsideCandidateFailures):
+		reason, message, next = "validation_failed", "required validation stopped", "implement"
+	default:
+		var failure interface{ FailureClass() string }
+		if !errors.As(err, &failure) || failure.FailureClass() == "" {
+			return nil
+		}
+		reason, message = "agent_failed", "agent execution stopped"
+	}
+	if next == "" || next == "all" {
+		return nil
+	}
+	action := c.classify(err)
+	if errors.Is(err, lease.ErrPlanReplanLimit) {
+		action = &NextAction{Reason: reason, Argv: c.argv(true, "issue", "edit", strconv.Itoa(c.number)), HumanRequired: true}
+	}
+	if action == nil {
+		action = &NextAction{Reason: reason, Argv: c.argv(false, "issue", "work", strconv.Itoa(c.number), "--phase", next)}
+	}
+	return &nodeIssueStop{Repo: c.opts.Repo, IssueNumber: c.number, Status: "stopped", Reason: reason, Message: message, NextPhase: next, NextAction: action}
+}
+
+// Walk wrappers as well as joins so a nested stop cannot hide an authority error.
+func nodeFatalCause(err error) bool {
+	if err == nil {
+		return false
+	}
+	var task *lease.TaskApprovalError
+	var base *lease.ClaimBaseApprovalError
+	var human *lease.HumanPlanApprovalError
+	var plan *lease.PlanApprovalError
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, lease.ErrClaimFence) || errors.Is(err, workflow.ErrLeaseLost) || errors.As(err, &task) || errors.As(err, &base) || errors.As(err, &human) || errors.As(err, &plan) {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, cause := range joined.Unwrap() {
+			if nodeFatalCause(cause) || !nodeOrdinaryCause(cause) {
+				return true
+			}
+		}
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return nodeFatalCause(wrapped.Unwrap())
+	}
+	return false
+}
+func nodeOrdinaryCause(err error) bool {
+	for _, ordinary := range []error{workflow.ErrPlanReviewRejected, lease.ErrPlanUnchanged, lease.ErrPlanReplanLimit, validation.ErrRequiredCheckFailed, workflow.ErrValidationRepairExhausted, workflow.ErrValidationRepairNoChanges, workflow.ErrPreExistingFailures, workflow.ErrOutsideCandidateFailures} {
+		if errors.Is(err, ordinary) {
+			return true
+		}
+	}
+	var failure interface{ FailureClass() string }
+	return errors.As(err, &failure) && failure.FailureClass() != ""
 }

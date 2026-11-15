@@ -173,6 +173,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 			}
 			var pauses []*workflow.ClaimBudgetPause
 			var splits []map[string]any
+			var skipped []skippedIssue
 			var selections []map[string]any
 			execute := func(ctx context.Context, pulled *pulledWorkUnit) (*workflow.WorkResult, error) {
 				tr, manager, cfg, err := rootOpts.resolveTargetLeaseManager(cmd, registry.RepoEntry{
@@ -237,6 +238,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								var noReady *noReadyError
 								if errors.As(err, &noReady) {
 									outputMu.Lock()
+									skipped = append(skipped, noReady.skipped...)
 									fmt.Fprintln(out, noReady.human())
 									outputMu.Unlock()
 								}
@@ -249,6 +251,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 								return
 							}
 							outputMu.Lock()
+							skipped = append(skipped, pulled.SkippedIssues...)
 							selections = append(selections, map[string]any{"repo": pulled.Repo, "issue_number": pulled.Issue.Number, "overlap": pulled.Overlap})
 							outputMu.Unlock()
 							result, err := execute(taskCtx, pulled)
@@ -290,7 +293,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				runBatch()
 				if failures.Load() > 0 {
 					if asJSON {
-						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections})
+						_ = writeJSON(cmd, map[string]any{"kind": "node", "status": "failed", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections, "skipped_issues": skipped})
 					}
 					return fmt.Errorf("node %q encountered %d failure(s)", profile.NodeID, failures.Load())
 				}
@@ -307,7 +310,7 @@ func newNodeCmd(rootOpts *RootOptions) *cobra.Command {
 				}
 			}
 			if asJSON {
-				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections})
+				return writeJSON(cmd, map[string]any{"kind": "node", "status": "drained", "attempts": completed.Load(), "failures": failures.Load(), "claim_budget_pauses": pauses, "split_recommendations": splits, "selections": selections, "skipped_issues": skipped})
 			}
 			fmt.Fprintf(out, "Node %q finished: %d task attempt(s)\n", profile.NodeID, completed.Load())
 			return nil

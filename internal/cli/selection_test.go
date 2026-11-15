@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1264,5 +1265,214 @@ func TestSelectionBatchSnapshotFallbackRequestedLoadError(t *testing.T) {
 	got, diag, err := selectFixture(t, f, s, workflow.WorkOptions{Phase: "plan", AgentName: "mock"})
 	if got != nil || !errors.Is(err, sentinel) || s.snapshots != 1 || strings.Count(diag, "batched selection state unavailable") != 1 || !strings.Contains(diag, "overlap scheduling signal is partial") {
 		t.Fatalf("%v %s got=%v", err, diag, got)
+	}
+}
+
+func TestNextSelectionPendingRevision(t *testing.T) {
+	for _, mode := range []string{"work", "node"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCLIFixture(t)
+			first, second := f.create(t, "agent"), f.create(t, "agent")
+			for _, n := range []int{first, second} {
+				f.must(t, "issue", "approve", strconv.Itoa(n))
+			}
+			editSelectionState(t, f, first, func(st *lease.IssueState) { st.PRRevision = &lease.PRRevision{Number: 37} })
+			before := f.state(t, first)
+			args := []string{"issue", "work", "--next", "--agent", "mock", "--headless", "--progress=false"}
+			if mode == "node" {
+				args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
+			}
+			if out, err := f.run(args...); err != nil {
+				t.Fatalf("%v\n%s", err, out)
+			}
+			if !reflect.DeepEqual(before, f.state(t, first)) || f.state(t, second).Lease.ClaimID == "" {
+				t.Fatal("skipped state changed or winner not claimed")
+			}
+		})
+	}
+}
+
+func TestNextSelectionSkippedOutput(t *testing.T) {
+	for _, mode := range []string{"work", "node", "claim"} {
+		for _, asJSON := range []bool{false, true} {
+			for _, winner := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/json=%t/winner=%t", mode, asJSON, winner), func(t *testing.T) {
+					f := newCLIFixture(t)
+					revision, retry, approval := f.create(t, "agent"), f.create(t, "agent"), f.create(t, "agent")
+					for _, n := range []int{revision, retry, approval} {
+						f.must(t, "issue", "approve", strconv.Itoa(n))
+					}
+					editSelectionState(t, f, revision, func(st *lease.IssueState) { st.PRRevision = &lease.PRRevision{Number: 37} })
+					editSelectionState(t, f, retry, func(st *lease.IssueState) {
+						st.PlanReplanCount = 99
+						st.PendingPlanReview = &lease.PlanRejection{ReviewID: "review", Version: 1, Findings: "VERDICT: CHANGES_REQUESTED", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte("VERDICT: CHANGES_REQUESTED"))), PlanDigest: "plan", TestDigest: "test", Source: "authenticated-agent", TaskDigest: st.TaskDigest, PolicyDigest: st.PolicyDigest, BaseSHA: st.BaseSHA}
+						st.Lease.NextPhase = "plan"
+					})
+					editSelectionState(t, f, approval, func(st *lease.IssueState) { st.TaskDigest = "stale" })
+					before := map[int]*lease.IssueState{}
+					for _, n := range []int{revision, retry, approval} {
+						before[n] = f.state(t, n)
+					}
+					if winner {
+						n := f.create(t, "agent")
+						f.must(t, "issue", "approve", strconv.Itoa(n))
+					}
+					args := []string{"issue", mode, "--next", "--agent", "mock"}
+					if mode == "work" {
+						args = append(args, "--headless", "--progress=false")
+					}
+					if mode == "node" {
+						args = []string{"node", "run", "--max-jobs", "1", "--agent", "mock"}
+					}
+					if asJSON {
+						args = append(args, "--json")
+					}
+					cmd := f.command(&RootOptions{RepoRoot: f.root, trackerOverride: f.tracker})
+					var output, diagnostics bytes.Buffer
+					cmd.SetOut(&output)
+					cmd.SetErr(&diagnostics)
+					cmd.SetArgs(append([]string{"--root", f.root}, args...))
+					err := cmd.Execute()
+					if (winner || mode == "node") && err != nil {
+						t.Fatalf("%v %s %s", err, &output, &diagnostics)
+					}
+					if !winner && mode != "node" && !errors.Is(err, errNoReadyWork) {
+						t.Fatalf("expected exhaustion: %v", err)
+					}
+					if asJSON {
+						var result map[string]json.RawMessage
+						dec := json.NewDecoder(&output)
+						if e := dec.Decode(&result); e != nil {
+							t.Fatal(e, output.String())
+						}
+						var extra any
+						if e := dec.Decode(&extra); e != io.EOF {
+							t.Fatalf("extra JSON: %v", e)
+						}
+						raw := result["skipped_issues"]
+						if mode == "claim" && winner {
+							var selected map[string]json.RawMessage
+							if e := json.Unmarshal(result["selection"], &selected); e != nil {
+								t.Fatal(e)
+							}
+							raw = selected["skipped_issues"]
+						}
+						var records []skippedIssue
+						if e := json.Unmarshal(raw, &records); e != nil {
+							t.Fatal(e, string(raw))
+						}
+						if len(records) != 3 {
+							t.Fatalf("records: %+v", records)
+						}
+						for i, r := range records {
+							if r.Repo == "" || r.IssueNumber != []int{revision, retry, approval}[i] || r.Reason == "" || r.NextStep == "" {
+								t.Fatalf("incomplete record: %+v", r)
+							}
+							if strings.Contains(r.NextStep, f.root) || strings.Contains(r.Reason, f.root) {
+								t.Fatal("local path in record")
+							}
+							if host, e := os.Hostname(); e == nil && host != "" && (strings.Contains(r.NextStep, host) || strings.Contains(r.Reason, host)) {
+								t.Fatal("hostname in record")
+							}
+						}
+						if !strings.Contains(records[0].NextStep, "pr work 37") || !strings.Contains(records[1].Reason, "automatic plan retry limit") || !(strings.Contains(records[1].NextStep, "issue edit ") || strings.Contains(records[1].NextStep, "issue approve ")) {
+							t.Fatalf("wrong recovery: %+v", records)
+						}
+					} else {
+						combined := output.String() + diagnostics.String()
+						if err != nil {
+							combined += err.Error()
+						}
+						for _, n := range []int{revision, retry, approval} {
+							if strings.Count(combined, fmt.Sprintf("Issue #%d:", n)) != 1 {
+								t.Fatalf("missing/duplicate issue %d: %s", n, combined)
+							}
+						}
+						if !strings.Contains(combined, "pr work 37") || !strings.Contains(combined, "automatic plan retry limit") {
+							t.Fatal(combined)
+						}
+					}
+					for n, st := range before {
+						if token, e := lease.LoadClaimToken(f.root, n); e == nil || token != "" {
+							t.Fatalf("skipped claim token %d: %q %v", n, token, e)
+						}
+						if !reflect.DeepEqual(st, f.state(t, n)) {
+							t.Fatalf("skipped issue %d changed", n)
+						}
+						if _, e := os.Stat(filepath.Join(f.root, ".swarm", "worktrees", fmt.Sprintf("issue-%d", n))); !os.IsNotExist(e) {
+							t.Fatalf("skipped worktree %d: %v", n, e)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+type selectionFailureTracker struct {
+	tracker.Tracker
+	stage string
+	err   error
+}
+
+func (s selectionFailureTracker) ListIssues(ctx context.Context, filter tracker.IssueFilter) ([]*tracker.Issue, error) {
+	if s.stage == "ready" && len(filter.Labels) > 0 {
+		return nil, s.err
+	}
+	return s.Tracker.ListIssues(ctx, filter)
+}
+func (s selectionFailureTracker) GetIssue(ctx context.Context, n int) (*tracker.Issue, error) {
+	if s.stage == "preflight" {
+		return nil, s.err
+	}
+	return s.Tracker.GetIssue(ctx, n)
+}
+func (s selectionFailureTracker) CurrentUser(ctx context.Context) (string, error) {
+	if s.stage == "identity" {
+		return "", s.err
+	}
+	return s.Tracker.CurrentUser(ctx)
+}
+func TestNextSelectionFatalErrors(t *testing.T) {
+	for _, stage := range []string{"ready", "preflight", "identity", "resolver", "canceled"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newCLIFixture(t)
+			first, second := f.create(t, "agent"), f.create(t, "agent")
+			for _, n := range []int{first, second} {
+				f.must(t, "issue", "approve", strconv.Itoa(n))
+			}
+			before := []*lease.IssueState{f.state(t, first), f.state(t, second)}
+			sentinel := errors.New("infrastructure unavailable")
+			ctx := t.Context()
+			if stage == "canceled" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+				sentinel = context.Canceled
+			}
+			tr := selectionFailureTracker{Tracker: f.tracker, stage: stage, err: sentinel}
+			cfg, err := harness.LoadConfig(f.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := f.options(&RootOptions{RepoRoot: f.root})
+			cmd := f.command(opts)
+			cmd.SetErr(io.Discard)
+			cmd.SetOut(io.Discard)
+			got, err := pullNextReadyIssueResolved(ctx, cmd, opts, false, workflow.WorkOptions{AgentName: "mock", Phase: "plan"}, time.Hour, func(*cobra.Command, registry.RepoEntry) (tracker.Tracker, *lease.Manager, *contract.SwarmConfig, error) {
+				if stage == "resolver" {
+					return nil, nil, nil, sentinel
+				}
+				return tr, f.manager, cfg, nil
+			})
+			if !errors.Is(err, sentinel) || got != nil {
+				t.Fatalf("fatal error lost: %v %+v", err, got)
+			}
+			for i, n := range []int{first, second} {
+				if !reflect.DeepEqual(before[i], f.state(t, n)) {
+					t.Fatalf("issue %d changed", n)
+				}
+			}
+		})
 	}
 }

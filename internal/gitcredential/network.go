@@ -346,7 +346,7 @@ const RetryAttempts = 4
 const retryDelayBudget = time.Minute
 
 // RetryReason is deliberately conservative for mutations: only positive evidence
-// that the connection was never established permits replay.
+// that the connection was never established or REST rejected the request permits replay.
 func RetryReason(o RetryObservation) string {
 	if errors.Is(o.Err, context.Canceled) || errors.Is(o.Err, ErrInterrupted) || errors.Is(o.Err, ErrCleanupIncomplete) {
 		return ""
@@ -379,6 +379,10 @@ func RetryReason(o RetryObservation) string {
 		}
 	}
 	read := o.Operation == "fetch" || o.Operation == "ls-remote" || o.Operation == "GET"
+	rest := o.Operation == "GET" || o.Operation == "HEAD" || o.Operation == "POST" || o.Operation == "PUT" || o.Operation == "PATCH" || o.Operation == "DELETE" || o.Operation == "OPTIONS"
+	if rest && (o.Status == 429 || (o.Status == 403 && (o.Header.Get("Retry-After") != "" || o.SecondaryLimit))) {
+		return "rate limited"
+	}
 	if o.Status == 401 || o.Status == 404 || (o.Status == 403 && (!read || (o.Header.Get("Retry-After") == "" && o.Header.Get("X-RateLimit-Remaining") != "0" && !o.SecondaryLimit))) {
 		return ""
 	}
@@ -403,7 +407,7 @@ func RetryReason(o RetryObservation) string {
 	if o.Status == 429 || (o.Status == 403 && (o.Header.Get("Retry-After") != "" || o.Header.Get("X-RateLimit-Remaining") == "0" || o.SecondaryLimit)) {
 		return "rate limited"
 	}
-	if o.Status == 502 || o.Status == 503 || o.Status == 504 {
+	if (o.Operation == "GET" && o.Status == 500) || o.Status == 502 || o.Status == 503 || o.Status == 504 {
 		return "service unavailable"
 	}
 	if o.Err != nil && o.Operation == "GET" {
@@ -464,10 +468,12 @@ type RetryPolicy struct {
 	Attempts  int
 	delay     time.Duration
 	exhausted bool
+	reset     time.Time
 }
 
 func (p *RetryPolicy) Next(ctx context.Context, o RetryObservation) (bool, error) {
 	p.exhausted = false
+	p.reset = time.Time{}
 	p.Attempts++
 	reason := RetryReason(o)
 	if reason == "" {
@@ -478,6 +484,34 @@ func (p *RetryPolicy) Next(ctx context.Context, o RetryObservation) (bool, error
 		return false, nil
 	}
 	delay := retryJitter(time.Duration(1<<(p.Attempts-1)) * 8 * time.Second)
+	if o.Status == 403 && o.Header.Get("X-RateLimit-Remaining") == "0" {
+		value := o.Header.Get("X-RateLimit-Reset")
+		seconds, err := strconv.ParseInt(value, 10, 64)
+		if err != nil && value != "" && strings.Trim(value, "0123456789") == "" {
+			p.exhausted = true
+			return false, nil
+		}
+		if err == nil && seconds > 0 {
+			now := retryNow()
+			// Compare seconds first: even extreme Unix values cannot overflow
+			// duration arithmetic or time.Time's internal representation.
+			budget := retryDelayBudget - p.delay
+			if seconds > now.Add(budget).Unix() {
+				if seconds <= 253402300799 { // Last RFC3339 year (9999).
+					p.reset = time.Unix(seconds, 0).UTC()
+				}
+				p.exhausted = true
+				return false, nil
+			}
+			reset := time.Unix(seconds, 0)
+			if reset.After(now) {
+				p.reset = reset.UTC()
+				if requested := reset.Sub(now); requested > delay {
+					delay = requested
+				}
+			}
+		}
+	}
 	if value := o.Header.Get("Retry-After"); value != "" {
 		requested := time.Duration(0)
 		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
@@ -549,7 +583,11 @@ func (p *RetryPolicy) Error(ctx context.Context, operation string, err error) er
 		command = redaction.Redact(command)
 		operation = redaction.Redact(operation)
 	}
-	failure := &networkError{fmt.Sprintf("%s failed after %d attempt(s); rerun %s", operation, p.Attempts, command), err, ""}
+	guidance := ""
+	if !p.reset.IsZero() {
+		guidance = "; rate limit resets at " + p.reset.Format(time.RFC3339)
+	}
+	failure := &networkError{fmt.Sprintf("%s failed after %d attempt(s); rerun %s", operation, p.Attempts, command) + guidance, err, ""}
 	if p.exhausted && ctx.Err() == nil {
 		return &RetryExhaustedError{Operation: operation, Attempts: p.Attempts, cause: failure}
 	}

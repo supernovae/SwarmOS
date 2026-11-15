@@ -2888,6 +2888,50 @@ func TestIssue528RequireGateNoop(t *testing.T) {
 		t.Fatalf("stale: %v", err)
 	}
 }
+
+// issue528RequestStore models the coordinator's request-scoped store.
+type issue528RequestStore struct {
+	*issue528Store
+	requestID int64
+}
+
+func (s *issue528RequestStore) RequestID() int64 { return s.requestID }
+
+func TestIssue528ForkRequestNoop(t *testing.T) {
+	m, _, n, s, _ := issue528Fixture(t)
+	ctx := context.Background()
+	requests := &issue528RequestStore{issue528Store: s, requestID: 42}
+	m.store = requests
+	st, err := m.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wantCAS := range []int{1, 1, 2} {
+		if wantCAS == 2 {
+			requests.requestID++
+		}
+		out, err := m.RequireGate(ctx, n, "local-dev", st.EffectiveGate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		persisted, err := m.GetCurrentState(ctx, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.cas != wantCAS || out.LastForkRequestID != requests.requestID || persisted.LastForkRequestID != requests.requestID {
+			t.Fatalf("CAS=%d want %d; returned/persisted request=%d/%d want %d", s.cas, wantCAS, out.LastForkRequestID, persisted.LastForkRequestID, requests.requestID)
+		}
+	}
+	m.BindClaim(n, "stale")
+	requests.requestID++
+	if _, err := m.RequireGate(ctx, n, "local-dev", st.EffectiveGate); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("stale: %v", err)
+	}
+	if s.cas != 2 {
+		t.Fatalf("stale request wrote state: CAS=%d", s.cas)
+	}
+}
+
 func TestIssue528LabelDelta(t *testing.T) {
 	for _, handoff := range []bool{false, true} {
 		for _, retry := range []bool{false, true} {

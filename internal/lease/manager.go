@@ -1530,9 +1530,16 @@ func (m *Manager) checkApprovedState(ctx context.Context, n int, st *IssueState)
 	return nil
 }
 
-func (m *Manager) checkStateClaim(ctx context.Context, n int, owner string, st *IssueState) error {
+func (m *Manager) checkClaimFence(n int, owner string, st *IssueState) error {
 	if st.Lease.Status != "active" || !st.Lease.ExpiresAt.After(m.nowFn()) || owner == "" || st.Lease.Owner != owner || st.Lease.ClaimID != m.token(n) {
 		return ErrClaimFence
+	}
+	return nil
+}
+
+func (m *Manager) checkStateClaim(ctx context.Context, n int, owner string, st *IssueState) error {
+	if err := m.checkClaimFence(n, owner, st); err != nil {
+		return err
 	}
 	return m.checkApprovedState(ctx, n, st)
 }
@@ -1612,12 +1619,34 @@ func (m *Manager) Release(ctx context.Context, n int, owner, reason string) (*Is
 			Reason:      reason,
 		})
 	}
-	st, err := m.mutate(ctx, n, owner, func(st *IssueState) error { st.Lease.Status = "released"; st.Lease.ExpiresAt = m.nowFn(); return nil })
-	if err == nil {
-		_ = m.tracker.RemoveLabel(ctx, n, "swarm:claimed")
-		_ = m.tracker.RemoveLabel(ctx, n, "swarm:in-progress")
+	// Direct release needs only the claim fence so an edited task cannot trap its owner.
+	// Fork releases retain the approval requirement on every freshly loaded snapshot.
+	for range 4 {
+		st, rev, err := m.load(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		if st.ForkRepo != "" {
+			err = m.checkStateClaim(ctx, n, owner, st)
+		} else {
+			err = m.checkClaimFence(n, owner, st)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("release claim: %w", err)
+		}
+		st.Lease.Status = "released"
+		st.Lease.ExpiresAt = m.nowFn()
+		out, err := m.save(ctx, n, rev, st)
+		if errors.Is(err, coordination.ErrConflict) {
+			continue
+		}
+		if err == nil {
+			_ = m.tracker.RemoveLabel(ctx, n, "swarm:claimed")
+			_ = m.tracker.RemoveLabel(ctx, n, "swarm:in-progress")
+		}
+		return out, err
 	}
-	return st, err
+	return nil, coordination.ErrConflict
 }
 func (m *Manager) Handoff(ctx context.Context, n int, owner, done, next string, reason ...string) (*IssueState, error) {
 	handoffReason := ""

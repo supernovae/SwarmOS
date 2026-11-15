@@ -22,6 +22,7 @@ import (
 )
 
 func TestWorkProgressPrintsCoordinatorOperation(t *testing.T) {
+	t.Parallel()
 	for _, printer := range []func(*bytes.Buffer) func(progress.Event){func(b *bytes.Buffer) func(progress.Event) { return workProgressPrinter(b) }, func(b *bytes.Buffer) func(progress.Event) { return operationProgressPrinter(b) }} {
 		for _, tc := range []struct {
 			e    progress.Event
@@ -53,6 +54,7 @@ func TestWorkProgressPrintsCoordinatorOperation(t *testing.T) {
 }
 
 func TestReviewPlanProgressKeepsJSONOnStdout(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := strconv.Itoa(f.create(t, "agent"))
 	f.must(t, "issue", "approve", n)
@@ -119,6 +121,7 @@ func (r upstreamCLIReviewRunner) Run(_ context.Context, req agent.RunRequest) (*
 	return &agent.RunResult{Agent: "codex", Role: "reviewer", Attestation: r.Provenance("reviewer", true)}, nil
 }
 func TestUpstreamPlanReviewCLISeparateCheckout(t *testing.T) {
+	t.Parallel()
 	for _, gate := range []string{"agent", "human"} {
 		for _, verdict := range []string{"APPROVED", "CHANGES_REQUESTED"} {
 			t.Run(gate+verdict, func(t *testing.T) {

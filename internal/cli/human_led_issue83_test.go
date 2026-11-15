@@ -23,6 +23,7 @@ import (
 )
 
 func TestIssue83GuideCommandRegistration(t *testing.T) {
+	t.Parallel()
 	commands := []string{
 		"issue claim 83", "issue status 83", "issue stage 83 --phase plan --harness codex --model default",
 		"issue review-plan 83", "issue review-plan 83 --approve --notes Reviewed",
@@ -93,6 +94,7 @@ func TestIssue83GuideCommandRegistration(t *testing.T) {
 }
 
 func TestIssue83CLIStagingStatusAndLocalPublication(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
@@ -199,6 +201,7 @@ func (tr issue83GitHubCLITracker) GetPullRequest(ctx context.Context, number int
 func (issue83GitHubCLITracker) BackendName() string { return "github (owner/repo)" }
 
 func TestIssue83AuthenticatedIssueSubmitPublishesStager(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "human")
 	n := strconv.Itoa(number)
@@ -386,6 +389,7 @@ func issue83AssertStandaloneTester(t *testing.T, st *lease.IssueState) {
 }
 
 func TestIssue83PRStageValidateSubmitPrivacy(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	p := strconv.Itoa(number)
 	prepared := readPROutcome(t, f.must(t, "pr", "work", p, "--phase", "plan", "--agent", "mock", "--progress=false", "--json"))
@@ -447,6 +451,7 @@ func (r issue83FreshRunner) Run(ctx context.Context, req agent.RunRequest) (*age
 }
 
 func TestIssue83FreshWorkflowValidationThenStandaloneReuse(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	f.setenv("SWARM_MOCK_DEVELOPER_CMD", "printf fresh > fresh-workflow.txt")
 	f.resolverRunner = func(name string, cfg *contract.SwarmConfig, local bool) (agent.Runner, error) {
@@ -481,6 +486,7 @@ func TestIssue83FreshWorkflowValidationThenStandaloneReuse(t *testing.T) {
 }
 
 func TestIssue83InteractiveMetadataCannotSatisfyHumanGate(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	cfgPath := filepath.Join(f.root, ".swarm", "config.yaml")
 	cfg, err := os.ReadFile(cfgPath)
@@ -519,6 +525,7 @@ func TestIssue83InteractiveMetadataCannotSatisfyHumanGate(t *testing.T) {
 }
 
 func TestIssue83AgentOnlyPlanningRejectsInteractiveStage(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	path := filepath.Join(f.root, ".swarm", "config.yaml")
 	raw, err := os.ReadFile(path)

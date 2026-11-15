@@ -439,6 +439,7 @@ func TestIssueEditAllowHarnessChangesApproval(t *testing.T) {
 
 // These regressions exercise the real REST serialization and CLI approval path.
 func TestIssueCreateGitHubNullLabels(t *testing.T) {
+	t.Parallel()
 	fake, tr := newFakeGitHubTracker(t)
 	_, err := tr.CreateIssue(context.Background(), "title", "body", nil)
 	if err == nil || !strings.Contains(err.Error(), "422") || !strings.Contains(err.Error(), "properties/labels nil is not an array") {
@@ -450,12 +451,15 @@ func TestIssueCreateGitHubNullLabels(t *testing.T) {
 }
 
 func TestIssueCreateReadyGitHubLabels(t *testing.T) {
+	t.Parallel()
 	checkIssueCreateGitHubLabels(t, true, false)
 }
 func TestIssueCreateDraftGitHubLabels(t *testing.T) {
+	t.Parallel()
 	checkIssueCreateGitHubLabels(t, false, false)
 }
 func TestIssueCreateReadyGitHubDenied(t *testing.T) {
+	t.Parallel()
 	checkIssueCreateGitHubLabels(t, true, true)
 }
 

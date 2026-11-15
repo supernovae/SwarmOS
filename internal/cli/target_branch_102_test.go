@@ -50,6 +50,7 @@ func retargetIssue102(t *testing.T, root string, number int, branch string) {
 }
 
 func TestIssue102LocalApprovalMatrix(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"default", "config", "override", "missing"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -161,6 +162,7 @@ func TestIssue102LocalApprovalMatrix(t *testing.T) {
 }
 
 func TestIssue102LocalRetargetBeforeMutation(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent")
 	before, _ := json.Marshal(f.state(t, issue))
 	retargetIssue102(t, f.root, number, "other-102")
@@ -176,6 +178,7 @@ func TestIssue102LocalRetargetBeforeMutation(t *testing.T) {
 }
 
 func TestIssue102DeletedRemoteTargetRefusesCachedSubmissionAndPR(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent", func(f *cliFixture) {
 		prGit(t, f.root, "branch", "release")
 		path := filepath.Join(f.root, ".swarm/config.yaml")
@@ -208,6 +211,7 @@ func TestIssue102DeletedRemoteTargetRefusesCachedSubmissionAndPR(t *testing.T) {
 }
 
 func TestIssue102PRTracksReleaseNotDefault(t *testing.T) {
+	t.Parallel()
 	f, issue, number := submittedPRFixture(t, "agent", func(f *cliFixture) {
 		prGit(t, f.root, "branch", "release")
 		path := filepath.Join(f.root, ".swarm/config.yaml")
@@ -238,6 +242,7 @@ func TestIssue102PRTracksReleaseNotDefault(t *testing.T) {
 }
 
 func TestTester102ExplicitTargetGrantRoundTrip(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"main", "release", "override", "unset"} {
 		t.Run(scenario, func(t *testing.T) {
 			setup := func(f *cliFixture) {
@@ -418,6 +423,7 @@ func TestTester102ExplicitTargetGrantRoundTrip(t *testing.T) {
 }
 
 func TestIssue102LegacyGrantGolden(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "grant.json")
 	record := &harnessGrantRecord{Verdict: "granted", Issue: 102, PR: 7, Base: "base", CandidateHead: "head", ApprovedBase: "approved", TaskDigest: "task", PolicyDigest: "policy", PolicyTreeDigest: "tree"}
 	if err := writeHarnessGrantFile(path, record); err != nil {
@@ -462,6 +468,7 @@ func (tr *issue102LateRetargetTracker) GetPullRequest(ctx context.Context, n int
 }
 
 func TestIssue102ExplicitReleaseReapprovalAndRebase(t *testing.T) {
+	t.Parallel()
 	for _, lateRetarget := range []bool{false, true} {
 		t.Run(strconv.FormatBool(lateRetarget), func(t *testing.T) {
 			f, issue, number := submittedPRFixture(t, "none", func(f *cliFixture) {
@@ -530,6 +537,7 @@ func TestIssue102ExplicitReleaseReapprovalAndRebase(t *testing.T) {
 }
 
 func TestIssue102DistinctTargetPolicyAndBundle(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	write := func(path, body string) {
 		t.Helper()

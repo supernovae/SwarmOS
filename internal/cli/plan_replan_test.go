@@ -448,6 +448,7 @@ func TestCLIStatusNoPendingPlanReview(t *testing.T) {
 }
 
 func TestPlanReviewRoundDisplay(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"", "auto", "agent", "interactive"} {
 		for _, count := range []int{0, 2} {
 			t.Run("no-pending/"+mode+strconv.Itoa(count), func(t *testing.T) {
@@ -520,6 +521,7 @@ func TestPlanReviewRoundDisplay(t *testing.T) {
 }
 
 func TestPlanReviewRoundFailureEnvelope(t *testing.T) {
+	t.Parallel()
 	for _, direct := range []bool{true, false} {
 		cmd := &cobra.Command{}
 		var out bytes.Buffer
@@ -543,6 +545,7 @@ func TestPlanReviewRoundFailureEnvelope(t *testing.T) {
 }
 
 func TestPendingPlanReviewWithoutSchedulingReason(t *testing.T) {
+	t.Parallel()
 	st := &lease.IssueState{PendingPlanReview: &lease.PlanRejection{
 		ReviewID: "art-rejected", Version: 3, Digest: "digest",
 	}}

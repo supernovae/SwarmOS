@@ -8,6 +8,7 @@ import (
 )
 
 func TestParseValidationShard(t *testing.T) {
+	t.Parallel()
 	for in, want := range map[string][2]int{"": {0, 0}, "1/3": {1, 3}, "3/3": {3, 3}, "1/1": {1, 1}} {
 		i, n, err := parseValidationShard(in)
 		if err != nil || i != want[0] || n != want[1] {

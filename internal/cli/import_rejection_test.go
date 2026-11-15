@@ -42,6 +42,7 @@ func TestCLIStatusImportRejection(t *testing.T) {
 // TestImportRejectionReasonWithPatch, TestDeveloperOutputImportRecoveryGuidance,
 // and the completed-role guidance tests in internal/workflow.
 func TestCLIImportRecoveryCommands(t *testing.T) {
+	t.Parallel()
 	for _, route := range []struct{ group, number string }{{"issue", "7"}, {"pr", "42"}} {
 		t.Run(route.group, func(t *testing.T) {
 			for _, flag := range []string{"instructions", "developer-instructions", "tester-instructions"} {

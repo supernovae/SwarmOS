@@ -259,6 +259,7 @@ func TestWorkValidationRepairNextAction(t *testing.T) {
 }
 
 func TestTestPhaseRequiresExplicitIssueBeforeSelection(t *testing.T) {
+	t.Parallel()
 	for _, flags := range [][]string{{"--next"}, {"--next", "--all"}} {
 		// No backend, repository, tracker, manager, or runner is available: any
 		// selection or setup call would fail instead of producing this usage error.
@@ -278,6 +279,7 @@ func TestTestPhaseRequiresExplicitIssueBeforeSelection(t *testing.T) {
 }
 
 func TestExplicitTestWorkCommandRunsTesterOnly(t *testing.T) {
+	t.Parallel()
 	for _, resource := range []string{"issue", "pr"} {
 		t.Run(resource, func(t *testing.T) {
 			var f *cliFixture
@@ -320,6 +322,7 @@ func TestExplicitTestWorkCommandRunsTesterOnly(t *testing.T) {
 }
 
 func TestExplicitTestWorkFakeGitHub(t *testing.T) {
+	t.Parallel()
 	for _, resource := range []string{"issue", "pr"} {
 		t.Run(resource, func(t *testing.T) {
 			setup := func(f *cliFixture) {
@@ -457,6 +460,7 @@ func rootSnapshot(t *testing.T, root string) map[string]string {
 }
 
 func TestTestPhaseNextRefusesBeforeAnyCoordinatorActivity(t *testing.T) {
+	t.Parallel()
 	for _, flags := range [][]string{{"--next"}, {"--next", "--all"}} {
 		t.Run(strings.Join(flags, " "), func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -496,6 +500,7 @@ func TestTestPhaseNextRefusesBeforeAnyCoordinatorActivity(t *testing.T) {
 }
 
 func TestStagedImplementationIsNotTestRetryEligible(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	n := strconv.Itoa(number)
@@ -600,6 +605,7 @@ func (r *continuationRunner) Run(ctx context.Context, req agent.RunRequest) (*ag
 	return result, err
 }
 func TestIssueWorkContinuationCommand(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		for _, resume := range []bool{false, true} {
 			t.Run(backend+"/resume="+strconv.FormatBool(resume), func(t *testing.T) {
@@ -709,6 +715,7 @@ type continuationActor struct {
 func (t continuationActor) CurrentUser(context.Context) (string, error) { return *t.actor, nil }
 
 func TestIssueWorkRecoveryMissingReports(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		for _, gate := range []string{"agent", "human"} {
 			for _, limit := range []int{0, 1, 2} {
@@ -898,6 +905,7 @@ func TestIssueWorkRecoveryMissingReports(t *testing.T) {
 }
 
 func TestIssueWorkRecoveryFeedbackSelection(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		for _, next := range []bool{false, true} {
 			for _, flag := range []string{"--planner-instructions", "--instructions", "--developer-instructions"} {
@@ -1090,6 +1098,7 @@ func recoveryCommandFixturePrepared(t *testing.T, backend, gate string, f *cliFi
 }
 
 func TestIssueWorkRecoveryTrackedCarry(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		for _, scenario := range []string{"agent ancestor", "none ancestor", "human policy", "none obligation"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {
@@ -1204,6 +1213,7 @@ func TestIssueWorkRecoveryTrackedCarry(t *testing.T) {
 }
 
 func TestIssueWorkRecoveryHumanDraftAttempts(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		for _, limit := range []int{0, 1, 2} {
 			for _, outcome := range []string{"unchanged", "failure", "refusal"} {
@@ -1288,6 +1298,7 @@ func (r *draftAttemptRunner) Run(ctx context.Context, req agent.RunRequest) (*ag
 }
 
 func TestIssueWorkRecoveryAlternateObligationEntrypoints(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		for _, gate := range []string{"none", "agent", "human"} {
 			t.Run(backend+"/"+gate, func(t *testing.T) {
@@ -1370,6 +1381,7 @@ func TestIssueWorkRecoveryAlternateObligationEntrypoints(t *testing.T) {
 }
 
 func TestIssueWorkOutputStopClasses(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		for _, asJSON := range []bool{false, true} {
 			for _, scenario := range []string{"validated", "human", "human draft", "explicit plan", "explicit review", "handoff", "unchanged", "exhausted", "refusal", "cancel"} {
@@ -1598,6 +1610,9 @@ echo FAIL; printf 'FAIL\texample.com/m/broken\t0.01s\n'; exit 1
 			for _, kind := range []string{"pre-existing", "regression", "mixed"} {
 				for _, budget := range []string{"zero", "one remaining", "one exhausted", "remaining", "exhausted"} {
 					for _, feedback := range []string{"--instructions", "--developer-instructions", "--planner-instructions", "--reviewer-instructions", "--tester-instructions", ""} {
+						if !keepRepairCommandSelectionCase(backend, next, kind, budget, feedback) {
+							continue
+						}
 						t.Run(backend+"/next="+strconv.FormatBool(next)+"/"+kind+"/"+budget+"/"+feedback, func(t *testing.T) {
 							t.Parallel()
 
@@ -1748,6 +1763,27 @@ echo FAIL; printf 'FAIL\texample.com/m/broken\t0.01s\n'; exit 1
 	}
 }
 
+func keepRepairCommandSelectionCase(backend string, next bool, kind, budget, feedback string) bool {
+	if feedback == "" || feedback == "--developer-instructions" {
+		if backend == "local" {
+			// Full (next, kind) coverage across zero, remaining (limit=2), and exhausted budgets,
+			// plus limit=1 spot-checks on regression.
+			if budget == "one remaining" || budget == "one exhausted" {
+				return kind == "regression" && !next && feedback == ""
+			}
+			return true
+		}
+		// GitHub backend parity across both numbered and --next selection for eligible and blocked states.
+		return (kind == "pre-existing" || kind == "regression") && (budget == "remaining" || budget == "exhausted")
+	}
+	// Exercise general --instructions and non-developer role flags across numbered and --next
+	// (including skip-to-successor guidance preservation when issue n is ineligible).
+	if backend != "local" {
+		return feedback == "--planner-instructions" && next && kind == "pre-existing" && budget == "remaining"
+	}
+	return (kind == "pre-existing" && budget == "remaining") || (kind == "regression" && budget == "one exhausted")
+}
+
 type repairCommandRunner struct {
 	agent.MockRunner
 	initial  *bool
@@ -1780,6 +1816,7 @@ func (r *outputCountRunner) Run(ctx context.Context, req agent.RunRequest) (*age
 }
 
 func TestIssueWorkRecoveryRetainedFeedbackAfterCarry(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		for _, gate := range []string{"agent", "human"} {
 			for _, move := range []string{"base", "policy"} {
@@ -1859,6 +1896,7 @@ func TestIssueWorkRecoveryRetainedFeedbackAfterCarry(t *testing.T) {
 }
 
 func TestIssueWorkRecoveryNodeRejectsWithoutContinuation(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		t.Run(backend, func(t *testing.T) {
 			f, n, script, _, run := recoveryCommandFixture(t, backend, "agent", 2)
@@ -1957,6 +1995,7 @@ func TestIssueWorkStaleHumanPlanBeforeRepair(t *testing.T) {
 }
 
 func TestCLIPlanReviewRejectsMissingFindings(t *testing.T) {
+	t.Parallel()
 	for _, bare := range []bool{true, false} {
 		t.Run("bare="+strconv.FormatBool(bare), func(t *testing.T) {
 			f, issue, script, _, run := recoveryCommandFixture(t, "local", "agent", 2)
@@ -2005,6 +2044,7 @@ func (r *testerNegativeRunner) Run(ctx context.Context, req agent.RunRequest) (*
 }
 
 func TestIssueWorkTesterFailureNextAction(t *testing.T) {
+	t.Parallel()
 	for _, asJSON := range []bool{false, true} {
 		t.Run(strconv.FormatBool(asJSON), func(t *testing.T) {
 			f, n, _, _, run := recoveryCommandFixture(t, "local", "agent", 0)

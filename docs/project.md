@@ -239,6 +239,15 @@ For Go repositories, `swarm repo init` writes the `fmt`, `build`, `test`, and `l
 
 `swarm repo doctor` compares the `run:` steps in `.github/workflows/*.yml` and `*.yaml` with these checks. When a workflow runs gofmt, `go vet`, staticcheck, golangci-lint, eslint, `prettier --check`, ruff, `black --check`, `cargo fmt --check`, or `cargo clippy` and no required check runs the same tool, doctor prints a `WARN` naming the workflow and command, with a suggested entry you can paste into `required_checks`. These warnings never fail doctor, and doctor never edits the policy: adding a check stays a maintainer change on the default branch. Doctor reads the commands as written. It does not follow `make` targets, scripts, reusable workflows, or `${{ }}` expressions, so a tool that only runs inside one of those is not reported.
 
+### Scoping checks by diff and tier
+
+Large repositories can keep local agent feedback fast without sacrificing full PR coverage in CI by adding optional `tier`, `scope`, and `paths` fields to entries in `required_checks`:
+
+- **`tier: local | ci`** (defaults to `local`): `local` checks run during task work, `issue validate`, `issue submit`, and CI; `ci` checks are deferred during local task loops and run in `swarm repo validate` (CI).
+- **`scope: all | paths | affected`** (defaults to `all`):
+  - `paths` runs the check only when at least one modified file matches `paths` (using the same `**` glob syntax as `protected_paths`).
+  - `affected` narrows Go `build`, `vet`, `staticcheck`, and `test` commands to changed Go packages plus their direct (one-hop) importers in the module, and skips Go checks altogether on documentation-only changes while still enforcing `protected_paths`.
+
 ### Build caches and who can write them
 
 SwarmOS keeps compiled output between runs so agents and validation do not rebuild from scratch every time. It owns these caches itself, under your user cache directory (for example `~/.cache` on Linux), and never uses your own `GOCACHE` or ccache directory. Each repository gets its own key, a hash of its Git directory, so every worktree of one repository shares a cache and unrelated repositories never do.
@@ -256,7 +265,7 @@ Validation runs candidate code, which is untrusted, and build caches do not veri
 
 - **Warm-up.** On Bubblewrap with overlay support, the first validation at a new approved base commit warms recognized Go commands on a clean checkout of that base, with the validator cache writable. Go test commands use an empty test selection (`-run '^$'`); Go build and vet commands run unchanged, and other commands are skipped. A `.warm-<base commit>` file in the repository's cache directory records that this ran. A failing base check is noted in the report and never changes the candidate's result.
 - **Bubblewrap.** Candidate checks see the warmed cache read-only, with a temporary write layer that is thrown away when the check exits.
-- **Codex native and host checks.** These include trusted-local execution and `swarm repo validate` on CI runners. They cannot layer a cache, so candidate checks get a fresh scratch cache. No warm-up runs there, because nothing would read the cache it writes.
+- **Codex native and host checks.** These include trusted-local execution and `swarm repo validate` on CI runners. Checks within a single validation run share a disposable scratch cache—priming Go build artifacts once before running concurrent Go checks—and discard that cache when validation finishes.
 - **OCI.** Validation and worker containers get no build cache.
 
 If a cache directory cannot be prepared safely, for example because it is a symlink, writable by other users, or inside the worktree, that run uses a fresh scratch cache instead. The older validator cache at `swarm/go-build/<repository key>` moves to `swarm/validate-build/<repository key>/go` the first time validation runs.

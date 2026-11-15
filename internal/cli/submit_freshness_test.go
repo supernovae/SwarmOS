@@ -38,6 +38,7 @@ func freshnessWrite(t *testing.T, root, name, contents string) {
 	}
 }
 func TestSubmitFreshnessOutcomes(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"unchanged", "clean", "conflicts", "skipped", "zero-count"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
@@ -97,6 +98,7 @@ func TestSubmitFreshnessOutcomes(t *testing.T) {
 	}
 }
 func TestSubmitFreshnessParser(t *testing.T) {
+	t.Parallel()
 	tree := strings.Repeat("a", 40)
 	for _, tc := range []struct {
 		data string
@@ -115,6 +117,7 @@ func TestSubmitFreshnessParser(t *testing.T) {
 	}
 }
 func TestSubmitFreshnessGuidance(t *testing.T) {
+	t.Parallel()
 	f := submissionFreshness{Status: "conflicts", ConflictedPaths: []string{"a\n`<b>"}}
 	for _, tc := range []struct {
 		opts    RootOptions
@@ -292,6 +295,7 @@ func TestSubmitFreshnessConflicts(t *testing.T) {
 }
 
 func TestSubmitFreshnessOriginSelection(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	g := func(args ...string) string { return freshnessGit(t, root, args...) }
 	g("init", "-b", "main")

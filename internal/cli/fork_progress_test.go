@@ -13,6 +13,7 @@ import (
 )
 
 func TestForkProgressPrinter(t *testing.T) {
+	t.Parallel()
 	var out bytes.Buffer
 	print := forkProgressPrinter(&out)
 	for _, status := range []string{"posted", "waiting", "accepted", "rejected"} {
@@ -31,6 +32,7 @@ func TestForkProgressPrinter(t *testing.T) {
 }
 
 func TestForkProgressConcurrentWorkflowOutput(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	var out bytes.Buffer
 	cmd.SetErr(&out)

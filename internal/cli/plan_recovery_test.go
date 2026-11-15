@@ -20,6 +20,7 @@ import (
 )
 
 func TestPlanReviewRecovery(t *testing.T) {
+	t.Parallel()
 	st := &lease.IssueState{PendingPlanReview: &lease.PlanRejection{}, NextPhaseReason: "CHANGES_REQUESTED"}
 	st.Lease.IssueNumber = 12
 	opts := &RootOptions{Repo: "owner/repo", RepoRoot: "a'b", Fork: true, ForkRemote: "fork"}
@@ -44,6 +45,7 @@ func TestPlanReviewRecovery(t *testing.T) {
 }
 
 func TestCheckpointRecoveryPlanCLISelectors(t *testing.T) {
+	t.Parallel()
 	for _, args := range [][]string{
 		{"1", "--phase", "all", "--plan-checkpoint"},
 		{"1", "--phase", "plan", "--expected-head", strings.Repeat("a", 40)},

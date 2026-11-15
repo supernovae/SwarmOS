@@ -20,6 +20,7 @@ import (
 )
 
 func TestStorageMaintenanceDiagnostics(t *testing.T) {
+	t.Parallel()
 	const target = 40 << 30
 	for _, tc := range []struct {
 		name    string
@@ -64,6 +65,7 @@ func TestStorageMaintenanceDiagnostics(t *testing.T) {
 // The suggested preview must run on this host: --all-repos fails when no
 // repository is registered, and looking must not create the registry.
 func TestStorageCleanupCommandMatchesRegistry(t *testing.T) {
+	t.Parallel()
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	dir := t.TempDir()
@@ -87,6 +89,7 @@ func TestStorageCleanupCommandMatchesRegistry(t *testing.T) {
 	}
 }
 func TestStorageMaintenanceLifecycleAndFailureIsolation(t *testing.T) {
+	t.Parallel()
 	for _, parent := range []string{"issue", "pr", "repo", "node"} {
 		for _, name := range []string{"work", "stage", "validate", "status", "run", "cleanup"} {
 			t.Run(parent+"/"+name, func(t *testing.T) {
@@ -133,6 +136,7 @@ func TestStorageMaintenanceLifecycleAndFailureIsolation(t *testing.T) {
 }
 
 func TestStorageMaintenanceLowSpaceThresholds(t *testing.T) {
+	t.Parallel()
 	cfg := node.DefaultStorageSettings()
 	for _, tc := range []struct {
 		free, total uint64
@@ -158,6 +162,7 @@ func (r statusRetentionCounter) WithRetention(context.Context, storage.Repositor
 }
 
 func TestStorageMaintenanceRepeatedStatus(t *testing.T) {
+	t.Parallel()
 	for _, cached := range []bool{false, true} {
 		t.Run(fmt.Sprint(cached), func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "maintenance")

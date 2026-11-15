@@ -24,6 +24,7 @@ import (
 )
 
 func TestIssue324NoopRetry(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	remote := filepath.Join(t.TempDir(), "origin.git")
 	prGit(t, f.root, "init", "--bare", "--initial-branch=main", remote)
@@ -90,6 +91,7 @@ func TestIssue324NoopRetry(t *testing.T) {
 }
 
 func TestIssue324RecordedImplementationResume(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"local", "github"} {
 		t.Run(backend, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -186,6 +188,7 @@ func (tr *issue324PublicationTracker) UpdateDraftPR(ctx context.Context, n int, 
 }
 
 func TestIssue324SubmitFailureDeniesResume(t *testing.T) {
+	t.Parallel()
 	for _, failure := range []string{"create error", "nil result", "update error"} {
 		t.Run(failure, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -229,6 +232,7 @@ func TestIssue324SubmitFailureDeniesResume(t *testing.T) {
 }
 
 func TestIssue324ForkReadOnlyConfiguration(t *testing.T) {
+	t.Parallel()
 	up := newUpstreamRemoteFixture(t)
 	f := newCLIFixture(t)
 	remote := filepath.Join(t.TempDir(), "origin.git")
@@ -345,6 +349,7 @@ func issue466Status(t *testing.T, raw string) issueStatus {
 }
 
 func TestIssue466ExpiredDeveloperStatus(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"completed", "missing time", "untrusted", "stale", "failed tester"} {
 		t.Run(mode, func(t *testing.T) {
 			f, n := issue466Fixture(t)
@@ -410,6 +415,7 @@ func TestIssue466ExpiredDeveloperStatus(t *testing.T) {
 }
 
 func TestIssue464StatusNextActionMatrix(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, reason, op string
 		args             []string
@@ -506,6 +512,7 @@ func TestIssue464StatusNextActionMatrix(t *testing.T) {
 }
 
 func TestIssue466WorkDryRunResume(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, claim, role string
 		phase             string
@@ -581,6 +588,7 @@ func TestIssue466WorkDryRunResume(t *testing.T) {
 }
 
 func TestIssue466InspectionReadOnly(t *testing.T) {
+	t.Parallel()
 	f, n := issue466Fixture(t)
 	wt := workspace.WorktreePath(f.root, n)
 	snapshot := func() string {

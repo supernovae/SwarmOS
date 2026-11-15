@@ -22,6 +22,7 @@ import (
 )
 
 func TestClaimBudgetGuidanceRetainsSelection(t *testing.T) {
+	t.Parallel()
 	for _, resource := range []string{"issue", "pr"} {
 		res := &workflow.WorkResult{HandedOffToPhase: "implement", ClaimBudgetPause: &workflow.ClaimBudgetPause{Reason: "paused for claim budget: 1h available, 3 renewals used, 0 remaining"}}
 		opts := &RootOptions{Repo: "owner/repo", RepoRoot: "/path with space", Fork: true, ForkRemote: "contributor"}

@@ -1145,3 +1145,57 @@ func TestWarmupCandidateOutcomesUnchanged(t *testing.T) {
 		}
 	}
 }
+
+func TestScratchGoCachePrimerSelectionAndOrdering(t *testing.T) {
+	if got := scratchGoCachePrimerIndex([]requiredCheckJob{
+		{name: "fmt", command: "gofmt -s -l ."},
+		{name: "lint", command: "go vet ./..."},
+		{name: "build", command: "go build ./..."},
+		{name: "test", command: "go test ./..."},
+	}); got != 2 {
+		t.Fatalf("primer index = %d, want 2 (go build ./...)", got)
+	}
+	if got := scratchGoCachePrimerIndex([]requiredCheckJob{
+		{name: "lint", command: "go vet ./..."},
+		{name: "test", command: "go test ./internal/cli"},
+	}); got != 0 {
+		t.Fatalf("primer index = %d, want 0 (go vet ./...)", got)
+	}
+	if got := scratchGoCachePrimerIndex([]requiredCheckJob{
+		{name: "cli", command: "go test ./internal/cli"},
+		{name: "core", command: "go test ./internal/lease"},
+	}); got != -1 {
+		t.Fatalf("primer index = %d, want -1 when only test checks exist", got)
+	}
+	if got := scratchGoCachePrimerIndex([]requiredCheckJob{
+		{name: "build", command: "go build ./..."},
+	}); got != -1 {
+		t.Fatalf("primer index = %d, want -1 for a single Go check", got)
+	}
+
+	codexCfg := &contract.SwarmConfig{DefaultAgent: "codex", Agents: map[string]contract.AgentConfig{"codex": {Harness: "codex"}}}
+	codexRunner := &checkRunner{
+		home:        t.TempDir(),
+		buildCaches: []sandbox.BuildCache{{Ecosystem: "go", EnvKey: "GOCACHE", Dir: t.TempDir(), Persistent: true}},
+		cfg:         codexCfg,
+		execution:   contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendNative},
+	}
+	if !codexRunner.usesScratchGoCache() {
+		t.Fatal("expected native Codex runner to use shared per-run scratch Go cache")
+	}
+
+	useCacheRoot(t)
+	repo := setupGitRepoForValidation(t)
+	commitRepoChange(t, repo, "go.mod", "module example.com/primertest\n\ngo 1.26\n")
+	commitRepoChange(t, repo, "main.go", "package primertest\nfunc Value() int { return 42 }\n")
+	commitRepoChange(t, repo, "p_test.go", "package primertest\nimport (\"os\"; \"path/filepath\"; \"testing\")\nfunc TestPrimedCache(t *testing.T) {\n\tentries, err := os.ReadDir(os.Getenv(\"GOCACHE\"))\n\tif err != nil || len(entries) == 0 {\n\t\tt.Fatalf(\"expected go build primer to populate GOCACHE before go test: entries=%d err=%v\", len(entries), err)\n\t}\n\t_ = filepath.Join\n}\n")
+	policy := "required_checks:\n  - name: test\n    command: 'go test -count=1 ./...'\n    timeout: 1m\n  - name: build\n    command: 'go build ./...'\n    timeout: 1m\nprotected_paths:\n  - .github/workflows/**\n"
+	base := commitPolicy(t, repo, policy)
+	report, err := Validate(t.Context(), repo, nil, ValidateOptions{CIMode: true, RunnerIsolated: true, BaseSHA: base, requiredCheckWorkers: 2})
+	if err != nil || !report.Passed {
+		t.Fatalf("Validate with primer failed: %+v, %v", report, err)
+	}
+	if len(report.CheckOutcomes) != 2 || report.CheckOutcomes[0].Name != "test" || report.CheckOutcomes[1].Name != "build" {
+		t.Fatalf("unexpected outcome policy order: %+v", report.CheckOutcomes)
+	}
+}

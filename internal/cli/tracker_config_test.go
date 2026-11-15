@@ -12,6 +12,7 @@ import (
 )
 
 func TestBackendFlagRemoved(t *testing.T) {
+	t.Parallel()
 	for _, prefix := range [][]string{nil, {"repo", "doctor"}, {"issue", "status"}} {
 		for _, flag := range [][]string{{"--backend", "local"}, {"--backend=github"}, {"--backend", "github", "--help"}, {"--help", "--backend=local"}} {
 			cmd := NewRootCmd()
@@ -46,6 +47,7 @@ func TestBackendFlagRemoved(t *testing.T) {
 }
 
 func TestTrackerConfigAuthority(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	opts := f.options(&RootOptions{RepoRoot: f.root})
 	tr, err := opts.resolveTracker(f.command(nil))
@@ -64,6 +66,7 @@ func TestTrackerConfigAuthority(t *testing.T) {
 }
 
 func TestTrackerConfigOverridesRegistry(t *testing.T) {
+	t.Parallel()
 	for _, configured := range []string{"local", "github"} {
 		t.Run(configured, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -95,6 +98,7 @@ func TestTrackerConfigOverridesRegistry(t *testing.T) {
 }
 
 func TestTrackerRecoveryCommandsOmitBackend(t *testing.T) {
+	t.Parallel()
 	opts := &RootOptions{Repo: "owner/repo", RepoRoot: "/path with space"}
 	for _, backend := range []string{"local", "github"} {
 		command := leaseReminderRenewCommand(opts, backend, 42)
@@ -109,6 +113,7 @@ func TestTrackerRecoveryCommandsOmitBackend(t *testing.T) {
 }
 
 func TestTrackerProjectionAndDoctorOutput(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	number := f.create(t, "agent")
 	f.must(t, "issue", "approve", strconv.Itoa(number))

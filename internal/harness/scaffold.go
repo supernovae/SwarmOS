@@ -833,6 +833,27 @@ func DecodeValidationSpec(data []byte) (*contract.ValidationSpec, error) {
 		if timeout, err := time.ParseDuration(check.Timeout); err != nil || timeout <= 0 {
 			return nil, fmt.Errorf("check %q requires a positive timeout", check.Name)
 		}
+		switch check.Tier {
+		case "", "all", "ci":
+		default:
+			return nil, fmt.Errorf("check %q has invalid tier %q; want \"all\" or \"ci\"", check.Name, check.Tier)
+		}
+		switch check.Scope {
+		case "", "always", "affected", "paths":
+		default:
+			return nil, fmt.Errorf("check %q has invalid scope %q; want \"always\", \"affected\", or \"paths\"", check.Name, check.Scope)
+		}
+		if check.Scope == "paths" && len(check.Paths) == 0 {
+			return nil, fmt.Errorf("check %q with scope \"paths\" requires at least one path pattern", check.Name)
+		}
+		if (check.Scope == "" || check.Scope == "always") && len(check.Paths) > 0 {
+			return nil, fmt.Errorf("check %q specifies paths without scope \"paths\" or \"affected\"", check.Name)
+		}
+		for _, p := range check.Paths {
+			if strings.TrimSpace(p) == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "../") {
+				return nil, fmt.Errorf("check %q paths must be nonempty repository-relative patterns", check.Name)
+			}
+		}
 		names[check.Name] = true
 	}
 	for _, path := range spec.ProtectedPaths {

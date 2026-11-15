@@ -34,6 +34,7 @@ import (
 //   - issue submit and pr submit run no agent review, so changes_requested is
 //     unreachable.
 func TestNextActionMatrix(t *testing.T) {
+	t.Parallel()
 	opts := &RootOptions{RepoRoot: "/repo"}
 	base := []string{"swarm", "--root", "/repo"}
 	argv := func(args ...string) []string { return append(append([]string(nil), base...), args...) }
@@ -163,6 +164,7 @@ func TestNextActionMatrix(t *testing.T) {
 }
 
 func TestNextActionLeavesOtherErrorsUnclassified(t *testing.T) {
+	t.Parallel()
 	c := stopContext{opts: &RootOptions{}, resource: "pr", number: 9}
 	for name, err := range map[string]error{
 		"nil":               nil,
@@ -191,6 +193,7 @@ func TestNextActionLeavesOtherErrorsUnclassified(t *testing.T) {
 }
 
 func TestNextActionArgvKeepsRepositorySelection(t *testing.T) {
+	t.Parallel()
 	root := "/work/it's a repo"
 	fork := &RootOptions{Repo: "acme/widgets", RepoRoot: root, Fork: true, ForkRemote: "my fork"}
 	upstream := &RootOptions{RepoRoot: root, ForkRemote: workspace.DefaultForkRemote}
@@ -496,6 +499,7 @@ func TestPRWorkGitHubBlockersNextAction(t *testing.T) {
 }
 
 func TestTesterRetryNextActionPreservesSelections(t *testing.T) {
+	t.Parallel()
 	for _, resource := range []string{"issue", "pr"} {
 		opts := &RootOptions{Repo: "org/repo", RepoRoot: "/checkout", UpstreamRemote: "upstream"}
 		c := stopContext{opts: opts, resource: resource, number: 42}
@@ -516,6 +520,7 @@ func TestTesterRetryNextActionPreservesSelections(t *testing.T) {
 }
 
 func TestNextActionHumanMessageBoundary(t *testing.T) {
+	t.Parallel()
 	c := stopContext{opts: &RootOptions{RepoRoot: "/repo with 'quotes'"}, resource: "issue", number: 7}
 	cause := &lease.HumanPlanApprovalError{IssueNumber: 7}
 	err := c.stop(cause)
@@ -536,6 +541,7 @@ func TestNextActionHumanMessageBoundary(t *testing.T) {
 }
 
 func TestNextActionUnknownIdentity(t *testing.T) {
+	t.Parallel()
 	for _, cause := range []error{workflow.ErrValidationRepairExhausted, workflow.ErrPlanReviewRejected, workflow.ErrPreExistingFailures} {
 		if got := (stopContext{resource: "issue"}).classify(cause); got != nil {
 			t.Fatalf("unknown issue: %+v", got)
@@ -544,6 +550,7 @@ func TestNextActionUnknownIdentity(t *testing.T) {
 }
 
 func TestNextActionNoReadyCarrier(t *testing.T) {
+	t.Parallel()
 	cause := workflow.ErrValidationRepairExhausted
 	c := stopContext{opts: &RootOptions{Repo: "acme/repo", RepoRoot: "/a 'repo'"}, resource: "issue", number: 19}
 	e := &noReadyError{cause: cause, action: c.classify(cause), text: "Issue #19: automatic allowance exhausted"}

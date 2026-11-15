@@ -20,6 +20,7 @@ const childPrompt = "PRIVATE_PROMPT_MARKER_291"
 const childEnv = "PRIVATE_ENV_VALUE_291"
 
 func TestProgressHostileChildHelper(t *testing.T) {
+	t.Parallel()
 	if !strings.Contains(strings.Join(os.Args, " "), "--hostile-progress-child") {
 		return
 	}
@@ -56,6 +57,7 @@ func (r *hostileOutputRunner) Run(ctx context.Context, req agent.RunRequest) (*a
 	return result, err
 }
 func TestProgressContainsOnlyMetadataChildOutput(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{"work", "review", "submit"} {
 		t.Run(path, func(t *testing.T) {
 			f := newCLIFixture(t)

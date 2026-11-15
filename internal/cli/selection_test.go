@@ -69,6 +69,7 @@ func issueNumbers(issues []*tracker.Issue) []int {
 	return out
 }
 func TestReadyIssueOrdering(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name        string
 		input, want []int
@@ -103,6 +104,7 @@ func TestReadyIssueOrdering(t *testing.T) {
 	}
 }
 func TestReadyIssueOrderingReadFailure(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"parent", "type", "list", "missing", "duplicate", "nil"} {
 		t.Run(mode, func(t *testing.T) {
 			f := &orderingTracker{parents: map[int]int{10: 100, 30: 100}, children: map[int][]*tracker.Issue{100: numbered(30, 10)}, calls: map[int]int{}}
@@ -519,6 +521,7 @@ func TestOverlapSelectionSnapshot(t *testing.T) {
 }
 
 func TestSelectorRefusesCommandOnlyTestBeforeResolution(t *testing.T) {
+	t.Parallel()
 	// nil dependencies make any target resolution, tracker, lease, or agent
 	// activity fail immediately; phase validation must be the first operation.
 	_, err := pullNextReadyIssue(t.Context(), nil, nil, true, workflow.WorkOptions{Phase: "test"}, 0)
@@ -528,6 +531,7 @@ func TestSelectorRefusesCommandOnlyTestBeforeResolution(t *testing.T) {
 }
 
 func TestSelectorRefusesCommandOnlyTestWithLiveDependencies(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	f.must(t, "issue", "approve", strconv.Itoa(f.create(t, "none")))
 	tr := &untouchedSelectionTracker{}
@@ -548,6 +552,7 @@ func TestSelectorRefusesCommandOnlyTestWithLiveDependencies(t *testing.T) {
 }
 
 func TestDecompositionNextSelectionEntryPoints(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"claim", "work", "node"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -590,6 +595,7 @@ func TestDecompositionNextSelectionEntryPoints(t *testing.T) {
 }
 
 func TestNextSelectionHumanPlanAdvice(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"work", "claim", "node"} {
 		t.Run(mode, func(t *testing.T) {
 			_, n, _, _, run := recoveryCommandFixture(t, "local", "human", 1)
@@ -621,6 +627,7 @@ func TestNextSelectionHumanPlanAdvice(t *testing.T) {
 }
 
 func TestParentLabelOrdering(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	ctx := context.Background()
 	parent, err := f.tracker.CreateIssue(ctx, "Parent", "", []string{tracker.ParentLabel})
@@ -849,6 +856,7 @@ func selectFixtureContext(ctx context.Context, t *testing.T, f *cliFixture, stor
 	return result, diagnostics.String(), e
 }
 func TestSelectionBatchCount(t *testing.T) {
+	t.Parallel()
 	for _, count := range []int{1, 10} {
 		t.Run(strconv.Itoa(count), func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -895,6 +903,7 @@ func (s selectionArchivedStore) Load(ctx context.Context, n int) ([]byte, string
 }
 
 func TestSelectionBatchEquivalence(t *testing.T) {
+	t.Parallel()
 	t.Run("ordinary states", func(t *testing.T) {
 		var wantNum int
 		var wantOverlap *overlapSelection
@@ -954,6 +963,7 @@ func TestSelectionBatchEquivalence(t *testing.T) {
 	})
 }
 func TestSelectionBatchSnapshotFallback(t *testing.T) {
+	t.Parallel()
 	for _, failure := range []error{errors.New("inventory output limit exceeded"), errors.New("unsupported state snapshot"), errors.New("budget exceeded"), errors.New("fetch failed"), errors.New("closed issue object unreadable"), context.Canceled} {
 		t.Run(failure.Error(), func(t *testing.T) {
 			f := newCLIFixture(t)
@@ -968,6 +978,7 @@ func TestSelectionBatchSnapshotFallback(t *testing.T) {
 	}
 }
 func TestSelectionBatchClaimRace(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	first := f.createTouching(t, "docs/first.md")
 	second := f.createTouching(t, "docs/second.md")
@@ -1117,6 +1128,7 @@ func editSelectionState(t *testing.T, f *cliFixture, n int, edit func(*lease.Iss
 
 // Paired fixtures exercise filtering and blocked diagnostics before any eligible candidate.
 func TestSelectionBatchEquivalenceEligibility(t *testing.T) {
+	t.Parallel()
 	for _, noReady := range []bool{false, true} {
 		var wantNum int
 		var wantOverlap *overlapSelection
@@ -1214,6 +1226,7 @@ func TestSelectionBatchEquivalenceEligibility(t *testing.T) {
 	}
 }
 func TestSelectionBatchCancellation(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	f.createTouching(t, "docs/test.md")
 	s := selectionFixtureStore(t, f)
@@ -1241,6 +1254,7 @@ func (s *selectionFailLoadStore) Load(ctx context.Context, n int) ([]byte, strin
 	return s.Store.Load(ctx, n)
 }
 func TestSelectionBatchSnapshotFallbackRequestedLoadError(t *testing.T) {
+	t.Parallel()
 	f := newCLIFixture(t)
 	n := f.createTouching(t, "docs/change.md")
 	s := selectionFixtureStore(t, f)

@@ -11,6 +11,7 @@ import (
 )
 
 func TestForkRequestStatusHelpAndArguments(t *testing.T) {
+	t.Parallel()
 	for index, args := range [][]string{
 		{"fork-coordinator", "request-status", "--help"},
 		{"--fork", "fork-coordinator", "request-status"},
@@ -50,6 +51,7 @@ func TestForkRequestStatusHelpAndArguments(t *testing.T) {
 }
 
 func TestForkRequestStatusStateOnly(t *testing.T) {
+	t.Parallel()
 	f := newUpstreamRemoteFixture(t)
 	root := f.aliceClone("request-status")
 	body, err := fork.FormatRequestComment(lease.ForkRequest{Operation: "acquire", IssueNumber: 42, ForkRepo: "alice/swarm"})

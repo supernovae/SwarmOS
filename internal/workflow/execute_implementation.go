@@ -131,7 +131,7 @@ func (r *workRun) developerRound(round int, targets []string) (paused bool, err 
 	if err := r.check(); err != nil {
 		return false, err
 	}
-	devRun, err := devRunner.Run(r.ctx, agent.RunRequest{CheckImport: r.checkImport("developer"), PreserveRejected: r.preserveRejected("developer"), Agent: developer, Role: "developer", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, r.st, r.opts.PRNumber), OperatorInstructions: r.opts.instructionsFor("developer"), Dependencies: r.deps})
+	devRun, err := r.attemptRunner(devRunner).Run(r.ctx, agent.RunRequest{CheckImport: r.checkImport("developer"), PreserveRejected: r.preserveRejected("developer"), Agent: developer, Role: "developer", Mode: r.mode, WorktreePath: r.wtPath, SystemPrompt: ".swarm/active/SYSTEM_PROMPT.md", TaskPrompt: revisionTaskPrompt(devPrompt, r.st, r.opts.PRNumber), OperatorInstructions: r.opts.instructionsFor("developer"), Dependencies: r.deps})
 	reservationID := r.repairReservationID
 	r.repairReservationID = ""
 	if settleErr := r.settleRetry(reservationID, devRun, err); settleErr != nil {

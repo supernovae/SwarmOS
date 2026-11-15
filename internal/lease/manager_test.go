@@ -2795,3 +2795,73 @@ func TestIssue505ForkReleaseRequiresApproval(t *testing.T) {
 	}
 	issue505Unchanged(t, m, tr, iss.Number, before, current.Labels)
 }
+
+func TestAttemptDiagnosticLifecycle(t *testing.T) {
+	m, tr, issue := testManager(t)
+	ctx := t.Context()
+	st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: st.Lease.ClaimID, Kind: "import", Paths: []string{".swarm/active/DEV_NOTES.md"}}
+	record := func(role string, d AttemptDiagnostic) *IssueState {
+		t.Helper()
+		st, err := m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", role, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	st = record("developer", d)
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded IssueState
+	if err = json.Unmarshal(raw, &decoded); err != nil || !reflect.DeepEqual(decoded.AttemptDiagnostics, st.AttemptDiagnostics) {
+		t.Fatal("round trip", err)
+	}
+	bad := d
+	bad.TaskDigest = "different"
+	if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", bad); !errors.Is(err, ErrClaimFence) {
+		t.Fatal("task fence", err)
+	}
+	bad = d
+	bad.ClaimID = "successor"
+	if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", bad); !errors.Is(err, ErrClaimFence) {
+		t.Fatal("claim fence", err)
+	}
+	st = record("tester", AttemptDiagnostic{TaskDigest: d.TaskDigest, ClaimID: d.ClaimID, Kind: "timeout", Elapsed: time.Second})
+	art := contract.Artifact{Type: contract.ArtifactImplementation, Producer: "mock:developer", Summary: "accepted implementation", Body: "accepted"}
+	if _, err = m.UpdateArtifact(ctx, issue.Number, "local-dev", contract.Artifact{Type: contract.ArtifactImplementation, IssueNumber: issue.Number + 1}); err == nil {
+		t.Fatal("expected failed artifact")
+	}
+	st, err = m.GetCurrentState(ctx, issue.Number)
+	if err != nil || len(st.AttemptDiagnostics) != 2 {
+		t.Fatal("failed write cleared", err)
+	}
+	st, err = m.UpdateArtifact(ctx, issue.Number, "local-dev", art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.AttemptDiagnostics["developer"]; ok {
+		t.Fatal("accepted artifact retained diagnostic")
+	}
+	if _, ok := st.AttemptDiagnostics["tester"]; !ok {
+		t.Fatal("another role cleared")
+	}
+	record("developer", d)
+	if _, err = tr.UpdateIssueBody(ctx, issue.Number, strings.ReplaceAll(testWorkUnit(), "Harden coordination state", "Changed objective")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.Release(ctx, issue.Number, "local-dev", "WorkUnit changed"); err != nil {
+		t.Fatal(err)
+	}
+	st, err = m.ApproveTask(ctx, issue.Number, "local-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.AttemptDiagnostics) != 0 {
+		t.Fatal("reapproval retained diagnostic")
+	}
+}

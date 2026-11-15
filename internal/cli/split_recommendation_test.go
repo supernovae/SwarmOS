@@ -172,6 +172,9 @@ func TestIssueWorkStopsOnSplitRecommendation(t *testing.T) {
 		t.Fatalf("split stop should not suggest plan review:\n%s", out)
 	}
 	assertNoSplitProgress(t, f.state(t, number))
+	if f.state(t, number).Lease.Status != "released" {
+		t.Fatal("maintainer stop retained claim")
+	}
 
 	// Resuming with the recorded plan stops again, and JSON reports it.
 	raw := f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false", "--json")
@@ -186,6 +189,11 @@ func TestIssueWorkStopsOnSplitRecommendation(t *testing.T) {
 		t.Fatalf("issue work JSON: %s (%v)", raw, err)
 	}
 	assertNoSplitProgress(t, f.state(t, number))
+	if f.state(t, number).Lease.Status != "released" {
+		t.Fatal("maintainer stop retained claim")
+	}
+	f.must(t, "issue", "edit", n, "--objective", "Revised maintainer objective")
+	f.must(t, "issue", "approve", n)
 }
 
 func TestPRWorkSplitRecommendationNamesLinkedIssue(t *testing.T) {
@@ -512,6 +520,9 @@ func TestIssueWorkStopsOnWorkUnitCorrection(t *testing.T) {
 				t.Fatal(out)
 			}
 			assertNoSplitProgress(t, f.state(t, number))
+			if f.state(t, number).Lease.Status != "released" {
+				t.Fatal("maintainer stop retained claim")
+			}
 			raw := f.must(t, "issue", "work", n, "--agent", "mock", "--progress=false", "--json")
 			var outcome struct {
 				Status string
@@ -522,6 +533,8 @@ func TestIssueWorkStopsOnWorkUnitCorrection(t *testing.T) {
 			if err := json.Unmarshal([]byte(raw), &outcome); err != nil || outcome.Status != "workunit-correction-required" || !outcome.Result.Required {
 				t.Fatalf("%s: %v", raw, err)
 			}
+			f.must(t, "issue", "edit", n, "--objective", "Revised maintainer objective")
+			f.must(t, "issue", "approve", n)
 		})
 	}
 }

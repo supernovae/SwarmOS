@@ -187,23 +187,54 @@ func (r *workRun) admit(phase string) error {
 	return r.e.admitStage(r.ctx, r.opts.IssueNumber, r.opts.Owner, phase)
 }
 
-func (r *workRun) stopForWorkUnitCorrection() bool {
-	if r.forkMode || r.opts.PRNumber != 0 || !workUnitCorrectionRequired(r.st) {
-		return false
+// releaseMaintainerStop leaves recorded planning evidence intact. Release owns
+// the claim fence; never acquire a claim just to clean up a maintainer stop.
+func (r *workRun) releaseMaintainerStop(ctx context.Context) error {
+	if r.e.ForkMode || r.opts.ForkMode || r.forkMode || r.opts.PRNumber != 0 || r.st == nil || r.st.ForkRepo != "" || r.st.PRNumber != 0 || r.st.PRRevision != nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = r.ctx
+	}
+	r.stopHeartbeat()
+	st, err := r.e.LeaseManager.Release(ctx, r.opts.IssueNumber, r.opts.Owner, "maintainer decision required")
+	if err != nil {
+		return fmt.Errorf("release maintainer stop: %w", err)
+	}
+	r.st = st
+	if r.res != nil {
+		r.res.State = st
+	}
+	return nil
+}
+
+func (r *workRun) stopForWorkUnitCorrection() (bool, error) {
+	if r.forkMode || r.opts.PRNumber != 0 || !workUnitCorrectionRequired(r.st) || r.st.PRRevision != nil {
+		return false, nil
+	}
+	if err := r.releaseMaintainerStop(r.coordinatorCtx); err != nil {
+		return true, err
 	}
 	r.res.State, r.res.PhaseCompleted, r.res.WorkUnitCorrectionRequired = r.st, "plan", true
-	return true
+	return true, nil
 }
 
-func (r *workRun) stopForSplit() bool {
+func (r *workRun) stopForSplit() (bool, error) {
 	if !splitRecommended(r.st) {
-		return false
+		return false, nil
+	}
+	if err := r.releaseMaintainerStop(r.coordinatorCtx); err != nil {
+		return true, err
 	}
 	r.res.State, r.res.PhaseCompleted, r.res.SplitRecommended = r.st, "plan", true
-	return true
+	return true, nil
 }
 
-func (r *workRun) stopHeartbeat() { r.heartbeat.Stop() }
+func (r *workRun) stopHeartbeat() {
+	if r.heartbeat != nil {
+		r.heartbeat.Stop()
+	}
+}
 
 // TestRetryAvailableError carries coordinator-verified recovery eligibility.
 type TestRetryAvailableError struct{ Err error }

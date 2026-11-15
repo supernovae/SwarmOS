@@ -172,7 +172,7 @@ func derivePlanReviewDisplay(st *lease.IssueState, mode string, limit int) *plan
 			d.NextPhase = "review"
 		}
 	}
-	if st.PendingPlanReview != nil || d.OperatorDecision {
+	if st.PendingPlanReview != nil && !d.OperatorDecision {
 		d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("swarm issue review-plan %d", n))
 		if !strings.EqualFold(mode, "agent") {
 			d.RecoveryCommands = append(d.RecoveryCommands, fmt.Sprintf("Revise both reports and run swarm issue stage %d --phase plan in its managed worktree", n))

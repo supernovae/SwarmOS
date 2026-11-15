@@ -622,6 +622,28 @@ func (e *Engine) ExecuteWork(ctx context.Context, opts WorkOptions) (result *Wor
 		}
 	}
 	r := &workRun{e: e, ctx: ctx, opts: opts}
+	// Execution alone cleans up retry exhaustion; classification stays read-only.
+	defer func() {
+		if !errors.Is(workErr, lease.ErrPlanReplanLimit) || e.ForkMode || r.opts.ForkMode || r.opts.PRNumber != 0 {
+			return
+		}
+		st, err := e.LeaseManager.GetCurrentState(ctx, r.opts.IssueNumber)
+		if err != nil {
+			workErr = errors.Join(workErr, err)
+			return
+		}
+		if st.Lease.Status == "released" {
+			return
+		}
+		r.st = st
+		if r.opts.ClaimID != "" {
+			e.LeaseManager.BindClaim(r.opts.IssueNumber, r.opts.ClaimID)
+		}
+		if err := r.releaseMaintainerStop(ctx); err != nil {
+			workErr = errors.Join(workErr, err)
+		}
+	}()
+
 	if r.opts.SetupProgress != nil && r.opts.OnProgress != nil {
 		r.progress = r.opts.SetupProgress
 		r.progress.mu.Lock()
@@ -2033,7 +2055,7 @@ func (e *Engine) CheckIssueContinuationContext(ctx context.Context, st *lease.Is
 			if !lease.CompletePlanPair(st) {
 				return contractRevisionRecovery(st, err)
 			}
-			return &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: err, Operation: "review-plan", Human: true}
+			return &IssueRecoveryError{IssueNumber: st.Lease.IssueNumber, Err: err, Operation: "review-plan", Arguments: []string{"--reject", "--notes", "Revise the plan"}, Human: true}
 		}
 		_, _, findings := rejectedPlanContext(st)
 		if strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(findings), "VERDICT: CHANGES_REQUESTED")) == "" && opts.instructionsFor("planner") == "" {

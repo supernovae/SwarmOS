@@ -976,3 +976,98 @@ func TestHeartbeatShorterRequestedDuration(t *testing.T) {
 		t.Fatalf("short renewal: %+v", st.Lease)
 	}
 }
+
+func TestHeartbeatStartupWaitsForTick(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		duration, left time.Duration
+	}{
+		{"window", 4 * time.Hour, 4 * time.Hour / 3}, {"minute", 4 * time.Hour, time.Minute},
+		{"short", 12 * time.Second, 2 * time.Second}, {"subsecond", time.Second, time.Second/12 + 100*time.Millisecond},
+	} {
+		for _, stop := range []bool{true, false} {
+			t.Run(fmt.Sprint(tc.name, "/stop=", stop), func(t *testing.T) {
+				r := newHeartbeatRig(t, tc.duration, 3)
+				at := tc.duration - tc.left
+				r.elapsed.Store(int64(at))
+				before := r.state(t)
+				tick := r.start(t, tc.duration)
+				remaining := tc.left - min(30*time.Second, tc.duration/12)
+				if r.store.writes.Load() != 0 || r.state(t).Lease.Renewals != 0 || !r.state(t).Lease.ExpiresAt.Equal(before.Lease.ExpiresAt) {
+					t.Fatal("startup renewed before first tick")
+				}
+				if tick.delay <= 0 || tick.delay >= remaining {
+					t.Fatalf("delay %v outside (0,%v)", tick.delay, remaining)
+				}
+				if tc.name == "minute" && tick.delay != 15*time.Second {
+					t.Fatalf("delay=%v", tick.delay)
+				}
+				if stop {
+					r.h.Stop()
+					if r.store.writes.Load() != 0 {
+						t.Fatal("Stop wrote")
+					}
+					return
+				}
+				r.fire(tick, at+tick.delay)
+				next := heartbeatReceive(t, r.ticks)
+				if r.store.writes.Load() != 1 || r.state(t).Lease.Renewals != 1 || r.h.Context().Err() != nil || next.delay <= 0 {
+					t.Fatalf("due tick: writes=%d err=%v delay=%v", r.store.writes.Load(), r.h.Err(), next.delay)
+				}
+			})
+		}
+	}
+}
+
+func TestHeartbeatStartupSafety(t *testing.T) {
+	for _, remaining := range []time.Duration{-time.Nanosecond, 0, time.Nanosecond, 2 * time.Nanosecond} {
+		t.Run(remaining.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := newHeartbeatRig(t, 4*time.Hour, 3)
+				r.elapsed.Store(int64(4*time.Hour - 30*time.Second - remaining))
+				r.h = r.m.StartHeartbeat(t.Context(), r.n, "local-dev", 4*time.Hour)
+				defer r.h.Stop()
+				if remaining <= time.Nanosecond {
+					heartbeatStopped(t, r.h)
+					if !errors.Is(context.Cause(r.h.Context()), ErrClaimFence) {
+						t.Fatal(r.h.Err())
+					}
+					select {
+					case <-r.ticks:
+						t.Fatal("cutoff scheduled timer")
+					default:
+					}
+				} else {
+					tick := heartbeatReceive(t, r.ticks)
+					if tick.delay != time.Nanosecond {
+						t.Fatalf("delay=%v", tick.delay)
+					}
+				}
+				if r.store.writes.Load() != 0 {
+					t.Fatal("startup wrote")
+				}
+			})
+		})
+	}
+	t.Run("late timer", func(t *testing.T) {
+		r := newHeartbeatRig(t, 4*time.Hour, 3)
+		r.elapsed.Store(int64(4*time.Hour - time.Minute))
+		tick := r.start(t, 4*time.Hour)
+		r.store.arm(errors.New("unexpected read after cutoff"))
+		r.fire(tick, 4*time.Hour-30*time.Second)
+		heartbeatStopped(t, r.h)
+		if !errors.Is(r.h.Err(), ErrClaimFence) || r.store.writes.Load() != 0 {
+			t.Fatalf("late timer: %v", r.h.Err())
+		}
+	})
+	t.Run("exhausted reserve", func(t *testing.T) {
+		r := newHeartbeatRig(t, 4*time.Hour, 0)
+		r.elapsed.Store(int64(3 * time.Hour))
+		r.h = r.m.StartHeartbeat(t.Context(), r.n, "local-dev", 4*time.Hour)
+		defer r.h.Stop()
+		heartbeatStopped(t, r.h)
+		if !errors.Is(r.h.Err(), claimpause.ErrBudget) || r.store.writes.Load() != 0 {
+			t.Fatalf("reserve: %v", r.h.Err())
+		}
+	})
+}

@@ -52,6 +52,7 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 		}
 		var outage error
 		first := true
+		initialWait := true
 		for {
 			if ctx.Err() != nil {
 				return
@@ -59,7 +60,7 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 			attemptStarted := time.Now()
 			cutoff := st.Lease.ExpiresAt.Add(-margin)
 			remaining := cutoff.Sub(m.nowFn())
-			if remaining <= 0 {
+			if remaining <= 0 || (initialWait && remaining <= time.Nanosecond) {
 				if outage != nil {
 					h.fail(outage)
 				} else {
@@ -111,7 +112,7 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 				h.fail(claimpause.ErrBudget)
 				return
 			}
-			if err == nil && due && (b == nil || b.LeaseExpiryOnly() || b.RenewalsRemaining > 0) {
+			if err == nil && !initialWait && due && (b == nil || b.LeaseExpiryOnly() || b.RenewalsRemaining > 0) {
 				var renewed *IssueState
 				renewed, err = m.Renew(attempt, issue, owner, duration)
 				if err == nil {
@@ -162,7 +163,7 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 					h.fail(ErrClaimFence)
 					return
 				}
-				if b != nil {
+				if b != nil && !(initialWait && due && b.LeaseExpiryOnly()) {
 					if b.Available <= b.Threshold {
 						h.fail(claimpause.ErrBudget)
 						return
@@ -170,9 +171,14 @@ func (m *Manager) StartHeartbeat(parent context.Context, issue int, owner string
 					delay = min(delay, b.Available-b.Threshold)
 				}
 				if b == nil || b.LeaseExpiryOnly() || b.RenewalsRemaining > 0 {
-					delay = min(delay, st.Lease.ExpiresAt.Sub(m.nowFn())-duration/3)
+					if initialWait && due {
+						delay = min(delay, max(time.Nanosecond, remaining/2))
+					} else {
+						delay = min(delay, st.Lease.ExpiresAt.Sub(m.nowFn())-duration/3)
+					}
 				}
 				delay = min(delay, remaining)
+				initialWait = false
 			}
 			timer := m.heartbeatTimer(delay)
 			select {

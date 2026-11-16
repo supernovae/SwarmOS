@@ -232,6 +232,8 @@ func TestManualStageResetsPlanBudget(t *testing.T) {
 			if _, err := f.run(args...); !errors.Is(err, workflow.ErrPlanReviewRejected) {
 				t.Fatal(err)
 			}
+			// Issue planning consumes one retry during the initial rejection;
+			// PR planning needs two further retries to reach the same budget.
 			retries := 1
 			if resource == "pr" {
 				retries = 2

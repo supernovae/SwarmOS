@@ -132,6 +132,7 @@ func TestProvisionUntouchedBase(t *testing.T) {
 func testProvisionUntouchedBase(t *testing.T, pointer, scenario, context string) {
 	f := newAdvanceFixture(t)
 	previous := f.previousFor(t, context)
+	advanceWrite(t, f.path, ".swarm/active/DECISION.md", "stale decision\n")
 	advanceWrite(t, f.path, ".swarm/active/PLAN.md", "stale plan\n")
 	advanceWrite(t, f.path, ".swarm/active/REVIEW.md", "VERDICT: APPROVED\nstale\n")
 	advanceWrite(t, f.path, ".swarm/active/REPAIR.md", "stale brief\n")
@@ -169,7 +170,7 @@ func testProvisionUntouchedBase(t *testing.T, pointer, scenario, context string)
 		t.Fatalf("source = %q", got)
 	}
 	if scenario != "branch only" {
-		for _, name := range []string{"PLAN.md", "REVIEW.md", "REPAIR.md"} {
+		for _, name := range []string{"DECISION.md", "PLAN.md", "REVIEW.md", "REPAIR.md"} {
 			if _, err := os.Stat(filepath.Join(path, ".swarm", "active", name)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("stale %s kept: %v", name, err)
 			}
@@ -195,6 +196,7 @@ func TestProvisionUntouchedBaseRefusals(t *testing.T) {
 func testProvisionUntouchedBaseRefusal(t *testing.T, scenario, context string) {
 	f := newAdvanceFixture(t)
 	previous := f.previousFor(t, context)
+	advanceWrite(t, f.path, ".swarm/active/DECISION.md", "stale decision\n")
 	advanceWrite(t, f.path, ".swarm/active/PLAN.md", "stale plan\n")
 	switch scenario {
 	case "commit":

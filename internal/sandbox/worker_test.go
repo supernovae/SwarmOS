@@ -377,3 +377,76 @@ func TestWorkerEmptyEnvironmentNeverInherits(t *testing.T) {
 		t.Fatalf("empty allowlist could inherit environment: %#v", cmd.Env)
 	}
 }
+
+// Exercise the OCI archive/import channel without a container daemon.
+func TestWorkerPlannerInvestigationArtifacts(t *testing.T) {
+	for _, kind := range []string{"present", "absent", "unexpected", "missing", "large", "reviewer", "project"} {
+		t.Run(kind, func(t *testing.T) {
+			source, extracted, dest := t.TempDir(), t.TempDir(), t.TempDir()
+			opts := WorkerOptions{ReadOnly: true, Role: "planner"}
+			if kind == "project" {
+				opts.ProjectPlan = true
+			}
+			if kind == "reviewer" {
+				opts.Role = "reviewer"
+			}
+			for _, name := range workerOutputs(opts) {
+				if name == "DECISION.md" {
+					continue
+				}
+				if kind == "missing" && name == "TEST_PLAN.md" {
+					continue
+				}
+				writeWorkerFixture(t, source, name, "new")
+			}
+			if kind != "absent" {
+				value := "decision evidence"
+				if kind == "large" {
+					value = strings.Repeat("x", (1<<20)+1)
+				}
+				writeWorkerFixture(t, source, "DECISION.md", value)
+			}
+			if kind == "unexpected" {
+				writeWorkerFixture(t, source, "unknown.log", "unowned")
+			}
+			archive := filepath.Join(t.TempDir(), "output.tar")
+			if _, err := packWorker(context.Background(), source, archive, nil, false); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := unpackWorker(context.Background(), archive, extracted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeWorkerFixture(t, dest, ".swarm/active/PLAN.md", "old plan")
+			writeWorkerFixture(t, dest, ".swarm/active/DECISION.md", "old")
+			root, err := safefs.Open(dest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			err = importRoleOutputs(context.Background(), opts, extracted, "", root, manifest)
+			bad := kind != "present" && kind != "absent"
+			if bad {
+				if err == nil {
+					t.Fatal("accepted invalid output")
+				}
+				data, _ := os.ReadFile(filepath.Join(dest, ".swarm/active/PLAN.md"))
+				if string(data) != "old plan" {
+					t.Fatal("partial import")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(dest, ".swarm/active/DECISION.md"))
+			if kind == "absent" {
+				if !os.IsNotExist(err) {
+					t.Fatal("stale evidence retained")
+				}
+			} else if err != nil || string(data) != "decision evidence" {
+				t.Fatalf("%q %v", data, err)
+			}
+		})
+	}
+}

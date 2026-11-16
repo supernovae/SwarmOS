@@ -870,6 +870,17 @@ func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOption
 	if err := os.MkdirAll(filepath.Join(work, ".swarm", "active"), 0700); err != nil {
 		return err
 	}
+	if optionalWorkerOutput(opts, "DECISION.md") {
+		snapshotRoot, err := safefs.Open(work)
+		if err != nil {
+			return err
+		}
+		err = snapshotRoot.Remove(".swarm/active/DECISION.md")
+		snapshotRoot.Close()
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
 	runErr := run(ctx, work, scratch)
 	if storageuse.FromContext(ctx).Retained() {
 		return errors.Join(runErr, storageuse.ErrUnsafe)
@@ -905,20 +916,7 @@ func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOption
 		return nil
 	}
 	if opts.ReadOnly {
-		// Validate every role output before replacing any existing artifact.
-		artifacts := make([][]byte, len(outputs))
-		for i, name := range outputs {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			artifacts[i], err = safefs.ReadFile(work, filepath.Join(".swarm", "active", name), 1<<20)
-			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					return fmt.Errorf("%w: %s", ErrMissingRoleOutput, name)
-				}
-				return fmt.Errorf("read native role output %s: %w", name, err)
-			}
-		}
+
 		destination := original
 		if opts.OutputDir != "" {
 			destination, err = safefs.Open(opts.OutputDir)
@@ -927,19 +925,7 @@ func withNativeWorkspaceClock(ctx context.Context, dir string, opts WorkerOption
 			}
 			defer destination.Close()
 		}
-		for i, name := range outputs {
-			dest := filepath.Join(".swarm", "active", name)
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if opts.OutputDir != "" {
-				dest = name
-			}
-			if err := destination.WriteFile(dest, artifacts[i], 0644); err != nil {
-				return err
-			}
-		}
-		return nil
+		return importRoleOutputs(ctx, opts, work, filepath.Join(".swarm", "active"), destination, nil)
 	}
 	if paused {
 		for _, name := range []string{".git", ".swarm/coordination", ".swarm/local-tracker", ".swarm/worktrees", ".swarm/active-output"} {

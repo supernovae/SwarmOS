@@ -517,31 +517,7 @@ func RunWorker(ctx context.Context, dir, bin string, args []string, opts WorkerO
 			}
 			defer destination.Close()
 		}
-		for name := range manifest {
-			permitted := false
-			for _, allowed := range outputs {
-				if name == allowed {
-					permitted = true
-				}
-			}
-			if !permitted {
-				return fmt.Errorf("unexpected isolated role artifact %q", name)
-			}
-		}
-		for _, name := range outputs {
-			data, err := safefs.ReadFile(extracted, name, 1<<20)
-			if err != nil {
-				return fmt.Errorf("isolated role did not produce %s: %w", name, err)
-			}
-			dest := filepath.Join(".swarm", "active", name)
-			if opts.OutputDir != "" {
-				dest = name
-			}
-			if err := destination.WriteFile(dest, data, 0644); err != nil {
-				return err
-			}
-		}
-		return nil
+		return importRoleOutputs(ctx, opts, extracted, "", destination, manifest)
 	}
 	if err := checkImport(ctx, opts, initial, manifest); err != nil {
 		return completedImport(preserveRejected(ctx, opts, input, extracted, err), runErr == nil && !paused)
@@ -567,7 +543,7 @@ func workerOutputs(opts WorkerOptions) []string {
 		if opts.ProjectPlan {
 			return []string{"PROJECT_PLAN.yaml"}
 		}
-		return []string{"PLAN.md", "TEST_PLAN.md"}
+		return []string{"PLAN.md", "TEST_PLAN.md", "DECISION.md"}
 	}
 	return []string{"REVIEW.md"}
 }
@@ -927,4 +903,59 @@ func (r *workerContextReader) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	return r.reader.Read(p)
+}
+
+// Only ordinary planners own optional investigation evidence.
+func optionalWorkerOutput(opts WorkerOptions, name string) bool {
+	return opts.ReadOnly && opts.Role == "planner" && !opts.ProjectPlan && name == "DECISION.md"
+}
+
+// Read the entire selected bundle before changing any destination artifact.
+func importRoleOutputs(ctx context.Context, opts WorkerOptions, source, prefix string, destination *safefs.Root, manifest workerManifest) error {
+	outputs := workerOutputs(opts)
+	for name := range manifest {
+		allowed := false
+		for _, output := range outputs {
+			if name == output {
+				allowed = true
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("unexpected isolated role artifact %q", name)
+		}
+	}
+	artifacts := make(map[string][]byte)
+	for _, name := range outputs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		data, err := safefs.ReadFile(source, filepath.Join(prefix, name), 1<<20)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				if optionalWorkerOutput(opts, name) {
+					continue
+				}
+				return fmt.Errorf("%w: %s", ErrMissingRoleOutput, name)
+			}
+			return fmt.Errorf("read role output %s: %w", name, err)
+		}
+		artifacts[name] = data
+	}
+	for _, name := range outputs {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		dest := filepath.Join(".swarm", "active", name)
+		if opts.OutputDir != "" {
+			dest = name
+		}
+		if data, ok := artifacts[name]; ok {
+			if err := destination.WriteFile(dest, data, 0644); err != nil {
+				return err
+			}
+		} else if err := destination.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }

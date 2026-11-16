@@ -1410,3 +1410,135 @@ func TestExecutableHashRejectsSymlinkRetargetDuringHash(t *testing.T) {
 		t.Fatal("accepted symlink retarget during hashing")
 	}
 }
+
+func TestPlannerInvestigationArtifacts(t *testing.T) {
+	for _, kind := range []string{"present", "absent", "missing", "symlink", "large", "fifo", "outputdir"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			writeWorkerFixture(t, dir, ".swarm/active/DECISION.md", "old")
+			writeWorkerFixture(t, dir, ".swarm/active/PLAN.md", "old plan")
+			opts := WorkerOptions{ReadOnly: true, Role: "planner"}
+			dest := filepath.Join(dir, ".swarm/active")
+			if kind == "outputdir" {
+				opts.OutputDir = t.TempDir()
+				dest = opts.OutputDir
+			}
+			err := withNativeWorkspace(context.Background(), dir, opts, func(_ context.Context, work, _ string) error {
+				active := filepath.Join(work, ".swarm/active")
+				for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
+					if kind == "missing" && name == "TEST_PLAN.md" {
+						continue
+					}
+					if err := os.WriteFile(filepath.Join(active, name), []byte("new"), 0600); err != nil {
+						return err
+					}
+				}
+				p := filepath.Join(active, "DECISION.md")
+				switch kind {
+				case "absent", "missing":
+					return nil
+				case "symlink":
+					return os.Symlink("PLAN.md", p)
+				case "large":
+					return os.WriteFile(p, make([]byte, (1<<20)+1), 0600)
+				case "fifo":
+					return syscall.Mkfifo(p, 0600)
+				default:
+					return os.WriteFile(p, []byte("decision evidence"), 0600)
+				}
+			})
+			bad := kind == "missing" || kind == "symlink" || kind == "large" || kind == "fifo"
+			if bad {
+				if err == nil {
+					t.Fatal("accepted invalid bundle")
+				}
+				data, _ := os.ReadFile(filepath.Join(dir, ".swarm/active/PLAN.md"))
+				if string(data) != "old plan" {
+					t.Fatal("partial import")
+				}
+				data, _ = os.ReadFile(filepath.Join(dir, ".swarm/active/DECISION.md"))
+				if string(data) != "old" {
+					t.Fatal("failed validation changed prior decision")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(dest, "DECISION.md"))
+			if kind == "absent" {
+				if !os.IsNotExist(err) {
+					t.Fatalf("stale decision: %q %v", data, err)
+				}
+				return
+			}
+			if err != nil || string(data) != "decision evidence" {
+				t.Fatalf("decision export: %q %v", data, err)
+			}
+			// A second successful run must not inherit and re-export the first decision.
+			err = withNativeWorkspace(context.Background(), dir, opts, func(_ context.Context, work, _ string) error {
+				for _, name := range []string{"PLAN.md", "TEST_PLAN.md"} {
+					if err := os.WriteFile(filepath.Join(work, ".swarm/active", name), []byte("second"), 0600); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(dest, "DECISION.md")); !os.IsNotExist(err) {
+				t.Fatal("decision survived omission", err)
+			}
+		})
+	}
+}
+
+func TestPlannerInvestigationArtifactOwnership(t *testing.T) {
+	for _, opts := range []WorkerOptions{
+		{ReadOnly: true, Role: "reviewer"},
+		{ReadOnly: true, Role: "planner", ProjectPlan: true},
+		{ReadOnly: true, Role: "planner"},
+	} {
+		t.Run(fmt.Sprint(opts.Role, opts.ProjectPlan), func(t *testing.T) {
+			dir := t.TempDir()
+			writeWorkerFixture(t, dir, ".swarm/active/DECISION.md", "input evidence")
+			err := withNativeWorkspace(context.Background(), dir, opts, func(_ context.Context, work, _ string) error {
+				active := filepath.Join(work, ".swarm/active")
+				if !optionalWorkerOutput(opts, "DECISION.md") {
+					data, err := os.ReadFile(filepath.Join(active, "DECISION.md"))
+					if err != nil || string(data) != "input evidence" {
+						t.Fatal("lost role input", err)
+					}
+				}
+				for _, name := range workerOutputs(opts) {
+					if name == "DECISION.md" {
+						continue
+					}
+					if err := os.WriteFile(filepath.Join(active, name), []byte("output"), 0600); err != nil {
+						return err
+					}
+				}
+				if err := os.WriteFile(filepath.Join(active, "unknown.log"), []byte("unowned"), 0600); err != nil {
+					return err
+				}
+				if !optionalWorkerOutput(opts, "DECISION.md") {
+					return os.WriteFile(filepath.Join(active, "DECISION.md"), []byte("unowned change"), 0600)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, ".swarm/active/unknown.log")); !os.IsNotExist(err) {
+				t.Fatal("imported unknown output")
+			}
+			if !optionalWorkerOutput(opts, "DECISION.md") {
+				data, _ := os.ReadFile(filepath.Join(dir, ".swarm/active/DECISION.md"))
+				if string(data) != "input evidence" {
+					t.Fatal("imported unowned evidence")
+				}
+			}
+		})
+	}
+}

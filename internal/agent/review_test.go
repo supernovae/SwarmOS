@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
+	"github.com/supernovae/swarmos/internal/harness"
 	"github.com/supernovae/swarmos/internal/safefs"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/storageuse"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
+	"github.com/supernovae/swarmos/internal/workspace"
 )
 
 // TestReviewHelperProcess is a portable hostile reviewer used by the regression
@@ -488,5 +491,41 @@ func TestReviewerStorageUseFinishesAfterImport(t *testing.T) {
 				t.Fatalf("pending review use in %s", path)
 			}
 		}
+	}
+}
+
+// The producer/import boundary is exercised by sandbox.TestPlannerInvestigationArtifacts;
+// this fixture represents that imported bundle because native injection is package-private.
+func TestPlannerDecisionReachesReviewer(t *testing.T) {
+	root := gitfixture.Init(t, "", "-b", "main")
+	if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	gitfixture.Run(t, root, "add", ".swarm")
+	base := gitfixture.Commit(t, root, "approved harness")
+	const evidence = "decision evidence"
+	for _, name := range []string{"PLAN.md", "TEST_PLAN.md", "DECISION.md"} {
+		mustWriteReviewFixture(t, root, ".swarm/active/"+name, evidence)
+	}
+	if err := workspace.CompileHarnessBundleAt(root, &contract.WorkUnit{ID: "ISSUE-583"}, nil, nil, "reviewer", contract.GateNone, base); err != nil {
+		t.Fatal(err)
+	}
+	runner := reviewOutputRunner{MockRunner: &MockRunner{}, produce: func(req RunRequest) error {
+		p := filepath.Join(req.WorktreePath, ".swarm/active/DECISION.md")
+		data, err := os.ReadFile(p)
+		if err != nil || string(data) != evidence {
+			t.Fatalf("review evidence: %q %v", data, err)
+		}
+		if err := os.WriteFile(p, []byte("reviewer mutation"), 0600); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(req.WorktreePath, ".swarm/active-output/REVIEW.md"), []byte("approved"), 0600)
+	}}
+	if _, err := RunReview(context.Background(), runner, RunRequest{Role: "reviewer", WorktreePath: root}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".swarm/active/DECISION.md"))
+	if err != nil || string(data) != evidence {
+		t.Fatalf("reviewer changed original evidence: %q %v", data, err)
 	}
 }

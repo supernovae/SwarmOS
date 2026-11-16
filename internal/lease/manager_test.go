@@ -2795,3 +2795,533 @@ func TestIssue505ForkReleaseRequiresApproval(t *testing.T) {
 	}
 	issue505Unchanged(t, m, tr, iss.Number, before, current.Labels)
 }
+
+// issue528Store counts actual persistence attempts, including conflicts.
+type issue528Store struct {
+	coordination.Store
+	cas    int
+	before func()
+}
+
+func (s *issue528Store) CompareAndSwap(ctx context.Context, n int, rev string, b []byte) (string, error) {
+	s.cas++
+	if s.before != nil {
+		f := s.before
+		s.before = nil
+		f()
+		return "", coordination.ErrConflict
+	}
+	return s.Store.CompareAndSwap(ctx, n, rev, b)
+}
+
+type issue528Tracker struct {
+	addedLabels []string
+	tracker.Tracker
+	gets, lists, updates, creates, adds, removes int
+	failList, failUpdate, failCreate             bool
+	missingComments                              bool
+}
+
+func (s *issue528Tracker) GetIssue(ctx context.Context, n int) (*tracker.Issue, error) {
+	s.gets++
+	return s.Tracker.GetIssue(ctx, n)
+}
+func (s *issue528Tracker) ListComments(ctx context.Context, n int) ([]*tracker.Comment, error) {
+	s.lists++
+	if s.missingComments {
+		return nil, nil
+	}
+	if s.failList {
+		return nil, errors.New("list failed")
+	}
+	return s.Tracker.ListComments(ctx, n)
+}
+func (s *issue528Tracker) UpdateComment(ctx context.Context, id int64, body string) (*tracker.Comment, error) {
+	s.updates++
+	if s.failUpdate || s.missingComments {
+		return nil, errors.New("update failed")
+	}
+	return s.Tracker.UpdateComment(ctx, id, body)
+}
+func (s *issue528Tracker) CreateComment(ctx context.Context, n int, body string) (*tracker.Comment, error) {
+	s.creates++
+	if s.failCreate {
+		return nil, errors.New("create failed")
+	}
+	return s.Tracker.CreateComment(ctx, n, body)
+}
+func (s *issue528Tracker) AddLabels(ctx context.Context, n int, labels []string) error {
+	s.adds++
+	s.addedLabels = append(s.addedLabels, labels...)
+	return s.Tracker.AddLabels(ctx, n, labels)
+}
+func (s *issue528Tracker) RemoveLabel(ctx context.Context, n int, label string) error {
+	s.removes++
+	return s.Tracker.RemoveLabel(ctx, n, label)
+}
+func issue528Fixture(t *testing.T) (*Manager, *tracker.LocalTracker, int, *issue528Store, *issue528Tracker) {
+	t.Helper()
+	m, lt, iss := testManager(t)
+	if _, err := m.Acquire(context.Background(), iss.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	s := &issue528Store{Store: m.store}
+	tr := &issue528Tracker{Tracker: m.tracker}
+	m.store, m.tracker = s, tr
+	return m, lt, iss.Number, s, tr
+}
+func TestIssue528RequireGateNoop(t *testing.T) {
+	m, _, n, s, _ := issue528Fixture(t)
+	ctx := context.Background()
+	st, err := m.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.RequireGate(ctx, n, "local-dev", st.EffectiveGate); err != nil {
+		t.Fatal(err)
+	}
+	if s.cas != 0 {
+		t.Fatalf("no-op CAS = %d", s.cas)
+	}
+	m.BindClaim(n, "stale")
+	if _, err = m.RequireGate(ctx, n, "local-dev", st.EffectiveGate); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("stale: %v", err)
+	}
+}
+
+// issue528RequestStore models the coordinator's request-scoped store.
+type issue528RequestStore struct {
+	*issue528Store
+	requestID int64
+}
+
+func (s *issue528RequestStore) RequestID() int64 { return s.requestID }
+
+func TestIssue528ForkRequestNoop(t *testing.T) {
+	m, _, n, s, _ := issue528Fixture(t)
+	ctx := context.Background()
+	requests := &issue528RequestStore{issue528Store: s, requestID: 42}
+	m.store = requests
+	st, err := m.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wantCAS := range []int{1, 1, 2} {
+		if wantCAS == 2 {
+			requests.requestID++
+		}
+		out, err := m.RequireGate(ctx, n, "local-dev", st.EffectiveGate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		persisted, err := m.GetCurrentState(ctx, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.cas != wantCAS || out.LastForkRequestID != requests.requestID || persisted.LastForkRequestID != requests.requestID {
+			t.Fatalf("CAS=%d want %d; returned/persisted request=%d/%d want %d", s.cas, wantCAS, out.LastForkRequestID, persisted.LastForkRequestID, requests.requestID)
+		}
+	}
+	m.BindClaim(n, "stale")
+	requests.requestID++
+	if _, err := m.RequireGate(ctx, n, "local-dev", st.EffectiveGate); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("stale: %v", err)
+	}
+	if s.cas != 2 {
+		t.Fatalf("stale request wrote state: CAS=%d", s.cas)
+	}
+}
+
+func TestIssue528LabelDelta(t *testing.T) {
+	for _, handoff := range []bool{false, true} {
+		for _, retry := range []bool{false, true} {
+			t.Run(fmt.Sprintf("handoff=%t/retry=%t", handoff, retry), func(t *testing.T) {
+				m, lt, n, s, tr := issue528Fixture(t)
+				ctx := context.Background()
+				if err := lt.AddLabels(ctx, n, []string{"swarm:plan-review", "unrelated"}); err != nil {
+					t.Fatal(err)
+				}
+				if retry {
+					s.before = func() {}
+				}
+				var st *IssueState
+				var err error
+				if handoff {
+					st, err = m.Handoff(ctx, n, "local-dev", "plan", "review")
+				} else {
+					st, err = m.UpdatePhase(ctx, n, "local-dev", "review", "active")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := 1
+				if retry {
+					want++
+				}
+				if s.cas != want || tr.gets != want || tr.adds != 0 {
+					t.Fatalf("CAS/get/add = %d/%d/%d; want %d/%d/0", s.cas, tr.gets, tr.adds, want, want)
+				}
+				iss, _ := lt.GetIssue(ctx, n)
+				wu, _ := contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
+				comments, _ := lt.ListComments(ctx, n)
+				found := false
+				for _, c := range comments {
+					if c.Body == RenderStateProjection(wu, st, m.LedgerLayout()) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("projection did not converge")
+				}
+				if !handoff {
+					s.cas, tr.gets, tr.adds = 0, 0, 0
+					if _, err = m.UpdatePhase(ctx, n, "local-dev", "review", "active"); err != nil {
+						t.Fatal(err)
+					}
+					if s.cas != 0 || tr.gets != 1 || tr.adds != 0 {
+						t.Fatalf("no-op CAS/get/add = %d/%d/%d", s.cas, tr.gets, tr.adds)
+					}
+				}
+			})
+		}
+	}
+}
+func TestIssue528ProjectionDedup(t *testing.T) {
+	m, lt, n, s, tr := issue528Fixture(t)
+	ctx := context.Background()
+	comments, _ := lt.ListComments(ctx, n)
+	for _, c := range comments {
+		if strings.HasPrefix(c.Body, "<!-- swarm:audit:v1 -->") {
+			if _, err := lt.UpdateComment(ctx, c.ID, "<!-- swarm:audit:v1 --> stale"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var bodies []string
+	for i := 1; i <= 2; i++ {
+		st, err := m.mutate(ctx, n, "local-dev", func(st *IssueState) error { st.LastForkRequestID = int64(i); return nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		iss, _ := lt.GetIssue(ctx, n)
+		wu, _ := contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
+		bodies = append(bodies, RenderStateProjection(wu, st, m.LedgerLayout()))
+	}
+	if bodies[0] != bodies[1] {
+		t.Fatal("test field changes rendering")
+	}
+	if s.cas != 2 || tr.updates != 1 || tr.creates != 0 || tr.gets != 2 {
+		t.Fatalf("CAS/update/create/get = %d/%d/%d/%d", s.cas, tr.updates, tr.creates, tr.gets)
+	}
+}
+
+func TestIssue528PhaseProjection(t *testing.T) {
+	m, lt, n, s, tr := issue528Fixture(t)
+	ctx := context.Background()
+	if err := lt.AddLabels(ctx, n, []string{"unrelated"}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := lt.ListComments(ctx, n)
+	st, err := m.UpdatePhase(ctx, n, "local-dev", "review", "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.cas != 1 || tr.updates != 1 || tr.adds != 1 || tr.gets != 1 {
+		t.Fatalf("CAS/update/add/get = %d/%d/%d/%d", s.cas, tr.updates, tr.adds, tr.gets)
+	}
+	saved, err := m.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Lease.Phase != "review" {
+		t.Fatal(saved.Lease.Phase)
+	}
+	iss, _ := lt.GetIssue(ctx, n)
+	if !slices.Contains(iss.Labels, "unrelated") || !slices.Contains(iss.Labels, "swarm:plan-review") {
+		t.Fatal(iss.Labels)
+	}
+	wu, _ := contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
+	after, _ := lt.ListComments(ctx, n)
+	found := false
+	for _, c := range after {
+		if c.Body == RenderStateProjection(wu, st, m.LedgerLayout()) {
+			found = true
+		}
+	}
+	if !found || reflect.DeepEqual(before, after) {
+		t.Fatal("phase projection unchanged or absent")
+	}
+}
+
+func TestIssue528FenceAndErrors(t *testing.T) {
+	for _, kind := range []string{"owner", "expired", "released", "edited", "callback", "successor", "approval-retry"} {
+		t.Run(kind, func(t *testing.T) {
+			m, lt, n, s, tr := issue528Fixture(t)
+			ctx := context.Background()
+			st, rev, err := m.load(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := "local-dev"
+			switch kind {
+			case "owner":
+				owner = "other"
+			case "expired":
+				m.SetNowFunc(func() time.Time { return st.Lease.ExpiresAt })
+			case "released":
+				st.Lease.Status = "released"
+				b, _ := marshalCoordinatorState(st)
+				if _, err := s.Store.CompareAndSwap(ctx, n, rev, b); err != nil {
+					t.Fatal(err)
+				}
+			case "edited":
+				if _, err := lt.UpdateIssueBody(ctx, n, strings.Replace(testWorkUnit(), "Harden coordination state", "Changed objective", 1)); err != nil {
+					t.Fatal(err)
+				}
+			case "successor":
+				s.before = func() {
+					st.Lease.ClaimID = "successor"
+					b, _ := marshalCoordinatorState(st)
+					if _, err := s.Store.CompareAndSwap(ctx, n, rev, b); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "approval-retry":
+				s.before = func() {
+					if _, err := lt.UpdateIssueBody(ctx, n, strings.Replace(testWorkUnit(), "Harden coordination state", "Changed objective", 1)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			sentinel := errors.New("callback error")
+			if kind == "callback" {
+				_, err = m.mutate(ctx, n, owner, func(*IssueState) error { return sentinel })
+				if !errors.Is(err, sentinel) {
+					t.Fatal(err)
+				}
+			} else if kind == "successor" || kind == "approval-retry" {
+				_, err = m.UpdatePhase(ctx, n, owner, "review", "active")
+			} else {
+				_, err = m.RequireGate(ctx, n, owner, st.EffectiveGate)
+			}
+			if err == nil {
+				t.Fatal("expected refusal")
+			}
+			if kind == "owner" || kind == "expired" || kind == "released" || kind == "successor" {
+				if !errors.Is(err, ErrClaimFence) {
+					t.Fatal(err)
+				}
+			}
+			wantCAS := 0
+			if kind == "successor" || kind == "approval-retry" {
+				wantCAS = 1
+			}
+			if s.cas != wantCAS || tr.updates != 0 || tr.creates != 0 || tr.adds != 0 || tr.removes != 0 {
+				t.Fatalf("failed mutation wrote: %+v %+v", s, tr)
+			}
+		})
+	}
+}
+
+func TestIssue528ReleaseLabels(t *testing.T) {
+	for _, count := range []int{0, 1, 2} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			m, lt, n, s, tr := issue528Fixture(t)
+			ctx := context.Background()
+			for i, label := range []string{"swarm:claimed", "swarm:in-progress"} {
+				if i >= count {
+					if err := lt.RemoveLabel(ctx, n, label); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := lt.AddLabels(ctx, n, []string{"unrelated"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := lt.UpdateIssueBody(ctx, n, strings.Replace(testWorkUnit(), "Harden coordination state", "Changed objective", 1)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.Release(ctx, n, "local-dev", "done"); err != nil {
+				t.Fatal(err)
+			}
+			if s.cas != 1 || tr.gets != 1 || tr.removes != count {
+				t.Fatalf("CAS/get/remove = %d/%d/%d", s.cas, tr.gets, tr.removes)
+			}
+			iss, _ := lt.GetIssue(ctx, n)
+			if !slices.Contains(iss.Labels, "unrelated") || slices.Contains(iss.Labels, "swarm:claimed") || slices.Contains(iss.Labels, "swarm:in-progress") {
+				t.Fatal(iss.Labels)
+			}
+		})
+	}
+}
+
+func TestIssue528Serialization(t *testing.T) {
+	m, _, n, s, _ := issue528Fixture(t)
+	ctx := context.Background()
+	// A private nested slice must participate in comparison even though public
+	// JSON and the audit projection omit it.
+	for _, index := range []int{1, 2} {
+		_, err := m.mutate(ctx, n, "local-dev", func(st *IssueState) error {
+			if st.gapAcknowledgment == nil {
+				st.gapAcknowledgment = &GapAcknowledgment{Indices: []int{index}}
+			} else {
+				st.gapAcknowledgment.Indices[0] = index
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, _, err := m.load(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.cas != 2 || st.gapAcknowledgment.Indices[0] != 2 {
+		t.Fatalf("private state: CAS=%d, %+v", s.cas, st.gapAcknowledgment)
+	}
+	// Public nested maps must also be compared by value, before callback edits.
+	for _, value := range []string{"first", "second"} {
+		_, err = m.mutate(ctx, n, "local-dev", func(st *IssueState) error {
+			if len(st.Artifacts) == 0 {
+				st.Artifacts = []contract.Artifact{{Type: contract.ArtifactDesign, Metadata: map[string]string{}}}
+			}
+			st.Artifacts[0].Metadata["test"] = value
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.cas != 4 {
+		t.Fatal(s.cas)
+	}
+}
+
+func TestIssue528ProjectionRecovery(t *testing.T) {
+	for _, kind := range []string{"write-failure", "external-edit", "list-failure", "missing"} {
+		t.Run(kind, func(t *testing.T) {
+			m, lt, n, _, tr := issue528Fixture(t)
+			ctx := context.Background()
+			comments, _ := lt.ListComments(ctx, n)
+			switch kind {
+			case "write-failure":
+				for _, c := range comments {
+					if strings.HasPrefix(c.Body, "<!-- swarm:audit:v1 -->") {
+						if _, err := lt.UpdateComment(ctx, c.ID, "stale"); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				tr.failUpdate, tr.failCreate = true, true
+			case "external-edit":
+				for _, c := range comments {
+					if strings.HasPrefix(c.Body, "<!-- swarm:audit:v1 -->") {
+						if _, err := lt.UpdateComment(ctx, c.ID, "external edit"); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			case "list-failure":
+				tr.failList = true
+			case "missing":
+				tr.missingComments = true
+			}
+			for i := 1; i <= 2; i++ {
+				_, err := m.mutate(ctx, n, "local-dev", func(st *IssueState) error { st.LastForkRequestID = int64(i); return nil })
+				if err != nil {
+					t.Fatal(err)
+				}
+				tr.failUpdate, tr.failCreate, tr.failList = false, false, false
+				tr.missingComments = false
+			}
+			st, err := m.GetCurrentState(ctx, n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			iss, _ := lt.GetIssue(ctx, n)
+			wu, _ := contract.ParseWorkUnitFromIssue(n, iss.Title, iss.Body)
+			comments, _ = lt.ListComments(ctx, n)
+			found := false
+			for _, c := range comments {
+				if c.Body == RenderStateProjection(wu, st, m.LedgerLayout()) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("projection did not recover")
+			}
+			if kind == "write-failure" && tr.updates != 2 {
+				t.Fatalf("updates=%d", tr.updates)
+			}
+			if kind == "list-failure" && tr.updates != 1 {
+				t.Fatalf("failed list suppressed update: %d", tr.updates)
+			}
+			if kind == "missing" && tr.creates != 1 {
+				t.Fatalf("creates=%d", tr.creates)
+			}
+		})
+	}
+}
+
+func TestIssue528WinningLabelSnapshot(t *testing.T) {
+	for _, handoff := range []bool{false, true} {
+		t.Run(fmt.Sprint(handoff), func(t *testing.T) {
+			m, lt, n, s, tr := issue528Fixture(t)
+			ctx := context.Background()
+			if err := lt.AddLabels(ctx, n, []string{"swarm:plan-review"}); err != nil {
+				t.Fatal(err)
+			}
+			s.before = func() {
+				if err := lt.RemoveLabel(ctx, n, "swarm:plan-review"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var err error
+			if handoff {
+				_, err = m.Handoff(ctx, n, "local-dev", "plan", "review")
+			} else {
+				_, err = m.UpdatePhase(ctx, n, "local-dev", "review", "active")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.cas != 2 || tr.gets != 2 || tr.adds != 1 || !reflect.DeepEqual(tr.addedLabels, []string{"swarm:plan-review"}) {
+				t.Fatalf("CAS/get/labels = %d/%d/%v", s.cas, tr.gets, tr.addedLabels)
+			}
+		})
+	}
+}
+func TestIssue528ClaimLabelDelta(t *testing.T) {
+	m, lt, iss := testManager(t)
+	ctx := context.Background()
+	if err := lt.AddLabels(ctx, iss.Number, []string{"swarm:claimed", "unrelated"}); err != nil {
+		t.Fatal(err)
+	}
+	tr := &issue528Tracker{Tracker: lt}
+	m.tracker = tr
+	if _, err := m.Acquire(ctx, iss.Number, "local-dev", "mock", "plan", time.Hour, 1); err != nil {
+		t.Fatal(err)
+	}
+	if tr.gets != 1 || !reflect.DeepEqual(tr.addedLabels, []string{"swarm:in-progress"}) {
+		t.Fatalf("get/labels = %d/%v", tr.gets, tr.addedLabels)
+	}
+}
+func TestIssue528StrongerGate(t *testing.T) {
+	m, _, n, s, _ := issue528Fixture(t)
+	ctx := context.Background()
+	if _, err := m.mutate(ctx, n, "local-dev", func(st *IssueState) error { st.EffectiveGate = contract.GateNone; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	s.cas = 0
+	if _, err := m.RequireGate(ctx, n, "local-dev", contract.GateAgent); err != nil {
+		t.Fatal(err)
+	}
+	st, err := m.GetCurrentState(ctx, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.cas != 1 || st.EffectiveGate != contract.GateAgent {
+		t.Fatalf("CAS/gate = %d/%s", s.cas, st.EffectiveGate)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1088,6 +1089,12 @@ func (t githubRetryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	current := req
 	for {
 		resp, err := t.base.RoundTrip(current)
+		if err != nil && errors.Is(current.Context().Err(), context.DeadlineExceeded) {
+			var ne net.Error
+			if !errors.As(err, &ne) || !ne.Timeout() {
+				err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
+			}
+		}
 		observation := gitcredential.RetryObservation{Operation: req.Method, Err: err}
 		if resp != nil {
 			observation.Status, observation.Header = resp.StatusCode, resp.Header

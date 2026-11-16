@@ -404,7 +404,8 @@ func forkRead(ctx context.Context, root, destination, token, operation, value st
 	default:
 		return nil, fmt.Errorf("unsupported fork read operation")
 	}
-	out, err := network(ctx, root, false, func(ctx context.Context) (*exec.Cmd, func(string) string, error) {
+	// The zero output cap preserves existing selected-read behavior intentionally.
+	out, err := runNetworkCommand(ctx, root, false, 0, args, func(ctx context.Context) (*exec.Cmd, func(string) string, error) {
 		// Do not resolve the normal writer credential, even for configuration probes.
 		var env []string
 		for _, item := range os.Environ() {
@@ -436,7 +437,7 @@ func forkRead(ctx context.Context, root, destination, token, operation, value st
 			appendConfig(cmd, pair[0], pair[1])
 		}
 		return cmd, redactionFor(token).Redact, nil
-	}, operation)
+	})
 	redact := redactionFor(token).Redact
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {

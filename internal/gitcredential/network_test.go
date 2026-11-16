@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/testutil"
 	"io"
 	"net"
 	"net/http"
@@ -15,10 +14,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/supernovae/swarmos/internal/testutil"
 	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/testutil/gittransport"
 )
@@ -1088,37 +1089,47 @@ func TestForkReadRealAuthenticatedGit(t *testing.T) {
 }
 
 func TestSelectedForkReadUsesBoundedEngine(t *testing.T) {
-	networkBudgets(t)
-	root := t.TempDir()
-	helper := filepath.Join(root, "git")
-	if err := testutil.WriteExecutable(helper, []byte("#!/bin/sh\nif [ \"$1\" = config ]; then exit 1; fi\nexec sleep 30\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("SWARM_GITHUB_TOKEN", "writer-sentinel")
-	t.Setenv(TokenCommandEnv, "/nonexistent/no-writer-credential-command")
-	t.Setenv("SWARM_GITHUB_FORK_READ_TOKEN", "read-sentinel")
-	var run *networkRun
-	lastRun = func(r *networkRun) { run = r }
-	t.Cleanup(func() { assertSettled(t, run); lastRun = nil })
-	start := time.Now()
-	_, err := ForkRead(context.Background(), root, "github.com", "alice/repo", "read-sentinel", "ls-remote", "main")
-	if !errors.Is(err, ErrInterrupted) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("classification: %v", err)
-	}
-	if time.Since(start) > 3*time.Second {
-		t.Fatal("unbounded selected read")
-	}
-	if run == nil {
-		t.Fatal("shared runner not used")
-	}
-	for _, entry := range run.cmd.Env {
-		if strings.Contains(entry, "writer-sentinel") || strings.HasPrefix(entry, "SWARM_GITHUB_FORK_READ_TOKEN=") {
-			t.Fatal("raw credential in read child")
-		}
-	}
-	if strings.Contains(strings.Join(run.cmd.Args, " "), "sentinel") {
-		t.Fatal("credential in argv")
+	for _, tc := range []struct{ name, op, value string }{
+		{"ls-remote", "ls-remote", "main"},
+		{"fetch", "fetch", strings.Repeat("a", 40)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			networkBudgets(t)
+			// The general deadline is longer, so only the operation-specific
+			// short-read bound can end the held command in time.
+			networkTimeout = time.Minute
+			root := t.TempDir()
+			helper := filepath.Join(root, "git")
+			if err := testutil.WriteExecutable(helper, []byte("#!/bin/sh\nif [ \"$1\" = config ]; then exit 1; fi\nexec sleep 30\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("SWARM_GITHUB_TOKEN", "writer-sentinel")
+			t.Setenv(TokenCommandEnv, "/nonexistent/no-writer-credential-command")
+			t.Setenv("SWARM_GITHUB_FORK_READ_TOKEN", "read-sentinel")
+			var run *networkRun
+			lastRun = func(r *networkRun) { run = r }
+			t.Cleanup(func() { assertSettled(t, run); lastRun = nil })
+			start := time.Now()
+			_, err := ForkRead(context.Background(), root, "github.com", "alice/repo", "read-sentinel", tc.op, tc.value)
+			if !errors.Is(err, ErrInterrupted) || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("classification: %v", err)
+			}
+			if time.Since(start) > 3*time.Second {
+				t.Fatal("selected read ignored short-read bound")
+			}
+			if run == nil {
+				t.Fatal("shared runner not used")
+			}
+			for _, entry := range run.cmd.Env {
+				if strings.Contains(entry, "writer-sentinel") || strings.HasPrefix(entry, "SWARM_GITHUB_FORK_READ_TOKEN=") {
+					t.Fatal("raw credential in read child")
+				}
+			}
+			if strings.Contains(strings.Join(run.cmd.Args, " "), "sentinel") {
+				t.Fatal("credential in argv")
+			}
+		})
 	}
 }
 

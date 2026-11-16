@@ -103,6 +103,25 @@ func NewGitHubTrackerWithClient(owner, repo string, client *api.RESTClient) *Git
 	}
 }
 
+// NewGitHubTrackerWithTransport builds a GitHubTracker with an explicit token
+// and base HTTP transport wrapped in githubRetryTransport, without reading
+// process-wide credential caches or host gh auth.
+func NewGitHubTrackerWithTransport(owner, repo, token string, base http.RoundTripper) (*GitHubTracker, error) {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	client, err := api.NewRESTClient(api.ClientOptions{
+		Host:      "github.com",
+		AuthToken: token,
+		Timeout:   githubRequestTimeout,
+		Transport: githubRetryTransport{base: base},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return NewGitHubTrackerWithClient(owner, repo, client), nil
+}
+
 func (g *GitHubTracker) UpstreamRepo() string {
 	return g.owner + "/" + g.repo
 }
@@ -1055,6 +1074,10 @@ func (g *GitHubTracker) RepositoryOwnerType(ctx context.Context) (string, error)
 	return metadata.Owner.Type, err
 }
 
+// maxHTTPErrorBodyBytes caps error response bodies passed to go-gh's
+// api.HandleHTTPError (which uses io.ReadAll) after retry exhaustion.
+const maxHTTPErrorBodyBytes = 1 << 20
+
 // githubRetryTransport shares Git's classification and wait budget. It sits
 // below go-gh's headers and above the base transport, so discarded responses
 // cannot reach API decoding or verbose response logging.
@@ -1101,9 +1124,14 @@ func (t githubRetryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 				return resp, policy.Error(req.Context(), "GitHub REST "+req.Method, err)
 			}
 			if policy.Exhausted() && resp != nil {
-				// Decode the final response exactly as go-gh does, retaining HTTPError
-				// fields and cause typing for every client consumer, including raw requests.
-				defer resp.Body.Close()
+				// Decode the final response as go-gh does while bounding resp.Body so
+				// a runaway or hostile error stream can never trigger an unbounded io.ReadAll.
+				rawBody := resp.Body
+				defer rawBody.Close()
+				resp.Body = struct {
+					io.Reader
+					io.Closer
+				}{io.LimitReader(rawBody, maxHTTPErrorBodyBytes), rawBody}
 				return nil, policy.Error(req.Context(), "GitHub REST "+req.Method, api.HandleHTTPError(resp))
 			}
 			return resp, nil

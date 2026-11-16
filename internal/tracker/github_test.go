@@ -969,6 +969,9 @@ type retryInspectionBody struct {
 }
 
 func (b *retryInspectionBody) Read(p []byte) (int, error) {
+	if b.bytes >= 16<<20 {
+		return 0, errors.New("runaway retry body read exceeded 16 MiB fuse")
+	}
 	for i := range p {
 		p[i] = 'x'
 	}
@@ -1312,5 +1315,40 @@ func TestSelectedForkReaderAuthAndDenials(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestGitHubRetryExhaustedBoundsErrorBody(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var bodies []*retryInspectionBody
+		transport := githubRetryTransport{base: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			body := &retryInspectionBody{}
+			bodies = append(bodies, body)
+			return &http.Response{
+				StatusCode: 503,
+				Status:     "503 Service Unavailable",
+				Header:     http.Header{"Content-Type": {"text/plain"}},
+				Body:       body,
+				Request:    r,
+			}, nil
+		})}
+		ctx := gitcredential.WithNetworkRetry(t.Context(), "swarm issue status 462", nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/test", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = transport.RoundTrip(req)
+		var exhausted *gitcredential.RetryExhaustedError
+		if !errors.As(err, &exhausted) || len(bodies) != gitcredential.RetryAttempts {
+			t.Fatalf("calls=%d err=%v", len(bodies), err)
+		}
+		for i, b := range bodies[:len(bodies)-1] {
+			if b.bytes != 0 || !b.closed {
+				t.Fatalf("intermediate attempt %d read or leaked body: bytes=%d closed=%v", i+1, b.bytes, b.closed)
+			}
+		}
+		last := bodies[len(bodies)-1]
+		if last.bytes > maxHTTPErrorBodyBytes+4096 || !last.closed {
+			t.Fatalf("final exhausted attempt exceeded error-body bound: bytes=%d closed=%v", last.bytes, last.closed)
+		}
+	})
 }

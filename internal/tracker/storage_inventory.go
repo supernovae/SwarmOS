@@ -396,7 +396,10 @@ func newInventoryRESTClient(options api.ClientOptions) (*api.RESTClient, error) 
 			transport = clone
 		}
 	}
-	options.Transport = inventoryTransport{base: githubRetryTransport{base: transport}}
+	// Wrap inventoryTransport directly around the base transport so non-2xx
+	// bodies are closed and discarded before githubRetryTransport inspects or
+	// decodes exhausted error responses.
+	options.Transport = githubRetryTransport{base: inventoryTransport{base: transport}}
 	options.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	options.EnableCache = false
 	options.LogIgnoreEnv = true

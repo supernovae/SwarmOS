@@ -11,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
+
+	"github.com/supernovae/swarmos/internal/gitcredential"
 )
 
 func inventoryTestBudget() InventoryBudget {
@@ -183,41 +186,66 @@ func TestStorageLocalVisitorDoesNotCreateOrRefresh(t *testing.T) {
 
 type inventoryHostileBody struct {
 	reads  int
+	bytes  int
 	closed bool
 }
 
 func (b *inventoryHostileBody) Read(p []byte) (int, error) {
 	b.reads++
+	if b.bytes >= 16<<20 {
+		// Fail-safe fuse so a broken transport fails the test assertion instead of OOM-killing the host.
+		return 0, errors.New("runaway error body read exceeded 16 MiB fuse")
+	}
 	for i := range p {
 		p[i] = 'x'
 	}
+	b.bytes += len(p)
 	return len(p), nil
 }
 func (b *inventoryHostileBody) Close() error { b.closed = true; return nil }
 func TestStoragePRVisitorNeverBuffersErrorBodies(t *testing.T) {
-	body := &inventoryHostileBody{}
-	calls := 0
-	client, err := newInventoryRESTClient(api.ClientOptions{Host: "github.com", AuthToken: "fixture", Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		return &http.Response{StatusCode: 500, Status: "500 failed", Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body, Request: req}, nil
-	})})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tr := &GitHubTracker{owner: "local", repo: "fixture", inventoryClient: client}
-	if err = tr.VisitPullRequests(context.Background(), inventoryTestBudget(), func(*PullRequest) error { return nil }); err == nil {
-		t.Fatal("lost HTTP failure")
-	}
-	if calls != 1 || body.reads != 0 || !body.closed {
-		t.Fatal(calls, body)
-	}
-	refused := inventoryTestBudget()
-	refused.Reserve = func(int64) error { return ErrInventoryLimit }
-	if err = tr.VisitPullRequests(context.Background(), refused, func(*PullRequest) error { return nil }); !errors.Is(err, ErrInventoryLimit) {
-		t.Fatal(err)
-	}
-	if calls != 1 {
-		t.Fatal("request started after budget refusal")
+	for _, tc := range []struct {
+		status    int
+		wantCalls int
+	}{
+		{status: 422, wantCalls: 1},
+		{status: 500, wantCalls: gitcredential.RetryAttempts},
+	} {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var bodies []*inventoryHostileBody
+				calls := 0
+				client, err := newInventoryRESTClient(api.ClientOptions{Host: "github.com", AuthToken: "fixture", Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					body := &inventoryHostileBody{}
+					bodies = append(bodies, body)
+					return &http.Response{StatusCode: tc.status, Status: fmt.Sprintf("%d failed", tc.status), Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body, Request: req}, nil
+				})})
+				if err != nil {
+					t.Fatal(err)
+				}
+				tr := &GitHubTracker{owner: "local", repo: "fixture", inventoryClient: client}
+				if err = tr.VisitPullRequests(t.Context(), inventoryTestBudget(), func(*PullRequest) error { return nil }); err == nil {
+					t.Fatal("lost HTTP failure")
+				}
+				if calls != tc.wantCalls {
+					t.Fatalf("calls = %d, want %d", calls, tc.wantCalls)
+				}
+				for i, body := range bodies {
+					if body.reads != 0 || !body.closed {
+						t.Fatalf("attempt %d buffered or leaked error body: reads=%d bytes=%d closed=%v", i+1, body.reads, body.bytes, body.closed)
+					}
+				}
+				refused := inventoryTestBudget()
+				refused.Reserve = func(int64) error { return ErrInventoryLimit }
+				if err = tr.VisitPullRequests(t.Context(), refused, func(*PullRequest) error { return nil }); !errors.Is(err, ErrInventoryLimit) {
+					t.Fatal(err)
+				}
+				if calls != tc.wantCalls {
+					t.Fatal("request started after budget refusal")
+				}
+			})
+		})
 	}
 }
 

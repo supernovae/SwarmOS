@@ -985,7 +985,7 @@ func TestIssue322GitHubCommands(t *testing.T) {
 				opts.nowFn = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 				opts.lookupEnv = env.lookup()
 				opts.forkDispatcher = dispatch
-				opts.forkPollTimeout = time.Second
+				opts.forkPollTimeout = 30 * time.Second
 				// Storage maintenance keeps its interval state in the process-wide
 				// cache directory, so under t.Parallel another test decides whether
 				// it runs inside this test's injected failures. This test covers

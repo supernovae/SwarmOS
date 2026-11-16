@@ -207,6 +207,8 @@ v0.10.0 expands SwarmOS with maintainer-grade ledger archiving, native sub-issue
 
 - Preserve `context.DeadlineExceeded` (`net.Error` timeout typing) in `githubRetryTransport` when `http.Client.Timeout`'s request context deadline wins the timer race against `setRequestCancel`.
 
+- Align `forkPollTimeout` in `TestIssue322GitHubCommands` to 30s (matching the other CLI fork fixtures) so parallel Git subprocess load in full CLI test runs cannot starve the 1s poll deadline.
+
 ## v0.9.0
 
 v0.9.0 makes issue and PR workflows more reliable with checkpoint recovery, clearer progress and retry guidance, and less repeated validation. Public personal-fork contributors gain trusted upstream plan reviews and approval continuity through implementation and PR revisions.

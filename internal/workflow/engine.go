@@ -1193,7 +1193,8 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 	if instructions != "" {
 		req.TaskPrompt += "\nOperator instructions: " + instructions
 	}
-	if err := e.admitStage(ctx, wu.IssueNumber, owner, "review"); err != nil {
+	admittedState, err := e.admitStageState(ctx, wu.IssueNumber, owner, "review")
+	if err != nil {
 		var admission *budgetAdmissionError
 		if errors.As(err, &admission) {
 			admission.prNumber = prNumber
@@ -1207,7 +1208,7 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 	var review, verdict, firstVerdict string
 	var firstErr error
 	for attempt := 0; ; attempt++ {
-		revRun, err = agent.RunReview(ctx, &attemptRunner{Runner: runner, e: e, st: st, owner: owner, direct: recovery.CandidateHead == "" && prNumber == 0 && !e.ForkMode && !e.LeaseManager.HasWorkerGateway()}, req)
+		revRun, err = agent.RunReview(ctx, &attemptRunner{Runner: runner, e: e, st: st, verified: admittedState, owner: owner, direct: recovery.CandidateHead == "" && prNumber == 0 && !e.ForkMode && !e.LeaseManager.HasWorkerGateway()}, req)
 		if err != nil && revRun != nil && revRun.ExitCode == 0 && prNumber == 0 && st.PRRevision == nil {
 			// Successful processes with no importable report are malformed review runs.
 			err = &planReviewOutputError{err}
@@ -1228,7 +1229,8 @@ func (e *Engine) runAgentReview(ctx context.Context, wtPath string, wu *contract
 			// the coordinator never reads. Ask once for the file itself; the
 			// result is validated exactly like any other review.
 			firstErr = err
-			if admitErr := e.admitStage(ctx, wu.IssueNumber, owner, "review"); admitErr != nil {
+			var admitErr error
+			if admittedState, admitErr = e.admitStageState(ctx, wu.IssueNumber, owner, "review"); admitErr != nil {
 				return "", st, errors.Join(err, admitErr)
 			}
 			reporter.retry("review-format", attempt+1, reviewFormatRetries)

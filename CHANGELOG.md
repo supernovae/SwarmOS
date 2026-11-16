@@ -195,6 +195,14 @@ v0.10.0 expands SwarmOS with maintainer-grade ledger archiving, native sub-issue
 
 - Trim each role prompt: the `swarm` command manual is indexed instead of inlined, developers and testers see check names and protected paths rather than the full policy, passing coordinator validation reports stay out of Prior Artifacts, and an execution profile without a role variant renders no empty body.
 
+- Add an optional verification-only credential for fork coordinator metadata and bounded Git reads while retaining default Actions write authority.
+
+- Fix `TestGatewayPostRetryBudget` to use an explicit mocked `api.RESTClient` instead of `NewGitHubTracker`, avoiding process-wide token-cache and `gh` auth dependencies in secret-free validation runs.
+
+- Reuse the verified admission snapshot in `RunAgentReview` and replace duplicate `GetCurrentState` plus `CheckClaim` reads in `attemptRunner` with a single `CheckClaimState` load.
+
+- Bound exhausted HTTP error response reads in `githubRetryTransport` to 1 MiB and place `inventoryTransport` below `githubRetryTransport` so storage inventory requests discard non-2xx bodies before retry exhaustion can buffer unbounded streams.
+
 ## v0.9.0
 
 v0.9.0 makes issue and PR workflows more reliable with checkpoint recovery, clearer progress and retry guidance, and less repeated validation. Public personal-fork contributors gain trusted upstream plan reviews and approval continuity through implementation and PR revisions.

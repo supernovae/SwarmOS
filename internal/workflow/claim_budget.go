@@ -52,6 +52,11 @@ func (e *Engine) workBudget(st *lease.IssueState) (*lease.ClaimBudget, error) {
 }
 
 func (e *Engine) admitStage(ctx context.Context, issue int, owner, phase string) error {
+	_, err := e.admitStageState(ctx, issue, owner, phase)
+	return err
+}
+
+func (e *Engine) admitStageState(ctx context.Context, issue int, owner, phase string) (*lease.IssueState, error) {
 	paused := context.Cause(ctx) == claimpause.ErrBudget
 	if paused {
 		cleanup, cancel := context.WithTimeout(claimpause.CoordinatorContext(ctx), 30*time.Second)
@@ -60,20 +65,20 @@ func (e *Engine) admitStage(ctx context.Context, issue int, owner, phase string)
 	}
 	st, err := e.LeaseManager.CheckClaimState(ctx, issue, owner)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	b, err := e.workBudget(st)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !paused && (b == nil || b.Available >= b.Threshold) {
-		return nil
+		return st, nil
 	}
 	st, err = e.LeaseManager.Handoff(ctx, issue, owner, phase, phase, "claim budget")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return &budgetAdmissionError{budget: b, state: st, issueNumber: issue, phase: phase}
+	return nil, &budgetAdmissionError{budget: b, state: st, issueNumber: issue, phase: phase}
 }
 
 func setBudgetPause(res *WorkResult, b *lease.ClaimBudget, phase string, opts WorkOptions) {

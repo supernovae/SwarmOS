@@ -612,16 +612,13 @@ type budgetTransport func(*http.Request) (*http.Response, error)
 func (f budgetTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestGatewayPostRetryBudget(t *testing.T) {
-	t.Setenv("SWARM_GITHUB_TOKEN", "dummy-token")
 	for _, success := range []bool{false, true} {
 		t.Run(fmt.Sprint(success), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				old := http.DefaultTransport
-				defer func() { http.DefaultTransport = old }()
 				posts, gets, notices := 0, 0, 0
 				var delays time.Duration
 				var bodies []string
-				http.DefaultTransport = budgetTransport(func(r *http.Request) (*http.Response, error) {
+				tr, err := tracker.NewGitHubTrackerWithTransport("o", "r", "dummy-token", budgetTransport(func(r *http.Request) (*http.Response, error) {
 					if r.Method != "POST" {
 						gets++
 						return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`[]`)), Request: r}, nil
@@ -634,8 +631,7 @@ func TestGatewayPostRetryBudget(t *testing.T) {
 						return &http.Response{StatusCode: 201, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":123,"body":"ok"}`)), Request: r}, nil
 					}
 					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: timeoutError{}}
-				})
-				tr, err := tracker.NewGitHubTracker("o/r")
+				}))
 				if err != nil {
 					t.Fatal(err)
 				}

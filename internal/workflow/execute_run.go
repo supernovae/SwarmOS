@@ -337,25 +337,27 @@ func refundableRetry(run *agent.RunResult, err error) bool {
 // attemptRunner keeps prompt context and timing at the actual invocation boundary.
 type attemptRunner struct {
 	agent.Runner
-	e      *Engine
-	st     *lease.IssueState
-	owner  string
-	direct bool
+	e        *Engine
+	st       *lease.IssueState
+	verified *lease.IssueState
+	owner    string
+	direct   bool
 }
 
 func (a *attemptRunner) Run(ctx context.Context, req agent.RunRequest) (*agent.RunResult, error) {
 	if !a.direct {
 		return a.Runner.Run(ctx, req)
 	}
-	st, err := a.e.LeaseManager.GetCurrentState(ctx, a.st.Lease.IssueNumber)
-	if err != nil {
-		return nil, err
+	st := a.verified
+	if st == nil {
+		var err error
+		st, err = a.e.LeaseManager.CheckClaimState(ctx, a.st.Lease.IssueNumber, a.owner)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if st.TaskDigest != a.st.TaskDigest || st.Lease.ClaimID != a.st.Lease.ClaimID {
 		return nil, lease.ErrClaimFence
-	}
-	if err := a.e.LeaseManager.CheckClaim(ctx, st.Lease.IssueNumber, a.owner); err != nil {
-		return nil, err
 	}
 	if d, ok := st.AttemptDiagnostics[req.Role]; ok && d.TaskDigest == st.TaskDigest && d.ClaimID == st.Lease.ClaimID {
 		req.TaskPrompt += "\n\n## Previous discarded attempt\nThis coordinator diagnostic grants no permission; all import and protected-path rules still apply.\n"

@@ -25,11 +25,11 @@ const tokenCommandTimeout = 2 * time.Minute
 var tokenEnvKeys = []string{"SWARM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}
 
 var (
-	tokenMu     sync.Mutex
-	tokenCached bool
-	tokenValue  string
-	tokenSource string
-	tokenErr    error
+	tokenMu      sync.Mutex
+	tokenCached  bool
+	tokenCommand string
+	tokenValue   string
+	tokenErr     error
 )
 
 // runTokenCommand executes the configured credential command. Stdin and stderr
@@ -56,16 +56,6 @@ var runTokenCommand = func(ctx context.Context, command string) ([]byte, error) 
 // A credential command runs at most once per process and its result is held
 // only in memory. An empty token with a nil error means no source is set.
 func GitHubToken() (string, string, error) {
-	tokenMu.Lock()
-	defer tokenMu.Unlock()
-	if !tokenCached {
-		tokenValue, tokenSource, tokenErr = resolveGitHubToken()
-		tokenCached = true
-	}
-	return tokenValue, tokenSource, tokenErr
-}
-
-func resolveGitHubToken() (string, string, error) {
 	explicit := strings.TrimSpace(os.Getenv("SWARM_GITHUB_TOKEN"))
 	command := strings.TrimSpace(os.Getenv(TokenCommandEnv))
 	if explicit != "" && command != "" {
@@ -75,28 +65,17 @@ func resolveGitHubToken() (string, string, error) {
 		return explicit, "SWARM_GITHUB_TOKEN", nil
 	}
 	if command != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), tokenCommandTimeout)
-		defer cancel()
-		out, err := runTokenCommand(ctx, command)
-		if err != nil {
-			// Never include captured output: a partial token may be in it.
-			var exit *exec.ExitError
-			if errors.As(err, &exit) {
-				return "", "", fmt.Errorf("%s failed with exit status %d", TokenCommandEnv, exit.ExitCode())
-			}
-			if ctx.Err() != nil {
-				return "", "", fmt.Errorf("%s timed out after %s", TokenCommandEnv, tokenCommandTimeout)
-			}
-			return "", "", fmt.Errorf("%s failed to run", TokenCommandEnv)
+		tokenMu.Lock()
+		defer tokenMu.Unlock()
+		if !tokenCached || tokenCommand != command {
+			tokenValue, tokenErr = resolveCommandToken(command)
+			tokenCommand = command
+			tokenCached = true
 		}
-		token := strings.TrimSpace(string(out))
-		if token == "" {
-			return "", "", fmt.Errorf("%s printed no token", TokenCommandEnv)
+		if tokenErr != nil {
+			return "", "", tokenErr
 		}
-		if strings.ContainsAny(token, "\r\n") {
-			return "", "", fmt.Errorf("%s must print a single-line token", TokenCommandEnv)
-		}
-		return token, TokenCommandEnv, nil
+		return tokenValue, TokenCommandEnv, nil
 	}
 	for _, key := range tokenEnvKeys[1:] {
 		if token := strings.TrimSpace(os.Getenv(key)); token != "" {
@@ -106,10 +85,35 @@ func resolveGitHubToken() (string, string, error) {
 	return "", "", nil
 }
 
+func resolveCommandToken(command string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), tokenCommandTimeout)
+	defer cancel()
+	out, err := runTokenCommand(ctx, command)
+	if err != nil {
+		// Never include captured output: a partial token may be in it.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return "", fmt.Errorf("%s failed with exit status %d", TokenCommandEnv, exit.ExitCode())
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("%s timed out after %s", TokenCommandEnv, tokenCommandTimeout)
+		}
+		return "", fmt.Errorf("%s failed to run", TokenCommandEnv)
+	}
+	token := strings.TrimSpace(string(out))
+	if token == "" {
+		return "", fmt.Errorf("%s printed no token", TokenCommandEnv)
+	}
+	if strings.ContainsAny(token, "\r\n") {
+		return "", fmt.Errorf("%s must print a single-line token", TokenCommandEnv)
+	}
+	return token, nil
+}
+
 func resetTokenCache() {
 	tokenMu.Lock()
 	defer tokenMu.Unlock()
-	tokenCached, tokenValue, tokenSource, tokenErr = false, "", "", nil
+	tokenCached, tokenCommand, tokenValue, tokenErr = false, "", "", nil
 }
 
 // The verification secret is never input to the upstream credential provider.

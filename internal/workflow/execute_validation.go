@@ -52,7 +52,7 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 		if err != nil {
 			return false, err
 		}
-		report, err = validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
+		report, err = r.validateChecks(version)
 		if context.Cause(r.ctx) == claimpause.ErrBudget {
 			return true, r.e.pauseWork(r.coordinatorCtx, r.res, r.opts, r.pre.WorkUnit, "implement", true, r.forkMode, r.forkRemote)
 		}
@@ -175,7 +175,7 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 			}
 		}
 		if report == nil {
-			report, err = validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy})
+			report, err = r.validateChecks(version)
 		}
 	}
 	if context.Cause(r.ctx) == claimpause.ErrBudget {
@@ -243,6 +243,64 @@ func (r *workRun) validationRoundWithReuse(round int, reuseChecks bool) (paused 
 		err = fmt.Errorf("%w; rerun the complete required checks with %s", err, command)
 	}
 	return false, err
+}
+
+// errTransientValidationStopped keeps exhausted or rejected checks-only retries
+// out of the developer reservation loop while preserving the underlying error.
+var errTransientValidationStopped = errors.New("transient validation retry stopped")
+
+func (r *workRun) validateChecks(version string) (*validation.ValidationReport, error) {
+	opts := validation.ValidateOptions{Version: version, ClaimID: r.st.Lease.ClaimID, BaseSHA: r.st.BaseSHA, ForkMode: r.forkMode, OnProgress: r.progress.observeCheck, LookupEnv: r.e.LookupEnv, DependencyPolicy: r.e.DependencyPolicy}
+	identity := func() (string, string, error) {
+		head, err := gitcredential.Output(r.ctx, r.wtPath, "rev-parse", "--verify", "HEAD^{commit}")
+		if err != nil {
+			return "", "", err
+		}
+		tree, err := workspace.CheckpointTree(r.ctx, r.wtPath)
+		h := strings.TrimSpace(string(head))
+		if err == nil && (h == "" || tree == "") {
+			err = errors.New("empty validation candidate identity")
+		}
+		return h, tree, err
+	}
+	head, tree, identityErr := identity()
+	report, err := validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, opts)
+	eligible := func(report *validation.ValidationReport, err error) bool {
+		var limit *validation.LimitError
+		return r.ctx.Err() == nil && errors.Is(err, validation.ErrRequiredCheckFailed) && !errors.As(err, &limit) && report != nil && !report.Passed && report.Limit == "" && report.Artifact.Metadata[validation.ChecksSkippedKey] != "skipped" && report.Repair.RetryWithoutRepair()
+	}
+	if !eligible(report, err) {
+		return report, err
+	}
+	stop := func(cause error) (*validation.ValidationReport, error) {
+		// Rejected identity/admission evidence must never be recorded as current.
+		return nil, fmt.Errorf("%w: %w", errTransientValidationStopped, errors.Join(err, cause))
+	}
+	if identityErr != nil {
+		return stop(identityErr)
+	}
+	if admissionErr := r.admit("implement"); admissionErr != nil {
+		return stop(admissionErr)
+	}
+	if approvalErr := r.checkWorkApproval(r.ctx); approvalErr != nil {
+		return stop(approvalErr)
+	}
+	h, t, guardErr := identity()
+	if guardErr != nil || h != head || t != tree {
+		return stop(errors.Join(guardErr, errors.New("validation candidate changed before transient retry")))
+	}
+	report, err = validation.Validate(r.ctx, r.wtPath, r.pre.WorkUnit, opts)
+	h, t, guardErr = identity()
+	if guardErr != nil || h != head || t != tree {
+		return stop(errors.Join(guardErr, errors.New("validation candidate changed during transient retry")))
+	}
+	if checkErr := r.admit("implement"); checkErr != nil {
+		return stop(checkErr)
+	}
+	if eligible(report, err) {
+		err = fmt.Errorf("%w: %w", errTransientValidationStopped, err)
+	}
+	return report, err
 }
 
 var errAcceptanceUnmet = errors.New("acceptance criteria unmet")
@@ -331,7 +389,7 @@ func (r *workRun) validateAndRepair() (*WorkResult, error) {
 		paused, err = r.validationRoundWithReuse(initialRound, refreshEvidence)
 	}
 	var previous []string
-	for round := initialRound + 1; err != nil && !paused && (repairableValidation(err, r.res.Validation) || errors.Is(err, errAcceptanceUnmet)); round++ {
+	for round := initialRound + 1; err != nil && !paused && (!errors.Is(err, errTransientValidationStopped) && (repairableValidation(err, r.res.Validation) || errors.Is(err, errAcceptanceUnmet))); round++ {
 		// Unmet criteria are targets even when checks failed too, so progress
 		// and the final message name everything the round had to fix.
 		failing := repairTargets(r.res.Validation, r.acceptanceRepair())

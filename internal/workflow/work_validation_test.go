@@ -2677,7 +2677,7 @@ func TestRequiredCheckLimitDoesNotRepair(t *testing.T) {
 		mixed, budget := mode.mixed, mode.budget
 		t.Run(fmt.Sprint("mixed=", mixed, "/budget=", budget), func(t *testing.T) {
 			counter := filepath.Join(t.TempDir(), "checks")
-			command := "echo ran >> '" + counter + "'; if test -f stall-check; then sleep 2; fi"
+			command := "echo ran >> '" + counter + "'; if test -f stall-check; then sleep 3; fi"
 			ordinary := "true"
 			if mixed {
 				ordinary = "if test -f stall-check; then exit 9; fi"
@@ -2694,7 +2694,7 @@ func TestRequiredCheckLimitDoesNotRepair(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err = os.WriteFile(path, []byte(strings.ReplaceAll(string(raw), "timeout: 1m", "timeout: 50ms")), 0644); err != nil {
+			if err = os.WriteFile(path, []byte(strings.ReplaceAll(string(raw), "timeout: 1m", "timeout: 500ms")), 0644); err != nil {
 				t.Fatal(err)
 			}
 			retryGit(t, e.repoRoot, "commit", "-am", "short check budget")

@@ -203,6 +203,8 @@ v0.10.0 expands SwarmOS with maintainer-grade ledger archiving, native sub-issue
 
 - Bound exhausted HTTP error response reads in `githubRetryTransport` to 1 MiB and place `inventoryTransport` below `githubRetryTransport` so storage inventory requests discard non-2xx bodies before retry exhaustion can buffer unbounded streams.
 
+- Widen the short check-deadline fixture in `TestRequiredCheckLimitDoesNotRepair` from 50ms to 500ms so shell startup jitter under `-race` does not flake continuation checks.
+
 ## v0.9.0
 
 v0.9.0 makes issue and PR workflows more reliable with checkpoint recovery, clearer progress and retry guidance, and less repeated validation. Public personal-fork contributors gain trusted upstream plan reviews and approval continuity through implementation and PR revisions.

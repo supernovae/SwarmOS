@@ -4,6 +4,197 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## Unreleased
 
+## v0.10.0
+
+v0.10.0 expands SwarmOS with maintainer-grade ledger archiving, native sub-issues and `swarm issue convert`, isolated browser and runtime sandboxing, and major reliability improvements across plan reviews, lease heartbeats, validation retries, and JSON output.
+
+- Repair submit regression tests for validation timing output and head-bound advisory failure evidence.
+
+- Add maintainer-only preview, verified archive, and exact restore of finished issue ledgers, with a versioned manifest, authoritative tombstones, and atomic creation fencing in both ledger namespaces.
+
+- Add opt-in scheduled archive maintenance with `swarm repo init --archive`, managed workflow upgrades, and credential setup guidance.
+
+- Remove potentially overflowing capacity arithmetic when merging rebase repair paths.
+
+- Use labelled parent issues and native sub-issues by default, with organization Epic issue types available through explicit opt-in.
+
+- Add an approved-policy browser profile for task-local Chromium previews in Linux Bubblewrap tools and native validation, using verified 2 GiB systemd 254+ scopes with literal command arguments and read-only Playwright caches.
+
+- Show effective plan gates in issue lint and active bundles, retire merged worktrees containing recognized ignored build directories, and document native Linux child-process output capture issues.
+
+- Add `swarm issue convert` to turn an intake issue into a validated draft WorkUnit in place, with previews, report preservation and individual versus backlog workflow guidance.
+
+- Continue direct issue work through bounded plan revisions, preserve human review obligations and track automatic validation repair allowance across invocations; reject unchanged checkpoint drafts after human review.
+
+- Preserve authenticated earlier plan-review findings for direct issues, show review rounds and retry recovery, and record the reserved retry count in planner telemetry.
+
+- Show authorized sandbox tool capabilities in doctor, task dry-run and role bundles, with JSON or text dry-run output and nonblocking optional diagnostics.
+
+- Make issue decomposition use recorded, ordered child proposals with preview, coverage checks, inherited policy, durable parent retirement, and merge-based parent reconciliation.
+
+- Add internal coordinator-owned storage-use records and maintenance exclusion primitives, retaining unresolved uses across coordinator crashes.
+
+- Add a read-only `swarm storage report` command with human and JSON observations of managed caches, Git storage, worktrees, branches and scratch candidates, bounded accounting, and explicit unknown or incomplete evidence.
+
+- Always show cached storage inventory and its age in node status, including human-readable sizes and guidance when no inventory has run yet.
+
+- Keep managed agent and validator caches near an operator-configured aggregate budget with throttled, idle-use maintenance and actionable storage diagnostics; task and worktree cleanup remains explicit.
+
+- Run required checks with checkpoint instruction content, restore active-task pointers afterward, and stop automatic repair when checks pass in the candidate's checkpoint checkout.
+
+- Fix human CLI next-step guidance and prioritize stale human plan approval before validation repair recovery.
+
+- Register coordinator-owned cache and scratch lifetimes with durable storage-use evidence, retaining interrupted and legacy coverage conservatively.
+
+- Add coordinator-only preview and safe reclamation of registered idle caches and abandoned temporary storage under storage-use exclusion.
+
+- Add preview-first `swarm storage cleanup` with JSON reports, repository scopes, merged-task retirement and admitted idle host storage reclamation.
+
+- Add approved-base browser-profile access through owned stdio tools for native Linux Codex developer and tester runs, retaining native shell network isolation.
+
+- Preserve the rejected plan review's identity in recovery guidance after an automatic retry.
+
+- Prepare an isolated, prefetched Go module cache for live Bubblewrap tests while keeping sandbox dependencies read-only.
+
+- Let cache maintenance reclaim eligible idle caches with partial byte accounting, and isolate test storage-use ledgers from operator state.
+
+- Recover interrupted local storage uses with complete Bubblewrap PID-namespace evidence during applied cleanup and automatic maintenance, while retaining native, mixed and unknown consumers and restarting automatic idle retention.
+
+- Compact finished storage-use history and isolate damaged records so busy caches no longer stall cleanup of other idle resources.
+
+- Fix live sandbox test cache ownership and native completion fixture setup.
+
+- Give Full validation dedicated CLI test and race steps with 30-minute timeouts while keeping other packages at 15 minutes.
+
+- Keep automatic Git maintenance out of CLI test repositories to prevent clone and cleanup races.
+
+- Fix storage cleanup with hidden ledger refs by reading the trusted repository layout while preserving complete snapshot checks.
+
+- Fix PR revision recovery by allowing explicit planning and review before rebasing, with source preservation checks and ordered recovery guidance.
+
+- Require structured, cumulative findings in agent plan reviews and deliver only open blockers to replanning agents.
+
+- Show issue submission readiness as required checks, acceptance evidence, and external verification; block publication until acceptance evidence is complete.
+
+- Assign expensive acceptance checks to one role, estimate their duration, and reuse recorded evidence across roles while preserving coordinator validation.
+
+- Fix the CLI process exit-code test fixture to supply acceptance evidence before submission.
+
+- Fix native helper dispatch in agent and workflow tests and give `make race` a 30-minute test timeout.
+
+- Configure the repository tracker with `tracker: github` or `tracker: local` in `.swarm/config.yaml`; commands no longer accept the backend flag.
+
+- Repair CLI lifecycle test fixtures for acceptance evidence and structured plan review findings, preserving refusal coverage for incomplete reports. Completed fork submissions can be retried without treating imported validation as trusted.
+
+- Let storage cleanup reclaim independently proven resources when physical discovery reaches its budget, report the exhausted discovery areas, and explain how to register repositories when `--all-repos` has none.
+
+- Reuse Go build caches across sandbox checkout paths and trim each repository's agent or validator Go cache above 10 GiB after its consumers finish.
+
+- Summarize tool capabilities in `swarm repo doctor` by default, keeping failure actions visible and full reports available with `--capabilities`.
+
+- Show recorded issue completion, claim expiry, and the next command in status, plus claim, resume, and validation reuse guidance in work previews.
+
+- Detect tester-resume candidate changes before required checks, retain findings and completed check failures, and show the developer recovery command with changed paths.
+
+- Guide developers and testers to their own results file when a completed run returns an unowned active file, while preserving scratch-log guidance and import restrictions.
+
+- Fix fork submissions losing previously recorded trusted acceptance evidence while recording their validation report.
+
+- Reuse eligible passing checks when a continued issue needs fresh tester acceptance evidence, avoiding unnecessary check reruns.
+
+- Update the human plan approval regression test to expect status to recommend resuming work after approval.
+
+- Require the full CLI test package in repository validation and document required versus full-suite test coverage.
+
+- Stop direct issue planning when the planner identifies a WorkUnit correction that requires maintainer editing and reapproval.
+
+- Allow direct claim owners to release an edited WorkUnit while preserving claim fencing and approval checks for fork release and other mutations.
+
+- Keep long runs alive through temporary heartbeat transport failures and renew claims only near expiry, preserving fencing and renewal limits.
+
+- Keep volunteer nodes working after an issue stops, hand off its claim for later continuation, and report the reason and next step.
+
+- Preserve tester FAIL and BLOCKED findings and route direct issues through the bounded developer repair workflow.
+
+- Return automatic plan and validation-repair retry reservations when a role run ends in a classified provider failure, timeout, or cancellation before producing a result.
+
+- Retry complete required validation once for flaky-only or infrastructure-only failures before spending a developer repair round.
+
+- Carry rejection reasons and elapsed timeout diagnostics into the next same-role direct-issue prompt, including successor claims for the same task.
+
+- Release direct issue claims when planning stops for WorkUnit correction, splitting, or exhausted retries, and point retry recovery to an explicit maintainer decision.
+
+- Show claim recovery commands for expired claims, link submitted issue status to its PR, and explain owner release and maintainer revoke options.
+
+- Keep ready-work selection moving past pending PR revisions and exhausted plan retries, and report skipped issues with recovery steps in text and JSON output.
+
+- Honor GitHub primary rate-limit resets, retry explicitly rate-limited REST mutations, and retry GET requests after HTTP 500 responses.
+
+- Preserve the original direct-issue plan review task and append the exact validation error when retrying a malformed review.
+
+- Run required checks before the tester for fresh direct-issue candidates, sending failed checks straight to repair.
+
+- Make JSON output consistent for onboarding, fork request status, storage reports, project plan failures, PR status failures, and issue claims; storage cleanup JSON version 2 uses snake_case report keys.
+
+- Make storage reports, issue cleanup summaries, and repository archive output easier to read; add `swarm storage report --details` for resource observations.
+
+- Remove unused changed-package validation bookkeeping and selection helpers.
+
+- Reduce coordinator state reads to one remote Git request when the state and archive objects are already local, while preserving archive admission and namespace checks.
+
+- Reuse checked claim state during stage admission, review startup, resume, and heartbeat startup to reduce coordinator reads while preserving fenced writes.
+
+- Warm validator caches with empty Go test selection instead of running the full checks twice; skip unsupported warm-up commands.
+
+- Batch Git issue-state reads when choosing the next task, with bounded refresh retries and per-issue fallback when the snapshot is unavailable.
+
+- Bound stalled coordinator Git reads and GitHub REST requests, add Git HTTP low-speed limits, and honor cancellation during default-branch discovery.
+
+- Skip unchanged fenced state writes and redundant audit-comment and label updates, reusing the issue snapshot fetched for approval.
+
+- Reuse immutable base-file reads, Git common-directory lookups, and executable digests within each command while verifying fresh executable bytes before every inspected agent launch.
+
+- Extend required-check budgets using passing run history, stop observable Linux CPU stalls early, and guide resource-limit failures to rerun checks without spending a developer repair round.
+
+- Run required validation checks concurrently with a CPU-based worker bound while preserving policy-ordered reports and progress.
+
+- Keep tester acceptance evidence when the same owner reclaims an unchanged issue candidate, and recommend the full work flow when evidence is missing.
+
+- Report a bounded infrastructure failure cause in required-check output when native launch or teardown fails.
+
+- Remove finished storage uses and their evidence immediately when completion is recorded, keeping ledger records small.
+
+- Preserve optional planner investigation decisions in reviewer bundles while retaining strict artifact ownership checks.
+
+- Fix CLI regression fixtures for storage output compatibility and validation recovery command selection.
+
+- Fix stale CLI regression fixtures for manual plan staging and issue status guidance.
+
+- Fix small defects found in a project audit: `swarm issue stage --phase plan` no longer follows a symlinked `PLAN.md` or `TEST_PLAN.md`; a failed validation-repair reservation reports its real cause instead of "allowance exhausted"; an unchanged re-plan is detectable as `ErrPlanUnchanged` so its next step is shown; fork coordinator errors keep their identity across the transport regardless of capitalisation; and several hints, help strings and docs now name real commands and current behaviour. `swarm issue epic` stays as a hidden compatibility alias of `swarm issue parent create --epic`.
+  Make the `internal/cli` test suite independent of the machine it runs on: tests no longer start agent programs (`claude`, `codex`, `opencode`, `omp`) that happen to be installed, which was most of the package's run time on a developer workstation.
+
+- Honour a required check's configured `timeout` up to one hour instead of silently capping it at 15 minutes, and give the full `cli-regressions` check 30 minutes so a slow but healthy run is no longer thrown away.
+
+- Keep the required `cli-regressions` check inside its 15-minute limit when validation runs in the native sandbox: the check now runs the `internal/cli` tests eight at a time instead of inheriting the sandbox's two-processor default.
+
+- Fix issue work stopping at the checkpoint with "completion inputs changed" after `swarm issue approve` on a new base dropped a checkpoint the base already contained; the finished implementation is now preserved and checkpointed on the same task branch.
+
+- Speed up task validation and CI by adding diff-aware `scope`/`paths` and `tier: ci` check policies, sharing per-run scratch Go build caches across checks, parallelizing isolated CLI tests, and splitting `cli-regressions` across CI shards.
+
+- `swarm issue work` and `swarm pr work` now accept a developer run that renames a file when the approved PLAN.md has a line such as `- Rename old/path.go to new/path.go`. Before, only a delete line authorized removing the old path, so a planned rename was refused as an unplanned deletion.
+
+- The planner prompt now tells the planner how to write a line that lets the developer remove a file: `- Delete path/to/file.go` or `- Rename path/to/old.go to path/to/new.go`. These lines may also say "existing" before the path, as in `- Rename existing old.go to new.go`. The rejection message for an unplanned deletion now shows the rename form too.
+
+- Concurrent required checks no longer fail with `native pre-exec handshake: native reservation write: storage evidence lock: context deadline exceeded` while another check deletes its scratch directory. The deletion used to hold a lock that every check's sandbox startup also needs.
+
+- Harden isolation and projections: the Linux trusted-local reviewer boundary now hides host runtime state directories; the issue audit comment carries the validation result table without raw check output; a node ID derived from the local hostname is no longer recorded in coordination state; and fork phase updates accept only the active status.
+
+- Make storage output readable: the per-run storage notice appears only when caches are over the target, finished tasks are waiting, or disk space is low, and it shows sizes in GiB with one preview command that works on the host. `swarm storage cleanup` now prints a short summary grouped by reason, says when tasks can only be checked with `--apply`, no longer repeats its error, and lists every item with the new `--details` flag.
+
+- Planner and reviewer prompts now ask each plan to name the execution paths (backend, harness and OS) a runtime criterion covers and to show from source that each path can support it, and to give every step a checkable result, so a plan that assumes a capability a path lacks is caught at review instead of during implementation.
+
+- Trim each role prompt: the `swarm` command manual is indexed instead of inlined, developers and testers see check names and protected paths rather than the full policy, passing coordinator validation reports stay out of Prior Artifacts, and an execution profile without a role variant renders no empty body.
+
 ## v0.9.0
 
 v0.9.0 makes issue and PR workflows more reliable with checkpoint recovery, clearer progress and retry guidance, and less repeated validation. Public personal-fork contributors gain trusted upstream plan reviews and approval continuity through implementation and PR revisions.

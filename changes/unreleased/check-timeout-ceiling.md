@@ -1,1 +1,0 @@
-- Honour a required check's configured `timeout` up to one hour instead of silently capping it at 15 minutes, and give the full `cli-regressions` check 30 minutes so a slow but healthy run is no longer thrown away.

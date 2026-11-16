@@ -1,1 +1,0 @@
-- Speed up task validation and CI by adding diff-aware `scope`/`paths` and `tier: ci` check policies, sharing per-run scratch Go build caches across checks, parallelizing isolated CLI tests, and splitting `cli-regressions` across CI shards.

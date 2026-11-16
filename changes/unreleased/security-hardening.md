@@ -1,1 +1,0 @@
-- Harden isolation and projections: the Linux trusted-local reviewer boundary now hides host runtime state directories; the issue audit comment carries the validation result table without raw check output; a node ID derived from the local hostname is no longer recorded in coordination state; and fork phase updates accept only the active status.

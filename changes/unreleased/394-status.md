@@ -1,1 +1,0 @@
-- Always show cached storage inventory and its age in node status, including human-readable sizes and guidance when no inventory has run yet.

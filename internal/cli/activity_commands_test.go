@@ -28,10 +28,10 @@ type commandActivityTracker struct {
 	once    sync.Once
 }
 
-func (b *commandActivityTracker) GetIssue(ctx context.Context, n int) (*tracker.Issue, error) {
+func (b *commandActivityTracker) ListComments(ctx context.Context, n int) ([]*tracker.Comment, error) {
 	e := progress.Event{Status: "running"}
 	progress.ActivityFrom(ctx).Enrich(&e, time.Now())
-	if e.Operation != "" {
+	if e.Operation == string(progress.OpTrackerUpdate) {
 		first := false
 		b.once.Do(func() { first = true; close(b.entered) })
 		if first {
@@ -42,7 +42,7 @@ func (b *commandActivityTracker) GetIssue(ctx context.Context, n int) (*tracker.
 			}
 		}
 	}
-	return b.Tracker.GetIssue(ctx, n)
+	return b.Tracker.ListComments(ctx, n)
 }
 func commandActivityWait(t *testing.T, ch <-chan struct{}) {
 	t.Helper()

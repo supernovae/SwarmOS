@@ -1568,6 +1568,8 @@ func TestIssueWorkRecoveryRepairCommandSelection(t *testing.T) {
 	dir := t.TempDir()
 	fakeGo := `#!/bin/sh
 if [ -f fixed.txt ]; then echo PASS; exit 0; fi
+failure=$(cat failure-control.txt) || exit 1
+if [ ! -f "$failure" ]; then echo PASS; exit 0; fi
 kind=$(cat classification.txt)
 base=false; case "$PWD" in */swarm-repair-base-*) base=true;; esac
 if [ "$kind" = regression ] && $base; then echo '--- PASS: TestBroken (0.00s)'; echo PASS; exit 0; fi
@@ -1634,6 +1636,13 @@ echo FAIL; printf 'FAIL\texample.com/m/broken\t0.01s\n'; exit 1
 							tr := tracker.NewLocalTracker(root).WithUser("alice", "")
 							f := &cliFixture{root: root, tracker: tr, env: newFixtureEnv(t)}
 							f.env.set("SWARM_USER", "alice")
+							// Commit only the control path; toggle failure outside the candidate.
+							failure := filepath.Join(t.TempDir(), "checks fail")
+							if err := os.WriteFile(filepath.Join(root, "failure-control.txt"), []byte(failure+"\n"), 0644); err != nil {
+								t.Fatal(err)
+							}
+							prGit(t, root, "add", "failure-control.txt")
+							prGit(t, root, "commit", "-m", "configure leaf validation failure")
 							f, n, _, _, run := recoveryCommandFixturePrepared(t, backend, "none", f, cfg)
 							number := strconv.Itoa(n)
 							must := func(args ...string) {
@@ -1651,16 +1660,29 @@ echo FAIL; printf 'FAIL\texample.com/m/broken\t0.01s\n'; exit 1
 							f.resolverRunner = func(string, *contract.SwarmConfig, bool) (agent.Runner, error) {
 								return &repairCommandRunner{initial: &initial, counts: counts, observed: observed}, nil
 							}
-							if _, err := run("issue", "work", number, "--agent", "mock", "--progress=false"); err == nil {
-								t.Fatal("initial tester interruption missing")
+							if out, err := run("issue", "work", number, "--agent", "mock", "--progress=false"); err == nil || !strings.Contains(err.Error(), "tester interrupted") || counts["tester"] != 1 {
+								t.Fatalf("initial tester interruption missing: %v %s counts=%v", err, out, counts)
+							}
+							interrupted, err := f.manager.GetCurrentState(t.Context(), n)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if interrupted.ValidationRepairCount != 0 {
+								t.Fatalf("initial checks consumed repair allowance: %d", interrupted.ValidationRepairCount)
 							}
 							initial = false
+							if err := os.WriteFile(failure, nil, 0600); err != nil {
+								t.Fatal(err)
+							}
 							if _, err := run("issue", "work", number, "--phase", "test", "--agent", "mock", "--progress=false"); err == nil {
 								t.Fatal("trusted failure missing")
 							}
 							before, err := f.manager.GetCurrentState(t.Context(), n)
 							if err != nil {
 								t.Fatal(err)
+							}
+							if before.ValidationRepairCount != 0 {
+								t.Fatalf("test-only failure consumed repair allowance: %d", before.ValidationRepairCount)
 							}
 							found := false
 							for _, a := range before.Artifacts {

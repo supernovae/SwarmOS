@@ -1,0 +1,1 @@
+- Add regression coverage rejecting stored failed validation reports even when their artifact verdict is PASS.

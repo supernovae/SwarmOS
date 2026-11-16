@@ -33,7 +33,7 @@ func TestFingerprintReuseBindings(t *testing.T) {
 	original.Metadata["validation_trusted_origin"] = "coordinator"
 	original.Metadata["validation_trusted_owner"] = "owner"
 	original.Metadata["validation_trusted_claim"] = "claim"
-	for _, kind := range []string{"match", "timing", "tree", "base", "policy", "claim", "version", "origin", "owner", "trusted-claim", "FAIL", "missing", "malformed", "dev", "dirty", "empty", "fork"} {
+	for _, kind := range []string{"match", "timing", "tree", "base", "policy", "claim", "version", "origin", "owner", "trusted-claim", "FAIL", "failed-payload-pass", "failed-payload-fail", "missing", "malformed", "dev", "dirty", "empty", "fork"} {
 		t.Run(kind, func(t *testing.T) {
 			art := original
 			art.Metadata = map[string]string{}
@@ -56,6 +56,25 @@ func TestFingerprintReuseBindings(t *testing.T) {
 				art.Metadata["validation_trusted_"+kind] = "other"
 			case "trusted-claim":
 				art.Metadata["validation_trusted_claim"] = "other"
+			case "failed-payload-pass", "failed-payload-fail":
+				var failed ValidationReport
+				if err := json.Unmarshal([]byte(art.Metadata["validation_report"]), &failed); err != nil {
+					t.Fatal(err)
+				}
+				failed.Passed = false
+				failed.CheckOutcomes = []CheckRunOutcome{{
+					Name: "test", Command: "go test ./...", ExitCode: 1,
+					Output:     "main.go:3:1: undefined: forged\n",
+					OutputTail: "main.go:3:1: undefined: forged",
+				}}
+				raw, err := json.Marshal(failed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				art.Metadata["validation_report"] = string(raw)
+				if kind == "failed-payload-fail" {
+					art.Verdict = "FAIL"
+				}
 			case "FAIL":
 				art.Verdict = "FAIL"
 			case "missing":

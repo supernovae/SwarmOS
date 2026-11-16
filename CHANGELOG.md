@@ -205,6 +205,8 @@ v0.10.0 expands SwarmOS with maintainer-grade ledger archiving, native sub-issue
 
 - Widen the short check-deadline fixture in `TestRequiredCheckLimitDoesNotRepair` from 50ms to 500ms so shell startup jitter under `-race` does not flake continuation checks.
 
+- Preserve `context.DeadlineExceeded` (`net.Error` timeout typing) in `githubRetryTransport` when `http.Client.Timeout`'s request context deadline wins the timer race against `setRequestCancel`.
+
 ## v0.9.0
 
 v0.9.0 makes issue and PR workflows more reliable with checkpoint recovery, clearer progress and retry guidance, and less repeated validation. Public personal-fork contributors gain trusted upstream plan reviews and approval continuity through implementation and PR revisions.

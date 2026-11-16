@@ -232,13 +232,23 @@ func TestManualStageResetsPlanBudget(t *testing.T) {
 			if _, err := f.run(args...); !errors.Is(err, workflow.ErrPlanReviewRejected) {
 				t.Fatal(err)
 			}
-			for i := 0; i < 2; i++ {
-				if _, err := f.run(args...); err == nil {
-					t.Fatal("unchanged plan accepted")
+			// Issue planning consumes one retry during the initial rejection;
+			// PR planning needs two further retries to reach the same budget.
+			retries := 1
+			if resource == "pr" {
+				retries = 2
+			}
+			for i := 0; i < retries; i++ {
+				if _, err := f.run(args...); !errors.Is(err, lease.ErrPlanUnchanged) {
+					t.Fatalf("unchanged retry: %v", err)
 				}
 			}
 			if f.state(t, issue).PlanReplanCount != 2 {
 				t.Fatal("budget not exhausted")
+			}
+			st := f.state(t, issue)
+			if st.Lease.Status != "active" || st.Lease.ClaimID == "" || !st.Lease.ExpiresAt.After(time.Now()) {
+				t.Fatalf("stage setup requires a live claim: %+v", st.Lease)
 			}
 			// Staging shares the non-blocking lock held by automatic work.
 			lock, err := lease.LockClaim(f.root, issue)

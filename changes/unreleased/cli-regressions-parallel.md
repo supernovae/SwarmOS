@@ -1,1 +1,0 @@
-- Keep the required `cli-regressions` check inside its 15-minute limit when validation runs in the native sandbox: the check now runs the `internal/cli` tests eight at a time instead of inheriting the sandbox's two-processor default.

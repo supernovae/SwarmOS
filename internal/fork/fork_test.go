@@ -41,11 +41,14 @@ type fakeGitHubState struct {
 	prs               map[int]*tracker.PullRequest
 	descriptionBodies []string
 	forks             map[string]map[string]any
+	requests          map[string]int
+	selectedStatus    int
 }
 
 func newFakeGitHubState() *fakeGitHubState {
 	return &fakeGitHubState{
 		currentUser: "maintainer",
+		requests:    make(map[string]int),
 		nextID:      500,
 		nextPR:      10,
 		issues:      make(map[int]*tracker.Issue),
@@ -75,11 +78,27 @@ func newFakeGitHubState() *fakeGitHubState {
 	}
 }
 
-func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *tracker.GitHubTracker {
+func (s *fakeGitHubState) transportForUser(t *testing.T, login, userType string) http.RoundTripper {
 	t.Helper()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
+
+		s.requests[login+" "+r.Method+" "+r.URL.Path]++
+		if r.Header.Get("Authorization") != "token fixture-"+login {
+			t.Error("unexpected fixture credential")
+		}
+		if login == "selected-reader" && (r.Method != http.MethodGet || (r.URL.Path != "/repos/alice/swarm" && r.URL.Path != "/repos/bob/swarm")) {
+			t.Error("selected reader used for upstream operation")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+
+		if login == "selected-reader" && s.selectedStatus != 0 {
+			w.WriteHeader(s.selectedStatus)
+			fmt.Fprint(w, "fixture-selected-reader unsafe response")
+			return
+		}
 
 		writeJSON := func(v any) {
 			w.Header().Set("Content-Type", "application/json")
@@ -172,7 +191,14 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 			if len(parts) == 2 && parts[1] == "comments" {
 				if r.Method == http.MethodGet {
 					var list []map[string]any
-					for _, cid := range s.issueComm[issueNum] {
+					page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+					if page < 1 {
+						page = 1
+					}
+					ids := s.issueComm[issueNum]
+					start := min((page-1)*100, len(ids))
+					end := min(start+100, len(ids))
+					for _, cid := range ids[start:end] {
 						c := s.comments[cid]
 						list = append(list, map[string]any{
 							"id":         c.ID,
@@ -317,17 +343,21 @@ func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
 	})
+	return roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cloned := req.Clone(req.Context())
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, cloned)
+		resp := rec.Result()
+		resp.Request = cloned
+		return resp, nil
+	})
+}
+
+func (s *fakeGitHubState) trackerForUser(t *testing.T, login, userType string) *tracker.GitHubTracker {
+	t.Helper()
 	client, err := api.NewRESTClient(api.ClientOptions{
-		Host:      "github.com",
-		AuthToken: "test-token",
-		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			cloned := req.Clone(req.Context())
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, cloned)
-			resp := rec.Result()
-			resp.Request = cloned
-			return resp, nil
-		}),
+		Host: "github.com", AuthToken: "fixture-" + login,
+		Transport: s.transportForUser(t, login, userType),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -341,7 +371,11 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 func TestForkCoordinatorSecurityAndLifecycle(t *testing.T) {
 	for _, ns := range []string{contract.LedgerNamespaceBranch, contract.LedgerNamespaceHidden} {
-		t.Run(ns, func(t *testing.T) { testForkCoordinatorSecurityAndLifecycle(t, ns) })
+		t.Run(ns, func(t *testing.T) {
+			for _, selected := range []bool{true, false} {
+				t.Run(fmt.Sprintf("selected=%t", selected), func(t *testing.T) { testForkCoordinatorSecurityAndLifecycle(t, ns, selected) })
+			}
+		})
 	}
 }
 
@@ -362,7 +396,7 @@ func setLedgerNamespace(t *testing.T, root, ns string) {
 	}
 }
 
-func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
+func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string, selected bool) {
 	ctx := context.Background()
 	tmp := t.TempDir()
 	git := func(dir string, args ...string) string {
@@ -472,10 +506,76 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		return ev
 	}
 
+	t.Cleanup(func() {
+		ghState.mu.Lock()
+		defer ghState.mu.Unlock()
+		for _, slug := range []string{"alice/swarm", "bob/swarm"} {
+			if !selected {
+				if ghState.requests[ActionsBotLogin+" GET /repos/"+slug] == 0 {
+					t.Errorf("unset reader missing bot verification for %s", slug)
+				}
+				continue
+			}
+			if ghState.requests["selected-reader GET /repos/"+slug] == 0 {
+				t.Errorf("missing selected metadata reads for %s", slug)
+			}
+			if ghState.requests[ActionsBotLogin+" GET /repos/"+slug] != 0 {
+				t.Errorf("fork metadata fell back to bot for %s", slug)
+			}
+		}
+		for _, path := range []string{"GET /repos/octo/swarm/issues/comments/", "POST /repos/octo/swarm/issues/", "GET /repos/octo/swarm/pulls/"} {
+			found := false
+			for key, count := range ghState.requests {
+				if strings.HasPrefix(key, ActionsBotLogin+" "+path) && count > 0 {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("missing bot operation %s", path)
+			}
+		}
+	})
+	// NewForkReader captures this hermetic transport at construction; restore
+	// the process default before any coordinator operation.
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = ghState.transportForUser(t, "selected-reader", "User")
+	selectedReader, readerErr := tracker.NewForkReader("octo/swarm", "github.com", "fixture-selected-reader")
+	http.DefaultTransport = previousTransport
+	if readerErr != nil {
+		t.Fatal(readerErr)
+	}
+	gitReads := map[string]int{}
+	deniedGitOperation := ""
+	t.Cleanup(func() {
+		if selected && (gitReads["ls-remote"] == 0 || gitReads["fetch"] == 0) {
+			t.Error("missing selected Git callbacks")
+		}
+	})
 	readerInitializations := 0
 	coord.InitForkReader = func() (func(context.Context, string, string) (string, error), func(context.Context, string, string, string) (string, error), error) {
 		readerInitializations++
-		return nil, nil, nil
+		if !selected {
+			return nil, nil, nil
+		}
+		return func(ctx context.Context, slug, owner string) (string, error) {
+				return selectedReader.VerifyForkRepository(ctx, slug, owner, false)
+			}, func(ctx context.Context, slug, op, value string) (string, error) {
+				gitReads[op]++
+				if op == deniedGitOperation {
+					return "", errors.New("selected Git access denied")
+				}
+				var args []string
+				switch op {
+				case "ls-remote":
+					args = []string{"ls-remote", "--refs", coord.forkGitURL(slug), "refs/heads/" + value}
+				case "fetch":
+					args = []string{"fetch", "--no-write-fetch-head", coord.forkGitURL(slug), value}
+				default:
+					return "", fmt.Errorf("unexpected selected read operation %s", op)
+				}
+				out, err := gitfixture.Command(t, upstreamCheckout, args...).CombinedOutput()
+				return string(out), err
+			}, nil
 	}
 	aliceTracker := ghState.trackerForUser(t, "alice", "User")
 	bobTracker := ghState.trackerForUser(t, "bob", "User")
@@ -517,6 +617,7 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeDenied := git(originBare, "for-each-ref", "--format=%(refname) %(objectname)")
 	oldInit := coord.InitForkReader
 	coord.InitForkReader = func() (func(context.Context, string, string) (string, error), func(context.Context, string, string, string) (string, error), error) {
 		return nil, nil, fmt.Errorf("invalid selected credential")
@@ -524,7 +625,27 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 	if _, err := coord.HandleEvent(ctx, makeEvent(42, admitted)); err == nil || !strings.Contains(err.Error(), "invalid selected credential") {
 		t.Fatalf("reader denial ignored: %v", err)
 	}
+	if after := git(originBare, "for-each-ref", "--format=%(refname) %(objectname)"); after != beforeDenied {
+		t.Fatal("reader initialization denial mutated authoritative refs")
+	}
 	coord.InitForkReader = oldInit
+	if selected {
+		for _, status := range []int{401, 403, 404} {
+			ghState.mu.Lock()
+			ghState.selectedStatus = status
+			ghState.mu.Unlock()
+			_, err := coord.HandleEvent(ctx, makeEvent(42, admitted))
+			if err == nil || strings.Contains(err.Error(), "fixture-selected-reader") || strings.Contains(err.Error(), "unsafe response") {
+				t.Fatalf("unsafe metadata denial: %v", err)
+			}
+			if after := git(originBare, "for-each-ref", "--format=%(refname) %(objectname)"); after != beforeDenied {
+				t.Fatal("metadata denial mutated authoritative refs")
+			}
+		}
+		ghState.mu.Lock()
+		ghState.selectedStatus = 0
+		ghState.mu.Unlock()
+	}
 	// 3. Alice acquires #42 via Gateway + Coordinator
 	aliceClone := filepath.Join(tmp, "alice-clone")
 	git(tmp, "clone", originBare, aliceClone)
@@ -664,6 +785,20 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 
 	// Push to alice's fork remote and retry record-checkpoint
 	git(aliceClone, "push", "fork", aliceHead+":refs/heads/"+aliceBranch)
+	if selected {
+		for _, op := range []string{"ls-remote", "fetch"} {
+			before := git(originBare, "for-each-ref", "--format=%(refname) %(objectname)")
+			deniedGitOperation = op
+			_, err := aliceGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "record-checkpoint", IssueNumber: 42, ClaimID: aliceClaimID, Branch: aliceBranch, HeadSHA: aliceHead})
+			if err == nil || !strings.Contains(err.Error(), "selected Git access denied") {
+				t.Fatalf("Git denial ignored: %v", err)
+			}
+			if after := git(originBare, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
+				t.Fatal("Git denial mutated authoritative refs")
+			}
+		}
+		deniedGitOperation = ""
+	}
 	st42, err = aliceGateway.Apply(ctx, lease.ForkRequest{
 		Version:     1,
 		Operation:   "record-checkpoint",
@@ -820,8 +955,16 @@ func testForkCoordinatorSecurityAndLifecycle(t *testing.T, ns string) {
 		req.Version, req.IssueNumber = 1, 42
 		return bobGateway.Apply(ctx, req)
 	}
-	if _, err := aliceGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: 42, PRNumber: 55}); err == nil || !strings.Contains(err.Error(), "does not match authenticated user") {
+	ownerDenial := "does not match authenticated user"
+	if selected {
+		ownerDenial = "fork repository verification failed"
+	}
+	beforeWrongActor := git(originBare, "for-each-ref", "--format=%(refname) %(objectname)")
+	if _, err := aliceGateway.Apply(ctx, lease.ForkRequest{Version: 1, Operation: "acquire-pr", IssueNumber: 42, PRNumber: 55}); err == nil || !strings.Contains(err.Error(), ownerDenial) {
 		t.Fatalf("a contributor claimed a PR whose head is in another contributor's fork: %v", err)
+	}
+	if after := git(originBare, "for-each-ref", "--format=%(refname) %(objectname)"); after != beforeWrongActor {
+		t.Fatal("wrong actor mutated authoritative refs")
 	}
 	if _, err := applyBob(lease.ForkRequest{Operation: "acquire-pr", PRNumber: 56}); err == nil || !strings.Contains(err.Error(), "not a fork contribution linked") {
 		t.Fatalf("acquire-pr accepted a PR the issue does not link: %v", err)

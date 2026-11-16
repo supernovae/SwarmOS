@@ -483,6 +483,58 @@ func TestForkCoordinatorWorkflowScaffoldAndPolicyDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read generated swarm-fork-coordinator.yml: %v", err)
 	}
+
+	for name, load := range map[string]func() ([]byte, error){
+		"generated": func() ([]byte, error) { return raw, nil },
+		"template": func() ([]byte, error) {
+			return embeddedTemplates.ReadFile("templates/github/workflows/swarm-fork-coordinator.yml")
+		},
+		"repository": func() ([]byte, error) { return os.ReadFile("../../.github/workflows/swarm-fork-coordinator.yml") },
+	} {
+		t.Run(name+" credential boundary", func(t *testing.T) {
+			data, err := load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var workflow struct {
+				Jobs map[string]struct {
+					Env   map[string]string `yaml:"env"`
+					Steps []struct {
+						Run  string            `yaml:"run"`
+						Env  map[string]string `yaml:"env"`
+						With map[string]any    `yaml:"with"`
+						Uses string            `yaml:"uses"`
+					} `yaml:"steps"`
+				} `yaml:"jobs"`
+				Env map[string]string `yaml:"env"`
+			}
+			if err := yaml.Unmarshal(data, &workflow); err != nil {
+				t.Fatal(err)
+			}
+			if workflow.Env["SWARM_GITHUB_FORK_READ_TOKEN"] != "" {
+				t.Fatal("workflow credential exposure")
+			}
+			job := workflow.Jobs["coordinate"]
+			if job.Env["SWARM_GITHUB_FORK_READ_TOKEN"] != "" {
+				t.Fatal("job credential exposure")
+			}
+			count := 0
+			for i, step := range job.Steps {
+				if strings.Contains(step.Uses, "actions/checkout") && step.With["persist-credentials"] != false {
+					t.Fatal("checkout persists credentials")
+				}
+				if step.Env["SWARM_GITHUB_FORK_READ_TOKEN"] != "" {
+					count++
+					if i == 0 || !strings.Contains(job.Steps[0].Run, "current_comment = fetch(") || !strings.Contains(job.Steps[0].Run, "current_issue = fetch(") || !strings.Contains(step.Run, "fork-coordinator --event") || step.Env["SWARM_GITHUB_TOKEN"] != "${{ secrets.GITHUB_TOKEN }}" {
+						t.Fatal("read credential outside admitted execution")
+					}
+				}
+			}
+			if count != 1 {
+				t.Fatalf("credential exposures=%d", count)
+			}
+		})
+	}
 	var parsed struct {
 		On struct {
 			IssueComment struct {

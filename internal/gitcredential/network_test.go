@@ -1051,6 +1051,7 @@ func TestForkReadRealAuthenticatedGit(t *testing.T) {
 	name := filepath.Base(root)
 	const token = "selected-read-sentinel"
 	var requests atomic.Int32
+	var deny atomic.Bool
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
@@ -1065,6 +1066,11 @@ func TestForkReadRealAuthenticatedGit(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
+		if deny.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, token+" unsafe denial")
+			return
+		}
 		handler := &cgi.Handler{Path: "/usr/bin/git", Args: []string{"http-backend"}, Env: []string{"GIT_PROJECT_ROOT=" + parent, "GIT_HTTP_EXPORT_ALL=1"}}
 		handler.ServeHTTP(w, r)
 	})}}
@@ -1072,6 +1078,17 @@ func TestForkReadRealAuthenticatedGit(t *testing.T) {
 	defer server.Close()
 	destination := server.URL + "/" + name
 	target := gitfixture.Init(t, "")
+	configBefore, err := os.ReadFile(filepath.Join(target, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperMarker := filepath.Join(t.TempDir(), "helper-called")
+	helper := filepath.Join(t.TempDir(), "askpass")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\ntouch '"+helperMarker+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_ASKPASS", helper)
+	t.Setenv("GH_TOKEN", "alternate-identity")
 	out, err := forkRead(context.Background(), target, destination, token, "ls-remote", "main")
 	if err != nil || !strings.Contains(string(out), sha) {
 		t.Fatalf("lookup: %s %v", out, err)
@@ -1085,6 +1102,35 @@ func TestForkReadRealAuthenticatedGit(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(target, ".git", "FETCH_HEAD")); !os.IsNotExist(err) {
 		t.Fatal("fetch persisted FETCH_HEAD")
+	}
+
+	deny.Store(true)
+	for _, op := range []string{"ls-remote", "fetch"} {
+		before := requests.Load()
+		value := "main"
+		if op == "fetch" {
+			value = sha
+		}
+		out, err := forkRead(context.Background(), target, destination, token, op, value)
+		if err == nil {
+			t.Fatalf("denied %s succeeded", op)
+		}
+		if strings.Contains(string(out)+err.Error(), token) {
+			t.Fatal("credential exposed")
+		}
+		if requests.Load() <= before {
+			t.Fatal("denial did not reach authenticated server")
+		}
+	}
+	if _, err := os.Stat(helperMarker); !os.IsNotExist(err) {
+		t.Fatal("alternate login helper invoked")
+	}
+	configAfter, err := os.ReadFile(filepath.Join(target, ".git", "config"))
+	if err != nil || string(configBefore) != string(configAfter) {
+		t.Fatal("read persisted configuration")
+	}
+	if _, err := os.Stat(filepath.Join(target, ".git", "FETCH_HEAD")); !os.IsNotExist(err) {
+		t.Fatal("denial persisted FETCH_HEAD")
 	}
 }
 

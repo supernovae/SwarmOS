@@ -128,10 +128,17 @@ func networkAttempt(ctx context.Context, root string, combined bool, maxBytes in
 	if !IsNetwork(args) {
 		return nil, errors.New("not a Git network operation")
 	}
-	return network(ctx, root, combined, func(ctx context.Context) (*exec.Cmd, func(string) string, error) { return Command(ctx, root, args...) }, args[0])
+	return runNetworkCommand(ctx, root, combined, maxBytes, args, func(ctx context.Context) (*exec.Cmd, func(string) string, error) { return Command(ctx, root, args...) })
 }
 
-func network(ctx context.Context, root string, combined bool, command func(context.Context) (*exec.Cmd, func(string) string, error), op string) ([]byte, error) {
+// runNetworkCommand is the shared bounded lifecycle for a Git network command.
+// The deadline derives from the full argument vector; maxBytes caps each output
+// stream when positive.
+func runNetworkCommand(ctx context.Context, root string, combined bool, maxBytes int, args []string, command func(context.Context) (*exec.Cmd, func(string) string, error)) ([]byte, error) {
+	if len(args) == 0 {
+		return nil, errors.New("git operation required")
+	}
+	op := args[0]
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("git %s not started: %w", op, err)
 	}

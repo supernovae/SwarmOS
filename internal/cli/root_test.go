@@ -248,7 +248,7 @@ func TestJSONEarlyCommandFailures(t *testing.T) {
 		var out bytes.Buffer
 		c.SetOut(&out)
 		c.SetArgs([]string{"storage", "report", "--root", root})
-		if err := c.Execute(); err != nil || !strings.Contains(out.String(), "Storage report:") {
+		if err := c.Execute(); err != nil || !strings.Contains(out.String(), "Storage report\nScope:") {
 			t.Fatalf("text changed: %v %s", err, out.String())
 		}
 	}

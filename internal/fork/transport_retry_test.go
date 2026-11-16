@@ -5,21 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/supernovae/swarmos/internal/gitcredential"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/cli/go-gh/v2/pkg/api"
+	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/coordination"
+	"github.com/supernovae/swarmos/internal/gitcredential"
 	"github.com/supernovae/swarmos/internal/lease"
+	"github.com/supernovae/swarmos/internal/testutil/gitfixture"
 	"github.com/supernovae/swarmos/internal/tracker"
 )
 
@@ -685,5 +690,167 @@ func TestGatewayPostRetryBudgetEarlyExhaustion(t *testing.T) {
 		if !errors.As(err, &exhausted) || exhausted.Attempts != 1 || exhausted.Operation != "GitHub REST POST" || !errors.As(err, &dial) || !dial.Timeout() || len(ct.bodies) != 1 || ct.reads != 0 || len(*waits) != 0 {
 			t.Fatalf("posts=%d reads=%d waits=%v err=%v", len(ct.bodies), ct.reads, *waits, err)
 		}
+	}
+}
+
+type heartbeatGatewayTimer struct {
+	ch    chan time.Time
+	delay time.Duration
+}
+
+func (t *heartbeatGatewayTimer) C() <-chan time.Time { return t.ch }
+func (t *heartbeatGatewayTimer) Stop() bool          { return true }
+
+type observedHeartbeatGateway struct {
+	gateway *Gateway
+	calls   atomic.Int64
+	errors  chan error
+}
+
+func (g *observedHeartbeatGateway) Apply(ctx context.Context, req lease.ForkRequest) (*lease.IssueState, error) {
+	g.calls.Add(1)
+	st, err := g.gateway.Apply(ctx, req)
+	g.errors <- err
+	return st, err
+}
+
+func TestHeartbeatGatewayTransport(t *testing.T) {
+	for _, scenario := range []string{"post timeout", "post 503", "scan failure", "fence rejection", "max rejection", "committed renewal"} {
+		t.Run(scenario, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(root, ".swarm", "workflows"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			config := "version: 1\ndefault_agent: mock\ndefault_gate: none\nlease:\n  duration: 4h\n  renewable: true\n  max_renewals: 3\nsecurity:\n  require_ready_label: true\n  ready_label: swarm:ready\nagents:\n  mock:\n    binary: mock\n"
+			if err := os.WriteFile(filepath.Join(root, ".swarm", "config.yaml"), []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".swarm", "workflows", "feature.yaml"), []byte("name: feature\nsteps:\n  - name: implement\n    role: developer\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"init"}, {"add", "."}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "base"}} {
+				cmd := gitfixture.Command(t, "", args...)
+				cmd.Dir = root
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git: %v %s", err, out)
+				}
+			}
+			tr := tracker.NewLocalTracker(root).WithUser("maintainer", "OWNER")
+			wu := &contract.WorkUnit{Objective: "Recover heartbeat", Constraints: []string{"Keep fencing"}, Acceptance: []string{"Survive transport"}, Workflow: "feature", Gate: contract.GateNone}
+			issue, err := tr.CreateIssue(t.Context(), "heartbeat", contract.FormatIssueMarkdown(wu), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			coord := lease.NewManager(tr, contract.SecurityConfig{RequireReadyLabel: true, ReadyLabel: "swarm:ready"})
+			store := coordination.NewFileStore(root)
+			coord.SetStore(root, store)
+			base := time.Now()
+			var elapsed atomic.Int64
+			now := func() time.Time { return base.Add(time.Duration(elapsed.Load())) }
+			coord.SetNowFunc(now)
+			if _, err = coord.ApproveTask(t.Context(), issue.Number, "maintainer"); err != nil {
+				t.Fatal(err)
+			}
+			st, err := coord.Acquire(t.Context(), issue.Number, "maintainer", "mock", "implement", 4*time.Hour, 3)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ct := &commentTracker{}
+			var want error
+			switch scenario {
+			case "post timeout":
+				want = &url.Error{Op: "Post", URL: "u", Err: timeoutError{}}
+				ct.posts = []postOutcome{{err: want}, {err: want}}
+			case "post 503":
+				want = httpStatus(503)
+				ct.posts = []postOutcome{{err: want}, {err: want}}
+			case "scan failure", "committed renewal":
+				want = httpStatus(502)
+				ct.readErrs = []error{want}
+			case "fence rejection", "max rejection":
+				want = lease.ErrClaimFence
+				if scenario == "max rejection" {
+					want = lease.ErrMaxRenewals
+				}
+				body, err := FormatResultComment(ForkResult{Version: 1, Operation: "renew", RequestID: 100, IssueNumber: issue.Number, Success: false, Error: want.Error()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ct.extra = []*tracker.Comment{{ID: 101, Author: ActionsBotLogin, AuthorType: "Bot", Body: body, CreatedAt: base, UpdatedAt: base}}
+			}
+			gateway := &Gateway{Tracker: ct, Store: store}
+			recordWaits(gateway)
+			if scenario == "committed renewal" {
+				gateway.Dispatcher = func(ctx context.Context, _ int, _ *tracker.Comment) error {
+					_, err := coord.Renew(ctx, issue.Number, "maintainer", 4*time.Hour)
+					return err
+				}
+			}
+			observed := &observedHeartbeatGateway{gateway: gateway, errors: make(chan error, 10)}
+			worker := lease.NewManager(tr, contract.SecurityConfig{RequireReadyLabel: true, ReadyLabel: "swarm:ready"})
+			worker.SetStore(root, store)
+			worker.SetNowFunc(now)
+			worker.BindClaim(issue.Number, st.Lease.ClaimID)
+			worker.SetWorkerGateway(observed)
+			ticks := make(chan *heartbeatGatewayTimer, 10)
+			worker.SetHeartbeatTimerFunc(func(d time.Duration) lease.HeartbeatTimer {
+				timer := &heartbeatGatewayTimer{make(chan time.Time, 1), d}
+				ticks <- timer
+				return timer
+			})
+			receive := func() *heartbeatGatewayTimer {
+				t.Helper()
+				select {
+				case timer := <-ticks:
+					return timer
+				case <-time.After(5 * time.Second):
+					t.Fatal("no timer")
+					return nil
+				}
+			}
+			h := worker.StartHeartbeat(t.Context(), issue.Number, "maintainer", 4*time.Hour)
+			defer h.Stop()
+			timer := receive()
+			elapsed.Store(int64(8 * time.Hour / 3))
+			timer.ch <- now()
+			var returned error
+			select {
+			case returned = <-observed.errors:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Gateway.Apply did not finish")
+			}
+			if !errors.Is(returned, want) {
+				t.Fatalf("gateway lost cause: %v", returned)
+			}
+			if scenario == "fence rejection" || scenario == "max rejection" {
+				select {
+				case <-h.Context().Done():
+				case <-time.After(5 * time.Second):
+					t.Fatal("fatal gateway error did not cancel")
+				}
+				if !errors.Is(h.Err(), want) {
+					t.Fatalf("fatal cause: %v", h.Err())
+				}
+				select {
+				case <-ticks:
+					t.Fatal("fatal gateway retry")
+				default:
+				}
+				return
+			}
+			timer = receive()
+			if timer.delay != time.Second || h.Context().Err() != nil {
+				t.Fatalf("gateway transport canceled: %v delay=%v", h.Err(), timer.delay)
+			}
+			if scenario == "committed renewal" {
+				elapsed.Add(int64(time.Second))
+				timer.ch <- now()
+				receive()
+				current, err := worker.GetCurrentState(t.Context(), issue.Number)
+				if err != nil || current.Lease.Renewals != 1 || observed.calls.Load() != 1 {
+					t.Fatalf("recovery duplicated committed renewal: %+v %v calls=%d", current, err, observed.calls.Load())
+				}
+			}
+		})
 	}
 }

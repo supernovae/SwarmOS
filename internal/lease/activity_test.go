@@ -2,12 +2,15 @@ package lease
 
 import (
 	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	"github.com/supernovae/swarmos/internal/coordination"
 	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/tracker"
-	"sync"
-	"testing"
-	"time"
 )
 
 type activityBlockingStore struct {
@@ -63,6 +66,9 @@ func TestRenewalIOIsNotLabeled(t *testing.T) {
 	for _, cas := range []bool{false, true} {
 		t.Run(map[bool]string{false: "load", true: "cas"}[cas], func(t *testing.T) {
 			m, _, iss := testManager(t)
+			base := time.Now()
+			var elapsed atomic.Int64
+			m.SetNowFunc(func() time.Time { return base.Add(time.Duration(elapsed.Load())) })
 			if _, err := m.Acquire(t.Context(), iss.Number, "local-dev", "mock", "implement", time.Hour, 2); err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +89,8 @@ func TestRenewalIOIsNotLabeled(t *testing.T) {
 			})
 			h = m.StartHeartbeat(ctx, iss.Number, "local-dev", time.Hour)
 			if cas {
-				timer.ch <- time.Now()
+				elapsed.Add(int64(2 * time.Hour / 3))
+				timer.ch <- base.Add(time.Duration(elapsed.Load()))
 			}
 			select {
 			case rctx := <-store.entered:
@@ -182,6 +189,9 @@ func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
 	for _, stopAt := range []string{"initial-read", "initial-check-tracker", "reload", "recheck", "recheck-tracker", "renew-read", "renew-check", "cas", "projection", "next-check", "next-check-tracker", "normal"} {
 		t.Run(stopAt, func(t *testing.T) {
 			m, _, iss := testManager(t)
+			base := time.Now()
+			var elapsed atomic.Int64
+			m.SetNowFunc(func() time.Time { return base.Add(time.Duration(elapsed.Load())) })
 			if _, err := m.Acquire(t.Context(), iss.Number, "local-dev", "mock", "implement", time.Hour, 3); err != nil {
 				t.Fatal(err)
 			}
@@ -240,7 +250,8 @@ func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
 				case <-time.After(5 * time.Second):
 					t.Fatal("missing timer")
 				}
-				timer.ch <- time.Now()
+				elapsed.Add(int64(2 * time.Hour / 3))
+				timer.ch <- base.Add(time.Duration(elapsed.Load()))
 				for _, step := range [][2]string{{"reload", "load"}, {"recheck", "load"}, {"recheck-tracker", "tracker"}, {"renew-read", "load"}, {"renew-check", "tracker"}, {"cas", "cas"}, {"projection", "tracker"}, {"next-check", "load"}, {"next-check-tracker", "tracker"}} {
 					if !check(step[0], step[1]) {
 						return
@@ -265,7 +276,8 @@ func TestRenewalRepeatedIOAndProjectionMasking(t *testing.T) {
 
 func TestRenewalMaxRenewalsReloadMasking(t *testing.T) {
 	base := time.Now()
-	worker, coord, n, _ := legacyForkManager(t, func() time.Time { return base })
+	var elapsed atomic.Int64
+	worker, coord, n, _ := legacyForkManager(t, func() time.Time { return base.Add(time.Duration(elapsed.Load())) })
 	// Consume the sole renewal before starting the legacy worker. Its expiry-only
 	// budget still permits a renewal attempt, and the coordinator rejects it.
 	if _, err := coord.Renew(t.Context(), n, "local-dev", 4*time.Hour); err != nil {
@@ -310,18 +322,21 @@ func TestRenewalMaxRenewalsReloadMasking(t *testing.T) {
 	read(true)
 	select {
 	case timer := <-ready:
+		elapsed.Store(int64(8 * time.Hour / 3))
 		timer.ch <- base
 	case <-time.After(5 * time.Second):
 		t.Fatal("missing timer")
 	}
 	read(true)
 	read(true)
-	// Gateway renewal returned ErrMaxRenewals; this is its explicit reload.
-	read(false)
-	stopped := make(chan struct{})
-	go func() { h.Stop(); close(stopped) }()
-	activityWait(t, stopped)
-	if h.Err() != nil {
-		t.Fatal(h.Err())
+	// Gateway renewal returned ErrMaxRenewals: no reload or retry is allowed.
+	activityWait(t, h.done)
+	if !errors.Is(h.Err(), ErrMaxRenewals) {
+		t.Fatalf("refusal: %v", h.Err())
+	}
+	select {
+	case <-gates.calls:
+		t.Fatal("refusal triggered a reload")
+	default:
 	}
 }

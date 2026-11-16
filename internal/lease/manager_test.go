@@ -2162,7 +2162,8 @@ func TestDecompositionFencingAndAdmission(t *testing.T) {
 			case "missing token":
 				m.BindClaim(parent.Number, "")
 			case "expired":
-				m.SetNowFunc(func() time.Time { return st.Lease.ExpiresAt.Add(time.Second) })
+				now := st.Lease.ExpiresAt.Add(time.Second)
+				m.SetNowFunc(func() time.Time { return now })
 			case "other owner":
 				m.tracker = tr.WithUser("other", "OWNER")
 			case "source changed":
@@ -3323,5 +3324,277 @@ func TestIssue528StrongerGate(t *testing.T) {
 	}
 	if s.cas != 1 || st.EffectiveGate != contract.GateAgent {
 		t.Fatalf("CAS/gate = %d/%s", s.cas, st.EffectiveGate)
+	}
+}
+
+func TestAttemptDiagnosticLifecycle(t *testing.T) {
+	m, tr, issue := testManager(t)
+	ctx := t.Context()
+	st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: st.Lease.ClaimID, Kind: "import", Paths: []string{".swarm/active/DEV_NOTES.md"}}
+	record := func(role string, d AttemptDiagnostic) *IssueState {
+		t.Helper()
+		st, err := m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", role, d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	st = record("developer", d)
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded IssueState
+	if err = json.Unmarshal(raw, &decoded); err != nil || !reflect.DeepEqual(decoded.AttemptDiagnostics, st.AttemptDiagnostics) {
+		t.Fatal("round trip", err)
+	}
+	bad := d
+	bad.TaskDigest = "different"
+	if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", bad); !errors.Is(err, ErrClaimFence) {
+		t.Fatal("task fence", err)
+	}
+	bad = d
+	bad.ClaimID = "successor"
+	if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", bad); !errors.Is(err, ErrClaimFence) {
+		t.Fatal("claim fence", err)
+	}
+	record("tester", AttemptDiagnostic{TaskDigest: d.TaskDigest, ClaimID: d.ClaimID, Kind: "timeout", Elapsed: time.Second})
+	art := contract.Artifact{Type: contract.ArtifactImplementation, Producer: "mock:developer", Summary: "accepted implementation", Body: "accepted"}
+	if _, err = m.UpdateArtifact(ctx, issue.Number, "local-dev", contract.Artifact{Type: contract.ArtifactImplementation, IssueNumber: issue.Number + 1}); err == nil {
+		t.Fatal("expected failed artifact")
+	}
+	st, err = m.GetCurrentState(ctx, issue.Number)
+	if err != nil || len(st.AttemptDiagnostics) != 2 {
+		t.Fatal("failed write cleared", err)
+	}
+	st, err = m.UpdateArtifact(ctx, issue.Number, "local-dev", art)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.AttemptDiagnostics["developer"]; ok {
+		t.Fatal("accepted artifact retained diagnostic")
+	}
+	if _, ok := st.AttemptDiagnostics["tester"]; !ok {
+		t.Fatal("another role cleared")
+	}
+	record("developer", d)
+	if _, err = tr.UpdateIssueBody(ctx, issue.Number, strings.ReplaceAll(testWorkUnit(), "Harden coordination state", "Changed objective")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.Release(ctx, issue.Number, "local-dev", "WorkUnit changed"); err != nil {
+		t.Fatal(err)
+	}
+	st, err = m.ApproveTask(ctx, issue.Number, "local-dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.AttemptDiagnostics) != 0 {
+		t.Fatal("reapproval retained diagnostic")
+	}
+}
+
+func TestAttemptDiagnosticTransferFiltering(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		claim, task, role, kind string
+		eligible, direct, want  bool
+	}{
+		{"valid", "old", "task", "developer", "import", true, true, true},
+		{"timeout", "old", "task", "tester", "timeout", true, true, true},
+		{"task changed", "old", "changed", "developer", "import", true, true, false},
+		{"claim mismatch", "other", "task", "developer", "import", true, true, false},
+		{"empty predecessor", "", "task", "developer", "import", true, true, false},
+		{"role", "old", "task", "unknown", "import", true, true, false},
+		{"kind", "old", "task", "developer", "unknown", true, true, false},
+		{"fork predecessor", "old", "task", "developer", "import", false, true, false},
+		{"PR successor", "old", "task", "developer", "import", true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &IssueState{TaskDigest: "task", Lease: contract.Lease{ClaimID: "new"}, AttemptDiagnostics: map[string]AttemptDiagnostic{tc.role: {TaskDigest: tc.task, ClaimID: tc.claim, Kind: tc.kind}}}
+			if !tc.direct {
+				st.PRNumber = 1
+			}
+			predecessor := "old"
+			if tc.claim == "" {
+				predecessor = ""
+			}
+			transferAttemptDiagnostics(st, predecessor, "task", tc.eligible)
+			d, ok := st.AttemptDiagnostics[tc.role]
+			if ok != tc.want || (ok && d.ClaimID != "new") {
+				t.Fatalf("unexpected transfer: %+v", st.AttemptDiagnostics)
+			}
+		})
+	}
+}
+
+func TestAttemptDiagnosticSuccessors(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprint(expired), func(t *testing.T) {
+			m, _, issue := testManager(t)
+			ctx := t.Context()
+			st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := st.Lease.ClaimID
+			d := AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: old, Kind: "timeout", Elapsed: time.Second}
+			if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", d); err != nil {
+				t.Fatal(err)
+			}
+			if expired {
+				now := st.Lease.ExpiresAt.Add(time.Second)
+				m.SetNowFunc(func() time.Time { return now })
+			} else if _, err = m.Handoff(ctx, issue.Number, "local-dev", "implement", "implement", "retry"); err != nil {
+				t.Fatal(err)
+			}
+			st, err = m.Acquire(ctx, issue.Number, "local-dev", "mock", "implement", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.Lease.ClaimID == old || st.AttemptDiagnostics["developer"].ClaimID != st.Lease.ClaimID {
+				t.Fatal("not rebound")
+			}
+			if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", d); !errors.Is(err, ErrClaimFence) {
+				t.Fatalf("old binding accepted: %v", err)
+			}
+			if _, err = m.UpdateArtifact(ctx, issue.Number, "local-dev", contract.Artifact{Type: contract.ArtifactImplementation, Producer: "mock:developer", Summary: "accepted", Body: "accepted"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = m.Handoff(ctx, issue.Number, "local-dev", "implement", "implement", "again"); err != nil {
+				t.Fatal(err)
+			}
+			st, err = m.Acquire(ctx, issue.Number, "local-dev", "mock", "implement", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(st.AttemptDiagnostics) != 0 {
+				t.Fatal("cleared note resurrected")
+			}
+		})
+	}
+}
+
+func TestAttemptDiagnosticCASFailure(t *testing.T) {
+	m, _, issue := testManager(t)
+	ctx := t.Context()
+	st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := st.Lease.ClaimID
+	if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: old, Kind: "timeout"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.Handoff(ctx, issue.Number, "local-dev", "plan", "implement"); err != nil {
+		t.Fatal(err)
+	}
+	original := m.store
+	m.store = &upstreamConflictStore{Store: original}
+	if _, err = m.Acquire(ctx, issue.Number, "local-dev", "mock", "implement", time.Hour, 1); !errors.Is(err, ErrClaimRaceLost) {
+		t.Fatalf("expected race: %v", err)
+	}
+	if m.token(issue.Number) != old {
+		t.Fatal("failed CAS rebound manager")
+	}
+	m.store = original
+	st, err = m.GetCurrentState(ctx, issue.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.AttemptDiagnostics["developer"].ClaimID != old || st.Lease.ClaimID != old {
+		t.Fatal("failed CAS changed state")
+	}
+}
+
+func TestAttemptDiagnosticArtifactReplacement(t *testing.T) {
+	for _, tc := range []struct {
+		role string
+		kind contract.ArtifactType
+	}{{"planner", contract.ArtifactDesign}, {"planner", contract.ArtifactTestPlan}, {"developer", contract.ArtifactImplementation}, {"tester", contract.ArtifactValidation}, {"reviewer", contract.ArtifactReview}} {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			m, _, issue := testManager(t)
+			ctx := t.Context()
+			st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			art := contract.Artifact{Type: tc.kind, Producer: "mock:" + tc.role, Summary: "accepted", Body: "accepted", Verdict: "PASS"}
+			if tc.role == "reviewer" {
+				st, err = m.RecordPlanPair(ctx, issue.Number, "local-dev", contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock:planner", Summary: "plan", Body: "plan"}, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "mock:planner", Summary: "tests", Body: "tests"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				art.Metadata = ReviewBindings(st)
+				art.Metadata["kind"] = "agent"
+				art.Verdict = "APPROVED"
+				art.Body = "VERDICT: APPROVED"
+			}
+			// Persist both an initial artifact and a replacement, clearing on each acceptance.
+			for range 2 {
+				if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", tc.role, AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: st.Lease.ClaimID, Kind: "timeout"}); err != nil {
+					t.Fatal(err)
+				}
+				st, err = m.UpdateArtifact(ctx, issue.Number, "local-dev", art)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := st.AttemptDiagnostics[tc.role]; ok {
+					t.Fatal("accepted artifact retained diagnostic")
+				}
+			}
+		})
+	}
+}
+
+func TestAttemptDiagnosticPlanPair(t *testing.T) {
+	m, _, issue := testManager(t)
+	ctx := t.Context()
+	st, err := m.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "planner", AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: st.Lease.ClaimID, Kind: "timeout"}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = m.RecordPlanPair(ctx, issue.Number, "local-dev", contract.Artifact{Type: contract.ArtifactDesign, Producer: "mock:planner", Summary: "plan", Body: "plan"}, contract.Artifact{Type: contract.ArtifactTestPlan, Producer: "mock:planner", Summary: "tests", Body: "tests"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.AttemptDiagnostics) != 0 {
+		t.Fatal("planner pair retained diagnostic")
+	}
+}
+
+func TestAttemptDiagnosticDifferentOwner(t *testing.T) {
+	old, tr, issue := testManager(t)
+	ctx := t.Context()
+	st, err := old.Acquire(ctx, issue.Number, "local-dev", "mock", "plan", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := AttemptDiagnostic{TaskDigest: st.TaskDigest, ClaimID: st.Lease.ClaimID, Kind: "timeout"}
+	if _, err = old.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", d); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = old.Handoff(ctx, issue.Number, "local-dev", "plan", "implement"); err != nil {
+		t.Fatal(err)
+	}
+	next := NewManager(tr.WithUser("successor", "OWNER"), old.security)
+	if err = next.ConfigureStore(old.repoRoot); err != nil {
+		t.Fatal(err)
+	}
+	st, err = next.Acquire(ctx, issue.Number, "successor", "mock", "implement", time.Hour, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.AttemptDiagnostics["developer"].ClaimID != st.Lease.ClaimID {
+		t.Fatal("different owner lost note")
+	}
+	if _, err = old.RecordAttemptDiagnostic(ctx, issue.Number, "local-dev", "developer", d); !errors.Is(err, ErrClaimFence) {
+		t.Fatalf("stale writer accepted: %v", err)
 	}
 }

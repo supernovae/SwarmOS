@@ -255,8 +255,79 @@ func (m *Manager) AdvanceDecomposition(ctx context.Context, n int, id string, fn
 	return m.saveDecomposition(ctx, n, rev, st)
 }
 
+// AttemptDiagnostic is coordinator-owned context for a discarded direct-issue run.
+type AttemptDiagnostic struct {
+	TaskDigest string        `json:"task_digest"`
+	ClaimID    string        `json:"claim_id"`
+	Kind       string        `json:"kind"`
+	Paths      []string      `json:"paths,omitempty"`
+	Elapsed    time.Duration `json:"elapsed,omitempty"`
+}
+
+func (m *Manager) RecordAttemptDiagnostic(ctx context.Context, n int, owner, role string, d AttemptDiagnostic) (*IssueState, error) {
+	if m.gateway != nil {
+		return nil, fmt.Errorf("attempt diagnostics require a direct issue")
+	}
+	switch role {
+	case "planner", "developer", "tester", "reviewer":
+	default:
+		return nil, fmt.Errorf("invalid diagnostic role")
+	}
+	if d.Kind != "import" && d.Kind != "timeout" {
+		return nil, fmt.Errorf("invalid diagnostic kind")
+	}
+	d.Paths = append([]string(nil), d.Paths...)
+	return m.mutate(ctx, n, owner, func(st *IssueState) error {
+		if !directIssue(st) || st.TaskDigest != d.TaskDigest || st.Lease.ClaimID != d.ClaimID {
+			return fmt.Errorf("attempt binding: %w", ErrClaimFence)
+		}
+		if st.AttemptDiagnostics == nil {
+			st.AttemptDiagnostics = map[string]AttemptDiagnostic{}
+		}
+		st.AttemptDiagnostics[role] = d
+		return nil
+	})
+}
+
+// transferAttemptDiagnostics retains advisory context only for the same direct task.
+// The caller persists the rebinding atomically with the successor lease.
+func transferAttemptDiagnostics(st *IssueState, predecessorClaim, predecessorTask string, eligible bool) {
+	kept := map[string]AttemptDiagnostic{}
+	if eligible && directIssue(st) && predecessorClaim != "" && predecessorTask == st.TaskDigest {
+		for role, d := range st.AttemptDiagnostics {
+			switch role {
+			case "planner", "developer", "tester", "reviewer":
+			default:
+				continue
+			}
+			if d.ClaimID != predecessorClaim || d.TaskDigest != st.TaskDigest || (d.Kind != "import" && d.Kind != "timeout") {
+				continue
+			}
+			d.ClaimID = st.Lease.ClaimID
+			kept[role] = d
+		}
+	}
+	st.AttemptDiagnostics = kept
+}
+
+func clearAttemptDiagnostic(st *IssueState, kind contract.ArtifactType) {
+	role := ""
+	switch kind {
+	case contract.ArtifactDesign, contract.ArtifactTestPlan:
+		role = "planner"
+	case contract.ArtifactReview:
+		role = "reviewer"
+	case contract.ArtifactImplementation:
+		role = "developer"
+	case contract.ArtifactValidation:
+		role = "tester"
+	}
+	delete(st.AttemptDiagnostics, role)
+}
+
 type IssueState struct {
-	gapAcknowledgment *GapAcknowledgment
+	AttemptDiagnostics map[string]AttemptDiagnostic `json:"attempt_diagnostics,omitempty"`
+	gapAcknowledgment  *GapAcknowledgment
 
 	Decomposition *Decomposition `json:"decomposition,omitempty"`
 
@@ -1050,6 +1121,7 @@ func (m *Manager) ApproveTask(ctx context.Context, n int, owner string) (*IssueS
 			}
 			dropPlanReviewHistory(old)
 			if old.TaskDigest != contract.DigestWorkUnit(wu) {
+				old.AttemptDiagnostics = nil
 				old.HumanPlanReview, old.CompletePlan = nil, nil
 				old.HumanDraftCount, old.PlanGeneration = 0, 0
 				old.PlanReservation = nil
@@ -1245,6 +1317,8 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 			return nil, err
 		}
 	}
+	predecessorClaim, predecessorTask := st.Lease.ClaimID, st.TaskDigest
+	diagnosticEligible := prNumber == 0 && directIssue(st)
 	if fresh {
 		previousBase := st.BaseSHA
 		st, err = m.prepareClaimBase(ctx, n, st, wu, cfg)
@@ -1305,6 +1379,7 @@ func (m *Manager) acquire(ctx context.Context, n, prNumber int, owner, agent, ph
 	if err != nil {
 		return nil, err
 	}
+	transferAttemptDiagnostics(st, predecessorClaim, predecessorTask, diagnosticEligible)
 	st.Lease.Contributors = contributors
 	if st.PendingPlanReview != nil {
 		st.Lease.NextPhase = "plan"
@@ -1399,6 +1474,7 @@ func (m *Manager) AcquireFork(ctx context.Context, issue int, owner, agent, phas
 			}
 			return nil, &TaskApprovalError{IssueNumber: issue, Err: fmt.Errorf("%w: approve task first", ErrApprovalRequired)}
 		}
+		st.AttemptDiagnostics = nil
 		if err := m.DecompositionAdmission(ctx, st); err != nil {
 			return nil, err
 		}
@@ -1960,11 +2036,13 @@ func (m *Manager) RecordHumanReview(ctx context.Context, n int, verdict, notes s
 	for i := range st.Artifacts {
 		if st.Artifacts[i].Type == contract.ArtifactReview {
 			art.Version = st.Artifacts[i].Version + 1
+			clearAttemptDiagnostic(st, art.Type)
 			st.Artifacts[i] = art
 			recordPlanReviewTransition(st, art, false)
 			return m.save(ctx, n, rev, st)
 		}
 	}
+	clearAttemptDiagnostic(st, art.Type)
 	st.Artifacts = append(st.Artifacts, art)
 	recordPlanReviewTransition(st, art, false)
 	return m.save(ctx, n, rev, st)
@@ -2297,11 +2375,13 @@ func (m *Manager) updateArtifact(ctx context.Context, n int, owner string, art c
 		for i, a := range st.Artifacts {
 			if a.Type == art.Type {
 				art.Version = a.Version + 1
+				clearAttemptDiagnostic(st, art.Type)
 				st.Artifacts[i] = art
 				recordPlanReviewTransition(st, art, advisory)
 				return nil
 			}
 		}
+		clearAttemptDiagnostic(st, art.Type)
 		st.Artifacts = append(st.Artifacts, art)
 		recordPlanReviewTransition(st, art, advisory)
 		return nil
@@ -2375,10 +2455,12 @@ func (m *Manager) insertValidationArtifact(st *IssueState, n int, art contract.A
 	for i, a := range st.Artifacts {
 		if a.Type == art.Type {
 			art.Version = a.Version + 1
+			clearAttemptDiagnostic(st, art.Type)
 			st.Artifacts[i] = art
 			return nil
 		}
 	}
+	clearAttemptDiagnostic(st, art.Type)
 	st.Artifacts = append(st.Artifacts, art)
 	return nil
 }
@@ -3729,12 +3811,14 @@ func (m *Manager) RecordUpstreamPlanReview(ctx context.Context, o *UpstreamPlanR
 	for i, a := range st.Artifacts {
 		if a.Type == contract.ArtifactReview {
 			art.Version = a.Version + 1
+			clearAttemptDiagnostic(st, art.Type)
 			st.Artifacts[i] = art
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
+		clearAttemptDiagnostic(st, art.Type)
 		st.Artifacts = append(st.Artifacts, art)
 	}
 	if _, structuredErr := contract.ParsePlanFindings(body); structuredErr == nil {

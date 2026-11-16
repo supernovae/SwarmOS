@@ -1234,3 +1234,83 @@ func TestGitHubRetryIssue515(t *testing.T) {
 		})
 	}
 }
+
+func TestSelectedForkReaderAuthAndDenials(t *testing.T) {
+	for _, owner := range []string{"alice", "fixture-org"} {
+		for _, status := range []int{200, 301, 401, 403, 404} {
+			t.Run(owner+"/"+fmt.Sprint(status), func(t *testing.T) {
+				calls := 0
+				reader, err := newForkReader("octo/swarm", "github.com", "read-sentinel", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if req.Method != "GET" || req.URL.Host != "api.github.com" || req.URL.Path != "/repos/"+owner+"/fork" || req.Header.Get("Authorization") != "token read-sentinel" {
+						t.Fatalf("incorrect scoped request: %s %s", req.Method, req.URL)
+					}
+					rec := httptest.NewRecorder()
+					if status == 200 {
+						writeJSON(t, rec, map[string]any{"full_name": owner + "/fork", "fork": true, "owner": map[string]string{"login": owner, "type": map[bool]string{true: "Organization", false: "User"}[owner == "fixture-org"]}, "source": map[string]string{"full_name": "octo/swarm"}})
+					} else {
+						rec.Header().Set("Location", "https://unsafe.invalid/redirect")
+						rec.WriteHeader(status)
+						fmt.Fprint(rec, "read-sentinel unsafe response")
+					}
+					response := rec.Result()
+					response.Request = req
+					return response, nil
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				slug, err := reader.VerifyForkRepository(context.Background(), owner+"/fork", owner, false)
+				if status == 200 {
+					if err != nil || slug != owner+"/fork" {
+						t.Fatalf("%s %v", slug, err)
+					}
+				} else if err == nil || strings.Contains(err.Error(), "sentinel") || strings.Contains(err.Error(), "unsafe") {
+					t.Fatalf("unsafe denial %v", err)
+				}
+				if calls != 1 {
+					t.Fatalf("fallback requests: %d", calls)
+				}
+				if _, err := reader.VerifyForkRepository(context.Background(), owner+"/fork", owner, true); err == nil {
+					t.Fatal("push admitted")
+				}
+				if calls != 1 {
+					t.Fatal("invalid operation made request")
+				}
+			})
+		}
+	}
+
+	for _, tc := range []struct {
+		name, canonical, source string
+		ok                      bool
+	}{
+		{"canonical case", "Alice/Fork", "octo/swarm", true},
+		{"canonical mismatch", "alice/other", "octo/swarm", false},
+		{"source mismatch", "alice/fork", "other/upstream", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			reader, err := newForkReader("octo/swarm", "github.com", "read-sentinel", roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.Header.Get("Authorization") != "token read-sentinel" {
+					t.Fatal("wrong credential")
+				}
+				rec := httptest.NewRecorder()
+				writeJSON(t, rec, map[string]any{"full_name": tc.canonical, "fork": true, "owner": map[string]string{"login": "alice"}, "source": map[string]string{"full_name": tc.source}})
+				return rec.Result(), nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			slug, err := reader.VerifyForkRepository(context.Background(), "alice/fork", "alice", false)
+			if (err == nil) != tc.ok || calls != 1 {
+				t.Fatalf("slug=%q err=%v calls=%d", slug, err, calls)
+			}
+			if tc.ok && slug != tc.canonical {
+				t.Fatal("canonical name lost")
+			}
+		})
+	}
+
+}

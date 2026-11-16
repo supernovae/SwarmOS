@@ -54,6 +54,13 @@ func TestOperationListsStayInSync(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		body := string(data)
+		secret := "SWARM_GITHUB_FORK_READ_TOKEN: ${{ secrets.SWARM_GITHUB_FORK_READ_TOKEN }}"
+		execute := strings.Index(body, "- name: Execute fork worker request")
+		selected := strings.Index(body, secret)
+		if execute < 0 || selected < execute || strings.Count(body, "secrets.SWARM_GITHUB_FORK_READ_TOKEN") != 1 {
+			t.Fatalf("%s must expose read secret only at execution", workflow)
+		}
 		m := admitted.FindSubmatch(data)
 		if m == nil {
 			t.Fatalf("%s has no admission operation list", workflow)

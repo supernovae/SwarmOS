@@ -92,11 +92,12 @@ func TestWorkerOCIReadonlyPlanner(t *testing.T) {
  if chmod u+w source.txt 2>/dev/null; then exit 62; fi
  if rm source.txt 2>/dev/null; then exit 63; fi
  printf plan > .swarm/active/PLAN.md
- printf tests > .swarm/active/TEST_PLAN.md`
+ printf tests > .swarm/active/TEST_PLAN.md
+ printf decision > .swarm/active/DECISION.md`
 	if err := RunWorker(context.Background(), worktree, "/bin/sh", []string{"-ec", script}, opts, nil, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]string{"source.txt": "original", ".swarm/active/PLAN.md": "plan", ".swarm/active/TEST_PLAN.md": "tests"} {
+	for name, want := range map[string]string{"source.txt": "original", ".swarm/active/PLAN.md": "plan", ".swarm/active/TEST_PLAN.md": "tests", ".swarm/active/DECISION.md": "decision"} {
 		got, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(name)))
 		if err != nil || string(got) != want {
 			t.Fatalf("%s: %q %v", name, got, err)

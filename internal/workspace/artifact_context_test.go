@@ -233,3 +233,20 @@ func TestPlannerOnlyReceivesOpenBlockers(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewerBundlePreservesPlannerDecision(t *testing.T) {
+	root := t.TempDir()
+	active := filepath.Join(root, ".swarm/active")
+	if err := os.MkdirAll(active, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const evidence = "decision evidence"
+	checkpointWrite(t, active, "DECISION.md", evidence)
+	if err := compileHarnessBundle(root, &contract.WorkUnit{ID: "ISSUE-583"}, nil, nil, "reviewer", "prompt", "", "", "", "checks", "", bundleGuidance{effectiveGate: contract.GateNone}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(active, "DECISION.md"))
+	if err != nil || string(data) != evidence {
+		t.Fatalf("setup changed decision: %q %v", data, err)
+	}
+}

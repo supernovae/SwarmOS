@@ -417,21 +417,23 @@ func TestIssue466ExpiredDeveloperStatus(t *testing.T) {
 func TestIssue464StatusNextActionMatrix(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, reason, op string
-		args             []string
-		human            bool
+		name, reason, resource, op string
+		target                     int
+		hasAction                  bool
+		args                       []string
+		human                      bool
 	}{
-		{"human plan", ReasonNeedsApproval, "review-plan", []string{"--approve"}, true},
-		{"failed checks", ReasonValidationRepairExhausted, "work", []string{"--phase", "implement"}, false},
-		{"pre-existing checks", ReasonPreExistingFailures, "status", nil, true},
-		{"missing acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
-		{"malformed acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
-		{"unmentioned acceptance", "tester_retry_available", "work", []string{"--phase", "test"}, false},
-		{"unmet acceptance", ReasonValidationRepairExhausted, "work", []string{"--phase", "implement"}, false},
-		{"ready", "ready_to_submit", "submit", nil, false},
-		{"expired ready", "resumable_work", "work", nil, false},
-		{"submitted", "submitted", "status", nil, false},
-		{"other actor", "claim_unavailable", "status", nil, true},
+		{"human plan", ReasonNeedsApproval, "issue", "review-plan", 0, true, []string{"--approve"}, true},
+		{"failed checks", ReasonValidationRepairExhausted, "issue", "work", 0, true, []string{"--phase", "implement"}, false},
+		{"pre-existing checks", ReasonPreExistingFailures, "issue", "status", 0, true, nil, true},
+		{"missing acceptance", "tester_retry_available", "issue", "work", 0, true, []string{"--phase", "test"}, false},
+		{"malformed acceptance", "tester_retry_available", "issue", "work", 0, true, []string{"--phase", "test"}, false},
+		{"unmentioned acceptance", "tester_retry_available", "issue", "work", 0, true, []string{"--phase", "test"}, false},
+		{"unmet acceptance", ReasonValidationRepairExhausted, "issue", "work", 0, true, []string{"--phase", "implement"}, false},
+		{"ready", "ready_to_submit", "issue", "submit", 0, true, nil, false},
+		{"expired ready", "resumable_work", "issue", "work", 0, true, nil, false},
+		{"submitted", "submitted", "pr", "status", 42, true, nil, false},
+		{"other actor", "", "", "", 0, false, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, n := issue466Fixture(t)
@@ -479,18 +481,41 @@ func TestIssue464StatusNextActionMatrix(t *testing.T) {
 					}
 				}
 			})
+			before := f.state(t, n)
 			raw := issue466Run(t, f, now, "issue", "status", strconv.Itoa(n), "--json")
 			entry := issue466Status(t, raw)
+			if !reflect.DeepEqual(before, f.state(t, n)) {
+				t.Fatal("JSON status changed authoritative state")
+			}
+			text := issue466Run(t, f, now, "issue", "status", strconv.Itoa(n))
+			if !reflect.DeepEqual(before, f.state(t, n)) {
+				t.Fatal("status changed authoritative state")
+			}
 			a := entry.NextAction
+			if !tc.hasAction {
+				if a != nil || strings.Contains(text, "Next step:") {
+					t.Fatalf("unexpected recommendation: %+v\n%s", a, text)
+				}
+				if entry.State.Lease.Owner != before.Lease.Owner || !entry.State.Lease.ExpiresAt.Equal(before.Lease.ExpiresAt) {
+					t.Fatal("missing lease information")
+				}
+				return
+			}
 			if a == nil || a.Reason != tc.reason || a.HumanRequired != tc.human {
 				t.Fatalf("action: %+v\n%s", a, raw)
 			}
 			resource, op, args := actionOperation(a)
-			wantArgs := append([]string{strconv.Itoa(n)}, tc.args...)
-			if resource != "issue" || op != tc.op || !reflect.DeepEqual(args, wantArgs) {
+			target := tc.target
+			if target == 0 {
+				target = n
+			}
+			wantArgs := append([]string{strconv.Itoa(target)}, tc.args...)
+			if tc.resource == "pr" && !reflect.DeepEqual(a.Argv, []string{"swarm", "--repo", "local/repo", "pr", tc.op, strconv.Itoa(target)}) {
+				t.Fatalf("path-free repository argv: %v", a.Argv)
+			}
+			if resource != tc.resource || op != tc.op || !reflect.DeepEqual(args, wantArgs) {
 				t.Fatalf("argv: %v want %v", a.Argv, wantArgs)
 			}
-			text := issue466Run(t, f, now, "issue", "status", strconv.Itoa(n))
 			if !strings.Contains(text, "Next step: "+formatCommand(a.Argv)) || strings.Count(text, "Next step:") != 1 {
 				t.Fatalf("text/JSON parity: %s", text)
 			}

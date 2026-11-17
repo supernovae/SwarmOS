@@ -987,33 +987,36 @@ func TestHeartbeatStartupWaitsForTick(t *testing.T) {
 	} {
 		for _, stop := range []bool{true, false} {
 			t.Run(fmt.Sprint(tc.name, "/stop=", stop), func(t *testing.T) {
-				r := newHeartbeatRig(t, tc.duration, 3)
-				at := tc.duration - tc.left
-				r.elapsed.Store(int64(at))
-				before := r.state(t)
-				tick := r.start(t, tc.duration)
-				remaining := tc.left - min(30*time.Second, tc.duration/12)
-				if r.store.writes.Load() != 0 || r.state(t).Lease.Renewals != 0 || !r.state(t).Lease.ExpiresAt.Equal(before.Lease.ExpiresAt) {
-					t.Fatal("startup renewed before first tick")
-				}
-				if tick.delay <= 0 || tick.delay >= remaining {
-					t.Fatalf("delay %v outside (0,%v)", tick.delay, remaining)
-				}
-				if tc.name == "minute" && tick.delay != 15*time.Second {
-					t.Fatalf("delay=%v", tick.delay)
-				}
-				if stop {
-					r.h.Stop()
-					if r.store.writes.Load() != 0 {
-						t.Fatal("Stop wrote")
+				synctest.Test(t, func(t *testing.T) {
+					r := newHeartbeatRig(t, tc.duration, 3)
+					at := tc.duration - tc.left
+					r.elapsed.Store(int64(at))
+					before := r.state(t)
+					tick := r.start(t, tc.duration)
+					remaining := tc.left - min(30*time.Second, tc.duration/12)
+					if r.store.writes.Load() != 0 || r.state(t).Lease.Renewals != 0 || !r.state(t).Lease.ExpiresAt.Equal(before.Lease.ExpiresAt) {
+						t.Fatal("startup renewed before first tick")
 					}
-					return
-				}
-				r.fire(tick, at+tick.delay)
-				next := heartbeatReceive(t, r.ticks)
-				if r.store.writes.Load() != 1 || r.state(t).Lease.Renewals != 1 || r.h.Context().Err() != nil || next.delay <= 0 {
-					t.Fatalf("due tick: writes=%d err=%v delay=%v", r.store.writes.Load(), r.h.Err(), next.delay)
-				}
+					if tick.delay <= 0 || tick.delay >= remaining {
+						t.Fatalf("delay %v outside (0,%v)", tick.delay, remaining)
+					}
+					if tc.name == "minute" && tick.delay != 15*time.Second {
+						t.Fatalf("delay=%v", tick.delay)
+					}
+					if stop {
+						r.h.Stop()
+						if r.store.writes.Load() != 0 {
+							t.Fatal("Stop wrote")
+						}
+						return
+					}
+					r.fire(tick, at+tick.delay)
+					next := heartbeatReceive(t, r.ticks)
+					if r.store.writes.Load() != 1 || r.state(t).Lease.Renewals != 1 || r.h.Context().Err() != nil || next.delay <= 0 {
+						t.Fatalf("due tick: writes=%d err=%v delay=%v", r.store.writes.Load(), r.h.Err(), next.delay)
+					}
+					r.h.Stop()
+				})
 			})
 		}
 	}

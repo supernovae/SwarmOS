@@ -678,7 +678,7 @@ On GitHub, `swarm issue lint <issue-number>` also reports missing or extra nativ
 
 ## Repository validation lanes
 
-PR validation loads its checks from the trusted base and distributes them across eight runners. It checks formatting, builds, vet, staticcheck, the full CLI regression suite, and focused security and core tests. Documentation changes use the policy's path scopes. A newer push cancels older runs for the same PR or branch. Existing security scanning remains enabled.
+PR validation loads its checks from the trusted base and distributes them across eight runners. It checks formatting, builds, vet, staticcheck, the full CLI regression suite, and focused security and core tests. Documentation changes use the policy's path scopes. A newer push cancels older runs for the same PR. Merging a PR does not repeat this suite; nightly and release validation cover the default branch. Existing security scanning remains enabled on PRs and default-branch pushes.
 
 ```bash
 go test -timeout=5m ./internal/cli -run '^Test(CLIRepoValidateHarnessGrantNeedsAuthoritativeState|RepoValidateGrantOnlyRunsNoChecks|RepoValidateGrantFileRechecked|RootDefaultEnvironment|RootInjectedEnvironment|ResolveBuildVersion|ResolveBuildVersionWithoutVCS)$' -count=1

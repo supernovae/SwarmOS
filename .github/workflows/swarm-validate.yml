@@ -3,15 +3,14 @@ name: SwarmOS CI
 on:
   pull_request:
     branches: [main, master]
-  push:
-    branches: [main, master]
   workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Only the newest commit on a PR or branch needs validation.
+# PRs validate the merge candidate; nightly and release runs validate main.
+# Only the newest push to a PR needs this feedback lane.
 concurrency:
   group: swarm-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true

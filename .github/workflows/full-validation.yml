@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [cli-a, cli-b, cli-c, cli-d, workflow-a, workflow-b, other]
+        shard: [cli-a, cli-b, cli-c, cli-d, workflow-a, workflow-b, state, storage, other]
     env:
       GOMAXPROCS: '4'
     steps:
@@ -75,9 +75,11 @@ jobs:
             cli-d) packages=(./internal/cli); filter='^Test([^A-M]|$)|^Example|^Fuzz' ;;
             workflow-a) packages=(./internal/workflow); filter='^Test[A-M]' ;;
             workflow-b) packages=(./internal/workflow); filter='^Test([^A-M]|$)|^Example|^Fuzz' ;;
+            state) packages=(./internal/coordination ./internal/lease ./internal/pr); filter=. ;;
+            storage) packages=(./internal/storage ./internal/validation); filter=. ;;
             other)
               all_packages=$(go list ./...)
-              mapfile -t packages < <(printf '%s\n' "$all_packages" | grep -Ev '/internal/(cli|workflow)$')
+              mapfile -t packages < <(printf '%s\n' "$all_packages" | grep -Ev '/internal/(cli|workflow|coordination|lease|pr|storage|validation)$')
               test "${#packages[@]}" -gt 0
               filter=.
               ;;

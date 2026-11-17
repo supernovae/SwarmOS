@@ -6,6 +6,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## v0.10.0
 
+- Synchronize native stop-failure cancellation tests on process output instead of racing immediate process exit.
+
 - Run large storage capacity fixtures nightly and through `make stress`, keeping local and release feedback focused on functional and security tests.
 
 - Build and verify all six release archives alongside sharded race tests, attach assets and provenance to a draft, and publish only after validation succeeds; tag runs reuse a successful preflight for the exact commit.

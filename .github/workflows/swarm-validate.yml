@@ -11,16 +11,16 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same PR supersedes the older run; main runs always finish.
+# Only the newest commit on a PR or branch needs validation.
 concurrency:
   group: swarm-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
     name: CLI smoke
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     env:
       GOMAXPROCS: '4'
     steps:
@@ -59,18 +59,16 @@ jobs:
       - name: Check changelog fragments
         run: go run ./cmd/changelog --check
 
-  # The required checks run in three shards on separate runners, with
-  # cli-regressions-a, cli-regressions-b, and core/sandbox checks balanced across
-  # shards. Check i runs in shard i%3+1, so the shards always cover every check;
-  # the aggregate job below is the required status.
+  # Six runners keep CLI halves and core checks from competing for the same
+  # CPU and disk. The aggregate status still requires every trusted check.
   policy-shard:
-    name: SwarmOS policy validation (shard ${{ matrix.shard }}/3)
+    name: SwarmOS policy validation (shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     env:
       GOMAXPROCS: '4'
     permissions:
@@ -174,7 +172,7 @@ jobs:
             set -- --grant-file "$RUNNER_TEMP/swarm-harness-grant.json"
           fi
           if "$swarm" repo validate --help | grep -q -- '--shard'; then
-            set -- "$@" --shard "$SHARD/3"
+            set -- "$@" --shard "$SHARD/6"
           elif [ "$SHARD" != 1 ]; then
             # A trusted base from before sharding runs every check in shard 1.
             echo "::notice::The validator at the trusted base predates --shard; shard 1 runs every required check."

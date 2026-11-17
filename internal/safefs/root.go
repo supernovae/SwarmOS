@@ -473,14 +473,7 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 	if name != filepath.Base(name) || !filepath.IsLocal(name) || expected == nil || !expected.IsDir() || visit == nil {
 		return errors.New("invalid checked removal")
 	}
-	device := func(i os.FileInfo) (uint64, bool) {
-		st, ok := i.Sys().(*syscall.Stat_t)
-		if !ok {
-			return 0, false
-		}
-		return uint64(st.Dev), true
-	}
-	dev, ok := device(expected)
+	dev, ok := cleanupDevice(expected)
 	if !ok {
 		return errors.New("unknown cleanup device")
 	}
@@ -520,7 +513,7 @@ func (r *Root) RemoveAllCheckedContext(ctx context.Context, name string, expecte
 			if err != nil {
 				return err
 			}
-			d, known := device(now)
+			d, known := cleanupDevice(now)
 			if !known || d != dev || !os.SameFile(now, want) || now.Mode() != want.Mode() {
 				return errors.New("cleanup entry changed")
 			}

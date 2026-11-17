@@ -6,6 +6,11 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## v0.10.0
 
+- Build and verify all six release archives alongside sharded race tests, attach assets and provenance to a draft, and publish only after validation succeeds.
+- Run PR policy checks on six runners and cancel superseded branch runs to reduce feedback delays.
+- Remove CPU-idle termination of validation checks; retain explicit deadlines, cancellation, and process cleanup.
+- Restore Windows release builds by keeping Unix device metadata behind platform-specific filesystem helpers.
+
 v0.10.0 expands SwarmOS with maintainer-grade ledger archiving, native sub-issues and `swarm issue convert`, isolated browser and runtime sandboxing, and major reliability improvements across plan reviews, lease heartbeats, validation retries, and JSON output.
 
 - Repair submit regression tests for validation timing output and head-bound advisory failure evidence.
@@ -154,7 +159,7 @@ v0.10.0 expands SwarmOS with maintainer-grade ledger archiving, native sub-issue
 
 - Reuse immutable base-file reads, Git common-directory lookups, and executable digests within each command while verifying fresh executable bytes before every inspected agent launch.
 
-- Extend required-check budgets using passing run history, stop observable Linux CPU stalls early, and guide resource-limit failures to rerun checks without spending a developer repair round.
+- Extend required-check budgets using passing run history, use explicit deadlines for checks, and guide resource-limit failures to rerun checks without spending a developer repair round.
 
 - Run required validation checks concurrently with a CPU-based worker bound while preserving policy-ordered reports and progress.
 

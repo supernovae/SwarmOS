@@ -678,7 +678,7 @@ On GitHub, `swarm issue lint <issue-number>` also reports missing or extra nativ
 
 ## Repository validation lanes
 
-Every PR runs the same fixed regression profile, including documentation-only, broad and unknown changes. Trusted-base policy owns all-source formatting, build, vet and staticcheck plus the commands below. Mandatory security checks cover authoritative grants, credentials, filesystem confinement, isolation and fork admission; the full core packages cover approval, fencing and protected policy. CLI smoke and changelog validation also run in CI. Existing security scanning remains enabled.
+PR validation loads its checks from the trusted base and distributes them across six runners. It checks formatting, builds, vet, staticcheck, the full CLI regression suite, and focused security and core tests. Documentation changes use the policy's path scopes. A newer push cancels older runs for the same PR or branch. Existing security scanning remains enabled.
 
 ```bash
 go test -timeout=5m ./internal/cli -run '^Test(CLIRepoValidateHarnessGrantNeedsAuthoritativeState|RepoValidateGrantOnlyRunsNoChecks|RepoValidateGrantFileRechecked|RootDefaultEnvironment|RootInjectedEnvironment|ResolveBuildVersion|ResolveBuildVersionWithoutVCS)$' -count=1
@@ -691,11 +691,13 @@ go test -timeout=5m ./cmd/changelog ./internal/changelog
 go test -timeout=30m -parallel=8 ./internal/cli
 ```
 
-There is no changed-file selector or conditional broad-change fallback: broad changes retain this fixed profile, which runs the entire CLI package on every PR. Nightly and release validation add the race suite and the remaining packages. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
+The CLI regression suite runs in two complementary partitions. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
 
-The [full validation workflow](../.github/workflows/full-validation.yml) runs nightly at 04:23 UTC and can be started from Actions with **Run workflow**. It runs full normal and race suites, with dedicated CLI steps using a 30-minute per-package timeout and all other packages retaining a 15-minute timeout. It also runs static and vulnerability checks, CLI smoke, changelog validation and Linux/macOS/Windows builds on amd64 and arm64. No existing benchmark or performance target is available. Each run records its commit and retains test/build logs for 14 days, including failures, with an Actions summary linking the outcome to the commit.
+The [full validation workflow](../.github/workflows/full-validation.yml) runs nightly at 04:23 UTC and can be started from Actions with **Run workflow**. It runs every test with the race detector, splitting the two largest packages across dedicated runners, alongside static and vulnerability checks. Test logs include individual timings and are retained for 14 days. Each test shard has a 20-minute test timeout and a 30-minute job limit.
 
-Release snapshot and publishing jobs require the shared full gate and existing release eligibility checks for the same resolved immutable commit. A failed or skipped gate blocks packaging; a successful nightly run for another commit cannot satisfy release validation. Publishing retains the release environment approval and provenance attestation.
+Before tagging, run [Release binaries](../.github/workflows/release.yml) manually with the intended version, such as `v0.10.0`. This creates the tag only inside the build runner and builds the real versioned archives for Linux, macOS and Windows on amd64 and arm64. Packaging runs alongside validation so compile failures appear early. The archives are checked for checksums, embedded version and commit, and the Linux restore helper; the native CLI is also executed. The manual run does not publish a tag or release.
+
+After that preflight succeeds, push the version tag at the same commit. The tag workflow validates and builds that exact commit, then downloads its verified archives for publication without rebuilding them. It attaches all assets and provenance to a draft before publishing the immutable release. The release environment's approval rules still apply.
 
 ## Public personal-fork lifecycle regression driver
 

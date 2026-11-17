@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/supernovae/swarmos/internal/contract"
 	"github.com/supernovae/swarmos/internal/process"
@@ -235,7 +236,9 @@ func TestNativeStopFailureRetainsUse(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "command-success", true: "cancellation"}[canceled], func(t *testing.T) {
 			isolateRuntimeControl(t)
-			ctx, scope, err := storageuse.Ensure(context.Background(), "")
+			parent, finish := context.WithTimeout(t.Context(), 10*time.Second)
+			defer finish()
+			ctx, scope, err := storageuse.Ensure(parent, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -244,15 +247,23 @@ func TestNativeStopFailureRetainsUse(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer os.RemoveAll(dir)
+			command := "printf ready"
 			var stdout io.Writer = io.Discard
 			if canceled {
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				defer cancel()
 				stdout = cancelNativeCommandWriter{cancel: cancel}
+				// Keep the command alive until its output triggers cancellation.
+				// Immediate exit can reach failed-stop cleanup before forwarding.
+				command += "; exec sleep 60"
 			}
 			failure := errors.New("injected stop verification failure")
-			err = runNativeCommandWithStop(ctx, "/bin/sh", dir, []string{"PATH=/usr/bin:/bin"}, []string{"-c", "printf ready"}, nil, stdout, io.Discard, func(*exec.Cmd) error { return failure })
+			err = runNativeCommandWithStop(ctx, "/bin/sh", dir, []string{"PATH=/usr/bin:/bin"}, []string{"-c", command}, nil, stdout, io.Discard, func(cmd *exec.Cmd) error {
+				// End the disposable process while simulating unverified stop.
+				process.Stop(cmd)
+				return failure
+			})
 			if canceled && !errors.Is(ctx.Err(), context.Canceled) {
 				t.Fatalf("command did not trigger cancellation: %v", ctx.Err())
 			}

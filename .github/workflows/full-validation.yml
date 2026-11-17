@@ -65,6 +65,7 @@ jobs:
       - name: Test shard
         env:
           SHARD: ${{ matrix.shard }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           test "$(git rev-parse HEAD)" = '${{ inputs.commit || github.sha }}'
           case "$SHARD" in
@@ -82,8 +83,12 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
+          # Large capacity fixtures run nightly. Releases retain every API,
+          # fencing, isolation, deadline and cleanup regression test.
+          skip='^(TestReclamationInventoryRealLedgerScale|TestMaintenanceRealShapeScaleAndEvidenceBudget)$'
+          if [ "$EVENT_NAME" = schedule ]; then skip='^$'; fi
           set -o pipefail
-          go test -race -json -timeout=20m -p=2 -parallel=8 -run "$filter" "${packages[@]}" | tee "$RUNNER_TEMP/tests.jsonl"
+          go test -race -json -timeout=20m -p=2 -parallel=8 -run "$filter" -skip "$skip" "${packages[@]}" | tee "$RUNNER_TEMP/tests.jsonl"
       - name: Retain test timings and failures
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

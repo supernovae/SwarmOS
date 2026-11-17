@@ -905,7 +905,7 @@ func requiredCheckLimitNextActionCompleteRetry(t *testing.T) {
 		t.Run(resource, func(t *testing.T) {
 			counters := t.TempDir()
 			setup := func(f *cliFixture) {
-				policy := "required_checks:\n  - name: first\n    command: echo ran >> '" + filepath.Join(counters, "first") + "'\n    timeout: 1m\n  - name: second\n    command: echo ran >> '" + filepath.Join(counters, "second") + "'; if test -f trigger; then sleep 2; fi\n    timeout: 50ms\nprotected_paths: ['.swarm/**']\n"
+				policy := "required_checks:\n  - name: first\n    command: echo ran >> '" + filepath.Join(counters, "first") + "'\n    timeout: 1m\n  - name: second\n    command: echo ran >> '" + filepath.Join(counters, "second") + "'; if test -f trigger; then sleep 3; fi\n    timeout: 500ms\nprotected_paths: ['.swarm/**']\n"
 				if err := os.WriteFile(filepath.Join(f.root, ".swarm/validation/required-checks.yaml"), []byte(policy), 0644); err != nil {
 					t.Fatal(err)
 				}

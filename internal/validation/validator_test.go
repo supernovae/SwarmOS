@@ -1027,8 +1027,10 @@ func repositoryCLIRegressionsChecks(t *testing.T) []contract.CheckSpec {
 		t.Fatal(err)
 	}
 	wantCommands := map[string]string{
-		"cli-regressions-a": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test[A-M]'",
-		"cli-regressions-b": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test([^A-M]|$)'",
+		"cli-regressions-a": "go test -timeout=20m -parallel=8 ./internal/cli -run '^TestC'",
+		"cli-regressions-b": "go test -timeout=20m -parallel=8 ./internal/cli -run '^TestI'",
+		"cli-regressions-c": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test[A-BD-HJ-M]'",
+		"cli-regressions-d": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test([^A-M]|$)'",
 	}
 	var found []contract.CheckSpec
 	seen := map[string]int{}
@@ -1043,15 +1045,19 @@ func repositoryCLIRegressionsChecks(t *testing.T) []contract.CheckSpec {
 			if check.Tier != "ci" || check.Scope != "affected" {
 				t.Fatalf("%s: want tier=ci scope=affected, got tier=%q scope=%q", check.Name, check.Tier, check.Scope)
 			}
-			seen[check.Name] = idx % 3
+			seen[check.Name] = idx % 8
 			found = append(found, check)
 		}
 	}
-	if len(found) != 2 {
-		t.Fatalf("want cli-regressions-a and cli-regressions-b, got %d", len(found))
+	if len(found) != 4 {
+		t.Fatalf("want four CLI regression partitions, got %d", len(found))
 	}
-	if seen["cli-regressions-a"] == seen["cli-regressions-b"] {
-		t.Fatalf("want cli-regressions-a and cli-regressions-b in distinct 3-way CI shards, both landed in %d", seen["cli-regressions-a"]+1)
+	shards := map[int]bool{}
+	for name, shard := range seen {
+		if shards[shard] {
+			t.Fatalf("CLI partition %s shares shard %d", name, shard+1)
+		}
+		shards[shard] = true
 	}
 	return found
 }
@@ -1097,7 +1103,7 @@ func TestRepositoryCLIRegressionsRejectsNewFailure(t *testing.T) {
 		}
 		return combined.String(), firstErr
 	}
-	for _, testName := range []string{"TestArbitraryFutureCLIRegression", "TestZArbitraryFutureCLIRegression", "Test_arbitraryFutureCLIRegression"} {
+	for _, testName := range []string{"TestArbitraryFutureCLIRegression", "TestCFutureCLIRegression", "TestIFutureCLIRegression", "TestZArbitraryFutureCLIRegression", "Test_arbitraryFutureCLIRegression"} {
 		source := func(body string) string {
 			return "package cli\nimport \"testing\"\nfunc TestOrdinaryPassing(t *testing.T) {}\nfunc " + testName + "(t *testing.T) {" + body + "}\n"
 		}

@@ -678,7 +678,7 @@ On GitHub, `swarm issue lint <issue-number>` also reports missing or extra nativ
 
 ## Repository validation lanes
 
-PR validation loads its checks from the trusted base and distributes them across six runners. It checks formatting, builds, vet, staticcheck, the full CLI regression suite, and focused security and core tests. Documentation changes use the policy's path scopes. A newer push cancels older runs for the same PR or branch. Existing security scanning remains enabled.
+PR validation loads its checks from the trusted base and distributes them across eight runners. It checks formatting, builds, vet, staticcheck, the full CLI regression suite, and focused security and core tests. Documentation changes use the policy's path scopes. A newer push cancels older runs for the same PR or branch. Existing security scanning remains enabled.
 
 ```bash
 go test -timeout=5m ./internal/cli -run '^Test(CLIRepoValidateHarnessGrantNeedsAuthoritativeState|RepoValidateGrantOnlyRunsNoChecks|RepoValidateGrantFileRechecked|RootDefaultEnvironment|RootInjectedEnvironment|ResolveBuildVersion|ResolveBuildVersionWithoutVCS)$' -count=1
@@ -691,7 +691,7 @@ go test -timeout=5m ./cmd/changelog ./internal/changelog
 go test -timeout=30m -parallel=8 ./internal/cli
 ```
 
-The CLI regression suite runs in two complementary partitions. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
+The CLI regression suite runs in four complementary partitions. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
 
 The [full validation workflow](../.github/workflows/full-validation.yml) runs nightly at 04:23 UTC and can be started from Actions with **Run workflow**. It runs every test with the race detector, splitting the two largest packages across dedicated runners, alongside static and vulnerability checks. Test logs include individual timings and are retained for 14 days. Each test shard has a 20-minute test timeout and a 30-minute job limit.
 

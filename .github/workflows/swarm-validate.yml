@@ -61,16 +61,16 @@ jobs:
       - name: Check release preflight selection
         run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
 
-  # Six runners keep CLI halves and core checks from competing for the same
+  # Eight runners keep CLI partitions and core checks from competing for the same
   # CPU and disk. The aggregate status still requires every trusted check.
   policy-shard:
-    name: SwarmOS policy validation (shard ${{ matrix.shard }}/6)
+    name: SwarmOS policy validation (shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     env:
       GOMAXPROCS: '4'
     permissions:
@@ -174,7 +174,7 @@ jobs:
             set -- --grant-file "$RUNNER_TEMP/swarm-harness-grant.json"
           fi
           if "$swarm" repo validate --help | grep -q -- '--shard'; then
-            set -- "$@" --shard "$SHARD/6"
+            set -- "$@" --shard "$SHARD/8"
           elif [ "$SHARD" != 1 ]; then
             # A trusted base from before sharding runs every check in shard 1.
             echo "::notice::The validator at the trusted base predates --shard; shard 1 runs every required check."

@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [cli-a, cli-b, workflow-a, workflow-b, other]
+        shard: [cli-a, cli-b, cli-c, cli-d, workflow-a, workflow-b, other]
     env:
       GOMAXPROCS: '4'
     steps:
@@ -68,12 +68,15 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = '${{ inputs.commit || github.sha }}'
           case "$SHARD" in
-            cli-a) packages=(./internal/cli); filter='^Test[A-M]' ;;
-            cli-b) packages=(./internal/cli); filter='^Test([^A-M]|$)|^Example|^Fuzz' ;;
+            cli-a) packages=(./internal/cli); filter='^TestC' ;;
+            cli-b) packages=(./internal/cli); filter='^TestI' ;;
+            cli-c) packages=(./internal/cli); filter='^Test[A-BD-HJ-M]' ;;
+            cli-d) packages=(./internal/cli); filter='^Test([^A-M]|$)|^Example|^Fuzz' ;;
             workflow-a) packages=(./internal/workflow); filter='^Test[A-M]' ;;
             workflow-b) packages=(./internal/workflow); filter='^Test([^A-M]|$)|^Example|^Fuzz' ;;
             other)
-              mapfile -t packages < <(go list ./... | grep -Ev '/internal/(cli|workflow)$')
+              all_packages=$(go list ./...)
+              mapfile -t packages < <(printf '%s\n' "$all_packages" | grep -Ev '/internal/(cli|workflow)$')
               test "${#packages[@]}" -gt 0
               filter=.
               ;;

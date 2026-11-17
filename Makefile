@@ -9,7 +9,10 @@ GO        ?= go
 GOBIN     ?= $(shell "$(GO)" env GOPATH)/bin
 BIN_DIR   ?= bin
 
-.PHONY: all build install test race fmt lint check clean version
+# Capacity fixtures run nightly and through `make stress`, outside the feedback lane.
+STRESS_TESTS := '^(TestReclamationInventoryRealLedgerScale|TestMaintenanceRealShapeScaleAndEvidenceBudget)$$'
+
+.PHONY: all build install test race stress fmt lint check clean version
 
 all: check build
 
@@ -24,13 +27,17 @@ install:
 	@if [ "$$("$(GO)" env GOOS)" = linux ]; then CGO_ENABLED=0 GOBIN="$(GOBIN)" "$(GO)" install ./cmd/swarm-restore-helper; fi
 	@"$(GOBIN)/swarm" version
 
-## test: run the test suite
+## test: run functional and security tests
 test:
-	$(GO) test ./...
+	$(GO) test -skip $(STRESS_TESTS) ./...
 
-## race: run the test suite with the race detector, as nightly and release validation do
+## race: run functional and security tests with the race detector
 race:
-	$(GO) test -race -timeout=30m ./...
+	$(GO) test -race -timeout=20m -skip $(STRESS_TESTS) ./...
+
+## stress: run large storage capacity fixtures (also covered nightly)
+stress:
+	$(GO) test -race -timeout=20m ./internal/storage -run $(STRESS_TESTS)
 
 ## fmt: format Go sources
 fmt:
@@ -42,7 +49,7 @@ lint:
 	$(GO) vet ./...
 	$(GO) tool staticcheck ./...
 
-## check: full local checks (lint, race tests, and changelog fragments); nightly/release also build distributions
+## check: local lint, functional/security race tests, and changelog fragments
 check: lint race changelog-check
 
 ## version: show the installed swarm version

@@ -691,9 +691,9 @@ go test -timeout=5m ./cmd/changelog ./internal/changelog
 go test -timeout=30m -parallel=8 ./internal/cli
 ```
 
-The CLI regression suite runs in four complementary partitions. Use `make check` for full local lint, race and changelog checks. The repository's scaffold defaults remain unchanged.
+The CLI regression suite runs in four complementary partitions. Use `make check` for local lint, functional and security race tests, and changelog checks. `make stress` runs the two large storage capacity fixtures. The repository's scaffold defaults remain unchanged.
 
-The [full validation workflow](../.github/workflows/full-validation.yml) runs nightly at 04:23 UTC and can be started from Actions with **Run workflow**. It runs every test with the race detector, splitting the two largest packages across dedicated runners, alongside static and vulnerability checks. Test logs include individual timings and are retained for 14 days. Each test shard has a 20-minute test timeout and a 30-minute job limit.
+The [full validation workflow](../.github/workflows/full-validation.yml) runs nightly at 04:23 UTC and can be started from Actions with **Run workflow**. It runs functional and security tests with the race detector, splitting the two largest packages across dedicated runners, alongside static and vulnerability checks. Scheduled nightly runs also include the two large storage capacity fixtures; release and manual runs leave those to the nightly lane. Test logs include individual timings and are retained for 14 days. Each test shard has a 20-minute test timeout and a 30-minute job limit.
 
 Before tagging, run [Release binaries](../.github/workflows/release.yml) manually with the intended version, such as `v0.10.0`. This creates the tag only inside the build runner and builds the real versioned archives for Linux, macOS and Windows on amd64 and arm64. Packaging runs alongside validation so compile failures appear early. The archives are checked for checksums, embedded version and commit, and the Linux restore helper; the native CLI is also executed. The manual run does not publish a tag or release.
 

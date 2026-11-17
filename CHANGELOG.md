@@ -6,6 +6,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## v0.10.0
 
+- Run large storage capacity fixtures nightly and through `make stress`, keeping local and release feedback focused on functional and security tests.
+
 - Build and verify all six release archives alongside sharded race tests, attach assets and provenance to a draft, and publish only after validation succeeds; tag runs reuse a successful preflight for the exact commit.
 - Run PR policy checks on eight runners with four CLI partitions and cancel superseded PR runs, and avoid repeating the PR suite after merge.
 - Remove CPU-idle termination of validation checks; retain explicit deadlines, cancellation, and process cleanup.

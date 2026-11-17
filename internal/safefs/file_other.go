@@ -9,6 +9,8 @@ import (
 
 const nonblock = 0
 
+func cleanupDevice(os.FileInfo) (uint64, bool) { return 0, false }
+
 func singleLink(_ *os.File, _ os.FileInfo) error {
 	return fmt.Errorf("secure regular-file verification is unavailable on this platform")
 }

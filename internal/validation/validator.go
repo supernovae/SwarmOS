@@ -3,8 +3,6 @@ package validation
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +12,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +47,9 @@ func (e *LimitError) Unwrap() error { return ErrRequiredCheckFailed }
 
 const LimitMetadataKey = "validation_limit"
 const OutcomeTimeLimit = "time-limit"
+
+// OutcomeStalled is retained for recovery of artifacts written by older versions.
+// New checks are bounded only by their deadline and parent cancellation.
 const OutcomeStalled = "stalled"
 
 func validLimit(s string) bool { return s == OutcomeTimeLimit || s == OutcomeStalled }
@@ -730,11 +730,6 @@ type checkRunner struct {
 	runnerIsolated bool
 	runCommand     func(context.Context, string, time.Duration, io.Writer, io.Writer) error
 	runOCI         func(context.Context, string, time.Duration, io.Writer, io.Writer) error
-	// Per-run observer seams; defaults are Linux procfs, one second, five minutes.
-	stallWindow     time.Duration
-	sampleInterval  time.Duration
-	sampleProcesses func() (map[int]checkProcess, error)
-	now             func() time.Time
 }
 
 // run executes command under ctx, which the caller bounds by duration.
@@ -752,24 +747,7 @@ func (r *checkRunner) run(ctx context.Context, command string, duration time.Dur
 				return err
 			}
 		}
-		if runtime.GOOS != "linux" {
-			return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, caches, r.deps, r.warmup, stdout, stderr)
-		}
-		var nonce [16]byte
-		if _, err := rand.Read(nonce[:]); err != nil {
-			return err
-		}
-		marker := "swarm-validation-" + hex.EncodeToString(nonce[:])
-		wrapped := nativeCheckSupervisor(command, marker)
-		observedCtx, cancel := context.WithCancelCause(ctx)
-		defer cancel(nil)
-		stop := r.observeCPU(observedCtx, cancel, 0, marker)
-		defer stop()
-		err := sandbox.RunConfiguredNativeValidation(observedCtx, r.worktree, r.cfg, wrapped, caches, r.deps, r.warmup, stdout, stderr)
-		if errors.Is(context.Cause(observedCtx), errCheckStalled) && ctx.Err() == nil && err != nil {
-			return errors.Join(err, errCheckStalled)
-		}
-		return err
+		return sandbox.RunConfiguredNativeValidation(ctx, r.worktree, r.cfg, command, caches, r.deps, r.warmup, stdout, stderr)
 	} else if r.execution.Mode == contract.ExecutionIsolated {
 		if r.runOCI != nil {
 			return r.runOCI(ctx, command, duration, stdout, stderr)
@@ -971,8 +949,6 @@ func (r *checkRunner) runCheck(ctx context.Context, name, command string, durati
 		outcome.Outcome = "failure"
 		if ctx.Err() == nil && errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
 			outcome.Outcome = OutcomeTimeLimit
-		} else if ctx.Err() == nil && errors.Is(runErr, errCheckStalled) {
-			outcome.Outcome = OutcomeStalled
 		}
 	}
 	if runErr == nil {
@@ -1035,9 +1011,7 @@ func (r *checkRunner) runOnHost(ctx context.Context, command string, stdout, std
 	if err != nil {
 		return err
 	}
-	observedCtx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	cmd := exec.CommandContext(observedCtx, "sh", "-c", command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = r.worktree
 	cmd.Env = cleanCheckEnv(r.home, caches, r.deps)
 	process.Configure(cmd)
@@ -1046,12 +1020,7 @@ func (r *checkRunner) runOnHost(ctx context.Context, command string, stdout, std
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err = cmd.Start()
 	if err == nil {
-		stop := r.observeCPU(observedCtx, cancel, cmd.Process.Pid, "")
 		err = cmd.Wait()
-		stop()
-		if ctx.Err() == nil && err != nil && errors.Is(context.Cause(observedCtx), errCheckStalled) {
-			err = errors.Join(err, errCheckStalled)
-		}
 	}
 	stopErr := stopValidationProcess(cmd)
 	if stopErr != nil {
@@ -1315,222 +1284,4 @@ func (r *checkRunner) storageScope(ctx context.Context) (context.Context, *stora
 		}
 	}
 	return ctx, owner, nil
-}
-
-var errCheckStalled = errors.New("required check CPU stalled")
-
-type checkProcess struct {
-	pid, parent int
-	start, cpu  uint64
-	args        []string
-}
-
-// A waiting supervisor retains its marker while the original shell executes.
-// The original command is an argument, not interpolated into supervisor code.
-func nativeCheckSupervisor(command, marker string) string {
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-	return "/bin/sh -c " + quote(`/bin/sh -c "$1" & child=$!; wait "$child"`) + " " + quote(marker) + " " + quote(command)
-}
-func checkProcesses() (map[int]checkProcess, error) {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[int]checkProcess)
-	for _, entry := range entries {
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil {
-			continue
-		}
-		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		end := strings.LastIndexByte(string(raw), ')')
-		if end < 0 {
-			return nil, errors.New("invalid proc stat")
-		}
-		fields := strings.Fields(string(raw[end+1:]))
-		if len(fields) < 20 {
-			return nil, errors.New("short proc stat")
-		}
-		parent, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return nil, err
-		}
-		start, err := strconv.ParseUint(fields[19], 10, 64)
-		if err != nil {
-			return nil, err
-		}
-		cpu := uint64(0)
-		for _, index := range []int{11, 12, 13, 14} {
-			value, err := strconv.ParseUint(fields[index], 10, 64)
-			if err != nil || cpu+value < cpu {
-				return nil, errors.New("invalid proc CPU")
-			}
-			cpu += value
-		}
-		args, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		result[pid] = checkProcess{pid: pid, parent: parent, start: start, cpu: cpu, args: strings.Split(string(args), "\x00")}
-	}
-	return result, nil
-}
-func checkDescendant(tree map[int]checkProcess, pid, root int) bool {
-	seen := make(map[int]bool)
-	for pid != 0 && !seen[pid] {
-		if pid == root {
-			return true
-		}
-		seen[pid] = true
-		p, ok := tree[pid]
-		if !ok {
-			return false
-		}
-		pid = p.parent
-	}
-	return false
-}
-
-// Observation is advisory. Any sampling error disables termination for the
-// invocation; deadlines and verified process cleanup remain authoritative.
-func cpuObservationEnabled(platform string, execution contract.ExecutionConfig, runnerIsolated bool) bool {
-	return platform == "linux" && (runnerIsolated || execution.Mode != contract.ExecutionIsolated || execution.Backend == contract.BackendNative)
-}
-func (r *checkRunner) observeCPU(ctx context.Context, cancel context.CancelCauseFunc, root int, marker string) func() {
-	if !cpuObservationEnabled(runtime.GOOS, r.execution, r.runnerIsolated) {
-		return func() {}
-	}
-	sample := r.sampleProcesses
-	if sample == nil {
-		sample = checkProcesses
-	}
-	now := r.now
-	if now == nil {
-		now = time.Now
-	}
-	interval, window := r.sampleInterval, r.stallWindow
-	if interval <= 0 {
-		interval = time.Second
-	}
-	if window <= 0 {
-		window = 5 * time.Minute
-	}
-	// Capture direct identity before cmd.Wait can reap the shell and allow
-	// its PID to be reused while inherited output pipes are still open.
-	var pinnedStart uint64
-	if root != 0 {
-		tree, err := sample()
-		if err != nil {
-			return func() {}
-		}
-		p, ok := tree[root]
-		if !ok || p.start == 0 {
-			return func() {}
-		}
-		pinnedStart = p.start
-	}
-	done, joined := make(chan struct{}), make(chan struct{})
-	go func() {
-		defer close(joined)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		previous := make(map[[2]uint64]uint64)
-		rootStart := pinnedStart
-		var last time.Time
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-done:
-				return
-			case <-ticker.C:
-			}
-			tree, err := sample()
-			if err != nil {
-				return
-			}
-			// A partial ancestry snapshot cannot establish which CPU belongs
-			// to this check. Disable observation instead of counting zero.
-			for pid, p := range tree {
-				if p.pid != pid || p.start == 0 {
-					return
-				}
-				if p.parent != 0 {
-					if _, ok := tree[p.parent]; !ok {
-						return
-					}
-				}
-			}
-			if marker != "" {
-				found := 0
-				for pid, p := range tree {
-					if !checkDescendant(tree, pid, os.Getpid()) {
-						continue
-					}
-					// Require the shell's positional marker, never substring matches in
-					// launcher arguments containing a copy of the whole command.
-					if len(p.args) >= 4 && p.args[1] == "-c" && p.args[3] == marker {
-						if found != 0 {
-							return
-						}
-						found = pid
-					}
-				}
-				if found == 0 {
-					if root != 0 {
-						return
-					}
-					continue
-				}
-				if root != 0 && root != found {
-					return
-				}
-				root = found
-			}
-			parent, ok := tree[root]
-			if !ok {
-				return
-			}
-			if rootStart != 0 && parent.start != rootStart {
-				return
-			}
-			rootStart = parent.start
-			progress := false
-			for pid, p := range tree {
-				if !checkDescendant(tree, pid, root) {
-					continue
-				}
-				id := [2]uint64{uint64(pid), p.start}
-				old, known := previous[id]
-				if known && p.cpu < old {
-					return
-				}
-				if p.cpu > old {
-					progress = true
-				}
-				previous[id] = p.cpu
-				if len(previous) > 100000 {
-					return
-				}
-			}
-			current := now()
-			if last.IsZero() || progress {
-				last = current
-			}
-			if current.Sub(last) >= window {
-				cancel(errCheckStalled)
-				return
-			}
-		}
-	}()
-	return func() { close(done); <-joined }
 }

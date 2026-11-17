@@ -179,8 +179,9 @@ func TestLocalReusableWorkflowPermissionsRegression(t *testing.T) {
 	release.Jobs["checks"] = job
 	_, diagnostics := checkWorkflowPermissions(workflows)
 	want := "release.yml/checks -> full-validation.yml/full: contents requires read, available none"
-	if len(diagnostics) != 1 || diagnostics[0] != want {
-		t.Fatalf("got %v; want %s", diagnostics, want)
+	wantTests := "release.yml/checks -> full-validation.yml/tests: contents requires read, available none"
+	if len(diagnostics) != 2 || diagnostics[0] != want || diagnostics[1] != wantTests {
+		t.Fatalf("got %v; want %s and %s", diagnostics, want, wantTests)
 	}
 	t.Log(diagnostics[0])
 }

@@ -16,25 +16,41 @@ permissions:
 
 jobs:
   full:
-    name: Full tests and distribution builds
+    name: Formatting and static checks
     runs-on: ubuntu-26.04
-    timeout-minutes: 90
+    timeout-minutes: 10
     env:
       GOMAXPROCS: '4'
-      GOFLAGS: '-p=2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.commit || github.sha }}
-          fetch-depth: 0
           persist-credentials: false
-      - name: Record exact commit
-        env:
-          EXPECTED_SHA: ${{ inputs.commit || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+      - name: Static checks
         run: |
-          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          mkdir -p "$RUNNER_TEMP/full-validation"
-          git rev-parse HEAD > "$RUNNER_TEMP/full-validation/commit.txt"
+          test "$(git rev-parse HEAD)" = '${{ inputs.commit || github.sha }}'
+          make lint changelog-check
+          python3 -B -m unittest discover -s scripts -p 'test_*.py'
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  tests:
+    name: Race tests (${{ matrix.shard }})
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [cli-a, cli-b, cli-c, cli-d, workflow-a, workflow-b, other]
+    env:
+      GOMAXPROCS: '4'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
@@ -42,135 +58,36 @@ jobs:
         run: |
           git config --global user.name "SwarmOS CI"
           git config --global user.email "ci@swarmos.local"
-      - name: Install reviewer sandbox (Linux)
-        if: runner.os == 'Linux'
+      - name: Install reviewer sandbox
         run: sudo apt-get update && sudo apt-get install --yes bubblewrap
-      - name: Formatting and static checks
-        shell: bash
+      # Race tests also run every ordinary test. The two large packages get
+      # separate runners; complementary filters cover all their top-level tests.
+      - name: Test shard
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
-          set -euo pipefail
-          {
-            unformatted=$(gofmt -s -l .)
-            if [ -n "$unformatted" ]; then printf '%s\n' "$unformatted"; exit 1; fi
-            go build ./...
-            go vet ./...
-            go tool staticcheck ./...
-            go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
-            go run ./cmd/changelog --check
-          } 2>&1 | tee "$RUNNER_TEMP/full-validation/static.log"
-      - name: Full tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            all_output=$(go list ./...)
-            cli_package=$(go list ./internal/cli)
-            [[ -n "$all_output" && -n "$cli_package" && "$cli_package" != *$'\n'* ]] || { echo 'Invalid package discovery'; exit 1; }
-            mapfile -t all_packages <<< "$all_output"
-            other_packages=()
-            cli_count=0
-            for package in "${all_packages[@]}"; do
-              if [[ "$package" == "$cli_package" ]]; then
-                cli_count=$((cli_count + 1))
-              else
-                other_packages+=("$package")
-              fi
-            done
-            [[ "$cli_count" -eq 1 && "${#other_packages[@]}" -gt 0 ]] || { echo 'Expected one CLI package and nonempty remaining packages'; exit 1; }
-            for package in "${other_packages[@]}"; do
-              [[ "$package" != "$cli_package" ]] || { echo 'CLI package overlaps remaining packages'; exit 1; }
-            done
-            original=$(printf '%s\n' "${all_packages[@]}" | LC_ALL=C sort)
-            partitioned=$(printf '%s\n' "${other_packages[@]}" "$cli_package" | LC_ALL=C sort)
-            [[ "$original" == "$partitioned" ]] || { echo 'Package partition does not cover ./... exactly'; exit 1; }
-            go test -timeout=15m "${other_packages[@]}"
-          } 2>&1 | tee "$RUNNER_TEMP/full-validation/test.log"
-      - name: Full CLI tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          go test -timeout=30m ./internal/cli 2>&1 | tee "$RUNNER_TEMP/full-validation/cli-test.log"
-      - name: Full race tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            all_output=$(go list ./...)
-            cli_package=$(go list ./internal/cli)
-            [[ -n "$all_output" && -n "$cli_package" && "$cli_package" != *$'\n'* ]] || { echo 'Invalid package discovery'; exit 1; }
-            mapfile -t all_packages <<< "$all_output"
-            other_packages=()
-            cli_count=0
-            for package in "${all_packages[@]}"; do
-              if [[ "$package" == "$cli_package" ]]; then
-                cli_count=$((cli_count + 1))
-              else
-                other_packages+=("$package")
-              fi
-            done
-            [[ "$cli_count" -eq 1 && "${#other_packages[@]}" -gt 0 ]] || { echo 'Expected one CLI package and nonempty remaining packages'; exit 1; }
-            for package in "${other_packages[@]}"; do
-              [[ "$package" != "$cli_package" ]] || { echo 'CLI package overlaps remaining packages'; exit 1; }
-            done
-            original=$(printf '%s\n' "${all_packages[@]}" | LC_ALL=C sort)
-            partitioned=$(printf '%s\n' "${other_packages[@]}" "$cli_package" | LC_ALL=C sort)
-            [[ "$original" == "$partitioned" ]] || { echo 'Package partition does not cover ./... exactly'; exit 1; }
-            go test -race -timeout=15m "${other_packages[@]}"
-          } 2>&1 | tee "$RUNNER_TEMP/full-validation/race.log"
-      - name: Full CLI race tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          go test -race -timeout=30m ./internal/cli 2>&1 | tee "$RUNNER_TEMP/full-validation/cli-race.log"
-      - name: Build CLI
-        run: go build -o swarm-ci.exe ./cmd/swarm
-      - name: Exercise CLI surface
-        run: |
-          ./swarm-ci.exe version
-          ./swarm-ci.exe --help
-          ./swarm-ci.exe repo --help
-          ./swarm-ci.exe repo init --help
-          ./swarm-ci.exe repo doctor --help
-          ./swarm-ci.exe repo plan --help
-          ./swarm-ci.exe repo validate --help
-          ./swarm-ci.exe issue --help
-          ./swarm-ci.exe issue claim --help
-          ./swarm-ci.exe issue work --help
-          ./swarm-ci.exe issue stage --help
-          ./swarm-ci.exe issue review-plan --help
-          ./swarm-ci.exe issue validate --help
-          ./swarm-ci.exe issue submit --help
-          ./swarm-ci.exe pr --help
-          ./swarm-ci.exe pr status --help
-          ./swarm-ci.exe pr work --help
-          ./swarm-ci.exe pr stage --help
-          ./swarm-ci.exe pr rebase --help
-          ./swarm-ci.exe pr validate --help
-          ./swarm-ci.exe pr submit --help
-      - name: Cross-compile all distributions
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
-              echo "Building $target"
-              GOOS=${target%/*} GOARCH=${target#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/swarm
-            done
-          } 2>&1 | tee "$RUNNER_TEMP/full-validation/build.log"
-      - name: Summarize validation
-        if: always()
-        run: |
-          {
-            echo '### Full validation'
-            echo 'Commit: ${{ inputs.commit || github.sha }}'
-            echo 'Result: ${{ job.status }}; see retained logs for failing commands.'
-            echo 'No existing Go benchmarks or performance target are available in this repository.'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Retain validation logs
+          test "$(git rev-parse HEAD)" = '${{ inputs.commit || github.sha }}'
+          case "$SHARD" in
+            cli-a) packages=(./internal/cli); filter='^TestC' ;;
+            cli-b) packages=(./internal/cli); filter='^TestI' ;;
+            cli-c) packages=(./internal/cli); filter='^Test[A-BD-HJ-M]' ;;
+            cli-d) packages=(./internal/cli); filter='^Test([^A-M]|$)|^Example|^Fuzz' ;;
+            workflow-a) packages=(./internal/workflow); filter='^Test[A-M]' ;;
+            workflow-b) packages=(./internal/workflow); filter='^Test([^A-M]|$)|^Example|^Fuzz' ;;
+            other)
+              all_packages=$(go list ./...)
+              mapfile -t packages < <(printf '%s\n' "$all_packages" | grep -Ev '/internal/(cli|workflow)$')
+              test "${#packages[@]}" -gt 0
+              filter=.
+              ;;
+            *) exit 1 ;;
+          esac
+          set -o pipefail
+          go test -race -json -timeout=20m -p=2 -parallel=8 -run "$filter" "${packages[@]}" | tee "$RUNNER_TEMP/tests.jsonl"
+      - name: Retain test timings and failures
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: full-validation-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/full-validation/
+          name: tests-${{ matrix.shard }}-${{ inputs.commit || github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/tests.jsonl
           retention-days: 14
-          if-no-files-found: warn

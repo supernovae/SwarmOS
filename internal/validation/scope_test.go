@@ -102,7 +102,7 @@ func TestScopeChecksTierAndDiffFiltering(t *testing.T) {
 		if cmds["staticcheck"] != "go tool staticcheck ./cmd/changelog ./internal/changelog" {
 			t.Fatalf("unexpected narrowed staticcheck command: %q", cmds["staticcheck"])
 		}
-		if !strings.Contains(note, "deferred to CI (cli-regressions-a, cli-regressions-b)") {
+		if !strings.Contains(note, "deferred to CI (cli-regressions-a, cli-regressions-b, cli-regressions-c, cli-regressions-d)") {
 			t.Fatalf("missing CI deferral note: %q", note)
 		}
 	})

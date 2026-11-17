@@ -36,11 +36,21 @@ required_checks:
       timeout: 15m
       scope: affected
     - name: cli-regressions-a
-      command: 'go test -timeout=20m -parallel=8 ./internal/cli -run ''^Test[A-M]'''
+      command: 'go test -timeout=20m -parallel=8 ./internal/cli -run ''^TestC'''
       timeout: 20m
       tier: ci
       scope: affected
     - name: cli-regressions-b
+      command: 'go test -timeout=20m -parallel=8 ./internal/cli -run ''^TestI'''
+      timeout: 20m
+      tier: ci
+      scope: affected
+    - name: cli-regressions-c
+      command: 'go test -timeout=20m -parallel=8 ./internal/cli -run ''^Test[A-BD-HJ-M]'''
+      timeout: 20m
+      tier: ci
+      scope: affected
+    - name: cli-regressions-d
       command: 'go test -timeout=20m -parallel=8 ./internal/cli -run ''^Test([^A-M]|$)'''
       timeout: 20m
       tier: ci

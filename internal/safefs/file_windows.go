@@ -12,6 +12,10 @@ import (
 
 const nonblock = 0
 
+// Checked recursive cleanup needs device identities for every entry. Until
+// Windows provides that implementation, retain the tree for explicit cleanup.
+func cleanupDevice(os.FileInfo) (uint64, bool) { return 0, false }
+
 func singleLink(f *os.File, _ os.FileInfo) error {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(f.Fd()), &info); err != nil {

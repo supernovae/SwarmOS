@@ -11,6 +11,14 @@ import (
 
 const nonblock = syscall.O_NONBLOCK
 
+func cleanupDevice(info os.FileInfo) (uint64, bool) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(stat.Dev), true
+}
+
 func singleLink(_ *os.File, info os.FileInfo) error {
 	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || stat.Nlink != 1 {
 		return fmt.Errorf("refuse multiply-linked file %q", info.Name())

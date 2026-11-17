@@ -1027,8 +1027,10 @@ func repositoryCLIRegressionsChecks(t *testing.T) []contract.CheckSpec {
 		t.Fatal(err)
 	}
 	wantCommands := map[string]string{
-		"cli-regressions-a": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test[A-M]'",
-		"cli-regressions-b": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test([^A-M]|$)'",
+		"cli-regressions-a": "go test -timeout=20m -parallel=8 ./internal/cli -run '^TestC'",
+		"cli-regressions-b": "go test -timeout=20m -parallel=8 ./internal/cli -run '^TestI'",
+		"cli-regressions-c": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test[A-BD-HJ-M]'",
+		"cli-regressions-d": "go test -timeout=20m -parallel=8 ./internal/cli -run '^Test([^A-M]|$)'",
 	}
 	var found []contract.CheckSpec
 	seen := map[string]int{}
@@ -1043,15 +1045,19 @@ func repositoryCLIRegressionsChecks(t *testing.T) []contract.CheckSpec {
 			if check.Tier != "ci" || check.Scope != "affected" {
 				t.Fatalf("%s: want tier=ci scope=affected, got tier=%q scope=%q", check.Name, check.Tier, check.Scope)
 			}
-			seen[check.Name] = idx % 3
+			seen[check.Name] = idx % 8
 			found = append(found, check)
 		}
 	}
-	if len(found) != 2 {
-		t.Fatalf("want cli-regressions-a and cli-regressions-b, got %d", len(found))
+	if len(found) != 4 {
+		t.Fatalf("want four CLI regression partitions, got %d", len(found))
 	}
-	if seen["cli-regressions-a"] == seen["cli-regressions-b"] {
-		t.Fatalf("want cli-regressions-a and cli-regressions-b in distinct 3-way CI shards, both landed in %d", seen["cli-regressions-a"]+1)
+	shards := map[int]bool{}
+	for name, shard := range seen {
+		if shards[shard] {
+			t.Fatalf("CLI partition %s shares shard %d", name, shard+1)
+		}
+		shards[shard] = true
 	}
 	return found
 }
@@ -1097,7 +1103,7 @@ func TestRepositoryCLIRegressionsRejectsNewFailure(t *testing.T) {
 		}
 		return combined.String(), firstErr
 	}
-	for _, testName := range []string{"TestArbitraryFutureCLIRegression", "TestZArbitraryFutureCLIRegression", "Test_arbitraryFutureCLIRegression"} {
+	for _, testName := range []string{"TestArbitraryFutureCLIRegression", "TestCFutureCLIRegression", "TestIFutureCLIRegression", "TestZArbitraryFutureCLIRegression", "Test_arbitraryFutureCLIRegression"} {
 		source := func(body string) string {
 			return "package cli\nimport \"testing\"\nfunc TestOrdinaryPassing(t *testing.T) {}\nfunc " + testName + "(t *testing.T) {" + body + "}\n"
 		}
@@ -1170,51 +1176,9 @@ func TestRequiredCheckDurationHistory(t *testing.T) {
 	}
 }
 
-func TestRequiredCheckCPUStall(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux procfs")
-	}
-	for _, tc := range []struct {
-		name, command string
-		stalled       bool
-	}{
-		{"sleeping descendants", "sleep 10 & echo child:$!; wait", true},
-		{"active grandchild", "sh -c 'i=0; while [ $i -lt 400000 ]; do i=$((i+1)); done' & wait", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := &checkRunner{worktree: t.TempDir(), home: t.TempDir(), stallWindow: 150 * time.Millisecond, sampleInterval: 20 * time.Millisecond}
-			start := time.Now()
-			c, err := r.runCheck(t.Context(), tc.name, tc.command, 5*time.Second, nil)
-			if tc.stalled {
-				if err == nil || c.Outcome != OutcomeStalled || time.Since(start) > 3*time.Second {
-					t.Fatalf("%+v %v", c, err)
-				}
-				pid := strings.TrimSpace(strings.TrimPrefix(c.Output, "child:"))
-				if raw, e := os.ReadFile(filepath.Join("/proc", pid, "stat")); e == nil {
-					end := strings.LastIndexByte(string(raw), ')')
-					if end < 0 || !strings.HasPrefix(string(raw[end+1:]), " Z ") {
-						t.Fatalf("stalled child still running: %s", raw)
-					}
-				}
-			} else if err != nil || !c.Passed {
-				t.Fatalf("CPU progress killed: %+v %v", c, err)
-			}
-		})
-	}
-	t.Run("supervisor preserves output and exit", func(t *testing.T) {
-		marker := "swarm-test-marker"
-		cmd := exec.Command("sh", "-c", nativeCheckSupervisor("printf '%s' \"quoted ' value\"; exit 7", marker))
-		out, err := cmd.CombinedOutput()
-		var exit *exec.ExitError
-		if string(out) != "quoted ' value" || !errors.As(err, &exit) || exit.ExitCode() != 7 {
-			t.Fatalf("%q %v", out, err)
-		}
-	})
-}
-
-func TestRequiredCheckUnobservableTree(t *testing.T) {
-	r := &checkRunner{worktree: t.TempDir(), home: t.TempDir(), stallWindow: 10 * time.Millisecond, sampleInterval: time.Millisecond, sampleProcesses: func() (map[int]checkProcess, error) { return nil, errors.New("unreadable procfs") }}
-	c, err := r.runCheck(t.Context(), "unreadable", "sleep 10", 100*time.Millisecond, nil)
+func TestRequiredCheckDeadlineAndCancellation(t *testing.T) {
+	r := &checkRunner{worktree: t.TempDir(), home: t.TempDir()}
+	c, err := r.runCheck(t.Context(), "deadline", "sleep 10", 100*time.Millisecond, nil)
 	if err == nil || c.Outcome != OutcomeTimeLimit {
 		t.Fatalf("%+v %v", c, err)
 	}
@@ -1224,14 +1188,8 @@ func TestRequiredCheckUnobservableTree(t *testing.T) {
 	if err == nil || validLimit(c.Outcome) {
 		t.Fatalf("parent cancellation classified as limit: %+v %v", c, err)
 	}
-	// All backends receive the centrally computed deadline; OCI never starts a
-	// procfs observer, even when its client is an idle descendant.
+	// All backends receive the centrally computed deadline.
 	r.execution = contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendOCI}
-	var observations atomic.Int32
-	r.sampleProcesses = func() (map[int]checkProcess, error) {
-		observations.Add(1)
-		return nil, errors.New("must not observe OCI")
-	}
 	r.runOCI = func(ctx context.Context, _ string, budget time.Duration, _, _ io.Writer) error {
 		if budget != 20*time.Millisecond {
 			t.Errorf("OCI budget %v", budget)
@@ -1242,101 +1200,6 @@ func TestRequiredCheckUnobservableTree(t *testing.T) {
 	c, err = r.runCheck(t.Context(), "OCI", "fake runtime", 20*time.Millisecond, nil)
 	if err == nil || c.Outcome != OutcomeTimeLimit {
 		t.Fatalf("OCI: %+v %v", c, err)
-	}
-	if observations.Load() != 0 {
-		t.Fatal("OCI client was observed")
-	}
-}
-
-func TestRequiredCheckCPUStallObserver(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux observer")
-	}
-	for _, tc := range []struct {
-		name     string
-		errAfter int
-		mutate   func(int, map[int]checkProcess)
-		stalled  bool
-	}{
-		{name: "idle native root", stalled: true},
-		{name: "unreadable after discovery", errAfter: 2},
-		{name: "missing intermediate ancestry", mutate: func(i int, m map[int]checkProcess) {
-			if i > 1 {
-				delete(m, 100002)
-				m[100003] = checkProcess{pid: 100003, parent: 100002, start: 3, cpu: 100}
-			}
-		}},
-		{name: "active grandchild", mutate: func(i int, m map[int]checkProcess) {
-			m[100003] = checkProcess{pid: 100003, parent: 100002, start: 3, cpu: uint64(i)}
-		}},
-		{name: "short lived children", mutate: func(i int, m map[int]checkProcess) {
-			p := m[100001]
-			p.cpu = uint64(i)
-			m[100001] = p
-			m[100004+i] = checkProcess{pid: 100004 + i, parent: 100001, start: uint64(4 + i), cpu: 1}
-		}},
-		{name: "PID identity changed", mutate: func(i int, m map[int]checkProcess) {
-			if i > 1 {
-				p := m[100001]
-				p.start = 99
-				m[100001] = p
-			}
-		}},
-		{name: "ambiguous marker", mutate: func(_ int, m map[int]checkProcess) {
-			m[100005] = checkProcess{pid: 100005, parent: os.Getpid(), start: 5, args: []string{"sh", "-c", "supervisor", "marker"}}
-		}},
-		{name: "missing root", mutate: func(_ int, m map[int]checkProcess) { delete(m, 100001) }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancelCause(t.Context())
-			defer cancel(nil)
-			i := 0
-			r := &checkRunner{stallWindow: 30 * time.Millisecond, sampleInterval: time.Millisecond, now: func() time.Time { return time.Unix(1, int64(i)*int64(10*time.Millisecond)) }, sampleProcesses: func() (map[int]checkProcess, error) {
-				i++
-				if tc.errAfter != 0 && i >= tc.errAfter {
-					return nil, errors.New("procfs unreadable")
-				}
-				m := map[int]checkProcess{os.Getpid(): {pid: os.Getpid(), start: 1}, 100001: {pid: 100001, parent: os.Getpid(), start: 1, args: []string{"sh", "-c", "supervisor", "marker"}}, 100002: {pid: 100002, parent: 100001, start: 2}, 100006: {pid: 100006, parent: os.Getpid(), start: 6, cpu: 999, args: []string{"sh", "-c", "unrelated", "other-marker"}}}
-				if tc.mutate != nil {
-					tc.mutate(i, m)
-				}
-				return m, nil
-			}}
-			stop := r.observeCPU(ctx, cancel, 0, "marker")
-			select {
-			case <-ctx.Done():
-			case <-time.After(30 * time.Millisecond):
-			}
-			stop() // also proves monitor termination without a running child.
-			if errors.Is(context.Cause(ctx), errCheckStalled) != tc.stalled {
-				t.Fatalf("cause: %v", context.Cause(ctx))
-			}
-		})
-	}
-	t.Run("direct root pinned before wait", func(t *testing.T) {
-		ctx, cancel := context.WithCancelCause(t.Context())
-		defer cancel(nil)
-		calls := 0
-		r := &checkRunner{stallWindow: 3 * time.Millisecond, sampleInterval: time.Millisecond, sampleProcesses: func() (map[int]checkProcess, error) {
-			calls++
-			start := uint64(1)
-			if calls > 1 {
-				start = 99
-			}
-			return map[int]checkProcess{100001: {pid: 100001, start: start}}, nil
-		}}
-		stop := r.observeCPU(ctx, cancel, 100001, "")
-		select {
-		case <-ctx.Done():
-		case <-time.After(15 * time.Millisecond):
-		}
-		stop()
-		if context.Cause(ctx) != nil {
-			t.Fatalf("reused direct PID triggered stall: %v", context.Cause(ctx))
-		}
-	})
-	if cpuObservationEnabled("darwin", contract.ExecutionConfig{}, false) || cpuObservationEnabled("linux", contract.ExecutionConfig{Mode: contract.ExecutionIsolated, Backend: contract.BackendOCI}, false) {
-		t.Fatal("unobservable backend enabled")
 	}
 }
 

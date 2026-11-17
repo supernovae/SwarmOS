@@ -1041,6 +1041,87 @@ func TestGitHubClientOptionsTimeout(t *testing.T) {
 	}
 }
 
+// http.Client can signal Request.Cancel before the context's deadline timer
+// publishes Err. Model that ordering directly instead of racing real timers.
+type pendingRequestDeadline struct{ context.Context }
+
+func (pendingRequestDeadline) Deadline() (time.Time, bool) { return time.Unix(1, 0), true }
+
+func TestGitHubRequestDeadlinePrecedesContextTimer(t *testing.T) {
+	for _, method := range []string{"GET", "POST"} {
+		for _, inventory := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/inventory=%v", method, inventory), func(t *testing.T) {
+				calls := 0
+				cause := errors.New("opaque transport failure with fixture-secret")
+				var base http.RoundTripper = roundTripFunc(func(*http.Request) (*http.Response, error) {
+					calls++
+					return nil, cause
+				})
+				if inventory {
+					base = inventoryTransport{base: base}
+				}
+				ctx := pendingRequestDeadline{context.Background()}
+				req, err := http.NewRequestWithContext(ctx, method, "https://example.invalid/stall", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = (githubRetryTransport{base: base}).RoundTrip(req)
+				var timeout net.Error
+				if !errors.As(err, &timeout) || !timeout.Timeout() || !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("expired deadline lost its timeout cause: %v", err)
+				}
+				if !errors.Is(err, cause) || calls != 1 || strings.Contains(err.Error(), "fixture-secret") {
+					t.Fatalf("cause/redaction/request count: calls=%d err=%v", calls, err)
+				}
+				reason := gitcredential.RetryReason(gitcredential.RetryObservation{Operation: method, Err: err})
+				if (reason != "") != (method == "GET") {
+					t.Fatalf("unsafe retry classification: %s: %q", method, reason)
+				}
+			})
+		}
+	}
+}
+
+func TestGitHubDeadlineDominatesNonTimeoutNetworkError(t *testing.T) {
+	for _, method := range []string{"GET", "POST"} {
+		t.Run(method, func(t *testing.T) {
+			cause := &net.OpError{Op: "read", Net: "tcp", Err: errors.New("fixture-secret")}
+			calls := 0
+			transport := githubRetryTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return nil, cause
+			})}
+			req, err := http.NewRequestWithContext(pendingRequestDeadline{context.Background()}, method, "https://example.invalid/stall", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = transport.RoundTrip(req)
+			var timeout net.Error
+			if !errors.As(err, &timeout) || !timeout.Timeout() || !errors.Is(err, cause) || calls != 1 {
+				t.Fatalf("deadline shadowed by transport error: calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestGitHubCallerCancellationWinsExpiredDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, err := http.NewRequestWithContext(pendingRequestDeadline{ctx}, "POST", "https://example.invalid/stall", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	transport := githubRetryTransport{base: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, context.Canceled
+	})}
+	_, err = transport.RoundTrip(req)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || calls != 1 {
+		t.Fatalf("caller cancellation changed: calls=%d err=%v", calls, err)
+	}
+}
+
 func TestGitHubRESTTimeout(t *testing.T) {
 	for _, kind := range []string{"ordinary", "CI", "inventory"} {
 		for _, mode := range []string{"GET", "POST", "cancel"} {

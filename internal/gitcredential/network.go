@@ -42,6 +42,19 @@ type networkError struct {
 func (e *networkError) Error() string { return e.message }
 func (e *networkError) Unwrap() error { return e.cause }
 
+// net/url.Error delegates Timeout directly to its cause, without unwrapping.
+// Implement that method while leaving ordinary redacted failures outside the
+// net.Error interface, so they do not gain network retry eligibility.
+func (e *networkError) Timeout() bool { return networkCauseTimedOut(e.cause) }
+
+func networkCauseTimedOut(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
 var networkTimeout = 10 * time.Minute
 var shortReadTimeout = time.Minute
 
@@ -575,6 +588,7 @@ type RetryExhaustedError struct {
 
 func (e *RetryExhaustedError) Error() string { return e.cause.Error() }
 func (e *RetryExhaustedError) Unwrap() error { return e.cause }
+func (e *RetryExhaustedError) Timeout() bool { return networkCauseTimedOut(e.cause) }
 
 // Exhausted reports whether the last observation reached an attempt or wait cap.
 func (p *RetryPolicy) Exhausted() bool { return p.exhausted }

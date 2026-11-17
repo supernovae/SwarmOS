@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -1089,11 +1088,21 @@ func (t githubRetryTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	current := req
 	for {
 		resp, err := t.base.RoundTrip(current)
-		if err != nil && errors.Is(current.Context().Err(), context.DeadlineExceeded) {
-			var ne net.Error
-			if !errors.As(err, &ne) || !ne.Timeout() {
-				err = fmt.Errorf("%w: %w", err, context.DeadlineExceeded)
-			}
+		ctxErr := current.Context().Err()
+		deadline, hasDeadline := current.Context().Deadline()
+		// http.Client's legacy Request.Cancel timer may fire before the
+		// context timer publishes Err. The absolute deadline is authoritative
+		// in that interval; an explicit caller cancellation stays cancellation.
+		expired := errors.Is(ctxErr, context.DeadlineExceeded) ||
+			(ctxErr == nil && hasDeadline && !time.Now().Before(deadline))
+		if err != nil && expired {
+			// Put the deadline first so a non-timeout net.OpError cannot
+			// shadow it during errors.As; retain the original cause as well.
+			err = fmt.Errorf("%w: %w", context.DeadlineExceeded, err)
+			// The whole request budget is spent; preserve the typed cause
+			// without starting another attempt or waiting for retry backoff.
+			policy.Attempts++
+			return resp, policy.Error(req.Context(), "GitHub REST "+req.Method, err)
 		}
 		observation := gitcredential.RetryObservation{Operation: req.Method, Err: err}
 		if resp != nil {

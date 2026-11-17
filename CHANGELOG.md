@@ -6,6 +6,8 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## v0.10.0
 
+- Preserve GitHub request timeout errors across HTTP cancellation races and safe retry wrappers; timed-out writes stay single-attempt.
+
 - Synchronize native stop-failure cancellation tests on process output instead of racing immediate process exit.
 
 - Run large storage capacity fixtures nightly and through `make stress`, keeping local and release feedback focused on functional and security tests.

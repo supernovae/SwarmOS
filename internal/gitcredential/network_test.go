@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cgi"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1203,5 +1204,32 @@ func TestSelectedForkReadRetainsKnownResultWithHeldPipe(t *testing.T) {
 	var known *KnownResultCleanupError
 	if !errors.As(err, &known) || known.ExitCode != 0 || !errors.Is(err, ErrCleanupIncomplete) || errors.Is(err, ErrInterrupted) {
 		t.Fatalf("lost known outcome: %v", err)
+	}
+}
+
+func TestRetryErrorPreservesHTTPTimeoutInterface(t *testing.T) {
+	for _, exhausted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exhausted=%v", exhausted), func(t *testing.T) {
+			policy := RetryPolicy{Attempts: 1, exhausted: exhausted}
+			cause := fmt.Errorf("fixture-secret: %w", context.DeadlineExceeded)
+			err := policy.Error(context.Background(), "GitHub REST GET", cause)
+			outer := &url.Error{Op: "Get", URL: "https://example.invalid/stall", Err: err}
+			var timeout net.Error
+			if !errors.As(outer, &timeout) || !timeout.Timeout() || !errors.Is(outer, cause) {
+				t.Fatalf("HTTP timeout interface lost: %v", outer)
+			}
+			if strings.Contains(outer.Error(), "fixture-secret") {
+				t.Fatal("cause leaked through redaction")
+			}
+			var marker *RetryExhaustedError
+			if errors.As(err, &marker) != exhausted {
+				t.Fatal("exhaustion marker changed")
+			}
+		})
+	}
+	ordinary := (&RetryPolicy{Attempts: 1}).Error(context.Background(), "GitHub REST GET", errors.New("permission failure"))
+	var network net.Error
+	if errors.As(ordinary, &network) {
+		t.Fatal("ordinary failure gained network retry classification")
 	}
 }

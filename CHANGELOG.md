@@ -6,7 +6,7 @@ Notable changes to SwarmOS, newest first. Upgrade `swarm` and rerun `swarm repo 
 
 ## v0.10.0
 
-- Build and verify all six release archives alongside sharded race tests, attach assets and provenance to a draft, and publish only after validation succeeds.
+- Build and verify all six release archives alongside sharded race tests, attach assets and provenance to a draft, and publish only after validation succeeds; tag runs reuse a successful preflight for the exact commit.
 - Run PR policy checks on six runners and cancel superseded branch runs to reduce feedback delays.
 - Remove CPU-idle termination of validation checks; retain explicit deadlines, cancellation, and process cleanup.
 - Restore Windows release builds by keeping Unix device metadata behind platform-specific filesystem helpers.

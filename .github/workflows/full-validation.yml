@@ -33,6 +33,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = '${{ inputs.commit || github.sha }}'
           make lint changelog-check
+          python3 -B -m unittest discover -s scripts -p 'test_*.py'
           go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   tests:

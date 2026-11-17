@@ -697,7 +697,7 @@ The [full validation workflow](../.github/workflows/full-validation.yml) runs ni
 
 Before tagging, run [Release binaries](../.github/workflows/release.yml) manually with the intended version, such as `v0.10.0`. This creates the tag only inside the build runner and builds the real versioned archives for Linux, macOS and Windows on amd64 and arm64. Packaging runs alongside validation so compile failures appear early. The archives are checked for checksums, embedded version and commit, and the Linux restore helper; the native CLI is also executed. The manual run does not publish a tag or release.
 
-After that preflight succeeds, push the version tag at the same commit. The tag workflow validates and builds that exact commit, then downloads its verified archives for publication without rebuilding them. It attaches all assets and provenance to a draft before publishing the immutable release. The release environment's approval rules still apply.
+After that preflight succeeds, push the version tag at the same commit. The tag workflow finds a successful manual preflight on the default branch for that exact commit and publishes its verified archives without repeating tests or builds. If none exists, it runs validation and packaging first. It attaches all assets and provenance to a draft before publishing the immutable release. The release environment's approval rules still apply.
 
 ## Public personal-fork lifecycle regression driver
 

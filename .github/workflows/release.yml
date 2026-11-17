@@ -1,4 +1,5 @@
 name: Release binaries
+run-name: Release ${{ inputs.version || github.ref_name }}
 
 on:
   push:
@@ -20,11 +21,15 @@ concurrency:
 
 jobs:
   resolve:
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       commit: ${{ steps.commit.outputs.sha }}
       tag: ${{ steps.commit.outputs.tag }}
+      preflight: ${{ steps.preflight.outputs.run }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -45,7 +50,22 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
+      - name: Find successful preflight for this exact commit
+        if: github.event_name == 'push'
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ steps.commit.outputs.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_TAG: ${{ steps.commit.outputs.tag }}
+        run: |
+          gh api "repos/$GH_REPO/actions/workflows/release.yml/runs?head_sha=$RELEASE_SHA&event=workflow_dispatch&status=success&per_page=30" > "$RUNNER_TEMP/preflights.json"
+          run=$(python3 scripts/release-preflight.py "$RUNNER_TEMP/preflights.json" "$RELEASE_SHA" "$DEFAULT_BRANCH" "$RELEASE_TAG")
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   checks:
+    if: needs.resolve.outputs.preflight == ''
     needs: resolve
     uses: ./.github/workflows/full-validation.yml
     with:
@@ -56,6 +76,7 @@ jobs:
   # Build the real versioned archives immediately, alongside tests. A manual
   # preflight uses a local tag and cannot create a GitHub tag or release.
   package:
+    if: needs.resolve.outputs.preflight == ''
     needs: resolve
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -107,28 +128,38 @@ jobs:
       - name: Retain exact assets for publication
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-assets-${{ needs.resolve.outputs.commit }}
+          name: release-assets-${{ needs.resolve.outputs.tag }}-${{ needs.resolve.outputs.commit }}
           path: ${{ runner.temp }}/release-assets/
           compression-level: 0
           retention-days: 14
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.resolve.result == 'success' && (needs.resolve.outputs.preflight != '' || (needs.checks.result == 'success' && needs.package.result == 'success'))
     needs: [resolve, checks, package]
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     environment: release
     permissions:
       contents: write
+      actions: read
       id-token: write
       attestations: write
     steps:
       - name: Download verified archives
+        if: needs.resolve.outputs.preflight == ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: release-assets-${{ needs.resolve.outputs.commit }}
+          name: release-assets-${{ needs.resolve.outputs.tag }}-${{ needs.resolve.outputs.commit }}
           path: release
+      - name: Download archives from successful preflight
+        if: needs.resolve.outputs.preflight != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-assets-${{ needs.resolve.outputs.tag }}-${{ needs.resolve.outputs.commit }}
+          path: release
+          run-id: ${{ needs.resolve.outputs.preflight }}
+          github-token: ${{ github.token }}
       - name: Verify checksums
         working-directory: release/dist
         run: sha256sum --check --strict *_checksums.txt

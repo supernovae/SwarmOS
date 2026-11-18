@@ -1852,6 +1852,20 @@ func TestRepoOnboardAndInitDryRun(t *testing.T) {
 	if err != nil || !strings.Contains(out, "swarm repo init --dry-run --json") || strings.HasPrefix(out, "---") {
 		t.Fatalf("repo onboard: %v\n%s", err, out)
 	}
+	guide := out
+	for _, want := range []string{"Show a diff scoped", "agree before applying", "swarm issue approve <issue>", "Deterministic required checks"} {
+		if !strings.Contains(guide, want) {
+			t.Errorf("guide missing %q", want)
+		}
+	}
+	jsonOut, err := run(root, "repo", "onboard", "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onboarding map[string]string
+	if err := json.Unmarshal([]byte(jsonOut), &onboarding); err != nil || onboarding["kind"] != "onboard" || onboarding["guide"] != guide {
+		t.Fatalf("onboard JSON does not match text: %v", err)
+	}
 	assertOnlyGit("repo onboard")
 
 	if _, err := run(root, "repo", "init", "--dry-run", "--sync-labels"); err == nil {

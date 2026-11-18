@@ -162,6 +162,8 @@ func LeadRole(phase string) string {
 
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
+	RolePolicy       string               `json:"role_policy,omitempty"`
+	RolePreview      []RolePreview        `json:"role_preview,omitempty"`
 	Continuation     *ContinuationPreview `json:"continuation,omitempty"`
 	ToolCapabilities map[string]sandbox.ToolCapabilityReport
 	BrowserProfile   string
@@ -286,39 +288,68 @@ func ResolveRoleAgent(cfg *contract.SwarmConfig, role string, opts WorkOptions) 
 	return resolveRoleAgent(cfg, role, opts)
 }
 
-// resolveRoleAgent applies role override, generic override, repository role,
-// then repository default precedence. It performs no availability check.
 func resolveRoleAgent(cfg *contract.SwarmConfig, role string, opts WorkOptions) string {
+	name, _ := roleAgentSelection(cfg, role, opts)
+	return name
+}
+
+func roleAgentSelection(cfg *contract.SwarmConfig, role string, opts WorkOptions) (name, source string) {
 	switch role {
 	case "planner":
 		if opts.PlannerAgent != "" {
-			return opts.PlannerAgent
+			return opts.PlannerAgent, "--" + role + "-agent"
 		}
 	case "reviewer":
 		if opts.ReviewerAgent != "" {
-			return opts.ReviewerAgent
+			return opts.ReviewerAgent, "--" + role + "-agent"
 		}
 	case "developer":
 		if opts.DeveloperAgent != "" {
-			return opts.DeveloperAgent
+			return opts.DeveloperAgent, "--" + role + "-agent"
 		}
 	case "tester":
 		if opts.TesterAgent != "" {
-			return opts.TesterAgent
+			return opts.TesterAgent, "--" + role + "-agent"
 		}
 	}
 	if opts.AgentName != "" {
-		return opts.AgentName
+		return opts.AgentName, "--agent"
 	}
 	if cfg != nil && cfg.Roles != nil {
 		if configured := strings.TrimSpace(cfg.Roles[role]); configured != "" {
-			return configured
+			return configured, "roles." + role
 		}
 	}
 	if cfg == nil {
-		return ""
+		return "", ""
 	}
-	return cfg.DefaultAgent
+	return cfg.DefaultAgent, "default_agent"
+}
+
+// RolePreview describes a role's selection or why it is manual, deferred, or skipped.
+type RolePreview struct {
+	Role        string `json:"role"`
+	Disposition string `json:"disposition"`
+	Reason      string `json:"reason,omitempty"`
+	Entry       string `json:"entry,omitempty"`
+	Source      string `json:"source,omitempty"`
+	Harness     string `json:"harness,omitempty"`
+	Model       string `json:"model,omitempty"`
+	Effort      string `json:"effort,omitempty"`
+}
+
+func SelectedRolePreview(cfg *contract.SwarmConfig, role string, opts WorkOptions) RolePreview {
+	name, source := roleAgentSelection(cfg, role, opts)
+	harness, model, effort := agent.ConfiguredMetadata(name, cfg)
+	return RolePreview{Role: role, Disposition: "selected", Entry: name, Source: source, Harness: harness, Model: model, Effort: effort}
+}
+
+// CheckReviewerEntry applies the repository's reviewer entry allowlist.
+func CheckReviewerEntry(cfg *contract.SwarmConfig, name string) error {
+	if len(cfg.Security.ReviewerAgents) > 0 && !slices.Contains(cfg.Security.ReviewerAgents, name) {
+		return fmt.Errorf("reviewer agent %q is not in security.reviewer_agents; choose one of %v with roles.reviewer or a reviewer override flag", name, cfg.Security.ReviewerAgents)
+	}
+	return nil
 }
 
 // Preflight rejects selector, policy, contract, workflow, and runner errors
@@ -456,8 +487,11 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	capabilities := make(map[string]sandbox.ToolCapabilityReport, 4)
 	approvalState := *state
 	approvalState.EffectiveGate = gate
-	roles := rolesForPhase(opts.Phase, planningGate(state, gate), (hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)), lease.VerifyApproval(&approvalState, wu) == nil)
-	if opts.IssueContinuation && opts.Phase == "all" && planningGate(state, gate) == contract.GateAgent && !slices.Contains(roles, "planner") && !hasApprovedReviewArtifact(state) && !strings.EqualFold(cfg.PlanMode, "interactive") {
+	effectivePlanGate := planningGate(state, gate)
+	hasPlan := hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)
+	approved := lease.VerifyApproval(&approvalState, wu) == nil
+	roles := rolesForPhase(opts.Phase, effectivePlanGate, hasPlan, approved)
+	if opts.IssueContinuation && opts.Phase == "all" && effectivePlanGate == contract.GateAgent && !slices.Contains(roles, "planner") && !hasApprovedReviewArtifact(state) && !strings.EqualFold(cfg.PlanMode, "interactive") {
 		limit, limitErr := e.LeaseManager.PlanReplanLimitContext(ctx, state)
 		if limitErr != nil {
 			return nil, limitErr
@@ -466,13 +500,18 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			roles = append(roles, "planner")
 		}
 	}
+	phaseRoles := roles
 	roles = continuationRoles(roles, state, opts)
-	if strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !(hasDesignAndTestPlanArtifacts(state) && !hasRejectedReview(state)))) {
+	interactivePlan := strings.EqualFold(cfg.PlanMode, "interactive") && (opts.Phase == "plan" || (opts.Phase == "all" && !hasPlan))
+	manualPlanner := false
+	if interactivePlan {
+		manualPlanner = true
 		agents["planner"] = "interactive"
 		binaries["planner"] = "interactive"
 	} else {
 		for _, role := range roles {
 			if role == "planner" && strings.EqualFold(cfg.PlanMode, "interactive") {
+				manualPlanner = true
 				agents[role] = "interactive"
 				binaries[role] = "interactive"
 				continue
@@ -481,12 +520,13 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			if name == "" {
 				return nil, fmt.Errorf("no configured %s agent", role)
 			}
-			if role == "reviewer" && len(cfg.Security.ReviewerAgents) > 0 && !slices.Contains(cfg.Security.ReviewerAgents, name) {
-				err := fmt.Errorf("reviewer agent %q is not in security.reviewer_agents; choose one of %v with roles.reviewer or a reviewer override flag", name, cfg.Security.ReviewerAgents)
-				if !opts.InspectOnly {
-					return nil, err
+			if role == "reviewer" {
+				if err := CheckReviewerEntry(cfg, name); err != nil {
+					if !opts.InspectOnly {
+						return nil, err
+					}
+					blockers = append(blockers, err.Error())
 				}
-				blockers = append(blockers, err.Error())
 			}
 			resolved, report, err := agent.InspectWithOptions(name, cfg, e.Tracker.BackendName() == "local", role, e.runnerOptions(ctx), "approved_task")
 			capabilities[role] = report
@@ -494,7 +534,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 				if !opts.InspectOnly {
 					return nil, fmt.Errorf("%s agent preflight: %w", role, err)
 				}
-				blockers = append(blockers, fmt.Sprintf("%s agent preflight: %v", role, err))
+				blockers = append(blockers, fmt.Sprintf("%s agent preflight (approved task policy): %v; choose an eligible entry with roles.%s or --%s-agent", role, err, role, role))
 			}
 			agents[role], binaries[role] = name, resolved
 		}
@@ -558,7 +598,38 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 			inspectValidationReuse(ctx, opts.RepoRoot, state, cfg, continuation, now)
 		}
 	}
-	return &PreflightResult{Continuation: continuation, ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
+	var rolePreview []RolePreview
+	var rolePolicy string
+	if opts.InspectOnly {
+		rolePolicy = "approved_task"
+		humanPending := effectivePlanGate == contract.GateHuman && (!hasPlan || !approved)
+		for _, role := range [...]string{"planner", "reviewer", "developer", "tester"} {
+			row := RolePreview{Role: role, Disposition: "skipped", Reason: "outside the requested phase"}
+			_, selected := agents[role]
+			switch {
+			case role == "planner" && manualPlanner:
+				row.Disposition, row.Reason = "manual", "plan_mode is interactive; prepare and stage the plan"
+			case selected:
+				row = SelectedRolePreview(cfg, role, opts)
+			case role == "reviewer" && humanPending && (opts.Phase == "all" || opts.Phase == "review"):
+				row.Disposition, row.Reason = "manual", "human plan gate requires independent approval"
+			case opts.Phase == "all" && interactivePlan:
+				row.Disposition, row.Reason = "deferred", "waiting for the interactive plan to be staged"
+			case slices.Contains(phaseRoles, role) && !slices.Contains(roles, role):
+				row.Reason = "continuation reuses completed work"
+			case opts.Phase == "all" && role == "planner":
+				row.Reason = "plan already staged"
+			case opts.Phase == "all" && role == "reviewer" && approved && effectivePlanGate != contract.GateNone:
+				row.Reason = "plan approval already recorded"
+			case (opts.Phase == "all" || opts.Phase == "review") && role == "reviewer":
+				row.Reason = "no agent review required"
+			case opts.Phase == "all" && humanPending:
+				row.Disposition, row.Reason = "deferred", "waiting for human plan approval"
+			}
+			rolePreview = append(rolePreview, row)
+		}
+	}
+	return &PreflightResult{RolePolicy: rolePolicy, RolePreview: rolePreview, Continuation: continuation, ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
 		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}, nil
 }
 

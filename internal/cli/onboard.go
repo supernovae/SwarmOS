@@ -14,9 +14,8 @@ func newOnboardCmd() *cobra.Command {
 		Short: "Print a guide your coding agent can follow to onboard or upgrade this repository",
 		Long: `Print the SwarmOS onboarding guide as a prompt for the coding agent of your
 choice. The agent previews repo init, proposes validation checks that match your
-CI, runs init, merges SwarmOS files with what you already have, and hands the
-result back for review. Nothing is written by this command, so it works before
-the repository has any SwarmOS files:
+CI, runs init, and previews role, model, and effort edits for your review. This
+command only prints the guide and can run before the repository has SwarmOS files:
 
   codex "$(swarm repo onboard)"
   claude "$(swarm repo onboard)"

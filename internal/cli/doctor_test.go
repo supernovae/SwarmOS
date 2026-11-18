@@ -35,6 +35,14 @@ func TestDoctorSelectedFailuresAndOptionalHarnesses(t *testing.T) {
 			statuses := map[string]string{}
 			for _, c := range checks {
 				statuses[c.Name] = c.Status
+				for name, want := range map[string]string{
+					"codex/planner":  "checkout policy; entry=codex, source=default_agent, harness=codex, model=harness default, effort=harness default",
+					"limited/tester": "checkout policy; entry=limited, source=roles.tester",
+				} {
+					if c.Name == name && !strings.Contains(c.Detail, want) {
+						t.Errorf("%s missing %q: %s", name, want, c.Detail)
+					}
+				}
 			}
 			for name, want := range map[string]string{"codex/planner": "OK", "limited/tester": "FAIL", "limited/developer": "OPTIONAL", "claude/reviewer": "OPTIONAL"} {
 				if statuses[name] != want {
@@ -69,11 +77,14 @@ func TestDoctorRejectsExcludedSelectedRole(t *testing.T) {
 		t.Fatalf("checks: %+v", checks)
 	}
 	for _, c := range checks {
+		if !strings.Contains(c.Detail, "checkout policy") || !strings.Contains(c.Detail, "harness=codex") {
+			t.Fatalf("missing selected entry metadata: %+v", c)
+		}
 		if c.Name == "limited/developer" {
 			if c.Status != "OK" {
 				t.Fatalf("allowed role: %+v", c)
 			}
-		} else if c.Status != "FAIL" || !strings.Contains(c.Detail, "not permitted for role") {
+		} else if c.Status != "FAIL" || !strings.Contains(c.Detail, "not permitted for role") || !strings.Contains(c.Detail, "choose an eligible entry") {
 			t.Fatalf("excluded selected role: %+v", c)
 		}
 	}
@@ -310,4 +321,24 @@ func TestDoctorCapabilitiesJSON(t *testing.T) {
 			t.Fatalf("empty reports: %s", out.String())
 		}
 	}
+}
+
+func TestDoctorRejectsReviewerOutsideReviewerAgents(t *testing.T) {
+	cfg := &contract.SwarmConfig{
+		DefaultAgent: "codex",
+		Agents:       map[string]contract.AgentConfig{"codex": {}, "claude": {}},
+		Security:     contract.SecurityConfig{ReviewerAgents: []string{"claude"}},
+	}
+	checks := doctorAgentChecks(cfg, false, func(string, *contract.SwarmConfig, bool, string) (string, error) {
+		return "verified", nil
+	})
+	for _, check := range checks {
+		if check.Name == "codex/reviewer" {
+			if check.Status != "FAIL" || !strings.Contains(check.Detail, "security.reviewer_agents") {
+				t.Fatalf("missing reviewer eligibility diagnostic: %+v", check)
+			}
+			return
+		}
+	}
+	t.Fatal("missing selected reviewer check")
 }

@@ -6,6 +6,14 @@ tracker: github
 # Linux isolation: Codex native sandbox; other harnesses use isolated tools.
 # Run swarm repo doctor before work. Models are optional; each harness chooses its default.
 default_agent: codex
+# Omitted roles inherit default_agent. Set a role to a named entry under agents.
+# roles:
+#   planner: codex
+#   reviewer: codex
+#   developer: codex
+#   tester: codex
+# For custom agent aliases, set harness explicitly. Omit model and effort to
+# use the harness defaults, or set effort on a harness that supports it.
 default_gate: agent
 plan_mode: auto
 # Checkpoint commit messages: concise (default) or detailed.

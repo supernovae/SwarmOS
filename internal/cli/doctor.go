@@ -14,6 +14,7 @@ import (
 	"github.com/supernovae/swarmos/internal/progress"
 	"github.com/supernovae/swarmos/internal/sandbox"
 	"github.com/supernovae/swarmos/internal/tracker"
+	"github.com/supernovae/swarmos/internal/workflow"
 	"github.com/supernovae/swarmos/internal/workspace"
 )
 
@@ -192,10 +193,8 @@ func doctorAgentChecksWithRunner(cfg *contract.SwarmConfig, local bool, prefligh
 	sort.Strings(names)
 	for _, name := range names {
 		for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
-			selected := cfg.Roles[role]
-			if selected == "" {
-				selected = cfg.DefaultAgent
-			}
+			row := workflow.SelectedRolePreview(cfg, role, workflow.WorkOptions{})
+			selected := row.Entry
 			allowed := len(cfg.Agents[name].Roles) == 0
 			for _, permitted := range cfg.Agents[name].Roles {
 				allowed = allowed || permitted == role
@@ -213,7 +212,16 @@ func doctorAgentChecksWithRunner(cfg *contract.SwarmConfig, local bool, prefligh
 					}
 				}
 				if selected == name {
-					detail = "selected; " + detail
+					if role == "reviewer" {
+						if reviewerErr := workflow.CheckReviewerEntry(cfg, name); reviewerErr != nil {
+							status = "FAIL"
+							detail = reviewerErr.Error() + "; " + detail
+						}
+					}
+					if err != nil {
+						detail += "; choose an eligible entry with roles." + role
+					}
+					detail = "selected; checkout policy; " + formatRoleSelection(row) + "; " + detail
 				}
 				return harness.DoctorCheck{Category: "execution", Name: name + "/" + role, Status: status, Detail: detail}
 			}))

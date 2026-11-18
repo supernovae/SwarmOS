@@ -176,7 +176,14 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					if c := preflight.Continuation; c != nil {
 						fmt.Fprintf(cmd.OutOrStdout(), "Claim: %s (%s); expiry=%s\nResume at: %s\nValidation reuse: %s (%s)\nAcceptance evidence: %s\nSubmission ready: %t\n", c.Claim, c.ClaimReason, c.ExpiresAt.Format(time.RFC3339), c.ResumeRole, c.ValidationReuse, c.ValidationReason, c.AcceptanceEvidence, c.SubmissionReady)
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d; policy=approved_task; execution=%s/%s\n", opts.IssueNumber, preflight.Execution.Mode, preflight.Execution.Backend)
+					fmt.Fprintf(cmd.OutOrStdout(), "Issue #%d; policy=approved_task (approved task policy); base=%s; execution=%s/%s\n", opts.IssueNumber, preflight.BaseSHA, preflight.Execution.Mode, preflight.Execution.Backend)
+					for _, row := range preflight.RolePreview {
+						detail := row.Reason
+						if row.Disposition == "selected" {
+							detail = formatRoleSelection(row)
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s)\n", row.Role, row.Disposition, detail)
+					}
 					for _, role := range []string{"planner", "developer", "tester", "reviewer"} {
 						if report, ok := preflight.ToolCapabilities[role]; ok {
 							fmt.Fprint(cmd.OutOrStdout(), sandbox.FormatToolCapabilities(report))
@@ -296,4 +303,18 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print the effective policy without claiming or running agents")
 	cmd.Flags().BoolVar(&progressOutput, "progress", true, "Report setup, headless stages, and a 15-second heartbeat to stderr (false disables)")
 	return cmd
+}
+
+func formatRoleSelection(row workflow.RolePreview) string {
+	harness, model, effort := row.Harness, row.Model, row.Effort
+	if harness == "" {
+		harness = "unresolved"
+	}
+	if model == "" {
+		model = "harness default"
+	}
+	if effort == "" {
+		effort = "harness default"
+	}
+	return fmt.Sprintf("entry=%s, source=%s, harness=%s, model=%s, effort=%s", row.Entry, row.Source, harness, model, effort)
 }

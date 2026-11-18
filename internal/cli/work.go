@@ -140,6 +140,11 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					return err
 				}
 			}
+			opts.AssessPromptScaffold = !nextReady
+			opts.OnPromptScaffoldAdvisory = func(report *workflow.PromptScaffoldReport) {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Warning: Prompt scaffold needs attention")
+				writePromptScaffoldReport(cmd.ErrOrStderr(), report)
+			}
 			opts.CompareRoleRouting = true
 			opts.OnRoleRoutingDrift = func(comparison *workflow.RoleRoutingComparison) {
 				fmt.Fprint(cmd.ErrOrStderr(), "Warning: ")
@@ -197,6 +202,9 @@ func newWorkCmd(rootOpts *RootOptions) *cobra.Command {
 					}
 					if comparison := preflight.RoleRoutingComparison; comparison != nil {
 						writeRoleRoutingComparison(cmd.OutOrStdout(), comparison)
+					}
+					if report := preflight.PromptScaffold; report != nil {
+						writePromptScaffoldReport(cmd.OutOrStdout(), report)
 					}
 					for _, blocker := range preflight.Blockers {
 						fmt.Fprintln(cmd.OutOrStdout(), "Blocker: "+blocker)
@@ -338,4 +346,15 @@ func writeRoleRoutingComparison(out io.Writer, comparison *workflow.RoleRoutingC
 		fmt.Fprintf(out, "  %s: approved (%s), target (%s)\n", change.Approved.Role, formatRoleSelection(change.Approved), formatRoleSelection(change.Target))
 	}
 	fmt.Fprintln(out, comparison.Guidance)
+}
+
+func writePromptScaffoldReport(out io.Writer, report *workflow.PromptScaffoldReport) {
+	fmt.Fprintf(out, "Prompt scaffold checkout: %s\n", report.Checkout.Summary())
+	fmt.Fprintf(out, "Prompt scaffold approved commit %s: %s\n", report.ApprovedSHA, report.Approved.Summary())
+	if report.TargetBranch != "" {
+		fmt.Fprintf(out, "Prompt scaffold target branch: %s\n", report.TargetBranch)
+	}
+	for _, action := range report.NextActions {
+		fmt.Fprintln(out, action)
+	}
 }

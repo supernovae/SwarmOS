@@ -51,16 +51,18 @@ var (
 )
 
 type WorkOptions struct {
-	CompareRoleRouting bool
-	OnRoleRoutingDrift func(*RoleRoutingComparison)
-	IssueContinuation  bool
-	RequestedPhase     string
-	PlanCheckpoint     bool
-	ExpectedHead       string
-	CandidateHead      string
-	Version            string
-	ReviewEvidence     tracker.ReviewEvidence
-	CIEvidence         []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
+	AssessPromptScaffold     bool
+	OnPromptScaffoldAdvisory func(*PromptScaffoldReport)
+	CompareRoleRouting       bool
+	OnRoleRoutingDrift       func(*RoleRoutingComparison)
+	IssueContinuation        bool
+	RequestedPhase           string
+	PlanCheckpoint           bool
+	ExpectedHead             string
+	CandidateHead            string
+	Version                  string
+	ReviewEvidence           tracker.ReviewEvidence
+	CIEvidence               []tracker.CheckEvidence // ephemeral coordinator input, never an authoritative artifact
 
 	InspectionTime        time.Time // read-only preview clock; zero uses wall clock
 	InspectOnly           bool      // report execution blockers without claiming or running work
@@ -164,6 +166,7 @@ func LeadRole(phase string) string {
 
 // PreflightResult is the immutable execution selection made before a claim.
 type PreflightResult struct {
+	PromptScaffold        *PromptScaffoldReport  `json:"prompt_scaffold,omitempty"`
 	RoleRoutingComparison *RoleRoutingComparison `json:"role_routing_comparison,omitempty"`
 	RolePolicy            string                 `json:"role_policy,omitempty"`
 	RolePreview           []RolePreview          `json:"role_preview,omitempty"`
@@ -644,6 +647,7 @@ func (e *Engine) preflight(ctx context.Context, opts WorkOptions, deferTaskAppro
 	result := &PreflightResult{RolePolicy: rolePolicy, RolePreview: rolePreview, Continuation: continuation, ToolCapabilities: capabilities, BrowserProfile: browserProfile, Execution: execution, Blockers: blockers, Issue: iss, WorkUnit: wu, Workflow: wf, Config: cfg, BaseSHA: state.BaseSHA, Gate: gate, Agents: agents,
 		Binaries: binaries, Validation: checks, TaskDigest: state.TaskDigest, PolicyDigest: state.PolicyDigest, Phase: opts.Phase, Dependencies: deps}
 	result.RoleRoutingComparison = e.compareRoleRouting(ctx, opts, result, state)
+	result.PromptScaffold = e.inspectPromptScaffold(ctx, opts, result, state)
 	return result, nil
 }
 

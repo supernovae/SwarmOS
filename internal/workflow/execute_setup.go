@@ -130,6 +130,17 @@ func (r *workRun) loadClaimPolicy() error {
 			}
 		}
 	}
+	if r.pre.PromptScaffold != nil && r.opts.OnPromptScaffoldAdvisory != nil {
+		report := *r.pre.PromptScaffold
+		if r.st.BaseSHA != report.ApprovedSHA {
+			report.readApproved(r.ctx, r.opts, r.st)
+		} else {
+			report.setActions(r.opts, r.st)
+		}
+		if len(report.NextActions) != 0 {
+			r.opts.OnPromptScaffoldAdvisory(&report)
+		}
+	}
 	return nil
 }
 

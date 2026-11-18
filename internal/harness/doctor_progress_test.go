@@ -116,7 +116,7 @@ func TestRunDoctorObservedMatchesSilent(t *testing.T) {
 	if !reflect.DeepEqual(got, silent) || !reflect.DeepEqual(got, observed) {
 		t.Fatalf("got %+v; want %+v", got, silent)
 	}
-	if !reflect.DeepEqual(names, []string{"git", "github-auth", ".swarm/config.yaml", ".swarm/validation/required-checks.yaml", "reviewer-runtime"}) {
+	if !reflect.DeepEqual(names, []string{"prompt-scaffold", "git", "github-auth", ".swarm/config.yaml", ".swarm/validation/required-checks.yaml", "reviewer-runtime"}) {
 		t.Fatal(names)
 	}
 }

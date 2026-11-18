@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -341,4 +342,111 @@ func TestDoctorRejectsReviewerOutsideReviewerAgents(t *testing.T) {
 		}
 	}
 	t.Fatal("missing selected reviewer check")
+}
+
+func TestDoctorPromptScaffoldStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		wants        []string
+	}{
+		{"current", "OK", []string{"current"}},
+		{"legacy with changed pin", "OK", []string{"declared revision 0"}},
+		{"older", "WARN", []string{"older-managed", "swarm repo init --dry-run", "review and commit"}},
+		{"mixed", "WARN", []string{"older-managed", "swarm repo init --dry-run", "tester.md (customized-or-unowned)", "Merge prompt updates manually"}},
+		{"unowned", "WARN", []string{"planner.md (customized-or-unowned)", "Merge prompt updates manually"}},
+		{"missing", "WARN", []string{"planner.md (missing)", "swarm repo init --dry-run"}},
+		{"invalid", "WARN", []string{"manifest invalid", "planner.md (unverifiable)", "Inspect"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			prGit(t, root, "init", "-b", "main")
+			if _, err := harness.InitRepository(harness.InitOptions{RepoRoot: root, SwarmVersion: "v0.6.0"}); err != nil {
+				t.Fatal(err)
+			}
+			const planner = ".swarm/prompts/planner.md"
+			const tester = ".swarm/prompts/tester.md"
+			const old = "Old prompt"
+			read := func(path string) string {
+				t.Helper()
+				data, err := os.ReadFile(filepath.Join(root, path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(data)
+			}
+			write := func(path, content string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(root, path), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch tc.name {
+			case "legacy with changed pin":
+				write(harness.ManifestPath, `{"version":1,"swarm_version":"v9.0.0","files":{}}`)
+				workflow := ".github/workflows/swarm-validate.yml"
+				write(workflow, strings.ReplaceAll(read(workflow), "v0.6.0", "v9.0.0"))
+			case "older", "mixed":
+				write(planner, old)
+				write(harness.ManifestPath, fmt.Sprintf(`{"version":1,"files":{%q:"%x"}}`, planner, sha256.Sum256([]byte(old))))
+				if tc.name == "mixed" {
+					write(tester, "Custom prompt")
+				}
+			case "unowned":
+				write(planner, old)
+				write(harness.ManifestPath, `{"version":1,"files":{}}`)
+			case "missing":
+				if err := os.Remove(filepath.Join(root, planner)); err != nil {
+					t.Fatal(err)
+				}
+			case "invalid":
+				write(planner, old)
+				write(harness.ManifestPath, "{")
+			}
+			manifestBefore, testerBefore := read(harness.ManifestPath), read(tester)
+			for _, args := range [][]string{nil, {"--json"}} {
+				factory := func(context.Context, func(progress.Event)) harness.DoctorRunner {
+					return func(category, name string, check func() harness.DoctorCheck) harness.DoctorCheck {
+						if name == "prompt-scaffold" || name == ".swarm/config.yaml" {
+							return check()
+						}
+						return harness.DoctorCheck{Category: category, Name: name, Status: "OK"}
+					}
+				}
+				cmd := newDoctorCmdWithRunner(&RootOptions{RepoRoot: root}, factory)
+				var out bytes.Buffer
+				cmd.SetOut(&out)
+				cmd.SetErr(io.Discard)
+				cmd.SetArgs(args)
+				if err := cmd.Execute(); err != nil {
+					t.Fatal(err)
+				}
+				body := out.String()
+				if len(args) != 0 {
+					var result struct{ Checks []harness.DoctorCheck }
+					if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+						t.Fatal(err)
+					}
+					body = ""
+					for _, row := range result.Checks {
+						if row.Name == "prompt-scaffold" {
+							if row.Status != tc.status {
+								t.Fatalf("scaffold status: %+v", row)
+							}
+							body = row.Detail
+						}
+					}
+				} else if !strings.Contains(body, "prompt-scaffold") || !strings.Contains(body, tc.status) {
+					t.Fatalf("missing scaffold row: %s", body)
+				}
+				for _, want := range tc.wants {
+					if !strings.Contains(body, want) {
+						t.Errorf("missing %q in %s", want, body)
+					}
+				}
+			}
+			if read(harness.ManifestPath) != manifestBefore || read(tester) != testerBefore {
+				t.Fatal("doctor changed fixture files")
+			}
+		})
+	}
 }

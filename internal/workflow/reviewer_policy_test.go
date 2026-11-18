@@ -62,3 +62,35 @@ func TestPreflightRejectsReviewerOutsideReviewerAgents(t *testing.T) {
 		t.Fatal("preflight failure still claimed the issue")
 	}
 }
+
+func TestResolveRoleAgentSelection(t *testing.T) {
+	for _, tc := range []struct {
+		role string
+		set  func(*WorkOptions)
+	}{
+		{"planner", func(o *WorkOptions) { o.PlannerAgent = "override" }},
+		{"reviewer", func(o *WorkOptions) { o.ReviewerAgent = "override" }},
+		{"developer", func(o *WorkOptions) { o.DeveloperAgent = "override" }},
+		{"tester", func(o *WorkOptions) { o.TesterAgent = "override" }},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			cfg := &contract.SwarmConfig{DefaultAgent: "inherited", Roles: map[string]string{tc.role: "configured"}}
+			opts := WorkOptions{AgentName: "generic"}
+			tc.set(&opts)
+			check := func(entry, source string) {
+				t.Helper()
+				got, from := roleAgentSelection(cfg, tc.role, opts)
+				if got != entry || from != source || ResolveRoleAgent(cfg, tc.role, opts) != entry {
+					t.Fatalf("selection = %q from %q, want %q from %q", got, from, entry, source)
+				}
+			}
+			check("override", "--"+tc.role+"-agent")
+			opts = WorkOptions{AgentName: "generic"}
+			check("generic", "--agent")
+			opts = WorkOptions{}
+			check("configured", "roles."+tc.role)
+			cfg.Roles[tc.role] = " "
+			check("inherited", "default_agent")
+		})
+	}
+}

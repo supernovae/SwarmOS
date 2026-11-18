@@ -319,6 +319,20 @@ func validateAgentEnv(names []string) error {
 	return nil
 }
 
+// ConfiguredMetadata describes the selected entry without inspecting the runtime.
+func ConfiguredMetadata(name string, cfg *contract.SwarmConfig) (harness, model, effort string) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "mock" {
+		return "mock", "", ""
+	}
+	ac, ok := cfg.Agents[name]
+	if !ok {
+		return "", "", ""
+	}
+	driver, _ := resolveHarness(name, ac.Harness)
+	return driver, ac.Model, ac.Effort
+}
+
 func resolveHarness(name, harness string) (string, error) {
 	driver := strings.ToLower(strings.TrimSpace(harness))
 	if driver == "" {
@@ -343,7 +357,11 @@ func InspectWithOptions(name string, cfg *contract.SwarmConfig, local bool, role
 			report.Entries[0].Reason = "unavailable"
 			report.Entries[0].Action = sandbox.CapabilityReason("unavailable")
 		}
-		return "", report, &capabilityInspectionError{cause: err}
+		detail := ""
+		if report.Entries[0].Reason == "role_denied" {
+			detail = fmt.Sprintf("agent %q is not permitted for role %q", name, role)
+		}
+		return "", report, &capabilityInspectionError{cause: err, detail: detail}
 	}
 	return detail, report, nil
 }
@@ -389,9 +407,15 @@ func CapabilityReport(name string, cfg *contract.SwarmConfig, role string, opts 
 
 // capabilityInspectionError retains error identity for callers without
 // projecting raw runtime output or host paths into inspection consumers.
-type capabilityInspectionError struct{ cause error }
+type capabilityInspectionError struct {
+	cause  error
+	detail string
+}
 
 func (e *capabilityInspectionError) Error() string {
+	if e.detail != "" {
+		return e.detail
+	}
 	return "runtime unavailable: " + sandbox.CapabilityReason("unavailable")
 }
 func (e *capabilityInspectionError) Unwrap() error { return e.cause }

@@ -242,7 +242,18 @@ func TestInitPreservesExistingPolicyAndRejectsMutablePins(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, ".swarm", "config.yaml")
-	custom := []byte("maintainer policy must not be overwritten\n")
+	generated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom := []byte(strings.NewReplacer(
+		"default_agent: codex", "# Maintainer policy\ndefault_agent: custom\nroles:\n  tester: custom",
+		"duration: 4h", "duration: 7h",
+		"\nagents:\n", "\nagents:\n  custom:\n    harness: codex\n    binary: codex\n    effort: medium\n",
+	).Replace(string(generated)))
+	if _, err := decodeConfig(custom); err != nil {
+		t.Fatalf("customized fixture is invalid: %v", err)
+	}
 	if err := os.WriteFile(path, custom, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -2054,5 +2065,88 @@ func TestLoadConfigAtCommandCache(t *testing.T) {
 		if _, err := LoadConfigAtContext(ctx, root, ref); err == nil {
 			t.Fatal("accepted mutable ref")
 		}
+	}
+}
+
+func TestRoleDefaultsScaffold(t *testing.T) {
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".swarm", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"planner: codex", "reviewer: codex", "developer: codex", "tester: codex", "inherit default_agent", "named entry under agents"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("missing scaffold guidance %q", want)
+		}
+	}
+	for _, name := range []string{"codex", "claude"} {
+		cfg, err := decodeConfig([]byte(strings.Replace(string(data), "default_agent: codex", "default_agent: "+name, 1)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ac := cfg.Agents[cfg.DefaultAgent]
+		if cfg.DefaultAgent != name || len(cfg.Roles) != 0 || ac.Model != "" || ac.Effort != "" ||
+			cfg.Execution.Mode != contract.ExecutionIsolated || cfg.Execution.Backend != contract.BackendNative {
+			t.Fatalf("unexpected inherited defaults: %+v", cfg)
+		}
+	}
+}
+
+func TestOnboardingRoleExample(t *testing.T) {
+	guide, err := OnboardingGuide()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, example, found := strings.Cut(guide, "```yaml\n")
+	example, _, closed := strings.Cut(example, "\n```")
+	if !found || !closed {
+		t.Fatal("guide is missing the role configuration example")
+	}
+	var entries struct {
+		Roles  map[string]string               `yaml:"roles"`
+		Agents map[string]contract.AgentConfig `yaml:"agents"`
+	}
+	if err := decodeStrictYAML([]byte(example), &entries); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if _, err := InitRepository(InitOptions{RepoRoot: root}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DefaultAgent = "omp"
+	cfg.Lease.Duration = "7h"
+	cfg.Roles = entries.Roles
+	maps.Copy(cfg.Agents, entries.Agents)
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeConfig(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct{ role, entry, harness, model, effort string }{
+		{"planner", "codex-plan", "codex", "gpt-6.2-sol", "medium"},
+		{"reviewer", "claude-review", "claude", "claude-sonnet-4-6", ""},
+		{"developer", "opencode-build", "opencode", "opencode-go/glm-5", ""},
+		{"tester", "codex-test", "codex", "gpt-6.2-sol", "high"},
+	} {
+		ac := got.Agents[got.Roles[want.role]]
+		if got.Roles[want.role] != want.entry || ac.Harness != want.harness || ac.Binary != want.harness ||
+			ac.Model != want.model || ac.Effort != want.effort || (len(ac.Roles) != 0 && !slices.Contains(ac.Roles, want.role)) {
+			t.Errorf("%s entry: %+v", want.role, ac)
+		}
+	}
+	if got.DefaultAgent != "omp" || got.Lease.Duration != "7h" || got.Agents["codex"].Binary != "codex" ||
+		!slices.Equal(got.Agents["claude-review"].Roles, []string{"reviewer"}) {
+		t.Fatalf("merge lost policy: %+v", got)
 	}
 }
